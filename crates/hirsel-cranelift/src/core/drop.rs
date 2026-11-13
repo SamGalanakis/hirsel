@@ -2,7 +2,6 @@
 //! at a time to the runtime's intrusive worklist, so pointer depth uses no stack.
 use super::*;
 use cranelift_codegen::ir::{MemFlagsData, Value, condcodes::IntCC};
-use cranelift_frontend::Variable;
 use hirsel_core_layout::{FieldTy, Layout, Recipe, Repr, TypeRef, charge, field_size};
 use std::collections::BTreeSet;
 mod resume;
@@ -159,15 +158,21 @@ impl Glues {
         }
         Ok(Self { drops, resumes })
     }
-    pub fn emit(&self, object: &mut ObjectModule, tables: &Tables<'_>) -> Result<()> {
+    pub fn emit(
+        &self,
+        object: &mut ObjectModule,
+        tables: &Tables<'_>,
+        observer: &impl profile::Observer,
+        scratch: &mut Compilation,
+    ) -> Result<()> {
         for (i, &function) in self.drops.iter().enumerate() {
             if let Some(function) = function {
-                self.emit_one(object, tables, i, function, false)?;
+                self.emit_one(object, tables, (i, function, false), observer, scratch)?;
             }
         }
         for (i, &function) in self.resumes.iter().enumerate() {
             if let Some(function) = function {
-                self.emit_one(object, tables, i, function, true)?;
+                self.emit_one(object, tables, (i, function, true), observer, scratch)?;
             }
         }
         Ok(())
@@ -176,22 +181,22 @@ impl Glues {
         &self,
         object: &mut ObjectModule,
         tables: &Tables<'_>,
-        index: usize,
-        function: cranelift_module::FuncId,
-        resume: bool,
+        definition: (usize, cranelift_module::FuncId, bool),
+        observer: &impl profile::Observer,
+        scratch: &mut Compilation,
     ) -> Result<()> {
-        let mut context = object.make_context();
+        let (index, function, resume) = definition;
+        let build = observer.enter("build_glue");
+        let context = &mut scratch.codegen;
+        object.clear_context(context);
         context.func.signature =
             abi::Signature::c(if resume { &[P, P, P, P] } else { &[P, P] }, &[B]).clif;
-        let mut bc = FunctionBuilderContext::new();
-        let mut b = FunctionBuilder::new(&mut context.func, &mut bc);
+        let mut b = FunctionBuilder::new(&mut context.func, &mut scratch.frontend);
         let entry = b.create_block();
         b.append_block_params_for_function_params(entry);
         b.switch_to_block(entry);
         let args = b.block_params(entry).to_vec();
-        let failed = b.declare_var(types::I8);
-        let zero = b.ins().iconst(types::I8, 0);
-        b.def_var(failed, zero);
+        let failed = b.ins().iconst(types::I8, 0);
         let mut g = Glue {
             b,
             object,
@@ -241,14 +246,13 @@ impl Glues {
                 let storage = g.icon(tables.layouts[index].logical_size.unwrap());
                 g.call("hirsel_core_resource_free", &[P, U], &[], &[base, storage])?;
             }
-            let status = g.b.use_var(g.failed);
+            let status = g.failed;
             g.b.ins().return_(&[status]);
         }
         g.b.seal_all_blocks();
         g.b.finalize(g.object.target_config());
-        object
-            .define_function(function, &mut context)
-            .map_err(error)
+        drop(build);
+        observer.define(object, function, context).map_err(error)
     }
 }
 
@@ -258,7 +262,7 @@ struct Glue<'a, 'b, 'c> {
     tables: &'c Tables<'c>,
     glues: &'c Glues,
     ctx: Value,
-    failed: Variable,
+    failed: Value,
 }
 impl Glue<'_, '_, '_> {
     fn icon(&mut self, n: u64) -> Value {
@@ -273,9 +277,7 @@ impl Glue<'_, '_, '_> {
             .load(types::I64, MemFlagsData::trusted(), base, off)
     }
     fn merge(&mut self, status: Value) {
-        let old = self.b.use_var(self.failed);
-        let new = self.b.ins().bor(old, status);
-        self.b.def_var(self.failed, new);
+        self.failed = self.b.ins().bor(self.failed, status);
     }
     fn direct(&mut self, f: cranelift_module::FuncId, args: &[Value]) -> Value {
         let f = self.object.declare_func_in_func(f, self.b.func);
@@ -322,7 +324,10 @@ impl Glue<'_, '_, '_> {
                 .ins()
                 .load(native, MemFlagsData::trusted(), base, tag.offset as i32);
             let done = self.b.create_block();
+            self.b.append_block_param(done, types::I8);
+            let incoming = self.failed;
             for (i, row) in drop.fields.iter().enumerate() {
+                self.failed = incoming;
                 let yes = self.b.create_block();
                 let no = self.b.create_block();
                 let test = self.b.ins().icmp_imm_s(IntCC::Equal, value, i as i64);
@@ -332,11 +337,12 @@ impl Glue<'_, '_, '_> {
                     let at = self.at(base, f.offset);
                     self.field(at, &f.ty)?;
                 }
-                self.b.ins().jump(done, &[]);
+                self.b.ins().jump(done, &[self.failed.into()]);
                 self.b.switch_to_block(no);
             }
-            self.b.ins().jump(done, &[]);
+            self.b.ins().jump(done, &[incoming.into()]);
             self.b.switch_to_block(done);
+            self.failed = self.b.block_params(done)[0];
         } else {
             for f in &drop.fields[0] {
                 let at = self.at(base, f.offset);
@@ -439,20 +445,26 @@ impl Glue<'_, '_, '_> {
         let body = self.b.create_block();
         let done = self.b.create_block();
         self.b.append_block_param(head, types::I64);
+        self.b.append_block_param(head, types::I8);
+        self.b.append_block_param(done, types::I8);
         let zero = self.icon(0);
-        self.b.ins().jump(head, &[zero.into()]);
+        self.b.ins().jump(head, &[zero.into(), self.failed.into()]);
         self.b.switch_to_block(head);
         let i = self.b.block_params(head)[0];
+        self.failed = self.b.block_params(head)[1];
         let more = self.b.ins().icmp(IntCC::UnsignedLessThan, i, len);
-        self.b.ins().brif(more, body, &[], done, &[]);
+        self.b
+            .ins()
+            .brif(more, body, &[], done, &[self.failed.into()]);
         self.b.switch_to_block(body);
         let stride = field_size(&self.tables.input.types, self.tables.layouts, e).0;
         let off = self.b.ins().imul_imm_s(i, stride as i64);
         let at = self.b.ins().iadd(base, off);
         self.field(at, e)?;
         let next = self.b.ins().iadd_imm_s(i, 1);
-        self.b.ins().jump(head, &[next.into()]);
+        self.b.ins().jump(head, &[next.into(), self.failed.into()]);
         self.b.switch_to_block(done);
+        self.failed = self.b.block_params(done)[0];
         Ok(())
     }
 }

@@ -22,6 +22,8 @@ cranelift-object = { version = "=0.136.3", default-features = false }
 gimli = { version = "=0.33.0", default-features = false, features = ["read", "write", "std"] }
 
 [dev-dependencies]
+cranelift-codegen = { version = "=0.136.3", default-features = false, features = ["timing"] }
+hirsel-intern = { path = "../hirsel-intern" }
 hirsel-core-ids = { path = "../hirsel-core-ids" }
 hirsel-core-front = { path = "../hirsel-core-front" }
 hirsel-core-resolve = { path = "../hirsel-core-resolve" }

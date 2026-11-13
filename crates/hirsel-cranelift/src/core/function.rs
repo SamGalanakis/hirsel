@@ -2,7 +2,12 @@ use super::*;
 use cranelift_codegen::ir::{
     BlockArg, MemFlagsData as MemFlags, StackSlotData, StackSlotKind, Value,
 };
-use cranelift_frontend::Variable;
+enum AddressValue {
+    Direct(Value),
+    // Address IDs are evaluated snapshots, unlike immutable CoreIR values.
+    // A repeatedly assigned ID retains its latest snapshot across control flow.
+    Snapshot(ir::StackSlot),
+}
 
 pub(super) struct Function<'a, 'b, 'c> {
     pub b: FunctionBuilder<'a>,
@@ -10,8 +15,8 @@ pub(super) struct Function<'a, 'b, 'c> {
     pub body: &'c Body,
     pub input: &'c c::Module,
     pub layouts: &'c [hirsel_core_layout::Recipe],
-    pub values: Vec<Variable>,
-    pub addresses: Vec<Variable>,
+    pub values: Vec<Value>,
+    addresses: Vec<AddressValue>,
     pub blocks: Vec<ir::Block>,
     pub slots: Vec<ir::StackSlot>,
     pub functions: &'c [cranelift_module::FuncId],
@@ -44,11 +49,43 @@ pub(super) fn emit(
             b.append_block_param(blocks[i], ty(body.values[v.index()]));
         }
     }
-    let values: Vec<_> = body.values.iter().map(|&t| b.declare_var(ty(t))).collect();
-    let addresses = body
-        .addresses
-        .iter()
-        .map(|_| b.declare_var(types::I64))
+    let mut values = vec![Value::from_u32(0); body.values.len()];
+    for (i, block) in body.blocks.iter().enumerate() {
+        let params = b.block_params(blocks[i]);
+        let params = if i == 0 {
+            &params[usize::from(signature.indirect) + 1..]
+        } else {
+            params
+        };
+        for (&id, &value) in block
+            .params
+            .get(&body.pools.values)
+            .unwrap()
+            .iter()
+            .zip(params)
+        {
+            values[id.index()] = value;
+        }
+    }
+    let mut definitions = vec![0u32; body.addresses.len()];
+    for inst in &body.insts {
+        if let Inst::Address { address, .. } = inst {
+            definitions[address.index()] += 1;
+        }
+    }
+    let addresses = definitions
+        .into_iter()
+        .map(|n| {
+            if n > 1 {
+                AddressValue::Snapshot(b.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    8,
+                    3,
+                )))
+            } else {
+                AddressValue::Direct(Value::from_u32(0))
+            }
+        })
         .collect();
     let mut slots = Vec::new();
     for &s in &body.slots {
@@ -85,25 +122,9 @@ pub(super) fn emit(
         signature,
         result_storage,
     };
-    for (i, block) in body.blocks.iter().enumerate() {
-        if i != 0 {
-            f.b.switch_to_block(f.blocks[i]);
-        }
-        let params = f.b.block_params(f.blocks[i]).to_vec();
-        let params = if i == 0 {
-            &params[usize::from(signature.indirect) + 1..]
-        } else {
-            &params[..]
-        };
-        for (&v, &param) in block
-            .params
-            .get(&body.pools.values)
-            .unwrap()
-            .iter()
-            .zip(params)
-        {
-            f.set(v, param);
-        }
+    for i in order(body) {
+        let block = &body.blocks[i];
+        f.b.switch_to_block(f.blocks[i]);
         for inst in block.insts.get(&body.insts).unwrap() {
             f.instruction(inst)?;
         }
@@ -167,8 +188,8 @@ pub(super) fn emit(
 }
 
 impl Function<'_, '_, '_> {
-    pub fn get(&mut self, v: ValueId) -> Value {
-        self.b.use_var(self.values[v.index()])
+    pub fn get(&self, v: ValueId) -> Value {
+        self.values[v.index()]
     }
     pub fn set(&mut self, v: ValueId, value: Value) {
         let value = if self.body.values[v.index()].is_float() {
@@ -176,10 +197,15 @@ impl Function<'_, '_, '_> {
         } else {
             value
         };
-        self.b.def_var(self.values[v.index()], value);
+        self.values[v.index()] = value;
     }
     pub fn addr(&mut self, a: AddressId) -> Value {
-        self.b.use_var(self.addresses[a.index()])
+        match self.addresses[a.index()] {
+            AddressValue::Direct(value) => value,
+            AddressValue::Snapshot(slot) => {
+                self.b.ins().stack_load(types::I64, types::I64, slot, 0)
+            }
+        }
     }
     fn edge(&mut self, e: EdgeId) -> (ir::Block, Vec<BlockArg>) {
         let edge = &self.body.edges[e.index()];
@@ -333,7 +359,14 @@ impl Function<'_, '_, '_> {
             Inst::StorageLive { .. } | Inst::StorageDead { .. } => {}
             Inst::Address { address, fail } => {
                 let v = self.address(address, fail)?;
-                self.b.def_var(self.addresses[address.index()], v);
+                match self.addresses[address.index()] {
+                    AddressValue::Direct(_) => {
+                        self.addresses[address.index()] = AddressValue::Direct(v)
+                    }
+                    AddressValue::Snapshot(slot) => {
+                        self.b.ins().stack_store(types::I64, v, slot, 0);
+                    }
+                }
             }
             Inst::Read {
                 result, address, ..
@@ -423,4 +456,52 @@ impl Function<'_, '_, '_> {
         }
         Ok(())
     }
+}
+
+// A producer's block numbers need not be topological. Reverse postorder makes
+// dominating definitions available before their uses; loop parameters already
+// have their Cranelift values before any instruction is lowered.
+fn order(body: &Body) -> Vec<usize> {
+    let mut seen = vec![false; body.blocks.len()];
+    let mut pending = vec![(0usize, false)];
+    let mut result = Vec::with_capacity(body.blocks.len());
+    while let Some((b, exit)) = pending.pop() {
+        if exit {
+            result.push(b);
+            continue;
+        }
+        if std::mem::replace(&mut seen[b], true) {
+            continue;
+        }
+        pending.push((b, true));
+        let mut target = |block: BlockId| pending.push((block.index(), false));
+        let mut edge = |e: EdgeId| target(body.edges[e.index()].target);
+        match &body.terminators[b] {
+            Terminator::Jump(e) => edge(*e),
+            Terminator::Branch { yes, no, .. } => {
+                edge(*no);
+                edge(*yes);
+            }
+            Terminator::Switch {
+                arms, otherwise, ..
+            } => {
+                edge(*otherwise);
+                for arm in arms.get(&body.pools.arms).unwrap() {
+                    edge(arm.edge);
+                }
+            }
+            Terminator::Raise {
+                cleanup: Some(block),
+                ..
+            } => target(*block),
+            _ => {}
+        }
+        for inst in body.blocks[b].insts.get(&body.insts).unwrap() {
+            if let Some(block) = inst.fail(body) {
+                target(block);
+            }
+        }
+    }
+    result.reverse();
+    result
 }

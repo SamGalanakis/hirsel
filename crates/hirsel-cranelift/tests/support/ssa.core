@@ -1,0 +1,59 @@
+core v1
+type t0 = own "Cell" { value: u64 }
+type t1 = own "Holder" { item: box t0 }
+sig g0 = (u64) -> (u64)
+sig g1 = (bool, u64, u64) -> (u64)
+inst n0 = test@0/ssa/out_of_order [] []
+inst n1 = test@0/ssa/address_snapshot [] []
+fn f0 = n0 g0 {
+b0(v0: u64):
+  jump b3
+b1:
+  v3: u64 = const 2
+  v4: u64 = wrapping_mul v2, v3
+  return v4
+b2:
+  v5: u64 = const 0
+  return v5
+b3:
+  v1: u64 = const 1
+  v2: u64 = wrapping_add v0, v1
+  jump b1
+}
+fn f1 = n1 g1 {
+  slot s0 = t1
+  addr a0 = s0 field 0 deref field 0 : u64
+  addr a1 = s0 field 0 : ptr
+  addr a2 = v4 : t0
+  addr a3 = a2 field 0 : u64
+  addr a4 = v6 : t0
+  addr a5 = a4 field 0 : u64
+b0(v0: bool, v1: u64, v2: u64):
+  live s0
+  v3: u64 = const 8
+  v4: ptr, v5: u64 = alloc own v3 align 8 charge v3
+  v6: ptr, v7: u64 = alloc own v3 align 8 charge v3
+  address a1
+  address a2
+  address a3
+  address a4
+  address a5
+  store a3, v1
+  store a5, v2
+  branch v0, b1, b2
+b1:
+  store a1, v4
+  address a0
+  store a1, v6
+  jump b3
+b2:
+  store a1, v6
+  address a0
+  store a1, v4
+  jump b3
+b3:
+  v8: u64 = read a0
+  free v4 charge v3
+  free v6 charge v3
+  return v8
+}

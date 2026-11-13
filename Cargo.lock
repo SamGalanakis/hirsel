@@ -697,7 +697,6 @@ dependencies = [
 name = "hirsel-core-driver"
 version = "0.1.0"
 dependencies = [
- "sha2",
  "bincode",
  "hirsel-core-front",
  "hirsel-core-ids",
@@ -711,6 +710,7 @@ dependencies = [
  "hirsel-intern",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
 ]
 
@@ -742,18 +742,18 @@ dependencies = [
 name = "hirsel-core-ir"
 version = "0.1.0"
 dependencies = [
- "serde",
  "hirsel-core-ids",
  "hirsel-core-layout",
  "hirsel-guard",
+ "serde",
 ]
 
 [[package]]
 name = "hirsel-core-layout"
 version = "0.1.0"
 dependencies = [
- "serde",
  "hirsel-guard",
+ "serde",
 ]
 
 [[package]]
@@ -809,6 +809,7 @@ dependencies = [
  "hirsel-core-syntax",
  "hirsel-graph",
  "hirsel-guard",
+ "hirsel-intern",
  "hirsel-lir",
  "hirsel-syntax",
 ]

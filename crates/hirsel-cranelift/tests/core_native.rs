@@ -799,3 +799,17 @@ fn failure_message_moves_its_carrier_out_of_the_native_frame() {
     let module = text::parse(include_str!("support/message.core")).unwrap();
     execute(&module, &[(FuncId(0), vec![])], false);
 }
+
+#[test]
+fn direct_ssa_handles_block_order_and_repeated_address_snapshots() {
+    let module = text::parse(include_str!("support/ssa.core")).unwrap();
+    execute(
+        &module,
+        &[
+            (FuncId(0), vec![19]),
+            (FuncId(1), vec![1, 11, 22]),
+            (FuncId(1), vec![0, 11, 22]),
+        ],
+        false,
+    );
+}

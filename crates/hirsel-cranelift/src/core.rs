@@ -17,6 +17,7 @@ mod failure;
 mod function;
 mod memory;
 mod place;
+pub mod profile;
 mod scalar;
 
 /// Why a CoreIR module could not be emitted.
@@ -75,6 +76,11 @@ fn ty(t: Ty) -> ir::Type {
     }
 }
 
+pub(super) struct Compilation {
+    codegen: cranelift_codegen::Context,
+    frontend: FunctionBuilderContext,
+}
+
 pub(super) struct Tables<'a> {
     input: &'a c::Module,
     layouts: &'a [hirsel_core_layout::Recipe],
@@ -118,7 +124,7 @@ pub fn emit_object_with_layouts(
     layouts: &[hirsel_core_layout::Recipe],
     options: &Options<'_>,
 ) -> Result<Object> {
-    emit(input, layouts, options, false)
+    emit(input, layouts, options, false, &())
 }
 
 /// Native fixture entry. Trace instrumentation is absent from ordinary emission.
@@ -128,14 +134,27 @@ pub fn emit_object_for_test(
     layouts: &[hirsel_core_layout::Recipe],
     options: &Options<'_>,
 ) -> Result<Object> {
-    emit(input, layouts, options, true)
+    emit(input, layouts, options, true, &())
+}
+/// Emit with diagnostic stage observation. Ordinary emission uses a zero-sized
+/// observer whose hooks disappear during Rust compilation.
+#[doc(hidden)]
+pub fn emit_object_profiled(
+    input: &c::Module,
+    layouts: &[hirsel_core_layout::Recipe],
+    options: &Options<'_>,
+    observer: &impl profile::Observer,
+) -> Result<Object> {
+    emit(input, layouts, options, false, observer)
 }
 fn emit(
     input: &c::Module,
     layouts: &[hirsel_core_layout::Recipe],
     options: &Options<'_>,
     trace_drops: bool,
+    observer: &impl profile::Observer,
 ) -> Result<Object> {
+    let setup = observer.enter("module_setup");
     let refuse = |message: String| Error::Target(format!("{}: {message}", options.target));
     if !options.target.starts_with("x86_64") || !options.target.contains("linux") {
         return Err(refuse(
@@ -194,19 +213,28 @@ fn emit(
         glues: &glues,
         trace_drops,
     };
+    drop(setup);
+    let mut scratch = Compilation {
+        codegen: object.make_context(),
+        frontend: FunctionBuilderContext::new(),
+    };
     for (index, f) in input.functions.iter().enumerate() {
         let Some(body) = &f.body else { continue };
+        let build = observer.enter("build_clif");
         let sig = &signatures[f.signature.index()];
-        let mut context = object.make_context();
+        let context = &mut scratch.codegen;
+        let builder_context = &mut scratch.frontend;
+        object.clear_context(context);
         context.func.signature = sig.clif.clone();
-        let mut builder_context = FunctionBuilderContext::new();
-        let builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
+        let builder = FunctionBuilder::new(&mut context.func, builder_context);
         function::emit(&mut object, builder, body, sig, &tables)?;
-        object
-            .define_function(functions[index], &mut context)
+        drop(build);
+        observer
+            .define(&mut object, functions[index], context)
             .map_err(error)?;
     }
-    glues.emit(&mut object, &tables)?;
+    glues.emit(&mut object, &tables, observer, &mut scratch)?;
+    let _write = observer.enter("object_write");
     Ok(Object {
         bytes: crate::object::finish(object.finish()).map_err(error)?,
     })

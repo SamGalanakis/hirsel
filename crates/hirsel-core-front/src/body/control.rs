@@ -28,6 +28,14 @@ impl<'c, 'a> Cx<'c, 'a> {
                 }
                 NodeKind::ExpressionStatement | NodeKind::Discard => {
                     let (t, _) = self.expr(self.kids(s)[0], None);
+                    if self.result_parts(t).is_some_and(|(_, _, e)| e.is_some()) {
+                        self.refuse(
+                            "LANG-18",
+                            self.kids(s)[0],
+                            "an unused Result is discarded explicitly with `let _`",
+                        );
+                        return (ERROR, None);
+                    }
                     diverged |= t == NEVER;
                 }
                 NodeKind::Let | NodeKind::LetMut => diverged |= self.let_(s),
@@ -62,12 +70,11 @@ impl<'c, 'a> Cx<'c, 'a> {
         let Some((&value, rest)) = rest.split_first() else {
             return self.let_uninit(s, pat, declared);
         };
-        if !rest.is_empty() {
-            self.gap(rest[0], "let-else is not built");
-            return false;
-        }
-        if !matches!(self.kind(pat), NodeKind::BindPattern | NodeKind::Wildcard) {
-            return self.destructure_let(s, pat, value, declared);
+        if !rest.is_empty()
+            || !matches!(self.kind(pat), NodeKind::BindPattern | NodeKind::Wildcard)
+            || self.kind(pat) == NodeKind::BindPattern && self.binder(pat).is_none()
+        {
+            return self.destructure_let(s, pat, value, declared, rest.first().copied());
         }
         let freezes = self.freezes.len();
         let (t, v) = self.expr(value, declared.and_then(expect));
@@ -164,6 +171,10 @@ impl<'c, 'a> Cx<'c, 'a> {
     /// `q = e` and `q op= e` (OWN-12): `q` is writable (OWN-5), not frozen, and reserved
     /// while `e` is evaluated.
     pub(super) fn assign(&mut self, s: NodeId) -> bool {
+        if self.patterns.guard {
+            self.refuse("LANG-17", s, "a match guard cannot assign");
+            return false;
+        }
         let c = self.kids(s);
         let (place, value) = (c[0], c[1]);
         let op = self.token_text(s);
@@ -273,7 +284,7 @@ impl<'c, 'a> Cx<'c, 'a> {
     pub(super) fn if_(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let c = self.kids(n);
         if self.kind(c[0]) == NodeKind::ConditionLet {
-            return self.gap_ty(c[0], "match and patterns are not built");
+            return self.if_let(n, want);
         }
         let cv = self.condition(c[0]);
         let join = self.new_join();
@@ -404,7 +415,7 @@ impl<'c, 'a> Cx<'c, 'a> {
     pub(super) fn while_(&mut self, n: NodeId, label: Option<String>) -> (TyId, Option<ValueId>) {
         let c = self.kids(n);
         if self.kind(c[0]) == NodeKind::ConditionLet {
-            return self.gap_ty(c[0], "match and patterns are not built");
+            return self.while_let(n, label);
         }
         self.push_frame(label, FrameKind::While, Some(UNIT));
         let mut header = None;

@@ -49,6 +49,14 @@ impl<'c, 'a> Cx<'c, 'a> {
             _ => return self.gap_ty(callee, "calls through values are not built"),
         };
         let g = &self.p.fns[f];
+        if self.patterns.guard && g.params.iter().any(|p| p.mode != Mode::View) {
+            self.refuse(
+                "LANG-17",
+                n,
+                "a match guard cannot call a take or mut parameter",
+            );
+            return (ERROR, None);
+        }
         // LANG-11: one argument per parameter; a missing one is refused at the call's
         // `)`, an extra one at the first extra argument.
         if args.len() < g.params.len() {

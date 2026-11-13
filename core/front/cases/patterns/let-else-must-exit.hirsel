@@ -1,0 +1,6 @@
+// A let-else that returns normally cannot establish the binding on every path.
+// expect: refuse LANG-17 at 4:24
+fn f(o: Option[u64]) -> u64 {
+  let Some(n) = o else { 0u64 }
+  n
+}

@@ -27,6 +27,9 @@ pub(super) struct Patterns {
     types: Vec<TyId>,
     heads: Vec<Head>,
     edges: Vec<(u32, u32)>,
+    escaping: Vec<Freeze>,
+    pub(super) guard: bool,
+    rebind: bool,
 }
 #[derive(Clone, Copy)]
 struct Subject {
@@ -129,6 +132,9 @@ impl<'c, 'a> Cx<'c, 'a> {
                 self.pat_push(n, ty, Head::Range(bits, bits), PoolRange::EMPTY)
             }
             NodeKind::RangePattern => {
+                if ty == BOOL {
+                    self.refuse("LANG-17", n, "ranges match integers or char");
+                }
                 let lo = self.pattern_number(c[0], ty);
                 let hi = self.pattern_number(c[1], ty);
                 if lo > hi {
@@ -296,6 +302,14 @@ impl<'c, 'a> Cx<'c, 'a> {
             }
             Some(TokenKind::Byte) if ty == scalar(Scalar::U8) => byte_value(text).map(i128::from),
             Some(TokenKind::Integer) => {
+                if int_of(&self.t, ty).is_none() {
+                    self.refuse(
+                        "LANG-17",
+                        n,
+                        "an integer pattern needs an integer scrutinee",
+                    );
+                    return 0;
+                }
                 let (digits, suffix) = int_suffix(text);
                 if suffix.is_some_and(|s| scalar(s) != ty) {
                     self.refuse("LANG-11", n, "the pattern literal has a different type");
@@ -347,7 +361,20 @@ impl<'c, 'a> Cx<'c, 'a> {
     /// A value used as a scrutinee is read in place. Only `take`, a destructuring
     /// let, or the selected arm's take bindings consume a source slot (OWN-15).
     fn subject(&mut self, n: NodeId, consume: bool, want: Option<Want>) -> Subject {
-        if let Ok(Some(at)) = self.place(n) {
+        let at = match self.place(n) {
+            Ok(at) => at,
+            Err(()) => {
+                return Subject {
+                    ty: ERROR,
+                    value: None,
+                    place: None,
+                    owned: false,
+                    viewed: false,
+                };
+            }
+        };
+        if let Some(at) = at {
+            self.out.counts.nodes += 1;
             self.out.counts.uses += 1;
             if consume {
                 self.use_place(at, Use::Value, n);
@@ -569,7 +596,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                 }
                 for i in 0..pat.fields.len {
                     let child = self.patterns.fields[(pat.fields.start + i) as usize];
-                    if child == 0 {
+                    if matches!(self.pat_head(child), Head::Any | Head::Bind(..)) {
                         continue;
                     }
                     let ty = self.pat(child).ty;
@@ -618,12 +645,40 @@ impl<'c, 'a> Cx<'c, 'a> {
                         Origin::LetMut,
                     )
                 } else {
-                    (Binding::Value(value), Origin::Let)
+                    (
+                        Binding::Value(value),
+                        if borrowed {
+                            Origin::PatternView
+                        } else {
+                            Origin::Let
+                        },
+                    )
                 };
-                self.declare(b, ty, binding, origin, pat.site);
-                self.scope_slots.push(b);
+                if self.patterns.rebind {
+                    let var = self.vars[b as usize].as_mut().unwrap();
+                    var.ty = ty;
+                    var.binding = binding;
+                    var.origin = origin;
+                } else {
+                    self.declare(b, ty, binding, origin, pat.site);
+                    self.scope_slots.push(b);
+                }
             }
             Head::Product(case) => {
+                if subject.owned
+                    && let TyKind::Adt(d, _) = self.t.kind(subject.ty)
+                {
+                    let decl = &self.p.decls[d.index()];
+                    if decl.repr == Repr::Resource
+                        && decl.site.module != self.p.modules[self.at.module as usize].id
+                    {
+                        self.refuse(
+                            "OWN-14",
+                            pat.site,
+                            "a resource is destructured only in its defining module",
+                        );
+                    }
+                }
                 for i in 0..pat.fields.len {
                     let child = self.patterns.fields[(pat.fields.start + i) as usize];
                     if child == 0 {
@@ -639,25 +694,11 @@ impl<'c, 'a> Cx<'c, 'a> {
     }
     fn chosen_pattern(&mut self, id: u32, mut subject: Subject, n: NodeId) -> Subject {
         if self.pattern_takes(id) && !subject.owned {
-            if subject.viewed {
-                self.refuse("OWN-15", n, "a pattern cannot take through a view");
-            } else if let Some(at) = subject.place {
+            if !subject.viewed
+                && let Some(at) = subject.place
+            {
                 self.use_place(at, Use::Take, n);
                 subject.owned = true;
-            }
-        }
-        if subject.owned
-            && let TyKind::Adt(d, _) = self.t.kind(subject.ty)
-        {
-            let decl = &self.p.decls[d.index()];
-            if decl.repr == Repr::Resource
-                && decl.site.module != self.p.modules[self.at.module as usize].id
-            {
-                self.refuse(
-                    "OWN-14",
-                    n,
-                    "a resource is destructured only in its defining module",
-                );
             }
         }
         subject
@@ -669,21 +710,38 @@ impl<'c, 'a> Cx<'c, 'a> {
         pat: NodeId,
         value: NodeId,
         declared: Option<TyId>,
+        other: Option<NodeId>,
     ) -> bool {
+        let freezes = self.freezes.len();
         let subject = self.subject(value, true, declared.and_then(expect));
         let id = self.pattern(pat, subject.ty);
-        let matrix = self.patterns.matrix.len();
-        self.patterns.matrix.push(id);
-        if let Some(missing) = self.pattern_missing(matrix, subject.ty) {
-            self.refuse(
-                "LANG-17",
-                pat,
-                format!("let pattern is refutable; missing `{missing}`"),
-            );
+        if let Some(other) = other {
+            self.let_else(pat, subject, id, other);
+        } else {
+            let matrix = self.patterns.matrix.len();
+            self.patterns.matrix.push(id);
+            if let Some(missing) = self.pattern_missing(matrix, subject.ty) {
+                self.refuse(
+                    "LANG-17",
+                    pat,
+                    format!("let pattern is refutable; missing `{missing}`"),
+                );
+            }
+            self.patterns.matrix.truncate(matrix);
         }
-        self.patterns.matrix.truncate(matrix);
         let subject = self.chosen_pattern(id, subject, pat);
         self.bind_pattern(id, subject, self.kind(s) == NodeKind::LetMut);
+        if subject.viewed || kind(&self.p.decls, &self.t, subject.ty, &self.params) == Kind::Scoped
+        {
+            let depth = self.depth;
+            self.unfreeze(freezes, |h| {
+                Some(if h == Hold::View(Extent::Temp) {
+                    Hold::View(Extent::Block(depth))
+                } else {
+                    h
+                })
+            });
+        }
         subject.ty == NEVER
     }
 
@@ -695,6 +753,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         let join = self.new_join();
         let matrix = self.patterns.matrix.len();
         let edge_mark = self.patterns.edges.len();
+        let escape_mark = self.patterns.escaping.len();
         let mut ty = want.map(|w| w.ty);
         for (i, &arm) in c[1..].iter().enumerate() {
             let a = self.kids(arm);
@@ -705,16 +764,45 @@ impl<'c, 'a> Cx<'c, 'a> {
             self.depth += 1;
             let (scope, holds) = (self.scope_slots.len(), self.freezes.len());
             if guarded {
-                self.gap(a[1], "match guards are not built");
+                self.bind_pattern(
+                    id,
+                    Subject {
+                        owned: false,
+                        ..subject
+                    },
+                    false,
+                );
+                let guard = std::mem::replace(&mut self.patterns.guard, true);
+                let (_, cv) = self.expr(a[1], expect(BOOL));
+                self.patterns.guard = guard;
+                if let (Some(cv), Some(no)) = (cv, no)
+                    && self.live()
+                {
+                    let yes = self.new_block(&[]);
+                    let ye = self.edge(yes, &[]);
+                    let ne = self.edge(no, &[]);
+                    self.end(
+                        Terminator::Branch {
+                            condition: cv,
+                            yes: ye,
+                            no: ne,
+                        },
+                        Some(a[1]),
+                    );
+                    self.start(yes);
+                }
+                self.unfreeze(holds, |_| None);
+                self.patterns.rebind = true;
             }
             let chosen = self.chosen_pattern(id, subject, a[0]);
             self.bind_pattern(id, chosen, false);
+            self.patterns.rebind = false;
             let body = *a.last().unwrap();
             let (at, v) = self.expr(body, ty.and_then(expect));
             if ty.is_none() && at != NEVER {
                 ty = Some(at);
             }
-            self.close_scope(scope, holds, body, at);
+            self.pattern_scope_end(scope, holds, body, at);
             self.depth -= 1;
             if let Some(edge) = self.arm_edge(mark) {
                 self.patterns.edges.push(edge);
@@ -735,6 +823,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         self.merge(mark, &edges[edge_mark..], n);
         edges.truncate(edge_mark);
         self.patterns.edges = edges;
+        self.pattern_escapes(escape_mark);
         self.dead |= was_dead;
         self.patterns.matrix.truncate(matrix);
         (ty.unwrap_or(NEVER), v)
@@ -743,6 +832,9 @@ impl<'c, 'a> Cx<'c, 'a> {
     /// Constructor specialization as in rustc_pattern_analysis::usefulness. The
     /// matrix is flat and recursion uses ranges into reusable per-body arenas.
     fn pattern_missing(&mut self, start: usize, ty: TyId) -> Option<String> {
+        if mentions_error(&self.t, ty) {
+            return None;
+        }
         let types = self.patterns.types.len();
         self.patterns.types.push(ty);
         let rows = PoolRange::new(start as u32, (self.patterns.matrix.len() - start) as u32);
@@ -909,5 +1001,310 @@ impl<'c, 'a> Cx<'c, 'a> {
             }
             _ => "_".into(),
         }
+    }
+    fn pattern_scope_end(&mut self, scope: usize, holds: usize, n: NodeId, ty: TyId) {
+        let scoped = kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Scoped;
+        if scoped {
+            let depth = self.depth;
+            self.unfreeze(holds, |h| {
+                Some(if h == Hold::View(Extent::Block(depth)) {
+                    Hold::View(Extent::Temp)
+                } else {
+                    h
+                })
+            });
+        }
+        self.close_scope(scope, holds, n, ty);
+        if scoped {
+            for &f in &self.freezes[holds..] {
+                self.patterns.escaping.push(f);
+            }
+            self.unfreeze(holds, |_| None);
+        }
+    }
+    fn pattern_escapes(&mut self, mark: usize) {
+        for i in mark..self.patterns.escaping.len() {
+            let f = self.patterns.escaping[i];
+            self.freeze(f.place, f.hold);
+        }
+        self.patterns.escaping.truncate(mark);
+    }
+    pub(super) fn plain_view(&self, from: TyId, to: TyId) -> bool {
+        matches!(self.t.kind(from), TyKind::View(t) if *t == to)
+            && has_bounds(&self.p.decls, &self.t, to, &self.params) & crate::decls::PLAIN != 0
+    }
+    pub(super) fn read_plain_view(
+        &mut self,
+        ty: TyId,
+        value: Option<ValueId>,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let value = value?;
+        if !self.live() {
+            return None;
+        }
+        match self.rep(ty).ok()? {
+            Rep::None => None,
+            Rep::Place(id) => Some(self.snapshot(value, id, n)),
+            Rep::Scalar(t) => {
+                let address = self.address(AddressBase::Value(value), &[], PlaceTy::Value(t), n);
+                let result = self.value(t);
+                self.inst(
+                    Inst::Read {
+                        result,
+                        address,
+                        mode: ReadMode::Bits,
+                    },
+                    n,
+                );
+                Some(result)
+            }
+        }
+    }
+    pub(super) fn if_let(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
+        let c = self.kids(n);
+        let condition = self.kids(c[0]);
+        let subject = self.subject(condition[1], false, None);
+        let id = self.pattern(condition[0], subject.ty);
+        let mark = self.log.len();
+        let was_dead = self.dead;
+        let no_block = self.live().then(|| self.new_block(&[]));
+        let escape_mark = self.patterns.escaping.len();
+        let join = self.new_join();
+        self.pattern_tests(id, subject, no_block);
+        self.depth += 1;
+        let (scope, holds) = (self.scope_slots.len(), self.freezes.len());
+        let chosen = self.chosen_pattern(id, subject, condition[0]);
+        self.bind_pattern(id, chosen, false);
+        let (yt, yv) = self.expr(c[1], if c.len() == 2 { expect(UNIT) } else { want });
+        self.pattern_scope_end(scope, holds, c[1], yt);
+        self.depth -= 1;
+        let yes = self.arm_edge(mark);
+        self.goto(join, yt, yv, c[1]);
+        if let Some(no) = no_block {
+            self.start(no);
+        }
+        let (ot, ov) = if let Some(&other) = c.get(2) {
+            self.expr(
+                other,
+                want.or_else(|| {
+                    (yt != NEVER).then_some(Want {
+                        ty: yt,
+                        view: false,
+                    })
+                }),
+            )
+        } else {
+            (UNIT, None)
+        };
+        let no = self.arm_edge(mark);
+        let ty = if c.len() == 2 {
+            UNIT
+        } else if yt == NEVER {
+            ot
+        } else {
+            yt
+        };
+        self.goto(join, ty, ov, n);
+        let v = self.land(join);
+        self.merge_arms(mark, [yes, no], was_dead, n);
+        self.pattern_escapes(escape_mark);
+        (ty, v)
+    }
+    pub(super) fn while_let(
+        &mut self,
+        n: NodeId,
+        label: Option<String>,
+    ) -> (TyId, Option<ValueId>) {
+        let c = self.kids(n);
+        let condition = self.kids(c[0]);
+        self.push_frame(label, FrameKind::While, Some(UNIT));
+        let fi = self.frames.len() - 1;
+        let header = self.live().then(|| self.new_block(&[]));
+        if let Some(h) = header {
+            self.jump(h, &[], n);
+            self.start(h);
+        }
+        self.frames[fi].header = header;
+        let freezes = self.freezes.len();
+        let subject = self.subject(condition[1], false, None);
+        let id = self.pattern(condition[0], subject.ty);
+        self.exit_edge(fi);
+        let exit = self.frames[fi].exit;
+        let out = self.live().then(|| self.new_block(&[]));
+        if let Some(out) = out {
+            self.joins[exit].block = Some(out);
+        }
+        self.pattern_tests(id, subject, out);
+        self.depth += 1;
+        let scope = self.scope_slots.len();
+        let chosen = self.chosen_pattern(id, subject, condition[0]);
+        self.bind_pattern(id, chosen, false);
+        self.loop_body(c[1]);
+        self.close_scope(scope, freezes, c[1], UNIT);
+        self.depth -= 1;
+        if let Some(h) = header {
+            self.jump(h, &[], c[1]);
+        }
+        self.back_edge(fi, self.close_brace(c[1]));
+        let f = self.pop_frame(n);
+        self.land(f.exit);
+        (UNIT, None)
+    }
+    fn let_else(&mut self, pat: NodeId, subject: Subject, id: u32, other: NodeId) {
+        let mark = self.log.len();
+        let was_dead = self.dead;
+        let no = self.live().then(|| self.new_block(&[]));
+        self.pattern_tests(id, subject, no);
+        let yes = self.live().then(|| self.new_block(&[]));
+        if let Some(yes) = yes {
+            self.jump(yes, &[], pat);
+        }
+        if let Some(no) = no {
+            self.start(no);
+        }
+        let (t, _) = self.expr(other, None);
+        if t != NEVER && t != ERROR {
+            self.refuse("LANG-17", other, "a let-else block must have type Never");
+        }
+        self.undo(mark);
+        self.dead = was_dead;
+        if let Some(yes) = yes {
+            self.start(yes);
+        }
+    }
+    pub(super) fn result_parts(&self, ty: TyId) -> Option<(DeclId, TyId, Option<TyId>)> {
+        let TyKind::Adt(d, args) = self.t.kind(ty) else {
+            return None;
+        };
+        let path = &self.p.decls[d.index()].path;
+        if is_core_prelude(path, &["Result"]) {
+            Some((*d, args[0], Some(args[1])))
+        } else if is_core_prelude(path, &["Option"]) {
+            Some((*d, args[0], None))
+        } else {
+            None
+        }
+    }
+    fn wrap_case(
+        &mut self,
+        ty: TyId,
+        case: u32,
+        payload: TyId,
+        value: Option<ValueId>,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let id = match self.rep(ty) {
+            Ok(Rep::Place(id)) => id,
+            Err(what) => {
+                self.gap(n, what);
+                return None;
+            }
+            _ => return None,
+        };
+        if !self.live() {
+            return None;
+        }
+        let to = self.new_slot(PlaceTy::Declared(id), n);
+        self.inst(Inst::SetCase { address: to, case }, n);
+        let rep = self.rep(payload).ok()?;
+        let place = match rep {
+            Rep::None => None,
+            Rep::Scalar(t) => Some(PlaceTy::Value(t)),
+            Rep::Place(t) => Some(PlaceTy::Declared(t)),
+        };
+        if let Some(place) = place {
+            let at = self.address(
+                AddressBase::Address(to),
+                &[Step::CaseField { case, field: 0 }],
+                place,
+                n,
+            );
+            self.install(at, rep, value, n);
+        }
+        Some(self.pointer(to, n))
+    }
+    pub(super) fn try_(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
+        let outer = self.result_parts(self.fd.result);
+        let hint = outer
+            .and_then(|(d, _, error)| {
+                want.map(|w| {
+                    let args = if let Some(e) = error {
+                        vec![w.ty, e]
+                    } else {
+                        vec![w.ty]
+                    };
+                    self.t.mk(TyKind::Adt(d, args))
+                })
+            })
+            .and_then(expect);
+        let operand = self.kids(n)[0];
+        let subject = self.subject(operand, true, hint);
+        if subject.ty == ERROR || subject.ty == NEVER {
+            return (subject.ty, None);
+        }
+        let Some((d, success, error)) = self.result_parts(subject.ty) else {
+            self.refuse("LANG-18", n, "`?` consumes a Result or Option");
+            return (ERROR, None);
+        };
+        let Some((od, _, oe)) = outer else {
+            self.refuse(
+                "LANG-18",
+                n,
+                "`?` needs an enclosing function returning the same Result or Option",
+            );
+            return (ERROR, None);
+        };
+        if d != od || error != oe {
+            self.refuse(
+                "LANG-18",
+                n,
+                "`?` propagates only the identical error type, or Option to Option",
+            );
+            return (success, None);
+        }
+        let (ok_case, err_case) = if error.is_some() { (0, 1) } else { (1, 0) };
+        let no = self.live().then(|| self.new_block(&[]));
+        if let (Some(value), Ok(Rep::Place(id))) = (subject.value, self.rep(subject.ty))
+            && self.live()
+        {
+            let a = self.address(AddressBase::Value(value), &[], PlaceTy::Declared(id), n);
+            let tag = self.value(Ty::Scalar(Scalar::U32));
+            self.inst(
+                Inst::Case {
+                    result: tag,
+                    address: a,
+                },
+                n,
+            );
+            self.pattern_compare(
+                Some(tag),
+                Ty::Scalar(Scalar::U32),
+                u64::from(err_case),
+                CompareOp::Eq,
+                no,
+                n,
+            );
+        }
+        // The error branch rewraps E in the enclosing result's own instance layout;
+        // Result[T,E] and Result[U,E] can have different payload offsets.
+        let error_value = if let Some(e) = error {
+            self.pattern_at(subject, Some(err_case), 0, e, n).value
+        } else {
+            None
+        };
+        let value = self.wrap_case(
+            self.fd.result,
+            err_case,
+            error.unwrap_or(UNIT),
+            error_value,
+            n,
+        );
+        self.ret(value, n);
+        if let Some(no) = no {
+            self.start(no);
+        }
+        let value = self.pattern_at(subject, Some(ok_case), 0, success, n).value;
+        (success, value)
     }
 }

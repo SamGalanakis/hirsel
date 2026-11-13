@@ -1,0 +1,8 @@
+// Even a copyable whole slot may not be explicitly moved by a guard.
+// expect: refuse LANG-17 at 5:23
+fn f(take x: u64) -> u64 {
+  match true {
+    true if { let y = take x; y == 0 } => 1,
+    _ => 2,
+  }
+}

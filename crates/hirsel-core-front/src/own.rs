@@ -26,6 +26,7 @@ pub(crate) fn join(a: Avail, b: Avail) -> Avail {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Origin {
     ViewParam,
+    PatternView,
     MutParam,
     TakeParam,
     Let,

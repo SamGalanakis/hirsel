@@ -651,6 +651,7 @@ impl<'c, 'a> Cx<'c, 'a> {
     /// `t` where `w` is expected: equal, or Never, or an already refused type.
     fn coerce(&mut self, t: TyId, w: Want, n: NodeId) {
         self.out.counts.types += 1;
+        let plain_view = self.plain_view(t, w.ty);
         let viewed = w.view
             && (matches!(self.t.kind(t), TyKind::View(x) if *x == w.ty)
                 || crate::decls::stable_parameter(&self.p.decls, &self.t, t, w.ty));
@@ -664,6 +665,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                 if *x == t && matches!(self.p.decls[d.index()].repr, Repr::Stable));
         if t != w.ty
             && !viewed
+            && !plain_view
             && !sequence
             && !stable
             && t != NEVER
@@ -1007,6 +1009,11 @@ impl<'c, 'a> Cx<'c, 'a> {
         match want {
             Some(w) if t != NEVER => {
                 self.coerce(t, w, n);
+                let v = if self.plain_view(t, w.ty) {
+                    self.read_plain_view(w.ty, v, n)
+                } else {
+                    v
+                };
                 (w.ty, v)
             }
             _ => (t, v),
@@ -1055,7 +1062,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             }
             NodeKind::Tuple => self.gap_ty(n, "tuples are not built"),
             NodeKind::Index | NodeKind::Projection => self.place_value(n),
-            NodeKind::Try => self.gap_ty(n, "`?` is not built"),
+            NodeKind::Try => self.try_(n, want),
             NodeKind::Match => self.match_(n, want),
             NodeKind::For | NodeKind::ForTake => self.gap_ty(n, "for loops are not built"),
             NodeKind::Region | NodeKind::Bound | NodeKind::Placement => {

@@ -1,0 +1,7 @@
+// Error propagation has no implicit conversion, even between integer widths.
+// expect: refuse LANG-18 at 5:11
+fn wrong() -> Result[u64, u16] { Error(7) }
+fn f() -> Result[u64, u8] {
+  let n = wrong()?
+  Ok(n)
+}

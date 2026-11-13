@@ -1,0 +1,7 @@
+// A discarded expression statement cannot silently lose a recoverable error.
+// expect: refuse LANG-18 at 5:3
+fn action() -> Result[(), u8] { Error(3) }
+fn f() -> Result[(), u8] {
+  action();
+  Ok(())
+}

@@ -1,0 +1,5 @@
+// The tuple's first component is still uncovered for Some((false, true/false)).
+// expect: refuse LANG-17 at 4:3
+fn f(o: Option[(bool, bool)]) -> u64 {
+  match o { Some((true, _)) => 1, None => 0 }
+}

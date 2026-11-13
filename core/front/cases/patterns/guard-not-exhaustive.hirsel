@@ -1,0 +1,5 @@
+// `true` is still missing because its only arm has a guard.
+// expect: refuse LANG-17 at 4:3
+fn f(c: bool) -> u64 {
+  match c { true if c => 1, false => 0 }
+}

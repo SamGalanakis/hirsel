@@ -354,6 +354,17 @@ impl<'c, 'a> Cx<'c, 'a> {
         let s = at.place.slot;
         let v = self.var(s);
         let name = self.slot_name(s);
+        if self.patterns.guard
+            && (matches!(how, Use::Take | Use::Mut(_))
+                || matches!(how, Use::Value) && !self.copies(at.ty))
+        {
+            self.refuse("LANG-17", n, "a match guard cannot move or lend mut");
+            return;
+        }
+        if v.origin == Origin::PatternView && matches!(how, Use::Take) {
+            self.refuse("OWN-15", n, "this pattern binding views the scrutinee");
+            return;
+        }
         match how {
             Use::Value | Use::Take => {
                 let copy = match how {

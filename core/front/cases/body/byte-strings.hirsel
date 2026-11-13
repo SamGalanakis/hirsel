@@ -1,0 +1,36 @@
+// A1.3 (core.md "Literals", syntax.md): a byte-string literal is `Result[Bytes, Capacity]`,
+// admits its length as storage and copies its bytes; the run harness checks the storage
+// is freed (used 0). Hand-derived: b"a\x00\xff\n" is the bytes 97, 0, 255, 10;
+// br#"x"y"# is 120, 34, 121; b"" has length 0.
+// expect: run at(0) = 97
+// expect: run at(1) = 0
+// expect: run at(2) = 255
+// expect: run at(3) = 10
+// expect: run at(4) = fail Bounds
+// expect: run count(0) = 4
+// expect: run raw(1) = 34
+// expect: run empty(0) = 0
+fn at(i: u64) -> u64 {
+  match b"a\x00\xff\n" {
+    Ok(xs) => int.widen(xs[i]),
+    Error(_) => 1000
+  }
+}
+fn count(x: u64) -> u64 {
+  match b"a\x00\xff\n" {
+    Ok(xs) => list.len(xs) + x,
+    Error(_) => 1000
+  }
+}
+fn raw(i: u64) -> u64 {
+  match br#"x"y"# {
+    Ok(xs) => int.widen(xs[i]),
+    Error(_) => 1000
+  }
+}
+fn empty(x: u64) -> u64 {
+  match b"" {
+    Ok(xs) => list.len(xs) + x,
+    Error(_) => 1000
+  }
+}

@@ -1,0 +1,3 @@
+// LANG-13 / OWN-20: callable results retain only written region anchors.
+// expect: refuse OWN-20 at 3:28
+fn local() {let f:fn(u64)->scoped fn(u64)->u64}

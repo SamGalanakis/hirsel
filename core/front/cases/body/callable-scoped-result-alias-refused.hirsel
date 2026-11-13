@@ -1,0 +1,4 @@
+// C3: result aliases and region roots retain the declared result contract.
+// expect: refuse OWN-20 at 4:21
+type Callback = scoped fn(u64)->u64
+fn apply(f:fn(u64)->Callback) {}

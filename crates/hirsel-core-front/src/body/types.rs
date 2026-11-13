@@ -95,7 +95,41 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                                 params.push((mode, ty));
                             }
                         }
-                        NodeKind::ResultType => result = self.ty(self.kids(child)[0]),
+                        NodeKind::ResultType => {
+                            let node = self.kids(child)[0];
+                            result = self.ty(node);
+                            if kind(&self.p.decls, &self.t, result, &self.params) == Kind::Scoped {
+                                let region = |root| {
+                                    let Some(Target::Binder(b)) =
+                                        self.p.target(self.at, root).copied()
+                                    else {
+                                        return false;
+                                    };
+                                    let binder = &self.p.items[self.at.module as usize]
+                                        [self.at.item as usize]
+                                        .resolution
+                                        .binders[b as usize];
+                                    binder.kind == hirsel_core_resolve::BinderKind::Region
+                                        || self.vars[b as usize]
+                                            .map(|v| v.ty)
+                                            .or_else(|| self.captured_root_ty(b))
+                                            .is_some_and(|ty| self.region_handle(ty))
+                                        || self.fd.params.iter().any(|p| {
+                                            p.name == binder.name && self.region_handle(p.ty)
+                                        })
+                                };
+                                if crate::decls::written_result_missing_anchor(
+                                    self.p, self.at, node, &region,
+                                ) {
+                                    self.refuse(
+                                        "OWN-20",
+                                        node,
+                                        "a callable's scoped result names a region anchor",
+                                    );
+                                    return ERROR;
+                                }
+                            }
+                        }
                         NodeKind::Waits => waits = true,
                         NodeKind::Generics => {
                             self.gap(child, "generic callable types are not built")

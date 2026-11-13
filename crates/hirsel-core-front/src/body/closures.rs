@@ -30,7 +30,27 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         want: Option<Want>,
         scratch: &mut CallScratch,
     ) -> (TyId, Option<ValueId>) {
+        if want.is_some_and(|w| w.ty == ERROR) {
+            return (ERROR, None);
+        }
         let g = &self.p.fns[f];
+        if g.anchors
+            .iter()
+            .any(|&i| !self.region_handle(g.params[i as usize].ty))
+        {
+            self.refuse(
+                "LANG-13",
+                n,
+                "a result anchored to a view parameter fits no callable type",
+            );
+            return (ERROR, None);
+        }
+        if kind(&self.p.decls, &self.t, g.result, &self.params) == Kind::Scoped {
+            return self.gap_ty(
+                n,
+                "scoped callable result region anchors are not represented",
+            );
+        }
         let ty = g.callable;
         scratch.found.clear();
         scratch.found.resize(g.generics.len(), None);
@@ -168,9 +188,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     "invokes a waits callable but is not declared waits",
                 );
             }
-        }
-        if kind(&self.p.decls, &self.t, result, &self.params) == Kind::Scoped {
-            self.gap(n, "scoped callable result anchors are not built");
         }
         let abi = self.value_call_abi(ty, result, callable != Callable::Plain, n, scratch);
         if let Some(abi) = abi {
@@ -558,6 +575,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             && *result != HOLE
         {
             fd.result = *result;
+        }
+        if kind(&self.p.decls, &self.t, fd.result, &self.params) == Kind::Scoped {
+            return self.gap_ty(
+                n,
+                "scoped callable result region anchors are not represented",
+            );
         }
         let expected_kind = expected.and_then(|ty| match self.t.kind(ty) {
             TyKind::Fn(_, _, _, k) => Some(*k),

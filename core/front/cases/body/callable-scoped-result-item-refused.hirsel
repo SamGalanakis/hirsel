@@ -1,0 +1,5 @@
+// LANG-13 / OWN-20: callable results retain only written region anchors.
+// expect: refuse LANG-13 at 5:19
+fn plus(x:u64)->u64 {x+1}
+fn make(a:u64)->(scoped fn(u64)->u64) in a {plus}
+fn value() {let f=make}

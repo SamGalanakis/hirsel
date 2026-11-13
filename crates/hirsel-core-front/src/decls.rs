@@ -385,7 +385,10 @@ pub(crate) enum Pending {
         rule: &'static str,
     },
     /// A type argument of a generic other than Option and Result is not scoped (OWN-19).
-    NotScoped { ty: TyId, site: Site },
+    NotScoped {
+        ty: TyId,
+        site: Site,
+    },
     Root {
         base: TyId,
         root: TyId,
@@ -396,6 +399,11 @@ pub(crate) enum Pending {
         ty: TyId,
         params: Vec<u16>,
         site: Site,
+    },
+    CallableResult {
+        ty: TyId,
+        at: ItemRef,
+        node: NodeId,
     },
 }
 
@@ -1022,7 +1030,23 @@ impl Program<'_> {
                             }
                         }
                         NodeKind::ResultType => {
-                            result = self.lower_ty(at, item.tree.children(c)[0], generics)
+                            let node = item.tree.children(c)[0];
+                            result = self.lower_ty(at, node, generics);
+                            if scoped_payload(&self.decls, &self.types, result)
+                                && written_missing_anchor(self, at, node)
+                            {
+                                self.refusals.push(refusal(
+                                    "OWN-20",
+                                    self.site(at, node),
+                                    "a callable's scoped result names a region anchor",
+                                ));
+                                return ERROR;
+                            }
+                            self.pending.push(Pending::CallableResult {
+                                ty: result,
+                                at,
+                                node,
+                            });
                         }
                         NodeKind::Waits => waits = true,
                         NodeKind::Generics => self.gaps.push(Gap::new(
@@ -1516,6 +1540,31 @@ impl Program<'_> {
                             site,
                             "Inline elements must be plain or own; a type parameter must be plain",
                         ));
+                    }
+                }
+                Pending::CallableResult { ty, at, node } => {
+                    // Bounds distinguish Plain from Generic, never Scoped.
+                    if kind(&self.decls, &self.types, ty, &[]) == Kind::Scoped {
+                        let region = |root| {
+                            let Some(Target::Binder(b)) = self.target(at, root).copied() else {
+                                return false;
+                            };
+                            let binder = &self.items[at.module as usize][at.item as usize]
+                                .resolution
+                                .binders[b as usize];
+                            binder.kind == hirsel_core_resolve::BinderKind::Region
+                                || self.fns.own_iter().find(|f| f.at == at).is_some_and(|f| {
+                                    f.params.iter().any(|p| p.name == binder.name
+                                        && matches!(self.types.kind(p.ty), TyKind::Adt(d, _) if self.decls[d.index()].role == Some(Role::Region)))
+                                })
+                        };
+                        if written_result_missing_anchor(self, at, node, &region) {
+                            self.refusals.push(refusal(
+                                "OWN-20",
+                                self.site(at, node),
+                                "a callable's scoped result names a region anchor",
+                            ));
+                        }
                     }
                 }
                 Pending::NotScoped { ty, site } => {
@@ -2628,26 +2677,41 @@ impl FnDecl {
 }
 
 fn written_missing_anchor(p: &Program<'_>, at: ItemRef, n: NodeId) -> bool {
+    written_result_missing_anchor(p, at, n, &|_| true)
+}
+
+pub(crate) fn written_result_missing_anchor(
+    p: &Program<'_>,
+    at: ItemRef,
+    n: NodeId,
+    valid_root: &impl Fn(NodeId) -> bool,
+) -> bool {
     let item = p.item(at);
     let kids = item.tree.children(n);
     match item.tree.node(n).kind {
-        NodeKind::Anchor => false,
-        NodeKind::TupleType | NodeKind::GroupType => {
-            kids.iter().any(|&c| written_missing_anchor(p, at, c))
-        }
+        NodeKind::Anchor => !valid_root(*kids.last().unwrap()),
+        NodeKind::ScopedCallableType => true,
+        NodeKind::TupleType | NodeKind::GroupType => kids
+            .iter()
+            .any(|&c| written_result_missing_anchor(p, at, c, valid_root)),
         NodeKind::TypeArguments => {
             if let Some(Target::Definition(d)) = p.target(at, kids[0]) {
                 if let Some(Def::Type(d)) = p.by_definition[d.0 as usize] {
                     let decl = &p.decls[d.index()];
                     if decl.structural {
-                        return kids[1..].iter().any(|&c| written_missing_anchor(p, at, c));
+                        return kids[1..]
+                            .iter()
+                            .any(|&c| written_result_missing_anchor(p, at, c, valid_root));
                     }
                     if decl.repr == Repr::Scoped
+                        || decl.summary.kind_fixed == Some(Kind::Scoped)
+                        || matches!(decl.body, DeclBody::Alias(ty) if scoped_payload(&p.decls, &p.types, ty))
                         || decl.role.is_some_and(|r| r.kind() == Kind::Scoped)
                     {
                         return !kids[1..].iter().any(|&c| {
                             item.tree.node(c).kind == NodeKind::Anchor
                                 && item.tree.children(c).len() == 1
+                                && valid_root(item.tree.children(c)[0])
                         });
                     }
                 }
@@ -2658,7 +2722,10 @@ fn written_missing_anchor(p: &Program<'_>, at: ItemRef, n: NodeId) -> bool {
             Some(Target::Definition(d)) => match p.by_definition[d.0 as usize] {
                 Some(Def::Type(d)) => {
                     let decl = &p.decls[d.index()];
-                    decl.repr == Repr::Scoped || decl.role.is_some_and(|r| r.kind() == Kind::Scoped)
+                    decl.repr == Repr::Scoped
+                        || decl.summary.kind_fixed == Some(Kind::Scoped)
+                        || matches!(decl.body, DeclBody::Alias(ty) if scoped_payload(&p.decls, &p.types, ty))
+                        || decl.role.is_some_and(|r| r.kind() == Kind::Scoped)
                 }
                 _ => false,
             },

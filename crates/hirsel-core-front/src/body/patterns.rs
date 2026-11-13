@@ -1444,6 +1444,16 @@ impl<'c, 'a> Cx<'c, 'a> {
         Some(p)
     }
     pub(super) fn try_(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
+        if self.fd.drop_of.is_some() {
+            // At the `?`, which ends the node.
+            let end = self.span(n).end;
+            let at = Span {
+                start: end - 1,
+                end,
+            };
+            self.refuse_at("FAIL-11", at, "a finalizer has no `?` of its own");
+            return (ERROR, None);
+        }
         let outer = self.result_parts(self.fd.result);
         let operand = self.kids(n)[0];
         // LANG-18: only the payload expectation reaches the operand. Its own

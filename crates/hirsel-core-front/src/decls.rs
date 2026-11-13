@@ -269,7 +269,8 @@ pub struct TypeDecl {
     /// Core `Option` or `Result`: kind, bounds and copying follow the arguments
     /// (OWN-3, SEM-7), and a scoped argument is allowed (OWN-19).
     pub structural: bool,
-    pub finalizer: bool,
+    /// The function row of its `drop` block (FAIL-11), a body of this item.
+    pub finalizer: Option<u32>,
     pub compact: Option<Width>,
     pub summary: Summary,
 }
@@ -332,6 +333,11 @@ pub struct FnDecl {
     pub outlives: Vec<(TyId, TyId)>,
     pub waits: bool,
     pub body: Option<NodeId>,
+    /// A resource's finalizer: the `drop` block of this type's item, under the type's
+    /// own path. Its one parameter is the resource, `mut`, passed as its block pointer
+    /// (FAIL-11, FORM).
+    #[serde(default)]
+    pub drop_of: Option<DeclId>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -397,7 +403,7 @@ impl Program<'_> {
                 let mut opaque = false;
                 let mut generics = vec![];
                 let mut declared = 0;
-                let mut finalizer = false;
+                let mut drop = None;
                 let mut compact = None;
                 for &c in item.tree.children(item.root) {
                     let n = item.tree.node(c);
@@ -419,7 +425,7 @@ impl Program<'_> {
                                 declared |= bit;
                             }
                         }
-                        NodeKind::Drop => finalizer = true,
+                        NodeKind::Drop => drop = Some(c),
                         NodeKind::Attribute => {
                             let t = n.token.unwrap();
                             if item.tree.token_text(item.text, t) == "compact" {
@@ -468,6 +474,7 @@ impl Program<'_> {
                             outlives: vec![],
                             waits: false,
                             body,
+                            drop_of: None,
                         });
                         self.by_path.entry(path).or_insert(Def::Fn(id));
                         self.by_definition[definition.0 as usize] = Some(Def::Fn(id));
@@ -476,6 +483,27 @@ impl Program<'_> {
                     _ => continue,
                 };
                 let id = DeclId(self.decls.len() as u32);
+                let finalizer = drop.map(|d| {
+                    let f = self.fns.len() as u32;
+                    let body = item.tree.children(d).last().copied();
+                    self.fns.push(FnDecl {
+                        path: path.clone(),
+                        result_site: site,
+                        site: self.site(at, d),
+                        at,
+                        generics: generics.clone(),
+                        params: vec![],
+                        result: UNIT,
+                        callable: ERROR,
+                        anchors: vec![],
+                        region_anchors: vec![],
+                        outlives: vec![],
+                        waits: true,
+                        body,
+                        drop_of: Some(id),
+                    });
+                    f
+                });
                 let role = Role::of(&path);
                 let structural = is_core_prelude(&path, &["Option", "Result"]);
                 self.decls.push(TypeDecl {
@@ -982,6 +1010,38 @@ impl Program<'_> {
     fn lower_signature(&mut self, f: usize) {
         let at = self.fns[f].at;
         let item = self.item(at);
+        if let Some(d) = self.fns[f].drop_of {
+            // FAIL-11: `drop(t)` takes the resource `mut`; it cannot move, copy or
+            // return it, and has a unit result. It is shielded and may wait.
+            let args = (0..self.fns[f].generics.len())
+                .map(|i| self.types.intern(TyKind::Param(i as u32)))
+                .collect();
+            let ty = self.types.intern(TyKind::Adt(d, args));
+            let node = item
+                .tree
+                .children(item.root)
+                .iter()
+                .copied()
+                .find(|&c| item.tree.node(c).kind == NodeKind::Drop)
+                .unwrap();
+            let name = item.symbol(item.tree.node(node).token.unwrap());
+            let site = self.fns[f].site;
+            let fd = &mut self.fns[f];
+            fd.params = vec![ParamDecl {
+                bytes: false,
+                name,
+                mode: Mode::Mut,
+                ty,
+                site,
+            }];
+            fd.callable = self.types.intern(TyKind::Fn(
+                vec![(Mode::Mut, ty)],
+                UNIT,
+                true,
+                Callable::Plain,
+            ));
+            return;
+        }
         let generics = self.fns[f].generics.clone();
         let mut params = vec![];
         let mut result = UNIT;

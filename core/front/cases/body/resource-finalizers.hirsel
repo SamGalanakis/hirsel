@@ -1,0 +1,47 @@
+// A finalizer runs at each implicit drop, owners in reverse order (FAIL-8). A failing
+// one on a normal edge drops the edge's pending result, cleans the remaining owners and
+// propagates (FAIL-9, FAIL-12); one failing during that cleanup appends its cause and
+// cleanup goes on (FAIL-10). A whole destructure ends a resource without it (T3.7).
+// The trace is each finalized resource's `id`; `100 / t.d` fails when `d` is 0.
+// expect: accept
+// expect: run pair(1,1) = 6 trace 3,2,1
+// expect: run pair(1,0) = fail Division trace 3,2,1
+// expect: run pair(0,1) = fail Division trace 3,2,1
+// expect: run pair(0,0) = fail Division,Division trace 3,2,1
+// expect: run outer(1) = 3 trace 4,3
+// expect: run outer(0) = fail Division trace 4,3
+// expect: run close(0) = 7
+resource type R { id: u64, d: u64 }
+  drop(t) { let _ = 100 / t.d }
+
+fn pair(da: u64, db: u64) -> u64 {
+  match R(id: 1, d: 1) {
+    Ok(o) => match R(id: 2, d: da) {
+      Ok(a) => match R(id: 3, d: db) { Ok(b) => o.id + a.id + b.id, Error(_) => 0 },
+      Error(_) => 0,
+    },
+    Error(_) => 0,
+  }
+}
+
+fn inner(d: u64) -> R {
+  match R(id: 3, d: 1) {
+    Ok(take keep) => match R(id: 4, d: d) { Ok(_x) => take keep, Error(_) => loop {} },
+    Error(_) => loop {},
+  }
+}
+
+fn outer(d: u64) -> u64 {
+  let r = inner(d)
+  r.id
+}
+
+fn close(d: u64) -> u64 {
+  match R(id: 7, d: d) {
+    Ok(take r) => {
+      let R(id: a, d: _) = take r
+      a
+    },
+    Error(_) => 0,
+  }
+}

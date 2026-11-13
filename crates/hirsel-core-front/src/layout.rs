@@ -21,8 +21,10 @@ pub(crate) struct Shapes<'p, T: TyRead> {
     pub shapes: &'p mut Vec<Shape>,
     pub of: &'p mut HashMap<String, TypeRef>,
     /// A body module's table: a finalizer names a function row this table cannot name
-    /// yet, so a type with one has no row here (resource types are not built).
+    /// yet, so it is left to [`Self::finalizers`]; a generic one is not built.
     pub module: bool,
+    /// The rows whose finalizer is the program's function `.1`, for the caller to name.
+    pub finalizers: Vec<(TypeRef, u32)>,
 }
 
 impl<T: TyRead> Shapes<'_, T> {
@@ -166,7 +168,8 @@ impl<T: TyRead> Shapes<'_, T> {
                     Some(_) => return None,
                     None => {}
                 }
-                if decl.summary.cycle || self.module && decl.finalizer {
+                if decl.summary.cycle || self.module && decl.finalizer.is_some() && !args.is_empty()
+                {
                     return None;
                 }
                 let repr = match decl.repr {
@@ -211,7 +214,16 @@ impl<T: TyRead> Shapes<'_, T> {
                     }
                     DeclBody::Alias(_) => return None,
                 };
-                (repr, body, decl.finalizer.then_some(FuncRef(d.0)))
+                let finalizer = match decl.finalizer {
+                    // A body module names the function row once the emitter has one.
+                    Some(f) if self.module => {
+                        self.finalizers.push((r, f));
+                        Some(FuncRef(u32::MAX))
+                    }
+                    Some(_) => Some(FuncRef(d.0)),
+                    None => None,
+                };
+                (repr, body, finalizer)
             }
             _ => return None,
         };
@@ -235,6 +247,7 @@ impl<T: TyRead> Shapes<'_, T> {
     pub fn truncate(&mut self, mark: usize) {
         self.shapes.truncate(mark);
         self.of.retain(|_, r| (r.0 as usize) < mark);
+        self.finalizers.retain(|(r, _)| (r.0 as usize) < mark);
     }
 
     fn map_field(&mut self, args: &[TyId]) -> Option<FieldTy> {
@@ -370,6 +383,7 @@ pub(crate) fn recipes(p: &mut Program) {
         shapes: &mut shapes,
         of: &mut of,
         module: false,
+        finalizers: vec![],
     };
     let mut roots = vec![];
     for (d, decl) in s.decls.iter().enumerate().skip(s.decls.base_len()) {

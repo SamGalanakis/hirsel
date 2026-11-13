@@ -108,6 +108,8 @@ pub struct Emitter {
     generic_calls: std::collections::BTreeMap<FuncId, GenericCall>,
     #[cfg(test)]
     templates: HashMap<DefPath, (FuncId, GenericTemplate)>,
+    /// Per row, whether cleaning it may run code (memoised [`Self::runs_code`]).
+    runs: HashMap<TypeId, bool>,
 }
 
 /// How a value of a type is carried in a body (crate docs, "Values, slots and
@@ -289,14 +291,34 @@ impl Emitter {
             shapes: &mut self.module.types,
             of: &mut self.types,
             module: true,
+            finalizers: vec![],
         };
         let r = s.shape(ty);
         if r.is_none() {
             s.truncate(mark);
         }
+        let finalizers = std::mem::take(&mut s.finalizers);
+        for (row, f) in finalizers {
+            let func = self.finalizer_row(p, f as usize);
+            self.module.types[row.index()].finalizer = Some(hirsel_core_layout::FuncRef(func.0));
+        }
         let row = TypeId(r?.0);
         self.remember_generic_types(p, t, ty);
         Some(row)
+    }
+    /// The function row of the program's finalizer `f`: it receives the resource
+    /// block's pointer and has no result (FAIL-11, FORM).
+    fn finalizer_row(&mut self, p: &Program, f: usize) -> FuncId {
+        if let Some(Some((func, _))) = self.rows.get(f) {
+            return *func;
+        }
+        let func = self.function(&p.fns[f].path, finalizer_signature());
+        let row = (func, self.module.functions[func.index()].signature);
+        if self.rows.len() <= f {
+            self.rows.resize(f + 1, None);
+        }
+        self.rows[f] = Some(row);
+        func
     }
     /// The recipe of row `id`, or None when the table's layout is refused, in which case
     /// the rows from `mark` on are taken back so the table stays computable.
@@ -308,6 +330,7 @@ impl Emitter {
                     self.module.types.truncate(mark);
                     self.types.retain(|_, r| (r.0 as usize) < mark);
                     self.generic_names.retain(|id, _| id.index() < mark);
+                    self.runs.retain(|r, _| r.index() < mark);
                     return None;
                 }
             }
@@ -347,13 +370,7 @@ impl Emitter {
             .type_row(p, t, ty)
             .ok_or("values of this type are not built")?;
         match self.recipe(id, mark) {
-            Some(r) if matches!(r.layout, Layout::Fixed(_)) => {
-                if self.runs_code(id) {
-                    Err("cleanup of resources is not built")
-                } else {
-                    Ok(Rep::Place(id))
-                }
-            }
+            Some(r) if matches!(r.layout, Layout::Fixed(_)) => Ok(Rep::Place(id)),
             _ => Err("values of this type are not built"),
         }
     }
@@ -375,7 +392,15 @@ impl Emitter {
     /// Cleaning a value of row `id` may run a finalizer; a resource without one is
     /// cleaned mechanically (FAIL-13). Rows reach themselves through sequences and
     /// maps, so each row is visited once.
-    fn runs_code(&self, id: TypeId) -> bool {
+    fn runs_code(&mut self, id: TypeId) -> bool {
+        if let Some(&r) = self.runs.get(&id) {
+            return r;
+        }
+        let r = self.runs_code_walk(id);
+        self.runs.insert(id, r);
+        r
+    }
+    fn runs_code_walk(&self, id: TypeId) -> bool {
         let mut seen = vec![id];
         let mut work = vec![id];
         while let Some(id) = work.pop() {
@@ -436,6 +461,9 @@ impl Emitter {
         arguments: &[TyId],
     ) -> Result<Signature, &'static str> {
         let fd = &p.fns[f];
+        if fd.drop_of.is_some() {
+            return Ok(finalizer_signature());
+        }
         let mut params = vec![];
         for q in &fd.params {
             let ty = subst(t, q.ty, arguments);
@@ -477,6 +505,15 @@ impl Emitter {
             dest,
             never,
         })
+    }
+}
+
+fn finalizer_signature() -> Signature {
+    Signature {
+        params: vec![Param::Value(Ty::Ptr)],
+        results: vec![],
+        dest: None,
+        never: false,
     }
 }
 
@@ -760,6 +797,13 @@ struct Cx<'c, 'a> {
     /// state serves every failing instruction until it changes.
     epoch: u64,
     fail_cache: Option<((u64, usize, usize), BlockId)>,
+    /// Emitting failure cleanup: a failing drop appends its cause and cleanup goes on
+    /// (FAIL-10).
+    failing: bool,
+    /// The edge whose cleanup is being emitted (FAIL-9).
+    edge: Option<cleanup::Edge>,
+    /// The pending result of the exit edge [`Self::unwind`] cleans next (FAIL-9).
+    pending: Option<(AddressBase, TypeId)>,
     out: CoreCheck,
 }
 
@@ -835,6 +879,9 @@ impl<'c, 'a> Cx<'c, 'a> {
             owner_buf: vec![],
             epoch: 0,
             fail_cache: None,
+            failing: false,
+            edge: None,
+            pending: None,
             out: CoreCheck::default(),
         }
     }
@@ -1096,6 +1143,9 @@ impl<'c, 'a> Cx<'c, 'a> {
             (Some((dest, id)), Some(v)) => {
                 let to = self.address(AddressBase::Value(dest), &[], PlaceTy::Declared(id), n);
                 self.copy_to(to, v, id, n);
+                if self.e.runs_code(id) {
+                    self.pending = Some((AddressBase::Address(to), id));
+                }
                 None
             }
             _ => v,
@@ -1269,6 +1319,31 @@ impl<'c, 'a> Cx<'c, 'a> {
                     Mode::Take => Origin::TakeParam,
                 };
                 let binding = match (pd.mode, v) {
+                    // A finalizer receives its resource's block pointer: `t` is a
+                    // holder slot of it, so fields are reached as through any holder.
+                    (Mode::Mut, Some(v)) if self.live() && self.fd.drop_of.is_some() => {
+                        let holder = match self.rep(pd.ty) {
+                            Ok(Rep::Place(id)) => {
+                                let h = self.new_slot(PlaceTy::Declared(id), body);
+                                let at = self.address(
+                                    AddressBase::Address(h),
+                                    &[],
+                                    PlaceTy::Value(Ty::Ptr),
+                                    body,
+                                );
+                                self.inst(
+                                    Inst::Store {
+                                        address: at,
+                                        value: v,
+                                    },
+                                    body,
+                                );
+                                Some(h)
+                            }
+                            _ => None,
+                        };
+                        Binding::Slot(holder)
+                    }
                     (Mode::Mut, Some(v)) if self.live() => {
                         let ty = match self.rep(pd.ty) {
                             Ok(Rep::None) => self
@@ -1300,7 +1375,8 @@ impl<'c, 'a> Cx<'c, 'a> {
         );
         self.ret(v, body);
         // Only a body checked to its end shows that nothing it calls waits.
-        if self.fd.waits && !self.waited && !self.entry && !self.broken {
+        if self.fd.waits && !self.waited && !self.entry && self.fd.drop_of.is_none() && !self.broken
+        {
             let root = self.item.root;
             let w = self
                 .kids(root)

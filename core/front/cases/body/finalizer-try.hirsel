@@ -1,0 +1,5 @@
+// expect: refuse FAIL-11 at 4:27
+// FAIL-11: a finalizer has no `?` of its own; a function it calls may use one.
+resource type R { d: u64 }
+  drop(t) { let _ = g(t.d)? }
+fn g(x: u64) -> Result[u64, u8] { Ok(x) }

@@ -296,8 +296,11 @@ fn run_case(path: &Path) -> Vec<String> {
     failures
 }
 
-/// `f(a,b)` run against `= r1,r2` or `= fail Cause`: arguments and results are read at
-/// the emitted signature's types, so a case writes values, not bits.
+/// `f(a,b)` run against `= r1,r2` or `= fail C1,C2` (the cause chain, primary first),
+/// optionally followed by `trace t1,t2`: the first u64 field of each resource whose
+/// cleanup started, in order. Arguments and results are read at the emitted
+/// signature's types, so a case writes values, not bits. A run that returns has
+/// refunded every admission (MEM-23).
 fn run_expect(
     module: &Module,
     functions: &HashMap<String, FuncId>,
@@ -330,9 +333,26 @@ fn run_expect(
         .zip(&args)
         .map(|(&t, a)| eval::scalar(t, a))
         .collect();
-    let got = eval::run(module, f, &args, u64::MAX).outcome;
+    let (want, trace) = match want.iter().position(|w| *w == "trace") {
+        Some(i) => (&want[..i], want.get(i + 1).copied()),
+        None => (want, None),
+    };
+    let report = eval::run(module, f, &args, u64::MAX);
+    if let Some(trace) = trace {
+        let t: Vec<u64> = trace.split(',').map(|x| x.parse().unwrap()).collect();
+        if report.trace != t {
+            return Some(format!(
+                "run {call}: want trace {t:?}, got {:?}",
+                report.trace
+            ));
+        }
+    }
+    let got = report.outcome;
+    if matches!(got, eval::Outcome::Returned(_)) && report.used != 0 {
+        return Some(format!("run {call}: {} bytes still admitted", report.used));
+    }
     let expected = match want {
-        ["fail", cause] => eval::Outcome::Failed(vec![(*cause).to_string()]),
+        ["fail", causes] => eval::Outcome::Failed(causes.split(',').map(str::to_string).collect()),
         [rs] => {
             let rs: Vec<&str> = rs.split(',').filter(|r| !r.is_empty()).collect();
             if rs.len() != sig.results.len() {

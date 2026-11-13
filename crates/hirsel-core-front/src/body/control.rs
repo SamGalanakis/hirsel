@@ -241,15 +241,22 @@ impl<'c, 'a> Cx<'c, 'a> {
                 // flag set; then the new one is installed and the flag set (T3.2-T3.4).
                 // A part is assigned only while its slot is live (OWN-5), so the old
                 // part is live and cleaned alone.
-                // A `mut` parameter owns no row here but is always live.
-                if at.place.len == 0 && self.var(q).own.is_some() {
-                    self.drop_old(q, s);
-                } else if var.avail == Avail::Live {
-                    self.drop_at(address, at.ty, s);
+                // A `mut` parameter owns no row here but is always live. An old value
+                // whose cleanup runs code is finalized after the install (T3.2).
+                let saved = self.save_old(q, at.place.len == 0, address, at.ty, s);
+                if saved.is_none() {
+                    if at.place.len == 0 && self.var(q).own.is_some() {
+                        self.drop_old(q, s);
+                    } else if var.avail == Avail::Live {
+                        self.drop_at(address, at.ty, s);
+                    }
                 }
                 self.install(address, r, v, s);
                 if at.place.len == 0 {
                     self.installed(q, s);
+                }
+                if let Some(Some(saved)) = saved {
+                    self.finalize_old(saved, s);
                 }
             }
             t == NEVER
@@ -937,6 +944,11 @@ impl<'c, 'a> Cx<'c, 'a> {
         let (exit, ty) = (f.exit, f.ty.unwrap_or(t));
         // The carried value goes to the exit's join; the rest is cleaned (FAIL-8, 9).
         self.consume(v, n);
+        if let (Some(v), Ok(Rep::Place(id))) = (v, self.rep(ty))
+            && self.e.runs_code(id)
+        {
+            self.pending = Some((AddressBase::Value(v), id));
+        }
         self.unwind(self.frames[i].owners, self.frames[i].scopes, n);
         self.goto(exit, ty, v, n);
         self.exit_edge(i);

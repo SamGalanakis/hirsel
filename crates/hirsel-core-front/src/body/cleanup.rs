@@ -29,6 +29,28 @@ pub(super) struct Temp {
     /// Its drop flag, when arms of a match may or may not take it (OWN-18).
     pub flag: Option<AddressId>,
 }
+/// What the cleanup being emitted has already done on its edge, for the failure block
+/// of a drop that runs code (FAIL-9, FAIL-12): owners from `from` on are cleaned,
+/// except those the edge keeps (the value `keep`, and slots when `temps`); the scopes
+/// from `scopes` on are closed; `pending` is the edge's pending result.
+#[derive(Clone, Copy)]
+pub(super) struct Edge {
+    pub from: usize,
+    pub keep: Option<ValueId>,
+    pub temps: bool,
+    pub scopes: usize,
+    pub pending: Option<(AddressBase, TypeId)>,
+}
+
+/// An old value moved aside to be finalized after an install (T3.2), and the value of
+/// its drop flag when it was maybe live.
+#[derive(Clone, Copy)]
+pub(super) struct Saved {
+    address: AddressId,
+    id: TypeId,
+    flag: Option<ValueId>,
+}
+
 /// How a slot that owns a value is cleaned: its place, its row and its drop flag.
 #[derive(Clone, Copy)]
 pub(super) struct Own {
@@ -147,6 +169,86 @@ impl<'c, 'a> Cx<'c, 'a> {
     /// it is live, or maybe with its flag set (T3.2, T3.3).
     pub(super) fn drop_old(&mut self, s: u32, n: NodeId) {
         self.clean(Owner::Slot(s), n);
+    }
+
+    /// T3.2: before an install into a place whose old value runs code when cleaned,
+    /// move the old value aside, so it is finalized after the install and a failing
+    /// finalizer leaves the place holding the new value. None when the old value is
+    /// cleaned before the install as usual; `Some(None)` when there is none.
+    pub(super) fn save_old(
+        &mut self,
+        q: u32,
+        whole: bool,
+        address: AddressId,
+        ty: TyId,
+        n: NodeId,
+    ) -> Option<Option<Saved>> {
+        let id = self.drop_id(ty)?;
+        if !self.live() || !self.e.runs_code(id) {
+            return None;
+        }
+        let v = self.var(q);
+        let flag = match (whole, v.own) {
+            (true, Some(own)) => match v.avail {
+                Avail::Live => None,
+                Avail::Maybe => {
+                    let on = self.value(Ty::Scalar(Scalar::Bool));
+                    self.inst(
+                        Inst::Read {
+                            result: on,
+                            address: own.flag,
+                            mode: ReadMode::Bits,
+                        },
+                        n,
+                    );
+                    Some(on)
+                }
+                _ => return Some(None),
+            },
+            _ if v.avail == Avail::Live => None,
+            _ => return Some(None),
+        };
+        let to = self.new_slot(PlaceTy::Declared(id), n);
+        let bytes = self.konst(Ty::Scalar(Scalar::U64), self.e.size(id), n)?;
+        self.inst(
+            Inst::Copy {
+                to,
+                from: address,
+                bytes,
+            },
+            n,
+        );
+        Some(Some(Saved {
+            address: to,
+            id,
+            flag,
+        }))
+    }
+    /// Clean the old value [`Self::save_old`] moved aside.
+    pub(super) fn finalize_old(&mut self, saved: Saved, n: NodeId) {
+        if !self.live() {
+            return;
+        }
+        let base = AddressBase::Address(saved.address);
+        let Some(on) = saved.flag else {
+            self.emit_drop(base, saved.id, n);
+            return;
+        };
+        let yes = self.new_block(&[]);
+        let next = self.new_block(&[]);
+        let (ye, ne) = (self.edge(yes, &[]), self.edge(next, &[]));
+        self.end(
+            Terminator::Branch {
+                condition: on,
+                yes: ye,
+                no: ne,
+            },
+            Some(n),
+        );
+        self.start(yes);
+        self.emit_drop(base, saved.id, n);
+        self.jump(next, &[], n);
+        self.start(next);
     }
 
     fn new_flag(&mut self, on: bool, n: NodeId) -> Option<AddressId> {
@@ -275,7 +377,6 @@ impl<'c, 'a> Cx<'c, 'a> {
             PlaceTy::Declared(elem),
             n,
         );
-        self.emit_drop(AddressBase::Address(address), elem, n);
         let one = self.konst(Ty::Scalar(Scalar::U64), 1, n).unwrap();
         let after = self.value(Ty::Scalar(Scalar::U64));
         self.inst(
@@ -295,6 +396,8 @@ impl<'c, 'a> Cx<'c, 'a> {
             },
             n,
         );
+        // Advanced first: a failed element's drop resumes after it (FAIL-12).
+        self.emit_drop(AddressBase::Address(address), elem, n);
         self.jump(head, &[], n);
         self.start(out);
     }
@@ -303,14 +406,86 @@ impl<'c, 'a> Cx<'c, 'a> {
             AddressBase::Address(a) => a,
             base => self.address(base, &[], PlaceTy::Declared(id), n),
         };
+        if !self.e.runs_code(id) {
+            self.inst(
+                Inst::Drop {
+                    address,
+                    ty: id,
+                    fail: None,
+                },
+                n,
+            );
+            return;
+        }
+        // FAIL-12: a failed drop has cleaned its value's fields. During failure
+        // cleanup its cause is appended and cleanup goes on (FAIL-10); on a normal
+        // edge it starts propagation, which cleans the rest (FAIL-9).
+        let fail = if self.failing {
+            self.new_block(&[])
+        } else {
+            self.drop_failure(n)
+        };
         self.inst(
             Inst::Drop {
                 address,
                 ty: id,
-                fail: None,
+                fail: Some(fail),
             },
             n,
         );
+        if self.failing {
+            self.jump(fail, &[], n);
+            self.start(fail);
+        }
+    }
+    /// The failure block of a drop on a normal edge: the edge's pending result, then
+    /// every owner and scope the edge has not cleaned, innermost first, then propagate.
+    fn drop_failure(&mut self, n: NodeId) -> BlockId {
+        let edge = self.edge.unwrap_or(Edge {
+            from: self.owners.len(),
+            keep: None,
+            temps: false,
+            scopes: self.patterns_len(),
+            pending: None,
+        });
+        let cur = self.cur.take();
+        let open = std::mem::take(&mut self.open);
+        let anchors = std::mem::take(&mut self.open_anchors);
+        let saved = std::mem::replace(&mut self.failing, true);
+        let blk = self.new_block(&[]);
+        self.start(blk);
+        if let Some((base, id)) = edge.pending {
+            self.emit_drop(base, id, n);
+        }
+        let done = |cx: &Self, i: usize| match cx.owners[i] {
+            // A drain resumes where it stopped, and ends at once when it finished.
+            Owner::Drain { .. } => false,
+            Owner::Temp(t) if Some(t.value) == edge.keep => edge.pending.is_some(),
+            Owner::Slot(_) if edge.temps => false,
+            _ => i >= edge.from,
+        };
+        let mut top = self.owners.len();
+        for s in (0..edge.scopes).rev() {
+            let at = self.scope_owners(s).min(top);
+            for i in (at..top).rev() {
+                if !done(self, i) {
+                    self.clean(self.owners[i], n);
+                }
+            }
+            top = at;
+            self.pattern_scope_exits_one(s, n);
+        }
+        for i in (0..top).rev() {
+            if !done(self, i) {
+                self.clean(self.owners[i], n);
+            }
+        }
+        self.end(Terminator::Propagate, Some(n));
+        self.failing = saved;
+        self.cur = cur;
+        self.open = open;
+        self.open_anchors = anchors;
+        blk
     }
     /// Drop the live value of type `ty` at `address`, when it needs cleanup.
     pub(super) fn drop_at(&mut self, address: AddressId, ty: TyId, n: NodeId) {
@@ -342,14 +517,32 @@ impl<'c, 'a> Cx<'c, 'a> {
             return;
         }
         let mut kept = std::mem::take(&mut self.owner_buf);
+        let saved = self.edge;
+        let pending = keep.and_then(|v| {
+            let i = self.temp_index(Some(v))?;
+            let Owner::Temp(t) = self.owners[i] else {
+                return None;
+            };
+            (i >= mark && self.e.runs_code(t.id)).then_some((AddressBase::Value(v), t.id))
+        });
         for i in (mark..self.owners.len()).rev() {
             let o = self.owners[i];
             match o {
                 Owner::Temp(t) if Some(t.value) == keep && t.avail == Avail::Live => kept.push(o),
                 Owner::Slot(_) if temps => kept.push(o),
-                _ => self.clean(o, n),
+                _ => {
+                    self.edge = Some(Edge {
+                        from: i,
+                        keep,
+                        temps,
+                        scopes: self.patterns_len(),
+                        pending,
+                    });
+                    self.clean(o, n);
+                }
             }
         }
+        self.edge = saved;
         self.owners.truncate(mark);
         self.owners.extend(kept.drain(..).rev());
         self.owner_buf = kept;
@@ -362,18 +555,35 @@ impl<'c, 'a> Cx<'c, 'a> {
         if !self.live() {
             return;
         }
+        let saved = self.edge;
+        let pending = self.pending.take();
         let mut top = self.owners.len();
         for s in (scopes..self.patterns_len()).rev() {
             let at = self.scope_owners(s).max(owners).min(top);
             for i in (at..top).rev() {
+                self.edge = Some(Edge {
+                    from: i,
+                    keep: None,
+                    temps: false,
+                    scopes: s + 1,
+                    pending,
+                });
                 self.clean(self.owners[i], n);
             }
             top = at;
             self.pattern_scope_exits_one(s, n);
         }
         for i in (owners..top).rev() {
+            self.edge = Some(Edge {
+                from: i,
+                keep: None,
+                temps: false,
+                scopes,
+                pending,
+            });
             self.clean(self.owners[i], n);
         }
+        self.edge = saved;
     }
     /// The failure successor of an instruction emitted here: a block that cleans every
     /// owner and scope of the body, then propagates; none when there is nothing to
@@ -401,7 +611,9 @@ impl<'c, 'a> Cx<'c, 'a> {
         let anchors = std::mem::take(&mut self.open_anchors);
         let blk = self.new_block(&[]);
         self.start(blk);
+        let saved = std::mem::replace(&mut self.failing, true);
         self.unwind(0, 0, n);
+        self.failing = saved;
         self.end(Terminator::Propagate, Some(n));
         self.cur = cur;
         self.open = open;
@@ -431,10 +643,19 @@ impl<'c, 'a> Cx<'c, 'a> {
     }
     /// Clean the live temporaries begun since `mark`, changing no state.
     pub(super) fn clean_temps(&mut self, mark: usize, n: NodeId) {
+        let saved = self.edge;
         for i in (mark..self.owners.len()).rev() {
             if let o @ Owner::Temp(_) = self.owners[i] {
+                self.edge = Some(Edge {
+                    from: i,
+                    keep: None,
+                    temps: true,
+                    scopes: self.patterns_len(),
+                    pending: None,
+                });
                 self.clean(o, n);
             }
         }
+        self.edge = saved;
     }
 }

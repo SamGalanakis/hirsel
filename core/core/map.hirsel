@@ -3,10 +3,11 @@
 pub fn new[K: key, V]() -> Map[K, V]
 pub fn len[K: key, V](m: Map[K, V]) -> u64
 pub fn get[K: key, V](m: Map[K, V], k: K) -> Option[View[V]] in m {
-  let n = index_len(m)
-  if n == 0 { return None }
-  let mask = n - 1
+  if capacity(m) == 0 { return None }
   let h = hash(k)
+  // Hashing reads only the key. Load the private index metadata afterwards so
+  // the byte-hash call does not keep the index mask alive across that call.
+  let mask = int.wrapping_sub(index_len(m), 1)
   let mut j = h & mask
   loop {
     let s = index_get(m, j)

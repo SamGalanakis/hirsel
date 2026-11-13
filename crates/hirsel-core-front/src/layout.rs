@@ -101,6 +101,30 @@ impl<T: TyRead> Shapes<'_, T> {
                         let entries = self.map_field(&args)?;
                         return self.fill(r, LRepr::Own, record(vec![("entries", entries)]), None);
                     }
+                    // Compact text or a span held as a value: a stable reference to
+                    // compact data in its region (core.md), plain.
+                    Some(
+                        Role::Text
+                        | Role::FixedSpan
+                        | Role::SeqSpan
+                        | Role::IndexedSpan
+                        | Role::SeqIndex,
+                    ) => {
+                        let body = record(vec![("at", FieldTy::Locator)]);
+                        return self.fill(r, LRepr::Own, body, None);
+                    }
+                    // A box or counted reference held as a value: its one pointer field,
+                    // cleaned by the recipe (freed, or released, MEM-15/16).
+                    Some(role @ (Role::Box | Role::Rc | Role::Arc)) => {
+                        let to = self.shape(args[0])?;
+                        let field = match role {
+                            Role::Box => FieldTy::Box(to),
+                            Role::Rc => FieldTy::Rc(to),
+                            _ => FieldTy::Arc(to),
+                        };
+                        let body = record(vec![("node", field)]);
+                        return self.fill(r, LRepr::Own, body, None);
+                    }
                     // A provider handle's carrier: its one handle field, cleaned by the
                     // runtime (closing a channel side, abandoning a task, MEM-24).
                     Some(

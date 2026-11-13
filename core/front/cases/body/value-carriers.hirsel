@@ -1,0 +1,17 @@
+// A1 values: an `Arc[T]` and a span are values with a layout (core.md: a counted
+// reference, a stable reference), so a function taking, matching or returning them
+// emits. versions `share` and request-scratch `header_value` gapped "values of this
+// type are not built" here.
+// expect: accept
+type Node: shareable + send {
+    id: u64,
+    left: Option[Arc[Node]]
+}
+fn present(root: Option[Arc[Node]]) -> u64 {
+    match root {
+        Some(_) => 1,
+        None => 0
+    }
+}
+type Header { lo: u64, hi: u64 }
+fn first(s: String, hs: FixedSpan[Header]) -> u64 { 0 }

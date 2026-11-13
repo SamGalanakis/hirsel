@@ -633,7 +633,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         } else {
             None
         };
-        self.push_frame(label, FrameKind::While, Some(UNIT));
+        self.push_frame(label, FrameKind::While, expect(UNIT));
         let fi = self.frames.len() - 1;
         let mut flow = None;
         if let (true, Some(_), Some(limit), Some(index_ir), Some(index_slot)) =
@@ -805,6 +805,18 @@ impl<'c, 'a> Cx<'c, 'a> {
             Rep::None => None,
             Rep::Scalar(t) => {
                 let result = self.value(t);
+                self.inst(
+                    Inst::Read {
+                        result,
+                        address,
+                        mode: ReadMode::Bits,
+                    },
+                    n,
+                );
+                Some(result)
+            }
+            Rep::View(_) => {
+                let result = self.value(Ty::Ptr);
                 self.inst(
                     Inst::Read {
                         result,

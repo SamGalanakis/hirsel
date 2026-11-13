@@ -670,3 +670,62 @@ fn m1_program_manifest() {
     );
     assert!(mechanical_ok, "M1 parse/resolve refusals are listed above");
 }
+
+#[test]
+fn sibling_main_wrapper_executes_the_sibling_body() {
+    let app = package("files");
+    let manifest = PackageManifest {
+        package: app,
+        dependencies: vec![],
+        sources: ["main", "matched"]
+            .into_iter()
+            .map(|name| ModuleSource {
+                file: name.into(),
+                modules: vec![name.into()],
+                signatures: false,
+            })
+            .collect(),
+    };
+    let mut symbols = Symbols::default();
+    manifest.intern(&mut symbols);
+    let syntax = [
+        "pub fn main() -> u64 { 42 }",
+        "pub fn main() -> u64 { main.main() }",
+    ]
+    .into_iter()
+    .map(|source| {
+        let p = parse(source, ParseMode::Source, &mut symbols);
+        assert!(p.diagnostics.is_empty());
+        p.syntax
+    })
+    .collect::<Vec<_>>();
+    let mut index = NameIndex::new(std::sync::Arc::new(symbols));
+    let ids = index.add_manifests(&[manifest]);
+    let modules = ids
+        .into_iter()
+        .zip(syntax)
+        .map(|(id, syntax)| ModuleInput { id, syntax })
+        .collect::<Vec<_>>();
+    for m in &modules {
+        for (i, item) in m.syntax.items().enumerate() {
+            index.index_item(m.id, i as u32, item);
+        }
+    }
+    let p = Program::declare(&index, &modules);
+    assert!(p.refusals.is_empty(), "{:?}", p.refusals);
+    assert!(p.gaps.is_empty(), "{:?}", p.gaps);
+    let mut emitter = Emitter::new();
+    let mut wrapper = None;
+    for (f, fd) in p.fns.iter().enumerate() {
+        let checked = p.check_lower(f, &mut emitter);
+        assert!(checked.refusals.is_empty(), "{:?}", checked.refusals);
+        assert!(checked.gaps.is_empty(), "{:?}", checked.gaps);
+        if fd.path.0.modules == ["matched"] {
+            wrapper = checked.function;
+        }
+    }
+    assert_eq!(
+        eval::run(&emitter.module, wrapper.unwrap(), &[], 1_000).outcome,
+        eval::Outcome::Returned(vec![42])
+    );
+}

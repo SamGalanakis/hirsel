@@ -312,11 +312,17 @@ fn prelude_functions_precede_modules_in_value_lookup() {
         &[
             ("core", "core", "pub fn helper() -> u64 { 1 }"),
             ("app", "helper", "pub fn other() {}"),
-            ("app", "m", "fn f() { helper }"),
+            ("app", "m", "fn f() { helper; helper.other() }"),
         ],
         Symbols::default(),
     );
     let r = run(&i, &f, 2, 0);
+    assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    assert!(
+        r.names
+            .iter()
+            .any(|u| u.target == Target::Definition(def(&i, f[1].0, "other")))
+    );
     assert!(
         r.names
             .iter()
@@ -787,3 +793,183 @@ fn repeated_path_results_keep_dependency_reads_and_binding_versions() {
 
 #[path = "spec_tests.rs"]
 mod spec_tests;
+
+#[test]
+fn a_function_is_not_a_namespace_for_a_dotted_path() {
+    let (index, files) = fixture(&[(
+        "m",
+        "fn f() -> u64 { 0 }\nfn g() { f.x; f.x(); f.x.y(); f() }",
+    )]);
+    let result = run(&index, &files, 0, 1);
+    assert_eq!(
+        result
+            .diagnostics
+            .iter()
+            .map(|d| d.rule.as_str())
+            .collect::<Vec<_>>(),
+        ["LANG-7", "LANG-7", "LANG-7"]
+    );
+    assert_eq!(
+        result
+            .names
+            .iter()
+            .filter(|u| u.target == Target::Missing)
+            .count(),
+        3
+    );
+    assert_eq!(
+        result
+            .names
+            .iter()
+            .filter(|u| u.target == Target::Definition(def(&index, files[0].0, "f")))
+            .count(),
+        1
+    );
+    let item = files[0].1.item(1);
+    for d in &result.diagnostics {
+        let span = d.primary.span;
+        assert_eq!(
+            &item.text
+                [(item.file_offset + span.start) as usize..(item.file_offset + span.end) as usize],
+            "f"
+        );
+    }
+    assert!(result.reads.iter().any(|r| r.symbol == sym(&index, "f")
+        && matches!(r.result, LookupResult::Found(Target::Definition(_)))));
+}
+
+#[test]
+fn a_sibling_module_call_cannot_silently_bind_to_the_enclosing_function() {
+    let (index, files) = fixture(&[
+        ("main", "pub fn main() -> u64 { 42 }"),
+        ("matched", "pub fn main() -> u64 { main.main() }"),
+    ]);
+    let result = run(&index, &files, 1, 0);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert!(result.names.iter().any(|u| u.target
+        == Target::Definition(def(&index, files[0].0, "main"))
+        && u.projections.is_empty()));
+    assert!(
+        !result
+            .names
+            .iter()
+            .any(|u| u.target == Target::Definition(def(&index, files[1].0, "main")))
+    );
+}
+
+#[test]
+fn constants_are_field_heads_only_after_modules_and_packages() {
+    let (index, files) = fixture(&[
+        ("choice", "pub fn member() -> u64 { 1 }"),
+        (
+            "m",
+            "type R { x: u64 }\nconst choice: u64 = 1\nconst C: R = R(x: 1)\nfn f() { choice.member(); C.x }",
+        ),
+    ]);
+    let result = run(&index, &files, 1, 3);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert!(result.names.iter().any(|u| u.target
+        == Target::Definition(def(&index, files[0].0, "member"))
+        && u.projections.is_empty()));
+    let field = result
+        .names
+        .iter()
+        .find(|u| u.target == Target::Definition(def(&index, files[1].0, "C")))
+        .unwrap();
+    assert!(!field.projections.is_empty());
+    assert_eq!(
+        files[1].1.tree.tokens[field.projections.start as usize].symbol,
+        sym(&index, "x")
+    );
+}
+
+#[test]
+fn a_dependency_package_is_a_head_before_a_same_named_function() {
+    let (index, files) = packages(
+        &[
+            ("lib", "sub", "pub fn value() -> u64 { 1 }"),
+            (
+                "app",
+                "m",
+                "fn lib() -> u64 { 0 }\nfn f() { lib.sub.value() }",
+            ),
+        ],
+        Symbols::default(),
+    );
+    let result = run(&index, &files, 1, 1);
+    assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
+    assert!(
+        result
+            .names
+            .iter()
+            .any(|u| u.target == Target::Definition(def(&index, files[0].0, "value")))
+    );
+}
+
+#[test]
+fn an_unknown_dotted_head_is_refused_at_the_head() {
+    let (index, files) = fixture(&[("m", "fn f() { unknown.member() }")]);
+    let result = run(&index, &files, 0, 0);
+    assert_eq!(result.diagnostics.len(), 1);
+    let d = &result.diagnostics[0];
+    assert_eq!(d.rule, "LANG-7");
+    let item = files[0].1.item(0);
+    let start = (item.file_offset + d.primary.span.start) as usize;
+    let end = (item.file_offset + d.primary.span.end) as usize;
+    assert_eq!(&item.text[start..end], "unknown");
+    assert!(
+        result
+            .reads
+            .iter()
+            .any(|r| r.symbol == sym(&index, "unknown")
+                && matches!(r.scope, LookupScope::Modules(_))
+                && r.result == LookupResult::Missing)
+    );
+}
+
+#[test]
+fn a_qualified_constant_keeps_its_field_suffix_and_a_function_does_not() {
+    let (index, files) = fixture(&[
+        (
+            "values",
+            "pub type R { x: u64 }\npub const C: R = R(x: 1)\npub fn callable() -> u64 { 0 }",
+        ),
+        ("m", "fn f() { values.C.x; values.callable.x() }"),
+    ]);
+    let result = run(&index, &files, 1, 0);
+    assert_eq!(result.diagnostics.len(), 1);
+    assert_eq!(result.diagnostics[0].rule, "LANG-7");
+    let item = files[1].1.item(0);
+    let span = result.diagnostics[0].primary.span;
+    assert_eq!(
+        &item.text
+            [(item.file_offset + span.start) as usize..(item.file_offset + span.end) as usize],
+        "callable"
+    );
+    let constant = def(&index, files[0].0, "C");
+    let use_ = result
+        .names
+        .iter()
+        .find(|u| u.target == Target::Definition(constant))
+        .unwrap();
+    assert_eq!(
+        item.tree.tokens[use_.projections.start as usize].symbol,
+        sym(&index, "x")
+    );
+    assert_eq!(
+        result
+            .names
+            .iter()
+            .filter(|u| u.target == Target::Missing)
+            .count(),
+        1
+    );
+    assert!(
+        result
+            .reads
+            .iter()
+            .any(|r| r.scope == LookupScope::Children(files[0].0)
+                && r.symbol == sym(&index, "C")
+                && r.result == LookupResult::Missing)
+    );
+}

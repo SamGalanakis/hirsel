@@ -452,6 +452,59 @@ impl<'a> Resolver<'a> {
         ));
         Target::Missing
     }
+    fn qualified_member(
+        &mut self,
+        n: NodeId,
+        module: ModuleId,
+        token: TokenId,
+        ns: Namespace,
+        construct: bool,
+    ) -> Option<Target> {
+        let name = self.name(token);
+        let mut candidates = self
+            .index
+            .members_named(self.module, module, name, ns, false);
+        let mut first = candidates.next();
+        let mut second = candidates.next();
+        if first.is_none() && construct {
+            let mut cs = self
+                .index
+                .members_named(self.module, module, name, Namespace::Type, true);
+            first = cs.next();
+            second = cs.next();
+        }
+        if second.is_some() {
+            self.record(
+                n,
+                ns,
+                LookupScope::Module(module),
+                name,
+                construct,
+                LookupResult::Ambiguous,
+            );
+            let mut d = Refusal::new("LANG-7", self.site(n), "ambiguous module extension member");
+            d.causal.extend(
+                self.index
+                    .members_named(self.module, module, name, ns, construct)
+                    .map(|id| self.index.get(id).site),
+            );
+            self.out.diagnostics.push(d);
+            Some(Target::Missing)
+        } else {
+            self.selected(n, LookupScope::Module(module), name, ns, construct, first)
+        }
+    }
+    fn function_head(&mut self, n: NodeId, token: TokenId, id: DefinitionId) -> Target {
+        let mut diagnostic = Refusal::new(
+            "LANG-7",
+            self.site(n),
+            "a function cannot be the head of a dotted path",
+        );
+        diagnostic.primary.span = self.item.token_span(token);
+        diagnostic.causal.push(self.index.get(id).site);
+        self.out.diagnostics.push(diagnostic);
+        Target::Missing
+    }
     fn use_path(&mut self, n: NodeId, type_context: bool, construct: bool) {
         let node = self.item.tree.node(n);
         let simple = node.origin.tokens.end == node.origin.tokens.start + 1;
@@ -475,10 +528,10 @@ impl<'a> Resolver<'a> {
         }
         let diagnostics_before = self.out.diagnostics.len();
         let mut parts = path_tokens(self.item, n);
-        let Some(first) = parts.next() else {
+        let Some(head_token) = parts.next() else {
             return;
         };
-        let name = self.name(first);
+        let name = self.name(head_token);
         let rest = parts.clone();
         let last = parts.clone().last();
         let ns = if type_context {
@@ -512,85 +565,63 @@ impl<'a> Resolver<'a> {
                 Target::Binder(b)
             } else if let Some(last) = last {
                 let first = self
-                    .module_lookup(n, self.module, name, Namespace::Value, false)
-                    .or_else(|| self.prelude_lookup(n, name, Namespace::Value, false))
-                    .or_else(|| self.head_lookup(n, name));
+                    .head_lookup(n, name)
+                    .or_else(|| self.module_lookup(n, self.module, name, Namespace::Value, false));
                 match first {
                     Some(Target::Module(mut module)) => {
-                        let mut valid = true;
-                        for t in rest.take_while(|&t| t != last) {
-                            let s = self.name(t);
-                            let child = self.index.child(module, s);
+                        let mut tail = rest.clone();
+                        let mut selected_value = None;
+                        while let Some(t) = tail.next() {
+                            if t == last {
+                                break;
+                            }
+                            let symbol = self.name(t);
+                            let child = self.index.child(module, symbol);
                             self.record(
                                 n,
                                 Namespace::Value,
                                 LookupScope::Children(module),
-                                s,
+                                symbol,
                                 false,
                                 child.map_or(LookupResult::Missing, |m| {
                                     LookupResult::Found(Target::Module(m))
                                 }),
                             );
-                            if let Some(m) = child {
-                                module = m;
+                            if let Some(child) = child {
+                                module = child;
                             } else {
-                                valid = false;
+                                let value = self
+                                    .qualified_member(n, module, t, Namespace::Value, false)
+                                    .unwrap_or_else(|| self.missing(n));
+                                selected_value = Some(match value {
+                                    Target::Definition(id)
+                                        if self.index.get(id).kind == DefinitionKind::Function =>
+                                    {
+                                        self.function_head(n, t, id)
+                                    }
+                                    Target::Definition(id)
+                                        if self.index.get(id).kind == DefinitionKind::Constant =>
+                                    {
+                                        projections = Span {
+                                            start: tail.next().unwrap().0,
+                                            end: self.item.tree.node(n).origin.tokens.end,
+                                        };
+                                        Target::Definition(id)
+                                    }
+                                    _ => value,
+                                });
                                 break;
                             }
                         }
-                        if !valid {
-                            self.missing(n)
-                        } else {
-                            let name = self.name(last);
-                            let mut candidates =
-                                self.index
-                                    .members_named(self.module, module, name, ns, false);
-                            let mut first = candidates.next();
-                            let mut second = candidates.next();
-                            if first.is_none() && construct {
-                                let mut cs = self.index.members_named(
-                                    self.module,
-                                    module,
-                                    name,
-                                    Namespace::Type,
-                                    true,
-                                );
-                                first = cs.next();
-                                second = cs.next();
-                            }
-                            if second.is_some() {
-                                self.record(
-                                    n,
-                                    ns,
-                                    LookupScope::Module(module),
-                                    name,
-                                    construct,
-                                    LookupResult::Ambiguous,
-                                );
-                                let mut d = Refusal::new(
-                                    "LANG-7",
-                                    self.site(n),
-                                    "ambiguous module extension member",
-                                );
-                                d.causal.extend(
-                                    self.index
-                                        .members_named(self.module, module, name, ns, construct)
-                                        .map(|id| self.index.get(id).site),
-                                );
-                                self.out.diagnostics.push(d);
-                                Target::Missing
-                            } else {
-                                self.selected(
-                                    n,
-                                    LookupScope::Module(module),
-                                    name,
-                                    ns,
-                                    construct,
-                                    first,
-                                )
+                        selected_value.unwrap_or_else(|| {
+                            self.qualified_member(n, module, last, ns, construct)
                                 .unwrap_or_else(|| self.missing(n))
-                            }
-                        }
+                        })
+                    }
+                    Some(Target::Definition(id))
+                        if self.index.get(id).kind == DefinitionKind::Function =>
+                    {
+                        self.function_head(n, head_token, id)
                     }
                     Some(t) => {
                         projections = Span {
@@ -599,7 +630,19 @@ impl<'a> Resolver<'a> {
                         };
                         t
                     }
-                    None => self.missing(n),
+                    None => {
+                        let mut diagnostic = Refusal::new(
+                            "LANG-7",
+                            self.site(n),
+                            format!(
+                                "`{}` is not a local, module, package or constant",
+                                self.index.symbols.text(name)
+                            ),
+                        );
+                        diagnostic.primary.span = self.item.token_span(head_token);
+                        self.out.diagnostics.push(diagnostic);
+                        Target::Missing
+                    }
                 }
             } else if let Some(t) = self
                 .module_lookup(n, self.module, name, ns, false)

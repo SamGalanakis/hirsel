@@ -394,12 +394,14 @@ impl<'de, T: serde::de::DeserializeOwned + Send + Sync + 'static> Deserialize<'d
 #[derive(Clone)]
 pub struct Map<K: Ord + std::hash::Hash, V> {
     prefix: Option<Arc<Published<(K, V)>>>,
+    cached: Option<Arc<Mutex<rustc_hash::FxHashMap<K, u32>>>>,
     own: rustc_hash::FxHashMap<K, V>,
 }
 impl<K: Ord + std::hash::Hash, V> Default for Map<K, V> {
     fn default() -> Self {
         Self {
             prefix: None,
+            cached: None,
             own: rustc_hash::FxHashMap::default(),
         }
     }
@@ -440,24 +442,43 @@ impl<K: Ord + std::hash::Hash, V> Map<K, V> {
     pub fn published(prefix: Arc<Published<(K, V)>>) -> Self {
         Self {
             prefix: Some(prefix),
+            cached: Some(Arc::new(Mutex::default())),
             own: rustc_hash::FxHashMap::default(),
         }
     }
+    #[inline]
     pub fn get<Q: Ord + std::hash::Hash + Serialize + ?Sized>(&self, key: &Q) -> Option<&V>
     where
-        K: Borrow<Q>,
+        K: Borrow<Q> + Clone,
     {
         if let Some(value) = self.own.get(key) {
             return Some(value);
         }
-        let prefix = self.prefix.as_ref()?;
+        self.prefix.as_ref()?;
+        self.get_published(key)
+    }
+    #[inline(never)]
+    fn get_published<Q: Ord + std::hash::Hash + Serialize + ?Sized>(&self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q> + Clone,
+    {
+        let prefix = self.prefix.as_ref().unwrap();
+        let cached = self.cached.as_ref().unwrap();
+        let hit = cached.lock().unwrap().get(key).copied();
+        if let Some(i) = hit {
+            return Some(&prefix.row(i as usize).1);
+        }
         let bytes = bincode::serialize(key).expect("published lookup key encoding");
         let i = prefix.find(&bytes)?;
-        Some(&prefix.row(i as usize).1)
+        let row = prefix.row(i as usize);
+        if row.0.borrow() == key {
+            cached.lock().unwrap().insert(row.0.clone(), i);
+        }
+        Some(&row.1)
     }
     pub fn contains_key<Q: Ord + std::hash::Hash + Serialize + ?Sized>(&self, key: &Q) -> bool
     where
-        K: Borrow<Q>,
+        K: Borrow<Q> + Clone,
     {
         self.get(key).is_some()
     }
@@ -504,7 +525,7 @@ impl<K: Ord + std::hash::Hash, V> Map<K, V> {
         self.len() == 0
     }
 }
-impl<K: Ord + std::hash::Hash + Serialize, V> Index<&K> for Map<K, V> {
+impl<K: Ord + std::hash::Hash + Clone + Serialize, V> Index<&K> for Map<K, V> {
     type Output = V;
     fn index(&self, key: &K) -> &V {
         self.get(key).expect("published key outside index")
@@ -514,6 +535,7 @@ impl<K: Ord + std::hash::Hash, V> FromIterator<(K, V)> for Map<K, V> {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(i: I) -> Self {
         Self {
             prefix: None,
+            cached: None,
             own: i.into_iter().collect(),
         }
     }
@@ -532,11 +554,14 @@ impl<
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let (prefix, own): (Option<Descriptor>, rustc_hash::FxHashMap<K, V>) =
             Deserialize::deserialize(d)?;
+        let prefix = prefix
+            .map(binding)
+            .transpose()
+            .map_err(serde::de::Error::custom)?;
+        let cached = prefix.as_ref().map(|_| Arc::new(Mutex::default()));
         Ok(Self {
-            prefix: prefix
-                .map(binding)
-                .transpose()
-                .map_err(serde::de::Error::custom)?,
+            prefix,
+            cached,
             own,
         })
     }
@@ -599,6 +624,69 @@ mod tests {
                 .unwrap(),
             "last"
         );
+    }
+    #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+    struct CountedKey(u32);
+    static KEY_ENCODINGS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    impl Serialize for CountedKey {
+        fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+            KEY_ENCODINGS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.0.serialize(s)
+        }
+    }
+    struct KeyRows;
+    impl Provider<(CountedKey, u32)> for KeyRows {
+        fn row(&self, index: u32) -> io::Result<(CountedKey, u32)> {
+            assert_eq!(index, 0);
+            Ok((CountedKey(7), 42))
+        }
+        fn find(&self, key: &[u8]) -> io::Result<Option<u32>> {
+            Ok((key == [7, 0, 0, 0]).then_some(0))
+        }
+    }
+    struct AliasRows;
+    impl Provider<(CountedKey, u32)> for AliasRows {
+        fn row(&self, _: u32) -> io::Result<(CountedKey, u32)> {
+            Ok((CountedKey(9), 42))
+        }
+        fn find(&self, key: &[u8]) -> io::Result<Option<u32>> {
+            Ok((key == [7, 0, 0, 0]).then_some(0))
+        }
+    }
+    #[test]
+    fn published_hot_keys_skip_encoding_and_owned_overrides_win() {
+        let descriptor = Descriptor {
+            namespace: ContentHash::of_bytes(b"counted-key"),
+            table: 0,
+            len: 1,
+            rows: ContentHash::default(),
+            lookup: ContentHash::default(),
+        };
+        let map = Map::published(bind(descriptor, Arc::new(KeyRows)));
+        assert_eq!(map.get(&CountedKey(7)), Some(&42));
+        let cold = KEY_ENCODINGS.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(cold > 0);
+        assert_eq!(map.get(&CountedKey(7)), Some(&42));
+        let mut other = map.clone();
+        assert_eq!(other.get(&CountedKey(7)), Some(&42));
+        other.insert(CountedKey(7), 99);
+        assert_eq!(other.get(&CountedKey(7)), Some(&99));
+        assert_eq!(map.get(&CountedKey(7)), Some(&42));
+        assert_eq!(
+            KEY_ENCODINGS.load(std::sync::atomic::Ordering::Relaxed),
+            cold
+        );
+        assert_eq!(map.get(&CountedKey(8)), None);
+        assert_eq!(map.get(&CountedKey(8)), None);
+        let alias = Map::published(bind(
+            Descriptor {
+                namespace: ContentHash::of_bytes(b"aliased-key"),
+                ..descriptor
+            },
+            Arc::new(AliasRows),
+        ));
+        assert_eq!(alias.get(&CountedKey(7)), Some(&42));
+        assert_eq!(alias.get(&CountedKey(9)), None);
     }
     struct Missing;
     impl Provider<u64> for Missing {

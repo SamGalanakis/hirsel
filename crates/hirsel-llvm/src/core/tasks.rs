@@ -99,6 +99,9 @@ impl FunctionEmitter<'_> {
                 &[p("%context"), u(&args[0]), u(&args[1])],
             ),
             RtOp::Host(op) => self.host_call(op, &args),
+            RtOp::HashBytes => {
+                self.native_call("hirsel_core_hash_bytes", &[U], &[p(&args[0]), u(&args[1])])
+            }
             RtOp::CompareBytes => {
                 vec![self.compare_bytes(&[p(&args[0]), u(&args[1]), p(&args[2]), u(&args[3])])]
             }

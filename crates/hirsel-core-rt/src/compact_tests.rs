@@ -264,3 +264,19 @@ fn byte_order_is_unsigned_with_a_proper_prefix_first() {
         0
     );
 }
+
+/// The producer hashes static map literals at compile time (FORM "Maps"); a run-time
+/// hash that differs makes every such key unfindable. Values derived by hand from the
+/// rule, as in hirsel-core-ir's strings.core f2.
+#[test]
+fn byte_hash_matches_the_fixed_rule() {
+    let hash = |b: &[u8]| {
+        // SAFETY: a live slice.
+        unsafe { hirsel_core_hash_bytes(b.as_ptr(), b.len() as u64) }
+    };
+    // SAFETY: length 0 is never read.
+    assert_eq!(unsafe { hirsel_core_hash_bytes(std::ptr::null(), 0) }, 0);
+    assert_eq!(hash(b"a"), 4535047995308936329);
+    assert_eq!(hash(b"hello"), 5704403177778809783);
+    assert_eq!(hash(b"abcdefghi"), 6716469241732165301);
+}

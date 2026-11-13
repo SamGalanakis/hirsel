@@ -184,6 +184,34 @@
 //!   directory and stream operations by the capability handle, the file
 //!   operations by the `HostFile`'s retained provider.
 //!
+//! # Maps (FORM v1b)
+//!
+//! `map.new` is the empty carrier `{0, 0, 0}` and `map.len` reads the live count.
+//! `get`, `insert`, `set` and `remove` are ordinary code in core's `map` module over
+//! private bodiless operations, each a sequence over the `map_entry` recipe: an
+//! entry's hash, state, key and value by slot; the lookup index (a power of two of
+//! u64 words after the entries, each a slot + 1 or 0, probed linearly); appending
+//! an entry; swapping a value; removing an entry (state 0, the key cleaned, the
+//! value moved out); and growth (admit, copy the live entries in order, free the
+//! old storage when its capacity is not 0). Cleanup is the recipe's: live entries in
+//! insertion order, each key before its value.
+//!
+//! A key's hash is glue built from `K`'s recipe: from `h = 0` it folds
+//! [`hash_mix`] `(h, w) = rotl((h ^ w) × 0x9E3779B97F4A7C15, 26)` over each scalar
+//! component zero-extended to `u64`, in field order (a variant's tag first), and
+//! over `rt.hash_bytes(data, len)` for each `String`, `Bytes` or `Text` component,
+//! then returns `h ^ (h >> 32)`. `rt.hash_bytes` ([`hash_bytes`]) starts at
+//! `h = len` and folds the little-endian 8-byte words, the last zero-padded. The
+//! function is fixed, not seeded: the producer hashes static map literals with
+//! [`hash_bytes`] and the run time must agree. Iteration is insertion order
+//! (SEM-5), so no hash is observable. Engines map `rt.hash_bytes` to `uint64_t
+//! hirsel_core_hash_bytes(const uint8_t *, uint64_t)`, with no context or status.
+//!
+//! # Identities
+//!
+//! `rt.dest_id` is the run's one counter of fresh `u64` identities: a
+//! destination's (MEM-4) and every `Unique` (`unique.new()` is `call rt.dest_id ()`).
+//!
 //! # Capabilities and the entry (FORM v1b)
 //!
 //! A capability value (`Dir`, `Net`, `Clock`, `Random`, `Stdout`, `Stderr`,

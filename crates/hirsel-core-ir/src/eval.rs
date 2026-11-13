@@ -13,6 +13,7 @@
 use crate::*;
 use hirsel_core_layout::{
     Body as Shaped, FieldTy, Handle, Layout, Recipe, Repr, TypeRef, charge, compute, field_size,
+    map_entry,
 };
 use std::collections::VecDeque;
 
@@ -69,6 +70,8 @@ struct OpenFile {
     at: usize,
     locked: bool,
 }
+/// The model host's largest block: an admitted allocation above it stops the run.
+const HOST_BYTES: u64 = 1 << 32;
 const FILE_BASE: u64 = 0x50_0000;
 const DIR_BASE: u64 = 0x60_0000;
 
@@ -441,6 +444,13 @@ impl Machine<'_> {
         );
     }
     fn block(&mut self, size: u64, limit: Option<usize>, charge: u64, res: Option<Res>) -> u64 {
+        // An admitted block the host cannot provide is a run stop, as for
+        // `hirsel_core_native_alloc`, never `Capacity`: a refusal is the limit's
+        // (give the run `limit N`).
+        assert!(
+            size <= HOST_BYTES,
+            "host out of memory: a block of {size} bytes was admitted (a run stop, not Capacity)"
+        );
         self.mem.push(Blk {
             bytes: vec![0; size as usize],
             live: true,
@@ -684,6 +694,27 @@ impl Machine<'_> {
                 }
                 failed
             }
+            // SEM-5, SEM-9: live entries in insertion order, each key before its
+            // value (`map_entry`); removed entries (state 0) were cleaned by
+            // `map.remove`. Storage exists exactly when the capacity is not 0.
+            FieldTy::Map(k, v) => {
+                let block = self.load(at, 8);
+                let slots = self.load(at + 8, 8);
+                let capacity = self.load(at + 16, 8);
+                let e = map_entry(&self.m.types, &self.recipes, k, v);
+                let mut failed = false;
+                for i in 0..slots {
+                    let entry = block + i * e.stride;
+                    if self.load(entry + 8, 8) == 1 {
+                        failed |= self.drop_field(t, entry + e.key, k);
+                        failed |= self.drop_field(t, entry + e.value, v);
+                    }
+                }
+                if capacity != 0 {
+                    self.free(block);
+                }
+                failed
+            }
             FieldTy::OwnFn => {
                 let environment = self.load(at + 8, 8);
                 if environment != 0 {
@@ -873,6 +904,13 @@ impl Machine<'_> {
                 };
                 let order = range(a[0], a[1]).cmp(&range(a[2], a[3]));
                 vec![order as i8 as u8 as u64]
+            }
+            RtOp::HashBytes => {
+                let bytes = match a[1] {
+                    0 => Vec::new(),
+                    n => self.get(a[0], n as usize).to_vec(),
+                };
+                vec![crate::hash_bytes(&bytes)]
             }
             RtOp::ChannelNew { item } => {
                 let item = TypeRef(item.0);

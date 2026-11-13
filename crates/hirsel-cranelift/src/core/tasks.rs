@@ -132,6 +132,10 @@ impl Function<'_, '_, '_> {
                 )?[0];
                 1
             }
+            RtOp::HashBytes => {
+                outputs[0] = self.c_call("hirsel_core_hash_bytes", &[P, U], &[U], &args)?[0];
+                1
+            }
             RtOp::CheckCancel => {
                 let status = self.c_call(
                     "hirsel_core_check_cancel",

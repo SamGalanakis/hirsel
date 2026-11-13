@@ -290,6 +290,32 @@ pub extern "C" fn hirsel_core_dest_id() -> u64 {
     crate::destination::next()
 }
 
+/// `rt.hash_bytes`: the fixed byte hash a `Map` key's text components fold
+/// (hirsel-core-ir crate docs, "Maps"): from `h = len`, fold
+/// `mix(h, w) = rotl((h ^ w) × 0x9E3779B97F4A7C15, 26)` over the little-endian
+/// 8-byte words, the last zero-padded, then `h ^ (h >> 32)`. The producer hashes
+/// static map literals with the same function, so it is fixed, never seeded. No
+/// context, admission or status; a range of length 0 is never read.
+///
+/// # Safety
+/// A non-empty range must be readable for its length.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_hash_bytes(data: *const u8, len: u64) -> u64 {
+    let bytes = match len {
+        0 => &[][..],
+        // SAFETY: the caller passes a readable range of len bytes.
+        n => unsafe { std::slice::from_raw_parts(data, n as usize) },
+    };
+    let mix = |h: u64, w: u64| ((h ^ w).wrapping_mul(0x9E37_79B9_7F4A_7C15)).rotate_left(26);
+    let mut h = len;
+    for chunk in bytes.chunks(8) {
+        let mut word = [0u8; 8];
+        word[..chunk.len()].copy_from_slice(chunk);
+        h = mix(h, u64::from_le_bytes(word));
+    }
+    h ^ (h >> 32)
+}
+
 /// `rt.compare_bytes`: the bytewise order of two byte ranges (SEM-7), -1, 0 or 1,
 /// a proper prefix first. No context, admission or failure status; a range of
 /// length 0 is never read, so its pointer may be null or static.

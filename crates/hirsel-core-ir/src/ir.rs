@@ -588,6 +588,8 @@ pub enum RtOp {
     DestId,
     /// Bytewise order of two byte ranges (SEM-7): `String`, `Text` and `Bytes`.
     CompareBytes,
+    /// The fixed byte hash a `Map` key's text components fold (crate docs, "Maps").
+    HashBytes,
     /// `args.len` (CAP-5): the run's argument count.
     ArgsLen,
     /// `args.get`: a run-owned `String` carrier of capacity 0, or null.
@@ -690,6 +692,7 @@ impl RtOp {
     /// | `receive[T]` | receiver `ptr`, `&T` | `bool`: received (false: `Closed`) |
     /// | `dest_id` | | `u64`: a destination identity no other call of the run returns (MEM-4) |
     /// | `compare_bytes` | `a: ptr`, `a_len: u64`, `b: ptr`, `b_len: u64` | `i8`: -1, 0 or 1 as `a` orders before, equal to or after `b` |
+    /// | `hash_bytes` | `data: ptr`, `len: u64` | `u64`: the fixed byte hash (crate docs, "Maps") |
     /// | `args_len` | `Args: u64` | `u64` |
     /// | `args_get` | `Args: u64`, `i: u64` | `ptr`: a `String` carrier, null past the end |
     /// | `host_open` | `Dir: u64`, path `ptr`, `mode: u8` | outcome |
@@ -739,6 +742,7 @@ impl RtOp {
                 vec![V(p), V(u64_), V(p), V(u64_)],
                 vec![Ty::Scalar(Scalar::I8)],
             ),
+            RtOp::HashBytes => (vec![V(p), V(u64_)], vec![u64_]),
             RtOp::ArgsLen => (vec![V(u64_)], vec![u64_]),
             RtOp::ArgsGet => (vec![V(u64_), V(u64_)], vec![p]),
             RtOp::Host(op) => {
@@ -785,6 +789,7 @@ impl RtOp {
             | RtOp::ChannelSender
             | RtOp::DestId
             | RtOp::CompareBytes
+            | RtOp::HashBytes
             | RtOp::ArgsLen
             | RtOp::ArgsGet
             | RtOp::Host(_) => vec![],
@@ -1018,4 +1023,22 @@ pub struct Module {
     pub signatures: Vec<Signature>,
     pub instances: Vec<InstanceKey>,
     pub functions: Vec<Function>,
+}
+
+/// One step of the `Map` key hash (crate docs, "Maps"): `rotl((h ^ w) × K, 26)`.
+pub fn hash_mix(h: u64, w: u64) -> u64 {
+    (h ^ w).wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(26)
+}
+
+/// `rt.hash_bytes` (crate docs, "Maps"): from `h = len`, [`hash_mix`] over the
+/// little-endian 8-byte words, the last zero-padded, then `h ^ (h >> 32)`. The
+/// producer uses it for static map literals; the run time's export is the same.
+pub fn hash_bytes(bytes: &[u8]) -> u64 {
+    let mut h = bytes.len() as u64;
+    for chunk in bytes.chunks(8) {
+        let mut word = [0u8; 8];
+        word[..chunk.len()].copy_from_slice(chunk);
+        h = hash_mix(h, u64::from_le_bytes(word));
+    }
+    h ^ (h >> 32)
 }

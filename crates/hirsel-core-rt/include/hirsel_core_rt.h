@@ -31,6 +31,8 @@ typedef struct { uint64_t requested, available; } HirselCoreCapacity;
 typedef struct { void *pointer; HirselCoreCapacity capacity; } HirselCoreAllocation;
 /* rt.dest_id: no hidden context or failure status; never admits or allocates. */
 uint64_t hirsel_core_dest_id(void);
+/* rt.hash_bytes: the fixed Map byte hash (FORM "Maps"); no context or status. */
+uint64_t hirsel_core_hash_bytes(const uint8_t *data, uint64_t len);
 /* rt.compare_bytes: bytewise order (SEM-7), -1, 0 or 1, a proper prefix first; no
    context or failure status; an empty range is never read. */
 int8_t hirsel_core_compare_bytes(const uint8_t *a, uint64_t a_len, const uint8_t *b,

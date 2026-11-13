@@ -228,6 +228,7 @@ fn rt(op: RtOp) -> String {
         RtOp::Receive { item } => format!("rt.receive[t{}]", item.0),
         RtOp::DestId => "rt.dest_id".into(),
         RtOp::CompareBytes => "rt.compare_bytes".into(),
+        RtOp::HashBytes => "rt.hash_bytes".into(),
         RtOp::ArgsLen => "rt.args_len".into(),
         RtOp::ArgsGet => "rt.args_get".into(),
         RtOp::Host(op) => format!("rt.{}", op.name()),
@@ -1427,6 +1428,7 @@ impl BodyParser {
                 "receive" => RtOp::Receive { item: tys(1)?[0] },
                 "dest_id" => RtOp::DestId,
                 "compare_bytes" => RtOp::CompareBytes,
+                "hash_bytes" => RtOp::HashBytes,
                 "args_len" => RtOp::ArgsLen,
                 "args_get" => RtOp::ArgsGet,
                 _ => match HostOp::ALL.into_iter().find(|op| op.name() == name) {

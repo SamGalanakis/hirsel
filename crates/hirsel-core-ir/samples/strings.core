@@ -27,6 +27,10 @@
 ; Bytes are unsigned and a proper prefix orders first (SEM-7); "" is a null pointer of
 ; length 0, never read:
 ; run: f1() -> -1, 1, 0, 1, 1 | used 0
+; f2: rt.hash_bytes (crate docs, "Maps") of "", "a", "hello" and "abcdefghi" (a full word
+; and a zero-padded one), computed by hand from the rule h = len, rotl((h ^ w) * K, 26) per
+; little-endian word, then h ^ (h >> 32). The run time's export must give the same numbers.
+; run: f2() -> 0, 4535047995308936329, 5704403177778809783, 6716469241732165301 | used 0
 core v1
 type t0 = own "String" { bytes: seq u8 }
 static d0 = align 1 hex 68656c6c6f
@@ -35,11 +39,16 @@ static d2 = align 1 hex 616263
 static d3 = align 1 hex 616264
 static d4 = align 1 hex 80
 static d5 = align 1 hex 7f
+static d6 = align 1 hex 61
+static d7 = align 1 hex 616263646566676869
 sig g0 = (bool) -> (u64, u64, i8, u64)
 sig g1 = (ptr, u64, ptr, u64) -> (i8)
 sig g2 = () -> (i8, i8, i8, i8, i8)
+sig g3 = (ptr, u64) -> (u64)
+sig g4 = () -> (u64, u64, u64, u64)
 inst n0 = samples@0/strings/push [] []
 inst n1 = samples@0/strings/order [] []
+inst n2 = samples@0/strings/hash [] []
 fn f0 = n0 g0 {
   slot s0 = t0                         ; s
   addr a0 = s0 field 0 byte v1 : ptr   ; the carrier's data pointer
@@ -115,4 +124,20 @@ b0:
   v13: i8 = call rt.compare_bytes g1 (v0, v1, v5, v6)
   v14: i8 = call rt.compare_bytes g1 (v7, v9, v8, v9)
   return v10, v11, v12, v13, v14
+}
+fn f2 = n2 g4 {
+b0:
+  v0: ptr = const 0x0
+  v1: u64 = const 0
+  v2: ptr = static d6
+  v3: u64 = const 1
+  v4: ptr = static d0
+  v5: u64 = const 5
+  v6: ptr = static d7
+  v7: u64 = const 9
+  v8: u64 = call rt.hash_bytes g3 (v0, v1)
+  v9: u64 = call rt.hash_bytes g3 (v2, v3)
+  v10: u64 = call rt.hash_bytes g3 (v4, v5)
+  v11: u64 = call rt.hash_bytes g3 (v6, v7)
+  return v8, v9, v10, v11
 }

@@ -576,3 +576,23 @@ fn string_shorten_operations_cranelift() { string_shorten_operations(Backend::Cr
 #[test]
 #[ignore = "explicit native integration target"]
 fn string_shorten_operations_llvm() { string_shorten_operations(Backend::Llvm); }
+
+// A declared finalizer grant reaches the native row: under a grant of 0 the finalizers'
+// allocations fail with Capacity and the program does not exit cleanly.
+fn resource_grant(backend: Backend) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let source = include_str!("../../../core/front/cases/body/resource-grant.hirsel");
+    let mut request = source_request(source, dir.path());
+    request.inputs.packages[1] = PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let built = product.build(&entry, &native_options(backend, dir.path())).unwrap();
+    run_clean(&built.executable, 0);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn resource_grant_cranelift() { resource_grant(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn resource_grant_llvm() { resource_grant(Backend::Llvm); }

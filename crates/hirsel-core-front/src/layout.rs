@@ -245,6 +245,7 @@ impl<T: TyRead> Shapes<'_, T> {
                     Some(_) => Some(FuncRef(d.0)),
                     None => None,
                 };
+                self.shapes[r.index()].grant = decl.grant;
                 (repr, body, finalizer)
             }
             _ => return None,

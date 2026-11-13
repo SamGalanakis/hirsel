@@ -285,6 +285,8 @@ pub struct TypeDecl {
     pub structural: bool,
     /// The function row of its `drop` block (FAIL-11), a body of this item.
     pub finalizer: Option<u32>,
+    /// `grant bytes n` (MEM-27): the limit its finalizer runs under; 0 if undeclared.
+    pub grant: u64,
     pub compact: Option<Width>,
     pub summary: Summary,
 }
@@ -418,6 +420,7 @@ impl Program<'_> {
                 let mut generics = vec![];
                 let mut declared = 0;
                 let mut drop = None;
+                let mut grant = 0;
                 let mut compact = None;
                 for &c in item.tree.children(item.root) {
                     let n = item.tree.node(c);
@@ -440,6 +443,16 @@ impl Program<'_> {
                             }
                         }
                         NodeKind::Drop => drop = Some(c),
+                        NodeKind::Literal => {
+                            grant = literal_length(item, c).unwrap_or_else(|| {
+                                self.refusals.push(refusal(
+                                    "LANG-3",
+                                    self.site(at, c),
+                                    "a grant is an integer literal fitting u64",
+                                ));
+                                0
+                            });
+                        }
                         NodeKind::Attribute => {
                             let t = n.token.unwrap();
                             if item.tree.token_text(item.text, t) == "compact" {
@@ -533,6 +546,7 @@ impl Program<'_> {
                     role,
                     structural,
                     finalizer,
+                    grant,
                     compact,
                     summary: Summary::default(),
                 });

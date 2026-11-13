@@ -169,6 +169,8 @@ operations! {
     ("deque", "slots_shift", Lane::Value, "A", "core-collections-918", true),
     ("deque", "slots_view", Lane::Value, "A", "core-collections-918", true),
     ("deque", "slots_free", Lane::Value, "A", "core-collections-918", true),
+    ("list", "Hole", Lane::PendingCode, "C", "core-collections-918", true),
+    ("list", "slots_finish_list", Lane::Value, "A", "core-collections-918", true),
     ("list", "sort_stable", Lane::PendingCode, "C", "core-collections-918", false),
     ("list", "sort_view", Lane::PendingCode, "C", "core-collections-918", true),
     ("list", "sort_move", Lane::PendingCode, "C", "core-collections-918", true),

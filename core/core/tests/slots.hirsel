@@ -71,3 +71,22 @@ fn slots_forget_ring_law() -> bool {
     slots_free(take s)
     empty
 }
+
+// Hand a restored prefix back to ordinary List mutation. The scratch is empty
+// before free; tail reuse/growth expose stale marks if the handoff is omitted.
+// expect: run slots_list_handoff_law() = 37
+fn slots_list_handoff_law() -> u64 {
+    let mut xs: List[u64] = result.unwrap(list.with_capacity(4))
+    for i in 1u64 .. 4 { result.unwrap(list.push(mut xs, i)) }
+    let mut scratch: Slots[u64] = result.unwrap(slots_new(1))
+    slots_from_list(view xs, 1, mut scratch, 0)
+    slots_to_list(mut scratch, 0, view xs, 1)
+    slots_finish_list(view xs)
+    slots_free(take scratch)
+    let a = option.unwrap(list.pop(mut xs))
+    result.unwrap(list.push(mut xs, 7))
+    result.unwrap(list.reserve(mut xs, 8))
+    let b = option.unwrap(list.pop(mut xs))
+    list.clear(mut xs)
+    a * 10 + b
+}

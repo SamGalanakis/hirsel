@@ -148,6 +148,7 @@ scoped type Hole[T] {
             i += 1
         }
     }
+    slots_finish_list(g.xs)
 }
 fn sort_view[T](g: Hole[T], i: u64) -> View[T] in g {
     if g.source_is_xs { slots_list_view(g.xs, i) } else { slots_view(g.scratch, i) }
@@ -164,3 +165,7 @@ fn sort_move[T](mut g: Hole[T], from: u64, to: u64) {
 fn slots_list_view[T](xs: View[List[T]], i: u64) -> View[T] in xs
 fn slots_from_list[T](src: View[List[T]], i: u64, mut dst: Slots[T], j: u64)
 fn slots_to_list[T](mut src: Slots[T], i: u64, dst: View[List[T]], j: u64)
+
+// Sort touches only the original prefix and restores it before handing back.
+// No tail slot was marked, so unmark live over the restored prefix is complete.
+fn slots_finish_list[T](xs: View[List[T]])

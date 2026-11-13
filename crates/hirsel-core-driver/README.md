@@ -93,7 +93,10 @@ Stderr, Stdin, Env, Process or Tasks. Args is always present, including empty ar
 These options configure the built executable and are part of its link cache key.
 For example, `hirsel-core run ... --dir . --grant Stdout -- input.txt normal`
 grants the current directory and stdout and passes two program arguments.
-Missing grants refuse configuration before main starts. The runtime closes grants
+Missing grants are diagnosed by build/run before native emission, naming the main
+parameter and the required --grant or --dir option. Declaring a capability
+parameter does not configure its grant. For example, a main with Stdout needs
+`--grant Stdout`; omitting it is a CAP-4 configuration refusal. The runtime closes grants
 after main cleanup and diagnostics, then the bootstrap frees process metadata.
 All three runtime headers are embedded and included in link keys. Owned error
 results still need the checker's cleanup support.

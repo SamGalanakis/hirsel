@@ -362,15 +362,40 @@ fn entry_source(
     } else {
         "out->kind=1;".into()
     };
-    let mut ordinals = [0; 11];
+    let mut ordinals = [0usize; 11];
     let mut requirements = Vec::new();
-    for parameter in parameters {
-        let kind = parameter
+    for (position, parameter) in parameters.iter().enumerate() {
+        let (name, kind) = parameter
             .strip_prefix("core@1/core/")
-            .and_then(grant_kind)
+            .and_then(|name| grant_kind(name).map(|kind| (name, kind)))
             .ok_or_else(|| {
                 NativeStop::Entry(format!("unsupported provider parameter {parameter}"))
             })?;
+        let ordinal = ordinals[kind as usize];
+        let supplied = match kind {
+            0 => options.directories.len(),
+            10 => 1,
+            _ => {
+                if options.grant_mask & (1 << kind) != 0 {
+                    1
+                } else {
+                    0
+                }
+            }
+        };
+        if ordinal >= supplied {
+            let hint = match (kind, ordinal) {
+                (0, _) => "add --dir <path> for this Dir parameter".into(),
+                (10, _) => "the OS configuration supplies Args once".into(),
+                (_, 0) => format!("add --grant {name}"),
+                _ => format!("the OS configuration supplies {name} once"),
+            };
+            return Err(NativeStop::Entry(format!(
+                "main parameter {} ({name}, grant {}) has no configured grant; {hint}",
+                position + 1,
+                ordinal + 1
+            )));
+        }
         requirements.push(format!("{{{kind},{}}}", ordinals[kind as usize]));
         ordinals[kind as usize] += 1;
     }
@@ -586,10 +611,9 @@ mod tests {
         assert!(result.stdout.is_empty());
         assert!(result.stderr.is_empty());
     }
-    fn exercise(backend: Backend) {
-        let dir = tempfile::tempdir().unwrap();
+    fn native_options(backend: Backend, dir: &Path) -> NativeOptions {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let mut options = NativeOptions {
+        NativeOptions {
             backend,
             optimize: false,
             target: TARGET.into(),
@@ -597,13 +621,17 @@ mod tests {
                 .join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
             include: root.join("crates/hirsel-core-rt/include"),
             cc: PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
-            store: dir.path().join("native"),
-            output: dir.path().join("program"),
+            store: dir.join("native"),
+            output: dir.join("program"),
             root_limit: 1_048_576,
             instance_limit: 64,
             directories: vec![],
             grant_mask: 0,
-        };
+        }
+    }
+    fn exercise(backend: Backend) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut options = native_options(backend, dir.path());
         let entry = DefPath::from_full("app@1/main/main").unwrap();
         let literal = "pub fn main() -> Result[(), Exit] { Error(Exit(status: 7u8)) }\n";
         let mut driver = Driver::default();
@@ -690,19 +718,21 @@ mod tests {
         let product = driver
             .check(source_request(source, dir.path()), &mut Meter::new(false))
             .unwrap();
-        let built = product.build(&entry, &options).unwrap();
-        let result = Command::new(built.executable).output().unwrap();
-        assert_eq!(result.status.code(), Some(2));
-        assert!(result.stdout.is_empty());
-        assert_eq!(result.stderr, b"entry configuration failed: IoError(2,0)\n");
+        assert!(
+            matches!(product.build(&entry, &options), Err(NativeStop::Entry(message))
+            if message.contains("Stdout") && message.contains("--grant Stdout"))
+        );
         options.grant_mask = 1 << grant_kind("Stdout").unwrap();
         let granted = product.build(&entry, &options).unwrap();
-        assert_eq!(granted.compiled, 0);
+        run_clean(&granted.executable, 7);
+        options.grant_mask |= 1 << grant_kind("Stderr").unwrap();
+        let changed_grants = product.build(&entry, &options).unwrap();
+        assert_eq!(changed_grants.compiled, 0);
         assert!(
-            granted.linked,
+            changed_grants.linked,
             "grant configuration is part of the executable key"
         );
-        run_clean(&granted.executable, 7);
+        run_clean(&changed_grants.executable, 7);
         let source = "pub fn main(out: Stdout, d: Dir, a: Args, other: Dir, net: Net, clock: Clock, random: Random, err: Stderr, input: Stdin, env: Env, process: Process, tasks: Tasks) -> Result[(), Exit] { Error(Exit(status: 7u8)) }\n";
         let product = driver
             .check(source_request(source, dir.path()), &mut Meter::new(false))
@@ -718,10 +748,10 @@ mod tests {
         run_clean(&built.executable, 7);
         // Two Dir parameters require two explicit directories, in ordinal order.
         options.directories.pop();
-        let built = product.build(&entry, &options).unwrap();
-        let result = Command::new(&built.executable).output().unwrap();
-        assert_eq!(result.status.code(), Some(2));
-        assert_eq!(result.stderr, b"entry configuration failed: IoError(2,0)\n");
+        assert!(
+            matches!(product.build(&entry, &options), Err(NativeStop::Entry(message))
+            if message.contains("Dir, grant 2") && message.contains("--dir"))
+        );
         // A declared record crosses result and view-argument ABIs between units.
         // Its u64 field has padding before it, so reading it at byte 1 is wrong.
         options.optimize = matches!(backend, Backend::Llvm);
@@ -755,6 +785,61 @@ mod tests {
         let built = product.build(&entry, &options).unwrap();
         run_clean(&built.executable, 0);
     }
+    fn capability_entry(backend: Backend, kind: &str, expected_kind: u8) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut options = native_options(backend, dir.path());
+        let source = format!("pub fn main(cap: {kind}) -> Result[(), Exit] {{ Ok(()) }}\n");
+        let product = Driver::default()
+            .check(source_request(&source, dir.path()), &mut Meter::new(false))
+            .unwrap();
+        assert!(
+            product.accepted(),
+            "{kind}: {}",
+            serde_json::to_string(&(
+                product.machine_diagnostics().unwrap(),
+                product.machine_incomplete().unwrap()
+            ))
+            .unwrap()
+        );
+        let entry = DefPath::from_full("app@1/main/main").unwrap();
+        if expected_kind != 10 {
+            assert!(
+                matches!(product.build(&entry, &options), Err(NativeStop::Entry(message))
+                if message.contains(kind) && message.contains("no configured grant"))
+            );
+        }
+        // Numbers come from hirsel_core_rt_host.h, independently of grant_kind.
+        match expected_kind {
+            10 => {}
+            0 => options.directories.push(dir.path().display().to_string()),
+            _ => options.grant_mask = 1 << expected_kind,
+        }
+        let built = product.build(&entry, &options).unwrap();
+        run_clean(&built.executable, 0);
+    }
+    macro_rules! capability_entries {
+        ($(($kind:ident, $expected_kind:literal, $cranelift:ident, $llvm:ident)),+ $(,)?) => {$(
+            #[test]
+            #[ignore = "explicit native integration target"]
+            fn $cranelift() { capability_entry(Backend::Cranelift, stringify!($kind), $expected_kind); }
+            #[test]
+            #[ignore = "explicit native integration target"]
+            fn $llvm() { capability_entry(Backend::Llvm, stringify!($kind), $expected_kind); }
+        )+};
+    }
+    capability_entries!(
+        (Args, 10, args_cranelift_entry, args_llvm_entry),
+        (Dir, 0, dir_cranelift_entry, dir_llvm_entry),
+        (Net, 1, net_cranelift_entry, net_llvm_entry),
+        (Clock, 2, clock_cranelift_entry, clock_llvm_entry),
+        (Random, 3, random_cranelift_entry, random_llvm_entry),
+        (Stdout, 4, stdout_cranelift_entry, stdout_llvm_entry),
+        (Stderr, 5, stderr_cranelift_entry, stderr_llvm_entry),
+        (Stdin, 6, stdin_cranelift_entry, stdin_llvm_entry),
+        (Env, 7, env_cranelift_entry, env_llvm_entry),
+        (Process, 8, process_cranelift_entry, process_llvm_entry),
+        (Tasks, 9, tasks_cranelift_entry, tasks_llvm_entry),
+    );
     #[test]
     #[ignore = "explicit native integration target"]
     fn cranelift_source_entries_link_run_and_reuse() {

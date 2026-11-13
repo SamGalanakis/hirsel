@@ -859,6 +859,16 @@ fn clone_twin_cranelift() { clone_twin(Backend::Cranelift); }
 #[test]
 #[ignore = "explicit native integration target"]
 fn clone_twin_llvm() { clone_twin(Backend::Llvm); }
+/// MEM-10: an optional link field is put and read, on each engine.
+fn compact_option_link(backend: Backend) {
+    run_lines_native(backend, include_str!("../../../core/front/cases/body/compact-option-link.hirsel"));
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn compact_option_link_cranelift() { compact_option_link(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn compact_option_link_llvm() { compact_option_link(Backend::Llvm); }
 
 fn uninitialized_take_names(backend: Backend) {
     let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

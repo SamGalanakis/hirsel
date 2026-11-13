@@ -334,8 +334,13 @@ impl Cx<'_, '_, '_> {
         Some((a, self.linked(fty)))
     }
     /// The type a field of type `ty` reads as: a link reads as a view of its target
-    /// (MEM-10), anything else as itself.
+    /// and an optional link as an optional view (MEM-10), anything else as itself.
     pub(super) fn linked(&mut self, ty: TyId) -> TyId {
+        if let Some(target) = self.link_option(ty) {
+            let view = self.t.mk(TyKind::View(target));
+            let option = self.p.core_decl("Option").expect("core declares Option");
+            return self.t.mk(TyKind::Adt(option, vec![view]));
+        }
         match self.role_of(ty) {
             Some((Role::Link, args)) => self.t.mk(TyKind::View(args[0])),
             _ => ty,
@@ -366,9 +371,48 @@ impl Cx<'_, '_, '_> {
             );
             return self.new_locator(args[0], blob, target, n);
         }
+        // `Option[Link[U]]` (MEM-10): distance 0 is `None`, else `Some` of a view of
+        // the target that many bytes back.
         if self.link_option(bare).is_some() {
-            self.gap(n, "an optional link field is not built");
-            return None;
+            let read = self.linked(bare);
+            let Ok(Rep::Place(id)) = self.rep(read) else {
+                self.gap(n, "an optional link field is not built");
+                return None;
+            };
+            let distance = self.word_in(blob, off, w, n)?;
+            let to = self.new_slot(PlaceTy::Declared(id), n);
+            let zero = self.u64k(0, n)?;
+            let none = self.test(CompareOp::Eq, distance, zero, n);
+            let (empty, some, join) = (
+                self.new_block(&[]),
+                self.new_block(&[]),
+                self.new_block(&[]),
+            );
+            self.branch(none, empty, some, n);
+            self.start(empty);
+            self.inst(
+                Inst::SetCase {
+                    address: to,
+                    case: 0,
+                },
+                n,
+            );
+            self.jump(join, &[], n);
+            self.start(some);
+            self.inst(
+                Inst::SetCase {
+                    address: to,
+                    case: 1,
+                },
+                n,
+            );
+            let target = self.word_op(BinaryOp::Sub, off, distance, n);
+            let payload = [Step::CaseField { case: 1, field: 0 }];
+            self.put_word(AddressBase::Address(to), &payload, 0, blob, n)?;
+            self.put_word(AddressBase::Address(to), &payload, 8, target, n)?;
+            self.jump(join, &[], n);
+            self.start(join);
+            return Some(to);
         }
         match self.rep(bare) {
             Ok(Rep::Scalar(t)) => {

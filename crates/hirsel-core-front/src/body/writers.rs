@@ -1155,7 +1155,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let words = self.t.mk(TyKind::Array(scalar(Scalar::U64), 2));
         let wid = self.declared(words)?;
         let payload = self.address(
-            AddressBase::Value(o),
+            AddressBase::Address(at),
             &[Step::CaseField { case: 1, field: 0 }],
             PlaceTy::Declared(wid),
             n,

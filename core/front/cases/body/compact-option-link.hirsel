@@ -1,0 +1,18 @@
+// MEM-10: an `Option[Link[U]]` field stores 0 for None, else the W-wide distance back
+// to its target, and reads as an optional view of the target. A list 1 -> 2 -> 3 built
+// back to front sums to 6 from its head, and the last node's next is None.
+// expect: run sum() = 6
+// expect: run tail() = 3
+@compact(u32) stable type N { v: u64, next: Option[Link[N]] }
+fn total(n: N) -> u64 { match n.next { Some(m) => n.v + total(m), None => n.v } }
+fn last(n: N) -> u64 { match n.next { Some(m) => last(m), None => n.v } }
+fn list(r: Region) -> Result[N in r, BuildError] {
+  let b = build_in(r, bytes 64, fn(mut d: Dest[N]) -> Result[Child[N], BuildError] {
+    let c = dest.put(mut d, N(v: 3, next: None))?
+    let b = dest.put(mut d, N(v: 2, next: Some(c)))?
+    dest.put(mut d, N(v: 1, next: Some(b)))
+  })?
+  Ok(finish(take b))
+}
+fn sum() -> u64 { region r { match list(r) { Ok(n) => total(n), Error(_) => 99 } } }
+fn tail() -> u64 { region r { match list(r) { Ok(n) => last(n), Error(_) => 99 } } }

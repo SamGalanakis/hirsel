@@ -105,13 +105,37 @@
 //!
 //! # Native ABI (FORM v1a)
 //!
-//! Every function with a body takes the task context pointer as a hidden first
-//! argument, before the destination; a call that can fail returns the failure
-//! status beside its results, and a nonzero status enters the call's failure
-//! successor (or propagates). The context carries the current limit stack and the
-//! cause chain. Runtime calls are calls to engine entry points with the rows
-//! above. Layouts are the recipes': resources and boxes are pointers, counted
-//! nodes are count then payload.
+//! **Every function row** uses one convention, the same for direct calls, indirect
+//! calls through a code pointer (`fnref`) and `extern` rows (providers):
+//! - The task context pointer comes first, then the destination pointer when
+//!   `dest` is present, then the parameters as in FORM v0. The context carries the
+//!   current limit stack and the cause chain.
+//! - The function returns, in the target's C convention, a struct of its result
+//!   scalars **followed by a `u8` failure status**: 0 when it returned, 1 when it
+//!   failed, its cause already appended to the task's chain in the context. No
+//!   other value occurs. With no results the return is a plain C `u8`; with one
+//!   result it is `{ r0, u8 }` (two registers on x86-64 SysV and AArch64).
+//!   A `never` function returns only the status, which is always 1.
+//! - After the call the caller tests the status once: zero continues with the
+//!   results, nonzero enters the call's failure successor, or propagates (returns
+//!   status 1 itself) when there is none. Results are undefined when it is 1.
+//!
+//! Every function row has the status, whether or not its body can fail: a caller
+//! reads only the callee's signature (LANG-8) and an instance is compiled and
+//! cached alone, so whether a body can fail is not known at the call. A function
+//! whose body cannot fail returns status 0 by a constant; an emitter that has the
+//! callee's body in hand (inlining, or a callee in the same unit with no failing
+//! exit) may drop the test. `main` is entered by the engine the same way.
+//!
+//! **Runtime rows** (`Callee::Runtime`) are the runtime's own declared C entry
+//! points, with the row's parameters and results. Only the rows that can fail
+//! ([`RtOp::fails`]: `join`, `check_cancel`, `channel_new`, `send`, `receive`)
+//! append the `u8` status, and only those may name a failure successor. The
+//! runtime entries behind instructions (`alloc`, `free`, `limit_enter`, region
+//! operations) are not calls in FORM and report refusals as values.
+//!
+//! Layouts are the recipes': resources and boxes are pointers, counted nodes are
+//! count then payload.
 //!
 //! # Values, slots and addresses
 //!
@@ -134,7 +158,7 @@
 //! result scalars (`m <= 1`: the plain C return). `bool` travels as a byte 0/1,
 //! `char` as a u32 scalar value. Link names are `h` followed by the hex digest of the
 //! instance key ([`InstanceKey::digest`]). The context parameter and the failure
-//! status are FORM v1a additions to this convention (Native ABI, above).
+//! status are the FORM v1a additions to this convention (Native ABI, above).
 //!
 //! # Instances
 //!

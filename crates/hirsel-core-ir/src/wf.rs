@@ -701,7 +701,10 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
                 c.m.signatures
                     .get(site.signature.index())
                     .ok_or("unknown signature")?;
-            c.fail(site.fail, true)?;
+            c.fail(
+                site.fail,
+                !matches!(site.callee, Callee::Runtime(op) if !op.fails()),
+            )?;
             match site.callee {
                 Callee::Direct(f) => {
                     let f = c.m.functions.get(f.index()).ok_or("unknown callee")?;

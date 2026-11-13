@@ -9,8 +9,8 @@
 ;       fn finish(k: u64) { let b = Big { k } }
 ;
 ; A refused allocation is an error value, never a failure (FAIL-2): `alloc` yields a
-; null pointer and the room left in the limit it tried (MEM-22 `available`); on
-; success `available` is the room before the charge. `limit_enter b` admits b against
+; null pointer and the room left in the limit it tried (MEM-22 `available`); a
+; successful admission makes no Capacity, so `available` is 0 then. `limit_enter b` admits b against
 ; the current limit and makes a limit of b current; `limit_exit` returns its unused
 ; part to the parent and forwards its record there, so live blocks made inside stay
 ; charged and are refunded to the parent later (MEM-20, MEM-25). Growth `like v`
@@ -24,11 +24,11 @@
 ;
 ; Behaviour, derived by hand:
 ; run limit 100: f0(64) -> false, 36 | used 0         ; 64 admitted, 64 more refused
-; run limit 100: f0(40) -> true, 60 | used 0
-; run limit 100: f1(50, 40) -> true, 50, 60 | used 0  ; 40 stays charged, 10 handed back
+; run limit 100: f0(40) -> true, 0 | used 0
+; run limit 100: f1(50, 40) -> true, 0, 60 | used 0   ; 40 stays charged, 10 handed back
 ; run limit 100: f1(30, 60) -> false, 30, 100 | used 0 ; refused by the bound's 30, not 70
 ; run limit 100: f1(200, 1) -> false, 100, 100 | used 0 ; the bound itself is refused
-; run limit 100: f2(7) -> 7, 76 | used 0              ; root 8 + bound 16 used: room 76
+; run limit 100: f2(7) -> 7, 0 | used 0               ; 32 > the bound's 16: admitted by the root
 ; run: f3(16) -> | used 0                             ; the finalizer's 16 fits its 32
 ; run: f3(48) -> fail Capacity | used 32              ; 48 > 32 although the root has room
 core v1

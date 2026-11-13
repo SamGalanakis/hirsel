@@ -408,7 +408,7 @@ pub enum Inst {
     // ---- FORM v1a ----
     /// Admit `charge` and allocate a block of `size` bytes aligned to `align`
     /// (MEM-21). On refusal `result` is null and `available` is the room left in the
-    /// limit tried (MEM-22), and nothing is allocated. Under a finalizer's grant a
+    /// limit tried (MEM-22), and nothing is allocated; on success `available` is 0. Under a finalizer's grant a
     /// refusal is a failure with cause `Capacity` instead (MEM-27).
     Alloc {
         result: ValueId,
@@ -461,7 +461,8 @@ pub enum Inst {
     // ---- FORM v1a ----
     /// Enter `bound bytes n`: admit `bytes` against the current limit and make a new
     /// limit of that size current (MEM-25). `admitted` is false, `available` the
-    /// room, and no limit is entered when the admission is refused.
+    /// room, and no limit is entered when the admission is refused; on success
+    /// `available` is 0.
     LimitEnter {
         admitted: ValueId,
         available: ValueId,
@@ -578,7 +579,8 @@ impl RtOp {
     ///
     /// `f` is a plain function `(&X) -> () dest R`. `channel_new` with `cap` 0 fails
     /// with `Bounds`; `send`, `receive`, `join` and `check_cancel` fail with
-    /// `Cancelled` when they observe it (CONC-7).
+    /// `Cancelled` when they observe it (CONC-7). These five are the rows that can
+    /// fail ([`RtOp::fails`]); the others never do.
     pub fn signature(self) -> Signature {
         use Param::{Address as A, Value as V};
         let (u8_, u64_, bool_) = (
@@ -604,6 +606,19 @@ impl RtOp {
             dest: None,
             never: false,
         }
+    }
+
+    /// Whether a call of this row can fail, and so returns the failure status
+    /// (crate docs, "Native ABI").
+    pub fn fails(self) -> bool {
+        matches!(
+            self,
+            RtOp::Join { .. }
+                | RtOp::CheckCancel
+                | RtOp::ChannelNew { .. }
+                | RtOp::Send { .. }
+                | RtOp::Receive { .. }
+        )
     }
 
     pub fn types(self) -> Vec<TypeId> {
@@ -635,7 +650,11 @@ impl Inst {
                     .iter()
                     .any(|s| matches!(s, Step::Index(_) | Step::Element(_)))
             }),
-            Inst::Alloc { .. } | Inst::Drop { .. } | Inst::Call { .. } => true,
+            Inst::Call { call } => b.calls.get(call.index()).is_none_or(|c| match c.callee {
+                Callee::Runtime(op) => op.fails(),
+                Callee::Direct(_) | Callee::Indirect(_) => true,
+            }),
+            Inst::Alloc { .. } | Inst::Drop { .. } => true,
             _ => false,
         }
     }

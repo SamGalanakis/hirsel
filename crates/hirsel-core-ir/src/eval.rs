@@ -240,13 +240,14 @@ impl Machine<'_> {
         }
         l
     }
-    /// Admit `n` against `l`: Ok(room before) or Err(room).
-    fn admit(&mut self, l: usize, n: u64) -> Result<u64, u64> {
+    /// Admit `n` against `l`, or Err(the room left). A successful admission reports
+    /// no room: `available` is 0 then.
+    fn admit(&mut self, l: usize, n: u64) -> Result<(), u64> {
         let lim = &mut self.limits[l];
         let room = lim.cap - lim.used;
         if n <= room {
             lim.used += n;
-            Ok(room)
+            Ok(())
         } else {
             Err(room)
         }
@@ -499,10 +500,9 @@ impl Machine<'_> {
                 let r = TypeRef(r.0);
                 let n = a[0];
                 let charge = charge::task(self.logical(r), n).unwrap_or(u64::MAX);
-                let room = match self.admit(cur, charge) {
-                    Err(room) => return Ok(vec![0, room]), // x stays the caller's
-                    Ok(room) => room,
-                };
+                if let Err(room) = self.admit(cur, charge) {
+                    return Ok(vec![0, room]); // x stays the caller's
+                }
                 let lim = self.open_limit(n, cur, false);
                 let xb = self.block(self.held(x), None, 0, None);
                 let bytes = self.get(a[1], self.held(x) as usize).to_vec();
@@ -535,7 +535,7 @@ impl Machine<'_> {
                     joined: false,
                     cells,
                 });
-                vec![TASK_BASE + self.children.len() as u64 - 1, room]
+                vec![TASK_BASE + self.children.len() as u64 - 1, 0]
             }
             RtOp::Join { r } => {
                 let i = (a[0] - TASK_BASE) as usize;
@@ -565,7 +565,7 @@ impl Machine<'_> {
                 let charge = charge::channel(a[0], self.logical(item)).unwrap_or(u64::MAX);
                 match self.admit(cur, charge) {
                     Err(room) => vec![0, 0, room],
-                    Ok(room) => {
+                    Ok(()) => {
                         self.chans.push(Chan {
                             item,
                             cap: a[0],
@@ -576,7 +576,7 @@ impl Machine<'_> {
                             limit: cur,
                         });
                         let s = CHAN_BASE + 2 * (self.chans.len() as u64 - 1);
-                        vec![s, s + 1, room]
+                        vec![s, s + 1, 0]
                     }
                 }
             }
@@ -1052,7 +1052,7 @@ impl Machine<'_> {
                 match self.admit(l, n) {
                     Err(_) if self.limits[l].grant => return Err(Stop::Cause("Capacity")),
                     Err(room) => (vals[result.index()], vals[available.index()]) = (0, room),
-                    Ok(room) => {
+                    Ok(()) => {
                         let res = match kind {
                             AllocKind::Resource { grant } => Some(Res {
                                 grant,
@@ -1068,7 +1068,7 @@ impl Machine<'_> {
                         if let AllocPlace::Region(r) = place {
                             self.regions[(vals[r.index()] - REGION_BASE) as usize].push(split(p).0);
                         }
-                        (vals[result.index()], vals[available.index()]) = (p, room);
+                        (vals[result.index()], vals[available.index()]) = (p, 0);
                     }
                 }
             }
@@ -1101,7 +1101,7 @@ impl Machine<'_> {
                 let cur = *t.limits.last().unwrap();
                 let n = vals[bytes.index()];
                 let (ok, room) = match self.admit(cur, n) {
-                    Ok(room) => (1, room),
+                    Ok(()) => (1, 0),
                     Err(room) => (0, room),
                 };
                 if ok == 1 {

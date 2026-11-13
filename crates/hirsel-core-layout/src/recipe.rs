@@ -380,10 +380,9 @@ fn visit(
             }
             State::Visiting | State::Todo => {
                 state[t.index()] = State::Visiting;
-                let pending: Vec<TypeRef> = inline_deps(&shapes[t.index()])
-                    .filter(|d| state[d.index()] != State::Done)
-                    .collect();
-                if let Some(&d) = pending.first() {
+                let pending =
+                    inline_deps(&shapes[t.index()]).find(|d| state[d.index()] != State::Done);
+                if let Some(d) = pending {
                     if state[d.index()] == State::Visiting {
                         return Err(LayoutError::Cycle {
                             ty: shapes[t.index()].name.clone(),
@@ -402,11 +401,14 @@ fn visit(
 }
 
 fn inline_deps(shape: &Shape) -> impl Iterator<Item = TypeRef> + '_ {
-    let fields: Box<dyn Iterator<Item = &Field>> = match &shape.body {
-        Body::Record(f) => Box::new(f.iter()),
-        Body::Variant(c) => Box::new(c.iter().flat_map(|c| c.fields.iter())),
+    let (fields, cases): (&[Field], &[_]) = match &shape.body {
+        Body::Record(f) => (f, &[]),
+        Body::Variant(c) => (&[], c),
     };
-    fields.filter_map(|f| inline_target(&f.ty))
+    fields
+        .iter()
+        .chain(cases.iter().flat_map(|c| c.fields.iter()))
+        .filter_map(|f| inline_target(&f.ty))
 }
 
 fn inline_target(ty: &FieldTy) -> Option<TypeRef> {

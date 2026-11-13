@@ -22,8 +22,12 @@ fn fixed(layouts: &[Recipe], id: TypeId) -> Result<&Fixed> {
         )),
     }
 }
+/// A resource or stable value is held as a pointer to its block (MEM-5, MEM-24).
+fn by_block(input: &c::Module, id: TypeId) -> bool {
+    matches!(input.types[id.index()].repr, Repr::Resource | Repr::Stable)
+}
 fn held<'a>(input: &c::Module, id: TypeId) -> At<'a> {
-    if input.types[id.index()].repr == Repr::Resource {
+    if by_block(input, id) {
         At::Pointer(id)
     } else {
         At::Declared(id)
@@ -44,7 +48,7 @@ pub(super) fn storage(input: &c::Module, layouts: &[Recipe], p: PlaceTy) -> Resu
             let n = u64::from(ty(t).bytes());
             (n, n)
         }
-        PlaceTy::Declared(t) if input.types[t.index()].repr == Repr::Resource => (8, 8),
+        PlaceTy::Declared(t) if by_block(input, t) => (8, 8),
         PlaceTy::Declared(t) => {
             let f = fixed(layouts, t)?;
             (f.size, f.align)

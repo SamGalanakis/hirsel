@@ -17,8 +17,15 @@ impl FunctionEmitter<'_> {
         };
         f
     }
+    /// A resource or stable value is held as a pointer to its block (MEM-5, MEM-24).
+    fn by_block(&self, t: TypeId) -> bool {
+        matches!(
+            self.module.types[t.index()].repr,
+            Repr::Resource | Repr::Stable
+        )
+    }
     fn kind_of(&self, t: TypeId) -> At {
-        if self.module.types[t.index()].repr == Repr::Resource {
+        if self.by_block(t) {
             At::Pointer(t)
         } else {
             At::Declared(t)
@@ -36,7 +43,7 @@ impl FunctionEmitter<'_> {
     pub(super) fn place_layout(&self, t: PlaceTy) -> (u64, u64) {
         match t {
             PlaceTy::Value(t) => (size(t), size(t)),
-            PlaceTy::Declared(t) if self.module.types[t.index()].repr == Repr::Resource => (8, 8),
+            PlaceTy::Declared(t) if self.by_block(t) => (8, 8),
             PlaceTy::Declared(t) => {
                 let f = self.fixed(t);
                 (f.size, f.align)

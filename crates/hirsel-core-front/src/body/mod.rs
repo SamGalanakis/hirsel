@@ -135,6 +135,15 @@ pub struct Emitter {
     constant_statics: HashMap<crate::ConstValue, hirsel_core_ir::StaticId>,
 }
 
+/// A literal placed by `T(..) in r` (MEM-2): its node, the region's value and root.
+#[derive(Clone, Copy)]
+struct Placing {
+    lit: NodeId,
+    region: Option<ValueId>,
+    root: TyId,
+    /// The literal's own expected type, `T` of an expected `Result[T in r, Capacity]`.
+    want: Option<Want>,
+}
 /// How a value of a type is carried in a body (crate docs, "Values, slots and
 /// addresses"): a scalar, nothing (unit, Never), or a pointer to a place of a declared
 /// type, which a parameter takes by address and a result returns through `dest`.
@@ -454,6 +463,14 @@ impl Emitter {
     fn is_resource(&self, id: TypeId) -> bool {
         self.module.types[id.index()].repr == LRepr::Resource
     }
+    /// A value of row `id` is held as a pointer to its block: a resource (MEM-24) or a
+    /// stable value, which never moves once published (MEM-5).
+    fn by_block(&self, id: TypeId) -> bool {
+        matches!(
+            self.module.types[id.index()].repr,
+            LRepr::Resource | LRepr::Stable
+        )
+    }
     /// The admission of a resource of row `id`: its storage, cause cell and grant
     /// (MEM-24, MEM-27).
     fn resource_charge(&self, id: TypeId) -> Option<u64> {
@@ -503,10 +520,10 @@ impl Emitter {
         }
         false
     }
-    /// The byte size of a value of row `id`, whose recipe exists: a resource's
-    /// holder is its block pointer.
+    /// The byte size of a value of row `id`, whose recipe exists: a resource's or a
+    /// stable value's holder is its block pointer.
     fn size(&self, id: TypeId) -> u64 {
-        if self.is_resource(id) {
+        if self.by_block(id) {
             return hirsel_core_layout::POINTER;
         }
         self.block(id).0
@@ -870,6 +887,9 @@ struct Cx<'c, 'a, 'e> {
     synth_ty: TyId,
     /// The synthesised type of the tail of the block being closed; unit without one.
     tail_ty: TyId,
+    /// The literal being placed by `T(..) in r` (MEM-2), until its construction
+    /// takes it.
+    placing: Option<Placing>,
     scope_slots: Vec<u32>,
     copies: Vec<CopySize>,
     nested: std::collections::BTreeMap<FuncId, GenericTemplate>,
@@ -983,6 +1003,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             depth: 0,
             synth_ty: UNIT,
             tail_ty: UNIT,
+            placing: None,
             scope_slots: vec![],
             copies: vec![],
             nested: Default::default(),
@@ -1217,7 +1238,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     /// The place of row `id`'s fields for the value at `base` (a place of row `id`):
     /// the place itself, or for a resource the block its holder points at.
     fn fields_of(&mut self, base: AddressBase, id: TypeId, n: NodeId) -> AddressId {
-        if !self.e.is_resource(id) {
+        if !self.e.by_block(id) {
             return self.address(base, &[], PlaceTy::Declared(id), n);
         }
         let at = self.address(base, &[], PlaceTy::Value(Ty::Ptr), n);
@@ -1255,6 +1276,13 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             Ok(Rep::Place(id)) => {
                 let bits = if self.e.is_resource(id) {
                     hirsel_core_layout::POINTER
+                } else if self.e.by_block(id) {
+                    // A stable value's holder counts as a `Stable` field (MEM-24).
+                    if logical {
+                        16
+                    } else {
+                        hirsel_core_layout::POINTER
+                    }
                 } else if logical {
                     self.e.recipes[id.index()].logical_size.unwrap()
                 } else {
@@ -1787,7 +1815,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             NodeKind::For | NodeKind::ForTake => self.for_(n, None),
             NodeKind::Region => self.region_(n, want),
             NodeKind::Bound => self.bound_(n, want),
-            NodeKind::Placement => self.gap_ty(n, "stable placement is not built"),
+            NodeKind::Placement => self.placement(n, want),
             NodeKind::Closure | NodeKind::ScopedClosure => self.closure(n, want),
             _ => self.gap_ty(n, "expression form is not built"),
         }

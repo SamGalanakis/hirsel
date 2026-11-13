@@ -374,16 +374,25 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             };
             return self.field(at, name, n);
         }
+        // A stable value in region `r`: its stable fields are in `r` unless they name
+        // another region (MEM-6).
+        let (inner, root) = match self.t.kind(inner) {
+            TyKind::Anchored(x, root) => (*x, Some(*root)),
+            _ => (inner, None),
+        };
         let mut stable = false;
         let found = match self.t.kind(inner).clone() {
             TyKind::Adt(d, args) => {
                 let decl = &self.p.decls[d.index()];
                 stable = decl.repr == Repr::Stable;
                 match &decl.body {
-                    DeclBody::Record(fs) => fs
-                        .iter()
-                        .position(|f| f.name == name)
-                        .map(|i| (i, subst(&mut self.t, fs[i].ty, &args))),
+                    DeclBody::Record(fs) => fs.iter().position(|f| f.name == name).map(|i| {
+                        let ft = subst(&mut self.t, fs[i].ty, &args);
+                        match root {
+                            Some(r) if stable => (i, reroot(&mut self.t, ft, Root::Enclosing, r)),
+                            _ => (i, ft),
+                        }
+                    }),
                     _ => None,
                 }
             }
@@ -510,9 +519,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     (address, ty) = self.compact_field(header, ty, None, i, n)?;
                 }
                 PStep::Field(i) => {
-                    // A resource's fields are in the block its holder points at.
+                    // A resource's or stable value's fields are in the block its
+                    // holder points at.
                     if let Ok(Rep::Place(id)) = self.rep(ty)
-                        && self.e.is_resource(id)
+                        && self.e.by_block(id)
                     {
                         address = self.fields_of(AddressBase::Address(address), id, n);
                     }
@@ -797,11 +807,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result
     }
     pub(super) fn field_ty(&mut self, ty: TyId, i: u32) -> Option<TyId> {
-        let ty = match self.t.kind(ty) {
-            TyKind::View(x) => *x,
-            _ => ty,
-        };
-        match self.t.kind(ty).clone() {
+        match self.t.kind(self.bare(ty)).clone() {
             TyKind::Adt(d, args) => match &self.p.decls[d.index()].body {
                 DeclBody::Record(fs) => Some(subst(&mut self.t, fs[i as usize].ty, &args)),
                 _ => None,

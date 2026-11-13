@@ -579,9 +579,15 @@ impl Machine<'_> {
     fn is_resource(&self, t: TypeRef) -> bool {
         self.shape(t).repr == Repr::Resource
     }
-    /// Bytes a holder spends on a value of `t`: a resource is a pointer to its block.
+    /// A value of `t` is held as a pointer to its block: a resource, or a stable
+    /// value, which never moves once published (MEM-5).
+    fn by_block(&self, t: TypeRef) -> bool {
+        matches!(self.shape(t).repr, Repr::Resource | Repr::Stable)
+    }
+    /// Bytes a holder spends on a value of `t`: a resource or stable value is a
+    /// pointer to its block.
     fn held(&self, t: TypeRef) -> u64 {
-        if self.is_resource(t) {
+        if self.by_block(t) {
             8
         } else {
             self.fixed(t).size
@@ -590,12 +596,14 @@ impl Machine<'_> {
     fn logical(&self, t: TypeRef) -> u64 {
         if self.is_resource(t) {
             8
+        } else if self.by_block(t) {
+            16
         } else {
             self.recipes[t.index()].logical_size.expect("fixed")
         }
     }
     fn at_of(&self, t: TypeRef) -> At {
-        if self.is_resource(t) {
+        if self.by_block(t) {
             At::Ptr(t)
         } else {
             At::Decl(t)

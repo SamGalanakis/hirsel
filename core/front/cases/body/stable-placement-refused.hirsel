@@ -1,0 +1,11 @@
+// MEM-2: a stable value is made by its literal placed `in r`, a builder or a call, and only
+// a stable type's literal is placed. MEM-9: a compact value is never placed.
+// expect: refuse MEM-2 at 9:28
+// expect: refuse MEM-2 at 10:36
+// expect: refuse MEM-9 at 11:39
+stable type S { n: u64 }
+type O { n: u64 }
+@compact(u32) stable type C { n: u64 }
+fn bare() -> u64 { let s = S(n: 1); 0 }
+fn own(r: Region) -> u64 { let o = O(n: 1) in r; 0 }
+fn packed(r: Region) -> u64 { let c = C(n: 1) in r; 0 }

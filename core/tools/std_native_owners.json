@@ -250,16 +250,6 @@
     "owner": "895"
   },
   {
-    "row": "M3",
-    "message": "stable values are not built",
-    "owner": "895"
-  },
-  {
-    "row": "M4",
-    "message": "stable placement is not built",
-    "owner": "895"
-  },
-  {
     "row": "M5",
     "message": "an optional link field is not built",
     "owner": "895"

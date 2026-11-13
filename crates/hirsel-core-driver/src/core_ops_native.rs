@@ -752,6 +752,21 @@ fn ordered_stable_cranelift(){ordered_stable(Backend::Cranelift);}
 #[test]
 #[ignore="explicit native integration target"]
 fn ordered_stable_llvm(){ordered_stable(Backend::Llvm);}
+/// MEM-2/MEM-5: a placed stable value is held as a pointer to its region block, inline in a
+/// Result payload, a record field and a list element alike; the values are the case's run lines.
+fn stable_placement(backend: Backend) {
+    let source = format!(
+        "{}\npub fn main() -> Result[(), Exit] {{ if sum() == 15 && picked() == 7 && nested() == 12 && refused() == 16 && listed() == 41 && widened() == 64 {{ Ok(()) }} else {{ Error(Exit(status: 1)) }} }}\n",
+        include_str!("../../../core/front/cases/body/stable-placement.hirsel")
+    );
+    ordered_case(backend, &source);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn stable_placement_cranelift() { stable_placement(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn stable_placement_llvm() { stable_placement(Backend::Llvm); }
 
 fn uninitialized_take_names(backend: Backend) {
     let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

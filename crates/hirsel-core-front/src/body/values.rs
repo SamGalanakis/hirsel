@@ -115,6 +115,209 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
         )
     }
+    /// `lit in r` (MEM-2): the literal of a stable type that is not compact, placed in
+    /// region `r`. Its expected type is the placed one's: in `Result[T in r, Capacity]`
+    /// it is `T`. Anything but such a literal is refused.
+    pub(super) fn placement(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
+        let (lit, at) = (self.kids(n)[0], self.kids(n)[1]);
+        let root = self.body_root(at, true);
+        if root == ERROR {
+            self.halt();
+            return (ERROR, None);
+        }
+        let region = self.expr(at, None).1;
+        let inner = want.and_then(|w| match self.t.kind(w.ty) {
+            TyKind::Adt(d, args) if Some(*d) == self.p.core_decl("Result") && !args.is_empty() => {
+                let ty = match self.t.kind(args[0]) {
+                    TyKind::Anchored(x, _) => *x,
+                    _ => args[0],
+                };
+                Some(Want {
+                    ty,
+                    view: false,
+                    payload: 0,
+                })
+            }
+            _ => None,
+        });
+        let outer = self.placing.replace(Placing {
+            lit,
+            region,
+            root,
+            want: inner,
+        });
+        let r = self.expr(lit, None);
+        let unplaced = self.placing.take().is_some();
+        self.placing = outer;
+        if unplaced && r.0 != ERROR {
+            self.refuse(
+                "MEM-2",
+                n,
+                "only the literal of a stable type is placed with `in r`",
+            );
+            return (ERROR, None);
+        }
+        r
+    }
+    /// The literal of `own`, a stable type that is not compact, placed in a region
+    /// (MEM-2): its fields, evaluated already, are written into one block admitted in
+    /// the region and charged its logical size rounded up to 8 (MEM-24). The value is
+    /// `Result[own in r, Capacity]`; on refusal nothing was admitted, and the fields,
+    /// plain or stable, need no cleaning.
+    #[allow(clippy::too_many_arguments)]
+    fn place_literal(
+        &mut self,
+        own: TyId,
+        pl: Placing,
+        case: Option<u32>,
+        fields: &[crate::decls::FieldDecl],
+        tys: &[TyId],
+        vals: &[Option<ValueId>],
+        n: NodeId,
+    ) -> (TyId, Option<ValueId>) {
+        let placed = self.t.mk(TyKind::Anchored(own, pl.root));
+        let cap = self.capacity_ty(n);
+        let Some(result) = self.p.core_decl("Result") else {
+            return self.gap_ty(n, "Result is not declared by core");
+        };
+        let ty = self.t.mk(TyKind::Adt(result, vec![placed, cap]));
+        let (id, rid) = match (self.rep(own), self.rep(ty)) {
+            (Ok(Rep::Place(id)), Ok(Rep::Place(rid))) => (id, rid),
+            (Err(what), _) | (_, Err(what)) => {
+                self.gap(n, what);
+                return (ty, None);
+            }
+            _ => return (ty, None),
+        };
+        let mut reps = vec![];
+        for f in fields {
+            let fty = subst(&mut self.t, f.ty, tys);
+            match self.rep(fty) {
+                Ok(r) => reps.push(r),
+                Err(what) => {
+                    self.gap(n, what);
+                    return (ty, None);
+                }
+            }
+        }
+        if reps
+            .iter()
+            .zip(vals)
+            .any(|(r, v)| r.stored().is_some() && v.is_none())
+        {
+            self.gap(n, "this field value is not built");
+            return (ty, None);
+        }
+        let (Some(region), Some(logical)) = (pl.region, self.e.recipes[id.index()].logical_size)
+        else {
+            return (ty, None);
+        };
+        if !self.live() {
+            return (ty, None);
+        }
+        let u64t = Ty::Scalar(Scalar::U64);
+        let (size, align) = self.e.block(id);
+        let Some(charge) = self.konst(u64t, logical.div_ceil(8) * 8, n) else {
+            return (ty, None);
+        };
+        let Some(sz) = self.konst(u64t, size, n) else {
+            return (ty, None);
+        };
+        let to = self.new_slot(PlaceTy::Declared(rid), n);
+        let block = self.value(Ty::Ptr);
+        let available = self.value(u64t);
+        let fail = self.fail_to(n);
+        self.inst(
+            Inst::Alloc {
+                result: block,
+                available,
+                region_entry: None,
+                kind: AllocKind::Plain,
+                place: AllocPlace::Region(region),
+                charge,
+                overflow: None,
+                size: sz,
+                align,
+                fail,
+            },
+            n,
+        );
+        let Some(null) = self.konst(Ty::Ptr, 0, n) else {
+            return (ty, None);
+        };
+        let admitted = self.test(CompareOp::Ne, block, null, n);
+        let (yes, no, join) = (
+            self.new_block(&[]),
+            self.new_block(&[]),
+            self.new_block(&[]),
+        );
+        self.branch(admitted, yes, no, n);
+        self.start(yes);
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 0,
+            },
+            n,
+        );
+        let holder = self.address(
+            AddressBase::Address(to),
+            &[Step::CaseField { case: 0, field: 0 }],
+            PlaceTy::Value(Ty::Ptr),
+            n,
+        );
+        self.inst(
+            Inst::Store {
+                address: holder,
+                value: block,
+            },
+            n,
+        );
+        let at = self.address(AddressBase::Value(block), &[], PlaceTy::Declared(id), n);
+        if let Some(case) = case {
+            self.inst(Inst::SetCase { address: at, case }, n);
+        }
+        for (i, r) in reps.iter().enumerate() {
+            let Some(place) = r.stored() else {
+                continue;
+            };
+            let step = match case {
+                Some(case) => Step::CaseField {
+                    case,
+                    field: i as u32,
+                },
+                None => Step::Field(i as u32),
+            };
+            let f = self.address(AddressBase::Address(at), &[step], place, n);
+            self.install(f, *r, vals[i], n);
+        }
+        self.jump(join, &[], n);
+        self.start(no);
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 1,
+            },
+            n,
+        );
+        if self
+            .capacity_at(
+                AddressBase::Address(to),
+                &[Step::CaseField { case: 1, field: 0 }],
+                charge,
+                available,
+                n,
+            )
+            .is_none()
+        {
+            return (ty, None);
+        }
+        self.jump(join, &[], n);
+        self.start(join);
+        let p = self.pointer(to, n);
+        self.temp(ty, Some(p));
+        (ty, Some(p))
+    }
     /// A byte-string literal is not static (core.md "Literals", c8e2e795): an own `List`
     /// with elements owns its storage, because a `List` has in-place element writes. It
     /// has type `Result[Bytes, Capacity]`, admits its length as `List[u8]` storage and
@@ -830,10 +1033,34 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.refuse("PROG-2", n, format!("`{a}` is opaque outside its module"));
             return (ERROR, None);
         }
-        // A stable value is written through a writer (MEM-4, `emit(f)` payloads).
+        // MEM-2: a stable value is made by a builder, a call, or its literal placed in
+        // a region; a compact one only by a builder or a clone (MEM-9).
+        let placed = match self.placing {
+            Some(pl) if pl.lit == n && matches!(decl.repr, Repr::Stable) => self.placing.take(),
+            _ => None,
+        };
         if matches!(decl.repr, Repr::Stable) {
-            return self.gap_ty(n, "stable values are not built");
+            if decl.compact.is_some() {
+                self.refuse(
+                    "MEM-9",
+                    n,
+                    "a compact value is built only by a builder or a clone",
+                );
+                return (ERROR, None);
+            }
+            if placed.is_none() {
+                self.refuse(
+                    "MEM-2",
+                    n,
+                    "a stable value is made by its literal placed `in r`, a builder or a call",
+                );
+                return (ERROR, None);
+            }
         }
+        let want = match placed {
+            Some(pl) => pl.want,
+            None => want,
+        };
         let k = fields.len();
         if args.len() < k {
             self.refuse_at(
@@ -876,6 +1103,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.unify(result, w.ty, &mut found);
             }
         }
+        // A placed literal's stable fields are in its region unless they name another
+        // (MEM-6).
+        let ftys: Vec<TyId> = fields
+            .iter()
+            .map(|f| match placed {
+                Some(pl) => reroot(&mut self.t, f.ty, Root::Enclosing, pl.root),
+                None => f.ty,
+            })
+            .collect();
         let mut vals: Vec<Option<ValueId>> = vec![None; k];
         let mut later = vec![];
         for (i, (&a, f)) in args.iter().zip(fields).enumerate() {
@@ -908,27 +1144,27 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 later.push((i, e));
                 continue;
             }
-            vals[i] = match self.known(f.ty, &found) {
+            vals[i] = match self.known(ftys[i], &found) {
                 Some(t) => self.expr(e, expect(t)).1,
                 None => {
                     let (at, v) = if let Some(hint) =
-                        want.and_then(|w| self.payload_argument(lit.unwrap_or(own), f.ty, w))
+                        want.and_then(|w| self.payload_argument(lit.unwrap_or(own), ftys[i], w))
                     {
                         self.expr_hinted(e, Some(hint))
                     } else if self.kind(e) == NodeKind::Call {
                         self.out.counts.nodes += 1;
-                        let w = self.partial(f.ty, &found);
+                        let w = self.partial(ftys[i], &found);
                         self.call(e, expect(w))
                     } else {
                         self.expr(e, None)
                     };
-                    if !self.unify(f.ty, at, &mut found) {
+                    if !self.unify(ftys[i], at, &mut found) {
                         self.refuse(
                             "LANG-11",
                             e,
                             "a type parameter is determined twice differently",
                         );
-                    } else if let Some(t) = self.known(f.ty, &found) {
+                    } else if let Some(t) = self.known(ftys[i], &found) {
                         self.coerce(
                             at,
                             Want {
@@ -944,7 +1180,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             };
         }
         for (i, e) in later {
-            match self.known(fields[i].ty, &found) {
+            match self.known(ftys[i], &found) {
                 Some(t) => vals[i] = self.expr(e, expect(t)).1,
                 None => {
                     self.refuse("LANG-11", e, "an unsuffixed number needs an expected type");
@@ -958,6 +1194,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return (ERROR, None);
         }
         let tys: Vec<TyId> = found.into_iter().flatten().collect();
+        if let Some(pl) = placed {
+            let own = self.t.mk(TyKind::Adt(d, tys.clone()));
+            return self.place_literal(own, pl, case, fields, &tys, &vals, n);
+        }
         if let Some(lit) = lit {
             let ty = subst(&mut self.t, lit, &tys);
             let own = self.t.mk(TyKind::Adt(d, tys.clone()));

@@ -1,5 +1,6 @@
 //! SEM-7 equality and order of values carried as places: tuples, records and variants
-//! (Option and Result among them), and a view by its payload. Order is lexicographic,
+//! (Option and Result among them), `String` and `List[u8]` bytewise, and a view by its
+//! payload. Order is lexicographic,
 //! fields in declaration order, variants by declaration ordinal then payload. The
 //! comparison walks both places once, leaving at the first component that differs, with
 //! the ordering -1, 0 or 1 as the join's parameter; `l op r` is then `ordering op 0`.
@@ -74,6 +75,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             TyKind::View(x) => self.comparable(x, depth + 1),
             TyKind::Adt(d, args) => {
                 let decl = &self.p.decls[d.index()];
+                if self.text_like(t) {
+                    return Ok(());
+                }
                 if decl.role.is_some() {
                     return Err(NOT);
                 }
@@ -143,6 +147,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     self.component(a, b, Step::Field(i as u32), x, join, eq_only, n);
                 }
             }
+            TyKind::Adt(..) if self.text_like(t) => self.bytes(a, b, join, n),
             TyKind::Adt(d, args) => match self.p.decls[d.index()].body.clone() {
                 DeclBody::Record(fs) => {
                     for (i, f) in fs.iter().enumerate() {
@@ -219,6 +224,78 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
             _ => unreachable!("refused by comparable"),
         }
+    }
+
+    /// `String`, `Bytes` and `List[u8]`: ordered bytewise by `rt.compare_bytes` (SEM-7,
+    /// FORM "Strings and literals").
+    fn text_like(&self, t: TyId) -> bool {
+        match self.t.kind(t) {
+            TyKind::Adt(d, args) => match self.p.decls[d.index()].role {
+                Some(Role::String) => true,
+                Some(Role::List) => matches!(self.t.kind(args[0]), TyKind::Scalar(Scalar::U8)),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// Two byte carriers: `rt.compare_bytes` over their data and lengths; a nonzero
+    /// ordering jumps to `join` with it.
+    fn bytes(&mut self, a: AddressId, b: AddressId, join: BlockId, n: NodeId) {
+        let u64t = Ty::Scalar(Scalar::U64);
+        let mut args = vec![];
+        for at in [a, b] {
+            for (offset, t) in [(0, Ty::Ptr), (8, u64t)] {
+                let Some(o) = self.konst(u64t, offset, n) else {
+                    return;
+                };
+                let word = self.address(
+                    AddressBase::Address(at),
+                    &[Step::Byte(o)],
+                    PlaceTy::Value(t),
+                    n,
+                );
+                args.push(Arg::Value(self.read_bits(word, t, n)));
+            }
+        }
+        let op = hirsel_core_ir::RtOp::CompareBytes;
+        let signature = self.e.sig(op.signature());
+        let args = PoolRange::push(&mut self.b.pools.args, args);
+        let ord = self.value(Ty::Scalar(Scalar::I8));
+        let results = PoolRange::push(&mut self.b.pools.values, [ord]);
+        self.b.calls.push(CallSite {
+            callee: Callee::Runtime(op),
+            signature,
+            args,
+            results,
+            fail: None,
+        });
+        let call = CallId(self.b.calls.len() as u32 - 1);
+        self.inst(Inst::Call { call }, n);
+        let Some(zero) = self.konst(Ty::Scalar(Scalar::I8), 0, n) else {
+            return;
+        };
+        let c = self.value(Ty::Scalar(Scalar::Bool));
+        self.inst(
+            Inst::Compare {
+                result: c,
+                op: CompareOp::Ne,
+                left: ord,
+                right: zero,
+            },
+            n,
+        );
+        let next = self.new_block(&[]);
+        let (ye, ne) = (self.edge(join, &[ord]), self.edge(next, &[]));
+        self.end(
+            Terminator::Branch {
+                condition: c,
+                yes: ye,
+                no: ne,
+            },
+            Some(n),
+        );
+        self.start(next);
     }
 
     #[allow(clippy::too_many_arguments)]

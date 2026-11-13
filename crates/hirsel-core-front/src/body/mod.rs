@@ -117,6 +117,8 @@ pub struct Emitter {
     templates: HashMap<DefPath, (FuncId, GenericTemplate)>,
     /// Per row, whether cleaning it may run code (memoised [`Self::runs_code`]).
     runs: HashMap<TypeId, bool>,
+    /// `module.statics` rows by their bytes.
+    statics: HashMap<Vec<u8>, hirsel_core_ir::StaticId>,
 }
 
 /// How a value of a type is carried in a body (crate docs, "Values, slots and
@@ -169,6 +171,19 @@ impl Emitter {
         let id = SigId(self.module.signatures.len() as u32);
         self.module.signatures.push(s.clone());
         self.sigs.insert(s, id);
+        id
+    }
+    /// The read-only static row holding `bytes`, shared by equal literals.
+    fn static_bytes(&mut self, bytes: &[u8]) -> hirsel_core_ir::StaticId {
+        if let Some(&id) = self.statics.get(bytes) {
+            return id;
+        }
+        let id = hirsel_core_ir::StaticId(self.module.statics.len() as u32);
+        self.module.statics.push(hirsel_core_ir::Static {
+            align: 1,
+            bytes: bytes.to_vec(),
+        });
+        self.statics.insert(bytes.to_vec(), id);
         id
     }
     fn item(&mut self, path: &DefPath) -> ItemId {

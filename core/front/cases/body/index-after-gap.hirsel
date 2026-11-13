@@ -1,0 +1,2 @@
+// expect: gap function, constant and module values are not built
+fn f(mut xs: List[u8], i: u64) { let s = int; xs[i] = 1u8 }

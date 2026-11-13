@@ -115,168 +115,80 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
         )
     }
-    /// A byte-string literal is not static: it has type `Result[Bytes, Capacity]`,
-    /// admits its length as `List[u8]` storage and copies its bytes (core.md,
-    /// "Literals"). The empty literal admits nothing and cannot fail, like
-    /// `list.with_capacity(0)`.
-    fn byte_string(&mut self, n: NodeId) -> (TyId, Option<ValueId>) {
+    /// A string or byte-string literal is static (core.md "Literals"): a `String` or a
+    /// `Bytes` (`List[u8]`) whose carrier is `{static data, byte length, capacity 0}`. It
+    /// admits nothing, is never charged and cannot fail; capacity 0 owns no storage, so
+    /// its cleanup frees nothing (FORM "Strings and literals"). `""` and `b""` have a
+    /// null data pointer. Where a view of that type is expected, the literal is the view
+    /// of its frame slot.
+    fn static_literal(
+        &mut self,
+        n: NodeId,
+        bytes: bool,
+        want: Option<Want>,
+    ) -> (TyId, Option<ValueId>) {
         let p = self.p;
-        let (Some(bytes), Some(result), Some(list), Some(cap)) = (
-            byte_string_value(self.token_text(n)),
-            p.core_decl("Result"),
-            p.core_decl("List"),
-            p.core_decl("Capacity"),
-        ) else {
-            return self.gap_ty(n, "byte string literal form is not built");
+        let decl = p.core_decl(if bytes { "List" } else { "String" });
+        let (Some(data), Some(decl)) = (quoted_bytes(self.token_text(n), bytes), decl) else {
+            return self.gap_ty(n, "string literal form is not built");
         };
-        let list = self.t.mk(TyKind::Adt(list, vec![scalar(Scalar::U8)]));
-        let cap = self.t.mk(TyKind::Adt(cap, vec![]));
-        let ty = self.t.mk(TyKind::Adt(result, vec![list, cap]));
-        let (id, list_id, cap_id) = match (self.rep(ty), self.rep(list), self.rep(cap)) {
-            (Ok(Rep::Place(a)), Ok(Rep::Place(b)), Ok(Rep::Place(c))) => (a, b, c),
-            (Err(what), _, _) | (_, Err(what), _) | (_, _, Err(what)) => {
-                return self.gap_ty(n, what);
-            }
-            _ => return (ty, None),
+        let args = if bytes {
+            vec![scalar(Scalar::U8)]
+        } else {
+            vec![]
+        };
+        let ty = self.t.mk(TyKind::Adt(decl, args));
+        let viewed = want.is_some_and(|w| matches!(self.t.kind(w.ty), TyKind::View(x) if *x == ty));
+        let shown = if viewed {
+            self.t.mk(TyKind::View(ty))
+        } else {
+            ty
+        };
+        let id = match self.rep(ty) {
+            Ok(Rep::Place(id)) => id,
+            Err(what) => return self.gap_ty(n, what),
+            _ => return (shown, None),
         };
         if !self.live() {
-            return (ty, None);
+            return (shown, None);
         }
         let to = self.new_slot(PlaceTy::Declared(id), n);
         let u64t = Ty::Scalar(Scalar::U64);
-        let len = bytes.len() as u64;
-        let (Some(length), Some(null)) = (self.konst(u64t, len, n), self.konst(Ty::Ptr, 0, n))
-        else {
-            return (ty, None);
-        };
-        // Ok: the carrier {storage, length, capacity = length}.
-        let ok = |cx: &mut Self, block: ValueId| {
-            cx.inst(
-                Inst::SetCase {
-                    address: to,
-                    case: 0,
-                },
-                n,
-            );
-            let carrier = cx.address(
-                AddressBase::Address(to),
-                &[Step::CaseField { case: 0, field: 0 }],
-                PlaceTy::Declared(list_id),
-                n,
-            );
-            for (k, value) in [block, length, length].into_iter().enumerate() {
-                let Some(offset) = cx.konst(u64t, 8 * k as u64, n) else {
-                    return;
-                };
-                let at = cx.address(
-                    AddressBase::Address(carrier),
-                    &[Step::Byte(offset)],
-                    PlaceTy::Value(if k == 0 { Ty::Ptr } else { u64t }),
-                    n,
-                );
-                cx.inst(Inst::Store { address: at, value }, n);
-            }
-        };
-        if bytes.is_empty() {
-            ok(self, null);
+        let start = if data.is_empty() {
+            self.konst(Ty::Ptr, 0, n)
         } else {
-            let Some(charge) = self.konst(u64t, len.next_multiple_of(8), n) else {
-                return (ty, None);
+            let d = self.e.static_bytes(&data);
+            let v = self.value(Ty::Ptr);
+            self.inst(Inst::ReadStatic { result: v, data: d }, n);
+            Some(v)
+        };
+        let (Some(start), Some(length), Some(zero)) = (
+            start,
+            self.konst(u64t, data.len() as u64, n),
+            self.konst(u64t, 0, n),
+        ) else {
+            return (shown, None);
+        };
+        for (k, (value, t)) in [(start, Ty::Ptr), (length, u64t), (zero, u64t)]
+            .into_iter()
+            .enumerate()
+        {
+            let Some(offset) = self.konst(u64t, 8 * k as u64, n) else {
+                return (shown, None);
             };
-            // MEM-24: `List[u8]` storage of capacity `len`, charged rounded up to 8; the
-            // block is that rounded size so the bytes go in as whole words.
-            let block = self.value(Ty::Ptr);
-            let available = self.value(u64t);
-            self.inst(
-                Inst::Alloc {
-                    result: block,
-                    available,
-                    region_entry: None,
-                    kind: AllocKind::Plain,
-                    place: AllocPlace::Current,
-                    charge,
-                    size: charge,
-                    align: 8,
-                    fail: None,
-                },
-                n,
-            );
-            let admitted = self.value(Ty::Scalar(Scalar::Bool));
-            self.inst(
-                Inst::Compare {
-                    result: admitted,
-                    op: CompareOp::Ne,
-                    left: block,
-                    right: null,
-                },
-                n,
-            );
-            let (yes, no, join) = (
-                self.new_block(&[]),
-                self.new_block(&[]),
-                self.new_block(&[]),
-            );
-            let (ye, ne) = (self.edge(yes, &[]), self.edge(no, &[]));
-            self.end(
-                Terminator::Branch {
-                    condition: admitted,
-                    yes: ye,
-                    no: ne,
-                },
-                Some(n),
-            );
-            self.start(yes);
-            // The bytes as little-endian words (memory.md: scalars are little-endian),
-            // the last one zero-padded inside the rounded block.
-            for (k, word) in bytes.chunks(8).enumerate() {
-                let mut w = [0u8; 8];
-                w[..word.len()].copy_from_slice(word);
-                let (Some(offset), Some(value)) = (
-                    self.konst(u64t, 8 * k as u64, n),
-                    self.konst(u64t, u64::from_le_bytes(w), n),
-                ) else {
-                    return (ty, None);
-                };
-                let at = self.address(
-                    AddressBase::Value(block),
-                    &[Step::Byte(offset)],
-                    PlaceTy::Value(u64t),
-                    n,
-                );
-                self.inst(Inst::Store { address: at, value }, n);
-            }
-            ok(self, block);
-            self.jump(join, &[], n);
-            // Error: `Capacity { requested, available }`.
-            self.start(no);
-            self.inst(
-                Inst::SetCase {
-                    address: to,
-                    case: 1,
-                },
-                n,
-            );
-            let err = self.address(
+            let at = self.address(
                 AddressBase::Address(to),
-                &[Step::CaseField { case: 1, field: 0 }],
-                PlaceTy::Declared(cap_id),
+                &[Step::Byte(offset)],
+                PlaceTy::Value(t),
                 n,
             );
-            for (k, value) in [charge, available].into_iter().enumerate() {
-                let at = self.address(
-                    AddressBase::Address(err),
-                    &[Step::Field(k as u32)],
-                    PlaceTy::Value(u64t),
-                    n,
-                );
-                self.inst(Inst::Store { address: at, value }, n);
-            }
-            self.jump(join, &[], n);
-            self.start(join);
+            self.inst(Inst::Store { address: at, value }, n);
         }
         let v = self.pointer(to, n);
-        self.temp(ty, Some(v));
-        (ty, Some(v))
+        if !viewed {
+            self.temp(ty, Some(v));
+        }
+        (shown, Some(v))
     }
     pub(super) fn literal(
         &mut self,
@@ -360,8 +272,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 };
                 (s, float_bits(s, if negate { -x } else { x }))
             }
-            Some(TokenKind::Bytes) => return self.byte_string(n),
-            Some(TokenKind::String) => return self.gap_ty(n, "string literals are not built"),
+            Some(TokenKind::Bytes) => return self.static_literal(n, true, want),
+            Some(TokenKind::String) => return self.static_literal(n, false, want),
             _ => return self.gap_ty(n, "literal form is not built"),
         };
         let v = self.konst(Ty::Scalar(ty), bits, n);
@@ -927,17 +839,23 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
 }
 
-/// The bytes a `b".."` or raw `br#".."#` spelling denotes (syntax.md: a byte escape is
-/// one of `\n \t \r \0 \\ \" \'` or `\xNN` of any byte; a raw body is its source
-/// bytes). The lexer has refused every malformed spelling; None marks one anyway.
-fn byte_string_value(spelling: &str) -> Option<Vec<u8>> {
-    if let Some(raw) = spelling.strip_prefix("br") {
+/// The bytes a quoted literal denotes (syntax.md): `".."`, `r#".."#`, and with `bytes`
+/// `b".."`, `br#".."#`. Escapes are `\n \t \r \0 \\ \" \'` and `\xNN` (any byte in
+/// byte strings), and in strings `\u{..}` as UTF-8; a raw body is its source bytes. The
+/// lexer has refused every malformed spelling; None marks one anyway.
+fn quoted_bytes(spelling: &str, bytes: bool) -> Option<Vec<u8>> {
+    let spelling = if bytes {
+        spelling.strip_prefix('b')?
+    } else {
+        spelling
+    };
+    if let Some(raw) = spelling.strip_prefix('r') {
         let hashes = raw.len() - raw.trim_start_matches('#').len();
         let body = raw[hashes..].strip_prefix('"')?;
         let body = body.strip_suffix(&raw[..hashes])?.strip_suffix('"')?;
         return Some(body.as_bytes().to_vec());
     }
-    let body = spelling.strip_prefix("b\"")?.strip_suffix('"')?.as_bytes();
+    let body = spelling.strip_prefix('"')?.strip_suffix('"')?.as_bytes();
     let mut out = Vec::with_capacity(body.len());
     let mut i = 0;
     while i < body.len() {
@@ -956,6 +874,14 @@ fn byte_string_value(spelling: &str) -> Option<Vec<u8>> {
                 let hex = std::str::from_utf8(body.get(i + 2..i + 4)?).ok()?;
                 i += 2;
                 u8::from_str_radix(hex, 16).ok()?
+            }
+            b'u' if !bytes => {
+                let close = i + body[i..].iter().position(|&c| c == b'}')?;
+                let hex = std::str::from_utf8(body.get(i + 3..close)?).ok()?;
+                let c = char::from_u32(u32::from_str_radix(hex, 16).ok()?)?;
+                out.extend_from_slice(c.encode_utf8(&mut [0; 4]).as_bytes());
+                i = close + 1;
+                continue;
             }
             _ => return None,
         };

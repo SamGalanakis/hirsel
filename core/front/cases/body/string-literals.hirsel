@@ -1,0 +1,36 @@
+// core.md "Literals", SEM-7: a string literal is a static String (capacity 0, nothing
+// admitted, so every run ends with used 0); `\u{..}` is UTF-8. Text order is bytewise over
+// unsigned bytes with a proper prefix first, also inside a record. Hand-derived: "\u{80}"
+// is C2 80, after "\x7f"; "\u{1f40f}" is F0 9F 90 8F, after C2 80; "\x41" is "A"; "" is
+// before everything.
+// expect: run lt(0,1) = true
+// expect: run lt(2,1) = false
+// expect: run lt(1,1) = false
+// expect: run le(1,1) = true
+// expect: run lt(3,0) = true
+// expect: run lt(4,5) = true
+// expect: run eq(1,1) = true
+// expect: run eq(0,1) = false
+// expect: run eq(3,3) = true
+// expect: run rec_lt(2,3) = true
+// expect: run rec_lt(3,2) = false
+// expect: run rec_gt(0) = true
+// expect: run bytes_lt(0) = true
+// expect: run escapes(0) = true
+// expect: run viewed(0) = true
+// expect: run viewed(1) = false
+type N: key + ordered { name: String, k: u64 }
+fn pick(k: u64) -> String {
+  if k == 0 { "ab" } else if k == 1 { "abc" } else if k == 2 { "abd" } else if k == 3 { "" } else if k == 4 { "\x7f" } else { "\u{80}" }
+}
+fn escapes(x: u64) -> bool { "\u{1f40f}" > "\u{80}" && "\x41" == "A" && "a\tb" != "a\\tb" }
+fn lt(a: u64, b: u64) -> bool { pick(a) < pick(b) }
+fn le(a: u64, b: u64) -> bool { pick(a) <= pick(b) }
+fn eq(a: u64, b: u64) -> bool { pick(a) == pick(b) }
+fn rec_lt(a: u64, b: u64) -> bool { N(name: "ab", k: a) < N(name: "ab", k: b) }
+fn rec_gt(x: u64) -> bool { N(name: "b", k: x) > N(name: "ab", k: 9) }
+fn bytes_lt(x: u64) -> bool { b"ab" < b"abc" && b"\xff" > b"\x7f\xff" }
+fn viewed(x: u64) -> bool {
+  let s: View[String] = "ab"
+  if x == 0 { s < "abc" } else { s > "abc" }
+}

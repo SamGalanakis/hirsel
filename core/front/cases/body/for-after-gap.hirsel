@@ -1,9 +1,9 @@
-// expect: gap string literals are not built
+// expect: gap function, constant and module values are not built
 fn f(xs: List[u64]) {
-  let s: View[String] = "x"
+  let s = int
   for _ in xs {}
 }
 fn index_after_gap(mut xs: List[u64]) {
-  let s: View[String] = "x"
+  let s = int
   xs[0] = 1
 }

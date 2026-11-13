@@ -1,4 +1,9 @@
 // SEM-7: a view compares by its payload, so a `View[String]` and a `String` are one
 // operand type for `==` and `<` (LANG-21).
-// expect: gap comparison of this type is not built
+// expect: run go(0) = true
+// expect: run go(1) = false
 fn same(v: View[String], s: String) -> bool { v == s }
+fn go(x: u64) -> bool {
+  let s = "ab"
+  if x == 0 { same(view s, "ab") } else { same(view s, "ac") }
+}

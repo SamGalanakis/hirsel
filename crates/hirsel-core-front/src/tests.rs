@@ -1213,30 +1213,30 @@ fn f{entry} = n{instance} g{g} {{
 #[test]
 fn emission_halts_but_typing_continues() {
     let programs = [
-        "fn f(mut xs: List[u8], i: u64) { let s = \"\"; xs[i] = 1u8 }",
-        "fn f(xs: List[u64]) -> u64 { let s = \"\"; xs[0] }",
-        "fn f(xs: List[u64]) { let s = \"\"; for x in xs { let n = x + 1 } }",
-        "fn f(take xs: List[u64]) { let s = \"\"; for take x in xs {} }",
-        "fn f(xs: Map[u64,u64]) { let s = \"\"; for (k,v) in xs {} }",
-        "fn f(xs: FixedSpan[u64]) -> u64 { let s = \"\"; xs[0] }",
-        "fn f(xs: FixedSpan[u64]) { let s = \"\"; for x in xs {} }",
-        "fn f(xs: SeqSpan[u64]) -> u64 { let s = \"\"; seq.len(xs) }",
-        "fn f(xs: SeqSpan[u64]) { let s = \"\"; let x = seq.nth(xs, 0) }",
-        "fn f(xs: List[u64]) { for x in xs { let s = \"\" } }",
-        "fn f() { let s = \"\"; for x in 0u64..=3 {} }",
-        "fn f() { for x in 0u64..=3 { let s = \"\"; continue } }",
-        "fn f() -> u64 { let s = \"\"; [7u64,11u64][0] }",
-        "fn f() { let s = \"\"; let a = [1u64; 3] }",
-        "fn f() { let s = \"\"; let n: u8 = int.narrow(1u64) }",
-        "fn f() { let s = \"\"; let n: Option[u8] = int.try_narrow(1u64) }",
-        "fn f() { let s = \"\"; let n = int.wrapping_shl(1u64, 3) }",
-        "fn f() { let s = \"\"; let n = int.checked_add(1u64, 3) }",
-        "fn f() { let s = \"\"; let n = int.leading_zeros(1u64) }",
-        "fn f() { let s = \"\"; let n = int.mul_wide(1u64, 3u64) }",
-        "fn f() { let s = \"\"; let n: Result[u8, FloatError] = float.to_int(1.0f64) }",
-        "fn f() { let s = \"\"; let n = float.total_order(1.0f64, 2.0f64) }",
-        "fn f() { let s = \"\"; let n = float.mul_add(1.0f64, 2.0f64, 3.0f64) }",
-        "fn f() { let s = \"\"; let n = float.to_bits64(1.0f64) }",
+        "fn f(mut xs: List[u8], i: u64) { let s = int; xs[i] = 1u8 }",
+        "fn f(xs: List[u64]) -> u64 { let s = int; xs[0] }",
+        "fn f(xs: List[u64]) { let s = int; for x in xs { let n = x + 1 } }",
+        "fn f(take xs: List[u64]) { let s = int; for take x in xs {} }",
+        "fn f(xs: Map[u64,u64]) { let s = int; for (k,v) in xs {} }",
+        "fn f(xs: FixedSpan[u64]) -> u64 { let s = int; xs[0] }",
+        "fn f(xs: FixedSpan[u64]) { let s = int; for x in xs {} }",
+        "fn f(xs: SeqSpan[u64]) -> u64 { let s = int; seq.len(xs) }",
+        "fn f(xs: SeqSpan[u64]) { let s = int; let x = seq.nth(xs, 0) }",
+        "fn f(xs: List[u64]) { for x in xs { let s = int } }",
+        "fn f() { let s = int; for x in 0u64..=3 {} }",
+        "fn f() { for x in 0u64..=3 { let s = int; continue } }",
+        "fn f() -> u64 { let s = int; [7u64,11u64][0] }",
+        "fn f() { let s = int; let a = [1u64; 3] }",
+        "fn f() { let s = int; let n: u8 = int.narrow(1u64) }",
+        "fn f() { let s = int; let n: Option[u8] = int.try_narrow(1u64) }",
+        "fn f() { let s = int; let n = int.wrapping_shl(1u64, 3) }",
+        "fn f() { let s = int; let n = int.checked_add(1u64, 3) }",
+        "fn f() { let s = int; let n = int.leading_zeros(1u64) }",
+        "fn f() { let s = int; let n = int.mul_wide(1u64, 3u64) }",
+        "fn f() { let s = int; let n: Result[u8, FloatError] = float.to_int(1.0f64) }",
+        "fn f() { let s = int; let n = float.total_order(1.0f64, 2.0f64) }",
+        "fn f() { let s = int; let n = float.mul_add(1.0f64, 2.0f64, 3.0f64) }",
+        "fn f() { let s = int; let n = float.to_bits64(1.0f64) }",
     ];
     for source in programs {
         let (index, inputs) = program_inputs(source);
@@ -1249,13 +1249,13 @@ fn emission_halts_but_typing_continues() {
             check
                 .gaps
                 .iter()
-                .any(|g| g.what == "string literals are not built"),
+                .any(|g| g.what == "function, constant and module values are not built"),
             "{source}: {:?}",
             check.gaps
         );
         assert!(check.function.is_none(), "{source}: emitted past a gap");
     }
-    let source = "fn f() { let s = \"\"; let n: u8 = int.widen(1u64) }";
+    let source = "fn f() { let s = int; let n: u8 = int.widen(1u64) }";
     let (index, inputs) = program_inputs(source);
     let p = Program::declare(&index, &inputs);
     let f = p.fns.iter().position(|f| f.path.0.name == "f").unwrap();

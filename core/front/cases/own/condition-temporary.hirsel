@@ -1,5 +1,5 @@
 // OWN-8, OWN-10: a temporary in an `if` condition ends once the condition is evaluated, so
 // the view `s == s` reads does not outlive the condition and the branch may move `s`.
-// expect: gap comparison of this type is not built
+// expect: accept
 fn eat(take s: String) {}
 fn f(take s: String) { if s == s { eat(take s) } }

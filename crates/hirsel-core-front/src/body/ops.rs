@@ -334,7 +334,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                             if self.copies(x) {
                                 self.read_plain_view(x, value, e)
                             } else {
-                                None
+                                value
                             },
                         )
                     }
@@ -351,7 +351,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                             if self.copies(x) {
                                 self.read_plain_view(x, v, e)
                             } else {
-                                None
+                                v
                             },
                         )
                     }
@@ -360,12 +360,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             Err(()) => return (ERROR, None),
         };
+        // A moving operand is read through a pointer to its payload (SEM-7).
         self.use_place(at, Use::View(Hold::View(Extent::Temp)), e);
-        let t = match self.t.kind(at.ty) {
-            TyKind::View(x) => *x,
-            _ => at.ty,
+        let (t, view) = match self.t.kind(at.ty) {
+            TyKind::View(x) => (*x, at.ty),
+            _ => (at.ty, self.t.mk(TyKind::View(at.ty))),
         };
-        (t, None)
+        (t, self.view_of(at, view, e))
     }
     pub(super) fn second_operand(&mut self, n: NodeId, r: NodeId, t: TyId) -> Option<ValueId> {
         if !self.synthesises(r) {

@@ -1,2 +1,0 @@
-// expect: gap string literals are not built
-fn f(mut xs: List[u8], i: u64) { let s = ""; xs[i] = 1u8 }

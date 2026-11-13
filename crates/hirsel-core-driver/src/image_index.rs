@@ -1,4 +1,4 @@
-//! Indexed package records: fixed-depth numeric arrays and bounded hash buckets.
+//! Indexed package records: bounded-depth numeric arrays and bounded hash buckets.
 //! Every pointer and absence is covered by immutable content-addressed roots.
 use super::*;
 use hirsel_core_ids::published::{Descriptor, Map, Publisher, Source, Table};
@@ -20,7 +20,7 @@ fn row_pages(store: &Store, rows: &[Vec<u8>]) -> io::Result<ContentHash> {
         bytes[chunk.len() * 8..(chunk.len() + 1) * 8].copy_from_slice(&end.to_le_bytes());
         pages.push((i as u32, store.put(&bytes)?));
     }
-    array(store, &pages, 28)
+    array(store, &pages, array_shift(pages.last().map_or(0, |p| p.0)))
 }
 // The private index codec is fixed-width little-endian bincode. Four words
 // have exactly the old 32-byte representation, with fewer serde visits.
@@ -51,6 +51,9 @@ enum Node {
         salt: u32,
     },
     Bucket(Vec<(IndexHash, u32)>),
+}
+fn array_shift(maximum: u32) -> u32 {
+    (31 - maximum.max(1).leading_zeros()) / 4 * 4
 }
 fn array(store: &Store, entries: &[(u32, ContentHash)], shift: u32) -> io::Result<ContentHash> {
     let mut children = [None; 16];
@@ -106,7 +109,7 @@ fn names(store: &Store, entries: &[(ContentHash, u32)]) -> io::Result<ContentHas
                     ));
                 }
             }
-            let buckets = array(store, &rows, 28)?;
+            let buckets = array(store, &rows, array_shift(mask))?;
             return store.put(&encode(&Node::Names {
                 buckets: buckets.into(),
                 mask,
@@ -149,10 +152,9 @@ impl DiskIndex {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(node)
     }
-    fn at(&self, mut root: ContentHash, index: u32) -> io::Result<Option<ContentHash>> {
-        // Eight 4-bit pages address every possible u32 row. No binary search,
-        // full-prefix digest or variable-depth walk over a package's size.
-        for shift in (0..=28).rev().step_by(4) {
+    fn at(&self, mut root: ContentHash, index: u32, shift: u32) -> io::Result<Option<ContentHash>> {
+        // Omit leading zero digits. At most eight pages cover every u32 index.
+        for shift in (0..=shift).rev().step_by(4) {
             let node = self.node(root)?;
             let Node::Array(children) = node.as_ref() else {
                 return Err(miss());
@@ -177,7 +179,11 @@ impl Source for DiskIndex {
             return Err(miss());
         }
         let hash = self
-            .at(table.rows, index / ROWS_PER_PAGE as u32)?
+            .at(
+                table.rows,
+                index / ROWS_PER_PAGE as u32,
+                array_shift((table.len - 1) / ROWS_PER_PAGE as u32),
+            )?
             .ok_or_else(miss)?;
         let cached = self.pages.lock().unwrap().get(&hash).cloned();
         let page = if let Some(page) = cached {
@@ -212,7 +218,12 @@ impl Source for DiskIndex {
         else {
             return Err(miss());
         };
-        let Some(hash) = self.at((*buckets).into(), bucket_index(key, *mask, *salt))? else {
+        let Some(hash) = self.at(
+            (*buckets).into(),
+            bucket_index(key, *mask, *salt),
+            array_shift(*mask),
+        )?
+        else {
             return Ok(None);
         };
         let bucket = self.node(hash)?;
@@ -300,6 +311,27 @@ impl Publisher for Writer<'_> {
 mod tests {
     use super::*;
     #[test]
+    fn one_record_uses_no_leading_zero_directory_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = DiskIndex::new(dir.path()).unwrap();
+        let rows = row_pages(&source.store, &[encode(&19u64).unwrap()]).unwrap();
+        let table = Descriptor {
+            namespace: ContentHash::default(),
+            table: 0,
+            len: 1,
+            rows,
+            lookup: ContentHash::default(),
+        };
+        assert_eq!(
+            decode::<u64>(&Source::row(&source, table, 0).unwrap()),
+            Some(19)
+        );
+        assert!(
+            source.decoded_nodes() <= 1,
+            "a single row needs only one directory page"
+        );
+    }
+    #[test]
     fn index_digest_words_preserve_the_existing_fixed_bytes() {
         let hash = ContentHash(std::array::from_fn(|i| i as u8));
         assert_eq!(encode(&IndexHash::from(hash)).unwrap(), hash.0);
@@ -352,7 +384,7 @@ mod tests {
             bytes[..8].copy_from_slice(&start.to_le_bytes());
             bytes[8..16].copy_from_slice(&end.to_le_bytes());
             let page = source.store.put(&bytes).unwrap();
-            let rows = array(&source.store, &[(0, page)], 28).unwrap();
+            let rows = array(&source.store, &[(0, page)], 0).unwrap();
             let table = Descriptor {
                 namespace: ContentHash::default(),
                 table: 0,

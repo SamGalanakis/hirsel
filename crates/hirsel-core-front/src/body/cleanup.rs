@@ -28,6 +28,11 @@ pub(super) struct Temp {
     pub avail: Avail,
     /// Its drop flag, when arms of a match may or may not take it (OWN-18).
     pub flag: Option<AddressId>,
+    /// A view into it was made ([`Cx::reach_temporary`]).
+    pub reached: bool,
+    /// A `let` binding's value reaches it: it lives to the binding's block exit, not
+    /// its statement's end (LANG-6).
+    pub held: bool,
 }
 /// What the cleanup being emitted has already done on its edge, for the failure block
 /// of a drop that runs code (FAIL-9, FAIL-12): owners from `from` on are cleaned,
@@ -96,6 +101,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 id,
                 avail: Avail::Live,
                 flag: None,
+                reached: false,
+                held: false,
             }));
             self.changed();
         }
@@ -106,6 +113,32 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.owners
             .iter()
             .rposition(|o| matches!(o, Owner::Temp(t) if t.value == v && t.avail == Avail::Live))
+    }
+    /// LANG-6's reach hook: a view into the live temporary owner `v` (a field or an
+    /// element of a call result, say) was made. The temporary lives to the end of its
+    /// statement as any other; when a `let` binds a scoped value whose evaluation
+    /// reached it, [`Cx::hold_reached`] keeps it as long as that binding.
+    pub(super) fn reach_temporary(&mut self, v: Option<ValueId>) {
+        if let Some(i) = self.temp_index(v)
+            && let Owner::Temp(t) = &mut self.owners[i]
+        {
+            t.reached = true;
+            self.changed();
+        }
+    }
+    /// A `let` binds a scoped value: the reached temporaries begun since `mark` live to
+    /// its block's exit and are cleaned there, after the binding (LANG-6).
+    pub(super) fn hold_reached(&mut self, mark: usize) {
+        let mark = mark.min(self.owners.len());
+        for o in &mut self.owners[mark..] {
+            if let Owner::Temp(t) = o
+                && t.reached
+                && t.avail == Avail::Live
+            {
+                t.held = true;
+            }
+        }
+        self.changed();
     }
     /// A consumer takes `v`: when it is a temporary, nothing cleans it any more.
     pub(super) fn consume(&mut self, v: Option<ValueId>, n: NodeId) {
@@ -480,6 +513,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Owner::Drain { .. } => false,
             Owner::Temp(t) if Some(t.value) == edge.keep => edge.pending.is_some(),
             Owner::Slot(_) if edge.temps => false,
+            Owner::Temp(t) if edge.temps && t.held => false,
             _ => i >= edge.from,
         };
         let mut top = self.owners.len();
@@ -549,6 +583,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             match o {
                 Owner::Temp(t) if Some(t.value) == keep && t.avail == Avail::Live => kept.push(o),
                 Owner::Slot(_) if temps => kept.push(o),
+                Owner::Temp(t) if temps && t.held => kept.push(o),
                 _ => {
                     self.edge = Some(Edge {
                         from: i,

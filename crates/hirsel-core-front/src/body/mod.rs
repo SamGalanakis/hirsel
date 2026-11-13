@@ -1467,6 +1467,8 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 id,
                 avail: Avail::Live,
                 flag: None,
+                reached: false,
+                held: false,
             }));
             self.epoch += 1;
         }

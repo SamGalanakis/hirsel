@@ -1,0 +1,27 @@
+// OWN-8, LANG-6: a field of a temporary owner that does not copy is a view of it, read in
+// place. The temporary lives to the end of its statement, and as long as a `let` binding
+// whose value reaches it: freeing it at the statement's end leaves `v` dangling.
+// expect: accept
+// expect: run direct() = 7
+// expect: run held() = 12
+// expect: run nested() = 25
+type P { xs: List[u64], n: u64 }
+fn mk(x: u64) -> P {
+    let mut xs: List[u64] = list.new()
+    result.unwrap(list.push(mut xs, x))
+    P(xs: take xs, n: 1)
+}
+fn direct() -> u64 { mk(7).xs[0] }
+fn held() -> u64 {
+    let v = mk(11).xs
+    let w = mk(5).n
+    v[0] + w
+}
+fn nested() -> u64 {
+    let v = mk(20).xs
+    let k: u64 = {
+        let u = mk(4).xs
+        u[0]
+    }
+    v[0] + k + list.len(v)
+}

@@ -456,16 +456,16 @@ impl Cx<'_, '_, '_> {
         let Some((i, ft)) = found else {
             return self.gap_ty(n, "this field access is not built");
         };
-        if !view && !self.copies(inner) {
-            return self.gap_ty(n, "a field of a temporary owner is not built");
-        }
+        // A temporary owner is read in place: a field that does not copy is a view of
+        // it, which reaches the temporary (LANG-6, OWN-8).
+        let owner = !view && !self.copies(inner);
         let compact = self.compact_adt(inner).is_some();
         let held = self.rep(base).ok().and_then(Rep::pointee);
         if !compact && held.is_none() {
             return self.gap_ty(n, "a field of this temporary is not built");
         }
         let ft = self.linked(ft);
-        let ty = if (view || stable)
+        let ty = if (view || stable || owner)
             && !self.copies(ft)
             && !matches!(self.t.kind(ft), TyKind::View(_))
         {
@@ -488,7 +488,12 @@ impl Cx<'_, '_, '_> {
             };
             match self.rep(ft).ok()? {
                 r @ Rep::Scalar(_) => Some(self.read_bits(address, r.ty()?, n)),
-                Rep::Place(_) if ty != ft => Some(self.pointer(address, n)),
+                Rep::Place(_) if ty != ft => {
+                    if owner {
+                        self.reach_temporary(Some(v));
+                    }
+                    Some(self.pointer(address, n))
+                }
                 Rep::Place(id) => {
                     let p = self.pointer(address, n);
                     Some(self.snapshot(p, id, n))

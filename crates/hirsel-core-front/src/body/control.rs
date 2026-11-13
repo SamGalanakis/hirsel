@@ -94,10 +94,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return self.destructure_let(s, pat, value, declared, rest.first().copied());
         }
         let freezes = self.freezes.len();
+        let owners = self.owner_mark();
         let (t, v) = self.expr(value, declared.and_then(expect));
         let ty = declared.unwrap_or(t);
-        // A let-bound view lasts to the end of its block (OWN-8).
+        // A let-bound view lasts to the end of its block (OWN-8), and so do the
+        // temporaries it reaches (LANG-6).
         if crate::decls::kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Scoped {
+            self.hold_reached(owners);
             let d = self.depth;
             self.unfreeze(freezes, |h| {
                 Some(if h == Hold::View(Extent::Temp) {

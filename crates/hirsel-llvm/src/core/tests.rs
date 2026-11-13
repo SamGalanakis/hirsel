@@ -191,6 +191,16 @@ fn execute_optimized(
     configuration: &str,
     optimization: Optimization,
 ) -> Vec<NativeReport> {
+    execute_object(module, cases, bindings, configuration, optimization, None)
+}
+fn execute_object(
+    module: &Module,
+    cases: &[Case],
+    bindings: &str,
+    configuration: &str,
+    optimization: Optimization,
+    object: Option<Vec<u8>>,
+) -> Vec<NativeReport> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
         "hirsel-core-llvm-{}-{}",
@@ -214,7 +224,9 @@ fn execute_optimized(
     let context = Context::new();
     let llvm = LlvmModule::parse(&context, "test", &ir).unwrap();
     llvm.verify().unwrap_or_else(|e| panic!("{e}\n{ir}"));
-    let bytes = emit_object_with_charge_observation(module, optimization, observing).unwrap();
+    let bytes = object.unwrap_or_else(|| {
+        emit_object_with_charge_observation(module, optimization, observing).unwrap()
+    });
     std::fs::write(dir.join("core.o"), bytes).unwrap();
     let mut c = String::from(
         "#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\n#include <assert.h>\n#include \"hirsel_core_rt.h\"\nextern uint64_t hirsel_core_test_available(const HirselCoreContext *);\nextern HirselCoreContext *hirsel_core_test_context_new(uint64_t);\nextern void hirsel_core_test_inject(HirselCoreContext *,size_t,bool);\nextern size_t hirsel_core_test_attempts(const HirselCoreContext *);\nstatic uint64_t trace[4096]; static size_t traces;\nvoid hirsel_core_test_drop_trace(uint64_t n){assert(traces<4096);trace[traces++]=n;}\nstatic float f32(uint32_t b){float x;memcpy(&x,&b,4);return x;}\nstatic double f64(uint64_t b){double x;memcpy(&x,&b,8);return x;}\nstatic const char *causes[]={\"Overflow\",\"Bounds\",\"Division\",\"Unwrap\",\"Fail\",\"Cancelled\",\"Capacity\"};\n",
@@ -1994,4 +2006,55 @@ fn dynamic_overflow_and_local_like_admissions_keep_exact_refusal_counts() {
         assert!(got.trace.is_empty());
     }
     println!("null-Like native admission cases: {}", null_cases.len());
+}
+
+#[test]
+fn private_register_results_keep_the_public_destination_and_failure_abi() {
+    // A 24-byte destination plus status keeps the ordinary destination ABI.
+    for (source, function) in [
+        (
+            include_str!("../../tests/core_runtime/forward.core"),
+            FuncId(0),
+        ),
+        (
+            include_str!("../../tests/core_runtime/register.core"),
+            FuncId(0),
+        ),
+        (
+            include_str!("../../../hirsel-core-ir/samples/failure.core"),
+            FuncId(1),
+        ),
+    ] {
+        let module = text::parse(source).unwrap();
+        wf::module(&module).unwrap();
+        let ir = emit_ir(&module).unwrap();
+        let exports = module
+            .functions
+            .iter()
+            .enumerate()
+            .map(|(i, _)| symbol(&module, FuncId(i as u32)))
+            .collect::<Vec<_>>();
+        let bytes = hirsel_llvm_lazy::emit_program(
+            &[hirsel_llvm_lazy::Unit {
+                ir: &ir,
+                imported: false,
+            }],
+            &exports,
+        )
+        .unwrap();
+        let cases = [0, 1, 2, 3, 123].map(|value| Case {
+            function,
+            args: vec![value],
+            limit: u64::MAX,
+            injection: None,
+        });
+        let got = execute_object(&module, &cases, "", "", Optimization::None, Some(bytes));
+        assert_eq!(got.len(), cases.len());
+        for (case, actual) in cases.iter().zip(got) {
+            let expected = eval::run(&module, case.function, &case.args, case.limit);
+            assert_eq!(actual.outcome, expected.outcome);
+            assert_eq!(actual.used, expected.used);
+            assert_eq!(actual.trace, expected.trace);
+        }
+    }
 }

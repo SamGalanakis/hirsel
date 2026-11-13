@@ -213,9 +213,24 @@ fn emit_ir_with_facts(module: &Module, observe_charge: bool, facts: bool) -> Res
         } else {
             format!("{name}.infallible")
         };
+        let destination = sig
+            .dest
+            .filter(|_| sig.results.is_empty())
+            .and_then(|t| {
+                use hirsel_core_layout::{Layout, Repr};
+                match (module.types[t.index()].repr, &recipes[t.index()].layout) {
+                    (Repr::Resource | Repr::Stable, _) | (_, Layout::Fixed(_)) => {
+                        let (bytes, _) = e.place_layout(PlaceTy::Declared(t));
+                        matches!(bytes, 1..=16)
+                            .then(|| format!(" \"hirsel-destination-size\"=\"{bytes}\""))
+                    }
+                    _ => None,
+                }
+            })
+            .unwrap_or_default();
         writeln!(
             text,
-            "define {linkage}{} @{body_name}({}) {{\nentry:\n{}{} }}",
+            "define {linkage}{} @{body_name}({}){destination} {{\nentry:\n{}{} }}",
             e.abi.return_type(),
             params.join(", "),
             e.allocations,

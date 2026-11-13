@@ -1624,3 +1624,56 @@ fn joined_cause_views_use_core_layout() {
         Some(&[expected]),
     );
 }
+
+#[test]
+fn dynamic_overflow_and_local_like_admissions_keep_exact_refusal_counts() {
+    let module = text::parse(include_str!("support/inline-admission.core")).unwrap();
+    for function in 0..3 {
+        for charge in [0, 8, 40, 72, u64::MAX] {
+            for overflow in [0, 1] {
+                let run = (FuncId(function), vec![charge, overflow]);
+                execute_limit(&module, std::slice::from_ref(&run), false, 64);
+                let baseline = eval::run(&module, run.0, &run.1, 64);
+                for nth in 1..=baseline.admissions {
+                    for later in [false, true] {
+                        execute_injected(
+                            &module,
+                            std::slice::from_ref(&run),
+                            false,
+                            64,
+                            Some((nth, later)),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    // The evaluator requires a real block for Like; the native ABI also accepts
+    // null as Current. Derive this plain null-Like case directly from its budget.
+    for charge in [0, 8, 40, 72, u64::MAX] {
+        for overflow in [0, 1] {
+            for injection in [None, Some((1, false)), Some((1, true))] {
+                let success = overflow == 0 && charge <= 64 && injection.is_none();
+                let expected = eval::Report {
+                    outcome: Outcome::Returned(vec![
+                        u64::from(success),
+                        if success { 0 } else { 64 },
+                    ]),
+                    used: 0,
+                    trace: vec![],
+                    admissions: 1,
+                    stdout: vec![],
+                    stderr: vec![],
+                };
+                execute_reports(
+                    &module,
+                    &[(FuncId(3), vec![charge, overflow])],
+                    false,
+                    64,
+                    injection,
+                    Some(&[expected]),
+                );
+            }
+        }
+    }
+}

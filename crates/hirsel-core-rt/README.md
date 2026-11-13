@@ -183,3 +183,19 @@ queued entries to their new owner without delivering them. Live records and the
 bound cache pin inbox metadata; zero-pin inboxes enter an intrusive reap list
 and are removed under the next local mailbox lock. Metadata therefore follows
 live records and task registrations rather than historical task IDs.
+
+Ordinary emitted allocation tests a dynamic overflow flag's value, then admits a
+positive charge directly from the canonical current record. A null Like uses
+current; a nonnull Like does so only when its untagged payer equals current.
+Real overflow, shortage, zero charge and foreign Like use hirsel_core_alloc
+once, preserving refusal events and original-payer funding. Test injection probes
+only a fitting admission, without double-counting a cold-path attempt.
+
+Ordinary free compares the raw word with current, allowing only native plain or
+GRAPH tags at the ordinary alignment. That proves both refund target and prefix
+size; it refunds directly and frees the selected native base. Other layouts and
+payers retain free_value and the owner-event mailbox rules. abi_layout.rs is the
+shared definition; no source variant/niche tag is involved. The physical native
+allocator splits over-alignment into a cold helper. Its ordinary branch retains
+the same malloc/mi_malloc calls and their at-least-16-byte returned alignment;
+its size-only Layout does not round an already valid size up again.

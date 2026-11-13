@@ -78,6 +78,7 @@ impl Function<'_, '_, '_> {
         size: Value,
         align: u64,
         charge: Value,
+        overflow: Option<Value>,
     ) -> Result<[Value; 2]> {
         let slow = self.cold_block();
         let fast = self.b.create_block();
@@ -85,6 +86,11 @@ impl Function<'_, '_, '_> {
         self.b.append_block_param(done, types::I64);
         self.b.append_block_param(done, types::I64);
         let payer = self.current_limit();
+        let like = match place {
+            AllocPlace::Like(v) => Some(self.get(v)),
+            _ => None,
+        };
+
         let alignment = align.max(8);
         let prefix = if kind == AllocKind::Plain {
             memory_layout::PLAIN_PREFIX_BYTES
@@ -107,6 +113,8 @@ impl Function<'_, '_, '_> {
             },
         );
         let fallback = self.b.ins().bor(zero_charge, too_large);
+        let overflow = overflow.unwrap_or_else(|| self.b.ins().iconst(types::I8, 0));
+        let fallback = self.b.ins().bor(fallback, overflow);
         let eligible = self.b.create_block();
         let fallback = if alignment > 512 {
             self.b.ins().iconst(types::I8, 1)
@@ -115,10 +123,6 @@ impl Function<'_, '_, '_> {
         };
         self.b.ins().brif(fallback, slow, &[], eligible, &[]);
         self.b.switch_to_block(eligible);
-        let like = match place {
-            AllocPlace::Like(v) => Some(self.get(v)),
-            _ => None,
-        };
         if let Some(like) = like {
             // This operand is an owned block, not a collection carrier. A producer
             // with capacity zero selects Current even when data is a static pointer.
@@ -142,10 +146,29 @@ impl Function<'_, '_, '_> {
             self.b.ins().jump(fast, &[]);
         }
         self.b.switch_to_block(fast);
-        let (fits, available) = self.admission(payer, charge)?;
+        let available = self.load_word(payer, memory_layout::LIMIT_AVAILABLE);
+        let fits = self
+            .b
+            .ins()
+            .icmp(IntCC::UnsignedLessThanOrEqual, charge, available);
+        let probe = self.b.create_block();
         let allocate = self.b.create_block();
         let refused = self.cold_block();
-        self.b.ins().brif(fits, allocate, &[], refused, &[]);
+        self.b.ins().brif(fits, probe, &[], slow, &[]);
+        self.b.switch_to_block(probe);
+        if self.testing {
+            // The test-only probe emits an injected refusal event and counts the
+            // attempt once. Real shortages reached the ordinary cold allocator.
+            let allowed = self.c_call(
+                "hirsel_core_test_probe_admission",
+                &[P, U],
+                &[B],
+                &[self.context, charge],
+            )?[0];
+            self.b.ins().brif(allowed, allocate, &[], refused, &[]);
+        } else {
+            self.b.ins().jump(allocate, &[]);
+        }
         self.b.switch_to_block(refused);
         let null = self.b.ins().iconst(types::I64, 0);
         self.b.ins().jump(done, &[null.into(), available.into()]);
@@ -170,13 +193,20 @@ impl Function<'_, '_, '_> {
         self.b.switch_to_block(slow);
         let like = like.unwrap_or_else(|| self.b.ins().iconst(types::I64, 0));
         let align_value = self.b.ins().iconst(types::I64, align as i64);
-        let zero = self.b.ins().iconst(types::I8, 0);
         let native = self.b.ins().iconst(types::I8, native_kind as i64);
         let values = self.c_call(
             "hirsel_core_alloc",
             &[P, P, U, U, U, B, K],
             &[P, U, U],
-            &[self.context, like, size, align_value, charge, zero, native],
+            &[
+                self.context,
+                like,
+                size,
+                align_value,
+                charge,
+                overflow,
+                native,
+            ],
         )?;
         self.b
             .ins()
@@ -266,6 +296,96 @@ impl Function<'_, '_, '_> {
         self.b.switch_to_block(done);
         Ok([self.b.block_params(done)[0], self.b.block_params(done)[1]])
     }
+}
+
+/// Canonical-current plain/GRAPH blocks with ordinary alignment have raw words
+/// current|0 and current|1. All other layouts and payers use the existing ABI.
+pub(super) fn free(
+    b: &mut FunctionBuilder<'_>,
+    calls: &mut calls::Calls<'_>,
+    object: &mut ObjectModule,
+    context: Value,
+    pointer: Value,
+    charge: Value,
+) -> Result<()> {
+    let done = b.create_block();
+    let local = b.create_block();
+    let slow = b.create_block();
+    b.set_cold_block(slow);
+    let raw = b.ins().load(
+        types::I64,
+        Flags::trusted(),
+        pointer,
+        -(memory_layout::OWN_PAYER_BACK as i32),
+    );
+    let current = b.ins().load(
+        types::I64,
+        Flags::trusted(),
+        context,
+        memory_layout::CONTEXT_CURRENT_LIMIT as i32,
+    );
+    let tag = b.ins().bxor(raw, current);
+    let ordinary = b.ins().icmp_imm_s(
+        IntCC::UnsignedLessThanOrEqual,
+        tag,
+        memory_layout::OWN_ORDINARY_MAX_TAG as i64,
+    );
+    let positive = b.ins().icmp_imm_s(IntCC::NotEqual, charge, 0);
+    let fast = b.ins().band(ordinary, positive);
+    b.ins().brif(fast, local, &[], slow, &[]);
+    b.switch_to_block(local);
+    let available = b.ins().load(
+        types::I64,
+        Flags::trusted(),
+        current,
+        memory_layout::LIMIT_AVAILABLE as i32,
+    );
+    let outstanding = b.ins().load(
+        types::I64,
+        Flags::trusted(),
+        current,
+        memory_layout::LIMIT_OUTSTANDING as i32,
+    );
+    let available = b.ins().iadd(available, charge);
+    let outstanding = b.ins().isub(outstanding, charge);
+    b.ins().store(
+        Flags::trusted(),
+        available,
+        current,
+        memory_layout::LIMIT_AVAILABLE as i32,
+    );
+    b.ins().store(
+        Flags::trusted(),
+        outstanding,
+        current,
+        memory_layout::LIMIT_OUTSTANDING as i32,
+    );
+    let plain = b.ins().icmp_imm_s(
+        IntCC::Equal,
+        tag,
+        memory_layout::OWN_ORDINARY_PLAIN_TAG as i64,
+    );
+    let plain_base = b
+        .ins()
+        .iadd_imm_s(pointer, -(memory_layout::PLAIN_PREFIX_BYTES as i64));
+    let graph_base = b
+        .ins()
+        .iadd_imm_s(pointer, -(memory_layout::GRAPH_PREFIX_BYTES as i64));
+    let base = b.ins().select(plain, plain_base, graph_base);
+    calls.c(object, b, "hirsel_core_native_free", &[P], &[], &[base])?;
+    b.ins().jump(done, &[]);
+    b.switch_to_block(slow);
+    calls.c(
+        object,
+        b,
+        "hirsel_core_free_value",
+        &[P, U],
+        &[],
+        &[pointer, charge],
+    )?;
+    b.ins().jump(done, &[]);
+    b.switch_to_block(done);
+    Ok(())
 }
 
 pub(super) fn arc_event(

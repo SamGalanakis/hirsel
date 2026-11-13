@@ -501,7 +501,7 @@ impl Glue<'_, '_, '_> {
                     )
                     .unwrap(),
                 );
-                self.call("hirsel_core_free_value", &[P, U], &[], &[p, n])?;
+                fast::free(&mut self.b, &mut self.calls, self.object, self.ctx, p, n)?;
             }
             FieldTy::Rc(payload) | FieldTy::Arc(payload) => {
                 let p = self.load(at, 0);
@@ -612,7 +612,14 @@ impl Glue<'_, '_, '_> {
         let present = self.b.ins().icmp_imm_s(IntCC::NotEqual, cap, 0);
         self.b.ins().brif(present, free, &[], done, &[]);
         self.b.switch_to_block(free);
-        self.call("hirsel_core_free_value", &[P, U], &[], &[p, charge])?;
+        fast::free(
+            &mut self.b,
+            &mut self.calls,
+            self.object,
+            self.ctx,
+            p,
+            charge,
+        )?;
         self.b.ins().jump(done, &[]);
         self.b.switch_to_block(done);
         Ok(())

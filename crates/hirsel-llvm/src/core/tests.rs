@@ -1585,3 +1585,66 @@ fn lazy_component_preserves_exact_core_objects() {
         }
     }
 }
+
+#[test]
+fn dynamic_overflow_and_local_like_admissions_keep_exact_refusal_counts() {
+    let module = text::parse(include_str!(
+        "../../../hirsel-cranelift/tests/support/inline-admission.core"
+    ))
+    .unwrap();
+    wf::module(&module).unwrap();
+    let mut cases = vec![];
+    for function in 0..3 {
+        for charge in [0, 8, 40, 72, u64::MAX] {
+            for overflow in [0, 1] {
+                let args = vec![charge, overflow];
+                let baseline = eval::run(&module, FuncId(function), &args, 64);
+                for nth in 1..=baseline.admissions {
+                    for later in [false, true] {
+                        cases.push(Case {
+                            function: FuncId(function),
+                            args: args.clone(),
+                            limit: 64,
+                            injection: Some((nth, later)),
+                        });
+                    }
+                }
+                cases.push(Case {
+                    function: FuncId(function),
+                    args,
+                    limit: 64,
+                    injection: None,
+                });
+            }
+        }
+    }
+    println!("ordinary admission cases: {}", cases.len());
+    agree_cases(&module, &cases, true);
+    // Null Like is the native ABI's Current spelling; the evaluator expects a
+    // real block for Like. Its one admission and room are derived independently.
+    let mut null_cases = vec![];
+    for charge in [0, 8, 40, 72, u64::MAX] {
+        for overflow in [0, 1] {
+            for injection in [None, Some((1, false)), Some((1, true))] {
+                null_cases.push(Case {
+                    function: FuncId(3),
+                    args: vec![charge, overflow],
+                    limit: 64,
+                    injection,
+                });
+            }
+        }
+    }
+    let actual = execute(&module, &null_cases);
+    for (case, got) in null_cases.iter().zip(actual) {
+        let success = case.args[1] == 0 && case.args[0] <= 64 && case.injection.is_none();
+        assert_eq!(
+            got.outcome,
+            eval::Outcome::Returned(vec![u64::from(success), if success { 0 } else { 64 }])
+        );
+        assert_eq!(got.used, 0);
+        assert_eq!(got.admissions, 1);
+        assert!(got.trace.is_empty());
+    }
+    println!("null-Like native admission cases: {}", null_cases.len());
+}

@@ -691,7 +691,21 @@ pub unsafe extern "C" fn hirsel_core_task_bind(context: *const Context) {
 /// Nonzero valid native layout, from trusted lowering, already logically admitted.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_native_alloc(bytes: usize, align: usize) -> *mut u8 {
-    // SAFETY: trusted emitter supplies a nonzero valid native layout.
+    if align > 16 {
+        return native_alloc_aligned(bytes, align);
+    }
+    // SAFETY: malloc/mi_malloc provide at least 16-byte native alignment. The
+    // emitter's valid nonzero size also forms a Layout at alignment 1, and the
+    // backend's actual alignment satisfies its request. Alignment 1 avoids
+    // rounding an already valid near-isize::MAX size up again. Logical charge
+    // and native prefix operands remain the emitter's original values.
+    let layout = unsafe { std::alloc::Layout::from_size_align_unchecked(bytes, 1) };
+    crate::allocator::allocate(layout).as_ptr()
+}
+#[cold]
+#[inline(never)]
+fn native_alloc_aligned(bytes: usize, align: usize) -> *mut u8 {
+    // SAFETY: the emitter supplies the same valid over-aligned native layout.
     let layout = unsafe { std::alloc::Layout::from_size_align_unchecked(bytes, align) };
     crate::allocator::allocate(layout).as_ptr()
 }

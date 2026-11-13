@@ -132,6 +132,34 @@ pub(crate) fn allocate(
     if charge == Some(0) {
         payer.pin_zero();
     }
+    // The cold ABI also receives constant-layout ordinary blocks from Rust and
+    // uncommon emitted branches. Avoid generic alignment rounding/tag selection
+    // for this same frozen plain/GRAPH shape.
+    let ordinary_prefix = if kind == PLAIN {
+        crate::abi_layout::PLAIN_PREFIX_BYTES
+    } else {
+        crate::abi_layout::GRAPH_PREFIX_BYTES
+    };
+    if align <= 8 && kind <= GRAPH && bytes <= isize::MAX as usize - ordinary_prefix {
+        // SAFETY: the size bound and fixed alignment form a nonzero valid Layout;
+        // admission already retained the canonical payer and zero-byte pin.
+        unsafe {
+            let layout = Layout::from_size_align_unchecked(bytes.max(1) + ordinary_prefix, 8);
+            let base = native_allocate(layout);
+            let payload = NonNull::new_unchecked(base.as_ptr().add(ordinary_prefix));
+            let word = if kind == PLAIN {
+                payer
+            } else {
+                payer.with_tag(kind as usize)
+            };
+            payload
+                .as_ptr()
+                .sub(crate::abi_layout::OWN_PAYER_BACK)
+                .cast::<Payer>()
+                .write(word);
+            return Ok(payload);
+        }
+    }
     let (layout, offset) = physical_layout(bytes, align, kind);
     // SAFETY: new nonzero allocation owns the native prefix and disjoint payload.
     unsafe {

@@ -432,3 +432,58 @@ fn static_capacity_zero_carriers_drop_and_grow_through_runtime_cleanup() {
         assert_eq!(ctx.available(), before + 32);
     }
 }
+
+#[test]
+fn ordinary_native_words_and_balances_match_the_inline_contract() {
+    use crate::abi_layout::*;
+    let ctx = Context::new(4096);
+    for (kind, prefix, tag) in [
+        (
+            crate::block::PLAIN,
+            PLAIN_PREFIX_BYTES,
+            OWN_ORDINARY_PLAIN_TAG,
+        ),
+        (
+            crate::block::GRAPH,
+            GRAPH_PREFIX_BYTES,
+            OWN_ORDINARY_GRAPH_TAG,
+        ),
+    ] {
+        for bytes in [0, 1, 128, 512] {
+            let charge = hirsel_core_layout::charge::seq(bytes, 1).unwrap();
+            // SAFETY: exact native layout and charge, exclusive cleaned payload.
+            unsafe {
+                let allocation = hirsel_core_alloc(
+                    &ctx,
+                    std::ptr::null_mut(),
+                    bytes as usize,
+                    8,
+                    charge,
+                    false,
+                    kind,
+                );
+                assert!(!allocation.pointer.is_null());
+                let raw = allocation
+                    .pointer
+                    .sub(OWN_PAYER_BACK)
+                    .cast::<usize>()
+                    .read();
+                assert_eq!(raw ^ ctx.limit_record().addr(), tag);
+                assert!(tag <= OWN_ORDINARY_MAX_TAG);
+                assert_eq!(ctx.available(), 4096 - charge);
+                if charge != 0 {
+                    let record = &mut *ctx.limit_record();
+                    record.available += charge;
+                    record.outstanding -= charge;
+                    hirsel_core_native_free(allocation.pointer.sub(prefix));
+                } else {
+                    hirsel_core_free_value(
+                        std::ptr::NonNull::new_unchecked(allocation.pointer),
+                        charge,
+                    );
+                }
+                assert_eq!(ctx.available(), 4096);
+            }
+        }
+    }
+}

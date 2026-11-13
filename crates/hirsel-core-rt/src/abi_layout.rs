@@ -49,3 +49,26 @@ pub const CAUSE_MESSAGE_CAPACITY: usize = 24;
 pub const CAUSE_SITE: usize = 32;
 pub const CAUSE_CELL_VALUE: usize = 0;
 pub const CAUSE_CELL_NEXT: usize = 40;
+
+// Ordinary allocation contract: nonzero exact charge, native size fitting a
+// Layout, canonical task-current payer, and ordinary native alignment (<=8).
+// An overflow operand being present is not a reason to bypass this path: test
+// its value. Current/null Like use context current; nonnull Like first proves
+// its untagged payer equals current, otherwise calls hirsel_core_alloc once.
+// Compare available before the debit. Shortage, overflow, zero charge and foreign
+// Like take that same existing cold entry, retaining Capacity events/fairness.
+// Native allocate then receives max(bytes,1)+prefix and alignment 8; the emitted
+// store at payload-OWN_PAYER_BACK records current|kind. No semantic tag layout
+// (including variants/niches) is involved.
+pub const OWN_ORDINARY_PLAIN_TAG: usize = 0;
+pub const OWN_ORDINARY_GRAPH_TAG: usize = 1;
+pub const OWN_ORDINARY_MAX_TAG: usize = OWN_ORDINARY_GRAPH_TAG;
+// Free: raw_header XOR current <= OWN_ORDINARY_MAX_TAG proves exact current
+// identity plus ordinary plain/GRAPH native layout. For nonzero charge, refund
+// available/outstanding directly and free(payload - the selected prefix).
+// Otherwise call free_value; it preserves original-payer/remote-event handling.
+// Outstanding bytes retain the old slot across scope exit and re-entry. Resume
+// only binds/normalizes custody; owner events deliver eligible pending refunds.
+// Ordinary admission does not apply pending refunds or add an event. Refusal
+// snapshots Capacity before its existing event. This local path adds no TLS
+// lookup, poll, drain, lock or atomic update.

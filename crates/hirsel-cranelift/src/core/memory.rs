@@ -43,7 +43,13 @@ impl Function<'_, '_, '_> {
                 // Allocation = {pointer, Capacity{requested,available}}, a C
                 // struct of three words. On refusal only the pointer is null;
                 // there is no guessed function status or call to the old runtime.
-                let values = if let Some(overflow) = overflow {
+                let values = if !matches!(kind, AllocKind::Resource { .. })
+                    && !matches!(place, AllocPlace::Region(_))
+                {
+                    let overflow = overflow.map(|v| self.get(v));
+                    let values = self.own_alloc(kind, place, size, alignment, charge, overflow)?;
+                    [values[0], self.b.ins().iconst(types::I64, 0), values[1]]
+                } else if let Some(overflow) = overflow {
                     let overflow = self.get(overflow);
                     let r = if matches!(place, AllocPlace::Region(_)) {
                         self.c_call(
@@ -87,7 +93,7 @@ impl Function<'_, '_, '_> {
                         AllocPlace::Region(_) => {
                             self.region_alloc(payer, size, alignment, charge)?
                         }
-                        _ => self.own_alloc(kind, place, size, alignment, charge)?,
+                        _ => self.own_alloc(kind, place, size, alignment, charge, None)?,
                     };
                     [values[0], self.b.ins().iconst(types::I64, 0), values[1]]
                 };
@@ -227,7 +233,14 @@ impl Function<'_, '_, '_> {
             Inst::Free { block, charge } => {
                 let block = self.get(block);
                 let charge = self.get(charge);
-                self.c_call("hirsel_core_free_value", &[p, u], &[], &[block, charge])?;
+                fast::free(
+                    &mut self.b,
+                    &mut self.calls,
+                    self.object,
+                    self.context,
+                    block,
+                    charge,
+                )?;
             }
             Inst::Copy { to, from, bytes } => {
                 let to = self.addr(to);

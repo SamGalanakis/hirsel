@@ -1,0 +1,81 @@
+; Ordinary allocation with a run-time overflow flag, including false flags and
+; null/local/nonlocal Like. Every completed case retains zero logical charge.
+core v1
+sig g0 = (u64, bool) -> (bool, u64)
+inst n0 = test@0/inline_admission/current [] []
+inst n1 = test@0/inline_admission/like [] []
+inst n2 = test@0/inline_admission/foreign [] []
+inst n3 = test@0/inline_admission/null_plain [] []
+fn f0 = n0 g0 {
+b0(v0: u64, v1: bool):
+  v2: ptr, v3: u64 = alloc own v0 align 8 charge v0 overflow v1
+  v4: ptr = const 0x0
+  v5: bool = ne v2, v4
+  branch v5, b1, b2
+b1:
+  free v2 charge v0
+  return v5, v3
+b2:
+  return v5, v3
+}
+fn f1 = n1 g0 {
+b0(v0: u64, v1: bool):
+  v2: u64 = const 8
+  v3: ptr, v4: u64 = alloc own v2 align 8 charge v2
+  v5: ptr = const 0x0
+  v6: bool = ne v3, v5
+  branch v6, b1, b4
+b1:
+  v7: ptr, v8: u64 = alloc own v0 align 8 charge v0 like v3 overflow v1
+  free v3 charge v2
+  v9: bool = ne v7, v5
+  branch v9, b2, b3
+b2:
+  free v7 charge v0
+  return v9, v8
+b3:
+  return v9, v8
+b4:
+  return v6, v4
+}
+fn f2 = n2 g0 {
+b0(v0: u64, v1: bool):
+  v2: u64 = const 8
+  v3: ptr, v4: u64 = alloc own v2 align 8 charge v2
+  v5: ptr = const 0x0
+  v6: bool = ne v3, v5
+  branch v6, b1, b4
+b1:
+  v7: u64 = const 16
+  v8: bool, v9: u64 = limit_enter v7
+  branch v8, b2, b5
+b2:
+  v10: ptr, v11: u64 = alloc own v0 align 8 charge v0 like v3 overflow v1
+  free v3 charge v2
+  limit_exit
+  v12: bool = ne v10, v5
+  branch v12, b3, b6
+b3:
+  free v10 charge v0
+  return v12, v11
+b4:
+  return v6, v4
+b5:
+  free v3 charge v2
+  return v8, v9
+b6:
+  return v12, v11
+}
+
+fn f3 = n3 g0 {
+b0(v0: u64, v1: bool):
+  v4: ptr = const 0x0
+  v2: ptr, v3: u64 = alloc plain v0 align 8 charge v0 like v4 overflow v1
+  v5: bool = ne v2, v4
+  branch v5, b1, b2
+b1:
+  free v2 charge v0
+  return v5, v3
+b2:
+  return v5, v3
+}

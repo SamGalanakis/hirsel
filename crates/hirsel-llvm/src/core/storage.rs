@@ -262,11 +262,7 @@ impl FunctionEmitter<'_> {
             } => {
                 let charge = self.get(charge);
                 let size = self.get(size);
-                let fast = if overflow.is_none() {
-                    self.fast_allocate(kind, place, &charge, &size, align)
-                } else {
-                    None
-                };
+                let fast = self.fast_allocate(kind, place, &charge, &size, align, overflow);
                 let (block, room) = if let Some(fast) = fast {
                     fast
                 } else {

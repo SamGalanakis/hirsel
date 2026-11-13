@@ -117,15 +117,19 @@ impl FunctionEmitter<'_> {
         charge: &str,
         bytes: &str,
         align: u64,
+        overflow: Option<ValueId>,
     ) -> Option<(String, String)> {
         if matches!(kind, AllocKind::Resource { .. }) {
             return None;
         }
         if let AllocPlace::Region(region) = place {
+            if overflow.is_some() {
+                return None;
+            }
             let region = self.get(region);
             return Some(self.fast_region(&region, charge, bytes, align));
         }
-        if !matches!(place, AllocPlace::Current) || align > 512 {
+        if !matches!(place, AllocPlace::Current | AllocPlace::Like(_)) || align > 512 {
             return None;
         }
         let graph = kind != AllocKind::Plain;
@@ -140,17 +144,60 @@ impl FunctionEmitter<'_> {
         let n = self.next;
         self.next += 1;
         let payer = self.current_payer();
+        let like = match place {
+            AllocPlace::Like(v) => self.get(v),
+            _ => "null".into(),
+        };
+        let overflow = overflow.map_or_else(
+            || "false".into(),
+            |v| {
+                let flag = self.get(v);
+                self.calc(format!("icmp ne i8 {flag}, 0"))
+            },
+        );
+        let exact = self.calc(format!("xor i1 {overflow}, true"));
         let positive = self.calc(format!("icmp ne i64 {charge}, 0"));
         let sized = self.calc(format!("icmp ule i64 {bytes}, {maximum}"));
         let eligible = self.calc(format!("and i1 {positive}, {sized}"));
+        let eligible = self.calc(format!("and i1 {eligible}, {exact}"));
         self.likely(
             &eligible,
-            &format!("admit{n}"),
+            &format!("allocation_payer{n}"),
             &format!("allocation_slow{n}"),
         );
+        writeln!(self.code, "allocation_payer{n}:").unwrap();
+        if matches!(place, AllocPlace::Like(_)) {
+            let empty = self.calc(format!("icmp eq ptr {like}, null"));
+            self.likely(
+                &empty,
+                &format!("admit{n}"),
+                &format!("allocation_header{n}"),
+            );
+            writeln!(self.code, "allocation_header{n}:").unwrap();
+            let header = self.calc(format!(
+                "getelementptr i8, ptr {like}, i64 -{OWN_PAYER_BACK}"
+            ));
+            let raw = self.calc(format!("load i64, ptr {header}, align 8"));
+            let original = self.calc(format!("and i64 {raw}, {}", !(OWN_TAG_MASK as u64)));
+            let current = self.calc(format!("ptrtoint ptr {payer} to i64"));
+            let same = self.calc(format!("icmp eq i64 {original}, {current}"));
+            self.likely(&same, &format!("admit{n}"), &format!("allocation_slow{n}"));
+        } else {
+            self.line(format!("br label %admit{n}"));
+        }
         writeln!(self.code, "admit{n}:").unwrap();
-        let (fits, available) = self.admission_test(&payer, charge);
-        self.likely(&fits, &format!("allocate{n}"), &format!("refused{n}"));
+        let available = self.load_native(&payer, LIMIT_AVAILABLE, "i64");
+        let fits = self.calc(format!("icmp ule i64 {charge}, {available}"));
+        // Real refusal uses the one runtime fallback, retaining Capacity events.
+        // Probe only a fitting admission, so tests never count an attempt twice.
+        self.likely(
+            &fits,
+            &format!("allocation_probe{n}"),
+            &format!("allocation_slow{n}"),
+        );
+        writeln!(self.code, "allocation_probe{n}:").unwrap();
+        let allowed = self.admission_probe(charge);
+        self.likely(&allowed, &format!("allocate{n}"), &format!("refused{n}"));
         writeln!(self.code, "allocate{n}:").unwrap();
         self.admit_balance(&payer, charge, &available);
         let zero = self.calc(format!("icmp eq i64 {bytes}, 0"));
@@ -179,11 +226,11 @@ impl FunctionEmitter<'_> {
             "hirsel_core_alloc",
             &[
                 ("ptr".into(), "%context".into()),
-                ("ptr".into(), "null".into()),
+                ("ptr".into(), like),
                 ("i64".into(), bytes.into()),
                 ("i64".into(), align.to_string()),
                 ("i64".into(), charge.into()),
-                ("i1 zeroext".into(), "false".into()),
+                ("i1 zeroext".into(), overflow),
                 ("i8 zeroext".into(), u8::from(graph).to_string()),
             ],
         );
@@ -290,36 +337,26 @@ impl FunctionEmitter<'_> {
         ));
         let tagged = self.calc(format!("load ptr, ptr {at}, align 8"));
         let word = self.calc(format!("ptrtoint ptr {tagged} to i64"));
-        let tag = self.calc(format!("and i64 {word}, {OWN_TAG_MASK}"));
-        let neg = self.calc(format!("sub i64 0, {tag}"));
-        let payer = self.calc(format!("getelementptr i8, ptr {tagged}, i64 {neg}"));
         let current = self.current_payer();
-        let local = self.calc(format!("icmp eq ptr {payer}, {current}"));
-        let kind = self.calc(format!("and i64 {tag}, {OWN_KIND_MASK}"));
-        let simple = self.calc(format!("icmp ult i64 {kind}, 2"));
-        let bits = self.calc(format!("lshr i64 {tag}, {OWN_ALIGNMENT_SHIFT}"));
-        let ordinary = self.calc(format!("icmp ult i64 {bits}, 7"));
+        let current_word = self.calc(format!("ptrtoint ptr {current} to i64"));
+        // Exact raw equality with the canonical current pointer, optionally its
+        // ordinary GRAPH tag, proves both local custody and the native layout.
+        let tag = self.calc(format!("xor i64 {word}, {current_word}"));
+        let ordinary = self.calc(format!("icmp ule i64 {tag}, {OWN_ORDINARY_MAX_TAG}"));
         let positive = self.calc(format!("icmp ne i64 {charge}, 0"));
-        let fast = self.calc(format!("and i1 {local}, {simple}"));
-        let fast = self.calc(format!("and i1 {fast}, {ordinary}"));
-        let fast = self.calc(format!("and i1 {fast}, {positive}"));
+        let fast = self.calc(format!("and i1 {ordinary}, {positive}"));
         self.likely(&fast, &format!("free_local{n}"), &format!("free_slow{n}"));
         writeln!(self.code, "free_local{n}:").unwrap();
-        let available = self.load_native(&payer, LIMIT_AVAILABLE, "i64");
+        let available = self.load_native(&current, LIMIT_AVAILABLE, "i64");
         let restored = self.calc(format!("add i64 {available}, {charge}"));
-        self.store_native(&payer, LIMIT_AVAILABLE, "i64", &restored);
-        let outstanding = self.load_native(&payer, LIMIT_OUTSTANDING, "i64");
+        self.store_native(&current, LIMIT_AVAILABLE, "i64", &restored);
+        let outstanding = self.load_native(&current, LIMIT_OUTSTANDING, "i64");
         let remaining = self.calc(format!("sub i64 {outstanding}, {charge}"));
-        self.store_native(&payer, LIMIT_OUTSTANDING, "i64", &remaining);
-        let alignment = self.calc(format!("shl i64 8, {bits}"));
-        let plain = self.calc(format!("icmp eq i64 {kind}, 0"));
-        let prefix = self.calc(format!(
+        self.store_native(&current, LIMIT_OUTSTANDING, "i64", &remaining);
+        let plain = self.calc(format!("icmp eq i64 {tag}, {OWN_ORDINARY_PLAIN_TAG}"));
+        let offset = self.calc(format!(
             "select i1 {plain}, i64 {PLAIN_PREFIX_BYTES}, i64 {GRAPH_PREFIX_BYTES}"
         ));
-        let padding = self.calc(format!("sub i64 {alignment}, 1"));
-        let rounded = self.calc(format!("add i64 {prefix}, {padding}"));
-        let mask = self.calc(format!("sub i64 0, {alignment}"));
-        let offset = self.calc(format!("and i64 {rounded}, {mask}"));
         let neg = self.calc(format!("sub i64 0, {offset}"));
         let base = self.calc(format!("getelementptr i8, ptr {pointer}, i64 {neg}"));
         self.runtime_void("hirsel_core_native_free", &[("ptr".into(), base)]);

@@ -1,0 +1,5 @@
+// SEM-7: a view compares by its payload, so a `View[String]` and a `String` are one
+// operand type for `==` and `<` (LANG-21).
+// expect: gap comparison of this type is not built
+// expect: gap values of this type are not built
+fn same(v: View[String], s: String) -> bool { v == s }

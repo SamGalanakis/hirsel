@@ -1,6 +1,7 @@
-// LANG-12: the spec's example; T of `int.wrapping_add` is `integer`, and `a` fixed it as
-// f64. SEM-1: the spec's `int.truncate` to a wider type, at the call (Q15).
-// expect: refuse LANG-12 at 5:48
-// expect: refuse SEM-1 at 6:25
+// LANG-12: T of `int.wrapping_add` is `integer`; the expected result `f64` fixes it first
+// (LANG-11's order), so it is refused at the call (Q32: the spec's example says at `a`).
+// SEM-1: the spec's `int.truncate` to a wider type, at the call (Q15).
+// expect: refuse LANG-12 at 6:31
+// expect: refuse SEM-1 at 7:25
 fn f(a: f64, b: f64) -> f64 { int.wrapping_add(a, b) }
 fn grow(x: u8) -> u32 { int.truncate(x) }

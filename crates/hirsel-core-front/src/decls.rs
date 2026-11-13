@@ -18,6 +18,9 @@ pub const ORDERED: u8 = 16;
 /// bodiless core declarations (OWN-4; the resolver refuses them elsewhere).
 pub const INTEGER: u8 = 32;
 pub const FLOAT: u8 = 64;
+/// `packed` or `streamable` (MEM-12): compact encodings, not built. A type argument that
+/// needs one is a gap, never a refusal, until stable types are built.
+pub const ENCODED: u8 = 128;
 pub fn bound_bit(name: &str) -> u8 {
     match name {
         "plain" => PLAIN,
@@ -26,6 +29,7 @@ pub fn bound_bit(name: &str) -> u8 {
         "key" => KEY,
         "integer" => INTEGER,
         "float" => FLOAT,
+        "packed" | "streamable" => ENCODED,
         _ => ORDERED,
     }
 }
@@ -38,8 +42,9 @@ pub fn bound_names(b: u8) -> String {
         "ordered",
         "integer",
         "float",
+        "packed or streamable",
     ];
-    (0..7)
+    (0..8)
         .filter(|i| b & (1 << i) != 0)
         .map(|i| names[i])
         .collect::<Vec<_>>()
@@ -321,7 +326,7 @@ impl Program<'_> {
                         NodeKind::Bounds => {
                             for &b in item.tree.children(c) {
                                 let t = item.tree.node(b).token.unwrap();
-                                let bit = bound_bit(item.tree.token_text(&item.text, t));
+                                let bit = bound_bit(item.tree.token_text(item.text, t));
                                 if bit == PLAIN {
                                     self.refusals.push(refusal(
                                         "OWN-4",
@@ -335,7 +340,7 @@ impl Program<'_> {
                         NodeKind::Drop => finalizer = true,
                         NodeKind::Attribute => {
                             let t = n.token.unwrap();
-                            if item.tree.token_text(&item.text, t) == "compact" {
+                            if item.tree.token_text(item.text, t) == "compact" {
                                 self.gaps.push(Gap::new(
                                     self.site(at, c),
                                     "compact stable layout is not built",
@@ -418,7 +423,7 @@ impl Program<'_> {
             for &b in item.tree.children(g) {
                 for &bn in item.tree.children(b) {
                     let t = item.tree.node(bn).token.unwrap();
-                    bounds |= bound_bit(item.tree.token_text(&item.text, t));
+                    bounds |= bound_bit(item.tree.token_text(item.text, t));
                 }
             }
             out.push(Generic { name, bounds });
@@ -455,7 +460,7 @@ impl Program<'_> {
                         let fnode = item.tree.node(f);
                         let name = item
                             .tree
-                            .token_text(&item.text, fnode.token.unwrap())
+                            .token_text(item.text, fnode.token.unwrap())
                             .to_owned();
                         let tnode = item.tree.children(f)[0];
                         let ty = self.lower_ty(at, tnode, &generics);
@@ -473,7 +478,7 @@ impl Program<'_> {
                         let vnode = item.tree.node(v);
                         let name = item
                             .tree
-                            .token_text(&item.text, vnode.token.unwrap())
+                            .token_text(item.text, vnode.token.unwrap())
                             .to_owned();
                         let mut fields = vec![];
                         let mut labelled = false;
@@ -481,7 +486,7 @@ impl Program<'_> {
                             let pnode = item.tree.node(p);
                             let label = pnode
                                 .token
-                                .map(|t| item.tree.token_text(&item.text, t).to_owned());
+                                .map(|t| item.tree.token_text(item.text, t).to_owned());
                             labelled = label.is_some();
                             let tnode = item.tree.children(p)[0];
                             let ty = self.lower_ty(at, tnode, &generics);
@@ -538,9 +543,10 @@ impl Program<'_> {
                 let mut args = vec![];
                 for &c in &children[1..] {
                     if item.tree.node(c).kind == NodeKind::Anchor {
+                        // Not built, so the type is not built: no argument count to check.
                         self.gaps
                             .push(Gap::new(self.site(at, c), "anchor arguments are not built"));
-                        continue;
+                        return ERROR;
                     }
                     let t = self.lower_ty(at, c, generics);
                     args.push((t, self.site(at, c)));
@@ -812,7 +818,10 @@ impl Program<'_> {
                     rule,
                 } => {
                     let have = has_bounds(&self.decls, &self.types, ty, &params);
-                    if have & bounds != bounds {
+                    if bounds & ENCODED != 0 {
+                        self.gaps
+                            .push(Gap::new(site, "packed and streamable bounds are not built"));
+                    } else if have & bounds != bounds {
                         self.refusals.push(refusal(
                             rule,
                             site,
@@ -1192,9 +1201,12 @@ fn join(a: Kind, b: Kind) -> Kind {
 /// type parameters.
 pub fn kind(decls: &[TypeDecl], t: &impl TyRead, ty: TyId, params: &[u8]) -> Kind {
     match t.kind(ty) {
-        TyKind::Error | TyKind::Never | TyKind::Unit | TyKind::Scalar(_) | TyKind::Fn(..) => {
-            Kind::Plain
-        }
+        TyKind::Error
+        | TyKind::Hole
+        | TyKind::Never
+        | TyKind::Unit
+        | TyKind::Scalar(_)
+        | TyKind::Fn(..) => Kind::Plain,
         TyKind::Tuple(xs) => xs
             .iter()
             .fold(Kind::Plain, |k, &x| join(k, kind(decls, t, x, params))),
@@ -1277,7 +1289,7 @@ pub fn has_bounds(decls: &[TypeDecl], t: &impl TyRead, ty: TyId, params: &[u8]) 
     };
     plain_extra
         | match t.kind(ty) {
-            TyKind::Error | TyKind::Never => all | INTEGER | FLOAT,
+            TyKind::Error | TyKind::Hole | TyKind::Never => all | INTEGER | FLOAT | ENCODED,
             TyKind::Unit => all,
             TyKind::Scalar(Scalar::F32 | Scalar::F64) => PLAIN | SHAREABLE | SEND | FLOAT,
             TyKind::Scalar(s) if hirsel_core_ir::Ty::Scalar(*s).int().is_some() => all | INTEGER,
@@ -1343,6 +1355,7 @@ fn write_canonical(decls: &[TypeDecl], t: &impl TyRead, ty: TyId, s: &mut String
     };
     match t.kind(ty) {
         TyKind::Error => s.push_str("{error}"),
+        TyKind::Hole => s.push('_'),
         TyKind::Never => s.push_str("Never"),
         TyKind::Unit => s.push_str("()"),
         TyKind::Scalar(x) => s.push_str(x.name()),

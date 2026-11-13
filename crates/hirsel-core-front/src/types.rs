@@ -42,6 +42,8 @@ pub enum TyKind {
     Param(u32),
     /// A plain callable type `fn(..) -> R` (LANG-13).
     Fn(Vec<(Mode, TyId)>, TyId, bool),
+    /// A part of a call's expected type not fixed yet; it constrains nothing (LANG-11).
+    Hole,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -58,6 +60,7 @@ impl Types {
         for s in Scalar::ALL {
             t.intern(TyKind::Scalar(s));
         }
+        t.intern(TyKind::Hole);
         t
     }
     pub fn intern(&mut self, k: TyKind) -> TyId {
@@ -87,6 +90,7 @@ pub fn scalar(s: Scalar) -> TyId {
     TyId(3 + Scalar::ALL.iter().position(|&x| x == s).unwrap() as u32)
 }
 pub const BOOL: TyId = TyId(3);
+pub const HOLE: TyId = TyId(3 + Scalar::ALL.len() as u32);
 
 /// The program's types plus the types one body makes.
 pub struct Local<'a> {
@@ -178,6 +182,15 @@ pub fn subst(t: &mut impl TyRead, ty: TyId, args: &[TyId]) -> TyId {
 }
 
 /// Whether `ty` names a type parameter anywhere.
+pub fn has_hole(t: &impl TyRead, ty: TyId) -> bool {
+    match t.kind(ty) {
+        TyKind::Hole => true,
+        TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs.iter().any(|&x| has_hole(t, x)),
+        TyKind::View(x) => has_hole(t, *x),
+        TyKind::Fn(ps, r, _) => ps.iter().any(|&(_, p)| has_hole(t, p)) || has_hole(t, *r),
+        _ => false,
+    }
+}
 pub fn has_param(t: &impl TyRead, ty: TyId) -> bool {
     match t.kind(ty) {
         TyKind::Param(_) => true,

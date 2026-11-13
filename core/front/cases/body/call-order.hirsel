@@ -1,0 +1,15 @@
+// LANG-11 (Q30): a call's type parameters are found in one forward visit. The expected
+// `List[u64]` fixes unwrap's T, `g` takes `Result[List[u64], _]` as its expected type and
+// fixes its own T, and its result fixes unwrap's E. A hole still open after its call is
+// refused LANG-12 at that call, once: the spec's `list.len(list.new())`, at `list.new()`.
+// A type built from it is the refused type, so a compound assignment does not refuse again.
+// expect: refuse LANG-12 at 13:30
+// expect: refuse LANG-12 at 15:29
+// expect: gap calls to generic functions are not built
+// expect: gap generic definitions are not built
+// expect: gap values of this type are not built
+fn g[T](n: u64) -> Result[List[T], u8] { loop {} }
+fn f() -> List[u64] { result.unwrap(g(5)) }
+fn empty() -> u64 { list.len(list.new()) }
+fn h[T]() -> T { loop {} }
+fn k() -> u64 { let mut m = h(); m -= 1u64; m }

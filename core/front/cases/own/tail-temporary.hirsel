@@ -1,8 +1,7 @@
-// OWN-8, OWN-10: a temporary in a function body's tail lasts to the end of its statement,
-// the function's exit; a freeze ends on that exit edge before the body's owners are
-// cleaned, so the view `list.get` returns does not outlive `xs`. (Q31: the same tail in an
-// inner block is still refused at that block's `}`.)
-// expect: refuse OWN-10 at 11:72
+// LANG-6, OWN-8 (Q31): a temporary in a block's tail, a function body's or an inner
+// block's, ends at that block's exit before its locals are cleaned, unless the block's
+// value reaches it; the view `list.get` returns does not outlive `xs`, since the value is
+// a `u64`. (The value reaching it is the Q28 case, own/drop-frozen.)
 // expect: gap calls to generic functions are not built
 // expect: gap values of this type are not built
 fn present(o: Option[View[u64]]) -> u64 { 0 }

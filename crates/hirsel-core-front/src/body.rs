@@ -15,7 +15,9 @@
 //! availability changes (a branch's arms run from one state and join by OWN-16 without
 //! copying the table), and the freeze and reservation records (crate::own).
 
-use crate::decls::{DeclBody, FnDecl, KEY, Kind, ORDERED, Repr, Role, copyable, has_bounds, kind};
+use crate::decls::{
+    DeclBody, ENCODED, FnDecl, KEY, Kind, ORDERED, Repr, Role, copyable, has_bounds, kind,
+};
 use crate::own::{Act, Avail, Extent, Freeze, Hold, Origin, PStep, Place, breaks, join, overlap};
 use crate::types::*;
 use crate::{Def, Gap, ItemRef, Program, refusal};
@@ -332,6 +334,10 @@ struct Cx<'c, 'a> {
     steps: Vec<PStep>,
     /// Block depth, and the slots of the open blocks in declaration order.
     depth: u32,
+    /// The type the last expression checked synthesised, before its expected type.
+    synth_ty: TyId,
+    /// The synthesised type of the tail of the block being closed; unit without one.
+    tail_ty: TyId,
     scope_slots: Vec<u32>,
     call_seq: u32,
     binder_at: HashMap<(u32, u32), u32>,
@@ -394,6 +400,8 @@ impl<'c, 'a> Cx<'c, 'a> {
             freezes: vec![],
             steps: vec![],
             depth: 0,
+            synth_ty: UNIT,
+            tail_ty: UNIT,
             scope_slots: vec![],
             call_seq: 0,
             binder_at,
@@ -417,7 +425,7 @@ impl<'c, 'a> Cx<'c, 'a> {
     fn token_text(&self, n: NodeId) -> &'a str {
         let item = self.item;
         match item.tree.node(n).token {
-            Some(t) => item.tree.token_text(&item.text, t),
+            Some(t) => item.tree.token_text(item.text, t),
             None => "",
         }
     }
@@ -1030,15 +1038,14 @@ impl<'c, 'a> Cx<'c, 'a> {
     }
     /// Close a block: its let-bound views end, then its live owners are dropped, which
     /// a remaining freeze forbids (OWN-10, at the block's closing `}`).
-    fn close_scope(&mut self, start: usize, freezes: usize, n: NodeId) {
+    /// Close block `n` whose value has type `value`. A temporary in its tail ends at its
+    /// exit, before its owners are cleaned, unless the value reaches it (LANG-6, OWN-8):
+    /// a value of a scoped type may hold a view, so its temporaries stay.
+    fn close_scope(&mut self, start: usize, freezes: usize, n: NodeId, value: TyId) {
         let d = self.depth;
-        // The function's exit also ends its body's tail temporaries, before the body's
-        // owners are cleaned (OWN-8, OWN-10), unless the result may carry them out: the
-        // result anchors (OWN-20) are not built, so a scoped result keeps them.
-        let exit =
-            d == 1 && kind(&self.p.decls, &self.t, self.fd.result, &self.params) != Kind::Scoped;
+        let tail = kind(&self.p.decls, &self.t, value, &self.params) != Kind::Scoped;
         self.unfreeze(freezes, |h| {
-            let ends = h == Hold::View(Extent::Block(d)) || exit && h == Hold::View(Extent::Temp);
+            let ends = h == Hold::View(Extent::Block(d)) || tail && h == Hold::View(Extent::Temp);
             (!ends).then_some(h)
         });
         if !self.dead {
@@ -1159,6 +1166,7 @@ impl<'c, 'a> Cx<'c, 'a> {
     fn expr(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         self.out.counts.nodes += 1;
         let (t, v) = self.expr_inner(n, want);
+        self.synth_ty = t;
         match want {
             Some(w) if t != NEVER => {
                 self.coerce(t, w, n);
@@ -1534,8 +1542,10 @@ impl<'c, 'a> Cx<'c, 'a> {
     fn block(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         self.depth += 1;
         let (scope, freezes) = (self.scope_slots.len(), self.freezes.len());
+        self.tail_ty = UNIT;
         let r = self.statements(n, want);
-        self.close_scope(scope, freezes, n);
+        let value = std::mem::replace(&mut self.tail_ty, UNIT);
+        self.close_scope(scope, freezes, n, value);
         self.depth -= 1;
         r
     }
@@ -1549,7 +1559,9 @@ impl<'c, 'a> Cx<'c, 'a> {
             match self.kind(s) {
                 // The tail's temporaries last to the end of the enclosing statement.
                 NodeKind::ExpressionStatement if last => {
-                    return self.expr(self.kids(s)[0], want);
+                    let r = self.expr(self.kids(s)[0], want);
+                    self.tail_ty = self.synth_ty;
+                    return r;
                 }
                 NodeKind::ExpressionStatement | NodeKind::Discard => {
                     let (t, _) = self.expr(self.kids(s)[0], None);
@@ -2358,7 +2370,13 @@ impl<'c, 'a> Cx<'c, 'a> {
     fn operand(&mut self, e: NodeId) -> (TyId, Option<ValueId>) {
         let at = match self.place(e) {
             Ok(Some(at)) if !self.copies(at.ty) => at,
-            Ok(_) => return self.expr(e, None),
+            Ok(_) => {
+                let (t, v) = self.expr(e, None);
+                return match self.t.kind(t) {
+                    TyKind::View(x) if !self.copies(*x) => (*x, None),
+                    _ => (t, v),
+                };
+            }
             Err(()) => return (ERROR, None),
         };
         self.use_place(at, Use::View(Hold::View(Extent::Temp)), e);
@@ -2521,6 +2539,12 @@ impl<'c, 'a> Cx<'c, 'a> {
         self.call_seq += 1;
         let call = self.call_seq;
         let holds = self.freezes.len();
+        // One forward visit (LANG-11): the expected result fixes what it can, then each
+        // argument left to right, then the unsuffixed literal arguments.
+        if let Some(w) = want {
+            self.unify(g.result, w.ty, &mut found);
+            self.determined(f, &found, &mut checked, n);
+        }
         for (i, &a) in args.iter().enumerate() {
             if matches!(
                 self.kind(a),
@@ -2556,23 +2580,32 @@ impl<'c, 'a> Cx<'c, 'a> {
                     self.expr(e, Some(w)).1
                 }
                 None => {
-                    let (at, v) = self.expr(e, None);
+                    // A call takes the partly known parameter type as its expected type.
+                    let (at, v) = if self.kind(e) == NodeKind::Call {
+                        self.out.counts.nodes += 1;
+                        let w = Want {
+                            ty: self.partial(pt, &found),
+                            view: false,
+                        };
+                        self.call(e, Some(w))
+                    } else {
+                        self.expr(e, None)
+                    };
                     if !self.unify(pt, at, &mut found) {
                         self.refuse(
                             "LANG-11",
                             e,
                             "a type parameter is determined twice differently",
                         );
+                    } else if let Some(t) = self.known(pt, &found) {
+                        let view = g.params[i].mode == Mode::View
+                            && !matches!(self.t.kind(t), TyKind::View(_));
+                        self.coerce(at, Want { ty: t, view }, e);
                     }
                     self.determined(f, &found, &mut checked, e);
                     v
                 }
             };
-        }
-        // The arguments determine the type parameters first, then the expected result.
-        if let Some(w) = want {
-            self.unify(g.result, w.ty, &mut found);
-            self.determined(f, &found, &mut checked, n);
         }
         for i in later {
             let e = args[i];
@@ -2588,11 +2621,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         // refused type, so nothing built from it is refused again.
         let undetermined = found.iter().any(Option::is_none);
         if undetermined && !self.broken {
-            self.refuse(
-                "LANG-11",
-                n,
-                "a type parameter of the callee is undetermined",
-            );
+            self.refuse("LANG-12", n, "a type parameter of the callee is still open");
         }
         // The call completes: its arguments' holds end, except a view the scoped result
         // is anchored to, which lasts for the result's extent (OWN-11, OWN-20).
@@ -2724,6 +2753,11 @@ impl<'c, 'a> Cx<'c, 'a> {
         }
     }
 
+    /// `pt` with the type arguments found so far, a hole for each one still open.
+    fn partial(&mut self, pt: TyId, s: &[Option<TyId>]) -> TyId {
+        let tys: Vec<TyId> = s.iter().map(|t| t.unwrap_or(HOLE)).collect();
+        subst(&mut self.t, pt, &tys)
+    }
     /// `pt` with the type arguments found so far, when they determine it.
     fn known(&mut self, pt: TyId, s: &[Option<TyId>]) -> Option<TyId> {
         if !has_param(&self.t, pt) {
@@ -2749,6 +2783,10 @@ impl<'c, 'a> Cx<'c, 'a> {
             *checked |= 1 << i;
             let g = &p.fns[f].generics[i];
             let missing = g.bounds & !has_bounds(&p.decls, &self.t, t, &self.params);
+            if missing & ENCODED != 0 {
+                self.gap(n, "packed and streamable bounds are not built");
+                return;
+            }
             if missing != 0 {
                 let (a, b) = (self.name(t), crate::decls::bound_names(missing));
                 self.refuse("LANG-12", n, format!("`{a}` is not {b}"));
@@ -2758,10 +2796,12 @@ impl<'c, 'a> Cx<'c, 'a> {
     }
     fn unify(&mut self, pt: TyId, at: TyId, s: &mut [Option<TyId>]) -> bool {
         self.out.counts.types += 1;
-        if at == NEVER || at == ERROR {
+        if at == NEVER || at == ERROR || at == HOLE {
             return true;
         }
         match (self.t.kind(pt).clone(), self.t.kind(at).clone()) {
+            // A partly known type fixes nothing whole (LANG-11).
+            (TyKind::Param(_), _) if has_hole(&self.t, at) => true,
             (TyKind::Param(i), _) => match s[i as usize] {
                 None => {
                     s[i as usize] = Some(at);
@@ -3039,6 +3079,10 @@ impl<'c, 'a> Cx<'c, 'a> {
                 return ERROR;
             }
             let missing = g.bounds & !has_bounds(&p.decls, &self.t, t, &self.params);
+            if missing & ENCODED != 0 {
+                self.gap(at, "packed and streamable bounds are not built");
+                return ERROR;
+            }
             if missing != 0 {
                 let rule = if counted { "OWN-4" } else { "LANG-12" };
                 let b = crate::decls::bound_names(missing);

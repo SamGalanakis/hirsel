@@ -513,7 +513,7 @@ fn m1_program_manifest() {
                         && index.module_package(m.id) == index.module_package(entry.id))
             })
             .map(|m| ModuleInput {
-                id: m.id.clone(),
+                id: m.id,
                 syntax: m.syntax.clone(),
             })
             .collect();

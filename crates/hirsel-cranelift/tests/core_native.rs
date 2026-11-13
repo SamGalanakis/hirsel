@@ -933,7 +933,7 @@ extern uint8_t {counted}(void *, void *);
 static uint64_t trace[8]; static size_t traces;
 void hirsel_core_test_drop_trace(uint64_t id) {{ if(traces==8) abort(); trace[traces++]=id; }}
 static void *allocate(HirselCoreContext *ctx, size_t size, uint64_t charge) {{
-  void *p=hirsel_core_alloc(ctx,0,size,8,charge,false).pointer; if(!p) abort(); return p;
+  void *p=hirsel_core_alloc(ctx,0,size,8,charge,false,HIRSEL_CORE_NATIVE_GRAPH).pointer; if(!p) abort(); return p;
 }}
 static void *resource(HirselCoreContext *ctx, uint64_t id) {{
   uint64_t *p=hirsel_core_resource_alloc(ctx,8,8,8,0).pointer; if(!p) abort(); *p=id; return p;

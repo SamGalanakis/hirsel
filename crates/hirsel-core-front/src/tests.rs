@@ -1561,15 +1561,16 @@ fn f{entry} = n{instance} g{g} {{
                 (72, 1),
                 (80, 13),
                 (88, 130),
-                (96, 2), // live count differs from the three occupied slots
-                (104, 2),
-                (112, 0),
-                (120, 1),
-                (128, 0),
+                (96, 2),  // live count differs from the three occupied slots
+                (104, 8), // cached index length, independent of capacity=3
+                (112, 2),
+                (120, 0),
+                (128, 1),
                 (136, 0),
-                (144, 3),
-                (152, 0),
+                (144, 0),
+                (152, 3),
                 (160, 0),
+                (168, 0),
             ]
             .into_iter()
             .enumerate()
@@ -1582,7 +1583,7 @@ fn f{entry} = n{instance} g{g} {{
             fixture
                 .replace(
                     "v0: u64 = const 24",
-                    "v0: u64 = const 96\n  v11: u64 = const 168",
+                    "v0: u64 = const 96\n  v11: u64 = const 176",
                 )
                 .replace(
                     "alloc own v0 align 8 charge v0",

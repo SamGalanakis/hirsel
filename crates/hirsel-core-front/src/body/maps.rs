@@ -69,7 +69,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     }
                 })
             }
-            "index_len" => Some(self.map_index_len(vals[0]?, n)),
+            "index_len" => {
+                let entry = self.map_entry(types[0], types[1], n)?;
+                Some(self.map_index_len(vals[0]?, entry, n))
+            }
             "index_get" | "index_set" => {
                 let entry = self.map_entry(types[0], types[1], n)?;
                 let at = self.map_index_at(vals[0]?, entry, vals[1]?, n)?;
@@ -152,8 +155,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let eight = self.konst(u, 8, n)?;
         let (index_bytes, _) =
             self.list_arith(ArithOp::Mul, ArithMode::Saturating, index_len, eight, n);
+        let sixteen = self.konst(u, 16, n)?;
         let (overhead, _) =
-            self.list_arith(ArithOp::Add, ArithMode::Saturating, index_bytes, eight, n);
+            self.list_arith(ArithOp::Add, ArithMode::Saturating, index_bytes, sixteen, n);
         let (physical, _) =
             self.list_arith(ArithOp::Add, ArithMode::Saturating, plan.size, overhead, n);
         plan.size = physical;
@@ -266,6 +270,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Inst::Store {
                 address: live_at,
                 value: live,
+            },
+            n,
+        );
+        let index_len_at = self.map_metadata_at(header, entry, 1, n)?;
+        self.inst(
+            Inst::Store {
+                address: index_len_at,
+                value: index_len,
             },
             n,
         );
@@ -391,10 +403,23 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         value
     }
     fn map_live_at(&mut self, header: ValueId, entry: MapEntry, n: NodeId) -> Option<AddressId> {
+        self.map_metadata_at(header, entry, 0, n)
+    }
+    fn map_metadata_at(
+        &mut self,
+        header: ValueId,
+        entry: MapEntry,
+        word: u64,
+        n: NodeId,
+    ) -> Option<AddressId> {
         let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
         let cap = self.read_sequence_word(header, 16, Ty::Scalar(Scalar::U64), n);
         let stride = self.layout_size(entry.ty, false, n)?;
-        let (offset, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, cap, stride, n);
+        let (mut offset, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, cap, stride, n);
+        if word != 0 {
+            let extra = self.konst(Ty::Scalar(Scalar::U64), word * 8, n)?;
+            offset = self.map_binary(BinaryOp::Add, offset, extra, n);
+        }
         Some(self.address(
             AddressBase::Value(data),
             &[Step::Byte(offset)],
@@ -442,7 +467,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         result
     }
-    fn map_index_len(&mut self, header: ValueId, n: NodeId) -> Option<ValueId> {
+    fn map_index_len(&mut self, header: ValueId, entry: MapEntry, n: NodeId) -> Option<ValueId> {
         let u = Ty::Scalar(Scalar::U64);
         let cap = self.read_sequence_word(header, 16, u, n);
         let zero = self.konst(u, 0, n)?;
@@ -463,7 +488,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.start(yes);
         self.jump(done, &[zero], n);
         self.start(no);
-        let count = self.map_index_count(cap, n)?;
+        let at = self.map_metadata_at(header, entry, 1, n)?;
+        let count = self.read_bits(at, u, n);
         self.jump(done, &[count], n);
         self.start(done);
         Some(self.block_params(done)[0])
@@ -482,7 +508,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let (entries, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, cap, stride, n);
         let eight = self.konst(u, 8, n)?;
         let (index, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, index, eight, n);
-        let offset = self.map_binary(BinaryOp::Add, entries, eight, n);
+        let sixteen = self.konst(u, 16, n)?;
+        let offset = self.map_binary(BinaryOp::Add, entries, sixteen, n);
         let offset = self.map_binary(BinaryOp::Add, offset, index, n);
         Some(self.address(
             AddressBase::Value(data),

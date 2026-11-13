@@ -12,7 +12,7 @@ pub fn get[K: key, V](m: Map[K, V], k: K) -> Option[View[V]] in m {
     let s = index_get(m, j)
     if s == 0 { return None }
     let i = s - 1
-    if slot_live(m, i) && slot_hash(m, i) == h && slot_key(m, i) == k {
+    if slot_hash(m, i) == h && slot_live(m, i) && slot_key(m, i) == k {
       return Some(slot_value(m, i))
     }
     j = int.wrapping_add(j, 1) & mask
@@ -72,7 +72,7 @@ fn find[K: key, V](m: Map[K,V], k: K, h: u64) -> Option[u64] {
     let s = index_get(m, j)
     if s == 0 { return None }
     let i = s - 1
-    if slot_live(m, i) && slot_hash(m, i) == h && slot_key(m, i) == k { return Some(i) }
+    if slot_hash(m, i) == h && slot_live(m, i) && slot_key(m, i) == k { return Some(i) }
     j = int.wrapping_add(j, 1) & mask
   }
 }

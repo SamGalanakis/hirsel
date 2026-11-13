@@ -75,6 +75,11 @@ pub fn symbol(module: &Module, function: FuncId) -> String {
 /// Proven infallible bodies use a private direct-call ABI without that status.
 /// This function trusts its producer's IR and layout recipes.
 pub fn emit_ir(module: &Module) -> Result<String> {
+    emit_ir_with_charge_observation(module, false)
+}
+
+/// Optional diagnostic emission; timings of these objects are not performance samples.
+pub fn emit_ir_with_charge_observation(module: &Module, observe_charge: bool) -> Result<String> {
     let mut text = String::new();
     for (i, data) in module.statics.iter().enumerate() {
         let bytes = data
@@ -121,7 +126,12 @@ pub fn emit_ir(module: &Module) -> Result<String> {
             has_status,
             failures: &failures,
             constants: &failures.constants[i],
-            empty_bounds: empty::EmptyBounds::new(body, &failures.constants[i]),
+            observe_charge,
+            empty_bounds: if observe_charge {
+                empty::EmptyBounds::default()
+            } else {
+                empty::EmptyBounds::new(body, &failures.constants[i])
+            },
             code: String::new(),
             allocations: String::new(),
             next: 0,
@@ -206,14 +216,26 @@ pub fn emit_ir(module: &Module) -> Result<String> {
 /// retained LLVM target/handle machinery, without the old product pipeline.
 /// The caller supplies its linker and entry harness; objects have FORM symbols.
 pub fn emit_object(module: &Module, opt: Optimization) -> Result<Vec<u8>> {
+    emit_object_with_charge_observation(module, opt, false)
+}
+
+/// Emit a labelled diagnostic object with exact logical-charge samples.
+pub fn emit_object_with_charge_observation(
+    module: &Module,
+    opt: Optimization,
+    observe_charge: bool,
+) -> Result<Vec<u8>> {
     #[cfg(not(hirsel_lazy_core))]
     {
-        compile(module, opt, |_| (), |_| ()).map(|(bytes, ())| bytes)
+        compile_observation(module, opt, observe_charge, |_| (), |_| ()).map(|(bytes, ())| bytes)
     }
     #[cfg(hirsel_lazy_core)]
     {
-        crate::loader::compile(&emit_ir(module)?, matches!(opt, Optimization::Speed))
-            .map_err(Error::Llvm)
+        crate::loader::compile(
+            &emit_ir_with_charge_observation(module, observe_charge)?,
+            matches!(opt, Optimization::Speed),
+        )
+        .map_err(Error::Llvm)
     }
 }
 
@@ -248,10 +270,21 @@ fn compile<R>(
     module: &Module,
     opt: Optimization,
     inspect: impl FnOnce(&LlvmModule<'_>) -> R,
+    observer: impl FnMut(CompilationStage),
+) -> Result<(Vec<u8>, R)> {
+    compile_observation(module, opt, false, inspect, observer)
+}
+
+#[cfg(not(hirsel_lazy_core))]
+fn compile_observation<R>(
+    module: &Module,
+    opt: Optimization,
+    observe_charge: bool,
+    inspect: impl FnOnce(&LlvmModule<'_>) -> R,
     mut observer: impl FnMut(CompilationStage),
 ) -> Result<(Vec<u8>, R)> {
     observer(CompilationStage::TextConstruction);
-    let ir = emit_ir(module)?;
+    let ir = emit_ir_with_charge_observation(module, observe_charge)?;
     observer(CompilationStage::TargetSetup);
     let target = hirsel_lir::layout_types::TargetSpec::x86_64_unknown_linux_gnu();
     let machine =
@@ -298,6 +331,7 @@ struct FunctionEmitter<'a> {
     failures: &'a failure::Failures,
     constants: &'a [Option<u64>],
     empty_bounds: empty::EmptyBounds,
+    observe_charge: bool,
     code: String,
     allocations: String,
     next: usize,

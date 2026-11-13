@@ -11,6 +11,7 @@ crate-type = ["rlib", "staticlib"]
 [features]
 testing = []
 memcheck = []
+charge-observation = []
 mimalloc = ["dep:libmimalloc-sys"]
 
 [dependencies]

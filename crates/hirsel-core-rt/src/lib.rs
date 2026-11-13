@@ -20,6 +20,8 @@ pub mod host_file;
 pub mod host_ops;
 pub mod limit;
 pub mod os;
+#[cfg(any(test, feature = "charge-observation"))]
+pub mod peak;
 pub mod process;
 pub mod provider;
 pub mod region;

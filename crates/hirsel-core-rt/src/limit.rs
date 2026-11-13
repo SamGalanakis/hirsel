@@ -301,6 +301,8 @@ impl Payer {
             Some(n) if !injected && n <= r.available => {
                 r.available = r.available.wrapping_sub(n);
                 r.outstanding = r.outstanding.wrapping_add(n);
+                #[cfg(any(test, feature = "charge-observation"))]
+                crate::peak::sample();
                 Ok(())
             }
             n => Err(crate::tasks::capacity_refused(
@@ -708,12 +710,15 @@ impl Funding {
             return Err(crate::tasks::capacity_refused(bytes, r.available));
         }
         r.available = r.available.wrapping_sub(bytes);
-        Ok(Live {
+        let live = Live {
             owner: r.live.owner,
             inbox: r.live.inbox,
             capacity: bytes,
             parent: Some(parent),
-        })
+        };
+        #[cfg(any(test, feature = "charge-observation"))]
+        crate::peak::sample();
+        Ok(live)
     }
     #[inline(always)]
     pub(crate) fn enter(&mut self, bytes: u64) -> Result<(), Capacity> {

@@ -28,6 +28,8 @@ pub struct Report {
     pub outcome: Outcome,
     /// The root limit's `used` after the run (MEM-19).
     pub used: u64,
+    /// Root peak reservation (MEM-19), including bound/task/grant reservations.
+    pub peak_reserved: u64,
     /// The first u64 field of each resource, in the order its cleanup started.
     pub trace: Vec<u64>,
     pub admissions: usize,
@@ -185,6 +187,7 @@ struct Machine<'m> {
     recipes: Vec<Recipe>,
     mem: Vec<Blk>,
     limits: Vec<Limit>,
+    peak_reserved: u64,
     regions: Vec<Vec<usize>>,
     children: Vec<Child>,
     chans: Vec<Chan>,
@@ -238,6 +241,7 @@ fn run_world(
         m,
         recipes: compute(&m.types).expect("layouts"),
         mem: Vec::new(),
+        peak_reserved: 0,
         limits: vec![Limit {
             cap: limit,
             used: 0,
@@ -292,6 +296,7 @@ fn run_world(
     Report {
         outcome,
         used: mach.limits[0].used,
+        peak_reserved: mach.peak_reserved,
         trace: mach.trace,
         admissions: mach.admissions,
         stdout: mach.world.stdout,
@@ -623,6 +628,7 @@ impl Machine<'_> {
             .is_some_and(|(nth, later)| self.admissions == nth || (later && self.admissions > nth));
         if n <= room && !refused {
             lim.used += n;
+            self.peak_reserved = self.peak_reserved.max(self.limits[0].used);
             Ok(())
         } else {
             Err(room)

@@ -85,8 +85,17 @@
 //! domain across growth; a received grant keeps the lease through finalizer_end,
 //! including suspension. No local admission/refund/enter/exit acquires a lock.
 
+//! Optional charge-observation archive: `hirsel_core_observe_charge() -> ()` samples
+//! after an emitted debit; `hirsel_core_peak_charge() -> u64` reads the completed
+//! run's root peak reservation (bound/task/grant reservations included, MEM-19).
+//! Neither has failure status, admission, refund delivery or an event. Both are
+//! absent from shipping archives; observed emission must link the observed archive.
+//!
 // Offset and header constants are shared verbatim with both native emitters.
 pub use crate::abi_layout::*;
+
+#[cfg(feature = "charge-observation")]
+pub use crate::peak::{hirsel_core_observe_charge, hirsel_core_peak_charge};
 
 use crate::{
     Capacity, Context,

@@ -62,6 +62,7 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     let mut backend = None;
     let mut release = false;
     let mut runtime = None;
+    let mut logical_charge_report = None;
     let mut output_path = None;
     let mut root_limit = 64 * 1024 * 1024;
     let mut target = "x86_64-unknown-linux-gnu".to_owned();
@@ -102,6 +103,11 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
             }
             "--runtime" => {
                 runtime = Some(PathBuf::from(args.next().ok_or("missing runtime archive")?))
+            }
+            "--logical-charge-report" if native_command => {
+                logical_charge_report = Some(PathBuf::from(
+                    args.next().ok_or("missing logical charge report path")?,
+                ));
             }
             "--cc" => cc = PathBuf::from(args.next().ok_or("missing C linker driver")?),
             "--target" => target = args.next().ok_or("missing target")?,
@@ -292,7 +298,13 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
             instance_limit: 65_536,
             directories,
             grant_mask,
+            logical_charge_report,
         };
+        if options.logical_charge_report.is_some() {
+            eprintln!(
+                "observation build: root peak reservation includes bound, task and grant reservations (MEM-19); timings are not performance samples"
+            );
+        }
         match product.build_reachable(
             selected_entry
                 .as_ref()

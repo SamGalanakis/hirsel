@@ -53,6 +53,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             instance_limit: 65536,
             directories: vec![],
             grant_mask: 0,
+            logical_charge_report: args
+                .get(6)
+                .filter(|mode| mode.as_str() == "observe-charge")
+                .map(|_| out.join("logical-charge.json")),
         };
         let objects = checked.emit_reachable(&entry, &options)?;
         let mut paths = vec![];

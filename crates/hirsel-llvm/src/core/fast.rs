@@ -100,6 +100,9 @@ impl FunctionEmitter<'_> {
         let outstanding = self.load_native(payer, LIMIT_OUTSTANDING, "i64");
         let used = self.calc(format!("add i64 {outstanding}, {charge}"));
         self.store_native(payer, LIMIT_OUTSTANDING, "i64", &used);
+        if self.observe_charge {
+            self.cold_void("hirsel_core_observe_charge", &[]);
+        }
     }
     /// Empty scopes have no admission or external observer between entry/exit.
     /// Their reservation and refund cancel; the source Capacity check remains.

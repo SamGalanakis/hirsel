@@ -202,3 +202,26 @@ adds an application extension and reaches the core, std and application bodies.
 Automatic std-package selection is the remaining driver integration step; std's
 constant/declaration acceptance and all body completion are still required for
 the standing canonical-image rows to turn green.
+
+`build` and `run --logical-charge-report <file.json>` create a diagnostic build
+that writes `{"observation_mode":true,"peak_root_reserved_bytes":N}` after the
+run and its cleanup. Program stdout, stderr, exit status, Capacity boundaries and
+refund delivery order remain the same. The report counts the root's peak
+reservation under MEM-19: bound scopes, task reservations and finalizer grants
+are included even when their reserved bytes are unused. Root task/cause startup
+is included; host allocations, physical chunk slack and engine bookkeeping are
+excluded. This is logical charge, not RSS or lifetime admitted bytes. The report
+file is opened only after the run. An error writing it is a driver/report error.
+
+Use the optional `//:hirsel-core-rt-observed-archives` Buck artifact with
+`--runtime <artifact>/x86_64-unknown-linux-gnu/libhirsel_core_rt.a`. Its Cargo
+equivalent is feature `charge-observation`. Shipping runtime archives contain
+no sampling hooks, branches or TLS accesses. Observed objects and the build JSON
+are labelled `observation_mode: true`, have distinct cache keys, and must never
+be used as performance samples. The compiler prints the same timing warning.
+Mixing observed emission with a shipping runtime fails at link time. Enabled
+mode samples successful runtime and inline admissions; it also retains actual
+empty-bound reservations that ordinary emission may cancel. Sampling changes
+execution cost, not language-visible event order. This mode currently follows
+the single-worker cooperative scheduler; a future multi-worker scheduler must
+provide a synchronized run observer before using it.

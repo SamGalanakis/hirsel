@@ -32,7 +32,11 @@ impl Scratch {
 }
 impl Drop for Scratch {
     fn drop(&mut self) {
-        fs::remove_dir_all(&self.0).unwrap();
+        if std::thread::panicking() {
+            eprintln!("native failure artifacts: {}", self.0.display());
+        } else {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
     }
 }
 
@@ -147,13 +151,15 @@ fn execute_reports(
             });
     let scratch = Scratch::new();
     let layouts = hirsel_core_layout::compute(&module.types).unwrap();
-    let artifact = emit_object_for_test(
+    let observing = std::env::var_os("HIRSEL_TEST_CHARGE_OBSERVATION").is_some();
+    let artifact = hirsel_cranelift::core::emit_object_for_test_observed(
         module,
         &layouts,
         &Options {
             target: "x86_64-unknown-linux-gnu",
             optimize,
         },
+        observing,
     )
     .unwrap();
     fs::write(scratch.0.join("input.o"), artifact.bytes).unwrap();
@@ -162,6 +168,9 @@ fn execute_reports(
         "../../hirsel-core-rt/include/hirsel_core_rt.h"
     ));
     source.push_str("\nextern HirselCoreContext *hirsel_core_test_context_new(uint64_t);\nextern void hirsel_core_test_inject(HirselCoreContext *,size_t,bool);\nextern uint64_t hirsel_core_test_available(const HirselCoreContext *);\nextern size_t hirsel_core_test_attempts(const HirselCoreContext *);\nstatic uint64_t trace[1000000]; static size_t traces;\nvoid hirsel_core_test_drop_trace(uint64_t n) { if(traces >= 1000000) __builtin_abort(); trace[traces++]=n; }\n");
+    if observing {
+        source.push_str("extern void *hirsel_core_test_observe_begin(const HirselCoreContext *); extern uint64_t hirsel_core_test_observe_end(void *);\n");
+    }
     declare_functions(&mut source, module);
     if scheduled {
         source.push_str("extern uint8_t hirsel_core_test_run(HirselCoreContext *,uint8_t (*)(HirselCoreContext*,void*,void*),void*,void*,size_t,size_t);\n");
@@ -268,6 +277,9 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
             source.push_str("{\n");
             writeln!(source, "HirselCoreContext *ctx = hirsel_core_test_context_new(UINT64_C({limit})); traces=0;").unwrap();
         }
+        if observing {
+            source.push_str("void *observation=hirsel_core_test_observe_begin(ctx);\n");
+        }
         if let Some((n, later)) = injection {
             writeln!(
                 source,
@@ -335,6 +347,21 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
         }
         if !s.results.is_empty() {
             source.push_str("uint64_t status = value.status;\n");
+        }
+        if observing {
+            let check = if !scheduled && !host_files && reports.is_none() {
+                format!(
+                    "if(peak!=UINT64_C({})) {{ fprintf(stderr,\"peak mismatch: %llu expected {}\\n\",(unsigned long long)peak); return 17; }}",
+                    report.peak_reserved, report.peak_reserved
+                )
+            } else {
+                String::new()
+            };
+            writeln!(
+                source,
+                "uint64_t peak=hirsel_core_test_observe_end(observation); {check}"
+            )
+            .unwrap();
         }
         source.push_str("fwrite(&status,8,1,stdout); HirselCoreCauseCell *causes = 0; if (status) { causes = hirsel_core_causes_take(ctx); uint64_t count = 0; for(const HirselCoreCauseCell *c = causes; c; c = hirsel_core_cause_next(c)) count++; fwrite(&count,8,1,stdout); for(const HirselCoreCauseCell *c = causes; c; c = hirsel_core_cause_next(c)) { uint64_t kind = hirsel_core_cause_kind(hirsel_core_cause_value(c)); fwrite(&kind,8,1,stdout); } } else {\n");
         writeln!(
@@ -1014,6 +1041,7 @@ fn counted_variant_chain_uses_constant_stack_and_refunds_every_node() {
         Some(&[eval::Report {
             outcome: Outcome::Returned(vec![n]),
             used: 0,
+            peak_reserved: 0, // This independent fixture specifies outcomes/ledger, not its high water.
             trace: vec![],
             admissions: n as usize + 1,
             stdout: vec![],
@@ -1107,6 +1135,7 @@ fn string_literals_grow_and_clean_in_dev_and_speed() {
                     Some(&[eval::Report {
                         outcome: Outcome::Returned(vec![]),
                         used: 0,
+                        peak_reserved: 0, // This independent fixture specifies outcomes/ledger, not its high water.
                         trace: vec![],
                         admissions: usize::from(counted_drop),
                         stdout: vec![],
@@ -1124,6 +1153,7 @@ fn string_literals_grow_and_clean_in_dev_and_speed() {
                             Some(&[eval::Report {
                                 outcome: Outcome::Failed(vec!["Unwrap".into()]),
                                 used: 0,
+                                peak_reserved: 0, // This independent fixture specifies outcomes/ledger, not its high water.
                                 trace: vec![],
                                 admissions: 1,
                                 stdout: vec![],
@@ -1200,6 +1230,7 @@ fn owned_callable_captures_and_captureless_cleanup_use_function_row_abi() {
         eval::Report {
             outcome: Outcome::Returned(vec![12345]),
             used: 0,
+            peak_reserved: 0, // This independent fixture specifies outcomes/ledger, not its high water.
             trace: vec![],
             admissions: 1,
             stdout: vec![],
@@ -1208,6 +1239,7 @@ fn owned_callable_captures_and_captureless_cleanup_use_function_row_abi() {
         eval::Report {
             outcome: Outcome::Returned(vec![13]),
             used: 0,
+            peak_reserved: 0, // This independent fixture specifies outcomes/ledger, not its high water.
             trace: vec![],
             admissions: 0,
             stdout: vec![],
@@ -1267,6 +1299,7 @@ fn nested_counted_sequences_clean_refused_prefixes_and_deep_chains() {
         Some(&[eval::Report {
             outcome: Outcome::Returned(vec![n]),
             used: 0,
+            peak_reserved: 0, // This independent fixture specifies outcomes/ledger, not its high water.
             trace: vec![],
             admissions: 1 + 3 * n as usize,
             stdout: vec![],
@@ -1658,6 +1691,7 @@ fn static_capacity_zero_carriers_drop_and_grow_through_runtime_cleanup() {
         .map(|(f, _)| eval::Report {
             outcome: Outcome::Returned(vec![]),
             used: 0,
+            peak_reserved: 0, // This independent fixture specifies outcomes/ledger, not its high water.
             trace: vec![],
             admissions: [0, 1, 1, 2][f.index()],
             stdout: vec![],
@@ -1673,6 +1707,7 @@ fn joined_cause_views_use_core_layout() {
     let expected = eval::Report {
         outcome: Outcome::Returned(vec![1, 1, 4, 4]),
         used: 0,
+        peak_reserved: 0, // This independent fixture specifies outcomes/ledger, not its high water.
         stdout: vec![],
         stderr: vec![],
         trace: vec![7],
@@ -1723,6 +1758,7 @@ fn dynamic_overflow_and_local_like_admissions_keep_exact_refusal_counts() {
                         if success { 0 } else { 64 },
                     ]),
                     used: 0,
+                    peak_reserved: 0, // This independent fixture specifies outcomes/ledger, not its high water.
                     trace: vec![],
                     admissions: 1,
                     stdout: vec![],

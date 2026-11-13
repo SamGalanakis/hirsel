@@ -1,6 +1,10 @@
 #ifndef HIRSEL_CORE_RT_H
 #define HIRSEL_CORE_RT_H
 #include <stdint.h>
+/* Diagnostic archive only. Samples do not admit, deliver refunds or emit events.
+ * Peak is the last run's root reservation, including bound/task/grant reservations. */
+void hirsel_core_observe_charge(void);
+uint64_t hirsel_core_peak_charge(void);
 #include <stddef.h>
 #include <stdbool.h>
 /* Frozen 64-bit emitter layouts; offsets in bytes, no atomic local accounting. */

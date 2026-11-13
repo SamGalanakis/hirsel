@@ -55,6 +55,8 @@ pub unsafe extern "C" fn hirsel_core_run(config: *const Config, entry: Entry) ->
         let _pipe_policy = PipePolicy::enter();
         let mut context = Context::new(config.root_limit);
         context.run = config;
+        #[cfg(feature = "charge-observation")]
+        let _observation = crate::peak::Run::start(&context);
         let mut files = crate::host_file::Files::default();
         context.host_files = &mut files;
         if let Err(capacity) = causes::task_start(&mut context) {

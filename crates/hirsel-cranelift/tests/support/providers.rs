@@ -312,6 +312,7 @@ fn every_host_row_preserves_c_fields_and_wait_status() {
                 report: eval::Report {
                     outcome,
                     used: 0,
+                    peak_reserved: 0, // This independent fixture specifies outcomes/ledger, not its high water.
                     trace: vec![],
                     admissions: 0,
                     stdout: vec![],

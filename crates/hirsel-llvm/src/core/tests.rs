@@ -49,6 +49,7 @@ struct NativeReport {
     admissions: usize,
     messages: Vec<String>,
     arc_events: Vec<(u8, u64)>,
+    peak_reserved: Option<u64>,
 }
 fn has_hostfile_field(shape: &hirsel_core_layout::Shape) -> bool {
     shape.fields(None).is_some_and(|fields| {
@@ -87,15 +88,19 @@ fn execute_with_configuration(
         }
     }
     let _scratch = Scratch(dir.clone());
-    let ir = emit_ir(module).unwrap();
+    let observing = std::env::var_os("HIRSEL_TEST_CHARGE_OBSERVATION").is_some();
+    let ir = emit_ir_with_charge_observation(module, observing).unwrap();
     let context = Context::new();
     let llvm = LlvmModule::parse(&context, "test", &ir).unwrap();
     llvm.verify().unwrap_or_else(|e| panic!("{e}\n{ir}"));
-    let bytes = emit_object(module, Optimization::None).unwrap();
+    let bytes = emit_object_with_charge_observation(module, Optimization::None, observing).unwrap();
     std::fs::write(dir.join("core.o"), bytes).unwrap();
     let mut c = String::from(
         "#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\n#include <assert.h>\n#include \"hirsel_core_rt.h\"\nextern uint64_t hirsel_core_test_available(const HirselCoreContext *);\nextern HirselCoreContext *hirsel_core_test_context_new(uint64_t);\nextern void hirsel_core_test_inject(HirselCoreContext *,size_t,bool);\nextern size_t hirsel_core_test_attempts(const HirselCoreContext *);\nstatic uint64_t trace[4096]; static size_t traces;\nvoid hirsel_core_test_drop_trace(uint64_t n){assert(traces<4096);trace[traces++]=n;}\nstatic float f32(uint32_t b){float x;memcpy(&x,&b,4);return x;}\nstatic double f64(uint64_t b){double x;memcpy(&x,&b,8);return x;}\nstatic const char *causes[]={\"Overflow\",\"Bounds\",\"Division\",\"Unwrap\",\"Fail\",\"Cancelled\",\"Capacity\"};\n",
     );
+    if observing {
+        c.push_str("extern void *hirsel_core_test_observe_begin(const HirselCoreContext *); extern uint64_t hirsel_core_test_observe_end(void *);\n");
+    }
     for (i, f) in module.functions.iter().enumerate() {
         let s = &module.signatures[f.signature.index()];
         let mut fields = s.results.clone();
@@ -216,7 +221,12 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
         } else {
             String::new()
         };
-        writeln!(c,"static uint8_t case{k}(HirselCoreContext *ctx,const HirselCoreProcessConfig *cfg,HirselCoreMainResult *result) {{ (void)cfg; (void)result; hirsel_core_test_reset_limit(ctx,UINT64_C({limit})); {files} traces=0; arc_count=0; {inject} uint64_t initial=hirsel_core_test_available(ctx); {ret} r{k} = {}({args});",symbol(module,f)).unwrap();
+        let begin = if observing {
+            "void *observation=hirsel_core_test_observe_begin(ctx);"
+        } else {
+            ""
+        };
+        writeln!(c,"static uint8_t case{k}(HirselCoreContext *ctx,const HirselCoreProcessConfig *cfg,HirselCoreMainResult *result) {{ (void)cfg; (void)result; hirsel_core_test_reset_limit(ctx,UINT64_C({limit})); {files} traces=0; arc_count=0; {begin} {inject} uint64_t initial=hirsel_core_test_available(ctx); {ret} r{k} = {}({args});",symbol(module,f)).unwrap();
         writeln!(invocations, "assert(hirsel_core_run(&cfg,case{k})==0);").unwrap();
         let status = if sig.results.is_empty() {
             format!("r{k}")
@@ -229,6 +239,12 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
                 "assert(file_closes==({status} ? 0 : 1)); assert(file_deliveries==file_closes);"
             )
             .unwrap();
+        }
+        if observing {
+            c.push_str("uint64_t peak=hirsel_core_test_observe_end(observation);\n");
+        }
+        if observing {
+            c.push_str("printf(\"%llu|\",(unsigned long long)peak);\n");
         }
         writeln!(
             c,
@@ -267,6 +283,7 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
         .lines()
         .map(|line| {
             let mut parts = line.split('|');
+            let peak_reserved = observing.then(|| parts.next().unwrap().parse().unwrap());
             let mut values = parts.next().unwrap().split_whitespace();
             let status = values.next().unwrap();
             let outcome = if status == "R" {
@@ -276,6 +293,7 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
             };
             NativeReport {
                 outcome,
+                peak_reserved,
                 used: parts.next().unwrap().parse().unwrap(),
                 trace: parts
                     .next()
@@ -331,6 +349,9 @@ fn agree_cases(module: &Module, cases: &[Case], memory: bool) {
             "f{}({:?})",
             case.function.0, case.args
         );
+        if let Some(peak) = got.peak_reserved {
+            assert_eq!(peak, expected.peak_reserved, "peak reservation");
+        }
         if memory {
             assert_eq!(got.used, expected.used, "used");
             assert_eq!(got.trace, expected.trace, "trace");

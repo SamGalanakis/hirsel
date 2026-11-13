@@ -34,6 +34,7 @@ pub(super) struct Function<'a, 'b, 'c> {
     pub calls: calls::Calls<'c>,
     pub testing: bool,
     pub empty_bound: bool,
+    pub observe_charge: bool,
 }
 
 pub(super) fn emit(
@@ -135,7 +136,8 @@ pub(super) fn emit(
         propagation: None,
         cause_slot: None,
         testing: tables.trace_drops,
-        empty_bound: fast::empty_bound(body),
+        empty_bound: !tables.observe_charge && fast::empty_bound(body),
+        observe_charge: tables.observe_charge,
         calls: calls::Calls::new(
             &tables.runtimes,
             signatures,

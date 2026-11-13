@@ -43,6 +43,8 @@ pub struct NativeOptions {
     pub directories: Vec<String>,
     /// Explicit host authority, using the runtime's grant-kind bit positions.
     pub grant_mask: u64,
+    /// Diagnostic build: exact root reservation peak, unsuitable for timing samples.
+    pub logical_charge_report: Option<PathBuf>,
 }
 #[derive(Debug)]
 pub enum NativeStop {
@@ -89,6 +91,8 @@ pub struct BuildProduct {
     pub identity: ContentHash,
     pub compiled: usize,
     pub linked: bool,
+    /// True means diagnostic instrumentation; timings are not performance samples.
+    pub observation_mode: bool,
 }
 fn key(domain: &str, value: &impl Serialize) -> io::Result<ContentHash> {
     Ok(ContentHash::of_parts(domain, [&encode(value)?[..]]))
@@ -114,23 +118,25 @@ fn read_input(path: &Path) -> io::Result<Vec<u8>> {
 // The cache chooses its granularity; this boundary never strips type/drop inputs.
 fn emit_unit(module: &Module, options: &NativeOptions) -> Result<Vec<u8>, String> {
     match options.backend {
-        Backend::Cranelift => hirsel_cranelift::core::emit_object_with_layouts(
+        Backend::Cranelift => hirsel_cranelift::core::emit_object_with_charge_observation(
             module,
             &hirsel_core_layout::compute(&module.types).expect("producer layouts"),
             &hirsel_cranelift::core::Options {
                 target: &options.target,
                 optimize: options.optimize,
             },
+            options.logical_charge_report.is_some(),
         )
         .map(|o| o.bytes)
         .map_err(|e| e.to_string()),
-        Backend::Llvm => hirsel_llvm_lazy::core::emit_object(
+        Backend::Llvm => hirsel_llvm_lazy::core::emit_object_with_charge_observation(
             module,
             if options.optimize {
                 hirsel_llvm_lazy::core::Optimization::Speed
             } else {
                 hirsel_llvm_lazy::core::Optimization::None
             },
+            options.logical_charge_report.is_some(),
         )
         .map_err(|e| e.to_string()),
     }
@@ -212,6 +218,7 @@ impl CheckProduct {
                     &options.target,
                     options.backend,
                     options.optimize,
+                    options.logical_charge_report.is_some(),
                     runtime,
                     &instance,
                     &body.key,
@@ -458,11 +465,25 @@ fn entry_source(
         .collect::<String>();
     let limit = options.root_limit;
     let grant_mask = options.grant_mask;
+    let observation_label = if options.logical_charge_report.is_some() {
+        r#"__attribute__((used)) static const char hirsel_observation_build[] = "Hirsel observation build: timings are not performance samples";"#
+    } else {
+        ""
+    };
+    let charge_report = options.logical_charge_report.as_ref().map_or_else(String::new, |path| {
+        use std::os::unix::ffi::OsStrExt;
+        let literal = path.as_os_str().as_bytes().iter().map(|b| format!("\\{b:03o}")).collect::<String>();
+        format!(r#"FILE *report=fopen("{literal}","w");
+    if(!report) {{ perror("logical charge report"); return 2; }}
+    fprintf(report,"{{\"observation_mode\":true,\"peak_root_reserved_bytes\":%llu}}\n",(unsigned long long)hirsel_core_peak_charge());
+    if(fclose(report)) {{ perror("logical charge report"); return 2; }}"#)
+    });
     Ok(format!(
         r#"#include "hirsel_core_rt_host.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+{observation_label}
 extern uint8_t {symbol}(HirselCoreContext *, void *{parameter_types});
 static uint8_t entry(HirselCoreContext *ctx, const HirselCoreProcessConfig *cfg, HirselCoreMainResult *out) {{
     (void)cfg;
@@ -488,6 +509,7 @@ int main(int argc, char **argv) {{
     input.parameters=parameters; input.parameters_len={requirements_len};
     uint8_t status=hirsel_core_os_run(&input,parameter_names,entry);
     free(args);
+    {charge_report}
     return status;
 }}
 "#,
@@ -651,6 +673,7 @@ fn link(
         identity,
         compiled: objects.iter().filter(|o| o.compiled).count(),
         linked,
+        observation_mode: options.logical_charge_report.is_some(),
     })
 }
 
@@ -741,6 +764,7 @@ b0:
             instance_limit: 64,
             directories: vec![],
             grant_mask: 0,
+            logical_charge_report: None,
         }
     }
     fn exercise(backend: Backend) {

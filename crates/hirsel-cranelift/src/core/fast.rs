@@ -64,12 +64,16 @@ impl Function<'_, '_, '_> {
         };
         Ok((fits, available))
     }
-    fn debit(&mut self, payer: Value, charge: Value, available: Value) {
+    fn debit(&mut self, payer: Value, charge: Value, available: Value) -> Result<()> {
         let available = self.b.ins().isub(available, charge);
         let held = self.load_word(payer, memory_layout::LIMIT_OUTSTANDING);
         let held = self.b.ins().iadd(held, charge);
         self.store_word(payer, memory_layout::LIMIT_AVAILABLE, available);
         self.store_word(payer, memory_layout::LIMIT_OUTSTANDING, held);
+        if self.observe_charge {
+            self.c_call("hirsel_core_observe_charge", &[], &[], &[])?;
+        }
+        Ok(())
     }
     pub fn own_alloc(
         &mut self,
@@ -173,7 +177,7 @@ impl Function<'_, '_, '_> {
         let null = self.b.ins().iconst(types::I64, 0);
         self.b.ins().jump(done, &[null.into(), available.into()]);
         self.b.switch_to_block(allocate);
-        self.debit(payer, charge, available);
+        self.debit(payer, charge, available)?;
         let native_kind = u64::from(kind != AllocKind::Plain);
         let tag = native_kind
             | (u64::from(alignment.trailing_zeros() - 3) << memory_layout::OWN_ALIGNMENT_SHIFT);
@@ -246,7 +250,7 @@ impl Function<'_, '_, '_> {
         let null = self.b.ins().iconst(types::I64, 0);
         self.b.ins().jump(done, &[null.into(), available.into()]);
         self.b.switch_to_block(admitted);
-        self.debit(payer, charge, available);
+        self.debit(payer, charge, available)?;
         let held = self.b.ins().iadd(held, charge);
         self.store_word(region, memory_layout::REGION_CHARGE, held);
         let cursor = self.load_word(region, memory_layout::REGION_CURSOR);

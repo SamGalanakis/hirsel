@@ -104,6 +104,7 @@ pub(super) struct Tables<'a> {
     task_entries: &'a task_entry::Glues,
     allocators: &'a [fast::Allocator],
     trace_drops: bool,
+    observe_charge: bool,
     runtimes: std::cell::RefCell<calls::Imports>,
 }
 
@@ -148,7 +149,7 @@ pub fn emit_object_with_layouts(
     layouts: &[hirsel_core_layout::Recipe],
     options: &Options<'_>,
 ) -> Result<Object> {
-    emit(input, layouts, options, false, &())
+    emit(input, layouts, options, false, false, &())
 }
 
 /// Native fixture entry. Trace instrumentation is absent from ordinary emission.
@@ -158,7 +159,18 @@ pub fn emit_object_for_test(
     layouts: &[hirsel_core_layout::Recipe],
     options: &Options<'_>,
 ) -> Result<Object> {
-    emit(input, layouts, options, true, &())
+    emit_object_for_test_observed(input, layouts, options, false)
+}
+
+/// Native observation fixture, retaining the admission injector and cleanup trace.
+#[doc(hidden)]
+pub fn emit_object_for_test_observed(
+    input: &c::Module,
+    layouts: &[hirsel_core_layout::Recipe],
+    options: &Options<'_>,
+    observe_charge: bool,
+) -> Result<Object> {
+    emit(input, layouts, options, true, observe_charge, &())
 }
 /// Emit with diagnostic stage observation. Ordinary emission uses a zero-sized
 /// observer whose hooks disappear during Rust compilation.
@@ -169,13 +181,23 @@ pub fn emit_object_profiled(
     options: &Options<'_>,
     observer: &impl profile::Observer,
 ) -> Result<Object> {
-    emit(input, layouts, options, false, observer)
+    emit(input, layouts, options, false, false, observer)
+}
+/// Optional diagnostic emission; timings of these objects are not performance samples.
+pub fn emit_object_with_charge_observation(
+    input: &c::Module,
+    layouts: &[hirsel_core_layout::Recipe],
+    options: &Options<'_>,
+    observe_charge: bool,
+) -> Result<Object> {
+    emit(input, layouts, options, false, observe_charge, &())
 }
 fn emit(
     input: &c::Module,
     layouts: &[hirsel_core_layout::Recipe],
     options: &Options<'_>,
     trace_drops: bool,
+    observe_charge: bool,
     observer: &impl profile::Observer,
 ) -> Result<Object> {
     let setup = observer.enter("module_setup");
@@ -259,6 +281,7 @@ fn emit(
         task_entries: &task_entries,
         allocators: &allocators,
         trace_drops,
+        observe_charge,
         runtimes: Default::default(),
     };
     drop(setup);

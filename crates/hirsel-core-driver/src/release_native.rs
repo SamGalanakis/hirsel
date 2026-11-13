@@ -59,6 +59,7 @@ impl CheckProduct {
                     &options.target,
                     options.backend,
                     options.optimize,
+                    options.logical_charge_report.is_some(),
                     runtime,
                     instance,
                     &materialized.get(instance).product.key,
@@ -93,6 +94,7 @@ impl CheckProduct {
             &(
                 compiler_identity()?,
                 &options.target,
+                options.logical_charge_report.is_some(),
                 runtime,
                 instance,
                 &modules,
@@ -104,7 +106,12 @@ impl CheckProduct {
         } else {
             let text = modules
                 .iter()
-                .map(|ir| hirsel_llvm_lazy::core::emit_ir(ir))
+                .map(|ir| {
+                    hirsel_llvm_lazy::core::emit_ir_with_charge_observation(
+                        ir,
+                        options.logical_charge_report.is_some(),
+                    )
+                })
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| NativeStop::Emit {
                     definition: entry.clone(),

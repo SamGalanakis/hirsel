@@ -214,6 +214,7 @@ fn atomic_helpers_use_checked_cas_and_release_acquire() {
         has_status: false,
         failures: &failures,
         constants: &[],
+        observe_charge: false,
         empty_bounds: empty::EmptyBounds::default(),
         code: String::new(),
         allocations: String::new(),

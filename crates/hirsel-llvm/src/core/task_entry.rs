@@ -54,6 +54,7 @@ pub(super) fn emit(
             has_status: false,
             failures,
             constants: &[],
+            observe_charge: false,
             empty_bounds: empty::EmptyBounds::new(&body, &[]),
             code: String::new(),
             allocations: String::new(),

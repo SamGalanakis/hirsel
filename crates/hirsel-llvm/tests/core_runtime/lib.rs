@@ -146,3 +146,25 @@ pub unsafe extern "C" fn hirsel_core_test_reset_limit(
         context.inject_admission(0, false);
     }
 }
+
+/// # Safety
+/// Context is this fixture's empty root, exclusively owned by the worker.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_test_observe_begin(
+    context: *const hirsel_core_rt::Context,
+) -> *mut hirsel_core_rt::peak::Run {
+    // SAFETY: fixture pins its root for the whole observation.
+    Box::into_raw(Box::new(hirsel_core_rt::peak::Run::start(unsafe {
+        &*context
+    })))
+}
+/// # Safety
+/// Observation is the live unique result of test_observe_begin on this worker.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_test_observe_end(
+    observation: *mut hirsel_core_rt::peak::Run,
+) -> u64 {
+    // SAFETY: fixture ends and consumes exactly its own guard.
+    drop(unsafe { Box::from_raw(observation) });
+    hirsel_core_rt::abi::hirsel_core_peak_charge()
+}

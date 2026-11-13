@@ -3,12 +3,12 @@
   "basis": "2e8792ee plus linked identity and terminal CLI exit: the one-shot CLI does not free resident products before exiting. Paired ordinary-driver results in NON-CHECK.md. Existing lower ceilings are retained when newer sibling work exceeds them; this change does not raise either ceiling.",
   "corpora": {
     "m1": {
-      "code_lines": 5963,
+      "code_lines": 6199,
       "check_lower_per_line": 25800,
       "whole_request_per_line": 46300
     },
     "std": {
-      "code_lines": 2572,
+      "code_lines": 2808,
       "check_lower_per_line": 13500,
       "whole_request_per_line": 31300
     }

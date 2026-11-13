@@ -574,12 +574,12 @@ fn repeated_reads_are_a_set_but_missing_and_shadowed_reads_survive() {
     );
 }
 #[test]
-fn numeric_bounds_only_on_bodiless_core_type_parameters() {
+fn numeric_bounds_only_on_core_type_parameters() {
     for (source, allowed) in [
         ("pub fn f[T: integer, F: float](x: T) -> F", true),
         ("pub opaque type Numeric[T: integer]", true),
-        ("fn f[T: integer](x: T) -> T { x }", false),
-        ("type Numeric[T: float] { n: T }", false),
+        ("fn f[T: integer](x: T) -> T { x }", true),
+        ("type Numeric[T: float] { n: T }", true),
         ("type Numeric: integer", false),
     ] {
         let (i, f) = packages(&[("core", "numeric", source)], Symbols::default());

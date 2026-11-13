@@ -18,4 +18,60 @@ pub fn widen[T: integer, U: integer](x: T) -> U
 pub fn narrow[T: integer, U: integer](x: T) -> U
 pub fn try_narrow[T: integer, U: integer](x: T) -> Option[U]
 pub fn truncate[T: integer, U: integer](x: T) -> U
-pub fn parse[T: integer](s: String) -> Result[T, ParseError]
+pub fn parse[T: integer](s: String) -> Result[T, ParseError] {
+    let b = string.as_bytes(s)
+    let n = list.len(b)
+    if n == 0 {
+        return Error(Empty)
+    }
+    let ten: T = int.narrow(10u8)
+    // T is signed exactly when it holds -1.
+    let minus_one: Option[T] = int.try_narrow(-1i8)
+    let negative = b[0] == b'-' && match minus_one {
+        Some(_) => true,
+        None => false,
+    }
+    let start: u64 = if negative {
+        1
+    } else {
+        0
+    }
+    if start == n {
+        return Error(Invalid(0))
+    }
+    // The grammar is checked to the end before the range: past the first value that does
+    // not fit, the digits are still read.
+    let mut v: T = int.narrow(0u8)
+    let mut fits = true
+    for i in start .. n {
+        let x = b[i]
+        if x < b'0' || x > b'9' {
+            return Error(Invalid(i))
+        }
+        if fits {
+            let d: T = int.narrow(x - b'0')
+            // Toward the sign, so a signed MIN fits.
+            let next: Option[T] = match int.checked_mul(v, ten) {
+                Some(m) => if negative {
+                    int.checked_sub(m, d)
+                } else {
+                    int.checked_add(m, d)
+                },
+                None => None,
+            }
+            match next {
+                Some(take m) => {
+                    v = m
+                },
+                None => {
+                    fits = false
+                },
+            }
+        }
+    }
+    if fits {
+        Ok(v)
+    } else {
+        Error(OutOfRange)
+    }
+}

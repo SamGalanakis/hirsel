@@ -183,6 +183,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let value = if let Some((f, types)) = item {
             let g = &child.p.fns[f];
             if g.path.package_is("core", "1")
+                && g.body.is_none()
                 && (g.path.0.modules == ["int"] || g.path.0.modules == ["float"])
             {
                 child.intrinsic(f, types, &values, n)

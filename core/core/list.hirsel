@@ -20,4 +20,21 @@ pub fn fill[T: plain](mut xs: List[T], n: u64, x: T) -> Result[(), Capacity] {
 }
 
 pub fn append[T: plain](mut xs: List[T], ys: List[T]) -> Result[(), Capacity]
-pub fn sum[T: integer](xs: List[T]) -> T
+
+pub fn sum[T: integer](xs: List[T]) -> T {
+    let mut t: T = int.narrow(0u8)
+    for x in xs {
+        let next: Option[T] = int.checked_add(t, x)
+        match next {
+            Some(take v) => {
+                t = v
+            },
+            None => {
+                // Overflow, raised by a conversion that does not fit.
+                let wide: u16 = 256
+                let _: u8 = int.narrow(wide)
+            },
+        }
+    }
+    t
+}

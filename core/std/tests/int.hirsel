@@ -141,7 +141,10 @@ fn parsed_i8(s: String) -> i64 {
     let r: Result[i8, ParseError] = int.parse(s)
     match r {
         Ok(x) => int.widen(x),
-        Error(e) => 1000 + int.narrow(unsigned_error(Error(e))),
+        Error(e) => {
+            let code: i64 = int.narrow(unsigned_error(Error(e)))
+            1000 + code
+        },
     }
 }
 

@@ -133,21 +133,7 @@ pub fn resolve(index: &NameIndex, module: ModuleId, ordinal: u32, item: Item<'_>
                     | NodeKind::StableType
                     | NodeKind::ResourceType
                     | NodeKind::ScopedType
-            )
-            && item.tree.children(item.root).iter().all(|&c| {
-                matches!(
-                    item.tree.node(c).kind,
-                    NodeKind::Public
-                        | NodeKind::Opaque
-                        | NodeKind::Attribute
-                        | NodeKind::Generics
-                        | NodeKind::Bounds
-                        | NodeKind::Parameters
-                        | NodeKind::ResultType
-                        | NodeKind::Waits
-                        | NodeKind::Outlives
-                )
-            }),
+            ),
         scope_id: 0,
         next_scope: 1,
         depth: 0,
@@ -994,7 +980,11 @@ impl<'a> Resolver<'a> {
                 if matches!(self.name(token.unwrap()), sym::INTEGER | sym::FLOAT)
                     && !(self.numeric_declaration && self.numeric_parameter)
                 {
-                    self.out.diagnostics.push(Refusal::new("OWN-4",self.site(n),"numeric bounds are only permitted on type parameters of bodiless core declarations"));
+                    self.out.diagnostics.push(Refusal::new(
+                        "OWN-4",
+                        self.site(n),
+                        "numeric bounds are only permitted on type parameters of core declarations",
+                    ));
                 }
             }
             NodeKind::Error => {}

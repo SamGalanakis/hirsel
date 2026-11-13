@@ -294,6 +294,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.dead = true;
         }
         let builtin = g.path.package_is("core", "1")
+            && g.body.is_none()
             && (g.path.0.modules == ["int"]
                 || g.path.0.modules == ["float"]
                 || g.path.0.modules == ["span"]
@@ -970,10 +971,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         if name == "mul_wide" {
             return self.mul_wide(vals[0]?, vals[1]?, g.result, n);
-        }
-        if name == "parse" {
-            self.gap(n, "core integer parsing is not built");
-            return None;
         }
         let target = *tys.get(1)?;
         let target_ty = value_ty(&self.t, target).ok().flatten()?;

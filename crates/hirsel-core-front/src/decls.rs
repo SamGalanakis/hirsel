@@ -15,7 +15,7 @@ pub const SEND: u16 = 4;
 pub const KEY: u16 = 8;
 pub const ORDERED: u16 = 16;
 /// Exactly the integer types, and exactly f32 and f64: written only on type parameters of
-/// bodiless core declarations (OWN-4; the resolver refuses them elsewhere).
+/// core declarations (OWN-4; the resolver refuses them elsewhere).
 pub const INTEGER: u16 = 32;
 pub const FLOAT: u16 = 64;
 /// Independently computed encoding bounds (MEM-12).

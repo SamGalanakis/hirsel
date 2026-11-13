@@ -462,11 +462,7 @@ impl Cx<'_, '_, '_> {
             || matches!(
                 self.role_of(ty),
                 Some((
-                    Role::Text
-                        | Role::FixedSpan
-                        | Role::SeqSpan
-                        | Role::IndexedSpan
-                        | Role::SeqIndex,
+                    Role::Text | Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan,
                     _
                 ))
             )

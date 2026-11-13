@@ -354,6 +354,35 @@ impl<T: TyRead> Shapes<'_, T> {
         self.hooks.retain(|(r, ..)| (r.0 as usize) < mark);
     }
 
+    /// The table block of a `SeqIndex` of `elem` (MEM-12, MEM-24): the sequence's
+    /// locator at 0, the count at 16, then `count` u64 offsets of each element from
+    /// the span's first element byte, at 24 (outside the row, inside the block,
+    /// which is charged round8(24 + 8 count)). Hash, equality and order read the
+    /// row: the located sequence, and the count it determines.
+    fn seq_index_block(&mut self, ty: TyId, elem: TyId) -> Option<TypeRef> {
+        let name = format!(
+            "{} block",
+            crate::decls::canonical(self.decls, &*self.types, ty)
+        );
+        if let Some(&r) = self.of.get(&name) {
+            return Some(r);
+        }
+        let seq = FieldTy::Locator(Box::new(FieldTy::SeqSpan(Box::new(
+            self.field_in(elem, true)?,
+        ))));
+        let r = TypeRef(self.shapes.len() as u32);
+        self.shapes.push(Shape {
+            name: name.clone(),
+            repr: LRepr::Stable,
+            carried: Carried::Address,
+            body: record(vec![("seq", seq), ("count", FieldTy::Scalar(Scalar::U64))]),
+            finalizer: None,
+            clone: None,
+            grant: 0,
+        });
+        self.of.insert(name, r);
+        Some(r)
+    }
     fn map_field(&mut self, args: &[TyId]) -> Option<FieldTy> {
         let (k, v) = (self.field(args[0])?, self.field(args[1])?);
         Some(FieldTy::Map(Box::new(k), Box::new(v)))
@@ -410,10 +439,9 @@ impl<T: TyRead> Shapes<'_, T> {
                         FieldTy::Locator(Box::new(span))
                     }
                 }
-                // A SeqIndex keeps its sequence's locator (MEM-12).
-                Some(Role::SeqIndex) => FieldTy::Locator(Box::new(FieldTy::SeqSpan(Box::new(
-                    self.field_in(args[0], true)?,
-                )))),
+                // A SeqIndex is held by its table block, a stable value in its region
+                // (MEM-12, FORM M14).
+                Some(Role::SeqIndex) => FieldTy::Stable(self.seq_index_block(ty, args[0])?),
                 Some(Role::Link) if compact => FieldTy::Link(self.compact_or_shape(args[0])?),
                 // A view field is the viewed type's own bytes, cleaned by nobody (FORM #56).
                 Some(Role::View) => view_field(self.field_in(args[0], compact)?),

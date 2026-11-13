@@ -1135,3 +1135,14 @@ fn temporary_owner_views_cranelift(){temporary_owner_views(Backend::Cranelift);}
 #[test]
 #[ignore="explicit native integration target"]
 fn temporary_owner_views_llvm(){temporary_owner_views(Backend::Llvm);}
+/// MEM-12: seq.index_in's region block and seq.get's checked offset load, and the
+/// refusal that charges nothing, on each engine.
+fn seq_index(backend: Backend) {
+    run_lines_native(backend, include_str!("../../../core/front/cases/body/seq-index.hirsel"));
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn seq_index_cranelift() { seq_index(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn seq_index_llvm() { seq_index(Backend::Llvm); }

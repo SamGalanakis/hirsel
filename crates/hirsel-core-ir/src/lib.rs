@@ -135,9 +135,12 @@
 //!   fixed e`, `locator seqspan e`, `locator indexedspan e` or `locator tN` of a
 //!   compact `tN`, and layout refuses any other target. That target is the only
 //!   recipe hash, equality and order read; nothing is parsed from a name. A
-//!   standalone `Text` or span is `{at: locator X}`, a `SeqIndex` keeps its
-//!   sequence's `locator seqspan e` (MEM-12), and a compact stable type held in
-//!   a non-compact holder is `locator tN`. A template row `Locator($i)` or
+//!   standalone `Text` or span is `{at: locator X}`, a `SeqIndex` is a stable
+//!   reference (8 bytes native, logically 16) to one region block {`locator
+//!   seqspan e` @0, count u64 @16, u64 offsets @24, W-free from the span's data
+//!   start} (MEM-12; it has no `key` or `ordered` role, so nothing hashes or
+//!   compares it), and a compact stable type held in a non-compact holder is
+//!   `locator tN`. A template row `Locator($i)` or
 //!   `View($i)` is materialized by substitution alone; the layout never depends
 //!   on the target. An `IndexedSpan` reads and iterates as a `SeqSpan` with the
 //!   same locator and W; its trailer (count W-wide offsets from the first element

@@ -1003,6 +1003,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             return match (g.path.0.modules[0].as_str(), g.path.0.name.as_str()) {
                 ("seq", "len") => self.span_parts(vals[0]?, n).map(|p| p.3),
+                ("seq", "index_in") => {
+                    let result = subst(&mut self.t, g.result, tys);
+                    self.seq_index_in(vals[0]?, vals[1]?, tys[0], result, n)
+                }
+                ("seq", "get") => {
+                    let result = subst(&mut self.t, g.result, tys);
+                    self.seq_index_get(vals[0]?, vals[1]?, tys[0], result, n)
+                }
                 (module, "nth" | "get") => {
                     let result = subst(&mut self.t, g.result, tys);
                     self.packed_get(vals[0]?, vals[1]?, tys[0], module == "indexed", result, n)

@@ -54,7 +54,13 @@ impl Cx<'_, '_, '_> {
             _ => None,
         }
     }
-    fn byte_at(&mut self, base: ValueId, offset: ValueId, ty: PlaceTy, n: NodeId) -> AddressId {
+    pub(super) fn byte_at(
+        &mut self,
+        base: ValueId,
+        offset: ValueId,
+        ty: PlaceTy,
+        n: NodeId,
+    ) -> AddressId {
         self.address(AddressBase::Value(base), &[Step::Byte(offset)], ty, n)
     }
     fn offset_sum(&mut self, left: ValueId, right: ValueId, n: NodeId) -> Option<ValueId> {

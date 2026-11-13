@@ -2075,6 +2075,164 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.start(done);
         Some(self.pointer(to, n))
     }
+    /// `seq.index_in(r, s)` (MEM-12): one region block in `r`, charged
+    /// round8(24 + 8 count) (MEM-24): `s`'s locator at 0, its count at 16, and each
+    /// element's offset from the first element byte at 24 + 8i, found by one walk.
+    /// A refusal is `Capacity` and charges nothing.
+    pub(super) fn seq_index_in(
+        &mut self,
+        region: ValueId,
+        span: ValueId,
+        elem: TyId,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let u64t = Ty::Scalar(Scalar::U64);
+        let elem = self.bare(elem);
+        let id = self.declared(result)?;
+        let to = self.new_slot(PlaceTy::Declared(id), n);
+        let (blob, at, w, count) = self.span_parts(span, n)?;
+        // Every element is at least one byte of an admitted blob, so 24 + 8 count fits.
+        let eight = self.u64k(8, n)?;
+        let words = self.mul(count, eight, n);
+        let size = self.add_k(words, 24, n)?;
+        let block = self.value(Ty::Ptr);
+        let available = self.value(u64t);
+        let fail = self.fail_to(n);
+        self.inst(
+            Inst::Alloc {
+                result: block,
+                available,
+                region_entry: None,
+                kind: AllocKind::Plain,
+                place: AllocPlace::Region(region),
+                charge: size,
+                overflow: None,
+                size,
+                align: 8,
+                fail,
+            },
+            n,
+        );
+        let null = self.konst(Ty::Ptr, 0, n)?;
+        let admitted = self.test(CompareOp::Ne, block, null, n);
+        let (yes, refused, join) = (
+            self.new_block(&[]),
+            self.new_block(&[]),
+            self.new_block(&[]),
+        );
+        self.branch(admitted, yes, refused, n);
+        self.start(refused);
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 1,
+            },
+            n,
+        );
+        self.capacity_at(
+            AddressBase::Address(to),
+            &[Step::CaseField { case: 1, field: 0 }],
+            size,
+            available,
+            n,
+        )?;
+        self.jump(join, &[], n);
+        self.start(yes);
+        for (off, v) in [(0, blob), (8, at), (16, count)] {
+            self.put_word(AddressBase::Value(block), &[], off, v, n)?;
+        }
+        let second = self.add(at, w, n);
+        let data = self.add(second, w, n);
+        let zero = self.u64k(0, n)?;
+        let lp = self.new_block(&[u64t, u64t]);
+        self.jump(lp, &[zero, data], n);
+        self.start(lp);
+        let p = self.block_params(lp);
+        let (i, el) = (p[0], p[1]);
+        let more = self.test(CompareOp::Lt, i, count, n);
+        let (body, done) = (self.new_block(&[]), self.new_block(&[]));
+        self.branch(more, body, done, n);
+        self.start(body);
+        let eight = self.u64k(8, n)?;
+        let iw = self.mul(i, eight, n);
+        let slot = self.add_k(iw, 24, n)?;
+        let off = self.word_op(BinaryOp::Sub, el, data, n);
+        let a = self.byte_at(block, slot, PlaceTy::Value(u64t), n);
+        self.inst(
+            Inst::Store {
+                address: a,
+                value: off,
+            },
+            n,
+        );
+        let next = self.skip(blob, el, w, elem, n)?;
+        let i1 = self.add_k(i, 1, n)?;
+        self.jump(lp, &[i1, next], n);
+        self.start(done);
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 0,
+            },
+            n,
+        );
+        let ok = [Step::CaseField { case: 0, field: 0 }];
+        self.put_word(AddressBase::Address(to), &ok, 0, block, n)?;
+        self.jump(join, &[], n);
+        self.start(join);
+        Some(self.pointer(to, n))
+    }
+    /// `seq.get(x, i)` (MEM-12): a bounds check against the block's count and one
+    /// offset load, then `Some` view of element `i`; `None` past the count.
+    pub(super) fn seq_index_get(
+        &mut self,
+        index: ValueId,
+        i: ValueId,
+        elem: TyId,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let u64t = Ty::Scalar(Scalar::U64);
+        if !self.live() {
+            return None;
+        }
+        let elem = self.bare(elem);
+        let block = self.read_sequence_word(index, 0, Ty::Ptr, n);
+        let count = self.read_sequence_word(block, 16, u64t, n);
+        let rep = self.rep(result).ok()?;
+        let to = self.new_slot(rep.stored()?, n);
+        let more = self.test(CompareOp::Lt, i, count, n);
+        let (load, empty, done) = (
+            self.new_block(&[]),
+            self.new_block(&[]),
+            self.new_block(&[]),
+        );
+        self.branch(more, load, empty, n);
+        self.start(load);
+        let (blob, at, w) = self.locator(block, n)?;
+        let eight = self.u64k(8, n)?;
+        let iw = self.mul(i, eight, n);
+        let slot = self.add_k(iw, 24, n)?;
+        let a = self.byte_at(block, slot, PlaceTy::Value(u64t), n);
+        let off = self.read_bits(a, u64t, n);
+        let second = self.add(at, w, n);
+        let data = self.add(second, w, n);
+        let el = self.add(data, off, n);
+        self.some_element(to, blob, el, w, elem, n)?;
+        self.jump(done, &[], n);
+        self.start(empty);
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 0,
+            },
+            n,
+        );
+        self.jump(done, &[], n);
+        self.start(done);
+        Some(self.pointer(to, n))
+    }
     /// `Some` of the packed element at `blob + off` into the option slot `to`.
     fn some_element(
         &mut self,

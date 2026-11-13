@@ -1,0 +1,7 @@
+// expect: refuse MEM-4 at 6:16
+// MEM-4: a SeqSpan or IndexedSpan writer is completed by writer.close after its elements
+// are appended; emit has no operand for one, so a whole sequence passed to it is refused at
+// the operand.
+fn g[in r](take w: Writer[IndexedSpan[u64], in r], xs: IndexedSpan[u64]) -> Result[Child[IndexedSpan[u64]], BuildError] {
+  emit(take w, xs)
+}

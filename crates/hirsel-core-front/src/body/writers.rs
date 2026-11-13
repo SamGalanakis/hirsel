@@ -575,6 +575,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.refuse("MEM-4", a, "a sequence is written through `emit(f)`");
                 None
             }
+            Shape::Other if self.role_of(ty).is_some_and(|r| r.0 == Role::FixedSpan) => {
+                self.write_span(state, ty, a, sinks)
+            }
             Shape::Other => {
                 let (_, v) = self.expr(a, expect(ty));
                 let v = v?;
@@ -589,6 +592,99 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 None
             }
         }
+    }
+    /// Write a `FixedSpan[T]` from a view of a `List[T]` (MEM-4, MEM-12): one fit check
+    /// for the `W`-wide count and the elements at `T`'s packed stride, then the count and
+    /// each element encoded in order.
+    fn write_span(
+        &mut self,
+        state: ValueId,
+        ty: TyId,
+        a: NodeId,
+        sinks: &mut Sinks,
+    ) -> Option<()> {
+        let u64t = Ty::Scalar(Scalar::U64);
+        let elem = self.role_of(ty)?.1.first().copied()?;
+        let list = self.p.core_decl("List")?;
+        let list = self.t.mk(TyKind::Adt(list, vec![elem]));
+        let (t, v) = self.operand(a, expect(list));
+        self.coerce(
+            t,
+            Want {
+                ty: list,
+                view: false,
+                payload: 0,
+            },
+            a,
+        );
+        let xs = v?;
+        let Some(packed) = self.packed_plain_size(elem) else {
+            self.unencoded_element(elem, a);
+            return None;
+        };
+        let r = self.rep(elem).ok()?;
+        let count = self.get_word(AddressBase::Value(xs), 8, u64t, a)?;
+        let w = self.state_word(state, 24, u64t, a)?;
+        let stride = self.u64k(packed, a)?;
+        let bytes = self.mul(count, stride, a);
+        let k = self.add(w, bytes, a);
+        let at = self.reserve(state, k, sinks, a)?;
+        let blob = self.state_word(state, 0, Ty::Ptr, a)?;
+        self.put_w(blob, at, w, count, a)?;
+        let first = self.add(at, w, a);
+        let data = self.get_word(AddressBase::Value(xs), 0, Ty::Ptr, a)?;
+        let size = self.layout_size(elem, false, a)?;
+        let zero = self.u64k(0, a)?;
+        let head = self.new_block(&[u64t]);
+        let (body, done) = (self.new_block(&[]), self.new_block(&[]));
+        self.jump(head, &[zero], a);
+        self.start(head);
+        let i = self.block_params(head)[0];
+        let more = self.test(CompareOp::Lt, i, count, a);
+        self.branch(more, body, done, a);
+        self.start(body);
+        let from = self.mul(i, size, a);
+        let x = match r {
+            Rep::Scalar(t) => {
+                let place = self.address(
+                    AddressBase::Value(data),
+                    &[Step::Byte(from)],
+                    PlaceTy::Value(t),
+                    a,
+                );
+                let x = self.value(t);
+                self.inst(
+                    Inst::Read {
+                        result: x,
+                        address: place,
+                        mode: ReadMode::Bits,
+                    },
+                    a,
+                );
+                x
+            }
+            Rep::Place(id) => {
+                let place = self.address(
+                    AddressBase::Value(data),
+                    &[Step::Byte(from)],
+                    PlaceTy::Declared(id),
+                    a,
+                );
+                self.pointer(place, a)
+            }
+            _ => {
+                self.unencoded_element(elem, a);
+                return None;
+            }
+        };
+        let off = self.mul(i, stride, a);
+        let to = self.add(first, off, a);
+        self.encode_plain(blob, to, elem, r, x, a)?;
+        let one = self.u64k(1, a)?;
+        let next = self.add(i, one, a);
+        self.jump(head, &[next], a);
+        self.start(done);
+        Some(())
     }
     /// Copy the `len` bytes of the `String` that `s` points at to `blob + at`.
     fn copy_string(
@@ -680,11 +776,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<ValueId> {
         let shape = self.shape(ty);
-        if matches!(shape, Shape::Seq | Shape::Indexed)
-            || self.role_of(ty).is_some_and(|r| r.0 == Role::FixedSpan)
-        {
+        if matches!(shape, Shape::Seq | Shape::Indexed) {
             let _ = self.expr(x, None);
-            self.gap(n, "emitting a whole sequence is not built");
+            self.refuse(
+                "MEM-4",
+                x,
+                "a `SeqSpan` or `IndexedSpan` writer is completed by `writer.close`",
+            );
             return None;
         }
         let frame = writer?;

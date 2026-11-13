@@ -869,6 +869,16 @@ fn compact_option_link_cranelift() { compact_option_link(Backend::Cranelift); }
 #[test]
 #[ignore = "explicit native integration target"]
 fn compact_option_link_llvm() { compact_option_link(Backend::Llvm); }
+/// MEM-4, MEM-12: a FixedSpan field is emitted from a List view, packed, on each engine.
+fn stream_fixed_span(backend: Backend) {
+    run_lines_native(backend, include_str!("../../../core/front/cases/stream-fixed-span.hirsel"));
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn stream_fixed_span_cranelift() { stream_fixed_span(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn stream_fixed_span_llvm() { stream_fixed_span(Backend::Llvm); }
 
 fn uninitialized_take_names(backend: Backend) {
     let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

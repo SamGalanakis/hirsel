@@ -210,7 +210,7 @@ later use or between definitions. An unsuffixed number needs an
 expected type ([LANG-3](syntax.md#lang-3-literals)); operands follow
 [LANG-21](#lang-21-operators). There are no implicit conversions except these: `Never` to any type; a
 `View[T]` of a plain `T` to `T` ([OWN-8](ownership.md#own-8-views)); a `Box`, `Rc` or `Arc`
-to its payload where its own type does not fit (OWN-8); a stable value to its
+to its payload, through nested holders, where its own type does not fit (OWN-8); a stable value to its
 view ([OWN-25](ownership.md#own-25-stable-values-are-read-as-views)); `T in a` to `T in r`
 when `a` outlives `r` ([MEM-6](memory.md#mem-6-roots)); an `IndexedSpan[T]` to a
 `SeqSpan[T]`, for reading only, keeping its region, `W` and locator

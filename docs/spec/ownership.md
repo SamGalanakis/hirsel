@@ -301,14 +301,16 @@ for a lexical **extent**:
 
 A view of a record reads its fields as views, and a view of a `Box`, `Rc` or `Arc` reads as
 a view of its payload, with the same anchors. Such a **holder** is used as itself wherever
-its own type fits, and through its payload, one level, wherever it does not: a field or
-index step on it, an argument or value whose expected type is fixed and is not a holder
-([LANG-11](language.md#lang-11-typing-is-local)), and a match arm whose pattern is a
-constructor, literal or tuple pattern, which can only be the payload's, all read the
-payload; a bare name or `_` binds the holder itself. A match has no expected type, so its
+its own type fits, and wherever it does not, through its payloads, outermost first, as far
+as the first type that fits: for an argument or value whose expected type is fixed
+([LANG-11](language.md#lang-11-typing-is-local)), that type; for a field or index step on it
+and for a match arm whose pattern is a constructor, literal or tuple pattern, the first
+payload that is not a holder. A bare name or `_` binds the holder itself, and `view b` views
+the holder, which reads the same way. A match has no expected type, so its
 patterns decide. Ownership stays with the holder, which is viewed for the binding's extent
 (OWN-15), and a `Box`'s payload is a writable place where the `Box` is (OWN-12), so `mut b`
-lends it where `mut T` is expected. A core operation may return a view of part
+lends it where `mut T` is expected; a payload reached through an `Rc` or `Arc` on the way is
+not one. A core operation may return a view of part
 of an argument's storage that its signature names (a sub-range, `string.slice`; the same
 bytes at another type, `string.as_bytes`): such a **sub-view** is a view with the anchors
 and freezes of a view of the whole argument (OWN-20). There is no last-use end and no
@@ -340,6 +342,13 @@ fn f() -> i64 { let b = result.unwrap(box.new(Lit(6i64))); ev(b) }
 fn g(b: Box[Option[u64]]) -> u64 { match b { Some(x) => x, None => 0 } }   // Some reads the payload
 fn h(b: Box[u64]) -> u64 { match b { x => x } }                            // x is the Box, read as u64
 fn grow(mut b: Box[List[u64]]) -> Result[(), (Capacity, u64)] { list.push(mut b, 1) }
+fn deep(b: Box[Box[N]]) -> i64 { ev(b) }                    // reads through both holders
+fn mixed(b: Box[Rc[N]]) -> i64 { match b { Lit(x) => x } }  // Lit reads the N
+```
+```hirsel
+type P { n: u64 }
+fn set(mut b: Box[Box[P]]) { b.n = 1 }
+fn bump(mut b: Box[Rc[P]]) { b.n = 1 }                      // refused: OWN-12, P is reached through an Rc
 ```
 ```hirsel
 fn total(mut xs: List[String]) -> u64 {

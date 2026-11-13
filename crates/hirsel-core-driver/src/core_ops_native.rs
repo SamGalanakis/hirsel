@@ -770,10 +770,26 @@ fn stable_placement_llvm() { stable_placement(Backend::Llvm); }
 /// Run a front case natively: `main` checks each `// expect: run f(args) = v` line of the
 /// case, so both engines meet the case's own hand-derived values; exit status i + 1 names
 /// the first line that differs.
+/// The case's run lines on a native engine: the returning ones in one program, and each
+/// `fail Bounds` in its own, which must stop with exit 101 and `Bounds` on stderr.
 fn run_lines_native(backend: Backend, case: &str) {
     let mut main = String::from("pub fn main() -> Result[(), Exit] {\n");
     for (i, line) in case.lines().filter_map(|l| l.strip_prefix("// expect: run ")).enumerate() {
         let (call, want) = line.split_once(" = ").expect("a run line");
+        if want == "fail Bounds" {
+            let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let dir = tempfile::tempdir().unwrap();
+            let source = format!("{case}\npub fn main() -> Result[(), Exit] {{ let _ = {call}; Ok(()) }}\n");
+            let mut request = source_request(&source, dir.path());
+            request.inputs.packages[1] = PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+            let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
+            let entry = DefPath::from_full("app@1/main/main").unwrap();
+            let built = product.build(&entry, &native_options(backend, dir.path())).unwrap();
+            let output = Command::new(&built.executable).output().unwrap();
+            assert_eq!(output.status.code(), Some(101), "{call}: {output:?}");
+            assert!(output.stderr.starts_with(b"Bounds"), "{call}: {output:?}");
+            continue;
+        }
         main += &format!("  if {call} != {want} {{ return Error(Exit(status: {})) }}\n", i + 1);
     }
     main += "  Ok(())\n}\n";
@@ -789,6 +805,16 @@ fn float_unary_cranelift() { float_unary(Backend::Cranelift); }
 #[test]
 #[ignore = "explicit native integration target"]
 fn float_unary_llvm() { float_unary(Backend::Llvm); }
+/// MEM-4: build_in and dest.put, a put that overflows and a foreign child, on each engine.
+fn dest_put(backend: Backend) {
+    run_lines_native(backend, include_str!("../../../core/front/cases/body/dest-put.hirsel"));
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn dest_put_cranelift() { dest_put(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn dest_put_llvm() { dest_put(Backend::Llvm); }
 
 fn uninitialized_take_names(backend: Backend) {
     let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

@@ -64,6 +64,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if self.is_emit(f) {
             return self.emit_form(n, f, args, want);
         }
+        if self.is_put(f) {
+            return self.put_form(n, f, args, want);
+        }
         let g = &self.p.fns[f];
         // A result rooted in a Region parameter is rooted in the region its argument
         // names (MEM-6); `rooted` lists those parameters.
@@ -318,7 +321,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 || (g.path.0.modules == ["core"]
                     && matches!(
                         g.path.0.name.as_str(),
-                        "build_stream_in" | "finish" | "finish_trim" | "fail"
+                        "build_in" | "build_stream_in" | "finish" | "finish_trim" | "fail"
                     )));
         let v = if builtin {
             self.intrinsic(f, tys, vals, n)

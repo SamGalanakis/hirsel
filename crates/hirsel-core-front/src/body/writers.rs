@@ -8,8 +8,16 @@
 //! accepted only from the completed frame handed to it. The first failed write marks
 //! the build failed; every later write then fails, and so does the build, so a result
 //! that is ignored never publishes a partly written value.
+//!
+//! `build_in` (MEM-4) keeps the same state with a sixth word, the destination's identity
+//! `id @40` (`rt.dest_id`), and `end` is `16 + min(n, cap of W)`, so one fit test also
+//! keeps every count, link distance and the used prefix within `W` (MEM-9). A `Dest[T]`
+//! is a pointer to that state. A put evaluates its literal's operands into pieces, checks
+//! each link's identity, reserves the whole size and only then writes; one that does
+//! not fit returns `Error(Overflow)` and leaves the state as it was. Its `Child[U]` is
+//! `{id, at}`.
 use super::*;
-use hirsel_core_ir::RaiseCause;
+use hirsel_core_ir::{RaiseCause, RtOp};
 
 const HEAD: u64 = 16;
 
@@ -24,6 +32,20 @@ enum Shape {
 /// The blocks a writer operation's failures go to, made when first used: `over` (no
 /// parameters) writes `Error(Overflow)`; `failed` (a pointer to a `BuildError`) writes
 /// that error.
+/// One operand of a put, evaluated before anything is written (MEM-4), in field order.
+enum Piece {
+    /// A variant tag of this width and case.
+    Tag(Scalar, u32),
+    /// A plain packed value of this type and encoded size.
+    Plain(TyId, ValueId, u64),
+    /// The `String` a `Text` field copies.
+    Text(ValueId),
+    /// A `Child` a `Link` field refers to.
+    Link(ValueId),
+    /// An `Option[Child]` an `Option[Link]` field refers to, and that option's type.
+    OptLink(ValueId, TyId),
+}
+
 #[derive(Default)]
 struct Sinks {
     over: Option<BlockId>,
@@ -748,6 +770,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let name = g.path.0.name.as_str();
         let result = subst(&mut self.t, g.result, tys);
         match (module, name) {
+            ("core", "build_in") => {
+                let fty = subst(&mut self.t, g.params[2].ty, tys);
+                self.build_in(tys[0], vals[0]?, vals[1]?, fty, vals[2]?, result, n)
+            }
             ("core", "build_stream_in") => {
                 let fty = subst(&mut self.t, g.params[2].ty, tys);
                 self.build_stream_in(tys[0], vals[0]?, vals[1]?, fty, vals[2]?, result, n)
@@ -873,8 +899,57 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         self.jump(join, &[], n);
         self.start(admit);
-        // Charge round8(n) (MEM-24); the blob is n bytes after its 16-byte head. A size
-        // past u64 is flagged as the charge's overflow, so the admission is refused.
+        let blob = self.admit_blob(region, bytes, to, eid, join, n)?;
+        let wv = self.u64k(w, n)?;
+        let head = self.u64k(HEAD, n)?;
+        self.put_word(AddressBase::Value(blob), &[], 0, bytes, n)?;
+        self.put_word(AddressBase::Value(blob), &[], 8, wv, n)?;
+        let s = self.words(5, n)?;
+        let end = self.add(bytes, head, n);
+        let zero = self.u64k(0, n)?;
+        self.put_word(AddressBase::Address(s), &[], 0, blob, n)?;
+        self.put_word(AddressBase::Address(s), &[], 8, head, n)?;
+        self.put_word(AddressBase::Address(s), &[], 16, end, n)?;
+        self.put_word(AddressBase::Address(s), &[], 24, wv, n)?;
+        self.put_word(AddressBase::Address(s), &[], 32, zero, n)?;
+        let state = self.pointer(s, n);
+        self.run_callback(state, ty, fty, f, &mut sinks, n)?;
+        // A build whose writes failed publishes nothing, whatever its callback returned.
+        let failed = self.state_word(state, 32, u64t, n)?;
+        let bad = self.test(CompareOp::Ne, failed, zero, n);
+        let over = self.over(&mut sinks);
+        let good = self.new_block(&[]);
+        self.branch(bad, over, good, n);
+        self.start(good);
+        // The root is where the callback's frame started: the first byte after the head.
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 0,
+            },
+            n,
+        );
+        let ok = [Step::CaseField { case: 0, field: 0 }];
+        self.put_word(AddressBase::Address(to), &ok, 0, blob, n)?;
+        self.put_word(AddressBase::Address(to), &ok, 8, head, n)?;
+        self.jump(join, &[], n);
+        self.close_build_sinks(sinks, state, to, eid, join, n)
+    }
+    /// Admit a blob of `bytes` after its 16-byte head in `region`, charged round8(n)
+    /// (MEM-24). A refusal writes `Error(Capacity(c))` into `to` and goes to `join`; the
+    /// block left current is the admitted one.
+    fn admit_blob(
+        &mut self,
+        region: ValueId,
+        bytes: ValueId,
+        to: AddressId,
+        eid: TypeId,
+        join: BlockId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let u64t = Ty::Scalar(Scalar::U64);
+        // A size past u64 is flagged as the charge's overflow, so the admission is
+        // refused.
         let sized = self.new_block(&[u64t, u64t]);
         let limit = self.u64k(u64::MAX - HEAD - 7, n)?;
         let huge = self.test(CompareOp::Gt, bytes, limit, n);
@@ -933,28 +1008,503 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         )?;
         self.jump(join, &[], n);
         self.start(yes);
+        Some(blob)
+    }
+    pub(super) fn is_put(&self, f: usize) -> bool {
+        let g = &self.p.fns[f];
+        g.body.is_none()
+            && g.path.package_is("core", "1")
+            && g.path.0.modules == ["dest"]
+            && g.path.0.name == "put"
+    }
+    /// The literal arguments of `fields`, their labels checked (LANG-9, LANG-11).
+    fn literal_args(
+        &mut self,
+        a: NodeId,
+        fields: &[crate::decls::FieldDecl],
+        labelled: bool,
+        args: &[NodeId],
+    ) -> Option<Vec<NodeId>> {
+        let k = fields.len();
+        if args.len() != k {
+            let at = args.get(k).copied().unwrap_or(a);
+            self.refuse("LANG-11", at, format!("expected {k} arguments"));
+            return None;
+        }
+        let mut out = Vec::with_capacity(k);
+        for (&e, f) in args.iter().zip(fields) {
+            out.push(match (self.kind(e), labelled) {
+                (NodeKind::LabelledArgument, true) if self.token_text(e) == f.name => {
+                    self.kids(e)[0]
+                }
+                (NodeKind::LabelledArgument, true) => {
+                    let name = &f.name;
+                    self.refuse("LANG-9", e, format!("expected the field `{name}` here"));
+                    return None;
+                }
+                (NodeKind::LabelledArgument, false) => {
+                    self.refuse("LANG-9", e, "this payload is not labelled");
+                    return None;
+                }
+                (_, true) => {
+                    let name = &f.name;
+                    self.refuse("LANG-9", e, format!("the field `{name}` is labelled"));
+                    return None;
+                }
+                (_, false) => e,
+            });
+        }
+        Some(out)
+    }
+    fn child_of(&mut self, ty: TyId) -> Option<TyId> {
+        let child = self.p.core_decl("Child")?;
+        Some(self.t.mk(TyKind::Adt(child, vec![ty])))
+    }
+    /// Evaluate the operand `a` of a put's `ty` into `pieces`, left to right (MEM-4).
+    fn put_pieces(&mut self, ty: TyId, a: NodeId, pieces: &mut Vec<Piece>) -> Option<()> {
+        let ty = self.bare(ty);
+        if let Some((d, _)) = self.compact_adt(ty) {
+            let Some((case, fields, labelled, args)) = self.literal_parts(a, d) else {
+                let _ = self.expr(a, None);
+                self.refuse(
+                    "MEM-4",
+                    a,
+                    "a put writes a construction literal of a compact type",
+                );
+                return None;
+            };
+            let args = self.literal_args(a, fields, labelled, args)?;
+            let ftys = self.compact_fields(ty, case)?;
+            if let Some(c) = case {
+                pieces.push(Piece::Tag(Self::tag_scalar(self.variant_cases(ty)?), c));
+            }
+            for (fty, e) in ftys.into_iter().zip(args) {
+                self.put_pieces(fty, e, pieces)?;
+            }
+            return Some(());
+        }
+        let typed = |cx: &mut Self, want: TyId| -> Option<ValueId> {
+            let (t, v) = cx.expr(a, expect(want));
+            cx.coerce(
+                t,
+                Want {
+                    ty: want,
+                    view: false,
+                    payload: 0,
+                },
+                a,
+            );
+            v
+        };
+        if let Some((Role::Link, args)) = self.role_of(ty) {
+            let child = self.child_of(args[0])?;
+            pieces.push(Piece::Link(typed(self, child)?));
+            return Some(());
+        }
+        if let Some(target) = self.link_option(ty) {
+            let child = self.child_of(target)?;
+            let option = self.p.core_decl("Option")?;
+            let option = self.t.mk(TyKind::Adt(option, vec![child]));
+            pieces.push(Piece::OptLink(typed(self, option)?, option));
+            return Some(());
+        }
+        match self.shape(ty) {
+            Shape::Text => {
+                pieces.push(Piece::Text(self.string_view(a)?));
+                Some(())
+            }
+            Shape::Seq | Shape::Indexed => {
+                let _ = self.expr(a, None);
+                self.gap(a, "a sequence field of a put is not built");
+                None
+            }
+            Shape::Other => {
+                let Some(size) = self.packed_plain_size(ty) else {
+                    let _ = self.expr(a, None);
+                    self.gap(a, "this field of a put is not built");
+                    return None;
+                };
+                let v = typed(self, ty)?;
+                pieces.push(Piece::Plain(ty, v, size));
+                Some(())
+            }
+        }
+    }
+    /// The case of the `Option[Child]` at `o` (1 is `Some`) and its payload's address.
+    fn opt_child(&mut self, o: ValueId, ty: TyId, n: NodeId) -> Option<(ValueId, AddressId)> {
+        let id = self.declared(ty)?;
+        let at = self.address(AddressBase::Value(o), &[], PlaceTy::Declared(id), n);
+        let case = self.value(Ty::Scalar(Scalar::U32));
+        self.inst(
+            Inst::Case {
+                result: case,
+                address: at,
+            },
+            n,
+        );
+        let one = self.konst(Ty::Scalar(Scalar::U32), 1, n)?;
+        let some = self.test(CompareOp::Eq, case, one, n);
+        let words = self.t.mk(TyKind::Array(scalar(Scalar::U64), 2));
+        let wid = self.declared(words)?;
+        let payload = self.address(
+            AddressBase::Value(o),
+            &[Step::CaseField { case: 1, field: 0 }],
+            PlaceTy::Declared(wid),
+            n,
+        );
+        Some((some, payload))
+    }
+    /// Go on only when the child at `base` is one of the destination `id` (MEM-4).
+    fn check_child(&mut self, base: AddressBase, id: ValueId, n: NodeId) -> Option<()> {
+        let got = self.word_at(base, &[], 0, Ty::Scalar(Scalar::U64), n)?;
+        let got = self.read_bits(got, Ty::Scalar(Scalar::U64), n);
+        let same = self.test(CompareOp::Eq, got, id, n);
+        self.or_bounds(same, n);
+        Some(())
+    }
+    /// Store the distance back from `pos` to the child at `base` (MEM-10).
+    fn store_link(
+        &mut self,
+        blob: ValueId,
+        pos: ValueId,
+        w: ValueId,
+        base: AddressBase,
+        n: NodeId,
+    ) -> Option<()> {
+        let u64t = Ty::Scalar(Scalar::U64);
+        let at = self.word_at(base, &[], 8, u64t, n)?;
+        let at = self.read_bits(at, u64t, n);
+        let distance = self.word_op(BinaryOp::Sub, pos, at, n);
+        self.put_w(blob, pos, w, distance, n)
+    }
+
+    /// The built-in form `dest.put(mut d, L)` (MEM-4).
+    pub(super) fn put_form(
+        &mut self,
+        n: NodeId,
+        f: usize,
+        args: &[NodeId],
+        want: Option<Want>,
+    ) -> (TyId, Option<ValueId>) {
+        let g = &self.p.fns[f];
+        if args.len() != 2 {
+            self.refuse("LANG-11", n, "expected 2 arguments");
+            return (ERROR, None);
+        }
+        let mut found = vec![None; g.generics.len()];
+        if let Some(w) = want
+            && let Some(result) = self.expected_part(g.result, w)
+        {
+            self.unify(result, w.ty, &mut found);
+        }
+        self.call_seq += 1;
+        let call = self.call_seq;
+        let holds = self.freezes.len();
+        let mut dest = None;
+        let pt = g.params[0].ty;
+        if !self.argument(Mode::Mut, pt, call, 0, args[0], &mut found, &mut dest) {
+            let (t, v) = self.expr(args[0], None);
+            self.arg_ty(pt, t, args[0], &mut found);
+            dest = v;
+        }
+        let out = self.put_typed(n, f, args, found, dest);
+        // The put completes: the destination's `mut` loan ends (OWN-9).
+        self.unfreeze(holds, |h| match h {
+            Hold::CallMut(c) if c == call => None,
+            h => Some(h),
+        });
+        out
+    }
+    fn put_typed(
+        &mut self,
+        n: NodeId,
+        f: usize,
+        args: &[NodeId],
+        found: Vec<Option<TyId>>,
+        dest: Option<ValueId>,
+    ) -> (TyId, Option<ValueId>) {
+        let g = &self.p.fns[f];
+        let Some(t) = found[0].filter(|&t| t != ERROR) else {
+            let _ = self.expr(args[1], None);
+            if !self.broken {
+                self.refuse("LANG-12", n, "a type parameter of the callee is still open");
+            }
+            return (ERROR, None);
+        };
+        // U is the literal's type: what the result expects, else the type its head
+        // names, else the destination's own.
+        let u =
+            found[1]
+                .filter(|&u| u != ERROR)
+                .unwrap_or_else(|| match self.literal_head(args[1]) {
+                    Some(d) if self.p.decls[d.index()].generics.is_empty() => {
+                        self.t.mk(TyKind::Adt(d, vec![]))
+                    }
+                    _ => t,
+                });
+        let result = subst(&mut self.t, g.result, &[t, u]);
+        if self.compact_adt(u).is_none() {
+            let _ = self.expr(args[1], None);
+            self.refuse(
+                "MEM-4",
+                n,
+                "a put writes a construction literal of a compact type",
+            );
+            return (result, None);
+        }
+        let v = self.put_value(dest, u, args[1], result, n);
+        (result, v)
+    }
+    /// The declaration a construction literal's head names, when it names a type.
+    fn literal_head(&self, a: NodeId) -> Option<DeclId> {
+        let callee = match self.kind(a) {
+            NodeKind::Call => self.kids(a)[0],
+            NodeKind::Path => a,
+            _ => return None,
+        };
+        match self.p.target(self.at, callee)? {
+            Target::Definition(id) => match self.p.by_definition[id.0 as usize].as_ref()? {
+                Def::Type(d) => Some(*d),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+    fn put_value(
+        &mut self,
+        dest: Option<ValueId>,
+        u: TyId,
+        x: NodeId,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let u64t = Ty::Scalar(Scalar::U64);
+        let mut pieces = vec![];
+        self.put_pieces(u, x, &mut pieces)?;
+        let place = dest?;
+        if !self.live() {
+            return None;
+        }
+        let state = self.get_word(AddressBase::Value(place), 0, Ty::Ptr, n)?;
+        let id = self.state_word(state, 40, u64t, n)?;
+        let w = self.state_word(state, 24, u64t, n)?;
+        // Each link's identity, in field order, before the size (MEM-4).
+        for p in &pieces {
+            match *p {
+                Piece::Link(c) => self.check_child(AddressBase::Value(c), id, n)?,
+                Piece::OptLink(o, ty) => {
+                    let (some, payload) = self.opt_child(o, ty, n)?;
+                    let (yes, after) = (self.new_block(&[]), self.new_block(&[]));
+                    self.branch(some, yes, after, n);
+                    self.start(yes);
+                    self.check_child(AddressBase::Address(payload), id, n)?;
+                    self.jump(after, &[], n);
+                    self.start(after);
+                }
+                _ => {}
+            }
+        }
+        // The whole size: fixed parts, and a W-wide count before each text's bytes.
+        let mut fixed = 0;
+        let mut size = None;
+        for p in &pieces {
+            match *p {
+                Piece::Tag(s, _) => fixed += s.size(),
+                Piece::Plain(_, _, k) => fixed += k,
+                Piece::Text(s) => {
+                    let len = self.get_word(AddressBase::Value(s), 8, u64t, n)?;
+                    let k = self.add(w, len, n);
+                    size = Some(match size {
+                        Some(x) => self.add(x, k, n),
+                        None => k,
+                    });
+                }
+                Piece::Link(_) | Piece::OptLink(..) => {
+                    size = Some(match size {
+                        Some(x) => self.add(x, w, n),
+                        None => w,
+                    });
+                }
+            }
+        }
+        let fixed = self.u64k(fixed, n)?;
+        let size = match size {
+            Some(x) => self.add(x, fixed, n),
+            None => fixed,
+        };
+        let (to, eid) = self.build_result(result, n)?;
+        let mut sinks = Sinks::default();
+        let join = self.new_block(&[]);
+        let start = self.reserve(state, size, &mut sinks, n)?;
+        let blob = self.state_word(state, 0, Ty::Ptr, n)?;
+        let mut pos = start;
+        for p in pieces {
+            let k = match p {
+                Piece::Tag(s, c) => {
+                    let tag = self.konst(Ty::Scalar(s), u64::from(c), n)?;
+                    self.store_at(blob, pos, tag, n);
+                    self.u64k(s.size(), n)?
+                }
+                Piece::Plain(ty, v, k) => {
+                    let r = self.rep(ty).ok()?;
+                    self.encode_plain(blob, pos, ty, r, v, n)?;
+                    self.u64k(k, n)?
+                }
+                Piece::Text(s) => {
+                    let len = self.get_word(AddressBase::Value(s), 8, u64t, n)?;
+                    self.put_w(blob, pos, w, len, n)?;
+                    let data = self.add(pos, w, n);
+                    self.copy_string(blob, data, s, len, n)?;
+                    self.add(w, len, n)
+                }
+                Piece::Link(c) => {
+                    self.store_link(blob, pos, w, AddressBase::Value(c), n)?;
+                    w
+                }
+                Piece::OptLink(o, ty) => {
+                    let (some, payload) = self.opt_child(o, ty, n)?;
+                    let (yes, no, after) = (
+                        self.new_block(&[]),
+                        self.new_block(&[]),
+                        self.new_block(&[]),
+                    );
+                    self.branch(some, yes, no, n);
+                    self.start(yes);
+                    self.store_link(blob, pos, w, AddressBase::Address(payload), n)?;
+                    self.jump(after, &[], n);
+                    self.start(no);
+                    let zero = self.u64k(0, n)?;
+                    self.put_w(blob, pos, w, zero, n)?;
+                    self.jump(after, &[], n);
+                    self.start(after);
+                    w
+                }
+            };
+            pos = self.add(pos, k, n);
+        }
+        self.ok_child(to, id, start, n)?;
+        self.jump(join, &[], n);
+        // A put that does not fit writes nothing and leaves the destination usable.
+        if let Some(over) = sinks.over {
+            self.start(over);
+            let e = self.error_place(to, eid, n);
+            self.inst(
+                Inst::SetCase {
+                    address: e,
+                    case: 1,
+                },
+                n,
+            );
+            self.jump(join, &[], n);
+        }
+        self.start(join);
+        Some(self.pointer(to, n))
+    }
+
+    /// `build_in(r, bytes n, w)` (MEM-4).
+    #[allow(clippy::too_many_arguments)]
+    fn build_in(
+        &mut self,
+        ty: TyId,
+        region: ValueId,
+        bytes: ValueId,
+        fty: TyId,
+        f: ValueId,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let u64t = Ty::Scalar(Scalar::U64);
+        let Some(width) = self
+            .compact_adt(ty)
+            .and_then(|(d, _)| self.p.decls[d.index()].compact)
+        else {
+            self.refuse("MEM-4", n, "`build_in` builds a value of a compact type");
+            return None;
+        };
+        let w = match width {
+            hirsel_core_layout::Width::U16 => 2,
+            hirsel_core_layout::Width::U32 => 4,
+            hirsel_core_layout::Width::U64 => 8,
+        };
+        let (to, eid) = self.build_result(result, n)?;
+        let join = self.new_block(&[]);
+        let blob = self.admit_blob(region, bytes, to, eid, join, n)?;
+        // The room a put may use: n, but never past the blob cap of W (MEM-9).
+        let cap = if w == 8 {
+            u64::MAX - HEAD
+        } else {
+            (1 << (8 * w)) - 1
+        };
+        let cap = self.u64k(cap, n)?;
+        let big = self.test(CompareOp::Gt, bytes, cap, n);
+        let room = self.new_block(&[u64t]);
+        let (capped, whole) = (self.new_block(&[]), self.new_block(&[]));
+        self.branch(big, capped, whole, n);
+        self.start(capped);
+        self.jump(room, &[cap], n);
+        self.start(whole);
+        self.jump(room, &[bytes], n);
+        self.start(room);
+        let room = self.block_params(room)[0];
+        let end = self.add_k(room, HEAD, n)?;
+        let id = self.runtime_row(RtOp::DestId, &[], n)?[0];
         let wv = self.u64k(w, n)?;
         let head = self.u64k(HEAD, n)?;
-        self.put_word(AddressBase::Value(blob), &[], 0, bytes, n)?;
-        self.put_word(AddressBase::Value(blob), &[], 8, wv, n)?;
-        let s = self.words(5, n)?;
-        let end = self.add(bytes, head, n);
         let zero = self.u64k(0, n)?;
-        self.put_word(AddressBase::Address(s), &[], 0, blob, n)?;
-        self.put_word(AddressBase::Address(s), &[], 8, head, n)?;
-        self.put_word(AddressBase::Address(s), &[], 16, end, n)?;
-        self.put_word(AddressBase::Address(s), &[], 24, wv, n)?;
-        self.put_word(AddressBase::Address(s), &[], 32, zero, n)?;
+        let s = self.words(6, n)?;
+        for (i, v) in [blob, head, end, wv, zero, id].into_iter().enumerate() {
+            self.put_word(AddressBase::Address(s), &[], 8 * i as u64, v, n)?;
+        }
         let state = self.pointer(s, n);
-        self.run_callback(state, ty, fty, f, &mut sinks, n)?;
-        // A build whose writes failed publishes nothing, whatever its callback returned.
-        let failed = self.state_word(state, 32, u64t, n)?;
-        let bad = self.test(CompareOp::Ne, failed, zero, n);
-        let over = self.over(&mut sinks);
-        let good = self.new_block(&[]);
-        self.branch(bad, over, good, n);
+        let d = self.words(1, n)?;
+        self.put_word(AddressBase::Address(d), &[], 0, state, n)?;
+        let d = self.pointer(d, n);
+        let r = self.call_lowered(fty, f, &[Some(d)], n)?;
+        let TyKind::Fn(_, rt, _, _) = self.t.kind(fty).clone() else {
+            return None;
+        };
+        let rid = self.declared(rt)?;
+        let at = self.address(AddressBase::Value(r), &[], PlaceTy::Declared(rid), n);
+        let case = self.value(Ty::Scalar(Scalar::U32));
+        self.inst(
+            Inst::Case {
+                result: case,
+                address: at,
+            },
+            n,
+        );
+        let zero32 = self.konst(Ty::Scalar(Scalar::U32), 0, n)?;
+        let ok = self.test(CompareOp::Eq, case, zero32, n);
+        let (good, bad) = (self.new_block(&[]), self.new_block(&[]));
+        self.branch(ok, good, bad, n);
+        // The writer's error is the build's.
+        self.start(bad);
+        let from = self.address(
+            AddressBase::Address(at),
+            &[Step::CaseField { case: 1, field: 0 }],
+            PlaceTy::Declared(eid),
+            n,
+        );
+        let from = self.pointer(from, n);
+        let e = self.error_place(to, eid, n);
+        self.copy_to(e, from, eid, n);
+        self.jump(join, &[], n);
+        // The root is a child of this destination (MEM-4); the blob's head records the
+        // used prefix and W.
         self.start(good);
-        // The root is where the callback's frame started: the first byte after the head.
+        let child = self.address(
+            AddressBase::Address(at),
+            &[Step::CaseField { case: 0, field: 0 }],
+            PlaceTy::Value(u64t),
+            n,
+        );
+        let child = self.pointer(child, n);
+        self.check_child(AddressBase::Value(child), id, n)?;
+        let root = self.get_word(AddressBase::Value(child), 8, u64t, n)?;
+        let cursor = self.state_word(state, 8, u64t, n)?;
+        let used = self.word_op(BinaryOp::Sub, cursor, head, n);
+        self.put_word(AddressBase::Value(blob), &[], 0, used, n)?;
+        self.put_word(AddressBase::Value(blob), &[], 8, wv, n)?;
         self.inst(
             Inst::SetCase {
                 address: to,
@@ -962,11 +1512,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
             n,
         );
-        let ok = [Step::CaseField { case: 0, field: 0 }];
-        self.put_word(AddressBase::Address(to), &ok, 0, blob, n)?;
-        self.put_word(AddressBase::Address(to), &ok, 8, head, n)?;
+        let okp = [Step::CaseField { case: 0, field: 0 }];
+        self.put_word(AddressBase::Address(to), &okp, 0, blob, n)?;
+        self.put_word(AddressBase::Address(to), &okp, 8, root, n)?;
         self.jump(join, &[], n);
-        self.close_build_sinks(sinks, state, to, eid, join, n)
+        self.start(join);
+        Some(self.pointer(to, n))
     }
     /// `close_sinks` for `build_stream_in`, whose state exists only after admission.
     fn close_build_sinks(

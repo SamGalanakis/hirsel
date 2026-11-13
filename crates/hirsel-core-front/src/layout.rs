@@ -145,7 +145,7 @@ impl<T: TyRead> Shapes<'_, T> {
                     // child is its destination's identity and its offset. Plain words.
                     // A writer held as a value: the pointer to its frame in the build
                     // (MEM-4), scoped and never cleaned.
-                    Some(Role::Writer) => {
+                    Some(Role::Writer | Role::Dest) => {
                         let body = record(vec![("frame", FieldTy::Borrow)]);
                         return self.fill(r, LRepr::Scoped, body, None);
                     }
@@ -476,7 +476,12 @@ pub(crate) fn carried(
         // A Region value is the region's pointer, scoped and never cleaned by its
         // holder: the block that opened it closes it (MEM-5, MEM-7). A writer is the
         // pointer to its frame in the build (MEM-4), scoped and never cleaned.
-        TyKind::Adt(d, _) if matches!(decls[d.index()].role, Some(Role::Region | Role::Writer)) => {
+        TyKind::Adt(d, _)
+            if matches!(
+                decls[d.index()].role,
+                Some(Role::Region | Role::Writer | Role::Dest)
+            ) =>
+        {
             Carried::Value(Ty::Ptr)
         }
         // A capability or `Args` is a provider handle, plain and never cleaned by the

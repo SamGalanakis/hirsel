@@ -296,7 +296,7 @@ impl Cx<'_, '_, '_> {
         Some(off)
     }
     /// `Option[Link[U]]`'s `U` (MEM-10: zero is `None`).
-    fn link_option(&self, ty: TyId) -> Option<TyId> {
+    pub(super) fn link_option(&self, ty: TyId) -> Option<TyId> {
         let TyKind::Adt(d, args) = self.t.kind(self.bare(ty)) else {
             return None;
         };

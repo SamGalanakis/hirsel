@@ -1,0 +1,66 @@
+// MEM-4, MEM-10: build_in admits n bytes and hands its writer a destination; each put
+// writes a whole literal at the next byte, its links W-wide distances back to children
+// of the same destination. Expr has three cases, so its tag is one byte: Num(2) and
+// Num(5) are 9 bytes each and Add 1 + 4 + 4 = 9, so 27 bytes hold the tree and 20 leave
+// 2 for Add, which overflows, writes nothing, and leaves room for Zero (1 byte).
+// expect: run go(27) = 7
+// expect: run go(20) = 0
+// expect: run go(8) = 98
+// expect: run refused() = 64
+// expect: run stray_root() = fail Bounds
+// expect: run stray_link() = fail Bounds
+@compact(u32) stable type Expr = Num(i64) | Add(Link[Expr], Link[Expr]) | Zero
+fn eval(e: Expr) -> i64 { match e { Num(n) => n, Add(a, b) => eval(a) + eval(b), Zero => 0 } }
+fn tree(r: Region, n: u64) -> Result[Expr in r, BuildError] {
+  let b = build_in(r, bytes n, fn(mut d: Dest[Expr]) -> Result[Child[Expr], BuildError] {
+    let a = dest.put(mut d, Num(2))?
+    let b = dest.put(mut d, Num(5))?
+    match dest.put(mut d, Add(a, b)) {
+      Ok(c) => Ok(c),
+      Error(_) => dest.put(mut d, Zero),
+    }
+  })?
+  Ok(finish(take b))
+}
+fn go(n: u64) -> i64 {
+  region r {
+    match tree(r, n) {
+      Ok(e) => eval(e),
+      Error(Overflow) => 98,
+      Error(Capacity(_)) => 97,
+    }
+  }
+}
+fn refused() -> u64 {
+  let got = bound bytes 8 {
+    region r {
+      match tree(r, 64) { Error(Capacity(c)) => c.requested, _ => 0u64 }
+    }
+  }
+  match got { Ok(k) => k, Error(_) => 1 }
+}
+fn first(r: Region) -> Child[Expr] {
+  let mut kept: Option[Child[Expr]] = None
+  let _ = build_in(r, bytes 16, fn(mut d: Dest[Expr]) -> Result[Child[Expr], BuildError] {
+    let c = dest.put(mut d, Num(1))?
+    kept = Some(c)
+    Ok(c)
+  })
+  match kept { Some(c) => c, None => fail("no child") }
+}
+fn stray_root() -> u64 {
+  region r {
+    let c = first(r)
+    let _ = build_in(r, bytes 16, fn(mut d: Dest[Expr]) -> Result[Child[Expr], BuildError] { Ok(c) })
+    0
+  }
+}
+fn stray_link() -> u64 {
+  region r {
+    let c = first(r)
+    let _ = build_in(r, bytes 16, fn(mut d: Dest[Expr]) -> Result[Child[Expr], BuildError] {
+      dest.put(mut d, Add(c, c))
+    })
+    0
+  }
+}

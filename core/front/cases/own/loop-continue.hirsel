@@ -1,5 +1,5 @@
-// OWN-17: every `continue` too leaves outer slots in their entry state; a `break` leaves for the exit, where the move joins.
-// expect: refuse OWN-17 at 6:38
+// OWN-17: every `continue` too leaves outer slots in their entry state, refused at the `continue`; a `break` leaves for the exit, where the move joins.
+// expect: refuse OWN-17 at 6:47
 // expect: gap values of this type are not built
 fn f(take s: String, c: bool) {
   loop {

@@ -1,0 +1,4 @@
+// OWN-10, the spec's example: the inner block's tail `view s` is a temporary of the enclosing statement, live when the block's cleanup drops `s`; refused at that block's closing `}`.
+// expect: refuse OWN-10 at 4:72
+// expect: gap values of this type are not built
+fn f() -> u64 { let n = string.byte_len({ let s = string.new(); view s }); n }

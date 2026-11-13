@@ -30,7 +30,9 @@ use hirsel_core_ir::{
 };
 use hirsel_core_layout::Scalar;
 use hirsel_core_resolve::{Refusal, Target};
-use hirsel_core_syntax::{Item, Keyword, NodeId, NodeKind, TokenKind, byte_value, character_value};
+use hirsel_core_syntax::{
+    Item, Keyword, NodeId, NodeKind, Span, TokenKind, byte_value, character_value,
+};
 use std::collections::HashMap;
 
 /// Work one body check did, for the cost measurements (core/MEASURE.md).
@@ -205,11 +207,14 @@ impl Program<'_> {
 struct Want {
     ty: TyId,
     rule: &'static str,
+    /// An argument for a view parameter: a view of `ty` is also accepted (OWN-7).
+    view: bool,
 }
 fn want(ty: TyId) -> Option<Want> {
     Some(Want {
         ty,
         rule: "LANG-11",
+        view: false,
     })
 }
 
@@ -435,9 +440,23 @@ impl<'c, 'a> Cx<'c, 'a> {
 
     // ---- outcomes
     fn refuse(&mut self, rule: &str, n: NodeId, message: impl Into<String>) {
-        let site = self.p.site(self.at, n);
+        self.refuse_at(rule, self.span(n), message);
+    }
+    fn refuse_at(&mut self, rule: &str, span: Span, message: impl Into<String>) {
+        let site = self.p.site_span(self.at, span);
         self.out.refusals.push(refusal(rule, site, message));
         self.halt();
+    }
+    fn span(&self, n: NodeId) -> Span {
+        self.item.tree.node(n).origin.span
+    }
+    /// The closing `}` of block `n`.
+    fn close_brace(&self, n: NodeId) -> Span {
+        let s = self.span(n);
+        Span {
+            start: s.end.saturating_sub(1),
+            end: s.end,
+        }
     }
     /// A construct not built yet; each one is reported once per body.
     fn gap(&mut self, n: NodeId, what: &'static str) {
@@ -454,7 +473,8 @@ impl<'c, 'a> Cx<'c, 'a> {
     /// `t` where `w` is expected: equal, or Never, or an already refused type.
     fn coerce(&mut self, t: TyId, w: Want, n: NodeId) {
         self.out.counts.types += 1;
-        if t != w.ty && t != NEVER && t != ERROR && w.ty != ERROR {
+        let viewed = w.view && matches!(self.t.kind(t), TyKind::View(x) if *x == w.ty);
+        if t != w.ty && !viewed && t != NEVER && t != ERROR && w.ty != ERROR {
             let (a, b) = (self.name(w.ty), self.name(t));
             self.refuse(w.rule, n, format!("expected `{a}`, found `{b}`"));
         }
@@ -677,8 +697,8 @@ impl<'c, 'a> Cx<'c, 'a> {
         self.touched = touched;
     }
     /// OWN-17: at a back edge every slot declared outside loop `fi` is in its entry
-    /// state; the site is where it last changed.
-    fn back_edge(&mut self, fi: usize) {
+    /// state; the site is the edge, a `continue` or the body's closing `}`.
+    fn back_edge(&mut self, fi: usize, site: Span) {
         if self.dead {
             return;
         }
@@ -695,9 +715,9 @@ impl<'c, 'a> Cx<'c, 'a> {
             let v = self.var(s);
             if v.born < born && v.avail != entry {
                 let name = self.slot_name(s);
-                self.refuse(
+                self.refuse_at(
                     "OWN-17",
-                    v.at,
+                    site,
                     format!("`{name}` is not in its loop-entry state when the loop repeats"),
                 );
             }
@@ -744,6 +764,9 @@ impl<'c, 'a> Cx<'c, 'a> {
     }
     /// The freeze or reservation `p` crosses, if any (OWN-9 to OWN-12).
     fn check_holds(&mut self, p: Place, act: Act, n: NodeId) -> bool {
+        self.check_holds_at(p, act, self.span(n))
+    }
+    fn check_holds_at(&mut self, p: Place, act: Act, site: Span) -> bool {
         if self.var(p.slot).holds == 0 {
             return true;
         }
@@ -759,7 +782,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                     Hold::CallMut(_) => "is lent `mut` to this call",
                     Hold::Assign => "is reserved by an assignment",
                 };
-                self.refuse(rule, n, format!("a place of `{name}` {why}"));
+                self.refuse_at(rule, site, format!("a place of `{name}` {why}"));
                 return false;
             }
         }
@@ -997,7 +1020,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         }
     }
     /// Close a block: its let-bound views end, then its live owners are dropped, which
-    /// a remaining freeze forbids (OWN-10).
+    /// a remaining freeze forbids (OWN-10, at the block's closing `}`).
     fn close_scope(&mut self, start: usize, freezes: usize, n: NodeId) {
         let d = self.depth;
         self.unfreeze(freezes, |h| {
@@ -1008,7 +1031,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                 let s = self.scope_slots[i];
                 let v = self.var(s);
                 if matches!(v.avail, Avail::Live | Avail::Maybe) && !self.copies(v.ty) {
-                    self.check_holds(Place::whole(s), Act::Write, n);
+                    self.check_holds_at(Place::whole(s), Act::Write, self.close_brace(n));
                 }
             }
         }
@@ -1073,6 +1096,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             Some(Want {
                 ty: result,
                 rule: "LANG-8",
+                view: false,
             }),
         );
         if self.live() {
@@ -1443,7 +1467,7 @@ impl<'c, 'a> Cx<'c, 'a> {
     /// `let x: T` with no value: an uninit slot (OWN-5), assigned before it is read.
     fn let_uninit(&mut self, s: NodeId, pat: NodeId, declared: Option<TyId>) -> bool {
         let Some(ty) = declared else {
-            self.gap(s, "a `let` with neither a type nor a value (Q26)");
+            self.refuse("LANG-5", s, "a `let` without a value needs a type");
             return false;
         };
         if self.kind(pat) != NodeKind::BindPattern {
@@ -1525,8 +1549,10 @@ impl<'c, 'a> Cx<'c, 'a> {
             );
             return false;
         }
+        // OWN-5: a part of a slot is assigned only while the slot is live.
         if at.place.len > 0 && var.avail != Avail::Live {
-            self.gap(place, "assignment into a slot that is not live (Q24)");
+            self.need_live(q, place);
+            return false;
         }
         self.check_holds(at.place, Act::Write, place);
         let compound = op != "=";
@@ -1573,6 +1599,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                 Some(Want {
                     ty: at.ty,
                     rule: "SEM-1",
+                    view: false,
                 }),
             );
             if let Some(new) = self.arith(bop, at.ty, old, rv, s)
@@ -1719,7 +1746,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         if let Some(h) = self.frames.last().unwrap().header {
             self.jump(h, &[], body);
         }
-        self.back_edge(self.frames.len() - 1);
+        self.back_edge(self.frames.len() - 1, self.close_brace(body));
         let f = self.pop_frame(n);
         let v = self.land(f.exit);
         if !f.left {
@@ -1774,7 +1801,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         if let Some(h) = header {
             self.jump(h, &[], c[1]);
         }
-        self.back_edge(self.frames.len() - 1);
+        self.back_edge(self.frames.len() - 1, self.close_brace(c[1]));
         let f = self.pop_frame(n);
         self.land(f.exit);
         (UNIT, None)
@@ -1798,6 +1825,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                             Want {
                                 ty: f,
                                 rule: "LANG-11",
+                                view: false,
                             },
                             e,
                         );
@@ -1851,6 +1879,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                         Want {
                             ty: f,
                             rule: "LANG-11",
+                            view: false,
                         },
                         n,
                     );
@@ -1882,7 +1911,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             self.jump(h, &[], n);
         }
         self.cur = None;
-        self.back_edge(i);
+        self.back_edge(i, self.span(n));
         self.dead = true;
         (NEVER, None)
     }
@@ -1891,6 +1920,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         let w = Want {
             ty: self.fd.result,
             rule: "LANG-8",
+            view: false,
         };
         let v = match self.kids(n).first() {
             Some(&e) => self.expr(e, Some(w)).1,
@@ -1994,7 +2024,10 @@ impl<'c, 'a> Cx<'c, 'a> {
                 Ok(None) => self.gap_ty(n, "`view` of a value that is not a place"),
                 Err(()) => (ERROR, None),
             },
-            _ => self.gap_ty(n, "`mut` outside an argument (Q25)"),
+            _ => {
+                self.refuse("OWN-7", n, "`mut p` is written only as an argument");
+                (ERROR, None)
+            }
         }
     }
     fn no_operator(&mut self, n: NodeId, t: TyId) -> (TyId, Option<ValueId>) {
@@ -2153,6 +2186,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             Some(Want {
                 ty: t,
                 rule: "SEM-1",
+                view: false,
             })
         };
         if self.synthesises(l) {
@@ -2339,7 +2373,16 @@ impl<'c, 'a> Cx<'c, 'a> {
             }
             let pt = g.params[i].ty;
             vals[i] = match self.known(pt, &found) {
-                Some(t) => self.expr(e, want_rule(t, "LANG-11")).1,
+                Some(t) => {
+                    let view = g.params[i].mode == Mode::View
+                        && !matches!(self.t.kind(t), TyKind::View(_));
+                    let w = Want {
+                        ty: t,
+                        rule: "LANG-11",
+                        view,
+                    };
+                    self.expr(e, Some(w)).1
+                }
                 None => {
                     let (at, v) = self.expr(e, None);
                     if !self.unify(pt, at, &mut found) {
@@ -2488,6 +2531,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                 Want {
                     ty: t,
                     rule: "LANG-11",
+                    view: false,
                 },
                 e,
             ),
@@ -2741,7 +2785,11 @@ impl<'c, 'a> Cx<'c, 'a> {
 }
 
 fn want_rule(ty: TyId, rule: &'static str) -> Option<Want> {
-    Some(Want { ty, rule })
+    Some(Want {
+        ty,
+        rule,
+        view: false,
+    })
 }
 
 fn is_type_node(k: NodeKind) -> bool {

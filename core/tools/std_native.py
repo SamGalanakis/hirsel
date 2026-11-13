@@ -165,16 +165,17 @@ def wrapper(case, evaluator=False):
     parameters, _ = host_parameter(case)
     effect = ' waits' if case.waits else ''
     success = '1u64' if evaluator else 'Ok(())'
-    failure = '0u64' if evaluator else 'Error(Exit(status:1))'
-    result = 'u64' if evaluator else 'Result[(),Exit]'
+    failure = '0u64' if evaluator else 'Error(())'
+    result = 'u64' if evaluator else 'Result[(),()]'
     if case.expected.startswith(('fail ', 'fault ')):
         body = f'let _ = {call}\n{success}'
     else:
         body = f'if {call} == {case.expected} {{{success}}} else {{{failure}}}'
-    return f'\npub fn native_contract({parameters})->{result}{effect} {{\n{body}\n}}\n'
+    marker = '' if evaluator else '@test\n'
+    return f'\n{marker}pub fn native_contract({parameters})->{result}{effect} {{\n{body}\n}}\n'
 
 
-def manifest(root, case, adapted, native=True):
+def manifest(root, case, adapted):
     core = {'name': 'core', 'version': '1'}
     std = {'name': 'std', 'version': '1'}
     def sources(directory, signatures):
@@ -189,10 +190,6 @@ def manifest(root, case, adapted, native=True):
         original.update(file=str(adapted), signatures=case.package == 'core')
     else:
         files.append({'file': str(adapted), 'modules': ['tests', case.file.stem], 'signatures': False})
-    if case.package == 'core' and native:
-        packages.append({'package': {'name': 'contracts', 'version': '1'},
-                         'sources': [{'file': str(adapted.with_name('entry.hirsel')), 'modules': ['main'], 'signatures': False}],
-                         'dependencies': [core]})
     return {'core': core, 'packages': packages}
 
 
@@ -315,18 +312,12 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 original = (root / 'core' / case.package / (case.test_of + '.hirsel')).read_text() + '\n' if case.test_of else ''
                 adapted.write_text(original + case.file.read_text() + wrapper(case, evaluator=evaluating))
                 inputs = scratch / 'inputs.json'
-                inputs.write_text(json.dumps(manifest(root, case, adapted, native=not evaluating)))
+                inputs.write_text(json.dumps(manifest(root, case, adapted)))
                 entry = f'{case.package}@1/{case.test_of or ("tests/" + case.file.stem)}/native_contract'
-                if case.package == 'core' and not evaluating:
-                    parameter, argument = host_parameter(case)
-                    effect = ' waits' if case.waits else ''
-                    module = case.test_of or 'tests.' + case.file.stem
-                    adapted.with_name('entry.hirsel').write_text(f'pub fn main({parameter})->Result[(),Exit]{effect} {{core.{module}.native_contract({argument})}}\n')
-                    entry = 'contracts@1/main/main'
                 binary = scratch / 'program'
                 command = [str(compiler), 'build', '--inputs', str(inputs), '--entry',
                            entry, '--backend', engine,
-                           '--runtime', str(runtime), '--store', str(work / 'store'), '--json',
+                           '--runtime', str(runtime), '--store', str(work / 'store'), '--json', '--limit', str(64 * 1024 * 1024),
                            '--dir', str(host), '-o', str(binary)]
                 if evaluating:
                     try:
@@ -339,11 +330,17 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                         row['cause'] = f'evaluator execution timed out after {timeout}s'
                     row['passed'] = row['cause'] is None
                     if row['cause']:
-                        row['owner'] = 'core-form-883' if row['ran'] else 'core-check-895'
+                        row['owner'] = ('core-check-895' if not row['ran'] else
+                                        'core-ops-914' if 'external functions do not run here' in row['cause'] else
+                                        'core-form-883')
                     save_row(rows, row, output)
                     continue
                 if engine == 'llvm':
                     command.append('--release')
+                if case.package == 'core':
+                    # A temporary core @test belongs to this source request;
+                    # published dependencies deliberately omit test bodies.
+                    command.append('--source-core')
                 if '(out)' in case.call:
                     command.extend(['--grant', 'Stdout'])
                 if '(err)' in case.call:

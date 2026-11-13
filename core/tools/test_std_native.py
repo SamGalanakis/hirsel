@@ -155,7 +155,10 @@ class Walker(unittest.TestCase):
             self.assertIn('2 selected, 1 ran, 1 passed', printed.getvalue())
             self.assertIn('1 native-only', printed.getvalue())
             self.assertIn('->u64', wrapper(cases[0], evaluator=True))
-            self.assertEqual(len(manifest(root, cases[0], root / 'adapted', native=False)['packages']), 2)
+            self.assertEqual(len(manifest(root, cases[0], root / 'adapted')['packages']), 2)
+            self.assertIn('@test\npub fn native_contract', wrapper(cases[0]))
+            self.assertIn('Result[(),()]', wrapper(cases[0]))
+            self.assertNotIn('@test', wrapper(cases[0], evaluator=True))
 
     def test_evaluator_disagreement_is_a_finding_not_an_inapplicable_law(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -165,14 +168,17 @@ class Walker(unittest.TestCase):
             (root / 'core/core').mkdir()
             (tests / 'bad.hirsel').write_text('// expect: run law() = 7\nfn law()->u64 {7}')
             evaluator = root / 'eval'
-            evaluator.write_text('#!/usr/bin/env python3\nprint(\'{"outcome":{"kind":"fault","message":"write to lent place"}}\')\n')
-            evaluator.chmod(0o755)
-            with contextlib.redirect_stdout(io.StringIO()):
-                rows = run(root, None, None, discover(root, []), ['evaluator'], None, [], evaluator=evaluator)
-            self.assertTrue(rows[0]['ran'])
-            self.assertTrue(rows[0]['applicable'])
-            self.assertFalse(rows[0]['passed'])
-            self.assertEqual(rows[0]['owner'], 'core-form-883')
+            for message, expected_owner in [('write to lent place', 'core-form-883'),
+                                            ('external functions do not run here', 'core-ops-914')]:
+                report = json.dumps(dict(outcome=dict(kind='fault', message=message)))
+                evaluator.write_text('#!/usr/bin/env python3\nprint(' + repr(report) + ')\n')
+                evaluator.chmod(0o755)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rows = run(root, None, None, discover(root, []), ['evaluator'], None, [], evaluator=evaluator)
+                self.assertTrue(rows[0]['ran'])
+                self.assertTrue(rows[0]['applicable'])
+                self.assertFalse(rows[0]['passed'])
+                self.assertEqual(rows[0]['owner'], expected_owner)
 
 
 if __name__ == '__main__':

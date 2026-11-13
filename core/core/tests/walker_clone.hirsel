@@ -1,0 +1,10 @@
+// The answer distinguishes a declared clone hook from structural copying.
+type CloneProbe { value: u64 }
+clone(p: CloneProbe) { Ok(CloneProbe(value: p.value + 1)) }
+
+// expect: run declared_clone_is_demanded() = 807
+fn declared_clone_is_demanded()->u64 {
+    let p=CloneProbe(value:7)
+    let copied:CloneProbe=result.unwrap(clone(p))
+    copied.value*100+p.value
+}

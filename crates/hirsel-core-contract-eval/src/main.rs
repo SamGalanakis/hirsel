@@ -4,7 +4,7 @@ use hirsel_core_ids::DefPath;
 use hirsel_core_ir::eval;
 use hirsel_core_resolve::CorpusManifest;
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 hirsel_guard::install!();
 
 fn evaluate() -> Result<Value, String> {
@@ -46,6 +46,15 @@ fn evaluate() -> Result<Value, String> {
     let Some(Def::Fn(root)) = program.by_path.get(&entry).copied() else {
         return Err("entry is not a function".into());
     };
+    // Named functions, type finalizers and declared clone hooks all have a
+    // canonical function identity. Clone hooks are not source-name lookups and
+    // therefore do not appear in Program::by_path.
+    let bodies = program
+        .fns
+        .iter()
+        .enumerate()
+        .map(|(f, declaration)| (declaration.path.clone(), f as u32))
+        .collect::<HashMap<_, _>>();
     let mut emitter = Emitter::new();
     let mut checked = HashSet::new();
     let mut pending = vec![root];
@@ -68,12 +77,7 @@ fn evaluate() -> Result<Value, String> {
         emitter.materialize_instances()?;
         for row in &emitter.module.functions {
             let key = &emitter.module.instances[row.instance.index()];
-            let demanded = match program.by_path.get(&key.definition) {
-                Some(Def::Fn(f)) => Some(*f),
-                Some(Def::Type(d)) => program.decls[d.index()].finalizer,
-                None => None,
-            };
-            if let Some(f) = demanded
+            if let Some(&f) = bodies.get(&key.definition)
                 && !checked.contains(&f)
                 && program.fns[f as usize].body.is_some()
             {

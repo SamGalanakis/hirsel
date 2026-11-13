@@ -63,8 +63,8 @@ law uses the same FIRST-line marker, with its core module:
 The walker splices `core/core/deque.hirsel` and this file into one temporary core
 module. The same private-function, collision and reason rules apply. An unmarked
 core test stays a separate `core.tests.<stem>` module and sees only public library
-items. For native execution a temporary application entry calls the core test's
-adapter, so the ordinary published-core body path is exercised. No test declaration
+items. For native execution the temporary core test adapter is itself an `@test`
+entry built through the ordinary core body and native product APIs. No test declaration
 is added to the installed product. Recursive core directory discovery excludes its
 root tests subtree; bundled products, std seed, M1 library rows and LangArena use
 library sources only. Real library source refusals still fail those paths.
@@ -113,3 +113,21 @@ Evaluator disagreements remain failing findings, routed to core-form-883 for
 evaluation or core-check-895 for checking/assembly. Do not exclude them. The
 existing evaluator-only fault marker and automatic execution on native selections
 are unchanged. Filters that match nothing fail on every backend.
+
+Native adapters are PROG-4 `@test` functions returning `Result[(), ()]`. The
+original scalar helpers and `// expect: run` values remain the hand-derived
+oracles; the generated test compares the helper result and returns Error on a
+mismatch. For a `fail Cause` oracle the walker compares the test's native failure
+status and exact cause as before. A wrong result, unexpected failure or crash
+still fails the law. Evaluator adapters remain scalar entries for their model
+comparison; native-only and evaluator-only accounting is unchanged.
+
+Each known test entry builds through the public product `build --entry <test>`
+path used by the driver's `run_test`, with an explicit 64 MiB native root limit
+and the case's grants. The walker owns its separate test process so the existing
+30-second execution bound is preserved; builds have no time bound. Core tests
+need no application forwarding function. They pass `--source-core` so their
+temporary test bodies stay in the source request, since published dependencies
+deliberately omit test bodies. The compiler checks the adapter's
+PROG-4 signature and references, and applies ordinary module privacy. This does
+not publish test adapters or alter the source library.

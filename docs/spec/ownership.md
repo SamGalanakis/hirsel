@@ -442,9 +442,20 @@ move or lend a place overlapping it. A view argument freezes its place from its 
 through its `mut` parameter and lend it on, but `take` of a `mut` parameter or of a place
 under it is refused. When the call ends, by return or failure, the caller's place holds
 whatever value was last installed ([T2.5](#own-26-the-transition-table)).
+A value installed through a `mut` parameter, or into a place under it, reads only anchors
+the caller's place already has: the parameter itself, its parts and sub-views of them, as
+OWN-20 counts them, and the regions its type names. Anything else is refused here, at the
+assignment, so the caller's place keeps its anchor set (OWN-19) across the call.
 
 ```hirsel
 fn reset(mut xs: List[u64]) { xs = list.new() }
+scoped type Cursor { input: View[Bytes], pos: u64 }
+fn skip(mut c: Cursor) { c = Cursor(input: c.input, pos: c.pos + 1) }
+```
+```hirsel
+fn put(mut out: Option[View[String]], t: String) {
+  out = Some(view t)                                        // refused: OWN-11, t is not an anchor of out
+}
 ```
 ```hirsel
 fn steal(mut xs: List[u64]) -> List[u64] { take xs }       // refused: OWN-11

@@ -84,6 +84,7 @@ const CRATES: &[(&str, Class)] = &[
     ("hirsel-interp", Class::Implementation),
     ("hirsel-rc", Class::Implementation),
     ("hirsel-llvm", Class::Implementation),
+    ("hirsel-llvm-lazy", Class::Implementation),
     ("hirsel-cranelift", Class::Implementation),
     ("hirsel-rt", Class::Implementation),
     ("hirsel-heapcheck", Class::Implementation),
@@ -213,7 +214,7 @@ fn check_edge(from: &str, to: &str, kind: Kind) -> Result<(), String> {
                 | "hirsel-guard"
                 | "hirsel-graph"
                 | "hirsel-cranelift"
-                | "hirsel-llvm"
+                | "hirsel-llvm-lazy"
         ),
         _ if from == "hirsel-core-resolve" => matches!(
             to,
@@ -424,7 +425,9 @@ fn workspace_edges_respect_the_crate_layering() {
 #[test]
 fn layering_controls() {
     assert!(check_edge("hirsel-core-driver", "hirsel-core-front", Kind::Production).is_ok());
+    assert!(check_edge("hirsel-core-driver", "hirsel-llvm-lazy", Kind::Production).is_ok());
     for old in [
+        "hirsel-llvm",
         "hirsel-driver",
         "hirsel-requests",
         "hirsel-engine",

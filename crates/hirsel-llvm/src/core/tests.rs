@@ -887,6 +887,7 @@ fn every_memory_sample_admission_refusal_matches_the_evaluator() {
         executions += cases.len();
         agree_cases(&module, &cases, true);
     }
+    // The two inner-bound finalizer cases add seven executions each.
     assert_eq!(executions, 144);
     println!("whole memory sample executions including every admission refusal: {executions}");
 }

@@ -104,20 +104,24 @@ def expected(workload):
 
 def abi_smoke(out, env):
     rustc = subprocess.check_output(['rustup', 'which', '--toolchain', '1.99.0', 'rustc'], text=True).strip()
-    archive = out/'libhirsel_core_rt.a'
-    commands = [
-        ['taskset','-c','16',rustc,str(CRATE/'src/lib.rs'),'--crate-name','hirsel_core_rt',
-         '--crate-type','staticlib','--edition=2024',*FLAGS,'--extern',f'libc={out}/lib/liblibc.rlib','--extern',
-         f'hirsel_core_layout={out}/lib/libhirsel_core_layout.rlib','-L',f'dependency={out}/lib','-o',str(archive)],
-        ['taskset','-c','16','cc','-std=c11','-O3','-Wall','-Wextra','-Werror','-pedantic',
-         '-I'+str(CRATE/'include'),str(CRATE/'tests/abi.c'),str(archive),'-lpthread','-ldl','-lm','-o',str(out/'c-abi')],
-        ['taskset','-c','16',str(out/'c-abi')],
-    ]
-    with (out/'c-abi.log').open('w') as log:
-        for command in commands:
-            wait_for_load()
-            subprocess.run([str(ROOT/'tools/capped'),*command],cwd=ROOT,env=env,stdout=log,stderr=subprocess.STDOUT,check=True)
-        log.write('C ABI smoke: 1 passed\n')
+    for allocator in ['system', 'mimalloc']:
+        suffix = '' if allocator == 'system' else '-mimalloc'
+        archive = out / f'libhirsel_core_rt{suffix}.a'
+        extra = [] if allocator == 'system' else ['--cfg', 'feature="mimalloc"', '--extern', f'libmimalloc_sys={out}/lib/liblibmimalloc_sys.rlib']
+        commands = [
+            ['taskset','-c','16',rustc,str(CRATE/'src/lib.rs'),'--crate-name','hirsel_core_rt',
+             '--crate-type','staticlib','--edition=2024',*FLAGS,*extra,'--extern',f'libc={out}/lib/liblibc.rlib','--extern',
+             f'hirsel_core_layout={out}/lib/libhirsel_core_layout.rlib','-L',f'dependency={out}/lib','-o',str(archive)],
+            ['taskset','-c','16','cc','-std=c11','-O3','-Wall','-Wextra','-Werror','-pedantic',
+             '-I'+str(CRATE/'include'),str(CRATE/'tests/abi.c'),str(archive),
+             *([] if allocator == 'system' else ['-lmimalloc']),'-lpthread','-ldl','-lm','-o',str(out/f'c-abi{suffix}')],
+            ['taskset','-c','16',str(out/f'c-abi{suffix}')],
+        ]
+        with (out/f'c-abi{suffix}.log').open('w') as log:
+            for command in commands:
+                wait_for_load()
+                subprocess.run([str(ROOT/'tools/capped'),*command],cwd=ROOT,env=env,stdout=log,stderr=subprocess.STDOUT,check=True)
+            log.write(f'C ABI {allocator} smoke: 1 passed\n')
 
 
 def sample(out, allocator, workload, mode, env):

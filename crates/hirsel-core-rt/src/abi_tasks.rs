@@ -32,6 +32,7 @@ pub(crate) unsafe fn task_handover(context: *mut Context) {
     }
 }
 /// Drain completed remote refunds before this task resumes pure code.
+#[inline(always)]
 pub(crate) fn task_resume(context: *mut Context) {
     // SAFETY: the cooperative scheduler owns this task's exclusive execution.
     unsafe {

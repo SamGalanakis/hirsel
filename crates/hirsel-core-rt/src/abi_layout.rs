@@ -27,3 +27,13 @@ pub const ARC_EVENT_NEW: u8 = 10;
 pub const ARC_EVENT_SHARE: u8 = 11;
 pub const ARC_EVENT_RELEASE: u8 = 12;
 pub const ARC_EVENT_UNWRAP: u8 = 13;
+
+// General own free/refund: load the raw payer word at payload-OWN_PAYER_BACK
+// and compare it directly with context[CONTEXT_CURRENT_LIMIT]. On equality and
+// nonzero charge, add to LIMIT_AVAILABLE and subtract from LIMIT_OUTSTANDING.
+// On inequality (including native tag bits), call hirsel_core_refund(original,
+// charge), which strips tags and follows forwarding records. The C slow entry
+// hirsel_core_refund_in(context, original, charge) implements the same sequence.
+// An outstanding charge prevents reuse of its payer slot, so an equal word
+// cannot be an earlier incarnation after exit/re-entry. Current is canonical;
+// forwarded parents and handed-over survivors differ until lookup resolves them.

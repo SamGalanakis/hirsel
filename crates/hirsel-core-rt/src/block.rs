@@ -338,15 +338,7 @@ pub(crate) unsafe fn free_in(
     // SAFETY: recover the live block's payer before deallocating its native bytes.
     unsafe {
         let payer = *funding(payload);
-        if charge != 0 && payer.record_pointer() == context.limit_record() {
-            // The task pins its current canonical record and owns these local writes.
-            (*context.limit_record()).available =
-                (*context.limit_record()).available.wrapping_add(charge);
-            (*context.limit_record()).outstanding =
-                (*context.limit_record()).outstanding.wrapping_sub(charge);
-        } else {
-            payer.settle(charge);
-        }
+        payer.settle_in(context, charge);
         let (_, offset) = physical_layout(bytes, align, PLAIN);
         crate::allocator::deallocate_raw(payload.as_ptr().sub(offset));
     }

@@ -316,6 +316,22 @@ impl Payer {
             self.settle(bytes);
         }
     }
+    /// A raw word match proves this is the canonical current record. Tags can
+    /// only cause a false negative; the slow path strips them and follows unions.
+    #[inline(always)]
+    pub(crate) fn settle_in(self, context: &crate::Context, bytes: u64) {
+        if bytes != 0 && self.0.as_ptr().cast::<LimitRecord>() == context.limit_record() {
+            // SAFETY: current is canonical and task-exclusive; this block's
+            // outstanding bytes prevent reuse of its stored payer slot.
+            unsafe {
+                let r = &mut *context.limit_record();
+                r.available = r.available.wrapping_add(bytes);
+                r.outstanding = r.outstanding.wrapping_sub(bytes);
+            }
+        } else {
+            self.settle(bytes);
+        }
+    }
     #[inline]
     pub(crate) fn settle(self, bytes: u64) {
         let d = self.domain();
@@ -453,18 +469,29 @@ impl Funding {
         }
         self.bind();
     }
+    #[inline(always)]
     pub(crate) fn bind(&self) {
-        CURRENT_DOMAIN.with(|v| v.set(self.payer.slot().domain.as_ptr().addr()));
+        // SAFETY: Funding holds an untagged slot under exclusive execution.
+        let domain = unsafe { self.payer.0.as_ref().domain };
+        CURRENT_DOMAIN.with(|v| v.set(domain.as_ptr().addr()));
     }
     pub(crate) fn unbind() {
         CURRENT_DOMAIN.with(|v| v.set(0));
     }
     /// Provider drains at event handoff, before this task resumes. No allocation.
+    #[inline(always)]
     pub fn drain(&self) {
-        if !self.payer.domain().pending.swap(false, Ordering::Acquire) {
-            return;
+        // SAFETY: a Funding handle is untagged and retains its entire domain.
+        let domain = unsafe { self.payer.0.as_ref().domain.as_ref() };
+        if domain.pending.load(Ordering::Acquire) {
+            self.drain_pending();
         }
-        let _remote = self.payer.domain().remote.lock().unwrap();
+    }
+    #[cold]
+    fn drain_pending(&self) {
+        let domain = self.payer.domain();
+        let _remote = domain.remote.lock().unwrap();
+        domain.pending.store(false, Ordering::Relaxed);
         self.drain_locked(false);
     }
     fn drain_locked(&self, retired: bool) {

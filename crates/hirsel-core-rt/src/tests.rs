@@ -249,6 +249,36 @@ fn emitted_own_sequence_refunds_current_foreign_and_handed_over_payers() {
         inline_own_free(&ctx, current, 8, 8, 8);
         assert_eq!(ctx.available(), 128);
     }
+    // A survivor pins its original slot across exit/re-entry. Its refund must
+    // reach the parent, not the newly entered current scope.
+    ctx.limit_enter(64).unwrap();
+    // SAFETY: this fixture owns the exact plain allocation and its payer word.
+    let survivor = unsafe { inline_own_alloc(&ctx, Some(24), 24, 8).unwrap() };
+    ctx.limit_exit();
+    assert_eq!(ctx.available(), 104);
+    ctx.limit_enter(32).unwrap();
+    // SAFETY: same live block; the new scope cannot reuse a byte-retained slot.
+    unsafe {
+        let payer = *crate::block::funding(survivor);
+        assert_ne!(payer.record_pointer(), ctx.limit_record());
+        inline_own_free(&ctx, survivor, 24, 24, 8);
+    }
+    assert_eq!(ctx.available(), 32);
+    ctx.limit_exit();
+    assert_eq!(ctx.available(), 128);
+    // The C refund hook implements the same test for emitted native frees.
+    // SAFETY: we retain the block while settling, then release its physical base.
+    unsafe {
+        let block = inline_own_alloc(&ctx, Some(8), 8, 8).unwrap();
+        let word = block
+            .as_ptr()
+            .sub(8)
+            .cast::<*mut crate::limit::LimitRecord>()
+            .read();
+        hirsel_core_refund_in(&ctx, word, 8);
+        hirsel_core_native_free(block.as_ptr().sub(8));
+    }
+    assert_eq!(ctx.available(), 128);
 }
 
 #[test]

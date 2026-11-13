@@ -42,6 +42,7 @@ fn page() -> usize {
 pub(crate) struct Stack {
     base: NonNull<u8>,
     len: usize,
+    guard_end: usize,
     #[cfg(any(test, feature = "memcheck"))]
     valgrind: u64,
 }
@@ -50,7 +51,8 @@ impl Stack {
         Self::with_bytes(USABLE)
     }
     pub(crate) fn with_bytes(bytes: usize) -> Self {
-        let len = page() + bytes;
+        let page_bytes = page();
+        let len = page_bytes + bytes;
         // SAFETY: fresh inaccessible private mapping, then enable only its usable pages.
         unsafe {
             let raw = libc::mmap(
@@ -65,7 +67,7 @@ impl Stack {
                 crate::process::stop(b"HostMemory");
             }
             if libc::mprotect(
-                raw.cast::<u8>().add(page()).cast(),
+                raw.cast::<u8>().add(page_bytes).cast(),
                 bytes,
                 libc::PROT_READ | libc::PROT_WRITE,
             ) != 0
@@ -75,19 +77,17 @@ impl Stack {
             Self {
                 base: NonNull::new_unchecked(raw.cast()),
                 len,
+                guard_end: raw.addr() + page_bytes,
                 #[cfg(any(test, feature = "memcheck"))]
                 valgrind: hirsel_stack::stack_register(
-                    raw.cast::<u8>().add(page()),
+                    raw.cast::<u8>().add(page_bytes),
                     raw.cast::<u8>().add(len),
                 ),
             }
         }
     }
     pub(crate) fn bounds(&self) -> (usize, usize) {
-        (
-            self.base.as_ptr() as usize,
-            self.base.as_ptr() as usize + page(),
-        )
+        (self.base.as_ptr().addr(), self.guard_end)
     }
     /// # Safety
     /// Stack is idle, entry never returns, and its operands remain live until completion.

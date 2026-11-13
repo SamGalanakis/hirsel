@@ -589,6 +589,23 @@ pub unsafe extern "C" fn hirsel_core_refund(payer: *mut crate::limit::LimitRecor
     crate::limit::Payer::from_current(payer).refund(bytes);
 }
 
+/// Refund with the context-aware raw-word equality fast path. Equal nonzero
+/// payer/current refunds directly; otherwise follows the original payer. No
+/// status, admission or allocation. Tags may send an equal payer to the slow path.
+/// # Safety
+/// Context is task-exclusive; payer is retained by these exact outstanding bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_refund_in(
+    context: *const Context,
+    payer: *mut crate::limit::LimitRecord,
+    bytes: u64,
+) {
+    // SAFETY: caller transfers the live block's exact remaining charge.
+    unsafe {
+        crate::limit::Payer::from_current(payer).settle_in(&*context, bytes);
+    }
+}
+
 /// Scheduler handoff: bind the native task to this worker and apply pending
 /// ordered refunds before resumption. Null unbinds before giving custody away.
 /// No admission, allocation or failure status.

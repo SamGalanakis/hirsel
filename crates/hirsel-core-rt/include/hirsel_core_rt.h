@@ -99,6 +99,9 @@ void hirsel_core_task_bind(const HirselCoreContext *);
 void *hirsel_core_region_refill(HirselCoreRegion *, size_t bytes, size_t alignment);
 void hirsel_core_release_last(HirselCoreContext *, void *node, uint64_t charge, HirselCoreDropRecipe);
 void hirsel_core_refund(HirselCoreLimitRecord *original_payer, uint64_t nonzero_bytes);
+/* Context-aware refund: compare raw payer word with current, direct when equal;
+   otherwise use original-payer lookup. No status/admission/allocation. */
+void hirsel_core_refund_in(const HirselCoreContext *, HirselCoreLimitRecord *original_payer, uint64_t bytes);
 void *hirsel_core_native_alloc(size_t native_bytes, size_t native_alignment);
 void hirsel_core_native_free(void *base);
 uint8_t hirsel_core_allocation_status(const HirselCoreContext *, void *);

@@ -45,14 +45,21 @@ fn allocation<const N: usize>(runtime: bool) -> u64 {
 // Both branches make exactly malloc(N+8)/free calls, align to 8 and zero N
 // payload bytes at base+8. Only the runtime branch admits, prefixes and refunds.
 #[inline(never)]
-fn matched_allocation<const N: usize, const RUNTIME: bool, const CURRENT: bool>() -> u64 {
+fn matched_allocation<
+    const N: usize,
+    const RUNTIME: bool,
+    const CURRENT: bool,
+    const DIFFERENT: bool,
+>() -> u64 {
     let ctx = Context::new(u64::MAX);
+    let origin = Context::new(u64::MAX);
+    let paid = if DIFFERENT { &origin } else { &ctx };
     let mut sum = 0;
     for i in 0..COUNT {
         // SAFETY: each branch owns the same N+8 native bytes, payload at offset8.
         unsafe {
             let block = if RUNTIME {
-                hirsel_core_rt::abi::inline_own_alloc(&ctx, Some(N as u64), N, 8)
+                hirsel_core_rt::abi::inline_own_alloc(paid, Some(N as u64), N, 8)
                     .unwrap()
                     .as_ptr()
             } else {
@@ -161,9 +168,10 @@ fn emitted_region() -> u64 {
 
 fn allocation_mode<const N: usize>(mode: &str) -> u64 {
     match mode {
-        "matched" => matched_allocation::<N, false, false>(),
-        "inline" => matched_allocation::<N, true, false>(),
-        "current" => matched_allocation::<N, true, true>(),
+        "matched" => matched_allocation::<N, false, false, false>(),
+        "inline" => matched_allocation::<N, true, false, false>(),
+        "current" => matched_allocation::<N, true, true, false>(),
+        "different" => matched_allocation::<N, true, false, true>(),
         _ => allocation::<N>(mode == "runtime"),
     }
 }

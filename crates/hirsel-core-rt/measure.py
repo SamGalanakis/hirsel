@@ -186,7 +186,7 @@ def main():
             writer.writeheader()
         for allocator in ['system', 'mimalloc']:
             for workload in args.workloads:
-                for mode in ['rust', 'runtime'] + (['matched', 'wrapped'] if workload == 'growth' else ['matched', 'inline', 'current'] if workload.startswith('alloc') else ['inline'] if workload == 'region' else ['full', 'query', 'full_alloc', 'alloc_control', 'c_full', 'c_full_alloc'] if workload == 'limits' else []):
+                for mode in ['rust', 'runtime'] + (['matched', 'wrapped'] if workload == 'growth' else ['matched', 'inline', 'current', 'different'] if workload.startswith('alloc') else ['inline'] if workload == 'region' else ['full', 'query', 'full_alloc', 'alloc_control', 'c_full', 'c_full_alloc'] if workload == 'limits' else []):
                     if args.modes and mode not in args.modes:
                         continue
                     if (allocator, workload, mode) in done:

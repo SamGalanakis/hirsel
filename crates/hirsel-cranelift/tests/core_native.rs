@@ -248,6 +248,11 @@ fn execute_reports(
         source.push_str("}\n");
     }
     source.push_str("return 0; }\n");
+    let actual = link_run(&scratch, &source);
+    assert_eq!(actual, expected, "optimize={optimize}");
+}
+
+fn link_run(scratch: &Scratch, source: &str) -> Vec<u64> {
     fs::write(scratch.0.join("caller.c"), source).unwrap();
     let archive = PathBuf::from(
         std::env::var_os("HIRSEL_CORE_RUNTIME_ARCHIVE")
@@ -289,7 +294,7 @@ fn execute_reports(
         .chunks_exact(8)
         .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
         .collect();
-    assert_eq!(actual, expected, "optimize={optimize}");
+    actual
 }
 
 #[test]
@@ -665,6 +670,7 @@ fn every_whole_v1a_sample_matches_evaluator() {
         let module = text::parse(source).unwrap();
         let ordinary = sample_runs(&module, source);
         execute(&module, &ordinary, false);
+        let mut cases: Vec<_> = ordinary.into_iter().map(|run| (run, 1_000_000)).collect();
         for line in source
             .lines()
             .filter(|l| l.trim().starts_with("; run limit "))
@@ -676,7 +682,23 @@ fn every_whole_v1a_sample_matches_evaluator() {
                 .split_once(": ")
                 .unwrap();
             let runs = sample_runs(&module, &format!("; run: {call}"));
-            execute_limit(&module, &runs, false, n.parse().unwrap());
+            let limit = n.parse().unwrap();
+            execute_limit(&module, &runs, false, limit);
+            cases.extend(runs.into_iter().map(|run| (run, limit)));
+        }
+        for (run, limit) in cases {
+            let baseline = eval::run(&module, run.0, &run.1, limit);
+            for n in 1..=baseline.admissions {
+                for later in [false, true] {
+                    execute_injected(
+                        &module,
+                        std::slice::from_ref(&run),
+                        false,
+                        limit,
+                        Some((n, later)),
+                    );
+                }
+            }
         }
     }
 }
@@ -812,4 +834,147 @@ fn direct_ssa_handles_block_order_and_repeated_address_snapshots() {
         ],
         false,
     );
+}
+
+#[test]
+fn nested_counted_sequences_clean_refused_prefixes_and_deep_chains() {
+    let module = text::parse(include_str!("support/counted-sequences.core")).unwrap();
+    execute(
+        &module,
+        &[(FuncId(0), vec![0]), (FuncId(0), vec![8])],
+        false,
+    );
+    // Every admission in a two-link construction, including the root.
+    for n in 1..=7 {
+        for later in [false, true] {
+            execute_injected(
+                &module,
+                &[(FuncId(0), vec![2])],
+                false,
+                1000,
+                Some((n, later)),
+            );
+        }
+    }
+    let n = 50_000;
+    execute_reports(
+        &module,
+        &[(FuncId(0), vec![n])],
+        false,
+        10_000_000,
+        None,
+        Some(&[eval::Report {
+            outcome: Outcome::Returned(vec![n]),
+            used: 0,
+            trace: vec![],
+            admissions: 1 + 3 * n as usize,
+        }]),
+    );
+}
+
+#[test]
+fn maps_clean_live_entries_in_order_and_continue_after_finalizer_failure() {
+    // The evaluator does not model Map entries. This independent C producer
+    // writes FORM's frozen layout, including poisoned removed entries.
+    let module = text::parse(
+        r#"core v1
+type t0 = resource "R" drop f2 { id: u64 }
+type t1 = own "Resources" { entries: map t0 t0 }
+type t2 = own "Leaf" { value: u64 }
+type t3 = own "CountedMap" { entries: map rc t2 arc t2 }
+sig g0 = (ptr) -> ()
+sig g1 = (ptr) -> ()
+inst n0 = test@0/maps/ordinary [] []
+inst n1 = test@0/maps/counted [] []
+inst n2 = test@0/maps/finalizer [] []
+fn f0 = n0 g0 {
+  addr a0 = v0 : t1
+b0(v0: ptr):
+  address a0
+  drop a0 t1
+  return
+}
+fn f1 = n1 g0 {
+b0(v0: ptr):
+  release v0 rc t3
+  return
+}
+fn f2 = n2 g1 {
+b0(v0: ptr):
+  raise unwrap
+}
+"#,
+    )
+    .unwrap();
+    let scratch = Scratch::new();
+    let layouts = hirsel_core_layout::compute(&module.types).unwrap();
+    let object = emit_object_for_test(
+        &module,
+        &layouts,
+        &Options {
+            target: "x86_64-unknown-linux-gnu",
+            optimize: false,
+        },
+    )
+    .unwrap();
+    fs::write(scratch.0.join("input.o"), object.bytes).unwrap();
+    let source = format!(
+        r#"
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+{header}
+extern HirselCoreContext *hirsel_core_test_context_new(uint64_t);
+extern void hirsel_core_test_inject(HirselCoreContext *,size_t,bool);
+extern uint64_t hirsel_core_test_available(const HirselCoreContext *);
+extern size_t hirsel_core_test_attempts(const HirselCoreContext *);
+extern uint8_t {ordinary}(void *, void *);
+extern uint8_t {counted}(void *, void *);
+static uint64_t trace[8]; static size_t traces;
+void hirsel_core_test_drop_trace(uint64_t id) {{ if(traces==8) abort(); trace[traces++]=id; }}
+static void *allocate(HirselCoreContext *ctx, size_t size, uint64_t charge) {{
+  void *p=hirsel_core_alloc(ctx,0,size,8,charge,false).pointer; if(!p) abort(); return p;
+}}
+static void *resource(HirselCoreContext *ctx, uint64_t id) {{
+  uint64_t *p=hirsel_core_resource_alloc(ctx,8,8,8,0).pointer; if(!p) abort(); *p=id; return p;
+}}
+static void *leaf(HirselCoreContext *ctx, bool atomic) {{
+  uint64_t *p=allocate(ctx,16,16); hirsel_core_counted_init(p,atomic); p[1]=7; return p;
+}}
+int main(void) {{
+  HirselCoreContext *ctx=hirsel_core_test_context_new(10000);
+  uint64_t *entries=allocate(ctx,4*32+8,128);
+  memset(entries,0xcc,4*32+8);
+  for(size_t i=0;i<3;i+=2) {{ entries[4*i+1]=1; entries[4*i+2]=(uintptr_t)resource(ctx,10*i+1); entries[4*i+3]=(uintptr_t)resource(ctx,10*i+2); }}
+  entries[5]=0;
+  uint64_t carrier[]={{(uintptr_t)entries,3,4}};
+  hirsel_core_test_inject(ctx,1,true);
+  size_t attempts=hirsel_core_test_attempts(ctx);
+  if({ordinary}(ctx,carrier)!=1 || traces!=4 || trace[0]!=1 || trace[1]!=2 || trace[2]!=21 || trace[3]!=22) return 1;
+  if(hirsel_core_test_attempts(ctx)!=attempts) return 2;
+  HirselCoreCauseCell *causes=hirsel_core_causes_take(ctx);
+  size_t n=0; for(const HirselCoreCauseCell *c=causes;c;c=hirsel_core_cause_next(c)) {{ if(hirsel_core_cause_value(c)->kind!=3) return 3; n++; }}
+  if(n!=4 || hirsel_core_test_available(ctx)!=10000-128) return 4;
+  hirsel_core_causes_drop(causes);
+  if(hirsel_core_test_available(ctx)!=10000) return 5;
+  hirsel_core_context_free(ctx);
+
+  ctx=hirsel_core_test_context_new(10000);
+  entries=allocate(ctx,4*32+8,128);
+  memset(entries,0xcc,4*32+8);
+  for(size_t i=0;i<3;i+=2) {{ entries[4*i+1]=1; entries[4*i+2]=(uintptr_t)leaf(ctx,false); entries[4*i+3]=(uintptr_t)leaf(ctx,true); }}
+  entries[5]=0;
+  uint64_t *root=allocate(ctx,32,32); hirsel_core_counted_init(root,false);
+  root[1]=(uintptr_t)entries; root[2]=3; root[3]=4;
+  hirsel_core_test_inject(ctx,1,true); attempts=hirsel_core_test_attempts(ctx);
+  if({counted}(ctx,root)!=0 || hirsel_core_test_available(ctx)!=10000 || hirsel_core_test_attempts(ctx)!=attempts) return 6;
+  hirsel_core_context_free(ctx);
+  return 0;
+}}
+"#,
+        header = include_str!("../../hirsel-core-rt/include/hirsel_core_rt.h"),
+        ordinary = symbol(&module.instances[0]),
+        counted = symbol(&module.instances[1])
+    );
+    assert!(link_run(&scratch, &source).is_empty());
 }

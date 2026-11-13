@@ -1,0 +1,81 @@
+; n links, each a counted node with a nested sequence of one predecessor.
+; All allocation refusals return the completed prefix after cleaning it.
+core v1
+type t0 = own "Node" { kids: seq seq rc t0 }
+sig g0 = (u64) -> (u64)
+inst n0 = test@0/counted_sequences/run [] []
+fn f0 = n0 g0 {
+  addr a0 = v5 byte v2 : ptr
+  addr a1 = v5 byte v3 : u64
+  addr a2 = v5 byte v4 : u64
+  addr a3 = v14 : ptr
+  addr a4 = v17 : ptr
+  addr a5 = v17 byte v2 : u64
+  addr a6 = v17 byte v3 : u64
+  addr a7 = v20 byte v2 : ptr
+  addr a8 = v20 byte v3 : u64
+  addr a9 = v20 byte v4 : u64
+b0(v0: u64):
+  v1: u64 = const 32
+  v2: u64 = const 8
+  v3: u64 = const 16
+  v4: u64 = const 24
+  v5: ptr, v6: u64 = alloc counted v1 align 8 charge v1
+  v7: ptr = const 0x0
+  v8: u64 = const 0
+  v9: u64 = const 1
+  v10: bool = ne v5, v7
+  branch v10, b1, b8
+b1:
+  address a0
+  address a1
+  address a2
+  store a0, v7
+  store a1, v8
+  store a2, v8
+  jump b2(v8, v5)
+b2(v11: u64, v12: ptr):
+  v13: bool = lt v11, v0
+  branch v13, b3, b7
+b3:
+  v14: ptr, v15: u64 = alloc own v2 align 8 charge v2
+  v16: bool = ne v14, v7
+  branch v16, b4, b7
+b4:
+  address a3
+  store a3, v12
+  v17: ptr, v18: u64 = alloc own v4 align 8 charge v4
+  v19: bool = ne v17, v7
+  branch v19, b5, b9
+b5:
+  address a4
+  address a5
+  address a6
+  store a4, v14
+  store a5, v9
+  store a6, v9
+  v20: ptr, v21: u64 = alloc counted v1 align 8 charge v1
+  v22: bool = ne v20, v7
+  branch v22, b6, b10
+b6:
+  address a7
+  address a8
+  address a9
+  store a7, v17
+  store a8, v9
+  store a9, v9
+  v23: u64 = wrapping_add v11, v9
+  jump b2(v23, v20)
+b7:
+  release v12 rc t0
+  return v11
+b8:
+  return v8
+b9:
+  free v14 charge v2
+  jump b7
+b10:
+  free v17 charge v4
+  free v14 charge v2
+  jump b7
+}

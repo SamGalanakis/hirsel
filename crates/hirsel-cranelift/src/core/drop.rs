@@ -10,6 +10,7 @@ use resume::plan_type;
 pub(super) struct Glues {
     pub drops: Vec<Option<cranelift_module::FuncId>>,
     pub resumes: Vec<Option<cranelift_module::FuncId>>,
+    pub buffers: Vec<(FieldTy, cranelift_module::FuncId)>,
 }
 const P: Ty = Ty::Ptr;
 const U: Ty = Ty::Scalar(Scalar::U64);
@@ -156,7 +157,52 @@ impl Glues {
                 );
             }
         }
-        Ok(Self { drops, resumes })
+        let mut buffers = Vec::new();
+        fn collect(t: &FieldTy, buffers: &mut Vec<FieldTy>) {
+            match t {
+                FieldTy::Seq(e) => {
+                    if !buffers.contains(t) {
+                        buffers.push(t.clone());
+                    }
+                    collect(e, buffers);
+                }
+                FieldTy::Map(k, v) => {
+                    if !buffers.contains(t) {
+                        buffers.push(t.clone());
+                    }
+                    collect(k, buffers);
+                    collect(v, buffers);
+                }
+                FieldTy::Array(e, _) => collect(e, buffers),
+                _ => {}
+            }
+        }
+        let mut types = Vec::new();
+        for (i, recipe) in layouts.iter().enumerate() {
+            if visited.contains(&i) {
+                if let Some(d) = &recipe.drop {
+                    for f in d.fields.iter().flatten() {
+                        collect(&f.ty, &mut types);
+                    }
+                }
+            }
+        }
+        // Inline types are already in the descendant closure.
+        for (i, t) in types.into_iter().enumerate() {
+            let function = object
+                .declare_function(
+                    &format!("hirsel.core.buffer.{i}"),
+                    Linkage::Local,
+                    &abi::Signature::c(&[P, P, P, P], &[B]).clif,
+                )
+                .map_err(error)?;
+            buffers.push((t, function));
+        }
+        Ok(Self {
+            drops,
+            resumes,
+            buffers,
+        })
     }
     pub fn emit(
         &self,
@@ -175,7 +221,46 @@ impl Glues {
                 self.emit_one(object, tables, (i, function, true), observer, scratch)?;
             }
         }
+        for (ty, function) in &self.buffers {
+            self.emit_buffer(object, tables, ty, *function, observer, scratch)?;
+        }
         Ok(())
+    }
+    fn emit_buffer(
+        &self,
+        object: &mut ObjectModule,
+        tables: &Tables<'_>,
+        ty: &FieldTy,
+        function: cranelift_module::FuncId,
+        observer: &impl profile::Observer,
+        scratch: &mut Compilation,
+    ) -> Result<()> {
+        let build = observer.enter("build_glue");
+        let context = &mut scratch.codegen;
+        object.clear_context(context);
+        context.func.signature = abi::Signature::c(&[P, P, P, P], &[B]).clif;
+        let mut b = FunctionBuilder::new(&mut context.func, &mut scratch.frontend);
+        let entry = b.create_block();
+        b.append_block_params_for_function_params(entry);
+        b.switch_to_block(entry);
+        let args = b.block_params(entry).to_vec();
+        let failed = b.ins().iconst(types::I8, 0);
+        let mut g = Glue {
+            b,
+            object,
+            tables,
+            glues: self,
+            ctx: args[0],
+            failed,
+            calls: calls::Calls::new(&tables.runtimes, tables.signatures, 0),
+        };
+        g.resume_buffer(ty, args[1], args[2], args[3])?;
+        let done = g.b.ins().iconst(types::I8, 1);
+        g.b.ins().return_(&[done]);
+        g.b.seal_all_blocks();
+        g.b.finalize(g.object.target_config());
+        drop(build);
+        observer.define(object, function, context).map_err(error)
     }
     fn emit_one(
         &self,
@@ -389,16 +474,17 @@ impl Glue<'_, '_, '_> {
                 let cap = self.load(at, 16);
                 self.array(p, e, len)?;
                 let logical = field_size(&self.tables.input.types, self.tables.layouts, e).2;
-                let bytes = self.b.ins().imul_imm_s(cap, logical as i64);
-                let charge = self.round8(bytes);
-                let done = self.b.create_block();
-                let free = self.b.create_block();
-                let present = self.b.ins().icmp_imm_s(IntCC::NotEqual, p, 0);
-                self.b.ins().brif(present, free, &[], done, &[]);
-                self.b.switch_to_block(free);
-                self.call("hirsel_core_free_value", &[P, U], &[], &[p, charge])?;
-                self.b.ins().jump(done, &[]);
-                self.b.switch_to_block(done);
+                self.free_buffer(p, cap, logical)?;
+            }
+            FieldTy::Map(k, v) => {
+                let p = self.load(at, 0);
+                let len = self.load(at, 8);
+                let cap = self.load(at, 16);
+                self.map(p, k, v, len)?;
+                let logical = field_size(&self.tables.input.types, self.tables.layouts, k).2
+                    + field_size(&self.tables.input.types, self.tables.layouts, v).2
+                    + 16;
+                self.free_buffer(p, cap, logical)?;
             }
             FieldTy::Handle(hirsel_core_layout::Handle::Causes) => {
                 let p = self.load(at, 0);
@@ -437,6 +523,61 @@ impl Glue<'_, '_, '_> {
             &[],
             &[self.ctx, p, atomic, n, callback],
         )?;
+        Ok(())
+    }
+    fn free_buffer(&mut self, p: Value, cap: Value, logical: u64) -> Result<()> {
+        let bytes = self.b.ins().imul_imm_s(cap, logical as i64);
+        let charge = self.round8(bytes);
+        let done = self.b.create_block();
+        let free = self.b.create_block();
+        let present = self.b.ins().icmp_imm_s(IntCC::NotEqual, p, 0);
+        self.b.ins().brif(present, free, &[], done, &[]);
+        self.b.switch_to_block(free);
+        self.call("hirsel_core_free_value", &[P, U], &[], &[p, charge])?;
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(done);
+        Ok(())
+    }
+    fn map(&mut self, base: Value, k: &FieldTy, v: &FieldTy, len: Value) -> Result<()> {
+        let entry =
+            hirsel_core_layout::map_entry(&self.tables.input.types, self.tables.layouts, k, v);
+        let head = self.b.create_block();
+        let body = self.b.create_block();
+        let live = self.b.create_block();
+        let next = self.b.create_block();
+        let done = self.b.create_block();
+        self.b.append_block_param(head, types::I64);
+        self.b.append_block_param(head, types::I8);
+        self.b.append_block_param(next, types::I8);
+        self.b.append_block_param(done, types::I8);
+        let zero = self.icon(0);
+        self.b.ins().jump(head, &[zero.into(), self.failed.into()]);
+        self.b.switch_to_block(head);
+        let i = self.b.block_params(head)[0];
+        self.failed = self.b.block_params(head)[1];
+        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, i, len);
+        self.b
+            .ins()
+            .brif(more, body, &[], done, &[self.failed.into()]);
+        self.b.switch_to_block(body);
+        let off = self.b.ins().imul_imm_s(i, entry.stride as i64);
+        let at = self.b.ins().iadd(base, off);
+        let state = self.load(at, 8);
+        self.b
+            .ins()
+            .brif(state, live, &[], next, &[self.failed.into()]);
+        self.b.switch_to_block(live);
+        let key = self.at(at, entry.key);
+        self.field(key, k)?;
+        let value = self.at(at, entry.value);
+        self.field(value, v)?;
+        self.b.ins().jump(next, &[self.failed.into()]);
+        self.b.switch_to_block(next);
+        self.failed = self.b.block_params(next)[0];
+        let i = self.b.ins().iadd_imm_s(i, 1);
+        self.b.ins().jump(head, &[i.into(), self.failed.into()]);
+        self.b.switch_to_block(done);
+        self.failed = self.b.block_params(done)[0];
         Ok(())
     }
     fn round8(&mut self, n: Value) -> Value {

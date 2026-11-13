@@ -5,13 +5,13 @@ use super::*;
 use cranelift_codegen::ir::{MemFlagsData, Value};
 use hirsel_core_layout::{FieldTy, Fixed, Layout, Recipe, Repr};
 
-#[derive(Clone)]
-enum At {
+#[derive(Clone, Copy)]
+enum At<'a> {
     Other,
     Declared(TypeId),
     Pointer(TypeId),
     Counted(TypeId),
-    Array(FieldTy, u64),
+    Array(&'a FieldTy, u64),
 }
 
 fn fixed(layouts: &[Recipe], id: TypeId) -> Result<&Fixed> {
@@ -22,19 +22,19 @@ fn fixed(layouts: &[Recipe], id: TypeId) -> Result<&Fixed> {
         )),
     }
 }
-fn held(input: &c::Module, id: TypeId) -> At {
+fn held<'a>(input: &c::Module, id: TypeId) -> At<'a> {
     if input.types[id.index()].repr == Repr::Resource {
         At::Pointer(id)
     } else {
         At::Declared(id)
     }
 }
-fn field_at(input: &c::Module, t: &FieldTy) -> At {
+fn field_at<'a>(input: &c::Module, t: &'a FieldTy) -> At<'a> {
     match t {
         FieldTy::Inline(t) => held(input, TypeId(t.0)),
         FieldTy::Box(t) => At::Pointer(TypeId(t.0)),
         FieldTy::Rc(t) | FieldTy::Arc(t) => At::Counted(TypeId(t.0)),
-        FieldTy::Array(e, n) => At::Array((**e).clone(), *n),
+        FieldTy::Array(e, n) => At::Array(e, *n),
         _ => At::Other,
     }
 }
@@ -51,8 +51,8 @@ pub(super) fn storage(input: &c::Module, layouts: &[Recipe], p: PlaceTy) -> Resu
         }
     })
 }
-impl Function<'_, '_, '_> {
-    fn base_at(&self, a: &AddressInfo) -> Result<At> {
+impl<'c> Function<'_, '_, 'c> {
+    fn base_at(&self, a: &AddressInfo) -> Result<At<'c>> {
         Ok(match a.base {
             AddressBase::Slot(s) => match self.body.slots[s.index()] {
                 PlaceTy::Declared(t) => held(self.input, t),
@@ -66,7 +66,7 @@ impl Function<'_, '_, '_> {
             _ => At::Other,
         })
     }
-    fn next_at(&self, at: At, step: Step, ty: PlaceTy) -> Result<At> {
+    fn next_at(&self, at: At<'c>, step: Step, ty: PlaceTy) -> Result<At<'c>> {
         Ok(match step {
             Step::Byte(_) => match ty {
                 PlaceTy::Declared(t) => At::Declared(t),
@@ -85,7 +85,7 @@ impl Function<'_, '_, '_> {
                 let At::Array(e, _) = at else {
                     unreachable!("array place")
                 };
-                field_at(self.input, &e)
+                field_at(self.input, e)
             }
             Step::Field(f) | Step::CaseField { field: f, .. } => {
                 let At::Declared(t) = at else {
@@ -102,7 +102,7 @@ impl Function<'_, '_, '_> {
             }
         })
     }
-    fn address_at(&self, id: AddressId) -> Result<At> {
+    fn address_at(&self, id: AddressId) -> Result<At<'c>> {
         let a = &self.body.addresses[id.index()];
         let mut at = self.base_at(a)?;
         for &step in a.steps.get(&self.body.pools.steps).unwrap() {
@@ -155,7 +155,7 @@ impl Function<'_, '_, '_> {
                     self.b.ins().iadd(ptr, offset)
                 }
                 Step::Element(v) => {
-                    let At::Array(ref e, n) = at else {
+                    let At::Array(e, n) = at else {
                         unreachable!("inline array")
                     };
                     let stride =

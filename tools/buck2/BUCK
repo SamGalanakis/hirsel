@@ -154,6 +154,7 @@ export_file(name = "workspace-metadata.json", mode = "reference", visibility = [
 # Source inputs of the landing race regression test.
 [export_file(name = tool, src = tool, mode = "reference", visibility = ["PUBLIC"]) for tool in [
     "event_logs.py",
+    "conformance.py",
     "generated.py",
     "merging.py",
     "clippy.py",

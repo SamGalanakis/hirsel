@@ -143,7 +143,7 @@ fn run(out: Stdout, parent: Dir, input: String, variant: String, take tx: Sender
     }
     io(std.file.write(directory, "source.txt", string.as_bytes(input)), "Io@setup")?
     if variant == "error-second" {
-        let existing: Bytes = m1.support.mem(b"existing")?
+        let existing: Bytes = b"existing"
         io(std.file.write(directory, "destination.txt", existing), "Io@setup")?
     }
     let mut holder: Option[std.file.Lock] = None

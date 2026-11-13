@@ -102,11 +102,22 @@ fn count(m: Map[String, u64], k: String) -> u64 { match map.get(m, k) { Some(v) 
 element out from the lowest index and cleaning the rest if the loop exits early. Nothing
 else is iterable; scalars are read with `string.next_scalar` (SEM-3). A range `a..b` is
 half-open and `a..=b` closed; both are plain, iterate upward, and stop at the type's
-maximum without overflow. The source is frozen for the loop
+maximum without overflow. Its endpoints are typed as a binary operator's operands, the left
+giving the right its type ([LANG-21](language.md#lang-21-operators)), and have one integer
+type; a range of any other type is refused here, at the range. `for` gives a range no
+expected type, so two unsuffixed endpoints have none and are refused by
+[LANG-11](language.md#lang-11-typing-is-local). The source is frozen for the loop
 ([OWN-10](ownership.md#own-10-freezes)), so iteration never observes a change.
 
 ```hirsel
 fn sum(xs: List[u64]) -> u64 { let mut t: u64 = 0; for x in xs { t += x }; t }
+fn three() -> u64 { let mut n: u64 = 0; for _ in 0u64..3 { n += 1 }; n }
+```
+```hirsel
+fn three() { for _ in 0..3 {} }                           // refused: LANG-11, 0 has no expected type
+```
+```hirsel
+fn letters() { for _ in 'a'..='c' {} }                    // refused: SEM-6, char is not an integer type
 ```
 ```hirsel
 fn grow(mut xs: List[u64]) -> Result[(), Capacity] {

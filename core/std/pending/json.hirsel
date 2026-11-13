@@ -1,0 +1,537 @@
+// Module `json` (std only: other packages write `std.json.`): a JSON document as one
+// compact blob, written once in a region and never moved (MEM-4, MEM-9, MEM-12). This is
+// the document library of the json workload's matched variant (NINE.md).
+//
+// PENDING: this file sits in core/std/pending because the parser does not yet accept
+// `@compact`, `Writer`, `emit` and `build_stream_in` (core-syntax-891). Once it does, the
+// file moves to core/std, where the std_seed gate reads it.
+//
+// Layout, W = u32 (MEM-9). Seven variants, so the tag is one byte.
+//   Null, False, True                 1
+//   Num(Text): the spelling as read   1 + 4 + len
+//   Str(Text): the decoded string     1 + 4 + its UTF-8 length
+//   Arr(IndexedSpan[Json])            1 + 4 count + 4 byte length + the elements + 4 per element
+//   Obj(IndexedSpan[Member])          as Arr; a Member is 4 + len(key) + its value
+// Every container is indexed, so `indexed.get(xs, i)` reaches element or member i after
+// one bounds test and one load. `for x in xs` and `for m in ms` walk them in input order;
+// `seq.len` counts them. Duplicate keys stay in the blob in input order; the first-position
+// and last-value rule is ObjectIndex, below. A number keeps its spelling: the document is
+// rendered as read, and no float is formatted.
+//
+// Sizing. `size` reads the input once, checks it, and returns the exact byte count of the
+// document; `parse` then admits exactly that many bytes once (build_stream_in) and writes
+// each value at its final offset. Nothing is staged and nothing moves. For n input bytes,
+// the result is at most floor((13n - 1) / 2): nested `[[..]]` at 13 bytes per `[]` pair
+// (goose-attack-898 ADVICE: every container indexed). Whitespace and escapes only lower
+// it. A document of more than 2^32 - 1 bytes is Error(Build(Overflow)).
+//
+// Reading text. Core reads a Text only through `text.len`, `==` and `<`. Nothing views its
+// bytes or a String of the same bytes, so a Str, a Num or a key cannot be printed yet.
+// REPORT.md FOR SPEC J1 asks for `text.as_string(t) -> View[String] in t`. That is why
+// ObjectIndex.get takes its key as a Text: Text is the one type it can be compared with.
+@compact(u32)
+pub stable type Json = Null | False | True | Num(Text) | Str(Text) | Arr(IndexedSpan[Json]) | Obj(IndexedSpan[Member])
+
+/// One object member: its decoded key, then its value.
+@compact(u32)
+pub stable type Member {
+    key: Text,
+    value: Json
+}
+
+/// Syntax(i): byte i is where the input stops being JSON: a trailing comma, a control
+/// byte in a string, a lone surrogate, a leading zero, trailing bytes, or the end of the
+/// input. NotFinite(i): the number at i rounds to an infinity (`1e999`). Build(e): the
+/// document did not fit (Capacity) or exceeds W's blob cap (Overflow).
+pub type Error = Syntax(u64) | NotFinite(u64) | Build(BuildError)
+
+/// Checks that s is one JSON value, which may have whitespace around it, and returns the
+/// exact number of bytes its document takes. `parse` admits exactly that many.
+/// Fails: Error(Syntax(i) | NotFinite(i)) at the first byte that is wrong.
+/// Alloc: nothing. Cost: O(len); each number once more through float.parse64.
+/// Ex: `let n = std.json.size(line)?`; `[12,"ab",[true,30],[]]` takes 73 bytes
+pub fn size(s: String) -> Result[u64, Error] {
+    let mut i: u64 = 0
+    let n = value_size(s, mut i)?
+    skip(s, mut i)
+    if i != string.byte_len(s) {
+        return Error(Syntax(i))
+    }
+    Ok(n)
+}
+
+/// Parses s into one document in r: `size(s)`, then a single admission of that many bytes,
+/// then each value written once at its final offset.
+/// Fails: as size; Error(Build(Capacity(c))) when r's limit refuses the admission,
+/// with nothing written; Error(Build(Overflow)) past 2^32 - 1 bytes.
+/// Alloc: one block of exactly size(s) bytes (rounded to 8) in r.
+/// Cost: two passes over s.
+/// Ex: `region r { let doc = std.json.parse(r, line)?; .. }`
+pub fn parse(r: Region, s: String) -> Result[Json in r, Error] {
+    let n = size(s)?
+    let mut i: u64 = 0
+    match build_stream_in(r, bytes n, fn(take w: Writer[Json, in r]) -> Result[Child[Json], BuildError] {
+        write_value(s, mut i, take w)
+    }) {
+        Ok(take b) => Ok(finish(take b)),
+        Error(e) => Error(Build(e)),
+    }
+}
+
+/// An object's members ordered for lookup: a permutation of member ordinals, sorted by key
+/// bytes and then by ordinal (goose-attack-898 APPENDIX C7). The members themselves never
+/// move. Opaque, so nothing outside this module replaces the members or adds ordinals that
+/// were never checked. Cleaned with its list; the document is untouched.
+pub opaque type ObjectIndex[in a] {
+    members: IndexedSpan[Member] in a,
+    ordinals: List[u32],
+}
+
+/// Indexes the members ms of one object.
+/// Fails: Error(Capacity) when the list of ordinals cannot be reserved; nothing else is
+/// admitted. Alloc: exactly 4 x seq.len(ms) bytes, in one list.
+/// Cost: O(m log m) key comparisons, each O(key length).
+/// Ex: `match doc { Obj(ms) => { let x = std.json.index(ms)?; .. }, _ => .. }`
+pub fn index[in a](ms: IndexedSpan[Member] in a) -> Result[ObjectIndex[in a], Capacity] {
+    let n = seq.len(ms)
+    let mut ordinals: List[u32] = list.with_capacity(n)?
+    for i in 0 .. n {
+        // The capacity is exactly n, so no push here admits anything.
+        match list.push(mut ordinals, int.narrow(i)) {
+            Ok(()) => {}
+            Error(_) => fail("json.index: a push past the reserved capacity"),
+        }
+    }
+    list.sort(mut ordinals, fn(x: u32, y: u32) -> Order {
+        by_key(ms, x, y)
+    })
+    Ok(ObjectIndex(members: ms, ordinals: take ordinals))
+}
+
+/// The value of key k: the value of k's last member (the last-value rule; RFC 8259 leaves
+/// duplicates open, and Python's json.loads keeps the last). None when no member has k.
+/// Cost: O(log m) key comparisons (an upper-bound search).
+/// Ex: `let k = text.copy_in(r, step)?; match std.json.get(x, k) { Some(v) => .., None => .. }`
+pub fn get[in a](x: ObjectIndex[in a], k: Text) -> Option[View[Json]] in x {
+    let p = above(x, k)
+    if p == 0 {
+        return None
+    }
+    let m = member(x.members, x.ordinals[p - 1])
+    if m.key == k {
+        Some(m.value)
+    } else {
+        None
+    }
+}
+
+/// Member i in render order. None when i is past the last member, or when an earlier
+/// member has the same key (that key is shown there). Otherwise Some((key, value)): member
+/// i's key, with the value of that key's last member. For i from 0 to seq.len(ms), this
+/// gives each key once, at its first position, with its last value.
+/// Cost: O(log m) key comparisons.
+/// Ex: `for i in 0 .. seq.len(ms) { if let Some((k, v)) = std.json.shown(x, i) { .. } }`
+pub fn shown[in a](x: ObjectIndex[in a], i: u64) -> Option[(View[Text], View[Json])] in x {
+    if i >= list.len(x.ordinals) {
+        return None
+    }
+    let k = member(x.members, int.narrow(i)).key
+    let first = below(x, k)
+    if int.widen(x.ordinals[first]) != i {
+        return None
+    }
+    let last = member(x.members, x.ordinals[above(x, k) - 1])
+    Some((k, last.value))
+}
+
+/// The first position in x.ordinals whose key is above k.
+fn above[in a](x: ObjectIndex[in a], k: Text) -> u64 {
+    let mut lo: u64 = 0
+    let mut hi = list.len(x.ordinals)
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2
+        if k < member(x.members, x.ordinals[mid]).key {
+            hi = mid
+        } else {
+            lo = mid + 1
+        }
+    }
+    lo
+}
+
+/// The first position in x.ordinals whose key is not below k.
+fn below[in a](x: ObjectIndex[in a], k: Text) -> u64 {
+    let mut lo: u64 = 0
+    let mut hi = list.len(x.ordinals)
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2
+        if member(x.members, x.ordinals[mid]).key < k {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
+    }
+    lo
+}
+
+/// Orders ordinals x and y by their members' keys, then by ordinal.
+fn by_key[in a](ms: IndexedSpan[Member] in a, x: u32, y: u32) -> Order {
+    let kx = member(ms, x).key
+    let ky = member(ms, y).key
+    if kx < ky {
+        Less
+    } else if ky < kx {
+        Greater
+    } else if x < y {
+        Less
+    } else if y < x {
+        Greater
+    } else {
+        Equal
+    }
+}
+
+/// Member o of ms. Every ordinal in an index came from 0 .. seq.len(ms).
+fn member[in a](ms: IndexedSpan[Member] in a, o: u32) -> View[Member] in ms {
+    match indexed.get(ms, int.widen(o)) {
+        Some(m) => m,
+        None => fail("json: an ordinal past the members"),
+    }
+}
+
+// Sizing pass. Each function starts at byte i, checks one item, leaves i just after it,
+// and returns the item's size in the document.
+fn value_size(s: String, mut i: u64) -> Result[u64, Error] {
+    skip(s, mut i)
+    let c = at(s, i)
+    if is(s, i, "null") || is(s, i, "true") {
+        i += 4
+        Ok(1)
+    } else if is(s, i, "false") {
+        i += 5
+        Ok(1)
+    } else if c == b'"' {
+        Ok(5 + string_size(s, mut i)?)
+    } else if c == b'-' || is_digit(c) {
+        Ok(5 + number_size(s, mut i)?)
+    } else if c == b'[' {
+        i += 1
+        let mut n: u64 = 9
+        if ends(s, mut i, b']') {
+            return Ok(n)
+        }
+        loop {
+            n += value_size(s, mut i)? + 4
+            if after_item(s, mut i, b']')? {
+                return Ok(n)
+            }
+        }
+    } else if c == b'{' {
+        i += 1
+        let mut n: u64 = 9
+        if ends(s, mut i, b'}') {
+            return Ok(n)
+        }
+        loop {
+            skip(s, mut i)
+            if at(s, i) != b'"' {
+                return Error(Syntax(i))
+            }
+            let k = string_size(s, mut i)?
+            skip(s, mut i)
+            if at(s, i) != b':' {
+                return Error(Syntax(i))
+            }
+            i += 1
+            n += 4 + k + value_size(s, mut i)? + 4
+            if after_item(s, mut i, b'}')? {
+                return Ok(n)
+            }
+        }
+    } else {
+        Error(Syntax(i))
+    }
+}
+
+/// At the opening '"': the decoded UTF-8 length of the string.
+fn string_size(s: String, mut i: u64) -> Result[u64, Error] {
+    i += 1
+    let mut n: u64 = 0
+    loop {
+        let c = at(s, i)
+        if c == b'"' {
+            i += 1
+            return Ok(n)
+        }
+        if c < 0x20 {
+            // A control byte, or the end of s, where `at` reads 0.
+            return Error(Syntax(i))
+        }
+        if c != b'\\' {
+            n += 1
+            i += 1
+        } else if at(s, i + 1) == b'u' {
+            n += char.utf8_len(unicode(s, mut i)?)
+        } else if is_escape(at(s, i + 1)) {
+            n += 1
+            i += 2
+        } else {
+            return Error(Syntax(i + 1))
+        }
+    }
+}
+
+/// At a number's first byte: the length of its spelling. float.parse64 checks the
+/// grammar, which is JSON's, and the range.
+fn number_size(s: String, mut i: u64) -> Result[u64, Error] {
+    let start = i
+    while is_number_byte(at(s, i)) {
+        i += 1
+    }
+    match float.parse64(string.slice(s, start, i)) {
+        Ok(_) => Ok(i - start),
+        Error(OutOfRange) => Error(NotFinite(start)),
+        Error(Invalid(p)) => Error(Syntax(start + p)),
+        Error(Empty) => Error(Syntax(start)),
+    }
+}
+
+/// Skips whitespace; if the byte at i is `end`, steps past it and returns true.
+fn ends(s: String, mut i: u64, end: u8) -> bool {
+    skip(s, mut i)
+    if at(s, i) == end {
+        i += 1
+        true
+    } else {
+        false
+    }
+}
+
+/// After an element: true when `end` closes the container. False after a ',', which
+/// another element must follow, so a trailing comma is Syntax at the `end` after it.
+fn after_item(s: String, mut i: u64, end: u8) -> Result[bool, Error] {
+    skip(s, mut i)
+    let c = at(s, i)
+    if c == end {
+        i += 1
+        return Ok(true)
+    }
+    if c != b',' {
+        return Error(Syntax(i))
+    }
+    i += 1
+    Ok(false)
+}
+
+/// At the '\' of `\uXXXX`: the scalar it denotes, reading a surrogate pair as one scalar.
+/// A lone surrogate is Syntax, because a Text holds valid UTF-8 only.
+fn unicode(s: String, mut i: u64) -> Result[char, Error] {
+    let start = i
+    let hi = hex4(s, i + 2)?
+    i += 6
+    let mut cp = hi
+    if hi >= 0xD800 && hi <= 0xDBFF {
+        if at(s, i) != b'\\' || at(s, i + 1) != b'u' {
+            return Error(Syntax(i))
+        }
+        let lo = hex4(s, i + 2)?
+        if lo < 0xDC00 || lo > 0xDFFF {
+            return Error(Syntax(i))
+        }
+        i += 6
+        cp = 0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00)
+    }
+    match char.from_u32(cp) {
+        Some(c) => Ok(c),
+        None => Error(Syntax(start)),
+    }
+}
+
+/// The four hex digits at p.
+fn hex4(s: String, p: u64) -> Result[u32, Error] {
+    let mut v: u32 = 0
+    for k in p .. p + 4 {
+        let x = at(s, k)
+        let d: u32 = if is_digit(x) {
+            int.widen(x - b'0')
+        } else if x >= b'a' && x <= b'f' {
+            int.widen(x - b'a' + 10)
+        } else if x >= b'A' && x <= b'F' {
+            int.widen(x - b'A' + 10)
+        } else {
+            return Error(Syntax(k))
+        }
+        v = v * 16 + d
+    }
+    Ok(v)
+}
+
+// Writing pass. It runs only on input that `size` has accepted, and s is frozen for the
+// call, so every check it would repeat has already passed. Where a branch cannot be
+// reached, it fails (FOR SPEC 7).
+fn write_value[in r](s: String, mut i: u64, take w: Writer[Json, in r]) -> Result[Child[Json], BuildError] {
+    skip(s, mut i)
+    let c = at(s, i)
+    if c == b'n' {
+        i += 4
+        emit(take w, Null)
+    } else if c == b't' {
+        i += 4
+        emit(take w, True)
+    } else if c == b'f' {
+        i += 5
+        emit(take w, False)
+    } else if c == b'"' {
+        emit(take w, Str(emit(fn(take t: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
+            write_string(s, mut i, take t)
+        })))
+    } else if c == b'[' {
+        i += 1
+        emit(take w, Arr(emit(fn(take xs: Writer[IndexedSpan[Json], in r]) -> Result[Child[IndexedSpan[Json]], BuildError] {
+            skip(s, mut i)
+            while at(s, i) != b']' {
+                writer.append(mut xs, fn(take x: Writer[Json, in r]) -> Result[Child[Json], BuildError] {
+                    write_value(s, mut i, take x)
+                })?
+                skip(s, mut i)
+                if at(s, i) == b',' {
+                    i += 1
+                }
+            }
+            i += 1
+            writer.close(take xs)
+        })))
+    } else if c == b'{' {
+        i += 1
+        emit(take w, Obj(emit(fn(take ms: Writer[IndexedSpan[Member], in r]) -> Result[Child[IndexedSpan[Member]], BuildError] {
+            skip(s, mut i)
+            while at(s, i) != b'}' {
+                writer.append(mut ms, fn(take m: Writer[Member, in r]) -> Result[Child[Member], BuildError] {
+                    skip(s, mut i)
+                    emit(take m, Member(key: emit(fn(take t: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
+                        write_string(s, mut i, take t)
+                    }), value: emit(fn(take v: Writer[Json, in r]) -> Result[Child[Json], BuildError] {
+                        skip(s, mut i)
+                        i += 1
+                        write_value(s, mut i, take v)
+                    }),))
+                })?
+                skip(s, mut i)
+                if at(s, i) == b',' {
+                    i += 1
+                    skip(s, mut i)
+                }
+            }
+            i += 1
+            writer.close(take ms)
+        })))
+    } else {
+        emit(take w, Num(emit(fn(take t: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
+            write_number(s, mut i, take t)
+        })))
+    }
+}
+
+/// At the opening '"': writes the decoded string, then closes it.
+fn write_string[in r](s: String, mut i: u64, take t: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
+    i += 1
+    while at(s, i) != b'"' {
+        if at(s, i) != b'\\' {
+            match string.next_scalar(s, i) {
+                Some((c, next)) => {
+                    writer.scalar(mut t, c)?
+                    i = next
+                }
+                None => fail("json: a string ends inside a checked document"),
+            }
+        } else if at(s, i + 1) == b'u' {
+            let c = match unicode(s, mut i) {
+                Ok(c) => c,
+                Error(_) => fail("json: an escape that size accepted is refused"),
+            }
+            writer.scalar(mut t, c)?
+        } else {
+            writer.scalar(mut t, unescape(at(s, i + 1)))?
+            i += 2
+        }
+    }
+    i += 1
+    writer.close(take t)
+}
+
+/// Writes the number's spelling, which is ASCII, then closes it.
+fn write_number[in r](s: String, mut i: u64, take t: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
+    while is_number_byte(at(s, i)) {
+        writer.scalar(mut t, ascii(at(s, i)))?
+        i += 1
+    }
+    writer.close(take t)
+}
+
+/// The character a one-letter escape denotes.
+fn unescape(e: u8) -> char {
+    if e == b'n' {
+        '\n'
+    } else if e == b't' {
+        '\t'
+    } else if e == b'r' {
+        '\r'
+    } else if e == b'b' {
+        '\u{8}'
+    } else if e == b'f' {
+        '\u{c}'
+    } else {
+        // '"', '\\' or '/', each itself.
+        ascii(e)
+    }
+}
+
+// Bytes.
+/// Byte i of s, or 0 past its end. 0 is no JSON token byte, so the end of s
+/// is refused where a token is expected.
+fn at(s: String, i: u64) -> u8 {
+    let b = string.as_bytes(s)
+    if i < list.len(b) {
+        b[i]
+    } else {
+        0
+    }
+}
+
+/// Whether w is in s at byte i.
+fn is(s: String, i: u64, w: String) -> bool {
+    let n = string.byte_len(w)
+    i + n <= string.byte_len(s) && string.slice(s, i, i + n) == w
+}
+
+/// Skips JSON whitespace: space, tab, line feed, carriage return.
+fn skip(s: String, mut i: u64) {
+    loop {
+        let c = at(s, i)
+        if c != b' ' && c != b'\t' && c != b'\n' && c != b'\r' {
+            return
+        }
+        i += 1
+    }
+}
+
+fn is_digit(x: u8) -> bool {
+    x >= b'0' && x <= b'9'
+}
+
+/// A byte that can appear in a number's spelling. float.parse64 checks where each one may go.
+fn is_number_byte(x: u8) -> bool {
+    is_digit(x) || x == b'-' || x == b'+' || x == b'.' || x == b'e' || x == b'E'
+}
+
+fn is_escape(e: u8) -> bool {
+    e == b'"' || e == b'\\' || e == b'/' || e == b'b' || e == b'f' || e == b'n' || e == b'r' || e == b't'
+}
+
+/// The char of an ASCII byte.
+fn ascii(x: u8) -> char {
+    match char.from_u32(int.widen(x)) {
+        Some(c) => c,
+        None => fail("json: an ASCII byte is a scalar"),
+    }
+}

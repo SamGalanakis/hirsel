@@ -978,3 +978,67 @@ int main(void) {{
     );
     assert!(link_run(&scratch, &source).is_empty());
 }
+
+#[test]
+fn cancellation_runtime_status_takes_cleanup_or_propagates() {
+    let module = text::parse(
+        r#"core v1
+sig g0 = () -> ()
+sig g1 = () -> (u64)
+inst n0 = test@0/cancel/cleanup [] []
+inst n1 = test@0/cancel/propagate [] []
+fn f0 = n0 g1 {
+b0:
+  call rt.check_cancel g0 () fail b1
+  v0: u64 = const 3
+  return v0
+b1:
+  v1: u64 = const 7
+  return v1
+}
+fn f1 = n1 g1 {
+b0:
+  call rt.check_cancel g0 ()
+  v0: u64 = const 9
+  return v0
+}
+"#,
+    )
+    .unwrap();
+    let scratch = Scratch::new();
+    let object = emit_object(
+        &module,
+        &Options {
+            target: "x86_64-unknown-linux-gnu",
+            optimize: false,
+        },
+    )
+    .unwrap();
+    fs::write(scratch.0.join("input.o"), object.bytes).unwrap();
+    // Script just the C row to exercise both outcomes deterministically. The
+    // real scheduler owns cancellation requests and has its own runtime tests.
+    let source = format!(
+        r#"
+#include <stdint.h>
+#include <stdlib.h>
+static uint8_t cancelled; static uint64_t calls;
+uint8_t hirsel_core_check_cancel(void *ctx, uint64_t site) {{
+  if(ctx!=(void*)16 || site!=0) abort(); calls++; return cancelled;
+}}
+struct R {{ uint64_t value; uint8_t status; }};
+extern struct R {cleanup}(void *);
+extern struct R {propagate}(void *);
+int main(void) {{
+  struct R r={cleanup}((void*)16); if(r.status || r.value!=3) return 1;
+  r={propagate}((void*)16); if(r.status || r.value!=9) return 2;
+  cancelled=1;
+  r={cleanup}((void*)16); if(r.status || r.value!=7) return 3;
+  r={propagate}((void*)16); if(r.status!=1 || calls!=4) return 4;
+  return 0;
+}}
+"#,
+        cleanup = symbol(&module.instances[0]),
+        propagate = symbol(&module.instances[1])
+    );
+    assert!(link_run(&scratch, &source).is_empty());
+}

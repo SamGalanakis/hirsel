@@ -442,6 +442,18 @@ impl Function<'_, '_, '_> {
                             let values = call.results.get(&self.body.pools.values).unwrap();
                             self.set(values[0], result);
                         }
+                        RtOp::CheckCancel => {
+                            // The running task is implicit in CoreIR. The C row
+                            // returns only the frozen trailing failure status.
+                            let site = self.b.ins().iconst(types::I64, 0);
+                            let status = self.c_call(
+                                "hirsel_core_check_cancel",
+                                &[Ty::Ptr, Ty::Scalar(Scalar::U64)],
+                                &[Ty::Scalar(Scalar::U8)],
+                                &[self.context, site],
+                            )?[0];
+                            self.call_failure(status, call.fail)?;
+                        }
                         _ => return Err(unsupported("task runtime call")),
                     }
                     return Ok(());

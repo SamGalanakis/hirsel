@@ -84,3 +84,31 @@ pub unsafe extern "C" fn hirsel_core_test_run(
         )
     }
 }
+
+/// Execute a fixture with an explicit event recorder on the cooperative root.
+/// # Safety
+/// All operands and provider callback state stay pinned through completion;
+/// callbacks neither suspend nor re-enter the runtime.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_test_run_events(
+    context: *mut hirsel_core_rt::Context,
+    body: hirsel_core_rt::tasks::Body,
+    input: *mut u8,
+    output: *mut u8,
+    input_bytes: usize,
+    output_bytes: usize,
+    provider: hirsel_core_rt::tasks::SchedulerProvider,
+) -> u8 {
+    // SAFETY: the caller supplies initialized carriers and a bounded recorder.
+    unsafe {
+        hirsel_core_rt::tasks::run_root(
+            context,
+            body,
+            input,
+            output,
+            input_bytes,
+            output_bytes,
+            provider,
+        )
+    }
+}

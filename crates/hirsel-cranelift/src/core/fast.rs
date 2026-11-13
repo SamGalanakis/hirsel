@@ -19,7 +19,7 @@ impl Function<'_, '_, '_> {
             .ins()
             .store(Flags::trusted(), value, base, offset as i32);
     }
-    fn current_limit(&mut self) -> Value {
+    pub fn current_limit(&mut self) -> Value {
         self.load_word(self.context, memory_layout::CONTEXT_CURRENT_LIMIT)
     }
     fn cold_block(&mut self) -> ir::Block {
@@ -27,7 +27,7 @@ impl Function<'_, '_, '_> {
         self.b.set_cold_block(block);
         block
     }
-    fn admission(&mut self, payer: Value, charge: Value) -> Result<(Value, Value)> {
+    pub fn admission(&mut self, payer: Value, charge: Value) -> Result<(Value, Value)> {
         let available = self.load_word(payer, memory_layout::LIMIT_AVAILABLE);
         let fits = self
             .b
@@ -90,11 +90,12 @@ impl Function<'_, '_, '_> {
         let fallback = self.b.ins().bor(overflow, zero_charge);
         let fallback = self.b.ins().bor(fallback, too_large);
         let eligible = self.b.create_block();
-        if alignment > 512 {
-            self.b.ins().jump(slow, &[]);
+        let fallback = if alignment > 512 {
+            self.b.ins().iconst(types::I8, 1)
         } else {
-            self.b.ins().brif(fallback, slow, &[], eligible, &[]);
-        }
+            fallback
+        };
+        self.b.ins().brif(fallback, slow, &[], eligible, &[]);
         self.b.switch_to_block(eligible);
         let like = match place {
             AllocPlace::Like(v) => Some(self.get(v)),
@@ -277,7 +278,11 @@ pub(super) fn share(
         // Cranelift atomics are SeqCst, stronger than the runtime's Relaxed CAS.
         let actual = b.ins().atomic_cas(Flags::trusted(), node, old, next);
         let same = b.ins().icmp(IntCC::Equal, actual, old);
-        b.ins().brif(same, done, &[], head, &[actual.into()]);
+        let observed = b.create_block();
+        b.ins().brif(same, observed, &[], head, &[actual.into()]);
+        b.switch_to_block(observed);
+        calls.c(object, b, "hirsel_core_arc_shared", &[P], &[], &[node])?;
+        b.ins().jump(done, &[]);
     } else {
         let old = b.ins().load(
             types::I64,
@@ -299,7 +304,15 @@ pub(super) fn share(
         b.ins().jump(done, &[]);
     }
     b.switch_to_block(overflow);
-    calls.c(object, b, "abort", &[], &[], &[])?;
+    let atomic = b.ins().iconst(types::I8, i64::from(atomic));
+    calls.c(
+        object,
+        b,
+        "hirsel_core_share",
+        &[P, B],
+        &[],
+        &[node, atomic],
+    )?;
     b.ins().trap(ir::TrapCode::unwrap_user(1));
     b.switch_to_block(done);
     Ok(())
@@ -317,9 +330,13 @@ pub(super) fn release(
     let one = b.ins().iconst(types::I64, 1);
     let last = if atomic {
         // SeqCst includes the required Release decrement and Acquire on last.
-        let old = b
-            .ins()
-            .atomic_rmw(Flags::trusted(), ir::AtomicRmwOp::Sub, node, one);
+        let old = b.ins().atomic_rmw(
+            types::I64,
+            Flags::trusted(),
+            ir::AtomicRmwOp::Sub,
+            node,
+            one,
+        );
         b.ins().icmp_imm_s(IntCC::Equal, old, 1)
     } else {
         let old = b.ins().load(
@@ -337,6 +354,9 @@ pub(super) fn release(
         );
         b.ins().icmp_imm_s(IntCC::Equal, next, 0)
     };
+    if atomic {
+        calls.c(object, b, "hirsel_core_arc_released", &[B], &[], &[last])?;
+    }
     let slow = b.create_block();
     let done = b.create_block();
     b.set_cold_block(slow);

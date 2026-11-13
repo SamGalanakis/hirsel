@@ -248,12 +248,7 @@ impl Payer {
     pub(crate) fn admit(self, bytes: Option<u64>) -> Result<(), Capacity> {
         let payer = self;
         #[cfg(any(test, feature = "testing"))]
-        let injected = {
-            let f = payer.forest();
-            f.attempts += 1;
-            f.fail
-                .is_some_and(|(n, later)| f.attempts == n || later && f.attempts >= n)
-        };
+        let injected = payer.injected();
         #[cfg(not(any(test, feature = "testing")))]
         let injected = false;
         // SAFETY: canonical live local record, accessed exclusively by its task.
@@ -269,6 +264,13 @@ impl Payer {
                 available: r.available,
             }),
         }
+    }
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) fn injected(self) -> bool {
+        let f = self.forest();
+        f.attempts += 1;
+        f.fail
+            .is_some_and(|(n, later)| f.attempts == n || later && f.attempts >= n)
     }
     pub(crate) fn pin_zero(self) {
         let f = self.forest();

@@ -545,17 +545,15 @@ impl Glue<'_, '_, '_> {
         Ok(())
     }
     fn release(&mut self, p: Value, t: TypeRef, atomic: bool) -> Result<()> {
-        let atomic = self.b.ins().iconst(types::I8, i64::from(atomic));
-        let n = self
-            .icon(charge::counted(self.tables.layouts[t.index()].logical_size.unwrap()).unwrap());
-        let callback = self.callback(t);
-        self.call(
-            "hirsel_core_release",
-            &[P, P, B, U, P],
-            &[],
-            &[self.ctx, p, atomic, n, callback],
-        )?;
-        Ok(())
+        let charge = charge::counted(self.tables.layouts[t.index()].logical_size.unwrap()).unwrap();
+        fast::release(
+            &mut self.b,
+            &mut self.calls,
+            self.object,
+            [self.ctx, p],
+            (charge, self.glues.resumes[t.index()].unwrap()),
+            atomic,
+        )
     }
     fn free_buffer(&mut self, p: Value, cap: Value, logical: u64) -> Result<()> {
         let bytes = self.b.ins().imul_imm_s(cap, logical as i64);

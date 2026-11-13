@@ -330,7 +330,7 @@ fn execute_reports(
     assert_eq!(actual, expected, "optimize={optimize}");
 }
 
-fn link_run(scratch: &Scratch, source: &str) -> Vec<u64> {
+fn link_program(scratch: &Scratch, source: &str) -> PathBuf {
     fs::write(scratch.0.join("caller.c"), source).unwrap();
     let archive = PathBuf::from(
         std::env::var_os("HIRSEL_CORE_RUNTIME_ARCHIVE")
@@ -344,10 +344,26 @@ fn link_run(scratch: &Scratch, source: &str) -> Vec<u64> {
             .join(archive)
     };
     let archive = fs::canonicalize(archive).expect("the declared core runtime archive exists");
-    let include = fs::canonicalize(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../hirsel-core-rt/include")).unwrap();
+    // Materialize the declared header data beside the embedded root header so
+    // nested includes work in both the worker sandbox and the host checkout.
+    for (name, text) in [
+        (
+            "hirsel_core_rt.h",
+            include_str!("../../hirsel-core-rt/include/hirsel_core_rt.h"),
+        ),
+        (
+            "hirsel_core_rt_host.h",
+            include_str!("../../hirsel-core-rt/include/hirsel_core_rt_host.h"),
+        ),
+        (
+            "hirsel_core_rt_tasks.h",
+            include_str!("../../hirsel-core-rt/include/hirsel_core_rt_tasks.h"),
+        ),
+    ] {
+        fs::write(scratch.0.join(name), text).unwrap();
+    }
     let link = Command::new("cc")
         .current_dir(&scratch.0)
-        .arg("-I").arg(include)
         .args(["caller.c", "input.o"])
         .arg(archive)
         .args([
@@ -367,7 +383,13 @@ fn link_run(scratch: &Scratch, source: &str) -> Vec<u64> {
         "{}",
         String::from_utf8_lossy(&link.stderr)
     );
-    let run = Command::new(scratch.0.join("run")).output().unwrap();
+    scratch.0.join("run")
+}
+
+fn link_run(scratch: &Scratch, source: &str) -> Vec<u64> {
+    let run = Command::new(link_program(scratch, source))
+        .output()
+        .unwrap();
     assert!(run.status.success(), "native execution: {:?}", run.status);
     let actual: Vec<_> = run
         .stdout
@@ -842,7 +864,9 @@ fn counted_variant_chain_uses_constant_stack_and_refunds_every_node() {
 fn every_compact_sequence_sample_matches_evaluator() {
     let source = include_str!("../../hirsel-core-ir/samples/sequences.core");
     let module = text::parse(source).unwrap();
-    execute(&module, &sample_runs(&module, source), false);
+    let ordinary = sample_runs(&module, source);
+    execute(&module, &ordinary, false);
+    let mut cases: Vec<_> = ordinary.into_iter().map(|run| (run, 1_000_000)).collect();
     let mut count = 0;
     for line in source
         .lines()
@@ -855,10 +879,26 @@ fn every_compact_sequence_sample_matches_evaluator() {
             .split_once(": ")
             .unwrap();
         let runs = sample_runs(&module, &format!("; run: {call}"));
-        execute_limit(&module, &runs, false, n.parse().unwrap());
+        let limit = n.parse().unwrap();
+        execute_limit(&module, &runs, false, limit);
         count += runs.len();
+        cases.extend(runs.into_iter().map(|run| (run, limit)));
     }
     assert_eq!(count, 7);
+    for (run, limit) in cases {
+        let baseline = eval::run(&module, run.0, &run.1, limit);
+        for n in 1..=baseline.admissions {
+            for later in [false, true] {
+                execute_injected(
+                    &module,
+                    std::slice::from_ref(&run),
+                    false,
+                    limit,
+                    Some((n, later)),
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -1156,5 +1196,146 @@ fn every_custody_sample_and_injected_admission_matches_evaluator() {
                 );
             }
         }
+    }
+}
+
+#[test]
+fn region_zero_charge_entry_is_not_reused_after_payer_retirement() {
+    let module = text::parse(include_str!("support/region-payer.core")).unwrap();
+    let run = [(FuncId(0), vec![])];
+    execute_limit(&module, &run, false, 1000);
+    for n in 1..=4 {
+        for later in [false, true] {
+            execute_injected(&module, &run, false, 1000, Some((n, later)));
+        }
+    }
+}
+
+#[test]
+fn empty_bound_preserves_room_and_every_injected_reservation() {
+    let module = text::parse(
+        r#"core v1
+sig g0 = (u64, u64) -> (u64, u64)
+inst n0 = test@0/bound/empty [] []
+fn f0 = n0 g0 {
+b0(v0: u64, v1: u64):
+  v2: u64 = const 0
+  v3: u64 = const 1
+  jump b1(v2)
+b1(v4: u64):
+  v5: bool = lt v4, v0
+  branch v5, b2, b4
+b2:
+  v6: bool, v7: u64 = limit_enter v1
+  branch v6, b3, b5
+b3:
+  limit_exit
+  v8: u64 = wrapping_add v4, v3
+  jump b1(v8)
+b4:
+  return v4, v2
+b5:
+  return v4, v7
+}
+"#,
+    )
+    .unwrap();
+    for bytes in [0, 8, 2000] {
+        let run = [(FuncId(0), vec![4, bytes])];
+        execute_limit(&module, &run, false, 1000);
+        let baseline = eval::run(&module, FuncId(0), &run[0].1, 1000);
+        for n in 1..=baseline.admissions {
+            for later in [false, true] {
+                execute_injected(&module, &run, false, 1000, Some((n, later)));
+            }
+        }
+    }
+}
+
+#[test]
+fn inlined_arc_updates_keep_the_provider_event_order() {
+    let module = text::parse(
+        r#"core v1
+type t0 = own "Payload" { value: u64 }
+sig g0 = (ptr) -> (bool)
+inst n0 = test@0/arc/events [] []
+fn f0 = n0 g0 {
+b0(v0: ptr):
+  share v0 arc
+  v1: bool = try_unwrap v0 arc
+  release v0 arc t0
+  v2: bool = try_unwrap v0 arc
+  return v2
+}
+"#,
+    )
+    .unwrap();
+    let scratch = Scratch::new();
+    let layouts = hirsel_core_layout::compute(&module.types).unwrap();
+    let object = emit_object_with_layouts(
+        &module,
+        &layouts,
+        &Options {
+            target: "x86_64-unknown-linux-gnu",
+            optimize: false,
+        },
+    )
+    .unwrap();
+    fs::write(scratch.0.join("input.o"), object.bytes).unwrap();
+    let source = format!(
+        r#"
+#include <stdint.h>
+#include <stdlib.h>
+#include "hirsel_core_rt.h"
+struct R {{ uint8_t value,status; }};
+extern struct R {function}(void*,void*);
+extern HirselCoreContext *hirsel_core_test_context_new(uint64_t);
+extern uint64_t hirsel_core_test_available(const HirselCoreContext*);
+extern uint8_t hirsel_core_test_run_events(HirselCoreContext*,uint8_t (*)(HirselCoreContext*,void*,void*),void*,void*,size_t,size_t,HirselCoreSchedulerProvider);
+static uint64_t kinds[4],values[4],count;
+static void event(void *state,HirselCoreEvent e) {{
+ if(e.kind>=11 && e.kind<=13) {{ if(count==4 || e.task!=0 || e.object!=0) abort(); kinds[count]=e.kind;values[count++]=e.value; }}
+}}
+static uint8_t body(HirselCoreContext *ctx,void *out,void *in) {{ *(struct R*)out={function}(ctx,*(void**)in);return 0; }}
+int main(void) {{
+ HirselCoreContext *ctx=hirsel_core_test_context_new(1000);
+ void *node=hirsel_core_alloc(ctx,0,16,8,16,false,HIRSEL_CORE_NATIVE_GRAPH).pointer;if(!node)return 1;
+ hirsel_core_counted_init(node,true);((uint64_t*)node)[1]=7;
+ HirselCoreSchedulerProvider provider={{0,event,0}};struct R out;
+ if(hirsel_core_test_run_events(ctx,body,&node,&out,sizeof node,sizeof out,provider) || out.status || !out.value)return 2;
+ if(count!=4 || kinds[0]!=11 || values[0]!=2 || kinds[1]!=13 || values[1]!=0 || kinds[2]!=12 || values[2]!=0 || kinds[3]!=13 || values[3]!=1)return 3;
+ hirsel_core_free_value(node,16);if(hirsel_core_test_available(ctx)!=1000)return 4;
+ hirsel_core_context_free(ctx);return 0;
+}}
+"#,
+        function = symbol(&module.instances[0])
+    );
+    assert!(link_run(&scratch, &source).is_empty());
+}
+
+#[test]
+fn inlined_count_increment_overflow_is_the_runtime_stop() {
+    for kind in ["rc", "arc"] {
+        let module = text::parse(&format!("core v1\nsig g0 = (ptr) -> ()\ninst n0 = test@0/count/overflow [] []\nfn f0 = n0 g0 {{\nb0(v0: ptr):\n  share v0 {kind}\n  return\n}}\n")).unwrap();
+        let scratch = Scratch::new();
+        let object = emit_object(
+            &module,
+            &Options {
+                target: "x86_64-unknown-linux-gnu",
+                optimize: false,
+            },
+        )
+        .unwrap();
+        fs::write(scratch.0.join("input.o"), object.bytes).unwrap();
+        let source = format!(
+            "#include <stdint.h>\nextern uint8_t {}(void*,void*);\nint main(void) {{ uint64_t node[2]={{UINT64_MAX,7}}; {}(0,node);return 0; }}\n",
+            symbol(&module.instances[0]),
+            symbol(&module.instances[0])
+        );
+        let run = Command::new(link_program(&scratch, &source))
+            .output()
+            .unwrap();
+        assert_eq!(run.status.code(), Some(102), "{kind}: {:?}", run.status);
+        assert!(String::from_utf8_lossy(&run.stderr).contains("CountOverflow"));
     }
 }

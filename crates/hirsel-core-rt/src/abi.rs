@@ -673,3 +673,14 @@ pub unsafe extern "C" fn hirsel_core_release_buffer_enqueue(
         crate::block::push_buffer(&mut *list, buffer, charge, recipe, payload);
     }
 }
+
+/// Count one emitted admission and consult the deterministic test injector.
+/// This does not debit storage; the emitted path performs the usual balance test.
+/// # Safety
+/// Context is the current task and its local payer is exclusively borrowed.
+#[cfg(feature = "testing")]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_test_inline_admission(context: *const Context) -> bool {
+    // SAFETY: the test object runs under the same task/payer discipline as alloc.
+    unsafe { (&*context).payer(None).injected() }
+}

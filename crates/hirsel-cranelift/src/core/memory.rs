@@ -33,14 +33,11 @@ impl Function<'_, '_, '_> {
                 let ctx = self.context;
                 let charge = self.get(charge);
                 let size = self.get(size);
+                let alignment = align;
                 let align = self.b.ins().iconst(types::I64, align as i64);
-                let overflow = self.b.ins().iconst(types::I8, 0);
-                let (name, payer) = match place {
-                    AllocPlace::Current => {
-                        ("hirsel_core_alloc", self.b.ins().iconst(types::I64, 0))
-                    }
-                    AllocPlace::Like(v) => ("hirsel_core_alloc", self.get(v)),
-                    AllocPlace::Region(v) => ("hirsel_core_region_alloc", self.get(v)),
+                let payer = match place {
+                    AllocPlace::Region(v) => self.get(v),
+                    _ => self.b.ins().iconst(types::I64, 0),
                 };
                 // Allocation = {pointer, Capacity{requested,available}}, a C
                 // struct of three words. On refusal only the pointer is null;
@@ -51,32 +48,21 @@ impl Function<'_, '_, '_> {
                         -(hirsel_core_layout::charge::CAUSE_CELL as i64) - grant as i64,
                     );
                     let grant = self.b.ins().iconst(types::I64, grant as i64);
-                    self.c_call(
+                    let resource = self.c_call(
                         "hirsel_core_resource_alloc",
                         &[p, u, u, u, u],
                         &[p, u, u],
                         &[ctx, size, align, storage, grant],
-                    )?
+                    )?;
+                    [resource[0], resource[1], resource[2]]
                 } else {
-                    if matches!(place, AllocPlace::Region(_)) {
-                        self.c_call(
-                            name,
-                            &[p, p, u, u, u, boolean],
-                            &[p, u, u],
-                            &[ctx, payer, size, align, charge, overflow],
-                        )?
-                    } else {
-                        let native = self
-                            .b
-                            .ins()
-                            .iconst(types::I8, i64::from(kind != AllocKind::Plain));
-                        self.c_call(
-                            name,
-                            &[p, p, u, u, u, boolean, Ty::Scalar(Scalar::U8)],
-                            &[p, u, u],
-                            &[ctx, payer, size, align, charge, overflow, native],
-                        )?
-                    }
+                    let values = match place {
+                        AllocPlace::Region(_) => {
+                            self.region_alloc(payer, size, alignment, charge)?
+                        }
+                        _ => self.own_alloc(kind, place, size, alignment, charge)?,
+                    };
+                    [values[0], self.b.ins().iconst(types::I64, 0), values[1]]
                 };
                 self.set(result, values[0]);
                 self.set(available, values[2]);
@@ -109,13 +95,13 @@ impl Function<'_, '_, '_> {
                     let ready = self.b.create_block();
                     self.b.ins().brif(refused, ready, &[], init, &[]);
                     self.b.switch_to_block(init);
-                    let atomic = self.b.ins().iconst(types::I8, 0);
-                    self.c_call(
-                        "hirsel_core_counted_init",
-                        &[p, boolean],
-                        &[],
-                        &[values[0], atomic],
-                    )?;
+                    let one = self.b.ins().iconst(types::I64, 1);
+                    self.b.ins().store(
+                        cranelift_codegen::ir::MemFlagsData::trusted(),
+                        one,
+                        values[0],
+                        memory_layout::NODE_COUNT as i32,
+                    );
                     self.b.ins().jump(ready, &[]);
                     self.b.switch_to_block(ready);
                 }
@@ -131,48 +117,49 @@ impl Function<'_, '_, '_> {
             }
             Inst::Share { node, kind } => {
                 let node = self.get(node);
-                let atomic = self
-                    .b
-                    .ins()
-                    .iconst(types::I8, i64::from(kind == Counted::Arc));
-                self.c_call("hirsel_core_share", &[p, boolean], &[], &[node, atomic])?;
+                fast::share(
+                    &mut self.b,
+                    &mut self.calls,
+                    self.object,
+                    node,
+                    kind == Counted::Arc,
+                )?;
             }
             Inst::TryUnwrap { result, node, kind } => {
                 let node = self.get(node);
-                let atomic = self
-                    .b
-                    .ins()
-                    .iconst(types::I8, i64::from(kind == Counted::Arc));
-                let value = self.c_call(
-                    "hirsel_core_try_unwrap",
-                    &[p, boolean],
-                    &[boolean],
-                    &[node, atomic],
-                )?[0];
+                let count = if kind == Counted::Arc {
+                    self.b.ins().atomic_load(
+                        types::I64,
+                        cranelift_codegen::ir::MemFlagsData::trusted(),
+                        node,
+                    )
+                } else {
+                    self.b.ins().load(
+                        types::I64,
+                        cranelift_codegen::ir::MemFlagsData::trusted(),
+                        node,
+                        memory_layout::NODE_COUNT as i32,
+                    )
+                };
+                let value = self.b.ins().icmp_imm_s(IntCC::Equal, count, 1);
+                if kind == Counted::Arc {
+                    self.c_call("hirsel_core_arc_unwrapped", &[boolean], &[], &[value])?;
+                }
                 self.set(result, value);
             }
             Inst::Release { node, kind, ty } => {
                 let node = self.get(node);
-                let atomic = self
-                    .b
-                    .ins()
-                    .iconst(types::I8, i64::from(kind == Counted::Arc));
-                let n = hirsel_core_layout::charge::counted(
+                let charge = hirsel_core_layout::charge::counted(
                     self.layouts[ty.index()].logical_size.unwrap(),
                 )
                 .unwrap();
-                let n = self.b.ins().iconst(types::I64, n as i64);
-                let f = self.calls.reference(
-                    self.object,
+                fast::release(
                     &mut self.b,
-                    self.glues.resumes[ty.index()].unwrap(),
-                );
-                let recipe = self.b.ins().func_addr(types::I64, f);
-                self.c_call(
-                    "hirsel_core_release",
-                    &[p, p, boolean, u, p],
-                    &[],
-                    &[self.context, node, atomic, n, recipe],
+                    &mut self.calls,
+                    self.object,
+                    [self.context, node],
+                    (charge, self.glues.resumes[ty.index()].unwrap()),
+                    kind == Counted::Arc,
                 )?;
             }
             Inst::Case { result, address } => {
@@ -218,6 +205,15 @@ impl Function<'_, '_, '_> {
             } => {
                 let ctx = self.context;
                 let bytes = self.get(bytes);
+                if self.empty_bound {
+                    let payer = self.current_limit();
+                    let (ok, available_value) = self.admission(payer, bytes)?;
+                    let zero = self.b.ins().iconst(types::I64, 0);
+                    let room = self.b.ins().select(ok, zero, available_value);
+                    self.set(admitted, ok);
+                    self.set(available, room);
+                    return Ok(());
+                }
                 let values = self.c_call(
                     "hirsel_core_limit_enter",
                     &[p, u],
@@ -229,6 +225,9 @@ impl Function<'_, '_, '_> {
                 self.set(available, values[2]);
             }
             Inst::LimitExit => {
+                if self.empty_bound {
+                    return Ok(());
+                }
                 self.c_call("hirsel_core_limit_exit", &[p], &[], &[self.context])?;
             }
             Inst::RegionOpen { result } => {

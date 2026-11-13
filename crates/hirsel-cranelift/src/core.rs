@@ -20,6 +20,7 @@ mod abi;
 mod calls;
 mod drop;
 mod failure;
+mod fast;
 mod function;
 mod memory;
 mod place;
@@ -129,8 +130,8 @@ pub(crate) fn isa(options: &Options<'_>) -> Result<cranelift_codegen::isa::Owned
         .map_err(|e| refuse(e.to_string()))
 }
 
-/// Emit CoreIR directly to an x86-64 System V object, using the form's C struct
-/// convention for multiple scalar results. CoreIR is a trusted compiler product;
+/// Emit scalar-only CoreIR directly to an x86-64 System V object. Modules with
+/// declared types use [`emit_object_with_layouts`] and producer layout recipes. CoreIR is a trusted compiler product;
 /// this entry does not invoke its well-formedness checker or the old pipeline.
 pub fn emit_object(input: &c::Module, options: &Options<'_>) -> Result<Object> {
     emit_object_with_layouts(input, &[], options)

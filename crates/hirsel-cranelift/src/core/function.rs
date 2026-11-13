@@ -30,6 +30,8 @@ pub(super) struct Function<'a, 'b, 'c> {
     pub propagation: Option<ir::Block>,
     pub cause_slot: Option<ir::StackSlot>,
     pub calls: calls::Calls<'c>,
+    pub testing: bool,
+    pub empty_bound: bool,
 }
 
 pub(super) fn emit(
@@ -128,6 +130,8 @@ pub(super) fn emit(
         raise_blocks: Vec::with_capacity(4),
         propagation: None,
         cause_slot: None,
+        testing: tables.trace_drops,
+        empty_bound: fast::empty_bound(body),
         calls: calls::Calls::new(
             &tables.runtimes,
             signatures,

@@ -53,3 +53,26 @@ pub use crate::tasks::{
     hirsel_core_cancel, hirsel_core_check_cancel, hirsel_core_join, hirsel_core_spawn,
     hirsel_core_task_drop,
 };
+
+/// Dispatch the provider event after an emitted Arc increment.
+/// # Safety
+/// Node is a live initialized Arc under the provider's operation order.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_arc_shared(node: *const u8) {
+    // SAFETY: caller just completed the increment on this live Arc.
+    let count = unsafe {
+        (&*node.cast::<std::sync::atomic::AtomicU64>()).load(std::sync::atomic::Ordering::Relaxed)
+    };
+    crate::tasks::event(crate::tasks::ARC_SHARE, 0, count);
+}
+/// Dispatch the provider event after an emitted Arc decrement. Admits nothing
+/// and has no failure status; last-release traversal has not begun yet.
+#[unsafe(no_mangle)]
+pub extern "C" fn hirsel_core_arc_released(last: bool) {
+    crate::tasks::event(crate::tasks::ARC_RELEASE, 0, u64::from(last));
+}
+/// Dispatch the provider event after an emitted Arc uniqueness test.
+#[unsafe(no_mangle)]
+pub extern "C" fn hirsel_core_arc_unwrapped(unique: bool) {
+    crate::tasks::event(crate::tasks::ARC_UNWRAP, 0, u64::from(unique));
+}

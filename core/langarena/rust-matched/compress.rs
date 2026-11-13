@@ -587,9 +587,22 @@ fn build_huffman_tree(frequencies: &[i32]) -> Option<Box<HuffmanNode>> {
         parent.left = Some(left);
         parent.right = Some(right);
 
-        let pos = nodes
-            .binary_search_by(|n| n.frequency.cmp(&parent.frequency))
-            .unwrap_or_else(|e| e);
+        let mut lo = 0usize;
+        let mut hi = nodes.len();
+        let mut found = false;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            match nodes[mid].frequency.cmp(&parent.frequency) {
+                std::cmp::Ordering::Less => lo = mid + 1,
+                std::cmp::Ordering::Equal => {
+                    found = true;
+                    hi = mid;
+                }
+                std::cmp::Ordering::Greater => hi = mid,
+            }
+        }
+        let _ = found;
+        let pos = lo;
         nodes.insert(pos, parent);
     }
 

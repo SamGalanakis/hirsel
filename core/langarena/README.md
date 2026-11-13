@@ -82,3 +82,25 @@ Its negative control uses `waiting-mismatch.json` and `--expect-mismatch 42`.
 That option requires the exact `checksum=42 expected=41 status=ERR` line and exit
 status 1; an arbitrary failure cannot pass the control. Ordinary runs continue to
 require the configured checksum, status OK and exit 0.
+
+## Measurement
+
+Runtime comparisons use each task's unchanged upstream `run` configuration on
+Cranelift dev versus Rust opt-level 0 and LLVM release versus Rust opt-level 3.
+Report upstream and independently reviewed matched twins separately, with one
+sample per side, instructions and peak RSS, following `core/MEASURE.md`.
+A missing counter, wrong checksum, Capacity or incomplete run produces a blocked
+row and no ratio. Ratios above 2 include a period-50003 instruction profile.
+
+Matched build and check comparisons run per module against its matching Rust
+root. Report fresh, unchanged reuse and one-body-edit counters, total instructions
+and instructions per source line, with the source sets and cache behavior visible.
+Several tasks in one module share that module's build/check row.
+
+There is no per-task idiomatic build ratio: unchanged upstream `main.rs` builds
+the whole suite. Each task records `idiomatic build: whole-suite only`. After all
+50 Hirsel tasks are on main, the numeric lane runs one whole-suite build comparison:
+all Hirsel modules in one build against the unchanged upstream Rust tree and its
+locked, vendored dependencies. Report totals and instructions per source line,
+stating dependency crate lines separately so the denominator is visible. This
+whole-suite comparison does not replace the per-task runtime comparisons.

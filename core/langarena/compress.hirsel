@@ -236,8 +236,138 @@ fn arith_decode(encoded:Arith)->Result[Bytes,helper.Error] {
     Ok(take output)
 }
 
+fn lzw_decode(encoded:Bytes)->Result[Bytes,helper.Error] {
+    let n=list.len(encoded)
+    if n==0 {return Ok(list.new())}
+    if n%2!=0 {return Error(Config)}
+    let mut dict:List[Bytes]=helper.mem(list.with_capacity(4096))?
+    for i in 0u32 .. 256u32 {let mut key:Bytes=list.new();push(mut key,int.narrow(i))?;push(mut dict,take key)?}
+    let mut output:Bytes=helper.mem(list.with_capacity(n*2))?
+    let first:u64=int.widen(encoded[0])
+    let second:u64=int.widen(encoded[1])
+    let mut old=(first<<8u64)|second
+    helper.mem(list.append(mut output,dict[old]))?
+    let mut i:u64=2
+    while i<n {
+        let hi:u64=int.widen(encoded[i])
+        let lo:u64=int.widen(encoded[i+1])
+        let code=(hi<<8u64)|lo
+        let copied:Result[Bytes,Capacity]=clone(dict[old])
+        let mut entry=helper.mem(take copied)?
+        if code<list.len(dict) {
+            push(mut entry,dict[code][0])?
+            helper.mem(list.append(mut output,dict[code]))?
+        } else if code==list.len(dict) {
+            let byte=entry[0]
+            push(mut entry,byte)?
+            helper.mem(list.append(mut output,entry))?
+        } else {return Ok(list.new())}
+        push(mut dict,take entry)?
+        old=code
+        i+=2
+    }
+    Ok(take output)
+}
+type Huff { frequency:i32, byte:u8, leaf:bool, left:Option[Box[Huff]], right:Option[Box[Huff]] }
+type Codes { lengths:List[i32], codes:List[i32] }
+type HuffEncoded { data:Bytes, bits:i32, frequencies:List[i32] }
+fn node(frequency:i32,byte:u8,leaf:bool,take left:Option[Box[Huff]],take right:Option[Box[Huff]])->Result[Box[Huff],helper.Error] {
+    match box.new(Huff(frequency:frequency,byte:byte,leaf:leaf,left:take left,right:take right)) {
+        Ok(take n)=>Ok(take n),Error((c,_))=>Error(Capacity(c)),
+    }
+}
+fn huff_tree(frequencies:List[i32])->Result[Option[Box[Huff]],helper.Error] {
+    let mut nodes:List[Box[Huff]]=list.new()
+    for i in 0u64 .. 256u64 {if frequencies[i]>0 {push(mut nodes,node(frequencies[i],int.narrow(i),true,None,None)?)?}}
+    helper.mem(list.sort_stable(mut nodes,fn(a:Box[Huff],b:Box[Huff])->Order {std.order.compare(a.frequency,b.frequency)}))?
+    if list.len(nodes)==1 {
+        let child=list.remove(mut nodes,0)
+        let frequency=child.frequency
+        let right=node(0,0,true,None,None)?
+        return Ok(Some(node(frequency,0,false,Some(take child),Some(take right))?))
+    }
+    while list.len(nodes)>1 {
+        let left=list.remove(mut nodes,0)
+        let right=list.remove(mut nodes,0)
+        let frequency=left.frequency+right.frequency
+        let parent=node(frequency,0,false,Some(take left),Some(take right))?
+        let pos=match list.binary_search_by(nodes,fn(n:Box[Huff])->Order {std.order.compare(n.frequency,frequency)}) {Ok(i)=>i,Error(i)=>i}
+        match list.insert(mut nodes,pos,take parent) {Ok(())=>{},Error((c,_))=>return Error(Capacity(c))}
+    }
+    Ok(list.pop(mut nodes))
+}
+fn huff_codes(n:Box[Huff],code:i32,length:i32,mut codes:Codes) {
+    if n.leaf {
+        if length>0 || n.byte!=0 {let index:u64=int.widen(n.byte);codes.lengths[index]=length;codes.codes[index]=code}
+    } else {
+        if let Some(left)=view n.left {huff_codes(left,code<<1i32,length+1,mut codes)}
+        if let Some(right)=view n.right {huff_codes(right,(code<<1i32)|1i32,length+1,mut codes)}
+    }
+}
+fn huff_encode(input:Bytes)->Result[HuffEncoded,helper.Error] {
+    let mut frequencies:List[i32]=list.new()
+    helper.mem(list.fill(mut frequencies,256,0i32))?
+    for byte in input {frequencies[int.widen(byte)]+=1}
+    let root=huff_tree(frequencies)?
+    let mut lengths:List[i32]=list.new()
+    let mut values:List[i32]=list.new()
+    helper.mem(list.fill(mut lengths,256,0i32))?
+    helper.mem(list.fill(mut values,256,0i32))?
+    let mut codes=Codes(lengths:take lengths,codes:take values)
+    if let Some(n)=view root {huff_codes(n,0,0,mut codes)}
+    let mut out:Bytes=helper.mem(list.with_capacity(list.len(input)*2))?
+    let mut current:u8=0
+    let mut pos:u8=0
+    let mut bits:i32=0
+    for byte in input {
+        let index:u64=int.widen(byte)
+        let code=codes.codes[index]
+        let mut remaining=codes.lengths[index]
+        while remaining>0 {
+            remaining-=1
+            if (code&(1i32<<remaining))!=0 {current|=1u8<<(7u8-pos)}
+            pos+=1
+            bits+=1
+            if pos==8 {push(mut out,current)?;current=0;pos=0}
+        }
+    }
+    if pos>0 {push(mut out,current)?}
+    Ok(HuffEncoded(data:take out,bits:bits,frequencies:take frequencies))
+}
+fn huff_read(encoded:HuffEncoded,root:Box[Huff])->Result[Bytes,helper.Error] {
+    let mut output:Bytes=list.new()
+    helper.mem(list.fill(mut output,int.narrow(encoded.bits),0u8))?
+    let mut size:u64=0
+    let mut current=view root
+    let mut processed:i32=0
+    let mut index:u64=0
+    while processed<encoded.bits && index<list.len(encoded.data) {
+        let byte=encoded.data[index]
+        index+=1
+        let mut pos:u8=8
+        while pos>0 {
+            if processed>=encoded.bits {break}
+            pos-=1
+            let bit=((byte>>pos)&1u8)==1
+            processed+=1
+            current=if bit {match view current.right {Some(n)=>n,None=>return Error(Config)}}
+                else {match view current.left {Some(n)=>n,None=>return Error(Config)}}
+            if current.leaf {
+                if current.byte!=0 {output[size]=current.byte;size+=1}
+                current=view root
+            }
+        }
+    }
+    list.truncate(mut output,size)
+    Ok(take output)
+}
+fn huff_decode(encoded:HuffEncoded)->Result[Bytes,helper.Error] {
+    let tree=huff_tree(encoded.frequencies)?
+    if let Some(root)=view tree {huff_read(encoded,root)} else {Ok(list.new())}
+}
+
 pub fn dispatch(config:String,name:String,warmup:u64,iterations:u64)->Result[u32,helper.Error] {
-    if name!="Compress::BWTEncode" && name!="Compress::BWTDecode" && name!="Compress::LZWEncode" && name!="Compress::LZWDecode" && name!="Compress::ArithEncode" && name!="Compress::ArithDecode" {return Error(UnknownTask)}
+    if name!="Compress::BWTEncode" && name!="Compress::BWTDecode" && name!="Compress::LZWEncode" && name!="Compress::LZWDecode" && name!="Compress::ArithEncode" && name!="Compress::ArithDecode" && name!="Compress::HuffEncode" && name!="Compress::HuffDecode" {return Error(UnknownTask)}
     let size=helper.config_i64(config,name,"size")?
     if size<0 {return Error(Config)}
     let input=test_data(int.narrow(size))?
@@ -247,18 +377,22 @@ pub fn dispatch(config:String,name:String,warmup:u64,iterations:u64)->Result[u32
     if name=="Compress::LZWDecode" {encoded=lzw_encode(input)?}
     let mut arith=Arith(data:list.new(),frequencies:list.new())
     if name=="Compress::ArithDecode" {arith=arith_encode(input)?}
+    let mut huff=HuffEncoded(data:list.new(),bits:0,frequencies:list.new())
+    if name=="Compress::HuffDecode" {huff=huff_encode(input)?}
     let mut decoded:Bytes=list.new()
     let mut checksum:u32=0
     for _ in 0 .. warmup+iterations {
         let n:u64=if name=="Compress::BWTEncode" {bwt=bwt_encode(input)?;list.len(bwt.transformed)}
         else if name=="Compress::BWTDecode" {decoded=bwt_decode(bwt)?;list.len(decoded)}
         else if name=="Compress::LZWEncode" {encoded=lzw_encode(input)?;list.len(encoded)}
-        else if name=="Compress::LZWDecode" {return Error(Config)} // blocked: core clone, owner895
+        else if name=="Compress::LZWDecode" {decoded=lzw_decode(encoded)?;list.len(decoded)}
         else if name=="Compress::ArithEncode" {arith=arith_encode(input)?;list.len(arith.data)}
-        else {decoded=arith_decode(arith)?;list.len(decoded)}
+        else if name=="Compress::ArithDecode" {decoded=arith_decode(arith)?;list.len(decoded)}
+        else if name=="Compress::HuffEncode" {huff=huff_encode(input)?;list.len(huff.data)}
+        else {decoded=huff_decode(huff)?;list.len(decoded)}
         checksum=int.wrapping_add(checksum,int.narrow(n))
     }
-    if (name=="Compress::BWTDecode" || name=="Compress::LZWDecode" || name=="Compress::ArithDecode") && decoded==input {checksum=int.wrapping_add(checksum,100000u32)}
+    if (name=="Compress::BWTDecode" || name=="Compress::LZWDecode" || name=="Compress::ArithDecode" || name=="Compress::HuffDecode") && decoded==input {checksum=int.wrapping_add(checksum,100000u32)}
     Ok(checksum)
 }
 pub fn main(out:Stdout,d:Dir,argv:Args)->Result[(),Exit] waits {

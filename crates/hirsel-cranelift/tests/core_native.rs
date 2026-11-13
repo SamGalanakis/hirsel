@@ -1,6 +1,8 @@
 //! Execute objects through a separately compiled C caller. This catches both
 //! scalar semantics and the register packing a same-backend caller could mask.
-use super::*;
+use hirsel_core_ir::{self as c, *};
+use hirsel_cranelift::core::*;
+hirsel_guard::install!();
 use hirsel_core_ir::eval::{self, Outcome};
 use std::{
     fmt::Write as _,
@@ -45,9 +47,14 @@ fn ctype(t: Ty) -> &'static str {
     }
 }
 fn execute(module: &c::Module, runs: &[(FuncId, Vec<u64>)], optimize: bool) {
+    execute_limit(module, runs, optimize, 1_000_000);
+}
+fn execute_limit(module: &c::Module, runs: &[(FuncId, Vec<u64>)], optimize: bool, limit: u64) {
     let scratch = Scratch::new();
-    let artifact = emit_object(
+    let layouts = hirsel_core_layout::compute(&module.types).unwrap();
+    let artifact = emit_object_with_layouts(
         module,
+        &layouts,
         &Options {
             target: "x86_64-unknown-linux-gnu",
             optimize,
@@ -56,6 +63,10 @@ fn execute(module: &c::Module, runs: &[(FuncId, Vec<u64>)], optimize: bool) {
     .unwrap();
     fs::write(scratch.0.join("input.o"), artifact.bytes).unwrap();
     let mut source = String::from("#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\n");
+    source.push_str(include_str!(
+        "../../hirsel-core-rt/include/hirsel_core_rt.h"
+    ));
+    source.push('\n');
     for (i, s) in module.signatures.iter().enumerate() {
         if s.results.len() > 1 {
             write!(source, "struct r{i} {{ ").unwrap();
@@ -78,6 +89,9 @@ fn execute(module: &c::Module, runs: &[(FuncId, Vec<u64>)], optimize: bool) {
             symbol(&module.instances[f.instance.index()])
         )
         .unwrap();
+        if s.dest.is_some() {
+            source.push_str(", void*");
+        }
         for p in &s.params {
             let Param::Value(t) = p else {
                 panic!("scalar test")
@@ -91,12 +105,18 @@ fn execute(module: &c::Module, runs: &[(FuncId, Vec<u64>)], optimize: bool) {
     for (i, (f, args)) in runs.iter().enumerate() {
         let function = &module.functions[f.index()];
         let s = &module.signatures[function.signature.index()];
-        let report = eval::run(module, *f, args, u64::MAX);
+        let report = eval::run(module, *f, args, limit);
         let Outcome::Returned(values) = report.outcome else {
             panic!("infallible test failed")
         };
         expected.extend(values);
+        expected.push(report.used);
         source.push_str("{\n");
+        writeln!(
+            source,
+            "HirselCoreContext *ctx = hirsel_core_context_new(UINT64_C({limit}));"
+        )
+        .unwrap();
         for (j, (p, arg)) in s.params.iter().zip(args).enumerate() {
             let Param::Value(t) = p else {
                 panic!("scalar test")
@@ -120,7 +140,7 @@ fn execute(module: &c::Module, runs: &[(FuncId, Vec<u64>)], optimize: bool) {
         };
         write!(
             source,
-            "{result}{}(0",
+            "{result}{}(ctx",
             symbol(&module.instances[function.instance.index()])
         )
         .unwrap();
@@ -142,7 +162,10 @@ fn execute(module: &c::Module, runs: &[(FuncId, Vec<u64>)], optimize: bool) {
                 writeln!(
                     source,
                     "out{i}_{j} = (uint64_t)({expr}) & UINT64_C({});",
-                    match ty(*t).bits() {
+                    match match t {
+                        Ty::Ptr => 64,
+                        Ty::Scalar(s) => s.size() as u32 * 8,
+                    } {
                         64 => u64::MAX,
                         n => (1u64 << n) - 1,
                     }
@@ -151,13 +174,37 @@ fn execute(module: &c::Module, runs: &[(FuncId, Vec<u64>)], optimize: bool) {
             }
             writeln!(source, "fwrite(&out{i}_{j}, 8, 1, stdout);").unwrap();
         }
+        writeln!(source,"HirselCoreAllocation probe = hirsel_core_limit_enter(ctx, UINT64_MAX); uint64_t used = UINT64_C({limit}) - probe.capacity.available; fwrite(&used,8,1,stdout); hirsel_core_context_free(ctx);").unwrap();
         source.push_str("}\n");
     }
     source.push_str("return 0; }\n");
     fs::write(scratch.0.join("caller.c"), source).unwrap();
+    let archive = PathBuf::from(
+        std::env::var_os("HIRSEL_CORE_RUNTIME_ARCHIVE")
+            .expect("the core runtime archive is explicit test data"),
+    );
+    let archive = if archive.is_absolute() {
+        archive
+    } else {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(archive)
+    };
+    let archive = fs::canonicalize(archive).expect("the declared core runtime archive exists");
     let link = Command::new("cc")
         .current_dir(&scratch.0)
-        .args(["caller.c", "input.o", "-lm", "-o", "run"])
+        .args(["caller.c", "input.o"])
+        .arg(archive)
+        .args([
+            "-lm",
+            "-ldl",
+            "-lpthread",
+            "-lrt",
+            "-lutil",
+            "-no-pie",
+            "-o",
+            "run",
+        ])
         .output()
         .unwrap();
     assert!(
@@ -177,7 +224,7 @@ fn execute(module: &c::Module, runs: &[(FuncId, Vec<u64>)], optimize: bool) {
 
 #[test]
 fn compare_convert_sample_matches_evaluator_through_c_abi() {
-    let text = include_str!("../../../hirsel-core-ir/samples/compare-convert.core");
+    let text = include_str!("../../hirsel-core-ir/samples/compare-convert.core");
     let module = text::parse(text).unwrap();
     let runs = sample_runs(&module, text);
     assert_eq!(runs.len(), 22);
@@ -212,7 +259,7 @@ fn sample_runs(m: &c::Module, text: &str) -> Vec<(FuncId, Vec<u64>)> {
 
 #[test]
 fn runtime_independent_arithmetic_sample_functions_match_evaluator() {
-    let text = include_str!("../../../hirsel-core-ir/samples/arith.core");
+    let text = include_str!("../../hirsel-core-ir/samples/arith.core");
     let mut m = text::parse(text).unwrap();
     let runs: Vec<_> = sample_runs(&m, text)
         .into_iter()
@@ -359,4 +406,261 @@ fn integer_modes_and_float_conversion_boundaries_match_evaluator() {
     let m = text::parse(&declarations).unwrap();
     wf::module(&m).unwrap();
     execute(&m, &runs, false);
+}
+
+#[test]
+fn memory_growth_region_and_capacity_refusal_match_evaluator() {
+    let source = r#"core v1
+sig g0 = (u64) -> (u64, u64)
+sig g1 = () -> (bool, u64)
+inst n0 = test@0/memory/growth [] []
+inst n1 = test@0/memory/region [] []
+inst n2 = test@0/memory/refusal [] []
+fn f0 = n0 g0 {
+  addr a0 = v2 : u64
+  addr a1 = v7 : u64
+b0(v0: u64):
+  v1: u64 = const 8
+  v2: ptr, v3: u64 = alloc own 8 align 8 charge v1
+  address a0
+  store a0, v0
+  v4: u64 = const 16
+  v5: bool, v6: u64 = limit_enter v4
+  v7: ptr, v8: u64 = alloc own 16 align 8 charge v4 like v2
+  address a1
+  copy a1, a0, v1
+  free v2 charge v1
+  limit_exit
+  v9: u64 = read a1
+  free v7 charge v4
+  v10: u64 = const 101
+  v11: bool, v12: u64 = limit_enter v10
+  return v9, v12
+}
+fn f1 = n1 g0 {
+  addr a0 = v3 : u64
+b0(v0: u64):
+  v1: ptr = region_open
+  v2: u64 = const 8
+  v3: ptr, v4: u64 = alloc own 8 align 8 charge v2 in v1
+  address a0
+  store a0, v0
+  v5: u64 = const 128
+  v6: bool, v7: u64 = limit_enter v5
+  v8: u64 = read a0
+  region_close v1
+  return v8, v7
+}
+fn f2 = n2 g1 {
+b0:
+  v0: u64 = const 200
+  v1: ptr, v2: u64 = alloc own 8 align 8 charge v0
+  v3: ptr = const 0x0
+  v4: bool = ne v1, v3
+  return v4, v2
+}
+"#;
+    let module = text::parse(source).unwrap();
+    wf::module(&module).unwrap();
+    execute_limit(
+        &module,
+        &[
+            (FuncId(0), vec![42]),
+            (FuncId(1), vec![91]),
+            (FuncId(2), vec![]),
+        ],
+        false,
+        100,
+    );
+}
+
+#[test]
+fn every_whole_v0_sample_matches_evaluator() {
+    let samples = [
+        include_str!("../../hirsel-core-ir/samples/arith.core"),
+        include_str!("../../hirsel-core-ir/samples/compare-convert.core"),
+        include_str!("../../hirsel-core-ir/samples/control.core"),
+        include_str!("../../hirsel-core-ir/samples/slots.core"),
+        include_str!("../../hirsel-core-ir/samples/calls.core"),
+    ];
+    for source in samples {
+        let module = text::parse(source).unwrap();
+        execute(&module, &sample_runs(&module, source), false);
+    }
+}
+
+#[test]
+fn every_front_end_run_case_matches_evaluator() {
+    use hirsel_core_front::{Emitter, ModuleInput, Program};
+    use hirsel_core_ids::PackageId;
+    use hirsel_core_resolve::{Environment, ModuleId, NameIndex, PackageManifest};
+    use hirsel_core_syntax::{ParseMode, parse};
+    use std::collections::HashMap;
+    fn files(path: &std::path::Path, out: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files(&path, out)
+            } else if path.extension().is_some_and(|e| e == "hirsel") {
+                out.push(path)
+            }
+        }
+    }
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/front");
+    let mut cases = Vec::new();
+    files(&root.join("cases"), &mut cases);
+    cases.sort();
+    let mut count = 0;
+    for file in cases {
+        let source = fs::read_to_string(&file).unwrap();
+        if !source.lines().any(|l| l.starts_with("// expect: run ")) {
+            continue;
+        }
+        let core = PackageId {
+            name: "core".into(),
+            version: "1".into(),
+        };
+        let app = PackageId {
+            name: "app".into(),
+            version: "1".into(),
+        };
+        let mut modules = Vec::new();
+        for m in PackageManifest::directory(&root.join("core"), core.clone(), true)
+            .unwrap()
+            .read()
+            .unwrap()
+        {
+            assert!(m.parsed.diagnostics.is_empty());
+            modules.push(ModuleInput {
+                id: m.module,
+                syntax: m.parsed.syntax,
+            });
+        }
+        let id = ModuleId {
+            package: app.clone(),
+            modules: vec!["main".into()],
+        };
+        let parsed = parse(&source, ParseMode::Source);
+        assert!(parsed.diagnostics.is_empty(), "{}", file.display());
+        modules.push(ModuleInput {
+            id,
+            syntax: parsed.syntax,
+        });
+        let mut index = NameIndex::new(Environment::default());
+        for m in &modules {
+            index.add_module(&m.id);
+            for (i, item) in m.syntax.items.iter().enumerate() {
+                index.index_item(&m.id, i as u32, item);
+            }
+        }
+        index.configure_core(core);
+        let program = Program::declare(&index, &modules);
+        assert!(
+            program.refusals.is_empty(),
+            "{}: {:?}",
+            file.display(),
+            program.refusals
+        );
+        let mut emitter = Emitter::new();
+        let mut functions = HashMap::new();
+        for (i, f) in program.fns.iter().enumerate() {
+            if f.path.0.package != app || f.body.is_none() {
+                continue;
+            }
+            let checked = program.check_lower(i, &mut emitter);
+            assert!(
+                checked.refusals.is_empty(),
+                "{}: {:?}",
+                file.display(),
+                checked.refusals
+            );
+            assert!(
+                checked.gaps.is_empty(),
+                "{}: {:?}",
+                file.display(),
+                checked.gaps
+            );
+            functions.insert(f.path.0.name.clone(), checked.function.unwrap());
+        }
+        let module = emitter.module;
+        let mut runs = Vec::new();
+        for line in source
+            .lines()
+            .filter_map(|l| l.strip_prefix("// expect: run "))
+        {
+            let call = line.split_once(" = ").unwrap().0;
+            let (name, args) = call.strip_suffix(')').unwrap().split_once('(').unwrap();
+            let f = functions[name];
+            let sig = &module.signatures[module.functions[f.index()].signature.index()];
+            let args = sig
+                .params
+                .iter()
+                .zip(args.split(',').filter(|a| !a.is_empty()))
+                .map(|(p, a)| {
+                    let Param::Value(t) = p else {
+                        panic!("scalar run parameter")
+                    };
+                    eval::scalar(*t, a.trim())
+                })
+                .collect();
+            runs.push((f, args));
+            count += 1;
+        }
+        execute(&module, &runs, false);
+    }
+    assert!(count > 0, "the front-end corpus must execute run cases");
+}
+
+#[test]
+fn declared_places_variants_and_destination_calls_match_evaluator() {
+    let source = r#"core v1
+type t0 = own "Row" { small: u8, large: u64 }
+type t1 = own "Maybe" | None { } | Some { x: u64 }
+sig g0 = (u64) -> (u8, u64, u32)
+sig g1 = (u64) -> () dest t0
+inst n0 = test@0/places/run [] []
+inst n1 = test@0/places/fill [] []
+fn f0 = n0 g0 {
+  slot s0 = t0
+  slot s1 = t1
+  addr a0 = s0 : t0
+  addr a1 = s0 field 0 : u8
+  addr a2 = s0 field 1 : u64
+  addr a3 = s1 : t1
+  addr a4 = s1 case 1 0 : u64
+b0(v0: u64):
+  live s0
+  live s1
+  address a0
+  address a1
+  address a2
+  address a3
+  address a4
+  call f1 g1 (&a0, v0)
+  set_case a3, 1
+  store a4, v0
+  v1: u8 = read a1
+  v2: u64 = read a2
+  v3: u32 = case a3
+  dead s1
+  dead s0
+  return v1, v2, v3
+}
+fn f1 = n1 g1 {
+  addr a0 = v0 : t0
+  addr a1 = a0 field 0 : u8
+  addr a2 = a0 field 1 : u64
+b0(v0: ptr, v1: u64):
+  address a0
+  address a1
+  address a2
+  v2: u8 = const 7
+  store a1, v2
+  store a2, v1
+  return
+}
+"#;
+    let module = text::parse(source).unwrap();
+    wf::module(&module).unwrap();
+    execute(&module, &[(FuncId(0), vec![42])], false);
 }

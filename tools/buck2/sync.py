@@ -180,6 +180,7 @@ RUNTIME_DATA = {
 # every test whose harness it changes.
 TEST_DATA = {
     "hirsel-core-front-unittest": ["core/front/**", "core/core/**", "core/std/**", "core/programs/m1/**"],
+    "hirsel-cranelift-test-core_native": ["core/front/**"],
     "hirsel-cli-test-cli": ["tools/capped", "conformance/old-spec/core-library.md", "conformance/old-spec/std-library.md", "docs/dependency-card.schema.json"],
     "hirsel-driver-test-it": ["crates/hirsel-driver/tests/fixtures/**", "crates/hirsel-rt/include/**"],
     "hirsel-llvm-test-it": ["crates/hirsel-llvm/tests/native/**"],
@@ -1194,10 +1195,13 @@ def first_party(meta: dict) -> str:
             # Request-lifecycle fixtures and the request-mode law compile
             # temporary files against std, without corpus or native runtime.
             requests_only = binary == "hirsel-driver-test-it-resident"
-            return dict(files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-llvm-runtime-fixture[staticlib]"} if binary == "hirsel-llvm-unittest" else None,
-                        data=Raw(f'glob({starlark(["stdlib/**", relative(package_dir / "Cargo.toml")], 4)})') if requests_only else test_data(binary, name, package_dir, src),
-                        runtime_archives=runtime_views(binary) if name in NATIVE_TESTS and not requests_only and binary != "hirsel-rt-unittest" else None,
-                        products=PRODUCTS if name in PRODUCT_TESTS else None,
+            core_native = binary == "hirsel-cranelift-test-core_native"
+            files_env = ({"HIRSEL_CORE_RUNTIME_ARCHIVE": "//:hirsel-core-rt[staticlib]"} if core_native
+                         else {"HIRSEL_CORE_RT_ARCHIVE": "//:core-llvm-runtime-fixture[staticlib]"} if binary == "hirsel-llvm-unittest" else None)
+            return dict(data=Raw(f'glob({starlark(["stdlib/**", relative(package_dir / "Cargo.toml")], 4)})') if requests_only else test_data(binary, name, package_dir, src),
+                        runtime_archives=runtime_views(binary) if name in NATIVE_TESTS and not requests_only and not core_native and binary != "hirsel-rt-unittest" else None,
+                        products=PRODUCTS if name in PRODUCT_TESTS and not core_native else None,
+                        files_env=files_env,
                         seeded=seeded(target_dir(package_dir, src), src) or None, skips=FULL_GATE_SKIPS.get(binary),
                         consumer_cases=CONSUMER_CASES.get(binary), retained_cases=retained_rust().get(binary, []))
 

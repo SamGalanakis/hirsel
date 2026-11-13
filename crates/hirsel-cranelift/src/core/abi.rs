@@ -16,6 +16,20 @@ pub(super) struct Signature {
 }
 impl Signature {
     pub fn new(s: &c::Signature) -> Self {
+        Self::build(s, true)
+    }
+    pub fn c(params: &[Ty], results: &[Ty]) -> Self {
+        Self::build(
+            &c::Signature {
+                params: params.iter().copied().map(Param::Value).collect(),
+                results: results.to_vec(),
+                dest: None,
+                never: false,
+            },
+            false,
+        )
+    }
+    fn build(s: &c::Signature, context: bool) -> Self {
         let mut clif = ir::Signature::new(CallConv::SystemV);
         let mut offsets = Vec::new();
         let mut size: u32 = 0;
@@ -36,7 +50,9 @@ impl Signature {
         }
         // The frozen v1a ABI supplies a context even for functions that need no
         // runtime operations. Infallible scalar entries do not return a status.
-        clif.params.push(AbiParam::new(types::I64));
+        if context {
+            clif.params.push(AbiParam::new(types::I64));
+        }
         if s.dest.is_some() {
             clif.params.push(AbiParam::new(types::I64));
         }

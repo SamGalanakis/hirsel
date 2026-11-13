@@ -13,9 +13,9 @@ use hirsel_core_ir::{self as c, *};
 
 mod abi;
 mod function;
+mod memory;
+mod place;
 mod scalar;
-#[cfg(test)]
-mod tests;
 
 /// Why a CoreIR module could not be emitted.
 #[derive(Debug)]
@@ -96,6 +96,16 @@ pub(crate) fn isa(options: &Options<'_>) -> Result<cranelift_codegen::isa::Owned
 /// convention for multiple scalar results. CoreIR is a trusted compiler product;
 /// this entry does not invoke its well-formedness checker or the old pipeline.
 pub fn emit_object(input: &c::Module, options: &Options<'_>) -> Result<Object> {
+    emit_object_with_layouts(input, &[], options)
+}
+
+/// Emit with the producer's already-computed layout recipes. The recipe table
+/// corresponds to `input.types`; the backend reads it without recomputing layouts.
+pub fn emit_object_with_layouts(
+    input: &c::Module,
+    layouts: &[hirsel_core_layout::Recipe],
+    options: &Options<'_>,
+) -> Result<Object> {
     let refuse = |message: String| Error::Target(format!("{}: {message}", options.target));
     if !options.target.starts_with("x86_64") || !options.target.contains("linux") {
         return Err(refuse(
@@ -110,10 +120,8 @@ pub fn emit_object(input: &c::Module, options: &Options<'_>) -> Result<Object> {
     )
     .map_err(error)?;
     let mut object = ObjectModule::new(builder);
-    if input.signatures.iter().any(|s| s.dest.is_some() || s.never) {
-        return Err(unsupported(
-            "destination and never signatures require the core runtime ABI",
-        ));
+    if input.signatures.iter().any(|s| s.never) {
+        return Err(unsupported("never signatures require the core failure ABI"));
     }
     let signatures: Vec<_> = input.signatures.iter().map(abi::Signature::new).collect();
     let mut functions = Vec::new();
@@ -160,6 +168,8 @@ pub fn emit_object(input: &c::Module, options: &Options<'_>) -> Result<Object> {
             &mut object,
             builder,
             body,
+            input,
+            layouts,
             sig,
             &signatures,
             &functions,

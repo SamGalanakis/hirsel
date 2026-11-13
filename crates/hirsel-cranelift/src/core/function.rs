@@ -8,6 +8,8 @@ pub(super) struct Function<'a, 'b, 'c> {
     pub b: FunctionBuilder<'a>,
     pub object: &'b mut ObjectModule,
     pub body: &'c Body,
+    pub input: &'c c::Module,
+    pub layouts: &'c [hirsel_core_layout::Recipe],
     pub values: Vec<Variable>,
     pub addresses: Vec<Variable>,
     pub blocks: Vec<ir::Block>,
@@ -22,6 +24,8 @@ pub(super) fn emit(
     object: &mut ObjectModule,
     mut b: FunctionBuilder<'_>,
     body: &Body,
+    input: &c::Module,
+    layouts: &[hirsel_core_layout::Recipe],
     signature: &abi::Signature,
     signatures: &[abi::Signature],
     functions: &[cranelift_module::FuncId],
@@ -41,14 +45,12 @@ pub(super) fn emit(
         .map(|_| b.declare_var(types::I64))
         .collect();
     let mut slots = Vec::new();
-    for s in &body.slots {
-        let PlaceTy::Value(t) = *s else {
-            return Err(unsupported("declared storage requires core-layout recipes"));
-        };
+    for &s in &body.slots {
+        let (size, align) = super::place::storage(input, layouts, s)?;
         slots.push(b.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
-            ty(t).bytes(),
-            ty(t).bytes().trailing_zeros() as u8,
+            size.max(1) as u32,
+            align.trailing_zeros() as u8,
         )));
     }
     b.switch_to_block(blocks[0]);
@@ -59,6 +61,8 @@ pub(super) fn emit(
         b,
         object,
         body,
+        input,
+        layouts,
         values,
         addresses,
         blocks,
@@ -152,7 +156,7 @@ impl Function<'_, '_, '_> {
         };
         self.b.def_var(self.values[v.index()], value);
     }
-    fn addr(&mut self, a: AddressId) -> Value {
+    pub fn addr(&mut self, a: AddressId) -> Value {
         self.b.use_var(self.addresses[a.index()])
     }
     fn edge(&mut self, e: EdgeId) -> (ir::Block, Vec<BlockArg>) {
@@ -165,37 +169,6 @@ impl Function<'_, '_, '_> {
             .map(|&v| self.get(v).into())
             .collect();
         (self.blocks[edge.target.index()], args)
-    }
-    fn address(&mut self, id: AddressId) -> Result<Value> {
-        let a = &self.body.addresses[id.index()];
-        let mut ptr = match a.base {
-            AddressBase::Slot(s) => self
-                .b
-                .ins()
-                .stack_addr(types::I64, self.slots[s.index()], 0),
-            AddressBase::Value(v) => self.get(v),
-            AddressBase::Address(a) => self.addr(a),
-        };
-        for &step in a.steps.get(&self.body.pools.steps).unwrap() {
-            ptr = match step {
-                Step::Deref => self.b.ins().load(types::I64, MemFlags::trusted(), ptr, 0),
-                Step::Index(v) => {
-                    let PlaceTy::Value(t) = a.ty else {
-                        return Err(unsupported("declared index stride"));
-                    };
-                    let index = self.get(v);
-                    let index = self.resize(index, types::I64, false);
-                    let offset = self.b.ins().imul_imm_s(index, i64::from(ty(t).bytes()));
-                    self.b.ins().iadd(ptr, offset)
-                }
-                _ => {
-                    return Err(unsupported(
-                        "declared place projection requires layout recipes",
-                    ));
-                }
-            };
-        }
-        Ok(ptr)
     }
     fn instruction(&mut self, inst: &Inst) -> Result<()> {
         match *inst {
@@ -410,7 +383,7 @@ impl Function<'_, '_, '_> {
                     self.set(v, result);
                 }
             }
-            _ => return Err(unsupported(format!("core storage runtime: {inst:?}"))),
+            _ => self.memory(inst)?,
         }
         Ok(())
     }

@@ -376,6 +376,10 @@ const VARIABLES: &[(&str, Class)] = &[
         Class::HostOnly("tools/tests/buck2_launcher.py"),
     ),
     (
+        "HIRSEL_CORE_RUNTIME_ARCHIVE",
+        Class::HostOnly("CoreIR native executable tests"),
+    ),
+    (
         "HIRSEL_TEST_PRODUCTS",
         Class::HostOnly("tools/buck2/test_launcher.sh"),
     ),

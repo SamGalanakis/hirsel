@@ -42,6 +42,26 @@ fn size_of_escapes() -> u64 {
     size_of("\"a\\n\\u00e9\\ud83d\\ude00\"")
 }
 
+// Every position within three words: a four-byte scalar can cross a word edge,
+// followed by escaped newline and quote. Decoded bytes n+4+1+1 plus tag/header5.
+// A control at n+1 must stop at that byte. Skipping a marked word, or counting
+// scalars instead of bytes, falsifies these sizes or the exact Syntax position.
+// expect: run sizing_words_stop_at_special_bytes() = true
+fn sizing_words_stop_at_special_bytes() -> bool {
+    for n in 0u64 .. 24 {
+        let mut good = result.unwrap(string.from("\""))
+        let mut bad = result.unwrap(string.from("\""))
+        for _ in 0u64 .. n {
+            result.unwrap(string.push(mut good, "x"))
+            result.unwrap(string.push(mut bad, "x"))
+        }
+        result.unwrap(string.push(mut good, "🙂\\n\\\"\""))
+        result.unwrap(string.push(mut bad, "\n\""))
+        if size_of(good) != n + 11 || syntax_at(bad) != n + 1 { return false }
+    }
+    true
+}
+
 // expect: run size_keeps_duplicates() = 39
 // Both members stay in the blob: 9 + 2 x (4 + 1 + 6 + 4).
 fn size_keeps_duplicates() -> u64 {

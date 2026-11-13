@@ -328,6 +328,8 @@ fn value_size(s: String, mut i: u64) -> Result[u64, Error] {
 fn string_size(s: String, mut i: u64) -> Result[u64, Error] {
     i += 1
     let mut n: u64 = 0
+    let b = string.as_bytes(s)
+    let end = list.len(b)
     loop {
         let c = at(s, i)
         if c == b'"' {
@@ -339,6 +341,27 @@ fn string_size(s: String, mut i: u64) -> Result[u64, Error] {
             return Error(Syntax(i))
         }
         if c != b'\\' {
+            // serde_json read.rs::skip_to_escape (Mycroft): the lowest marked byte
+            // is a control, quote or backslash. UTF-8 high bytes cannot be marked.
+            if i + 8 <= end {
+                let v = list.word_le(b, i)
+                let q = v ^ 0x2222222222222222
+                let slash = v ^ 0x5c5c5c5c5c5c5c5c
+                let controls = int.wrapping_sub(v, 0x2020202020202020) & ~v
+                let quotes = int.wrapping_sub(q, 0x0101010101010101) & ~q
+                let slashes = int.wrapping_sub(slash, 0x0101010101010101) & ~slash
+                let mark = (controls | quotes | slashes) & 0x8080808080808080
+                if mark != 0 {
+                    let bit: u64 = int.widen(int.trailing_zeros(mark))
+                    let run = bit >> 3
+                    n += run
+                    i += run
+                } else {
+                    n += 8
+                    i += 8
+                }
+                continue
+            }
             n += 1
             i += 1
         } else if at(s, i + 1) == b'u' {

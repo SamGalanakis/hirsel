@@ -14,15 +14,15 @@ fn bfs(adj:List[List[i32]])->Result[i32,helper.Error] {
     let mut seen:List[bool]=list.new()
     helper.mem(list.fill(mut seen,n,false))?
     seen[0]=true
-    let mut q:std.deque.Deque[(i32,i32)]=std.deque.new()
-    match std.deque.push_back(mut q,(0,0)) {Ok(())=>{},Error((c,_))=>return Error(Capacity(c))}
-    while let Some((v,d))=std.deque.pop_front(mut q) {
+    let mut q:Deque[(i32,i32)]=deque.new()
+    match deque.push_back(mut q,(0,0)) {Ok(())=>{},Error((c,_))=>return Error(Capacity(c))}
+    while let Some((v,d))=deque.pop_front(mut q) {
         for neighbor in adj[int.narrow(v)] {
             if neighbor==target {return Ok(d+1)}
             let at:u64=int.narrow(neighbor)
             if !seen[at] {
                 seen[at]=true
-                match std.deque.push_back(mut q,(neighbor,d+1)) {Ok(())=>{},Error((c,_))=>return Error(Capacity(c))}
+                match deque.push_back(mut q,(neighbor,d+1)) {Ok(())=>{},Error((c,_))=>return Error(Capacity(c))}
             }
         }
     }

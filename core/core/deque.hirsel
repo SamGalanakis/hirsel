@@ -1,0 +1,89 @@
+// A power-of-two ring of uninhabited slots, following Rust's VecDeque.
+pub opaque type Deque[T]: shareable + send {
+    ring: Slots[T],
+    head: u64
+} drop(d) {
+    // Normalize the live interval before List's resumable element cleanup.
+    // The finalizer itself moves only and cannot fail.
+    if d.head == 0 { return }
+    let count = list.len(d.ring.raw)
+    let cap = list.capacity(d.ring.raw)
+    let tail = cap - d.head
+    let wrapped: u64 = if count > tail { count - tail } else { 0 }
+    let moved: u64 = if count > tail { tail } else { count }
+    let mut i: u64 = 0
+    while count != cap && i < moved {
+        slots_shift(mut d.ring, d.head + i, wrapped + i)
+        i += 1
+    }
+    reverse(mut d.ring.raw, 0, wrapped)
+    reverse(mut d.ring.raw, wrapped, count)
+    reverse(mut d.ring.raw, 0, count)
+    d.head = 0
+}
+
+pub fn new[T]() -> Deque[T] { Deque(ring: slots_empty(), head: 0) }
+pub fn len[T](d: Deque[T]) -> u64 { list.len(d.ring.raw) }
+pub fn push_back[T](mut d: Deque[T], take x: T) -> Result[(), (Capacity, T)] {
+    if list.len(d.ring.raw) == list.capacity(d.ring.raw) {
+        if let Error(c) = grow(mut d) { return Error((c, take x)) }
+    }
+    // Opaque ring invariants make the masked index arithmetic non-failing.
+    let i = int.wrapping_add(d.head, list.len(d.ring.raw)) & int.wrapping_sub(list.capacity(d.ring.raw), 1)
+    slots_put(mut d.ring, i, take x)
+    Ok(())
+}
+pub fn push_front[T](mut d: Deque[T], take x: T) -> Result[(), (Capacity, T)] {
+    if list.len(d.ring.raw) == list.capacity(d.ring.raw) {
+        if let Error(c) = grow(mut d) { return Error((c, take x)) }
+    }
+    d.head = int.wrapping_sub(d.head, 1) & int.wrapping_sub(list.capacity(d.ring.raw), 1)
+    slots_put(mut d.ring, d.head, take x)
+    Ok(())
+}
+pub fn pop_front[T](mut d: Deque[T]) -> Option[T] {
+    if list.len(d.ring.raw) == 0 { return None }
+    let x = slots_take(mut d.ring, d.head)
+    d.head = int.wrapping_add(d.head, 1) & int.wrapping_sub(list.capacity(d.ring.raw), 1)
+    Some(take x)
+}
+pub fn pop_back[T](mut d: Deque[T]) -> Option[T] {
+    if list.len(d.ring.raw) == 0 { return None }
+    let i = int.wrapping_add(d.head, int.wrapping_sub(list.len(d.ring.raw), 1)) & int.wrapping_sub(list.capacity(d.ring.raw), 1)
+    Some(slots_take(mut d.ring, i))
+}
+fn grow[T](mut d: Deque[T]) -> Result[(), Capacity] {
+    let cap = list.capacity(d.ring.raw)
+    let count = list.len(d.ring.raw)
+    if count < cap { return Ok(()) }
+    let next: u64 = if cap == 0 { 1 } else { cap * 2 }
+    let mut ring: Slots[T] = slots_new(next)?
+    let mut i: u64 = 0
+    while i < count {
+        let at = (d.head + i) & (cap - 1)
+        slots_move(mut d.ring, at, mut ring, i)
+        i += 1
+    }
+    let old = replace(mut d.ring, take ring)
+    slots_free(take old)
+    d.head = 0
+    Ok(())
+}
+fn reverse[T](mut xs: List[T], lo: u64, hi: u64) {
+    let mut a = lo
+    let mut b = hi
+    while a < b {
+        b -= 1
+        if a < b { list.swap(mut xs, a, b) }
+        a += 1
+    }
+}
+
+type Slots[T]: shareable + send { raw: List[T] }
+fn slots_empty[T]() -> Slots[T]
+fn slots_new[T](n: u64) -> Result[Slots[T], Capacity]
+fn slots_put[T](mut s: Slots[T], i: u64, take x: T)
+fn slots_take[T](mut s: Slots[T], i: u64) -> T
+fn slots_move[T](mut src: Slots[T], i: u64, mut dst: Slots[T], j: u64)
+fn slots_shift[T](mut s: Slots[T], i: u64, j: u64)
+fn slots_free[T](take s: Slots[T])

@@ -134,6 +134,22 @@ operations! {
     ("int", "narrow", Lane::Numeric, "A", "core-check-index-912", false),
     ("int", "try_narrow", Lane::Numeric, "A", "core-check-index-912", false),
     ("int", "truncate", Lane::Numeric, "A", "core-check-index-912", false),
+    ("deque", "Deque", Lane::PendingCode, "C", "core-collections-918", false),
+    ("deque", "new", Lane::PendingCode, "C", "core-collections-918", false),
+    ("deque", "len", Lane::PendingCode, "C", "core-collections-918", false),
+    ("deque", "push_back", Lane::PendingCode, "C", "core-collections-918", false),
+    ("deque", "push_front", Lane::PendingCode, "C", "core-collections-918", false),
+    ("deque", "pop_front", Lane::PendingCode, "C", "core-collections-918", false),
+    ("deque", "pop_back", Lane::PendingCode, "C", "core-collections-918", false),
+    ("deque", "grow", Lane::PendingCode, "C", "core-collections-918", true),
+    ("deque", "reverse", Lane::PendingCode, "C", "core-collections-918", true),
+    ("deque", "slots_empty", Lane::Value, "A", "core-collections-918", true),
+    ("deque", "slots_new", Lane::Value, "A", "core-collections-918", true),
+    ("deque", "slots_put", Lane::Value, "A", "core-collections-918", true),
+    ("deque", "slots_take", Lane::Value, "A", "core-collections-918", true),
+    ("deque", "slots_move", Lane::Value, "A", "core-collections-918", true),
+    ("deque", "slots_shift", Lane::Value, "A", "core-collections-918", true),
+    ("deque", "slots_free", Lane::Value, "A", "core-collections-918", true),
     ("list", "slots_empty", Lane::Value, "A", "core-collections-918", true),
     ("list", "slots_new", Lane::Value, "A", "core-collections-918", true),
     ("list", "slots_put", Lane::Value, "A", "core-collections-918", true),
@@ -926,6 +942,7 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
                     )
                     || entry.module == "map"
                     || entry.module == "list" && entry.name.starts_with("slots_")
+                    || entry.module == "deque"
             );
         }
     }

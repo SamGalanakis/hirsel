@@ -1,0 +1,62 @@
+// test-of: core.list
+// test-reason: exercise the private uninhabited slot kernel
+
+// expect: run slots_move_law() = 11
+fn slots_move_law() -> u64 {
+    let mut s: Slots[u64] = result.unwrap(slots_new(4))
+    slots_put(mut s, 1, 11)
+    slots_shift(mut s, 1, 3)
+    let got = slots_take(mut s, 3)
+    slots_free(take s)
+    got
+}
+
+// expect: run slots_owned_law() = true
+fn slots_owned_law() -> bool {
+    let mut s: Slots[String] = result.unwrap(slots_new(4))
+    slots_put(mut s, 0, result.unwrap(string.from("abc")))
+    slots_shift(mut s, 0, 2)
+    let text = slots_take(mut s, 2)
+    slots_free(take s)
+    let another = result.unwrap(string.from("xyz"))
+    text == "abc" && another == "xyz"
+}
+
+// expect: run slots_capacity_law() = 32
+fn slots_capacity_law() -> u64 {
+    let r = bound bytes 0 {
+        let s: Result[Slots[u64], Capacity] = slots_new(4)
+        s
+    }
+    match r { Ok(Error(c)) => c.requested, _ => 99 }
+}
+
+// expect: run slots_zero_size_law() = true
+fn slots_zero_size_law() -> bool {
+    let mut a: Slots[()] = result.unwrap(slots_new(4))
+    let mut b: Slots[()] = result.unwrap(slots_new(4))
+    slots_put(mut a, 0, ())
+    slots_put(mut a, 1, ())
+    slots_put(mut b, 0, ())
+    let _ = slots_take(mut a, 1)
+    let _ = slots_take(mut b, 0)
+    let _ = slots_take(mut a, 0)
+    let caps = list.capacity(a.raw) == 4 && list.capacity(b.raw) == 4
+    slots_free(take a)
+    slots_free(take b)
+    caps
+}
+
+// expect: run slots_cross_block_law() = 711
+fn slots_cross_block_law() -> u64 {
+    let mut a: Slots[u64] = result.unwrap(slots_new(2))
+    let mut b: Slots[u64] = result.unwrap(slots_new(4))
+    slots_put(mut a, 1, 7)
+    slots_put(mut b, 3, 11)
+    slots_move(mut a, 1, mut b, 0)
+    slots_shift(mut b, 3, 3)
+    let answer = slots_take(mut b, 0) * 100 + slots_take(mut b, 3)
+    slots_free(take a)
+    slots_free(take b)
+    answer
+}

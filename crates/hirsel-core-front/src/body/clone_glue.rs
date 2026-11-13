@@ -18,6 +18,81 @@ use super::*;
 use hirsel_core_layout::{Body as ShapeBody, FieldTy};
 
 impl Derive<'_> {
+    // Slot kernels describe their live set outside the structural fields. The
+    // core clone hook must own that walk, including inside a containing value.
+    fn structural_clone_allowed(&self, ty: TypeId, allow_hooks: bool) -> Result<(), &'static str> {
+        fn row(
+            types: &[hirsel_core_layout::Shape],
+            id: u32,
+            seen: &mut Vec<u32>,
+            allow_hooks: bool,
+        ) -> bool {
+            if seen.contains(&id) {
+                return false;
+            }
+            seen.push(id);
+            let shape = &types[id as usize];
+            if shape.clone.is_some() {
+                return !allow_hooks;
+            }
+            let slots = shape.name.starts_with("core@1/")
+                && shape
+                    .name
+                    .split('[')
+                    .next()
+                    .is_some_and(|n| n.ends_with("/Slots"));
+            if slots
+                || shape.finalizer.is_some() && shape.repr != hirsel_core_layout::Repr::Resource
+            {
+                return true;
+            }
+            match &shape.body {
+                ShapeBody::Record(fs) => fs.iter().any(|f| field(types, &f.ty, seen, allow_hooks)),
+                ShapeBody::Variant(cs) => cs.iter().any(|c| {
+                    c.fields
+                        .iter()
+                        .any(|f| field(types, &f.ty, seen, allow_hooks))
+                }),
+            }
+        }
+        fn field(
+            types: &[hirsel_core_layout::Shape],
+            ty: &FieldTy,
+            seen: &mut Vec<u32>,
+            allow_hooks: bool,
+        ) -> bool {
+            match ty {
+                FieldTy::Inline(t)
+                | FieldTy::Box(t)
+                | FieldTy::Rc(t)
+                | FieldTy::Arc(t)
+                | FieldTy::Stable(t)
+                | FieldTy::Link(t) => row(types, t.0, seen, allow_hooks),
+                FieldTy::Seq(x)
+                | FieldTy::Array(x, _)
+                | FieldTy::View(x)
+                | FieldTy::FixedSpan(x)
+                | FieldTy::SeqSpan(x)
+                | FieldTy::IndexedSpan(x)
+                | FieldTy::Locator(x) => field(types, x, seen, allow_hooks),
+                FieldTy::Map(k, v) => {
+                    field(types, k, seen, allow_hooks) || field(types, v, seen, allow_hooks)
+                }
+                FieldTy::Scalar(_)
+                | FieldTy::Fn
+                | FieldTy::OwnFn
+                | FieldTy::Borrow
+                | FieldTy::Handle(_)
+                | FieldTy::Text => false,
+            }
+        }
+        if row(&self.module.types, ty.0, &mut vec![], allow_hooks) {
+            Err("core-declared clone bodies for slot storage and core finalizers are not built")
+        } else {
+            Ok(())
+        }
+    }
+
     pub(super) fn clone_function(
         &mut self,
         c: &mut Code,
@@ -25,6 +100,7 @@ impl Derive<'_> {
         from: ValueId,
         to: ValueId,
     ) -> Result<(), &'static str> {
+        self.structural_clone_allowed(ty, true)?;
         let size = self.row_size(ty);
         copy(c, to, from, size);
         if let Some(f) = self.module.types[ty.index()].clone {
@@ -479,6 +555,8 @@ impl Derive<'_> {
     ) -> Result<(), &'static str> {
         self.walkable(src)?;
         self.walkable(dst)?;
+        self.structural_clone_allowed(src, false)?;
+        self.structural_clone_allowed(dst, false)?;
         let fail = c.block(&[Ty::Scalar(Scalar::U64); 2]);
         let (xs, ys) = (self.offsets(src), self.offsets(dst));
         match (
@@ -669,6 +747,8 @@ impl Derive<'_> {
         from: ValueId,
         region: ValueId,
     ) -> Result<(), &'static str> {
+        self.structural_clone_allowed(src, false)?;
+        self.structural_clone_allowed(dst, false)?;
         let fail = c.block(&[Ty::Scalar(Scalar::U64); 2]);
         let block = self.clone_in_block(c, src, dst, from, region, fail)?;
         let zero = c.constant(0);
@@ -1254,5 +1334,79 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.jump(join, &[], n);
         self.start(join);
         Some(self.pointer(to, n))
+    }
+}
+
+#[cfg(test)]
+mod kernel_clone_tests {
+    use super::*;
+    use hirsel_core_layout::{Carried, Field, FuncRef, Repr, Shape, TypeRef};
+
+    #[test]
+    fn every_clone_walk_gaps_on_kernel_storage_and_finalizers() {
+        let field = |name: &str, ty| Field {
+            name: name.into(),
+            ty,
+        };
+        let row = |name: &str, fields, finalizer| Shape {
+            name: name.into(),
+            repr: Repr::Own,
+            carried: Carried::Address,
+            body: ShapeBody::Record(fields),
+            finalizer,
+            clone: None,
+            grant: 0,
+        };
+        let mut base = Module::default();
+        base.types = vec![
+            row(
+                "Plain",
+                vec![field("x", FieldTy::Scalar(Scalar::U64))],
+                None,
+            ),
+            row(
+                "core@1/list/Slots[u64]",
+                vec![field(
+                    "raw",
+                    FieldTy::Seq(Box::new(FieldTy::Scalar(Scalar::U64))),
+                )],
+                None,
+            ),
+            row(
+                "RecursiveWrapper",
+                vec![
+                    field("self", FieldTy::Box(TypeRef(2))),
+                    field(
+                        "values",
+                        FieldTy::Seq(Box::new(FieldTy::Inline(TypeRef(1)))),
+                    ),
+                ],
+                None,
+            ),
+            row(
+                "core@1/test/Guard",
+                vec![field("x", FieldTy::Scalar(Scalar::U64))],
+                Some(FuncRef(0)),
+            ),
+            row(
+                "OrdinaryList",
+                vec![field(
+                    "raw",
+                    FieldTy::Seq(Box::new(FieldTy::Inline(TypeRef(0)))),
+                )],
+                None,
+            ),
+        ];
+        for ty in [1, 2, 3] {
+            for op in [KeyOp::Clone, KeyOp::CloneIn(0), KeyOp::CloneTwin(0)] {
+                let error =
+                    super::super::key_glue::ensure(&mut base.clone(), TypeId(ty), op).unwrap_err();
+                assert_eq!(
+                    error,
+                    "core-declared clone bodies for slot storage and core finalizers are not built"
+                );
+            }
+        }
+        super::super::key_glue::ensure(&mut base, TypeId(4), KeyOp::Clone).unwrap();
     }
 }

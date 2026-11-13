@@ -1,0 +1,5 @@
+// Structural clone cannot copy a ring's private List prefix or its raw head.
+// expect: gap core-declared clone bodies for slot storage and core finalizers are not built
+fn direct(d: Deque[u64]) -> Result[Deque[u64], Capacity] { clone(d) }
+fn containing(ds: List[Deque[u64]]) -> Result[List[Deque[u64]], Capacity] { clone(ds) }
+fn counted(d: Rc[Deque[u64]]) -> Result[Rc[Deque[u64]], Capacity] { clone(d) }

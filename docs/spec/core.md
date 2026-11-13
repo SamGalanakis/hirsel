@@ -1,7 +1,7 @@
 # Core library
 
 The core library is source: one file per core module under
-[`core/core/`](../../core/core/), 25 files. Each file is a module ([LANG-7](language.md#lang-7-names))
+[`core/core/`](../../core/core/), 27 files. Each file is a module ([LANG-7](language.md#lang-7-names))
 of the package `core`, which differs from any other package in one power: a function there
 may end at its header, and is then provided by the implementation. A core function with a
 body is ordinary code under the ordinary rules. Either way its contract is its header and
@@ -17,6 +17,7 @@ there with no body is built in, so its summary is the one the table below gives 
 | `int`, `float`, `char` | [int](../../core/core/int.hirsel), [float](../../core/core/float.hirsel), [char](../../core/core/char.hirsel) | SEM-1 to SEM-3 |
 | `box`, `rc`, `arc`, `unique` | [box](../../core/core/box.hirsel), [rc](../../core/core/rc.hirsel), [arc](../../core/core/arc.hirsel), [unique](../../core/core/unique.hirsel) | MEM-13 to MEM-18 |
 | `list`, `string`, `text`, `map`, `span`, `dest` | [list](../../core/core/list.hirsel), [string](../../core/core/string.hirsel), [text](../../core/core/text.hirsel), [map](../../core/core/map.hirsel), [span](../../core/core/span.hirsel), [dest](../../core/core/dest.hirsel) | SEM-3 to SEM-6, MEM-3, MEM-4, MEM-12 |
+| `deque` | [deque](../../core/core/deque.hirsel) | Deques and heaps, MEM-24 |
 | `seq`, `indexed`, `writer` | [seq](../../core/core/seq.hirsel), [indexed](../../core/core/indexed.hirsel), [writer](../../core/core/writer.hirsel) | MEM-4, MEM-12 |
 | `task`, `channel` | [task](../../core/core/task.hirsel), [channel](../../core/core/channel.hirsel) | CONC-1 to CONC-11 |
 | `args`, `host`, `stdout`, `stderr` | [args](../../core/core/args.hirsel), [host](../../core/core/host.hirsel), [stdout](../../core/core/stdout.hirsel), [stderr](../../core/core/stderr.hirsel) | PROG-3, CAP-5 |

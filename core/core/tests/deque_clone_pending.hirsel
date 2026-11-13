@@ -1,0 +1,15 @@
+// Cloning a wrapped partial ring must follow logical order and retain both owners.
+// A raw List prefix clone copies the empty slot and loses the power-of-two mask.
+// expect: run clone_wrapped_partial() = 123123
+fn clone_wrapped_partial() -> u64 {
+    let mut d: Deque[u64] = deque.new()
+    for i in 0u64 .. 4 { result.unwrap(deque.push_back(mut d, i)) }
+    let _ = deque.pop_front(mut d)
+    let mut cloned: Deque[u64] = result.unwrap(clone(d))
+    let mut a: u64 = 0
+    let mut b: u64 = 0
+    while deque.len(cloned) > 0 { a = a * 10 + option.unwrap(deque.pop_front(mut cloned)) }
+    while deque.len(d) > 0 { b = b * 10 + option.unwrap(deque.pop_front(mut d)) }
+    a * 1000 + b
+}
+

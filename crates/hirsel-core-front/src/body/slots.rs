@@ -423,6 +423,20 @@ fn clone_body_refusal_law() -> u64 {
     let q: Result[TestPair, Capacity] = clone(p)
     match q { Ok(_) => 0, Error(c) => c.requested * 10 + c.available }
 }
+type TestSlotCopy[T] { s: Slots[T], n: u64 } clone(t) {
+    Ok(TestSlotCopy(s: slots_empty(), n: t.n + 100))
+}
+type TestSlotPair { value: TestSlotCopy[u64] }
+// A declared body stops the structural walk before its private Slots field.
+// expect: run clone_kernel_hook_law() = 1050
+fn clone_kernel_hook_law() -> u64 {
+    let mut s: Slots[u64] = result.unwrap(slots_new(1))
+    slots_put(mut s, 0, 7)
+    let p = TestSlotPair(value: TestSlotCopy(s: take s, n: 5))
+    let q: TestSlotPair = result.unwrap(clone(p))
+    q.value.n * 10 + list.len(q.value.s.raw)
+}
+
 "#;
 
     #[test]
@@ -516,6 +530,6 @@ fn clone_body_refusal_law() -> u64 {
                 faults += 1;
             }
         }
-        assert_eq!((passed, faults), (8, 5));
+        assert_eq!((passed, faults), (9, 5));
     }
 }

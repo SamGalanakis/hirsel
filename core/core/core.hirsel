@@ -12,6 +12,7 @@ pub opaque type Never
 pub opaque type String
 pub opaque type List[T]
 pub type Bytes = List[u8]
+pub type Deque[T] = deque.Deque[T]
 pub opaque type Map[K: key, V]
 pub opaque type Box[T]
 pub opaque type Rc[T: shareable]

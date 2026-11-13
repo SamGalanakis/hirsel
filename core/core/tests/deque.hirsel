@@ -1,7 +1,7 @@
 // Ring/list model laws. The queues are compared element by element, not with List ==.
 // expect: run empty_pops() = true
 fn empty_pops() -> bool {
-    let mut d: deque.Deque[u64] = deque.new()
+    let mut d: Deque[u64] = deque.new()
     let a = match deque.pop_front(mut d) { None => true, _ => false }
     let b = match deque.pop_back(mut d) { None => true, _ => false }
     a && b && deque.len(d) == 0
@@ -9,7 +9,7 @@ fn empty_pops() -> bool {
 
 // expect: run singleton_ends() = 78
 fn singleton_ends() -> u64 {
-    let mut d: deque.Deque[u64] = deque.new()
+    let mut d: Deque[u64] = deque.new()
     result.unwrap(deque.push_back(mut d, 7))
     let a = option.unwrap(deque.pop_front(mut d))
     result.unwrap(deque.push_front(mut d, 8))
@@ -24,7 +24,7 @@ fn every_head() -> bool {
     while cap <= 4 {
         let mut head: u64 = 0
         while head < cap {
-            let mut d: deque.Deque[u64] = deque.new()
+            let mut d: Deque[u64] = deque.new()
             let mut i: u64 = 0
             while i < cap { result.unwrap(deque.push_back(mut d, i + 1)); i += 1 }
             i = 0
@@ -56,7 +56,7 @@ fn every_head() -> bool {
 // [1,2,3,4] -> [3,4,5,6], wrapped at head 2; growth must produce [3,4,5,6,7].
 // expect: run wrapped_growth() = 34567
 fn wrapped_growth() -> u64 {
-    let mut d: deque.Deque[u64] = deque.new()
+    let mut d: Deque[u64] = deque.new()
     for i in 1u64 .. 5 { result.unwrap(deque.push_back(mut d, i)) }
     let _ = deque.pop_front(mut d)
     let _ = deque.pop_front(mut d)
@@ -71,7 +71,7 @@ fn wrapped_growth() -> u64 {
 // [1,2,3,4,5,6] removed alternately at front/back gives [1,6,2,5,3,4].
 // expect: run alternating_ends() = 162534
 fn alternating_ends() -> u64 {
-    let mut d: deque.Deque[u64] = deque.new()
+    let mut d: Deque[u64] = deque.new()
     for i in 1u64 .. 7 { result.unwrap(deque.push_back(mut d, i)) }
     let mut n: u64 = 0
     while deque.len(d) > 0 {
@@ -84,7 +84,7 @@ fn alternating_ends() -> u64 {
 // Every push direction returns the owned String on refusal, leaving an empty deque.
 // expect: run capacity_back() = 3
 fn capacity_back() -> u64 {
-    let mut d: deque.Deque[String] = deque.new()
+    let mut d: Deque[String] = deque.new()
     let s = result.unwrap(string.from("abc"))
     let r = bound bytes 0 { deque.push_back(mut d, take s) }
     match r { Ok(Error((_, take x))) => if x == "abc" { list.len(string.as_bytes(x)) + deque.len(d) } else { 99 }, _ => 99 }
@@ -92,7 +92,7 @@ fn capacity_back() -> u64 {
 
 // expect: run capacity_front() = 3
 fn capacity_front() -> u64 {
-    let mut d: deque.Deque[String] = deque.new()
+    let mut d: Deque[String] = deque.new()
     let s = result.unwrap(string.from("abc"))
     let r = bound bytes 0 { deque.push_front(mut d, take s) }
     match r { Ok(Error((_, take x))) => if x == "abc" { list.len(string.as_bytes(x)) + deque.len(d) } else { 99 }, _ => 99 }
@@ -101,7 +101,7 @@ fn capacity_front() -> u64 {
 // No admission on pop even after wraparound.
 // expect: run bounded_pop() = 21
 fn bounded_pop() -> u64 {
-    let mut d: deque.Deque[u64] = deque.new()
+    let mut d: Deque[u64] = deque.new()
     result.unwrap(deque.push_back(mut d, 1))
     result.unwrap(deque.push_front(mut d, 2))
     let r = bound bytes 0 {
@@ -113,7 +113,7 @@ fn bounded_pop() -> u64 {
 // A wrapped, full ring must stay [2,3] when growth fails and return the String.
 // expect: run capacity_wrapped_growth() = 323
 fn capacity_wrapped_growth() -> u64 {
-    let mut d: deque.Deque[String] = deque.new()
+    let mut d: Deque[String] = deque.new()
     let a = result.unwrap(string.from("a"))
     let b = result.unwrap(string.from("bb"))
     result.unwrap(deque.push_back(mut d, take a))
@@ -133,7 +133,7 @@ fn capacity_wrapped_growth() -> u64 {
 // Growth from a wrapped ring via push_front, then read from the opposite end.
 // expect: run wrapped_front_growth() = 36542
 fn wrapped_front_growth() -> u64 {
-    let mut d: deque.Deque[u64] = deque.new()
+    let mut d: Deque[u64] = deque.new()
     for i in 3u64 .. 7 { result.unwrap(deque.push_back(mut d, i)) }
     let x = option.unwrap(deque.pop_front(mut d))
     result.unwrap(deque.push_back(mut d, x))
@@ -143,33 +143,69 @@ fn wrapped_front_growth() -> u64 {
     n
 }
 
-// Logical element charges from MEM-24's variant tag plus maximum payload.
-// These also expose the Option ring's representation cost, independently of growth slack.
-// expect: run slot_bytes_u64() = 16
+// A deque admits nothing until its first push, whose slot charge is size(T).
+// expect: run slot_bytes_u64() = 8
 fn slot_bytes_u64() -> u64 {
-    let r = bound bytes 0 {
-        let xs: Result[List[Option[u64]], Capacity] = list.with_capacity(64)
-        xs
-    }
-    match r { Ok(Error(c)) => c.requested / 64, _ => 99 }
+    let mut d: Deque[u64] = deque.new()
+    let r = bound bytes 0 { deque.push_back(mut d, 7) }
+    match r { Ok(Error((c, _))) => c.requested, _ => 99 }
 }
-
-// expect: run slot_bytes_string() = 32
+// expect: run slot_bytes_string() = 24
 fn slot_bytes_string() -> u64 {
+    let mut d: Deque[String] = deque.new()
+    let x = result.unwrap(string.from("abc"))
+    let r = bound bytes 0 { deque.push_back(mut d, take x) }
+    match r { Ok(Error((c, _))) => c.requested, _ => 99 }
+}
+type Triple { a: u64, b: u64, c: u64 }
+// expect: run slot_bytes_record24() = 24
+fn slot_bytes_record24() -> u64 {
+    let mut d: Deque[Triple] = deque.new()
+    let r = bound bytes 0 { deque.push_back(mut d, Triple(a:1,b:2,c:3)) }
+    match r { Ok(Error((c, _))) => c.requested, _ => 99 }
+}
+// expect: run zero_sized_ring() = true
+fn zero_sized_ring() -> bool {
     let r = bound bytes 0 {
-        let xs: Result[List[Option[String]], Capacity] = list.with_capacity(64)
-        xs
+        let mut d: Deque[()] = deque.new()
+        for _ in 0u64 .. 9 { result.unwrap(deque.push_front(mut d, ())) }
+        for _ in 0u64 .. 5 { let _ = option.unwrap(deque.pop_back(mut d)) }
+        for _ in 0u64 .. 4 { result.unwrap(deque.push_back(mut d, ())) }
+        deque.len(d) == 8
     }
-    match r { Ok(Error(c)) => c.requested / 64, _ => 99 }
+    result.unwrap(r)
 }
 
-type Triple { a: u64, b: u64, c: u64 }
-
-// expect: run slot_bytes_record24() = 32
-fn slot_bytes_record24() -> u64 {
-    let r = bound bytes 0 {
-        let xs: Result[List[Option[Triple]], Capacity] = list.with_capacity(64)
-        xs
-    }
-    match r { Ok(Error(c)) => c.requested / 64, _ => 99 }
+// The carrier occupies32 bytes independently of its element type.
+// expect: run carrier_bytes() = 32
+fn carrier_bytes() -> u64 {
+    let r = bound bytes 0 { let n: Result[List[Deque[u64]], Capacity] = list.with_capacity(1); n }
+    match r { Ok(Error(c)) => c.requested, _ => 99 }
+}
+// Sharing copies only the counted holder, preserving a wrapped live interval.
+// expect: run rc_share_unwrap() = 123
+fn rc_share_unwrap() -> u64 {
+    let mut d: Deque[u64] = deque.new()
+    for i in 0u64 .. 4 { result.unwrap(deque.push_back(mut d, i)) }
+    let _ = deque.pop_front(mut d)
+    let shared = result.unwrap(rc.new(take d))
+    let second = rc.share(shared)
+    let _ = take second
+    let mut recovered = result.unwrap(rc.try_unwrap(take shared))
+    let mut n: u64 = 0
+    while deque.len(recovered) > 0 { n = n * 10 + option.unwrap(deque.pop_front(mut recovered)) }
+    n
+}
+// expect: run arc_share_unwrap() = 123
+fn arc_share_unwrap() -> u64 {
+    let mut d: Deque[u64] = deque.new()
+    for i in 0u64 .. 4 { result.unwrap(deque.push_back(mut d, i)) }
+    let _ = deque.pop_front(mut d)
+    let shared = result.unwrap(arc.new(take d))
+    let second = arc.share(shared)
+    let _ = take second
+    let mut recovered = result.unwrap(arc.try_unwrap(take shared))
+    let mut n: u64 = 0
+    while deque.len(recovered) > 0 { n = n * 10 + option.unwrap(deque.pop_front(mut recovered)) }
+    n
 }

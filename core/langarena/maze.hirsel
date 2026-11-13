@@ -84,9 +84,9 @@ fn bfs(m:Maze)->Result[List[(u64,u64)],helper.Error] {
     seen[m.width+1]=true
     let mut path:List[(u64,u64,i32)]=list.new()
     push(mut path,(1u64,1u64,-1i32))?
-    let mut queue:std.deque.Deque[u64]=std.deque.new()
-    match std.deque.push_back(mut queue,0u64) {Ok(())=>{},Error((c,_))=>return Error(Capacity(c))}
-    while let Some(id)=std.deque.pop_front(mut queue) {
+    let mut queue:Deque[u64]=deque.new()
+    match deque.push_back(mut queue,0u64) {Ok(())=>{},Error((c,_))=>return Error(Capacity(c))}
+    while let Some(id)=deque.pop_front(mut queue) {
         let (y,x,_)=path[id]
         let neighbors:Inline[(u64,u64),4]=m.cells[y][x].neighbors
         for (ny,nx) in neighbors {
@@ -107,7 +107,7 @@ fn bfs(m:Maze)->Result[List[(u64,u64)],helper.Error] {
                 seen[at]=true
                 let prev:i32=int.narrow(id)
                 push(mut path,(ny,nx,prev))?
-                match std.deque.push_back(mut queue,list.len(path)-1) {Ok(())=>{},Error((c,_))=>return Error(Capacity(c))}
+                match deque.push_back(mut queue,list.len(path)-1) {Ok(())=>{},Error((c,_))=>return Error(Capacity(c))}
             }
         }
     }

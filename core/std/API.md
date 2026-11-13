@@ -21,7 +21,7 @@ test log and writes nothing to the tree; the report depends on the checker, so i
 
 **Naming std from another package.** There are no imports (LANG-7). A module that extends core
 (list, string, char, int, float, map, result) merges into core's name, so `list.sort` and
-`string.find` are written bare everywhere. The deque and the heap are core modules (`Deque[T]`, `deque.push_back`, `Heap[T]`, `heap.pop`; docs/spec/core.md), not std: `std.deque` and `std.heap` are deleted, not re-exported, and `list.swap` and `list.sort_stable` are core. Modules that are std's alone (order, set, pool, dir,
+`string.find` are written bare everywhere. The deque and the heap are core modules (`Deque[T]`, `deque.push_back`, `Heap[T]`, `heap.pop`; docs/spec/core.md), not std: `std.deque` and `std.heap` are deleted, not re-exported, and `list.swap` and `list.sort_stable` are core. `string.make_ascii_upper` and `string.make_ascii_lower` are core too, written over the carrier without a second UTF-8 pass; std no longer defines them, and callers keep the same names. Modules that are std's alone (order, set, pool, dir,
 file) are reached from another package through the package name: `std.order.compare`,
 `std.set.Set[u64]`, `std.pool.Pool[T]`, `std.file.read(d, p)`, `std.file.Error`. Variants are
 written bare (`Held(f)`, `NotUtf8`).
@@ -50,7 +50,7 @@ the seed's, read through one name. No extension declares a core member's name.
 | Module | Extends | Ops | Operations |
 |---|---|---|---|
 | list | yes | 10 | first, last, remove, insert, swap_remove, swap, truncate, reverse, sort, sum_bytes |
-| string | yes | 13 | with_capacity, is_boundary, push_i64, push_uint, make_ascii_upper, clear, find, starts_with, ends_with, split_once, strip_prefix, strip_suffix, trim_ascii |
+| string | yes | 12 | with_capacity, is_boundary, push_i64, push_uint, clear, find, starts_with, ends_with, split_once, strip_prefix, strip_suffix, trim_ascii |
 | char | yes | 3 | utf8_len, to_ascii_upper, digit |
 | int | yes | 2 | parse_uint, parse_int |
 | float | yes | 3 | parse64, parse32, is_finite |
@@ -62,3 +62,8 @@ the seed's, read through one name. No extension declares a core member's name.
 | dir |  | 3 | create_dir, remove_all, create_temp |
 | file |  | 10 | open, read_into, write_all, close, read, read_string, write, remove, try_lock, unlock |
 | **total** | **7 of 12** | **65** | |
+
+**Known cost.** float's push_fixed64 and its push_ascii helper build their digits as Bytes
+and pass them through `string.from_utf8`, revalidating about 20 ASCII bytes per number that
+they wrote themselves. That revalidation stays in std (no core entry point) until it shows in a
+profile.

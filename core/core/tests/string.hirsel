@@ -1,0 +1,66 @@
+// Laws of core.string's case changes (core/core/string.hirsel), each result derived by hand.
+fn same(a: String, b: String) -> bool {
+    a == b
+}
+
+// Only a-z change; É (two bytes) and '-' are kept.
+// expect: run upper_owned() = true
+fn upper_owned() -> bool {
+    let mut s = result.unwrap(string.from("abc-Éz"))
+    result.unwrap(string.make_ascii_upper(mut s))
+    same(s, "ABC-ÉZ")
+}
+
+// The neighbours of a-z: '`' (0x60) and '{' (0x7B) stay, as do '@' and '['; 0xFF-range
+// bytes of é are not shifted by the one-comparison test.
+// expect: run upper_range_edges() = true
+fn upper_range_edges() -> bool {
+    let mut s = result.unwrap(string.from("`az{@AZ[é"))
+    result.unwrap(string.make_ascii_upper(mut s))
+    same(s, "`AZ{@AZ[é")
+}
+
+// A literal is copied first.
+// expect: run upper_static() = true
+fn upper_static() -> bool {
+    let mut s = "hello"
+    result.unwrap(string.make_ascii_upper(mut s))
+    same(s, "HELLO")
+}
+
+// The neighbours of A-Z: '@' (0x40) and '[' (0x5B) stay, as do '`' and '{'; É's bytes
+// C3 89 are not shifted.
+// expect: run lower_range_edges() = true
+fn lower_range_edges() -> bool {
+    let mut s = result.unwrap(string.from("@AZ[`az{É"))
+    result.unwrap(string.make_ascii_lower(mut s))
+    s == "@az[`az{É"
+}
+
+// The edge rows of upper_range_edges and lower_range_edges four times over (44 bytes), so
+// each neighbour of a-z and A-Z falls in several lanes of a 16-byte vector and in the tail.
+// expect: run case_edges_across_vectors() = true
+fn case_edges_across_vectors() -> bool {
+    let mut up = result.unwrap(string.from("`az{@AZ[é`az{@AZ[é`az{@AZ[é`az{@AZ[é"))
+    result.unwrap(string.make_ascii_upper(mut up))
+    let mut low = result.unwrap(string.from("@AZ[`az{É@AZ[`az{É@AZ[`az{É@AZ[`az{É"))
+    result.unwrap(string.make_ascii_lower(mut low))
+    same(up, result.unwrap(string.from("`AZ{@AZ[é`AZ{@AZ[é`AZ{@AZ[é`AZ{@AZ[é"))) && same(low, result.unwrap(string.from("@az[`az{É@az[`az{É@az[`az{É@az[`az{É")))
+}
+
+// Under `bound bytes 0` the copy of the literal is refused: Error, and s is still "Abc".
+// expect: run upper_static_refused() = true
+fn upper_static_refused() -> bool {
+    let r: Result[bool, Capacity] = bound bytes 0 {
+        let mut s = "Abc"
+        let refused = match string.make_ascii_upper(mut s) {
+            Ok(()) => false,
+            Error(_) => true,
+        }
+        refused && same(s, "Abc")
+    }
+    match r {
+        Ok(b) => b,
+        Error(_) => false,
+    }
+}

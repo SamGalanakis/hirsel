@@ -1,6 +1,6 @@
 // Module `string`, extended (LANG-7): library members of the core module `string` (SEM-3).
 // The core members (new, from, from_utf8, into_bytes, as_bytes, slice, next_scalar,
-// byte_len, push, push_char, push_u64) are declared in core/core/string.hirsel. Field
+// byte_len, push, push_char, push_u64, make_ascii_upper, make_ascii_lower) are declared in core/core/string.hirsel. Field
 // legend, GROWTH and FREEZE: API.md, "Reading a contract".
 //
 // Representation: String is an opaque own type over a Bytes block: a 24-byte header
@@ -89,74 +89,6 @@ pub fn push_uint(mut s: String, n: u64, base: u32, width: u64, pad: char) -> Res
     Ok(())
 }
 
-/// Upper-cases ASCII a-z in place; other bytes are unchanged, so the result is valid UTF-8
-/// of the same length (Rust make_ascii_uppercase). Library code over into_bytes and
-/// from_utf8, which revalidates. Fails: Error(c) only when s is static (a literal) and
-/// into_bytes cannot admit its copy (core.md, "Strings"); s unchanged.
-/// Alloc: nothing for an owned s; byte_len rounded to 8 for a static one. Cost: O(len).
-/// Ex: `let mut up = string.from(row)?; string.make_ascii_upper(mut up)?`
-pub fn make_ascii_upper(mut s: String) -> Result[(), Capacity] {
-    let owned = replace(mut s, string.new())
-    let mut b = match string.into_bytes(take owned) {
-        Ok(take bs) => take bs,
-        Error((c, take back)) => {
-            s = back
-            return Error(c)
-        },
-    }
-    for i in 0 .. list.len(b) {
-        let x = b[i]
-        // One comparison: below b'a' wraps past 25. Every byte is stored, changed or not, so
-        // the loop has no branch and LLVM vectorizes it.
-        b[i] = if int.wrapping_sub(x, b'a') < 26 {
-            int.wrapping_sub(x, 32)
-        } else {
-            x
-        }
-    }
-    match string.from_utf8(take b) {
-        Ok(take up) => {
-            s = up
-        },
-        Error(_) => fail("string.make_ascii_upper: ASCII case change kept UTF-8"),
-    }
-    Ok(())
-}
-
-/// Lower-cases ASCII A-Z in place; other bytes are unchanged, so the result is valid UTF-8
-/// of the same length (Rust make_ascii_lowercase). Library code over into_bytes and
-/// from_utf8, which revalidates. Fails: Error(c) only when s is static (a literal) and
-/// into_bytes cannot admit its copy (core.md, "Strings"); s unchanged.
-/// Alloc: nothing for an owned s; byte_len rounded to 8 for a static one. Cost: O(len).
-/// Ex: `let mut key = string.from(word)?; string.make_ascii_lower(mut key)?`
-pub fn make_ascii_lower(mut s: String) -> Result[(), Capacity] {
-    let owned = replace(mut s, string.new())
-    let mut b = match string.into_bytes(take owned) {
-        Ok(take bs) => take bs,
-        Error((c, take back)) => {
-            s = back
-            return Error(c)
-        },
-    }
-    for i in 0 .. list.len(b) {
-        let x = b[i]
-        // One comparison: below b'A' wraps past 25. Every byte is stored, changed or not, so
-        // the loop has no branch and LLVM vectorizes it.
-        b[i] = if int.wrapping_sub(x, b'A') < 26 {
-            int.wrapping_add(x, 32)
-        } else {
-            x
-        }
-    }
-    match string.from_utf8(take b) {
-        Ok(take low) => {
-            s = low
-        },
-        Error(_) => fail("string.make_ascii_lower: ASCII case change kept UTF-8"),
-    }
-    Ok(())
-}
-
 /// s written n times into a new string of exactly byte_len(s) * n bytes (Rust str::repeat).
 /// Fails: Error(c) when that storage is refused; Fail when byte_len(s) * n overflows u64.
 /// Alloc: byte_len(s) * n rounded to 8, current limit. Cost: O(byte_len(s) * n).
@@ -175,19 +107,11 @@ pub fn repeat(s: String, n: u64) -> Result[String, Capacity] {
     Ok(take out)
 }
 
-/// Empties s; keeps an owned s's storage (into_bytes, list.clear, from_utf8). A static s
-/// (a literal) is copied by into_bytes first; if that copy is refused, s becomes
-/// `string.new()`. Alloc: nothing for an owned s. Cost: O(1).
+/// Empties s; keeps an owned s's storage, and a static s (a literal) becomes the empty
+/// static string, so clearing admits nothing (core truncate to 0). Alloc: nothing. Cost: O(1).
 /// Ex: `string.clear(mut line)`
 pub fn clear(mut s: String) {
-    let owned = replace(mut s, string.new())
-    if let Ok(take bs) = string.into_bytes(take owned) {
-        let mut b = bs
-        list.clear(mut b)
-        if let Ok(take empty) = string.from_utf8(take b) {
-            s = empty
-        }
-    }
+    string.truncate(mut s, 0)
 }
 
 /// The first byte position at or after `start` where pat occurs, or None. An empty pat is

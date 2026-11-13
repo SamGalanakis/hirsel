@@ -66,6 +66,8 @@ operations! {
     ("string", "push_char", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("string", "push_u64", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("string", "truncate", Lane::PendingCode, "C", "std-seed-api-889", false),
+    ("string", "make_ascii_upper", Lane::PendingCode, "C", "std-seed-api-889", false),
+    ("string", "make_ascii_lower", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("arc", "new", Lane::Runtime(Kernel::NewOwner(Some(Counted::Arc))), "A", "core-ops-914", false),
     ("arc", "share", Lane::Runtime(Kernel::Share(Counted::Arc)), "A", "core-ops-914", false),
     ("arc", "try_unwrap", Lane::Runtime(Kernel::TryUnwrap(Counted::Arc)), "A", "core-ops-914", false),

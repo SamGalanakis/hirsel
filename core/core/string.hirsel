@@ -332,6 +332,43 @@ pub fn truncate(mut s: String, n: u64) {
     shorten(mut s, n)
 }
 
+pub fn make_ascii_upper(mut s: String) -> Result[(), Capacity] {
+    let owned = replace(mut s, string.new())
+    let mut b = match into_bytes(take owned) {
+        Ok(take bs) => take bs,
+        Error((c, take back)) => {
+            s = back
+            return Error(c)
+        },
+    }
+    for i in 0 .. list.len(b) {
+        let x = b[i]
+        // One comparison: below b'a' wraps past 25. Every byte is stored, changed or not, so
+        // the loop has no branch and vectorizes. Only a-z change, so b stays UTF-8.
+        b[i] = if int.wrapping_sub(x, b'a') < 26 { int.wrapping_sub(x, 32) } else { x }
+    }
+    s = of_bytes(take b)
+    Ok(())
+}
+
+pub fn make_ascii_lower(mut s: String) -> Result[(), Capacity] {
+    let owned = replace(mut s, string.new())
+    let mut b = match into_bytes(take owned) {
+        Ok(take bs) => take bs,
+        Error((c, take back)) => {
+            s = back
+            return Error(c)
+        },
+    }
+    for i in 0 .. list.len(b) {
+        let x = b[i]
+        // As make_ascii_upper: only A-Z change, so b stays UTF-8.
+        b[i] = if int.wrapping_sub(x, b'A') < 26 { int.wrapping_add(x, 32) } else { x }
+    }
+    s = of_bytes(take b)
+    Ok(())
+}
+
 // The kernel, the only unchecked code in core. The String and Bytes carriers are one layout,
 // {data, length, capacity}; these rewrite or reinterpret a carrier and check nothing, so each
 // caller establishes the precondition stated on it.

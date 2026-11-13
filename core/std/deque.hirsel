@@ -1,0 +1,77 @@
+// VecDeque's ring shape, adapted to safe List[Option[T]] slots. The slot list's
+// length is a power of two (or zero); head and count describe the live interval.
+// Option slots allow moves without placeholders or allocation on removal.
+pub opaque type Deque[T] {
+    slots: List[Option[T]],
+    head: u64,
+    count: u64
+}
+
+/// Empty deque, no allocation. Ex: `let mut q: std.deque.Deque[u64] = std.deque.new()`
+pub fn new[T]() -> Deque[T] {
+    Deque(slots: list.new(), head: 0, count: 0)
+}
+
+/// Live element count. Cost: O(1). Alloc: nothing.
+pub fn len[T](d: Deque[T]) -> u64 { d.count }
+
+/// Appends x. Error returns x and leaves d unchanged. Alloc: doubling GROWTH.
+/// Cost: amortised O(1). Ex: `std.deque.push_back(mut q, take x)?`
+pub fn push_back[T](mut d: Deque[T], take x: T) -> Result[(), (Capacity, T)] {
+    if let Error(c) = grow(mut d) { return Error((c, take x)) }
+    let i = (d.head + d.count) & (list.len(d.slots) - 1)
+    let _ = list.set(mut d.slots, i, Some(take x))
+    d.count += 1
+    Ok(())
+}
+
+/// Prepends x. Error returns x and leaves d unchanged. Alloc: doubling GROWTH.
+/// Cost: amortised O(1).
+pub fn push_front[T](mut d: Deque[T], take x: T) -> Result[(), (Capacity, T)] {
+    if let Error(c) = grow(mut d) { return Error((c, take x)) }
+    d.head = int.wrapping_sub(d.head, 1) & (list.len(d.slots) - 1)
+    let _ = list.set(mut d.slots, d.head, Some(take x))
+    d.count += 1
+    Ok(())
+}
+
+/// Removes the front, or None. Alloc: nothing. Cost: O(1), including alternating ends.
+pub fn pop_front[T](mut d: Deque[T]) -> Option[T] {
+    if d.count == 0 { return None }
+    let x = list.set(mut d.slots, d.head, None)
+    d.head = (d.head + 1) & (list.len(d.slots) - 1)
+    d.count -= 1
+    x
+}
+
+/// Removes the back, or None. Alloc: nothing. Cost: O(1).
+pub fn pop_back[T](mut d: Deque[T]) -> Option[T] {
+    if d.count == 0 { return None }
+    d.count -= 1
+    let i = (d.head + d.count) & (list.len(d.slots) - 1)
+    list.set(mut d.slots, i, None)
+}
+
+// Allocate the new slot block before moving anything, so Capacity is atomic.
+// A full ring doubles; the first ring has one logical slot (List may reserve four).
+fn grow[T](mut d: Deque[T]) -> Result[(), Capacity] {
+    let cap = list.len(d.slots)
+    if d.count < cap { return Ok(()) }
+    let next: u64 = if cap == 0 { 1 } else { cap * 2 }
+    let mut slots: List[Option[T]] = list.with_capacity(next)?
+    let mut j: u64 = 0
+    while j < next {
+        let _ = list.push(mut slots, None)
+        j += 1
+    }
+    let mut i: u64 = 0
+    while i < d.count {
+        let at = (d.head + i) & (cap - 1)
+        let x = list.set(mut d.slots, at, None)
+        let _ = list.set(mut slots, i, take x)
+        i += 1
+    }
+    d.slots = take slots
+    d.head = 0
+    Ok(())
+}

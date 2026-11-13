@@ -1,39 +1,39 @@
 {
   "measurement": "Buck release, CPU 16, jobs 1, instructions:u, fresh private store, complete driver interval including publication and teardown; separate perf stat instructions:u covers process startup, dynamic loader, output and exit",
-  "basis": "9f0f7927 merged source after Map replacement/removal and scalar conversion support. Fixed-manifest actual line counts 6239/2848. Expected-work std ceilings are re-baselined; stricter green M1 ceilings remain. Source-line movement alone prints reference drift and does not skip numeric comparisons. Fixed finished-process budget remains 60000.",
+  "basis": "core-ops-914 generic runtime/count-layout substitution, FORM 56 carrier views and fourth private string kernel complete more source bodies. Actual fixed-manifest code lines and current projections; observation plus two percent rounded up to 100. Fixed finished-process budget remains 60000.",
   "corpora": {
     "m1": {
-      "code_lines": 6239,
-      "check_lower_per_line": 24300,
-      "whole_request_per_line": 45700,
-      "whole_process_per_line": 45800
+      "code_lines": 6235,
+      "check_lower_per_line": 24800,
+      "whole_request_per_line": 46700,
+      "whole_process_per_line": 46800
     },
     "std": {
-      "code_lines": 2848,
-      "check_lower_per_line": 14500,
-      "whole_request_per_line": 33800,
-      "whole_process_per_line": 33900
+      "code_lines": 2844,
+      "check_lower_per_line": 14700,
+      "whole_request_per_line": 34000,
+      "whole_process_per_line": 34200
     }
   },
   "margin": "2 percent over the ordinary release observation, rounded up to 100 instructions per code line. Lower ceilings after savings. Re-baseline expected work growth only with reason, completed-body counts and commit range; do not change the fixed finished-process budget.",
   "finished_budget_per_line": 60000,
-  "forecast_revision": "9f0f79277830b53372e22c488552e36a13318269",
+  "forecast_revision": "ce2ddd012b79d8913c9699326a0950c29c2bd94e",
   "completion_forecast": {
     "m1": {
-      "complete_bodies": 304,
+      "complete_bodies": 306,
       "bodies": 315,
-      "missing_check_lower_per_line": 1052.289195688882,
-      "additional_publication_per_line": 200.8162935313966,
-      "measured_process_per_line": 45702.3973393172,
-      "finished_process_per_line": 46955.50282853748
+      "missing_check_lower_per_line": 938.8105937426301,
+      "additional_publication_per_line": 114.81939866623404,
+      "measured_process_per_line": 45825.550601443465,
+      "finished_process_per_line": 46879.18059385233
     },
     "std": {
-      "complete_bodies": 127,
+      "complete_bodies": 129,
       "bodies": 137,
-      "missing_check_lower_per_line": 635.0198724083102,
-      "additional_publication_per_line": 261.49869945512523,
-      "measured_process_per_line": 33228.715941011236,
-      "finished_process_per_line": 34125.23451287467
+      "missing_check_lower_per_line": 508.3604085208754,
+      "additional_publication_per_line": 144.94875149162684,
+      "measured_process_per_line": 33495.685302391,
+      "finished_process_per_line": 34148.9944624035
     }
   },
   "forecast_method": "Current process instructions plus recorded missing checker/emission and publication per line. Live construct self costs project the written population and calibrate to native check/lower less driver keys. Completed IR/template bytes per completed definition line are charged for every unfinished line, retaining partial IR, at measured definition-encoding and archive write/hash rates. Refresh projection/counts when support changes.",
@@ -194,6 +194,57 @@
           "check_lower_per_line": 14182.245786516854,
           "whole_request_per_line": 33046.52457865168,
           "whole_process_per_line": 33228.715941011236
+        }
+      }
+    },
+    {
+      "from_revision": "9f0f79277830b53372e22c488552e36a13318269",
+      "to_revision": "ce2ddd012b79d8913c9699326a0950c29c2bd94e",
+      "reason": "Expected supported-work growth: current core source bodies, generic task/channel/count layouts, FORM 56 carrier view copies, and string.shorten bind the private kernel used by truncate. The String-only static carrier rule also restores allocating byte literals. Refresh every observation and missing-work projection under the host rule; fixed budget unchanged.",
+      "completed_bodies_before": {
+        "m1": [
+          304,
+          315
+        ],
+        "std": [
+          127,
+          137
+        ]
+      },
+      "completed_bodies_after": {
+        "m1": [
+          306,
+          315
+        ],
+        "std": [
+          129,
+          137
+        ]
+      },
+      "previous_ceilings": {
+        "m1": {
+          "code_lines": 6239,
+          "check_lower_per_line": 24300,
+          "whole_request_per_line": 45700,
+          "whole_process_per_line": 45800
+        },
+        "std": {
+          "code_lines": 2848,
+          "check_lower_per_line": 14500,
+          "whole_request_per_line": 33800,
+          "whole_process_per_line": 33900
+        }
+      },
+      "measured_per_line": {
+        "m1": {
+          "check_lower_per_line": 24268.480513231756,
+          "whole_request_per_line": 45743.15862068965,
+          "whole_process_per_line": 45825.550601443465
+        },
+        "std": {
+          "check_lower_per_line": 14329.386427566807,
+          "whole_request_per_line": 33315.15576652602,
+          "whole_process_per_line": 33495.685302391
         }
       }
     }

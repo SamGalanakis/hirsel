@@ -170,10 +170,23 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
         "int main(void){ HirselCoreProcessConfig cfg={.root_limit=UINT64_MAX,.diagnostic=diagnostic,.scheduler={.event=record_event}CONFIGURATION};\n",
     ).replace("CONFIGURATION", configuration);
 
+    let layouts = hirsel_core_layout::compute(&module.types).unwrap();
     for (k, case) in cases.iter().enumerate() {
         let f = case.function;
         let sig = &module.signatures[module.functions[f.index()].signature.index()];
-        assert!(sig.dest.is_none(), "entry returns scalars to the C fixture");
+        let destination = sig
+            .dest
+            .map(|ty| {
+                let hirsel_core_layout::Layout::Fixed(layout) = &layouts[ty.index()].layout else {
+                    panic!("fixed entry destination");
+                };
+                format!(
+                    "_Alignas({}) uint8_t destination{k}[{}];",
+                    layout.align,
+                    layout.size.max(1)
+                )
+            })
+            .unwrap_or_default();
         let args = sig
             .params
             .iter()
@@ -190,10 +203,15 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
             })
             .collect::<Vec<_>>()
             .join(", ");
-        let args = if args.is_empty() {
-            "ctx".into()
+        let context = if sig.dest.is_some() {
+            format!("ctx, destination{k}")
         } else {
-            format!("ctx, {args}")
+            "ctx".into()
+        };
+        let args = if args.is_empty() {
+            context
+        } else {
+            format!("{context}, {args}")
         };
         let ret = if sig.results.is_empty() {
             "uint8_t".into()
@@ -226,7 +244,7 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
         } else {
             ""
         };
-        writeln!(c,"static uint8_t case{k}(HirselCoreContext *ctx,const HirselCoreProcessConfig *cfg,HirselCoreMainResult *result) {{ (void)cfg; (void)result; hirsel_core_test_reset_limit(ctx,UINT64_C({limit})); {files} traces=0; arc_count=0; {begin} {inject} uint64_t initial=hirsel_core_test_available(ctx); {ret} r{k} = {}({args});",symbol(module,f)).unwrap();
+        writeln!(c,"static uint8_t case{k}(HirselCoreContext *ctx,const HirselCoreProcessConfig *cfg,HirselCoreMainResult *result) {{ (void)cfg; (void)result; hirsel_core_test_reset_limit(ctx,UINT64_C({limit})); {files} traces=0; arc_count=0; {begin} {inject} {destination} uint64_t initial=hirsel_core_test_available(ctx); {ret} r{k} = {}({args});",symbol(module,f)).unwrap();
         writeln!(invocations, "assert(hirsel_core_run(&cfg,case{k})==0);").unwrap();
         let status = if sig.results.is_empty() {
             format!("r{k}")

@@ -1,0 +1,25 @@
+// PROG-4: parameters are capabilities; success is unit in Result.
+// expect: refuse PROG-4 at 8:11
+// expect: refuse PROG-4 at 10:9
+// expect: refuse PROG-4 at 12:20
+// expect: refuse PROG-4 at 14:21
+// expect: refuse PROG-4 at 16:4
+@test
+fn scalar(n: u64) -> Result[(), ()] { Ok(()) }
+@test
+fn argv(a: Args) -> Result[(), ()] { Ok(()) }
+@test
+fn not_result() -> u64 { 1u64 }
+@test
+fn not_unit_ok() -> Result[u64, ()] { Ok(1u64) }
+@test
+fn implicit_unit() {}
+@test
+fn each[T]() -> Result[(), ()] { Ok(()) }
+@test
+fn mut_cap(mut out: Stdout) -> Result[(), ()] { Ok(()) }
+@test
+fn take_cap(take out: Stdout) -> Result[(), ()] { Ok(()) }
+// expect: refuse PROG-4 at 18:8
+// expect: refuse PROG-4 at 20:12
+// expect: refuse PROG-4 at 22:13

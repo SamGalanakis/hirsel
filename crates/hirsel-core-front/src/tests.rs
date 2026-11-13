@@ -188,7 +188,7 @@ fn concrete_rows_reaching_rigid(module: &Module) -> Vec<(String, String)> {
     found
 }
 
-fn run_case(path: &Path) -> Vec<String> {
+pub(crate) fn run_case(path: &Path) -> Vec<String> {
     let source = std::fs::read_to_string(path).expect("case reads");
     let (index, modules) = program_inputs(&source);
     let mut p = Program::declare(&index, &modules);

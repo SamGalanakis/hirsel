@@ -18,6 +18,7 @@ mod layout;
 mod library;
 pub use library::{Library, Rows};
 mod own;
+mod test_functions;
 mod types;
 
 pub use body::{CoreCheck, Counts, Emitter, GenericTemplate, materialize};
@@ -96,6 +97,7 @@ pub struct Program<'a> {
     /// (LANG-8).
     pub entry: Option<DefPath>,
     pub(crate) library_modules: usize,
+    pub(crate) has_test_functions: bool,
     pub(crate) pending: Vec<decls::Pending>,
     pub(crate) alias_state: Vec<u8>,
     /// Aliases being lowered, each with its reference continuing the chain.
@@ -241,6 +243,7 @@ impl<'a> Program<'a> {
             gaps: vec![],
             entry: None,
             library_modules: 0,
+            has_test_functions: library.is_some_and(|l| l.has_test_functions),
             pending: vec![],
             alias_state: vec![],
             alias_stack: vec![],
@@ -251,6 +254,7 @@ impl<'a> Program<'a> {
         p.register_constants();
         p.summarize();
         p.evaluate_constants();
+        test_functions::check(&mut p);
 
         for f in p.fns.base_len()..p.fns.len() {
             p.core_operations.push(body::core_ops::binding(&p.fns[f]));

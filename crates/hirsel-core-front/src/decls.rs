@@ -335,6 +335,8 @@ pub struct ParamDecl {
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FnDecl {
+    /// PROG-4: only another test function may refer to this function.
+    pub is_test: bool,
     pub path: DefPath,
     pub site: Site,
     pub at: ItemRef,
@@ -438,6 +440,7 @@ impl Program<'_> {
                     span: name_span,
                 };
                 let mut public = false;
+                let mut is_test = false;
                 let mut opaque = false;
                 let mut generics = vec![];
                 let mut declared = 0;
@@ -488,6 +491,7 @@ impl Program<'_> {
                         }
                         NodeKind::Attribute => {
                             let t = n.token.unwrap();
+                            is_test |= item.tree.token_text(item.text, t) == "test";
                             if item.tree.token_text(item.text, t) == "compact" {
                                 let tokens = n.origin.tokens.clone();
                                 compact = item.tree.tokens
@@ -521,6 +525,7 @@ impl Program<'_> {
                             .copied()
                             .find(|&c| item.tree.node(c).kind == NodeKind::Block);
                         self.fns.push(FnDecl {
+                            is_test,
                             path: path.clone(),
                             result_site: site,
                             site,
@@ -555,6 +560,7 @@ impl Program<'_> {
                     let f = self.fns.len() as u32;
                     let body = item.tree.children(d).last().copied();
                     self.fns.push(FnDecl {
+                        is_test: false,
                         path: path.clone(),
                         result_site: site,
                         site: self.site(at, d),
@@ -664,6 +670,7 @@ impl Program<'_> {
             .find(|&c| item.tree.node(c).kind == NodeKind::Block);
         let generics = generics_node.map_or(vec![], |g| self.generics(at, g));
         self.fns.push(FnDecl {
+            is_test: false,
             path,
             result_site: site,
             site,

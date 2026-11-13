@@ -196,7 +196,24 @@ fn execute_reports(
             } else {
                 format!("struct r{}", function.signature.0)
             };
-            write!(source, "}}; static uint8_t run{}(HirselCoreContext *ctx,void *destination,void *input) {{ struct input{} *args=input; *({result}*)destination={} (ctx", f.0, f.0, symbol(&module.instances[function.instance.index()])).unwrap();
+            let returned_place = signature
+                .dest
+                .map(|ty| {
+                    let hirsel_core_layout::Layout::Fixed(layout) = &layouts[ty.index()].layout
+                    else {
+                        panic!("fixed fixture result");
+                    };
+                    format!(
+                        "_Alignas({}) uint8_t returned_place[{}];",
+                        layout.align,
+                        layout.size.max(1)
+                    )
+                })
+                .unwrap_or_default();
+            write!(source, "}}; static uint8_t run{}(HirselCoreContext *ctx,void *destination,void *input) {{ struct input{} *args=input; {returned_place} *({result}*)destination={} (ctx", f.0, f.0, symbol(&module.instances[function.instance.index()])).unwrap();
+            if signature.dest.is_some() {
+                source.push_str(",returned_place");
+            }
             for i in 0..signature.params.len() {
                 write!(source, ",args->a{i}").unwrap();
             }
@@ -334,12 +351,27 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
             }
             writeln!(source, "}}; if(hirsel_core_test_run(ctx,run{},&args,&{variable},sizeof args,sizeof {variable})) return 10;", f.0).unwrap();
         } else {
+            if let Some(ty) = s.dest {
+                let hirsel_core_layout::Layout::Fixed(layout) = &layouts[ty.index()].layout else {
+                    panic!("fixed fixture result");
+                };
+                writeln!(
+                    source,
+                    "_Alignas({}) uint8_t returned_place[{}];",
+                    layout.align,
+                    layout.size.max(1)
+                )
+                .unwrap();
+            }
             write!(
                 source,
                 "{result}{}(ctx",
                 symbol(&module.instances[function.instance.index()])
             )
             .unwrap();
+            if s.dest.is_some() {
+                source.push_str(", returned_place");
+            }
             for j in 0..args.len() {
                 write!(source, ", a{j}").unwrap();
             }

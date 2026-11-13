@@ -92,6 +92,7 @@ impl<T> IndexMut<usize> for Rows<T> {
 /// The driver owns versioned external decoding and the immutable image sections.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Library {
+    pub(crate) has_test_functions: bool,
     pub types: Arc<Types>,
     pub decls: Arc<Table<TypeDecl>>,
     pub fns: Arc<Table<FnDecl>>,
@@ -106,6 +107,7 @@ pub struct Library {
 impl Library {
     pub fn publish(&self, writer: &mut impl Publisher) -> std::io::Result<Self> {
         Ok(Self {
+            has_test_functions: self.has_test_functions,
             types: Arc::new(self.types.publish(writer)?),
             decls: Arc::new(writer.table(&self.decls)?),
             fns: Arc::new(writer.table(&self.fns)?),
@@ -122,6 +124,7 @@ impl Library {
 impl Program<'_> {
     pub fn into_library(self) -> Library {
         Library {
+            has_test_functions: self.has_test_functions,
             types: Arc::new(self.types),
             decls: self.decls.freeze(),
             fns: self.fns.freeze(),

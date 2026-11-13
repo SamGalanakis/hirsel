@@ -99,6 +99,7 @@ pub(super) struct Tables<'a> {
     functions: &'a [cranelift_module::FuncId],
     statics: &'a [cranelift_module::DataId],
     glues: &'a drop::Glues,
+    allocators: &'a [fast::Allocator],
     trace_drops: bool,
     runtimes: std::cell::RefCell<calls::Imports>,
 }
@@ -181,7 +182,11 @@ fn emit(
             "CoreIR entry currently implements the x86-64 Linux C ABI".into(),
         ));
     }
-    let isa = isa(options)?;
+    let isa = {
+        let _span = observer.enter("isa_setup");
+        isa(options)?
+    };
+    let object_setup = observer.enter("object_setup");
     let builder = ObjectBuilder::new(
         isa,
         "hirsel-core",
@@ -189,8 +194,17 @@ fn emit(
     )
     .map_err(error)?;
     let mut object = ObjectModule::new(builder);
-    let signatures: Vec<_> = input.signatures.iter().map(abi::Signature::new).collect();
-    let mut functions = Vec::new();
+    drop(object_setup);
+    let signatures = {
+        let _span = observer.enter("signature_setup");
+        input
+            .signatures
+            .iter()
+            .map(abi::Signature::new)
+            .collect::<Vec<_>>()
+    };
+    let declarations = observer.enter("declarations");
+    let mut functions = Vec::with_capacity(input.functions.len());
     for f in &input.functions {
         let name = symbol(&input.instances[f.instance.index()]);
         functions.push(
@@ -207,6 +221,8 @@ fn emit(
                 .map_err(error)?,
         );
     }
+    drop(declarations);
+    let static_setup = observer.enter("static_setup");
     let mut statics = Vec::new();
     for (i, data) in input.statics.iter().enumerate() {
         let id = object
@@ -223,7 +239,12 @@ fn emit(
         object.define_data(id, &desc).map_err(error)?;
         statics.push(id);
     }
-    let glues = drop::Glues::declare(&mut object, input, layouts)?;
+    drop(static_setup);
+    let glues = {
+        let _span = observer.enter("glue_declarations");
+        drop::Glues::declare(&mut object, input, layouts)?
+    };
+    let allocators = fast::declare_allocators(&mut object, input)?;
     let tables = Tables {
         input,
         layouts,
@@ -231,6 +252,7 @@ fn emit(
         functions: &functions,
         statics: &statics,
         glues: &glues,
+        allocators: &allocators,
         trace_drops,
         runtimes: Default::default(),
     };
@@ -255,6 +277,9 @@ fn emit(
             .map_err(error)?;
     }
     glues.emit(&mut object, &tables, observer, &mut scratch)?;
+    for allocator in &allocators {
+        fast::emit_allocator(&mut object, &tables, allocator, observer, &mut scratch)?;
+    }
     let _write = observer.enter("object_write");
     Ok(Object {
         bytes: crate::object::finish(object.finish()).map_err(error)?,

@@ -95,15 +95,18 @@ impl Function<'_, '_, '_> {
         let one = self.b.ins().iconst(types::I64, 1);
         let nonzero_size = self.b.ins().umax(size, one);
         let offset_value = self.b.ins().iconst(types::I64, offset as i64);
-        let (native_size, overflow) = self.b.ins().uadd_overflow(nonzero_size, offset_value);
+        let native_size = self.b.ins().iadd(nonzero_size, offset_value);
         let zero_charge = self.b.ins().icmp_imm_s(IntCC::Equal, charge, 0);
         let too_large = self.b.ins().icmp_imm_s(
             IntCC::UnsignedGreaterThan,
-            native_size,
-            (i64::MAX as u64 - (alignment - 1)) as i64,
+            nonzero_size,
+            if alignment <= 512 {
+                (i64::MAX as u64 - (alignment - 1) - offset) as i64
+            } else {
+                0
+            },
         );
-        let fallback = self.b.ins().bor(overflow, zero_charge);
-        let fallback = self.b.ins().bor(fallback, too_large);
+        let fallback = self.b.ins().bor(zero_charge, too_large);
         let eligible = self.b.create_block();
         let fallback = if alignment > 512 {
             self.b.ins().iconst(types::I8, 1)
@@ -147,24 +150,20 @@ impl Function<'_, '_, '_> {
         self.b.ins().jump(done, &[null.into(), available.into()]);
         self.b.switch_to_block(allocate);
         self.debit(payer, charge, available);
-        let align_value = self.b.ins().iconst(types::I64, alignment as i64);
-        let base = self.c_call(
-            "hirsel_core_native_alloc",
-            &[U, U],
-            &[P],
-            &[native_size, align_value],
-        )?[0];
-        let pointer = self.b.ins().iadd_imm_s(base, offset as i64);
         let native_kind = u64::from(kind != AllocKind::Plain);
         let tag = native_kind
             | (u64::from(alignment.trailing_zeros() - 3) << memory_layout::OWN_ALIGNMENT_SHIFT);
         let tagged = self.b.ins().bor_imm_s(payer, tag as i64);
-        self.b.ins().store(
-            Flags::trusted(),
-            tagged,
-            pointer,
-            -(memory_layout::OWN_PAYER_BACK as i32),
-        );
+        let output = self.calls.storage(&mut self.b, 8);
+        let id = self
+            .allocators
+            .iter()
+            .find(|a| a.align == alignment && a.offset == offset)
+            .unwrap()
+            .function;
+        let allocator = self.calls.reference(self.object, &mut self.b, id);
+        self.b.ins().call(allocator, &[native_size, tagged, output]);
+        let pointer = self.b.ins().load(types::I64, Flags::trusted(), output, 0);
         let zero = self.b.ins().iconst(types::I64, 0);
         self.b.ins().jump(done, &[pointer.into(), zero.into()]);
         self.b.switch_to_block(slow);
@@ -464,4 +463,110 @@ pub(super) fn empty_bound(body: &Body) -> bool {
         }
     }
     enters == 1 && exits == 1
+}
+
+// Admission stays inline. PreserveAll moves register saves to physical allocation
+// so a rare host call does not force the enclosing loop's values into spill slots.
+// That convention has no register results; reuse the caller's ABI scratch word.
+fn allocator_signature() -> ir::Signature {
+    let mut signature = ir::Signature::new(cranelift_codegen::isa::CallConv::PreserveAll);
+    signature
+        .params
+        .extend((0..3).map(|_| AbiParam::new(types::I64)));
+    signature
+}
+pub(super) struct Allocator {
+    align: u64,
+    offset: u64,
+    function: cranelift_module::FuncId,
+}
+pub(super) fn declare_allocators(
+    object: &mut ObjectModule,
+    input: &c::Module,
+) -> Result<Vec<Allocator>> {
+    let mut allocators: Vec<Allocator> = Vec::new();
+    for body in input.functions.iter().filter_map(|f| f.body.as_ref()) {
+        for inst in &body.insts {
+            if let Inst::Alloc {
+                kind: kind @ (AllocKind::Plain | AllocKind::Counted),
+                align,
+                place: AllocPlace::Current | AllocPlace::Like(_),
+                ..
+            } = inst
+            {
+                let align = (*align).max(8);
+                let prefix = if *kind == AllocKind::Plain {
+                    memory_layout::PLAIN_PREFIX_BYTES
+                } else {
+                    memory_layout::GRAPH_PREFIX_BYTES
+                } as u64;
+                let offset = prefix.next_multiple_of(align);
+                if allocators
+                    .iter()
+                    .any(|a| a.align == align && a.offset == offset)
+                {
+                    continue;
+                }
+                let function = object
+                    .declare_function(
+                        &format!("hirsel.core.allocate.{align}.{offset}"),
+                        Linkage::Local,
+                        &allocator_signature(),
+                    )
+                    .map_err(error)?;
+                allocators.push(Allocator {
+                    align,
+                    offset,
+                    function,
+                });
+            }
+        }
+    }
+    Ok(allocators)
+}
+pub(super) fn emit_allocator(
+    object: &mut ObjectModule,
+    tables: &Tables<'_>,
+    allocator: &Allocator,
+    observer: &impl profile::Observer,
+    scratch: &mut Compilation,
+) -> Result<()> {
+    let build = observer.enter("build_glue");
+    let context = &mut scratch.codegen;
+    object.clear_context(context);
+    context.func.signature = allocator_signature();
+    let mut b = FunctionBuilder::new(&mut context.func, &mut scratch.frontend);
+    let entry = b.create_block();
+    b.append_block_params_for_function_params(entry);
+    b.switch_to_block(entry);
+    let args = [
+        b.block_params(entry)[0],
+        b.block_params(entry)[1],
+        b.block_params(entry)[2],
+    ];
+    let mut calls = calls::Calls::new(&tables.runtimes, tables.signatures, 0);
+    let alignment = b.ins().iconst(types::I64, allocator.align as i64);
+    let base = calls.c(
+        object,
+        &mut b,
+        "hirsel_core_native_alloc",
+        &[U, U],
+        &[P],
+        &[args[0], alignment],
+    )?[0];
+    let pointer = b.ins().iadd_imm_s(base, allocator.offset as i64);
+    b.ins().store(
+        Flags::trusted(),
+        args[1],
+        pointer,
+        -(memory_layout::OWN_PAYER_BACK as i32),
+    );
+    b.ins().store(Flags::trusted(), pointer, args[2], 0);
+    b.ins().return_(&[]);
+    b.seal_all_blocks();
+    b.finalize(object.target_config());
+    drop(build);
+    observer
+        .define(object, allocator.function, context)
+        .map_err(error)
 }

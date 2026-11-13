@@ -15,7 +15,7 @@ use std::{
     collections::BTreeMap,
     fs::File,
     io::{Seek, SeekFrom, Write},
-    path::Path,
+    path::{Path, PathBuf},
     rc::Rc,
 };
 
@@ -90,7 +90,7 @@ impl Meter {
     }
 }
 #[derive(Clone)]
-struct Measure(Rc<RefCell<Meter>>, bool);
+struct Measure(Rc<RefCell<Meter>>, bool, Option<PathBuf>);
 struct Span(Measure);
 impl Drop for Span {
     fn drop(&mut self) {
@@ -134,12 +134,34 @@ impl Observer for Measure {
                 ctx.func.dfg.signatures.len()
             );
         }
+        if let Some(prefix) = &self.2 {
+            let _span = self.scope("profile_counts");
+            std::fs::write(
+                prefix.with_extension(format!("{}.before.clif", function.as_u32())),
+                ctx.func.display().to_string(),
+            )
+            .unwrap();
+            ctx.set_disasm(true);
+        }
         if self.1 {
             return Ok(());
         }
         {
             let _span = self.scope("codegen");
             ctx.compile(object.isa(), &mut Default::default())?;
+        }
+        if let Some(prefix) = &self.2 {
+            let _span = self.scope("profile_counts");
+            std::fs::write(
+                prefix.with_extension(format!("{}.after.clif", function.as_u32())),
+                ctx.func.display().to_string(),
+            )
+            .unwrap();
+            std::fs::write(
+                prefix.with_extension(format!("{}.vcode", function.as_u32())),
+                ctx.compiled_code().unwrap().vcode.as_deref().unwrap(),
+            )
+            .unwrap();
         }
         let _span = self.scope("object_function");
         let code = ctx.compiled_code().unwrap();
@@ -162,6 +184,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let measure = Measure(
         Rc::new(RefCell::new(Meter::new())),
         args.iter().any(|a| a == "--ir-counts-only"),
+        args.iter()
+            .position(|a| a == "--dump-prefix")
+            .map(|i| PathBuf::from(&args[i + 1])),
     );
     let _previous = timing::set_thread_profiler(Box::new(measure.clone()));
     let total = measure.scope("total");

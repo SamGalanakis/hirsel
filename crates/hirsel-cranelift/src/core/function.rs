@@ -24,6 +24,7 @@ pub(super) struct Function<'a, 'b, 'c> {
     pub signatures: &'c [abi::Signature],
     pub glues: &'c drop::Glues,
     pub context: Value,
+    pub allocators: &'c [fast::Allocator],
     pub signature: &'c abi::Signature,
     pub result_storage: Option<Value>,
     pub raise_blocks: Vec<(u8, Option<BlockId>, ir::Block)>,
@@ -107,7 +108,7 @@ pub(super) fn emit(
         ));
     }
     b.switch_to_block(blocks[0]);
-    let params = b.block_params(blocks[0]).to_vec();
+    let params = b.block_params(blocks[0]);
     let context = params[usize::from(signature.indirect)];
     let result_storage = signature.indirect.then(|| params[0]);
     let mut f = Function {
@@ -124,6 +125,7 @@ pub(super) fn emit(
         statics,
         signatures,
         context,
+        allocators: tables.allocators,
         glues: tables.glues,
         signature,
         result_storage,
@@ -483,7 +485,23 @@ impl Function<'_, '_, '_> {
                     results.push(value)
                 });
                 let status = results.pop().unwrap();
-                self.call_failure(status, call.fail)?;
+                let infallible =
+                    match call.callee {
+                        Callee::Direct(f) => self.input.functions[f.index()]
+                            .body
+                            .as_ref()
+                            .is_some_and(|body| {
+                                body.insts.is_empty()
+                                    && body
+                                        .terminators
+                                        .iter()
+                                        .all(|t| matches!(t, Terminator::Return(_)))
+                            }),
+                        _ => false,
+                    };
+                if !infallible {
+                    self.call_failure(status, call.fail)?;
+                }
                 for (&v, &result) in call
                     .results
                     .get(&self.body.pools.values)

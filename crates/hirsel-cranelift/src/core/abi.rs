@@ -14,9 +14,7 @@ pub(super) struct Signature {
 }
 impl Signature {
     pub fn new(s: &c::Signature) -> Self {
-        let mut native = s.clone();
-        native.results.push(Ty::Scalar(Scalar::U8));
-        Self::build(&native, true)
+        Self::build(s, true)
     }
     pub fn c(params: &[Ty], results: &[Ty]) -> Self {
         let mut signature = Self::build(
@@ -39,11 +37,16 @@ impl Signature {
         signature
     }
     fn build(s: &c::Signature, context: bool) -> Self {
+        let mut results = Vec::with_capacity(s.results.len() + usize::from(context));
+        results.extend_from_slice(&s.results);
+        if context {
+            results.push(Ty::Scalar(Scalar::U8));
+        }
         let mut clif = ir::Signature::new(CallConv::SystemV);
         let mut offsets = Vec::new();
         let mut size: u32 = 0;
         let mut align = 1;
-        for &r in &s.results {
+        for &r in &results {
             let n = ty(r).bytes();
             align = align.max(n);
             size = size.next_multiple_of(n);
@@ -52,7 +55,7 @@ impl Signature {
         }
         size = size.next_multiple_of(align);
         let indirect = size > 16;
-        let aggregate = s.results.len() > 1;
+        let aggregate = results.len() > 1;
         if indirect {
             clif.params
                 .push(AbiParam::special(types::I64, ArgumentPurpose::StructReturn));
@@ -74,12 +77,12 @@ impl Signature {
         if !indirect {
             if !aggregate {
                 clif.returns
-                    .extend(s.results.iter().map(|&r| AbiParam::new(ty(r))));
+                    .extend(results.iter().map(|&r| AbiParam::new(ty(r))));
             } else {
                 for chunk in 0..size.div_ceil(8) {
                     let mut integer = false;
                     let mut f64_ = false;
-                    for (&r, &off) in s.results.iter().zip(&offsets) {
+                    for (&r, &off) in results.iter().zip(&offsets) {
                         if off / 8 == chunk {
                             integer |= !r.is_float();
                             f64_ |= ty(r) == types::F64;
@@ -99,7 +102,7 @@ impl Signature {
         Self {
             clif,
             offsets,
-            results: s.results.clone(),
+            results,
             size,
             indirect,
             aggregate,

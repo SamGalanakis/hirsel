@@ -36,6 +36,7 @@ use hirsel_core_resolve::{Refusal, Target};
 use hirsel_core_syntax::{Item, NodeId, NodeKind, Span, TokenKind, byte_value, character_value};
 use std::collections::HashMap;
 
+mod builtins;
 mod calls;
 mod cleanup;
 mod closures;

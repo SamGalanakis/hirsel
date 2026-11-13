@@ -599,6 +599,9 @@ impl<'c, 'a> Cx<'c, 'a> {
         if !self.live() {
             return None;
         }
+        if let Some(value) = self.core_value(f, types, vals, result, n) {
+            return value;
+        }
         let (func, signature) = match self.instance_row(f, types) {
             Ok(row) => row,
             Err(what) => {

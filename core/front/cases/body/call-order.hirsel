@@ -7,7 +7,7 @@
 // expect: refuse LANG-12 at 15:29
 
 // expect: accept
-// expect: gap this generic core operation is not built
+// expect: accept
 fn g[T](n: u64) -> Result[List[T], u8] { loop {} }
 fn f() -> List[u64] { result.unwrap(g(5)) }
 fn empty() -> u64 { list.len(list.new()) }

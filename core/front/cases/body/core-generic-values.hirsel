@@ -1,0 +1,15 @@
+// Core generic operations inline their already-typed value operations.
+// expect: accept
+// expect: run empty() = 0
+// expect: run exchanged() = 39
+// expect: run payload() = 9
+// expect: run absent() = fail Unwrap
+fn empty() -> u64 { let xs: List[u8] = list.new(); list.len(xs) + list.capacity(xs) }
+fn exchanged() -> u64 { let mut x: u64 = 3; let old = replace(mut x, 9); old * 10 + x }
+fn payload() -> u8 { option.unwrap(Some(9)) }
+fn absent() -> u8 { option.unwrap(None) }
+
+// expect: run result_ok() = 5
+// expect: run result_error() = fail Unwrap
+fn result_ok() -> u8 { let r: Result[u8, u64] = Ok(5); result.unwrap(take r) }
+fn result_error() -> u8 { let r: Result[u8, u64] = Error(6); result.unwrap(take r) }

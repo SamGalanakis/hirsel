@@ -373,8 +373,8 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
             **isolated_common
         )
     if host_cases:
-        _test_suite(name = name + "-openat2", tests = host_targets, labels = ["local-execution", "requires-openat2"])
-        _test_suite(name = name, tests = host_targets + [
+        _suite(name = name + "-openat2", tests = host_targets, labels = ["local-execution", "requires-openat2"])
+        _suite(name = name, tests = host_targets + [
             ":{}-shard-{}".format(prefix, shard + 1)
             for _, count, prefix in groups for shard in range(count)
         ])
@@ -741,13 +741,21 @@ def _script_binary_impl(ctx):
 
 _script_binary = rule(impl = _script_binary_impl, attrs = {"script": attrs.source()})
 
-def _test_suite_impl(_ctx):
-    return [DefaultInfo()]
+def _test_suite_impl(ctx):
+    inputs = []
+    for dep in ctx.attrs.inputs:
+        inputs.extend(dep[DefaultInfo].default_outputs)
+        inputs.extend(dep[DefaultInfo].other_outputs)
+    return [DefaultInfo(sub_targets = {"inputs": [DefaultInfo(other_outputs = inputs)]})]
 
 # `buck2 test <suite>` runs the targets in its built-in `tests` attribute.
 _test_suite = rule(impl = _test_suite_impl, attrs = {
     "labels": attrs.list(attrs.string(), default = []),
+    "inputs": attrs.list(attrs.dep(), default = []),
 })
+
+def _suite(name, tests, **kwargs):
+    _test_suite(name = name, tests = tests, inputs = [test + "[inputs]" for test in tests], **kwargs)
 
 def hirsel_script_test(name, script, data, runtime_archives = [], full = True, args = [], bin_exes = {}, products = None, production = False, files_env = {}, sanitizer = None, host = False, shards = 1):
     """A script harness with the same hermetic inputs as native Rust tests.
@@ -779,7 +787,7 @@ def hirsel_script_test(name, script, data, runtime_archives = [], full = True, a
             visibility = ["PUBLIC"],
         )
     if shards > 1:
-        _test_suite(
+        _suite(
             name = name,
             tests = [":{}-shard-{}".format(name, shard) for shard in range(1, shards + 1)],
             labels = ["gate"],
@@ -1306,8 +1314,8 @@ def hirsel_core_driver_native_test(name, data):
             extra_env = {"HIRSEL_TEST_DEDICATED_CASE": case},
             **common
         )
-    _test_suite(name = name + "-openat2", tests = host_targets, labels = ["local-execution", "requires-openat2"])
-    _test_suite(name = name, tests = [":" + name + "-pool"] + host_targets)
+    _suite(name = name + "-openat2", tests = host_targets, labels = ["local-execution", "requires-openat2"])
+    _suite(name = name, tests = [":" + name + "-pool"] + host_targets)
 
 def hirsel_core_llvm_native_test(name, data):
     """CoreIR executable agreement uses the core runtime, with no old std products."""

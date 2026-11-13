@@ -92,8 +92,15 @@ pub(super) fn drop_glue(
             "%payload".into()
         };
         #[cfg(test)]
-        if resource && e.fixed(TypeId(t as u32)).size >= 8 {
-            let id = e.calc(format!("load i64, ptr {base}, align 1"));
+        if resource
+            && let hirsel_core_layout::Body::Record(fields) = &module.types[t].body
+            && let Some(i) = fields
+                .iter()
+                .position(|f| f.ty == FieldTy::Scalar(Scalar::U64))
+        {
+            let offset = e.fixed(TypeId(t as u32)).offsets[0][i];
+            let field = e.calc(format!("getelementptr i8, ptr {base}, i64 {offset}"));
+            let id = e.calc(format!("load i64, ptr {field}, align 1"));
             e.runtime_void("hirsel_core_test_drop_trace", &[("i64".into(), id)]);
         }
         // A resource's finalizer runs under its grant; a core slot kernel's on an

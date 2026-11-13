@@ -198,6 +198,7 @@ fn execute_reports(
     if host_files {
         source.push_str(r#"
 extern void hirsel_core_test_reset_limit(HirselCoreContext *,uint64_t);
+extern uint64_t hirsel_core_test_primary_refund(const HirselCoreContext *);
 static HirselCoreHostOutcome file_issue(void *state,HirselCoreHostRequest *r) {
  if(r->operation==0) return (HirselCoreHostOutcome){.value=r->handle};
  if(r->operation!=3) __builtin_abort();
@@ -260,7 +261,7 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
             writeln!(source, "HirselCoreProvider issuing={{0,file_issue,file_deliver}}; for(uint64_t key=1;key<=UINT64_C({maximum});key++) {{ HirselCoreHostRequest request={{.operation=0,.handle=key}}; HirselCoreHostOutcome opened=hirsel_core_host_file_open(ctx,&issuing,&request);if(opened.status || opened.error.tag || opened.value!=key) __builtin_abort(); }} traces=0;").unwrap();
             writeln!(
                 process_calls,
-                "if(hirsel_core_run(&config,fixture{i})) return 11;"
+                "{{ uint8_t code=hirsel_core_run(&config,fixture{i}); if(code) {{ fprintf(stderr,\"fixture f{} args {:?} limit {limit} injection {injection:?}: process code %u\\n\",code); return 11; }} }}", f.0, args
             )
             .unwrap();
         } else {
@@ -368,7 +369,12 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
         expected.push(report.trace.len() as u64);
         expected.extend(&report.trace);
         expected.push(report.admissions as u64);
-        writeln!(source,"uint64_t used = UINT64_C({limit}) - hirsel_core_test_available(ctx); fwrite(&used,8,1,stdout); uint64_t nt=traces; fwrite(&nt,8,1,stdout); fwrite(trace,8,traces,stdout); uint64_t na=hirsel_core_test_attempts(ctx); fwrite(&na,8,1,stdout); hirsel_core_causes_drop(causes); if(status && hirsel_core_test_available(ctx) != UINT64_C({limit})) return 9; hirsel_core_context_free(ctx);").unwrap();
+        let primary_refund = if host_files {
+            "hirsel_core_test_primary_refund(ctx)"
+        } else {
+            "0"
+        };
+        writeln!(source,"uint64_t used = UINT64_C({limit}) - hirsel_core_test_available(ctx); fwrite(&used,8,1,stdout); uint64_t nt=traces; fwrite(&nt,8,1,stdout); fwrite(trace,8,traces,stdout); uint64_t na=hirsel_core_test_attempts(ctx); fwrite(&na,8,1,stdout); uint64_t startup_refund={primary_refund}; hirsel_core_causes_drop(causes); if(status && hirsel_core_test_available(ctx) != UINT64_C({limit}) + startup_refund) return 9; hirsel_core_context_free(ctx);").unwrap();
         if host_files {
             // Context/run ownership belongs to hirsel_core_run in this path.
             let end = source.rfind("hirsel_core_context_free(ctx);").unwrap();
@@ -384,10 +390,39 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
     }
     source.push_str("return 0; }\n");
     let actual = link_run(&scratch, &source);
-    assert_eq!(
-        actual,
-        expected,
-        "optimize={optimize}\n{}",
+    // Decode each report independently so a red row cannot hide later rows in
+    // this executable. The count words include either results or causes, then
+    // retained charge, the drop trace, and admission attempts.
+    fn take_report<'a>(words: &mut &'a [u64]) -> Option<&'a [u64]> {
+        let payload = usize::try_from(*words.get(1)?).ok()?;
+        let trace_at = payload.checked_add(3)?;
+        let trace = usize::try_from(*words.get(trace_at)?).ok()?;
+        let end = trace_at.checked_add(trace)?.checked_add(2)?;
+        let report = words.get(..end)?;
+        *words = &words[end..];
+        Some(report)
+    }
+    let (mut actual, mut expected) = (actual.as_slice(), expected.as_slice());
+    let mut failures = Vec::new();
+    for (function, args) in runs {
+        let got = take_report(&mut actual);
+        let want = take_report(&mut expected).expect("the authored report is complete");
+        if got != Some(want) {
+            let name = &module.instances[module.functions[function.index()].instance.index()];
+            failures.push(format!(
+                "case {}({args:?}): expected {want:?}, got {got:?}",
+                name.definition
+            ));
+        }
+    }
+    assert!(
+        actual.is_empty() && expected.is_empty(),
+        "trailing report words: {actual:?} / {expected:?}"
+    );
+    assert!(
+        failures.is_empty(),
+        "optimize={optimize}\n{}\nCoreIR:\n{}",
+        failures.join("\n"),
         text::print(module)
     );
 }
@@ -453,7 +488,12 @@ fn link_run(scratch: &Scratch, source: &str) -> Vec<u64> {
     let run = Command::new(link_program(scratch, source))
         .output()
         .unwrap();
-    assert!(run.status.success(), "native execution: {:?}", run.status);
+    assert!(
+        run.status.success(),
+        "native execution: {:?}\n{}",
+        run.status,
+        String::from_utf8_lossy(&run.stderr)
+    );
     let actual: Vec<_> = run
         .stdout
         .chunks_exact(8)
@@ -732,40 +772,63 @@ fn every_front_end_run_case_matches_evaluator() {
     files(&root.join("cases"), &mut cases);
     cases.sort();
     let mut count = 0;
+    let mut failures = Vec::new();
     for file in cases {
         let source = fs::read_to_string(&file).unwrap();
         if !source.lines().any(|l| l.starts_with("// expect: run ")) {
             continue;
         }
         println!("front-end fixture: {}", file.display());
-        let (module, functions) = front::lower(&root, &source);
-        let mut runs = Vec::new();
-        for line in source
-            .lines()
-            .filter_map(|l| l.strip_prefix("// expect: run "))
-        {
-            let call = line.split_once(" = ").unwrap().0;
-            let (name, args) = call.strip_suffix(')').unwrap().split_once('(').unwrap();
-            let f = functions[name];
-            let sig = &module.signatures[module.functions[f.index()].signature.index()];
-            let args = sig
-                .params
-                .iter()
-                .zip(args.split(',').filter(|a| !a.is_empty()))
-                .map(|(p, a)| {
-                    let Param::Value(t) = p else {
-                        panic!("scalar run parameter")
-                    };
-                    eval::scalar(*t, a.trim())
-                })
-                .collect();
-            runs.push((f, args));
-            count += 1;
+        let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (module, functions) = front::lower(&root, &source);
+            let mut runs = Vec::new();
+            for line in source
+                .lines()
+                .filter_map(|l| l.strip_prefix("// expect: run "))
+            {
+                let call = line.split_once(" = ").unwrap().0;
+                let (name, args) = call.strip_suffix(')').unwrap().split_once('(').unwrap();
+                let f = functions[name];
+                let sig = &module.signatures[module.functions[f.index()].signature.index()];
+                let args = sig
+                    .params
+                    .iter()
+                    .zip(args.split(',').filter(|a| !a.is_empty()))
+                    .map(|(p, a)| {
+                        let Param::Value(t) = p else {
+                            panic!("scalar run parameter")
+                        };
+                        eval::scalar(*t, a.trim())
+                    })
+                    .collect();
+                runs.push((f, args));
+                count += 1;
+            }
+            execute(&module, &runs, false);
+        }));
+        if let Err(error) = attempt {
+            let message = error
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| error.downcast_ref::<&str>().copied())
+                .unwrap_or("non-string panic");
+            // Assembly/link failures prevent every row of this fixture from
+            // running; name all of them instead of silently dropping the file.
+            let rows = source
+                .lines()
+                .filter_map(|l| l.strip_prefix("// expect: run "))
+                .map(|run| format!("{}: {run}", file.display()))
+                .collect::<Vec<_>>();
+            failures.push(format!("{}\n{message}", rows.join("\n")));
         }
-        execute(&module, &runs, false);
     }
     assert!(count > 0, "the front-end corpus must execute run cases");
-    println!("front-end run cases executed: {count}");
+    println!("front-end run cases selected: {count}");
+    assert!(
+        failures.is_empty(),
+        "front-end failures:\n{}",
+        failures.join("\n\n")
+    );
 }
 
 #[test]

@@ -344,13 +344,17 @@ impl Glues {
             } else {
                 args[1]
             };
-            if resource && tables.trace_drops {
-                let id = if matches!(&tables.layouts[index].layout, Layout::Fixed(f) if f.size >= 8)
-                {
-                    g.load(base, 0)
-                } else {
-                    g.icon(0)
+            if resource
+                && tables.trace_drops
+                && let hirsel_core_layout::Body::Record(fields) = &tables.input.types[index].body
+                && let Some(i) = fields
+                    .iter()
+                    .position(|f| f.ty == FieldTy::Scalar(Scalar::U64))
+            {
+                let Layout::Fixed(layout) = &tables.layouts[index].layout else {
+                    unreachable!()
                 };
+                let id = g.load(base, layout.offsets[0][i] as i32);
                 g.call("hirsel_core_test_drop_trace", &[U], &[], &[id])?;
             }
             if let Some(finalizer) = tables.layouts[index]

@@ -74,7 +74,7 @@ if [ "$1" = test ]; then
       if [ -f broken-core-suite ]; then echo 'core evaluator body failed' >&2; exit 1; fi ;;
   esac
   case "$*" in
-    *land-core-cranelift-custody*)
+    *land-core-cranelift-custody*|*hirsel-cranelift-test-core_native*)
       if [ -f broken-custody ]; then echo 'custody native agreement failed' >&2; exit 1; fi ;;
     *land-audit-runtime-schema*)
       if [ -f broken-runtime-header ]; then echo 'runtime declarations disagree with C header' >&2; exit 1; fi ;;

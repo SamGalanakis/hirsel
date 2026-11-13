@@ -62,14 +62,69 @@ pub fn lower(root: &Path, source: &str) -> (Module, HashMap<String, FuncId>) {
     assert!(program.refusals.is_empty(), "{:?}", program.refusals);
     let mut emitter = Emitter::new();
     let mut functions = HashMap::new();
+    let mut checked = vec![false; program.fns.len()];
+    let mut refusals = Vec::new();
     for (i, f) in program.fns.iter().enumerate() {
         if f.path.0.package != package("app") || f.body.is_none() {
             continue;
         }
-        let checked = program.check_lower(i, &mut emitter);
-        assert!(checked.refusals.is_empty(), "{:?}", checked.refusals);
-        assert!(checked.gaps.is_empty(), "{:?}", checked.gaps);
-        functions.insert(f.path.0.name.clone(), checked.function.unwrap());
+        checked[i] = true;
+        let check = program.check_lower(i, &mut emitter);
+        assert!(check.gaps.is_empty(), "{:?}", check.gaps);
+        for refusal in &check.refusals {
+            let site = &refusal.primary;
+            let input = modules.iter().find(|m| m.id == site.module).unwrap();
+            let start = input.syntax.items[site.item as usize].file_offset + site.span.start;
+            let before = &input.syntax.text()[..start as usize];
+            let line = before.matches('\n').count() + 1;
+            let column = before.len() - before.rfind('\n').map_or(0, |i| i + 1) + 1;
+            refusals.push(format!("{} at {line}:{column}", refusal.rule));
+        }
+        if let Some(function) = check.function {
+            functions.insert(f.path.0.name.clone(), function);
+        }
+    }
+    let mut expected = source
+        .lines()
+        .filter_map(|l| {
+            l.trim()
+                .strip_prefix("// expect: refuse ")
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>();
+    expected.sort();
+    refusals.sort();
+    assert_eq!(refusals, expected, "source refusal rules and sites");
+    // Core library operations can have ordinary source bodies. Assemble those
+    // requested by the fixture before specializing their generic call rows.
+    loop {
+        let pending = program
+            .fns
+            .iter()
+            .enumerate()
+            .filter(|(i, f)| {
+                !checked[*i]
+                    && f.body.is_some()
+                    && emitter
+                        .module
+                        .instances
+                        .iter()
+                        .any(|k| k.definition == f.path)
+            })
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>();
+        if pending.is_empty() {
+            break;
+        }
+        for i in pending {
+            checked[i] = true;
+            let check = program.check_lower(i, &mut emitter);
+            assert!(
+                check.refusals.is_empty() && check.gaps.is_empty(),
+                "core body {}: {check:?}",
+                program.fns[i].path
+            );
+        }
     }
     emitter
         .materialize_instances()

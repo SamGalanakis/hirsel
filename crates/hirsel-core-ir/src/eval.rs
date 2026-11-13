@@ -920,8 +920,14 @@ impl Machine<'_> {
     }
     fn drop_resource(&mut self, t: &mut Task, blk: u64, ty: TypeRef) -> bool {
         let (b, _) = split(blk);
-        if self.mem[b].bytes.len() >= 8 {
-            self.trace.push(self.load(blk, 8));
+        // Report::trace names a declared u64 field, never carrier/pointer bytes.
+        if let Shaped::Record(fields) = &self.shape(ty).body
+            && let Some(i) = fields
+                .iter()
+                .position(|f| f.ty == FieldTy::Scalar(Scalar::U64))
+        {
+            let offset = self.fixed(ty).offsets[0][i];
+            self.trace.push(self.load(blk + offset, 8));
         }
         let mut failed = false;
         if let Some(f) = self.shape(ty).finalizer {

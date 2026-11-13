@@ -99,6 +99,16 @@ impl Context {
     pub fn admission_attempts(&self) -> usize {
         self.current.attempts()
     }
+    /// A process fixture excludes startup from its allowance; a consumed root
+    /// primary refunds these startup bytes when the observed cause chain drops.
+    #[cfg(feature = "testing")]
+    pub fn test_primary_refund(&self) -> u64 {
+        if self.primary.is_none() {
+            hirsel_core_layout::charge::CAUSE_CELL
+        } else {
+            0
+        }
+    }
     /// Native emitter pointer to the frozen current-limit prefix. Dereferencing
     /// requires the task-exclusive discipline of the C ABI.
     #[inline(always)]

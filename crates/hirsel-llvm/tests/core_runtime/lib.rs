@@ -41,6 +41,16 @@ pub unsafe extern "C" fn hirsel_core_test_attempts(
     unsafe { (&*context).admission_attempts() }
 }
 
+/// # Safety
+/// The process fixture exclusively borrows this live context.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_test_primary_refund(
+    context: *const hirsel_core_rt::Context,
+) -> u64 {
+    // SAFETY: the caller inspects its process entry's context before dropping causes.
+    unsafe { (&*context).test_primary_refund() }
+}
+
 /// Advance the real test injector once, restoring the empty reservation before
 /// emitted admission mutates the balances itself.
 /// # Safety

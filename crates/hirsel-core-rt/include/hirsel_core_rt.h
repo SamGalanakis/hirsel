@@ -90,8 +90,6 @@ void hirsel_core_release_last(HirselCoreContext *, void *node, uint64_t charge, 
 void hirsel_core_refund(HirselCoreLimitRecord *original_payer, uint64_t nonzero_bytes);
 void *hirsel_core_native_alloc(size_t native_bytes, size_t native_alignment);
 void hirsel_core_native_free(void *base);
-void hirsel_core_raise_string(HirselCoreContext *, uint64_t site,
-    uint8_t *data, uint64_t len, uint64_t capacity);
 uint8_t hirsel_core_allocation_status(const HirselCoreContext *, void *);
 void hirsel_core_free_value(void *, uint64_t);
 /* Recipe borrows its descriptor from the still-live parent frame. */

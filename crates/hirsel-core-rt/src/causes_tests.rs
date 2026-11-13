@@ -456,11 +456,11 @@ fn inside_a_finalizer_only_the_grant_refuses_with_failure() {
         let p = causes::resource_new(&ctx, 8, 32, 8, 8).unwrap();
         causes::finalizer_begin(&mut ctx, p);
         ctx.limit_enter(16).unwrap();
-        let a = hirsel_core_alloc(&ctx, ptr::null_mut(), 8, 8, 24, false);
+        let a = hirsel_core_alloc(&ctx, ptr::null_mut(), 8, 8, 24, false, crate::block::PLAIN);
         assert!(a.pointer.is_null());
         assert_eq!(hirsel_core_allocation_status(&ctx, a.pointer), 0);
         ctx.limit_exit();
-        let b = hirsel_core_alloc(&ctx, ptr::null_mut(), 8, 8, 48, false);
+        let b = hirsel_core_alloc(&ctx, ptr::null_mut(), 8, 8, 48, false, crate::block::PLAIN);
         assert!(b.pointer.is_null());
         assert_eq!(hirsel_core_allocation_status(&ctx, b.pointer), 1);
         causes::finalizer_end(&mut ctx, p);

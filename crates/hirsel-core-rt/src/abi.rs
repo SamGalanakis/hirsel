@@ -1,8 +1,9 @@
 //! Native memory ABI, FORM v1. Every symbol and failure convention lives here.
 //!
 //! `alloc` and `limit_enter` return null plus Capacity on refusal; on success
-//! `capacity` is zero. Allocation inside a finalizer must branch to the emitter's
-//! Capacity failure path on null. `free`, limit exit and mechanical release never
+//! `capacity` is zero. Null from the active finalizer grant takes the emitter's
+//! Capacity failure path; an inner bound returns ordinary Capacity. `free`, limit
+//! exit and mechanical release never
 //! fail. `alloc like` follows the original payer except within finalizers.
 //!
 //! `region_alloc`, `resource_alloc` and `task_start` use the same Allocation
@@ -57,40 +58,8 @@
 //! that task quiescent for the call. The provider must take that rare path before
 //! alloc-like/finalizer_begin; these entries do not implement a scheduler.
 
-//! Additive process/provider symbols, retained from core-tasks-provider-907:
-//! `hirsel_core_run(*const process::Config, process::Entry) -> u8` maps a
-//! completed main to exit 0, ordinary Error to 1, explicit Exit 1..100 to that
-//! byte, and task-start Capacity or failure to 101. `hirsel_core_args_len`
-//! `(*const Config)->u64` and `hirsel_core_args_get(*const Config,u64)->Argument`
-//! admit nothing; get returns present=false out of range. `hirsel_core_host`
-//! `(*mut Context,*const provider::Provider,*mut provider::Request)->Outcome`
-//! preserves provider issue/delivery results and committed prefixes; status 1
-//! propagates a cause, distinct from an ordinary IoError value. The entry
-//! `hirsel_core_check_cancel(*mut Context,u64)->u8` returns 1 after recording
-//! Cancelled, else 0. No hidden ordinary function-row status is appended.
-pub use crate::process::{hirsel_core_args_get, hirsel_core_args_len, hirsel_core_run};
-pub use crate::provider::hirsel_core_host;
-pub use crate::tasks::hirsel_core_check_cancel;
-
-// Frozen on both supported 64-bit targets. A payer word is a pointer to a
-// stable task-table slot whose local LimitRecord starts at offset zero.
-pub const CONTEXT_CURRENT_LIMIT: usize = std::mem::offset_of!(Context, current_limit);
-pub const LIMIT_AVAILABLE: usize = std::mem::offset_of!(crate::limit::LimitRecord, available);
-pub const LIMIT_OUTSTANDING: usize = std::mem::offset_of!(crate::limit::LimitRecord, outstanding);
-pub const REGION_CURSOR: usize = std::mem::offset_of!(crate::region::Region, cursor);
-pub const REGION_END: usize = std::mem::offset_of!(crate::region::Region, end);
-pub const REGION_ENTRY: usize = std::mem::offset_of!(crate::region::Region, entry);
-pub const REGION_PAYER: usize = std::mem::offset_of!(crate::region::Region, payer);
-pub const REGION_CHARGE: usize = std::mem::offset_of!(crate::region::Region, charge);
-pub const NODE_COUNT: usize = 0;
-pub const NODE_PAYLOAD: usize = 8;
-pub const OWN_PAYER_BACK: usize = 8;
-pub const OWN_TAG_MASK: usize = 31;
-pub const OWN_KIND_MASK: usize = 3;
-pub const OWN_ALIGNMENT_SHIFT: usize = 2;
-pub const PLAIN_PREFIX_BYTES: usize = 8;
-pub const GRAPH_PREFIX_BYTES: usize = crate::block::GRAPH_PREFIX_BYTES;
-pub const RESOURCE_PREFIX_BYTES: usize = 16;
+// Offset and header constants are shared verbatim with both native emitters.
+pub use crate::abi_layout::*;
 
 use crate::{
     Capacity, Context,
@@ -369,7 +338,11 @@ pub unsafe extern "C" fn hirsel_core_release_own_enqueue(
 ) {
     // SAFETY: the generated recipe transfers an exclusively owned descendant.
     unsafe {
-        crate::block::push_dead(&mut *worklist, node, charge, recipe, 0);
+        if crate::block::funding(node).native_tag() & 3 == crate::block::PLAIN as usize {
+            crate::block::free(node, charge);
+        } else {
+            crate::block::push_dead(&mut *worklist, node, charge, recipe, 0);
+        }
     }
 }
 
@@ -600,7 +573,11 @@ pub unsafe extern "C" fn hirsel_core_allocation_status(
     pointer: *mut u8,
 ) -> u8 {
     // SAFETY: the emitter passes its live hidden task context.
-    u8::from(pointer.is_null() && unsafe { &*context }.finalizing != 0 && unsafe { &*context }.bound_depth == unsafe { &*context }.grant_depth)
+    u8::from(
+        pointer.is_null()
+            && unsafe { &*context }.finalizing != 0
+            && unsafe { &*context }.bound_depth == unsafe { &*context }.grant_depth,
+    )
 }
 
 /// Free a wholly destructured own value or resource.

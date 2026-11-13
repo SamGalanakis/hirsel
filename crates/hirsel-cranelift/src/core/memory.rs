@@ -86,7 +86,7 @@ impl Function<'_, '_, '_> {
                         types::I64,
                         cranelift_codegen::ir::MemFlagsData::trusted(),
                         payer,
-                        16,
+                        memory_layout::REGION_ENTRY as i32,
                     );
                     self.set(token, token_value);
                 }

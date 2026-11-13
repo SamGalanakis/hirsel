@@ -283,3 +283,35 @@ fn remote_refunds_wait_for_the_ordered_handoff_while_local_admission_runs() {
     assert_eq!(ctx.available(), 4096);
     assert_eq!(ctx.current.attempts(), 0);
 }
+
+#[test]
+fn counted_parent_frees_plain_owned_children_without_a_resume_frame() {
+    unsafe extern "C" fn parent(
+        ctx: *mut Context,
+        p: *mut u8,
+        cursor: *mut u64,
+        work: *mut Worklist,
+    ) -> bool {
+        // SAFETY: this fixture's parent contains one initialized plain child pointer.
+        unsafe {
+            if *cursor == 0 {
+                *cursor = 1;
+                let child = NonNull::new_unchecked(p.cast::<*mut u8>().read());
+                crate::abi::hirsel_core_release_own_enqueue(work, child, 8, empty);
+                return false;
+            }
+            assert_eq!((*ctx).available(), 48);
+            true
+        }
+    }
+    let mut ctx = Context::new(64);
+    let child = Block::new(&ctx, Some(8), 8, 8).unwrap().into_raw();
+    let node = Block::graph(&ctx, Some(16), 16, 8).unwrap().into_raw();
+    // SAFETY: initialize the sole counted holder and move its plain child into it.
+    unsafe {
+        counted::initialize(node, false);
+        node.as_ptr().add(8).cast::<*mut u8>().write(child.as_ptr());
+        counted::release(&mut ctx, node, false, 16, parent);
+    }
+    assert_eq!(ctx.available(), 64);
+}

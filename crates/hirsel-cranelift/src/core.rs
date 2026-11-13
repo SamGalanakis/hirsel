@@ -11,6 +11,11 @@ use cranelift_module::{DataDescription, Linkage, Module as _};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use hirsel_core_ir::{self as c, *};
 
+/// Frozen native memory layout, shared with hirsel-core-rt.
+pub mod memory_layout {
+    include!("../../hirsel-core-rt/src/abi_layout.rs");
+}
+
 mod abi;
 mod calls;
 mod drop;

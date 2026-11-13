@@ -182,40 +182,48 @@ fn native_task_context_moves_workers_with_exclusive_execution_custody() {
 fn frozen_prefixes_match_the_emitter_contract() {
     use crate::region::Region;
     assert_eq!(
-        (CONTEXT_CURRENT_LIMIT, LIMIT_AVAILABLE, LIMIT_OUTSTANDING),
-        (0, 0, 8)
+        std::mem::offset_of!(Context, current_limit),
+        CONTEXT_CURRENT_LIMIT
     );
     assert_eq!(
-        (
-            REGION_CURSOR,
-            REGION_END,
-            REGION_ENTRY,
-            REGION_PAYER,
-            REGION_CHARGE
-        ),
-        (0, 8, 16, 24, 32)
+        std::mem::offset_of!(crate::limit::LimitRecord, available),
+        LIMIT_AVAILABLE
     );
     assert_eq!(
-        (
-            OWN_PAYER_BACK,
-            PLAIN_PREFIX_BYTES,
-            GRAPH_PREFIX_BYTES,
-            RESOURCE_PREFIX_BYTES
-        ),
-        (8, 8, 48, 16)
+        std::mem::offset_of!(crate::limit::LimitRecord, outstanding),
+        LIMIT_OUTSTANDING
+    );
+    assert_eq!(std::mem::offset_of!(Region, cursor), REGION_CURSOR);
+    assert_eq!(std::mem::offset_of!(Region, end), REGION_END);
+    assert_eq!(std::mem::offset_of!(Region, entry), REGION_ENTRY);
+    assert_eq!(std::mem::offset_of!(Region, payer), REGION_PAYER);
+    assert_eq!(std::mem::offset_of!(Region, charge), REGION_CHARGE);
+    assert_eq!(
+        crate::block::GRAPH_PREFIX_BYTES,
+        crate::abi_layout::GRAPH_PREFIX_BYTES
     );
     let ctx = Context::new(256);
-    let block = Block::new(&ctx, Some(128), 128, 64).unwrap();
-    // SAFETY: the owner pins all 128 writable, aligned bytes.
-    unsafe {
-        block.pointer().as_ptr().write_bytes(0, 128);
-        assert_eq!(
-            std::slice::from_raw_parts(block.pointer().as_ptr(), 128),
-            [0; 128]
-        );
+    for alignment in [8, 16, 64, 512, 1024, 4096] {
+        for graph in [false, true] {
+            let block = if graph {
+                Block::graph(&ctx, Some(128), 128, alignment)
+            } else {
+                Block::new(&ctx, Some(128), 128, alignment)
+            }
+            .unwrap();
+            // SAFETY: the owner pins all 128 writable, aligned bytes.
+            unsafe {
+                block.pointer().as_ptr().write_bytes(0, 128);
+                assert_eq!(
+                    std::slice::from_raw_parts(block.pointer().as_ptr(), 128),
+                    [0; 128]
+                );
+            }
+            assert_eq!(block.pointer().as_ptr().addr() % alignment, 0);
+            drop(block);
+            assert_eq!(ctx.available(), 256);
+        }
     }
-    assert_eq!(block.pointer().as_ptr().addr() % 64, 0);
-    drop(block);
     let mut region = Region::new(64);
     region.allocate(&ctx, 8, 8, Some(8)).unwrap();
     assert_eq!(ctx.available(), 248);

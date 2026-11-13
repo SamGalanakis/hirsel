@@ -301,7 +301,10 @@ impl FunctionEmitter<'_> {
                         unreachable!()
                     };
                     let region = self.get(region);
-                    let at = self.calc(format!("getelementptr i8, ptr {region}, i64 16"));
+                    let at = self.calc(format!(
+                        "getelementptr i8, ptr {region}, i64 {}",
+                        super::memory_layout::REGION_ENTRY
+                    ));
                     let value = self.calc(format!("load i64, ptr {at}, align 8"));
                     self.put(token, &value);
                 }

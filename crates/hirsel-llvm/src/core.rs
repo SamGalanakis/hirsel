@@ -1,6 +1,11 @@
 //! Direct emission of CoreIR functions, failure edges and storage recipes. No old lowered program,
 //! staging, manifest or receipt participates in this entry point.
 
+/// Frozen native memory layout, shared with hirsel-core-rt.
+pub mod memory_layout {
+    include!("../../hirsel-core-rt/src/abi_layout.rs");
+}
+
 mod abi;
 mod cleanup;
 mod collections;

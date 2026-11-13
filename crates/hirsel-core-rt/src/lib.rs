@@ -7,6 +7,7 @@ hirsel_guard::install!();
 pub mod abi;
 pub mod abi_host;
 pub mod abi_tasks;
+pub mod abi_layout;
 mod allocator;
 pub mod block;
 pub mod causes;

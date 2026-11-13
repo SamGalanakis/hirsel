@@ -1,4 +1,4 @@
-// MEM-17, T1.5, budgets.md: clone copies every own part into new blocks at capacity equal
+// MEM-17, T1.5, FAIL-5, budgets.md: clone copies every own part into new blocks at capacity equal
 // to its length; a refusal at block k drops the blocks already copied, refunds them, and
 // leaves x untouched. Hand-derived charges: a List[String] of two is 2 x 24 = 48, "ab"
 // and "cde" 8 each; a Box[Cell] node is 24 + 8 = 32. So under 60 bytes the list copy

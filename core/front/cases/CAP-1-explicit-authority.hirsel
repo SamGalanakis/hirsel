@@ -1,0 +1,6 @@
+// CAP-1: the world is reached only through an operation's capability argument, so a call
+// that leaves the capability out is refused as CAP-1 at its `)`, not as a miscount; one
+// that passes it is accepted.
+// expect: refuse CAP-1 at 6:36
+fn stamp(c: Clock) -> u64 { host.mono_ns(c) }
+fn ambient() -> u64 { host.mono_ns() }

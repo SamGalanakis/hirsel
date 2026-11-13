@@ -1,4 +1,4 @@
-// MEM-17, T1.5, budgets.md: clone_in(r, x) makes a stable U in r from x's twin, or from U
+// MEM-17, T1.5, FAIL-5, budgets.md: clone_in(r, x) makes a stable U in r from x's twin, or from U
 // itself, selected through Box: one block for U charged its logical size rounded up to 8,
 // then each field in order, a String into Text and a List into a FixedSpan as a region
 // blob charged round8(8 + bytes), a Box or twin field into its own stable block. A refusal

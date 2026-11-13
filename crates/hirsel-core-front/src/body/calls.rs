@@ -102,8 +102,27 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return (ERROR, None);
         }
         // LANG-11: one argument per parameter; a missing one is refused at the call's
-        // `)`, an extra one at the first extra argument.
+        // `)`, an extra one at the first extra argument. A missing capability is CAP-1:
+        // authority is reached only through a capability argument.
         if args.len() < g.params.len() {
+            let missing = g.params[args.len()..]
+                .iter()
+                .find_map(|q| match self.t.kind(q.ty) {
+                    TyKind::Adt(d, _) if crate::layout::handle(&self.p.decls[d.index()]) => {
+                        Some(self.p.decls[d.index()].path.0.name.clone())
+                    }
+                    _ => None,
+                });
+            if let Some(name) = missing {
+                self.refuse_at(
+                    "CAP-1",
+                    self.close_brace(n),
+                    format!(
+                        "no `{name}` argument: authority comes only from a capability argument"
+                    ),
+                );
+                return (ERROR, None);
+            }
             let k = g.params.len();
             self.refuse_at(
                 "LANG-11",

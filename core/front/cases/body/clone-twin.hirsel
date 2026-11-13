@@ -1,4 +1,4 @@
-// MEM-17, T1.5, budgets.md: clone(x) of a stable value expecting its own twin copies it
+// MEM-17, T1.5, FAIL-5, budgets.md: clone(x) of a stable value expecting its own twin copies it
 // field by field: Text into a String and a FixedSpan into a List at capacity equal to
 // length, a stable field into a Box node or the inline twin. A refusal at block k drops
 // and refunds what was copied. Hand-derived: OuterS as Outer takes a Box[Inner] node

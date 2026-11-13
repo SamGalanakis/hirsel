@@ -25,7 +25,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let product = Driver::default().check(request, &mut meter)?;
     let instances = if let Some(at) = args.iter().position(|a| a == "--instances") {
         let entry =
-            hirsel_core_ids::DefPath::from_full(args.get(at + 1).ok_or("missing instance entry")?)?;
+            hirsel_core_ids::DefPath::from_full(args.get(at + 1).ok_or("missing instance entry")?)
+                .ok_or("invalid instance entry")?;
         Some(product.instances(
             [hirsel_core_ir::InstanceKey {
                 definition: entry,

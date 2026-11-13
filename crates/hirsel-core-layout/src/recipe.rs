@@ -187,16 +187,46 @@ fn align_up(n: u64, a: u64) -> u64 {
 
 /// Recipes for every shape of a module, indexed like `shapes`.
 pub fn compute(shapes: &[Shape]) -> Result<Vec<Recipe>, LayoutError> {
+    let mut recipes = vec![];
+    extend(shapes, &mut recipes)?;
+    Ok(recipes)
+}
+
+/// Compute only the appended shapes. `recipes` describes an unchanged prefix of
+/// `shapes`; neither that prefix nor its references may change between extensions.
+/// A refused suffix leaves the existing recipes intact.
+pub fn extend(shapes: &[Shape], recipes: &mut Vec<Recipe>) -> Result<(), LayoutError> {
+    let prefix = recipes.len();
     let mut state = vec![State::Todo; shapes.len()];
-    let mut order = Vec::with_capacity(shapes.len());
-    for i in 0..shapes.len() {
+    state[..prefix].fill(State::Done);
+    let mut order = Vec::with_capacity(shapes.len() - prefix);
+    for i in prefix..shapes.len() {
         visit(shapes, TypeRef(i as u32), &mut state, &mut order)?;
     }
-    let mut out: Vec<Option<Recipe>> = vec![None; shapes.len()];
+    let mut out = Computed {
+        prefix: recipes,
+        suffix: vec![None; shapes.len() - prefix],
+    };
     for t in order {
-        out[t.index()] = Some(recipe(shapes, &shapes[t.index()], &out)?);
+        out.suffix[t.index() - prefix] = Some(recipe(shapes, &shapes[t.index()], &out)?);
     }
-    Ok(out.into_iter().map(|r| r.expect("visited")).collect())
+    let suffix = out.suffix;
+    recipes.extend(suffix.into_iter().map(|r| r.expect("visited")));
+    Ok(())
+}
+
+struct Computed<'a> {
+    prefix: &'a [Recipe],
+    suffix: Vec<Option<Recipe>>,
+}
+impl Computed<'_> {
+    fn get(&self, t: TypeRef) -> Option<&Recipe> {
+        if t.index() < self.prefix.len() {
+            Some(&self.prefix[t.index()])
+        } else {
+            self.suffix[t.index() - self.prefix.len()].as_ref()
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -267,13 +297,11 @@ fn cases(shape: &Shape) -> Vec<&[Field]> {
     }
 }
 
-fn done(out: &[Option<Recipe>], t: TypeRef) -> &Recipe {
-    out[t.index()]
-        .as_ref()
-        .expect("inline dependency computed first")
+fn done<'a>(out: &'a Computed<'_>, t: TypeRef) -> &'a Recipe {
+    out.get(t).expect("inline dependency computed first")
 }
 
-fn recipe(shapes: &[Shape], shape: &Shape, out: &[Option<Recipe>]) -> Result<Recipe, LayoutError> {
+fn recipe(shapes: &[Shape], shape: &Shape, out: &Computed<'_>) -> Result<Recipe, LayoutError> {
     match shape.repr {
         Repr::Compact(w) => compact(shapes, shape, w, out),
         _ => fixed(shapes, shape, out),
@@ -288,7 +316,7 @@ fn err(shape: &Shape, f: &Field, why: &'static str) -> LayoutError {
     }
 }
 
-fn fixed(shapes: &[Shape], shape: &Shape, out: &[Option<Recipe>]) -> Result<Recipe, LayoutError> {
+fn fixed(shapes: &[Shape], shape: &Shape, out: &Computed<'_>) -> Result<Recipe, LayoutError> {
     let rows = cases(shape);
     let tag = matches!(shape.body, Body::Variant(_)).then(|| tag_width(rows.len()));
     // (size, align, logical) per field, per case.
@@ -476,7 +504,7 @@ pub fn field_size(shapes: &[Shape], recipes: &[Recipe], ty: &FieldTy) -> (u64, u
     measure(shapes, Repr::Own, ty, &|t| &recipes[t.index()]).expect("an accepted field type")
 }
 
-fn needs_drop(shapes: &[Shape], ty: &FieldTy, out: &[Option<Recipe>]) -> bool {
+fn needs_drop(shapes: &[Shape], ty: &FieldTy, out: &Computed<'_>) -> bool {
     match ty {
         FieldTy::Inline(t) => {
             !matches!(shapes[t.index()].repr, Repr::Compact(_)) && done(out, *t).drop.is_some()
@@ -500,7 +528,7 @@ fn drop_recipe(
     shape: &Shape,
     rows: &[&[Field]],
     offsets: &[Vec<u64>],
-    out: &[Option<Recipe>],
+    out: &Computed<'_>,
 ) -> Option<DropRecipe> {
     let fields: Vec<Vec<FieldDrop>> = rows
         .iter()
@@ -530,7 +558,7 @@ fn compact(
     shapes: &[Shape],
     shape: &Shape,
     declared: Width,
-    out: &[Option<Recipe>],
+    out: &Computed<'_>,
 ) -> Result<Recipe, LayoutError> {
     let rows = cases(shape);
     if matches!(shape.body, Body::Record(ref f) if f.is_empty()) {
@@ -610,7 +638,7 @@ fn compact_size(
     ty: &FieldTy,
     w: Width,
     element: bool,
-    out: &[Option<Recipe>],
+    out: &Computed<'_>,
 ) -> Result<Size, LayoutError> {
     Ok(match ty {
         FieldTy::Scalar(s) => Size::Fixed(s.size()),
@@ -648,7 +676,7 @@ fn compact_size(
         FieldTy::Inline(t)
             if element
                 && matches!(shapes[t.index()].repr, Repr::Compact(_))
-                && out[t.index()].is_none() =>
+                && out.get(*t).is_none() =>
         {
             Size::Inline(*t)
         }

@@ -1,6 +1,6 @@
 {
   "measurement": "Buck release, CPU 16, jobs 1, instructions:u, fresh private store, complete driver interval including publication and teardown",
-  "basis": "e1ed29ff plus dense definition-key traversal; one before/after sample per corpus; ceilings round upward from 25559.60 and 13556.61",
+  "basis": "e1ed29ff plus dense definition-key traversal: 25559.60 and 13556.61; fd076946 plus that fix and append-only layout recipes: 24744.66 and 13079.36. One before/after sample per corpus and fix; ceilings retain headroom below the whole-request target.",
   "corpora": {
     "m1": {"code_lines": 5963, "check_lower_per_line": 26000, "whole_request_per_line": 60000},
     "std": {"code_lines": 2572, "check_lower_per_line": 14000, "whole_request_per_line": 60000}

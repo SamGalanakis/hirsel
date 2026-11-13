@@ -353,8 +353,8 @@ impl Emitter {
     fn recipe(&mut self, id: TypeId, mark: usize) -> Option<&Recipe> {
         crate::cost_scope!("phase", "layout/drop recipes");
         if self.recipes.len() != self.module.types.len() {
-            match hirsel_core_layout::compute(&self.module.types) {
-                Ok(r) => self.recipes = r,
+            match hirsel_core_layout::extend(&self.module.types, &mut self.recipes) {
+                Ok(()) => {}
                 Err(_) => {
                     self.module.types.truncate(mark);
                     self.types.retain(|_, r| (r.0 as usize) < mark);

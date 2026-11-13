@@ -579,3 +579,66 @@ fn recursive_sequences_end_layout_dependencies() {
         }
     }
 }
+
+/// Appending shapes must retain correct prefix references, preserve recursive compact
+/// sequences, and leave the prior table usable when a later shape is refused.
+#[test]
+fn appended_layouts_keep_prefix_dependencies_and_refuse_atomically() {
+    let mut shapes = vec![record("Word", Repr::Own, vec![field("n", u(Scalar::U64))])];
+    let mut recipes = compute(&shapes).unwrap();
+    shapes.push(record(
+        "Pair",
+        Repr::Own,
+        vec![
+            field("word", FieldTy::Inline(TypeRef(0))),
+            field("byte", u(Scalar::U8)),
+        ],
+    ));
+    extend(&shapes, &mut recipes).unwrap();
+    // Native padding makes 16 bytes, while portable charge is exactly 8 + 1.
+    assert_eq!(fixed(&recipes[1]).size, 16);
+    assert_eq!(fixed(&recipes[1]).offsets, vec![vec![0, 8]]);
+    assert_eq!(recipes[1].logical_size, Some(9));
+    shapes.push(variant(
+        "J",
+        Repr::Compact(Width::U32),
+        vec![
+            ("Null", vec![]),
+            (
+                "Arr",
+                vec![field(
+                    "items",
+                    FieldTy::SeqSpan(Box::new(FieldTy::Inline(TypeRef(2)))),
+                )],
+            ),
+        ],
+    ));
+    extend(&shapes, &mut recipes).unwrap();
+    assert_eq!(
+        compact_extent(
+            &recipes,
+            TypeRef(2),
+            Width::U32,
+            0,
+            &|_| panic!("Null has no sequence header"),
+            &|_, _| 0
+        ),
+        1
+    );
+    let before = recipes.clone();
+    shapes.push(record(
+        "Cycle",
+        Repr::Own,
+        vec![field("self", FieldTy::Inline(TypeRef(3)))],
+    ));
+    assert_eq!(
+        extend(&shapes, &mut recipes),
+        Err(LayoutError::Cycle { ty: "Cycle".into() })
+    );
+    assert_eq!(recipes, before);
+    shapes.pop();
+    shapes.push(record("Short", Repr::Own, vec![field("n", u(Scalar::U16))]));
+    extend(&shapes, &mut recipes).unwrap();
+    assert_eq!(fixed(&recipes[3]).size, 2);
+    assert_eq!(recipes, compute(&shapes).unwrap());
+}

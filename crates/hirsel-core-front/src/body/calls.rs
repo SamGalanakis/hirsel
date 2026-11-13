@@ -1,8 +1,29 @@
 use super::*;
 
+#[derive(Default)]
+pub(super) struct CallScratch {
+    found: Vec<Option<TyId>>,
+    checked: Vec<bool>,
+    vals: Vec<Option<ValueId>>,
+    later: Vec<usize>,
+    tys: Vec<TyId>,
+}
+
 impl<'c, 'a> Cx<'c, 'a> {
     // ---- calls
     pub(super) fn call(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
+        let mut scratch = self.call_scratch.pop().unwrap_or_default();
+        let result = self.call_inner(n, want, &mut scratch);
+        self.call_scratch.push(scratch);
+        result
+    }
+
+    fn call_inner(
+        &mut self,
+        n: NodeId,
+        want: Option<Want>,
+        scratch: &mut CallScratch,
+    ) -> (TyId, Option<ValueId>) {
         self.out.counts.calls += 1;
         let c = self.kids(n);
         let (callee, args) = (c[0], &c[1..]);
@@ -53,18 +74,29 @@ impl<'c, 'a> Cx<'c, 'a> {
                 );
             }
         }
-        let mut found: Vec<Option<TyId>> = vec![None; g.generics.len()];
-        let mut checked = 0u64;
-        let mut vals: Vec<Option<ValueId>> = vec![None; args.len()];
-        let mut later = vec![];
+        let CallScratch {
+            found,
+            checked,
+            vals,
+            later,
+            tys,
+        } = scratch;
+        found.clear();
+        found.resize(g.generics.len(), None);
+        checked.clear();
+        checked.resize(g.generics.len(), false);
+        vals.clear();
+        vals.resize(args.len(), None);
+        later.clear();
+        tys.clear();
         self.call_seq += 1;
         let call = self.call_seq;
         let holds = self.freezes.len();
         // One forward visit (LANG-11): the expected result fixes what it can, then each
         // argument left to right, then the unsuffixed literal arguments.
         if let Some(w) = want {
-            self.unify(g.result, w.ty, &mut found);
-            self.determined(f, &found, &mut checked, n);
+            self.unify(g.result, w.ty, found);
+            self.determined(f, found, checked, n);
         }
         for (i, &a) in args.iter().enumerate() {
             if matches!(
@@ -81,10 +113,10 @@ impl<'c, 'a> Cx<'c, 'a> {
                 call,
                 i,
                 e,
-                &mut found,
+                found,
                 &mut vals[i],
             ) {
-                self.determined(f, &found, &mut checked, e);
+                self.determined(f, found, checked, e);
                 continue;
             }
             // A literal operand waits for the other arguments and the result (LANG-21).
@@ -93,7 +125,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                 continue;
             }
             let pt = g.params[i].ty;
-            vals[i] = match self.known(pt, &found) {
+            vals[i] = match self.known(pt, found) {
                 Some(t) => {
                     let view = g.params[i].mode == Mode::View
                         && !matches!(self.t.kind(t), TyKind::View(_));
@@ -105,39 +137,48 @@ impl<'c, 'a> Cx<'c, 'a> {
                     let (at, v) = if self.kind(e) == NodeKind::Call {
                         self.out.counts.nodes += 1;
                         let w = Want {
-                            ty: self.partial(pt, &found),
+                            ty: self.partial(pt, found),
                             view: false,
                         };
                         self.call(e, Some(w))
                     } else {
                         self.expr(e, None)
                     };
-                    if !self.unify(pt, at, &mut found) {
+                    let inferred = match self.t.kind(at) {
+                        TyKind::View(x)
+                            if g.params[i].mode == Mode::View
+                                && !matches!(self.t.kind(pt), TyKind::View(_)) =>
+                        {
+                            *x
+                        }
+                        _ => at,
+                    };
+                    if !self.unify(pt, inferred, found) {
                         self.refuse(
                             "LANG-11",
                             e,
                             "a type parameter is determined twice differently",
                         );
-                    } else if let Some(t) = self.known(pt, &found) {
+                    } else if let Some(t) = self.known(pt, found) {
                         let view = g.params[i].mode == Mode::View
                             && !matches!(self.t.kind(t), TyKind::View(_));
                         self.coerce(at, Want { ty: t, view }, e);
                     }
-                    self.determined(f, &found, &mut checked, e);
+                    self.determined(f, found, checked, e);
                     v
                 }
             };
         }
-        for i in later {
+        for &i in later.iter() {
             let e = args[i];
-            match self.known(g.params[i].ty, &found) {
+            match self.known(g.params[i].ty, found) {
                 Some(t) => vals[i] = self.expr(e, expect(t)).1,
                 None => {
                     self.refuse("LANG-11", e, "an unsuffixed number needs an expected type");
                 }
             }
         }
-        let tys: Vec<TyId> = found.iter().map(|s| s.unwrap_or(ERROR)).collect();
+        tys.extend(found.iter().map(|s| s.unwrap_or(ERROR)));
         // An undetermined type argument is refused once; the call's type is then the
         // refused type, so nothing built from it is refused again.
         let undetermined = found.iter().any(Option::is_none);
@@ -157,15 +198,15 @@ impl<'c, 'a> Cx<'c, 'a> {
         let result = if undetermined {
             ERROR
         } else {
-            subst(&mut self.t, g.result, &tys)
+            subst(&mut self.t, g.result, tys)
         };
         if result == NEVER {
             self.dead = true;
         }
         let v = if g.generics.is_empty() {
-            self.emit_call(f, &vals, result, n)
+            self.emit_call(f, vals, result, n)
         } else {
-            self.intrinsic(f, &tys, &vals, n)
+            self.intrinsic(f, tys, vals, n)
         };
         (result, v)
     }
@@ -276,20 +317,53 @@ impl<'c, 'a> Cx<'c, 'a> {
 
     /// `pt` with the type arguments found so far, a hole for each one still open.
     pub(super) fn partial(&mut self, pt: TyId, s: &[Option<TyId>]) -> TyId {
-        let tys: Vec<TyId> = s.iter().map(|t| t.unwrap_or(HOLE)).collect();
-        subst(&mut self.t, pt, &tys)
+        fn fill(t: &mut impl TyRead, ty: TyId, found: &[Option<TyId>]) -> TyId {
+            match t.kind(ty).clone() {
+                TyKind::Param(i) => found[i as usize].unwrap_or(HOLE),
+                TyKind::Tuple(xs) => {
+                    let xs = xs.into_iter().map(|x| fill(t, x, found)).collect();
+                    t.mk(TyKind::Tuple(xs))
+                }
+                TyKind::Adt(d, xs) => {
+                    let xs = xs.into_iter().map(|x| fill(t, x, found)).collect();
+                    t.mk(TyKind::Adt(d, xs))
+                }
+                TyKind::View(x) => {
+                    let x = fill(t, x, found);
+                    t.mk(TyKind::View(x))
+                }
+                TyKind::Fn(ps, r, w) => {
+                    let ps = ps
+                        .into_iter()
+                        .map(|(m, p)| (m, fill(t, p, found)))
+                        .collect();
+                    let r = fill(t, r, found);
+                    t.mk(TyKind::Fn(ps, r, w))
+                }
+                _ => ty,
+            }
+        }
+        if !has_param(&self.t, pt) {
+            return pt;
+        }
+        fill(&mut self.t, pt, s)
     }
     /// `pt` with the type arguments found so far, when they determine it.
     pub(super) fn known(&mut self, pt: TyId, s: &[Option<TyId>]) -> Option<TyId> {
-        if !has_param(&self.t, pt) {
-            return Some(pt);
+        fn ready(t: &impl TyRead, ty: TyId, found: &[Option<TyId>]) -> bool {
+            match t.kind(ty) {
+                TyKind::Param(i) => found[*i as usize].is_some(),
+                TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs.iter().all(|&x| ready(t, x, found)),
+                TyKind::View(x) => ready(t, *x, found),
+                TyKind::Fn(ps, r, _) => {
+                    ps.iter().all(|&(_, p)| ready(t, p, found)) && ready(t, *r, found)
+                }
+                _ => true,
+            }
         }
-        if s.iter().any(Option::is_none) {
-            return None;
-        }
-        let tys: Vec<TyId> = s.iter().map(|t| t.unwrap()).collect();
-        Some(subst(&mut self.t, pt, &tys))
+        ready(&self.t, pt, s).then(|| self.partial(pt, s))
     }
+
     /// Find type arguments from one argument type; false when one is found twice
     /// differently (LANG-11). A mismatch elsewhere is the argument's own refusal.
     /// LANG-12: a type argument that lacks a bound its parameter declares is refused at
@@ -298,16 +372,16 @@ impl<'c, 'a> Cx<'c, 'a> {
         &mut self,
         f: usize,
         found: &[Option<TyId>],
-        checked: &mut u64,
+        checked: &mut [bool],
         n: NodeId,
     ) {
         let p: &'c Program<'a> = self.p;
         for (i, t) in found.iter().enumerate() {
             let Some(t) = *t else { continue };
-            if *checked & (1 << i) != 0 {
+            if checked[i] {
                 continue;
             }
-            *checked |= 1 << i;
+            checked[i] = true;
             let g = &p.fns[f].generics[i];
             let missing = g.bounds & !has_bounds(&p.decls, &self.t, t, &self.params);
             if missing & ENCODED != 0 {
@@ -339,11 +413,24 @@ impl<'c, 'a> Cx<'c, 'a> {
             (TyKind::Tuple(a), TyKind::Tuple(b)) if a.len() == b.len() => {
                 a.iter().zip(&b).all(|(&x, &y)| self.unify(x, y, s))
             }
-            (TyKind::Adt(d, a), TyKind::Adt(e, b)) if d == e => {
+            (TyKind::Adt(d, a), TyKind::Adt(e, b)) if d == e && a.len() == b.len() => {
+                a.iter().zip(&b).all(|(&x, &y)| self.unify(x, y, s))
+            }
+            (TyKind::Adt(d, a), TyKind::Adt(e, b))
+                if is_core_prelude(&self.p.decls[d.index()].path, &["SeqSpan"])
+                    && is_core_prelude(&self.p.decls[e.index()].path, &["IndexedSpan"])
+                    && a.len() == b.len() =>
+            {
                 a.iter().zip(&b).all(|(&x, &y)| self.unify(x, y, s))
             }
             (TyKind::View(a), TyKind::View(b)) => self.unify(a, b, s),
-            _ => true,
+            (TyKind::Fn(a, ar, aw), TyKind::Fn(b, br, bw)) if a.len() == b.len() && (!bw || aw) => {
+                a.iter()
+                    .zip(&b)
+                    .all(|(&(am, at), &(bm, bt))| am == bm && self.unify(at, bt, s))
+                    && self.unify(ar, br, s)
+            }
+            _ => pt == at || pt == ERROR || pt == HOLE,
         }
     }
 

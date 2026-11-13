@@ -1,0 +1,6 @@
+// LANG-11: the result fixes T before checking the block argument; U is fixed later.
+// Before the fix, the unrelated hole U hid the known u8 destination from the block.
+// expect: gap generic definitions are not built
+// expect: gap calls to generic functions are not built
+fn first[T, U](take x: T, take y: U) -> T { x }
+fn f() -> u8 { first({ 7 }, false) }

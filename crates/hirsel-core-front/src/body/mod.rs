@@ -383,6 +383,8 @@ struct Cx<'c, 'a> {
     tail_ty: TyId,
     scope_slots: Vec<u32>,
     call_seq: u32,
+    /// Reused call workspaces, one for each active nesting level.
+    call_scratch: Vec<calls::CallScratch>,
     binder_at: HashMap<(u32, u32), u32>,
     frames: Vec<Frame>,
     joins: Vec<Join>,
@@ -447,6 +449,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             tail_ty: UNIT,
             scope_slots: vec![],
             call_seq: 0,
+            call_scratch: vec![],
             binder_at,
             frames: vec![],
             joins: vec![],
@@ -527,7 +530,11 @@ impl<'c, 'a> Cx<'c, 'a> {
     fn coerce(&mut self, t: TyId, w: Want, n: NodeId) {
         self.out.counts.types += 1;
         let viewed = w.view && matches!(self.t.kind(t), TyKind::View(x) if *x == w.ty);
-        if t != w.ty && !viewed && t != NEVER && t != ERROR && w.ty != ERROR {
+        let sequence = matches!((self.t.kind(w.ty), self.t.kind(t)),
+            (TyKind::Adt(d, a), TyKind::Adt(e, b))
+                if a == b && is_core_prelude(&self.p.decls[d.index()].path, &["SeqSpan"])
+                    && is_core_prelude(&self.p.decls[e.index()].path, &["IndexedSpan"]));
+        if t != w.ty && !viewed && !sequence && t != NEVER && t != ERROR && w.ty != ERROR {
             let (a, b) = (self.name(w.ty), self.name(t));
             self.refuse("LANG-11", n, format!("expected `{a}`, found `{b}`"));
         }

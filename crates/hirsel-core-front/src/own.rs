@@ -44,6 +44,8 @@ impl Origin {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PStep {
     Field(u32),
+    /// The payload of a `Box`, `Rc` or `Arc` (OWN-8).
+    Payload,
     Index {
         collection: crate::types::TyId,
         value: Option<hirsel_core_ir::ValueId>,

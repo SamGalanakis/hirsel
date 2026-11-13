@@ -374,6 +374,22 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             TyKind::View(x) => (*x, true),
             _ => (at.ty, false),
         };
+        // A Box, Rc or Arc reads as its payload; a counted payload is shared, so its
+        // fields read as views (OWN-8, MEM-14, MEM-15).
+        if let TyKind::Adt(d, args) = self.t.kind(inner).clone()
+            && let Some(role @ (Role::Box | Role::Rc | Role::Arc)) = self.p.decls[d.index()].role
+        {
+            let shared = view || role != Role::Box;
+            self.steps.push(PStep::Payload);
+            at.place.len += 1;
+            at.shared |= shared;
+            at.ty = if shared {
+                self.t.mk(TyKind::View(args[0]))
+            } else {
+                args[0]
+            };
+            return self.field(at, name, n);
+        }
         let mut stable = false;
         let found = match self.t.kind(inner).clone() {
             TyKind::Adt(d, args) => {
@@ -531,6 +547,23 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     };
                     let place = self.place_ty(ty, n)?;
                     address = self.index_address(address, collection, value, place, n)?;
+                }
+                PStep::Payload => {
+                    let holder = match self.t.kind(ty) {
+                        TyKind::View(x) => *x,
+                        _ => ty,
+                    };
+                    let TyKind::Adt(_, args) = self.t.kind(holder) else {
+                        unreachable!("a payload step follows a Box, Rc or Arc")
+                    };
+                    ty = args[0];
+                    let place = self.place_ty(ty, n)?;
+                    address = self.address(
+                        AddressBase::Address(address),
+                        &[Step::Field(0), Step::Deref],
+                        place,
+                        n,
+                    );
                 }
                 PStep::Any => unreachable!("payload overlap marker is not an emitted place"),
             }

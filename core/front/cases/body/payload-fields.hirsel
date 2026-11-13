@@ -1,0 +1,19 @@
+// OWN-8, MEM-14, MEM-15: a field of a Box, Rc or Arc is the field of its payload, and
+// a field of a nested record continues from it. Hand-derived: a holds C(k, 7, I(40)),
+// so a + b + i.v = k + 47: boxed(2) = 49, counted(0) = 47, shared(5) = 52, run lines to
+// add when box.new, rc.new and arc.new are built (core-ops-914).
+// expect: gap this generic core operation is not built
+type I: shareable + send { v: u64 }
+type C: shareable + send { a: u64, b: u64, i: I }
+fn sum_box(c: Box[C]) -> u64 { c.a + c.b + c.i.v }
+fn sum_rc(c: Rc[C]) -> u64 { c.a + c.b + c.i.v }
+fn sum_arc(c: Arc[C]) -> u64 { c.a + c.b + c.i.v }
+fn boxed(k: u64) -> u64 {
+  match box.new(C(a: k, b: 7, i: I(v: 40))) { Ok(h) => sum_box(h), Error(_) => 999 }
+}
+fn counted(k: u64) -> u64 {
+  match rc.new(C(a: k, b: 7, i: I(v: 40))) { Ok(h) => sum_rc(h), Error(_) => 999 }
+}
+fn shared(k: u64) -> u64 {
+  match arc.new(C(a: k, b: 7, i: I(v: 40))) { Ok(h) => sum_arc(h), Error(_) => 999 }
+}

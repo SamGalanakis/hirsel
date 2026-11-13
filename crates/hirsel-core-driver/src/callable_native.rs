@@ -109,3 +109,13 @@ fn slots_needs_drop_cranelift(){slots_needs_drop(Backend::Cranelift);}
 #[test]
 #[ignore="explicit native integration target"]
 fn slots_needs_drop_llvm(){slots_needs_drop(Backend::Llvm);}
+
+fn map_clone(backend: Backend) {
+    ordered_case(backend, include_str!("../../../core/front/cases/body/map-clone.hirsel"));
+}
+#[test]
+#[ignore="explicit native integration target"]
+fn map_clone_cranelift(){map_clone(Backend::Cranelift);}
+#[test]
+#[ignore="explicit native integration target"]
+fn map_clone_llvm(){map_clone(Backend::Llvm);}

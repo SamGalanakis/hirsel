@@ -2090,6 +2090,57 @@
           "whole_process_per_line": 36308.72
         }
       }
+    },
+    {
+      "from_revision": "4edfc66f2cea86127a77122249f2122fa4f62860",
+      "to_revision": "908c629c + Map clone exact-live-capacity qualification",
+      "reason": "Core Map top-level clone body and reverse-prefix rollback now check and emit, including nested Map values. Core source completion rises by two bodies in each corpus; include the cumulative source growth since the recorded forecast. Observation plus 2 percent rounded up to 100; fixed 60000 process budget unchanged.",
+      "completed_bodies_before": {
+        "m1": [
+          362,
+          362
+        ],
+        "std": [
+          184,
+          184
+        ]
+      },
+      "completed_bodies_after": {
+        "m1": [
+          364,
+          364
+        ],
+        "std": [
+          186,
+          186
+        ]
+      },
+      "previous_ceilings": {
+        "m1": {
+          "code_lines": 7059,
+          "check_lower_per_line": 25000,
+          "whole_request_per_line": 46300,
+          "whole_process_per_line": 46400
+        },
+        "std": {
+          "code_lines": 3668,
+          "check_lower_per_line": 16600,
+          "whole_request_per_line": 35600,
+          "whole_process_per_line": 35900
+        }
+      },
+      "measured_per_line": {
+        "m1": {
+          "check_lower_per_line": 26253.60740022173,
+          "whole_request_per_line": 47207.483370288246,
+          "whole_process_per_line": 47305.689440133036
+        },
+        "std": {
+          "check_lower_per_line": 17332.804183006538,
+          "whole_request_per_line": 36082.237385620916,
+          "whole_process_per_line": 36302.05045751634
+        }
+      }
     }
   ],
   "denominator_policy": "Fixed M1/core-std manifest closure, deterministic actual code lines. Print baseline and current counts when different. Source-line movement alone is expected source development, not a regression; empty corpus, missing counters, every numeric ceiling and the fixed finished-process budget still fail. Refresh recorded reference and forecast when supported work changes."

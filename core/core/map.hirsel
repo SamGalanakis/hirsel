@@ -131,9 +131,7 @@ clone[K:key,V](x:Map[K,V]) {
   let mut copied: Map[K,V] = new()
   let count = len(x)
   if count == 0 { return Ok(take copied) }
-  let mut cap: u64 = 4
-  while cap < count { cap *= 2 }
-  regrow(mut copied,cap)?
+  regrow(mut copied,count)?
   let mut i: u64 = 0
   while i < slots(x) {
     if slot_live(x,i) {

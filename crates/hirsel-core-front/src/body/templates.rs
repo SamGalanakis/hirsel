@@ -665,34 +665,70 @@ impl Emitter {
     /// Test/evaluator assembly. Production materializes one immutable definition
     /// product at a time, using the same `materialize` transformation.
     pub fn materialize_instances(&mut self) -> Result<(), String> {
-        let mut i = 0;
-        while i < self.module.functions.len() {
-            let f = FuncId(i as u32);
-            i += 1;
+        use std::collections::HashSet;
+        // A row may carry a clone hook even when this program never clones it.
+        // Only a derived clone's call demands that hook's instance. In particular,
+        // storing opaque/resource values does not instantiate an inadmissible clone.
+        let clone_definitions: HashSet<_> = self
+            .module
+            .types
+            .iter()
+            .filter_map(|s| s.clone)
+            .map(|f| {
+                self.module.instances[self.module.functions[f.0 as usize].instance.index()]
+                    .definition
+                    .clone()
+            })
+            .collect();
+        let sources: HashSet<_> = self.templates.values().map(|(f, _)| *f).collect();
+        let mut scheduled = HashSet::new();
+        let mut pending = vec![];
+        let mut scanned = 0;
+        let mut next = 0;
+        loop {
+            while scanned < self.module.functions.len() {
+                let f = FuncId(scanned as u32);
+                scanned += 1;
+                let function = &self.module.functions[f.index()];
+                let key = &self.module.instances[function.instance.index()];
+                if !clone_definitions.contains(&key.definition) && scheduled.insert(f) {
+                    pending.push(f);
+                }
+            }
+            let Some(&f) = pending.get(next) else { break };
+            next += 1;
             let function = &self.module.functions[f.index()];
-            if function.body.is_some() {
-                continue;
-            }
             let key = &self.module.instances[function.instance.index()];
-            if key.types.is_empty() || self.generic_calls.contains_key(&f) {
-                continue;
+            if function.body.is_none()
+                && !key.types.is_empty()
+                && !self.generic_calls.contains_key(&f)
+                && let Some((source, template)) = self.templates.get(&key.definition).cloned()
+            {
+                let arguments = key
+                    .types
+                    .iter()
+                    .map(|name| {
+                        self.module
+                            .types
+                            .iter()
+                            .position(|ty| &ty.name == name)
+                            .map(|i| TypeId(i as u32))
+                            .ok_or_else(|| format!("unpublished instance type {name}"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                fill(&mut self.module, source, f, &template, &arguments)?;
             }
-            let Some((source, template)) = self.templates.get(&key.definition).cloned() else {
-                continue;
-            };
-            let arguments = key
-                .types
-                .iter()
-                .map(|name| {
-                    self.module
-                        .types
-                        .iter()
-                        .position(|ty| &ty.name == name)
-                        .map(|i| TypeId(i as u32))
-                        .ok_or_else(|| format!("unpublished instance type {name}"))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            fill(&mut self.module, source, f, &template, &arguments)?;
+            if !sources.contains(&f)
+                && let Some(body) = &self.module.functions[f.index()].body
+            {
+                for call in &body.calls {
+                    if let Callee::Direct(callee) = call.callee
+                        && scheduled.insert(callee)
+                    {
+                        pending.push(callee);
+                    }
+                }
+            }
         }
         for (source, _) in self.templates.values() {
             self.module.functions[source.index()].body = None;

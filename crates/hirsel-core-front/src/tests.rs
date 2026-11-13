@@ -206,7 +206,8 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
     for (f, fd) in p.fns.iter().enumerate() {
         if fd.body.is_none()
             || (index.module_package(fd.site.module) != index.module_package(main)
-                && !(fd.path.package_is("core", "1") && fd.path.0.modules == ["map"]))
+                && !(fd.path.package_is("core", "1")
+                    && (fd.path.0.modules == ["map"] || fd.path.0.modules == ["string"])))
         {
             continue;
         }
@@ -217,9 +218,12 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
             functions.insert(fd.path.0.name.clone(), id);
         }
     }
-    emitter
-        .materialize_instances()
-        .expect("materialize checked generic bodies");
+    emitter.materialize_instances().unwrap_or_else(|e| {
+        panic!(
+            "{}: materialize checked generic bodies: {e}",
+            path.display()
+        )
+    });
     let module = &emitter.module;
     let rigid = concrete_rows_reaching_rigid(module);
     assert!(
@@ -2871,6 +2875,6 @@ fn aggregate_callback_cases() {
 
 #[test]
 fn map_clone_cases() {
-    let failures=run_case(&root().join("cases/body/map-clone.hirsel"));
+    let failures = run_case(&root().join("cases/body/map-clone.hirsel"));
     assert!(failures.is_empty(), "{failures:?}");
 }

@@ -535,13 +535,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 );
                 return (ERROR, None);
             }
-            let bounds = self.kids(ungrouped);
-            if !self.synthesises(bounds[0]) && !self.synthesises(bounds[1]) {
-                return self.gap_ty(source, "the type of an unsuffixed range is unspecified");
-            }
             let (ty, lo, hi) = self.operands(ungrouped, None);
             if ty != ERROR && int_of(&self.t, ty).is_none() {
-                return self.gap_ty(source, "iteration of a non-integer range is unspecified");
+                self.refuse(
+                    "SEM-6",
+                    ungrouped,
+                    "a range's endpoints must have one integer type",
+                );
+                return (ERROR, None);
             }
             (ty, lo, hi, self.token_text(ungrouped) == "..=", None)
         } else {

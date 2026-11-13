@@ -1,0 +1,2 @@
+// expect: refuse LANG-11 at 2:23
+fn three() { for _ in 0..3 {} }

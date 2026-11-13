@@ -1,0 +1,6 @@
+// expect: run lower() = 1
+// expect: run upper() = 1
+// expect: run outside() = 2
+fn lower() -> u8 { match 'a' { 'a'..='c' => 1, _ => 2 } }
+fn upper() -> u8 { match 'c' { 'a'..='c' => 1, _ => 2 } }
+fn outside() -> u8 { match 'd' { 'a'..='c' => 1, _ => 2 } }

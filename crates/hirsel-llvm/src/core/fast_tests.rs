@@ -189,7 +189,9 @@ fn counted_hot_paths_are_inline_and_last_release_is_cold() {
     assert!(!ir.contains("@hirsel_core_release("));
     assert!(ir.contains("cmpxchg weak ptr"));
     assert!(ir.contains("atomicrmw sub ptr"));
-    assert!(ir.contains("call void @hirsel_core_counted_init"));
+    assert!(!ir.contains("@hirsel_core_counted_init"));
+    assert!(ir.contains("store atomic i64 1"));
+    assert!(ir.contains("call void @hirsel_core_arc_initialized()"));
     assert!(ir.contains("call void @hirsel_core_arc_shared"));
     assert!(ir.contains("call void @hirsel_core_arc_released"));
     assert!(ir.lines().any(

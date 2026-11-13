@@ -358,10 +358,10 @@ impl FunctionEmitter<'_> {
                     ));
                     writeln!(self.code, "counted{n}:").unwrap();
                     if counted == Counted::Arc {
-                        self.runtime_void(
-                            "hirsel_core_counted_init",
-                            &[ptr(&block), ("i1 zeroext".into(), "true".into())],
-                        );
+                        self.line(format!(
+                            "store atomic i64 1, ptr {block} monotonic, align 8"
+                        ));
+                        self.runtime_void("hirsel_core_arc_initialized", &[]);
                     } else {
                         self.line(format!("store i64 1, ptr {block}, align 8"));
                     }

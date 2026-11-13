@@ -163,8 +163,12 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
             include_bytes!("../../hirsel-core-rt/include/hirsel_core_rt.h"),
         )?;
         std::fs::write(
-            headers.path().join("hirsel_core_process.h"),
-            include_bytes!("../../hirsel-core-rt/include/hirsel_core_process.h"),
+            headers.path().join("hirsel_core_rt_host.h"),
+            include_bytes!("../../hirsel-core-rt/include/hirsel_core_rt_host.h"),
+        )?;
+        std::fs::write(
+            headers.path().join("hirsel_core_rt_tasks.h"),
+            include_bytes!("../../hirsel-core-rt/include/hirsel_core_rt_tasks.h"),
         )?;
         let options = NativeOptions {
             backend: backend.unwrap_or(if release {

@@ -269,6 +269,18 @@ impl Cx<'_, '_, '_> {
         }
         Some(())
     }
+    /// A FixedSpan element with no packed encoding: a non-plain one was refused at its
+    /// type (MEM-12), so lowering stops quietly; a plain one is a gap.
+    pub(super) fn unencoded_element(&mut self, elem: TyId, n: NodeId) {
+        if self.copies(elem) {
+            self.gap(
+                n,
+                "the private encoding of this FixedSpan element is not built",
+            );
+        } else {
+            self.halt();
+        }
+    }
     #[allow(clippy::too_many_arguments)]
     pub(super) fn fixed_span_element(
         &mut self,
@@ -280,10 +292,7 @@ impl Cx<'_, '_, '_> {
         n: NodeId,
     ) -> Option<AddressId> {
         let Some(stride) = self.packed_plain_size(elem) else {
-            self.gap(
-                n,
-                "the private encoding of this FixedSpan element is not built",
-            );
+            self.unencoded_element(elem, n);
             return None;
         };
         let (blob, at, w, count) = self.span_parts(header, n)?;

@@ -796,10 +796,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                             if matches!(self.role_of(collection), Some((Role::FixedSpan, _)))
                                 && self.packed_plain_size(elem).is_none()
                             {
-                                self.gap(
-                                    n,
-                                    "the private encoding of this FixedSpan element is not built",
-                                );
+                                self.unencoded_element(elem, n);
                                 return None;
                             }
                             let off = self.read_bits(cursor, Ty::Scalar(Scalar::U64), n);

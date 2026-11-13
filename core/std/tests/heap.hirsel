@@ -1,0 +1,52 @@
+// Min-heap laws use the hand-sorted model [1, 1, 2, 3, 4, 5, 9].
+// Swapping the comparison or choosing the larger child changes this oracle.
+// expect: run priority_order() = 1123459
+fn priority_order() -> u64 {
+    let mut h: heap.Heap[u64] = heap.new()
+    result.unwrap(heap.push(mut h, 5))
+    result.unwrap(heap.push(mut h, 1))
+    result.unwrap(heap.push(mut h, 9))
+    result.unwrap(heap.push(mut h, 3))
+    result.unwrap(heap.push(mut h, 1))
+    result.unwrap(heap.push(mut h, 4))
+    result.unwrap(heap.push(mut h, 2))
+    let mut digits: u64 = 0
+    while heap.len(h) > 0 { digits = digits * 10 + option.unwrap(heap.pop(mut h)) }
+    digits
+}
+
+// expect: run empty_pop() = true
+fn empty_pop() -> bool {
+    let mut h: heap.Heap[u64] = heap.new()
+    match heap.pop(mut h) { None => true, _ => false }
+}
+
+// expect: run singleton_peek_pop() = 77
+fn singleton_peek_pop() -> u64 {
+    let mut h: heap.Heap[u64] = heap.new()
+    result.unwrap(heap.push(mut h, 7))
+    let p: u64 = match heap.peek(h) { Some(v) => v, None => 99 }
+    p * 10 + option.unwrap(heap.pop(mut h))
+}
+
+// Capacity returns an owned String, and the heap remains empty.
+// expect: run capacity_returns_owner() = 3
+fn capacity_returns_owner() -> u64 {
+    let mut h: heap.Heap[String] = heap.new()
+    let x = result.unwrap(string.from("abc"))
+    let r = bound bytes 0 { heap.push(mut h, take x) }
+    match r {
+        Ok(Error((_, take original))) => list.len(string.as_bytes(original)) + heap.len(h),
+        _ => 99,
+    }
+}
+
+// expect: run interleaved() = 123
+fn interleaved() -> u64 {
+    let mut h: heap.Heap[u64] = heap.new()
+    result.unwrap(heap.push(mut h, 3))
+    result.unwrap(heap.push(mut h, 1))
+    let a = option.unwrap(heap.pop(mut h))
+    result.unwrap(heap.push(mut h, 2))
+    a * 100 + option.unwrap(heap.pop(mut h)) * 10 + option.unwrap(heap.pop(mut h))
+}

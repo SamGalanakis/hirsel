@@ -155,6 +155,16 @@ impl Function<'_, '_, '_> {
             Inst::SetCase { address, case } => {
                 self.case(address, Some(case))?;
             }
+            Inst::Trim { block, charge } => {
+                let block = self.get(block);
+                let charge = self.get(charge);
+                self.c_call(
+                    "hirsel_core_region_lower_charge",
+                    &[p, u],
+                    &[],
+                    &[block, charge],
+                )?;
+            }
             Inst::Free { block, charge } => {
                 let block = self.get(block);
                 let charge = self.get(charge);

@@ -212,6 +212,10 @@ impl Function<'_, '_, '_> {
                 };
                 self.set(result, v);
             }
+            Inst::Pointer { result, address } => {
+                let pointer = self.addr(address);
+                self.set(result, pointer);
+            }
             Inst::ReadStatic { result, data } => {
                 let global = self
                     .object
@@ -338,18 +342,16 @@ impl Function<'_, '_, '_> {
                 result, address, ..
             } => {
                 let a = self.addr(address);
-                let v = self.b.ins().load(
-                    ty(self.body.values[result.index()]),
-                    MemFlags::trusted(),
-                    a,
-                    0,
-                );
+                let v =
+                    self.b
+                        .ins()
+                        .load(ty(self.body.values[result.index()]), MemFlags::new(), a, 0);
                 self.set(result, v);
             }
             Inst::Store { address, value } => {
                 let a = self.addr(address);
                 let v = self.get(value);
-                self.b.ins().store(MemFlags::trusted(), v, a, 0);
+                self.b.ins().store(MemFlags::new(), v, a, 0);
             }
             Inst::UpdateMask {
                 result,
@@ -392,6 +394,17 @@ impl Function<'_, '_, '_> {
                         let v = self.get(v);
                         let sig = self.b.import_signature(signature.clif.clone());
                         self.b.ins().call_indirect(sig, v, &args)
+                    }
+                    Callee::Runtime(RtOp::DestId) => {
+                        let result = self.c_call(
+                            "hirsel_core_dest_id",
+                            &[],
+                            &[Ty::Scalar(Scalar::U64)],
+                            &[],
+                        )?[0];
+                        let values = call.results.get(&self.body.pools.values).unwrap();
+                        self.set(values[0], result);
+                        return Ok(());
                     }
                     Callee::Runtime(_) => return Err(unsupported("task runtime call")),
                 };

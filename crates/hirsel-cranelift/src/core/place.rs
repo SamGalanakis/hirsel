@@ -68,7 +68,10 @@ impl Function<'_, '_, '_> {
     }
     fn next_at(&self, at: At, step: Step, ty: PlaceTy) -> Result<At> {
         Ok(match step {
-            Step::Byte(_) => return Err(unsupported("compact byte projection is the next slice")),
+            Step::Byte(_) => match ty {
+                PlaceTy::Declared(t) => At::Declared(t),
+                _ => At::Other,
+            },
             Step::Deref => match at {
                 At::Pointer(t) => At::Declared(t),
                 At::Counted(t) => held(self.input, t),
@@ -120,14 +123,13 @@ impl Function<'_, '_, '_> {
         };
         for &step in a.steps.get(&self.body.pools.steps).unwrap() {
             ptr = match step {
-                Step::Byte(_) => {
-                    return Err(unsupported("compact byte projection is the next slice"));
+                Step::Byte(v) => {
+                    let offset = self.get(v);
+                    let offset = self.resize(offset, types::I64, false);
+                    self.b.ins().iadd(ptr, offset)
                 }
                 Step::Deref => {
-                    let p = self
-                        .b
-                        .ins()
-                        .load(types::I64, MemFlagsData::trusted(), ptr, 0);
+                    let p = self.b.ins().load(types::I64, MemFlagsData::new(), ptr, 0);
                     if matches!(at, At::Counted(_)) {
                         self.b.ins().iadd_imm_s(p, 8)
                     } else {
@@ -189,13 +191,13 @@ impl Function<'_, '_, '_> {
             let value = self.b.ins().iconst(native, i64::from(value));
             self.b
                 .ins()
-                .store(MemFlagsData::trusted(), value, address, tag.offset as i32);
+                .store(MemFlagsData::new(), value, address, tag.offset as i32);
             Ok(None)
         } else {
-            let value =
-                self.b
-                    .ins()
-                    .load(native, MemFlagsData::trusted(), address, tag.offset as i32);
+            let value = self
+                .b
+                .ins()
+                .load(native, MemFlagsData::new(), address, tag.offset as i32);
             Ok(Some(self.resize(value, types::I32, false)))
         }
     }

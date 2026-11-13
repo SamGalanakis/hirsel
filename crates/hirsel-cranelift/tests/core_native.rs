@@ -732,3 +732,61 @@ fn counted_variant_chain_uses_constant_stack_and_refunds_every_node() {
         }]),
     );
 }
+
+#[test]
+fn every_compact_sequence_sample_matches_evaluator() {
+    let source = include_str!("../../hirsel-core-ir/samples/sequences.core");
+    let module = text::parse(source).unwrap();
+    execute(&module, &sample_runs(&module, source), false);
+    let mut count = 0;
+    for line in source
+        .lines()
+        .filter(|l| l.trim().starts_with("; run limit "))
+    {
+        let (n, call) = line
+            .trim()
+            .strip_prefix("; run limit ")
+            .unwrap()
+            .split_once(": ")
+            .unwrap();
+        let runs = sample_runs(&module, &format!("; run: {call}"));
+        execute_limit(&module, &runs, false, n.parse().unwrap());
+        count += runs.len();
+    }
+    assert_eq!(count, 7);
+}
+
+#[test]
+fn fixed_span_payload_pointers_and_scalar_reads_match_evaluator() {
+    let module = text::parse(include_str!("support/spans.core")).unwrap();
+    execute(
+        &module,
+        &[
+            (FuncId(0), vec![0]),
+            (FuncId(0), vec![1]),
+            (FuncId(0), vec![257]),
+        ],
+        false,
+    );
+}
+
+#[test]
+fn owned_callable_captures_and_captureless_cleanup_use_function_row_abi() {
+    let module = text::parse(include_str!("support/callable.core")).unwrap();
+    let runs = [(FuncId(0), vec![12345]), (FuncId(3), vec![])];
+    let reports = [
+        eval::Report {
+            outcome: Outcome::Returned(vec![12345]),
+            used: 0,
+            trace: vec![],
+            admissions: 1,
+        },
+        eval::Report {
+            outcome: Outcome::Returned(vec![13]),
+            used: 0,
+            trace: vec![],
+            admissions: 0,
+        },
+    ];
+    execute_reports(&module, &runs, false, 1000, None, Some(&reports));
+}

@@ -404,3 +404,38 @@ pub unsafe extern "C" fn hirsel_core_free_value(pointer: NonNull<u8>, charge: u6
         causes::free_value(pointer, charge);
     }
 }
+
+/// A run-unique identity for a compact destination. It admits no storage and
+/// returns no failure status. Exhausting the identity space is a run stop.
+#[unsafe(no_mangle)]
+pub extern "C" fn hirsel_core_dest_id() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+        .unwrap_or_else(|_| std::process::abort())
+}
+
+#[cfg(test)]
+mod destination_tests {
+    #[test]
+    fn destination_identities_are_unique_across_tasks() {
+        let mut ids = std::thread::scope(|scope| {
+            let tasks: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| {
+                        (0..1000)
+                            .map(|_| super::hirsel_core_dest_id())
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            tasks
+                .into_iter()
+                .flat_map(|task| task.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        ids.sort_unstable();
+        assert_eq!(ids.len(), 4000);
+        assert!(ids.windows(2).all(|pair| pair[0] != pair[1]));
+    }
+}

@@ -1169,6 +1169,14 @@ impl<'c, 'a> Cx<'c, 'a> {
             NodeKind::Return => self.return_(n),
             NodeKind::Break => self.break_(n),
             NodeKind::Continue => self.continue_(n),
+            NodeKind::Unary | NodeKind::Binary
+                if let Some(sc) = want.and_then(|w| match self.t.kind(w.ty) {
+                    TyKind::Scalar(sc) if numeric(*sc) => Some(*sc),
+                    _ => None,
+                }) && !self.synthesises(n) =>
+            {
+                self.literal_operand(n, sc)
+            }
             NodeKind::Unary => self.unary(n, want),
             NodeKind::Binary => self.binary(n, want),
             NodeKind::Call => self.call(n, want),
@@ -1221,9 +1229,9 @@ impl<'c, 'a> Cx<'c, 'a> {
         let r = match self.kind(n) {
             NodeKind::Literal => !self.unsuffixed_number(n),
             NodeKind::Group => self.synthesises(c[0]),
-            // LANG-21: a literal operand is an unsuffixed number, or a unary `-`, a
-            // binary operator or parentheses over literal operands only.
-            NodeKind::Unary => self.token_text(n) != "-" || self.synthesises(c[0]),
+            // LANG-21: a literal operand is an unsuffixed number, or a unary `-` or `~`,
+            // a binary operator or parentheses over literal operands only.
+            NodeKind::Unary => !matches!(self.token_text(n), "-" | "~") || self.synthesises(c[0]),
             NodeKind::Binary => self.synthesises(c[0]) || self.synthesises(c[1]),
             _ => true,
         };
@@ -1338,6 +1346,146 @@ impl<'c, 'a> Cx<'c, 'a> {
         };
         let v = self.konst(Ty::Scalar(ty), bits, n);
         (scalar(ty), v)
+    }
+    /// A literal operand of type `s` (LANG-21) is evaluated here, by SEM-1 and SEM-2,
+    /// and emitted as one constant: it has no run-time effect. A failure is refused
+    /// LANG-3 at the operation that fails.
+    fn literal_operand(&mut self, n: NodeId, s: Scalar) -> (TyId, Option<ValueId>) {
+        match self.fold(n, s, true) {
+            Some(x) => {
+                let bits = match x {
+                    Num::Int(v) => {
+                        let w = Ty::Scalar(s).int().map_or(64, |(_, w)| w);
+                        (v as u64) & (u64::MAX >> (64 - w))
+                    }
+                    Num::Float(f) => float_bits(s, f),
+                };
+                (scalar(s), self.konst(Ty::Scalar(s), bits, n))
+            }
+            None => (ERROR, None),
+        }
+    }
+    /// `n`'s value in `s`; `check` is false only for a number directly under unary `-`,
+    /// whose magnitude may be one past the type's maximum (LANG-3).
+    fn fold(&mut self, n: NodeId, s: Scalar, check: bool) -> Option<Num> {
+        let int = Ty::Scalar(s).int();
+        let c = self.kids(n);
+        let x = match self.kind(n) {
+            NodeKind::Group => return self.fold(c[0], s, check),
+            NodeKind::Literal => {
+                let text = self.token_text(n);
+                match (self.token_kind(n), int) {
+                    (Some(TokenKind::Integer), Some(_)) => Num::Int(
+                        int_magnitude(int_suffix(text).0)
+                            .map_or(i128::MAX, |m| i128::try_from(m).unwrap_or(i128::MAX)),
+                    ),
+                    (Some(TokenKind::Float), None) => {
+                        let d: String =
+                            float_suffix(text).0.chars().filter(|&c| c != '_').collect();
+                        Num::Float(d.parse::<f64>().ok()?)
+                    }
+                    (Some(TokenKind::Integer), None) => {
+                        let a = self.name(scalar(s));
+                        self.refuse("LANG-3", n, format!("an integer literal is not `{a}`"));
+                        return None;
+                    }
+                    _ => {
+                        let a = self.name(scalar(s));
+                        self.refuse("LANG-3", n, format!("a fractional literal is not `{a}`"));
+                        return None;
+                    }
+                }
+            }
+            NodeKind::Unary => {
+                let op = self.token_text(n);
+                let ok = match op {
+                    "-" => matches!(int, Some((true, _)) | None),
+                    _ => int.is_some(),
+                };
+                if !ok {
+                    self.no_operator(n, scalar(s));
+                    return None;
+                }
+                let bare = self.kind(c[0]) == NodeKind::Literal;
+                match (op, self.fold(c[0], s, !(op == "-" && bare))?) {
+                    ("-", Num::Int(v)) => Num::Int(-v),
+                    ("-", Num::Float(f)) => Num::Float(-f),
+                    (_, Num::Int(v)) => {
+                        let (signed, w) = int.unwrap_or((false, 64));
+                        Num::Int(wrap(!v, signed, w))
+                    }
+                    (_, f) => f,
+                }
+            }
+            NodeKind::Binary => {
+                let op = self.token_text(n);
+                let arith = matches!(op, "+" | "-" | "*" | "/");
+                let ints = matches!(op, "%" | "&" | "|" | "^" | "<<" | ">>");
+                if !arith && !ints {
+                    self.refuse("LANG-11", n, "literal operands have no type here");
+                    return None;
+                }
+                if ints && int.is_none() {
+                    self.no_operator(n, scalar(s));
+                    return None;
+                }
+                let a = self.fold(c[0], s, true)?;
+                let b = self.fold(c[1], s, true)?;
+                match (a, b) {
+                    (Num::Float(a), Num::Float(b)) => {
+                        let f = match op {
+                            "+" => a + b,
+                            "-" => a - b,
+                            "*" => a * b,
+                            _ => a / b,
+                        };
+                        Num::Float(f)
+                    }
+                    (Num::Int(a), Num::Int(b)) => {
+                        let (signed, w) = int.unwrap_or((false, 64));
+                        let bad = |cx: &mut Self, why: &str| {
+                            cx.refuse("LANG-3", n, why.to_owned());
+                            None
+                        };
+                        Num::Int(match op {
+                            "+" => a.saturating_add(b),
+                            "-" => a.saturating_sub(b),
+                            "*" => a.saturating_mul(b),
+                            "/" | "%" if b == 0 => return bad(self, "division by zero"),
+                            "/" => a / b,
+                            "%" => a % b,
+                            "&" => a & b,
+                            "|" => a | b,
+                            "^" => a ^ b,
+                            _ if b < 0 || b >= i128::from(w) => {
+                                return bad(self, "shift count out of range");
+                            }
+                            "<<" => wrap(a << b, signed, w),
+                            _ => a >> b,
+                        })
+                    }
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        let x = match (x, s) {
+            (Num::Float(f), Scalar::F32) => Num::Float(f64::from(f as f32)),
+            (x, _) => x,
+        };
+        if let (Num::Int(v), Some((signed, w)), true) = (x, int, check) {
+            let (lo, hi) = if signed {
+                (-(1i128 << (w - 1)), (1i128 << (w - 1)) - 1)
+            } else {
+                (0, (1i128 << w) - 1)
+            };
+            if v < lo || v > hi {
+                let a = self.name(scalar(s));
+                self.refuse("LANG-3", n, format!("the value does not fit `{a}`"));
+                return None;
+            }
+        }
+        Some(x)
     }
     fn untyped_number(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         match want {
@@ -2807,6 +2955,21 @@ fn is_type_node(k: NodeKind) -> bool {
     )
 }
 
+/// A literal operand's value while it is evaluated (LANG-21).
+#[derive(Clone, Copy)]
+enum Num {
+    Int(i128),
+    Float(f64),
+}
+/// `v` cut to `w` bits, read signed or not.
+fn wrap(v: i128, signed: bool, w: u32) -> i128 {
+    let m = v & ((1i128 << w) - 1);
+    if signed && m >> (w - 1) != 0 {
+        m - (1i128 << w)
+    } else {
+        m
+    }
+}
 fn numeric(s: Scalar) -> bool {
     !matches!(s, Scalar::Bool | Scalar::Char)
 }

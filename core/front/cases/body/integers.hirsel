@@ -33,5 +33,5 @@ fn shl(x: u8, n: u8) -> u8 { x << n }
 fn sar(x: i8, n: i8) -> i8 { x >> n }
 fn shr(x: u8, n: u8) -> u8 { x >> n }
 // (12 & 10) | (12 ^ 10) = 8 | 6 = 14; then & ~8 = 6
-fn bits(x: u8, y: u8) -> u8 { ((x & y) | (x ^ y)) & ~8u8 }
+fn bits(x: u8, y: u8) -> u8 { ((x & y) | (x ^ y)) & ~8 }
 fn flip(x: u8) -> u8 { ~x }

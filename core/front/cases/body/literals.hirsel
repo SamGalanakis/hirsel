@@ -1,5 +1,6 @@
 // LANG-3 by hand: prefixes, separators, suffixes, MIN under negation, and an unsuffixed
-// number taking the expected type (LANG-11), also through an operator.
+// number taking the expected type (LANG-11), also through an operator. Literal operands
+// are evaluated when checked (LANG-21): (1 + 2) * 3 = 9 and ~2 = 253 in u8.
 // expect: accept
 // expect: run min() = -128
 // expect: run hex() = 255
@@ -10,6 +11,8 @@
 // expect: run half() = 0.5
 // expect: run byte() = 97
 // expect: run yes() = true
+// expect: run folded() = 9
+// expect: run flipped() = 253
 
 fn min() -> i8 { -128i8 }
 fn hex() -> u8 { 0xff }
@@ -20,3 +23,5 @@ fn shifted(x: u64) -> u64 { x << 3 }
 fn half() -> f64 { 1.0 / 2.0 }
 fn byte() -> u8 { b'a' }
 fn yes() -> bool { 2 < 3u8 }
+fn folded() -> u8 { (1 + 2) * 3 }
+fn flipped() -> u8 { ~2 }

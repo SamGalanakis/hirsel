@@ -1,0 +1,19 @@
+// MEM-6: callable invocation roots its result in the Region argument, using the
+// same reroot operation as a direct call. The adapter's physical signature is fixed.
+// expect: accept
+// expect: run run() = 1
+stable type Doc { value: u64 }
+fn parse(r: Region) -> Result[Doc in r, Capacity] {
+  Error(Capacity(requested: 1, available: 0))
+}
+fn invoke(r: Region) -> Result[Doc in r, Capacity] {
+  let cb = parse
+  cb(r)
+}
+fn run() -> u64 {
+  let cb = parse
+  region r {
+    let result: Result[Doc in r, Capacity] = cb(r)
+    match result { Error(c) => c.requested, Ok(_) => 0 }
+  }
+}

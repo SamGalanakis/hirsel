@@ -1,0 +1,9 @@
+// A captured enclosing formal is not an invocation parameter. Its anchor needs
+// enclosing-formal translation; until built, this source construct is a GAP.
+// expect: gap captured formal Region anchors are not built
+stable type Doc { value: u64 }
+fn parse(r: Region) -> Result[Doc in r, Capacity] { Error(Capacity(requested: 1, available: 0)) }
+fn outer(r: Region) {
+  let invoke = scoped fn() { let f = parse; let _ = f(r) }
+  invoke()
+}

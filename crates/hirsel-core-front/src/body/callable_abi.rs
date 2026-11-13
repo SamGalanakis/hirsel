@@ -19,8 +19,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if environment {
             ps.push(Param::Value(Ty::Ptr));
         }
-        for &(_, ty) in params {
-            ps.push(Param::Address(self.e.type_row(self.p, &mut self.t, ty)?));
+        for &(mode, ty) in params {
+            ps.push(if mode == Mode::View && self.region_handle(ty) {
+                Param::Value(Ty::Ptr)
+            } else {
+                Param::Address(self.e.type_row(self.p, &mut self.t, ty)?)
+            });
         }
         let dest = if result == NEVER {
             None
@@ -39,6 +43,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         } else {
             Some(self.e.sig(signature))
         }
+    }
+
+    pub(super) fn region_handle(&self, ty: TyId) -> bool {
+        matches!(self.t.kind(ty), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::Region))
     }
 
     /// Read a source value from its callable argument/result place.
@@ -158,7 +166,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         let mut values = Vec::with_capacity(params.len());
         for (i, &(mode, ty)) in params.iter().enumerate() {
-            let value = if mode == Mode::Mut {
+            let value = if mode == Mode::Mut || child.region_handle(ty) {
                 Some(incoming[k + i])
             } else {
                 let id = child.e.type_row(child.p, &mut child.t, ty)?;

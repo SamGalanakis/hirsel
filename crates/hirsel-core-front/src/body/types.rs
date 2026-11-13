@@ -23,27 +23,25 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return self.t.mk(TyKind::Region(Root::Generic(i as u32)));
         }
         let parameter = binder.kind == hirsel_core_resolve::BinderKind::Parameter;
-        let ty = if parameter {
-            self.fd
-                .params
-                .iter()
-                .find(|p| p.name == binder.name)
-                .map(|p| p.ty)
+        let parameter_index = if parameter {
+            let Some(i) = self.fd.params.iter().position(|p| p.name == binder.name) else {
+                self.gap(n, "captured formal Region anchors are not built");
+                return ERROR;
+            };
+            Some(i)
         } else {
-            self.vars[b as usize].map(|v| v.ty)
+            None
+        };
+        let ty = match parameter_index {
+            Some(i) => Some(self.fd.params[i].ty),
+            None => self.vars[b as usize].map(|v| v.ty),
         };
         if region_only && binder.kind != hirsel_core_resolve::BinderKind::Region
             && !ty.is_some_and(|ty| matches!(self.t.kind(ty), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::Region))) {
             self.refuse("MEM-6", n, "a region argument names a Region value");
             return ERROR;
         }
-        if parameter {
-            let i = self
-                .fd
-                .params
-                .iter()
-                .position(|p| p.name == binder.name)
-                .unwrap();
+        if let Some(i) = parameter_index {
             return self.t.mk(TyKind::Region(Root::Parameter(i as u32)));
         }
         // Local roots are indexed by resolver identity, like body places.

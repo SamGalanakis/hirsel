@@ -7,6 +7,7 @@ pub(super) struct CallableAbi {
     signature: SigId,
     params: PoolRange<Rep>,
     result: Rep,
+    regions: PoolRange<u32>,
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
@@ -146,6 +147,20 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if kind(&self.p.decls, &self.t, result, &self.params) == Kind::Scoped {
             self.gap(n, "scoped callable result anchors are not built");
         }
+        let abi = self.value_call_abi(ty, result, callable != Callable::Plain, n, scratch);
+        if let Some(abi) = abi {
+            for j in abi.regions.start..abi.regions.start + abi.regions.len {
+                let i = self.callable_regions[j as usize] as usize;
+                if self.kind(args[i]) != NodeKind::Path
+                    || !matches!(self.p.target(self.at, args[i]), Some(Target::Binder(_)))
+                {
+                    return self.gap_ty(
+                        n,
+                        "a call result rooted in a Region expression is not built",
+                    );
+                }
+            }
+        }
         self.activate(value, call, n);
         scratch.vals.clear();
         scratch.vals.resize(args.len(), None);
@@ -194,6 +209,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Hold::CallView(c, _) | Hold::CallMut(c) if c == call => None,
             other => Some(other),
         });
+        let mut result = result;
+        if let Some(abi) = abi {
+            for j in abi.regions.start..abi.regions.start + abi.regions.len {
+                let i = self.callable_regions[j as usize];
+                let root = self.body_root(args[i as usize], true);
+                result = reroot(&mut self.t, result, Root::Parameter(i), root);
+            }
+        }
         let (code, environment) = if callable == Callable::Plain {
             (value, None)
         } else {
@@ -202,7 +225,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.callable_word(value, 8, n),
             )
         };
-        let v = self.emit_value_call(code, environment, ty, result, n, scratch);
+        let v = self.emit_value_call(code, environment, abi, result, n, scratch);
         if result == NEVER {
             self.dead = true;
         }
@@ -233,19 +256,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(result)
     }
 
-    fn emit_value_call(
+    fn value_call_abi(
         &mut self,
-        code: Option<ValueId>,
-        environment: Option<ValueId>,
         callable: TyId,
         result: TyId,
+        environment: bool,
         n: NodeId,
         scratch: &mut CallScratch,
-    ) -> Option<ValueId> {
-        if !self.live() {
-            return None;
-        }
-        let code = code?;
+    ) -> Option<CallableAbi> {
         let abi = match self
             .callable_signatures
             .get(callable.0 as usize)
@@ -254,12 +272,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         {
             Some(abi) => abi,
             None => {
-                let signature = self.indirect_signature(
+                let Some(signature) = self.indirect_signature(
                     &scratch.params,
                     result,
-                    environment.is_some(),
+                    environment,
                     &mut scratch.ir_params,
-                )?;
+                ) else {
+                    self.gap(n, "callable payload layouts are not built");
+                    return None;
+                };
                 let start = self.callable_reps.len();
                 for &(_, ty) in &scratch.params {
                     let rep = match self.rep(ty) {
@@ -271,6 +292,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     };
                     self.callable_reps.push(rep);
                 }
+                let result_ty = result;
                 let result = match self.rep(result) {
                     Ok(rep) => rep,
                     Err(what) => {
@@ -278,16 +300,56 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         return None;
                     }
                 };
+                let roots = self.callable_regions.len();
+                for (i, &(_, ty)) in scratch.params.iter().enumerate() {
+                    if self.region_handle(ty) && self.parameter_region_result(result_ty, i as u32) {
+                        self.callable_regions.push(i as u32);
+                    }
+                }
                 let abi = CallableAbi {
                     signature,
                     params: PoolRange::new(start as u32, scratch.params.len() as u32),
                     result,
+                    regions: PoolRange::new(
+                        roots as u32,
+                        (self.callable_regions.len() - roots) as u32,
+                    ),
                 };
                 self.callable_signatures.resize(self.t.len(), None);
                 self.callable_signatures[callable.0 as usize] = Some(abi);
                 abi
             }
         };
+        Some(abi)
+    }
+    fn parameter_region_result(&self, ty: TyId, parameter: u32) -> bool {
+        match self.t.kind(ty) {
+            TyKind::Anchored(inner, root) => {
+                matches!(self.t.kind(*root), TyKind::Region(Root::Parameter(i)) if *i == parameter)
+                    || self.parameter_region_result(*inner, parameter)
+            }
+            TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs
+                .iter()
+                .any(|&x| self.parameter_region_result(x, parameter)),
+            TyKind::Array(x, _) | TyKind::View(x) => self.parameter_region_result(*x, parameter),
+            _ => false,
+        }
+    }
+
+    fn emit_value_call(
+        &mut self,
+        code: Option<ValueId>,
+        environment: Option<ValueId>,
+        abi: Option<CallableAbi>,
+        result: TyId,
+        n: NodeId,
+        scratch: &mut CallScratch,
+    ) -> Option<ValueId> {
+        if !self.live() {
+            return None;
+        }
+        let code = code?;
+        let abi = abi?;
         let signature = abi.signature;
         let dest = self.e.module.signatures[signature.index()]
             .dest
@@ -300,10 +362,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             if mode == Mode::Take {
                 self.consume(scratch.vals[i], n);
             }
-            let Param::Address(id) = self.e.module.signatures[signature.index()].params
+            let id = match self.e.module.signatures[signature.index()].params
                 [i + usize::from(environment.is_some())]
-            else {
-                unreachable!()
+            {
+                Param::Address(id) => id,
+                Param::Value(_) => {
+                    scratch.ir_args.push(Arg::Value(scratch.vals[i]?));
+                    continue;
+                }
             };
             let pointer = if mode == Mode::Mut {
                 scratch.vals[i]

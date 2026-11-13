@@ -825,6 +825,7 @@ struct Cx<'c, 'a, 'e> {
     call_seq: u32,
     callable_signatures: Vec<Option<closures::CallableAbi>>,
     callable_reps: Vec<Rep>,
+    callable_regions: Vec<u32>,
     patterns: patterns::Patterns,
     /// Reused call workspaces, one for each active nesting level.
     call_scratch: Vec<calls::CallScratch>,
@@ -926,6 +927,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             call_seq: 0,
             callable_signatures: vec![],
             callable_reps: vec![],
+            callable_regions: vec![],
             patterns: patterns::Patterns::default(),
             call_scratch: vec![],
             array_parts: vec![],

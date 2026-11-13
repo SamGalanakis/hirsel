@@ -2892,6 +2892,25 @@ fn packed_scan_offsets_preserve_source_failures() {
 }
 
 #[test]
+fn callable_scoped_result_regions() {
+    let mut failures =
+        run_case(&root().join("cases/body/callable-scoped-region-result-escape.hirsel"));
+    failures.extend(run_case(
+        &root().join("cases/body/callable-scoped-region-result.hirsel"),
+    ));
+    failures.extend(run_case(
+        &root().join("cases/body/callable-scoped-region-result-fit-refused.hirsel"),
+    ));
+    failures.extend(run_case(&root().join(
+        "cases/body/callable-scoped-region-result-literal-refused.hirsel",
+    )));
+    failures.extend(run_case(
+        &root().join("cases/body/callable-scoped-region-result-alias-escape.hirsel"),
+    ));
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
 fn closure_invocation_region_headers() {
     let mut failures =
         run_case(&root().join("cases/body/callable-closure-header-anchor-gap.hirsel"));

@@ -1819,6 +1819,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let body = self.kids(n)[0];
         let (t, v) = self.expr(body, want);
+        self.region_result_anchors(scope, body, t);
         // Region values cannot leave their scope. Rooted stable/scoped values need
         // the declaration lane's body-root relation before emission is possible.
         if self.contains_region_value(t) {

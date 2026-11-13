@@ -1,0 +1,7 @@
+// A bound invocation Region is not the enclosing function's same-position Region.
+// expect: refuse LANG-13 at 6:47
+fn plus(x:u64)->u64{x+1}
+fn make(r:Region)->(scoped fn(u64)->u64) in r {plus}
+fn wrong(r:Region) {
+ let f:fn(Region)->(scoped fn(u64)->u64) in r=make
+}

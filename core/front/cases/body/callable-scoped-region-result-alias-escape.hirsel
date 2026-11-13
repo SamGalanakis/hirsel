@@ -1,0 +1,9 @@
+// An alias's nested function binder cannot capture an invocation Region.
+// expect: refuse OWN-19 at 7:49
+fn plus(x:u64)->u64{x+1}
+type Factory[in r]=fn()->(scoped fn(u64)->u64) in r
+fn wrong()->u64 {
+ let produce=fn(r:Region)->Factory[in r] {fn(){plus}}
+ let cb=region caller {let f=produce(caller);f()}
+ cb(2)
+}

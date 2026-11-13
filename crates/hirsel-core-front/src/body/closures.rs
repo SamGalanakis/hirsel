@@ -8,6 +8,7 @@ pub(super) struct CallableAbi {
     params: PoolRange<Rep>,
     result: Rep,
     regions: PoolRange<u32>,
+    scoped_result: bool,
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
@@ -45,13 +46,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             );
             return (ERROR, None);
         }
-        if kind(&self.p.decls, &self.t, g.result, &self.params) == Kind::Scoped {
+        let ty = g.callable;
+        if let TyKind::Fn(_, result, _, _) = self.t.kind(ty)
+            && !crate::decls::scoped_result_rooted(&self.p.decls, &self.t, *result, false)
+        {
             return self.gap_ty(
                 n,
                 "scoped callable result region anchors are not represented",
             );
         }
-        let ty = g.callable;
         scratch.found.clear();
         scratch.found.resize(g.generics.len(), None);
         scratch.checked.clear();
@@ -201,7 +204,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             }
         }
-        self.call_region_roots(scratch.params.iter().map(|p| p.1), args, &mut scratch.roots);
+        let rooted = abi.is_some_and(|a| a.regions.len != 0);
+        let result = if rooted {
+            self.call_region_roots(scratch.params.iter().map(|p| p.1), args, &mut scratch.roots);
+            for (_, ty) in &mut scratch.params {
+                *ty = crate::types::open_callable_roots(&mut self.t, *ty, &scratch.roots);
+            }
+            crate::types::open_callable_roots(&mut self.t, result, &scratch.roots)
+        } else {
+            scratch.roots.clear();
+            result
+        };
         self.activate(value, call, n);
         scratch.vals.clear();
         scratch.vals.resize(args.len(), None);
@@ -244,9 +257,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 arg,
                 &mut scratch.found,
                 &mut scratch.vals[i],
-                &scratch.roots,
+                &[],
             ) {
-                let expected = self.partial_rooted(pt, &scratch.found, &scratch.roots);
+                let expected = self.partial(pt, &scratch.found);
                 scratch.vals[i] = self
                     .expr(
                         arg,
@@ -264,7 +277,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Hold::CallView(c, _) | Hold::CallMut(c) if c == call => None,
             other => Some(other),
         });
-        let result = self.partial_rooted(result, &scratch.found, &scratch.roots);
+        let result = self.partial(result, &scratch.found);
+        let result = if abi.is_some_and(|a| a.scoped_result) {
+            let fact = self.anchor_regions(result);
+            if fact != 0 {
+                self.anchors.expressions.insert(n, fact);
+            }
+            crate::decls::erase_scoped_result(&self.p.decls, &mut self.t, result)
+        } else {
+            result
+        };
         let (code, environment) = if callable == Callable::Plain {
             (value, None)
         } else {
@@ -386,7 +408,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 };
                 let roots = self.callable_regions.len();
                 for (i, &(_, ty)) in scratch.params.iter().enumerate() {
-                    if self.region_handle(ty) && self.parameter_region_result(result_ty, i as u32) {
+                    if self.region_handle(ty)
+                        && (self.parameter_region_result(result_ty, i as u32)
+                            || scratch
+                                .params
+                                .iter()
+                                .any(|&(_, ty)| self.parameter_region_result(ty, i as u32)))
+                    {
                         self.callable_regions.push(i as u32);
                     }
                 }
@@ -394,6 +422,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     signature,
                     params: PoolRange::new(start as u32, scratch.params.len() as u32),
                     result,
+                    scoped_result: matches!(
+                        self.type_kind(result_ty),
+                        Kind::Scoped | Kind::Generic
+                    ),
                     regions: PoolRange::new(
                         roots as u32,
                         (self.callable_regions.len() - roots) as u32,
@@ -406,16 +438,56 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         Some(abi)
     }
-    fn parameter_region_result(&self, ty: TyId, parameter: u32) -> bool {
+    fn scoped_result_regions_only(&self, ty: TyId, params: &[crate::decls::ParamDecl]) -> bool {
         match self.t.kind(ty) {
-            TyKind::Anchored(inner, root) => {
-                matches!(self.t.kind(*root), TyKind::Region(Root::Parameter(i)) if *i == parameter)
-                    || self.parameter_region_result(*inner, parameter)
+            TyKind::Region(Root::Parameter(i)) => self
+                .fd
+                .params
+                .get(*i as usize)
+                .is_some_and(|p| self.region_handle(p.ty)),
+            TyKind::Region(Root::CallableParameter { depth: 0, index: i }) => params
+                .get(*i as usize)
+                .is_some_and(|p| self.region_handle(p.ty)),
+            TyKind::Region(Root::Local(slot)) => self.vars[*slot as usize]
+                .map(|v| v.ty)
+                .or_else(|| self.captured_root_ty(*slot))
+                .is_some_and(|ty| self.region_handle(ty)),
+            TyKind::Anchored(x, root) => {
+                self.scoped_result_regions_only(*x, params)
+                    && self.scoped_result_regions_only(*root, params)
             }
             TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs
                 .iter()
-                .any(|&x| self.parameter_region_result(x, parameter)),
-            TyKind::Array(x, _) | TyKind::View(x) => self.parameter_region_result(*x, parameter),
+                .all(|&x| self.scoped_result_regions_only(x, params)),
+            TyKind::View(x) | TyKind::Array(x, _) => self.scoped_result_regions_only(*x, params),
+            _ => true,
+        }
+    }
+
+    fn parameter_region_result(&self, ty: TyId, parameter: u32) -> bool {
+        self.parameter_region_result_at(ty, parameter, 0)
+    }
+    fn parameter_region_result_at(&self, ty: TyId, parameter: u32, depth: u32) -> bool {
+        match self.t.kind(ty) {
+            TyKind::Region(Root::CallableParameter {
+                depth: bound,
+                index: i,
+            }) => *i == parameter && *bound == depth,
+            TyKind::Anchored(inner, root) => {
+                matches!(self.t.kind(*root), TyKind::Region(Root::CallableParameter {depth: bound, index: i}) if *i == parameter && *bound == depth)
+                    || self.parameter_region_result_at(*inner, parameter, depth)
+            }
+            TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs
+                .iter()
+                .any(|&x| self.parameter_region_result_at(x, parameter, depth)),
+            TyKind::Array(x, _) | TyKind::View(x) => {
+                self.parameter_region_result_at(*x, parameter, depth)
+            }
+            TyKind::Fn(ps, r, _, _) => {
+                ps.iter()
+                    .any(|&(_, p)| self.parameter_region_result_at(p, parameter, depth + 1))
+                    || self.parameter_region_result_at(*r, parameter, depth + 1)
+            }
             _ => false,
         }
     }
@@ -524,6 +596,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         fd.site = self.p.site(self.at, n);
         self.closure_header_params.clear();
         let mut written_result = false;
+        let mut callable_result = UNIT;
         for &child in self.kids(n) {
             match self.kind(child) {
                 NodeKind::Parameters => {
@@ -555,7 +628,24 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
                 NodeKind::ResultType => {
                     written_result = true;
-                    fd.result = self.ty(self.kids(child)[0]);
+                    let node = self.kids(child)[0];
+                    callable_result = self.ty_result(node, true);
+                    if crate::decls::scoped_payload(&self.p.decls, &self.t, callable_result)
+                        && crate::decls::written_result_missing_anchor(
+                            self.p,
+                            self.at,
+                            node,
+                            &|_| true,
+                        )
+                    {
+                        self.refuse("OWN-20", node, "a scoped result names its anchor");
+                        return (ERROR, None);
+                    }
+                    fd.result = crate::decls::erase_scoped_result(
+                        &self.p.decls,
+                        &mut self.t,
+                        callable_result,
+                    );
                     fd.result_site = self.p.site(self.at, child);
                 }
                 NodeKind::Waits => fd.waits = true,
@@ -564,6 +654,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         }
         self.closure_header_params.clear();
+        if !self.scoped_result_regions_only(callable_result, &fd.params) {
+            self.refuse(
+                "LANG-13",
+                n,
+                "a result anchored to a view parameter fits no callable type",
+            );
+            return (ERROR, None);
+        }
         let expected = want
             .filter(|w| w.payload == 0)
             .map(|w| w.ty)
@@ -579,9 +677,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             && let TyKind::Fn(_, result, _, _) = self.t.kind(ty)
             && *result != HOLE
         {
-            fd.result = *result;
+            callable_result = *result;
+            fd.result =
+                crate::decls::erase_scoped_result(&self.p.decls, &mut self.t, callable_result);
         }
-        if kind(&self.p.decls, &self.t, fd.result, &self.params) == Kind::Scoped {
+        if !crate::decls::scoped_result_rooted(&self.p.decls, &self.t, callable_result, false) {
             return self.gap_ty(
                 n,
                 "scoped callable result region anchors are not represented",
@@ -600,7 +700,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 .iter()
                 .map(|p| (if p.bytes { Mode::Bytes } else { p.mode }, p.ty))
                 .collect(),
-            fd.result,
+            callable_result,
             fd.waits,
             if scoped {
                 Callable::Scoped
@@ -609,6 +709,30 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
         ));
         fd.callable = ty;
+        // The public closure type already distinguishes invocation roots from
+        // lexical roots. Its child body uses ordinary formal/outer-slot roots.
+        let mut scratch = self.call_scratch.pop().unwrap_or_default();
+        for (i, pd) in self.fd.params.iter().enumerate() {
+            if let Some(&slot) = self.binder_at.get(&(pd.site.span.start, pd.site.span.end)) {
+                let root = self.t.mk(TyKind::Region(Root::Local(slot)));
+                for pd in &mut fd.params {
+                    pd.ty = reroot(&mut self.t, pd.ty, Root::Parameter(i as u32), root);
+                }
+                fd.result = reroot(&mut self.t, fd.result, Root::Parameter(i as u32), root);
+            }
+        }
+        scratch.roots.clear();
+        for (i, pd) in fd.params.iter().enumerate() {
+            let root = self
+                .region_handle(pd.ty)
+                .then(|| self.t.mk(TyKind::Region(Root::Parameter(i as u32))));
+            scratch.roots.push(root);
+        }
+        for pd in &mut fd.params {
+            pd.ty = crate::types::open_callable_roots(&mut self.t, pd.ty, &scratch.roots);
+        }
+        fd.result = crate::types::open_callable_roots(&mut self.t, fd.result, &scratch.roots);
+        self.call_scratch.push(scratch);
         let body = fd.body.unwrap();
         self.capture_nested(body);
         let mut child = Cx::new(self.p, self.definition, self.e);

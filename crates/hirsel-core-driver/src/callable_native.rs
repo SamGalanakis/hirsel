@@ -129,3 +129,13 @@ fn invocation_region_headers_cranelift(){invocation_region_headers(Backend::Cran
 #[test]
 #[ignore="explicit native integration target"]
 fn invocation_region_headers_llvm(){invocation_region_headers(Backend::Llvm);}
+
+fn scoped_result_regions(backend:Backend) {
+ ordered_case(backend,include_str!("../../../core/front/cases/body/callable-scoped-region-result.hirsel"));
+}
+#[test]
+#[ignore="explicit native integration target"]
+fn scoped_result_regions_cranelift(){scoped_result_regions(Backend::Cranelift);}
+#[test]
+#[ignore="explicit native integration target"]
+fn scoped_result_regions_llvm(){scoped_result_regions(Backend::Llvm);}

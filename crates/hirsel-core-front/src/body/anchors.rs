@@ -303,29 +303,82 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     pub(super) fn anchor_tracked(&mut self, ty: TyId) -> bool {
         matches!(self.type_kind(ty), Kind::Scoped | Kind::Stable)
     }
-    fn anchor_regions(&mut self, ty: TyId) -> Fact {
-        fn walk(t: &impl TyRead, anchors: &mut Anchors, ty: TyId) -> Fact {
+    pub(super) fn anchor_regions(&mut self, ty: TyId) -> Fact {
+        fn walk(p: &Program<'_>, t: &impl TyRead, anchors: &mut Anchors, ty: TyId) -> Fact {
             match t.kind(ty) {
                 TyKind::Region(root) => anchors.node(Node::Root(Root::Region(*root))),
-                TyKind::View(x) | TyKind::Array(x, _) => walk(t, anchors, *x),
+                TyKind::View(x) => walk(p, t, anchors, *x),
+                TyKind::Array(x, _) => {
+                    let value = walk(p, t, anchors, *x);
+                    anchors.field(Component::Element(None), value)
+                }
                 TyKind::Anchored(x, r) => {
-                    let a = walk(t, anchors, *x);
-                    let b = walk(t, anchors, *r);
+                    let a = walk(p, t, anchors, *x);
+                    let b = walk(p, t, anchors, *r);
                     anchors.union(a, b)
                 }
-                TyKind::Adt(_, args) | TyKind::Tuple(args) => {
+                TyKind::Tuple(args) => {
                     let mut fact = 0;
-                    for &ty in args {
-                        let root = walk(t, anchors, ty);
+                    for (i, &ty) in args.iter().enumerate() {
+                        let root = walk(p, t, anchors, ty);
+                        let root = anchors.field(Component::Field(i as u32), root);
                         fact = anchors.union(fact, root);
+                    }
+                    fact
+                }
+                TyKind::Adt(d, args) => {
+                    let mut fact = 0;
+                    if is_core_prelude(&p.decls[d.index()].path, &["Option", "Result"]) {
+                        let DeclBody::Variant(cases) = &p.decls[d.index()].body else {
+                            unreachable!()
+                        };
+                        for (c, case) in cases.iter().enumerate() {
+                            for (i, field) in case.fields.iter().enumerate() {
+                                let ty = match t.kind(field.ty) {
+                                    TyKind::Param(i) => args[*i as usize],
+                                    _ => field.ty,
+                                };
+                                let root = walk(p, t, anchors, ty);
+                                let root = anchors.field(Component::Case(c as u32, i as u32), root);
+                                fact = anchors.union(fact, root);
+                            }
+                        }
+                    } else {
+                        for &ty in args {
+                            let root = walk(p, t, anchors, ty);
+                            fact = anchors.union(fact, root);
+                        }
                     }
                     fact
                 }
                 _ => 0,
             }
         }
-        walk(&self.t, &mut self.anchors, ty)
+        walk(self.p, &self.t, &mut self.anchors, ty)
     }
+    /// The region being closed must outlive every root in its result, including
+    /// a scoped callable whose root is carried only in static anchor facts.
+    pub(super) fn region_result_anchors(&mut self, scope: usize, n: NodeId, ty: TyId) {
+        if !self.anchor_tracked(ty) {
+            return;
+        }
+        let typed = self.anchor_regions(ty);
+        let fact = self.anchors.union(typed, self.anchor_expression(n));
+        let mut roots = std::mem::take(&mut self.anchors.left);
+        roots.clear();
+        self.anchors.collect(fact, &mut roots);
+        let escapes = roots.iter().any(|root| matches!(root,
+            Root::Region(crate::types::Root::Local(slot)) if self.scope_slots[scope..].contains(slot)));
+        self.anchors.left = roots;
+        if escapes {
+            self.refuse_at(
+                "OWN-19",
+                self.close_brace(n),
+                "a scoped value cannot leave its region anchor",
+            );
+        }
+    }
+
     pub(super) fn parameter_anchors(&mut self, slot: u32, ty: TyId, mode: Mode, index: u32) {
         let tracked = self.anchor_tracked(ty);
         if !tracked && mode != Mode::Mut {

@@ -936,16 +936,26 @@ impl Program<'_> {
 
     /// Lower a written type. `generics` are the enclosing definition's parameters.
     pub(crate) fn lower_ty(&mut self, at: ItemRef, n: NodeId, generics: &[Generic]) -> TyId {
+        self.lower_ty_result(at, n, generics, false)
+    }
+
+    fn lower_ty_result(
+        &mut self,
+        at: ItemRef,
+        n: NodeId,
+        generics: &[Generic],
+        scoped_roots: bool,
+    ) -> TyId {
         let item = self.item(at);
         let node = item.tree.node(n);
         let children = item.tree.children(n).to_vec();
         match node.kind {
             NodeKind::UnitType => UNIT,
-            NodeKind::GroupType => self.lower_ty(at, children[0], generics),
+            NodeKind::GroupType => self.lower_ty_result(at, children[0], generics, scoped_roots),
             NodeKind::TupleType => {
                 let xs = children
                     .iter()
-                    .map(|&c| self.lower_ty(at, c, generics))
+                    .map(|&c| self.lower_ty_result(at, c, generics, scoped_roots))
                     .collect();
                 self.types.intern(TyKind::Tuple(xs))
             }
@@ -960,7 +970,7 @@ impl Program<'_> {
                     ));
                     return ERROR;
                 }
-                let element = self.lower_ty(at, children[1], generics);
+                let element = self.lower_ty_result(at, children[1], generics, scoped_roots);
                 let count = literal_length(item, children[2]);
                 let Some(count) = count else {
                     self.refusals.push(refusal(
@@ -984,10 +994,18 @@ impl Program<'_> {
             NodeKind::TypeArguments => {
                 let mut args = vec![];
                 for &c in &children[1..] {
-                    let t = self.lower_ty(at, c, generics);
+                    let t = self.lower_ty_result(at, c, generics, scoped_roots);
                     args.push((t, self.site(at, c)));
                 }
-                self.named_ty(at, children[0], &args, generics)
+                let mut ty = self.named_ty(at, children[0], &args, generics);
+                if scoped_roots && scoped_payload(&self.decls, &self.types, ty) {
+                    for &(root, _) in &args {
+                        if matches!(self.types.kind(root), TyKind::Region(_)) {
+                            ty = self.types.intern(TyKind::Anchored(ty, root));
+                        }
+                    }
+                }
+                ty
             }
             NodeKind::Anchor if children.len() == 1 => {
                 let root = self.root_ty(at, children[0], generics);
@@ -1000,7 +1018,7 @@ impl Program<'_> {
                 root
             }
             NodeKind::Anchor => {
-                let ty = self.lower_ty(at, children[0], generics);
+                let ty = self.lower_ty_result(at, children[0], generics, scoped_roots);
                 let root = self.root_ty(at, children[1], generics);
                 self.pending.push(Pending::Root {
                     base: ty,
@@ -1008,7 +1026,7 @@ impl Program<'_> {
                     at,
                     site: self.site(at, children[1]),
                 });
-                if scoped_payload(&self.decls, &self.types, ty) {
+                if !scoped_roots && scoped_payload(&self.decls, &self.types, ty) {
                     ty
                 } else {
                     self.types.intern(TyKind::Anchored(ty, root))
@@ -1036,7 +1054,7 @@ impl Program<'_> {
                         }
                         NodeKind::ResultType => {
                             let node = item.tree.children(c)[0];
-                            result = self.lower_ty(at, node, generics);
+                            result = self.lower_ty_result(at, node, generics, true);
                             if scoped_payload(&self.decls, &self.types, result)
                                 && written_missing_anchor(self, at, node)
                             {
@@ -1292,6 +1310,7 @@ impl Program<'_> {
         let generics = self.fns[f].generics.clone();
         let mut params = vec![];
         let mut result = UNIT;
+        let mut callable_result = UNIT;
         let mut anchor_nodes = vec![];
         let mut written_roots = vec![];
         let mut waits = false;
@@ -1336,7 +1355,8 @@ impl Program<'_> {
                         }
                     }
                     anchors(item, t, &mut anchor_nodes);
-                    result = self.lower_ty(at, t, &generics);
+                    callable_result = self.lower_ty_result(at, t, &generics, true);
+                    result = erase_scoped_result(&self.decls, &mut self.types, callable_result);
                     self.fns[f].result_site = self.site(at, t);
                 }
                 NodeKind::Waits => waits = true,
@@ -1387,10 +1407,11 @@ impl Program<'_> {
                 .iter()
                 .map(|p| (if p.bytes { Mode::Bytes } else { p.mode }, p.ty))
                 .collect(),
-            result,
+            callable_result,
             waits,
             Callable::Plain,
         ));
+        let callable = crate::types::bind_callable_roots(&mut self.types, callable);
         let has_region_parameters = params.iter().any(|p| {
             matches!(self.types.kind(p.ty), TyKind::Adt(d, _) if self.decls[d.index()].role == Some(Role::Region))
         });
@@ -2756,6 +2777,7 @@ pub(crate) fn written_result_missing_anchor(
 
 pub(crate) fn scoped_payload(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId) -> bool {
     match t.kind(ty) {
+        TyKind::Anchored(x, _) => scoped_payload(decls, t, *x),
         TyKind::View(_) | TyKind::Fn(_, _, _, Callable::Scoped) => true,
         TyKind::Tuple(xs) => xs.iter().any(|&x| scoped_payload(decls, t, x)),
         TyKind::Adt(d, xs) => {
@@ -2765,6 +2787,68 @@ pub(crate) fn scoped_payload(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty:
                 || decl.structural && xs.iter().any(|&x| scoped_payload(decls, t, x))
         }
         _ => false,
+    }
+}
+
+/// Scoped roots are part of a callable's result contract; expression values keep
+/// them in anchor facts instead. Nested callable signatures retain their contracts.
+pub(crate) fn erase_scoped_result(
+    decls: &crate::Rows<TypeDecl>,
+    t: &mut impl TyRead,
+    ty: TyId,
+) -> TyId {
+    if !scoped_payload(decls, t, ty) {
+        return ty;
+    }
+    match t.kind(ty).clone() {
+        TyKind::Anchored(x, _) => erase_scoped_result(decls, t, x),
+        TyKind::Tuple(mut xs) => {
+            for x in &mut xs {
+                *x = erase_scoped_result(decls, t, *x);
+            }
+            t.mk(TyKind::Tuple(xs))
+        }
+        TyKind::Adt(d, mut xs) => {
+            for x in &mut xs {
+                *x = erase_scoped_result(decls, t, *x);
+            }
+            t.mk(TyKind::Adt(d, xs))
+        }
+        TyKind::Array(x, n) => {
+            let x = erase_scoped_result(decls, t, x);
+            t.mk(TyKind::Array(x, n))
+        }
+        _ => ty,
+    }
+}
+
+/// Every scoped result component must retain its declared region contract.
+pub(crate) fn scoped_result_rooted(
+    decls: &crate::Rows<TypeDecl>,
+    t: &impl TyRead,
+    ty: TyId,
+    anchored: bool,
+) -> bool {
+    if !scoped_payload(decls, t, ty) {
+        return true;
+    }
+    match t.kind(ty) {
+        TyKind::Anchored(x, root) => scoped_result_rooted(
+            decls,
+            t,
+            *x,
+            anchored || matches!(t.kind(*root), TyKind::Region(_)),
+        ),
+        TyKind::Tuple(xs) => xs
+            .iter()
+            .all(|&x| scoped_result_rooted(decls, t, x, anchored)),
+        TyKind::Adt(d, xs) if decls[d.index()].structural => xs
+            .iter()
+            .all(|&x| scoped_result_rooted(decls, t, x, anchored)),
+        TyKind::Adt(_, xs) => {
+            anchored || xs.iter().any(|&x| matches!(t.kind(x), TyKind::Region(_)))
+        }
+        _ => anchored,
     }
 }
 

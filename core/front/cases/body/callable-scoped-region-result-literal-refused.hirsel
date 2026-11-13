@@ -1,0 +1,5 @@
+// A literal also needs a named scoped-result anchor; an ordinary view anchor fits no callable.
+// expect: refuse OWN-20 at 4:26
+// expect: refuse LANG-13 at 5:21
+fn missing(){let f=fn()->scoped fn()->u64 {fn()->u64{0u64}}}
+fn ordinary(){let f=fn(n:u64)->(scoped fn()->u64) in n {fn()->u64{0u64}}}

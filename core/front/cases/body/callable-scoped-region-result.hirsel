@@ -1,0 +1,36 @@
+// Scoped result anchors survive named items, closure headers, tuples and Option payloads.
+// expect: run checked() = 75
+fn plus(x:u64)->u64{x+1}
+fn make(r:Region)->(scoped fn(u64)->u64) in r {plus}
+fn pair(a:Region,b:Region)->((scoped fn(u64)->u64) in a,(scoped fn(u64)->u64) in b) {(plus,plus)}
+fn maybe(r:Region)->Option[scoped fn(u64)->u64] in r {Some(plus)}
+type Callback[in r]=scoped fn(u64)->u64
+fn alias(r:Region)->Callback[in r] {plus}
+fn expected(r:Region)->u64 {
+ let cb:fn()->(scoped fn(u64)->u64) in r=fn(){plus}
+ let f=cb()
+ f(5)
+}
+type Factory[in r]=fn()->(scoped fn(u64)->u64) in r
+fn nested_alias()->u64 {
+ let produce=fn(r:Region)->Factory[in r] {fn(){plus}}
+ region caller {let f=produce(caller);let cb=f();cb(2)}
+}
+fn checked()->u64 {
+ region a {
+  let named=make
+  let first=named(a)
+  let literal=fn(r:Region)->(scoped fn(u64)->u64) in r {plus}
+  let second=literal(a)
+  let captured=fn()->(scoped fn(u64)->u64) in a {plus}
+  let fifth=captured()
+  let choose=pair
+  let outside=region b {let both=choose(a,b);let (left,right)=take both;left}
+  let option=maybe
+  let fourth=option(a)
+  let aliased=alias
+  let sixth=aliased(a)
+  first(7)+second(10)+outside(13)+fifth(6)+sixth(8)+expected(a)+nested_alias()+match fourth {Some(f)=>f(16),None=>0}
+ }
+}
+pub fn main()->Result[(),Exit] {if checked()==75u64 {Ok(())}else{Error(Exit(status:1))}}

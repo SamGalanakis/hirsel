@@ -47,7 +47,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.refuse("MEM-6", n, "a region argument names a Region value");
                 return ERROR;
             }
-            return self.t.mk(TyKind::Region(Root::Parameter(i as u32)));
+            return self.t.mk(TyKind::Region(Root::CallableParameter {
+                depth: self.callable_type_depth,
+                index: i as u32,
+            }));
         }
         let parameter_index = if parameter {
             self.fd.params.iter().position(|p| {
@@ -85,10 +88,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
     // ---- types written in bodies
     pub(super) fn ty(&mut self, n: NodeId) -> TyId {
+        self.ty_result(n, false)
+    }
+    pub(super) fn ty_result(&mut self, n: NodeId, scoped_roots: bool) -> TyId {
         self.out.counts.types += 1;
         let c = self.kids(n);
         match self.kind(n) {
             NodeKind::CallableType | NodeKind::OwnCallableType | NodeKind::ScopedCallableType => {
+                self.callable_type_depth += 1;
                 let mut params = vec![];
                 let mut result = UNIT;
                 let mut waits = false;
@@ -110,7 +117,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         }
                         NodeKind::ResultType => {
                             let node = self.kids(child)[0];
-                            result = self.ty(node);
+                            result = self.ty_result(node, true);
                             if kind(&self.p.decls, &self.t, result, &self.params) == Kind::Scoped {
                                 let region = |root| {
                                     let Some(Target::Binder(b)) =
@@ -130,6 +137,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                                         || self.fd.params.iter().any(|p| {
                                             p.name == binder.name && self.region_handle(p.ty)
                                         })
+                                        || self
+                                            .closure_header_params
+                                            .iter()
+                                            .any(|&(slot, ty)| slot == b && self.region_handle(ty))
                                 };
                                 if crate::decls::written_result_missing_anchor(
                                     self.p, self.at, node, &region,
@@ -161,12 +172,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         return ERROR;
                     }
                 };
+                self.callable_type_depth -= 1;
                 self.t.mk(TyKind::Fn(params, result, waits, callable))
             }
             NodeKind::UnitType => UNIT,
-            NodeKind::GroupType => self.ty(c[0]),
+            NodeKind::GroupType => self.ty_result(c[0], scoped_roots),
             NodeKind::TupleType => {
-                let xs = c.iter().map(|&x| self.ty(x)).collect();
+                let xs = c.iter().map(|&x| self.ty_result(x, scoped_roots)).collect();
                 self.t.mk(TyKind::Tuple(xs))
             }
             NodeKind::TypePath => self.named_ty(n, &[]),
@@ -180,7 +192,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     );
                     return ERROR;
                 }
-                let element = self.ty(c[1]);
+                let element = self.ty_result(c[1], scoped_roots);
                 let Some(count) = crate::decls::literal_length(self.p.item(self.at), c[2]) else {
                     self.refuse(
                         if self.kind(c[2]) == NodeKind::Literal {
@@ -209,18 +221,26 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             NodeKind::TypeArguments => {
                 let mut args = vec![];
                 for &a in &c[1..] {
-                    args.push((self.ty(a), a));
+                    args.push((self.ty_result(a, scoped_roots), a));
                 }
-                self.named_ty(c[0], &args)
+                let mut ty = self.named_ty(c[0], &args);
+                if scoped_roots && crate::decls::scoped_payload(&self.p.decls, &self.t, ty) {
+                    for &(root, _) in &args {
+                        if matches!(self.t.kind(root), TyKind::Region(_)) {
+                            ty = self.t.mk(TyKind::Anchored(ty, root));
+                        }
+                    }
+                }
+                ty
             }
             NodeKind::Anchor if c.len() == 1 => self.body_root(c[0], true),
             NodeKind::Anchor => {
-                let ty = self.ty(c[0]);
+                let ty = self.ty_result(c[0], scoped_roots);
                 let root = self.body_root(
                     c[1],
                     !crate::decls::scoped_payload(&self.p.decls, &self.t, ty),
                 );
-                if crate::decls::scoped_payload(&self.p.decls, &self.t, ty) {
+                if !scoped_roots && crate::decls::scoped_payload(&self.p.decls, &self.t, ty) {
                     ty
                 } else {
                     self.t.mk(TyKind::Anchored(ty, root))

@@ -44,6 +44,12 @@ pub enum Root {
     Local(u32),
     /// The enclosing stable declaration's region (MEM-6).
     Enclosing,
+    /// A callable's invocation parameter, distinguished from lexical function
+    /// parameters. Depth counts intervening callable signatures.
+    CallableParameter {
+        depth: u32,
+        index: u32,
+    },
 }
 
 /// Callable representation and the owning environment's send promise (LANG-13).
@@ -314,34 +320,46 @@ pub fn subst(t: &mut impl TyRead, ty: TyId, args: &[TyId]) -> TyId {
     if args.is_empty() {
         return ty;
     }
+    subst_at(t, ty, args, 0)
+}
+
+fn subst_at(t: &mut impl TyRead, ty: TyId, args: &[TyId], depth: u32) -> TyId {
     match t.kind(ty).clone() {
         TyKind::Param(i) | TyKind::Region(Root::Generic(i)) => {
-            args.get(i as usize).copied().unwrap_or(ERROR)
+            let value = args.get(i as usize).copied().unwrap_or(ERROR);
+            if depth == 0 {
+                value
+            } else {
+                callable_roots(t, value, 0, RootSubstitution::Shift(depth))
+            }
         }
         TyKind::Anchored(x, root) => {
-            let x = subst(t, x, args);
-            let root = subst(t, root, args);
+            let x = subst_at(t, x, args, depth);
+            let root = subst_at(t, root, args, depth);
             t.mk(TyKind::Anchored(x, root))
         }
         TyKind::Tuple(xs) => {
-            let xs = xs.iter().map(|&x| subst(t, x, args)).collect();
+            let xs = xs.iter().map(|&x| subst_at(t, x, args, depth)).collect();
             t.mk(TyKind::Tuple(xs))
         }
         TyKind::Adt(d, xs) => {
-            let xs = xs.iter().map(|&x| subst(t, x, args)).collect();
+            let xs = xs.iter().map(|&x| subst_at(t, x, args, depth)).collect();
             t.mk(TyKind::Adt(d, xs))
         }
         TyKind::Array(x, n) => {
-            let x = subst(t, x, args);
+            let x = subst_at(t, x, args, depth);
             t.mk(TyKind::Array(x, n))
         }
         TyKind::View(x) => {
-            let x = subst(t, x, args);
+            let x = subst_at(t, x, args, depth);
             t.mk(TyKind::View(x))
         }
         TyKind::Fn(ps, r, w, k) => {
-            let ps = ps.iter().map(|&(m, p)| (m, subst(t, p, args))).collect();
-            let r = subst(t, r, args);
+            let ps = ps
+                .iter()
+                .map(|&(m, p)| (m, subst_at(t, p, args, depth + 1)))
+                .collect();
+            let r = subst_at(t, r, args, depth + 1);
             t.mk(TyKind::Fn(ps, r, w, k))
         }
         _ => ty,
@@ -380,6 +398,100 @@ pub fn reroot(t: &mut impl TyRead, ty: TyId, from: Root, to: TyId) -> TyId {
                 .map(|&(m, p)| (m, reroot(t, p, from, to)))
                 .collect();
             let r = reroot(t, r, from, to);
+            t.mk(TyKind::Fn(ps, r, w, k))
+        }
+        _ => ty,
+    }
+}
+
+/// Close a function/closure declaration's formal roots over its callable binder.
+pub fn bind_callable_roots(t: &mut impl TyRead, ty: TyId) -> TyId {
+    let TyKind::Fn(mut ps, r, w, k) = t.kind(ty).clone() else {
+        unreachable!()
+    };
+    for (_, p) in &mut ps {
+        *p = callable_roots(t, *p, 0, RootSubstitution::Bind);
+    }
+    let r = callable_roots(t, r, 0, RootSubstitution::Bind);
+    t.mk(TyKind::Fn(ps, r, w, k))
+}
+
+/// Open only the invoked callable binder. Lexical roots and roots bound by a
+/// nested returned callable remain untouched.
+pub fn open_callable_roots(t: &mut impl TyRead, ty: TyId, roots: &[Option<TyId>]) -> TyId {
+    if roots.iter().all(Option::is_none) {
+        return ty;
+    }
+    callable_roots(t, ty, 0, RootSubstitution::Open(roots))
+}
+
+#[derive(Clone, Copy)]
+enum RootSubstitution<'a> {
+    Bind,
+    Open(&'a [Option<TyId>]),
+    Shift(u32),
+}
+
+fn callable_roots(
+    t: &mut impl TyRead,
+    ty: TyId,
+    depth: u32,
+    operation: RootSubstitution<'_>,
+) -> TyId {
+    match t.kind(ty).clone() {
+        TyKind::Region(Root::Parameter(index)) if matches!(operation, RootSubstitution::Bind) => {
+            t.mk(TyKind::Region(Root::CallableParameter { depth, index }))
+        }
+        TyKind::Region(Root::CallableParameter {
+            depth: bound,
+            index,
+        }) => match operation {
+            RootSubstitution::Open(roots) if bound == depth => {
+                let value = roots.get(index as usize).copied().flatten().unwrap_or(ty);
+                if depth == 0 {
+                    value
+                } else {
+                    callable_roots(t, value, 0, RootSubstitution::Shift(depth))
+                }
+            }
+            RootSubstitution::Shift(amount) if bound >= depth => {
+                t.mk(TyKind::Region(Root::CallableParameter {
+                    depth: bound + amount,
+                    index,
+                }))
+            }
+            _ => ty,
+        },
+        TyKind::Anchored(x, r) => {
+            let x = callable_roots(t, x, depth, operation);
+            let r = callable_roots(t, r, depth, operation);
+            t.mk(TyKind::Anchored(x, r))
+        }
+        TyKind::Tuple(mut xs) => {
+            for x in &mut xs {
+                *x = callable_roots(t, *x, depth, operation);
+            }
+            t.mk(TyKind::Tuple(xs))
+        }
+        TyKind::Adt(d, mut xs) => {
+            for x in &mut xs {
+                *x = callable_roots(t, *x, depth, operation);
+            }
+            t.mk(TyKind::Adt(d, xs))
+        }
+        TyKind::Array(x, n) => {
+            let x = callable_roots(t, x, depth, operation);
+            t.mk(TyKind::Array(x, n))
+        }
+        TyKind::View(x) => {
+            let x = callable_roots(t, x, depth, operation);
+            t.mk(TyKind::View(x))
+        }
+        TyKind::Fn(mut ps, r, w, k) => {
+            for (_, p) in &mut ps {
+                *p = callable_roots(t, *p, depth + 1, operation);
+            }
+            let r = callable_roots(t, r, depth + 1, operation);
             t.mk(TyKind::Fn(ps, r, w, k))
         }
         _ => ty,
@@ -522,5 +634,42 @@ mod interner_tests {
         assert_eq!(nested.len(), before + 1);
         assert_eq!(nested.kind(pair_id), program.kind(pair_id));
         assert_eq!(nested.kind(added), &TyKind::Array(pair_id, 7));
+    }
+}
+
+#[cfg(test)]
+mod callable_roots_tests {
+    use super::*;
+    #[test]
+    fn opening_a_callable_preserves_a_nested_binder() {
+        let mut t = Types::new();
+        let lexical = t.intern(TyKind::Region(Root::Parameter(0)));
+        let inner = t.intern(TyKind::Region(Root::CallableParameter {
+            depth: 0,
+            index: 0,
+        }));
+        let a = t.intern(TyKind::Anchored(scalar(Scalar::U64), lexical));
+        let b = t.intern(TyKind::Anchored(scalar(Scalar::U64), inner));
+        let pair = t.intern(TyKind::Tuple(vec![a, b]));
+        let nested = t.intern(TyKind::Fn(vec![], pair, false, Callable::Plain));
+        let outer = t.intern(TyKind::Fn(vec![], nested, false, Callable::Plain));
+        let closed = bind_callable_roots(&mut t, outer);
+        let TyKind::Fn(_, nested, _, _) = t.kind(closed) else {
+            unreachable!()
+        };
+        let nested = *nested;
+        let actual = t.intern(TyKind::Region(Root::Local(99)));
+        let opened = open_callable_roots(&mut t, nested, &[Some(actual)]);
+        let TyKind::Fn(_, pair, _, _) = t.kind(opened) else {
+            unreachable!()
+        };
+        let TyKind::Tuple(xs) = t.kind(*pair) else {
+            unreachable!()
+        };
+        assert_eq!(
+            t.kind(xs[0]),
+            &TyKind::Anchored(scalar(Scalar::U64), actual)
+        );
+        assert_eq!(t.kind(xs[1]), &TyKind::Anchored(scalar(Scalar::U64), inner));
     }
 }

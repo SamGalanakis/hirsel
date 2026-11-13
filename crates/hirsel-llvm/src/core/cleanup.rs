@@ -16,6 +16,7 @@ fn cleanup_dependencies(field: &FieldTy, counted: bool, pending: &mut Vec<(usize
 pub(super) fn drop_glue(
     module: &Module,
     recipes: &[hirsel_core_layout::Recipe],
+    failures: &failure::Failures,
     text: &mut String,
     intrinsics: &mut BTreeSet<String>,
 ) -> Result<()> {
@@ -53,6 +54,9 @@ pub(super) fn drop_glue(
             body: &empty,
             recipes,
             abi: abi::Return::internal(&[]),
+            has_status: true,
+            failures,
+            constants: &[],
             code: String::new(),
             allocations: String::new(),
             next: 0,
@@ -80,11 +84,18 @@ pub(super) fn drop_glue(
                         ("ptr".into(), base.clone()),
                     ],
                 );
-                let failed = e.calc(format!(
-                    "call i8 @{}(ptr %context, ptr {base})",
-                    symbol(module, FuncId(f.0))
-                ));
-                e.line(format!("store i8 {failed}, ptr {status}"));
+                if failures.may_fail[f.0 as usize] {
+                    let failed = e.calc(format!(
+                        "call i8 @{}(ptr %context, ptr {base})",
+                        symbol(module, FuncId(f.0))
+                    ));
+                    e.line(format!("store i8 {failed}, ptr {status}"));
+                } else {
+                    e.line(format!(
+                        "call void @{}.infallible(ptr %context, ptr {base})",
+                        symbol(module, FuncId(f.0))
+                    ));
+                }
                 e.runtime_void(
                     "hirsel_core_finalizer_end",
                     &[
@@ -143,8 +154,8 @@ pub(super) fn drop_glue(
             }
         }
     }
-    counted_glue(module, recipes, &counted, text, intrinsics)?;
-    sequence_glue(module, recipes, &sequences, text, intrinsics)?;
+    counted_glue(module, recipes, failures, &counted, text, intrinsics)?;
+    sequence_glue(module, recipes, failures, &sequences, text, intrinsics)?;
     Ok(())
 }
 
@@ -438,6 +449,7 @@ impl FunctionEmitter<'_> {
 fn counted_glue(
     module: &Module,
     recipes: &[hirsel_core_layout::Recipe],
+    failures: &failure::Failures,
     demanded: &BTreeSet<usize>,
     text: &mut String,
     intrinsics: &mut BTreeSet<String>,
@@ -452,6 +464,9 @@ fn counted_glue(
             body: &empty,
             recipes,
             abi: abi::Return::new(&[]),
+            has_status: false,
+            failures,
+            constants: &[],
             code: String::new(),
             allocations: String::new(),
             next: 0,
@@ -486,6 +501,7 @@ fn collect_sequences(field: &FieldTy, sequences: &mut Vec<FieldTy>) {
 fn sequence_glue(
     module: &Module,
     recipes: &[hirsel_core_layout::Recipe],
+    failures: &failure::Failures,
     sequences: &[FieldTy],
     text: &mut String,
     intrinsics: &mut BTreeSet<String>,
@@ -497,6 +513,9 @@ fn sequence_glue(
             body: &empty,
             recipes,
             abi: abi::Return::new(&[]),
+            has_status: false,
+            failures,
+            constants: &[],
             code: String::new(),
             allocations: String::new(),
             next: 0,

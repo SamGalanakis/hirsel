@@ -27,6 +27,25 @@ impl Return {
         Self::new(&fields)
     }
 
+    pub fn parameters(&self, sig: &Signature) -> Vec<String> {
+        let mut params = vec![];
+        if self.indirect {
+            params.push(format!("ptr sret({}) %sret", self.storage));
+        }
+        params.push("ptr %context".into());
+        if sig.dest.is_some() {
+            params.push("ptr %dest".into());
+        }
+        for (i, p) in sig.params.iter().enumerate() {
+            let t = match p {
+                Param::Value(t) => format!("{}{}", ty(*t), extension(*t)),
+                Param::Address(_) => "ptr".into(),
+            };
+            params.push(format!("{t} %p{i}"));
+        }
+        params
+    }
+
     pub fn return_type(&self) -> String {
         match self.fields.as_slice() {
             [t] if !extension(*t).is_empty() => format!("{} {}", extension(*t).trim(), self.ty),
@@ -94,7 +113,9 @@ impl FunctionEmitter<'_> {
     }
     pub(super) fn return_values(&mut self, values: &[String]) {
         let mut returned = values.to_vec();
-        returned.push("0".into());
+        if self.has_status {
+            returned.push("0".into());
+        }
         self.return_abi_values(&returned);
     }
     pub(super) fn return_failure(&mut self) {
@@ -158,20 +179,16 @@ impl FunctionEmitter<'_> {
             return Ok(());
         }
         let sig = &self.module.signatures[site.signature.index()];
-        let abi = Return::internal(&sig.results);
-        let mut args = vec![];
-        let scratch = if abi.fields.len() > 1 {
-            Some(self.temp(&abi.storage))
-        } else {
-            None
+        let has_status = match site.callee {
+            Callee::Direct(f) => self.failures.may_fail[f.index()],
+            _ => true,
         };
-        if abi.indirect {
-            args.push(format!(
-                "ptr sret({}) {}",
-                abi.storage,
-                scratch.as_ref().unwrap()
-            ));
-        }
+        let abi = if has_status {
+            Return::internal(&sig.results)
+        } else {
+            Return::new(&sig.results)
+        };
+        let mut args = vec![];
         args.push("ptr %context".into());
         for arg in site.args.get(&self.body.pools.args).unwrap() {
             args.push(match *arg {
@@ -183,10 +200,43 @@ impl FunctionEmitter<'_> {
             });
         }
         let callee = match site.callee {
-            Callee::Direct(f) => format!("@{}", symbol(self.module, f)),
+            Callee::Direct(f) => format!(
+                "@{}{}",
+                symbol(self.module, f),
+                if has_status { "" } else { ".infallible" }
+            ),
             Callee::Indirect(v) => self.get(v),
             Callee::Runtime(_) => return Err(Error::Unsupported("task runtime calls".into())),
         };
+        let mut values = self.invoke(&abi, &callee, args);
+        if has_status {
+            let status = values.pop().unwrap();
+            let failed = self.calc(format!("icmp ne i8 {status}, 0"));
+            self.branch_failure(&failed, site.fail, None);
+        }
+        for (v, x) in site
+            .results
+            .get(&self.body.pools.values)
+            .unwrap()
+            .iter()
+            .zip(values)
+        {
+            self.put(*v, &x);
+        }
+        Ok(())
+    }
+    fn invoke(&mut self, abi: &Return, callee: &str, mut args: Vec<String>) -> Vec<String> {
+        let scratch = if abi.fields.len() > 1 {
+            Some(self.temp(&abi.storage))
+        } else {
+            None
+        };
+        if abi.indirect {
+            args.insert(
+                0,
+                format!("ptr sret({}) {}", abi.storage, scratch.as_ref().unwrap()),
+            );
+        }
         let call = format!("call {} {callee}({})", abi.return_type(), args.join(", "));
         let r = if abi.ty == "void" {
             self.line(call);
@@ -218,18 +268,39 @@ impl FunctionEmitter<'_> {
                 values.push(self.calc(format!("load {}, ptr {at}, align 1", ty(*t))));
             }
         }
-        let status = values.pop().unwrap();
-        let failed = self.calc(format!("icmp ne i8 {status}, 0"));
-        self.branch_failure(&failed, site.fail, None);
-        for (v, x) in site
-            .results
-            .get(&self.body.pools.values)
-            .unwrap()
-            .iter()
-            .zip(values)
-        {
-            self.put(*v, &x);
+        values
+    }
+
+    pub(super) fn infallible_wrapper(&mut self, name: &str, sig: &Signature, text: &mut String) {
+        self.code.clear();
+        self.allocations.clear();
+        self.next = 0;
+        self.has_status = true;
+        self.abi = Return::internal(&sig.results);
+        let mut args = vec!["ptr %context".into()];
+        if sig.dest.is_some() {
+            args.push("ptr %dest".into());
         }
-        Ok(())
+        for (i, p) in sig.params.iter().enumerate() {
+            args.push(match p {
+                Param::Value(t) => format!("{}{} %p{i}", ty(*t), extension(*t)),
+                Param::Address(_) => format!("ptr %p{i}"),
+            });
+        }
+        let values = self.invoke(
+            &Return::new(&sig.results),
+            &format!("@{name}.infallible"),
+            args,
+        );
+        self.return_values(&values);
+        writeln!(
+            text,
+            "define {} @{name}({}) {{\nentry:\n{}{} }}",
+            self.abi.return_type(),
+            self.abi.parameters(sig).join(", "),
+            self.allocations,
+            self.code
+        )
+        .unwrap();
     }
 }

@@ -3,6 +3,7 @@
 
 mod abi;
 mod cleanup;
+mod failure;
 mod scalar;
 mod storage;
 #[cfg(test)]
@@ -56,7 +57,8 @@ pub fn symbol(module: &Module, function: FuncId) -> String {
 /// Emit x86-64 System V LLVM IR directly from CoreIR.
 ///
 /// Functions take FORM v1a's hidden task context before the destination.
-/// Every function returns its scalar results followed by failure status.
+/// Exports and function pointers return scalar results followed by failure status.
+/// Proven infallible bodies use a private direct-call ABI without that status.
 /// This function trusts its producer's IR and layout recipes.
 pub fn emit_ir(module: &Module) -> Result<String> {
     let mut text = String::new();
@@ -76,25 +78,17 @@ pub fn emit_ir(module: &Module) -> Result<String> {
     }
     let recipes = hirsel_core_layout::compute(&module.types).expect("producer layouts");
     let mut intrinsics = BTreeSet::new();
+    let failures = failure::Failures::new(module);
     for (i, f) in module.functions.iter().enumerate() {
         let sig = &module.signatures[f.signature.index()];
-        let abi = abi::Return::internal(&sig.results);
+        let has_status = failures.may_fail[i];
+        let abi = if has_status || f.body.is_none() {
+            abi::Return::internal(&sig.results)
+        } else {
+            abi::Return::new(&sig.results)
+        };
         let name = symbol(module, FuncId(i as u32));
-        let mut params = vec![];
-        if abi.indirect {
-            params.push(format!("ptr sret({}) %sret", abi.storage));
-        }
-        params.push("ptr %context".into());
-        if sig.dest.is_some() {
-            params.push("ptr %dest".into());
-        }
-        for (i, p) in sig.params.iter().enumerate() {
-            let t = match p {
-                Param::Value(t) => format!("{}{}", ty(*t), abi::extension(*t)),
-                Param::Address(_) => "ptr".into(),
-            };
-            params.push(format!("{t} %p{i}"));
-        }
+        let params = abi.parameters(sig);
         let Some(body) = &f.body else {
             writeln!(
                 text,
@@ -110,6 +104,9 @@ pub fn emit_ir(module: &Module) -> Result<String> {
             body,
             recipes: &recipes,
             abi,
+            has_status,
+            failures: &failures,
+            constants: &failures.constants[i],
             code: String::new(),
             allocations: String::new(),
             next: 0,
@@ -151,17 +148,26 @@ pub fn emit_ir(module: &Module) -> Result<String> {
             }
             e.term(&body.terminators[i])?;
         }
+        let linkage = if has_status { "" } else { "internal " };
+        let body_name = if has_status {
+            name.clone()
+        } else {
+            format!("{name}.infallible")
+        };
         writeln!(
             text,
-            "define {} @{name}({}) {{\nentry:\n{}{} }}",
+            "define {linkage}{} @{body_name}({}) {{\nentry:\n{}{} }}",
             e.abi.return_type(),
             params.join(", "),
             e.allocations,
             e.code
         )
         .unwrap();
+        if !has_status {
+            e.infallible_wrapper(&name, sig, &mut text);
+        }
     }
-    cleanup::drop_glue(module, &recipes, &mut text, &mut intrinsics)?;
+    cleanup::drop_glue(module, &recipes, &failures, &mut text, &mut intrinsics)?;
     for decl in intrinsics {
         writeln!(text, "{decl}").unwrap();
     }
@@ -218,9 +224,7 @@ fn compile<R>(
     module.set_target(&machine);
     observer(CompilationStage::Optimization);
     if matches!(opt, Optimization::Speed) {
-        module
-            .run_passes("default<O3>", &machine)
-            .map_err(Error::Llvm)?;
+        module.run_core_passes(&machine).map_err(Error::Llvm)?;
     }
     observer(CompilationStage::ObjectEmission);
     let bytes = module.emit_object(&machine).map_err(Error::Llvm)?;
@@ -252,6 +256,9 @@ struct FunctionEmitter<'a> {
     body: &'a Body,
     recipes: &'a [hirsel_core_layout::Recipe],
     abi: abi::Return,
+    has_status: bool,
+    failures: &'a failure::Failures,
+    constants: &'a [Option<u64>],
     code: String,
     allocations: String,
     next: usize,
@@ -403,8 +410,7 @@ impl FunctionEmitter<'_> {
             } => {
                 let t = self.vty(left);
                 let a = self.get(left);
-                let b = self.get(right);
-                let x = self.binary(t, op, &a, &b, fail)?;
+                let x = self.binary(t, op, &a, right, fail)?;
                 self.put(result, &x);
             }
             Inst::Compare {

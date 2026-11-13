@@ -8,11 +8,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .next()
         .ok_or("expected input.core output.o [--speed]")?;
     let output = args.next().ok_or("expected output.o")?;
-    let opt = if args.next().as_deref() == Some(std::ffi::OsStr::new("--speed")) {
-        Optimization::Speed
-    } else {
-        Optimization::None
-    };
+    let mut opt = Optimization::None;
+    let mut llvm_ir = None;
+    while let Some(flag) = args.next() {
+        if flag == "--speed" {
+            opt = Optimization::Speed;
+        } else if flag == "--llvm-ir" {
+            llvm_ir = Some(args.next().ok_or("expected LLVM IR output path")?);
+        } else {
+            return Err(format!("unknown option {flag:?}").into());
+        }
+    }
     let counter = InstructionCounter::open()?;
     let mut previous = counter.read()?;
     let source = std::fs::read_to_string(source)?;
@@ -32,6 +38,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let now = counter.read()?;
     rows.push((owner.unwrap(), now - previous));
     std::fs::write(output, bytes)?;
+    if let Some(path) = llvm_ir {
+        // Diagnostic output is outside the exclusive compilation windows.
+        std::fs::write(path, hirsel_llvm::core::emit_ir(&module)?)?;
+    }
     for (stage, count) in rows {
         println!("{stage}\t{count}");
     }

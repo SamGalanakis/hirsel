@@ -35,7 +35,10 @@ use llvm_sys::target_machine::{
     LLVMTargetMachineEmitToMemoryBuffer, LLVMTargetMachineRef, LLVMTargetRef,
 };
 use llvm_sys::transforms::pass_builder::{
-    LLVMCreatePassBuilderOptions, LLVMDisposePassBuilderOptions, LLVMRunPasses,
+    LLVMCreatePassBuilderOptions, LLVMDisposePassBuilderOptions,
+    LLVMPassBuilderOptionsSetLoopInterleaving, LLVMPassBuilderOptionsSetLoopUnrolling,
+    LLVMPassBuilderOptionsSetLoopVectorization, LLVMPassBuilderOptionsSetMergeFunctions,
+    LLVMPassBuilderOptionsSetSLPVectorization, LLVMRunPasses,
 };
 use llvm_sys::{LLVMIntPredicate, LLVMOpcode, LLVMRealPredicate};
 
@@ -506,6 +509,31 @@ impl<'context> Module<'context> {
         // here, and a returned error is consumed by LLVMGetErrorMessage.
         unsafe {
             let options = LLVMCreatePassBuilderOptions();
+            let error = LLVMRunPasses(self.raw, pipeline.as_ptr(), machine.raw, options);
+            LLVMDisposePassBuilderOptions(options);
+            if error.is_null() {
+                return Ok(());
+            }
+            let message = LLVMGetErrorMessage(error);
+            let text = borrowed_string(message);
+            LLVMDisposeErrorMessage(message);
+            Err(text)
+        }
+    }
+
+    /// rustc -O's ordinary per-module O3 pipeline. CoreIR has no retained
+    /// pipeline's guarded-count or ahead-stack extension passes.
+    pub(crate) fn run_core_passes(&self, machine: &TargetMachine) -> Result<(), String> {
+        let pipeline = c_string("default<O3>");
+        // SAFETY: handles are live; these are per-invocation options, disposed
+        // after LLVM consumes them. The default pipeline does not verify IR.
+        unsafe {
+            let options = LLVMCreatePassBuilderOptions();
+            LLVMPassBuilderOptionsSetLoopInterleaving(options, 1);
+            LLVMPassBuilderOptionsSetLoopUnrolling(options, 1);
+            LLVMPassBuilderOptionsSetLoopVectorization(options, 1);
+            LLVMPassBuilderOptionsSetSLPVectorization(options, 1);
+            LLVMPassBuilderOptionsSetMergeFunctions(options, 1);
             let error = LLVMRunPasses(self.raw, pipeline.as_ptr(), machine.raw, options);
             LLVMDisposePassBuilderOptions(options);
             if error.is_null() {

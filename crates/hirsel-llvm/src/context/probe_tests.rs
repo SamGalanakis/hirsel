@@ -65,6 +65,7 @@ fn every_emitted_function_probes_its_frame_within_the_guard() {
 type t0 = own "Probe" { value: u64 }
 sig g0 = (u64) -> (u64)
 inst n0 = tests@0/probes/core [] []
+inst n1 = tests@0/probes/infallible [] []
 fn f0 = n0 g0 {
   slot s0 = t0
   addr a0 = s0 field 0 : u64
@@ -78,12 +79,16 @@ b0(v0: u64):
   dead s0
   return v0
 }
+fn f1 = n1 g0 {
+b0(v0: u64):
+  return v0
+}
 "#,
     )
     .unwrap();
     for (opt, definitions) in [
-        (crate::core::Optimization::None, 2),
-        (crate::core::Optimization::Speed, 1),
+        (crate::core::Optimization::None, 4),
+        (crate::core::Optimization::Speed, 2),
     ] {
         let text = crate::core::emitted_ir(&core_ir, opt).unwrap();
         assert_probes(&text, "CoreIR x86_64", definitions);

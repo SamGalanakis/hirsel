@@ -886,3 +886,33 @@ fn every_memory_sample_admission_refusal_matches_the_evaluator() {
     assert_eq!(executions, 130);
     println!("whole memory sample executions including every admission refusal: {executions}");
 }
+
+#[test]
+fn infallible_direct_calls_keep_the_external_and_indirect_failure_abi() {
+    let module = text::parse(include_str!("../../tests/core_runtime/infallible.core")).unwrap();
+    wf::module(&module).unwrap();
+    assert_eq!(
+        failure::Failures::new(&module).may_fail,
+        [false, false, true, true, true]
+    );
+    let ir = emit_ir(&module).unwrap();
+    assert!(ir.contains(&format!(
+        "call i64 @{}.infallible",
+        symbol(&module, FuncId(1))
+    )));
+    let mut unknown = module.clone();
+    unknown.functions[1].body = None;
+    assert!(failure::Failures::new(&unknown).may_fail.iter().all(|f| *f));
+    let mut cases = vec![];
+    for f in [0, 1, 4] {
+        for n in [0, 5, 100] {
+            cases.push((FuncId(f), vec![n]));
+        }
+    }
+    for f in [2, 3] {
+        for n in [0, 1, 63, 64, u64::MAX] {
+            cases.push((FuncId(f), vec![7, n]));
+        }
+    }
+    agree(&module, &cases);
+}

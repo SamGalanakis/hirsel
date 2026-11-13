@@ -97,9 +97,10 @@ impl FunctionEmitter<'_> {
         t: Ty,
         op: BinaryOp,
         a: &str,
-        b: &str,
+        right: ValueId,
         fail: Option<BlockId>,
     ) -> Result<String> {
+        let b = &self.get(right);
         let tt = ty(t);
         if t.is_float() {
             let name = match op {
@@ -164,8 +165,10 @@ impl FunctionEmitter<'_> {
                 self.calc(format!("{sign}div {tt} {a}, {b}"))
             }
             BinaryOp::Shl | BinaryOp::Shr => {
-                let outside = self.calc(format!("icmp uge {tt} {b}, {w}"));
-                self.fail_if(&outside, fail, 0)?;
+                if !failure::bounded_shift(t, self.constants[right.index()]) {
+                    let outside = self.calc(format!("icmp uge {tt} {b}, {w}"));
+                    self.fail_if(&outside, fail, 0)?;
+                }
                 self.calc(format!(
                     "{} {tt} {a}, {b}",
                     if op == BinaryOp::Shl {

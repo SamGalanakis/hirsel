@@ -12,6 +12,7 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use hirsel_core_ir::{self as c, *};
 
 mod abi;
+mod drop;
 mod failure;
 mod function;
 mod memory;
@@ -80,6 +81,8 @@ pub(super) struct Tables<'a> {
     signatures: &'a [abi::Signature],
     functions: &'a [cranelift_module::FuncId],
     statics: &'a [cranelift_module::DataId],
+    glues: &'a drop::Glues,
+    trace_drops: bool,
 }
 
 pub(crate) fn isa(options: &Options<'_>) -> Result<cranelift_codegen::isa::OwnedTargetIsa> {
@@ -114,6 +117,24 @@ pub fn emit_object_with_layouts(
     input: &c::Module,
     layouts: &[hirsel_core_layout::Recipe],
     options: &Options<'_>,
+) -> Result<Object> {
+    emit(input, layouts, options, false)
+}
+
+/// Native fixture entry. Trace instrumentation is absent from ordinary emission.
+#[doc(hidden)]
+pub fn emit_object_for_test(
+    input: &c::Module,
+    layouts: &[hirsel_core_layout::Recipe],
+    options: &Options<'_>,
+) -> Result<Object> {
+    emit(input, layouts, options, true)
+}
+fn emit(
+    input: &c::Module,
+    layouts: &[hirsel_core_layout::Recipe],
+    options: &Options<'_>,
+    trace_drops: bool,
 ) -> Result<Object> {
     let refuse = |message: String| Error::Target(format!("{}: {message}", options.target));
     if !options.target.starts_with("x86_64") || !options.target.contains("linux") {
@@ -163,12 +184,15 @@ pub fn emit_object_with_layouts(
         object.define_data(id, &desc).map_err(error)?;
         statics.push(id);
     }
+    let glues = drop::Glues::declare(&mut object, input, layouts)?;
     let tables = Tables {
         input,
         layouts,
         signatures: &signatures,
         functions: &functions,
         statics: &statics,
+        glues: &glues,
+        trace_drops,
     };
     for (index, f) in input.functions.iter().enumerate() {
         let Some(body) = &f.body else { continue };
@@ -182,6 +206,7 @@ pub fn emit_object_with_layouts(
             .define_function(functions[index], &mut context)
             .map_err(error)?;
     }
+    glues.emit(&mut object, &tables)?;
     Ok(Object {
         bytes: crate::object::finish(object.finish()).map_err(error)?,
     })

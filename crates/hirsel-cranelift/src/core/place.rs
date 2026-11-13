@@ -11,7 +11,7 @@ enum At {
     Declared(TypeId),
     Pointer(TypeId),
     Counted(TypeId),
-    Array(FieldTy),
+    Array(FieldTy, u64),
 }
 
 fn fixed(layouts: &[Recipe], id: TypeId) -> Result<&Fixed> {
@@ -34,7 +34,7 @@ fn field_at(input: &c::Module, t: &FieldTy) -> At {
         FieldTy::Inline(t) => held(input, TypeId(t.0)),
         FieldTy::Box(t) => At::Pointer(TypeId(t.0)),
         FieldTy::Rc(t) | FieldTy::Arc(t) => At::Counted(TypeId(t.0)),
-        FieldTy::Array(e, _) => At::Array((**e).clone()),
+        FieldTy::Array(e, n) => At::Array((**e).clone(), *n),
         _ => At::Other,
     }
 }
@@ -79,7 +79,7 @@ impl Function<'_, '_, '_> {
                 _ => At::Other,
             },
             Step::Element(_) => {
-                let At::Array(e) = at else {
+                let At::Array(e, _) = at else {
                     unreachable!("array place")
                 };
                 field_at(self.input, &e)
@@ -107,7 +107,7 @@ impl Function<'_, '_, '_> {
         }
         Ok(at)
     }
-    pub fn address(&mut self, id: AddressId) -> Result<Value> {
+    pub fn address(&mut self, id: AddressId, fail: Option<BlockId>) -> Result<Value> {
         let a = &self.body.addresses[id.index()];
         let mut at = self.base_at(a)?;
         let mut ptr = match a.base {
@@ -152,8 +152,22 @@ impl Function<'_, '_, '_> {
                     let offset = self.b.ins().imul_imm_s(index, stride as i64);
                     self.b.ins().iadd(ptr, offset)
                 }
-                Step::Element(_) => {
-                    return Err(unsupported("inline array bounds require the failure ABI"));
+                Step::Element(v) => {
+                    let At::Array(ref e, n) = at else {
+                        unreachable!("inline array")
+                    };
+                    let stride =
+                        hirsel_core_layout::field_size(&self.input.types, self.layouts, e).0;
+                    let i = self.get(v);
+                    let i = self.resize(i, types::I64, false);
+                    let outside = self.b.ins().icmp_imm_s(
+                        ir::condcodes::IntCC::UnsignedGreaterThanOrEqual,
+                        i,
+                        n as i64,
+                    );
+                    self.guard(outside, 1, fail)?;
+                    let off = self.b.ins().imul_imm_s(i, stride as i64);
+                    self.b.ins().iadd(ptr, off)
                 }
             };
             at = self.next_at(at, step, a.ty)?;

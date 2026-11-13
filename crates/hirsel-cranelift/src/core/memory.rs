@@ -11,21 +11,7 @@ impl Function<'_, '_, '_> {
         results: &[Ty],
         args: &[Value],
     ) -> Result<Vec<Value>> {
-        let sig = abi::Signature::c(params, results);
-        let storage = sig.indirect.then(|| sig.storage(&mut self.b));
-        let mut actual = Vec::new();
-        if let Some(storage) = storage {
-            actual.push(storage);
-        }
-        actual.extend_from_slice(args);
-        let func = self
-            .object
-            .declare_function(name, Linkage::Import, &sig.clif)
-            .map_err(error)?;
-        let reference = self.object.declare_func_in_func(func, self.b.func);
-        let inst = self.b.ins().call(reference, &actual);
-        let values = self.b.inst_results(inst).to_vec();
-        Ok(sig.unpack(&mut self.b, &values, storage))
+        c_call(self.object, &mut self.b, name, params, results, args)
     }
     pub fn memory(&mut self, inst: &Inst) -> Result<()> {
         let p = Ty::Ptr;
@@ -35,7 +21,7 @@ impl Function<'_, '_, '_> {
             Inst::Alloc {
                 result,
                 available,
-                kind: AllocKind::Own,
+                kind,
                 place,
                 charge,
                 size,
@@ -57,12 +43,26 @@ impl Function<'_, '_, '_> {
                 // Allocation = {pointer, Capacity{requested,available}}, a C
                 // struct of three words. On refusal only the pointer is null;
                 // there is no guessed function status or call to the old runtime.
-                let values = self.c_call(
-                    name,
-                    &[p, p, u, u, u, boolean],
-                    &[p, u, u],
-                    &[ctx, payer, size, align, charge, overflow],
-                )?;
+                let values = if let AllocKind::Resource { grant } = kind {
+                    let storage = self.b.ins().iadd_imm_s(
+                        charge,
+                        -(hirsel_core_layout::charge::CAUSE_CELL as i64) - grant as i64,
+                    );
+                    let grant = self.b.ins().iconst(types::I64, grant as i64);
+                    self.c_call(
+                        "hirsel_core_resource_alloc",
+                        &[p, u, u, u, u],
+                        &[p, u, u],
+                        &[ctx, size, align, storage, grant],
+                    )?
+                } else {
+                    self.c_call(
+                        name,
+                        &[p, p, u, u, u, boolean],
+                        &[p, u, u],
+                        &[ctx, payer, size, align, charge, overflow],
+                    )?
+                };
                 self.set(result, values[0]);
                 self.set(available, values[2]);
                 let refused = self.b.ins().icmp_imm_s(IntCC::Equal, values[0], 0);
@@ -79,6 +79,74 @@ impl Function<'_, '_, '_> {
                 self.guard(grant, 6, fail)?;
                 self.b.ins().jump(done, &[]);
                 self.b.switch_to_block(done);
+                if kind == AllocKind::Counted {
+                    let init = self.b.create_block();
+                    let ready = self.b.create_block();
+                    self.b.ins().brif(refused, ready, &[], init, &[]);
+                    self.b.switch_to_block(init);
+                    let atomic = self.b.ins().iconst(types::I8, 0);
+                    self.c_call(
+                        "hirsel_core_counted_init",
+                        &[p, boolean],
+                        &[],
+                        &[values[0], atomic],
+                    )?;
+                    self.b.ins().jump(ready, &[]);
+                    self.b.switch_to_block(ready);
+                }
+            }
+            Inst::Drop { address, ty, fail } => {
+                if let Some(glue) = self.glues.drops[ty.index()] {
+                    let at = self.addr(address);
+                    let glue = self.object.declare_func_in_func(glue, self.b.func);
+                    let call = self.b.ins().call(glue, &[self.context, at]);
+                    let status = self.b.inst_results(call)[0];
+                    self.call_failure(status, fail)?;
+                }
+            }
+            Inst::Share { node, kind } => {
+                let node = self.get(node);
+                let atomic = self
+                    .b
+                    .ins()
+                    .iconst(types::I8, i64::from(kind == Counted::Arc));
+                self.c_call("hirsel_core_share", &[p, boolean], &[], &[node, atomic])?;
+            }
+            Inst::TryUnwrap { result, node, kind } => {
+                let node = self.get(node);
+                let atomic = self
+                    .b
+                    .ins()
+                    .iconst(types::I8, i64::from(kind == Counted::Arc));
+                let value = self.c_call(
+                    "hirsel_core_try_unwrap",
+                    &[p, boolean],
+                    &[boolean],
+                    &[node, atomic],
+                )?[0];
+                self.set(result, value);
+            }
+            Inst::Release { node, kind, ty } => {
+                let node = self.get(node);
+                let atomic = self
+                    .b
+                    .ins()
+                    .iconst(types::I8, i64::from(kind == Counted::Arc));
+                let n = hirsel_core_layout::charge::counted(
+                    self.layouts[ty.index()].logical_size.unwrap(),
+                )
+                .unwrap();
+                let n = self.b.ins().iconst(types::I64, n as i64);
+                let f = self
+                    .object
+                    .declare_func_in_func(self.glues.resumes[ty.index()].unwrap(), self.b.func);
+                let recipe = self.b.ins().func_addr(types::I64, f);
+                self.c_call(
+                    "hirsel_core_release",
+                    &[p, p, boolean, u, p],
+                    &[],
+                    &[self.context, node, atomic, n, recipe],
+                )?;
             }
             Inst::Case { result, address } => {
                 let value = self.case(address, None)?.unwrap();
@@ -137,4 +205,28 @@ impl Function<'_, '_, '_> {
         }
         Ok(())
     }
+}
+
+pub(super) fn c_call(
+    object: &mut ObjectModule,
+    b: &mut FunctionBuilder<'_>,
+    name: &str,
+    params: &[Ty],
+    results: &[Ty],
+    args: &[Value],
+) -> Result<Vec<Value>> {
+    let sig = abi::Signature::c(params, results);
+    let storage = sig.indirect.then(|| sig.storage(b));
+    let mut actual = Vec::new();
+    if let Some(storage) = storage {
+        actual.push(storage);
+    }
+    actual.extend_from_slice(args);
+    let func = object
+        .declare_function(name, Linkage::Import, &sig.clif)
+        .map_err(error)?;
+    let reference = object.declare_func_in_func(func, b.func);
+    let inst = b.ins().call(reference, &actual);
+    let values = b.inst_results(inst).to_vec();
+    Ok(sig.unpack(b, &values, storage))
 }

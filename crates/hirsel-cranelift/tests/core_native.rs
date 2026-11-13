@@ -53,9 +53,28 @@ fn execute(module: &c::Module, runs: &[(FuncId, Vec<u64>)], optimize: bool) {
     execute_limit(module, runs, optimize, 1_000_000);
 }
 fn execute_limit(module: &c::Module, runs: &[(FuncId, Vec<u64>)], optimize: bool, limit: u64) {
+    execute_injected(module, runs, optimize, limit, None);
+}
+fn execute_injected(
+    module: &c::Module,
+    runs: &[(FuncId, Vec<u64>)],
+    optimize: bool,
+    limit: u64,
+    injection: Option<(usize, bool)>,
+) {
+    execute_reports(module, runs, optimize, limit, injection, None);
+}
+fn execute_reports(
+    module: &c::Module,
+    runs: &[(FuncId, Vec<u64>)],
+    optimize: bool,
+    limit: u64,
+    injection: Option<(usize, bool)>,
+    reports: Option<&[eval::Report]>,
+) {
     let scratch = Scratch::new();
     let layouts = hirsel_core_layout::compute(&module.types).unwrap();
-    let artifact = emit_object_with_layouts(
+    let artifact = emit_object_for_test(
         module,
         &layouts,
         &Options {
@@ -69,7 +88,7 @@ fn execute_limit(module: &c::Module, runs: &[(FuncId, Vec<u64>)], optimize: bool
     source.push_str(include_str!(
         "../../hirsel-core-rt/include/hirsel_core_rt.h"
     ));
-    source.push('\n');
+    source.push_str("\nextern HirselCoreContext *hirsel_core_test_context_new(uint64_t);\nextern void hirsel_core_test_inject(HirselCoreContext *,size_t,bool);\nextern uint64_t hirsel_core_test_available(const HirselCoreContext *);\nextern size_t hirsel_core_test_attempts(const HirselCoreContext *);\nstatic uint64_t trace[1000000]; static size_t traces;\nvoid hirsel_core_test_drop_trace(uint64_t n) { if(traces >= 1000000) __builtin_abort(); trace[traces++]=n; }\n");
     for (i, s) in module.signatures.iter().enumerate() {
         if !s.results.is_empty() {
             write!(source, "struct r{i} {{ ").unwrap();
@@ -103,12 +122,23 @@ fn execute_limit(module: &c::Module, runs: &[(FuncId, Vec<u64>)], optimize: bool
         }
         source.push_str(");\n");
     }
-    source.push_str("int main(void) {\n");
+    source.push_str("#include <sys/resource.h>\nint main(void) {\n");
+    if reports.is_some() {
+        source.push_str(
+            "struct rlimit stack = {65536,65536}; if(setrlimit(RLIMIT_STACK,&stack)) return 7;\n",
+        );
+    }
     let mut expected = Vec::new();
     for (i, (f, args)) in runs.iter().enumerate() {
         let function = &module.functions[f.index()];
         let s = &module.signatures[function.signature.index()];
-        let report = eval::run(module, *f, args, limit);
+        let computed;
+        let report = if let Some(reports) = reports {
+            &reports[i]
+        } else {
+            computed = eval::run_injected(module, *f, args, limit, injection);
+            &computed
+        };
         match &report.outcome {
             Outcome::Returned(values) => {
                 expected.push(0);
@@ -134,9 +164,19 @@ fn execute_limit(module: &c::Module, runs: &[(FuncId, Vec<u64>)], optimize: bool
         }
         expected.push(report.used);
         source.push_str("{\n");
-        let startup =
-            hirsel_core_layout::charge::TASK_RECORD + hirsel_core_layout::charge::CAUSE_CELL;
-        writeln!(source,"HirselCoreContext *ctx = hirsel_core_context_new(UINT64_C({})); HirselCoreAllocation startup = hirsel_core_task_start(ctx); if (!startup.pointer) return 4;",limit + startup).unwrap();
+        writeln!(
+            source,
+            "HirselCoreContext *ctx = hirsel_core_test_context_new(UINT64_C({limit})); traces=0;"
+        )
+        .unwrap();
+        if let Some((n, later)) = injection {
+            writeln!(
+                source,
+                "hirsel_core_test_inject(ctx,{n},{});",
+                u8::from(later)
+            )
+            .unwrap();
+        }
         for (j, (p, arg)) in s.params.iter().zip(args).enumerate() {
             let Param::Value(t) = p else {
                 panic!("scalar test")
@@ -201,7 +241,10 @@ fn execute_limit(module: &c::Module, runs: &[(FuncId, Vec<u64>)], optimize: bool
             writeln!(source, "fwrite(&out{i}_{j}, 8, 1, stdout);").unwrap();
         }
         source.push_str("}\n");
-        writeln!(source,"HirselCoreAllocation probe = hirsel_core_limit_enter(ctx, UINT64_MAX); uint64_t used = UINT64_C({limit}) - probe.capacity.available; fwrite(&used,8,1,stdout); hirsel_core_causes_drop(causes); hirsel_core_context_free(ctx);").unwrap();
+        expected.push(report.trace.len() as u64);
+        expected.extend(&report.trace);
+        expected.push(report.admissions as u64);
+        writeln!(source,"uint64_t used = UINT64_C({limit}) - hirsel_core_test_available(ctx); fwrite(&used,8,1,stdout); uint64_t nt=traces; fwrite(&nt,8,1,stdout); fwrite(trace,8,traces,stdout); uint64_t na=hirsel_core_test_attempts(ctx); fwrite(&na,8,1,stdout); hirsel_core_causes_drop(causes); hirsel_core_context_free(ctx);").unwrap();
         source.push_str("}\n");
     }
     source.push_str("return 0; }\n");
@@ -605,4 +648,87 @@ b0(v0: ptr, v1: u64):
     let module = text::parse(source).unwrap();
     wf::module(&module).unwrap();
     execute(&module, &[(FuncId(0), vec![42])], false);
+}
+
+#[test]
+fn every_whole_v1a_sample_matches_evaluator() {
+    for source in [
+        include_str!("../../hirsel-core-ir/samples/admission.core"),
+        include_str!("../../hirsel-core-ir/samples/cleanup.core"),
+        include_str!("../../hirsel-core-ir/samples/counted.core"),
+        include_str!("../../hirsel-core-ir/samples/failure.core"),
+        include_str!("../../hirsel-core-ir/samples/variants.core"),
+    ] {
+        let module = text::parse(source).unwrap();
+        let ordinary = sample_runs(&module, source);
+        execute(&module, &ordinary, false);
+        for line in source
+            .lines()
+            .filter(|l| l.trim().starts_with("; run limit "))
+        {
+            let (n, call) = line
+                .trim()
+                .strip_prefix("; run limit ")
+                .unwrap()
+                .split_once(": ")
+                .unwrap();
+            let runs = sample_runs(&module, &format!("; run: {call}"));
+            execute_limit(&module, &runs, false, n.parse().unwrap());
+        }
+    }
+}
+
+#[test]
+fn capacity_at_each_admission_preserves_cleanup_chain_and_balance() {
+    let module = text::parse(include_str!("support/admissions.core")).unwrap();
+    let mut executions = 0;
+    for argument in [0, 1] {
+        let runs = [(FuncId(0), vec![argument])];
+        let baseline = eval::run(&module, FuncId(0), &[argument], 1000);
+        execute_limit(&module, &runs, false, 1000);
+        for n in 1..=baseline.admissions {
+            for later in [false, true] {
+                execute_injected(&module, &runs, false, 1000, Some((n, later)));
+                executions += 1;
+            }
+        }
+    }
+    assert_eq!(executions, 14);
+}
+
+#[test]
+fn counted_variant_chain_uses_constant_stack_and_refunds_every_node() {
+    let module = text::parse(include_str!("support/counted-chain.core")).unwrap();
+    execute(
+        &module,
+        &[(FuncId(0), vec![0]), (FuncId(0), vec![32])],
+        false,
+    );
+    for n in 1..=5 {
+        for later in [false, true] {
+            execute_injected(
+                &module,
+                &[(FuncId(0), vec![4])],
+                false,
+                1000,
+                Some((n, later)),
+            );
+        }
+    }
+    // Hand-derived oracle avoids imposing the evaluator's recursive host-stack
+    // implementation on the generated code's constant-stack requirement.
+    let n = 100_000;
+    execute_reports(
+        &module,
+        &[(FuncId(0), vec![n])],
+        false,
+        10_000_000,
+        None,
+        Some(&[eval::Report {
+            outcome: Outcome::Returned(vec![n]),
+            used: 0,
+            trace: vec![],
+            admissions: n as usize + 1,
+        }]),
+    );
 }

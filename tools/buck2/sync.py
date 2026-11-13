@@ -1197,7 +1197,7 @@ def first_party(meta: dict) -> str:
             # temporary files against std, without corpus or native runtime.
             requests_only = binary == "hirsel-driver-test-it-resident"
             core_native = binary == "hirsel-cranelift-test-core_native"
-            files_env = ({"HIRSEL_CORE_RUNTIME_ARCHIVE": "//:hirsel-core-rt[staticlib]"} if core_native
+            files_env = ({"HIRSEL_CORE_RUNTIME_ARCHIVE": "//:core-llvm-runtime-fixture[staticlib]"} if core_native
                          else {"HIRSEL_CORE_RT_ARCHIVE": "//:core-llvm-runtime-fixture[staticlib]"} if binary == "hirsel-llvm-unittest" else None)
             return dict(data=Raw(f'glob({starlark(["stdlib/**", relative(package_dir / "Cargo.toml")], 4)})') if requests_only else test_data(binary, name, package_dir, src),
                         runtime_archives=runtime_views(binary) if name in NATIVE_TESTS and not requests_only and not core_native and binary != "hirsel-rt-unittest" else None,

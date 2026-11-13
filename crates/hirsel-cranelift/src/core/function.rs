@@ -17,6 +17,7 @@ pub(super) struct Function<'a, 'b, 'c> {
     pub functions: &'c [cranelift_module::FuncId],
     pub statics: &'c [cranelift_module::DataId],
     pub signatures: &'c [abi::Signature],
+    pub glues: &'c drop::Glues,
     pub context: Value,
     pub signature: &'c abi::Signature,
     pub result_storage: Option<Value>,
@@ -80,6 +81,7 @@ pub(super) fn emit(
         statics,
         signatures,
         context,
+        glues: tables.glues,
         signature,
         result_storage,
     };
@@ -328,8 +330,8 @@ impl Function<'_, '_, '_> {
                 self.set(result, v);
             }
             Inst::StorageLive { .. } | Inst::StorageDead { .. } => {}
-            Inst::Address { address, .. } => {
-                let v = self.address(address)?;
+            Inst::Address { address, fail } => {
+                let v = self.address(address, fail)?;
                 self.b.def_var(self.addresses[address.index()], v);
             }
             Inst::Read {

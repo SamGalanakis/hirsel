@@ -152,15 +152,14 @@ fn upper(mut b: Batch) -> Result[(), m1.support.Error] {
 
 fn transform(take t: Transform) -> Result[TransformResult, m1.support.Error] waits {
     let _ = channel.receive(t.start)
-    let cancel_send = t.variant == "cancel-send"
-    if cancel_send {
+    if t.variant == "cancel-send" {
         let mut count: u64 = 0
         while count < 8 {
             let _ = channel.receive(t.input);
             count += 1
         }
         let Transform(variant: _, input: rx, output: _, start: _, ready: _, forwarded: _, cancel_gate: _) = take t
-        return Ok(TransformResult(completed: 0, error: Some(m1.support.Error(code: 4, label: "Cancelled@source.send", capacity: None)), retained: Some(take rx)))
+        return Ok(TransformResult(completed: 0, error: Some(m1.support.Error(exit: Exit(status: 4), label: "Cancelled@source.send", capacity: None)), retained: Some(take rx)))
     }
     let mut completed: u64 = 0
     while let Ok(take b) = channel.receive(t.input) {
@@ -217,7 +216,7 @@ fn spawn_sink(tasks: Tasks, take s: Sink) -> Result[Task[Stats], m1.support.Erro
 fn joined_source(take h: Task[Result[SourceResult, m1.support.Error]]) -> Result[SourceResult, m1.support.Error] waits {
     match task.join(take h) {
         Ok(take r) => r,
-        Error(_) => Error(m1.support.Error(code: 4, label: "Cancelled@source.send", capacity: None))
+        Error(_) => Error(m1.support.Error(exit: Exit(status: 4), label: "Cancelled@source.send", capacity: None))
     }
 }
 
@@ -233,7 +232,7 @@ fn ids(mut out: String, xs: List[u64]) -> Result[(), m1.support.Error] {
     m1.support.add(mut out, "\n")
 }
 
-pub fn main(out: Stdout, d: Dir, argv: Args, tasks: Tasks) -> Result[(), m1.support.Error] waits {
+fn program(out: Stdout, d: Dir, argv: Args, tasks: Tasks) -> Result[(), m1.support.Error] waits {
     let input = m1.support.input(d, argv)?
     let variant = m1.support.case_variant(argv)
     let failed = variant != "normal"
@@ -300,7 +299,7 @@ pub fn main(out: Stdout, d: Dir, argv: Args, tasks: Tasks) -> Result[(), m1.supp
             outcome = Error(take e)
         },
         Error(Cancelled(_)) => {
-            outcome = Error(m1.support.Error(code: 4, label: if variant == "cancel-receive" {
+            outcome = Error(m1.support.Error(exit: Exit(status: 4), label: if variant == "cancel-receive" {
                 "Cancelled@transform.receive"
             } else {
                 "Cancelled@transform.check"
@@ -371,4 +370,8 @@ pub fn main(out: Stdout, d: Dir, argv: Args, tasks: Tasks) -> Result[(), m1.supp
         let closed = tx
     }
     m1.support.finish(out, take rx, take outcome)
+}
+
+pub fn main(out: Stdout, d: Dir, argv: Args, tasks: Tasks) -> Result[(), Exit] waits {
+    m1.support.exit(program(out, d, argv, tasks))
 }

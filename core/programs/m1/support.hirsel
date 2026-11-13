@@ -1,17 +1,19 @@
+// A workload error: the exit status the corpus gives its class (2 for input and I/O,
+// 3 for Capacity, 4 for cancellation), and the label the program prints as failure=.
 pub type Error: send {
-    code: u64,
+    exit: Exit,
     label: String,
     capacity: Option[Capacity]
 }
 
 pub fn error(take label: String) -> Error {
-    Error(code: 2, label: take label, capacity: None)
+    Error(exit: Exit(status: 2), label: take label, capacity: None)
 }
 
 pub fn mem[T](take r: Result[T, Capacity]) -> Result[T, Error] {
     match take r {
         Ok(take x) => Ok(take x),
-        Error(c) => Error(Error(code: 3, label: "Capacity@ambient", capacity: Some(c))),
+        Error(c) => Error(Error(exit: Exit(status: 3), label: "Capacity@ambient", capacity: Some(c))),
     }
 }
 
@@ -79,7 +81,7 @@ pub fn admission(variant: String, site: String, requested: u64) -> Result[(), Er
         if s == site {
             let mut label = mem(string.from("Capacity@"))?
             add(mut label, site)?
-            return Error(Error(code: 3, label: take label, capacity: Some(Capacity(requested: if requested > 18446744073709551608 {
+            return Error(Error(exit: Exit(status: 3), label: take label, capacity: Some(Capacity(requested: if requested > 18446744073709551608 {
                 18446744073709551615
             } else {
                 ((requested + 7) / 8) * 8
@@ -127,6 +129,15 @@ pub fn finish(out: Stdout, take rx: Receiver[String], take outcome: Result[(), E
             put(out, "\n")?;
             Error(take e)
         },
+    }
+}
+
+/// main's result: the workload's outcome with its error reduced to its exit status
+/// (PROG-3). The label has been printed already, or the run ended before any output.
+pub fn exit(take r: Result[(), Error]) -> Result[(), Exit] {
+    match take r {
+        Ok(()) => Ok(()),
+        Error(take e) => Error(e.exit),
     }
 }
 

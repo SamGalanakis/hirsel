@@ -835,7 +835,6 @@
     ],
     "stderr": "empty",
     "success_exit": 0,
-    "error_exit_code_field": "code",
     "error_prefix_printed_by_program": true
   }
 }

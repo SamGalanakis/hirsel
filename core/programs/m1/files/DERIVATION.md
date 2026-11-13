@@ -29,8 +29,7 @@ destination-bytes=12 sum=1126 lock-free=true
 
 HostFile acquisition is mechanical and admits no cause cell. By MEM-24,
 std.file.try_lock admits a Lock block of HostFile(8)+cause(32)=40 before the OS
-call. The seed comment's Alloc:32 omits the field; this derivation follows the
-normative resource table. Three traced Owned resources
+call (file.hirsel's Alloc: 40). Three traced Owned resources
 reserve their declared finalizer grants of 1024 each, plus fields and cause
 cells. Their Option placeholders allow consuming close/unlock without a partial
 move from a resource. Finalizers allocate only from those grants and never

@@ -118,8 +118,9 @@ pub fn remove(d: Dir, p: String) -> Result[(), IoError] waits {
 // File::try_lock). Lock is a `send` resource that owns the locked file, so the lock is
 // released exactly once: by `unlock`, or by its finalizer, which unlocks (ignoring the
 // error) and then cleans the file field, whose finalizer closes the handle. Making a Lock
-// admits 32 bytes for its cause cell (budgets.md, "resource value"); try_lock makes it
-// before asking the host, so a refused admission leaves the host untouched. A refused
+// admits one 40-byte block: its HostFile field 8 plus its cause cell 32 (MEM-24, "resource
+// value"). try_lock makes it before asking the host, so a refused admission leaves the host
+// untouched. A refused
 // resource literal hands its one field back (`Result[Lock, (Capacity, HostFile)]`), so on
 // Capacity the file comes back open and unlocked.
 pub opaque resource type Lock: send {
@@ -129,14 +130,14 @@ pub opaque resource type Lock: send {
 }
 
 /// Held(f): another handle holds the lock; f comes back unlocked. Io(e, f): the host
-/// refused for another reason; f comes back unlocked. Capacity(c, f): the Lock's cause cell
-/// was refused before the host was asked; f comes back untouched.
+/// refused for another reason; f comes back unlocked. Capacity(c, f): the Lock's block was
+/// refused before the host was asked; f comes back untouched.
 pub type LockError = Held(HostFile) | Io(IoError, HostFile) | Capacity(Capacity, HostFile)
 
 /// Takes the lock on f without blocking. `host.try_lock`.
-/// Fails: Error(Held(f)) or Error(Io(e, f)), f unlocked and the Lock's cell refunded;
-/// Error(Capacity(c, f)), f untouched and the host not asked. Alloc: 32, current limit. Prefix: on failure the lock is
-/// not held. Cost: one host call.
+/// Fails: Error(Held(f)) or Error(Io(e, f)), f unlocked and the Lock's 40 bytes refunded;
+/// Error(Capacity(c, f)), f untouched and the host not asked. Alloc: 40, current limit.
+/// Prefix: on failure the lock is not held. Cost: one host call.
 /// Ex: `let l = match std.file.try_lock(take lf) { Ok(take l) => l, Error(Held(take lf)) => .. }`
 pub fn try_lock(take f: HostFile) -> Result[Lock, LockError] waits {
     let mut l = match Lock(f: take f) {

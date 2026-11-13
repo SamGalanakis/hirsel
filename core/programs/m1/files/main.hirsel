@@ -210,8 +210,12 @@ fn run(out: Stdout, parent: Dir, input: String, variant: String, take tx: Sender
     }
 }
 
-pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] waits {
+fn program(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] waits {
     let input = m1.support.input(d, argv)?
     let (tx, rx): (Sender[Event], Receiver[Event]) = m1.support.mem(channel.new(16))?
     run(out, d, input, m1.support.case_variant(argv), take tx, take rx)
+}
+
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
+    m1.support.exit(program(out, d, argv))
 }

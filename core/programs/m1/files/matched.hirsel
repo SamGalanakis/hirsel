@@ -1,4 +1,4 @@
 // Three OS handles have no alternative storage representation in this workload.
-pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] waits {
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
     main.main(out, d, argv)
 }

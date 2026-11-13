@@ -174,7 +174,7 @@ fn operations(input: String, start: u64, variant: String, mut s: Store, mut curr
     Ok(())
 }
 
-pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] waits {
+fn program(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] waits {
     let input = m1.support.input(d, argv)?
     let mut at: u64 = 0
     let initial = m1.support.line(input, mut at)
@@ -211,4 +211,8 @@ pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] wai
         let closed = tx
     }
     m1.support.finish(out, take rx, take outcome)
+}
+
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
+    m1.support.exit(program(out, d, argv))
 }

@@ -124,7 +124,7 @@ fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> 
     outcome
 }
 
-pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] waits {
+fn program(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] waits {
     let input = m1.support.input(d, argv)?
     let mut events: u64 = 4
     let mut at: u64 = 0
@@ -137,4 +137,8 @@ pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] wai
     let (tx, rx): (Sender[String], Receiver[String]) = m1.support.mem(channel.new(events))?
     let outcome = run(out, input, m1.support.case_variant(argv), take tx)
     m1.support.finish(out, take rx, take outcome)
+}
+
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
+    m1.support.exit(program(out, d, argv))
 }

@@ -8,6 +8,7 @@ pub mod memory_layout {
 
 mod abi;
 mod bytes;
+mod case;
 mod cleanup;
 mod collections;
 mod empty;
@@ -387,7 +388,16 @@ impl FunctionEmitter<'_> {
         self.line(format!(
             "store {shape} zeroinitializer, ptr {cause}, align 8"
         ));
-        self.line(format!("store i8 {kind}, ptr {cause}, align 8"));
+        // The kind is the message's niche word (FORM #75).
+        let at = self.fresh();
+        self.line(format!(
+            "{at} = getelementptr i8, ptr {cause}, i64 {}",
+            memory_layout::CAUSE_KIND
+        ));
+        self.line(format!(
+            "store i64 {}, ptr {at}, align 8",
+            memory_layout::cause_kind_word(kind) as i64
+        ));
         self.line(format!(
             "call void @hirsel_core_raise(ptr %context, ptr byval({shape}) align 8 {cause})"
         ));

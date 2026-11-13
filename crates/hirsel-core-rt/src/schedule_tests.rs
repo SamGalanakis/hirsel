@@ -111,11 +111,7 @@ unsafe extern "C" fn drop_message(context: *mut Context, value: *mut u8) -> u8 {
         if fail {
             hirsel_core_raise(
                 context,
-                causes::Cause {
-                    kind: causes::FAIL,
-                    site: 100 + m.index,
-                    message: Default::default(),
-                },
+                causes::Cause::fail(Default::default(), 100 + m.index),
             );
         }
         hirsel_core_finalizer_end(context, cell);
@@ -344,7 +340,7 @@ unsafe extern "C" fn root(context: *mut Context, _: *mut u8, input: *mut u8) -> 
             }
             handles[index] = None;
             let chain = causes::Causes::from_raw(join.causes);
-            let values = chain.iter().map(|c| (c.kind, c.site)).collect::<Vec<_>>();
+            let values = chain.iter().map(|c| (c.kind(), c.site)).collect::<Vec<_>>();
             (*s).chains.push(((&(*s).ids)[index], values));
             drop(chain);
         }
@@ -372,7 +368,7 @@ fn execute(mut session: Session) -> Session {
             },
         );
         let chain = causes::Causes::from_raw(hirsel_core_causes_take(&mut context));
-        let values = chain.iter().map(|c| (c.kind, c.site)).collect::<Vec<_>>();
+        let values = chain.iter().map(|c| (c.kind(), c.site)).collect::<Vec<_>>();
         drop(chain);
         assert_eq!(status != 0, !values.is_empty());
         session.chains.push((0, values));
@@ -562,7 +558,10 @@ fn scripted_providers_suspend_at_issue_and_delivery_without_losing_issued_result
             assert_eq!((join.kind, join.status), (2, 0));
             let causes = causes::Causes::from_raw(join.causes);
             assert_eq!(
-                causes.iter().map(|c| (c.kind, c.site)).collect::<Vec<_>>(),
+                causes
+                    .iter()
+                    .map(|c| (c.kind(), c.site))
+                    .collect::<Vec<_>>(),
                 [(causes::CANCELLED, if (*s).hold == 0 { 88 } else { 99 })]
             );
             drop(causes);

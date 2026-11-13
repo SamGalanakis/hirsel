@@ -185,24 +185,17 @@ impl<'c> Function<'_, '_, 'c> {
             unreachable!("variant place")
         };
         let tag = fixed(self.layouts, t)?.tag.unwrap();
-        let native = match tag.width {
-            1 => types::I8,
-            2 => types::I16,
-            _ => types::I32,
-        };
         let address = self.addr(address);
         if let Some(value) = value {
-            let value = self.b.ins().iconst(native, i64::from(value));
-            self.b
-                .ins()
-                .store(MemFlagsData::new(), value, address, tag.offset as i32);
+            super::case::set_case(&mut self.b, &tag, value, address, MemFlagsData::new());
             Ok(None)
         } else {
-            let value = self
-                .b
-                .ins()
-                .load(native, MemFlagsData::new(), address, tag.offset as i32);
-            Ok(Some(self.resize(value, types::I32, false)))
+            Ok(Some(super::case::case_value(
+                &mut self.b,
+                &tag,
+                address,
+                MemFlagsData::new(),
+            )))
         }
     }
 }

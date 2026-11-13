@@ -54,11 +54,131 @@ impl CompactSet {
     }
 }
 
+/// Where a variant keeps which case it is, and how the case is encoded there. Every
+/// consumer reads a case through [`read_case`] and writes one through [`case_word`];
+/// nothing else interprets a tag word.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Tag {
     pub offset: u64,
-    /// 1, 2 or 4 bytes: the smallest that holds the case count.
+    /// The word's width in bytes: 1, 2 or 4 for a direct tag (the smallest that
+    /// holds the case count); for a niche, the width of the niche it uses (8 for a
+    /// pointer or a capacity).
     pub width: u64,
+    pub encoding: Encoding,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum Encoding {
+    /// The word is the case ordinal.
+    Direct,
+    /// The variant is laid out as case `dataful`'s payload, and every other case is
+    /// in `first..=last` and has no data. Case `c != dataful` is the word
+    /// `start + (c - first)` (mod 2^(8 × width)), a value no payload of `dataful`
+    /// holds; any other word is `dataful`, whose case is written by its payload alone.
+    Niche {
+        dataful: u32,
+        first: u32,
+        last: u32,
+        start: u64,
+    },
+}
+
+/// Bit patterns no valid value of a type holds: `count` values from `start` (mod
+/// 2^(8 × width)) in the `width`-byte little-endian word at `offset`. Each field type
+/// states its own once ([`field_niche`]); a variant with one dataful case spends
+/// some on its other cases (MEM-13 keeps this private).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Niche {
+    pub offset: u64,
+    pub width: u64,
+    pub start: u64,
+    pub count: u64,
+}
+
+/// The arithmetic a consumer reads a case with: the evaluator on words, an engine on
+/// IR values. Values are u64; `below` and `select` treat 0 as false.
+pub trait CaseOps {
+    type V: Copy;
+    fn constant(&mut self, n: u64) -> Self::V;
+    /// Wrapping.
+    fn add(&mut self, a: Self::V, b: Self::V) -> Self::V;
+    /// Wrapping.
+    fn sub(&mut self, a: Self::V, b: Self::V) -> Self::V;
+    fn and(&mut self, a: Self::V, b: Self::V) -> Self::V;
+    /// Unsigned `a < b`, as 1 or 0.
+    fn below(&mut self, a: Self::V, b: Self::V) -> Self::V;
+    fn select(&mut self, c: Self::V, yes: Self::V, no: Self::V) -> Self::V;
+}
+
+/// The case ordinal of a variant whose tag word (`tag.width` bytes at `tag.offset`,
+/// zero-extended) is `word`.
+pub fn read_case<O: CaseOps>(tag: &Tag, o: &mut O, word: O::V) -> O::V {
+    match tag.encoding {
+        Encoding::Direct => word,
+        Encoding::Niche {
+            dataful,
+            first,
+            last,
+            start,
+        } => {
+            let s = o.constant(start);
+            let mut rel = o.sub(word, s);
+            if tag.width < 8 {
+                let mask = o.constant((1u64 << (8 * tag.width)) - 1);
+                rel = o.and(rel, mask);
+            }
+            let k = o.constant(u64::from(last - first) + 1);
+            let empty = o.below(rel, k);
+            let f = o.constant(u64::from(first));
+            let case = o.add(rel, f);
+            let d = o.constant(u64::from(dataful));
+            o.select(empty, case, d)
+        }
+    }
+}
+
+/// The tag word that makes a variant case `case`, or `None` when the case is written
+/// by its payload alone (the dataful case of a niche).
+pub fn case_word(tag: &Tag, case: u32) -> Option<u64> {
+    match tag.encoding {
+        Encoding::Direct => Some(u64::from(case)),
+        Encoding::Niche { dataful, .. } if case == dataful => None,
+        Encoding::Niche { first, start, .. } => {
+            let word = start.wrapping_add(u64::from(case - first));
+            Some(if tag.width < 8 {
+                word & ((1u64 << (8 * tag.width)) - 1)
+            } else {
+                word
+            })
+        }
+    }
+}
+
+/// [`read_case`] on a word in hand.
+pub fn case_of(tag: &Tag, word: u64) -> u32 {
+    struct Words;
+    impl CaseOps for Words {
+        type V = u64;
+        fn constant(&mut self, n: u64) -> u64 {
+            n
+        }
+        fn add(&mut self, a: u64, b: u64) -> u64 {
+            a.wrapping_add(b)
+        }
+        fn sub(&mut self, a: u64, b: u64) -> u64 {
+            a.wrapping_sub(b)
+        }
+        fn and(&mut self, a: u64, b: u64) -> u64 {
+            a & b
+        }
+        fn below(&mut self, a: u64, b: u64) -> u64 {
+            u64::from(a < b)
+        }
+        fn select(&mut self, c: u64, yes: u64, no: u64) -> u64 {
+            if c != 0 { yes } else { no }
+        }
+    }
+    read_case(tag, &mut Words, word) as u32
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -68,6 +188,9 @@ pub struct Fixed {
     pub tag: Option<Tag>,
     /// Field byte offsets from the value's start: one row for a record, one per case.
     pub offsets: Vec<Vec<u64>>,
+    /// The spare values of the type, for a variant that holds it (the one with the
+    /// most, ties to the lowest offset).
+    pub niche: Option<Niche>,
 }
 
 /// Where a compact field starts.
@@ -343,9 +466,170 @@ fn err(shape: &Shape, f: &Field, why: &'static str) -> LayoutError {
     }
 }
 
+/// Field offsets of `row` laid out from `start`, and where the row ends.
+fn place_row(
+    shape: &Shape,
+    row: &[Field],
+    m: &[(u64, u64, u64)],
+    start: u64,
+) -> Result<(Vec<u64>, u64), LayoutError> {
+    let mut off = start;
+    let mut offsets = Vec::with_capacity(m.len());
+    for (&(size, a, _), f) in m.iter().zip(row.iter()) {
+        off = checked_align_up(off, a)
+            .ok_or_else(|| err(shape, f, "native layout exceeds the engine's size range"))?;
+        offsets.push(off);
+        off = off
+            .checked_add(size)
+            .ok_or_else(|| err(shape, f, "native layout exceeds the engine's size range"))?;
+    }
+    Ok((offsets, off))
+}
+
+/// The niche with the most spare values among `fields` at `offsets` (ties to the
+/// lowest offset).
+fn best_niche<'r>(
+    shapes: &[Shape],
+    fields: &[Field],
+    offsets: &[u64],
+    get: &dyn Fn(TypeRef) -> &'r Recipe,
+) -> Option<Niche> {
+    let mut best: Option<Niche> = None;
+    for (f, &at) in fields.iter().zip(offsets) {
+        if let Some(n) = field_niche(shapes, &f.ty, get) {
+            let n = Niche {
+                offset: at + n.offset,
+                ..n
+            };
+            let better = match best {
+                None => true,
+                Some(b) => n.count > b.count || (n.count == b.count && n.offset < b.offset),
+            };
+            if better {
+                best = Some(n);
+            }
+        }
+    }
+    best
+}
+
+/// The spare values of a fixed-layout field of type `ty`, from the field's start: the
+/// one table of them (MEM-13 keeps it private).
+///
+/// - `Box`, `Rc`, `Arc` and a stable reference: a null pointer.
+/// - `List`, `String`, `Bytes` and `Map`: a capacity of 2^63 to 2^64 - 2. Storage of
+///   2^63 elements never fits the address space, and a zero-sized element's list
+///   holds 2^64 - 1 (SEM-4), so no carrier holds one. (The data pointer is no niche:
+///   an empty string's may be null.)
+/// - `bool`: 2 to 255. `char`: 0x110000 to 2^32 - 1.
+/// - An inline value: its type's ([`Fixed::niche`]); an inline array: its first
+///   element's.
+///
+/// Nothing else has one: integers and floats use every pattern, and a handle, a
+/// code pointer or a resource pointer is not promised to be non-null here.
+pub fn field_niche<'r>(
+    shapes: &[Shape],
+    ty: &FieldTy,
+    get: &dyn Fn(TypeRef) -> &'r Recipe,
+) -> Option<Niche> {
+    let n = |offset, width, start, count| {
+        Some(Niche {
+            offset,
+            width,
+            start,
+            count,
+        })
+    };
+    match ty {
+        FieldTy::Box(_) | FieldTy::Rc(_) | FieldTy::Arc(_) => n(0, POINTER, 0, 1),
+        FieldTy::Stable(t) if !matches!(shapes[t.index()].repr, Repr::Compact(_)) => {
+            n(0, POINTER, 0, 1)
+        }
+        FieldTy::Seq(_) | FieldTy::Map(..) => n(16, 8, 1 << 63, (1 << 63) - 1),
+        FieldTy::Scalar(crate::shape::Scalar::Bool) => n(0, 1, 2, 254),
+        FieldTy::Scalar(crate::shape::Scalar::Char) => n(0, 4, 0x11_0000, (1 << 32) - 0x11_0000),
+        FieldTy::Inline(t) => match (shapes[t.index()].repr, &get(*t).layout) {
+            (Repr::Resource | Repr::Compact(_), _) => None,
+            (_, Layout::Fixed(l)) => l.niche,
+            (_, Layout::Compact(_)) => None,
+        },
+        FieldTy::Array(e, count) if *count > 0 => field_niche(shapes, e, get),
+        _ => None,
+    }
+}
+
+/// A variant laid out as its one dataful case's payload: that case's index, offsets
+/// from 0, end, and the tag and the variant's own remaining niche. `None` when the
+/// variant does not have exactly one case with data, every other case's fields
+/// zero-sized and without cleanup, or when that case's payload has too few spare
+/// values for the other cases.
+#[allow(clippy::type_complexity)]
+fn niche_layout(
+    shapes: &[Shape],
+    rows: &[&[Field]],
+    measured: &[Vec<(u64, u64, u64)>],
+    shape: &Shape,
+    out: &Computed<'_>,
+) -> Result<Option<(Vec<Vec<u64>>, u64, Tag, Option<Niche>)>, LayoutError> {
+    let get = |t: TypeRef| done(out, t);
+    let dataful: Vec<usize> = (0..rows.len())
+        .filter(|&r| measured[r].iter().any(|&(size, _, _)| size > 0))
+        .collect();
+    let &[d] = dataful.as_slice() else {
+        return Ok(None);
+    };
+    if rows.len() < 2
+        || rows
+            .iter()
+            .enumerate()
+            .any(|(r, row)| r != d && row.iter().any(|f| needs_drop(shapes, &f.ty, out)))
+    {
+        return Ok(None);
+    }
+    let (row, end) = place_row(shape, rows[d], &measured[d], 0)?;
+    let Some(niche) = best_niche(shapes, rows[d], &row, &get) else {
+        return Ok(None);
+    };
+    let first = if d == 0 { 1 } else { 0 };
+    let last = if d == rows.len() - 1 {
+        rows.len() - 2
+    } else {
+        rows.len() - 1
+    };
+    let used = (last - first + 1) as u64;
+    if niche.count < used {
+        return Ok(None);
+    }
+    let offsets = (0..rows.len())
+        .map(|r| {
+            if r == d {
+                row.clone()
+            } else {
+                vec![0; rows[r].len()]
+            }
+        })
+        .collect();
+    let tag = Tag {
+        offset: niche.offset,
+        width: niche.width,
+        encoding: Encoding::Niche {
+            dataful: d as u32,
+            first: first as u32,
+            last: last as u32,
+            start: niche.start,
+        },
+    };
+    let rest = (niche.count > used).then(|| Niche {
+        start: niche.start.wrapping_add(used),
+        count: niche.count - used,
+        ..niche
+    });
+    Ok(Some((offsets, end, tag, rest)))
+}
+
 fn fixed(shapes: &[Shape], shape: &Shape, out: &Computed<'_>) -> Result<Recipe, LayoutError> {
     let rows = cases(shape);
-    let tag = matches!(shape.body, Body::Variant(_)).then(|| tag_width(rows.len()));
+    let variant = matches!(shape.body, Body::Variant(_));
     // (size, align, logical) per field, per case.
     let get = |t: TypeRef| done(out, t);
     let mut measured = Vec::with_capacity(rows.len());
@@ -356,38 +640,61 @@ fn fixed(shapes: &[Shape], shape: &Shape, out: &Computed<'_>) -> Result<Recipe, 
         }
         measured.push(m);
     }
-    let align = measured
-        .iter()
-        .flatten()
-        .map(|&(_, a, _)| a)
-        .chain(tag)
-        .max()
-        .unwrap_or(1);
-    let start = tag.map_or(0, |t| align_up(t, align));
-    let mut offsets = Vec::with_capacity(rows.len());
-    let mut end = start;
+    // charge-v1 (MEM-24): a variant is 8 plus its largest payload, however it is laid
+    // out.
     let mut logical = 0;
     for (m, fields) in measured.iter().zip(&rows) {
-        let mut row_logical = if tag.is_some() { 8u64 } else { 0 };
+        let mut row_logical = if variant { 8u64 } else { 0 };
         for (&(_, _, bytes), f) in m.iter().zip(fields.iter()) {
             row_logical = row_logical
                 .checked_add(bytes)
                 .ok_or_else(|| err(shape, f, "logical size exceeds 2^64 - 1 bytes"))?;
         }
         logical = logical.max(row_logical);
-        let mut off = start;
-        let mut row = Vec::with_capacity(m.len());
-        for (&(size, a, _), f) in m.iter().zip(fields.iter()) {
-            off = checked_align_up(off, a)
-                .ok_or_else(|| err(shape, f, "native layout exceeds the engine's size range"))?;
-            row.push(off);
-            off = off
-                .checked_add(size)
-                .ok_or_else(|| err(shape, f, "native layout exceeds the engine's size range"))?;
-        }
-        end = end.max(off);
-        offsets.push(row);
     }
+    let fields_align = measured.iter().flatten().map(|&(_, a, _)| a).max();
+    let niched = if variant {
+        niche_layout(shapes, &rows, &measured, shape, out)?
+    } else {
+        None
+    };
+    let (offsets, end, tag, niche, align) = if let Some((offsets, end, tag, rest)) = niched {
+        (offsets, end, Some(tag), rest, fields_align.unwrap_or(1))
+    } else {
+        let width = variant.then(|| tag_width(rows.len()));
+        let align = fields_align.into_iter().chain(width).max().unwrap_or(1);
+        let start = width.map_or(0, |t| align_up(t, align));
+        let mut offsets = Vec::with_capacity(rows.len());
+        let mut end = start;
+        for (m, fields) in measured.iter().zip(&rows) {
+            let (row, row_end) = place_row(shape, fields, m, start)?;
+            end = end.max(row_end);
+            offsets.push(row);
+        }
+        let niche = match width {
+            Some(w) => {
+                let spare = (1u64 << (8 * w)) - rows.len() as u64;
+                (spare > 0).then_some(Niche {
+                    offset: 0,
+                    width: w,
+                    start: rows.len() as u64,
+                    count: spare,
+                })
+            }
+            None => best_niche(
+                shapes,
+                rows.first().copied().unwrap_or(&[]),
+                offsets.first().map_or(&[][..], |o| &o[..]),
+                &get,
+            ),
+        };
+        let tag = width.map(|width| Tag {
+            offset: 0,
+            width,
+            encoding: Encoding::Direct,
+        });
+        (offsets, end, tag, niche, align)
+    };
     let size = checked_align_up(end, align).ok_or_else(|| LayoutError::Field {
         ty: shape.name.clone(),
         field: rows
@@ -405,8 +712,9 @@ fn fixed(shapes: &[Shape], shape: &Shape, out: &Computed<'_>) -> Result<Recipe, 
         layout: Layout::Fixed(Fixed {
             size,
             align,
-            tag: tag.map(|width| Tag { offset: 0, width }),
+            tag,
             offsets,
+            niche,
         }),
     })
 }
@@ -500,8 +808,7 @@ fn measure<'r>(
         | FieldTy::FixedSpan(_)
         | FieldTy::SeqSpan(_)
         | FieldTy::IndexedSpan(_)
-        | FieldTy::Link(_)
-        | FieldTy::OptLink(_) => return Err("compact field types need a compact declaration"),
+        | FieldTy::Link(_) => return Err("compact field types need a compact declaration"),
     })
 }
 
@@ -649,9 +956,43 @@ fn compact(
             ty: shape.name.clone(),
         });
     }
+    // The compact encoding is public (MEM-9): a variant's tag is its ordinal, except
+    // MEM-10's optional link, two cases of which one is empty and the other one link,
+    // whose empty case is the zero distance no link holds.
+    let link_option = match rows.as_slice() {
+        [a, b] if matches!(shape.body, Body::Variant(_)) => match (a, b) {
+            ([], [f]) if matches!(f.ty, FieldTy::Link(_)) => Some(1),
+            ([f], []) if matches!(f.ty, FieldTy::Link(_)) => Some(0),
+            _ => None,
+        },
+        _ => None,
+    };
     let encode = |w: Width| -> Result<Compact, LayoutError> {
-        let tag = matches!(shape.body, Body::Variant(_)).then(|| tag_width(rows.len()));
-        let start = tag.unwrap_or(0);
+        let tag = match link_option {
+            Some(dataful) => Some(Tag {
+                offset: 0,
+                width: w.bytes(),
+                encoding: Encoding::Niche {
+                    dataful,
+                    first: 1 - dataful,
+                    last: 1 - dataful,
+                    start: 0,
+                },
+            }),
+            None => matches!(shape.body, Body::Variant(_)).then(|| Tag {
+                offset: 0,
+                width: tag_width(rows.len()),
+                encoding: Encoding::Direct,
+            }),
+        };
+        let start = match tag {
+            Some(Tag {
+                width,
+                encoding: Encoding::Direct,
+                ..
+            }) => width,
+            _ => 0,
+        };
         let mut fields = Vec::with_capacity(rows.len());
         let mut extents = Vec::with_capacity(rows.len());
         for row in &rows {
@@ -679,6 +1020,8 @@ fn compact(
                 pos = next;
             }
             extents.push(match pos {
+                // The optional link's empty case is its zero word.
+                Pos::At(_) if link_option.is_some() && row.is_empty() => Some(w.bytes()),
                 Pos::At(n) => Some(n),
                 Pos::After { .. } => None,
             });
@@ -690,7 +1033,7 @@ fn compact(
         };
         Ok(Compact {
             width: w,
-            tag: tag.map(|width| Tag { offset: 0, width }),
+            tag,
             fields,
             fixed_extent,
         })
@@ -725,14 +1068,14 @@ fn compact_size(
 ) -> Result<Size, LayoutError> {
     Ok(match ty {
         FieldTy::Scalar(s) => Size::Fixed(s.size()),
-        FieldTy::Link(_) | FieldTy::OptLink(_) if element => {
+        FieldTy::Link(_) if element => {
             return Err(err(
                 shape,
                 f,
                 "a link is a field, never an element (MEM-10)",
             ));
         }
-        FieldTy::Link(t) | FieldTy::OptLink(t) => {
+        FieldTy::Link(t) => {
             if !matches!(shapes[t.index()].repr, Repr::Compact(_)) {
                 return Err(err(
                     shape,
@@ -852,7 +1195,9 @@ pub fn compact_extent(
     if let Some(e) = c.fixed_extent {
         return e;
     }
-    let case = c.tag.map_or(0, |t| read_tag(base + t.offset, t.width)) as usize;
+    let case = c
+        .tag
+        .map_or(0, |t| case_of(&t, read_tag(base + t.offset, t.width))) as usize;
     let row = &c.fields[case];
     let ends = field_ends(recipes, c, row, base, read_w, read_tag);
     ends.last()

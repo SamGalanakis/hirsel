@@ -1,0 +1,15 @@
+// FORM #72/#73: a key's hash and equality read its case through the layout, never the
+// raw niche word: None (capacity 2^63), Some("") (capacity 0) and Some("a") are three
+// distinct keys, and each finds its own value.
+// expect: accept
+// expect: run keys() = 321
+fn found(m: Map[Option[String], u64], k: Option[String]) -> u64 {
+  match map.get(m, k) { Some(v) => v, None => 9u64 }
+}
+fn keys() -> u64 {
+  let mut m: Map[Option[String], u64] = map.new()
+  result.unwrap(map.insert(mut m, None, 1u64))
+  result.unwrap(map.insert(mut m, Some(""), 2u64))
+  result.unwrap(map.insert(mut m, Some("a"), 3u64))
+  found(m, Some("a")) * 100u64 + found(m, Some("")) * 10u64 + found(m, None)
+}

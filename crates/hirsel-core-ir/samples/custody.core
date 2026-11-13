@@ -37,8 +37,9 @@
 ; run limit 1000: f6() -> 1, 1, 4, 4 | used 0 | trace 7           ; one Fail cause, its message
 ;
 ; f6 iterates the joined chain with rt.cause_value / rt.cause_next (crate docs, "Causes"):
-; a cell's Cause is core's layout, the CauseKind tag at 0 (Fail = 4) and Fail's String
-; carrier at 8, so the message length is at 16; the next cell after the last is null.
+; a cell's Cause is core's layout, Fail's String carrier at 0, so the message length is
+; at 8, and CauseKind is that carrier's capacity niche at 16 (FORM #75): a capacity below
+; 2^63 is Fail (4), kind k otherwise 2^63 + k; the next cell after the last is null.
 ; Charges: Tok 40, spawn 396; the child cleans Tok (trace 7), admits the 8-byte message
 ; from its limit and fails; its limit's unused 92 returns at its end, join refunds 264,
 ; and dropping the Causes frees the message (8) and the primary cell (32): used 0.
@@ -293,8 +294,8 @@ fn f6 = n6 g11 {
   addr a2 = s1 : t2
   addr a3 = s2 case 0 0 : ptr
   addr a4 = s2 : t3
-  addr a5 = v13 : u8                   ; the Cause's CauseKind tag
-  addr a6 = v13 byte v14 : u64         ; its Fail message's length
+  addr a5 = v13 byte v14 : u64         ; the Cause's CauseKind niche word (capacity)
+  addr a6 = v13 byte v29 : u64         ; its Fail message's length
 b0:
   live s0
   live s1
@@ -312,7 +313,7 @@ b0:
   v4: ptr, v5: u64 = call rt.spawn[t1, t2] g2 (v3, &a1, v2)
   v27: ptr = const 0x0
   v28: bool = ne v4, v27
-  branch v28, b1, b5
+  branch v28, b1, b8
 b1:
   v6: u8, v7: ptr = call rt.join[t2] g3 (v4, &a2)
   v8: u64 = const 0
@@ -320,15 +321,25 @@ b1:
 b2(v9: ptr, v10: u64, v11: u64, v12: u64):   ; cell, count, kinds, lengths
   v15: ptr = const 0x0
   v16: bool = eq v9, v15
-  branch v16, b4, b3
+  branch v16, b7, b3
 b3:
   v13: ptr = call rt.cause_value g12 (v9)
   v14: u64 = const 16
+  v29: u64 = const 8
   address a5
   address a6
-  v17: u8 = read a5
-  v18: u64 = widen v17
+  v17: u64 = read a5
   v19: u64 = read a6
+  v30: u64 = const 9223372036854775808
+  v31: bool = lt v17, v30
+  branch v31, b4, b5
+b4:
+  v32: u64 = const 4
+  jump b6(v32)
+b5:
+  v33: u64 = sub v17, v30
+  jump b6(v33)
+b6(v18: u64):                          ; the cause's kind
   v20: u64 = const 1
   v21: u64 = add v10, v20
   v22: u64 = const 16
@@ -337,12 +348,12 @@ b3:
   v25: u64 = add v12, v19
   v26: ptr = call rt.cause_next g12 (v9)
   jump b2(v26, v21, v24, v25)
-b4:
+b7:
   set_case a4, 0
   store a3, v7
   drop a4 t3
   return v6, v10, v11, v12
-b5:
+b8:
   drop a1 t1                           ; refused: the task never took x
   raise unwrap
 }

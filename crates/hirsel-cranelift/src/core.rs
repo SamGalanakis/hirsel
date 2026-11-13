@@ -18,6 +18,7 @@ pub mod memory_layout {
 
 mod abi;
 mod calls;
+mod case;
 mod drop;
 mod failure;
 mod fast;

@@ -49,14 +49,7 @@ pub unsafe extern "C" fn hirsel_core_channel_new(
     // SAFETY: creation owns context; no custody changes until admission succeeds.
     unsafe {
         if capacity == 0 {
-            causes::record(
-                &mut *context,
-                Cause {
-                    kind: causes::BOUNDS,
-                    site,
-                    message: Default::default(),
-                },
-            );
+            causes::record(&mut *context, Cause::new(causes::BOUNDS, site));
             return New {
                 sender: ptr::null_mut(),
                 receiver: ptr::null_mut(),

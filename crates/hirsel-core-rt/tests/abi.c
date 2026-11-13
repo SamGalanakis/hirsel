@@ -9,7 +9,7 @@ static bool empty(HirselCoreContext *context, void *payload, uint64_t *cursor,
 }
 
 _Static_assert(sizeof(HirselCoreCause) == HIRSEL_CORE_CAUSE_BYTES, "Cause size");
-_Static_assert(offsetof(HirselCoreCause, kind) == HIRSEL_CORE_CAUSE_KIND, "Cause kind");
+_Static_assert(offsetof(HirselCoreCause, message.capacity) == HIRSEL_CORE_CAUSE_KIND, "Cause kind");
 _Static_assert(offsetof(HirselCoreCause, message) == HIRSEL_CORE_CAUSE_MESSAGE, "Cause message");
 _Static_assert(offsetof(HirselCoreCause, site) == HIRSEL_CORE_CAUSE_SITE, "Cause site");
 
@@ -76,12 +76,12 @@ int main(void) {
 
     HirselCoreAllocation resource = hirsel_core_resource_alloc(context, 8, 8, 8, 64);
     assert(resource.pointer);
-    hirsel_core_raise(context, (HirselCoreCause){ .kind = 0, .site = 99 });
+    hirsel_core_raise(context, hirsel_core_cause_new(0, 99));
     hirsel_core_finalizer_begin(context, resource.pointer);
     HirselCoreAllocation refusal = hirsel_core_alloc(context, NULL, 128, 8, 128, false, 0);
     assert(!refusal.pointer);
     assert(refusal.capacity.requested == 128 && refusal.capacity.available == 64);
-    hirsel_core_raise(context, (HirselCoreCause){ .kind = 6, .site = 100 });
+    hirsel_core_raise(context, hirsel_core_cause_new(6, 100));
     hirsel_core_finalizer_end(context, resource.pointer);
     hirsel_core_resource_free(resource.pointer, 8);
     HirselCoreCauseCell *causes = hirsel_core_causes_take(context);

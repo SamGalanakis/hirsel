@@ -71,10 +71,13 @@ impl Cx<'_, '_, '_> {
                     let Layout::Fixed(fixed) = &self.e.recipes[id.index()].layout else {
                         unreachable!()
                     };
+                    // A niche variant's dataful case is made by its fields alone.
                     let tag = fixed.tag.unwrap();
-                    let offset = tag.offset as usize;
-                    let width = tag.width as usize;
-                    bytes[offset..offset + width].copy_from_slice(&case.to_le_bytes()[..width]);
+                    if let Some(word) = hirsel_core_layout::case_word(&tag, case) {
+                        let offset = tag.offset as usize;
+                        let width = tag.width as usize;
+                        bytes[offset..offset + width].copy_from_slice(&word.to_le_bytes()[..width]);
+                    }
                 }
                 let stride = if let TyKind::Array(elem, _) = *self.t.kind(value.ty) {
                     Some(match self.rep(elem).ok()? {

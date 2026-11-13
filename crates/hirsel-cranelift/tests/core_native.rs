@@ -335,7 +335,7 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
         if !s.results.is_empty() {
             source.push_str("uint64_t status = value.status;\n");
         }
-        source.push_str("fwrite(&status,8,1,stdout); HirselCoreCauseCell *causes = 0; if (status) { causes = hirsel_core_causes_take(ctx); uint64_t count = 0; for(const HirselCoreCauseCell *c = causes; c; c = hirsel_core_cause_next(c)) count++; fwrite(&count,8,1,stdout); for(const HirselCoreCauseCell *c = causes; c; c = hirsel_core_cause_next(c)) { uint64_t kind = hirsel_core_cause_value(c)->kind; fwrite(&kind,8,1,stdout); } } else {\n");
+        source.push_str("fwrite(&status,8,1,stdout); HirselCoreCauseCell *causes = 0; if (status) { causes = hirsel_core_causes_take(ctx); uint64_t count = 0; for(const HirselCoreCauseCell *c = causes; c; c = hirsel_core_cause_next(c)) count++; fwrite(&count,8,1,stdout); for(const HirselCoreCauseCell *c = causes; c; c = hirsel_core_cause_next(c)) { uint64_t kind = hirsel_core_cause_kind(hirsel_core_cause_value(c)); fwrite(&kind,8,1,stdout); } } else {\n");
         writeln!(
             source,
             "uint64_t count = {}; fwrite(&count,8,1,stdout);",
@@ -1293,7 +1293,7 @@ int main(void) {{
   if({ordinary}(ctx,carrier)!=1 || traces!=4 || trace[0]!=1 || trace[1]!=2 || trace[2]!=21 || trace[3]!=22) return 1;
   if(hirsel_core_test_attempts(ctx)!=attempts) return 2;
   HirselCoreCauseCell *causes=hirsel_core_causes_take(ctx);
-  size_t n=0; for(const HirselCoreCauseCell *c=causes;c;c=hirsel_core_cause_next(c)) {{ if(hirsel_core_cause_value(c)->kind!=3) return 3; n++; }}
+  size_t n=0; for(const HirselCoreCauseCell *c=causes;c;c=hirsel_core_cause_next(c)) {{ if(hirsel_core_cause_kind(hirsel_core_cause_value(c))!=3) return 3; n++; }}
   if(n!=4 || hirsel_core_test_available(ctx)!=10000-128) return 4;
   hirsel_core_causes_drop(causes);
   if(hirsel_core_test_available(ctx)!=10000) return 5;

@@ -40,15 +40,31 @@ pub const ARC_EVENT_UNWRAP: u8 = 13;
 
 // FORM #55. cause_value borrows this exact core layout, not a translated view.
 // Cells begin with Cause followed by next; native funding follows the prefix.
-pub const CAUSE_BYTES: usize = 40;
-pub const CAUSE_KIND: usize = 0;
-pub const CAUSE_MESSAGE: usize = 8;
-pub const CAUSE_MESSAGE_DATA: usize = 8;
-pub const CAUSE_MESSAGE_LENGTH: usize = 16;
-pub const CAUSE_MESSAGE_CAPACITY: usize = 24;
-pub const CAUSE_SITE: usize = 32;
+// CauseKind is Fail's String's niche (FORM #75): kind k other than Fail (4) is the
+// capacity word CAUSE_KIND_START + k at CAUSE_KIND; a Fail's capacity is below it.
+pub const CAUSE_BYTES: usize = 32;
+pub const CAUSE_MESSAGE: usize = 0;
+pub const CAUSE_MESSAGE_DATA: usize = 0;
+pub const CAUSE_MESSAGE_LENGTH: usize = 8;
+pub const CAUSE_MESSAGE_CAPACITY: usize = 16;
+pub const CAUSE_KIND: usize = CAUSE_MESSAGE_CAPACITY;
+pub const CAUSE_KIND_START: u64 = 1 << 63;
+pub const CAUSE_FAIL: u8 = 4;
+pub const CAUSE_SITE: usize = 24;
 pub const CAUSE_CELL_VALUE: usize = 0;
-pub const CAUSE_CELL_NEXT: usize = 40;
+pub const CAUSE_CELL_NEXT: usize = 32;
+/// The word at CAUSE_KIND of a cause of `kind`, which is not Fail.
+pub const fn cause_kind_word(kind: u8) -> u64 {
+    CAUSE_KIND_START + kind as u64
+}
+/// The kind of a cause whose CAUSE_KIND word is `word`.
+pub const fn cause_kind(word: u64) -> u8 {
+    if word < CAUSE_KIND_START {
+        CAUSE_FAIL
+    } else {
+        (word - CAUSE_KIND_START) as u8
+    }
+}
 
 // Ordinary allocation contract: nonzero exact charge, native size fitting a
 // Layout, canonical task-current payer, and ordinary native alignment (<=8).

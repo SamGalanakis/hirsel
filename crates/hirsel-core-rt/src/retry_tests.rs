@@ -191,7 +191,10 @@ unsafe extern "C" fn root(ctx: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
         );
         let causes = causes::Causes::from_raw(joined.causes);
         assert_eq!(
-            causes.iter().map(|c| (c.kind, c.site)).collect::<Vec<_>>(),
+            causes
+                .iter()
+                .map(|c| (c.kind(), c.site))
+                .collect::<Vec<_>>(),
             if (*trace).kind == 4 {
                 vec![]
             } else {

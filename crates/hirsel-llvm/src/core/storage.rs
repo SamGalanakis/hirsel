@@ -454,12 +454,7 @@ impl FunctionEmitter<'_> {
                     unreachable!()
                 };
                 let tag = self.fixed(t).tag.unwrap();
-                let x = self.calc(format!("load i{}, ptr {p}, align 1", tag.width * 8));
-                let x = if tag.width < 4 {
-                    self.calc(format!("zext i{} {x} to i32", tag.width * 8))
-                } else {
-                    x
-                };
+                let x = self.case_value(&tag, &p);
                 self.put(result, &x);
             }
             Inst::SetCase { address, case } => {
@@ -468,7 +463,7 @@ impl FunctionEmitter<'_> {
                     unreachable!()
                 };
                 let tag = self.fixed(t).tag.unwrap();
-                self.line(format!("store i{} {case}, ptr {p}, align 1", tag.width * 8));
+                self.set_case(&tag, case, &p);
             }
             Inst::Drop { address, ty, fail } => {
                 let p = self.address(address);

@@ -16,13 +16,9 @@ fn need(ok: bool, msg: impl FnOnce() -> String) -> R {
 fn refs_ok(f: &hirsel_core_layout::FieldTy, n: usize) -> bool {
     use hirsel_core_layout::FieldTy as F;
     match f {
-        F::Inline(t)
-        | F::Box(t)
-        | F::Rc(t)
-        | F::Arc(t)
-        | F::Stable(t)
-        | F::Link(t)
-        | F::OptLink(t) => t.index() < n,
+        F::Inline(t) | F::Box(t) | F::Rc(t) | F::Arc(t) | F::Stable(t) | F::Link(t) => {
+            t.index() < n
+        }
         F::Seq(e) | F::FixedSpan(e) | F::SeqSpan(e) | F::IndexedSpan(e) | F::Array(e, _) => {
             refs_ok(e, n)
         }

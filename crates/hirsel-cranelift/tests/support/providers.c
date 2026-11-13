@@ -48,7 +48,7 @@ static HirselCoreHostOutcome issue(void *state,HirselCoreHostRequest *r) {
         }
         uint8_t status=(op==10 || op==11 || w->failing) ? 1 : 0;
         if(w->failing && op!=10 && op!=11)
-            hirsel_core_raise(w->ctx,(HirselCoreCause){.kind=5});
+            hirsel_core_raise(w->ctx,hirsel_core_cause_new(5,0));
         return (HirselCoreHostOutcome){
             .value=UINT64_C(0x1011121314151617),.error={5,UINT32_C(0x89abcdef)},
             .written=UINT64_C(0x2122232425262728),.status=status};
@@ -110,7 +110,7 @@ static void emit(HirselCoreContext *ctx,uint8_t status,const uint64_t *values,si
         for(const HirselCoreCauseCell *c=causes;c;c=hirsel_core_cause_next(c)) count++;
         put(count);
         for(const HirselCoreCauseCell *c=causes;c;c=hirsel_core_cause_next(c))
-            put(hirsel_core_cause_value(c)->kind);
+            put(hirsel_core_cause_kind(hirsel_core_cause_value(c)));
     } else { put(n); for(size_t i=0;i<n;i++) put(values[i]); }
     put(world.limit-hirsel_core_test_available(ctx));
     put(hirsel_core_test_attempts(ctx));

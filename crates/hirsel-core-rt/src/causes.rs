@@ -17,14 +17,38 @@ pub const FAIL: u8 = 4;
 pub const CANCELLED: u8 = 5;
 pub const CAPACITY: u8 = 6;
 
-/// Core's 40-byte Cause view: kind at 0, inline String at 8, site at 32.
-/// The chain owns the message buffer exactly when its capacity is nonzero.
+/// Core's 32-byte Cause: `Fail`'s String at 0, then the site at 24. `CauseKind` is
+/// that String's niche (FORM #75): every other kind is a capacity at or above 2^63
+/// ([`crate::abi_layout::cause_kind_word`]), so the chain owns a message buffer
+/// exactly when the capacity is nonzero and below 2^63.
 #[derive(Default)]
 #[repr(C)]
 pub struct Cause {
-    pub kind: u8,
-    pub message: StringMessage,
+    pub(crate) message: StringMessage,
     pub site: u64,
+}
+impl Cause {
+    /// A cause of `kind`, which is not [`FAIL`] (a failure has a message).
+    pub fn new(kind: u8, site: u64) -> Self {
+        assert_ne!(kind, FAIL, "a Fail cause carries its message");
+        Self {
+            message: StringMessage {
+                capacity: crate::abi_layout::cause_kind_word(kind),
+                ..Default::default()
+            },
+            site,
+        }
+    }
+    pub fn fail(message: StringMessage, site: u64) -> Self {
+        Self { message, site }
+    }
+    pub fn kind(&self) -> u8 {
+        crate::abi_layout::cause_kind(self.message.capacity)
+    }
+    /// `Fail`'s message.
+    pub fn message(&self) -> Option<&StringMessage> {
+        (self.kind() == FAIL).then_some(&self.message)
+    }
 }
 
 /// An owned String carrier retained in a prepaid cause cell. The buffer keeps
@@ -37,8 +61,9 @@ pub struct StringMessage {
     pub capacity: u64,
 }
 unsafe fn drop_string(message: &StringMessage) {
-    // FORM #48: capacity alone says whether the moved carrier owns a block.
-    if message.capacity != 0 {
+    // FORM #48: capacity alone says whether the moved carrier owns a block; one at
+    // or above 2^63 is another cause kind (FORM #75).
+    if message.capacity != 0 && message.capacity < crate::abi_layout::CAUSE_KIND_START {
         // SAFETY: positive capacity guarantees the transferred live owned buffer.
         unsafe {
             block::free(
@@ -170,16 +195,7 @@ fn take_cell(context: &mut Context) -> Box<Cell> {
 /// at any length, including zero. It owns the current task/resource's unused cause cell.
 pub unsafe fn record_string(context: &mut Context, site: u64, message: StringMessage) {
     // SAFETY: the caller transfers the String into its unused obligation cell.
-    unsafe {
-        record(
-            context,
-            Cause {
-                kind: FAIL,
-                message,
-                site,
-            },
-        )
-    };
+    unsafe { record(context, Cause::fail(message, site)) };
 }
 
 pub(crate) struct Resource {

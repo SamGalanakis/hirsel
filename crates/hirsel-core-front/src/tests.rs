@@ -148,8 +148,7 @@ fn concrete_rows_reaching_rigid(module: &Module) -> Vec<(String, String)> {
             | FieldTy::Rc(r)
             | FieldTy::Arc(r)
             | FieldTy::Stable(r)
-            | FieldTy::Link(r)
-            | FieldTy::OptLink(r) => out.push(r.0),
+            | FieldTy::Link(r) => out.push(r.0),
             FieldTy::Seq(e)
             | FieldTy::Array(e, _)
             | FieldTy::View(e)
@@ -1996,7 +1995,9 @@ fn causes_iteration_reads_complete_cells_and_preserves_order() {
         };
         let (g, instance, entry) = (m.signatures.len(), m.instances.len(), m.functions.len());
         // Two complete cells: Fail(message length 4, site 17), then Overflow(site 23).
-        // They are ordinary owned fixture blocks; f only borrows the chain.
+        // They are ordinary owned fixture blocks; f only borrows the chain. A cell is
+        // core's 32-byte Cause, the Fail String carrier at 0 and the site at 24, then
+        // the next cell at 32; Overflow is the capacity niche 2^63 + 0 (FORM #75).
         let mut fixture = format!(
             "{}\nsig g{g} = () -> (u64)\ninst n{instance} = app@1/fixture/causes [] []\nfn f{entry} = n{instance} g{g} {{\nslot s0 = t{}\naddr a0 = s0 : t{}\naddr a1 = a0 : ptr\n",
             text::print(m),
@@ -2004,21 +2005,24 @@ fn causes_iteration_reads_complete_cells_and_preserves_order() {
             cs.0
         );
         let words = [
-            ("v1", 0, "u8", 4),
-            ("v1", 16, "u64", 4),
-            ("v1", 24, "u64", 8),
-            ("v1", 32, "u64", 17),
-            ("v3", 0, "u8", 0),
+            ("v1", 8, "u64", 4),
+            ("v1", 16, "u64", 8),
+            ("v1", 24, "u64", 17),
+            ("v3", 0, "u64", 0),
             ("v3", 8, "u64", 0),
-            ("v3", 16, "u64", 0),
-            ("v3", 24, "u64", 0),
-            ("v3", 32, "u64", 23),
-            ("v3", 40, "ptr", 0),
+            ("v3", 16, "u64", 1u64 << 63),
+            ("v3", 24, "u64", 23),
+            ("v3", 32, "ptr", 0),
         ];
+        let k = words.len();
         for (i, (base, _, ty, _)) in words.iter().enumerate() {
             fixture += &format!("addr a{} = {base} byte v{} : {ty}\n", i + 2, 10 + 2 * i);
         }
-        fixture += "addr a12 = v1 byte v30 : ptr\naddr a13 = v1 byte v31 : ptr\naddr a14 = v6 : u32\nb0:\nlive s0\nv0: u64 = const 48\nv1: ptr, v2: u64 = alloc own v0 align 8 charge v0\nv3: ptr, v4: u64 = alloc own v0 align 8 charge v0\nv5: u64 = const 8\nv6: ptr, v7: u64 = alloc own v5 align 1 charge v5\nv8: u64 = const 17\nv9: u32 = const 1635017060\naddress a14\nstore a14, v9\n";
+        let (data_at, next_at, bytes_at) = (k + 2, k + 3, k + 4);
+        let (data_off, next_off, result) = (10 + 2 * k, 11 + 2 * k, 12 + 2 * k);
+        fixture += &format!(
+            "addr a{data_at} = v1 byte v{data_off} : ptr\naddr a{next_at} = v1 byte v{next_off} : ptr\naddr a{bytes_at} = v6 : u32\nb0:\nlive s0\nv0: u64 = const 40\nv1: ptr, v2: u64 = alloc own v0 align 8 charge v0\nv3: ptr, v4: u64 = alloc own v0 align 8 charge v0\nv5: u64 = const 8\nv6: ptr, v7: u64 = alloc own v5 align 1 charge v5\nv8: u64 = const 17\nv9: u32 = const 1635017060\naddress a{bytes_at}\nstore a{bytes_at}, v9\n"
+        );
         for (i, (_, offset, ty, bits)) in words.iter().enumerate() {
             let bits = if *ty == "ptr" {
                 format!("0x{bits:x}")
@@ -2035,7 +2039,7 @@ fn causes_iteration_reads_complete_cells_and_preserves_order() {
             );
         }
         fixture += &format!(
-            "v30: u64 = const 8\nv31: u64 = const 40\naddress a12\naddress a13\nstore a12, v6\nstore a13, v3\naddress a0\naddress a1\nstore a1, v1\nv32: u64 = call f{} g{} (&a0, v8) fail b1\nfree v6 charge v5\nfree v3 charge v0\nfree v1 charge v0\nreturn v32\nb1:\nfree v6 charge v5\nfree v3 charge v0\nfree v1 charge v0\npropagate\n}}",
+            "v{data_off}: u64 = const 0\nv{next_off}: u64 = const 32\naddress a{data_at}\naddress a{next_at}\nstore a{data_at}, v6\nstore a{next_at}, v3\naddress a0\naddress a1\nstore a1, v1\nv{result}: u64 = call f{} g{} (&a0, v8) fail b1\nfree v6 charge v5\nfree v3 charge v0\nfree v1 charge v0\nreturn v{result}\nb1:\nfree v6 charge v5\nfree v3 charge v0\nfree v1 charge v0\npropagate\n}}",
             target.0, sig.0
         );
         let module = text::parse(&fixture).unwrap();
@@ -2043,6 +2047,72 @@ fn causes_iteration_reads_complete_cells_and_preserves_order() {
         let report = eval::run(&module, FuncId(entry as u32), &[], 10000);
         assert_eq!(report.outcome, expected, "{source}");
         assert_eq!(report.used, 0, "{source}: fixture storage leaked");
+    }
+}
+
+mod run_time_abi {
+    include!("../../hirsel-core-rt/src/abi_layout.rs");
+}
+
+/// The run time and both engines write and read `Cause` cells by the frozen constants
+/// in `abi_layout.rs` (FORM #55, #75); core reads them through its own recipe. A layout
+/// rule that moves `CauseKind`'s tag or a field (a new niche, a reordering) must fail
+/// here rather than in a delivered chain.
+#[test]
+fn core_cause_layout_is_the_run_time_abi() {
+    use hirsel_core_layout::{Body as ShapeBody, FieldTy, Layout, case_word, compute};
+    use run_time_abi as abi;
+    let (index, inputs) =
+        program_inputs("fn f(cs: Causes) -> u64 { let mut s: u64 = 0; for c in cs { s += 1 }; s }");
+    let p = Program::declare(&index, &inputs);
+    let f = p.fns.iter().position(|f| f.path.0.name == "f").unwrap();
+    let mut emitter = Emitter::new();
+    let check = p.check_lower(f, &mut emitter);
+    assert!(
+        check.refusals.is_empty() && check.gaps.is_empty(),
+        "{check:?}"
+    );
+    let m = &emitter.module;
+    let recipes = compute(&m.types).unwrap();
+    let row = |name: &str| {
+        m.types
+            .iter()
+            .position(|t| t.name == name)
+            .unwrap_or_else(|| panic!("no {name} row"))
+    };
+    let fixed = |i: usize| match &recipes[i].layout {
+        Layout::Fixed(l) => l.clone(),
+        other => panic!("{other:?}"),
+    };
+    let cause = fixed(row("core@1/core/Cause"));
+    let ShapeBody::Record(fields) = &m.types[row("core@1/core/Cause")].body else {
+        panic!("Cause is a record")
+    };
+    assert_eq!(cause.size, abi::CAUSE_BYTES as u64);
+    let at = |name: &str| cause.offsets[0][fields.iter().position(|f| f.name == name).unwrap()];
+    assert_eq!(at("site"), abi::CAUSE_SITE as u64);
+    let FieldTy::Inline(kind) = fields.iter().find(|f| f.name == "kind").unwrap().ty else {
+        panic!("CauseKind is inline")
+    };
+    let kind_at = at("kind");
+    let kind = fixed(kind.index());
+    let tag = kind.tag.unwrap();
+    assert_eq!(kind_at + tag.offset, abi::CAUSE_KIND as u64);
+    assert_eq!(
+        kind_at + kind.offsets[abi::CAUSE_FAIL as usize][0],
+        abi::CAUSE_MESSAGE as u64
+    );
+    for k in 0..7u8 {
+        let word = case_word(&tag, u32::from(k));
+        if k == abi::CAUSE_FAIL {
+            assert_eq!(word, None);
+        } else {
+            assert_eq!(
+                (tag.width, word),
+                (8, Some(abi::cause_kind_word(k))),
+                "kind {k}"
+            );
+        }
     }
 }
 

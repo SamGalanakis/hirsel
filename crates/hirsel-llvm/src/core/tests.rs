@@ -239,7 +239,7 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
             writeln!(c,"uint64_t b{k}_{j}=0; memcpy(&b{k}_{j},&r{k}.r{j},{}); printf(\" %llu\",(unsigned long long)b{k}_{j});",size(t)).unwrap();
         }
         c.push_str("}\n");
-        writeln!(c,"HirselCoreCauseCell *chain=hirsel_core_causes_take(ctx); if({status}) for(const HirselCoreCauseCell *p=chain;p;p=hirsel_core_cause_next(p)) printf(\" %s\",causes[hirsel_core_cause_value(p)->kind]); printf(\"|%llu|\",(unsigned long long)(initial-hirsel_core_test_available(ctx))); for(size_t i=0;i<traces;i++) printf(\" %llu\",(unsigned long long)trace[i]); printf(\"|%zu|\",hirsel_core_test_attempts(ctx)); for(const HirselCoreCauseCell *p=chain;p;p=hirsel_core_cause_next(p)) if(hirsel_core_cause_value(p)->kind==4) {{ const HirselCoreStringMessage *msg=&hirsel_core_cause_value(p)->message; for(uint64_t i=0;i<msg->len;i++) printf(\"%02x\",((const unsigned char *)msg->data)[i]); printf(\" \"); }} printf(\"|\"); for(size_t j=0;j<arc_count;j++) printf(\" %u:%llu\",arc_events[j].kind,(unsigned long long)arc_events[j].value); printf(\"\\n\"); hirsel_core_causes_drop(chain); return 0; }}").unwrap();
+        writeln!(c,"HirselCoreCauseCell *chain=hirsel_core_causes_take(ctx); if({status}) for(const HirselCoreCauseCell *p=chain;p;p=hirsel_core_cause_next(p)) printf(\" %s\",causes[hirsel_core_cause_kind(hirsel_core_cause_value(p))]); printf(\"|%llu|\",(unsigned long long)(initial-hirsel_core_test_available(ctx))); for(size_t i=0;i<traces;i++) printf(\" %llu\",(unsigned long long)trace[i]); printf(\"|%zu|\",hirsel_core_test_attempts(ctx)); for(const HirselCoreCauseCell *p=chain;p;p=hirsel_core_cause_next(p)) if(hirsel_core_cause_kind(hirsel_core_cause_value(p))==4) {{ const HirselCoreStringMessage *msg=&hirsel_core_cause_value(p)->message; for(uint64_t i=0;i<msg->len;i++) printf(\"%02x\",((const unsigned char *)msg->data)[i]); printf(\" \"); }} printf(\"|\"); for(size_t j=0;j<arc_count;j++) printf(\" %u:%llu\",arc_events[j].kind,(unsigned long long)arc_events[j].value); printf(\"\\n\"); hirsel_core_causes_drop(chain); return 0; }}").unwrap();
     }
     invocations.push_str("return 0;}\n");
     c.push_str(&invocations);
@@ -1263,7 +1263,7 @@ R1 EXTERNAL(void *context, uint64_t mode) {
     HirselCoreHostRequest request={.operation=10,.handle=mode};
     HirselCoreHostOutcome out=hirsel_core_host(context,&provider,&request);
     if(out.status) {
-        HirselCoreCause cause={.kind=5}; hirsel_core_raise(context,cause);
+        HirselCoreCause cause=hirsel_core_cause_new(5,0); hirsel_core_raise(context,cause);
         return (R1){.r1=1};
     }
     return (R1){.r0=out.value};

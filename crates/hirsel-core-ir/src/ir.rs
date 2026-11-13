@@ -444,6 +444,8 @@ pub enum Inst {
     /// Make the variant place at `address` hold case `case`; its payload fields are
     /// then stored through `CaseField` addresses. Constructing writes the case first
     /// or last, as the producer likes: nothing reads the place until it is complete.
+    /// Under a niche the data case writes nothing and an empty case's word overlaps
+    /// the payload (crate docs, "Variants").
     SetCase {
         address: AddressId,
         case: u32,

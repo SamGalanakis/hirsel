@@ -253,10 +253,17 @@ impl<T: TyRead> Shapes<'_, T> {
         };
         let decls = self.decls;
         let decl = &decls[d.index()];
+        // A structural `Option` inside compact data (only of a link) is as wide as any
+        // container: its one link word takes the container's width.
+        let width = match decl.compact {
+            Some(w) => w,
+            None if decl.structural => hirsel_core_layout::Width::U64,
+            None => return None,
+        };
         let r = TypeRef(self.shapes.len() as u32);
         self.shapes.push(Shape {
             name: name.clone(),
-            repr: LRepr::Compact(decl.compact?),
+            repr: LRepr::Compact(width),
             carried: Carried::Address,
             body: Body::Record(vec![]),
             finalizer: None,
@@ -408,14 +415,15 @@ impl<T: TyRead> Shapes<'_, T> {
                     && self.decls[d.index()].structural
                     && crate::decls::is_core_prelude(&self.decls[d.index()].path, &["Option"]) =>
                 {
-                    if let TyKind::Adt(link, payload) = self.types.kind(args[0]).clone() {
-                        if self.decls[link.index()].role == Some(Role::Link) {
-                            FieldTy::OptLink(self.compact_or_shape(payload[0])?)
-                        } else {
-                            FieldTy::Inline(self.shape(ty)?)
+                    // MEM-10's optional link is a compact variant of its own, whose empty
+                    // case is the link's zero distance (a niche the layout assigns).
+                    match self.types.kind(args[0]).clone() {
+                        TyKind::Adt(link, _)
+                            if self.decls[link.index()].role == Some(Role::Link) =>
+                        {
+                            FieldTy::Inline(self.compact(ty)?)
                         }
-                    } else {
-                        FieldTy::Inline(self.shape(ty)?)
+                        _ => FieldTy::Inline(self.shape(ty)?),
                     }
                 }
                 None if self.decls[d.index()].repr == Repr::Stable

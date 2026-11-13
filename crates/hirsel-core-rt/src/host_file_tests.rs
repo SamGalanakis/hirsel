@@ -116,11 +116,7 @@ unsafe extern "C" fn entry(ctx: *mut Context, cfg: *const Config, _: *mut MainRe
         if mode == "failure" {
             crate::causes::record(
                 &mut *ctx,
-                crate::causes::Cause {
-                    kind: crate::causes::UNWRAP,
-                    site: 31,
-                    message: Default::default(),
-                },
+                crate::causes::Cause::new(crate::causes::UNWRAP, 31),
             );
         }
         if mode == "explicit" {

@@ -240,14 +240,7 @@ unsafe extern "C" fn cancelled(context: *mut Context, _: *mut u8, input: *mut u8
             1
         );
         hirsel_core_finalizer_begin(context, std::ptr::NonNull::new(resource).unwrap());
-        hirsel_core_raise(
-            context,
-            causes::Cause {
-                kind: causes::OVERFLOW,
-                site: 32,
-                message: Default::default(),
-            },
-        );
+        hirsel_core_raise(context, causes::Cause::new(causes::OVERFLOW, 32));
         hirsel_core_finalizer_end(context, std::ptr::NonNull::new(resource).unwrap());
         hirsel_core_resource_free(std::ptr::NonNull::new(resource).unwrap(), 0);
         hirsel_core_receiver_drop(context, rx);
@@ -276,7 +269,7 @@ unsafe extern "C" fn cancelled_join(context: *mut Context, destination: *mut u8,
         let join = hirsel_core_join(context, child.task, &mut unit, 33);
         assert_eq!((join.kind, join.status), (2, 0));
         let chain = causes::Causes::from_raw(join.causes);
-        let seen: Vec<_> = chain.iter().map(|c| (c.kind, c.site)).collect();
+        let seen: Vec<_> = chain.iter().map(|c| (c.kind(), c.site)).collect();
         assert_eq!(seen, [(causes::CANCELLED, 31), (causes::OVERFLOW, 32)]);
         drop(chain);
         assert_eq!((*context).current.attempts(), 0);
@@ -328,14 +321,7 @@ unsafe extern "C" fn drop_resource(context: *mut Context, value: *mut u8) -> u8 
         let value = value.cast::<Resource>().read();
         let resource = std::ptr::NonNull::new(value.pointer).unwrap();
         hirsel_core_finalizer_begin(context, resource);
-        hirsel_core_raise(
-            context,
-            causes::Cause {
-                kind: causes::FAIL,
-                site: value.site,
-                message: Default::default(),
-            },
-        );
+        hirsel_core_raise(context, causes::Cause::fail(Default::default(), value.site));
         hirsel_core_finalizer_end(context, resource);
         hirsel_core_resource_free(resource, 0);
     }
@@ -402,7 +388,7 @@ fn zero_channel_capacity_is_bounds_and_huge_charge_refuses_before_publication() 
         assert!(c.sender.is_null() && c.receiver.is_null());
         assert_eq!(c.status, u8::from(capacity == 0));
         if capacity == 0 {
-            assert_eq!(context.causes.iter().next().unwrap().kind, causes::BOUNDS);
+            assert_eq!(context.causes.iter().next().unwrap().kind(), causes::BOUNDS);
         } else {
             assert_eq!(c.available, before);
             assert_eq!(context.available(), before);
@@ -561,7 +547,7 @@ fn cancelled_joiner_retains_handle_for_shielded_abandonment() {
                 (*context)
                     .causes
                     .iter()
-                    .map(|c| (c.kind, c.site))
+                    .map(|c| (c.kind(), c.site))
                     .collect::<Vec<_>>(),
                 [(causes::CANCELLED, 51)]
             );
@@ -588,7 +574,7 @@ fn cancelled_joiner_retains_handle_for_shielded_abandonment() {
         );
         let chain = causes::Causes::from_raw(hirsel_core_causes_take(&mut context));
         assert_eq!(
-            chain.iter().map(|c| (c.kind, c.site)).collect::<Vec<_>>(),
+            chain.iter().map(|c| (c.kind(), c.site)).collect::<Vec<_>>(),
             [(causes::CANCELLED, 51)]
         );
         drop(chain);
@@ -646,7 +632,7 @@ fn abandoning_successful_resource_result_propagates_its_finalizer_failure() {
         );
         let chain = causes::Causes::from_raw(hirsel_core_causes_take(&mut context));
         assert_eq!(
-            chain.iter().map(|c| (c.kind, c.site)).collect::<Vec<_>>(),
+            chain.iter().map(|c| (c.kind(), c.site)).collect::<Vec<_>>(),
             [(causes::FAIL, 61)]
         );
         drop(chain);

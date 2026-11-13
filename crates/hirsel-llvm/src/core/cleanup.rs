@@ -133,10 +133,10 @@ pub(super) fn drop_glue(
         if let Some(drop) = &recipes[t].drop {
             let tag = e.fixed(TypeId(t as u32)).tag;
             if let Some(tag) = tag {
-                let which = e.calc(format!("load i{}, ptr {base}, align 1", tag.width * 8));
-                e.line(format!("switch i{} {which}, label %case0 [", tag.width * 8));
+                let which = e.case_value(&tag, &base);
+                e.line(format!("switch i32 {which}, label %case0 ["));
                 for row in 1..drop.fields.len() {
-                    e.line(format!("i{} {row}, label %case{row}", tag.width * 8));
+                    e.line(format!("i32 {row}, label %case{row}"));
                 }
                 e.line("]");
             } else {
@@ -386,13 +386,10 @@ impl FunctionEmitter<'_> {
                 let drop = self.recipes[t.index()].drop.as_ref().unwrap();
                 let tag = self.fixed(TypeId(t.0)).tag;
                 if let Some(tag) = tag {
-                    let tagvalue = self.calc(format!("load i{}, ptr {p}, align 1", tag.width * 8));
-                    self.line(format!(
-                        "switch i{} {tagvalue}, label %row{n}_0 [",
-                        tag.width * 8
-                    ));
+                    let tagvalue = self.case_value(&tag, &p);
+                    self.line(format!("switch i32 {tagvalue}, label %row{n}_0 ["));
                     for row in 1..drop.fields.len() {
-                        self.line(format!("i{} {row}, label %row{n}_{row}", tag.width * 8));
+                        self.line(format!("i32 {row}, label %row{n}_{row}"));
                     }
                     self.line("]");
                 } else {

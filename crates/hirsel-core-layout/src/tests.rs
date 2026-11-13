@@ -96,7 +96,8 @@ fn own_variant_reserves_the_largest_payload_after_its_tag() {
         f.tag,
         Some(Tag {
             offset: 0,
-            width: 1
+            width: 1,
+            encoding: Encoding::Direct,
         })
     );
     assert_eq!(f.offsets, vec![vec![], vec![8], vec![8, 12]]);
@@ -787,4 +788,116 @@ fn a_row_carried_unlike_its_body_is_refused() {
             "{c:?}"
         );
     }
+}
+
+fn option(name: &str, payload: FieldTy) -> Shape {
+    variant(
+        name,
+        Repr::Own,
+        vec![("None", vec![]), ("Some", vec![field("v", payload)])],
+    )
+}
+
+/// Bug: a niche layout that is not the payload's own size (the tag still reserved),
+/// a niche taken from a type with no spare values, or a charge derived from the
+/// niche layout (#72: charges stay "8 plus the largest payload", MEM-24). By the
+/// niche table: a Box's null makes `Option[Box]` 8 bytes, charged 8 + 8 = 16; a
+/// String's capacity word makes `Option[String]` 24; u64 and u8 have none, so a u8
+/// tag at 0 and the payload at the payload's alignment: 16 and 2. A node of three
+/// u64s and two `Option[Arc[Node]]` links is 3 × 8 + 2 × 16 = 56 bytes tagged and
+/// 3 × 8 + 2 × 8 = 40 with niches.
+#[test]
+fn a_one_payload_variant_takes_its_payloads_size_and_keeps_its_charge() {
+    let shapes = [
+        option("Option[Box]", FieldTy::Box(TypeRef(0))),
+        option("Option[String]", FieldTy::Seq(Box::new(u(Scalar::U8)))),
+        option("Option[u64]", u(Scalar::U64)),
+        option("Option[u8]", u(Scalar::U8)),
+        option("Option[Arc[Node]]", FieldTy::Arc(TypeRef(5))),
+        record(
+            "Node",
+            Repr::Own,
+            vec![
+                field("key", u(Scalar::U64)),
+                field("value", u(Scalar::U64)),
+                field("left", FieldTy::Inline(TypeRef(4))),
+                field("right", FieldTy::Inline(TypeRef(4))),
+                field("size", u(Scalar::U64)),
+            ],
+        ),
+    ];
+    let r = compute(&shapes).unwrap();
+    let sizes: Vec<u64> = r.iter().map(|r| fixed(r).size).collect();
+    assert_eq!(sizes, vec![8, 24, 16, 2, 8, 40]);
+    assert_eq!(r[0].logical_size, Some(16));
+    assert_eq!(fixed(&r[5]).offsets[0], vec![0, 8, 16, 24, 32]);
+}
+
+/// Bug: a niche word written or read at the wrong value, or a nested variant whose
+/// empty case collides with its payload's. `Option[Option[bool]]`, by the table:
+/// bool spares 2..=255; the inner None is 2, the outer None the next spare, 3; all
+/// one byte. Reading the outer case of an inner None (word 2) must give Some: 2 - 3
+/// wraps within the byte to 255, past the one empty case. `Option[String]`'s None is
+/// capacity 2^63 at 16; `Option[char]`'s is 0x110000.
+#[test]
+fn niche_words_round_trip_through_read_case_and_case_word() {
+    let shapes = [
+        option("Option[bool]", u(Scalar::Bool)),
+        option("Option[Option[bool]]", FieldTy::Inline(TypeRef(0))),
+        option("Option[String]", FieldTy::Seq(Box::new(u(Scalar::U8)))),
+        option("Option[char]", u(Scalar::Char)),
+    ];
+    let r = compute(&shapes).unwrap();
+    let tag = |i: usize| fixed(&r[i]).tag.unwrap();
+    let (inner, outer) = (tag(0), tag(1));
+    assert_eq!((fixed(&r[1]).size, outer.offset, outer.width), (1, 0, 1));
+    assert_eq!(
+        (case_word(&inner, 0), case_word(&inner, 1)),
+        (Some(2), None)
+    );
+    assert_eq!(
+        (case_word(&outer, 0), case_word(&outer, 1)),
+        (Some(3), None)
+    );
+    // outer None, outer Some(inner None), outer Some(Some(false)), Some(Some(true)).
+    assert_eq!([3, 2, 0, 1].map(|w| case_of(&outer, w)), [0, 1, 1, 1]);
+    // Inside an outer Some, the same byte is the inner value.
+    assert_eq!([2, 0, 1].map(|w| case_of(&inner, w)), [0, 1, 1]);
+    let string = tag(2);
+    assert_eq!((string.offset, string.width), (16, 8));
+    assert_eq!(case_word(&string, 0), Some(1 << 63));
+    // A zero-sized element's list holds capacity 2^64 - 1 (SEM-4): still Some.
+    assert_eq!(
+        [1 << 63, u64::MAX, 0, 7].map(|w| case_of(&string, w)),
+        [0, 1, 1, 1]
+    );
+    let char_tag = tag(3);
+    assert_eq!(case_word(&char_tag, 0), Some(0x11_0000));
+    assert_eq!(
+        [0x11_0000, 0x10_FFFF].map(|w| case_of(&char_tag, w)),
+        [0, 1]
+    );
+}
+
+/// Bug: a niche taken from a record's field other than the first, or the niche's
+/// offset left relative to the field. `Pair { n: u64, b: Box }` has its only niche
+/// in its second field at 8, so `Option[Pair]` is 16 bytes with its tag word at 8.
+#[test]
+fn a_record_lends_its_niche_from_any_field_at_that_fields_offset() {
+    let shapes = [
+        record(
+            "Pair",
+            Repr::Own,
+            vec![
+                field("n", u(Scalar::U64)),
+                field("b", FieldTy::Box(TypeRef(0))),
+            ],
+        ),
+        option("Option[Pair]", FieldTy::Inline(TypeRef(0))),
+    ];
+    let r = compute(&shapes).unwrap();
+    let f = fixed(&r[1]);
+    let t = f.tag.unwrap();
+    assert_eq!((f.size, t.offset, t.width), (16, 8, 8));
+    assert_eq!(f.offsets, vec![vec![], vec![0]]);
 }

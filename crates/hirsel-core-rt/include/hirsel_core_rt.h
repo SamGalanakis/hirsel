@@ -25,15 +25,17 @@
 #define HIRSEL_CORE_PLAIN_PREFIX_BYTES 8
 #define HIRSEL_CORE_GRAPH_PREFIX_BYTES 48
 #define HIRSEL_CORE_RESOURCE_PREFIX_BYTES 16
-#define HIRSEL_CORE_CAUSE_BYTES 40
-#define HIRSEL_CORE_CAUSE_KIND 0
-#define HIRSEL_CORE_CAUSE_MESSAGE 8
-#define HIRSEL_CORE_CAUSE_MESSAGE_DATA 8
-#define HIRSEL_CORE_CAUSE_MESSAGE_LENGTH 16
-#define HIRSEL_CORE_CAUSE_MESSAGE_CAPACITY 24
-#define HIRSEL_CORE_CAUSE_SITE 32
+#define HIRSEL_CORE_CAUSE_BYTES 32
+#define HIRSEL_CORE_CAUSE_MESSAGE 0
+#define HIRSEL_CORE_CAUSE_MESSAGE_DATA 0
+#define HIRSEL_CORE_CAUSE_MESSAGE_LENGTH 8
+#define HIRSEL_CORE_CAUSE_MESSAGE_CAPACITY 16
+#define HIRSEL_CORE_CAUSE_KIND HIRSEL_CORE_CAUSE_MESSAGE_CAPACITY
+#define HIRSEL_CORE_CAUSE_KIND_START UINT64_C(0x8000000000000000)
+#define HIRSEL_CORE_CAUSE_FAIL 4
+#define HIRSEL_CORE_CAUSE_SITE 24
 #define HIRSEL_CORE_CAUSE_CELL_VALUE 0
-#define HIRSEL_CORE_CAUSE_CELL_NEXT 40
+#define HIRSEL_CORE_CAUSE_CELL_NEXT 32
 #define HIRSEL_CORE_NATIVE_PLAIN 0
 #define HIRSEL_CORE_NATIVE_GRAPH 1
 #define HIRSEL_CORE_NATIVE_RESOURCE 2
@@ -92,14 +94,27 @@ HirselCoreAllocation hirsel_core_resource_alloc(const HirselCoreContext *,
 void hirsel_core_finalizer_begin(HirselCoreContext *, void *resource);
 void hirsel_core_finalizer_end(HirselCoreContext *, void *resource);
 void hirsel_core_resource_free(void *resource, uint64_t logical_field_storage);
-/* Cause tags: 0 Overflow, 1 Bounds, 2 Division, 3 Unwrap, 4 Fail,
-   5 Cancelled, 6 Capacity. Message ownership transfers to raise. */
+/* Cause kinds: 0 Overflow, 1 Bounds, 2 Division, 3 Unwrap, 4 Fail,
+   5 Cancelled, 6 Capacity. The kind is Fail's message's niche (FORM #75): kind k
+   other than Fail is message.capacity == HIRSEL_CORE_CAUSE_KIND_START + k; a Fail's
+   capacity is below that. Message ownership transfers to raise. */
 typedef struct { uint8_t *data; uint64_t len, capacity; } HirselCoreStringMessage;
 typedef struct {
-    uint8_t kind;
     HirselCoreStringMessage message;
     uint64_t site;
 } HirselCoreCause;
+static inline uint8_t hirsel_core_cause_kind(const HirselCoreCause *cause) {
+    uint64_t word = cause->message.capacity;
+    return word < HIRSEL_CORE_CAUSE_KIND_START ? HIRSEL_CORE_CAUSE_FAIL
+                                               : (uint8_t)(word - HIRSEL_CORE_CAUSE_KIND_START);
+}
+/* A cause of a kind other than Fail. */
+static inline HirselCoreCause hirsel_core_cause_new(uint8_t kind, uint64_t site) {
+    HirselCoreCause cause = {0};
+    cause.message.capacity = HIRSEL_CORE_CAUSE_KIND_START + kind;
+    cause.site = site;
+    return cause;
+}
 typedef struct HirselCoreCauseCell HirselCoreCauseCell;
 /* Transfers the inline String backing; capacity zero owns no storage. */
 void hirsel_core_raise(HirselCoreContext *, HirselCoreCause);

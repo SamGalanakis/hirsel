@@ -228,8 +228,9 @@ pub enum FieldTy {
     SeqSpan(Box<FieldTy>),
     /// As `SeqSpan`, then a trailer of `count` `W` offsets (MEM-12).
     IndexedSpan(Box<FieldTy>),
+    /// `Link[U]` (MEM-10); `Option[Link[U]]` is an inline compact variant whose
+    /// empty case is the zero distance (the recipe's niche tag).
     Link(TypeRef),
-    OptLink(TypeRef),
     /// A reference to compact data held outside a blob: the blob pointer, then the
     /// value's offset from it (crate `hirsel-core-ir`, "Compact data"). Plain,
     /// logically 16 (MEM-24). It names what it locates, as a compact field type:

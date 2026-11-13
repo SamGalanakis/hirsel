@@ -278,15 +278,8 @@ impl Glue<'_, '_, '_> {
                 }
             }
             Plan::Variant(tag, cases) => {
-                let native = match tag.width {
-                    1 => types::I8,
-                    2 => types::I16,
-                    _ => types::I32,
-                };
-                let v = self
-                    .b
-                    .ins()
-                    .load(native, MemFlagsData::trusted(), base, tag.offset as i32);
+                let v =
+                    super::super::case::case_value(&mut self.b, tag, base, MemFlagsData::trusted());
                 let done = self.b.create_block();
                 for (i, p) in cases.iter().enumerate() {
                     let yes = self.b.create_block();

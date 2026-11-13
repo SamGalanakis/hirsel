@@ -6,10 +6,10 @@ use crate::{
 use std::ptr::{self, NonNull};
 
 fn cause(site: u64, kind: u8) -> Cause {
-    Cause {
-        kind,
-        site,
-        message: Default::default(),
+    if kind == causes::FAIL {
+        Cause::fail(Default::default(), site)
+    } else {
+        Cause::new(kind, site)
     }
 }
 #[derive(Default)]
@@ -256,7 +256,7 @@ fn nested_finalizers_subdivide_only_prepaid_grants_under_every_refusal() {
                                 causes::finalizer_end(&mut ctx, resource);
                                 causes::resource_free(resource, 8);
                             }
-                            assert!(ctx.causes.iter().all(|c| c.kind == causes::CAPACITY));
+                            assert!(ctx.causes.iter().all(|c| c.kind() == causes::CAPACITY));
                             assert!(ctx.causes.iter().count() <= 1);
                             if failed {
                                 assert!(
@@ -286,15 +286,14 @@ fn fail_message_and_joined_cells_outlive_the_task_and_keep_funding() {
     unsafe {
         causes::record(
             &mut child,
-            Cause {
-                kind: causes::FAIL,
-                site: 7,
-                message: causes::StringMessage {
+            Cause::fail(
+                causes::StringMessage {
                     data: message.as_ptr(),
                     len: 24,
                     capacity: 24,
                 },
-            },
+                7,
+            ),
         );
     }
     let joined = std::mem::take(&mut child.causes).into_raw();

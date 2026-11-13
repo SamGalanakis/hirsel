@@ -205,7 +205,7 @@ fn frozen_prefixes_match_the_emitter_contract() {
     );
     use crate::causes::{Cause, Cell, StringMessage};
     assert_eq!(size_of::<Cause>(), CAUSE_BYTES);
-    assert_eq!(std::mem::offset_of!(Cause, kind), CAUSE_KIND);
+    assert_eq!(CAUSE_KIND, CAUSE_MESSAGE_CAPACITY);
     assert_eq!(std::mem::offset_of!(Cause, message), CAUSE_MESSAGE);
     assert_eq!(
         CAUSE_MESSAGE + std::mem::offset_of!(StringMessage, data),
@@ -332,8 +332,8 @@ fn owned_failure_string_outlives_its_frame_and_context_without_admission() {
             let chain = hirsel_core_causes_take(&mut ctx);
             drop(ctx);
             let cause = &*hirsel_core_cause_value(chain);
-            assert_eq!((cause.kind, cause.site), (crate::causes::FAIL, 77));
-            let message = &cause.message;
+            assert_eq!((cause.kind(), cause.site), (crate::causes::FAIL, 77));
+            let message = cause.message().unwrap();
             assert_eq!((message.len, message.capacity), (len as u64, capacity));
             if len != 0 {
                 assert_eq!(std::slice::from_raw_parts(message.data, len), b"hey");

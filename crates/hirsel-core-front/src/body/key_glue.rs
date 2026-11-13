@@ -822,7 +822,19 @@ impl Derive<'_> {
                 }
             }
             FieldTy::Inline(ty) => {
-                let compact = matches!(self.recipes[ty.index()].layout, Layout::Compact(_));
+                let compact = match &self.recipes[ty.index()].layout {
+                    // A compact niche variant is MEM-10's optional link, never a key.
+                    Layout::Compact(set)
+                        if set.at.iter().any(|k| {
+                            k.tag
+                                .is_some_and(|t| t.encoding != hirsel_core_layout::Encoding::Direct)
+                        }) =>
+                    {
+                        return Err("an optional link is not a key");
+                    }
+                    Layout::Compact(_) => true,
+                    _ => false,
+                };
                 match self.module.types[ty.index()].body.clone() {
                     ShapeBody::Record(fields) => {
                         for f in &fields {
@@ -1244,7 +1256,19 @@ impl Derive<'_> {
                 }
             }
             FieldTy::Inline(ty) => {
-                let compact = matches!(self.recipes[ty.index()].layout, Layout::Compact(_));
+                let compact = match &self.recipes[ty.index()].layout {
+                    // A compact niche variant is MEM-10's optional link, never a key.
+                    Layout::Compact(set)
+                        if set.at.iter().any(|k| {
+                            k.tag
+                                .is_some_and(|t| t.encoding != hirsel_core_layout::Encoding::Direct)
+                        }) =>
+                    {
+                        return Err("an optional link is not a key");
+                    }
+                    Layout::Compact(_) => true,
+                    _ => false,
+                };
                 match self.module.types[ty.index()].body.clone() {
                     ShapeBody::Record(fields) => {
                         for f in &fields {

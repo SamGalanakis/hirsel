@@ -107,11 +107,7 @@ pub unsafe extern "C" fn hirsel_core_host(
             {
                 causes::record(
                     &mut *context,
-                    causes::Cause {
-                        kind: causes::BOUNDS,
-                        site: request.site,
-                        message: Default::default(),
-                    },
+                    causes::Cause::new(causes::BOUNDS, request.site),
                 );
                 return Outcome {
                     status: 1,

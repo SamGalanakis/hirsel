@@ -30,7 +30,13 @@
 //!   writes it, and `case c f` address steps reach a case's payload. Own, resource,
 //!   stable and scoped variants; `Option` and `Result` are ordinary variant rows of
 //!   the type table, one per instantiation. The tag's place and width stay private
-//!   (MEM-13): a producer never names the tag bytes.
+//!   (MEM-13): a producer never names the tag bytes. A variant with one case that
+//!   holds data may keep its other cases in spare values of that payload (a niche,
+//!   `hirsel_core_layout::Encoding::Niche`): then `set_case` of the data case writes
+//!   nothing, since its payload makes the case, and `set_case` of another case writes
+//!   that case's spare word, which overlaps the payload. So a producer writes the
+//!   payload of the data case completely, and sets an empty case only once the
+//!   payload is moved out or was never written.
 //! - Inline arrays `Inline[T, n]` (SEM-9): field type `array n T`, `n` elements at
 //!   `T`'s native stride, no block and no charge of their own; the `element v`
 //!   step fails with `Bounds` at its `address` when `v` is not below `n`; cleanup
@@ -369,11 +375,12 @@
 //! `rt.cause_value(cell) -> ptr` is the cell's `Cause` and `rt.cause_next(cell) -> ptr`
 //! the next cell, null after the last. Neither takes the context, admits, waits or
 //! fails; engines map them to `hirsel_core_cause_value` and `hirsel_core_cause_next`.
-//! The `Cause` is in core's layout (40 bytes): the `CauseKind` tag (u8, declaration
-//! order: Overflow 0, Bounds 1, Division 2, Unwrap 3, Fail 4, Cancelled 5, Capacity 6)
-//! at 0, `Fail`'s `String` carrier at 8, `Site` (u64) at 32. `View[Cause]` is that
-//! pointer, valid while the `Causes` lives. A `Fail` cause owns its message; cleaning
-//! the `Causes` frees it when its capacity is not 0.
+//! The `Cause` is in core's layout (32 bytes): `Fail`'s `String` carrier at 0 and the
+//! `Site` (u64) at 24. `CauseKind` is that carrier's capacity niche (FORM #75): kind
+//! `k` (declaration order: Overflow 0, Bounds 1, Division 2, Unwrap 3, Fail 4,
+//! Cancelled 5, Capacity 6) other than `Fail` is the capacity 2^63 + k. `View[Cause]`
+//! is that pointer, valid while the `Causes` lives. A `Fail` cause owns its message;
+//! cleaning the `Causes` frees it when its capacity is not 0.
 //!
 //! # Capabilities and the entry (FORM v1b)
 //!

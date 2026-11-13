@@ -61,11 +61,10 @@ pub(crate) unsafe fn format_cause(cause: &crate::causes::Cause) -> String {
         "Fail",
         "Cancelled",
         "Capacity",
-    ][cause.kind as usize];
+    ][cause.kind() as usize];
     // SAFETY: cause chain pins its canonical immutable String carrier and bytes.
     unsafe {
-        if cause.kind == crate::causes::FAIL {
-            let message = &cause.message;
+        if let Some(message) = cause.message() {
             let data = if message.len == 0 {
                 &[]
             } else {

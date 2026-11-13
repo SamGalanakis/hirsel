@@ -399,6 +399,7 @@ fn entry_source(
         ));
     }
     let tag = layout.tag.expect("checked Result is a variant");
+    let case = c_case(&tag, "word");
     let error = if let Some(offset) = exit_offset {
         format!("out->kind=2; out->exit=result[{}];", offset)
     } else {
@@ -483,8 +484,8 @@ static uint8_t entry(HirselCoreContext *ctx, const HirselCoreProcessConfig *cfg,
     _Alignas({align}) uint8_t result[{size}];
     uint8_t failed={symbol}(ctx,result{grants});
     if(failed) return failed;
-    uint32_t tag=0; memcpy(&tag,result+{at},{width});
-    if(tag==1) {{ {error} }}
+    uint64_t word=0; memcpy(&word,result+{at},{width});
+    if(({case})==1) {{ {error} }}
     return 0;
 }}
 static const HirselCoreEntryRequirement parameters[] = {{{requirements}}};
@@ -511,8 +512,42 @@ int main(int argc, char **argv) {{
         align = layout.align,
         size = layout.size.max(1),
         at = tag.offset,
-        width = tag.width
+        width = tag.width,
     ))
+}
+/// The C expression for the case a variant's tag word `word` holds (read_case).
+fn c_case(tag: &hirsel_core_layout::Tag, word: &str) -> String {
+    struct C(Vec<String>);
+    impl hirsel_core_layout::CaseOps for C {
+        type V = usize;
+        fn constant(&mut self, n: u64) -> usize {
+            self.push(format!("UINT64_C({n})"))
+        }
+        fn add(&mut self, a: usize, b: usize) -> usize {
+            self.push(format!("({}+{})", self.0[a], self.0[b]))
+        }
+        fn sub(&mut self, a: usize, b: usize) -> usize {
+            self.push(format!("({}-{})", self.0[a], self.0[b]))
+        }
+        fn and(&mut self, a: usize, b: usize) -> usize {
+            self.push(format!("({}&{})", self.0[a], self.0[b]))
+        }
+        fn below(&mut self, a: usize, b: usize) -> usize {
+            self.push(format!("(uint64_t)({}<{})", self.0[a], self.0[b]))
+        }
+        fn select(&mut self, c: usize, yes: usize, no: usize) -> usize {
+            self.push(format!("({}?{}:{})", self.0[c], self.0[yes], self.0[no]))
+        }
+    }
+    impl C {
+        fn push(&mut self, e: String) -> usize {
+            self.0.push(e);
+            self.0.len() - 1
+        }
+    }
+    let mut c = C(vec![word.to_string()]);
+    let v = hirsel_core_layout::read_case(tag, &mut c, 0);
+    c.0.swap_remove(v)
 }
 fn command(command: &mut Command) -> Result<Vec<u8>, NativeStop> {
     let result = command

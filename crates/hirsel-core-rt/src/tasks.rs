@@ -411,14 +411,7 @@ unsafe fn observe_cancel(context: *mut Context, site: u64) {
     // SAFETY: the operation entry exclusively owns this task context.
     unsafe {
         (*context).cancel_requested = false;
-        causes::record(
-            &mut *context,
-            Cause {
-                kind: causes::CANCELLED,
-                site,
-                message: Default::default(),
-            },
-        );
+        causes::record(&mut *context, Cause::new(causes::CANCELLED, site));
         event(CANCELLED, 0, site);
     }
 }
@@ -697,7 +690,7 @@ pub unsafe extern "C" fn hirsel_core_join(
         let cancelled = causes
             .iter()
             .next()
-            .is_some_and(|cause| cause.kind == causes::CANCELLED);
+            .is_some_and(|cause| cause.kind() == causes::CANCELLED);
         if !failed {
             ptr::copy_nonoverlapping((*task).result.as_ptr(), result, (*task).layout.result.bytes);
         }

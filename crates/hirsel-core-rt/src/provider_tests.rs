@@ -391,23 +391,9 @@ unsafe extern "C" fn failing_main(
     // SAFETY: prepaid task primary and resource cell, each recorded exactly once.
     unsafe {
         let resource = hirsel_core_resource_alloc(context, 8, 8, 0, 0).pointer;
-        hirsel_core_raise(
-            context,
-            causes::Cause {
-                kind: causes::FAIL,
-                site: 41,
-                message: Default::default(),
-            },
-        );
+        hirsel_core_raise(context, causes::Cause::fail(Default::default(), 41));
         hirsel_core_finalizer_begin(context, std::ptr::NonNull::new(resource).unwrap());
-        hirsel_core_raise(
-            context,
-            causes::Cause {
-                kind: causes::OVERFLOW,
-                site: 42,
-                message: Default::default(),
-            },
-        );
+        hirsel_core_raise(context, causes::Cause::new(causes::OVERFLOW, 42));
         diagnostic((*config).state, b"cleaned\n".as_ptr(), 8);
         hirsel_core_finalizer_end(context, std::ptr::NonNull::new(resource).unwrap());
         hirsel_core_resource_free(std::ptr::NonNull::new(resource).unwrap(), 0);
@@ -459,7 +445,7 @@ fn mkdtemp_bounds_and_pending_cancellation_happen_before_issue() {
             );
             let chain = hirsel_core_causes_take(f.context);
             assert_eq!(
-                (*hirsel_core_cause_value(chain)).kind,
+                (*hirsel_core_cause_value(chain)).kind(),
                 if cancel {
                     causes::CANCELLED
                 } else {

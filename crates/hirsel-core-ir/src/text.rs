@@ -169,7 +169,6 @@ fn field_ty(f: &FieldTy) -> String {
         FieldTy::SeqSpan(e) => format!("seqspan {}", field_ty(e)),
         FieldTy::IndexedSpan(e) => format!("indexed {}", field_ty(e)),
         FieldTy::Link(t) => format!("link t{}", t.0),
-        FieldTy::OptLink(t) => format!("optlink t{}", t.0),
         FieldTy::Locator(t) => format!("locator {}", field_ty(t)),
     }
 }
@@ -840,7 +839,7 @@ impl<'a> Line<'a> {
         use hirsel_core_layout::Handle;
         let boxed = |l: &mut Self| l.field_ty().map(Box::new);
         Ok(match self.peek().ok_or("expected a field type")? {
-            "box" | "rc" | "arc" | "stable" | "link" | "optlink" => {
+            "box" | "rc" | "arc" | "stable" | "link" => {
                 let w = self.next()?;
                 let t = self.tref()?;
                 match w {
@@ -848,8 +847,7 @@ impl<'a> Line<'a> {
                     "rc" => FieldTy::Rc(t),
                     "arc" => FieldTy::Arc(t),
                     "stable" => FieldTy::Stable(t),
-                    "link" => FieldTy::Link(t),
-                    _ => FieldTy::OptLink(t),
+                    _ => FieldTy::Link(t),
                 }
             }
             "view" => {

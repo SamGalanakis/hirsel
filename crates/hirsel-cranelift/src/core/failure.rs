@@ -69,8 +69,15 @@ impl Function<'_, '_, '_> {
                 .ins()
                 .store(MemFlagsData::trusted(), zero, addr, offset as i32);
         }
-        let kind = self.b.ins().iconst(types::I8, i64::from(kind));
-        self.b.ins().store(MemFlagsData::trusted(), kind, addr, 0);
+        // The kind is the message's niche word (FORM #75).
+        let word = super::memory_layout::cause_kind_word(kind);
+        let kind = self.b.ins().iconst(types::I64, word as i64);
+        self.b.ins().store(
+            MemFlagsData::trusted(),
+            kind,
+            addr,
+            super::memory_layout::CAUSE_KIND as i32,
+        );
         self.calls
             .raise(self.object, &mut self.b, self.context, addr)
     }

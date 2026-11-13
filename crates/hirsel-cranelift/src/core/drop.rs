@@ -447,15 +447,7 @@ impl Glue<'_, '_, '_> {
             return Ok(());
         };
         if let Some(tag) = fixed.tag {
-            let native = match tag.width {
-                1 => types::I8,
-                2 => types::I16,
-                _ => types::I32,
-            };
-            let value = self
-                .b
-                .ins()
-                .load(native, MemFlagsData::trusted(), base, tag.offset as i32);
+            let value = super::case::case_value(&mut self.b, &tag, base, MemFlagsData::trusted());
             let done = self.b.create_block();
             self.b.append_block_param(done, types::I8);
             let incoming = self.failed;

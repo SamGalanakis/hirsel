@@ -235,11 +235,7 @@ unsafe fn files(ctx: *mut Context, state: *mut State, small: bool) -> u8 {
             assert_eq!((*ctx).available(), before);
             crate::abi::hirsel_core_raise(
                 ctx,
-                crate::causes::Cause {
-                    kind: crate::causes::UNWRAP,
-                    site: 123,
-                    message: Default::default(),
-                },
+                crate::causes::Cause::new(crate::causes::UNWRAP, 123),
             );
             (&mut *ctx).limit_exit();
             return 1;

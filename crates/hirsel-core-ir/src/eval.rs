@@ -88,7 +88,7 @@ struct Cause {
     kind: &'static str,
     message: [u64; 3],
 }
-/// `CauseKind` in declaration order: its tag in core's layout (crate docs, "Causes").
+/// `CauseKind` in declaration order, its case ordinals.
 const CAUSE_KINDS: [&str; 7] = [
     "Overflow",
     "Bounds",
@@ -98,9 +98,12 @@ const CAUSE_KINDS: [&str; 7] = [
     "Cancelled",
     "Capacity",
 ];
-/// A cause cell: core's `Cause` (40 bytes: tag at 0, the `Fail` carrier at 8, `Site`
-/// at 32), then the next cell's pointer.
-const CELL_NEXT: u64 = 40;
+/// A cause cell: core's `Cause` (32 bytes: the `Fail` carrier at 0, `Site` at 24),
+/// then the next cell's pointer. `CauseKind` is the carrier's capacity niche (FORM
+/// #75): another kind `k` is the capacity `CAUSE_KIND_START + k`.
+const CELL_NEXT: u64 = 32;
+const CAUSE_CAPACITY: u64 = 16;
+const CAUSE_KIND_START: u64 = 1 << 63;
 
 /// Why an instruction stopped: a new cause, or a callee's failure already chained.
 #[derive(Debug)]
@@ -651,6 +654,11 @@ impl Machine<'_> {
     fn shape(&self, t: TypeRef) -> &Shape {
         &self.m.types[t.index()]
     }
+    /// The case of the variant of type `ty` at `base`.
+    fn case_at(&self, base: u64, ty: TypeRef) -> u32 {
+        let tag = self.fixed(ty).tag.expect("a variant");
+        hirsel_core_layout::case_of(&tag, self.load(base + tag.offset, tag.width as usize))
+    }
     fn fixed(&self, t: TypeRef) -> &hirsel_core_layout::Fixed {
         match &self.recipes[t.index()].layout {
             Layout::Fixed(f) => f,
@@ -737,7 +745,7 @@ impl Machine<'_> {
     }
     fn drop_fields(&mut self, t: &mut Task, base: u64, ty: TypeRef) -> bool {
         let row = match self.fixed(ty).tag {
-            Some(tag) => self.load(base + tag.offset, tag.width as usize) as usize,
+            Some(_) => self.case_at(base, ty) as usize,
             None => 0,
         };
         let fields = self.recipes[ty.index()].drop.as_ref().unwrap().fields[row].clone();
@@ -875,8 +883,9 @@ impl Machine<'_> {
                 let mut cell = head;
                 while cell != 0 {
                     let next = self.load(cell + CELL_NEXT, 8);
-                    if self.load(cell, 1) == 4 && self.load(cell + 24, 8) != 0 {
-                        let data = self.load(cell + 8, 8);
+                    let capacity = self.load(cell + CAUSE_CAPACITY, 8);
+                    if capacity != 0 && capacity < CAUSE_KIND_START {
+                        let data = self.load(cell, 8);
                         self.free(data);
                     }
                     self.free(cell);
@@ -1066,9 +1075,12 @@ impl Machine<'_> {
                     for c in chain.iter().rev() {
                         let cell = self.block(CELL_NEXT + 8, None, 0, None);
                         let tag = CAUSE_KINDS.iter().position(|k| *k == c.kind).unwrap();
-                        self.store(cell, 1, tag as u64);
-                        for (j, w) in c.message.into_iter().enumerate() {
-                            self.store(cell + 8 + 8 * j as u64, 8, w);
+                        if c.kind == "Fail" {
+                            for (j, w) in c.message.into_iter().enumerate() {
+                                self.store(cell + 8 * j as u64, 8, w);
+                            }
+                        } else {
+                            self.store(cell + CAUSE_CAPACITY, 8, CAUSE_KIND_START + tag as u64);
                         }
                         self.store(cell + CELL_NEXT, 8, head);
                         head = cell;
@@ -1537,15 +1549,17 @@ impl Machine<'_> {
                 let (p, At::Decl(ty)) = places[address.index()] else {
                     panic!("case of an untyped place")
                 };
-                let tag = self.fixed(ty).tag.expect("a variant");
-                vals[result.index()] = self.load(p + tag.offset, tag.width as usize);
+                vals[result.index()] = u64::from(self.case_at(p, ty));
             }
             Inst::SetCase { address, case } => {
                 let (p, At::Decl(ty)) = places[address.index()] else {
                     panic!("set_case of an untyped place")
                 };
                 let tag = self.fixed(ty).tag.expect("a variant");
-                self.store(p + tag.offset, tag.width as usize, u64::from(case));
+                // A niche variant's dataful case is made by its payload alone.
+                if let Some(word) = hirsel_core_layout::case_word(&tag, case) {
+                    self.store(p + tag.offset, tag.width as usize, word);
+                }
             }
             Inst::Read {
                 result, address, ..

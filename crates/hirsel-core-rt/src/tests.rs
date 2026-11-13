@@ -133,8 +133,14 @@ fn owned_failure_string_outlives_its_frame_and_context_without_admission() {
             ctx.limit_enter(capacity).unwrap();
             let len = if capacity == 0 { 0 } else { 3 };
             let data = if reserved {
-                let allocation =
-                    hirsel_core_alloc(&ctx, std::ptr::null_mut(), capacity, 1, capacity, false);
+                let allocation = hirsel_core_alloc(
+                    &ctx,
+                    std::ptr::null_mut(),
+                    capacity as usize,
+                    1,
+                    capacity,
+                    false,
+                );
                 std::ptr::copy_nonoverlapping(b"hey".as_ptr(), allocation.pointer, len);
                 allocation.pointer
             } else {

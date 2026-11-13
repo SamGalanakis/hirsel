@@ -717,33 +717,38 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         } else {
             self.slot(index_ty, start, n)
         };
-        let drain_data = if consuming {
-            match (sequence, index_slot, limit) {
-                (Some((_, Some(header))), Some(next), Some(end)) if self.live() => {
-                    let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
-                    let eight = self.konst(Ty::Scalar(Scalar::U64), 8, n).unwrap();
-                    let len = self.address(
-                        AddressBase::Value(header),
-                        &[Step::Byte(eight)],
-                        PlaceTy::Value(Ty::Scalar(Scalar::U64)),
-                        n,
-                    );
-                    let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n).unwrap();
-                    self.inst(
-                        Inst::Store {
-                            address: len,
-                            value: zero,
-                        },
-                        n,
-                    );
-                    self.drain_owner(data, next, end, elem);
-                    Some(data)
-                }
-                _ => None,
+        // The source is frozen for the loop. Capture the carrier once; the
+        // header's index < limit edge then proves every element access.
+        let list_data = match sequence {
+            Some((collection, Some(header)))
+                if self.live() && matches!(self.role_of(collection), Some((Role::List, _))) =>
+            {
+                Some(self.read_sequence_word(header, 0, Ty::Ptr, n))
             }
-        } else {
-            None
+            _ => None,
         };
+        if consuming
+            && let (Some((_, Some(header))), Some(next), Some(end), Some(data)) =
+                (sequence, index_slot, limit, list_data)
+            && self.live()
+        {
+            let eight = self.konst(Ty::Scalar(Scalar::U64), 8, n).unwrap();
+            let len = self.address(
+                AddressBase::Value(header),
+                &[Step::Byte(eight)],
+                PlaceTy::Value(Ty::Scalar(Scalar::U64)),
+                n,
+            );
+            let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n).unwrap();
+            self.inst(
+                Inst::Store {
+                    address: len,
+                    value: zero,
+                },
+                n,
+            );
+            self.drain_owner(data, next, end, elem);
+        }
         let packed_cursor = match sequence {
             Some((collection, Some(header))) if self.live() => match self.role_of(collection) {
                 Some((role @ (Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan), _)) => {
@@ -853,15 +858,23 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     let element = self.place_ty(elem, n);
                     match (place, element) {
                         (Some(place), Some(element)) => {
-                            let base = self.address(AddressBase::Value(pointer), &[], place, n);
-                            let at = if let Some(data) = drain_data {
+                            let at = if let Some(data) = list_data {
                                 Some(self.address(
                                     AddressBase::Value(data),
                                     &[Step::Index(index)],
                                     element,
                                     n,
                                 ))
+                            } else if matches!(self.t.kind(collection), TyKind::Array(..)) {
+                                let base = self.address(AddressBase::Value(pointer), &[], place, n);
+                                Some(self.address(
+                                    AddressBase::Address(base),
+                                    &[Step::Field(0), Step::Index(index)],
+                                    element,
+                                    n,
+                                ))
                             } else {
+                                let base = self.address(AddressBase::Value(pointer), &[], place, n);
                                 self.index_address(base, collection, index, element, n)
                             };
                             at.and_then(|at| self.iteration_value(at, elem, n))
@@ -879,13 +892,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         {
             let one = self.konst(index_ir, 1, n).unwrap();
             let after = self.value(index_ir);
+            // The successful loop-head edge proves index < limit.
             self.inst(
-                Inst::Binary {
+                Inst::IntArith {
                     result: after,
-                    op: BinaryOp::Add,
+                    flag: None,
+                    op: hirsel_core_ir::ArithOp::Add,
+                    mode: hirsel_core_ir::ArithMode::Wrapping,
                     left: index,
                     right: one,
-                    fail: None,
                 },
                 n,
             );
@@ -957,13 +972,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             } else {
                 let one = self.konst(index_ir, 1, n).unwrap();
                 let next = self.value(index_ir);
+                // The head bound, and inclusive-end test above, prove this fits.
                 self.inst(
-                    Inst::Binary {
+                    Inst::IntArith {
                         result: next,
-                        op: BinaryOp::Add,
+                        flag: None,
+                        op: hirsel_core_ir::ArithOp::Add,
+                        mode: hirsel_core_ir::ArithMode::Wrapping,
                         left: index,
                         right: one,
-                        fail: None,
                     },
                     n,
                 );

@@ -2900,3 +2900,10 @@ fn closure_invocation_region_headers() {
     ));
     assert!(failures.is_empty(), "{failures:?}");
 }
+
+#[test]
+fn for_carriers_share_the_loop_head_bound() {
+    let mut failures = run_case(&root().join("cases/body/for-carrier-bounds.hirsel"));
+    failures.extend(run_case(&root().join("cases/body/for-freeze.hirsel")));
+    assert!(failures.is_empty(), "{failures:#?}");
+}

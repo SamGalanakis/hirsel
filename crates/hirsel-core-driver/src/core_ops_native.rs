@@ -1179,3 +1179,13 @@ fn packed_scan_offsets_cranelift() { packed_scan_offsets(Backend::Cranelift); }
 #[test]
 #[ignore = "explicit native integration target"]
 fn packed_scan_offsets_llvm() { packed_scan_offsets(Backend::Llvm); }
+
+fn for_carrier_bounds(backend: Backend) {
+    run_lines_native(backend, include_str!("../../../core/front/cases/body/for-carrier-bounds.hirsel"));
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn for_carrier_bounds_cranelift() { for_carrier_bounds(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn for_carrier_bounds_llvm() { for_carrier_bounds(Backend::Llvm); }

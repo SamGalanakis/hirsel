@@ -1,0 +1,115 @@
+// SEM-6/LANG-16: the frozen carrier and the loop head share one bound. Calls
+// that grow another List cannot change that carrier. Empty sources never read data.
+// expect: run consumed(0) = 0
+// expect: run consumed(5) = 2
+// expect: run consumed_strings() = 3
+// expect: run plain(0) = 0
+// expect: run plain(1) = 100
+// expect: run plain(3) = 303
+// expect: run cut(5) = 202
+// expect: run units(0) = 0
+// expect: run units(3) = 3
+// expect: run strings() = 9
+// expect: run inline() = 6
+// expect: run pick_u64(0) = 99
+// expect: run pick_u64(1) = 1
+// expect: run pick_pair(0) = 999
+// expect: run pick_pair(1) = 207
+// expect: run closed_max() = 1
+// expect: run open_max() = 1
+// expect: run signed() = 5
+fn source(n: u64) -> List[u64] {
+    let mut xs: List[u64] = list.new()
+    for i in 0u64 .. n { let _ = list.push(mut xs, i) }
+    xs
+}
+fn plain(n: u64) -> u64 {
+    let xs = source(n)
+    let mut other: List[u64] = list.new()
+    let mut sum: u64 = 0
+    for x in xs { let _ = list.push(mut other, x); sum += x }
+    sum + list.len(other) * 100
+}
+fn cut(n: u64) -> u64 {
+    let xs = source(n)
+    let mut other: List[u64] = list.new()
+    let mut sum: u64 = 0
+    for x in xs {
+        if x == 1 { continue }
+        if x == 3 { break }
+        let _ = list.push(mut other, x)
+        sum += x
+    }
+    sum + list.len(other) * 100
+}
+fn units(n: u64) -> u64 {
+    let mut xs: List[()] = list.new()
+    for _ in 0u64 .. n { let _ = list.push(mut xs, ()) }
+    let mut count: u64 = 0
+    for _ in xs { count += 1 }
+    count
+}
+fn strings() -> u64 {
+    let mut xs: List[String] = list.new()
+    let _ = list.push(mut xs, "abc")
+    let _ = list.push(mut xs, "defghi")
+    let mut sum: u64 = 0
+    for s in xs { sum += string.byte_len(s) }
+    sum
+}
+fn inline() -> u64 {
+    let xs: Inline[u64,3] = [1u64,2u64,3u64]
+    let mut sum: u64 = 0
+    for x in xs { sum += x }
+    sum
+}
+fn pick[T: plain](xs: List[T], fallback: T) -> T {
+    for x in xs { return x }
+    fallback
+}
+fn pick_u64(n: u64) -> u64 {
+    let mut xs: List[u64] = list.new()
+    if n != 0 { let _ = list.push(mut xs, 1) }
+    pick(xs, 99u64)
+}
+fn pick_pair(n: u64) -> u64 {
+    let mut xs: List[(u8,u64)] = list.new()
+    if n != 0 { let _ = list.push(mut xs, (2u8,7u64)) }
+    let p = pick(xs, (9u8,99u64))
+    let first: u64 = int.widen(p.0)
+    first * 100 + p.1
+}
+fn closed_max() -> u64 {
+    let mut count: u64 = 0
+    for _ in 255u8 ..= 255u8 { count += 1 }
+    count
+}
+fn open_max() -> u64 {
+    let mut count: u64 = 0
+    for _ in 254u8 .. 255u8 { count += 1 }
+    count
+}
+fn signed() -> u64 {
+    let mut count: u64 = 0
+    for _ in -2i8 ..= 2i8 { count += 1 }
+    count
+}
+
+fn consumed(n: u64) -> u64 {
+    let xs = source(n)
+    let mut sum: u64 = 0
+    for take x in xs {
+        if x == 1 { continue }
+        if x == 3 { break }
+        sum += x
+    }
+    sum
+}
+fn consumed_strings() -> u64 {
+    let mut xs: List[String] = list.new()
+    let _ = list.push(mut xs, "abc")
+    let _ = list.push(mut xs, "defghi")
+    let mut sum: u64 = 0
+    for take s in xs { sum += string.byte_len(s); break }
+    sum
+}

@@ -118,3 +118,67 @@ fn with_capacity_is_empty() -> u64 {
     let p: pool.Pool[u64] = result.unwrap(pool.with_capacity(4))
     pool.len(p)
 }
+
+// Clear must advance generations, including a slot reused before the clear. A mutant
+// that truncates the slots and restarts at generation zero resurrects a and b.
+// expect: run clear_invalidates_every_handle() = true
+fn clear_invalidates_every_handle() -> bool {
+    let mut p: pool.Pool[u64] = pool.new()
+    let a = handle(pool.insert(mut p, 10))
+    let b = handle(pool.insert(mut p, 20))
+    let _ = pool.remove(mut p, a)
+    let c = handle(pool.insert(mut p, 30))
+    pool.clear(mut p)
+    let empty = pool.len(p) == 0
+    pool.clear(mut p)
+    let d = handle(pool.insert(mut p, 40))
+    empty && pool.len(p) == 1 && !pool.contains(p, a) && !pool.contains(p, b) && !pool.contains(p, c) && pool.get_or(p, d, 0) == 40
+}
+
+// Insertion order 10,20,30 then replace slot 0 by 40: slot order is 40,30.
+// A dense swap-remove iterator or insertion-order iterator returns another number.
+// expect: run iteration_is_slot_order() = 4030
+fn iteration_is_slot_order() -> u64 {
+    let mut p: pool.Pool[u64] = pool.new()
+    let a = handle(pool.insert(mut p, 10))
+    let b = handle(pool.insert(mut p, 20))
+    let _ = handle(pool.insert(mut p, 30))
+    let _ = pool.remove(mut p, a)
+    let _ = handle(pool.insert(mut p, 40))
+    let _ = pool.remove(mut p, b)
+    let mut at: u64 = 0
+    let mut answer: u64 = 0
+    loop {
+        match pool.next(p, at) {
+            Some((h, v, cursor)) => {
+                if pool.get_or(p, h, 0) != v { return 999 }
+                answer = answer * 100 + v
+                at = cursor
+            }
+            None => break,
+        }
+    }
+    answer
+}
+
+// expect: run iteration_empty_and_past_end() = true
+fn iteration_empty_and_past_end() -> bool {
+    let mut p: pool.Pool[u64] = pool.new()
+    let empty = match pool.next(p, 0) { None => true, _ => false }
+    let _ = handle(pool.insert(mut p, 7))
+    let past = match pool.next(p, 18446744073709551615) { None => true, _ => false }
+    pool.clear(mut p)
+    empty && past && match pool.next(p, 0) { None => true, _ => false }
+}
+
+// Admission refusal returns the taken owner and leaves the pool empty.
+// expect: run capacity_returns_value() = true
+fn capacity_returns_value() -> bool {
+    let mut p: pool.Pool[String] = pool.new()
+    let x = result.unwrap(string.from("kept"))
+    let attempt = result.unwrap(bound bytes 0 { pool.insert(mut p, take x) })
+    match attempt {
+        Error((c, take back)) => c.requested > 0 && c.available == 0 && back == "kept" && pool.len(p) == 0,
+        Ok(_) => false,
+    }
+}

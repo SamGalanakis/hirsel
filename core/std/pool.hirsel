@@ -15,8 +15,8 @@
 // is no static brand, so an Id may be stored anywhere: in a local, a record, a Map's keys
 // or values, or inside the pool's own values. Removal is explicit; cleaning the pool
 // cleans every live value by ordinary list cleanup (FAIL-8). Unique is plain, so a
-// `clone` of a pool keeps its identity and an Id of the original resolves in the copy
-// (MEM-18), as in slotmap.
+// identity is plain data (MEM-18). Pool itself is an opaque owner, so MEM-17 refuses
+// cloning it; a new pool always receives a fresh identity.
 pub opaque type Pool[T] {
     me: Unique,
     slots: List[Slot[T]],
@@ -79,12 +79,12 @@ pub fn insert[T](mut p: Pool[T], take x: T) -> Result[Id[T], (Capacity, T)] {
         return Ok(Id(pool: p.me, index: index, generation: 0))
     }
     let index = p.free
-    let (generation, next) = match p.slots[index] {
+    let (generation, free_next) = match p.slots[index] {
         Vacant(g, n) => (g, n),
         Occupied(_, _) => fail("pool: the free list names an occupied slot"),
     }
     let _ = list.set(mut p.slots, index, Occupied(generation, take x))
-    p.free = next
+    p.free = free_next
     p.live += 1
     Ok(Id(pool: p.me, index: index, generation: generation))
 }
@@ -134,8 +134,10 @@ pub fn update[T, R](mut p: Pool[T], h: Id[T], f: scoped fn(mut T) -> R) -> Resul
         Occupied(_, take v) => take v,
         Vacant(_, _) => fail("pool.update: a checked slot was vacant"),
     }
+    p.live -= 1
     let r = f(mut value)
     let _ = list.set(mut p.slots, h.index, Occupied(h.generation, take value))
+    p.live += 1
     Ok(take r)
 }
 
@@ -168,4 +170,39 @@ fn check[T](p: Pool[T], h: Id[T]) -> Result[(), Stale] {
         Ok(_) => Ok(()),
         Error(e) => Error(e),
     }
+}
+
+/// Removes every live value, invalidating its Id, while keeping slot storage and pool
+/// identity. Every generation advances exactly as in remove; exhausted slots stay retired.
+/// Vacant slots are reused in increasing slot order. Alloc: nothing. Cost: O(slots).
+/// Ex: `std.pool.clear(mut cache)`
+pub fn clear[T](mut p: Pool[T]) {
+    p.free = NONE
+    let mut i = list.len(p.slots)
+    while i > 0 {
+        i -= 1
+        let generation = match p.slots[i] {
+            Occupied(g, _) => g + 1,
+            Vacant(g, _) => g,
+        }
+        let _ = list.set(mut p.slots, i, Vacant(generation, p.free))
+        if generation != NONE { p.free = i }
+    }
+    p.live = 0
+}
+
+/// The first live slot at or after at, as (Id, value view, next cursor). None at the
+/// end; begin with 0 and pass the returned cursor to the next call. Order is slot order,
+/// independent of insertion order. View: anchored to p; FREEZE p while held.
+/// Alloc: nothing. Cost: O(slots scanned), O(slots) for a complete walk.
+/// Ex: `if let Some((h, value, at)) = std.pool.next(p, 0) { .. }`
+pub fn next[T](p: Pool[T], at: u64) -> Option[(Id[T], View[T], u64)] in p {
+    let mut i = at
+    while i < list.len(p.slots) {
+        if let Occupied(g, v) = p.slots[i] {
+            return Some((Id(pool: p.me, index: i, generation: g), v, i + 1))
+        }
+        i += 1
+    }
+    None
 }

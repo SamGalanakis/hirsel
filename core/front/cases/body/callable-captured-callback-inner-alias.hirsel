@@ -1,0 +1,8 @@
+// Known callback roots must also be activated inside the nested body.
+// expect: refuse OWN-9 at 6:29
+fn f()->u64 {
+ let mut n:u64=1
+ let cb=scoped fn(x:u64)->u64 {n+=x;n}
+ let g=scoped fn()->u64 {cb(n)}
+ g()
+}

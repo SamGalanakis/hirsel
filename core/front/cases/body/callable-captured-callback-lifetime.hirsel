@@ -1,0 +1,11 @@
+// The captured callback and its transitive roots must outlive the result.
+// expect: refuse OWN-21 at 9:2
+fn f()->u64 {
+ let g={
+  let mut n:u64=1
+  let cb=scoped fn(x:u64)->u64 {n+=x;n}
+  let nested=scoped fn()->u64 {cb(1)}
+  nested
+ }
+ g()
+}

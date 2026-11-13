@@ -62,3 +62,13 @@ fn callable_item_conversions_cranelift(){callable_item_conversions(Backend::Cran
 #[test]
 #[ignore="explicit native integration target"]
 fn callable_item_conversions_llvm(){callable_item_conversions(Backend::Llvm);}
+
+fn captured_callback(backend: Backend) {
+    ordered_case(backend, include_str!("../../../core/front/cases/body/callable-captured-callback.hirsel"));
+}
+#[test]
+#[ignore="explicit native integration target"]
+fn captured_callback_cranelift(){captured_callback(Backend::Cranelift);}
+#[test]
+#[ignore="explicit native integration target"]
+fn captured_callback_llvm(){captured_callback(Backend::Llvm);}

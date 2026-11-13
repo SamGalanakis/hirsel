@@ -2704,3 +2704,19 @@ fn loop_scoped_slots_preserve_their_anchor_sets() {
     }
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+#[test]
+fn captured_callback_cases() {
+    let mut report = vec![];
+    for name in [
+        "callable-captured-callback",
+        "callable-captured-callback-alias",
+        "callable-captured-callback-inner-alias",
+        "callable-captured-callback-lifetime",
+        "callable-captured-callback-list-alias",
+    ] {
+        let failures = run_case(&root().join("cases/body").join(format!("{name}.hirsel")));
+        report.extend(failures.into_iter().map(|f| format!("{name}: {f}")));
+    }
+    assert!(report.is_empty(), "{report:?}");
+}

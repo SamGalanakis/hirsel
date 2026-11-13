@@ -1,0 +1,9 @@
+// The transitive mutable capture remains reserved during the nested call.
+// expect: refuse OWN-9 at 8:4
+fn f()->u64 {
+ let mut n:u64=1
+ let cb=scoped fn(x:u64)->u64 {n+=x;n}
+ let g=scoped fn(x:u64)->u64 {cb(x)}
+ let h=scoped fn(x:u64)->u64 {g(x)}
+ h(n)
+}

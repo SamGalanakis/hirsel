@@ -592,6 +592,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         child.entry = false;
         child.capture_frame = Some(CaptureFrame {
             outer: self.vars.clone(),
+            outer_descriptors: std::mem::take(&mut self.descriptors),
             by_slot: vec![None; self.vars.len()],
             captures: vec![],
             environment: None,
@@ -613,7 +614,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         });
         child.run_row(row, body);
         std::mem::swap(&mut child.t, &mut self.t);
-        let frame = child.capture_frame.take().unwrap();
+        let mut frame = child.capture_frame.take().unwrap();
+        self.descriptors = std::mem::take(&mut frame.outer_descriptors);
         let out = child.finish();
         let function = out.function;
         if let (Some(function), Some(template)) = (function, out.template) {
@@ -709,6 +711,7 @@ pub(super) struct Capture {
 
 pub(super) struct CaptureFrame {
     outer: Vec<Option<Var>>,
+    outer_descriptors: Descriptors,
     by_slot: Vec<Option<usize>>,
     captures: Vec<Capture>,
     pub(super) environment: Option<ValueId>,
@@ -809,13 +812,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if matches!(self.t.kind(original.ty),TyKind::Adt(d,_) if self.p.decls[d.index()].role==Some(Role::Writer))
         {
             self.refuse("MEM-4", n, "a Writer is never captured");
-        } else if !owning
-            && matches!(
-                self.t.kind(original.ty),
-                TyKind::Fn(_, _, _, Callable::Scoped)
-            )
-        {
-            self.gap(n, "captured callback descriptor substitution is not built");
         } else if owning {
             if self.capture_holds(original.ty)
                 & (crate::H_RESOURCE | crate::H_CAPABILITY | crate::H_SCOPED | crate::H_STABLE)
@@ -951,6 +947,28 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         ) {
             let fact = self.anchor_root(Place::whole(slot));
             self.anchors.slots[slot as usize] = fact;
+        }
+        // Import only this callback's roots. Marking its environment slot above
+        // makes repeated and transitive captures reuse the same slot.
+        let outer = &self.capture_frame.as_ref().unwrap().outer_descriptors;
+        if let Some(&id) = outer.slots.get(&slot) {
+            let range = outer.ranges[id as usize];
+            let start = self.descriptors.captures.len();
+            self.descriptors
+                .captures
+                .extend_from_slice(range.get(&outer.captures).unwrap());
+            let id = self.descriptors.ranges.len() as u32;
+            self.descriptors
+                .ranges
+                .push(PoolRange::new(start as u32, range.len));
+            self.set_slot_descriptor(slot, Some(id));
+            for i in 0..range.len {
+                let capture = self.descriptors.captures[start + i as usize];
+                self.capture_slot(capture.slot, n);
+                if capture.mode == Mode::Mut {
+                    self.capture_write(capture.slot, self.span(n));
+                }
+            }
         }
     }
     pub(super) fn capture_write(&mut self, slot: u32, site: Span) {

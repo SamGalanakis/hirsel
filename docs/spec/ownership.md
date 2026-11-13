@@ -247,7 +247,12 @@ fn dup[T](x: T) -> (T, T) { (copy x, copy x) }          // refused: OWN-6, T is 
 A parameter is a view for the call when unmarked, lent for the call when marked `mut`,
 and owned by the callee when marked `take`. An argument for a `mut` parameter is written
 `mut p`; an argument for a `take` parameter is written `take p` when it is a place of a
-moving type and bare otherwise; every other argument is bare. A bare place argument for
+moving type and bare otherwise; an argument for a `bytes` parameter is written `bytes e`;
+every other argument is bare. A constructor's payloads are `take` parameters. An argument
+whose mark does not match its parameter (a missing or an extra `mut`, `take` or `bytes`)
+is refused here, at the argument. `view p` and `copy p` are expressions, not marks, and
+`e in r` is a placement; like any argument they are checked against the parameter's type
+([LANG-11](language.md#lang-11-typing-is-local)). A bare place argument for
 an unmarked parameter is a view; a copyable value is copied. An unmarked parameter of type
 `T` also takes a `View[T]`, which passes as that same view: a view of a view is the view
 itself, so `list.len(string.as_bytes(s))` passes the `View[Bytes]` unchanged. `mut p` is written nowhere
@@ -266,6 +271,14 @@ fn f(take xs: List[u64]) { eat(xs) }                      // refused: OWN-7, nee
 ```
 ```hirsel
 fn f(s: String) -> String { s }                           // refused: OWN-7, at s: a view
+```
+```hirsel
+fn g(bytes n: u64) -> u64 { n }
+fn f() -> u64 { g(8) }                                    // refused: OWN-7, needs bytes 8
+```
+```hirsel
+type Size = Exact(u64) | Unknown
+fn f() -> Size { Exact(bytes 3) }                         // refused: OWN-7, a payload is not bytes
 ```
 ```hirsel
 fn f(mut x: u64) { let y = mut x }                        // refused: OWN-7, mut outside an argument

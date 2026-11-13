@@ -52,8 +52,12 @@ def build(out, env):
     (out / 'environment.json').write_text(json.dumps(information, indent=2) + '\n')
     libs = out / 'lib'
     libs.mkdir(exist_ok=True)
+    # Memory uses only charge-v1. Include that exact module rather than the
+    # unrelated shape serializer and its proc-macro build graph.
+    charge_root = out / 'layout_charge.rs'
+    charge_root.write_text('#[path = ' + json.dumps(str(ROOT/'crates/hirsel-core-layout/src/charge.rs')) + ']\npub mod charge;\n')
     targets = [
-        ('hirsel_core_layout', ROOT/'crates/hirsel-core-layout/src/lib.rs', '2024', []),
+        ('hirsel_core_layout', charge_root, '2024', []),
         ('libc', source('libc-0.2.190'), '2021', []),
         ('bumpalo', source('bumpalo-3.20.3'), '2021', []),
         ('libmimalloc_sys', source('libmimalloc-sys-0.1.49'), '2018', ['-l', 'dylib=mimalloc']),

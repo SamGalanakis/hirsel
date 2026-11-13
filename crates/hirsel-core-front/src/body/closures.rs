@@ -2,6 +2,13 @@
 use super::calls::CallScratch;
 use super::*;
 
+#[derive(Clone, Copy)]
+pub(super) struct CallableAbi {
+    signature: SigId,
+    params: PoolRange<Rep>,
+    result: Rep,
+}
+
 impl<'c, 'a> Cx<'c, 'a, '_> {
     pub(super) fn function_value(
         &mut self,
@@ -195,7 +202,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.callable_word(value, 8, n),
             )
         };
-        let v = self.emit_value_call(code, environment, result, n, scratch);
+        let v = self.emit_value_call(code, environment, ty, result, n, scratch);
         if result == NEVER {
             self.dead = true;
         }
@@ -230,6 +237,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         &mut self,
         code: Option<ValueId>,
         environment: Option<ValueId>,
+        callable: TyId,
         result: TyId,
         n: NodeId,
         scratch: &mut CallScratch,
@@ -238,12 +246,49 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return None;
         }
         let code = code?;
-        let signature = self.indirect_signature(
-            &scratch.params,
-            result,
-            environment.is_some(),
-            &mut scratch.ir_params,
-        )?;
+        let abi = match self
+            .callable_signatures
+            .get(callable.0 as usize)
+            .copied()
+            .flatten()
+        {
+            Some(abi) => abi,
+            None => {
+                let signature = self.indirect_signature(
+                    &scratch.params,
+                    result,
+                    environment.is_some(),
+                    &mut scratch.ir_params,
+                )?;
+                let start = self.callable_reps.len();
+                for &(_, ty) in &scratch.params {
+                    let rep = match self.rep(ty) {
+                        Ok(rep) => rep,
+                        Err(what) => {
+                            self.gap(n, what);
+                            return None;
+                        }
+                    };
+                    self.callable_reps.push(rep);
+                }
+                let result = match self.rep(result) {
+                    Ok(rep) => rep,
+                    Err(what) => {
+                        self.gap(n, what);
+                        return None;
+                    }
+                };
+                let abi = CallableAbi {
+                    signature,
+                    params: PoolRange::new(start as u32, scratch.params.len() as u32),
+                    result,
+                };
+                self.callable_signatures.resize(self.t.len(), None);
+                self.callable_signatures[callable.0 as usize] = Some(abi);
+                abi
+            }
+        };
+        let signature = abi.signature;
         let dest = self.e.module.signatures[signature.index()]
             .dest
             .map(|id| self.new_slot(PlaceTy::Declared(id), n));
@@ -251,17 +296,24 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         scratch.ir_args.clear();
         scratch.ir_args.extend(dest.map(Arg::Address));
         scratch.ir_args.extend(environment.map(Arg::Value));
-        for (i, &(mode, ty)) in scratch.params.iter().enumerate() {
+        for (i, &(mode, _)) in scratch.params.iter().enumerate() {
             if mode == Mode::Take {
                 self.consume(scratch.vals[i], n);
             }
+            let Param::Address(id) = self.e.module.signatures[signature.index()].params
+                [i + usize::from(environment.is_some())]
+            else {
+                unreachable!()
+            };
             let pointer = if mode == Mode::Mut {
                 scratch.vals[i]
             } else {
-                self.slot(ty, scratch.vals[i], n)
-                    .map(|at| self.pointer(at, n))
+                let rep = self.callable_reps[abi.params.start as usize + i];
+                let place = rep.stored().unwrap_or(PlaceTy::Declared(id));
+                let at = self.new_slot(place, n);
+                self.install(at, rep, scratch.vals[i], n);
+                Some(self.pointer(at, n))
             }?;
-            let id = self.e.type_row(self.p, &mut self.t, ty)?;
             let at = self.address(AddressBase::Value(pointer), &[], PlaceTy::Declared(id), n);
             scratch.ir_args.push(Arg::Address(at));
         }
@@ -280,7 +332,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.end(Terminator::Unreachable, Some(n));
             return None;
         }
-        let value = self.read_carried(dest?, result, n);
+        let value = self.read_carried_rep(dest?, abi.result, n);
         self.temp(result, value);
         value
     }
@@ -288,9 +340,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
     pub(super) fn closure(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
-        if !self.fd.generics.is_empty() {
-            return self.gap_ty(n, "closure bodies inside generic definitions are not built");
-        }
         let mut fd = self.fd.as_ref().clone();
         fd.drop_of = None;
         fd.params.clear();
@@ -404,6 +453,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let frame = child.capture_frame.take().unwrap();
         let out = child.finish();
         let function = out.function;
+        if let (Some(function), Some(template)) = (function, out.template) {
+            self.nested.insert(function, template);
+        }
         let refused = !out.refusals.is_empty();
         self.out.refusals.extend(out.refusals);
         self.out.gaps.extend(out.gaps);

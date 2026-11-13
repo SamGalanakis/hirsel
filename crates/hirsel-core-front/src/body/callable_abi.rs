@@ -10,6 +10,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         environment: bool,
         buffer: &mut Vec<Param>,
     ) -> Option<SigId> {
+        #[cfg(test)]
+        {
+            self.e.callable_signature_builds += 1;
+        }
         buffer.clear();
         let ps = &mut *buffer;
         if environment {
@@ -39,7 +43,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
     /// Read a source value from its callable argument/result place.
     pub(super) fn read_carried(&mut self, at: AddressId, ty: TyId, n: NodeId) -> Option<ValueId> {
-        match self.rep(ty).ok()? {
+        let rep = self.rep(ty).ok()?;
+        self.read_carried_rep(at, rep, n)
+    }
+    pub(super) fn read_carried_rep(
+        &mut self,
+        at: AddressId,
+        rep: Rep,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        match rep {
             Rep::None => None,
             Rep::Place(_) => Some(self.pointer(at, n)),
             Rep::Scalar(t) => {
@@ -117,6 +130,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         child.fd = std::borrow::Cow::Owned(fd);
         child.entry = false;
+        if let Some(template) = self.nested.get(&raw) {
+            child.nested.insert(raw, template.clone());
+        }
         std::mem::swap(&mut child.t, &mut self.t);
         let row = child.e.function(
             &child.fd.path,

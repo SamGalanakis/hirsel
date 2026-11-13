@@ -104,6 +104,8 @@ pub struct Emitter {
     pub module: Module,
     funcs: HashMap<InstanceKey, FuncId>,
     callable_adapters: HashMap<(FuncId, SigId), FuncId>,
+    #[cfg(test)]
+    pub(crate) callable_signature_builds: usize,
     sigs: HashMap<Signature, SigId>,
     items: HashMap<DefPath, ItemId>,
     /// Per non-generic definition of the program, its function row once mentioned.
@@ -802,6 +804,8 @@ struct Cx<'c, 'a, 'e> {
     copies: Vec<CopySize>,
     nested: std::collections::BTreeMap<FuncId, GenericTemplate>,
     call_seq: u32,
+    callable_signatures: Vec<Option<closures::CallableAbi>>,
+    callable_reps: Vec<Rep>,
     patterns: patterns::Patterns,
     /// Reused call workspaces, one for each active nesting level.
     call_scratch: Vec<calls::CallScratch>,
@@ -900,6 +904,8 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             copies: vec![],
             nested: Default::default(),
             call_seq: 0,
+            callable_signatures: vec![],
+            callable_reps: vec![],
             patterns: patterns::Patterns::default(),
             call_scratch: vec![],
             array_parts: vec![],

@@ -1273,3 +1273,27 @@ fn emission_halts_but_typing_continues() {
 
 #[path = "core_ops_tests.rs"]
 mod core_ops_tests;
+
+#[test]
+fn callable_payload_metadata_is_built_once_per_type() {
+    let source = format!(
+        "fn f(a: fn(u64) -> u64, b: fn(u8) -> u8) {{ {} }}",
+        "let _ = a(1); let _ = b(2);".repeat(256)
+    );
+    let (index, inputs) = program_inputs(&source);
+    let p = Program::declare(&index, &inputs);
+    let f = p.fns.iter().position(|f| f.path.0.name == "f").unwrap();
+    let mut emitter = Emitter::new();
+    let check = p.check_lower(f, &mut emitter);
+    assert!(
+        check.refusals.is_empty() && check.gaps.is_empty(),
+        "{check:?}"
+    );
+    let body = emitter.module.functions[check.function.unwrap().index()]
+        .body
+        .as_ref()
+        .unwrap();
+    assert_eq!(body.calls.len(), 512);
+    assert_eq!(emitter.callable_signature_builds, 2);
+    wf::module(&emitter.module).unwrap();
+}

@@ -58,6 +58,7 @@ impl CheckProduct {
             limit,
             &mut materialized,
         );
+        let image_directory = self.image.as_ref().map(|i| i.directory()).transpose()?;
         let mut bodies = BTreeSet::new();
         let mut unavailable = BTreeSet::new();
         let mut declarations = BTreeSet::new();
@@ -69,10 +70,9 @@ impl CheckProduct {
                 let path = self
                     .index
                     .definition_path(hirsel_core_resolve::DefinitionId(id as u32));
-                if !self
-                    .image
+                if !image_directory
                     .as_ref()
-                    .is_some_and(|i| i.directory.headers.contains_key(&path))
+                    .is_some_and(|i| i.headers.contains_key(&path))
                 {
                     pending.insert((path, false));
                 }
@@ -89,10 +89,9 @@ impl CheckProduct {
                     pending.extend(header.body_reads.iter().cloned().map(|p| (p, false)));
                 }
                 if !self.definitions.contains_key(&path)
-                    && !self
-                        .image
+                    && !image_directory
                         .as_ref()
-                        .is_some_and(|i| i.directory.definitions.contains_key(&path))
+                        .is_some_and(|i| i.definitions.contains_key(&path))
                 {
                     unavailable.insert(path);
                     continue;

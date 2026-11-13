@@ -44,6 +44,8 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     let mut manifest = None;
     let mut metrics = None;
     let mut image_path = None;
+    let mut core_product = None;
+    let mut source_core = false;
     let mut entry = None;
     let native_command = command == "build" || command == "run";
     let mut backend = None;
@@ -62,6 +64,12 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--json" => json = true,
+            "--source-core" => source_core = true,
+            "--core-product" => {
+                core_product = Some(PathBuf::from(
+                    args.next().ok_or("missing core product cache")?,
+                ))
+            }
             "--dir" if native_command => {
                 directories.push(args.next().ok_or("missing directory grant path")?)
             }
@@ -148,7 +156,18 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     let (product, image) = if command == "image" {
         driver.produce_image(request, &mut meter)?
     } else {
-        (driver.check(request, &mut meter)?, None)
+        (
+            if !source_core && (native_command || core_product.is_some()) {
+                driver.check_with_product(
+                    request,
+                    &core_product.unwrap_or_else(hirsel_core_driver::PackageProduct::default_cache),
+                    &mut meter,
+                )?
+            } else {
+                driver.check(request, &mut meter)?
+            },
+            None,
+        )
     };
     let reach = if native_command {
         Some(

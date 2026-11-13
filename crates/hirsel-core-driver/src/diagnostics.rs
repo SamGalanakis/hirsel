@@ -27,7 +27,7 @@ impl CheckProduct {
             Some(Arc::clone(file))
         } else if let Some(image) = &self.image {
             image
-                .directory
+                .directory()?
                 .files
                 .iter()
                 .position(|f| f.module == site.module)

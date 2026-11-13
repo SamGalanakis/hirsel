@@ -80,6 +80,7 @@ READS = generated.Reads(ROOT)
 # What the engine's build script reads (crates/hirsel-engine/build.rs), as
 # repository paths: it hashes these into the frozen runtime revision.
 BUILD_SCRIPT_INPUTS = {
+    "hirsel-core-driver": ["core/core/**"],
     "hirsel-rt-operations": ["native-tests/library/operations.tsv"],
     "hirsel-registry": ["crates/hirsel-registry/src/**"],
     "hirsel-engine": [
@@ -181,7 +182,7 @@ RUNTIME_DATA = {
 TEST_DATA = {
     "hirsel-core-resolve-unittest": ["docs/spec/**", "core/core/**"],
     "hirsel-core-front-unittest": ["core/front/**", "core/core/**", "core/std/**", "core/programs/m1/**"],
-    "hirsel-core-driver-unittest": ["core/core/**", "core/front/runtime/**"],
+    "hirsel-core-driver-unittest": ["core/core/**", "core/front/**", "core/std/**", "core/programs/m1/**"],
     "hirsel-cranelift-test-core_native": ["core/front/**"],
     "hirsel-cli-test-cli": ["tools/capped", "conformance/old-spec/core-library.md", "conformance/old-spec/std-library.md", "docs/dependency-card.schema.json"],
     "hirsel-driver-test-it": ["crates/hirsel-driver/tests/fixtures/**", "crates/hirsel-rt/include/**"],

@@ -465,7 +465,7 @@ fn corrupt_unused_image_body_is_a_miss_on_demand_only() {
         .unwrap();
     let image = image.unwrap();
     let answer = DefPath::from_full("core@1/lib/answer").unwrap();
-    let hash = image.directory.archive;
+    let hash = image.directory().unwrap().definitions[&answer];
     let store = Store::new(&dir.path().join("store")).unwrap();
     std::fs::write(store.path(hash), b"damaged").unwrap();
     let opened = CoreImage::open(&dir.path().join("store")).unwrap().unwrap();
@@ -629,7 +629,11 @@ fn an_unused_image_declaration_section_is_not_decoded() {
         .unwrap();
     let image = image.unwrap();
     let store = Store::new(&dir.path().join("store")).unwrap();
-    std::fs::write(store.path(image.directory.archive), b"damaged").unwrap();
+    std::fs::write(
+        store.path(image.directory().unwrap().declarations),
+        b"damaged",
+    )
+    .unwrap();
     let opened = CoreImage::open(&dir.path().join("store")).unwrap().unwrap();
     let app = tempfile::tempdir().unwrap();
     let mut req = request("fn scalar() -> u64 { 42 }\n", app.path());

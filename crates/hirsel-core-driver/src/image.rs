@@ -4,7 +4,7 @@ use super::*;
 use hirsel_core_front::Library;
 use std::sync::OnceLock;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub enum LibraryInput {
     #[default]
     Sources,
@@ -16,7 +16,7 @@ pub(crate) struct ImageFile {
     pub module: ModuleId,
     pub path: PathBuf,
     pub names: Vec<Definition>,
-    pub row: Record,
+    pub row: ContentHash,
 }
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ImageDirectory {
@@ -25,20 +25,33 @@ pub(crate) struct ImageDirectory {
     pub index: Arc<NameIndex>,
     pub files: Vec<ImageFile>,
     pub headers: Arc<BTreeMap<DefPath, reuse::Header>>,
-    pub archive: ContentHash,
-    pub declarations: Record,
-    pub definitions: BTreeMap<DefPath, Record>,
+    pub declarations: ContentHash,
+    pub definitions: BTreeMap<DefPath, ContentHash>,
+}
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ImageRoot {
+    pub compiler: ContentHash,
+    pub directory: ContentHash,
 }
 pub struct CoreImage {
-    store: Store,
+    pub(crate) store: Store,
     pub identity: ContentHash,
-    pub(crate) directory: ImageDirectory,
-    backing: OnceLock<Arc<Cache>>,
+    directory_hash: ContentHash,
+    directory: OnceLock<Arc<ImageDirectory>>,
     declarations: OnceLock<Arc<Library>>,
-    files: Vec<OnceLock<Arc<FileProduct>>>,
-    bodies: BTreeMap<DefPath, OnceLock<Arc<DefinitionProduct>>>,
+    files: std::sync::Mutex<BTreeMap<usize, Arc<FileProduct>>>,
+    bodies: std::sync::Mutex<BTreeMap<DefPath, Arc<DefinitionProduct>>>,
 }
 impl CoreImage {
+    #[cfg(test)]
+    pub(crate) fn store_root(&self) -> PathBuf {
+        self.store
+            .path(ContentHash::default())
+            .parent()
+            .unwrap()
+            .to_owned()
+    }
+    /// O(1) in the package size: one selection and a fixed-size compiler/directory root.
     pub fn open(path: &Path) -> io::Result<Option<Arc<Self>>> {
         let store = Store::new(path)?;
         let Some(identity) = store.selection("image-root")? else {
@@ -47,84 +60,82 @@ impl CoreImage {
         let Some(bytes) = store.get(identity)? else {
             return Ok(None);
         };
-        let Some(directory) = decode::<ImageDirectory>(&bytes) else {
+        let Some(root) = decode::<ImageRoot>(&bytes) else {
             return Ok(None);
         };
-        if directory.compiler != compiler_identity()? {
+        if root.compiler != compiler_identity()? {
             return Ok(None);
         }
-        Ok(Some(Self::from_directory(store, identity, directory)))
-    }
-    fn from_directory(store: Store, identity: ContentHash, directory: ImageDirectory) -> Arc<Self> {
-        let files = directory.files.iter().map(|_| OnceLock::new()).collect();
-        let bodies = directory
-            .definitions
-            .keys()
-            .map(|p| (p.clone(), OnceLock::new()))
-            .collect();
-        Arc::new(Self {
+        Ok(Some(Arc::new(Self {
             store,
             identity,
-            directory,
-            backing: OnceLock::new(),
+            directory_hash: root.directory,
+            directory: OnceLock::new(),
             declarations: OnceLock::new(),
-            files,
-            bodies,
-        })
+            files: std::sync::Mutex::default(),
+            bodies: std::sync::Mutex::default(),
+        })))
+    }
+    pub(crate) fn directory(&self) -> io::Result<Arc<ImageDirectory>> {
+        if let Some(directory) = self.directory.get() {
+            return Ok(Arc::clone(directory));
+        }
+        let directory = Arc::new(self.read::<ImageDirectory>(self.directory_hash)?);
+        let _ = self.directory.set(Arc::clone(&directory));
+        Ok(directory)
     }
     pub fn decoded_files(&self) -> usize {
-        self.files.iter().filter(|r| r.get().is_some()).count()
+        self.files.lock().unwrap().len()
     }
     pub fn decoded_bodies(&self) -> usize {
-        self.bodies.values().filter(|r| r.get().is_some()).count()
+        self.bodies.lock().unwrap().len()
     }
     pub fn file(&self, index: usize) -> io::Result<Arc<FileProduct>> {
-        let Some(slot) = self.files.get(index) else {
-            return Err(io::Error::other(
-                "core image file demand outside reached directory",
-            ));
-        };
-        if let Some(row) = slot.get() {
-            return Ok(Arc::clone(row));
+        if let Some(file) = self.files.lock().unwrap().get(&index) {
+            return Ok(Arc::clone(file));
         }
-        let row = self.read::<FileProduct>(self.directory.files[index].row)?;
-        let row = Arc::new(row);
-        let _ = slot.set(Arc::clone(&row));
-        Ok(row)
+        let directory = self.directory()?;
+        let row = directory
+            .files
+            .get(index)
+            .ok_or_else(|| io::Error::other("core image file demand outside reached directory"))?
+            .row;
+        let file = Arc::new(self.read::<FileProduct>(row)?);
+        self.files.lock().unwrap().insert(index, Arc::clone(&file));
+        Ok(file)
+    }
+    pub(crate) fn has_body(&self, path: &DefPath) -> io::Result<bool> {
+        Ok(self.directory()?.definitions.contains_key(path))
     }
     pub fn demand(&self, path: &DefPath) -> io::Result<Arc<DefinitionProduct>> {
-        let Some(slot) = self.bodies.get(path) else {
-            return Err(io::Error::other(format!(
-                "core image body demand outside reached definitions: {path}"
-            )));
-        };
-        if let Some(row) = slot.get() {
-            return Ok(Arc::clone(row));
+        if let Some(body) = self.bodies.lock().unwrap().get(path) {
+            return Ok(Arc::clone(body));
         }
-        let hash = self.directory.definitions[path];
-        let disk = self.read::<DiskCheck>(hash)?;
+        let directory = self.directory()?;
+        let hash = directory.definitions.get(path).ok_or_else(|| {
+            io::Error::other(format!(
+                "core image body demand outside reached definitions: {path}"
+            ))
+        })?;
+        let disk = self.read::<DiskCheck>(*hash)?;
         let row = Arc::new(from_disk(disk));
-        let _ = slot.set(Arc::clone(&row));
+        self.bodies
+            .lock()
+            .unwrap()
+            .insert(path.clone(), Arc::clone(&row));
         Ok(row)
     }
     pub(crate) fn declarations(&self) -> io::Result<Arc<Library>> {
         if let Some(rows) = self.declarations.get() {
             return Ok(Arc::clone(rows));
         }
-        let rows = Arc::new(self.read::<Library>(self.directory.declarations)?);
+        let rows = Arc::new(self.read::<Library>(self.directory()?.declarations)?);
         let _ = self.declarations.set(Arc::clone(&rows));
         Ok(rows)
     }
-    fn read<T: serde::de::DeserializeOwned>(&self, record: Record) -> io::Result<T> {
-        let backing = if let Some(backing) = self.backing.get() {
-            Arc::clone(backing)
-        } else {
-            let backing =
-                Arc::new(Cache::open(&self.store, self.directory.archive)?.ok_or_else(miss)?);
-            let _ = self.backing.set(Arc::clone(&backing));
-            backing
-        };
-        decode(record.bytes(&backing.bytes).ok_or_else(miss)?).ok_or_else(miss)
+    fn read<T: serde::de::DeserializeOwned>(&self, record: ContentHash) -> io::Result<T> {
+        let bytes = self.store.get(record)?.ok_or_else(miss)?;
+        decode(&bytes).ok_or_else(miss)
     }
 }
 fn miss() -> io::Error {
@@ -157,47 +168,84 @@ impl Driver {
             return Ok((product, None));
         }
         let store = Store::new(&store_path)?;
-        let root = product
-            .records
-            .as_ref()
-            .expect("image request publishes its checked declarations");
+        let library = if let Some(library) = &product.library {
+            Arc::clone(library)
+        } else {
+            // A foreign/missing image directory can be rebuilt from the ordinary
+            // cached check product without checking its source again.
+            let cache = Cache::open(&store, product.root)?.ok_or_else(miss)?;
+            let record = cache.root.declarations.ok_or_else(miss)?;
+            Arc::new(
+                decode::<Library>(record.bytes(&cache.bytes).ok_or_else(miss)?).ok_or_else(miss)?,
+            )
+        };
+        let declarations = store.put(&encode(library.as_ref())?)?;
+        let mut files = Vec::new();
+        for file in &product.files {
+            files.push(ImageFile {
+                module: file.module,
+                path: file.path.clone(),
+                names: file.names.clone(),
+                row: store.put(&encode(file.as_ref())?)?,
+            });
+        }
+        let mut definitions = BTreeMap::new();
+        for (path, body) in &product.definitions {
+            let c = body.check.counts;
+            let disk = DiskCheckRef {
+                anchors: &body.anchors,
+                key: &body.key,
+                definition: path,
+                refusals: &body.check.refusals,
+                incomplete: &body.incomplete,
+                counts: [c.nodes, c.uses, c.places, c.calls, c.types, c.bytes],
+                template: &body.check.template,
+                function: body.check.function.map(|f| f.0),
+                ir: &body.ir,
+                resolved: body.resolved,
+            };
+            let hash = store.archive(|writer| {
+                writer.record(&disk)?;
+                Ok(())
+            })?;
+            definitions.insert(path.clone(), hash);
+        }
         let directory = ImageDirectory {
             compiler: compiler_identity()?,
             inputs,
             index: Arc::clone(&product.index),
-            files: product
-                .files
-                .iter()
-                .zip(root.files.iter().copied())
-                .map(|(file, row)| ImageFile {
-                    module: file.module.clone(),
-                    path: file.path.clone(),
-                    names: file.names.clone(),
-                    row,
-                })
-                .collect(),
-            headers: root.headers.clone(),
-            archive: product.root,
-            declarations: root
-                .declarations
-                .expect("image request publishes its checked declarations"),
-            definitions: root.definitions.clone(),
+            files,
+            headers: Arc::clone(&product.headers),
+            declarations,
+            definitions,
         };
-        let identity = store.archive(|writer| {
-            writer.record(&directory)?;
-            Ok(())
-        })?;
+        let directory_hash = store.put(&encode(&directory)?)?;
+        let identity = store.put(&encode(&ImageRoot {
+            compiler: compiler_identity()?,
+            directory: directory_hash,
+        })?)?;
         store.select("image-root", identity)?;
-        let image = CoreImage::from_directory(store, identity, directory);
-        for (slot, file) in image.files.iter().zip(&product.files) {
-            let _ = slot.set(Arc::clone(file));
+        let image = Arc::new(CoreImage {
+            store,
+            identity,
+            directory_hash,
+            directory: OnceLock::new(),
+            declarations: OnceLock::new(),
+            files: std::sync::Mutex::default(),
+            bodies: std::sync::Mutex::default(),
+        });
+        let _ = image.directory.set(Arc::new(directory));
+        for (i, file) in product.files.iter().enumerate() {
+            image.files.lock().unwrap().insert(i, Arc::clone(file));
         }
         for (path, body) in &product.definitions {
-            let _ = image.bodies[path].set(Arc::clone(body));
+            image
+                .bodies
+                .lock()
+                .unwrap()
+                .insert(path.clone(), Arc::clone(body));
         }
-        if let Some(rows) = &product.library {
-            let _ = image.declarations.set(Arc::clone(rows));
-        }
+        let _ = image.declarations.set(library);
         meter.finish("image publication");
         Ok((product, Some(image)))
     }

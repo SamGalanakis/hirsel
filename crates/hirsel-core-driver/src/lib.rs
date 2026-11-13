@@ -2,6 +2,8 @@
 //! Sources and signatures are explicit inputs; no old compiler or std image is loaded.
 mod diagnostics;
 mod image;
+mod product;
+pub use product::PackageProduct;
 mod instances;
 mod native;
 mod reachability;
@@ -48,6 +50,7 @@ pub fn package(name: &str) -> PackageId {
 
 /// All producers are enumerated before any stage runs. Explicit manifests can select
 /// another source convention; the CLI's directory convention names a module per file.
+#[derive(Clone)]
 pub struct CheckRequest {
     pub inputs: CorpusManifest,
     pub store: PathBuf,
@@ -56,7 +59,11 @@ pub struct CheckRequest {
 }
 impl CheckRequest {
     pub fn libraries(libraries: &Path, store: &Path) -> io::Result<Self> {
-        let core = PackageManifest::directory(&libraries.join("core"), package("core"), true)?;
+        let core = if libraries == Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core") {
+            PackageProduct::bundled_manifest(&libraries.join("core"))
+        } else {
+            PackageManifest::directory(&libraries.join("core"), package("core"), true)?
+        };
         let mut std = PackageManifest::directory(&libraries.join("std"), package("std"), true)?;
         std.dependencies.push(package("core"));
         Ok(Self {
@@ -73,7 +80,7 @@ impl CheckRequest {
         let mut app = PackageManifest::directory(dir, package("app"), false)?;
         app.dependencies.extend(
             image
-                .directory
+                .directory()?
                 .inputs
                 .packages
                 .iter()
@@ -81,7 +88,7 @@ impl CheckRequest {
         );
         Ok(Self {
             inputs: CorpusManifest {
-                core: image.directory.inputs.core.clone(),
+                core: image.directory()?.inputs.core.clone(),
                 packages: vec![app],
             },
             store: store.to_owned(),
@@ -90,7 +97,11 @@ impl CheckRequest {
         })
     }
     pub fn directory(dir: &Path, libraries: &Path, store: &Path) -> io::Result<Self> {
-        let core = PackageManifest::directory(&libraries.join("core"), package("core"), true)?;
+        let core = if libraries == Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core") {
+            PackageProduct::bundled_manifest(&libraries.join("core"))
+        } else {
+            PackageManifest::directory(&libraries.join("core"), package("core"), true)?
+        };
         let mut std = PackageManifest::directory(&libraries.join("std"), package("std"), true)?;
         std.dependencies.push(package("core"));
         let mut app = PackageManifest::directory(dir, package("app"), false)?;
@@ -386,10 +397,12 @@ impl Driver {
             meter.finish("snapshot reuse");
             return Ok(cached);
         }
-        let library_modules = image.as_ref().map_or(0, |i| i.directory.files.len());
+        let image_directory = image.as_ref().map(|i| i.directory()).transpose()?;
+        meter.finish("package index demand");
+        let library_modules = image_directory.as_ref().map_or(0, |i| i.files.len());
         let mut resolution_inputs = request.inputs.clone();
-        if let Some(image) = &image {
-            for package in &image.directory.inputs.packages {
+        if let Some(directory) = &image_directory {
+            for package in &directory.inputs.packages {
                 if !resolution_inputs
                     .packages
                     .iter()
@@ -401,9 +414,9 @@ impl Driver {
                 }
             }
         }
-        let mut symbols = image.as_ref().map_or_else(Symbols::default, |i| {
-            i.directory.index.symbols.as_ref().clone()
-        });
+        let mut symbols = image_directory
+            .as_ref()
+            .map_or_else(Symbols::default, |i| i.index.symbols.as_ref().clone());
         for p in &request.inputs.packages {
             p.intern(&mut symbols);
         }
@@ -428,9 +441,9 @@ impl Driver {
         }
         meter.finish("parse");
         let symbols = Arc::new(symbols);
-        let mut index = image.as_ref().map_or_else(
+        let mut index = image_directory.as_ref().map_or_else(
             || NameIndex::new(Arc::clone(&symbols)),
-            |i| i.directory.index.as_ref().clone(),
+            |i| i.index.as_ref().clone(),
         );
         index.symbols = symbols;
         index.add_manifests(&resolution_inputs.packages);
@@ -441,9 +454,8 @@ impl Driver {
                 syntax,
             })
             .collect();
-        if let Some(image) = &image {
-            let mut all: Vec<_> = image
-                .directory
+        if let Some(directory) = &image_directory {
+            let mut all: Vec<_> = directory
                 .files
                 .iter()
                 .map(|f| ModuleInput {
@@ -508,20 +520,34 @@ impl Driver {
                 }
             }
         }
-        let reads_library = image.as_ref().is_some_and(|image| {
+        let reads_library = image_directory.as_ref().is_some_and(|image| {
             modules
                 .iter()
                 .zip(&resolutions)
                 .skip(library_modules)
                 .any(|(m, rows)| {
-                    rows.iter().any(|r| {
+                    // Region/limit scopes and string carriers name core types
+                    // implicitly; they need the same published declarations.
+                    m.syntax.tree.nodes.iter().any(|n| {
+                        matches!(
+                            n.kind,
+                            hirsel_core_syntax::NodeKind::Region
+                                | hirsel_core_syntax::NodeKind::Bound
+                        ) || n.token.is_some_and(|t| {
+                            matches!(
+                                m.syntax.tree.tokens[t.0 as usize].kind,
+                                hirsel_core_syntax::TokenKind::String
+                                    | hirsel_core_syntax::TokenKind::Bytes
+                            )
+                        })
+                    }) || rows.iter().any(|r| {
                         r.names.iter().any(|n| match n.target {
                             hirsel_core_resolve::Target::Definition(d) => {
-                                (d.0 as usize) < image.directory.index.definitions.len()
+                                (d.0 as usize) < image.index.definitions.len()
                             }
                             hirsel_core_resolve::Target::ContextualConstructor { name } => index
                                 .constructor_candidates(m.id, name)
-                                .any(|d| (d.0 as usize) < image.directory.index.definitions.len()),
+                                .any(|d| (d.0 as usize) < image.index.definitions.len()),
                             _ => false,
                         })
                     })
@@ -539,7 +565,7 @@ impl Driver {
             &resolutions,
             &resolution_inputs,
             compiler_identity()?,
-            image.as_ref().map(|i| &*i.directory.headers),
+            image_directory.as_ref().map(|i| &*i.headers),
             request.entry.as_ref(),
         )?;
         {

@@ -31,3 +31,6 @@ tempfile = "3"
 hirsel-core-front = { path = "../hirsel-core-front", features = ["cost-profile"] }
 tempfile = "3"
 hirsel-core-ir = { path = "../hirsel-core-ir", features = ["eval"] }
+
+[build-dependencies]
+sha2 = "0.10"

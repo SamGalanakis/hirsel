@@ -81,12 +81,17 @@ impl CheckProduct {
         let mut shapes =
             std::collections::BTreeMap::<String, (usize, hirsel_core_layout::TypeRef)>::new();
         collect_instances(roots, limit, |key| {
-            if !self.definitions.contains_key(&key.definition)
-                && !self
-                    .image
-                    .as_ref()
-                    .is_some_and(|i| i.directory.definitions.contains_key(&key.definition))
-            {
+            let installed = self
+                .image
+                .as_ref()
+                .map(|i| i.has_body(&key.definition))
+                .transpose()
+                .map_err(|e| InstanceStop::Input {
+                    definition: key.definition.clone(),
+                    message: e.to_string(),
+                })?
+                .unwrap_or(false);
+            if !self.definitions.contains_key(&key.definition) && !installed {
                 return Err(InstanceStop::OutsideReached(key.definition.clone()));
             }
             let product = self

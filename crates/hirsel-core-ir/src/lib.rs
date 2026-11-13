@@ -49,8 +49,8 @@
 //!   charged, MEM-24) and its glue cleans the captures in reverse, frees the block
 //!   and refunds it. A captureless `own fn` has a null environment. Captures hold
 //!   no resource, so this cleanup never fails and runs no finalizer.
-//! - Providers (CAP-5): a provider operation is a call of an engine function by
-//!   its signature row, a cancellation point when it `waits` (so it can fail),
+//! - Providers (CAP-5): a provider operation is a closed runtime row (below,
+//!   "Providers"), a cancellation point when it `waits` (so it can fail),
 //!   admitting nothing. `HostFile` is a mechanical resource that is not a
 //!   block: a `u64` provider handle (field type `hostfile`, 8 bytes, logically 8),
 //!   with no cause cell, no grant and no charge. Its drop step calls the runtime
@@ -143,6 +143,43 @@
 //!   code over their components, calling it for each text component. Comparison
 //!   admits nothing.
 //!
+//! # Providers (FORM v1b)
+//!
+//! A provider or run-time C entry is reached only through a closed runtime row
+//! ([`RtOp`]); FORM has no call of a C symbol by name. The provider rows are
+//! `rt.args_len`, `rt.args_get`, `rt.host_*` and `rt.stdout_write` /
+//! `rt.stderr_write` ([`HostOp`], one row per core operation; signatures at
+//! [`RtOp::signature`]). Their operands are scalars and pointers only: the
+//! capability, `Args` or `HostFile` handle, and each `String` or `Bytes` as a
+//! pointer to its carrier `{data, length, capacity}` (a view is already that
+//! pointer). Every `host`, `stdout` and `stderr` row returns the outcome
+//! `value: u64, error: u8, code: u32, written: u64`, from which the producer
+//! builds the `Result`; the rows that `wait` add the failure status (Native ABI)
+//! and fail with `Cancelled` when cancellation is pending, `host_mkdtemp` also with
+//! `Bounds` when the name has fewer than 32 spare bytes. `host_wall_ms` and
+//! `host_mono_ns` return the `u64` alone and cannot fail; neither can the `args`
+//! rows. The run time reads and writes the carrier: `host_read` fills spare
+//! capacity and `host_mkdtemp` appends the directory's name, each storing the new
+//! length; neither changes the data pointer or the capacity (no provider
+//! operation admits). `rt.args_get` returns a run-owned `String` carrier of
+//! capacity 0, or null past the end: it is the `View[String]` of `Some`, valid
+//! until the run ends.
+//!
+//! Engines map the rows to the run time's entries, the context first:
+//! - `rt.args_len` → `uint64_t hirsel_core_args_len(const HirselCoreContext *,
+//!   uint64_t args)`.
+//! - `rt.args_get` → `const HirselCoreBuffer *hirsel_core_args_get(const
+//!   HirselCoreContext *, uint64_t args, uint64_t index)`.
+//! - every `HostOp` → `HirselCoreHostOutcome hirsel_core_host_op(HirselCoreContext
+//!   *, uint8_t operation, uint64_t handle, HirselCoreBuffer *operand, uint8_t
+//!   mode, uint64_t site)`, with [`HostOp::code`], the row's handle, its carrier
+//!   pointer (null when it has none) and `mode` (0 when it has none).
+//!   `HirselCoreHostOutcome` is the row's results then the status, laid out as
+//!   the Native ABI's result struct; a row that cannot fail ignores the status
+//!   and keeps `value`. The entry resolves the provider: `open` and the
+//!   directory and stream operations by the capability handle, the file
+//!   operations by the `HostFile`'s retained provider.
+//!
 //! # Capabilities and the entry (FORM v1b)
 //!
 //! A capability value (`Dir`, `Net`, `Clock`, `Random`, `Stdout`, `Stderr`,
@@ -219,7 +256,8 @@
 //! # Native ABI (FORM v1a)
 //!
 //! **Every function row** uses one convention, the same for direct calls, indirect
-//! calls through a code pointer (`fnref`) and `extern` rows (providers):
+//! calls through a code pointer (`fnref`) and `extern` rows (a FORM function
+//! defined in another module, linked by its instance digest; never a C symbol):
 //! - The task context pointer comes first, then the destination pointer when
 //!   `dest` is present, then the parameters as in FORM v0. The context carries the
 //!   current limit stack and the cause chain.

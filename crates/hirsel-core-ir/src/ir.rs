@@ -585,6 +585,78 @@ pub enum RtOp {
     DestId,
     /// Bytewise order of two byte ranges (SEM-7): `String`, `Text` and `Bytes`.
     CompareBytes,
+    /// `args.len` (CAP-5): the run's argument count.
+    ArgsLen,
+    /// `args.get`: a run-owned `String` carrier of capacity 0, or null.
+    ArgsGet,
+    /// A provider operation of `host`, `stdout` or `stderr` (CAP-5).
+    Host(HostOp),
+}
+
+/// The provider operations, numbered as the run time's `HirselCoreHostRequest`
+/// operation codes ([`HostOp::code`]).
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum HostOp {
+    Open,
+    Read,
+    Write,
+    Close,
+    TryLock,
+    Unlock,
+    Mkdir,
+    Mkdtemp,
+    Remove,
+    RemoveTree,
+    WallMs,
+    MonoNs,
+    Stdout,
+    Stderr,
+}
+
+impl HostOp {
+    pub const ALL: [HostOp; 14] = [
+        HostOp::Open,
+        HostOp::Read,
+        HostOp::Write,
+        HostOp::Close,
+        HostOp::TryLock,
+        HostOp::Unlock,
+        HostOp::Mkdir,
+        HostOp::Mkdtemp,
+        HostOp::Remove,
+        HostOp::RemoveTree,
+        HostOp::WallMs,
+        HostOp::MonoNs,
+        HostOp::Stdout,
+        HostOp::Stderr,
+    ];
+    /// The run time's operation code (`hirsel_core_rt_host.h`).
+    pub const fn code(self) -> u8 {
+        self as u8
+    }
+    /// The row's name after `rt.`.
+    pub const fn name(self) -> &'static str {
+        match self {
+            HostOp::Open => "host_open",
+            HostOp::Read => "host_read",
+            HostOp::Write => "host_write",
+            HostOp::Close => "host_close",
+            HostOp::TryLock => "host_try_lock",
+            HostOp::Unlock => "host_unlock",
+            HostOp::Mkdir => "host_mkdir",
+            HostOp::Mkdtemp => "host_mkdtemp",
+            HostOp::Remove => "host_remove",
+            HostOp::RemoveTree => "host_remove_tree",
+            HostOp::WallMs => "host_wall_ms",
+            HostOp::MonoNs => "host_mono_ns",
+            HostOp::Stdout => "stdout_write",
+            HostOp::Stderr => "stderr_write",
+        }
+    }
+    /// Whether the operation waits (a cancellation point, so it can fail).
+    pub const fn waits(self) -> bool {
+        !matches!(self, HostOp::WallMs | HostOp::MonoNs)
+    }
 }
 
 /// The primary cause a `Raise` records (FAIL-2). Overflow, Bounds and Division are
@@ -615,6 +687,16 @@ impl RtOp {
     /// | `receive[T]` | receiver `ptr`, `&T` | `bool`: received (false: `Closed`) |
     /// | `dest_id` | | `u64`: a destination identity no other call of the run returns (MEM-4) |
     /// | `compare_bytes` | `a: ptr`, `a_len: u64`, `b: ptr`, `b_len: u64` | `i8`: -1, 0 or 1 as `a` orders before, equal to or after `b` |
+    /// | `args_len` | `Args: u64` | `u64` |
+    /// | `args_get` | `Args: u64`, `i: u64` | `ptr`: a `String` carrier, null past the end |
+    /// | `host_open` | `Dir: u64`, path `ptr`, `mode: u8` | outcome |
+    /// | `host_read` | `HostFile: u64`, buffer `ptr` | outcome |
+    /// | `host_write` | `HostFile: u64`, bytes `ptr` | outcome |
+    /// | `host_close`, `host_try_lock`, `host_unlock` | `HostFile: u64` | outcome |
+    /// | `host_mkdir`, `host_remove`, `host_remove_tree` | `Dir: u64`, path `ptr` | outcome |
+    /// | `host_mkdtemp` | `Dir: u64`, name `ptr` | outcome |
+    /// | `host_wall_ms`, `host_mono_ns` | `Clock: u64` | `u64` |
+    /// | `stdout_write`, `stderr_write` | stream `u64`, string `ptr` | outcome |
     ///
     /// `f` is a plain function `(&X) -> () dest R`. `channel_new` with `cap` 0 fails
     /// with `Bounds`; `send`, `receive`, `join` and `check_cancel` fail with
@@ -624,6 +706,13 @@ impl RtOp {
     /// `compare_bytes` orders unsigned bytes from the first, a proper prefix first
     /// (SEM-7); it reads both ranges, writes nothing, admits nothing and takes no
     /// context. A pointer with length 0 is never read, so it may be null.
+    ///
+    /// The provider rows (crate docs, "Providers") take the capability or file
+    /// handle, and each `String` or `Bytes` operand as a pointer to its carrier.
+    /// An outcome is `value: u64, error: u8, code: u32, written: u64`: `error` is
+    /// 0 for success, else `IoError`'s case + 1 (`code` is `Other`'s payload),
+    /// `value` is the opened `HostFile`, the bytes read, the lock taken (1) or the
+    /// new `Dir`, and `written` the bytes written.
     pub fn signature(self) -> Signature {
         use Param::{Address as A, Value as V};
         let (u8_, u64_, bool_) = (
@@ -647,6 +736,17 @@ impl RtOp {
                 vec![V(p), V(u64_), V(p), V(u64_)],
                 vec![Ty::Scalar(Scalar::I8)],
             ),
+            RtOp::ArgsLen => (vec![V(u64_)], vec![u64_]),
+            RtOp::ArgsGet => (vec![V(u64_), V(u64_)], vec![p]),
+            RtOp::Host(op) => {
+                let outcome = vec![u64_, u8_, Ty::Scalar(Scalar::U32), u64_];
+                match op {
+                    HostOp::Open => (vec![V(u64_), V(p), V(u8_)], outcome),
+                    HostOp::Close | HostOp::TryLock | HostOp::Unlock => (vec![V(u64_)], outcome),
+                    HostOp::WallMs | HostOp::MonoNs => (vec![V(u64_)], vec![u64_]),
+                    _ => (vec![V(u64_), V(p)], outcome),
+                }
+            }
         };
         Signature {
             params,
@@ -666,7 +766,7 @@ impl RtOp {
                 | RtOp::ChannelNew { .. }
                 | RtOp::Send { .. }
                 | RtOp::Receive { .. }
-        )
+        ) || matches!(self, RtOp::Host(op) if op.waits())
     }
 
     pub fn types(self) -> Vec<TypeId> {
@@ -681,7 +781,10 @@ impl RtOp {
             | RtOp::CheckCancel
             | RtOp::ChannelSender
             | RtOp::DestId
-            | RtOp::CompareBytes => vec![],
+            | RtOp::CompareBytes
+            | RtOp::ArgsLen
+            | RtOp::ArgsGet
+            | RtOp::Host(_) => vec![],
         }
     }
 }

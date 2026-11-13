@@ -910,6 +910,8 @@ fn counted_variant_chain_uses_constant_stack_and_refunds_every_node() {
             used: 0,
             trace: vec![],
             admissions: n as usize + 1,
+            stdout: vec![],
+            stderr: vec![],
         }]),
     );
 }
@@ -1001,6 +1003,8 @@ fn string_literals_grow_and_clean_in_dev_and_speed() {
                         used: 0,
                         trace: vec![],
                         admissions: usize::from(counted_drop),
+                        stdout: vec![],
+                        stderr: vec![],
                     }]),
                 );
                 if counted_drop {
@@ -1016,6 +1020,8 @@ fn string_literals_grow_and_clean_in_dev_and_speed() {
                                 used: 0,
                                 trace: vec![],
                                 admissions: 1,
+                                stdout: vec![],
+                                stderr: vec![],
                             }]),
                         );
                     }
@@ -1090,12 +1096,16 @@ fn owned_callable_captures_and_captureless_cleanup_use_function_row_abi() {
             used: 0,
             trace: vec![],
             admissions: 1,
+            stdout: vec![],
+            stderr: vec![],
         },
         eval::Report {
             outcome: Outcome::Returned(vec![13]),
             used: 0,
             trace: vec![],
             admissions: 0,
+            stdout: vec![],
+            stderr: vec![],
         },
     ];
     execute_reports(&module, &runs, false, 1000, None, Some(&reports));
@@ -1153,6 +1163,8 @@ fn nested_counted_sequences_clean_refused_prefixes_and_deep_chains() {
             used: 0,
             trace: vec![],
             admissions: 1 + 3 * n as usize,
+            stdout: vec![],
+            stderr: vec![],
         }]),
     );
 }
@@ -1542,6 +1554,8 @@ fn static_capacity_zero_carriers_drop_and_grow_through_runtime_cleanup() {
             used: 0,
             trace: vec![],
             admissions: [0, 1, 1, 2][f.index()],
+            stdout: vec![],
+            stderr: vec![],
         })
         .collect();
     execute_reports(&module, &cases, false, 1000, None, Some(&expected));

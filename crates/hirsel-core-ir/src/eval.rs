@@ -8,7 +8,7 @@
 //! `byte` steps, as a producer lowers it. Each static is a read-only block made
 //! at the start of the run: a store into one, or a `free` of one, stops the run.
 //! Sequence storage is cleaned by its carrier; list and map operations are the
-//! producer's code.
+//! producer's code. Provider rows run against a modelled provider ([`World`]).
 
 use crate::*;
 use hirsel_core_layout::{
@@ -30,7 +30,47 @@ pub struct Report {
     /// The first u64 field of each resource, in the order its cleanup started.
     pub trace: Vec<u64>,
     pub admissions: usize,
+    /// Bytes the program wrote to its `Stdout` and `Stderr`.
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
 }
+
+/// The modelled provider (CAP-5), deterministic so runs can be derived by hand:
+/// - `Args` is the run's argument table: each argument a run-owned `String`
+///   carrier of capacity 0; the handle's value is not read.
+/// - `stdout` and `stderr` writes are captured whole: `written` is the length.
+/// - A clock read returns the number of clock reads before it, both clocks alike.
+/// - Directories hold flat names: a key is (`Dir` handle, path bytes). `open`
+///   with `Read` needs a file (`NotFound`), `CreateNew` needs no entry (`Exists`),
+///   `Write` truncates or creates, `Append` creates and writes at the end; a
+///   directory is `Denied`. `read` fills the buffer's spare capacity from the
+///   file's cursor. `try_lock` takes the lock unless another open file of the
+///   same key holds it (then 0). `mkdtemp` appends `t<k>` to the name, k from 0,
+///   and returns a new `Dir`; it fails with `Bounds` when the name has fewer than
+///   32 spare bytes. `mkdir` of an existing key is `Exists`; `remove` and
+///   `remove_tree` of a missing one `NotFound`.
+/// - Nothing is ever cancelled.
+#[derive(Default)]
+struct World {
+    args: Vec<u64>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    clock: u64,
+    nodes: std::collections::BTreeMap<(u64, Vec<u8>), Node>,
+    files: Vec<Option<OpenFile>>,
+    temporaries: u64,
+}
+enum Node {
+    File(Vec<u8>),
+    Dir,
+}
+struct OpenFile {
+    key: (u64, Vec<u8>),
+    at: usize,
+    locked: bool,
+}
+const FILE_BASE: u64 = 0x50_0000;
+const DIR_BASE: u64 = 0x60_0000;
 
 const FN_BASE: u64 = 0x1000;
 const REGION_BASE: u64 = 0x10_0000;
@@ -126,6 +166,7 @@ struct Machine<'m> {
     dests: u64,
     admissions: usize,
     injection: Option<(usize, bool)>,
+    world: World,
 }
 
 fn collect_arrays(ty: &FieldTy, out: &mut Vec<(FieldTy, u64)>) {
@@ -140,6 +181,10 @@ fn collect_arrays(ty: &FieldTy, out: &mut Vec<(FieldTy, u64)>) {
 pub fn run(m: &Module, f: FuncId, args: &[u64], limit: u64) -> Report {
     run_injected(m, f, args, limit, None)
 }
+/// A run whose `Args` table holds `argv`.
+pub fn run_args(m: &Module, f: FuncId, args: &[u64], limit: u64, argv: &[&str]) -> Report {
+    run_world(m, f, args, limit, None, argv)
+}
 /// Deterministic admission refusal for native/evaluator agreement fixtures.
 pub fn run_injected(
     m: &Module,
@@ -147,6 +192,16 @@ pub fn run_injected(
     args: &[u64],
     limit: u64,
     injection: Option<(usize, bool)>,
+) -> Report {
+    run_world(m, f, args, limit, injection, &[])
+}
+fn run_world(
+    m: &Module,
+    f: FuncId,
+    args: &[u64],
+    limit: u64,
+    injection: Option<(usize, bool)>,
+    argv: &[&str],
 ) -> Report {
     let mut mach = Machine {
         m,
@@ -168,11 +223,22 @@ pub fn run_injected(
         dests: 0,
         admissions: 0,
         injection,
+        world: World::default(),
     };
     for s in &m.statics {
         let p = mach.block(s.bytes.len() as u64, None, 0, None);
         mach.mem[split(p).0].bytes.clone_from(&s.bytes);
         mach.mem[split(p).0].fixed = true;
+    }
+    for a in argv {
+        let data = mach.block(a.len() as u64, None, 0, None);
+        mach.mem[split(data).0].bytes = a.as_bytes().to_vec();
+        let carrier = mach.block(24, None, 0, None);
+        mach.store(carrier, 8, data);
+        mach.store(carrier + 8, 8, a.len() as u64);
+        mach.mem[split(data).0].fixed = true;
+        mach.mem[split(carrier).0].fixed = true;
+        mach.world.args.push(carrier);
     }
     for shape in &m.types {
         let fields: Vec<&hirsel_core_layout::Field> = match &shape.body {
@@ -197,6 +263,8 @@ pub fn run_injected(
         used: mach.limits[0].used,
         trace: mach.trace,
         admissions: mach.admissions,
+        stdout: mach.world.stdout,
+        stderr: mach.world.stderr,
     }
 }
 
@@ -222,6 +290,148 @@ impl Machine<'_> {
     // ---- memory
     /// Rc and Arc counts differ in atomicity only, which one task cannot observe;
     /// what the evaluator checks is that every operation names its node's kind.
+    /// A `String` or `Bytes` carrier's bytes, data pointer, length and capacity.
+    fn carrier(&self, c: u64) -> (Vec<u8>, u64, u64, u64) {
+        let (data, len, cap) = (self.load(c, 8), self.load(c + 8, 8), self.load(c + 16, 8));
+        let bytes = match len {
+            0 => Vec::new(),
+            n => self.get(data, n as usize).to_vec(),
+        };
+        (bytes, data, len, cap)
+    }
+    /// A provider row against [`World`]: an outcome `value, error, code, written`.
+    fn host(&mut self, op: HostOp, a: &[u64]) -> X<Vec<u64>> {
+        const NOT_FOUND: u64 = 1;
+        const DENIED: u64 = 2;
+        const EXISTS: u64 = 3;
+        let ok = |value: u64, written: u64| vec![value, 0, 0, written];
+        let error = |e: u64| vec![0, e, 0, 0];
+        let file = |h: u64| (h - FILE_BASE) as usize;
+        Ok(match op {
+            HostOp::WallMs | HostOp::MonoNs => {
+                self.world.clock += 1;
+                vec![self.world.clock - 1]
+            }
+            HostOp::Stdout | HostOp::Stderr => {
+                let (bytes, ..) = self.carrier(a[1]);
+                let n = bytes.len() as u64;
+                match op {
+                    HostOp::Stdout => self.world.stdout.extend(bytes),
+                    _ => self.world.stderr.extend(bytes),
+                }
+                ok(0, n)
+            }
+            HostOp::Open => {
+                let key = (a[0], self.carrier(a[1]).0);
+                let w = &mut self.world;
+                let at = match (w.nodes.get(&key), a[2]) {
+                    (Some(Node::Dir), _) => return Ok(error(DENIED)),
+                    (None, 0) => return Ok(error(NOT_FOUND)),
+                    (Some(_), 3) => return Ok(error(EXISTS)),
+                    (Some(Node::File(c)), 2) => c.len(),
+                    (Some(_), 0) => 0,
+                    _ => {
+                        let keep = a[2] == 2;
+                        let n = w.nodes.entry(key.clone()).or_insert(Node::File(Vec::new()));
+                        if let Node::File(c) = n
+                            && !keep
+                        {
+                            c.clear();
+                        }
+                        0
+                    }
+                };
+                w.files.push(Some(OpenFile {
+                    key,
+                    at,
+                    locked: false,
+                }));
+                ok(FILE_BASE + w.files.len() as u64 - 1, 0)
+            }
+            HostOp::Read => {
+                let (_, data, len, cap) = self.carrier(a[1]);
+                let i = file(a[0]);
+                let f = self.world.files[i].as_ref().expect("an open file");
+                let Some(Node::File(c)) = self.world.nodes.get(&f.key) else {
+                    return Ok(error(NOT_FOUND));
+                };
+                let n = (cap.saturating_sub(len) as usize).min(c.len() - f.at);
+                let bytes = c[f.at..f.at + n].to_vec();
+                if n > 0 {
+                    self.put(data + len, &bytes);
+                    self.store(a[1] + 8, 8, len + n as u64);
+                }
+                self.world.files[i].as_mut().unwrap().at += n;
+                ok(n as u64, 0)
+            }
+            HostOp::Write => {
+                let (bytes, ..) = self.carrier(a[1]);
+                let i = file(a[0]);
+                let f = self.world.files[i].as_mut().expect("an open file");
+                let Some(Node::File(c)) = self.world.nodes.get_mut(&f.key) else {
+                    return Ok(error(NOT_FOUND));
+                };
+                let end = f.at + bytes.len();
+                if c.len() < end {
+                    c.resize(end, 0);
+                }
+                c[f.at..end].copy_from_slice(&bytes);
+                f.at = end;
+                ok(0, bytes.len() as u64)
+            }
+            HostOp::Close => {
+                let i = file(a[0]);
+                self.world.files[i] = None;
+                ok(0, 0)
+            }
+            HostOp::TryLock | HostOp::Unlock => {
+                let i = file(a[0]);
+                let key = self.world.files[i]
+                    .as_ref()
+                    .expect("an open file")
+                    .key
+                    .clone();
+                let held =
+                    self.world.files.iter().enumerate().any(|(j, f)| {
+                        j != i && f.as_ref().is_some_and(|f| f.locked && f.key == key)
+                    });
+                let take = op == HostOp::TryLock;
+                if take && held {
+                    return Ok(ok(0, 0));
+                }
+                self.world.files[i].as_mut().unwrap().locked = take;
+                ok(u64::from(take), 0)
+            }
+            HostOp::Mkdir => {
+                let key = (a[0], self.carrier(a[1]).0);
+                if self.world.nodes.contains_key(&key) {
+                    return Ok(error(EXISTS));
+                }
+                self.world.nodes.insert(key, Node::Dir);
+                ok(0, 0)
+            }
+            HostOp::Remove | HostOp::RemoveTree => {
+                let key = (a[0], self.carrier(a[1]).0);
+                match self.world.nodes.remove(&key) {
+                    Some(_) => ok(0, 0),
+                    None => error(NOT_FOUND),
+                }
+            }
+            HostOp::Mkdtemp => {
+                let (_, data, len, cap) = self.carrier(a[1]);
+                if len + 32 > cap {
+                    return Err(Stop::Cause("Bounds"));
+                }
+                let k = self.world.temporaries;
+                self.world.temporaries += 1;
+                let name = format!("t{k}").into_bytes();
+                self.put(data + len, &name);
+                self.store(a[1] + 8, 8, len + name.len() as u64);
+                self.world.nodes.insert((a[0], name), Node::Dir);
+                ok(DIR_BASE + k, 0)
+            }
+        })
+    }
     fn kind(&self, p: u64, kind: Counted) {
         let made = self.mem[split(p).0].counted;
         assert_eq!(
@@ -428,7 +638,14 @@ impl Machine<'_> {
             // The provider closes the file and ignores the outcome (core.md,
             // MEM-24); the trace records the close by its handle.
             FieldTy::Handle(Handle::HostFile) => {
-                self.trace.push(self.load(at, 8));
+                let h = self.load(at, 8);
+                self.trace.push(h);
+                if let Some(file) = h
+                    .checked_sub(FILE_BASE)
+                    .and_then(|i| self.world.files.get_mut(i as usize))
+                {
+                    *file = None;
+                }
                 false
             }
             FieldTy::Box(x) => {
@@ -646,6 +863,9 @@ impl Machine<'_> {
                 self.dests += 1;
                 vec![self.dests]
             }
+            RtOp::ArgsLen => vec![self.world.args.len() as u64],
+            RtOp::ArgsGet => vec![self.world.args.get(a[1] as usize).copied().unwrap_or(0)],
+            RtOp::Host(op) => self.host(op, a)?,
             RtOp::CompareBytes => {
                 let range = |p: u64, n: u64| match n {
                     0 => Vec::new(),

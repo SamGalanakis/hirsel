@@ -62,6 +62,20 @@ impl Function<'_, '_, '_> {
                 outputs[0] = self.c_call("hirsel_core_dest_id", &[], &[U], &[])?[0];
                 1
             }
+            RtOp::ArgsLen => {
+                outputs[0] = self.c_call(
+                    "hirsel_core_args_len",
+                    &[P, U],
+                    &[U],
+                    &[self.context, args[0]],
+                )?[0];
+                1
+            }
+            // The run time's carrier-returning `args_get` and its `host_op` entry
+            // (FORM decision 50) are not built yet.
+            RtOp::ArgsGet | RtOp::Host(_) => {
+                return Err(unsupported(format!("provider row {op:?}")));
+            }
             RtOp::CompareBytes => {
                 outputs[0] = self.c_call(
                     "hirsel_core_compare_bytes",

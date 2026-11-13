@@ -228,6 +228,9 @@ fn rt(op: RtOp) -> String {
         RtOp::Receive { item } => format!("rt.receive[t{}]", item.0),
         RtOp::DestId => "rt.dest_id".into(),
         RtOp::CompareBytes => "rt.compare_bytes".into(),
+        RtOp::ArgsLen => "rt.args_len".into(),
+        RtOp::ArgsGet => "rt.args_get".into(),
+        RtOp::Host(op) => format!("rt.{}", op.name()),
     }
 }
 fn list<T>(items: impl IntoIterator<Item = T>, f: impl Fn(T) -> String) -> String {
@@ -1416,7 +1419,12 @@ impl BodyParser {
                 "receive" => RtOp::Receive { item: tys(1)?[0] },
                 "dest_id" => RtOp::DestId,
                 "compare_bytes" => RtOp::CompareBytes,
-                _ => return Err(format!("unknown engine operation `{t}`")),
+                "args_len" => RtOp::ArgsLen,
+                "args_get" => RtOp::ArgsGet,
+                _ => match HostOp::ALL.into_iter().find(|op| op.name() == name) {
+                    Some(op) => RtOp::Host(op),
+                    None => return Err(format!("unknown engine operation `{t}`")),
+                },
             })
         } else {
             return Err(format!("bad callee `{t}`"));

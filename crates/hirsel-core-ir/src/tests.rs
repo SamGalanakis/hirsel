@@ -23,6 +23,7 @@ const SAMPLES: &[(&str, &str)] = &[
     ("variants", include_str!("../samples/variants.core")),
     ("sequences", include_str!("../samples/sequences.core")),
     ("strings", include_str!("../samples/strings.core")),
+    ("providers", include_str!("../samples/providers.core")),
 ];
 
 fn load(name: &str, text: &str) -> Module {
@@ -157,12 +158,17 @@ fn samples_behave_as_derived_by_hand() {
         let mut runs = 0;
         let m = load(name, text);
         for line in text.lines() {
-            // `; run [limit N]: fK(args) -> results | used N | trace a, b`, or
-            // `-> fail Cause, ...`; `used` and `trace` are checked when written.
+            // `; run [limit N] [args a b]: fK(args) -> results | used N | trace a, b
+            // | out text | err text`, or `-> fail Cause, ...`; each check after the
+            // results is made when written (`\n` in a text is a newline).
             let Some(run) = line.strip_prefix("; run") else {
                 continue;
             };
             let (head, run) = run.split_once(':').unwrap();
+            let (head, argv) = match head.split_once("args") {
+                Some((h, a)) => (h, a.split_whitespace().collect()),
+                None => (head, Vec::new()),
+            };
             let limit = match head.trim().strip_prefix("limit") {
                 Some(n) => n.trim().parse().unwrap(),
                 None => u64::MAX,
@@ -183,7 +189,7 @@ fn samples_behave_as_derived_by_hand() {
                     Param::Address(_) => panic!("by-address arguments are FORM v1"),
                 })
                 .collect();
-            let got = eval::run(&m, f, &args, limit);
+            let got = eval::run_args(&m, f, &args, limit, &argv);
             let want = match expected.trim() {
                 e if e.starts_with("fail") => eval::Outcome::Failed(
                     e["fail".len()..]
@@ -214,6 +220,15 @@ fn samples_behave_as_derived_by_hand() {
                             .map(|v| v.trim().parse().unwrap())
                             .collect();
                         assert_eq!(got.trace, want, "{name}: {run}: trace");
+                    }
+                    "out" | "err" => {
+                        let want = value.replace("\\n", "\n");
+                        let got = if key == "out" {
+                            &got.stdout
+                        } else {
+                            &got.stderr
+                        };
+                        assert_eq!(String::from_utf8_lossy(got), want, "{name}: {run}: {key}");
                     }
                     k => panic!("unknown run check `{k}`"),
                 }

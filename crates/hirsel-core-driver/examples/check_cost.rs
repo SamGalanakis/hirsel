@@ -1,5 +1,5 @@
 //! Diagnostic runner: profile instructions and export semantic results for comparison.
-use hirsel_core_driver::{CheckRequest, Driver, LibraryInput, Meter};
+use hirsel_core_driver::{CheckRequest, Driver, LibraryInput, Meter, PackageProduct};
 use hirsel_core_front::cost;
 use hirsel_intern::instructions::InstructionCounter;
 use serde_json::json;
@@ -8,8 +8,29 @@ hirsel_guard::install!();
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.len() == 3 && args[0] == "produce" {
+        let cache = Path::new(&args[1]);
+        let mut meter = Meter::new(false);
+        PackageProduct::bundled(cache, &mut meter)?;
+        let mut inputs: hirsel_core_resolve::CorpusManifest =
+            serde_json::from_slice(&std::fs::read(&args[2])?)?;
+        inputs
+            .packages
+            .retain(|p| ["core", "std"].contains(&p.package.name.as_str()));
+        Driver::default().check_reachable_with_product(
+            CheckRequest {
+                inputs,
+                entry: None,
+                store: cache.join("prepare"),
+                library: LibraryInput::Sources,
+            },
+            cache,
+            &mut meter,
+        )?;
+        return Ok(());
+    }
     if args.len() < 3 {
-        return Err("usage: check_cost <inputs.json> <new-store> <output.json> [--profile] [--instances <entry>]".into());
+        return Err("usage: check_cost <inputs.json> <new-store> <output.json> [--profile] [--instances <entry>] [--product <cache> --entry <entry>]; or produce <cache> <inputs.json>".into());
     }
     if args.iter().any(|a| a == "--profile") {
         let counter = InstructionCounter::open()?;
@@ -19,10 +40,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         inputs: serde_json::from_slice(&std::fs::read(&args[0])?)?,
         store: PathBuf::from(&args[1]),
         library: LibraryInput::Sources,
-        entry: None,
+        entry: if let Some(at) = args.iter().position(|a| a == "--entry") {
+            Some(
+                hirsel_core_ids::DefPath::from_full(args.get(at + 1).ok_or("missing entry")?)
+                    .ok_or("invalid entry")?,
+            )
+        } else {
+            None
+        },
     };
     let mut meter = Meter::new(true);
-    let product = Driver::default().check(request, &mut meter)?;
+    let product = if let Some(at) = args.iter().position(|a| a == "--product") {
+        Driver::default().check_reachable_with_product(
+            request,
+            Path::new(args.get(at + 1).ok_or("missing product cache")?),
+            &mut meter,
+        )?
+    } else {
+        Driver::default().check(request, &mut meter)?
+    };
     let instances = if let Some(at) = args.iter().position(|a| a == "--instances") {
         let entry =
             hirsel_core_ids::DefPath::from_full(args.get(at + 1).ok_or("missing instance entry")?)
@@ -43,7 +79,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err(error.clone().into());
     }
     let definitions: Vec<_> = product.definitions.values().map(|d| {
-        let definition = product.index.definitions().find(|(id,_)| product.index.definition_path(*id) == d.definition).unwrap().1;
+        let index = &product.index;
+        let module = index.module(&hirsel_core_resolve::ModulePath { package: d.definition.0.package.clone(), modules: d.definition.0.modules.clone() }).unwrap();
+        let definition = index.get(index.definition(module, index.symbols.find(&d.definition.0.name).unwrap()).unwrap());
         let file = product.files.iter().find(|f| f.module == definition.site.module).unwrap();
         let item = file.syntax.item(definition.site.item as usize);
         let mut instance_refs = Vec::new();

@@ -1654,6 +1654,16 @@ fn push_ascii(mut s: String, take o: Bytes) -> Result[(), Capacity] {
     }
 }
 
+// fdlibm constants: ln2 split into high/low parts, its inverse, and Remez coefficients.
+const EXP_LN2_HI: f64 = 6.93147180369123816490e-01 // 0x3fe62e42fee00000
+const EXP_LN2_LO: f64 = 1.90821492927058770002e-10 // 0x3dea39ef35793c76
+const EXP_INVLN2: f64 = 1.44269504088896338700e+00 // 0x3ff71547652b82fe
+const EXP_P1: f64 = 1.66666666666666019037e-01 // 0x3FC555555555553E
+const EXP_P2: f64 = -2.77777777770155933842e-03 // 0xBF66C16C16BEBD93
+const EXP_P3: f64 = 6.61375632143793436117e-05 // 0x3F11566AAF25DE2C
+const EXP_P4: f64 = -1.65339022054652515390e-06 // 0xBEBBBD41C5D26BF1
+const EXP_P5: f64 = 4.13813679705723846039e-08 // 0x3E66376972BEA4D0
+
 /// e^x within 1 ulp, after fdlibm's e_exp.c (Sun, 1993; FreeBSD's msun and Rust's libm
 /// crate carry the same code): x = k ln2 + r with |r| <= 0.5 ln2, a degree-5 Remez
 /// polynomial for e^r, then k added to the exponent. Overflows to inf above
@@ -1661,17 +1671,6 @@ fn push_ascii(mut s: String, take o: Bytes) -> Result[(), Capacity] {
 /// exp(-inf) is 0. Alloc: nothing. Cost: O(1).
 /// Ex: `let decay = float.exp(-t / tau)`
 pub fn exp(x: f64) -> f64 {
-    // fdlibm's constants (bit patterns in comments): ln2 split into 32 high bits and the rest,
-    // 1/ln2, and the Remez coefficients of R(r^2) on [0, 0.347^2] (error below 2^-59). They are
-    // lets, not consts: the front reads a const's bare float literal as a grant (LANG-3).
-    let ln2_hi: f64 = 6.93147180369123816490e-01 // 0x3fe62e42fee00000
-    let ln2_lo: f64 = 1.90821492927058770002e-10 // 0x3dea39ef35793c76
-    let invln2: f64 = 1.44269504088896338700e+00 // 0x3ff71547652b82fe
-    let p1: f64 = 1.66666666666666019037e-01 // 0x3FC555555555553E
-    let p2: f64 = -2.77777777770155933842e-03 // 0xBF66C16C16BEBD93
-    let p3: f64 = 6.61375632143793436117e-05 // 0x3F11566AAF25DE2C
-    let p4: f64 = -1.65339022054652515390e-06 // 0xBEBBBD41C5D26BF1
-    let p5: f64 = 4.13813679705723846039e-08 // 0x3E66376972BEA4D0
     let bits = float.to_bits64(x)
     let hx = (bits >> 32) & 0x7fffffff
     let negative = bits >> 63 != 0
@@ -1706,12 +1705,12 @@ pub fn exp(x: f64) -> f64 {
         if hx < 0x3FF0A2B2 {
             // and |x| < 1.5 ln2: k is 1 or -1.
             if negative {
-                hi = x + ln2_hi
-                lo = -ln2_lo
+                hi = x + EXP_LN2_HI
+                lo = -EXP_LN2_LO
                 k = -1
             } else {
-                hi = x - ln2_hi
-                lo = ln2_lo
+                hi = x - EXP_LN2_HI
+                lo = EXP_LN2_LO
                 k = 1
             }
         } else {
@@ -1720,15 +1719,15 @@ pub fn exp(x: f64) -> f64 {
             } else {
                 0.5
             }
-            let nearest: Result[i64, FloatError] = float.to_int(invln2 * x + half)
+            let nearest: Result[i64, FloatError] = float.to_int(EXP_INVLN2 * x + half)
             k = match nearest {
                 Ok(v) => v,
                 Error(_) => fail("float.exp: |x| < 746 makes k fit"),
             }
             let t: f64 = float.from_int(k)
-            // t x ln2_hi is exact: ln2_hi has 32 significant bits and |k| < 1076.
-            hi = x - t * ln2_hi
-            lo = t * ln2_lo
+            // t x EXP_LN2_HI is exact: EXP_LN2_HI has 32 significant bits and |k| < 1076.
+            hi = x - t * EXP_LN2_HI
+            lo = t * EXP_LN2_LO
         }
         r = hi - lo
     } else if hx < 0x3e300000 {
@@ -1736,7 +1735,7 @@ pub fn exp(x: f64) -> f64 {
         return 1.0 + x
     }
     let t = r * r
-    let c = r - t * (p1 + t * (p2 + t * (p3 + t * (p4 + t * p5))))
+    let c = r - t * (EXP_P1 + t * (EXP_P2 + t * (EXP_P3 + t * (EXP_P4 + t * EXP_P5))))
     if k == 0 {
         return 1.0 - ((r * c) / (c - 2.0) - r)
     }

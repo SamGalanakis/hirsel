@@ -2213,6 +2213,57 @@ fn aggregate_constants_publish_values_and_use_read_only_tables() {
 }
 
 #[test]
+fn constant_literals_are_not_type_grants() {
+    let source =
+        "const P: f64 = 1.5e-01\nconst N: i64 = -7\nconst B: bool = true\nconst C: char = 'x'";
+    let (index, inputs) = program_inputs(source);
+    let p = Program::declare(&index, &inputs);
+    assert!(p.refusals.is_empty(), "{:?}", p.refusals);
+    assert!(p.gaps.is_empty(), "{:?}", p.gaps);
+    for (name, bits) in [
+        ("P", 0x3fc3333333333333),
+        ("N", (-7i64) as u64),
+        ("B", 1),
+        ("C", 120),
+    ] {
+        let c = p.constants.iter().find(|c| c.path.0.name == name).unwrap();
+        assert_eq!(
+            c.value.unwrap().data,
+            crate::ConstData::Bits(bits),
+            "{name}"
+        );
+    }
+    let failures = run_case(&root().join("cases/body/constant-literals.hirsel"));
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
+fn invalid_grants_and_constants_keep_their_own_rules_and_sites() {
+    for (source, rule, token) in [
+        (
+            "resource type R grant bytes 1.5 { n: u64 } drop(r) {}",
+            "LANG-5",
+            "1.5",
+        ),
+        (
+            "resource type R grant bytes 18446744073709551616 { n: u64 } drop(r) {}",
+            "LANG-3",
+            "18446744073709551616",
+        ),
+        ("const BAD: u8 = 256", "LANG-20", "256"),
+        ("const BAD: String = \"hello\"", "LANG-20", "\"hello\""),
+    ] {
+        let (index, inputs) = program_inputs(source);
+        let p = Program::declare(&index, &inputs);
+        let refusals = &p.refusals;
+        assert_eq!(refusals.len(), 1, "{source}: {refusals:?}");
+        assert_eq!(refusals[0].rule, rule, "{source}: {refusals:?}");
+        let span = refusals[0].primary.span;
+        assert_eq!(&source[span.start as usize..span.end as usize], token);
+    }
+}
+
+#[test]
 fn aggregate_constant_errors_are_checked_before_use() {
     for source in [
         "const BAD: Inline[u8,2] = [1,256]",

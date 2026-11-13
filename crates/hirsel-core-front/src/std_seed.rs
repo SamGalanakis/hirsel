@@ -169,7 +169,10 @@ fn std_bodies_never_halt_silently() {
 
 /// The checker's outcome per std body and per contract test, as a markdown report.
 fn std_seed_check() -> String {
-    let corpus = manifest().load().expect("std seed reads");
+    check_corpus(manifest().load().expect("std seed reads"))
+}
+
+fn check_corpus(corpus: hirsel_core_resolve::Corpus) -> String {
     let parsed = corpus.parse();
     let index = corpus.index(&parsed);
     let modules: Vec<ModuleInput> = corpus
@@ -238,6 +241,13 @@ fn std_seed_check() -> String {
         };
         rows.push((module, m.name.clone(), outcome));
     }
+    for ((module, item), why) in by_item {
+        rows.push((
+            module,
+            format!("declaration item {item}"),
+            format!("refused: {}", why.join("; ")),
+        ));
+    }
     emitter
         .materialize_instances()
         .expect("materialize seed instances");
@@ -287,13 +297,13 @@ fn std_seed_check() -> String {
     let count = |k: &str| rows.iter().filter(|r| r.2.starts_with(k)).count();
     let _ = writeln!(
         out,
-        "Bodies: {} accepted, {} refused, {} gap, {} not emitted.\n",
+        "Items: {} accepted, {} refused, {} gap, {} not emitted.\n",
         count("accepted"),
         count("refused"),
         count("gap"),
         count("not emitted")
     );
-    let _ = writeln!(out, "| Module | Function | Outcome |\n|---|---|---|");
+    let _ = writeln!(out, "| Module | Item | Outcome |\n|---|---|---|");
     for (m, f, o) in &rows {
         let _ = writeln!(out, "| {m} | {f} | {o} |");
     }
@@ -446,4 +456,33 @@ fn generic_numeric_core_contracts() {
         let error = run_expect(&emitter.module, &functions, call, want);
         assert!(error.is_none(), "{call}: {error:?}");
     }
+}
+
+#[test]
+fn seed_report_keeps_refusals_on_constant_items() {
+    let mut corpus = manifest().load().unwrap();
+    // Keep the real core package but replace std bodies with a constant-only module.
+    corpus.sources.retain(|s| s.module.package.name == "core");
+    let std = corpus
+        .manifest
+        .packages
+        .iter_mut()
+        .find(|p| p.package.name == "std")
+        .unwrap();
+    std.sources.truncate(1);
+    let source = &std.sources[0];
+    corpus.sources.push(hirsel_core_resolve::CorpusSource {
+        module: hirsel_core_resolve::ModulePath {
+            package: std.package.clone(),
+            modules: source.modules.clone(),
+        },
+        file: source.file.clone(),
+        text: "const BAD: u8 = 256".into(),
+        mode: hirsel_core_syntax::ParseMode::Source,
+    });
+    let report = check_corpus(corpus);
+    assert!(
+        report.contains("declaration item 0 | refused: LANG-20"),
+        "{report}"
+    );
 }

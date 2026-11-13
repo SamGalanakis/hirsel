@@ -445,11 +445,22 @@ impl Program<'_> {
                             }
                         }
                         NodeKind::Drop => drop = Some(c),
-                        NodeKind::Literal => {
+                        NodeKind::Literal
+                            if matches!(
+                                root.kind,
+                                NodeKind::TypeDecl
+                                    | NodeKind::StableType
+                                    | NodeKind::ResourceType
+                                    | NodeKind::ScopedType
+                            ) =>
+                        {
                             grant = literal_length(item, c).unwrap_or_else(|| {
                                 self.refusals.push(refusal(
                                     "LANG-3",
-                                    self.site(at, c),
+                                    Site {
+                                        span: item.token_span(n.token.unwrap()),
+                                        ..self.site(at, c)
+                                    },
                                     "a grant is an integer literal fitting u64",
                                 ));
                                 0

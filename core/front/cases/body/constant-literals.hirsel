@@ -1,0 +1,22 @@
+// Scalar literal constants are values, never type grants.
+// IEEE754 0.15 is 0x3fc3333333333333; other values are exact.
+// expect: accept
+// expect: run float_bits() = 4594572339843380019
+// expect: run negative_integer() = -7
+// expect: run boolean() = true
+// expect: run character() = 120
+const FRACTION: f64 = 1.5e-01
+const NEGATIVE: i64 = -7
+const YES: bool = true
+const LETTER: char = 'x'
+fn float_bits() -> u64 { float.to_bits64(FRACTION) }
+fn negative_integer() -> i64 { NEGATIVE }
+fn boolean() -> bool { YES }
+fn character() -> u32 { char.to_u32(LETTER) }
+pub fn main() -> Result[(), Exit] {
+    if float_bits() == 4594572339843380019u64 && negative_integer() == -7i64 && boolean() && character() == 120u32 {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
+}

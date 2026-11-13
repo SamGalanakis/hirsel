@@ -286,3 +286,22 @@ fn bodied_core_operations_cranelift() { bodied_core_operations(Backend::Cranelif
 #[test]
 #[ignore = "explicit native integration target"]
 fn bodied_core_operations_llvm() { bodied_core_operations(Backend::Llvm); }
+fn causes_iteration_kind(backend: Backend) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let source = include_str!("../../../core/front/cases/body/causes-kind.hirsel");
+    let mut request = source_request(source, dir.path());
+    request.inputs.packages[1] = PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
+    let mut options = native_options(backend, dir.path());
+    options.grant_mask = 1 << 9;
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let built = product.build(&entry, &options).unwrap();
+    run_clean(&built.executable, 0);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn causes_iteration_kind_cranelift() { causes_iteration_kind(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn causes_iteration_kind_llvm() { causes_iteration_kind(Backend::Llvm); }

@@ -1,0 +1,29 @@
+// expect: accept
+resource type Marker: send { id: u64 }
+  drop(m) { fail("tail") }
+fn child(take x: Marker) -> u64 { fail("data") }
+pub fn main(tasks: Tasks) -> Result[(), Exit] {
+  let x = result.unwrap(Marker(id: 7u64))
+  let h = result.unwrap(task.spawn(tasks, bytes 64, take x, child))
+  match task.join(take h) {
+    Error(Failed(take cs)) => {
+      let mut n: u64 = 0
+      let mut previous: Option[Site] = None
+      for c in cs {
+        match c.kind {
+          Fail(m) => {
+            if (n == 0 && m != "data") || (n == 1 && m != "tail") { return Error(Exit(status: 1)) }
+            if let Some(site) = previous {
+              if c.site == site { return Error(Exit(status: 2)) }
+            }
+            previous = Some(c.site)
+          },
+          _ => return Error(Exit(status: 3))
+        }
+        n += 1
+      }
+      if n == 2 { Ok(()) } else { Error(Exit(status: 4)) }
+    },
+    _ => Error(Exit(status: 5))
+  }
+}

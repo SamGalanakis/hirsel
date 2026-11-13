@@ -535,6 +535,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let range = self.kind(ungrouped) == NodeKind::Binary
             && matches!(self.token_text(ungrouped), ".." | "..=");
         let freezes = self.freezes.len();
+        let mut causes = false;
         let (elem, start, limit, inclusive, sequence) = if range {
             if self.kind(n) == NodeKind::ForTake {
                 self.refuse(
@@ -602,10 +603,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     (pair, None)
                 }
                 TyKind::Error => return (ERROR, None),
-                TyKind::Adt(d, _)
-                    if is_core_prelude(&self.p.decls[d.index()].path, &["Causes"]) =>
-                {
-                    return self.gap_ty(source, "iteration of Causes needs runtime reader rows");
+                TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::Causes) => {
+                    let Some(cause) = self.p.core_decl("Cause") else {
+                        return self.gap_ty(source, "the core Cause declaration is not available");
+                    };
+                    causes = true;
+                    (self.t.mk(TyKind::Adt(cause, vec![])), None)
                 }
                 _ => {
                     self.refuse("LANG-16", source, "this source is not iterable");
@@ -626,8 +629,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             if !consuming && let Some(at) = at {
                 self.freeze(at.place, Hold::View(Extent::Block(self.depth + 1)));
             }
-            let start = self.konst(Ty::Scalar(Scalar::U64), 0, n);
+            let start = if causes {
+                value.filter(|_| self.live()).map(|v| self.read_sequence_word(v, 0, Ty::Ptr, n))
+            } else {
+                self.konst(Ty::Scalar(Scalar::U64), 0, n)
+            };
             let limit = match count {
+                _ if causes => self.konst(Ty::Ptr, 0, n),
                 Some(count) => self.konst(Ty::Scalar(Scalar::U64), count, n),
                 None if matches!(self.t.kind(inner), TyKind::Adt(d, _) if matches!(self.p.decls[d.index()].role, Some(Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan))) => {
                     value.and_then(|v| self.span_parts(v, n).map(|p| p.3))
@@ -639,8 +647,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             (elem, start, limit, false, Some((inner, value)))
         };
         let index_ty = if range { elem } else { scalar(Scalar::U64) };
-        let index_ir = self.ir_ty(index_ty);
-        let index_slot = self.slot(index_ty, start, n);
+        let index_ir = if causes { Some(Ty::Ptr) } else { self.ir_ty(index_ty) };
+        let index_slot = if causes {
+            start.filter(|_| self.live()).map(|value| {
+                let slot = self.new_slot(PlaceTy::Value(Ty::Ptr), n);
+                self.inst(Inst::Store { address: slot, value }, n);
+                slot
+            })
+        } else {
+            self.slot(index_ty, start, n)
+        };
         let drain_data = if consuming {
             match (sequence, index_slot, limit) {
                 (Some((_, Some(header))), Some(next), Some(end)) if self.live() => {
@@ -695,7 +711,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.inst(
                 Inst::Compare {
                     result: condition,
-                    op: if inclusive {
+                    op: if causes {
+                        CompareOp::Ne
+                    } else if inclusive {
                         CompareOp::Le
                     } else {
                         CompareOp::Lt
@@ -718,7 +736,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.depth += 1;
         let value = match (flow, sequence) {
             (Some((_, advance, _, index, _, _, _)), Some((collection, Some(pointer)))) => {
-                if matches!(self.t.kind(collection), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::Map))
+                if causes {
+                    self.runtime_row(hirsel_core_ir::RtOp::CauseValue, &[Arg::Value(index)], n).map(|v| v[0])
+                } else if matches!(self.t.kind(collection), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::Map))
                 {
                     self.map_pair(pointer, collection, index, elem, advance, n)
                 } else if matches!(self.t.kind(collection), TyKind::Adt(d, _) if matches!(self.p.decls[d.index()].role, Some(Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan)))
@@ -827,6 +847,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             if consuming {
                 self.jump(head, &[], n);
+            } else if causes {
+                if let Some(value) = self.runtime_row(hirsel_core_ir::RtOp::CauseNext, &[Arg::Value(index)], n) {
+                    self.inst(Inst::Store { address: index_slot, value: value[0] }, n);
+                    self.jump(head, &[], n);
+                }
             } else {
                 let one = self.konst(index_ir, 1, n).unwrap();
                 let next = self.value(index_ir);

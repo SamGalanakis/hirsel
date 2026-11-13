@@ -1,2 +1,2 @@
-// expect: gap iteration of Causes needs runtime reader rows
+// expect: accept
 fn f(cs: Causes) { for c in cs {} }

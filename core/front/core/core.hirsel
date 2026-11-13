@@ -59,3 +59,7 @@ pub opaque type Tasks
 pub type JoinError = Failed(Causes) | Cancelled(Causes)
 pub type IoError = NotFound | Denied | Exists | Closed | Other(u32)
 pub type WriteError { written: u64, error: IoError }
+
+pub opaque type Site
+pub type Cause { kind: CauseKind, site: Site }
+pub type CauseKind = Overflow | Bounds | Division | Unwrap | Fail(String) | Cancelled | Capacity

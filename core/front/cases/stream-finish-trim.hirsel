@@ -1,0 +1,30 @@
+// expect: run go(1) = 508
+// expect: run go(0) = 590
+// MEM-4, MEM-24: a stream blob of n bytes is charged round8(n) until finish_trim lowers
+// it to round8(used) and refunds the rest to the limit; finish keeps the whole charge.
+// Under 80 bytes the 64-byte blob leaves 16; the Text root "hello" uses 8 + 5 = 13, so
+// finish_trim keeps 16 and refunds 48, and a List[u64] of capacity 8 (64 bytes) then
+// fits in exactly 16 + 48. After finish it is refused. The text reads back as 5 bytes.
+fn make(r: Region, trim: u64) -> Result[Text in r, BuildError] {
+  match build_stream_in(r, bytes 64, fn(take t: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
+    writer.push(mut t, "hello")?
+    writer.close(take t)
+  }) {
+    Ok(take b) => if trim == 1 { Ok(finish_trim(take b)) } else { Ok(finish(take b)) },
+    Error(e) => Error(e),
+  }
+}
+fn go(trim: u64) -> u64 {
+  let got = bound bytes 80 {
+    region r {
+      match make(r, trim) {
+        Ok(t) => {
+          let after: Result[List[u64], Capacity] = list.with_capacity(8)
+          match after { Ok(xs) => text.len(t) * 100 + list.capacity(xs), Error(_) => text.len(t) * 100 + 90 }
+        },
+        Error(_) => 99,
+      }
+    }
+  }
+  match got { Ok(k) => k, Error(_) => 2 }
+}

@@ -899,6 +899,16 @@ fn stream_text_temp_cranelift() { stream_text_temp(Backend::Cranelift); }
 #[test]
 #[ignore = "explicit native integration target"]
 fn stream_text_temp_llvm() { stream_text_temp(Backend::Llvm); }
+/// MEM-24: finish_trim refunds round8(n) - round8(used) to the limit, on each engine.
+fn stream_finish_trim(backend: Backend) {
+    run_lines_native(backend, include_str!("../../../core/front/cases/stream-finish-trim.hirsel"));
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn stream_finish_trim_cranelift() { stream_finish_trim(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn stream_finish_trim_llvm() { stream_finish_trim(Backend::Llvm); }
 
 fn uninitialized_take_names(backend: Backend) {
     let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

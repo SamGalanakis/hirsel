@@ -929,11 +929,30 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 Some(self.pointer(to, n))
             }
             ("core", "finish_trim") => {
-                self.gap(
+                // MEM-24: lower the blob's charge from round8(n) to round8(used), then
+                // publish as `finish` does.
+                let u64t = Ty::Scalar(Scalar::U64);
+                let b = AddressBase::Value(vals[0]?);
+                let blob = self.get_word(b, 0, Ty::Ptr, n)?;
+                let root = self.get_word(b, 8, u64t, n)?;
+                let used = self.get_word(b, 16, u64t, n)?;
+                let region = self.get_word(b, 24, Ty::Ptr, n)?;
+                let entry = self.get_word(b, 32, u64t, n)?;
+                let bytes = self.get_word(AddressBase::Value(blob), 0, u64t, n)?;
+                let previous = self.round8(bytes, n)?;
+                let charge = self.round8(used, n)?;
+                self.inst(
+                    Inst::Trim {
+                        block: blob,
+                        region,
+                        entry,
+                        previous,
+                        charge,
+                    },
                     n,
-                    "finish_trim needs a region refund instruction (FOR FORM)",
                 );
-                None
+                let to = self.new_locator(tys[0], blob, root, n)?;
+                Some(self.pointer(to, n))
             }
             ("writer", "append") => {
                 let shape = self.shape(tys[0]);
@@ -1057,7 +1076,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         self.jump(join, &[], n);
         self.start(admit);
-        let blob = self.admit_blob(region, bytes, to, eid, join, n)?;
+        let (blob, entry) = self.admit_blob(region, bytes, true, to, eid, join, n)?;
         let wv = self.u64k(w, n)?;
         let head = self.u64k(HEAD, n)?;
         self.put_word(AddressBase::Value(blob), &[], 0, bytes, n)?;
@@ -1087,24 +1106,33 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
             n,
         );
+        // The builder also keeps what `finish_trim` refunds against: the bytes used,
+        // the region and the payer entry its blob was admitted under (MEM-24).
         let ok = [Step::CaseField { case: 0, field: 0 }];
+        let used = self.state_word(state, 8, u64t, n)?;
+        let used = self.word_op(BinaryOp::Sub, used, head, n);
         self.put_word(AddressBase::Address(to), &ok, 0, blob, n)?;
         self.put_word(AddressBase::Address(to), &ok, 8, head, n)?;
+        self.put_word(AddressBase::Address(to), &ok, 16, used, n)?;
+        self.put_word(AddressBase::Address(to), &ok, 24, region, n)?;
+        self.put_word(AddressBase::Address(to), &ok, 32, entry?, n)?;
         self.jump(join, &[], n);
         self.close_build_sinks(sinks, state, to, eid, join, n)
     }
     /// Admit a blob of `bytes` after its 16-byte head in `region`, charged round8(n)
     /// (MEM-24). A refusal writes `Error(Capacity(c))` into `to` and goes to `join`; the
     /// block left current is the admitted one.
+    #[allow(clippy::too_many_arguments)]
     fn admit_blob(
         &mut self,
         region: ValueId,
         bytes: ValueId,
+        entry: bool,
         to: AddressId,
         eid: TypeId,
         join: BlockId,
         n: NodeId,
-    ) -> Option<ValueId> {
+    ) -> Option<(ValueId, Option<ValueId>)> {
         let u64t = Ty::Scalar(Scalar::U64);
         // A size past u64 is flagged as the charge's overflow, so the admission is
         // refused.
@@ -1128,12 +1156,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let (charge, size) = (p[0], p[1]);
         let blob = self.value(Ty::Ptr);
         let available = self.value(u64t);
+        let region_entry = entry.then(|| self.value(u64t));
         let fail = self.fail_to(n);
         self.inst(
             Inst::Alloc {
                 result: blob,
                 available,
-                region_entry: None,
+                region_entry,
                 kind: AllocKind::Plain,
                 place: AllocPlace::Region(region),
                 charge,
@@ -1166,7 +1195,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         )?;
         self.jump(join, &[], n);
         self.start(yes);
-        Some(blob)
+        Some((blob, region_entry))
+    }
+    /// `x` rounded up to a multiple of 8; `x` is below the blob cap, so it does not wrap.
+    fn round8(&mut self, x: ValueId, n: NodeId) -> Option<ValueId> {
+        let seven = self.u64k(7, n)?;
+        let up = self.add(x, seven, n);
+        let mask = self.u64k(!7, n)?;
+        Some(self.word_op(BinaryOp::BitAnd, up, mask, n))
     }
     pub(super) fn is_put(&self, f: usize) -> bool {
         let g = &self.p.fns[f];
@@ -1586,7 +1622,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         let (to, eid) = self.build_result(result, n)?;
         let join = self.new_block(&[]);
-        let blob = self.admit_blob(region, bytes, to, eid, join, n)?;
+        let (blob, _) = self.admit_blob(region, bytes, false, to, eid, join, n)?;
         // The room a put may use: n, but never past the blob cap of W (MEM-9).
         let cap = if w == 8 {
             u64::MAX - HEAD

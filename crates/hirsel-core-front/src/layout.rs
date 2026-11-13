@@ -141,16 +141,18 @@ impl<T: TyRead> Shapes<'_, T> {
                     }
                     // A span builder held as a value: its region blob and its region
                     // (MEM-3); the blob lives in the region, so cleaning does nothing.
-                    // A stream builder (MEM-4) is its blob and the root's offset; a
-                    // child is its destination's identity and its offset. Plain words.
+                    // A stream builder (MEM-4) is its blob, the root's offset, the bytes
+                    // used, its region and the blob's payer entry (for `finish_trim`);
+                    // a child is its destination's identity and its offset. Plain words.
                     // A writer held as a value: the pointer to its frame in the build
                     // (MEM-4), scoped and never cleaned.
                     Some(Role::Writer | Role::Dest) => {
                         let body = record(vec![("frame", FieldTy::Borrow)]);
                         return self.fill(r, LRepr::Scoped, body, None);
                     }
-                    Some(Role::SpanBuilder | Role::Builder | Role::Child) => {
-                        let words = FieldTy::Array(Box::new(FieldTy::Scalar(Scalar::U64)), 2);
+                    Some(role @ (Role::SpanBuilder | Role::Builder | Role::Child)) => {
+                        let k = if role == Role::Builder { 5 } else { 2 };
+                        let words = FieldTy::Array(Box::new(FieldTy::Scalar(Scalar::U64)), k);
                         return self.fill(r, LRepr::Own, record(vec![("words", words)]), None);
                     }
                     // A box or counted reference held as a value: its one pointer field,
@@ -396,9 +398,10 @@ impl<T: TyRead> Shapes<'_, T> {
                 // A view field is the viewed type's own bytes, cleaned by nobody (FORM #56).
                 Some(Role::View) => view_field(self.field_in(args[0], compact)?),
                 Some(Role::Dest | Role::Writer) => FieldTy::Borrow,
-                Some(Role::Child | Role::SpanBuilder | Role::Builder) => {
+                Some(Role::Child | Role::SpanBuilder) => {
                     FieldTy::Array(Box::new(FieldTy::Scalar(Scalar::U64)), 2)
                 }
+                Some(Role::Builder) => FieldTy::Array(Box::new(FieldTy::Scalar(Scalar::U64)), 5),
                 Some(Role::Unique | Role::Site) => FieldTy::Scalar(Scalar::U64),
                 Some(_) => return None,
                 None if compact

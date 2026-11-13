@@ -17,14 +17,21 @@ fn allocation<const N: usize>(runtime: bool) -> u64 {
     let mut sum = 0;
     for i in 0..COUNT {
         if runtime {
-            let block = Block::new(&ctx, Some(N as u64), N, 1).unwrap();
+            // SAFETY: this is the emitter's inline instruction sequence. The
+            // native size/alignment are constants, not fields in a Rust owner.
+            let block = unsafe {
+                hirsel_core_rt::abi::inline_own_alloc(&ctx, Some(N as u64), N, 1).unwrap()
+            };
             // SAFETY: this fresh block has N bytes, all initialized before reading.
             unsafe {
-                block.pointer().as_ptr().write_bytes(0, N);
-                block.pointer().as_ptr().write(i as u8);
-                sum += black_box(block.pointer().as_ptr()).read() as u64;
+                block.as_ptr().write_bytes(0, N);
+                block.as_ptr().write(i as u8);
+                sum += black_box(block.as_ptr()).read() as u64;
             }
-            drop(black_box(block));
+            // SAFETY: all bytes are plain; pass the same original native operands.
+            unsafe {
+                hirsel_core_rt::abi::inline_own_free(&ctx, black_box(block), N as u64, N, 1);
+            }
         } else {
             let mut block = Box::new([0u8; N]);
             block[0] = i as u8;

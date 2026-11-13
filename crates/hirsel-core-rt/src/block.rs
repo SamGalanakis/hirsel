@@ -290,3 +290,29 @@ impl Drop for Block {
         }
     }
 }
+
+/// # Safety
+/// Exclusive cleaned PLAIN block, exact native layout and logical charge; live
+/// task context. Foreign or merged payers go through the ordered refund path.
+#[inline(always)]
+pub(crate) unsafe fn free_in(
+    context: &Context,
+    payload: NonNull<u8>,
+    charge: u64,
+    bytes: usize,
+    align: usize,
+) {
+    // SAFETY: recover the live block's payer before deallocating its native bytes.
+    unsafe {
+        let payer = *funding(payload);
+        if charge != 0 && payer.record_pointer() == context.current_limit {
+            // The task pins its current canonical record and owns these local writes.
+            (*context.current_limit).available += charge;
+            (*context.current_limit).outstanding -= charge;
+        } else {
+            payer.settle(charge);
+        }
+        let (layout, offset) = physical_layout(bytes, align, PLAIN);
+        dealloc(payload.as_ptr().sub(offset), layout);
+    }
+}

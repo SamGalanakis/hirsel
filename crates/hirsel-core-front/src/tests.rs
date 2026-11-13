@@ -566,6 +566,14 @@ fn generic_allocation_layout() {
 }
 
 #[test]
+fn call_region_callback_substitution() {
+    for case in ["call-region-callbacks", "call-region-callback-mismatch"] {
+        let failures = run_case(&root().join(format!("cases/body/{case}.hirsel")));
+        assert!(failures.is_empty(), "{case}: {failures:?}");
+    }
+}
+
+#[test]
 fn scalar_key_carriage() {
     let failures = run_case(&root().join("cases/body/scalar-key-carriage.hirsel"));
     assert!(failures.is_empty(), "{failures:?}");

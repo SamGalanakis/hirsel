@@ -183,6 +183,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             }
         }
+        self.call_region_roots(&scratch.params, args, &mut scratch.roots);
         self.activate(value, call, n);
         scratch.vals.clear();
         scratch.vals.resize(args.len(), None);
@@ -217,7 +218,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 _ => arg,
             };
             let mode = if bytes { Mode::View } else { mode };
-            if !self.argument(
+            if !self.argument_rooted(
                 mode,
                 pt,
                 call,
@@ -225,12 +226,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 arg,
                 &mut scratch.found,
                 &mut scratch.vals[i],
+                &scratch.roots,
             ) {
+                let expected = self.partial_rooted(pt, &scratch.found, &scratch.roots);
                 scratch.vals[i] = self
                     .expr(
                         arg,
                         Some(Want {
-                            ty: pt,
+                            ty: expected,
                             view: mode == Mode::View,
                             payload: 0,
                         }),
@@ -243,14 +246,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Hold::CallView(c, _) | Hold::CallMut(c) if c == call => None,
             other => Some(other),
         });
-        let mut result = result;
-        if let Some(abi) = abi {
-            for j in abi.regions.start..abi.regions.start + abi.regions.len {
-                let i = self.callable_regions[j as usize];
-                let root = self.body_root(args[i as usize], true);
-                result = reroot(&mut self.t, result, Root::Parameter(i), root);
-            }
-        }
+        let result = self.partial_rooted(result, &scratch.found, &scratch.roots);
         let (code, environment) = if callable == Callable::Plain {
             (value, None)
         } else {

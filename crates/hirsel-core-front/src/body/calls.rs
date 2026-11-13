@@ -8,6 +8,7 @@ pub(super) struct CallScratch {
     pub(super) later: Vec<(usize, NodeId)>,
     pub(super) tys: Vec<TyId>,
     pub(super) params: Vec<(Mode, TyId)>,
+    pub(super) roots: Vec<Option<TyId>>,
     pub(super) ir_params: Vec<Param>,
     pub(super) ir_results: Vec<Ty>,
     pub(super) ir_args: Vec<Arg>,
@@ -127,7 +128,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 );
             }
         }
+        scratch.params.clear();
+        scratch
+            .params
+            .extend(g.params.iter().map(|p| (p.mode, p.ty)));
+        self.call_region_roots(&scratch.params, args, &mut scratch.roots);
         let CallScratch {
+            roots,
             found,
             checked,
             vals,
@@ -150,7 +157,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // argument left to right, then the unsuffixed literal arguments.
         if let Some(w) = want {
             if let Some(result) = self.expected_part(g.result, w) {
-                self.unify(result, w.ty, found);
+                self.unify_rooted(result, w.ty, found, roots);
             }
             self.determined(f, found, checked, n);
         }
@@ -174,7 +181,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
                 _ => a,
             };
-            if self.argument(
+            if self.argument_rooted(
                 g.params[i].mode,
                 g.params[i].ty,
                 call,
@@ -182,6 +189,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 e,
                 found,
                 &mut vals[i],
+                roots,
             ) {
                 self.activate(vals[i], call, e);
                 self.determined(f, found, checked, e);
@@ -193,7 +201,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 continue;
             }
             let pt = g.params[i].ty;
-            vals[i] = match self.known(pt, found) {
+            vals[i] = match self.known_rooted(pt, found, roots) {
                 Some(t) => {
                     let view = g.params[i].mode == Mode::View
                         && !matches!(self.t.kind(t), TyKind::View(_));
@@ -212,7 +220,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         self.expr_hinted(e, Some(hint))
                     } else if matches!(self.kind(e), NodeKind::Closure | NodeKind::ScopedClosure) {
                         let w = Want {
-                            ty: self.partial(pt, found),
+                            ty: self.partial_rooted(pt, found, roots),
                             view: false,
                             payload: 0,
                         };
@@ -220,7 +228,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     } else if self.kind(e) == NodeKind::Call {
                         self.out.counts.nodes += 1;
                         let w = Want {
-                            ty: self.partial(pt, found),
+                            ty: self.partial_rooted(pt, found, roots),
                             view: false,
                             payload: 0,
                         };
@@ -237,7 +245,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         }
                         _ => at,
                     };
-                    if !self.unify(pt, inferred, found) {
+                    if !self.unify_rooted(pt, inferred, found, roots) {
                         self.refuse(
                             "LANG-11",
                             e,
@@ -246,7 +254,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                                 "a type parameter is determined twice differently; bind the holder with `let` first"
                             } else { "a type parameter is determined twice differently" },
                         );
-                    } else if let Some(t) = self.known(pt, found) {
+                    } else if let Some(t) = self.known_rooted(pt, found, roots) {
                         let view = g.params[i].mode == Mode::View
                             && !matches!(self.t.kind(t), TyKind::View(_));
                         self.coerce(
@@ -266,7 +274,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.activate(vals[i], call, e);
         }
         for &(i, e) in later.iter() {
-            match self.known(g.params[i].ty, found) {
+            match self.known_rooted(g.params[i].ty, found, roots) {
                 Some(t) => vals[i] = self.expr(e, expect(t)).1,
                 None => {
                     self.refuse("LANG-11", e, "an unsuffixed number needs an expected type");
@@ -290,15 +298,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Hold::CallMut(c) if c == call => None,
             h => Some(h),
         });
-        let mut result = if undetermined {
+        let result = if undetermined {
             ERROR
         } else {
-            subst(&mut self.t, g.result, tys)
+            self.partial_rooted(g.result, found, roots)
         };
-        for &i in &rooted {
-            let to = self.body_root(args[i], true);
-            result = reroot(&mut self.t, result, Root::Parameter(i as u32), to);
-        }
         if result == NEVER {
             self.dead = true;
         }
@@ -348,6 +352,25 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         (result, v)
     }
 
+    pub(super) fn call_region_roots(
+        &mut self,
+        params: &[(Mode, TyId)],
+        args: &[NodeId],
+        roots: &mut Vec<Option<TyId>>,
+    ) {
+        roots.clear();
+        for (i, &(_, ty)) in params.iter().enumerate() {
+            if matches!(self.t.kind(ty), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::Region))
+                && let Some(&arg) = args.get(i)
+                && self.kind(arg) == NodeKind::Path
+                && matches!(self.p.target(self.at, arg), Some(Target::Binder(_)))
+            {
+                roots.resize(i + 1, None);
+                roots[i] = Some(self.body_root(arg, true));
+            }
+        }
+    }
+
     /// Check argument `e` for a parameter of mode `mode` and type `pt` when its mode
     /// decides how (OWN-7): a `mut` loan, a place viewed or moved. False when `e` is an
     /// ordinary value, checked by the caller.
@@ -361,6 +384,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         e: NodeId,
         found: &mut [Option<TyId>],
         val: &mut Option<ValueId>,
+    ) -> bool {
+        self.argument_rooted(mode, pt, call, i, e, found, val, &[])
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn argument_rooted(
+        &mut self,
+        mode: Mode,
+        pt: TyId,
+        call: u32,
+        i: usize,
+        e: NodeId,
+        found: &mut [Option<TyId>],
+        val: &mut Option<ValueId>,
+        roots: &[Option<TyId>],
     ) -> bool {
         let unary = (self.kind(e) == NodeKind::Unary).then(|| self.token_text(e));
         match mode {
@@ -384,7 +422,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                             return true;
                         }
                         self.use_place(at, Use::Mut(Hold::CallMut(call)), e);
-                        self.arg_ty(pt, at.ty, e, found);
+                        self.arg_ty_rooted(pt, at.ty, e, found, roots);
                         *val = self.place_ptr(at, e);
                     }
                     Ok(None) => {
@@ -416,7 +454,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     Ok(Rep::Scalar(_)) => self.read_plain_view(t, v, e),
                     _ => v,
                 };
-                self.arg_ty(pt, t, e, found);
+                self.arg_ty_rooted(pt, t, e, found, roots);
                 true
             }
             Mode::View | Mode::Take if unary.is_none() => {
@@ -477,7 +515,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 if mode == Mode::View && t != ty && self.copies(t) {
                     *val = self.read_plain_view(t, *val, e);
                 }
-                self.arg_ty(pt, t, e, found);
+                self.arg_ty_rooted(pt, t, e, found, roots);
                 true
             }
             _ => false,
@@ -485,7 +523,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
     /// An argument of type `at` for a parameter of type `pt` (LANG-11).
     pub(super) fn arg_ty(&mut self, pt: TyId, at: TyId, e: NodeId, found: &mut [Option<TyId>]) {
-        match self.known(pt, found) {
+        self.arg_ty_rooted(pt, at, e, found, &[])
+    }
+    fn arg_ty_rooted(
+        &mut self,
+        pt: TyId,
+        at: TyId,
+        e: NodeId,
+        found: &mut [Option<TyId>],
+        roots: &[Option<TyId>],
+    ) {
+        match self.known_rooted(pt, found, roots) {
             Some(t) => self.coerce(
                 at,
                 Want {
@@ -496,7 +544,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 e,
             ),
             None => {
-                if !self.unify(pt, at, found) {
+                if !self.unify_rooted(pt, at, found, roots) {
                     self.refuse(
                         "LANG-11",
                         e,
@@ -509,50 +557,76 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
     /// `pt` with the type arguments found so far, a hole for each one still open.
     pub(super) fn partial(&mut self, pt: TyId, s: &[Option<TyId>]) -> TyId {
-        fn fill(t: &mut impl TyRead, ty: TyId, found: &[Option<TyId>]) -> TyId {
+        self.partial_rooted(pt, s, &[])
+    }
+    // Substituted caller types and roots are atoms. Walking into them again would
+    // confuse a caller's Parameter/Generic index with a callee's index.
+    pub(super) fn partial_rooted(
+        &mut self,
+        pt: TyId,
+        s: &[Option<TyId>],
+        roots: &[Option<TyId>],
+    ) -> TyId {
+        fn fill(
+            t: &mut impl TyRead,
+            ty: TyId,
+            found: &[Option<TyId>],
+            roots: &[Option<TyId>],
+        ) -> TyId {
             match t.kind(ty).clone() {
                 TyKind::Param(i) | TyKind::Region(Root::Generic(i)) => {
                     found[i as usize].unwrap_or(HOLE)
                 }
+                TyKind::Region(Root::Parameter(i)) => {
+                    roots.get(i as usize).copied().flatten().unwrap_or(ty)
+                }
                 TyKind::Anchored(x, root) => {
-                    let x = fill(t, x, found);
-                    let root = fill(t, root, found);
+                    let x = fill(t, x, found, roots);
+                    let root = fill(t, root, found, roots);
                     t.mk(TyKind::Anchored(x, root))
                 }
                 TyKind::Array(x, n) => {
-                    let x = fill(t, x, found);
+                    let x = fill(t, x, found, roots);
                     t.mk(TyKind::Array(x, n))
                 }
                 TyKind::Tuple(xs) => {
-                    let xs = xs.into_iter().map(|x| fill(t, x, found)).collect();
+                    let xs = xs.into_iter().map(|x| fill(t, x, found, roots)).collect();
                     t.mk(TyKind::Tuple(xs))
                 }
                 TyKind::Adt(d, xs) => {
-                    let xs = xs.into_iter().map(|x| fill(t, x, found)).collect();
+                    let xs = xs.into_iter().map(|x| fill(t, x, found, roots)).collect();
                     t.mk(TyKind::Adt(d, xs))
                 }
                 TyKind::View(x) => {
-                    let x = fill(t, x, found);
+                    let x = fill(t, x, found, roots);
                     t.mk(TyKind::View(x))
                 }
                 TyKind::Fn(ps, r, w, k) => {
                     let ps = ps
                         .into_iter()
-                        .map(|(m, p)| (m, fill(t, p, found)))
+                        .map(|(m, p)| (m, fill(t, p, found, roots)))
                         .collect();
-                    let r = fill(t, r, found);
+                    let r = fill(t, r, found, roots);
                     t.mk(TyKind::Fn(ps, r, w, k))
                 }
                 _ => ty,
             }
         }
-        if !has_param(&self.t, pt) {
+        if roots.is_empty() && !has_param(&self.t, pt) {
             return pt;
         }
-        fill(&mut self.t, pt, s)
+        fill(&mut self.t, pt, s, roots)
     }
     /// `pt` with the type arguments found so far, when they determine it.
     pub(super) fn known(&mut self, pt: TyId, s: &[Option<TyId>]) -> Option<TyId> {
+        self.known_rooted(pt, s, &[])
+    }
+    pub(super) fn known_rooted(
+        &mut self,
+        pt: TyId,
+        s: &[Option<TyId>],
+        roots: &[Option<TyId>],
+    ) -> Option<TyId> {
         fn ready(t: &impl TyRead, ty: TyId, found: &[Option<TyId>]) -> bool {
             match t.kind(ty) {
                 TyKind::Param(i) | TyKind::Region(Root::Generic(i)) => found[*i as usize].is_some(),
@@ -566,7 +640,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 _ => true,
             }
         }
-        ready(&self.t, pt, s).then(|| self.partial(pt, s))
+        ready(&self.t, pt, s).then(|| self.partial_rooted(pt, s, roots))
     }
 
     /// Find type arguments from one argument type; false when one is found twice
@@ -623,11 +697,25 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
     }
     pub(super) fn unify(&mut self, pt: TyId, at: TyId, s: &mut [Option<TyId>]) -> bool {
+        self.unify_rooted(pt, at, s, &[])
+    }
+    fn unify_rooted(
+        &mut self,
+        pt: TyId,
+        at: TyId,
+        s: &mut [Option<TyId>],
+        roots: &[Option<TyId>],
+    ) -> bool {
         self.out.counts.types += 1;
         if at == NEVER || at == ERROR || at == HOLE {
             return true;
         }
         match (self.t.kind(pt).clone(), self.t.kind(at).clone()) {
+            (TyKind::Region(Root::Parameter(i)), _)
+                if let Some(root) = roots.get(i as usize).copied().flatten() =>
+            {
+                root == at
+            }
             // A partly known type fixes nothing whole (LANG-11).
             (TyKind::Param(_) | TyKind::Region(Root::Generic(_)), _) if has_hole(&self.t, at) => {
                 true
@@ -641,37 +729,45 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     Some(x) => x == at || x == ERROR,
                 }
             }
-            (TyKind::Tuple(a), TyKind::Tuple(b)) if a.len() == b.len() => {
-                a.iter().zip(&b).all(|(&x, &y)| self.unify(x, y, s))
-            }
-            (TyKind::Adt(d, a), TyKind::Adt(e, b)) if d == e && a.len() == b.len() => {
-                a.iter().zip(&b).all(|(&x, &y)| self.unify(x, y, s))
-            }
+            (TyKind::Tuple(a), TyKind::Tuple(b)) if a.len() == b.len() => a
+                .iter()
+                .zip(&b)
+                .all(|(&x, &y)| self.unify_rooted(x, y, s, roots)),
+            (TyKind::Adt(d, a), TyKind::Adt(e, b)) if d == e && a.len() == b.len() => a
+                .iter()
+                .zip(&b)
+                .all(|(&x, &y)| self.unify_rooted(x, y, s, roots)),
             (TyKind::Adt(d, a), TyKind::Adt(e, b))
                 if is_core_prelude(&self.p.decls[d.index()].path, &["SeqSpan"])
                     && is_core_prelude(&self.p.decls[e.index()].path, &["IndexedSpan"])
                     && a.len() == b.len() =>
             {
-                a.iter().zip(&b).all(|(&x, &y)| self.unify(x, y, s))
+                a.iter()
+                    .zip(&b)
+                    .all(|(&x, &y)| self.unify_rooted(x, y, s, roots))
             }
-            (TyKind::Array(a, n), TyKind::Array(b, m)) if n == m => self.unify(a, b, s),
-            (TyKind::View(a), TyKind::View(b)) => self.unify(a, b, s),
-            (TyKind::Array(a, n), TyKind::Array(b, m)) if n == m => self.unify(a, b, s),
+            (TyKind::Array(a, n), TyKind::Array(b, m)) if n == m => {
+                self.unify_rooted(a, b, s, roots)
+            }
+            (TyKind::View(a), TyKind::View(b)) => self.unify_rooted(a, b, s, roots),
+            (TyKind::Array(a, n), TyKind::Array(b, m)) if n == m => {
+                self.unify_rooted(a, b, s, roots)
+            }
             (TyKind::Anchored(a, ar), TyKind::Anchored(b, br)) => {
-                self.unify(a, b, s) && self.unify(ar, br, s)
+                self.unify_rooted(a, b, s, roots) && self.unify_rooted(ar, br, s, roots)
             }
             (_, TyKind::Anchored(b, _))
                 if kind(&self.p.decls, &self.t, b, &self.params) == Kind::Stable =>
             {
-                self.unify(pt, b, s)
+                self.unify_rooted(pt, b, s, roots)
             }
             (TyKind::Fn(a, ar, aw, ak), TyKind::Fn(b, br, bw, bk))
                 if ak == bk && a.len() == b.len() && (!bw || aw) =>
             {
                 a.iter()
                     .zip(&b)
-                    .all(|(&(am, at), &(bm, bt))| am == bm && self.unify(at, bt, s))
-                    && self.unify(ar, br, s)
+                    .all(|(&(am, at), &(bm, bt))| am == bm && self.unify_rooted(at, bt, s, roots))
+                    && self.unify_rooted(ar, br, s, roots)
             }
             _ => pt == at || pt == ERROR || pt == HOLE,
         }

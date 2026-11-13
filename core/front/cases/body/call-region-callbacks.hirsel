@@ -1,0 +1,21 @@
+// MEM-6 / LANG-11: a formal Region in a callback parameter becomes the Region
+// named by that call's argument, before fitting or inferring the callback.
+// Each Text has two bytes; both callbacks in swapped contribute two: 2+2+2+4=10.
+// expect: accept
+// Native oracle: checked() = 10, and main succeeds.
+fn invoke(r:Region, f:scoped fn(Text in r)->u64)->u64 {
+ let t=result.unwrap(text.copy_in(r,"hi")); f(t)
+}
+fn local()->u64 {region r {invoke(r,fn(t:Text in r)->u64 {text.len(t)})}}
+fn stream()->u64 {region r {
+ let b=result.unwrap(build_stream_in(r,bytes 32,fn(take w:Writer[Text,in r])->Result[Child[Text],BuildError] {emit(take w,"hi")}));
+ let t:Text in r=finish_trim(take b);text.len(t)
+}}
+fn expected()->u64 {region r {
+ let b:Result[Builder[Text,in r],BuildError]=build_stream_in(r,bytes 32,fn(take w:Writer[Text,in r])->Result[Child[Text],BuildError] {emit(take w,"yo")});
+ let t:Text in r=finish_trim(result.unwrap(take b));text.len(t)
+}}
+fn both(a:Region,b:Region,fa:scoped fn(Text in a)->u64,fb:scoped fn(Text in b)->u64)->u64 {invoke(a,fa)+invoke(b,fb)}
+fn swapped(a:Region,b:Region)->u64 {both(b,a,fn(t:Text in b)->u64{text.len(t)},fn(t:Text in a)->u64{text.len(t)})}
+fn checked()->u64 {region a {region b {local()+stream()+expected()+swapped(a,b)}}}
+pub fn main()->Result[(),Exit] {if checked()==10u64 {Ok(())}else{Error(Exit(status:1))}}

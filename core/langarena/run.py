@@ -178,6 +178,14 @@ def build_samples(args):
               'library_mode': 'core product; explicit std sources retained when the driver reports them loaded',
               'rustc': subprocess.check_output([str(rustc), '-vV'], text=True)}
     def save():
+        for row in report['rows']:
+            lines = row.setdefault('source_lines', dict(counts))
+            for side in ['idiomatic', 'matched']:
+                if side in row['samples']:
+                    lines[side] = counts[side] + int(row['scenario'] == 'build-edit')
+                    sample = row['samples'][side]
+                    if sample.get('instructions') and lines[side]:
+                        sample['k_instructions_per_source_line'] = sample['instructions'] / lines[side] / 1000
         (out / 'build-report.json').write_text(json.dumps(report, indent=2) + '\n')
     def collect(command, directory, hirsel=False):
         with open('/tmp/hirsel-langarena-measure.lock', 'a') as lock:
@@ -294,7 +302,7 @@ def build_samples(args):
                 command += ['--emit=metadata' if operation == 'check' else '--emit=link', '-o', str(scratch / (side + '-' + scenario))]
                 if side not in row['samples']:
                     row['samples'][side] = collect(command, out / (scenario + '-' + side))
-                    row['source_lines'][side] = counts[side]
+                    row['source_lines'][side] = counts[side] + int(scenario == 'build-edit')
                 row['ratios'][side] = ratio(row['samples']['hirsel'], row['samples'][side]) if side != 'matched' or reviewed(matched, args.matched_author) else {'status': 'blocked: independent review pending'}
             for side, sample in row['samples'].items():
                 if sample.get('instructions') and row['source_lines'][side]:

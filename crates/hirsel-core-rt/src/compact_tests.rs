@@ -280,3 +280,57 @@ fn byte_hash_matches_the_fixed_rule() {
     assert_eq!(hash(b"hello"), 5704403177778809783);
     assert_eq!(hash(b"abcdefghi"), 6716469241732165301);
 }
+
+/// Independent fixed hash words at every short tail boundary, and longer inputs.
+/// Prefix offsets force unaligned word reads without changing the hashed bytes.
+#[test]
+fn byte_hash_full_words_and_tails() {
+    for (n, want) in [
+        (0, 0x0000000000000000),
+        (1, 0xe5fd29f0b385f416),
+        (2, 0xc924443460ebe687),
+        (3, 0x03021624ff145ab1),
+        (4, 0xb9fb4015eaba61ec),
+        (5, 0xeff86a054a56cda4),
+        (6, 0xd5f593f52c0ca4d9),
+        (7, 0xbbf2bde6f7e6b0f5),
+        (8, 0xa1efe7d601370d2c),
+        (9, 0x3a45815c4ef00d87),
+        (10, 0x392105ab391310ee),
+        (11, 0xacf7ae0a622f6ffc),
+        (12, 0xe1570d6f3be40f79),
+        (13, 0x29665eca4fce401a),
+        (14, 0xe2c818ef91307839),
+        (15, 0x94da40593ecd37d3),
+        (16, 0x946c4fbe22bde4d1),
+        (17, 0x382426beaa1d2be0),
+        (18, 0x3c655c73467dc5df),
+        (19, 0x55ac3819a86dc336),
+        (20, 0x3f4504c9cb11caad),
+        (21, 0x608764353109f567),
+        (22, 0xff96a12c51d83714),
+        (23, 0x0e7877deab119fc5),
+        (24, 0x3a8cb73ff27af871),
+        (25, 0x15c3b206ec7c388d),
+        (26, 0x2b287887e06d1ad8),
+        (27, 0x5d729fe47b9bd59b),
+        (28, 0xdb8606f2da2e7178),
+        (29, 0xf9d8142ebb92a17a),
+        (30, 0x4fd71be91a6c85c5),
+        (31, 0xa6db2efec4d4812c),
+        (32, 0xf341fec280082f43),
+        (33, 0x072b724a359808c8),
+        (63, 0xf4c4cef80f6531db),
+        (64, 0x060d4ebfcc94d8d0),
+        (65, 0xec3d8f7f63ae977d),
+        (257, 0x60fd66c4124c29cf),
+    ] {
+        for prefix in 0..8 {
+            let mut data = vec![0xE7; prefix];
+            data.extend((0..n).map(|i| i as u8));
+            // SAFETY: the offset range contains exactly n initialized bytes.
+            let got = unsafe { hirsel_core_hash_bytes(data.as_ptr().add(prefix), n as u64) };
+            assert_eq!(got, want, "length{n} prefix{prefix}");
+        }
+    }
+}

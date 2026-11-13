@@ -41,3 +41,13 @@ fn bytes_callable_cranelift(){bytes_callable(Backend::Cranelift);}
 #[test]
 #[ignore="explicit native integration target"]
 fn bytes_callable_llvm(){bytes_callable(Backend::Llvm);}
+
+fn map_string_words(backend: Backend) {
+    ordered_case(backend, include_str!("../../../core/front/cases/body/map-string-words.hirsel"));
+}
+#[test]
+#[ignore="explicit native integration target"]
+fn map_string_words_cranelift(){map_string_words(Backend::Cranelift);}
+#[test]
+#[ignore="explicit native integration target"]
+fn map_string_words_llvm(){map_string_words(Backend::Llvm);}

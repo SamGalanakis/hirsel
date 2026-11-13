@@ -311,9 +311,15 @@ pub unsafe extern "C" fn hirsel_core_hash_bytes(data: *const u8, len: u64) -> u6
     };
     let mix = |h: u64, w: u64| ((h ^ w).wrapping_mul(0x9E37_79B9_7F4A_7C15)).rotate_left(26);
     let mut h = len;
-    for chunk in bytes.chunks(8) {
+    // Full words need neither padding nor a variable-sized copy. Array elements
+    // have byte alignment, so this also handles unaligned input without overread.
+    let (words, tail) = bytes.as_chunks::<8>();
+    for &word in words {
+        h = mix(h, u64::from_le_bytes(word));
+    }
+    if !tail.is_empty() {
         let mut word = [0u8; 8];
-        word[..chunk.len()].copy_from_slice(chunk);
+        word[..tail.len()].copy_from_slice(tail);
         h = mix(h, u64::from_le_bytes(word));
     }
     h ^ (h >> 32)

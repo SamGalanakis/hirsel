@@ -1,0 +1,32 @@
+// Full-word and tail hashing agrees for static, owned and disjoint query storage.
+// expect: run checked() = 72
+fn copied(s:String)->String {
+  let mut out=string.new()
+  result.unwrap(string.push(mut out,s))
+  take out
+}
+fn checked()->u64 {
+  let mut keys:List[String]=list.new()
+  result.unwrap(list.push(mut keys,""))
+  result.unwrap(list.push(mut keys,"abcdefg"))
+  result.unwrap(list.push(mut keys,"abcdefgh"))
+  result.unwrap(list.push(mut keys,"abcdefghi"))
+  result.unwrap(list.push(mut keys,"abcdefghijklmnopqrstuvwxyzABCDE"))
+  result.unwrap(list.push(mut keys,"abcdefghijklmnopqrstuvwxyzABCDEF"))
+  result.unwrap(list.push(mut keys,"abcdefghijklmnopqrstuvwxyzABCDEFG"))
+  result.unwrap(list.push(mut keys,"abcdefghabcdefgh"))
+  let mut m:Map[String,u64]=map.new()
+  let mut value:u64=1
+  for key in keys {
+    result.unwrap(map.insert(mut m,copied(key),value))
+    value+=1
+  }
+  let mut sum:u64=0
+  for key in keys {
+    let query=copied(key)
+    sum+=match map.get(m,query) {Some(v)=>v,None=>0}
+    sum+=option.unwrap(map.remove(mut m,query))
+  }
+  if map.len(m)==0 {sum}else{0}
+}
+pub fn main()->Result[(),Exit] {if checked()==72 {Ok(())}else{Error(Exit(status:1))}}

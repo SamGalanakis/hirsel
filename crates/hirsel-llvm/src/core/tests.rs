@@ -883,7 +883,7 @@ fn every_memory_sample_admission_refusal_matches_the_evaluator() {
         executions += cases.len();
         agree_cases(&module, &cases, true);
     }
-    assert_eq!(executions, 130);
+    assert_eq!(executions, 144);
     println!("whole memory sample executions including every admission refusal: {executions}");
 }
 
@@ -915,4 +915,67 @@ fn infallible_direct_calls_keep_the_external_and_indirect_failure_abi() {
         }
     }
     agree(&module, &cases);
+}
+
+#[test]
+fn maps_clean_live_entries_in_order_and_continue_after_both_failures() {
+    let module = text::parse(include_str!("../../tests/core_runtime/map.core")).unwrap();
+    wf::module(&module).unwrap();
+    let cases = [
+        (FuncId(2), vec![0]),
+        (FuncId(2), vec![1]),
+        (FuncId(3), vec![]),
+        (FuncId(4), vec![]),
+    ]
+    .map(|(function, args)| Case {
+        function,
+        args,
+        limit: 1024,
+        injection: None,
+    });
+    let reports = execute(&module, &cases);
+    for (i, got) in reports.iter().enumerate() {
+        assert_eq!(
+            got.outcome,
+            if i == 1 {
+                eval::Outcome::Failed(vec!["Bounds".into(), "Unwrap".into()])
+            } else {
+                eval::Outcome::Returned(vec![])
+            }
+        );
+        assert_eq!(got.used, if i == 1 { 64 } else { 0 });
+        assert_eq!(
+            got.trace,
+            match i {
+                0 => vec![11, 12, 30, 33],
+                1 => vec![11, 12, 31, 32],
+                _ => vec![],
+            }
+        );
+        assert_eq!(
+            got.admissions,
+            match i {
+                0 | 1 => 5,
+                2 => 1,
+                _ => 0,
+            }
+        );
+    }
+}
+
+#[test]
+fn counted_maps_skip_removed_entries_and_destroy_deep_chains_with_constant_stack() {
+    let module = text::parse(include_str!("../../tests/core_runtime/counted_map.core")).unwrap();
+    wf::module(&module).unwrap();
+    let cases = [0, 32, 50_000].map(|n| Case {
+        function: FuncId(0),
+        args: vec![n],
+        limit: u64::MAX,
+        injection: None,
+    });
+    for (case, got) in cases.iter().zip(execute(&module, &cases)) {
+        assert_eq!(got.outcome, eval::Outcome::Returned(case.args.clone()));
+        assert_eq!(got.used, 0);
+        assert_eq!(got.admissions, 1 + 2 * case.args[0] as usize);
+    }
 }

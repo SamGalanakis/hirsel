@@ -63,9 +63,12 @@ fn every_emitted_function_probes_its_frame_within_the_guard() {
     let core_ir = hirsel_core_ir::text::parse(
         r#"core v1
 type t0 = own "Probe" { value: u64 }
+type t1 = own "Node" { children: seq rc t1 }
 sig g0 = (u64) -> (u64)
+sig g1 = (ptr) -> ()
 inst n0 = tests@0/probes/core [] []
 inst n1 = tests@0/probes/infallible [] []
+inst n2 = tests@0/probes/collections [] []
 fn f0 = n0 g0 {
   slot s0 = t0
   addr a0 = s0 field 0 : u64
@@ -83,12 +86,17 @@ fn f1 = n1 g0 {
 b0(v0: u64):
   return v0
 }
+fn f2 = n2 g1 {
+b0(v0: ptr):
+  release v0 rc t1
+  return
+}
 "#,
     )
     .unwrap();
     for (opt, definitions) in [
-        (crate::core::Optimization::None, 4),
-        (crate::core::Optimization::Speed, 2),
+        (crate::core::Optimization::None, 8),
+        (crate::core::Optimization::Speed, 5),
     ] {
         let text = crate::core::emitted_ir(&core_ir, opt).unwrap();
         assert_probes(&text, "CoreIR x86_64", definitions);

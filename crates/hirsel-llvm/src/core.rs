@@ -3,6 +3,7 @@
 
 mod abi;
 mod cleanup;
+mod collections;
 mod failure;
 mod scalar;
 mod storage;

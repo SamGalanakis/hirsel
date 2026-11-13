@@ -1,5 +1,6 @@
-// LANG-14: plain capability captures are forbidden, at first use in the body.
-// expect: refuse LANG-14 at 4:25
+// LANG-14, CAP-3: authority is received only as arguments, so an owning closure captures
+// no capability; plain capability captures are refused at first use in the body.
+// expect: refuse LANG-14 at 5:25
 fn bad(d: Dir) {
   let _ = fn() -> Dir { d }
 }

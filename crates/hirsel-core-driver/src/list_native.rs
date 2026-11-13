@@ -113,7 +113,7 @@ fn list_growth(backend: Backend) {
         options.root_limit = limit;
         let built = product
             .build(&DefPath::from_full("app@1/main/main").unwrap(), &options)
-            .unwrap();
+            .unwrap_or_else(|e| panic!("{check}: {e:?}"));
         let output = Command::new(&built.executable).output().unwrap();
         assert_eq!(output.status.code(), Some(exit), "{check}: {output:?}");
         assert!(output.stdout.is_empty(), "{check}: {output:?}");

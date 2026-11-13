@@ -776,13 +776,17 @@ mod tests {
             types: vec!["Empty".into()],
             dictionaries: vec![],
         };
+        let owner = Module {
+            types: vec![empty],
+            ..Module::default()
+        };
         assert!(
             materialize(
                 &emitter.module,
                 source,
                 &template,
                 &key,
-                &[(&[empty], TypeRef(0))]
+                &[(&owner, TypeRef(0))]
             )
             .unwrap_err()
             .contains("zero-sized List growth is not specified")

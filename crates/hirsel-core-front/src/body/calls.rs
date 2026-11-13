@@ -707,6 +707,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             };
             let generic_value = rigid(&self.t, p.ty);
+            // The compact value's locator row and its logical payload row still differ
+            // at a rigid boundary (895 item15). Typing continues after this gap.
+            if generic_value
+                && let TyKind::Adt(d, _) = self.t.kind(self.bare(ty))
+                && self.p.decls[d.index()].compact.is_some()
+            {
+                self.gap(n, "compact value row at a generic instance is not built (core-check-895 queue item15)");
+                return None;
+            }
             if generic_value && p.mode != Mode::Mut && matches!(r, Rep::Scalar(_) | Rep::None) {
                 let id = self.e.type_row(self.p, &mut self.t, ty)?;
                 let slot = self.new_slot(PlaceTy::Declared(id), n);

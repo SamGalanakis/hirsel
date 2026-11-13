@@ -401,7 +401,7 @@ impl Derive<'_> {
         different: BlockId,
     ) -> Result<(), &'static str> {
         let Layout::Fixed(layout) = self.recipes[ty.index()].layout.clone() else {
-            return Err("ordering a compact recipe is not built (form883 queue item6)");
+            return self.order_located(c, &FieldTy::Inline(TypeRef(ty.0)), a, b, different);
         };
         match self.module.types[ty.index()].body.clone() {
             ShapeBody::Record(fs) => {
@@ -456,6 +456,238 @@ impl Derive<'_> {
         }
         Ok(())
     }
+    fn order_located(
+        &mut self,
+        c: &mut Code,
+        target: &FieldTy,
+        a: ValueId,
+        b: ValueId,
+        different: BlockId,
+    ) -> Result<(), &'static str> {
+        let mut blobs = [ValueId(0); 2];
+        let mut ats = [ValueId(0); 2];
+        let mut widths = [ValueId(0); 2];
+        for (i, p) in [a, b].into_iter().enumerate() {
+            blobs[i] = c.read(p, Ty::Ptr);
+            let at = c.offset(p, 8);
+            ats[i] = c.read(at, Ty::Scalar(Scalar::U64));
+            let at = c.offset(blobs[i], 8);
+            widths[i] = c.read(at, Ty::Scalar(Scalar::U64));
+        }
+        self.order_packed(c, target, blobs, ats, widths, different)?;
+        Ok(())
+    }
+    /// All addresses into a blob retain a byte step, so scalar reads are unaligned.
+    fn packed_word(c: &mut Code, blob: ValueId, at: ValueId, scalar: Scalar) -> ValueId {
+        let steps = PoolRange::push(&mut c.body.pools.steps, [Step::Byte(at)]);
+        let address = AddressId(c.body.addresses.len() as u32);
+        let ty = Ty::Scalar(scalar);
+        c.body.addresses.push(AddressInfo {
+            base: AddressBase::Value(blob),
+            steps,
+            ty: PlaceTy::Value(ty),
+        });
+        c.inst(Inst::Address {
+            address,
+            fail: None,
+        });
+        let result = c.value(ty);
+        c.inst(Inst::Read {
+            result,
+            address,
+            mode: ReadMode::Bits,
+        });
+        result
+    }
+    fn packed_count(c: &mut Code, blob: ValueId, at: ValueId, width: ValueId) -> ValueId {
+        let done = c.block(&[Ty::Scalar(Scalar::U64)]);
+        for (bytes, scalar) in [(2, Scalar::U16), (4, Scalar::U32), (8, Scalar::U64)] {
+            if bytes != 8 {
+                let k = c.constant(bytes);
+                let on = c.compare(CompareOp::Eq, width, k);
+                let load = c.block(&[]);
+                let next = c.block(&[]);
+                c.branch(on, load, next);
+                c.start(load);
+                let v = Self::packed_word(c, blob, at, scalar);
+                let v = c.widen(v);
+                c.jump(done, &[v]);
+                c.start(next);
+            } else {
+                let v = Self::packed_word(c, blob, at, scalar);
+                c.jump(done, &[v]);
+            }
+        }
+        c.start(done);
+        c.params(done)[0]
+    }
+    /// Return both cursors after the equal value. A difference leaves immediately.
+    fn order_packed(
+        &mut self,
+        c: &mut Code,
+        field: &FieldTy,
+        blobs: [ValueId; 2],
+        mut ats: [ValueId; 2],
+        widths: [ValueId; 2],
+        different: BlockId,
+    ) -> Result<[ValueId; 2], &'static str> {
+        match field {
+            FieldTy::Scalar(s) if !matches!(s, Scalar::F32 | Scalar::F64) => {
+                let a = Self::packed_word(c, blobs[0], ats[0], *s);
+                let b = Self::packed_word(c, blobs[1], ats[1], *s);
+                self.order_scalars(c, a, b, different);
+                let size = c.constant(s.size());
+                for at in &mut ats {
+                    *at = c.binary(BinaryOp::Add, *at, size);
+                }
+            }
+            FieldTy::Text => {
+                let mut lengths = [ValueId(0); 2];
+                let mut ps = [ValueId(0); 2];
+                for i in 0..2 {
+                    lengths[i] = Self::packed_count(c, blobs[i], ats[i], widths[i]);
+                    ats[i] = c.binary(BinaryOp::Add, ats[i], widths[i]);
+                    ps[i] = c.offset_value(blobs[i], ats[i]);
+                    ats[i] = c.binary(BinaryOp::Add, ats[i], lengths[i]);
+                }
+                let result = self.runtime(
+                    c,
+                    hirsel_core_ir::RtOp::CompareBytes,
+                    &[ps[0], lengths[0], ps[1], lengths[1]],
+                );
+                self.order_result(c, result, different);
+            }
+            FieldTy::Array(item, count) => {
+                let len = c.constant(*count);
+                ats =
+                    self.order_packed_sequence(c, item, blobs, ats, widths, [len, len], different)?;
+            }
+            FieldTy::FixedSpan(item) | FieldTy::SeqSpan(item) | FieldTy::IndexedSpan(item) => {
+                let mut lengths = [ValueId(0); 2];
+                for i in 0..2 {
+                    lengths[i] = Self::packed_count(c, blobs[i], ats[i], widths[i]);
+                    ats[i] = c.binary(BinaryOp::Add, ats[i], widths[i]);
+                    if !matches!(field, FieldTy::FixedSpan(_)) {
+                        ats[i] = c.binary(BinaryOp::Add, ats[i], widths[i]);
+                    }
+                }
+                ats =
+                    self.order_packed_sequence(c, item, blobs, ats, widths, lengths, different)?;
+                if matches!(field, FieldTy::IndexedSpan(_)) {
+                    for i in 0..2 {
+                        let trailer = c.mul(lengths[i], widths[i]);
+                        ats[i] = c.binary(BinaryOp::Add, ats[i], trailer);
+                    }
+                }
+            }
+            FieldTy::Inline(ty) => {
+                let compact = matches!(self.recipes[ty.index()].layout, Layout::Compact(_));
+                match self.module.types[ty.index()].body.clone() {
+                    ShapeBody::Record(fields) => {
+                        for f in &fields {
+                            ats = self.order_packed(c, &f.ty, blobs, ats, widths, different)?;
+                        }
+                    }
+                    ShapeBody::Variant(cases) => {
+                        // Compact tags use the recipe's ordinal width. The private plain
+                        // encoding has a u64 ordinal and pads to its logical stride (#58).
+                        let tag_width = if compact {
+                            hirsel_core_layout::tag_width(cases.len())
+                        } else {
+                            8
+                        };
+                        let scalar = match tag_width {
+                            1 => Scalar::U8,
+                            2 => Scalar::U16,
+                            4 => Scalar::U32,
+                            _ => Scalar::U64,
+                        };
+                        let a = Self::packed_word(c, blobs[0], ats[0], scalar);
+                        let b = Self::packed_word(c, blobs[1], ats[1], scalar);
+                        self.order_scalars(c, a, b, different);
+                        let tag_size = c.constant(tag_width);
+                        let starts = ats.map(|at| c.binary(BinaryOp::Add, at, tag_size));
+                        let done = c.block(&[Ty::Scalar(Scalar::U64); 2]);
+                        let mut arms = vec![];
+                        for i in 0..cases.len() {
+                            let block = c.block(&[]);
+                            arms.push(hirsel_core_ir::SwitchArm {
+                                value: i as u64,
+                                edge: c.edge(block, &[]),
+                            });
+                        }
+                        let otherwise = arms.last().unwrap().edge;
+                        let range = PoolRange::push(
+                            &mut c.body.pools.arms,
+                            arms[..arms.len() - 1].iter().copied(),
+                        );
+                        c.end(Terminator::Switch {
+                            value: a,
+                            arms: range,
+                            otherwise,
+                        });
+                        for (i, case) in cases.iter().enumerate() {
+                            c.start(c.body.edges[arms[i].edge.index()].target);
+                            let mut ends = starts;
+                            for f in &case.fields {
+                                ends =
+                                    self.order_packed(c, &f.ty, blobs, ends, widths, different)?;
+                            }
+                            if !compact {
+                                let stride = c.constant(
+                                    self.recipes[ty.index()]
+                                        .logical_size
+                                        .ok_or("plain variant logical size is not built")?,
+                                );
+                                ends = ats.map(|at| c.binary(BinaryOp::Add, at, stride));
+                            }
+                            c.jump(done, &ends);
+                        }
+                        c.start(done);
+                        ats = c.params(done);
+                    }
+                }
+            }
+            _ => return Err("ordering this packed recipe field is not built"),
+        }
+        Ok(ats)
+    }
+    fn order_packed_sequence(
+        &mut self,
+        c: &mut Code,
+        item: &FieldTy,
+        blobs: [ValueId; 2],
+        ats: [ValueId; 2],
+        widths: [ValueId; 2],
+        lengths: [ValueId; 2],
+        different: BlockId,
+    ) -> Result<[ValueId; 2], &'static str> {
+        let head = c.block(&[Ty::Scalar(Scalar::U64); 3]);
+        let check = c.block(&[]);
+        let body = c.block(&[]);
+        let done = c.block(&[]);
+        let zero = c.constant(0);
+        c.jump(head, &[zero, ats[0], ats[1]]);
+        c.start(head);
+        let params = c.body.blocks[head.index()]
+            .params
+            .get(&c.body.pools.values)
+            .unwrap();
+        let (i, cursors) = (params[0], [params[1], params[2]]);
+        let on = c.compare(CompareOp::Lt, i, lengths[0]);
+        c.branch(on, check, done);
+        c.start(check);
+        let on = c.compare(CompareOp::Lt, i, lengths[1]);
+        c.branch(on, body, done);
+        c.start(body);
+        let next = self.order_packed(c, item, blobs, cursors, widths, different)?;
+        let one = c.constant(1);
+        let i = c.binary(BinaryOp::Add, i, one);
+        c.jump(head, &[i, next[0], next[1]]);
+        c.start(done);
+        self.order_scalars(c, lengths[0], lengths[1], different);
+        Ok(cursors)
+    }
     fn order_scalars(&mut self, c: &mut Code, a: ValueId, b: ValueId, different: BlockId) {
         for (op, bits) in [(CompareOp::Lt, 255), (CompareOp::Gt, 1)] {
             let value = c.typed_constant(Scalar::I8, bits);
@@ -506,6 +738,12 @@ impl Derive<'_> {
                 self.order_result(c, order, different);
             }
             FieldTy::View(inner) => self.order_field(c, inner, a, b, different)?,
+            FieldTy::Locator(target) => self.order_located(c, target, a, b, different)?,
+            FieldTy::Stable(t) => {
+                let x = c.read(a, Ty::Ptr);
+                let y = c.read(b, Ty::Ptr);
+                self.order_type(c, TypeId(t.0), x, y, different)?;
+            }
             FieldTy::Seq(item) if **item == FieldTy::Scalar(Scalar::U8) => {
                 let mut args = [ValueId(0); 4];
                 for (i, p) in [a, b].into_iter().enumerate() {
@@ -543,7 +781,7 @@ impl Derive<'_> {
                 let order = self.call(c, f, &[Arg::Address(x), Arg::Address(y)]);
                 self.order_result(c, order, different);
             }
-            _ => return Err("ordering this recipe field is not built (form883 queue item6)"),
+            _ => return Err("ordering this recipe field is not built"),
         }
         Ok(())
     }
@@ -1329,5 +1567,185 @@ fn text()->bool { let a="a"; let b="b"; less(view a,view b) }
             );
         }
         eprintln!("{}", hirsel_core_ir::text::print(&e.module));
+    }
+}
+
+#[cfg(test)]
+mod located_order_tests {
+    use super::*;
+    use hirsel_core_ir::{eval, text, wf};
+    fn word(bytes: &mut Vec<u8>, value: u64, width: usize) {
+        bytes.extend_from_slice(&value.to_le_bytes()[..width]);
+    }
+    fn text_bytes(width: usize, value: &str) -> Vec<u8> {
+        let mut out = vec![];
+        word(&mut out, value.len() as u64, width);
+        out.extend_from_slice(value.as_bytes());
+        out
+    }
+    fn seq(width: usize, values: &[&str], indexed: bool) -> Vec<u8> {
+        let mut data = vec![];
+        let mut offsets = vec![];
+        for value in values {
+            offsets.push(data.len() as u64);
+            data.extend(text_bytes(width, value));
+        }
+        let mut out = vec![];
+        word(&mut out, values.len() as u64, width);
+        word(&mut out, data.len() as u64, width);
+        out.extend(data);
+        if indexed {
+            for offset in offsets {
+                word(&mut out, offset, width);
+            }
+        }
+        out
+    }
+    fn blob(width: usize, value: &[u8]) -> String {
+        let mut bytes = vec![];
+        word(&mut bytes, value.len() as u64, 8);
+        word(&mut bytes, width as u64, 8);
+        bytes.extend(value);
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+    #[test]
+    fn typed_locator_order_uses_values_across_widths_and_advances_private_encodings() {
+        // Each name is opaque to the derivation. Only its target recipe determines the walk.
+        let mut vectors = vec![
+            (
+                "locator text".to_owned(),
+                "".to_owned(),
+                2,
+                text_bytes(2, "abc"),
+                4,
+                text_bytes(4, "abc"),
+                0,
+            ),
+            (
+                "locator text".to_owned(),
+                "".to_owned(),
+                8,
+                text_bytes(8, "ab"),
+                2,
+                text_bytes(2, "abc"),
+                255,
+            ),
+            (
+                "locator seqspan text".to_owned(),
+                "".to_owned(),
+                2,
+                seq(2, &["ab", "c"], false),
+                8,
+                seq(8, &["ab", "d"], false),
+                255,
+            ),
+            (
+                "locator indexed text".to_owned(),
+                "".to_owned(),
+                4,
+                seq(4, &["ab", "c"], true),
+                2,
+                seq(2, &["ab"], true),
+                1,
+            ),
+        ];
+        let mut a = vec![];
+        word(&mut a, 2, 2);
+        word(&mut a, 1, 8);
+        word(&mut a, 9, 8);
+        let mut b = vec![];
+        word(&mut b, 2, 4);
+        word(&mut b, 1, 8);
+        word(&mut b, 10, 8);
+        vectors.push(("locator fixed u64".into(), "".into(), 2, a, 4, b, 255));
+        let mut a = vec![0u8; 16];
+        a[0] = 128;
+        a[8..16].copy_from_slice(&9u64.to_le_bytes());
+        let mut b = vec![0u8; 16];
+        b[0] = 127;
+        b[8..16].copy_from_slice(&1u64.to_le_bytes());
+        vectors.push((
+            "stable t1".into(),
+            r#"type t1 = stable "NativeStable" { first:i8, next:u64 }"#.into(),
+            2,
+            a,
+            8,
+            b,
+            255,
+        ));
+        let types =
+            "type t1 = compact u16 \"OpaqueRecord\" { label:text, rows:indexed text, tail:i8 }";
+        let mut a = text_bytes(2, "same");
+        a.extend(seq(2, &["a", "b"], true));
+        a.push(128);
+        let mut b = text_bytes(8, "same");
+        b.extend(seq(8, &["a", "b"], true));
+        b.push(127);
+        vectors.push(("locator t1".into(), types.into(), 2, a, 8, b, 255));
+        let types = "type t1 = compact u16 \"OpaqueVariant\" | First { rows:seqspan text } | Second { value:text }";
+        let mut a = vec![0];
+        a.extend(seq(2, &["z"], false));
+        let mut b = vec![1];
+        b.extend(text_bytes(4, "a"));
+        vectors.push(("locator t1".into(), types.into(), 2, a, 4, b, 255));
+        let types = "type t1 = own \"Private\" | Small { n:i8 } | Large { n:u64 }";
+        // Private variant stride16, two per array; the first cell is equal Small(-1),
+        // and the second is Small(-128) versus Small(127), including zero tails.
+        let mut a = vec![];
+        word(&mut a, 1, 2);
+        a.extend([0u8; 32]);
+        a[2 + 8] = 255;
+        a[2 + 16 + 8] = 128;
+        let mut b = vec![];
+        word(&mut b, 1, 8);
+        b.extend([0u8; 32]);
+        b[8 + 8] = 255;
+        b[8 + 16 + 8] = 127;
+        vectors.push((
+            "locator fixed array 2 t1".into(),
+            types.into(),
+            2,
+            a,
+            8,
+            b,
+            255,
+        ));
+        for (field, types, aw, a, bw, b, want) in vectors {
+            let native_reference = field == "stable t1";
+            let hex = |width, value: &[u8]| {
+                if native_reference {
+                    value.iter().map(|b| format!("{b:02x}")).collect()
+                } else {
+                    blob(width, value)
+                }
+            };
+            let mut m=text::parse(&format!("core v1\ntype t0 = own \"OpaqueCarrier\" {{ at:{field} }}\n{types}\nstatic d0 = align 8 hex {}\nstatic d1 = align 8 hex {}\n",hex(aw,&a),hex(bw,&b))).unwrap();
+            let f = ensure(&mut m, TypeId(0), KeyOp::Order).unwrap();
+            let g = m.functions[f.index()].signature.0;
+            let n = m.instances.len();
+            let row = m.functions.len();
+            let sig = m.signatures.len();
+            let source = format!(
+                "{}\nsig g{sig} = () -> (i8)\ninst n{n} = app@1/located/check [] []\nfn f{row} = n{n} g{sig} {{\nslot s0=t0\nslot s1=t0\naddr a0=s0:t0\naddr a1=s1:t0\naddr a2=a0 byte v0:ptr\naddr a3=a0 byte v1:u64\naddr a4=a1 byte v0:ptr\naddr a5=a1 byte v1:u64\nb0:\nlive s0\nlive s1\naddress a0\naddress a1\nv0:u64=const 0\nv1:u64=const 8\nv2:u64=const 16\nv3:ptr=static d0\nv4:ptr=static d1\naddress a2\nstore a2,v3\naddress a3\nstore a3,v2\naddress a4\nstore a4,v4\naddress a5\nstore a5,v2\nv5:i8=call f{} g{g} (&a0,&a1)\nreturn v5\n}}\n",
+                text::print(&m),
+                f.0
+            );
+            let source = if native_reference {
+                source
+                    .replace("address a3\nstore a3,v2\n", "")
+                    .replace("address a5\nstore a5,v2\n", "")
+            } else {
+                source
+            };
+            let m = text::parse(&source).unwrap();
+            wf::module(&m).unwrap();
+            let run = eval::run(&m, FuncId(row as u32), &[], 0);
+            assert_eq!(
+                run.outcome,
+                eval::Outcome::Returned(vec![want]),
+                "{field}: {types}"
+            );
+            assert_eq!(run.used, 0);
+        }
     }
 }

@@ -224,6 +224,7 @@ fn run_case(path: &Path) -> Vec<String> {
         "{}: concrete rows reach a rigid parameter row: {rigid:?}",
         path.display()
     );
+
     if path
         .file_stem()
         .is_some_and(|name| name == "map-operations")
@@ -2281,4 +2282,12 @@ fn rows_publish_the_closed_signature_carriage() {
         })
         .collect();
     assert_eq!(sig.params, from_rows);
+}
+
+#[test]
+fn generic_order_reads_typed_locator_recipes() {
+    let failures = run_case(&root().join("cases/body/ordered-stable.hirsel"));
+    assert!(failures.is_empty(), "{failures:#?}");
+    let failures = run_case(&root().join("cases/body/ordered-compact-gap.hirsel"));
+    assert!(failures.is_empty(), "{failures:#?}");
 }

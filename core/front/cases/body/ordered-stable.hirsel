@@ -1,0 +1,37 @@
+// SEM-7 / FORM #63: compare located bytes and packed fields, never locator addresses.
+// expect: run texts() = 31210
+// expect: run fixed() = 31210
+fn code[T:ordered](a:T,b:T)->u64 {
+ let l=if a<b {1u64} else {0}
+ let le=if a<=b {2u64} else {0}
+ let g=if a>b {4u64} else {0}
+ let ge=if a>=b {8u64} else {0}
+ l+le+g+ge
+}
+fn make_text(r:Region,s:String)->Text in r {
+ let b=result.unwrap(build_stream_in(r,bytes 128,fn(take w:Writer[Text,in r])->Result[Child[Text],BuildError] {
+  writer.push(mut w,s)?
+  writer.close(take w)
+ }))
+ finish(take b)
+}
+fn texts()->u64 { region r {
+ let a=make_text(r,"a")
+ let b=make_text(r,"aa")
+ text_code(a,b)*10000+text_code(b,a)*100+text_code(a,a)
+} }
+type Choice:ordered = Small(i8) | Large(u64)
+fn fixed()->u64 { region r {
+ let mut a:SpanBuilder[Choice,in r]=span.builder(r)
+ let mut b:SpanBuilder[Choice,in r]=span.builder(r)
+ let _=span.push(mut a,Small(-1i8))
+ let _=span.push(mut b,Small(-1i8))
+ let _=span.push(mut b,Large(0u64))
+ let x=span.finish(take a)
+ let y=span.finish(take b)
+ fixed_code(x,y)*10000+fixed_code(y,x)*100+fixed_code(x,x)
+} }
+pub fn main()->Result[(),Exit] { if texts()==31210u64 && fixed()==31210u64 { Ok(()) } else { Error(Exit(status:1)) } }
+
+fn text_code(a:Text,b:Text)->u64 { code(a,b) }
+fn fixed_code(a:FixedSpan[Choice],b:FixedSpan[Choice])->u64 { code(a,b) }

@@ -228,8 +228,8 @@ pub(super) fn inline_ordered(module: &Module, body: &mut Body) {
                 };
                 let args = call.args.get(&body.pools.args).unwrap();
                 let addresses = match (op, args) {
-                    (Some(_), [a,b]) => [*a,*b],
-                    (None, [a]) if scalar == Scalar::U64 => [*a,*a],
+                    (Some(_), [a, b]) => [*a, *b],
+                    (None, [a]) if scalar == Scalar::U64 => [*a, *a],
                     _ => return None,
                 };
                 Some((
@@ -241,9 +241,16 @@ pub(super) fn inline_ordered(module: &Module, body: &mut Body) {
             })();
             if let Some((op, scalar, args, result)) = scalar_call {
                 let mut values = [ValueId(0); 2];
-                for (i, arg) in args.into_iter().take(if op.is_some() {2} else {1}).enumerate() {
+                for (i, arg) in args
+                    .into_iter()
+                    .take(if op.is_some() { 2 } else { 1 })
+                    .enumerate()
+                {
                     let arg = match arg {
-                        Arg::Value(v) => {values[i]=v;continue;}
+                        Arg::Value(v) => {
+                            values[i] = v;
+                            continue;
+                        }
                         Arg::Address(a) => a,
                     };
                     let steps = PoolRange::push(&mut body.pools.steps, [Step::Field(0)]);

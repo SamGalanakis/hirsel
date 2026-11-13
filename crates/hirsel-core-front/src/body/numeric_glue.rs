@@ -222,9 +222,17 @@ pub(super) fn ensure(
     let (target, payload_steps) = if op.optional() {
         payload(module, out.unwrap())
     } else {
-        (if let Some(out) = out { scalar(module,out) } else {
-            let Ty::Scalar(s) = sig.results[0] else {unreachable!()};s
-        }, vec![])
+        (
+            if let Some(out) = out {
+                scalar(module, out)
+            } else {
+                let Ty::Scalar(s) = sig.results[0] else {
+                    unreachable!()
+                };
+                s
+            },
+            vec![],
+        )
     };
     let entry = sig
         .dest

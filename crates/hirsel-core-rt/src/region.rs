@@ -53,7 +53,7 @@ impl Region {
     #[inline(always)]
     fn charge(&mut self, payer: Payer, charge: u64) {
         if self.payer == payer.record_pointer() {
-            self.charge += charge;
+            self.charge = self.charge.wrapping_add(charge);
         } else {
             self.change_payer(payer, charge);
         }
@@ -117,11 +117,11 @@ impl Region {
         let refund = previous - retained;
         if entry == self.entry {
             Payer::from_current(self.payer).refund(refund);
-            self.charge -= refund;
+            self.charge = self.charge.wrapping_sub(refund);
         } else {
             let record = self.entry_mut(entry);
             record.payer.refund(refund);
-            record.charge -= refund;
+            record.charge = record.charge.wrapping_sub(refund);
         }
     }
     pub fn physical_bytes(&self) -> usize {

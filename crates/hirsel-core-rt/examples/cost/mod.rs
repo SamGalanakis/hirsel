@@ -184,7 +184,7 @@ fn empty_bound(available: &mut u64, reservation: u64) -> u64 {
     }
     *available -= reservation;
     let child_available = black_box(reservation);
-    *available += child_available;
+    *available = available.wrapping_add(child_available);
     black_box(*available);
     child_available
 }

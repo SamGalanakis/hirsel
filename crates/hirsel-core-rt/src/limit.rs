@@ -1,5 +1,8 @@
 //! Task-local paged limit table. Bytes retain payer slots; only scope handles
 //! and union edges use structural pins. Remote events never touch local fields.
+//! Native balance updates wrap because admission/refund invariants already prove
+//! their range; they do not add guards against incorrect generated bookkeeping.
+//! User-visible size arithmetic, Capacity and count-increment overflow stay checked.
 use crate::Capacity;
 use std::{
     cell::{Cell, UnsafeCell},
@@ -165,9 +168,9 @@ impl Forest {
             return;
         }
         let root = self.find(id);
-        self.record_mut(root).available += bytes;
+        self.record_mut(root).available = self.record(root).available.wrapping_add(bytes);
         let r = self.record_mut(id);
-        r.outstanding -= bytes;
+        r.outstanding = r.outstanding.wrapping_sub(bytes);
         if r.refs == 0 && r.outstanding == 0 {
             r.refs = 1;
             self.release(id);
@@ -250,8 +253,8 @@ impl Payer {
         let r = unsafe { &mut *payer.local() };
         match bytes {
             Some(n) if !injected && n <= r.available => {
-                r.available -= n;
-                r.outstanding += n;
+                r.available = r.available.wrapping_sub(n);
+                r.outstanding = r.outstanding.wrapping_add(n);
                 Ok(())
             }
             n => Err(Capacity {
@@ -290,8 +293,8 @@ impl Payer {
             // SAFETY: this task owns all local fields; remote events use only mailbox atoms.
             let r = unsafe { &mut *self.local() };
             if bytes != 0 && r.parent.is_none() && r.refs != 0 {
-                r.available += bytes;
-                r.outstanding -= bytes;
+                r.available = r.available.wrapping_add(bytes);
+                r.outstanding = r.outstanding.wrapping_sub(bytes);
             } else {
                 self.forest().refund(self.slot().id, bytes);
             }

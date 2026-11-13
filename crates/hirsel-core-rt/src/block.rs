@@ -307,8 +307,10 @@ pub(crate) unsafe fn free_in(
         let payer = *funding(payload);
         if charge != 0 && payer.record_pointer() == context.current_limit {
             // The task pins its current canonical record and owns these local writes.
-            (*context.current_limit).available += charge;
-            (*context.current_limit).outstanding -= charge;
+            (*context.current_limit).available =
+                (*context.current_limit).available.wrapping_add(charge);
+            (*context.current_limit).outstanding =
+                (*context.current_limit).outstanding.wrapping_sub(charge);
         } else {
             payer.settle(charge);
         }

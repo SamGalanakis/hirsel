@@ -119,7 +119,7 @@ pub unsafe fn decrement(node: NonNull<u8>, atomic: bool) -> bool {
             last
         } else {
             let count = &mut *node.cast::<u64>().as_ptr();
-            *count -= 1;
+            *count = count.wrapping_sub(1);
             *count == 0
         }
     }

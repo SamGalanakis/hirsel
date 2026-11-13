@@ -55,6 +55,7 @@ import tomllib
 
 from action_sizes_from_log import CALIBRATED_CPUS, CPU_CLASSES, MAX_CPUS, compile_cpus
 import generated
+import prepare
 from cargo_units import Resolution
 from test_sizes_from_usage import requests_bzl
 
@@ -1160,8 +1161,8 @@ def first_party(meta: dict) -> str:
                                  "//tools/buck2:llvm-cxx-headers-lock.json", "//tools/buck2:llvm-runtime-lock.json",
                                  "//tools/buck2:pins.json", "tools/native-toolchain/llvm-23.lock"]))
     out.append("\n" + call("hirsel_script_test", name="test-native-scratch-tools", script="tools/tests/buck2_sync.py", full=False,
-                           args=["AtomicScratch", "ProductionFeatures", "CargoUnits"],
-                           data=["//tools/buck2:sync.py", "//tools/buck2:cargo_units.py", "//tools/buck2:rust_environment.py", "//tools/buck2:generated.py",
+                           args=["AtomicScratch", "ProductionFeatures", "CargoUnits", "ExecutorConfiguration"],
+                           data=["//tools/buck2:sync.py", "//tools/buck2:prepare.py", "//tools/buck2:cargo_units.py", "//tools/buck2:rust_environment.py", "//tools/buck2:generated.py",
                                  "//tools/buck2:action_sizes_from_log.py", "//tools/buck2:test_sizes_from_usage.py"]))
     out.append("\n" + call("hirsel_script_test", name="test-filter", script="tools/tests/test_filter.py", full=False,
                            data=["tools/test-filter", "tools/consumers", "//tools/buck2:event_logs.py"]))
@@ -1600,6 +1601,7 @@ def main() -> int:
     parser.add_argument("--strict-production-features", action="store_true",
                         help="fail on every production test feature, including the explicitly recorded baseline leaks")
     args = parser.parse_args()
+    prepare.configure_test_executor(ROOT)
     if not REINDEER.is_file():
         raise SystemExit("run tools/buck2/bootstrap.py first (Reindeer is missing)")
     parts = generated.stale(ROOT) if args.if_stale or args.check else list(generated.PARTS)

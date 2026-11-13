@@ -49,6 +49,28 @@ def is_remote(config):
     return '[buck2_re_client]' in text and 'execution = local' not in text
 
 
+def configure_test_executor(root):
+    """Pin the executor to this checkout after either setup entry point.
+
+    Do not create a local config: its absence tells callers to install their
+    remote configuration, and sync must not silently select local execution.
+    """
+    local = root / '.buckconfig.local'
+    if not local.is_file():
+        return False
+    before = local.read_text()
+    text = re.sub(r'(?m)^[ \t]*v2_test_executor\s*=.*\n?', '', before)
+    setting = f'v2_test_executor = {root.resolve() / "tools/buck2/test_executor.py"}\n'
+    if re.search(r'(?m)^\[test\][ \t]*(?:\n|$)', text):
+        text = re.sub(r'(?m)^\[test\][ \t]*(?:\n|$)', lambda m: '[test]\n' + setting, text, count=1)
+    else:
+        text += '\n[test]\n' + setting
+    if text == before:
+        return False
+    local.write_text(text)
+    return True
+
+
 def main():
     local = ROOT / '.buckconfig.local'
     before = local.read_bytes() if local.is_file() else None
@@ -56,12 +78,8 @@ def main():
     if status == 0:
         # The daemon launches executors outside the project root. The shared
         # timeout stays in .buckconfig; only this checkout's path is local.
-        text = re.sub(r'(?m)^v2_test_executor\s*=.*\n?', '', local.read_text())
-        setting = f'v2_test_executor = {HERE / "test_executor.py"}\n'
-        if re.search(r'(?m)^\[test\][ \t]*(?:\n|$)', text):
-            text = re.sub(r'(?m)^\[test\][ \t]*(?:\n|$)', lambda m: '[test]\n' + setting, text, count=1)
-        else:
-            text += '\n[test]\n' + setting
+        configure_test_executor(ROOT)
+        text = local.read_text()
         # The daemon reads its remote client's settings from config files when
         # it starts, never from `-c`: a caller allowed a wider share of the
         # pool than .buckconfig's per-checkout ceiling (tools/land) names it

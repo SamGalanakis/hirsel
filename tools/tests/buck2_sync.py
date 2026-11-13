@@ -20,6 +20,39 @@ sync = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(sync)
 
 
+class ExecutorConfiguration(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.local = self.root / '.buckconfig.local'
+
+    def test_missing_execution_configuration_is_not_created(self):
+        self.assertFalse(sync.prepare.configure_test_executor(self.root))
+        self.assertFalse(self.local.exists())
+
+    def test_remote_hook_configuration_gets_a_checkout_absolute_executor(self):
+        remote = '[buck2_re_client]\naddress = pool\n'
+        self.local.write_text(remote + '[test]\nv2_test_executor = tools/buck2/test_executor.py\n')
+        self.assertTrue(sync.prepare.configure_test_executor(self.root))
+        configured = self.local.read_text()
+        self.assertTrue(configured.startswith(remote))
+        self.assertIn(f'v2_test_executor = {self.root}/tools/buck2/test_executor.py\n', configured)
+        self.assertEqual(configured.count('v2_test_executor'), 1)
+        self.assertFalse(sync.prepare.configure_test_executor(self.root))
+        self.assertEqual(self.local.read_text(), configured)
+
+    def test_if_stale_still_repairs_executor_after_hook_rewrites_configuration(self):
+        self.local.write_text('[buck2_re_client]\naddress = pool\n')
+        reindeer = self.root / 'reindeer'
+        reindeer.touch()
+        with patch.object(sync, 'ROOT', self.root), patch.object(sync, 'REINDEER', reindeer), \
+             patch.object(sync.generated, 'stale', return_value=[]), \
+             patch.object(sys, 'argv', ['sync.py', '--if-stale']):
+            self.assertEqual(sync.main(), 0)
+        self.assertIn(f'v2_test_executor = {self.root}/tools/buck2/test_executor.py', self.local.read_text())
+
+
 class ProductionFeatures(unittest.TestCase):
     def graph(self, *, leaked=True, build=False):
         return (sync.call('hirsel_binary', name='compiler', package_name='compiler', features=[],

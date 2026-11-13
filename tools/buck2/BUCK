@@ -131,6 +131,7 @@ export_file(name = "runtime_parts.py", src = "runtime_parts.py", visibility = ["
 export_file(name = "startup_order.py", visibility = ["PUBLIC"])
 export_file(name = "link_hosts.py", src = "link_hosts.py", visibility = ["PUBLIC"])
 export_file(name = "sync.py", src = "sync.py", mode = "reference", visibility = ["PUBLIC"])
+export_file(name = "prepare.py", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "cargo_units.py", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "consumer_results.py", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "action_sizes_from_log.py", src = "action_sizes_from_log.py", mode = "reference", visibility = ["PUBLIC"])

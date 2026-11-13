@@ -4,7 +4,7 @@ use hirsel_core_driver::{
 use hirsel_core_resolve::CorpusManifest;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-hirsel_guard::install!();
+hirsel_guard::install!(mimalloc::MiMalloc: mimalloc::MiMalloc);
 
 #[derive(Serialize)]
 struct Output<'a> {

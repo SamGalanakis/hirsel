@@ -720,6 +720,7 @@ dependencies = [
  "hirsel-guard",
  "hirsel-intern",
  "hirsel-llvm-lazy",
+ "mimalloc",
  "object",
  "rustc-hash",
  "serde",

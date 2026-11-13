@@ -43,12 +43,13 @@ fn partial_refund_follows_allocation_payer_and_close_refunds_only_the_tail_balan
     let mut ctx = Context::new(8192);
     let mut region = Region::new(8192);
     ctx.limit_enter(4096).unwrap();
-    let p = region.allocate(&ctx, 4096, 8, Some(4096)).unwrap();
+    let _p = region.allocate(&ctx, 4096, 8, Some(4096)).unwrap();
+    let entry = region.entry;
     ctx.limit_exit();
     ctx.limit_enter(1024).unwrap();
     // SAFETY: the sole writer retains 80 logical bytes of its completed prefix.
     unsafe {
-        Region::lower_charge(p, 80);
+        region.lower_charge(entry, 4096, 80);
     }
     assert_eq!(ctx.available(), 1024);
     ctx.limit_exit();
@@ -107,11 +108,39 @@ fn region_c_abi_preserves_prefix_and_refunds_lowered_charge() {
         let region = hirsel_core_region_open(256);
         let allocation = hirsel_core_region_alloc(ctx, region, 64, 16, 64, false);
         allocation.pointer.write(73);
-        hirsel_core_region_lower_charge(std::ptr::NonNull::new(allocation.pointer).unwrap(), 8);
+        hirsel_core_region_lower_charge(region, (*region).entry, 64, 8);
         assert_eq!(allocation.pointer.read(), 73);
         assert_eq!((*ctx).available(), 120);
         hirsel_core_region_close(region);
         assert_eq!((*ctx).available(), 128);
         hirsel_core_context_free(ctx);
     }
+}
+
+#[test]
+fn shared_payer_entries_trim_each_builder_independently_across_spills_and_slot_pages() {
+    let mut ctx = Context::new(8192);
+    let mut region = Region::new(128);
+    let mut reservations = Vec::new();
+    for depth in 0..80 {
+        ctx.limit_enter(8192 - depth * 80).unwrap();
+        region.allocate(&ctx, 32, 8, Some(32)).unwrap();
+        let entry = region.entry;
+        region.allocate(&ctx, 16, 8, Some(16)).unwrap();
+        assert_eq!(region.entry, entry);
+        reservations.push(entry);
+    }
+    for _ in 0..80 {
+        ctx.limit_exit();
+    }
+    for entry in reservations {
+        // SAFETY: distinct reservations share an entry; each refunds only its own tail.
+        unsafe {
+            region.lower_charge(entry, 32, 8);
+            region.lower_charge(entry, 16, 0);
+        }
+    }
+    assert_eq!(ctx.available(), 8192 - 80 * 8);
+    drop(region);
+    assert_eq!(ctx.available(), 8192);
 }

@@ -7,12 +7,14 @@ hirsel_guard::install!();
 pub mod abi;
 pub mod abi_host;
 pub mod abi_tasks;
+mod allocator;
 pub mod block;
 pub mod causes;
 pub mod channel;
 pub mod counted;
 pub mod entry;
 mod fiber;
+mod destination;
 pub mod limit;
 pub mod os;
 pub mod process;
@@ -32,16 +34,15 @@ pub struct Capacity {
 
 /// The hidden first argument of native functions. A task owns its context;
 /// custody can carry funding records beyond this context's lifetime.
+#[repr(C)]
 pub struct Context {
+    pub(crate) current_limit: *mut limit::LimitRecord,
     pub(crate) run: *const crate::process::Config,
     pub(crate) cancel_requested: bool,
     pub(crate) cancel_shield: usize,
     pub(crate) current: Funding,
-    pub(crate) stack: Vec<Funding>,
     pub(crate) finalizing: usize,
-    /// The bound depth at which the running finalizer's grant is current, or MAX.
-    /// A refusal is a failure only while the grant itself is current (MEM-27): a
-    /// bound scope entered inside a finalizer refuses with a value (MEM-25).
+    pub(crate) bound_depth: usize,
     pub(crate) grant_depth: usize,
     pub(crate) primary: Option<Box<causes::Cell>>,
     pub(crate) causes: causes::Causes,
@@ -51,18 +52,21 @@ pub struct Context {
 
 impl Context {
     /// The task provider admits its task record and primary cell separately.
+    #[inline]
     pub fn new(bytes: u64) -> Self {
         Self::with_funding(Funding::root(bytes))
     }
 
-    pub(crate) fn with_funding(funding: Funding) -> Self {
+    pub(crate) fn with_funding(current: Funding) -> Self {
+        let current_limit = current.fast();
         Self {
+            current_limit,
             run: std::ptr::null(),
             cancel_requested: false,
             cancel_shield: 0,
-            current: funding,
-            stack: Vec::new(),
+            current,
             finalizing: 0,
+            bound_depth: 0,
             grant_depth: usize::MAX,
             primary: None,
             causes: causes::Causes::default(),
@@ -71,12 +75,12 @@ impl Context {
         }
     }
 
-    /// Give a fixture's program its exact allowance after prepaying task startup.
     #[cfg(feature = "testing")]
     pub fn reset_test_limit(&mut self, bytes: u64) {
         self.current = Funding::root(bytes);
+        self.current_limit = self.current.fast();
+        self.current.bind();
     }
-    /// Refuse the nth admission, optionally also every later admission.
     #[cfg(feature = "testing")]
     pub fn inject_admission(&mut self, n: usize, later: bool) {
         self.current.inject(n, later);
@@ -85,34 +89,48 @@ impl Context {
     pub fn admission_attempts(&self) -> usize {
         self.current.attempts()
     }
+    /// Native emitter pointer to the frozen current-limit prefix. Dereferencing
+    /// requires the task-exclusive discipline of the C ABI.
+    pub fn limit_record(&self) -> *mut limit::LimitRecord {
+        self.current_limit
+    }
 
+    #[inline]
     pub fn available(&self) -> u64 {
         self.current.available()
     }
 
+    #[inline]
     pub fn limit_enter(&mut self, bytes: u64) -> Result<(), Capacity> {
-        let child = self.current.reserve(bytes)?;
-        self.stack.push(std::mem::replace(&mut self.current, child));
+        self.current.enter(bytes)?;
+        self.bound_depth += 1;
+        self.current_limit = self.current.fast();
         Ok(())
     }
 
+    #[inline]
     pub fn limit_exit(&mut self) {
-        self.current.end();
-        self.current = self.stack.pop().unwrap();
+        self.current.exit();
+        self.bound_depth -= 1;
+        self.current_limit = self.current.fast();
     }
 
-    pub(crate) fn payer(&self, like: Option<&Funding>) -> Funding {
+    #[inline]
+    pub(crate) fn payer(&self, like: Option<&limit::Payer>) -> limit::Payer {
         if self.finalizing != 0 {
-            self.current.clone()
+            limit::Payer::from_current(self.current_limit)
         } else {
-            like.unwrap_or(&self.current).clone()
+            like.copied().map_or_else(
+                || limit::Payer::from_current(self.current_limit),
+                limit::Payer::canonical,
+            )
         }
     }
 }
 
 impl Drop for Context {
     fn drop(&mut self) {
-        while !self.stack.is_empty() {
+        while self.bound_depth != 0 {
             self.limit_exit();
         }
     }
@@ -120,6 +138,8 @@ impl Drop for Context {
 
 #[cfg(test)]
 mod causes_tests;
+#[cfg(test)]
+mod compact_tests;
 #[cfg(test)]
 mod counted_tests;
 #[cfg(test)]

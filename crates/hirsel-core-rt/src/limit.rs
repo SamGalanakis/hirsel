@@ -1,87 +1,141 @@
-//! Union by rank, full path compression, and reference-counted record slots.
-//! Reservations hold their parent record; union edges hold their representative.
-//! Ending a limit allocates nothing and never walks values (MEM-20).
-
+//! Task-local paged limit table. Bytes retain payer slots; only scope handles
+//! and union edges use structural pins. Remote events never touch local fields.
 use crate::Capacity;
-use std::sync::{Arc, Mutex};
+use std::{
+    cell::{Cell, UnsafeCell},
+    ptr::NonNull,
+    sync::{
+        Mutex,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
+};
 
+#[derive(Clone, Copy)]
 struct Live {
     owner: u64,
     capacity: u64,
-    used: u64,
     parent: Option<usize>,
 }
-struct Record {
+/// Frozen local record prefix. Emitters compare/subtract available and add the
+/// admitted bytes to outstanding. Neither operation is atomic.
+#[repr(C)]
+pub struct LimitRecord {
+    pub available: u64,
+    pub outstanding: u64,
     refs: usize,
     parent: Option<usize>,
     rank: u32,
     live: Option<Live>,
+    next_free: Option<usize>,
+    occupied: bool,
 }
-enum Slot {
-    Record(Record),
-    Free(Option<usize>),
+#[repr(C)]
+struct Slot {
+    local: UnsafeCell<LimitRecord>,
+    pending: AtomicU64,
+    pending_zeros: AtomicUsize,
+    domain: NonNull<Domain>,
+    id: usize,
 }
 struct Forest {
-    slots: Vec<Slot>,
+    pages: Vec<Box<[Slot; 64]>>,
+    length: usize,
     free: Option<usize>,
-    #[cfg(any(test, feature = "testing"))]
-    pub(crate) attempts: usize,
-    #[cfg(any(test, feature = "testing"))]
-    pub(crate) fail: Option<(usize, bool)>,
+    // Read/written only after the last local handle retires.
+    retired_bytes: u64,
+    zeros: usize,
+    #[cfg(any(test,feature="testing"))]
+    attempts: usize,
+    #[cfg(any(test,feature="testing"))]
+    fail: Option<(usize, bool)>,
 }
-
 impl Forest {
-    fn record(&self, id: usize) -> &Record {
-        match &self.slots[id] {
-            Slot::Record(r) => r,
-            Slot::Free(_) => unreachable!(),
-        }
+    #[inline(always)]
+    fn slot(&self, id: usize) -> &Slot {
+        &self.pages[id / 64][id % 64]
     }
-    fn record_mut(&mut self, id: usize) -> &mut Record {
-        match &mut self.slots[id] {
-            Slot::Record(r) => r,
-            Slot::Free(_) => unreachable!(),
-        }
+    #[inline(always)]
+    fn record(&self, id: usize) -> &LimitRecord {
+        // SAFETY: task-exclusive forest access, or the retired mailbox owner.
+        unsafe { &*self.slot(id).local.get() }
     }
+    #[inline(always)]
+    fn record_mut(&mut self, id: usize) -> &mut LimitRecord {
+        // SAFETY: task-exclusive forest access, or the retired mailbox owner.
+        unsafe { &mut *self.slot(id).local.get() }
+    }
+    #[inline]
     fn retain(&mut self, id: usize) {
         self.record_mut(id).refs += 1;
     }
     fn release(&mut self, mut id: usize) {
         loop {
+            let free = self.free;
             let r = self.record_mut(id);
             r.refs -= 1;
-            if r.refs != 0 {
-                break;
+            if r.refs != 0 || r.outstanding != 0 {
+                return;
             }
-            let parent = r.parent.or_else(|| r.live.as_ref().and_then(|l| l.parent));
-            self.slots[id] = Slot::Free(self.free);
+            let parent = r.parent.or_else(|| r.live.and_then(|l| l.parent));
+            r.occupied = false;
+            r.next_free = free;
             self.free = Some(id);
-            match parent {
-                Some(p) => id = p,
-                None => break,
+            if let Some(p) = parent {
+                id = p;
+            } else {
+                return;
             }
         }
     }
-    fn insert(&mut self, live: Live) -> usize {
-        let record = Slot::Record(Record {
+    fn insert(&mut self, domain: NonNull<Domain>, live: Live) -> usize {
+        let id = if let Some(id) = self.free {
+            self.free = self.record(id).next_free;
+            id
+        } else {
+            let id = self.length;
+            if id % 64 == 0 {
+                self.pages.push(Box::new(std::array::from_fn(|i| Slot {
+                    local: UnsafeCell::new(LimitRecord {
+                        available: 0,
+                        outstanding: 0,
+                        refs: 0,
+                        parent: None,
+                        rank: 0,
+                        live: None,
+                        next_free: None,
+                        occupied: false,
+                    }),
+                    pending: AtomicU64::new(0),
+                    pending_zeros: AtomicUsize::new(0),
+                    domain,
+                    id: id + i,
+                })));
+            }
+            self.length += 1;
+            id
+        };
+        *self.record_mut(id) = LimitRecord {
+            available: live.capacity,
+            outstanding: 0,
             refs: 1,
             parent: None,
             rank: 0,
             live: Some(live),
-        });
-        if let Some(id) = self.free {
-            let Slot::Free(next) = self.slots[id] else {
-                unreachable!()
-            };
-            self.free = next;
-            self.slots[id] = record;
+            next_free: None,
+            occupied: true,
+        };
+        id
+    }
+    #[inline(always)]
+    fn find(&mut self, id: usize) -> usize {
+        if self.record(id).parent.is_none() {
             id
         } else {
-            self.slots.push(record);
-            self.slots.len() - 1
+            self.compress(id)
         }
     }
-    fn find(&mut self, id: usize) -> usize {
+    #[cold]
+    fn compress(&mut self, id: usize) -> usize {
         let mut root = id;
         while let Some(p) = self.record(root).parent {
             root = p;
@@ -93,10 +147,7 @@ impl Forest {
             }
             self.retain(root);
             self.record_mut(node).parent = Some(root);
-            // Hold p while releasing its former incoming edge: compression may
-            // otherwise reclaim the next node before we follow it.
-            self.retain(p);
-            self.release(p);
+            // Transfer the old edge to this traversal until its next step.
             if node != id {
                 self.release(node);
             }
@@ -107,112 +158,299 @@ impl Forest {
         }
         root
     }
-    fn admit(&mut self, id: usize, bytes: Option<u64>) -> Result<(), Capacity> {
+    fn refund(&mut self, id: usize, bytes: u64) {
+        if bytes == 0 {
+            self.zeros -= 1;
+            self.release(id);
+            return;
+        }
         let root = self.find(id);
-        #[cfg(any(test, feature = "testing"))]
+        self.record_mut(root).available += bytes;
+        let r = self.record_mut(id);
+        r.outstanding -= bytes;
+        if r.refs == 0 && r.outstanding == 0 {
+            r.refs = 1;
+            self.release(id);
+        }
+    }
+}
+struct Remote {
+    retired: bool,
+}
+struct Domain {
+    forest: UnsafeCell<Forest>,
+    handles: Cell<usize>,
+    owner: Option<usize>,
+    remote: Mutex<Remote>,
+}
+thread_local! { static THREAD:u8=const{0}; static CURRENT_DOMAIN: Cell<usize> = const { Cell::new(0) }; }
+#[inline(always)]
+fn thread() -> usize {
+    THREAD.with(|v| v as *const u8 as usize)
+}
+/// One pointer to a stable task-table slot. The slot's outstanding bytes keep
+/// both it and its table alive. No per-block reference count or allocation.
+#[repr(transparent)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Payer(NonNull<Slot>);
+impl Payer {
+    #[inline(always)]
+    fn slot(self) -> &'static Slot {
+        // SAFETY: a local handle, structural edge or outstanding bytes pin this slot.
+        unsafe { self.0.as_ref() }
+    }
+    #[inline(always)]
+    fn domain(self) -> &'static Domain {
+        // SAFETY: every occupied slot pins its table's domain.
+        unsafe { self.slot().domain.as_ref() }
+    }
+    #[inline(always)]
+    #[allow(clippy::mut_from_ref)] // Task-exclusive UnsafeCell; remote uses only mailbox atomics.
+    fn forest(self) -> &'static mut Forest {
+        // SAFETY: local task is exclusive; orphan access owns the mailbox mutex.
+        unsafe { &mut *self.domain().forest.get() }
+    }
+    #[inline(always)]
+    pub(crate) fn record_pointer(self) -> *mut LimitRecord {
+        self.local()
+    }
+    pub(crate) fn from_current(pointer: *mut LimitRecord) -> Self {
+        // SAFETY: Slot is repr(C), with the local record at offset zero. Context
+        // refreshes this pointer at each limit/finalizer transition.
+        Self(unsafe { NonNull::new_unchecked(pointer.cast()) })
+    }
+    #[inline(always)]
+    fn local(self) -> *mut LimitRecord {
+        self.slot().local.get()
+    }
+    #[inline(always)]
+    pub(crate) fn canonical(self) -> Self {
+        // SAFETY: local task exclusively owns the local record fields.
+        if unsafe { (*self.local()).parent.is_none() } {
+            self
+        } else {
+            let f = self.forest();
+            let id = f.find(self.slot().id);
+            Self(NonNull::from(f.slot(id)))
+        }
+    }
+    #[inline(always)]
+    pub(crate) fn admit(self, bytes: Option<u64>) -> Result<(), Capacity> {
+        let payer = self;
+        #[cfg(any(test,feature="testing"))]
         let injected = {
-            self.attempts += 1;
-            self.fail
-                .is_some_and(|(n, later)| self.attempts == n || later && self.attempts >= n)
+            let f = payer.forest();
+            f.attempts += 1;
+            f.fail
+                .is_some_and(|(n, later)| f.attempts == n || later && f.attempts >= n)
         };
-        #[cfg(not(any(test, feature = "testing")))]
+        #[cfg(not(any(test,feature="testing")))]
         let injected = false;
-        let live = self.record_mut(root).live.as_mut().unwrap();
-        let available = live.capacity - live.used;
+        // SAFETY: canonical live local record, accessed exclusively by its task.
+        let r = unsafe { &mut *payer.local() };
         match bytes {
-            Some(n) if !injected && n <= available => {
-                live.used += n;
+            Some(n) if !injected && n <= r.available => {
+                r.available -= n;
+                r.outstanding += n;
                 Ok(())
             }
             n => Err(Capacity {
                 requested: n.unwrap_or(u64::MAX),
-                available,
+                available: r.available,
             }),
         }
     }
-    fn refund(&mut self, id: usize, bytes: u64) -> u64 {
-        let root = self.find(id);
-        let live = self.record_mut(root).live.as_mut().unwrap();
-        live.used -= bytes;
-        live.owner
+    pub(crate) fn pin_zero(self) {
+        let f = self.forest();
+        f.retain(self.slot().id);
+        f.zeros += 1;
     }
-}
-
-/// A storage domain identity, retained by every allocation it paid for.
-pub struct Funding {
-    forest: Arc<Mutex<Forest>>,
-    id: usize,
-}
-
-impl Funding {
-    pub fn root(capacity: u64) -> Self {
-        let mut forest = Forest {
-            slots: Vec::new(),
-            free: None,
-            #[cfg(any(test, feature = "testing"))]
-            attempts: 0,
-            #[cfg(any(test, feature = "testing"))]
-            fail: None,
-        };
-        let id = forest.insert(Live {
-            owner: crate::tasks::current_id(),
-            capacity,
-            used: 0,
-            parent: None,
-        });
-        Self {
-            forest: Arc::new(Mutex::new(forest)),
-            id,
+    #[inline(always)]
+    pub(crate) fn refund(self, bytes: u64) {
+        if bytes != 0 {
+            self.settle(bytes);
         }
     }
+    #[inline]
+    pub(crate) fn settle(self, bytes: u64) {
+        let d = self.domain();
+        if d.owner == Some(thread()) && d.handles.get() != 0 {
+            let root = self.canonical();
+            let owner = root.forest().record(root.slot().id).live.unwrap().owner;
+            if owner != crate::tasks::current_id() && bytes != 0 {
+                crate::abi_tasks::cross_task_refund(owner, bytes);
+                self.slot().pending.fetch_add(bytes, Ordering::Relaxed);
+                return;
+            }
+        }
+        if (d.owner == Some(thread())
+            || CURRENT_DOMAIN.with(|v| v.get() == self.slot().domain.as_ptr().addr()))
+            && d.handles.get() != 0
+        {
+            // SAFETY: this task owns all local fields; remote events use only mailbox atoms.
+            let r = unsafe { &mut *self.local() };
+            if bytes != 0 && r.parent.is_none() && r.refs != 0 {
+                r.available += bytes;
+                r.outstanding -= bytes;
+            } else {
+                self.forest().refund(self.slot().id, bytes);
+            }
+        } else {
+            self.remote_refund(bytes);
+        }
+    }
+    #[cold]
+    fn remote_refund(self, bytes: u64) {
+        let d = self.domain();
+        let remote = d.remote.lock().unwrap();
+        if remote.retired {
+            let f = self.forest();
+            f.refund(self.slot().id, bytes);
+            f.retired_bytes -= bytes;
+            let empty = f.retired_bytes == 0 && f.zeros == 0;
+            let domain = self.slot().domain;
+            drop(remote);
+            if empty {
+                // SAFETY: all handles, zero leases and outstanding bytes are gone.
+                unsafe {
+                    drop(Box::from_raw(domain.as_ptr()));
+                }
+            }
+        } else if bytes != 0 {
+            self.slot().pending.fetch_add(bytes, Ordering::Relaxed);
+        } else {
+            self.slot().pending_zeros.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub(crate) fn prepaid(self, bytes: u64) -> Funding {
+        let parent = self.canonical();
+        let f = self.forest();
+        f.record_mut(parent.slot().id).outstanding -= bytes;
+        f.retain(parent.slot().id);
+        let id = f.insert(
+            self.slot().domain,
+            Live {
+                owner: f.record(parent.slot().id).live.unwrap().owner,
+                capacity: bytes,
+                parent: Some(parent.slot().id),
+            },
+        );
+        self.domain().handles.set(self.domain().handles.get() + 1);
+        Funding {
+            payer: Self(NonNull::from(f.slot(id))),
+        }
+    }
+}
+/// Safe task-local scope handle. Allocations retain bytes, never these handles.
+#[repr(C)]
+pub struct Funding {
+    pub(crate) payer: Payer,
+}
+impl Funding {
+    pub fn root(capacity: u64) -> Self {
+        let domain = Box::new(Domain {
+            forest: UnsafeCell::new(Forest {
+                pages: Vec::new(),
+                length: 0,
+                free: None,
+                retired_bytes: 0,
+                zeros: 0,
+                #[cfg(any(test,feature="testing"))]
+                attempts: 0,
+                #[cfg(any(test,feature="testing"))]
+                fail: None,
+            }),
+            handles: Cell::new(1),
+            owner: Some(thread()),
+            remote: Mutex::new(Remote { retired: false }),
+        });
+        let domain = NonNull::from(Box::leak(domain));
+        // SAFETY: the fresh domain is exclusively owned until its first handle returns.
+        let f = unsafe { &mut *domain.as_ref().forest.get() };
+        let id = f.insert(
+            domain,
+            Live {
+                owner: crate::tasks::current_id(),
+                capacity,
+                parent: None,
+            },
+        );
+        Self {
+            payer: Payer(NonNull::from(f.slot(id))),
+        }
+    }
+    pub(crate) fn native(&self) {
+        // SAFETY: context_new calls this before publishing the fresh native context.
+        unsafe {
+            (*self.payer.slot().domain.as_ptr()).owner = None;
+        }
+        self.bind();
+    }
+    pub(crate) fn bind(&self) {
+        CURRENT_DOMAIN.with(|v| v.set(self.payer.slot().domain.as_ptr().addr()));
+    }
+    pub(crate) fn unbind() {
+        CURRENT_DOMAIN.with(|v| v.set(0));
+    }
+    /// Provider drains at event handoff, before this task resumes. No allocation.
+    pub fn drain(&self) {
+        let _remote = self.payer.domain().remote.lock().unwrap();
+        self.drain_locked(false);
+    }
+    fn drain_locked(&self, retired: bool) {
+        let f = self.payer.forest();
+        for id in 0..f.length {
+            let bytes = f.slot(id).pending.swap(0, Ordering::Relaxed);
+            if bytes != 0 {
+                f.refund(id, bytes);
+                if retired {
+                    f.retired_bytes -= bytes;
+                }
+            }
+            let zeros = f.slot(id).pending_zeros.swap(0, Ordering::Relaxed);
+            for _ in 0..zeros {
+                f.refund(id, 0);
+            }
+        }
+    }
+    pub(crate) fn fast(&self) -> *mut LimitRecord {
+        self.payer.canonical().local()
+    }
+    #[inline(always)]
     pub fn available(&self) -> u64 {
-        let mut forest = self.forest.lock().unwrap();
-        let root = forest.find(self.id);
-        let l = forest.record(root).live.as_ref().unwrap();
-        l.capacity - l.used
+        // SAFETY: this handle pins its canonical local record.
+        unsafe { (*self.fast()).available }
     }
     pub(crate) fn admit(&self, bytes: Option<u64>) -> Result<(), Capacity> {
-        self.forest.lock().unwrap().admit(self.id, bytes)
+        self.payer.canonical().admit(bytes)
     }
     pub(crate) fn refund(&self, bytes: u64) {
-        let owner = self.forest.lock().unwrap().refund(self.id, bytes);
-        crate::abi_tasks::cross_task_refund(owner, bytes);
+        self.payer.refund(bytes);
     }
     pub fn reserve(&self, bytes: u64) -> Result<Self, Capacity> {
         self.admit(Some(bytes))?;
-        Ok(self.prepaid(bytes))
+        Ok(self.payer.prepaid(bytes))
     }
-    /// Subdivide an already admitted reservation, without another admission.
     pub(crate) fn prepaid(&self, bytes: u64) -> Self {
-        let mut forest = self.forest.lock().unwrap();
-        forest.retain(self.id);
-        let root = forest.find(self.id);
-        let owner = forest.record(root).live.as_ref().unwrap().owner;
-        let id = forest.insert(Live {
-            owner,
-            capacity: bytes,
-            used: 0,
-            parent: Some(self.id),
-        });
-        Self {
-            forest: self.forest.clone(),
-            id,
-        }
+        self.payer.prepaid(bytes)
     }
     pub(crate) fn task_owner(&self, owner: u64) {
-        let mut forest = self.forest.lock().unwrap();
-        let root = forest.find(self.id);
-        forest.record_mut(root).live.as_mut().unwrap().owner = owner;
+        let payer = self.payer.canonical();
+        payer.forest().record_mut(payer.slot().id).live.as_mut().unwrap().owner = owner;
     }
     pub fn end(&self) {
-        let mut f = self.forest.lock().unwrap();
-        let child = f.find(self.id);
+        self.end_id();
+    }
+    fn end_id(&self) -> usize {
+        let f = self.payer.forest();
+        let child = f.find(self.payer.slot().id);
         let live = f.record_mut(child).live.take().unwrap();
         let original_parent = live.parent.unwrap();
         let parent = f.find(original_parent);
-        let unused = live.capacity - live.used;
-        let owner = f.record(parent).live.as_ref().unwrap().owner;
-        f.record_mut(parent).live.as_mut().unwrap().used -= unused;
+        let unused = f.record(child).available;
+        crate::abi_tasks::cross_task_refund(f.record(parent).live.unwrap().owner, unused);
+        f.record_mut(parent).available += unused;
+        let parent_available = f.record(parent).available;
         let parent_live = f.record_mut(parent).live.take();
         let (winner, loser) = if f.record(child).rank > f.record(parent).rank {
             (child, parent)
@@ -223,44 +461,112 @@ impl Funding {
             (parent, child)
         };
         f.record_mut(winner).live = parent_live;
+        f.record_mut(winner).available = parent_available;
         f.retain(winner);
         f.record_mut(loser).parent = Some(winner);
         f.release(original_parent);
-        drop(f);
-        crate::abi_tasks::cross_task_refund(owner, unused);
+        winner
     }
-    #[cfg(any(test, feature = "testing"))]
+    #[inline]
+    pub(crate) fn enter(&mut self, bytes: u64) -> Result<(), Capacity> {
+        self.admit(Some(bytes))?;
+        let parent = self.payer.canonical();
+        let f = self.payer.forest();
+        f.record_mut(parent.slot().id).outstanding -= bytes;
+        f.retain(parent.slot().id);
+        let id = f.insert(
+            self.payer.slot().domain,
+            Live {
+                owner: f.record(parent.slot().id).live.unwrap().owner,
+                capacity: bytes,
+                parent: Some(parent.slot().id),
+            },
+        );
+        f.release(self.payer.slot().id);
+        self.payer = Payer(NonNull::from(f.slot(id)));
+        Ok(())
+    }
+    #[inline]
+    pub(crate) fn exit(&mut self) {
+        let old = self.payer.slot().id;
+        let f = self.payer.forest();
+        let r = f.record(old);
+        // Empty lexical scopes leave no funding record or union edge behind.
+        if r.refs == 1 && r.available == r.live.unwrap().capacity {
+            let live = r.live.unwrap();
+            let parent = f.find(live.parent.unwrap());
+            f.record_mut(parent).available += live.capacity;
+            f.retain(parent);
+            f.release(old);
+            self.payer = Payer(NonNull::from(f.slot(parent)));
+        } else {
+            let winner = self.end_id();
+            let f = self.payer.forest();
+            f.retain(winner);
+            f.release(old);
+            self.payer = Payer(NonNull::from(f.slot(winner)));
+        }
+    }
+    pub(crate) fn has_parent(&self) -> bool {
+        let p = self.payer.canonical();
+        p.forest()
+            .record(p.slot().id)
+            .live
+            .unwrap()
+            .parent
+            .is_some()
+    }
+    #[cfg(any(test,feature="testing"))]
     pub(crate) fn inject(&self, n: usize, later: bool) {
-        let mut f = self.forest.lock().unwrap();
+        let f = self.payer.forest();
         f.attempts = 0;
         f.fail = Some((n, later));
     }
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(any(test,feature="testing"))]
     pub(crate) fn attempts(&self) -> usize {
-        self.forest.lock().unwrap().attempts
+        self.payer.forest().attempts
     }
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(any(test,feature="testing"))]
     pub(crate) fn records(&self) -> usize {
-        self.forest
-            .lock()
-            .unwrap()
-            .slots
-            .iter()
-            .filter(|s| matches!(s, Slot::Record(_)))
-            .count()
+        let f = self.payer.forest();
+        (0..f.length).filter(|&id| f.record(id).occupied).count()
     }
 }
 impl Clone for Funding {
     fn clone(&self) -> Self {
-        self.forest.lock().unwrap().retain(self.id);
-        Self {
-            forest: self.forest.clone(),
-            id: self.id,
-        }
+        let d = self.payer.domain();
+        d.handles.set(d.handles.get() + 1);
+        self.payer.forest().retain(self.payer.slot().id);
+        Self { payer: self.payer }
     }
 }
 impl Drop for Funding {
     fn drop(&mut self) {
-        self.forest.lock().unwrap().release(self.id);
+        let domain = self.payer.slot().domain;
+        let d = self.payer.domain();
+        d.handles.set(d.handles.get() - 1);
+        if d.handles.get() != 0 {
+            self.payer.forest().release(self.payer.slot().id);
+            return;
+        }
+        CURRENT_DOMAIN.with(|v| {
+            if v.get() == domain.as_ptr().addr() {
+                v.set(0);
+            }
+        });
+        let mut remote = d.remote.lock().unwrap();
+        remote.retired = true;
+        let f = self.payer.forest();
+        f.retired_bytes = (0..f.length).map(|id| f.record(id).outstanding).sum();
+        self.drain_locked(true);
+        self.payer.forest().release(self.payer.slot().id);
+        let empty = self.payer.forest().retired_bytes == 0 && self.payer.forest().zeros == 0;
+        drop(remote);
+        if empty {
+            // SAFETY: the last handle and all charged values have been settled.
+            unsafe {
+                drop(Box::from_raw(domain.as_ptr()));
+            }
+        }
     }
 }

@@ -34,7 +34,7 @@ fn counted_chain_releases_with_constant_stack_and_no_admission() {
     let mut ctx = Context::new(2_000_000);
     let mut head = ptr::null_mut();
     for _ in 0..100_000 {
-        let node = Block::new(&ctx, Some(16), 16, 8).unwrap().into_raw();
+        let node = Block::graph(&ctx, Some(16), 16, 8).unwrap().into_raw();
         // SAFETY: a freshly allocated count/payload pair receives its sole child.
         unsafe {
             counted::initialize(node, false);
@@ -57,7 +57,7 @@ fn exact_rc_and_arc_share_release_and_both_unwrap_event_orders() {
     for atomic in [false, true] {
         for release_first in [false, true] {
             let mut ctx = Context::new(64);
-            let node = Block::new(&ctx, Some(16), 16, 8).unwrap().into_raw();
+            let node = Block::graph(&ctx, Some(16), 16, 8).unwrap().into_raw();
             // SAFETY: the two explicit holders follow each prescribed event order.
             unsafe {
                 counted::initialize(node, atomic);
@@ -70,7 +70,7 @@ fn exact_rc_and_arc_share_release_and_both_unwrap_event_orders() {
                     counted::release(&mut ctx, node, atomic, 16, empty);
                     assert!(counted::try_unwrap(node, atomic));
                 }
-                crate::block::free(node, 16);
+                crate::block::free_graph(node, 16);
             }
             assert_eq!(ctx.available(), 64);
             runs += 1;
@@ -88,7 +88,7 @@ fn counted_creation_refusals_preserve_source_and_descendant_charges() {
             ctx.current.inject(k, later);
             if let Ok(source) = Block::new(&ctx, Some(24), 24, 8) {
                 let before = ctx.available();
-                let node = Block::new(&ctx, Some(16), 16, 8);
+                let node = Block::graph(&ctx, Some(16), 16, 8);
                 match node {
                     Ok(node) => {
                         let node = node.into_raw();
@@ -127,7 +127,7 @@ fn arc_last_release_on_another_task_refunds_the_original_domain() {
     let mut ctx = Context::new(64);
     let payer = ctx.current.clone();
     ctx.limit_enter(32).unwrap();
-    let node = Block::new(&ctx, Some(16), 16, 8).unwrap().into_raw();
+    let node = Block::graph(&ctx, Some(16), 16, 8).unwrap().into_raw();
     // SAFETY: initialize a single live holder before moving it to another task.
     unsafe {
         counted::initialize(node, true);
@@ -136,6 +136,7 @@ fn arc_last_release_on_another_task_refunds_the_original_domain() {
     drop(ctx);
     let holder = Holder(node);
     std::thread::spawn(move || holder.release()).join().unwrap();
+    payer.drain(); // Provider applies the ordered remote-refund event before resume.
     assert_eq!(payer.available(), 64);
 }
 
@@ -145,7 +146,8 @@ fn counted_c_abi_drops_the_last_holder_only() {
     // SAFETY: C fixtures own two holders, releasing each exactly once.
     unsafe {
         let ctx = hirsel_core_context_new(64);
-        let allocation = hirsel_core_alloc(ctx, ptr::null_mut(), 16, 8, 16, false);
+        let allocation =
+            hirsel_core_alloc(ctx, ptr::null_mut(), 16, 8, 16, false, crate::block::GRAPH);
         let node = NonNull::new(allocation.pointer).unwrap();
         hirsel_core_counted_init(node, false);
         hirsel_core_share(node, false);
@@ -197,7 +199,7 @@ fn resumed_drop_glue_cleans_descendants_before_siblings_and_parent_refunds() {
     TRACE.with(|t| *t.borrow_mut() = Vec::with_capacity(4));
     let mut ctx = Context::new(128);
     let make = |id, left, right| {
-        let node = Block::new(&ctx, Some(32), 32, 8).unwrap().into_raw();
+        let node = Block::graph(&ctx, Some(32), 32, 8).unwrap().into_raw();
         // SAFETY: fresh node receives its count and completely initialized payload.
         unsafe {
             counted::initialize(node, false);
@@ -224,7 +226,7 @@ fn resumed_drop_glue_cleans_descendants_before_siblings_and_parent_refunds() {
 fn full_u64_count_is_representable_without_immortalizing_the_node() {
     for atomic in [false, true] {
         let ctx = Context::new(16);
-        let node = Block::new(&ctx, Some(16), 16, 8).unwrap().into_raw();
+        let node = Block::graph(&ctx, Some(16), 16, 8).unwrap().into_raw();
         // SAFETY: symbolic boundary fixture supplies a live count, then returns
         // its synthetic holders before freeing the otherwise empty node.
         unsafe {
@@ -233,8 +235,51 @@ fn full_u64_count_is_representable_without_immortalizing_the_node() {
             counted::share(node, atomic);
             assert_eq!(node.cast::<u64>().as_ptr().read(), u64::MAX);
             assert!(!counted::try_unwrap(node, atomic));
-            crate::block::free(node, 16);
+            crate::block::free_graph(node, 16);
         }
         assert_eq!(ctx.available(), 16);
     }
+}
+
+#[test]
+fn remote_refunds_wait_for_the_ordered_handoff_while_local_admission_runs() {
+    struct Nodes(Vec<NonNull<u8>>);
+    // SAFETY: all nodes contain immutable u64 data; only their atomic counts and
+    // prepaid remote-mailbox slots are touched by the receiving task.
+    unsafe impl Send for Nodes {}
+    impl Nodes {
+        fn release(self) {
+            let mut remote = Context::new(0);
+            for node in self.0 {
+                // SAFETY: one transferred Arc holder, with no descendants.
+                unsafe {
+                    counted::release(&mut remote, node, true, 16, empty);
+                }
+            }
+        }
+    }
+    let mut ctx = Context::new(4096);
+    ctx.limit_enter(3200).unwrap();
+    let mut nodes = Nodes(Vec::new());
+    for _ in 0..200 {
+        let node = Block::graph(&ctx, Some(16), 16, 8).unwrap().into_raw();
+        // SAFETY: this task initializes each fresh single-holder Arc.
+        unsafe {
+            counted::initialize(node, true);
+        }
+        nodes.0.push(node);
+    }
+    ctx.limit_exit();
+    let worker = std::thread::spawn(move || nodes.release());
+    for _ in 0..1000 {
+        let local = Block::new(&ctx, Some(8), 8, 8).unwrap();
+        assert_eq!(ctx.available(), 888);
+        drop(local);
+    }
+    worker.join().unwrap();
+    assert_eq!(ctx.available(), 896);
+    ctx.current.inject(1, true);
+    ctx.current.drain();
+    assert_eq!(ctx.available(), 4096);
+    assert_eq!(ctx.current.attempts(), 0);
 }

@@ -776,6 +776,7 @@ dependencies = [
  "bumpalo",
  "hirsel-core-layout",
  "hirsel-guard",
+ "libmimalloc-sys",
  "libc",
  "mimalloc",
 ]

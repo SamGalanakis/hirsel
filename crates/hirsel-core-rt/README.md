@@ -1,30 +1,47 @@
 # hirsel-core-rt
 
-Memory operations for FORM v1, independent of the old runtime. Logical charges
-are supplied by the emitter using `hirsel-core-layout::charge`. Allocation
-refusal returns the plain C `Capacity` record. Physical host exhaustion is a
-run stop, as specified by FAIL-15.
+Memory operations for FORM v1, independent of the old runtime. Emitters supply
+portable `charge-v1` charges and native layout operands separately. Logical
+refusal returns `Capacity`; physical host exhaustion is a FAIL-15 run stop.
 
-The C declarations are in `include/hirsel_core_rt.h`. Pointers and recipes come
-from our emitters. They must obey the ownership, layout and threading contracts
-documented on the Rust entry points. No runtime validation of compiler output
-is performed. Task/provider code must serialize cross-task funding operations
-in its recorded event order; the funding forest itself is synchronized.
+`src/abi.rs` is the emitter reference. `include/hirsel_core_rt.h` publishes the
+same C declarations and frozen 64-bit offsets. Success Capacity fields are zero.
+`rt.dest_id` takes no context or status and returns a fresh u64 identity.
 
-Bookkeeping precedes each own payload. Counted payloads start with the FORM
-u64 count at offset zero and user data at offset eight. Native padding and
-bookkeeping never contribute to logical charges.
+Each task has a paged limit table and a direct current-record pointer. Admission,
+refund and scope operations use ordinary task-local loads and stores. Outstanding
+bytes retain payer slots; only scope handles and union edges need structural
+pins. Reserved scopes hand survivors over without admission. Page growth is a
+cold table-refill operation; ordinary scope entry allocates no heap record.
 
-`//:hirsel-core-rt-archives` builds `libhirsel_core_rt.a` for x86-64 and AArch64,
-using this crate's normal Cargo dependencies. Each target also has an `x86_64`
-or `aarch64` subtarget. This namespace has no old-runtime feature variants or
-old-language startup training. The emitters supply resumable mechanical drop
-glue through the ABI modules.
+Plain blocks have one native payer word. Graph nodes additionally reserve an
+intrusive resumable destruction frame; resources reserve a state pointer. The
+allocator takes a native kind; free receives the physical size, alignment and
+kind. These operands never affect logical charges. No legacy ABI is retained.
 
-`MEASUREMENTS.md` records the instruction samples and missed targets. Reproduce
-them with `python3 crates/hirsel-core-rt/measure.py --out <new-directory>` from
-the repo root. `--abi-only` instead compiles and runs `tests/abi.c` against the
-published header and a static archive. Ordinary Rust tests run through Buck.
+Regions bump within nonmoving chunks and aggregate charges per payer run, with
+four inline prior entries. A compact builder remembers its region entry and
+retained charge. Trim takes those explicit operands and never needs an object
+header. Writer/copy/index code and Child/Bounds/Overflow checks belong to the
+emitter. Region close refunds the aggregate entries and frees chunks.
+
+Rc/Arc share and nonlast release inline; last release uses allocation-free,
+constant-stack resumable glue. A scheduler binds native task execution on resume
+and unbinds before moving it to another worker. Foreign refunds accumulate in
+prepaid per-slot mailboxes and are drained before resuming the payer task. MEM-26
+also makes growth of a received collection an ordered foreign charge; the later
+task provider must obtain exclusive payer execution custody around that operation
+and a received resource's finalizer grant. These memory entries are not a scheduler.
+
+System allocation is the default. The optional `mimalloc` backend uses native
+malloc/free for ordinary alignment and aligned allocation above 16 bytes. The
+measurement driver compares both backends, retaining Rust's upstream MiMalloc
+wrapper as its Rust baseline. `MEASUREMENTS.md` records costs and limitations.
+
+Buck target `//:hirsel-core-rt-archives` builds x86-64 and AArch64 archives with
+normal Cargo dependencies and no old-runtime feature matrix. Rust fixtures run
+through Buck. Reproduce costs with `python3 crates/hirsel-core-rt/measure.py
+--out <new-directory>`; `--abi-only` runs the C header/static-link fixture.
 
 `include/hirsel_core_rt_host.h` declares process entry and the host provider ABI.
 The driver pins a Config with immutable argv, explicit grants, the provider and

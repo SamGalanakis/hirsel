@@ -4,7 +4,7 @@
 use crate::{
     Capacity, Context,
     block::{self, Block},
-    limit::Funding,
+    limit::{Funding, Payer},
 };
 use hirsel_core_layout::charge;
 use std::{
@@ -53,13 +53,13 @@ unsafe extern "C" fn drop_string(pointer: *mut u8) {
 
 /// Opaque native ABI handle. Its physical size is not its logical charge of 32.
 pub struct Cell {
-    funding: Funding,
+    funding: Payer,
     cause: Option<Cause>,
     next: *mut Cell,
     string: MaybeUninit<StringMessage>,
 }
 impl Cell {
-    pub(crate) fn prepaid(funding: Funding) -> Box<Self> {
+    pub(crate) fn prepaid(funding: Payer) -> Box<Self> {
         Box::new(Self {
             funding,
             cause: None,
@@ -207,10 +207,16 @@ pub unsafe fn resource_new(
     bytes: usize,
     align: usize,
 ) -> Result<std::ptr::NonNull<u8>, Capacity> {
-    let block = Block::new(context, charge::resource(storage, grant), bytes, align)?;
+    let block = Block::paid(
+        context.payer(None),
+        charge::resource(storage, grant),
+        bytes,
+        align,
+        block::RESOURCE,
+    )?;
     let payer = block.payer();
     let state = Box::new(Resource {
-        cell: Some(Cell::prepaid(payer.clone())),
+        cell: Some(Cell::prepaid(*payer)),
         grant: Some(payer.prepaid(grant)),
         previous: None,
         previous_resource: ptr::null_mut(),
@@ -231,13 +237,15 @@ pub unsafe fn finalizer_begin(context: &mut Context, pointer: std::ptr::NonNull<
     let resource = unsafe { &mut *block::resource(pointer) };
     resource.previous_resource = context.active_resource;
     resource.previous_grant_depth = context.grant_depth;
-    context.grant_depth = context.stack.len();
+    context.grant_depth = context.bound_depth;
     resource.previous = Some(std::mem::replace(
         &mut context.current,
         resource.grant.take().unwrap(),
     ));
     // SAFETY: the state stays alive through finalizer_end and field cleanup.
     context.active_resource = unsafe { block::resource(pointer) };
+    context.current_limit = context.current.fast();
+    context.current.bind();
     context.finalizing += 1;
 }
 
@@ -251,6 +259,8 @@ pub unsafe fn finalizer_end(context: &mut Context, pointer: std::ptr::NonNull<u8
     context.current = resource.previous.take().unwrap();
     context.active_resource = resource.previous_resource;
     context.grant_depth = resource.previous_grant_depth;
+    context.current_limit = context.current.fast();
+    context.current.bind();
     context.finalizing -= 1;
 }
 

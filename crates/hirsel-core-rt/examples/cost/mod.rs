@@ -142,7 +142,7 @@ fn region(runtime: bool) -> u64 {
 fn counted(runtime: bool) -> u64 {
     if runtime {
         let mut ctx = Context::new(64);
-        let node = Block::new(&ctx, Some(16), 16, 8).unwrap().into_raw();
+        let node = Block::graph(&ctx, Some(16), 16, 8).unwrap().into_raw();
         // SAFETY: the fixture owns an initialized immutable u64 and exact holders.
         unsafe {
             counted::initialize(node, false);
@@ -168,14 +168,37 @@ fn counted(runtime: bool) -> u64 {
     }
 }
 
-fn limits(runtime: bool) -> u64 {
-    if runtime {
+// Emitted sequence for a statically empty bound. No values can refer to this
+// scope, so no table identity is materialized. Admission/refund remain visible.
+#[inline(always)]
+fn empty_bound(available: &mut u64, reservation: u64) -> u64 {
+    if reservation > *available {
+        panic!("capacity");
+    }
+    *available -= reservation;
+    let child_available = black_box(reservation);
+    *available += child_available;
+    black_box(*available);
+    child_available
+}
+
+fn limits(mode: &str) -> u64 {
+    if mode == "full" {
         let mut ctx = Context::new(1024);
         let mut sum = 0;
         for _ in 0..COUNT {
             ctx.limit_enter(black_box(64)).unwrap();
             sum += black_box(ctx.available());
             ctx.limit_exit();
+        }
+        sum
+    } else if mode == "runtime" {
+        let ctx = Context::new(1024);
+        let mut sum = 0;
+        for _ in 0..COUNT {
+            // SAFETY: no operation in this statically empty body can retain a
+            // payer or access the context before its reservation is refunded.
+            sum += unsafe { empty_bound(&mut (*ctx.limit_record()).available, black_box(64)) };
         }
         sum
     } else {
@@ -209,7 +232,7 @@ pub fn main() {
         "growth" => growth(&mode),
         "region" => region(runtime),
         "rc" => counted(runtime),
-        "limits" => limits(runtime),
+        "limits" => limits(&mode),
         _ => panic!("unknown workload"),
     };
     println!("{checksum}");

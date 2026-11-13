@@ -282,7 +282,7 @@ fn fail_message_and_joined_cells_outlive_the_task_and_keep_funding() {
     unsafe extern "C" fn drop_message(p: *mut u8) {
         // SAFETY: the cell receives the sole initialized 24-byte message block.
         unsafe {
-            crate::block::free(NonNull::new(p).unwrap(), 24);
+            crate::block::free(NonNull::new(p).unwrap(), 24, 24, 8, crate::block::PLAIN);
         }
     }
     let mut child = Context::new(1024);
@@ -362,7 +362,9 @@ fn bound_handover_keeps_cells_own_counted_and_region_bytes_within_parent() {
                 let mut region = Region::new(chunk);
                 if causes::task_start(&mut ctx).is_ok() && ctx.limit_enter(1024).is_ok() {
                     let own = Block::new(&ctx, Some(24), 24, 8).ok();
-                    let node = Block::new(&ctx, Some(16), 16, 8).ok().map(Block::into_raw);
+                    let node = Block::graph(&ctx, Some(16), 16, 8)
+                        .ok()
+                        .map(Block::into_raw);
                     if let Some(node) = node {
                         // SAFETY: initialize a newly admitted immutable counted node.
                         unsafe {
@@ -410,7 +412,15 @@ fn causes_and_resources_c_abi_preserve_complete_chain_and_container_refunds() {
         let pointer = NonNull::new(resource.pointer).unwrap();
         hirsel_core_raise(ctx, cause(1, causes::OVERFLOW));
         hirsel_core_finalizer_begin(ctx, pointer);
-        let refusal = hirsel_core_alloc(ctx, ptr::null_mut(), 128, 8, 128, false);
+        let refusal = hirsel_core_alloc(
+            ctx,
+            ptr::null_mut(),
+            128,
+            8,
+            128,
+            false,
+            crate::block::PLAIN,
+        );
         assert!(refusal.pointer.is_null());
         assert_eq!(
             refusal.capacity,

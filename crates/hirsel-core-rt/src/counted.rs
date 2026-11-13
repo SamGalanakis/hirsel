@@ -17,7 +17,7 @@ pub struct Worklist {
 }
 
 /// # Safety
-/// The emitter initializes a newly allocated node, count at 0 and payload at 8.
+/// The emitter initializes a newly allocated GRAPH node, count at 0 and payload at 8.
 pub unsafe fn initialize(node: NonNull<u8>, atomic: bool) {
     // SAFETY: node has fresh aligned storage for one count word.
     unsafe {
@@ -33,6 +33,7 @@ pub unsafe fn initialize(node: NonNull<u8>, atomic: bool) {
 /// # Safety
 /// The caller holds a live holder. Rc operations are task-local; Arc operations
 /// occur in the provider's event order. Payload mutation remains forbidden.
+#[inline]
 pub unsafe fn share(node: NonNull<u8>, atomic: bool) {
     // SAFETY: a live holder keeps the initialized count word alive.
     unsafe {
@@ -63,6 +64,7 @@ pub unsafe fn share(node: NonNull<u8>, atomic: bool) {
 /// The caller holds a live holder and meets share's task/event discipline.
 /// A true result transfers exclusive payload custody; the caller moves it out
 /// and frees the node. A false result leaves the original holder unchanged.
+#[inline]
 pub unsafe fn try_unwrap(node: NonNull<u8>, atomic: bool) -> bool {
     // SAFETY: the caller's holder pins the initialized count word.
     unsafe {
@@ -79,6 +81,7 @@ pub unsafe fn try_unwrap(node: NonNull<u8>, atomic: bool) -> bool {
 /// # Safety
 /// Consumes one live holder. Charge and recipe describe this node. The recipe
 /// obeys the mechanical, nonrecursive contract above. The list is exclusively used.
+#[inline]
 pub unsafe fn enqueue(
     list: &mut Worklist,
     node: NonNull<u8>,
@@ -86,8 +89,23 @@ pub unsafe fn enqueue(
     charge: u64,
     recipe: Recipe,
 ) {
+    // SAFETY: caller transfers a live holder under the node's count discipline.
+    let last = unsafe { decrement(node, atomic) };
+    if last {
+        // SAFETY: the last holder owns the dead node exclusively.
+        unsafe {
+            block::push_dead(list, node, charge, recipe, 8);
+        }
+    }
+}
+
+/// Consume one holder, returning whether the emitter must run last-release glue.
+/// # Safety
+/// A live holder is transferred under the Rc/Arc event discipline.
+#[inline(always)]
+pub unsafe fn decrement(node: NonNull<u8>, atomic: bool) -> bool {
     // SAFETY: the transferred holder keeps this node's initialized count alive.
-    let last = unsafe {
+    unsafe {
         if atomic {
             let last = node
                 .cast::<AtomicU64>()
@@ -104,18 +122,13 @@ pub unsafe fn enqueue(
             *count -= 1;
             *count == 0
         }
-    };
-    if last {
-        // SAFETY: the last holder owns the dead node exclusively.
-        unsafe {
-            block::push_dead(list, node, charge, recipe, 8);
-        }
     }
 }
 
 /// # Safety
 /// As for enqueue, plus a live task context. Each generated recipe enqueues
 /// descendants rather than invoking release recursively.
+#[inline(always)]
 pub unsafe fn release(
     context: *mut Context,
     node: NonNull<u8>,
@@ -123,17 +136,31 @@ pub unsafe fn release(
     charge: u64,
     recipe: Recipe,
 ) {
+    // SAFETY: caller transfers one live holder.
+    if unsafe { decrement(node, atomic) } {
+        // SAFETY: decrement transferred the unique dead node to cleanup.
+        unsafe {
+            release_last(context, node, charge, recipe);
+        }
+    }
+}
+
+/// Slow path after an inline decrement has returned true.
+/// # Safety
+/// Count is zero; caller owns this node, its exact charge and mechanical recipe.
+#[inline(never)]
+pub unsafe fn release_last(context: *mut Context, node: NonNull<u8>, charge: u64, recipe: Recipe) {
     let mut list = Worklist { head: None };
     // SAFETY: caller transfers one holder and its generated mechanical recipe.
     unsafe {
-        enqueue(&mut list, node, atomic, charge, recipe);
+        block::push_dead(&mut list, node, charge, recipe, 8);
         while let Some(node) = list.head {
             let dead = block::dead(node);
             let recipe = (*dead).recipe;
             let payload = (*dead).payload;
             if recipe(context, payload, &mut (*dead).cursor, &mut list) {
                 list.head = (*dead).next;
-                block::free(node, (*dead).charge);
+                block::free_graph(node, (*dead).charge);
             }
         }
     }

@@ -9,12 +9,13 @@ rust-version.workspace = true
 crate-type = ["rlib", "staticlib"]
 
 [features]
-# Deterministic native compiler fixtures; absent from shipped archives.
 testing = []
+mimalloc = ["dep:libmimalloc-sys"]
 
 [dependencies]
 hirsel-stack = { path = "../hirsel-stack" }
 libc = { version = "0.2", default-features = false }
+libmimalloc-sys = { version = "=0.1.49", optional = true }
 hirsel-core-layout = { path = "../hirsel-core-layout" }
 
 [dev-dependencies]

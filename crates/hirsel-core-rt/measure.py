@@ -54,10 +54,11 @@ def build(out, env):
     libs.mkdir(exist_ok=True)
     targets = [
         ('hirsel_core_layout', ROOT/'crates/hirsel-core-layout/src/lib.rs', '2024', []),
-        ('hirsel_core_rt', CRATE/'src/lib.rs', '2024', ['--extern', f'hirsel_core_layout={libs}/libhirsel_core_layout.rlib']),
         ('bumpalo', source('bumpalo-3.20.3'), '2021', []),
         ('libmimalloc_sys', source('libmimalloc-sys-0.1.49'), '2018', ['-l', 'dylib=mimalloc']),
         ('mimalloc', source('mimalloc-0.1.52'), '2018', ['--extern', f'libmimalloc_sys={libs}/liblibmimalloc_sys.rlib']),
+        ('hirsel_core_rt', CRATE/'src/lib.rs', '2024', ['--extern', f'hirsel_core_layout={libs}/libhirsel_core_layout.rlib']),
+        ('hirsel_core_rt_mimalloc', CRATE/'src/lib.rs', '2024', ['--cfg', 'feature="mimalloc"', '--extern', f'libmimalloc_sys={libs}/liblibmimalloc_sys.rlib', '--extern', f'hirsel_core_layout={libs}/libhirsel_core_layout.rlib']),
     ]
     for name, src, edition, extra in targets:
         artifact = libs / f'lib{name}.rlib'
@@ -80,7 +81,8 @@ def build(out, env):
                        str(CRATE/f'examples/memory_{allocator}.rs'), '--edition', '2024',
                        *FLAGS, '-L', f'dependency={libs}']
             for name in ['hirsel_core_rt', 'hirsel_core_layout', 'bumpalo', 'mimalloc']:
-                command += ['--extern', f'{name}={libs}/lib{name}.rlib']
+                suffix = '_mimalloc' if name == 'hirsel_core_rt' and allocator == 'mimalloc' else ''
+                command += ['--extern', f'{name}={libs}/lib{name}{suffix}.rlib']
             command += ['-o', str(artifact)]
             subprocess.run(command, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT, check=True)
 
@@ -172,7 +174,7 @@ def main():
             writer.writeheader()
         for allocator in ['system', 'mimalloc']:
             for workload in WORKLOADS:
-                for mode in ['rust', 'runtime'] + (['matched'] if workload == 'growth' else []):
+                for mode in ['rust', 'runtime'] + (['matched'] if workload == 'growth' else ['full'] if workload == 'limits' else []):
                     if (allocator, workload, mode) in done:
                         continue
                     row = sample(out, allocator, workload, mode, env)

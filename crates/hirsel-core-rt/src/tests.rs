@@ -1,4 +1,9 @@
-use crate::{Capacity, Context, abi::*, block::*, limit::Funding};
+use crate::{
+    Capacity, Context,
+    abi::*,
+    block::{Block, PLAIN},
+    limit::Funding,
+};
 use hirsel_core_layout::charge;
 
 #[test]
@@ -76,6 +81,11 @@ fn exact_charge_overflow_refuses_even_an_empty_maximum_limit() {
         })
     );
     assert_eq!(ctx.available(), u64::MAX);
+    // Symbolic full-range bookkeeping needs no physical MAX-sized host block.
+    ctx.current.admit(Some(u64::MAX)).unwrap();
+    assert_eq!(ctx.available(), 0);
+    ctx.current.refund(u64::MAX);
+    assert_eq!(ctx.available(), u64::MAX);
 }
 
 #[test]
@@ -108,16 +118,127 @@ fn c_abi_admission_growth_copy_free_and_handover() {
     unsafe {
         let ctx = hirsel_core_context_new(128);
         assert!(!hirsel_core_limit_enter(ctx, 64).pointer.is_null());
-        let first = hirsel_core_alloc(ctx, std::ptr::null_mut(), 8, 8, 8, false);
+        let first = hirsel_core_alloc(ctx, std::ptr::null_mut(), 8, 8, 8, false, PLAIN);
         first.pointer.write(42);
         hirsel_core_limit_exit(ctx);
-        let second = hirsel_core_alloc(ctx, first.pointer, 16, 8, 16, false);
+        let second = hirsel_core_alloc(ctx, first.pointer, 16, 8, 16, false, PLAIN);
         std::ptr::copy_nonoverlapping(first.pointer, second.pointer, 1);
         assert_eq!(second.pointer.read(), 42);
         hirsel_core_free(std::ptr::NonNull::new(first.pointer).unwrap(), 8);
         hirsel_core_free(std::ptr::NonNull::new(second.pointer).unwrap(), 16);
         assert_eq!((*ctx).available(), 128);
         hirsel_core_context_free(ctx);
+    }
+}
+
+#[test]
+fn zero_charge_storage_pins_its_payer_after_the_context_ends() {
+    let mut ctx = Context::new(0);
+    ctx.limit_enter(0).unwrap();
+    let block = Block::new(&ctx, Some(0), 8, 64).unwrap();
+    ctx.limit_exit();
+    drop(ctx);
+    // SAFETY: even uncharged native storage remains owned and aligned until drop.
+    unsafe {
+        block.pointer().as_ptr().write(42);
+    }
+    drop(block);
+}
+
+#[test]
+fn native_task_context_moves_workers_with_exclusive_execution_custody() {
+    struct Task {
+        context: *mut Context,
+        block: std::ptr::NonNull<u8>,
+    }
+    // SAFETY: scheduler unbinds the previous worker before transferring the task
+    // and its sole owned block; no thread retains execution or payload access.
+    unsafe impl Send for Task {}
+    impl Task {
+        fn run(self) {
+            // SAFETY: the fixture is the sole scheduler and follows native custody.
+            unsafe {
+                hirsel_core_task_bind(self.context);
+                hirsel_core_free(self.block, 8);
+                assert_eq!((*self.context).available(), 64);
+                hirsel_core_context_free(self.context);
+            }
+        }
+    }
+    // SAFETY: one native context and one plain allocation are transferred once.
+    unsafe {
+        let context = hirsel_core_context_new(64);
+        let result = hirsel_core_alloc(context, std::ptr::null_mut(), 8, 8, 8, false, PLAIN);
+        let task = Task {
+            context,
+            block: std::ptr::NonNull::new(result.pointer).unwrap(),
+        };
+        hirsel_core_task_bind(std::ptr::null());
+        std::thread::spawn(move || task.run()).join().unwrap();
+    }
+}
+
+#[test]
+fn frozen_prefixes_match_the_emitter_contract() {
+    use crate::region::Region;
+    assert_eq!(
+        (CONTEXT_CURRENT_LIMIT, LIMIT_AVAILABLE, LIMIT_OUTSTANDING),
+        (0, 0, 8)
+    );
+    assert_eq!(
+        (
+            REGION_CURSOR,
+            REGION_END,
+            REGION_ENTRY,
+            REGION_PAYER,
+            REGION_CHARGE
+        ),
+        (0, 8, 16, 24, 32)
+    );
+    assert_eq!(
+        (
+            OWN_PAYER_BACK,
+            PLAIN_PREFIX_BYTES,
+            GRAPH_PREFIX_BYTES,
+            RESOURCE_PREFIX_BYTES
+        ),
+        (8, 8, 48, 16)
+    );
+    let ctx = Context::new(256);
+    let block = Block::new(&ctx, Some(128), 128, 64).unwrap();
+    // SAFETY: the owner pins all 128 writable, aligned bytes.
+    unsafe {
+        block.pointer().as_ptr().write_bytes(0, 128);
+        assert_eq!(
+            std::slice::from_raw_parts(block.pointer().as_ptr(), 128),
+            [0; 128]
+        );
+    }
+    assert_eq!(block.pointer().as_ptr().addr() % 64, 0);
+    drop(block);
+    let mut region = Region::new(64);
+    region.allocate(&ctx, 8, 8, Some(8)).unwrap();
+    assert_eq!(ctx.available(), 248);
+    drop(region);
+    assert_eq!(ctx.available(), 256);
+}
+
+#[test]
+fn emitted_own_sequence_refunds_current_foreign_and_handed_over_payers() {
+    let mut ctx = Context::new(128);
+    // SAFETY: fixture owns every returned byte block and passes its exact operands.
+    unsafe {
+        let outer = inline_own_alloc(&ctx, Some(16), 16, 64).unwrap();
+        ctx.limit_enter(64).unwrap();
+        let inner = inline_own_alloc(&ctx, Some(24), 24, 8).unwrap();
+        inline_own_free(&ctx, outer, 16, 16, 64);
+        assert_eq!(ctx.available(), 40);
+        ctx.limit_exit();
+        inline_own_free(&ctx, inner, 24, 24, 8);
+        assert_eq!(ctx.available(), 128);
+        let current = inline_own_alloc(&ctx, Some(8), 8, 8).unwrap();
+        inline_own_free(&ctx, current, 8, 8, 8);
+        assert_eq!(ctx.available(), 128);
     }
 }
 
@@ -140,6 +261,7 @@ fn owned_failure_string_outlives_its_frame_and_context_without_admission() {
                     1,
                     capacity,
                     false,
+                    PLAIN,
                 );
                 std::ptr::copy_nonoverlapping(b"hey".as_ptr(), allocation.pointer, len);
                 allocation.pointer

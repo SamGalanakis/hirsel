@@ -1,12 +1,9 @@
 //! Native memory ABI, FORM v1. Every symbol and failure convention lives here.
 //!
 //! `alloc` and `limit_enter` return null plus Capacity on refusal; on success
-//! `capacity` is zero. An allocation refused while a finalizer's grant is the
-//! current limit branches to the emitter's Capacity failure path
-//! (`allocation_status`); one refused by a bound scope entered inside the
-//! finalizer is a value. `free`, limit exit and mechanical release never fail.
-//! `alloc like` follows the original payer except within finalizers, where it
-//! admits from the current limit.
+//! `capacity` is zero. Allocation inside a finalizer must branch to the emitter's
+//! Capacity failure path on null. `free`, limit exit and mechanical release never
+//! fail. `alloc like` follows the original payer except within finalizers.
 //!
 //! `region_alloc`, `resource_alloc` and `task_start` use the same Allocation
 //! convention. Success pointers from `limit_enter` and `task_start` equal the
@@ -14,16 +11,86 @@
 //! and region creation return owned handles and admit no language storage.
 //! `try_unwrap` returns its uniqueness test. `causes_take` transfers a complete
 //! chain, null for empty; cause accessors return borrowed pointers. All other
-//! entries return unit. Count overflow and physical host exhaustion are run
+//! entries return unit, except dest_id (u64) and native_alloc/region_refill
+//! (nonnull native base/payload). Count overflow and physical host exhaustion are run
 //! stops. A drop recipe's boolean means completion, with false requesting resume.
 //!
 //! These C signatures are complete. The FORM function-row u8 failure status is
 //! handled by the emitter. FORM decision 39 fixes successful admission's
 //! available field at zero; no source-level Capacity exists on success.
 //!
+//! FORM v1b: `rt.dest_id` maps to `hirsel_core_dest_id() -> u64`, with no
+//! parameters, context or failure status. `trim` maps to region_lower_charge;
+//! allocation's byte size is already a dynamic parameter. The producer writes
+//! the 16-byte blob header and data, checks Child identity/offset and width/fit,
+//! and emits writer/copy/index operations over these entries and byte accesses.
+//!
 //! Contexts are task-owned. Allocation pointers, sizes, alignment and remaining
 //! logical charges are trusted emitter operands. None may be stale. Provider
 //! operations serialize Arc operations and cross-task refunds in event order.
+
+//! Inline contract: compare charge with current_limit.available, subtract on
+//! success and add it to outstanding. A plain block's only native word is its
+//! payer pointer at payload-8. Native allocation kind is 0 plain, 1 graph or 2
+//! resource. Payload offset is align_up(prefix_bytes, max(alignment,8)); native
+//! size is offset+max(bytes,1). The payer word tags its low five bits: kind in
+//! bits 0..1; bits 2..4 encode log2(max(alignment,8))-3. Index 7 stores the
+//! alignment in one extra word before the prefix. Generic free takes pointer
+//! and charge; it decodes this word and calls the native allocator's free.
+//!
+//! Region fast allocation compares its payer with current_limit, admits once,
+//! adds charge, aligns/bumps cursor and checks end. On payer change call the full
+//! region_alloc before admitting; on chunk exhaustion after admission call
+//! region_refill. Builder captures region.entry plus its original charge; trim
+//! takes (region, entry, previous_charge, retained_charge). No object headers.
+//!
+//! Rc uses checked u64 increment and decrement/test at count offset zero; only
+//! the zero result calls release_last. Arc uses relaxed increment and release
+//! decrement plus an acquire fence before release_last. Provider event ordering
+//! still surrounds every Arc operation. A statically empty bound can emit the
+//! checked reservation and refund without materializing a payer table identity.
+//!
+//! Scheduler binds native execution on resume and unbinds before transferring
+//! it. Bind drains prepaid per-slot remote refunds; local accounting has no
+//! atomics or lock. Foreign-payer growth (MEM-26) and a received resource's grant
+//! also require an ordered provider lease over the original payer task, with
+//! that task quiescent for the call. The provider must take that rare path before
+//! alloc-like/finalizer_begin; these entries do not implement a scheduler.
+
+//! Additive process/provider symbols, retained from core-tasks-provider-907:
+//! `hirsel_core_run(*const process::Config, process::Entry) -> u8` maps a
+//! completed main to exit 0, ordinary Error to 1, explicit Exit 1..100 to that
+//! byte, and task-start Capacity or failure to 101. `hirsel_core_args_len`
+//! `(*const Config)->u64` and `hirsel_core_args_get(*const Config,u64)->Argument`
+//! admit nothing; get returns present=false out of range. `hirsel_core_host`
+//! `(*mut Context,*const provider::Provider,*mut provider::Request)->Outcome`
+//! preserves provider issue/delivery results and committed prefixes; status 1
+//! propagates a cause, distinct from an ordinary IoError value. The entry
+//! `hirsel_core_check_cancel(*mut Context,u64)->u8` returns 1 after recording
+//! Cancelled, else 0. No hidden ordinary function-row status is appended.
+pub use crate::process::{hirsel_core_args_get, hirsel_core_args_len, hirsel_core_run};
+pub use crate::provider::hirsel_core_host;
+pub use crate::tasks::hirsel_core_check_cancel;
+
+// Frozen on both supported 64-bit targets. A payer word is a pointer to a
+// stable task-table slot whose local LimitRecord starts at offset zero.
+pub const CONTEXT_CURRENT_LIMIT: usize = std::mem::offset_of!(Context, current_limit);
+pub const LIMIT_AVAILABLE: usize = std::mem::offset_of!(crate::limit::LimitRecord, available);
+pub const LIMIT_OUTSTANDING: usize = std::mem::offset_of!(crate::limit::LimitRecord, outstanding);
+pub const REGION_CURSOR: usize = std::mem::offset_of!(crate::region::Region, cursor);
+pub const REGION_END: usize = std::mem::offset_of!(crate::region::Region, end);
+pub const REGION_ENTRY: usize = std::mem::offset_of!(crate::region::Region, entry);
+pub const REGION_PAYER: usize = std::mem::offset_of!(crate::region::Region, payer);
+pub const REGION_CHARGE: usize = std::mem::offset_of!(crate::region::Region, charge);
+pub const NODE_COUNT: usize = 0;
+pub const NODE_PAYLOAD: usize = 8;
+pub const OWN_PAYER_BACK: usize = 8;
+pub const OWN_TAG_MASK: usize = 31;
+pub const OWN_KIND_MASK: usize = 3;
+pub const OWN_ALIGNMENT_SHIFT: usize = 2;
+pub const PLAIN_PREFIX_BYTES: usize = 8;
+pub const GRAPH_PREFIX_BYTES: usize = crate::block::GRAPH_PREFIX_BYTES;
+pub const RESOURCE_PREFIX_BYTES: usize = 16;
 
 use crate::{
     Capacity, Context,
@@ -69,12 +136,18 @@ pub unsafe extern "C" fn hirsel_core_region_alloc(
 /// Lower a live region allocation's charge, without moving published bytes.
 /// # Safety
 /// The sole destination writer owns a live allocation and proves its unused tail;
-/// retained is its new charge, no larger than its current charge.
+/// entry is its saved region entry; previous is this builder's remaining charge.
+/// retained is its new charge, no larger than previous.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_region_lower_charge(pointer: NonNull<u8>, retained: u64) {
+pub unsafe extern "C" fn hirsel_core_region_lower_charge(
+    region: *mut crate::region::Region,
+    entry: usize,
+    previous: u64,
+    retained: u64,
+) {
     // SAFETY: the caller holds the live allocation's sole writer.
     unsafe {
-        crate::region::Region::lower_charge(pointer, retained);
+        (*region).lower_charge(entry, previous, retained);
     }
 }
 
@@ -172,33 +245,6 @@ pub unsafe extern "C" fn hirsel_core_resource_free(resource: NonNull<u8>, storag
         causes::resource_free(resource, storage);
     }
 }
-/// Move a String into the current prepaid cause cell and record Fail. The
-/// carrier is copied into cell-owned native bookkeeping; no admission occurs.
-/// # Safety
-/// Context has an unused primary/resource cell. The live String buffer and its
-/// capacity transfer to that cell and must not be used or dropped by the caller.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_raise_string(
-    context: *mut Context,
-    site: u64,
-    data: *mut u8,
-    len: u64,
-    capacity: u64,
-) {
-    // SAFETY: the emitter transfers exactly this owned String and obligation.
-    unsafe {
-        causes::record_string(
-            &mut *context,
-            site,
-            causes::StringMessage {
-                data,
-                len,
-                capacity,
-            },
-        );
-    }
-}
-
 /// Record one cause in the current prepaid task/resource cell. Admits nothing.
 /// # Safety
 /// Transfers the cause's owned message. The obligation has an unused cell;
@@ -244,8 +290,15 @@ pub unsafe extern "C" fn hirsel_core_cause_value(cell: *const Cell) -> *const Ca
 }
 use std::ptr::{self, NonNull};
 
+/// `rt.dest_id`: a fresh destination identity. No admission, allocation or
+/// failure status. Identities never wrap; exhausting u64 is a run stop (FAIL-15).
+#[unsafe(no_mangle)]
+pub extern "C" fn hirsel_core_dest_id() -> u64 {
+    crate::destination::next()
+}
+
 /// # Safety
-/// Node is fresh aligned storage for a FORM count word and payload at offset 8.
+/// Node is fresh GRAPH storage for a FORM count word and payload at offset 8.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_counted_init(node: NonNull<u8>, atomic: bool) {
     // SAFETY: emitter supplies a fresh counted allocation.
@@ -329,7 +382,9 @@ pub struct Allocation {
 /// Create a context. The provider owns task startup admission (256 + 32).
 #[unsafe(no_mangle)]
 pub extern "C" fn hirsel_core_context_new(bytes: u64) -> *mut Context {
-    Box::into_raw(Box::new(Context::new(bytes)))
+    let context = Box::new(Context::new(bytes));
+    context.current.native();
+    Box::into_raw(context)
 }
 /// # Safety
 /// `context` is a uniquely owned context from context_new, with no active calls.
@@ -342,7 +397,8 @@ pub unsafe extern "C" fn hirsel_core_context_free(context: *mut Context) {
 }
 /// # Safety
 /// Context is live and exclusively used by its task. `like` is null or a live
-/// own/counted/resource allocation. Size/alignment are the emitter's layout.
+/// own/counted/resource allocation. Caller has exclusive execution custody over
+/// its payer for growth. Size/alignment/kind are the emitter's native layout.
 /// Overflow denotes an exact logical charge greater than u64::MAX. The caller
 /// owns a successful pointer and must free it once after cleaning its payload.
 #[unsafe(no_mangle)]
@@ -353,6 +409,7 @@ pub unsafe extern "C" fn hirsel_core_alloc(
     align: usize,
     charge: u64,
     overflow: bool,
+    kind: u8,
 ) -> Allocation {
     // SAFETY: the emitter supplies a live context and optional live block.
     let (context, like) = unsafe { (&*context, NonNull::new(like).map(|p| funding(p))) };
@@ -361,6 +418,7 @@ pub unsafe extern "C" fn hirsel_core_alloc(
         (!overflow).then_some(charge),
         bytes,
         align,
+        kind,
     ) {
         Ok(p) => Allocation {
             pointer: p.as_ptr(),
@@ -377,9 +435,10 @@ pub unsafe extern "C" fn hirsel_core_alloc(
 }
 /// # Safety
 /// `pointer` is uniquely owned with cleaned payload; charge is its remaining charge.
+/// Bytes, alignment and native kind match its original physical allocation.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_free(pointer: NonNull<u8>, charge: u64) {
-    // SAFETY: ownership and the exact charge are transferred by the caller.
+    // SAFETY: caller transfers the cleaned native block and exact retained charge.
     unsafe {
         free(pointer, charge);
     }
@@ -411,8 +470,128 @@ pub unsafe extern "C" fn hirsel_core_limit_exit(context: *mut Context) {
     unsafe { &mut *context }.limit_exit();
 }
 
-/// FORM allocation refusal becomes failure only when a finalizer's grant is the
-/// current limit, not a bound scope entered inside the finalizer.
+/// Apply the ordered remote-refund events before the payer task resumes.
+/// Admits and allocates nothing; does not report a failure status.
+/// # Safety
+/// Task-owned live context, not concurrently running on another worker.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_refunds_drain(context: *const Context) {
+    // SAFETY: the scheduler gives this task exclusive local execution custody.
+    unsafe {
+        (*context).current.drain();
+    }
+}
+
+/// Refill after emitted admission and region charge accumulation. Host OOM is
+/// a run stop; returns a nonnull pointer, never a Capacity or function status.
+/// # Safety
+/// Exclusive open region; bytes/alignment match the already admitted operation.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_region_refill(
+    region: *mut crate::region::Region,
+    bytes: usize,
+    align: usize,
+) -> *mut u8 {
+    // SAFETY: the emitter already performed the logical admission exactly once.
+    unsafe { (*region).refill(bytes, align).as_ptr() }
+}
+
+/// Last-release slow path after the emitted decrement-and-test consumes count 1.
+/// No failure status, allocation or admission. Same recipe convention as release.
+/// # Safety
+/// Exclusive dead GRAPH allocation with count zero and exact charge/recipe.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_release_last(
+    context: *mut Context,
+    node: NonNull<u8>,
+    charge: u64,
+    recipe: Recipe,
+) {
+    // SAFETY: the emitter transferred the unique dead graph node after decrement.
+    unsafe {
+        counted::release_last(context, node, charge, recipe);
+    }
+}
+
+/// Refund through an original payer after emitted physical deallocation. Remote
+/// payers use the event mailbox. Admits/allocates nothing, no failure status.
+/// # Safety
+/// Payer is pinned by these nonzero outstanding bytes, settled exactly once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_refund(payer: *mut crate::limit::LimitRecord, bytes: u64) {
+    crate::limit::Payer::from_current(payer).refund(bytes);
+}
+
+/// Scheduler handoff: bind the native task to this worker and apply pending
+/// ordered refunds before resumption. Null unbinds before giving custody away.
+/// No admission, allocation or failure status.
+/// # Safety
+/// A nonnull context is a live native context under exclusive scheduler custody;
+/// its previous worker has unbound and all later transfers follow this protocol.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_task_bind(context: *const Context) {
+    if context.is_null() {
+        crate::limit::Funding::unbind();
+    } else {
+        // SAFETY: exclusive scheduler custody permits this worker to run the task.
+        unsafe {
+            (*context).current.bind();
+            (*context).current.drain();
+        }
+    }
+}
+
+/// Physical backend for emitted own allocation after logical admission. Returns
+/// nonnull native base; host OOM is a run stop, no Capacity or failure status.
+/// The emitter adds the payload offset and writes its one payer word.
+/// # Safety
+/// Nonzero valid native layout, from trusted lowering, already logically admitted.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_native_alloc(bytes: usize, align: usize) -> *mut u8 {
+    // SAFETY: trusted emitter supplies a nonzero valid native layout.
+    let layout = unsafe { std::alloc::Layout::from_size_align_unchecked(bytes, align) };
+    crate::allocator::allocate(layout).as_ptr()
+}
+
+/// Physical backend after emitted cleanup/refund, no admission or status.
+/// # Safety
+/// Base is the unique live result of native_alloc with these exact operands.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_native_free(base: *mut u8) {
+    // SAFETY: emitter transfers the original matching native allocation base.
+    unsafe {
+        crate::allocator::deallocate_raw(base);
+    }
+}
+
+/// Move a String into the current prepaid cause cell and record Fail. The
+/// carrier is copied into cell-owned native bookkeeping; no admission occurs.
+/// # Safety
+/// Context has an unused primary/resource cell. The live String buffer and its
+/// capacity transfer to that cell and must not be used or dropped by the caller.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_raise_string(
+    context: *mut Context,
+    site: u64,
+    data: *mut u8,
+    len: u64,
+    capacity: u64,
+) {
+    // SAFETY: the emitter transfers exactly this owned String and obligation.
+    unsafe {
+        causes::record_string(
+            &mut *context,
+            site,
+            causes::StringMessage {
+                data,
+                len,
+                capacity,
+            },
+        );
+    }
+}
+
+/// FORM allocation refusal becomes failure only under a finalizer's grant.
 /// # Safety
 /// Context is live and exclusively held by its task.
 #[unsafe(no_mangle)]
@@ -421,8 +600,7 @@ pub unsafe extern "C" fn hirsel_core_allocation_status(
     pointer: *mut u8,
 ) -> u8 {
     // SAFETY: the emitter passes its live hidden task context.
-    let context = unsafe { &*context };
-    u8::from(pointer.is_null() && context.grant_depth == context.stack.len())
+    u8::from(pointer.is_null() && unsafe { &*context }.finalizing != 0 && unsafe { &*context }.bound_depth == unsafe { &*context }.grant_depth)
 }
 
 /// Free a wholly destructured own value or resource.
@@ -437,14 +615,41 @@ pub unsafe extern "C" fn hirsel_core_free_value(pointer: NonNull<u8>, charge: u6
     }
 }
 
-/// A run-unique identity for a compact destination. It admits no storage and
-/// returns no failure status. Exhausting the identity space is a run stop.
-#[unsafe(no_mangle)]
-pub extern "C" fn hirsel_core_dest_id() -> u64 {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static NEXT: AtomicU64 = AtomicU64::new(1);
-    NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
-        .unwrap_or_else(|_| std::process::abort())
+/// Rust instruction shim for the emitted plain-own sequence, not a C symbol.
+/// # Safety
+/// Trusted nonzero native layout operands and exact portable charge. Caller
+/// owns the resulting uninitialized bytes and cleans them before inline_own_free.
+#[inline(always)]
+pub unsafe fn inline_own_alloc(
+    context: &Context,
+    charge: Option<u64>,
+    bytes: usize,
+    align: usize,
+) -> Result<NonNull<u8>, Capacity> {
+    allocate(
+        context.payer(None),
+        charge,
+        bytes,
+        align,
+        crate::block::PLAIN,
+    )
+}
+/// Rust instruction shim for emitted plain-own refund and physical deallocation.
+/// # Safety
+/// Exclusive cleaned block from inline_own_alloc, exact original layout/charge,
+/// and a live task context. The block may have a different or handed-over payer.
+#[inline(always)]
+pub unsafe fn inline_own_free(
+    context: &Context,
+    pointer: NonNull<u8>,
+    charge: u64,
+    bytes: usize,
+    align: usize,
+) {
+    // SAFETY: the emitter transfers the exclusively owned block and native operands.
+    unsafe {
+        crate::block::free_in(context, pointer, charge, bytes, align);
+    }
 }
 
 #[cfg(test)]

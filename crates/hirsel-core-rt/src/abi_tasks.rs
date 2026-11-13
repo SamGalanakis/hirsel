@@ -27,12 +27,17 @@ pub(crate) unsafe fn task_handover(context: *mut Context) {
         (*context).current.end();
     }
 }
-/// Task-local representations drain pending foreign refunds here before pure code
-/// can attempt another admission. The current synchronized forest settles them
-/// directly at refund; no pending queue is needed in this representation.
-pub(crate) fn task_resume(_: *mut Context) {}
+/// Drain completed remote refunds before this task resumes pure code.
+pub(crate) fn task_resume(context: *mut Context) {
+    // SAFETY: the cooperative scheduler owns this task's exclusive execution.
+    unsafe {
+        (*context).current.bind();
+        (*context).current.drain();
+        (*context).current_limit = (*context).current.fast();
+    }
+}
 
-/// One slow path for cross-task refunds, after updating the live payer. Local
+/// One slow path for cross-task refunds, before publishing to the payer mailbox. Local
 /// refund does not invoke a provider. No allocation, no suspended callback.
 pub(crate) fn cross_task_refund(owner: u64, bytes: u64) {
     if bytes != 0 && owner != crate::tasks::current_id() {

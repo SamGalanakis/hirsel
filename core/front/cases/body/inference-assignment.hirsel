@@ -1,0 +1,9 @@
+// LANG-11 S4: the field's declared type reaches both nested calls.
+// expect: run checked() = 17
+type Slot { len: u32 }
+fn set(mut s: Slot, n: u64) { s.len = option.unwrap(int.try_narrow(n)) }
+fn checked() -> u32 {
+  let mut s = Slot(len: 0)
+  set(mut s, 17)
+  s.len
+}

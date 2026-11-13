@@ -1,0 +1,6 @@
+// LANG-11 S3: the later Some must not infer the earlier None's T.
+// expect: refuse LANG-12 at 4:18
+fn pick(c: bool) -> u64 {
+  let o = if c { None } else { Some(1u64) }
+  option.unwrap(take o)
+}

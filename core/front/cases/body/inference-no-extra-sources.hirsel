@@ -1,0 +1,8 @@
+// LANG-11: later use, binary result type and copy are not expected-type sources.
+// expect: refuse LANG-12 at 6:29
+// expect: refuse LANG-12 at 7:26
+// expect: refuse LANG-12 at 8:27
+fn make[T: plain]() -> T { loop {} }
+fn later() -> u64 { let x = make(); x }
+fn arithmetic() -> u64 { make() + 1 }
+fn copied() -> u64 { copy make() }

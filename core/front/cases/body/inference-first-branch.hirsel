@@ -1,0 +1,7 @@
+// LANG-11 S3: the first non-Never branch fixes the later branch's type.
+// expect: run pick(true) = 1
+// expect: run pick(false) = fail Unwrap
+fn pick(c: bool) -> u64 {
+  let o = if c { Some(1u64) } else { None }
+  option.unwrap(take o)
+}

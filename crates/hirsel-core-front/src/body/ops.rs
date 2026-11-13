@@ -35,7 +35,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 (t, r)
             }
             "!" => {
-                let (t, v) = self.expr(e, None);
+                let (t, v) = self.expr(e, expect(BOOL));
                 if t != BOOL {
                     return self.no_operator(n, t);
                 }
@@ -49,7 +49,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 (t, self.emit_unary(UnaryOp::BitNot, t, v, n))
             }
             "copy" => {
-                let (t, v) = self.expr(e, want);
+                let (t, v) = self.expr(e, None);
                 if !copyable(&self.p.decls, &self.t, t, &self.params) {
                     let a = self.name(t);
                     self.refuse("OWN-6", n, format!("`{a}` is not plain"));

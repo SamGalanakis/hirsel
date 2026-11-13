@@ -1,0 +1,4 @@
+// LANG-11's closed list includes bool for !, through nested generic calls.
+// expect: run check() = fail Unwrap
+fn empty[T]() -> Option[T] { None }
+fn check() -> bool { !option.unwrap(empty()) }

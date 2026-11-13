@@ -1451,3 +1451,15 @@ fn parser_nesting_exhaustion_keeps_its_file_site_and_limit() {
             .contains(&format!("nesting limit of {limit}"))
     );
 }
+
+#[test]
+fn store_paths_keep_two_lowercase_hex_digits_per_digest_byte() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store::Store::new(dir.path()).unwrap();
+    let pattern = [0, 1, 16, 127, 128, 254, 255, 170];
+    let key = ContentHash(std::array::from_fn(|i| pattern[i % pattern.len()]));
+    assert_eq!(
+        store.path(key),
+        dir.path().join("0001107f80feffaa".repeat(4))
+    );
+}

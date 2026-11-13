@@ -79,12 +79,13 @@ impl Store {
     }
     pub fn path(&self, key: ContentHash) -> PathBuf {
         const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut name = String::with_capacity(64);
-        for byte in key.0 {
-            name.push(char::from(HEX[(byte >> 4) as usize]));
-            name.push(char::from(HEX[(byte & 15) as usize]));
+        let mut name = [0; 64];
+        for (i, byte) in key.0.into_iter().enumerate() {
+            name[i * 2] = HEX[(byte >> 4) as usize];
+            name[i * 2 + 1] = HEX[(byte & 15) as usize];
         }
-        self.root.join(name)
+        self.root
+            .join(std::str::from_utf8(&name).expect("hex digits are ASCII"))
     }
     pub fn put(&self, bytes: &[u8]) -> io::Result<ContentHash> {
         self.archive(|writer| writer.write_all(bytes))

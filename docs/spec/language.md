@@ -7,7 +7,11 @@ fields; an operator's operands; an assignment's place, then its value
 ([OWN-12](ownership.md#own-12-assignment)). `&&` and `||` skip their right operand when the
 left decides. A temporary lives to the end of its statement; in the condition of an `if` or
 `while`, it ends when the condition has been evaluated, before a branch or the loop body
-runs; in a block's tail, a function
+runs; in an operand of `&&` or `||`, it ends when that operand's `bool` has been produced; in
+a match arm's expression, it ends when the arm's value has been produced, before the match's
+own cleanup, unless the arm's value reaches it, and then it lives as long as the match's
+value; a scrutinee's temporaries follow the expression the match is in, so they live across
+every arm; in a block's tail, a function
 body's included, it lives to that block's exit and ends before the block's locals are
 cleaned, unless the block's value reaches it; a temporary that a `let` binding's value, or
 a block's value, reaches lives as long as that value. A moved argument stays a
@@ -18,6 +22,11 @@ caller-owned temporary until the callee is entered
 fn f(d: Dir) -> Result[(HostFile, HostFile), IoError] waits {
   Ok((host.open(d, "a", Read)?, host.open(d, "b", Read)?))   // a is opened first
 }
+```
+```hirsel
+type T { name: String }
+fn keep(take t: T) -> bool { let T(name: _) = take t; true }
+fn f(take a: T) -> bool { a.name == "x" && keep(take a) }   // a.name's view ends at ==
 ```
 
 ### LANG-7: Names

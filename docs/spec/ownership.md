@@ -271,8 +271,9 @@ for a lexical **extent**:
 
 - bound by `let`: to the end of the enclosing block;
 - bound by a match arm or `if let`: to the end of the arm;
-- otherwise a temporary: to the end of its statement; in an `if` or `while` condition,
-  to the end of the condition; in a block's tail, to the block's exit unless the block's
+- otherwise a temporary: to the end of its statement; in an `if` or `while` condition or
+  an operand of `&&` or `||`, to the end of that condition or operand; in a match arm's
+  expression, to the end of the arm unless the arm's value reaches it; in a block's tail, to the block's exit unless the block's
   value reaches it ([LANG-6](language.md#lang-6-evaluation-order));
 - a parameter view: for the call.
 
@@ -351,6 +352,12 @@ fn h(take t: T) { if t.name == "x" { let T(name: _) = take t } }
 ```hirsel
 type Inbox { items: List[String] }
 fn f(take m: Inbox) -> Inbox { let v = view m.items; m }     // refused: OWN-10
+```
+```hirsel
+fn f(take o: Option[String]) -> u64 {
+  let v = match o { Some(take s) => view s, None => return 0 }   // refused: OWN-10, s ends with its arm
+  string.byte_len(v)
+}
 ```
 ```hirsel
 fn f() -> u64 { let n = string.byte_len({ let s = string.new(); view s }); n }

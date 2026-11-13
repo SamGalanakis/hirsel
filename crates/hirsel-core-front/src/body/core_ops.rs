@@ -148,6 +148,8 @@ operations! {
     ("list", "append", Lane::PendingCode, "A", "core-check-calls-910", false),
     ("map", "push_entry", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "regrow", Lane::Value, "A", "core-check-callables-913", true),
+    ("map", "compact", Lane::Value, "A", "core-check-callables-913", true),
+    ("map", "make_room", Lane::Value, "C", "core-check-callables-913", true),
     ("map", "install_index", Lane::PendingCode, "C", "core-check-callables-913", true),
     ("map", "swap_value", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "kill", Lane::Value, "A", "core-check-callables-913", true),

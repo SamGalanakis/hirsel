@@ -40,16 +40,9 @@ pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), (
   }
   let cap = capacity(m)
   if slots(m) == cap {
-    let new_cap: u64 = if cap == 0 { 4 } else { cap * 2 }
-    match regrow(mut m, new_cap) {
+    match make_room(mut m) {
       Error(c) => return Error((c, take k, take v)),
       Ok(()) => {}
-    }
-    let mut i: u64 = 0
-    while i < slots(m) {
-      let stored_hash = slot_hash(m, i)
-      install_index(mut m, stored_hash, i + 1)
-      i += 1
     }
     let mask = index_len(m) - 1
     j = h & mask
@@ -101,7 +94,30 @@ fn swap_value[K: key, V](mut m: Map[K,V], i: u64, take v: V) -> V
 fn kill[K: key, V](mut m: Map[K,V], i: u64) -> V
 
 fn push_entry[K: key, V](mut m: Map[K,V], h: u64, take k: K, take v: V)
+// Capacity is at most max(4, 4 * peak live entries). Removals do not shrink.
+// At full slots and at least capacity/2 dead entries, compact in place without
+// allocation or admission, preserving live insertion order; rebuild the index.
+fn compact[K: key, V](mut m: Map[K, V])
 fn regrow[K: key, V](mut m: Map[K,V], cap: u64) -> Result[(), Capacity]
+
+// Keep rebuilding and admission on the full-table path, outside the ordinary
+// insertion probe. The caller still owns its key and value if admission fails.
+fn make_room[K:key,V](mut m:Map[K,V])->Result[(),Capacity] {
+  let cap = capacity(m)
+  if cap != 0 && len(m) <= cap / 2 {
+    compact(mut m)
+  } else {
+    let new_cap:u64 = if cap == 0 {4} else {cap * 2}
+    regrow(mut m,new_cap)?
+  }
+  let mut i:u64 = 0
+  while i < slots(m) {
+    let stored_hash=slot_hash(m,i)
+    install_index(mut m,stored_hash,i+1)
+    i+=1
+  }
+  Ok(())
+}
 
 fn install_index[K: key, V](mut m: Map[K,V], h: u64, s: u64) {
   let mask = index_len(m) - 1

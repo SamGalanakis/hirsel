@@ -1788,6 +1788,8 @@ fn emission_halts_but_typing_continues() {
 
 #[path = "core_ops_tests.rs"]
 mod core_ops_tests;
+#[path = "tests_maps.rs"]
+mod maps;
 
 #[test]
 fn callable_payload_metadata_is_built_once_per_type() {

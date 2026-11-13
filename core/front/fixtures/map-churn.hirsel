@@ -1,0 +1,45 @@
+// Storage <= max(4,4*peak live) entries; charge is32 per entry.
+// 192*peak also covers the old+new blocks during an allocating growth.
+// Churn always preserves the increasing insertion order of surviving keys.
+fn churn(peak:u64,live:u64)->u64 {
+  let r:Result[u64,Capacity]=bound bytes (192*peak) {
+    let mut m:Map[u64,u64]=map.new()
+    for i in 0u64..peak {result.unwrap(map.insert(mut m,i,3*i+1))}
+    for i in 0u64..(peak-live) {let _=map.remove(mut m,i)}
+    let mut oldest:u64=peak-live
+    let mut newest:u64=peak
+    let mut bound_cap:u64=4*peak
+    if bound_cap<4 {bound_cap=4}
+    for turn in 0u64..(64*peak) {
+      if option.unwrap(map.remove(mut m,oldest))!=3*oldest+1 {fail("removed value")}
+      oldest+=1
+      result.unwrap(map.insert(mut m,newest,3*newest+1))
+      newest+=1
+      if map.len(m)!=live || map.test_capacity(m)>bound_cap {fail("storage bound")}
+      let mut expected:u64=oldest
+      for (k,v) in m {
+        if k!=expected || v!=3*k+1 {fail("insertion order")}
+        expected+=1
+      }
+      if expected!=newest {fail("missing live entry")}
+    }
+    map.len(m)
+  }
+  result.unwrap(r)
+}
+fn no_room()->u64 {
+  let r:Result[u64,Capacity]=bound bytes 128 {
+    let mut m:Map[u64,u64]=map.new()
+    for i in 0u64..4u64 {result.unwrap(map.insert(mut m,i,i))}
+    let _=map.remove(mut m,0)
+    let _=map.remove(mut m,2)
+    result.unwrap(map.insert(mut m,4,4))
+    let mut order:u64=0
+    for(k,v)in m {order=order*10+k}
+    order
+  }
+  result.unwrap(r)
+}
+pub fn main()->Result[(),Exit] {
+  if churn(1,1)==1 && churn(3,3)==3 && churn(8,8)==8 && churn(33,33)==33 && churn(33,1)==1 && no_room()==134 {Ok(())}else{Error(Exit(status:1))}
+}

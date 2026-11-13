@@ -26,6 +26,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 Some(self.map_len(vals[0]?, entry, n))
             }
             "push_entry" => Some(self.map_push(types, vals, n)),
+            "compact" => {
+                let entry = self.map_entry(types[0], types[1], n)?;
+                let header = vals[0]?;
+                let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
+                let cap = self.read_sequence_word(header, 16, Ty::Scalar(Scalar::U64), n);
+                let plan = self.list_plan(entry.ty, cap, None, n)?;
+                let index_len = self.map_index_len(header, entry, n)?;
+                self.map_relocate(
+                    header, entry, data, cap, data, cap, index_len, plan, true, n,
+                )?;
+                Some(None)
+            }
             "regrow" => Some(self.map_regrow(types, vals[0]?, vals[1]?, result, n)),
             "with_value" => {
                 let collection = self.map_type(types)?;
@@ -198,7 +210,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             n,
             |cx, _, _| {
                 cx.map_relocate(
-                    header, entry, old_data, old_cap, block, cap, index_len, plan, n,
+                    header, entry, old_data, old_cap, block, cap, index_len, plan, false, n,
                 );
             },
             |cx, to, capacity| {
@@ -226,6 +238,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         cap: ValueId,
         index_len: ValueId,
         plan: lists::ListPlan,
+        in_place: bool,
         n: NodeId,
     ) -> Option<()> {
         let u = Ty::Scalar(Scalar::U64);
@@ -261,6 +274,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             PlaceTy::Declared(entry.place),
             n,
         );
+        // Distinct entry indices never overlap. Skip an unchanged prefix rather
+        // than pass equal pointers to memcpy; later live entries move only left.
+        let after_copy = in_place.then(|| self.new_block(&[]));
+        if let Some(done) = after_copy {
+            let moved = self.new_block(&[]);
+            let unchanged = self.map_compare(CompareOp::Eq, i, live, n);
+            self.map_branch(unchanged, done, moved, n);
+            self.start(moved);
+        }
         self.inst(
             Inst::Copy {
                 to,
@@ -269,6 +291,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
             n,
         );
+        if let Some(done) = after_copy {
+            self.jump(done, &[], n);
+            self.start(done);
+        }
         let next_i = self.map_binary(BinaryOp::Add, i, one, n);
         let next_live = self.map_binary(BinaryOp::Add, live, one, n);
         self.jump(head, &[next_i, next_live], n);
@@ -315,6 +341,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let next = self.map_binary(BinaryOp::Add, j, one, n);
         self.jump(zero_head, &[next], n);
         self.start(cleared);
+        if in_place {
+            return Some(());
+        }
         let has_old = self.map_compare(CompareOp::Ne, old_cap, zero, n);
         let free = self.new_block(&[]);
         let done = self.new_block(&[]);

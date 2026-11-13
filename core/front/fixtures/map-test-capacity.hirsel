@@ -1,0 +1,2 @@
+// Test-only observation of the private capacity word, never a library export.
+pub fn test_capacity(m: Map[u64,u64]) -> u64 { capacity(m) }

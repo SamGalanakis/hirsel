@@ -849,6 +849,16 @@ fn clone_in_cranelift() { clone_in(Backend::Cranelift); }
 #[test]
 #[ignore = "explicit native integration target"]
 fn clone_in_llvm() { clone_in(Backend::Llvm); }
+/// MEM-17: clone copies a stable value into its own twin, on each engine.
+fn clone_twin(backend: Backend) {
+    run_lines_native(backend, include_str!("../../../core/front/cases/body/clone-twin.hirsel"));
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn clone_twin_cranelift() { clone_twin(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn clone_twin_llvm() { clone_twin(Backend::Llvm); }
 
 fn uninitialized_take_names(backend: Backend) {
     let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

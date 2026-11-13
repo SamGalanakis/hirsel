@@ -429,6 +429,196 @@ impl Derive<'_> {
         c.jump(fail, &[requested, available]);
         c.start(yes);
     }
+    /// `$clone_twin`: the own twin `dst` at `to` of the stable `src` at `from`, field by
+    /// field (a twin's field k pairs with field k). Text and spans become blocks of
+    /// capacity equal to their length, a stable field a `Box` node or the inline twin. A
+    /// refusal drops what was written in reverse, as `$clone` does.
+    pub(super) fn clone_twin_function(
+        &mut self,
+        c: &mut Code,
+        src: TypeId,
+        dst: TypeId,
+        from: ValueId,
+        to: ValueId,
+    ) -> Result<(), &'static str> {
+        let fail = c.block(&[Ty::Scalar(Scalar::U64); 2]);
+        let (xs, ys) = (self.offsets(src), self.offsets(dst));
+        match (
+            self.module.types[src.index()].body.clone(),
+            self.module.types[dst.index()].body.clone(),
+        ) {
+            (ShapeBody::Record(a), ShapeBody::Record(b)) if a.len() == b.len() => {
+                let a: Vec<_> = a.into_iter().map(|f| f.ty).collect();
+                let b: Vec<_> = b.into_iter().map(|f| f.ty).collect();
+                self.twin_fields(c, (&a, &b), (&xs[0], &ys[0]), from, to, fail)?;
+            }
+            (ShapeBody::Variant(a), ShapeBody::Variant(b)) if a.len() == b.len() => {
+                let at = c.address(from, PlaceTy::Declared(src));
+                let tag = c.value(Ty::Scalar(Scalar::U32));
+                c.inst(Inst::Case {
+                    result: tag,
+                    address: at,
+                });
+                let done = c.block(&[]);
+                let mut arms = vec![];
+                for i in 0..a.len() {
+                    let target = c.block(&[]);
+                    arms.push(hirsel_core_ir::SwitchArm {
+                        value: i as u64,
+                        edge: c.edge(target, &[]),
+                    });
+                }
+                let otherwise = arms.last().unwrap().edge;
+                let range = PoolRange::push(
+                    &mut c.body.pools.arms,
+                    arms[..arms.len() - 1].iter().copied(),
+                );
+                c.end(Terminator::Switch {
+                    value: tag,
+                    arms: range,
+                    otherwise,
+                });
+                for (i, (ca, cb)) in a.into_iter().zip(b).enumerate() {
+                    c.start(c.body.edges[arms[i].edge.index()].target);
+                    if ca.fields.len() != cb.fields.len() {
+                        return Err("these clone twins are not built");
+                    }
+                    let y = c.address(to, PlaceTy::Declared(dst));
+                    c.inst(Inst::SetCase {
+                        address: y,
+                        case: i as u32,
+                    });
+                    let a: Vec<_> = ca.fields.into_iter().map(|f| f.ty).collect();
+                    let b: Vec<_> = cb.fields.into_iter().map(|f| f.ty).collect();
+                    self.twin_fields(c, (&a, &b), (&xs[i], &ys[i]), from, to, fail)?;
+                    c.jump(done, &[]);
+                }
+                c.start(done);
+            }
+            _ => return Err("these clone twins are not built"),
+        }
+        let zero = c.constant(0);
+        ret(c, &[zero, zero]);
+        c.start(fail);
+        let [requested, available] = c.params(fail);
+        ret(c, &[requested, available]);
+        Ok(())
+    }
+    /// The field pairs in order; a refusal at field k drops the own fields written
+    /// before it, k-1 down to 0, before `fail`.
+    fn twin_fields(
+        &mut self,
+        c: &mut Code,
+        (a, b): (&[FieldTy], &[FieldTy]),
+        (xs, ys): (&[u64], &[u64]),
+        from: ValueId,
+        to: ValueId,
+        fail: BlockId,
+    ) -> Result<(), &'static str> {
+        let mut undo = fail;
+        for (k, (fa, fb)) in a.iter().zip(b).enumerate() {
+            let (x, y) = (c.offset(from, xs[k]), c.offset(to, ys[k]));
+            self.twin_field(c, fa, fb, x, y, undo)?;
+            if !self.owns(fb, &mut vec![]) {
+                continue;
+            }
+            let next = c.block(&[Ty::Scalar(Scalar::U64); 2]);
+            let here = detour(c);
+            c.start(next);
+            let [requested, available] = c.params(next);
+            self.drop_field(c, fb, y)?;
+            c.jump(undo, &[requested, available]);
+            c.start(here);
+            undo = next;
+        }
+        Ok(())
+    }
+    fn twin_field(
+        &mut self,
+        c: &mut Code,
+        source: &FieldTy,
+        target: &FieldTy,
+        from: ValueId,
+        to: ValueId,
+        fail: BlockId,
+    ) -> Result<(), &'static str> {
+        match (source, target) {
+            // Text or a FixedSpan of scalars: `W` count at the locator, then the bytes.
+            (FieldTy::Locator(span), FieldTy::Seq(item)) => {
+                match &**span {
+                    FieldTy::Text => {}
+                    FieldTy::FixedSpan(packed)
+                        if matches!(**item, FieldTy::Scalar(_)) && packed == item => {}
+                    _ => return Err("a clone of a span of non-scalar items is not built"),
+                }
+                let blob = c.read(from, Ty::Ptr);
+                let at = c.offset(from, 8);
+                let at = c.read(at, Ty::Scalar(Scalar::U64));
+                let w = c.offset(blob, 8);
+                let width = c.read(w, Ty::Scalar(Scalar::U64));
+                let len = Derive::packed_count(c, blob, at, width);
+                let start = c.binary(BinaryOp::Add, at, width);
+                let data = c.offset_value(blob, start);
+                let zero = c.constant(0);
+                let empty = c.compare(CompareOp::Eq, len, zero);
+                let (none, some, done) = (c.block(&[]), c.block(&[]), c.block(&[]));
+                c.branch(empty, none, some);
+                // An empty copy allocates nothing (budgets.md).
+                c.start(none);
+                let null = c.value(Ty::Ptr);
+                c.inst(Inst::Const {
+                    result: null,
+                    bits: 0,
+                });
+                store(c, to, null);
+                let n = c.offset(to, 8);
+                store(c, n, zero);
+                let cap = c.offset(to, 16);
+                store(c, cap, zero);
+                c.jump(done, &[]);
+                c.start(some);
+                let stride = c.constant(self.size_of(item));
+                let bytes = c.mul(len, stride);
+                let charge = round8_value(c, bytes);
+                let block = alloc_value(c, charge, bytes, fail);
+                copy_value(c, block, data, bytes);
+                store(c, to, block);
+                let n = c.offset(to, 8);
+                store(c, n, len);
+                let cap = c.offset(to, 16);
+                store(c, cap, len);
+                c.jump(done, &[]);
+                c.start(done);
+            }
+            // A stable field becomes a new node holding its twin.
+            (FieldTy::Stable(t), FieldTy::Box(u)) => {
+                let (t, u) = (TypeId(t.0), TypeId(u.0));
+                let size = self.row_size(u);
+                let block = alloc(c, AllocKind::Own, round8(size), size, fail);
+                let f = self.function(t, KeyOp::CloneTwin(u.0))?;
+                let old = c.read(from, Ty::Ptr);
+                let x = c.address(old, PlaceTy::Declared(t));
+                let y = c.address(block, PlaceTy::Declared(u));
+                self.call_checked(c, f, x, y, fail, Some((block, round8(size))));
+                store(c, to, block);
+            }
+            (FieldTy::Stable(t), FieldTy::Inline(u)) if t != u => {
+                let (t, u) = (TypeId(t.0), TypeId(u.0));
+                let f = self.function(t, KeyOp::CloneTwin(u.0))?;
+                let old = c.read(from, Ty::Ptr);
+                let x = c.address(old, PlaceTy::Declared(t));
+                let y = c.address(to, PlaceTy::Declared(u));
+                self.call_checked(c, f, x, y, fail, None);
+            }
+            // The same field type in both: bits, or a stable value kept in its region.
+            (a, b) if a == b && !self.owns(b, &mut vec![]) => {
+                let size = self.size_of(b);
+                copy(c, to, from, size);
+            }
+            _ => return Err("this field of a clone into the twin type is not built"),
+        }
+        Ok(())
+    }
     /// `$clone_in`: a new block of the stable row `dst` admitted in `region`, then its
     /// fields from the `src` value at `from` in order (a twin's field k pairs with field
     /// k). A refusal returns a null block; what was admitted stays charged to the region
@@ -833,14 +1023,31 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<ValueId> {
         let u = self.bare(u);
-        let (_, at) = self.clone_part(x, u, v, false, n)?;
-        let (id, function, _) = self.key_function(KeyOp::Clone, u, n)?;
+        let (part, at) = self.clone_part(x, u, v, true, n)?;
+        // `src` is the row copied from, `id` the row of `u` written.
+        let (src, id, function, at) = if part == u {
+            let (id, function, _) = self.key_function(KeyOp::Clone, u, n)?;
+            (id, id, function, at)
+        } else {
+            // The stable twin of an own `u` (MEM-17), held as its block's pointer.
+            let Ok(Rep::Place(target)) = self.rep(u) else {
+                self.gap(n, "a clone into the twin type is not built");
+                return None;
+            };
+            let (src, function, _) = self.key_function(KeyOp::CloneTwin(target.0), part, n)?;
+            if !self.e.by_block(src) || self.e.by_block(target) {
+                self.gap(n, "a clone into the twin type is not built");
+                return None;
+            }
+            let block = self.get_word(AddressBase::Value(at), 0, Ty::Ptr, n)?;
+            (src, target, function, block)
+        };
         let rid = self.declared(result)?;
         if !self.live() {
             return None;
         }
         let to = self.new_slot(PlaceTy::Declared(rid), n);
-        let from = self.address(AddressBase::Value(at), &[], PlaceTy::Declared(id), n);
+        let from = self.address(AddressBase::Value(at), &[], PlaceTy::Declared(src), n);
         let ok = self.address(
             AddressBase::Address(to),
             &[Step::CaseField { case: 0, field: 0 }],

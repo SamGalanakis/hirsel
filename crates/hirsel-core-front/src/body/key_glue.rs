@@ -15,6 +15,9 @@ pub enum KeyOp {
     /// `$clone_in[T, U](from, r) -> (block, requested, available)`: MEM-17's copy of a
     /// `T` into a new stable `U` in `r`; `U` is the row named here.
     CloneIn(u32),
+    /// `$clone_twin[S, U](from, to) -> (requested, available)`: MEM-17's own copy of a
+    /// stable `S` as its declared twin `U`, the row named here.
+    CloneTwin(u32),
 }
 impl KeyOp {
     fn definition(self) -> DefPath {
@@ -30,6 +33,7 @@ impl KeyOp {
             Self::Ordered(_) => unreachable!("ordered predicates"),
             Self::Clone => "core.$clone",
             Self::CloneIn(_) => "core.$clone_in",
+            Self::CloneTwin(_) => "core.$clone_twin",
         })
     }
     fn signature(self, ty: TypeId) -> Signature {
@@ -40,6 +44,7 @@ impl KeyOp {
             Self::Equal | Self::Order | Self::Ordered(_) | Self::Clone => {
                 params.push(Param::Address(ty))
             }
+            Self::CloneTwin(u) => params.push(Param::Address(TypeId(u))),
             Self::CloneIn(_) => {
                 params.push(Param::Value(Ty::Ptr));
                 return Signature {
@@ -50,7 +55,7 @@ impl KeyOp {
                 };
             }
         }
-        if self == Self::Clone {
+        if matches!(self, Self::Clone | Self::CloneTwin(_)) {
             return Signature {
                 params,
                 results: vec![Ty::Scalar(Scalar::U64); 2],
@@ -157,10 +162,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     op.signature(id),
                     // A clone writes through `to`, so both its places stay addresses.
                     match op {
-                        KeyOp::Clone | KeyOp::CloneIn(_) => scalar_abi::SignatureAbi {
-                            params: vec![false; 2],
-                            result: false,
-                        },
+                        KeyOp::Clone | KeyOp::CloneIn(_) | KeyOp::CloneTwin(_) => {
+                            scalar_abi::SignatureAbi {
+                                params: vec![false; 2],
+                                result: false,
+                            }
+                        }
                         KeyOp::Equal | KeyOp::Order | KeyOp::Ordered(_) => {
                             scalar_abi::SignatureAbi {
                                 params: vec![true; 2],
@@ -412,7 +419,7 @@ pub(super) struct Derive<'a> {
 impl Derive<'_> {
     pub(super) fn function(&mut self, ty: TypeId, op: KeyOp) -> Result<FuncId, &'static str> {
         let mut types = vec![self.module.types[ty.index()].name.clone()];
-        if let KeyOp::CloneIn(u) = op {
+        if let KeyOp::CloneIn(u) | KeyOp::CloneTwin(u) = op {
             types.push(self.module.types[u as usize].name.clone());
         }
         let key = InstanceKey {
@@ -466,6 +473,13 @@ impl Derive<'_> {
             self.active.pop();
             return Ok(row);
         }
+        if let KeyOp::CloneTwin(u) = op {
+            self.clone_twin_function(&mut c, ty, TypeId(u), ps[0], ps[1])?;
+            order_instructions(&mut c.body);
+            self.module.functions[row.index()].body = Some(c.body);
+            self.active.pop();
+            return Ok(row);
+        }
         if let KeyOp::CloneIn(u) = op {
             self.clone_in_function(&mut c, ty, TypeId(u), ps[0], ps[1])?;
             order_instructions(&mut c.body);
@@ -499,7 +513,9 @@ impl Derive<'_> {
                 let b = c.read(ps[1], Ty::Scalar(scalar));
                 c.compare(op, a, b)
             }
-            KeyOp::Clone | KeyOp::CloneIn(_) => unreachable!("clones return above"),
+            KeyOp::Clone | KeyOp::CloneIn(_) | KeyOp::CloneTwin(_) => {
+                unreachable!("clones return above")
+            }
             KeyOp::Order | KeyOp::Ordered(_) => {
                 let different = c.block(&[Ty::Scalar(Scalar::I8)]);
                 self.order_type(&mut c, ty, ps[0], ps[1], different)?;
@@ -719,7 +735,12 @@ impl Derive<'_> {
         });
         result
     }
-    fn packed_count(c: &mut Code, blob: ValueId, at: ValueId, width: ValueId) -> ValueId {
+    pub(super) fn packed_count(
+        c: &mut Code,
+        blob: ValueId,
+        at: ValueId,
+        width: ValueId,
+    ) -> ValueId {
         let done = c.block(&[Ty::Scalar(Scalar::U64)]);
         for (bytes, scalar) in [(2, Scalar::U16), (4, Scalar::U32), (8, Scalar::U64)] {
             if bytes != 8 {

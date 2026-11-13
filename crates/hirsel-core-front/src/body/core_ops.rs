@@ -6,6 +6,7 @@ use hirsel_core_ir::{Counted, HostOp, RtOp};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Kernel {
     Stream(HostOp),
+    Host(HostOp),
     ArgsLen,
     ArgsGet,
     NewOwner(Option<Counted>),
@@ -36,147 +37,153 @@ struct Entry {
     module: &'static str,
     name: &'static str,
     lane: Lane,
+    #[cfg(test)]
+    class: &'static str,
+    #[cfg(test)]
+    owner: &'static str,
+    #[cfg(test)]
+    private: bool,
 }
 macro_rules! operations {
-    ($(($module:literal, $name:literal, $lane:expr)),* $(,)?) => {
-        const OPERATIONS: &[Entry] = &[$(Entry { module: $module, name: $name, lane: $lane }),*];
+    ($(($module:literal, $name:literal, $lane:expr, $class:literal, $owner:literal, $private:literal)),* $(,)?) => {
+        const OPERATIONS: &[Entry] = &[$(Entry { module: $module, name: $name, lane: $lane, #[cfg(test)] class: $class, #[cfg(test)] owner: $owner, #[cfg(test)] private: $private }),*];
     };
 }
 
 operations! {
-    ("int", "parse", Lane::PendingCode),
-    ("list", "fill", Lane::PendingCode),
-    ("list", "sum", Lane::PendingCode),
-    ("string", "from", Lane::PendingCode),
-    ("string", "from_utf8", Lane::PendingCode),
-    ("string", "into_bytes", Lane::PendingCode),
-    ("string", "next_scalar", Lane::PendingCode),
-    ("string", "push_char", Lane::PendingCode),
-    ("string", "push_u64", Lane::PendingCode),
-    ("string", "truncate", Lane::PendingCode),
-    ("arc", "new", Lane::Runtime(Kernel::NewOwner(Some(Counted::Arc)))),
-    ("arc", "share", Lane::Runtime(Kernel::Share(Counted::Arc))),
-    ("arc", "try_unwrap", Lane::Runtime(Kernel::TryUnwrap(Counted::Arc))),
-    ("args", "len", Lane::Runtime(Kernel::ArgsLen)),
-    ("args", "get", Lane::Runtime(Kernel::ArgsGet)),
-    ("box", "new", Lane::Runtime(Kernel::NewOwner(None))),
-    ("box", "unbox", Lane::Runtime(Kernel::Unbox)),
-    ("channel", "new", Lane::Runtime(Kernel::ChannelNew)),
-    ("channel", "sender", Lane::Runtime(Kernel::ChannelSender)),
-    ("channel", "send", Lane::Runtime(Kernel::Send)),
-    ("channel", "try_send", Lane::Runtime(Kernel::TrySend)),
-    ("channel", "receive", Lane::Runtime(Kernel::Receive)),
-    ("char", "from_u32", Lane::Numeric),
-    ("char", "to_u32", Lane::Numeric),
-    ("core", "fail", Lane::Language),
-    ("core", "replace", Lane::Value),
-    ("core", "clone", Lane::Language),
-    ("core", "clone_in", Lane::Language),
-    ("core", "build_in", Lane::Language),
-    ("core", "finish", Lane::Language),
-    ("core", "finish_trim", Lane::Language),
-    ("core", "build_stream_in", Lane::Language),
-    ("core", "emit", Lane::Language),
-    ("dest", "put", Lane::Language),
-    ("float", "mul_add", Lane::Numeric),
-    ("float", "total_order", Lane::Numeric),
-    ("float", "to_int", Lane::Numeric),
-    ("float", "from_int", Lane::Numeric),
-    ("float", "widen", Lane::Numeric),
-    ("float", "narrow", Lane::Numeric),
-    ("float", "to_bits32", Lane::Numeric),
-    ("float", "to_bits64", Lane::Numeric),
-    ("float", "from_bits32", Lane::Numeric),
-    ("float", "from_bits64", Lane::Numeric),
-    ("host", "open", Lane::Runtime(Kernel::Blocked("provider extern rows are not built (FOR FORM)"))),
-    ("host", "read", Lane::Runtime(Kernel::Blocked("provider extern rows are not built (FOR FORM)"))),
-    ("host", "write", Lane::Runtime(Kernel::Blocked("provider extern rows are not built (FOR FORM)"))),
-    ("host", "close", Lane::Runtime(Kernel::Blocked("provider extern rows are not built (FOR FORM)"))),
-    ("host", "try_lock", Lane::Runtime(Kernel::Blocked("provider extern rows are not built (FOR FORM)"))),
-    ("host", "unlock", Lane::Runtime(Kernel::Blocked("provider extern rows are not built (FOR FORM)"))),
-    ("host", "mkdir", Lane::Runtime(Kernel::Blocked("provider extern rows are not built (FOR FORM)"))),
-    ("host", "mkdtemp", Lane::Runtime(Kernel::Blocked("provider extern rows are not built (FOR FORM)"))),
-    ("host", "remove", Lane::Runtime(Kernel::Blocked("provider extern rows are not built (FOR FORM)"))),
-    ("host", "remove_tree", Lane::Runtime(Kernel::Blocked("provider extern rows are not built (FOR FORM)"))),
-    ("host", "wall_ms", Lane::Runtime(Kernel::Blocked("provider extern rows are not built (FOR FORM)"))),
-    ("host", "mono_ns", Lane::Runtime(Kernel::Blocked("provider extern rows are not built (FOR FORM)"))),
-    ("indexed", "get", Lane::Language),
-    ("int", "wrapping_add", Lane::Numeric),
-    ("int", "wrapping_sub", Lane::Numeric),
-    ("int", "wrapping_mul", Lane::Numeric),
-    ("int", "wrapping_neg", Lane::Numeric),
-    ("int", "wrapping_shl", Lane::Numeric),
-    ("int", "checked_add", Lane::Numeric),
-    ("int", "checked_sub", Lane::Numeric),
-    ("int", "checked_mul", Lane::Numeric),
-    ("int", "checked_div", Lane::Numeric),
-    ("int", "saturating_add", Lane::Numeric),
-    ("int", "saturating_sub", Lane::Numeric),
-    ("int", "saturating_mul", Lane::Numeric),
-    ("int", "mul_wide", Lane::Numeric),
-    ("int", "leading_zeros", Lane::Numeric),
-    ("int", "widen", Lane::Numeric),
-    ("int", "narrow", Lane::Numeric),
-    ("int", "try_narrow", Lane::Numeric),
-    ("int", "truncate", Lane::Numeric),
-    ("list", "new", Lane::Value),
-    ("list", "with_capacity", Lane::Value),
-    ("list", "len", Lane::Value),
-    ("list", "capacity", Lane::Value),
-    ("list", "reserve", Lane::Value),
-    ("list", "get", Lane::Value),
-    ("list", "slice", Lane::Value),
-    ("list", "push", Lane::Value),
-    ("list", "pop", Lane::Value),
-    ("list", "set", Lane::Value),
-    ("list", "clear", Lane::Value),
-    ("list", "append", Lane::PendingCode),
-    ("map", "new", Lane::Value),
-    ("map", "len", Lane::Value),
-    ("map", "get", Lane::Value),
-    ("map", "insert", Lane::Value),
-    ("map", "set", Lane::Value),
-    ("map", "remove", Lane::Value),
-    ("option", "unwrap", Lane::Value),
-    ("rc", "new", Lane::Runtime(Kernel::NewOwner(Some(Counted::Rc)))),
-    ("rc", "share", Lane::Runtime(Kernel::Share(Counted::Rc))),
-    ("rc", "try_unwrap", Lane::Runtime(Kernel::TryUnwrap(Counted::Rc))),
-    ("result", "unwrap", Lane::Value),
-    ("seq", "len", Lane::Language),
-    ("seq", "nth", Lane::Language),
-    ("seq", "index_in", Lane::Language),
-    ("seq", "get", Lane::Language),
-    ("span", "builder", Lane::Language),
-    ("span", "with_capacity", Lane::Language),
-    ("span", "push", Lane::Language),
-    ("span", "finish", Lane::Language),
-    ("span", "len", Lane::Language),
-    ("span", "get", Lane::Language),
-    ("stderr", "write", Lane::Runtime(Kernel::Stream(HostOp::Stderr))),
-    ("stdout", "write", Lane::Runtime(Kernel::Stream(HostOp::Stdout))),
-    ("string", "new", Lane::PendingCode),
-    ("string", "as_bytes", Lane::PendingCode),
-    ("string", "slice", Lane::PendingCode),
-    ("string", "byte_len", Lane::PendingCode),
-    ("string", "push", Lane::PendingCode),
-    ("string", "reserve", Lane::PendingCode),
-    ("string", "of_bytes", Lane::Value),
-    ("string", "to_bytes", Lane::Value),
-    ("string", "view_string", Lane::Value),
-    ("task", "spawn", Lane::Runtime(Kernel::Spawn)),
-    ("task", "join", Lane::Runtime(Kernel::Join)),
-    ("task", "cancel", Lane::Runtime(Kernel::Cancel)),
-    ("task", "check_cancel", Lane::Runtime(Kernel::CheckCancel)),
-    ("text", "len", Lane::Language),
-    ("text", "as_string", Lane::Language),
-    ("text", "copy_in", Lane::Language),
-    ("unique", "new", Lane::Runtime(Kernel::Blocked("Unique runtime identity binding is not specified (FOR FORM)"))),
-    ("writer", "append", Lane::Language),
-    ("writer", "scalar", Lane::Language),
-    ("writer", "push", Lane::Language),
-    ("writer", "close", Lane::Language),
-    ("writer", "completed", Lane::Language),
-    ("writer", "last_completed", Lane::Language),
+    ("int", "parse", Lane::PendingCode, "C", "std-seed-api-889", false),
+    ("list", "sum", Lane::PendingCode, "C", "std-seed-api-889", false),
+    ("list", "fill", Lane::PendingCode, "C", "std-seed-api-889", false),
+    ("string", "from", Lane::PendingCode, "C", "std-seed-api-889", false),
+    ("string", "from_utf8", Lane::PendingCode, "C", "std-seed-api-889", false),
+    ("string", "into_bytes", Lane::PendingCode, "C", "std-seed-api-889", false),
+    ("string", "next_scalar", Lane::PendingCode, "C", "std-seed-api-889", false),
+    ("string", "push_char", Lane::PendingCode, "C", "std-seed-api-889", false),
+    ("string", "push_u64", Lane::PendingCode, "C", "std-seed-api-889", false),
+    ("string", "truncate", Lane::PendingCode, "C", "std-seed-api-889", false),
+    ("arc", "new", Lane::Runtime(Kernel::NewOwner(Some(Counted::Arc))), "A", "core-ops-914", false),
+    ("arc", "share", Lane::Runtime(Kernel::Share(Counted::Arc)), "A", "core-ops-914", false),
+    ("arc", "try_unwrap", Lane::Runtime(Kernel::TryUnwrap(Counted::Arc)), "A", "core-ops-914", false),
+    ("args", "len", Lane::Runtime(Kernel::ArgsLen), "B", "core-ops-914", false),
+    ("args", "get", Lane::Runtime(Kernel::ArgsGet), "B", "core-ops-914", false),
+    ("box", "new", Lane::Runtime(Kernel::NewOwner(None)), "A", "core-ops-914", false),
+    ("box", "unbox", Lane::Runtime(Kernel::Unbox), "A", "core-ops-914", false),
+    ("channel", "new", Lane::Runtime(Kernel::ChannelNew), "B", "core-ops-914", false),
+    ("channel", "sender", Lane::Runtime(Kernel::ChannelSender), "B", "core-ops-914", false),
+    ("channel", "send", Lane::Runtime(Kernel::Send), "B", "core-ops-914", false),
+    ("channel", "try_send", Lane::Runtime(Kernel::TrySend), "B", "core-ops-914", false),
+    ("channel", "receive", Lane::Runtime(Kernel::Receive), "B", "core-ops-914", false),
+    ("char", "from_u32", Lane::Numeric, "A", "core-check-index-912", false),
+    ("char", "to_u32", Lane::Numeric, "A", "core-check-index-912", false),
+    ("core", "fail", Lane::Language, "A", "core-check-895", false),
+    ("core", "replace", Lane::Value, "A", "core-check-calls-910", false),
+    ("core", "clone", Lane::Language, "A", "core-check-895", false),
+    ("core", "clone_in", Lane::Language, "A", "core-check-895", false),
+    ("core", "build_in", Lane::Language, "A", "core-check-895", false),
+    ("core", "finish", Lane::Language, "A", "core-check-895", false),
+    ("core", "finish_trim", Lane::Language, "A", "core-check-895", false),
+    ("core", "build_stream_in", Lane::Language, "A", "core-check-895", false),
+    ("core", "emit", Lane::Language, "A", "core-check-895", false),
+    ("dest", "put", Lane::Language, "A", "core-check-895", false),
+    ("float", "mul_add", Lane::Numeric, "A", "core-check-index-912", false),
+    ("float", "total_order", Lane::Numeric, "A", "core-check-index-912", false),
+    ("float", "to_int", Lane::Numeric, "A", "core-check-index-912", false),
+    ("float", "from_int", Lane::Numeric, "A", "core-check-index-912", false),
+    ("float", "widen", Lane::Numeric, "A", "core-check-index-912", false),
+    ("float", "narrow", Lane::Numeric, "A", "core-check-index-912", false),
+    ("float", "to_bits32", Lane::Numeric, "A", "core-check-index-912", false),
+    ("float", "to_bits64", Lane::Numeric, "A", "core-check-index-912", false),
+    ("float", "from_bits32", Lane::Numeric, "A", "core-check-index-912", false),
+    ("float", "from_bits64", Lane::Numeric, "A", "core-check-index-912", false),
+    ("host", "open", Lane::Runtime(Kernel::Host(HostOp::Open)), "B", "core-ops-914", false),
+    ("host", "read", Lane::Runtime(Kernel::Host(HostOp::Read)), "B", "core-ops-914", false),
+    ("host", "write", Lane::Runtime(Kernel::Blocked("this provider operation is not built")), "B", "core-ops-914", false),
+    ("host", "close", Lane::Runtime(Kernel::Host(HostOp::Close)), "B", "core-ops-914", false),
+    ("host", "try_lock", Lane::Runtime(Kernel::Blocked("this provider operation is not built")), "B", "core-ops-914", false),
+    ("host", "unlock", Lane::Runtime(Kernel::Blocked("this provider operation is not built")), "B", "core-ops-914", false),
+    ("host", "mkdir", Lane::Runtime(Kernel::Blocked("this provider operation is not built")), "B", "core-ops-914", false),
+    ("host", "mkdtemp", Lane::Runtime(Kernel::Blocked("this provider operation is not built")), "B", "core-ops-914", false),
+    ("host", "remove", Lane::Runtime(Kernel::Blocked("this provider operation is not built")), "B", "core-ops-914", false),
+    ("host", "remove_tree", Lane::Runtime(Kernel::Blocked("this provider operation is not built")), "B", "core-ops-914", false),
+    ("host", "wall_ms", Lane::Runtime(Kernel::Blocked("this provider operation is not built")), "B", "core-ops-914", false),
+    ("host", "mono_ns", Lane::Runtime(Kernel::Blocked("this provider operation is not built")), "B", "core-ops-914", false),
+    ("indexed", "get", Lane::Language, "A", "core-check-895", false),
+    ("int", "wrapping_add", Lane::Numeric, "A", "core-check-index-912", false),
+    ("int", "wrapping_sub", Lane::Numeric, "A", "core-check-index-912", false),
+    ("int", "wrapping_mul", Lane::Numeric, "A", "core-check-index-912", false),
+    ("int", "wrapping_neg", Lane::Numeric, "A", "core-check-index-912", false),
+    ("int", "wrapping_shl", Lane::Numeric, "A", "core-check-index-912", false),
+    ("int", "checked_add", Lane::Numeric, "A", "core-check-index-912", false),
+    ("int", "checked_sub", Lane::Numeric, "A", "core-check-index-912", false),
+    ("int", "checked_mul", Lane::Numeric, "A", "core-check-index-912", false),
+    ("int", "checked_div", Lane::Numeric, "A", "core-check-index-912", false),
+    ("int", "saturating_add", Lane::Numeric, "A", "core-check-index-912", false),
+    ("int", "saturating_sub", Lane::Numeric, "A", "core-check-index-912", false),
+    ("int", "saturating_mul", Lane::Numeric, "A", "core-check-index-912", false),
+    ("int", "mul_wide", Lane::Numeric, "A", "core-check-index-912", false),
+    ("int", "leading_zeros", Lane::Numeric, "A", "core-check-index-912", false),
+    ("int", "widen", Lane::Numeric, "A", "core-check-index-912", false),
+    ("int", "narrow", Lane::Numeric, "A", "core-check-index-912", false),
+    ("int", "try_narrow", Lane::Numeric, "A", "core-check-index-912", false),
+    ("int", "truncate", Lane::Numeric, "A", "core-check-index-912", false),
+    ("list", "new", Lane::Value, "A", "core-check-calls-910", false),
+    ("list", "with_capacity", Lane::Value, "A", "core-check-calls-910", false),
+    ("list", "len", Lane::Value, "A", "core-check-calls-910", false),
+    ("list", "capacity", Lane::Value, "A", "core-check-calls-910", false),
+    ("list", "reserve", Lane::Value, "A", "core-check-calls-910", false),
+    ("list", "get", Lane::Value, "A", "core-check-calls-910", false),
+    ("list", "slice", Lane::Value, "A", "core-check-calls-910", false),
+    ("list", "push", Lane::Value, "A", "core-check-calls-910", false),
+    ("list", "pop", Lane::Value, "A", "core-check-calls-910", false),
+    ("list", "set", Lane::Value, "A", "core-check-calls-910", false),
+    ("list", "clear", Lane::Value, "A", "core-check-calls-910", false),
+    ("list", "append", Lane::PendingCode, "A", "core-check-calls-910", false),
+    ("map", "new", Lane::Value, "A", "core-check-callables-913", false),
+    ("map", "len", Lane::Value, "A", "core-check-callables-913", false),
+    ("map", "get", Lane::Value, "C", "core-check-callables-913", false),
+    ("map", "insert", Lane::Value, "C", "core-check-callables-913", false),
+    ("map", "set", Lane::Value, "C", "core-check-callables-913", false),
+    ("map", "remove", Lane::Value, "C", "core-check-callables-913", false),
+    ("option", "unwrap", Lane::Value, "A", "core-check-calls-910", false),
+    ("rc", "new", Lane::Runtime(Kernel::NewOwner(Some(Counted::Rc))), "A", "core-ops-914", false),
+    ("rc", "share", Lane::Runtime(Kernel::Share(Counted::Rc)), "A", "core-ops-914", false),
+    ("rc", "try_unwrap", Lane::Runtime(Kernel::TryUnwrap(Counted::Rc)), "A", "core-ops-914", false),
+    ("result", "unwrap", Lane::Value, "A", "core-check-calls-910", false),
+    ("seq", "len", Lane::Language, "A", "core-check-895", false),
+    ("seq", "nth", Lane::Language, "A", "core-check-895", false),
+    ("seq", "index_in", Lane::Language, "A", "core-check-895", false),
+    ("seq", "get", Lane::Language, "A", "core-check-895", false),
+    ("span", "builder", Lane::Language, "A", "core-check-895", false),
+    ("span", "with_capacity", Lane::Language, "A", "core-check-895", false),
+    ("span", "push", Lane::Language, "A", "core-check-895", false),
+    ("span", "finish", Lane::Language, "A", "core-check-895", false),
+    ("span", "len", Lane::Language, "A", "core-check-895", false),
+    ("span", "get", Lane::Language, "A", "core-check-895", false),
+    ("stderr", "write", Lane::Runtime(Kernel::Stream(HostOp::Stderr)), "B", "core-ops-914", false),
+    ("stdout", "write", Lane::Runtime(Kernel::Stream(HostOp::Stdout)), "B", "core-ops-914", false),
+    ("string", "new", Lane::PendingCode, "A", "core-ops-914", false),
+    ("string", "as_bytes", Lane::PendingCode, "A", "core-ops-914", false),
+    ("string", "slice", Lane::PendingCode, "C", "std-seed-api-889", false),
+    ("string", "byte_len", Lane::PendingCode, "A", "core-ops-914", false),
+    ("string", "push", Lane::PendingCode, "A", "core-ops-914", false),
+    ("string", "reserve", Lane::PendingCode, "A", "core-ops-914", false),
+    ("string", "of_bytes", Lane::Value, "A", "core-ops-914", true),
+    ("string", "to_bytes", Lane::Value, "A", "core-ops-914", true),
+    ("string", "view_string", Lane::Value, "A", "core-ops-914", true),
+    ("task", "spawn", Lane::Runtime(Kernel::Spawn), "B", "core-ops-914", false),
+    ("task", "join", Lane::Runtime(Kernel::Join), "B", "core-ops-914", false),
+    ("task", "cancel", Lane::Runtime(Kernel::Cancel), "B", "core-ops-914", false),
+    ("task", "check_cancel", Lane::Runtime(Kernel::CheckCancel), "B", "core-ops-914", false),
+    ("text", "len", Lane::Language, "A", "core-check-895", false),
+    ("text", "as_string", Lane::Language, "A", "core-check-895", false),
+    ("text", "copy_in", Lane::Language, "A", "core-check-895", false),
+    ("unique", "new", Lane::Runtime(Kernel::Blocked("Unique runtime identity binding is not specified (FOR FORM)")), "B", "core-ops-914", false),
+    ("writer", "append", Lane::Language, "A", "core-check-895", false),
+    ("writer", "scalar", Lane::Language, "A", "core-check-895", false),
+    ("writer", "push", Lane::Language, "A", "core-check-895", false),
+    ("writer", "close", Lane::Language, "A", "core-check-895", false),
+    ("writer", "completed", Lane::Language, "A", "core-check-895", false),
+    ("writer", "last_completed", Lane::Language, "A", "core-check-895", false),
 }
 
 pub(crate) fn bind(fns: &crate::Rows<FnDecl>) -> Vec<Option<Kernel>> {
@@ -207,12 +214,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<Option<ValueId>> {
         let kernel = self.p.core_operations[f]?;
-        Some(self.runtime_kernel(kernel, types, vals, result, n))
+        Some(self.runtime_kernel(kernel, f, types, vals, result, n))
     }
 
     fn runtime_kernel(
         &mut self,
         kernel: Kernel,
+        f: usize,
         types: &[TyId],
         vals: &[Option<ValueId>],
         result: TyId,
@@ -228,6 +236,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 .map(|values| values[0]),
             Kernel::ArgsGet => self.runtime_args_get(vals, result, n),
             Kernel::Stream(op) => self.runtime_stream(op, vals, result, n),
+            Kernel::Host(op) => self.runtime_host(op, f, vals, result, n),
             Kernel::Blocked(what) => {
                 self.gap(n, what);
                 None
@@ -827,6 +836,25 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
         .filter(|f| f.path.package_is("core", "1"))
         .map(|f| (f.path.0.modules[0].as_str(), f.path.0.name.as_str()))
         .collect();
+    for entry in OPERATIONS {
+        assert!(matches!(entry.class, "A" | "B" | "C"));
+        assert!(matches!(
+            entry.owner,
+            "core-ops-914"
+                | "core-check-index-912"
+                | "core-check-calls-910"
+                | "core-check-895"
+                | "core-check-callables-913"
+                | "std-seed-api-889"
+        ));
+        if entry.private {
+            assert!(
+                entry.module == "string"
+                    && matches!(entry.name, "of_bytes" | "to_bytes" | "view_string")
+                    || entry.module == "map"
+            );
+        }
+    }
     let recorded: BTreeSet<_> = OPERATIONS.iter().map(|e| (e.module, e.name)).collect();
     assert_eq!(
         recorded.len(),
@@ -1237,5 +1265,90 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         self.jump(join, &[], n);
         self.start(join);
+    }
+}
+
+impl<'c, 'a> Cx<'c, 'a, '_> {
+    fn runtime_host(
+        &mut self,
+        op: HostOp,
+        f: usize,
+        vals: &[Option<ValueId>],
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let u64t = Ty::Scalar(Scalar::U64);
+        let file = matches!(op, HostOp::Read | HostOp::Close);
+        // HostFile's entire carrier is the opaque u64 key, not provider metadata.
+        let handle = if file {
+            let at = self.address(AddressBase::Value(vals[0]?), &[], PlaceTy::Value(u64t), n);
+            self.read_bits(at, u64t, n)
+        } else {
+            vals[0]?
+        };
+        let mut args = [Arg::Value(handle); 3];
+        let len = match op {
+            HostOp::Open => {
+                args[1] = Arg::Value(vals[1]?);
+                let ty = self.p.fns[f].params[2].ty;
+                let id = self.runtime_type(ty, n)?;
+                let at = self.address(AddressBase::Value(vals[2]?), &[], PlaceTy::Declared(id), n);
+                let tag = self.value(Ty::Scalar(Scalar::U32));
+                self.inst(
+                    Inst::Case {
+                        result: tag,
+                        address: at,
+                    },
+                    n,
+                );
+                let mode = self.value(Ty::Scalar(Scalar::U8));
+                self.inst(
+                    Inst::Convert {
+                        result: mode,
+                        flag: None,
+                        operand: tag,
+                        mode: ConvertMode::Truncate,
+                    },
+                    n,
+                );
+                args[2] = Arg::Value(mode);
+                3
+            }
+            HostOp::Read => {
+                args[1] = Arg::Value(vals[1]?);
+                2
+            }
+            _ => 1,
+        };
+        if op == HostOp::Close {
+            // Explicit CLOSE consumes on error and pre-issue cancellation too.
+            // Its failure cleanup must not close the same key a second time.
+            self.consume(vals[0], n);
+        }
+        let [value, error, code, _] = self.runtime_row(RtOp::Host(op), &args[..len], n)?;
+        let ok = self.runtime_compare(Ty::Scalar(Scalar::U8), error, 0, n)?;
+        self.runtime_result(
+            result,
+            ok,
+            n,
+            |cx, to, ty| match op {
+                HostOp::Open => {
+                    if let Some(to) =
+                        cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], ty, n)
+                    {
+                        cx.runtime_store(to, &[], u64t, value, n);
+                    }
+                }
+                HostOp::Read => cx.runtime_case_payload(to, 0, ty, Some(value), n),
+                _ => {}
+            },
+            |cx, to, ty| {
+                if let Some(to) =
+                    cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], ty, n)
+                {
+                    cx.runtime_io_error(to, error, code, n);
+                }
+            },
+        )
     }
 }

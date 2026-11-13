@@ -184,3 +184,38 @@ fn stream_operations_cranelift() { stream_operations(Backend::Cranelift); }
 #[test]
 #[ignore = "explicit native integration target"]
 fn stream_operations_llvm() { stream_operations(Backend::Llvm); }
+
+fn host_operations(backend: Backend) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (name, expected_exit) in [("host-read",0), ("host-close-cancel",0)] {
+        let dir = tempfile::tempdir().unwrap();
+        let grant = dir.path().join("grant");
+        std::fs::create_dir(&grant).unwrap();
+        if name=="host-read" || name=="host-close-cancel" { std::fs::write(grant.join("input"), b"hello").unwrap(); }
+        let source = std::fs::read_to_string(root.join(format!("core/front/runtime/{name}.hirsel"))).unwrap();
+        let mut request = source_request(&source, dir.path());
+        request.inputs.packages[1] = PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+        let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
+        let entry = DefPath::from_full("app@1/main/main").unwrap();
+        let options = NativeOptions { backend, optimize:false, target:TARGET.into(),
+            runtime:root.join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
+            include:root.join("crates/hirsel-core-rt/include"),
+            cc:PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
+            store:dir.path().join("native"), output:dir.path().join("program"), root_limit:1_048_576,
+            instance_limit:64, directories:vec![grant.to_str().unwrap().into()], grant_mask:(1<<2)|(1<<9) };
+        let built = product.build(&entry, &options).unwrap();
+        let output = Command::new(built.executable).output().unwrap();
+        assert_eq!(output.status.code(),Some(expected_exit),"{name}: {:?}",String::from_utf8_lossy(&output.stderr));
+        assert!(output.stdout.is_empty(),"{name}");
+        if expected_exit==0 { assert!(output.stderr.is_empty(),"{name}: {:?}",String::from_utf8_lossy(&output.stderr)); }
+        else { assert!(output.stderr.starts_with(b"Bounds"),"{name}: {:?}",String::from_utf8_lossy(&output.stderr)); }
+        if name=="host-read" || name=="host-close-cancel" { assert_eq!(std::fs::read(grant.join("input")).unwrap(),b"hello"); }
+        else { assert_eq!(std::fs::read_dir(&grant).unwrap().count(),0,"{name}"); }
+    }
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn host_operations_cranelift() { host_operations(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn host_operations_llvm() { host_operations(Backend::Llvm); }

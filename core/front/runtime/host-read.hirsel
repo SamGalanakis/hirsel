@@ -1,0 +1,19 @@
+// Native oracle: input contains hello; read appends only into spare capacity.
+pub fn main(d: Dir) -> Result[(), Exit] {
+    match host.open(d, "missing", Read) { Error(NotFound) => {}, Error(Denied) => return Error(Exit(status: 11)), Error(Exists) => return Error(Exit(status: 12)), Error(Closed) => return Error(Exit(status: 13)), Error(Other(code)) => return Error(Exit(status: int.truncate(code))), Ok(_) => return Error(Exit(status: 1)) }
+    match host.open(d, "../escape", Read) { Error(Denied) => {}, _ => return Error(Exit(status: 2)) }
+    let mut f = result.unwrap(host.open(d, "input", Read))
+    let mut buf: Bytes = b""
+    if result.unwrap(host.read(mut f, mut buf)) != 0u64 { return Error(Exit(status: 3)) }
+    buf = result.unwrap(list.with_capacity(5))
+    if result.unwrap(host.read(mut f, mut buf)) != 5u64 || list.len(buf) != 5u64 { return Error(Exit(status: 4)) }
+    if buf[0] != b'h' || buf[1] != b'e' || buf[2] != b'l' || buf[3] != b'l' || buf[4] != b'o' { return Error(Exit(status: 5)) }
+    if result.unwrap(host.read(mut f, mut buf)) != 0u64 { return Error(Exit(status: 6)) }
+    result.unwrap(host.close(take f))
+    // A file opened only for writing produces Closed(EBADF) on read.
+    let mut writer = result.unwrap(host.open(d, "output", Write))
+    let mut other: Bytes = result.unwrap(list.with_capacity(1))
+    match host.read(mut writer, mut other) { Error(Closed) => {}, _ => return Error(Exit(status: 7)) }
+    result.unwrap(host.close(take writer))
+    Ok(())
+}

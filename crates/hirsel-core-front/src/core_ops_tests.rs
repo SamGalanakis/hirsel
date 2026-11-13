@@ -277,3 +277,39 @@ fn stream_rows_write_literal_and_argument_views_without_admission() {
     assert_eq!(run.stderr, b"err");
     assert_eq!(run.used, 0);
 }
+
+#[test]
+fn host_rows_preserve_handles_result_tags_and_mutated_carriers() {
+    let source = r#"fn f(d:Dir) -> u64 waits {
+        match host.open(d,"missing",Read) { Error(NotFound) => {}, _ => return 1u64 }
+        let file = result.unwrap(host.open(d,"file",CreateNew));
+        match host.open(d,"file",CreateNew) { Error(Exists) => {}, _ => return 2u64 }
+        result.unwrap(host.close(take file));
+        let mut reader = result.unwrap(host.open(d,"file",Read));
+        let mut b:Bytes = result.unwrap(list.with_capacity(4));
+        if result.unwrap(host.read(mut reader,mut b)) != 0u64 || list.len(b)!=0u64 { return 3u64 }
+        result.unwrap(host.close(take reader));
+        42u64
+    }"#;
+    let (index, modules) = canonical(source);
+    let p = Program::declare(&index, &modules);
+    assert!(p.refusals.is_empty(), "{:?}", p.refusals);
+    let mut emitter = Emitter::new();
+    let f = p
+        .fns
+        .iter()
+        .position(|fd| fd.path.0.package.name == "app")
+        .unwrap();
+    let check = p.check_lower(f, &mut emitter);
+    assert!(
+        check.refusals.is_empty() && check.gaps.is_empty(),
+        "{check:?}"
+    );
+    wf::module(&emitter.module).unwrap();
+    let run = eval::run(&emitter.module, check.function.unwrap(), &[0], 8);
+    assert_eq!(run.outcome, eval::Outcome::Returned(vec![42]));
+    assert_eq!(
+        run.used, 0,
+        "file handles admit nothing; the four-byte buffer is refunded"
+    );
+}

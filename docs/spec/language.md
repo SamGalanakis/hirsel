@@ -153,13 +153,35 @@ are in [OWN-3](ownership.md#own-3-kinds).
 ### LANG-11: Typing is local
 
 Types are checked bidirectionally within one body: an expression is checked against an
-expected type where one exists, and its type is synthesised otherwise. The expected type
-reaches a block's last expression, each `if` and `match` arm, each `break` value of a loop
-and a closure's result; an `if` without `else` has type unit, and an arm of type `Never`
-constrains nothing. An expression whose type, after the conversions below, is not its
+expected type where one exists, and its type is synthesised otherwise. These are the
+**sources of an expected type**, and nothing else is one: no later use, later operand, later
+arm or exit gives an expression its type.
+
+- a `let` with a written type: its initializer;
+- a call's parameter types and a constructor's declared field types, with what is fixed so
+  far filled in, in the order below: each argument or field;
+- the declared type of the place `q` in `q = e` ([OWN-12](ownership.md#own-12-assignment)):
+  `e`; a compound assignment `q op= e` types as `q op e`;
+- the function's declared result type: each `return e` and the body's tail; a closure's
+  result type, written or expected: its body's tail;
+- the expected type of a block: its last expression; of an `if` or `match`: each branch or
+  arm; of a loop: each `break` value;
+- with none of those, the type of the first branch, arm or `break` value in source order
+  whose type is not `Never`: every later one, so `if c { Some(1u64) } else { None }` types;
+- a binary operator's left operand: its right operand; a literal operand takes the type of
+  the other operand ([LANG-21](#lang-21-operators)); the expected type of a unary `-` or
+  `~`: its operand;
+- the expected type `T` of `e?`: `e`'s payload, and nothing else of `e`
+  ([LANG-18](#lang-18-errors));
+- the expected type of a tuple or an `Inline` array ([SEM-9](semantics.md#sem-9-inline-arrays)):
+  each component or element;
+- `bool` for a condition, a guard and each operand of `!`, `&&` and `||`; `u64` for an index.
+
+An `if` without `else` has type unit, and an arm of type `Never` constrains nothing. An
+expression whose type, after the conversions below, is not its
 expected type is refused, at the innermost expression the expected type reached: in `if c
-{ x } else { 0 }` checked against `u16` with `x: u8`, at `x`. This one rule covers a body
-and its result type, an arm, a `let` with a written type, an argument and a `break` value.
+{ x } else { 0 }` checked against `u16` with `x: u8`, at `x`. This one rule covers every
+source above.
 A call has exactly one argument per parameter, in order; a missing argument is refused at
 the call's closing parenthesis, and an extra one at the first extra argument. A call's
 type parameters and regions are found in one forward visit of that call, in this order:
@@ -192,6 +214,15 @@ fn f() -> u64 { let x: u64 = 7; x }
 ```
 ```hirsel
 fn f() -> u64 { let x = 7; x }                            // refused: LANG-11, 7 has no expected type
+```
+```hirsel
+type Slot { len: u32 }
+fn set(mut s: Slot, n: u64) { s.len = option.unwrap(int.try_narrow(n)) }
+fn pick(c: bool) -> u64 { let o = if c { Some(1u64) } else { None }; option.unwrap(take o) }
+```
+```hirsel
+fn pick(c: bool) -> u64 { let o = if c { None } else { Some(1u64) }; option.unwrap(take o) }
+                                                          // refused: LANG-12, at None: T is open
 ```
 ```hirsel
 fn f(c: bool, x: u8) -> u16 { if c { x } else { 0 } }     // refused: LANG-11, at x: u8 is not u16

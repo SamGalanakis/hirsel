@@ -141,3 +141,34 @@ fn wrapped_front_growth() -> u64 {
     while deque.len(d) > 0 { n = n * 10 + option.unwrap(deque.pop_back(mut d)) }
     n
 }
+
+// Logical element charges from MEM-24's variant tag plus maximum payload.
+// These also expose the Option ring's representation cost, independently of growth slack.
+// expect: run slot_bytes_u64() = 16
+fn slot_bytes_u64() -> u64 {
+    let r = bound bytes 0 {
+        let xs: Result[List[Option[u64]], Capacity] = list.with_capacity(64)
+        xs
+    }
+    match r { Ok(Error(c)) => c.requested / 64, _ => 99 }
+}
+
+// expect: run slot_bytes_string() = 32
+fn slot_bytes_string() -> u64 {
+    let r = bound bytes 0 {
+        let xs: Result[List[Option[String]], Capacity] = list.with_capacity(64)
+        xs
+    }
+    match r { Ok(Error(c)) => c.requested / 64, _ => 99 }
+}
+
+type Triple { a: u64, b: u64, c: u64 }
+
+// expect: run slot_bytes_record24() = 32
+fn slot_bytes_record24() -> u64 {
+    let r = bound bytes 0 {
+        let xs: Result[List[Option[Triple]], Capacity] = list.with_capacity(64)
+        xs
+    }
+    match r { Ok(Error(c)) => c.requested / 64, _ => 99 }
+}

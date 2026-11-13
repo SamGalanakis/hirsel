@@ -1,0 +1,2 @@
+// expect: refuse LANG-11 at 2:25
+fn f() { let xs = [1u8, 2] }

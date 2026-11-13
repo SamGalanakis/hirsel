@@ -278,11 +278,12 @@ impl<'c, 'a> Cx<'c, 'a> {
                 let Some(mut at) = self.place(c[0])? else {
                     return Ok(None);
                 };
-                if matches!(self.t.kind(at.ty), TyKind::View(_)) {
-                    self.gap(n, "indexing through a view is not built");
-                    return Err(());
-                }
-                let elem = match self.t.kind(at.ty).clone() {
+                let (collection, viewed) = match self.t.kind(at.ty) {
+                    TyKind::View(x) => (*x, true),
+                    _ => (at.ty, false),
+                };
+                let elem = match self.t.kind(collection) {
+                    TyKind::Array(elem, _) => *elem,
                     TyKind::Adt(d, args) if self.p.decls[d.index()].role == Some(Role::List) => {
                         args[0]
                     }
@@ -291,16 +292,21 @@ impl<'c, 'a> Cx<'c, 'a> {
                         return Err(());
                     }
                 };
-                // Index operands are evaluated before places are compared (OWN-9).
-                let (_, _) = self.expr(c[1], expect(scalar(Scalar::U64)));
+                // Index operands are evaluated once, before places are compared (OWN-9).
+                let (_, value) = self.expr(c[1], expect(scalar(Scalar::U64)));
                 let (s, l) = (at.place.start as usize, at.place.len as usize);
                 if s + l != self.steps.len() {
                     self.steps.extend_from_within(s..s + l);
                     at.place.start = (self.steps.len() - l) as u32;
                 }
-                self.steps.push(PStep::Any);
+                self.steps.push(PStep::Index { collection, value });
                 at.place.len += 1;
-                at.ty = elem;
+                at.shared |= viewed;
+                at.ty = if viewed && !self.copies(elem) {
+                    self.t.mk(TyKind::View(elem))
+                } else {
+                    elem
+                };
                 Ok(Some(at))
             }
             _ => Ok(None),
@@ -421,41 +427,235 @@ impl<'c, 'a> Cx<'c, 'a> {
     }
     /// The address of field place `at` (a local and field steps) and how its value is
     /// carried; a local held as a place is its base.
-    fn field_address(&mut self, at: At, n: NodeId) -> Option<(AddressId, Rep)> {
+    pub(super) fn field_address(&mut self, at: At, n: NodeId) -> Option<(AddressId, Rep)> {
         let var = self.var(at.place.slot);
-        let base = match (var.binding, self.rep(var.ty)) {
-            // A pointer names a typed place only through an address with no steps.
+        let mut address = match (var.binding, self.rep(var.ty)) {
             (Binding::Value(Some(v)), Ok(Rep::Place(id))) => {
-                let whole = PlaceTy::Declared(id);
-                AddressBase::Address(self.address(AddressBase::Value(v), &[], whole, n))
+                self.address(AddressBase::Value(v), &[], PlaceTy::Declared(id), n)
             }
-            (Binding::Slot(Some(a)), _) => AddressBase::Address(a),
+            (Binding::Slot(Some(a)), _) => a,
             _ => return None,
         };
-        let (s, l) = (at.place.start as usize, at.place.len as usize);
-        let mut steps = Vec::with_capacity(l);
-        for &st in &self.steps[s..s + l] {
-            match st {
-                PStep::Field(i) => steps.push(Step::Field(i)),
-                _ => {
-                    self.gap(n, "index places are not built");
-                    return None;
+        let mut ty = var.ty;
+        for k in at.place.start..at.place.start + at.place.len {
+            match self.steps[k as usize] {
+                PStep::Field(i) => {
+                    ty = self.field_ty(ty, i)?;
+                    let place = self.place_ty(ty, n)?;
+                    address =
+                        self.address(AddressBase::Address(address), &[Step::Field(i)], place, n);
+                }
+                PStep::Index { collection, value } => {
+                    let value = value?;
+                    ty = match self.t.kind(collection) {
+                        TyKind::Array(elem, _) => *elem,
+                        TyKind::Adt(_, args) => args[0],
+                        _ => unreachable!(),
+                    };
+                    let place = self.place_ty(ty, n)?;
+                    address = match self.t.kind(collection) {
+                        TyKind::Array(..) => self.address(
+                            AddressBase::Address(address),
+                            &[Step::Field(0), Step::Element(value)],
+                            place,
+                            n,
+                        ),
+                        _ => {
+                            self.gap(n, "list index emission is not built");
+                            return None;
+                        }
+                    };
+                }
+                PStep::Any => unreachable!("payload overlap marker is not an emitted place"),
+            }
+            if let Some(place @ PlaceTy::Declared(_)) = self.place_ty(ty, n) {
+                let pointer = self.pointer(address, n);
+                address = self.address(AddressBase::Value(pointer), &[], place, n);
+            }
+        }
+        Some((address, self.rep(at.ty).ok()?))
+    }
+    fn field_ty(&mut self, ty: TyId, i: u32) -> Option<TyId> {
+        let ty = match self.t.kind(ty) {
+            TyKind::View(x) => *x,
+            _ => ty,
+        };
+        match self.t.kind(ty).clone() {
+            TyKind::Adt(d, args) => match &self.p.decls[d.index()].body {
+                DeclBody::Record(fs) => Some(subst(&mut self.t, fs[i as usize].ty, &args)),
+                _ => None,
+            },
+            TyKind::Tuple(xs) => Some(xs[i as usize]),
+            _ => None,
+        }
+    }
+    pub(super) fn place_ty(&mut self, ty: TyId, n: NodeId) -> Option<PlaceTy> {
+        match self.rep(ty) {
+            Ok(Rep::Scalar(t)) => Some(PlaceTy::Value(t)),
+            Ok(Rep::Place(id)) => Some(PlaceTy::Declared(id)),
+            Ok(Rep::None) if ty == UNIT => self
+                .e
+                .type_row(self.p, &mut self.t, ty)
+                .map(PlaceTy::Declared),
+            Ok(Rep::None) => None,
+            Err(what) => {
+                self.gap(n, what);
+                None
+            }
+        }
+    }
+
+    /// SEM-9: array elements are evaluated left to right; a repeat evaluates once,
+    /// including a zero-length repeat. The expected length is part of its type.
+    pub(super) fn array(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
+        let children = self.kids(n);
+        let repeat = self.kind(n) == NodeKind::RepeatArray;
+        let expected = want.and_then(|w| match self.t.kind(w.ty) {
+            TyKind::Array(elem, count) => Some((w.ty, *elem, *count)),
+            _ => None,
+        });
+        let count = if repeat {
+            let Some(Num::Int(count)) = self.fold(children[1], Scalar::U64, true) else {
+                return (ERROR, None);
+            };
+            count as u64
+        } else {
+            children.len() as u64
+        };
+        if let Some((_, _, required)) = expected
+            && count != required
+        {
+            self.refuse(
+                "LANG-11",
+                n,
+                "the array length differs from its expected type",
+            );
+            return (ERROR, None);
+        }
+        if children.is_empty() && expected.is_none() {
+            self.refuse("LANG-11", n, "an empty array needs an expected type");
+            return (ERROR, None);
+        }
+        let mut elem = expected.map(|(_, elem, _)| elem);
+        let mut result = expected.map(|(ty, _, _)| ty);
+        let mut to = None;
+        for (i, &child) in children[..if repeat { 1 } else { children.len() }]
+            .iter()
+            .enumerate()
+        {
+            let (ty, value) = self.expr(
+                child,
+                if expected.is_some() {
+                    elem.and_then(expect)
+                } else {
+                    None
+                },
+            );
+            if expected.is_none()
+                && let Some(elem) = elem
+            {
+                self.coerce(
+                    ty,
+                    Want {
+                        ty: elem,
+                        view: false,
+                    },
+                    child,
+                );
+            }
+            let elem = *elem.get_or_insert(ty);
+            let array = *result.get_or_insert_with(|| self.t.mk(TyKind::Array(elem, count)));
+            if repeat && kind(&self.p.decls, &self.t, elem, &self.params) != Kind::Plain {
+                self.refuse("SEM-9", child, "a repeated array element must be plain");
+            }
+            if to.is_none() {
+                to = self
+                    .place_ty(array, n)
+                    .filter(|_| self.live())
+                    .map(|p| self.new_slot(p, n));
+            }
+            if let (Some(to), Some(place), Ok(rep)) = (to, self.place_ty(elem, n), self.rep(elem)) {
+                if repeat {
+                    // A compact CFG fills the array; source length never expands the checker work.
+                    self.repeat_array(to, place, rep, value, count, n);
+                } else if let Some(index) = self.konst(Ty::Scalar(Scalar::U64), i as u64, child) {
+                    let address = self.address(
+                        AddressBase::Address(to),
+                        &[Step::Field(0), Step::Element(index)],
+                        place,
+                        child,
+                    );
+                    self.install(address, rep, value, child);
                 }
             }
         }
-        let r = match self.rep(at.ty) {
-            Ok(r) => r,
-            Err(what) => {
-                self.gap(n, what);
-                return None;
-            }
-        };
-        let ty = match r {
-            Rep::None => return None,
-            Rep::Scalar(t) => PlaceTy::Value(t),
-            Rep::Place(id) => PlaceTy::Declared(id),
-        };
-        Some((self.address(base, &steps, ty, n), r))
+        let ty = result.unwrap_or_else(|| self.t.mk(TyKind::Array(elem.unwrap(), count)));
+        if to.is_none()
+            && let Some(place) = self.place_ty(ty, n)
+            && self.live()
+        {
+            to = Some(self.new_slot(place, n));
+        }
+        (ty, to.filter(|_| self.live()).map(|a| self.pointer(a, n)))
+    }
+    fn repeat_array(
+        &mut self,
+        to: AddressId,
+        place: PlaceTy,
+        rep: Rep,
+        value: Option<ValueId>,
+        count: u64,
+        n: NodeId,
+    ) {
+        if !self.live() || count == 0 {
+            return;
+        }
+        let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n).unwrap();
+        let len = self.konst(Ty::Scalar(Scalar::U64), count, n).unwrap();
+        let one = self.konst(Ty::Scalar(Scalar::U64), 1, n).unwrap();
+        let head = self.new_block(&[Ty::Scalar(Scalar::U64)]);
+        let body = self.new_block(&[]);
+        let out = self.new_block(&[]);
+        self.jump(head, &[zero], n);
+        self.start(head);
+        let index = self.b.blocks[head.index()]
+            .params
+            .get(&self.b.pools.values)
+            .unwrap()[0];
+        let condition = self.value(Ty::Scalar(Scalar::Bool));
+        self.inst(
+            Inst::Compare {
+                result: condition,
+                op: CompareOp::Lt,
+                left: index,
+                right: len,
+            },
+            n,
+        );
+        let yes = self.edge(body, &[]);
+        let no = self.edge(out, &[]);
+        self.end(Terminator::Branch { condition, yes, no }, Some(n));
+        self.start(body);
+        let address = self.address(
+            AddressBase::Address(to),
+            &[Step::Field(0), Step::Element(index)],
+            place,
+            n,
+        );
+        self.install(address, rep, value, n);
+        let next = self.value(Ty::Scalar(Scalar::U64));
+        self.inst(
+            Inst::Binary {
+                result: next,
+                op: BinaryOp::Add,
+                left: index,
+                right: one,
+                fail: None,
+            },
+            n,
+        );
+        self.jump(head, &[next], n);
+        self.start(out);
     }
     /// The address of a used place as a pointer, for an argument passed by address.
     pub(super) fn place_ptr(&mut self, at: At, n: NodeId) -> Option<ValueId> {

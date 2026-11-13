@@ -1,0 +1,25 @@
+// expect: run unit(0) = fail Bounds
+// expect: run read(0) = 7
+// expect: run read(2) = 13
+// expect: run read(3) = fail Bounds
+// expect: run nested(1) = 19
+// expect: run update(2) = 31
+// expect: run once(0) = 12
+fn read(i: u64) -> u64 { let xs: Inline[u64, 3] = [7, 11, 13]; xs[i] }
+fn nested(i: u64) -> u64 {
+  let xs: Inline[Inline[u64, 2], 2] = [[3, 5], [17, 19]]
+  xs[i][1]
+}
+fn update(i: u64) -> u64 {
+  let mut xs: Inline[u64, 3] = [7, 11, 13]
+  xs[i] += 18
+  xs[i]
+}
+fn next(mut n: u64) -> u64 { let old = n; n += 1; old }
+fn once(i: u64) -> u64 {
+  let mut n: u64 = i
+  let xs: Inline[u64, 2] = [11, 13]
+  xs[next(mut n)] + n
+}
+
+fn unit(i: u64) { let xs: Inline[(), 0] = []; xs[i] }

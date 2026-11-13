@@ -1060,6 +1060,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                 self.halt();
                 (ERROR, None)
             }
+            NodeKind::Array | NodeKind::RepeatArray => self.array(n, want),
             NodeKind::Tuple => self.gap_ty(n, "tuples are not built"),
             NodeKind::Index | NodeKind::Projection => self.place_value(n),
             NodeKind::Try => self.try_(n, want),

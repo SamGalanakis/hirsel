@@ -214,7 +214,10 @@ impl<'c, 'a> Cx<'c, 'a> {
         self.freeze(at.place, Hold::Assign);
         let (address, emitted) = match var.binding {
             Binding::Slot(a) if at.place.len == 0 => (a, true),
-            _ => (None, false),
+            _ => match self.field_address(at, place) {
+                Some((a, _)) => (Some(a), true),
+                None => (None, false),
+            },
         };
         if !emitted && self.ir_ty(at.ty).is_some() {
             self.gap(place, "assignment to this place is not built");

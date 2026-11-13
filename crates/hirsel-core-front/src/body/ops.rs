@@ -281,7 +281,18 @@ impl<'c, 'a> Cx<'c, 'a> {
     pub(super) fn operand(&mut self, e: NodeId, hint: Option<Want>) -> (TyId, Option<ValueId>) {
         let at = match self.place(e) {
             Ok(Some(at)) if !self.copies(at.ty) => at,
-            Ok(_) => {
+            Ok(Some(at)) => {
+                // `place` already evaluated every index operand. Do not visit it again.
+                self.out.counts.nodes += 1;
+                self.use_place(at, Use::Value, e);
+                let value = self.emit_place(at, e);
+                self.synth_ty = at.ty;
+                return match self.t.kind(at.ty) {
+                    TyKind::View(x) if !self.copies(*x) => (*x, None),
+                    _ => (at.ty, value),
+                };
+            }
+            Ok(None) => {
                 let (t, v) = self.expr_hinted(e, hint);
                 return match self.t.kind(t) {
                     TyKind::View(x) if !self.copies(*x) => (*x, None),

@@ -1,0 +1,9 @@
+// expect: run repeat(9) = 18
+// expect: run zero(0) = 1
+fn next(mut n: u64) -> u64 { let old = n; n += 1; old }
+fn repeat(x: u64) -> u64 { let xs: Inline[u64, 2] = [x; 2]; xs[0] + xs[1] }
+fn zero(x: u64) -> u64 {
+  let mut n: u64 = x
+  let xs: Inline[u64, 0] = [next(mut n); 0]
+  n
+}

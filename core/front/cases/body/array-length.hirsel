@@ -1,0 +1,2 @@
+// expect: refuse LANG-11 at 2:34
+fn f() { let xs: Inline[u8, 2] = [1] }

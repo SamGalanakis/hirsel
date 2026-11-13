@@ -44,6 +44,10 @@ impl Origin {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PStep {
     Field(u32),
+    Index {
+        collection: crate::types::TyId,
+        value: Option<hirsel_core_ir::ValueId>,
+    },
     Any,
 }
 

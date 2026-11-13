@@ -1,0 +1,457 @@
+[
+  {
+    "row": "L1",
+    "message": "ranges are not built",
+    "owner": "895"
+  },
+  {
+    "row": "L2",
+    "message": "function, constant and module values are not built",
+    "owner": "895"
+  },
+  {
+    "row": "L3",
+    "message": "construction is not built",
+    "owner": "910"
+  },
+  {
+    "row": "L5",
+    "message": "non-integral literal patterns are not built",
+    "owner": "895"
+  },
+  {
+    "row": "L6",
+    "message": "this pattern form is not built",
+    "owner": "895"
+  },
+  {
+    "row": "L7",
+    "message": "this constructor pattern is not built",
+    "owner": "895"
+  },
+  {
+    "row": "L8",
+    "message": "this kind of name is not built",
+    "owner": "912"
+  },
+  {
+    "row": "L9",
+    "message": "comparison of this type is not built",
+    "owner": "912"
+  },
+  {
+    "row": "L10",
+    "message": "indexing this type is not built",
+    "owner": "912"
+  },
+  {
+    "row": "L11",
+    "message": "a view of an indexed temporary owner is not built",
+    "owner": "912"
+  },
+  {
+    "row": "L13",
+    "message": "a field of a temporary owner is not built",
+    "owner": "895"
+  },
+  {
+    "row": "L14",
+    "message": "a field of this temporary is not built",
+    "owner": "895"
+  },
+  {
+    "row": "L15",
+    "message": "field and index places are not built",
+    "owner": "895"
+  },
+  {
+    "row": "L16",
+    "message": "statement form is not built",
+    "owner": "912"
+  },
+  {
+    "row": "L17",
+    "message": "expression form is not built",
+    "owner": "895"
+  },
+  {
+    "row": "L18",
+    "message": "labelled form is not built",
+    "owner": "912"
+  },
+  {
+    "row": "L19",
+    "message": "patterns are not built",
+    "owner": "912"
+  },
+  {
+    "row": "L20",
+    "message": "assignment to this place is not built",
+    "owner": "912"
+  },
+  {
+    "row": "L21",
+    "message": "literal form is not built",
+    "owner": "895"
+  },
+  {
+    "row": "L22",
+    "message": "character literal form is not built",
+    "owner": "895"
+  },
+  {
+    "row": "L23",
+    "message": "byte literal form is not built",
+    "owner": "895"
+  },
+  {
+    "row": "L24",
+    "message": "float literal form is not built",
+    "owner": "895"
+  },
+  {
+    "row": "L25",
+    "message": "string literal form is not built",
+    "owner": "895"
+  },
+  {
+    "row": "L26",
+    "message": "byte string literal form is not built",
+    "owner": "895"
+  },
+  {
+    "row": "L27",
+    "message": "construction of this type is not built",
+    "owner": "895"
+  },
+  {
+    "row": "L28",
+    "message": "this type form is not built in bodies",
+    "owner": "895"
+  },
+  {
+    "row": "L29",
+    "message": "type form is not built",
+    "owner": "895"
+  },
+  {
+    "row": "L30",
+    "message": "this type parameter is not built",
+    "owner": "895"
+  },
+  {
+    "row": "L31",
+    "message": "generic callable types are not built",
+    "owner": "913"
+  },
+  {
+    "row": "L32",
+    "message": "inline array types are not built",
+    "owner": "895"
+  },
+  {
+    "row": "L35",
+    "message": "closure parameters require written names and types",
+    "owner": "913"
+  },
+  {
+    "row": "L36",
+    "message": "Region / Result / Capacity is not declared by core (3 messages)",
+    "owner": "895"
+  },
+  {
+    "row": "L33",
+    "message": "the core Cause declaration is not available",
+    "owner": "912"
+  },
+  {
+    "row": "C1",
+    "message": "callable payload layouts are not built",
+    "owner": "913"
+  },
+  {
+    "row": "C2",
+    "message": "function values with bytes parameters are not built",
+    "owner": "913"
+  },
+  {
+    "row": "C3",
+    "message": "scoped callable result anchors are not built",
+    "owner": "913"
+  },
+  {
+    "row": "C4",
+    "message": "marked arguments to callable values are not built",
+    "owner": "913"
+  },
+  {
+    "row": "C5",
+    "message": "invocation of this lowered callable type is not built",
+    "owner": "913"
+  },
+  {
+    "row": "C6",
+    "message": "closure parameter layout is not built",
+    "owner": "913"
+  },
+  {
+    "row": "C7",
+    "message": "captured callback descriptor substitution is not built",
+    "owner": "913"
+  },
+  {
+    "row": "C8",
+    "message": "capture descriptors in scoped aggregate fields are not built",
+    "owner": "913"
+  },
+  {
+    "row": "C9",
+    "message": "loop-carried capture descriptors are not built",
+    "owner": "912"
+  },
+  {
+    "row": "C10",
+    "message": "owning closures need Result and Capacity declarations",
+    "owner": "913"
+  },
+  {
+    "row": "C11",
+    "message": "captured formal Region anchors are not built",
+    "owner": "913"
+  },
+  {
+    "row": "C12",
+    "message": "callable kind conversions are not built",
+    "owner": "913"
+  },
+  {
+    "row": "C13",
+    "message": "a call result rooted in a Region expression is not built",
+    "owner": "910"
+  },
+  {
+    "row": "C15",
+    "message": "returning scoped capture environments is not represented",
+    "owner": "913"
+  },
+  {
+    "row": "C14",
+    "message": "view` of a value that is not a place",
+    "owner": "895"
+  },
+  {
+    "row": "M1",
+    "message": "this generic core operation is not built",
+    "owner": "895"
+  },
+  {
+    "row": "M2",
+    "message": "values of this type are not built",
+    "owner": "895"
+  },
+  {
+    "row": "M3",
+    "message": "stable values are not built",
+    "owner": "895"
+  },
+  {
+    "row": "M4",
+    "message": "stable placement is not built",
+    "owner": "895"
+  },
+  {
+    "row": "M5",
+    "message": "an optional link field is not built",
+    "owner": "895"
+  },
+  {
+    "row": "M6",
+    "message": "this compact field is not built",
+    "owner": "895"
+  },
+  {
+    "row": "M7",
+    "message": "emitting a whole sequence is not built",
+    "owner": "895"
+  },
+  {
+    "row": "M8",
+    "message": "views of completed elements in a writer are not built",
+    "owner": "895"
+  },
+  {
+    "row": "M9",
+    "message": "this writer operation is not built",
+    "owner": "895"
+  },
+  {
+    "row": "M10",
+    "message": "this field of an emitted literal is not built",
+    "owner": "895"
+  },
+  {
+    "row": "M11",
+    "message": "the private encoding of this FixedSpan element is not built",
+    "owner": "895"
+  },
+  {
+    "row": "M12",
+    "message": "span elements of this type are not built",
+    "owner": "895"
+  },
+  {
+    "row": "M13",
+    "message": "this span construction operation is not built",
+    "owner": "895"
+  },
+  {
+    "row": "M14",
+    "message": "this sequence operation is not built",
+    "owner": "895"
+  },
+  {
+    "row": "M17",
+    "message": "this constant array extent is not built",
+    "owner": "895"
+  },
+  {
+    "row": "M18",
+    "message": "resource literals are not built",
+    "owner": "895"
+  },
+  {
+    "row": "M19",
+    "message": "this field value is not built",
+    "owner": "895"
+  },
+  {
+    "row": "M20",
+    "message": "nested layout failure is not diagnosed",
+    "owner": "895"
+  },
+  {
+    "row": "M22",
+    "message": "finish_trim needs a region refund instruction (FOR FORM)",
+    "owner": "895"
+  },
+  {
+    "row": "K1",
+    "message": "callable constants are not built",
+    "owner": "895"
+  },
+  {
+    "row": "K2",
+    "message": "constant constructor inference is not built",
+    "owner": "895"
+  },
+  {
+    "row": "K3",
+    "message": "aggregate constant comparisons are not built",
+    "owner": "895"
+  },
+  {
+    "row": "S1",
+    "message": "generic scalar operations are not built",
+    "owner": "912"
+  },
+  {
+    "row": "S2",
+    "message": "this core integer operation is not built",
+    "owner": "912"
+  },
+  {
+    "row": "S3",
+    "message": "this core float operation is not built",
+    "owner": "912"
+  },
+  {
+    "row": "S4",
+    "message": "numeric argument scalar row is not built",
+    "owner": "912"
+  },
+  {
+    "row": "S5",
+    "message": "numeric Option row is not built",
+    "owner": "912"
+  },
+  {
+    "row": "S6",
+    "message": "numeric Option scalar payload is not built",
+    "owner": "912"
+  },
+  {
+    "row": "S7",
+    "message": "key payload layout is not built",
+    "owner": "913"
+  },
+  {
+    "row": "S8",
+    "message": "key recipe is not built",
+    "owner": "913"
+  },
+  {
+    "row": "S9",
+    "message": "ordering a compact recipe is not built (form883 queue item6)",
+    "owner": "913"
+  },
+  {
+    "row": "S10",
+    "message": "ordering this recipe field is not built (form883 queue item6)",
+    "owner": "913"
+  },
+  {
+    "row": "S11",
+    "message": "compact key recipe glue is not built",
+    "owner": "913"
+  },
+  {
+    "row": "S12",
+    "message": "hashing this key recipe is not built",
+    "owner": "913"
+  },
+  {
+    "row": "S13",
+    "message": "compact key recipe equality is not built",
+    "owner": "913"
+  },
+  {
+    "row": "S14",
+    "message": "comparison of this key recipe is not built",
+    "owner": "913"
+  },
+  {
+    "row": "R1",
+    "message": "shared List reserve kernel is not built",
+    "owner": "914"
+  },
+  {
+    "row": "R2",
+    "message": "shared List append kernel is not built",
+    "owner": "914"
+  },
+  {
+    "row": "R3",
+    "message": "shared List carrier kernel is not built",
+    "owner": "914"
+  },
+  {
+    "row": "R4",
+    "message": "runtime operand layout is not built",
+    "owner": "914"
+  },
+  {
+    "row": "R5",
+    "message": "a carrier view needs its value place",
+    "owner": "914"
+  },
+  {
+    "row": "R6",
+    "message": "List slice result layout is not built",
+    "owner": "910"
+  },
+  {
+    "row": "R7",
+    "message": "this argument is not built",
+    "owner": "910"
+  }
+]

@@ -113,7 +113,7 @@ pub struct Published<T> {
     provider: Arc<dyn Provider<T>>,
     cache: Sparse<T>,
     ranges: Sparse<Vec<T>>,
-    lookups: Mutex<BTreeMap<Vec<u8>, Option<u32>>>,
+    lookups: Mutex<rustc_hash::FxHashMap<Vec<u8>, Option<u32>>>,
 }
 impl<T> Published<T> {
     fn row(&self, index: usize) -> &T {

@@ -268,33 +268,35 @@ fn scoped_allocation(ctx: &mut Context) {
     }
 }
 
-fn limits(mode: &str) -> u64 {
-    if matches!(mode, "full_alloc" | "alloc_control" | "query") {
-        let mut ctx = Context::new(if mode == "full_alloc" { 1024 } else { 64 });
-        let mut sum = 0;
-        for _ in 0..COUNT {
-            let bytes = black_box(64);
-            if mode == "full_alloc" {
-                ctx.limit_enter(bytes).unwrap();
-            }
-            if mode != "query" {
-                scoped_allocation(black_box(&mut ctx));
-            }
-            sum += black_box(black_box(&mut ctx).available());
-            if mode == "full_alloc" {
-                ctx.limit_exit();
-            }
+#[inline(never)]
+fn material_scope<const BOUND: bool, const ALLOCATE: bool>() -> u64 {
+    let mut ctx = Context::new(if BOUND { 1024 } else { 64 });
+    let mut sum = 0;
+    for _ in 0..COUNT {
+        let bytes = black_box(64);
+        if BOUND {
+            ctx.limit_enter(bytes).unwrap();
         }
-        sum
-    } else if mode == "full" {
-        let mut ctx = Context::new(1024);
-        let mut sum = 0;
-        for _ in 0..COUNT {
-            ctx.limit_enter(black_box(64)).unwrap();
-            sum += black_box(black_box(&mut ctx).available());
+        if ALLOCATE {
+            scoped_allocation(black_box(&mut ctx));
+        }
+        sum += black_box(black_box(&mut ctx).available());
+        if BOUND {
             ctx.limit_exit();
         }
-        sum
+    }
+    sum
+}
+
+fn limits(mode: &str) -> u64 {
+    if mode == "full_alloc" {
+        material_scope::<true, true>()
+    } else if mode == "alloc_control" {
+        material_scope::<false, true>()
+    } else if mode == "query" {
+        material_scope::<false, false>()
+    } else if mode == "full" {
+        material_scope::<true, false>()
     } else if mode == "runtime" {
         let ctx = Context::new(1024);
         let mut sum = 0;

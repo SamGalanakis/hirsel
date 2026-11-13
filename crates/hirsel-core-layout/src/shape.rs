@@ -82,6 +82,45 @@ impl Scalar {
     }
 }
 
+/// The type of a CoreIR value: a scalar or an opaque target pointer.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum Ty {
+    Scalar(Scalar),
+    Ptr,
+}
+impl Ty {
+    pub fn int(self) -> Option<(bool, u32)> {
+        match self {
+            Ty::Scalar(s) => match s {
+                Scalar::I8 | Scalar::I16 | Scalar::I32 | Scalar::I64 => {
+                    Some((true, s.size() as u32 * 8))
+                }
+                Scalar::U8 | Scalar::U16 | Scalar::U32 | Scalar::U64 => {
+                    Some((false, s.size() as u32 * 8))
+                }
+                _ => None,
+            },
+            Ty::Ptr => None,
+        }
+    }
+    pub fn is_float(self) -> bool {
+        matches!(self, Ty::Scalar(Scalar::F32 | Scalar::F64))
+    }
+}
+
+/// How a value of a row is carried in a signature, published from the closed rule
+/// that lowers every signature (crate `hirsel-core-ir`, "Values"): `Value(t)` as the
+/// one CoreIR value `t` (a scalar, a plain `fn` or a `Writer` as `ptr`, a capability,
+/// `Args`, `Unique` or `Site` as its `u64` word); `Nothing` for unit; `Address` for
+/// every other row (passed by address, returned through `dest`). A generic instance's
+/// signature reads it for each substituted row, so it never classifies a row itself.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum Carried {
+    Address,
+    Value(Ty),
+    Nothing,
+}
+
 /// The width `W` of a compact declaration (MEM-9): the blob cap is `2^W - 1`
 /// bytes and every stored length, extent, offset and link uses `W` bytes.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -222,6 +261,8 @@ pub enum Body {
 pub struct Shape {
     pub name: String,
     pub repr: Repr,
+    /// How a signature carries a value of this row (see [`Carried`]).
+    pub carried: Carried,
     pub body: Body,
     /// A resource's finalizer (FAIL-11), called with the value's address.
     pub finalizer: Option<FuncRef>,

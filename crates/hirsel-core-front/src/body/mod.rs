@@ -31,7 +31,9 @@ use hirsel_core_ir::{
     FuncId, Function, Inst, InstanceId, InstanceKey, ItemId, Module, Param, PlaceTy, PoolRange,
     ReadMode, SigId, Signature, SlotId, Step, Terminator, Ty, TypeId, UnaryOp, ValueId,
 };
-use hirsel_core_layout::{FieldTy, Handle, Layout, Recipe, Repr as LRepr, Scalar, TypeRef};
+use hirsel_core_layout::{
+    Carried, FieldTy, Handle, Layout, Recipe, Repr as LRepr, Scalar, TypeRef,
+};
 use hirsel_core_resolve::{Refusal, Target};
 use hirsel_core_syntax::{Item, NodeId, NodeKind, Span, TokenKind, byte_value, character_value};
 use rustc_hash::FxHashMap as HashMap;
@@ -422,28 +424,6 @@ impl Emitter {
     fn rep(&mut self, p: &Program, t: &mut impl TyRead, ty: TyId) -> Result<Rep, &'static str> {
         crate::cost_scope!("phase", "layout/drop recipes");
         match t.kind(ty) {
-            TyKind::Scalar(s) => return Ok(Rep::Scalar(Ty::Scalar(*s))),
-            TyKind::Fn(_, _, _, Callable::Plain) => return Ok(Rep::Scalar(Ty::Ptr)),
-            TyKind::Unit | TyKind::Never | TyKind::Error => return Ok(Rep::None),
-            // A Region value is the region's pointer, scoped and never cleaned by its
-            // holder: the block that opened it closes it (MEM-5, MEM-7).
-            TyKind::Adt(d, _) if p.decls[d.index()].role == Some(Role::Region) => {
-                return Ok(Rep::Scalar(Ty::Ptr));
-            }
-            // A writer is the pointer to its frame in the build (MEM-4), scoped and
-            // never cleaned.
-            TyKind::Adt(d, _) if p.decls[d.index()].role == Some(Role::Writer) => {
-                return Ok(Rep::Scalar(Ty::Ptr));
-            }
-            // A capability or `Args` is a provider handle, plain and never cleaned by
-            // the program (FORM e68de117); `Unique` and `Site` are one plain word
-            // (core.md "Core types").
-            TyKind::Adt(d, _)
-                if crate::layout::handle(&p.decls[d.index()])
-                    || matches!(p.decls[d.index()].role, Some(Role::Unique | Role::Site)) =>
-            {
-                return Ok(Rep::Scalar(Ty::Scalar(Scalar::U64)));
-            }
             // A compact value is its locator, a view of its bytes in a blob (MEM-5, MEM-9):
             // held as a `Text` is, `{blob, offset}`.
             TyKind::Adt(d, _)
@@ -456,25 +436,18 @@ impl Emitter {
                 let ty = t.mk(TyKind::Adt(text, vec![]));
                 return self.rep(p, t, ty);
             }
-            TyKind::Tuple(_)
-            | TyKind::Array(..)
-            | TyKind::Adt(..)
-            | TyKind::Fn(..)
-            | TyKind::Param(_) => {}
-            // A value anchored in a region is held like its type; the anchor only
-            // bounds where it may go (MEM-6).
-            TyKind::Anchored(x, _) => {
+            TyKind::Anchored(x, _) | TyKind::View(x) => {
                 let x = *x;
                 return self.rep(p, t, x);
             }
-            // A view is carried exactly as its type: the type's own bytes, a scalar or
-            // a place, a copy nobody cleans (FORM #56, OWN-8). A locator is already a
-            // view of its blob (MEM-5).
-            TyKind::View(x) => {
-                let x = *x;
-                return self.rep(p, t, x);
-            }
-            _ => return Err("values of this type are not built"),
+            _ => {}
+        }
+        // The one rule every signature follows, also published on the row (FORM #64).
+        match crate::layout::carried(&p.decls, t, ty) {
+            Some(Carried::Value(v)) => return Ok(Rep::Scalar(v)),
+            Some(Carried::Nothing) => return Ok(Rep::None),
+            Some(Carried::Address) => {}
+            None => return Err("values of this type are not built"),
         }
         let mark = self.module.types.len();
         let id = self

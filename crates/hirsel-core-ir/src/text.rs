@@ -181,7 +181,8 @@ fn fields(fs: &[hirsel_core_layout::Field]) -> String {
         list(fs, |f| format!("{}: {}", f.name, field_ty(&f.ty)))
     )
 }
-/// `own "Pair" { a: u64 }`, `resource "Temp" drop f3 grant 64 { .. }`,
+/// `own "Pair" { a: u64 }`, `own "u64" value u64 { 0: u64 }`, `own "()" nothing { }`,
+/// `resource "Temp" drop f3 grant 64 { .. }`,
 /// `compact u32 "Row" { .. }`, `own "Opt" | None { } | Some { v: u64 }`.
 fn shape(s: &Shape) -> String {
     use hirsel_core_layout::{Body as B, Repr, Width};
@@ -200,6 +201,11 @@ fn shape(s: &Shape) -> String {
         ),
     };
     let mut out = format!("{repr} {}", quote(&s.name));
+    match s.carried {
+        Carried::Address => {}
+        Carried::Value(t) => out += &format!(" value {}", ty(t)),
+        Carried::Nothing => out += " nothing",
+    }
     if let Some(f) = s.finalizer {
         out += &format!(" drop f{}", f.0);
     }
@@ -923,6 +929,13 @@ impl<'a> Line<'a> {
             r => return Err(format!("unknown representation `{r}`")),
         };
         let name = self.string()?;
+        let carried = if self.eat("value") {
+            Carried::Value(self.ty()?)
+        } else if self.eat("nothing") {
+            Carried::Nothing
+        } else {
+            Carried::Address
+        };
         let finalizer = if self.eat("drop") {
             Some(FuncRef(self.id('f')?))
         } else {
@@ -945,6 +958,7 @@ impl<'a> Line<'a> {
         Ok(Shape {
             name,
             repr,
+            carried,
             body,
             finalizer,
             grant,

@@ -25,6 +25,7 @@ const SAMPLES: &[(&str, &str)] = &[
     ("strings", include_str!("../samples/strings.core")),
     ("providers", include_str!("../samples/providers.core")),
     ("stable-keys", include_str!("../samples/stable-keys.core")),
+    ("scalar-rows", include_str!("../samples/scalar-rows.core")),
 ];
 
 fn load(name: &str, text: &str) -> Module {

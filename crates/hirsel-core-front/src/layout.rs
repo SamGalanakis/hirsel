@@ -8,8 +8,8 @@ use crate::Program;
 use crate::decls::{DeclBody, Repr, Role};
 use crate::types::*;
 use hirsel_core_layout::{
-    Body, Case, Field, FieldTy, FuncRef, Handle, LayoutError, Repr as LRepr, Scalar, Shape,
-    TypeRef, compute,
+    Body, Carried, Case, Field, FieldTy, FuncRef, Handle, LayoutError, Repr as LRepr, Scalar,
+    Shape, Ty, TypeRef, compute,
 };
 use rustc_hash::FxHashMap as HashMap;
 
@@ -47,6 +47,7 @@ impl<T: TyRead> Shapes<'_, T> {
         self.shapes.push(Shape {
             name: name.clone(),
             repr: LRepr::Own,
+            carried: carried(self.decls, &*self.types, ty).unwrap_or(Carried::Address),
             body: Body::Record(vec![]),
             finalizer: None,
             grant: 0,
@@ -397,6 +398,45 @@ fn view_field(inner: FieldTy) -> FieldTy {
     }
 }
 
+/// How every signature carries a value of `ty`: the closed rule, read by the body
+/// emitter's `rep` and published on each row (FORM #64) so a generic instance's
+/// signature reads it for its substituted rows. None for a type no value is built of.
+pub(crate) fn carried(
+    decls: &crate::Rows<crate::decls::TypeDecl>,
+    types: &impl TyRead,
+    ty: TyId,
+) -> Option<Carried> {
+    Some(match types.kind(ty) {
+        TyKind::Scalar(s) => Carried::Value(Ty::Scalar(*s)),
+        TyKind::Fn(_, _, _, Callable::Plain) => Carried::Value(Ty::Ptr),
+        TyKind::Unit | TyKind::Never | TyKind::Error => Carried::Nothing,
+        // A Region value is the region's pointer, scoped and never cleaned by its
+        // holder: the block that opened it closes it (MEM-5, MEM-7). A writer is the
+        // pointer to its frame in the build (MEM-4), scoped and never cleaned.
+        TyKind::Adt(d, _) if matches!(decls[d.index()].role, Some(Role::Region | Role::Writer)) => {
+            Carried::Value(Ty::Ptr)
+        }
+        // A capability or `Args` is a provider handle, plain and never cleaned by the
+        // program (FORM e68de117); `Unique` and `Site` are one plain word (core.md
+        // "Core types").
+        TyKind::Adt(d, _)
+            if handle(&decls[d.index()])
+                || matches!(decls[d.index()].role, Some(Role::Unique | Role::Site)) =>
+        {
+            Carried::Value(Ty::Scalar(Scalar::U64))
+        }
+        // A value anchored in a region is held like its type; the anchor only bounds
+        // where it may go (MEM-6). A view is carried exactly as its type (FORM #56).
+        TyKind::Anchored(x, _) | TyKind::View(x) => return carried(decls, types, *x),
+        TyKind::Tuple(_)
+        | TyKind::Array(..)
+        | TyKind::Adt(..)
+        | TyKind::Fn(..)
+        | TyKind::Param(_) => Carried::Address,
+        _ => return None,
+    })
+}
+
 /// A capability or `Args`: a `u64` provider handle (FORM e68de117).
 pub(crate) fn handle(decl: &crate::decls::TypeDecl) -> bool {
     decl.role == Some(Role::Capability) || crate::decls::is_core_prelude(&decl.path, &["Args"])
@@ -453,6 +493,7 @@ pub(crate) fn recipes(p: &mut Program) {
                 LayoutError::Cycle { ty } => (ty, None, "inline containment cycle"),
                 LayoutError::TooLarge { ty } => (ty, None, "compact extent exceeds its width"),
                 LayoutError::Empty { ty } => (ty, None, "compact encoding has zero size"),
+                LayoutError::Carried { ty } => (ty, None, "row carried unlike its body"),
             };
             let declaration = s.decls.iter().find(|d| d.path.to_string() == *name);
             if let Some(decl) = declaration {

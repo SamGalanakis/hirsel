@@ -13,6 +13,7 @@ fn record(name: &str, repr: Repr, fields: Vec<Field>) -> Shape {
     Shape {
         name: name.into(),
         repr,
+        carried: Carried::Address,
         body: Body::Record(fields),
         finalizer: None,
         grant: 0,
@@ -22,6 +23,7 @@ fn variant(name: &str, repr: Repr, cases: Vec<(&str, Vec<Field>)>) -> Shape {
     Shape {
         name: name.into(),
         repr,
+        carried: Carried::Address,
         body: Body::Variant(
             cases
                 .into_iter()
@@ -732,4 +734,57 @@ fn a_list_of_a_zero_sized_element_has_nothing_to_clean() {
     );
     let r = compute(&[late, record("Unit", Repr::Own, vec![])]).unwrap();
     assert!(r[0].drop.is_none());
+}
+
+/// FORM #64. Bug: a row published as carried by value whose body is not that one value
+/// (two words, a narrower field, a variant, a field for `nothing`) would make a
+/// generic instance pass a place's first bytes as the value. Each such row is refused;
+/// the one-field rows that are the value, and any address row, are laid out.
+#[test]
+fn a_row_carried_unlike_its_body_is_refused() {
+    let carried = |c: Carried, mut s: Shape| {
+        s.carried = c;
+        compute(&[s])
+    };
+    let u64v = Carried::Value(Ty::Scalar(Scalar::U64));
+    let one = |t: FieldTy| record("R", Repr::Own, vec![field("x", t)]);
+    for (c, s) in [
+        (u64v, one(u(Scalar::U64))),
+        (Carried::Value(Ty::Ptr), one(FieldTy::Fn)),
+        (
+            Carried::Value(Ty::Ptr),
+            record("W", Repr::Scoped, vec![field("f", FieldTy::Borrow)]),
+        ),
+        (Carried::Nothing, record("()", Repr::Own, vec![])),
+        (Carried::Address, one(u(Scalar::U64))),
+    ] {
+        assert!(carried(c, s).is_ok(), "{c:?}");
+    }
+    let refused = [
+        (
+            u64v,
+            record(
+                "P",
+                Repr::Own,
+                vec![field("a", u(Scalar::U64)), field("b", u(Scalar::U64))],
+            ),
+        ),
+        (u64v, one(u(Scalar::U32))),
+        (
+            u64v,
+            variant(
+                "V",
+                Repr::Own,
+                vec![("A", vec![field("x", u(Scalar::U64))])],
+            ),
+        ),
+        (Carried::Value(Ty::Ptr), one(u(Scalar::U64))),
+        (Carried::Nothing, one(u(Scalar::U64))),
+    ];
+    for (c, s) in refused {
+        assert!(
+            matches!(carried(c, s), Err(LayoutError::Carried { .. })),
+            "{c:?}"
+        );
+    }
 }

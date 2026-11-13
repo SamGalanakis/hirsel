@@ -6,7 +6,9 @@
 //! one recipe so they agree). Compact types get the byte-aligned blob layout of
 //! MEM-9..12: positions are either constant or "after variable field j, plus k".
 
-use crate::shape::{Body, Field, FieldTy, FuncRef, Handle, Repr, Shape, TypeRef, Width};
+use crate::shape::{
+    Body, Carried, Field, FieldTy, FuncRef, Handle, Repr, Shape, Ty, TypeRef, Width,
+};
 
 /// Native size and alignment of a field slot of this type in a fixed layout.
 pub const POINTER: u64 = 8;
@@ -164,6 +166,8 @@ pub enum LayoutError {
     TooLarge { ty: String },
     /// A compact type that can encode to zero bytes (MEM-9).
     Empty { ty: String },
+    /// A row whose published [`Carried`] contradicts its body.
+    Carried { ty: String },
 }
 
 /// The smallest tag of u8/u16/u32 that holds `cases` ordinals.
@@ -302,9 +306,31 @@ fn done<'a>(out: &'a Computed<'_>, t: TypeRef) -> &'a Recipe {
 }
 
 fn recipe(shapes: &[Shape], shape: &Shape, out: &Computed<'_>) -> Result<Recipe, LayoutError> {
+    if !carries(shape) {
+        return Err(LayoutError::Carried {
+            ty: shape.name.clone(),
+        });
+    }
     match shape.repr {
         Repr::Compact(w) => compact(shapes, shape, w, out),
         _ => fixed(shapes, shape, out),
+    }
+}
+
+/// A row's published [`Carried`] agrees with its body: a value row is exactly one
+/// field holding that value (a `ptr` is a plain `fn` or a borrow), a row carried as
+/// nothing has no fields, and an address row may be anything.
+fn carries(shape: &Shape) -> bool {
+    let fields = match &shape.body {
+        Body::Record(fields) => fields.as_slice(),
+        Body::Variant(_) => return shape.carried == Carried::Address,
+    };
+    match (shape.carried, fields) {
+        (Carried::Address, _) => true,
+        (Carried::Nothing, []) => true,
+        (Carried::Value(Ty::Scalar(s)), [f]) => f.ty == FieldTy::Scalar(s),
+        (Carried::Value(Ty::Ptr), [f]) => matches!(f.ty, FieldTy::Fn | FieldTy::Borrow),
+        _ => false,
     }
 }
 

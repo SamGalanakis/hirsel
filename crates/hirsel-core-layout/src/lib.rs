@@ -24,7 +24,9 @@ pub use recipe::{
     LayoutError, MapEntry, POINTER, Pos, Recipe, SEQ_CARRIER, Size, Tag, compact_extent,
     compact_starts, compute, extend, field_size, map_entry, storage_free, tag_width,
 };
-pub use shape::{Body, Case, Field, FieldTy, FuncRef, Handle, Repr, Scalar, Shape, TypeRef, Width};
+pub use shape::{
+    Body, Carried, Case, Field, FieldTy, FuncRef, Handle, Repr, Scalar, Shape, Ty, TypeRef, Width,
+};
 
 #[cfg(test)]
 mod tests;

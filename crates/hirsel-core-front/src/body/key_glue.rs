@@ -146,16 +146,14 @@ pub(super) fn ensure(module: &mut Module, ty: TypeId, op: KeyOp) -> Result<FuncI
 }
 
 fn scalar_row(module: &Module, ty: TypeId) -> Option<Scalar> {
-    let ShapeBody::Record(fields) = &module.types[ty.index()].body else {
-        return None;
-    };
-    match fields.as_slice() {
-        [
-            hirsel_core_layout::Field {
-                ty: FieldTy::Scalar(s),
-                ..
-            },
-        ] if !matches!(s, Scalar::F32 | Scalar::F64) => Some(*s),
+    // The row's published carriage (FORM #64), never its field structure: a one-field
+    // record or tuple of a scalar is carried by address.
+    match module.types[ty.index()].carried {
+        hirsel_core_layout::Carried::Value(Ty::Scalar(s))
+            if !matches!(s, Scalar::F32 | Scalar::F64) =>
+        {
+            Some(s)
+        }
         _ => None,
     }
 }

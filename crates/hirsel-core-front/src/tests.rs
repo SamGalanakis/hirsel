@@ -2203,3 +2203,82 @@ pub fn written()->u64 waits
         assert_eq!(rules, want, "{}", fd.path);
     }
 }
+
+/// FORM #64: a published row says how every signature carries its values, so a generic
+/// instance's signature can read it instead of the row's fields. The bug it catches:
+/// `u64`, a one-field record and a one-element tuple all publish `{0: u64}`-like
+/// bodies, and a classifier reading the body passes the record or tuple by value.
+/// Expected: the closed rule as core.md states it (scalars, plain `fn`, capability and
+/// identity words by value; unit nothing; declared and structural types by address),
+/// and each row agrees with the closed signature `s` takes the same type with.
+#[test]
+fn rows_publish_the_closed_signature_carriage() {
+    use hirsel_core_ir::{Carried, Scalar};
+    let (index, modules) = program_inputs(
+        "type W { x: u64 }\n\
+         fn id[T](take x: T) -> T { x }\n\
+         fn s(a: u64, w: W, t: (u64,), c: char, f: f64, b: bool, u: Unique) -> u64 { a }\n\
+         fn g(a: u64, w: W, t: (u64,), u: (), c: char, f: f64, b: bool, q: Unique) -> u64 {\n\
+           let _ = id(w); let _ = id(t); let _ = id(u); let _ = id(c); let _ = id(f);\n\
+           let _ = id(b); let _ = id(q); id(a)\n\
+         }",
+    );
+    let p = Program::declare(&index, &modules);
+    assert!(p.refusals.is_empty(), "{:?}", p.refusals);
+    let mut emitter = Emitter::new();
+    let mut s = None;
+    for (f, fd) in p.fns.iter().enumerate() {
+        if fd.body.is_none() || !fd.generics.is_empty() || !fd.path.package_is("app", "1") {
+            continue;
+        }
+        let check = p.check_lower(f, &mut emitter);
+        assert!(
+            check.refusals.is_empty() && check.gaps.is_empty(),
+            "{check:?}"
+        );
+        if fd.path.0.name == "s" {
+            s = check.function;
+        }
+    }
+    let module = &emitter.module;
+    wf::module(module).unwrap();
+    let row = |name: &str| {
+        module
+            .types
+            .iter()
+            .find(|t| t.name == name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no row {name}: {:?}",
+                    module.types.iter().map(|t| &t.name).collect::<Vec<_>>()
+                )
+            })
+            .carried
+    };
+    let value = |s| Carried::Value(Ty::Scalar(s));
+    let expected = [
+        ("u64", value(Scalar::U64)),
+        ("app@1/main/W", Carried::Address),
+        ("(u64)", Carried::Address),
+        ("char", value(Scalar::Char)),
+        ("f64", value(Scalar::F64)),
+        ("bool", value(Scalar::Bool)),
+        ("core@1/core/Unique", value(Scalar::U64)),
+        ("()", Carried::Nothing),
+    ];
+    for (name, carried) in expected {
+        assert_eq!(row(name), carried, "{name}");
+    }
+    let sig = &module.signatures[module.functions[s.unwrap().index()].signature.index()];
+    let from_rows: Vec<Param> = expected
+        .iter()
+        .filter_map(|&(name, carried)| match carried {
+            Carried::Value(t) => Some(Param::Value(t)),
+            Carried::Address => Some(Param::Address(hirsel_core_ir::TypeId(
+                module.types.iter().position(|t| t.name == name).unwrap() as u32,
+            ))),
+            Carried::Nothing => None,
+        })
+        .collect();
+    assert_eq!(sig.params, from_rows);
+}

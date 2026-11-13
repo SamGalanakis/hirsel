@@ -772,6 +772,7 @@ mod tests {
         let shape = Shape {
             name: "Padded".into(),
             repr: LRepr::Own,
+            carried: hirsel_core_layout::Carried::Address,
             body: ShapeBody::Record(vec![
                 hirsel_core_layout::Field {
                     name: "a".into(),
@@ -816,6 +817,7 @@ mod tests {
         let empty = Shape {
             name: "Empty".into(),
             repr: LRepr::Own,
+            carried: hirsel_core_layout::Carried::Address,
             body: ShapeBody::Record(vec![]),
             finalizer: None,
             grant: 0,

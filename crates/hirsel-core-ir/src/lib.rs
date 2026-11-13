@@ -484,6 +484,25 @@
 //! refused by the driver as a compiler resource refusal (type-argument nesting or
 //! instance count past the compiler's resource limit), never as a language error
 //! and never by a depth rule in the language.
+//!
+//! An instance's signature is the closed signature of its substituted types (FORM
+//! #64): a parameter of a type argument is carried the way that type is carried in a
+//! closed function. Each type row publishes how ([`Carried`], text `value s`,
+//! `value ptr`, `nothing`, or nothing written for by address), written by the
+//! producer from the same rule its closed signatures use, so an importer or
+//! materialiser reads the row and never classifies a body: a scalar `u64`, the
+//! one-field record `W { x: u64 }` and the tuple `(u64,)` all have the body
+//! `{ 0: u64 }`, and only the first is `value u64`. By value: every scalar type
+//! (integers, `bool`, `char`, `f32`, `f64`) as itself; a plain function, `Region` and
+//! `Writer` as `ptr`; a capability, `Args`, `Unique` and `Site` as a `u64` word; a
+//! `View[T]` as `T`. `()`, `Never` and the error type carry nothing (the parameter is
+//! dropped). Everything else, tuples, arrays, records, variants, handles to runtime
+//! data (strings, lists, maps, boxes, tasks, channels, host files, causes) and
+//! closures, is passed by address and returned through `dest`. Layout refuses a row
+//! carried unlike its body: `value s` needs exactly one field of scalar `s`, `value
+//! ptr` one `fn` or `borrow` field, `nothing` no field, and a variant row is by
+//! address. `samples/scalar-rows.core` shows less[u64] by value beside less[W] by
+//! address.
 
 #[cfg(test)]
 hirsel_guard::install!();

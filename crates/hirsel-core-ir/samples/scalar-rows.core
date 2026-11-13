@@ -1,0 +1,71 @@
+; CoreIR sample, family: how a row is carried in a signature (crate docs, "Values"),
+; published on the row so an instance of a generic template takes the closed
+; signature of its substituted types. `u64` (t0) and the one-field record `W` (t1)
+; have the same body, one u64 field at offset 0; only the row's carriage tells them
+; apart: t0 is `value u64`, so less[u64] takes and compares two u64 values (f0);
+; t1 is carried by address, so less[W] takes two addresses and reads field 0 of each
+; (f1). The unit row t2 is carried as nothing: a param of it is dropped.
+;
+; Source (package samples@0, module rows):
+;   type W { x: u64 }
+;   fn less[T: Order](a: T, b: T) -> bool { a < b }
+;   fn two() -> (bool, bool) { (less(3, 5), less(W { x: 5 }, W { x: 3 })) }
+;
+; Behaviour, derived by hand: 3 < 5; W's order is its one field's, and 5 < 3 is false.
+; run: f2() -> true, false | used 0
+core v1
+item i0 = samples@0/rows/less
+item i1 = samples@0/rows/two
+type t0 = own "u64" value u64 { 0: u64 }
+type t1 = own "W" { x: u64 }
+type t2 = own "()" nothing { }
+sig g0 = (u64, u64) -> (bool)
+sig g1 = (&t1, &t1) -> (bool)
+sig g2 = () -> (bool, bool)
+inst n0 = samples@0/rows/less ["u64"] []
+inst n1 = samples@0/rows/less ["W"] []
+inst n2 = samples@0/rows/two [] []
+fn f0 = n0 g0 {
+b0(v0: u64, v1: u64):
+  v2: bool = lt v0, v1
+  return v2
+}
+fn f1 = n1 g1 {
+  addr a0 = v0 : t1
+  addr a1 = a0 field 0 : u64
+  addr a2 = v1 : t1
+  addr a3 = a2 field 0 : u64
+b0(v0: ptr, v1: ptr):
+  address a0
+  address a1
+  address a2
+  address a3
+  v2: u64 = read a1
+  v3: u64 = read a3
+  v4: bool = lt v2, v3
+  return v4
+}
+fn f2 = n2 g2 {
+  slot s0 = t1                         ; W { x: 5 }
+  slot s1 = t1                         ; W { x: 3 }
+  addr a0 = s0 : t1
+  addr a1 = a0 field 0 : u64
+  addr a2 = s1 : t1
+  addr a3 = a2 field 0 : u64
+b0:
+  v0: u64 = const 3
+  v1: u64 = const 5
+  v2: bool = call f0 g0 (v0, v1) at i1 50..60
+  live s0
+  live s1
+  address a0
+  address a1
+  address a2
+  address a3
+  store a1, v1
+  store a3, v0
+  v3: bool = call f1 g1 (&a0, &a2) at i1 63..94
+  dead s1
+  dead s0
+  return v2, v3
+}

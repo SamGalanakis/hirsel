@@ -9,7 +9,7 @@
 //! slots or prove liveness before emitting.
 
 use hirsel_core_ids::{ContentHash, DefPath};
-pub use hirsel_core_layout::{Scalar, Shape};
+pub use hirsel_core_layout::{Carried, Scalar, Shape, Ty};
 use std::marker::PhantomData;
 
 macro_rules! ids { ($($(#[$doc:meta])* $name:ident),* $(,)?) => {$(
@@ -98,32 +98,6 @@ impl<T> std::hash::Hash for PoolRange<T> {
 impl<T> std::fmt::Debug for PoolRange<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}..+{}", self.start, self.len)
-    }
-}
-
-/// The type of a value: a scalar or an opaque target pointer.
-#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub enum Ty {
-    Scalar(Scalar),
-    Ptr,
-}
-impl Ty {
-    pub fn int(self) -> Option<(bool, u32)> {
-        match self {
-            Ty::Scalar(s) => match s {
-                Scalar::I8 | Scalar::I16 | Scalar::I32 | Scalar::I64 => {
-                    Some((true, s.size() as u32 * 8))
-                }
-                Scalar::U8 | Scalar::U16 | Scalar::U32 | Scalar::U64 => {
-                    Some((false, s.size() as u32 * 8))
-                }
-                _ => None,
-            },
-            Ty::Ptr => None,
-        }
-    }
-    pub fn is_float(self) -> bool {
-        matches!(self, Ty::Scalar(Scalar::F32 | Scalar::F64))
     }
 }
 

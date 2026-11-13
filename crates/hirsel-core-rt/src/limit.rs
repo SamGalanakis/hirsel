@@ -93,7 +93,7 @@ impl Forest {
             id
         } else {
             let id = self.length;
-            if id % 64 == 0 {
+            if id.is_multiple_of(64) {
                 self.pages.push(Box::new(std::array::from_fn(|i| Slot {
                     local: UnsafeCell::new(LimitRecord {
                         available: 0,
@@ -424,15 +424,13 @@ impl Funding {
     pub(crate) fn admit(&self, bytes: Option<u64>) -> Result<(), Capacity> {
         self.payer.canonical().admit(bytes)
     }
+    #[cfg(test)]
     pub(crate) fn refund(&self, bytes: u64) {
         self.payer.refund(bytes);
     }
     pub fn reserve(&self, bytes: u64) -> Result<Self, Capacity> {
         self.admit(Some(bytes))?;
         Ok(self.payer.prepaid(bytes))
-    }
-    pub(crate) fn prepaid(&self, bytes: u64) -> Self {
-        self.payer.prepaid(bytes)
     }
     pub(crate) fn task_owner(&self, owner: u64) {
         let payer = self.payer.canonical();

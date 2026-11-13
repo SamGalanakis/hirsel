@@ -97,6 +97,29 @@ impl CheckRequest {
             entry: Some(DefPath::from_full("app@1/main/main").unwrap()),
         })
     }
+    /// Installed program libraries are the published root modules, not their contract-test corpus.
+    pub fn program(dir: &Path, libraries: &Path, store: &Path) -> io::Result<Self> {
+        if product::normalized(libraries)
+            != product::normalized(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core"))
+        {
+            return Self::directory(dir, libraries, store);
+        }
+        let mut app = PackageManifest::directory(dir, package("app"), false)?;
+        app.dependencies.extend([package("core"), package("std")]);
+        Ok(Self {
+            inputs: CorpusManifest {
+                core: package("core"),
+                packages: vec![
+                    PackageProduct::bundled_manifest(&libraries.join("core")),
+                    PackageProduct::bundled_std_manifest(&libraries.join("std")),
+                    app,
+                ],
+            },
+            store: store.to_owned(),
+            library: LibraryInput::Sources,
+            entry: Some(DefPath::from_full("app@1/main/main").unwrap()),
+        })
+    }
     pub fn directory(dir: &Path, libraries: &Path, store: &Path) -> io::Result<Self> {
         let core = if libraries == Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core") {
             PackageProduct::bundled_manifest(&libraries.join("core"))

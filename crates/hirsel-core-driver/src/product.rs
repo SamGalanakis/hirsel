@@ -19,10 +19,21 @@ impl PackageProduct {
         ContentHash(bundled::DIGEST)
     }
     pub fn bundled_manifest(root: &Path) -> PackageManifest {
+        Self::manifest(root, "core", bundled::SOURCES, vec![])
+    }
+    pub fn bundled_std_manifest(root: &Path) -> PackageManifest {
+        Self::manifest(root, "std", bundled::STD_SOURCES, vec![package("core")])
+    }
+    fn manifest(
+        root: &Path,
+        name: &str,
+        sources: &[(&str, &str)],
+        dependencies: Vec<PackageId>,
+    ) -> PackageManifest {
         PackageManifest {
-            package: package("core"),
-            dependencies: vec![],
-            sources: bundled::SOURCES
+            package: package(name),
+            dependencies,
+            sources: sources
                 .iter()
                 .map(|(module, _)| ModuleSource {
                     file: root.join(format!("{module}.hirsel")),
@@ -32,6 +43,9 @@ impl PackageProduct {
                 .collect(),
         }
     }
+    pub fn bundled_std_digest() -> ContentHash {
+        ContentHash(bundled::STD_DIGEST)
+    }
     pub fn default_cache() -> PathBuf {
         std::env::var_os("XDG_CACHE_HOME")
             .map(PathBuf::from)
@@ -40,7 +54,17 @@ impl PackageProduct {
             .join("hirsel/core-packages")
     }
     pub fn bundled(root: &Path, meter: &mut Meter) -> io::Result<Self> {
-        let digest = Self::bundled_digest();
+        Self::bundled_libraries(root, meter, false)
+    }
+    pub fn bundled_std(root: &Path, meter: &mut Meter) -> io::Result<Self> {
+        Self::bundled_libraries(root, meter, true)
+    }
+    fn bundled_libraries(root: &Path, meter: &mut Meter, std: bool) -> io::Result<Self> {
+        let digest = if std {
+            Self::bundled_std_digest()
+        } else {
+            Self::bundled_digest()
+        };
         let directory = cache_path(root, digest)?;
         if let Some(image) = CoreImage::open(&directory)?
             && image.source_stamp == digest
@@ -52,22 +76,31 @@ impl PackageProduct {
             });
         }
         meter.finish("package product lookup");
-        // Source extraction is paid only by toolchain production/cache rebuilding.
-        let sources = directory.join("sources");
-        std::fs::create_dir_all(&sources)?;
-        for (module, text) in bundled::SOURCES {
-            // Concurrent first users may produce the same package. A source
-            // reader must see an entire frozen file, never another writer's prefix.
-            use std::io::Write;
-            let mut file = tempfile::NamedTempFile::new_in(&sources)?;
-            file.write_all(text.as_bytes())?;
-            file.persist(sources.join(format!("{module}.hirsel")))?;
+        let mut packages = vec![];
+        let mut selected = vec![("core", bundled::SOURCES, vec![])];
+        if std {
+            selected.push(("std", bundled::STD_SOURCES, vec![package("core")]));
         }
-        let inputs = CorpusManifest {
-            core: package("core"),
-            packages: vec![Self::bundled_manifest(&sources)],
-        };
-        Self::produce(inputs, directory, meter, digest)
+        for (name, texts, dependencies) in selected {
+            let sources = directory.join("sources").join(name);
+            std::fs::create_dir_all(&sources)?;
+            for (module, text) in texts {
+                use std::io::Write;
+                let mut file = tempfile::NamedTempFile::new_in(&sources)?;
+                file.write_all(text.as_bytes())?;
+                file.persist(sources.join(format!("{module}.hirsel")))?;
+            }
+            packages.push(Self::manifest(&sources, name, texts, dependencies));
+        }
+        Self::produce(
+            CorpusManifest {
+                core: package("core"),
+                packages,
+            },
+            directory,
+            meter,
+            digest,
+        )
     }
     /// Source-owned package producers use this explicit identity once per package
     /// revision. The installed consumer passes only the resulting cache key/image.
@@ -163,7 +196,7 @@ impl Driver {
         root: &Path,
         meter: &mut Meter,
     ) -> io::Result<Arc<CheckProduct>> {
-        self.check_package_product(request, root, meter, false)
+        self.check_package_product(request, root, meter, false, true)
     }
     pub fn check_reachable_with_product(
         &mut self,
@@ -171,7 +204,23 @@ impl Driver {
         root: &Path,
         meter: &mut Meter,
     ) -> io::Result<Arc<CheckProduct>> {
-        self.check_package_product(request, root, meter, true)
+        self.check_package_product(request, root, meter, true, true)
+    }
+    pub fn check_with_core_product(
+        &mut self,
+        request: CheckRequest,
+        root: &Path,
+        meter: &mut Meter,
+    ) -> io::Result<Arc<CheckProduct>> {
+        self.check_package_product(request, root, meter, false, false)
+    }
+    pub fn check_reachable_with_core_product(
+        &mut self,
+        request: CheckRequest,
+        root: &Path,
+        meter: &mut Meter,
+    ) -> io::Result<Arc<CheckProduct>> {
+        self.check_package_product(request, root, meter, true, false)
     }
     fn check_package_product(
         &mut self,
@@ -179,6 +228,7 @@ impl Driver {
         root: &Path,
         meter: &mut Meter,
         reachable: bool,
+        include_std: bool,
     ) -> io::Result<Arc<CheckProduct>> {
         if reachable && let LibraryInput::Image(image) = &request.library {
             request.library = LibraryInput::ReachableImage(Arc::clone(image));
@@ -194,25 +244,23 @@ impl Driver {
         else {
             return self.check(request, meter);
         };
-        let compiled = normalized(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/core"));
-        // Buck embeds package-relative manifest paths; its tests run in the
-        // crate, while the command-line runner runs in the workspace root.
-        let workspace = normalized(Path::new("core/core"));
-        let is_bundled = core.package == package("core")
-            && core.dependencies.is_empty()
-            && core.sources.len() == bundled::SOURCES.len()
-            && core
-                .sources
-                .iter()
-                .zip(bundled::SOURCES)
-                .all(|(s, (module, _))| {
-                    s.signatures
-                        && s.modules == [*module]
-                        && [&compiled, &workspace].iter().any(|root| {
-                            normalized(&s.file) == root.join(format!("{module}.hirsel"))
-                        })
-                });
-        let product = if is_bundled {
+        let is_bundled = matches_bundle(core, "core", bundled::SOURCES, &[]);
+        let std = include_std
+            .then(|| {
+                request
+                    .inputs
+                    .packages
+                    .iter()
+                    .find(|p| p.package == package("std"))
+            })
+            .flatten();
+        let bundled_std = is_bundled
+            && std.is_some_and(|s| {
+                matches_bundle(s, "std", bundled::STD_SOURCES, &[package("core")])
+            });
+        let product = if bundled_std {
+            PackageProduct::bundled_std(root, meter)?
+        } else if is_bundled {
             PackageProduct::bundled(root, meter)?
         } else {
             PackageProduct::sources(
@@ -224,10 +272,9 @@ impl Driver {
                 meter,
             )?
         };
-        request
-            .inputs
-            .packages
-            .retain(|p| p.package != request.inputs.core);
+        request.inputs.packages.retain(|p| {
+            p.package != request.inputs.core && !(bundled_std && p.package == package("std"))
+        });
         request.library = if reachable {
             LibraryInput::ReachableImage(product.image)
         } else {
@@ -237,7 +284,38 @@ impl Driver {
     }
 }
 
-fn normalized(path: &Path) -> PathBuf {
+fn matches_bundle(
+    input: &PackageManifest,
+    name: &str,
+    sources: &[(&str, &str)],
+    dependencies: &[PackageId],
+) -> bool {
+    if input.package != package(name)
+        || input.dependencies != dependencies
+        || input.sources.len() != sources.len()
+    {
+        return false;
+    }
+    let compiled = normalized(
+        &Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../core")
+            .join(name),
+    );
+    let workspace = normalized(&Path::new("core").join(name));
+    input
+        .sources
+        .iter()
+        .zip(sources)
+        .all(|(source, (module, _))| {
+            source.signatures
+                && source.modules == [*module]
+                && [&compiled, &workspace]
+                    .iter()
+                    .any(|root| normalized(&source.file) == root.join(format!("{module}.hirsel")))
+        })
+}
+
+pub(crate) fn normalized(path: &Path) -> PathBuf {
     let mut result = PathBuf::new();
     let absolute = if path.is_absolute() {
         path.to_owned()
@@ -364,6 +442,79 @@ mod tests {
             (0, 0)
         );
     }
+    #[test]
+    fn bundled_std_skips_sources_and_rebuilds_stale_or_foreign_products() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = PackageProduct::bundled_std(dir.path(), &mut Meter::new(false)).unwrap();
+        assert!(first.rebuilt);
+        let path = first.image.store_root();
+        std::fs::remove_dir_all(path.join("sources")).unwrap();
+        let warm = PackageProduct::bundled_std(dir.path(), &mut Meter::new(false)).unwrap();
+        assert!(!warm.rebuilt);
+        assert_eq!(
+            (warm.image.decoded_files(), warm.image.decoded_bodies()),
+            (0, 0)
+        );
+        for foreign_compiler in [false, true] {
+            let mut root: crate::image::ImageRoot = decode(
+                &first
+                    .image
+                    .store
+                    .get(first.image.identity)
+                    .unwrap()
+                    .unwrap(),
+            )
+            .unwrap();
+            if foreign_compiler {
+                root.compiler = ContentHash::of_bytes(b"foreign compiler");
+            } else {
+                root.source_stamp = ContentHash::of_bytes(b"different std revision");
+            }
+            let changed = first.image.store.put(&encode(&root).unwrap()).unwrap();
+            first.image.store.select("image-root", changed).unwrap();
+            let rebuilt = PackageProduct::bundled_std(dir.path(), &mut Meter::new(false)).unwrap();
+            assert!(rebuilt.rebuilt);
+            assert_eq!(rebuilt.image.identity, first.image.identity);
+        }
+        let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let app = tempfile::tempdir().unwrap();
+        let mut request =
+            crate::tests::request("fn answer() -> u64 { std.std_only.answer() }", app.path());
+        let std_file = app.path().join("custom_std.hirsel");
+        std::fs::write(&std_file, "pub fn answer() -> u64 { 42u64 }").unwrap();
+        request
+            .inputs
+            .packages
+            .push(PackageProduct::bundled_manifest(
+                &source_root.join("core/core"),
+            ));
+        request.inputs.packages.push(PackageManifest {
+            package: package("std"),
+            dependencies: vec![package("core")],
+            sources: vec![ModuleSource {
+                file: std_file,
+                modules: vec!["std_only".into()],
+                signatures: true,
+            }],
+        });
+        request.inputs.packages[0].dependencies = vec![package("core"), package("std")];
+        let custom = Driver::default()
+            .check_with_product(request, dir.path(), &mut Meter::new(false))
+            .unwrap();
+        assert!(
+            custom.accepted(),
+            "{:?} {:?}",
+            custom.machine_diagnostics().unwrap(),
+            custom.machine_incomplete().unwrap()
+        );
+        assert!(
+            custom
+                .rechecked
+                .iter()
+                .any(|p| p.0.package == package("std")),
+            "custom source library must not be replaced by the bundled std"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -393,7 +544,7 @@ mod agreement {
             if path.0.package == package("core") {
                 continue;
             }
-            let image = &product.definitions[path];
+            let image = product.demand_body(path).unwrap();
             assert_eq!(
                 hirsel_core_ir::text::print(&body.ir),
                 hirsel_core_ir::text::print(&image.ir),
@@ -407,11 +558,12 @@ mod agreement {
         }
     }
     fn run(inputs: CorpusManifest, entry: Option<DefPath>, dir: &Path, cache: &Path) {
+        let expect_std = inputs.packages.iter().any(|p| p.package == package("std"));
         let mut request = CheckRequest {
             inputs,
             store: dir.join("source"),
             library: LibraryInput::Sources,
-            entry,
+            entry: entry.clone(),
         };
         let source = Driver::default()
             .check(request.clone(), &mut Meter::new(false))
@@ -421,6 +573,34 @@ mod agreement {
             .check_with_product(request, cache, &mut Meter::new(false))
             .unwrap();
         compare(&source, &product);
+        if expect_std {
+            assert_eq!(
+                product.image.as_ref().unwrap().source_stamp,
+                PackageProduct::bundled_std_digest()
+            );
+            assert!(product.files.iter().all(|f| {
+                ![package("core"), package("std")]
+                    .contains(&product.index.module_path(f.module).package)
+            }));
+            assert!(
+                product
+                    .rechecked
+                    .iter()
+                    .all(|p| ![package("core"), package("std")].contains(&p.0.package))
+            );
+            let entry = entry.unwrap();
+            let a = source.reachable(&entry, 65_536).unwrap();
+            let b = product.reachable(&entry, 65_536).unwrap();
+            assert!(a.accepted() && b.accepted());
+            assert_eq!(a.instances.as_ref().unwrap(), b.instances.as_ref().unwrap());
+            for key in a.instances.as_ref().unwrap() {
+                assert_eq!(
+                    hirsel_core_ir::text::print(a.materialized.get(key).ir()),
+                    hirsel_core_ir::text::print(b.materialized.get(key).ir()),
+                    "instance {key:?}"
+                );
+            }
+        }
     }
     #[test]
     fn all_front_cases_and_m1_closures_agree_with_published_core() {

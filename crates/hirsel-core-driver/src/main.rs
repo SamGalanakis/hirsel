@@ -35,8 +35,17 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     let command = args
         .next()
         .ok_or("usage: hirsel-core check <package-dir> | image --libraries <core-root>")?;
-    if !["check", "image", "build", "run", "core-product"].contains(&command.as_str()) {
-        return Err("expected check, image, build, run or core-product".into());
+    if ![
+        "check",
+        "image",
+        "build",
+        "run",
+        "core-product",
+        "std-product",
+    ]
+    .contains(&command.as_str())
+    {
+        return Err("expected check, image, build, run, core-product or std-product".into());
     }
     let mut dir = None;
     let mut libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
@@ -46,6 +55,7 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     let mut image_path = None;
     let mut core_product = None;
     let mut source_core = false;
+    let mut source_std = false;
     let mut product_name = None;
     let mut entry = None;
     let native_command = command == "build" || command == "run";
@@ -66,6 +76,7 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
         match arg.as_str() {
             "--json" => json = true,
             "--source-core" => source_core = true,
+            "--source-std" => source_std = true,
             "--name" => {
                 product_name = Some(
                     hirsel_core_ids::DefPath::from_full(&args.next().ok_or("missing --name")?)
@@ -131,7 +142,7 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
             .unwrap_or(Path::new("."))
             .join(".hirsel-core")
     });
-    if command == "core-product" {
+    if command == "core-product" || command == "std-product" {
         meter.finish("startup/discovery");
         let (image, rebuilt) = if let Some(path) = image_path {
             (
@@ -139,7 +150,11 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
                 false,
             )
         } else {
-            let package = hirsel_core_driver::PackageProduct::bundled(&store, &mut meter)?;
+            let package = if command == "std-product" {
+                hirsel_core_driver::PackageProduct::bundled_std(&store, &mut meter)?
+            } else {
+                hirsel_core_driver::PackageProduct::bundled(&store, &mut meter)?
+            };
             (package.image, package.rebuilt)
         };
         let name = if let Some(name) = product_name {
@@ -187,6 +202,8 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
         CheckRequest::libraries(dir.as_deref().unwrap_or(&libraries), &store)?
     } else if let Some(image) = image {
         CheckRequest::with_image(&dir.ok_or("missing package directory")?, &store, image)?
+    } else if native_command {
+        CheckRequest::program(&dir.ok_or("missing package directory")?, &libraries, &store)?
     } else {
         CheckRequest::directory(&dir.ok_or("missing package directory")?, &libraries, &store)?
     };
@@ -204,7 +221,11 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
             if !source_core && (native_command || core_product.is_some()) {
                 let root =
                     core_product.unwrap_or_else(hirsel_core_driver::PackageProduct::default_cache);
-                if native_command {
+                if source_std && native_command {
+                    driver.check_reachable_with_core_product(request, &root, &mut meter)?
+                } else if source_std {
+                    driver.check_with_core_product(request, &root, &mut meter)?
+                } else if native_command {
                     driver.check_reachable_with_product(request, &root, &mut meter)?
                 } else {
                     driver.check_with_product(request, &root, &mut meter)?

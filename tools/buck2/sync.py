@@ -80,7 +80,7 @@ READS = generated.Reads(ROOT)
 # What the engine's build script reads (crates/hirsel-engine/build.rs), as
 # repository paths: it hashes these into the frozen runtime revision.
 BUILD_SCRIPT_INPUTS = {
-    "hirsel-core-driver": ["core/core/**"],
+    "hirsel-core-driver": ["core/core/**", "core/std/*.hirsel"],
     "hirsel-rt-operations": ["native-tests/library/operations.tsv"],
     "hirsel-registry": ["crates/hirsel-registry/src/**"],
     "hirsel-engine": [

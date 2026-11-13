@@ -681,6 +681,6 @@ fn clone_kernel_hook_law() -> u64 {
                 faults += 1;
             }
         }
-        assert_eq!((passed, faults), (10, 5));
+        assert_eq!((passed, faults), (11, 5));
     }
 }

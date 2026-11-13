@@ -1,0 +1,55 @@
+// BinaryHeap's one-move-per-level hole sift, with minimum-first ordering.
+pub opaque type Heap[T: ordered]: shareable + send { items: List[T] }
+pub fn new[T: ordered]() -> Heap[T] { Heap(items: list.new()) }
+pub fn len[T: ordered](h: Heap[T]) -> u64 { list.len(h.items) }
+pub fn peek[T: ordered](h: Heap[T]) -> Option[View[T]] in h { list.get(h.items, 0) }
+pub fn push[T: ordered](mut h: Heap[T], take x: T) -> Result[(), (Capacity, T)] {
+    list.push(mut h.items, take x)?
+    let mut hole = list.len(h.items) - 1
+    let held = slots_take(mut h.items, hole)
+    while hole > 0 {
+        let parent = (hole - 1) / 2
+        if !(held < slots_view(h.items, parent)) { break }
+        slots_shift(mut h.items, parent, hole)
+        hole = parent
+    }
+    slots_put(mut h.items, hole, take held)
+    Ok(())
+}
+pub fn pop[T: ordered](mut h: Heap[T]) -> Option[T] {
+    let count = list.len(h.items)
+    if count == 0 { return None }
+    let end = count - 1
+    let last = slots_take(mut h.items, end)
+    if end == 0 { return Some(take last) }
+    let removed = slots_take(mut h.items, 0)
+    let mut hole: u64 = 0
+    // Move the smaller child up at each level, then sift last back up.
+    while hole < (end - 1) / 2 {
+        let mut child = hole * 2 + 1
+        if slots_view(h.items, child + 1) < slots_view(h.items, child) { child += 1 }
+        slots_shift(mut h.items, child, hole)
+        hole = child
+    }
+    // For even end, the final parent has exactly one child.
+    if end > 1 && hole == (end - 1) / 2 && hole * 2 + 1 < end {
+        let child = hole * 2 + 1
+        slots_shift(mut h.items, child, hole)
+        hole = child
+    }
+    while hole > 0 {
+        let parent = (hole - 1) / 2
+        if !(last < slots_view(h.items, parent)) { break }
+        slots_shift(mut h.items, parent, hole)
+        hole = parent
+    }
+    slots_put(mut h.items, hole, take last)
+    Some(take removed)
+}
+
+// These operate on List's allocation while its live set contains a hole. No
+// public List operation runs until the hole is filled and len is restored.
+fn slots_put[T](mut xs: List[T], i: u64, take x: T)
+fn slots_take[T](mut xs: List[T], i: u64) -> T
+fn slots_view[T](xs: List[T], i: u64) -> View[T] in xs
+fn slots_shift[T](mut xs: List[T], i: u64, j: u64)

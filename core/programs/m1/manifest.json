@@ -60,6 +60,13 @@
           "signatures": true
         },
         {
+          "file": "core/core/heap.hirsel",
+          "modules": [
+            "heap"
+          ],
+          "signatures": true
+        },
+        {
           "file": "core/core/dest.hirsel",
           "modules": [
             "dest"

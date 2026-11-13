@@ -134,9 +134,9 @@ fn astar(m:Maze)->Result[List[(u64,u64)],helper.Error] {
     scores[start]=0
     let f=heuristic(1,1,ty,tx)
     best[start]=f
-    let mut open:std.heap.Heap[(i32,u64)]=std.heap.new()
-    match std.heap.push(mut open,(f,start)) {Ok(())=>{},Error((c,_))=>return Error(Capacity(c))}
-    while let Some((_,current))=std.heap.pop(mut open) {
+    let mut open:Heap[(i32,u64)]=heap.new()
+    match heap.push(mut open,(f,start)) {Ok(())=>{},Error((c,_))=>return Error(Capacity(c))}
+    while let Some((_,current))=heap.pop(mut open) {
         if current==target {
             let mut result:List[(u64,u64)]=list.new()
             let mut cur:i32=int.narrow(current)
@@ -160,7 +160,7 @@ fn astar(m:Maze)->Result[List[(u64,u64)],helper.Error] {
                 let next=tentative+heuristic(ny,nx,ty,tx)
                 if next<best[at] {
                     best[at]=next
-                    match std.heap.push(mut open,(next,at)) {Ok(())=>{},Error((c,_))=>return Error(Capacity(c))}
+                    match heap.push(mut open,(next,at)) {Ok(())=>{},Error((c,_))=>return Error(Capacity(c))}
                 }
             }
         }

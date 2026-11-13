@@ -58,9 +58,9 @@ fn astar(adj:List[List[i32]])->Result[i32,helper.Error] {
     helper.mem(list.fill(mut best,n,2147483647))?
     scores[0]=0
     best[0]=target
-    let mut open:std.heap.Heap[(i32,i32)]=std.heap.new()
-    match std.heap.push(mut open,(target,0)) {Ok(())=>{},Error((c,_))=>return Error(Capacity(c))}
-    while let Some((_,v))=std.heap.pop(mut open) {
+    let mut open:Heap[(i32,i32)]=heap.new()
+    match heap.push(mut open,(target,0)) {Ok(())=>{},Error((c,_))=>return Error(Capacity(c))}
+    while let Some((_,v))=heap.pop(mut open) {
         let vi:u64=int.narrow(v)
         if v==target {return Ok(scores[vi])}
         for neighbor in adj[vi] {
@@ -71,7 +71,7 @@ fn astar(adj:List[List[i32]])->Result[i32,helper.Error] {
                 let f=candidate+target-neighbor
                 if f<best[ni] {
                     best[ni]=f
-                    match std.heap.push(mut open,(f,neighbor)) {Ok(())=>{},Error((c,_))=>return Error(Capacity(c))}
+                    match heap.push(mut open,(f,neighbor)) {Ok(())=>{},Error((c,_))=>return Error(Capacity(c))}
                 }
             }
         }

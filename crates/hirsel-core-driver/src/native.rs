@@ -856,7 +856,8 @@ b0:
             .unwrap()
         );
         let built = product.build(&entry, &options).unwrap();
-        assert_eq!(built.compiled, 3);
+        // LLVM release emits one reached unit so its bodies can inline across calls.
+        assert_eq!(built.compiled, if options.optimize { 1 } else { 3 });
         run_clean(&built.executable, 7);
         let edited = record.replace("b: 300u64", "b: 301u64");
         let product = driver

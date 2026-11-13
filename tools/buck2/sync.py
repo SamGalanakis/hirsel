@@ -161,7 +161,7 @@ RUNTIME_DATA = {
     "hirsel-lexer": [*CORPUS_DATA],
     "hirsel-lir": ["crates/hirsel-rt/include/**", "native-tests/**"],
     # tools/native-toolchain/check reads Cargo.lock's llvm-sys pin.
-    "hirsel-llvm": ["crates/hirsel-core-ir/samples/**", "crates/hirsel-core-rt/include/**", "core/front/**", "Cargo.lock", "crates/hirsel-rt/include/**", "stdlib/**", "tools/native-toolchain/llvm-23.lock", "tools/native-toolchain/check", "tools/native-toolchain/fixtures/**"],
+    "hirsel-llvm": ["core/core/**", "crates/hirsel-core-ir/samples/**", "crates/hirsel-core-rt/include/**", "core/front/**", "Cargo.lock", "crates/hirsel-rt/include/**", "stdlib/**", "tools/native-toolchain/llvm-23.lock", "tools/native-toolchain/check", "tools/native-toolchain/fixtures/**"],
     "hirsel-authority": [*CORPUS_DATA],
     "hirsel-ownership": [*CORPUS_DATA, "crates/hirsel-driver/tests/fixtures/**"],
     "hirsel-parser": ["conformance/old-spec/**"],
@@ -493,6 +493,8 @@ FULL_GATE_SKIPS = {}
 
 # Their tests live in integration/proof targets, not these empty entry points.
 EMPTY_UNIT_HARNESSES = {'hirsel-analysis-canary-unittest',
+ 'hirsel-core-driver-bin-hirsel-core-unittest',
+ 'hirsel-core-syntax-bin-hirsel-core-syntax-unittest',
  'hirsel-authority-unittest',
  'hirsel-check-protocol-unittest',
  'hirsel-check-unittest',
@@ -1302,8 +1304,8 @@ def first_party(meta: dict) -> str:
                             data=Raw('glob(["core/core/**", "core/std/**", "core/programs/m1/**"]) + ["core/tools/measure.py", "core/tools/m1.py", "tools/capped", "crates/hirsel-core-front/cost-ceilings.json"]')))
     out.append("\n" + call("hirsel_script_test", name="core-check-cost-unit", script="crates/hirsel-core-front/test-check-cost.py", full=False, host=True,
                             data=["crates/hirsel-core-front/test-check-cost.py", "crates/hirsel-core-front/check-cost.py", "core/tools/measure.py"]))
-    out.append("\n" + call("hirsel_core_driver_native_test", name="core-driver-native", data=Raw('glob(["crates/hirsel-core-rt/include/**", "crates/hirsel-core-driver/Cargo.toml", "core/core/**", "core/front/runtime/**"])')))
-    out.append("\n" + call("hirsel_core_llvm_native_test", name="core-llvm-native", data=Raw('glob(["core/front/**", "crates/hirsel-core-rt/include/**", "crates/hirsel-core-ir/samples/**", "crates/hirsel-llvm/Cargo.toml"])')))
+    out.append("\n" + call("hirsel_core_driver_native_test", name="core-driver-native", data=Raw('glob(["crates/hirsel-core-rt/include/**", "crates/hirsel-core-driver/Cargo.toml", "core/core/**", "core/std/**", "core/front/runtime/**"])')))
+    out.append("\n" + call("hirsel_core_llvm_native_test", name="core-llvm-native", data=Raw('glob(["core/core/**", "core/front/**", "crates/hirsel-core-rt/include/**", "crates/hirsel-core-ir/samples/**", "crates/hirsel-llvm/Cargo.toml"])')))
     out.append("\n" + call("hirsel_library", name="hirsel-core-rt-native-fixture", crate="hirsel_core_rt", crate_root="crates/hirsel-core-rt/src/lib.rs",
         srcs=Raw('glob(["crates/hirsel-core-rt/src/**"])'), features=["testing", "memcheck"], deps=declared_deps(next(p for p in packages.values() if p["name"] == "hirsel-core-rt"), packages),
         manifest_dir="crates/hirsel-core-rt", package_name="hirsel-core-rt", version="0.1.0", edition="2024"))

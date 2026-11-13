@@ -444,7 +444,7 @@ typedef struct {
     const hirsel_rt_v2_entry_row *value_codes;
     uint64_t value_code_count;
 } hirsel_rt_v2_program_descriptor;
-HIRSEL_RT_V2_ASSERT_SIZE(hirsel_rt_v2_program_descriptor, 272);
+HIRSEL_RT_V2_ASSERT_SIZE(hirsel_rt_v2_program_descriptor, 192);
 /* Load the program and launch the run argv (argv[0] names the program) selects; returns the
  * exit status of its outcome. No other process arguments are read. */
 int32_t hirsel_rt_v2_main(const hirsel_rt_v2_program_descriptor *program, int32_t argc, const char *const *argv);

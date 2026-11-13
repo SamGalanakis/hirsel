@@ -625,7 +625,7 @@ fn every_front_run_case_matches_the_evaluator() {
             continue;
         }
         let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let (module, names) = front::lower(&source, &root.join("core"), "main")
+            let (module, names) = front::lower(&source, &root.join("../core"), "main")
                 .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
             let cases = runs
                 .iter()
@@ -1147,7 +1147,7 @@ fn string_literals_growth_and_byte_order_match_the_evaluator() {
     let module = text::parse(source).unwrap();
     wf::module(&module).unwrap();
     let cases = sample_cases(&module, source);
-    assert_eq!(cases.len(), 4);
+    assert_eq!(cases.len(), 10);
     // Refuse each growth/probe admission without ever freeing the static carrier.
     let mut refusals = Vec::new();
     for case in &cases {

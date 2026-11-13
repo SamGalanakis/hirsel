@@ -58,23 +58,38 @@ fn every_emitted_function_probes_its_frame_within_the_guard() {
         let module = Module::parse(&context, "probes", IR).unwrap();
         module.set_target(&machine);
         module.emit_object(&machine).unwrap();
-        let text = module.text();
-        let kinds = defined_attribute(&text, "probe-stack");
-        let sizes = defined_attribute(&text, "stack-probe-size");
-        assert_eq!(kinds.len(), 2, "{text}");
-        for ((function, kind), (_, size)) in kinds.iter().zip(&sizes) {
-            assert_eq!(
-                kind.as_deref(),
-                Some("inline-asm"),
-                "{} {function}",
-                target.triple
-            );
-            let size: usize = size.as_deref().unwrap().parse().unwrap();
-            assert!(
-                size <= hirsel_lir::runtime_abi::STACK_GUARD_BYTES,
-                "{} {function}: probes every {size} bytes",
-                target.triple
-            );
-        }
+        assert_probes(&module.text(), &target.triple, 2);
+    }
+    let core_ir = hirsel_core_ir::text::parse(
+        r#"core v0
+sig g0 = (u64) -> (u64)
+inst n0 = tests@0/probes/core [] []
+fn f0 = n0 g0 {
+b0(v0: u64):
+  return v0
+}
+"#,
+    )
+    .unwrap();
+    for opt in [
+        crate::core::Optimization::None,
+        crate::core::Optimization::Speed,
+    ] {
+        let text = crate::core::emitted_ir(&core_ir, opt).unwrap();
+        assert_probes(&text, "CoreIR x86_64", 1);
+    }
+}
+
+fn assert_probes(text: &str, target: &str, count: usize) {
+    let kinds = defined_attribute(text, "probe-stack");
+    let sizes = defined_attribute(text, "stack-probe-size");
+    assert_eq!(kinds.len(), count, "{text}");
+    for ((function, kind), (_, size)) in kinds.iter().zip(&sizes) {
+        assert_eq!(kind.as_deref(), Some("inline-asm"), "{target} {function}");
+        let size: usize = size.as_deref().unwrap().parse().unwrap();
+        assert!(
+            size <= hirsel_lir::runtime_abi::STACK_GUARD_BYTES,
+            "{target} {function}: probes every {size} bytes"
+        );
     }
 }

@@ -159,7 +159,7 @@ RUNTIME_DATA = {
     "hirsel-lexer": [*CORPUS_DATA],
     "hirsel-lir": ["crates/hirsel-rt/include/**", "native-tests/**"],
     # tools/native-toolchain/check reads Cargo.lock's llvm-sys pin.
-    "hirsel-llvm": ["Cargo.lock", "crates/hirsel-rt/include/**", "stdlib/**", "tools/native-toolchain/llvm-23.lock", "tools/native-toolchain/check", "tools/native-toolchain/fixtures/**"],
+    "hirsel-llvm": ["crates/hirsel-core-ir/samples/**", "Cargo.lock", "crates/hirsel-rt/include/**", "stdlib/**", "tools/native-toolchain/llvm-23.lock", "tools/native-toolchain/check", "tools/native-toolchain/fixtures/**"],
     "hirsel-authority": [*CORPUS_DATA],
     "hirsel-ownership": [*CORPUS_DATA, "bench/native/programs/**", "crates/hirsel-driver/tests/fixtures/**"],
     "hirsel-parser": ["conformance/old-spec/**"],

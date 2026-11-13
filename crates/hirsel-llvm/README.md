@@ -1,5 +1,21 @@
 # hirsel-llvm
 
+`core::emit_ir` and `core::emit_object` lower the frozen CoreIR v0 convention
+directly, alongside the retained old entry points. The object entry emits x86-64
+System V ELF bytes with instance-digest symbols. It uses the retained LLVM
+context and target machinery; no old products, manifests or receipts participate.
+Every function takes FORM v1a's hidden context before its destination and explicit
+parameters, matching the sibling engine. Multiple scalar results use the target C struct convention, including packed
+registers and an implicit result pointer for large structs. LLVM promotes the
+backend temporaries at the optimizing level.
+
+This first slice supports scalar storage, control flow and infallible calls.
+Propagated failures and v1 runtime operations return `core::Error::Unsupported`
+until the v1 status and runtime contracts are implemented. Production emission
+does not validate CoreIR or run LLVM verification; executable differential tests
+use the evaluator and independent C callers. Object generation installs the
+same 4 KiB stack probes as the old entry point.
+
 The LLVM backend: emission of validated Ready LIR units through a
 small RAII layer over the LLVM C API, returning an owned `hirsel_lir::ObjectArtifact`.
 

@@ -26,6 +26,10 @@ pub(super) struct Function<'a, 'b, 'c> {
     pub context: Value,
     pub signature: &'c abi::Signature,
     pub result_storage: Option<Value>,
+    pub raise_blocks: Vec<(u8, Option<BlockId>, ir::Block)>,
+    pub propagation: Option<ir::Block>,
+    pub cause_slot: Option<ir::StackSlot>,
+    pub calls: calls::Calls<'c>,
 }
 
 pub(super) fn emit(
@@ -121,6 +125,18 @@ pub(super) fn emit(
         glues: tables.glues,
         signature,
         result_storage,
+        raise_blocks: Vec::with_capacity(4),
+        propagation: None,
+        cause_slot: None,
+        calls: calls::Calls::new(
+            &tables.runtimes,
+            signatures,
+            body.edges
+                .iter()
+                .map(|e| e.args.len as usize)
+                .max()
+                .unwrap_or(0),
+        ),
     };
     for i in order(body) {
         let block = &body.blocks[i];
@@ -130,25 +146,33 @@ pub(super) fn emit(
         }
         match &body.terminators[i] {
             Terminator::Return(range) => {
-                let results: Vec<_> = range
-                    .get(&body.pools.values)
-                    .unwrap()
-                    .iter()
-                    .map(|&v| f.get(v))
-                    .collect();
-                let mut results = results;
+                let mut results = std::mem::take(&mut f.calls.results);
+                results.clear();
+                results.extend(
+                    range
+                        .get(&body.pools.values)
+                        .unwrap()
+                        .iter()
+                        .map(|&v| f.get(v)),
+                );
                 results.push(f.b.ins().iconst(types::I8, 0));
                 signature.return_(&mut f.b, &results, result_storage);
+                f.calls.results = results;
             }
             Terminator::Jump(e) => {
-                let (target, args) = f.edge(*e);
+                let mut args = std::mem::take(&mut f.calls.edges[0]);
+                let target = f.edge(*e, &mut args);
                 f.b.ins().jump(target, &args);
+                f.calls.edges[0] = args;
             }
             Terminator::Branch { condition, yes, no } => {
                 let cond = f.get(*condition);
-                let (yes, ya) = f.edge(*yes);
-                let (no, na) = f.edge(*no);
+                let mut ya = std::mem::take(&mut f.calls.edges[0]);
+                let mut na = std::mem::take(&mut f.calls.edges[1]);
+                let yes = f.edge(*yes, &mut ya);
+                let no = f.edge(*no, &mut na);
                 f.b.ins().brif(cond, yes, &ya, no, &na);
+                f.calls.edges = [ya, na];
             }
             Terminator::Switch {
                 value,
@@ -156,17 +180,19 @@ pub(super) fn emit(
                 otherwise,
             } => {
                 let value = f.get(*value);
+                let mut args = std::mem::take(&mut f.calls.edges[0]);
                 for arm in arms.get(&body.pools.arms).unwrap() {
                     let test =
                         f.b.ins()
                             .icmp_imm_s(ir::condcodes::IntCC::Equal, value, arm.value as i64);
                     let next = f.b.create_block();
-                    let (target, args) = f.edge(arm.edge);
+                    let target = f.edge(arm.edge, &mut args);
                     f.b.ins().brif(test, target, &args, next, &[]);
                     f.b.switch_to_block(next);
                 }
-                let (target, args) = f.edge(*otherwise);
+                let target = f.edge(*otherwise, &mut args);
                 f.b.ins().jump(target, &args);
+                f.calls.edges[0] = args;
             }
             Terminator::Unreachable => {
                 f.b.ins().trap(ir::TrapCode::unwrap_user(1));
@@ -182,6 +208,7 @@ pub(super) fn emit(
             Terminator::Propagate => f.fail_to(None),
         }
     }
+    f.emit_failure_blocks()?;
     f.b.seal_all_blocks();
     f.b.finalize(f.object.target_config());
     Ok(())
@@ -207,16 +234,17 @@ impl Function<'_, '_, '_> {
             }
         }
     }
-    fn edge(&mut self, e: EdgeId) -> (ir::Block, Vec<BlockArg>) {
+    fn edge(&self, e: EdgeId, args: &mut Vec<BlockArg>) -> ir::Block {
         let edge = &self.body.edges[e.index()];
-        let args = edge
-            .args
-            .get(&self.body.pools.values)
-            .unwrap()
-            .iter()
-            .map(|&v| self.get(v).into())
-            .collect();
-        (self.blocks[edge.target.index()], args)
+        args.clear();
+        args.extend(
+            edge.args
+                .get(&self.body.pools.values)
+                .unwrap()
+                .iter()
+                .map(|&v| BlockArg::from(self.get(v))),
+        );
+        self.blocks[edge.target.index()]
     }
     fn instruction(&mut self, inst: &Inst) -> Result<()> {
         match *inst {
@@ -247,9 +275,11 @@ impl Function<'_, '_, '_> {
                 self.set(result, v);
             }
             Inst::FunctionRef { result, function } => {
-                let func = self
-                    .object
-                    .declare_func_in_func(self.functions[function.index()], self.b.func);
+                let func = self.calls.reference(
+                    self.object,
+                    &mut self.b,
+                    self.functions[function.index()],
+                );
                 let v = self.b.ins().func_addr(types::I64, func);
                 self.set(result, v);
             }
@@ -400,9 +430,28 @@ impl Function<'_, '_, '_> {
             }
             Inst::Call { call } => {
                 let call = &self.body.calls[call.index()];
+                if let Callee::Runtime(op) = call.callee {
+                    match op {
+                        RtOp::DestId => {
+                            let result = self.c_call(
+                                "hirsel_core_dest_id",
+                                &[],
+                                &[Ty::Scalar(Scalar::U64)],
+                                &[],
+                            )?[0];
+                            let values = call.results.get(&self.body.pools.values).unwrap();
+                            self.set(values[0], result);
+                        }
+                        _ => return Err(unsupported("task runtime call")),
+                    }
+                    return Ok(());
+                }
                 let signature = &self.signatures[call.signature.index()];
-                let storage = signature.indirect.then(|| signature.storage(&mut self.b));
-                let mut args = Vec::new();
+                let storage = signature
+                    .indirect
+                    .then(|| self.calls.storage(&mut self.b, signature.size));
+                let mut args = std::mem::take(&mut self.calls.args);
+                args.clear();
                 if let Some(storage) = storage {
                     args.push(storage);
                 }
@@ -415,42 +464,45 @@ impl Function<'_, '_, '_> {
                 }
                 let inst = match call.callee {
                     Callee::Direct(f) => {
-                        let f = self
-                            .object
-                            .declare_func_in_func(self.functions[f.index()], self.b.func);
+                        let f = self.calls.reference(
+                            self.object,
+                            &mut self.b,
+                            self.functions[f.index()],
+                        );
                         self.b.ins().call(f, &args)
                     }
                     Callee::Indirect(v) => {
                         let v = self.get(v);
-                        let sig = self.b.import_signature(signature.clif.clone());
+                        let sig = self.calls.indirect(
+                            &mut self.b,
+                            call.signature.index(),
+                            &signature.clif,
+                        );
                         self.b.ins().call_indirect(sig, v, &args)
                     }
-                    Callee::Runtime(RtOp::DestId) => {
-                        let result = self.c_call(
-                            "hirsel_core_dest_id",
-                            &[],
-                            &[Ty::Scalar(Scalar::U64)],
-                            &[],
-                        )?[0];
-                        let values = call.results.get(&self.body.pools.values).unwrap();
-                        self.set(values[0], result);
-                        return Ok(());
-                    }
-                    Callee::Runtime(_) => return Err(unsupported("task runtime call")),
+                    Callee::Runtime(_) => unreachable!(),
                 };
-                let results = self.b.inst_results(inst).to_vec();
-                let mut results = signature.unpack(&mut self.b, &results, storage);
+                self.calls.args = args;
+                let mut returned = [Value::from_u32(0); 2];
+                let len = self.b.inst_results(inst).len();
+                returned[..len].copy_from_slice(self.b.inst_results(inst));
+                let mut results = std::mem::take(&mut self.calls.results);
+                results.clear();
+                signature.unpack(&mut self.b, &returned[..len], storage, |value| {
+                    results.push(value)
+                });
                 let status = results.pop().unwrap();
                 self.call_failure(status, call.fail)?;
-                for (&v, result) in call
+                for (&v, &result) in call
                     .results
                     .get(&self.body.pools.values)
                     .unwrap()
                     .iter()
-                    .zip(results)
+                    .zip(&results)
                 {
                     self.set(v, result);
                 }
+                self.calls.results = results;
             }
             _ => self.memory(inst)?,
         }

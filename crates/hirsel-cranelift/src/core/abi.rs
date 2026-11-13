@@ -1,9 +1,7 @@
 //! System V scalar-struct returns. Like rustc_codegen_cranelift's ABI lowering,
 //! physical register carriers follow aggregate classification, not source arity.
 use super::*;
-use cranelift_codegen::ir::{
-    ArgumentPurpose, MemFlagsData as MemFlags, StackSlotData, StackSlotKind, Value,
-};
+use cranelift_codegen::ir::{ArgumentPurpose, MemFlagsData as MemFlags, Value};
 use cranelift_codegen::isa::CallConv;
 
 pub(super) struct Signature {
@@ -98,62 +96,136 @@ impl Signature {
             aggregate,
         }
     }
-    pub fn storage(&self, b: &mut FunctionBuilder<'_>) -> Value {
-        let slot = b.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            self.size.max(8).next_multiple_of(8),
-            3,
-        ));
-        let addr = b.ins().stack_addr(types::I64, slot, 0);
-        let zero = b.ins().iconst(types::I64, 0);
-        for off in (0..self.size.next_multiple_of(8)).step_by(8) {
-            b.ins().store(MemFlags::trusted(), zero, addr, off as i32);
-        }
-        addr
-    }
     pub fn unpack(
         &self,
         b: &mut FunctionBuilder<'_>,
         values: &[Value],
         storage: Option<Value>,
-    ) -> Vec<Value> {
+        mut push: impl FnMut(Value),
+    ) {
         if !self.aggregate {
-            return values.to_vec();
-        }
-        let addr = storage.unwrap_or_else(|| self.storage(b));
-        if !self.indirect {
-            for (i, &v) in values.iter().enumerate() {
-                b.ins().store(MemFlags::trusted(), v, addr, (i * 8) as i32);
+            for &value in values {
+                push(value);
             }
+            return;
         }
-        self.results
-            .iter()
-            .zip(&self.offsets)
-            .map(|(&t, &off)| b.ins().load(ty(t), MemFlags::trusted(), addr, off as i32))
-            .collect()
+        for (&t, &offset) in self.results.iter().zip(&self.offsets) {
+            let target = ty(t);
+            let value = if self.indirect {
+                b.ins()
+                    .load(target, MemFlags::trusted(), storage.unwrap(), offset as i32)
+            } else {
+                let carrier = values[(offset / 8) as usize];
+                let native = b.func.dfg.value_type(carrier);
+                if offset % 8 == 0 && native == target {
+                    carrier
+                } else {
+                    let integer = match native.bytes() {
+                        4 => types::I32,
+                        _ => types::I64,
+                    };
+                    let bits = if native.is_float() {
+                        b.ins().bitcast(integer, MemFlags::new(), carrier)
+                    } else {
+                        carrier
+                    };
+                    let bits = if offset % 8 == 0 {
+                        bits
+                    } else {
+                        b.ins().ushr_imm_s(bits, i64::from(offset % 8 * 8))
+                    };
+                    let integer = match target.bytes() {
+                        1 => types::I8,
+                        2 => types::I16,
+                        4 => types::I32,
+                        _ => types::I64,
+                    };
+                    let bits = if b.func.dfg.value_type(bits) != integer {
+                        b.ins().ireduce(integer, bits)
+                    } else {
+                        bits
+                    };
+                    if target.is_float() {
+                        b.ins().bitcast(target, MemFlags::new(), bits)
+                    } else {
+                        bits
+                    }
+                }
+            };
+            push(value);
+        }
     }
     pub fn return_(&self, b: &mut FunctionBuilder<'_>, values: &[Value], storage: Option<Value>) {
         if !self.aggregate {
             b.ins().return_(values);
             return;
         }
-        let addr = storage.unwrap_or_else(|| self.storage(b));
-        for (&v, &off) in values.iter().zip(&self.offsets) {
-            b.ins().store(MemFlags::trusted(), v, addr, off as i32);
+        if self.indirect {
+            let addr = storage.unwrap();
+            for (&value, &offset) in values.iter().zip(&self.offsets) {
+                b.ins()
+                    .store(MemFlags::trusted(), value, addr, offset as i32);
+            }
+            b.ins().return_(&[]);
+            return;
         }
-        let registers = if self.indirect {
-            vec![]
-        } else {
-            self.clif
-                .returns
+        let mut registers = [Value::from_u32(0); 2];
+        for (chunk, result) in self.clif.returns.iter().enumerate() {
+            let mut fields = values
                 .iter()
-                .enumerate()
-                .map(|(i, r)| {
-                    b.ins()
-                        .load(r.value_type, MemFlags::trusted(), addr, (i * 8) as i32)
-                })
-                .collect()
-        };
-        b.ins().return_(&registers);
+                .zip(&self.offsets)
+                .zip(&self.results)
+                .filter(|((_, offset), _)| **offset as usize / 8 == chunk);
+            let ((&value, &offset), &t) = fields.next().unwrap();
+            if fields.next().is_none() && offset % 8 == 0 && ty(t) == result.value_type {
+                registers[chunk] = value;
+                continue;
+            }
+            let mut bits = None;
+            for ((&value, &offset), &t) in values.iter().zip(&self.offsets).zip(&self.results) {
+                if offset as usize / 8 != chunk {
+                    continue;
+                }
+                let native = ty(t);
+                let integer = if native == types::F32 {
+                    types::I32
+                } else {
+                    types::I64
+                };
+                let value = if native.is_float() {
+                    b.ins().bitcast(integer, MemFlags::new(), value)
+                } else {
+                    value
+                };
+                let value = if b.func.dfg.value_type(value) != types::I64 {
+                    b.ins().uextend(types::I64, value)
+                } else {
+                    value
+                };
+                let value = if offset % 8 == 0 {
+                    value
+                } else {
+                    b.ins().ishl_imm_s(value, i64::from(offset % 8 * 8))
+                };
+                bits = Some(if let Some(bits) = bits {
+                    b.ins().bor(bits, value)
+                } else {
+                    value
+                });
+            }
+            let bits = bits.unwrap();
+            let target = result.value_type;
+            registers[chunk] = if target == types::I64 {
+                bits
+            } else {
+                let bits = if target == types::F32 {
+                    b.ins().ireduce(types::I32, bits)
+                } else {
+                    bits
+                };
+                b.ins().bitcast(target, MemFlags::new(), bits)
+            };
+        }
+        b.ins().return_(&registers[..self.clif.returns.len()]);
     }
 }

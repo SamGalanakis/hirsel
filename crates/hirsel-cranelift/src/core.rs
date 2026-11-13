@@ -12,6 +12,7 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use hirsel_core_ir::{self as c, *};
 
 mod abi;
+mod calls;
 mod drop;
 mod failure;
 mod function;
@@ -50,12 +51,15 @@ pub struct Object {
 
 /// The external name of a closed CoreIR instance.
 pub fn symbol(instance: &InstanceKey) -> String {
-    let mut name = String::from("h");
-    use std::fmt::Write as _;
-    for byte in instance.digest().0 {
-        write!(name, "{byte:02x}").unwrap();
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut name = [0u8; 65];
+    name[0] = b'h';
+    for (i, byte) in instance.digest().0.into_iter().enumerate() {
+        name[1 + i * 2] = HEX[(byte >> 4) as usize];
+        name[2 + i * 2] = HEX[(byte & 15) as usize];
     }
-    name
+    // SAFETY: the prefix and every table entry are ASCII.
+    unsafe { String::from_utf8_unchecked(name.to_vec()) }
 }
 
 fn unsupported(message: impl Into<String>) -> Error {
@@ -89,6 +93,7 @@ pub(super) struct Tables<'a> {
     statics: &'a [cranelift_module::DataId],
     glues: &'a drop::Glues,
     trace_drops: bool,
+    runtimes: std::cell::RefCell<calls::Imports>,
 }
 
 pub(crate) fn isa(options: &Options<'_>) -> Result<cranelift_codegen::isa::OwnedTargetIsa> {
@@ -98,6 +103,14 @@ pub(crate) fn isa(options: &Options<'_>) -> Result<cranelift_codegen::isa::Owned
         ("is_pic", "true"),
         ("enable_verifier", "false"),
         ("opt_level", if options.optimize { "speed" } else { "none" }),
+        (
+            "regalloc_algorithm",
+            if options.optimize {
+                "backtracking"
+            } else {
+                "single_pass"
+            },
+        ),
     ]
     .into_iter()
     .chain(crate::module::STACK_PROBE_SETTINGS)
@@ -212,6 +225,7 @@ fn emit(
         statics: &statics,
         glues: &glues,
         trace_drops,
+        runtimes: Default::default(),
     };
     drop(setup);
     let mut scratch = Compilation {

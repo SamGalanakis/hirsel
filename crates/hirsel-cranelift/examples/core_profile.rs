@@ -90,7 +90,7 @@ impl Meter {
     }
 }
 #[derive(Clone)]
-struct Measure(Rc<RefCell<Meter>>);
+struct Measure(Rc<RefCell<Meter>>, bool);
 struct Span(Measure);
 impl Drop for Span {
     fn drop(&mut self) {
@@ -123,6 +123,21 @@ impl Observer for Measure {
         ctx: &mut cranelift_codegen::Context,
     ) -> cranelift_module::ModuleResult<()> {
         {
+            let _span = self.scope("profile_counts");
+            eprintln!(
+                "CLIF\t{}\t{}\t{}\t{}\t{}\t{}",
+                function.as_u32(),
+                ctx.func.dfg.num_insts(),
+                ctx.func.dfg.num_blocks(),
+                ctx.func.sized_stack_slots.len(),
+                ctx.func.dfg.ext_funcs.len(),
+                ctx.func.dfg.signatures.len()
+            );
+        }
+        if self.1 {
+            return Ok(());
+        }
+        {
             let _span = self.scope("codegen");
             ctx.compile(object.isa(), &mut Default::default())?;
         }
@@ -144,7 +159,10 @@ impl Observer for Measure {
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = std::env::args().collect::<Vec<_>>();
-    let measure = Measure(Rc::new(RefCell::new(Meter::new())));
+    let measure = Measure(
+        Rc::new(RefCell::new(Meter::new())),
+        args.iter().any(|a| a == "--ir-counts-only"),
+    );
     let _previous = timing::set_thread_profiler(Box::new(measure.clone()));
     let total = measure.scope("total");
     let module = {

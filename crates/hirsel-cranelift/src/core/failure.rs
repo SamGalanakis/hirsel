@@ -2,15 +2,36 @@
 //! recorded its cause; only the instruction that raises one records a new cell.
 use super::function::Function;
 use super::*;
-use cranelift_codegen::ir::{
-    ArgumentPurpose, MemFlagsData, StackSlotData, StackSlotKind, Value, condcodes::IntCC,
-};
+use cranelift_codegen::ir::{MemFlagsData, StackSlotData, StackSlotKind, Value, condcodes::IntCC};
 impl Function<'_, '_, '_> {
-    pub fn fail_to(&mut self, target: Option<BlockId>) {
-        if let Some(target) = target {
-            self.b.ins().jump(self.blocks[target.index()], &[]);
+    fn propagation_block(&mut self) -> ir::Block {
+        if let Some(block) = self.propagation {
+            block
         } else {
-            let mut results = Vec::new();
+            let block = self.b.create_block();
+            self.b.set_cold_block(block);
+            self.propagation = Some(block);
+            block
+        }
+    }
+    pub fn fail_to(&mut self, target: Option<BlockId>) {
+        let block = if let Some(target) = target {
+            self.blocks[target.index()]
+        } else {
+            self.propagation_block()
+        };
+        self.b.ins().jump(block, &[]);
+    }
+    pub fn emit_failure_blocks(&mut self) -> Result<()> {
+        while let Some((kind, target, block)) = self.raise_blocks.pop() {
+            self.b.switch_to_block(block);
+            self.record_failure(kind)?;
+            self.fail_to(target);
+        }
+        if let Some(block) = self.propagation {
+            self.b.switch_to_block(block);
+            let mut results = std::mem::take(&mut self.calls.results);
+            results.clear();
             for &t in &self.signature.results[..self.signature.results.len() - 1] {
                 let zero = match ty(t) {
                     types::F32 => self.b.ins().f32const(0.0),
@@ -22,15 +43,25 @@ impl Function<'_, '_, '_> {
             results.push(self.b.ins().iconst(types::I8, 1));
             self.signature
                 .return_(&mut self.b, &results, self.result_storage);
+            self.calls.results = results;
         }
+        Ok(())
     }
     pub fn record_failure(&mut self, kind: u8) -> Result<()> {
         // HirselCoreCause in the runtime header, passed by value under the C ABI.
         // Its pointer fields are empty for primitive causes. Source-site table
         // rebinding is reserved for the driver/debug integration.
-        let slot =
-            self.b
-                .create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 32, 3));
+        let slot = if let Some(slot) = self.cause_slot {
+            slot
+        } else {
+            let slot = self.b.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                32,
+                3,
+            ));
+            self.cause_slot = Some(slot);
+            slot
+        };
         let addr = self.b.ins().stack_addr(types::I64, slot, 0);
         let zero = self.b.ins().iconst(types::I64, 0);
         for offset in [0, 8, 16, 24] {
@@ -40,19 +71,8 @@ impl Function<'_, '_, '_> {
         }
         let kind = self.b.ins().iconst(types::I8, i64::from(kind));
         self.b.ins().store(MemFlagsData::trusted(), kind, addr, 0);
-        let mut sig = self.object.make_signature();
-        sig.params.push(AbiParam::new(types::I64));
-        sig.params.push(AbiParam::special(
-            types::I64,
-            ArgumentPurpose::StructArgument(32),
-        ));
-        let func = self
-            .object
-            .declare_function("hirsel_core_raise", Linkage::Import, &sig)
-            .map_err(error)?;
-        let func = self.object.declare_func_in_func(func, self.b.func);
-        self.b.ins().call(func, &[self.context, addr]);
-        Ok(())
+        self.calls
+            .raise(self.object, &mut self.b, self.context, addr)
     }
     pub fn record_string(&mut self, address: AddressId) -> Result<()> {
         let carrier = self.addr(address);
@@ -79,21 +99,31 @@ impl Function<'_, '_, '_> {
         Ok(())
     }
     pub fn guard(&mut self, condition: Value, kind: u8, target: Option<BlockId>) -> Result<()> {
-        let failed = self.b.create_block();
+        let failed = if let Some((_, _, block)) = self
+            .raise_blocks
+            .iter()
+            .find(|(k, t, _)| *k == kind && *t == target)
+        {
+            *block
+        } else {
+            let block = self.b.create_block();
+            self.b.set_cold_block(block);
+            self.raise_blocks.push((kind, target, block));
+            block
+        };
         let next = self.b.create_block();
         self.b.ins().brif(condition, failed, &[], next, &[]);
-        self.b.switch_to_block(failed);
-        self.record_failure(kind)?;
-        self.fail_to(target);
         self.b.switch_to_block(next);
         Ok(())
     }
     pub fn call_failure(&mut self, status: Value, target: Option<BlockId>) -> Result<()> {
-        let failed = self.b.create_block();
+        let failed = if let Some(target) = target {
+            self.blocks[target.index()]
+        } else {
+            self.propagation_block()
+        };
         let next = self.b.create_block();
         self.b.ins().brif(status, failed, &[], next, &[]);
-        self.b.switch_to_block(failed);
-        self.fail_to(target);
         self.b.switch_to_block(next);
         Ok(())
     }

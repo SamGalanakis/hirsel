@@ -204,6 +204,7 @@ impl Glues {
             glues: self,
             ctx: args[0],
             failed,
+            calls: calls::Calls::new(&tables.runtimes, tables.signatures, 0),
         };
         if resume {
             let plan = plan_type(tables, TypeRef(index as u32))?;
@@ -263,6 +264,7 @@ struct Glue<'a, 'b, 'c> {
     glues: &'c Glues,
     ctx: Value,
     failed: Value,
+    calls: calls::Calls<'c>,
 }
 impl Glue<'_, '_, '_> {
     fn icon(&mut self, n: u64) -> Value {
@@ -280,18 +282,19 @@ impl Glue<'_, '_, '_> {
         self.failed = self.b.ins().bor(self.failed, status);
     }
     fn direct(&mut self, f: cranelift_module::FuncId, args: &[Value]) -> Value {
-        let f = self.object.declare_func_in_func(f, self.b.func);
+        let f = self.calls.reference(self.object, &mut self.b, f);
         let call = self.b.ins().call(f, args);
         self.b.inst_results(call)[0]
     }
     fn call(
         &mut self,
-        name: &str,
+        name: &'static str,
         params: &[Ty],
         results: &[Ty],
         args: &[Value],
-    ) -> Result<Vec<Value>> {
-        super::memory::c_call(self.object, &mut self.b, name, params, results, args)
+    ) -> Result<calls::NativeValues> {
+        self.calls
+            .c(self.object, &mut self.b, name, params, results, args)
     }
     fn drop_type(&mut self, at: Value, t: TypeRef) {
         if let Some(f) = self.glues.drops[t.index()] {
@@ -300,9 +303,11 @@ impl Glue<'_, '_, '_> {
         }
     }
     fn callback(&mut self, t: TypeRef) -> Value {
-        let f = self
-            .object
-            .declare_func_in_func(self.glues.resumes[t.index()].unwrap(), self.b.func);
+        let f = self.calls.reference(
+            self.object,
+            &mut self.b,
+            self.glues.resumes[t.index()].unwrap(),
+        );
         self.b.ins().func_addr(types::I64, f)
     }
     fn fields(&mut self, base: Value, index: usize) -> Result<()> {
@@ -407,9 +412,7 @@ impl Glue<'_, '_, '_> {
                 self.b.ins().brif(present, yes, &[], done, &[]);
                 self.b.switch_to_block(yes);
                 let code = self.load(env, 0);
-                let sig = self
-                    .b
-                    .import_signature(abi::Signature::c(&[P, P], &[B]).clif);
+                let sig = self.calls.own_fn_cleanup(&mut self.b);
                 self.b.ins().call_indirect(sig, code, &[self.ctx, env]);
                 self.b.ins().jump(done, &[]);
                 self.b.switch_to_block(done);

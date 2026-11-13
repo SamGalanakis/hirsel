@@ -38,18 +38,14 @@ impl Function<'_, '_, '_> {
         let value = self.float_const(t, f64::NAN);
         self.b.ins().select(nan, value, v)
     }
-    fn libcall(&mut self, name: &str, args: &[Value]) -> Result<Value> {
-        let t = self.b.func.dfg.value_type(args[0]);
-        let mut sig = self.object.make_signature();
-        sig.params.extend(args.iter().map(|_| AbiParam::new(t)));
-        sig.returns.push(AbiParam::new(t));
-        let id = self
-            .object
-            .declare_function(name, Linkage::Import, &sig)
-            .map_err(error)?;
-        let reference = self.object.declare_func_in_func(id, self.b.func);
-        let call = self.b.ins().call(reference, args);
-        Ok(self.b.inst_results(call)[0])
+    fn libcall(&mut self, name: &'static str, args: &[Value]) -> Result<Value> {
+        let t = Ty::Scalar(if self.b.func.dfg.value_type(args[0]) == types::F32 {
+            Scalar::F32
+        } else {
+            Scalar::F64
+        });
+        let params = [t; 2];
+        Ok(self.c_call(name, &params[..args.len()], &[t], args)?[0])
     }
     pub fn binary(&mut self, op: BinaryOp, t: Ty, l: Value, r: Value) -> Result<Value> {
         use BinaryOp::*;

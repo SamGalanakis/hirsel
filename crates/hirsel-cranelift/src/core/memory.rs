@@ -6,12 +6,13 @@ use cranelift_codegen::ir::{Value, condcodes::IntCC};
 impl Function<'_, '_, '_> {
     pub fn c_call(
         &mut self,
-        name: &str,
+        name: &'static str,
         params: &[Ty],
         results: &[Ty],
         args: &[Value],
-    ) -> Result<Vec<Value>> {
-        c_call(self.object, &mut self.b, name, params, results, args)
+    ) -> Result<calls::NativeValues> {
+        self.calls
+            .c(self.object, &mut self.b, name, params, results, args)
     }
     pub fn memory(&mut self, inst: &Inst) -> Result<()> {
         let p = Ty::Ptr;
@@ -98,7 +99,7 @@ impl Function<'_, '_, '_> {
             Inst::Drop { address, ty, fail } => {
                 if let Some(glue) = self.glues.drops[ty.index()] {
                     let at = self.addr(address);
-                    let glue = self.object.declare_func_in_func(glue, self.b.func);
+                    let glue = self.calls.reference(self.object, &mut self.b, glue);
                     let call = self.b.ins().call(glue, &[self.context, at]);
                     let status = self.b.inst_results(call)[0];
                     self.call_failure(status, fail)?;
@@ -137,9 +138,11 @@ impl Function<'_, '_, '_> {
                 )
                 .unwrap();
                 let n = self.b.ins().iconst(types::I64, n as i64);
-                let f = self
-                    .object
-                    .declare_func_in_func(self.glues.resumes[ty.index()].unwrap(), self.b.func);
+                let f = self.calls.reference(
+                    self.object,
+                    &mut self.b,
+                    self.glues.resumes[ty.index()].unwrap(),
+                );
                 let recipe = self.b.ins().func_addr(types::I64, f);
                 self.c_call(
                     "hirsel_core_release",
@@ -215,28 +218,4 @@ impl Function<'_, '_, '_> {
         }
         Ok(())
     }
-}
-
-pub(super) fn c_call(
-    object: &mut ObjectModule,
-    b: &mut FunctionBuilder<'_>,
-    name: &str,
-    params: &[Ty],
-    results: &[Ty],
-    args: &[Value],
-) -> Result<Vec<Value>> {
-    let sig = abi::Signature::c(params, results);
-    let storage = sig.indirect.then(|| sig.storage(b));
-    let mut actual = Vec::new();
-    if let Some(storage) = storage {
-        actual.push(storage);
-    }
-    actual.extend_from_slice(args);
-    let func = object
-        .declare_function(name, Linkage::Import, &sig.clif)
-        .map_err(error)?;
-    let reference = object.declare_func_in_func(func, b.func);
-    let inst = b.ins().call(reference, &actual);
-    let values = b.inst_results(inst).to_vec();
-    Ok(sig.unpack(b, &values, storage))
 }

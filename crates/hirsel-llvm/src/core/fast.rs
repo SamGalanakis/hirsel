@@ -45,6 +45,27 @@ impl FunctionEmitter<'_> {
                 .join(", ")
         ));
     }
+    /// Every inline Arc operation has one immutable context gate. No sink pays
+    /// one test; a recorded run calls the context-first hook on the cold branch.
+    pub(super) fn arc_event(&mut self, name: &str, arguments: &[(String, String)]) {
+        let n = self.next;
+        self.next += 1;
+        let at = self.field_pointer("%context", CONTEXT_EVENTS);
+        self.intrinsics.insert("!1 = !{}".into());
+        let events = self.calc(format!("load i64, ptr {at}, align 8, !invariant.load !1"));
+        let empty = self.calc(format!("icmp eq i64 {events}, 0"));
+        self.likely(
+            &empty,
+            &format!("arc_event_done{n}"),
+            &format!("arc_event_call{n}"),
+        );
+        writeln!(self.code, "arc_event_call{n}:").unwrap();
+        let mut args = vec![("ptr".into(), "%context".into())];
+        args.extend_from_slice(arguments);
+        self.cold_void(name, &args);
+        self.line(format!("br label %arc_event_done{n}"));
+        writeln!(self.code, "arc_event_done{n}:").unwrap();
+    }
     fn admission_probe(&mut self, charge: &str) -> String {
         #[cfg(test)]
         {
@@ -349,7 +370,7 @@ impl FunctionEmitter<'_> {
         }
         writeln!(self.code, "retained{n}:").unwrap();
         if atomic {
-            self.runtime_void("hirsel_core_arc_shared", &[("ptr".into(), node.into())]);
+            self.arc_event("hirsel_core_arc_shared", &[("ptr".into(), node.into())]);
         }
     }
     pub(super) fn unique_node(&mut self, node: &str, atomic: bool) -> String {
@@ -360,7 +381,7 @@ impl FunctionEmitter<'_> {
         });
         let unique = self.calc(format!("icmp eq i64 {count}, 1"));
         if atomic {
-            self.runtime_void(
+            self.arc_event(
                 "hirsel_core_arc_unwrapped",
                 &[("i1 zeroext".into(), unique.clone())],
             );
@@ -390,7 +411,7 @@ impl FunctionEmitter<'_> {
         );
         writeln!(self.code, "release_nonlast{n}:").unwrap();
         if atomic {
-            self.runtime_void(
+            self.arc_event(
                 "hirsel_core_arc_released",
                 &[("i1 zeroext".into(), "false".into())],
             );
@@ -399,7 +420,7 @@ impl FunctionEmitter<'_> {
         writeln!(self.code, "release_last{n}:").unwrap();
         if atomic {
             self.line("fence acquire");
-            self.runtime_void(
+            self.arc_event(
                 "hirsel_core_arc_released",
                 &[("i1 zeroext".into(), "true".into())],
             );

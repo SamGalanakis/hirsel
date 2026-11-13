@@ -96,12 +96,21 @@ impl Function<'_, '_, '_> {
                     self.b.ins().brif(refused, ready, &[], init, &[]);
                     self.b.switch_to_block(init);
                     let one = self.b.ins().iconst(types::I64, 1);
-                    self.b.ins().store(
-                        cranelift_codegen::ir::MemFlagsData::trusted(),
-                        one,
-                        values[0],
-                        memory_layout::NODE_COUNT as i32,
-                    );
+                    if kind == AllocKind::Counted(Counted::Arc) {
+                        self.b.ins().atomic_store(
+                            cranelift_codegen::ir::MemFlagsData::trusted(),
+                            one,
+                            values[0],
+                        );
+                        self.arc_event("hirsel_core_arc_initialized", &[], &[])?;
+                    } else {
+                        self.b.ins().store(
+                            cranelift_codegen::ir::MemFlagsData::trusted(),
+                            one,
+                            values[0],
+                            memory_layout::NODE_COUNT as i32,
+                        );
+                    }
                     self.b.ins().jump(ready, &[]);
                     self.b.switch_to_block(ready);
                 }
@@ -121,6 +130,7 @@ impl Function<'_, '_, '_> {
                     &mut self.b,
                     &mut self.calls,
                     self.object,
+                    self.context,
                     node,
                     kind == Counted::Arc,
                 )?;
@@ -143,7 +153,7 @@ impl Function<'_, '_, '_> {
                 };
                 let value = self.b.ins().icmp_imm_s(IntCC::Equal, count, 1);
                 if kind == Counted::Arc {
-                    self.c_call("hirsel_core_arc_unwrapped", &[boolean], &[], &[value])?;
+                    self.arc_event("hirsel_core_arc_unwrapped", &[boolean], &[value])?;
                 }
                 self.set(result, value);
             }

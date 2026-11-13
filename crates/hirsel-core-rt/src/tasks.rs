@@ -231,6 +231,26 @@ pub(crate) fn event(kind: u8, object: u64, value: u64) {
         }
     }
 }
+/// Complete a recorded inline operation without consulting task TLS.
+/// # Safety
+/// Context's immutable event word is nonzero and pins its current Task/run.
+pub(crate) unsafe fn event_in(context: *const Context, kind: u8, object: u64, value: u64) {
+    // SAFETY: the emitted gate proves the run has this immutable event sink.
+    unsafe {
+        let task = (*context).events as *const Task;
+        let run = &*(*task).run;
+        let sink = run.provider.event.unwrap_unchecked();
+        sink(
+            run.provider.state,
+            Event {
+                kind,
+                task: (*task).id,
+                object,
+                value,
+            },
+        );
+    }
+}
 pub(crate) fn current_id() -> u64 {
     let task = CURRENT.get();
     if task.is_null() {
@@ -398,6 +418,11 @@ pub unsafe fn run_root(
     unsafe {
         ptr::copy_nonoverlapping(argument, root.input.as_ptr(), input_bytes);
         let root_pointer: *mut Task = &mut *root;
+        (*context).events = if run.provider.event.is_some() {
+            root_pointer.addr()
+        } else {
+            0
+        };
         root.sp = root
             .stack
             .prepare(start, root_pointer.cast(), ptr::null_mut());
@@ -424,6 +449,7 @@ pub unsafe fn run_root(
         if root.failed == 0 {
             ptr::copy_nonoverlapping(root.result.as_ptr(), destination, result_bytes);
         }
+        (*context).events = 0;
         root.failed
     }
 }
@@ -479,6 +505,11 @@ pub unsafe extern "C" fn hirsel_core_spawn(
         });
         let task = Box::into_raw(task);
         (*task).context = (*task).owned_context.as_mut().unwrap();
+        (*(*task).context).events = if (*(*task).context).events != 0 {
+            task.addr()
+        } else {
+            0
+        };
         ptr::copy_nonoverlapping(input, (*task).input.as_ptr(), layout.input.bytes);
         (*task).sp = (*task).stack.prepare(start, task.cast(), ptr::null_mut());
         (*run).all = task;

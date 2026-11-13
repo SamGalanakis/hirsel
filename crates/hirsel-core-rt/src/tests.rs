@@ -185,6 +185,7 @@ fn frozen_prefixes_match_the_emitter_contract() {
         std::mem::offset_of!(Context, current),
         CONTEXT_CURRENT_LIMIT
     );
+    assert_eq!(std::mem::offset_of!(Context, events), CONTEXT_EVENTS);
     assert_eq!(
         std::mem::offset_of!(crate::limit::LimitRecord, available),
         LIMIT_AVAILABLE

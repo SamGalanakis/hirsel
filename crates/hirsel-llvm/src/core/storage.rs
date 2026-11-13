@@ -361,7 +361,7 @@ impl FunctionEmitter<'_> {
                         self.line(format!(
                             "store atomic i64 1, ptr {block} monotonic, align 8"
                         ));
-                        self.runtime_void("hirsel_core_arc_initialized", &[]);
+                        self.arc_event("hirsel_core_arc_initialized", &[]);
                     } else {
                         self.line(format!("store i64 1, ptr {block}, align 8"));
                     }

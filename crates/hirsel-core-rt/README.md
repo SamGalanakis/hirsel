@@ -94,8 +94,14 @@ Inline count offsets remain count=0, payload=8, aligned to 8 on both targets.
 Rc initialization/counts use ordinary u64 stores. Arc initialization uses an
 atomic u64 initialized to 1 before publication; share uses checked relaxed CAS,
 release uses release decrement plus an acquire fence at zero, and unwrap loads
-with acquire. Emitters call hirsel_core_arc_initialized/shared/released/unwrapped after each Arc operation, before
-last-release glue. The hook returns no status and admits/allocates nothing.
+with acquire. The frozen context event word at offset8 is zero without an
+installed sink. Emitters test it after each Arc operation and call the context-first
+hirsel_core_arc_initialized/shared/released/unwrapped only on the cold nonzero
+branch, before last-release glue. The word points at this pinned task when enabled.
+The root sets it before execution and each child inherits recording but installs
+its own task pointer before publication. It is immutable until the task's run ends.
+The taken hook reads task/run directly from the word, without TLS. Hooks return no
+status and admit/allocate nothing.
 The scheduler holds its event turn across the count operation and hook.
 Acceptance builds enable memcheck to register alternate stacks; Rust tests do so
 automatically. Normal archives carry no Valgrind stack-registration work.

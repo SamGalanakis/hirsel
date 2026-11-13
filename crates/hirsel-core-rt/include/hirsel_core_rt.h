@@ -5,6 +5,7 @@
 #include <stdbool.h>
 /* Frozen 64-bit emitter layouts; offsets in bytes, no atomic local accounting. */
 #define HIRSEL_CORE_CONTEXT_CURRENT_LIMIT 0
+#define HIRSEL_CORE_CONTEXT_EVENTS 8
 #define HIRSEL_CORE_LIMIT_AVAILABLE 0
 #define HIRSEL_CORE_LIMIT_OUTSTANDING 8
 #define HIRSEL_CORE_REGION_CURSOR 0
@@ -48,14 +49,16 @@ typedef struct HirselCoreWorklist HirselCoreWorklist;
 /* Resumable glue: cursor starts at 0. Advance it, enqueue at most one child,
    return false; return true only after all children and fields are cleaned. */
 typedef bool (*HirselCoreDropRecipe)(HirselCoreContext *, void *payload, uint64_t *cursor, HirselCoreWorklist *);
-/* Inline Arc completion hooks, no status/admission/suspension/count mutation.
+/* Inline Arc completion hooks: call only when ctx[CONTEXT_EVENTS] != 0.
+   The event word/sink are immutable during a run. No TLS read on the taken path.
+   No status/admission/suspension/count mutation.
    Scheduler owns the event turn across mutation and hook; release precedes glue. */
 enum { HIRSEL_CORE_ARC_EVENT_NEW=10, HIRSEL_CORE_ARC_EVENT_SHARE=11,
        HIRSEL_CORE_ARC_EVENT_RELEASE=12, HIRSEL_CORE_ARC_EVENT_UNWRAP=13 };
-void hirsel_core_arc_initialized(void);
-void hirsel_core_arc_shared(const void *node); /* loads completed new count */
-void hirsel_core_arc_released(bool last);
-void hirsel_core_arc_unwrapped(bool unique);
+void hirsel_core_arc_initialized(const HirselCoreContext *);
+void hirsel_core_arc_shared(const HirselCoreContext *, const void *node); /* loads completed new count */
+void hirsel_core_arc_released(const HirselCoreContext *, bool last);
+void hirsel_core_arc_unwrapped(const HirselCoreContext *, bool unique);
 void hirsel_core_counted_init(void *node, bool atomic);
 void hirsel_core_share(void *node, bool atomic);
 bool hirsel_core_try_unwrap(void *node, bool atomic);

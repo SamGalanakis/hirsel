@@ -40,6 +40,12 @@ pub struct Capacity {
 pub struct Context {
     // Funding's first word is the one frozen current-record pointer.
     pub(crate) current: Funding,
+    /// Frozen event gate. Zero means no scheduler event sink; otherwise this
+    /// is the pinned Task pointer used by context-first Arc completion hooks.
+    /// The root sets it before execution; children inherit the enabled state
+    /// and install their own Task pointer before publication. It is immutable
+    /// for the task's run, then cleared when the root returns.
+    pub events: usize,
     pub(crate) run: *const crate::process::Config,
     pub(crate) cancel_requested: bool,
     pub(crate) cancel_shield: usize,
@@ -64,6 +70,7 @@ impl Context {
         current.normalize();
         Self {
             current,
+            events: 0,
             run: std::ptr::null(),
             cancel_requested: false,
             cancel_shield: 0,

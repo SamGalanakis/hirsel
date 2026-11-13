@@ -54,7 +54,13 @@
 //! decrement plus an acquire fence before release_last. Provider event ordering
 //! still surrounds every Arc operation. Arc initialization stores an aligned
 //! atomic u64 value 1 before publication; Rc initialization stores ordinary u64 1.
-//! Inline Arc calls arc_initialized/shared/released/unwrapped after each operation.
+//! The immutable u64 event word is at context+CONTEXT_EVENTS (8). Zero means
+//! no sink; otherwise it is the pinned Task pointer used by the context-first
+//! hooks. After each inline Arc operation, test events != 0 and call
+//! arc_initialized/shared/released/unwrapped(context, ...) on the cold side.
+//! Without a sink no hook is called. The root sets the word before execution;
+//! each child inherits recording and installs its own pointer before publication.
+//! It cannot change until that task's run ends. Hooks never read task TLS.
 //! These hooks return unit, admit/allocate nothing and never mutate a count;
 //! release publishes before last-release glue.
 //! A statically empty bound can emit the
@@ -277,35 +283,59 @@ pub extern "C" fn hirsel_core_dest_id() -> u64 {
     crate::destination::next()
 }
 
-/// Publish inline Arc initialization after storing atomic u64 1. No status,
-/// admission, allocation, suspension or count mutation. The scheduler owns
-/// the event turn across initialization and this hook, before publication.
-#[unsafe(no_mangle)]
-pub extern "C" fn hirsel_core_arc_initialized() {
-    crate::tasks::event(crate::tasks::ARC_NEW, 0, 1);
+#[cfg(test)]
+thread_local! { pub(crate) static ARC_HOOK_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+#[inline(always)]
+fn count_arc_hook() {
+    #[cfg(test)]
+    ARC_HOOK_CALLS.update(|n| n + 1);
 }
-
-/// Dispatch the provider event after an emitted Arc increment.
+/// Complete inline atomic initialization. No status/admission/allocation/count mutation.
 /// # Safety
-/// Node is a live initialized Arc under the provider's operation order.
+/// Context is live and events != 0; its run's sink is immutable. Count 1 was
+/// initialized before publication and the scheduler still owns the event turn.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_arc_shared(node: *const u8) {
-    // SAFETY: caller just completed the increment on this live Arc.
-    let count = unsafe {
-        (&*node.cast::<std::sync::atomic::AtomicU64>()).load(std::sync::atomic::Ordering::Relaxed)
-    };
-    crate::tasks::event(crate::tasks::ARC_SHARE, 0, count);
+pub unsafe extern "C" fn hirsel_core_arc_initialized(context: *const Context) {
+    count_arc_hook();
+    // SAFETY: caller's event gate pins this task and sink through the callback.
+    unsafe {
+        crate::tasks::event_in(context, crate::tasks::ARC_NEW, 0, 1);
+    }
 }
-/// Dispatch the provider event after an emitted Arc decrement. Admits nothing
-/// and has no failure status; last-release traversal has not begun yet.
+/// Complete an emitted Arc increment. No status/admission/allocation.
+/// # Safety
+/// As for arc_initialized; node is live and its checked atomic increment completed.
 #[unsafe(no_mangle)]
-pub extern "C" fn hirsel_core_arc_released(last: bool) {
-    crate::tasks::event(crate::tasks::ARC_RELEASE, 0, u64::from(last));
+pub unsafe extern "C" fn hirsel_core_arc_shared(context: *const Context, node: *const u8) {
+    count_arc_hook();
+    // SAFETY: caller holds the node and the recorded event turn.
+    unsafe {
+        let count = (&*node.cast::<std::sync::atomic::AtomicU64>())
+            .load(std::sync::atomic::Ordering::Relaxed);
+        crate::tasks::event_in(context, crate::tasks::ARC_SHARE, 0, count);
+    }
 }
-/// Dispatch the provider event after an emitted Arc uniqueness test.
+/// Complete an emitted Arc decrement before last-release glue/refunds.
+/// # Safety
+/// As for arc_initialized; last exactly describes the completed decrement.
 #[unsafe(no_mangle)]
-pub extern "C" fn hirsel_core_arc_unwrapped(unique: bool) {
-    crate::tasks::event(crate::tasks::ARC_UNWRAP, 0, u64::from(unique));
+pub unsafe extern "C" fn hirsel_core_arc_released(context: *const Context, last: bool) {
+    count_arc_hook();
+    // SAFETY: the event gate pins this immutable task/sink until completion.
+    unsafe {
+        crate::tasks::event_in(context, crate::tasks::ARC_RELEASE, 0, u64::from(last));
+    }
+}
+/// Complete an emitted Arc acquire uniqueness test.
+/// # Safety
+/// As for arc_initialized; unique is the completed test result.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_arc_unwrapped(context: *const Context, unique: bool) {
+    count_arc_hook();
+    // SAFETY: the event gate pins this immutable task/sink until completion.
+    unsafe {
+        crate::tasks::event_in(context, crate::tasks::ARC_UNWRAP, 0, u64::from(unique));
+    }
 }
 
 /// # Safety

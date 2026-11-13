@@ -23,7 +23,7 @@ pub unsafe fn initialize(node: NonNull<u8>, atomic: bool) {
     unsafe {
         if atomic {
             node.cast::<AtomicU64>().as_ptr().write(AtomicU64::new(1));
-            crate::abi::hirsel_core_arc_initialized();
+            crate::tasks::event(crate::tasks::ARC_NEW, 0, 1);
         } else {
             node.cast::<u64>().as_ptr().write(1);
         }
@@ -46,7 +46,11 @@ pub unsafe fn share(node: NonNull<u8>, atomic: bool) {
             {
                 crate::process::stop(b"CountOverflow");
             }
-            crate::abi::hirsel_core_arc_shared(node.as_ptr());
+            crate::tasks::event(
+                crate::tasks::ARC_SHARE,
+                0,
+                node.cast::<AtomicU64>().as_ref().load(Ordering::Relaxed),
+            );
         } else {
             let count = &mut *node.cast::<u64>().as_ptr();
             *count = count
@@ -66,7 +70,7 @@ pub unsafe fn try_unwrap(node: NonNull<u8>, atomic: bool) -> bool {
     unsafe {
         if atomic {
             let unique = node.cast::<AtomicU64>().as_ref().load(Ordering::Acquire) == 1;
-            crate::abi::hirsel_core_arc_unwrapped(unique);
+            crate::tasks::event(crate::tasks::ARC_UNWRAP, 0, u64::from(unique));
             unique
         } else {
             node.cast::<u64>().as_ptr().read() == 1
@@ -111,7 +115,7 @@ pub unsafe fn decrement(node: NonNull<u8>, atomic: bool) -> bool {
             if last {
                 fence(Ordering::Acquire);
             }
-            crate::abi::hirsel_core_arc_released(last);
+            crate::tasks::event(crate::tasks::ARC_RELEASE, 0, u64::from(last));
             last
         } else {
             let count = &mut *node.cast::<u64>().as_ptr();

@@ -17,6 +17,8 @@ pub(crate) fn task_child(
     context.primary = Some(crate::causes::Cell::prepaid(primary));
     // SAFETY: spawner and child share the same run-owned provider configuration.
     context.run = unsafe { (*parent).run };
+    // SAFETY: child inherits recording; spawn replaces the pointer before publication.
+    context.events = unsafe { (*parent).events };
     // SAFETY: every task borrows the root run's provider-file registry.
     context.host_files = unsafe { (*parent).host_files };
     context

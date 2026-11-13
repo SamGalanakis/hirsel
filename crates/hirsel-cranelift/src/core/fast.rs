@@ -27,6 +27,17 @@ impl Function<'_, '_, '_> {
         self.b.set_cold_block(block);
         block
     }
+    pub fn arc_event(&mut self, name: &'static str, types: &[Ty], args: &[Value]) -> Result<()> {
+        arc_event(
+            &mut self.b,
+            &mut self.calls,
+            self.object,
+            self.context,
+            name,
+            types,
+            args,
+        )
+    }
     pub fn admission(&mut self, payer: Value, charge: Value) -> Result<(Value, Value)> {
         let available = self.load_word(payer, memory_layout::LIMIT_AVAILABLE);
         let fits = self
@@ -253,10 +264,42 @@ impl Function<'_, '_, '_> {
     }
 }
 
+pub(super) fn arc_event(
+    b: &mut FunctionBuilder<'_>,
+    calls: &mut calls::Calls<'_>,
+    object: &mut ObjectModule,
+    context: Value,
+    name: &'static str,
+    argument_types: &[Ty],
+    arguments: &[Value],
+) -> Result<()> {
+    let call = b.create_block();
+    let done = b.create_block();
+    b.set_cold_block(call);
+    let events = b.ins().load(
+        types::I64,
+        Flags::trusted().with_readonly(),
+        context,
+        memory_layout::CONTEXT_EVENTS as i32,
+    );
+    let empty = b.ins().icmp_imm_s(IntCC::Equal, events, 0);
+    b.ins().brif(empty, done, &[], call, &[]);
+    b.switch_to_block(call);
+    let mut params = vec![P];
+    params.extend_from_slice(argument_types);
+    let mut args = vec![context];
+    args.extend_from_slice(arguments);
+    calls.c(object, b, name, &params, &[], &args)?;
+    b.ins().jump(done, &[]);
+    b.switch_to_block(done);
+    Ok(())
+}
+
 pub(super) fn share(
     b: &mut FunctionBuilder<'_>,
     calls: &mut calls::Calls<'_>,
     object: &mut ObjectModule,
+    context: Value,
     node: Value,
     atomic: bool,
 ) -> Result<()> {
@@ -281,7 +324,15 @@ pub(super) fn share(
         let observed = b.create_block();
         b.ins().brif(same, observed, &[], head, &[actual.into()]);
         b.switch_to_block(observed);
-        calls.c(object, b, "hirsel_core_arc_shared", &[P], &[], &[node])?;
+        arc_event(
+            b,
+            calls,
+            object,
+            context,
+            "hirsel_core_arc_shared",
+            &[P],
+            &[node],
+        )?;
         b.ins().jump(done, &[]);
     } else {
         let old = b.ins().load(
@@ -355,7 +406,15 @@ pub(super) fn release(
         b.ins().icmp_imm_s(IntCC::Equal, next, 0)
     };
     if atomic {
-        calls.c(object, b, "hirsel_core_arc_released", &[B], &[], &[last])?;
+        arc_event(
+            b,
+            calls,
+            object,
+            context,
+            "hirsel_core_arc_released",
+            &[B],
+            &[last],
+        )?;
     }
     let slow = b.create_block();
     let done = b.create_block();

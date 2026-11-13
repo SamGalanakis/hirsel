@@ -754,22 +754,32 @@ fn inline_arc_count_operations_publish_the_same_events_as_runtime_entries() {
         unsafe {
             let node = Block::graph(&*context, Some(16), 16, 8).unwrap().into_raw();
             node.cast::<AtomicU64>().as_ptr().write(AtomicU64::new(1));
-            hirsel_core_arc_initialized();
+            if (*context).events != 0 {
+                hirsel_core_arc_initialized(context);
+            }
             let count = node.cast::<AtomicU64>().as_ref();
             let old = count
                 .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_add(1))
                 .unwrap();
             assert_eq!(old, 1);
-            hirsel_core_arc_shared(node.as_ptr());
+            if (*context).events != 0 {
+                hirsel_core_arc_shared(context, node.as_ptr());
+            }
             let last = count.fetch_sub(1, Ordering::Release) == 1;
-            hirsel_core_arc_released(last);
+            if (*context).events != 0 {
+                hirsel_core_arc_released(context, last);
+            }
             let unique = count.load(Ordering::Acquire) == 1;
-            hirsel_core_arc_unwrapped(unique);
+            if (*context).events != 0 {
+                hirsel_core_arc_unwrapped(context, unique);
+            }
             let last = count.fetch_sub(1, Ordering::Release) == 1;
             if last {
                 fence(Ordering::Acquire);
             }
-            hirsel_core_arc_released(last);
+            if (*context).events != 0 {
+                hirsel_core_arc_released(context, last);
+            }
             crate::block::free_graph(node, 16);
             out.cast::<u64>().write(u64::from(unique && last));
         }
@@ -790,6 +800,95 @@ fn inline_arc_count_operations_publish_the_same_events_as_runtime_entries() {
             (ARC_RELEASE, 0),
             (ARC_UNWRAP, 1),
             (ARC_RELEASE, 1)
+        ]
+    );
+}
+
+#[test]
+fn event_gate_skips_all_arc_hooks_without_a_sink_and_children_inherit_recording() {
+    unsafe extern "C" fn child(context: *mut Context, out: *mut u8, input: *mut u8) -> u8 {
+        // SAFETY: parent transfers one expected recording bit and owns result.
+        unsafe {
+            out.cast::<u64>().write(u64::from(
+                ((*context).events != 0) == input.cast::<bool>().read(),
+            ));
+        }
+        0
+    }
+    unsafe extern "C" fn root(context: *mut Context, out: *mut u8, _: *mut u8) -> u8 {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let node = AtomicU64::new(1);
+        // SAFETY: exact emitted count/gate sequence under the scheduler turn.
+        unsafe {
+            if (*context).events != 0 {
+                hirsel_core_arc_initialized(context);
+            }
+            node.fetch_add(1, Ordering::Relaxed);
+            if (*context).events != 0 {
+                hirsel_core_arc_shared(context, (&node as *const AtomicU64).cast());
+            }
+            let last = node.fetch_sub(1, Ordering::Release) == 1;
+            if (*context).events != 0 {
+                hirsel_core_arc_released(context, last);
+            }
+            let unique = node.load(Ordering::Acquire) == 1;
+            if (*context).events != 0 {
+                hirsel_core_arc_unwrapped(context, unique);
+            }
+            let mut enabled = (*context).events != 0;
+            let task = hirsel_core_spawn(
+                context,
+                0,
+                (&mut enabled as *mut bool).cast(),
+                child,
+                layout::<bool, u64>(8),
+            );
+            assert!(!task.task.is_null());
+            assert_eq!(hirsel_core_join(context, task.task, out, 1).status, 0);
+        }
+        0
+    }
+    ARC_HOOK_CALLS.set(0);
+    let mut context = Context::new(1 << 20);
+    causes::task_start(&mut context).unwrap();
+    let mut result = 0u64;
+    // SAFETY: root has unit input and an exclusive initialized u64 destination.
+    unsafe {
+        assert_eq!(
+            run_root(
+                &mut context,
+                root,
+                ptr::null_mut(),
+                (&mut result as *mut u64).cast(),
+                0,
+                8,
+                SchedulerProvider::default()
+            ),
+            0
+        );
+    }
+    assert_eq!(result, 1);
+    assert_eq!(context.events, 0);
+    assert_eq!(
+        ARC_HOOK_CALLS.get(),
+        0,
+        "a no-sink run must never enter a hook"
+    );
+    let (result, events) = run(root, ());
+    assert_eq!(result, 1);
+    assert_eq!(ARC_HOOK_CALLS.get(), 4);
+    let arc: Vec<_> = events
+        .iter()
+        .filter(|e| (ARC_NEW..=ARC_UNWRAP).contains(&e.kind))
+        .map(|e| (e.kind, e.value))
+        .collect();
+    assert_eq!(
+        arc,
+        [
+            (ARC_NEW, 1),
+            (ARC_SHARE, 2),
+            (ARC_RELEASE, 0),
+            (ARC_UNWRAP, 1)
         ]
     );
 }

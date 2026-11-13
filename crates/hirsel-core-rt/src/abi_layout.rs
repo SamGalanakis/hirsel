@@ -1,6 +1,7 @@
 // Frozen memory ABI for both supported 64-bit targets. This file is standalone:
 // native emitters include these constants without linking runtime semantics.
 pub const CONTEXT_CURRENT_LIMIT: usize = 0;
+pub const CONTEXT_EVENTS: usize = 8;
 pub const LIMIT_AVAILABLE: usize = 0;
 pub const LIMIT_OUTSTANDING: usize = 8;
 pub const REGION_CURSOR: usize = 0;
@@ -19,6 +20,7 @@ pub const GRAPH_PREFIX_BYTES: usize = 48;
 pub const RESOURCE_PREFIX_BYTES: usize = 16;
 
 // Arc count mutations are inline under the scheduler's event turn. Call
+// if context[CONTEXT_EVENTS] != 0, call the context-first cold hook
 // hirsel_core_arc_initialized/shared/released/unwrapped after the operation,
 // with released before last-release glue. These constants identify trace events.
 pub const ARC_EVENT_NEW: u8 = 10;

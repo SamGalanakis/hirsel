@@ -1,5 +1,4 @@
 // expect: gap generic definitions are not built
-// expect: gap calls to generic functions are not built
 // MEM-6: the callee's region index follows T, while the caller's starts at zero.
 fn consume[T, in r](take x: Writer[T, in r]) { }
 fn forward[in r](take x: Writer[u64, in r]) { consume(take x) }

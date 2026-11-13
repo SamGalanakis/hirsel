@@ -2,7 +2,6 @@
 // callee's region generic without inventing or losing the region argument.
 // expect: gap values of this type are not built
 // expect: gap generic definitions are not built
-// expect: gap calls to generic functions are not built
 stable type Leaf { n: u64 }
 stable type Tree = One(Leaf)
 fn inspect[in a](x: Leaf in a) -> u64 { 0 }

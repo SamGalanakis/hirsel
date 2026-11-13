@@ -1,0 +1,4 @@
+// A function name cannot shadow the core module at the head of a dotted path.
+// expect: accept
+// expect: run int(4) = 5
+fn int(x: u8) -> u8 { int.wrapping_add(x, 1) }

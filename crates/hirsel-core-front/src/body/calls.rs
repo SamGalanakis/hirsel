@@ -236,10 +236,10 @@ impl<'c, 'a> Cx<'c, 'a> {
         }
         let numeric = g.path.package_is("core", "1")
             && (g.path.0.modules == ["int"] || g.path.0.modules == ["float"]);
-        let v = if g.generics.is_empty() && !numeric {
-            self.emit_call(f, vals, result, n)
-        } else {
+        let v = if numeric {
             self.intrinsic(f, tys, vals, n)
+        } else {
+            self.emit_call(f, tys, vals, result, n)
         };
         (result, v)
     }
@@ -297,7 +297,11 @@ impl<'c, 'a> Cx<'c, 'a> {
                 // An explicit view where the parameter views anyway.
                 let (t, _) = self.expr(e, None);
                 let t = match self.t.kind(t) {
-                    TyKind::View(x) if !matches!(self.t.kind(pt), TyKind::View(_)) => *x,
+                    TyKind::View(x)
+                        if mode == Mode::View && !matches!(self.t.kind(pt), TyKind::View(_)) =>
+                    {
+                        *x
+                    }
                     _ => t,
                 };
                 self.arg_ty(pt, t, e, found);
@@ -328,7 +332,11 @@ impl<'c, 'a> Cx<'c, 'a> {
                     *val = self.place_ptr(at, e);
                 }
                 let t = match self.t.kind(ty) {
-                    TyKind::View(x) if !matches!(self.t.kind(pt), TyKind::View(_)) => *x,
+                    TyKind::View(x)
+                        if mode == Mode::View && !matches!(self.t.kind(pt), TyKind::View(_)) =>
+                    {
+                        *x
+                    }
                     _ => ty,
                 };
                 self.arg_ty(pt, t, e, found);
@@ -440,6 +448,18 @@ impl<'c, 'a> Cx<'c, 'a> {
                 continue;
             }
             checked[i] = true;
+            if !p.fns[f].generics[i].region
+                && kind(&p.decls, &self.t, t, &self.params) == Kind::Scoped
+            {
+                if p.fns[f].path.package_is("core", "1") {
+                    if !self.broken {
+                        self.gap(n, "scoped core type arguments are not built");
+                    }
+                } else {
+                    self.refuse("OWN-19", n, "a type parameter cannot be a scoped type");
+                }
+                return;
+            }
             let g = &p.fns[f].generics[i];
             let missing = g.bounds & !has_bounds(&p.decls, &self.t, t, &self.params);
             if missing != 0 {
@@ -481,6 +501,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             {
                 a.iter().zip(&b).all(|(&x, &y)| self.unify(x, y, s))
             }
+            (TyKind::Array(a, n), TyKind::Array(b, m)) if n == m => self.unify(a, b, s),
             (TyKind::View(a), TyKind::View(b)) => self.unify(a, b, s),
             (TyKind::Array(a, n), TyKind::Array(b, m)) if n == m => self.unify(a, b, s),
             (TyKind::Anchored(a, ar), TyKind::Anchored(b, br)) => {
@@ -501,14 +522,47 @@ impl<'c, 'a> Cx<'c, 'a> {
         }
     }
 
+    fn instance_row(&mut self, f: usize, types: &[TyId]) -> Result<(FuncId, SigId), &'static str> {
+        use std::hash::{Hash, Hasher};
+        if types.is_empty() {
+            return self.e.row(self.p, f);
+        }
+        let mut hash = std::hash::DefaultHasher::new();
+        f.hash(&mut hash);
+        types.hash(&mut hash);
+        let hash = hash.finish();
+        let mut next = self.instance_heads.get(&hash).copied();
+        while let Some(i) = next {
+            let row = &self.instance_rows[i];
+            if row.definition == f && row.arguments.get(&self.instance_args) == Some(types) {
+                return Ok(row.row);
+            }
+            next = row.next;
+        }
+        let row = self.e.instance(self.p, &mut self.t, f, types)?;
+        let arguments = PoolRange::push(&mut self.instance_args, types.iter().copied());
+        let next = self.instance_heads.insert(hash, self.instance_rows.len());
+        self.instance_rows.push(BodyInstance {
+            definition: f,
+            arguments,
+            next,
+            row,
+        });
+        Ok(row)
+    }
+
     pub(super) fn emit_call(
         &mut self,
         f: usize,
+        types: &[TyId],
         vals: &[Option<ValueId>],
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
-        let (func, signature) = match self.e.row(self.p, f) {
+        if !self.live() {
+            return None;
+        }
+        let (func, signature) = match self.instance_row(f, types) {
             Ok(row) => row,
             Err(what) => {
                 self.gap(n, what);
@@ -519,6 +573,10 @@ impl<'c, 'a> Cx<'c, 'a> {
             return None;
         }
         let g = &self.p.fns[f];
+        if !g.generics.is_empty() && g.body.is_none() && g.path.package_is("core", "1") {
+            self.gap(n, "this generic core operation is not built");
+            return None;
+        }
         let sig = &self.e.module.signatures[signature.index()];
         let (dest, result_ty) = (sig.dest, sig.results.first().copied());
         // The destination is the first argument: a fresh place the result is written to.
@@ -526,7 +584,8 @@ impl<'c, 'a> Cx<'c, 'a> {
         let start = self.b.pools.args.len();
         self.b.pools.args.extend(dest.map(Arg::Address));
         for (i, p) in g.params.iter().enumerate() {
-            let r = match self.rep(p.ty) {
+            let ty = subst(&mut self.t, p.ty, types);
+            let r = match self.rep(ty) {
                 Ok(Rep::None) if p.mode != Mode::Mut => continue,
                 Ok(r) => r,
                 Err(what) => {
@@ -540,7 +599,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             };
             let arg = match r {
                 _ if p.mode == Mode::Mut => {
-                    let id = self.e.type_row(self.p, &mut self.t, p.ty)?;
+                    let id = self.e.type_row(self.p, &mut self.t, ty)?;
                     let a = self.address(AddressBase::Value(v), &[], PlaceTy::Declared(id), n);
                     Arg::Address(a)
                 }
@@ -585,19 +644,11 @@ impl<'c, 'a> Cx<'c, 'a> {
         n: NodeId,
     ) -> Option<ValueId> {
         let g = &self.p.fns[f];
-        if !g.path.package_is("core", "1") {
-            self.gap(n, "calls to generic functions are not built");
-            return None;
-        }
         if g.path.0.modules == ["float"] {
             if tys.contains(&ERROR) {
                 return None;
             }
             return self.float_intrinsic(f, tys, vals, n);
-        }
-        if g.path.0.modules != ["int"] {
-            self.gap(n, "calls to generic functions are not built");
-            return None;
         }
         if tys.contains(&ERROR) {
             return None;

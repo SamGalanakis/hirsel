@@ -1,7 +1,7 @@
 // OWN-9: different fields of one record do not overlap (the spec's swap_halves; proto-872's safe program views p.a while assigning p.b).
 // expect: accept
 // expect: gap assignment to this place is not built
-// expect: gap calls to generic functions are not built
+
 // expect: gap cleanup of own values is not built
 
 // expect: gap values of this type are not built

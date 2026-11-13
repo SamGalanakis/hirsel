@@ -154,6 +154,44 @@ impl Emitter {
         self.rows[f] = Some(row);
         Ok(row)
     }
+    /// A closed generic call row. Source checking is definition-local; a row names
+    /// the concrete signature and instance the materializer must supply later.
+    fn instance(
+        &mut self,
+        p: &Program,
+        t: &mut impl TyRead,
+        f: usize,
+        arguments: &[TyId],
+    ) -> Result<(FuncId, SigId), &'static str> {
+        if arguments.is_empty() {
+            return self.row(p, f);
+        }
+        let fd = &p.fns[f];
+        let types: Vec<_> = arguments
+            .iter()
+            .map(|&ty| crate::decls::canonical(&p.decls, t, ty))
+            .collect();
+        let mut dictionaries = vec![];
+        for (generic, ty) in fd.generics.iter().zip(&types) {
+            for bit in 0..8 {
+                if generic.bounds & (1 << bit) != 0 {
+                    dictionaries.push(format!("{}[{ty}]", crate::decls::bound_names(1 << bit)));
+                }
+            }
+        }
+        let key = InstanceKey {
+            definition: fd.path.clone(),
+            types,
+            dictionaries,
+        };
+        if let Some(&function) = self.funcs.get(&key) {
+            return Ok((function, self.module.functions[function.index()].signature));
+        }
+        let signature = self.signature_inst(p, t, f, arguments)?;
+        let function = self.add_function(key, signature);
+        Ok((function, self.module.functions[function.index()].signature))
+    }
+
     /// The function row of a non-generic definition.
     pub fn function(&mut self, path: &DefPath, sig: Signature) -> FuncId {
         let key = InstanceKey {
@@ -161,6 +199,9 @@ impl Emitter {
             types: vec![],
             dictionaries: vec![],
         };
+        self.add_function(key, sig)
+    }
+    fn add_function(&mut self, key: InstanceKey, sig: Signature) -> FuncId {
         if let Some(&f) = self.funcs.get(&key) {
             return f;
         }
@@ -253,12 +294,23 @@ impl Emitter {
             return Err("generic definitions are not built");
         }
         let mut t = Local::new(&p.types);
+        self.signature_inst(p, &mut t, f, &[])
+    }
+    fn signature_inst(
+        &mut self,
+        p: &Program,
+        t: &mut impl TyRead,
+        f: usize,
+        arguments: &[TyId],
+    ) -> Result<Signature, &'static str> {
+        let fd = &p.fns[f];
         let mut params = vec![];
         for q in &fd.params {
-            let rep = self.rep(p, &mut t, q.ty)?;
+            let ty = subst(t, q.ty, arguments);
+            let rep = self.rep(p, t, ty)?;
             if q.mode == Mode::Mut {
                 let id = self
-                    .type_row(p, &mut t, q.ty)
+                    .type_row(p, t, ty)
                     .ok_or("values of this type are not built")?;
                 params.push(Param::Address(id));
                 continue;
@@ -269,8 +321,9 @@ impl Emitter {
                 Rep::Place(id) => params.push(Param::Address(id)),
             }
         }
-        let never = matches!(p.types.kind(fd.result), TyKind::Never);
-        let (results, dest) = match self.rep(p, &mut t, fd.result)? {
+        let result = subst(t, fd.result, arguments);
+        let never = matches!(t.kind(result), TyKind::Never);
+        let (results, dest) = match self.rep(p, t, result)? {
             Rep::None => (vec![], None),
             Rep::Scalar(s) => (vec![s], None),
             Rep::Place(id) => (vec![], Some(id)),
@@ -453,6 +506,13 @@ struct Frame {
     scopes: usize,
 }
 
+struct BodyInstance {
+    definition: usize,
+    arguments: PoolRange<TyId>,
+    next: Option<usize>,
+    row: (FuncId, SigId),
+}
+
 struct Cx<'c, 'a> {
     p: &'c Program<'a>,
     at: ItemRef,
@@ -499,6 +559,9 @@ struct Cx<'c, 'a> {
     patterns: patterns::Patterns,
     /// Reused call workspaces, one for each active nesting level.
     call_scratch: Vec<calls::CallScratch>,
+    instance_heads: HashMap<u64, usize>,
+    instance_rows: Vec<BodyInstance>,
+    instance_args: Vec<TyId>,
     binder_at: HashMap<(u32, u32), u32>,
     frames: Vec<Frame>,
     joins: Vec<Join>,
@@ -570,6 +633,9 @@ impl<'c, 'a> Cx<'c, 'a> {
             call_seq: 0,
             patterns: patterns::Patterns::default(),
             call_scratch: vec![],
+            instance_heads: HashMap::new(),
+            instance_rows: vec![],
+            instance_args: vec![],
             binder_at,
             frames: vec![],
             joins: vec![],

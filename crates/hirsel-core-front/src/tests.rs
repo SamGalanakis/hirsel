@@ -729,3 +729,47 @@ fn sibling_main_wrapper_executes_the_sibling_body() {
         eval::Outcome::Returned(vec![42])
     );
 }
+
+/// PROG-5: type widths distinguish instances; equal requests name the same callee.
+#[test]
+fn generic_call_keys_separate_widths_and_reuse_equal_instances() {
+    let (index, modules) = program_inputs(
+        "fn id[T: key](take x: T) -> T { x }\n\
+         fn byte(x: u8) -> u8 { id(x) }\n\
+         fn word(x: u64) -> u64 { id(x) }\n\
+         fn again(x: u8) -> u8 { id(x) }",
+    );
+    let p = Program::declare(&index, &modules);
+    assert!(p.refusals.is_empty(), "{:?}", p.refusals);
+    let mut emitter = Emitter::new();
+    let mut callers = HashMap::new();
+    for (f, fd) in p.fns.iter().enumerate() {
+        if fd.body.is_none() || !fd.generics.is_empty() {
+            continue;
+        }
+        let check = p.check_lower(f, &mut emitter);
+        assert!(check.refusals.is_empty(), "{:?}", check.refusals);
+        assert!(check.gaps.is_empty(), "{:?}", check.gaps);
+        callers.insert(fd.path.0.name.as_str(), check.function.unwrap());
+    }
+    let module = &emitter.module;
+    let target = |name| {
+        let caller = &module.functions[callers[name].index()];
+        let call = &caller.body.as_ref().unwrap().calls[0];
+        let hirsel_core_ir::Callee::Direct(function) = call.callee else {
+            panic!("direct call")
+        };
+        function
+    };
+    assert!(wf::module(module).is_ok());
+    let byte = target("byte");
+    let word = target("word");
+    assert_eq!(byte, target("again"));
+    assert_ne!(byte, word);
+    for (function, ty) in [(byte, "u8"), (word, "u64")] {
+        let function = &module.functions[function.index()];
+        let key = &module.instances[function.instance.index()];
+        assert_eq!(key.types, [ty]);
+        assert_eq!(key.dictionaries, [format!("key[{ty}]")]);
+    }
+}

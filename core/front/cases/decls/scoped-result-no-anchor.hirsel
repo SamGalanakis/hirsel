@@ -2,5 +2,5 @@
 // OWN-20's example: a scoped result names its anchor.
 fn first(xs: List[String]) -> Option[View[String]] { list.get(xs, 0) }
 // The body is not built yet (bodies of these types come with slice c and e).
-// expect: gap calls to generic functions are not built
+
 // expect: gap cleanup of own values is not built

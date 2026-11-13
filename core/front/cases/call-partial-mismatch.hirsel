@@ -2,6 +2,6 @@
 // The first two arguments determine T and U; the second mismatches the tuple (T, T).
 // expect: refuse LANG-11 at 7:31
 // expect: gap generic definitions are not built
-// expect: gap calls to generic functions are not built
+
 fn choose[T, U](take x: T, n: (T, T), take y: U) -> T { x }
 fn f() -> bool { choose(true, false, 3u64) }

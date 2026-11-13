@@ -271,10 +271,17 @@ impl Emitter {
             })
             .collect();
         let (arguments, signed) = (&erased[..], &rooted[..]);
+        // An anchor bounds lifetime without changing a layout. Instance identities
+        // name the published row, exactly as the materializer looks it up.
         let types: Vec<_> = arguments
             .iter()
-            .map(|&ty| crate::decls::canonical(&p.decls, t, ty))
-            .collect();
+            .map(|&ty| {
+                let row = self
+                    .type_row(p, t, ty)
+                    .ok_or("values of this type are not built")?;
+                Ok(self.module.types[row.index()].name.clone())
+            })
+            .collect::<Result<_, &'static str>>()?;
         let mut dictionaries = vec![];
         for (generic, ty) in fd.generics.iter().zip(&types) {
             for bit in 0..u16::BITS {
@@ -290,10 +297,6 @@ impl Emitter {
         };
         if let Some(&function) = self.funcs.get(&key) {
             return Ok((function, self.module.functions[function.index()].signature));
-        }
-        for &ty in arguments {
-            self.type_row(p, t, ty)
-                .ok_or("values of this type are not built")?;
         }
         let signature = self.signature_inst(p, t, f, signed)?;
         let function = self.add_function(key, signature);

@@ -474,6 +474,12 @@ fn cases(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 #[test]
+fn anchored_instance_key() {
+    let failures = run_case(&root().join("cases/body/instance-anchored.hirsel"));
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
 fn list_replacement() {
     let failures = run_case(&root().join("cases/body/list-set-static-gap.hirsel"));
     assert!(failures.is_empty(), "{failures:?}");

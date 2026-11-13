@@ -243,7 +243,10 @@ A callable type has one of three kinds, written in the type:
 | `own fn(..) -> R`, `own[send] fn(..) -> R` | the above, and **owning closures** (LANG-14); `own[send]` only those whose captures are all `send` | own; `send` only with `[send]` | 16 |
 | `scoped fn(..) -> R` | any closure, and the above | scoped ([OWN-21](ownership.md#own-21-scoped-callbacks)) | 16 |
 
-A callable type also says whether it is `waits` (LANG-8). A callable fits a callable type
+The bracket of an owning callable type parses any bounds (LANG-5) but holds nothing but
+`send`: any other bound, or a second bound, is refused here, at the first bound name unless
+that is `send` and otherwise at the second. An owning closure is never `shareable`
+([OWN-4](ownership.md#own-4-bounds)). A callable type also says whether it is `waits` (LANG-8). A callable fits a callable type
 when its parameter modes and types and its result are identical, its kind is admitted, and
 it is `waits` only if the type is. Calling a callable never consumes it and follows the
 modes of a direct call. Any call through a callable may allocate. Cleaning an owning closure
@@ -253,6 +256,12 @@ nothing ([FAIL-13](failure.md#fail-13-mechanical-release)).
 ```hirsel
 fn apply(f: fn(u64) -> u64, x: u64) -> u64 { f(x) }
 fn main_like() -> u64 { apply(fn(x: u64) -> u64 { x + 1 }, 1) }
+```
+```hirsel
+fn run(take f: own[send] fn() -> u64) -> u64 { f() }
+```
+```hirsel
+fn run(take f: own[shareable] fn() -> u64) -> u64 { f() }   // refused: LANG-13, at shareable
 ```
 ```hirsel
 fn keep(take s: String) -> fn() -> u64 { fn() -> u64 { string.byte_len(s) } }

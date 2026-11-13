@@ -190,7 +190,9 @@ failures; deadlines and timeouts; task sets and selection; `@noalloc`; compile-t
 evaluation beyond `const`; unsafe code and foreign functions; layout declarations other
 than `@compact`; methods, traits and implementation contracts; imports; list and map
 literals (an `Inline` array literal is not one); format strings; `forget`; static brands;
-conversion of errors by `?`; code generic over the numeric types: the bounds `integer` and
+conversion of errors by `?`; shareable owning callables (`own[shareable] fn`), which would
+need every capture `shareable` and OWN-4 to admit the closure, its calls already only
+viewing the environment (LANG-14), and would add a second calling mode, from several tasks; code generic over the numeric types: the bounds `integer` and
 `float` are written only by core declarations ([OWN-4](ownership.md#own-4-bounds)), and a
 library writes one function per width; generics over an `Inline` length; persistent mutable views; derivation and codecs; contracts and
 facts; `@varint` (R25); documents in segments (R26); the store, runners and places; recording formats. A later opt-in execution-budget

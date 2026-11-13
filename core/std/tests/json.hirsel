@@ -256,3 +256,57 @@ fn print_escapes_round_trip() -> bool {
         out == expected && second == expected
     }
 }
+
+// Syntax is checked before admission. Invalid input under zero capacity stays Syntax;
+// valid null needs exactly one rounded8 block, with no parser staging allocation.
+// expect: run parse_admission_order() = true
+fn parse_admission_order() -> bool {
+    result.unwrap(bound bytes 0 {
+        region r {
+            let bad = match json.parse(r, "[1,]") { Error(Syntax(3)) => true, _ => false }
+            let good = match json.parse(r, "null") { Error(Build(Capacity(c))) => c.requested == 8 && c.available == 0, _ => false }
+            bad && good
+        }
+    })
+}
+
+// Two exact one-tag blobs remain charged; the third refusal leaves both readable.
+// expect: run parse_retains_admitted_prefix() = true
+fn parse_retains_admitted_prefix() -> bool {
+    result.unwrap(bound bytes 16 {
+        region r {
+            let a = result.unwrap(json.parse(r, "null"))
+            let b = result.unwrap(json.parse(r, "true"))
+            let refused = match json.parse(r, "false") { Error(Build(Capacity(c))) => c.requested == 8 && c.available == 0, _ => false }
+            refused && match (a, b) { (Null, True) => true, _ => false }
+        }
+    })
+}
+
+// Output GROWTH starts at capacity4, rounded charge8. At limit8, quote+a+\n
+// fills it and the next run is refused, keeping exactly those four bytes. At limit16,
+// quote+abc fills it; reserving the whole six-byte hex escape requests16 with8 left.
+// A printer that appends a hex escape piecemeal leaves a partial \u00 and fails this law.
+// expect: run print_capacity_prefixes() = true
+fn print_capacity_prefixes() -> bool {
+    region r {
+        let line = result.unwrap(json.parse(r, "\"a\\nb\""))
+        let hex = result.unwrap(json.parse(r, "\"abc\\u0000\""))
+        let zero = result.unwrap(bound bytes 0 {
+            let mut s = string.new()
+            let refused = match json.push_json(mut s, line) { Error(c) => c.requested == 8 && c.available == 0, _ => false }
+            refused && s == ""
+        })
+        let run = result.unwrap(bound bytes 8 {
+            let mut s = string.new()
+            let refused = match json.push_json(mut s, line) { Error(c) => c.requested == 8 && c.available == 0, _ => false }
+            refused && s == "\"a\\n"
+        })
+        let atomic_hex = result.unwrap(bound bytes 16 {
+            let mut s = string.new()
+            let refused = match json.push_json(mut s, hex) { Error(c) => c.requested == 16 && c.available == 8, _ => false }
+            refused && s == "\"abc"
+        })
+        zero && run && atomic_hex
+    }
+}

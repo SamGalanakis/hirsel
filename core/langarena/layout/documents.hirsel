@@ -1,0 +1,119 @@
+// LAYOUT family 1. The generator in generate.py fixes the tag/text/score schedule.
+// Construct, scan/select, discard a whole batch. Input is borrowed static UTF-8;
+// both ordinary and compact paths copy it, and unknown-size construction runs once.
+@compact(u32)
+stable type Item = Flag(bool) | Name(Text) | Scores(FixedSpan[u64])
+@compact(u32)
+stable type Batch { items: IndexedSpan[Item] }
+type OwnedItem = Flag(bool) | Name(String) | Scores(List[u64])
+
+fn label(source: String, i: u64) -> View[String] in source {
+    string.slice(source, 0, i % 24)
+}
+fn scores(i: u64) -> Result[List[u64], Capacity] {
+    let mut xs: List[u64] = list.with_capacity(3)?
+    let _ = list.push(mut xs, i)
+    let _ = list.push(mut xs, i + 1)
+    let _ = list.push(mut xs, i + 2)
+    Ok(take xs)
+}
+fn ordinary(n: u64) -> Result[u64, Capacity] {
+    let mut items: List[OwnedItem] = list.with_capacity(n)?
+    for i in 0 .. n {
+        let item: OwnedItem = if i % 3 == 0 { Flag(i % 2 == 0) }
+            else if i % 3 == 1 { Name(string.from(label("abcdefghijklmnopqrstuvw", i))?) }
+            else { Scores(scores(i)?) }
+        let _ = list.push(mut items, take item)
+    }
+    let mut sum: u64 = 0
+    for item in items {
+        sum += match item {
+            Flag(x) => if x { 1 } else { 0 },
+            Name(s) => string.byte_len(s),
+            Scores(xs) => xs[0] + xs[1] + xs[2],
+        }
+    }
+    Ok(sum)
+}
+fn encoded_size(n: u64) -> u64 {
+    let mut size: u64 = 8
+    for i in 0 .. n {
+        size += 4u64 + if i % 3 == 0 { 2 } else if i % 3 == 1 { 5 + i % 24 } else { 29 }
+    }
+    size
+}
+fn write_batch[in r](n: u64, take w: Writer[Batch, in r]) -> Result[Child[Batch], BuildError] {
+    emit(take w, Batch(items: emit(fn(take xs: Writer[IndexedSpan[Item], in r]) -> Result[Child[IndexedSpan[Item]], BuildError] {
+        for i in 0 .. n {
+            writer.append(mut xs, fn(take item: Writer[Item, in r]) -> Result[Child[Item], BuildError] {
+                if i % 3 == 0 { emit(take item, Flag(i % 2 == 0)) }
+                else if i % 3 == 1 { emit(take item, Name(label("abcdefghijklmnopqrstuvw", i))) }
+                else {
+                    // Three fixed-stride values; the same source schedule as ordinary.
+                    emit(take item, Scores(emit(fn(take values: Writer[FixedSpan[u64], in r]) -> Result[Child[FixedSpan[u64]], BuildError] {
+                        // The plain list is the core FixedSpan emit source, explicit scratch.
+                        let admission: Result[List[u64], Capacity] = list.with_capacity(3)
+                        let mut source: List[u64] = match take admission { Ok(take s) => take s, Error(c) => return Error(Capacity(c)) }
+                        let _ = list.push(mut source, i)
+                        let _ = list.push(mut source, i + 1)
+                        let _ = list.push(mut source, i + 2)
+                        emit(take values, source)
+                    })))
+                }
+            })?
+        }
+        writer.close(take xs)
+    })))
+}
+fn build_batch(r: Region, n: u64, reserve: u64) -> Result[Builder[Batch, in r], BuildError] {
+    build_stream_in(r, bytes reserve, fn(take w: Writer[Batch, in r]) -> Result[Child[Batch], BuildError] {
+        write_batch(n, take w)
+    })
+}
+fn scan(doc: Batch) -> u64 {
+    let mut sum: u64 = 0
+    for item in doc.items {
+        sum += match item {
+            Flag(x) => if x { 1 } else { 0 },
+            Name(t) => text.len(t),
+            Scores(xs) => xs[0] + xs[1] + xs[2],
+        }
+    }
+    sum
+}
+fn compact_sized(n: u64) -> Result[u64, BuildError] {
+    region r {
+        let b = build_batch(r, n, encoded_size(n))?
+        Ok(scan(finish(take b)))
+    }
+}
+fn compact_streaming(n: u64) -> Result[u64, BuildError] {
+    region r {
+        let b = build_batch(r, n, 64 * n + 8)?
+        Ok(scan(finish_trim(take b)))
+    }
+}
+fn show(out: Stdout, n: u64) -> Result[(), Exit] waits {
+    let mut s = string.new()
+    if let Error(_) = string.push_u64(mut s, n) { return Error(Exit(status: 2)) }
+    if let Error(_) = string.push(mut s, "\n") { return Error(Exit(status: 2)) }
+    match stdout.write(out, s) { Ok(()) => Ok(()), Error(_) => Error(Exit(status: 3)) }
+}
+pub fn ordinary_main(out: Stdout) -> Result[(), Exit] waits {
+    let mut sum: u64 = 0
+    for _ in 0u64 .. 64 { sum += match ordinary(8192) { Ok(n) => n, Error(_) => return Error(Exit(status: 2)) } }
+    show(out, sum)
+}
+pub fn sized_main(out: Stdout) -> Result[(), Exit] waits {
+    let mut sum: u64 = 0
+    for _ in 0u64 .. 64 { sum += match compact_sized(8192) { Ok(n) => n, Error(_) => return Error(Exit(status: 2)) } }
+    show(out, sum)
+}
+pub fn streaming_main(out: Stdout) -> Result[(), Exit] waits {
+    let mut sum: u64 = 0
+    for _ in 0u64 .. 64 { sum += match compact_streaming(8192) { Ok(n) => n, Error(_) => return Error(Exit(status: 2)) } }
+    show(out, sum)
+}
+pub fn small_law() -> bool {
+    result.unwrap(ordinary(6)) == 33 && result.unwrap(compact_sized(6)) == 33
+}

@@ -1,0 +1,43 @@
+{
+  "phases": {
+    "ordinary": 2149317440,
+    "sized": 2149317440,
+    "streaming": 2149317440,
+    "exclusive": 33812480,
+    "churn": 8517632,
+    "rc": 1601664,
+    "arc": 1601664,
+    "charges": 63,
+    "lifetime": 45533440,
+    "json_parse": 262144,
+    "json_reject": 3,
+    "json_capacity": 210488,
+    "json_print": 241502240
+  },
+  "document_count": 8192,
+  "batches": 64,
+  "ordinary_logical_peak": 368608,
+  "churn_logical_peak": 212992,
+  "snapshot_logical_peak": 273376,
+  "snapshot_lifetime_admitted": 274432,
+  "compact_used": 162447,
+  "stream_reserved": 524296,
+  "exclusive": {
+    "nodes": 8192,
+    "rounds": 32
+  },
+  "churn": {
+    "nodes": 4096,
+    "rounds": 16
+  },
+  "snapshots": {
+    "depth": 64,
+    "versions": 256,
+    "copied_nodes_per_version": 33
+  },
+  "early_capacity_bytes": [
+    0,
+    16,
+    32
+  ]
+}

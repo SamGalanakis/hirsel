@@ -314,7 +314,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             }
             Mode::View if unary == Some("view") => {
                 // An explicit view where the parameter views anyway.
-                let (t, _) = self.expr(e, None);
+                let (t, v) = self.expr(e, None);
                 let t = match self.t.kind(t) {
                     TyKind::View(x)
                         if mode == Mode::View && !matches!(self.t.kind(pt), TyKind::View(_)) =>
@@ -322,6 +322,11 @@ impl<'c, 'a> Cx<'c, 'a> {
                         *x
                     }
                     _ => t,
+                };
+                // A plain parameter takes the value the view reads (OWN-7).
+                *val = match self.rep(t) {
+                    Ok(Rep::Scalar(_)) => self.read_plain_view(t, v, e),
+                    _ => v,
                 };
                 self.arg_ty(pt, t, e, found);
                 true

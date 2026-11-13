@@ -517,8 +517,8 @@ impl<'c, 'a> Cx<'c, 'a> {
         let value = if self.live() {
             match (subject.value, self.rep(ty)) {
                 (Some(value), Ok(r)) => {
-                    let base = match self.rep(subject.ty) {
-                        Ok(Rep::Place(id)) => {
+                    let base = match self.rep(subject.ty).map(Rep::pointee) {
+                        Ok(Some(id)) => {
                             let a = self.address(
                                 AddressBase::Value(value),
                                 &[],
@@ -540,7 +540,8 @@ impl<'c, 'a> Cx<'c, 'a> {
                         case.map_or(Step::Field(field), |case| Step::CaseField { case, field });
                     match r {
                         Rep::None => None,
-                        Rep::Scalar(t) => {
+                        Rep::Scalar(_) | Rep::View(_) => {
+                            let t = r.ty().unwrap();
                             let a = self.address(base, &[step], PlaceTy::Value(t), n);
                             let result = self.value(t);
                             self.inst(
@@ -631,7 +632,8 @@ impl<'c, 'a> Cx<'c, 'a> {
             }
             Head::Product(case) => {
                 if let Some(case) = case
-                    && let (Some(value), Ok(Rep::Place(ty))) = (subject.value, self.rep(subject.ty))
+                    && let (Some(value), Ok(Some(ty))) =
+                        (subject.value, self.rep(subject.ty).map(Rep::pointee))
                     && self.live()
                 {
                     let a = self.address(
@@ -1180,7 +1182,8 @@ impl<'c, 'a> Cx<'c, 'a> {
         match self.rep(ty).ok()? {
             Rep::None => None,
             Rep::Place(id) => Some(self.snapshot(value, id, n)),
-            Rep::Scalar(t) => {
+            r @ (Rep::Scalar(_) | Rep::View(_)) => {
+                let t = r.ty().unwrap();
                 let address = self.address(AddressBase::Value(value), &[], PlaceTy::Value(t), n);
                 let result = self.value(t);
                 self.inst(
@@ -1369,11 +1372,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         let to = self.new_slot(PlaceTy::Declared(id), n);
         self.inst(Inst::SetCase { address: to, case }, n);
         let rep = self.rep(payload).ok()?;
-        let place = match rep {
-            Rep::None => None,
-            Rep::Scalar(t) => Some(PlaceTy::Value(t)),
-            Rep::Place(t) => Some(PlaceTy::Declared(t)),
-        };
+        let place = rep.stored();
         if let Some(place) = place {
             let at = self.address(
                 AddressBase::Address(to),

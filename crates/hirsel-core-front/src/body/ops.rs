@@ -81,8 +81,8 @@ impl<'c, 'a> Cx<'c, 'a> {
                         TyKind::View(_) => at.ty,
                         _ => self.t.mk(TyKind::View(at.ty)),
                     };
-                    self.gap(n, "values of this type are not built");
-                    (t, None)
+                    let v = self.view_of(at, t, n);
+                    (t, v)
                 }
                 Ok(None) => self.gap_ty(n, "`view` of a value that is not a place"),
                 Err(()) => (ERROR, None),
@@ -91,6 +91,29 @@ impl<'c, 'a> Cx<'c, 'a> {
                 self.refuse("OWN-7", n, "`mut p` is written only as an argument");
                 (ERROR, None)
             }
+        }
+    }
+    /// The pointer `view p` gives: the place of `p`, or the pointer `p` already holds
+    /// when it is a view. A plain local held as a value is spilled to a slot; the
+    /// view freezes it, so the copy reads the same (OWN-10).
+    fn view_of(&mut self, at: At, t: TyId, n: NodeId) -> Option<ValueId> {
+        if let Err(what) = self.rep(t) {
+            self.gap(n, what);
+            return None;
+        }
+        if t == at.ty {
+            return self.emit_place(at, n);
+        }
+        let held =
+            at.place.len == 0 && matches!(self.var(at.place.slot).binding, Binding::Value(_));
+        match self.rep(at.ty) {
+            Ok(Rep::Scalar(s)) if held => {
+                let value = self.emit_place(at, n)?;
+                let to = self.new_slot(PlaceTy::Value(s), n);
+                self.inst(Inst::Store { address: to, value }, n);
+                Some(self.pointer(to, n))
+            }
+            _ => self.place_ptr(at, n),
         }
     }
     /// LANG-21: an operator applies only to the operand types its table lists; anything

@@ -3,4 +3,4 @@
 fn first(xs: List[String]) -> Option[View[String]] { list.get(xs, 0) }
 // The body is not built yet (bodies of these types come with slice c and e).
 
-// expect: gap values of this type are not built
+// expect: gap this generic core operation is not built

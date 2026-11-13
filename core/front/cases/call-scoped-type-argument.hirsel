@@ -1,7 +1,6 @@
 // OWN-19: a generic T cannot be a scoped View type, even for a copying argument.
 // A take parameter does not unwrap the view as an unmarked parameter does (OWN-7).
 // expect: refuse OWN-19 at 6:25
-// expect: gap values of this type are not built
+// expect: gap generic definitions are not built
 fn eat[T](take t: T) {}
 fn f(v: View[u8]) { eat(v) }
-// expect: gap generic definitions are not built

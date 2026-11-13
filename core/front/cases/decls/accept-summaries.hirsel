@@ -34,4 +34,4 @@ type Ids = List[u64]
 type Rec: shareable { kids: List[Rc[Rec]] }
 fn first(xs: List[String]) -> Option[View[String]] in xs { list.get(xs, 0) }
 
-// expect: gap values of this type are not built
+// expect: gap this generic core operation is not built

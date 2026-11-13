@@ -1,6 +1,5 @@
 // A non-taking arm binds a physical view, which `take` cannot turn into an owner.
-// expect: gap values of this type are not built
-// expect: refuse OWN-15 at 6:34
+// expect: refuse OWN-15 at 5:34
 type Payload { items: List[u64] }
 fn f(take o: Option[Payload]) -> u64 {
   match o { Some(x) => { let _ = take x; 0 }, None => 0 }

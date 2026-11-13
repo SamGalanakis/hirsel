@@ -1,5 +1,4 @@
 // OWN-10, the spec's example: `v` views `m.items` to the block end, and the tail moves `m`, a prefix of it.
-// expect: refuse OWN-10 at 5:54
-// expect: gap values of this type are not built
+// expect: refuse OWN-10 at 4:54
 type Inbox { items: List[String] }
 fn f(take m: Inbox) -> Inbox { let v = view m.items; m }

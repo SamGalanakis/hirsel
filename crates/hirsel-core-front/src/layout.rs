@@ -88,6 +88,29 @@ impl<T: TyRead> Shapes<'_, T> {
                         let items = FieldTy::Seq(Box::new(self.field(args[0])?));
                         return self.fill(r, LRepr::Own, record(vec![("items", items)]), None);
                     }
+                    Some(Role::Map) => {
+                        let entries = self.map_field(&args)?;
+                        return self.fill(r, LRepr::Own, record(vec![("entries", entries)]), None);
+                    }
+                    // A provider handle's carrier: its one handle field, cleaned by the
+                    // runtime (closing a channel side, abandoning a task, MEM-24).
+                    Some(
+                        role @ (Role::Sender
+                        | Role::Receiver
+                        | Role::Task
+                        | Role::HostFile
+                        | Role::Causes),
+                    ) => {
+                        let handle = match role {
+                            Role::Sender => Handle::Sender,
+                            Role::Receiver => Handle::Receiver,
+                            Role::Task => Handle::Task,
+                            Role::HostFile => Handle::HostFile,
+                            _ => Handle::Causes,
+                        };
+                        let body = record(vec![("handle", FieldTy::Handle(handle))]);
+                        return self.fill(r, LRepr::Own, body, None);
+                    }
                     Some(_) => return None,
                     None => {}
                 }
@@ -95,6 +118,17 @@ impl<T: TyRead> Shapes<'_, T> {
                     return None;
                 }
                 let repr = match decl.repr {
+                    // Option and Result follow their arguments' kind (OWN-3): over a
+                    // view they are scoped, and hold the view as a borrow.
+                    Repr::Own
+                        if decl.structural
+                            && args.iter().any(|&a| {
+                                crate::decls::kind(self.decls, &*self.types, a, &[])
+                                    == crate::decls::Kind::Scoped
+                            }) =>
+                    {
+                        LRepr::Scoped
+                    }
                     Repr::Own => LRepr::Own,
                     Repr::Resource => LRepr::Resource,
                     Repr::Scoped => LRepr::Scoped,
@@ -151,6 +185,10 @@ impl<T: TyRead> Shapes<'_, T> {
         self.of.retain(|_, r| (r.0 as usize) < mark);
     }
 
+    fn map_field(&mut self, args: &[TyId]) -> Option<FieldTy> {
+        let (k, v) = (self.field(args[0])?, self.field(args[1])?);
+        Some(FieldTy::Map(Box::new(k), Box::new(v)))
+    }
     fn field(&mut self, ty: TyId) -> Option<FieldTy> {
         self.field_in(ty, false)
     }
@@ -165,6 +203,7 @@ impl<T: TyRead> Shapes<'_, T> {
                 Some(Role::Arc) => FieldTy::Arc(self.shape(args[0])?),
                 Some(Role::List) => FieldTy::Seq(Box::new(self.field(args[0])?)),
                 Some(Role::String) => FieldTy::Seq(Box::new(FieldTy::Scalar(Scalar::U8))),
+                Some(Role::Map) => self.map_field(&args)?,
                 _ if handle(&self.decls[d.index()]) => FieldTy::Scalar(Scalar::U64),
                 Some(Role::Task) => FieldTy::Handle(Handle::Task),
                 Some(Role::Sender) => FieldTy::Handle(Handle::Sender),

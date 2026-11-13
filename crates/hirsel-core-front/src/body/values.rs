@@ -586,10 +586,8 @@ impl<'c, 'a> Cx<'c, 'a> {
                 },
                 None => Step::Field(i as u32),
             };
-            let place = match r {
-                Rep::None => continue,
-                Rep::Scalar(t) => PlaceTy::Value(t),
-                Rep::Place(fid) => PlaceTy::Declared(fid),
+            let Some(place) = r.stored() else {
+                continue;
             };
             if vals[i].is_none() {
                 return self.gap_ty(n, "this field value is not built");

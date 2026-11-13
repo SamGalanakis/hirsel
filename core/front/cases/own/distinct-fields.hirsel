@@ -1,7 +1,6 @@
 // OWN-9: different fields of one record do not overlap (the spec's swap_halves; proto-872's safe program views p.a while assigning p.b).
 // expect: accept
 // expect: gap this generic core operation is not built
-// expect: gap values of this type are not built
 
 
 type Pair { left: List[u8], right: List[u8] }

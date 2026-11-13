@@ -163,8 +163,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                 let id = self.e.type_row(self.p, &mut self.t, ty)?;
                 self.new_slot(PlaceTy::Declared(id), n)
             }
-            Rep::Scalar(t) => self.new_slot(PlaceTy::Value(t), n),
-            Rep::Place(id) => self.new_slot(PlaceTy::Declared(id), n),
+            r => self.new_slot(r.stored().unwrap(), n),
         };
         self.install(address, r, v, n);
         Some(address)
@@ -173,7 +172,9 @@ impl<'c, 'a> Cx<'c, 'a> {
     /// value is moved, so nothing cleans `v` afterwards.
     pub(super) fn install(&mut self, address: AddressId, r: Rep, v: Option<ValueId>, n: NodeId) {
         match (r, v) {
-            (Rep::Scalar(_), Some(value)) => self.inst(Inst::Store { address, value }, n),
+            (Rep::Scalar(_) | Rep::View(_), Some(value)) => {
+                self.inst(Inst::Store { address, value }, n)
+            }
             (Rep::Place(id), Some(from)) if self.live() => self.copy_to(address, from, id, n),
             _ => {}
         }

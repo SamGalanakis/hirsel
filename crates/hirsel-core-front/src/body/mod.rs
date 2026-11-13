@@ -31,7 +31,7 @@ use hirsel_core_ir::{
     InstanceId, InstanceKey, ItemId, Module, Param, PlaceTy, PoolRange, ReadMode, SigId, Signature,
     SlotId, Step, Terminator, Ty, TypeId, UnaryOp, ValueId,
 };
-use hirsel_core_layout::{FieldTy, Layout, Recipe, Repr as LRepr, Scalar, TypeRef};
+use hirsel_core_layout::{FieldTy, Handle, Layout, Recipe, Repr as LRepr, Scalar, TypeRef};
 use hirsel_core_resolve::{Refusal, Target};
 use hirsel_core_syntax::{Item, NodeId, NodeKind, Span, TokenKind, byte_value, character_value};
 use std::collections::HashMap;
@@ -108,6 +108,9 @@ pub(crate) enum Rep {
     None,
     Scalar(Ty),
     Place(TypeId),
+    /// A view of a place of this type: its pointer, stored and passed as a pointer
+    /// value and never cleaned (OWN-8).
+    View(PlaceTy),
 }
 impl Rep {
     /// The CoreIR type of the value: a place travels as its pointer.
@@ -115,7 +118,24 @@ impl Rep {
         match self {
             Rep::None => None,
             Rep::Scalar(t) => Some(t),
-            Rep::Place(_) => Some(Ty::Ptr),
+            Rep::Place(_) | Rep::View(_) => Some(Ty::Ptr),
+        }
+    }
+    /// The place a value of this representation is stored in: a view stores its
+    /// pointer.
+    fn stored(self) -> Option<PlaceTy> {
+        match self {
+            Rep::None => None,
+            Rep::Scalar(t) => Some(PlaceTy::Value(t)),
+            Rep::Place(id) => Some(PlaceTy::Declared(id)),
+            Rep::View(_) => Some(PlaceTy::Value(Ty::Ptr)),
+        }
+    }
+    /// The row of the place a value of this representation points at.
+    fn pointee(self) -> Option<TypeId> {
+        match self {
+            Rep::Place(id) | Rep::View(PlaceTy::Declared(id)) => Some(id),
+            _ => None,
         }
     }
 }
@@ -265,6 +285,15 @@ impl Emitter {
                 return Ok(Rep::Scalar(Ty::Scalar(Scalar::U64)));
             }
             TyKind::Tuple(_) | TyKind::Array(..) | TyKind::Adt(..) => {}
+            // A view is a pointer to a place of its type, never cleaned (OWN-8).
+            TyKind::View(x) => {
+                let x = *x;
+                return match self.rep(p, t, x)? {
+                    Rep::Place(id) => Ok(Rep::View(PlaceTy::Declared(id))),
+                    Rep::Scalar(s) => Ok(Rep::View(PlaceTy::Value(s))),
+                    _ => Err("views of this type are not built"),
+                };
+            }
             _ => return Err("values of this type are not built"),
         }
         let mark = self.module.types.len();
@@ -286,26 +315,30 @@ impl Emitter {
     fn needs_drop(&self, id: TypeId) -> bool {
         self.recipes[id.index()].drop.is_some()
     }
-    /// Cleaning a value of row `id` may run a finalizer or free a resource block.
+    /// Cleaning a value of row `id` may run a finalizer or free a resource block. Rows
+    /// reach themselves through sequences and maps, so each row is visited once.
     fn runs_code(&self, id: TypeId) -> bool {
-        let Some(d) = &self.recipes[id.index()].drop else {
-            return false;
-        };
-        self.module.types[id.index()].repr == LRepr::Resource
-            || d.finalizer.is_some()
-            || d.fields
-                .iter()
-                .flatten()
-                .any(|f| self.field_runs_code(&f.ty))
-    }
-    fn field_runs_code(&self, t: &FieldTy) -> bool {
-        match t {
-            FieldTy::Inline(r) | FieldTy::Box(r) => self.runs_code(TypeId(r.0)),
-            FieldTy::Seq(e) | FieldTy::Array(e, _) => self.field_runs_code(e),
-            FieldTy::Map(k, v) => self.field_runs_code(k) || self.field_runs_code(v),
-            FieldTy::OwnFn => true,
-            _ => false,
+        let mut seen = vec![id];
+        let mut work = vec![id];
+        while let Some(id) = work.pop() {
+            let Some(d) = &self.recipes[id.index()].drop else {
+                continue;
+            };
+            if self.module.types[id.index()].repr == LRepr::Resource || d.finalizer.is_some() {
+                return true;
+            }
+            for f in d.fields.iter().flatten() {
+                if field_runs_code(&f.ty, &mut |r| {
+                    if !seen.contains(&r) {
+                        seen.push(r);
+                        work.push(r);
+                    }
+                }) {
+                    return true;
+                }
+            }
         }
+        false
     }
     /// The byte size of a value of row `id`, whose recipe exists.
     fn size(&self, id: TypeId) -> u64 {
@@ -347,6 +380,7 @@ impl Emitter {
             match rep {
                 Rep::None => {}
                 Rep::Scalar(s) => params.push(Param::Value(s)),
+                Rep::View(_) => params.push(Param::Value(Ty::Ptr)),
                 Rep::Place(id) => params.push(Param::Address(id)),
             }
         }
@@ -355,6 +389,7 @@ impl Emitter {
         let (results, dest) = match self.rep(p, t, result)? {
             Rep::None => (vec![], None),
             Rep::Scalar(s) => (vec![s], None),
+            Rep::View(_) => (vec![Ty::Ptr], None),
             Rep::Place(id) => (vec![], Some(id)),
         };
         Ok(Signature {
@@ -363,6 +398,22 @@ impl Emitter {
             dest,
             never,
         })
+    }
+}
+
+/// A field whose cleanup runs code by itself; the rows it holds go to `row`.
+fn field_runs_code(t: &FieldTy, row: &mut impl FnMut(TypeId)) -> bool {
+    match t {
+        FieldTy::Inline(r) | FieldTy::Box(r) => {
+            row(TypeId(r.0));
+            false
+        }
+        FieldTy::Seq(e) | FieldTy::Array(e, _) => field_runs_code(e, row),
+        FieldTy::Map(k, v) => field_runs_code(k, row) || field_runs_code(v, row),
+        // An abandoned task or receiver cleans results or items whose type the handle
+        // does not name, which may run finalizers (CONC-8).
+        FieldTy::OwnFn | FieldTy::Handle(Handle::Task | Handle::Receiver) => true,
+        _ => false,
     }
 }
 
@@ -1098,12 +1149,11 @@ impl<'c, 'a> Cx<'c, 'a> {
                 let binding = match (pd.mode, v) {
                     (Mode::Mut, Some(v)) if self.live() => {
                         let ty = match self.rep(pd.ty) {
-                            Ok(Rep::Scalar(t)) => Some(PlaceTy::Value(t)),
-                            Ok(Rep::Place(id)) => Some(PlaceTy::Declared(id)),
                             Ok(Rep::None) => self
                                 .e
                                 .type_row(p, &mut self.t, pd.ty)
                                 .map(PlaceTy::Declared),
+                            Ok(r) => r.stored(),
                             Err(_) => None,
                         };
                         Binding::Slot(

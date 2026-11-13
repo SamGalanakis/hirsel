@@ -74,7 +74,17 @@ pub fn into_bytes(take s: String) -> Result[Bytes, (Capacity, String)] {
 }
 
 pub fn as_bytes(s: String) -> View[Bytes] in s
-pub fn slice(s: String, lo: u64, hi: u64) -> View[String] in s
+pub fn slice(s: String, lo: u64, hi: u64) -> View[String] in s {
+    let b = string.as_bytes(s)
+    // Bounds when lo > hi or hi is past the length.
+    let v = list.slice(b, lo, hi)
+    let n = list.len(b)
+    if (lo < n && (b[lo] & 0xC0) == 0x80) || (hi < n && (b[hi] & 0xC0) == 0x80) {
+        // Inside a scalar: Bounds, raised by the index n, which is past the end.
+        let _ = b[n]
+    }
+    view_string(v)
+}
 
 pub fn next_scalar(s: String, at: u64) -> Option[(char, u64)] {
     let b = string.as_bytes(s)
@@ -193,7 +203,9 @@ pub fn truncate(mut s: String, n: u64) {
     s = of_bytes(take kept)
 }
 
-// The kernel: the String carrier and the Bytes carrier are one layout. of_bytes is called
-// only on UTF-8; to_bytes keeps any static, capacity-0 storage.
+// The kernel: the String carrier and the Bytes carrier are one layout. of_bytes and
+// view_string are called only on UTF-8 that is whole scalars; to_bytes keeps any static,
+// capacity-0 storage.
 fn of_bytes(take b: Bytes) -> String
 fn to_bytes(take s: String) -> Bytes
+fn view_string(b: Bytes) -> View[String] in b

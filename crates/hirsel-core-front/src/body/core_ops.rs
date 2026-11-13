@@ -44,7 +44,9 @@ macro_rules! operations {
 }
 
 operations! {
+    ("int", "parse", Lane::PendingCode),
     ("list", "fill", Lane::PendingCode),
+    ("list", "sum", Lane::PendingCode),
     ("string", "from", Lane::PendingCode),
     ("string", "from_utf8", Lane::PendingCode),
     ("string", "into_bytes", Lane::PendingCode),
@@ -160,6 +162,7 @@ operations! {
     ("string", "reserve", Lane::PendingCode),
     ("string", "of_bytes", Lane::Value),
     ("string", "to_bytes", Lane::Value),
+    ("string", "view_string", Lane::Value),
     ("task", "spawn", Lane::Runtime(Kernel::Spawn)),
     ("task", "join", Lane::Runtime(Kernel::Join)),
     ("task", "cancel", Lane::Runtime(Kernel::Cancel)),

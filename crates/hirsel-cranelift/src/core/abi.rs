@@ -33,7 +33,7 @@ impl Signature {
         for (index, ty) in params.iter().enumerate() {
             if *ty == Ty::Scalar(Scalar::Bool) {
                 let parameter = &mut signature.clif.params[index + usize::from(signature.indirect)];
-                *parameter = parameter.clone().uext();
+                *parameter = (*parameter).uext();
             }
         }
         signature

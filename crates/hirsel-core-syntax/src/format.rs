@@ -11,17 +11,22 @@ pub fn format(parsed: &ParseOutput) -> Option<String> {
         return None;
     }
     let mut out = String::new();
-    for item in &parsed.syntax.items {
+    for item in parsed.syntax.items() {
         if !out.is_empty() {
             out.push('\n');
         }
-        out.push_str(&item_text(item));
+        out.push_str(&item_text(&item));
     }
-    let trailing = lex(&parsed.syntax.trailing);
+    let start = parsed
+        .syntax
+        .tree
+        .tokens
+        .partition_point(|t| t.span.start < parsed.syntax.trailing_start);
+    let tokens = &parsed.syntax.tree.tokens[start..];
     let tail = print(
-        &parsed.syntax.trailing,
-        &trailing.tokens,
-        &vec![Role::default(); trailing.tokens.len()],
+        &parsed.syntax.source,
+        tokens,
+        &vec![Role::default(); tokens.len()],
     );
     out.push_str(&tail);
     Some(out)
@@ -41,7 +46,8 @@ struct Role {
 fn item_text(item: &Item) -> String {
     let tree = &item.tree;
     let mut roles = vec![Role::default(); tree.tokens.len()];
-    for (i, node) in tree.nodes.iter().enumerate() {
+    for i in item.range.nodes.start as usize..item.range.nodes.end as usize {
+        let node = &tree.nodes[i];
         let children = tree.children(NodeId(i as u32));
         let range = node.origin.tokens.start as usize..node.origin.tokens.end as usize;
         match node.kind {
@@ -85,7 +91,11 @@ fn item_text(item: &Item) -> String {
             _ => {}
         }
     }
-    print(&item.text, &tree.tokens, &roles)
+    print(
+        item.text,
+        &tree.tokens[item.range.tokens.start as usize..item.range.tokens.end as usize],
+        &roles[item.range.tokens.start as usize..item.range.tokens.end as usize],
+    )
 }
 
 fn whitespace(kind: TokenKind) -> bool {

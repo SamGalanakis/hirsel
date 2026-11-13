@@ -147,7 +147,7 @@ impl Role {
 
 #[derive(Clone, Debug)]
 pub struct Generic {
-    pub name: String,
+    pub name: hirsel_core_syntax::Symbol,
     pub bounds: u8,
 }
 
@@ -237,7 +237,7 @@ impl TypeDecl {
 
 #[derive(Clone, Debug)]
 pub struct ParamDecl {
-    pub name: String,
+    pub name: hirsel_core_syntax::Symbol,
     pub mode: Mode,
     pub ty: TyId,
     pub site: Site,
@@ -290,18 +290,20 @@ impl Program<'_> {
     /// Pass 1: register every type and function definition with its header names.
     pub(crate) fn register(&mut self) {
         for (m, module) in self.modules.iter().enumerate() {
-            for (i, item) in module.syntax.items.iter().enumerate() {
+            for (i, item) in module.syntax.items().enumerate() {
                 let root = item.tree.node(item.root);
                 let Some(name) = root.token else { continue };
                 let at = ItemRef {
                     module: m as u32,
                     item: i as u32,
                 };
-                let name_span = item.tree.tokens[name.0 as usize].span;
-                let name = item.tree.token_text(&item.text, name).to_owned();
-                let path = module.id.definition(&name);
+                let name_span = item.token_span(name);
+                let Some(definition) = self.index.definition(module.id, item.symbol(name)) else {
+                    continue;
+                };
+                let path = self.index.definition_path(definition);
                 let site = Site {
-                    module: module.id.clone(),
+                    module: module.id,
                     item: i as u32,
                     span: name_span,
                 };
@@ -358,7 +360,7 @@ impl Program<'_> {
                             .find(|&c| item.tree.node(c).kind == NodeKind::Block);
                         self.fns.push(FnDecl {
                             path: path.clone(),
-                            result_site: site.clone(),
+                            result_site: site,
                             site,
                             at,
                             generics,
@@ -369,6 +371,7 @@ impl Program<'_> {
                             body,
                         });
                         self.by_path.entry(path).or_insert(Def::Fn(id));
+                        self.by_definition[definition.0 as usize] = Some(Def::Fn(id));
                         continue;
                     }
                     _ => continue,
@@ -392,6 +395,7 @@ impl Program<'_> {
                     summary: Summary::default(),
                 });
                 self.by_path.entry(path).or_insert(Def::Type(id));
+                self.by_definition[definition.0 as usize] = Some(Def::Type(id));
             }
         }
         self.alias_state = vec![Visit::Todo as u8; self.decls.len()];
@@ -409,10 +413,7 @@ impl Program<'_> {
                 ));
                 continue;
             }
-            let name = item
-                .tree
-                .token_text(&item.text, gn.token.unwrap())
-                .to_owned();
+            let name = item.symbol(gn.token.unwrap());
             let mut bounds = 0;
             for &b in item.tree.children(g) {
                 for &bn in item.tree.children(b) {
@@ -596,10 +597,10 @@ impl Program<'_> {
         generics: &[Generic],
     ) -> TyId {
         let site = self.site(at, path);
-        let target = self.target(at, path).cloned();
+        let target = self.target(at, path).copied();
         let decl = match target {
             Some(Target::Builtin(name)) => {
-                let Some(s) = Scalar::from_name(&name) else {
+                let Some(s) = Scalar::from_name(self.index.symbols.text(name)) else {
                     // The one builtin that is not a scalar: `Inline[T, n]`.
                     self.gaps
                         .push(Gap::new(site, "inline array types are not built"));
@@ -607,7 +608,7 @@ impl Program<'_> {
                 };
                 return self.no_args(scalar(s), args, &site);
             }
-            Some(Target::Definition(p)) if is_core_prelude(&p, &["Never"]) => {
+            Some(Target::Definition(p)) if self.core_named(p, &["Never"]) => {
                 return self.no_args(NEVER, args, &site);
             }
             Some(Target::Binder(b)) => {
@@ -627,11 +628,14 @@ impl Program<'_> {
                     }
                 };
             }
-            Some(Target::Definition(p)) => match self.by_path.get(&p) {
+            Some(Target::Definition(p)) => match self.by_definition[p.0 as usize].as_ref() {
                 Some(Def::Type(d)) => *d,
                 _ => {
-                    self.refusals
-                        .push(refusal("LANG-7", site, format!("`{p}` is not a type")));
+                    self.refusals.push(refusal(
+                        "LANG-7",
+                        site,
+                        format!("`{}` is not a type", self.index.definition_path(p)),
+                    ));
                     return ERROR;
                 }
             },
@@ -657,10 +661,7 @@ impl Program<'_> {
         let role = d.role;
         if !d.structural {
             for (i, (t, s)) in args.iter().enumerate() {
-                self.pending.push(Pending::NotScoped {
-                    ty: *t,
-                    site: s.clone(),
-                });
+                self.pending.push(Pending::NotScoped { ty: *t, site: *s });
                 let need = d.generics[i].bounds;
                 if need != 0 {
                     let counted = matches!(role, Some(Role::Rc | Role::Arc));
@@ -668,7 +669,7 @@ impl Program<'_> {
                         ty: *t,
                         bounds: need,
                         params: params.clone(),
-                        site: s.clone(),
+                        site: *s,
                         rule: if counted { "OWN-4" } else { "LANG-12" },
                     });
                 }
@@ -679,7 +680,7 @@ impl Program<'_> {
         }
         let alias = self.is_alias(decl);
         if alias && let Some(top) = self.alias_stack.last_mut() {
-            top.1 = Some(site.clone());
+            top.1 = Some(site);
         }
         if alias && self.alias_state[decl.index()] == Visit::Open as u8 {
             self.alias_cycle(decl);
@@ -715,11 +716,8 @@ impl Program<'_> {
 
     fn no_args(&mut self, t: TyId, args: &[(TyId, Site)], site: &Site) -> TyId {
         if !args.is_empty() {
-            self.refusals.push(refusal(
-                "LANG-12",
-                site.clone(),
-                "this type takes no arguments",
-            ));
+            self.refusals
+                .push(refusal("LANG-12", *site, "this type takes no arguments"));
             return ERROR;
         }
         t
@@ -742,10 +740,7 @@ impl Program<'_> {
                             self.gaps
                                 .push(Gap::new(self.site(at, p), "sized parameters are not built"));
                         }
-                        let name = item
-                            .tree
-                            .token_text(&item.text, pn.token.unwrap())
-                            .to_owned();
+                        let name = item.symbol(pn.token.unwrap());
                         let tnode = item.tree.children(p)[0];
                         let ty = self.lower_ty(at, tnode, &generics);
                         params.push(ParamDecl {
@@ -774,7 +769,10 @@ impl Program<'_> {
         let mut anchors = vec![];
         for a in anchor_nodes {
             let parts = path_text(item, a);
-            match params.iter().position(|p| p.name == parts) {
+            match params
+                .iter()
+                .position(|p| self.index.symbols.text(p.name) == parts)
+            {
                 Some(i) if params[i].mode == Mode::View => anchors.push(i as u32),
                 _ => self.refusals.push(refusal(
                     "OWN-20",
@@ -950,7 +948,7 @@ impl Program<'_> {
         let f = decl.all_fields().nth(field).unwrap();
         let mut r = refusal(
             "OWN-2",
-            f.site.clone(),
+            f.site,
             format!(
                 "`{}` contains itself inline through field `{}`",
                 decl.path.0.name, f.name
@@ -959,7 +957,7 @@ impl Program<'_> {
         r.causal = members
             .iter()
             .filter(|m| m.0 != least)
-            .map(|m| self.decls[m.0.index()].site.clone())
+            .map(|m| self.decls[m.0.index()].site)
             .collect();
         self.refusals.push(r);
     }
@@ -979,13 +977,13 @@ impl Program<'_> {
             .expect("a cycle has a member");
         let mut r = refusal(
             "LANG-9",
-            least.1.clone().expect("every member continues the chain"),
+            least.1.expect("every member continues the chain"),
             "a chain of aliases reaches itself",
         );
         r.causal = members
             .iter()
             .filter(|m| m.0 != least.0)
-            .map(|m| self.decls[m.0.index()].site.clone())
+            .map(|m| self.decls[m.0.index()].site)
             .collect();
         self.refusals.push(r);
     }
@@ -1067,7 +1065,7 @@ impl Program<'_> {
             if declared & SHAREABLE != 0 && decl.repr != Repr::Own {
                 out.push(refusal(
                     "OWN-4",
-                    decl.site.clone(),
+                    decl.site,
                     "resources, scoped and stable types are never shareable",
                 ));
             }
@@ -1077,7 +1075,7 @@ impl Program<'_> {
                 {
                     out.push(refusal(
                         "OWN-19",
-                        f.site.clone(),
+                        f.site,
                         format!("field `{}` of a non-scoped type is scoped", f.name),
                     ));
                 }
@@ -1086,7 +1084,7 @@ impl Program<'_> {
                 if missing != 0 {
                     out.push(refusal(
                         "OWN-4",
-                        f.site.clone(),
+                        f.site,
                         format!("field `{}` is not {}", f.name, bound_names(missing)),
                     ));
                 }
@@ -1105,7 +1103,7 @@ impl Program<'_> {
             {
                 self.refusals.push(refusal(
                     "OWN-20",
-                    fd.result_site.clone(),
+                    fd.result_site,
                     "a scoped result names its anchor",
                 ));
             }
@@ -1316,7 +1314,7 @@ pub(crate) fn mode_of(k: NodeKind) -> Mode {
     }
 }
 
-pub(crate) fn path_text(item: &hirsel_core_syntax::Item, n: NodeId) -> String {
+pub(crate) fn path_text(item: hirsel_core_syntax::Item<'_>, n: NodeId) -> String {
     let r = &item.tree.node(n).origin.tokens;
     item.tree.tokens[r.start as usize..r.end as usize]
         .iter()

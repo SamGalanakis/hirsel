@@ -1,6 +1,6 @@
 //! Format new-language source to stdout without changing the input file.
 hirsel_guard::install!();
-use hirsel_core_syntax::{ParseMode, format, parse_bytes};
+use hirsel_core_syntax::{ParseMode, Symbols, format, parse_bytes};
 use std::{io::Write, process::ExitCode};
 fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
@@ -13,7 +13,7 @@ fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
     } else {
         ParseMode::Source
     };
-    let parsed = parse_bytes(&bytes, mode);
+    let parsed = parse_bytes(&bytes, mode, &mut Symbols::default());
     let Some(text) = format(&parsed) else {
         for d in &parsed.diagnostics {
             let offset = d.primary.start as usize;

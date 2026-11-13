@@ -35,6 +35,12 @@ fn publishes_a_checked_body_and_disk_syntax() {
     assert_eq!(value, eval::Outcome::Returned(vec![42]));
     let store = Store::new(&dir.path().join("store")).unwrap();
     let root: Root = bincode::deserialize(&store.get(product.root).unwrap().unwrap()).unwrap();
+    let identities: NameIndex =
+        bincode::deserialize(&store.get(root.identities).unwrap().unwrap()).unwrap();
+    assert_eq!(
+        identities.module_path(product.files[0].module).modules,
+        ["main"]
+    );
     let file: FileProduct =
         bincode::deserialize(&store.get(root.files[0]).unwrap().unwrap()).unwrap();
     assert_eq!(file.syntax.text(), "fn answer() -> u64 { 6 * 7 }\n");
@@ -67,11 +73,11 @@ fn refused_body_is_published_and_unreached_demand_is_explicit() {
             .function
             .is_none()
     );
-    let absent = ModuleId {
+    let absent = DefPath(hirsel_core_ids::ItemPath {
         package: package("app"),
         modules: vec!["absent".into()],
-    }
-    .definition("missing");
+        name: "missing".into(),
+    });
     assert!(
         product
             .demand(&absent)
@@ -114,11 +120,11 @@ fn unrelated_parse_failure_does_not_suppress_a_valid_body() {
         .check(req, &mut Meter::new(false))
         .unwrap();
     assert!(!product.accepted());
-    let answer = ModuleId {
+    let answer = DefPath(hirsel_core_ids::ItemPath {
         package: package("app"),
         modules: vec!["main".into()],
-    }
-    .definition("answer");
+        name: "answer".into(),
+    });
     let d = product.demand(&answer).unwrap();
     assert_eq!(
         eval::run(&d.ir, d.check.function.unwrap(), &[], 1_000_000).outcome,

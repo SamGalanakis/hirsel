@@ -1,7 +1,6 @@
-use crate::{index::path_parts, *};
-use hirsel_core_ids::{DefPath, PackageId};
-use hirsel_core_syntax::{Item, NodeId, NodeKind, TokenId};
-use std::collections::BTreeMap;
+use crate::{index::path_tokens, *};
+use hirsel_core_syntax::{Item, NodeId, NodeKind, Span, Symbol, TokenId, sym};
+use rustc_hash::FxHashSet;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum BinderKind {
     Local,
@@ -10,57 +9,58 @@ pub enum BinderKind {
     Region,
     Label,
 }
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Binder {
     pub id: u32,
-    pub name: String,
+    pub name: Symbol,
     pub kind: BinderKind,
     pub site: Site,
 }
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Target {
-    Definition(DefPath),
+    Definition(DefinitionId),
     Module(ModuleId),
     Binder(u32),
-    Builtin(String),
-    ContextualConstructor {
-        name: String,
-        candidates: Vec<DefPath>,
-    },
+    Builtin(Symbol),
+    ContextualConstructor { name: Symbol },
     Missing,
 }
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum LookupScope {
-    Local,
+    Local(u32),
+    Bind(u32),
+    Label(u32),
     Module(ModuleId),
-    Prelude,
-    Modules(PackageId),
-    Variants,
-    Dependency(String),
+    Prelude(PackageKey),
+    Modules(PackageKey),
+    Children(ModuleId),
+    Variants(ModuleId),
 }
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum LookupResult {
     Found(Target),
     Missing,
-    Private(DefPath),
-    Opaque(DefPath),
+    Private(DefinitionId),
+    Opaque(DefinitionId),
     Shadowed(Target),
-    Ambiguous(Vec<DefPath>),
+    Ambiguous,
 }
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+/// One dependency fact per distinct scope/name/namespace/mode in this item.
+/// The first site is retained; a use's field suffix stays on the original token tape.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Lookup {
     pub node: NodeId,
-    pub site: Site,
-    pub namespace: Namespace,
     pub scope: LookupScope,
-    pub spelling: Vec<String>,
+    pub symbol: Symbol,
+    pub namespace: Namespace,
+    pub constructor: bool,
     pub result: LookupResult,
 }
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ResolvedUse {
     pub node: NodeId,
     pub target: Target,
-    pub projections: Vec<String>,
+    pub projections: Span,
 }
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Resolution {
@@ -70,39 +70,53 @@ pub struct Resolution {
     pub diagnostics: Vec<Refusal>,
     pub resource_refusal: Option<Site>,
 }
-pub(crate) fn builtin(n: &str) -> bool {
+pub(crate) fn builtin(n: Symbol) -> bool {
     matches!(
         n,
-        "Inline"
-            | "bool"
-            | "char"
-            | "u8"
-            | "u16"
-            | "u32"
-            | "u64"
-            | "i8"
-            | "i16"
-            | "i32"
-            | "i64"
-            | "f32"
-            | "f64"
+        sym::INLINE
+            | sym::BOOL
+            | sym::CHAR
+            | sym::U8
+            | sym::U16
+            | sym::U32
+            | sym::U64
+            | sym::I8
+            | sym::I16
+            | sym::I32
+            | sym::I64
+            | sym::F32
+            | sym::F64
     )
 }
-pub fn resolve(index: &NameIndex, module: &ModuleId, ordinal: u32, item: &Item) -> Resolution {
-    if item.has_errors {
+#[derive(Clone, Copy)]
+struct Binding {
+    symbol: Symbol,
+    namespace: Namespace,
+    previous: u32,
+}
+/// Resolve one borrowed item. The visitor allocates no child/path/scope objects.
+/// Result tables and scratch storage are reserved once, before traversal.
+pub fn resolve(index: &NameIndex, module: ModuleId, ordinal: u32, item: Item<'_>) -> Resolution {
+    if item.range.has_errors {
         return Resolution::default();
     }
+    let size = item.range.resolution_size;
+    let queries = (size.names + size.binders + size.labels) as usize;
+    let read_capacity =
+        queries.min(index.symbols.len() * (size.scopes + size.binders + 1) as usize) * 6;
     let mut r = Resolver {
         index,
         module,
         item,
         ordinal,
-        scopes: vec![BTreeMap::new()],
-        labels: vec![],
-        label_kinds: vec![],
-        loops: vec![],
+        bindings: Vec::with_capacity(size.binders as usize),
+        slots: vec![u32::MAX; index.symbols.len() * 2],
+        labels: Vec::with_capacity(size.labels as usize),
+        label_base: 0,
+        loop_base: 0,
+        loops: Vec::with_capacity(size.loops as usize),
         numeric_parameter: false,
-        numeric_declaration: index.environment.core.as_ref() == Some(&module.package)
+        numeric_declaration: Some(index.module_package(module)) == index.core
             && matches!(
                 item.tree.node(item.root).kind,
                 NodeKind::Function
@@ -125,65 +139,92 @@ pub fn resolve(index: &NameIndex, module: &ModuleId, ordinal: u32, item: &Item) 
                         | NodeKind::Outlives
                 )
             }),
+        scope_id: 0,
+        next_scope: 1,
         depth: 0,
-        out: Resolution::default(),
+        paths: [None; 8],
+        seen: FxHashSet::with_capacity_and_hasher(read_capacity, Default::default()),
+        out: Resolution {
+            names: Vec::with_capacity(size.names as usize),
+            binders: Vec::with_capacity(size.binders as usize),
+            reads: Vec::with_capacity(read_capacity),
+            ..Resolution::default()
+        },
     };
     r.visit(item.root);
     r.out
 }
 struct Resolver<'a> {
     index: &'a NameIndex,
-    module: &'a ModuleId,
-    item: &'a Item,
+    module: ModuleId,
+    item: Item<'a>,
     ordinal: u32,
-    scopes: Vec<BTreeMap<(Namespace, String), u32>>,
-    labels: Vec<BTreeMap<String, u32>>,
-    label_kinds: Vec<NodeKind>,
+    bindings: Vec<Binding>,
+    slots: Vec<u32>,
+    labels: Vec<(Symbol, u32, NodeKind)>,
+    label_base: usize,
     loops: Vec<NodeKind>,
+    loop_base: usize,
     numeric_parameter: bool,
     numeric_declaration: bool,
+    scope_id: u32,
+    next_scope: u32,
     depth: usize,
+    paths: [Option<((u32, Symbol, bool, bool), Target)>; 8],
+    seen: FxHashSet<(LookupScope, Symbol, Namespace, bool)>,
     out: Resolution,
 }
-impl Resolver<'_> {
+impl<'a> Resolver<'a> {
     fn site(&self, n: NodeId) -> Site {
         Site {
-            module: self.module.clone(),
+            module: self.module,
             item: self.ordinal,
             span: self.item.tree.node(n).origin.span,
         }
     }
-    fn name(&self, t: TokenId) -> String {
-        self.item.tree.token_text(&self.item.text, t).into()
+    fn name(&self, t: TokenId) -> Symbol {
+        self.item.symbol(t)
     }
-    fn children(&self, n: NodeId) -> Vec<NodeId> {
-        self.item.tree.children(n).to_vec()
+    fn children(&self, n: NodeId) -> &'a [NodeId] {
+        self.item.tree.children(n)
     }
     fn record(
         &mut self,
         n: NodeId,
         namespace: Namespace,
         scope: LookupScope,
-        spelling: Vec<String>,
+        symbol: Symbol,
+        constructor: bool,
         result: LookupResult,
     ) {
-        self.out.reads.push(Lookup {
-            node: n,
-            site: self.site(n),
-            namespace,
-            scope,
-            spelling,
-            result,
-        });
+        if self.seen.insert((scope, symbol, namespace, constructor)) {
+            self.out.reads.push(Lookup {
+                node: n,
+                scope,
+                symbol,
+                namespace,
+                constructor,
+                result,
+            });
+        }
     }
-    fn read(&mut self, n: NodeId, scope: LookupScope, spelling: Vec<String>, result: LookupResult) {
-        self.record(n, Namespace::Value, scope, spelling, result);
+    fn slot(name: Symbol, ns: Namespace) -> usize {
+        name.0 as usize * 2 + usize::from(ns == Namespace::Value)
     }
-    fn local_in(&self, name: &str, ns: Namespace) -> Option<u32> {
-        self.scopes
-            .iter()
-            .rev()
-            .find_map(|s| s.get(&(ns, name.to_owned())).copied())
+    fn local_in(&self, name: Symbol, ns: Namespace) -> Option<u32> {
+        let b = self.slots[Self::slot(name, ns)];
+        (b != u32::MAX).then_some(b)
+    }
+    fn scope(&mut self, f: impl FnOnce(&mut Self)) {
+        let mark = self.bindings.len();
+        let old = self.scope_id;
+        self.scope_id = self.next_scope;
+        self.next_scope += 1;
+        f(self);
+        for b in self.bindings.drain(mark..) {
+            self.slots[Self::slot(b.symbol, b.namespace)] = b.previous;
+        }
+        self.scope_id = old;
     }
     fn bind(&mut self, n: NodeId, t: TokenId, kind: BinderKind) {
         let name = self.name(t);
@@ -192,7 +233,7 @@ impl Resolver<'_> {
         } else {
             Namespace::Value
         };
-        if ns == Namespace::Type && builtin(&name) {
+        if ns == Namespace::Type && builtin(name) {
             self.out.diagnostics.push(Refusal::new(
                 "LANG-7",
                 self.site(n),
@@ -200,43 +241,40 @@ impl Resolver<'_> {
             ));
             return;
         }
-        let local = self.local_in(&name, ns);
+        let local = self.local_in(name, ns);
         self.record(
             n,
             ns,
-            LookupScope::Local,
-            vec![name.clone()],
+            LookupScope::Local(self.scope_id),
+            name,
+            false,
             local.map_or(LookupResult::Missing, |b| {
                 LookupResult::Found(Target::Binder(b))
             }),
         );
         let mut existing = local.map(Target::Binder);
         if existing.is_none() && ns == Namespace::Value {
-            existing = self.module_lookup(n, self.module.clone(), &name, ns, false);
-            if existing.is_none() {
-                existing = self.prelude_lookup(n, &name, ns, false);
-            }
+            existing = self
+                .module_lookup(n, self.module, name, ns, false)
+                .or_else(|| self.prelude_lookup(n, name, ns, false));
         }
         if let Some(target) = existing {
             self.record(
                 n,
                 ns,
-                LookupScope::Local,
-                vec![name.clone()],
-                LookupResult::Shadowed(target.clone()),
+                LookupScope::Bind(self.scope_id),
+                name,
+                false,
+                LookupResult::Shadowed(target),
             );
             let mut d = Refusal::new(
                 "LANG-7",
                 self.site(n),
-                format!("`{name}` shadows a visible name"),
+                format!("`{}` shadows a visible name", self.index.symbols.text(name)),
             );
             match target {
-                Target::Binder(b) => d.causal.push(self.out.binders[b as usize].site.clone()),
-                Target::Definition(p) => {
-                    if let Some(def) = self.index.get(&p) {
-                        d.causal.push(def.site.clone());
-                    }
-                }
+                Target::Binder(b) => d.causal.push(self.out.binders[b as usize].site),
+                Target::Definition(id) => d.causal.push(self.index.get(id).site),
                 _ => {}
             }
             self.out.diagnostics.push(d);
@@ -245,315 +283,365 @@ impl Resolver<'_> {
         let id = self.out.binders.len() as u32;
         self.out.binders.push(Binder {
             id,
-            name: name.clone(),
+            name,
             kind,
             site: self.site(n),
         });
-        self.scopes.last_mut().unwrap().insert((ns, name), id);
+        let slot = Self::slot(name, ns);
+        self.bindings.push(Binding {
+            symbol: name,
+            namespace: ns,
+            previous: self.slots[slot],
+        });
+        self.slots[slot] = id;
+        self.scope_id = self.next_scope;
+        self.next_scope += 1;
     }
-    fn select(
+    fn selected(
         &mut self,
         n: NodeId,
         scope: LookupScope,
-        name: &str,
+        name: Symbol,
         ns: Namespace,
         construct: bool,
-        candidates: Vec<&Definition>,
+        id: Option<DefinitionId>,
     ) -> Option<Target> {
-        if candidates.is_empty() {
-            self.record(n, ns, scope, vec![name.into()], LookupResult::Missing);
+        let Some(id) = id else {
+            self.record(n, ns, scope, name, construct, LookupResult::Missing);
             return None;
-        }
-        if candidates.len() > 1 {
-            let paths = candidates.iter().map(|d| d.path.clone()).collect();
-            self.record(
-                n,
-                ns,
-                scope,
-                vec![name.into()],
-                LookupResult::Ambiguous(paths),
-            );
-            let mut d = Refusal::new("LANG-7", self.site(n), "ambiguous module extension member");
-            d.causal.extend(candidates.iter().map(|d| d.site.clone()));
-            self.out.diagnostics.push(d);
-            return Some(Target::Missing);
-        }
-        let d = candidates[0];
-        let path = d.path.clone();
-        let result = if d.site.module != *self.module && !d.public {
-            LookupResult::Private(path.clone())
-        } else if construct && d.site.module != *self.module && d.opaque {
-            LookupResult::Opaque(path.clone())
+        };
+        let d = self.index.get(id);
+        let result = if d.site.module != self.module && !d.public {
+            LookupResult::Private(id)
+        } else if construct && d.site.module != self.module && d.opaque {
+            LookupResult::Opaque(id)
         } else {
-            LookupResult::Found(Target::Definition(path.clone()))
+            LookupResult::Found(Target::Definition(id))
         };
         if matches!(result, LookupResult::Private(_) | LookupResult::Opaque(_)) {
             let mut refusal = Refusal::new(
                 "PROG-2",
                 self.site(n),
-                format!("`{path}` is private or opaque"),
+                format!("`{}` is private or opaque", self.index.definition_path(id)),
             );
-            refusal.causal.push(d.site.clone());
+            refusal.causal.push(d.site);
             self.out.diagnostics.push(refusal);
         }
-        self.record(n, ns, scope, vec![name.into()], result);
-        Some(Target::Definition(path))
+        self.record(n, ns, scope, name, construct, result);
+        Some(Target::Definition(id))
     }
     fn module_lookup(
         &mut self,
         n: NodeId,
         module: ModuleId,
-        name: &str,
+        name: Symbol,
         ns: Namespace,
         construct: bool,
     ) -> Option<Target> {
-        let candidates = self
+        let candidate = self
             .index
-            .member(&module, name, ns, construct)
-            .filter(|d| !construct || d.kind != DefinitionKind::Type || d.variants.is_empty())
-            .into_iter()
-            .collect();
-        self.select(
+            .member(module, name, ns, construct)
+            .filter(|&id| {
+                !construct
+                    || self.index.get(id).kind != DefinitionKind::Type
+                    || self.index.variant_names(id).is_empty()
+            });
+        self.selected(
             n,
             LookupScope::Module(module),
             name,
             ns,
             construct,
-            candidates,
+            candidate,
         )
     }
     fn prelude_lookup(
         &mut self,
         n: NodeId,
-        name: &str,
+        name: Symbol,
         ns: Namespace,
         construct: bool,
     ) -> Option<Target> {
-        let path = self.index.environment.prelude.get(name);
-        let candidate = path.and_then(|p| self.index.get(p)).filter(|d| match ns {
-            Namespace::Type => d.kind == DefinitionKind::Type,
-            Namespace::Value => {
-                d.kind == DefinitionKind::Function || construct && d.kind == DefinitionKind::Type
-            }
+        let candidate = self.index.prelude(name, ns, construct).filter(|&id| {
+            !construct
+                || self.index.get(id).kind != DefinitionKind::Type
+                || self.index.variant_names(id).is_empty()
         });
-        let candidates = candidate
-            .filter(|d| !construct || d.kind != DefinitionKind::Type || d.variants.is_empty())
-            .into_iter()
-            .collect();
-        let found = self.select(n, LookupScope::Prelude, name, ns, construct, candidates);
-        if found.is_none() && path.is_some() && path.and_then(|p| self.index.get(p)).is_none() {
-            let p = path.unwrap();
-            self.record(
-                n,
-                ns,
-                LookupScope::Module(ModuleId {
-                    package: p.0.package.clone(),
-                    modules: p.0.modules.clone(),
-                }),
-                vec![p.0.name.clone()],
-                LookupResult::Missing,
-            );
-        }
-        found
+        let Some(core) = self.index.core else {
+            return None;
+        };
+        self.selected(
+            n,
+            LookupScope::Prelude(core),
+            name,
+            ns,
+            construct,
+            candidate,
+        )
     }
-    fn head_lookup(&mut self, n: NodeId, name: &str) -> Option<Target> {
+    fn head_lookup(&mut self, n: NodeId, name: Symbol) -> Option<Target> {
         let m = self.index.module_head(self.module, name);
         self.record(
             n,
             Namespace::Value,
-            LookupScope::Modules(self.module.package.clone()),
-            vec![name.into()],
-            m.clone().map_or(LookupResult::Missing, |m| {
+            LookupScope::Modules(self.index.module_package(self.module)),
+            name,
+            false,
+            m.map_or(LookupResult::Missing, |m| {
                 LookupResult::Found(Target::Module(m))
             }),
         );
         m.map(Target::Module)
     }
-    fn use_path(&mut self, n: NodeId, type_context: bool, construct: bool) {
-        let parts = path_parts(self.item, n);
-        if parts.is_empty() {
-            return;
+    fn has_variant(&self, name: Symbol) -> bool {
+        self.index.variants(name).any(|id| {
+            let d = self.index.get(id);
+            d.site.module == self.module
+                || d.public
+                    && !d.opaque
+                    && self
+                        .index
+                        .reachable(self.module, self.index.module_package(d.site.module))
+        })
+    }
+    fn constructor(&mut self, n: NodeId, name: Symbol) -> Target {
+        let target = Target::ContextualConstructor { name };
+        self.record(
+            n,
+            Namespace::Value,
+            LookupScope::Variants(self.module),
+            name,
+            true,
+            LookupResult::Found(target),
+        );
+        target
+    }
+    fn variant_or_missing(&mut self, n: NodeId, name: Symbol) -> Target {
+        if self.has_variant(name) {
+            self.constructor(n, name)
+        } else {
+            self.record(
+                n,
+                Namespace::Value,
+                LookupScope::Variants(self.module),
+                name,
+                true,
+                LookupResult::Missing,
+            );
+            self.missing(n)
         }
+    }
+    fn missing(&mut self, n: NodeId) -> Target {
+        let path = path_tokens(self.item, n)
+            .map(|t| self.index.symbols.text(self.name(t)))
+            .collect::<Vec<_>>()
+            .join(".");
+        self.out.diagnostics.push(Refusal::new(
+            "LANG-7",
+            self.site(n),
+            format!("name `{path}` was not found"),
+        ));
+        Target::Missing
+    }
+    fn use_path(&mut self, n: NodeId, type_context: bool, construct: bool) {
+        let node = self.item.tree.node(n);
+        let simple = node.origin.tokens.end == node.origin.tokens.start + 1;
+        let key = (
+            self.scope_id,
+            self.name(node.token.unwrap()),
+            type_context,
+            construct,
+        );
+        if simple {
+            if let Some((old, target)) = self.paths[key.1.0 as usize & 7] {
+                if old == key {
+                    self.out.names.push(ResolvedUse {
+                        node: n,
+                        target,
+                        projections: Span::default(),
+                    });
+                    return;
+                }
+            }
+        }
+        let diagnostics_before = self.out.diagnostics.len();
+        let mut parts = path_tokens(self.item, n);
+        let Some(first) = parts.next() else {
+            return;
+        };
+        let name = self.name(first);
+        let rest = parts.clone();
+        let last = parts.clone().last();
         let ns = if type_context {
             Namespace::Type
         } else {
             Namespace::Value
         };
-        if type_context && parts.len() == 1 && builtin(&parts[0]) {
-            self.out.names.push(ResolvedUse {
-                node: n,
-                target: Target::Builtin(parts[0].clone()),
-                projections: vec![],
-            });
-            return;
-        }
-        let first_ns = if parts.len() > 1 {
-            Namespace::Value
+        let first_ns = if last.is_some() { Namespace::Value } else { ns };
+        let mut projections = Span::default();
+        let target = if type_context && last.is_none() && builtin(name) {
+            Target::Builtin(name)
         } else {
-            ns
-        };
-        let local = self.local_in(&parts[0], first_ns);
-        self.record(
-            n,
-            first_ns,
-            LookupScope::Local,
-            vec![parts[0].clone()],
-            local.map_or(LookupResult::Missing, |b| {
-                LookupResult::Found(Target::Binder(b))
-            }),
-        );
-        let mut projections = vec![];
-        let target = if let Some(b) = local {
-            projections = parts[1..].to_vec();
-            Target::Binder(b)
-        } else if parts.len() == 1 {
-            let name = &parts[0];
-            if let Some(t) = self
-                .module_lookup(n, self.module.clone(), name, ns, false)
+            let local = self.local_in(name, first_ns);
+            self.record(
+                n,
+                first_ns,
+                LookupScope::Local(self.scope_id),
+                name,
+                false,
+                local.map_or(LookupResult::Missing, |b| {
+                    LookupResult::Found(Target::Binder(b))
+                }),
+            );
+            if let Some(b) = local {
+                if let Some(p) = rest.clone().next() {
+                    projections = Span {
+                        start: p.0,
+                        end: self.item.tree.node(n).origin.tokens.end,
+                    };
+                }
+                Target::Binder(b)
+            } else if let Some(last) = last {
+                let first = self
+                    .module_lookup(n, self.module, name, Namespace::Value, false)
+                    .or_else(|| self.prelude_lookup(n, name, Namespace::Value, false))
+                    .or_else(|| self.head_lookup(n, name));
+                match first {
+                    Some(Target::Module(mut module)) => {
+                        let mut valid = true;
+                        for t in rest.take_while(|&t| t != last) {
+                            let s = self.name(t);
+                            let child = self.index.child(module, s);
+                            self.record(
+                                n,
+                                Namespace::Value,
+                                LookupScope::Children(module),
+                                s,
+                                false,
+                                child.map_or(LookupResult::Missing, |m| {
+                                    LookupResult::Found(Target::Module(m))
+                                }),
+                            );
+                            if let Some(m) = child {
+                                module = m;
+                            } else {
+                                valid = false;
+                                break;
+                            }
+                        }
+                        if !valid {
+                            self.missing(n)
+                        } else {
+                            let name = self.name(last);
+                            let mut candidates =
+                                self.index
+                                    .members_named(self.module, module, name, ns, false);
+                            let mut first = candidates.next();
+                            let mut second = candidates.next();
+                            if first.is_none() && construct {
+                                let mut cs = self.index.members_named(
+                                    self.module,
+                                    module,
+                                    name,
+                                    Namespace::Type,
+                                    true,
+                                );
+                                first = cs.next();
+                                second = cs.next();
+                            }
+                            if second.is_some() {
+                                self.record(
+                                    n,
+                                    ns,
+                                    LookupScope::Module(module),
+                                    name,
+                                    construct,
+                                    LookupResult::Ambiguous,
+                                );
+                                let mut d = Refusal::new(
+                                    "LANG-7",
+                                    self.site(n),
+                                    "ambiguous module extension member",
+                                );
+                                d.causal.extend(
+                                    self.index
+                                        .members_named(self.module, module, name, ns, construct)
+                                        .map(|id| self.index.get(id).site),
+                                );
+                                self.out.diagnostics.push(d);
+                                Target::Missing
+                            } else {
+                                self.selected(
+                                    n,
+                                    LookupScope::Module(module),
+                                    name,
+                                    ns,
+                                    construct,
+                                    first,
+                                )
+                                .unwrap_or_else(|| self.missing(n))
+                            }
+                        }
+                    }
+                    Some(t) => {
+                        projections = Span {
+                            start: rest.clone().next().unwrap().0,
+                            end: self.item.tree.node(n).origin.tokens.end,
+                        };
+                        t
+                    }
+                    None => self.missing(n),
+                }
+            } else if let Some(t) = self
+                .module_lookup(n, self.module, name, ns, false)
                 .or_else(|| self.prelude_lookup(n, name, ns, false))
             {
                 t
-            } else if type_context && builtin(name) {
-                Target::Builtin(name.clone())
-            } else if construct && !self.visible_variants(name).is_empty() {
-                let mut candidates = self.visible_variants(name);
-                let record = self
-                    .index
-                    .member(self.module, name, Namespace::Type, true)
-                    .or_else(|| {
-                        self.index
-                            .environment
-                            .prelude
-                            .get(name)
-                            .and_then(|p| self.index.get(p))
-                    })
-                    .filter(|d| d.kind == DefinitionKind::Type && d.variants.is_empty());
-                if let Some(record) = record {
-                    candidates.push(record.path.clone());
-                }
-                let target = Target::ContextualConstructor {
-                    name: name.clone(),
-                    candidates,
-                };
-                self.read(
-                    n,
-                    LookupScope::Variants,
-                    vec![name.clone()],
-                    LookupResult::Found(target.clone()),
-                );
-                target
+            } else if construct && self.has_variant(name) {
+                self.constructor(n, name)
             } else if construct {
-                if let Some(t) = self
-                    .module_lookup(n, self.module.clone(), name, Namespace::Type, true)
+                self.module_lookup(n, self.module, name, Namespace::Type, true)
                     .or_else(|| self.prelude_lookup(n, name, Namespace::Type, true))
-                {
-                    t
-                } else {
-                    self.variant_or_missing(n, name)
-                }
+                    .unwrap_or_else(|| self.variant_or_missing(n, name))
             } else if !type_context {
-                if let Some(t) = self.head_lookup(n, name) {
-                    t
-                } else {
-                    self.variant_or_missing(n, name)
-                }
+                self.head_lookup(n, name)
+                    .unwrap_or_else(|| self.variant_or_missing(n, name))
             } else {
-                self.missing(n, &parts)
-            }
-        } else {
-            let first = self
-                .module_lookup(n, self.module.clone(), &parts[0], Namespace::Value, false)
-                .or_else(|| self.prelude_lookup(n, &parts[0], Namespace::Value, false))
-                .or_else(|| self.head_lookup(n, &parts[0]));
-            match first {
-                Some(Target::Module(mut module)) => {
-                    module.modules.extend_from_slice(&parts[1..parts.len() - 1]);
-                    let name = parts.last().unwrap();
-                    let mut cs = self
-                        .index
-                        .members_named(self.module, &module, name, ns, false);
-                    if cs.is_empty() && construct {
-                        cs = self.index.members_named(
-                            self.module,
-                            &module,
-                            name,
-                            Namespace::Type,
-                            true,
-                        );
-                    }
-                    self.select(n, LookupScope::Module(module), name, ns, construct, cs)
-                        .unwrap_or_else(|| self.missing(n, &parts))
-                }
-                Some(t) => {
-                    projections = parts[1..].to_vec();
-                    t
-                }
-                None => self.missing(n, &parts),
+                self.missing(n)
             }
         };
+        if simple && self.out.diagnostics.len() == diagnostics_before && target != Target::Missing {
+            self.paths[key.1.0 as usize & 7] = Some((key, target));
+        }
         self.out.names.push(ResolvedUse {
             node: n,
             target,
             projections,
         });
     }
-    fn missing(&mut self, n: NodeId, parts: &[String]) -> Target {
-        self.out.diagnostics.push(Refusal::new(
-            "LANG-7",
-            self.site(n),
-            format!("name `{}` was not found", parts.join(".")),
-        ));
-        Target::Missing
-    }
-    fn visible_variants(&self, name: &str) -> Vec<DefPath> {
-        self.index
-            .variants(name)
-            .filter(|d| {
-                d.site.module == *self.module
-                    || d.public && !d.opaque && self.index.reachable(self.module, &d.path.0.package)
-            })
-            .map(|d| d.path.clone())
-            .collect()
-    }
-    fn variant_or_missing(&mut self, n: NodeId, name: &str) -> Target {
-        let candidates = self.visible_variants(name);
-        if candidates.is_empty() {
-            self.read(
-                n,
-                LookupScope::Variants,
-                vec![name.into()],
-                LookupResult::Missing,
-            );
-            self.missing(n, &[name.into()])
-        } else {
-            let t = Target::ContextualConstructor {
-                name: name.into(),
-                candidates,
-            };
-            self.read(
-                n,
-                LookupScope::Variants,
-                vec![name.into()],
-                LookupResult::Found(t.clone()),
-            );
-            t
-        }
-    }
     fn pattern(&mut self, n: NodeId) {
         let node = self.item.tree.node(n);
-        let kind = node.kind;
         let token = node.token;
-        match kind {
+        match node.kind {
             NodeKind::BindPattern => {
                 let t = token.unwrap();
                 let name = self.name(t);
-                if !self.visible_variants(&name).is_empty()
-                    || matches!(name.as_str(), "None" | "Ok" | "Some" | "Error")
-                {
-                    // The checker decides bare constructor versus binding from expected type.
-                    self.use_bare_pattern(n, &name);
+                if self.has_variant(name) {
+                    let target = self.constructor(n, name);
+                    self.out.names.push(ResolvedUse {
+                        node: n,
+                        target,
+                        projections: Span::default(),
+                    });
                 } else {
-                    self.read(n, LookupScope::Variants, vec![name], LookupResult::Missing);
+                    self.record(
+                        n,
+                        Namespace::Value,
+                        LookupScope::Variants(self.module),
+                        name,
+                        true,
+                        LookupResult::Missing,
+                    );
                     self.bind(n, t, BinderKind::Local);
                 }
             }
@@ -568,64 +656,42 @@ impl Resolver<'_> {
                 }
             }
             NodeKind::PatternField | NodeKind::TuplePattern => {
-                for c in self.children(n) {
-                    self.pattern(c);
+                for &c in self.children(n) {
+                    self.pattern(c)
                 }
             }
             _ => {}
         }
     }
-    fn use_bare_pattern(&mut self, n: NodeId, name: &str) {
-        let target = Target::ContextualConstructor {
-            name: name.into(),
-            candidates: self.visible_variants(name),
-        };
-        self.read(
-            n,
-            LookupScope::Variants,
-            vec![name.into()],
-            LookupResult::Found(target.clone()),
-        );
-        self.out.names.push(ResolvedUse {
-            node: n,
-            target,
-            projections: vec![],
-        });
-    }
-    fn scope(&mut self, f: impl FnOnce(&mut Self)) {
-        self.scopes.push(BTreeMap::new());
-        f(self);
-        self.scopes.pop();
-    }
     fn function(&mut self, n: NodeId) {
-        let old_labels = std::mem::take(&mut self.labels);
-        let old_kinds = std::mem::take(&mut self.label_kinds);
-        let old_loops = std::mem::take(&mut self.loops);
+        let old = self.label_base;
+        let old_loop = self.loop_base;
+        self.label_base = self.labels.len();
+        self.loop_base = self.loops.len();
         self.scope(|r| {
             let children = r.children(n);
-            for &c in &children {
+            for &c in children {
                 if r.item.tree.node(c).kind == NodeKind::Generics {
                     r.visit(c);
                 }
             }
-            for &c in &children {
+            for &c in children {
                 if r.item.tree.node(c).kind == NodeKind::Parameters {
-                    for p in r.children(c) {
+                    for &p in r.children(c) {
                         if let Some(t) = r.item.tree.node(p).token {
                             r.bind(p, t, BinderKind::Parameter);
                         }
                     }
                 }
             }
-            for c in children {
+            for &c in children {
                 if r.item.tree.node(c).kind != NodeKind::Generics {
                     r.visit(c);
                 }
             }
         });
-        self.labels = old_labels;
-        self.label_kinds = old_kinds;
-        self.loops = old_loops;
+        self.label_base = old;
+        self.loop_base = old_loop;
     }
     fn condition(&mut self, n: NodeId) {
         if self.item.tree.node(n).kind == NodeKind::ConditionLet {
@@ -639,6 +705,12 @@ impl Resolver<'_> {
     fn visit(&mut self, n: NodeId) {
         if self.out.resource_refusal.is_some() {
             return;
+        }
+        match self.item.tree.node(n).kind {
+            NodeKind::Literal => return,
+            NodeKind::Path => return self.use_path(n, false, false),
+            NodeKind::TypePath => return self.use_path(n, true, false),
+            _ => {}
         }
         if self.depth >= 384 {
             self.out.resource_refusal = Some(self.site(n));
@@ -654,22 +726,19 @@ impl Resolver<'_> {
         let token = node.token;
         let c = self.children(n);
         match kind {
-            NodeKind::Function => self.function(n),
-            NodeKind::Closure | NodeKind::ScopedClosure => self.function(n),
-            NodeKind::CallableType | NodeKind::ScopedCallableType | NodeKind::OwnCallableType => {
-                self.function(n)
-            }
+            NodeKind::Function
+            | NodeKind::Closure
+            | NodeKind::ScopedClosure
+            | NodeKind::CallableType
+            | NodeKind::ScopedCallableType
+            | NodeKind::OwnCallableType => self.function(n),
             NodeKind::TypeDecl
             | NodeKind::StableType
             | NodeKind::ResourceType
-            | NodeKind::ScopedType => self.scope(|r| {
-                for child in c {
-                    r.visit(child);
-                }
-            }),
-            NodeKind::Block => self.scope(|r| {
-                for &child in &c {
-                    r.visit(child);
+            | NodeKind::ScopedType
+            | NodeKind::Block => self.scope(|r| {
+                for &child in c {
+                    r.visit(child)
                 }
             }),
             NodeKind::Generic | NodeKind::RegionGeneric => {
@@ -684,7 +753,7 @@ impl Resolver<'_> {
                 );
                 let old = self.numeric_parameter;
                 self.numeric_parameter = kind == NodeKind::Generic;
-                for child in c {
+                for &child in c {
                     self.visit(child);
                 }
                 self.numeric_parameter = old;
@@ -723,7 +792,7 @@ impl Resolver<'_> {
             }
             NodeKind::Loop => {
                 self.loops.push(kind);
-                for child in c {
+                for &child in c {
                     self.visit(child);
                 }
                 self.loops.pop();
@@ -734,23 +803,23 @@ impl Resolver<'_> {
                     r.visit(child);
                 }
             }),
-            NodeKind::Region => self.scope(|r| {
-                r.bind(n, token.unwrap(), BinderKind::Region);
-                for &child in &c {
-                    r.visit(child);
-                }
-            }),
-            NodeKind::Drop => self.scope(|r| {
-                r.bind(n, token.unwrap(), BinderKind::Parameter);
-                for &child in &c {
+            NodeKind::Region | NodeKind::Drop => self.scope(|r| {
+                r.bind(
+                    n,
+                    token.unwrap(),
+                    if kind == NodeKind::Region {
+                        BinderKind::Region
+                    } else {
+                        BinderKind::Parameter
+                    },
+                );
+                for &child in c {
                     r.visit(child);
                 }
             }),
             NodeKind::Call => {
                 if let Some((&callee, args)) = c.split_first() {
-                    let labelled = args
-                        .iter()
-                        .any(|&a| self.item.tree.node(a).kind == NodeKind::LabelledArgument);
+                    let before = self.out.names.len();
                     if self.item.tree.node(callee).kind == NodeKind::Path {
                         self.use_path(callee, false, true);
                     } else {
@@ -759,16 +828,17 @@ impl Resolver<'_> {
                     for &arg in args {
                         self.visit(arg);
                     }
-                    if labelled {
-                        let target = self
-                            .out
-                            .names
+                    if args
+                        .iter()
+                        .any(|&a| self.item.tree.node(a).kind == NodeKind::LabelledArgument)
+                    {
+                        let target = self.out.names[before..]
                             .iter()
                             .find(|u| u.node == callee)
-                            .map(|u| &u.target);
-                        let ordinary = matches!(target,Some(Target::Definition(path)) if self.index.get(path).is_some_and(|d|d.kind==DefinitionKind::Function))
-                            || matches!(target, Some(Target::Binder(_)));
-                        if ordinary {
+                            .map(|u| u.target);
+                        if matches!(target,Some(Target::Definition(id)) if self.index.get(id).kind==DefinitionKind::Function)
+                            || matches!(target, Some(Target::Binder(_)))
+                        {
                             self.out.diagnostics.push(Refusal::new(
                                 "LANG-9",
                                 self.site(n),
@@ -780,37 +850,39 @@ impl Resolver<'_> {
             }
             NodeKind::Labelled => {
                 let name = self.name(token.unwrap());
-                let old = self.labels.iter().rev().find_map(|s| s.get(&name).copied());
+                let old = self.labels[self.label_base..]
+                    .iter()
+                    .rev()
+                    .find(|&&(s, _, _)| s == name)
+                    .map(|&(_, b, _)| b);
                 if let Some(b) = old {
                     let mut d = Refusal::new("LANG-15", self.site(n), "active label is shadowed");
-                    d.causal.push(self.out.binders[b as usize].site.clone());
+                    d.causal.push(self.out.binders[b as usize].site);
                     self.out.diagnostics.push(d);
                 }
                 let id = self.out.binders.len() as u32;
                 self.out.binders.push(Binder {
                     id,
-                    name: name.clone(),
+                    name,
                     kind: BinderKind::Label,
                     site: self.site(n),
                 });
-                self.labels.push(BTreeMap::from([(name, id)]));
-                self.label_kinds.push(self.item.tree.node(c[0]).kind);
-                for child in c {
+                self.labels.push((name, id, self.item.tree.node(c[0]).kind));
+                for &child in c {
                     self.visit(child);
                 }
                 self.labels.pop();
-                self.label_kinds.pop();
             }
             NodeKind::Break | NodeKind::Continue => {
                 let target = if let Some(t) = token {
                     let name = self.name(t);
-                    self.labels
+                    self.labels[self.label_base..]
                         .iter()
-                        .enumerate()
                         .rev()
-                        .find_map(|(i, s)| s.contains_key(&name).then_some(self.label_kinds[i]))
+                        .find(|&&(s, _, _)| s == name)
+                        .map(|&(_, _, k)| k)
                 } else {
-                    self.loops.last().copied()
+                    self.loops[self.loop_base..].last().copied()
                 };
                 if token.is_none() && target.is_none() {
                     self.out.diagnostics.push(Refusal::new(
@@ -839,11 +911,17 @@ impl Resolver<'_> {
                 }
                 if let Some(t) = token {
                     let name = self.name(t);
-                    let b = self.labels.iter().rev().find_map(|s| s.get(&name).copied());
-                    self.read(
+                    let b = self.labels[self.label_base..]
+                        .iter()
+                        .rev()
+                        .find(|&&(s, _, _)| s == name)
+                        .map(|&(_, b, _)| b);
+                    self.record(
                         n,
-                        LookupScope::Local,
-                        vec![name],
+                        Namespace::Value,
+                        LookupScope::Label(self.scope_id),
+                        name,
+                        false,
                         b.map_or(LookupResult::Missing, |b| {
                             LookupResult::Found(Target::Binder(b))
                         }),
@@ -856,12 +934,12 @@ impl Resolver<'_> {
                         ));
                     }
                 }
-                for child in c {
+                for &child in c {
                     self.visit(child);
                 }
             }
             NodeKind::BoundName => {
-                if matches!(self.name(token.unwrap()).as_str(), "integer" | "float")
+                if matches!(self.name(token.unwrap()), sym::INTEGER | sym::FLOAT)
                     && !(self.numeric_declaration && self.numeric_parameter)
                 {
                     self.out.diagnostics.push(Refusal::new("OWN-4",self.site(n),"numeric bounds are only permitted on type parameters of bodiless core declarations"));
@@ -869,8 +947,8 @@ impl Resolver<'_> {
             }
             NodeKind::Error => {}
             _ => {
-                for child in c {
-                    self.visit(child);
+                for &child in c {
+                    self.visit(child)
                 }
             }
         }

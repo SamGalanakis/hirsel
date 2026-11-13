@@ -9,10 +9,10 @@ use hirsel_core_front::{CoreCheck, Emitter, ModuleInput, Program};
 use hirsel_core_ids::{ContentHash, DefPath, PackageId};
 use hirsel_core_ir::{Module, text};
 use hirsel_core_resolve::{
-    CorpusManifest, Definition, Environment, ModuleId, NameIndex, PackageManifest, Refusal,
+    CorpusManifest, Definition, ModuleId, ModulePath, NameIndex, PackageManifest, Refusal,
     Resolution, Site, resolve,
 };
-use hirsel_core_syntax::{ParseMode, SyntaxFile, parse_bytes};
+use hirsel_core_syntax::{ParseMode, Symbols, SyntaxFile, parse_bytes};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io;
@@ -77,8 +77,8 @@ pub struct DefinitionProduct {
     pub ir: Module,
     pub resolution: Arc<Resolution>,
 }
-#[derive(Default)]
 pub struct CheckProduct {
+    pub index: Arc<NameIndex>,
     pub files: Vec<Arc<FileProduct>>,
     pub definitions: BTreeMap<DefPath, Arc<DefinitionProduct>>,
     pub diagnostics: Vec<Refusal>,
@@ -120,6 +120,7 @@ struct DiskCheck {
 }
 #[derive(Serialize, Deserialize)]
 struct Root {
+    identities: ContentHash,
     files: Vec<ContentHash>,
     definitions: Vec<(DefPath, ContentHash)>,
     diagnostics: Vec<Refusal>,
@@ -134,14 +135,20 @@ impl Driver {
     ) -> io::Result<Arc<CheckProduct>> {
         // Read source bytes exactly once. The source digest is reused by file publication.
         let mut sources = vec![];
-        let mut result = CheckProduct::default();
+        let mut bytes_total = 0;
+        let mut diagnostics = vec![];
+        let mut incomplete = vec![];
+        let mut symbols = Symbols::default();
+        for p in &request.inputs.packages {
+            p.intern(&mut symbols);
+        }
         for p in &request.inputs.packages {
             for s in &p.sources {
                 let bytes = std::fs::read(&s.file)?;
                 let hash = ContentHash::of_bytes(&bytes);
-                result.bytes += bytes.len();
+                bytes_total += bytes.len();
                 sources.push((
-                    ModuleId {
+                    ModulePath {
                         package: p.package.clone(),
                         modules: s.modules.clone(),
                     },
@@ -162,62 +169,71 @@ impl Driver {
                 } else {
                     ParseMode::Source
                 },
+                &mut symbols,
             );
-            result.diagnostics.extend(
-                output
-                    .diagnostics
-                    .iter()
-                    .map(|d| Refusal::syntax(id.clone(), d)),
-            );
+            diagnostics.extend(output.diagnostics.iter().map(|d| (id.clone(), d.clone())));
             if let Some(r) = output.resource_refusal {
-                result.incomplete.push(Incomplete {
-                    primary: Site {
-                        module: id.clone(),
-                        item: u32::MAX,
-                        span: Default::default(),
-                    },
-                    message: format!("parser resource refusal: {r:?}"),
-                });
+                incomplete.push((id.clone(), format!("parser resource refusal: {r:?}")));
             }
-            modules.push(ModuleInput {
-                id: id.clone(),
-                syntax: output.syntax,
-            });
+            modules.push((id.clone(), output.syntax));
         }
         meter.finish("parse");
-        let mut environment = Environment::default();
-        for p in &request.inputs.packages {
-            for dependency in &p.dependencies {
-                environment
-                    .dependencies
-                    .entry(p.package.clone())
-                    .or_default()
-                    .insert(
-                        dependency.name.clone(),
-                        ModuleId {
-                            package: dependency.clone(),
-                            modules: vec![],
-                        },
-                    );
-            }
-        }
-        let mut index = NameIndex::new(environment);
+        let mut index = NameIndex::new(Arc::new(symbols));
+        index.add_manifests(&request.inputs.packages);
+        let modules = modules
+            .into_iter()
+            .map(|(path, syntax)| ModuleInput {
+                id: index.module(&path).unwrap(),
+                syntax,
+            })
+            .collect::<Vec<_>>();
         for m in &modules {
-            index.add_module(&m.id);
-            for (i, item) in m.syntax.items.iter().enumerate() {
-                index.index_item(&m.id, i as u32, item);
+            for (i, item) in m.syntax.items().enumerate() {
+                index.index_item(m.id, i as u32, item);
             }
         }
-        index.configure_core(request.inputs.core.clone());
+        if let Some(core) = index
+            .symbols
+            .find(&request.inputs.core.name)
+            .zip(index.symbols.find(&request.inputs.core.version))
+            .and_then(|(n, v)| index.package(n, v))
+        {
+            index.configure_core(core);
+        }
+        let mut result = CheckProduct {
+            index: Arc::new(index),
+            files: vec![],
+            definitions: BTreeMap::new(),
+            diagnostics: vec![],
+            incomplete: vec![],
+            bytes: bytes_total,
+            rechecked: vec![],
+            root: ContentHash::of_bytes(b""),
+        };
+        let index = result.index.clone();
+        for (path, d) in diagnostics {
+            result
+                .diagnostics
+                .push(Refusal::syntax(index.module(&path).unwrap(), &d));
+        }
+        for (path, message) in incomplete {
+            result.incomplete.push(Incomplete {
+                primary: Site {
+                    module: index.module(&path).unwrap(),
+                    item: u32::MAX,
+                    span: Default::default(),
+                },
+                message,
+            });
+        }
         meter.finish("index");
         let resolutions: Vec<Vec<Arc<Resolution>>> = modules
             .iter()
             .map(|m| {
                 m.syntax
-                    .items
-                    .iter()
+                    .items()
                     .enumerate()
-                    .map(|(i, item)| Arc::new(resolve(&index, &m.id, i as u32, item)))
+                    .map(|(i, item)| Arc::new(resolve(&index, m.id, i as u32, item)))
                     .collect()
             })
             .collect();
@@ -273,7 +289,7 @@ impl Driver {
         }
         meter.finish("check/lower");
         let mut names: BTreeMap<ModuleId, Vec<Definition>> = BTreeMap::new();
-        for d in index.definitions() {
+        for (_, d) in index.definitions() {
             names
                 .entry(d.site.module.clone())
                 .or_default()
@@ -294,6 +310,7 @@ impl Driver {
         }
         let store = Store::new(&request.store)?;
         let mut root = Root {
+            identities: store.put(&encode(index.as_ref())?)?,
             files: vec![],
             definitions: vec![],
             diagnostics: result.diagnostics.clone(),

@@ -1,22 +1,29 @@
 use hirsel_core_ids::{DefPath, ItemPath, PackageId};
-use hirsel_core_syntax::{Diagnostic, Item, NodeId, NodeKind, Span, TokenKind};
-use std::collections::{BTreeMap, BTreeSet};
-
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
-pub struct ModuleId {
+use hirsel_core_syntax::{Diagnostic, Item, NodeId, NodeKind, Span, Symbol, Symbols};
+use rustc_hash::FxHashMap;
+use std::sync::Arc;
+macro_rules! ids { ($($name:ident),*) => {$(
+    #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize)]
+    pub struct $name(pub u32);
+)*}; }
+ids!(ModuleId, PackageKey, DefinitionId);
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Rows {
+    pub start: u32,
+    pub end: u32,
+}
+impl Rows {
+    pub fn slice<T>(self, rows: &[T]) -> &[T] {
+        &rows[self.start as usize..self.end as usize]
+    }
+}
+/// External discovery input. Strings stop at the compilation's symbol table.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ModulePath {
     pub package: PackageId,
     pub modules: Vec<String>,
 }
-impl ModuleId {
-    pub fn definition(&self, name: &str) -> DefPath {
-        DefPath(ItemPath {
-            package: self.package.clone(),
-            modules: self.modules.clone(),
-            name: name.into(),
-        })
-    }
-}
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Site {
     pub module: ModuleId,
     pub item: u32,
@@ -63,229 +70,308 @@ pub enum DefinitionKind {
     Constant,
     Type,
 }
-/// Index entries contain only declared headers. No body, AST or signature provider.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Definition {
-    pub path: DefPath,
+    pub name: Symbol,
     pub kind: DefinitionKind,
     pub public: bool,
     pub opaque: bool,
     pub site: Site,
-    pub fields: Vec<String>,
-    pub variants: Vec<String>,
+    pub fields: Rows,
+    pub variants: Rows,
 }
-/// Namespace is chosen by syntax (LANG-7), never inferred from a type.
 #[derive(
-    Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
+    Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize,
 )]
 pub enum Namespace {
     Type,
     Value,
 }
-#[derive(Clone, Debug, Default)]
-pub struct Environment {
-    pub prelude: BTreeMap<String, DefPath>,
-    pub dependencies: BTreeMap<PackageId, BTreeMap<String, ModuleId>>,
-    pub core: Option<PackageId>,
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Module {
+    pub package: PackageKey,
+    pub parent: Option<ModuleId>,
+    pub name: Symbol,
+    pub depth: u32,
+    merge: Rows,
 }
-/// Header rows and module membership are built once, before any definition is resolved.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Package {
+    pub name: Symbol,
+    pub version: Symbol,
+    pub root: ModuleId,
+    dependencies: Rows,
+}
+/// One compilation's flat header index. No body or owning path is stored here.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct NameIndex {
-    definitions: Vec<Definition>,
-    paths: BTreeMap<DefPath, usize>,
-    members: BTreeMap<ModuleId, BTreeMap<String, usize>>,
-    heads: BTreeMap<String, BTreeSet<ModuleId>>,
-    variants: BTreeMap<String, Vec<usize>>,
-    pub environment: Environment,
+    pub symbols: Arc<Symbols>,
+    pub modules: Vec<Module>,
+    pub packages: Vec<Package>,
+    pub definitions: Vec<Definition>,
+    members: FxHashMap<(ModuleId, Symbol), DefinitionId>,
+    children: FxHashMap<(ModuleId, Symbol), ModuleId>,
+    package_ids: FxHashMap<(Symbol, Symbol), PackageKey>,
+    dependencies: Vec<PackageKey>,
+    member_names: Vec<Symbol>,
+    variants: Vec<(Symbol, DefinitionId)>,
+    extensions: Vec<ModuleId>,
+    prelude: FxHashMap<Symbol, DefinitionId>,
+    pub core: Option<PackageKey>,
     pub diagnostics: Vec<Refusal>,
 }
 impl NameIndex {
-    pub fn new(environment: Environment) -> Self {
+    pub fn new(symbols: Arc<Symbols>) -> Self {
         Self {
-            environment,
-            ..Self::default()
+            symbols,
+            modules: vec![],
+            packages: vec![],
+            definitions: vec![],
+            members: FxHashMap::default(),
+            children: FxHashMap::default(),
+            package_ids: FxHashMap::default(),
+            dependencies: vec![],
+            member_names: vec![],
+            variants: vec![],
+            extensions: vec![],
+            prelude: FxHashMap::default(),
+            core: None,
+            diagnostics: vec![],
         }
     }
-    pub fn add_module(&mut self, module: &ModuleId) {
-        if !self.members.contains_key(module)
-            && module
-                .modules
-                .iter()
-                .any(|n| hirsel_core_syntax::Keyword::from_spelling(n).is_some())
-        {
-            self.diagnostics.push(Refusal::new(
-                "LANG-2",
-                Site {
-                    module: module.clone(),
-                    item: u32::MAX,
-                    span: Span::default(),
-                },
-                "module name is a reserved keyword",
-            ));
+    pub fn add_package(&mut self, name: Symbol, version: Symbol) -> PackageKey {
+        if let Some(&p) = self.package_ids.get(&(name, version)) {
+            return p;
         }
-        self.members.entry(module.clone()).or_default();
-        if let Some(head) = module.modules.first() {
-            self.heads
-                .entry(head.clone())
-                .or_default()
-                .insert(module.clone());
+        let id = PackageKey(self.packages.len() as u32);
+        let root = ModuleId(self.modules.len() as u32);
+        self.modules.push(Module {
+            package: id,
+            parent: None,
+            name,
+            depth: 0,
+            merge: Rows::default(),
+        });
+        self.packages.push(Package {
+            name,
+            version,
+            root,
+            dependencies: Rows::default(),
+        });
+        self.package_ids.insert((name, version), id);
+        id
+    }
+    pub fn package(&self, name: Symbol, version: Symbol) -> Option<PackageKey> {
+        self.package_ids.get(&(name, version)).copied()
+    }
+    pub fn set_dependencies(&mut self, p: PackageKey, ds: impl IntoIterator<Item = PackageKey>) {
+        let start = self.dependencies.len() as u32;
+        self.dependencies.extend(ds);
+        self.packages[p.0 as usize].dependencies = Rows {
+            start,
+            end: self.dependencies.len() as u32,
+        };
+    }
+    pub fn add_module(&mut self, package: PackageKey, path: &[Symbol]) -> ModuleId {
+        let mut parent = self.packages[package.0 as usize].root;
+        for &name in path {
+            if let Some(&id) = self.children.get(&(parent, name)) {
+                parent = id;
+                continue;
+            }
+            let id = ModuleId(self.modules.len() as u32);
+            self.modules.push(Module {
+                package,
+                parent: Some(parent),
+                name,
+                depth: self.modules[parent.0 as usize].depth + 1,
+                merge: Rows::default(),
+            });
+            self.children.insert((parent, name), id);
+            if hirsel_core_syntax::keyword_symbol(name) {
+                self.diagnostics.push(Refusal::new(
+                    "LANG-2",
+                    Site {
+                        module: id,
+                        item: u32::MAX,
+                        span: Span::default(),
+                    },
+                    "module name is a reserved keyword",
+                ));
+            }
+            parent = id;
         }
+        parent
     }
-    pub fn has_module_head(&self, package: &PackageId, name: &str) -> bool {
-        self.heads
-            .get(name)
-            .is_some_and(|ms| ms.iter().any(|m| &m.package == package))
+    pub fn child(&self, parent: ModuleId, name: Symbol) -> Option<ModuleId> {
+        self.children.get(&(parent, name)).copied()
     }
-    pub fn definitions(&self) -> impl Iterator<Item = &Definition> {
-        self.definitions.iter()
+    pub fn module_package(&self, module: ModuleId) -> PackageKey {
+        self.modules[module.0 as usize].package
     }
-    pub fn get(&self, path: &DefPath) -> Option<&Definition> {
-        self.paths.get(path).map(|&i| &self.definitions[i])
+    pub fn reachable(&self, from: ModuleId, package: PackageKey) -> bool {
+        let own = self.module_package(from);
+        package == own
+            || Some(package) == self.core
+            || self.packages[own.0 as usize]
+                .dependencies
+                .slice(&self.dependencies)
+                .contains(&package)
+    }
+    pub fn core_module(&self, name: Symbol) -> Option<ModuleId> {
+        self.child(self.packages[self.core?.0 as usize].root, name)
+    }
+    pub fn module_head(&self, from: ModuleId, name: Symbol) -> Option<ModuleId> {
+        let p = &self.packages[self.module_package(from).0 as usize];
+        self.child(p.root, name)
+            .or_else(|| {
+                p.dependencies
+                    .slice(&self.dependencies)
+                    .iter()
+                    .find_map(|d| {
+                        let p = &self.packages[d.0 as usize];
+                        (p.name == name).then_some(p.root)
+                    })
+            })
+            .or_else(|| self.core_module(name))
+    }
+    pub fn get(&self, id: DefinitionId) -> &Definition {
+        &self.definitions[id.0 as usize]
+    }
+    pub fn definitions(&self) -> impl Iterator<Item = (DefinitionId, &Definition)> {
+        self.definitions
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (DefinitionId(i as u32), d))
     }
     pub fn member(
         &self,
-        module: &ModuleId,
-        name: &str,
-        namespace: Namespace,
+        module: ModuleId,
+        name: Symbol,
+        ns: Namespace,
         constructor: bool,
-    ) -> Option<&Definition> {
-        let &i = self.members.get(module)?.get(name)?;
-        let d = &self.definitions[i];
-        (match namespace {
+    ) -> Option<DefinitionId> {
+        let id = *self.members.get(&(module, name))?;
+        let d = self.get(id);
+        (match ns {
             Namespace::Type => d.kind == DefinitionKind::Type,
             Namespace::Value => d.kind != DefinitionKind::Type || constructor,
         })
-        .then_some(d)
+        .then_some(id)
     }
-    pub fn variants(&self, name: &str) -> impl Iterator<Item = &Definition> {
-        self.variants
-            .get(name)
-            .into_iter()
-            .flatten()
-            .map(|&i| &self.definitions[i])
+    pub fn prelude(&self, name: Symbol, ns: Namespace, constructor: bool) -> Option<DefinitionId> {
+        let id = *self.prelude.get(&name)?;
+        let d = self.get(id);
+        (match ns {
+            Namespace::Type => d.kind == DefinitionKind::Type,
+            Namespace::Value => {
+                d.kind == DefinitionKind::Function || constructor && d.kind == DefinitionKind::Type
+            }
+        })
+        .then_some(id)
     }
-    pub fn reachable(&self, from: &ModuleId, package: &PackageId) -> bool {
-        package == &from.package
-            || self.environment.core.as_ref() == Some(package)
-            || self
-                .environment
-                .dependencies
-                .get(&from.package)
-                .is_some_and(|ds| ds.values().any(|m| &m.package == package))
+    pub fn field_names(&self, d: DefinitionId) -> &[Symbol] {
+        self.get(d).fields.slice(&self.member_names)
     }
-    pub fn core_module(&self, name: &str) -> Option<ModuleId> {
-        let package = self.environment.core.as_ref()?;
-        self.heads
-            .get(name)?
+    pub fn variant_names(&self, d: DefinitionId) -> &[Symbol] {
+        self.get(d).variants.slice(&self.member_names)
+    }
+    pub fn variants(&self, name: Symbol) -> impl Iterator<Item = DefinitionId> + '_ {
+        let start = self.variants.partition_point(|&(s, _)| s < name);
+        self.variants[start..]
             .iter()
-            .find(|m| &m.package == package && m.modules.len() == 1)
-            .cloned()
+            .take_while(move |&&(s, _)| s == name)
+            .map(|&(_, d)| d)
     }
-    pub fn module_head(&self, from: &ModuleId, name: &str) -> Option<ModuleId> {
-        if self.has_module_head(&from.package, name) {
-            return Some(ModuleId {
-                package: from.package.clone(),
-                modules: vec![name.into()],
-            });
-        }
-        self.environment
-            .dependencies
-            .get(&from.package)
-            .and_then(|d| d.get(name))
-            .cloned()
-            .or_else(|| self.core_module(name))
+    pub fn constructor_candidates(
+        &self,
+        from: ModuleId,
+        name: Symbol,
+    ) -> impl Iterator<Item = DefinitionId> + '_ {
+        let variants = self.variants(name).filter(move |&id| {
+            let d = self.get(id);
+            d.site.module == from
+                || d.public && !d.opaque && self.reachable(from, self.module_package(d.site.module))
+        });
+        let record = self
+            .member(from, name, Namespace::Type, true)
+            .or_else(|| self.prelude(name, Namespace::Type, true))
+            .filter(|&id| self.get(id).variants.start == self.get(id).variants.end);
+        variants.chain(record)
     }
-    /// Merge core module extensions by name while retaining every member's identity.
     pub fn members_named(
         &self,
-        from: &ModuleId,
-        module: &ModuleId,
-        name: &str,
+        from: ModuleId,
+        module: ModuleId,
+        name: Symbol,
         ns: Namespace,
         constructor: bool,
-    ) -> Vec<&Definition> {
-        if module.modules.len() == 1 && self.core_module(&module.modules[0]).is_some() {
-            self.heads
-                .get(&module.modules[0])
-                .into_iter()
-                .flatten()
-                .filter(|m| m.modules.len() == 1 && self.reachable(from, &m.package))
-                .filter_map(|m| self.member(m, name, ns, constructor))
-                .filter(|d| {
-                    d.site.module == *from
-                        || d.public
-                        || self.environment.core.as_ref() == Some(&d.path.0.package)
-                })
-                .collect()
-        } else {
-            self.member(module, name, ns, constructor)
-                .into_iter()
-                .collect()
-        }
+    ) -> impl Iterator<Item = DefinitionId> + '_ {
+        let merge = self.modules[module.0 as usize].merge;
+        let single = (merge.start == merge.end).then_some(module);
+        single
+            .into_iter()
+            .chain(merge.slice(&self.extensions).iter().copied())
+            .filter(move |&m| self.reachable(from, self.module_package(m)))
+            .filter_map(move |m| self.member(m, name, ns, constructor))
+            .filter(move |&id| {
+                let d = self.get(id);
+                merge.start == merge.end
+                    || d.site.module == from
+                    || d.public
+                    || Some(self.module_package(d.site.module)) == self.core
+            })
     }
-    pub fn configure_core(&mut self, package: PackageId) {
-        self.environment.core = Some(package.clone());
-        let prelude = ModuleId {
-            package,
-            modules: vec!["core".into()],
-        };
-        for d in &self.definitions {
-            if d.site.module == prelude && d.public {
-                self.environment
-                    .prelude
-                    .insert(d.path.0.name.clone(), d.path.clone());
+    pub fn configure_core(&mut self, package: PackageKey) {
+        self.core = Some(package);
+        let name = self.symbols.find("core").unwrap();
+        if let Some(module) = self.child(self.packages[package.0 as usize].root, name) {
+            for (i, d) in self.definitions.iter().enumerate() {
+                if d.site.module == module && d.public {
+                    self.prelude.insert(d.name, DefinitionId(i as u32));
+                }
             }
         }
-        for d in &self.definitions {
-            if d.site.module.modules.len() != 1
-                || Some(&d.path.0.package) == self.environment.core.as_ref()
-            {
+        self.variants.sort_unstable_by_key(|&(s, d)| (s, d));
+        let mut heads: Vec<_> = self
+            .modules
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.depth == 1)
+            .map(|(i, m)| (m.name, ModuleId(i as u32)))
+            .collect();
+        heads.sort_unstable();
+        for &(name, _) in &heads {
+            if self.core_module(name).is_none() {
                 continue;
             }
-            let Some(core) = self.core_module(&d.site.module.modules[0]) else {
-                continue;
+            let start = self.extensions.len() as u32;
+            self.extensions
+                .extend(heads.iter().filter(|&&(n, _)| n == name).map(|&(_, m)| m));
+            let range = Rows {
+                start,
+                end: self.extensions.len() as u32,
             };
-            if let Some(&i) = self.members.get(&core).and_then(|m| m.get(&d.path.0.name)) {
-                let mut r = Refusal::new(
-                    "LANG-7",
-                    d.site.clone(),
-                    "extension redeclares a core member",
-                );
-                r.causal.push(self.definitions[i].site.clone());
-                self.diagnostics.push(r);
+            for &(_, m) in heads.iter().filter(|&&(n, _)| n == name) {
+                self.modules[m.0 as usize].merge = range;
+            }
+        }
+        for d in &self.definitions {
+            let m = &self.modules[d.site.module.0 as usize];
+            if m.depth != 1 || m.package == package {
+                continue;
+            }
+            if let Some(core) = self.core_module(m.name) {
+                if let Some(&old) = self.members.get(&(core, d.name)) {
+                    let mut r =
+                        Refusal::new("LANG-7", d.site, "extension redeclares a core member");
+                    r.causal.push(self.get(old).site);
+                    self.diagnostics.push(r);
+                }
             }
         }
     }
-    pub fn add(&mut self, definition: Definition) {
-        self.add_module(&definition.site.module);
-        if definition.kind == DefinitionKind::Type
-            && crate::resolve::builtin(&definition.path.0.name)
-        {
-            self.diagnostics.push(Refusal::new(
-                "LANG-7",
-                definition.site.clone(),
-                "builtin type name cannot be redeclared",
-            ));
-            return;
-        }
-        if let Some(old) = self.get(&definition.path) {
-            let mut d = Refusal::new("LANG-7", definition.site.clone(), "duplicate definition");
-            d.causal.push(old.site.clone());
-            self.diagnostics.push(d);
-            return;
-        }
-        let i = self.definitions.len();
-        self.members
-            .get_mut(&definition.site.module)
-            .unwrap()
-            .insert(definition.path.0.name.clone(), i);
-        for name in &definition.variants {
-            self.variants.entry(name.clone()).or_default().push(i);
-        }
-        self.paths.insert(definition.path.clone(), i);
-        self.definitions.push(definition);
-    }
-    pub fn index_item(&mut self, module: &ModuleId, ordinal: u32, item: &Item) {
+    pub fn index_item(&mut self, module: ModuleId, ordinal: u32, item: Item<'_>) {
         let root = item.tree.node(item.root);
         let kind = match root.kind {
             NodeKind::Function => DefinitionKind::Function,
@@ -296,51 +382,110 @@ impl NameIndex {
             | NodeKind::ScopedType => DefinitionKind::Type,
             _ => return,
         };
-        let Some(name) = root.token else { return };
-        let name_span = item.tree.tokens[name.0 as usize].span;
-        let name = item.tree.token_text(&item.text, name);
+        let Some(t) = root.token else { return };
+        let name = item.symbol(t);
+        let site = Site {
+            module,
+            item: ordinal,
+            span: item.token_span(t),
+        };
+        if kind == DefinitionKind::Type && crate::resolve::builtin(name) {
+            self.diagnostics.push(Refusal::new(
+                "LANG-7",
+                site,
+                "builtin type name cannot be redeclared",
+            ));
+            return;
+        }
+        if let Some(&old) = self.members.get(&(module, name)) {
+            let mut r = Refusal::new("LANG-7", site, "duplicate definition");
+            r.causal.push(self.get(old).site);
+            self.diagnostics.push(r);
+            return;
+        }
         let mut d = Definition {
-            path: module.definition(name),
+            name,
             kind,
             public: false,
             opaque: false,
-            site: Site {
-                module: module.clone(),
-                item: ordinal,
-                span: name_span,
-            },
-            fields: vec![],
-            variants: vec![],
+            site,
+            fields: Rows::default(),
+            variants: Rows::default(),
         };
+        let id = DefinitionId(self.definitions.len() as u32);
         for &child in item.tree.children(item.root) {
             let n = item.tree.node(child);
             match n.kind {
                 NodeKind::Public => d.public = true,
                 NodeKind::Opaque => d.opaque = true,
                 NodeKind::Fields | NodeKind::Variants => {
-                    for &field in item.tree.children(child) {
-                        let n = item.tree.node(field);
-                        if let Some(t) = n.token {
-                            let name = item.tree.token_text(&item.text, t).into();
-                            if n.kind == NodeKind::Field {
-                                d.fields.push(name);
-                            } else if n.kind == NodeKind::Variant {
-                                d.variants.push(name);
+                    let start = self.member_names.len() as u32;
+                    for &child in item.tree.children(child) {
+                        if let Some(t) = item.tree.node(child).token {
+                            let s = item.symbol(t);
+                            self.member_names.push(s);
+                            if n.kind == NodeKind::Variants {
+                                self.variants.push((s, id));
                             }
                         }
+                    }
+                    let range = Rows {
+                        start,
+                        end: self.member_names.len() as u32,
+                    };
+                    if n.kind == NodeKind::Fields {
+                        d.fields = range;
+                    } else {
+                        d.variants = range;
                     }
                 }
                 _ => {}
             }
         }
-        self.add(d);
+        self.members.insert((module, name), id);
+        self.definitions.push(d);
+    }
+    /// Materialize neutral paths only at driver/checker/output boundaries.
+    pub fn module_path(&self, module: ModuleId) -> ModulePath {
+        let mut parts = vec![];
+        let mut m = module;
+        while let Some(parent) = self.modules[m.0 as usize].parent {
+            parts.push(
+                self.symbols
+                    .text(self.modules[m.0 as usize].name)
+                    .to_owned(),
+            );
+            m = parent;
+        }
+        parts.reverse();
+        let p = self.packages[self.module_package(module).0 as usize];
+        ModulePath {
+            package: PackageId {
+                name: self.symbols.text(p.name).into(),
+                version: self.symbols.text(p.version).into(),
+            },
+            modules: parts,
+        }
+    }
+    pub fn definition_path(&self, id: DefinitionId) -> DefPath {
+        let d = self.get(id);
+        let m = self.module_path(d.site.module);
+        DefPath(ItemPath {
+            package: m.package,
+            modules: m.modules,
+            name: self.symbols.text(d.name).into(),
+        })
+    }
+    pub fn definition(&self, module: ModuleId, name: Symbol) -> Option<DefinitionId> {
+        self.members.get(&(module, name)).copied()
     }
 }
-pub(crate) fn path_parts(item: &Item, node: NodeId) -> Vec<String> {
-    let r = &item.tree.node(node).origin.tokens;
-    item.tree.tokens[r.start as usize..r.end as usize]
-        .iter()
-        .filter(|t| t.kind == TokenKind::Ident)
-        .map(|t| item.text[t.span.start as usize..t.span.end as usize].to_owned())
-        .collect()
+pub(crate) fn path_tokens(
+    item: Item<'_>,
+    n: NodeId,
+) -> impl Iterator<Item = hirsel_core_syntax::TokenId> + Clone + '_ {
+    let r = &item.tree.node(n).origin.tokens;
+    (r.start..r.end)
+        .filter(move |&i| item.tree.tokens[i as usize].kind == hirsel_core_syntax::TokenKind::Ident)
+        .map(hirsel_core_syntax::TokenId)
 }

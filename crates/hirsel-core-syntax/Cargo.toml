@@ -8,7 +8,10 @@ rust-version.workspace = true
 [dependencies]
 hirsel-core-ids = { path = "../hirsel-core-ids" }
 hirsel-guard = { path = "../hirsel-guard" }
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
+
+rustc-hash = "2"
+smallvec = "1"
 
 [dev-dependencies]
 serde_json = "1"

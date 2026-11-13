@@ -6,12 +6,14 @@ mod grammar;
 mod lexer;
 mod literals;
 mod parser;
+mod symbols;
 mod token;
 pub use format::format;
 pub use lexer::{LexOutput, lex};
 pub use literals::{byte_value, character_value};
 pub use parser::{ParseMode, ParseOutput, ResourceRefusal, parse, parse_bytes};
 use std::ops::Range;
+pub use symbols::{Symbol, Symbols, keyword_symbol, sym};
 pub use token::*;
 
 #[cfg(test)]
@@ -26,7 +28,9 @@ macro_rules! ids { ($($name:ident),*) => {$(
 ids!(NodeId, TokenId);
 
 /// Byte offsets relative to an item's owned text, or to the file for file diagnostics.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct Span {
     pub start: u32,
     pub end: u32,
@@ -57,6 +61,12 @@ impl Diagnostic {
             required: None,
             message: message.into(),
         }
+    }
+}
+
+impl Span {
+    pub fn is_empty(self) -> bool {
+        self.start == self.end
     }
 }
 
@@ -114,7 +124,6 @@ pub enum NodeKind {
     Array,
     RepeatArray,
     Call,
-    Argument,
     LabelledArgument,
     BytesArgument,
     Index,
@@ -178,32 +187,130 @@ impl Tree {
         &text[s.start as usize..s.end as usize]
     }
 }
-/// Item-local text and arena remain identical when preceding items move.
+/// Upper bounds for resolver tables, accumulated while nodes are appended.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ResolutionSize {
+    pub names: u32,
+    pub binders: u32,
+    pub scopes: u32,
+    pub loops: u32,
+    pub labels: u32,
+}
+impl ResolutionSize {
+    pub(crate) fn add(&mut self, kind: NodeKind) {
+        match kind {
+            NodeKind::Path | NodeKind::TypePath => self.names += 1,
+            NodeKind::BindPattern => {
+                self.names += 1;
+                self.binders += 1;
+            }
+            NodeKind::TakePattern
+            | NodeKind::Generic
+            | NodeKind::RegionGeneric
+            | NodeKind::Parameter
+            | NodeKind::TakeParameter
+            | NodeKind::MutParameter
+            | NodeKind::BytesParameter => self.binders += 1,
+            NodeKind::Region | NodeKind::Drop => {
+                self.binders += 1;
+                self.scopes += 1;
+            }
+            NodeKind::Labelled => {
+                self.binders += 1;
+                self.labels += 1;
+            }
+            NodeKind::Loop | NodeKind::While | NodeKind::For | NodeKind::ForTake => {
+                self.loops += 1;
+                self.scopes += 1;
+            }
+            NodeKind::Function
+            | NodeKind::Closure
+            | NodeKind::ScopedClosure
+            | NodeKind::CallableType
+            | NodeKind::ScopedCallableType
+            | NodeKind::OwnCallableType
+            | NodeKind::Block
+            | NodeKind::TypeDecl
+            | NodeKind::StableType
+            | NodeKind::ResourceType
+            | NodeKind::ScopedType
+            | NodeKind::Arm
+            | NodeKind::If => self.scopes += 1,
+            _ => {}
+        }
+    }
+}
+/// One declaration's range in a file arena. Origins retain item-relative byte sites.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct Item {
-    /// The user source was refused during lexing/parsing; semantic passes skip it.
+pub struct ItemRange {
+    pub resolution_size: ResolutionSize,
+    /// Syntax-refused items retain text but skip semantic passes.
     pub has_errors: bool,
     pub file_offset: u32,
-    pub text: String,
-    pub tree: Tree,
+    pub end: u32,
+    pub tokens: Range<u32>,
+    pub nodes: Range<u32>,
     pub root: NodeId,
+}
+/// A borrowed item view. Token/node IDs address the file, never temporary objects.
+#[derive(Clone, Copy, Debug)]
+pub struct Item<'a> {
+    pub file_offset: u32,
+    pub text: &'a str,
+    pub tree: &'a Tree,
+    pub range: &'a ItemRange,
+    pub root: NodeId,
+}
+impl Item<'_> {
+    pub fn source_text(&self) -> &str {
+        &self.text[self.file_offset as usize..self.range.end as usize]
+    }
+    pub fn token_span(&self, t: TokenId) -> Span {
+        let s = self.tree.tokens[t.0 as usize].span;
+        Span {
+            start: s.start - self.file_offset,
+            end: s.end - self.file_offset,
+        }
+    }
+    pub fn symbol(&self, t: TokenId) -> Symbol {
+        self.tree.tokens[t.0 as usize].symbol
+    }
 }
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SyntaxFile {
-    pub items: Vec<Item>,
-    pub trailing: String,
+    pub source: String,
+    pub tree: Tree,
+    pub items: Vec<ItemRange>,
+    pub trailing_start: u32,
 }
 impl SyntaxFile {
     pub fn text(&self) -> String {
-        self.items
+        self.tree
+            .tokens
             .iter()
-            .flat_map(|item| {
-                item.tree.tokens.iter().map(move |token| {
-                    let span = token.span;
-                    &item.text[span.start as usize..span.end as usize]
-                })
-            })
-            .chain([self.trailing.as_str()])
+            .map(|t| &self.source[t.span.start as usize..t.span.end as usize])
             .collect()
+    }
+    pub fn trailing(&self) -> &str {
+        &self.source[self.trailing_start as usize..]
+    }
+    pub fn item(&self, i: usize) -> Item<'_> {
+        let range = &self.items[i];
+        Item {
+            file_offset: range.file_offset,
+            text: &self.source,
+            tree: &self.tree,
+            range,
+            root: range.root,
+        }
+    }
+    pub fn items(&self) -> impl ExactSizeIterator<Item = Item<'_>> {
+        self.items.iter().map(|range| Item {
+            file_offset: range.file_offset,
+            text: &self.source,
+            tree: &self.tree,
+            range,
+            root: range.root,
+        })
     }
 }

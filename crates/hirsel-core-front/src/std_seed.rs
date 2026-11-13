@@ -112,9 +112,9 @@ fn std_seed_check_report() {
     let modules: Vec<ModuleInput> = corpus
         .sources
         .iter()
-        .zip(parsed)
+        .zip(parsed.files)
         .map(|(s, p)| ModuleInput {
-            id: s.module.clone(),
+            id: index.module(&s.module).unwrap(),
             syntax: p.syntax,
         })
         .collect();
@@ -132,10 +132,13 @@ fn std_seed_check_report() {
     for r in p
         .refusals
         .iter()
-        .filter(|r| is_seed(&r.primary.module.package))
+        .filter(|r| is_seed(&index.module_path(r.primary.module).package))
     {
         by_item
-            .entry((r.primary.module.modules.join("."), r.primary.item))
+            .entry((
+                index.module_path(r.primary.module).modules.join("."),
+                r.primary.item,
+            ))
             .or_default()
             .push(describe(r));
     }

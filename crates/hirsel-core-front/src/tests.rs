@@ -4,8 +4,8 @@
 use crate::*;
 use hirsel_core_ids::PackageId;
 use hirsel_core_ir::{FuncId, Module, Param, Ty, eval, wf};
-use hirsel_core_resolve::{Environment, ModuleId, PackageManifest};
-use hirsel_core_syntax::{ParseMode, parse};
+use hirsel_core_resolve::{ModuleSource, PackageManifest};
+use hirsel_core_syntax::{ParseMode, Symbols, parse};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -23,42 +23,59 @@ fn package(name: &str) -> PackageId {
 /// The core fixture and one application module, indexed with the core fixture as the
 /// core package (its `core` module is the prelude).
 fn program_inputs(source: &str) -> (NameIndex, Vec<ModuleInput>) {
-    let core = PackageManifest::directory(&root().join("core"), package("core"), true)
-        .and_then(|m| m.read())
-        .expect("core fixture reads");
-    let mut modules = vec![];
-    for m in core {
-        assert!(
-            m.parsed.diagnostics.is_empty(),
-            "{}: {:?}",
-            m.file.display(),
-            m.parsed.diagnostics
-        );
-        modules.push(ModuleInput {
-            id: m.module,
-            syntax: m.parsed.syntax,
-        });
-    }
-    let main = ModuleId {
+    let mut symbols = Symbols::default();
+    let core = PackageManifest::directory(&root().join("core"), package("core"), true).unwrap();
+    let app = PackageManifest {
         package: package("app"),
-        modules: vec!["main".into()],
+        sources: vec![ModuleSource {
+            file: PathBuf::from("input.hirsel"),
+            modules: vec!["main".into()],
+            signatures: false,
+        }],
+        dependencies: vec![package("core")],
     };
-    let parsed = parse(source, ParseMode::Source);
-    let mut index = NameIndex::new(Environment::default());
-    for d in &parsed.diagnostics {
-        index.diagnostics.push(Refusal::syntax(main.clone(), d));
+    core.intern(&mut symbols);
+    app.intern(&mut symbols);
+    let mut syntax = core
+        .read(&mut symbols)
+        .unwrap()
+        .into_iter()
+        .map(|m| {
+            assert!(
+                m.parsed.diagnostics.is_empty(),
+                "{:?}",
+                m.parsed.diagnostics
+            );
+            m.parsed.syntax
+        })
+        .collect::<Vec<_>>();
+    let parsed = parse(source, ParseMode::Source, &mut symbols);
+    let diagnostics = parsed.diagnostics;
+    syntax.push(parsed.syntax);
+    let mut index = NameIndex::new(std::sync::Arc::new(symbols));
+    let ids = index.add_manifests(&[core, app]);
+    let modules = ids
+        .into_iter()
+        .zip(syntax)
+        .map(|(id, syntax)| ModuleInput { id, syntax })
+        .collect::<Vec<_>>();
+    for d in &diagnostics {
+        index
+            .diagnostics
+            .push(Refusal::syntax(modules.last().unwrap().id, d));
     }
-    modules.push(ModuleInput {
-        id: main,
-        syntax: parsed.syntax,
-    });
     for m in &modules {
-        index.add_module(&m.id);
-        for (i, item) in m.syntax.items.iter().enumerate() {
-            index.index_item(&m.id, i as u32, item);
+        for (i, item) in m.syntax.items().enumerate() {
+            index.index_item(m.id, i as u32, item);
         }
     }
-    index.configure_core(package("core"));
+    let core = index
+        .package(
+            index.symbols.find("core").unwrap(),
+            index.symbols.find("1").unwrap(),
+        )
+        .unwrap();
+    index.configure_core(core);
     (index, modules)
 }
 
@@ -114,18 +131,19 @@ fn run_case(path: &Path) -> Vec<String> {
     let source = std::fs::read_to_string(path).expect("case reads");
     let (index, modules) = program_inputs(&source);
     let mut p = Program::declare(&index, &modules);
-    let main = ModuleId {
-        package: package("app"),
-        modules: vec!["main".into()],
-    };
-    p.entry = Some(main.definition("main"));
+    let main = modules.last().unwrap().id;
+    p.entry = index
+        .symbols
+        .find("main")
+        .and_then(|s| index.definition(main, s))
+        .map(|d| index.definition_path(d));
     // Every body of the application module, checked once, in order.
     let mut emitter = Emitter::new();
     let mut refusals = p.refusals.clone();
     let mut gaps = p.gaps.clone();
     let mut functions = HashMap::new();
     for (f, fd) in p.fns.iter().enumerate() {
-        if fd.path.0.package != main.package || fd.body.is_none() {
+        if index.module_package(fd.site.module) != index.module_package(main) || fd.body.is_none() {
             continue;
         }
         let c = p.check_lower(f, &mut emitter);
@@ -155,7 +173,12 @@ fn run_case(path: &Path) -> Vec<String> {
             ["refuse", rule, "at", at] => want_refusals.push(format!("{rule} at {at}")),
             ["gap", what @ ..] => want_gaps.push(what.join(" ")),
             ["kind", ty, k] | ["holds", ty, k] | ["size", ty, k] => {
-                let Some(d) = p.decl(&main.definition(ty)) else {
+                let Some(d) = index
+                    .symbols
+                    .find(ty)
+                    .and_then(|n| index.definition(main, n))
+                    .and_then(|d| p.decl(&index.definition_path(d)))
+                else {
                     failures.push(format!("no type {ty}"));
                     continue;
                 };
@@ -438,12 +461,12 @@ fn m1_program_manifest() {
         }
     }
     let mut programs = 0;
-    for (source, parsed) in corpus.sources.iter().zip(&parsed) {
+    for (source, parsed) in corpus.sources.iter().zip(&parsed.files) {
         if source.mode != ParseMode::Source {
             continue;
         }
         let once = format(parsed).expect("accepted source formats");
-        let again = parse(&once, ParseMode::Source);
+        let again = parse(&once, ParseMode::Source, &mut Symbols::default());
         assert!(
             again.diagnostics.is_empty(),
             "{}: {:?}",
@@ -467,22 +490,27 @@ fn m1_program_manifest() {
     let modules: Vec<_> = corpus
         .sources
         .iter()
-        .zip(parsed)
+        .zip(parsed.files)
         .map(|(source, parsed)| ModuleInput {
-            id: source.module.clone(),
+            id: index.module(&source.module).unwrap(),
             syntax: parsed.syntax,
         })
         .collect();
-    for entry in modules
-        .iter()
-        .filter(|m| !matches!(m.id.package.name.as_str(), "core" | "std"))
-    {
+    for entry in modules.iter().filter(|m| {
+        !matches!(
+            index.module_path(m.id).package.name.as_str(),
+            "core" | "std"
+        )
+    }) {
         let selected: Vec<_> = modules
             .iter()
             .filter(|m| {
-                matches!(m.id.package.name.as_str(), "core" | "std" | "m1")
-                    || m.id == entry.id
-                    || (entry.id.package.name == "files" && m.id.package == entry.id.package)
+                matches!(
+                    index.module_path(m.id).package.name.as_str(),
+                    "core" | "std" | "m1"
+                ) || m.id == entry.id
+                    || (index.module_path(entry.id).package.name == "files"
+                        && index.module_package(m.id) == index.module_package(entry.id))
             })
             .map(|m| ModuleInput {
                 id: m.id.clone(),
@@ -494,7 +522,7 @@ fn m1_program_manifest() {
             for refusal in &program.refusals {
                 println!(
                     "M1 declaration refusal {} {} {:?}: {}",
-                    refusal.primary.module.package.name,
+                    index.module_path(refusal.primary.module).package.name,
                     line_col(&selected, &refusal.primary),
                     refusal.rule,
                     refusal.message
@@ -503,7 +531,7 @@ fn m1_program_manifest() {
             for gap in &program.gaps {
                 println!(
                     "M1 declaration gap {} {}: {}",
-                    gap.site.module.package.name,
+                    index.module_path(gap.site.module).package.name,
                     line_col(&selected, &gap.site),
                     gap.what
                 );
@@ -515,8 +543,8 @@ fn m1_program_manifest() {
             let mut gaps = 0;
             for (f, definition) in program.fns.iter().enumerate() {
                 if definition.body.is_none()
-                    || definition.path.0.package != entry.id.package
-                    || definition.path.0.modules != entry.id.modules
+                    || definition.path.0.package != index.module_path(entry.id).package
+                    || definition.path.0.modules != index.module_path(entry.id).modules
                 {
                     continue;
                 }
@@ -558,8 +586,8 @@ fn m1_program_manifest() {
             }
             println!(
                 "M1 checker {}.{}: {accepted}/{bodies} bodies accepted, {refused} refusals, {gaps} gaps; declarations {} refusals, {} gaps",
-                entry.id.package.name,
-                entry.id.modules.join("."),
+                index.module_path(entry.id).package.name,
+                index.module_path(entry.id).modules.join("."),
                 program.refusals.len(),
                 program.gaps.len()
             );
@@ -575,8 +603,8 @@ fn m1_program_manifest() {
                 .unwrap_or("non-string panic");
             println!(
                 "M1 checker CRASH {}.{}: {message}; no acceptance claimed",
-                entry.id.package.name,
-                entry.id.modules.join(".")
+                index.module_path(entry.id).package.name,
+                index.module_path(entry.id).modules.join(".")
             );
         }
     }

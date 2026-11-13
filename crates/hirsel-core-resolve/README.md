@@ -1,30 +1,38 @@
 # Core resolution
 
-Build a `NameIndex` from declared headers, call `configure_core` with the core package
-identity, and resolve each item. The prelude is every public declaration in that
-package's `core` module. Type and value lookups have separate namespaces. Core modules
-merge visible extension members from the current package and its dependencies, retaining
-each member's neutral definition identity. Core-member redeclarations and ambiguous
-extension reads are LANG-7 refusals.
+Lex every source with the compilation's `Symbols`, freeze the table in an `Arc`, and
+construct `NameIndex::new`. `PackageManifest::intern` and `add_manifests` convert external
+package/module descriptions once. Header indexing takes Copy `ModuleId`s and borrowed
+file-arena `Item`s. `configure_core` reads the actual public declarations of the core
+package's `core` module as the prelude. No core declaration is guessed from a spelling.
 
-Index rows contain names, kind, visibility, fields, variants and declaration sites.
-They contain no callee body. Resolution records successful, failed, ambiguous and
-shadowed lookups with the namespace and primary site. Bare variants retain expected-type
-candidate sets for checking. Dotted paths never name variants. Modes, bounds, anchors
-and waits are parsed as written; ownership and semantic checking belong to the next stage.
-Resource refusal is an incomplete tool result, separate from source diagnostics.
+Definitions, packages and modules are flat tables addressed by Copy IDs. Names and
+members use integer symbols, with separate type and value namespaces. Header rows own
+no path or name strings. `definition_path` and `module_path` materialize neutral identities
+at driver, checker and output boundaries. Core-front consumes definition IDs directly.
 
-The test/measurement command accepts an explicit JSON `CorpusManifest`, containing the
-core package identity and `PackageManifest` values with source/module mappings and exact
-dependencies. It discovers no installed old library and guesses no core declarations.
+`resolve(index, module, ordinal, item)` returns per-item flat use, binder and dependency
+rows. Each written use retains its node and target ID; field suffixes refer to a token
+range rather than copied strings. Dependency rows deduplicate scope/symbol/namespace/mode
+keys, retaining missing, private, opaque, ambiguous and shadowed outcomes. Local bindings
+use one marked undo stack and dense symbol slots. Traversal borrows child ranges and
+allocates no child, path or scope objects. Results and scratch tables are reserved before
+traversal. Refusal paths alone build diagnostic text.
+
+Locals beat modules, including a dotted path's first component. Local/value-definition
+and prelude-function shadowing remains refused. Builtin types resolve first and cannot
+be redeclared. Numeric bounds are contextual and legal only on type parameters of bodiless
+core declarations. Loop/label targets obey LANG-15 and cannot cross a closure.
+Ownership, type fitting, constructor selection and lowering belong to core-front.
+
+The tool accepts a JSON `CorpusManifest`, with explicit source/module mappings and package
+dependencies. `--json FILE` writes located refusals and counts; compact module IDs in sites
+index the report's `modules` table. `--strip-comments` preserves statement newlines and
+literal bytes; `--clean` removes refused definitions and their refused dependents for
+measurement input preparation. It retains valid members in partly refused modules.
+`--phase parse|resolve --iterations N` repeats one phase, including destruction.
+Parse includes corpus header indexing; resolve reuses one index. Startup is amortized.
 
 ```sh
 .buck2/bin/buck2 run //:hirsel-core-resolve-bin-hirsel-core-resolve -- inputs.json --json results.json
 ```
-
-Each report refusal includes file, line, column, excerpt and the machine-readable rule
-and item-relative site. `--strip-comments` compacts trivia while preserving statement
-newlines and literal spellings. `--clean` selects definitions with no syntax/index/resolve
-refusal and removes newly refused dependents, while retaining valid module members. `--phase parse|resolve --iterations N` repeats the selected stage. Parsing
-includes one corpus header-index build per iteration; resolution reuses one index and
-never rebuilds it per definition. Whole-process startup and reporting remain amortized.

@@ -3,26 +3,38 @@ use crate::*;
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LexOutput {
     pub tokens: Vec<Token>,
+    pub significant: Vec<usize>,
     pub diagnostics: Vec<Diagnostic>,
 }
-pub fn lex(text: &str) -> LexOutput {
-    let mut scanner = Scanner::new(text.as_bytes());
+pub fn lex(text: &str, symbols: &mut Symbols) -> LexOutput {
+    let mut scanner = Scanner::new(text, symbols);
     while scanner.pos < text.len() {
         scanner.next();
     }
     scanner.finish()
 }
 struct Scanner<'a> {
+    text: &'a str,
     bytes: &'a [u8],
     pos: usize,
     output: LexOutput,
+    symbols: &'a mut Symbols,
+    newline: bool,
 }
 impl<'a> Scanner<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
+    fn new(text: &'a str, symbols: &'a mut Symbols) -> Self {
+        let bytes = text.as_bytes();
         Self {
+            text,
             bytes,
             pos: 0,
-            output: LexOutput::default(),
+            output: LexOutput {
+                tokens: Vec::with_capacity(bytes.len() / 3 + 1),
+                significant: Vec::with_capacity(bytes.len() / 4 + 1),
+                diagnostics: vec![],
+            },
+            symbols,
+            newline: false,
         }
     }
     fn span(&self, start: usize, end: usize) -> Span {
@@ -37,16 +49,32 @@ impl<'a> Scanner<'a> {
             .push(Diagnostic::error(rule, self.span(start, end), message));
     }
 
-    fn emit(&mut self, start: usize, kind: TokenKind) {
+    fn emit(&mut self, start: usize, kind: TokenKind, symbol: Symbol) {
+        if !matches!(kind, TokenKind::Trivia(_)) {
+            self.output.significant.push(self.output.tokens.len());
+        }
         self.output.tokens.push(Token {
             kind,
             span: self.span(start, self.pos),
+            symbol,
+            line_before: self.newline,
         });
+        match kind {
+            TokenKind::Trivia(
+                TriviaKind::Space | TriviaKind::LineComment | TriviaKind::DocLine,
+            ) => {}
+            TokenKind::Trivia(TriviaKind::Newline) => self.newline = true,
+            TokenKind::Trivia(_) => self.newline |= self.bytes[start..self.pos].contains(&b'\n'),
+            _ => self.newline = false,
+        }
     }
     fn finish(mut self) -> LexOutput {
+        self.output.significant.push(self.output.tokens.len());
         self.output.tokens.push(Token {
             kind: TokenKind::Eof,
             span: self.span(self.pos, self.pos),
+            symbol: sym::NONE,
+            line_before: self.newline,
         });
         self.output
     }
@@ -56,6 +84,7 @@ impl<'a> Scanner<'a> {
     fn next(&mut self) {
         let start = self.pos;
         let errors = self.output.diagnostics.len();
+        let mut symbol = sym::NONE;
         let kind = match self.bytes[self.pos] {
             b' ' | b'\t' => {
                 while self
@@ -80,7 +109,11 @@ impl<'a> Scanner<'a> {
             b'r' if self.raw_start(false).is_some() => self.raw_string(false),
             b'b' if self.raw_start(true).is_some() => self.raw_string(true),
             b'"' => self.string(false),
-            b'\'' if self.label_end().is_some() => self.label(),
+            b'\'' if self.label_end().is_some() => {
+                let kind = self.label();
+                symbol = self.symbols.intern(&self.text[start + 1..self.pos]);
+                kind
+            }
             b'\'' => self.character_literal(false),
             b'b' if self.starts(b"b'") => self.character_literal(true),
             b'b' if self.starts(b"b\"") => self.string(true),
@@ -90,13 +123,13 @@ impl<'a> Scanner<'a> {
                 while self.bytes.get(self.pos).is_some_and(|b| name_byte(*b)) {
                     self.pos += 1;
                 }
-                // Identifier bytes are ASCII by construction.
-                let text = std::str::from_utf8(&self.bytes[start..self.pos]).unwrap_or("");
-                Keyword::from_spelling(text).map_or_else(|| TokenKind::Ident, TokenKind::Keyword)
+                symbol = self.symbols.intern(&self.text[start..self.pos]);
+                Keyword::from_symbol(symbol).map_or(TokenKind::Ident, TokenKind::Keyword)
             }
             _ => {
                 if let Some((len, punct)) = punctuation(&self.bytes[self.pos..]) {
                     self.pos += len;
+                    symbol = punct.symbol();
                     TokenKind::Punct(punct)
                 } else {
                     let (_, len) = scalar(&self.bytes[self.pos..]);
@@ -111,7 +144,7 @@ impl<'a> Scanner<'a> {
         } else {
             kind
         };
-        self.emit(start, kind);
+        self.emit(start, kind, symbol);
     }
     fn label_end(&self) -> Option<usize> {
         let start = self.pos + 1;
@@ -128,8 +161,8 @@ impl<'a> Scanner<'a> {
     fn label(&mut self) -> TokenKind {
         let start = self.pos;
         self.pos = self.label_end().expect("checked label prefix");
-        let name = std::str::from_utf8(&self.bytes[start + 1..self.pos]).unwrap();
-        if name == "_" || Keyword::from_spelling(name).is_some() {
+        let name = &self.text[start + 1..self.pos];
+        if name == "_" || self.symbols.find(name).is_some_and(crate::keyword_symbol) {
             self.error(
                 "LANG-2",
                 start,
@@ -261,11 +294,9 @@ impl<'a> Scanner<'a> {
         let mut float = false;
         let projection = self
             .output
-            .tokens
-            .iter()
-            .rev()
-            .find(|t| !matches!(t.kind, TokenKind::Trivia(_)))
-            .is_some_and(|t| t.kind == TokenKind::Punct(Punct::Dot));
+            .significant
+            .last()
+            .is_some_and(|&i| self.output.tokens[i].symbol == sym::DOT);
         if base == 10 && !projection {
             if self.bytes.get(self.pos) == Some(&b'.')
                 && self.bytes.get(self.pos + 1).is_some_and(u8::is_ascii_digit)

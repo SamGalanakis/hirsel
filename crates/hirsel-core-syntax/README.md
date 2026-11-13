@@ -1,37 +1,30 @@
 # Core syntax
 
-`parse(text, ParseMode::Source)` parses complete source. `Signatures` additionally permits
-function headers without bodies, for the seed library. Both retain every input byte,
-including invalid tokens and recovered items. `ResourceRefusal` is an incomplete compiler
-outcome, separate from source diagnostics. Callers must check it before publishing syntax.
+Create one `Symbols` table for the compilation package and its dependency sources, then
+call `parse(text, mode, &mut symbols)` or `parse_bytes(bytes, mode, &mut symbols)`.
+`Source` requires function bodies; `Signatures` permits bodiless declarations. Lexing
+interns identifiers once into this table. Grammar terminals have prefilled symbol IDs;
+parsing dispatches on integers. Symbols from unrelated tables must not be mixed.
 
-Each item owns its text, token tape, node arena and child-index pool. `NodeId` and
-`TokenId` address that item alone. Origins contain byte spans and half-open token ranges
-relative to its owned text; `file_offset` rebinds them to the current file. Nodes are
-append-only and nonrecursive to drop. `Tree::children` preserves written order.
+A `SyntaxFile` owns one source string and one arena of tokens, nodes and child edges.
+`items` contains ranges into those arrays; `item(n)` and `items()` yield Copy borrowed
+`Item` views. Token and node IDs address the file. Node byte spans remain relative to
+the containing item, while token byte spans and token/child indices address the file.
+`Item::token_span` converts a token's span to an item-relative anchor. `SyntaxFile::text`
+reconstructs the original bytes from the tape, including invalid and recovered source.
+A compiler `ResourceRefusal` is separate from language diagnostics; incomplete syntax
+must not be published as a successful parse.
 
-The scanner, trivia, literal and decoding algorithms are extracted from hirsel-lexer
-and hirsel-syntax. Cursor, brace recovery, precedence climbing and per-item origins adapt
-hirsel-parser. Tokens and grammar nodes are new. `grammar.rs` holds operator precedence
-and terminal sets. Grammar visitors live in parser.rs. Zig's flat node/edge tables and
-Rowan's lossless token coverage inform the representation, with existing Hirsel item
-arenas retained. Detailed source references are in the lane's PRIOR-ART.md.
+The scanner, trivia/literal decoding, recovery, precedence climbing and relative source
+anchors adapt the old front end. Grammar, nodes and token vocabulary belong to the new
+language. Goose, Zig and rustc informed the flat arenas and symbols; the lane's
+PRIOR-ART.md records choices and tradeoffs. There are no old semantic dependencies.
 
-Tests use source rules and hand-derived precedence, diagnostic, origin and token
-expectations. They catch dropped trivia, item relocation, newline continuation, chained
-comparisons, old or-pattern syntax, hidden subsequent items and literal decoding errors.
+`format(&ParseOutput)` formats a successful complete parse, retaining every literal,
+comment and semicolon. Blocks, fields, match arms and statements use four-space structural
+layout; declarations have one blank line between them. Other lists stay inline. Tests
+check token preservation, item-relative anchors, AST shape, recovery and idempotence.
+No reparse or validation of our own output runs in the product.
 
-
-`format(&ParseOutput)` returns canonical text for a successful, complete parse and
-`None` for invalid source or an incomplete compiler outcome. Blocks, record fields
-and match arms use four-space indentation, statements occupy separate lines, attributes
-precede their declaration, and declarations have one blank line between them. Other
-lists stay inline. Spaces follow syntax roles, including unary operators, calls and
-numeric tuple projections. Every semicolon, literal spelling and comment byte is retained;
-comments keep their order and trailing/leading placement. There is no reparse of the
-formatter's output in the product. Tests check syntax shape, token preservation and
-idempotence. The formatter does not resolve names or infer ownership.
-
-The command `hirsel-core-syntax FILE [--signatures]` writes formatted text to stdout.
-It never rewrites the input file. Invalid source produces located rule diagnostics on
-stderr and exits unsuccessfully without formatted output.
+`hirsel-core-syntax FILE [--signatures]` writes canonical text to stdout. Invalid source
+prints located rule diagnostics and exits unsuccessfully without formatted output.

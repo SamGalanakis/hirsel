@@ -15,9 +15,7 @@
 //! availability changes (a branch's arms run from one state and join by OWN-16 without
 //! copying the table), and the freeze and reservation records (crate::own).
 
-use crate::decls::{
-    DeclBody, FnDecl, KEY, Kind, ORDERED, Repr, Role, copyable, has_bounds, is_core_prelude, kind,
-};
+use crate::decls::{DeclBody, FnDecl, KEY, Kind, ORDERED, Repr, Role, copyable, has_bounds, kind};
 use crate::own::{Act, Avail, Extent, Freeze, Hold, Origin, PStep, Place, breaks, join, overlap};
 use crate::types::*;
 use crate::{Def, Gap, ItemRef, Program, refusal};
@@ -191,7 +189,7 @@ impl Program<'_> {
     /// this body, signatures and summaries).
     pub fn check_lower(&self, f: usize, e: &mut Emitter) -> CoreCheck {
         let fd = &self.fns[f];
-        if self.item(fd.at).has_errors {
+        if self.item(fd.at).range.has_errors {
             return CoreCheck::default();
         }
         let Some(body) = fd.body else {
@@ -300,7 +298,7 @@ struct Frame {
 struct Cx<'c, 'a> {
     p: &'c Program<'a>,
     at: ItemRef,
-    item: &'a Item,
+    item: Item<'a>,
     fd: &'c FnDecl,
     params: Vec<u8>,
     t: Local<'c>,
@@ -401,7 +399,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             binder_at,
             frames: vec![],
             joins: vec![],
-            synth: vec![0; item.tree.nodes.len()],
+            synth: vec![0; (item.range.nodes.end - item.range.nodes.start) as usize],
             waited: false,
             entry: p.entry.as_ref() == Some(&fd.path),
             out: CoreCheck::default(),
@@ -413,11 +411,11 @@ impl<'c, 'a> Cx<'c, 'a> {
         self.item.tree.node(n).kind
     }
     fn kids(&self, n: NodeId) -> &'a [NodeId] {
-        let item: &'a Item = self.item;
+        let item = self.item;
         item.tree.children(n)
     }
     fn token_text(&self, n: NodeId) -> &'a str {
-        let item: &'a Item = self.item;
+        let item = self.item;
         match item.tree.node(n).token {
             Some(t) => item.tree.token_text(&item.text, t),
             None => "",
@@ -450,7 +448,7 @@ impl<'c, 'a> Cx<'c, 'a> {
     /// The operator token of a unary, binary or compound-assignment node `n`.
     fn op_span(&self, n: NodeId) -> Span {
         match self.item.tree.node(n).token {
-            Some(t) => self.item.tree.tokens[t.0 as usize].span,
+            Some(t) => self.item.token_span(t),
             None => self.span(n),
         }
     }
@@ -607,10 +605,12 @@ impl<'c, 'a> Cx<'c, 'a> {
     }
     fn slot_name(&self, s: u32) -> &'c str {
         let p: &'c Program<'a> = self.p;
-        &p.items[self.at.module as usize][self.at.item as usize]
-            .resolution
-            .binders[s as usize]
-            .name
+        p.index.symbols.text(
+            p.items[self.at.module as usize][self.at.item as usize]
+                .resolution
+                .binders[s as usize]
+                .name,
+        )
     }
     fn declare(&mut self, b: u32, ty: TyId, binding: Binding, origin: Origin, n: NodeId) {
         self.vars[b as usize] = Some(Var {
@@ -847,8 +847,13 @@ impl<'c, 'a> Cx<'c, 'a> {
                     ty: var.ty,
                     shared: false,
                 };
-                for name in &u.projections {
-                    self.field(&mut at, name, n)?;
+                let item = self.item;
+                for token in
+                    &item.tree.tokens[u.projections.start as usize..u.projections.end as usize]
+                {
+                    if token.kind == TokenKind::Ident {
+                        self.field(&mut at, self.p.index.symbols.text(token.symbol), n)?;
+                    }
                 }
                 Ok(Some(at))
             }
@@ -1065,7 +1070,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                 self.start(entry);
             }
             Err(what) => {
-                let site = self.fd.site.clone();
+                let site = self.fd.site;
                 self.out.gaps.push(Gap::new(site, what));
                 self.halt();
             }
@@ -1229,7 +1234,7 @@ impl<'c, 'a> Cx<'c, 'a> {
     /// operator chains stay linear.
     fn synthesises(&mut self, n: NodeId) -> bool {
         self.out.counts.nodes += 1;
-        match self.synth[n.0 as usize] {
+        match self.synth[(n.0 - self.item.range.nodes.start) as usize] {
             1 => return true,
             2 => return false,
             _ => {}
@@ -1244,7 +1249,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             NodeKind::Binary => self.synthesises(c[0]) || self.synthesises(c[1]),
             _ => true,
         };
-        self.synth[n.0 as usize] = if r { 1 } else { 2 };
+        self.synth[(n.0 - self.item.range.nodes.start) as usize] = if r { 1 } else { 2 };
         r
     }
     fn unsuffixed_number(&self, n: NodeId) -> bool {
@@ -2469,7 +2474,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             _ => None,
         };
         let f = match target {
-            Some(Target::Definition(path)) => match p.by_path.get(path) {
+            Some(Target::Definition(id)) => match p.by_definition[id.0 as usize].as_ref() {
                 Some(Def::Fn(f)) => *f as usize,
                 _ => return self.gap_ty(callee, "construction is not built"),
             },
@@ -2517,11 +2522,14 @@ impl<'c, 'a> Cx<'c, 'a> {
         let call = self.call_seq;
         let holds = self.freezes.len();
         for (i, &a) in args.iter().enumerate() {
-            if self.kind(a) != NodeKind::Argument {
+            if matches!(
+                self.kind(a),
+                NodeKind::LabelledArgument | NodeKind::BytesArgument
+            ) {
                 self.gap(a, "labelled and bytes arguments are not built");
                 continue;
             }
-            let e = self.kids(a)[0];
+            let e = a;
             if self.argument(
                 g.params[i].mode,
                 g.params[i].ty,
@@ -2567,7 +2575,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             self.determined(f, &found, &mut checked, n);
         }
         for i in later {
-            let e = self.kids(args[i])[0];
+            let e = args[i];
             match self.known(g.params[i].ty, &found) {
                 Some(t) => vals[i] = self.expr(e, expect(t)).1,
                 None => {
@@ -2955,8 +2963,8 @@ impl<'c, 'a> Cx<'c, 'a> {
     /// Option and Result, is not scoped (OWN-19), as in the declaration pass.
     fn named_ty(&mut self, path: NodeId, args: &[(TyId, NodeId)]) -> TyId {
         let p: &'c Program<'a> = self.p;
-        let d = match p.target(self.at, path).cloned() {
-            Some(Target::Builtin(name)) => match Scalar::from_name(&name) {
+        let d = match p.target(self.at, path).copied() {
+            Some(Target::Builtin(name)) => match Scalar::from_name(p.index.symbols.text(name)) {
                 Some(s) if args.is_empty() => return scalar(s),
                 Some(_) => {
                     self.refuse("LANG-12", path, "this type takes no type arguments");
@@ -2967,17 +2975,21 @@ impl<'c, 'a> Cx<'c, 'a> {
                     return ERROR;
                 }
             },
-            Some(Target::Definition(q)) if is_core_prelude(&q, &["Never"]) => {
+            Some(Target::Definition(q)) if p.core_named(q, &["Never"]) => {
                 if !args.is_empty() {
                     self.refuse("LANG-12", path, "this type takes no type arguments");
                     return ERROR;
                 }
                 return NEVER;
             }
-            Some(Target::Definition(q)) => match p.by_path.get(&q) {
+            Some(Target::Definition(q)) => match p.by_definition[q.0 as usize].as_ref() {
                 Some(Def::Type(d)) => *d,
                 _ => {
-                    self.refuse("LANG-7", path, format!("`{q}` is not a type"));
+                    self.refuse(
+                        "LANG-7",
+                        path,
+                        format!("`{}` is not a type", p.index.definition_path(q)),
+                    );
                     return ERROR;
                 }
             },

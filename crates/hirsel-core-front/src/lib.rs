@@ -22,7 +22,7 @@ pub use types::*;
 
 use hirsel_core_ids::DefPath;
 use hirsel_core_resolve::{
-    ModuleId, NameIndex, Refusal, Resolution, ResolvedUse, Site, Target, resolve,
+    DefinitionId, ModuleId, NameIndex, Refusal, Resolution, ResolvedUse, Site, Target, resolve,
 };
 use hirsel_core_syntax::{Item, NodeId, Span, SyntaxFile};
 use std::collections::HashMap;
@@ -79,6 +79,7 @@ pub struct Program<'a> {
     pub decls: Vec<TypeDecl>,
     pub fns: Vec<FnDecl>,
     pub by_path: HashMap<DefPath, Def>,
+    pub by_definition: Vec<Option<Def>>,
     /// Refusals of declarations and signatures, and the resolver's.
     pub refusals: Vec<Refusal>,
     pub gaps: Vec<Gap>,
@@ -98,10 +99,9 @@ impl<'a> Program<'a> {
             .iter()
             .map(|m| {
                 m.syntax
-                    .items
-                    .iter()
+                    .items()
                     .enumerate()
-                    .map(|(i, item)| std::sync::Arc::new(resolve(index, &m.id, i as u32, item)))
+                    .map(|(i, item)| std::sync::Arc::new(resolve(index, m.id, i as u32, item)))
                     .collect()
             })
             .collect();
@@ -121,14 +121,16 @@ impl<'a> Program<'a> {
             .zip(resolutions)
             .map(|(m, rows)| {
                 m.syntax
-                    .items
-                    .iter()
+                    .items()
                     .zip(rows)
                     .map(|(item, resolution)| {
                         refusals.extend(resolution.diagnostics.iter().cloned());
-                        let mut uses = vec![u32::MAX; item.tree.nodes.len()];
+                        let mut uses = vec![
+                            u32::MAX;
+                            (item.range.nodes.end - item.range.nodes.start) as usize
+                        ];
                         for (k, u) in resolution.names.iter().enumerate() {
-                            uses[u.node.0 as usize] = k as u32;
+                            uses[(u.node.0 - item.range.nodes.start) as usize] = k as u32;
                         }
                         ItemInfo { resolution, uses }
                     })
@@ -143,6 +145,7 @@ impl<'a> Program<'a> {
             decls: vec![],
             fns: vec![],
             by_path: HashMap::new(),
+            by_definition: vec![None; index.definitions.len()],
             refusals,
             gaps: vec![],
             entry: None,
@@ -156,16 +159,16 @@ impl<'a> Program<'a> {
         p
     }
 
-    pub(crate) fn item(&self, at: ItemRef) -> &'a Item {
+    pub(crate) fn item(&self, at: ItemRef) -> Item<'a> {
         let modules: &'a [ModuleInput] = self.modules;
-        &modules[at.module as usize].syntax.items[at.item as usize]
+        modules[at.module as usize].syntax.item(at.item as usize)
     }
     pub(crate) fn site(&self, at: ItemRef, n: NodeId) -> Site {
         self.site_span(at, self.item(at).tree.node(n).origin.span)
     }
     pub(crate) fn site_span(&self, at: ItemRef, span: Span) -> Site {
         Site {
-            module: self.modules[at.module as usize].id.clone(),
+            module: self.modules[at.module as usize].id,
             item: at.item,
             span,
         }
@@ -175,10 +178,22 @@ impl<'a> Program<'a> {
     }
     pub(crate) fn resolved(&self, at: ItemRef, n: NodeId) -> Option<&ResolvedUse> {
         let info = &self.items[at.module as usize][at.item as usize];
-        let k = *info.uses.get(n.0 as usize)?;
+        let k = *info
+            .uses
+            .get((n.0 - self.item(at).range.nodes.start) as usize)?;
         (k != u32::MAX).then(|| &info.resolution.names[k as usize])
     }
 
+    pub(crate) fn core_named(&self, id: DefinitionId, names: &[&str]) -> bool {
+        let d = self.index.get(id);
+        let m = self.index.modules[d.site.module.0 as usize];
+        Some(m.package) == self.index.core
+            && m.depth == 1
+            && self.index.symbols.text(m.name) == "core"
+            && names
+                .iter()
+                .any(|n| self.index.symbols.find(n) == Some(d.name))
+    }
     pub fn decl(&self, path: &DefPath) -> Option<&TypeDecl> {
         match self.by_path.get(path)? {
             Def::Type(d) => Some(&self.decls[d.index()]),

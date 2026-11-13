@@ -27,9 +27,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some("resolve") => {
             for _ in 0..iterations {
-                for (source, p) in corpus.sources.iter().zip(&parsed) {
-                    for (i, item) in p.syntax.items.iter().enumerate() {
-                        black_box(resolve(&index, &source.module, i as u32, item));
+                for (source, p) in corpus.sources.iter().zip(&parsed.files) {
+                    for (i, item) in p.syntax.items().enumerate() {
+                        black_box(resolve(
+                            &index,
+                            index.module(&source.module).unwrap(),
+                            i as u32,
+                            item,
+                        ));
                     }
                 }
             }

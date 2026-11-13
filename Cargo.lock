@@ -756,6 +756,7 @@ dependencies = [
  "hirsel-core-ids",
  "hirsel-core-syntax",
  "hirsel-guard",
+ "rustc-hash",
  "serde",
  "serde_json",
 ]
@@ -776,8 +777,10 @@ version = "0.1.0"
 dependencies = [
  "hirsel-core-ids",
  "hirsel-guard",
+ "rustc-hash",
  "serde",
  "serde_json",
+ "smallvec",
 ]
 
 [[package]]

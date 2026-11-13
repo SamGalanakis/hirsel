@@ -1,0 +1,326 @@
+//! Identifier symbols owned by one compilation package, including its dependencies.
+//! Safe and session-local: no global interner, locks, or extended lifetimes.
+use rustc_hash::FxHashMap;
+use std::sync::Arc;
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Eq,
+    PartialEq,
+    Ord,
+    PartialOrd,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+pub struct Symbol(pub u32);
+pub mod sym {
+    use super::Symbol;
+    pub const NONE: Symbol = Symbol(0);
+    pub const PACKED: Symbol = Symbol(109);
+    pub const STREAMABLE: Symbol = Symbol(110);
+    pub const FN: Symbol = Symbol(1);
+    pub const LET: Symbol = Symbol(2);
+    pub const MUT: Symbol = Symbol(3);
+    pub const MATCH: Symbol = Symbol(4);
+    pub const IF: Symbol = Symbol(5);
+    pub const ELSE: Symbol = Symbol(6);
+    pub const LOOP: Symbol = Symbol(7);
+    pub const WHILE: Symbol = Symbol(8);
+    pub const FOR: Symbol = Symbol(9);
+    pub const IN: Symbol = Symbol(10);
+    pub const BREAK: Symbol = Symbol(11);
+    pub const CONTINUE: Symbol = Symbol(12);
+    pub const RETURN: Symbol = Symbol(13);
+    pub const TAKE: Symbol = Symbol(14);
+    pub const COPY: Symbol = Symbol(15);
+    pub const VIEW: Symbol = Symbol(16);
+    pub const TYPE: Symbol = Symbol(17);
+    pub const STABLE: Symbol = Symbol(18);
+    pub const RESOURCE: Symbol = Symbol(19);
+    pub const SCOPED: Symbol = Symbol(20);
+    pub const REGION: Symbol = Symbol(21);
+    pub const BOUND: Symbol = Symbol(22);
+    pub const PUB: Symbol = Symbol(23);
+    pub const OPAQUE: Symbol = Symbol(24);
+    pub const CONST: Symbol = Symbol(25);
+    pub const WHERE: Symbol = Symbol(26);
+    pub const TRUE: Symbol = Symbol(27);
+    pub const FALSE: Symbol = Symbol(28);
+    pub const BYTES: Symbol = Symbol(29);
+    pub const DOTDOTEQ: Symbol = Symbol(30);
+    pub const SHLEQ: Symbol = Symbol(31);
+    pub const SHREQ: Symbol = Symbol(32);
+    pub const DOTDOT: Symbol = Symbol(33);
+    pub const ARROW: Symbol = Symbol(34);
+    pub const FATARROW: Symbol = Symbol(35);
+    pub const ANDAND: Symbol = Symbol(36);
+    pub const OROR: Symbol = Symbol(37);
+    pub const SHL: Symbol = Symbol(38);
+    pub const SHR: Symbol = Symbol(39);
+    pub const EQEQ: Symbol = Symbol(40);
+    pub const NE: Symbol = Symbol(41);
+    pub const LE: Symbol = Symbol(42);
+    pub const GE: Symbol = Symbol(43);
+    pub const PLUSEQ: Symbol = Symbol(44);
+    pub const MINUSEQ: Symbol = Symbol(45);
+    pub const STAREQ: Symbol = Symbol(46);
+    pub const SLASHEQ: Symbol = Symbol(47);
+    pub const PERCENTEQ: Symbol = Symbol(48);
+    pub const AMPEQ: Symbol = Symbol(49);
+    pub const PIPEEQ: Symbol = Symbol(50);
+    pub const CARETEQ: Symbol = Symbol(51);
+    pub const LPAREN: Symbol = Symbol(52);
+    pub const RPAREN: Symbol = Symbol(53);
+    pub const LBRACKET: Symbol = Symbol(54);
+    pub const RBRACKET: Symbol = Symbol(55);
+    pub const LBRACE: Symbol = Symbol(56);
+    pub const RBRACE: Symbol = Symbol(57);
+    pub const COMMA: Symbol = Symbol(58);
+    pub const COLON: Symbol = Symbol(59);
+    pub const SEMICOLON: Symbol = Symbol(60);
+    pub const DOT: Symbol = Symbol(61);
+    pub const AT: Symbol = Symbol(62);
+    pub const QUESTION: Symbol = Symbol(63);
+    pub const PLUS: Symbol = Symbol(64);
+    pub const MINUS: Symbol = Symbol(65);
+    pub const STAR: Symbol = Symbol(66);
+    pub const SLASH: Symbol = Symbol(67);
+    pub const PERCENT: Symbol = Symbol(68);
+    pub const BANG: Symbol = Symbol(69);
+    pub const TILDE: Symbol = Symbol(70);
+    pub const AMP: Symbol = Symbol(71);
+    pub const PIPE: Symbol = Symbol(72);
+    pub const CARET: Symbol = Symbol(73);
+    pub const EQ: Symbol = Symbol(74);
+    pub const LT: Symbol = Symbol(75);
+    pub const GT: Symbol = Symbol(76);
+    pub const UNDERSCORE: Symbol = Symbol(77);
+    pub const DROP: Symbol = Symbol(78);
+    pub const COMPACT: Symbol = Symbol(79);
+    pub const TWIN: Symbol = Symbol(80);
+    pub const TEST: Symbol = Symbol(81);
+    pub const GRANT: Symbol = Symbol(82);
+    pub const OWN: Symbol = Symbol(83);
+    pub const SEND: Symbol = Symbol(84);
+    pub const WAITS: Symbol = Symbol(85);
+    pub const PLAIN: Symbol = Symbol(86);
+    pub const SHAREABLE: Symbol = Symbol(87);
+    pub const KEY: Symbol = Symbol(88);
+    pub const ORDERED: Symbol = Symbol(89);
+    pub const INTEGER: Symbol = Symbol(90);
+    pub const FLOAT: Symbol = Symbol(91);
+    pub const INLINE: Symbol = Symbol(92);
+    pub const BOOL: Symbol = Symbol(93);
+    pub const CHAR: Symbol = Symbol(94);
+    pub const U8: Symbol = Symbol(95);
+    pub const U16: Symbol = Symbol(96);
+    pub const U32: Symbol = Symbol(97);
+    pub const U64: Symbol = Symbol(98);
+    pub const I8: Symbol = Symbol(99);
+    pub const I16: Symbol = Symbol(100);
+    pub const I32: Symbol = Symbol(101);
+    pub const I64: Symbol = Symbol(102);
+    pub const F32: Symbol = Symbol(103);
+    pub const F64: Symbol = Symbol(104);
+    pub const NONE_VARIANT: Symbol = Symbol(105);
+    pub const SOME_VARIANT: Symbol = Symbol(106);
+    pub const OK_VARIANT: Symbol = Symbol(107);
+    pub const ERROR_VARIANT: Symbol = Symbol(108);
+}
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Symbols {
+    strings: Vec<Arc<str>>,
+    index: FxHashMap<Arc<str>, Symbol>,
+}
+impl Default for Symbols {
+    fn default() -> Self {
+        let mut strings: Vec<Arc<str>> = vec![
+            Arc::from(""),
+            Arc::from("fn"),
+            Arc::from("let"),
+            Arc::from("mut"),
+            Arc::from("match"),
+            Arc::from("if"),
+            Arc::from("else"),
+            Arc::from("loop"),
+            Arc::from("while"),
+            Arc::from("for"),
+            Arc::from("in"),
+            Arc::from("break"),
+            Arc::from("continue"),
+            Arc::from("return"),
+            Arc::from("take"),
+            Arc::from("copy"),
+            Arc::from("view"),
+            Arc::from("type"),
+            Arc::from("stable"),
+            Arc::from("resource"),
+            Arc::from("scoped"),
+            Arc::from("region"),
+            Arc::from("bound"),
+            Arc::from("pub"),
+            Arc::from("opaque"),
+            Arc::from("const"),
+            Arc::from("where"),
+            Arc::from("true"),
+            Arc::from("false"),
+            Arc::from("bytes"),
+            Arc::from("..="),
+            Arc::from("<<="),
+            Arc::from(">>="),
+            Arc::from(".."),
+            Arc::from("->"),
+            Arc::from("=>"),
+            Arc::from("&&"),
+            Arc::from("||"),
+            Arc::from("<<"),
+            Arc::from(">>"),
+            Arc::from("=="),
+            Arc::from("!="),
+            Arc::from("<="),
+            Arc::from(">="),
+            Arc::from("+="),
+            Arc::from("-="),
+            Arc::from("*="),
+            Arc::from("/="),
+            Arc::from("%="),
+            Arc::from("&="),
+            Arc::from("|="),
+            Arc::from("^="),
+            Arc::from("("),
+            Arc::from(")"),
+            Arc::from("["),
+            Arc::from("]"),
+            Arc::from("{"),
+            Arc::from("}"),
+            Arc::from(","),
+            Arc::from(":"),
+            Arc::from(";"),
+            Arc::from("."),
+            Arc::from("@"),
+            Arc::from("?"),
+            Arc::from("+"),
+            Arc::from("-"),
+            Arc::from("*"),
+            Arc::from("/"),
+            Arc::from("%"),
+            Arc::from("!"),
+            Arc::from("~"),
+            Arc::from("&"),
+            Arc::from("|"),
+            Arc::from("^"),
+            Arc::from("="),
+            Arc::from("<"),
+            Arc::from(">"),
+            Arc::from("_"),
+            Arc::from("drop"),
+            Arc::from("compact"),
+            Arc::from("twin"),
+            Arc::from("test"),
+            Arc::from("grant"),
+            Arc::from("own"),
+            Arc::from("send"),
+            Arc::from("waits"),
+            Arc::from("plain"),
+            Arc::from("shareable"),
+            Arc::from("key"),
+            Arc::from("ordered"),
+            Arc::from("integer"),
+            Arc::from("float"),
+            Arc::from("Inline"),
+            Arc::from("bool"),
+            Arc::from("char"),
+            Arc::from("u8"),
+            Arc::from("u16"),
+            Arc::from("u32"),
+            Arc::from("u64"),
+            Arc::from("i8"),
+            Arc::from("i16"),
+            Arc::from("i32"),
+            Arc::from("i64"),
+            Arc::from("f32"),
+            Arc::from("f64"),
+            Arc::from("None"),
+            Arc::from("Some"),
+            Arc::from("Ok"),
+            Arc::from("Error"),
+        ];
+        strings.push(Arc::from("packed"));
+        strings.push(Arc::from("streamable"));
+        Self {
+            index: strings
+                .iter()
+                .enumerate()
+                .skip(1)
+                .map(|(i, s)| (s.clone(), Symbol(i as u32)))
+                .collect(),
+            strings,
+        }
+    }
+}
+impl Symbols {
+    pub fn intern(&mut self, text: &str) -> Symbol {
+        if let Some(&id) = self.index.get(text) {
+            return id;
+        }
+        let id = Symbol(
+            self.strings
+                .len()
+                .try_into()
+                .expect("symbol table exceeds address space"),
+        );
+        let text: Arc<str> = Arc::from(text);
+        self.strings.push(text.clone());
+        self.index.insert(text, id);
+        id
+    }
+    pub fn find(&self, text: &str) -> Option<Symbol> {
+        self.index.get(text).copied()
+    }
+    pub fn text(&self, id: Symbol) -> &str {
+        &self.strings[id.0 as usize]
+    }
+    pub fn len(&self) -> usize {
+        self.strings.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.strings.is_empty()
+    }
+}
+pub fn keyword_symbol(s: Symbol) -> bool {
+    matches!(
+        s,
+        sym::FN
+            | sym::LET
+            | sym::MUT
+            | sym::MATCH
+            | sym::IF
+            | sym::ELSE
+            | sym::LOOP
+            | sym::WHILE
+            | sym::FOR
+            | sym::IN
+            | sym::BREAK
+            | sym::CONTINUE
+            | sym::RETURN
+            | sym::TAKE
+            | sym::COPY
+            | sym::VIEW
+            | sym::TYPE
+            | sym::STABLE
+            | sym::RESOURCE
+            | sym::SCOPED
+            | sym::REGION
+            | sym::BOUND
+            | sym::PUB
+            | sym::OPAQUE
+            | sym::CONST
+            | sym::WHERE
+            | sym::TRUE
+            | sym::FALSE
+            | sym::BYTES
+    )
+}

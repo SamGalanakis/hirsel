@@ -1,4 +1,14 @@
 use super::*;
+fn parse(text: &str, mode: ParseMode) -> ParseOutput {
+    crate::parse(text, mode, &mut Symbols::default())
+}
+fn parse_bytes(bytes: &[u8], mode: ParseMode) -> ParseOutput {
+    crate::parse_bytes(bytes, mode, &mut Symbols::default())
+}
+fn lex(text: &str) -> LexOutput {
+    crate::lex(text, &mut Symbols::default())
+}
+
 fn formatted(text: &str, mode: ParseMode) -> String {
     let p = parse(text, mode);
     assert!(p.diagnostics.is_empty(), "{text}: {:?}", p.diagnostics);
@@ -27,20 +37,25 @@ fn formatted(text: &str, mode: ParseMode) -> String {
     assert_eq!(tokens(text), tokens(&output));
     let shape = |p: &ParseOutput| {
         p.syntax
-            .items
-            .iter()
+            .items()
             .map(|i| {
                 (
-                    i.root,
-                    i.tree.edges.clone(),
-                    i.tree
-                        .nodes
+                    i.root.0 - i.range.nodes.start,
+                    i.tree.nodes[i.range.nodes.start as usize..i.range.nodes.end as usize]
+                        .iter()
+                        .flat_map(|n| {
+                            i.tree.edges[n.children.start as usize..n.children.end as usize]
+                                .iter()
+                                .map(|x| x.0 - i.range.nodes.start)
+                        })
+                        .collect::<Vec<_>>(),
+                    i.tree.nodes[i.range.nodes.start as usize..i.range.nodes.end as usize]
                         .iter()
                         .map(|n| {
                             (
                                 n.kind,
                                 n.token.map(|t| i.tree.token_text(&i.text, t).to_owned()),
-                                n.children.clone(),
+                                (n.children.end - n.children.start),
                             )
                         })
                         .collect::<Vec<_>>(),
@@ -141,7 +156,7 @@ fn good(text: &str) -> SyntaxFile {
 fn precedence_and_relative_arenas() {
     let text = "// docs\nfn sum(a: u64, b: u64) -> u64 { a + b * 2 }\n";
     let file = good(text);
-    let item = &file.items[0];
+    let item = &file.item(0);
     let t = &item.tree;
     let binaries: Vec<_> = t
         .nodes
@@ -152,8 +167,15 @@ fn precedence_and_relative_arenas() {
     assert_eq!(t.token_text(&item.text, binaries[0].token.unwrap()), "*");
     assert_eq!(t.token_text(&item.text, binaries[1].token.unwrap()), "+");
     let shifted = good(&format!("type Before {{}}\n{text}"));
-    assert_eq!(shifted.items[1].tree, item.tree);
-    assert_eq!(shifted.items[1].text, item.text);
+    let moved = shifted.item(1);
+    assert_eq!(moved.source_text(), item.source_text());
+    let spans = |i: Item<'_>| {
+        i.tree.nodes[i.range.nodes.start as usize..i.range.nodes.end as usize]
+            .iter()
+            .map(|n| (n.kind, n.origin.span))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(spans(moved), spans(*item));
 }
 #[test]
 fn statement_boundaries_and_recovery() {
@@ -167,7 +189,7 @@ fn statement_boundaries_and_recovery() {
         let p = parse(text, ParseMode::Source);
         assert!(p.diagnostics.iter().any(|d| d.rule == rule), "{text}");
         assert_eq!(p.syntax.text(), text);
-        let last = p.syntax.items.last().unwrap();
+        let last = p.syntax.items().last().unwrap();
         assert_eq!(
             last.tree.token_text(
                 &last.text,
@@ -188,8 +210,7 @@ fn new_forms_have_written_nodes() {
         "stable type P[in r] { x: u64 }\nfn f[in r](x: P in r) -> u64 where r: r { let mut y: u64; region a { bound bytes 8 { loop { break (x, 1).0 } } } }\n",
     );
     let kinds: Vec<_> = f
-        .items
-        .iter()
+        .items()
         .flat_map(|i| i.tree.nodes.iter().map(|n| n.kind))
         .collect();
     for k in [
@@ -256,7 +277,7 @@ fn revised_callable_summaries_and_projection_tokenization() {
         "@twin(Stable) type Own {}\nstable type Stable {}\nresource type R { x: u64 } drop(r) {}\nfn f(g: own[send] fn(take u64) -> u64 waits, p: ((u64, u64), u64)) -> u64 { p.0.1 }\n",
     );
     assert!(
-        f.items[3]
+        f.item(3)
             .tree
             .nodes
             .iter()
@@ -317,7 +338,7 @@ fn revision_three_deletions_and_sized_parameters() {
     let s = "pub fn of(bytes n: u64, uses: u64) -> u64 { n + uses }";
     let f = good(s);
     assert!(
-        f.items[0]
+        f.item(0)
             .tree
             .nodes
             .iter()
@@ -364,8 +385,7 @@ fn revision_four_inline_arrays_and_bytes_keyword() {
         "const POW10: Inline[u64, 4] = [1, 10, 100, 1000]\nfn f() { let a = [2; 4]; let b = []; a[1] }",
     );
     let kinds: Vec<_> = f
-        .items
-        .iter()
+        .items()
         .flat_map(|i| i.tree.nodes.iter().map(|n| n.kind))
         .collect();
     assert!(kinds.contains(&NodeKind::Array));
@@ -389,6 +409,35 @@ fn revision_four_inline_arrays_and_bytes_keyword() {
         "fn f() {\n    [2; 4]\n}\n"
     );
 }
+#[test]
+fn symbols_are_shared_across_files_and_preserve_written_spellings() {
+    let mut symbols = Symbols::default();
+    let a = crate::parse(
+        "fn first(x: u64) { x; None }",
+        ParseMode::Source,
+        &mut symbols,
+    );
+    let x = symbols.find("x").unwrap();
+    let none = symbols.find("None").unwrap();
+    assert_ne!(none, sym::NONE);
+    assert_eq!(symbols.text(none), "None");
+    let b = crate::parse("fn second(x: u64) { x }", ParseMode::Source, &mut symbols);
+    assert_eq!(symbols.find("x"), Some(x));
+    for file in [&a.syntax, &b.syntax] {
+        let uses = file.tree.tokens.iter().filter(|t| t.symbol == x).count();
+        assert_eq!(uses, 2);
+        for t in &file.tree.tokens {
+            if t.kind == TokenKind::Ident {
+                assert_eq!(
+                    symbols.text(t.symbol),
+                    &file.source[t.span.start as usize..t.span.end as usize]
+                );
+            }
+        }
+    }
+    assert_eq!(a.syntax.items().count(), 1);
+    assert_eq!(b.syntax.items().count(), 1);
+}
 
 #[test]
 fn streaming_bounds_forms_and_region_result_anchors() {
@@ -410,5 +459,30 @@ fn streaming_bounds_forms_and_region_result_anchors() {
     );
     good(
         "fn f() { let mut x: u64; x = 1; emit(scoped fn(take y: Writer[u64, in r]) -> Result[Child[u64], BuildError] { emit(take y, 1) }) }",
+    );
+}
+
+#[test]
+fn positional_arguments_are_direct_expression_rows() {
+    let p = good("fn f(x: u64) { f(x, 2, field: x, bytes 3) }");
+    let item = p.item(0);
+    let call = item
+        .tree
+        .nodes
+        .iter()
+        .position(|n| n.kind == NodeKind::Call)
+        .unwrap();
+    let args = item.tree.children(NodeId(call as u32));
+    assert_eq!(
+        args.iter()
+            .map(|&n| item.tree.node(n).kind)
+            .collect::<Vec<_>>(),
+        [
+            NodeKind::Path,
+            NodeKind::Path,
+            NodeKind::Literal,
+            NodeKind::LabelledArgument,
+            NodeKind::BytesArgument
+        ]
     );
 }

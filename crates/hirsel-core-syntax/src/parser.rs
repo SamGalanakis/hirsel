@@ -1,6 +1,8 @@
 //! Recovery, significant-token cursor, precedence climbing and item-local arena/origin
 //! mechanics adapted from hirsel-parser. Every grammar visitor is for the new language.
 use crate::{grammar::*, *};
+type Nodes = smallvec::SmallVec<[NodeId; 24]>;
+use smallvec::smallvec;
 type Parsed<T> = Result<T, ()>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -22,9 +24,9 @@ pub struct ParseOutput {
 }
 
 /// Decode external source bytes. Invalid UTF-8 has a raw byte span (PROG-7).
-pub fn parse_bytes(bytes: &[u8], mode: ParseMode) -> ParseOutput {
+pub fn parse_bytes(bytes: &[u8], mode: ParseMode, symbols: &mut Symbols) -> ParseOutput {
     match std::str::from_utf8(bytes) {
-        Ok(text) => parse(text, mode),
+        Ok(text) => parse(text, mode, symbols),
         Err(error) => {
             if bytes.len() > u32::MAX as usize {
                 return ParseOutput {
@@ -51,7 +53,7 @@ pub fn parse_bytes(bytes: &[u8], mode: ParseMode) -> ParseOutput {
     }
 }
 
-pub fn parse(text: &str, mode: ParseMode) -> ParseOutput {
+pub fn parse(text: &str, mode: ParseMode, symbols: &mut Symbols) -> ParseOutput {
     if text.len() > u32::MAX as usize {
         return ParseOutput {
             syntax: SyntaxFile::default(),
@@ -59,21 +61,23 @@ pub fn parse(text: &str, mode: ParseMode) -> ParseOutput {
             resource_refusal: Some(ResourceRefusal::SourceTooLarge),
         };
     }
-    let output = lex(text);
+    let output = lex(text, symbols);
     let lexical_diagnostics = output.diagnostics.len();
-    let significant = output
-        .tokens
-        .iter()
-        .enumerate()
-        .filter_map(|(i, t)| (!matches!(t.kind, TokenKind::Trivia(_))).then_some(i))
-        .collect();
+    let significant = output.significant;
     let mut p = Parser {
         text,
+        symbols,
+        current: output.tokens[significant[0]],
+        current_index: significant[0],
+        resolution_size: ResolutionSize::default(),
         tokens: output.tokens,
         significant,
         pos: 0,
-        tree: Tree::default(),
-        first: 0,
+        tree: Tree {
+            tokens: vec![],
+            nodes: Vec::with_capacity(text.len() / 8),
+            edges: Vec::with_capacity(text.len() / 8),
+        },
         base: 0,
         whitespace: 0,
         depth: 0,
@@ -84,14 +88,14 @@ pub fn parse(text: &str, mode: ParseMode) -> ParseOutput {
     let mut syntax = SyntaxFile::default();
     let mut owned = 0;
     while !p.eof() && p.resource.is_none() {
-        if p.eat(";") {
+        if p.eat(sym::SEMICOLON) {
             continue;
         }
         let start = p.pos;
         let diagnostic_start = p.diagnostics.len();
-        p.first = owned;
         p.base = p.tokens[owned].span.start;
-        p.tree = Tree::default();
+        let nodes_start = p.tree.nodes.len() as u32;
+        p.resolution_size = ResolutionSize::default();
         let root = match p.item() {
             Ok(root) => {
                 if p.end(false).is_err() {
@@ -124,16 +128,6 @@ pub fn parse(text: &str, mode: ParseMode) -> ParseOutput {
             .tokens
             .get(end)
             .map_or(text.len() as u32, |t| t.span.start);
-        p.tree.tokens = p.tokens[owned..end]
-            .iter()
-            .map(|t| Token {
-                kind: t.kind,
-                span: Span {
-                    start: t.span.start - p.base,
-                    end: t.span.end - p.base,
-                },
-            })
-            .collect();
         let has_errors = p.resource.is_some()
             || p.diagnostics.len() != diagnostic_start
             || p.diagnostics[..lexical_diagnostics].iter().any(|d| {
@@ -141,11 +135,13 @@ pub fn parse(text: &str, mode: ParseMode) -> ParseOutput {
                     && (d.primary.start < byte_end
                         || byte_end as usize == text.len() && d.primary.start == byte_end)
             });
-        syntax.items.push(Item {
+        syntax.items.push(ItemRange {
+            resolution_size: p.resolution_size,
             has_errors,
             file_offset: p.base,
-            text: text[p.base as usize..byte_end as usize].into(),
-            tree: std::mem::take(&mut p.tree),
+            end: byte_end,
+            tokens: owned as u32..end as u32,
+            nodes: nodes_start..p.tree.nodes.len() as u32,
             root,
         });
         owned = end;
@@ -154,7 +150,10 @@ pub fn parse(text: &str, mode: ParseMode) -> ParseOutput {
         .tokens
         .get(owned)
         .map_or(text.len() as u32, |t| t.span.start);
-    syntax.trailing = text[trailing_start as usize..].into();
+    syntax.trailing_start = trailing_start;
+    syntax.source = text.to_owned();
+    p.tree.tokens = p.tokens;
+    syntax.tree = p.tree;
     ParseOutput {
         syntax,
         diagnostics: p.diagnostics,
@@ -164,11 +163,14 @@ pub fn parse(text: &str, mode: ParseMode) -> ParseOutput {
 
 struct Parser<'a> {
     text: &'a str,
+    symbols: &'a Symbols,
     tokens: Vec<Token>,
     significant: Vec<usize>,
+    current: Token,
+    current_index: usize,
+    resolution_size: ResolutionSize,
     pos: usize,
     tree: Tree,
-    first: usize,
     base: u32,
     whitespace: usize,
     depth: usize,
@@ -178,29 +180,34 @@ struct Parser<'a> {
 }
 impl Parser<'_> {
     fn index(&self) -> usize {
-        self.significant[self.pos.min(self.significant.len() - 1)]
+        self.current_index
     }
     fn token(&self, n: usize) -> &Token {
-        &self.tokens[self.significant[(self.pos + n).min(self.significant.len() - 1)]]
+        if n == 0 {
+            &self.current
+        } else {
+            &self.tokens[self.significant[(self.pos + n).min(self.significant.len() - 1)]]
+        }
     }
-    fn word(&self, n: usize) -> &str {
-        let s = self.token(n).span;
-        &self.text[s.start as usize..s.end as usize]
+    fn word(&self, n: usize) -> Symbol {
+        self.token(n).symbol
     }
-    fn at(&self, word: &str) -> bool {
-        !self.eof() && self.word(0) == word
+    fn at(&self, word: Symbol) -> bool {
+        self.current.symbol == word
     }
     fn eof(&self) -> bool {
         self.token(0).kind == TokenKind::Eof
     }
     fn bump(&mut self) -> TokenId {
-        let id = TokenId((self.index() - self.first) as u32);
+        let id = TokenId(self.index() as u32);
         if !self.eof() {
             self.pos += 1;
+            self.current_index = self.significant[self.pos];
+            self.current = self.tokens[self.current_index];
         }
         id
     }
-    fn eat(&mut self, word: &str) -> bool {
+    fn eat(&mut self, word: Symbol) -> bool {
         if self.at(word) {
             self.bump();
             true
@@ -208,11 +215,11 @@ impl Parser<'_> {
             false
         }
     }
-    fn expect(&mut self, word: &str) -> Parsed<()> {
+    fn expect(&mut self, word: Symbol) -> Parsed<()> {
         if self.eat(word) {
             Ok(())
         } else {
-            self.fail("LANG-5", format!("expected `{word}`"))
+            self.fail("LANG-5", format!("expected `{}`", self.symbols.text(word)))
         }
     }
     fn fail<T>(&mut self, rule: &str, message: impl Into<String>) -> Parsed<T> {
@@ -221,7 +228,7 @@ impl Parser<'_> {
         Err(())
     }
     fn name(&mut self) -> Parsed<TokenId> {
-        if self.token(0).kind == TokenKind::Ident && !self.at("_") {
+        if self.token(0).kind == TokenKind::Ident && !self.at(sym::UNDERSCORE) {
             Ok(self.bump())
         } else {
             self.fail(
@@ -235,13 +242,7 @@ impl Parser<'_> {
         }
     }
     fn newline(&self) -> bool {
-        if self.pos == 0 {
-            return false;
-        }
-        let previous = self.significant[self.pos - 1];
-        self.tokens[previous + 1..self.index()]
-            .iter()
-            .any(|t| self.text[t.span.start as usize..t.span.end as usize].contains('\n'))
+        self.token(0).line_before
     }
     fn continuing(&self) -> bool {
         self.whitespace > 0 || !self.newline()
@@ -253,6 +254,7 @@ impl Parser<'_> {
         token: Option<TokenId>,
         children: &[NodeId],
     ) -> NodeId {
+        self.resolution_size.add(kind);
         let first = self.significant[start];
         let last = if self.pos > start {
             self.significant[self.pos - 1] + 1
@@ -275,7 +277,7 @@ impl Parser<'_> {
             token,
             origin: Origin {
                 span,
-                tokens: (first - self.first) as u32..(last - self.first) as u32,
+                tokens: first as u32..last as u32,
             },
             children: edge..self.tree.edges.len() as u32,
         });
@@ -300,38 +302,38 @@ impl Parser<'_> {
     }
     fn list(
         &mut self,
-        close: &str,
+        close: Symbol,
         mut f: impl FnMut(&mut Self) -> Parsed<NodeId>,
-    ) -> Parsed<Vec<NodeId>> {
+    ) -> Parsed<Nodes> {
         self.whitespace += 1;
         let result = (|p: &mut Self| {
-            let mut v = vec![];
+            let mut v: Nodes = smallvec![];
             while !p.eat(close) {
                 if p.eof() {
-                    return p.fail("LANG-5", format!("expected `{close}`"));
+                    return p.fail("LANG-5", format!("expected `{}`", p.symbols.text(close)));
                 }
                 v.push(f(p)?);
                 if p.eat(close) {
                     break;
                 }
-                p.expect(",")?;
+                p.expect(sym::COMMA)?;
             }
             Ok(v)
         })(self);
         self.whitespace -= 1;
         result
     }
-    fn entry_end(&mut self, close: &str) -> Parsed<()> {
-        if self.at(close) || self.eat(",") || self.newline() {
+    fn entry_end(&mut self, close: Symbol) -> Parsed<()> {
+        if self.at(close) || self.eat(sym::COMMA) || self.newline() {
             Ok(())
         } else {
             self.fail("LANG-4", "expected comma or newline")
         }
     }
     fn end(&mut self, implicit: bool) -> Parsed<bool> {
-        if self.eat(";") {
+        if self.eat(sym::SEMICOLON) {
             Ok(true)
-        } else if self.eof() || self.at("}") || self.newline() || implicit {
+        } else if self.eof() || self.at(sym::RBRACE) || self.newline() || implicit {
             Ok(false)
         } else {
             self.fail("LANG-4", "expected newline or semicolon")
@@ -339,19 +341,19 @@ impl Parser<'_> {
     }
     fn item_start(&self) -> bool {
         ITEM_START.contains(&self.word(0))
-            && !(self.at("fn") && self.word(1) == "(")
-            && !(self.at("scoped") && self.word(1) == "fn")
+            && !(self.at(sym::FN) && self.word(1) == sym::LPAREN)
+            && !(self.at(sym::SCOPED) && self.word(1) == sym::FN)
     }
     fn recover(&mut self, start: usize, item: bool) {
         let mut braces = 0usize;
         for i in start..self.pos {
-            match self.text_token(self.significant[i]) {
-                "{" => braces += 1,
-                "}" => braces = braces.saturating_sub(1),
+            match self.tokens[self.significant[i]].symbol {
+                sym::LBRACE => braces += 1,
+                sym::RBRACE => braces = braces.saturating_sub(1),
                 _ => {}
             }
         }
-        if self.pos == start && !self.eof() && (item || !self.at("}")) {
+        if self.pos == start && !self.eof() && (item || !self.at(sym::RBRACE)) {
             self.bump();
         }
         while !self.eof() {
@@ -359,16 +361,16 @@ impl Parser<'_> {
                 break;
             }
             if braces == 0 {
-                if !item && (self.at("}") || self.newline()) {
+                if !item && (self.at(sym::RBRACE) || self.newline()) {
                     break;
                 }
-                if self.eat(";") {
+                if self.eat(sym::SEMICOLON) {
                     break;
                 }
             }
             match self.word(0) {
-                "{" => braces += 1,
-                "}" => braces = braces.saturating_sub(1),
+                sym::LBRACE => braces += 1,
+                sym::RBRACE => braces = braces.saturating_sub(1),
                 _ => {}
             }
             self.bump();
@@ -380,100 +382,102 @@ impl Parser<'_> {
     }
     fn item(&mut self) -> Parsed<NodeId> {
         let s = self.pos;
-        let mut c = vec![];
-        while self.eat("@") {
+        let mut c: Nodes = smallvec![];
+        while self.eat(sym::AT) {
             let a = self.pos - 1;
             let n = self.name()?;
-            let word = self.text_token(self.first + n.0 as usize);
-            if word == "compact" {
-                self.expect("(")?;
-                if !matches!(self.word(0), "u16" | "u32" | "u64") {
+            let word = self.tokens[n.0 as usize].symbol;
+            if word == sym::COMPACT {
+                self.expect(sym::LPAREN)?;
+                if !matches!(self.word(0), sym::U16 | sym::U32 | sym::U64) {
                     return self.fail("LANG-5", "expected compact width");
                 }
                 self.bump();
-                self.expect(")")?;
-            } else if word == "twin" {
-                self.expect("(")?;
+                self.expect(sym::RPAREN)?;
+            } else if word == sym::TWIN {
+                self.expect(sym::LPAREN)?;
                 let path = self.path(NodeKind::TypePath)?;
-                self.expect(")")?;
+                self.expect(sym::RPAREN)?;
                 c.push(self.node(a, NodeKind::Attribute, Some(n), &[path]));
                 continue;
-            } else if word != "test" {
+            } else if word != sym::TEST {
                 return self.fail("LANG-5", "unknown attribute");
             }
             c.push(self.node(a, NodeKind::Attribute, Some(n), &[]));
         }
-        if self.eat("pub") {
+        if self.eat(sym::PUB) {
             c.push(self.node(self.pos - 1, NodeKind::Public, None, &[]));
-            if self.eat("opaque") {
+            if self.eat(sym::OPAQUE) {
                 c.push(self.node(self.pos - 1, NodeKind::Opaque, None, &[]));
             }
         }
-        if self.eat("fn") {
+        if self.eat(sym::FN) {
             let name = self.name()?;
             c.extend(self.header(true)?);
-            if self.at("{") {
+            if self.at(sym::LBRACE) {
                 c.push(self.block()?);
             } else if self.mode != ParseMode::Signatures {
                 return self.fail("LANG-5", "function requires a body");
             }
             return Ok(self.node(s, NodeKind::Function, Some(name), &c));
         }
-        if self.eat("const") {
+        if self.eat(sym::CONST) {
             let name = self.name()?;
-            self.expect(":")?;
+            self.expect(sym::COLON)?;
             c.push(self.ty()?);
-            self.expect("=")?;
+            self.expect(sym::EQ)?;
             c.push(self.required(|p| p.expr(0))?);
             return Ok(self.node(s, NodeKind::Constant, Some(name), &c));
         }
-        let kind = if self.eat("stable") {
+        let kind = if self.eat(sym::STABLE) {
             NodeKind::StableType
-        } else if self.eat("resource") {
+        } else if self.eat(sym::RESOURCE) {
             NodeKind::ResourceType
-        } else if self.eat("scoped") {
+        } else if self.eat(sym::SCOPED) {
             NodeKind::ScopedType
         } else {
             NodeKind::TypeDecl
         };
-        self.expect("type")?;
+        self.expect(sym::TYPE)?;
         let name = self.name()?;
-        if self.at("[") {
+        if self.at(sym::LBRACKET) {
             c.push(self.generics()?);
         }
-        if self.eat(":") {
+        if self.eat(sym::COLON) {
             c.push(self.bounds()?);
         }
-        if self.eat("grant") {
+        if self.eat(sym::GRANT) {
             let st = self.pos - 1;
-            self.expect("bytes")?;
+            self.expect(sym::BYTES)?;
             if self.token(0).kind != TokenKind::Integer {
                 return self.fail("LANG-5", "expected grant size");
             }
             let t = self.bump();
             c.push(self.node(st, NodeKind::Literal, Some(t), &[]));
         }
-        if self.eat("{") {
+        if self.eat(sym::LBRACE) {
             let st = self.pos - 1;
-            let mut fields = vec![];
-            while !self.eat("}") {
+            let mut fields: Nodes = smallvec![];
+            while !self.eat(sym::RBRACE) {
                 if self.eof() {
                     return self.fail("LANG-5", "unclosed fields");
                 }
                 let fs = self.pos;
                 let n = self.name()?;
-                self.expect(":")?;
+                self.expect(sym::COLON)?;
                 let t = self.ty()?;
                 fields.push(self.node(fs, NodeKind::Field, Some(n), &[t]));
-                self.entry_end("}")?;
+                self.entry_end(sym::RBRACE)?;
             }
             c.push(self.node(st, NodeKind::Fields, None, &fields));
-        } else if self.eat("=") {
+        } else if self.eat(sym::EQ) {
             let st = self.pos;
             // LANG-9: a single bare name aliases; payload parentheses or | makes a variant.
-            if self.token(0).kind == TokenKind::Ident && matches!(self.word(1), "(" | "|") {
-                let mut vs = vec![self.variant()?];
-                while self.eat("|") {
+            if self.token(0).kind == TokenKind::Ident
+                && matches!(self.word(1), sym::LPAREN | sym::PIPE)
+            {
+                let mut vs: Nodes = smallvec![self.variant()?];
+                while self.eat(sym::PIPE) {
                     vs.push(self.variant()?);
                 }
                 c.push(self.node(st, NodeKind::Variants, None, &vs));
@@ -481,12 +485,12 @@ impl Parser<'_> {
                 c.push(self.ty()?);
             }
         }
-        if self.at("drop") {
+        if self.at(sym::DROP) {
             let st = self.pos;
             self.bump();
-            self.expect("(")?;
+            self.expect(sym::LPAREN)?;
             let n = self.name()?;
-            self.expect(")")?;
+            self.expect(sym::RPAREN)?;
             let body = self.block()?;
             c.push(self.node(st, NodeKind::Drop, Some(n), &[body]));
         }
@@ -495,14 +499,14 @@ impl Parser<'_> {
     fn variant(&mut self) -> Parsed<NodeId> {
         let s = self.pos;
         let n = self.name()?;
-        let mut c = vec![];
+        let mut c: Nodes = smallvec![];
         let mut labelled = None;
-        if self.eat("(") {
-            c = self.list(")", |p| {
+        if self.eat(sym::LPAREN) {
+            c = self.list(sym::RPAREN, |p| {
                 let st = p.pos;
-                let label = if p.token(0).kind == TokenKind::Ident && p.word(1) == ":" {
+                let label = if p.token(0).kind == TokenKind::Ident && p.word(1) == sym::COLON {
                     let n = p.name()?;
-                    p.expect(":")?;
+                    p.expect(sym::COLON)?;
                     Some(n)
                 } else {
                     None
@@ -519,13 +523,13 @@ impl Parser<'_> {
     }
     fn generics(&mut self) -> Parsed<NodeId> {
         let s = self.pos;
-        self.expect("[")?;
-        let c = self.list("]", |p| {
+        self.expect(sym::LBRACKET)?;
+        let c = self.list(sym::RBRACKET, |p| {
             let st = p.pos;
-            let region = p.eat("in");
+            let region = p.eat(sym::IN);
             let n = p.name()?;
-            let mut c = vec![];
-            if p.eat(":") {
+            let mut c: Nodes = smallvec![];
+            if p.eat(sym::COLON) {
                 c.push(p.bounds()?);
             }
             Ok(p.node(
@@ -546,7 +550,7 @@ impl Parser<'_> {
     }
     fn bounds(&mut self) -> Parsed<NodeId> {
         let s = self.pos;
-        let mut c = vec![];
+        let mut c: Nodes = smallvec![];
         loop {
             let st = self.pos;
             if !BOUNDS.contains(&self.word(0)) {
@@ -554,37 +558,37 @@ impl Parser<'_> {
             }
             let n = self.bump();
             c.push(self.node(st, NodeKind::BoundName, Some(n), &[]));
-            if !self.eat("+") {
+            if !self.eat(sym::PLUS) {
                 break;
             }
         }
         Ok(self.node(s, NodeKind::Bounds, None, &c))
     }
-    fn header(&mut self, top: bool) -> Parsed<Vec<NodeId>> {
-        let mut c = vec![];
-        if top && self.at("[") {
+    fn header(&mut self, top: bool) -> Parsed<Nodes> {
+        let mut c: Nodes = smallvec![];
+        if top && self.at(sym::LBRACKET) {
             c.push(self.generics()?);
         }
         let s = self.pos;
-        self.expect("(")?;
-        let ps = self.list(")", |p| p.parameter(top, top))?;
+        self.expect(sym::LPAREN)?;
+        let ps = self.list(sym::RPAREN, |p| p.parameter(top, top))?;
         c.push(self.node(s, NodeKind::Parameters, None, &ps));
-        if self.eat("->") {
+        if self.eat(sym::ARROW) {
             let st = self.pos - 1;
             let t = self.ty()?;
             c.push(self.node(st, NodeKind::ResultType, None, &[t]));
         }
-        if self.eat("waits") {
+        if self.eat(sym::WAITS) {
             c.push(self.node(self.pos - 1, NodeKind::Waits, None, &[]));
         }
-        if top && self.eat("where") {
+        if top && self.eat(sym::WHERE) {
             let st = self.pos - 1;
-            let mut cs = vec![];
+            let mut cs: Nodes = smallvec![];
             loop {
                 cs.push(self.path(NodeKind::Path)?);
-                self.expect(":")?;
+                self.expect(sym::COLON)?;
                 cs.push(self.path(NodeKind::Path)?);
-                if !self.eat(",") {
+                if !self.eat(sym::COMMA) {
                     break;
                 }
             }
@@ -594,18 +598,18 @@ impl Parser<'_> {
     }
     fn parameter(&mut self, named: bool, sized: bool) -> Parsed<NodeId> {
         let s = self.pos;
-        let k = if self.eat("take") {
+        let k = if self.eat(sym::TAKE) {
             NodeKind::TakeParameter
-        } else if self.eat("mut") {
+        } else if self.eat(sym::MUT) {
             NodeKind::MutParameter
-        } else if sized && self.eat("bytes") {
+        } else if sized && self.eat(sym::BYTES) {
             NodeKind::BytesParameter
         } else {
             NodeKind::Parameter
         };
-        let n = if named || (self.token(0).kind == TokenKind::Ident && self.word(1) == ":") {
+        let n = if named || (self.token(0).kind == TokenKind::Ident && self.word(1) == sym::COLON) {
             let n = self.name()?;
-            self.expect(":")?;
+            self.expect(sym::COLON)?;
             Some(n)
         } else {
             None
@@ -618,18 +622,18 @@ impl Parser<'_> {
     }
     fn ty_inner(&mut self) -> Parsed<NodeId> {
         let s = self.pos;
-        let mut n = if self.at("fn")
-            || self.at("scoped")
-            || (self.at("own") && matches!(self.word(1), "fn" | "["))
+        let mut n = if self.at(sym::FN)
+            || self.at(sym::SCOPED)
+            || (self.at(sym::OWN) && matches!(self.word(1), sym::FN | sym::LBRACKET))
         {
-            let scoped = self.eat("scoped");
-            let own = self.eat("own");
-            let mut c = vec![];
-            if own && self.eat("[") {
+            let scoped = self.eat(sym::SCOPED);
+            let own = self.eat(sym::OWN);
+            let mut c: Nodes = smallvec![];
+            if own && self.eat(sym::LBRACKET) {
                 c.push(self.bounds()?);
-                self.expect("]")?;
+                self.expect(sym::RBRACKET)?;
             }
-            self.expect("fn")?;
+            self.expect(sym::FN)?;
             c.extend(self.header(false)?);
             self.node(
                 s,
@@ -643,11 +647,11 @@ impl Parser<'_> {
                 None,
                 &c,
             )
-        } else if self.eat("(") {
-            let c = self.list(")", |p| p.ty())?;
+        } else if self.eat(sym::LPAREN) {
+            let c = self.list(sym::RPAREN, |p| p.ty())?;
             let k = if c.is_empty() {
                 NodeKind::UnitType
-            } else if c.len() == 1 && self.word_token_before() != "," {
+            } else if c.len() == 1 && self.word_token_before() != sym::COMMA {
                 NodeKind::GroupType
             } else {
                 NodeKind::TupleType
@@ -655,10 +659,10 @@ impl Parser<'_> {
             self.node(s, k, None, &c)
         } else {
             let path = self.path(NodeKind::TypePath)?;
-            if self.eat("[") {
-                let mut c = vec![path];
-                let args = self.list("]", |p| {
-                    if p.eat("in") {
+            if self.eat(sym::LBRACKET) {
+                let mut c: Nodes = smallvec![path];
+                let args = self.list(sym::RBRACKET, |p| {
+                    if p.eat(sym::IN) {
                         let st = p.pos - 1;
                         let path = p.path(NodeKind::Path)?;
                         Ok(p.node(st, NodeKind::Anchor, None, &[path]))
@@ -679,23 +683,23 @@ impl Parser<'_> {
                 path
             }
         };
-        if self.eat("in") {
+        if self.eat(sym::IN) {
             let b = self.path(NodeKind::Path)?;
             n = self.node(s, NodeKind::Anchor, None, &[n, b]);
         }
         Ok(n)
     }
-    fn word_token_before(&self) -> &str {
+    fn word_token_before(&self) -> Symbol {
         if self.pos >= 2 {
-            self.text_token(self.significant[self.pos - 2])
+            self.tokens[self.significant[self.pos - 2]].symbol
         } else {
-            ""
+            sym::NONE
         }
     }
     fn path(&mut self, kind: NodeKind) -> Parsed<NodeId> {
         let s = self.pos;
         let n = self.name()?;
-        while self.continuing() && self.at(".") && self.token(1).kind == TokenKind::Ident {
+        while self.continuing() && self.at(sym::DOT) && self.token(1).kind == TokenKind::Ident {
             self.bump();
             self.name()?;
         }
@@ -706,16 +710,16 @@ impl Parser<'_> {
     }
     fn block_inner(&mut self) -> Parsed<NodeId> {
         let s = self.pos;
-        self.expect("{")?;
+        self.expect(sym::LBRACE)?;
         let old = self.whitespace;
         self.whitespace = 0;
-        let mut c = vec![];
+        let mut c: Nodes = smallvec![];
         let result = (|| {
-            while !self.eat("}") {
+            while !self.eat(sym::RBRACE) {
                 if self.eof() || self.item_start() {
                     return self.fail("LANG-5", "unclosed block");
                 }
-                if self.eat(";") {
+                if self.eat(sym::SEMICOLON) {
                     continue;
                 }
                 let st = self.pos;
@@ -737,17 +741,17 @@ impl Parser<'_> {
     }
     fn statement(&mut self) -> Parsed<NodeId> {
         let s = self.pos;
-        if self.eat("let") {
-            let mutable = self.eat("mut");
-            let mut c = vec![self.pattern()?];
-            let typed = self.eat(":");
+        if self.eat(sym::LET) {
+            let mutable = self.eat(sym::MUT);
+            let mut c: Nodes = smallvec![self.pattern()?];
+            let typed = self.eat(sym::COLON);
             if typed {
                 c.push(self.ty()?);
             }
-            let initialized = self.eat("=");
+            let initialized = self.eat(sym::EQ);
             if initialized {
                 c.push(self.required(|p| p.expr(0))?);
-                if self.eat("else") {
+                if self.eat(sym::ELSE) {
                     self.subject(*c.last().unwrap())?;
                     c.push(self.block()?);
                 }
@@ -778,7 +782,10 @@ impl Parser<'_> {
                 &c,
             ));
         }
-        if matches!(self.word(0), "+" | "*" | "/" | "%" | "." | "?") {
+        if matches!(
+            self.word(0),
+            sym::PLUS | sym::STAR | sym::SLASH | sym::PERCENT | sym::DOT | sym::QUESTION
+        ) {
             return self.fail("LANG-4", "continuation after a complete statement");
         }
         let e = self.expr(0)?;
@@ -809,34 +816,39 @@ impl Parser<'_> {
         let mut nonassoc = None;
         let mut placed = false;
         while self.continuing() {
-            if minimum <= 12 && !placed {
-                if self.eat("(") {
-                    let mut c = vec![left];
-                    c.extend(self.list(")", |p| {
+            let Some(next) = continuation(self.word(0)) else {
+                break;
+            };
+            match next {
+                Continuation::Call if minimum <= 12 && !placed => {
+                    self.bump();
+                    let mut c: Nodes = smallvec![left];
+                    c.extend(self.list(sym::RPAREN, |p| {
                         let st = p.pos;
                         let mut token = None;
-                        let kind = if p.token(0).kind == TokenKind::Ident && p.word(1) == ":" {
+                        let kind = if p.token(0).kind == TokenKind::Ident && p.word(1) == sym::COLON
+                        {
                             token = Some(p.bump());
-                            p.expect(":")?;
+                            p.expect(sym::COLON)?;
                             NodeKind::LabelledArgument
-                        } else if p.eat("bytes") {
+                        } else if p.eat(sym::BYTES) {
                             NodeKind::BytesArgument
                         } else {
-                            NodeKind::Argument
+                            return p.expr(0);
                         };
                         let v = p.expr(0)?;
                         Ok(p.node(st, kind, token, &[v]))
                     })?);
                     left = self.node(s, NodeKind::Call, None, &c);
-                    continue;
                 }
-                if self.eat("[") {
+                Continuation::Index if minimum <= 12 && !placed => {
+                    self.bump();
                     let i = self.required(|p| p.expr(0))?;
-                    self.expect("]")?;
+                    self.expect(sym::RBRACKET)?;
                     left = self.node(s, NodeKind::Index, None, &[left, i]);
-                    continue;
                 }
-                if self.eat(".") {
+                Continuation::Projection if minimum <= 12 && !placed => {
+                    self.bump();
                     if self.tree.node(left).kind == NodeKind::Literal && self.eof() {
                         let start = self.base + self.tree.node(left).origin.span.start;
                         let end = self.tokens[self.significant[self.pos - 1]].span.end;
@@ -848,7 +860,7 @@ impl Parser<'_> {
                         return Err(());
                     }
                     let n = if self.token(0).kind == TokenKind::Integer {
-                        let raw = self.word(0);
+                        let raw = self.text_token(self.index());
                         if !raw.bytes().all(|b| b.is_ascii_digit()) {
                             return self
                                 .fail("LANG-5", "tuple projection is an unsuffixed decimal index");
@@ -858,218 +870,35 @@ impl Parser<'_> {
                         self.name()?
                     };
                     left = self.node(s, NodeKind::Projection, Some(n), &[left]);
-                    continue;
                 }
-                if self.eat("?") {
+                Continuation::Try if minimum <= 12 && !placed => {
+                    self.bump();
                     left = self.node(s, NodeKind::Try, None, &[left]);
-                    continue;
                 }
-            }
-            if minimum <= 11 && !placed && self.eat("in") {
-                let p = self.path(NodeKind::Path)?;
-                left = self.node(s, NodeKind::Placement, None, &[left, p]);
-                placed = true;
-                continue;
-            }
-            let Some(&(_, prec, na)) = BINARY.iter().find(|(word, _, _)| *word == self.word(0))
-            else {
-                break;
-            };
-            if prec < minimum {
-                break;
-            }
-            if na && nonassoc == Some(prec) {
-                return self.fail("LANG-5", "nonassociative operators do not chain");
-            }
-            let op = self.bump();
-            let right = self.required(|p| p.expr(prec + 1))?;
-            left = self.node(s, NodeKind::Binary, Some(op), &[left, right]);
-            if na {
-                nonassoc = Some(prec);
+                Continuation::Placement if minimum <= 11 && !placed => {
+                    self.bump();
+                    let p = self.path(NodeKind::Path)?;
+                    left = self.node(s, NodeKind::Placement, None, &[left, p]);
+                    placed = true;
+                }
+                Continuation::Binary(prec, na) if prec >= minimum => {
+                    if na && nonassoc == Some(prec) {
+                        return self.fail("LANG-5", "nonassociative operators do not chain");
+                    }
+                    let op = self.bump();
+                    let right = self.required(|p| p.expr(prec + 1))?;
+                    left = self.node(s, NodeKind::Binary, Some(op), &[left, right]);
+                    if na {
+                        nonassoc = Some(prec);
+                    }
+                }
+                _ => break,
             }
         }
         Ok(left)
     }
     fn primary(&mut self) -> Parsed<NodeId> {
         let s = self.pos;
-        if PREFIX.contains(&self.word(0)) {
-            let op = self.bump();
-            let e = self.required(|p| p.expr(11))?;
-            return Ok(self.node(s, NodeKind::Unary, Some(op), &[e]));
-        }
-        if self.token(0).kind == TokenKind::Label {
-            let t = self.bump();
-            self.expect(":")?;
-            let e = self.primary()?;
-            if !matches!(
-                self.tree.node(e).kind,
-                NodeKind::Block
-                    | NodeKind::Loop
-                    | NodeKind::While
-                    | NodeKind::For
-                    | NodeKind::ForTake
-            ) {
-                return self.fail("LANG-5", "label needs block or loop");
-            }
-            return Ok(self.node(s, NodeKind::Labelled, Some(t), &[e]));
-        }
-        if self.eat("return") || self.eat("break") || self.eat("continue") {
-            let k = match self.text_token(self.significant[s]) {
-                "return" => NodeKind::Return,
-                "break" => NodeKind::Break,
-                _ => NodeKind::Continue,
-            };
-            let mut label = None;
-            let mut c = vec![];
-            if !self.newline() && self.token(0).kind == TokenKind::Label {
-                if k == NodeKind::Return {
-                    return self.fail("LANG-5", "return has no label");
-                }
-                label = Some(self.bump());
-            }
-            if k != NodeKind::Continue
-                && !self.newline()
-                && !self.eof()
-                && !matches!(self.word(0), "}" | ";" | "," | ")" | "]" | "=>")
-            {
-                c.push(self.expr(0)?);
-            }
-            return Ok(self.node(s, k, label, &c));
-        }
-        if self.at("{") {
-            return self.block();
-        }
-        if self.eat("[") {
-            self.whitespace += 1;
-            let result = (|| {
-                let mut children = vec![];
-                if self.eat("]") {
-                    return Ok(self.node(s, NodeKind::Array, None, &children));
-                }
-                children.push(self.expr(0)?);
-                if self.eat(";") {
-                    if self.token(0).kind != TokenKind::Integer {
-                        return self.fail("LANG-5", "array repeat count is an integer literal");
-                    }
-                    let st = self.pos;
-                    let token = self.bump();
-                    children.push(self.node(st, NodeKind::Literal, Some(token), &[]));
-                    self.expect("]")?;
-                    return Ok(self.node(s, NodeKind::RepeatArray, None, &children));
-                }
-                while !self.eat("]") {
-                    self.expect(",")?;
-                    if self.eat("]") {
-                        break;
-                    }
-                    children.push(self.expr(0)?);
-                }
-                Ok(self.node(s, NodeKind::Array, None, &children))
-            })();
-            self.whitespace -= 1;
-            return result;
-        }
-        if self.eat("(") {
-            let c = self.list(")", |p| p.expr(0))?;
-            let k = if c.is_empty() {
-                NodeKind::Unit
-            } else if c.len() == 1 && self.word_token_before() != "," {
-                NodeKind::Group
-            } else {
-                NodeKind::Tuple
-            };
-            return Ok(self.node(s, k, None, &c));
-        }
-        if self.eat("if") {
-            let condition = self.condition()?;
-            let yes = self.block()?;
-            let mut c = vec![condition, yes];
-            if self.eat("else") {
-                c.push(if self.at("if") {
-                    self.primary()?
-                } else {
-                    self.block()?
-                });
-            }
-            return Ok(self.node(s, NodeKind::If, None, &c));
-        }
-        if self.eat("match") {
-            let subject = self.expr(0)?;
-            self.subject(subject)?;
-            self.expect("{")?;
-            let mut c = vec![subject];
-            while !self.eat("}") {
-                if self.eof() {
-                    return self.fail("LANG-5", "unclosed match");
-                }
-                let st = self.pos;
-                let mut a = vec![self.pattern()?];
-                if self.eat("if") {
-                    a.push(self.expr(0)?);
-                }
-                self.expect("=>")?;
-                a.push(self.required(|p| p.expr(0))?);
-                c.push(self.node(st, NodeKind::Arm, None, &a));
-                self.entry_end("}")?;
-            }
-            return Ok(self.node(s, NodeKind::Match, None, &c));
-        }
-        if self.eat("loop") {
-            let b = self.block()?;
-            return Ok(self.node(s, NodeKind::Loop, None, &[b]));
-        }
-        if self.eat("while") {
-            let c = self.condition()?;
-            let b = self.block()?;
-            return Ok(self.node(s, NodeKind::While, None, &[c, b]));
-        }
-        if self.eat("for") {
-            let take = self.eat("take");
-            let pat = self.pattern()?;
-            self.expect("in")?;
-            let value = self.expr(0)?;
-            let body = self.block()?;
-            return Ok(self.node(
-                s,
-                if take {
-                    NodeKind::ForTake
-                } else {
-                    NodeKind::For
-                },
-                None,
-                &[pat, value, body],
-            ));
-        }
-        if self.eat("region") {
-            let n = self.name()?;
-            let b = self.block()?;
-            return Ok(self.node(s, NodeKind::Region, Some(n), &[b]));
-        }
-        if self.eat("bound") {
-            self.expect("bytes")?;
-            let value = self.expr(0)?;
-            let body = self.block()?;
-            return Ok(self.node(s, NodeKind::Bound, None, &[value, body]));
-        }
-        if self.at("fn") && self.word(1) != "(" {
-            return self.fail("LANG-5", "expected expression before next function");
-        }
-        if self.at("fn") || self.at("scoped") {
-            let scoped = self.eat("scoped");
-            self.expect("fn")?;
-            let mut c = self.header(false)?;
-            c.push(self.block()?);
-            return Ok(self.node(
-                s,
-                if scoped {
-                    NodeKind::ScopedClosure
-                } else {
-                    NodeKind::Closure
-                },
-                None,
-                &c,
-            ));
-        }
         if matches!(
             self.token(0).kind,
             TokenKind::Integer
@@ -1083,13 +912,203 @@ impl Parser<'_> {
             let t = self.bump();
             return Ok(self.node(s, NodeKind::Literal, Some(t), &[]));
         }
+        if self.token(0).kind == TokenKind::Ident {
+            return self.path(NodeKind::Path);
+        }
+
+        if PREFIX.contains(&self.word(0)) {
+            let op = self.bump();
+            let e = self.required(|p| p.expr(11))?;
+            return Ok(self.node(s, NodeKind::Unary, Some(op), &[e]));
+        }
+        if self.token(0).kind == TokenKind::Label {
+            let t = self.bump();
+            self.expect(sym::COLON)?;
+            let e = self.primary()?;
+            if !matches!(
+                self.tree.node(e).kind,
+                NodeKind::Block
+                    | NodeKind::Loop
+                    | NodeKind::While
+                    | NodeKind::For
+                    | NodeKind::ForTake
+            ) {
+                return self.fail("LANG-5", "label needs block or loop");
+            }
+            return Ok(self.node(s, NodeKind::Labelled, Some(t), &[e]));
+        }
+        if self.eat(sym::RETURN) || self.eat(sym::BREAK) || self.eat(sym::CONTINUE) {
+            let k = match self.tokens[self.significant[s]].symbol {
+                sym::RETURN => NodeKind::Return,
+                sym::BREAK => NodeKind::Break,
+                _ => NodeKind::Continue,
+            };
+            let mut label = None;
+            let mut c: Nodes = smallvec![];
+            if !self.newline() && self.token(0).kind == TokenKind::Label {
+                if k == NodeKind::Return {
+                    return self.fail("LANG-5", "return has no label");
+                }
+                label = Some(self.bump());
+            }
+            if k != NodeKind::Continue
+                && !self.newline()
+                && !self.eof()
+                && !matches!(
+                    self.word(0),
+                    sym::RBRACE
+                        | sym::SEMICOLON
+                        | sym::COMMA
+                        | sym::RPAREN
+                        | sym::RBRACKET
+                        | sym::FATARROW
+                )
+            {
+                c.push(self.expr(0)?);
+            }
+            return Ok(self.node(s, k, label, &c));
+        }
+        if self.at(sym::LBRACE) {
+            return self.block();
+        }
+        if self.eat(sym::LBRACKET) {
+            self.whitespace += 1;
+            let result = (|| {
+                let mut children: Nodes = smallvec![];
+                if self.eat(sym::RBRACKET) {
+                    return Ok(self.node(s, NodeKind::Array, None, &children));
+                }
+                children.push(self.expr(0)?);
+                if self.eat(sym::SEMICOLON) {
+                    if self.token(0).kind != TokenKind::Integer {
+                        return self.fail("LANG-5", "array repeat count is an integer literal");
+                    }
+                    let st = self.pos;
+                    let token = self.bump();
+                    children.push(self.node(st, NodeKind::Literal, Some(token), &[]));
+                    self.expect(sym::RBRACKET)?;
+                    return Ok(self.node(s, NodeKind::RepeatArray, None, &children));
+                }
+                while !self.eat(sym::RBRACKET) {
+                    self.expect(sym::COMMA)?;
+                    if self.eat(sym::RBRACKET) {
+                        break;
+                    }
+                    children.push(self.expr(0)?);
+                }
+                Ok(self.node(s, NodeKind::Array, None, &children))
+            })();
+            self.whitespace -= 1;
+            return result;
+        }
+        if self.eat(sym::LPAREN) {
+            let c = self.list(sym::RPAREN, |p| p.expr(0))?;
+            let k = if c.is_empty() {
+                NodeKind::Unit
+            } else if c.len() == 1 && self.word_token_before() != sym::COMMA {
+                NodeKind::Group
+            } else {
+                NodeKind::Tuple
+            };
+            return Ok(self.node(s, k, None, &c));
+        }
+        if self.eat(sym::IF) {
+            let condition = self.condition()?;
+            let yes = self.block()?;
+            let mut c: Nodes = smallvec![condition, yes];
+            if self.eat(sym::ELSE) {
+                c.push(if self.at(sym::IF) {
+                    self.primary()?
+                } else {
+                    self.block()?
+                });
+            }
+            return Ok(self.node(s, NodeKind::If, None, &c));
+        }
+        if self.eat(sym::MATCH) {
+            let subject = self.expr(0)?;
+            self.subject(subject)?;
+            self.expect(sym::LBRACE)?;
+            let mut c: Nodes = smallvec![subject];
+            while !self.eat(sym::RBRACE) {
+                if self.eof() {
+                    return self.fail("LANG-5", "unclosed match");
+                }
+                let st = self.pos;
+                let mut a: Nodes = smallvec![self.pattern()?];
+                if self.eat(sym::IF) {
+                    a.push(self.expr(0)?);
+                }
+                self.expect(sym::FATARROW)?;
+                a.push(self.required(|p| p.expr(0))?);
+                c.push(self.node(st, NodeKind::Arm, None, &a));
+                self.entry_end(sym::RBRACE)?;
+            }
+            return Ok(self.node(s, NodeKind::Match, None, &c));
+        }
+        if self.eat(sym::LOOP) {
+            let b = self.block()?;
+            return Ok(self.node(s, NodeKind::Loop, None, &[b]));
+        }
+        if self.eat(sym::WHILE) {
+            let c = self.condition()?;
+            let b = self.block()?;
+            return Ok(self.node(s, NodeKind::While, None, &[c, b]));
+        }
+        if self.eat(sym::FOR) {
+            let take = self.eat(sym::TAKE);
+            let pat = self.pattern()?;
+            self.expect(sym::IN)?;
+            let value = self.expr(0)?;
+            let body = self.block()?;
+            return Ok(self.node(
+                s,
+                if take {
+                    NodeKind::ForTake
+                } else {
+                    NodeKind::For
+                },
+                None,
+                &[pat, value, body],
+            ));
+        }
+        if self.eat(sym::REGION) {
+            let n = self.name()?;
+            let b = self.block()?;
+            return Ok(self.node(s, NodeKind::Region, Some(n), &[b]));
+        }
+        if self.eat(sym::BOUND) {
+            self.expect(sym::BYTES)?;
+            let value = self.expr(0)?;
+            let body = self.block()?;
+            return Ok(self.node(s, NodeKind::Bound, None, &[value, body]));
+        }
+        if self.at(sym::FN) && self.word(1) != sym::LPAREN {
+            return self.fail("LANG-5", "expected expression before next function");
+        }
+        if self.at(sym::FN) || self.at(sym::SCOPED) {
+            let scoped = self.eat(sym::SCOPED);
+            self.expect(sym::FN)?;
+            let mut c = self.header(false)?;
+            c.push(self.block()?);
+            return Ok(self.node(
+                s,
+                if scoped {
+                    NodeKind::ScopedClosure
+                } else {
+                    NodeKind::Closure
+                },
+                None,
+                &c,
+            ));
+        }
         self.path(NodeKind::Path)
     }
     fn condition(&mut self) -> Parsed<NodeId> {
-        if self.eat("let") {
+        if self.eat(sym::LET) {
             let s = self.pos - 1;
             let p = self.pattern()?;
-            self.expect("=")?;
+            self.expect(sym::EQ)?;
             let e = self.expr(0)?;
             Ok(self.node(s, NodeKind::ConditionLet, None, &[p, e]))
         } else {
@@ -1139,15 +1158,15 @@ impl Parser<'_> {
     }
     fn pattern_inner(&mut self) -> Parsed<NodeId> {
         let s = self.pos;
-        if self.eat("_") {
+        if self.eat(sym::UNDERSCORE) {
             return Ok(self.node(s, NodeKind::Wildcard, None, &[]));
         }
-        if self.eat("take") {
+        if self.eat(sym::TAKE) {
             let n = self.name()?;
             return Ok(self.node(s, NodeKind::TakePattern, Some(n), &[]));
         }
-        if self.eat("(") {
-            let c = self.list(")", |p| p.pattern())?;
+        if self.eat(sym::LPAREN) {
+            let c = self.list(sym::RPAREN, |p| p.pattern())?;
             return Ok(self.node(
                 s,
                 if c.is_empty() {
@@ -1159,7 +1178,7 @@ impl Parser<'_> {
                 &c,
             ));
         }
-        if self.eat("-")
+        if self.eat(sym::MINUS)
             || matches!(
                 self.token(0).kind,
                 TokenKind::Integer
@@ -1173,7 +1192,7 @@ impl Parser<'_> {
         {
             let t = self.bump();
             let left = self.node(s, NodeKind::LiteralPattern, Some(t), &[]);
-            if self.eat("..=") {
+            if self.eat(sym::DOTDOTEQ) {
                 let right = self.pattern()?;
                 return Ok(self.node(s, NodeKind::RangePattern, None, &[left, right]));
             }
@@ -1181,21 +1200,21 @@ impl Parser<'_> {
         }
         let p = self.path(NodeKind::Path)?;
         let name = self.tree.node(p).token;
-        if self.eat("(") {
+        if self.eat(sym::LPAREN) {
             let mut rest = false;
-            let mut c = vec![p];
-            c.extend(self.list(")", |p| {
+            let mut c: Nodes = smallvec![p];
+            c.extend(self.list(sym::RPAREN, |p| {
                 let st = p.pos;
                 if rest {
                     return p.fail("LANG-5", "rest pattern must be last");
                 }
-                if p.eat("..") {
+                if p.eat(sym::DOTDOT) {
                     rest = true;
                     return Ok(p.node(st, NodeKind::RestPattern, None, &[]));
                 }
-                let label = if p.token(0).kind == TokenKind::Ident && p.word(1) == ":" {
+                let label = if p.token(0).kind == TokenKind::Ident && p.word(1) == sym::COLON {
                     let n = p.bump();
-                    p.expect(":")?;
+                    p.expect(sym::COLON)?;
                     Some(n)
                 } else {
                     None

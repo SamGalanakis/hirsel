@@ -13,3 +13,11 @@ and never reported as refusals of the program.
 Cases live in `core/front/cases` with hand-derived `// expect:` lines; `core/front/core`
 is a fixture of the core library until the spec's `core/core/` signature files reach the
 tools. See `core/front/README.md`.
+
+
+The front-end input uses one compilation symbol table and one arena per source file.
+`ModuleInput.id` is the index's Copy `ModuleId`. Resolved definitions are `DefinitionId`s;
+`Program` maps them directly to declarations/functions, while neutral paths remain the
+emission and public query identities. Use and synthesis tables cover only an item's node
+range, so many definitions in one file do not allocate file-sized tables per definition.
+Generic and parameter names are symbols; the index renders their spelling when needed.

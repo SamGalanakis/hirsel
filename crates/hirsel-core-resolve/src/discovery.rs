@@ -1,5 +1,5 @@
 use hirsel_core_ids::PackageId;
-use hirsel_core_syntax::{ParseMode, ParseOutput, parse_bytes};
+use hirsel_core_syntax::{ParseMode, ParseOutput, Symbols, parse_bytes};
 use std::path::{Path, PathBuf};
 
 /// Tool input, not language syntax: one explicitly mapped module per source (PROG-1).
@@ -16,11 +16,11 @@ pub struct PackageManifest {
     pub dependencies: Vec<PackageId>,
 }
 pub struct ParsedModule {
-    pub module: ModuleId,
+    pub module: ModulePath,
     pub file: PathBuf,
     pub parsed: ParseOutput,
 }
-use crate::ModuleId;
+use crate::{ModuleId, ModulePath, NameIndex};
 impl PackageManifest {
     /// Explicit directory-tool convention: relative path components name modules.
     /// Drivers with another manifest format supply their own `sources` instead.
@@ -71,13 +71,14 @@ impl PackageManifest {
             dependencies: vec![],
         })
     }
-    pub fn read(&self) -> std::io::Result<Vec<ParsedModule>> {
+    pub fn read(&self, symbols: &mut Symbols) -> std::io::Result<Vec<ParsedModule>> {
+        self.intern(symbols);
         self.sources
             .iter()
             .map(|s| {
                 let bytes = std::fs::read(&s.file)?;
                 Ok(ParsedModule {
-                    module: ModuleId {
+                    module: ModulePath {
                         package: self.package.clone(),
                         modules: s.modules.clone(),
                     },
@@ -89,9 +90,86 @@ impl PackageManifest {
                         } else {
                             ParseMode::Source
                         },
+                        symbols,
                     ),
                 })
             })
             .collect()
+    }
+}
+
+impl PackageManifest {
+    pub fn intern(&self, symbols: &mut Symbols) {
+        symbols.intern(&self.package.name);
+        symbols.intern(&self.package.version);
+        for d in &self.dependencies {
+            symbols.intern(&d.name);
+            symbols.intern(&d.version);
+        }
+        for s in &self.sources {
+            for name in &s.modules {
+                symbols.intern(name);
+            }
+        }
+    }
+}
+impl NameIndex {
+    /// External package discovery is converted once, before header indexing.
+    pub fn add_manifests(&mut self, manifests: &[PackageManifest]) -> Vec<ModuleId> {
+        for m in manifests {
+            self.add_package(
+                self.symbols.find(&m.package.name).unwrap(),
+                self.symbols.find(&m.package.version).unwrap(),
+            );
+        }
+        for m in manifests {
+            let p = self
+                .package(
+                    self.symbols.find(&m.package.name).unwrap(),
+                    self.symbols.find(&m.package.version).unwrap(),
+                )
+                .unwrap();
+            let deps = m
+                .dependencies
+                .iter()
+                .map(|d| {
+                    self.package(
+                        self.symbols.find(&d.name).unwrap(),
+                        self.symbols.find(&d.version).unwrap(),
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>();
+            self.set_dependencies(p, deps);
+        }
+        let mut modules = vec![];
+        for m in manifests {
+            let p = self
+                .package(
+                    self.symbols.find(&m.package.name).unwrap(),
+                    self.symbols.find(&m.package.version).unwrap(),
+                )
+                .unwrap();
+            for s in &m.sources {
+                let path = s
+                    .modules
+                    .iter()
+                    .map(|n| self.symbols.find(n).unwrap())
+                    .collect::<Vec<_>>();
+                modules.push(self.add_module(p, &path));
+            }
+        }
+        modules
+    }
+    pub fn module(&self, path: &ModulePath) -> Option<ModuleId> {
+        let p = self.package(
+            self.symbols.find(&path.package.name)?,
+            self.symbols.find(&path.package.version)?,
+        )?;
+        let mut m = self.packages[p.0 as usize].root;
+        for name in &path.modules {
+            m = self.child(m, self.symbols.find(name)?)?;
+        }
+        Some(m)
     }
 }

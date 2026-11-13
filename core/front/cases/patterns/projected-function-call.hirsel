@@ -1,0 +1,5 @@
+// Selecting a member of a function value must not silently call the function.
+// The names lane has not implemented this kind of value projection.
+// expect: gap function, constant and module values are not built
+fn source() -> u8 { 7 }
+fn f() -> u8 { source.member() }

@@ -288,7 +288,9 @@ impl<'c, 'a> Cx<'c, 'a> {
     fn pattern_field_ty(&mut self, ty: TyId, case: Option<u32>, i: usize) -> TyId {
         if let TyKind::Anchored(inner, root) = *self.t.kind(ty) {
             let ft = self.pattern_field_ty(inner, case, i);
-            return if kind(&self.p.decls, &self.t, ft, &self.params) == Kind::Stable {
+            return if kind(&self.p.decls, &self.t, ft, &self.params) == Kind::Stable
+                && !matches!(self.t.kind(ft), TyKind::Anchored(..))
+            {
                 self.t.mk(TyKind::Anchored(ft, root))
             } else {
                 ft
@@ -427,10 +429,25 @@ impl<'c, 'a> Cx<'c, 'a> {
                 self.coerce(at.ty, w, n);
             }
             let viewed = matches!(self.t.kind(at.ty), TyKind::View(_));
-            let ty = match self.t.kind(at.ty) {
+            let mut ty = match self.t.kind(at.ty) {
                 TyKind::View(t) => *t,
                 _ => at.ty,
             };
+            if !matches!(self.t.kind(ty), TyKind::Anchored(..))
+                && kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Stable
+            {
+                // A bare stable parameter is a view for this call. Payloads retain
+                // that view's anchor even when its region is not named in the type.
+                let name = self.slot_name(at.place.slot);
+                let root = self
+                    .fd
+                    .params
+                    .iter()
+                    .position(|p| self.p.index.symbols.text(p.name) == name)
+                    .map_or(Root::Local(at.place.slot), |i| Root::Parameter(i as u32));
+                let root = self.t.mk(TyKind::Region(root));
+                ty = self.t.mk(TyKind::Anchored(ty, root));
+            }
             return Subject {
                 ty,
                 value,

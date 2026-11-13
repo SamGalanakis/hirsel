@@ -1,0 +1,7 @@
+// A result rooted in formal parameter zero is rooted in the local actual region,
+// not the caller's parameter zero. Calls must report the missing substitution.
+// expect: gap values of this type are not built
+// expect: gap call result region anchors are not built
+stable type S { n: u64 }
+fn create(r: Region) -> S in r { loop {} }
+fn f() { region local { let _: S in local = create(local) } }

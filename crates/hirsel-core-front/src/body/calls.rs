@@ -30,7 +30,16 @@ impl<'c, 'a> Cx<'c, 'a> {
         self.out.counts.uses += 1;
         let p: &'c Program<'a> = self.p;
         let target = match self.kind(callee) {
-            NodeKind::Path => p.resolved(self.at, callee).map(|u| &u.target),
+            NodeKind::Path => match p.resolved(self.at, callee) {
+                Some(u)
+                    if u.projections.start != u.projections.end
+                        && matches!(u.target, Target::Definition(_)) =>
+                {
+                    return self
+                        .gap_ty(callee, "function, constant and module values are not built");
+                }
+                other => other.map(|u| &u.target),
+            },
             _ => None,
         };
         let f = match target {
@@ -49,6 +58,12 @@ impl<'c, 'a> Cx<'c, 'a> {
             _ => return self.gap_ty(callee, "calls through values are not built"),
         };
         let g = &self.p.fns[f];
+        if g.region_anchors.iter().any(|&r| {
+            matches!(self.t.kind(r), TyKind::Region(Root::Parameter(i))
+                if matches!(self.t.kind(g.params[*i as usize].ty), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::Region)))
+        }) {
+            return self.gap_ty(n, "call result region anchors are not built");
+        }
         if self.patterns.guard && g.params.iter().any(|p| p.mode != Mode::View) {
             self.refuse(
                 "LANG-17",

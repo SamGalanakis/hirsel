@@ -163,12 +163,12 @@ fn copy_prefix(mut l:Lines,mut line:String,partial:bool)->Result[(),Error] {
 }
 
 /// Explicitly flushed stdout buffer. Drop only releases memory; it never hides I/O errors.
-pub opaque type Out { output:Stdout,buffer:Bytes,cap:u64 }
+pub opaque type Out { output:Stdout,buffer:Bytes }
 
 /// Reserves exactly cap bytes of buffering, current limit. Error leaves stdout untouched.
 pub fn out(o:Stdout,cap:u64)->Result[Out,Capacity] {
     let b:Bytes=list.with_capacity(cap)?
-    Ok(Out(output:o,buffer:take b,cap:cap))
+    Ok(Out(output:o,buffer:take b))
 }
 /// The retained suffix awaiting flush; freezes w. Alloc: none.
 pub fn pending(w:Out)->View[Bytes] in w {list.slice(w.buffer,0,list.len(w.buffer))}
@@ -195,11 +195,18 @@ pub fn flush(mut w:Out)->Result[(),WriteError] waits {
 /// cap=0 is direct unbuffered byte output. Ex: io.write(mut out,"hello\n")?
 pub fn write(mut w:Out,s:String)->Result[(),WriteError] waits {
     let b=string.as_bytes(s)
-    if w.cap==0 {return stdout.write_bytes(w.output,b)}
+    let cap=list.capacity(w.buffer)
+    if cap==0 {return stdout.write_bytes(w.output,b)}
+    // Keep the common whole-input copy outside the split/refill loop. Passing
+    // the original view also preserves a caller's known copy length.
+    if list.len(b)<=cap-list.len(w.buffer) {
+        let _=list.append(mut w.buffer,b)
+        return Ok(())
+    }
     let mut at:u64=0
     while at<list.len(b) {
-        if list.len(w.buffer)==w.cap {flush(mut w)?}
-        let spare=w.cap-list.len(w.buffer)
+        if list.len(w.buffer)==cap {flush(mut w)?}
+        let spare=cap-list.len(w.buffer)
         let count=if list.len(b)-at<spare {list.len(b)-at} else {spare}
         let _=list.append(mut w.buffer,list.slice(b,at,at+count))
         at+=count

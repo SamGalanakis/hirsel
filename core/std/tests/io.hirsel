@@ -238,3 +238,19 @@ fn static_caller_needs_only_output_capacity(d:Dir)->bool waits {
     let r=bound bytes 16 {io.read_line(mut l,mut line)}
     match r {Ok(Ok(true))=>line=="ab" && list.capacity(string.as_bytes(line))==16,_=>false}
 }
+
+// A whole input may exactly fill the buffer. Empty input must not flush it;
+// the next nonempty input flushes that prefix and then buffers its own bytes.
+// expect: stdout "abcdef"
+// expect: run whole_input_and_empty_at_full(out) = true
+fn whole_input_and_empty_at_full(out:Stdout)->bool waits {
+    let mut w=result.unwrap(io.out(out,4))
+    result.unwrap(io.write(mut w,"ab"))
+    result.unwrap(io.write(mut w,"cd"))
+    result.unwrap(io.write(mut w,""))
+    let full=list.len(io.pending(w))==4 && io.pending(w)[0]==97 && io.pending(w)[3]==100
+    result.unwrap(io.write(mut w,"ef"))
+    let suffix=list.len(io.pending(w))==2 && io.pending(w)[0]==101 && io.pending(w)[1]==102
+    result.unwrap(io.flush(mut w))
+    full && suffix
+}

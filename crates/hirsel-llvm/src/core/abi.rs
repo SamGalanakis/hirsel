@@ -170,28 +170,8 @@ impl FunctionEmitter<'_> {
         self.line(format!("ret {} {r}", self.abi.ty));
     }
     pub(super) fn call(&mut self, site: &CallSite) -> Result<()> {
-        if site.callee == Callee::Runtime(RtOp::DestId) {
-            self.intrinsics
-                .insert("declare i64 @hirsel_core_dest_id()".into());
-            let value = self.calc("call i64 @hirsel_core_dest_id()");
-            let result = site.results.get(&self.body.pools.values).unwrap()[0];
-            self.put(result, &value);
-            return Ok(());
-        }
-        if site.callee == Callee::Runtime(RtOp::CompareBytes) {
-            let operands = site.args.get(&self.body.pools.args).unwrap();
-            let args = operands
-                .iter()
-                .zip(["ptr", "i64", "ptr", "i64"])
-                .map(|(arg, t)| {
-                    let Arg::Value(v) = *arg else { unreachable!() };
-                    (t.into(), self.get(v))
-                })
-                .collect::<Vec<_>>();
-            let value = self.compare_bytes(&args);
-            let result = site.results.get(&self.body.pools.values).unwrap()[0];
-            self.put(result, &value);
-            return Ok(());
+        if let Callee::Runtime(op) = site.callee {
+            return self.runtime_call(op, site);
         }
         let sig = &self.module.signatures[site.signature.index()];
         let has_status = match site.callee {
@@ -221,7 +201,7 @@ impl FunctionEmitter<'_> {
                 if has_status { "" } else { ".infallible" }
             ),
             Callee::Indirect(v) => self.get(v),
-            Callee::Runtime(_) => return Err(Error::Unsupported("task runtime calls".into())),
+            Callee::Runtime(_) => unreachable!(),
         };
         let mut values = self.invoke(&abi, &callee, args);
         if has_status {
@@ -240,7 +220,12 @@ impl FunctionEmitter<'_> {
         }
         Ok(())
     }
-    fn invoke(&mut self, abi: &Return, callee: &str, mut args: Vec<String>) -> Vec<String> {
+    pub(super) fn invoke(
+        &mut self,
+        abi: &Return,
+        callee: &str,
+        mut args: Vec<String>,
+    ) -> Vec<String> {
         let scratch = if abi.fields.len() > 1 {
             Some(self.temp(&abi.storage))
         } else {

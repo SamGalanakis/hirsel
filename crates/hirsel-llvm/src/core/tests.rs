@@ -58,6 +58,9 @@ fn has_hostfile_field(shape: &hirsel_core_layout::Shape) -> bool {
     })
 }
 fn execute(module: &Module, cases: &[Case]) -> Vec<NativeReport> {
+    execute_with_bindings(module, cases, "")
+}
+fn execute_with_bindings(module: &Module, cases: &[Case], bindings: &str) -> Vec<NativeReport> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
         "hirsel-core-llvm-{}-{}",
@@ -120,6 +123,7 @@ fn execute(module: &Module, cases: &[Case]) -> Vec<NativeReport> {
         )
         .unwrap();
     }
+    c.push_str(bindings);
     c.push_str(r#"
 extern void hirsel_core_test_reset_limit(HirselCoreContext *, uint64_t);
 static HirselCoreEvent arc_events[4096]; static size_t arc_count;
@@ -602,6 +606,7 @@ fn every_front_run_case_matches_the_evaluator() {
     files(&root.join("cases"), &mut paths);
     paths.sort();
     let mut count = 0;
+    let mut failures = Vec::new();
     for path in paths {
         let source = std::fs::read_to_string(&path).unwrap();
         let runs = source
@@ -611,40 +616,55 @@ fn every_front_run_case_matches_the_evaluator() {
         if runs.is_empty() {
             continue;
         }
-        let (module, names) = front::lower(&source, &root.join("core"), "main")
-            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        let cases = runs
-            .iter()
-            .map(|run| {
-                let (call, _) = run.split_once(" = ").unwrap();
-                let (name, args) = call.strip_suffix(')').unwrap().split_once('(').unwrap();
-                let function = names[name];
-                let sig = &module.signatures[module.functions[function.index()].signature.index()];
-                let args = args
-                    .split(',')
-                    .filter(|s| !s.is_empty())
-                    .zip(&sig.params)
-                    .map(|(a, t)| {
-                        let Param::Value(t) = t else {
-                            panic!("front argument")
-                        };
-                        eval::scalar(*t, a)
-                    })
-                    .collect();
-                Case {
-                    function,
-                    args,
-                    limit: u64::MAX,
-                    injection: None,
-                }
-            })
-            .collect::<Vec<_>>();
-        println!("front {}: {} native runs", path.display(), cases.len());
-        count += cases.len();
-        agree_cases(&module, &cases, false);
+        let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (module, names) = front::lower(&source, &root.join("core"), "main")
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let cases = runs
+                .iter()
+                .map(|run| {
+                    let (call, _) = run.split_once(" = ").unwrap();
+                    let (name, args) = call.strip_suffix(')').unwrap().split_once('(').unwrap();
+                    let function = names[name];
+                    let sig =
+                        &module.signatures[module.functions[function.index()].signature.index()];
+                    let args = args
+                        .split(',')
+                        .filter(|s| !s.is_empty())
+                        .zip(&sig.params)
+                        .map(|(a, t)| {
+                            let Param::Value(t) = t else {
+                                panic!("front argument")
+                            };
+                            eval::scalar(*t, a)
+                        })
+                        .collect();
+                    Case {
+                        function,
+                        args,
+                        limit: u64::MAX,
+                        injection: None,
+                    }
+                })
+                .collect::<Vec<_>>();
+            println!("front {}: {} native runs", path.display(), cases.len());
+            count += cases.len();
+            agree_cases(&module, &cases, false);
+        }));
+        if let Err(error) = attempt {
+            let message = error
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| error.downcast_ref::<&str>().copied())
+                .unwrap_or("non-string panic");
+            failures.push(format!("{}: {message}", path.display()));
+        }
     }
     assert!(count > 0);
-    println!("front native executions: {count}");
+    println!(
+        "front native executions: {count}; file failures: {}",
+        failures.len()
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]
@@ -1121,5 +1141,123 @@ fn string_literals_growth_and_byte_order_match_the_evaluator() {
         "string sample runs: {}; refusal runs: {}",
         cases.len(),
         refusals.len()
+    );
+}
+
+#[test]
+fn task_custody_samples_and_admission_refusals_match_the_evaluator() {
+    let source = include_str!("../../../hirsel-core-ir/samples/custody.core");
+    let module = text::parse(source).unwrap();
+    wf::module(&module).unwrap();
+    let mut cases = Vec::new();
+    for case in sample_cases(&module, source) {
+        let baseline = eval::run(&module, case.function, &case.args, case.limit);
+        for nth in 1..=baseline.admissions {
+            for later in [false, true] {
+                cases.push(Case {
+                    function: case.function,
+                    args: case.args.clone(),
+                    limit: case.limit,
+                    injection: Some((nth, later)),
+                });
+            }
+        }
+        cases.push(case);
+    }
+    println!("task custody executions: {}", cases.len());
+    agree_cases(&module, &cases, true);
+}
+
+#[test]
+fn channel_fifo_clone_full_and_closed_match_the_evaluator() {
+    let module = text::parse(include_str!("channel_tests.core")).unwrap();
+    wf::module(&module).unwrap();
+    let baseline = eval::run(&module, FuncId(0), &[], u64::MAX);
+    assert_eq!(baseline.outcome, eval::Outcome::Returned(vec![7, 8, 0, 1]));
+    let mut cases = vec![Case {
+        function: FuncId(0),
+        args: vec![],
+        limit: u64::MAX,
+        injection: None,
+    }];
+    for nth in 1..=baseline.admissions {
+        for later in [false, true] {
+            cases.push(Case {
+                function: FuncId(0),
+                args: vec![],
+                limit: u64::MAX,
+                injection: Some((nth, later)),
+            });
+        }
+    }
+    println!("channel executions: {}", cases.len());
+    agree_cases(&module, &cases, true);
+}
+
+#[test]
+fn provider_extern_uses_form_results_and_failure_status() {
+    let module = text::parse(
+        r#"
+core v1
+sig g0 = (u64) -> (u64)
+inst n0 = tests@0/provider/call [] []
+inst n1 = tests@0/provider/clock [] []
+inst n2 = tests@0/provider/catch [] []
+fn f0 = n0 g0 {
+b0(v0: u64):
+ v1: u64 = call f1 g0 (v0)
+ return v1
+}
+fn f1 = n1 g0 extern
+fn f2 = n2 g0 {
+b0(v0: u64):
+ v1: u64 = call f1 g0 (v0) fail b1
+ return v1
+b1:
+ v2: u64 = const 0
+ v3: u64 = call f1 g0 (v2)
+ propagate
+}
+"#,
+    )
+    .unwrap();
+    wf::module(&module).unwrap();
+    let bindings = r#"
+static HirselCoreHostOutcome clock_issue(void *state, HirselCoreHostRequest *request) {
+    (void)state; assert(request->operation==10); hirsel_core_test_drop_trace(7+request->handle); HirselCoreHostOutcome out={0};
+    if(request->handle) out.status=1; else out.value=1234567;
+    return out;
+}
+static HirselCoreHostOutcome clock_deliver(void *state, HirselCoreHostRequest *request, HirselCoreHostOutcome out) {
+    (void)state; assert(request->operation==10); return out;
+}
+R1 EXTERNAL(void *context, uint64_t mode) {
+    HirselCoreProvider provider={.issue=clock_issue,.deliver=clock_deliver};
+    HirselCoreHostRequest request={.operation=10,.handle=mode};
+    HirselCoreHostOutcome out=hirsel_core_host(context,&provider,&request);
+    if(out.status) {
+        HirselCoreCause cause={.kind=5}; hirsel_core_raise(context,cause);
+        return (R1){.r1=1};
+    }
+    return (R1){.r0=out.value};
+}
+"#
+    .replace("EXTERNAL", &symbol(&module, FuncId(1)));
+    let cases = [(0, 0), (0, 1), (2, 1)].map(|(f, a)| Case {
+        function: FuncId(f),
+        args: vec![a],
+        limit: u64::MAX,
+        injection: None,
+    });
+    let reports = execute_with_bindings(&module, &cases, &bindings);
+    assert_eq!(reports[0].outcome, eval::Outcome::Returned(vec![1234567]));
+    assert_eq!(
+        reports[1].outcome,
+        eval::Outcome::Failed(vec!["Cancelled".into()])
+    );
+    assert_eq!(reports[2].trace, vec![8, 7]);
+    assert_eq!(
+        reports[2].outcome,
+        eval::Outcome::Failed(vec!["Cancelled".into()])
     );
 }

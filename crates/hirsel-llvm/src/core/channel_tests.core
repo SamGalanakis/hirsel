@@ -1,0 +1,71 @@
+core v1
+type t0 = own "Word" { value: u64 }
+type t1 = own "Sender" { value: sender }
+type t2 = own "Receiver" { value: receiver }
+sig g0 = () -> (u64, u64, bool, u8)
+sig g1 = (u64) -> (ptr, ptr, u64)
+sig g2 = (ptr) -> (ptr)
+sig g3 = (ptr, &t0) -> (bool)
+sig g4 = (ptr, &t0) -> (u8)
+inst n0 = tests@0/channel/fifo [] []
+fn f0 = n0 g0 {
+ slot s0 = t0
+ slot s1 = t0
+ slot s2 = t1
+ slot s3 = t1
+ slot s4 = t2
+ addr a0 = s0 field 0 : u64
+ addr a1 = s0 : t0
+ addr a2 = s1 field 0 : u64
+ addr a3 = s1 : t0
+ addr a4 = s2 field 0 : ptr
+ addr a5 = s2 : t1
+ addr a6 = s3 field 0 : ptr
+ addr a7 = s3 : t1
+ addr a8 = s4 field 0 : ptr
+ addr a9 = s4 : t2
+b0:
+ v0: u64 = const 2
+ v1: ptr, v2: ptr, v3: u64 = call rt.channel_new[t0] g1 (v0)
+ v4: ptr = const 0x0
+ v5: bool = ne v1, v4
+ branch v5, b1, b2
+b1:
+ v6: ptr = call rt.channel_sender g2 (v1)
+ address a0
+ address a1
+ address a2
+ address a3
+ address a4
+ address a5
+ address a6
+ address a7
+ address a8
+ address a9
+ store a4, v1
+ store a6, v6
+ store a8, v2
+ v7: u64 = const 7
+ store a0, v7
+ v8: bool = call rt.send[t0] g3 (v1, &a1)
+ v9: u64 = const 8
+ store a0, v9
+ v10: u8 = call rt.try_send[t0] g4 (v6, &a1)
+ v11: u64 = const 9
+ store a0, v11
+ v12: u8 = call rt.try_send[t0] g4 (v1, &a1)
+ v13: bool = call rt.receive[t0] g3 (v2, &a3)
+ v14: u64 = read a2
+ v15: bool = call rt.receive[t0] g3 (v2, &a3)
+ v16: u64 = read a2
+ drop a7 t1
+ drop a5 t1
+ v17: bool = call rt.receive[t0] g3 (v2, &a3)
+ drop a9 t2
+ return v14, v16, v17, v12
+b2:
+ v18: u64 = const 0
+ v19: bool = const false
+ v20: u8 = const 9
+ return v18, v18, v19, v20
+}

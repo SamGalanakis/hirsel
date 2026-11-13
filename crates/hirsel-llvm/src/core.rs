@@ -15,6 +15,7 @@ mod failure;
 mod fast;
 mod scalar;
 mod storage;
+mod tasks;
 #[cfg(test)]
 mod tests;
 

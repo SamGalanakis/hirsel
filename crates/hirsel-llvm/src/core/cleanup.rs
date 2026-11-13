@@ -32,6 +32,16 @@ pub(super) fn drop_glue(
             match inst {
                 Inst::Drop { ty, .. } => pending.push((ty.index(), false)),
                 Inst::Release { ty, .. } => pending.push((ty.index(), true)),
+                Inst::Call { call } => match body.calls[call.index()].callee {
+                    Callee::Runtime(RtOp::Spawn { x, r }) => {
+                        pending.push((x.index(), false));
+                        pending.push((r.index(), false));
+                    }
+                    Callee::Runtime(RtOp::ChannelNew { item }) => {
+                        pending.push((item.index(), false))
+                    }
+                    _ => {}
+                },
                 _ => {}
             }
         }
@@ -251,6 +261,30 @@ impl FunctionEmitter<'_> {
                 self.runtime_void("hirsel_core_causes_drop", &[ptr(&chain)]);
                 None
             }
+            FieldTy::Handle(
+                hirsel_core_layout::Handle::Task | hirsel_core_layout::Handle::Receiver,
+            ) => {
+                let handle = self.calc(format!("load ptr, ptr {p}, align 1"));
+                let name = if *field == FieldTy::Handle(hirsel_core_layout::Handle::Task) {
+                    "hirsel_core_task_drop"
+                } else {
+                    "hirsel_core_receiver_drop"
+                };
+                Some(
+                    self.native_call(
+                        name,
+                        &[Ty::Scalar(Scalar::U8)],
+                        &[ptr("%context"), ptr(&handle)],
+                    )
+                    .remove(0),
+                )
+            }
+            FieldTy::Handle(hirsel_core_layout::Handle::Sender) => {
+                let handle = self.calc(format!("load ptr, ptr {p}, align 1"));
+                self.runtime_void("hirsel_core_sender_drop", &[ptr(&handle)]);
+                None
+            }
+            FieldTy::Handle(hirsel_core_layout::Handle::Capability) => None,
             other => return Err(Error::Unsupported(format!("drop field {other:?}"))),
         };
         if let Some(failed) = failed {

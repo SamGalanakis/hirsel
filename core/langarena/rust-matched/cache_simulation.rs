@@ -2,6 +2,7 @@
 // Matched twin of cache_simulation.hirsel. Reviewed below.
 // Source: kostya/LangArena 3c9f84d benchmarks/cache_simulation.rs:5-207.
 // Identical indexed nodes, LIFO free list, owned keys and values, explicit LCG.
+mod text_support;
 use std::collections::HashMap;
 
 struct Node {
@@ -162,7 +163,7 @@ fn step(c: &mut LruCache, g: &mut i32, i: u64, values: i32, hits: &mut u32, miss
     }
 }
 fn main() {
-    let a: Vec<String> = std::env::args().collect();
+    let a: Vec<String> = text_support::arguments(&["values", "size"], false);
     let values: i32 = a[1].parse().unwrap();
     let size: usize = a[2].parse().unwrap();
     let warmup: u64 = a[3].parse().unwrap();
@@ -181,5 +182,5 @@ fn main() {
     }
     let a = (5432u32 << 5).wrapping_add(hits);
     let b = (a << 5).wrapping_add(misses);
-    println!("{}", (b << 5).wrapping_add(u32::try_from(c.size).unwrap()));
+    text_support::output((b << 5).wrapping_add(u32::try_from(c.size).unwrap()));
 }

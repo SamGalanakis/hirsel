@@ -1,6 +1,8 @@
-// Matched twin of distance.hirsel. Review pending langs-numeric-920.
+// Reviewed-by: langs-numeric-920 2026-11-13; Jaro/NGram: same ASCII pairs, byte bool flags, u64 counts and gram maps, score evaluation and checked arithmetic. Overflow checks required.
+// Matched twin of distance.hirsel. Reviewed below.
 // Source: kostya/LangArena3c9f84d benchmarks/distance.rs:31-243.
 // Same ASCII bytes, boolean match lists, owned pair Strings and gram frequency maps.
+mod text_support;
 use std::collections::HashMap;
 fn jaro(s1: &str, s2: &str) -> f64 {
     let bytes1 = s1.as_bytes();
@@ -22,7 +24,7 @@ fn jaro(s1: &str, s2: &str) -> f64 {
     let mut s1_matches = vec![false; len1];
     let mut s2_matches = vec![false; len2];
 
-    let mut matches = 0;
+    let mut matches = 0u64;
     for i in 0..len1 {
         let start = i.saturating_sub(match_dist);
         let end = (len2 - 1).min(i + match_dist);
@@ -41,7 +43,7 @@ fn jaro(s1: &str, s2: &str) -> f64 {
         return 0.0;
     }
 
-    let mut transpositions = 0;
+    let mut transpositions = 0u64;
     let mut k = 0;
     for i in 0..len1 {
         if s1_matches[i] {
@@ -72,7 +74,7 @@ fn ngram(s1: &str, s2: &str) -> f64 {
         return 0.0;
     }
 
-    let mut grams1 = HashMap::new();
+    let mut grams1: HashMap<u32, u64> = HashMap::new();
 
     for i in 0..=len1 - 4 {
         let gram = ((s1_bytes[i] as u32) << 24)
@@ -83,8 +85,8 @@ fn ngram(s1: &str, s2: &str) -> f64 {
         let _ = *grams1.entry(gram).and_modify(|e| *e += 1).or_insert(1);
     }
 
-    let mut grams2 = HashMap::new();
-    let mut intersection = 0;
+    let mut grams2: HashMap<u32, u64> = HashMap::new();
+    let mut intersection = 0u64;
 
     for i in 0..=len2 - 4 {
         let gram = ((s2_bytes[i] as u32) << 24)
@@ -120,7 +122,7 @@ fn random_string(g: &mut i32, n: i32) -> String {
     s
 }
 fn main() {
-    let a: Vec<String> = std::env::args().collect();
+    let a: Vec<String> = text_support::arguments(&["count", "size"], true);
     let task = &a[1];
     assert!(task == "Distance::Jaro" || task == "Distance::NGram");
     let count: usize = a[2].parse().unwrap();
@@ -147,5 +149,5 @@ fn main() {
             result = result.wrapping_add((score * 1000.0) as u32);
         }
     }
-    println!("{result}");
+    text_support::output(result);
 }

@@ -1,6 +1,8 @@
-// Matched twin of graph.hirsel. Review pending langs-numeric-920.
+// Reviewed-by: langs-numeric-920 2026-11-13; BFS/DFS/AStar preserve nested i32 adjacency, byte bool marks, FIFO/LIFO/min-heap priorities, LCG and checked arithmetic; overflow checks required.
+// Matched twin of graph.hirsel. Reviewed below.
 // kostya/LangArena3c9f84d benchmarks/graph_path.rs:11-316.
 // Adjacency vectors, FIFO/LIFO searches, minimum (f,vertex) heap and explicit LCG.
+mod text_support;
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BinaryHeap, VecDeque};
 pub struct Graph {
@@ -187,7 +189,7 @@ fn next(g: &mut i32, max: i32) -> i32 {
     (*g as f64 / 139968.0 * f64::from(max)) as i32
 }
 fn main() {
-    let a: Vec<String> = std::env::args().collect();
+    let a: Vec<String> = text_support::arguments(&["vertices", "jumps", "jump_len"], true);
     let task = &a[1];
     let vertices: i32 = a[2].parse().unwrap();
     let jumps: i32 = a[3].parse().unwrap();
@@ -206,5 +208,5 @@ fn main() {
         };
         checksum = checksum.wrapping_add(d as u32);
     }
-    println!("{checksum}");
+    text_support::output(checksum);
 }

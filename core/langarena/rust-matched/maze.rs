@@ -1,6 +1,8 @@
-// Matched twin of maze.hirsel. Review pending langs-numeric-920.
+// Reviewed-by: langs-numeric-920 2026-11-13; Generator/BFS/AStar: same nested cells, shuffled inline neighbors, flat BFS marks, i32 path/scores, min priorities and LCG. Overflow checks required.
+// Matched twin of maze.hirsel. Reviewed below.
 // kostya/LangArena3c9f84d benchmarks/maze.rs:8-468.
 // Nested cell vectors, four ordered neighbors, u32 kinds, same path arrays and LCG.
+mod text_support;
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
 fn walkable(k: u32) -> bool {
@@ -218,10 +220,10 @@ fn bfs(m: &Maze, start: (usize, usize), target: (usize, usize)) -> Vec<(usize, u
     let height = m.height();
 
     let mut queue = VecDeque::new();
-    let mut visited = vec![vec![false; width]; height];
+    let mut visited = vec![false; width * height];
     let mut path = Vec::new();
 
-    visited[start.0][start.1] = true;
+    visited[start.0 * width + start.1] = true;
     path.push((start.0, start.1, -1i32));
     queue.push_back(0);
 
@@ -241,8 +243,8 @@ fn bfs(m: &Maze, start: (usize, usize), target: (usize, usize)) -> Vec<(usize, u
                 return result;
             }
 
-            if walkable(m.get_cell(ny, nx).kind) && !visited[ny][nx] {
-                visited[ny][nx] = true;
+            if walkable(m.get_cell(ny, nx).kind) && !visited[ny * width + nx] {
+                visited[ny * width + nx] = true;
                 path.push((ny, nx, path_id as i32));
                 queue.push_back(path.len() - 1);
             }
@@ -318,7 +320,7 @@ fn astar(m: &Maze, start: (usize, usize), target: (usize, usize)) -> Vec<(usize,
     Vec::new()
 }
 fn main() {
-    let a: Vec<String> = std::env::args().collect();
+    let a: Vec<String> = text_support::arguments(&["w", "h"], true);
     let task = &a[1];
     let width: usize = a[2].parse().unwrap();
     let height: usize = a[3].parse().unwrap();
@@ -352,5 +354,5 @@ fn main() {
         let (y, x) = path[path.len() / 2];
         (x * y) as u32
     };
-    println!("{}", checksum.wrapping_add(final_part));
+    text_support::output(checksum.wrapping_add(final_part));
 }

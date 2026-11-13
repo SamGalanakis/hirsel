@@ -1,0 +1,266 @@
+// kostya/LangArena3c9f84d benchmarks/compress.rs. Same codecs and checked storage.
+fn push[T](mut xs:List[T],take x:T)->Result[(),helper.Error] {
+    match list.push(mut xs,take x) {Ok(())=>Ok(()),Error((c,_))=>Error(Capacity(c))}
+}
+fn test_data(n:u64)->Result[Bytes,helper.Error] {
+    let pattern=string.as_bytes("ABRACADABRA")
+    let mut b:Bytes=helper.mem(list.with_capacity(n))?
+    for i in 0 .. n {push(mut b,pattern[i%11])?}
+    Ok(take b)
+}
+type Bwt { transformed:Bytes, original:i32 }
+fn bwt_encode(input:Bytes)->Result[Bwt,helper.Error] {
+    let n=list.len(input)
+    if n==0 {return Ok(Bwt(transformed:list.new(),original:0))}
+    let mut sa:List[u64]=list.new()
+    helper.mem(list.fill(mut sa,n,0u64))?
+    let mut counts:Inline[u64,256]=[0;256]
+    for byte in input {counts[int.widen(byte)]+=1}
+    let mut positions:Inline[u64,256]=[0;256]
+    let mut total:u64=0
+    for i in 0u64 .. 256u64 {positions[i]=total;total+=counts[i]}
+    let mut temp:Inline[u64,256]=[0;256]
+    for i in 0 .. n {
+        let byte:u64=int.widen(input[i])
+        sa[positions[byte]+temp[byte]]=i
+        temp[byte]+=1
+    }
+    if n>1 {
+        let mut rank:List[u64]=list.new()
+        helper.mem(list.fill(mut rank,n,0u64))?
+        let mut current:u64=0
+        let mut previous=input[sa[0]]
+        for index in sa {
+            if input[index]!=previous {current+=1;previous=input[index]}
+            rank[index]=current
+        }
+        let mut k:u64=1
+        while k<n {
+            let mut pairs:List[(u64,u64)]=helper.mem(list.with_capacity(n))?
+            for i in 0 .. n {push(mut pairs,(rank[i],rank[(i+k)%n]))?}
+            helper.mem(list.sort_stable(mut sa,fn(a:u64,b:u64)->Order {std.order.compare(pairs[a],pairs[b])}))?
+            let mut next_rank:List[u64]=list.new()
+            helper.mem(list.fill(mut next_rank,n,0u64))?
+            for i in 1 .. n {
+                let prev=sa[i-1]
+                let curr=sa[i]
+                next_rank[curr]=next_rank[prev]+if pairs[prev]==pairs[curr] {0u64} else {1u64}
+            }
+            rank=take next_rank
+            k<<=1
+        }
+    }
+    let mut transformed:Bytes=list.new()
+    helper.mem(list.fill(mut transformed,n,0u8))?
+    let mut original:i32=0
+    for i in 0 .. n {
+        let suffix=sa[i]
+        if suffix==0 {transformed[i]=input[n-1];original=int.narrow(i)}
+        else {transformed[i]=input[suffix-1]}
+    }
+    Ok(Bwt(transformed:take transformed,original:original))
+}
+fn bwt_decode(encoded:Bwt)->Result[Bytes,helper.Error] {
+    let b=view encoded.transformed
+    let n=list.len(b)
+    if n==0 {return Ok(list.new())}
+    let mut counts:Inline[i32,256]=[0;256]
+    for byte in b {counts[int.widen(byte)]+=1}
+    let mut positions:Inline[i32,256]=[0;256]
+    let mut total:i32=0
+    for i in 0u64 .. 256u64 {positions[i]=total;total+=counts[i]}
+    let mut next:List[u64]=list.new()
+    helper.mem(list.fill(mut next,n,0u64))?
+    let mut temp:Inline[i32,256]=[0;256]
+    for i in 0 .. n {
+        let byte:u64=int.widen(b[i])
+        let pos:u64=int.narrow(positions[byte]+temp[byte])
+        next[pos]=i
+        temp[byte]+=1
+    }
+    let mut output:Bytes=list.new()
+    helper.mem(list.fill(mut output,n,0u8))?
+    let mut index:u64=int.narrow(encoded.original)
+    for i in 0 .. n {index=next[index];output[i]=b[index]}
+    Ok(take output)
+}
+fn lzw_encode(input:Bytes)->Result[Bytes,helper.Error] {
+    let n=list.len(input)
+    if n==0 {return Ok(list.new())}
+    let mut dict:Map[Bytes,u32]=map.new()
+    for i in 0u32 .. 256u32 {
+        let mut key:Bytes=list.new()
+        push(mut key,int.narrow(i))?
+        match map.insert(mut dict,take key,i) {Ok(())=>{},Error((c,_,_))=>return Error(Capacity(c))}
+    }
+    let mut next_code:u32=256
+    let mut output:Bytes=helper.mem(list.with_capacity(n*2))?
+    let mut current:Bytes=list.new()
+    push(mut current,input[0])?
+    for i in 1 .. n {
+        let byte=input[i]
+        push(mut current,byte)?
+        if !map.contains(dict,current) {
+            let code:u32={
+                let prefix=list.slice(current,0,list.len(current)-1)
+                match map.get(dict,prefix) {Some(c)=>c,None=>return Error(Config)}
+            }
+            push(mut output,int.narrow((code>>8u32)&255u32))?
+            push(mut output,int.narrow(code&255u32))?
+            match map.insert(mut dict,take current,next_code) {Ok(())=>{},Error((c,_,_))=>return Error(Capacity(c))}
+            next_code+=1
+            current=list.new()
+            push(mut current,byte)?
+        }
+    }
+    let code:u32=match map.get(dict,current) {Some(c)=>c,None=>return Error(Config)}
+    push(mut output,int.narrow((code>>8u32)&255u32))?
+    push(mut output,int.narrow(code&255u32))?
+    Ok(take output)
+}
+
+type Arith { data:Bytes, frequencies:List[i32] }
+type Table { low:List[i32], high:List[i32], total:i32 }
+type Bits { buffer:u8, pos:u8, output_data:Bytes, written:i32 }
+fn table(frequencies:List[i32])->Result[Table,helper.Error] {
+    let mut low:List[i32]=list.new()
+    let mut high:List[i32]=list.new()
+    helper.mem(list.fill(mut low,256,0i32))?
+    helper.mem(list.fill(mut high,256,0i32))?
+    let mut total:i32=0
+    for i in 0u64 .. 256u64 {low[i]=total;total+=frequencies[i];high[i]=total}
+    Ok(Table(low:take low,high:take high,total:total))
+}
+fn write_bit(mut out:Bits,bit:u8)->Result[(),helper.Error] {
+    out.buffer=(out.buffer<<1u8)|(bit&1u8)
+    out.pos+=1
+    out.written+=1
+    if out.pos==8 {push(mut out.output_data,out.buffer)?;out.buffer=0;out.pos=0}
+    Ok(())
+}
+fn arith_encode(input:Bytes)->Result[Arith,helper.Error] {
+    let mut frequencies:List[i32]=list.new()
+    helper.mem(list.fill(mut frequencies,256,0i32))?
+    for byte in input {frequencies[int.widen(byte)]+=1}
+    let t=table(frequencies)?
+    let mut low:u64=0
+    let mut high:u64=4294967295
+    let mut pending:u64=0
+    let mut output=Bits(buffer:0,pos:0,output_data:list.new(),written:0)
+    let total:u64=int.narrow(t.total)
+    for byte in input {
+        let index:u64=int.widen(byte)
+        let range=high-low+1
+        let hi:u64=int.narrow(t.high[index])
+        let lo:u64=int.narrow(t.low[index])
+        high=low+range*hi/total-1
+        low=low+range*lo/total
+        loop {
+            if high<2147483648 {
+                write_bit(mut output,0)?
+                for _ in 0 .. pending {write_bit(mut output,1)?}
+                pending=0
+            } else if low>=2147483648 {
+                write_bit(mut output,1)?
+                for _ in 0 .. pending {write_bit(mut output,0)?}
+                pending=0
+                low-=2147483648
+                high-=2147483648
+            } else if low>=1073741824 && high<3221225472 {
+                pending+=1
+                low-=1073741824
+                high-=1073741824
+            } else {break}
+            low<<=1
+            high=((high<<1u64)|1u64)&4294967295u64
+        }
+    }
+    pending+=1
+    if low<1073741824 {
+        write_bit(mut output,0)?
+        for _ in 0 .. pending {write_bit(mut output,1)?}
+    } else {
+        write_bit(mut output,1)?
+        for _ in 0 .. pending {write_bit(mut output,0)?}
+    }
+    if output.pos>0 {
+        output.buffer<<=8u8-output.pos
+        push(mut output.output_data,output.buffer)?
+    }
+    let payload=replace(mut output.output_data,list.new())
+    Ok(Arith(data:take payload,frequencies:take frequencies))
+}
+fn read_bit(data:Bytes,mut position:u64)->u64 {
+    let byte=position/8
+    let shift:u8=int.narrow(7-position%8)
+    let b:u8=if byte<list.len(data) {data[byte]} else {0}
+    position+=1
+    int.widen((b>>shift)&1u8)
+}
+fn arith_decode(encoded:Arith)->Result[Bytes,helper.Error] {
+    let t=table(encoded.frequencies)?
+    let total:u64=int.narrow(t.total)
+    let mut output:Bytes=list.new()
+    helper.mem(list.fill(mut output,total,0u8))?
+    let mut position:u64=0
+    let mut value:u64=0
+    for _ in 0u64 .. 32u64 {value=(value<<1u64)|read_bit(encoded.data,mut position)}
+    let mut low:u64=0
+    let mut high:u64=4294967295
+    for j in 0 .. total {
+        let range=high-low+1
+        let scaled=((value-low+1)*total-1)/range
+        let mut left:u64=0
+        let mut right:u64=256
+        while left<right {
+            let middle=left+(right-left)/2
+            let hi:u64=int.narrow(t.high[middle])
+            if hi<=scaled {left=middle+1} else {right=middle}
+        }
+        let symbol=left
+        output[j]=int.narrow(symbol)
+        let hi:u64=int.narrow(t.high[symbol])
+        let lo:u64=int.narrow(t.low[symbol])
+        high=low+range*hi/total-1
+        low=low+range*lo/total
+        loop {
+            if high>=2147483648 && low<2147483648 && (low<1073741824 || high>=3221225472) {break}
+            if high<2147483648 {}
+            else if low>=2147483648 {value-=2147483648;low-=2147483648;high-=2147483648}
+            else if low>=1073741824 && high<3221225472 {value-=1073741824;low-=1073741824;high-=1073741824}
+            low<<=1
+            high=(high<<1u64)|1u64
+            value=(value<<1u64)|read_bit(encoded.data,mut position)
+        }
+    }
+    Ok(take output)
+}
+
+pub fn dispatch(config:String,name:String,warmup:u64,iterations:u64)->Result[u32,helper.Error] {
+    if name!="Compress::BWTEncode" && name!="Compress::BWTDecode" && name!="Compress::LZWEncode" && name!="Compress::LZWDecode" && name!="Compress::ArithEncode" && name!="Compress::ArithDecode" {return Error(UnknownTask)}
+    let size=helper.config_i64(config,name,"size")?
+    if size<0 {return Error(Config)}
+    let input=test_data(int.narrow(size))?
+    let mut bwt=Bwt(transformed:list.new(),original:0)
+    let mut encoded:Bytes=list.new()
+    if name=="Compress::BWTDecode" {bwt=bwt_encode(input)?}
+    if name=="Compress::LZWDecode" {encoded=lzw_encode(input)?}
+    let mut arith=Arith(data:list.new(),frequencies:list.new())
+    if name=="Compress::ArithDecode" {arith=arith_encode(input)?}
+    let mut decoded:Bytes=list.new()
+    let mut checksum:u32=0
+    for _ in 0 .. warmup+iterations {
+        let n:u64=if name=="Compress::BWTEncode" {bwt=bwt_encode(input)?;list.len(bwt.transformed)}
+        else if name=="Compress::BWTDecode" {decoded=bwt_decode(bwt)?;list.len(decoded)}
+        else if name=="Compress::LZWEncode" {encoded=lzw_encode(input)?;list.len(encoded)}
+        else if name=="Compress::LZWDecode" {return Error(Config)} // blocked: core clone, owner895
+        else if name=="Compress::ArithEncode" {arith=arith_encode(input)?;list.len(arith.data)}
+        else {decoded=arith_decode(arith)?;list.len(decoded)}
+        checksum=int.wrapping_add(checksum,int.narrow(n))
+    }
+    if (name=="Compress::BWTDecode" || name=="Compress::LZWDecode" || name=="Compress::ArithDecode") && decoded==input {checksum=int.wrapping_add(checksum,100000u32)}
+    Ok(checksum)
+}
+pub fn main(out:Stdout,d:Dir,argv:Args)->Result[(),Exit] waits {
+    harness.main(out,d,argv,fn(c:String,n:String,w:u64,i:u64)->Result[u32,helper.Error] {dispatch(c,n,w,i)})
+}

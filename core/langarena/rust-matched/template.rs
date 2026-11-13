@@ -2,6 +2,7 @@
 // Matched twin of template.hirsel. Reviewed below.
 // Source: kostya/LangArena 3c9f84d benchmarks/template.rs:49-216.
 // Same owned String keys/values, hash lookup, ASCII fixture and hand matcher.
+mod text_support;
 use std::collections::HashMap;
 fn render(source: &str, vars: &HashMap<String, String>, regex: bool) -> String {
     let b = source.as_bytes();
@@ -32,7 +33,7 @@ fn render(source: &str, vars: &HashMap<String, String>, regex: bool) -> String {
     out
 }
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let args: Vec<String> = text_support::arguments(&["count"], true);
     let task = &args[1];
     assert!(task == "Template::Parse" || task == "Template::Regex");
     let count: u64 = args[2].parse().unwrap();
@@ -74,5 +75,5 @@ fn main() {
     let hash = rendered.bytes().fold(5381u32, |h, b| {
         (h << 5).wrapping_add(h).wrapping_add(u32::from(b))
     });
-    println!("{}", checksum.wrapping_add(hash));
+    text_support::output(checksum.wrapping_add(hash));
 }

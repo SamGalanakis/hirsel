@@ -1,0 +1,176 @@
+// kostya/LangArena3c9f84d benchmarks/log_parser.rs:12-149.
+// Hand matchers preserve the 13 regexes' leftmost non-overlapping search order.
+fn lower(b:u8)->u8 {if b>=b'A' && b<=b'Z' {b+32} else {b}}
+fn prefix(b:Bytes,i:u64,s:String,fold:bool)->bool {
+    let p=string.as_bytes(s)
+    if list.len(p)>list.len(b)-i {return false}
+    for k in 0 .. list.len(p) {
+        if (if fold {lower(b[i+k])} else {b[i+k]})!=p[k] {return false}
+    }
+    true
+}
+fn digit(b:u8)->bool {b>=b'0' && b<=b'9'}
+fn alpha(b:u8)->bool {let c=lower(b);c>=b'a' && c<=b'z'}
+fn word(b:u8)->bool {alpha(b) || digit(b) || b==b'_'}
+fn digits(b:Bytes,start:u64)->u64 {let mut i=start;while i<list.len(b) && digit(b[i]) {i+=1};i}
+fn blank(b:u8)->bool {b==b' ' || b>=9 && b<=13}
+fn value_end(b:Bytes,start:u64)->u64 {let mut i=start;while i<list.len(b) && b[i]!=b'&' && b[i]!=b'"' && !blank(b[i]) {i+=1};i}
+fn email_local(b:u8)->bool {alpha(b) || digit(b) || b==b'.' || b==b'_' || b==b'%' || b==b'+' || b==b'-'}
+fn email_domain(b:u8)->bool {alpha(b) || digit(b) || b==b'.' || b==b'-'}
+fn matched(b:Bytes,i:u64,pattern:u64)->Option[u64] {
+    let n=list.len(b)
+    if pattern==0 {
+        if i+5<=n && b[i]==b' ' && (b[i+1]==b'4' || b[i+1]==b'5') && digit(b[i+2]) && digit(b[i+3]) && b[i+4]==b' ' {return Some(i+5)}
+    } else if pattern==1 {
+        let alternatives:Inline[String,7]=["bot","crawler","scanner","spider","indexing","crawl","robot"]
+        for s in alternatives {if prefix(b,i,s,true) {return Some(i+string.byte_len(s))}}
+    } else if pattern==2 {
+        let alternatives:Inline[String,3]=["etc/passwd","wp-admin","../"]
+        for s in alternatives {if prefix(b,i,s,true) {return Some(i+string.byte_len(s))}}
+    } else if pattern==3 {
+        let mut pos=i
+        for _ in 0u64 .. 3u64 {
+            let end=digits(b,pos)
+            if end==pos || end>=n || b[end]!=b'.' {return None}
+            pos=end+1
+        }
+        if prefix(b,pos,"35",false) {return Some(pos+2)}
+    } else if pattern==4 {
+        if prefix(b,i,"/api/",false) {
+            let mut j=i+5
+            while j<n && b[j]!=b' ' && b[j]!=b'"' {j+=1}
+            if j>i+5 {return Some(j)}
+        }
+    } else if pattern==5 {
+        if prefix(b,i,"POST ",false) {
+            let mut j=i+5
+            while j<n && b[j]!=b' ' {j+=1}
+            if prefix(b,j," HTTP",false) {return Some(j+5)}
+        }
+    } else if pattern==6 {
+        if prefix(b,i,"/login",true) {return Some(i+6)}
+        if prefix(b,i,"/signin",true) {return Some(i+7)}
+    } else if pattern==7 {
+        let alternatives:Inline[String,3]=["get","post","put"]
+        for s in alternatives {if prefix(b,i,s,true) {return Some(i+string.byte_len(s))}}
+    } else if pattern==8 {
+        let mut j=i
+        while j<n && email_local(b[j]) {j+=1}
+        if j==i || j>=n || b[j]!=b'@' {return None}
+        let domain=j+1
+        j=domain
+        while j<n && email_domain(b[j]) {j+=1}
+        let mut dot=j
+        while dot>domain {
+            dot-=1
+            if b[dot]==b'.' && dot>domain {
+                let mut end=dot+1
+                while end<n && alpha(b[end]) {end+=1}
+                if end>=dot+3 {return Some(end)}
+            }
+        }
+    } else if pattern==9 {
+        if prefix(b,i,"password=",false) {let end=value_end(b,i+9);if end>i+9 {return Some(end)}}
+    } else if pattern==10 {
+        let alternatives:Inline[String,4]=["token=","apikey=","api_key=","api-key="]
+        for s in alternatives {if prefix(b,i,s,false) {let start=i+string.byte_len(s);let end=value_end(b,start);if end>start {return Some(end)}}}
+    } else if pattern==11 {
+        let alternatives:Inline[String,3]=["sessionid=","session_id=","session-id="]
+        for s in alternatives {if prefix(b,i,s,false) {let start=i+string.byte_len(s);let end=value_end(b,start);if end>start {return Some(end)}}}
+    } else if pattern==12 {
+        if b[i]!=b'[' {return None}
+        let mut j=digits(b,i+1)
+        if j==i+1 || j>=n || b[j]!=b'/' {return None}
+        let start=j+1
+        j=start
+        while j<n && word(b[j]) {j+=1}
+        if j==start || j>=n || b[j]!=b'/' {return None}
+        let year=j+1
+        j=digits(b,year)
+        if j==year || j+4>n || b[j]!=b':' || b[j+1]!=b'1' || b[j+2]<b'3' || b[j+2]>b'7' || b[j+3]!=b':' {return None}
+        let minute=j+4
+        j=digits(b,minute)
+        if j==minute || j>=n || b[j]!=b':' {return None}
+        let second=j+1
+        j=digits(b,second)
+        if j==second || j+2>n || b[j]!=b' ' || (b[j+1]!=b'+' && b[j+1]!=b'-') {return None}
+        let zone=j+2
+        j=digits(b,zone)
+        if j>zone && j<n && b[j]==b']' {return Some(j+1)}
+    }
+    None
+}
+fn scan(log:String)->Result[u32,helper.Error] {
+    let names:Inline[String,13]=["errors","bots","suspicious","ips","api_calls","post_requests","auth_attempts","methods","emails","passwords","tokens","sessions","peak_hours"]
+    let b=string.as_bytes(log)
+    let mut counts:Map[String,u64]=map.new()
+    for pattern in 0u64 .. 13u64 {
+        let key=helper.mem(string.from(names[pattern]))?
+        match map.insert(mut counts,take key,0u64) {Ok(())=>{},Error((c,_,_))=>return Error(Capacity(c))}
+        let mut i:u64=0
+        while i<list.len(b) {
+            if let Some(end)=matched(b,i,pattern) {
+                let _=map.update(mut counts,names[pattern],fn(mut count:u64) {count+=1})
+                i=end
+            } else {i+=1}
+        }
+    }
+    let mut total:u64=0
+    for (_,count) in counts {total+=count}
+    Ok(int.truncate(total))
+}
+fn generate(count:u64)->Result[String,helper.Error] {
+    let methods:Inline[String,4]=["GET","POST","PUT","DELETE"]
+    let paths:Inline[String,6]=["/index.html","/api/users","/admin","/images/logo.png","/etc/passwd","/wp-admin/setup.php"]
+    let statuses:Inline[u64,11]=[200,201,301,302,400,401,403,404,500,502,503]
+    let agents:Inline[String,4]=["Mozilla/5.0","Googlebot/2.1","curl/7.68.0","scanner/2.0"]
+    let users:Inline[String,8]=["john","jane","alex","sarah","mike","anna","david","elena"]
+    let domains:Inline[String,6]=["example.com","gmail.com","yahoo.com","hotmail.com","company.org","mail.ru"]
+    let mut log=helper.mem(string.with_capacity(count*200))?
+    for i in 0 .. count {
+        helper.mem(string.push(mut log,"192.168.1."))?
+        helper.mem(string.push_u64(mut log,i%255+1))?
+        helper.mem(string.push(mut log," - - ["))?
+        helper.mem(string.push_u64(mut log,i%31))?
+        helper.mem(string.push(mut log,"/Oct/2023:"))?
+        helper.mem(string.push_u64(mut log,i%60))?
+        helper.mem(string.push(mut log,":55:36 +0000] \""))?
+        helper.mem(string.push(mut log,methods[i%4]))?
+        helper.mem(string.push(mut log," "))?
+        if i%3==0 {
+            helper.mem(string.push(mut log,"/login?email="))?
+            helper.mem(string.push(mut log,users[i%8]))?
+            helper.mem(string.push_u64(mut log,i%100))?
+            helper.mem(string.push(mut log,"@"))?
+            helper.mem(string.push(mut log,domains[i%6]))?
+            helper.mem(string.push(mut log,"&password=secret"))?
+            helper.mem(string.push_u64(mut log,i%10000))?
+        } else if i%5==0 {
+            helper.mem(string.push(mut log,"/api/data?token="))?
+            for _ in 0 .. i%3+1 {helper.mem(string.push(mut log,"abcdef123456"))?}
+        } else if i%7==0 {
+            helper.mem(string.push(mut log,"/user/profile?session_id=sess_"))?
+            helper.mem(string.push_uint(mut log,i*12345,16,0,'0'))?
+        } else {helper.mem(string.push(mut log,paths[i%6]))?}
+        helper.mem(string.push(mut log," HTTP/1.1\" "))?
+        helper.mem(string.push_u64(mut log,statuses[i%11]))?
+        helper.mem(string.push(mut log," 2326 \"http://"))?
+        helper.mem(string.push(mut log,domains[i%6]))?
+        helper.mem(string.push(mut log,"\" \""))?
+        helper.mem(string.push(mut log,agents[i%4]))?
+        helper.mem(string.push(mut log,"\"\n"))?
+    }
+    Ok(take log)
+}
+pub fn dispatch(config:String,name:String,warmup:u64,iterations:u64)->Result[u32,helper.Error] {
+    if name!="Etc::LogParser" {return Error(UnknownTask)}
+    let count=helper.config_i64(config,name,"lines_count")?
+    if count<0 {return Error(Config)}
+    let log=generate(int.narrow(count))?
+    let mut checksum:u32=0
+    for _ in 0 .. warmup+iterations {checksum=int.wrapping_add(checksum,scan(log)?)}
+    Ok(checksum)
+}
+pub fn main(out:Stdout,d:Dir,argv:Args)->Result[(),Exit] waits {
+    harness.main(out,d,argv,fn(c:String,n:String,w:u64,i:u64)->Result[u32,helper.Error] {dispatch(c,n,w,i)})
+}

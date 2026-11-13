@@ -22,15 +22,35 @@ fn row_pages(store: &Store, rows: &[Vec<u8>]) -> io::Result<ContentHash> {
     }
     array(store, &pages, 28)
 }
+// The private index codec is fixed-width little-endian bincode. Four words
+// have exactly the old 32-byte representation, with fewer serde visits.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct IndexHash([u64; 4]);
+impl From<ContentHash> for IndexHash {
+    fn from(hash: ContentHash) -> Self {
+        Self(std::array::from_fn(|i| {
+            u64::from_le_bytes(hash.0[i * 8..i * 8 + 8].try_into().unwrap())
+        }))
+    }
+}
+impl From<IndexHash> for ContentHash {
+    fn from(hash: IndexHash) -> Self {
+        let mut bytes = [0; 32];
+        for (chunk, word) in bytes.chunks_exact_mut(8).zip(hash.0) {
+            chunk.copy_from_slice(&word.to_le_bytes());
+        }
+        Self(bytes)
+    }
+}
 #[derive(Serialize, Deserialize)]
 enum Node {
-    Array(Box<[Option<ContentHash>; 16]>),
+    Array(Box<[Option<IndexHash>; 16]>),
     Names {
-        buckets: ContentHash,
+        buckets: IndexHash,
         mask: u32,
         salt: u32,
     },
-    Bucket(Vec<(ContentHash, u32)>),
+    Bucket(Vec<(IndexHash, u32)>),
 }
 fn array(store: &Store, entries: &[(u32, ContentHash)], shift: u32) -> io::Result<ContentHash> {
     let mut children = [None; 16];
@@ -48,7 +68,9 @@ fn array(store: &Store, entries: &[(u32, ContentHash)], shift: u32) -> io::Resul
             });
         }
     }
-    store.put(&encode(&Node::Array(Box::new(children)))?)
+    store.put(&encode(&Node::Array(Box::new(
+        children.map(|h| h.map(IndexHash::from)),
+    )))?)
 }
 fn bucket_index(key: ContentHash, mask: u32, salt: u32) -> u32 {
     let hash = if salt == 0 {
@@ -76,12 +98,17 @@ fn names(store: &Store, entries: &[(ContentHash, u32)]) -> io::Result<ContentHas
             let mut rows = vec![];
             for (i, group) in groups.into_iter().enumerate() {
                 if !group.is_empty() {
-                    rows.push((i as u32, store.put(&encode(&Node::Bucket(group))?)?));
+                    rows.push((
+                        i as u32,
+                        store.put(&encode(&Node::Bucket(
+                            group.into_iter().map(|(h, i)| (h.into(), i)).collect(),
+                        ))?)?,
+                    ));
                 }
             }
             let buckets = array(store, &rows, 28)?;
             return store.put(&encode(&Node::Names {
-                buckets,
+                buckets: buckets.into(),
                 mask,
                 salt,
             })?);
@@ -133,7 +160,7 @@ impl DiskIndex {
             let Some(next) = children[((index >> shift) & 15) as usize] else {
                 return Ok(None);
             };
-            root = next;
+            root = next.into();
         }
         Ok(Some(root))
     }
@@ -185,16 +212,17 @@ impl Source for DiskIndex {
         else {
             return Err(miss());
         };
-        let Some(hash) = self.at(*buckets, bucket_index(key, *mask, *salt))? else {
+        let Some(hash) = self.at((*buckets).into(), bucket_index(key, *mask, *salt))? else {
             return Ok(None);
         };
         let bucket = self.node(hash)?;
         let Node::Bucket(rows) = bucket.as_ref() else {
             return Err(miss());
         };
+        let needle = IndexHash::from(key);
         Ok(rows
             .iter()
-            .find(|&&(k, _)| k == key)
+            .find(|&&(k, _)| k == needle)
             .map(|&(_, value)| value))
     }
 }
@@ -271,6 +299,50 @@ impl Publisher for Writer<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn index_digest_words_preserve_the_existing_fixed_bytes() {
+        let hash = ContentHash(std::array::from_fn(|i| i as u8));
+        assert_eq!(encode(&IndexHash::from(hash)).unwrap(), hash.0);
+        let children = std::array::from_fn(|i| {
+            if i % 3 == 0 {
+                Some(IndexHash::from(hash))
+            } else {
+                None
+            }
+        });
+        let node = Node::Array(Box::new(children));
+        // Old enum tag 0, u8 Option tags, then exactly 32 digest bytes.
+        let mut expected = 0u32.to_le_bytes().to_vec();
+        for i in 0..16 {
+            expected.push(u8::from(i % 3 == 0));
+            if i % 3 == 0 {
+                expected.extend_from_slice(&hash.0);
+            }
+        }
+        assert_eq!(encode(&node).unwrap(), expected);
+        let names = Node::Names {
+            buckets: hash.into(),
+            mask: 7,
+            salt: 11,
+        };
+        let mut names_bytes = 1u32.to_le_bytes().to_vec();
+        names_bytes.extend_from_slice(&hash.0);
+        names_bytes.extend_from_slice(&7u32.to_le_bytes());
+        names_bytes.extend_from_slice(&11u32.to_le_bytes());
+        assert_eq!(encode(&names).unwrap(), names_bytes);
+        let bucket = Node::Bucket(vec![(hash.into(), 7)]);
+        let mut bucket_bytes = 2u32.to_le_bytes().to_vec();
+        bucket_bytes.extend_from_slice(&1u64.to_le_bytes());
+        bucket_bytes.extend_from_slice(&hash.0);
+        bucket_bytes.extend_from_slice(&7u32.to_le_bytes());
+        assert_eq!(encode(&bucket).unwrap(), bucket_bytes);
+        let Node::Array(decoded) = decode::<Node>(&expected).unwrap() else {
+            panic!("array")
+        };
+        for (i, row) in decoded.iter().enumerate() {
+            assert_eq!(row.map(ContentHash::from), (i % 3 == 0).then_some(hash));
+        }
+    }
     #[test]
     fn malformed_record_page_offsets_are_external_cache_misses() {
         let dir = tempfile::tempdir().unwrap();

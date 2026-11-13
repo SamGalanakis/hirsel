@@ -16,80 +16,80 @@
     },
     "product": {
       "measurement": "One ordinary release check/lower request per M1 entry, core and exact supplied std subset preproduced; fresh private request stores; perf instructions:u including GNU time and process exit. Fixed is empty main with std or core only. Marginal is (process-fixed std)/own checked source lines, excluding prechecked library source lines. Instances are collected after this boundary and reported separately.",
-      "fixed_std_instructions": 5868100,
-      "fixed_core_instructions": 5186900,
+      "fixed_std_instructions": 5257900,
+      "fixed_core_instructions": 4658700,
       "entries": {
         "bfs-idiomatic": {
           "own_lines": 373,
-          "marginal_per_line": 110400
+          "marginal_per_line": 106600
         },
         "bfs-matched": {
           "own_lines": 373,
-          "marginal_per_line": 110400
+          "marginal_per_line": 106600
         },
         "generics-idiomatic": {
           "own_lines": 346,
-          "marginal_per_line": 123600
+          "marginal_per_line": 119400
         },
         "generics-matched": {
           "own_lines": 346,
-          "marginal_per_line": 123600
+          "marginal_per_line": 119400
         },
         "lru-idiomatic": {
           "own_lines": 496,
-          "marginal_per_line": 105900
+          "marginal_per_line": 102800
         },
         "lru-matched": {
           "own_lines": 496,
-          "marginal_per_line": 105900
+          "marginal_per_line": 102800
         },
         "files-idiomatic": {
           "own_lines": 351,
-          "marginal_per_line": 133600
+          "marginal_per_line": 129300
         },
         "files-matched": {
           "own_lines": 351,
-          "marginal_per_line": 133500
+          "marginal_per_line": 129200
         },
         "json-idiomatic": {
           "own_lines": 743,
-          "marginal_per_line": 90700
+          "marginal_per_line": 88400
         },
         "json-matched": {
           "own_lines": 743,
-          "marginal_per_line": 90700
+          "marginal_per_line": 88400
         },
         "pipeline-idiomatic": {
           "own_lines": 848,
-          "marginal_per_line": 100500
+          "marginal_per_line": 98900
         },
         "pipeline-matched": {
           "own_lines": 848,
-          "marginal_per_line": 100500
+          "marginal_per_line": 98900
         },
         "request-scratch-idiomatic": {
           "own_lines": 407,
-          "marginal_per_line": 117100
+          "marginal_per_line": 113500
         },
         "request-scratch-matched": {
           "own_lines": 407,
-          "marginal_per_line": 117100
+          "marginal_per_line": 113500
         },
         "rope-idiomatic": {
           "own_lines": 490,
-          "marginal_per_line": 110200
+          "marginal_per_line": 107000
         },
         "rope-matched": {
           "own_lines": 490,
-          "marginal_per_line": 110200
+          "marginal_per_line": 107000
         },
         "versions-idiomatic": {
           "own_lines": 449,
-          "marginal_per_line": 108300
+          "marginal_per_line": 105100
         },
         "versions-matched": {
           "own_lines": 449,
-          "marginal_per_line": 108300
+          "marginal_per_line": 105100
         }
       }
     }
@@ -1457,6 +1457,140 @@
           "check_lower_per_line": 16598.084800866975,
           "whole_request_per_line": 34899.77079382281,
           "whole_process_per_line": 35120.66188024925
+        }
+      }
+    },
+    {
+      "to_revision": "0807f51f9cce734fb21e6153192b1b9389e6e5b6",
+      "reason": "Decode private fixed-width index digests as four words instead of32byte visits, preserving exact stored bytes. Native fixed and marginal savings; no completed-body change. Only lower ceilings;60K unchanged.",
+      "margin": "observation+2%,rounded up to100; ceilings only decrease",
+      "previous_ceilings": {
+        "m1": {
+          "code_lines": 7059,
+          "check_lower_per_line": 25000,
+          "whole_request_per_line": 46300,
+          "whole_process_per_line": 46400
+        },
+        "std": {
+          "code_lines": 3668,
+          "check_lower_per_line": 16600,
+          "whole_request_per_line": 35600,
+          "whole_process_per_line": 35900
+        },
+        "product": {
+          "measurement": "One ordinary release check/lower request per M1 entry, core and exact supplied std subset preproduced; fresh private request stores; perf instructions:u including GNU time and process exit. Fixed is empty main with std or core only. Marginal is (process-fixed std)/own checked source lines, excluding prechecked library source lines. Instances are collected after this boundary and reported separately.",
+          "fixed_std_instructions": 5868100,
+          "fixed_core_instructions": 5186900,
+          "entries": {
+            "bfs-idiomatic": {
+              "own_lines": 373,
+              "marginal_per_line": 110400
+            },
+            "bfs-matched": {
+              "own_lines": 373,
+              "marginal_per_line": 110400
+            },
+            "generics-idiomatic": {
+              "own_lines": 346,
+              "marginal_per_line": 123600
+            },
+            "generics-matched": {
+              "own_lines": 346,
+              "marginal_per_line": 123600
+            },
+            "lru-idiomatic": {
+              "own_lines": 496,
+              "marginal_per_line": 105900
+            },
+            "lru-matched": {
+              "own_lines": 496,
+              "marginal_per_line": 105900
+            },
+            "files-idiomatic": {
+              "own_lines": 351,
+              "marginal_per_line": 133600
+            },
+            "files-matched": {
+              "own_lines": 351,
+              "marginal_per_line": 133500
+            },
+            "json-idiomatic": {
+              "own_lines": 743,
+              "marginal_per_line": 90700
+            },
+            "json-matched": {
+              "own_lines": 743,
+              "marginal_per_line": 90700
+            },
+            "pipeline-idiomatic": {
+              "own_lines": 848,
+              "marginal_per_line": 100500
+            },
+            "pipeline-matched": {
+              "own_lines": 848,
+              "marginal_per_line": 100500
+            },
+            "request-scratch-idiomatic": {
+              "own_lines": 407,
+              "marginal_per_line": 117100
+            },
+            "request-scratch-matched": {
+              "own_lines": 407,
+              "marginal_per_line": 117100
+            },
+            "rope-idiomatic": {
+              "own_lines": 490,
+              "marginal_per_line": 110200
+            },
+            "rope-matched": {
+              "own_lines": 490,
+              "marginal_per_line": 110200
+            },
+            "versions-idiomatic": {
+              "own_lines": 449,
+              "marginal_per_line": 108300
+            },
+            "versions-matched": {
+              "own_lines": 449,
+              "marginal_per_line": 108300
+            }
+          }
+        }
+      },
+      "product_fixed": {
+        "std": 5154794,
+        "core": 4567290
+      },
+      "product_marginal_per_line": {
+        "bfs-idiomatic": 104427.50670241287,
+        "bfs-matched": 104435.5871313673,
+        "generics-idiomatic": 116965.30346820809,
+        "generics-matched": 116968.67341040462,
+        "lru-idiomatic": 100778.77217741935,
+        "lru-matched": 100773.5745967742,
+        "files-idiomatic": 126669.7207977208,
+        "files-matched": 126638.07122507122,
+        "json-idiomatic": 86654.85598923283,
+        "json-matched": 86655.05114401077,
+        "pipeline-idiomatic": 96873.05188679245,
+        "pipeline-matched": 96876.82075471699,
+        "request-scratch-idiomatic": 111190.05405405405,
+        "request-scratch-matched": 111185.61916461916,
+        "rope-idiomatic": 104852.24489795919,
+        "rope-matched": 104848.36530612245,
+        "versions-idiomatic": 102950.24053452116,
+        "versions-matched": 102945.27394209354
+      },
+      "measured_per_line": {
+        "m1": {
+          "check_lower_per_line": 25841.569009314142,
+          "whole_request_per_line": 46670.11049957663,
+          "whole_process_per_line": 46769.77603725656
+        },
+        "std": {
+          "check_lower_per_line": 16677.740730717185,
+          "whole_request_per_line": 35058.73396481732,
+          "whole_process_per_line": 35279.808660351824
         }
       }
     }

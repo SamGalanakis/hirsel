@@ -197,7 +197,9 @@ unsafe fn echo(ctx: *mut Context, index: u64) -> (u64, u64) {
         } else {
             assert_eq!((*arg).capacity, 0);
             assert_eq!(arg, hirsel_core_args_get(ctx, 5, index));
-            hirsel_core_host_op(ctx, STDOUT, 3, arg.cast_mut(), 0, 123).written
+            let out = hirsel_core_host_op(ctx, STDOUT, 3, arg.cast_mut(), 0, 123);
+            assert_eq!((out.status, out.error), (0, IoError::OK));
+            out.written
         };
         (len, written)
     }
@@ -385,8 +387,14 @@ unsafe extern "C" fn entry(ctx: *mut Context, cfg: *const Config, _: *mut MainRe
                     2
                 );
                 assert_eq!(temp(ctx, state, 40), 0);
-                let _ = call(ctx, WALL_MS, 2, None, 0);
-                let _ = call(ctx, MONO_NS, 2, None, 0);
+                let wall = call(ctx, WALL_MS, 2, None, 0).value;
+                let mono = call(ctx, MONO_NS, 2, None, 0).value;
+                if (*state).os.is_some() {
+                    assert!(wall > 1_700_000_000_000);
+                    assert!(call(ctx, MONO_NS, 2, None, 0).value >= mono);
+                } else {
+                    assert_eq!((wall, mono), (37, 41));
+                }
                 let err = call(ctx, STDERR, 4, Some(&mut literal(b"error")), 0);
                 assert_eq!((err.error, err.written), (IoError::OK, 5));
                 0

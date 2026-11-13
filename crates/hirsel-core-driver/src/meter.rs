@@ -62,11 +62,16 @@ impl Meter {
             }
         });
         let instructions = value.zip(self.last).map(|(n, p)| n - p);
-        self.result.stages.push(Stage {
-            name,
-            instructions,
-            nanoseconds: now.duration_since(self.clock).as_nanos(),
-        });
+        if let Some(stage) = self.result.stages.iter_mut().find(|s| s.name == name) {
+            stage.instructions = stage.instructions.zip(instructions).map(|(a, b)| a + b);
+            stage.nanoseconds += now.duration_since(self.clock).as_nanos();
+        } else {
+            self.result.stages.push(Stage {
+                name,
+                instructions,
+                nanoseconds: now.duration_since(self.clock).as_nanos(),
+            });
+        }
         self.result.instructions = value.zip(self.first).map(|(n, f)| n - f);
         self.last = value;
         self.clock = now;

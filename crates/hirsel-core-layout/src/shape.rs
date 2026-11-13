@@ -3,7 +3,9 @@
 //! recipes once. Shapes name other types by `TypeRef`, an index into the same table.
 
 /// Index of a declared type in its module's type table.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+#[derive(
+    serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd,
+)]
 pub struct TypeRef(pub u32);
 impl TypeRef {
     pub const fn index(self) -> usize {
@@ -12,12 +14,14 @@ impl TypeRef {
 }
 
 /// Index of a function in the module's function table (finalizers, glue).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+#[derive(
+    serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd,
+)]
 pub struct FuncRef(pub u32);
 
 /// A scalar as the language sees it (SEM-1, SEM-2): its logical width is its
 /// written width; `bool` is 1 byte and `char` 4 (MEM-24).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Scalar {
     Bool,
     Char,
@@ -78,7 +82,7 @@ impl Scalar {
 
 /// The width `W` of a compact declaration (MEM-9): the blob cap is `2^W - 1`
 /// bytes and every stored length, extent, offset and link uses `W` bytes.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Width {
     U16,
     U32,
@@ -113,7 +117,7 @@ impl Width {
 /// A runtime-owned handle kind: an opaque pointer whose cleanup is a run-time call.
 /// Logical sizes per core's built-in types: a task handle, a capability, a
 /// `Causes` chain and a `HostFile` 8, a sender or receiver 24.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Handle {
     Task,
     Sender,
@@ -127,7 +131,7 @@ pub enum Handle {
     HostFile,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Repr {
     /// `type`: one owner, mutated in place, capacity-based (MEM-13).
     Own,
@@ -142,7 +146,7 @@ pub enum Repr {
 }
 
 /// The type of one field.
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum FieldTy {
     Scalar(Scalar),
     /// The declared type stored by value (own/stable/scoped) or inline (compact).
@@ -187,26 +191,26 @@ pub enum FieldTy {
     Locator,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Field {
     pub name: String,
     pub ty: FieldTy,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Case {
     pub name: String,
     pub fields: Vec<Field>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Body {
     Record(Vec<Field>),
     /// Cases in declaration order; the tag of case `i` is `i`.
     Variant(Vec<Case>),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Shape {
     pub name: String,
     pub repr: Repr,

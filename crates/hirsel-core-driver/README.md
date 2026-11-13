@@ -8,8 +8,12 @@ to a module in `app@1`; libraries map `core/core` and `core/std` to `core@1` and
 The serial request loads and hashes sources once, parses, builds the complete name
 index, resolves once, publishes declarations/layout recipes and checks/lowers each
 body once. Each body owns its CoreIR module and signature-only callee rows. Syntax,
-name/lookup rows, successful bodies and diagnostics are published in memory and in
-versioned, length- and digest-checked immutable disk records. The root commits last.
+name rows, successful bodies and diagnostics move into shared in-memory products.
+One buffered binary archive per request writes their borrowed tables once, including
+native CoreIR without text reconstruction. The stream is hashed once and committed
+by atomic rename before its root selection. Disk reads check version, length and digest.
+Resolver scratch is not retained or encoded; definition keys retain its observed
+lookup fingerprint and transitive signature reads. The root commits last.
 No old std products, old requests, TIR or independent checker enter this path.
 
 `--json` emits structured results; `--metrics <file>` records exclusive user-instruction

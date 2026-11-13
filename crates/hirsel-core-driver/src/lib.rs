@@ -11,7 +11,7 @@ pub use store::Store;
 
 use hirsel_core_front::{CoreCheck, Emitter, ModuleInput, Program};
 use hirsel_core_ids::{ContentHash, DefPath, PackageId};
-use hirsel_core_ir::{Module, text};
+use hirsel_core_ir::Module;
 use hirsel_core_resolve::{
     CorpusManifest, Definition, Environment, ModuleId, NameIndex, PackageManifest, Refusal,
     Resolution, Site, resolve,
@@ -22,6 +22,7 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use store::Record;
 
 #[cfg(test)]
 hirsel_guard::install!();
@@ -65,7 +66,6 @@ pub struct FileProduct {
     pub source: ContentHash,
     pub syntax: SyntaxFile,
     pub names: Vec<Definition>,
-    pub resolutions: Vec<Arc<Resolution>>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Incomplete {
@@ -79,11 +79,10 @@ pub struct DefinitionProduct {
     pub definition: DefPath,
     pub check: CoreCheck,
     pub ir: Module,
-    pub resolution: Arc<Resolution>,
+    pub resolved: bool,
     pub key: DefinitionKey,
     pub anchors: BTreeMap<(ModuleId, u32), DefPath>,
     pub incomplete: Vec<Incomplete>,
-    stored: std::sync::OnceLock<ContentHash>,
 }
 #[derive(Clone, Default)]
 pub struct CheckProduct {
@@ -118,7 +117,20 @@ pub struct Driver {
     store: Option<PathBuf>,
 }
 
-#[derive(Serialize, Deserialize)]
+// Borrow the native result tables for output. No cloned IR, resolver scratch or text.
+#[derive(Serialize)]
+struct DiskCheckRef<'a> {
+    anchors: &'a BTreeMap<(ModuleId, u32), DefPath>,
+    key: &'a DefinitionKey,
+    definition: &'a DefPath,
+    refusals: &'a [Refusal],
+    incomplete: &'a [Incomplete],
+    counts: [u64; 6],
+    function: Option<u32>,
+    ir: &'a Module,
+    resolved: bool,
+}
+#[derive(Deserialize)]
 struct DiskCheck {
     anchors: BTreeMap<(ModuleId, u32), DefPath>,
     key: DefinitionKey,
@@ -127,17 +139,68 @@ struct DiskCheck {
     incomplete: Vec<Incomplete>,
     counts: [u64; 6],
     function: Option<u32>,
-    ir: String,
-    resolution: Resolution,
+    ir: Module,
+    resolved: bool,
 }
 #[derive(Serialize, Deserialize)]
 struct Root {
     snapshot: ContentHash,
     bytes: usize,
-    files: Vec<ContentHash>,
-    definitions: Vec<(DefPath, ContentHash)>,
+    files: Vec<Record>,
+    definitions: BTreeMap<DefPath, Record>,
     diagnostics: Vec<Refusal>,
     incomplete: Vec<Incomplete>,
+}
+struct Cache {
+    bytes: Vec<u8>,
+    root: Root,
+}
+impl Cache {
+    fn open(store: &Store, hash: ContentHash) -> io::Result<Option<Self>> {
+        let Some(bytes) = store.get(hash)? else {
+            return Ok(None);
+        };
+        let Some(offset) = bytes.len().checked_sub(8) else {
+            return Ok(None);
+        };
+        let start = u64::from_le_bytes(bytes[offset..].try_into().unwrap());
+        let Some(len) = (offset as u64).checked_sub(start) else {
+            return Ok(None);
+        };
+        let Some(slice) = (Record { start, len }).bytes(&bytes) else {
+            return Ok(None);
+        };
+        let Some(root) = decode(slice) else {
+            return Ok(None);
+        };
+        Ok(Some(Self { bytes, root }))
+    }
+    fn definition(&self, path: &DefPath, key: &DefinitionKey) -> Option<DefinitionProduct> {
+        let disk: DiskCheck = decode(self.root.definitions.get(path)?.bytes(&self.bytes)?)?;
+        (disk.definition == *path && disk.key == *key).then(|| from_disk(disk))
+    }
+    fn product(&self, hash: ContentHash) -> Option<CheckProduct> {
+        let mut result = CheckProduct {
+            diagnostics: self.root.diagnostics.clone(),
+            incomplete: self.root.incomplete.clone(),
+            root: hash,
+            snapshot: self.root.snapshot,
+            bytes: self.root.bytes,
+            ..Default::default()
+        };
+        for &record in &self.root.files {
+            result
+                .files
+                .push(Arc::new(decode(record.bytes(&self.bytes)?)?));
+        }
+        for (path, &record) in &self.root.definitions {
+            result.definitions.insert(
+                path.clone(),
+                Arc::new(from_disk(decode(record.bytes(&self.bytes)?)?)),
+            );
+        }
+        Some(result)
+    }
 }
 
 impl Driver {
@@ -197,8 +260,14 @@ impl Driver {
             meter.finish("snapshot reuse");
             return Ok(reused);
         }
-        if let Some(root) = store.selection("check-root")?
-            && let Some(cached) = load_root(&store, root, result.snapshot)?
+        let prior_hash = store.selection("check-root")?;
+        let prior = prior_hash
+            .map(|hash| Cache::open(&store, hash))
+            .transpose()?
+            .flatten();
+        if let Some(prior) = &prior
+            && prior.root.snapshot == result.snapshot
+            && let Some(cached) = prior.product(prior_hash.unwrap())
         {
             let cached = Arc::new(cached);
             self.published = Some(Arc::clone(&cached));
@@ -316,7 +385,10 @@ impl Driver {
                 let cached = if resident.is_some() {
                     resident
                 } else {
-                    load_definition(&store, &fd.path, &key)?.map(Arc::new)
+                    prior
+                        .as_ref()
+                        .and_then(|p| p.definition(&fd.path, &key))
+                        .map(Arc::new)
                 };
                 let product = if let Some(product) = cached {
                     product
@@ -346,14 +418,13 @@ impl Driver {
                         definition: fd.path.clone(),
                         check,
                         ir: emitter.module,
-                        resolution,
+                        resolved: resolution.diagnostics.is_empty(),
                         key,
                         anchors,
                         incomplete,
-                        stored: std::sync::OnceLock::new(),
                     })
                 };
-                if product.resolution.diagnostics.is_empty() {
+                if product.resolved {
                     for r in &product.check.refusals {
                         let mut r = r.clone();
                         keys.bind_site(&product.anchors, &mut r.primary);
@@ -374,15 +445,10 @@ impl Driver {
         }
         meter.finish("check/lower");
         let mut names: BTreeMap<ModuleId, Vec<Definition>> = BTreeMap::new();
-        for d in index.definitions() {
-            names
-                .entry(d.site.module.clone())
-                .or_default()
-                .push(d.clone());
+        for d in index.into_definitions() {
+            names.entry(d.site.module.clone()).or_default().push(d);
         }
-        for ((m, rows), (_, path, _, _, source)) in
-            modules.into_iter().zip(resolutions).zip(sources)
-        {
+        for (m, (_, path, _, _, source)) in modules.into_iter().zip(sources) {
             let module_names = names.remove(&m.id).unwrap_or_default();
             result.files.push(Arc::new(FileProduct {
                 module: m.id,
@@ -390,49 +456,57 @@ impl Driver {
                 source,
                 syntax: m.syntax,
                 names: module_names,
-                resolutions: rows,
             }));
         }
-        let mut root = Root {
-            snapshot: result.snapshot,
-            bytes: result.bytes,
-            files: vec![],
-            definitions: vec![],
-            diagnostics: result.diagnostics.clone(),
-            incomplete: result.incomplete.clone(),
-        };
-        for f in &result.files {
-            root.files.push(store.put(&encode(f.as_ref())?)?);
-        }
-        for (path, d) in &result.definitions {
-            let stored = if same_store && let Some(&stored) = d.stored.get() {
-                stored
-            } else {
+        meter.finish("publish/assemble products");
+        result.root = store.archive(|writer| {
+            let mut files = Vec::with_capacity(result.files.len());
+            for file in &result.files {
+                files.push(writer.record(file.as_ref())?);
+            }
+            meter.finish("publish/file tables");
+            let mut definitions = BTreeMap::new();
+            for (path, d) in &result.definitions {
                 let c = d.check.counts;
-                let disk = DiskCheck {
-                    anchors: d.anchors.clone(),
-                    key: d.key.clone(),
-                    definition: path.clone(),
-                    refusals: d.check.refusals.clone(),
-                    incomplete: d.incomplete.clone(),
+                let disk = DiskCheckRef {
+                    anchors: &d.anchors,
+                    key: &d.key,
+                    definition: path,
+                    refusals: &d.check.refusals,
+                    incomplete: &d.incomplete,
                     counts: [c.nodes, c.uses, c.places, c.calls, c.types, c.bytes],
                     function: d.check.function.map(|f| f.0),
-                    ir: text::print(&d.ir),
-                    resolution: d.resolution.as_ref().clone(),
+                    ir: &d.ir,
+                    resolved: d.resolved,
                 };
-                let hash = store.put(&encode(&disk)?)?;
-                let _ = d.stored.set(hash);
-                hash
-            };
-            store.select(&definition_selection(path), stored)?;
-            root.definitions.push((path.clone(), stored));
-        }
-        result.root = store.put(&encode(&root)?)?;
+                definitions.insert(path.clone(), writer.record(&disk)?);
+            }
+            meter.finish("publish/definition tables");
+            // Root rows use borrowed diagnostics too. Footer owns only the offset index.
+            let footer = (
+                result.snapshot,
+                result.bytes,
+                files,
+                definitions,
+                &result.diagnostics,
+                &result.incomplete,
+            );
+            let record = writer.record(&footer)?;
+            use std::io::Write;
+            writer.write_all(&record.start.to_le_bytes())?;
+            meter.finish("publish/footer");
+            Ok(())
+        })?;
         store.publish_root(result.root)?;
         let result = Arc::new(result);
         self.published = Some(Arc::clone(&result));
         self.store = Some(request.store.clone());
-        meter.finish("publish");
+        meter.finish("publish/commit and Arc move");
+        drop(resolutions);
+        drop(keys);
+        drop(prior);
+        drop(request);
+        meter.finish("publish/scratch cleanup");
         Ok(result)
     }
 }
@@ -448,46 +522,15 @@ fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
         .deserialize(bytes)
         .ok()
 }
-fn definition_selection(path: &DefPath) -> String {
-    format!(
-        "definition-{}",
-        path.fingerprint()
-            .0
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>()
-    )
-}
-fn load_definition(
-    store: &Store,
-    path: &DefPath,
-    key: &DefinitionKey,
-) -> io::Result<Option<DefinitionProduct>> {
-    let Some(hash) = store.selection(&definition_selection(path))? else {
-        return Ok(None);
-    };
-    let Some(bytes) = store.get(hash)? else {
-        return Ok(None);
-    };
-    let Some(disk) = decode::<DiskCheck>(&bytes) else {
-        return Ok(None);
-    };
-    if disk.definition != *path || disk.key != *key {
-        return Ok(None);
-    }
-    Ok(from_disk(disk, hash))
-}
-fn from_disk(disk: DiskCheck, stored: ContentHash) -> Option<DefinitionProduct> {
-    let ir = text::parse(&disk.ir).ok()?;
+fn from_disk(disk: DiskCheck) -> DefinitionProduct {
     let [nodes, uses, places, calls, types, bytes] = disk.counts;
-    Some(DefinitionProduct {
+    DefinitionProduct {
         definition: disk.definition,
         anchors: disk.anchors,
         key: disk.key,
         incomplete: disk.incomplete,
-        stored: std::sync::OnceLock::from(stored),
-        resolution: Arc::new(disk.resolution),
-        ir,
+        resolved: disk.resolved,
+        ir: disk.ir,
         check: CoreCheck {
             refusals: disk.refusals,
             gaps: vec![],
@@ -501,50 +544,5 @@ fn from_disk(disk: DiskCheck, stored: ContentHash) -> Option<DefinitionProduct> 
                 bytes,
             },
         },
-    })
-}
-fn load_root(
-    store: &Store,
-    root: ContentHash,
-    snapshot: ContentHash,
-) -> io::Result<Option<CheckProduct>> {
-    let Some(bytes) = store.get(root)? else {
-        return Ok(None);
-    };
-    let Some(row) = decode::<Root>(&bytes) else {
-        return Ok(None);
-    };
-    if row.snapshot != snapshot {
-        return Ok(None);
     }
-    let mut result = CheckProduct {
-        diagnostics: row.diagnostics,
-        incomplete: row.incomplete,
-        root,
-        snapshot,
-        bytes: row.bytes,
-        ..Default::default()
-    };
-    for hash in row.files {
-        let Some(bytes) = store.get(hash)? else {
-            return Ok(None);
-        };
-        let Some(file) = decode::<FileProduct>(&bytes) else {
-            return Ok(None);
-        };
-        result.files.push(Arc::new(file));
-    }
-    for (path, hash) in row.definitions {
-        let Some(bytes) = store.get(hash)? else {
-            return Ok(None);
-        };
-        let Some(disk) = decode::<DiskCheck>(&bytes) else {
-            return Ok(None);
-        };
-        let Some(product) = from_disk(disk, hash) else {
-            return Ok(None);
-        };
-        result.definitions.insert(path, Arc::new(product));
-    }
-    Ok(Some(result))
 }

@@ -95,9 +95,11 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
     } else {
         i32::from(!product.diagnostics.is_empty())
     };
+    meter.finish("output/render");
     drop(product);
+    meter.finish("output/drop returned Arc");
     drop(driver);
-    meter.finish("output/cleanup");
+    meter.finish("output/drop resident products");
     if let Some(path) = metrics {
         std::fs::write(path, serde_json::to_vec_pretty(&meter.result)?)?;
     }

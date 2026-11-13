@@ -14,7 +14,7 @@ use std::marker::PhantomData;
 
 macro_rules! ids { ($($(#[$doc:meta])* $name:ident),* $(,)?) => {$(
     $(#[$doc])*
-    #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+    #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
     pub struct $name(pub u32);
     impl $name {
         pub const fn index(self) -> usize {
@@ -50,6 +50,8 @@ ids!(
 );
 
 /// A typed range in one of a body's pools (LIR `PoolRange`, unchanged).
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(bound = "")]
 pub struct PoolRange<T> {
     pub start: u32,
     pub len: u32,
@@ -100,7 +102,7 @@ impl<T> std::fmt::Debug for PoolRange<T> {
 }
 
 /// The type of a value: a scalar or an opaque target pointer.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Ty {
     Scalar(Scalar),
     Ptr,
@@ -126,7 +128,7 @@ impl Ty {
 }
 
 /// The type of a slot or of the place an address names.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum PlaceTy {
     Value(Ty),
     /// A declared type laid out by its recipe (FORM v1).
@@ -135,7 +137,7 @@ pub enum PlaceTy {
 
 /// One projection step; indices are already-evaluated values (LIR `ProjectionStep`
 /// without `Slot` and `FlatAt`, which were library-unit and old-flat steps).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Step {
     /// Follow the pointer stored at this place.
     Deref,
@@ -158,7 +160,7 @@ pub enum Step {
     Byte(ValueId),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum AddressBase {
     Slot(SlotId),
     /// The place a pointer value points at.
@@ -166,14 +168,14 @@ pub enum AddressBase {
     Address(AddressId),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct AddressInfo {
     pub base: AddressBase,
     pub steps: PoolRange<Step>,
     pub ty: PlaceTy,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum UnaryOp {
     /// Integer negation fails on signed MIN and is refused on unsigned kinds;
     /// float negation flips the sign bit.
@@ -189,7 +191,7 @@ pub enum UnaryOp {
 /// `0..width`; `Division` on a zero divisor. `Div` truncates toward zero and `Rem`
 /// takes the dividend's sign; `MIN rem -1` is 0 and does not fail. Float forms are
 /// exact IEEE.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum BinaryOp {
     Add,
     Sub,
@@ -221,7 +223,7 @@ impl BinaryOp {
 
 /// Comparison of two scalars of one kind, or two pointers (Eq/Ne only). Floats
 /// compare by IEEE: an unordered pair makes every op but `Ne` false.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum CompareOp {
     Eq,
     Ne,
@@ -232,7 +234,7 @@ pub enum CompareOp {
 }
 
 /// LIR `ConvertMode`, unchanged; see its documentation for each mode's exact result.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum ConvertMode {
     Widen,
     Truncate,
@@ -248,7 +250,7 @@ pub enum ConvertMode {
 }
 
 /// Overflow behaviour of `IntArith` (LIR `ArithMode`).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum ArithMode {
     Wrapping,
     Saturating,
@@ -257,7 +259,7 @@ pub enum ArithMode {
 }
 
 /// The ops `IntArith` admits (LIR used `BinaryOp` and a validator rule).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum ArithOp {
     Add,
     Sub,
@@ -268,7 +270,7 @@ pub enum ArithOp {
 }
 
 /// LIR `ScalarUnaryOp`, unchanged.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum ScalarUnaryOp {
     Sqrt,
     Floor,
@@ -292,7 +294,7 @@ impl ScalarUnaryOp {
 }
 
 /// How a read uses its place.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum ReadMode {
     /// Plain bits; the place is unchanged.
     Bits,
@@ -303,7 +305,7 @@ pub enum ReadMode {
 /// An instruction. A `fail` block is the failure successor of an operation that
 /// can fail; the block takes no parameters in FORM v0 and what it does (cause
 /// storage, cleanup, propagation) is FORM v1.
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Inst {
     /// The bits of a scalar of the result's type (floats by their IEEE bits,
     /// signed integers two's complement in the low bits, bool 0 or 1, char its
@@ -516,7 +518,7 @@ pub enum Inst {
 
 /// What an `Alloc` makes. The block's bookkeeping (its limit record,
 /// and for a resource its cause cell and grant) is the engine's.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum AllocKind {
     Own,
     /// A counted node: the count (u64, starting at 1) at offset 0, the payload at 8.
@@ -528,7 +530,7 @@ pub enum AllocKind {
 }
 
 /// Which limit an `Alloc` is charged to.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum AllocPlace {
     /// The current limit (MEM-19).
     Current,
@@ -538,7 +540,7 @@ pub enum AllocPlace {
     Region(ValueId),
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Counted {
     Rc,
     /// Every operation is an event in the run's order (MEM-15).
@@ -548,7 +550,7 @@ pub enum Counted {
 /// Engine operations a call can name. Rows are in the crate docs;
 /// a `take` argument is passed by address and is the callee's only after the
 /// operation's commit point (FAIL-3), so a refused operation leaves it in place.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum RtOp {
     Spawn { x: TypeId, r: TypeId },
     Join { r: TypeId },
@@ -565,7 +567,7 @@ pub enum RtOp {
 /// The primary cause a `Raise` records (FAIL-2). Overflow, Bounds and Division are
 /// recorded by the instructions that raise them; Cancelled by the engine operations
 /// that observe it; Capacity by an allocation over a grant.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum RaiseCause {
     Unwrap,
     Bounds,
@@ -687,7 +689,7 @@ impl Inst {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Callee {
     Direct(FuncId),
     /// A code pointer value, called with the call site's signature.
@@ -697,13 +699,13 @@ pub enum Callee {
 }
 
 /// A call argument: a value, or the address of a place passed by address.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Arg {
     Value(ValueId),
     Address(AddressId),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct CallSite {
     pub callee: Callee,
     pub signature: SigId,
@@ -714,19 +716,19 @@ pub struct CallSite {
     pub fail: Option<BlockId>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Edge {
     pub target: BlockId,
     pub args: PoolRange<ValueId>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct SwitchArm {
     pub value: u64,
     pub edge: EdgeId,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Terminator {
     Jump(EdgeId),
     Branch {
@@ -755,7 +757,7 @@ pub enum Terminator {
     Propagate,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Block {
     pub params: PoolRange<ValueId>,
     pub insts: PoolRange<Inst>,
@@ -766,14 +768,14 @@ pub struct Block {
 /// Where code came from: a byte range relative to the start of an item, so an
 /// item moved in its file keeps its body; the driver rebinds items to files at
 /// link time (as `hirsel-lir/src/debug.rs` already persists).
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct Anchor {
     pub item: ItemId,
     pub start: u32,
     pub end: u32,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub struct Pools {
     pub values: Vec<ValueId>,
     pub steps: Vec<Step>,
@@ -783,7 +785,7 @@ pub struct Pools {
 
 /// One function body. Block 0 is the entry; its parameters are the signature's
 /// parameters (a by-address parameter arrives as a pointer value).
-#[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub struct Body {
     pub values: Vec<Ty>,
     pub slots: Vec<PlaceTy>,
@@ -800,7 +802,7 @@ pub struct Body {
 }
 
 /// How a parameter is passed.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Param {
     Value(Ty),
     /// A pointer to a place of the declared type, owned by the caller.
@@ -812,7 +814,7 @@ pub enum Param {
 /// `never` (FORM v1a) is a function whose result type is `Never`: it has no results
 /// and no `dest`, its body never returns, and a call of it ends its block, followed
 /// by `Unreachable`.
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Signature {
     pub params: Vec<Param>,
     pub results: Vec<Ty>,
@@ -821,7 +823,9 @@ pub struct Signature {
 }
 
 /// The identity of one instantiation (see the crate docs, "Instances").
-#[derive(Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
+#[derive(
+    serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash, Ord, PartialOrd,
+)]
 pub struct InstanceKey {
     pub definition: DefPath,
     /// Canonical text of each closed type argument, in parameter order.
@@ -847,7 +851,7 @@ impl InstanceKey {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Function {
     pub instance: InstanceId,
     pub signature: SigId,
@@ -855,14 +859,14 @@ pub struct Function {
     pub body: Option<Body>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Static {
     pub align: u32,
     pub bytes: Vec<u8>,
 }
 
 /// One unit of emission.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub struct Module {
     pub items: Vec<DefPath>,
     /// Each declared type's shape (its `name` is its canonical text). `Shape`'s

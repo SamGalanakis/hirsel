@@ -12,6 +12,7 @@ wf = []
 eval = []
 
 [dependencies]
+serde = { version = "1", features = ["derive"] }
 hirsel-core-ids = { path = "../hirsel-core-ids" }
 hirsel-core-layout = { path = "../hirsel-core-layout" }
 

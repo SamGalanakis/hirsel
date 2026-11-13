@@ -1,15 +1,69 @@
-//! Immutable byte records. The root is replaced only after its contents are published.
+//! One buffered append-only archive per request, committed by atomic rename.
 //! Disk bytes are external input; a damaged record is a cache miss.
 use hirsel_core_ids::ContentHash;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
+use sha2::{Digest, Sha256};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAGIC: &[u8; 8] = b"HCORE\0\0\0";
-const VERSION: u32 = 2;
-const HEADER: usize = 52;
+const VERSION: u32 = 3;
+const HEADER: usize = 12;
+const TRAILER: usize = 40;
 static NEXT: AtomicU64 = AtomicU64::new(0);
+
+/// Position in an archive payload, independent of its file envelope.
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Record {
+    pub start: u64,
+    pub len: u64,
+}
+impl Record {
+    pub fn bytes(self, archive: &[u8]) -> Option<&[u8]> {
+        let start = usize::try_from(self.start).ok()?;
+        let len = usize::try_from(self.len).ok()?;
+        archive.get(start..start.checked_add(len)?)
+    }
+}
+struct HashedFile {
+    file: File,
+    hash: Sha256,
+}
+impl Write for HashedFile {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let written = self.file.write(bytes)?;
+        self.hash.update(&bytes[..written]);
+        Ok(written)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
+}
+pub(crate) struct ArchiveWriter {
+    // The binary output arena is appended once and written as one request batch.
+    buffer: Vec<u8>,
+}
+impl Write for ArchiveWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.buffer.write(bytes)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+impl ArchiveWriter {
+    pub fn record<T: serde::Serialize>(&mut self, row: &T) -> io::Result<Record> {
+        let start = self.buffer.len() as u64;
+        // serialize_into visits the borrowed tables once. serialize() first counts
+        // their encoded size and would add a complete second traversal.
+        bincode::serialize_into(&mut self.buffer, row).map_err(io::Error::other)?;
+        Ok(Record {
+            start,
+            len: self.buffer.len() as u64 - start,
+        })
+    }
+}
 
 pub struct Store {
     root: PathBuf,
@@ -26,45 +80,72 @@ impl Store {
             .join(key.0.iter().map(|b| format!("{b:02x}")).collect::<String>())
     }
     pub fn put(&self, bytes: &[u8]) -> io::Result<ContentHash> {
-        let key = ContentHash::of_bytes(bytes);
-        let mut record = Vec::with_capacity(HEADER + bytes.len());
-        record.extend_from_slice(MAGIC);
-        record.extend_from_slice(&VERSION.to_le_bytes());
-        record.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-        record.extend_from_slice(&key.0);
-        record.extend_from_slice(bytes);
-        self.atomic(&self.path(key), &record)?;
-        Ok(key)
+        self.archive(|writer| writer.write_all(bytes))
+    }
+    pub(crate) fn archive(
+        &self,
+        emit: impl FnOnce(&mut ArchiveWriter) -> io::Result<()>,
+    ) -> io::Result<ContentHash> {
+        let temporary = self.temporary();
+        let result = (|| {
+            let file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temporary)?;
+            let mut output = BufWriter::with_capacity(
+                64 * 1024,
+                HashedFile {
+                    file,
+                    hash: Sha256::new(),
+                },
+            );
+            output.write_all(MAGIC)?;
+            output.write_all(&VERSION.to_le_bytes())?;
+            let mut writer = ArchiveWriter { buffer: Vec::new() };
+            emit(&mut writer)?;
+            output.write_all(&writer.buffer)?;
+            output.write_all(&(writer.buffer.len() as u64).to_le_bytes())?;
+            output.flush()?;
+            let mut output = output.into_inner().map_err(|e| e.into_error())?;
+            // The digest covers exactly the header, payload and length bytes written.
+            let hash = ContentHash(output.hash.finalize().into());
+            output.file.write_all(&hash.0)?;
+            output.file.sync_all()?;
+            fs::rename(&temporary, self.path(hash))?;
+            File::open(&self.root)?.sync_all()?;
+            Ok(hash)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(temporary);
+        }
+        result
     }
     pub fn get(&self, key: ContentHash) -> io::Result<Option<Vec<u8>>> {
-        let mut file = match fs::File::open(self.path(key)) {
+        let mut file = match File::open(self.path(key)) {
             Ok(f) => f,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
         };
-        let mut header = [0u8; HEADER];
-        if file.read_exact(&mut header).is_err() {
-            return Ok(None);
-        }
-        let size = u64::from_le_bytes(header[12..20].try_into().unwrap());
-        if &header[..8] != MAGIC
-            || header[8..12] != VERSION.to_le_bytes()
-            || header[20..52] != key.0
-            || file.metadata()?.len().checked_sub(HEADER as u64) != Some(size)
-        {
+        let size = usize::try_from(file.metadata()?.len()).map_err(io::Error::other)?;
+        if size < HEADER + TRAILER {
             return Ok(None);
         }
         let mut bytes = Vec::new();
-        if bytes
-            .try_reserve_exact(usize::try_from(size).map_err(io::Error::other)?)
-            .is_err()
-        {
-            return Err(io::Error::other(
-                "core store decode exceeded compiler memory",
-            ));
-        }
+        bytes.try_reserve_exact(size).map_err(io::Error::other)?;
         file.read_to_end(&mut bytes)?;
-        Ok((ContentHash::of_bytes(&bytes) == key).then_some(bytes))
+        if bytes.len() != size || &bytes[..8] != MAGIC || bytes[8..12] != VERSION.to_le_bytes() {
+            return Ok(None);
+        }
+        let end = size - TRAILER;
+        if u64::from_le_bytes(bytes[end..end + 8].try_into().unwrap()) != (end - HEADER) as u64
+            || bytes[end + 8..] != key.0
+            || Sha256::digest(&bytes[..end + 8])[..] != key.0
+        {
+            return Ok(None);
+        }
+        bytes.drain(..HEADER);
+        bytes.truncate(end - HEADER);
+        Ok(Some(bytes))
     }
     pub(crate) fn selection(&self, name: &str) -> io::Result<Option<ContentHash>> {
         match fs::read(self.root.join(name)) {
@@ -73,18 +154,18 @@ impl Store {
             Err(e) => Err(e),
         }
     }
-    pub(crate) fn select(&self, name: &str, key: ContentHash) -> io::Result<()> {
-        self.atomic(&self.root.join(name), &key.0)
-    }
     pub fn publish_root(&self, key: ContentHash) -> io::Result<()> {
         self.atomic(&self.root.join("check-root"), &key.0)
     }
-    pub(crate) fn atomic(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        let temporary = self.root.join(format!(
+    fn temporary(&self) -> PathBuf {
+        self.root.join(format!(
             ".write-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
-        ));
+        ))
+    }
+    pub(crate) fn atomic(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        let temporary = self.temporary();
         let result = (|| {
             let mut f = OpenOptions::new()
                 .create_new(true)
@@ -93,7 +174,7 @@ impl Store {
             f.write_all(bytes)?;
             f.sync_all()?;
             fs::rename(&temporary, path)?;
-            fs::File::open(&self.root)?.sync_all()
+            File::open(&self.root)?.sync_all()
         })();
         if result.is_err() {
             let _ = fs::remove_file(temporary);

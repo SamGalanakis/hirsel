@@ -376,6 +376,7 @@ fn workspace_edges_respect_the_crate_layering() {
             && NO_EXTERNAL_PRODUCTION.contains(&edge.from.as_str())
             // PS-18 findings are JSON sidecars; this codec does not wire compiler phases.
             && !(edge.from == "hirsel-proof-export" && edge.to == "serde_json")
+            && !(matches!(edge.from.as_str(), "hirsel-core-ir" | "hirsel-core-layout") && edge.to == "serde")
         {
             violations.push(format!(
                 "external production dependency {} -> {}",

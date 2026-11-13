@@ -260,11 +260,16 @@ fn coreir_data_crates_depend_only_on_neutral_crates() {
         "hirsel-intern",
         "hirsel-guard",
     ];
-    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap();
     let deps = |name: &str| -> Vec<String> {
-        let manifest = std::fs::read_to_string(crates.join(name).join("Cargo.toml")).unwrap();
+        // Embed the manifest inputs so the law also runs in a hermetic test sandbox.
+        let manifest = match name {
+            "hirsel-core-ids" => include_str!("../../hirsel-core-ids/Cargo.toml"),
+            "hirsel-core-layout" => include_str!("../../hirsel-core-layout/Cargo.toml"),
+            "hirsel-core-ir" => include_str!("../Cargo.toml"),
+            "hirsel-intern" => include_str!("../../hirsel-intern/Cargo.toml"),
+            "hirsel-guard" => include_str!("../../hirsel-guard/Cargo.toml"),
+            _ => panic!("non-neutral data dependency {name}"),
+        };
         let mut in_deps = false;
         let mut out = Vec::new();
         for line in manifest.lines() {

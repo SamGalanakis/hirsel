@@ -1723,3 +1723,126 @@ fn f{entry} = n{inst} g{g} {{
         }
     }
 }
+
+#[test]
+fn aggregate_constants_publish_values_and_use_read_only_tables() {
+    let failures = run_case(&root().join("cases/body/constant-aggregates.hirsel"));
+    assert!(failures.is_empty(), "{failures:#?}");
+    let source = include_str!("../../../core/front/cases/body/constant-aggregates.hirsel");
+    let (index, inputs) = program_inputs(source);
+    let p = Program::declare(&index, &inputs);
+    assert!(
+        p.gaps.is_empty() && p.refusals.is_empty(),
+        "{:?} {:?}",
+        p.gaps,
+        p.refusals
+    );
+    let hidden = p
+        .constants
+        .iter()
+        .find(|c| c.path.0.name == "HIDDEN")
+        .unwrap();
+    assert!(
+        p.constant_field(
+            p.modules[hidden.at.module as usize].id,
+            hidden.value.unwrap(),
+            "raw"
+        )
+        .is_ok()
+    );
+    let foreign = p
+        .modules
+        .iter()
+        .find(|m| m.id != p.modules[hidden.at.module as usize].id)
+        .unwrap()
+        .id;
+    assert_eq!(
+        p.constant_field(foreign, hidden.value.unwrap(), "raw"),
+        Err("PROG-2")
+    );
+    let count = p.constant_parts.len();
+    let value = p
+        .constants
+        .iter()
+        .find(|c| c.path.0.name == "LOOKUP")
+        .unwrap()
+        .value
+        .unwrap();
+    let crate::ConstData::Fields { len, .. } = value.data else {
+        panic!("checked array")
+    };
+    assert_eq!(len, 8);
+    let f = p
+        .fns
+        .iter()
+        .position(|f| f.path.0.name == "lookup")
+        .unwrap();
+    let mut emitter = Emitter::new();
+    let check = p.check_lower(f, &mut emitter);
+    assert!(
+        check.refusals.is_empty() && check.gaps.is_empty(),
+        "{:?} {:?}",
+        check.refusals,
+        check.gaps
+    );
+    let body = emitter.module.functions[check.function.unwrap().index()]
+        .body
+        .as_ref()
+        .unwrap();
+    assert!(
+        body.slots.is_empty(),
+        "lookup must not rebuild the table on the stack"
+    );
+    let instructions = &body.insts;
+    let instruction_count = instructions.len();
+    assert_eq!(
+        instructions
+            .iter()
+            .filter(|i| matches!(i, hirsel_core_ir::Inst::ReadStatic { .. }))
+            .count(),
+        1
+    );
+    assert!(!instructions.iter().any(|i| matches!(
+        i,
+        hirsel_core_ir::Inst::Store { .. } | hirsel_core_ir::Inst::Copy { .. }
+    )));
+    assert_eq!(emitter.module.statics.len(), 1);
+    assert_eq!(
+        emitter.module.statics[0].bytes,
+        (0u16..8)
+            .flat_map(|i| (i * 3).to_le_bytes())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        p.constant_parts.len(),
+        count,
+        "body uses only published constant values"
+    );
+    let _ = p.check_lower(f, &mut emitter);
+    assert_eq!(
+        emitter.module.statics.len(),
+        1,
+        "reuse the same read-only table"
+    );
+    eprintln!(
+        "constant table lookup: {} CoreIR instructions",
+        instruction_count
+    );
+}
+
+#[test]
+fn aggregate_constant_errors_are_checked_before_use() {
+    for source in [
+        "const BAD: Inline[u8,2] = [1,256]",
+        "const BAD: Inline[u8,3] = [1,2]",
+        "const BAD: Inline[u8,0] = [200u8 + 100u8;0]",
+        "type Point { x:u8 }\nfn id(x:u8)->u8{x}\nconst BAD: Point = Point(x:id(7))",
+        "const A: (u8,u8) = (0,B.0)\nconst B: (u8,u8) = (A.0,0)",
+    ] {
+        let (index, inputs) = program_inputs(source);
+        let p = Program::declare(&index, &inputs);
+        assert!(p.gaps.is_empty(), "{source}: {:?}", p.gaps);
+        assert_eq!(p.refusals.len(), 1, "{source}: {:?}", p.refusals);
+        assert_eq!(p.refusals[0].rule, "LANG-20", "{source}: {:?}", p.refusals);
+    }
+}

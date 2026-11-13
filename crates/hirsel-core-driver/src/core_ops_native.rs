@@ -349,3 +349,21 @@ fn stream_partial_progress_cranelift() { stream_partial_progress(Backend::Cranel
 #[test]
 #[ignore = "explicit native integration target"]
 fn stream_partial_progress_llvm() { stream_partial_progress(Backend::Llvm); }
+fn aggregate_constants(backend: Backend) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let source = include_str!("../../../core/front/cases/body/constant-aggregates.hirsel");
+    let mut request = source_request(source, dir.path());
+    request.inputs.packages[1] = PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
+    let options = native_options(backend, dir.path());
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let built = product.build(&entry, &options).unwrap();
+    run_clean(&built.executable, 0);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn aggregate_constants_cranelift() { aggregate_constants(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn aggregate_constants_llvm() { aggregate_constants(Backend::Llvm); }

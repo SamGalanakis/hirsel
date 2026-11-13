@@ -453,17 +453,27 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     self.halt();
                     return (ERROR, None);
                 };
-                if !u.projections.is_empty() {
-                    return self.gap_ty(n, "constant field projections are not built");
-                }
-                match value.data {
-                    crate::ConstData::Bits(bits) => {
-                        let ty = self.ir_ty(value.ty);
-                        (value.ty, ty.and_then(|ty| self.konst(ty, bits, n)))
+                let mut value = value;
+                for token in
+                    &self.item.tree.tokens[u.projections.start as usize..u.projections.end as usize]
+                {
+                    if token.kind == TokenKind::Ident {
+                        let field = match self.p.constant_field(
+                            self.p.modules[self.at.module as usize].id,
+                            value,
+                            self.p.index.symbols.text(token.symbol),
+                        ) {
+                            Ok(field) => field,
+                            Err(rule) => {
+                                self.refuse(rule, n, "constant field is absent or opaque");
+                                return (ERROR, None);
+                            }
+                        };
+                        value = field;
                     }
-                    crate::ConstData::Unit => (UNIT, None),
-                    _ => self.gap_ty(n, "aggregate constants are not built"),
                 }
+                let emitted = self.constant_value(value, n);
+                (value.ty, emitted)
             }
             &Target::ContextualConstructor { name } => self.construct_variant(n, name, &[], want),
             &Target::Definition(id) if u.projections.is_empty() => {

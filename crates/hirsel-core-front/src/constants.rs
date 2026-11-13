@@ -15,12 +15,12 @@ pub struct Constant {
     pub value: Option<ConstValue>,
     expr: NodeId,
 }
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct ConstValue {
     pub ty: TyId,
     pub data: ConstData,
 }
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum ConstData {
     Bits(u64),
     Unit,
@@ -157,6 +157,43 @@ impl Program<'_> {
             }
         }
     }
+    /// LANG-7 constant heads and explicit projections read the published field.
+    pub(crate) fn constant_field(
+        &self,
+        from: ModuleId,
+        value: ConstValue,
+        name: &str,
+    ) -> Result<ConstValue, &'static str> {
+        let ConstData::Fields {
+            start,
+            len,
+            case: None,
+        } = value.data
+        else {
+            return Err("LANG-11");
+        };
+        let index = match self.types.kind(value.ty) {
+            TyKind::Tuple(_) => name.parse::<usize>().map_err(|_| "LANG-11")?,
+            TyKind::Adt(d, _) => {
+                let decl = &self.decls[d.index()];
+                if decl.opaque && decl.site.module != from {
+                    return Err("PROG-2");
+                }
+                match &decl.body {
+                    DeclBody::Record(fs) => {
+                        fs.iter().position(|f| f.name == name).ok_or("LANG-11")?
+                    }
+                    _ => return Err("LANG-11"),
+                }
+            }
+            _ => return Err("LANG-11"),
+        };
+        if index < len as usize {
+            Ok(self.constant_parts[start as usize + index])
+        } else {
+            Err("LANG-11")
+        }
+    }
     fn const_refuse(&mut self, at: ItemRef, n: NodeId, message: &str) {
         self.refusals
             .push(refusal("LANG-20", self.site(at, n), message));
@@ -171,6 +208,22 @@ impl ConstCx<'_, '_> {
     fn fail(&mut self, n: NodeId, message: &str) -> Option<ConstValue> {
         self.p.const_refuse(self.at, n, message);
         None
+    }
+    fn project(&mut self, n: NodeId, value: ConstValue, name: &str) -> Option<ConstValue> {
+        match self
+            .p
+            .constant_field(self.p.modules[self.at.module as usize].id, value, name)
+        {
+            Ok(field) => Some(field),
+            Err(rule) => {
+                self.p.refusals.push(refusal(
+                    rule,
+                    self.p.site(self.at, n),
+                    "constant field is absent or opaque",
+                ));
+                None
+            }
+        }
     }
     fn bits(&self, s: Scalar, bits: u64) -> ConstValue {
         ConstValue {
@@ -197,22 +250,30 @@ impl ConstCx<'_, '_> {
                 let Some(use_) = self.p.resolved(self.at, n) else {
                     return None;
                 };
-                let hirsel_core_resolve::Target::Definition(def) = use_.target else {
-                    if use_.target == Target::Missing {
-                        return None;
+                match use_.target {
+                    Target::Definition(def) if self.p.constant_ids[def.0 as usize].is_some() => {
+                        let id = self.p.constant_ids[def.0 as usize]?;
+                        let mut value = self.p.constants[id as usize].value?;
+                        for token in &item.tree.tokens
+                            [use_.projections.start as usize..use_.projections.end as usize]
+                        {
+                            if token.kind == TokenKind::Ident {
+                                let field = self.project(
+                                    n,
+                                    value,
+                                    self.p.index.symbols.text(token.symbol),
+                                )?;
+                                value = field;
+                            }
+                        }
+                        value
                     }
-                    if matches!(use_.target, Target::ContextualConstructor { .. }) {
-                        return self.gap(n, "aggregate constants are not built");
+                    Target::ContextualConstructor { .. } => {
+                        self.construct(n, n, &[], want, active)?
                     }
-                    return self.fail(n, "a constant expression reads only constants");
-                };
-                let Some(id) = self.p.constant_ids[def.0 as usize] else {
-                    return self.fail(n, "a constant expression reads only constants");
-                };
-                if !use_.projections.is_empty() {
-                    return self.gap(n, "constant field projections are not built");
+                    Target::Missing => return None,
+                    _ => return self.fail(n, "a constant expression reads only constants"),
                 }
-                self.p.constants[id as usize].value?
             }
             NodeKind::Unary => {
                 if text == "copy" {
@@ -226,32 +287,258 @@ impl ConstCx<'_, '_> {
                 }
             }
             NodeKind::Binary => self.binary(n, text, kids[0], kids[1], want, active)?,
-            NodeKind::Tuple
-            | NodeKind::Array
-            | NodeKind::RepeatArray
-            | NodeKind::Projection
-            | NodeKind::Index => {
-                return self.gap(n, "aggregate constants are not built");
+            NodeKind::Tuple | NodeKind::Array | NodeKind::RepeatArray => {
+                self.aggregate(n, want, active)?
             }
-            NodeKind::Call => {
-                let constructor = match self.p.target(self.at, kids[0]) {
-                    Some(Target::Definition(id)) => {
-                        matches!(self.p.by_definition[id.0 as usize], Some(Def::Type(_)))
+            NodeKind::Projection => {
+                let value = self.expr(kids[0], None, active)?;
+                self.project(n, value, text)?
+            }
+            NodeKind::Index => {
+                let value = self.expr(kids[0], None, active)?;
+                let index = self.expr(kids[1], Some(scalar(Scalar::U64)), active)?;
+                let (
+                    TyKind::Array(elem, count),
+                    ConstData::Fields { start, .. },
+                    ConstData::Bits(i),
+                ) = (self.p.types.kind(value.ty), value.data, index.data)
+                else {
+                    return self.fail(n, "a constant index requires an Inline array");
+                };
+                if i >= *count {
+                    if active {
+                        return self.fail(n, "constant array index is out of bounds");
                     }
-                    Some(Target::ContextualConstructor { .. }) => true,
-                    _ => false,
-                };
-                return if constructor {
-                    self.gap(n, "aggregate constants are not built")
+                    ConstValue {
+                        ty: *elem,
+                        data: ConstData::Bits(0),
+                    }
                 } else {
-                    self.fail(n, "a constant expression cannot call a function")
-                };
+                    self.p.constant_parts[start as usize + i as usize]
+                }
             }
+            NodeKind::Call => self.construct(n, kids[0], &kids[1..], want, active)?,
             NodeKind::Closure => return self.gap(n, "callable constants are not built"),
             _ => return self.fail(n, "this expression is not permitted in a constant"),
         };
         if want.is_some_and(|want| value.ty != want) {
             return self.fail(n, "constant type differs from its annotation");
+        }
+        Some(value)
+    }
+    /// Reserve a contiguous row before visiting children, whose aggregates append
+    /// their own rows to the same arena.
+    fn fields(&mut self, ty: TyId, len: usize, case: Option<u32>) -> ConstValue {
+        let start = self.p.constant_parts.len() as u32;
+        for _ in 0..len {
+            self.p.constant_parts.push(ConstValue {
+                ty: UNIT,
+                data: ConstData::Unit,
+            });
+        }
+        ConstValue {
+            ty,
+            data: ConstData::Fields {
+                start,
+                len: len as u32,
+                case,
+            },
+        }
+    }
+    fn set_field(&mut self, parent: ConstValue, index: usize, value: ConstValue) {
+        let ConstData::Fields { start, .. } = parent.data else {
+            unreachable!()
+        };
+        self.p.constant_parts[start as usize + index] = value;
+    }
+    fn aggregate(&mut self, n: NodeId, want: Option<TyId>, active: bool) -> Option<ConstValue> {
+        let item = self.p.item(self.at);
+        let kids = item.tree.children(n);
+        match item.tree.node(n).kind {
+            NodeKind::Tuple => {
+                let value = self.fields(UNIT, kids.len(), None);
+                let mut types = Vec::with_capacity(kids.len());
+                for (i, &child) in kids.iter().enumerate() {
+                    let hint = want.and_then(|t| match self.p.types.kind(t) {
+                        TyKind::Tuple(xs) => xs.get(i).copied(),
+                        _ => None,
+                    });
+                    let field = self.expr(child, hint, active)?;
+                    types.push(field.ty);
+                    self.set_field(value, i, field);
+                }
+                Some(ConstValue {
+                    ty: self.p.types.mk(TyKind::Tuple(types)),
+                    ..value
+                })
+            }
+            NodeKind::Array | NodeKind::RepeatArray => {
+                let repeat = item.tree.node(n).kind == NodeKind::RepeatArray;
+                let hint = want.and_then(|t| match self.p.types.kind(t) {
+                    TyKind::Array(t, _) => Some(*t),
+                    _ => None,
+                });
+                let count = if repeat {
+                    let token = item.tree.node(kids[1]).token?;
+                    let (digits, _) =
+                        crate::body::int_suffix(item.tree.token_text(item.text, token));
+                    let count = crate::body::int_magnitude(digits)?;
+                    let Ok(count) = u32::try_from(count) else {
+                        return self.gap(n, "this constant array extent is not built");
+                    };
+                    count as usize
+                } else {
+                    kids.len()
+                };
+                let value = self.fields(UNIT, count, None);
+                let mut elem = hint;
+                for (i, &child) in kids[..if repeat { 1 } else { kids.len() }]
+                    .iter()
+                    .enumerate()
+                {
+                    let field = self.expr(child, elem, active)?;
+                    elem = Some(field.ty);
+                    if repeat {
+                        for i in 0..count {
+                            self.set_field(value, i, field);
+                        }
+                    } else {
+                        self.set_field(value, i, field);
+                    }
+                }
+                let Some(elem) = elem else {
+                    return self.fail(n, "an empty constant array needs an element type");
+                };
+                Some(ConstValue {
+                    ty: self.p.types.mk(TyKind::Array(elem, count as u64)),
+                    ..value
+                })
+            }
+            _ => unreachable!(),
+        }
+    }
+    fn construct(
+        &mut self,
+        n: NodeId,
+        head: NodeId,
+        args: &[NodeId],
+        want: Option<TyId>,
+        active: bool,
+    ) -> Option<ConstValue> {
+        let item = self.p.item(self.at);
+        let target = self.p.target(self.at, head).cloned()?;
+        let (d, case, ty) = match target {
+            Target::Definition(id) => {
+                let Some(Def::Type(d)) = self.p.by_definition[id.0 as usize] else {
+                    return self.fail(n, "a constant expression cannot call a function");
+                };
+                let ty = match want {
+                    Some(ty) if matches!(self.p.types.kind(ty), TyKind::Adt(e, _) if *e == d) => ty,
+                    _ if self.p.decls[d.index()].generics.is_empty() => {
+                        self.p.types.mk(TyKind::Adt(d, vec![]))
+                    }
+                    _ => return self.gap(n, "constant constructor inference is not built"),
+                };
+                (d, None, ty)
+            }
+            Target::ContextualConstructor { name } => {
+                let text = self.p.index.symbols.text(name);
+                let ty = if let Some(ty) = want {
+                    ty
+                } else {
+                    let from = self.p.modules[self.at.module as usize].id;
+                    let mut found = None;
+                    for id in self.p.index.constructor_candidates(from, name) {
+                        let Some(Def::Type(d)) = self.p.by_definition[id.0 as usize] else {
+                            continue;
+                        };
+                        if found.is_some_and(|other| other != d) {
+                            return self.fail(n, "constant constructor is ambiguous");
+                        }
+                        found = Some(d);
+                    }
+                    let d = found?;
+                    if !self.p.decls[d.index()].generics.is_empty() {
+                        return self.gap(n, "constant constructor inference is not built");
+                    }
+                    self.p.types.mk(TyKind::Adt(d, vec![]))
+                };
+                let TyKind::Adt(d, _) = *self.p.types.kind(ty) else {
+                    return self.fail(n, "constant constructor has another type");
+                };
+                let from = self.p.modules[self.at.module as usize].id;
+                if !self.p.index.constructor_candidates(from, name).any(|id| matches!(self.p.by_definition[id.0 as usize], Some(Def::Type(e)) if e == d)) {
+                    return self.fail(n, "constant constructor is not visible");
+                }
+                let case = match &self.p.decls[d.index()].body {
+                    DeclBody::Variant(cs) => {
+                        cs.iter().position(|c| c.name == text).map(|i| i as u32)
+                    }
+                    _ => None,
+                };
+                if case.is_none() {
+                    return self.fail(n, "constant constructor has another type");
+                }
+                (d, case, ty)
+            }
+            Target::Missing => return None,
+            _ => return self.fail(n, "a constant expression cannot call a function"),
+        };
+        let decl = &self.p.decls[d.index()];
+        if decl.opaque && decl.site.module != self.p.modules[self.at.module as usize].id {
+            self.p.refusals.push(refusal(
+                "PROG-2",
+                self.p.site(self.at, n),
+                "constant constructor is opaque",
+            ));
+            return None;
+        }
+        if self.p.kind(ty) != Kind::Plain {
+            return self.fail(n, "a constant constructor must be plain");
+        }
+        let (fields, labelled) = match (&decl.body, case) {
+            (DeclBody::Record(fs), None) => (fs.clone(), true),
+            (DeclBody::Variant(cs), Some(c)) => {
+                (cs[c as usize].fields.clone(), cs[c as usize].labelled)
+            }
+            _ => return self.fail(n, "a constant constructor needs a record or variant"),
+        };
+        if fields.len() != args.len() {
+            return self.fail(n, "constant constructor argument count differs");
+        }
+        let TyKind::Adt(_, type_args) = self.p.types.kind(ty) else {
+            unreachable!()
+        };
+        let type_args = type_args.clone();
+        let value = self.fields(ty, fields.len(), case);
+        for (i, (&arg, field)) in args.iter().zip(&fields).enumerate() {
+            let node = item.tree.node(arg);
+            let child = if labelled {
+                if node.kind != NodeKind::LabelledArgument
+                    || item.tree.token_text(item.text, node.token?) != field.name
+                {
+                    self.p.refusals.push(refusal(
+                        "LANG-9",
+                        self.p.site(self.at, arg),
+                        "constant fields are labelled in declaration order",
+                    ));
+                    return None;
+                }
+                item.tree.children(arg)[0]
+            } else {
+                if node.kind == NodeKind::LabelledArgument {
+                    self.p.refusals.push(refusal(
+                        "LANG-9",
+                        self.p.site(self.at, arg),
+                        "constant payload is positional",
+                    ));
+                    return None;
+                }
+                arg
+            };
+            let hint = subst(&mut self.p.types, field.ty, &type_args);
+            let child = self.expr(child, Some(hint), active)?;
+            self.set_field(value, i, child);
         }
         Some(value)
     }
@@ -496,7 +783,7 @@ impl ConstCx<'_, '_> {
             "&" => Some(a & b),
             "|" => Some(a | b),
             "^" => Some(a ^ b),
-            "+" | "-" | "*" | "/" | "%" | "<<" | ">>" => None,
+            "<<" | ">>" => None,
             _ => return self.fail(n, "operator is not permitted in a constant"),
         };
         if let Some(bits) = bits {

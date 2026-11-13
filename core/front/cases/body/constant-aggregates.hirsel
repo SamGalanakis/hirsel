@@ -1,0 +1,42 @@
+// Annotation types flow through each aggregate; ORIGIN is a LANG-7 constant head.
+// expect: accept
+// expect: run fields() = 42
+// expect: run choice() = 307
+// expect: run optional() = 9
+// expect: run copies() = 110
+// expect: run repeated() = 40
+// expect: run lookup(0) = 0
+// expect: run lookup(7) = 21
+// expect: run lookup(8) = fail Bounds
+// expect: run projected() = 42
+// expect: run float_bits() = 4613937818241073152
+// expect: run short() = false
+
+pub opaque type Secret { raw: u8 }
+const HIDDEN: Secret = Secret(raw: 17)
+type Point { x: u8, y: u64 }
+type Choice = Empty | Pair(u8, u64)
+const ORIGIN: Point = Point(x: 2, y: 40)
+const PAIRS: Inline[(u8, u64), 3] = [(1, 7), (2, 11), (3, 13)]
+const CHOICE: Choice = Pair(3, 7)
+const MAYBE: Option[u64] = Some(9)
+const NOTHING: Option[u64] = None
+const REPEATED: Inline[Point, 2] = [ORIGIN; 2]
+const TUPLE: (u8, u64) = (ORIGIN.x, ORIGIN.y)
+const ZERO: Inline[u8, 0] = []
+const LOOKUP: Inline[u16, 8] = [0, 3, 6, 9, 12, 15, 18, 21]
+const FLOATS: Inline[f64, 2] = [1.0, 3.0]
+const PROJECTED: u64 = REPEATED[1].y + 2
+const SHORT: bool = false && (LOOKUP[99] == 0u16)
+fn fields() -> u64 { let x: u64 = int.widen(ORIGIN.x); ORIGIN.y + x }
+fn choice() -> u64 { match CHOICE { Pair(a, b) => { let x: u64 = int.widen(a); x * 100 + b }, Empty => 0 } }
+fn optional() -> u64 { match MAYBE { Some(x) => x, None => 0 } }
+fn copies() -> u64 { let mut a = PAIRS; a[1] = (9u8, 99u64); let (_, n) = a[1]; let (_, original) = PAIRS[1]; n + original }
+fn repeated() -> u64 { REPEATED[1].y }
+fn lookup(i: u64) -> u16 { LOOKUP[i] }
+fn projected() -> u64 { PROJECTED }
+fn float_bits() -> u64 { float.to_bits64(FLOATS[1]) }
+fn short() -> bool { SHORT }
+pub fn main() -> Result[(), Exit] {
+  if fields() == 42u64 && choice() == 307u64 && optional() == 9u64 && copies() == 110u64 && repeated() == 40u64 && lookup(7) == 21u16 && projected() == 42u64 && float_bits() == 4613937818241073152u64 && !short() { Ok(()) } else { Error(Exit(status: 1)) }
+}

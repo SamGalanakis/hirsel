@@ -44,6 +44,7 @@ mod cleanup;
 mod closures;
 mod compact;
 mod compare;
+mod constants;
 mod control;
 pub(crate) mod core_ops;
 mod key_glue;
@@ -128,6 +129,7 @@ pub struct Emitter {
     runs: HashMap<TypeId, bool>,
     /// `module.statics` rows by their bytes.
     statics: HashMap<Vec<u8>, hirsel_core_ir::StaticId>,
+    constant_statics: HashMap<crate::ConstValue, hirsel_core_ir::StaticId>,
 }
 
 /// How a value of a type is carried in a body (crate docs, "Values, slots and

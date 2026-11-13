@@ -1214,3 +1214,34 @@ fn nested_cost_views_exclude_bookkeeping_without_double_counting() {
     assert_eq!(row("body").occurrences, 1);
     assert!(profile.counter_refusal.is_none());
 }
+
+#[test]
+fn aggregate_constants_in_an_image_need_no_source_or_body_decode() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, image) = Driver::default().produce_image(library_request("pub type Point { x: u8, y: u64 }\npub const ORIGIN: Point = Point(x: 2, y: 40)\npub const TABLE: Inline[(u8,u64),2] = [(1,7),(2,11)]\n", dir.path()), &mut Meter::new(false)).unwrap();
+    assert!(image.is_some());
+    let opened = CoreImage::open(&dir.path().join("store")).unwrap().unwrap();
+    std::fs::remove_file(dir.path().join("main.hirsel")).unwrap();
+    let app = tempfile::tempdir().unwrap();
+    let mut req = request(
+        "fn answer(i:u64) -> u64 { let (_, value) = lib.TABLE[i]; value + lib.ORIGIN.y }\n",
+        app.path(),
+    );
+    req.library = LibraryInput::Image(Arc::clone(&opened));
+    let checked = Driver::default()
+        .check(req, &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        checked.accepted(),
+        "{:?} {:?}",
+        checked.diagnostics,
+        checked.incomplete
+    );
+    let path = DefPath::from_full("app@1/main/answer").unwrap();
+    let body = checked.demand_body(&path).unwrap();
+    assert_eq!(
+        eval::run(&body.ir, body.check.function.unwrap(), &[1], 1_000_000).outcome,
+        eval::Outcome::Returned(vec![51])
+    );
+    assert_eq!((opened.decoded_files(), opened.decoded_bodies()), (0, 0));
+}

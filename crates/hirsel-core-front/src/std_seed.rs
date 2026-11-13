@@ -254,3 +254,92 @@ fn std_seed_check_report() {
     }
     print!("{out}");
 }
+
+#[test]
+#[ignore = "explicit std constant-table inspection"]
+fn float_constant_tables_are_read_only_data() {
+    use hirsel_core_ir::{Inst, Step};
+    let corpus = manifest().load().unwrap();
+    let parsed = corpus.parse();
+    let index = corpus.index(&parsed);
+    let modules: Vec<_> = corpus
+        .sources
+        .iter()
+        .zip(parsed.files)
+        .map(|(s, p)| ModuleInput {
+            id: index.module(&s.module).unwrap(),
+            syntax: p.syntax,
+        })
+        .collect();
+    let p = Program::declare(&index, &modules);
+    for name in ["SHIFTS", "POW10_64", "POW10_32", "POW5"] {
+        let constant = p
+            .constants
+            .iter()
+            .find(|c| c.path.0.modules == ["float"] && c.path.0.name == name)
+            .unwrap();
+        assert!(
+            constant.value.is_some(),
+            "{name}: {:?} {:?}",
+            p.refusals,
+            p.gaps
+        );
+    }
+    let f = p
+        .fns
+        .iter()
+        .position(|f| {
+            f.path.0.package.name == "std"
+                && f.path.0.modules == ["float"]
+                && f.path.0.name == "shift_for"
+        })
+        .unwrap();
+    let mut emitter = Emitter::new();
+    let check = p.check_lower(f, &mut emitter);
+    assert!(
+        check.refusals.is_empty() && check.gaps.is_empty(),
+        "{:?} {:?}",
+        check.refusals,
+        check.gaps
+    );
+    let body = emitter.module.functions[check.function.unwrap().index()]
+        .body
+        .as_ref()
+        .unwrap();
+    let start = body
+        .insts
+        .iter()
+        .position(|i| matches!(i, Inst::ReadStatic { .. }))
+        .unwrap();
+    let end = body
+        .insts
+        .iter()
+        .enumerate()
+        .skip(start)
+        .find_map(|(i, inst)| match inst {
+            Inst::Read { address, .. }
+                if body.addresses[address.index()]
+                    .steps
+                    .get(&body.pools.steps)
+                    .unwrap()
+                    .iter()
+                    .any(|s| matches!(s, Step::Element(_))) =>
+            {
+                Some(i)
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        !body.insts[start..=end]
+            .iter()
+            .any(|i| matches!(i, Inst::Store { .. } | Inst::Copy { .. }))
+    );
+    assert_eq!(emitter.module.statics.len(), 1);
+    assert_eq!(emitter.module.statics[0].bytes.len(), 19 * 8);
+    println!(
+        "std.float.shift_for SHIFTS: {} CoreIR instructions per lookup, no table stores/copies",
+        end + 1 - start
+    );
+    println!("{}", hirsel_core_ir::text::print(&emitter.module));
+}

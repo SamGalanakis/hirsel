@@ -431,3 +431,11 @@ fn sum_bytes_tail_lengths() -> bool {
     }
     true
 }
+
+// First 5-u64 scratch list fits; second does not. xs must still be unchanged.
+// expect: run stable_second_allocation_failure() = 54321
+fn stable_second_allocation_failure() -> u64 {
+    let mut xs = five(5, 4, 3, 2, 1)
+    let r = bound bytes 40 { list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order { order.compare(a, b) }) }
+    match r { Ok(Error(_)) => digits(xs), _ => 99 }
+}

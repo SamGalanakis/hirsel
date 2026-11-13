@@ -78,3 +78,11 @@ fn get_or_insert_capacity() -> u64 {
     let r = bound bytes 0 { map.get_or_insert(mut m, take x, 7) }
     match r { Ok(Error((_, take original, v))) => if v == 7 { list.len(string.as_bytes(original)) + map.len(m) } else { 99 }, _ => 99 }
 }
+
+// A present key is read without admission, without replacing its value.
+// expect: run get_or_insert_present_bound() = 10
+fn get_or_insert_present_bound() -> u64 {
+    let mut m = one_entry()
+    let r = bound bytes 0 { map.get_or_insert(mut m, 1, 99) }
+    result.unwrap(result.unwrap(r))
+}

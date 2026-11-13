@@ -590,6 +590,10 @@ pub enum RtOp {
     CompareBytes,
     /// The fixed byte hash a `Map` key's text components fold (crate docs, "Maps").
     HashBytes,
+    /// The next cell of a `Causes` chain, or null (crate docs, "Causes").
+    CauseNext,
+    /// A cause cell's `Cause`, in core's layout (crate docs, "Causes").
+    CauseValue,
     /// `args.len` (CAP-5): the run's argument count.
     ArgsLen,
     /// `args.get`: a run-owned `String` carrier of capacity 0, or null.
@@ -693,6 +697,8 @@ impl RtOp {
     /// | `dest_id` | | `u64`: a destination identity no other call of the run returns (MEM-4) |
     /// | `compare_bytes` | `a: ptr`, `a_len: u64`, `b: ptr`, `b_len: u64` | `i8`: -1, 0 or 1 as `a` orders before, equal to or after `b` |
     /// | `hash_bytes` | `data: ptr`, `len: u64` | `u64`: the fixed byte hash (crate docs, "Maps") |
+    /// | `cause_next` | cell `ptr` | `ptr`: the next cell, null after the last |
+    /// | `cause_value` | cell `ptr` | `ptr`: the cell's `Cause` |
     /// | `args_len` | `Args: u64` | `u64` |
     /// | `args_get` | `Args: u64`, `i: u64` | `ptr`: a `String` carrier, null past the end |
     /// | `host_open` | `Dir: u64`, path `ptr`, `mode: u8` | outcome |
@@ -743,6 +749,7 @@ impl RtOp {
                 vec![Ty::Scalar(Scalar::I8)],
             ),
             RtOp::HashBytes => (vec![V(p), V(u64_)], vec![u64_]),
+            RtOp::CauseNext | RtOp::CauseValue => (vec![V(p)], vec![p]),
             RtOp::ArgsLen => (vec![V(u64_)], vec![u64_]),
             RtOp::ArgsGet => (vec![V(u64_), V(u64_)], vec![p]),
             RtOp::Host(op) => {
@@ -790,6 +797,8 @@ impl RtOp {
             | RtOp::DestId
             | RtOp::CompareBytes
             | RtOp::HashBytes
+            | RtOp::CauseNext
+            | RtOp::CauseValue
             | RtOp::ArgsLen
             | RtOp::ArgsGet
             | RtOp::Host(_) => vec![],

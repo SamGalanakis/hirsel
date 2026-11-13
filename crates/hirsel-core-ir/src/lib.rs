@@ -115,6 +115,14 @@
 //!   `emit` of a `String` view or a `Text` into a `Text` is one fit check and one
 //!   `copy`. An unmarked `T` parameter also takes a `View[T]` (OWN-7): the
 //!   producer passes the locator.
+//! - **A view of a plain type** is that type's own representation (a scalar, or a
+//!   place of the type), copied when the view is made: plain values have no identity
+//!   and viewed storage is frozen, so the copy cannot be told apart. A view of a
+//!   plain packed element decodes it field after field into a native place (a compact
+//!   field becomes its locator); a view of a compact element is its locator.
+//!   Iterating a span advances by the element's packed size, constant for a plain
+//!   element and `compact_extent` at the holder's W otherwise. A `FixedSpan` element
+//!   MEM-9 does not fix uses the same packed encoding.
 //!
 //! # Strings and literals (FORM v1b)
 //!
@@ -211,6 +219,19 @@
 //!
 //! `rt.dest_id` is the run's one counter of fresh `u64` identities: a
 //! destination's (MEM-4) and every `Unique` (`unique.new()` is `call rt.dest_id ()`).
+//!
+//! # Causes (FORM v1b)
+//!
+//! A `Causes` value's one handle is its head cause cell (null when empty); the cells
+//! are the run time's. `for c in cs` walks them, primary cause first:
+//! `rt.cause_value(cell) -> ptr` is the cell's `Cause` and `rt.cause_next(cell) -> ptr`
+//! the next cell, null after the last. Neither takes the context, admits, waits or
+//! fails; engines map them to `hirsel_core_cause_value` and `hirsel_core_cause_next`.
+//! The `Cause` is in core's layout (40 bytes): the `CauseKind` tag (u8, declaration
+//! order: Overflow 0, Bounds 1, Division 2, Unwrap 3, Fail 4, Cancelled 5, Capacity 6)
+//! at 0, `Fail`'s `String` carrier at 8, `Site` (u64) at 32. `View[Cause]` is that
+//! pointer, valid while the `Causes` lives. A `Fail` cause owns its message; cleaning
+//! the `Causes` frees it when its capacity is not 0.
 //!
 //! # Capabilities and the entry (FORM v1b)
 //!

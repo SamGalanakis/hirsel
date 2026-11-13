@@ -229,6 +229,8 @@ fn rt(op: RtOp) -> String {
         RtOp::DestId => "rt.dest_id".into(),
         RtOp::CompareBytes => "rt.compare_bytes".into(),
         RtOp::HashBytes => "rt.hash_bytes".into(),
+        RtOp::CauseNext => "rt.cause_next".into(),
+        RtOp::CauseValue => "rt.cause_value".into(),
         RtOp::ArgsLen => "rt.args_len".into(),
         RtOp::ArgsGet => "rt.args_get".into(),
         RtOp::Host(op) => format!("rt.{}", op.name()),
@@ -1429,6 +1431,8 @@ impl BodyParser {
                 "dest_id" => RtOp::DestId,
                 "compare_bytes" => RtOp::CompareBytes,
                 "hash_bytes" => RtOp::HashBytes,
+                "cause_next" => RtOp::CauseNext,
+                "cause_value" => RtOp::CauseValue,
                 "args_len" => RtOp::ArgsLen,
                 "args_get" => RtOp::ArgsGet,
                 _ => match HostOp::ALL.into_iter().find(|op| op.name() == name) {

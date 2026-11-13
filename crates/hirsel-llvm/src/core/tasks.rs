@@ -99,6 +99,8 @@ impl FunctionEmitter<'_> {
                 &[p("%context"), u(&args[0]), u(&args[1])],
             ),
             RtOp::Host(op) => self.host_call(op, &args),
+            RtOp::CauseNext => self.native_call("hirsel_core_cause_next", &[P], &[p(&args[0])]),
+            RtOp::CauseValue => self.native_call("hirsel_core_cause_value", &[P], &[p(&args[0])]),
             RtOp::HashBytes => {
                 self.native_call("hirsel_core_hash_bytes", &[U], &[p(&args[0]), u(&args[1])])
             }

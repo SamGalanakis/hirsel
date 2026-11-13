@@ -136,6 +136,15 @@ impl Function<'_, '_, '_> {
                 outputs[0] = self.c_call("hirsel_core_hash_bytes", &[P, U], &[U], &args)?[0];
                 1
             }
+            RtOp::CauseNext | RtOp::CauseValue => {
+                let name = if op == RtOp::CauseNext {
+                    "hirsel_core_cause_next"
+                } else {
+                    "hirsel_core_cause_value"
+                };
+                outputs[0] = self.c_call(name, &[P], &[P], &[args[0]])?[0];
+                1
+            }
             RtOp::CheckCancel => {
                 let status = self.c_call(
                     "hirsel_core_check_cancel",

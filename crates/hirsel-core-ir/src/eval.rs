@@ -15,7 +15,7 @@ use hirsel_core_layout::{
     Body as Shaped, FieldTy, Handle, Layout, Recipe, Repr, TypeRef, charge, compute, field_size,
     map_entry,
 };
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 
 #[derive(Debug, PartialEq)]
 pub enum Outcome {
@@ -80,7 +80,27 @@ const REGION_BASE: u64 = 0x10_0000;
 const TASK_BASE: u64 = 0x20_0000;
 /// Sender of channel `i` is `CHAN_BASE + 2i`, its receiver `CHAN_BASE + 2i + 1`.
 const CHAN_BASE: u64 = 0x30_0000;
-const CAUSES_BASE: u64 = 0x40_0000;
+
+/// One cause of a chain: its `CauseKind` case and, for `Fail`, the message's
+/// `String` carrier `{data, length, capacity}`, which the cause owns (FAIL-10).
+#[derive(Clone, Copy, Debug)]
+struct Cause {
+    kind: &'static str,
+    message: [u64; 3],
+}
+/// `CauseKind` in declaration order: its tag in core's layout (crate docs, "Causes").
+const CAUSE_KINDS: [&str; 7] = [
+    "Overflow",
+    "Bounds",
+    "Division",
+    "Unwrap",
+    "Fail",
+    "Cancelled",
+    "Capacity",
+];
+/// A cause cell: core's `Cause` (40 bytes: tag at 0, the `Fail` carrier at 8, `Site`
+/// at 32), then the next cell's pointer.
+const CELL_NEXT: u64 = 40;
 
 /// Why an instruction stopped: a new cause, or a callee's failure already chained.
 #[derive(Debug)]
@@ -116,7 +136,7 @@ struct Limit {
 }
 struct Task {
     limits: Vec<usize>,
-    chain: Vec<String>,
+    chain: Vec<Cause>,
     /// Used cause cells beyond the primary, with the limit each is charged to.
     cells: Vec<(usize, u64)>,
 }
@@ -130,6 +150,8 @@ struct Child {
     joined: bool,
     /// The child's used cells: its primary and each failed finalizer's.
     cells: Vec<(usize, u64)>,
+    /// Its causes, primary first, while no `Causes` holds them.
+    chain: Vec<Cause>,
 }
 struct Chan {
     item: TypeRef,
@@ -160,8 +182,8 @@ struct Machine<'m> {
     regions: Vec<Vec<usize>>,
     children: Vec<Child>,
     chans: Vec<Chan>,
-    /// Each delivered `Causes`: the cells it owns, None once dropped.
-    causes: Vec<Option<Vec<(usize, u64)>>>,
+    /// Each live delivered `Causes`, by its head cell: the charged cells it owns.
+    causes: HashMap<u64, Vec<(usize, u64)>>,
     /// Every inline array field type of the module: element and length.
     arrays: Vec<(FieldTy, u64)>,
     trace: Vec<u64>,
@@ -220,7 +242,7 @@ fn run_world(
         regions: Vec::new(),
         children: Vec::new(),
         chans: Vec::new(),
-        causes: Vec::new(),
+        causes: HashMap::new(),
         arrays: Vec::new(),
         trace: Vec::new(),
         dests: 0,
@@ -259,7 +281,7 @@ fn run_world(
     };
     let outcome = match mach.call(&mut task, f, args) {
         Ok(r) => Outcome::Returned(r),
-        Err(_) => Outcome::Failed(task.chain),
+        Err(_) => Outcome::Failed(task.chain.iter().map(|c| c.kind.into()).collect()),
     };
     Report {
         outcome,
@@ -673,6 +695,11 @@ impl Machine<'_> {
                 };
                 // CONC-8: an abandoned handle cleans the result or the chain.
                 let failed = status == 0 && self.drop_value(t, result, r);
+                for c in std::mem::take(&mut self.children[i].chain) {
+                    if c.message[2] != 0 {
+                        self.free(c.message[0]);
+                    }
+                }
                 for (l, n) in self.settle_child(i) {
                     self.refund(l, n);
                 }
@@ -730,8 +757,18 @@ impl Machine<'_> {
                 false
             }
             FieldTy::Handle(Handle::Causes) => {
-                let i = (self.load(at, 8) - CAUSES_BASE) as usize;
-                let cells = self.causes[i].take().expect("Causes dropped twice");
+                let head = self.load(at, 8);
+                let cells = self.causes.remove(&head).expect("Causes dropped twice");
+                let mut cell = head;
+                while cell != 0 {
+                    let next = self.load(cell + CELL_NEXT, 8);
+                    if self.load(cell, 1) == 4 && self.load(cell + 24, 8) != 0 {
+                        let data = self.load(cell + 8, 8);
+                        self.free(data);
+                    }
+                    self.free(cell);
+                    cell = next;
+                }
                 for (l, n) in cells {
                     self.refund(l, n);
                 }
@@ -849,12 +886,12 @@ impl Machine<'_> {
                 let f = FuncId((a[2] - FN_BASE) as u32);
                 let ok = self.call(&mut child, f, &[rb, xb]).is_ok();
                 self.end_limit(lim);
-                let status = match child.chain.first().map(String::as_str) {
+                let status = match child.chain.first().map(|c| c.kind) {
                     _ if ok => 0,
                     Some("Cancelled") => 2,
                     _ => 1,
                 };
-                let mut cells = child.cells;
+                let (mut cells, chain) = (child.cells, child.chain);
                 if status != 0 {
                     cells.insert(0, (cur, charge::CAUSE_CELL));
                 }
@@ -867,6 +904,7 @@ impl Machine<'_> {
                     limit: cur,
                     joined: false,
                     cells,
+                    chain,
                 });
                 vec![TASK_BASE + self.children.len() as u64 - 1, 0]
             }
@@ -882,13 +920,26 @@ impl Machine<'_> {
                 if status == 0 {
                     vec![0, 0]
                 } else {
-                    self.causes.push(Some(cells));
-                    vec![
-                        u64::from(status),
-                        CAUSES_BASE + self.causes.len() as u64 - 1,
-                    ]
+                    // The chain as the run time delivers it: one cell per cause, each
+                    // a `Cause` in core's layout then the next cell (crate docs, "Causes").
+                    let chain = std::mem::take(&mut self.children[i].chain);
+                    let mut head = 0;
+                    for c in chain.iter().rev() {
+                        let cell = self.block(CELL_NEXT + 8, None, 0, None);
+                        let tag = CAUSE_KINDS.iter().position(|k| *k == c.kind).unwrap();
+                        self.store(cell, 1, tag as u64);
+                        for (j, w) in c.message.into_iter().enumerate() {
+                            self.store(cell + 8 + 8 * j as u64, 8, w);
+                        }
+                        self.store(cell + CELL_NEXT, 8, head);
+                        head = cell;
+                    }
+                    self.causes.insert(head, cells);
+                    vec![u64::from(status), head]
                 }
             }
+            RtOp::CauseNext => vec![self.load(a[0] + CELL_NEXT, 8)],
+            RtOp::CauseValue => vec![a[0]],
             RtOp::Cancel | RtOp::CheckCancel => vec![], // every child has already ended
             RtOp::DestId => {
                 self.dests += 1;
@@ -998,7 +1049,10 @@ impl Machine<'_> {
                 let r = self.inst(t, b, &slots, &mut vals, &mut places, inst);
                 if let Err(stop) = r {
                     if let Stop::Cause(c) = stop {
-                        t.chain.push(c.into());
+                        t.chain.push(Cause {
+                            kind: c,
+                            message: [0; 3],
+                        });
                     }
                     match inst.fail(b) {
                         Some(fb) => {
@@ -1045,7 +1099,15 @@ impl Machine<'_> {
                     return Ok(pool(*r).iter().map(|v| vals[v.index()]).collect());
                 }
                 Terminator::Raise { cause: c, cleanup } => {
-                    t.chain.push(cause(*c).into());
+                    let mut message = [0; 3];
+                    if let RaiseCause::Fail(a) = c {
+                        let (p, _) = self.address(b, &slots, &vals, &places, *a)?;
+                        message = [0, 8, 16].map(|o| self.load(p + o, 8));
+                    }
+                    t.chain.push(Cause {
+                        kind: cause(*c),
+                        message,
+                    });
                     match cleanup {
                         Some(c) => (*c, Vec::new()),
                         None => break 'blocks,

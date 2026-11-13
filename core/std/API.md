@@ -13,9 +13,11 @@ is library code. Every function there has a body written in Hirsel over `core/co
 else, so you can tell core from library by the directory, and in a file by whether the `fn` has a
 body. A `pub fn` is the API. A plain `fn` or `const` is an implementation detail of its module.
 `core/std/tests/<module>.hirsel` holds the contract tests: small functions, each preceded by
-`// expect: run f() = R`, with the expected values derived by hand. `core/std/CHECK.md` records
-what the front-end checker on main does with each body and test
-(`cargo test -p hirsel-core-front std_seed_check_report -- --ignored`).
+`// expect: run f() = R`, with the expected values derived by hand. To see what the
+front-end checker does with each body and test (the counts, then a table per function and per
+contract-test run), run
+`cargo test -p hirsel-core-front std_seed_check_report -- --ignored --nocapture`. It prints to the
+test log and writes nothing to the tree; the report depends on the checker, so it is not tracked.
 
 **Naming std from another package.** There are no imports (LANG-7). A module that extends core
 (list, string, char, int, float, map, result) merges into core's name, so `list.sort` and

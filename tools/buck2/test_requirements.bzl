@@ -13,6 +13,7 @@ OPENAT2_TEST_CASES = {
         "host_file_tests::run_stop_skips_host_file_cleanup_and_kernel_releases_the_descriptor",
         "host_ops_tests::every_host_op_routes_to_the_host_and_records_delivery",
         "provider_tests::files_deliver_committed_prefixes_and_all_open_modes",
+        "provider_tests::rule_provider_tests::cap7_temporary_dir_never_widens_its_parent_authority",
         "provider_tests::guarded_root_routes_real_os_calls_through_the_separate_host_stack",
         "provider_tests::locks_are_exclusive_idempotent_and_end_at_close",
         "provider_tests::paths_cannot_escape_grants_and_tree_drop_never_follows_links",

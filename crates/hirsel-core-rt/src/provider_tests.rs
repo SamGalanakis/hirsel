@@ -683,3 +683,6 @@ fn literal_failure_messages_keep_static_backing_and_render_one_line_with_their_s
     assert_eq!(unsafe { hirsel_core_run(&config, main) }, 101);
     assert_eq!(stderr, b"Fail(\"static\\nmessage\") at 17\n");
 }
+
+#[path = "rule_provider_tests.rs"]
+mod rule_provider_tests;

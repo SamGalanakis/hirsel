@@ -159,12 +159,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     continue;
                 }
                 (NodeKind::BytesArgument, true) => self.kids(a)[0],
-                (NodeKind::BytesArgument, false) | (_, true) => {
-                    self.gap(
-                        a,
-                        "bytes argument mark does not match its parameter (rule unspecified)",
-                    );
-                    continue;
+                // A missing or extra mark is refused at the argument (OWN-7); the
+                // argument is still typed against its parameter.
+                (NodeKind::BytesArgument, false) => {
+                    self.refuse("OWN-7", a, "this parameter takes no `bytes` mark");
+                    self.kids(a)[0]
+                }
+                (_, true) => {
+                    self.refuse("OWN-7", a, "this parameter needs a `bytes` argument");
+                    a
                 }
                 _ => a,
             };

@@ -1,0 +1,4 @@
+// OWN-7: an argument for a `bytes` parameter is written `bytes e` (spec example).
+// expect: refuse OWN-7 at 4:19
+fn g(bytes n: u64) -> u64 { n }
+fn f() -> u64 { g(8) }

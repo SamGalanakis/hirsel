@@ -892,8 +892,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     self.refuse("LANG-9", a, "this payload is not labelled");
                     return (ERROR, None);
                 }
+                // A payload is a `take` parameter, never a `bytes` one (OWN-7).
                 (NodeKind::BytesArgument, _) => {
-                    return self.gap_ty(a, "labelled and bytes arguments are not built");
+                    self.refuse("OWN-7", a, "a payload takes no `bytes` mark");
+                    self.kids(a)[0]
                 }
                 (_, true) => {
                     let name = &f.name;

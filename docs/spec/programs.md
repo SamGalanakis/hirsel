@@ -75,14 +75,31 @@ pub fn main() -> u8 { 3 }                                     // refused: PROG-3
 
 ### PROG-4: Tests
 
-A function marked `@test` takes no parameters other than capabilities, and returns
-`Result[(), E]`. Each test runs as its own run with its own root limit; `Error` and a
-failure fail the test. A test function can be named, called or taken as a value only by
-another test function.
+A function marked `@test` takes no type parameters and no parameters other than
+capabilities, unmarked as `main`'s are (PROG-3), so never `Args`; it returns `Result[(), E]`
+for any `E`, and may be `waits`. Each test runs as its own run with its own root limit: the
+test run's configuration grants its parameters and supplies its root limit as a run's
+configuration does for `main` ([CAP-4](capabilities.md#cap-4-entry-grants),
+[MEM-19](budgets.md#mem-19-limits)), and a test whose run does not start fails. `Ok(())`
+passes the test; `Error(e)` fails it, `e` cleaned as its run ends whatever `E` is, an `Exit`
+included; a failure fails it; a run stop fails the test it stops and ends no other test's
+run. A test function can be named, called or taken as a value only by another test
+function; otherwise it is an ordinary function of its module (PROG-2), so it may call that
+module's private functions.
 
 ```hirsel
 @test
 fn adds() -> Result[(), ()] { if 1u64 + 1 == 2 { Ok(()) } else { fail("arithmetic") } }
+@test
+fn greets(out: Stdout) -> Result[(), WriteError] waits { stdout.write(out, "hi\n") }
+```
+```hirsel
+@test
+fn each[T]() -> Result[(), ()] { Ok(()) }                     // refused: PROG-4, a type parameter
+```
+```hirsel
+@test
+fn named(argv: Args) -> Result[(), ()] { Ok(()) }             // refused: PROG-4, Args is not a capability
 ```
 
 ### PROG-5: Code identity

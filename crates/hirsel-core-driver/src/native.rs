@@ -8,8 +8,11 @@ use std::fmt;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
+#[path = "entry_cleanup.rs"]
+mod cleanup;
 #[path = "release_native.rs"]
 mod release;
+use cleanup::result_cleanup;
 
 pub const TARGET: &str = "x86_64-unknown-linux-gnu";
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -262,27 +265,63 @@ impl CheckProduct {
     ) -> Result<BuildProduct, NativeStop> {
         let instances = reached.require()?;
         let source = self.process_entry(entry, options)?;
-        let objects = self.emit_instances(entry, instances, &reached.materialized, options)?;
+        let mut objects = self.emit_instances(entry, instances, &reached.materialized, options)?;
+        if let Some(module) = &self.entry_binding(entry)?.cleanup {
+            let store = Store::new(&options.store)?;
+            let object_key = key(
+                "hirsel.core-entry-cleanup.v1",
+                &(
+                    compiler_identity()?,
+                    &options.target,
+                    options.backend,
+                    options.optimize,
+                    options.logical_charge_report.is_some(),
+                    module,
+                ),
+            )?;
+            let (identity, bytes, compiled) =
+                if let Some((identity, bytes)) = cached(&store, object_key)? {
+                    (identity, bytes, false)
+                } else {
+                    let bytes = emit_unit(module, options).map_err(|message| NativeStop::Emit {
+                        definition: entry.clone(),
+                        message,
+                    })?;
+                    (publish(&store, object_key, &bytes)?, bytes, true)
+                };
+            objects.push(ObjectProduct {
+                instance: module.instances.last().unwrap().clone(),
+                identity,
+                bytes,
+                compiled,
+            });
+        }
         link(&source, &objects, options)
+    }
+    fn entry_binding(&self, entry: &DefPath) -> Result<&EntryAbi, NativeStop> {
+        let binding = self
+            .native_entry
+            .as_ref()
+            .filter(|(path, _)| path == entry)
+            .map(|(_, abi)| abi)
+            .or_else(|| self.test_entries.get(entry))
+            .ok_or_else(|| {
+                NativeStop::Entry("no checked entry selected for this definition".into())
+            })?;
+        binding.as_ref().map_err(|e| NativeStop::Entry(e.clone()))
     }
     fn process_entry(
         &self,
         entry: &DefPath,
         options: &NativeOptions,
     ) -> Result<String, NativeStop> {
-        let Some((path, binding)) = &self.native_entry else {
-            return Err(NativeStop::Entry("no checked entry selected".into()));
-        };
-        if path != entry {
-            return Err(NativeStop::Entry(
-                "build entry differs from checked entry".into(),
-            ));
-        }
+        let binding = self.entry_binding(entry)?;
         let EntryAbi {
             recipe,
             exit_offset,
             parameters,
-        } = binding.as_ref().map_err(|e| NativeStop::Entry(e.clone()))?;
+            cleanup,
+        } = binding;
         let instance = InstanceKey {
             definition: entry.clone(),
             types: vec![],
@@ -293,6 +332,9 @@ impl CheckProduct {
             recipe,
             *exit_offset,
             parameters,
+            cleanup
+                .as_ref()
+                .map(|m| hirsel_cranelift::core::symbol(m.instances.last().unwrap())),
             options,
         )
     }
@@ -304,6 +346,7 @@ pub(crate) struct EntryAbi {
     recipe: Recipe,
     exit_offset: Option<u64>,
     parameters: Vec<EntryParameter>,
+    cleanup: Option<Module>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct EntryParameter {
@@ -377,10 +420,12 @@ pub(crate) fn bind_entry(
                 })
             })
             .collect::<Result<Vec<_>, &str>>()?;
+        let cleanup = (!recipe.plain).then(|| result_cleanup(module, dest, entry));
         Ok(EntryAbi {
             recipe,
             exit_offset,
             parameters,
+            cleanup,
         })
     })()
     .map_err(str::to_owned);
@@ -403,16 +448,12 @@ fn entry_source(
     recipe: &Recipe,
     exit_offset: Option<u64>,
     parameters: &[EntryParameter],
+    cleanup: Option<String>,
     options: &NativeOptions,
 ) -> Result<String, NativeStop> {
     let Layout::Fixed(layout) = &recipe.layout else {
         return Err(NativeStop::Entry("Result needs fixed layout".into()));
     };
-    if !recipe.plain {
-        return Err(NativeStop::Entry(
-            "owned entry error cleanup needs emitted drop glue".into(),
-        ));
-    }
     let tag = layout.tag.expect("checked Result is a variant");
     let case = c_case(&tag, "word");
     let error = if let Some(offset) = exit_offset {
@@ -463,6 +504,14 @@ fn entry_source(
     let grants = (0..parameters.len())
         .map(|i| format!(",cfg->grants[{i}]"))
         .collect::<String>();
+    let cleanup_declaration = cleanup
+        .as_ref()
+        .map(|name| format!("extern uint8_t {name}(HirselCoreContext *, void *);"))
+        .unwrap_or_default();
+    let cleanup_call = cleanup
+        .as_ref()
+        .map(|name| format!("if({name}(ctx,result)) return 1;"))
+        .unwrap_or_default();
     let limit = options.root_limit;
     let grant_mask = options.grant_mask;
     let observation_label = if options.logical_charge_report.is_some() {
@@ -485,6 +534,7 @@ fn entry_source(
 #include <string.h>
 {observation_label}
 extern uint8_t {symbol}(HirselCoreContext *, void *{parameter_types});
+{cleanup_declaration}
 static uint8_t entry(HirselCoreContext *ctx, const HirselCoreProcessConfig *cfg, HirselCoreMainResult *out) {{
     (void)cfg;
     _Alignas({align}) uint8_t result[{size}];
@@ -492,6 +542,7 @@ static uint8_t entry(HirselCoreContext *ctx, const HirselCoreProcessConfig *cfg,
     if(failed) return failed;
     uint64_t word=0; memcpy(&word,result+{at},{width});
     if(({case})==1) {{ {error} }}
+    {cleanup_call}
     return 0;
 }}
 static const HirselCoreEntryRequirement parameters[] = {{{requirements}}};
@@ -742,6 +793,7 @@ b0:
     include!("finalizer_native.rs");
     include!("startup_native.rs");
     include!("test_rules_native.rs");
+    include!("test_run_native.rs");
 
     fn run_clean(binary: &Path, exit: i32) {
         let result = Command::new(binary).output().unwrap();
@@ -1096,12 +1148,12 @@ b0:
     }
     #[test]
     #[ignore = "explicit native integration target"]
-    fn cranelift_source_entries_link_run_and_reuse() {
+    fn prog3_prog6_cranelift_source_entries_link_run_and_reuse() {
         exercise(Backend::Cranelift)
     }
     #[test]
     #[ignore = "explicit native integration target"]
-    fn llvm_source_entries_link_run_and_reuse() {
+    fn prog3_prog6_llvm_source_entries_link_run_and_reuse() {
         exercise(Backend::Llvm)
     }
 }

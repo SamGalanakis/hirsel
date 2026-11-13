@@ -107,9 +107,10 @@ fn damaged_disk_bytes_are_a_miss() {
 }
 
 #[test]
-fn unrelated_parse_failure_does_not_suppress_a_valid_body() {
+fn prog8_unrelated_parse_failure_does_not_suppress_other_results() {
     let dir = tempfile::tempdir().unwrap();
-    let mut req = request("fn answer() -> u64 { 42 }\n", dir.path());
+    let source = "fn answer() -> u64 { 42 }\nfn independently_bad() -> u64 { true }\n";
+    let mut req = request(source, dir.path());
     let bad = dir.path().join("broken.hirsel");
     std::fs::write(&bad, "fn broken(\n").unwrap();
     req.inputs.packages[0]
@@ -123,6 +124,15 @@ fn unrelated_parse_failure_does_not_suppress_a_valid_body() {
         .check(req, &mut Meter::new(false))
         .unwrap();
     assert!(!product.accepted());
+    let diagnostics = product.machine_diagnostics().unwrap();
+    assert!(
+        diagnostics.len() >= 2,
+        "{}",
+        serde_json::to_string(&diagnostics).unwrap()
+    );
+    assert!(diagnostics.iter().any(|d| d.rule == "LANG-11"
+        && d.primary.module == "app@1/main"
+        && &source[d.primary.span.start as usize..d.primary.span.end as usize] == "true"));
     let answer = DefPath::from_full("app@1/main/answer").unwrap();
     let d = product.demand(&answer).unwrap();
     assert_eq!(
@@ -248,7 +258,7 @@ fn negative_and_shadowed_name_reads_invalidate_on_new_names() {
     assert!(missing.check.function.is_some());
 }
 #[test]
-fn transitive_type_reads_and_discovery_order_have_stable_results() {
+fn prog1_prog6_transitive_type_reads_and_discovery_order_have_stable_results() {
     let dir = tempfile::tempdir().unwrap();
     let mut driver = Driver::default();
     let other = dir.path().join("other.hirsel");
@@ -513,7 +523,7 @@ fn refused_library_never_publishes_an_image() {
 }
 
 #[test]
-fn machine_refusal_spans_point_into_current_file_bytes() {
+fn prog7_machine_refusal_spans_point_into_current_file_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let source = "// leading comment\nfn good() -> u64 { 42 }\nfn bad() -> u64 { let n = 7; 0 }\n";
     let result = Driver::default()
@@ -718,7 +728,7 @@ fn installed_image_instances_are_demanded_without_source_rechecks() {
 }
 
 #[test]
-fn invalid_utf8_diagnostics_keep_raw_byte_spans() {
+fn prog7_invalid_utf8_diagnostics_keep_raw_byte_spans() {
     let dir = tempfile::tempdir().unwrap();
     let req = request("", dir.path());
     std::fs::write(dir.path().join("main.hirsel"), [0xf0, 0x28, 0x8c, 0x28]).unwrap();

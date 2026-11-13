@@ -8,8 +8,10 @@ pub use product::PackageProduct;
 mod instances;
 mod native;
 mod reachability;
+mod test_run;
 pub use native::{Backend, BuildProduct, NativeOptions, NativeStop, ObjectProduct, grant_kind};
 pub use reachability::{GapStop, Reachable};
+pub use test_run::TestOutcome;
 mod meter;
 pub use diagnostics::{Diagnostic, IncompleteDiagnostic, SourceSite};
 pub use image::{CoreImage, LibraryInput};
@@ -182,6 +184,7 @@ pub struct CheckProduct {
     pub image: Option<Arc<CoreImage>>,
     pub(crate) library: Option<Arc<hirsel_core_front::Library>>,
     native_entry: Option<native::EntryBinding>,
+    test_entries: BTreeMap<DefPath, Result<native::EntryAbi, String>>,
     headers: Arc<hirsel_core_ids::published::Map<DefPath, reuse::Header>>,
     records: Option<Root>,
 }
@@ -200,6 +203,7 @@ impl CheckProduct {
             image: None,
             library: None,
             native_entry: None,
+            test_entries: BTreeMap::new(),
             headers: Arc::default(),
             records: None,
         }
@@ -275,6 +279,7 @@ struct Root {
     diagnostics: Vec<Refusal>,
     incomplete: Vec<Incomplete>,
     native_entry: Option<native::EntryBinding>,
+    test_entries: BTreeMap<DefPath, Result<native::EntryAbi, String>>,
 }
 struct Cache {
     bytes: Vec<u8>,
@@ -307,6 +312,7 @@ impl Cache {
     fn product(&self, hash: ContentHash) -> Option<CheckProduct> {
         let mut result = CheckProduct {
             native_entry: self.root.native_entry.clone(),
+            test_entries: self.root.test_entries.clone(),
             headers: Arc::clone(&self.root.headers),
             diagnostics: self.root.diagnostics.clone(),
             incomplete: self.root.incomplete.clone(),
@@ -692,6 +698,17 @@ impl Driver {
                 .entry
                 .as_ref()
                 .map(|e| native::bind_entry(&p, e, result.definitions.get(e).map(Arc::as_ref)));
+            for f in p.fns.base_len()..p.fns.len() {
+                let fd = &p.fns[f];
+                if fd.is_test {
+                    let (path, abi) = native::bind_entry(
+                        &p,
+                        &fd.path,
+                        result.definitions.get(&fd.path).map(Arc::as_ref),
+                    );
+                    result.test_entries.insert(path, abi);
+                }
+            }
             if produce && declarations_accepted {
                 result.library = Some(Arc::new(p.into_library()));
             } else {
@@ -759,6 +776,7 @@ impl Driver {
                 &result.diagnostics,
                 &result.incomplete,
                 &result.native_entry,
+                &result.test_entries,
             );
             let record = writer.record(&footer)?;
             use std::io::Write;
@@ -775,6 +793,7 @@ impl Driver {
                     diagnostics: vec![],
                     incomplete: vec![],
                     native_entry: result.native_entry.clone(),
+                    test_entries: result.test_entries.clone(),
                 });
             }
             meter.finish("publish/footer");

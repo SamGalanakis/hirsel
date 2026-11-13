@@ -40,12 +40,13 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
         "image",
         "build",
         "run",
+        "test",
         "core-product",
         "std-product",
     ]
     .contains(&command.as_str())
     {
-        return Err("expected check, image, build, run, core-product or std-product".into());
+        return Err("expected check, image, build, run, test, core-product or std-product".into());
     }
     let mut dir = None;
     let mut libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
@@ -58,7 +59,10 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     let mut source_std = false;
     let mut product_name = None;
     let mut entry = None;
-    let native_command = command == "build" || command == "run";
+    let test_command = command == "test";
+    let native_command = command == "build" || command == "run" || test_command;
+    let mut test_filter = None;
+    let mut explicit_limit = false;
     let mut backend = None;
     let mut release = false;
     let mut runtime = None;
@@ -97,6 +101,9 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
                     .filter(|kind| (1..=9).contains(kind)).ok_or("expected Net, Clock, Random, Stdout, Stderr, Stdin, Env, Process or Tasks; use --dir for Dir; Args is always present")?;
                 grant_mask |= 1 << kind;
             }
+            "--filter" if test_command => {
+                test_filter = Some(args.next().ok_or("missing test filter")?)
+            }
             "--release" => release = true,
             "--backend" => {
                 backend = Some(args.next().ok_or("missing backend")?.parse::<Backend>()?)
@@ -111,7 +118,10 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
             }
             "--cc" => cc = PathBuf::from(args.next().ok_or("missing C linker driver")?),
             "--target" => target = args.next().ok_or("missing target")?,
-            "--limit" => root_limit = args.next().ok_or("missing root limit")?.parse()?,
+            "--limit" => {
+                explicit_limit = true;
+                root_limit = args.next().ok_or("missing root limit")?.parse()?;
+            }
             "-o" | "--output" => {
                 output_path = Some(PathBuf::from(args.next().ok_or("missing output path")?))
             }
@@ -141,6 +151,12 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
             _ if !arg.starts_with('-') && dir.is_none() => dir = Some(PathBuf::from(arg)),
             _ => return Err(format!("unknown argument: {arg}").into()),
         }
+    }
+    if test_command && !explicit_limit {
+        return Err("test requires an explicit --limit <bytes> for each run".into());
+    }
+    if test_command && entry.is_some() {
+        return Err("test selects marked functions with --filter, not --entry".into());
     }
     let mut meter = Meter::new(metrics.is_some());
     // Source comparison uses checkout sources when Buck's build-time package
@@ -225,6 +241,9 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     if entry.is_some() {
         request.entry = entry;
     }
+    if test_command {
+        request.entry = None;
+    }
     let selected_entry = request.entry.clone();
     let native_store = request.store.join("native");
     meter.finish("startup/discovery");
@@ -251,7 +270,7 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
             None,
         )
     };
-    let reach = if native_command {
+    let reach = if native_command && !test_command {
         Some(
             product.reachable(
                 selected_entry
@@ -266,8 +285,7 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     let accepted = reach
         .as_ref()
         .map_or_else(|| product.accepted(), |r| r.accepted());
-    let mut stopped = None;
-    let native = if native_command && accepted {
+    let mut native_options = if native_command && (test_command || accepted) {
         let headers = tempfile::tempdir()?;
         std::fs::write(
             headers.path().join("hirsel_core_rt.h"),
@@ -281,6 +299,11 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
             headers.path().join("hirsel_core_rt_tasks.h"),
             include_bytes!("../../hirsel-core-rt/include/hirsel_core_rt_tasks.h"),
         )?;
+        let default_output = if test_command {
+            native_store.join("tests")
+        } else {
+            PathBuf::from("program")
+        };
         let options = NativeOptions {
             backend: backend.unwrap_or(if release {
                 Backend::Llvm
@@ -289,11 +312,11 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
             }),
             optimize: release,
             target,
-            runtime: runtime.ok_or("build/run requires --runtime <core runtime archive>")?,
+            runtime: runtime.ok_or("build/run/test requires --runtime <core runtime archive>")?,
             include: headers.path().to_owned(),
             cc,
             store: native_store,
-            output: output_path.unwrap_or_else(|| PathBuf::from("program")),
+            output: output_path.unwrap_or(default_output),
             root_limit,
             instance_limit: 65_536,
             directories,
@@ -305,12 +328,86 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
                 "observation build: root peak reservation includes bound, task and grant reservations (MEM-19); timings are not performance samples"
             );
         }
+
+        Some((headers, options))
+    } else {
+        None
+    };
+    if test_command {
+        let options = &mut native_options.as_mut().unwrap().1;
+        let output_dir = options.output.clone();
+        let tests: Vec<_> = product
+            .tests()
+            .filter(|path| {
+                test_filter
+                    .as_ref()
+                    .is_none_or(|filter: &String| path.to_string().contains(filter.as_str()))
+            })
+            .cloned()
+            .collect();
+        let mut rows = Vec::new();
+        let mut failed = false;
+        for test in &tests {
+            options.output = output_dir.join(hex(hirsel_core_ids::ContentHash::of_bytes(
+                test.to_string().as_bytes(),
+            )));
+            let row = match product.run_test(test, options) {
+                Ok(outcome) => {
+                    let passed = outcome.passed();
+                    failed |= !passed;
+                    if !json {
+                        if passed {
+                            println!("pass {test}");
+                        } else {
+                            let reason = if outcome.output.stderr.is_empty() {
+                                "error".to_owned()
+                            } else {
+                                String::from_utf8_lossy(&outcome.output.stderr)
+                                    .lines()
+                                    .collect::<Vec<_>>()
+                                    .join(" | ")
+                            };
+                            println!("fail {test}: {reason}");
+                        }
+                    }
+                    serde_json::json!({"definition":test.to_string(),"passed":passed,"status":outcome.output.status.code(),"stdout":String::from_utf8_lossy(&outcome.output.stdout),"stderr":String::from_utf8_lossy(&outcome.output.stderr)})
+                }
+                Err(error) => {
+                    failed = true;
+                    if !json {
+                        println!("fail {test}: {error}");
+                    }
+                    serde_json::json!({"definition":test.to_string(),"passed":false,"stopped":error.to_string()})
+                }
+            };
+            rows.push(row);
+        }
+        let passed = !tests.is_empty() && !failed;
+        if json {
+            println!("{}", serde_json::json!({"passed":passed,"tests":rows}));
+        }
+        if tests.is_empty() && !json {
+            eprintln!("no tests found");
+        }
+        meter.finish("test execution/output");
+        if let Some(path) = metrics {
+            std::fs::write(path, serde_json::to_vec_pretty(&meter.result)?)?;
+        }
+        std::process::exit(if tests.is_empty() {
+            2
+        } else {
+            i32::from(failed)
+        });
+    }
+    let mut stopped = None;
+    let native = if native_command && accepted {
+        let options = &native_options.as_ref().unwrap().1;
         match product.build_reachable(
             selected_entry
                 .as_ref()
                 .ok_or("build/run requires an entry")?,
             reach.as_ref().unwrap(),
-            &options,
+            options,
         ) {
             Ok(native) => Some(native),
             Err(e) => {

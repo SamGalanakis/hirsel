@@ -225,3 +225,30 @@ empty-bound reservations that ordinary emission may cancel. Sampling changes
 execution cost, not language-visible event order. This mode currently follows
 the single-worker cooperative scheduler; a future multi-worker scheduler must
 provide a synchronized run observer before using it.
+
+`hirsel-core test <package-dir> --limit <bytes> --runtime <archive>` discovers
+`@test` functions in the request's source modules, including private functions.
+Installed dependency tests are not rediscovered. Tests take only unmarked
+capabilities, no `Args` or type parameters, and return `Result[(), E]`; only
+other tests may refer to them. A test retains normal access to its module's
+private helpers. `--filter <substring>` matches the full definition path; the
+driver visits matching paths in lexical order. No matching test exits 2.
+
+Each selected test builds through the ordinary reachable closure and runs in
+its own process. The mandatory `--limit` supplies each run's root limit; `--dir`
+and `--grant` configure capabilities exactly as for `run`. The typed API exposes
+`CheckProduct::tests` and `run_test(test, options)`, allowing each invocation its
+own explicit configuration. A run stop ends only that test's process. All later
+tests still run after an error, failure, stop, setup refusal or build refusal.
+Returned owned errors are dropped by emitted FORM glue before their outcome is
+reported; a failure from that cleanup is a failed test too. An `Exit` never makes
+an `Error` pass. The driver does not share a test's run or root bookkeeping.
+
+Human output is one `pass <definition>` or `fail <definition>: <reason>` line per
+selected test. Error outcomes say `error`; failures, stops and setup refusals
+include the run's stderr, with lines joined by ` | `. `--json` instead retains
+each test's status and captured stdout/stderr or build-stop reason. Exit 0 means
+at least one test ran and every selected test passed; 1 means a selected test
+failed; 2 means no tests matched or configuration could not be read. `--backend`
+and `--release` select the same engines and options as `build`; `--output` is a
+test-executable directory, defaulting to the private store's `native/tests`.

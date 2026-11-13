@@ -1,5 +1,4 @@
-// Review pending for parallel tasks: langs-text-921. Single reviewed below.
-// Reviewed-by: langs-text-921 2026-11-13; Single only: nested f64 rows, retained matrices, explicit transpose, triple-loop order and fixed7 checksum; compile with overflow checks.
+// Reviewed-by: langs-text-921 2026-11-13; Single/T4/T8/T16: nested f64 rows, transpose and triple-loop order, Arc inputs, all task row partitions retained, reverse joins and center-block checksum; overflow checks required.
 // Matches matmul.hirsel Single: nested f64 rows, explicit transpose, checked indices.
 #[allow(dead_code)]
 mod support;

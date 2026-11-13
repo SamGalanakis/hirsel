@@ -14,3 +14,38 @@ and refuses an absent or changed dependency before measuring.
 The task named Hash::SHA256 uses upstream SimpleSHA256, an eight-lane rolling
 hash. It is not a cryptographic SHA-256 implementation. The Hirsel task must
 preserve that algorithm to match the upstream checksum.
+
+The numeric run configurations use the default 64 MiB logical root except:
+
+- Binarytrees::Obj, root: 128 MiB (default 64).
+- Binarytrees::Arena, root: 256 MiB (default 64).
+
+Pass the documented driver limit through `run.py --limit 134217728` or
+`--limit 268435456`, equivalently `--root-mib 128` or `--root-mib 256`. These are the smallest admitting powers of two for the
+unchanged upstream inputs on both engines. Preserve the default-root refusal;
+report peak charge and peak RSS beside each Rust twin. A larger root funds live
+data and simultaneous old/new growth blocks, never unreclaimed dead storage.
+
+After all task sources are available, `run.py --build-only --suite --module suite`
+generates one dispatcher reaching all 50 tasks for the whole-suite idiomatic
+comparison. Supply the compiler, runtime, backend, upstream binary and external
+output directory as for a runtime sample. Dependency crates remain prebuilt.
+Build reports list source sets and count only loaded source packages in each
+per-line denominator, matching the driver's reported file and byte counts.
+`--resume` reuses completed samples; changed root funding preserves Rust samples
+and runs only the missing Hirsel side.
+
+Result measurements require a release compiler and the shipping fat-LTO runtime.
+Build them with:
+
+    .buck2/bin/buck2 build --target-platforms //tools/buck2:release //:hirsel-core-driver-bin-hirsel-core '//:hirsel-core-rt-archives' --show-json-output
+
+Pass `--compiler-profile release` and the runtime archive reported by the
+configured shipping target, or its `hirsel-core-rt-archives/` view. The runner
+refuses another archive before creating a report directory. `--diagnostic`
+explicitly permits other toolchains; use `--compiler-profile checked
+--runtime-profile checked` to label those observations. Every report records
+both profiles and SHA-256 identities. Diagnostic ratios are excluded from results.
+Changing either identity invalidates only the Hirsel side of `--resume`; correct
+Rust samples remain reusable. `python3 core/langarena/test_run.py` exercises the
+profile refusal, shipping view, explicit diagnostic and archive-change controls.

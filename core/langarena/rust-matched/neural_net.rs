@@ -1,4 +1,4 @@
-// Review pending: langs-text-921. No matched ratio before independent review.
+// Reviewed-by: langs-text-921 2026-11-13; same 2/10/1 indexed neurons and synapses, LCG order, feed/train operation order, momentum history, deep checksum copy and fixed7 output; overflow checks required.
 // Matches neural_net.hirsel: explicit LCG, indexed neuron/synapse vectors and checksum deep copy.
 #[allow(dead_code)]
 mod support;

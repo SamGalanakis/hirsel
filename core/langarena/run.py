@@ -9,6 +9,7 @@ import argparse
 import fcntl
 import hashlib
 import importlib.util
+import itertools
 import json
 import os
 from pathlib import Path
@@ -64,6 +65,25 @@ def vendor_check(rust):
                 raise ValueError(f'vendor file checksum mismatch: {key}/{relative}; run: {POPULATE}')
 
 
+def toolchain_identity(compiler, runtime, compiler_profile, runtime_profile=None, diagnostic=False):
+    """Only the configured shipping archive view admits a result measurement."""
+    roots = {ROOT, *(parent for parent in runtime.absolute().parents if (parent / 'buck-out/v2/art/root').is_dir())}
+    canonical = runtime.resolve()
+    is_shipping = any(path.is_file() and path.resolve() == canonical
+                      for root in roots
+                      for path in root.glob('buck-out/v2/art/root/*/__hirsel-core-rt-archives__/hirsel-core-rt-archives/x86_64-unknown-linux-gnu/libhirsel_core_rt.a'))
+    archive_profile = 'shipping-release-fat-lto' if is_shipping else runtime_profile or 'unknown'
+    if not diagnostic and (compiler_profile != 'release' or not is_shipping):
+        raise ValueError('ratios require --compiler-profile release and the shipping fat-LTO runtime: '
+                         'build //:hirsel-core-rt-archives and pass its archive; '
+                         'use --diagnostic explicitly for other toolchains')
+    return {'compiler_build_profile': compiler_profile,
+            'compiler_sha256': hashlib.sha256(compiler.read_bytes()).hexdigest(),
+            'runtime_archive_profile': archive_profile,
+            'runtime_archive_sha256': hashlib.sha256(runtime.read_bytes()).hexdigest(),
+            'diagnostic': diagnostic}
+
+
 def ratio(numerator, denominator):
     """No incomplete sample, missing counter or zero denominator becomes a ratio."""
     if numerator.get('status') != 'ok' or denominator.get('status') != 'ok':
@@ -99,7 +119,8 @@ def observe(command, directory, task, expected, idiomatic=False, numeric=False):
         valid = stdout == str(expected) + '\n'
     else:
         valid = stdout == expected_line(task, expected)
-    if not valid:
+    sample['output_valid'] = bool(valid)
+    if not valid and sample['status'] == 'ok':
         sample['status'] = 'wrong-output'
     sample['directory'] = str(sample['directory'])
     return sample
@@ -119,6 +140,27 @@ def reviewed(source, author):
         return False
     match = re.search(r'^// Reviewed-by: (\S+)', source.read_text(), re.M)
     return bool(match and match[1] in {'langs-numeric-920', 'langs-text-921'} and match[1] != author)
+
+
+def suite_source():
+    groups = [
+        ('Binarytrees::', 'binarytrees'), ('Brainfuck::', 'brainfuck'), ('Base64::', 'base64'),
+        ('Hash::', 'hash'), ('Sort::', 'sort'), ('CLBG::', 'clbg'), ('Template::', 'template'),
+        ('Json::', 'json'), ('Distance::', 'distance'), ('CSV::', 'csv'), ('Calculator::', 'calculator'),
+        ('Graph::', 'graph'), ('Maze::', 'maze'), ('Compress::', 'compress')]
+    exact = [('Etc::CacheSimulation', 'cache_simulation'), ('Etc::Words', 'words'),
+             ('Etc::LogParser', 'log_parser'), ('Etc::GameOfLife', 'game_of_life'),
+             ('Etc::Sieve', 'sieve'), ('Etc::TextRaytracer', 'text_raytracer'), ('Etc::NeuralNet', 'neural_net')]
+    lines = ['pub fn dispatch(tasks:Tasks,c:String,n:String,w:u64,i:u64)->Result[u32,helper.Error] waits {']
+    for prefix, module in groups:
+        lines.append(f'if string.starts_with(n,"{prefix}") {{return {module}.dispatch(c,n,w,i)}}')
+    for name, module in exact:
+        lines.append(f'if n=="{name}" {{return {module}.dispatch(c,n,w,i)}}')
+    lines += ['if string.starts_with(n,"Matmul::") {return matmul.dispatch_wait(tasks,c,n,w,i)}',
+              'Error(UnknownTask)', '}',
+              'pub fn main(tasks:Tasks,out:Stdout,d:Dir,argv:Args)->Result[(),Exit] waits {',
+              'harness.main_wait(out,d,argv,fn(c:String,n:String,w:u64,i:u64)->Result[u32,helper.Error] waits {dispatch(tasks,c,n,w,i)})', '}']
+    return '\n'.join(lines) + '\n'
 
 
 def build_samples(args):
@@ -143,8 +185,10 @@ def build_samples(args):
             selected = max(choices, key=lambda p: p.stat().st_mtime_ns)
             dependencies += ['--extern', name + '=' + str(selected)]
     report = {'module': args.module, 'backend': args.backend, 'source': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
-              'rows': [], 'missing_rust_dependencies': missing,
+              'rows': [], 'missing_rust_dependencies': missing, 'toolchain': args.toolchain,
+              'result_kind': 'diagnostic' if args.diagnostic else 'result',
               'scenarios': 'check/build fresh, build reuse, one semantically neutral body edit; Rust incremental off',
+              'idiomatic_build': 'whole-suite only',
               'rustc': subprocess.check_output([str(rustc), '-vV'], text=True)}
     def save():
         (out / 'build-report.json').write_text(json.dumps(report, indent=2) + '\n')
@@ -158,6 +202,7 @@ def build_samples(args):
             value = json.loads((directory / 'stdout').read_text())
             result['rechecked'] = value.get('rechecked')
             result['source_bytes'] = value.get('source_bytes')
+            result['files'] = value.get('files')
             if not value.get('accepted') or value.get('stopped'):
                 result['status'] = 'incomplete-build'
         return result
@@ -166,7 +211,22 @@ def build_samples(args):
         host = scratch / 'host'; host.mkdir()
         manifest = scratch / 'inputs.json'
         spec = inputs(ROOT, args.module)
+        if args.suite:
+            args.module = 'suite'
+            generated = out / 'suite.hirsel'
+            generated.write_text(suite_source())
+            spec['packages'][-1]['sources'] = [source for source in spec['packages'][-1]['sources'] if len(source['modules']) == 1]
+            spec['packages'][-1]['sources'].append({'file': str(generated), 'modules': ['suite'], 'signatures': False})
+            report['module'] = 'suite'
+            report['suite_tasks'] = 50
         manifest.write_text(json.dumps(spec))
+        check_spec = json.loads(json.dumps(spec))
+        check_spec['packages'][-1]['sources'] = [
+            source for source in check_spec['packages'][-1]['sources']
+            if args.suite or source['modules'] in [args.module.split('/'), ['helper'], ['harness']]]
+        check_manifest = scratch / 'check-inputs.json'
+        check_manifest.write_text(json.dumps(check_spec))
+        check_sources = [Path(source['file']) for package in check_spec['packages'] for source in package['sources']]
         hirsel_sources = [Path(source['file']) for package in spec['packages'] for source in package['sources']]
         counts = {'hirsel': sum(_measure.source_lines(p) for p in hirsel_sources),
                   'idiomatic': sum(_measure.source_lines(p) for p in (rust / 'src').rglob('*.rs'))}
@@ -178,12 +238,14 @@ def build_samples(args):
         report['source_lines'] = counts
         report['source_sets'] = {'hirsel': [str(p) for p in hirsel_sources], 'idiomatic': [str(p) for p in (rust / 'src').rglob('*.rs')], 'matched': [str(p) for p in matched_files]}
         edited = scratch / 'edited.hirsel'
-        source = ROOT / 'core/langarena' / (args.module + '.hirsel')
+        source = generated if args.suite else ROOT / 'core/langarena' / (args.module + '.hirsel')
         text = source.read_text()
         marker = text.index('{', text.index('pub fn dispatch'))
         edited.write_text(text[:marker + 1] + '\nlet _ = 0u8\n' + text[marker + 1:])
         edited_manifest = scratch / 'edited-inputs.json'
-        edited_manifest.write_text(json.dumps(inputs(ROOT, args.module, edited)))
+        edited_spec = json.loads(json.dumps(spec))
+        next(source for source in edited_spec['packages'][-1]['sources'] if source['modules'] == args.module.split('/'))['file'] = str(edited)
+        edited_manifest.write_text(json.dumps(edited_spec))
         twin = scratch / 'matched'
         twin.mkdir()
         if matched:
@@ -197,9 +259,18 @@ def build_samples(args):
         main = idiomatic / 'main.rs'
         body = main.read_text(); marker = body.index('{', body.index('fn config_i64('))
         main.write_text(body[:marker + 1] + '\nlet _ = 0u8;\n' + body[marker + 1:])
+        previous = json.loads(args.resume.read_text()) if args.resume else None
+        if previous and (previous.get('module') != args.module or previous.get('backend') != args.backend):
+            raise ValueError('build resume must use the same module and backend')
+        report['resumed_from'] = str(args.resume) if args.resume else None
         for scenario in ['check-fresh', 'build-fresh', 'build-reuse', 'build-edit']:
+            prior = next((row for row in previous['rows'] if row['scenario'] == scenario), None) if previous else None
+            if prior and previous.get('toolchain') == args.toolchain and all(sample.get('status') == 'ok' for sample in prior['samples'].values()):
+                report['rows'].append(prior)
+                save()
+                continue
             operation = 'check' if scenario == 'check-fresh' else 'build'
-            selected = edited_manifest if scenario == 'build-edit' else manifest
+            selected = check_manifest if operation == 'check' else edited_manifest if scenario == 'build-edit' else manifest
             store = scratch / ('check-store' if operation == 'check' else 'build-store')
             command = [str(args.compiler.resolve()), operation, '--inputs', str(selected), '--entry',
                        f'langarena@1/{args.module}/main', '--store', str(store), '--json']
@@ -207,8 +278,23 @@ def build_samples(args):
                 command += ['--backend', args.backend, '--runtime', str(args.runtime.resolve()),
                             '--dir', str(host), '--grant', 'Stdout', '--grant', 'Tasks', '-o', str(scratch / 'hirsel')]
                 if args.backend == 'llvm': command.append('--release')
-            row = {'scenario': scenario, 'samples': {'hirsel': collect(command, out / (scenario + '-hirsel'), True)}, 'ratios': {}}
-            for side in ['idiomatic', 'matched']:
+            samples = {side: value for side, value in prior['samples'].items() if value.get('status') == 'ok' and (side != 'hirsel' or previous.get('toolchain') == args.toolchain)} if prior else {}
+            row = {'scenario': scenario, 'samples': samples, 'ratios': {}, 'toolchain': args.toolchain,
+                   'source_lines': dict(prior.get('source_lines', previous['source_lines']) if prior else counts)}
+            if 'hirsel' not in samples:
+                samples['hirsel'] = collect(command, out / (scenario + '-hirsel'), True)
+                active_spec = check_spec if operation == 'check' else edited_spec if scenario == 'build-edit' else spec
+                packages = [[Path(source['file']) for source in package['sources']] for package in active_spec['packages']]
+                loaded = None
+                for mask in itertools.product([False, True], repeat=len(packages)):
+                    sources = [path for selected, paths in zip(mask, packages) if selected for path in paths]
+                    if (len(sources) == samples['hirsel'].get('files') and
+                            sum(path.stat().st_size for path in sources) == samples['hirsel'].get('source_bytes')):
+                        loaded = sources
+                        break
+                row['loaded_hirsel_sources'] = [str(path) for path in loaded] if loaded is not None else None
+                row['source_lines']['hirsel'] = sum(_measure.source_lines(path) for path in loaded) if loaded is not None else None
+            for side in (['idiomatic'] if args.suite else ['matched']):
                 if side == 'idiomatic' and missing or side == 'matched' and matched is None:
                     row['samples'][side] = {'status': 'missing-build-input'}
                     continue
@@ -216,11 +302,13 @@ def build_samples(args):
                 command = [str(rustc), '--edition=' + ('2021' if side == 'idiomatic' else '2024'), *flags, str(root)]
                 if side == 'idiomatic': command += dependencies
                 command += ['--emit=metadata' if operation == 'check' else '--emit=link', '-o', str(scratch / (side + '-' + scenario))]
-                row['samples'][side] = collect(command, out / (scenario + '-' + side))
+                if side not in row['samples']:
+                    row['samples'][side] = collect(command, out / (scenario + '-' + side))
+                    row['source_lines'][side] = counts[side]
                 row['ratios'][side] = ratio(row['samples']['hirsel'], row['samples'][side]) if side != 'matched' or reviewed(matched, args.matched_author) else {'status': 'blocked: independent review pending'}
             for side, sample in row['samples'].items():
-                if sample.get('instructions') and counts[side]:
-                    sample['k_instructions_per_source_line'] = sample['instructions'] / counts[side] / 1000
+                if sample.get('instructions') and row['source_lines'][side]:
+                    sample['k_instructions_per_source_line'] = sample['instructions'] / row['source_lines'][side] / 1000
             report['rows'].append(row); save()
             print(scenario, row['ratios'], flush=True)
     save()
@@ -231,6 +319,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--compiler', type=Path, required=True)
     parser.add_argument('--runtime', type=Path, required=True)
+    parser.add_argument('--compiler-profile', choices=['release', 'checked', 'unknown'], default='unknown')
+    parser.add_argument('--runtime-profile', choices=['checked', 'unknown'], help='label a non-shipping diagnostic archive')
+    parser.add_argument('--diagnostic', action='store_true', help='explicitly permit a non-release toolchain; never a result ratio')
     parser.add_argument('--module', required=True)
     parser.add_argument('--task', required=True)
     parser.add_argument('--config', type=Path, default=ROOT / 'core/langarena/rust/run.js')
@@ -242,6 +333,10 @@ def main():
     parser.add_argument('--matched-args', nargs='*', help='argument templates, e.g. {count} {warmup} {iterations}')
     parser.add_argument('--matched-numeric-output', action='store_true', help='twin prints only the computed checksum')
     parser.add_argument('--resume', type=Path, help='previous report; reuse its complete samples and run missing sides only')
+    parser.add_argument('--suite', action='store_true', help='build-only: generate one dispatcher for all 50 task sources and compare the full upstream binary')
+    funding = parser.add_mutually_exclusive_group()
+    funding.add_argument('--limit', type=int, default=67108864, help='documented logical root bytes; record the smallest admitted power of two')
+    funding.add_argument('--root-mib', type=int, help='logical root in MiB, equivalent to --limit N*1048576')
     parser.add_argument('--build-only', action='store_true', help='measure check/build fresh/reuse/edit once for the task group')
     parser.add_argument('--profile', action='store_true', help='profile instructions at period 50003 when an instruction ratio exceeds 2')
     parser.add_argument('--out', type=Path, required=True)
@@ -250,10 +345,20 @@ def main():
         vendor_check(ROOT / 'core/langarena/rust')
     except (OSError, ValueError, KeyError) as error:
         parser.error(str(error))
+    try:
+        args.toolchain = toolchain_identity(args.compiler, args.runtime, args.compiler_profile, args.runtime_profile, args.diagnostic)
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
     if args.out.exists() or args.out.resolve().is_relative_to(ROOT):
         parser.error('--out must be new and outside the repository')
     if 16 not in os.sched_getaffinity(0):
         parser.error('CPU 16 is required by core/MEASURE.md')
+    if args.root_mib is not None:
+        args.limit = args.root_mib * 1048576
+    if args.limit <= 0:
+        parser.error('--limit must be positive')
+    if args.suite and not args.build_only:
+        parser.error('--suite requires --build-only')
     if args.build_only:
         os.sched_setaffinity(0, {16})
         os.environ['HIRSEL_MEMORY_LIMIT'] = '2G'
@@ -268,8 +373,10 @@ def main():
     os.environ['HIRSEL_JOBS'] = '1'
     report = {'task': args.task, 'backend': args.backend, 'config': str(args.config.resolve()),
               'source': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
-              'cpu': 16, 'sample_policy': 'one sample per side; no retry; no system page-cache flush',
-              'configuration': row, 'samples': {}, 'ratios': {},
+              'cpu': 16, 'toolchain': args.toolchain, 'result_kind': 'diagnostic' if args.diagnostic else 'result',
+              'sample_policy': 'one sample per side; no retry; no system page-cache flush',
+              'configuration': row, 'root_bytes': args.limit,
+              'root': f'root: {args.limit / 1048576:g} MiB (default 64)', 'samples': {}, 'ratios': {},
               'platform': dict(system=os.uname().sysname, release=os.uname().release, machine=os.uname().machine),
               'profiles': 'rustc1.99.0; x86-64; overflow-checks=on; codegen-units=1; no LTO; upstream edition2021, matched2024',
               'hirsel_compiler': str(args.compiler.resolve()), 'runtime': str(args.runtime.resolve())}
@@ -278,7 +385,7 @@ def main():
         if previous['task'] != args.task or previous['backend'] != args.backend or previous.get('configuration') != row:
             parser.error('--resume must name the same task, backend and config')
         report['resumed_from'] = str(args.resume.resolve())
-        report['samples'] = {key: value for key, value in previous['samples'].items() if value.get('status') == 'ok'}
+        report['samples'] = {key: value for key, value in previous['samples'].items() if value.get('status') == 'ok' and (key != 'hirsel' or previous.get('root_bytes', 67108864) == args.limit and previous.get('toolchain') == args.toolchain)}
     try:
         with tempfile.TemporaryDirectory(prefix='langarena-host-', dir=args.out) as tmp:
             host = Path(tmp)
@@ -290,7 +397,7 @@ def main():
             build = [str(args.compiler.resolve()), 'build', '--inputs', str(manifest), '--entry',
                      f'langarena@1/{args.module}/main', '--backend', args.backend,
                      '--runtime', str(args.runtime.resolve()), '--store', str(host / 'store'),
-                     '--dir', str(host), '--grant', 'Stdout', '--grant', 'Tasks', '--json', '-o', str(binary)]
+                     '--dir', str(host), '--grant', 'Stdout', '--grant', 'Tasks', '--limit', str(args.limit), '--json', '-o', str(binary)]
             if args.backend == 'llvm':
                 build.append('--release')
             if 'hirsel' not in report['samples']:

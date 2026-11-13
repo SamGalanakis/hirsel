@@ -108,8 +108,8 @@ operations it names; nothing else about them may be inferred from an implementat
   [MEM-24](budgets.md#mem-24-logical-charges). `string.from` copies a literal or a view.
 - **Literals.** A string literal has type `String`, is static, allocates nothing and is never
   charged; it has capacity 0, so the first push onto it grows it into new storage. This is
-  sound because no operation writes a `String`'s bytes in place: growth moves them into new
-  storage, and `truncate` and `clear` only shorten it. A `List` has in-place element writes
+  sound because no operation writes a static `String`'s bytes: growth moves them into new
+  storage, `truncate` and `clear` only shorten it, and the ASCII case changes copy it first. A `List` has in-place element writes
   (`list.set`, `xs[i] = x`), so an own `List` that has elements always owns its storage:
   capacity 0 means length 0, and no `List` is static. A byte-string literal (`b".."`,
   `br#".."#`) therefore has type `Result[Bytes, Capacity]`: it admits its length as
@@ -118,7 +118,12 @@ operations it names; nothing else about them may be inferred from an implementat
   length, capacity and charge; a static `s` is copied into newly admitted storage of capacity
   equal to its length, and on `Capacity` the error returns `s`. `string.from_utf8` returns its
   argument when it is not UTF-8. `string.push_u64` appends `n` in ASCII decimal, with no sign
-  and no leading zeros (`0` for zero). `string.next_scalar(s, at)` returns `None` when `at`
+  and no leading zeros (`0` for zero). `string.make_ascii_upper(mut s)` and
+  `string.make_ascii_lower(mut s)` change `a`–`z` to `A`–`Z`, or the reverse, in place, and
+  leave every other byte as it is, so `s` keeps its length and stays UTF-8 with no second
+  check. For an owned `s` they admit nothing and cannot fail. A static `s` is first copied
+  as `into_bytes` copies it, and on that copy's `Capacity` they return the error with `s`
+  unchanged. `string.next_scalar(s, at)` returns `None` when `at`
   is `byte_len(s)`, and fails with `Bounds` when `at` is greater or falls inside a scalar.
 - **Slices.** `list.slice(xs, lo, hi)` and `string.slice(s, lo, hi)` view the elements or
   bytes from `lo` up to `hi`; they fail with `Bounds` when `lo > hi` or `hi` exceeds the

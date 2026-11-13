@@ -1,0 +1,10 @@
+// expect: run go(0,0) = 7
+// A capability moved into a spawned task is one handle word in the callable's
+// payload row; the spawn is emitted (not dropped) and the child's 7 is joined.
+fn child(take out: Stdout) -> u64 { 7u64 }
+fn go(out: Stdout, tasks: Tasks) -> u64 waits {
+  match task.spawn(tasks, bytes 0, out, child) {
+    Ok(take h) => match task.join(take h) { Ok(v) => v, Error(_) => 2 },
+    Error(_) => 3,
+  }
+}

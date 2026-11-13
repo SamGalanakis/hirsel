@@ -52,3 +52,6 @@ pub type ParseError = Empty | Invalid(u64) | OutOfRange
 
 pub opaque type Map[K: key, V]
 pub opaque type Causes
+pub opaque type Stdout
+pub opaque type Tasks
+pub type JoinError = Failed(Causes) | Cancelled(Causes)

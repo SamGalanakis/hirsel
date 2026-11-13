@@ -118,7 +118,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return None;
             }
         }
-        let signature = self.indirect_signature(&params, result, environment, &mut vec![])?;
+        let Some(signature) = self.indirect_signature(&params, result, environment, &mut vec![])
+        else {
+            self.gap(
+                n,
+                "a callable whose parameter or result has no layout row is not built",
+            );
+            return None;
+        };
         if let Some(&row) = self.e.callable_adapters.get(&(raw, signature)) {
             return Some(row);
         }

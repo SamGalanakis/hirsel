@@ -179,6 +179,12 @@ impl<T: TyRead> Shapes<'_, T> {
                         let body = record(vec![("handle", FieldTy::Handle(handle))]);
                         return self.fill(r, LRepr::Own, body, None);
                     }
+                    // A capability or Args held as a value: its one u64 handle word,
+                    // never cleaned (the provider owns it).
+                    _ if handle(decl) => {
+                        let body = record(vec![("handle", FieldTy::Scalar(Scalar::U64))]);
+                        return self.fill(r, LRepr::Own, body, None);
+                    }
                     Some(_) => return None,
                     None => {}
                 }

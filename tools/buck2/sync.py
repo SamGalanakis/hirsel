@@ -1287,6 +1287,14 @@ def first_party(meta: dict) -> str:
                 out.append("\n" + call("hirsel_test", name=f"{name}-test-{target['name']}", deps=own + test_deps, bin_exes=binaries,
                                          shards=count if count > 1 or case_shards else None, case_shards=case_shards or None, costs=costs,
                                          **test_attrs(f"{name}-test-{target['name']}", src), **attrs))
+    out.append("\n" + call("hirsel_script_test", name="test-core-m1-runner", script="core/tools/test_m1.py", full=False,
+                            data=["core/tools/m1.py"]))
+    for engine in ("cranelift", "llvm"):
+        out.append("\n" + call("hirsel_script_test", name="core-m1-" + engine, script="core/tools/m1.py", full=False,
+                                args=["--backend", engine, "--compiler", "buck-out/tmp/cargo-bin-exe/core-m1-" + engine + "/hirsel-core"],
+                                bin_exes={"hirsel-core": "//:hirsel-core-driver-bin-hirsel-core"},
+                                files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:hirsel-core-rt[staticlib]"},
+                                data=Raw('glob(["core/core/**", "core/std/**", "core/programs/m1/**", "core/corpus/m1/**", "crates/hirsel-core-rt/include/**"])')))
     out.append("\n" + call("hirsel_core_driver_native_test", name="core-driver-native", data=Raw('glob(["crates/hirsel-core-rt/include/**", "crates/hirsel-core-driver/Cargo.toml"])')))
     out.append("\n" + call("hirsel_core_llvm_native_test", name="core-llvm-native", data=Raw('glob(["core/front/**", "crates/hirsel-core-rt/include/**", "crates/hirsel-core-ir/samples/**", "crates/hirsel-llvm/Cargo.toml"])')))
     out.append("\n" + call("hirsel_library", name="hirsel-core-rt-native-fixture", crate="hirsel_core_rt", crate_root="crates/hirsel-core-rt/src/lib.rs",

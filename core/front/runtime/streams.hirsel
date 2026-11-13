@@ -1,0 +1,6 @@
+// Native oracle: stdout out, stderr err, exit 0. Neither write admits storage.
+pub fn main(out: Stdout, err: Stderr) -> Result[(), Exit] {
+    result.unwrap(stdout.write(out, "out"))
+    result.unwrap(stderr.write(err, "err"))
+    Ok(())
+}

@@ -136,3 +136,51 @@ fn args_values_cranelift() { args_operations(Backend::Cranelift,false); }
 #[test]
 #[ignore = "explicit native provider target, after args exports and engine rows land"]
 fn args_values_llvm() { args_operations(Backend::Llvm,false); }
+
+fn stream_operations(backend: Backend) {
+    use std::os::{fd::OwnedFd, unix::net::UnixStream};
+    use std::process::Stdio;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (name, argv, stdout, stderr, closed) in [
+        ("streams", vec![], "out", "err", 0),
+        ("args-print", vec!["alpha", "beta", ""], "alphabeta", "", 0),
+        ("stdout-closed", vec![], "", "", 1),
+        ("stderr-closed", vec![], "", "", 2),
+        ("stdout-cancel", vec![], "", "", 0),
+        ("stderr-cancel", vec![], "", "", 0),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let source = std::fs::read_to_string(root.join(format!("core/front/runtime/{name}.hirsel"))).unwrap();
+        let mut request = source_request(&source, dir.path());
+        request.inputs.packages[1] = PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+        let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
+        let entry = DefPath::from_full("app@1/main/main").unwrap();
+        let options = NativeOptions { backend, optimize:false, target:TARGET.into(),
+            runtime:root.join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
+            include:root.join("crates/hirsel-core-rt/include"),
+            cc:PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
+            store:dir.path().join("native"), output:dir.path().join("program"), root_limit:1_048_576,
+            instance_limit:64, directories:vec![], grant_mask:(1<<4) | (1<<5) | (1<<9) };
+        let built = product.build(&entry, &options).unwrap();
+        let mut command = Command::new(built.executable);
+        command.args(argv);
+        if closed != 0 {
+            // Close before exec, so EPIPE does not depend on process scheduling.
+            let (writer, reader) = UnixStream::pair().unwrap();
+            drop(reader);
+            let fd: OwnedFd = writer.into();
+            if closed == 1 { command.stdout(Stdio::from(fd)); }
+            else { command.stderr(Stdio::from(fd)); }
+        }
+        let output = command.output().unwrap();
+        assert_eq!(output.status.code(), Some(0), "{name}: {:?}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(output.stdout, stdout.as_bytes(), "{name}");
+        assert_eq!(output.stderr, stderr.as_bytes(), "{name}");
+    }
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn stream_operations_cranelift() { stream_operations(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn stream_operations_llvm() { stream_operations(Backend::Llvm); }

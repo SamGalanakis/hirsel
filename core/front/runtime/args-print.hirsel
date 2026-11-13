@@ -1,0 +1,12 @@
+// Native oracle: argv alpha, beta, empty gives stdout alphabeta, empty stderr, exit 0.
+pub fn main(a: Args, out: Stdout) -> Result[(), Exit] {
+    if args.len(a) != 3u64 { return Error(Exit(status: 1)) }
+    let first = option.unwrap(args.get(a, 0))
+    let second = option.unwrap(args.get(a, 1))
+    let empty = option.unwrap(args.get(a, 2))
+    if first != "alpha" || second != "beta" || empty != "" { return Error(Exit(status: 2)) }
+    match args.get(a, 3) { Some(_) => return Error(Exit(status: 3)), None => {} }
+    result.unwrap(stdout.write(out, first))
+    result.unwrap(stdout.write(out, second))
+    Ok(())
+}

@@ -246,3 +246,34 @@ fn args_rows_return_count_and_run_owned_optional_views() {
         }
     }
 }
+
+#[test]
+fn stream_rows_write_literal_and_argument_views_without_admission() {
+    let source = "fn f(a:Args,out:Stdout,err:Stderr) -> u64 waits { result.unwrap(stdout.write(out,\"out\")); let s = option.unwrap(args.get(a,0)); result.unwrap(stdout.write(out,s)); result.unwrap(stderr.write(err,\"err\")); 7u64 }";
+    let (index, modules) = canonical(source);
+    let p = Program::declare(&index, &modules);
+    assert!(p.refusals.is_empty(), "{:?}", p.refusals);
+    let mut emitter = Emitter::new();
+    let f = p
+        .fns
+        .iter()
+        .position(|fd| fd.path.0.package.name == "app")
+        .unwrap();
+    let check = p.check_lower(f, &mut emitter);
+    assert!(
+        check.refusals.is_empty() && check.gaps.is_empty(),
+        "{check:?}"
+    );
+    wf::module(&emitter.module).unwrap();
+    let run = eval::run_args(
+        &emitter.module,
+        check.function.unwrap(),
+        &[0, 0, 0],
+        0,
+        &["alpha"],
+    );
+    assert_eq!(run.outcome, eval::Outcome::Returned(vec![7]));
+    assert_eq!(run.stdout, b"outalpha");
+    assert_eq!(run.stderr, b"err");
+    assert_eq!(run.used, 0);
+}

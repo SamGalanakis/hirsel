@@ -1,10 +1,11 @@
 //! Binding of canonical core declarations to their call-site kernels.
 //! Identity is resolved once when the program's declarations are published.
 use super::*;
-use hirsel_core_ir::{Counted, RtOp};
+use hirsel_core_ir::{Counted, HostOp, RtOp};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Kernel {
+    Stream(HostOp),
     ArgsLen,
     ArgsGet,
     NewOwner(Option<Counted>),
@@ -43,6 +44,14 @@ macro_rules! operations {
 }
 
 operations! {
+    ("list", "fill", Lane::PendingCode),
+    ("string", "from", Lane::PendingCode),
+    ("string", "from_utf8", Lane::PendingCode),
+    ("string", "into_bytes", Lane::PendingCode),
+    ("string", "next_scalar", Lane::PendingCode),
+    ("string", "push_char", Lane::PendingCode),
+    ("string", "push_u64", Lane::PendingCode),
+    ("string", "truncate", Lane::PendingCode),
     ("arc", "new", Lane::Runtime(Kernel::NewOwner(Some(Counted::Arc)))),
     ("arc", "share", Lane::Runtime(Kernel::Share(Counted::Arc))),
     ("arc", "try_unwrap", Lane::Runtime(Kernel::TryUnwrap(Counted::Arc))),
@@ -143,8 +152,8 @@ operations! {
     ("span", "finish", Lane::Language),
     ("span", "len", Lane::Language),
     ("span", "get", Lane::Language),
-    ("stderr", "write", Lane::Runtime(Kernel::Blocked("provider extern rows are not built (FOR FORM)"))),
-    ("stdout", "write", Lane::Runtime(Kernel::Blocked("provider extern rows are not built (FOR FORM)"))),
+    ("stderr", "write", Lane::Runtime(Kernel::Stream(HostOp::Stderr))),
+    ("stdout", "write", Lane::Runtime(Kernel::Stream(HostOp::Stdout))),
     ("string", "new", Lane::PendingCode),
     ("string", "as_bytes", Lane::PendingCode),
     ("string", "slice", Lane::PendingCode),
@@ -217,6 +226,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 .runtime_row(RtOp::ArgsLen, &[Arg::Value(vals[0]?)], n)
                 .map(|values| values[0]),
             Kernel::ArgsGet => self.runtime_args_get(vals, result, n),
+            Kernel::Stream(op) => self.runtime_stream(op, vals, result, n),
             Kernel::Blocked(what) => {
                 self.gap(n, what);
                 None
@@ -250,12 +260,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
     /// Runtime rows use their own fixed ABI, with the context supplied by the engine.
     /// A call's failure edge is captured before any normal-result custody changes.
-    fn runtime_row(&mut self, op: RtOp, args: &[Arg], n: NodeId) -> Option<[ValueId; 3]> {
+    fn runtime_row(&mut self, op: RtOp, args: &[Arg], n: NodeId) -> Option<[ValueId; 4]> {
         if !self.live() {
             return None;
         }
         let signature = self.e.sig(op.signature());
-        let mut output = [ValueId(0); 3];
+        let mut output = [ValueId(0); 4];
         let count = self.e.module.signatures[signature.index()].results.len();
         for (i, value) in output.iter_mut().enumerate().take(count) {
             *value = self.value(self.e.module.signatures[signature.index()].results[i]);
@@ -464,7 +474,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let size = self.konst(u, logical, n)?;
         let base = self.konst(u, hirsel_core_layout::charge::CHANNEL_BASE, n)?;
         let requested = self.runtime_charge(cap, size, base, n)?;
-        let [sender, receiver, available] =
+        let [sender, receiver, available, ..] =
             self.runtime_row(RtOp::ChannelNew { item: id }, &[Arg::Value(cap)], n)?;
         let ok = self.runtime_nonzero(Ty::Ptr, sender, n)?;
         self.runtime_result(
@@ -813,7 +823,7 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
     let actual: BTreeSet<_> = p
         .fns
         .iter()
-        .filter(|f| f.path.package_is("core", "1") && f.body.is_none())
+        .filter(|f| f.path.package_is("core", "1"))
         .map(|f| (f.path.0.modules[0].as_str(), f.path.0.name.as_str()))
         .collect();
     let recorded: BTreeSet<_> = OPERATIONS.iter().map(|e| (e.module, e.name)).collect();
@@ -824,7 +834,7 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
     );
     assert_eq!(
         actual, recorded,
-        "assign each declaration to its lowering lane or pending ordinary code"
+        "assign each core declaration, bodied function or private kernel to its owning lane"
     );
 }
 
@@ -1138,5 +1148,93 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.jump(join, &[], n);
         self.start(join);
         Some(self.pointer(to, n))
+    }
+}
+
+impl<'c, 'a> Cx<'c, 'a, '_> {
+    fn runtime_stream(
+        &mut self,
+        op: HostOp,
+        vals: &[Option<ValueId>],
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let [_, error, code, written] = self.runtime_row(
+            RtOp::Host(op),
+            &[Arg::Value(vals[0]?), Arg::Value(vals[1]?)],
+            n,
+        )?;
+        let ok = self.runtime_compare(Ty::Scalar(Scalar::U8), error, 0, n)?;
+        self.runtime_result(
+            result,
+            ok,
+            n,
+            |_, _, _| {},
+            |cx, to, ty| {
+                if let Some(to) =
+                    cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], ty, n)
+                {
+                    cx.runtime_write_error(to, ty, written, error, code, n);
+                }
+            },
+        )
+    }
+
+    fn runtime_write_error(
+        &mut self,
+        to: AddressId,
+        ty: TyId,
+        written: ValueId,
+        error: ValueId,
+        code: ValueId,
+        n: NodeId,
+    ) {
+        self.runtime_store(to, &[Step::Field(0)], Ty::Scalar(Scalar::U64), written, n);
+        let TyKind::Adt(decl, _) = self.t.kind(ty) else {
+            return;
+        };
+        let DeclBody::Record(fields) = &self.p.decls[decl.index()].body else {
+            return;
+        };
+        let io = fields[1].ty;
+        if let Some(to) = self.runtime_field(to, &[Step::Field(1)], io, n) {
+            self.runtime_io_error(to, error, code, n);
+        }
+    }
+
+    fn runtime_io_error(&mut self, to: AddressId, error: ValueId, code: ValueId, n: NodeId) {
+        let join = self.new_block(&[]);
+        // Provider tags are 1-based, source variant indices 0-based. The fifth
+        // variant alone has a payload. The runtime has already classified errno.
+        for case in 0..4 {
+            let Some(on) =
+                self.runtime_compare(Ty::Scalar(Scalar::U8), error, u64::from(case + 1), n)
+            else {
+                return;
+            };
+            let yes = self.new_block(&[]);
+            let no = self.new_block(&[]);
+            self.runtime_branch(on, yes, no, n);
+            self.start(yes);
+            self.inst(Inst::SetCase { address: to, case }, n);
+            self.jump(join, &[], n);
+            self.start(no);
+        }
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 4,
+            },
+            n,
+        );
+        self.runtime_store(
+            to,
+            &[Step::CaseField { case: 4, field: 0 }],
+            Ty::Scalar(Scalar::U32),
+            code,
+            n,
+        );
+        self.jump(join, &[], n);
+        self.start(join);
     }
 }

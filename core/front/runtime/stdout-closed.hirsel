@@ -1,0 +1,9 @@
+// Native oracle: a stream whose peer was closed reports Other(EPIPE=32), written 0.
+pub fn main(out: Stdout) -> Result[(), Exit] {
+    match stdout.write(out, "out") {
+        Ok(()) => Error(Exit(status: 1)),
+        Error(e) => if e.written != 0u64 { Error(Exit(status: 2)) } else {
+            match e.error { Other(32u32) => Ok(()), _ => Error(Exit(status: 3)) }
+        }
+    }
+}

@@ -1,0 +1,11 @@
+// Parent cancels before the child issues its write: Cancelled and no output.
+type Input: send { out: Stdout }
+fn child(take x: Input) -> u64 waits { result.unwrap(stdout.write(x.out, "bad")); 7u64 }
+pub fn main(out: Stdout, tasks: Tasks) -> Result[(), Exit] {
+    let mut h = result.unwrap(task.spawn(tasks, bytes 0, Input(out: out), child))
+    task.cancel(mut h)
+    match task.join(take h) {
+        Error(Cancelled(take causes)) => { let _ = take causes; Ok(()) },
+        _ => Error(Exit(status: 1))
+    }
+}

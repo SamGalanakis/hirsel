@@ -77,6 +77,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let c = self.kids(s);
         let pat = c[0];
         let mut rest = &c[1..];
+        let written = rest
+            .first()
+            .copied()
+            .filter(|&n| is_type_node(self.kind(n)));
         let declared = match rest.first() {
             Some(&t) if is_type_node(self.kind(t)) => {
                 rest = &rest[1..];
@@ -97,12 +101,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let owners = self.owner_mark();
         let (t, v) = self.expr(value, declared.and_then(expect));
         let ty = declared.unwrap_or(t);
+        let anchors = if kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Scoped {
+            written.and_then(|n| self.written_anchors(n))
+        } else {
+            None
+        };
         // A let-bound view lasts to the end of its block (OWN-8), and so do the
         // temporaries it reaches (LANG-6).
         if crate::decls::kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Scoped {
             self.hold_reached(owners);
             let fact = self.anchor_expression(value);
-            self.freeze_anchors(fact, self.depth);
+            if anchors.is_none() {
+                self.freeze_anchors(fact, self.depth);
+            }
             let d = self.depth;
             self.unfreeze(freezes, |h| {
                 Some(if h == Hold::View(Extent::Temp) {
@@ -132,7 +143,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 };
                 self.declare(b, ty, binding, origin, pat);
                 self.bind_descriptor(b, v);
-                self.set_slot_anchors(b, self.anchor_expression(value));
+                let mut initial = self.anchor_expression(value);
+                if anchors.is_some() {
+                    let captures = self.capture_anchors(v);
+                    initial = self.anchors.union(initial, captures);
+                }
+                self.declare_anchors(b, anchors, initial, value);
                 self.own(b, pat);
                 self.scope_slots.push(b);
             }
@@ -166,6 +182,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         let binding = Binding::Slot(self.slot(ty, None, pat));
         self.declare(b, ty, binding, origin, pat);
+        if kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Scoped {
+            let written = self
+                .kids(s)
+                .iter()
+                .copied()
+                .find(|&n| is_type_node(self.kind(n)));
+            let anchors = written.and_then(|n| self.written_anchors(n));
+            self.declare_anchors(b, anchors, 0, pat);
+        }
         self.set(b, Avail::Uninit, pat);
         self.own(b, pat);
         self.scope_slots.push(b);
@@ -270,7 +295,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let diverged = if !compound {
             let (t, v) = self.expr(value, expect(at.ty));
             self.descriptor_store(at, v, place);
-            self.anchor_store(at, value);
+            self.anchor_store(at, value, v, s);
             self.capture_store(at, t, place);
             if let (Some(address), Ok(r)) = (address, self.rep(at.ty)) {
                 // OWN-12: the old value is cleaned when it is live, or maybe with its

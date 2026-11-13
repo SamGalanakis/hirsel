@@ -25,6 +25,7 @@ enum Node {
 pub(super) struct Anchors {
     nodes: Vec<Node>,
     pub(super) slots: Vec<Fact>,
+    declared: Vec<Option<Fact>>,
     pub(super) expressions: HashMap<NodeId, Fact>,
     pub(super) places: HashMap<NodeId, At>,
     pub(super) values: HashMap<ValueId, Fact>,
@@ -41,6 +42,7 @@ impl Anchors {
         Self {
             nodes: vec![Node::Empty],
             slots: vec![0; slots],
+            declared: vec![None; slots],
             expressions: HashMap::default(),
             places: HashMap::default(),
             values: HashMap::default(),
@@ -172,9 +174,95 @@ impl Anchors {
         self.right = right;
         result
     }
+    fn permits(&mut self, allowed: Fact, actual: Fact, steps: &[PStep]) -> bool {
+        if actual == 0 || allowed == actual {
+            return true;
+        }
+        let mut left = std::mem::take(&mut self.left);
+        let mut right = std::mem::take(&mut self.right);
+        left.clear();
+        right.clear();
+        self.collect(allowed, &mut left);
+        self.collect(actual, &mut right);
+        let part = |actual: Root, allowed: Root| match (actual, allowed) {
+            (Root::Region(a), Root::Region(b)) => a == b,
+            (Root::Temporary(a), Root::Temporary(b)) => a == b,
+            (Root::Place(a), Root::Place(b)) => {
+                a.slot == b.slot
+                    && a.len >= b.len
+                    && steps[a.start as usize..(a.start + b.len) as usize]
+                        .iter()
+                        .zip(&steps[b.start as usize..(b.start + b.len) as usize])
+                        .all(|(a, b)| match (a, b) {
+                            (PStep::Index { .. }, PStep::Index { .. }) => true,
+                            _ => a == b,
+                        })
+            }
+            _ => false,
+        };
+        let result = right.iter().all(|&a| left.iter().any(|&b| part(a, b)));
+        self.left = left;
+        self.right = right;
+        result
+    }
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
+    /// Written scoped anchors have a fixed set, even for an empty initializer.
+    pub(super) fn written_anchors(&mut self, n: NodeId) -> Option<Fact> {
+        let mut result = None;
+        if self.kind(n) == NodeKind::Anchor {
+            let root = *self.kids(n).last().unwrap();
+            if let Some(Target::Binder(slot)) = self.p.target(self.at, root).copied() {
+                let fact = if self.vars[slot as usize].is_some() {
+                    let ty = self.var(slot).ty;
+                    self.anchor_read(At {
+                        place: Place::whole(slot),
+                        ty,
+                        shared: false,
+                    })
+                } else {
+                    let ty = self.body_root(root, false);
+                    if let TyKind::Region(r) = self.t.kind(ty) {
+                        self.anchors.node(Node::Root(Root::Region(*r)))
+                    } else {
+                        0
+                    }
+                };
+                result = Some(fact);
+            }
+        }
+        for &child in self.kids(n) {
+            if is_type_node(self.kind(child))
+                && let Some(fact) = self.written_anchors(child)
+            {
+                result = Some(self.anchors.union(result.unwrap_or(0), fact));
+            }
+        }
+        result
+    }
+    pub(super) fn declare_anchors(
+        &mut self,
+        slot: u32,
+        declared: Option<Fact>,
+        initial: Fact,
+        n: NodeId,
+    ) {
+        self.anchors.declared[slot as usize] = declared;
+        if let Some(allowed) = declared {
+            if !self.anchors.permits(allowed, initial, &self.steps) {
+                self.refuse(
+                    "OWN-19",
+                    n,
+                    "a scoped slot may read only its declared anchors",
+                );
+            }
+            self.set_slot_anchors(slot, allowed);
+            self.freeze_anchors(allowed, self.depth);
+        } else {
+            self.set_slot_anchors(slot, initial);
+        }
+    }
     pub(super) fn anchor_expression(&self, n: NodeId) -> Fact {
         self.anchors.expressions.get(&n).copied().unwrap_or(0)
     }
@@ -271,8 +359,26 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         fact
     }
-    pub(super) fn anchor_store(&mut self, at: At, value: NodeId) {
+    pub(super) fn anchor_store(
+        &mut self,
+        at: At,
+        value: NodeId,
+        emitted: Option<ValueId>,
+        site: NodeId,
+    ) {
         let new = self.anchor_expression(value);
+        if let Some(allowed) = self.anchors.declared[at.place.slot as usize] {
+            let captures = self.capture_anchors(emitted);
+            let new = self.anchors.union(new, captures);
+            if !self.anchors.permits(allowed, new, &self.steps) {
+                self.refuse(
+                    "OWN-19",
+                    site,
+                    "a scoped slot may read only its declared anchors",
+                );
+            }
+            return;
+        }
         if new != 0 {
             self.freeze_anchors(new, self.var(at.place.slot).depth);
         }
@@ -348,7 +454,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     .unwrap_or(0),
             }
         };
-        if let TyKind::Anchored(_, root) = self.t.kind(t)
+        if fact == 0
+            && let TyKind::Anchored(_, root) = self.t.kind(t)
             && let TyKind::Region(root) = self.t.kind(*root)
         {
             let region = self.anchors.node(Node::Root(Root::Region(*root)));

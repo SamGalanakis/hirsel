@@ -32,6 +32,7 @@ pub(super) struct Patterns {
     escaping: Vec<Freeze>,
     pub(super) guard: bool,
     rebind: bool,
+    declared_anchors: Option<(anchors::Fact, NodeId)>,
     scopes: Vec<Scope>,
 }
 #[derive(Clone, Copy)]
@@ -800,7 +801,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     self.declare(b, ty, binding, origin, pat.site);
                     self.scope_slots.push(b);
                 }
-                self.set_slot_anchors(b, subject.anchors);
+                if let Some((allowed, site)) = self.patterns.declared_anchors {
+                    self.declare_anchors(b, Some(allowed), subject.anchors, site);
+                } else {
+                    self.set_slot_anchors(b, subject.anchors);
+                }
                 if kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Scoped {
                     self.freeze_anchors(subject.anchors, self.depth);
                 }
@@ -959,7 +964,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.patterns.matrix.truncate(matrix);
         }
         let subject = self.chosen_pattern(id, subject, pat);
+        let written = self
+            .kids(s)
+            .iter()
+            .copied()
+            .find(|&n| is_type_node(self.kind(n)));
+        let declared = written
+            .and_then(|n| self.written_anchors(n))
+            .map(|f| (f, value));
+        let saved = std::mem::replace(&mut self.patterns.declared_anchors, declared);
         self.bind_pattern(id, subject, self.kind(s) == NodeKind::LetMut);
+        self.patterns.declared_anchors = saved;
         if subject.viewed || kind(&self.p.decls, &self.t, subject.ty, &self.params) == Kind::Scoped
         {
             let depth = self.depth;

@@ -2625,6 +2625,8 @@ fn loop_scoped_slots_preserve_their_anchor_sets() {
         "loop-anchor-refused.hirsel",
         "loop-anchor-lifetimes.hirsel",
         "loop-anchor-accepted.hirsel",
+        "loop-declared-anchors.hirsel",
+        "loop-declared-anchors-refused.hirsel",
     ] {
         failures.extend(run_case(&root().join("cases/body").join(case)));
     }

@@ -1023,7 +1023,8 @@ fn loop_anchor_lifetimes(backend:Backend) {
     let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dir=tempfile::tempdir().unwrap();
     let source=include_str!("../../../core/front/cases/body/loop-anchor-accepted.hirsel");
-    let source=format!("{source}\npub fn main()->Result[(),Exit] {{ if positive() {{ Ok(()) }} else {{ Error(Exit(status:1)) }} }}");
+    let declared=include_str!("../../../core/front/cases/body/loop-declared-anchors.hirsel").replace("positive()", "declared_positive()");
+    let source=format!("{source}\n{declared}\npub fn main()->Result[(),Exit] {{ if positive() && declared_positive() {{ Ok(()) }} else {{ Error(Exit(status:1)) }} }}");
     let mut request=source_request(&source,dir.path());
     request.inputs.packages[1]=PackageManifest::directory(&root.join("core/core"),package("core"),true).unwrap();
     let product=Driver::default().check(request,&mut Meter::new(false)).unwrap();

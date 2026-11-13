@@ -1,0 +1,21 @@
+fn last_local(xs:List[String])->u64 {
+ let mut found:Option[View[String]] in xs=None
+ for s in xs {
+  let t=string.new()
+  found=Some(view t)
+ }
+ 0
+}
+fn frozen_empty(mut xs:List[String]) {
+ let mut found:Option[View[String]] in xs=None
+ list.clear(mut xs)
+ let _=found
+}
+fn wrong_initial(xs:List[String],t:String) {
+ let found:Option[View[String]] in xs=Some(view t)
+ let _=found
+}
+// expect: refuse OWN-19 at 5:3
+// expect: refuse OWN-10 at 11:13
+// expect: refuse OWN-19 at 15:39
+

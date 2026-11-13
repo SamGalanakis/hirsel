@@ -199,7 +199,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.refuse_at(
                     "OWN-17",
                     site,
-                    format!("`{name}` changes its anchor set when the loop repeats"),
+                    format!("`{name}` changes its anchor set when the loop repeats; write its anchors on the binding, for example `let mut last: Option[View[String]] in xs = None`"),
                 );
             }
             if v.born < born && v.avail != entry {

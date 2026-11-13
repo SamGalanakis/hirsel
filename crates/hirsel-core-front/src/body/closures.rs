@@ -1395,3 +1395,24 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         true
     }
 }
+
+impl<'c, 'a> Cx<'c, 'a, '_> {
+    pub(super) fn capture_anchors(&mut self, value: Option<ValueId>) -> anchors::Fact {
+        let Some(id) = self.descriptors.of(value) else {
+            return 0;
+        };
+        let range = self.descriptors.ranges[id as usize];
+        let mut fact = 0;
+        for i in range.start..range.start + range.len {
+            let slot = self.descriptors.captures[i as usize].slot;
+            let ty = self.var(slot).ty;
+            let captured = self.anchor_read(At {
+                place: Place::whole(slot),
+                ty,
+                shared: false,
+            });
+            fact = self.anchors.union(fact, captured);
+        }
+        fact
+    }
+}

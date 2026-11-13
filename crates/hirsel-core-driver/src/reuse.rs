@@ -338,16 +338,102 @@ fn header_end(item: Item<'_>) -> usize {
 
 pub(crate) fn compiler_identity() -> io::Result<ContentHash> {
     static ID: std::sync::LazyLock<io::Result<ContentHash>> = std::sync::LazyLock::new(|| {
-        // Hash the running executable once per process, including its format and code.
-        // Linux's proc link remains bound to the loaded inode across binary replacement.
+        hirsel_core_front::cost_scope!("non-check", "compiler executable identity");
+        // The linker has already identified this executable. Read that immutable
+        // note, rather than scanning and hashing the whole compiler on every launch.
+        // /proc/self/exe stays bound to the loaded inode across binary replacement.
         let path = if cfg!(target_os = "linux") {
             PathBuf::from("/proc/self/exe")
         } else {
             std::env::current_exe()?
         };
-        std::fs::read(path).map(|b| ContentHash::of_bytes(&b))
+        compiler_stream_identity(&mut std::fs::File::open(path)?)
     });
     ID.as_ref()
         .copied()
         .map_err(|e| io::Error::other(e.to_string()))
+}
+
+fn compiler_stream_identity(reader: &mut (impl io::Read + io::Seek)) -> io::Result<ContentHash> {
+    use object::Object as _;
+    let linked = {
+        let cache = object::read::ReadCache::new(&mut *reader);
+        object::File::parse(&cache).ok().and_then(|binary| {
+            binary
+                .build_id()
+                .ok()
+                .flatten()
+                .filter(|id| !id.is_empty())
+                .map(|id| ContentHash::of_parts("hirsel.compiler-link-id.v1", [id]))
+        })
+    };
+    if let Some(identity) = linked {
+        return Ok(identity);
+    }
+    // Linkers/formats without a build ID retain the complete executable identity.
+    reader.rewind()?;
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes)?;
+    Ok(ContentHash::of_bytes(&bytes))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn compiler_link_id_changes_identity_and_missing_notes_keep_full_hashing() {
+        // Minimal ELF64 executable: one PT_NOTE at byte 120, a GNU build ID of
+        // twenty bytes. The note and ELF field offsets are from the ELF ABI.
+        let mut elf = vec![0u8; 156];
+        elf[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
+        elf[16..18].copy_from_slice(&2u16.to_le_bytes());
+        elf[18..20].copy_from_slice(&62u16.to_le_bytes());
+        elf[20..24].copy_from_slice(&1u32.to_le_bytes());
+        elf[32..40].copy_from_slice(&64u64.to_le_bytes());
+        elf[52..54].copy_from_slice(&64u16.to_le_bytes());
+        elf[54..56].copy_from_slice(&56u16.to_le_bytes());
+        elf[56..58].copy_from_slice(&1u16.to_le_bytes());
+        elf[58..60].copy_from_slice(&64u16.to_le_bytes());
+        elf[64..68].copy_from_slice(&4u32.to_le_bytes());
+        elf[72..80].copy_from_slice(&120u64.to_le_bytes());
+        elf[96..104].copy_from_slice(&36u64.to_le_bytes());
+        elf[104..112].copy_from_slice(&36u64.to_le_bytes());
+        elf[112..120].copy_from_slice(&4u64.to_le_bytes());
+        elf[120..124].copy_from_slice(&4u32.to_le_bytes());
+        elf[124..128].copy_from_slice(&20u32.to_le_bytes());
+        elf[128..132].copy_from_slice(&3u32.to_le_bytes());
+        elf[132..136].copy_from_slice(b"GNU\0");
+        for (i, b) in elf[136..].iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        // Independent SHA-256 of the domain and ID, each framed by u64 LE length.
+        assert_eq!(
+            compiler_stream_identity(&mut io::Cursor::new(&elf))
+                .unwrap()
+                .0,
+            [
+                169, 29, 73, 236, 7, 183, 253, 11, 157, 25, 184, 241, 93, 180, 53, 99, 6, 172, 106,
+                55, 33, 198, 174, 102, 215, 24, 56, 121, 46, 189, 104, 222
+            ]
+        );
+        elf[136] = 255;
+        assert_eq!(
+            compiler_stream_identity(&mut io::Cursor::new(&elf))
+                .unwrap()
+                .0,
+            [
+                178, 69, 107, 16, 225, 205, 99, 73, 2, 221, 87, 102, 200, 207, 27, 15, 58, 15, 242,
+                147, 200, 57, 12, 20, 206, 186, 7, 15, 122, 208, 179, 22
+            ]
+        );
+        assert_eq!(
+            compiler_stream_identity(&mut io::Cursor::new(b"compiler-without-a-note"))
+                .unwrap()
+                .0,
+            [
+                88, 28, 171, 172, 129, 86, 81, 147, 24, 134, 60, 221, 161, 178, 132, 193, 24, 62,
+                80, 145, 143, 22, 81, 140, 69, 22, 97, 225, 130, 98, 156, 238
+            ]
+        );
+    }
 }

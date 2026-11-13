@@ -553,6 +553,21 @@ def full(tree, screened=False):
     return report
 
 
+def core_cost_report(base, tree):
+    """Print both core cost ceilings at land time; budget reds ride by host policy."""
+    ceiling = ROOT / 'crates/hirsel-core-front/cost-ceilings.json'
+    relevant = ('crates/hirsel-core-', 'crates/hirsel-intern/', 'core/core/', 'core/std/', 'core/programs/m1/')
+    if not ceiling.is_file() or not any(
+            path.startswith(relevant) or path in {'Cargo.toml', 'Cargo.lock', 'tools/buck2/profile.bzl', 'tools/buck2/defs.bzl', 'core/tools/measure.py'}
+            for path in changed_paths(base, tree)):
+        return
+    result = run([BUCK2, 'test', *CONFIG, '//:core-check-cost'])
+    # Keep observations in every affected ticket's log, including successful samples.
+    print(result.stdout + result.stderr, flush=True)
+    say('core cost guard passed' if result.returncode == 0 else
+        'core cost guard RED; budget/counter findings ride under host-rules')
+
+
 def changed_paths(before, after):
     result = git('diff', '--no-renames', '--name-only', '-z', before, after)
     if result.returncode:
@@ -862,7 +877,10 @@ class Batch:
             tickets = f' with {len(applied)} tickets: ' + ', '.join(str(member) for member, _ in applied)
         say(f'attempt {self.attempt}: checking {tree[:12]} on origin/main {base[:12]}' + tickets)
         tree_id = git('rev-parse', tree + '^{tree}')
-        return full(tree, tree_id.returncode == 0 and tree_id.stdout.strip() in self.screened)
+        report = full(tree, tree_id.returncode == 0 and tree_id.stdout.strip() in self.screened)
+        if report is None:
+            core_cost_report(base, tree)
+        return report
 
     def resolve(self, members, previous=None):
         """Check groups of tickets one at a time and push each green one at once.

@@ -32,6 +32,7 @@ struct HashedFile {
 }
 impl Write for HashedFile {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        hirsel_core_front::cost_scope!("non-check", "archive write and digest");
         let written = self.file.write(bytes)?;
         self.hash.update(&bytes[..written]);
         Ok(written)
@@ -54,6 +55,7 @@ impl Write for ArchiveWriter {
 }
 impl ArchiveWriter {
     pub fn record<T: serde::Serialize>(&mut self, row: &T) -> io::Result<Record> {
+        hirsel_core_front::cost_scope!("non-check", "archive binary encoding");
         let start = self.buffer.len() as u64;
         // serialize_into visits the borrowed tables once. serialize() first counts
         // their encoded size and would add a complete second traversal.

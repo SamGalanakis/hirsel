@@ -708,6 +708,7 @@ dependencies = [
  "hirsel-guard",
  "hirsel-intern",
  "hirsel-llvm",
+ "object",
  "serde",
  "serde_json",
  "sha2",

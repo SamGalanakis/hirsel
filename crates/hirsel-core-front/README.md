@@ -44,3 +44,10 @@ It pauses instruction accounting around event bookkeeping; counter wrappers and
 changed inlining remain diagnostic overhead. Use the ordinary driver for savings.
 Omit `--profile` to export CoreIR, outcomes and definition keys for comparison.
 The feature and all scopes are absent from production compiler units.
+
+Each cost-saving land lowers both recorded ceilings to its ordinary-driver sample
+plus 2%, rounded up to 100 instructions per line. The finished-checker forecast for
+this lane must stay under 50,000 on both corpora; a cheap incomplete check is not
+that proof. Relevant compiler/source lands run the guard and retain its observations
+in their land log. A failed guard remains a failed test; under host-rules, budget
+or counter findings are reported without blocking the otherwise qualified push.

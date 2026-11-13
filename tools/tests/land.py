@@ -1395,5 +1395,28 @@ class Units(unittest.TestCase):
                         module['main']()
 
 
+class CoreCostGuard(unittest.TestCase):
+    def test_cost_findings_are_visible_at_land_time_and_unrelated_lands_skip(self):
+        report = runpy.run_path(str(ROOT / 'tools/land'))['core_cost_report']
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            ceiling = root / 'crates/hirsel-core-front/cost-ceilings.json'
+            ceiling.parent.mkdir(parents=True)
+            ceiling.write_text('{}')
+            messages, commands = [], []
+            def run(command):
+                commands.append(command)
+                return subprocess.CompletedProcess(command, 1, 'm1: 50001 exceeds 50000\n', '')
+            with patch.dict(report.__globals__, ROOT=root, run=run, say=messages.append,
+                            changed_paths=lambda *_: {'crates/hirsel-core-front/src/body/mod.rs'}):
+                self.assertIsNone(report('base', 'tree'))
+            self.assertEqual(commands[0][-1], '//:core-check-cost')
+            self.assertIn('RED', messages[-1])
+            commands.clear()
+            with patch.dict(report.__globals__, ROOT=root, run=run, say=messages.append,
+                            changed_paths=lambda *_: {'README.md'}):
+                report('base', 'tree')
+            self.assertEqual(commands, [])
+
 if __name__ == '__main__':
     unittest.main()

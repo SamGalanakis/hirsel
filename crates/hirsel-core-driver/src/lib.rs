@@ -316,8 +316,14 @@ impl Driver {
         let mut bytes_total = 0;
         for p in &request.inputs.packages {
             for s in &p.sources {
-                let bytes = std::fs::read(&s.file)?;
-                let hash = ContentHash::of_bytes(&bytes);
+                let bytes = {
+                    hirsel_core_front::cost_scope!("non-check", "source file reads");
+                    std::fs::read(&s.file)?
+                };
+                let hash = {
+                    hirsel_core_front::cost_scope!("non-check", "source byte hashing");
+                    ContentHash::of_bytes(&bytes)
+                };
                 bytes_total += bytes.len();
                 sources.push((
                     ModulePath {
@@ -331,6 +337,9 @@ impl Driver {
                 ));
             }
         }
+        meter.finish("load/source files and hashes");
+        let compiler = compiler_identity()?;
+        meter.finish("load/compiler identity");
         let image = match &request.library {
             LibraryInput::Image(i) => Some(Arc::clone(i)),
             _ => None,
@@ -338,7 +347,7 @@ impl Driver {
         let produce = matches!(request.library, LibraryInput::Produce);
         let source_stamps: Vec<_> = sources.iter().map(|s| s.4).collect();
         let snapshot = ContentHash::of_bytes(&encode(&(
-            compiler_identity()?,
+            compiler,
             &request.inputs,
             source_stamps,
             image.as_ref().map(|i| i.identity),
@@ -346,7 +355,7 @@ impl Driver {
             &request.entry,
         ))?);
         let store = Store::new(&request.store)?;
-        meter.finish("load/hash");
+        meter.finish("load/request identity and store");
         let same_store = self.store.as_ref() == Some(&request.store);
         if let Some(old) = self
             .published
@@ -656,6 +665,7 @@ impl Driver {
                 .as_ref()
                 .map(|l| writer.record(l.as_ref()))
                 .transpose()?;
+            meter.finish("publish/index and declarations");
             let headers = Arc::clone(&result.headers);
             let mut files = Vec::with_capacity(result.files.len());
             for file in &result.files {
@@ -728,6 +738,7 @@ impl Driver {
     }
 }
 fn encode<T: Serialize>(value: &T) -> io::Result<Vec<u8>> {
+    hirsel_core_front::cost_scope!("encoding", "canonical key encoding");
     bincode::serialize(value).map_err(io::Error::other)
 }
 

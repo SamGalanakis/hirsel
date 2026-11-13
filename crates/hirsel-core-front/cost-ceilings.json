@@ -1,8 +1,17 @@
 {
   "measurement": "Buck release, CPU 16, jobs 1, instructions:u, fresh private store, complete driver interval including publication and teardown",
-  "basis": "e1ed29ff plus dense definition-key traversal: 25559.60 and 13556.61; fd076946 plus that fix and append-only layout recipes: 24744.66 and 13079.36. One before/after sample per corpus and fix; ceilings retain headroom below the whole-request target.",
+  "basis": "0236fc9e plus linker build-ID identity; measured check/lower 25286.71/13220.37 and whole request 46652.29/32177.71 for M1/std. Finished-checker forecast is separately reported against the 50000 target.",
   "corpora": {
-    "m1": {"code_lines": 5963, "check_lower_per_line": 26000, "whole_request_per_line": 60000},
-    "std": {"code_lines": 2572, "check_lower_per_line": 14000, "whole_request_per_line": 60000}
-  }
+    "m1": {
+      "code_lines": 5963,
+      "check_lower_per_line": 25800,
+      "whole_request_per_line": 47600
+    },
+    "std": {
+      "code_lines": 2572,
+      "check_lower_per_line": 13500,
+      "whole_request_per_line": 32900
+    }
+  },
+  "margin": "2 percent over the last ordinary release observation, rounded up to 100 instructions per code line; lower both ceilings after every saving."
 }

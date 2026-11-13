@@ -72,10 +72,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         match self.t.kind(t).clone() {
             TyKind::Scalar(_) | TyKind::Unit => Ok(()),
             TyKind::Tuple(xs) => xs.iter().try_for_each(|&x| self.comparable(x, depth + 1)),
-            TyKind::View(x) => self.comparable(x, depth + 1),
+            TyKind::View(x) | TyKind::Anchored(x, _) => self.comparable(x, depth + 1),
             TyKind::Adt(d, args) => {
                 let decl = &self.p.decls[d.index()];
-                if self.text_like(t) || self.word_like(t) {
+                if self.text_like(t) || self.word_like(t) || self.is_text(t) {
                     return Ok(());
                 }
                 if decl.role.is_some() {
@@ -133,6 +133,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 );
                 self.scalars(x, y, join, eq_only, n);
             }
+            // An anchored value is held like its type (MEM-6).
+            TyKind::Anchored(x, _) => self.walk(a, b, x, join, eq_only, n),
+            // A view of a locator is the locator (MEM-5).
+            TyKind::View(x) if self.is_text(x) => self.walk(a, b, x, join, eq_only, n),
             TyKind::View(x) => {
                 let (pa, pb) = (self.read_bits(a, Ty::Ptr, n), self.read_bits(b, Ty::Ptr, n));
                 let Some(place) = self.place_of(x) else {
@@ -147,7 +151,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     self.component(a, b, Step::Field(i as u32), x, join, eq_only, n);
                 }
             }
-            TyKind::Adt(..) if self.text_like(t) => self.bytes(a, b, join, n),
+            TyKind::Adt(..) if self.text_like(t) => {
+                if let (Some(x), Some(y)) = (self.carrier(a, n), self.carrier(b, n)) {
+                    self.bytes(x, y, join, n);
+                }
+            }
+            TyKind::Adt(..) if self.is_text(t) => {
+                if let (Some(x), Some(y)) = (self.text_bytes(a, n), self.text_bytes(b, n)) {
+                    self.bytes(x, y, join, n);
+                }
+            }
             TyKind::Adt(..) if self.word_like(t) => {
                 let u64t = Ty::Scalar(Scalar::U64);
                 let (x, y) = (self.read_bits(a, u64t, n), self.read_bits(b, u64t, n));
@@ -251,25 +264,46 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             if matches!(self.p.decls[d.index()].role, Some(Role::Unique | Role::Site)))
     }
 
-    /// Two byte carriers: `rt.compare_bytes` over their data and lengths; a nonzero
-    /// ordering jumps to `join` with it.
-    fn bytes(&mut self, a: AddressId, b: AddressId, join: BlockId, n: NodeId) {
+    /// `Text`: its bytes are compared like a `String`'s (SEM-7).
+    fn is_text(&self, t: TyId) -> bool {
+        matches!(self.t.kind(self.bare(t)), TyKind::Adt(d, _)
+            if self.p.decls[d.index()].role == Some(Role::Text))
+    }
+    /// The data pointer and length of the byte carrier at `at`.
+    fn carrier(&mut self, at: AddressId, n: NodeId) -> Option<[ValueId; 2]> {
         let u64t = Ty::Scalar(Scalar::U64);
-        let mut args = vec![];
-        for at in [a, b] {
-            for (offset, t) in [(0, Ty::Ptr), (8, u64t)] {
-                let Some(o) = self.konst(u64t, offset, n) else {
-                    return;
-                };
-                let word = self.address(
-                    AddressBase::Address(at),
-                    &[Step::Byte(o)],
-                    PlaceTy::Value(t),
-                    n,
-                );
-                args.push(Arg::Value(self.read_bits(word, t, n)));
-            }
+        let mut out = [None; 2];
+        for (k, (offset, t)) in [(0, Ty::Ptr), (8, u64t)].into_iter().enumerate() {
+            let o = self.konst(u64t, offset, n)?;
+            let word = self.address(
+                AddressBase::Address(at),
+                &[Step::Byte(o)],
+                PlaceTy::Value(t),
+                n,
+            );
+            out[k] = Some(self.read_bits(word, t, n));
         }
+        Some([out[0]?, out[1]?])
+    }
+    /// The bytes and length of the `Text` whose locator is at `at`: its W-wide length
+    /// is followed by its bytes.
+    fn text_bytes(&mut self, at: AddressId, n: NodeId) -> Option<[ValueId; 2]> {
+        let header = self.pointer(at, n);
+        let (blob, at, w) = self.locator(header, n)?;
+        let len = self.word_in(blob, at, w, n)?;
+        let data = self.add(at, w, n);
+        let bytes = self.address(
+            AddressBase::Value(blob),
+            &[Step::Byte(data)],
+            PlaceTy::Value(Ty::Scalar(Scalar::U8)),
+            n,
+        );
+        Some([self.pointer(bytes, n), len])
+    }
+    /// Two byte runs: `rt.compare_bytes` over their data and lengths; a nonzero
+    /// ordering jumps to `join` with it.
+    fn bytes(&mut self, a: [ValueId; 2], b: [ValueId; 2], join: BlockId, n: NodeId) {
+        let args: Vec<Arg> = a.into_iter().chain(b).map(Arg::Value).collect();
         let op = hirsel_core_ir::RtOp::CompareBytes;
         let signature = self.e.sig(op.signature());
         let args = PoolRange::push(&mut self.b.pools.args, args);

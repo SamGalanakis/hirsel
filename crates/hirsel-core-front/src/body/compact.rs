@@ -425,4 +425,75 @@ impl Cx<'_, '_, '_> {
                 ))
             )
     }
+    /// A field of a temporary, such as a call result (OWN-8): the base is evaluated
+    /// once and read in place. Through a view, or in a stable value, a field that is
+    /// not plain reads as a view.
+    pub(super) fn temporary_field(&mut self, n: NodeId) -> (TyId, Option<ValueId>) {
+        let (base, value) = self.expr(self.kids(n)[0], None);
+        if base == ERROR {
+            return (ERROR, None);
+        }
+        let view = matches!(self.t.kind(base), TyKind::View(_));
+        let inner = self.bare(base);
+        let name = self.token_text(n);
+        let (found, stable) = match self.t.kind(inner).clone() {
+            TyKind::Adt(d, args) => {
+                let decl = &self.p.decls[d.index()];
+                let stable = decl.repr == Repr::Stable;
+                let found = match &decl.body {
+                    DeclBody::Record(fs) => fs
+                        .iter()
+                        .position(|f| f.name == name)
+                        .map(|i| (i, subst(&mut self.t, fs[i].ty, &args))),
+                    _ => None,
+                };
+                (found, stable)
+            }
+            _ => (None, false),
+        };
+        let Some((i, ft)) = found else {
+            return self.gap_ty(n, "this field access is not built");
+        };
+        if !view && !self.copies(inner) {
+            return self.gap_ty(n, "a field of a temporary owner is not built");
+        }
+        let compact = self.compact_adt(inner).is_some();
+        let held = self.rep(base).ok().and_then(Rep::pointee);
+        if !compact && held.is_none() {
+            return self.gap_ty(n, "a field of this temporary is not built");
+        }
+        let ft = self.linked(ft);
+        let ty = if (view || stable)
+            && !self.copies(ft)
+            && !matches!(self.t.kind(ft), TyKind::View(_))
+        {
+            self.t.mk(TyKind::View(ft))
+        } else {
+            ft
+        };
+        let v = (|| {
+            let v = value?;
+            if !self.live() {
+                return None;
+            }
+            let address = if compact {
+                self.compact_field(v, inner, None, i as u32, n)?.0
+            } else {
+                let id = held?;
+                let place = self.place_ty(ft, n)?;
+                let at = self.address(AddressBase::Value(v), &[], PlaceTy::Declared(id), n);
+                self.address(AddressBase::Address(at), &[Step::Field(i as u32)], place, n)
+            };
+            match self.rep(ft).ok()? {
+                r @ (Rep::Scalar(_) | Rep::View(_)) => Some(self.read_bits(address, r.ty()?, n)),
+                Rep::Place(_) if ty != ft => Some(self.pointer(address, n)),
+                Rep::Place(id) => {
+                    let p = self.pointer(address, n);
+                    Some(self.snapshot(p, id, n))
+                }
+                Rep::None => None,
+            }
+        })();
+        (ty, v)
+    }
 }

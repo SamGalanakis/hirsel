@@ -1774,6 +1774,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 (at.ty, v)
             }
             Ok(None) if self.kind(n) == NodeKind::Index => self.temporary_index(n),
+            Ok(None) if self.kind(n) == NodeKind::Projection => self.temporary_field(n),
             Ok(None) => self.gap_ty(n, "field and index places are not built"),
             Err(()) => (ERROR, None),
         }

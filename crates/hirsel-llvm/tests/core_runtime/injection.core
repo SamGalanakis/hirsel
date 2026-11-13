@@ -24,8 +24,9 @@ b0:
   address a1
   address a2
   address a3
+  v10: u64 = const 8
   v0: u64 = const 48
-  v1: ptr, v2: u64 = alloc resource grant 8 8 align 8 charge v0
+  v1: ptr, v2: u64 = alloc resource grant 8 v10 align 8 charge v0
   v3: ptr = const 0x0
   v4: bool = ne v1, v3
   branch v4, b1, b4
@@ -35,7 +36,7 @@ b1:
   address a5
   v5: u64 = const 1
   store a5, v5
-  v6: ptr, v7: u64 = alloc resource grant 8 8 align 8 charge v0
+  v6: ptr, v7: u64 = alloc resource grant 8 v10 align 8 charge v0
   v8: bool = ne v6, v3
   branch v8, b2, b3
 b2:
@@ -61,7 +62,7 @@ b6:
 fn f1 = n1 g1 {
 b0(v0: ptr):
   v1: u64 = const 8
-  v2: ptr, v3: u64 = alloc own 8 align 8 charge v1
+  v2: ptr, v3: u64 = alloc own v1 align 8 charge v1
   free v2 charge v1
   return
 }

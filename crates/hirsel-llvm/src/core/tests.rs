@@ -1,3 +1,5 @@
+#[path = "../../examples/support/front.rs"]
+mod front;
 use super::*;
 use hirsel_core_ir::{eval, text, wf};
 use std::path::PathBuf;
@@ -499,10 +501,6 @@ fn every_whole_v0_sample_matches_the_evaluator() {
 
 #[test]
 fn every_front_run_case_matches_the_evaluator() {
-    use hirsel_core_front::{Emitter, ModuleInput, Program};
-    use hirsel_core_ids::PackageId;
-    use hirsel_core_resolve::{Environment, ModuleId, NameIndex, PackageManifest};
-    use hirsel_core_syntax::{ParseMode, parse};
     fn files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
@@ -514,10 +512,6 @@ fn every_front_run_case_matches_the_evaluator() {
         }
     }
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/front");
-    let package = |name: &str| PackageId {
-        name: name.into(),
-        version: "1".into(),
-    };
     let mut paths = vec![];
     files(&root.join("cases"), &mut paths);
     paths.sort();
@@ -531,58 +525,15 @@ fn every_front_run_case_matches_the_evaluator() {
         if runs.is_empty() {
             continue;
         }
-        let mut modules = PackageManifest::directory(&root.join("core"), package("core"), true)
-            .and_then(|m| m.read())
-            .unwrap()
-            .into_iter()
-            .map(|m| ModuleInput {
-                id: m.module,
-                syntax: m.parsed.syntax,
-            })
-            .collect::<Vec<_>>();
-        let main = ModuleId {
-            package: package("app"),
-            modules: vec!["main".into()],
-        };
-        modules.push(ModuleInput {
-            id: main.clone(),
-            syntax: parse(&source, ParseMode::Source).syntax,
-        });
-        let mut index = NameIndex::new(Environment::default());
-        for m in &modules {
-            index.add_module(&m.id);
-            for (i, item) in m.syntax.items.iter().enumerate() {
-                index.index_item(&m.id, i as u32, item);
-            }
-        }
-        index.configure_core(package("core"));
-        let mut program = Program::declare(&index, &modules);
-        program.entry = Some(main.definition("main"));
-        let mut emitter = Emitter::new();
-        let mut names = std::collections::HashMap::new();
-        for (f, fd) in program.fns.iter().enumerate() {
-            if fd.path.0.package != main.package || fd.body.is_none() {
-                continue;
-            }
-            let check = program.check_lower(f, &mut emitter);
-            assert!(
-                check.gaps.is_empty(),
-                "{}: {:?}",
-                path.display(),
-                check.gaps
-            );
-            if let Some(id) = check.function {
-                names.insert(fd.path.0.name.clone(), id);
-            }
-        }
+        let (module, names) = front::lower(&source, &root.join("core"), "main")
+            .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         let cases = runs
             .iter()
             .map(|run| {
                 let (call, _) = run.split_once(" = ").unwrap();
                 let (name, args) = call.strip_suffix(')').unwrap().split_once('(').unwrap();
                 let function = names[name];
-                let sig = &emitter.module.signatures
-                    [emitter.module.functions[function.index()].signature.index()];
+                let sig = &module.signatures[module.functions[function.index()].signature.index()];
                 let args = args
                     .split(',')
                     .filter(|s| !s.is_empty())
@@ -604,7 +555,7 @@ fn every_front_run_case_matches_the_evaluator() {
             .collect::<Vec<_>>();
         println!("front {}: {} native runs", path.display(), cases.len());
         count += cases.len();
-        agree_cases(&emitter.module, &cases, false);
+        agree_cases(&module, &cases, false);
     }
     assert!(count > 0);
     println!("front native executions: {count}");

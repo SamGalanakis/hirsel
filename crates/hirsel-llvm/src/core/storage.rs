@@ -75,6 +75,7 @@ impl FunctionEmitter<'_> {
                         _ => At::Other,
                     };
                 }
+                Step::Byte(_) => return Err(Error::Unsupported("compact byte projection".into())),
                 Step::Index(v) => {
                     let stride = self.place_layout(info.ty).0;
                     let i = self.get(v);
@@ -176,6 +177,7 @@ impl FunctionEmitter<'_> {
                 fail,
             } => {
                 let charge = self.get(charge);
+                let size = self.get(size);
                 let (name, mut args) = match (kind, place) {
                     (AllocKind::Resource { grant }, _) => {
                         let without_grant = self.calc(format!("sub i64 {charge}, {grant}"));

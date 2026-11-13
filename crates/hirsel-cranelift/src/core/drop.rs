@@ -569,7 +569,7 @@ impl Glue<'_, '_, '_> {
         let charge = self.round8(bytes);
         let done = self.b.create_block();
         let free = self.b.create_block();
-        let present = self.b.ins().icmp_imm_s(IntCC::NotEqual, p, 0);
+        let present = self.b.ins().icmp_imm_s(IntCC::NotEqual, cap, 0);
         self.b.ins().brif(present, free, &[], done, &[]);
         self.b.switch_to_block(free);
         self.call("hirsel_core_free_value", &[P, U], &[], &[p, charge])?;

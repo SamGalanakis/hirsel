@@ -73,10 +73,10 @@ impl Glue<'_, '_, '_> {
     ) -> Result<()> {
         let done = self.b.create_block();
         let present = self.b.create_block();
-        let allocated = self.b.ins().icmp_imm_s(IntCC::NotEqual, node, 0);
+        let cap = self.load(carrier, 16);
+        let allocated = self.b.ins().icmp_imm_s(IntCC::NotEqual, cap, 0);
         self.b.ins().brif(allocated, present, &[], done, &[]);
         self.b.switch_to_block(present);
-        let cap = self.load(carrier, 16);
         let bytes = self.b.ins().imul_imm_s(cap, logical as i64);
         let charge = self.round8(bytes);
         let function = self

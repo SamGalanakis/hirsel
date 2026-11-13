@@ -416,12 +416,7 @@ fn link_program(scratch: &Scratch, source: &str) -> PathBuf {
     let link = Command::new("cc")
         .current_dir(&scratch.0)
         .args(["caller.c", "input.o", "-I"])
-        .arg(
-            fs::canonicalize(
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../hirsel-core-rt/include"),
-            )
-            .expect("the runtime headers are explicit test data"),
-        )
+        .arg(&scratch.0)
         .arg(archive)
         .args([
             "-lm",
@@ -917,6 +912,117 @@ fn counted_variant_chain_uses_constant_stack_and_refunds_every_node() {
             admissions: n as usize + 1,
         }]),
     );
+}
+
+#[test]
+fn string_literals_grow_and_clean_in_dev_and_speed() {
+    let source = include_str!("../../hirsel-core-ir/samples/strings.core");
+    let module = text::parse(source).unwrap();
+    let mut cases: Vec<_> = sample_runs(&module, source)
+        .into_iter()
+        .map(|run| (run, 1_000_000))
+        .collect();
+    for line in source
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("; run limit "))
+    {
+        let (limit, call) = line.split_once(": ").unwrap();
+        cases.extend(
+            sample_runs(&module, &format!("; run: {call}"))
+                .into_iter()
+                .map(|run| (run, limit.parse().unwrap())),
+        );
+    }
+    for optimize in [false, true] {
+        for (run, limit) in &cases {
+            execute_limit(&module, std::slice::from_ref(run), optimize, *limit);
+            let baseline = eval::run(&module, run.0, &run.1, *limit);
+            for n in 1..=baseline.admissions {
+                for later in [false, true] {
+                    execute_injected(
+                        &module,
+                        std::slice::from_ref(run),
+                        optimize,
+                        *limit,
+                        Some((n, later)),
+                    );
+                }
+            }
+        }
+    }
+
+    // The sample's fixed-size push folds its room test. Exercise a real loop,
+    // then Seq/Map cleanup with nonnull static data in both count modes.
+    let source = include_str!("support/literal-storage.core");
+    for counted in ["rc", "arc"] {
+        let source = source
+            .replace("counted rc", &format!("counted {counted}"))
+            .replace("release v12 rc", &format!("release v12 {counted}"));
+        let module = text::parse(&source).unwrap();
+        wf::module(&module).unwrap();
+        let mut runs = Vec::new();
+        for n in [0, 1, 3, 4, 12] {
+            let run = (FuncId(0), vec![n]);
+            let report = eval::run(&module, run.0, &run.1, 1000);
+            assert_eq!(report.outcome, Outcome::Returned(vec![5 + n, 532 + 88 * n]));
+            assert_eq!(report.used, 0);
+            runs.push(run);
+        }
+        for optimize in [false, true] {
+            execute(&module, &runs, optimize);
+            // Three growth admissions exercise literal -> owned, owned -> owned,
+            // and the non-growing push path, with the live prefix cleaned on refusal.
+            let run = (FuncId(0), vec![12]);
+            let baseline = eval::run(&module, run.0, &run.1, 1000);
+            for n in 1..=baseline.admissions {
+                for later in [false, true] {
+                    execute_injected(
+                        &module,
+                        std::slice::from_ref(&run),
+                        optimize,
+                        1000,
+                        Some((n, later)),
+                    );
+                }
+            }
+            // Map cleanup is not implemented by the evaluator. The independent
+            // oracle is no causes, no trace, no retained charge; counted storage
+            // adds one admission, whose refusal raises only Unwrap.
+            for counted_drop in [false, true] {
+                let run = (FuncId(1), vec![u64::from(counted_drop)]);
+                execute_reports(
+                    &module,
+                    std::slice::from_ref(&run),
+                    optimize,
+                    1000,
+                    None,
+                    Some(&[eval::Report {
+                        outcome: Outcome::Returned(vec![]),
+                        used: 0,
+                        trace: vec![],
+                        admissions: usize::from(counted_drop),
+                    }]),
+                );
+                if counted_drop {
+                    for later in [false, true] {
+                        execute_reports(
+                            &module,
+                            std::slice::from_ref(&run),
+                            optimize,
+                            1000,
+                            Some((1, later)),
+                            Some(&[eval::Report {
+                                outcome: Outcome::Failed(vec!["Unwrap".into()]),
+                                used: 0,
+                                trace: vec![],
+                                admissions: 1,
+                            }]),
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[test]

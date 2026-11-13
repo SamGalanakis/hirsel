@@ -107,14 +107,14 @@ impl Context {
     #[inline]
     pub fn limit_enter(&mut self, bytes: u64) -> Result<(), Capacity> {
         self.current_limit = self.current.enter(bytes)?;
-        self.bound_depth += 1;
+        self.bound_depth = self.bound_depth.wrapping_add(1);
         Ok(())
     }
 
     #[inline]
     pub fn limit_exit(&mut self) {
         self.current_limit = self.current.exit();
-        self.bound_depth -= 1;
+        self.bound_depth = self.bound_depth.wrapping_sub(1);
     }
 
     #[inline]

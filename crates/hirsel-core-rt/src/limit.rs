@@ -261,7 +261,8 @@ impl Payer {
     pub(crate) fn canonical(self) -> Self {
         // SAFETY: local task exclusively owns the local record fields.
         if unsafe { (*self.local()).parent.is_none() } {
-            self
+            // SAFETY: canonical identities are untagged stable slot pointers.
+            Self(unsafe { NonNull::new_unchecked(self.local().cast()) })
         } else {
             let f = self.forest();
             let id = f.find(self.slot().id);
@@ -504,13 +505,22 @@ impl Funding {
     /// Move a retained forwarding handle to its canonical record at a context switch.
     #[inline(always)]
     pub(crate) fn normalize(&mut self) {
-        let canonical = self.payer.canonical();
-        if canonical != self.payer {
-            let f = self.payer.forest();
-            f.retain(canonical.slot().id);
-            f.release(self.payer.slot().id);
-            self.payer = canonical;
+        // SAFETY: Funding handles contain untagged slot pointers, unlike block words.
+        if unsafe { (*self.raw_local()).parent.is_some() } {
+            self.normalize_merged();
         }
+    }
+    #[cold]
+    fn normalize_merged(&mut self) {
+        let canonical = self.payer.canonical();
+        let f = self.payer.forest();
+        f.retain(canonical.slot().id);
+        f.release(self.payer.slot().id);
+        self.payer = canonical;
+    }
+    #[inline(always)]
+    fn raw_local(&self) -> *mut LimitRecord {
+        self.payer.0.as_ptr().cast()
     }
     #[inline(always)]
     pub(crate) fn enter(&mut self, bytes: u64) -> Result<*mut LimitRecord, Capacity> {
@@ -527,7 +537,7 @@ impl Funding {
         #[cfg(not(any(test, feature = "testing")))]
         let injected = false;
         // SAFETY: the task exclusively owns this live canonical context record.
-        let r = unsafe { &mut *parent.local() };
+        let r = unsafe { &mut *self.raw_local() };
         if injected || bytes > r.available {
             return Err(Capacity {
                 requested: bytes,
@@ -540,17 +550,21 @@ impl Funding {
             capacity: bytes,
             parent: Some(parent),
         };
-        self.payer = parent.forest().take(parent.slot().domain, live);
-        Ok(self.payer.local())
+        // SAFETY: an active Funding handle is untagged and task-exclusive.
+        let domain = unsafe { parent.0.as_ref().domain };
+        let forest = unsafe { &mut *domain.as_ref().forest.get() };
+        self.payer = forest.take(domain, live);
+        Ok(self.raw_local())
     }
     #[inline(always)]
     pub(crate) fn exit(&mut self) -> *mut LimitRecord {
         let old = self.payer;
         // SAFETY: the active context pins its live canonical record exclusively.
-        let r = unsafe { &mut *old.local() };
+        let r = unsafe { &mut *self.raw_local() };
         if r.refs == 1 && r.available == r.live.capacity {
             let parent = r.live.parent.unwrap();
-            let f = old.forest();
+            // SAFETY: the active Funding slot and its domain are task-exclusive.
+            let f = unsafe { &mut *old.0.as_ref().domain.as_ref().forest.get() };
             r.refs = 0;
             r.rank = 0;
             #[cfg(any(test, feature = "testing"))]
@@ -564,8 +578,8 @@ impl Funding {
             self.normalize();
             // SAFETY: normalize transferred the pin if an inactive parent merged.
             unsafe {
-                (*self.payer.local()).available =
-                    (*self.payer.local()).available.wrapping_add(r.available);
+                (*self.raw_local()).available =
+                    (*self.raw_local()).available.wrapping_add(r.available);
             }
         } else {
             let winner = self.end_id();
@@ -574,7 +588,7 @@ impl Funding {
             f.release(old.slot().id);
             self.payer = Payer(NonNull::from(f.slot(winner)));
         }
-        self.payer.local()
+        self.raw_local()
     }
     #[cfg(any(test, feature = "testing"))]
     pub(crate) fn inject(&self, n: usize, later: bool) {

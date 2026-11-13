@@ -189,8 +189,36 @@ fn empty_bound(available: &mut u64, reservation: u64) -> u64 {
     child_available
 }
 
+#[inline(never)]
+fn scoped_allocation(ctx: &mut Context) {
+    // SAFETY: this callback owns its exact plain allocation and frees it once.
+    unsafe {
+        let p = hirsel_core_rt::abi::inline_own_alloc(ctx, Some(8), 8, 8).unwrap();
+        p.as_ptr().write(7);
+        black_box(p).as_ptr().read();
+        hirsel_core_rt::abi::inline_own_free(ctx, p, 8, 8, 8);
+    }
+}
+
 fn limits(mode: &str) -> u64 {
-    if mode == "full" {
+    if matches!(mode, "full_alloc" | "alloc_control" | "query") {
+        let mut ctx = Context::new(if mode == "full_alloc" { 1024 } else { 64 });
+        let mut sum = 0;
+        for _ in 0..COUNT {
+            let bytes = black_box(64);
+            if mode == "full_alloc" {
+                ctx.limit_enter(bytes).unwrap();
+            }
+            if mode != "query" {
+                scoped_allocation(black_box(&mut ctx));
+            }
+            sum += black_box(black_box(&mut ctx).available());
+            if mode == "full_alloc" {
+                ctx.limit_exit();
+            }
+        }
+        sum
+    } else if mode == "full" {
         let mut ctx = Context::new(1024);
         let mut sum = 0;
         for _ in 0..COUNT {

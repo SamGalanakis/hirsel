@@ -142,7 +142,11 @@ audit's "child-domain/root values cannot escape". *v1:* MEM-20, MEM-25, MEM-26.
 input and a yield rooted in mutable cursor state are distinct contracts. Generic consumers
 use explicit scoped callbacks/bounds, retain invocation/destruction effects, and release
 each conflicting view before advance/refill. Ordinary storable Iter never secretly stores a
-View." *v1:* OWN-20, OWN-21; SEM-6 iterates only built-in sources.
+View." *v1:* OWN-20, OWN-21; SEM-6 iterates only built-in sources. A borrowed cursor is
+a value of a scoped type holding a view and a position (OWN-22's `Cursor`), anchored by
+OWN-20, advanced by functions that take it `mut`, and kept out of every storable value by
+OWN-19; a position may equally be a `u64` passed in and returned, as `string.next_scalar`
+does. No core type is a cursor and `for` takes no user cursor.
 
 **R22.** Dropped handles cancel and wait shielded. A later completion-selection primitive
 will be provider-ordered, separate from join, and clean its losers before returning.

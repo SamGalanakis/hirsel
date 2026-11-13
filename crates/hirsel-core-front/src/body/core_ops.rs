@@ -164,6 +164,14 @@ operations! {
     ("map", "insert", Lane::Value, "C", "core-check-callables-913", false),
     ("map", "set", Lane::Value, "C", "core-check-callables-913", false),
     ("map", "remove", Lane::Value, "C", "core-check-callables-913", false),
+    ("map", "update", Lane::PendingCode, "C", "core-collections-918", false),
+    ("float", "sqrt", Lane::PendingCode, "C", "core-check-895", false),
+    ("float", "abs", Lane::PendingCode, "C", "core-check-895", false),
+    ("float", "floor", Lane::PendingCode, "C", "core-check-895", false),
+    ("float", "ceil", Lane::PendingCode, "C", "core-check-895", false),
+    ("float", "trunc", Lane::PendingCode, "C", "core-check-895", false),
+    ("float", "round", Lane::PendingCode, "C", "core-check-895", false),
+    ("float", "round_even", Lane::PendingCode, "C", "core-check-895", false),
     ("option", "unwrap", Lane::Value, "A", "core-check-calls-910", false),
     ("rc", "new", Lane::Runtime(Kernel::NewOwner(Some(Counted::Rc))), "A", "core-ops-914", false),
     ("rc", "share", Lane::Runtime(Kernel::Share(Counted::Rc)), "A", "core-ops-914", false),
@@ -889,6 +897,7 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
                 | "core-check-895"
                 | "core-check-callables-913"
                 | "std-seed-api-889"
+                | "core-collections-918"
         ));
         if entry.private {
             assert!(

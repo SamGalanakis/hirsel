@@ -47,6 +47,7 @@ pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), (
 pub fn set[K: key, V](mut m: Map[K, V], k: K, take v: V) -> Result[V, V] {
   match find(m, k, hash(k)) { Some(i) => Ok(swap_value(mut m, i, take v)), None => Error(take v) }
 }
+pub fn update[K: key, V, R](mut m: Map[K, V], k: K, f: scoped fn(mut V) -> R) -> Option[R]
 pub fn remove[K: key, V](mut m: Map[K, V], k: K) -> Option[V] {
   match find(m, k, hash(k)) { Some(i) => Some(kill(mut m, i)), None => None }
 }

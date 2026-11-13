@@ -127,7 +127,13 @@ operations it names; nothing else about them may be inferred from an implementat
   fit. A `List` is cleaned element by element from index 0.
 - **Maps.** `map.insert` returns its key and value with `Capacity`. `map.set(mut m, k, take
   v)` returns `Ok(old)` when `k` is present, after installing `v` in place, and `Error(v)`
-  when it is absent; it copies no key and admits nothing. `map.remove` drops the stored key
+  when it is absent; it copies no key and admits nothing. `map.update(mut m, k, f)`, where
+  `f: scoped fn(mut V) -> R`, runs `f` once on the value of `k` in place and returns
+  `Some(r)`, or returns `None` without calling `f` when `k` is absent; it makes one lookup,
+  never inserts and admits nothing. `m` is lent to `update` for the call, so `f` cannot
+  name `m` ([OWN-9](ownership.md#own-9-overlap)). No core operation inserts or updates in
+  one call: a tally is `update`, then `insert` when it returns `None`, so a present key
+  costs one lookup and no owned key. `map.remove` drops the stored key
   and returns the value. A `Map` is cleaned entry by entry in insertion order, each key
   before its value.
 - **Integers.** The `integer` and `float` bounds ([OWN-4](ownership.md#own-4-bounds)) say
@@ -147,7 +153,17 @@ operations it names; nothing else about them may be inferred from an implementat
   the canonical NaN of [SEM-2](semantics.md#sem-2-floats) for every NaN pattern and the
   exact value for every other pattern, so a round trip through the bits is exact except that
   every NaN becomes canonical. These, with `char.from_u32` and `char.to_u32`, are all the
-  numeric conversions.
+  numeric conversions. Core's other float operations are `+ - * /`, unary `-`,
+  `float.mul_add`, `float.sqrt`, `float.abs`, `float.floor`, `float.ceil`, `float.trunc`,
+  `float.round` (ties away from zero) and `float.round_even` (ties to even). Each is the IEEE
+  754 operation, correctly rounded, so its result is exact or the nearest representable
+  value. A NaN operand gives the canonical NaN; `sqrt` of a value below zero gives the
+  canonical NaN, `sqrt(-0.0)` is `-0.0` and `sqrt` of `+∞` is `+∞`; `abs` clears the sign;
+  the rounding operations return zeros and infinities unchanged and keep the sign of a zero
+  result, so `float.floor(-0.5)` is `-1.0` and `float.ceil(-0.5)` is `-0.0`. No other float
+  operation is in core: `sin`, `cos`, `exp`, `ln`, `pow`, `min`, `max` and the rest are not
+  correctly rounded on every target, or not one IEEE operation, and are library code over
+  these.
 - **Host.** A path is resolved relative to its `Dir` and may not leave it, through every
   traversal, symbolic links included. `OpenMode`:
   `Read` opens an existing file for reading (`NotFound` when absent); `Write` opens for

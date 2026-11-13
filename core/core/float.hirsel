@@ -1,6 +1,13 @@
 // Module `float` (SEM-2).
 
 pub fn mul_add[F: float](a: F, b: F, c: F) -> F
+pub fn sqrt[F: float](x: F) -> F
+pub fn abs[F: float](x: F) -> F
+pub fn floor[F: float](x: F) -> F
+pub fn ceil[F: float](x: F) -> F
+pub fn trunc[F: float](x: F) -> F
+pub fn round[F: float](x: F) -> F
+pub fn round_even[F: float](x: F) -> F
 pub fn total_order[F: float](a: F, b: F) -> Order
 pub fn to_int[F: float, I: integer](x: F) -> Result[I, FloatError]
 pub fn from_int[I: integer, F: float](x: I) -> F

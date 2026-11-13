@@ -96,9 +96,24 @@ by a per-run seed that enters at the replay point
 is in insertion order, so no value depends on the seed
 ([CAP-6](capabilities.md#cap-6-no-ambient-input)).
 Views from `map.get` are anchored to the map and freeze it as list views do.
+`map.update` changes a present value in place through a scoped callback
+([core](core.md)).
 
 ```hirsel
 fn count(m: Map[String, u64], k: String) -> u64 { match map.get(m, k) { Some(v) => v, None => 0 } }
+```
+```hirsel
+fn tally(mut m: Map[String, u64], take w: String) -> Result[(), (Capacity, String, u64)] {
+  match map.update(mut m, w, fn(mut n: u64) { n += 1 }) {
+    Some(()) => Ok(()),
+    None => map.insert(mut m, take w, 1),
+  }
+}
+```
+```hirsel
+fn bump(mut m: Map[u64, u64]) -> Option[()] {
+  map.update(mut m, 1, fn(mut n: u64) { n = map.len(m) })   // refused: OWN-9, m is lent to update
+}
 ```
 
 ### SEM-6: Iteration

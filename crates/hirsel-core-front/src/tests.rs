@@ -1705,12 +1705,12 @@ fn callable_payload_metadata_is_built_once_per_type() {
 #[test]
 fn list_set_transfers_the_indexed_element() {
     let (index, modules) =
-        program_inputs("fn update(mut xs: List[u64]) -> u64 { list.set(mut xs, 1, 9) }");
+        program_inputs("fn set_one(mut xs: List[u64]) -> u64 { list.set(mut xs, 1, 9) }");
     let p = Program::declare(&index, &modules);
     let f = p
         .fns
         .iter()
-        .position(|f| f.path.0.name == "update")
+        .position(|f| f.path.0.name == "set_one")
         .unwrap();
     let mut emitter = Emitter::new();
     let check = p.check_lower(f, &mut emitter);

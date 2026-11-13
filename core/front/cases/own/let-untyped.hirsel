@@ -1,4 +1,4 @@
 // LANG-5, syntax.md's answer to Q26: a `let` without a value needs a type; `let x` alone is refused at `let`.
 // expect: refuse LANG-5 at 4:16
-// expect: gap this kind of name is not built
+// The syntax refusal stops this definition before semantic passes.
 fn f() -> u8 { let x; x = 3; x }

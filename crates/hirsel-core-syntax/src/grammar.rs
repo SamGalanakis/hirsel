@@ -11,6 +11,8 @@ pub const BOUNDS: &[&str] = &[
     "ordered",
     "integer",
     "float",
+    "packed",
+    "streamable",
 ];
 pub const ASSIGN: &[&str] = &[
     "=", "+=", "-=", "*=", "/=", "%=", "<<=", ">>=", "&=", "|=", "^=",

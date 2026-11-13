@@ -60,6 +60,7 @@ pub fn parse(text: &str, mode: ParseMode) -> ParseOutput {
         };
     }
     let output = lex(text);
+    let lexical_diagnostics = output.diagnostics.len();
     let significant = output
         .tokens
         .iter()
@@ -87,6 +88,7 @@ pub fn parse(text: &str, mode: ParseMode) -> ParseOutput {
             continue;
         }
         let start = p.pos;
+        let diagnostic_start = p.diagnostics.len();
         p.first = owned;
         p.base = p.tokens[owned].span.start;
         p.tree = Tree::default();
@@ -132,7 +134,15 @@ pub fn parse(text: &str, mode: ParseMode) -> ParseOutput {
                 },
             })
             .collect();
+        let has_errors = p.resource.is_some()
+            || p.diagnostics.len() != diagnostic_start
+            || p.diagnostics[..lexical_diagnostics].iter().any(|d| {
+                d.primary.start >= p.base
+                    && (d.primary.start < byte_end
+                        || byte_end as usize == text.len() && d.primary.start == byte_end)
+            });
         syntax.items.push(Item {
+            has_errors,
             file_offset: p.base,
             text: text[p.base as usize..byte_end as usize].into(),
             tree: std::mem::take(&mut p.tree),
@@ -730,15 +740,31 @@ impl Parser<'_> {
         if self.eat("let") {
             let mutable = self.eat("mut");
             let mut c = vec![self.pattern()?];
-            if self.eat(":") {
+            let typed = self.eat(":");
+            if typed {
                 c.push(self.ty()?);
             }
-            if self.eat("=") {
+            let initialized = self.eat("=");
+            if initialized {
                 c.push(self.required(|p| p.expr(0))?);
                 if self.eat("else") {
                     self.subject(*c.last().unwrap())?;
                     c.push(self.block()?);
                 }
+            }
+            if !initialized
+                && (!typed
+                    || !matches!(
+                        self.tree.node(c[0]).kind,
+                        NodeKind::BindPattern | NodeKind::TakePattern
+                    ))
+            {
+                self.diagnostics.push(Diagnostic::error(
+                    "LANG-5",
+                    self.tokens[self.significant[s]].span,
+                    "an uninitialized slot needs a name pattern and a type",
+                ));
+                return Err(());
             }
             self.end(false)?;
             return Ok(self.node(

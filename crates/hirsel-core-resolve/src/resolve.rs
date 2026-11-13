@@ -89,6 +89,9 @@ pub(crate) fn builtin(n: &str) -> bool {
     )
 }
 pub fn resolve(index: &NameIndex, module: &ModuleId, ordinal: u32, item: &Item) -> Resolution {
+    if item.has_errors {
+        return Resolution::default();
+    }
     let mut r = Resolver {
         index,
         module,
@@ -212,9 +215,6 @@ impl Resolver<'_> {
             existing = self.module_lookup(n, self.module.clone(), &name, ns, false);
             if existing.is_none() {
                 existing = self.prelude_lookup(n, &name, ns, false);
-            }
-            if existing.is_none() {
-                existing = self.head_lookup(n, &name);
             }
         }
         if let Some(target) = existing {

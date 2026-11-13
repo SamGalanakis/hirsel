@@ -181,6 +181,8 @@ impl Tree {
 /// Item-local text and arena remain identical when preceding items move.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Item {
+    /// The user source was refused during lexing/parsing; semantic passes skip it.
+    pub has_errors: bool,
     pub file_offset: u32,
     pub text: String,
     pub tree: Tree,

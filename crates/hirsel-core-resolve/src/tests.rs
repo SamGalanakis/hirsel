@@ -224,7 +224,7 @@ fn long_expression_tree_has_an_explicit_compiler_resource_outcome() {
 }
 
 #[test]
-fn locals_cannot_shadow_modules_dependencies_or_core_names() {
+fn locals_may_shadow_modules_and_dependencies_but_not_prelude_functions() {
     let (mut index, files) = fixture(&[
         ("lib", "pub fn External() {}"),
         ("m", "fn f() { let lib = 1; let dep = 2; let CoreName = 3 }"),
@@ -246,9 +246,9 @@ fn locals_cannot_shadow_modules_dependencies_or_core_names() {
             .iter()
             .map(|d| d.rule.as_str())
             .collect::<Vec<_>>(),
-        ["LANG-7", "LANG-7", "LANG-7"]
+        ["LANG-7"]
     );
-    assert_eq!(r.binders.len(), 0);
+    assert_eq!(r.binders.len(), 2);
 }
 
 #[test]
@@ -479,11 +479,7 @@ fn revision_four_builtin_names_and_visible_modules() {
     assert_eq!(index.diagnostics[0].rule, "LANG-7");
     let (module, file) = &files[0];
     let r = resolve(&index, module, 1, &file.items[1]);
-    assert!(
-        r.diagnostics
-            .iter()
-            .any(|d| d.rule == "LANG-7" && d.message.contains("shadows"))
-    );
+    assert!(r.diagnostics.is_empty());
     assert!(
         r.names
             .iter()
@@ -582,4 +578,48 @@ fn exits_resolve_only_to_legal_targets_in_the_current_function() {
             .diagnostics
             .is_empty()
     );
+}
+
+#[test]
+fn a_local_wins_at_the_start_of_a_dotted_path() {
+    let (i, f) = fixture(&[
+        ("args", "pub fn len() -> u64 { 0 }"),
+        ("m", "fn f(args: u64) { args.len }"),
+    ]);
+    let r = resolve(&i, &f[1].0, 0, &f[1].1.items[0]);
+    assert!(r.diagnostics.is_empty());
+    assert!(
+        r.names
+            .iter()
+            .any(|u| u.target == Target::Binder(0) && u.projections == ["len"])
+    );
+}
+
+#[test]
+fn syntax_refusals_do_not_cascade_and_recovery_keeps_the_next_definition() {
+    let p = parse(
+        "fn bad() { let x; x = 1; x }\nfn good(x: u64) -> u64 { x }",
+        ParseMode::Source,
+    );
+    assert_eq!(p.diagnostics.len(), 1);
+    assert_eq!(p.diagnostics[0].rule, "LANG-5");
+    assert!(p.syntax.items[0].has_errors);
+    assert!(!p.syntax.items[1].has_errors);
+    let recovery = parse(
+        "fn bad() { 1\nfn good(x: u64) -> u64 { x }",
+        ParseMode::Source,
+    );
+    assert!(recovery.syntax.items[0].has_errors);
+    assert!(!recovery.syntax.items[1].has_errors);
+
+    let m = module("m");
+    let mut index = NameIndex::default();
+    for (i, item) in p.syntax.items.iter().enumerate() {
+        index.index_item(&m, i as u32, item);
+    }
+    let bad = resolve(&index, &m, 0, &p.syntax.items[0]);
+    assert!(bad.names.is_empty() && bad.diagnostics.is_empty());
+    let good = resolve(&index, &m, 1, &p.syntax.items[1]);
+    assert!(good.diagnostics.is_empty());
+    assert_eq!(good.names.len(), 3);
 }

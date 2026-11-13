@@ -191,6 +191,9 @@ impl Program<'_> {
     /// this body, signatures and summaries).
     pub fn check_lower(&self, f: usize, e: &mut Emitter) -> CoreCheck {
         let fd = &self.fns[f];
+        if self.item(fd.at).has_errors {
+            return CoreCheck::default();
+        }
         let Some(body) = fd.body else {
             return CoreCheck::default();
         };

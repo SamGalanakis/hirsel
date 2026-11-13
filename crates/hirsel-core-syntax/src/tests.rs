@@ -389,3 +389,26 @@ fn revision_four_inline_arrays_and_bytes_keyword() {
         "fn f() {\n    [2; 4]\n}\n"
     );
 }
+
+#[test]
+fn streaming_bounds_forms_and_region_result_anchors() {
+    let text = "fn fill[T: packed + streamable, in r](take w: Writer[SeqSpan[T], in r], t: T) -> Result[Child[SeqSpan[T]], BuildError] { writer.append(mut w, scoped fn(take x: Writer[T, in r]) -> Result[Child[T], BuildError] { emit(take x, t) })?; writer.close(take w) }\nfn peek[T: packed, in r](w: Writer[IndexedSpan[T], in r]) -> Option[View[T]] in r { writer.last_completed(w) }";
+    good(text);
+    formatted(text, ParseMode::Source);
+    let p = parse("fn f() { let x }", ParseMode::Source);
+    assert_eq!(p.diagnostics[0].rule, "LANG-5");
+    assert_eq!(
+        &p.syntax.text()
+            [p.diagnostics[0].primary.start as usize..p.diagnostics[0].primary.end as usize],
+        "let"
+    );
+    assert!(
+        parse("fn f() { let (x, y): (u64, u64) }", ParseMode::Source)
+            .diagnostics
+            .iter()
+            .any(|d| d.rule == "LANG-5")
+    );
+    good(
+        "fn f() { let mut x: u64; x = 1; emit(scoped fn(take y: Writer[u64, in r]) -> Result[Child[u64], BuildError] { emit(take y, 1) }) }",
+    );
+}

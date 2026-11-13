@@ -32,7 +32,7 @@ pub struct LimitRecord {
     next_free: Option<usize>,
     occupied: bool,
 }
-#[repr(C)]
+#[repr(C, align(32))]
 struct Slot {
     local: UnsafeCell<LimitRecord>,
     pending: AtomicU64,
@@ -47,9 +47,9 @@ struct Forest {
     // Read/written only after the last local handle retires.
     retired_bytes: u64,
     zeros: usize,
-    #[cfg(any(test,feature="testing"))]
+    #[cfg(any(test, feature = "testing"))]
     attempts: usize,
-    #[cfg(any(test,feature="testing"))]
+    #[cfg(any(test, feature = "testing"))]
     fail: Option<(usize, bool)>,
 }
 impl Forest {
@@ -200,7 +200,14 @@ impl Payer {
     #[inline(always)]
     fn slot(self) -> &'static Slot {
         // SAFETY: a local handle, structural edge or outstanding bytes pin this slot.
-        unsafe { self.0.as_ref() }
+        unsafe { &*self.0.as_ptr().map_addr(|v| v & !31) }
+    }
+    pub(crate) fn native_tag(self) -> usize {
+        self.0.as_ptr().addr() & 31
+    }
+    pub(crate) fn with_tag(self, tag: usize) -> Self {
+        // SAFETY: tagging preserves slot provenance; slot() strips these five bits.
+        Self(unsafe { NonNull::new_unchecked(self.0.as_ptr().map_addr(|v| (v & !31) | tag)) })
     }
     #[inline(always)]
     fn domain(self) -> &'static Domain {
@@ -240,14 +247,14 @@ impl Payer {
     #[inline(always)]
     pub(crate) fn admit(self, bytes: Option<u64>) -> Result<(), Capacity> {
         let payer = self;
-        #[cfg(any(test,feature="testing"))]
+        #[cfg(any(test, feature = "testing"))]
         let injected = {
             let f = payer.forest();
             f.attempts += 1;
             f.fail
                 .is_some_and(|(n, later)| f.attempts == n || later && f.attempts >= n)
         };
-        #[cfg(not(any(test,feature="testing")))]
+        #[cfg(not(any(test, feature = "testing")))]
         let injected = false;
         // SAFETY: canonical live local record, accessed exclusively by its task.
         let r = unsafe { &mut *payer.local() };
@@ -358,9 +365,9 @@ impl Funding {
                 free: None,
                 retired_bytes: 0,
                 zeros: 0,
-                #[cfg(any(test,feature="testing"))]
+                #[cfg(any(test, feature = "testing"))]
                 attempts: 0,
-                #[cfg(any(test,feature="testing"))]
+                #[cfg(any(test, feature = "testing"))]
                 fail: None,
             }),
             handles: Cell::new(1),
@@ -517,17 +524,17 @@ impl Funding {
             .parent
             .is_some()
     }
-    #[cfg(any(test,feature="testing"))]
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn inject(&self, n: usize, later: bool) {
         let f = self.payer.forest();
         f.attempts = 0;
         f.fail = Some((n, later));
     }
-    #[cfg(any(test,feature="testing"))]
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn attempts(&self) -> usize {
         self.payer.forest().attempts
     }
-    #[cfg(any(test,feature="testing"))]
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) fn records(&self) -> usize {
         let f = self.payer.forest();
         (0..f.length).filter(|&id| f.record(id).occupied).count()

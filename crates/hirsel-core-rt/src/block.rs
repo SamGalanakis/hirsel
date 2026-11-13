@@ -1,6 +1,6 @@
 //! Own bytes have one native payer word. Only graph nodes reserve a resumable
 //! drop frame; physical layouts are emitter operands, never logical charges.
-use crate::allocator::{allocate as native_allocate, deallocate as dealloc};
+use crate::allocator::allocate as native_allocate;
 use crate::{Capacity, Context, limit::Payer};
 use std::alloc::Layout;
 use std::ptr::NonNull;
@@ -11,9 +11,6 @@ pub const RESOURCE: u8 = 2;
 pub const GRAPH_PREFIX_BYTES: usize = size_of::<Payer>() + size_of::<Frame>();
 #[repr(C)]
 struct Frame {
-    size: usize,
-    alignment: usize,
-    offset: usize,
     dead: std::mem::MaybeUninit<Dead>,
 }
 #[repr(C)]
@@ -37,7 +34,8 @@ pub(crate) fn prefix(kind: u8) -> usize {
 #[inline]
 fn physical_layout(bytes: usize, align: usize, kind: u8) -> (Layout, usize) {
     let alignment = align.max(8);
-    let offset = prefix(kind).next_multiple_of(alignment);
+    let extra = usize::from(alignment > 512) * 8;
+    let offset = (prefix(kind) + extra).next_multiple_of(alignment);
     let layout = Layout::from_size_align(
         offset
             .checked_add(bytes.max(1))
@@ -68,13 +66,17 @@ pub(crate) unsafe fn set_resource(payload: NonNull<u8>, resource: *mut crate::ca
     }
 }
 pub(crate) unsafe fn resource(payload: NonNull<u8>) -> *mut crate::causes::Resource {
-    // SAFETY: live RESOURCE allocation has an initialized resource-state pointer.
+    // SAFETY: the tagged native word identifies whether a state slot exists.
     unsafe {
-        payload
-            .as_ptr()
-            .sub(16)
-            .cast::<*mut crate::causes::Resource>()
-            .read()
+        if funding(payload).native_tag() & 3 != RESOURCE as usize {
+            std::ptr::null_mut()
+        } else {
+            payload
+                .as_ptr()
+                .sub(16)
+                .cast::<*mut crate::causes::Resource>()
+                .read()
+        }
     }
 }
 pub(crate) unsafe fn push_dead(
@@ -134,18 +136,23 @@ pub(crate) fn allocate(
     unsafe {
         let base = native_allocate(layout);
         let payload = NonNull::new_unchecked(base.as_ptr().add(offset));
+        let alignment = align.max(8);
+        let index = if alignment <= 512 {
+            alignment.trailing_zeros() as usize - 3
+        } else {
+            7
+        };
         payload
             .as_ptr()
-            .sub(size_of::<Payer>())
+            .sub(8)
             .cast::<Payer>()
-            .write(payer);
-        if kind == GRAPH {
-            frame(payload).write(Frame {
-                size: layout.size(),
-                alignment: layout.align(),
-                offset,
-                dead: std::mem::MaybeUninit::uninit(),
-            });
+            .write(payer.with_tag((index << 2) | kind as usize));
+        if index == 7 {
+            payload
+                .as_ptr()
+                .sub(prefix(kind) + 8)
+                .cast::<usize>()
+                .write(alignment);
         }
         Ok(payload)
     }
@@ -160,26 +167,35 @@ pub(crate) unsafe fn funding<'a>(payload: NonNull<u8>) -> &'a Payer {
 /// # Safety
 /// Exclusive cleaned block; native size/alignment/kind and logical charge are exact.
 #[inline]
-pub(crate) unsafe fn free(payload: NonNull<u8>, charge: u64, bytes: usize, align: usize, kind: u8) {
-    // SAFETY: take the live payer before matching deallocation of the original layout.
+pub(crate) unsafe fn free(payload: NonNull<u8>, charge: u64) {
+    // SAFETY: native kind/alignment are encoded in the sole payer word.
     unsafe {
         let payer = *funding(payload);
-        let (layout, offset) = physical_layout(bytes, align, kind);
-        payer.settle(charge);
-        dealloc(payload.as_ptr().sub(offset), layout);
+        let tag = payer.native_tag();
+        let kind = (tag & 3) as u8;
+        let index = tag >> 2;
+        let alignment = if index == 7 {
+            payload
+                .as_ptr()
+                .sub(prefix(kind) + 8)
+                .cast::<usize>()
+                .read()
+        } else {
+            8usize << index
+        };
+        let offset = (prefix(kind) + usize::from(index == 7) * 8).next_multiple_of(alignment);
+        if charge != 0 || kind != RESOURCE {
+            payer.settle(charge);
+        }
+        crate::allocator::deallocate_raw(payload.as_ptr().sub(offset));
     }
 }
 /// # Safety
-/// The graph node's fields have completed; its prepaid native frame is live.
+/// The dead GRAPH node's fields are completely cleaned.
 pub(crate) unsafe fn free_graph(payload: NonNull<u8>, charge: u64) {
-    // SAFETY: the dead frame retains the graph allocation's original physical layout.
+    // SAFETY: caller transfers the exclusively owned dead graph block.
     unsafe {
-        let frame = &*frame(payload);
-        let layout = Layout::from_size_align_unchecked(frame.size, frame.alignment);
-        let offset = frame.offset;
-        let payer = *funding(payload);
-        payer.settle(charge);
-        dealloc(payload.as_ptr().sub(offset), layout);
+        free(payload, charge);
     }
 }
 /// Raw-byte Rust owner. Native layout operands correspond to emitter constants
@@ -187,9 +203,6 @@ pub(crate) unsafe fn free_graph(payload: NonNull<u8>, charge: u64) {
 pub struct Block {
     pointer: NonNull<u8>,
     charge: u64,
-    bytes: usize,
-    align: usize,
-    kind: u8,
 }
 impl Block {
     #[inline]
@@ -221,9 +234,6 @@ impl Block {
         Ok(Self {
             pointer,
             charge: charge.unwrap(),
-            bytes,
-            align,
-            kind,
         })
     }
     #[inline]
@@ -256,7 +266,7 @@ impl Block {
             charge,
             bytes,
             align,
-            self.kind,
+            self.payer().native_tag() as u8 & 3,
         )
     }
     pub fn into_raw(self) -> NonNull<u8> {
@@ -266,27 +276,15 @@ impl Block {
     }
     /// # Safety
     /// Exclusive live block from into_raw; every layout and charge operand is exact.
-    pub unsafe fn from_raw(
-        pointer: NonNull<u8>,
-        charge: u64,
-        bytes: usize,
-        align: usize,
-        kind: u8,
-    ) -> Self {
-        Self {
-            pointer,
-            charge,
-            bytes,
-            align,
-            kind,
-        }
+    pub unsafe fn from_raw(pointer: NonNull<u8>, charge: u64) -> Self {
+        Self { pointer, charge }
     }
 }
 impl Drop for Block {
     fn drop(&mut self) {
         // SAFETY: this owner releases its cleaned storage and exact charge once.
         unsafe {
-            free(self.pointer, self.charge, self.bytes, self.align, self.kind);
+            free(self.pointer, self.charge);
         }
     }
 }
@@ -314,7 +312,7 @@ pub(crate) unsafe fn free_in(
         } else {
             payer.settle(charge);
         }
-        let (layout, offset) = physical_layout(bytes, align, PLAIN);
-        dealloc(payload.as_ptr().sub(offset), layout);
+        let (_, offset) = physical_layout(bytes, align, PLAIN);
+        crate::allocator::deallocate_raw(payload.as_ptr().sub(offset));
     }
 }

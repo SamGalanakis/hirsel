@@ -64,7 +64,7 @@
 //!
 //! Compact values are region bytes. FORM adds four primitives for them and
 //! nothing else: a `byte vN` step (an unaligned byte offset), `pointer aN` (an
-//! address as a `ptr`), `trim vB charge vN` (lowers a region block's charge and
+//! address as a `ptr`), `trim vB in vR entry vE from vP charge vN` (lowers a region block's charge and
 //! refunds the difference to its record) and `rt.dest_id` (a run-unique `u64`,
 //! cannot fail). `alloc`'s size is a value, so a blob of `n` bytes is one alloc.
 //! Writers, readers, `clone_in`, `seq.index_in`, `text.as_string`, `writer.push`
@@ -78,7 +78,12 @@
 //!   same locator and W; its trailer (count W-wide offsets from the first element
 //!   byte) follows the elements, outside its own length but inside the holder's
 //!   extent. It is never a writer, a `Child` or a field encoding.
-//! - **Build**: a record `{blob, cursor, end = 16 + n, w, id = rt.dest_id}`; a
+//! - A region alloc can return an optional third u64 result, the opaque payer-entry
+//!   token captured at admission. Only the destination writer passes it back to
+//!   trim; its numeric value is engine bookkeeping and is not program data.
+//!   `alloc plain` has Own's semantics but promises no outgoing mechanical drop;
+//!   general `alloc own` and counted nodes prepay a resumable native frame.
+//! - **Build**: a record `{blob, region, entry, charge, cursor, end = 16 + n, w, id = rt.dest_id}`; a
 //!   writer frame `{record, start, count, last}`; a `Child` `{id, at}`. Every
 //!   write checks, in order: the identity of each link it stores, in field order
 //!   (`Bounds`); then fit and the W cap (`Overflow`, an earlier fit failure
@@ -88,7 +93,8 @@
 //!   `IndexedSpan` checks the whole trailer fits before storing any entry.
 //!   `build_stream_in` refuses with `Overflow` when n exceeds the W cap, then
 //!   admits round8(n). Finish stores used = cursor - 16 and W; `finish_trim`
-//!   then `trim`s the blob to round8(used) (MEM-23). Streaming roots are stable
+//!   then `trim`s the blob with its region, captured entry and previous charge to
+//!   round8(used) (MEM-23). Streaming roots are stable
 //!   streamable types only.
 //! - **Packed** element types (layout's predicate): numbers, bool, char, `Text`,
 //!   compact types, non-empty plain records and tuples of packed fields (encoded

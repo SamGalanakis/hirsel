@@ -229,6 +229,7 @@ impl FunctionEmitter<'_> {
             Inst::Alloc {
                 result,
                 available,
+                region_entry,
                 kind,
                 place,
                 charge,
@@ -286,7 +287,24 @@ impl FunctionEmitter<'_> {
                 if !matches!(kind, AllocKind::Resource { .. }) {
                     args.push(("i1 zeroext".into(), "false".into()));
                 }
+                if !matches!(kind, AllocKind::Resource { .. })
+                    && !matches!(place, AllocPlace::Region(_))
+                {
+                    args.push((
+                        "i8 zeroext".into(),
+                        u8::from(kind != AllocKind::Plain).to_string(),
+                    ));
+                }
                 let (block, room) = self.allocation(name, &args);
+                if let Some(token) = region_entry {
+                    let AllocPlace::Region(region) = place else {
+                        unreachable!()
+                    };
+                    let region = self.get(region);
+                    let at = self.calc(format!("getelementptr i8, ptr {region}, i64 16"));
+                    let value = self.calc(format!("load i64, ptr {at}, align 8"));
+                    self.put(token, &value);
+                }
                 // Null is an ordinary Capacity value outside a finalizer. The runtime
                 // reports whether this context is executing a finalizer grant.
                 self.intrinsics

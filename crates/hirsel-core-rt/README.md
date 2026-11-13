@@ -16,8 +16,8 @@ cold table-refill operation; ordinary scope entry allocates no heap record.
 
 Plain blocks have one native payer word. Graph nodes additionally reserve an
 intrusive resumable destruction frame; resources reserve a state pointer. The
-allocator takes a native kind; free receives the physical size, alignment and
-kind. These operands never affect logical charges. No legacy ABI is retained.
+allocator takes a native kind; kind and alignment tag the payer word so generic
+free needs only pointer and charge. These tags never affect logical charges. No legacy ABI is retained.
 
 Regions bump within nonmoving chunks and aggregate charges per payer run, with
 four inline prior entries. A compact builder remembers its region entry and

@@ -1087,6 +1087,7 @@ impl Machine<'_> {
             Inst::Alloc {
                 result,
                 available,
+                region_entry,
                 kind,
                 place,
                 charge,
@@ -1104,6 +1105,9 @@ impl Machine<'_> {
                     }
                     AllocPlace::Current | AllocPlace::Region(_) => *t.limits.last().unwrap(),
                 };
+                if let Some(token) = region_entry {
+                    vals[token.index()] = 0;
+                }
                 let n = vals[charge.index()];
                 match self.admit(l, n) {
                     Err(_) if self.limits[l].grant => return Err(Stop::Cause("Capacity")),
@@ -1122,7 +1126,12 @@ impl Machine<'_> {
                             self.store(p, 8, 1);
                         }
                         if let AllocPlace::Region(r) = place {
-                            self.regions[(vals[r.index()] - REGION_BASE) as usize].push(split(p).0);
+                            let region =
+                                &mut self.regions[(vals[r.index()] - REGION_BASE) as usize];
+                            if let Some(token) = region_entry {
+                                vals[token.index()] = region.len() as u64;
+                            }
+                            region.push(split(p).0);
                         }
                         (vals[result.index()], vals[available.index()]) = (p, 0);
                     }
@@ -1138,9 +1147,17 @@ impl Machine<'_> {
                 self.free(p);
             }
             Inst::Pointer { result, address } => vals[result.index()] = places[address.index()].0,
-            Inst::Trim { block, charge } => {
+            Inst::Trim {
+                block,
+                region,
+                entry: _,
+                previous,
+                charge,
+            } => {
                 let (blk, o) = split(vals[block.index()]);
                 let (n, old) = (vals[charge.index()], self.mem[blk].charge);
+                assert_eq!(old, vals[previous.index()], "writer retained charge");
+                assert!(self.regions[(vals[region.index()] - REGION_BASE) as usize].contains(&blk));
                 assert!(
                     o == 0 && n <= old,
                     "trim of a non-block or above its charge"

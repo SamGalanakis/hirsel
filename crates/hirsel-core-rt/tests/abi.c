@@ -26,7 +26,7 @@ int main(void) {
     uint64_t *inline_own = (uint64_t *)(base + HIRSEL_CORE_PLAIN_PREFIX_BYTES);
     *inline_own = 42;
     assert(*inline_own == 42);
-    hirsel_core_native_free(base, 16, 8);
+    hirsel_core_native_free(base);
     hirsel_core_refund(limit, 8);
     assert(*room == 1760);
     HirselCoreAllocation entered = hirsel_core_limit_enter(context, 128);
@@ -39,13 +39,13 @@ int main(void) {
     hirsel_core_limit_exit(context);
     HirselCoreAllocation aligned = hirsel_core_alloc(context, NULL, 17, 64, 24, false, 0);
     assert(aligned.pointer && (uintptr_t)aligned.pointer % 64 == 0);
-    hirsel_core_free(aligned.pointer, 24, 17, 64, 0);
+    hirsel_core_free(aligned.pointer, 24);
     HirselCoreAllocation grown = hirsel_core_alloc(context, own.pointer, 16, 8, 16, false, 0);
     assert(grown.pointer);
     memcpy(grown.pointer, own.pointer, 8);
     assert(*(uint64_t *)grown.pointer == 42);
-    hirsel_core_free(own.pointer, 8, 8, 8, 0);
-    hirsel_core_free(grown.pointer, 16, 16, 8, 0);
+    hirsel_core_free(own.pointer, 8);
+    hirsel_core_free(grown.pointer, 16);
 
     HirselCoreAllocation counted = hirsel_core_alloc(context, NULL, 16, 8, 16, false, 1);
     assert(counted.pointer);

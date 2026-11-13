@@ -22,6 +22,7 @@ impl Function<'_, '_, '_> {
             Inst::Alloc {
                 result,
                 available,
+                region_entry,
                 kind,
                 place,
                 charge,
@@ -57,15 +58,38 @@ impl Function<'_, '_, '_> {
                         &[ctx, size, align, storage, grant],
                     )?
                 } else {
-                    self.c_call(
-                        name,
-                        &[p, p, u, u, u, boolean],
-                        &[p, u, u],
-                        &[ctx, payer, size, align, charge, overflow],
-                    )?
+                    if matches!(place, AllocPlace::Region(_)) {
+                        self.c_call(
+                            name,
+                            &[p, p, u, u, u, boolean],
+                            &[p, u, u],
+                            &[ctx, payer, size, align, charge, overflow],
+                        )?
+                    } else {
+                        let native = self
+                            .b
+                            .ins()
+                            .iconst(types::I8, i64::from(kind != AllocKind::Plain));
+                        self.c_call(
+                            name,
+                            &[p, p, u, u, u, boolean, Ty::Scalar(Scalar::U8)],
+                            &[p, u, u],
+                            &[ctx, payer, size, align, charge, overflow, native],
+                        )?
+                    }
                 };
                 self.set(result, values[0]);
                 self.set(available, values[2]);
+                if let Some(token) = region_entry {
+                    // hirsel-core-rt abi::REGION_ENTRY, frozen on both 64-bit targets.
+                    let token_value = self.b.ins().load(
+                        types::I64,
+                        cranelift_codegen::ir::MemFlagsData::trusted(),
+                        payer,
+                        16,
+                    );
+                    self.set(token, token_value);
+                }
                 let refused = self.b.ins().icmp_imm_s(IntCC::Equal, values[0], 0);
                 let check = self.b.create_block();
                 let done = self.b.create_block();
@@ -158,14 +182,22 @@ impl Function<'_, '_, '_> {
             Inst::SetCase { address, case } => {
                 self.case(address, Some(case))?;
             }
-            Inst::Trim { block, charge } => {
-                let block = self.get(block);
+            Inst::Trim {
+                block: _,
+                region,
+                entry,
+                previous,
+                charge,
+            } => {
+                let region = self.get(region);
+                let entry = self.get(entry);
+                let previous = self.get(previous);
                 let charge = self.get(charge);
                 self.c_call(
                     "hirsel_core_region_lower_charge",
-                    &[p, u],
+                    &[p, u, u, u],
                     &[],
-                    &[block, charge],
+                    &[region, entry, previous, charge],
                 )?;
             }
             Inst::Free { block, charge } => {

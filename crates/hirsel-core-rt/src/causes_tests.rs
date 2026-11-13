@@ -282,7 +282,7 @@ fn fail_message_and_joined_cells_outlive_the_task_and_keep_funding() {
     unsafe extern "C" fn drop_message(p: *mut u8) {
         // SAFETY: the cell receives the sole initialized 24-byte message block.
         unsafe {
-            crate::block::free(NonNull::new(p).unwrap(), 24, 24, 8, crate::block::PLAIN);
+            crate::block::free(NonNull::new(p).unwrap(), 24);
         }
     }
     let mut child = Context::new(1024);

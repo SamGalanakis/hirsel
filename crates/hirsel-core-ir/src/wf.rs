@@ -617,6 +617,7 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
         Inst::Alloc {
             result,
             available,
+            region_entry,
             kind: _,
             place,
             charge,
@@ -626,6 +627,13 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
         } => {
             c.def(result)?;
             c.def(available)?;
+            if let Some(token) = region_entry {
+                need(matches!(place, AllocPlace::Region(_)), || {
+                    "payer-entry output requires a region allocation".into()
+                })?;
+                c.def(token)?;
+                c.is(token, Ty::Scalar(Scalar::U64))?;
+            }
             c.is(size, Ty::Scalar(Scalar::U64))?;
             c.is(result, Ty::Ptr)?;
             c.is(available, Ty::Scalar(Scalar::U64))?;
@@ -663,8 +671,17 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             c.is(result, Ty::Ptr)
         }
         Inst::RegionClose { region } => c.is(region, Ty::Ptr),
-        Inst::Trim { block, charge } => {
+        Inst::Trim {
+            block,
+            region,
+            entry,
+            previous,
+            charge,
+        } => {
             c.is(block, Ty::Ptr)?;
+            c.is(region, Ty::Ptr)?;
+            c.is(entry, Ty::Scalar(Scalar::U64))?;
+            c.is(previous, Ty::Scalar(Scalar::U64))?;
             c.is(charge, Ty::Scalar(Scalar::U64))
         }
         Inst::Pointer { result, address } => {

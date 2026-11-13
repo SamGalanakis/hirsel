@@ -16,7 +16,16 @@ pub(crate) fn allocate(layout: Layout) -> NonNull<u8> {
         }
         #[cfg(not(feature = "mimalloc"))]
         {
-            std::alloc::alloc(layout)
+            if layout.align() <= 16 {
+                libc::malloc(layout.size()).cast()
+            } else {
+                let mut p = std::ptr::null_mut();
+                if libc::posix_memalign(&mut p, layout.align(), layout.size()) != 0 {
+                    std::ptr::null_mut()
+                } else {
+                    p.cast()
+                }
+            }
         }
     };
     NonNull::new(pointer).unwrap_or_else(|| handle_alloc_error(layout))
@@ -24,17 +33,25 @@ pub(crate) fn allocate(layout: Layout) -> NonNull<u8> {
 /// # Safety
 /// Matching live allocation and original Layout from this backend.
 #[inline]
-pub(crate) unsafe fn deallocate(pointer: *mut u8, layout: Layout) {
-    // SAFETY: the caller transfers the matching uniquely owned allocation.
+pub(crate) unsafe fn deallocate(pointer: *mut u8, _layout: Layout) {
+    // SAFETY: this base came from the matching native allocator.
+    unsafe {
+        deallocate_raw(pointer);
+    }
+}
+/// # Safety
+/// Original native base, exclusively owned, allocated by this backend.
+#[inline]
+pub(crate) unsafe fn deallocate_raw(pointer: *mut u8) {
+    // SAFETY: malloc and posix_memalign both pair with free; mimalloc with mi_free.
     unsafe {
         #[cfg(feature = "mimalloc")]
         {
-            let _ = layout;
             libmimalloc_sys::mi_free(pointer.cast());
         }
         #[cfg(not(feature = "mimalloc"))]
         {
-            std::alloc::dealloc(pointer, layout);
+            libc::free(pointer.cast());
         }
     }
 }

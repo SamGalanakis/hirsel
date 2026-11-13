@@ -513,6 +513,7 @@ impl Printer {
                     Inst::Alloc {
                         result,
                         available,
+                        region_entry,
                         kind,
                         place,
                         charge,
@@ -521,6 +522,7 @@ impl Printer {
                         fail: f,
                     } => {
                         let kind = match kind {
+                            AllocKind::Plain => "plain".into(),
                             AllocKind::Own => "own".into(),
                             AllocKind::Counted => "counted".into(),
                             AllocKind::Resource { grant } => format!("resource grant {grant}"),
@@ -531,9 +533,10 @@ impl Printer {
                             AllocPlace::Region(r) => format!(" in v{}", r.0),
                         };
                         format!(
-                            "{}, {} = alloc {kind} {} align {align} charge {}{place}{}",
+                            "{}, {}{} = alloc {kind} {} align {align} charge {}{place}{}",
                             def(*result),
                             def(*available),
+                            region_entry.map_or_else(String::new, |v| format!(", {}", def(v))),
                             v(size),
                             v(charge),
                             fail(*f)
@@ -551,8 +554,21 @@ impl Printer {
                     Inst::SetCase { address, case } => format!("set_case a{}, {case}", address.0),
                     Inst::RegionOpen { result } => format!("{} = region_open", def(*result)),
                     Inst::RegionClose { region } => format!("region_close {}", v(region)),
-                    Inst::Trim { block, charge } => {
-                        format!("trim {} charge {}", v(block), v(charge))
+                    Inst::Trim {
+                        block,
+                        region,
+                        entry,
+                        previous,
+                        charge,
+                    } => {
+                        format!(
+                            "trim {} in {} entry {} from {} charge {}",
+                            v(block),
+                            v(region),
+                            v(entry),
+                            v(previous),
+                            v(charge)
+                        )
                     }
                     Inst::LimitEnter {
                         admitted,
@@ -1108,9 +1124,18 @@ impl BodyParser {
             Some("trim") => {
                 l.next()?;
                 let block = l.value()?;
+                l.expect("in")?;
+                let region = l.value()?;
+                l.expect("entry")?;
+                let entry = l.value()?;
+                l.expect("from")?;
+                let previous = l.value()?;
                 l.expect("charge")?;
                 return Ok(Inst::Trim {
                     block,
+                    region,
+                    entry,
+                    previous,
                     charge: l.value()?,
                 });
             }
@@ -1182,8 +1207,13 @@ impl BodyParser {
             _ => Err(format!("`{op}` takes 2 results")),
         };
         let inst = if op == "alloc" {
-            let (result, available) = pair(&defs)?;
+            let (result, available, region_entry) = match defs.as_slice() {
+                [a, b] => (*a, *b, None),
+                [a, b, c] => (*a, *b, Some(*c)),
+                _ => return Err("alloc takes pointer, room and optionally region entry".into()),
+            };
             let kind = match l.next()? {
+                "plain" => AllocKind::Plain,
                 "own" => AllocKind::Own,
                 "counted" => AllocKind::Counted,
                 "resource" => {
@@ -1207,6 +1237,7 @@ impl BodyParser {
             Inst::Alloc {
                 result,
                 available,
+                region_entry,
                 kind,
                 place,
                 charge,

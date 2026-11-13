@@ -418,6 +418,8 @@ pub enum Inst {
     Alloc {
         result: ValueId,
         available: ValueId,
+        /// Optional opaque payer-entry token, for a region writer only.
+        region_entry: Option<ValueId>,
         kind: AllocKind,
         place: AllocPlace,
         charge: ValueId,
@@ -469,6 +471,9 @@ pub enum Inst {
     /// Moves nothing and never fails; the region's close refunds the rest.
     Trim {
         block: ValueId,
+        region: ValueId,
+        entry: ValueId,
+        previous: ValueId,
         charge: ValueId,
     },
     // ---- FORM v1a ----
@@ -520,13 +525,14 @@ pub enum Inst {
 /// and for a resource its cause cell and grant) is the engine's.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum AllocKind {
+    /// Own storage with no outgoing mechanical drop. No resumable frame.
+    Plain,
+    /// General own storage, including descendants of counted payloads.
     Own,
     /// A counted node: the count (u64, starting at 1) at offset 0, the payload at 8.
     Counted,
     /// A resource block: `charge` covers its storage, its cause cell and `grant`.
-    Resource {
-        grant: u64,
-    },
+    Resource { grant: u64 },
 }
 
 /// Which limit an `Alloc` is charged to.

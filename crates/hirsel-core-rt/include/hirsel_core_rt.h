@@ -15,8 +15,11 @@
 #define HIRSEL_CORE_NODE_COUNT 0
 #define HIRSEL_CORE_NODE_PAYLOAD 8
 #define HIRSEL_CORE_OWN_PAYER_BACK 8
+#define HIRSEL_CORE_OWN_TAG_MASK 31
+#define HIRSEL_CORE_OWN_KIND_MASK 3
+#define HIRSEL_CORE_OWN_ALIGNMENT_SHIFT 2
 #define HIRSEL_CORE_PLAIN_PREFIX_BYTES 8
-#define HIRSEL_CORE_GRAPH_PREFIX_BYTES 72
+#define HIRSEL_CORE_GRAPH_PREFIX_BYTES 48
 #define HIRSEL_CORE_RESOURCE_PREFIX_BYTES 16
 #define HIRSEL_CORE_NATIVE_PLAIN 0
 #define HIRSEL_CORE_NATIVE_GRAPH 1
@@ -31,7 +34,7 @@ HirselCoreContext *hirsel_core_context_new(uint64_t bytes);
 void hirsel_core_context_free(HirselCoreContext *);
 HirselCoreAllocation hirsel_core_alloc(const HirselCoreContext *, void *like,
     size_t bytes, size_t alignment, uint64_t charge, bool charge_overflow, uint8_t native_kind);
-void hirsel_core_free(void *, uint64_t remaining_charge, size_t bytes, size_t alignment, uint8_t native_kind);
+void hirsel_core_free(void *, uint64_t remaining_charge);
 HirselCoreAllocation hirsel_core_limit_enter(HirselCoreContext *, uint64_t bytes);
 void hirsel_core_limit_exit(HirselCoreContext *);
 typedef struct HirselCoreRegion HirselCoreRegion;
@@ -86,7 +89,7 @@ void *hirsel_core_region_refill(HirselCoreRegion *, size_t bytes, size_t alignme
 void hirsel_core_release_last(HirselCoreContext *, void *node, uint64_t charge, HirselCoreDropRecipe);
 void hirsel_core_refund(HirselCoreLimitRecord *original_payer, uint64_t nonzero_bytes);
 void *hirsel_core_native_alloc(size_t native_bytes, size_t native_alignment);
-void hirsel_core_native_free(void *base, size_t native_bytes, size_t native_alignment);
+void hirsel_core_native_free(void *base);
 void hirsel_core_raise_string(HirselCoreContext *, uint64_t site,
     uint8_t *data, uint64_t len, uint64_t capacity);
 uint8_t hirsel_core_allocation_status(const HirselCoreContext *, void *);

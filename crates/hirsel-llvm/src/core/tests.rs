@@ -10,6 +10,36 @@ use std::sync::atomic::{AtomicU64, Ordering};
 mod host_memory;
 
 #[test]
+fn scalar_checked_add_keeps_wrapped_results_and_failure_edges() {
+    let mut source = String::from("core v1\n");
+    for (i, t) in ["u8", "i8"].iter().enumerate() {
+        writeln!(source, "sig g{i} = ({t}, {t}) -> ({t})").unwrap();
+    }
+    source.push_str("sig g2 = (u8, u8) -> (u8, bool)\n");
+    for i in 0..7 {
+        writeln!(source, "inst n{i} = llvm@1/checked/op{i} [] []").unwrap();
+    }
+    for (i, op) in ["add", "sub", "mul"].iter().cycle().take(6).enumerate() {
+        let t = if i < 3 { "u8" } else { "i8" };
+        writeln!(source, "fn f{i} = n{i} g{} {{\nb0(v0: {t}, v1: {t}):\n  v2: {t} = {op} v0, v1\n  return v2\n}}", i / 3).unwrap();
+    }
+    source.push_str("fn f6 = n6 g2 {\nb0(v0: u8, v1: u8):\n  v2: u8, v3: bool = checked_add v0, v1\n  return v2, v3\n}\n");
+    let module = text::parse(&source).unwrap();
+    wf::module(&module).unwrap();
+    let mut cases = Vec::new();
+    for function in 0..7 {
+        for a in [0, 1, 127, 128, 255] {
+            for b in [0, 1, 127, 128, 255] {
+                cases.push((FuncId(function), vec![a, b]));
+            }
+        }
+    }
+    // The explicit checked row returns wrapped bits even on overflow. Binary
+    // rows instead leave via Overflow before the result can be used.
+    agree(&module, &cases);
+}
+
+#[test]
 fn native_allocator_refusals_are_reported_run_stops() {
     host_memory::check(
         |module| emit_object(module, Optimization::Speed).unwrap(),

@@ -4,6 +4,16 @@ use super::*;
 
 impl FunctionEmitter<'_> {
     pub(super) fn overflow(&mut self, t: Ty, op: ArithOp, a: &str, b: &str) -> (String, String) {
+        if op == ArithOp::Add && !t.int().unwrap().0 {
+            // Keep the value and its overflow condition scalar. A PHI of the
+            // intrinsic's aggregate can hide end = index + width from the late
+            // constraint pass, even on the edge where overflow was ruled out.
+            // Wrapping add is defined on both paths, including checked_add's
+            // observable wrapped result. No no-wrap promise is needed here.
+            let value = self.calc(format!("add {} {a}, {b}", ty(t)));
+            let flag = self.calc(format!("icmp ult {} {value}, {a}", ty(t)));
+            return (value, flag);
+        }
         let op = match op {
             ArithOp::Add => "add",
             ArithOp::Sub => "sub",

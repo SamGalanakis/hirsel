@@ -98,8 +98,9 @@ void hirsel_llvm_program_v1(const HirselLlvmUnit *units, size_t count,
         // The ordinary pipeline infers nonrecursive cleanup attributes after
         // argument promotion. Revisit those arguments, then expose their local
         // carrier values and fold checks implied by the caller's room test.
+        // Scalar cleanup also exposes checked end offsets to constraints again.
         LLVMErrorRef e = LLVMRunPasses(module,
-            "default<O3>,cgscc(argpromotion),function(sroa,early-cse,correlated-propagation,instcombine,simplifycfg)",
+            "default<O3>,cgscc(argpromotion),function(sroa,early-cse,correlated-propagation,instcombine,constraint-elimination,simplifycfg)",
             machine, options);
         LLVMDisposePassBuilderOptions(options);
         if (e) {

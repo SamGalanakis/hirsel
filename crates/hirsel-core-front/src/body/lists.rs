@@ -1058,6 +1058,83 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.replace_value(item, Some(pointer), value, n)
     }
 
+    /// Both indices are checked before moving either element. The scratch place
+    /// is unowned during this non-failing three-copy exchange.
+    pub(super) fn list_swap(
+        &mut self,
+        item: TyId,
+        header: ValueId,
+        left: ValueId,
+        right: ValueId,
+        n: NodeId,
+    ) -> Option<()> {
+        let len = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
+        let a = self.list_compare(CompareOp::Lt, left, len, n);
+        let b = self.list_compare(CompareOp::Lt, right, len, n);
+        let valid = self.list_bool(BinaryOp::BitAnd, a, b, n);
+        let yes = self.new_block(&[]);
+        let no = self.new_block(&[]);
+        self.list_branch(valid, yes, no, n);
+        self.start(no);
+        let cleanup = self.fail_to(n);
+        self.end(
+            Terminator::Raise {
+                cause: hirsel_core_ir::RaiseCause::Bounds,
+                cleanup,
+            },
+            Some(n),
+        );
+        self.start(yes);
+        let rep = match self.rep(item) {
+            Ok(rep) => rep,
+            Err(what) => {
+                self.gap(n, what);
+                return None;
+            }
+        };
+        let Some(place) = rep.stored() else {
+            return Some(());
+        };
+        let same = self.list_compare(CompareOp::Eq, left, right, n);
+        let exchange = self.new_block(&[]);
+        let done = self.new_block(&[]);
+        self.list_branch(same, done, exchange, n);
+        self.start(exchange);
+        let a = self.list_element(item, header, left, n)?;
+        let b = self.list_element(item, header, right, n)?;
+        let a = self.address(AddressBase::Value(a), &[], place, n);
+        let b = self.address(AddressBase::Value(b), &[], place, n);
+        let saved = self.new_slot(place, n);
+        let bytes = self.layout_size(item, false, n)?;
+        self.inst(
+            Inst::Copy {
+                to: saved,
+                from: a,
+                bytes,
+            },
+            n,
+        );
+        self.inst(
+            Inst::Copy {
+                to: a,
+                from: b,
+                bytes,
+            },
+            n,
+        );
+        self.inst(
+            Inst::Copy {
+                to: b,
+                from: saved,
+                bytes,
+            },
+            n,
+        );
+        self.jump(done, &[], n);
+        self.start(done);
+        Some(())
+    }
+
     fn list_element(
         &mut self,
         item: TyId,

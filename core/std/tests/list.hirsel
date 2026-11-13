@@ -439,3 +439,39 @@ fn stable_second_allocation_failure() -> u64 {
     let r = bound bytes 40 { list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order { order.compare(a, b) }) }
     match r { Ok(Error(_)) => digits(xs), _ => 99 }
 }
+
+// Both indices are checked even when equal; the same-index fast path must not
+// turn an out-of-range access into a successful no-op.
+// expect: run swap_equal_out_of_bounds() = fail Bounds
+fn swap_equal_out_of_bounds() -> u64 {
+    let mut xs = five(1, 2, 3, 4, 5)
+    list.swap(mut xs, 5, 5)
+    digits(xs)
+}
+
+// The first index is independently checked before the exchange.
+// expect: run swap_first_out_of_bounds() = fail Bounds
+fn swap_first_out_of_bounds() -> u64 {
+    let mut xs = five(1, 2, 3, 4, 5)
+    list.swap(mut xs, 5, 0)
+    digits(xs)
+}
+
+// Owning elements exchange their whole carriers, without a cleanup or clone.
+// expect: run swap_owned_carriers() = true
+fn swap_owned_carriers() -> bool {
+    let mut xs: List[String] = list.new()
+    result.unwrap(list.push(mut xs, result.unwrap(string.from("first"))))
+    result.unwrap(list.push(mut xs, result.unwrap(string.from("second"))))
+    list.swap(mut xs, 0, 1)
+    xs[0] == "second" && xs[1] == "first"
+}
+
+// expect: run swap_zero_sized() = 2
+fn swap_zero_sized() -> u64 {
+    let mut xs: List[()] = list.new()
+    result.unwrap(list.push(mut xs, ()))
+    result.unwrap(list.push(mut xs, ()))
+    list.swap(mut xs, 0, 1)
+    list.len(xs)
+}

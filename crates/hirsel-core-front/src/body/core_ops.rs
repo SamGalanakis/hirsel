@@ -143,6 +143,7 @@ operations! {
     ("list", "push", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "pop", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "set", Lane::Value, "A", "core-check-calls-910", false),
+    ("list", "swap", Lane::Value, "A", "core-collections-918", false),
     ("list", "clear", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "append", Lane::PendingCode, "A", "core-check-calls-910", false),
     ("map", "push_entry", Lane::Value, "A", "core-check-callables-913", true),

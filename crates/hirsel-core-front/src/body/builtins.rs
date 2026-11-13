@@ -59,6 +59,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             "reserve" => return Some(self.list_reserve(item, vals[0]?, vals[1]?, result, n)),
             "get" => return Some(self.list_get(item, vals[0]?, vals[1]?, result, n)),
             "set" => return Some(self.list_set(item, vals[0]?, vals[1]?, vals[2], n)),
+            "swap" => {
+                self.list_swap(item, vals[0]?, vals[1]?, vals[2]?, n)?;
+                return Some(None);
+            }
             "with_capacity" => {
                 return Some(self.list_with_capacity(item, vals[0]?, result, n));
             }

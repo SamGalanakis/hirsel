@@ -78,30 +78,6 @@ pub fn swap_remove[T](mut xs: List[T], i: u64) -> T {
     }
 }
 
-/// Exchanges elements i and j. Fails: Bounds (failure) when either is >= len.
-/// Alloc: nothing (the pop and push it is built from stay within capacity). Cost: O(1).
-/// Ex: `list.swap(mut xs, 0, list.len(xs) - 1)`
-pub fn swap[T](mut xs: List[T], i: u64, j: u64) {
-    check_index(xs, i)
-    check_index(xs, j)
-    if i == j {
-        return
-    }
-    let a = order.min(i, j)
-    let b = order.max(i, j)
-    let tail = option.unwrap(list.pop(mut xs))
-    if b == list.len(xs) {
-        // tail is element b: put it at a and element a at the end.
-        let old_a = list.set(mut xs, a, take tail)
-        push_reserved(mut xs, take old_a)
-    } else {
-        let old_a = list.set(mut xs, a, take tail)
-        let old_b = list.set(mut xs, b, take old_a)
-        let back = list.set(mut xs, a, take old_b)
-        push_reserved(mut xs, take back)
-    }
-}
-
 /// Cleans elements n.. from the highest index down; no change when n >= len.
 /// Alloc: nothing. Cost: O(len - n). Ex: `list.truncate(mut xs, 64)`
 pub fn truncate[T](mut xs: List[T], n: u64) {
@@ -116,7 +92,7 @@ pub fn reverse[T](mut xs: List[T]) {
     let mut j = list.len(xs)
     while i + 1 < j {
         j -= 1
-        swap(mut xs, i, j)
+        list.swap(mut xs, i, j)
         i += 1
     }
 }
@@ -226,22 +202,22 @@ fn partition[T](mut xs: List[T], a: u64, b: u64, before: scoped fn(T, T) -> Orde
     let mid = a + (b - a) / 2
     let hi = b - 1
     if less(xs, mid, a, before) {
-        swap(mut xs, mid, a)
+        list.swap(mut xs, mid, a)
     }
     if less(xs, hi, a, before) {
-        swap(mut xs, hi, a)
+        list.swap(mut xs, hi, a)
     }
     if less(xs, mid, hi, before) {
-        swap(mut xs, mid, hi)
+        list.swap(mut xs, mid, hi)
     }
     let mut store = a
     for i in a .. hi {
         if less(xs, i, hi, before) {
-            swap(mut xs, i, store)
+            list.swap(mut xs, i, store)
             store += 1
         }
     }
-    swap(mut xs, store, hi)
+    list.swap(mut xs, store, hi)
     store
 }
 
@@ -252,7 +228,7 @@ fn insertion_sort[T](mut xs: List[T], a: u64, b: u64, before: scoped fn(T, T) ->
     for i in (a + 1) .. b {
         let mut j = i
         while j > a && less(xs, j, j - 1, before) {
-            swap(mut xs, j, j - 1)
+            list.swap(mut xs, j, j - 1)
             j -= 1
         }
     }
@@ -268,7 +244,7 @@ fn heapsort[T](mut xs: List[T], a: u64, b: u64, before: scoped fn(T, T) -> Order
     let mut end = n
     while end > 1 {
         end -= 1
-        swap(mut xs, a, a + end)
+        list.swap(mut xs, a, a + end)
         sift_down(mut xs, a, 0, end, before)
     }
 }
@@ -287,7 +263,7 @@ fn sift_down[T](mut xs: List[T], base: u64, root: u64, n: u64, before: scoped fn
         if !less(xs, base + r, base + child, before) {
             break
         }
-        swap(mut xs, base + r, base + child)
+        list.swap(mut xs, base + r, base + child)
         r = child
     }
 }
@@ -319,7 +295,7 @@ pub fn dedup[T: key](mut xs: List[T]) {
     let mut read: u64 = 1
     while read < n {
         if !(xs[read] == xs[write - 1]) {
-            swap(mut xs, read, write)
+            list.swap(mut xs, read, write)
             write += 1
         }
         read += 1
@@ -376,8 +352,8 @@ pub fn sort_stable[T](mut xs: List[T], before: scoped fn(T, T) -> Order) -> Resu
     for i in 0u64 .. n {
         while scratch[i] != i {
             let to = scratch[i]
-            swap(mut xs, i, to)
-            swap(mut scratch, i, to)
+            list.swap(mut xs, i, to)
+            list.swap(mut scratch, i, to)
         }
     }
     Ok(())

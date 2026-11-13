@@ -816,14 +816,7 @@ impl Machine<'_> {
                 vals[result.index()] = if t.is_float() {
                     float_binary(t, op, a, c)
                 } else {
-                    let division = matches!(
-                        op,
-                        BinaryOp::Div
-                            | BinaryOp::Rem
-                            | BinaryOp::DivFloor
-                            | BinaryOp::Mod
-                            | BinaryOp::DivExact
-                    );
+                    let division = matches!(op, BinaryOp::Div | BinaryOp::Rem);
                     int_binary(t, op, a, c).ok_or(Stop::Cause(if division && c == 0 {
                         "Division"
                     } else {
@@ -1216,19 +1209,6 @@ fn int_binary(t: Ty, op: BinaryOp, a: u64, c: u64) -> Option<u64> {
         BinaryOp::Mul => fit(t, x.checked_mul(y)?),
         BinaryOp::Div => fit(t, x.checked_div(y)?),
         BinaryOp::Rem => (y != 0).then(|| mask(t, (x % y) as u64)),
-        BinaryOp::DivFloor => fit(
-            t,
-            x.checked_div_euclid(y)
-                .map(|q| if y < 0 && x % y != 0 { q + 1 } else { q })?,
-        ),
-        BinaryOp::Mod => (y != 0).then(|| mask(t, (((x % y) + y) % y) as u64)),
-        BinaryOp::DivExact => {
-            if y != 0 && x % y == 0 {
-                fit(t, x / y)
-            } else {
-                None
-            }
-        }
         BinaryOp::Shl | BinaryOp::Shr if !(0..i128::from(w)).contains(&y) => None,
         BinaryOp::Shl => Some(mask(t, a << y)),
         BinaryOp::Shr => Some(mask(t, (x >> y) as u64)),

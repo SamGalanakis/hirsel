@@ -207,10 +207,11 @@ fn compare_convert_sample_matches_evaluator() {
 fn infallible_arithmetic_sample_matches_evaluator() {
     let mut module =
         text::parse(include_str!("../../../hirsel-core-ir/samples/arith.core")).unwrap();
-    // Those two bodies require the not-yet-specified v1 failure ABI. Their
-    // declarations remain; the v0 numeric cases below call only infallible bodies.
-    module.functions[1].body = None;
-    module.functions[6].body = None;
+    // These bodies can fail, which needs the failure ABI. Their declarations
+    // remain; the cases below call only infallible bodies.
+    for f in [1, 6, 7, 8] {
+        module.functions[f].body = None;
+    }
     let cases = vec![
         (FuncId(0), vec![3f64.to_bits(), 4f64.to_bits()]),
         (FuncId(0), vec![1e308f64.to_bits(), 1e308f64.to_bits()]),

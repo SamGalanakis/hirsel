@@ -180,9 +180,11 @@ pub enum UnaryOp {
 }
 
 /// Scalar binary operations (LIR `BinaryOp` without the comparisons, which are
-/// `CompareOp`). Integer `Add`..`Shr`, `DivFloor`, `Mod` and `DivExact` fail on an
-/// out-of-range result, a zero divisor, signed MIN / -1, a shift count outside
-/// `0..width` and (DivExact) a nonzero remainder (SEM-1); float forms are exact IEEE.
+/// `CompareOp`). Integer `Add`..`Shr` fail as SEM-1 says: `Overflow` on an
+/// out-of-range result, on signed `MIN / -1` and on a shift count outside
+/// `0..width`; `Division` on a zero divisor. `Div` truncates toward zero and `Rem`
+/// takes the dividend's sign; `MIN rem -1` is 0 and does not fail. Float forms are
+/// exact IEEE.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum BinaryOp {
     Add,
@@ -195,9 +197,6 @@ pub enum BinaryOp {
     BitAnd,
     BitOr,
     BitXor,
-    DivFloor,
-    Mod,
-    DivExact,
     /// IEEE 754-2019 minimum/maximum/minimumNumber/maximumNumber on floats;
     /// the ordinary minimum/maximum on integers.
     Min,
@@ -211,16 +210,7 @@ impl BinaryOp {
         ty.int().is_some()
             && matches!(
                 self,
-                Self::Add
-                    | Self::Sub
-                    | Self::Mul
-                    | Self::Div
-                    | Self::Rem
-                    | Self::Shl
-                    | Self::Shr
-                    | Self::DivFloor
-                    | Self::Mod
-                    | Self::DivExact
+                Self::Add | Self::Sub | Self::Mul | Self::Div | Self::Rem | Self::Shl | Self::Shr
             )
     }
 }
@@ -373,7 +363,8 @@ pub enum Inst {
         op: ScalarUnaryOp,
         operand: ValueId,
     },
-    /// Evaluate an address: index bounds checks run here (failing to `fail`).
+    /// Evaluate an address. An `element` step's bounds check runs here (failing
+    /// to `fail`); `index` steps are raw and never fail.
     Address {
         address: AddressId,
         fail: Option<BlockId>,
@@ -648,7 +639,7 @@ impl Inst {
                     .get(&b.pools.steps)
                     .unwrap_or_default()
                     .iter()
-                    .any(|s| matches!(s, Step::Index(_) | Step::Element(_)))
+                    .any(|s| matches!(s, Step::Element(_)))
             }),
             Inst::Call { call } => b.calls.get(call.index()).is_none_or(|c| match c.callee {
                 Callee::Runtime(op) => op.fails(),

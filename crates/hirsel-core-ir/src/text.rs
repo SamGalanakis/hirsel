@@ -40,8 +40,7 @@ macro_rules! names {
 names!(UnaryOp { Neg = "neg", Not = "not", BitNot = "bitnot" });
 names!(BinaryOp {
     Add = "add", Sub = "sub", Mul = "mul", Div = "div", Rem = "rem", Shl = "shl", Shr = "shr",
-    BitAnd = "bitand", BitOr = "bitor", BitXor = "bitxor", DivFloor = "div_floor", Mod = "mod",
-    DivExact = "div_exact", Min = "min", Max = "max", MinNumber = "min_number", MaxNumber = "max_number",
+    BitAnd = "bitand", BitOr = "bitor", BitXor = "bitxor", Min = "min", Max = "max", MinNumber = "min_number", MaxNumber = "max_number",
 });
 names!(CompareOp { Eq = "eq", Ne = "ne", Lt = "lt", Le = "le", Gt = "gt", Ge = "ge" });
 names!(ConvertMode {

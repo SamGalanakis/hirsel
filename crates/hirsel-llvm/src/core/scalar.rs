@@ -145,78 +145,23 @@ impl FunctionEmitter<'_> {
                 self.fail_if(&flag, fail)?;
                 x
             }
-            BinaryOp::Div
-            | BinaryOp::DivExact
-            | BinaryOp::DivFloor
-            | BinaryOp::Rem
-            | BinaryOp::Mod => {
-                if matches!(op, BinaryOp::Rem | BinaryOp::Mod) {
-                    let zero = self.calc(format!("icmp eq {tt} {b}, 0"));
-                    self.fail_if(&zero, fail)?;
+            BinaryOp::Rem => {
+                let zero = self.calc(format!("icmp eq {tt} {b}, 0"));
+                self.fail_if(&zero, fail)?;
+                // SEM-1: signed MIN % -1 is 0 and does not fail; a native signed
+                // remainder traps there, and x % 1 is 0 for every x.
+                let safe = if signed {
                     let minus_one = self.calc(format!("icmp eq {tt} {b}, -1"));
-                    // The evaluator returns 0 for signed MIN % -1; use 1 to avoid poison.
-                    let safe = if signed {
-                        self.calc(format!("select i1 {minus_one}, {tt} 1, {tt} {b}"))
-                    } else {
-                        b.into()
-                    };
-                    let r = self.calc(format!("{sign}rem {tt} {a}, {safe}"));
-                    if op == BinaryOp::Mod && signed {
-                        let signs = self.calc(format!("xor {tt} {r}, {b}"));
-                        let different = self.calc(format!("icmp slt {tt} {signs}, 0"));
-                        let nonzero = self.calc(format!("icmp ne {tt} {r}, 0"));
-                        let adjust = self.calc(format!("and i1 {different}, {nonzero}"));
-                        let fixed = self.calc(format!("add {tt} {r}, {b}"));
-                        self.calc(format!("select i1 {adjust}, {tt} {fixed}, {tt} {r}"))
-                    } else {
-                        r
-                    }
+                    self.calc(format!("select i1 {minus_one}, {tt} 1, {tt} {b}"))
                 } else {
-                    let over = self.div_overflow(t, a, b);
-                    self.fail_if(&over, fail)?;
-                    let q = self.calc(format!("{sign}div {tt} {a}, {b}"));
-                    if op == BinaryOp::Div {
-                        q
-                    } else {
-                        let r = self.calc(format!("{sign}rem {tt} {a}, {b}"));
-                        let nonzero = self.calc(format!("icmp ne {tt} {r}, 0"));
-                        if op == BinaryOp::DivExact {
-                            self.fail_if(&nonzero, fail)?;
-                            q
-                        } else if !signed {
-                            if op == BinaryOp::Mod { r } else { q }
-                        } else {
-                            if op == BinaryOp::DivFloor {
-                                // Preserve the evaluator's current Euclidean quotient plus
-                                // its negative-divisor correction. FOR FORM records the
-                                // difference from mathematical floor division.
-                                let negative_rem = self.calc(format!("icmp slt {tt} {r}, 0"));
-                                let negative_div = self.calc(format!("icmp slt {tt} {b}, 0"));
-                                let direction =
-                                    self.calc(format!("select i1 {negative_div}, {tt} 1, {tt} -1"));
-                                let correction = self.calc(format!(
-                                    "select i1 {negative_rem}, {tt} {direction}, {tt} 0"
-                                ));
-                                let euclid = self.calc(format!("add {tt} {q}, {correction}"));
-                                let extra = self.calc(format!("and i1 {negative_div}, {nonzero}"));
-                                let extra = self.calc(format!("zext i1 {extra} to {tt}"));
-                                return Ok(self.calc(format!("add {tt} {euclid}, {extra}")));
-                            }
-                            let signs = self.calc(format!("xor {tt} {a}, {b}"));
-                            let different = self.calc(format!("icmp slt {tt} {signs}, 0"));
-                            let adjust = self.calc(format!("and i1 {different}, {nonzero}"));
-                            let fixed = if op == BinaryOp::Mod {
-                                self.calc(format!("add {tt} {r}, {b}"))
-                            } else {
-                                self.calc(format!("sub {tt} {q}, 1"))
-                            };
-                            self.calc(format!(
-                                "select i1 {adjust}, {tt} {fixed}, {tt} {}",
-                                if op == BinaryOp::Mod { r } else { q }
-                            ))
-                        }
-                    }
-                }
+                    b.into()
+                };
+                self.calc(format!("{sign}rem {tt} {a}, {safe}"))
+            }
+            BinaryOp::Div => {
+                let over = self.div_overflow(t, a, b);
+                self.fail_if(&over, fail)?;
+                self.calc(format!("{sign}div {tt} {a}, {b}"))
             }
             BinaryOp::Shl | BinaryOp::Shr => {
                 let outside = self.calc(format!("icmp uge {tt} {b}, {w}"));

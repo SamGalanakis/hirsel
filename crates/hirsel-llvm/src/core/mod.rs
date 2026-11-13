@@ -399,8 +399,15 @@ impl FunctionEmitter<'_> {
     }
     fn get(&mut self, v: ValueId) -> String {
         let t = self.vty(v);
-        let x = self.calc(format!("load {}, ptr %v{}", ty(t), v.0));
+        let x = self.numeric(v);
         self.canonical(t, &x)
+    }
+    // Numerical operations cannot distinguish NaN signs or payloads. Keep their
+    // internal representation until an observer uses get(): typed memory,
+    // calls, returns and conversions (including reinterpret) still canonicalize.
+    // No fast-math flags, reassociation or change to the operation's rounding.
+    fn numeric(&mut self, v: ValueId) -> String {
+        self.calc(format!("load {}, ptr %v{}", ty(self.vty(v)), v.0))
     }
     fn put(&mut self, v: ValueId, x: &str) {
         self.line(format!("store {} {x}, ptr %v{}", ty(self.vty(v)), v.0));
@@ -516,7 +523,7 @@ impl FunctionEmitter<'_> {
                 fail,
             } => {
                 let t = self.vty(operand);
-                let x = self.get(operand);
+                let x = self.numeric(operand);
                 let r = match op {
                     UnaryOp::Not => self.calc(format!("xor {} {x}, 1", ty(t))),
                     UnaryOp::BitNot => self.calc(format!("xor {} {x}, -1", ty(t))),
@@ -537,7 +544,7 @@ impl FunctionEmitter<'_> {
                 fail,
             } => {
                 let t = self.vty(left);
-                let a = self.get(left);
+                let a = self.numeric(left);
                 let x = self.binary(t, op, &a, right, fail)?;
                 self.put(result, &x);
             }
@@ -548,8 +555,8 @@ impl FunctionEmitter<'_> {
                 right,
             } => {
                 let t = self.vty(left);
-                let a = self.get(left);
-                let b = self.get(right);
+                let a = self.numeric(left);
+                let b = self.numeric(right);
                 let pred = match op {
                     CompareOp::Eq => "eq",
                     CompareOp::Ne => "ne",
@@ -611,7 +618,7 @@ impl FunctionEmitter<'_> {
                 operand,
             } => {
                 let t = self.vty(operand);
-                let x = self.get(operand);
+                let x = self.numeric(operand);
                 let x = self.scalar_unary(t, op, &x);
                 self.put(result, &x);
             }
@@ -622,9 +629,9 @@ impl FunctionEmitter<'_> {
                 addend,
             } => {
                 let t = self.vty(left);
-                let a = self.get(left);
-                let b = self.get(right);
-                let c = self.get(addend);
+                let a = self.numeric(left);
+                let b = self.numeric(right);
+                let c = self.numeric(addend);
                 let x = self.intrinsic(
                     &format!("llvm.fma.{}", if size(t) == 4 { "f32" } else { "f64" }),
                     &ty(t),
@@ -686,7 +693,7 @@ impl FunctionEmitter<'_> {
         let e = &self.body.edges[edge.index()];
         let args = e.args.get(&self.body.pools.values).unwrap();
         // Read every source before writing any target: loop parameters can swap.
-        let values = args.iter().map(|v| self.get(*v)).collect::<Vec<_>>();
+        let values = args.iter().map(|v| self.numeric(*v)).collect::<Vec<_>>();
         for (v, x) in self.body.blocks[e.target.index()]
             .params
             .get(&self.body.pools.values)

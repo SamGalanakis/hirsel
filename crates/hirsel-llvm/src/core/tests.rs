@@ -182,6 +182,15 @@ fn execute_with_configuration(
     bindings: &str,
     configuration: &str,
 ) -> Vec<NativeReport> {
+    execute_optimized(module, cases, bindings, configuration, Optimization::None)
+}
+fn execute_optimized(
+    module: &Module,
+    cases: &[Case],
+    bindings: &str,
+    configuration: &str,
+    optimization: Optimization,
+) -> Vec<NativeReport> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
         "hirsel-core-llvm-{}-{}",
@@ -205,7 +214,7 @@ fn execute_with_configuration(
     let context = Context::new();
     let llvm = LlvmModule::parse(&context, "test", &ir).unwrap();
     llvm.verify().unwrap_or_else(|e| panic!("{e}\n{ir}"));
-    let bytes = emit_object_with_charge_observation(module, Optimization::None, observing).unwrap();
+    let bytes = emit_object_with_charge_observation(module, optimization, observing).unwrap();
     std::fs::write(dir.join("core.o"), bytes).unwrap();
     let mut c = String::from(
         "#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\n#include <assert.h>\n#include \"hirsel_core_rt.h\"\nextern uint64_t hirsel_core_test_available(const HirselCoreContext *);\nextern HirselCoreContext *hirsel_core_test_context_new(uint64_t);\nextern void hirsel_core_test_inject(HirselCoreContext *,size_t,bool);\nextern size_t hirsel_core_test_attempts(const HirselCoreContext *);\nstatic uint64_t trace[4096]; static size_t traces;\nvoid hirsel_core_test_drop_trace(uint64_t n){assert(traces<4096);trace[traces++]=n;}\nstatic float f32(uint32_t b){float x;memcpy(&x,&b,4);return x;}\nstatic double f64(uint64_t b){double x;memcpy(&x,&b,8);return x;}\nstatic const char *causes[]={\"Overflow\",\"Bounds\",\"Division\",\"Unwrap\",\"Fail\",\"Cancelled\",\"Capacity\"};\n",
@@ -691,6 +700,90 @@ fn float_intrinsics_preserve_nan_and_signed_zero() {
     let module = text::parse(&source).unwrap();
     wf::module(&module).unwrap();
     agree(&module, &cases);
+}
+
+#[test]
+fn numerical_chains_canonicalize_at_memory_bits_calls_and_returns() {
+    let mut source = String::from("core v1\n");
+    let mut cases = Vec::new();
+    for (kind, word, inputs) in [
+        (
+            "f32",
+            "u32",
+            vec![
+                0,
+                0x8000_0000,
+                1,
+                0x0080_0000,
+                0x3f80_0000,
+                0xbf80_0000,
+                0x7f80_0000,
+                0xff80_0000,
+                0x7fc0_0001,
+                0xffc0_0042,
+                0x7f80_0001,
+            ],
+        ),
+        (
+            "f64",
+            "u64",
+            vec![
+                0,
+                0x8000_0000_0000_0000,
+                1,
+                0x0010_0000_0000_0000,
+                0x3ff0_0000_0000_0000,
+                0xbff0_0000_0000_0000,
+                0x7ff0_0000_0000_0000,
+                0xfff0_0000_0000_0000,
+                0x7ff8_0000_0000_0001,
+                0xfff8_0000_0000_0042,
+                0x7ff0_0000_0000_0001,
+            ],
+        ),
+    ] {
+        let identity = source.matches("\nfn ").count();
+        writeln!(source, "sig g{identity} = ({kind}) -> ({kind})\ninst n{identity} = tests@0/numeric/{kind}_identity [] []\nfn f{identity} = n{identity} g{identity} {{\nb0(v0: {kind}):\n return v0\n}}").unwrap();
+        for op in [
+            "add",
+            "sub",
+            "mul",
+            "div",
+            "min",
+            "max",
+            "min_number",
+            "max_number",
+        ] {
+            let i = source.matches("\nfn ").count();
+            // A raw integer read observes the actual float store, independently
+            // of reinterpret's normalization. The edge and later operations may
+            // carry noncanonical NaNs internally; all three observations agree.
+            writeln!(source, "sig g{i} = ({kind}, {kind}) -> ({kind}, {word}, {word})\ninst n{i} = tests@0/numeric/{kind}_{op} [] []\nfn f{i} = n{i} g{i} {{\n slot s0 = {kind}\n addr a0 = s0 : {kind}\n addr a1 = v9 index v8 : {word}\nb0(v0: {kind}, v1: {kind}):\n v2: {kind} = {op} v0, v1\n jump b1(v2)\nb1(v3: {kind}):\n v4: {kind} = neg v3\n v5: {kind} = abs v4\n v6: {kind} = sqrt v5\n v7: {kind} = mul_add v6, v6, v3\n live s0\n address a0\n store a0, v7\n v8: u64 = const 0\n v9: ptr = pointer a0\n address a1\n v10: {word} = read a1\n v11: {word} = reinterpret v7\n v12: {kind} = call f{identity} g{identity} (v7)\n dead s0\n return v12, v10, v11\n}}").unwrap();
+            for &a in &inputs {
+                for &b in &inputs {
+                    cases.push(Case {
+                        function: FuncId(i as u32),
+                        args: vec![a, b],
+                        limit: u64::MAX,
+                        injection: None,
+                    });
+                }
+            }
+        }
+    }
+    let module = text::parse(&source).unwrap();
+    wf::module(&module).unwrap();
+    let expected: Vec<_> = cases
+        .iter()
+        .map(|c| eval::run(&module, c.function, &c.args, c.limit).outcome)
+        .collect();
+    for optimization in [Optimization::None, Optimization::Speed] {
+        let reports = execute_optimized(&module, &cases, "", "", optimization);
+        assert_eq!(reports.len(), expected.len());
+        for (got, want) in reports.iter().zip(&expected) {
+            assert_eq!(&got.outcome, want);
+        }
+    }
 }
 
 fn sample_cases(module: &Module, source: &str) -> Vec<Case> {

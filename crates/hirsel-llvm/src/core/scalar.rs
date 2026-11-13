@@ -110,7 +110,7 @@ impl FunctionEmitter<'_> {
         right: ValueId,
         fail: Option<BlockId>,
     ) -> Result<String> {
-        let b = &self.get(right);
+        let b = &self.numeric(right);
         let tt = ty(t);
         if t.is_float() {
             let name = match op {

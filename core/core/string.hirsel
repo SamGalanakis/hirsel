@@ -162,23 +162,29 @@ pub fn push_char(mut s: String, c: char) -> Result[(), Capacity] {
 }
 
 pub fn push_u64(mut s: String, n: u64) -> Result[(), Capacity] {
-    // The digit count w and the place value of the leading digit.
+    // The digit count w: 1, plus one for each power of ten from 10 up to 10^19 that n reaches.
     let mut w: u64 = 1
-    let mut place: u64 = 1
-    while n / place >= 10 {
-        place *= 10
+    let mut p: u64 = 10
+    while w < 20 && n >= p {
         w += 1
+        if w < 20 {
+            p = p * 10
+        }
     }
     string.reserve(mut s, w)?
     let owned = replace(mut s, string.new())
     let mut b = to_bytes(take owned)
-    loop {
-        let d: u8 = int.truncate(n / place % 10)
-        let _ = list.push(mut b, b'0' + d)
-        if place == 1 {
-            break
-        }
-        place = place / 10
+    let base = list.len(b)
+    // The reserve made room for w more bytes, so this admits nothing.
+    let _ = list.fill(mut b, w, b'0')
+    // The digits from the last: each step writes in place and returns nothing.
+    let mut i = base + w
+    let mut m = n
+    while m > 0 {
+        i -= 1
+        let d: u8 = int.truncate(m % 10)
+        b[i] = b'0' + d
+        m = m / 10
     }
     s = of_bytes(take b)
     Ok(())

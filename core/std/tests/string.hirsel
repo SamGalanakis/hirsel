@@ -375,6 +375,21 @@ fn push_u64_onto_literal() -> bool {
     s == "x42"
 }
 
+// Each side of every digit-count step the sizing loop takes, up to its last power, 10^19.
+// expect: run push_u64_powers_of_ten() = true
+fn push_u64_powers_of_ten() -> bool {
+    decimal(99) == "99" && decimal(100) == "100" && decimal(999999999999999999) == "999999999999999999" && decimal(1000000000000000000) == "1000000000000000000" && decimal(9999999999999999999) == "9999999999999999999" && decimal(10000000000000000000) == "10000000000000000000"
+}
+
+// Onto owned bytes, twice: the digits land after what is there, zeros inside n included.
+// expect: run push_u64_appends() = true
+fn push_u64_appends() -> bool {
+    let mut s = result.unwrap(string.from("ab"))
+    result.unwrap(string.push_u64(mut s, 100))
+    result.unwrap(string.push_u64(mut s, 7))
+    s == "ab1007"
+}
+
 // 1, 2, 3 and 4 UTF-8 bytes: 'a', 'é' (C3 A9), '€' (E2 82 AC), U+1F600 (F0 9F 98 80).
 // expect: run push_char_widths() = true
 fn push_char_widths() -> bool {

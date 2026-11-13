@@ -8,7 +8,7 @@
 //! item i0 = app@1/main/add                ; source items (debug identity)
 //! type t0 = "app@1/geo/Point"             ; declared types, canonical text
 //! static d0 = align 1 hex 6869            ; read-only data
-//! sig g0 = (i32, &t0) -> (i32) dest t0    ; params: scalar, ptr or &tN (by address)
+//! sig g0 = (i32, &view t0) -> (i32) dest t0 ; params: scalar, ptr or &mut/view/take tN
 //! sig g1 = (u64) -> never                 ; FORM v1: a function whose result is Never
 //! inst n0 = app@1/main/add ["i32"] []     ; instance key: definition, types, dictionaries
 //! fn f0 = n0 g0 extern                    ; defined in another module
@@ -283,7 +283,7 @@ impl Printer {
         for (i, s) in m.signatures.iter().enumerate() {
             let params = list(&s.params, |p| match p {
                 Param::Value(t) => ty(*t).into(),
-                Param::Address(t) => format!("&t{}", t.0),
+                Param::Address { ty, loan } => format!("&{} t{}", loan_word(*loan), ty.0),
             });
             let results = if s.never {
                 "never".into()
@@ -697,6 +697,14 @@ pub fn parse(text: &str) -> Result<Module, ParseError> {
 
 /// Split a line into words, punctuation and quoted strings (kept with their quotes,
 /// unescaped inside); `;` outside a string starts a comment.
+pub(crate) fn loan_word(loan: Loan) -> &'static str {
+    match loan {
+        Loan::Mut => "mut",
+        Loan::View => "view",
+        Loan::Take => "take",
+    }
+}
+
 fn tokens(line: &str) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
     let mut chars = line.chars().peekable();
@@ -1670,7 +1678,19 @@ impl Parser {
                     expect_index(&mut l, 'g', n)?;
                     let params = l.seq("(", ")", |l| {
                         if l.eat("&") {
-                            Ok(Param::Address(TypeId(l.id('t')?)))
+                            let loan = if l.eat("mut") {
+                                Loan::Mut
+                            } else if l.eat("view") {
+                                Loan::View
+                            } else if l.eat("take") {
+                                Loan::Take
+                            } else {
+                                return Err("expected `mut`, `view` or `take` after `&`".into());
+                            };
+                            Ok(Param::Address {
+                                ty: TypeId(l.id('t')?),
+                                loan,
+                            })
                         } else {
                             Ok(Param::Value(l.ty()?))
                         }

@@ -189,7 +189,7 @@ fn samples_behave_as_derived_by_hand() {
                 .zip(&sig.params)
                 .map(|(a, p)| match p {
                     Param::Value(t) => eval::scalar(*t, a.trim()),
-                    Param::Address(_) => panic!("by-address arguments are FORM v1"),
+                    Param::Address { .. } => panic!("by-address arguments are FORM v1"),
                 })
                 .collect();
             let got = eval::run_args(&m, f, &args, limit, &argv);
@@ -420,5 +420,105 @@ fn only_core_marks_slots_and_finalizes_own_rows() {
         }
         let err = wf::module(&load("kernel", &text)).expect_err(why);
         assert!(err.contains(why), "expected `{why}`, got `{err}`");
+    }
+}
+
+/// Loans (crate docs, "Loans"). Bugs: a producer passes one place as a `mut`
+/// argument and as another argument, writes a place it holds as a `view` (both
+/// unsound once an emitter marks `mut` noalias and `view` readonly), or a body
+/// writes its own `view` parameter.
+#[test]
+fn loans_stop_producer_aliasing() {
+    let module = |main: &str, callee: &str| {
+        format!(
+            "core v1\ntype t0 = own \"P\" {{ a: u64 }}\nsig g0 = () -> ()\nsig g1 = (&view t0, &mut t0) -> ()\nsig g2 = (&view t0, ptr) -> ()\nsig g3 = (&take t0, &mut t0) -> ()\nsig g4 = (&view t0, &take t0) -> ()\nsig g5 = (&take t0, ptr) -> ()\ninst n0 = p@0/m/main [] []\ninst n1 = p@0/m/callee [] []\nfn f0 = n0 g0 {{\n  slot s0 = t0\n  slot s1 = t0\n  addr a0 = s0 : t0\n  addr a1 = s1 : t0\nb0:\n  live s0\n  live s1\n  address a0\n  address a1\n{main}  return\n}}\n{callee}"
+        )
+    };
+    // the callee writes its `mut` place, or a place it was handed as a pointer
+    let write = |sig: &str, base: &str| {
+        format!(
+            "fn f1 = n1 {sig} {{\n  addr a0 = {base} : t0\n  addr a1 = a0 field 0 : u64\nb0(v0: ptr, v1: ptr):\n  address a0\n  address a1\n  v2: u64 = const 1\n  store a1, v2\n  return\n}}\n"
+        )
+    };
+    let (mutate, poke) = (write("g1", "v1"), write("g2", "v1"));
+    // the evaluator alone, as the oracle for what wf cannot see
+    let eval_only = |text: &str| {
+        let m = parse(text).unwrap();
+        std::panic::catch_unwind(|| eval::run_checked(&m, FuncId(0), &[], u64::MAX))
+            .map(|(_, checked)| checked.loans)
+            .map_err(|e| {
+                e.downcast::<String>()
+                    .map_or_else(|_| String::new(), |s| *s)
+            })
+    };
+    let wf_err = |text: &str| wf::module(&parse(text).unwrap()).expect_err(text);
+    let run = |text: &str| {
+        let m = parse(text).unwrap();
+        wf::module(&m).unwrap();
+        std::panic::catch_unwind(|| eval::run_checked(&m, FuncId(0), &[], u64::MAX))
+            .map(|(_, checked)| checked.loans)
+            .map_err(|e| {
+                e.downcast::<String>()
+                    .map_or_else(|_| String::new(), |s| *s)
+            })
+    };
+    assert_eq!(
+        run(&module("  call f1 g1 (&a0, &a1)\n", &mutate)),
+        Ok(2),
+        "distinct places run, and both loans are checked"
+    );
+    // one place lent as mut and as a view or a take: wf refuses it, and the
+    // evaluator faults it when wf is bypassed
+    for (call, callee) in [
+        ("  call f1 g1 (&a0, &a0)\n", mutate.clone()),
+        ("  call f1 g3 (&a0, &a0)\n", write("g3", "v1")),
+    ] {
+        let text = module(call, &callee);
+        let err = wf_err(&text);
+        assert!(
+            err.contains("a mut place overlaps another argument"),
+            "got `{err}`"
+        );
+        let shared = eval_only(&text).unwrap_err();
+        assert!(
+            shared.contains("overlaps another argument's place"),
+            "got `{shared}`"
+        );
+    }
+    // a take lent from a place another argument views: nothing writes it
+    let reader = "fn f1 = n1 g4 {\n  addr a0 = v0 : t0\n  addr a1 = a0 field 0 : u64\n  addr a2 = v1 : t0\n  addr a3 = a2 field 0 : u64\nb0(v0: ptr, v1: ptr):\n  address a0\n  address a1\n  address a2\n  address a3\n  v2: u64 = read a1\n  v3: u64 = read a3\n  return\n}\n";
+    assert_eq!(run(&module("  call f1 g4 (&a0, &a0)\n", reader)), Ok(2));
+    let poked = run(&module(
+        "  v0: ptr = pointer a0\n  call f1 g2 (&a0, v0)\n",
+        &poke,
+    ))
+    .unwrap_err();
+    assert!(
+        poked.contains("into a lent view or take place"),
+        "got `{poked}`"
+    );
+    let taken = run(&module(
+        "  v0: ptr = pointer a0\n  call f1 g5 (&a0, v0)\n",
+        &write("g5", "v1"),
+    ))
+    .unwrap_err();
+    assert!(
+        taken.contains("into a lent view or take place"),
+        "got `{taken}`"
+    );
+    // wf: a body writes its own take parameter's incoming place
+    let err = wf_err(&module("", &write("g5", "v0")));
+    assert!(
+        err.contains("writes a take parameter's place"),
+        "got `{err}`"
+    );
+    // wf: a body writes its own view parameter, directly or through `pointer`
+    for callee in [
+        write("g2", "v0"),
+        "fn f1 = n1 g2 {\n  addr a0 = v0 : t0\n  addr a1 = v2 : t0\n  addr a2 = a1 field 0 : u64\nb0(v0: ptr, v1: ptr):\n  address a0\n  v2: ptr = pointer a0\n  address a1\n  address a2\n  v3: u64 = const 1\n  store a2, v3\n  return\n}\n".into(),
+    ] {
+        let m = parse(&module("", &callee)).unwrap();
+        let err = wf::module(&m).expect_err("a write into a view parameter");
+        assert!(err.contains("writes a view parameter's place"), "got `{err}`");
     }
 }

@@ -376,7 +376,7 @@ impl Substitution<'_> {
         }
         let mut sig = self.module.signatures[old.index()].clone();
         for param in &mut sig.params {
-            if let Param::Address(id) = param {
+            if let Param::Address { ty: id, .. } = param {
                 *id = self.ty(*id);
             }
         }
@@ -461,7 +461,8 @@ impl Substitution<'_> {
         }
         if let Some(op) = call.operation {
             self.signature(function.signature);
-            let Param::Address(ty) = self.module.signatures[function.signature.index()].params[0]
+            let Param::Address { ty, .. } =
+                self.module.signatures[function.signature.index()].params[0]
             else {
                 unreachable!("symbolic key payload")
             };

@@ -38,6 +38,14 @@ pub struct Report {
     pub stderr: Vec<u8>,
 }
 
+/// What the run's oracle checks covered (crate docs, "Loans").
+#[derive(Debug, Default, PartialEq)]
+pub struct Checked {
+    /// Lent places: each `view` and `take` place frozen for its call, each `mut`
+    /// place and destination checked against the call's other places.
+    pub loans: u64,
+}
+
 /// The modelled provider (CAP-5), deterministic so runs can be derived by hand:
 /// - `Args` is the run's argument table: each argument a run-owned `String`
 ///   carrier of capacity 0; the handle's value is not read.
@@ -201,6 +209,9 @@ struct Machine<'m> {
     admissions: usize,
     injection: Option<(usize, bool)>,
     world: World,
+    /// The `view` places of the calls running now, as (block, offset, size).
+    frozen: Vec<(usize, usize, usize)>,
+    loans: u64,
 }
 
 fn collect_arrays(ty: &FieldTy, out: &mut Vec<(FieldTy, u64)>) {
@@ -215,9 +226,13 @@ fn collect_arrays(ty: &FieldTy, out: &mut Vec<(FieldTy, u64)>) {
 pub fn run(m: &Module, f: FuncId, args: &[u64], limit: u64) -> Report {
     run_injected(m, f, args, limit, None)
 }
+/// A run, with what its oracle checks covered.
+pub fn run_checked(m: &Module, f: FuncId, args: &[u64], limit: u64) -> (Report, Checked) {
+    run_world(m, f, args, limit, None, &[])
+}
 /// A run whose `Args` table holds `argv`.
 pub fn run_args(m: &Module, f: FuncId, args: &[u64], limit: u64, argv: &[&str]) -> Report {
-    run_world(m, f, args, limit, None, argv)
+    run_world(m, f, args, limit, None, argv).0
 }
 /// Deterministic admission refusal for native/evaluator agreement fixtures.
 pub fn run_injected(
@@ -227,7 +242,7 @@ pub fn run_injected(
     limit: u64,
     injection: Option<(usize, bool)>,
 ) -> Report {
-    run_world(m, f, args, limit, injection, &[])
+    run_world(m, f, args, limit, injection, &[]).0
 }
 fn run_world(
     m: &Module,
@@ -236,7 +251,7 @@ fn run_world(
     limit: u64,
     injection: Option<(usize, bool)>,
     argv: &[&str],
-) -> Report {
+) -> (Report, Checked) {
     let mut mach = Machine {
         m,
         recipes: compute(&m.types).expect("layouts"),
@@ -259,6 +274,8 @@ fn run_world(
         admissions: 0,
         injection,
         world: World::default(),
+        frozen: Vec::new(),
+        loans: 0,
     };
     for s in &m.statics {
         let p = mach.block(s.bytes.len() as u64, None, 0, None);
@@ -293,7 +310,8 @@ fn run_world(
         Ok(r) => Outcome::Returned(r),
         Err(_) => Outcome::Failed(task.chain.iter().map(|c| c.kind.into()).collect()),
     };
-    Report {
+    let checked = Checked { loans: mach.loans };
+    let report = Report {
         outcome,
         used: mach.limits[0].used,
         peak_reserved: mach.peak_reserved,
@@ -301,7 +319,8 @@ fn run_world(
         admissions: mach.admissions,
         stdout: mach.world.stdout,
         stderr: mach.world.stderr,
-    }
+    };
+    (report, checked)
 }
 
 fn ptr(blk: usize, off: u64) -> u64 {
@@ -510,6 +529,17 @@ impl Machine<'_> {
         let (b, o) = split(p);
         assert!(self.mem[b].live, "use of a freed block");
         assert!(!self.mem[b].fixed, "a store into static data");
+        if let Some(&(_, at, n)) = self
+            .frozen
+            .iter()
+            .find(|&&(fb, fo, fn_)| fb == b && o < fo + fn_ && fo < o + bytes.len())
+        {
+            panic!(
+                "a write of +{o}..+{} into a lent view or take place +{at}..+{} while its call runs",
+                o + bytes.len(),
+                at + n
+            );
+        }
         self.mem[b].bytes[o..o + bytes.len()].copy_from_slice(bytes);
     }
     fn store(&mut self, p: u64, n: usize, v: u64) {
@@ -593,6 +623,10 @@ impl Machine<'_> {
     fn free(&mut self, p: u64) {
         let (b, o) = split(p);
         assert!(o == 0 && self.mem[b].live, "free of a non-block");
+        assert!(
+            !self.frozen.iter().any(|f| f.0 == b),
+            "free of a block holding a lent view or take place while its call runs"
+        );
         assert!(!self.mem[b].fixed, "a free of static data");
         if let Some((at, _)) = self.mem[b].marks.iter().find(|(_, m)| m.0) {
             panic!("free of a block whose slot at +{at} is live: a slot kernel left a value in it");
@@ -1186,6 +1220,48 @@ impl Machine<'_> {
     }
 
     // ---- functions
+    /// Check a call's loans (crate docs, "Loans") and freeze its `view` places
+    /// until the caller truncates `frozen` back. The destination is exclusive.
+    fn lend(&mut self, sig: &Signature, args: &[u64]) {
+        let places: Vec<(usize, usize, usize, Loan)> = sig
+            .dest
+            .map(|ty| Param::Address {
+                ty,
+                loan: Loan::Mut,
+            })
+            .into_iter()
+            .chain(sig.params.iter().copied())
+            .zip(args)
+            .filter_map(|(p, &a)| match p {
+                Param::Address { ty, loan } => {
+                    let n = self.place_size(PlaceTy::Declared(ty)) as usize;
+                    (n > 0).then(|| {
+                        let (b, o) = split(a);
+                        (b, o, n, loan)
+                    })
+                }
+                Param::Value(_) => None,
+            })
+            .collect();
+        for (i, &(b, o, n, loan)) in places.iter().enumerate() {
+            self.loans += 1;
+            match loan {
+                Loan::View | Loan::Take => {
+                    self.frozen.push((b, o, n));
+                    continue;
+                }
+                Loan::Mut => {}
+            }
+            for (j, &(b2, o2, n2, _)) in places.iter().enumerate() {
+                assert!(
+                    i == j || b != b2 || o + n <= o2 || o2 + n2 <= o,
+                    "a {loan:?} place +{o}..+{} overlaps another argument's place +{o2}..+{}",
+                    o + n,
+                    o2 + n2
+                );
+            }
+        }
+    }
     fn call(&mut self, t: &mut Task, f: FuncId, args: &[u64]) -> X<Vec<u64>> {
         let m = self.m;
         let b = m.functions[f.index()]
@@ -1610,13 +1686,17 @@ impl Machine<'_> {
                         Arg::Address(a) => places[a.index()].0,
                     })
                     .collect();
+                let held = self.frozen.len();
+                self.lend(&self.m.signatures[site.signature.index()], &args);
                 let r = match site.callee {
                     Callee::Direct(f) => self.call(t, f, &args),
                     Callee::Indirect(v) => {
                         self.call(t, FuncId((vals[v.index()] - FN_BASE) as u32), &args)
                     }
                     Callee::Runtime(op) => self.rt(t, op, &args),
-                }?;
+                };
+                self.frozen.truncate(held);
+                let r = r?;
                 for (v, x) in site.results.get(&b.pools.values).unwrap().iter().zip(r) {
                     vals[v.index()] = x;
                 }

@@ -129,7 +129,7 @@ fn execute_with_configuration(
                 .chain(s.dest.iter().map(|_| "void *"))
                 .chain(s.params.iter().map(|p| match p {
                     Param::Value(t) => cty(*t),
-                    Param::Address(_) => "void *",
+                    Param::Address { .. } => "void *",
                 }))
                 .collect::<Vec<_>>()
                 .join(", ")

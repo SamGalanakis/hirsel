@@ -41,14 +41,22 @@ impl KeyOp {
         })
     }
     fn signature(self, ty: TypeId) -> Signature {
-        let mut params = vec![Param::Address(ty)];
+        // The value read is lent as a view; a clone's target is written.
+        let view = |ty| Param::Address {
+            ty,
+            loan: Loan::View,
+        };
+        let out = |ty| Param::Address {
+            ty,
+            loan: Loan::Mut,
+        };
+        let mut params = vec![view(ty)];
         match self {
             Self::Hash => {}
             Self::Fold => params.push(Param::Value(Ty::Scalar(Scalar::U64))),
-            Self::Equal | Self::Order | Self::Ordered(_) | Self::Clone => {
-                params.push(Param::Address(ty))
-            }
-            Self::CloneTwin(u) => params.push(Param::Address(TypeId(u))),
+            Self::Equal | Self::Order | Self::Ordered(_) => params.push(view(ty)),
+            Self::Clone => params.push(out(ty)),
+            Self::CloneTwin(u) => params.push(out(TypeId(u))),
             Self::Encode => {
                 params.extend([Param::Value(Ty::Ptr), Param::Value(Ty::Scalar(Scalar::U64))]);
                 return Signature {
@@ -299,7 +307,7 @@ pub(super) fn inline_ordered(module: &Module, body: &mut Body) -> bool {
                 };
                 let scalar = match *module.signatures[call.signature.index()].params.first()? {
                     Param::Value(Ty::Scalar(s)) => s,
-                    Param::Address(ty) => scalar_row(module, ty)?,
+                    Param::Address { ty, .. } => scalar_row(module, ty)?,
                     _ => return None,
                 };
                 let args = call.args.get(&body.pools.args).unwrap();
@@ -585,7 +593,7 @@ impl Derive<'_> {
             params: sig
                 .params
                 .iter()
-                .map(|p| matches!(p, Param::Address(_)))
+                .map(|p| matches!(p, Param::Address { .. }))
                 .collect(),
             result: true,
         };

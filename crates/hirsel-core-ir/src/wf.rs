@@ -81,7 +81,7 @@ pub fn module(m: &Module) -> R {
     hirsel_core_layout::compute(&m.types).map_err(|e| format!("layout: {e:?}"))?;
     for (i, s) in m.signatures.iter().enumerate() {
         let types_ok = s.params.iter().all(|p| match p {
-            Param::Address(t) => t.index() < m.types.len(),
+            Param::Address { ty, .. } => ty.index() < m.types.len(),
             Param::Value(_) => true,
         }) && s.dest.is_none_or(|t| t.index() < m.types.len());
         need(types_ok, || format!("g{i}: unknown type"))?;
@@ -124,7 +124,7 @@ pub fn entry_params(m: &Module, s: &Signature) -> Vec<Ty> {
         .into_iter()
         .chain(s.params.iter().map(|p| match p {
             Param::Value(t) => *t,
-            Param::Address(_) => Ty::Ptr,
+            Param::Address { .. } => Ty::Ptr,
         }))
         .collect()
 }
@@ -133,6 +133,11 @@ struct Ctx<'a> {
     m: &'a Module,
     b: &'a Body,
     defined: Vec<u32>,
+    /// The entry values that are `view` or `take` parameters' pointers: places
+    /// this body only reads (crate docs, "Loans").
+    views: Vec<(ValueId, Loan)>,
+    /// The address each `pointer` instruction's result was taken from.
+    pointers: std::collections::HashMap<ValueId, AddressId>,
 }
 
 impl Ctx<'_> {
@@ -212,6 +217,69 @@ impl Ctx<'_> {
             _ => Err(format!("a{}: case of a record", a.0)),
         }
     }
+    /// The place `a` names within its allocation: the root (a slot or an
+    /// incoming pointer) and every step from it, following bases through
+    /// addresses and `pointer` results. `None` past a `deref` step, which leaves
+    /// for another allocation, or at a pointer of unknown origin.
+    fn root(&self, mut a: AddressId) -> Option<(AddressBase, Vec<Step>)> {
+        let mut path = Vec::new();
+        loop {
+            let info = self.b.addresses.get(a.index())?;
+            let steps = info.steps.get(&self.b.pools.steps).unwrap_or_default();
+            if steps.iter().any(|s| matches!(s, Step::Deref)) {
+                return None;
+            }
+            path.splice(0..0, steps.iter().copied());
+            a = match info.base {
+                AddressBase::Address(x) => x,
+                AddressBase::Value(v) if !self.views.iter().any(|&(w, _)| w == v) => {
+                    match self.pointers.get(&v) {
+                        Some(&x) => x,
+                        None => return Some((info.base, path)),
+                    }
+                }
+                base => return Some((base, path)),
+            };
+        }
+    }
+    /// A write through `a`: never into this body's own `view` or `take`
+    /// parameter's place. A callee consumes a `take` place by reading it into its
+    /// own slot or by dropping it in place, and writes it no other way.
+    fn writes(&self, a: AddressId) -> R {
+        let loan = match self.root(a) {
+            Some((AddressBase::Value(v), _)) => {
+                self.views.iter().find(|&&(w, _)| w == v).map(|&(_, l)| l)
+            }
+            _ => None,
+        };
+        need(loan.is_none(), || {
+            format!(
+                "a{}: writes a {} parameter's place",
+                a.0,
+                crate::text::loan_word(loan.unwrap())
+            )
+        })
+    }
+    /// A drop through `a`: the callee may consume its own `take` place in place,
+    /// but never drops a `view` place.
+    fn drops(&self, a: AddressId) -> R {
+        match self.root(a) {
+            Some((AddressBase::Value(v), _))
+                if self.views.iter().any(|&(w, l)| w == v && l == Loan::Take) =>
+            {
+                Ok(())
+            }
+            _ => self.writes(a),
+        }
+    }
+    /// Whether `a` and `b` provably share bytes: one is the other or lies
+    /// inside it (same root, one path a prefix of the other).
+    fn overlaps(&self, a: AddressId, b: AddressId) -> bool {
+        match (self.root(a), self.root(b)) {
+            (Some((x, p)), Some((y, q))) => x == y && (p.starts_with(&q) || q.starts_with(&p)),
+            _ => false,
+        }
+    }
     fn place(&self, a: AddressId) -> Result<PlaceTy, String> {
         self.b
             .addresses
@@ -222,10 +290,38 @@ impl Ctx<'_> {
 }
 
 pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
+    let entry_values = b
+        .blocks
+        .first()
+        .and_then(|k| k.params.get(&b.pools.values))
+        .unwrap_or_default();
+    let skip = usize::from(sig.dest.is_some());
+    let views = sig
+        .params
+        .iter()
+        .zip(entry_values.iter().skip(skip))
+        .filter_map(|(p, v)| match p {
+            Param::Address {
+                loan: loan @ (Loan::View | Loan::Take),
+                ..
+            } => Some((*v, *loan)),
+            _ => None,
+        })
+        .collect();
+    let pointers = b
+        .insts
+        .iter()
+        .filter_map(|i| match *i {
+            Inst::Pointer { result, address } => Some((result, address)),
+            _ => None,
+        })
+        .collect();
     let mut c = Ctx {
         m,
         b,
         defined: vec![0; b.values.len()],
+        views,
+        pointers,
     };
     need(!b.blocks.is_empty(), || "no entry block".into())?;
     need(b.terminators.len() == b.blocks.len(), || {
@@ -636,6 +732,7 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             })
         }
         Inst::Store { address, value } => {
+            c.writes(address)?;
             need(c.place(address)? == PlaceTy::Value(c.ty(value)?), || {
                 "store type".into()
             })
@@ -700,6 +797,7 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             c.is(charge, Ty::Scalar(Scalar::U64))
         }
         Inst::Copy { to, from, bytes } => {
+            c.writes(to)?;
             c.place(to)?;
             c.place(from)?;
             c.is(bytes, Ty::Scalar(Scalar::U64))
@@ -710,6 +808,7 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             c.cases(address).map(|_| ())
         }
         Inst::SetCase { address, case } => {
+            c.writes(address)?;
             let n = c.cases(address)?;
             need((case as usize) < n, || {
                 format!("set_case {case} of {n} cases")
@@ -763,6 +862,7 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             })
         }
         Inst::Drop { address, ty, fail } => {
+            c.drops(address)?;
             c.tid(ty)?;
             need(c.place(address)? == PlaceTy::Declared(ty), || {
                 "drop of a place of another type".into()
@@ -817,15 +917,34 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             need(args.len() == entry_params(c.m, sig).len(), || {
                 "call arity".into()
             })?;
+            // The destination is written, and a `mut` place may be.
             let params = sig
                 .dest
-                .map(Param::Address)
+                .map(|ty| Param::Address {
+                    ty,
+                    loan: Loan::Mut,
+                })
                 .into_iter()
                 .chain(sig.params.iter().copied());
-            for (a, p) in args.iter().zip(params) {
+            for (i, (a, p)) in args.iter().zip(params).enumerate() {
                 let ok = match (a, p) {
                     (Arg::Value(v), Param::Value(t)) => c.ty(*v)? == t,
-                    (Arg::Address(a), Param::Address(t)) => c.place(*a)? == PlaceTy::Declared(t),
+                    (Arg::Address(a), Param::Address { ty, loan }) => {
+                        if loan == Loan::Mut {
+                            c.writes(*a)?;
+                            for (j, b) in args.iter().enumerate() {
+                                if let Arg::Address(b) = b {
+                                    need(i == j || !c.overlaps(*a, *b), || {
+                                        format!(
+                                            "a{}: a mut place overlaps another argument a{}",
+                                            a.0, b.0
+                                        )
+                                    })?;
+                                }
+                            }
+                        }
+                        c.place(*a)? == PlaceTy::Declared(ty)
+                    }
                     _ => false,
                 };
                 need(ok, || "call argument differs from the signature".into())?;

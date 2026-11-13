@@ -69,7 +69,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             for (i, p) in g.params.iter().enumerate() {
                 let ty = subst(&mut self.t, p.ty, tys);
                 rows[i] = self.e.type_row(self.p, &mut self.t, ty)?;
-                params.push(Param::Address(rows[i]));
+                params.push(Param::Address {
+                    ty: rows[i],
+                    loan: loan(p.mode),
+                });
             }
             let definition = DefPath::core(&format!("int.${}", g.path.0.name));
             let function = self.e.add_function_abi(
@@ -244,7 +247,7 @@ pub(super) fn ensure(
         .into_iter()
         .chain(sig.params.iter().map(|p| match p {
             Param::Value(t) => *t,
-            Param::Address(_) => Ty::Ptr,
+            Param::Address { .. } => Ty::Ptr,
         }))
         .collect::<Vec<_>>();
     let mut c = Code::new(&entry);
@@ -259,7 +262,7 @@ pub(super) fn ensure(
         let p = ps[i + usize::from(dest.is_some())];
         operands[i] = match param {
             Param::Value(_) => p,
-            Param::Address(ty) => c.read(p, Ty::Scalar(scalar(module, *ty))),
+            Param::Address { ty, .. } => c.read(p, Ty::Scalar(scalar(module, *ty))),
         };
     }
     let result = c.value(Ty::Scalar(target));

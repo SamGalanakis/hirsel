@@ -39,7 +39,7 @@ impl Return {
         for (i, p) in sig.params.iter().enumerate() {
             let t = match p {
                 Param::Value(t) => format!("{}{}", ty(*t), extension(*t)),
-                Param::Address(_) => "ptr".into(),
+                Param::Address { .. } => "ptr".into(),
             };
             params.push(format!("{t} %p{i}"));
         }
@@ -355,7 +355,7 @@ impl FunctionEmitter<'_> {
         for (i, p) in sig.params.iter().enumerate() {
             args.push(match p {
                 Param::Value(t) => format!("{}{} %p{i}", ty(*t), extension(*t)),
-                Param::Address(_) => format!("ptr %p{i}"),
+                Param::Address { .. } => format!("ptr %p{i}"),
             });
         }
         let values = self.invoke(

@@ -83,14 +83,15 @@ fn evaluate() -> Result<Value, String> {
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        eval::run(&emitter.module, function, &[], u64::MAX)
+        eval::run_checked(&emitter.module, function, &[], u64::MAX)
     }));
     std::panic::set_hook(hook);
     Ok(match result {
-        Ok(report) => json!({"outcome": match report.outcome {
+        Ok((report, checked)) => json!({"outcome": match report.outcome {
             eval::Outcome::Returned(values) => json!({"kind":"returned", "values":values}),
             eval::Outcome::Failed(causes) => json!({"kind":"failed", "causes":causes}),
-        }, "used":report.used, "stdout":report.stdout, "stderr":report.stderr}),
+        }, "used":report.used, "stdout":report.stdout, "stderr":report.stderr,
+            "checked": {"loans": checked.loans}}),
         Err(fault) => {
             let message = fault
                 .downcast_ref::<String>()

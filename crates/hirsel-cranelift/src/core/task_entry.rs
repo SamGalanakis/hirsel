@@ -91,7 +91,11 @@ impl Glues {
             let rc = tables.input.types[r.index()].carried;
             let sig = c::Signature {
                 params: match xc {
-                    Carried::Address => vec![Param::Address(x)],
+                    // The task takes its input (RtOp::Spawn).
+                    Carried::Address => vec![Param::Address {
+                        ty: x,
+                        loan: c::Loan::Take,
+                    }],
                     Carried::Value(t) => vec![Param::Value(t)],
                     Carried::Nothing => vec![],
                 },

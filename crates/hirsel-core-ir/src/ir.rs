@@ -682,8 +682,9 @@ pub enum RaiseCause {
 }
 
 impl RtOp {
-    /// The signature row a call of this operation names. A `take` input is `&T` and
-    /// stays the caller's when the operation refuses before its commit point.
+    /// The signature row a call of this operation names. A `take` input is `&take T`
+    /// and stays the caller's when the operation refuses before its commit point; an
+    /// output the operation writes is `&mut T`.
     ///
     /// | op | params | results |
     /// |---|---|---|
@@ -728,7 +729,15 @@ impl RtOp {
     /// `value` is the opened `HostFile`, the bytes read, the lock taken (1) or the
     /// new `Dir`, and `written` the bytes written.
     pub fn signature(self) -> Signature {
-        use Param::{Address as A, Value as V};
+        use Param::Value as V;
+        let take = |ty| Param::Address {
+            ty,
+            loan: Loan::Take,
+        };
+        let out = |ty| Param::Address {
+            ty,
+            loan: Loan::Mut,
+        };
         let (u8_, u64_, bool_) = (
             Ty::Scalar(Scalar::U8),
             Ty::Scalar(Scalar::U64),
@@ -736,15 +745,15 @@ impl RtOp {
         );
         let p = Ty::Ptr;
         let (params, results) = match self {
-            RtOp::Spawn { x, .. } => (vec![V(u64_), A(x), V(p)], vec![p, u64_]),
-            RtOp::Join { r } => (vec![V(p), A(r)], vec![u8_, p]),
+            RtOp::Spawn { x, .. } => (vec![V(u64_), take(x), V(p)], vec![p, u64_]),
+            RtOp::Join { r } => (vec![V(p), out(r)], vec![u8_, p]),
             RtOp::Cancel => (vec![V(p)], vec![]),
             RtOp::CheckCancel => (vec![], vec![]),
             RtOp::ChannelNew { .. } => (vec![V(u64_)], vec![p, p, u64_]),
             RtOp::ChannelSender => (vec![V(p)], vec![p]),
-            RtOp::Send { item } => (vec![V(p), A(item)], vec![bool_]),
-            RtOp::TrySend { item } => (vec![V(p), A(item)], vec![u8_]),
-            RtOp::Receive { item } => (vec![V(p), A(item)], vec![bool_]),
+            RtOp::Send { item } => (vec![V(p), take(item)], vec![bool_]),
+            RtOp::TrySend { item } => (vec![V(p), take(item)], vec![u8_]),
+            RtOp::Receive { item } => (vec![V(p), out(item)], vec![bool_]),
             RtOp::DestId => (vec![], vec![u64_]),
             RtOp::CompareBytes => (
                 vec![V(p), V(u64_), V(p), V(u64_)],
@@ -963,8 +972,31 @@ pub struct Body {
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Param {
     Value(Ty),
-    /// A pointer to a place of the declared type, owned by the caller.
-    Address(TypeId),
+    /// A pointer to a place of the declared type, owned by the caller, lent for
+    /// the whole call under `loan` (crate docs, "Loans").
+    Address {
+        ty: TypeId,
+        loan: Loan,
+    },
+}
+
+/// How a by-address parameter's place is lent to the callee (OWN-7..11). The extent
+/// is the call: entry to every exit, failure cleanup included.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum Loan {
+    /// Exclusive: during the call no other argument's place, and no other path the
+    /// callee can reach, overlaps it. Its bytes may change.
+    Mut,
+    /// Frozen: no write anywhere touches its bytes during the call. Other views of
+    /// the same place may be passed alongside it.
+    View,
+    /// The callee owns the value: it consumes the place by reading it into its own
+    /// slot or by dropping or moving out of it in place, and neither it nor
+    /// anything else writes the place during the call. A copyable value may be
+    /// lent from a place other arguments still view. A refusal before the callee's
+    /// commit point leaves it the caller's. See the crate docs, "Loans", for what
+    /// `noalias` on it claims.
+    Take,
 }
 
 /// An instantiated signature. `dest` is the declared type of a result returned

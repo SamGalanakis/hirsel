@@ -522,6 +522,43 @@
 //! instance key ([`InstanceKey::digest`]). The context parameter and the failure
 //! status are the FORM v1a additions to this convention (Native ABI, above).
 //!
+//! # Loans
+//!
+//! Every by-address parameter states how its place is lent for the call
+//! ([`Loan`]), written `&mut t`, `&view t` or `&take t`. The extent is the whole
+//! call, from entry to every exit, failure cleanup included. These are facts the
+//! checker already proved (OWN-7..11); an emitter may rely on them and may ignore
+//! them:
+//! - `mut`: no other path reaches the place during the call;
+//! - `view`: nothing writes the place during the call;
+//! - `take`: the callee consumes the place, by reading it (into its own slot, as a
+//!   front-lowered callee does at entry) or by dropping or moving out of it in
+//!   place. Neither the callee nor anything else writes the place during the
+//!   call. A copyable value may therefore be lent as `take` from a place other
+//!   arguments still view.
+//!
+//! What `noalias` on a `take` parameter claims, exactly: during the call no
+//! write reaches that memory through any other pointer, and the callee itself
+//! never writes the caller's place (it writes only its own slot). That holds even
+//! when a `view` of the same place is passed alongside, because neither is
+//! written. `take` does not say the place is readonly in LLVM's sense (a drop in
+//! place releases what it owns), and it does not say the pointer is not captured.
+//!
+//! A `view` is not invariant beyond the call, and a `mut` place changes. Places
+//! behind the parameter (a carrier's buffer, a counted header, a queue, a region
+//! record, a provider handle) carry no loan. The destination is a fresh place the
+//! caller provides; it is exclusive like `mut`. wf refuses a body that writes its
+//! own `view` or `take` parameter's place (store, copy to, set case, lending it as
+//! `mut` or as a destination), a drop of its own `view` place, and a call whose
+//! `mut` place or destination provably overlaps another argument's place (the
+//! same root, one projection a prefix of the other). The test evaluator checks
+//! the rest on every call: a `mut` place or the destination overlaps no other
+//! argument's place, and no write touches a `view` or `take` place while its call
+//! runs. It runs only entries that take no host arguments: the front corpora's
+//! cases and evaluator-backend laws, not native programs. On the native side,
+//! running each program with an emitter's loan-derived facts on and off and
+//! comparing the outputs is the safety net.
+//!
 //! # Instances
 //!
 //! A function row names an instance: a definition plus the canonical text of each

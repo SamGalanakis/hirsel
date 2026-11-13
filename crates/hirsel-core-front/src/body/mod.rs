@@ -28,8 +28,8 @@ use hirsel_core_ids::DefPath;
 use hirsel_core_ir::{
     AddressBase, AddressId, AddressInfo, AllocKind, AllocPlace, Anchor, Arg, ArithMode, ArithOp,
     BinaryOp, Block, BlockId, Body, CallId, CallSite, Callee, CompareOp, ConvertMode, Edge, EdgeId,
-    FuncId, Function, Inst, InstanceId, InstanceKey, ItemId, Module, Param, PlaceTy, PoolRange,
-    ReadMode, SigId, Signature, SlotId, Step, Terminator, Ty, TypeId, UnaryOp, ValueId,
+    FuncId, Function, Inst, InstanceId, InstanceKey, ItemId, Loan, Module, Param, PlaceTy,
+    PoolRange, ReadMode, SigId, Signature, SlotId, Step, Terminator, Ty, TypeId, UnaryOp, ValueId,
 };
 use hirsel_core_layout::{
     Carried, FieldTy, Handle, Layout, Recipe, Repr as LRepr, Scalar, TypeRef,
@@ -616,7 +616,10 @@ impl Emitter {
                 let id = self
                     .type_row(p, t, ty)
                     .ok_or("values of this type are not built")?;
-                params.push(Param::Address(id));
+                params.push(Param::Address {
+                    ty: id,
+                    loan: Loan::Mut,
+                });
                 abi.params.push(false);
                 continue;
             }
@@ -627,7 +630,10 @@ impl Emitter {
                     abi.params.push(false);
                 }
                 Rep::Place(id) => {
-                    params.push(Param::Address(id));
+                    params.push(Param::Address {
+                        ty: id,
+                        loan: loan(q.mode),
+                    });
                     abi.params.push(true);
                 }
             }
@@ -659,6 +665,16 @@ fn clone_body_signature() -> Signature {
         results: vec![Ty::Scalar(Scalar::U64), Ty::Scalar(Scalar::U64)],
         dest: None,
         never: false,
+    }
+}
+
+/// The loan a by-address parameter of this source mode carries (crate docs of
+/// hirsel-core-ir, "Loans"). `bytes` parameters are `u64` values, never places.
+pub(super) fn loan(mode: Mode) -> Loan {
+    match mode {
+        Mode::Mut => Loan::Mut,
+        Mode::Take => Loan::Take,
+        Mode::View | Mode::Bytes => Loan::View,
     }
 }
 
@@ -1703,7 +1719,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                     .into_iter()
                     .chain(s.params.iter().map(|p| match p {
                         Param::Value(t) => *t,
-                        Param::Address(_) => Ty::Ptr,
+                        Param::Address { .. } => Ty::Ptr,
                     }))
                     .collect();
                 let entry = self.new_block(&tys);

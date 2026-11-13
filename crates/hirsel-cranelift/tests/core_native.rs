@@ -83,7 +83,7 @@ fn declare_functions(source: &mut String, module: &c::Module) {
         for p in &s.params {
             let c = match p {
                 Param::Value(t) => ctype(*t),
-                Param::Address(_) => "void*",
+                Param::Address { .. } => "void*",
             };
             write!(source, ", {c}").unwrap();
         }

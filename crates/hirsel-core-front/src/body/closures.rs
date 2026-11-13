@@ -436,7 +436,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let param = self.e.module.signatures[signature.index()].params[parameter];
             parameter += 1;
             let id = match param {
-                Param::Address(id) => id,
+                Param::Address { ty: id, .. } => id,
                 Param::Value(_) => {
                     scratch.ir_args.push(Arg::Value(scratch.vals[i]?));
                     continue;

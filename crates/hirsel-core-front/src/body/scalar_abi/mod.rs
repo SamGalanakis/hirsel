@@ -31,7 +31,7 @@ impl Plan {
             .enumerate()
             .filter_map(|(i, &param)| {
                 let change = match param {
-                    Param::Address(id) if abi.params.get(i) == Some(&true) => {
+                    Param::Address { ty: id, .. } if abi.params.get(i) == Some(&true) => {
                         match module.types[id.index()].carried {
                             Carried::Value(t) => Change::Value(t, id),
                             Carried::Nothing => Change::Nothing,

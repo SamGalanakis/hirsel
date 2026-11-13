@@ -71,7 +71,7 @@ impl Signature {
         clif.params.extend(s.params.iter().map(|p| {
             AbiParam::new(match *p {
                 Param::Value(t) => ty(t),
-                Param::Address(_) => types::I64,
+                Param::Address { .. } => types::I64,
             })
         }));
         if !indirect {

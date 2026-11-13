@@ -26,20 +26,25 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         for &(mode, ty) in params {
             let rep = self.rep(ty)?;
             let p = if mode == Mode::Mut {
-                Param::Address(
-                    self.e
+                Param::Address {
+                    ty: self
+                        .e
                         .type_row(self.p, &mut self.t, ty)
                         .ok_or("callable payload layouts are not built")?,
-                )
+                    loan: Loan::Mut,
+                }
             } else {
                 match rep {
                     Rep::None => continue,
                     Rep::Scalar(t) => Param::Value(t),
-                    Rep::Place(id) => Param::Address(id),
+                    Rep::Place(id) => Param::Address {
+                        ty: id,
+                        loan: loan(mode),
+                    },
                 }
             };
             abi.params
-                .push(mode != Mode::Mut && matches!(p, Param::Address(_)));
+                .push(mode != Mode::Mut && matches!(p, Param::Address { .. }));
             buffer.push(p);
         }
         let (results, dest) = match self.rep(result)? {
@@ -192,7 +197,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             .into_iter()
             .chain(sig.params.iter().map(|p| match p {
                 Param::Value(t) => *t,
-                Param::Address(_) => Ty::Ptr,
+                Param::Address { .. } => Ty::Ptr,
             }))
             .collect::<Vec<_>>();
         let block = child.new_block(&entry);
@@ -219,8 +224,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             parameter += 1;
             let value = match param {
                 Param::Value(_) => Some(incoming[k]),
-                Param::Address(_) if mode == Mode::Mut => Some(incoming[k]),
-                Param::Address(id) => {
+                Param::Address { .. } if mode == Mode::Mut => Some(incoming[k]),
+                Param::Address { ty: id, .. } => {
                     let at = child.address(
                         AddressBase::Value(incoming[k]),
                         &[],

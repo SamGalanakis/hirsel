@@ -114,8 +114,7 @@ unsafe extern "C" fn drop_message(context: *mut Context, value: *mut u8) -> u8 {
                 causes::Cause {
                     kind: causes::FAIL,
                     site: 100 + m.index,
-                    message: ptr::null_mut(),
-                    drop_message: None,
+                    message: Default::default(),
                 },
             );
         }

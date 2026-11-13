@@ -245,8 +245,7 @@ unsafe extern "C" fn cancelled(context: *mut Context, _: *mut u8, input: *mut u8
             causes::Cause {
                 kind: causes::OVERFLOW,
                 site: 32,
-                message: ptr::null_mut(),
-                drop_message: None,
+                message: Default::default(),
             },
         );
         hirsel_core_finalizer_end(context, std::ptr::NonNull::new(resource).unwrap());
@@ -332,8 +331,7 @@ unsafe extern "C" fn drop_resource(context: *mut Context, value: *mut u8) -> u8 
             causes::Cause {
                 kind: causes::FAIL,
                 site: value.site,
-                message: ptr::null_mut(),
-                drop_message: None,
+                message: Default::default(),
             },
         );
         hirsel_core_finalizer_end(context, resource);
@@ -891,4 +889,29 @@ fn event_gate_skips_all_arc_hooks_without_a_sink_and_children_inherit_recording(
             (ARC_UNWRAP, 1)
         ]
     );
+}
+
+#[test]
+fn unjoined_failed_child_frees_the_moved_string_backing() {
+    unsafe extern "C" fn fail(context: *mut Context, _: *mut u8, _: *mut u8) -> u8 {
+        // SAFETY: child owns this freshly admitted buffer and its unused primary cell.
+        unsafe {
+            let message = hirsel_core_alloc(context, ptr::null_mut(), 4, 1, 8, false, 0);
+            assert!(!message.pointer.is_null());
+            ptr::copy_nonoverlapping(b"boom".as_ptr(), message.pointer, 4);
+            hirsel_core_raise_string(context, 55, message.pointer, 4, 4);
+        }
+        1
+    }
+    unsafe extern "C" fn abandon(context: *mut Context, result: *mut u8, _: *mut u8) -> u8 {
+        // SAFETY: root transfers its only child handle to drop and never joins it.
+        unsafe {
+            let child = hirsel_core_spawn(context, 8, ptr::null_mut(), fail, layout::<(), ()>(0));
+            assert!(!child.task.is_null());
+            assert_eq!(hirsel_core_task_drop(context, child.task), 0);
+            result.cast::<u64>().write(1);
+        }
+        0
+    }
+    assert_eq!(run(abandon, ()).0, 1);
 }

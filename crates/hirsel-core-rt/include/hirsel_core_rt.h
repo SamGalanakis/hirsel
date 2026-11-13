@@ -22,6 +22,15 @@
 #define HIRSEL_CORE_PLAIN_PREFIX_BYTES 8
 #define HIRSEL_CORE_GRAPH_PREFIX_BYTES 48
 #define HIRSEL_CORE_RESOURCE_PREFIX_BYTES 16
+#define HIRSEL_CORE_CAUSE_BYTES 40
+#define HIRSEL_CORE_CAUSE_KIND 0
+#define HIRSEL_CORE_CAUSE_MESSAGE 8
+#define HIRSEL_CORE_CAUSE_MESSAGE_DATA 8
+#define HIRSEL_CORE_CAUSE_MESSAGE_LENGTH 16
+#define HIRSEL_CORE_CAUSE_MESSAGE_CAPACITY 24
+#define HIRSEL_CORE_CAUSE_SITE 32
+#define HIRSEL_CORE_CAUSE_CELL_VALUE 0
+#define HIRSEL_CORE_CAUSE_CELL_NEXT 40
 #define HIRSEL_CORE_NATIVE_PLAIN 0
 #define HIRSEL_CORE_NATIVE_GRAPH 1
 #define HIRSEL_CORE_NATIVE_RESOURCE 2
@@ -82,16 +91,15 @@ void hirsel_core_finalizer_end(HirselCoreContext *, void *resource);
 void hirsel_core_resource_free(void *resource, uint64_t logical_field_storage);
 /* Cause tags: 0 Overflow, 1 Bounds, 2 Division, 3 Unwrap, 4 Fail,
    5 Cancelled, 6 Capacity. Message ownership transfers to raise. */
+typedef struct { uint8_t *data; uint64_t len, capacity; } HirselCoreStringMessage;
 typedef struct {
     uint8_t kind;
+    HirselCoreStringMessage message;
     uint64_t site;
-    void *message;
-    void (*drop_message)(void *);
 } HirselCoreCause;
 typedef struct HirselCoreCauseCell HirselCoreCauseCell;
+/* Transfers the inline String backing; capacity zero owns no storage. */
 void hirsel_core_raise(HirselCoreContext *, HirselCoreCause);
-/* Fail messages borrow this carrier from the delivered cause cell. */
-typedef struct { uint8_t *data; uint64_t len, capacity; } HirselCoreStringMessage;
 void hirsel_core_raise_string(HirselCoreContext *, uint64_t site,
     uint8_t *data, uint64_t len, uint64_t capacity);
 HirselCoreCauseCell *hirsel_core_causes_take(HirselCoreContext *);

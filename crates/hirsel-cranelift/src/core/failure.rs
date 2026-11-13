@@ -56,7 +56,7 @@ impl Function<'_, '_, '_> {
         } else {
             let slot = self.b.create_sized_stack_slot(StackSlotData::new(
                 StackSlotKind::ExplicitSlot,
-                32,
+                super::memory_layout::CAUSE_BYTES as u32,
                 3,
             ));
             self.cause_slot = Some(slot);
@@ -64,10 +64,10 @@ impl Function<'_, '_, '_> {
         };
         let addr = self.b.ins().stack_addr(types::I64, slot, 0);
         let zero = self.b.ins().iconst(types::I64, 0);
-        for offset in [0, 8, 16, 24] {
+        for offset in (0..super::memory_layout::CAUSE_BYTES).step_by(8) {
             self.b
                 .ins()
-                .store(MemFlagsData::trusted(), zero, addr, offset);
+                .store(MemFlagsData::trusted(), zero, addr, offset as i32);
         }
         let kind = self.b.ins().iconst(types::I8, i64::from(kind));
         self.b.ins().store(MemFlagsData::trusted(), kind, addr, 0);

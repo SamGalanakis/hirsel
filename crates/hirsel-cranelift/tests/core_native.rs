@@ -1566,3 +1566,24 @@ fn static_capacity_zero_carriers_drop_and_grow_through_runtime_cleanup() {
         .collect();
     execute_reports(&module, &cases, false, 1000, None, Some(&expected));
 }
+
+#[test]
+fn joined_cause_views_use_core_layout() {
+    let module = text::parse(include_str!("../../hirsel-core-ir/samples/custody.core")).unwrap();
+    let expected = eval::Report {
+        outcome: Outcome::Returned(vec![1, 1, 4, 4]),
+        used: 0,
+        stdout: vec![],
+        stderr: vec![],
+        trace: vec![7],
+        admissions: eval::run(&module, FuncId(6), &[], 1000).admissions,
+    };
+    execute_reports(
+        &module,
+        &[(FuncId(6), vec![])],
+        false,
+        1000,
+        None,
+        Some(&[expected]),
+    );
+}

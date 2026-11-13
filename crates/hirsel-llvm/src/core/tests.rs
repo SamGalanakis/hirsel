@@ -239,7 +239,7 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
             writeln!(c,"uint64_t b{k}_{j}=0; memcpy(&b{k}_{j},&r{k}.r{j},{}); printf(\" %llu\",(unsigned long long)b{k}_{j});",size(t)).unwrap();
         }
         c.push_str("}\n");
-        writeln!(c,"HirselCoreCauseCell *chain=hirsel_core_causes_take(ctx); if({status}) for(const HirselCoreCauseCell *p=chain;p;p=hirsel_core_cause_next(p)) printf(\" %s\",causes[hirsel_core_cause_value(p)->kind]); printf(\"|%llu|\",(unsigned long long)(initial-hirsel_core_test_available(ctx))); for(size_t i=0;i<traces;i++) printf(\" %llu\",(unsigned long long)trace[i]); printf(\"|%zu|\",hirsel_core_test_attempts(ctx)); for(const HirselCoreCauseCell *p=chain;p;p=hirsel_core_cause_next(p)) if(hirsel_core_cause_value(p)->kind==4) {{ const HirselCoreStringMessage *msg=(const HirselCoreStringMessage *)hirsel_core_cause_value(p)->message; for(uint64_t i=0;i<msg->len;i++) printf(\"%02x\",((const unsigned char *)msg->data)[i]); printf(\" \"); }} printf(\"|\"); for(size_t j=0;j<arc_count;j++) printf(\" %u:%llu\",arc_events[j].kind,(unsigned long long)arc_events[j].value); printf(\"\\n\"); hirsel_core_causes_drop(chain); return 0; }}").unwrap();
+        writeln!(c,"HirselCoreCauseCell *chain=hirsel_core_causes_take(ctx); if({status}) for(const HirselCoreCauseCell *p=chain;p;p=hirsel_core_cause_next(p)) printf(\" %s\",causes[hirsel_core_cause_value(p)->kind]); printf(\"|%llu|\",(unsigned long long)(initial-hirsel_core_test_available(ctx))); for(size_t i=0;i<traces;i++) printf(\" %llu\",(unsigned long long)trace[i]); printf(\"|%zu|\",hirsel_core_test_attempts(ctx)); for(const HirselCoreCauseCell *p=chain;p;p=hirsel_core_cause_next(p)) if(hirsel_core_cause_value(p)->kind==4) {{ const HirselCoreStringMessage *msg=&hirsel_core_cause_value(p)->message; for(uint64_t i=0;i<msg->len;i++) printf(\"%02x\",((const unsigned char *)msg->data)[i]); printf(\" \"); }} printf(\"|\"); for(size_t j=0;j<arc_count;j++) printf(\" %u:%llu\",arc_events[j].kind,(unsigned long long)arc_events[j].value); printf(\"\\n\"); hirsel_core_causes_drop(chain); return 0; }}").unwrap();
     }
     invocations.push_str("return 0;}\n");
     c.push_str(&invocations);
@@ -1524,4 +1524,21 @@ fn provider_error_payload_and_nonwaiting_clocks_use_the_c_abi() {
         assert_eq!(report.used, 0);
         assert_eq!(report.admissions, 0);
     }
+}
+
+#[test]
+fn joined_cause_views_use_core_layout() {
+    let module = text::parse(include_str!("../../../hirsel-core-ir/samples/custody.core")).unwrap();
+    let actual = execute(
+        &module,
+        &[Case {
+            function: FuncId(6),
+            args: vec![],
+            limit: 1000,
+            injection: None,
+        }],
+    );
+    assert_eq!(actual[0].outcome, eval::Outcome::Returned(vec![1, 1, 4, 4]));
+    assert_eq!(actual[0].used, 0);
+    assert_eq!(actual[0].trace, vec![7]);
 }

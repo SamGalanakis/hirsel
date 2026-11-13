@@ -311,8 +311,7 @@ pub unsafe fn check_cancel(context: *mut Context, site: u64) -> u8 {
                 Cause {
                     kind: causes::CANCELLED,
                     site,
-                    message: ptr::null_mut(),
-                    drop_message: None,
+                    message: Default::default(),
                 },
             );
             event(CANCELLED, 0, site);

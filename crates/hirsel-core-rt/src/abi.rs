@@ -11,7 +11,10 @@
 //! context; other allocation success pointers address payload storage. Context
 //! and region creation return owned handles and admit no language storage.
 //! `try_unwrap` returns its uniqueness test. `causes_take` transfers a complete
-//! chain, null for empty; cause accessors return borrowed pointers. allocation_status
+//! chain, null for empty; cause accessors return borrowed pointers to the exact
+//! core Cause layout, published in abi_layout.rs. rt.cause_next/value take only
+//! the cell, return next/core-view pointers, and have no context or failure status.
+//! allocation_status
 //! returns 1 only for a null result under the current finalizer grant, else 0. Other
 //! entries return unit, except dest_id (u64), compare_bytes (i8) and native_alloc/region_refill
 //! (nonnull native base/payload). Count overflow and physical host exhaustion are run

@@ -170,7 +170,7 @@ impl<'a> Calls<'a> {
             signature.params.push(AbiParam::new(types::I64));
             signature.params.push(AbiParam::special(
                 types::I64,
-                ArgumentPurpose::StructArgument(32),
+                ArgumentPurpose::StructArgument(super::memory_layout::CAUSE_BYTES as u32),
             ));
             let function = object
                 .declare_function("hirsel_core_raise", Linkage::Import, &signature)

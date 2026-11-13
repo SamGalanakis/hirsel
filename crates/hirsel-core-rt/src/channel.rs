@@ -54,8 +54,7 @@ pub unsafe extern "C" fn hirsel_core_channel_new(
                 Cause {
                     kind: causes::BOUNDS,
                     site,
-                    message: ptr::null_mut(),
-                    drop_message: None,
+                    message: Default::default(),
                 },
             );
             return New {

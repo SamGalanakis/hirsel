@@ -119,8 +119,7 @@ unsafe extern "C" fn entry(ctx: *mut Context, cfg: *const Config, _: *mut MainRe
                 crate::causes::Cause {
                     kind: crate::causes::UNWRAP,
                     site: 31,
-                    message: ptr::null_mut(),
-                    drop_message: None,
+                    message: Default::default(),
                 },
             );
         }

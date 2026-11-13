@@ -284,8 +284,7 @@ unsafe extern "C" fn failing_main(
             causes::Cause {
                 kind: causes::FAIL,
                 site: 41,
-                message: std::ptr::null_mut(),
-                drop_message: None,
+                message: Default::default(),
             },
         );
         hirsel_core_finalizer_begin(context, std::ptr::NonNull::new(resource).unwrap());
@@ -294,8 +293,7 @@ unsafe extern "C" fn failing_main(
             causes::Cause {
                 kind: causes::OVERFLOW,
                 site: 42,
-                message: std::ptr::null_mut(),
-                drop_message: None,
+                message: Default::default(),
             },
         );
         diagnostic((*config).state, b"cleaned\n".as_ptr(), 8);
@@ -310,7 +308,7 @@ fn failure_chain_keeps_order_sites_and_cleanup_precedes_diagnostics() {
     let config = config(std::ptr::null(), 0, &mut stderr);
     // SAFETY: live test config and thunk with explicit cleanup.
     assert_eq!(unsafe { hirsel_core_run(&config, failing_main) }, 101);
-    assert_eq!(stderr, b"cleaned\nFail at 41\nOverflow at 42\n");
+    assert_eq!(stderr, b"cleaned\nFail(\"\") at 41\nOverflow at 42\n");
 }
 #[test]
 fn mkdtemp_bounds_and_pending_cancellation_happen_before_issue() {

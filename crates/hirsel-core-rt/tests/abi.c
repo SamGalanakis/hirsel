@@ -8,6 +8,11 @@ static bool empty(HirselCoreContext *context, void *payload, uint64_t *cursor,
     return true;
 }
 
+_Static_assert(sizeof(HirselCoreCause) == HIRSEL_CORE_CAUSE_BYTES, "Cause size");
+_Static_assert(offsetof(HirselCoreCause, kind) == HIRSEL_CORE_CAUSE_KIND, "Cause kind");
+_Static_assert(offsetof(HirselCoreCause, message) == HIRSEL_CORE_CAUSE_MESSAGE, "Cause message");
+_Static_assert(offsetof(HirselCoreCause, site) == HIRSEL_CORE_CAUSE_SITE, "Cause site");
+
 int main(void) {
     uint64_t destination = hirsel_core_dest_id();
     assert(destination != hirsel_core_dest_id());

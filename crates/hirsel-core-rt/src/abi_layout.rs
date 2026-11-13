@@ -37,3 +37,15 @@ pub const ARC_EVENT_UNWRAP: u8 = 13;
 // An outstanding charge prevents reuse of its payer slot, so an equal word
 // cannot be an earlier incarnation after exit/re-entry. Current is canonical;
 // forwarded parents and handed-over survivors differ until lookup resolves them.
+
+// FORM #55. cause_value borrows this exact core layout, not a translated view.
+// Cells begin with Cause followed by next; native funding follows the prefix.
+pub const CAUSE_BYTES: usize = 40;
+pub const CAUSE_KIND: usize = 0;
+pub const CAUSE_MESSAGE: usize = 8;
+pub const CAUSE_MESSAGE_DATA: usize = 8;
+pub const CAUSE_MESSAGE_LENGTH: usize = 16;
+pub const CAUSE_MESSAGE_CAPACITY: usize = 24;
+pub const CAUSE_SITE: usize = 32;
+pub const CAUSE_CELL_VALUE: usize = 0;
+pub const CAUSE_CELL_NEXT: usize = 40;

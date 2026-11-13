@@ -7,10 +7,7 @@ use crate::{
     limit::{Funding, Payer},
 };
 use hirsel_core_layout::charge;
-use std::{
-    mem::{ManuallyDrop, MaybeUninit},
-    ptr,
-};
+use std::{mem::ManuallyDrop, ptr};
 
 pub const OVERFLOW: u8 = 0;
 pub const BOUNDS: u8 = 1;
@@ -20,27 +17,26 @@ pub const FAIL: u8 = 4;
 pub const CANCELLED: u8 = 5;
 pub const CAPACITY: u8 = 6;
 
-/// A message is an owned emitter value. Its generated drop entry point accepts
-/// the pointer and frees/refunds all of it without allocation or failure.
+/// Core's 40-byte Cause view: kind at 0, inline String at 8, site at 32.
+/// The chain owns the message buffer exactly when its capacity is nonzero.
+#[derive(Default)]
 #[repr(C)]
 pub struct Cause {
     pub kind: u8,
+    pub message: StringMessage,
     pub site: u64,
-    pub message: *mut u8,
-    pub drop_message: Option<unsafe extern "C" fn(*mut u8)>,
 }
 
 /// An owned String carrier retained in a prepaid cause cell. The buffer keeps
 /// its original payer until the delivered chain is consumed.
+#[derive(Default)]
 #[repr(C)]
 pub struct StringMessage {
     pub data: *mut u8,
     pub len: u64,
     pub capacity: u64,
 }
-unsafe extern "C" fn drop_string(pointer: *mut u8) {
-    // SAFETY: record_string points the callback at its cell-owned carrier.
-    let message = unsafe { &*pointer.cast::<StringMessage>() };
+unsafe fn drop_string(message: &StringMessage) {
     // FORM #48: capacity alone says whether the moved carrier owns a block.
     if message.capacity != 0 {
         // SAFETY: positive capacity guarantees the transferred live owned buffer.
@@ -53,33 +49,27 @@ unsafe extern "C" fn drop_string(pointer: *mut u8) {
     }
 }
 
-/// Opaque native ABI handle. Its physical size is not its logical charge of 32.
+/// Prepaid cell: core Cause followed immediately by the next-cell pointer.
+/// Native funding follows that prefix; logical charge remains 32.
+#[repr(C)]
 pub struct Cell {
+    pub(crate) cause: Cause,
+    pub(crate) next: *mut Cell,
     funding: Payer,
-    cause: Option<Cause>,
-    next: *mut Cell,
-    string: MaybeUninit<StringMessage>,
 }
 impl Cell {
     pub(crate) fn prepaid(funding: Payer) -> Box<Self> {
         Box::new(Self {
             funding,
-            cause: None,
+            cause: Cause::default(),
             next: ptr::null_mut(),
-            string: MaybeUninit::uninit(),
         })
     }
 }
 impl Drop for Cell {
     fn drop(&mut self) {
-        if let Some(cause) = &self.cause
-            && let Some(drop_message) = cause.drop_message
-        {
-            // SAFETY: the used cell owns the message and its generated drop recipe.
-            unsafe {
-                drop_message(cause.message);
-            }
-        }
+        // SAFETY: this cell owns its inline String; unused cells have capacity zero.
+        unsafe { drop_string(&self.cause.message) };
         self.funding.refund(charge::CAUSE_CELL);
     }
 }
@@ -111,7 +101,7 @@ impl Causes {
             // SAFETY: self owns all live cells; the iterator's borrow pins the chain.
             let cell = unsafe { &*next };
             next = cell.next;
-            Some(cell.cause.as_ref().unwrap())
+            Some(&cell.cause)
         })
     }
     pub fn into_raw(self) -> *mut Cell {
@@ -159,7 +149,7 @@ pub fn task_start(context: &mut Context) -> Result<(), Capacity> {
 /// obligation again. A non-finalizer failure requires a started task.
 pub unsafe fn record(context: &mut Context, cause: Cause) {
     let mut cell = take_cell(context);
-    cell.cause = Some(cause);
+    cell.cause = cause;
     context.causes.append(cell);
 }
 
@@ -179,15 +169,17 @@ fn take_cell(context: &mut Context) -> Box<Cell> {
 /// carrier with capacity zero. A non-owning data pointer may be static and nonnull
 /// at any length, including zero. It owns the current task/resource's unused cause cell.
 pub unsafe fn record_string(context: &mut Context, site: u64, message: StringMessage) {
-    let mut cell = take_cell(context);
-    let carrier = cell.string.write(message) as *mut StringMessage;
-    cell.cause = Some(Cause {
-        kind: FAIL,
-        site,
-        message: carrier.cast(),
-        drop_message: Some(drop_string),
-    });
-    context.causes.append(cell);
+    // SAFETY: the caller transfers the String into its unused obligation cell.
+    unsafe {
+        record(
+            context,
+            Cause {
+                kind: FAIL,
+                message,
+                site,
+            },
+        )
+    };
 }
 
 pub(crate) struct Resource {
@@ -314,5 +306,5 @@ pub unsafe fn next(cell: *const Cell) -> *const Cell {
 /// A live borrowed chain cell, held by an unmodified live Causes owner.
 pub unsafe fn value<'a>(cell: *const Cell) -> &'a Cause {
     // SAFETY: a delivered cell always holds an initialized cause.
-    unsafe { (*cell).cause.as_ref().unwrap() }
+    unsafe { &(*cell).cause }
 }

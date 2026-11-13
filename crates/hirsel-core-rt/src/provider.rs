@@ -110,8 +110,7 @@ pub unsafe extern "C" fn hirsel_core_host(
                     causes::Cause {
                         kind: causes::BOUNDS,
                         site: request.site,
-                        message: std::ptr::null_mut(),
-                        drop_message: None,
+                        message: Default::default(),
                     },
                 );
                 return Outcome {

@@ -135,3 +135,11 @@ failure status at 24. Waiting rows expose status; clocks use only value.
 `hirsel_core_args_get(context, args, index)` returns a pointer to a pinned
 capacity-zero carrier or null for None. The process constructor copies argv and
 owns these carriers for the run; Config.args is now their immutable table.
+
+Cause readers borrow the native cell's core layout directly: kind at 0, the
+inline String carrier at 8 and site at 32, total 40 bytes. The next-cell pointer
+follows at 40; native funding is outside this prefix. No translation or message
+drop callback exists. Dropping a chain, including an unjoined failed child,
+frees moved String backing exactly when capacity is nonzero. Prepaid logical
+cell charges and append order remain unchanged. abi_layout.rs and the C header
+publish these offsets; primitive raise passes the complete 40-byte value.

@@ -366,15 +366,18 @@ impl FunctionEmitter<'_> {
         }
     }
     fn raise(&mut self, kind: u8) {
-        self.intrinsics.insert(
-            "declare void @hirsel_core_raise(ptr, ptr byval({ i8, i64, ptr, ptr }) align 8)".into(),
-        );
-        let cause = self.temp("{ i8, i64, ptr, ptr }");
+        let shape = format!("[{} x i8]", memory_layout::CAUSE_BYTES);
+        self.intrinsics.insert(format!(
+            "declare void @hirsel_core_raise(ptr, ptr byval({shape}) align 8)"
+        ));
+        let cause = self.temp(&shape);
         self.line(format!(
-            "store {{ i8, i64, ptr, ptr }} zeroinitializer, ptr {cause}, align 8"
+            "store {shape} zeroinitializer, ptr {cause}, align 8"
         ));
         self.line(format!("store i8 {kind}, ptr {cause}, align 8"));
-        self.line(format!("call void @hirsel_core_raise(ptr %context, ptr byval({{ i8, i64, ptr, ptr }}) align 8 {cause})"));
+        self.line(format!(
+            "call void @hirsel_core_raise(ptr %context, ptr byval({shape}) align 8 {cause})"
+        ));
     }
     fn inst(&mut self, inst: &Inst, index: usize) -> Result<()> {
         match *inst {

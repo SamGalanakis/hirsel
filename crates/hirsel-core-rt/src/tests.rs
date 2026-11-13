@@ -203,6 +203,25 @@ fn frozen_prefixes_match_the_emitter_contract() {
         crate::block::GRAPH_PREFIX_BYTES,
         crate::abi_layout::GRAPH_PREFIX_BYTES
     );
+    use crate::causes::{Cause, Cell, StringMessage};
+    assert_eq!(size_of::<Cause>(), CAUSE_BYTES);
+    assert_eq!(std::mem::offset_of!(Cause, kind), CAUSE_KIND);
+    assert_eq!(std::mem::offset_of!(Cause, message), CAUSE_MESSAGE);
+    assert_eq!(
+        CAUSE_MESSAGE + std::mem::offset_of!(StringMessage, data),
+        CAUSE_MESSAGE_DATA
+    );
+    assert_eq!(
+        CAUSE_MESSAGE + std::mem::offset_of!(StringMessage, len),
+        CAUSE_MESSAGE_LENGTH
+    );
+    assert_eq!(
+        CAUSE_MESSAGE + std::mem::offset_of!(StringMessage, capacity),
+        CAUSE_MESSAGE_CAPACITY
+    );
+    assert_eq!(std::mem::offset_of!(Cause, site), CAUSE_SITE);
+    assert_eq!(std::mem::offset_of!(Cell, cause), CAUSE_CELL_VALUE);
+    assert_eq!(std::mem::offset_of!(Cell, next), CAUSE_CELL_NEXT);
     let ctx = Context::new(256);
     for alignment in [8, 16, 64, 512, 1024, 4096] {
         for graph in [false, true] {
@@ -314,7 +333,7 @@ fn owned_failure_string_outlives_its_frame_and_context_without_admission() {
             drop(ctx);
             let cause = &*hirsel_core_cause_value(chain);
             assert_eq!((cause.kind, cause.site), (crate::causes::FAIL, 77));
-            let message = &*cause.message.cast::<crate::causes::StringMessage>();
+            let message = &cause.message;
             assert_eq!((message.len, message.capacity), (len as u64, capacity));
             if len != 0 {
                 assert_eq!(std::slice::from_raw_parts(message.data, len), b"hey");

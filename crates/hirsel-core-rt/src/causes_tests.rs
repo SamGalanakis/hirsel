@@ -9,8 +9,7 @@ fn cause(site: u64, kind: u8) -> Cause {
     Cause {
         kind,
         site,
-        message: ptr::null_mut(),
-        drop_message: None,
+        message: Default::default(),
     }
 }
 #[derive(Default)]
@@ -279,25 +278,22 @@ fn nested_finalizers_subdivide_only_prepaid_grants_under_every_refusal() {
 
 #[test]
 fn fail_message_and_joined_cells_outlive_the_task_and_keep_funding() {
-    unsafe extern "C" fn drop_message(p: *mut u8) {
-        // SAFETY: the cell receives the sole initialized 24-byte message block.
-        unsafe {
-            crate::block::free(NonNull::new(p).unwrap(), 24);
-        }
-    }
     let mut child = Context::new(1024);
     let payer = child.current.clone();
     causes::task_start(&mut child).unwrap();
     let message = Block::new(&child, Some(24), 24, 8).unwrap().into_raw();
-    // SAFETY: task primary takes sole custody of message storage and drop glue.
+    // SAFETY: task primary takes sole custody of the String storage.
     unsafe {
         causes::record(
             &mut child,
             Cause {
                 kind: causes::FAIL,
                 site: 7,
-                message: message.as_ptr(),
-                drop_message: Some(drop_message),
+                message: causes::StringMessage {
+                    data: message.as_ptr(),
+                    len: 24,
+                    capacity: 24,
+                },
             },
         );
     }

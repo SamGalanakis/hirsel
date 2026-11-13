@@ -238,8 +238,7 @@ unsafe fn files(ctx: *mut Context, state: *mut State, small: bool) -> u8 {
                 crate::causes::Cause {
                     kind: crate::causes::UNWRAP,
                     site: 123,
-                    message: ptr::null_mut(),
-                    drop_message: None,
+                    message: Default::default(),
                 },
             );
             (&mut *ctx).limit_exit();

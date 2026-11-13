@@ -61,7 +61,7 @@ fn channel_rows_preserve_values_charges_and_closed_errors() {
         ),
         // After an earlier gap the runtime adapter must not emit or panic.
         (
-            "fn f() { let s = \"\"; task.check_cancel() }",
+            "fn f[T:send]() { let c: Result[(Sender[T],Receiver[T]),Capacity] = channel.new(1); let _ = take c; task.check_cancel() }",
             1000,
             eval::Outcome::Returned(vec![]),
         ),
@@ -86,7 +86,7 @@ fn channel_rows_preserve_values_charges_and_closed_errors() {
                 entry = check.function;
             }
         }
-        if source.contains("let s =") {
+        if source.contains("fn f[T") {
             assert!(entry.is_none());
             assert!(!gaps.is_empty());
             continue;

@@ -57,3 +57,110 @@ fn slots_free[T](take s: Slots[T])
 
 // Discard only a no-drop element ring; preserves evaluator liveness.
 fn slots_forget_ring[T](mut s: Slots[T], head: u64)
+
+// Stable bottom-up merges. Every pass moves T between xs and one scratch block.
+pub fn sort_stable[T](mut xs: List[T], before: scoped fn(T, T) -> Order) -> Result[(), Capacity] {
+    let n = list.len(xs)
+    if n < 2 { return Ok(()) }
+    let scratch: Slots[T] = slots_new(n)?
+    let mut g = Hole(xs: view xs, scratch: take scratch, source_is_xs: true,
+                     a: 0, mid: 0, b: 0, end: 0, out: 0, n: n)
+    let mut width: u64 = 1
+    while width < n {
+        let mut lo: u64 = 0
+        while lo < n {
+            g.mid = lo + (if width < n - lo { width } else { n - lo })
+            g.end = g.mid + (if width < n - g.mid { width } else { n - g.mid })
+            g.a = lo
+            g.b = g.mid
+            // out is a prefix across the whole pass, not just this pair.
+            while g.out < g.end {
+                let right = if g.b == g.end { false } else if g.a == g.mid { true } else {
+                    match before(sort_view(g, g.b), sort_view(g, g.a)) { Less => true, _ => false }
+                }
+                if right {
+                    let from = g.b
+                    let to = g.out
+                    sort_move(mut g, from, to)
+                    g.b += 1
+                } else {
+                    let from = g.a
+                    let to = g.out
+                    sort_move(mut g, from, to)
+                    g.a += 1
+                }
+                g.out += 1
+            }
+            lo = g.end
+        }
+        g.source_is_xs = !g.source_is_xs
+        g.a = 0
+        g.mid = 0
+        g.b = 0
+        g.end = 0
+        g.out = 0
+        if width >= n - width { width = n } else { width *= 2 }
+    }
+    // Its infallible finalizer restores xs on both success and failure. It also
+    // performs the final copy back when the sorted source is scratch.
+    let _ = take g
+    Ok(())
+}
+
+scoped type Hole[T] {
+    xs: View[List[T]],
+    scratch: Slots[T],
+    source_is_xs: bool,
+    a: u64, mid: u64, b: u64, end: u64, out: u64, n: u64
+} drop(g) {
+    let mut read: u64 = 0
+    if g.source_is_xs {
+        let mut i: u64 = 0
+        while i < g.a {
+            slots_to_list(mut g.scratch, read, g.xs, i)
+            read += 1
+            i += 1
+        }
+        i = g.mid
+        while i < g.b {
+            slots_to_list(mut g.scratch, read, g.xs, i)
+            read += 1
+            i += 1
+        }
+    } else {
+        let mut out = g.out
+        let mut i = g.a
+        while i < g.mid {
+            slots_to_list(mut g.scratch, i, g.xs, out)
+            out += 1
+            i += 1
+        }
+        i = g.b
+        while i < g.end {
+            slots_to_list(mut g.scratch, i, g.xs, out)
+            out += 1
+            i += 1
+        }
+        i = g.end
+        while i < g.n {
+            slots_to_list(mut g.scratch, i, g.xs, out)
+            out += 1
+            i += 1
+        }
+    }
+}
+fn sort_view[T](g: Hole[T], i: u64) -> View[T] in g {
+    if g.source_is_xs { slots_list_view(g.xs, i) } else { slots_view(g.scratch, i) }
+}
+fn sort_move[T](mut g: Hole[T], from: u64, to: u64) {
+    if g.source_is_xs {
+        slots_from_list(g.xs, from, mut g.scratch, to)
+    } else {
+        slots_to_list(mut g.scratch, from, g.xs, to)
+    }
+}
+// Header access is trusted and private. xs stays frozen by Hole's view while
+// these transfer operations temporarily change its live count and live set.
+fn slots_list_view[T](xs: View[List[T]], i: u64) -> View[T] in xs
+fn slots_from_list[T](src: View[List[T]], i: u64, mut dst: Slots[T], j: u64)
+fn slots_to_list[T](mut src: Slots[T], i: u64, dst: View[List[T]], j: u64)

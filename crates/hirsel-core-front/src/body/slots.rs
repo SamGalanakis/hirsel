@@ -58,11 +58,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.temp(result, value);
                 Some(value)
             }
-            "slots_view" => {
+            "slots_view" | "slots_list_view" => {
                 let (at, _) = self.slots_at(item, vals[0]?, vals[1]?, n)?;
                 Some(self.read_carried(at, item, n))
             }
-            "slots_move" | "slots_shift" => {
+            "slots_move" | "slots_shift" | "slots_from_list" | "slots_to_list" => {
                 let source_header = vals[0]?;
                 let (target_header, to) = if name == "slots_shift" {
                     (source_header, vals[2]?)
@@ -98,7 +98,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 );
                 // Cross-carrier moves update both counts. A shift keeps the
                 // count and permits self-moves without two mutable borrows.
-                if name == "slots_move" {
+                if name != "slots_shift" {
                     self.slots_count(source_header, false, n)?;
                     self.slots_count(target_header, true, n)?;
                 }

@@ -1,0 +1,93 @@
+// n=5, input keys [2,1,2,0,1]. Stable output ids [3,1,4,0,2].
+// Pair merges take 2 comparisons, the width-2 pass 3, the width-4 pass 3.
+// Thus failures 1..8 cover both source buffers and every comparison in this run.
+resource type SortItem { out: Stdout, id: u64, key: u64 }
+  drop(t) { let _ = stdout.write(t.out, "X") }
+resource type SortAudit { out: Stdout, values: List[SortItem] }
+  drop(t) {
+    let mut valid = list.len(t.values) == 5 && list.capacity(t.values) == 8
+    let mut mask: u64 = 0
+    for x in t.values {
+        let bit: u64 = if x.id == 0 { 1 } else if x.id == 1 { 2 } else if x.id == 2 { 4 } else if x.id == 3 { 8 } else if x.id == 4 { 16 } else { 0 }
+        if bit == 0 || (mask & bit) != 0 { valid = false }
+        mask |= bit
+        let key: u64 = if x.id == 0 || x.id == 2 { 2 } else if x.id == 3 { 0 } else { 1 }
+        if x.key != key { valid = false }
+    }
+    let _ = stdout.write(t.out, if valid && mask == 31 { "ok" } else { "bad" })
+  }
+fn sort_audit(out: Stdout) -> SortAudit {
+    let mut xs: List[SortItem] = list.new()
+    for i in 0u64 .. 5 {
+        let key: u64 = if i == 0 || i == 2 { 2 } else if i == 3 { 0 } else { 1 }
+        result.unwrap(list.push(mut xs, result.unwrap(SortItem(out:out,id:i,key:key))))
+    }
+    result.unwrap(SortAudit(out:out,values:take xs))
+}
+fn sort_fail_at(out: Stdout, failure: u64) -> u64 {
+    let mut audit = sort_audit(out)
+    let mut calls: u64 = 0
+    result.unwrap(list.sort_stable(mut audit.values, fn(a: SortItem, b: SortItem) -> Order {
+        calls += 1
+        if calls == failure { let none: Option[u64] = None; let _ = option.unwrap(none) }
+        if a.key < b.key { Less } else if a.key > b.key { Greater } else { Equal }
+    }))
+    let mut ids: u64 = 0
+    for x in audit.values { ids = ids * 10 + x.id }
+    if ids != 31402 { return 99 }
+    calls
+}
+// expect: stdout "okXXXXX"
+// expect: run complete_merge(out) = 8
+fn complete_merge(out: Stdout) -> u64 { sort_fail_at(out, 0) }
+
+// expect: stdout "okXXXXX"
+// expect: run comparator_fail_1(out) = fail Unwrap
+fn comparator_fail_1(out: Stdout) -> u64 { sort_fail_at(out, 1) }
+
+// expect: stdout "okXXXXX"
+// expect: run comparator_fail_2(out) = fail Unwrap
+fn comparator_fail_2(out: Stdout) -> u64 { sort_fail_at(out, 2) }
+
+// expect: stdout "okXXXXX"
+// expect: run comparator_fail_3(out) = fail Unwrap
+fn comparator_fail_3(out: Stdout) -> u64 { sort_fail_at(out, 3) }
+
+// expect: stdout "okXXXXX"
+// expect: run comparator_fail_4(out) = fail Unwrap
+fn comparator_fail_4(out: Stdout) -> u64 { sort_fail_at(out, 4) }
+
+// expect: stdout "okXXXXX"
+// expect: run comparator_fail_5(out) = fail Unwrap
+fn comparator_fail_5(out: Stdout) -> u64 { sort_fail_at(out, 5) }
+
+// expect: stdout "okXXXXX"
+// expect: run comparator_fail_6(out) = fail Unwrap
+fn comparator_fail_6(out: Stdout) -> u64 { sort_fail_at(out, 6) }
+
+// expect: stdout "okXXXXX"
+// expect: run comparator_fail_7(out) = fail Unwrap
+fn comparator_fail_7(out: Stdout) -> u64 { sort_fail_at(out, 7) }
+
+// expect: stdout "okXXXXX"
+// expect: run comparator_fail_8(out) = fail Unwrap
+fn comparator_fail_8(out: Stdout) -> u64 { sort_fail_at(out, 8) }
+
+// Admission of five resource holders is exactly 5*8. Capacity runs no comparator
+// and changes no element, length, capacity or source order.
+// expect: stdout "okXXXXX"
+// expect: run scratch_capacity_atomic(out) = true
+fn scratch_capacity_atomic(out: Stdout) -> bool {
+    let mut audit = sort_audit(out)
+    let mut calls: u64 = 0
+    let r = bound bytes 0 {
+        list.sort_stable(mut audit.values, fn(a: SortItem, b: SortItem) -> Order {
+            calls += 1
+            if a.key < b.key { Less } else if a.key > b.key { Greater } else { Equal }
+        })
+    }
+    let refused = match r { Ok(Error(c)) => c.requested == 40, _ => false }
+    let mut ids: u64 = 0
+    for x in audit.values { ids = ids * 10 + x.id }
+    refused && calls == 0 && ids == 1234
+}

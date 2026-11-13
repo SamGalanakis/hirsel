@@ -309,55 +309,7 @@ pub fn extend[T: plain](mut xs: List[T], ys: List[T]) -> Result[(), Capacity] {
     list.append(mut xs, ys)
 }
 
-/// Stable ascending-by-comparator merge sort: equal elements retain their order.
-/// Fails: Capacity leaves xs unchanged. A comparator failure leaves xs unchanged too.
-/// Alloc: two u64 index lists, 16 bytes per element before GROWTH rounding.
-/// Cost: O(n log n) comparisons and O(n) element swaps. The comparator is scoped
-/// and never stored. Indirect sorting keeps every owned element in xs throughout.
-pub fn sort_stable[T](mut xs: List[T], before: scoped fn(T, T) -> Order) -> Result[(), Capacity] {
-    let n = list.len(xs)
-    if n < 2 { return Ok(()) }
-    let mut indices: List[u64] = list.with_capacity(n)?
-    let mut scratch: List[u64] = list.with_capacity(n)?
-    for i in 0u64 .. n {
-        let _ = list.push(mut indices, i)
-        let _ = list.push(mut scratch, 0)
-    }
-    let mut width: u64 = 1
-    while width < n {
-        let mut lo: u64 = 0
-        while lo < n {
-            let mid = lo + order.min(width, n - lo)
-            let end = mid + order.min(width, n - mid)
-            let mut a = lo
-            let mut b = mid
-            let mut out = lo
-            while out < end {
-                let right = if b == end { false } else if a == mid { true } else {
-                    match before(xs[indices[b]], xs[indices[a]]) { Less => true, _ => false }
-                }
-                let selected = if right { let k = indices[b]; b += 1; k } else { let k = indices[a]; a += 1; k }
-                let _ = list.set(mut scratch, out, selected)
-                out += 1
-            }
-            lo = end
-        }
-        let old = replace(mut indices, take scratch)
-        scratch = take old
-        if width > n / 2 { break }
-        width *= 2
-    }
-    // Convert output->input permutation to input->output in the spare index list.
-    for i in 0u64 .. n { let _ = list.set(mut scratch, indices[i], i) }
-    for i in 0u64 .. n {
-        while scratch[i] != i {
-            let to = scratch[i]
-            list.swap(mut xs, i, to)
-            list.swap(mut scratch, i, to)
-        }
-    }
-    Ok(())
-}
+// sort_stable is core.list, with one uninhabited scratch block.
 
 /// First equal index, or Error(insertion index), in a list sorted by compare.
 /// compare(element) orders that element relative to the sought key, as Rust's

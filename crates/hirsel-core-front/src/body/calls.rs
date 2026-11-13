@@ -265,9 +265,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if result == NEVER {
             self.dead = true;
         }
-        let numeric = g.path.package_is("core", "1")
-            && (g.path.0.modules == ["int"] || g.path.0.modules == ["float"]);
-        let v = if numeric {
+        let builtin = g.path.package_is("core", "1")
+            && (g.path.0.modules == ["int"]
+                || g.path.0.modules == ["float"]
+                || g.path.0.modules == ["span"]
+                || g.path.0.modules == ["seq"]
+                || g.path.0.modules == ["indexed"]);
+        let v = if builtin {
             self.intrinsic(f, tys, vals, n)
         } else {
             self.emit_call(f, tys, vals, result, n)
@@ -760,6 +764,39 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<ValueId> {
         let g = &self.p.fns[f];
+        if g.path.0.modules == ["seq"] || g.path.0.modules == ["indexed"] {
+            if tys.contains(&ERROR) || !self.live() {
+                return None;
+            }
+            return match (g.path.0.modules[0].as_str(), g.path.0.name.as_str()) {
+                ("seq", "len") => self.span_parts(vals[0]?, n).map(|p| p.3),
+                ("seq", "nth") | ("indexed", "get") => {
+                    let result = subst(&mut self.t, g.result, tys);
+                    self.scalar_sequence_get(vals[0]?, vals[1]?, tys[0], result, n)
+                }
+                _ => {
+                    self.gap(n, "this sequence operation is not built");
+                    None
+                }
+            };
+        }
+        if g.path.0.modules == ["span"] {
+            if tys.contains(&ERROR) || !self.live() {
+                return None;
+            }
+            let header = vals[0]?;
+            return match g.path.0.name.as_str() {
+                "len" => self.span_parts(header, n).map(|p| p.3),
+                "get" => {
+                    let result = subst(&mut self.t, g.result, tys);
+                    self.fixed_span_get(header, vals[1]?, tys[0], result, n)
+                }
+                _ => {
+                    self.gap(n, "this span construction operation is not built");
+                    None
+                }
+            };
+        }
         if g.path.0.modules == ["float"] {
             if tys.contains(&ERROR) {
                 return None;

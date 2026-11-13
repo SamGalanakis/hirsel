@@ -1,0 +1,2 @@
+pub fn len[T: plain](s: FixedSpan[T]) -> u64
+pub fn get[T: plain](s: FixedSpan[T], i: u64) -> Option[T]

@@ -806,6 +806,101 @@ fn list_index_iteration_and_failure_cleanup() {
     use hirsel_core_ir::{TypeId, text};
     let vectors = [
         (
+            "type Entry { tiny: u8, num: u64 }\nfn f(xs: FixedSpan[Entry]) -> u64 { xs[1].num }",
+            false,
+            eval::Outcome::Returned(vec![11]),
+        ),
+        (
+            "fn f(xs: FixedSpan[()]) -> u64 { xs[3]; 0 }",
+            false,
+            eval::Outcome::Failed(vec!["Bounds".into()]),
+        ),
+        (
+            "fn f(xs: FixedSpan[()]) -> u64 { let mut s: u64 = 0; for _ in xs { s += 1 }; s }",
+            false,
+            eval::Outcome::Returned(vec![3]),
+        ),
+        (
+            "fn f(xs: SeqSpan[u64]) -> u64 { let mut s: u64 = 0; for x in xs { s += x }; s }",
+            false,
+            eval::Outcome::Returned(vec![31]),
+        ),
+        (
+            "fn f(xs: IndexedSpan[u64]) -> u64 { let mut s: u64 = 0; for x in xs { s += x }; s }",
+            false,
+            eval::Outcome::Returned(vec![31]),
+        ),
+        (
+            "fn f(xs: SeqSpan[u64]) -> u64 { seq.len(xs) }",
+            false,
+            eval::Outcome::Returned(vec![3]),
+        ),
+        (
+            "fn f(xs: SeqSpan[u64]) -> u64 { match seq.nth(xs, 1) { Some(x) => x + 0u64, None => 0 } }",
+            false,
+            eval::Outcome::Returned(vec![11]),
+        ),
+        (
+            "fn f(xs: SeqSpan[u64]) -> u64 { match seq.nth(xs, 3) { Some(x) => x + 0u64, None => 0 } }",
+            false,
+            eval::Outcome::Returned(vec![0]),
+        ),
+        (
+            "fn f(xs: IndexedSpan[u64]) -> u64 { match indexed.get(xs, 2) { Some(x) => x + 0u64, None => 0 } }",
+            false,
+            eval::Outcome::Returned(vec![13]),
+        ),
+        (
+            "fn f(w32: FixedSpan[u64]) -> u64 { w32[2] }",
+            false,
+            eval::Outcome::Returned(vec![13]),
+        ),
+        (
+            "fn f(w64: FixedSpan[u64]) -> u64 { w64[2] }",
+            false,
+            eval::Outcome::Returned(vec![13]),
+        ),
+        (
+            "fn f(xs: FixedSpan[u64]) -> u64 { span.len(xs) }",
+            false,
+            eval::Outcome::Returned(vec![3]),
+        ),
+        (
+            "fn f(xs: FixedSpan[u64]) -> u64 { match span.get(xs, 1) { Some(x) => x, None => 0 } }",
+            false,
+            eval::Outcome::Returned(vec![11]),
+        ),
+        (
+            "fn f(xs: FixedSpan[u64]) -> u64 { match span.get(xs, 3) { Some(x) => x, None => 0 } }",
+            false,
+            eval::Outcome::Returned(vec![0]),
+        ),
+        (
+            "fn f(xs: FixedSpan[u64]) -> u64 { xs[1] }",
+            false,
+            eval::Outcome::Returned(vec![11]),
+        ),
+        (
+            "fn f(xs: FixedSpan[u64]) -> u64 { xs[3] }",
+            false,
+            eval::Outcome::Failed(vec!["Bounds".into()]),
+        ),
+        (
+            "fn f(xs: FixedSpan[u64]) -> u64 { let mut s: u64 = 0; for x in xs { s += x }; s }",
+            false,
+            eval::Outcome::Returned(vec![31]),
+        ),
+        (
+            "fn f(xs: FixedSpan[(u8,u64)]) -> u64 { let mut s: u64 = 0; for (x,y) in xs { s += y }; s }",
+            false,
+            eval::Outcome::Returned(vec![31]),
+        ),
+        (
+            "fn f(xs: FixedSpan[(u8,u64)]) -> u64 { let (x,y) = xs[1]; y }",
+            false,
+            eval::Outcome::Returned(vec![11]),
+        ),
+        (
             "fn f(xs: Map[u64,u64]) -> u64 { let mut s: u64 = 0; for (k,v) in xs { s += k + v }; s }",
             false,
             eval::Outcome::Returned(vec![220]),
@@ -995,7 +1090,75 @@ fn f{entry} = n{instance} g{g} {{
             target.0,
             signature.0
         );
-        let fixture = if source.contains("Map[u64,u64]") {
+        let fixture = if source.contains("FixedSpan[")
+            || source.contains("SeqSpan[")
+            || source.contains("IndexedSpan[")
+        {
+            // Independent W16 blob: header, count=3, then tightly packed elements.
+            let sequence = !source.contains("FixedSpan[");
+            let tuple = source.contains("Span[(u8,u64)]") || source.contains("FixedSpan[Entry]");
+            let width = if source.contains("w32") {
+                4
+            } else if source.contains("w64") {
+                8
+            } else {
+                2
+            };
+            let mut addresses = String::new();
+            let mut build = String::new();
+            let mut fields = vec![
+                (8, width, "u64"),
+                (
+                    16,
+                    3,
+                    if width == 2 {
+                        "u16"
+                    } else if width == 4 {
+                        "u32"
+                    } else {
+                        "u64"
+                    },
+                ),
+            ];
+            if sequence {
+                fields.push((
+                    16 + width as usize,
+                    24,
+                    if width == 2 {
+                        "u16"
+                    } else if width == 4 {
+                        "u32"
+                    } else {
+                        "u64"
+                    },
+                ));
+            }
+            if source.contains("IndexedSpan[") {
+                fields.extend([(44, 0, "u16"), (46, 8, "u16"), (48, 16, "u16")]);
+            }
+            for (i, bits) in [7, 11, 13].into_iter().enumerate() {
+                let offset = 16
+                    + width as usize * if sequence { 2 } else { 1 }
+                    + i * if tuple { 9 } else { 8 };
+                if tuple {
+                    fields.push((offset, 1, "u8"));
+                }
+                fields.push((offset + usize::from(tuple), bits, "u64"));
+            }
+            for (i, (offset, bits, ty)) in fields.into_iter().enumerate() {
+                let a = 7 + i;
+                let v = 11 + 2 * i;
+                addresses.push_str(&format!("addr a{a} = v4 byte v{v} : {ty}\n"));
+                build.push_str(&format!("v{v}: u64 = const {offset}\nv{}: {ty} = const {bits}\naddress a{a}\nstore a{a}, v{}\n",v+1,v+1));
+            }
+            fixture
+                .replace("v0: u64 = const 24", "v0: u64 = const 64")
+                .replace(" b0:", &format!("{addresses} b0:"))
+                .replace("store a3, v9", "")
+                .replace("store a2, v9", "store a2, v3")
+                .replace("store a4, v6\n  store a5, v7\n  store a6, v8", &build)
+                .replace(&format!("drop a0 t{list}"), "free v4 charge v0")
+        } else if source.contains("Map[u64,u64]") {
             let mut addresses = String::new();
             let mut build = String::new();
             for (i, (offset, bits)) in [

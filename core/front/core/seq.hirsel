@@ -1,0 +1,2 @@
+pub fn len[T: packed](s: SeqSpan[T]) -> u64
+pub fn nth[T: packed](s: SeqSpan[T], i: u64) -> Option[View[T]] in s

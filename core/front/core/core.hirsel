@@ -41,3 +41,4 @@ pub type FloatError = NaN | OutOfRange
 pub type ParseError = Empty | Invalid(u64) | OutOfRange
 
 pub opaque type Map[K: key, V]
+pub opaque type Causes

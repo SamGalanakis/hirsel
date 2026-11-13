@@ -1,0 +1,8 @@
+// expect: run f(1) = 11
+// expect: run f(3) = fail Bounds
+// expect: run nested(1) = 19
+// expect: run returned(0) = 7
+fn f(i: u64) -> u64 { [7u64, 11u64, 13u64][i] }
+fn nested(i: u64) -> u64 { [[3u64, 5u64], [17u64, 19u64]][i][1] }
+fn array() -> Inline[u64, 2] { [7, 11] }
+fn returned(i: u64) -> u64 { array()[i] }

@@ -1,0 +1,9 @@
+// expect: gap string and bytes literals are not built
+fn f(xs: List[u64]) {
+  let s: View[String] = "x"
+  for _ in xs {}
+}
+fn index_after_gap(mut xs: List[u64]) {
+  let s: View[String] = "x"
+  xs[0] = 1
+}

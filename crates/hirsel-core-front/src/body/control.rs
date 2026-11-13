@@ -576,7 +576,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let (inner, _) = self.indexed_type(ty);
             let (elem, count) = match self.t.kind(inner) {
                 TyKind::Array(elem, count) => (*elem, Some(*count)),
-                TyKind::Adt(d, args) if self.p.decls[d.index()].role == Some(Role::List) => {
+                TyKind::Adt(d, args)
+                    if matches!(
+                        self.p.decls[d.index()].role,
+                        Some(Role::List | Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan)
+                    ) =>
+                {
                     (args[0], None)
                 }
                 TyKind::Adt(d, args) if self.p.decls[d.index()].role == Some(Role::Map) => {
@@ -588,15 +593,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
                 TyKind::Error => return (ERROR, None),
                 TyKind::Adt(d, _)
-                    if is_core_prelude(
-                        &self.p.decls[d.index()].path,
-                        &["FixedSpan", "SeqSpan", "IndexedSpan", "Causes"],
-                    ) =>
+                    if is_core_prelude(&self.p.decls[d.index()].path, &["Causes"]) =>
                 {
-                    return self.gap_ty(
-                        source,
-                        "iteration of this stable or map representation is not built",
-                    );
+                    return self.gap_ty(source, "iteration of Causes needs runtime reader rows");
                 }
                 _ => {
                     self.refuse("LANG-16", source, "this source is not iterable");
@@ -620,6 +619,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let start = self.konst(Ty::Scalar(Scalar::U64), 0, n);
             let limit = match count {
                 Some(count) => self.konst(Ty::Scalar(Scalar::U64), count, n),
+                None if matches!(self.t.kind(inner), TyKind::Adt(d, _) if matches!(self.p.decls[d.index()].role, Some(Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan))) => {
+                    value.and_then(|v| self.span_parts(v, n).map(|p| p.3))
+                }
                 None => value
                     .filter(|_| self.live())
                     .map(|v| self.read_sequence_word(v, 8, Ty::Scalar(Scalar::U64), n)),
@@ -710,6 +712,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 {
                     let advance = flow.unwrap().1;
                     self.map_pair(pointer, collection, index, elem, advance, n)
+                } else if matches!(self.t.kind(collection), TyKind::Adt(d, _) if matches!(self.p.decls[d.index()].role, Some(Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan)))
+                {
+                    let words = match self.t.kind(collection) {
+                        TyKind::Adt(d, _)
+                            if self.p.decls[d.index()].role == Some(Role::FixedSpan) =>
+                        {
+                            1
+                        }
+                        _ => 2,
+                    };
+                    self.fixed_span_element(pointer, elem, index, false, words, n)
+                        .and_then(|at| self.iteration_value(at, elem, n))
                 } else {
                     let place = self.place_ty(collection, n);
                     let element = self.place_ty(elem, n);

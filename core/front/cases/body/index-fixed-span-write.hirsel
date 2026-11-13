@@ -1,0 +1,2 @@
+// expect: refuse OWN-12 at 2:32
+fn write(xs: FixedSpan[u64]) { xs[0] = 1 }

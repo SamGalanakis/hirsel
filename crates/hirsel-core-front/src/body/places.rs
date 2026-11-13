@@ -313,7 +313,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let (collection, viewed) = self.indexed_type(at.ty);
                 let elem = match self.t.kind(collection) {
                     TyKind::Array(elem, _) => *elem,
-                    TyKind::Adt(d, args) if self.p.decls[d.index()].role == Some(Role::List) => {
+                    TyKind::Adt(d, args)
+                        if matches!(
+                            self.p.decls[d.index()].role,
+                            Some(Role::List | Role::FixedSpan)
+                        ) =>
+                    {
                         args[0]
                     }
                     TyKind::Adt(d, _)
@@ -343,7 +348,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
                 self.steps.push(PStep::Index { collection, value });
                 at.place.len += 1;
-                at.shared |= viewed;
+                at.shared |= viewed
+                    || matches!(self.t.kind(collection), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::FixedSpan));
                 at.ty = if viewed && !self.copies(elem) {
                     self.t.mk(TyKind::View(elem))
                 } else {
@@ -550,6 +556,61 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 .iter()
                 .any(|s| matches!(s, PStep::Index { .. }))
     }
+    /// Indexing an evaluated expression retains its temporary owner until the
+    /// surrounding expression ends. Plain results are copied before that cleanup.
+    pub(super) fn temporary_index(&mut self, n: NodeId) -> (TyId, Option<ValueId>) {
+        let c = self.kids(n);
+        let (ty, value) = self.expr(c[0], None);
+        let (collection, _) = self.indexed_type(ty);
+        let elem = match self.t.kind(collection) {
+            TyKind::Array(elem, _) => *elem,
+            TyKind::Adt(d, args)
+                if matches!(
+                    self.p.decls[d.index()].role,
+                    Some(Role::List | Role::FixedSpan)
+                ) =>
+            {
+                args[0]
+            }
+            TyKind::Adt(d, _)
+                if matches!(
+                    self.p.decls[d.index()].role,
+                    Some(Role::SeqSpan | Role::IndexedSpan)
+                ) =>
+            {
+                self.refuse(
+                    "MEM-12",
+                    n,
+                    "a variable-sized sequence is read with seq.nth or indexed.get",
+                );
+                return (ERROR, None);
+            }
+            TyKind::Error => return (ERROR, None),
+            _ => return self.gap_ty(n, "indexing this type is not built"),
+        };
+        let (_, index) = self.expr(c[1], expect(scalar(Scalar::U64)));
+        if !self.copies(elem) {
+            return self.gap_ty(n, "a view of an indexed temporary owner is not built");
+        }
+        let result = (|| {
+            let pointer = value?;
+            let index = index?;
+            let place = self.place_ty(collection, n)?;
+            let element = self.place_ty(elem, n)?;
+            let base = self.address(AddressBase::Value(pointer), &[], place, n);
+            let at = self.index_address(base, collection, index, element, n)?;
+            match self.rep(elem).ok()? {
+                Rep::None => None,
+                Rep::Scalar(t) => Some(self.read_bits(at, t, n)),
+                Rep::Place(id) => {
+                    let pointer = self.pointer(at, n);
+                    Some(self.snapshot(pointer, id, n))
+                }
+                Rep::View(_) => Some(self.read_bits(at, Ty::Ptr, n)),
+            }
+        })();
+        (elem, result)
+    }
     pub(super) fn indexed_type(&self, mut ty: TyId) -> (TyId, bool) {
         let mut viewed = false;
         while let TyKind::View(inner) | TyKind::Anchored(inner, _) = self.t.kind(ty) {
@@ -568,6 +629,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) -> Option<AddressId> {
         if !self.live() {
             return None;
+        }
+        if let TyKind::Adt(d, args) = self.t.kind(collection)
+            && self.p.decls[d.index()].role == Some(Role::FixedSpan)
+        {
+            let elem = args[0];
+            let header = self.pointer(base, n);
+            return self.fixed_span_element(header, elem, index, true, 1, n);
         }
         match self.t.kind(collection) {
             TyKind::Array(..) => Some(self.address(
@@ -762,7 +830,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         result
     }
-    fn field_ty(&mut self, ty: TyId, i: u32) -> Option<TyId> {
+    pub(super) fn field_ty(&mut self, ty: TyId, i: u32) -> Option<TyId> {
         let ty = match self.t.kind(ty) {
             TyKind::View(x) => *x,
             _ => ty,

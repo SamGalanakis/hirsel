@@ -19,7 +19,8 @@ pub const GRAPH_PREFIX_BYTES: usize = 48;
 pub const RESOURCE_PREFIX_BYTES: usize = 16;
 
 // Arc count mutations are inline under the scheduler's event turn. Call
-// hirsel_core_arc_event after the mutation/test and before last-release glue.
+// hirsel_core_arc_initialized/shared/released/unwrapped after the operation,
+// with released before last-release glue. These constants identify trace events.
 pub const ARC_EVENT_NEW: u8 = 10;
 pub const ARC_EVENT_SHARE: u8 = 11;
 pub const ARC_EVENT_RELEASE: u8 = 12;

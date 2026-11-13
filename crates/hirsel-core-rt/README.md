@@ -94,7 +94,7 @@ Inline count offsets remain count=0, payload=8, aligned to 8 on both targets.
 Rc initialization/counts use ordinary u64 stores. Arc initialization uses an
 atomic u64 initialized to 1 before publication; share uses checked relaxed CAS,
 release uses release decrement plus an acquire fence at zero, and unwrap loads
-with acquire. Emitters call hirsel_core_arc_event after each Arc operation, before
+with acquire. Emitters call hirsel_core_arc_initialized/shared/released/unwrapped after each Arc operation, before
 last-release glue. The hook returns no status and admits/allocates nothing.
 The scheduler holds its event turn across the count operation and hook.
 Acceptance builds enable memcheck to register alternate stacks; Rust tests do so

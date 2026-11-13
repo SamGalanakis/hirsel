@@ -34,7 +34,4 @@ void hirsel_core_sender_drop(HirselCoreChannel *);
 uint8_t hirsel_core_receiver_drop(HirselCoreContext *, HirselCoreChannel *);
 /* Event dispatch after an emitted Arc update/test. These do not change counts,
    admit storage or return a failure status. release_last follows the last event. */
-void hirsel_core_arc_shared(const void *node);
-void hirsel_core_arc_released(bool last);
-void hirsel_core_arc_unwrapped(bool unique);
 #endif

@@ -754,21 +754,22 @@ fn inline_arc_count_operations_publish_the_same_events_as_runtime_entries() {
         unsafe {
             let node = Block::graph(&*context, Some(16), 16, 8).unwrap().into_raw();
             node.cast::<AtomicU64>().as_ptr().write(AtomicU64::new(1));
-            hirsel_core_arc_event(ARC_EVENT_NEW, 1);
+            hirsel_core_arc_initialized();
             let count = node.cast::<AtomicU64>().as_ref();
             let old = count
                 .try_update(Ordering::Relaxed, Ordering::Relaxed, |v| v.checked_add(1))
                 .unwrap();
-            hirsel_core_arc_event(ARC_EVENT_SHARE, old + 1);
+            assert_eq!(old, 1);
+            hirsel_core_arc_shared(node.as_ptr());
             let last = count.fetch_sub(1, Ordering::Release) == 1;
-            hirsel_core_arc_event(ARC_EVENT_RELEASE, u64::from(last));
+            hirsel_core_arc_released(last);
             let unique = count.load(Ordering::Acquire) == 1;
-            hirsel_core_arc_event(ARC_EVENT_UNWRAP, u64::from(unique));
+            hirsel_core_arc_unwrapped(unique);
             let last = count.fetch_sub(1, Ordering::Release) == 1;
             if last {
                 fence(Ordering::Acquire);
             }
-            hirsel_core_arc_event(ARC_EVENT_RELEASE, u64::from(last));
+            hirsel_core_arc_released(last);
             crate::block::free_graph(node, 16);
             out.cast::<u64>().write(u64::from(unique && last));
         }

@@ -14,6 +14,8 @@ use std::{
 
 #[path = "support/front.rs"]
 mod front;
+#[path = "support/providers.rs"]
+mod providers;
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Scratch(PathBuf);
@@ -49,6 +51,42 @@ fn ctype(t: Ty) -> &'static str {
         Ty::Scalar(Scalar::F64) => "double",
     }
 }
+fn declare_functions(source: &mut String, module: &c::Module) {
+    for (i, s) in module.signatures.iter().enumerate() {
+        if !s.results.is_empty() {
+            write!(source, "struct r{i} {{ ").unwrap();
+            for (j, &t) in s.results.iter().enumerate() {
+                write!(source, "{} v{j};", ctype(t)).unwrap();
+            }
+            source.push_str("uint8_t status; };\n");
+        }
+    }
+    for f in &module.functions {
+        let s = &module.signatures[f.signature.index()];
+        let result = match s.results.as_slice() {
+            [] => "uint8_t".into(),
+            _ => format!("struct r{}", f.signature.0),
+        };
+        write!(
+            source,
+            "extern {result} {}(void*",
+            symbol(&module.instances[f.instance.index()])
+        )
+        .unwrap();
+        if s.dest.is_some() {
+            source.push_str(", void*");
+        }
+        for p in &s.params {
+            let c = match p {
+                Param::Value(t) => ctype(*t),
+                Param::Address(_) => "void*",
+            };
+            write!(source, ", {c}").unwrap();
+        }
+        source.push_str(");\n");
+    }
+}
+
 fn execute(module: &c::Module, runs: &[(FuncId, Vec<u64>)], optimize: bool) {
     execute_limit(module, runs, optimize, 1_000_000);
 }
@@ -124,39 +162,7 @@ fn execute_reports(
         "../../hirsel-core-rt/include/hirsel_core_rt.h"
     ));
     source.push_str("\nextern HirselCoreContext *hirsel_core_test_context_new(uint64_t);\nextern void hirsel_core_test_inject(HirselCoreContext *,size_t,bool);\nextern uint64_t hirsel_core_test_available(const HirselCoreContext *);\nextern size_t hirsel_core_test_attempts(const HirselCoreContext *);\nstatic uint64_t trace[1000000]; static size_t traces;\nvoid hirsel_core_test_drop_trace(uint64_t n) { if(traces >= 1000000) __builtin_abort(); trace[traces++]=n; }\n");
-    for (i, s) in module.signatures.iter().enumerate() {
-        if !s.results.is_empty() {
-            write!(source, "struct r{i} {{ ").unwrap();
-            for (j, &t) in s.results.iter().enumerate() {
-                write!(source, "{} v{j};", ctype(t)).unwrap();
-            }
-            source.push_str("uint8_t status; };\n");
-        }
-    }
-    for f in &module.functions {
-        let s = &module.signatures[f.signature.index()];
-        let result = match s.results.as_slice() {
-            [] => "uint8_t".into(),
-            _ => format!("struct r{}", f.signature.0),
-        };
-        write!(
-            source,
-            "extern {result} {}(void*",
-            symbol(&module.instances[f.instance.index()])
-        )
-        .unwrap();
-        if s.dest.is_some() {
-            source.push_str(", void*");
-        }
-        for p in &s.params {
-            let c = match p {
-                Param::Value(t) => ctype(*t),
-                Param::Address(_) => "void*",
-            };
-            write!(source, ", {c}").unwrap();
-        }
-        source.push_str(");\n");
-    }
+    declare_functions(&mut source, module);
     if scheduled {
         source.push_str("extern uint8_t hirsel_core_test_run(HirselCoreContext *,uint8_t (*)(HirselCoreContext*,void*,void*),void*,void*,size_t,size_t);\n");
         let mut wrappers = std::collections::BTreeSet::new();

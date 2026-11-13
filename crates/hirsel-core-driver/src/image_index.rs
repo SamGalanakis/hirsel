@@ -59,34 +59,40 @@ fn bucket_index(key: ContentHash, mask: u32, salt: u32) -> u32 {
     u32::from_le_bytes(hash.0[..4].try_into().unwrap()) & mask
 }
 fn names(store: &Store, entries: &[(ContentHash, u32)]) -> io::Result<ContentHash> {
-    let count = entries.len().max(1).next_power_of_two();
-    let mask = (count - 1) as u32;
-    // Hash construction is a producer operation. A fixed bucket bound makes
-    // every consumer lookup independent of the number of library declarations.
-    for salt in 0..128 {
-        let mut groups = vec![vec![]; count];
-        for &(key, value) in entries {
-            groups[bucket_index(key, mask, salt) as usize].push((key, value));
-        }
-        if groups.iter().any(|g| g.len() > BUCKET_LIMIT) {
-            continue;
-        }
-        let mut rows = vec![];
-        for (i, group) in groups.into_iter().enumerate() {
-            if !group.is_empty() {
-                rows.push((i as u32, store.put(&encode(&Node::Bucket(group))?)?));
+    let maximum = entries.len().max(1).next_power_of_two();
+    let mut count = entries.len().div_ceil(8).max(1).next_power_of_two();
+    loop {
+        let mask = (count - 1) as u32;
+        // Hash construction is a producer operation. A fixed bucket bound makes
+        // every consumer lookup independent of the number of library declarations.
+        for salt in 0..128 {
+            let mut groups = vec![vec![]; count];
+            for &(key, value) in entries {
+                groups[bucket_index(key, mask, salt) as usize].push((key, value));
             }
+            if groups.iter().any(|g| g.len() > BUCKET_LIMIT) {
+                continue;
+            }
+            let mut rows = vec![];
+            for (i, group) in groups.into_iter().enumerate() {
+                if !group.is_empty() {
+                    rows.push((i as u32, store.put(&encode(&Node::Bucket(group))?)?));
+                }
+            }
+            let buckets = array(store, &rows, 28)?;
+            return store.put(&encode(&Node::Names {
+                buckets,
+                mask,
+                salt,
+            })?);
         }
-        let buckets = array(store, &rows, 28)?;
-        return store.put(&encode(&Node::Names {
-            buckets,
-            mask,
-            salt,
-        })?);
+        if count == maximum {
+            return Err(io::Error::other(
+                "compiler resource refusal: package hash-index construction exhausted",
+            ));
+        }
+        count *= 2;
     }
-    Err(io::Error::other(
-        "compiler resource refusal: package hash-index construction exhausted",
-    ))
 }
 pub(crate) struct DiskIndex {
     pub store: Store,

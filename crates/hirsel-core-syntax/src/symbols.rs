@@ -350,12 +350,14 @@ impl Symbols {
         }
         id
     }
+    #[inline]
     pub fn find(&self, text: &str) -> Option<Symbol> {
         self.index
             .get(text)
             .copied()
             .or_else(|| self.published_index.get(text).copied())
     }
+    #[inline(always)]
     pub fn text(&self, id: Symbol) -> &str {
         &self.strings[id.0 as usize]
     }

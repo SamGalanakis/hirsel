@@ -171,7 +171,7 @@ def compare_case(binary, directory, case, scratch, timeout=None):
     return None
 
 
-def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=None, case_timeouts=None):
+def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=None, case_timeouts=None, include_libraries=True):
     manifest = json.loads(manifest_path.read_text())
     entries = [e for e in manifest['entries'] if not only or e['workload'] in only]
     if not entries:
@@ -263,7 +263,7 @@ def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=No
                             row['stopped'] = f'run {failure}'
                     else:
                         row['passed'] += 1
-        for engine in engines:
+        for engine in engines if include_libraries else ():
             command = [str(compiler), 'image', '--libraries', str(root / 'core'), '--store',
                        str(store / 'canonical-image'), '--json']
             result = subprocess.run(command, cwd=root, capture_output=True)
@@ -357,6 +357,7 @@ def main():
     parser.add_argument('--store', type=Path)
     parser.add_argument('--cc', type=Path, default=(Path(os.environ['LLVM_SYS_231_PREFIX']) / 'bin/clang') if 'LLVM_SYS_231_PREFIX' in os.environ else None)
     parser.add_argument('--only', nargs='+')
+    parser.add_argument('--programs-only', action='store_true')
     parser.add_argument('--report', type=Path)
     parser.add_argument('--timeout-case', action='append', default=[], metavar='PROGRAM/CASE=SECONDS')
     args = parser.parse_args()
@@ -370,7 +371,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='hirsel-m1-store-') as store:
         rows = run(args.compiler.resolve(), args.runtime.resolve(), engines, args.manifest.resolve(),
                    args.root.resolve(), args.store.resolve() if args.store else Path(store),
-                   args.cc.resolve() if args.cc else None, args.only, case_timeouts)
+                   args.cc.resolve() if args.cc else None, args.only, case_timeouts, not args.programs_only)
     print(report(rows))
     if args.report:
         args.report.write_text(json.dumps(rows, indent=2) + '\n')

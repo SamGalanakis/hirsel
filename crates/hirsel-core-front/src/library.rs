@@ -10,25 +10,33 @@ use std::sync::Arc;
 #[derive(Clone, Debug)]
 pub struct Rows<T> {
     base: Arc<Table<T>>,
+    base_len: usize,
     own: Vec<T>,
 }
 impl<T> Default for Rows<T> {
     fn default() -> Self {
         Self {
             base: Arc::new(Table::default()),
+            base_len: 0,
             own: vec![],
         }
     }
 }
 impl<T> Rows<T> {
     pub fn overlay(base: Arc<Table<T>>) -> Self {
-        Self { base, own: vec![] }
+        Self {
+            base_len: base.len(),
+            base,
+            own: vec![],
+        }
     }
+    #[inline(always)]
     pub fn base_len(&self) -> usize {
-        self.base.len()
+        self.base_len
     }
+    #[inline(always)]
     pub fn len(&self) -> usize {
-        self.base.len() + self.own.len()
+        self.base_len + self.own.len()
     }
     pub fn is_empty(&self) -> bool {
         self.len() == 0
@@ -45,7 +53,7 @@ impl<T> Rows<T> {
 }
 impl<T: Clone> Rows<T> {
     pub fn resize(&mut self, len: usize, value: T) {
-        self.own.resize(len - self.base.len(), value);
+        self.own.resize(len - self.base_len, value);
     }
 
     fn freeze(self) -> Arc<Table<T>> {
@@ -64,17 +72,19 @@ impl<T: Clone> Rows<T> {
 }
 impl<T> Index<usize> for Rows<T> {
     type Output = T;
+    #[inline(always)]
     fn index(&self, i: usize) -> &T {
-        if i < self.base.len() {
+        if i < self.base_len {
             &self.base[i]
         } else {
-            &self.own[i - self.base.len()]
+            &self.own[i - self.base_len]
         }
     }
 }
 impl<T> IndexMut<usize> for Rows<T> {
+    #[inline(always)]
     fn index_mut(&mut self, i: usize) -> &mut T {
-        &mut self.own[i - self.base.len()]
+        &mut self.own[i - self.base_len]
     }
 }
 

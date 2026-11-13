@@ -21,13 +21,47 @@ pub(crate) struct Header {
     pub(crate) site: Site,
     pub(crate) anchor: (ModuleId, u32),
 }
+// Request-owned IDs get direct slots; the installed prefix is sparse and is
+// allocated only as a request names it. Each semantic lookup is performed once.
+struct Demand<T> {
+    base: usize,
+    own: Vec<std::sync::OnceLock<T>>,
+    prefix: hirsel_core_ids::published::Sparse<T>,
+}
+impl<T> Demand<T> {
+    fn new(base: usize, len: usize) -> Self {
+        Self {
+            base,
+            own: (base..len).map(|_| std::sync::OnceLock::new()).collect(),
+            prefix: Default::default(),
+        }
+    }
+    fn get_or_try_init(&self, id: u64, f: impl FnOnce() -> io::Result<T>) -> io::Result<&T> {
+        let id = id as usize;
+        if id < self.base {
+            return self.prefix.get_or_try_init(id as u64, f);
+        }
+        let cell = &self.own[id - self.base];
+        if let Some(value) = cell.get() {
+            return Ok(value);
+        }
+        let value = f()?;
+        let _ = cell.set(value);
+        Ok(cell.get().unwrap())
+    }
+}
+struct Dependencies {
+    digest: ContentHash,
+    reads: Vec<usize>,
+}
 pub(crate) struct Keys {
     pub(crate) headers: hirsel_core_ids::published::Map<DefPath, Header>,
     environment: ContentHash,
-    paths: hirsel_core_ids::published::Sparse<Arc<DefPath>>,
-    modules: hirsel_core_ids::published::Sparse<ModulePath>,
-    packages: hirsel_core_ids::published::Sparse<PackageId>,
+    paths: Demand<Arc<DefPath>>,
+    modules: Demand<ModulePath>,
+    packages: Demand<PackageId>,
     anchors: hirsel_core_ids::published::Map<(ModuleId, u32), DefPath>,
+    dependencies: Demand<Dependencies>,
 }
 impl Keys {
     pub fn new(
@@ -52,12 +86,15 @@ impl Keys {
             "hirsel.core-environment.v1",
             [&encode(&(compiler, &inputs.core, namespaces, entry))?[..]],
         );
+        let mut source_definitions = Vec::new();
         for (m, rows) in modules.iter().zip(resolutions) {
             for (ordinal, (item, resolution)) in m.syntax.items().zip(rows).enumerate() {
                 let Some(t) = item.tree.node(item.root).token else {
                     continue;
                 };
-                let path = index.definition_path(index.definition(m.id, item.symbol(t)).unwrap());
+                let definition = index.definition(m.id, item.symbol(t)).unwrap();
+                source_definitions.push(definition.0 as usize);
+                let path = index.definition_path(definition);
                 let end = header_end(item);
                 let digest = ContentHash::of_bytes(&item.source_text().as_bytes()[..end]);
                 let mut reads = BTreeSet::new();
@@ -86,13 +123,50 @@ impl Keys {
                 );
             }
         }
-        Ok(Self {
+        let keys = Self {
             headers,
             environment,
             anchors,
-            paths: Default::default(),
-            modules: Default::default(),
-            packages: Default::default(),
+            paths: Demand::new(index.definitions.base_len(), index.definitions.len()),
+            modules: Demand::new(index.modules.base_len(), index.modules.len()),
+            packages: Demand::new(index.packages.base_len(), index.packages.len()),
+            dependencies: Demand::new(index.definitions.base_len(), index.definitions.len()),
+        };
+        // Signature binding belongs to declaration setup for source-owned rows.
+        // Installed rows remain demand-loaded; no package prefix is enumerated.
+        for id in source_definitions {
+            keys.dependency(index, id)?;
+        }
+        Ok(keys)
+    }
+    fn dependency(&self, index: &NameIndex, id: usize) -> io::Result<&Dependencies> {
+        self.dependencies.get_or_try_init(id as u64, || {
+            let path = self.path(index, hirsel_core_resolve::DefinitionId(id as u32));
+            let h = self.headers.get(path.as_ref()).ok_or_else(|| {
+                io::Error::other(format!(
+                    "core signature demand outside reached definitions: {path}"
+                ))
+            })?;
+            let mut reads = Vec::with_capacity(h.reads.len());
+            for read in &h.reads {
+                let module = index.module(&ModulePath {
+                    package: read.0.package.clone(),
+                    modules: read.0.modules.clone(),
+                });
+                let id = module
+                    .zip(index.symbols.find(&read.0.name))
+                    .and_then(|(m, n)| index.definition(m, n))
+                    .ok_or_else(|| {
+                        io::Error::other(format!(
+                            "core signature demand outside reached definitions: {read}"
+                        ))
+                    })?;
+                reads.push(id.0 as usize);
+            }
+            Ok(Dependencies {
+                digest: h.digest,
+                reads,
+            })
         })
     }
     fn path(&self, index: &NameIndex, id: hirsel_core_resolve::DefinitionId) -> &Arc<DefPath> {
@@ -175,36 +249,22 @@ impl Keys {
                 LookupResult::Ambiguous | LookupResult::Missing => {}
             }
         }
-        let mut pending: Vec<Arc<DefPath>> = pending
-            .into_iter()
-            .map(|id| Arc::clone(self.path(index, hirsel_core_resolve::DefinitionId(id as u32))))
-            .collect();
         let mut signatures = BTreeMap::new();
-        while let Some(path) = pending.pop() {
-            if signatures.contains_key(&path) {
+        let base = index.definitions.base_len();
+        let mut seen = vec![false; index.definitions.len() - base];
+        let mut library_seen = BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            if if id >= base {
+                std::mem::replace(&mut seen[id - base], true)
+            } else {
+                !library_seen.insert(id)
+            } {
                 continue;
             }
-            let h = self.headers.get(path.as_ref()).ok_or_else(|| {
-                io::Error::other(format!(
-                    "core signature demand outside reached definitions: {path}"
-                ))
-            })?;
-            signatures.insert(Arc::clone(&path), h.digest);
-            for read in &h.reads {
-                let module = index.module(&ModulePath {
-                    package: read.0.package.clone(),
-                    modules: read.0.modules.clone(),
-                });
-                let id = module
-                    .zip(index.symbols.find(&read.0.name))
-                    .and_then(|(m, n)| index.definition(m, n))
-                    .ok_or_else(|| {
-                        io::Error::other(format!(
-                            "core signature demand outside reached definitions: {read}"
-                        ))
-                    })?;
-                pending.push(Arc::clone(self.path(index, id)));
-            }
+            let path = self.path(index, hirsel_core_resolve::DefinitionId(id as u32));
+            let dependency = self.dependency(index, id)?;
+            signatures.insert(Arc::clone(path), dependency.digest);
+            pending.extend(dependency.reads.iter().copied());
         }
         let lookups: Vec<_> = resolution
             .reads

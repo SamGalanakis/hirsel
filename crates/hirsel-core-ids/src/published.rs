@@ -97,6 +97,7 @@ impl<T> Sparse<T> {
     pub fn loaded(&self) -> Vec<u64> {
         self.loaded.lock().unwrap().clone()
     }
+    #[inline(always)]
     pub fn len(&self) -> usize {
         self.loaded.lock().unwrap().len()
     }
@@ -266,11 +267,13 @@ impl<T> Table<T> {
     pub fn descriptor(&self) -> Option<Descriptor> {
         self.prefix.as_ref().map(|p| p.descriptor)
     }
+    #[inline(always)]
     pub fn base_len(&self) -> usize {
         self.prefix
             .as_ref()
             .map_or(0, |p| p.descriptor.len as usize)
     }
+    #[inline(always)]
     pub fn len(&self) -> usize {
         self.base_len() + self.own.len()
     }
@@ -283,15 +286,18 @@ impl<T> Table<T> {
     pub fn extend(&mut self, values: impl IntoIterator<Item = T>) {
         self.own.extend(values);
     }
+    #[inline(always)]
     pub fn get(&self, index: usize) -> Option<&T> {
-        if let Some(value) = self.overrides.get(&index) {
-            return Some(value);
+        let Some(prefix) = &self.prefix else {
+            return self.own.get(index);
+        };
+        let base = prefix.descriptor.len as usize;
+        if index >= base {
+            return self.own.get(index - base);
         }
-        if index < self.base_len() {
-            Some(self.prefix.as_ref().unwrap().row(index))
-        } else {
-            self.own.get(index - self.base_len())
-        }
+        self.overrides
+            .get(&index)
+            .or_else(|| Some(prefix.row(index)))
     }
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = &T> + ExactSizeIterator {
         (0..self.len()).map(|i| &self[i])
@@ -344,6 +350,7 @@ impl<T: Clone> Table<T> {
 }
 impl<T> Index<usize> for Table<T> {
     type Output = T;
+    #[inline(always)]
     fn index(&self, index: usize) -> &T {
         self.get(index).expect("published row outside table")
     }
@@ -383,19 +390,19 @@ impl<'de, T: serde::de::DeserializeOwned + Send + Sync + 'static> Deserialize<'d
 }
 
 #[derive(Clone)]
-pub struct Map<K: Ord, V> {
+pub struct Map<K: Ord + std::hash::Hash, V> {
     prefix: Option<Arc<Published<(K, V)>>>,
-    own: BTreeMap<K, V>,
+    own: rustc_hash::FxHashMap<K, V>,
 }
-impl<K: Ord, V> Default for Map<K, V> {
+impl<K: Ord + std::hash::Hash, V> Default for Map<K, V> {
     fn default() -> Self {
         Self {
             prefix: None,
-            own: BTreeMap::new(),
+            own: rustc_hash::FxHashMap::default(),
         }
     }
 }
-impl<K: Ord + fmt::Debug, V: fmt::Debug> fmt::Debug for Map<K, V> {
+impl<K: Ord + std::hash::Hash + fmt::Debug, V: fmt::Debug> fmt::Debug for Map<K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Map")
             .field("prefix", &self.prefix.as_ref().map(|p| p.descriptor))
@@ -403,7 +410,7 @@ impl<K: Ord + fmt::Debug, V: fmt::Debug> fmt::Debug for Map<K, V> {
             .finish()
     }
 }
-impl<K: Ord, V> Map<K, V> {
+impl<K: Ord + std::hash::Hash, V> Map<K, V> {
     pub fn from_descriptor(descriptor: Descriptor) -> io::Result<Self>
     where
         K: serde::de::DeserializeOwned + Send + Sync + 'static,
@@ -411,7 +418,7 @@ impl<K: Ord, V> Map<K, V> {
     {
         Ok(Self::published(binding(descriptor)?))
     }
-    pub fn index_of<Q: Ord + Serialize + ?Sized>(&self, key: &Q) -> Option<usize>
+    pub fn index_of<Q: Ord + std::hash::Hash + Serialize + ?Sized>(&self, key: &Q) -> Option<usize>
     where
         K: Borrow<Q>,
     {
@@ -431,10 +438,10 @@ impl<K: Ord, V> Map<K, V> {
     pub fn published(prefix: Arc<Published<(K, V)>>) -> Self {
         Self {
             prefix: Some(prefix),
-            own: BTreeMap::new(),
+            own: rustc_hash::FxHashMap::default(),
         }
     }
-    pub fn get<Q: Ord + Serialize + ?Sized>(&self, key: &Q) -> Option<&V>
+    pub fn get<Q: Ord + std::hash::Hash + Serialize + ?Sized>(&self, key: &Q) -> Option<&V>
     where
         K: Borrow<Q>,
     {
@@ -446,7 +453,7 @@ impl<K: Ord, V> Map<K, V> {
         let i = prefix.find(&bytes)?;
         Some(&prefix.row(i as usize).1)
     }
-    pub fn contains_key<Q: Ord + Serialize + ?Sized>(&self, key: &Q) -> bool
+    pub fn contains_key<Q: Ord + std::hash::Hash + Serialize + ?Sized>(&self, key: &Q) -> bool
     where
         K: Borrow<Q>,
     {
@@ -455,7 +462,7 @@ impl<K: Ord, V> Map<K, V> {
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         self.own.insert(key, value)
     }
-    pub fn entry(&mut self, key: K) -> std::collections::btree_map::Entry<'_, K, V> {
+    pub fn entry(&mut self, key: K) -> std::collections::hash_map::Entry<'_, K, V> {
         self.own.entry(key)
     }
     pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
@@ -484,6 +491,7 @@ impl<K: Ord, V> Map<K, V> {
     pub fn values(&self) -> impl Iterator<Item = &V> {
         self.iter().map(|(_, v)| v)
     }
+    #[inline(always)]
     pub fn len(&self) -> usize {
         self.prefix
             .as_ref()
@@ -494,13 +502,13 @@ impl<K: Ord, V> Map<K, V> {
         self.len() == 0
     }
 }
-impl<K: Ord + Serialize, V> Index<&K> for Map<K, V> {
+impl<K: Ord + std::hash::Hash + Serialize, V> Index<&K> for Map<K, V> {
     type Output = V;
     fn index(&self, key: &K) -> &V {
         self.get(key).expect("published key outside index")
     }
 }
-impl<K: Ord, V> FromIterator<(K, V)> for Map<K, V> {
+impl<K: Ord + std::hash::Hash, V> FromIterator<(K, V)> for Map<K, V> {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(i: I) -> Self {
         Self {
             prefix: None,
@@ -508,19 +516,20 @@ impl<K: Ord, V> FromIterator<(K, V)> for Map<K, V> {
         }
     }
 }
-impl<K: Ord + Serialize, V: Serialize> Serialize for Map<K, V> {
+impl<K: Ord + std::hash::Hash + Serialize, V: Serialize> Serialize for Map<K, V> {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         (self.prefix.as_ref().map(|p| p.descriptor), &self.own).serialize(s)
     }
 }
 impl<
     'de,
-    K: Ord + serde::de::DeserializeOwned + Send + Sync + 'static,
+    K: Ord + std::hash::Hash + serde::de::DeserializeOwned + Send + Sync + 'static,
     V: serde::de::DeserializeOwned + Send + Sync + 'static,
 > Deserialize<'de> for Map<K, V>
 {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        let (prefix, own): (Option<Descriptor>, BTreeMap<K, V>) = Deserialize::deserialize(d)?;
+        let (prefix, own): (Option<Descriptor>, rustc_hash::FxHashMap<K, V>) =
+            Deserialize::deserialize(d)?;
         Ok(Self {
             prefix: prefix
                 .map(binding)
@@ -538,7 +547,14 @@ pub trait Publisher {
         table: &Table<T>,
     ) -> io::Result<Table<T>>;
     fn map<
-        K: Clone + Ord + Serialize + serde::de::DeserializeOwned + Send + Sync + 'static,
+        K: Clone
+            + Ord
+            + std::hash::Hash
+            + Serialize
+            + serde::de::DeserializeOwned
+            + Send
+            + Sync
+            + 'static,
         V: Clone + Serialize + serde::de::DeserializeOwned + Send + Sync + 'static,
     >(
         &mut self,

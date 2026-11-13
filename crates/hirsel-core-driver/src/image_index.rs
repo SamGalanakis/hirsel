@@ -191,7 +191,14 @@ impl Publisher for Writer<'_> {
         Table::from_descriptor(self.descriptor(table.len(), root, empty))
     }
     fn map<
-        K: Clone + Ord + Serialize + serde::de::DeserializeOwned + Send + Sync + 'static,
+        K: Clone
+            + Ord
+            + std::hash::Hash
+            + Serialize
+            + serde::de::DeserializeOwned
+            + Send
+            + Sync
+            + 'static,
         V: Clone + Serialize + serde::de::DeserializeOwned + Send + Sync + 'static,
     >(
         &mut self,

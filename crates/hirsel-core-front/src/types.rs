@@ -170,6 +170,7 @@ impl Types {
         self.map.insert(k, id);
         id
     }
+    #[inline(always)]
     pub fn kind(&self, t: TyId) -> &TyKind {
         let base_len = self.base.as_ref().map_or(0, |b| b.len());
         if (t.0 as usize) < base_len {
@@ -178,6 +179,7 @@ impl Types {
             &self.kinds[t.0 as usize - base_len]
         }
     }
+    #[inline(always)]
     pub fn len(&self) -> usize {
         self.base.as_ref().map_or(0, |b| b.len()) + self.kinds.len()
     }
@@ -222,6 +224,7 @@ impl<'a> Local<'a> {
         self.map.insert(k, id);
         id
     }
+    #[inline(always)]
     pub fn len(&self) -> usize {
         self.base.len() + self.kinds.len()
     }
@@ -236,6 +239,7 @@ pub trait TyRead {
     fn mk(&mut self, k: TyKind) -> TyId;
 }
 impl TyRead for Types {
+    #[inline(always)]
     fn kind(&self, t: TyId) -> &TyKind {
         Types::kind(self, t)
     }
@@ -244,6 +248,7 @@ impl TyRead for Types {
     }
 }
 impl TyRead for Local<'_> {
+    #[inline(always)]
     fn kind(&self, t: TyId) -> &TyKind {
         let i = t.0 as usize;
         if i < self.base.len() {

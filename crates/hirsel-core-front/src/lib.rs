@@ -100,11 +100,30 @@ pub struct Program<'a> {
     pub(crate) alias_state: Vec<u8>,
     /// Aliases being lowered, each with its reference continuing the chain.
     pub(crate) alias_stack: Vec<(DeclId, Option<Site>)>,
+    core_declarations: [std::sync::OnceLock<Option<DeclId>>; 12],
 }
 
 impl<'a> Program<'a> {
     /// The core prelude type named `name`, when the program has core.
     pub(crate) fn core_decl(&self, name: &str) -> Option<DeclId> {
+        let slot = match name {
+            "String" => 0,
+            "Result" => 1,
+            "Capacity" => 2,
+            "List" => 3,
+            "Region" => 4,
+            "Map" => 5,
+            "Text" => 6,
+            "Cause" => 7,
+            "BuildError" => 8,
+            "Child" => 9,
+            "FloatError" => 10,
+            "Bytes" => 11,
+            _ => return self.core_decl_uncached(name),
+        };
+        *self.core_declarations[slot].get_or_init(|| self.core_decl_uncached(name))
+    }
+    fn core_decl_uncached(&self, name: &str) -> Option<DeclId> {
         let key = self.index.core?;
         let package = &self.index.packages[key.0 as usize];
         let path = DefPath(hirsel_core_ids::ItemPath {
@@ -225,6 +244,7 @@ impl<'a> Program<'a> {
             pending: vec![],
             alias_state: vec![],
             alias_stack: vec![],
+            core_declarations: std::array::from_fn(|_| std::sync::OnceLock::new()),
         };
         p.register();
         p.lower_headers();

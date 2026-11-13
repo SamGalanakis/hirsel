@@ -184,12 +184,13 @@ call: they are found from that one call, as LANG-11 orders it, or the call is re
 A type argument that lacks a bound its
 parameter declares is refused when it is fixed, at what fixed it in LANG-11's order: at the
 call when the expected result fixed it, otherwise at the argument that did. An argument that
-later agrees with it is not a second site. A record or variant constructor is typed as such a
-call, its payloads the arguments, except that its type arguments may still be fixed by the
-rest of its statement (the operand it is compared with, the tuple it sits in); one still
-open at the end of that statement is refused here, at the constructor. Nothing after the
-statement, a later use of the binding included, fixes it. So `let x = None`, `let y =
-Ok(1u64)` and `let xs = list.new()` are refused without a written type. Each use of a
+later agrees with it is not a second site. A record or variant constructor is typed exactly as such a
+call, its payloads the arguments: its type arguments are fixed by its expected type and its
+own payloads, and one still open when the constructor has been typed is refused here, at the
+constructor. Nothing to its right, in its statement or later, fixes it, so the checker emits
+each expression as it types it. So `let x = None`, `let y = Ok(1u64)`, `let xs =
+list.new()` and `let r = if c { None } else { Some(1u64) }` are refused without a written
+type, and `None == v` is refused where `v == None` is accepted. Each use of a
 generic type writes its arguments.
 
 ```hirsel
@@ -203,9 +204,11 @@ fn empty() -> u64 { list.len(list.new()) }                // refused: LANG-12, a
 ```
 ```hirsel
 fn f() -> bool { let x: Option[u64] = None; x == Some(1u64) }
+fn g(v: Option[u64]) -> bool { v == None }
 ```
 ```hirsel
 fn f() -> bool { let x = None; x == Some(1u64) }          // refused: LANG-12, at None: T is open
+fn h(v: Option[u64]) -> bool { None == v }                // refused: LANG-12, at None: T is open
 fn g() -> u64 { let y = Ok(1u64); 0 }                     // refused: LANG-12, at Ok(1u64): E is open
 ```
 ```hirsel
@@ -401,7 +404,8 @@ that does not fit, a zero divisor or any other failure is refused there
 ([LANG-3](syntax.md#lang-3-literals)). It therefore does nothing at run time and has no
 place in the evaluation order, which stays left to right for every other operand. A binary operator
 checks an operand that is not a literal operand first, and checks a literal operand against
-that operand's type. When both are literal operands they take the expected type, for an
+that operand's type; of two operands that are not literal operands, the left is checked
+first and gives the right its expected type. When both are literal operands they take the expected type, for an
 operator whose result is its operand type, and are refused by LANG-11 otherwise. So `1 + x`
 and `(1 + 2) < x` type their literals from `x`, and `1 < 2` has no type.
 

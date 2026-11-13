@@ -192,7 +192,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             if v.born < born
                 && !self.broken
                 && anchors != v.anchors
-                && kind(&self.p.decls, &self.t, v.ty, &self.params) == Kind::Scoped
+                && self.type_kind(v.ty) == Kind::Scoped
                 && !self
                     .anchors
                     .same(anchors, self.slot_anchors(s), &self.steps)
@@ -469,7 +469,24 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Ok(())
     }
     pub(super) fn copies(&self, ty: TyId) -> bool {
-        copyable(&self.p.decls, &self.t, ty, &self.params)
+        if ty.0 <= HOLE.0 {
+            return true;
+        }
+        let Some((kind, copies)) = self.kind_cache.get(&ty) else {
+            return copyable(&self.p.decls, &self.t, ty, &self.params);
+        };
+        match kind {
+            Kind::Plain | Kind::Stable => true,
+            Kind::Own | Kind::Resource | Kind::Counted | Kind::Generic => false,
+            Kind::Scoped => {
+                if let Some(value) = copies.get() {
+                    return value;
+                }
+                let value = copyable(&self.p.decls, &self.t, ty, &self.params);
+                copies.set(Some(value));
+                value
+            }
+        }
     }
     /// Use place `at` at `n` (OWN-5 to OWN-14); its type.
     pub(super) fn use_place(&mut self, at: At, how: Use, n: NodeId) {
@@ -952,7 +969,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             let elem = *elem.get_or_insert(ty);
             let array = *result.get_or_insert_with(|| self.t.mk(TyKind::Array(elem, count)));
-            if repeat && kind(&self.p.decls, &self.t, elem, &self.params) != Kind::Plain {
+            if repeat && self.type_kind(elem) != Kind::Plain {
                 self.refuse("SEM-9", child, "a repeated array element must be plain");
             }
             if to.is_none() {
@@ -1095,12 +1112,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 // view lives (OWN-10).
                 (address, Rep::Place(_))
                     if matches!(self.t.kind(at.ty), TyKind::View(_))
-                        && kind(
-                            &self.p.decls,
-                            &self.t,
-                            self.var(at.place.slot).ty,
-                            &self.params,
-                        ) != Kind::Scoped =>
+                        && self.type_kind(self.var(at.place.slot).ty) != Kind::Scoped =>
                 {
                     Some(self.pointer(address, n))
                 }
@@ -1151,7 +1163,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// a value of a scoped type may hold a view, so its temporaries stay.
     pub(super) fn close_scope(&mut self, start: usize, freezes: usize, n: NodeId, value: TyId) {
         let d = self.depth;
-        let tail = kind(&self.p.decls, &self.t, value, &self.params) != Kind::Scoped;
+        let tail = self.type_kind(value) != Kind::Scoped;
         self.unfreeze(freezes, |h| {
             let ends = h == Hold::View(Extent::Block(d)) || tail && h == Hold::View(Extent::Temp);
             (!ends).then_some(h)

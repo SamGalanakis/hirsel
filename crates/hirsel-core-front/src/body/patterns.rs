@@ -313,7 +313,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     fn pattern_field_ty(&mut self, ty: TyId, case: Option<u32>, i: usize) -> TyId {
         if let TyKind::Anchored(inner, root) = *self.t.kind(ty) {
             let ft = self.pattern_field_ty(inner, case, i);
-            return if kind(&self.p.decls, &self.t, ft, &self.params) == Kind::Stable
+            return if self.type_kind(ft) == Kind::Stable
                 && !matches!(self.t.kind(ft), TyKind::Anchored(..))
             {
                 self.t.mk(TyKind::Anchored(ft, root))
@@ -471,7 +471,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 _ => at.ty,
             };
             if !matches!(self.t.kind(ty), TyKind::Anchored(..))
-                && kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Stable
+                && self.type_kind(ty) == Kind::Stable
             {
                 // A bare stable parameter is a view for this call. Payloads retain
                 // that view's anchor even when its region is not named in the type.
@@ -822,11 +822,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     } else {
                         self.set_slot_anchors(b, subject.anchors);
                     }
-                    if kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Scoped {
+                    if self.type_kind(ty) == Kind::Scoped {
                         self.freeze_anchors(subject.anchors, self.depth);
                     }
                 }
-                if kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Scoped {
+                if self.type_kind(ty) == Kind::Scoped {
                     self.hold_reached(subject.anchors);
                 }
                 self.own(b, pat.site);
@@ -995,8 +995,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let saved = std::mem::replace(&mut self.patterns.declared_anchors, declared);
         self.bind_pattern(id, subject, self.kind(s) == NodeKind::LetMut);
         self.patterns.declared_anchors = saved;
-        if subject.viewed || kind(&self.p.decls, &self.t, subject.ty, &self.params) == Kind::Scoped
-        {
+        if subject.viewed || self.type_kind(subject.ty) == Kind::Scoped {
             let depth = self.depth;
             self.unfreeze(freezes, |h| {
                 Some(if h == Hold::View(Extent::Temp) {
@@ -1367,7 +1366,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         ty: TyId,
         keep: Option<ValueId>,
     ) {
-        let scoped = kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Scoped;
+        let scoped = self.type_kind(ty) == Kind::Scoped;
         if scoped {
             let depth = self.depth;
             self.unfreeze(holds, |h| {

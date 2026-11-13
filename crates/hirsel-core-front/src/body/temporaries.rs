@@ -66,14 +66,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if self.owners.len() == mark {
             return;
         }
-        let reach = if self.anchor_tracked(ty)
-            && kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Scoped
-        {
-            self.anchors
-                .expressions
-                .get(&n)
-                .copied()
-                .unwrap_or(self.anchors.last)
+        // The returned expression already published its provenance. Most tails
+        // have none, so they need neither a kind query nor reached-owner work.
+        let fact = self.anchors.last;
+        let reach = if fact != 0 && self.type_kind(ty) == Kind::Scoped {
+            fact
         } else {
             0
         };

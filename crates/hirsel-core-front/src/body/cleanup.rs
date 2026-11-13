@@ -77,7 +77,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Ok(Rep::Place(id))
                 if self.e.needs_drop(id)
                     && (!self.e.generic_names.contains_key(&id)
-                        || kind(&self.p.decls, &self.t, ty, &self.params) != Kind::Plain
+                        || self.type_kind(ty) != Kind::Plain
                         || self.e.runs_known_code(id)) =>
             {
                 Some(id)

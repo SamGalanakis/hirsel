@@ -100,14 +100,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let freezes = self.freezes.len();
         let (t, v) = self.expr(value, declared.and_then(expect));
         let ty = declared.unwrap_or(t);
-        let anchors = if kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Scoped {
+        let kind = self.type_kind(ty);
+        let anchors = if kind == Kind::Scoped {
             written.and_then(|n| self.written_anchors(n))
         } else {
             None
         };
         // A let-bound view lasts to the end of its block (OWN-8), and so do the
         // temporaries it reaches (LANG-6).
-        if crate::decls::kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Scoped {
+        if kind == Kind::Scoped {
             self.hold_reached(self.anchor_expression(value));
             let fact = self.anchor_expression(value);
             if anchors.is_none() {
@@ -142,7 +143,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 };
                 self.declare(b, ty, binding, origin, pat);
                 self.bind_descriptor(b, v);
-                if self.anchor_tracked(ty) {
+                if matches!(kind, Kind::Scoped | Kind::Stable) {
                     let mut initial = self.anchor_expression(value);
                     if anchors.is_some() {
                         let captures = self.capture_anchors(v);
@@ -183,7 +184,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         let binding = Binding::Slot(self.slot(ty, None, pat));
         self.declare(b, ty, binding, origin, pat);
-        if kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Scoped {
+        if self.type_kind(ty) == Kind::Scoped {
             let written = self
                 .kids(s)
                 .iter()

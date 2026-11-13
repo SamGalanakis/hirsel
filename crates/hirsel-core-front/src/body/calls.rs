@@ -371,7 +371,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         } else {
             self.emit_call(f, tys, vals, result, n)
         };
-        if kind(&self.p.decls, &self.t, result, &self.params) == Kind::Scoped {
+        if self.type_kind(result) == Kind::Scoped {
             let mut fact = 0;
             for &i in &g.anchors {
                 let argument = self.anchor_argument(args[i as usize]);
@@ -572,15 +572,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         roots: &[Option<TyId>],
     ) {
         match self.known_rooted(pt, found, roots) {
-            Some(t) => self.coerce(
-                at,
-                Want {
-                    ty: t,
-                    view: kind(&self.p.decls, &self.t, t, &self.params) == Kind::Stable,
-                    payload: 0,
-                },
-                e,
-            ),
+            Some(t) => {
+                let view = self.type_kind(t) == Kind::Stable;
+                self.coerce(
+                    at,
+                    Want {
+                        ty: t,
+                        view,
+                        payload: 0,
+                    },
+                    e,
+                );
+            }
             None => {
                 if !self.unify_rooted(pt, at, found, roots) {
                     self.refuse(
@@ -794,9 +797,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             (TyKind::Anchored(a, ar), TyKind::Anchored(b, br)) => {
                 self.unify_rooted(a, b, s, roots) && self.unify_rooted(ar, br, s, roots)
             }
-            (_, TyKind::Anchored(b, _))
-                if kind(&self.p.decls, &self.t, b, &self.params) == Kind::Stable =>
-            {
+            (_, TyKind::Anchored(b, _)) if self.type_kind(b) == Kind::Stable => {
                 self.unify_rooted(pt, b, s, roots)
             }
             (TyKind::Fn(a, ar, aw, ak), TyKind::Fn(b, br, bw, bk))

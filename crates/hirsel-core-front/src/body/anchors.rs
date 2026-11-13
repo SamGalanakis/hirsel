@@ -287,15 +287,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
     }
     #[inline(always)]
-    pub(super) fn anchor_tracked(&self, ty: TyId) -> bool {
-        // Builtin scalar/unit/error IDs precede HOLE and never carry provenance.
+    pub(super) fn type_kind(&mut self, ty: TyId) -> Kind {
         if ty.0 <= HOLE.0 {
-            return false;
+            return Kind::Plain;
         }
-        matches!(
-            kind(&self.p.decls, &self.t, ty, &self.params),
-            Kind::Scoped | Kind::Stable
-        )
+        if let Some((kind, _)) = self.kind_cache.get(&ty) {
+            return *kind;
+        }
+        let kind = kind(&self.p.decls, &self.t, ty, &self.params);
+        self.kind_cache
+            .insert(ty, (kind, std::cell::Cell::new(None)));
+        kind
+    }
+    #[inline(always)]
+    pub(super) fn anchor_tracked(&mut self, ty: TyId) -> bool {
+        matches!(self.type_kind(ty), Kind::Scoped | Kind::Stable)
     }
     fn anchor_regions(&mut self, ty: TyId) -> Fact {
         fn walk(t: &impl TyRead, anchors: &mut Anchors, ty: TyId) -> Fact {
@@ -329,7 +335,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if !tracked && regions == 0 {
             return;
         }
-        let stable = kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Stable;
+        let stable = self.type_kind(ty) == Kind::Stable;
         let initial = if stable {
             if regions != 0 {
                 regions
@@ -457,7 +463,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
     }
     pub(super) fn anchor_payload(&mut self, n: NodeId, ty: TyId, value: Option<ValueId>) {
-        if kind(&self.p.decls, &self.t, ty, &self.params) != Kind::Scoped {
+        if self.type_kind(ty) != Kind::Scoped {
             return;
         }
         let fact = self.anchor_argument(n);
@@ -474,12 +480,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
     pub(super) fn anchor_read(&mut self, at: At) -> Fact {
         if matches!(
-            kind(
-                &self.p.decls,
-                &self.t,
-                self.var(at.place.slot).ty,
-                &self.params
-            ),
+            self.type_kind(self.var(at.place.slot).ty),
             Kind::Scoped | Kind::Stable
         ) {
             self.anchor_place(at)

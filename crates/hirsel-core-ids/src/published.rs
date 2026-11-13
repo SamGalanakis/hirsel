@@ -65,22 +65,24 @@ impl<T> Node<T> {
         }
     }
 }
-/// A fixed-height sparse cache. Opening allocates no slot per package row.
+/// Sparse stable cells, partitioned by key width. Opening allocates no slot per package row.
 pub struct Sparse<T> {
-    root: Node<T>,
+    roots: [OnceLock<Box<Node<T>>>; 16],
     loaded: Mutex<Vec<u64>>,
 }
 impl<T> Default for Sparse<T> {
     fn default() -> Self {
         Self {
-            root: Node::branch(),
+            roots: std::array::from_fn(|_| OnceLock::new()),
             loaded: Mutex::new(vec![]),
         }
     }
 }
 impl<T> Sparse<T> {
     pub fn get_or_try_init(&self, key: u64, f: impl FnOnce() -> io::Result<T>) -> io::Result<&T> {
-        let cell = self.root.cell(key, 60);
+        let level = (63 - key.max(1).leading_zeros()) / 4;
+        let root = self.roots[level as usize].get_or_init(|| Box::new(Node::branch()));
+        let cell = root.cell(key, level * 4);
         if let Some(value) = cell.get() {
             return Ok(value);
         }
@@ -565,6 +567,39 @@ pub trait Publisher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sparse_cells_cover_all_key_widths_and_keep_references() {
+        let rows = Sparse::default();
+        let first = rows
+            .get_or_try_init(0, || Ok(String::from("zero")))
+            .unwrap();
+        let address = first.as_ptr();
+        for bit in 0..64 {
+            let key = 1u64 << bit;
+            assert_eq!(
+                rows.get_or_try_init(key, || Ok(key.to_string())).unwrap(),
+                &key.to_string()
+            );
+        }
+        assert_eq!(first, "zero");
+        assert_eq!(
+            rows.get_or_try_init(0, || panic!("cached"))
+                .unwrap()
+                .as_ptr(),
+            address
+        );
+        assert_eq!(rows.len(), 65);
+        assert!(
+            rows.get_or_try_init(u64::MAX, || Err(io::Error::other("retry")))
+                .is_err()
+        );
+        assert_eq!(rows.len(), 65);
+        assert_eq!(
+            rows.get_or_try_init(u64::MAX, || Ok(String::from("last")))
+                .unwrap(),
+            "last"
+        );
+    }
     struct Missing;
     impl Provider<u64> for Missing {
         fn row(&self, _: u32) -> io::Result<u64> {

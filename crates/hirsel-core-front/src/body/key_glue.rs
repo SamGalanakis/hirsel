@@ -80,6 +80,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         arguments: vec![NameRecipe::of(self.p, &self.t, ty)],
                         dictionaries: vec![],
                         operation: Some(op),
+                        numeric: None,
                     });
                 function
             } else {
@@ -558,13 +559,13 @@ impl Derive<'_> {
     }
 }
 
-struct Code {
-    body: Body,
+pub(super) struct Code {
+    pub(super) body: Body,
     current: BlockId,
     open: Vec<Inst>,
 }
 impl Code {
-    fn new(params: &[Ty]) -> Self {
+    pub(super) fn new(params: &[Ty]) -> Self {
         let mut c = Self {
             body: Body::default(),
             current: BlockId(0),
@@ -573,15 +574,15 @@ impl Code {
         c.block(params);
         c
     }
-    fn value(&mut self, ty: Ty) -> ValueId {
+    pub(super) fn value(&mut self, ty: Ty) -> ValueId {
         let id = ValueId(self.body.values.len() as u32);
         self.body.values.push(ty);
         id
     }
-    fn inst(&mut self, inst: Inst) {
+    pub(super) fn inst(&mut self, inst: Inst) {
         self.open.push(inst);
     }
-    fn block(&mut self, tys: &[Ty]) -> BlockId {
+    pub(super) fn block(&mut self, tys: &[Ty]) -> BlockId {
         let start = self.body.pools.values.len();
         for &ty in tys {
             let value = self.value(ty);
@@ -604,10 +605,10 @@ impl Code {
             .unwrap();
         [ps[0], ps.get(1).copied().unwrap_or(ps[0])]
     }
-    fn start(&mut self, b: BlockId) {
+    pub(super) fn start(&mut self, b: BlockId) {
         self.current = b;
     }
-    fn end(&mut self, t: Terminator) {
+    pub(super) fn end(&mut self, t: Terminator) {
         self.body.blocks[self.current.index()].insts =
             PoolRange::push(&mut self.body.insts, self.open.drain(..));
         self.body.inst_anchors.resize(self.body.insts.len(), None);
@@ -623,7 +624,7 @@ impl Code {
         let edge = self.edge(target, args);
         self.end(Terminator::Jump(edge));
     }
-    fn branch(&mut self, on: ValueId, yes: BlockId, no: BlockId) {
+    pub(super) fn branch(&mut self, on: ValueId, yes: BlockId, no: BlockId) {
         let yes = self.edge(yes, &[]);
         let no = self.edge(no, &[]);
         self.end(Terminator::Branch {
@@ -673,7 +674,7 @@ impl Code {
         });
         result
     }
-    fn compare(&mut self, op: CompareOp, left: ValueId, right: ValueId) -> ValueId {
+    pub(super) fn compare(&mut self, op: CompareOp, left: ValueId, right: ValueId) -> ValueId {
         let result = self.value(Ty::Scalar(Scalar::Bool));
         self.inst(Inst::Compare {
             result,
@@ -683,7 +684,7 @@ impl Code {
         });
         result
     }
-    fn address(&mut self, p: ValueId, ty: PlaceTy) -> AddressId {
+    pub(super) fn address(&mut self, p: ValueId, ty: PlaceTy) -> AddressId {
         let id = AddressId(self.body.addresses.len() as u32);
         self.body.addresses.push(AddressInfo {
             base: AddressBase::Value(p),
@@ -723,7 +724,7 @@ impl Code {
             self.offset_value(p, offset)
         }
     }
-    fn read(&mut self, p: ValueId, ty: Ty) -> ValueId {
+    pub(super) fn read(&mut self, p: ValueId, ty: Ty) -> ValueId {
         let address = self.address(p, PlaceTy::Value(ty));
         let result = self.value(ty);
         self.inst(Inst::Read {

@@ -50,6 +50,7 @@ pub(crate) mod core_ops;
 mod key_glue;
 mod lists;
 mod maps;
+mod numeric_glue;
 mod ops;
 mod patterns;
 mod places;
@@ -316,6 +317,7 @@ impl Emitter {
                     arguments: names,
                     dictionaries,
                     operation: None,
+                    numeric: None,
                 },
             );
         }
@@ -908,6 +910,7 @@ struct Cx<'c, 'a, 'e> {
     map_entries: HashMap<(TyId, TyId), maps::MapEntry>,
     key_functions: HashMap<(TyId, key_glue::KeyOp), (TypeId, FuncId, Rep)>,
     key_args: Vec<Arg>,
+    numeric_functions: HashMap<(usize, TyId, TyId), numeric_glue::NumericAbi>,
     #[cfg(test)]
     key_metadata_builds: usize,
     patterns: patterns::Patterns,
@@ -1020,6 +1023,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             map_entries: HashMap::default(),
             key_functions: HashMap::default(),
             key_args: vec![],
+            numeric_functions: HashMap::default(),
             #[cfg(test)]
             key_metadata_builds: 0,
             patterns: patterns::Patterns::default(),

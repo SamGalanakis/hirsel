@@ -144,7 +144,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return None;
         }
         let result = self.value(ty);
-        let fail = self.fail_to(n);
+        let fail = if op == UnaryOp::Neg && ty.int().is_some() {
+            self.fail_to(n)
+        } else {
+            None
+        };
         self.inst(
             Inst::Unary {
                 result,
@@ -169,7 +173,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return None;
         }
         let result = self.value(ty);
-        let fail = self.fail_to(n);
+        let fail = if op.can_fail(ty) {
+            self.fail_to(n)
+        } else {
+            None
+        };
         self.inst(
             Inst::Binary {
                 result,

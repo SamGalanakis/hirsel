@@ -361,10 +361,10 @@ fn float_constant_tables_are_read_only_data() {
     println!("{}", hirsel_core_ir::text::print(&emitter.module));
 }
 
-/// Rigid numeric operands used to disappear from emission, making sum return zero.
-/// Until typed numeric helpers are materialized, these real source bodies must GAP.
+/// Rigid numeric operands used to disappear, making every nonempty sum return zero.
+/// These existing core contracts exercise closed helpers with u8/i8/u64/i64 rows.
 #[test]
-fn generic_scalar_operations_are_explicit_gaps() {
+fn generic_numeric_core_contracts() {
     let corpus = manifest().load().unwrap();
     let parsed = corpus.parse();
     let index = corpus.index(&parsed);
@@ -379,26 +379,36 @@ fn generic_scalar_operations_are_explicit_gaps() {
         .collect();
     let p = Program::declare(&index, &modules);
     let mut emitter = Emitter::new();
-    let mut checked = 0;
+    let mut functions = HashMap::new();
     for (f, fd) in p.fns.iter().enumerate() {
-        if fd.path.package_is("core", "1")
-            && matches!(
-                (fd.path.0.modules[0].as_str(), fd.path.0.name.as_str()),
-                ("int", "parse") | ("list", "sum")
-            )
+        if fd.body.is_none()
+            || !(fd.path.package_is("core", "1")
+                || fd.path.0.modules == ["tests", "int"]
+                || fd.path.0.modules == ["tests", "list"])
         {
-            let check = p.check_lower(f, &mut emitter);
-            assert!(check.refusals.is_empty(), "{check:?}");
-            assert!(check.function.is_none(), "{check:?}");
-            assert!(
-                check
-                    .gaps
-                    .iter()
-                    .any(|g| g.what == "generic scalar operations are not built"),
-                "{check:?}"
-            );
-            checked += 1;
+            continue;
         }
+        let check = p.check_lower(f, &mut emitter);
+        assert!(
+            check.refusals.is_empty() && check.gaps.is_empty(),
+            "{}: {check:?}",
+            fd.path
+        );
+        functions.insert(fd.path.0.name.clone(), check.function.unwrap());
     }
-    assert_eq!(checked, 2);
+    emitter.materialize_instances().unwrap();
+    hirsel_core_ir::wf::module(&emitter.module).unwrap();
+    for (call, want) in [
+        ("parse_u8_cases()", &["true"][..]),
+        ("parse_i8_cases()", &["true"][..]),
+        ("parse_u64_limits()", &["18446744073709551615"][..]),
+        ("parse_i64_min()", &["-9223372036854775808"][..]),
+        ("sum_empty()", &["0"][..]),
+        ("sum_to_max()", &["255"][..]),
+        ("sum_overflow()", &["fail", "Overflow"][..]),
+        ("sum_signed()", &["-2"][..]),
+    ] {
+        let error = run_expect(&emitter.module, &functions, call, want);
+        assert!(error.is_none(), "{call}: {error:?}");
+    }
 }

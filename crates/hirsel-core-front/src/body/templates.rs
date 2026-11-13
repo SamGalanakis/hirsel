@@ -131,6 +131,7 @@ impl NameRecipe {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GenericCall {
     pub operation: Option<key_glue::KeyOp>,
+    pub numeric: Option<numeric_glue::NumericOp>,
     pub arguments: Vec<NameRecipe>,
     pub dictionaries: Vec<NameRecipe>,
 }
@@ -385,6 +386,19 @@ impl Substitution<'_> {
                 .map(|name| name.render(&self.names))
                 .collect(),
         };
+        if let Some(op) = call.numeric {
+            let signature = self.signature(function.signature);
+            return match numeric_glue::ensure(self.module, key, signature, op) {
+                Ok(row) => {
+                    self.functions.insert(old, row);
+                    row
+                }
+                Err(error) => {
+                    self.error = Some(error.into());
+                    old
+                }
+            };
+        }
         if let Some(op) = call.operation {
             let signature = self.signature(function.signature);
             let Param::Address(ty) = self.module.signatures[signature.index()].params[0] else {

@@ -865,8 +865,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if (g.path.0.modules == ["int"] || g.path.0.modules == ["float"])
             && tys.iter().any(|&ty| has_param(&self.t, ty))
         {
-            self.gap(n, "generic scalar operations are not built");
-            return None;
+            return if g.path.0.modules == ["int"] {
+                self.generic_numeric(f, tys, vals, n)
+            } else {
+                self.gap(n, "generic scalar operations are not built");
+                None
+            };
         }
         if g.path.0.modules == ["float"] {
             if tys.contains(&ERROR) {

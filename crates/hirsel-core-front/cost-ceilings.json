@@ -1,39 +1,39 @@
 {
   "measurement": "Buck release, CPU 16, jobs 1, instructions:u, fresh private store, complete driver interval including publication and teardown; separate perf stat instructions:u covers process startup, dynamic loader, output and exit",
-  "basis": "List kernels and typed generic numeric helpers complete more source bodies; the FORM61 range capacity correction and byte literal ownership are included. Ordinary release observations plus 2 percent, rounded up to 100. The fixed 60000 process budget is unchanged. The parallel runtime/view observation is retained in history; the active observation completes more bodies.",
+  "basis": "List kernels and typed generic numeric helpers complete more source bodies; the FORM61 range capacity correction and byte literal ownership are included. Ordinary release observations plus 2 percent, rounded up to 100. The fixed 60000 process budget is unchanged. The parallel runtime/view observation is retained in history; the active observation completes more bodies. Std check ceiling refreshed after recorded completion136/139 to139/139 over59630bcf..a526a304; M1 completion314/317 to317/317. Only std check ceiling changes, using14946.00034602076 plus2percent rounded up to100; the reader process regression is repaired, and the fixed60000 budget is unchanged.",
   "corpora": {
     "m1": {
-      "code_lines": 6268,
+      "code_lines": 6281,
       "check_lower_per_line": 24900,
       "whole_request_per_line": 46800,
       "whole_process_per_line": 46900
     },
     "std": {
-      "code_lines": 2877,
-      "check_lower_per_line": 14900,
+      "code_lines": 2890,
+      "check_lower_per_line": 15300,
       "whole_request_per_line": 34400,
       "whole_process_per_line": 34600
     }
   },
   "margin": "2 percent over the ordinary release observation, rounded up to 100 instructions per code line. Lower ceilings after savings. Re-baseline expected work growth only with reason, completed-body counts and commit range; do not change the fixed finished-process budget.",
   "finished_budget_per_line": 60000,
-  "forecast_revision": "14419966ec9d9f7d0c693a31639726dc6dc2f442",
+  "forecast_revision": "a526a304a3383fb2c8e9d0bd494e553fcb571698",
   "completion_forecast": {
     "m1": {
-      "complete_bodies": 314,
+      "complete_bodies": 317,
       "bodies": 317,
-      "missing_check_lower_per_line": 916.2693948419568,
-      "additional_publication_per_line": 28.035942323484033,
-      "measured_process_per_line": 45952.71011486918,
-      "finished_process_per_line": 46897.01545203461
+      "missing_check_lower_per_line": 0,
+      "additional_publication_per_line": 0,
+      "measured_process_per_line": 46132.341028498646,
+      "finished_process_per_line": 46132.341028498646
     },
     "std": {
-      "complete_bodies": 136,
+      "complete_bodies": 139,
       "bodies": 139,
-      "missing_check_lower_per_line": 461.59434453738186,
-      "additional_publication_per_line": 38.13690161708365,
-      "measured_process_per_line": 33855.46784845325,
-      "finished_process_per_line": 34355.19909460771
+      "missing_check_lower_per_line": 0,
+      "additional_publication_per_line": 0,
+      "measured_process_per_line": 33609.523875432526,
+      "finished_process_per_line": 33609.523875432526
     }
   },
   "forecast_method": "Current process instructions plus recorded missing checker/emission and publication per line. Live construct self costs project the written population and calibrate to native check/lower less driver keys. Completed IR/template bytes per completed definition line are charged for every unfinished line, retaining partial IR, at measured definition-encoding and archive write/hash rates. Refresh projection/counts when support changes.",
@@ -296,6 +296,71 @@
           "check_lower_per_line": 14581.68230795968,
           "whole_request_per_line": 33676.86583246437,
           "whole_process_per_line": 33855.46784845325
+        }
+      }
+    },
+    {
+      "from_revision": "59630bcf",
+      "to_revision": "a526a304a3383fb2c8e9d0bd494e553fcb571698",
+      "reason": "Expected supported-work completion since the last recorded forecast: std136/139 to139/139 and M1314/317 to317/317. Both canonical images and all36 program rows now accepted;232/232 native cases pass. Per orchestrator ruling, refresh only the std check ceiling:14946.00034602076 *1.02, rounded up to100=15300. Indexed source-reader process regression was repaired separately; no process/request ceiling or60000 budget is raised.",
+      "completed_bodies_before": {
+        "m1": [
+          314,
+          317
+        ],
+        "std": [
+          136,
+          139
+        ]
+      },
+      "completed_bodies_after": {
+        "m1": [
+          317,
+          317
+        ],
+        "std": [
+          139,
+          139
+        ]
+      },
+      "previous_ceilings": {
+        "m1": {
+          "code_lines": 6268,
+          "check_lower_per_line": 24900,
+          "whole_request_per_line": 46800,
+          "whole_process_per_line": 46900
+        },
+        "std": {
+          "code_lines": 2877,
+          "check_lower_per_line": 14900,
+          "whole_request_per_line": 34400,
+          "whole_process_per_line": 34600
+        }
+      },
+      "new_ceilings": {
+        "m1": {
+          "code_lines": 6281,
+          "check_lower_per_line": 24900,
+          "whole_request_per_line": 46800,
+          "whole_process_per_line": 46900
+        },
+        "std": {
+          "code_lines": 2890,
+          "check_lower_per_line": 15300,
+          "whole_request_per_line": 34400,
+          "whole_process_per_line": 34600
+        }
+      },
+      "observations": {
+        "m1": {
+          "check_per_line": 24816.612800509472,
+          "request_per_line": 46023.572201878684,
+          "process_per_line": 46132.341028498646
+        },
+        "std": {
+          "check_per_line": 14946.00034602076,
+          "request_per_line": 33339.36816608997,
+          "process_per_line": 33609.523875432526
         }
       }
     }

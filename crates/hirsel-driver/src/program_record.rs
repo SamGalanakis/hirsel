@@ -66,6 +66,10 @@ const VARIABLES: &[(&str, Class)] = &[
     ("HIRSEL_GUARD_ORACLE", Class::Key),
     ("HIRSEL_LINK_KIT", Class::Native),
     ("HIRSEL_RUNTIME_ARCHIVES", Class::Native),
+    (
+        "HIRSEL_CORE_RT_ARCHIVE",
+        Class::HostOnly("CoreIR LLVM executable test runtime"),
+    ),
     // The emulator runs a built aarch64 program; no build reads it, and
     // `run --native` launches only x86_64 programs.
     ("HIRSEL_QEMU_AARCH64", Class::Launch),

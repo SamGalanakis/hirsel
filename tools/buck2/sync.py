@@ -160,7 +160,7 @@ RUNTIME_DATA = {
     "hirsel-lexer": [*CORPUS_DATA],
     "hirsel-lir": ["crates/hirsel-rt/include/**", "native-tests/**"],
     # tools/native-toolchain/check reads Cargo.lock's llvm-sys pin.
-    "hirsel-llvm": ["crates/hirsel-core-ir/samples/**", "Cargo.lock", "crates/hirsel-rt/include/**", "stdlib/**", "tools/native-toolchain/llvm-23.lock", "tools/native-toolchain/check", "tools/native-toolchain/fixtures/**"],
+    "hirsel-llvm": ["crates/hirsel-core-ir/samples/**", "crates/hirsel-core-rt/include/**", "core/front/**", "Cargo.lock", "crates/hirsel-rt/include/**", "stdlib/**", "tools/native-toolchain/llvm-23.lock", "tools/native-toolchain/check", "tools/native-toolchain/fixtures/**"],
     "hirsel-authority": [*CORPUS_DATA],
     "hirsel-ownership": [*CORPUS_DATA, "crates/hirsel-driver/tests/fixtures/**"],
     "hirsel-parser": ["conformance/old-spec/**"],
@@ -1136,7 +1136,7 @@ def first_party(meta: dict) -> str:
     archive_consumers = set()
     out = [
         HEADER,
-        'load("//tools/buck2:defs.bzl", "hirsel_binary", "hirsel_build_script", "hirsel_command_test", "hirsel_products", "hirsel_library", "hirsel_link_hosts_test", "hirsel_runtime_archives", "hirsel_core_runtime_archives", "hirsel_tsan_runtime_archives", "hirsel_script_test", "hirsel_source_audit", "hirsel_test", "hirsel_toolchain_bundle")\n',
+        'load("//tools/buck2:defs.bzl", "hirsel_binary", "hirsel_build_script", "hirsel_command_test", "hirsel_core_llvm_native_test", "hirsel_products", "hirsel_library", "hirsel_link_hosts_test", "hirsel_runtime_archives", "hirsel_core_runtime_archives", "hirsel_tsan_runtime_archives", "hirsel_script_test", "hirsel_source_audit", "hirsel_test", "hirsel_toolchain_bundle")\n',
         'load("//tools/buck2:native_selection.bzl", "hirsel_native_selection")\n',
     ]
 
@@ -1194,7 +1194,8 @@ def first_party(meta: dict) -> str:
             # Request-lifecycle fixtures and the request-mode law compile
             # temporary files against std, without corpus or native runtime.
             requests_only = binary == "hirsel-driver-test-it-resident"
-            return dict(data=Raw(f'glob({starlark(["stdlib/**", relative(package_dir / "Cargo.toml")], 4)})') if requests_only else test_data(binary, name, package_dir, src),
+            return dict(files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-llvm-runtime-fixture[staticlib]"} if binary == "hirsel-llvm-unittest" else None,
+                        data=Raw(f'glob({starlark(["stdlib/**", relative(package_dir / "Cargo.toml")], 4)})') if requests_only else test_data(binary, name, package_dir, src),
                         runtime_archives=runtime_views(binary) if name in NATIVE_TESTS and not requests_only and binary != "hirsel-rt-unittest" else None,
                         products=PRODUCTS if name in PRODUCT_TESTS else None,
                         seeded=seeded(target_dir(package_dir, src), src) or None, skips=FULL_GATE_SKIPS.get(binary),
@@ -1280,6 +1281,11 @@ def first_party(meta: dict) -> str:
                 out.append("\n" + call("hirsel_test", name=f"{name}-test-{target['name']}", deps=own + test_deps, bin_exes=binaries,
                                          shards=count if count > 1 or case_shards else None, case_shards=case_shards or None, costs=costs,
                                          **test_attrs(f"{name}-test-{target['name']}", src), **attrs))
+    out.append("\n" + call("hirsel_core_llvm_native_test", name="core-llvm-native", data=Raw('glob(["core/front/**", "crates/hirsel-core-rt/include/**", "crates/hirsel-core-ir/samples/**", "crates/hirsel-llvm/Cargo.toml"])')))
+    out.append("\n" + call("hirsel_library", name="core-llvm-runtime-fixture",
+        crate="core_llvm_runtime_fixture", crate_root="crates/hirsel-llvm/tests/core_runtime/lib.rs",
+        srcs=["crates/hirsel-llvm/tests/core_runtime/lib.rs"], features=[], deps=["//:hirsel-core-rt"],
+        manifest_dir="crates/hirsel-llvm", package_name="hirsel-llvm", version="0.1.0", edition="2024"))
     for name, binary, cwd, args, data in (
         ("workspace-layering", "hirsel-lir-test-it", "crates/hirsel-lir", ["dependencies::"],
          ["//tools/buck2:workspace-metadata.json", "crates/hirsel-lir/Cargo.toml"]),

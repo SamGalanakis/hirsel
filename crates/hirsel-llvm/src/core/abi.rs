@@ -21,6 +21,12 @@ pub(super) fn extension(t: Ty) -> &'static str {
     }
 }
 impl Return {
+    pub fn internal(fields: &[Ty]) -> Self {
+        let mut fields = fields.to_vec();
+        fields.push(Ty::Scalar(Scalar::U8));
+        Self::new(&fields)
+    }
+
     pub fn return_type(&self) -> String {
         match self.fields.as_slice() {
             [t] if !extension(*t).is_empty() => format!("{} {}", extension(*t).trim(), self.ty),
@@ -87,6 +93,16 @@ impl FunctionEmitter<'_> {
         self.calc(format!("getelementptr i8, ptr {p}, i64 {n}"))
     }
     pub(super) fn return_values(&mut self, values: &[String]) {
+        let mut returned = values.to_vec();
+        returned.push("0".into());
+        self.return_abi_values(&returned);
+    }
+    pub(super) fn return_failure(&mut self) {
+        let mut values = vec!["zeroinitializer".into(); self.abi.fields.len()];
+        *values.last_mut().unwrap() = "1".into();
+        self.return_abi_values(&values);
+    }
+    fn return_abi_values(&mut self, values: &[String]) {
         if self.abi.fields.len() <= 1 {
             if let Some(x) = values.first() {
                 self.line(format!("ret {} {x}", self.abi.ty));
@@ -133,13 +149,8 @@ impl FunctionEmitter<'_> {
         self.line(format!("ret {} {r}", self.abi.ty));
     }
     pub(super) fn call(&mut self, site: &CallSite) -> Result<()> {
-        if site.fail.is_some() {
-            return Err(Error::Unsupported(
-                "call failure successors pending FORM's v1 status ABI".into(),
-            ));
-        }
         let sig = &self.module.signatures[site.signature.index()];
-        let abi = Return::new(&sig.results);
+        let abi = Return::internal(&sig.results);
         let mut args = vec![];
         let scratch = if abi.fields.len() > 1 {
             Some(self.temp(&abi.storage))
@@ -175,9 +186,9 @@ impl FunctionEmitter<'_> {
         } else {
             Some(self.calc(call))
         };
-        let results = site.results.get(&self.body.pools.values).unwrap();
+        let mut values = vec![];
         if abi.fields.len() == 1 {
-            self.put(results[0], r.as_ref().unwrap());
+            values.push(r.unwrap());
         } else if let Some(p) = scratch {
             if !abi.indirect {
                 for (i, t) in abi.regs.iter().enumerate() {
@@ -194,11 +205,22 @@ impl FunctionEmitter<'_> {
                     self.line(format!("store {t} {x}, ptr {at}, align 1"));
                 }
             }
-            for ((v, t), off) in results.iter().zip(&abi.fields).zip(&abi.offsets) {
+            for (t, off) in abi.fields.iter().zip(&abi.offsets) {
                 let at = self.offset(&p, *off);
-                let x = self.calc(format!("load {}, ptr {at}, align 1", ty(*t)));
-                self.put(*v, &x);
+                values.push(self.calc(format!("load {}, ptr {at}, align 1", ty(*t))));
             }
+        }
+        let status = values.pop().unwrap();
+        let failed = self.calc(format!("icmp ne i8 {status}, 0"));
+        self.branch_failure(&failed, site.fail, None);
+        for (v, x) in site
+            .results
+            .get(&self.body.pools.values)
+            .unwrap()
+            .iter()
+            .zip(values)
+        {
+            self.put(*v, &x);
         }
         Ok(())
     }

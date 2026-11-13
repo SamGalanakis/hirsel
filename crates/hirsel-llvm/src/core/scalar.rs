@@ -142,30 +142,22 @@ impl FunctionEmitter<'_> {
                     _ => ArithOp::Mul,
                 };
                 let (x, flag) = self.overflow(t, op, a, b);
-                self.fail_if(&flag, fail)?;
+                self.fail_if(&flag, fail, 0)?;
                 x
             }
             BinaryOp::Rem => {
-                let zero = self.calc(format!("icmp eq {tt} {b}, 0"));
-                self.fail_if(&zero, fail)?;
-                // SEM-1: signed MIN % -1 is 0 and does not fail; a native signed
-                // remainder traps there, and x % 1 is 0 for every x.
-                let safe = if signed {
-                    let minus_one = self.calc(format!("icmp eq {tt} {b}, -1"));
-                    self.calc(format!("select i1 {minus_one}, {tt} 1, {tt} {b}"))
-                } else {
-                    b.into()
-                };
+                let zero=self.calc(format!("icmp eq {tt} {b}, 0"));self.fail_if(&zero,fail,2)?;
+                let safe=if signed {let minus_one=self.calc(format!("icmp eq {tt} {b}, -1"));self.calc(format!("select i1 {minus_one}, {tt} 1, {tt} {b}"))}else{b.into()};
                 self.calc(format!("{sign}rem {tt} {a}, {safe}"))
             }
             BinaryOp::Div => {
-                let over = self.div_overflow(t, a, b);
-                self.fail_if(&over, fail)?;
+                let zero=self.calc(format!("icmp eq {tt} {b}, 0"));self.fail_if(&zero,fail,2)?;
+                let over=self.div_overflow(t,a,b);self.fail_if(&over,fail,0)?;
                 self.calc(format!("{sign}div {tt} {a}, {b}"))
             }
             BinaryOp::Shl | BinaryOp::Shr => {
                 let outside = self.calc(format!("icmp uge {tt} {b}, {w}"));
-                self.fail_if(&outside, fail)?;
+                self.fail_if(&outside, fail, 0)?;
                 self.calc(format!(
                     "{} {tt} {a}, {b}",
                     if op == BinaryOp::Shl {

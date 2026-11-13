@@ -380,3 +380,15 @@ pub unsafe extern "C" fn hirsel_core_limit_exit(context: *mut Context) {
     // SAFETY: the caller owns the task context and ends its innermost bound.
     unsafe { &mut *context }.limit_exit();
 }
+
+/// FORM allocation refusal becomes failure only under a finalizer's grant.
+/// # Safety
+/// Context is live and exclusively held by its task.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_allocation_status(
+    context: *const Context,
+    pointer: *mut u8,
+) -> u8 {
+    // SAFETY: the emitter passes its live hidden task context.
+    u8::from(pointer.is_null() && unsafe { &*context }.finalizing != 0)
+}

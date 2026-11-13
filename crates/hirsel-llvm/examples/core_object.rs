@@ -1,8 +1,7 @@
-//! Developer entry for the CoreIR object-cost protocol. No old compiler image is loaded.
+//! Developer entry for the CoreIR object-cost protocol.
 hirsel_guard::install!();
-
-use hirsel_llvm::core::{Optimization, emit_object};
-
+use hirsel_intern::instructions::InstructionCounter;
+use hirsel_llvm::core::{Optimization, emit_object_observed};
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args_os().skip(1);
     let source = args
@@ -14,8 +13,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         Optimization::None
     };
-    let module = hirsel_core_ir::text::parse(&std::fs::read_to_string(source)?)
-        .map_err(|e| format!("{e:?}"))?;
-    std::fs::write(output, emit_object(&module, opt)?)?;
+    let counter = InstructionCounter::open()?;
+    let mut previous = counter.read()?;
+    let source = std::fs::read_to_string(source)?;
+    let module = hirsel_core_ir::text::parse(&source).map_err(|e| format!("{e:?}"))?;
+    let now = counter.read()?;
+    let mut rows = vec![("InputReadAndCoreParse".to_string(), now - previous)];
+    previous = now;
+    let mut owner = None;
+    let bytes = emit_object_observed(&module, opt, |stage| {
+        let now = counter.read().expect("exclusive instruction counter");
+        if let Some(owner) = owner.take() {
+            rows.push((owner, now - previous));
+        }
+        previous = now;
+        owner = Some(format!("{stage:?}"));
+    })?;
+    let now = counter.read()?;
+    rows.push((owner.unwrap(), now - previous));
+    std::fs::write(output, bytes)?;
+    for (stage, count) in rows {
+        println!("{stage}\t{count}");
+    }
     Ok(())
 }

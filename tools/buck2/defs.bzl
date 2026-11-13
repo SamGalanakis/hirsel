@@ -241,7 +241,7 @@ def _merged_archives(ctx, views):
         for key, artifact in view[RuntimeArchivesInfo].entries.items()
     })
 
-def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, package_name, version, edition, build_script = None, bin_exes = {}, data = [], runtime_archives = [], products = None, shards = 1, case_shards = {}, costs = None, seeded = False, skips = [], consumer_cases = {}, retained_cases = []):
+def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, package_name, version, edition, build_script = None, bin_exes = {}, data = [], files_env = {}, runtime_archives = [], products = None, shards = 1, case_shards = {}, costs = None, seeded = False, skips = [], consumer_cases = {}, retained_cases = []):
     """A libtest harness (`rustc --test`) and the test that runs it.
 
     `bin_exes` are the package's binaries, as Cargo's CARGO_BIN_EXE_<name>.
@@ -281,6 +281,7 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
     common = dict(
         harness = ":" + harness,
         data = data,
+        files_env = files_env,
         bin_exes = bin_exes,
         bin_exe_dir = bin_exe_dir,
         runtime_archives = runtime_archives,
@@ -1192,3 +1193,22 @@ _runtime_archives = rule(
         "_profile_llvm": attrs.dep(default = "toolchains//:llvm"),
     },
 )
+
+def hirsel_core_llvm_native_test(name, data):
+    """CoreIR executable agreement uses the core runtime, with no old std products."""
+    _rust_test(
+        name = name,
+        harness = "//:hirsel-llvm-unittest-harness",
+        data = data,
+        files_env = {"HIRSEL_CORE_RT_ARCHIVE": "//:core-llvm-runtime-fixture[staticlib]"},
+        args = ["core::", "context::probe_tests::"],
+        cwd = "crates/hirsel-llvm",
+        test_binary = "hirsel-llvm-unittest",
+        llvm = "root//tools/buck2/native-toolchain:llvm",
+        llvm_libraries = "toolchains//:llvm-libraries",
+        native_tools = native_tool_inputs(),
+        request = _request("hirsel-llvm-unittest"),
+        exec_compatible_with = _test_platform("hirsel-llvm-unittest"),
+        pool = not TESTS_ON_HOST,
+        visibility = ["PUBLIC"],
+    )

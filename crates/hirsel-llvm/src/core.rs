@@ -3,6 +3,7 @@
 
 mod abi;
 mod scalar;
+mod storage;
 #[cfg(test)]
 mod tests;
 
@@ -72,15 +73,11 @@ pub fn emit_ir(module: &Module) -> Result<String> {
         )
         .unwrap();
     }
+    let recipes = hirsel_core_layout::compute(&module.types).expect("producer layouts");
     let mut intrinsics = BTreeSet::new();
     for (i, f) in module.functions.iter().enumerate() {
         let sig = &module.signatures[f.signature.index()];
-        if sig.never {
-            return Err(Error::Unsupported(
-                "never signatures and the v1 failure ABI".into(),
-            ));
-        }
-        let abi = abi::Return::new(&sig.results);
+        let abi = abi::Return::internal(&sig.results);
         let name = symbol(module, FuncId(i as u32));
         let mut params = vec![];
         if abi.indirect {
@@ -110,6 +107,8 @@ pub fn emit_ir(module: &Module) -> Result<String> {
         let mut e = FunctionEmitter {
             module,
             body,
+            recipes: &recipes,
+            address_kinds: vec![storage::At::Other; body.addresses.len()],
             abi,
             code: String::new(),
             allocations: String::new(),
@@ -120,10 +119,12 @@ pub fn emit_ir(module: &Module) -> Result<String> {
             writeln!(e.allocations, "  %v{i} = alloca {}", ty(*t)).unwrap();
         }
         for (i, t) in body.slots.iter().enumerate() {
-            let PlaceTy::Value(t) = *t else {
-                return Err(Error::Unsupported("declared slots and drop recipes".into()));
-            };
-            writeln!(e.allocations, "  %s{i} = alloca {}", ty(t)).unwrap();
+            let (bytes, align) = e.place_layout(*t);
+            writeln!(
+                e.allocations,
+                "  %s{i} = alloca [{bytes} x i8], align {align}"
+            )
+            .unwrap();
         }
         for i in 0..body.addresses.len() {
             writeln!(e.allocations, "  %a{i} = alloca ptr").unwrap();
@@ -160,6 +161,7 @@ pub fn emit_ir(module: &Module) -> Result<String> {
         )
         .unwrap();
     }
+    storage::drop_glue(module, &recipes, &mut text, &mut intrinsics)?;
     for decl in intrinsics {
         writeln!(text, "{decl}").unwrap();
     }
@@ -170,33 +172,61 @@ pub fn emit_ir(module: &Module) -> Result<String> {
 /// retained LLVM target/handle machinery, without the old product pipeline.
 /// The caller supplies its linker and entry harness; objects have FORM symbols.
 pub fn emit_object(module: &Module, opt: Optimization) -> Result<Vec<u8>> {
-    compile(module, opt, |_| ()).map(|(bytes, ())| bytes)
+    compile(module, opt, |_| (), |_| ()).map(|(bytes, ())| bytes)
+}
+
+/// Exclusive compilation stages, for the developer measurement entry.
+#[derive(Clone, Copy, Debug)]
+pub enum CompilationStage {
+    TextConstruction,
+    TargetSetup,
+    IrParse,
+    Optimization,
+    ObjectEmission,
+    Disposal,
+}
+
+/// Observe stage boundaries without changing the generated program.
+pub fn emit_object_observed(
+    module: &Module,
+    opt: Optimization,
+    observer: impl FnMut(CompilationStage),
+) -> Result<Vec<u8>> {
+    compile(module, opt, |_| (), observer).map(|(bytes, ())| bytes)
 }
 
 #[cfg(test)]
 pub(crate) fn emitted_ir(module: &Module, opt: Optimization) -> Result<String> {
-    compile(module, opt, |llvm| llvm.text()).map(|(_, ir)| ir)
+    compile(module, opt, |llvm| llvm.text(), |_| ()).map(|(_, ir)| ir)
 }
 
 fn compile<R>(
     module: &Module,
     opt: Optimization,
     inspect: impl FnOnce(&LlvmModule<'_>) -> R,
+    mut observer: impl FnMut(CompilationStage),
 ) -> Result<(Vec<u8>, R)> {
+    observer(CompilationStage::TextConstruction);
     let ir = emit_ir(module)?;
+    observer(CompilationStage::TargetSetup);
     let target = hirsel_lir::layout_types::TargetSpec::x86_64_unknown_linux_gnu();
     let machine =
         TargetMachine::new(&target, matches!(opt, Optimization::Speed)).map_err(Error::Llvm)?;
+    observer(CompilationStage::IrParse);
     let context = Context::new();
     let module = LlvmModule::parse(&context, "hirsel-core", &ir).map_err(Error::Llvm)?;
     module.set_target(&machine);
+    observer(CompilationStage::Optimization);
     if matches!(opt, Optimization::Speed) {
         module
             .run_passes("default<O3>", &machine)
             .map_err(Error::Llvm)?;
     }
+    observer(CompilationStage::ObjectEmission);
     let bytes = module.emit_object(&machine).map_err(Error::Llvm)?;
-    Ok((bytes, inspect(&module)))
+    let result = inspect(&module);
+    observer(CompilationStage::Disposal);
+    Ok((bytes, result))
 }
 
 fn ty(t: Ty) -> String {
@@ -220,6 +250,8 @@ fn size(t: Ty) -> u64 {
 struct FunctionEmitter<'a> {
     module: &'a Module,
     body: &'a Body,
+    recipes: &'a [hirsel_core_layout::Recipe],
+    address_kinds: Vec<storage::At>,
     abi: abi::Return,
     code: String,
     allocations: String,
@@ -293,17 +325,38 @@ impl FunctionEmitter<'_> {
             ty(t)
         ))
     }
-    fn fail_if(&mut self, flag: &str, fail: Option<BlockId>) -> Result<()> {
-        let Some(fail) = fail else {
-            return Err(Error::Unsupported(
-                "propagated scalar failures pending FORM's v1 status ABI".into(),
-            ));
-        };
-        let next = self.next;
-        self.next += 1;
-        self.line(format!("br i1 {flag}, label %b{}, label %ok{next}", fail.0));
-        writeln!(self.code, "ok{next}:").unwrap();
+    fn fail_if(&mut self, flag: &str, fail: Option<BlockId>, cause: u8) -> Result<()> {
+        self.branch_failure(flag, fail, Some(cause));
         Ok(())
+    }
+    fn branch_failure(&mut self, flag: &str, fail: Option<BlockId>, cause: Option<u8>) {
+        let n = self.next;
+        self.next += 1;
+        self.line(format!("br i1 {flag}, label %bad{n}, label %ok{n}"));
+        writeln!(self.code, "bad{n}:").unwrap();
+        if let Some(cause) = cause {
+            self.raise(cause);
+        }
+        self.propagate_to(fail);
+        writeln!(self.code, "ok{n}:").unwrap();
+    }
+    fn propagate_to(&mut self, fail: Option<BlockId>) {
+        if let Some(fail) = fail {
+            self.line(format!("br label %b{}", fail.0));
+        } else {
+            self.return_failure();
+        }
+    }
+    fn raise(&mut self, kind: u8) {
+        self.intrinsics.insert(
+            "declare void @hirsel_core_raise(ptr, ptr byval({ i8, i64, ptr, ptr }) align 8)".into(),
+        );
+        let cause = self.temp("{ i8, i64, ptr, ptr }");
+        self.line(format!(
+            "store {{ i8, i64, ptr, ptr }} zeroinitializer, ptr {cause}, align 8"
+        ));
+        self.line(format!("store i8 {kind}, ptr {cause}, align 8"));
+        self.line(format!("call void @hirsel_core_raise(ptr %context, ptr byval({{ i8, i64, ptr, ptr }}) align 8 {cause})"));
     }
     fn inst(&mut self, inst: &Inst) -> Result<()> {
         match *inst {
@@ -336,7 +389,7 @@ impl FunctionEmitter<'_> {
                     UnaryOp::Neg if t.is_float() => self.calc(format!("fneg {} {x}", ty(t))),
                     UnaryOp::Neg => {
                         let (v, flag) = self.overflow(t, ArithOp::Sub, "0", &x);
-                        self.fail_if(&flag, fail)?;
+                        self.fail_if(&flag, fail, 0)?;
                         v
                     }
                 };
@@ -446,36 +499,7 @@ impl FunctionEmitter<'_> {
                 );
                 self.put(result, &x);
             }
-            Inst::Address { address, .. } => {
-                let info = &self.body.addresses[address.index()];
-                let mut p = match info.base {
-                    AddressBase::Slot(s) => format!("%s{}", s.0),
-                    AddressBase::Value(v) => self.get(v),
-                    AddressBase::Address(a) => self.address(a),
-                };
-                for step in info.steps.get(&self.body.pools.steps).unwrap() {
-                    match *step {
-                        Step::Deref => p = self.calc(format!("load ptr, ptr {p}")),
-                        Step::Index(v) => {
-                            let PlaceTy::Value(t) = info.ty else {
-                                return Err(Error::Unsupported("declared projections".into()));
-                            };
-                            let x = self.get(v);
-                            p = self.calc(format!(
-                                "getelementptr {}, ptr {p}, {} {x}",
-                                ty(t),
-                                ty(self.vty(v))
-                            ));
-                        }
-                        _ => {
-                            return Err(Error::Unsupported(
-                                "declared projections and inline arrays".into(),
-                            ));
-                        }
-                    }
-                }
-                self.line(format!("store ptr {p}, ptr %a{}", address.0));
-            }
+            Inst::Address { address, fail } => self.project(address, fail)?,
             Inst::Read {
                 result, address, ..
             } => {
@@ -512,7 +536,7 @@ impl FunctionEmitter<'_> {
                 self.put(result, &x);
             }
             Inst::Call { call } => self.call(&self.body.calls[call.index()])?,
-            _ => return Err(Error::Unsupported("FORM v1 runtime operations".into())),
+            _ => self.storage(inst)?,
         }
         Ok(())
     }
@@ -592,10 +616,16 @@ impl FunctionEmitter<'_> {
                 self.return_values(&xs);
             }
             Terminator::Unreachable => self.line("unreachable"),
-            _ => {
-                return Err(Error::Unsupported(
-                    "raise/propagate and the v1 failure ABI".into(),
-                ));
+            Terminator::Propagate => self.return_failure(),
+            Terminator::Raise { cause, cleanup } => {
+                match cause {
+                    RaiseCause::Unwrap => self.raise(3),
+                    RaiseCause::Bounds => self.raise(1),
+                    RaiseCause::Fail(_) => {
+                        return Err(Error::Unsupported("owned failure messages".into()));
+                    }
+                }
+                self.propagate_to(cleanup);
             }
         }
         Ok(())

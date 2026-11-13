@@ -23,6 +23,22 @@ The port's entry is:
             ->Result[u32,helper.Error] {dispatch(c,n,w,i)})
     }
 
+A port that spawns or joins tasks uses `harness.main_wait`. Its callback has the
+same arguments and result as the ordinary dispatcher, with `waits` on its type.
+The entry borrows its Tasks capability in the scoped closure:
+
+    pub fn main(tasks:Tasks,out:Stdout,d:Dir,argv:Args)->Result[(),Exit] waits {
+        harness.main_wait(out,d,argv,
+            fn(c:String,n:String,w:u64,i:u64)->Result[u32,helper.Error] waits {
+                dispatch_wait(tasks,c,n,w,i)
+            })
+    }
+
+Here `dispatch_wait(tasks:Tasks,config:String,name:String,warmup:u64,iterations:u64)`
+returns `Result[u32,helper.Error] waits`. Both harness entries call the same private
+config reader and driver. The existing non-waiting entry and ports need no change.
+The correctness runner grants Tasks for either entry.
+
 The command-line arguments are a config filename relative to the granted Dir,
 then the exact task name. The harness reads the config, obtains counts and expected
 checksum, calls the dispatcher, and prints:
@@ -55,3 +71,14 @@ seven decimal places through `float.push_fixed64`, then applies `checksum_str`.
 It returns `Result[u32,helper.Error]` and propagates formatting Capacity. The
 bootstrap helper laws check independently derived hashes for zero, positive,
 negative and fractional values, plus Capacity under a zero-byte bound.
+
+The waiting control in `tests/waiting.hirsel` spawns one child and joins it. The
+configured one warmup plus forty iterations supplies 41; the child returns 42.
+Run it with the same compiler/runtime arguments as above:
+
+    python3 core/tools/langarena.py --compiler <compiler> --runtime <archive> --module tests/waiting --task Task::Join --config core/langarena/tests/waiting-test.json --backend both --report /tmp/wait.json
+
+Its negative control uses `waiting-mismatch.json` and `--expect-mismatch 42`.
+That option requires the exact `checksum=42 expected=41 status=ERR` line and exit
+status 1; an arbitrary failure cannot pass the control. Ordinary runs continue to
+require the configured checksum, status OK and exit 0.

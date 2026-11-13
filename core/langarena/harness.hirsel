@@ -2,13 +2,19 @@
 // of callable constants. A task prepares once, warms up and runs on the same state.
 pub fn main(out:Stdout,d:Dir,argv:Args,
     dispatch:scoped fn(String,String,u64,u64)->Result[u32,helper.Error])->Result[(),Exit] waits {
+    main_wait(out,d,argv,dispatch)
+}
+
+// Waiting dispatchers may borrow Tasks or other capabilities from their main.
+pub fn main_wait(out:Stdout,d:Dir,argv:Args,
+    dispatch:scoped fn(String,String,u64,u64)->Result[u32,helper.Error] waits)->Result[(),Exit] waits {
     match execute(out,d,argv,dispatch) {
         Ok(())=>Ok(()),
         Error(_)=>Error(Exit(status:1)),
     }
 }
 fn execute(out:Stdout,d:Dir,argv:Args,
-    dispatch:scoped fn(String,String,u64,u64)->Result[u32,helper.Error])->Result[(),helper.Error] waits {
+    dispatch:scoped fn(String,String,u64,u64)->Result[u32,helper.Error] waits)->Result[(),helper.Error] waits {
     let Some(path)=args.get(argv,0) else {return Error(Config)}
     let Some(name)=args.get(argv,1) else {return Error(Config)}
     let config=match std.file.read_string(d,path) {Ok(take s)=>take s,Error(_)=>return Error(Config)}

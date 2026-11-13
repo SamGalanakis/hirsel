@@ -42,7 +42,11 @@ def main():
     parser.add_argument('--backend', choices=['both', 'cranelift', 'llvm'], default='both')
     parser.add_argument('--report', type=Path)
     parser.add_argument('--helper-laws', action='store_true')
+    parser.add_argument('--expect-mismatch', type=int, metavar='ACTUAL',
+                        help='negative control: require checksum ACTUAL, status ERR and exit 1')
     args = parser.parse_args()
+    if args.expect_mismatch is not None and (args.helper_laws or not 0 <= args.expect_mismatch <= 4294967295):
+        parser.error('--expect-mismatch requires a u32 checksum and a task run')
     rows = []
     with tempfile.TemporaryDirectory(prefix='hirsel-langarena-') as temporary:
         scratch = Path(temporary)
@@ -82,7 +86,13 @@ def main():
                     item = next(c for c in config if c['name'] == args.task) if isinstance(config, list) else config[args.task]
                     checksum = item['checksum']
                     expected = f'{args.task} checksum={checksum} expected={checksum} status=OK\n'
-                row['passed'] = run.returncode == 0 and row['stdout'] == expected and not row['stderr']
+                status = 0
+                if args.expect_mismatch is not None:
+                    if args.expect_mismatch == checksum:
+                        parser.error('--expect-mismatch checksum equals the configured checksum')
+                    expected = f'{args.task} checksum={args.expect_mismatch} expected={checksum} status=ERR\n'
+                    status = 1
+                row['passed'] = run.returncode == status and row['stdout'] == expected and not row['stderr']
             rows.append(row)
             print(json.dumps(row), flush=True)
     if args.report:

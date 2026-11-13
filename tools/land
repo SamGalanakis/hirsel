@@ -83,7 +83,15 @@ CLIPPY_TWINS = 'attrregexfilter(name, "-clippy$", kind("^rust_(library|binary)$"
 # These reuse the existing harnesses with source data only.
 SOURCE_AUDITS = ('//:land-audit-workspace-layering', '//:land-audit-runtime-schema',
                  '//:land-audit-runtime-descriptors', '//:land-audit-environment-inventory')
-CORE_ACCEPTANCE = ('//:land-core-cranelift-custody',)
+# Whole suites qualify here only after every body passes. Outstanding suites and
+# their fixing owners are recorded in core-cranelift-904/RED-CENSUS.md.
+CORE_ACCEPTANCE = (
+    '//:hirsel-core-contract-unittest', '//:hirsel-core-ids-unittest',
+    '//:hirsel-core-syntax-unittest', '//:hirsel-core-resolve-unittest',
+    '//:hirsel-core-layout-unittest', '//:hirsel-core-ir-unittest',
+    '//:hirsel-core-front-unittest', '//:hirsel-cranelift-unittest',
+    '//:hirsel-llvm-lazy-unittest', '//:land-core-cranelift-custody',
+)
 # A target literal in a tools/land: the tool on main checks every batch this
 # tree joins, so each one it names must exist in the tree submitted.
 NAMED = re.compile(r'''['"](?:root)?//:([A-Za-z0-9_.+-]+)['"]''')
@@ -552,7 +560,8 @@ def full(tree, screened=False):
             report = (check('workspace build', [PY, 'tools/buck2/event_logs.py', 'build', *CONFIG,
                                                 '--materializations', 'none', *targets])
                       or check('Clippy', [PY, 'tools/buck2/clippy.py'])
-                      or check('CoreIR custody', [BUCK2, 'test', *CONFIG, *CORE_ACCEPTANCE]))
+                      or check('Core suites', [BUCK2, 'test', *CONFIG, '-c', 'hirsel.full=true', *CORE_ACCEPTANCE,
+                                                   '--', '--test-arg=--test-threads=1']))
     # fast(tree) checked this exact tree's formatting (now or when screened);
     # fmt checks Rust plus the changed cases against the candidate formatter; no rerun.
     if not unchanged(tree):

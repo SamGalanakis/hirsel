@@ -70,6 +70,10 @@ if os.environ.get('FAKE_RED_AFTER_RACE') and STAGE == os.environ['FAKE_RED_AFTER
 FAKE_BUCK = '''#!/bin/sh
 if [ "$1" = test ]; then
   case "$*" in
+    *hirsel-core-ir-unittest*)
+      if [ -f broken-core-suite ]; then echo 'core evaluator body failed' >&2; exit 1; fi ;;
+  esac
+  case "$*" in
     *land-core-cranelift-custody*)
       if [ -f broken-custody ]; then echo 'custody native agreement failed' >&2; exit 1; fi ;;
     *land-audit-runtime-schema*)
@@ -168,8 +172,18 @@ class Land(unittest.TestCase):
         self.git(self.lane, 'commit', '-qm', 'break custody')
         refused = self.land()
         self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
-        self.assertIn('FAIL  CoreIR custody', refused.stdout)
+        self.assertIn('FAIL  Core suites', refused.stdout)
         self.assertIn('custody native agreement failed', refused.stdout)
+        self.assertEqual(self.main_log(), ['base'])
+
+    def test_red_whole_core_suite_refuses_the_push(self):
+        (self.lane / 'broken-core-suite').write_text('broken evaluator body\n')
+        self.git(self.lane, 'add', 'broken-core-suite')
+        self.git(self.lane, 'commit', '-qm', 'break a core suite')
+        refused = self.land()
+        self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+        self.assertIn('FAIL  Core suites', refused.stdout)
+        self.assertIn('core evaluator body failed', refused.stdout)
         self.assertEqual(self.main_log(), ['base'])
 
     def test_detached_wrapper_records_submission_and_one_completion_with_the_landed_sha(self):
@@ -1238,7 +1252,7 @@ if not marker.exists():
         self.git(self.lane, 'commit', '-qm', 'noncanonical changed case')
         refused = self.land(FAKE_CASE_FORMATTER=formatter)
         self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
-        self.assertIn('FAIL  screen: formatting', refused.stdout)
+        self.assertIn('FAIL  screen: formatting', refused.stdout, refused.stdout + refused.stderr)
         self.assertIn('not-canonical.hir: corpus source is not formatter-canonical', refused.stdout)
         self.assertNotIn('pass  workspace build', refused.stdout)
         self.assertEqual(self.main_log(), ['base'])
@@ -1248,7 +1262,7 @@ if not marker.exists():
         self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
         self.assertNotIn('pass  workspace build', refused.stdout)
         self.assertNotIn('pass  Clippy', refused.stdout)
-        self.assertIn('FAIL  screen: formatting', refused.stdout)
+        self.assertIn('FAIL  screen: formatting', refused.stdout, refused.stdout + refused.stderr)
         self.assertEqual(self.main_log(), ['base'])
 
     def conflicting_lanes(self, path):
@@ -1307,7 +1321,7 @@ if not marker.exists():
     def test_a_red_check_refuses_the_push_and_prints_its_first_error(self):
         refused = self.land(FAKE_FMT_RED='1')
         self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
-        self.assertIn('FAIL  screen: formatting', refused.stdout)
+        self.assertIn('FAIL  screen: formatting', refused.stdout, refused.stdout + refused.stderr)
         self.assertIn('Diff in crates/a/src/lib.rs', refused.stdout)
         self.assertNotIn('checking 3 files', refused.stdout)
         self.assertIn('refusing to push a red tree', refused.stdout)

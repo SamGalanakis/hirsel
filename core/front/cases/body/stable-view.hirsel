@@ -1,0 +1,4 @@
+// OWN-25: a stable value is read where a view of its type is expected, with no `view`.
+// expect: gap values of this type are not built
+stable type S { x: u64 }
+fn f(s: S) -> u64 { let v: View[S] = s; 0 }

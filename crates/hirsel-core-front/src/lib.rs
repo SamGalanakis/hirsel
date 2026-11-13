@@ -96,6 +96,14 @@ pub struct Program<'a> {
 }
 
 impl<'a> Program<'a> {
+    /// The core prelude type named `name`, when the program has core.
+    pub(crate) fn core_decl(&self, name: &str) -> Option<DeclId> {
+        self.decls
+            .iter()
+            .position(|d| decls::is_core_prelude(&d.path, &[name]))
+            .map(|i| DeclId(i as u32))
+    }
+
     /// Resolve every item, then publish summaries and signatures (slice a).
     pub fn declare(index: &'a NameIndex, modules: &'a [ModuleInput]) -> Self {
         let resolutions = modules

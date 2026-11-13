@@ -384,6 +384,10 @@ impl<'c, 'a> Cx<'c, 'a> {
             self.refuse("PROG-2", n, format!("`{a}` is opaque outside its module"));
             return (ERROR, None);
         }
+        // A stable value is written through a writer (MEM-4, `emit(f)` payloads).
+        if matches!(decl.repr, Repr::Stable) {
+            return self.gap_ty(n, "stable values are not built");
+        }
         let k = fields.len();
         if args.len() < k {
             self.refuse_at(
@@ -402,8 +406,27 @@ impl<'c, 'a> Cx<'c, 'a> {
             .map(|i| self.t.mk(TyKind::Param(i)))
             .collect();
         let own = self.t.mk(TyKind::Adt(d, params));
+        // A resource literal is `Result[R, (Capacity, F)]` (T1.2, LANG-14): F the one
+        // field, or the tuple of them in declaration order, or bare `Capacity` for none.
+        let lit = if matches!(decl.repr, Repr::Resource) {
+            let (Some(result), Some(cap)) = (p.core_decl("Result"), p.core_decl("Capacity")) else {
+                return self.gap_ty(n, "resource literals are not built");
+            };
+            let cap = self.t.mk(TyKind::Adt(cap, vec![]));
+            let back = match fields {
+                [] => cap,
+                [f] => self.t.mk(TyKind::Tuple(vec![cap, f.ty])),
+                fs => {
+                    let f = self.t.mk(TyKind::Tuple(fs.iter().map(|f| f.ty).collect()));
+                    self.t.mk(TyKind::Tuple(vec![cap, f]))
+                }
+            };
+            Some(self.t.mk(TyKind::Adt(result, vec![own, back])))
+        } else {
+            None
+        };
         if let Some(w) = want {
-            self.unify(own, w.ty, &mut found);
+            self.unify(lit.unwrap_or(own), w.ty, &mut found);
         }
         let mut vals: Vec<Option<ValueId>> = vec![None; k];
         let mut later = vec![];
@@ -473,6 +496,11 @@ impl<'c, 'a> Cx<'c, 'a> {
             return (ERROR, None);
         }
         let tys: Vec<TyId> = found.into_iter().flatten().collect();
+        if let Some(lit) = lit {
+            let ty = subst(&mut self.t, lit, &tys);
+            self.gap(n, "resource literals are not built");
+            return (ty, None);
+        }
         let ty = self.t.mk(TyKind::Adt(d, tys.clone()));
         let id = match self.rep(ty) {
             Ok(Rep::Place(id)) => id,

@@ -1,0 +1,5 @@
+// A type with a refused part satisfies every check silently (LANG-11): the payload of
+// `Some` is not compared again with the unknown `Nope` of the result.
+// expect: refuse LANG-7 at 5:18
+// expect: gap values of this type are not built
+fn f() -> Option[Nope] { Some(1u64) }

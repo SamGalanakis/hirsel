@@ -648,7 +648,18 @@ impl<'c, 'a> Cx<'c, 'a> {
             (TyKind::Adt(d, a), TyKind::Adt(e, b))
                 if a == b && is_core_prelude(&self.p.decls[d.index()].path, &["SeqSpan"])
                     && is_core_prelude(&self.p.decls[e.index()].path, &["IndexedSpan"]));
-        if t != w.ty && !viewed && !sequence && t != NEVER && t != ERROR && w.ty != ERROR {
+        // OWN-25: a stable value is read where a view of its type is expected.
+        let stable = matches!((self.t.kind(w.ty), self.t.kind(t)),
+            (TyKind::View(x), TyKind::Adt(d, _))
+                if *x == t && matches!(self.p.decls[d.index()].repr, Repr::Stable));
+        if t != w.ty
+            && !viewed
+            && !sequence
+            && !stable
+            && t != NEVER
+            && !mentions_error(&self.t, t)
+            && !mentions_error(&self.t, w.ty)
+        {
             let (a, b) = (self.name(w.ty), self.name(t));
             self.refuse("LANG-11", n, format!("expected `{a}`, found `{b}`"));
         }
@@ -1053,5 +1064,19 @@ impl<'c, 'a> Cx<'c, 'a> {
         };
         self.synth[(n.0 - self.item.range.nodes.start) as usize] = if r { 1 } else { 2 };
         r
+    }
+}
+
+/// Whether `ty` is or contains the error type: a part that already produced a refusal
+/// or gap, so a comparison involving it is not refused again.
+fn mentions_error(t: &impl TyRead, ty: TyId) -> bool {
+    match t.kind(ty) {
+        TyKind::Error => true,
+        TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs.iter().any(|&x| mentions_error(t, x)),
+        TyKind::Array(x, _) | TyKind::View(x) => mentions_error(t, *x),
+        TyKind::Fn(ps, r, _) => {
+            mentions_error(t, *r) || ps.iter().any(|&(_, x)| mentions_error(t, x))
+        }
+        TyKind::Never | TyKind::Unit | TyKind::Scalar(_) | TyKind::Param(_) | TyKind::Hole => false,
     }
 }

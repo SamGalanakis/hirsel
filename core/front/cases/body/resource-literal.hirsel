@@ -1,0 +1,9 @@
+// A resource literal is `Result[R, (Capacity, F)]`, F its one field (T1.2, LANG-14):
+// it goes where that result is expected and is refused where the bare resource is.
+// expect: refuse LANG-11 at 8:18
+// expect: gap cleanup of own values is not built
+// expect: gap resource literals are not built
+resource type R { id: u64 }
+fn hold(take r: Result[R, (Capacity, u64)]) -> u64 { 0 }
+fn bare() -> R { R(id: 1) }
+fn passes() -> u64 { hold(R(id: 1)) }

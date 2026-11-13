@@ -1,4 +1,4 @@
-//! FAIL-15 symbolic counter edges and native OOM are separate process outcomes.
+//! FAIL-15 full counters stop the process before cleanup or join delivery.
 use super::*;
 use crate::{process::*, tasks::*};
 use std::process::Command;

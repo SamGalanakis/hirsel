@@ -52,3 +52,51 @@ fn core_operations_cranelift() { core_operations(Backend::Cranelift); }
 #[test]
 #[ignore = "explicit native integration target"]
 fn core_operations_llvm() { core_operations(Backend::Llvm); }
+
+fn counted_operations(backend: Backend) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut vectors = vec![
+        ("fn run() -> u64 { box.unbox(result.unwrap(box.new(7u64))) }".to_owned(), 8, 7),
+        ("fn run() -> u64 { box.unbox(result.unwrap(box.new(()))); 7u64 }".to_owned(), 0, 7),
+        ("fn run() -> u64 { let r = box.new(7u64); match take r { Ok(_) => 0u64, Error((e,x)) => e.requested+e.available+x } }".to_owned(), 7, 22),
+        ("fn run() -> u64 { let r = bound bytes 0 { box.new(7u64) }; match take r { Ok(Error((e,x))) => e.requested+x, _ => 0u64 } }".to_owned(), 1000, 15),
+        ("resource type R:send { a:u64,b:u64 }\nfn run() -> u64 { let c:Result[(Sender[R],Receiver[R]),Capacity] = channel.new(1); match take c { Ok(_) => 0u64, Error(e) => e.requested+e.available } }".to_owned(), 71, 143),
+        ("resource type R:send { a:u64,b:u64 }\nfn run() -> u64 { let r = result.unwrap(R(a:7u64,b:11u64)); let c = box.new(take r); match take c { Ok(_) => 0u64, Error((e,take back)) => e.requested*10000u64+e.available*100u64+back.a+back.b } }".to_owned(), 55, 80718),
+    ];
+    for (module, ty) in [("rc", "Rc"), ("arc", "Arc")] {
+        vectors.push((format!("fn end(take h:{ty}[u64]) {{}}\nfn run() -> u64 {{ let h = result.unwrap({module}.new(7u64)); let other = {module}.share(h); let last = match {module}.try_unwrap(take h) {{ Ok(_) => return 0u64, Error(take back) => back }}; end(take other); result.unwrap({module}.try_unwrap(take last)) }}"),16,7));
+        vectors.push((format!("type Data:shareable+send {{ a:u8,b:Box[u64] }}\nfn run() -> u64 {{ let b = result.unwrap(box.new(41u64)); let data = Data(a:7u8,b:take b); let r = {module}.new(take data); match take r {{ Ok(_) => 0u64, Error((e,take back)) => {{ let Data(a:_,b:take boxed) = take back; let v = box.unbox(take boxed); e.requested*10000u64+e.available*100u64+v }} }} }}"),31,242341));
+        vectors.push((format!("fn run() -> u64 {{ let b = result.unwrap(box.new(41u64)); let h = result.unwrap({module}.new(take b)); let b = result.unwrap({module}.try_unwrap(take h)); box.unbox(take b) }}").replacen("let b = result.unwrap", "let first = result.unwrap", 1).replacen("new(take b)", "new(take first)", 1),24,41));
+    }
+    let mut failures = vec![];
+    for (source, room, expected) in vectors {
+        let source = format!("{source}\npub fn main() -> Result[(),Exit] {{ if run()=={expected}u64 {{ Ok(()) }} else {{ Error(Exit(status:1)) }} }}\n");
+        let dir = tempfile::tempdir().unwrap();
+        let mut request = source_request(&source, dir.path());
+        request.inputs.packages[1] = PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+        let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
+        let entry = DefPath::from_full("app@1/main/main").unwrap();
+        let options = NativeOptions { backend, optimize:false, target:TARGET.into(),
+            runtime:root.join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
+            include:root.join("crates/hirsel-core-rt/include"),
+            cc:PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
+            store:dir.path().join("native"), output:dir.path().join("program"), root_limit:288+room,
+            instance_limit:64, directories:vec![], grant_mask:0 };
+        let built = match product.build(&entry, &options) {
+            Ok(built) => built,
+            Err(e) => { failures.push(format!("{source}: {e}")); continue; }
+        };
+        let output = Command::new(&built.executable).output().unwrap();
+        if !output.status.success() || !output.stdout.is_empty() || !output.stderr.is_empty() {
+            failures.push(format!("{source}: exit {:?}, stderr {:?}", output.status.code(), String::from_utf8_lossy(&output.stderr)));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+#[ignore = "explicit native integration target"]
+fn counted_operations_cranelift() { counted_operations(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn counted_operations_llvm() { counted_operations(Backend::Llvm); }

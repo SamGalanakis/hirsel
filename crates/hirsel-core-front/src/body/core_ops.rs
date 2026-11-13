@@ -1,10 +1,14 @@
 //! Binding of canonical core declarations to their call-site kernels.
 //! Identity is resolved once when the program's declarations are published.
 use super::*;
-use hirsel_core_ir::RtOp;
+use hirsel_core_ir::{Counted, RtOp};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Kernel {
+    NewOwner(Option<Counted>),
+    Share(Counted),
+    TryUnwrap(Counted),
+    Unbox,
     Spawn,
     CheckCancel,
     Cancel,
@@ -37,13 +41,13 @@ macro_rules! operations {
 }
 
 operations! {
-    ("arc", "new", Lane::Value),
-    ("arc", "share", Lane::Value),
-    ("arc", "try_unwrap", Lane::Value),
+    ("arc", "new", Lane::Runtime(Kernel::NewOwner(Some(Counted::Arc)))),
+    ("arc", "share", Lane::Runtime(Kernel::Share(Counted::Arc))),
+    ("arc", "try_unwrap", Lane::Runtime(Kernel::TryUnwrap(Counted::Arc))),
     ("args", "len", Lane::Runtime(Kernel::Blocked("provider extern rows are not built (FOR FORM)"))),
     ("args", "get", Lane::Runtime(Kernel::Blocked("provider extern rows are not built (FOR FORM)"))),
-    ("box", "new", Lane::Value),
-    ("box", "unbox", Lane::Value),
+    ("box", "new", Lane::Runtime(Kernel::NewOwner(None))),
+    ("box", "unbox", Lane::Runtime(Kernel::Unbox)),
     ("channel", "new", Lane::Runtime(Kernel::ChannelNew)),
     ("channel", "sender", Lane::Runtime(Kernel::ChannelSender)),
     ("channel", "send", Lane::Runtime(Kernel::Send)),
@@ -124,9 +128,9 @@ operations! {
     ("map", "set", Lane::Value),
     ("map", "remove", Lane::Value),
     ("option", "unwrap", Lane::Value),
-    ("rc", "new", Lane::Value),
-    ("rc", "share", Lane::Value),
-    ("rc", "try_unwrap", Lane::Value),
+    ("rc", "new", Lane::Runtime(Kernel::NewOwner(Some(Counted::Rc)))),
+    ("rc", "share", Lane::Runtime(Kernel::Share(Counted::Rc))),
+    ("rc", "try_unwrap", Lane::Runtime(Kernel::TryUnwrap(Counted::Rc))),
     ("result", "unwrap", Lane::Value),
     ("seq", "len", Lane::Language),
     ("seq", "nth", Lane::Language),
@@ -209,6 +213,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<ValueId> {
         match kernel {
+            Kernel::NewOwner(kind) => self.runtime_new_owner(kind, types[0], vals[0], result, n),
+            Kernel::Share(kind) => self.runtime_share(kind, vals[0]?, result, n),
+            Kernel::TryUnwrap(kind) => self.runtime_try_unwrap(kind, types[0], vals[0]?, result, n),
+            Kernel::Unbox => self.runtime_unbox(types[0], vals[0]?, n),
             Kernel::Blocked(what) => {
                 self.gap(n, what);
                 None
@@ -366,6 +374,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(result)
     }
 
+    fn runtime_nonzero(&mut self, ty: Ty, value: ValueId, n: NodeId) -> Option<ValueId> {
+        let right = self.konst(ty, 0, n)?;
+        let result = self.value(Ty::Scalar(Scalar::Bool));
+        self.inst(
+            Inst::Compare {
+                result,
+                op: CompareOp::Ne,
+                left: value,
+                right,
+            },
+            n,
+        );
+        Some(result)
+    }
+
     fn runtime_branch(&mut self, condition: ValueId, yes: BlockId, no: BlockId, n: NodeId) {
         let yes = self.edge(yes, &[]);
         let no = self.edge(no, &[]);
@@ -443,8 +466,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let requested = self.runtime_charge(cap, size, base, n)?;
         let [sender, receiver, available] =
             self.runtime_row(RtOp::ChannelNew { item: id }, &[Arg::Value(cap)], n)?;
-        let null = self.runtime_compare(Ty::Ptr, sender, 0, n)?;
-        let ok = self.emit_unary(UnaryOp::Not, BOOL, Some(null), n)?;
+        let ok = self.runtime_nonzero(Ty::Ptr, sender, n)?;
         self.runtime_result(
             result,
             ok,
@@ -551,6 +573,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             .e
             .recipe(id, mark)
             .and_then(|recipe| recipe.logical_size);
+        let logical = if self.e.is_resource(id) {
+            Some(8)
+        } else {
+            logical
+        };
         if logical.is_none() {
             self.gap(n, "runtime logical size is not built");
         }
@@ -833,8 +860,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             n,
         )?;
         self.consume(value, n);
-        let null = self.runtime_compare(Ty::Ptr, task, 0, n)?;
-        let ok = self.emit_unary(UnaryOp::Not, BOOL, Some(null), n)?;
+        let ok = self.runtime_nonzero(Ty::Ptr, task, n)?;
         self.runtime_result(
             result,
             ok,
@@ -862,5 +888,214 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             },
         )
+    }
+}
+
+impl<'c, 'a> Cx<'c, 'a, '_> {
+    fn owner_charge(&mut self, ty: TyId, kind: Option<Counted>, n: NodeId) -> Option<u64> {
+        let logical = self.runtime_logical(ty, n)?;
+        let charge = if kind.is_some() {
+            hirsel_core_layout::charge::counted(logical)
+        } else {
+            hirsel_core_layout::charge::boxed(logical)
+        };
+        if charge.is_none() {
+            self.gap(n, "allocation charge overflow flag is not built (FOR FORM)");
+        }
+        charge
+    }
+
+    fn runtime_new_owner(
+        &mut self,
+        kind: Option<Counted>,
+        item: TyId,
+        value: Option<ValueId>,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let logical_charge = self.owner_charge(item, kind, n)?;
+        let rep = self.rep(item).ok()?;
+        let id = self.runtime_type(item, n)?;
+        let payload = self.e.size(id);
+        let align = if self.e.is_resource(id) {
+            hirsel_core_layout::POINTER
+        } else {
+            self.e.block(id).1
+        };
+        let header = if kind.is_some() { 8 } else { 0 };
+        let Some(size) = payload.checked_add(header) else {
+            self.gap(n, "owner native storage size exceeds the engine's range");
+            return None;
+        };
+        let u = Ty::Scalar(Scalar::U64);
+        let charge = self.konst(u, logical_charge, n)?;
+        let size = self.konst(u, size, n)?;
+        let node = self.value(Ty::Ptr);
+        let available = self.value(u);
+        let fail = self.fail_to(n);
+        self.inst(
+            Inst::Alloc {
+                result: node,
+                available,
+                region_entry: None,
+                kind: kind.map_or(AllocKind::Own, AllocKind::Counted),
+                place: AllocPlace::Current,
+                charge,
+                size,
+                align: align.max(if kind.is_some() { 8 } else { 1 }),
+                fail,
+            },
+            n,
+        );
+        // Allocation commits normally to either the new owner or the handback
+        // error. A grant failure enters cleanup before this consumption.
+        self.consume(value, n);
+        let ok = self.runtime_nonzero(Ty::Ptr, node, n)?;
+        self.runtime_result(
+            result,
+            ok,
+            n,
+            |cx, to, owner| {
+                if let Some(at) =
+                    cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], owner, n)
+                {
+                    cx.runtime_store(at, &[Step::Field(0)], Ty::Ptr, node, n);
+                    let at = cx.owner_payload(node, id, kind.is_some(), n);
+                    if let Some(at) = at {
+                        let at = match rep {
+                            Rep::Scalar(_) | Rep::View(_) => cx.address(
+                                AddressBase::Address(at),
+                                &[Step::Field(0)],
+                                rep.stored().unwrap(),
+                                n,
+                            ),
+                            _ => at,
+                        };
+                        cx.install(at, rep, value, n);
+                    }
+                }
+            },
+            |cx, to, pair| {
+                let TyKind::Tuple(parts) = cx.t.kind(pair).clone() else {
+                    return;
+                };
+                if let Some(to) =
+                    cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], pair, n)
+                {
+                    if let Some(at) = cx.runtime_field(to, &[Step::Field(0)], parts[0], n) {
+                        cx.runtime_capacity(at, charge, available, n);
+                    }
+                    if let Some(at) = cx.runtime_field(to, &[Step::Field(1)], item, n) {
+                        cx.install(at, rep, value, n);
+                    }
+                }
+            },
+        )
+    }
+
+    fn owner_payload(
+        &mut self,
+        node: ValueId,
+        id: TypeId,
+        counted: bool,
+        n: NodeId,
+    ) -> Option<AddressId> {
+        let place = PlaceTy::Declared(id);
+        if counted {
+            let offset = self.konst(Ty::Scalar(Scalar::U64), 8, n)?;
+            let at = self.address(AddressBase::Value(node), &[Step::Byte(offset)], place, n);
+            let pointer = self.pointer(at, n);
+            Some(self.address(AddressBase::Value(pointer), &[], place, n))
+        } else {
+            Some(self.address(AddressBase::Value(node), &[], place, n))
+        }
+    }
+
+    fn runtime_share(
+        &mut self,
+        kind: Counted,
+        value: ValueId,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let node = self.runtime_handle(value, n);
+        self.inst(Inst::Share { node, kind }, n);
+        self.runtime_carrier(result, node, n)
+    }
+
+    fn runtime_try_unwrap(
+        &mut self,
+        kind: Counted,
+        item: TyId,
+        value: ValueId,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        // A failed unwrap returns this holder unchanged, without sharing it.
+        let charge = self.owner_charge(item, Some(kind), n)?;
+        let id = self.runtime_type(item, n)?;
+        let node = self.runtime_handle(value, n);
+        let ok = self.value(Ty::Scalar(Scalar::Bool));
+        self.inst(
+            Inst::TryUnwrap {
+                result: ok,
+                node,
+                kind,
+            },
+            n,
+        );
+        self.consume(Some(value), n);
+        self.runtime_result(
+            result,
+            ok,
+            n,
+            |cx, to, ty| {
+                if let Some(payload) = cx.owner_payload(node, id, true, n) {
+                    let value = cx.runtime_read(payload, ty, n);
+                    cx.runtime_case_payload(to, 0, ty, value, n);
+                    if let Some(charge) = cx.konst(Ty::Scalar(Scalar::U64), charge, n) {
+                        cx.inst(
+                            Inst::Free {
+                                block: node,
+                                charge,
+                            },
+                            n,
+                        );
+                    }
+                }
+            },
+            |cx, to, ty| {
+                cx.runtime_case_payload(to, 1, ty, Some(value), n);
+            },
+        )
+    }
+
+    fn runtime_unbox(&mut self, item: TyId, value: ValueId, n: NodeId) -> Option<ValueId> {
+        let charge = self.owner_charge(item, None, n)?;
+        let rep = self.rep(item).ok()?;
+        let id = self.runtime_type(item, n)?;
+        let node = self.runtime_handle(value, n);
+        let payload = self.owner_payload(node, id, false, n)?;
+        self.consume(Some(value), n);
+        let value = self.runtime_read(payload, item, n);
+        let output = match rep {
+            Rep::Place(_) => {
+                let to = self.new_slot(PlaceTy::Declared(id), n);
+                self.install(to, rep, value, n);
+                let value = self.pointer(to, n);
+                self.temp(item, Some(value));
+                Some(value)
+            }
+            _ => value,
+        };
+        let charge = self.konst(Ty::Scalar(Scalar::U64), charge, n)?;
+        self.inst(
+            Inst::Free {
+                block: node,
+                charge,
+            },
+            n,
+        );
+        output
     }
 }

@@ -157,3 +157,54 @@ fn spawn_adapts_scalar_place_and_unit_results_and_returns_refused_input() {
         assert_eq!(run.used, 0, "{source}: unrefunded task or cause storage");
     }
 }
+
+#[test]
+fn counted_and_box_kernels_preserve_payloads_handback_and_exact_refunds() {
+    let mut cases = vec![
+        ("fn f() -> u64 { box.unbox(result.unwrap(box.new(7u64))) }".to_owned(), 8, eval::Outcome::Returned(vec![7])),
+        ("fn f() -> u64 { box.unbox(result.unwrap(box.new(()))); 7u64 }".to_owned(), 0, eval::Outcome::Returned(vec![7])),
+        ("fn f() -> u64 { let r = box.new(7u64); match take r { Ok(_) => 0u64, Error((e,x)) => e.requested+e.available+x } }".to_owned(), 7, eval::Outcome::Returned(vec![22])),
+        ("fn f() -> u64 { let r = bound bytes 0 { box.new(7u64) }; match take r { Ok(Error((e,x))) => e.requested+x, _ => 0u64 } }".to_owned(), 1000, eval::Outcome::Returned(vec![15])),
+        // Resource R has a 16-byte block, but its holder in a channel is 8.
+        ("resource type R:send { a:u64,b:u64 }\nfn f() -> u64 { let c: Result[(Sender[R],Receiver[R]),Capacity] = channel.new(1); match take c { Ok(_) => 0u64, Error(e) => e.requested+e.available } }".to_owned(), 71, eval::Outcome::Returned(vec![143])),
+        // R's own block + cell costs 48. Box[R] admits a further eight, so
+        // seven remaining bytes refuse, returning the live resource unchanged.
+        ("resource type R:send { a:u64,b:u64 }\nfn f() -> u64 { let r = result.unwrap(R(a:7u64,b:11u64)); let c = box.new(take r); match take c { Ok(_) => 0u64, Error((e,take back)) => e.requested*10000u64+e.available*100u64+back.a+back.b } }".to_owned(), 55, eval::Outcome::Returned(vec![80718])),
+    ];
+    for (module, ty) in [("rc", "Rc"), ("arc", "Arc")] {
+        cases.push((format!("fn end(take h:{ty}[u64]) {{}}\nfn f() -> u64 {{ let h = result.unwrap({module}.new(7u64)); let other = {module}.share(h); let h = match {module}.try_unwrap(take h) {{ Ok(_) => return 0u64, Error(take back) => back }}; end(take other); result.unwrap({module}.try_unwrap(take h)) }}").replace("let h = match", "let last = match").replace("try_unwrap(take h))", "try_unwrap(take last))"),16,eval::Outcome::Returned(vec![7])));
+        cases.push((format!("type Data:shareable+send {{ a:u8,b:Box[u64] }}\nfn f() -> u64 {{ let b = result.unwrap(box.new(41u64)); let data = Data(a:7u8,b:take b); let r = {module}.new(take data); match take r {{ Ok(_) => 0u64, Error((e,take back)) => {{ let Data(a:_,b:take boxed) = take back; let v = box.unbox(take boxed); e.requested*10000u64+e.available*100u64+v }} }} }}"),31,eval::Outcome::Returned(vec![242341])));
+    }
+    for (source, limit, expected) in cases {
+        let (index, modules) = canonical(&source);
+        let p = Program::declare(&index, &modules);
+        assert!(p.refusals.is_empty(), "{source}: {:?}", p.refusals);
+        let mut emitter = Emitter::new();
+        let mut entry = None;
+        for (f, fd) in p
+            .fns
+            .iter()
+            .enumerate()
+            .filter(|(_, fd)| fd.path.0.package.name == "app" && fd.body.is_some())
+        {
+            let check = p.check_lower(f, &mut emitter);
+            assert!(
+                check.refusals.is_empty() && check.gaps.is_empty(),
+                "{source}: {check:?}"
+            );
+            if fd.path.0.name == "f" {
+                entry = check.function;
+            }
+        }
+        emitter.materialize_instances().unwrap();
+        if let Err(error) = wf::module(&emitter.module) {
+            panic!(
+                "{source}: {error}\n{}",
+                hirsel_core_ir::text::print(&emitter.module)
+            );
+        }
+        let run = eval::run(&emitter.module, entry.unwrap(), &[], limit);
+        assert_eq!(run.outcome, expected, "{source}");
+        assert_eq!(run.used, 0, "{source}: leaked payload, holder or node");
+    }
+}

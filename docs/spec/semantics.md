@@ -127,8 +127,10 @@ fn grow(mut xs: List[u64]) -> Result[(), Capacity] {
 
 ### SEM-7: Equality and order
 
-`==` and `!=` need `key` operands; `<`, `<=`, `>` and `>=` need `ordered` operands
-([OWN-4](ownership.md#own-4-bounds)). Integers, `bool`, `char`, unit, `String` and `Text`
+`==` and `!=` take `key` operands and `<`, `<=`, `>` and `>=` take `ordered` operands
+([OWN-4](ownership.md#own-4-bounds)); any other operand is refused by
+[LANG-21](language.md#lang-21-operators), at the operator. This rule says what equality and
+order mean, and refuses nothing. Integers, `bool`, `char`, unit, `String` and `Text`
 are both. Tuples, `Option`, `Result`, `List`, `Inline` and the stable sequences have a
 bound when their components do. `Unique` is `key` and not `ordered`
 ([MEM-18](memory.md#mem-18-pools-are-library-code)). A nominal type has a bound when it declares it and its fields have it.

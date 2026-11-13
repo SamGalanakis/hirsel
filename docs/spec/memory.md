@@ -528,5 +528,5 @@ type Handle: key { pool: Unique, index: u64, generation: u64 }
 fn same_pool(a: Handle, b: Handle) -> bool { a.pool == b.pool }
 ```
 ```hirsel
-fn older(a: Unique, b: Unique) -> bool { a < b }            // refused: SEM-7, Unique is not ordered
+fn older(a: Unique, b: Unique) -> bool { a < b }            // refused: LANG-21, Unique is not ordered
 ```

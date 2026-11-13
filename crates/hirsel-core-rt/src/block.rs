@@ -142,11 +142,14 @@ pub(crate) fn allocate(
         } else {
             7
         };
-        payload
-            .as_ptr()
-            .sub(8)
-            .cast::<Payer>()
-            .write(payer.with_tag((index << 2) | kind as usize));
+        let tag = (index << 2) | kind as usize;
+        // Admission took an untagged canonical payer; ordinary plain/align8
+        // blocks need no tag operation at all.
+        payload.as_ptr().sub(8).cast::<Payer>().write(if tag == 0 {
+            payer
+        } else {
+            payer.with_tag(tag)
+        });
         if index == 7 {
             payload
                 .as_ptr()

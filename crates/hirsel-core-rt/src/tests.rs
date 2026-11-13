@@ -324,4 +324,9 @@ fn current_payer_free_refunds_without_a_header_lookup() {
         }
         assert_eq!(ctx.available(), 64);
     }
+    // SAFETY: zero charge still owns a payer pin; the helper settles it.
+    unsafe {
+        let block = inline_own_alloc(&ctx, Some(0), 1, 8).unwrap();
+        inline_own_free_current(&ctx, block, 0, 1, 8);
+    }
 }

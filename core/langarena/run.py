@@ -13,6 +13,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -120,6 +121,112 @@ def reviewed(source, author):
     return bool(match and match[1] in {'langs-numeric-920', 'langs-text-921'} and match[1] != author)
 
 
+def build_samples(args):
+    """Group binaries share a compilation, so collect build scenarios once per module."""
+    out = args.out.resolve()
+    out.mkdir(parents=True)
+    rust = ROOT / 'core/langarena/rust'
+    profile = 'release' if args.backend == 'llvm' else 'debug'
+    rustc = ROOT / 'tools/buck2/toolchains/rust-files/bin/rustc'
+    flags = ['--target', 'x86_64-unknown-linux-gnu', '-C', 'target-cpu=x86-64',
+             '-C', 'overflow-checks=on', '-C', 'codegen-units=1', '-C',
+             'opt-level=' + ('3' if args.backend == 'llvm' else '0')]
+    dependencies = []
+    for directory in [rust / 'target/x86_64-unknown-linux-gnu' / profile / 'deps', rust / 'target' / profile / 'deps']:
+        dependencies += ['-L', 'dependency=' + str(directory)]
+    missing = []
+    for name in ['serde', 'serde_json', 'regex', 'once_cell', 'base64_simd', 'simd_csv', 'rayon', 'tokio']:
+        choices = list((rust / 'target/x86_64-unknown-linux-gnu' / profile / 'deps').glob('lib' + name + '-*.rlib'))
+        if not choices:
+            missing.append(name)
+        else:
+            selected = max(choices, key=lambda p: p.stat().st_mtime_ns)
+            dependencies += ['--extern', name + '=' + str(selected)]
+    report = {'module': args.module, 'backend': args.backend, 'source': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+              'rows': [], 'missing_rust_dependencies': missing,
+              'scenarios': 'check/build fresh, build reuse, one semantically neutral body edit; Rust incremental off',
+              'rustc': subprocess.check_output([str(rustc), '-vV'], text=True)}
+    def save():
+        (out / 'build-report.json').write_text(json.dumps(report, indent=2) + '\n')
+    def collect(command, directory, hirsel=False):
+        with open('/tmp/hirsel-langarena-measure.lock', 'a') as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            wait_load()
+            result = _measure.sample(command, directory)
+        result['directory'] = str(result['directory'])
+        if hirsel and result['status'] == 'ok':
+            value = json.loads((directory / 'stdout').read_text())
+            result['rechecked'] = value.get('rechecked')
+            result['source_bytes'] = value.get('source_bytes')
+            if not value.get('accepted') or value.get('stopped'):
+                result['status'] = 'incomplete-build'
+        return result
+    with tempfile.TemporaryDirectory(prefix='langarena-build-', dir=out) as tmp:
+        scratch = Path(tmp)
+        host = scratch / 'host'; host.mkdir()
+        manifest = scratch / 'inputs.json'
+        spec = inputs(ROOT, args.module)
+        manifest.write_text(json.dumps(spec))
+        hirsel_sources = [Path(source['file']) for package in spec['packages'] for source in package['sources']]
+        counts = {'hirsel': sum(_measure.source_lines(p) for p in hirsel_sources),
+                  'idiomatic': sum(_measure.source_lines(p) for p in (rust / 'src').rglob('*.rs'))}
+        matched = args.matched_source.resolve() if args.matched_source else None
+        matched_files = [matched] if matched else []
+        if matched:
+            matched_files += [matched.with_name(name + '.rs') for name in re.findall(r'(?m)^\s*(?:pub\s+)?mod\s+(\w+)\s*;', matched.read_text())]
+        counts['matched'] = sum(_measure.source_lines(p) for p in matched_files if p.is_file())
+        report['source_lines'] = counts
+        report['source_sets'] = {'hirsel': [str(p) for p in hirsel_sources], 'idiomatic': [str(p) for p in (rust / 'src').rglob('*.rs')], 'matched': [str(p) for p in matched_files]}
+        edited = scratch / 'edited.hirsel'
+        source = ROOT / 'core/langarena' / (args.module + '.hirsel')
+        text = source.read_text()
+        marker = text.index('{', text.index('pub fn dispatch'))
+        edited.write_text(text[:marker + 1] + '\nlet _ = 0u8\n' + text[marker + 1:])
+        edited_manifest = scratch / 'edited-inputs.json'
+        edited_manifest.write_text(json.dumps(inputs(ROOT, args.module, edited)))
+        twin = scratch / 'matched'
+        twin.mkdir()
+        if matched:
+            for file in matched_files:
+                shutil.copyfile(file, twin / file.name)
+            body = matched.read_text()
+            marker = body.index('{', body.index('fn run(' if 'fn run(' in body else 'fn main('))
+            (twin / matched.name).write_text(body[:marker + 1] + '\nlet _ = 0u8;\n' + body[marker + 1:])
+        idiomatic = scratch / 'idiomatic'
+        shutil.copytree(rust / 'src', idiomatic)
+        main = idiomatic / 'main.rs'
+        body = main.read_text(); marker = body.index('{', body.index('fn config_i64('))
+        main.write_text(body[:marker + 1] + '\nlet _ = 0u8;\n' + body[marker + 1:])
+        for scenario in ['check-fresh', 'build-fresh', 'build-reuse', 'build-edit']:
+            operation = 'check' if scenario == 'check-fresh' else 'build'
+            selected = edited_manifest if scenario == 'build-edit' else manifest
+            store = scratch / ('check-store' if operation == 'check' else 'build-store')
+            command = [str(args.compiler.resolve()), operation, '--inputs', str(selected), '--entry',
+                       f'langarena@1/{args.module}/main', '--store', str(store), '--json']
+            if operation == 'build':
+                command += ['--backend', args.backend, '--runtime', str(args.runtime.resolve()),
+                            '--dir', str(host), '--grant', 'Stdout', '--grant', 'Tasks', '-o', str(scratch / 'hirsel')]
+                if args.backend == 'llvm': command.append('--release')
+            row = {'scenario': scenario, 'samples': {'hirsel': collect(command, out / (scenario + '-hirsel'), True)}, 'ratios': {}}
+            for side in ['idiomatic', 'matched']:
+                if side == 'idiomatic' and missing or side == 'matched' and matched is None:
+                    row['samples'][side] = {'status': 'missing-build-input'}
+                    continue
+                root = (idiomatic / 'main.rs' if scenario == 'build-edit' else rust / 'src/main.rs') if side == 'idiomatic' else (twin / matched.name if scenario == 'build-edit' else matched)
+                command = [str(rustc), '--edition=' + ('2021' if side == 'idiomatic' else '2024'), *flags, str(root)]
+                if side == 'idiomatic': command += dependencies
+                command += ['--emit=metadata' if operation == 'check' else '--emit=link', '-o', str(scratch / (side + '-' + scenario))]
+                row['samples'][side] = collect(command, out / (scenario + '-' + side))
+                row['ratios'][side] = ratio(row['samples']['hirsel'], row['samples'][side]) if side != 'matched' or reviewed(matched, args.matched_author) else {'status': 'blocked: independent review pending'}
+            for side, sample in row['samples'].items():
+                if sample.get('instructions') and counts[side]:
+                    sample['k_instructions_per_source_line'] = sample['instructions'] / counts[side] / 1000
+            report['rows'].append(row); save()
+            print(scenario, row['ratios'], flush=True)
+    save()
+    return int(any(sample['status'] != 'ok' for row in report['rows'] for sample in row['samples'].values()))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--compiler', type=Path, required=True)
@@ -135,6 +242,7 @@ def main():
     parser.add_argument('--matched-args', nargs='*', help='argument templates, e.g. {count} {warmup} {iterations}')
     parser.add_argument('--matched-numeric-output', action='store_true', help='twin prints only the computed checksum')
     parser.add_argument('--resume', type=Path, help='previous report; reuse its complete samples and run missing sides only')
+    parser.add_argument('--build-only', action='store_true', help='measure check/build fresh/reuse/edit once for the task group')
     parser.add_argument('--profile', action='store_true', help='profile instructions at period 50003 when an instruction ratio exceeds 2')
     parser.add_argument('--out', type=Path, required=True)
     args = parser.parse_args()
@@ -146,6 +254,11 @@ def main():
         parser.error('--out must be new and outside the repository')
     if 16 not in os.sched_getaffinity(0):
         parser.error('CPU 16 is required by core/MEASURE.md')
+    if args.build_only:
+        os.sched_setaffinity(0, {16})
+        os.environ['HIRSEL_MEMORY_LIMIT'] = '2G'
+        os.environ['HIRSEL_JOBS'] = '1'
+        return build_samples(args)
     config = json.loads(args.config.read_text())
     row = next(c for c in config if c['name'] == args.task) if isinstance(config, list) else config[args.task]
     args.out = args.out.resolve()
@@ -156,7 +269,10 @@ def main():
     report = {'task': args.task, 'backend': args.backend, 'config': str(args.config.resolve()),
               'source': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
               'cpu': 16, 'sample_policy': 'one sample per side; no retry; no system page-cache flush',
-              'configuration': row, 'samples': {}, 'ratios': {}}
+              'configuration': row, 'samples': {}, 'ratios': {},
+              'platform': dict(system=os.uname().sysname, release=os.uname().release, machine=os.uname().machine),
+              'profiles': 'rustc1.99.0; x86-64; overflow-checks=on; codegen-units=1; no LTO; upstream edition2021, matched2024',
+              'hirsel_compiler': str(args.compiler.resolve()), 'runtime': str(args.runtime.resolve())}
     if args.resume:
         previous = json.loads(args.resume.read_text())
         if previous['task'] != args.task or previous['backend'] != args.backend or previous.get('configuration') != row:
@@ -173,7 +289,7 @@ def main():
             binary = args.out / 'hirsel'
             build = [str(args.compiler.resolve()), 'build', '--inputs', str(manifest), '--entry',
                      f'langarena@1/{args.module}/main', '--backend', args.backend,
-                     '--runtime', str(args.runtime.resolve()), '--store', str(args.out / 'store'),
+                     '--runtime', str(args.runtime.resolve()), '--store', str(host / 'store'),
                      '--dir', str(host), '--grant', 'Stdout', '--grant', 'Tasks', '--json', '-o', str(binary)]
             if args.backend == 'llvm':
                 build.append('--release')

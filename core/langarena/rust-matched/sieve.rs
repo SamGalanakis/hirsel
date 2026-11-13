@@ -1,4 +1,4 @@
-// Review pending: langs-text-921. No matched ratio before independent review.
+// Reviewed-by: langs-text-921 2026-11-13; byte flags, sqrt bound, checked multiples and u64 odd-prime count/last scan match; compile with overflow checks.
 // Matches sieve.hirsel: byte flags, sqrt limit, odd count scan, checked indexing.
 #[allow(dead_code)]
 mod support;

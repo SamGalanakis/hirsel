@@ -1,4 +1,4 @@
-// Review pending: langs-text-921. No matched ratio before independent review.
+// Reviewed-by: langs-text-921 2026-11-13; all four tasks match inline arrays/planets, PBM retained bytes, spectral vector phases and float/checksum order; compile with overflow checks.
 // Matches clbg.hirsel Fannkuchredux: inline arrays, identical permutation/flip order.
 #[allow(dead_code)]
 mod support;

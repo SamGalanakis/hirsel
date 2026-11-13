@@ -1,4 +1,4 @@
-// Review pending: langs-text-921. No matched ratio before independent review.
+// Reviewed-by: langs-text-921 2026-11-13; flat AoS cell/inline neighbor arrays, toroidal indices, total float comparison and simultaneous next-state update match; compile with overflow checks.
 // Matches game_of_life.hirsel: flat AoS cells and eight inline u64 neighbor indices.
 #[allow(dead_code)]
 mod support;

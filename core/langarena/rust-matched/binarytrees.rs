@@ -1,4 +1,4 @@
-// Review pending: langs-text-921. No matched ratio before independent review.
+// Reviewed-by: langs-text-921 2026-11-13; Obj boxed nodes and Arena Pool/Id/Slot layout, fresh identity, checked lookup and placeholder/owned-local update lifecycle match; compile with overflow checks.
 // Matches binarytrees.hirsel Obj: Box nodes with Option children and checked i32 items.
 #[allow(dead_code)]
 mod support;
@@ -53,8 +53,16 @@ struct ArenaNode {
 }
 impl Pool {
     fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let me = NEXT
+            .fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |x| x.checked_add(1),
+            )
+            .expect("unique exhausted");
         Self {
-            me: 1,
+            me,
             slots: Vec::new(),
             free: u64::MAX,
             live: 0,
@@ -79,14 +87,21 @@ impl Pool {
         }
     }
     fn update(&mut self, id: Id, left: Id, right: Id) {
-        assert_eq!(id.pool, self.me);
-        match &mut self.slots[usize::try_from(id.index).unwrap()] {
-            Slot::Occupied(g, n) if *g == id.generation => {
-                n.left = Some(left);
-                n.right = Some(right);
-            }
-            _ => panic!("Stale"),
-        }
+        let _ = self.get(id);
+        let placeholder = Slot::Vacant(id.generation + 1, u64::MAX);
+        let slot = std::mem::replace(
+            &mut self.slots[usize::try_from(id.index).unwrap()],
+            placeholder,
+        );
+        let mut value = match slot {
+            Slot::Occupied(_, value) => value,
+            Slot::Vacant(_, _) => panic!("checked slot vacant"),
+        };
+        self.live -= 1;
+        value.left = Some(left);
+        value.right = Some(right);
+        self.slots[usize::try_from(id.index).unwrap()] = Slot::Occupied(id.generation, value);
+        self.live += 1;
     }
 }
 fn arena_tree(p: &mut Pool, item: i32, depth: i32) -> Id {

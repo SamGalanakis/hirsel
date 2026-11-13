@@ -1,0 +1,9 @@
+[
+  {
+    "name": "Layout::Numeric::SoA",
+    "n": 1,
+    "seed": 42,
+    "iterations": 1,
+    "checksum": 0
+  }
+]

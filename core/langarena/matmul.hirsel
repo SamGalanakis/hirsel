@@ -49,6 +49,65 @@ pub fn dispatch(config:String,name:String,warmup:u64,iterations:u64)->Result[u32
     }
     Ok(total)
 }
-pub fn main(out:Stdout,d:Dir,argv:Args)->Result[(),Exit] waits {
-    harness.main(out,d,argv,fn(c:String,n:String,w:u64,i:u64)->Result[u32,helper.Error] {dispatch(c,n,w,i)})
+// Ownership partition for parallel Matmul: every row is computed once by a task.
+// Immutable inputs are shared by Arc; completed row blocks remain owned until checksum.
+type Matrix:shareable+send {rows:List[List[f64]]}
+type Job:send {a:Arc[Matrix],transposed:Arc[Matrix],start:u64,end:u64}
+type Block:send {start:u64,rows:List[List[f64]]}
+fn worker(take job:Job)->Result[Block,helper.Error] {
+    let n=list.len(job.a.rows)
+    let mut rows:List[List[f64]]=helper.mem(list.with_capacity(job.end-job.start))?
+    for i in job.start .. job.end {
+        let mut row:List[f64]=list.new()
+        helper.mem(list.fill(mut row,n,0.0))?
+        for j in 0 .. n {
+            let mut sum:f64=0.0
+            for k in 0 .. n {sum+=job.a.rows[i][k]*job.transposed.rows[j][k]}
+            row[j]=sum
+        }
+        match list.push(mut rows,take row) {Ok(())=>{},Error((c,take unused))=>return Error(Capacity(c))}
+    }
+    Ok(Block(start:job.start,rows:take rows))
+}
+fn parallel(tasks:Tasks,a:Arc[Matrix],b:List[List[f64]],threads:u64)->Result[f64,helper.Error] waits {
+    let n=list.len(a.rows)
+    let mut transposed=zeros(n)?
+    for i in 0 .. n {for j in 0 .. n {transposed[j][i]=b[i][j]}}
+    let columns=match arc.new(Matrix(rows:take transposed)) {
+        Ok(take x)=>take x,Error((c,take unused))=>return Error(Capacity(c)),
+    }
+    let mut jobs:List[Task[Result[Block,helper.Error]]]=helper.mem(list.with_capacity(threads))?
+    for i in 0 .. threads {
+        let job=Job(a:arc.share(a),transposed:arc.share(columns),start:i*n/threads,end:(i+1)*n/threads)
+        let handle=match task.spawn(tasks,bytes 2097152,take job,worker) {
+            Ok(take h)=>take h,Error((c,take unused))=>return Error(Capacity(c)),
+        }
+        match list.push(mut jobs,take handle) {Ok(())=>{},Error((c,take unused))=>return Error(Capacity(c))}
+    }
+    let mut blocks:List[Block]=helper.mem(list.with_capacity(threads))?
+    // Pop in reverse spawn order. Blocks retain their explicit first row.
+    while let Some(take handle)=list.pop(mut jobs) {
+        let block=match task.join(take handle) {Ok(take r)=>take r,Error(_)=>return Error(Config)}?
+        match list.push(mut blocks,take block) {Ok(())=>{},Error((c,take unused))=>return Error(Capacity(c))}
+    }
+    let center=n/2
+    for block in blocks {
+        if center>=block.start && center<block.start+list.len(block.rows) {return Ok(block.rows[center-block.start][center])}
+    }
+    Error(Config)
+}
+pub fn dispatch_wait(tasks:Tasks,config:String,name:String,warmup:u64,iterations:u64)->Result[u32,helper.Error] waits {
+    if name=="Matmul::Single" {return dispatch(config,name,warmup,iterations)}
+    let threads:u64=if name=="Matmul::T4" {4} else if name=="Matmul::T8" {8} else if name=="Matmul::T16" {16} else {return Error(UnknownTask)}
+    let ni=helper.config_i64(config,name,"n")?
+    if ni<=0 {return Error(Config)}
+    let n:u64=int.narrow(ni)
+    let a=match arc.new(Matrix(rows:matrix(n)?)) {Ok(take x)=>take x,Error((c,take unused))=>return Error(Capacity(c))}
+    let b=matrix(n)?
+    let mut total:u32=0
+    for _ in 0 .. warmup+iterations {total=int.wrapping_add(total,helper.checksum_f64(parallel(tasks,a,b,threads)?)?)}
+    Ok(total)
+}
+pub fn main(tasks:Tasks,out:Stdout,d:Dir,argv:Args)->Result[(),Exit] waits {
+    harness.main_wait(out,d,argv,fn(c:String,n:String,w:u64,i:u64)->Result[u32,helper.Error] waits {dispatch_wait(tasks,c,n,w,i)})
 }

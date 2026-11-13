@@ -1,0 +1,23 @@
+[
+  {
+    "name": "Layout::Numeric::Fixed",
+    "n": 64,
+    "seed": 42,
+    "iterations": 1,
+    "checksum": 169680
+  },
+  {
+    "name": "Layout::Numeric::AoS",
+    "n": 64,
+    "seed": 42,
+    "iterations": 1,
+    "checksum": 169680
+  },
+  {
+    "name": "Layout::Numeric::SoA",
+    "n": 64,
+    "seed": 42,
+    "iterations": 1,
+    "checksum": 169680
+  }
+]

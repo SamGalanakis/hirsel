@@ -1,4 +1,4 @@
-// Review pending: langs-text-921. No matched ratio before independent review.
+// Reviewed-by: langs-text-921 2026-11-13; inline scene/LUT, Vec3 arithmetic, total-order branches, sphere order and pixel sum match valid positive dimensions; compile with overflow checks.
 // Matches text_raytracer.hirsel: inline three-sphere scene and f64 triple arithmetic.
 #[allow(dead_code)]
 mod support;

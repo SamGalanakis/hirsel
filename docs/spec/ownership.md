@@ -289,8 +289,10 @@ fn f(mut x: u64) { let y = mut x }                        // refused: OWN-7, mut
 `view p` makes a read-only **view** of the live place `p`, of type `View[T]`. A view lasts
 for a lexical **extent**:
 
-- bound by `let`: to the end of the enclosing block;
+- bound by `let`, `let .. else` included: to the end of the enclosing block;
 - bound by a match arm or `if let`: to the end of the arm;
+- bound by `while let` or a `for` pattern: to the end of the body, in each iteration
+  ([OWN-17](#own-17-loops));
 - otherwise a temporary: to the end of its statement; in an `if` or `while` condition or
   an operand of `&&` or `||`, to the end of that condition or operand; in a match arm's
   expression, to the end of the arm unless the arm's value reaches it; in a block's tail, to the block's exit unless the block's
@@ -319,6 +321,26 @@ type Inbox { items: List[String] }
 fn f(mut m: Inbox) {
   let items = view m.items
   list.clear(mut m.items)                       // refused: OWN-10, items lasts to block end
+}
+```
+```hirsel
+fn total(mut xs: List[String]) -> u64 {
+  let mut n: u64 = 0
+  let mut i: u64 = 0
+  while let Some(s) = list.get(xs, i) { n += string.byte_len(s); i += 1 }
+  list.clear(mut xs)
+  n
+}
+```
+```hirsel
+fn last_len(xs: List[String]) -> u64 {
+  let mut last: Option[View[String]] = None
+  let mut i: u64 = 0
+  while let Some(s) = list.get(xs, i) {
+    last = Some(s)
+    i += 1
+  }                                             // refused: OWN-17, last keeps s past its iteration
+  0
 }
 ```
 

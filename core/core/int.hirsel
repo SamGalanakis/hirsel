@@ -60,7 +60,7 @@ pub fn parse[T: integer](s: String) -> Result[T, ParseError] {
                 None => None,
             }
             match next {
-                Some(take m) => {
+                Some(m) => {
                     v = m
                 },
                 None => {

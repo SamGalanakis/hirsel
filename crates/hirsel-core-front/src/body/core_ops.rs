@@ -186,6 +186,7 @@ operations! {
     ("string", "of_bytes", Lane::Runtime(Kernel::CarrierMove), "A", "core-ops-914", true),
     ("string", "to_bytes", Lane::Runtime(Kernel::CarrierMove), "A", "core-ops-914", true),
     ("string", "view_string", Lane::Runtime(Kernel::CarrierView), "A", "core-ops-914", true),
+    ("string", "shorten", Lane::Value, "A", "core-ops-914", true),
     ("task", "spawn", Lane::Runtime(Kernel::Spawn), "B", "core-ops-914", false),
     ("task", "join", Lane::Runtime(Kernel::Join), "B", "core-ops-914", false),
     ("task", "cancel", Lane::Runtime(Kernel::Cancel), "B", "core-ops-914", false),
@@ -887,7 +888,10 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
         if entry.private {
             assert!(
                 entry.module == "string"
-                    && matches!(entry.name, "of_bytes" | "to_bytes" | "view_string")
+                    && matches!(
+                        entry.name,
+                        "of_bytes" | "to_bytes" | "view_string" | "shorten"
+                    )
                     || entry.module == "map"
             );
         }

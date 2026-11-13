@@ -26,7 +26,7 @@ pub fn sum[T: integer](xs: List[T]) -> T {
     for x in xs {
         let next: Option[T] = int.checked_add(t, x)
         match next {
-            Some(take v) => {
+            Some(v) => {
                 t = v
             },
             None => {

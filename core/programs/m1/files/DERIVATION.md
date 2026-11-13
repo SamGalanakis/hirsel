@@ -26,6 +26,7 @@ destination-bytes=12 sum=1126 lock-free=true
 | site | either entry |
 |---|---|
 | copy.buffer | exactly List[u8] capacity 4096 = 4096 |
+| setup, error-second only | b"existing": List[u8] capacity 8 = 8 |
 
 HostFile acquisition is mechanical and admits no cause cell. By MEM-24,
 std.file.try_lock admits a Lock block of HostFile(8)+cause(32)=40 before the OS
@@ -40,7 +41,8 @@ A finalizer can send one release line, one error line and one cleanup cause;
 The matched entry calls the identical three-handle implementation, as both
 Rust twins do. Temp removes the private directory on every exit edge.
 
-All charges use MEM-24, charge-v1. Empty owners and static literals charge 0.
+All charges use MEM-24, charge-v1. Empty owners and string literals charge 0;
+a byte-string literal admits its length as List[u8] storage.
 A growth block has capacity max(needed,4,2×old), and is admitted before the old
 block is refunded. Named injections are synthetic source sites, not host-OOM
 or allocator-call counters. Output and instrumentation charges are separate

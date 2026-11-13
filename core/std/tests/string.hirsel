@@ -279,8 +279,8 @@ fn trim_keeps_other_scalars() -> bool {
 }
 
 // Core operations with bodies (core/core/string.hirsel), against core.md and RFC 3629.
-fn utf8(take b: Bytes) -> u64 {
-    match string.from_utf8(take b) {
+fn utf8(take b: Result[Bytes, Capacity]) -> u64 {
+    match string.from_utf8(result.unwrap(take b)) {
         Ok(_) => 1,
         Error(_) => 0,
     }
@@ -310,7 +310,7 @@ fn from_utf8_boundaries() -> u64 {
 // The argument comes back unchanged.
 // expect: run from_utf8_returns_argument() = 3
 fn from_utf8_returns_argument() -> u64 {
-    match string.from_utf8(b"ab\xFF") {
+    match string.from_utf8(result.unwrap(b"ab\xFF")) {
         Ok(_) => 99,
         Error(b) => list.len(b),
     }
@@ -486,6 +486,48 @@ fn truncate_past_end() -> u64 {
     let mut s = "aé"
     string.truncate(mut s, 4)
     string.byte_len(s)
+}
+
+// To 0: the owned "aé" keeps capacity 3 (len*10 + cap = 3); the literal keeps capacity 0 (0).
+// expect: run truncate_to_zero() = 30
+fn truncate_to_zero() -> u64 {
+    let mut owned = result.unwrap(string.from("aé"))
+    string.truncate(mut owned, 0)
+    let mut lit = "aé"
+    string.truncate(mut lit, 0)
+    let a = string.byte_len(owned) * 10 + list.capacity(string.as_bytes(owned))
+    let b = string.byte_len(lit) * 10 + list.capacity(string.as_bytes(lit))
+    a * 10 + b
+}
+
+// expect: run truncate_literal_inside_scalar() = fail Bounds
+fn truncate_literal_inside_scalar() -> u64 {
+    let mut s = "aé"
+    string.truncate(mut s, 2)
+    string.byte_len(s)
+}
+
+// A push after truncating a literal copies out and never writes the static bytes: on each of two
+// passes the literal "aé€" still reads "aé€" (2 passes), truncated to "aé" and pushed 'x' it is
+// "aéx" (4 bytes) with capacity at least 4 (1): 2*100 + 1*10 + 4.
+// expect: run push_after_truncating_literal() = 214
+fn push_after_truncating_literal() -> u64 {
+    let mut intact: u64 = 0
+    let mut grown: u64 = 0
+    let mut len: u64 = 0
+    for _ in 0u64 .. 2 {
+        let mut s = "aé€"
+        if s == "aé€" {
+            intact += 1
+        }
+        string.truncate(mut s, 3)
+        let _ = string.push_char(mut s, 'x')
+        if s == "aéx" && list.capacity(string.as_bytes(s)) >= 4 {
+            grown = 1
+            len = string.byte_len(s)
+        }
+    }
+    intact * 100 + grown * 10 + len
 }
 
 // A literal shortens without being written; its capacity stays 0.

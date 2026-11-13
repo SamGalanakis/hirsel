@@ -195,17 +195,20 @@ pub fn truncate(mut s: String, n: u64) {
             let _ = b[len]
         }
     }
-    let owned = replace(mut s, string.new())
-    let mut kept = to_bytes(take owned)
-    while list.len(kept) > n {
-        let _ = list.pop(mut kept)
-    }
-    s = of_bytes(take kept)
+    // The same bytes, shorter: a static String stays static, an owned one keeps its capacity.
+    shorten(mut s, n)
 }
 
-// The kernel: the String carrier and the Bytes carrier are one layout. of_bytes and
-// view_string are called only on UTF-8 that is whole scalars; to_bytes keeps any static,
-// capacity-0 storage.
+// The kernel, the only unchecked code in core. The String and Bytes carriers are one layout,
+// {data, length, capacity}; these rewrite or reinterpret a carrier and check nothing, so each
+// caller establishes the precondition stated on it.
+
+// b is UTF-8. (As a List, b already owns its storage or is empty.)
 fn of_bytes(take b: Bytes) -> String
+// s owns its storage or is empty: capacity(as_bytes(s)) > 0 or byte_len(s) == 0. A static String
+// with bytes never becomes a List, which would write in place; copy it or reserve first.
 fn to_bytes(take s: String) -> Bytes
+// b is UTF-8 cut at scalar boundaries at both ends.
 fn view_string(b: Bytes) -> View[String] in b
+// n <= byte_len(s), at a scalar boundary. Only the length changes: data and capacity stay.
+fn shorten(mut s: String, n: u64)

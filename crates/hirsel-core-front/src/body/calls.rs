@@ -234,7 +234,9 @@ impl<'c, 'a> Cx<'c, 'a> {
         if result == NEVER {
             self.dead = true;
         }
-        let v = if g.generics.is_empty() {
+        let numeric = g.path.package_is("core", "1")
+            && (g.path.0.modules == ["int"] || g.path.0.modules == ["float"]);
+        let v = if g.generics.is_empty() && !numeric {
             self.emit_call(f, vals, result, n)
         } else {
             self.intrinsic(f, tys, vals, n)
@@ -573,8 +575,8 @@ impl<'c, 'a> Cx<'c, 'a> {
         }
     }
 
-    /// The core integer operations built so far (SEM-1); T and U range over the
-    /// integer types (their `integer` bound, checked by LANG-12 at the call).
+    /// SEM-1/2 numeric operations use the scalar FORM instructions. Wrapping and
+    /// checked arithmetic never use an ordinary failing arithmetic instruction.
     pub(super) fn intrinsic(
         &mut self,
         f: usize,
@@ -582,41 +584,56 @@ impl<'c, 'a> Cx<'c, 'a> {
         vals: &[Option<ValueId>],
         n: NodeId,
     ) -> Option<ValueId> {
-        let path = &self.p.fns[f].path;
-        let name = path.0.name.as_str();
-        if !(path.package_is("core", "1") && path.0.modules == ["int"]) {
+        let g = &self.p.fns[f];
+        if !g.path.package_is("core", "1") {
+            self.gap(n, "calls to generic functions are not built");
+            return None;
+        }
+        if g.path.0.modules == ["float"] {
+            if tys.contains(&ERROR) {
+                return None;
+            }
+            return self.float_intrinsic(f, tys, vals, n);
+        }
+        if g.path.0.modules != ["int"] {
             self.gap(n, "calls to generic functions are not built");
             return None;
         }
         if tys.contains(&ERROR) {
             return None;
         }
-        let ints: Vec<(bool, u32)> = tys.iter().filter_map(|&t| int_of(&self.t, t)).collect();
-        if ints.len() != tys.len() {
-            // Refused LANG-12 where the type argument was determined.
-            return None;
-        }
-        let arith = |m: ArithMode, op: ArithOp| Some((m, op));
+        let name = g.path.0.name.as_str();
+        let input = if tys.is_empty() {
+            g.params[0].ty
+        } else {
+            tys[0]
+        };
+        let (signed, width) = int_of(&self.t, input)?;
+        let ty = value_ty(&self.t, input).ok().flatten()?;
         let op = match name {
-            "wrapping_add" => arith(ArithMode::Wrapping, ArithOp::Add),
-            "wrapping_sub" => arith(ArithMode::Wrapping, ArithOp::Sub),
-            "wrapping_mul" => arith(ArithMode::Wrapping, ArithOp::Mul),
-            "saturating_add" => arith(ArithMode::Saturating, ArithOp::Add),
-            "saturating_sub" => arith(ArithMode::Saturating, ArithOp::Sub),
-            "saturating_mul" => arith(ArithMode::Saturating, ArithOp::Mul),
+            "wrapping_add" => Some((ArithMode::Wrapping, ArithOp::Add)),
+            "wrapping_sub" => Some((ArithMode::Wrapping, ArithOp::Sub)),
+            "wrapping_mul" => Some((ArithMode::Wrapping, ArithOp::Mul)),
+            "saturating_add" => Some((ArithMode::Saturating, ArithOp::Add)),
+            "saturating_sub" => Some((ArithMode::Saturating, ArithOp::Sub)),
+            "saturating_mul" => Some((ArithMode::Saturating, ArithOp::Mul)),
+            "checked_add" => Some((ArithMode::Checked, ArithOp::Add)),
+            "checked_sub" => Some((ArithMode::Checked, ArithOp::Sub)),
+            "checked_mul" => Some((ArithMode::Checked, ArithOp::Mul)),
+            "checked_div" => Some((ArithMode::Checked, ArithOp::Div)),
             _ => None,
         };
         if let Some((mode, op)) = op {
-            let ty = value_ty(&self.t, tys[0]).ok().flatten()?;
             let (left, right) = (vals[0]?, vals[1]?);
             if !self.live() {
                 return None;
             }
             let result = self.value(ty);
+            let flag = (mode == ArithMode::Checked).then(|| self.value(Ty::Scalar(Scalar::Bool)));
             self.inst(
                 Inst::IntArith {
                     result,
-                    flag: None,
+                    flag,
                     op,
                     mode,
                     left,
@@ -624,31 +641,124 @@ impl<'c, 'a> Cx<'c, 'a> {
                 },
                 n,
             );
-            return Some(result);
+            return if let Some(flag) = flag {
+                let ok = self.emit_unary(UnaryOp::Not, BOOL, Some(flag), n)?;
+                let result_ty = subst(&mut self.t, g.result, tys);
+                self.numeric_option(result_ty, input, result, ok, n)
+            } else {
+                Some(result)
+            };
         }
+        if name == "wrapping_neg" {
+            let zero = self.konst(ty, 0, n)?;
+            return self.numeric_arith(ty, ArithOp::Sub, zero, vals[0]?, n);
+        }
+        if name == "wrapping_shl" {
+            let mask = self.konst(Ty::Scalar(Scalar::U32), u64::from(width - 1), n)?;
+            let count =
+                self.numeric_binary(Ty::Scalar(Scalar::U32), BinaryOp::BitAnd, vals[1]?, mask, n)?;
+            let mode = if width <= 32 {
+                ConvertMode::Truncate
+            } else {
+                ConvertMode::Widen
+            };
+            let count = self.numeric_convert(ty, mode, count, n)?;
+            return self.numeric_binary(ty, BinaryOp::Shl, vals[0]?, count, n);
+        }
+        if name == "leading_zeros" {
+            let operand = vals[0]?;
+            if !self.live() {
+                return None;
+            }
+            let result = self.value(ty);
+            self.inst(
+                Inst::ScalarUnary {
+                    result,
+                    op: hirsel_core_ir::ScalarUnaryOp::LeadingZeros,
+                    operand,
+                },
+                n,
+            );
+            let unsigned = Ty::Scalar(match width {
+                8 => Scalar::U8,
+                16 => Scalar::U16,
+                32 => Scalar::U32,
+                _ => Scalar::U64,
+            });
+            let result = if signed {
+                self.numeric_convert(unsigned, ConvertMode::Truncate, result, n)?
+            } else {
+                result
+            };
+            let mode = if width > 32 {
+                ConvertMode::Truncate
+            } else {
+                ConvertMode::Widen
+            };
+            return self.numeric_convert(Ty::Scalar(Scalar::U32), mode, result, n);
+        }
+        if name == "mul_wide" {
+            return self.mul_wide(vals[0]?, vals[1]?, g.result, n);
+        }
+        if name == "parse" {
+            self.gap(n, "core integer parsing is not built");
+            return None;
+        }
+        let target = *tys.get(1)?;
+        let target_ty = value_ty(&self.t, target).ok().flatten()?;
         let mode = match name {
             "widen" => {
-                let ((fs, a), (ts, b)) = (ints[0], ints[1]);
-                if !((fs == ts && a <= b) || (!fs && ts && a < b)) {
-                    let (x, y) = (self.name(tys[0]), self.name(tys[1]));
+                let (ts, b) = int_of(&self.t, target)?;
+                if !((signed == ts && width <= b) || (!signed && ts && width < b)) {
+                    let (x, y) = (self.name(input), self.name(target));
                     self.refuse("SEM-1", n, format!("not every `{x}` fits `{y}`"));
                     return None;
                 }
                 ConvertMode::Widen
             }
-            "truncate" if ints[1].1 <= ints[0].1 => ConvertMode::Truncate,
+            "truncate" if int_of(&self.t, target)?.1 <= width => ConvertMode::Truncate,
             "truncate" => {
-                let (x, y) = (self.name(tys[0]), self.name(tys[1]));
+                let (x, y) = (self.name(input), self.name(target));
                 self.refuse("SEM-1", n, format!("`{y}` is wider than `{x}`"));
                 return None;
             }
+            "narrow" | "try_narrow" => ConvertMode::TryNarrow,
             _ => {
                 self.gap(n, "this core integer operation is not built");
                 return None;
             }
         };
-        let ty = value_ty(&self.t, tys[1]).ok().flatten()?;
         let operand = vals[0]?;
+        if !self.live() {
+            return None;
+        }
+        let result = self.value(target_ty);
+        let flag = (mode == ConvertMode::TryNarrow).then(|| self.value(Ty::Scalar(Scalar::Bool)));
+        self.inst(
+            Inst::Convert {
+                result,
+                flag,
+                operand,
+                mode,
+            },
+            n,
+        );
+        if let Some(ok) = flag {
+            if name == "try_narrow" {
+                let result_ty = subst(&mut self.t, g.result, tys);
+                return self.numeric_option(result_ty, target, result, ok, n);
+            }
+            self.require_numeric(ok, n);
+        }
+        Some(result)
+    }
+    fn numeric_convert(
+        &mut self,
+        ty: Ty,
+        mode: ConvertMode,
+        operand: ValueId,
+        n: NodeId,
+    ) -> Option<ValueId> {
         if !self.live() {
             return None;
         }
@@ -663,5 +773,404 @@ impl<'c, 'a> Cx<'c, 'a> {
             n,
         );
         Some(result)
+    }
+    fn numeric_binary(
+        &mut self,
+        ty: Ty,
+        op: BinaryOp,
+        left: ValueId,
+        right: ValueId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        if !self.live() {
+            return None;
+        }
+        let result = self.value(ty);
+        self.inst(
+            Inst::Binary {
+                result,
+                op,
+                left,
+                right,
+                fail: None,
+            },
+            n,
+        );
+        Some(result)
+    }
+    fn numeric_arith(
+        &mut self,
+        ty: Ty,
+        op: ArithOp,
+        left: ValueId,
+        right: ValueId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        if !self.live() {
+            return None;
+        }
+        let result = self.value(ty);
+        self.inst(
+            Inst::IntArith {
+                result,
+                flag: None,
+                op,
+                mode: ArithMode::Wrapping,
+                left,
+                right,
+            },
+            n,
+        );
+        Some(result)
+    }
+    fn numeric_compare(
+        &mut self,
+        op: CompareOp,
+        left: ValueId,
+        right: ValueId,
+        n: NodeId,
+    ) -> ValueId {
+        let result = self.value(Ty::Scalar(Scalar::Bool));
+        self.inst(
+            Inst::Compare {
+                result,
+                op,
+                left,
+                right,
+            },
+            n,
+        );
+        result
+    }
+    fn numeric_branch(&mut self, condition: ValueId, yes: BlockId, no: BlockId, n: NodeId) {
+        let (yes, no) = (self.edge(yes, &[]), self.edge(no, &[]));
+        self.end(Terminator::Branch { condition, yes, no }, Some(n));
+    }
+    fn require_numeric(&mut self, ok: ValueId, n: NodeId) {
+        let yes = self.new_block(&[]);
+        let no = self.new_block(&[]);
+        self.numeric_branch(ok, yes, no, n);
+        self.start(no);
+        // FORM records Overflow on scalar arithmetic. This failing arithmetic is
+        // the narrow operation's failure edge, with the narrow call's source anchor.
+        let ty = Ty::Scalar(Scalar::U8);
+        let max = self.konst(ty, 255, n).unwrap();
+        let one = self.konst(ty, 1, n).unwrap();
+        let _ = self.numeric_binary(ty, BinaryOp::Add, max, one, n);
+        self.end(Terminator::Propagate, Some(n));
+        self.start(yes);
+    }
+    /// The overflow flag decides which ordinary Option variant is constructed.
+    fn numeric_option(
+        &mut self,
+        ty: TyId,
+        payload: TyId,
+        value: ValueId,
+        ok: ValueId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let id = match self.rep(ty).ok()? {
+            Rep::Place(id) => id,
+            _ => return None,
+        };
+        let to = self.new_slot(PlaceTy::Declared(id), n);
+        let yes = self.new_block(&[]);
+        let no = self.new_block(&[]);
+        let join = self.new_block(&[]);
+        self.numeric_branch(ok, yes, no, n);
+        self.start(yes);
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 1,
+            },
+            n,
+        );
+        let place = self.place_ty(payload, n)?;
+        let at = self.address(
+            AddressBase::Address(to),
+            &[Step::CaseField { case: 1, field: 0 }],
+            place,
+            n,
+        );
+        let rep = self.rep(payload).ok()?;
+        self.install(at, rep, Some(value), n);
+        self.jump(join, &[], n);
+        self.start(no);
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 0,
+            },
+            n,
+        );
+        self.jump(join, &[], n);
+        self.start(join);
+        Some(self.pointer(to, n))
+    }
+    /// Base-2^32 long multiplication. Each limb product fits u64; the two carry
+    /// sums are bounded by 2^64-2^32, and high is at most u64::MAX-1.
+    fn mul_wide(&mut self, a: ValueId, b: ValueId, tuple: TyId, n: NodeId) -> Option<ValueId> {
+        let ty = Ty::Scalar(Scalar::U64);
+        let mask = self.konst(ty, 0xffff_ffff, n)?;
+        let shift = self.konst(ty, 32, n)?;
+        let a0 = self.numeric_binary(ty, BinaryOp::BitAnd, a, mask, n)?;
+        let b0 = self.numeric_binary(ty, BinaryOp::BitAnd, b, mask, n)?;
+        let a1 = self.numeric_binary(ty, BinaryOp::Shr, a, shift, n)?;
+        let b1 = self.numeric_binary(ty, BinaryOp::Shr, b, shift, n)?;
+        let w0 = self.numeric_binary(ty, BinaryOp::Mul, a0, b0, n)?;
+        let carry = self.numeric_binary(ty, BinaryOp::Shr, w0, shift, n)?;
+        let cross = self.numeric_binary(ty, BinaryOp::Mul, a1, b0, n)?;
+        let t = self.numeric_binary(ty, BinaryOp::Add, cross, carry, n)?;
+        let w1 = self.numeric_binary(ty, BinaryOp::BitAnd, t, mask, n)?;
+        let w2 = self.numeric_binary(ty, BinaryOp::Shr, t, shift, n)?;
+        let cross = self.numeric_binary(ty, BinaryOp::Mul, a0, b1, n)?;
+        let w1 = self.numeric_binary(ty, BinaryOp::Add, w1, cross, n)?;
+        let carry = self.numeric_binary(ty, BinaryOp::Shr, w1, shift, n)?;
+        let high = self.numeric_binary(ty, BinaryOp::Mul, a1, b1, n)?;
+        let high = self.numeric_binary(ty, BinaryOp::Add, high, w2, n)?;
+        let high = self.numeric_binary(ty, BinaryOp::Add, high, carry, n)?;
+        let low = self.numeric_binary(ty, BinaryOp::Shl, w1, shift, n)?;
+        let bottom = self.numeric_binary(ty, BinaryOp::BitAnd, w0, mask, n)?;
+        let low = self.numeric_binary(ty, BinaryOp::BitOr, low, bottom, n)?;
+        let place = self.place_ty(tuple, n)?;
+        let to = self.new_slot(place, n);
+        for (i, value) in [high, low].into_iter().enumerate() {
+            let at = self.address(
+                AddressBase::Address(to),
+                &[Step::Field(i as u32)],
+                PlaceTy::Value(ty),
+                n,
+            );
+            self.inst(Inst::Store { address: at, value }, n);
+        }
+        Some(self.pointer(to, n))
+    }
+    fn float_intrinsic(
+        &mut self,
+        f: usize,
+        tys: &[TyId],
+        vals: &[Option<ValueId>],
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let g = &self.p.fns[f];
+        let name = g.path.0.name.as_str();
+        let result_ty = subst(&mut self.t, g.result, tys);
+        let result_ir = value_ty(&self.t, result_ty).ok().flatten();
+        let operand = vals[0]?;
+        if !self.live() {
+            return None;
+        }
+        let mode = match name {
+            "to_bits32" | "to_bits64" | "from_bits32" | "from_bits64" => ConvertMode::Reinterpret,
+            "widen" | "narrow" => ConvertMode::FloatResize,
+            "from_int" => ConvertMode::IntToFloat,
+            "mul_add" => {
+                let result = self.value(result_ir?);
+                self.inst(
+                    Inst::MulAdd {
+                        result,
+                        left: operand,
+                        right: vals[1]?,
+                        addend: vals[2]?,
+                    },
+                    n,
+                );
+                return Some(result);
+            }
+            "to_int" => return self.float_to_int(result_ty, tys[1], operand, n),
+            "total_order" => return self.float_total_order(result_ty, operand, vals[1]?, n),
+            _ => {
+                self.gap(n, "this core float operation is not built");
+                return None;
+            }
+        };
+        self.numeric_convert(result_ir?, mode, operand, n)
+    }
+    fn float_to_int(
+        &mut self,
+        ty: TyId,
+        integer: TyId,
+        operand: ValueId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let result = self.value(value_ty(&self.t, integer).ok().flatten()?);
+        let flag = self.value(Ty::Scalar(Scalar::U8));
+        self.inst(
+            Inst::Convert {
+                result,
+                flag: Some(flag),
+                operand,
+                mode: ConvertMode::FloatToInt,
+            },
+            n,
+        );
+        let zero = self.konst(Ty::Scalar(Scalar::U8), 0, n)?;
+        let ok = self.numeric_compare(CompareOp::Eq, flag, zero, n);
+        let place = self.place_ty(ty, n)?;
+        let to = self.new_slot(place, n);
+        let yes = self.new_block(&[]);
+        let no = self.new_block(&[]);
+        let join = self.new_block(&[]);
+        self.numeric_branch(ok, yes, no, n);
+        self.start(yes);
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 0,
+            },
+            n,
+        );
+        let place = self.place_ty(integer, n)?;
+        let at = self.address(
+            AddressBase::Address(to),
+            &[Step::CaseField { case: 0, field: 0 }],
+            place,
+            n,
+        );
+        self.inst(
+            Inst::Store {
+                address: at,
+                value: result,
+            },
+            n,
+        );
+        self.jump(join, &[], n);
+        self.start(no);
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 1,
+            },
+            n,
+        );
+        let error = self
+            .t
+            .mk(TyKind::Adt(self.p.core_decl("FloatError")?, vec![]));
+        let place = self.place_ty(error, n)?;
+        let at = self.address(
+            AddressBase::Address(to),
+            &[Step::CaseField { case: 1, field: 0 }],
+            place,
+            n,
+        );
+        let one = self.konst(Ty::Scalar(Scalar::U8), 1, n)?;
+        let nan = self.numeric_compare(CompareOp::Eq, flag, one, n);
+        let nan_block = self.new_block(&[]);
+        let range_block = self.new_block(&[]);
+        self.numeric_branch(nan, nan_block, range_block, n);
+        self.start(nan_block);
+        self.inst(
+            Inst::SetCase {
+                address: at,
+                case: 0,
+            },
+            n,
+        );
+        self.jump(join, &[], n);
+        self.start(range_block);
+        self.inst(
+            Inst::SetCase {
+                address: at,
+                case: 1,
+            },
+            n,
+        );
+        self.jump(join, &[], n);
+        self.start(join);
+        Some(self.pointer(to, n))
+    }
+    /// IEEE totalOrder becomes unsigned comparison after complementing negative
+    /// bits and flipping positive sign bits. SEM-2 canonicalizes every NaN.
+    fn float_order_key(&mut self, operand: ValueId, n: NodeId) -> Option<ValueId> {
+        let width = if self.b.values[operand.index()] == Ty::Scalar(Scalar::F32) {
+            32
+        } else {
+            64
+        };
+        let ty = Ty::Scalar(if width == 32 {
+            Scalar::U32
+        } else {
+            Scalar::U64
+        });
+        let bits = self.numeric_convert(ty, ConvertMode::Reinterpret, operand, n)?;
+        let sign = self.konst(ty, 1u64 << (width - 1), n)?;
+        let negative = self.numeric_compare(CompareOp::Ge, bits, sign, n);
+        let yes = self.new_block(&[]);
+        let no = self.new_block(&[]);
+        let join = self.new_block(&[ty]);
+        self.numeric_branch(negative, yes, no, n);
+        self.start(yes);
+        let result = self.value(ty);
+        self.inst(
+            Inst::Unary {
+                result,
+                op: UnaryOp::BitNot,
+                operand: bits,
+                fail: None,
+            },
+            n,
+        );
+        self.jump(join, &[result], n);
+        self.start(no);
+        let result = self.numeric_binary(ty, BinaryOp::BitXor, bits, sign, n)?;
+        self.jump(join, &[result], n);
+        self.start(join);
+        Some(
+            self.b.blocks[join.index()]
+                .params
+                .get(&self.b.pools.values)?[0],
+        )
+    }
+    fn float_total_order(
+        &mut self,
+        ty: TyId,
+        a: ValueId,
+        b: ValueId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let a = self.float_order_key(a, n)?;
+        let b = self.float_order_key(b, n)?;
+        let place = self.place_ty(ty, n)?;
+        let to = self.new_slot(place, n);
+        let less = self.numeric_compare(CompareOp::Lt, a, b, n);
+        let lt = self.new_block(&[]);
+        let other = self.new_block(&[]);
+        let join = self.new_block(&[]);
+        self.numeric_branch(less, lt, other, n);
+        self.start(lt);
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 0,
+            },
+            n,
+        );
+        self.jump(join, &[], n);
+        self.start(other);
+        let equal = self.numeric_compare(CompareOp::Eq, a, b, n);
+        let eq = self.new_block(&[]);
+        let gt = self.new_block(&[]);
+        self.numeric_branch(equal, eq, gt, n);
+        self.start(eq);
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 1,
+            },
+            n,
+        );
+        self.jump(join, &[], n);
+        self.start(gt);
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 2,
+            },
+            n,
+        );
+        self.jump(join, &[], n);
+        self.start(join);
+        Some(self.pointer(to, n))
     }
 }

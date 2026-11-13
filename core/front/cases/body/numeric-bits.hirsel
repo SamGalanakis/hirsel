@@ -1,0 +1,17 @@
+// expect: run neg(128) = 128
+// expect: run neg(1) = 255
+// expect: run shl(129,8) = 129
+// expect: run shl(129,9) = 2
+// expect: run zeros(0) = 8
+// expect: run zeros(1) = 7
+// expect: run zeros64(1) = 63
+// expect: run wide_hi(18446744073709551615,18446744073709551615) = 18446744073709551614
+// expect: run wide_lo(18446744073709551615,18446744073709551615) = 1
+// expect: run wide_hi(4294967295,4294967295) = 0
+// expect: run wide_lo(4294967295,4294967295) = 18446744065119617025
+fn neg(x: u8) -> u8 { int.wrapping_neg(x) }
+fn shl(x: u8, n: u32) -> u8 { int.wrapping_shl(x, n) }
+fn zeros(x: u8) -> u32 { int.leading_zeros(x) }
+fn zeros64(x: u64) -> u32 { int.leading_zeros(x) }
+fn wide_hi(a: u64, b: u64) -> u64 { let (h, l) = int.mul_wide(a, b); h }
+fn wide_lo(a: u64, b: u64) -> u64 { let (h, l) = int.mul_wide(a, b); l }

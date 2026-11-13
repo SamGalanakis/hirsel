@@ -142,6 +142,14 @@ impl<'c, 'a> Cx<'c, 'a> {
                 self.constructor_pattern(n, declared)
             }
             NodeKind::LiteralPattern => {
+                if !self.comparison_allowed(ty, false) {
+                    self.refuse(
+                        "LANG-17",
+                        n,
+                        "a literal pattern requires equality on a key type",
+                    );
+                    return self.pat_push(n, ERROR, Head::Any, PoolRange::EMPTY);
+                }
                 let bits = self.pattern_number(n, ty);
                 self.pat_push(n, ty, Head::Range(bits, bits), PoolRange::EMPTY)
             }

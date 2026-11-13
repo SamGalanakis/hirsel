@@ -1,0 +1,2 @@
+// expect: refuse LANG-17 at 2:32
+fn f(x: f64) -> u8 { match x { 0.0 => 1, _ => 2 } }

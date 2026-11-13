@@ -103,6 +103,13 @@ impl<'c, 'a> Cx<'c, 'a> {
         );
         (ERROR, None)
     }
+    /// SEM-7's operand requirement is shared by operators and literal patterns.
+    pub(super) fn comparison_allowed(&self, ty: TyId, ordered: bool) -> bool {
+        ty == ERROR
+            || has_bounds(&self.p.decls, &self.t, ty, &self.params)
+                & if ordered { ORDERED } else { KEY }
+                != 0
+    }
     pub(super) fn is_numeric(&self, t: TyId) -> bool {
         matches!(self.t.kind(t), TyKind::Scalar(s) if numeric(*s))
     }
@@ -170,7 +177,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                 } else {
                     ORDERED
                 };
-                if has_bounds(&self.p.decls, &self.t, t, &self.params) & need == 0 {
+                if !self.comparison_allowed(t, need == ORDERED) {
                     let a = self.name(t);
                     let b = if need == KEY { "key" } else { "ordered" };
                     self.refuse("SEM-7", n, format!("`{a}` is not {b}"));

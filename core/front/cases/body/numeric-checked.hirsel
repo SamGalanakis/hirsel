@@ -1,0 +1,18 @@
+// expect: run add(254,1) = 255
+// expect: run add(255,1) = 99
+// expect: run div(-128,-1) = 99
+// expect: run div(-128,0) = 99
+// expect: run div(-127,2) = -63
+// expect: run sub(0,1) = 99
+// expect: run mul(16,16) = 99
+// expect: run mul(15,17) = 255
+// expect: run narrow(256) = fail Overflow
+// expect: run narrow(255) = 255
+// expect: run try_narrow(-1) = 77
+// expect: run try_narrow(255) = 255
+fn add(a: u8, b: u8) -> u8 { match int.checked_add(a, b) { Some(x) => x, None => 99 } }
+fn sub(a: u8, b: u8) -> u8 { match int.checked_sub(a, b) { Some(x) => x, None => 99 } }
+fn mul(a: u8, b: u8) -> u8 { match int.checked_mul(a, b) { Some(x) => x, None => 99 } }
+fn div(a: i8, b: i8) -> i8 { match int.checked_div(a, b) { Some(x) => x, None => 99 } }
+fn narrow(a: u64) -> u8 { int.narrow(a) }
+fn try_narrow(a: i64) -> u8 { let v: Option[u8] = int.try_narrow(a); match v { Some(x) => x, None => 77 } }

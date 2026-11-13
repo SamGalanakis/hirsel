@@ -1,0 +1,24 @@
+// expect: run bits32(2147483648) = 2147483648
+// expect: run bits32(2147483647) = 2143289344
+// expect: run bits64(18446744073709551615) = 9221120237041090560
+// expect: run bits64(4607182418800017408) = 4607182418800017408
+// expect: run convert(-12.9) = -12
+// expect: run convert(128.0) = 22
+// expect: run convert_bits(9221120237041090561) = 11
+// expect: run convert_bits(9218868437227405312) = 22
+// expect: run fused(2.0,3.0,4.0) = 10.0
+// expect: run resize(1.5) = 1.5
+// expect: run integer(16777217) = 16777216.0
+// expect: run order(9223372036854775808,0) = 1
+// expect: run order(13830554455654793216,0) = 1
+// expect: run order(9221120237041090560,9218868437227405312) = 3
+fn bits32(x: u32) -> u32 { float.to_bits32(float.from_bits32(x)) }
+fn bits64(x: u64) -> u64 { float.to_bits64(float.from_bits64(x)) }
+fn convert(x: f64) -> i8 { let result: Result[i8, FloatError] = float.to_int(x); match result { Ok(v) => v, Error(NaN) => 11, Error(OutOfRange) => 22 } }
+fn convert_bits(x: u64) -> i8 { convert(float.from_bits64(x)) }
+fn fused(a: f64, b: f64, c: f64) -> f64 { float.mul_add(a, b, c) }
+fn resize(x: f32) -> f32 { float.narrow(float.widen(x)) }
+fn integer(x: u32) -> f32 { float.from_int(x) }
+fn order(a: u64, b: u64) -> u8 {
+  match float.total_order(float.from_bits64(a), float.from_bits64(b)) { Less => 1, Equal => 2, Greater => 3 }
+}

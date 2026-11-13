@@ -12,6 +12,11 @@
 ;   i8  fn rem_min(y: i64) -> i64 { -9223372036854775808 % y }
 ;   i9  fn root(x: f64) -> f64 { float.sqrt(x) }
 ;   i10 fn root32(x: f32) -> f32 { float.sqrt(x) }
+;   i11 fn ones8(x: u8) -> u32 { int.count_ones(x) }
+;   i12 fn ones64(x: u64) -> u32 { int.count_ones(x) }
+;   i13 fn ones_i8(x: i8) -> u32 { int.count_ones(x) }
+;   i14 fn even(x: f64) -> f64 { float.round_even(x) }
+;   i15 fn even32(x: f32) -> f32 { float.round_even(x) }
 ;
 ; Behaviour, derived by hand from SEM-1/SEM-2 (`fail C` = the run failed with cause C;
 ; an instruction without a failure block propagates, nothing to clean in these frames):
@@ -50,6 +55,25 @@
 ; run: f9(-inf) -> 0x7ff8000000000000
 ; run: f10(2) -> 0x3fb504f3          ; nearest f32 to sqrt 2 (fraction 3504f3.33f... rounds down)
 ; run: f10(-2) -> 0x7fc00000         ; the f32 canonical NaN
+; run: f11(0) -> 0                   ; int.count_ones (SEM-1): the one bits of the value at its width
+; run: f11(1) -> 1
+; run: f11(255) -> 8                 ; all ones of a u8
+; run: f11(165) -> 4                 ; 0xa5 = 1010 0101
+; run: f12(18446744073709551615) -> 64   ; all ones of a u64
+; run: f12(9223372036854775809) -> 2    ; 0x8000000000000001: the top and bottom bits
+; run: f13(-1) -> 8                  ; i8 -1 is 0xff: eight ones at width 8, not 64
+; run: f13(-128) -> 1                ; 0x80
+; run: f14(0.5) -> 0                 ; float.round_even (core.md "Floats"): ties to the even integer
+; run: f14(1.5) -> 2
+; run: f14(2.5) -> 2                 ; not 3: float.round (ties away) gives 3
+; run: f14(-0.5) -> 0x8000000000000000   ; -0.5 ties to -0, the sign of a zero result kept
+; run: f14(-2.5) -> -2
+; run: f14(3) -> 3                   ; already integral: unchanged
+; run: f14(2.4999999999999996) -> 2  ; just below a tie: the nearest, 2
+; run: f14(inf) -> inf               ; infinities unchanged
+; run: f14(0x7ff8000000000001) -> 0x7ff8000000000000  ; a NaN gives the canonical NaN (SEM-2)
+; run: f15(2.5) -> 2
+; run: f15(3.5) -> 4
 core v1
 item i0 = samples@0/arith/hyp
 item i1 = samples@0/arith/add
@@ -62,6 +86,11 @@ item i7 = samples@0/arith/qr
 item i8 = samples@0/arith/rem_min
 item i9 = samples@0/arith/root
 item i10 = samples@0/arith/root32
+item i11 = samples@0/arith/ones8
+item i12 = samples@0/arith/ones64
+item i13 = samples@0/arith/ones_i8
+item i14 = samples@0/arith/even
+item i15 = samples@0/arith/even32
 sig g0 = (f64, f64) -> (f64)
 sig g1 = (i32, i32) -> (i32)
 sig g2 = (u8) -> (u8)
@@ -72,6 +101,9 @@ sig g6 = (i64, i64) -> (i64, i64)
 sig g7 = (i64) -> (i64)
 sig g8 = (f64) -> (f64)
 sig g9 = (f32) -> (f32)
+sig g10 = (u8) -> (u8)
+sig g11 = (u64) -> (u64)
+sig g12 = (i8) -> (i8)
 inst n0 = samples@0/arith/hyp [] []
 inst n1 = samples@0/arith/add [] []
 inst n2 = samples@0/arith/wrap [] []
@@ -83,6 +115,11 @@ inst n7 = samples@0/arith/qr [] []
 inst n8 = samples@0/arith/rem_min [] []
 inst n9 = samples@0/arith/root [] []
 inst n10 = samples@0/arith/root32 [] []
+inst n11 = samples@0/arith/ones8 [] []
+inst n12 = samples@0/arith/ones64 [] []
+inst n13 = samples@0/arith/ones_i8 [] []
+inst n14 = samples@0/arith/even [] []
+inst n15 = samples@0/arith/even32 [] []
 fn f0 = n0 g0 {
 b0(v0: f64, v1: f64):
   v2: f64 = mul v1, v1                 ; float ops cannot fail: no failure block
@@ -143,5 +180,30 @@ b0(v0: f64):
 fn f10 = n10 g9 {
 b0(v0: f32):
   v1: f32 = sqrt v0
+  return v1
+}
+fn f11 = n11 g10 {
+b0(v0: u8):
+  v1: u8 = count_ones v0
+  return v1
+}
+fn f12 = n12 g11 {
+b0(v0: u64):
+  v1: u64 = count_ones v0
+  return v1
+}
+fn f13 = n13 g12 {
+b0(v0: i8):
+  v1: i8 = count_ones v0
+  return v1
+}
+fn f14 = n14 g8 {
+b0(v0: f64):
+  v1: f64 = round_even v0
+  return v1
+}
+fn f15 = n15 g9 {
+b0(v0: f32):
+  v1: f32 = round_even v0
   return v1
 }

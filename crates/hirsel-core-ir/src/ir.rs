@@ -249,7 +249,8 @@ pub enum ArithOp {
     Div,
 }
 
-/// LIR `ScalarUnaryOp`, unchanged.
+/// LIR `ScalarUnaryOp`, plus `RoundEven`: IEEE 754 roundToIntegralTiesToEven
+/// (`float.round_even`); `Round` rounds ties away from zero (`float.round`).
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum ScalarUnaryOp {
     Sqrt,
@@ -257,6 +258,7 @@ pub enum ScalarUnaryOp {
     Ceil,
     Trunc,
     Round,
+    RoundEven,
     Abs,
     LeadingZeros,
     TrailingZeros,
@@ -268,7 +270,13 @@ impl ScalarUnaryOp {
     pub const fn is_float(self) -> bool {
         matches!(
             self,
-            Self::Sqrt | Self::Floor | Self::Ceil | Self::Trunc | Self::Round | Self::Abs
+            Self::Sqrt
+                | Self::Floor
+                | Self::Ceil
+                | Self::Trunc
+                | Self::Round
+                | Self::RoundEven
+                | Self::Abs
         )
     }
 }

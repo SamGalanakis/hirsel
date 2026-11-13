@@ -50,7 +50,7 @@ names!(ConvertMode {
 names!(ArithMode { Wrapping = "wrapping", Saturating = "saturating", Checked = "checked" });
 names!(ArithOp { Add = "add", Sub = "sub", Mul = "mul", Div = "div" });
 names!(ScalarUnaryOp {
-    Sqrt = "sqrt", Floor = "floor", Ceil = "ceil", Trunc = "trunc", Round = "round", Abs = "abs",
+    Sqrt = "sqrt", Floor = "floor", Ceil = "ceil", Trunc = "trunc", Round = "round", RoundEven = "round_even", Abs = "abs",
     LeadingZeros = "leading_zeros", TrailingZeros = "trailing_zeros", CountOnes = "count_ones",
     SwapBytes = "swap_bytes", ReverseBits = "reverse_bits",
 });

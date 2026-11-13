@@ -358,6 +358,7 @@ impl Function<'_, '_, '_> {
             Ceil => self.b.ins().ceil(v),
             Trunc => self.b.ins().trunc(v),
             Abs => self.b.ins().fabs(v),
+            RoundEven => self.b.ins().nearest(v),
             Round => self.libcall(
                 if self.b.func.dfg.value_type(v) == types::F32 {
                     "roundf"

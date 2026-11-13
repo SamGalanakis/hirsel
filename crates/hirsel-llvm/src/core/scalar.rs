@@ -205,6 +205,7 @@ impl FunctionEmitter<'_> {
             ScalarUnaryOp::Ceil => "ceil",
             ScalarUnaryOp::Trunc => "trunc",
             ScalarUnaryOp::Round => "round",
+            ScalarUnaryOp::RoundEven => "roundeven",
             ScalarUnaryOp::Abs => "fabs",
             ScalarUnaryOp::LeadingZeros => "ctlz",
             ScalarUnaryOp::TrailingZeros => "cttz",

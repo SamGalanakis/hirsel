@@ -1387,6 +1387,7 @@ impl Machine<'_> {
                     ScalarUnaryOp::Ceil => bits(t, f.ceil()),
                     ScalarUnaryOp::Trunc => bits(t, f.trunc()),
                     ScalarUnaryOp::Round => bits(t, f.round()),
+                    ScalarUnaryOp::RoundEven => bits(t, f.round_ties_even()),
                     ScalarUnaryOp::Abs => bits(t, f.abs()),
                     ScalarUnaryOp::LeadingZeros => u64::from(x.leading_zeros() - (64 - w)),
                     ScalarUnaryOp::TrailingZeros => u64::from(x.trailing_zeros().min(w)),

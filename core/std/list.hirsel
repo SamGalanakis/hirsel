@@ -358,3 +358,23 @@ pub fn sort_stable[T](mut xs: List[T], before: scoped fn(T, T) -> Order) -> Resu
     }
     Ok(())
 }
+
+/// First equal index, or Error(insertion index), in a list sorted by compare.
+/// compare(element) orders that element relative to the sought key, as Rust's
+/// slice::binary_search_by. Equal keys use the first index, including duplicates.
+/// The scoped comparator may borrow its target and never escapes.
+/// Alloc: nothing. Cost: O(log len) calls; one comparison per search step.
+pub fn binary_search_by[T](xs: List[T], compare: scoped fn(T) -> Order) -> Result[u64, u64] {
+    let mut lo: u64 = 0
+    let mut hi = list.len(xs)
+    let mut found = false
+    while lo < hi {
+        let mid = lo + (hi - lo) / 2
+        match compare(xs[mid]) {
+            Less => { lo = mid + 1 },
+            Equal => { found = true; hi = mid },
+            Greater => { hi = mid },
+        }
+    }
+    if found { Ok(lo) } else { Error(lo) }
+}

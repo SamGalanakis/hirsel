@@ -475,3 +475,50 @@ fn swap_zero_sized() -> u64 {
     list.swap(mut xs, 0, 1)
     list.len(xs)
 }
+
+// Search only the tens key, not the whole value, retaining the first equal index.
+// expect: run search_by_key() = 1
+fn search_by_key() -> u64 {
+    let xs = five(10, 21, 22, 24, 30)
+    result.unwrap(list.binary_search_by(xs, fn(x: u64) -> Order { order.compare(x / 10, 2) }))
+}
+
+// Exact insertion indices before, between and after keys; a callback using the
+// opposite operand order changes these results.
+// expect: run search_by_insertions() = 35
+fn search_by_insertions() -> u64 {
+    let xs = five(10, 20, 30, 40, 50)
+    let a = match list.binary_search_by(xs, fn(x: u64) -> Order { order.compare(x, 5) }) { Error(i) => i, _ => 99 }
+    let b = match list.binary_search_by(xs, fn(x: u64) -> Order { order.compare(x, 35) }) { Error(i) => i, _ => 99 }
+    let c = match list.binary_search_by(xs, fn(x: u64) -> Order { order.compare(x, 55) }) { Error(i) => i, _ => 99 }
+    a * 100 + b * 10 + c
+}
+
+// Empty search must not call the comparator.
+// expect: run search_by_empty() = 0
+fn search_by_empty() -> u64 {
+    let xs: List[u64] = list.new()
+    match list.binary_search_by(xs, fn(x: u64) -> Order { fail("empty comparator") }) {
+        Error(i) => i,
+        _ => 99,
+    }
+}
+
+// Captured key is viewed, and equal runs still resolve to their first position.
+// expect: run search_by_capture() = 0
+fn search_by_capture() -> u64 {
+    let xs = five(7, 7, 7, 7, 7)
+    let key: u64 = 7
+    result.unwrap(list.binary_search_by(xs, fn(x: u64) -> Order { order.compare(x, key) }))
+}
+
+// Huffman nodes need not be ordered: the callback reads frequency alone.
+// expect: run search_by_unordered_record() = 1
+fn search_by_unordered_record() -> u64 {
+    let mut xs: List[Box[SearchNode]] = list.new()
+    result.unwrap(list.push(mut xs, result.unwrap(box.new(SearchNode(frequency: 1, name: true)))))
+    result.unwrap(list.push(mut xs, result.unwrap(box.new(SearchNode(frequency: 3, name: false)))))
+    result.unwrap(list.push(mut xs, result.unwrap(box.new(SearchNode(frequency: 3, name: true)))))
+    result.unwrap(list.binary_search_by(xs, fn(x: Box[SearchNode]) -> Order { order.compare(x.frequency, 3) }))
+}
+type SearchNode { frequency: u64, name: bool }

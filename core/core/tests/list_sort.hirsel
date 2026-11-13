@@ -119,3 +119,18 @@ fn ordinary_list_after_sort() -> u64 {
     result.unwrap(list.push(mut xs, 7))
     a * 100 + b * 10 + option.unwrap(list.pop(mut xs))
 }
+
+// Five equal zero-sized elements need no admission. Bottom-up passes compare
+// twice at width1, twice at width2 and four times at width4.
+// expect: run zero_size_sort() = 58
+fn zero_size_sort() -> u64 {
+    let r = bound bytes 0 {
+        let mut xs: List[()] = list.new()
+        for _ in 0u64 .. 5 { result.unwrap(list.push(mut xs, ())) }
+        let cap = list.capacity(xs)
+        let mut calls: u64 = 0
+        result.unwrap(list.sort_stable(mut xs, fn(a:(),b:())->Order { calls += 1; Equal }))
+        if list.capacity(xs) != cap { 99 } else { list.len(xs) * 10 + calls }
+    }
+    result.unwrap(r)
+}

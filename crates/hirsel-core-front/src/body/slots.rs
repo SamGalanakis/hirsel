@@ -133,15 +133,39 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let done = self.new_block(&[]);
         self.jump(check, &[zero], n);
         self.start(check);
-        let index = self.b.blocks[check.index()].params.get(&self.b.pools.values)?[0];
+        let index = self.b.blocks[check.index()]
+            .params
+            .get(&self.b.pools.values)?[0];
         let more = self.value(Ty::Scalar(Scalar::Bool));
-        self.inst(Inst::Compare { result: more, op: CompareOp::Lt, left: index, right: count }, n);
+        self.inst(
+            Inst::Compare {
+                result: more,
+                op: CompareOp::Lt,
+                left: index,
+                right: count,
+            },
+            n,
+        );
         let yes = self.edge(body, &[]);
         let no = self.edge(done, &[]);
-        self.end(Terminator::Branch { condition: more, yes, no }, Some(n));
+        self.end(
+            Terminator::Branch {
+                condition: more,
+                yes,
+                no,
+            },
+            Some(n),
+        );
         self.start(body);
         let (address, ty) = self.slots_at(item, header, index, n)?;
-        self.inst(Inst::Unmark { address, live: true, ty }, n);
+        self.inst(
+            Inst::Unmark {
+                address,
+                live: true,
+                ty,
+            },
+            n,
+        );
         let (next, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, index, one, n);
         self.jump(check, &[next], n);
         self.start(done);

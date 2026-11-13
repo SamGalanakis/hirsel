@@ -27,6 +27,20 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             "push_entry" => Some(self.map_push(types, vals, n)),
             "regrow" => Some(self.map_regrow(types, vals[0]?, vals[1]?, result, n)),
+            "with_value" => {
+                let collection = self.map_type(types)?;
+                let entry = self.map_entry_at(vals[0]?, collection, vals[1]?, n)?;
+                let place = self.place_ty(types[1], n)?;
+                let at = self.address(AddressBase::Address(entry), &[Step::Field(3)], place, n);
+                let pointer = self.pointer(at, n);
+                let callable = self.t.mk(TyKind::Fn(
+                    vec![(Mode::Mut, types[1])],
+                    result,
+                    false,
+                    Callable::Scoped,
+                ));
+                Some(self.call_lowered(callable, vals[2]?, &[Some(pointer)], n))
+            }
             "swap_value" | "kill" => {
                 let collection = self.map_type(types)?;
                 let entry = self.map_entry_at(vals[0]?, collection, vals[1]?, n)?;

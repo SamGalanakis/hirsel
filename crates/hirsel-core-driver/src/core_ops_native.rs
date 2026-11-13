@@ -689,6 +689,40 @@ fn region_recursive_instance_cranelift() { region_recursive_instance(Backend::Cr
 #[test]
 #[ignore = "explicit native integration target"]
 fn region_recursive_instance_llvm() { region_recursive_instance(Backend::Llvm); }
+fn map_update_value(backend: Backend) {
+    let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir=tempfile::tempdir().unwrap();
+    let source=concat!(include_str!("../../../core/front/cases/body/map-update.hirsel"), r#"
+resource type Trace {out:Stdout,id:u64} drop(t) {let _=stdout.write(t.out,"D")}
+fn clean_once(out:Stdout)->u64 {
+ let mut m:Map[u64,Trace]=map.new()
+ result.unwrap(map.insert(mut m,1u64,result.unwrap(Trace(out:out,id:8))))
+ option.unwrap(map.update(mut m,1u64,fn(mut value:Trace)->u64 {value.id+=1;value.id}))
+}
+pub fn main(out:Stdout)->Result[(),Exit] waits {
+ if counter()==17 && owners()==9 && clean_once(out)==9 {Ok(())}else{Error(Exit(status:1))}
+}
+"#);
+    let mut request=source_request(source,dir.path());
+    request.inputs.packages[1]=PackageManifest::directory(&root.join("core/core"),package("core"),true).unwrap();
+    let product=Driver::default().check(request,&mut Meter::new(false)).unwrap();
+    let entry=DefPath::from_full("app@1/main/main").unwrap();
+    let mut options=native_options(backend,dir.path());
+    options.grant_mask=1<<grant_kind("Stdout").unwrap();
+    let built=product.build(&entry,&options).unwrap();
+    let output=Command::new(&built.executable).output().unwrap();
+    assert_eq!(output.status.code(),Some(0),"{:?}",output.stderr);
+    assert_eq!(output.stdout,b"D");
+    assert!(output.stderr.is_empty());
+}
+#[test]
+#[ignore="explicit native integration target"]
+fn map_update_value_cranelift(){map_update_value(Backend::Cranelift);}
+#[test]
+#[ignore="explicit native integration target"]
+fn map_update_value_llvm(){map_update_value(Backend::Llvm);}
+
+
 fn ordered_stable(backend: Backend) {
     ordered_case(backend, include_str!("../../../core/front/cases/body/ordered-stable.hirsel"));
 }

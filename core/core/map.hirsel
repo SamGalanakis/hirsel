@@ -63,7 +63,9 @@ pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), (
 pub fn set[K: key, V](mut m: Map[K, V], k: K, take v: V) -> Result[V, V] {
   match find(m, k, hash(k)) { Some(i) => Ok(swap_value(mut m, i, take v)), None => Error(take v) }
 }
-pub fn update[K: key, V, R](mut m: Map[K, V], k: K, f: scoped fn(mut V) -> R) -> Option[R]
+pub fn update[K: key, V, R](mut m: Map[K, V], k: K, f: scoped fn(mut V) -> R) -> Option[R] {
+  match find(m, k, hash(k)) { Some(i) => Some(with_value(mut m, i, f)), None => None }
+}
 pub fn remove[K: key, V](mut m: Map[K, V], k: K) -> Option[V] {
   match find(m, k, hash(k)) { Some(i) => Some(kill(mut m, i)), None => None }
 }
@@ -76,6 +78,7 @@ fn slot_hash[K: key, V](m: Map[K,V], i: u64) -> u64
 fn slot_live[K: key, V](m: Map[K,V], i: u64) -> bool
 fn slot_key[K: key, V](m: Map[K,V], i: u64) -> View[K] in m
 fn slot_value[K: key, V](m: Map[K,V], i: u64) -> View[V] in m
+fn with_value[K: key, V, R](mut m: Map[K,V], i: u64, f: scoped fn(mut V) -> R) -> R
 fn index_len[K: key, V](m: Map[K,V]) -> u64
 fn index_get[K: key, V](m: Map[K,V], j: u64) -> u64
 fn index_set[K: key, V](mut m: Map[K,V], j: u64, s: u64)

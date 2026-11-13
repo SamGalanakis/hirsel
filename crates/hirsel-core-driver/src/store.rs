@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAGIC: &[u8; 8] = b"HCORE\0\0\0";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const HEADER: usize = 52;
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -66,10 +66,20 @@ impl Store {
         file.read_to_end(&mut bytes)?;
         Ok((ContentHash::of_bytes(&bytes) == key).then_some(bytes))
     }
+    pub(crate) fn selection(&self, name: &str) -> io::Result<Option<ContentHash>> {
+        match fs::read(self.root.join(name)) {
+            Ok(b) => Ok(<[u8; 32]>::try_from(b.as_slice()).ok().map(ContentHash)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+    pub(crate) fn select(&self, name: &str, key: ContentHash) -> io::Result<()> {
+        self.atomic(&self.root.join(name), &key.0)
+    }
     pub fn publish_root(&self, key: ContentHash) -> io::Result<()> {
         self.atomic(&self.root.join("check-root"), &key.0)
     }
-    fn atomic(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    pub(crate) fn atomic(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
         let temporary = self.root.join(format!(
             ".write-{}-{}",
             std::process::id(),

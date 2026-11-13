@@ -104,12 +104,48 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
                 Some(None)
             }
+            "slots_forget_ring" => {
+                self.slots_forget_ring(item, vals[0]?, vals[1]?, n)?;
+                Some(None)
+            }
             "slots_free" => {
                 self.slots_free(item, vals[0]?, n)?;
                 Some(None)
             }
             _ => None,
         }
+    }
+
+    // Only the core finalizer's no-drop branch may discard live slots. Marks
+    // preserve the evaluator's live-set accounting; native engines erase them.
+    fn slots_forget_ring(&mut self, item: TyId, header: ValueId, head: ValueId, n: NodeId) -> Option<()> {
+        let count = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
+        let capacity = self.read_sequence_word(header, 16, Ty::Scalar(Scalar::U64), n);
+        let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
+        let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
+        let (mask, _) = self.list_arith(ArithOp::Sub, ArithMode::Wrapping, capacity, one, n);
+        let check = self.new_block(&[Ty::Scalar(Scalar::U64)]);
+        let body = self.new_block(&[]);
+        let done = self.new_block(&[]);
+        self.jump(check, &[zero], n);
+        self.start(check);
+        let index = self.b.blocks[check.index()].params.get(&self.b.pools.values)?[0];
+        let more = self.value(Ty::Scalar(Scalar::Bool));
+        self.inst(Inst::Compare { result: more, op: CompareOp::Lt, left: index, right: count }, n);
+        let yes = self.edge(body, &[]);
+        let no = self.edge(done, &[]);
+        self.end(Terminator::Branch { condition: more, yes, no }, Some(n));
+        self.start(body);
+        let (at, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, head, index, n);
+        let physical = self.value(Ty::Scalar(Scalar::U64));
+        self.inst(Inst::Binary { result: physical, op: BinaryOp::BitAnd, left: at, right: mask, fail: None }, n);
+        let (address, ty) = self.slots_at(item, header, physical, n)?;
+        self.inst(Inst::Mark { address, live: false, ty }, n);
+        let (next, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, index, one, n);
+        self.jump(check, &[next], n);
+        self.start(done);
+        self.sequence_word(header, 8, Ty::Scalar(Scalar::U64), zero, n);
+        Some(())
     }
 
     fn slots_new(
@@ -361,6 +397,17 @@ fn slots_cross_block_law() -> u64 {
     slots_free(take b)
     answer
 }
+// expect: run slots_forget_ring_law() = true
+fn slots_forget_ring_law() -> bool {
+    let mut s: Slots[u64] = result.unwrap(slots_new(4))
+    slots_put(mut s, 3, 11)
+    slots_put(mut s, 0, 7)
+    slots_forget_ring(mut s, 3)
+    let empty = list.len(s.raw) == 0
+    slots_free(take s)
+    empty
+}
+
 "#;
 
     #[test]

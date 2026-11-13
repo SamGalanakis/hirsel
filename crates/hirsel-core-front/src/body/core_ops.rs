@@ -154,6 +154,7 @@ operations! {
     ("deque", "slots_shift", Lane::Value, "A", "core-collections-918", true),
     ("deque", "slots_view", Lane::Value, "A", "core-collections-918", true),
     ("deque", "slots_free", Lane::Value, "A", "core-collections-918", true),
+    ("list", "slots_forget_ring", Lane::Value, "A", "core-collections-918", true),
     ("list", "slots_empty", Lane::Value, "A", "core-collections-918", true),
     ("list", "slots_new", Lane::Value, "A", "core-collections-918", true),
     ("list", "slots_put", Lane::Value, "A", "core-collections-918", true),

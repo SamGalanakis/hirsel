@@ -60,3 +60,14 @@ fn slots_cross_block_law() -> u64 {
     slots_free(take b)
     answer
 }
+
+// expect: run slots_forget_ring_law() = true
+fn slots_forget_ring_law() -> bool {
+    let mut s: Slots[u64] = result.unwrap(slots_new(4))
+    slots_put(mut s, 3, 11)
+    slots_put(mut s, 0, 7)
+    slots_forget_ring(mut s, 3)
+    let empty = list.len(s.raw) == 0
+    slots_free(take s)
+    empty
+}

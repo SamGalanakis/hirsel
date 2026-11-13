@@ -54,3 +54,6 @@ fn slots_move[T](mut src: Slots[T], i: u64, mut dst: Slots[T], j: u64)
 // Same carrier, including i == j. Keeps its live count.
 fn slots_shift[T](mut s: Slots[T], i: u64, j: u64)
 fn slots_free[T](take s: Slots[T])
+
+// Discard only a no-drop element ring; preserves evaluator liveness.
+fn slots_forget_ring[T](mut s: Slots[T], head: u64)

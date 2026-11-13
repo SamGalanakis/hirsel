@@ -1,0 +1,4 @@
+// LANG-1: invalid source scalar; LANG-5 also records grammar recovery at that token.
+// expect: refuse LANG-1 at 4:10
+// expect: refuse LANG-5 at 4:10
+fn f() { $ }

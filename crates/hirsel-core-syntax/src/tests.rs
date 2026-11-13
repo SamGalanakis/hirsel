@@ -149,7 +149,7 @@ fn good(text: &str) -> SyntaxFile {
     p.syntax
 }
 #[test]
-fn precedence_and_relative_arenas() {
+fn lang_5_precedence_and_prog_7_relative_arenas() {
     let text = "// docs\nfn sum(a: u64, b: u64) -> u64 { a + b * 2 }\n";
     let file = good(text);
     let item = &file.item(0);
@@ -174,12 +174,21 @@ fn precedence_and_relative_arenas() {
     assert_eq!(spans(moved), spans(*item));
 }
 #[test]
-fn statement_boundaries_and_recovery() {
+fn lang_2_lang_4_lang_5_statement_boundaries_and_recovery() {
     for (text, rule) in [
-        ("fn f() { let x = 1\n+ 2 }\nfn next() {}", "LANG-4"),
-        ("fn f() { 1 < 2 < 3 }\nfn next() {}", "LANG-5"),
+        (
+            include_str!("../../../core/front/cases/LANG-4-continuation.hirsel"),
+            "LANG-4",
+        ),
+        (
+            include_str!("../../../core/front/cases/LANG-5-nonassociative.hirsel"),
+            "LANG-5",
+        ),
         ("fn f() { match 1 { A | B => 0 } }\nfn next() {}", "LANG-5"),
-        ("fn view() {}\nfn next() {}", "LANG-2"),
+        (
+            include_str!("../../../core/front/cases/LANG-2-keyword-name.hirsel"),
+            "LANG-2",
+        ),
         ("fn f() { let x =\nfn next() {}", "LANG-5"),
     ] {
         let p = parse(text, ParseMode::Source);
@@ -225,7 +234,7 @@ fn new_forms_have_written_nodes() {
     }
 }
 #[test]
-fn literals_are_lossless_and_decode_the_new_rules() {
+fn lang_1_lang_3_literals_are_lossless_and_decode_the_new_rules() {
     assert_eq!(byte_value("b'\\xff'"), Some(255));
     assert_eq!(character_value("'\\u{1f40f}'"), Some('🐏'));
     assert_eq!(character_value("'\\x80'"), None);
@@ -324,7 +333,7 @@ fn nesting_exhaustion_is_an_incomplete_tool_result() {
 }
 
 #[test]
-fn invalid_utf8_has_a_raw_primary_byte_span() {
+fn lang_1_invalid_utf8_has_a_raw_primary_byte_span() {
     let p = parse_bytes(b"fn f() {}\n\xff", ParseMode::Source);
     assert_eq!(p.diagnostics.len(), 1);
     assert_eq!(p.diagnostics[0].rule, "LANG-1");

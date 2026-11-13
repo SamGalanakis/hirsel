@@ -1,0 +1,4 @@
+// LANG-5: comparison operators cannot chain.
+// expect: refuse LANG-5 at 3:16
+fn f() { 1 < 2 < 3 }
+fn next() {}

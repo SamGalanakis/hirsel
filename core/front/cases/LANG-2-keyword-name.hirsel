@@ -1,0 +1,4 @@
+// LANG-2: a reserved keyword cannot be a declaration name.
+// expect: refuse LANG-2 at 3:4
+fn view() {}
+fn next() {}

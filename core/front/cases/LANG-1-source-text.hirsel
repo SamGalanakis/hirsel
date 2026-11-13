@@ -1,0 +1,6 @@
+// LANG-1: UTF-8 comments, ASCII names, nested comments, and LF source.
+// expect: accept
+// expect: run source() = 42
+/// Unicode documentation: é𝄞 中文.
+/** A documentation comment /* with nesting */ is still trivia. */
+fn source() -> u64 { let ascii_9: u64 = 40; ascii_9 /* no break */ + 2 }

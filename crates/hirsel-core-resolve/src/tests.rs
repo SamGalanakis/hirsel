@@ -101,7 +101,7 @@ fn def(index: &NameIndex, m: ModuleId, s: &str) -> DefinitionId {
     index.definition(m, sym(index, s)).unwrap()
 }
 #[test]
-fn lookup_failures_and_shadowed_reads_are_preserved() {
+fn prog_8_lookup_failures_and_shadowed_reads_are_preserved() {
     let (i, f) = fixture(&[("m", "fn f(x: u64) -> u64 { let x = x + 1; absent(x) }")]);
     let r = run(&i, &f, 0, 0);
     assert_eq!(
@@ -220,7 +220,7 @@ fn callee_body_edits_do_not_change_caller_resolution() {
     assert!(a.diagnostics.is_empty());
 }
 #[test]
-fn dependencies_and_prelude_keep_neutral_definition_paths() {
+fn prog_1_dependencies_and_prelude_keep_neutral_definition_paths() {
     let (i, f) = packages(
         &[
             (
@@ -1048,4 +1048,63 @@ fn callable_bytes_parameters_and_arguments_resolve() {
     };
     assert_eq!(r.binders[id as usize].kind, BinderKind::Parameter);
     assert_eq!(r.binders[id as usize].name, sym(&i, "n"));
+}
+
+// Checked mutation C: expand a tab to four scalars when rendering the column.
+#[test]
+fn lang_1_prog_7_columns_count_scalars_and_one_per_tab() {
+    let mut corpus = Corpus {
+        manifest: CorpusManifest {
+            core: package("core"),
+            packages: vec![
+                PackageManifest {
+                    package: package("core"),
+                    sources: vec![],
+                    dependencies: vec![],
+                },
+                PackageManifest {
+                    package: package("app"),
+                    sources: vec![ModuleSource {
+                        file: "positions.hirsel".into(),
+                        modules: vec!["m".into()],
+                        signatures: false,
+                    }],
+                    dependencies: vec![],
+                },
+            ],
+        },
+        sources: vec![CorpusSource {
+            module: ModulePath {
+                package: package("app"),
+                modules: vec!["m".into()],
+            },
+            file: "positions.hirsel".into(),
+            text: "// head\nfn f() { \"é𝄞\";\t$ }".into(),
+            mode: ParseMode::Source,
+        }],
+    };
+    // Also pin the same-line tab when every preceding character is ASCII.
+    for (text, byte, column) in [
+        ("// head\nfn f() { \"é𝄞\";\t$ }", 27, 16),
+        ("fn f() {\t$ }", 9, 10),
+    ] {
+        corpus.sources[0].text = text.into();
+        let parsed = corpus.parse();
+        let index = corpus.index(&parsed);
+        let report = corpus.analyze(&parsed, &index);
+        let d = report.files[0]
+            .diagnostics
+            .iter()
+            .find(|d| d.refusal.rule == "LANG-1")
+            .unwrap();
+        assert_eq!(
+            d.refusal.primary.span,
+            hirsel_core_syntax::Span {
+                start: byte,
+                end: byte + 1
+            }
+        );
+        assert_eq!(d.line, if byte == 27 { 2 } else { 1 });
+        assert_eq!(d.column, column);
+    }
 }

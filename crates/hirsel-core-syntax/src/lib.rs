@@ -21,6 +21,8 @@ pub use token::*;
 #[cfg(test)]
 hirsel_guard::install!();
 #[cfg(test)]
+mod source_tests;
+#[cfg(test)]
 mod tests;
 
 macro_rules! ids { ($($name:ident),*) => {$(

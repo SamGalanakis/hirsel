@@ -1027,8 +1027,14 @@ impl<'c, 'a> Cx<'c, 'a> {
     /// a remaining freeze forbids (OWN-10, at the block's closing `}`).
     fn close_scope(&mut self, start: usize, freezes: usize, n: NodeId) {
         let d = self.depth;
+        // The function's exit also ends its body's tail temporaries, before the body's
+        // owners are cleaned (OWN-8, OWN-10), unless the result may carry them out: the
+        // result anchors (OWN-20) are not built, so a scoped result keeps them.
+        let exit =
+            d == 1 && kind(&self.p.decls, &self.t, self.fd.result, &self.params) != Kind::Scoped;
         self.unfreeze(freezes, |h| {
-            (h != Hold::View(Extent::Block(d))).then_some(h)
+            let ends = h == Hold::View(Extent::Block(d)) || exit && h == Hold::View(Extent::Temp);
+            (!ends).then_some(h)
         });
         if !self.dead {
             for i in start..self.scope_slots.len() {
@@ -2312,10 +2318,10 @@ impl<'c, 'a> Cx<'c, 'a> {
         let c = self.kids(n);
         let (l, r) = (c[0], c[1]);
         if self.synthesises(l) {
-            let (lt, lv) = self.expr(l, None);
+            let (lt, lv) = self.operand(l);
             if lt == NEVER || lt == ERROR {
                 if self.synthesises(r) {
-                    self.expr(r, None);
+                    self.operand(r);
                 }
                 return (lt, None, None);
             }
@@ -2323,7 +2329,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             return (lt, lv, rv);
         }
         if self.synthesises(r) {
-            let (rt, rv) = self.expr(r, None);
+            let (rt, rv) = self.operand(r);
             if rt == NEVER || rt == ERROR {
                 return (rt, None, None);
             }
@@ -2340,11 +2346,28 @@ impl<'c, 'a> Cx<'c, 'a> {
     }
     /// The operand after one of type `t`: a literal operand takes `t`; any other must
     /// have it, or operator `n` is refused (LANG-21, no mixed widths or kinds).
+    /// An operand that synthesises its type. An operator reads its operands: a place of
+    /// a moving type is viewed for the statement, not moved, since `take` is written
+    /// exactly where such a place is moved (OWN-6), and a view operand is its payload
+    /// (SEM-7).
+    fn operand(&mut self, e: NodeId) -> (TyId, Option<ValueId>) {
+        let at = match self.place(e) {
+            Ok(Some(at)) if !self.copies(at.ty) => at,
+            Ok(_) => return self.expr(e, None),
+            Err(()) => return (ERROR, None),
+        };
+        self.use_place(at, Use::View(Hold::View(Extent::Temp)), e);
+        let t = match self.t.kind(at.ty) {
+            TyKind::View(x) => *x,
+            _ => at.ty,
+        };
+        (t, None)
+    }
     fn second_operand(&mut self, n: NodeId, r: NodeId, t: TyId) -> Option<ValueId> {
         if !self.synthesises(r) {
             return self.expr(r, expect(t)).1;
         }
-        let (rt, rv) = self.expr(r, None);
+        let (rt, rv) = self.operand(r);
         if rt != t && ![NEVER, ERROR].contains(&rt) && t != ERROR {
             let (op, a, b) = (self.token_text(n), self.name(t), self.name(rt));
             self.refuse_at("LANG-21", self.op_span(n), format!("`{a}` {op} `{b}`"));

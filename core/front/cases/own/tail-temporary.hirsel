@@ -1,0 +1,12 @@
+// OWN-8, OWN-10: a temporary in a function body's tail lasts to the end of its statement,
+// the function's exit; a freeze ends on that exit edge before the body's owners are
+// cleaned, so the view `list.get` returns does not outlive `xs`. (Q31: the same tail in an
+// inner block is still refused at that block's `}`.)
+// expect: refuse OWN-10 at 11:72
+// expect: gap calls to generic functions are not built
+// expect: gap values of this type are not built
+fn present(o: Option[View[u64]]) -> u64 { 0 }
+fn f() -> u64 { let xs: List[u64] = list.new(); present(list.get(xs, 0)) }
+fn g() -> u64 {
+    let b = { let xs: List[u64] = list.new(); present(list.get(xs, 0)) }; b
+}

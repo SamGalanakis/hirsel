@@ -1,0 +1,9 @@
+// No argument fixes E: inside bound the error could target Capacity or the
+// function's u8. The spec has not selected one as the expected error type.
+// expect: gap generic definitions are not built
+// expect: gap an undetermined generic error target inside bound is not built (rule unspecified)
+fn receipt[E]() -> Result[u64, E] { loop {} }
+fn f() -> Result[u64, u8] {
+  let r: Result[u64, Capacity] = bound bytes 0 { let n: u64 = receipt()?; n }
+  Ok(match r { Ok(n) => n, Error(c) => c.requested })
+}

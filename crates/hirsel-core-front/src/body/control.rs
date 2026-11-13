@@ -372,6 +372,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             mark: self.log.len(),
             born: self.born,
             exits: self.exits.len(),
+            scopes: self.pattern_scope_mark(),
         });
     }
     /// Pop the innermost frame, joining its exits (OWN-16).
@@ -529,6 +530,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             f.ty = Some(t);
         }
         let (exit, ty) = (f.exit, f.ty.unwrap_or(t));
+        self.pattern_scope_exits(self.frames[i].scopes, n);
         self.goto(exit, ty, v, n);
         self.exit_edge(i);
         self.dead = true;
@@ -544,6 +546,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             self.halt();
             return (NEVER, None);
         }
+        self.pattern_scope_exits(self.frames[i].scopes, n);
         if let Some(h) = self.frames[i].header {
             self.jump(h, &[], n);
         }

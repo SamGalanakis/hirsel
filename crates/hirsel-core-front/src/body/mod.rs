@@ -450,6 +450,7 @@ struct Frame {
     born: u32,
     /// Where its exit edges begin in `exits`.
     exits: usize,
+    scopes: usize,
 }
 
 struct Cx<'c, 'a> {
@@ -780,6 +781,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             }
             _ => v,
         };
+        self.pattern_scope_exits(0, n);
         let r = PoolRange::push(&mut self.b.pools.values, v);
         self.end(Terminator::Return(r), Some(n));
     }
@@ -1063,9 +1065,9 @@ impl<'c, 'a> Cx<'c, 'a> {
             NodeKind::Try => self.try_(n, want),
             NodeKind::Match => self.match_(n, want),
             NodeKind::For | NodeKind::ForTake => self.gap_ty(n, "for loops are not built"),
-            NodeKind::Region | NodeKind::Bound | NodeKind::Placement => {
-                self.gap_ty(n, "regions and bounded scopes are not built")
-            }
+            NodeKind::Region => self.region_(n, want),
+            NodeKind::Bound => self.bound_(n, want),
+            NodeKind::Placement => self.gap_ty(n, "stable placement is not built"),
             NodeKind::Closure | NodeKind::ScopedClosure => self.gap_ty(n, "closures are not built"),
             _ => self.gap_ty(n, "expression form is not built"),
         }

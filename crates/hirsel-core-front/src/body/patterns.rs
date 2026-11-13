@@ -16,11 +16,13 @@ struct Pat {
     head: Head,
     viewed: bool,
     fields: PoolRange<u32>,
+    order: PoolRange<u32>,
 }
 #[derive(Default)]
 pub(super) struct Patterns {
     pats: Vec<Pat>,
     fields: Vec<u32>,
+    order: Vec<u32>,
     // Exhaustiveness workspaces. Recursive specialization appends and truncates
     // these arenas, reusing their capacity across every arm and match in the body.
     matrix: Vec<u32>,
@@ -30,7 +32,19 @@ pub(super) struct Patterns {
     escaping: Vec<Freeze>,
     pub(super) guard: bool,
     rebind: bool,
+    scopes: Vec<Scope>,
 }
+#[derive(Clone, Copy)]
+enum ScopeKind {
+    Region(Option<ValueId>),
+    Bound { failed: usize },
+}
+#[derive(Clone, Copy)]
+struct Scope {
+    kind: ScopeKind,
+    frame: Option<usize>,
+}
+
 #[derive(Clone, Copy)]
 struct Subject {
     ty: TyId,
@@ -49,6 +63,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             head,
             viewed: false,
             fields,
+            order: PoolRange::EMPTY,
         });
         id
     }
@@ -78,10 +93,7 @@ impl<'c, 'a> Cx<'c, 'a> {
     fn pattern_inner(&mut self, n: NodeId, ty: TyId) -> u32 {
         self.out.counts.nodes += 1;
         let declared = ty;
-        let ty = match self.t.kind(ty) {
-            TyKind::View(t) => *t,
-            _ => ty,
-        };
+        let ty = self.pattern_type(ty);
         let c = self.kids(n);
         match self.kind(n) {
             NodeKind::Wildcard => self.pat_push(n, declared, Head::Any, PoolRange::EMPTY),
@@ -126,7 +138,9 @@ impl<'c, 'a> Cx<'c, 'a> {
                 }
                 self.pat_push(n, ty, Head::Product(None), fields)
             }
-            NodeKind::ConstructorPattern | NodeKind::BindPattern => self.constructor_pattern(n, ty),
+            NodeKind::ConstructorPattern | NodeKind::BindPattern => {
+                self.constructor_pattern(n, declared)
+            }
             NodeKind::LiteralPattern => {
                 let bits = self.pattern_number(n, ty);
                 self.pat_push(n, ty, Head::Range(bits, bits), PoolRange::EMPTY)
@@ -165,7 +179,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             (c[0], &c[1..])
         };
         let fail = |cx: &mut Self| cx.pat_push(n, ERROR, Head::Any, PoolRange::EMPTY);
-        let TyKind::Adt(d, _) = self.t.kind(ty) else {
+        let TyKind::Adt(d, _) = self.t.kind(self.pattern_type(ty)) else {
             if ty != ERROR {
                 self.refuse(
                     "LANG-17",
@@ -219,6 +233,9 @@ impl<'c, 'a> Cx<'c, 'a> {
             }
         };
         let fields = self.pattern_fields(fs.len());
+        let order_start = self.patterns.order.len();
+        self.patterns.order.resize(order_start + fs.len(), 0);
+        let mut order_len = 0;
         let mut rest = false;
         let mut positional = 0;
         for &arg in args {
@@ -257,13 +274,26 @@ impl<'c, 'a> Cx<'c, 'a> {
             let t = self.pattern_field_ty(ty, case, i);
             let child = self.pattern(self.kids(arg)[0], t);
             self.patterns.fields[index] = child;
+            self.patterns.order[order_start + order_len] = i as u32;
+            order_len += 1;
         }
         if !rest && (0..fs.len()).any(|i| self.patterns.fields[fields.start as usize + i] == 0) {
             self.refuse("LANG-17", n, "a pattern names every field, or ends in `..`");
         }
-        self.pat_push(n, ty, Head::Product(case), fields)
+        let id = self.pat_push(n, ty, Head::Product(case), fields);
+        self.patterns.pats[id as usize - 1].order =
+            PoolRange::new(order_start as u32, order_len as u32);
+        id
     }
     fn pattern_field_ty(&mut self, ty: TyId, case: Option<u32>, i: usize) -> TyId {
+        if let TyKind::Anchored(inner, root) = *self.t.kind(ty) {
+            let ft = self.pattern_field_ty(inner, case, i);
+            return if kind(&self.p.decls, &self.t, ft, &self.params) == Kind::Stable {
+                self.t.mk(TyKind::Anchored(ft, root))
+            } else {
+                ft
+            };
+        }
         let (d, arg_len) = match self.t.kind(ty) {
             TyKind::Tuple(ts) => return ts[i],
             TyKind::Adt(d, args) => (*d, args.len()),
@@ -287,6 +317,12 @@ impl<'c, 'a> Cx<'c, 'a> {
         let out = subst(&mut self.t, ft, &self.patterns.types[mark..]);
         self.patterns.types.truncate(mark);
         out
+    }
+    fn pattern_type(&self, mut ty: TyId) -> TyId {
+        while let TyKind::View(inner) | TyKind::Anchored(inner, _) = self.t.kind(ty) {
+            ty = *inner;
+        }
+        ty
     }
     fn pattern_number(&mut self, n: NodeId, ty: TyId) -> i128 {
         let text = self.token_text(n);
@@ -679,7 +715,17 @@ impl<'c, 'a> Cx<'c, 'a> {
                         );
                     }
                 }
-                for i in 0..pat.fields.len {
+                let count = if pat.order.len == 0 {
+                    pat.fields.len
+                } else {
+                    pat.order.len
+                };
+                for at in 0..count {
+                    let i = if pat.order.len == 0 {
+                        at
+                    } else {
+                        self.patterns.order[(pat.order.start + at) as usize]
+                    };
                     let child = self.patterns.fields[(pat.fields.start + i) as usize];
                     if child == 0 {
                         continue;
@@ -846,10 +892,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         if width == 0 {
             return (rows.len == 0).then(Vec::new);
         }
-        let ty = match self.t.kind(self.patterns.types[types]) {
-            TyKind::View(t) => *t,
-            _ => self.patterns.types[types],
-        };
+        let ty = self.pattern_type(self.patterns.types[types]);
         let heads = self.patterns.heads.len();
         if let Some((lo, hi)) = self.pattern_domain(ty) {
             // Split intervals only where a pattern starts or ends, never enumerate
@@ -1224,9 +1267,83 @@ impl<'c, 'a> Cx<'c, 'a> {
         }
         Some(self.pointer(to, n))
     }
+    fn pattern_type_parameter(&self, ty: TyId, parameter: u32) -> bool {
+        match self.t.kind(ty) {
+            TyKind::Param(i) => *i == parameter,
+            TyKind::Adt(_, ts) | TyKind::Tuple(ts) => ts
+                .iter()
+                .any(|&t| self.pattern_type_parameter(t, parameter)),
+            TyKind::View(t) | TyKind::Array(t, _) | TyKind::Anchored(t, _) => {
+                self.pattern_type_parameter(*t, parameter)
+            }
+            TyKind::Fn(ps, r, _) => {
+                self.pattern_type_parameter(*r, parameter)
+                    || ps
+                        .iter()
+                        .any(|&(_, t)| self.pattern_type_parameter(t, parameter))
+            }
+            _ => false,
+        }
+    }
     pub(super) fn try_(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let outer = self.result_parts(self.fd.result);
-        let hint = outer
+        let operand = self.kids(n)[0];
+        let bounded = self
+            .patterns
+            .scopes
+            .iter()
+            .any(|s| matches!(s.kind, ScopeKind::Bound { .. }));
+        let mut context = outer;
+        let mut partial_error = false;
+        if bounded {
+            // A published concrete Capacity error selects the bound's target even
+            // when the enclosing function propagates another error type.
+            let callee = match self.kind(operand) {
+                NodeKind::Call => self.kids(operand).first().copied(),
+                _ => None,
+            };
+            if let Some(callee) = callee
+                && let Some(Target::Definition(id)) = self.p.target(self.at, callee)
+                && let Some(Def::Fn(f)) = self.p.by_definition[id.0 as usize]
+                && let Some(parts @ (_, _, Some(error))) =
+                    self.result_parts(self.p.fns[f as usize].result)
+                && matches!(self.t.kind(error), TyKind::Adt(d, _) if is_core_prelude(&self.p.decls[d.index()].path, &["Capacity"]))
+            {
+                context = Some(parts);
+            }
+            if want.is_some()
+                && let Some(callee) = callee
+                && let Some(Target::Definition(id)) = self.p.target(self.at, callee)
+                && let Some(Def::Fn(f)) = self.p.by_definition[id.0 as usize]
+                && let Some((d, success, Some(error))) =
+                    self.result_parts(self.p.fns[f as usize].result)
+                && let TyKind::Param(parameter) = *self.t.kind(error)
+                && let Some((_, _, Some(function_error))) = outer
+                && !matches!(self.t.kind(function_error), TyKind::Adt(d, _) if is_core_prelude(&self.p.decls[d.index()].path, &["Capacity"]))
+            {
+                let g = &self.p.fns[f as usize];
+                let args = &self.kids(operand)[1..];
+                let mut determines = false;
+                for (q, &arg) in g.params.iter().zip(args) {
+                    if self.pattern_type_parameter(q.ty, parameter) && self.synthesises(arg) {
+                        determines = true;
+                    }
+                }
+                if !determines {
+                    self.gap(n, "an undetermined generic error target inside bound is not built (rule unspecified)");
+                    return (ERROR, None);
+                }
+                context = Some((d, success, Some(HOLE)));
+                partial_error = true;
+            }
+            if context.is_none() {
+                let capacity = self.capacity_ty(n);
+                if let Some(d) = self.p.core_decl("Result") {
+                    context = Some((d, HOLE, Some(capacity)));
+                }
+            }
+        }
+        let hint = context
             .and_then(|(d, _, error)| {
                 want.map(|w| {
                     let args = if let Some(e) = error {
@@ -1238,30 +1355,58 @@ impl<'c, 'a> Cx<'c, 'a> {
                 })
             })
             .and_then(expect);
-        let operand = self.kids(n)[0];
-        let subject = self.subject(operand, true, hint);
+        let subject = if partial_error {
+            // A partial expected type fixes success only. The call's one visit
+            // determines E from its arguments before choosing an error target.
+            self.out.counts.nodes += 1;
+            let (ty, value) = self.call(operand, hint);
+            Subject {
+                ty,
+                value,
+                place: None,
+                owned: true,
+                viewed: false,
+            }
+        } else {
+            self.subject(operand, true, hint)
+        };
         if subject.ty == ERROR || subject.ty == NEVER {
             return (subject.ty, None);
+        }
+        if subject.viewed
+            && has_bounds(&self.p.decls, &self.t, subject.ty, &self.params) & crate::decls::PLAIN
+                == 0
+        {
+            self.refuse(
+                "LANG-18",
+                n,
+                "`?` cannot consume a view of a moving or scoped value",
+            );
+            return (ERROR, None);
         }
         let Some((d, success, error)) = self.result_parts(subject.ty) else {
             self.refuse("LANG-18", n, "`?` consumes a Result or Option");
             return (ERROR, None);
         };
-        let Some((od, _, oe)) = outer else {
-            self.refuse(
-                "LANG-18",
-                n,
-                "`?` needs an enclosing function returning the same Result or Option",
-            );
-            return (ERROR, None);
-        };
-        if d != od || error != oe {
-            self.refuse(
-                "LANG-18",
-                n,
-                "`?` propagates only the identical error type, or Option to Option",
-            );
-            return (success, None);
+        let bound = error.filter(|&e| matches!(self.t.kind(e), TyKind::Adt(d, _) if is_core_prelude(&self.p.decls[d.index()].path, &["Capacity"])))
+            .and_then(|_| self.patterns.scopes.iter().rposition(|s| matches!(s.kind, ScopeKind::Bound { .. })));
+        if bound.is_none() {
+            let Some((od, _, oe)) = outer else {
+                self.refuse(
+                    "LANG-18",
+                    n,
+                    "`?` needs an enclosing function returning the same Result or Option",
+                );
+                return (ERROR, None);
+            };
+            if d != od || error != oe {
+                self.refuse(
+                    "LANG-18",
+                    n,
+                    "`?` propagates only the identical error type, or Option to Option",
+                );
+                return (success, None);
+            }
         }
         let (ok_case, err_case) = if error.is_some() { (0, 1) } else { (1, 0) };
         let no = self.live().then(|| self.new_block(&[]));
@@ -1293,18 +1438,213 @@ impl<'c, 'a> Cx<'c, 'a> {
         } else {
             None
         };
-        let value = self.wrap_case(
-            self.fd.result,
-            err_case,
-            error.unwrap_or(UNIT),
-            error_value,
-            n,
-        );
-        self.ret(value, n);
+        if let Some(scope) = bound {
+            let context = self.patterns.scopes[scope];
+            let ScopeKind::Bound { failed } = context.kind else {
+                unreachable!()
+            };
+            self.pattern_scope_exits(scope, n);
+            self.exit_edge(context.frame.unwrap());
+            self.goto(failed, error.unwrap(), error_value, n);
+        } else {
+            let value = self.wrap_case(
+                self.fd.result,
+                err_case,
+                error.unwrap_or(UNIT),
+                error_value,
+                n,
+            );
+            self.ret(value, n);
+        }
         if let Some(no) = no {
             self.start(no);
         }
         let value = self.pattern_at(subject, Some(ok_case), 0, success, n).value;
         (success, value)
+    }
+    pub(super) fn pattern_scope_mark(&self) -> usize {
+        self.patterns.scopes.len()
+    }
+    /// Lexically open region/limit exits. This emits no value cleanup: A1 owns that
+    /// cleanup, which must precede releasing the scopes those values live in.
+    pub(super) fn pattern_scope_exits(&mut self, mark: usize, n: NodeId) {
+        for i in (mark..self.patterns.scopes.len()).rev() {
+            match self.patterns.scopes[i].kind {
+                ScopeKind::Region(Some(region)) => self.inst(Inst::RegionClose { region }, n),
+                ScopeKind::Bound { .. } => self.inst(Inst::LimitExit, n),
+                _ => {}
+            }
+        }
+    }
+    fn capacity_ty(&mut self, n: NodeId) -> TyId {
+        match self.p.core_decl("Capacity") {
+            Some(d) => self.t.mk(TyKind::Adt(d, vec![])),
+            None => {
+                self.gap(n, "Capacity is not declared by core");
+                ERROR
+            }
+        }
+    }
+    fn capacity_value(
+        &mut self,
+        requested: Option<ValueId>,
+        available: Option<ValueId>,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let ty = self.capacity_ty(n);
+        let id = match self.rep(ty) {
+            Ok(Rep::Place(id)) => id,
+            _ => return None,
+        };
+        if !self.live() {
+            return None;
+        }
+        let to = self.new_slot(PlaceTy::Declared(id), n);
+        for (i, value) in [requested, available].into_iter().enumerate() {
+            let a = self.address(
+                AddressBase::Address(to),
+                &[Step::Field(i as u32)],
+                PlaceTy::Value(Ty::Scalar(Scalar::U64)),
+                n,
+            );
+            self.install(a, Rep::Scalar(Ty::Scalar(Scalar::U64)), value, n);
+        }
+        Some(self.pointer(to, n))
+    }
+    pub(super) fn region_(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
+        let Some(d) = self.p.core_decl("Region") else {
+            return self.gap_ty(n, "Region is not declared by core");
+        };
+        let ty = self.t.mk(TyKind::Adt(d, vec![]));
+        let region = if self.live() {
+            let result = self.value(Ty::Ptr);
+            self.inst(Inst::RegionOpen { result }, n);
+            Some(result)
+        } else {
+            None
+        };
+        let mark = self.patterns.scopes.len();
+        self.patterns.scopes.push(Scope {
+            kind: ScopeKind::Region(region),
+            frame: None,
+        });
+        self.depth += 1;
+        let (scope, holds) = (self.scope_slots.len(), self.freezes.len());
+        if let Some(b) = self.binder(n) {
+            self.declare(b, ty, Binding::Value(region), Origin::Let, n);
+            self.scope_slots.push(b);
+        }
+        let body = self.kids(n)[0];
+        let (t, v) = self.expr(body, want);
+        // Region values cannot leave their scope. Rooted stable/scoped values need
+        // the declaration lane's body-root relation before emission is possible.
+        if self.contains_region_value(t) {
+            self.refuse(
+                "MEM-7",
+                body,
+                "a Region value cannot leave its region scope",
+            );
+        }
+        self.close_scope(scope, holds, body, t);
+        self.depth -= 1;
+        self.pattern_scope_exits(mark, n);
+        self.patterns.scopes.truncate(mark);
+        (t, v)
+    }
+    fn contains_region_value(&self, ty: TyId) -> bool {
+        match self.t.kind(ty) {
+            TyKind::Adt(d, args) => {
+                self.p.decls[d.index()].role == Some(Role::Region)
+                    || args.iter().any(|&t| self.contains_region_value(t))
+            }
+            TyKind::Tuple(ts) => ts.iter().any(|&t| self.contains_region_value(t)),
+            TyKind::View(t) | TyKind::Array(t, _) | TyKind::Anchored(t, _) => {
+                self.contains_region_value(*t)
+            }
+            _ => false,
+        }
+    }
+    pub(super) fn bound_(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
+        let c = self.kids(n);
+        let (size_ty, bytes) = self.expr(c[0], expect(scalar(Scalar::U64)));
+        if size_ty == NEVER {
+            return (NEVER, None);
+        }
+        let capacity = self.capacity_ty(n);
+        let expected = want
+            .and_then(|w| self.result_parts(w.ty))
+            .and_then(|(_, t, e)| (e == Some(capacity)).then_some(t));
+        let mark = self.patterns.scopes.len();
+        self.push_frame(None, FrameKind::Block, None);
+        let fi = self.frames.len() - 1;
+        let was_dead = self.dead;
+        let failed = self.new_join();
+        let mut yes = None;
+        if self.live()
+            && let Some(bytes) = bytes
+        {
+            let admitted = self.value(Ty::Scalar(Scalar::Bool));
+            let available = self.value(Ty::Scalar(Scalar::U64));
+            self.inst(
+                Inst::LimitEnter {
+                    admitted,
+                    available,
+                    bytes,
+                },
+                n,
+            );
+            let good = self.new_block(&[]);
+            let bad = self.new_block(&[]);
+            let ye = self.edge(good, &[]);
+            let ne = self.edge(bad, &[]);
+            self.end(
+                Terminator::Branch {
+                    condition: admitted,
+                    yes: ye,
+                    no: ne,
+                },
+                Some(n),
+            );
+            self.start(bad);
+            let value = self.capacity_value(Some(bytes), Some(available), n);
+            self.exit_edge(fi);
+            self.goto(failed, capacity, value, n);
+            yes = Some(good);
+        } else {
+            self.exit_edge(fi);
+        }
+        if let Some(yes) = yes {
+            self.start(yes);
+        }
+        self.patterns.scopes.push(Scope {
+            kind: ScopeKind::Bound { failed },
+            frame: Some(fi),
+        });
+        let (t, value) = self.expr(c[1], expected.and_then(expect));
+        let result = match self.p.core_decl("Result") {
+            Some(d) => self
+                .t
+                .mk(TyKind::Adt(d, vec![expected.unwrap_or(t), capacity])),
+            None => {
+                self.gap(n, "Result is not declared by core");
+                ERROR
+            }
+        };
+        self.pattern_scope_exits(mark, n);
+        self.patterns.scopes.truncate(mark);
+        let exit = self.frames[fi].exit;
+        let good = self.wrap_case(result, 0, expected.unwrap_or(t), value, n);
+        self.exit_edge(fi);
+        self.goto(exit, result, good, n);
+        self.dead = false;
+        let error = self.land(failed);
+        if error.is_some() {
+            let bad = self.wrap_case(result, 1, capacity, error, n);
+            self.goto(exit, result, bad, n);
+        }
+        self.pop_frame(n);
+        let value = self.land(exit);
+        self.dead |= was_dead;
+        (result, value)
     }
 }

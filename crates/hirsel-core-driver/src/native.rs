@@ -598,9 +598,12 @@ fn link(
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let temp = tempfile::NamedTempFile::new_in(parent)?;
-    std::fs::write(temp.path(), &bytes)?;
-    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o755))?;
+    // Close the original writable descriptor before publishing. Keeping the
+    // NamedTempFile open across parallel child launches can leave a forked
+    // child holding a writable descriptor until exec (ETXTBSY at our exec).
+    let temp = tempfile::NamedTempFile::new_in(parent)?.into_temp_path();
+    std::fs::write(&temp, &bytes)?;
+    std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o755))?;
     temp.persist(&options.output).map_err(|e| e.error)?;
     Ok(BuildProduct {
         executable: options.output.clone(),

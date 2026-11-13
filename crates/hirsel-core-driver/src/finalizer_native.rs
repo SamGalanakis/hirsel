@@ -2,7 +2,7 @@
 fn finalizer_entry(backend: Backend, carrier: &str) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     for divisor in [0, 2] {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new().prefix(&format!("finalizer-{backend:?}-{carrier}-{divisor}-")).tempdir().unwrap();
         let keep = match carrier {
             "plain" => "let r = result.unwrap(R(d: DIVISOR));".to_owned(),
             "list" => "let r = result.unwrap(R(d: DIVISOR)); let mut xs: List[R] = result.unwrap(list.with_capacity(1)); result.unwrap(list.push(mut xs, take r));".to_owned(),
@@ -24,7 +24,9 @@ fn finalizer_entry(backend: Backend, carrier: &str) {
         let entry = DefPath::from_full("app@1/main/main").unwrap();
         let reached = product.reachable(&entry, 64).unwrap();
         assert!(reached.accepted(), "{carrier}: {}", serde_json::to_string(&(product.machine_diagnostics().unwrap(), product.machine_incomplete().unwrap(), &reached.first_stops)).unwrap());
-        let built = product.build(&entry, &native_options(backend, dir.path())).unwrap();
+        let mut options = native_options(backend, dir.path());
+        options.output = dir.path().join(format!("{backend:?}-{carrier}-{divisor}"));
+        let built = product.build(&entry, &options).unwrap();
         let instances = reached.instances.unwrap();
         let finalizer = if carrier == "generic_resource" { "app@1/main/Generic" } else { "app@1/main/R" };
         assert!(instances.iter().any(|k| k.definition == DefPath::from_full(finalizer).unwrap()), "missing finalizer: {instances:?}");

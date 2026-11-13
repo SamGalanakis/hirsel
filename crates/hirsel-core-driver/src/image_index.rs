@@ -6,7 +6,7 @@ use std::sync::Mutex;
 const BUCKET_LIMIT: usize = 32;
 #[derive(Serialize, Deserialize)]
 enum Node {
-    Array([Option<ContentHash>; 16]),
+    Array(Box<[Option<ContentHash>; 16]>),
     Names {
         buckets: ContentHash,
         mask: u32,
@@ -30,7 +30,7 @@ fn array(store: &Store, entries: &[(u32, ContentHash)], shift: u32) -> io::Resul
             });
         }
     }
-    store.put(&encode(&Node::Array(children))?)
+    store.put(&encode(&Node::Array(Box::new(children)))?)
 }
 fn bucket_index(key: ContentHash, mask: u32, salt: u32) -> u32 {
     let hash = if salt == 0 {

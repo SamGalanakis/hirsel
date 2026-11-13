@@ -49,8 +49,9 @@ may have the name of a module or a dependency package: in its scope the local wi
 the first component of a dotted path, so adding a module or a dependency never makes an
 existing local illegal. `main`'s argument list is written `argv: Args` in this
 specification; `args: Args` is equally legal. Two definitions with one name in one module are refused. Variants are
-written bare (`Ok(x)`, `None`) and selected by the expected type; a dotted path never names
-a variant. Core roles (`Result`, `Capacity`, the capability types) are fixed by definition
+written bare (`Ok(x)`, `None`) and selected by the expected type; with none, a variant names
+the one visible type that declares it, and a variant two visible types declare is refused
+here. A dotted path never names a variant. Core roles (`Result`, `Capacity`, the capability types) are fixed by definition
 path, never by spelling.
 
 ```hirsel
@@ -183,8 +184,13 @@ call: they are found from that one call, as LANG-11 orders it, or the call is re
 A type argument that lacks a bound its
 parameter declares is refused when it is fixed, at what fixed it in LANG-11's order: at the
 call when the expected result fixed it, otherwise at the argument that did. An argument that
-later agrees with it is not a second site. Each use of a generic type writes its
-arguments.
+later agrees with it is not a second site. A record or variant constructor is typed as such a
+call, its payloads the arguments, except that its type arguments may still be fixed by the
+rest of its statement (the operand it is compared with, the tuple it sits in); one still
+open at the end of that statement is refused here, at the constructor. Nothing after the
+statement, a later use of the binding included, fixes it. So `let x = None`, `let y =
+Ok(1u64)` and `let xs = list.new()` are refused without a written type. Each use of a
+generic type writes its arguments.
 
 ```hirsel
 fn same[T: key](a: T, b: T) -> bool { a == b }
@@ -194,6 +200,13 @@ fn same[T](a: T, b: T) -> bool { a == b }                 // refused: LANG-12, T
 ```
 ```hirsel
 fn empty() -> u64 { list.len(list.new()) }                // refused: LANG-12, at list.new(): T is open
+```
+```hirsel
+fn f() -> bool { let x: Option[u64] = None; x == Some(1u64) }
+```
+```hirsel
+fn f() -> bool { let x = None; x == Some(1u64) }          // refused: LANG-12, at None: T is open
+fn g() -> u64 { let y = Ok(1u64); 0 }                     // refused: LANG-12, at Ok(1u64): E is open
 ```
 ```hirsel
 fn f(a: f64, b: f64) -> f64 { int.wrapping_add(a, b) }    // refused: LANG-12, at the call: f64 is not integer

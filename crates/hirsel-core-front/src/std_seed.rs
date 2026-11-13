@@ -117,6 +117,23 @@ fn std_seed_parses_and_resolves() {
 #[test]
 #[ignore = "prints the checker's outcome per std body; run by hand with --nocapture"]
 fn std_seed_check_report() {
+    print!("{}", std_seed_check());
+}
+
+/// A std or core body whose emission stopped without a refusal or a gap would be counted
+/// accepted while its program silently computes something else (`list.sum` returned 0).
+#[test]
+fn std_bodies_never_halt_silently() {
+    let halted: Vec<String> = std_seed_check()
+        .lines()
+        .filter(|l| l.contains(crate::body::SILENT_HALT))
+        .map(str::to_string)
+        .collect();
+    assert!(halted.is_empty(), "{}", halted.join("\n"));
+}
+
+/// The checker's outcome per std body and per contract test, as a markdown report.
+fn std_seed_check() -> String {
     let corpus = manifest().load().expect("std seed reads");
     let parsed = corpus.parse();
     let index = corpus.index(&parsed);
@@ -252,7 +269,7 @@ fn std_seed_check_report() {
     for (m, r, o) in &runs {
         let _ = writeln!(out, "| {m} | `{r}` | {} |", o.replace('|', "\\|"));
     }
-    print!("{out}");
+    out
 }
 
 #[test]

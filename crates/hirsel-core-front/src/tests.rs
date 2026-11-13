@@ -697,6 +697,7 @@ fn m1_program_manifest() {
             syntax: parsed.syntax,
         })
         .collect();
+    let mut halted = vec![];
     for entry in modules.iter().filter(|m| {
         !matches!(
             index.module_path(m.id).package.name.as_str(),
@@ -765,6 +766,14 @@ fn m1_program_manifest() {
                     );
                 }
                 for gap in &checked.gaps {
+                    if gap.what == crate::body::SILENT_HALT {
+                        halted.push(format!(
+                            "{}.{} {}",
+                            definition.path.0.package.name,
+                            definition.path.0.name,
+                            line_col(&selected, &gap.site)
+                        ));
+                    }
                     println!(
                         "M1 body gap {}.{} {}: {}",
                         definition.path.0.package.name,
@@ -817,6 +826,8 @@ fn m1_program_manifest() {
         report.files.len()
     );
     assert!(mechanical_ok, "M1 parse/resolve refusals are listed above");
+    // A body whose emission stopped without a reported reason is never accepted.
+    assert!(halted.is_empty(), "silent halts: {halted:?}");
 }
 
 #[test]

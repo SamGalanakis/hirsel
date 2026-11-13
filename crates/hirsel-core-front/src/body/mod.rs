@@ -867,6 +867,12 @@ struct Cx<'c, 'a, 'e> {
     open_anchors: Vec<Option<Anchor>>,
     /// Emission stopped: a refusal or a gap was recorded.
     broken: bool,
+    /// The expression being checked, innermost; where a halt is reported.
+    node: NodeId,
+    /// Where emission first stopped, or where a live expression of a valued type first
+    /// produced no value. At the end of the body, a halt with no refusal and no gap
+    /// recorded is itself a gap: a body is never accepted with its emission cut short.
+    halted: Option<NodeId>,
     /// The slot table, indexed by binder id.
     vars: Vec<Option<Var>>,
     /// Availability changes, undone to a mark when a branch ends: (slot, old, old site).
@@ -944,6 +950,9 @@ struct Cx<'c, 'a, 'e> {
     descriptors: closures::Descriptors,
 }
 
+/// The gap a body reports when its emission stopped with no refusal or gap to say why.
+pub(crate) const SILENT_HALT: &str = "emission halted without a reported reason";
+
 impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     fn new(p: &'c Program<'a>, f: usize, e: &'e mut Emitter) -> Self {
         crate::cost_scope!("phase", "body setup");
@@ -974,6 +983,8 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             open: vec![],
             open_anchors: vec![],
             broken: false,
+            node: item.root,
+            halted: None,
             vars: vec![None; info.resolution.binders.len()],
             log: vec![],
             diffs: vec![],
@@ -1103,6 +1114,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         self.halt();
     }
     fn halt(&mut self) {
+        self.halted.get_or_insert(self.node);
         self.broken = true;
         self.cur = None;
     }
@@ -1511,6 +1523,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         self.run_row(row, body);
     }
     fn run_row(&mut self, row: Result<(FuncId, SigId), &'static str>, body: NodeId) {
+        self.node = body;
         match row {
             Ok((func, sig)) => {
                 self.func = Some(func);
@@ -1649,6 +1662,18 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     }
     fn finish(mut self) -> CoreCheck {
         crate::cost_scope!("phase", "body finish");
+        if let Some(n) = self.halted
+            && self.out.refusals.is_empty()
+            && self.out.gaps.is_empty()
+            && let site = self.p.site(self.at, n)
+            // The resolver's and the declarations' refusals of this item are reported.
+            && !self.p.refusals.iter().any(|r| {
+                (r.primary.module, r.primary.item) == (site.module, site.item)
+            })
+        {
+            self.out.gaps.push(Gap::new(site, SILENT_HALT));
+            self.broken = true;
+        }
         let b = &self.b;
         let size = |n: usize, s: usize| (n * s) as u64;
         self.out.counts.bytes = size(b.values.len(), size_of::<Ty>())
@@ -1696,8 +1721,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     /// it there and returns `want`'s type, so the outer check here passes.
     fn expr(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         self.out.counts.nodes += 1;
-        let (t, v) = self.expr_inner(n, want);
-        self.synth_ty = t;
+        let (t, v) = self.checked(n, want);
         match want {
             Some(w) if t != NEVER && w.payload != 0 => {
                 self.coerce(t, w, n);
@@ -1720,8 +1744,23 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     /// compares the synthesised type itself (LANG-21's right operand).
     fn expr_hinted(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         self.out.counts.nodes += 1;
+        self.checked(n, want)
+    }
+
+    /// `n` checked and emitted: the single place an expression's value is produced. A
+    /// live expression of a valued type that produced no value marks the body halted.
+    fn checked(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
+        let outer = std::mem::replace(&mut self.node, n);
         let (t, v) = self.expr_inner(n, want);
+        self.node = outer;
         self.synth_ty = t;
+        if v.is_none()
+            && self.halted.is_none()
+            && self.live()
+            && matches!(self.rep(t), Ok(Rep::Scalar(_) | Rep::Place(_)))
+        {
+            self.halted = Some(n);
+        }
         (t, v)
     }
 

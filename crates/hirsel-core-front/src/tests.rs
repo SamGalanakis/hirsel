@@ -449,6 +449,43 @@ fn callable_provider_and_identity_words() {
     }
 }
 
+/// OWN-4 (e9073564): `integer` and `float` imply every bound all their admitted types
+/// have, and a core body may rely on them. `T: integer` is plain and ordered, so `max`
+/// copies and compares; `T: float` is not key, so `same`'s `==` is refused (the spec
+/// names LANG-21 in OWN-4 and SEM-7 in MEM-18's example; QUESTIONS Q41).
+/// These bounds are written only in core, so the bodies are a module of a copy of the
+/// core fixture.
+#[test]
+fn integer_and_float_bounds_imply_their_types_bounds() {
+    let dir = std::env::temp_dir().join(format!("hirsel-own4-core-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for e in std::fs::read_dir(root().join("core")).unwrap() {
+        let path = e.unwrap().path();
+        std::fs::copy(&path, dir.join(path.file_name().unwrap())).unwrap();
+    }
+    std::fs::write(
+        dir.join("bounds.hirsel"),
+        "pub fn max[T: integer](a: T, b: T) -> T { if a < b { b } else { a } }\n\
+         pub fn same[T: float](a: T, b: T) -> bool { a == b }\n",
+    )
+    .unwrap();
+    let (index, inputs) = inputs_with_core("", &dir);
+    let p = Program::declare(&index, &inputs);
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert!(p.refusals.is_empty(), "{:?}", p.refusals);
+    let mut emitter = Emitter::new();
+    let mut rules = HashMap::new();
+    for (f, fd) in p.fns.iter().enumerate() {
+        if fd.path.0.modules == ["bounds"] {
+            let check = p.check_lower(f, &mut emitter);
+            rules.insert(fd.path.0.name.to_string(), check.refusals.len());
+        }
+    }
+    // `max` is accepted; `same` is refused once, at its `==`.
+    assert_eq!((rules["max"], rules["same"]), (0, 1));
+}
+
 #[test]
 fn corpus() {
     let mut paths = vec![];

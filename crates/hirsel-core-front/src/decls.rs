@@ -23,6 +23,20 @@ pub const PACKED: u16 = 128;
 pub const STREAMABLE: u16 = 256;
 pub const ENCODED: u16 = PACKED | STREAMABLE;
 const FIXED_ENCODING: u16 = 512;
+/// A declared bound set closed under implication (OWN-4): `integer` and `float` imply
+/// every bound all their admitted types have, and `streamable` implies `packed`.
+pub fn implied(mut b: u16) -> u16 {
+    if b & INTEGER != 0 {
+        b |= PLAIN | SHAREABLE | SEND | KEY | ORDERED | ENCODED;
+    }
+    if b & FLOAT != 0 {
+        b |= PLAIN | SHAREABLE | SEND | ENCODED;
+    }
+    if b & STREAMABLE != 0 {
+        b |= PACKED;
+    }
+    b
+}
 pub fn bound_bit(name: &str) -> u16 {
     match name {
         "plain" => PLAIN,
@@ -545,7 +559,7 @@ impl Program<'_> {
             }
             out.push(Generic {
                 name,
-                bounds,
+                bounds: implied(bounds),
                 region: gn.kind == NodeKind::RegionGeneric,
             });
         }
@@ -1988,10 +2002,7 @@ pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, para
             TyKind::Anchored(x, _) => has_bounds(decls, t, *x, params),
             TyKind::Array(x, _) => has_bounds(decls, t, *x, params) & all,
             TyKind::View(x) => has_bounds(decls, t, *x, params) & (KEY | ORDERED),
-            TyKind::Param(i) => {
-                let b = params.get(*i as usize).copied().unwrap_or(0);
-                b | if b & STREAMABLE != 0 { PACKED } else { 0 }
-            }
+            TyKind::Param(i) => params.get(*i as usize).copied().unwrap_or(0),
             TyKind::Adt(d, args) => {
                 let decl = &decls[d.index()];
                 let declared = match decl.role {
@@ -2302,10 +2313,7 @@ fn encoding_bounds(
     match t.kind(ty) {
         TyKind::Scalar(_) | TyKind::Error | TyKind::Hole => all,
         TyKind::Anchored(x, _) => encoding_bounds(decls, t, *x, params),
-        TyKind::Param(i) => {
-            let b = params.get(*i as usize).copied().unwrap_or(0);
-            (b & all) | if b & STREAMABLE != 0 { PACKED } else { 0 }
-        }
+        TyKind::Param(i) => params.get(*i as usize).copied().unwrap_or(0) & all,
         TyKind::Tuple(xs) if !xs.is_empty() && kind(decls, t, ty, params) == Kind::Plain => xs
             .iter()
             .fold(all, |b, &x| b & encoding_bounds(decls, t, x, params)),

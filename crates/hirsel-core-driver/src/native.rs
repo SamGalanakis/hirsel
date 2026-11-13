@@ -617,6 +617,7 @@ mod tests {
     }
     include!("core_ops_native.rs");
     include!("list_native.rs");
+    include!("finalizer_native.rs");
 
     fn run_clean(binary: &Path, exit: i32) {
         let result = Command::new(binary).output().unwrap();

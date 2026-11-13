@@ -162,6 +162,15 @@ pub(crate) fn external_functions(
     root: hirsel_core_ir::FuncId,
 ) -> BTreeSet<hirsel_core_ir::FuncId> {
     let mut pending = vec![root];
+    // A unit's layouts generate drop glue, including nested List/Rc fields.
+    // Its finalizers are dependencies even without a Call or FunctionRef.
+    // Generic materialization imports the argument's finalizer into this table.
+    pending.extend(
+        module
+            .types
+            .iter()
+            .filter_map(|shape| shape.finalizer.map(|f| hirsel_core_ir::FuncId(f.0))),
+    );
     let mut visited = BTreeSet::new();
     let mut external = BTreeSet::new();
     while let Some(function) = pending.pop() {

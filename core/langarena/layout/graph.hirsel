@@ -113,16 +113,19 @@ pub fn small_law() -> bool {
 }
 // Logical charge-v1 laws, independent of native layout and Option niche decisions.
 // Node is8+4=12; Slot[Node] is8+max(8+12,16)=28; Id is24.
-// Snapshot node is8+Option[Rc](16)+count8=32. The first replaced prefix33 is
-// freed; retained nodes are31+256*33, plus256 eight-byte holders:271328.
+// A snapshot node charges 8 + Option[Rc](16) + count(8) = 32 bytes.
+// Releasing the initial 33-node prefix leaves 31 shared nodes and 256*33 copied
+// nodes. Add the 256 eight-byte holders: (31+256*33)*32 +256*8 = 273376.
 // Exact budgets admit; one byte less must refuse. The bound includes the full lifetime.
+const SNAPSHOT_BUDGET: u64 = (31 + 256 * 33) * 32 + 256 * 8
+
 pub fn charges_main(out: Stdout) -> Result[(), Exit] waits {
     let churn_ok = match (bound bytes 212992 { churn(4096, 16) }) { Ok(Ok(8517632)) => true, _ => false }
     let churn_short = match (bound bytes 212991 { churn(4096, 16) }) { Ok(Error(c)) => c.requested == 98304 && c.available == 98303, _ => false }
-    let rc_ok = match (bound bytes 271328 { snapshots_rc(64, 256) }) { Ok(Ok(1601664)) => true, _ => false }
-    let rc_short = match (bound bytes 271327 { snapshots_rc(64, 256) }) { Ok(Error(c)) => c.requested == 32 && c.available == 31, _ => false }
-    let arc_ok = match (bound bytes 271328 { snapshots_arc(64, 256) }) { Ok(Ok(1601664)) => true, _ => false }
-    let arc_short = match (bound bytes 271327 { snapshots_arc(64, 256) }) { Ok(Error(c)) => c.requested == 32 && c.available == 31, _ => false }
+    let rc_ok = match (bound bytes SNAPSHOT_BUDGET { snapshots_rc(64, 256) }) { Ok(Ok(1601664)) => true, _ => false }
+    let rc_short = match (bound bytes (SNAPSHOT_BUDGET - 1) { snapshots_rc(64, 256) }) { Ok(Error(c)) => c.requested == 32 && c.available == 31, _ => false }
+    let arc_ok = match (bound bytes SNAPSHOT_BUDGET { snapshots_arc(64, 256) }) { Ok(Ok(1601664)) => true, _ => false }
+    let arc_short = match (bound bytes (SNAPSHOT_BUDGET - 1) { snapshots_arc(64, 256) }) { Ok(Error(c)) => c.requested == 32 && c.available == 31, _ => false }
     let mask: u64 = (if churn_ok { 1u64 } else { 0 }) + (if churn_short { 2u64 } else { 0 }) +
         (if rc_ok { 4u64 } else { 0 }) + (if rc_short { 8u64 } else { 0 }) +
         (if arc_ok { 16u64 } else { 0 }) + (if arc_short { 32u64 } else { 0 })

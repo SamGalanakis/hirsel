@@ -49,3 +49,10 @@ base checksum and hand-derived+1 edited checksum. Its Rust source selects the re
 graph functions only. A refused full check has no check ratio; an unchanged Hirsel record
 hit is an absolute startup/work count, not a claim about incremental rustc. Raw products,
 profiles and result tables stay outside the repository in the lane evidence directory.
+
+The `charges`, `json_reject` and `json_capacity` phases are correctness controls. The
+sampler records their native instructions/RSS without a Rust ratio; the valid-input
+twins do not model portable Capacity or the same malformed-input result. Snapshot
+budgets include both `(31 + 256 * 33) * 32` node bytes and `256 * 8` holder-list bytes,
+so the exact budget is 273376 and the one-byte-short budget is 273375. This uses logical
+charge-v1 sizes, independently of native Option niches.

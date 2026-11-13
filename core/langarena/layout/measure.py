@@ -36,7 +36,10 @@ def main():
     for selection in args.native:
         phase, binary = selection.split('=', 1)
         sides = [('hirsel', [binary])]
-        if phase.startswith('json_'):
+        if phase in ('charges', 'json_reject', 'json_capacity'):
+            # Refusal/charge controls have no equivalent valid-input Rust workload.
+            pass
+        elif phase.startswith('json_'):
             for twin in ['json_matched', 'json_serde']:
                 sides.append((twin, [str(args.twins / twin), phase, str(Path(__file__).with_name('inputs').joinpath('documents.json'))]))
         else:

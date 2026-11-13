@@ -44,6 +44,7 @@ def main():
     rows = []
     measure = None
     if args.measure:
+        os.environ["HIRSEL_MEMORY_LIMIT"] = "2G"
         spec = importlib.util.spec_from_file_location('layout_measure', ROOT / 'core/tools/measure.py')
         measure = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(measure)
@@ -76,7 +77,7 @@ def main():
                            output=run.stdout.decode(errors='replace'), stderr=run.stderr.decode(errors='replace'), exit=run.returncode)
                 if measure and row['status'] == 'pass':
                     wait_load()
-                    row['measurement'] = measure.sample([str(stem)], args.out / f'{phase}-{backend}-sample')
+                    row['measurement'] = measure.sample(['taskset', '-c', '16', str(stem)], args.out / f'{phase}-{backend}-sample')
             rows.append(row)
             (args.out / 'results.json').write_text(json.dumps(rows, indent=2, default=str) + '\n')
             print(json.dumps(row, default=str), flush=True)

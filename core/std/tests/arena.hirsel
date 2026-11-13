@@ -200,3 +200,34 @@ fn completed_view_survives_failed_stream() -> bool {
         }
     })
 }
+
+// A formal Region keeps this concrete writer independent of the pending local-Region
+// callback substitution. The four local-Region stream laws above retain that coverage.
+fn reserved_text(r: Region) -> Result[Builder[Text, in r], BuildError] {
+    build_stream_in(r, bytes 64, fn(take w: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
+        emit(take w, "hi")
+    })
+}
+
+// M22/MEM-23: Text uses round8(8+2)=16 of64. Trim inside a zero-byte child limit
+// refunds48 to its original payer, not the current child. A child allocation still
+// fails, then the outer payer can admit an exactly48-byte Text while the first survives.
+// expect: run trim_refunds_original_payer() = true
+fn trim_refunds_original_payer() -> bool {
+    result.unwrap(bound bytes 64 {
+        region r {
+            let b = result.unwrap(reserved_text(r))
+            let first: Text in r = result.unwrap(bound bytes 0 {
+                let t: Text in r = finish_trim(take b)
+                let child_empty = match text.copy_in(r, "x") {
+                    Error(c) => c.requested == 16 && c.available == 0,
+                    _ => false,
+                }
+                if !child_empty { return false }
+                t
+            })
+            let second = text.copy_in(r, "1234567890123456789012345678901234567890")
+            text.as_string(first) == "hi" && match second { Ok(t) => text.len(t) == 40, Error(_) => false }
+        }
+    })
+}

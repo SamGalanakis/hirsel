@@ -55,8 +55,13 @@ impl FunctionEmitter<'_> {
         let n = self.next;
         self.next += 1;
         let at = self.field_pointer("%context", CONTEXT_EVENTS);
-        self.intrinsics.insert("!1 = !{}".into());
-        let events = self.calc(format!("load i64, ptr {at}, align 8, !invariant.load !1"));
+        let invariant = if self.facts {
+            self.intrinsics.insert("!1 = !{}".into());
+            ", !invariant.load !1"
+        } else {
+            ""
+        };
+        let events = self.calc(format!("load i64, ptr {at}, align 8{invariant}"));
         let empty = self.calc(format!("icmp eq i64 {events}, 0"));
         self.likely(
             &empty,

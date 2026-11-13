@@ -77,6 +77,7 @@ const VARIABLES: &[(&str, Class)] = &[
     // which does not use B.
     ("HIRSEL_VALGRIND", Class::Launch),
     ("HIRSEL_VALGRIND_RUNTIME", Class::Launch),
+    ("HIRSEL_LLVM_NO_FACTS", Class::Native),
     ("LLVM_SYS_231_PREFIX", Class::Native),
     ("VALGRIND_LIB", Class::Launch),
     ("PATH", Class::Key),

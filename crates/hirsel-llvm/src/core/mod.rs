@@ -68,6 +68,14 @@ pub fn symbol(module: &Module, function: FuncId) -> String {
     name
 }
 
+/// Whether to use the producer's optimization facts. Setting the diagnostic
+/// switch suppresses every emitter-supplied fact, while retaining ABI attributes
+/// and stack probes. Drivers include this choice in native object cache keys.
+pub fn facts_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("HIRSEL_LLVM_NO_FACTS").is_none())
+}
+
 /// Emit x86-64 System V LLVM IR directly from CoreIR.
 ///
 /// Functions take FORM v1a's hidden task context before the destination.
@@ -80,6 +88,10 @@ pub fn emit_ir(module: &Module) -> Result<String> {
 
 /// Optional diagnostic emission; timings of these objects are not performance samples.
 pub fn emit_ir_with_charge_observation(module: &Module, observe_charge: bool) -> Result<String> {
+    emit_ir_with_facts(module, observe_charge, facts_enabled())
+}
+
+fn emit_ir_with_facts(module: &Module, observe_charge: bool, facts: bool) -> Result<String> {
     let mut text = String::new();
     for (i, data) in module.statics.iter().enumerate() {
         let bytes = data
@@ -107,7 +119,7 @@ pub fn emit_ir_with_charge_observation(module: &Module, observe_charge: bool) ->
             abi::Return::new(&sig.results)
         };
         let name = symbol(module, FuncId(i as u32));
-        let params = abi.parameters(sig);
+        let params = abi.parameters(sig, facts);
         let Some(body) = &f.body else {
             writeln!(
                 text,
@@ -127,6 +139,7 @@ pub fn emit_ir_with_charge_observation(module: &Module, observe_charge: bool) ->
             failures: &failures,
             constants: &failures.constants[i],
             observe_charge,
+            facts,
             empty_bounds: if observe_charge {
                 empty::EmptyBounds::default()
             } else {
@@ -201,11 +214,25 @@ pub fn emit_ir_with_charge_observation(module: &Module, observe_charge: bool) ->
         )
         .unwrap();
         if !has_status {
-            e.infallible_wrapper(&name, sig, &mut text);
+            e.infallible_wrapper(&name, sig, facts, &mut text);
         }
     }
-    cleanup::drop_glue(module, &recipes, &failures, &mut text, &mut intrinsics)?;
-    task_entry::emit(module, &recipes, &failures, &mut text, &mut intrinsics)?;
+    cleanup::drop_glue(
+        module,
+        &recipes,
+        &failures,
+        facts,
+        &mut text,
+        &mut intrinsics,
+    )?;
+    task_entry::emit(
+        module,
+        &recipes,
+        &failures,
+        facts,
+        &mut text,
+        &mut intrinsics,
+    )?;
     for decl in intrinsics {
         writeln!(text, "{decl}").unwrap();
     }
@@ -332,6 +359,7 @@ struct FunctionEmitter<'a> {
     constants: &'a [Option<u64>],
     empty_bounds: empty::EmptyBounds,
     observe_charge: bool,
+    facts: bool,
     code: String,
     allocations: String,
     next: usize,

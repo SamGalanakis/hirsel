@@ -27,18 +27,31 @@ impl Return {
         Self::new(&fields)
     }
 
-    pub fn parameters(&self, sig: &Signature) -> Vec<String> {
+    pub fn parameters(&self, sig: &Signature, facts: bool) -> Vec<String> {
         let mut params = vec![];
         if self.indirect {
             params.push(format!("ptr sret({}) %sret", self.storage));
         }
         params.push("ptr %context".into());
         if sig.dest.is_some() {
-            params.push("ptr %dest".into());
+            params.push(
+                if facts {
+                    "ptr noalias %dest"
+                } else {
+                    "ptr %dest"
+                }
+                .into(),
+            );
         }
         for (i, p) in sig.params.iter().enumerate() {
             let t = match p {
                 Param::Value(t) => format!("{}{}", ty(*t), extension(*t)),
+                Param::Address { loan, .. } if facts => match loan {
+                    Loan::Mut | Loan::Take => "ptr noalias".into(),
+                    // Loan::View freezes the place for the whole call, including
+                    // cleanup. Shared read-only aliases may still overlap.
+                    Loan::View => "ptr noalias readonly".into(),
+                },
                 Param::Address { .. } => "ptr".into(),
             };
             params.push(format!("{t} %p{i}"));
@@ -342,7 +355,13 @@ impl FunctionEmitter<'_> {
         values
     }
 
-    pub(super) fn infallible_wrapper(&mut self, name: &str, sig: &Signature, text: &mut String) {
+    pub(super) fn infallible_wrapper(
+        &mut self,
+        name: &str,
+        sig: &Signature,
+        facts: bool,
+        text: &mut String,
+    ) {
         self.code.clear();
         self.allocations.clear();
         self.next = 0;
@@ -368,7 +387,7 @@ impl FunctionEmitter<'_> {
             text,
             "define {} @{name}({}) {{\nentry:\n{}{} }}",
             self.abi.return_type(),
-            self.abi.parameters(sig).join(", "),
+            self.abi.parameters(sig, facts).join(", "),
             self.allocations,
             self.code
         )

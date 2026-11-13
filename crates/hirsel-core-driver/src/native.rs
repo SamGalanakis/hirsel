@@ -222,6 +222,8 @@ impl CheckProduct {
                     options.backend,
                     options.optimize,
                     options.logical_charge_report.is_some(),
+                    matches!(options.backend, Backend::Llvm)
+                        && !hirsel_llvm_lazy::core::facts_enabled(),
                     runtime,
                     &instance,
                     &body.key,
@@ -276,6 +278,8 @@ impl CheckProduct {
                     options.backend,
                     options.optimize,
                     options.logical_charge_report.is_some(),
+                    matches!(options.backend, Backend::Llvm)
+                        && !hirsel_llvm_lazy::core::facts_enabled(),
                     module,
                 ),
             )?;

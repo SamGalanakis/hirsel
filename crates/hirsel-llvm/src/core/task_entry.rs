@@ -19,6 +19,7 @@ pub(super) fn emit(
     module: &Module,
     recipes: &[hirsel_core_layout::Recipe],
     failures: &failure::Failures,
+    facts: bool,
     text: &mut String,
     intrinsics: &mut BTreeSet<String>,
 ) -> Result<()> {
@@ -55,6 +56,7 @@ pub(super) fn emit(
             failures,
             constants: &[],
             observe_charge: false,
+            facts,
             empty_bounds: empty::EmptyBounds::new(&body, &[]),
             code: String::new(),
             allocations: String::new(),

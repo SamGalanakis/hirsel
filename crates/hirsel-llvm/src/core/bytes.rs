@@ -4,9 +4,14 @@ use super::*;
 
 impl FunctionEmitter<'_> {
     pub(super) fn compare_bytes(&mut self, arguments: &[(String, String)]) -> String {
+        let facts = if self.facts {
+            " nounwind memory(argmem: read)"
+        } else {
+            ""
+        };
         self.intrinsics
-            .insert("declare i32 @memcmp(ptr, ptr, i64) nounwind memory(argmem: read)".into());
-        self.intrinsics.insert(r#"define private signext i8 @core_compare_bytes(ptr %a, i64 %al, ptr %b, i64 %bl) alwaysinline nounwind memory(argmem: read) {
+            .insert(format!("declare i32 @memcmp(ptr, ptr, i64){facts}"));
+        let body = r#" {
 entry:
   %same = icmp eq i64 %al, %bl
   br i1 %same, label %equal_length, label %different_length
@@ -37,7 +42,8 @@ prefix_compare:
   %prefix_sign = select i1 %prefix_negative, i8 -1, i8 1
   %prefix_order = select i1 %prefix_zero, i8 %length_order, i8 %prefix_sign
   ret i8 %prefix_order
-}"#.into());
+}"#;
+        self.intrinsics.insert(format!("define private signext i8 @core_compare_bytes(ptr %a, i64 %al, ptr %b, i64 %bl) alwaysinline{facts}{body}"));
         self.calc(format!(
             "call signext i8 @core_compare_bytes({})",
             arguments

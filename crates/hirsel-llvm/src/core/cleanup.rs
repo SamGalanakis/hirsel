@@ -21,6 +21,7 @@ pub(super) fn drop_glue(
     module: &Module,
     recipes: &[hirsel_core_layout::Recipe],
     failures: &failure::Failures,
+    facts: bool,
     text: &mut String,
     intrinsics: &mut BTreeSet<String>,
 ) -> Result<()> {
@@ -78,6 +79,7 @@ pub(super) fn drop_glue(
             failures,
             constants: &[],
             observe_charge: false,
+            facts,
             empty_bounds: empty::EmptyBounds::default(),
             code: String::new(),
             allocations: String::new(),
@@ -187,8 +189,10 @@ pub(super) fn drop_glue(
             }
         }
     }
-    counted_glue(module, recipes, failures, &counted, text, intrinsics)?;
-    collections::glue(module, recipes, failures, &sequences, text, intrinsics)?;
+    counted_glue(module, recipes, failures, facts, &counted, text, intrinsics)?;
+    collections::glue(
+        module, recipes, failures, facts, &sequences, text, intrinsics,
+    )?;
     Ok(())
 }
 
@@ -463,6 +467,7 @@ fn counted_glue(
     module: &Module,
     recipes: &[hirsel_core_layout::Recipe],
     failures: &failure::Failures,
+    facts: bool,
     demanded: &BTreeSet<usize>,
     text: &mut String,
     intrinsics: &mut BTreeSet<String>,
@@ -481,6 +486,7 @@ fn counted_glue(
             failures,
             constants: &[],
             observe_charge: false,
+            facts,
             empty_bounds: empty::EmptyBounds::default(),
             code: String::new(),
             allocations: String::new(),

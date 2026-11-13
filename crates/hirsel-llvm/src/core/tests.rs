@@ -10,6 +10,48 @@ use std::sync::atomic::{AtomicU64, Ordering};
 mod host_memory;
 
 #[test]
+fn loan_facts_and_diagnostic_off_preserve_abi_and_legal_aliases() {
+    let module = text::parse(include_str!("../../tests/core_runtime/loans.core")).unwrap();
+    wf::module(&module).unwrap();
+    let on = emit_ir_with_facts(&module, false, true).unwrap();
+    let off = emit_ir_with_facts(&module, false, false).unwrap();
+    assert!(on.contains("ptr noalias readonly %p0"));
+    assert!(on.contains("ptr noalias %dest"));
+    for function in [2, 3] {
+        let name = symbol(&module, FuncId(function));
+        let definition = on
+            .lines()
+            .find(|l| l.starts_with("define ") && l.contains(&format!("@{name}(")))
+            .unwrap();
+        assert!(definition.contains("ptr noalias %p0"));
+    }
+    for fact in [
+        "noalias",
+        "readonly",
+        "nocapture",
+        "captures(",
+        "invariant",
+        "!range",
+    ] {
+        assert!(!off.contains(fact), "fact retained: {fact}");
+    }
+    assert!(off.contains("sret("), "ABI return convention stays intact");
+    for source in [
+        include_str!("../../../hirsel-core-ir/samples/counted.core"),
+        include_str!("../../../hirsel-core-ir/samples/strings.core"),
+    ] {
+        let module = text::parse(source).unwrap();
+        let off = emit_ir_with_facts(&module, false, false).unwrap();
+        for fact in ["noalias", "readonly", "invariant", "memory(", "nounwind"] {
+            assert!(!off.contains(fact), "fact retained: {fact}");
+        }
+    }
+    // Views may overlap, and a copyable take can alias another view. A view
+    // can escape through a returned pointer; mut writes remain observable.
+    agree(&module, &[(FuncId(0), vec![])]);
+}
+
+#[test]
 fn scalar_checked_add_keeps_wrapped_results_and_failure_edges() {
     let mut source = String::from("core v1\n");
     for (i, t) in ["u8", "i8"].iter().enumerate() {

@@ -1,0 +1,52 @@
+use super::super::{helper, Benchmark};
+use crate::config_i64;
+use base64_simd::STANDARD;
+
+pub struct Base64Encode {
+    str_data: String,
+    str2_encoded: String,
+    result_val: u32,
+}
+
+impl Base64Encode {
+    pub fn new() -> Self {
+        let n = config_i64("Base64::Encode", "size");
+        let str_data = "a".repeat(n as usize);
+        let str2_encoded = STANDARD.encode_to_string(str_data.as_bytes());
+        Self {
+            str_data,
+            str2_encoded,
+            result_val: 0,
+        }
+    }
+}
+
+impl Benchmark for Base64Encode {
+    fn name(&self) -> String {
+        "Base64::Encode".to_string()
+    }
+
+    fn run(&mut self, _iteration_id: i64) {
+        self.str2_encoded = STANDARD.encode_to_string(self.str_data.as_bytes());
+        self.result_val = self.result_val.wrapping_add(self.str2_encoded.len() as u32);
+    }
+
+    fn checksum(&self) -> u32 {
+        let message = format!(
+            "encode {} to {}: {}",
+            if self.str_data.len() > 4 {
+                format!("{}...", &self.str_data[0..4])
+            } else {
+                self.str_data.clone()
+            },
+            if self.str2_encoded.len() > 4 {
+                format!("{}...", &self.str2_encoded[0..4])
+            } else {
+                self.str2_encoded.clone()
+            },
+            self.result_val
+        );
+
+        helper::checksum_str(&message)
+    }
+}

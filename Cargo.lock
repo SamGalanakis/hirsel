@@ -701,13 +701,13 @@ dependencies = [
  "hirsel-core-front",
  "hirsel-core-ids",
  "hirsel-core-ir",
- "hirsel-llvm",
- "hirsel-cranelift",
  "hirsel-core-layout",
  "hirsel-core-resolve",
  "hirsel-core-syntax",
+ "hirsel-cranelift",
  "hirsel-guard",
  "hirsel-intern",
+ "hirsel-llvm",
  "serde",
  "serde_json",
  "sha2",
@@ -772,12 +772,12 @@ dependencies = [
 name = "hirsel-core-rt"
 version = "0.1.0"
 dependencies = [
- "hirsel-stack",
  "bumpalo",
  "hirsel-core-layout",
  "hirsel-guard",
- "libmimalloc-sys",
+ "hirsel-stack",
  "libc",
+ "libmimalloc-sys",
  "mimalloc",
 ]
 
@@ -1749,7 +1749,6 @@ dependencies = [
 name = "hirsel-rt"
 version = "0.1.0"
 dependencies = [
- "hirsel-stack",
  "base64",
  "base64-simd",
  "hirsel-core-contract",
@@ -1763,6 +1762,7 @@ dependencies = [
  "hirsel-rt-operations",
  "hirsel-run-config",
  "hirsel-run-schema",
+ "hirsel-stack",
  "hirsel-store-authority",
  "hirsel-syntax",
  "hirsel-tir",

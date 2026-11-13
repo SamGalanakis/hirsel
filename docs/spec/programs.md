@@ -67,6 +67,8 @@ pub fn main(out: Stdout) -> Result[(), Exit] waits {
 ```
 ```hirsel
 pub fn main(take xs: List[u64]) -> Result[(), ()] { Ok(()) }   // refused: PROG-3
+```
+```hirsel
 pub fn main() -> u8 { 3 }                                     // refused: PROG-3, not Result[(), E]
 ```
 

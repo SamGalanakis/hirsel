@@ -26,13 +26,18 @@ There are no imports. Types and values have separate namespaces, and the grammar
 which one a name is read in: a name in a type position (LANG-5) is a type, and any other
 name is a value. A type name resolves, in order, to a builtin type name (LANG-10), a type
 of the current module or a type of the **prelude**, and declaring a type with a builtin
-type name is refused; a value name resolves to a local, a function or constant of the current
+type name is refused; a bare value name, with no dot, resolves to a local, a function or constant of the current
 module, a function of the prelude, a module of the current package, a dependency package or
 a core module. The prelude is the `core` module of the core library: every `pub`
-declaration in `core/core/core.hirsel` ([core](core.md)), and nothing else. A dotted path
-`a.b` reads its first name as a value; if `a` is a local, `.b` selects a field, and if `a` is
-a module or package, `.b` selects a member; in a type position the last name is a type
-(`path.Path`). So `fn f(c: char)` names the builtin type and `char.digit(c)` a module
+declaration in `core/core/core.hirsel` ([core](core.md)), and nothing else. The head `a`
+of a dotted path `a.b` resolves in this order: a local or parameter in scope, then a module
+of the current package, a dependency package or a core module, and nothing else. If `a` is a
+local, `.b` selects a field; if a module or package, `.b` selects a member. A function or
+constant of a module is never the head of a path and never shadows a module there: a head
+that names only such a definition, or nothing, is refused here, at the head. So a module may
+define a function with the name of a module, as an entry point `main` beside a module
+`main`, and in it `main.main(..)` calls the module's `main`. In a type position the last
+name of a path is a type (`path.Path`). So `fn f(c: char)` names the builtin type and `char.digit(c)` a module
 member.
 
 A package module may have the name of a core module; it then **extends** it. In a module of
@@ -56,6 +61,11 @@ path, never by spelling.
 
 ```hirsel
 fn digits(s: String) -> Result[u64, ParseError] { int.parse(s) }
+fn list(xs: List[u64]) -> u64 { list.len(xs) }            // list.len is the core module's
+```
+```hirsel
+fn width() -> u64 { 8 }
+fn f() -> u64 { width.bits }                              // refused: LANG-7, width is a function
 ```
 ```hirsel
 fn f(x: u64) -> u64 { let x = x + 1; x }                  // refused: LANG-7, shadows x

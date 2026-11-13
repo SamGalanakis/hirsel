@@ -443,6 +443,69 @@ mod tests {
         );
     }
     #[test]
+    fn core_contract_directory_is_not_a_package_product_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("core.hirsel");
+        std::fs::write(&source, "pub fn answer() -> u64 { 7u64 }\n").unwrap();
+        std::fs::create_dir(dir.path().join("tests")).unwrap();
+        std::fs::write(
+            dir.path().join("tests/refused.hirsel"),
+            "fn poison(x: Missing) {}\n",
+        )
+        .unwrap();
+        let manifest = || CorpusManifest {
+            core: package("core"),
+            packages: vec![PackageManifest::directory(dir.path(), package("core"), true).unwrap()],
+        };
+        assert_eq!(manifest().packages[0].sources.len(), 1);
+        // The exclusion is a core-library convention, not a rule for application modules.
+        assert_eq!(
+            PackageManifest::directory(dir.path(), package("app"), false)
+                .unwrap()
+                .sources
+                .len(),
+            2
+        );
+        let product = PackageProduct::sources(
+            manifest(),
+            &dir.path().join("products"),
+            &mut Meter::new(false),
+        )
+        .unwrap();
+        assert!(
+            product
+                .image
+                .resolve_name(&DefPath::from_full("core@1/core/answer").unwrap())
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            product
+                .image
+                .resolve_name(&DefPath::from_full("core@1/tests/refused/poison").unwrap())
+                .unwrap()
+                .is_none()
+        );
+        // A real source refusal must still reject publication.
+        std::fs::write(&source, "pub fn answer(x: Missing) -> u64 { 7u64 }\n").unwrap();
+        assert!(
+            PackageProduct::sources(
+                manifest(),
+                &dir.path().join("products"),
+                &mut Meter::new(false)
+            )
+            .is_err()
+        );
+        let bundled = PackageProduct::bundled_manifest(Path::new("core/core"));
+        assert!(
+            bundled
+                .sources
+                .iter()
+                .all(|s| s.modules.first().is_none_or(|m| m != "tests"))
+        );
+    }
+
+    #[test]
     fn source_paths_normalize_relative_to_the_process_directory() {
         let root = std::env::current_dir().unwrap();
         assert_eq!(normalized(Path::new("core/core")), root.join("core/core"));

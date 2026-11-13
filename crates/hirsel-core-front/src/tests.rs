@@ -748,7 +748,9 @@ fn integer_and_float_bounds_imply_their_types_bounds() {
     std::fs::create_dir_all(&dir).unwrap();
     for e in std::fs::read_dir(core_dir()).unwrap() {
         let path = e.unwrap().path();
-        std::fs::copy(&path, dir.join(path.file_name().unwrap())).unwrap();
+        if path.extension().is_some_and(|e| e == "hirsel") {
+            std::fs::copy(&path, dir.join(path.file_name().unwrap())).unwrap();
+        }
     }
     std::fs::write(
         dir.join("bounds.hirsel"),

@@ -81,6 +81,47 @@ fn marked_contracts_run_only_in_the_native_walker() {
     std::fs::remove_dir(dir).unwrap();
 }
 
+#[test]
+fn core_contract_directory_is_not_part_of_the_std_seed() {
+    let inputs = manifest();
+    let core = inputs
+        .packages
+        .iter()
+        .find(|p| p.package.name == "core")
+        .unwrap();
+    assert!(!core.sources.is_empty());
+    assert!(core.sources.iter().all(|s| s.modules.len() == 1));
+    assert!(
+        core.sources
+            .iter()
+            .all(|s| s.file.parent() == Some(repo().join("core/core").as_path()))
+    );
+    // Root-only discovery does not hide invalid real source files.
+    let dir = std::env::temp_dir().join(format!(
+        "hirsel-core-contract-source-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::create_dir(dir.join("tests")).unwrap();
+    std::fs::write(dir.join("tests/poison.hirsel"), "fn poison(x: Missing) {}").unwrap();
+    std::fs::write(dir.join("bad.hirsel"), "fn bad(").unwrap();
+    let selected = sources(&dir, &[], true);
+    assert_eq!(selected.len(), 1);
+    let mut symbols = hirsel_core_syntax::Symbols::default();
+    let package = PackageManifest {
+        package: package("core"),
+        sources: selected,
+        dependencies: vec![],
+    };
+    assert!(
+        !package.read(&mut symbols).unwrap()[0]
+            .parsed
+            .diagnostics
+            .is_empty()
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 /// core (declarations) and std (library code, depends on core), laid out as the canonical
 /// image reads `core/std`: one package, the contract tests its modules `tests.<module>`.
 fn manifest() -> CorpusManifest {

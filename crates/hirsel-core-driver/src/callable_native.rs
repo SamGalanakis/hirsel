@@ -15,7 +15,8 @@ fn map_churn(backend: Backend) {
     let dir=tempfile::tempdir().unwrap();
     let core=dir.path().join("core");std::fs::create_dir(&core).unwrap();
     for file in std::fs::read_dir(root.join("core/core")).unwrap() {
-        let path=file.unwrap().path();std::fs::copy(&path,core.join(path.file_name().unwrap())).unwrap();
+        let path=file.unwrap().path();
+        if path.extension().is_some_and(|e| e == "hirsel") {std::fs::copy(&path,core.join(path.file_name().unwrap())).unwrap();}
     }
     let map=core.join("map.hirsel");let mut source=std::fs::read_to_string(&map).unwrap();
     source.push_str(include_str!("../../../core/front/fixtures/map-test-capacity.hirsel"));std::fs::remove_file(&map).unwrap();std::fs::write(map,source).unwrap();

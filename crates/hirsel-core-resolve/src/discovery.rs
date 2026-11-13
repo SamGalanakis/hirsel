@@ -30,6 +30,7 @@ impl PackageManifest {
             dir: &Path,
             out: &mut Vec<ModuleSource>,
             signatures: bool,
+            core: bool,
         ) -> std::io::Result<()> {
             let mut entries = std::fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
             entries.sort_by_key(|e| e.file_name());
@@ -37,7 +38,11 @@ impl PackageManifest {
                 let path = e.path();
                 let kind = e.file_type()?;
                 if kind.is_dir() {
-                    walk(root, &path, out, signatures)?;
+                    // Core contract fixtures belong only to the explicit test walker.
+                    if core && dir == root && e.file_name() == "tests" {
+                        continue;
+                    }
+                    walk(root, &path, out, signatures, core)?;
                 } else if path.extension().is_some_and(|x| x == "hirsel")
                     && (kind.is_file() || (kind.is_symlink() && path.metadata()?.is_file()))
                 {
@@ -66,7 +71,7 @@ impl PackageManifest {
             Ok(())
         }
         let mut sources = vec![];
-        walk(root, root, &mut sources, signatures)?;
+        walk(root, root, &mut sources, signatures, package.name == "core")?;
         Ok(Self {
             package,
             sources,

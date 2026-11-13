@@ -87,6 +87,8 @@ print(json.dumps({'accepted':True, 'native':{'executable':str(output)}, 'diagnos
         std = self.root / 'core/std'
         core.mkdir()
         (std / 'tests').mkdir(parents=True)
+        (core / 'tests').mkdir()
+        (core / 'tests/refused.hirsel').write_text('// expected refusal OWN-9')
         (core / 'core.hirsel').write_text('pub fn identity(x: u64) -> u64 { x }')
         source = std / 'values.hirsel'
         source.write_text('pub fn value() -> u64 { 7u64 }')
@@ -112,6 +114,9 @@ print(json.dumps({'accepted':True, 'native':{'executable':str(output)}, 'diagnos
         self.assertFalse(row['checked'])
         self.assertFalse(row['built'])
         self.assertIn('OWN-9', row['stopped'])
+        source.write_text('pub fn value() -> u64 { 7u64 }')
+        (core / 'core.hirsel').write_text('// expected refusal OWN-9')
+        self.assertIn('OWN-9', self.rows()[1]['stopped'])
 
     def test_empty_output_and_wrapper_only_closures_are_not_built(self):
         original = self.compiler.read_text()

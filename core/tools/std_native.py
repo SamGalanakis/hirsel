@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run std's source contract oracles through the published native product path.
+"""Run core and std source contract oracles through the published native product path.
 
 Example: std_native.py --compiler PATH --runtime PATH --filter file --backend both
 Confined filesystem cases run on the host, which needs openat2 (Linux >= 5.6).
@@ -33,16 +33,23 @@ class Contract:
     first_write: int | None = None
     test_of: str | None = None
     host_op: int = 0
+    package: str = "std"
+    evaluator_only: str | None = None
 
     @property
     def name(self):
-        return self.file.stem + ':' + self.call.split('(')[0]
+        prefix = 'core.' if self.package == 'core' else ''
+        return prefix + self.file.stem + ':' + self.call.split('(')[0]
+
+
+def masked_source(source):
+    return re.sub(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'',
+                    lambda m: ' ' * len(m[0]), source, flags=re.S)
 
 
 def declared_names(source):
-    # Mask comments/literals, then inspect only module-level declarations.
-    masked = re.sub(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'',
-                    lambda m: ' ' * len(m[0]), source, flags=re.S)
+    # Inspect only named module-level declarations, not callable parameter types.
+    masked = masked_source(source)
     depth = 0
     names = []
     tokens = list(re.finditer(r'[A-Za-z_]\w*|[{}]', masked))
@@ -52,7 +59,7 @@ def declared_names(source):
             depth += 1
         elif text == '}':
             depth -= 1
-        elif depth == 0 and text in ('fn', 'type', 'const') and i + 1 < len(tokens):
+        elif depth == 0 and text in ('fn', 'type', 'const') and i + 1 < len(tokens) and re.match(r'\s+[A-Za-z_]', masked[token.end():]):
             names.append((text, tokens[i + 1][0]))
     return names
 
@@ -61,11 +68,13 @@ def test_module(root, file, source):
     first = source.splitlines()[0] if source.splitlines() else ''
     if not first.startswith('// test-of:'):
         return None
-    match = re.fullmatch(r'// test-of: std\.([a-z][a-z0-9_]*)', first)
+    match = re.fullmatch(r'// test-of: (core|std)\.([a-z][a-z0-9_]*)', first)
     if not match:
         raise ValueError(f'{file}: invalid first-line test-of marker')
-    module = match[1]
-    library = root / 'core/std' / (module + '.hirsel')
+    package, module = match.groups()
+    if file.parent != root / 'core' / package / 'tests':
+        raise ValueError(f'{file}: test-of must name its own library package')
+    library = root / 'core' / package / (module + '.hirsel')
     if not library.is_file():
         raise ValueError(f'{file}: test-of module does not exist')
     if not re.search(r'^// test-reason: \S.+', source, re.M):
@@ -73,6 +82,11 @@ def test_module(root, file, source):
     names = declared_names(source)
     if any(kind != 'fn' for kind, _ in names) or re.search(r'^\s*pub\b', source, re.M):
         raise ValueError(f'{file}: marked test may add only private test/helper functions')
+    masked = masked_source(source)
+    functions = list(re.finditer(r'\bfn\s+[A-Za-z_]\w*', masked))
+    if any('{' not in masked[f.end():functions[i+1].start() if i+1 < len(functions) else len(masked)]
+           for i, f in enumerate(functions)):
+        raise ValueError(f'{file}: marked helper functions must have bodies')
     original = {name for _, name in declared_names(library.read_text())}
     additions = [name for _, name in names]
     if len(additions) != len(set(additions)) or original.intersection(additions):
@@ -84,9 +98,17 @@ def test_module(root, file, source):
 
 def discover(root, filters):
     contracts = []
-    for file in sorted((root / 'core/std/tests').glob('*.hirsel')):
+    files = [p for package in ['core', 'std'] for p in (root / 'core' / package / 'tests').glob('*.hirsel')]
+    for file in sorted(files):
         source = file.read_text()
         test_of = test_module(root, file, source)
+        backend = re.findall(r'^// test-backend: (.+)$', source, re.M)
+        if backend and backend != ['evaluator']:
+            raise ValueError(f'{file}: only // test-backend: evaluator is supported')
+        reason = re.search(r'^// test-reason: (\S.+)$', source, re.M)
+        if backend and not reason:
+            raise ValueError(f'{file}: evaluator-only law needs // test-reason:')
+        evaluator_only = reason[1] if backend else None
         stdout = stderr = b""
         first_write = None
         host_op = 0
@@ -107,47 +129,71 @@ def discover(root, filters):
                     raise ValueError(f'{file}:{line}: unreadable run oracle')
                 continue
             call, expected = match.groups()
+            if expected.startswith('fault ') and not evaluator_only:
+                raise ValueError(f'{file}:{line}: fault oracle requires // test-backend: evaluator')
+            if expected.startswith('fault '):
+                if not isinstance(json.loads(expected.removeprefix('fault ')), str):
+                    raise ValueError(f'{file}:{line}: fault oracle must be an exact JSON string')
+            if evaluator_only and (not call.endswith('()') or first_write is not None):
+                raise ValueError(f'{file}:{line}: evaluator-only laws take no host arguments')
             name = call.split('(')[0]
             header = re.search(r'\bfn\s+' + re.escape(name) + r'\s*\([^)]*\)([^\{]*)\{', source)
             if header is None:
                 raise ValueError(f'{file}:{line}: no function for {call}')
-            case = Contract(file, line, call, expected, bool(re.search(r'\bwaits\b', header[1])), stdout, stderr, first_write, test_of, host_op)
+            case = Contract(file, line, call, expected, bool(re.search(r'\bwaits\b', header[1])), stdout, stderr, first_write, test_of, host_op, file.relative_to(root).parts[1], evaluator_only)
             stdout = stderr = b""
             first_write = None
             host_op = 0
-            if not filters or any(case.name.startswith(f) or str(file.relative_to(root)).startswith(f) for f in filters):
+            if not filters or any(case.name.startswith(f) or ('std.' + case.name).startswith(f) and case.package == 'std' or str(file.relative_to(root)).startswith(f) for f in filters):
                 contracts.append(case)
     if not contracts:
         raise ValueError(f'no expect: run tests match {filters!r}')
     return contracts
 
 
-def wrapper(case):
+def host_parameter(case):
+    for argument, kind in [('dir', 'Dir'), ('out', 'Stdout'), ('err', 'Stderr')]:
+        if '(' + argument + ')' in case.call:
+            name = 'native_' + argument
+            return name + ':' + kind, name
+    return '', ''
+
+
+def wrapper(case, evaluator=False):
     # The adapter lives in the original module, so private helpers remain private.
     call = case.call.replace('(dir)', '(native_dir)').replace('(out)', '(native_out)').replace('(err)', '(native_err)')
-    parameters = 'native_dir:Dir' if '(dir)' in case.call else 'native_out:Stdout' if '(out)' in case.call else 'native_err:Stderr' if '(err)' in case.call else ''
+    parameters, _ = host_parameter(case)
     effect = ' waits' if case.waits else ''
-    if case.expected.startswith('fail '):
-        body = f'let _ = {call}\nOk(())'
+    success = '1u64' if evaluator else 'Ok(())'
+    failure = '0u64' if evaluator else 'Error(Exit(status:1))'
+    result = 'u64' if evaluator else 'Result[(),Exit]'
+    if case.expected.startswith(('fail ', 'fault ')):
+        body = f'let _ = {call}\n{success}'
     else:
-        body = f'if {call} == {case.expected} {{Ok(())}} else {{Error(Exit(status:1))}}'
-    return f'\npub fn native_contract({parameters})->Result[(),Exit]{effect} {{\n{body}\n}}\n'
+        body = f'if {call} == {case.expected} {{{success}}} else {{{failure}}}'
+    return f'\npub fn native_contract({parameters})->{result}{effect} {{\n{body}\n}}\n'
 
 
-def manifest(root, case, adapted):
+def manifest(root, case, adapted, native=True):
     core = {'name': 'core', 'version': '1'}
     std = {'name': 'std', 'version': '1'}
     def sources(directory, signatures):
         return [{'file': str(p.resolve()), 'modules': [p.stem], 'signatures': signatures}
                 for p in sorted(directory.glob('*.hirsel'))]
-    files = sources(root / 'core/std', False)
+    packages = [
+        {'package': core, 'sources': sources(root / 'core/core', True), 'dependencies': []},
+        {'package': std, 'sources': sources(root / 'core/std', False), 'dependencies': [core]}]
+    files = next(p['sources'] for p in packages if p['package']['name'] == case.package)
     if case.test_of:
-        next(f for f in files if f['modules'] == [case.test_of])['file'] = str(adapted)
+        original = next(f for f in files if f['modules'] == [case.test_of])
+        original.update(file=str(adapted), signatures=case.package == 'core')
     else:
         files.append({'file': str(adapted), 'modules': ['tests', case.file.stem], 'signatures': False})
-    return {'core': core, 'packages': [
-        {'package': core, 'sources': sources(root / 'core/core', True), 'dependencies': []},
-        {'package': std, 'sources': files, 'dependencies': [core]}]}
+    if case.package == 'core' and native:
+        packages.append({'package': {'name': 'contracts', 'version': '1'},
+                         'sources': [{'file': str(adapted.with_name('entry.hirsel')), 'modules': ['main'], 'signatures': False}],
+                         'dependencies': [core]})
+    return {'core': core, 'packages': packages}
 
 
 def owner(message, owners):
@@ -193,8 +239,45 @@ def observation(case, result):
     return f'exit {result.returncode}, stdout {result.stdout!r}, stderr {result.stderr!r}; expected {case.expected}'
 
 
-def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, timeout=30):
+def evaluator_observation(case, result):
+    if result.returncode:
+        return False, f'evaluator backend exited {result.returncode}: {result.stdout!r} {result.stderr!r}'
+    try:
+        report = json.loads(result.stdout)
+    except ValueError:
+        return False, f'evaluator backend did not return JSON: {result.stdout!r}'
+    if report.get('error'):
+        return False, report['error']
+    outcome = report.get('outcome')
+    if case.expected.startswith('fault '):
+        expected = dict(kind='fault', message=json.loads(case.expected.removeprefix('fault ')))
+    elif case.expected.startswith('fail '):
+        expected = dict(kind='failed', causes=case.expected.removeprefix('fail ').split(','))
+    else:
+        expected = dict(kind='returned', values=[1])
+    if outcome != expected:
+        return True, f'evaluator got {outcome!r}; expected {expected!r}'
+    if expected['kind'] != 'fault':
+        if bytes(report.get('stdout', [])) != case.stdout or bytes(report.get('stderr', [])) != case.stderr:
+            return True, 'evaluator output differs'
+        if expected['kind'] == 'returned' and report.get('used') != 0:
+            return True, f"evaluator returned with {report.get('used')} bytes admitted"
+    return True, None
+
+
+def save_row(rows, row, output):
+    rows.append(row)
+    status = 'NOT APPLICABLE' if not row['applicable'] else 'PASS' if row['passed'] else 'FAIL' if row['ran'] else 'NOT RUN'
+    print(f"{row['engine']} {row['test']}: {status}" + (f" {row['cause']}" if row['cause'] else '') +
+          (f" [owner {row['owner']}]" if row['owner'] else ''), flush=True)
+    if output:
+        output.write_text(json.dumps(rows, indent=2) + '\n')
+
+
+def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, timeout=30, evaluator=None):
     rows = []
+    if any(c.evaluator_only for c in contracts) and evaluator is None:
+        raise ValueError('evaluator-only laws require --evaluator <hirsel-core-contract-eval>')
     # Private stores are shared across cases only for immutable checked/native products.
     # Each case's host state is fresh and its executable is removed after observation.
     with tempfile.TemporaryDirectory(prefix='hirsel-std-native-') as temporary:
@@ -206,15 +289,42 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 host = scratch / 'host'
                 host.mkdir()  # Script: every contract receives one fresh, empty confined Dir.
                 adapted = scratch / case.file.name
-                original = (root / 'core/std' / (case.test_of + '.hirsel')).read_text() + '\n' if case.test_of else ''
-                adapted.write_text(original + case.file.read_text() + wrapper(case))
+                original = (root / 'core' / case.package / (case.test_of + '.hirsel')).read_text() + '\n' if case.test_of else ''
+                adapted.write_text(original + case.file.read_text() + wrapper(case, evaluator=bool(case.evaluator_only)))
                 inputs = scratch / 'inputs.json'
-                inputs.write_text(json.dumps(manifest(root, case, adapted)))
+                inputs.write_text(json.dumps(manifest(root, case, adapted, native=not case.evaluator_only)))
+                entry = f'{case.package}@1/{case.test_of or ("tests/" + case.file.stem)}/native_contract'
+                if case.package == 'core' and not case.evaluator_only:
+                    parameter, argument = host_parameter(case)
+                    effect = ' waits' if case.waits else ''
+                    module = case.test_of or 'tests.' + case.file.stem
+                    adapted.with_name('entry.hirsel').write_text(f'pub fn main({parameter})->Result[(),Exit]{effect} {{core.{module}.native_contract({argument})}}\n')
+                    entry = 'contracts@1/main/main'
                 binary = scratch / 'program'
                 command = [str(compiler), 'build', '--inputs', str(inputs), '--entry',
-                           f'std@1/{case.test_of or ("tests/" + case.file.stem)}/native_contract', '--backend', engine,
+                           entry, '--backend', engine,
                            '--runtime', str(runtime), '--store', str(work / 'store'), '--json',
                            '--dir', str(host), '-o', str(binary)]
+                if case.evaluator_only:
+                    row = dict(test=case.name, file=str(case.file.relative_to(root)), line=case.line,
+                               engine=engine, profile=None, call=case.call, expected=case.expected,
+                               ran=False, passed=None, applicable=False, cause=case.evaluator_only, owner=None)
+                    if engine == engines[0]:
+                        evaluated = row | dict(engine='evaluator', applicable=True, passed=False, cause=None)
+                        try:
+                            wait_load()
+                            result = subprocess.run([str(evaluator), str(inputs), command[command.index('--entry') + 1]],
+                                                    capture_output=True, timeout=timeout)
+                            evaluated['ran'], evaluated['cause'] = evaluator_observation(case, result)
+                        except subprocess.TimeoutExpired:
+                            evaluated['ran'] = True
+                            evaluated['cause'] = f'evaluator execution timed out after {timeout}s'
+                        evaluated['passed'] = evaluated['cause'] is None
+                        if evaluated['cause']:
+                            evaluated['owner'] = owner(evaluated['cause'], owners)
+                        save_row(rows, evaluated, output)
+                    save_row(rows, row, output)
+                    continue
                 if engine == 'llvm':
                     command.append('--release')
                 if '(out)' in case.call:
@@ -235,7 +345,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 build = subprocess.run(command, capture_output=True)
                 row = dict(test=case.name, file=str(case.file.relative_to(root)), line=case.line,
                            engine=engine, profile='release' if engine == 'llvm' else 'dev',
-                           call=case.call, expected=case.expected, ran=False, passed=False,
+                           call=case.call, expected=case.expected, ran=False, passed=False, applicable=True,
                            cause=None, owner=None)
                 try:
                     product = json.loads(build.stdout)
@@ -255,16 +365,12 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                         row['cause'] = f'native execution timed out after {timeout}s'
                 if row['cause']:
                     row['owner'] = owner(row['cause'], owners)
-                rows.append(row)
-                status = 'PASS' if row['passed'] else 'FAIL' if row['ran'] else 'NOT RUN'
-                print(f"{engine} {case.name}: {status}" + (f" {row['cause']} [owner {row['owner']}]" if row['cause'] else ''), flush=True)
-                if output:
-                    output.write_text(json.dumps(rows, indent=2) + '\n')
+                save_row(rows, row, output)
                 if binary.exists():
                     binary.unlink()
-    for engine in engines:
+    for engine in [*engines, *(['evaluator'] if any(c.evaluator_only for c in contracts) else [])]:
         selected = [r for r in rows if r['engine'] == engine]
-        print(f"{engine}: {len(selected)} selected, {sum(r['ran'] for r in selected)} ran, {sum(r['passed'] for r in selected)} passed, {sum(not r['ran'] for r in selected)} not run", flush=True)
+        print(f"{engine}: {len(selected)} selected, {sum(r['ran'] for r in selected)} ran, {sum(bool(r['passed']) for r in selected)} passed, {sum(r['applicable'] and not r['ran'] for r in selected)} not run, {sum(not r['applicable'] for r in selected)} not applicable", flush=True)
     return rows
 
 
@@ -272,6 +378,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--compiler', type=Path, required=True)
     parser.add_argument('--runtime', type=Path, required=True)
+    parser.add_argument('--evaluator', type=Path, help='test-only hirsel-core-contract-eval backend')
     parser.add_argument('--root', type=Path, default=ROOT)
     parser.add_argument('--backend', choices=['both', 'cranelift', 'llvm'], default='both')
     parser.add_argument('--filter', action='append', default=[])
@@ -284,8 +391,8 @@ def main():
     owners = json.loads(Path(__file__).with_name('std_native_owners.json').read_text())
     engines = ['cranelift', 'llvm'] if args.backend == 'both' else [args.backend]
     rows = run(root, args.compiler.resolve(), args.runtime.resolve(), contracts, engines,
-               args.report, owners, args.cc.resolve() if args.cc else None, args.timeout)
-    return int(any(not r['passed'] for r in rows))
+               args.report, owners, args.cc.resolve() if args.cc else None, args.timeout, args.evaluator.resolve() if args.evaluator else None)
+    return int(any(r['applicable'] and not r['passed'] for r in rows))
 
 
 if __name__ == '__main__':

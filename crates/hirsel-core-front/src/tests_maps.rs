@@ -9,7 +9,9 @@ fn churn_capacity_and_order() {
     std::fs::create_dir_all(&dir).unwrap();
     for file in std::fs::read_dir(core_dir()).unwrap() {
         let path = file.unwrap().path();
-        std::fs::copy(&path, dir.join(path.file_name().unwrap())).unwrap();
+        if path.extension().is_some_and(|e| e == "hirsel") {
+            std::fs::copy(&path, dir.join(path.file_name().unwrap())).unwrap();
+        }
     }
     let map = dir.join("map.hirsel");
     let mut source = std::fs::read_to_string(&map).unwrap();

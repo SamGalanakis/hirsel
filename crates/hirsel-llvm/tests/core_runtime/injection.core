@@ -1,0 +1,67 @@
+; Two resource owners, guarded construction and scratch under finalizer grants.
+; Baseline four admissions; sweep Nth-only and Nth-and-later for all four.
+core v1
+type t0 = resource "Guarded" drop f1 grant 8 { id: u64 }
+sig g0 = () -> (bool, u64)
+sig g1 = (ptr) -> ()
+inst n0 = llvm@1/inject/main [] []
+inst n1 = llvm@1/inject/drop [] []
+fn f0 = n0 g0 {
+  slot s0 = t0
+  slot s1 = t0
+  addr a0 = s0 : ptr
+  addr a1 = s0 : t0
+  addr a2 = s1 : ptr
+  addr a3 = s1 : t0
+  addr a4 = v1 : t0
+  addr a5 = a4 field 0 : u64
+  addr a6 = v6 : t0
+  addr a7 = a6 field 0 : u64
+b0:
+  live s0
+  live s1
+  address a0
+  address a1
+  address a2
+  address a3
+  v0: u64 = const 48
+  v1: ptr, v2: u64 = alloc resource grant 8 8 align 8 charge v0
+  v3: ptr = const 0x0
+  v4: bool = ne v1, v3
+  branch v4, b1, b4
+b1:
+  store a0, v1
+  address a4
+  address a5
+  v5: u64 = const 1
+  store a5, v5
+  v6: ptr, v7: u64 = alloc resource grant 8 8 align 8 charge v0
+  v8: bool = ne v6, v3
+  branch v8, b2, b3
+b2:
+  store a2, v6
+  address a6
+  address a7
+  v9: u64 = const 2
+  store a7, v9
+  drop a3 t0 fail b6
+  drop a1 t0 fail b5
+  return v8, v7
+b3:
+  drop a1 t0 fail b5
+  return v8, v7
+b4:
+  return v4, v2
+b5:
+  propagate
+b6:
+  drop a1 t0 fail b5
+  propagate
+}
+fn f1 = n1 g1 {
+b0(v0: ptr):
+  v1: u64 = const 8
+  v2: ptr, v3: u64 = alloc own 8 align 8 charge v1
+  free v2 charge v1
+  return
+}

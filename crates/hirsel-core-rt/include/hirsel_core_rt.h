@@ -53,4 +53,5 @@ void hirsel_core_causes_drop(HirselCoreCauseCell *);
 const HirselCoreCauseCell *hirsel_core_cause_next(const HirselCoreCauseCell *);
 const HirselCoreCause *hirsel_core_cause_value(const HirselCoreCauseCell *);
 uint8_t hirsel_core_allocation_status(const HirselCoreContext *, void *allocation);
+void hirsel_core_free_value(void *, uint64_t charge);
 #endif

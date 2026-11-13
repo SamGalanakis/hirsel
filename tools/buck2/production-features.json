@@ -6,6 +6,7 @@
     "hirsel-authority/testing": "test-only",
     "hirsel-cli/native-tsan": "test-only",
     "hirsel-core-ir/eval": "test-only",
+    "hirsel-core-rt/testing": "test-only",
     "hirsel-core-ir/wf": "test-only",
     "hirsel-cranelift/native-tsan": "test-only",
     "hirsel-driver/native-tsan": "test-only",

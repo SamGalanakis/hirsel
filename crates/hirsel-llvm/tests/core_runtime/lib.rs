@@ -1,4 +1,6 @@
 //! C executable fixtures inspect the real runtime, with no shadow implementation.
+/// # Safety
+/// Context is live and borrowed for this call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_test_available(
     context: *const hirsel_core_rt::Context,
@@ -13,17 +15,28 @@ static CONTEXT: extern "C" fn(u64) -> *mut hirsel_core_rt::Context =
 
 #[unsafe(no_mangle)]
 pub extern "C" fn hirsel_core_test_context_new(bytes: u64) -> *mut hirsel_core_rt::Context {
-    let mut context=hirsel_core_rt::Context::new(288);
+    let mut context = hirsel_core_rt::Context::new(288);
     hirsel_core_rt::causes::task_start(&mut context).expect("fixture startup allowance");
-    context.reset_test_limit(bytes);Box::into_raw(Box::new(context))
+    context.reset_test_limit(bytes);
+    Box::into_raw(Box::new(context))
 }
+/// # Safety
+/// Context is live and exclusively borrowed.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_test_inject(context:*mut hirsel_core_rt::Context,n:usize,later:bool) {
+pub unsafe extern "C" fn hirsel_core_test_inject(
+    context: *mut hirsel_core_rt::Context,
+    n: usize,
+    later: bool,
+) {
     // SAFETY: fixture exclusively owns its live context.
-    unsafe {(&mut *context).inject_admission(n,later)}
+    unsafe { (&mut *context).inject_admission(n, later) }
 }
+/// # Safety
+/// Context is live and borrowed for this call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_test_attempts(context:*const hirsel_core_rt::Context)->usize {
+pub unsafe extern "C" fn hirsel_core_test_attempts(
+    context: *const hirsel_core_rt::Context,
+) -> usize {
     // SAFETY: fixture exclusively owns its live context.
-    unsafe {(&*context).admission_attempts()}
+    unsafe { (&*context).admission_attempts() }
 }

@@ -118,7 +118,7 @@ struct Machine<'m> {
     /// The last destination identity handed out (`rt.dest_id`).
     dests: u64,
     admissions: usize,
-    injection: Option<(usize,bool)>,
+    injection: Option<(usize, bool)>,
 }
 
 fn collect_arrays(ty: &FieldTy, out: &mut Vec<(FieldTy, u64)>) {
@@ -131,10 +131,16 @@ fn collect_arrays(ty: &FieldTy, out: &mut Vec<(FieldTy, u64)>) {
 }
 
 pub fn run(m: &Module, f: FuncId, args: &[u64], limit: u64) -> Report {
-    run_injected(m,f,args,limit,None)
+    run_injected(m, f, args, limit, None)
 }
 /// Deterministic admission refusal for native/evaluator agreement fixtures.
-pub fn run_injected(m: &Module, f: FuncId, args: &[u64], limit: u64, injection: Option<(usize,bool)>) -> Report {
+pub fn run_injected(
+    m: &Module,
+    f: FuncId,
+    args: &[u64],
+    limit: u64,
+    injection: Option<(usize, bool)>,
+) -> Report {
     let mut mach = Machine {
         m,
         recipes: compute(&m.types).expect("layouts"),
@@ -259,7 +265,11 @@ impl Machine<'_> {
     fn admit(&mut self, l: usize, n: u64) -> Result<(), u64> {
         let lim = &mut self.limits[l];
         let room = lim.cap - lim.used;
-        if n <= room {
+        self.admissions += 1;
+        let refused = self
+            .injection
+            .is_some_and(|(nth, later)| self.admissions == nth || (later && self.admissions > nth));
+        if n <= room && !refused {
             lim.used += n;
             Ok(())
         } else {

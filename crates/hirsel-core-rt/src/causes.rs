@@ -218,6 +218,23 @@ pub unsafe fn resource_free(pointer: std::ptr::NonNull<u8>, storage: u64) {
     }
 }
 
+/// Free a wholly destructured value, including unused resource funding.
+/// # Safety
+/// The caller owns a live block and has moved or cleaned all fields. A resource
+/// has not begun finalization, and `charge` is its complete remaining charge.
+pub unsafe fn free_value(pointer: std::ptr::NonNull<u8>, charge: u64) {
+    // SAFETY: the caller owns the block and its initialized allocation metadata.
+    unsafe {
+        let resource = block::resource(pointer);
+        if resource.is_null() {
+            block::free(pointer, charge);
+        } else {
+            let storage = charge - 32 - (*resource).grant.as_ref().unwrap().available();
+            resource_free(pointer, storage);
+        }
+    }
+}
+
 /// # Safety
 /// A live borrowed chain cell, held by an unmodified live Causes owner.
 pub unsafe fn next(cell: *const Cell) -> *const Cell {

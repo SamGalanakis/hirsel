@@ -1206,7 +1206,6 @@ def hirsel_core_llvm_native_test(name, data):
         test_binary = "hirsel-llvm-unittest",
         llvm = "root//tools/buck2/native-toolchain:llvm",
         llvm_libraries = "toolchains//:llvm-libraries",
-        native_tools = native_tool_inputs(),
         request = _request("hirsel-llvm-unittest"),
         exec_compatible_with = _test_platform("hirsel-llvm-unittest"),
         pool = not TESTS_ON_HOST,

@@ -219,7 +219,9 @@ impl Funding {
         f.fail = Some((n, later));
     }
     #[cfg(any(test, feature = "testing"))]
-    pub(crate) fn attempts(&self) -> usize { self.forest.lock().unwrap().attempts }
+    pub(crate) fn attempts(&self) -> usize {
+        self.forest.lock().unwrap().attempts
+    }
     #[cfg(any(test, feature = "testing"))]
     pub(crate) fn records(&self) -> usize {
         self.forest

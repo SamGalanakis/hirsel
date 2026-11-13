@@ -392,3 +392,15 @@ pub unsafe extern "C" fn hirsel_core_allocation_status(
     // SAFETY: the emitter passes its live hidden task context.
     u8::from(pointer.is_null() && unsafe { &*context }.finalizing != 0)
 }
+
+/// Free a wholly destructured own value or resource.
+/// # Safety
+/// The block is exclusively owned, all fields have moved or been cleaned, and a
+/// resource has not begun finalization. Charge is its remaining logical charge.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_free_value(pointer: NonNull<u8>, charge: u64) {
+    // SAFETY: the emitter supplies the live block with the contract above.
+    unsafe {
+        causes::free_value(pointer, charge);
+    }
+}

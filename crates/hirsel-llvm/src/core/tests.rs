@@ -38,11 +38,13 @@ struct Case {
     function: FuncId,
     args: Vec<u64>,
     limit: u64,
+    injection: Option<(usize, bool)>,
 }
 struct NativeReport {
     outcome: eval::Outcome,
     used: u64,
     trace: Vec<u64>,
+    admissions: usize,
 }
 fn execute(module: &Module, cases: &[Case]) -> Vec<NativeReport> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -66,7 +68,7 @@ fn execute(module: &Module, cases: &[Case]) -> Vec<NativeReport> {
     let bytes = emit_object(module, Optimization::None).unwrap();
     std::fs::write(dir.join("core.o"), bytes).unwrap();
     let mut c = String::from(
-        "#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\n#include <assert.h>\n#include \"hirsel_core_rt.h\"\nextern uint64_t hirsel_core_test_available(const HirselCoreContext *);\nstatic float f32(uint32_t b){float x;memcpy(&x,&b,4);return x;}\nstatic double f64(uint64_t b){double x;memcpy(&x,&b,8);return x;}\nstatic const char *causes[]={\"Overflow\",\"Bounds\",\"Division\",\"Unwrap\",\"Fail\",\"Cancelled\",\"Capacity\"};\n",
+        "#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\n#include <assert.h>\n#include \"hirsel_core_rt.h\"\nextern uint64_t hirsel_core_test_available(const HirselCoreContext *);\nextern HirselCoreContext *hirsel_core_test_context_new(uint64_t);\nextern void hirsel_core_test_inject(HirselCoreContext *,size_t,bool);\nextern size_t hirsel_core_test_attempts(const HirselCoreContext *);\nstatic uint64_t trace[4096]; static size_t traces;\nvoid hirsel_core_test_drop_trace(uint64_t n){assert(traces<4096);trace[traces++]=n;}\nstatic float f32(uint32_t b){float x;memcpy(&x,&b,4);return x;}\nstatic double f64(uint64_t b){double x;memcpy(&x,&b,8);return x;}\nstatic const char *causes[]={\"Overflow\",\"Bounds\",\"Division\",\"Unwrap\",\"Fail\",\"Cancelled\",\"Capacity\"};\n",
     );
     for (i, f) in module.functions.iter().enumerate() {
         let s = &module.signatures[f.signature.index()];
@@ -133,8 +135,12 @@ fn execute(module: &Module, cases: &[Case]) -> Vec<NativeReport> {
         } else {
             format!("R{}", f.0)
         };
-        let limit = case.limit.saturating_add(288);
-        writeln!(c,"{{ HirselCoreContext *ctx = hirsel_core_context_new(UINT64_C({limit})); assert(hirsel_core_task_start(ctx).pointer); uint64_t initial=hirsel_core_test_available(ctx); {ret} r{k} = {}({args});",symbol(module,f)).unwrap();
+        let limit = case.limit;
+        let inject = case
+            .injection
+            .map(|(n, later)| format!("hirsel_core_test_inject(ctx,{n},{});", u8::from(later)))
+            .unwrap_or_default();
+        writeln!(c,"{{ HirselCoreContext *ctx = hirsel_core_test_context_new(UINT64_C({limit})); traces=0; {inject} uint64_t initial=hirsel_core_test_available(ctx); {ret} r{k} = {}({args});",symbol(module,f)).unwrap();
         let status = if sig.results.is_empty() {
             format!("r{k}")
         } else {
@@ -149,18 +155,21 @@ fn execute(module: &Module, cases: &[Case]) -> Vec<NativeReport> {
             writeln!(c,"uint64_t b{k}_{j}=0; memcpy(&b{k}_{j},&r{k}.r{j},{}); printf(\" %llu\",(unsigned long long)b{k}_{j});",size(t)).unwrap();
         }
         c.push_str("}\n");
-        writeln!(c,"HirselCoreCauseCell *chain=hirsel_core_causes_take(ctx); if({status}) for(const HirselCoreCauseCell *p=chain;p;p=hirsel_core_cause_next(p)) printf(\" %s\",causes[hirsel_core_cause_value(p)->kind]); printf(\"|%llu|\\n\",(unsigned long long)(initial-hirsel_core_test_available(ctx))); hirsel_core_causes_drop(chain); hirsel_core_context_free(ctx); }}").unwrap();
+        writeln!(c,"HirselCoreCauseCell *chain=hirsel_core_causes_take(ctx); if({status}) for(const HirselCoreCauseCell *p=chain;p;p=hirsel_core_cause_next(p)) printf(\" %s\",causes[hirsel_core_cause_value(p)->kind]); printf(\"|%llu|\",(unsigned long long)(initial-hirsel_core_test_available(ctx))); for(size_t i=0;i<traces;i++) printf(\" %llu\",(unsigned long long)trace[i]); printf(\"|%zu\\n\",hirsel_core_test_attempts(ctx)); hirsel_core_causes_drop(chain); hirsel_core_context_free(ctx); }}").unwrap();
     }
     c.push_str("return 0;}\n");
     std::fs::write(dir.join("test.c"), c).unwrap();
     let prefix =
         PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").expect("pinned LLVM prefix"));
-    let runtime =
-        std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("CoreIR native runtime test input");
+    let runtime = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(
+            std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("CoreIR native runtime test input"),
+        );
     output(
         Command::new(prefix.join("bin/clang"))
             .arg(format!("--ld-path={}", prefix.join("bin/ld.lld").display()))
-            .args(["-std=c11", "-O0", "-I"])
+            .args(["-std=c11", "-O0", "-no-pie", "-I"])
             .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../hirsel-core-rt/include"))
             .arg(dir.join("test.c"))
             .arg(dir.join("core.o"))
@@ -189,6 +198,7 @@ fn execute(module: &Module, cases: &[Case]) -> Vec<NativeReport> {
                     .split_whitespace()
                     .map(|s| s.parse().unwrap())
                     .collect(),
+                admissions: parts.next().unwrap().parse().unwrap(),
             }
         })
         .collect()
@@ -200,6 +210,7 @@ fn agree(module: &Module, cases: &[(FuncId, Vec<u64>)]) {
             function: *function,
             args: args.clone(),
             limit: u64::MAX,
+            injection: None,
         })
         .collect::<Vec<_>>();
     agree_cases(module, &cases, false);
@@ -208,7 +219,13 @@ fn agree_cases(module: &Module, cases: &[Case], memory: bool) {
     let got = execute(module, cases);
     assert_eq!(got.len(), cases.len());
     for (case, got) in cases.iter().zip(got) {
-        let expected = eval::run(module, case.function, &case.args, case.limit);
+        let expected = eval::run_injected(
+            module,
+            case.function,
+            &case.args,
+            case.limit,
+            case.injection,
+        );
         assert_eq!(
             got.outcome, expected.outcome,
             "f{}({:?})",
@@ -217,6 +234,7 @@ fn agree_cases(module: &Module, cases: &[Case], memory: bool) {
         if memory {
             assert_eq!(got.used, expected.used, "used");
             assert_eq!(got.trace, expected.trace, "trace");
+            assert_eq!(got.admissions, expected.admissions, "admissions");
         }
     }
 }
@@ -454,6 +472,7 @@ fn sample_cases(module: &Module, source: &str) -> Vec<Case> {
                 function,
                 args,
                 limit,
+                injection: None,
             })
         })
         .collect()
@@ -579,6 +598,7 @@ fn every_front_run_case_matches_the_evaluator() {
                     function,
                     args,
                     limit: u64::MAX,
+                    injection: None,
                 }
             })
             .collect::<Vec<_>>();
@@ -588,4 +608,66 @@ fn every_front_run_case_matches_the_evaluator() {
     }
     assert!(count > 0);
     println!("front native executions: {count}");
+}
+
+#[test]
+fn every_whole_v1_memory_sample_matches_the_evaluator() {
+    let mut count = 0;
+    for source in [
+        include_str!("../../../hirsel-core-ir/samples/admission.core"),
+        include_str!("../../../hirsel-core-ir/samples/cleanup.core"),
+        include_str!("../../../hirsel-core-ir/samples/counted.core"),
+        include_str!("../../../hirsel-core-ir/samples/failure.core"),
+        include_str!("../../../hirsel-core-ir/samples/variants.core"),
+    ] {
+        let module = text::parse(source).unwrap();
+        wf::module(&module).unwrap();
+        let cases = sample_cases(&module, source);
+        assert!(!cases.is_empty());
+        count += cases.len();
+        agree_cases(&module, &cases, true);
+    }
+    println!("whole-v1 memory sample executions: {count}");
+}
+
+#[test]
+fn every_guarded_admission_refusal_matches_the_evaluator() {
+    let admission = include_str!("../../../hirsel-core-ir/samples/admission.core");
+    let resource = include_str!("../../tests/core_runtime/injection.core");
+    let mut executions = 0;
+    for source in [admission, resource] {
+        let module = text::parse(source).unwrap();
+        wf::module(&module).unwrap();
+        let baselines = if source == resource {
+            vec![Case {
+                function: FuncId(0),
+                args: vec![],
+                limit: 256,
+                injection: None,
+            }]
+        } else {
+            sample_cases(&module, source)
+                .into_iter()
+                .filter(|c| c.function.0 <= 1)
+                .collect()
+        };
+        let mut cases = Vec::new();
+        for case in baselines {
+            let expected = eval::run(&module, case.function, &case.args, case.limit);
+            assert!(expected.admissions > 0);
+            for nth in 1..=expected.admissions {
+                for later in [false, true] {
+                    cases.push(Case {
+                        function: case.function,
+                        args: case.args.clone(),
+                        limit: case.limit,
+                        injection: Some((nth, later)),
+                    });
+                }
+            }
+        }
+        executions += cases.len();
+        agree_cases(&module, &cases, true);
+    }
+    println!("guarded injected executions: {executions}");
 }

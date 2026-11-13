@@ -1,4 +1,4 @@
-//! Direct emission of the frozen CoreIR v0 convention. No old lowered program,
+//! Direct emission of CoreIR functions, failure edges and storage recipes. No old lowered program,
 //! staging, manifest or receipt participates in this entry point.
 
 mod abi;
@@ -52,11 +52,11 @@ pub fn symbol(module: &Module, function: FuncId) -> String {
     name
 }
 
-/// Emit x86-64 System V LLVM IR directly from CoreIR's v0 operations and ABI.
+/// Emit x86-64 System V LLVM IR directly from CoreIR.
 ///
 /// Functions take FORM v1a's hidden task context before the destination.
-/// Declared storage and failure propagation are not implemented here. A v0 arithmetic failure must
-/// have an explicit successor. This function trusts its producer's IR.
+/// Every function returns its scalar results followed by failure status.
+/// This function trusts its producer's IR and layout recipes.
 pub fn emit_ir(module: &Module) -> Result<String> {
     let mut text = String::new();
     for (i, data) in module.statics.iter().enumerate() {
@@ -168,7 +168,7 @@ pub fn emit_ir(module: &Module) -> Result<String> {
     Ok(text)
 }
 
-/// Compile CoreIR v0 to an owned ELF object for x86-64 Linux. This uses the
+/// Compile CoreIR to an owned ELF object for x86-64 Linux. This uses the
 /// retained LLVM target/handle machinery, without the old product pipeline.
 /// The caller supplies its linker and entry harness; objects have FORM symbols.
 pub fn emit_object(module: &Module, opt: Optimization) -> Result<Vec<u8>> {

@@ -178,7 +178,8 @@ impl FunctionEmitter<'_> {
                 let charge = self.get(charge);
                 let (name, mut args) = match (kind, place) {
                     (AllocKind::Resource { grant }, _) => {
-                        let storage = self.calc(format!("sub i64 {charge}, {}", 32 + grant));
+                        let without_grant = self.calc(format!("sub i64 {charge}, {grant}"));
+                        let storage = self.calc(format!("sub i64 {without_grant}, 32"));
                         (
                             "hirsel_core_resource_alloc",
                             vec![
@@ -353,14 +354,50 @@ impl FunctionEmitter<'_> {
     }
 }
 
+fn cleanup_dependencies(field: &FieldTy, counted: bool, pending: &mut Vec<(usize, bool)>) {
+    match field {
+        FieldTy::Inline(t) | FieldTy::Box(t) => pending.push((t.index(), counted)),
+        FieldTy::Rc(t) | FieldTy::Arc(t) => pending.push((t.index(), true)),
+        FieldTy::Array(element, _) => cleanup_dependencies(element, counted, pending),
+        _ => {}
+    }
+}
+
 pub(super) fn drop_glue(
     module: &Module,
     recipes: &[hirsel_core_layout::Recipe],
     text: &mut String,
     intrinsics: &mut BTreeSet<String>,
 ) -> Result<()> {
+    let mut normal = BTreeSet::new();
+    let mut counted = BTreeSet::new();
+    let mut pending = Vec::new();
+    for body in module.functions.iter().filter_map(|f| f.body.as_ref()) {
+        for inst in &body.insts {
+            match inst {
+                Inst::Drop { ty, .. } => pending.push((ty.index(), false)),
+                Inst::Release { ty, .. } => pending.push((ty.index(), true)),
+                _ => {}
+            }
+        }
+    }
+    while let Some((t, mechanical)) = pending.pop() {
+        let seen = if mechanical {
+            &mut counted
+        } else {
+            &mut normal
+        };
+        if !seen.insert(t) {
+            continue;
+        }
+        if let Some(drop) = &recipes[t].drop {
+            for field in drop.fields.iter().flatten() {
+                cleanup_dependencies(&field.ty, mechanical, &mut pending);
+            }
+        }
+    }
     let empty = Body::default();
-    for t in 0..module.types.len() {
+    for t in normal {
         let mut e = FunctionEmitter {
             module,
             body: &empty,
@@ -449,7 +486,7 @@ pub(super) fn drop_glue(
         )
         .unwrap();
     }
-    counted_glue(module, recipes, text, intrinsics)?;
+    counted_glue(module, recipes, &counted, text, intrinsics)?;
     Ok(())
 }
 
@@ -638,19 +675,18 @@ impl FunctionEmitter<'_> {
                         hirsel_core_layout::charge::counted(logical).unwrap(),
                     )
                 };
-                self.runtime_void(
-                    name,
-                    &[
-                        ("ptr".into(), "%worklist".into()),
-                        ("ptr".into(), node),
-                        (
-                            "i1 zeroext".into(),
-                            matches!(field, FieldTy::Arc(_)).to_string(),
-                        ),
-                        ("i64".into(), charge.to_string()),
-                        ("ptr".into(), format!("@core_counted_drop_{}", t.0)),
-                    ],
-                );
+                let mut args = vec![("ptr".into(), "%worklist".into()), ("ptr".into(), node)];
+                if !matches!(field, FieldTy::Box(_)) {
+                    args.push((
+                        "i1 zeroext".into(),
+                        matches!(field, FieldTy::Arc(_)).to_string(),
+                    ));
+                }
+                args.extend([
+                    ("i64".into(), charge.to_string()),
+                    ("ptr".into(), format!("@core_counted_drop_{}", t.0)),
+                ]);
+                self.runtime_void(name, &args);
                 self.line("ret i1 false");
             }
             _ => unreachable!(),
@@ -662,11 +698,12 @@ impl FunctionEmitter<'_> {
 fn counted_glue(
     module: &Module,
     recipes: &[hirsel_core_layout::Recipe],
+    demanded: &BTreeSet<usize>,
     text: &mut String,
     intrinsics: &mut BTreeSet<String>,
 ) -> Result<()> {
     let empty = Body::default();
-    for t in 0..module.types.len() {
+    for &t in demanded {
         if module.types[t].repr == Repr::Resource {
             continue;
         }

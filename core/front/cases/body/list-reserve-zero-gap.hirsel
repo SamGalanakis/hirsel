@@ -1,3 +1,69 @@
-// Geometric capacity overflow for zero-sized elements awaits its specified outcome.
-// expect: gap zero-sized List growth is not specified (FOR SPEC)
-fn f(mut xs: List[()]) -> Result[(), Capacity] { list.reserve(mut xs, 18446744073709551615u64) }
+// SEM-4: no element storage; capacity is MAX even for a fresh or capacity-0 List.
+// expect: accept
+// expect: run fresh() = 18446744073709551615
+// expect: run generic_fresh() = 18446744073709551615
+// expect: run exact() = true
+// expect: run reserve_overflow() = true
+// expect: run max_count() = true
+// expect: run generic_ops() = true
+fn new[T]() -> List[T] { list.new() }
+fn make[T](n:u64) -> Result[List[T], Capacity] { list.with_capacity(n) }
+fn reserve[T](mut xs:List[T], n:u64) -> Result[(), Capacity] { list.reserve(mut xs,n) }
+fn push[T](mut xs:List[T], take x:T) -> Result[(), (Capacity,T)] { list.push(mut xs,take x) }
+fn fresh() -> u64 { let xs:List[()] = list.new(); list.capacity(xs) }
+type Empty {}
+fn generic_fresh() -> u64 { let xs:List[Empty]=new(); list.capacity(xs) }
+fn exact() -> bool {
+    let outcome = bound bytes 0 {
+        let a:List[()] = make(0)?
+        let b:List[()] = make(18446744073709551615u64)?
+        let mut c:List[()] = new()
+        reserve(mut c,18446744073709551615u64)?
+        list.capacity(a)==18446744073709551615u64 && list.capacity(b)==18446744073709551615u64 && list.capacity(c)==18446744073709551615u64
+    }
+    match outcome { Ok(b)=>b, Error(_)=>false }
+}
+fn reserve_overflow() -> bool {
+    let outcome = bound bytes 0 {
+        let mut xs:List[()] = new()
+        result.unwrap(push(mut xs,()))
+        match reserve(mut xs,18446744073709551615u64) {
+            Ok(())=>false,
+            Error(e)=>e.requested==18446744073709551615u64 && e.available==0 && list.len(xs)==1 && list.capacity(xs)==18446744073709551615u64,
+        }
+    }
+    match outcome { Ok(b)=>b, Error(_)=>false }
+}
+fn max_count() -> bool {
+    let outcome = bound bytes 0 {
+        let mut a:List[()] = new()
+        let mut b:List[()] = new()
+        result.unwrap(push(mut a,()))
+        // After iteration k, len(a)=2^(k+2)-1. No element bytes are copied.
+        for _ in 0u64 .. 63u64 {
+            list.clear(mut b)
+            list.append(mut b,a)?
+            list.append(mut a,b)?
+            result.unwrap(push(mut a,()))
+        }
+        let good = list.len(a)==18446744073709551615u64
+        let declined = match push(mut a,()) {
+            Ok(())=>false,
+            Error((e,_))=>e.requested==18446744073709551615u64 && e.available==0,
+        }
+        good && declined && list.len(a)==18446744073709551615u64
+    }
+    match outcome { Ok(b)=>b, Error(_)=>false }
+}
+
+fn generic_ops() -> bool {
+    let outcome = bound bytes 0 {
+        let mut xs:List[Empty] = make(18446744073709551615u64)?
+        result.unwrap(push(mut xs,Empty()))
+        list.set(mut xs,0,Empty())
+        let present = match list.get(xs,0) { Some(_)=>true, None=>false }
+        let popped = match list.pop(mut xs) { Some(_)=>true, None=>false }
+        present && popped && list.len(xs)==0 && list.capacity(xs)==18446744073709551615u64
+    }
+    match outcome { Ok(b)=>b, Error(_)=>false }
+}

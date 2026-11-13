@@ -284,3 +284,35 @@ fn list_replacement_cranelift() {
 fn list_replacement_llvm() {
     list_replacement(Backend::Llvm);
 }
+
+fn list_zero_sized(backend: Backend) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let cases = include_str!("../../../core/front/cases/body/list-reserve-zero-gap.hirsel");
+    let source = format!(
+        "{cases}\npub fn main() -> Result[(), Exit] {{ if fresh()==18446744073709551615u64 && generic_fresh()==18446744073709551615u64 && exact() && reserve_overflow() && max_count() && generic_ops() {{ Ok(()) }} else {{ Error(Exit(status:1)) }} }}"
+    );
+    let mut request = source_request(&source, dir.path());
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    let built = product
+        .build(
+            &DefPath::from_full("app@1/main/main").unwrap(),
+            &native_options(backend, dir.path()),
+        )
+        .unwrap();
+    run_clean(&built.executable, 0);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn list_zero_sized_cranelift() {
+    list_zero_sized(Backend::Cranelift);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn list_zero_sized_llvm() {
+    list_zero_sized(Backend::Llvm);
+}

@@ -10,7 +10,6 @@ pub struct CopySize {
     pub value: ValueId,
     pub ty: TypeId,
     pub logical: bool,
-    pub nonzero: bool,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -549,13 +548,13 @@ fn fill(
     let sizes = template
         .copies
         .iter()
-        .map(|copy| (copy.value, (s.ty(copy.ty), copy.logical, copy.nonzero)))
+        .map(|copy| (copy.value, (s.ty(copy.ty), copy.logical)))
         .collect::<HashMap<_, _>>();
     let recipes = hirsel_core_layout::compute(&s.module.types)
         .map_err(|e| format!("instance layout: {e:?}"))?;
     for inst in &mut body.insts {
         if let Inst::Const { result, bits } = inst
-            && let Some(&(ty, logical, nonzero)) = sizes.get(result)
+            && let Some(&(ty, logical)) = sizes.get(result)
         {
             *bits = if s.module.types[ty.index()].repr == LRepr::Resource {
                 hirsel_core_layout::POINTER
@@ -571,9 +570,6 @@ fn fill(
                     }
                 }
             };
-            if nonzero && *bits == 0 {
-                return Err("zero-sized List growth is not specified (FOR SPEC)".into());
-            }
         }
     }
     if let Some(error) = s.error {
@@ -792,12 +788,7 @@ mod tests {
         // This template constant is the producer's size query, independent of any
         // source-level sizeof feature. The record's logical 9 bytes pad to 16.
         for (logical, expected) in [(true, 9), (false, 16)] {
-            template.copies = vec![CopySize {
-                value,
-                ty,
-                logical,
-                nonzero: false,
-            }];
+            template.copies = vec![CopySize { value, ty, logical }];
             let key = InstanceKey {
                 definition: p.fns[f].path.clone(),
                 types: vec!["Padded".into()],
@@ -833,7 +824,6 @@ mod tests {
             value,
             ty,
             logical: true,
-            nonzero: true,
         }];
         let key = InstanceKey {
             definition: p.fns[f].path.clone(),
@@ -844,16 +834,17 @@ mod tests {
             types: vec![empty],
             ..Module::default()
         };
-        assert!(
-            materialize(
-                &emitter.module,
-                source,
-                &template,
-                &key,
-                &[(&owner, TypeRef(0))]
-            )
-            .unwrap_err()
-            .contains("zero-sized List growth is not specified")
+        let (module, target) = materialize(
+            &emitter.module,
+            source,
+            &template,
+            &key,
+            &[(&owner, TypeRef(0))],
+        )
+        .unwrap();
+        assert_eq!(
+            hirsel_core_ir::eval::run(&module, target, &[0], u64::MAX).outcome,
+            hirsel_core_ir::eval::Outcome::Returned(vec![0])
         );
     }
 }

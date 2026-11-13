@@ -1284,18 +1284,6 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     /// A held value's native stride or portable logical size. Rigid parameters
     /// retain the kind of size until mechanical instance materialization.
     pub(super) fn layout_size(&mut self, ty: TyId, logical: bool, n: NodeId) -> Option<ValueId> {
-        self.layout_size_inner(ty, logical, false, n)
-    }
-    pub(super) fn nonzero_size(&mut self, ty: TyId, n: NodeId) -> Option<ValueId> {
-        self.layout_size_inner(ty, true, true, n)
-    }
-    fn layout_size_inner(
-        &mut self,
-        ty: TyId,
-        logical: bool,
-        nonzero: bool,
-        n: NodeId,
-    ) -> Option<ValueId> {
         let (id, bits) = match self.rep(ty) {
             Ok(Rep::Scalar(Ty::Scalar(s))) => (None, s.size()),
             Ok(Rep::Scalar(Ty::Ptr)) => (None, hirsel_core_layout::POINTER),
@@ -1315,10 +1303,6 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 return None;
             }
         };
-        if nonzero && bits == 0 {
-            self.gap(n, "zero-sized List growth is not specified (FOR SPEC)");
-            return None;
-        }
         let value = self.konst(Ty::Scalar(Scalar::U64), bits, n)?;
         if let Some(id) = id
             && self.e.generic_names.contains_key(&id)
@@ -1327,7 +1311,6 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 value,
                 ty: id,
                 logical,
-                nonzero,
             });
         }
         Some(value)
@@ -1355,7 +1338,6 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 value: bytes,
                 ty: id,
                 logical: false,
-                nonzero: false,
             });
         }
         self.inst(

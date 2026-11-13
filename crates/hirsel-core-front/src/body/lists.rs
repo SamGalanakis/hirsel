@@ -3,6 +3,13 @@ use super::*;
 use hirsel_core_ir::{ArithMode, ArithOp};
 
 #[derive(Clone, Copy)]
+enum ListStorage {
+    Empty,
+    Stored,
+    Dynamic(ValueId),
+}
+
+#[derive(Clone, Copy)]
 pub(super) struct ListPlan {
     pub(super) charge: ValueId,
     pub(super) overflow: ValueId,
@@ -12,6 +19,118 @@ pub(super) struct ListPlan {
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
+    fn list_storage(&mut self, item: TyId, n: NodeId) -> Option<ListStorage> {
+        match self.rep(item) {
+            Ok(Rep::None) => Some(ListStorage::Empty),
+            Ok(Rep::Scalar(_)) => Some(ListStorage::Stored),
+            Ok(Rep::Place(id)) if !self.e.generic_names.contains_key(&id) => {
+                Some(if self.e.size(id) == 0 {
+                    ListStorage::Empty
+                } else {
+                    ListStorage::Stored
+                })
+            }
+            Ok(Rep::Place(_)) => {
+                let stride = self.layout_size(item, false, n)?;
+                let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
+                Some(ListStorage::Dynamic(self.list_compare(
+                    CompareOp::Eq,
+                    stride,
+                    zero,
+                    n,
+                )))
+            }
+            Err(what) => {
+                self.gap(n, what);
+                None
+            }
+        }
+    }
+    fn list_choose(
+        &mut self,
+        on: ValueId,
+        yes_value: ValueId,
+        no_value: ValueId,
+        n: NodeId,
+    ) -> ValueId {
+        let yes = self.new_block(&[]);
+        let no = self.new_block(&[]);
+        let done = self.new_block(&[Ty::Scalar(Scalar::U64)]);
+        self.list_branch(on, yes, no, n);
+        self.start(yes);
+        self.jump(done, &[yes_value], n);
+        self.start(no);
+        self.jump(done, &[no_value], n);
+        self.start(done);
+        self.b.blocks[done.index()]
+            .params
+            .get(&self.b.pools.values)
+            .unwrap()[0]
+    }
+    pub(super) fn list_new(&mut self, item: TyId, result: TyId, n: NodeId) -> Option<ValueId> {
+        let value = self.empty_list(result, n)?;
+        let storage = self.list_storage(item, n)?;
+        let cap = match storage {
+            ListStorage::Stored => return Some(value),
+            ListStorage::Empty => self.konst(Ty::Scalar(Scalar::U64), u64::MAX, n)?,
+            ListStorage::Dynamic(on) => {
+                let max = self.konst(Ty::Scalar(Scalar::U64), u64::MAX, n)?;
+                let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
+                self.list_choose(on, max, zero, n)
+            }
+        };
+        self.sequence_word(value, 16, Ty::Scalar(Scalar::U64), cap, n);
+        Some(value)
+    }
+    fn list_refused(
+        &mut self,
+        to: AddressId,
+        cap_id: TypeId,
+        charge: ValueId,
+        available: ValueId,
+        n: NodeId,
+    ) {
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 1,
+            },
+            n,
+        );
+        let cap = self.address(
+            AddressBase::Address(to),
+            &[Step::CaseField { case: 1, field: 0 }],
+            PlaceTy::Declared(cap_id),
+            n,
+        );
+        for (i, value) in [charge, available].into_iter().enumerate() {
+            let at = self.address(
+                AddressBase::Address(cap),
+                &[Step::Field(i as u32)],
+                PlaceTy::Value(Ty::Scalar(Scalar::U64)),
+                n,
+            );
+            self.inst(Inst::Store { address: at, value }, n);
+        }
+    }
+    fn list_count_overflow(&mut self, to: AddressId, cap_id: TypeId, n: NodeId) -> Option<()> {
+        // FORM60's declined counter-overflow admission. Under a finalizer grant it
+        // follows the ordinary allocation failure edge; otherwise it is Capacity.
+        let max = self.konst(Ty::Scalar(Scalar::U64), u64::MAX, n)?;
+        let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
+        let overflow = self.konst(Ty::Scalar(Scalar::Bool), 1, n)?;
+        let plan = ListPlan {
+            charge: max,
+            overflow,
+            size: zero,
+            logical: zero,
+            stride: zero,
+        };
+        let (_, available) = self.list_allocate(plan, AllocPlace::Current, n);
+        self.list_refused(to, cap_id, max, available, n);
+        Some(())
+    }
+
     pub(super) fn list_arith(
         &mut self,
         op: ArithOp,
@@ -69,6 +188,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let to = self.new_slot(PlaceTy::Declared(id), n);
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
         let null = self.konst(Ty::Ptr, 0, n)?;
+        let storage = self.list_storage(item, n)?;
+        if matches!(storage, ListStorage::Empty) {
+            let max = self.konst(Ty::Scalar(Scalar::U64), u64::MAX, n)?;
+            self.list_allocated(to, list_id, null, max, n);
+            let value = self.pointer(to, n);
+            self.temp(result, Some(value));
+            return Some(value);
+        }
         let empty = self.value(Ty::Scalar(Scalar::Bool));
         self.inst(
             Inst::Compare {
@@ -79,6 +206,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
             n,
         );
+        let empty = if let ListStorage::Dynamic(on) = storage {
+            self.list_bool(BinaryOp::BitOr, empty, on, n)
+        } else {
+            empty
+        };
         let yes = self.new_block(&[]);
         let allocate = self.new_block(&[]);
         let done = self.new_block(&[]);
@@ -93,11 +225,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Some(n),
         );
         self.start(yes);
-        self.list_allocated(to, list_id, null, zero, n);
+        let cap = if let ListStorage::Dynamic(on) = storage {
+            let max = self.konst(Ty::Scalar(Scalar::U64), u64::MAX, n)?;
+            self.list_choose(on, max, zero, n)
+        } else {
+            zero
+        };
+        self.list_allocated(to, list_id, null, cap, n);
         self.jump(done, &[], n);
 
         self.start(allocate);
-        let plan = self.list_plan(item, count, None, false, n)?;
+        let plan = self.list_plan(item, count, None, n)?;
         let (block, available) = self.list_allocate(plan, AllocPlace::Current, n);
         let charge = plan.charge;
         let admitted = self.value(Ty::Scalar(Scalar::Bool));
@@ -206,14 +344,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         item: TyId,
         count: ValueId,
         extra: Option<ValueId>,
-        nonzero: bool,
         n: NodeId,
     ) -> Option<ListPlan> {
-        let logical = if nonzero {
-            self.nonzero_size(item, n)?
-        } else {
-            self.layout_size(item, true, n)?
-        };
+        let logical = self.layout_size(item, true, n)?;
         let stride = self.layout_size(item, false, n)?;
         let (raw_charge, mul_overflow) =
             self.list_arith(ArithOp::Mul, ArithMode::Checked, count, logical, n);
@@ -343,6 +476,35 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let done = self.new_block(&[]);
         self.list_branch(grow, growth, success, n);
         self.start(growth);
+        match self.list_storage(item, n)? {
+            ListStorage::Stored => {}
+            ListStorage::Empty => {
+                self.list_count_overflow(to, cap_id, n)?;
+                self.jump(done, &[], n);
+                self.start(success);
+                self.inst(
+                    Inst::SetCase {
+                        address: to,
+                        case: 0,
+                    },
+                    n,
+                );
+                self.jump(done, &[], n);
+                self.start(done);
+                let value = self.pointer(to, n);
+                self.temp(result, Some(value));
+                return Some(value);
+            }
+            ListStorage::Dynamic(on) => {
+                let zero_sized = self.new_block(&[]);
+                let stored = self.new_block(&[]);
+                self.list_branch(on, zero_sized, stored, n);
+                self.start(zero_sized);
+                self.list_count_overflow(to, cap_id, n)?;
+                self.jump(done, &[], n);
+                self.start(stored);
+            }
+        }
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
         let two = self.konst(Ty::Scalar(Scalar::U64), 2, n)?;
         let four = self.konst(Ty::Scalar(Scalar::U64), 4, n)?;
@@ -350,7 +512,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let count_over = self.list_bool(BinaryOp::BitOr, len_over?, cap_over?, n);
         let new_cap = self.list_max(needed, four, n);
         let new_cap = self.list_max(new_cap, double, n);
-        let plan = self.list_plan(item, new_cap, Some(count_over), true, n)?;
+        let plan = self.list_plan(item, new_cap, Some(count_over), n)?;
         let old_data = self.read_sequence_word(header, 0, Ty::Ptr, n);
         let owned = self.list_compare(CompareOp::Ne, old_cap, zero, n);
         let current = self.new_block(&[]);

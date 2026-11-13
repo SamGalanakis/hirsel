@@ -147,7 +147,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let u = Ty::Scalar(Scalar::U64);
         let old_data = self.read_sequence_word(header, 0, Ty::Ptr, n);
         let old_cap = self.read_sequence_word(header, 16, u, n);
-        let mut plan = self.list_plan(entry.ty, cap, None, false, n)?;
+        let mut plan = self.list_plan(entry.ty, cap, None, n)?;
         let index_len = self.map_index_count(cap, n)?;
         let eight = self.konst(u, 8, n)?;
         let (index_bytes, _) =

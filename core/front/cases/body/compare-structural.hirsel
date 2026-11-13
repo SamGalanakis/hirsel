@@ -1,0 +1,40 @@
+// SEM-7: equality is structural; order is lexicographic over fields in declaration order
+// (signed fields signed), and by declaration ordinal then payload for variants; a view
+// compares by payload. Hand-derived from those rules: x - 2 makes x = -1 against 0, which
+// unsigned order would put last.
+// expect: run rec_lt(1,9,2,0) = true
+// expect: run rec_lt(3,0,3,1) = true
+// expect: run rec_lt(3,1,3,1) = false
+// expect: run rec_le(3,1,3,1) = true
+// expect: run rec_gt(3,0,2,9) = true
+// expect: run var_lt(1,9,2,0) = true
+// expect: run var_lt(1,3,1,4) = true
+// expect: run var_lt(1,4,1,3) = false
+// expect: run var_eq(0,1,0,2) = true
+// expect: run var_eq(2,5,2,5) = true
+// expect: run var_eq(2,5,1,5) = false
+// expect: run opt_ne(true,3) = false
+// expect: run opt_ne(true,4) = true
+// expect: run opt_ne(false,3) = true
+// expect: run view_lt(1,2) = true
+// expect: run view_lt(2,1) = false
+type P: key + ordered { x: i64, y: u8 }
+type S: key + ordered = Zero | One(u64) | Two(u64, bool)
+fn p(x: i64, y: u8) -> P { P(x: x - 2, y: y) }
+fn rec_lt(ax: i64, ay: u8, bx: i64, by: u8) -> bool { p(ax, ay) < p(bx, by) }
+fn rec_le(ax: i64, ay: u8, bx: i64, by: u8) -> bool { p(ax, ay) <= p(bx, by) }
+fn rec_gt(ax: i64, ay: u8, bx: i64, by: u8) -> bool { p(ax, ay) > p(bx, by) }
+fn mk(k: u64, v: u64) -> S {
+  if k == 0 { Zero } else if k == 1 { One(v) } else { Two(v, true) }
+}
+fn var_lt(ka: u64, va: u64, kb: u64, vb: u64) -> bool { mk(ka, va) < mk(kb, vb) }
+fn var_eq(ka: u64, va: u64, kb: u64, vb: u64) -> bool { mk(ka, va) == mk(kb, vb) }
+fn opt_ne(c: bool, x: i64) -> bool {
+  let a: Option[P] = if c { Some(p(x, 1)) } else { None }
+  a != Some(p(3, 1))
+}
+fn view_lt(a: i64, b: i64) -> bool {
+  let l = p(a, 0)
+  let r = p(b, 0)
+  view l < view r
+}

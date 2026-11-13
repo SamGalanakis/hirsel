@@ -225,7 +225,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     return (BOOL, self.konst(Ty::Scalar(Scalar::Bool), u64::from(eq), n));
                 }
                 if value_ty(&self.t, t).ok().flatten().is_none() {
-                    return self.gap_ty(n, "comparison of this type is not built");
+                    return match self.compare_places(t, cop, lv, rv, n) {
+                        Ok(v) => (BOOL, v),
+                        Err(what) => self.gap_ty(n, what),
+                    };
                 }
                 let v = match (lv, rv) {
                     (Some(left), Some(right)) if self.live() => {

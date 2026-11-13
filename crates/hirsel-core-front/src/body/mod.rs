@@ -41,6 +41,7 @@ mod builtins;
 mod calls;
 mod cleanup;
 mod closures;
+mod compare;
 mod control;
 mod ops;
 mod patterns;

@@ -33,6 +33,10 @@ for option in ('format', 'color', 'test-threads', 'logfile', 'shuffle-seed'):
     parser.add_argument('--' + option)
 parser.add_argument('-Z')
 parser.add_argument('filters', nargs='*')
+# libtest rejects a repeated exact flag, unlike argparse's store_true action.
+options = sys.argv[1:sys.argv.index('--')] if '--' in sys.argv else sys.argv[1:]
+if options.count('--exact') > 1:
+    parser.error("Option 'exact' given more than once")
 args = parser.parse_args()
 cases = json.loads(os.environ['CASES'])
 match = lambda name, pattern: name == pattern if args.exact else pattern in name
@@ -613,6 +617,12 @@ class LauncherSelection(LauncherFixture):
         self.env['HIRSEL_TEST_BINARY'] = 'fixture'
         dedicated, _ = self.run_cases('--exact', 'pool::smoke', 'full_gate_', '--ignored', expected_status=2)
         self.assertEqual(dedicated['cases'], [])
+
+    def test_dedicated_exact_target_accepts_an_exact_caller_selection(self):
+        self.env['HIRSEL_TEST_DEDICATED_CASE'] = 'pool::smoke'
+        observed, _ = self.run_cases('--exact', 'pool::smoke', '--exact', 'pool::smoke')
+        self.assertEqual(observed['cases'], ['pool::smoke'])
+        self.assertEqual(observed['argv'].count('--exact'), 1)
 
     def test_host_required_cases_never_run_on_a_pool_shard_even_with_positive_filters(self):
         before = [case for i in (1, 2) for case in self.run_cases(shard=f'{i}/2')[0]['cases']]

@@ -357,11 +357,14 @@ list_cases() (
   remaining=$#
   set -- "$@" --list --format terse --color never
   literal=false
+  exact=false
   while [ "$remaining" -gt 0 ]; do
     argument=$1; shift; remaining=$((remaining - 1))
     if "$literal"; then set -- "$@" "$argument"; continue; fi
     case "$argument" in
       --) literal=true; set -- "$@" -- ;;
+      --exact)
+        if ! "$exact"; then set -- "$@" --exact; exact=true; fi ;;
       --list | --quiet | -q | --format=* | --color=* | --logfile=*) ;;
       --format | --color | --logfile)
         [ "$remaining" -gt 0 ] || { echo "$argument requires a value" >&2; exit 2; }

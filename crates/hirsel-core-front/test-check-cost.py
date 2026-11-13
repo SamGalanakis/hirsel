@@ -21,6 +21,18 @@ class ProcessCeiling(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'does not cover'):
             check(metrics, 1000, ceiling, 9999)
 
+    def test_source_growth_uses_actual_lines_and_keeps_numeric_limits(self):
+        metrics = {'instructions': 10000, 'stages': [{'name': 'check/lower', 'instructions': 5000}]}
+        ceiling = {'code_lines': 1000, 'check_lower_per_line': 5,
+                   'whole_request_per_line': 10, 'whole_process_per_line': 30}
+        check = GUARD['check_ceiling']
+        self.assertEqual(check(metrics, 1001, ceiling, 30030)[2], [])
+        errors = check(metrics, 1001, ceiling, 30031)[2]
+        self.assertEqual(len(errors), 1)
+        self.assertIn('whole process', errors[0])
+        with self.assertRaisesRegex(ValueError, 'no code lines'):
+            check(metrics, 0, ceiling, 30000)
+
     def test_finished_budget_is_independent_of_current_work_ceiling(self):
         forecast = GUARD['finished_forecast']
         projection = {'missing_check_lower_per_line': 1000,

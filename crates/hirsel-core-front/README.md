@@ -26,7 +26,7 @@ Generic and parameter names are symbols; the index renders their spelling when n
 
 `//:core-check-cost` runs the ordinary release driver on the fixed M1 closure and
 core/std, on CPU 16 with one job and a fresh private store. It fails on a missing
-counter, a changed code-line denominator, or a check/lower or whole-request cost
+counter, an empty corpus, or a check/lower or whole-request cost
 above [cost-ceilings.json](cost-ceilings.json). The driver-request ceiling includes
 loading, publication and output. A separate whole-process ceiling uses process-tree
 `perf stat -e instructions:u`, including dynamic loading before Rust main, reporting
@@ -36,7 +36,10 @@ unfinished. This guard records today's work; it does not certify completion.
 For local evidence, run `./crates/hirsel-core-front/check-cost.py --compiler <release-hirsel-core>
 --out <new-directory>`. When the corpus or supported constructs change, measure
 once with the same release platform, CPU and jobs, explain the change and update
-the recorded denominator and ceiling together. Do not raise the 60,000 whole-request
+the recorded reference denominator, completion terms and any explained ceilings.
+Manifest membership stays fixed; the guard counts actual code lines deterministically
+and prints a changed reference count without treating source growth alone as a
+regression. Every numeric ceiling still applies to the actual count. Do not raise the 60,000 whole-request
 target to make a regression pass.
 
 The driver's `check_cost` example enables this crate's `cost-profile` feature only

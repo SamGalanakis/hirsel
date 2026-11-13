@@ -1303,3 +1303,87 @@ fn callable_payload_metadata_is_built_once_per_type() {
     assert_eq!(emitter.callable_signature_builds, 2);
     wf::module(&emitter.module).unwrap();
 }
+
+#[test]
+fn list_set_transfers_the_indexed_element() {
+    let (index, modules) =
+        program_inputs("fn update(mut xs: List[u64]) -> u64 { list.set(mut xs, 1, 9) }");
+    let p = Program::declare(&index, &modules);
+    let f = p
+        .fns
+        .iter()
+        .position(|f| f.path.0.name == "update")
+        .unwrap();
+    let mut emitter = Emitter::new();
+    let check = p.check_lower(f, &mut emitter);
+    assert!(
+        check.refusals.is_empty() && check.gaps.is_empty(),
+        "{check:?}"
+    );
+    let target = check.function.unwrap();
+    let sig = emitter.module.functions[target.index()].signature;
+    let Param::Address(list) = emitter.module.signatures[sig.index()].params[0] else {
+        panic!("mut List ABI")
+    };
+    let s = emitter.module.signatures.len();
+    let i = emitter.module.instances.len();
+    let f = emitter.module.functions.len();
+    // Independent two-element fixture [5,7], avoiding an unbuilt push/fill helper.
+    // update index 1 with 9: first*10000 + returned_old*100 + second = 50709.
+    let source = format!(
+        "{}\nsig g{s} = () -> (u64)\ninst n{i} = fixture@1/list/probe [] []\nfn f{f} = n{i} g{s} {{
+  slot s0 = t{list}
+  addr a0 = s0 : t{list}
+  addr a1 = v3 : u64
+  addr a2 = v3 byte v1 : u64
+  addr a3 = s0 byte v0 : ptr
+  addr a4 = s0 byte v1 : u64
+  addr a5 = s0 byte v2 : u64
+b0:
+  live s0
+  v0: u64 = const 0
+  v1: u64 = const 8
+  v2: u64 = const 16
+  v3: ptr, v4: u64 = alloc own v2 align 8 charge v2
+  v5: u64 = const 2
+  v6: u64 = const 5
+  v7: u64 = const 7
+  v8: u64 = const 100
+  v9: u64 = const 10000
+  address a0
+  address a1
+  address a2
+  address a3
+  address a4
+  address a5
+  store a1, v6
+  store a2, v7
+  store a3, v3
+  store a4, v5
+  store a5, v5
+  v10: u64 = call f{target} g{sig} (&a0)
+  v11: u64 = read a1
+  v12: u64 = read a2
+  v13: u64 = mul v11, v9
+  v14: u64 = mul v10, v8
+  v15: u64 = add v13, v14
+  v16: u64 = add v15, v12
+  drop a0 t{list}
+  dead s0
+  return v16
+}}",
+        hirsel_core_ir::text::print(&emitter.module),
+        list = list.0,
+        target = target.0,
+        sig = sig.0
+    );
+    let module = hirsel_core_ir::text::parse(&source).unwrap();
+    wf::module(&module).unwrap();
+    let report = eval::run(&module, FuncId(f as u32), &[], u64::MAX);
+    assert_eq!(report.outcome, eval::Outcome::Returned(vec![50709]));
+    assert_eq!(report.used, 0);
+    for case in ["list-set-bounds.hirsel", "list-set-static-gap.hirsel"] {
+        let failures = run_case(&root().join("cases/body").join(case));
+        assert!(failures.is_empty(), "{case}: {failures:?}");
+    }
+}

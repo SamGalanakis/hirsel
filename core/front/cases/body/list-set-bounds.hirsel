@@ -1,0 +1,8 @@
+// Spare capacity does not make an element present.
+// expect: accept
+// expect: run empty(0) = fail Bounds
+// expect: run empty(18446744073709551615) = fail Bounds
+fn empty(i: u64) -> u64 {
+    let mut xs: List[u64] = result.unwrap(list.with_capacity(2))
+    list.set(mut xs, i, 9)
+}

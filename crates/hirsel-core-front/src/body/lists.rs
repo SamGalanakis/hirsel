@@ -217,6 +217,74 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(value)
     }
 
+    pub(super) fn list_set(
+        &mut self,
+        item: TyId,
+        header: ValueId,
+        index: ValueId,
+        value: Option<ValueId>,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        if matches!(
+            self.t.kind(item),
+            TyKind::Scalar(Scalar::U8) | TyKind::Param(_)
+        ) {
+            self.gap(
+                n,
+                "replacement through a potentially static List is not specified (FOR SPEC)",
+            );
+            return None;
+        }
+        let len = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
+        let in_bounds = self.value(Ty::Scalar(Scalar::Bool));
+        self.inst(
+            Inst::Compare {
+                result: in_bounds,
+                op: CompareOp::Lt,
+                left: index,
+                right: len,
+            },
+            n,
+        );
+        let yes = self.new_block(&[]);
+        let no = self.new_block(&[]);
+        let ye = self.edge(yes, &[]);
+        let ne = self.edge(no, &[]);
+        self.end(
+            Terminator::Branch {
+                condition: in_bounds,
+                yes: ye,
+                no: ne,
+            },
+            Some(n),
+        );
+        self.start(no);
+        let cleanup = self.fail_to(n);
+        self.end(
+            Terminator::Raise {
+                cause: hirsel_core_ir::RaiseCause::Bounds,
+                cleanup,
+            },
+            Some(n),
+        );
+        self.start(yes);
+        let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
+        let stride = self.layout_size(item, false, n)?;
+        let (offset, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, index, stride, n);
+        let place = match self.rep(item) {
+            Ok(rep) => rep
+                .stored()
+                .unwrap_or(PlaceTy::Value(Ty::Scalar(Scalar::U8))),
+            Err(what) => {
+                self.gap(n, what);
+                return None;
+            }
+        };
+        let at = self.address(AddressBase::Value(data), &[Step::Byte(offset)], place, n);
+        let pointer = self.pointer(at, n);
+        self.replace_value(item, Some(pointer), value, n)
+    }
+
     fn list_allocated(
         &mut self,
         to: AddressId,

@@ -21,6 +21,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if module == ["list"] {
             match name {
                 "new" => return Some(self.empty_list(result, n)),
+                "set" => return Some(self.list_set(types[0], vals[0]?, vals[1]?, vals[2], n)),
                 "with_capacity" => {
                     return Some(self.list_with_capacity(types[0], vals[0]?, result, n));
                 }
@@ -85,7 +86,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.inst(Inst::Store { address, value }, n);
     }
 
-    fn replace_value(
+    pub(super) fn replace_value(
         &mut self,
         ty: TyId,
         pointer: Option<ValueId>,

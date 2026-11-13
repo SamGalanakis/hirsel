@@ -1,0 +1,4 @@
+// A non-allocating set cannot write literal storage; awaiting its specified outcome.
+// expect: gap replacement through a potentially static List is not specified (FOR SPEC)
+fn static_bytes() -> u8 { let mut xs = b"ab"; list.set(mut xs, 0, 99) }
+fn unknown[T](mut xs: List[T], take x: T) -> T { list.set(mut xs, 0, take x) }

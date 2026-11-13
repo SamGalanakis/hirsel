@@ -184,3 +184,57 @@ fn out_capacity_returns_before_issue(o:Stdout)->bool {
     let res=bound bytes 0 {io.out(o,3)}
     match take res {Ok(Error(c))=>c.requested==8 && c.available==0,_=>false}
 }
+
+// LF at every byte lane and on both sides of word/refill boundaries. The 0x0B
+// after LF can receive a borrow mark; the first LF must still be chosen exactly.
+// expect: run newline_word_positions(dir) = true
+fn newline_word_positions(d:Dir)->bool waits {
+    for n in 0u64 .. 34u64 {
+        let mut text=string.new()
+        for _ in 0u64 .. n {result.unwrap(string.push(mut text,"x"))}
+        result.unwrap(string.push(mut text,"\n\u{b}q\nabcdefghijklmnop\n"))
+        let cap:u64=if n<16 {16} else {n}
+        let mut l=input(d,text,cap)
+        let mut line=result.unwrap(string.with_capacity(40))
+        if !result.unwrap(io.read_line(mut l,mut line)) || string.byte_len(line)!=n {return false}
+        if !result.unwrap(io.read_line(mut l,mut line)) || line!="\u{b}q" {return false}
+        if !result.unwrap(io.read_line(mut l,mut line)) || line!="abcdefghijklmnop" {return false}
+        if result.unwrap(io.read_line(mut l,mut line)) {return false}
+    }
+    true
+}
+// A word-sized Capacity boundary keeps exactly that prefix, including high bytes;
+// the delimiter following the cap is accepted, while an ordinary next byte stays.
+// expect: run word_capacity_boundary(dir) = true
+fn word_capacity_boundary(d:Dir)->bool waits {
+    let mut exact=input(d,"1234567é\n",9)
+    let mut line=string.new()
+    if !result.unwrap(io.read_line(mut exact,mut line)) || line!="1234567é" {return false}
+    let mut oversized=input(d,"1234567éz\n",9)
+    match io.read_line(mut oversized,mut line) {Error(Capacity(_))=>{},_=>return false}
+    if line!="1234567é" || list.len(io.prefix(oversized))!=9 {return false}
+    match io.read_line(mut oversized,mut line) {Error(Capacity(_))=>line=="1234567é",_=>false}
+}
+
+// The word path and a refill reuse the pre-admitted caller buffer at zero budget.
+// expect: run word_reuse_without_allocation(dir) = true
+fn word_reuse_without_allocation(d:Dir)->bool waits {
+    let mut l=input(d,"abcdefghijklmnop\nqrstuvwxyz012345\n",32)
+    let mut line=result.unwrap(string.with_capacity(32))
+    let r=bound bytes 0 {
+        if !result.unwrap(io.read_line(mut l,mut line)) || line!="abcdefghijklmnop" {return false}
+        if !result.unwrap(io.read_line(mut l,mut line)) || line!="qrstuvwxyz012345" {return false}
+    }
+    result.unwrap(r)
+    true
+}
+
+// The caller's static literal needs only the 16-byte output reservation. Clearing
+// it must not first copy its seven bytes into a separate transient allocation.
+// expect: run static_caller_needs_only_output_capacity(dir) = true
+fn static_caller_needs_only_output_capacity(d:Dir)->bool waits {
+    let mut l=input(d,"ab\n",16)
+    let mut line="keep me"
+    let r=bound bytes 16 {io.read_line(mut l,mut line)}
+    match r {Ok(Ok(true))=>line=="ab" && list.capacity(string.as_bytes(line))==16,_=>false}
+}

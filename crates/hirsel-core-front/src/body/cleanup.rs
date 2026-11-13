@@ -214,7 +214,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             _ => return Some(None),
         };
         let to = self.new_slot(PlaceTy::Declared(id), n);
-        let bytes = self.konst(Ty::Scalar(Scalar::U64), self.e.size(id), n)?;
+        let bytes = self.layout_size(ty, false, n)?;
         self.inst(
             Inst::Copy {
                 to,

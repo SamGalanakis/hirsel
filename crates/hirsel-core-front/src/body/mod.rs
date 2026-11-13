@@ -532,6 +532,11 @@ impl Emitter {
         let mut seen = vec![id];
         let mut work = vec![id];
         while let Some(id) = work.pop() {
+            // A rigid row may acquire a finalizer at materialization. Keep its
+            // failure successor in the once-checked template.
+            if self.generic_names.contains_key(&id) {
+                return true;
+            }
             let Some(d) = &self.recipes[id.index()].drop else {
                 continue;
             };

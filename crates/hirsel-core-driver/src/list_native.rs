@@ -129,3 +129,54 @@ fn list_growth_cranelift() {
 fn list_growth_llvm() {
     list_growth(Backend::Llvm);
 }
+
+fn list_shrink(backend: Backend) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (cases, check, exit) in [
+        (
+            include_str!("../../../core/front/cases/body/list-pop.hirsel"),
+            "values()==110704u64 && empty()==0u64 && static_value()==990200u64 && resource_value()==7u64",
+            0,
+        ),
+        (
+            include_str!("../../../core/front/cases/body/list-clear.hirsel"),
+            "reuse()==904u64 && static_value()==0u64 && resources()==4u64",
+            0,
+        ),
+        (
+            include_str!("../../../core/front/cases/body/list-clear.hirsel"),
+            "failed_drop()==0u64",
+            101,
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let source = format!(
+            "{cases}\npub fn main() -> Result[(), Exit] {{ if {check} {{ Ok(()) }} else {{ Error(Exit(status:1)) }} }}"
+        );
+        let mut request = source_request(&source, dir.path());
+        request.inputs.packages[1] =
+            PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+        let product = Driver::default()
+            .check(request, &mut Meter::new(false))
+            .unwrap();
+        let built = product
+            .build(
+                &DefPath::from_full("app@1/main/main").unwrap(),
+                &native_options(backend, dir.path()),
+            )
+            .unwrap_or_else(|e| panic!("{check}: {e:?}"));
+        let output = Command::new(&built.executable).output().unwrap();
+        assert_eq!(output.status.code(), Some(exit), "{check}: {output:?}");
+        assert!(output.stdout.is_empty(), "{check}: {output:?}");
+    }
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn list_shrink_cranelift() {
+    list_shrink(Backend::Cranelift);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn list_shrink_llvm() {
+    list_shrink(Backend::Llvm);
+}

@@ -659,6 +659,102 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(reserved)
     }
 
+    pub(super) fn list_pop(
+        &mut self,
+        item: TyId,
+        header: ValueId,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let id = match self.rep(result) {
+            Ok(Rep::Place(id)) => id,
+            Err(what) => {
+                self.gap(n, what);
+                return None;
+            }
+            _ => return None,
+        };
+        let rep = match self.rep(item) {
+            Ok(rep) => rep,
+            Err(what) => {
+                self.gap(n, what);
+                return None;
+            }
+        };
+        let out = self.new_slot(PlaceTy::Declared(id), n);
+        let len = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
+        let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
+        let present = self.list_compare(CompareOp::Ne, len, zero, n);
+        let yes = self.new_block(&[]);
+        let no = self.new_block(&[]);
+        let done = self.new_block(&[]);
+        self.list_branch(present, yes, no, n);
+        self.start(no);
+        self.inst(
+            Inst::SetCase {
+                address: out,
+                case: 0,
+            },
+            n,
+        );
+        self.jump(done, &[], n);
+        self.start(yes);
+        let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
+        let (last, _) = self.list_arith(ArithOp::Sub, ArithMode::Wrapping, len, one, n);
+        self.sequence_word(header, 8, Ty::Scalar(Scalar::U64), last, n);
+        self.inst(
+            Inst::SetCase {
+                address: out,
+                case: 1,
+            },
+            n,
+        );
+        if let Some(place) = rep.stored() {
+            let element = self.list_element(item, header, last, n)?;
+            let value = match rep {
+                Rep::Scalar(ty) => {
+                    let at = self.address(AddressBase::Value(element), &[], place, n);
+                    self.read_bits(at, ty, n)
+                }
+                _ => element,
+            };
+            let to = self.address(
+                AddressBase::Address(out),
+                &[Step::CaseField { case: 1, field: 0 }],
+                place,
+                n,
+            );
+            self.install(to, rep, Some(value), n);
+        }
+        self.jump(done, &[], n);
+        self.start(done);
+        let value = self.pointer(out, n);
+        self.temp(result, Some(value));
+        Some(value)
+    }
+
+    pub(super) fn list_clear(&mut self, item: TyId, header: ValueId, n: NodeId) {
+        let len = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
+        let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n).unwrap();
+        // The carrier retains its allocation, while a drain owns the old elements.
+        // Advancing that drain before each drop also resumes correctly on failure.
+        self.sequence_word(header, 8, Ty::Scalar(Scalar::U64), zero, n);
+        if self.drop_id(item).is_some() {
+            let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
+            let next = self.new_slot(PlaceTy::Value(Ty::Scalar(Scalar::U64)), n);
+            self.inst(
+                Inst::Store {
+                    address: next,
+                    value: zero,
+                },
+                n,
+            );
+            let mark = self.owner_mark();
+            self.drain_owner(data, next, len, item);
+            self.end_owners(mark, None, false, n);
+        }
+    }
+
     pub(super) fn list_set(
         &mut self,
         item: TyId,

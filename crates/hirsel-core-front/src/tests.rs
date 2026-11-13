@@ -392,6 +392,14 @@ fn cases(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 #[test]
+fn list_shrink() {
+    for case in ["list-pop.hirsel", "list-clear.hirsel"] {
+        let failures = run_case(&root().join("cases/body").join(case));
+        assert!(failures.is_empty(), "{case}: {failures:?}");
+    }
+}
+
+#[test]
 fn list_growth() {
     for case in [
         "list-reserve.hirsel",

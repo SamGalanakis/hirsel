@@ -26,7 +26,6 @@ pub(crate) enum Kernel {
     Send,
     TrySend,
     Receive,
-    Blocked(&'static str),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -101,16 +100,16 @@ operations! {
     ("float", "from_bits64", Lane::Numeric, "A", "core-check-index-912", false),
     ("host", "open", Lane::Runtime(Kernel::Host(HostOp::Open)), "B", "core-ops-914", false),
     ("host", "read", Lane::Runtime(Kernel::Host(HostOp::Read)), "B", "core-ops-914", false),
-    ("host", "write", Lane::Runtime(Kernel::Blocked("this provider operation is not built")), "B", "core-ops-914", false),
+    ("host", "write", Lane::Runtime(Kernel::Host(HostOp::Write)), "B", "core-ops-914", false),
     ("host", "close", Lane::Runtime(Kernel::Host(HostOp::Close)), "B", "core-ops-914", false),
-    ("host", "try_lock", Lane::Runtime(Kernel::Blocked("this provider operation is not built")), "B", "core-ops-914", false),
-    ("host", "unlock", Lane::Runtime(Kernel::Blocked("this provider operation is not built")), "B", "core-ops-914", false),
-    ("host", "mkdir", Lane::Runtime(Kernel::Blocked("this provider operation is not built")), "B", "core-ops-914", false),
-    ("host", "mkdtemp", Lane::Runtime(Kernel::Blocked("this provider operation is not built")), "B", "core-ops-914", false),
-    ("host", "remove", Lane::Runtime(Kernel::Blocked("this provider operation is not built")), "B", "core-ops-914", false),
-    ("host", "remove_tree", Lane::Runtime(Kernel::Blocked("this provider operation is not built")), "B", "core-ops-914", false),
-    ("host", "wall_ms", Lane::Runtime(Kernel::Blocked("this provider operation is not built")), "B", "core-ops-914", false),
-    ("host", "mono_ns", Lane::Runtime(Kernel::Blocked("this provider operation is not built")), "B", "core-ops-914", false),
+    ("host", "try_lock", Lane::Runtime(Kernel::Host(HostOp::TryLock)), "B", "core-ops-914", false),
+    ("host", "unlock", Lane::Runtime(Kernel::Host(HostOp::Unlock)), "B", "core-ops-914", false),
+    ("host", "mkdir", Lane::Runtime(Kernel::Host(HostOp::Mkdir)), "B", "core-ops-914", false),
+    ("host", "mkdtemp", Lane::Runtime(Kernel::Host(HostOp::Mkdtemp)), "B", "core-ops-914", false),
+    ("host", "remove", Lane::Runtime(Kernel::Host(HostOp::Remove)), "B", "core-ops-914", false),
+    ("host", "remove_tree", Lane::Runtime(Kernel::Host(HostOp::RemoveTree)), "B", "core-ops-914", false),
+    ("host", "wall_ms", Lane::Runtime(Kernel::Host(HostOp::WallMs)), "B", "core-ops-914", false),
+    ("host", "mono_ns", Lane::Runtime(Kernel::Host(HostOp::MonoNs)), "B", "core-ops-914", false),
     ("indexed", "get", Lane::Language, "A", "core-check-895", false),
     ("int", "wrapping_add", Lane::Numeric, "A", "core-check-index-912", false),
     ("int", "wrapping_sub", Lane::Numeric, "A", "core-check-index-912", false),
@@ -270,10 +269,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Kernel::ArgsGet => self.runtime_args_get(vals, result, n),
             Kernel::Stream(op) => self.runtime_stream(op, vals, result, n),
             Kernel::Host(op) => self.runtime_host(op, f, vals, result, n),
-            Kernel::Blocked(what) => {
-                self.gap(n, what);
-                None
-            }
             Kernel::Spawn => {
                 self.runtime_spawn(types[0], types[1], vals[1]?, vals[2], vals[3]?, result, n)
             }
@@ -1316,7 +1311,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<ValueId> {
         let u64t = Ty::Scalar(Scalar::U64);
-        let file = matches!(op, HostOp::Read | HostOp::Close);
+        let file = matches!(
+            op,
+            HostOp::Read | HostOp::Write | HostOp::Close | HostOp::TryLock | HostOp::Unlock
+        );
         // HostFile's entire carrier is the opaque u64 key, not provider metadata.
         let handle = if file {
             let at = self.address(AddressBase::Value(vals[0]?), &[], PlaceTy::Value(u64t), n);
@@ -1352,7 +1350,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 args[2] = Arg::Value(mode);
                 3
             }
-            HostOp::Read => {
+            HostOp::Read
+            | HostOp::Write
+            | HostOp::Mkdir
+            | HostOp::Mkdtemp
+            | HostOp::Remove
+            | HostOp::RemoveTree
+            | HostOp::Stdout
+            | HostOp::Stderr => {
                 args[1] = Arg::Value(vals[1]?);
                 2
             }
@@ -1363,7 +1368,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             // Its failure cleanup must not close the same key a second time.
             self.consume(vals[0], n);
         }
-        let [value, error, code, _] = self.runtime_row(RtOp::Host(op), &args[..len], n)?;
+        let [value, error, code, written] = self.runtime_row(RtOp::Host(op), &args[..len], n)?;
+        if matches!(op, HostOp::WallMs | HostOp::MonoNs) {
+            return Some(value);
+        }
         let ok = self.runtime_compare(Ty::Scalar(Scalar::U8), error, 0, n)?;
         self.runtime_result(
             result,
@@ -1377,14 +1385,25 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         cx.runtime_store(to, &[], u64t, value, n);
                     }
                 }
-                HostOp::Read => cx.runtime_case_payload(to, 0, ty, Some(value), n),
+                HostOp::Read | HostOp::Mkdtemp => {
+                    cx.runtime_case_payload(to, 0, ty, Some(value), n)
+                }
+                HostOp::TryLock => {
+                    if let Some(boolean) = cx.runtime_nonzero(u64t, value, n) {
+                        cx.runtime_case_payload(to, 0, ty, Some(boolean), n);
+                    }
+                }
                 _ => {}
             },
             |cx, to, ty| {
                 if let Some(to) =
                     cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], ty, n)
                 {
-                    cx.runtime_io_error(to, error, code, n);
+                    if matches!(op, HostOp::Write | HostOp::Stdout | HostOp::Stderr) {
+                        cx.runtime_write_error(to, ty, written, error, code, n);
+                    } else {
+                        cx.runtime_io_error(to, error, code, n);
+                    }
                 }
             },
         )

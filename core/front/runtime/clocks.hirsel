@@ -1,0 +1,7 @@
+// Native oracle: wall clock is past epoch, monotonic clock does not decrease; exit 0.
+pub fn main(clock: Clock) -> Result[(), Exit] {
+    let first = host.mono_ns(clock)
+    let wall = host.wall_ms(clock)
+    let second = host.mono_ns(clock)
+    if wall > 0u64 && second >= first { Ok(()) } else { Error(Exit(status: 1)) }
+}

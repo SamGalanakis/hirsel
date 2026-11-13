@@ -187,14 +187,21 @@ fn stream_operations_llvm() { stream_operations(Backend::Llvm); }
 
 fn host_operations(backend: Backend) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for (name, expected_exit) in [("host-read",0), ("host-close-cancel",0)] {
+    for (name, expected_exit) in [("host-read",0), ("host",0), ("host-close-cancel",0), ("clocks",0), ("mkdtemp-bounds",101), ("mkdtemp",0), ("host-wait-cancel",0)] {
         let dir = tempfile::tempdir().unwrap();
         let grant = dir.path().join("grant");
         std::fs::create_dir(&grant).unwrap();
-        if name=="host-read" || name=="host-close-cancel" { std::fs::write(grant.join("input"), b"hello").unwrap(); }
+        if name=="host-read" || name=="host-close-cancel" || name=="host-wait-cancel" { std::fs::write(grant.join("input"), b"hello").unwrap(); }
         let source = std::fs::read_to_string(root.join(format!("core/front/runtime/{name}.hirsel"))).unwrap();
         let mut request = source_request(&source, dir.path());
         request.inputs.packages[1] = PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+        if name == "mkdtemp" || name == "host-wait-cancel" {
+            let module = request.inputs.packages[1].sources.iter_mut().find(|s| s.modules==["string"]).unwrap();
+            let mut text = std::fs::read_to_string(&module.file).unwrap();
+            text.push_str("\npub fn proof_temp_name() -> String { let b:Bytes = result.unwrap(list.with_capacity(32)); of_bytes(take b) }\n");
+            module.file = dir.path().join("string.hirsel");
+            std::fs::write(&module.file,text).unwrap();
+        }
         let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
         let entry = DefPath::from_full("app@1/main/main").unwrap();
         let options = NativeOptions { backend, optimize:false, target:TARGET.into(),
@@ -209,7 +216,7 @@ fn host_operations(backend: Backend) {
         assert!(output.stdout.is_empty(),"{name}");
         if expected_exit==0 { assert!(output.stderr.is_empty(),"{name}: {:?}",String::from_utf8_lossy(&output.stderr)); }
         else { assert!(output.stderr.starts_with(b"Bounds"),"{name}: {:?}",String::from_utf8_lossy(&output.stderr)); }
-        if name=="host-read" || name=="host-close-cancel" { assert_eq!(std::fs::read(grant.join("input")).unwrap(),b"hello"); }
+        if name=="host-read" || name=="host-close-cancel" || name=="host-wait-cancel" { assert_eq!(std::fs::read(grant.join("input")).unwrap(),b"hello"); }
         else { assert_eq!(std::fs::read_dir(&grant).unwrap().count(),0,"{name}"); }
     }
 }
@@ -305,3 +312,40 @@ fn causes_iteration_kind_cranelift() { causes_iteration_kind(Backend::Cranelift)
 #[test]
 #[ignore = "explicit native integration target"]
 fn causes_iteration_kind_llvm() { causes_iteration_kind(Backend::Llvm); }
+
+fn stream_partial_progress(backend: Backend) {
+    use std::io::Read;
+    use std::os::{fd::OwnedFd,unix::net::UnixStream};
+    use std::process::Stdio;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    // Larger than a Unix stream's send buffer. The reader observes a byte and
+    // closes, so the writer must report both positive progress and EPIPE.
+    let payload = "x".repeat(1_048_576);
+    let source = format!("pub fn main(out:Stdout) -> Result[(),Exit] {{ match stdout.write(out,\"{payload}\") {{ Ok(()) => Error(Exit(status:1)), Error(e) => if e.written==0u64 || e.written>=1048576u64 {{ Error(Exit(status:2)) }} else {{ match e.error {{ Other(32u32) => Ok(()), _ => Error(Exit(status:3)) }} }} }} }}");
+    let mut request = source_request(&source,dir.path());
+    request.inputs.packages[1] = PackageManifest::directory(&root.join("core/core"),package("core"),true).unwrap();
+    let product = Driver::default().check(request,&mut Meter::new(false)).unwrap();
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let mut options = native_options(backend,dir.path());
+    options.grant_mask = 1<<4;
+    options.root_limit = 288;
+    let built = product.build(&entry,&options).unwrap();
+    let (writer,mut reader) = UnixStream::pair().unwrap();
+    let reading = std::thread::spawn(move || {
+        let mut byte = [0];
+        assert_eq!(reader.read(&mut byte).unwrap(),1);
+        assert_eq!(byte,[b'x']);
+    });
+    let fd:OwnedFd = writer.into();
+    let output = Command::new(built.executable).stdout(Stdio::from(fd)).output().unwrap();
+    reading.join().unwrap();
+    assert_eq!(output.status.code(),Some(0),"{:?}",String::from_utf8_lossy(&output.stderr));
+    assert!(output.stderr.is_empty());
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn stream_partial_progress_cranelift() { stream_partial_progress(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn stream_partial_progress_llvm() { stream_partial_progress(Backend::Llvm); }

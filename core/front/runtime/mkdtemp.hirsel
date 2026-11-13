@@ -1,0 +1,12 @@
+// A private test-package helper provides an empty valid String with capacity 32.
+// The provider fills its name, and the returned Dir designates that exact child.
+pub fn main(d: Dir) -> Result[(), Exit] {
+    let mut name = string.proof_temp_name()
+    let child = result.unwrap(host.mkdtemp(d, mut name))
+    if string.byte_len(name) == 0u64 || string.byte_len(name) > 32u64 { return Error(Exit(status: 1)) }
+    let mut file = result.unwrap(host.open(child, "inside", Write))
+    result.unwrap(host.write(mut file, b"data"))
+    result.unwrap(host.close(take file))
+    result.unwrap(host.remove_tree(d, name))
+    Ok(())
+}

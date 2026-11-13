@@ -1,0 +1,39 @@
+// Native oracle: all operations finish with exit 0; the granted directory is empty.
+pub fn main(d: Dir) -> Result[(), Exit] {
+    match host.open(d, "missing", Read) {
+        Error(NotFound) => {},
+        _ => return Error(Exit(status: 1))
+    }
+    match host.open(d, "../escape", Read) {
+        Error(Denied) => {},
+        _ => return Error(Exit(status: 2))
+    }
+    let mut f = result.unwrap(host.open(d, "file", CreateNew))
+    match host.open(d, "file", CreateNew) {
+        Error(Exists) => {},
+        _ => return Error(Exit(status: 3))
+    }
+    result.unwrap(host.write(mut f, b"data"))
+    if result.unwrap(host.try_lock(mut f)) == false { return Error(Exit(status: 4)) }
+    let mut other = result.unwrap(host.open(d, "file", Append))
+    if result.unwrap(host.try_lock(mut other)) { return Error(Exit(status: 9)) }
+    result.unwrap(host.close(take other))
+    result.unwrap(host.unlock(mut f))
+    result.unwrap(host.close(take f))
+    let mut reader = result.unwrap(host.open(d, "file", Read))
+    let mut buf: Bytes = b""
+    if result.unwrap(host.read(mut reader, mut buf)) != 0u64 { return Error(Exit(status: 5)) }
+    result.unwrap(host.close(take reader))
+    result.unwrap(host.mkdir(d, "directory"))
+    match host.mkdir(d, "directory") { Error(Exists) => {}, _ => return Error(Exit(status: 6)) }
+    result.unwrap(host.remove(d, "file"))
+    match host.remove(d, "file") { Error(NotFound) => {}, _ => return Error(Exit(status: 7)) }
+    result.unwrap(host.remove(d, "directory"))
+    result.unwrap(host.mkdir(d, "tree"))
+    let mut nested = result.unwrap(host.open(d, "tree/file", Write))
+    result.unwrap(host.write(mut nested, b"nested"))
+    result.unwrap(host.close(take nested))
+    result.unwrap(host.remove_tree(d, "tree"))
+    match host.remove_tree(d, "tree") { Error(NotFound) => {}, _ => return Error(Exit(status: 8)) }
+    Ok(())
+}

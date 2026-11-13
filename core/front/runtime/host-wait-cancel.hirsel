@@ -1,0 +1,49 @@
+// Every waiting host row observes cancellation before its issue. No side effects.
+type DirInput:send { d:Dir }
+type FileInput:send { file:HostFile }
+type NameInput:send { d:Dir,name:String }
+fn child_open(take input:DirInput) -> u64 waits { let mut x = take input; let _ = result.unwrap(host.open(x.d, "absent", Write)); 7u64 }
+fn child_mkdir(take input:DirInput) -> u64 waits { let mut x = take input; let _ = result.unwrap(host.mkdir(x.d, "absent")); 7u64 }
+fn child_remove(take input:DirInput) -> u64 waits { let mut x = take input; let _ = result.unwrap(host.remove(x.d, "input")); 7u64 }
+fn child_remove_tree(take input:DirInput) -> u64 waits { let mut x = take input; let _ = result.unwrap(host.remove_tree(x.d, "tree")); 7u64 }
+fn child_mkdtemp(take input:NameInput) -> u64 waits { let mut x = take input; let _ = result.unwrap(host.mkdtemp(x.d, mut x.name)); 7u64 }
+fn child_read(take input:FileInput) -> u64 waits { let mut x = take input; let _ = { let mut buf:Bytes = b""; result.unwrap(host.read(mut x.file, mut buf)); }; 7u64 }
+fn child_write(take input:FileInput) -> u64 waits { let mut x = take input; let _ = result.unwrap(host.write(mut x.file, b"bad")); 7u64 }
+fn child_try_lock(take input:FileInput) -> u64 waits { let mut x = take input; let _ = result.unwrap(host.try_lock(mut x.file)); 7u64 }
+fn child_unlock(take input:FileInput) -> u64 waits { let mut x = take input; let _ = result.unwrap(host.unlock(mut x.file)); 7u64 }
+fn child_close(take input:FileInput) -> u64 waits { let FileInput(file:take f) = take input; result.unwrap(host.close(take f)); 7u64 }
+pub fn main(d:Dir,tasks:Tasks) -> Result[(),Exit] {
+    result.unwrap(host.mkdir(d, "tree"))
+    let mut h_open = result.unwrap(task.spawn(tasks, bytes 0, DirInput(d:d), child_open))
+    task.cancel(mut h_open)
+    match task.join(take h_open) { Error(Cancelled(take causes)) => { let _ = take causes; }, _ => return Error(Exit(status:1)) }
+    let mut h_mkdir = result.unwrap(task.spawn(tasks, bytes 0, DirInput(d:d), child_mkdir))
+    task.cancel(mut h_mkdir)
+    match task.join(take h_mkdir) { Error(Cancelled(take causes)) => { let _ = take causes; }, _ => return Error(Exit(status:2)) }
+    let mut h_remove = result.unwrap(task.spawn(tasks, bytes 0, DirInput(d:d), child_remove))
+    task.cancel(mut h_remove)
+    match task.join(take h_remove) { Error(Cancelled(take causes)) => { let _ = take causes; }, _ => return Error(Exit(status:3)) }
+    let mut h_remove_tree = result.unwrap(task.spawn(tasks, bytes 0, DirInput(d:d), child_remove_tree))
+    task.cancel(mut h_remove_tree)
+    match task.join(take h_remove_tree) { Error(Cancelled(take causes)) => { let _ = take causes; }, _ => return Error(Exit(status:4)) }
+    let mut h_mkdtemp = result.unwrap(task.spawn(tasks, bytes 0, NameInput(d:d,name:string.proof_temp_name()), child_mkdtemp))
+    task.cancel(mut h_mkdtemp)
+    match task.join(take h_mkdtemp) { Error(Cancelled(take causes)) => { let _ = take causes; }, _ => return Error(Exit(status:5)) }
+    let mut h_read = result.unwrap(task.spawn(tasks, bytes 0, FileInput(file:result.unwrap(host.open(d, "input", Read))), child_read))
+    task.cancel(mut h_read)
+    match task.join(take h_read) { Error(Cancelled(take causes)) => { let _ = take causes; }, _ => return Error(Exit(status:6)) }
+    let mut h_write = result.unwrap(task.spawn(tasks, bytes 0, FileInput(file:result.unwrap(host.open(d, "input", Append))), child_write))
+    task.cancel(mut h_write)
+    match task.join(take h_write) { Error(Cancelled(take causes)) => { let _ = take causes; }, _ => return Error(Exit(status:7)) }
+    let mut h_try_lock = result.unwrap(task.spawn(tasks, bytes 0, FileInput(file:result.unwrap(host.open(d, "input", Read))), child_try_lock))
+    task.cancel(mut h_try_lock)
+    match task.join(take h_try_lock) { Error(Cancelled(take causes)) => { let _ = take causes; }, _ => return Error(Exit(status:8)) }
+    let mut h_unlock = result.unwrap(task.spawn(tasks, bytes 0, FileInput(file:result.unwrap(host.open(d, "input", Read))), child_unlock))
+    task.cancel(mut h_unlock)
+    match task.join(take h_unlock) { Error(Cancelled(take causes)) => { let _ = take causes; }, _ => return Error(Exit(status:9)) }
+    let mut h_close = result.unwrap(task.spawn(tasks, bytes 0, FileInput(file:result.unwrap(host.open(d, "input", Read))), child_close))
+    task.cancel(mut h_close)
+    match task.join(take h_close) { Error(Cancelled(take causes)) => { let _ = take causes; }, _ => return Error(Exit(status:10)) }
+    result.unwrap(host.remove_tree(d, "tree"))
+    Ok(())
+}

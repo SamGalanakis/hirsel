@@ -1,0 +1,7 @@
+// Native oracle: Bounds failure, exit 101, no directory created. A static carrier has no spare capacity.
+pub fn main(d: Dir) -> Result[(), Exit] {
+    let mut name = ""
+    let result = host.mkdtemp(d, mut name)
+    let _ = result
+    Ok(())
+}

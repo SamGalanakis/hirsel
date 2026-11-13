@@ -9,6 +9,7 @@ pub fn main(d: Dir) -> Result[(), Exit] {
     if result.unwrap(host.read(mut f, mut buf)) != 5u64 || list.len(buf) != 5u64 { return Error(Exit(status: 4)) }
     if buf[0] != b'h' || buf[1] != b'e' || buf[2] != b'l' || buf[3] != b'l' || buf[4] != b'o' { return Error(Exit(status: 5)) }
     if result.unwrap(host.read(mut f, mut buf)) != 0u64 { return Error(Exit(status: 6)) }
+    match host.write(mut f, b"x") { Error(e) => if e.written != 0u64 { return Error(Exit(status: 8)) } else { match e.error { Closed => {}, _ => return Error(Exit(status: 9)) } }, _ => return Error(Exit(status: 10)) }
     result.unwrap(host.close(take f))
     // A file opened only for writing produces Closed(EBADF) on read.
     let mut writer = result.unwrap(host.open(d, "output", Write))

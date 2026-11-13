@@ -280,15 +280,28 @@ fn stream_rows_write_literal_and_argument_views_without_admission() {
 
 #[test]
 fn host_rows_preserve_handles_result_tags_and_mutated_carriers() {
-    let source = r#"fn f(d:Dir) -> u64 waits {
+    let source = r#"fn f(d:Dir,c:Clock) -> u64 waits {
         match host.open(d,"missing",Read) { Error(NotFound) => {}, _ => return 1u64 }
-        let file = result.unwrap(host.open(d,"file",CreateNew));
+        let mut file = result.unwrap(host.open(d,"file",CreateNew));
         match host.open(d,"file",CreateNew) { Error(Exists) => {}, _ => return 2u64 }
+        result.unwrap(host.write(mut file,b"data"));
+        if result.unwrap(host.try_lock(mut file)) == false { return 3u64 }
+        let mut other = result.unwrap(host.open(d,"file",Append));
+        if result.unwrap(host.try_lock(mut other)) { return 4u64 }
+        result.unwrap(host.close(take other));
+        result.unwrap(host.unlock(mut file));
         result.unwrap(host.close(take file));
         let mut reader = result.unwrap(host.open(d,"file",Read));
         let mut b:Bytes = result.unwrap(list.with_capacity(4));
-        if result.unwrap(host.read(mut reader,mut b)) != 0u64 || list.len(b)!=0u64 { return 3u64 }
+        if result.unwrap(host.read(mut reader,mut b)) != 4u64 || list.len(b)!=4u64 { return 5u64 }
+        if b[0]!=b'd' || b[3]!=b'a' { return 6u64 }
+        if result.unwrap(host.read(mut reader,mut b)) != 0u64 { return 7u64 }
         result.unwrap(host.close(take reader));
+        result.unwrap(host.remove(d,"file"));
+        result.unwrap(host.mkdir(d,"dir"));
+        result.unwrap(host.remove_tree(d,"dir"));
+        let a = host.mono_ns(c); let _ = host.wall_ms(c);
+        if host.mono_ns(c)<a { return 8u64 }
         42u64
     }"#;
     let (index, modules) = canonical(source);
@@ -306,7 +319,7 @@ fn host_rows_preserve_handles_result_tags_and_mutated_carriers() {
         "{check:?}"
     );
     wf::module(&emitter.module).unwrap();
-    let run = eval::run(&emitter.module, check.function.unwrap(), &[0], 8);
+    let run = eval::run(&emitter.module, check.function.unwrap(), &[0, 0], 8);
     assert_eq!(run.outcome, eval::Outcome::Returned(vec![42]));
     assert_eq!(
         run.used, 0,

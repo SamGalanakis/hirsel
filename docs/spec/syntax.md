@@ -88,7 +88,10 @@ takes its type from the expected type ([LANG-11](language.md#lang-11-typing-is-l
 `integer` token only an integer type and a `float` token only a float type, so `1` is never a
 float (`1.0` and `1f64` are). A literal whose value does not fit its type is refused, at the
 literal: `300` as a `u8`, `300u8`, and a magnitude above `MAX` that is not the operand of a
-negation giving `MIN`.
+negation giving `MIN`. A literal operand ([LANG-21](language.md#lang-21-operators)) is
+evaluated when checked; one whose evaluation fails in the type it takes (a value that does
+not fit, a division by zero, a shift count out of range) is refused here, at the
+literal operand, and never fails at run time.
 
 ```hirsel
 const MASK: u32 = 0xff_ff
@@ -98,6 +101,9 @@ const BAD: u64 = 1.                                       // refused: LANG-3
 ```
 ```hirsel
 fn f() -> u8 { 300 }                                      // refused: LANG-3, 300 does not fit u8
+```
+```hirsel
+fn f(x: u8) -> bool { (255 + 1) < x }                     // refused: LANG-3, at 255 + 1: 256 is not a u8
 ```
 ```hirsel
 fn f() -> f64 { 1 }                                       // refused: LANG-3, 1 is an integer

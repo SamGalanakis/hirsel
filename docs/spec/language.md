@@ -354,8 +354,12 @@ installs the result ([OWN-12](ownership.md#own-12-assignment)).
 | `== !=` | one `key` type ([SEM-7](semantics.md#sem-7-equality-and-order)) | `bool` |
 | `< <= > >=` | one `ordered` type (SEM-7) | `bool` |
 
-A **literal operand** is an unsuffixed number, or a unary `-`, a binary operator or
-parentheses applied only to literal operands; it synthesises no type. A binary operator
+A **literal operand** is an unsuffixed number, or a unary `-` or `~`, a binary operator or
+parentheses applied only to literal operands; it synthesises no type. It is evaluated when
+the definition is checked, in the type it takes, by the rules of SEM-1 and SEM-2; a result
+that does not fit, a zero divisor or any other failure is refused there
+([LANG-3](syntax.md#lang-3-literals)). It therefore does nothing at run time and has no
+place in the evaluation order, which stays left to right for every other operand. A binary operator
 checks an operand that is not a literal operand first, and checks a literal operand against
 that operand's type. When both are literal operands they take the expected type, for an
 operator whose result is its operand type, and are refused by LANG-11 otherwise. So `1 + x`
@@ -363,6 +367,7 @@ and `(1 + 2) < x` type their literals from `x`, and `1 < 2` has no type.
 
 ```hirsel
 fn f(x: u8) -> bool { (1 + 2) < x && !(x == 7) }
+fn bits(x: u8) -> u8 { x & ~8 }
 ```
 ```hirsel
 fn f(a: bool, b: bool) -> bool { a + b }                  // refused: LANG-21, + on bool

@@ -419,6 +419,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result
     }
     fn map_binary(&mut self, op: BinaryOp, left: ValueId, right: ValueId, n: NodeId) -> ValueId {
+        // Private entry/index offsets fit the admitted block; counts stay within
+        // its capacity. These are recipe arithmetic, not source integer ops.
+        let arithmetic = match op {
+            BinaryOp::Add => Some(ArithOp::Add),
+            BinaryOp::Sub => Some(ArithOp::Sub),
+            _ => None,
+        };
+        if let Some(op) = arithmetic {
+            return self.list_arith(op, ArithMode::Wrapping, left, right, n).0;
+        }
         let result = self.value(Ty::Scalar(Scalar::U64));
         self.inst(
             Inst::Binary {

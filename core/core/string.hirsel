@@ -168,29 +168,128 @@ pub fn push_char(mut s: String, c: char) -> Result[(), Capacity] {
 }
 
 pub fn push_u64(mut s: String, n: u64) -> Result[(), Capacity] {
-    // The digit count w: 1, plus one for each power of ten from 10 up to 10^19 that n reaches.
-    let mut w: u64 = 1
-    let mut p: u64 = 10
-    while w < 20 && n >= p {
-        w += 1
-        if w < 20 {
-            p = p * 10
-        }
+    // The digit count w: low = floor(bits x log10(2)) is w or w - 1, and n reaches 10^low exactly when
+    // it is w (low = 0 only below 8, where w is 1: its threshold is 0).
+    let lz: u64 = int.widen(int.leading_zeros(n))
+    let low = (64 - lz) * 1233 >> 12
+    let reach: u64 = match low {
+        0 => 0,
+        1 => 10,
+        2 => 100,
+        3 => 1000,
+        4 => 10000,
+        5 => 100000,
+        6 => 1000000,
+        7 => 10000000,
+        8 => 100000000,
+        9 => 1000000000,
+        10 => 10000000000,
+        11 => 100000000000,
+        12 => 1000000000000,
+        13 => 10000000000000,
+        14 => 100000000000000,
+        15 => 1000000000000000,
+        16 => 10000000000000000,
+        17 => 100000000000000000,
+        18 => 1000000000000000000,
+        _ => 10000000000000000000,
     }
-    string.reserve(mut s, w)?
+    let w = if n >= reach {
+        low + 1
+    } else {
+        low
+    }
+    // w zeros in one copy from a static literal, then the digits over them from the last.
+    string.push(mut s, match w {
+        1 => "0",
+        2 => "00",
+        3 => "000",
+        4 => "0000",
+        5 => "00000",
+        6 => "000000",
+        7 => "0000000",
+        8 => "00000000",
+        9 => "000000000",
+        10 => "0000000000",
+        11 => "00000000000",
+        12 => "000000000000",
+        13 => "0000000000000",
+        14 => "00000000000000",
+        15 => "000000000000000",
+        16 => "0000000000000000",
+        17 => "00000000000000000",
+        18 => "000000000000000000",
+        19 => "0000000000000000000",
+        _ => "00000000000000000000",
+    })?
     let owned = replace(mut s, string.new())
     let mut b = to_bytes(take owned)
-    let base = list.len(b)
-    // The reserve made room for w more bytes, so this admits nothing.
-    let _ = list.fill(mut b, w, b'0')
-    // The digits from the last: each step writes in place and returns nothing.
-    let mut i = base + w
+    let base = list.len(b) - w
+    let mut i = list.len(b)
     let mut m = n
-    while m > 0 {
-        i -= 1
-        let d: u8 = int.truncate(m % 10)
-        b[i] = b'0' + d
-        m = m / 10
+    // Eight digits a step, at most twice: one division by 10^8, then all eight digits at once in a
+    // word, a lane per digit (most significant in the low byte): split into two halves of four
+    // digits, each half into two pairs (x 10486 >> 20 is / 100 below 10^4), each pair into two
+    // digits (x 103 >> 10 is / 10 below 100). No lane carries into the next.
+    while m >= 100000000 {
+        let v = m % 100000000
+        m = m / 100000000
+        i -= 8
+        // Every lane stays below 2^16 and every product below 2^63, so the wrapping forms never wrap.
+        let x = v / 10000 | (v % 10000) << 32
+        let y = (int.wrapping_mul(x, 10486) >> 20) & 0x0000007F0000007F
+        let z = y | int.wrapping_sub(x, int.wrapping_mul(y, 100)) << 16
+        let t = (int.wrapping_mul(z, 103) >> 10) & 0x000F000F000F000F
+        let digits = (t | int.wrapping_sub(z, int.wrapping_mul(t, 10)) << 8) | 0x3030303030303030
+        // The highest index first: a Bounds failure raises before any byte of the block changes.
+        b[i + 7] = int.truncate(digits >> 56)
+        b[i] = int.truncate(digits & 0xFF)
+        b[i + 1] = int.truncate(digits >> 8 & 0xFF)
+        b[i + 2] = int.truncate(digits >> 16 & 0xFF)
+        b[i + 3] = int.truncate(digits >> 24 & 0xFF)
+        b[i + 4] = int.truncate(digits >> 32 & 0xFF)
+        b[i + 5] = int.truncate(digits >> 40 & 0xFF)
+        b[i + 6] = int.truncate(digits >> 48 & 0xFF)
+    }
+    // m < 10^8: four digits at once (the same lanes in 32 bits), then at base the last 1 to 4.
+    if m >= 10000 {
+        let r = m % 10000
+        m = m / 10000
+        i -= 4
+        let x = r / 100 | (r % 100) << 16
+        let t = (int.wrapping_mul(x, 103) >> 10) & 0x000F000F
+        let digits = (t | int.wrapping_sub(x, int.wrapping_mul(t, 10)) << 8) | 0x30303030
+        b[i + 3] = int.truncate(digits >> 24)
+        b[i] = int.truncate(digits & 0xFF)
+        b[i + 1] = int.truncate(digits >> 8 & 0xFF)
+        b[i + 2] = int.truncate(digits >> 16 & 0xFF)
+    }
+    if m >= 1000 {
+        let x = m / 100 | (m % 100) << 16
+        let t = (int.wrapping_mul(x, 103) >> 10) & 0x000F000F
+        let digits = (t | int.wrapping_sub(x, int.wrapping_mul(t, 10)) << 8) | 0x30303030
+        b[base + 3] = int.truncate(digits >> 24)
+        b[base] = int.truncate(digits & 0xFF)
+        b[base + 1] = int.truncate(digits >> 8 & 0xFF)
+        b[base + 2] = int.truncate(digits >> 16 & 0xFF)
+    } else {
+        if m >= 100 {
+            let hundreds: u8 = int.truncate(m / 100)
+            b[base] = b'0' + hundreds
+            m = m % 100
+            i = base + 1
+        } else {
+            i = base
+        }
+        if m >= 10 || i > base {
+            let tens: u8 = int.truncate(m / 10)
+            let ones: u8 = int.truncate(m % 10)
+            b[i] = b'0' + tens
+            b[i + 1] = b'0' + ones
+        } else {
+            let d: u8 = int.truncate(m)
+            b[i] = b'0' + d
+        }
     }
     s = of_bytes(take b)
     Ok(())

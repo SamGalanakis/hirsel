@@ -443,10 +443,49 @@ fn push_u64_onto_literal() -> bool {
     s == "x42"
 }
 
-// Each side of every digit-count step the sizing loop takes, up to its last power, 10^19.
-// expect: run push_u64_powers_of_ten() = true
-fn push_u64_powers_of_ten() -> bool {
-    decimal(99) == "99" && decimal(100) == "100" && decimal(999999999999999999) == "999999999999999999" && decimal(1000000000000000000) == "1000000000000000000" && decimal(9999999999999999999) == "9999999999999999999" && decimal(10000000000000000000) == "10000000000000000000"
+// Each side of every power of ten from 10 to 10^19: 10^k - 1 is k nines, 10^k is 1 and k zeros.
+// Returns the number of k that print right.
+// expect: run push_u64_powers_of_ten() = 19
+fn push_u64_powers_of_ten() -> u64 {
+    let mut right: u64 = 0
+    let mut p: u64 = 1
+    for k in 1u64 .. 20 {
+        p = p * 10
+        let nines = result.unwrap(string.repeat("9", k))
+        let mut ten = result.unwrap(string.from("1"))
+        result.unwrap(string.push(mut ten, result.unwrap(string.repeat("0", k))))
+        if decimal(p - 1) == nines && decimal(p) == ten {
+            right += 1
+        }
+    }
+    right
+}
+
+// Every digit 1 to 9 repeated to every width 1 to 19 (and 1 to width 20): each digit value in each
+// position of each width. Returns the number of the 9 x 19 + 1 = 172 that print right.
+// expect: run push_u64_repdigits() = 172
+fn push_u64_repdigits() -> u64 {
+    let mut right: u64 = 0
+    for d in 1u64 .. 10 {
+        let mut n: u64 = 0
+        for w in 1u64 .. 20 {
+            n = n * 10 + d
+            if decimal(n) == result.unwrap(string.repeat(string.slice("123456789", d - 1, d), w)) {
+                right += 1
+            }
+        }
+    }
+    if decimal(11111111111111111111) == "11111111111111111111" {
+        right += 1
+    }
+    right
+}
+
+// Distinct neighbouring digits at the widths whose last block is 1 to 4 digits after 0, 1 or 2
+// blocks of eight: a digit in the wrong position shows.
+// expect: run push_u64_digit_order() = true
+fn push_u64_digit_order() -> bool {
+    decimal(1) == "1" && decimal(12) == "12" && decimal(123) == "123" && decimal(1234) == "1234" && decimal(12345) == "12345" && decimal(123456789) == "123456789" && decimal(9876543210) == "9876543210" && decimal(10203040506) == "10203040506" && decimal(123456789012) == "123456789012" && decimal(98765432109876543) == "98765432109876543" && decimal(1234567890123456789) == "1234567890123456789" && decimal(12345678901234567890) == "12345678901234567890"
 }
 
 // Onto owned bytes, twice: the digits land after what is there, zeros inside n included.

@@ -304,8 +304,10 @@ a view of its payload, with the same anchors. A core operation may return a view
 of an argument's storage that its signature names (a sub-range, `string.slice`; the same
 bytes at another type, `string.as_bytes`): such a **sub-view** is a view with the anchors
 and freezes of a view of the whole argument (OWN-20). There is no last-use end and no
-mutable view; nothing is written through a view (the one reserved exception is read
-tracking, R18 in [reserved](reserved.md)). Where a plain `T` is expected, a `View[T]` of a
+mutable view. Nothing that a view exposes is written, moved or freed while the view lives,
+through the view or through any other alias; an operation given a view may still change
+state that no view exposes: a counted holder's count, a channel's queue, a region's
+bookkeeping, the host. Read tracking (R18 in [reserved](reserved.md)) is such state. Where a plain `T` is expected, a `View[T]` of a
 plain `T` reads as the value. A stable value used where a view is expected is that view
 ([OWN-25](#own-25-stable-values-are-read-as-views)).
 

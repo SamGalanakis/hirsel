@@ -118,8 +118,8 @@ PROG-7, PROG-8.
 no read/count/clear, and `finish(take Log[E])->OwnedEvents[E]` transfers without
 allocation. E is independently owned inert data, never scoped/stable/resource. This does
 not allow writes through ordinary frozen views; queries cannot report success after a
-failed tracking append." *v1:* OWN-8 names this as the one reserved exception to "nothing
-is written through a view".
+failed tracking append." *v1:* OWN-8 counts the log as state that no view exposes, which
+an operation given a view may change.
 
 **R19.** "Opaque capability facades declare their nominal public authority independently
 of a private implementation-authority ceiling, including captured/destructor grants.

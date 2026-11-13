@@ -1,0 +1,31 @@
+// test-of: std.pool
+// test-reason: Public operations cannot reach u64 generation exhaustion in a finite test.
+// Only generation exhaustion needs private access: the public API would require
+// 2^64 removals. Seed the penultimate generation, then exercise public operations.
+// expect: run retirement_never_reuses() = true
+fn retirement_never_reuses() -> bool {
+    let mut p: Pool[u64] = result.unwrap(with_capacity(2))
+    let seed = result.unwrap(insert(mut p, 11))
+    let _ = list.set(mut p.slots, seed.index, Occupied(NONE - 1, 11))
+    let h: Id[u64] = Id(pool: p.me, index: seed.index, generation: NONE - 1)
+    let removed = result.unwrap(remove(mut p, h)) == 11
+    let fresh = result.unwrap(insert(mut p, 22))
+    let no_reuse = fresh.index == 1 && !contains(p, h)
+    clear(mut p)
+    clear(mut p)
+    let after = result.unwrap(insert(mut p, 33))
+    let forged_max: Id[u64] = Id(pool: p.me, index: 0, generation: NONE)
+    removed && no_reuse && after.index == 1 && !contains(p, h) && !contains(p, forged_max) && len(p) == 1
+}
+
+// clear has its own generation-advancement path: reaching max must retire there too.
+// expect: run clear_retires_exhausted_slot() = true
+fn clear_retires_exhausted_slot() -> bool {
+    let mut p: Pool[u64] = result.unwrap(with_capacity(2))
+    let seed = result.unwrap(insert(mut p, 11))
+    let _ = list.set(mut p.slots, seed.index, Occupied(NONE - 1, 11))
+    let h: Id[u64] = Id(pool: p.me, index: seed.index, generation: NONE - 1)
+    clear(mut p)
+    let after = result.unwrap(insert(mut p, 22))
+    after.index == 1 && !contains(p, h) && len(p) == 1
+}

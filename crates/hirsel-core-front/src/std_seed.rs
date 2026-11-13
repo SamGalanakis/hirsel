@@ -26,6 +26,14 @@ fn sources(dir: &Path, prefix: &[&str], signatures: bool) -> Vec<ModuleSource> {
         .expect("source directory reads")
         .map(|e| e.expect("entry").path())
         .filter(|p| p.extension().is_some_and(|x| x == "hirsel"))
+        .filter(|p| {
+            prefix != ["tests"]
+                || !std::fs::read_to_string(p)
+                    .expect("std contract reads")
+                    .lines()
+                    .next()
+                    .is_some_and(|line| line.starts_with("// test-of:"))
+        })
         .collect();
     files.sort();
     files
@@ -44,6 +52,33 @@ fn sources(dir: &Path, prefix: &[&str], signatures: bool) -> Vec<ModuleSource> {
             }
         })
         .collect()
+}
+
+#[test]
+fn marked_contracts_run_only_in_the_native_walker() {
+    let dir = std::env::temp_dir().join(format!("hirsel-std-test-of-{}", std::process::id()));
+    std::fs::create_dir(&dir).expect("fixture directory");
+    let marked = dir.join("private.hirsel");
+    let public = dir.join("public.hirsel");
+    let later = dir.join("later.hirsel");
+    std::fs::write(&marked, "// test-of: std.pool\nfn private() {}\n").unwrap();
+    std::fs::write(&public, "fn public() {}\n").unwrap();
+    std::fs::write(
+        &later,
+        "// ordinary contract\n// test-of: std.pool\nfn later() {}\n",
+    )
+    .unwrap();
+    let selected = sources(&dir, &["tests"], false);
+    assert_eq!(
+        selected.iter().map(|s| &s.file).collect::<Vec<_>>(),
+        [&later, &public]
+    );
+    // The marker is a tests-loader convention, never a library-source exclusion.
+    assert_eq!(sources(&dir, &[], false).len(), 3);
+    for file in [marked, public, later] {
+        std::fs::remove_file(file).unwrap();
+    }
+    std::fs::remove_dir(dir).unwrap();
 }
 
 /// core (declarations) and std (library code, depends on core), laid out as the canonical

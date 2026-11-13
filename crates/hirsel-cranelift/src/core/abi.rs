@@ -19,7 +19,7 @@ impl Signature {
         Self::build(&native, true)
     }
     pub fn c(params: &[Ty], results: &[Ty]) -> Self {
-        Self::build(
+        let mut signature = Self::build(
             &c::Signature {
                 params: params.iter().copied().map(Param::Value).collect(),
                 results: results.to_vec(),
@@ -27,7 +27,16 @@ impl Signature {
                 never: false,
             },
             false,
-        )
+        );
+        // C bool parameters carry zero-extension in Rust/LLVM's ABI. Without
+        // it, upper register bits can leak into an event's u64 boolean value.
+        for (index, ty) in params.iter().enumerate() {
+            if *ty == Ty::Scalar(Scalar::Bool) {
+                let parameter = &mut signature.clif.params[index + usize::from(signature.indirect)];
+                *parameter = parameter.clone().uext();
+            }
+        }
+        signature
     }
     fn build(s: &c::Signature, context: bool) -> Self {
         let mut clif = ir::Signature::new(CallConv::SystemV);

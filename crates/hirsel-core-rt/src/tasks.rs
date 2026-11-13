@@ -419,7 +419,7 @@ pub unsafe fn run_root(
         ptr::copy_nonoverlapping(argument, root.input.as_ptr(), input_bytes);
         let root_pointer: *mut Task = &mut *root;
         (*context).events = if run.provider.event.is_some() {
-            root_pointer.addr()
+            root_pointer.expose_provenance()
         } else {
             0
         };
@@ -506,7 +506,7 @@ pub unsafe extern "C" fn hirsel_core_spawn(
         let task = Box::into_raw(task);
         (*task).context = (*task).owned_context.as_mut().unwrap();
         (*(*task).context).events = if (*(*task).context).events != 0 {
-            task.addr()
+            task.expose_provenance()
         } else {
             0
         };

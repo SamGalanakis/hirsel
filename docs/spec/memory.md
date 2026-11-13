@@ -124,7 +124,13 @@ fn build_stream_in[T: streamable](r: Region, bytes n: u64,
 ```
 
 Its root `T` is a stable streamable type: a compact type, which supplies its `W`, or `Text`
-or a sequence, encoded with `W = u64`. It returns `Error(Overflow)` when `n` exceeds the
+or a sequence, encoded with `W = u64`. Both checks read the root's outermost type at the
+call: a type parameter is never compact or a root, whatever its bounds, because no bound
+says so and a generic body uses only its bounds
+([OWN-23](ownership.md#own-23-generic-bodies)), while a sequence of a parameter is a root,
+`SeqSpan[T]` when `T: streamable`. So a generic function cannot build or stream a document
+whose root is its own parameter; its caller calls `build_in` or `build_stream_in` at its
+own type. It returns `Error(Overflow)` when `n` exceeds the
 blob cap of that `W`, then admits `n` bytes as `build_in` does, and only then calls `w`
 once. A `Writer[U, in r]` is the right to
 write one complete `U` at the allocation's next byte. It is scoped and moves (OWN-3), has
@@ -175,6 +181,22 @@ unused end, `round8(n) − round8(used)`, to the limit the allocation's record l
 ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)), whatever limit is current; it
 moves nothing and cannot fail.
 
+```hirsel
+fn batch[T: streamable](r: Region, bytes n: u64,
+    f: scoped fn(take Writer[SeqSpan[T], in r]) -> Result[Child[SeqSpan[T]], BuildError])
+    -> Result[SeqSpan[T] in r, BuildError] {
+  let b = build_stream_in(r, bytes n, f)?
+  Ok(finish_trim(take b))
+}
+```
+```hirsel
+fn doc[T: streamable](r: Region, bytes n: u64,
+    f: scoped fn(take Writer[T, in r]) -> Result[Child[T], BuildError])
+    -> Result[T in r, BuildError] {
+  let b = build_stream_in(r, bytes n, f)?          // refused: MEM-4, T is not a root
+  Ok(finish_trim(take b))
+}
+```
 ```hirsel
 @compact(u32) stable type J = Null | Arr(SeqSpan[J])
 fn list[in r](take w: Writer[SeqSpan[J], in r]) -> Result[Child[SeqSpan[J]], BuildError] {

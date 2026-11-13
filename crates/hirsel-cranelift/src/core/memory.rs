@@ -90,7 +90,7 @@ impl Function<'_, '_, '_> {
                 self.guard(grant, 6, fail)?;
                 self.b.ins().jump(done, &[]);
                 self.b.switch_to_block(done);
-                if kind == AllocKind::Counted {
+                if matches!(kind, AllocKind::Counted(_)) {
                     let init = self.b.create_block();
                     let ready = self.b.create_block();
                     self.b.ins().brif(refused, ready, &[], init, &[]);

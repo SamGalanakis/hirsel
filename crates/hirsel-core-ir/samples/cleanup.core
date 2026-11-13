@@ -11,6 +11,8 @@
 ;       fn flags(take: bool) { let a = mk(1); let b = mk(2); if take { consume(a) } }
 ;       fn replace(x: u64, y: u64, z: u64) { let mut p = Pair { a: mk(x), b: mk(y) }; p.a = mk(z) }
 ;       fn chain(n: u64) { let mut l = Nil; for i in 1..=n { l = Cons(mk(i), Box(l)) } }
+;       type Opened { f: HostFile, r: Res }
+;       fn opened(f: HostFile, x: u64) { let o = Opened { f, r: mk(x) } }
 ;
 ; A resource is a pointer to its block; Res is charged 40 (storage 8, cell 32). f0 is
 ; `mk`, which unwraps a construction refusal. Ordinary callers here run without a
@@ -27,23 +29,30 @@
 ; run: f4(1, 2, 3) -> | used 0 | trace 1, 2, 3        ; old a at the replace, then b, a
 ; run: f5(3) -> | used 0 | trace 1, 2, 3              ; next before r: innermost first
 ; run: f5(0) -> | used 0                              ; Nil owns nothing
+; A HostFile is a u64 provider handle, not a block: its drop closes it through the
+; provider and ignores the outcome, admitting nothing (core.md, MEM-24); the trace
+; records the close by the handle.
+; run: f6(7, 10) -> | used 0 | trace 10, 7            ; r, then f: reverse order
 core v1
 item i0 = samples@0/cleanup/flags
 type t0 = resource "Res" { id: u64 }
 type t1 = own "Pair" { a: t0, b: t0 }
 type t2 = own "Node" | Nil { } | Cons { r: t0, next: box t2 }
+type t3 = own "Opened" { f: hostfile, r: t0 }
 sig g0 = (u64) -> (ptr)
 sig g1 = (u64, u64) -> ()
 sig g2 = (bool) -> ()
 sig g3 = (ptr) -> ()
 sig g4 = (u64, u64, u64) -> ()
 sig g5 = (u64) -> ()
+sig g6 = (u64, u64) -> ()
 inst n0 = samples@0/cleanup/mk [] []
 inst n1 = samples@0/cleanup/pair [] []
 inst n2 = samples@0/cleanup/flags [] []
 inst n3 = samples@0/cleanup/consume [] []
 inst n4 = samples@0/cleanup/replace [] []
 inst n5 = samples@0/cleanup/chain [] []
+inst n6 = samples@0/cleanup/opened [] []
 fn f0 = n0 g0 {
   addr a0 = v2 : t0
   addr a1 = a0 field 0 : u64
@@ -240,4 +249,21 @@ b8:
   drop a5 t0
   dead s1
   jump b5
+}
+fn f6 = n6 g6 {
+  slot s0 = t3                         ; o
+  addr a0 = s0 field 0 : u64
+  addr a1 = s0 field 1 : ptr
+  addr a2 = s0 : t3
+b0(v0: u64, v1: u64):
+  live s0
+  address a0
+  address a1
+  address a2
+  store a0, v0                         ; f
+  v2: ptr = call f0 g0 (v1)
+  store a1, v2
+  drop a2 t3
+  dead s0
+  return
 }

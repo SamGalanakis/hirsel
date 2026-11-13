@@ -349,7 +349,7 @@ impl FunctionEmitter<'_> {
                 writeln!(self.code, "allocation_success{n}:").unwrap();
                 self.put(result, &block);
                 self.put(available, &room);
-                if kind == AllocKind::Counted {
+                if matches!(kind, AllocKind::Counted(_)) {
                     // Both count implementations use the same initial word; later operations
                     // select Rc/Arc from their instruction, including shared constructors.
                     let missing = self.calc(format!("icmp eq ptr {block}, null"));

@@ -524,7 +524,7 @@ impl Printer {
                         let kind = match kind {
                             AllocKind::Plain => "plain".into(),
                             AllocKind::Own => "own".into(),
-                            AllocKind::Counted => "counted".into(),
+                            AllocKind::Counted(c) => format!("counted {}", c.name()),
                             AllocKind::Resource { grant } => format!("resource grant {grant}"),
                         };
                         let place = match place {
@@ -1215,7 +1215,7 @@ impl BodyParser {
             let kind = match l.next()? {
                 "plain" => AllocKind::Plain,
                 "own" => AllocKind::Own,
-                "counted" => AllocKind::Counted,
+                "counted" => AllocKind::Counted(counted(l)?),
                 "resource" => {
                     l.expect("grant")?;
                     AllocKind::Resource { grant: l.num()? }

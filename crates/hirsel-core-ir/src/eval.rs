@@ -52,6 +52,8 @@ struct Blk {
     limit: Option<usize>,
     charge: u64,
     res: Option<Res>,
+    /// A counted node's kind, fixed by its `alloc`; its operations must name it.
+    counted: Option<Counted>,
 }
 struct Res {
     grant: u64,
@@ -209,6 +211,16 @@ fn cause(r: RaiseCause) -> &'static str {
 
 impl Machine<'_> {
     // ---- memory
+    /// Rc and Arc counts differ in atomicity only, which one task cannot observe;
+    /// what the evaluator checks is that every operation names its node's kind.
+    fn kind(&self, p: u64, kind: Counted) {
+        let made = self.mem[split(p).0].counted;
+        assert_eq!(
+            made,
+            Some(kind),
+            "a counted operation names another kind than its alloc"
+        );
+    }
     fn block(&mut self, size: u64, limit: Option<usize>, charge: u64, res: Option<Res>) -> u64 {
         self.mem.push(Blk {
             bytes: vec![0; size as usize],
@@ -216,6 +228,7 @@ impl Machine<'_> {
             limit,
             charge,
             res,
+            counted: None,
         });
         ptr(self.mem.len() - 1, 0)
     }
@@ -400,8 +413,12 @@ impl Machine<'_> {
                 }
                 failed
             }
-            // The provider closes the file and ignores the outcome (MEM-24).
-            FieldTy::Handle(Handle::HostFile) => false,
+            // The provider closes the file and ignores the outcome (core.md,
+            // MEM-24); the trace records the close by its handle.
+            FieldTy::Handle(Handle::HostFile) => {
+                self.trace.push(self.load(at, 8));
+                false
+            }
             FieldTy::Box(x) => {
                 let p = self.load(at, 8);
                 let failed = self.drop_value(t, p, *x);
@@ -1122,7 +1139,8 @@ impl Machine<'_> {
                             _ => None,
                         };
                         let p = self.block(vals[size.index()], Some(l), n, res);
-                        if kind == AllocKind::Counted {
+                        if let AllocKind::Counted(c) = kind {
+                            self.mem[split(p).0].counted = Some(c);
                             self.store(p, 8, 1);
                         }
                         if let AllocPlace::Region(r) = place {
@@ -1208,13 +1226,18 @@ impl Machine<'_> {
                 let src = self.get(places[from.index()].0, n).to_vec();
                 self.put(places[to.index()].0, &src);
             }
-            Inst::Share { node, .. } => {
+            Inst::Share { node, kind } => {
                 let p = vals[node.index()];
+                self.kind(p, kind);
                 let c = self.load(p, 8);
                 self.store(p, 8, c + 1);
             }
-            Inst::Release { node, ty, .. } => self.release(vals[node.index()], TypeRef(ty.0)),
-            Inst::TryUnwrap { result, node, .. } => {
+            Inst::Release { node, ty, kind } => {
+                self.kind(vals[node.index()], kind);
+                self.release(vals[node.index()], TypeRef(ty.0))
+            }
+            Inst::TryUnwrap { result, node, kind } => {
+                self.kind(vals[node.index()], kind);
                 vals[result.index()] = u64::from(self.load(vals[node.index()], 8) == 1);
             }
         }

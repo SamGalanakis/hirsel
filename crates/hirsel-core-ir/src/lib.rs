@@ -51,8 +51,15 @@
 //!   no resource, so this cleanup never fails and runs no finalizer.
 //! - Providers (CAP-5): a provider operation is a call of an engine function by
 //!   its signature row, a cancellation point when it `waits` (so it can fail),
-//!   admitting nothing. `HostFile` is a handle (`hostfile`) of a mechanical
-//!   resource: no cause cell, cleaned by closing it and ignoring the outcome.
+//!   admitting nothing. `HostFile` is a mechanical resource that is not a
+//!   block: a `u64` provider handle (field type `hostfile`, 8 bytes, logically 8),
+//!   with no cause cell, no grant and no charge. Its drop step calls the runtime
+//!   entry `hirsel_core_hostfile_drop(context, handle)`, which issues the
+//!   provider's close through the replay point, ends any lock, ignores the
+//!   outcome, admits nothing and cannot fail (core.md, MEM-24, FAIL-13); it is
+//!   not a cancellation point and adds no status. It is cleaned where its field
+//!   falls in the recipe's order. It never reaches counted cleanup: it is not
+//!   `shareable`, and a counted payload holds no resource (MEM-16).
 //! - Cleanup of `List`, `String` and `Map` storage, the `Map` entry slot, and the
 //!   step order a counted release resumes by, dynamic sequences and maps
 //!   included, are stated in `hirsel-core-layout` (`DropRecipe`, `map_entry`).
@@ -163,6 +170,14 @@
 //! out with `copy` and `free`s the block, refunding that complete charge (MEM-23). A counted node is a u64 count at
 //! offset 0 and the payload at offset 8; `deref` of an rc or arc field names the
 //! payload. A counted payload holds no resource, so a release runs no user code.
+//! Every counted row names its kind: `alloc counted rc|arc` and `share`,
+//! `release` and `try_unwrap` with `rc|arc`, so each row alone says whether its
+//! count operations are atomic. An `arc` node is made and counted atomically, and
+//! each of these rows is an event in the run's order (MEM-15); `rc` never crosses
+//! a task (Rc is not `send`). The producer takes the kind from the core type the
+//! source operation is on, `rc.*` or `Rc[T]` gives `rc`, `arc.*` or `Arc[T]`
+//! gives `arc`, never from bounds of `T`; a row whose kind differs from its node's
+//! allocation is malformed (the evaluator stops on it).
 //!
 //! # Runtime calls (FORM v1a)
 //!

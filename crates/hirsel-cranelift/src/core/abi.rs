@@ -16,7 +16,9 @@ pub(super) struct Signature {
 }
 impl Signature {
     pub fn new(s: &c::Signature) -> Self {
-        Self::build(s, true)
+        let mut native = s.clone();
+        native.results.push(Ty::Scalar(Scalar::U8));
+        Self::build(&native, true)
     }
     pub fn c(params: &[Ty], results: &[Ty]) -> Self {
         Self::build(
@@ -48,8 +50,8 @@ impl Signature {
             clif.params
                 .push(AbiParam::special(types::I64, ArgumentPurpose::StructReturn));
         }
-        // The frozen v1a ABI supplies a context even for functions that need no
-        // runtime operations. Infallible scalar entries do not return a status.
+        // FORM #38 uses context plus a trailing u8 result status for every
+        // function row. Raw runtime C signatures omit both additions.
         if context {
             clif.params.push(AbiParam::new(types::I64));
         }

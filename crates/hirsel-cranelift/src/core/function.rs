@@ -18,19 +18,24 @@ pub(super) struct Function<'a, 'b, 'c> {
     pub statics: &'c [cranelift_module::DataId],
     pub signatures: &'c [abi::Signature],
     pub context: Value,
+    pub signature: &'c abi::Signature,
+    pub result_storage: Option<Value>,
 }
 
 pub(super) fn emit(
     object: &mut ObjectModule,
     mut b: FunctionBuilder<'_>,
     body: &Body,
-    input: &c::Module,
-    layouts: &[hirsel_core_layout::Recipe],
     signature: &abi::Signature,
-    signatures: &[abi::Signature],
-    functions: &[cranelift_module::FuncId],
-    statics: &[cranelift_module::DataId],
+    tables: &super::Tables<'_>,
 ) -> Result<()> {
+    let (input, layouts, signatures, functions, statics) = (
+        tables.input,
+        tables.layouts,
+        tables.signatures,
+        tables.functions,
+        tables.statics,
+    );
     let blocks: Vec<_> = body.blocks.iter().map(|_| b.create_block()).collect();
     b.append_block_params_for_function_params(blocks[0]);
     for (i, block) in body.blocks.iter().enumerate().skip(1) {
@@ -47,11 +52,15 @@ pub(super) fn emit(
     let mut slots = Vec::new();
     for &s in &body.slots {
         let (size, align) = super::place::storage(input, layouts, s)?;
-        slots.push(b.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            size.max(1) as u32,
-            align.trailing_zeros() as u8,
-        )));
+        slots.push(b.create_sized_stack_slot(
+            StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                u32::try_from(size.max(1)).map_err(|_| {
+                    error("native stack slot exceeds Cranelift's u32 representation")
+                })?,
+                align.trailing_zeros() as u8,
+            ),
+        ));
     }
     b.switch_to_block(blocks[0]);
     let params = b.block_params(blocks[0]).to_vec();
@@ -71,6 +80,8 @@ pub(super) fn emit(
         statics,
         signatures,
         context,
+        signature,
+        result_storage,
     };
     for (i, block) in body.blocks.iter().enumerate() {
         if i != 0 {
@@ -102,6 +113,8 @@ pub(super) fn emit(
                     .iter()
                     .map(|&v| f.get(v))
                     .collect();
+                let mut results = results;
+                results.push(f.b.ins().iconst(types::I8, 0));
                 signature.return_(&mut f.b, &results, result_storage);
             }
             Terminator::Jump(e) => {
@@ -132,11 +145,21 @@ pub(super) fn emit(
                 let (target, args) = f.edge(*otherwise);
                 f.b.ins().jump(target, &args);
             }
-            Terminator::Unreachable | Terminator::Raise { .. } | Terminator::Propagate => {
-                return Err(unsupported(
-                    "failure propagation requires the core runtime ABI",
-                ));
+            Terminator::Unreachable => {
+                f.b.ins().trap(ir::TrapCode::unwrap_user(1));
             }
+            Terminator::Raise { cause, cleanup } => {
+                let kind = match cause {
+                    RaiseCause::Unwrap => 3,
+                    RaiseCause::Bounds => 1,
+                    RaiseCause::Fail(_) => {
+                        return Err(unsupported("owned failure-message carrier ABI"));
+                    }
+                };
+                f.record_failure(kind)?;
+                f.fail_to(*cleanup);
+            }
+            Terminator::Propagate => f.fail_to(None),
         }
     }
     f.b.seal_all_blocks();
@@ -205,14 +228,17 @@ impl Function<'_, '_, '_> {
                 result,
                 op,
                 operand,
-                ..
+                fail,
             } => {
                 let v = self.get(operand);
                 let t = self.body.values[operand.index()];
                 let v = match op {
                     UnaryOp::Neg if t.is_float() => self.b.ins().fneg(v),
                     UnaryOp::Neg => {
-                        return Err(unsupported("checked negation needs the failure ABI"));
+                        let zero = self.b.ins().iconst(ty(t), 0);
+                        let (value, overflow) = self.b.ins().ssub_overflow(zero, v);
+                        self.guard(overflow, 0, fail)?;
+                        value
                     }
                     UnaryOp::Not => self.b.ins().icmp_imm_s(ir::condcodes::IntCC::Equal, v, 0),
                     UnaryOp::BitNot => self.b.ins().bnot(v),
@@ -224,15 +250,16 @@ impl Function<'_, '_, '_> {
                 op,
                 left,
                 right,
-                ..
+                fail,
             } => {
                 let t = self.body.values[left.index()];
-                if op.can_fail(t) {
-                    return Err(unsupported("checked arithmetic needs the failure ABI"));
-                }
                 let l = self.get(left);
                 let r = self.get(right);
-                let v = self.binary(op, t, l, r)?;
+                let v = if op.can_fail(t) {
+                    self.checked_binary(op, t, l, r, fail)?
+                } else {
+                    self.binary(op, t, l, r)?
+                };
                 self.set(result, v);
             }
             Inst::Compare {
@@ -339,11 +366,6 @@ impl Function<'_, '_, '_> {
             }
             Inst::Call { call } => {
                 let call = &self.body.calls[call.index()];
-                if call.fail.is_some() {
-                    return Err(unsupported(
-                        "call failure successor requires the core runtime ABI",
-                    ));
-                }
                 let signature = &self.signatures[call.signature.index()];
                 let storage = signature.indirect.then(|| signature.storage(&mut self.b));
                 let mut args = Vec::new();
@@ -372,7 +394,9 @@ impl Function<'_, '_, '_> {
                     Callee::Runtime(_) => return Err(unsupported("task runtime call")),
                 };
                 let results = self.b.inst_results(inst).to_vec();
-                let results = signature.unpack(&mut self.b, &results, storage);
+                let mut results = signature.unpack(&mut self.b, &results, storage);
+                let status = results.pop().unwrap();
+                self.call_failure(status, call.fail)?;
                 for (&v, result) in call
                     .results
                     .get(&self.body.pools.values)

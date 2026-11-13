@@ -143,6 +143,16 @@ impl Function<'_, '_, '_> {
     ) -> (Value, Value) {
         let (signed, width) = t.int().unwrap();
         let native = ty(t);
+        if mode == ArithMode::Wrapping {
+            let value = match op {
+                ArithOp::Add => self.b.ins().iadd(l, r),
+                ArithOp::Sub => self.b.ins().isub(l, r),
+                ArithOp::Mul => self.b.ins().imul(l, r),
+                ArithOp::Div => unreachable!("checked division only"),
+            };
+            let unused = self.b.ins().iconst(types::I8, 0);
+            return (value, unused);
+        }
         if op == ArithOp::Div {
             let zero = self.b.ins().icmp_imm_s(IntCC::Equal, r, 0);
             let fail = if signed {

@@ -12,6 +12,9 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+#[path = "support/front.rs"]
+mod front;
+
 static NEXT: AtomicU64 = AtomicU64::new(0);
 struct Scratch(PathBuf);
 impl Scratch {
@@ -68,19 +71,18 @@ fn execute_limit(module: &c::Module, runs: &[(FuncId, Vec<u64>)], optimize: bool
     ));
     source.push('\n');
     for (i, s) in module.signatures.iter().enumerate() {
-        if s.results.len() > 1 {
+        if !s.results.is_empty() {
             write!(source, "struct r{i} {{ ").unwrap();
             for (j, &t) in s.results.iter().enumerate() {
                 write!(source, "{} v{j};", ctype(t)).unwrap();
             }
-            source.push_str(" };\n");
+            source.push_str("uint8_t status; };\n");
         }
     }
     for f in &module.functions {
         let s = &module.signatures[f.signature.index()];
         let result = match s.results.as_slice() {
-            [] => "void".into(),
-            [t] => ctype(*t).into(),
+            [] => "uint8_t".into(),
             _ => format!("struct r{}", f.signature.0),
         };
         write!(
@@ -93,10 +95,11 @@ fn execute_limit(module: &c::Module, runs: &[(FuncId, Vec<u64>)], optimize: bool
             source.push_str(", void*");
         }
         for p in &s.params {
-            let Param::Value(t) = p else {
-                panic!("scalar test")
+            let c = match p {
+                Param::Value(t) => ctype(*t),
+                Param::Address(_) => "void*",
             };
-            write!(source, ", {}", ctype(*t)).unwrap();
+            write!(source, ", {c}").unwrap();
         }
         source.push_str(");\n");
     }
@@ -106,17 +109,34 @@ fn execute_limit(module: &c::Module, runs: &[(FuncId, Vec<u64>)], optimize: bool
         let function = &module.functions[f.index()];
         let s = &module.signatures[function.signature.index()];
         let report = eval::run(module, *f, args, limit);
-        let Outcome::Returned(values) = report.outcome else {
-            panic!("infallible test failed")
-        };
-        expected.extend(values);
+        match &report.outcome {
+            Outcome::Returned(values) => {
+                expected.push(0);
+                expected.push(values.len() as u64);
+                expected.extend(values);
+            }
+            Outcome::Failed(causes) => {
+                expected.push(1);
+                expected.push(causes.len() as u64);
+                for cause in causes {
+                    expected.push(match cause.as_str() {
+                        "Overflow" => 0,
+                        "Bounds" => 1,
+                        "Division" => 2,
+                        "Unwrap" => 3,
+                        "Fail" => 4,
+                        "Cancelled" => 5,
+                        "Capacity" => 6,
+                        _ => panic!("unknown cause {cause}"),
+                    });
+                }
+            }
+        }
         expected.push(report.used);
         source.push_str("{\n");
-        writeln!(
-            source,
-            "HirselCoreContext *ctx = hirsel_core_context_new(UINT64_C({limit}));"
-        )
-        .unwrap();
+        let startup =
+            hirsel_core_layout::charge::TASK_RECORD + hirsel_core_layout::charge::CAUSE_CELL;
+        writeln!(source,"HirselCoreContext *ctx = hirsel_core_context_new(UINT64_C({})); HirselCoreAllocation startup = hirsel_core_task_start(ctx); if (!startup.pointer) return 4;",limit + startup).unwrap();
         for (j, (p, arg)) in s.params.iter().zip(args).enumerate() {
             let Param::Value(t) = p else {
                 panic!("scalar test")
@@ -133,10 +153,10 @@ fn execute_limit(module: &c::Module, runs: &[(FuncId, Vec<u64>)], optimize: bool
                 writeln!(source, "a{j} = ({})bits{j};", ctype(*t)).unwrap();
             }
         }
-        let result = match s.results.as_slice() {
-            [] => String::new(),
-            [t] => format!("{} value = ", ctype(*t)),
-            _ => format!("struct r{} value = ", function.signature.0),
+        let result = if s.results.is_empty() {
+            "uint64_t status = ".into()
+        } else {
+            format!("struct r{} value = ", function.signature.0)
         };
         write!(
             source,
@@ -148,12 +168,18 @@ fn execute_limit(module: &c::Module, runs: &[(FuncId, Vec<u64>)], optimize: bool
             write!(source, ", a{j}").unwrap();
         }
         source.push_str(");\n");
+        if !s.results.is_empty() {
+            source.push_str("uint64_t status = value.status;\n");
+        }
+        source.push_str("fwrite(&status,8,1,stdout); HirselCoreCauseCell *causes = 0; if (status) { causes = hirsel_core_causes_take(ctx); uint64_t count = 0; for(const HirselCoreCauseCell *c = causes; c; c = hirsel_core_cause_next(c)) count++; fwrite(&count,8,1,stdout); for(const HirselCoreCauseCell *c = causes; c; c = hirsel_core_cause_next(c)) { uint64_t kind = hirsel_core_cause_value(c)->kind; fwrite(&kind,8,1,stdout); } } else {\n");
+        writeln!(
+            source,
+            "uint64_t count = {}; fwrite(&count,8,1,stdout);",
+            s.results.len()
+        )
+        .unwrap();
         for (j, t) in s.results.iter().enumerate() {
-            let expr = if s.results.len() == 1 {
-                "value".into()
-            } else {
-                format!("value.v{j}")
-            };
+            let expr = format!("value.v{j}");
             writeln!(source, "uint64_t out{i}_{j} = 0;").unwrap();
             // Values are raw low bits, even when the language type is signed.
             if t.is_float() {
@@ -174,7 +200,8 @@ fn execute_limit(module: &c::Module, runs: &[(FuncId, Vec<u64>)], optimize: bool
             }
             writeln!(source, "fwrite(&out{i}_{j}, 8, 1, stdout);").unwrap();
         }
-        writeln!(source,"HirselCoreAllocation probe = hirsel_core_limit_enter(ctx, UINT64_MAX); uint64_t used = UINT64_C({limit}) - probe.capacity.available; fwrite(&used,8,1,stdout); hirsel_core_context_free(ctx);").unwrap();
+        source.push_str("}\n");
+        writeln!(source,"HirselCoreAllocation probe = hirsel_core_limit_enter(ctx, UINT64_MAX); uint64_t used = UINT64_C({limit}) - probe.capacity.available; fwrite(&used,8,1,stdout); hirsel_core_causes_drop(causes); hirsel_core_context_free(ctx);").unwrap();
         source.push_str("}\n");
     }
     source.push_str("return 0; }\n");
@@ -273,7 +300,7 @@ fn runtime_independent_arithmetic_sample_functions_match_evaluator() {
 
 #[test]
 fn slots_loops_calls_and_c_struct_returns_match_evaluator() {
-    let source = r#"core v0
+    let source = r#"core v1
 sig g0 = (u64) -> (u64, u64, u64)
 sig g1 = (u64) -> (u32, f32)
 sig g2 = (u32, f32) -> (u32, f32)
@@ -491,11 +518,6 @@ fn every_whole_v0_sample_matches_evaluator() {
 
 #[test]
 fn every_front_end_run_case_matches_evaluator() {
-    use hirsel_core_front::{Emitter, ModuleInput, Program};
-    use hirsel_core_ids::PackageId;
-    use hirsel_core_resolve::{Environment, ModuleId, NameIndex, PackageManifest};
-    use hirsel_core_syntax::{ParseMode, parse};
-    use std::collections::HashMap;
     fn files(path: &std::path::Path, out: &mut Vec<PathBuf>) {
         for entry in fs::read_dir(path).unwrap() {
             let path = entry.unwrap().path();
@@ -516,73 +538,7 @@ fn every_front_end_run_case_matches_evaluator() {
         if !source.lines().any(|l| l.starts_with("// expect: run ")) {
             continue;
         }
-        let core = PackageId {
-            name: "core".into(),
-            version: "1".into(),
-        };
-        let app = PackageId {
-            name: "app".into(),
-            version: "1".into(),
-        };
-        let mut modules = Vec::new();
-        for m in PackageManifest::directory(&root.join("core"), core.clone(), true)
-            .unwrap()
-            .read()
-            .unwrap()
-        {
-            assert!(m.parsed.diagnostics.is_empty());
-            modules.push(ModuleInput {
-                id: m.module,
-                syntax: m.parsed.syntax,
-            });
-        }
-        let id = ModuleId {
-            package: app.clone(),
-            modules: vec!["main".into()],
-        };
-        let parsed = parse(&source, ParseMode::Source);
-        assert!(parsed.diagnostics.is_empty(), "{}", file.display());
-        modules.push(ModuleInput {
-            id,
-            syntax: parsed.syntax,
-        });
-        let mut index = NameIndex::new(Environment::default());
-        for m in &modules {
-            index.add_module(&m.id);
-            for (i, item) in m.syntax.items.iter().enumerate() {
-                index.index_item(&m.id, i as u32, item);
-            }
-        }
-        index.configure_core(core);
-        let program = Program::declare(&index, &modules);
-        assert!(
-            program.refusals.is_empty(),
-            "{}: {:?}",
-            file.display(),
-            program.refusals
-        );
-        let mut emitter = Emitter::new();
-        let mut functions = HashMap::new();
-        for (i, f) in program.fns.iter().enumerate() {
-            if f.path.0.package != app || f.body.is_none() {
-                continue;
-            }
-            let checked = program.check_lower(i, &mut emitter);
-            assert!(
-                checked.refusals.is_empty(),
-                "{}: {:?}",
-                file.display(),
-                checked.refusals
-            );
-            assert!(
-                checked.gaps.is_empty(),
-                "{}: {:?}",
-                file.display(),
-                checked.gaps
-            );
-            functions.insert(f.path.0.name.clone(), checked.function.unwrap());
-        }
-        let module = emitter.module;
+        let (module, functions) = front::lower(&root, &source);
         let mut runs = Vec::new();
         for line in source
             .lines()

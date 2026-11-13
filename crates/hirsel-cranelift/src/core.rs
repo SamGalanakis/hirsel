@@ -12,6 +12,7 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use hirsel_core_ir::{self as c, *};
 
 mod abi;
+mod failure;
 mod function;
 mod memory;
 mod place;
@@ -73,6 +74,14 @@ fn ty(t: Ty) -> ir::Type {
     }
 }
 
+pub(super) struct Tables<'a> {
+    input: &'a c::Module,
+    layouts: &'a [hirsel_core_layout::Recipe],
+    signatures: &'a [abi::Signature],
+    functions: &'a [cranelift_module::FuncId],
+    statics: &'a [cranelift_module::DataId],
+}
+
 pub(crate) fn isa(options: &Options<'_>) -> Result<cranelift_codegen::isa::OwnedTargetIsa> {
     let refuse = |message: String| Error::Target(format!("{}: {message}", options.target));
     let mut flags = settings::builder();
@@ -120,9 +129,6 @@ pub fn emit_object_with_layouts(
     )
     .map_err(error)?;
     let mut object = ObjectModule::new(builder);
-    if input.signatures.iter().any(|s| s.never) {
-        return Err(unsupported("never signatures require the core failure ABI"));
-    }
     let signatures: Vec<_> = input.signatures.iter().map(abi::Signature::new).collect();
     let mut functions = Vec::new();
     for f in &input.functions {
@@ -157,6 +163,13 @@ pub fn emit_object_with_layouts(
         object.define_data(id, &desc).map_err(error)?;
         statics.push(id);
     }
+    let tables = Tables {
+        input,
+        layouts,
+        signatures: &signatures,
+        functions: &functions,
+        statics: &statics,
+    };
     for (index, f) in input.functions.iter().enumerate() {
         let Some(body) = &f.body else { continue };
         let sig = &signatures[f.signature.index()];
@@ -164,17 +177,7 @@ pub fn emit_object_with_layouts(
         context.func.signature = sig.clif.clone();
         let mut builder_context = FunctionBuilderContext::new();
         let builder = FunctionBuilder::new(&mut context.func, &mut builder_context);
-        function::emit(
-            &mut object,
-            builder,
-            body,
-            input,
-            layouts,
-            sig,
-            &signatures,
-            &functions,
-            &statics,
-        )?;
+        function::emit(&mut object, builder, body, sig, &tables)?;
         object
             .define_function(functions[index], &mut context)
             .map_err(error)?;

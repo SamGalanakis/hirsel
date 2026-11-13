@@ -40,7 +40,7 @@ impl Function<'_, '_, '_> {
                 charge,
                 size,
                 align,
-                fail: None,
+                fail,
             } => {
                 let ctx = self.context;
                 let charge = self.get(charge);
@@ -65,6 +65,15 @@ impl Function<'_, '_, '_> {
                 )?;
                 self.set(result, values[0]);
                 self.set(available, values[2]);
+                let refused = self.b.ins().icmp_imm_s(IntCC::Equal, values[0], 0);
+                let check = self.b.create_block();
+                let done = self.b.create_block();
+                self.b.ins().brif(refused, check, &[], done, &[]);
+                self.b.switch_to_block(check);
+                let grant = self.c_call("hirsel_core_allocation_status", &[p, p], &[boolean], &[ctx, values[0]])?[0];
+                self.guard(grant, 6, fail)?;
+                self.b.ins().jump(done, &[]);
+                self.b.switch_to_block(done);
             }
             Inst::Case { result, address } => {
                 let value = self.case(address, None)?.unwrap();
@@ -76,7 +85,7 @@ impl Function<'_, '_, '_> {
             Inst::Free { block, charge } => {
                 let block = self.get(block);
                 let charge = self.get(charge);
-                self.c_call("hirsel_core_free", &[p, u], &[], &[block, charge])?;
+                self.c_call("hirsel_core_free_value", &[p, u], &[], &[block, charge])?;
             }
             Inst::Copy { to, from, bytes } => {
                 let to = self.addr(to);

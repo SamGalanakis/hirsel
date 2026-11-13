@@ -354,16 +354,20 @@ fn try_send_returns_owner_and_receiver_cleans_reverse_fifo_despite_failures() {
                 0
             );
         }
+        // FAIL-3: a refused publication returns the exact original owner, untouched.
+        let retained = (resources[2].pointer, resources[2].site);
         assert_eq!(
             hirsel_core_try_send(c.sender, (&mut resources[2] as *mut Resource).cast()),
             1
         );
+        assert_eq!((resources[2].pointer, resources[2].site), retained);
         context.current.inject(1, true);
         assert_eq!(hirsel_core_receiver_drop(&mut context, c.receiver), 1);
         assert_eq!(
             hirsel_core_try_send(c.sender, (&mut resources[2] as *mut Resource).cast()),
             2
         );
+        assert_eq!((resources[2].pointer, resources[2].site), retained);
         assert_eq!(
             drop_resource(&mut context, (&mut resources[2] as *mut Resource).cast()),
             1
@@ -907,3 +911,6 @@ fn unjoined_failed_child_frees_the_moved_string_backing() {
     }
     assert_eq!(run(abandon, ()).0, 1);
 }
+
+#[path = "rule_tasks_tests.rs"]
+mod rule_tasks_tests;

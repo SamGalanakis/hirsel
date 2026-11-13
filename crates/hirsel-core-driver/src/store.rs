@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAGIC: &[u8; 8] = b"HCORE\0\0\0";
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 const HEADER: usize = 12;
 const TRAILER: usize = 40;
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -57,7 +57,11 @@ impl ArchiveWriter {
         let start = self.buffer.len() as u64;
         // serialize_into visits the borrowed tables once. serialize() first counts
         // their encoded size and would add a complete second traversal.
-        bincode::serialize_into(&mut self.buffer, row).map_err(io::Error::other)?;
+        use bincode::Options;
+        bincode::DefaultOptions::new()
+            .with_varint_encoding()
+            .serialize_into(&mut self.buffer, row)
+            .map_err(io::Error::other)?;
         Ok(Record {
             start,
             len: self.buffer.len() as u64 - start,

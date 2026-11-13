@@ -78,11 +78,7 @@ fn refused_body_is_published_and_unreached_demand_is_explicit() {
             .function
             .is_none()
     );
-    let absent = ModuleId {
-        package: package("app"),
-        modules: vec!["absent".into()],
-    }
-    .definition("missing");
+    let absent = DefPath::from_full("app@1/absent/missing").unwrap();
     assert!(
         product
             .demand(&absent)
@@ -125,11 +121,7 @@ fn unrelated_parse_failure_does_not_suppress_a_valid_body() {
         .check(req, &mut Meter::new(false))
         .unwrap();
     assert!(!product.accepted());
-    let answer = ModuleId {
-        package: package("app"),
-        modules: vec!["main".into()],
-    }
-    .definition("answer");
+    let answer = DefPath::from_full("app@1/main/answer").unwrap();
     let d = product.demand(&answer).unwrap();
     assert_eq!(
         eval::run(&d.ir, d.check.function.unwrap(), &[], 1_000_000).outcome,

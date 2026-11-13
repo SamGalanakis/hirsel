@@ -447,6 +447,20 @@ fn image_signature_use_skips_source_and_body_decoding() {
     );
     assert_eq!(names(&checked), ["caller"]);
     assert_eq!((opened.decoded_files(), opened.decoded_bodies()), (0, 0));
+    let caller = checked.definitions.values().next().unwrap();
+    assert_eq!(
+        caller
+            .key
+            .signatures
+            .keys()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>(),
+        [
+            "app@1/main/caller",
+            "core@1/lib/Number",
+            "core@1/lib/answer"
+        ]
+    );
     let answer = DefPath::from_full("core@1/lib/answer").unwrap();
     let body = checked.demand_body(&answer).unwrap();
     assert_eq!(

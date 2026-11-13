@@ -134,7 +134,12 @@ impl CheckProduct {
                     continue;
                 }
                 if let Some(header) = self.headers.get(&path) {
-                    pending.extend(header.reads.iter().cloned().map(|p| (p, false)));
+                    pending.extend(
+                        header
+                            .reads
+                            .iter()
+                            .map(|&id| (self.index.definition_path(id), false)),
+                    );
                 }
             }
         }

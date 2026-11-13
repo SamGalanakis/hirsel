@@ -1,6 +1,6 @@
 //! Definition keys keep implementation edits separate from signature dependencies.
 use super::*;
-use hirsel_core_resolve::{LookupResult, LookupScope, Target};
+use hirsel_core_resolve::{DefinitionId, LookupResult, LookupScope, Target};
 use hirsel_core_syntax::{Item, NodeKind};
 use std::collections::BTreeSet;
 
@@ -14,7 +14,9 @@ pub struct DefinitionKey {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Header {
     digest: ContentHash,
-    pub(crate) reads: Vec<DefPath>,
+    // Publication preserves definition IDs, and requests append to that index.
+    // Signature dependencies are already resolved by the producing request.
+    pub(crate) reads: Vec<DefinitionId>,
     pub(crate) body_reads: Vec<DefPath>,
     pub(crate) has_body: bool,
     pub(crate) header_end: u32,
@@ -123,7 +125,15 @@ impl Keys {
                 let mut body_reads = BTreeSet::new();
                 for name in &resolution.names {
                     if (item.tree.node(name.node).origin.span.start as usize) < end {
-                        targets(index, m.id, name.target, &mut reads);
+                        match name.target {
+                            Target::Definition(id) => {
+                                reads.insert(id);
+                            }
+                            Target::ContextualConstructor { name } => {
+                                reads.extend(index.constructor_candidates(m.id, name));
+                            }
+                            _ => {}
+                        }
                     } else {
                         targets(index, m.id, name.target, &mut body_reads);
                     }
@@ -160,32 +170,18 @@ impl Keys {
         Ok(keys)
     }
     fn dependency(&self, index: &NameIndex, id: usize) -> io::Result<&Dependencies> {
+        hirsel_core_front::cost_scope!("key query", "dependency lookup");
         self.dependencies.get_or_try_init(id as u64, || {
+            hirsel_core_front::cost_scope!("key query", "dependency miss");
             let path = self.path(index, hirsel_core_resolve::DefinitionId(id as u32));
             let h = self.headers.get(path.as_ref()).ok_or_else(|| {
                 io::Error::other(format!(
                     "core signature demand outside reached definitions: {path}"
                 ))
             })?;
-            let mut reads = Vec::with_capacity(h.reads.len());
-            for read in &h.reads {
-                let module = index.module(&ModulePath {
-                    package: read.0.package.clone(),
-                    modules: read.0.modules.clone(),
-                });
-                let id = module
-                    .zip(index.symbols.find(&read.0.name))
-                    .and_then(|(m, n)| index.definition(m, n))
-                    .ok_or_else(|| {
-                        io::Error::other(format!(
-                            "core signature demand outside reached definitions: {read}"
-                        ))
-                    })?;
-                reads.push(id.0 as usize);
-            }
             Ok(Dependencies {
                 digest: h.digest,
-                reads,
+                reads: h.reads.iter().map(|id| id.0 as usize).collect(),
             })
         })
     }
@@ -279,63 +275,70 @@ impl Keys {
                 LookupResult::Ambiguous | LookupResult::Missing => {}
             }
         }
-        let mut signatures = BTreeMap::new();
-        let base = index.definitions.base_len();
-        let mut seen = vec![false; index.definitions.len() - base];
-        let mut library_seen = BTreeSet::new();
-        while let Some(id) = pending.pop() {
-            if if id >= base {
-                std::mem::replace(&mut seen[id - base], true)
-            } else {
-                !library_seen.insert(id)
-            } {
-                continue;
+        let signatures = {
+            hirsel_core_front::cost_scope!("key work", "signature closure");
+            let mut signatures = BTreeMap::new();
+            let base = index.definitions.base_len();
+            let mut seen = vec![false; index.definitions.len() - base];
+            let mut library_seen = BTreeSet::new();
+            while let Some(id) = pending.pop() {
+                if if id >= base {
+                    std::mem::replace(&mut seen[id - base], true)
+                } else {
+                    !library_seen.insert(id)
+                } {
+                    continue;
+                }
+                let path = self.path(index, hirsel_core_resolve::DefinitionId(id as u32));
+                let dependency = self.dependency(index, id)?;
+                signatures.insert(Arc::clone(path), dependency.digest);
+                pending.extend(dependency.reads.iter().copied());
             }
-            let path = self.path(index, hirsel_core_resolve::DefinitionId(id as u32));
-            let dependency = self.dependency(index, id)?;
-            signatures.insert(Arc::clone(path), dependency.digest);
-            pending.extend(dependency.reads.iter().copied());
-        }
-        let lookups: Vec<_> = resolution
-            .reads
-            .iter()
-            .map(|r| {
-                let (kind, local, module_scope, package_scope) = match r.scope {
-                    LookupScope::Local(n) => (0, n, None, None),
-                    LookupScope::Bind(n) => (1, n, None, None),
-                    LookupScope::Label(n) => (2, n, None, None),
-                    LookupScope::Module(m) => (3, 0, Some(self.module(index, m)), None),
-                    LookupScope::Prelude(p) => (4, 0, None, Some(self.package(index, p))),
-                    LookupScope::Modules(p) => (5, 0, None, Some(self.package(index, p))),
-                    LookupScope::Children(m) => (6, 0, Some(self.module(index, m)), None),
-                    LookupScope::Variants(m) => (7, 0, Some(self.module(index, m)), None),
-                };
-                let result = match r.result {
-                    LookupResult::Found(t) => (0, Some(self.target_key(index, module, t))),
-                    LookupResult::Missing => (1, None),
-                    LookupResult::Private(d) => (
-                        2,
-                        Some(self.target_key(index, module, Target::Definition(d))),
-                    ),
-                    LookupResult::Opaque(d) => (
-                        3,
-                        Some(self.target_key(index, module, Target::Definition(d))),
-                    ),
-                    LookupResult::Shadowed(t) => (4, Some(self.target_key(index, module, t))),
-                    LookupResult::Ambiguous => (5, None),
-                };
-                (
-                    r.namespace,
-                    kind,
-                    local,
-                    module_scope,
-                    package_scope,
-                    index.symbols.text(r.symbol),
-                    r.constructor,
-                    result,
-                )
-            })
-            .collect();
+            signatures
+        };
+        let lookups: Vec<_> = {
+            hirsel_core_front::cost_scope!("key work", "lookup rows");
+            resolution
+                .reads
+                .iter()
+                .map(|r| {
+                    let (kind, local, module_scope, package_scope) = match r.scope {
+                        LookupScope::Local(n) => (0, n, None, None),
+                        LookupScope::Bind(n) => (1, n, None, None),
+                        LookupScope::Label(n) => (2, n, None, None),
+                        LookupScope::Module(m) => (3, 0, Some(self.module(index, m)), None),
+                        LookupScope::Prelude(p) => (4, 0, None, Some(self.package(index, p))),
+                        LookupScope::Modules(p) => (5, 0, None, Some(self.package(index, p))),
+                        LookupScope::Children(m) => (6, 0, Some(self.module(index, m)), None),
+                        LookupScope::Variants(m) => (7, 0, Some(self.module(index, m)), None),
+                    };
+                    let result = match r.result {
+                        LookupResult::Found(t) => (0, Some(self.target_key(index, module, t))),
+                        LookupResult::Missing => (1, None),
+                        LookupResult::Private(d) => (
+                            2,
+                            Some(self.target_key(index, module, Target::Definition(d))),
+                        ),
+                        LookupResult::Opaque(d) => (
+                            3,
+                            Some(self.target_key(index, module, Target::Definition(d))),
+                        ),
+                        LookupResult::Shadowed(t) => (4, Some(self.target_key(index, module, t))),
+                        LookupResult::Ambiguous => (5, None),
+                    };
+                    (
+                        r.namespace,
+                        kind,
+                        local,
+                        module_scope,
+                        package_scope,
+                        index.symbols.text(r.symbol),
+                        r.constructor,
+                        result,
+                    )
+                })
+                .collect()
+        };
         Ok(DefinitionKey {
             body: ContentHash::of_bytes(item.source_text().as_bytes()),
             signatures,

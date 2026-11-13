@@ -156,7 +156,8 @@ pub fn push_char(mut s: String, c: char) -> Result[(), Capacity] {
     push_scalar(mut s, v)
 }
 
-// Any scalar value v, growing (or copying out of static storage) first.
+// Any scalar value v, growing (or copying out of static storage) first. One branch per UTF-8
+// width with constant shifts: no shift loop and no shift-amount check.
 fn push_scalar(mut s: String, v: u32) -> Result[(), Capacity] {
     let w: u64 = if v < 0x80 {
         1
@@ -168,22 +169,23 @@ fn push_scalar(mut s: String, v: u32) -> Result[(), Capacity] {
         4
     }
     string.reserve(mut s, w)?
-    let prefix: u32 = if w == 1 {
-        0
-    } else if w == 2 {
-        0xC0
-    } else if w == 3 {
-        0xE0
-    } else {
-        0xF0
-    }
-    let mut shift: u32 = int.narrow(6 * (w - 1))
     let owned = replace(mut s, string.new())
     let mut b = to_bytes(take owned)
-    let _ = list.push(mut b, int.truncate(prefix | (v >> shift)))
-    while shift > 0 {
-        shift -= 6
-        let _ = list.push(mut b, int.truncate(0x80 | ((v >> shift) & 0x3F)))
+    // Room for w bytes is reserved, so no push below admits anything.
+    if w == 1 {
+        let _ = list.push(mut b, int.truncate(v))
+    } else if w == 2 {
+        let _ = list.push(mut b, int.truncate(0xC0 | (v >> 6)))
+        let _ = list.push(mut b, int.truncate(0x80 | (v & 0x3F)))
+    } else if w == 3 {
+        let _ = list.push(mut b, int.truncate(0xE0 | (v >> 12)))
+        let _ = list.push(mut b, int.truncate(0x80 | ((v >> 6) & 0x3F)))
+        let _ = list.push(mut b, int.truncate(0x80 | (v & 0x3F)))
+    } else {
+        let _ = list.push(mut b, int.truncate(0xF0 | (v >> 18)))
+        let _ = list.push(mut b, int.truncate(0x80 | ((v >> 12) & 0x3F)))
+        let _ = list.push(mut b, int.truncate(0x80 | ((v >> 6) & 0x3F)))
+        let _ = list.push(mut b, int.truncate(0x80 | (v & 0x3F)))
     }
     s = of_bytes(take b)
     Ok(())

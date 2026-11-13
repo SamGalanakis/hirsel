@@ -714,6 +714,24 @@ fn push_char_widths() -> bool {
     s == "aé€\u{1F600}" && string.byte_len(s) == 10
 }
 
+// The scalars on each side of every UTF-8 width edge (U+7F | U+80, U+7FF | U+800, U+D7FF and
+// U+E000 around the surrogates, U+FFFF | U+10000, and U+10FFFF), against the same escapes in a
+// literal, which the lexer encodes: 1 + 2 + 2 + 3 + 3 + 3 + 3 + 4 + 4 = 25 bytes.
+// expect: run push_char_width_edges() = true
+fn push_char_width_edges() -> bool {
+    let mut s = string.new()
+    result.unwrap(string.push_char(mut s, '\u{7F}'))
+    result.unwrap(string.push_char(mut s, '\u{80}'))
+    result.unwrap(string.push_char(mut s, '\u{7FF}'))
+    result.unwrap(string.push_char(mut s, '\u{800}'))
+    result.unwrap(string.push_char(mut s, '\u{D7FF}'))
+    result.unwrap(string.push_char(mut s, '\u{E000}'))
+    result.unwrap(string.push_char(mut s, '\u{FFFF}'))
+    result.unwrap(string.push_char(mut s, '\u{10000}'))
+    result.unwrap(string.push_char(mut s, '\u{10FFFF}'))
+    s == "\u{7F}\u{80}\u{7FF}\u{800}\u{D7FF}\u{E000}\u{FFFF}\u{10000}\u{10FFFF}" && string.byte_len(s) == 25
+}
+
 // "aé€" is 61 C3 A9 E2 82 AC: scalars start at 0, 1 and 3, and end at 6.
 // expect: run next_scalar_positions() = 1368364
 fn next_scalar_positions() -> u64 {

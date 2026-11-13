@@ -73,6 +73,25 @@ fn ty(t: Ty) -> ir::Type {
     }
 }
 
+pub(crate) fn isa(options: &Options<'_>) -> Result<cranelift_codegen::isa::OwnedTargetIsa> {
+    let refuse = |message: String| Error::Target(format!("{}: {message}", options.target));
+    let mut flags = settings::builder();
+    for (name, value) in [
+        ("is_pic", "true"),
+        ("enable_verifier", "false"),
+        ("opt_level", if options.optimize { "speed" } else { "none" }),
+    ]
+    .into_iter()
+    .chain(crate::module::STACK_PROBE_SETTINGS)
+    {
+        flags.set(name, value).map_err(|e| refuse(e.to_string()))?;
+    }
+    cranelift_codegen::isa::lookup_by_name(options.target)
+        .map_err(|e| refuse(e.to_string()))?
+        .finish(settings::Flags::new(flags))
+        .map_err(|e| refuse(e.to_string()))
+}
+
 /// Emit CoreIR directly to an x86-64 System V object, using the form's C struct
 /// convention for multiple scalar results. CoreIR is a trusted compiler product;
 /// this entry does not invoke its well-formedness checker or the old pipeline.
@@ -83,18 +102,7 @@ pub fn emit_object(input: &c::Module, options: &Options<'_>) -> Result<Object> {
             "CoreIR entry currently implements the x86-64 Linux C ABI".into(),
         ));
     }
-    let mut flags = settings::builder();
-    for (name, value) in [
-        ("is_pic", "true"),
-        ("enable_verifier", "false"),
-        ("opt_level", if options.optimize { "speed" } else { "none" }),
-    ] {
-        flags.set(name, value).map_err(|e| refuse(e.to_string()))?;
-    }
-    let isa = cranelift_codegen::isa::lookup_by_name(options.target)
-        .map_err(|e| refuse(e.to_string()))?
-        .finish(settings::Flags::new(flags))
-        .map_err(|e| refuse(e.to_string()))?;
+    let isa = isa(options)?;
     let builder = ObjectBuilder::new(
         isa,
         "hirsel-core",

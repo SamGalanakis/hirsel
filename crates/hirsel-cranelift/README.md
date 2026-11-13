@@ -8,7 +8,7 @@ links with the same runtime archive and calls at the same ABI as `hirsel-llvm`.
 select it. The Cranelift parity gate holds it to LLVM's observations.
 
 Allowed dependencies: the pure `hirsel-graph` utility, the shared data crates
-`hirsel-lir`, `hirsel-core-contract` and `hirsel-syntax`, the four Cranelift
+`hirsel-core-ir`, `hirsel-lir`, `hirsel-core-contract` and `hirsel-syntax`, the four Cranelift
 crates and `gimli` 0.33 (DWARF writing). No other implementation crate.
 
 Interface:

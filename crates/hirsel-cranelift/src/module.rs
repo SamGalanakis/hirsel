@@ -271,6 +271,14 @@ pub(crate) struct Emitter<'a> {
     debug_functions: Vec<hirsel_lir::debug::DebugFunction>,
 }
 
+/// Inline probing keeps every emitted frame within the runtime's stack guard.
+/// Both language entry points consume the same policy.
+pub(crate) const STACK_PROBE_SETTINGS: [(&str, &str); 3] = [
+    ("enable_probestack", "true"),
+    ("probestack_strategy", "inline"),
+    ("probestack_size_log2", "12"),
+];
+
 pub(crate) fn isa(target: &TargetSpec, opt: OptLevel) -> Emitted<OwnedTargetIsa> {
     isa_with_verifier(target, opt, hirsel_lir::emission::validate_stages())
 }
@@ -301,15 +309,12 @@ fn isa_with_verifier(target: &TargetSpec, opt: OptLevel, verify: bool) -> Emitte
             },
         ),
         ("preserve_frame_pointers", "true"),
-        // A frame of a page or more touches each page in turn (inline: no libcall), so a
-        // stack overflow always faults in the fiber's guard and becomes the runtime's stack
-        // stop. The interval is one 4 KiB page, within `STACK_GUARD_BYTES`.
-        ("enable_probestack", "true"),
-        ("probestack_strategy", "inline"),
-        ("probestack_size_log2", "12"),
         // i128 parameters and results in register pairs, as LLVM passes them (SysV, AAPCS64).
         ("enable_llvm_abi_extensions", "true"),
-    ] {
+    ]
+    .into_iter()
+    .chain(STACK_PROBE_SETTINGS)
+    {
         flags
             .set(name, value)
             .map_err(|e| refuse(format!("{name}={value}: {e}")))?;
@@ -1446,20 +1451,27 @@ mod probe_tests {
             TargetSpec::aarch64_unknown_linux_gnu(),
         ] {
             for opt in [OptLevel::None, OptLevel::Default, OptLevel::Speed] {
-                let isa = isa(&target, opt).unwrap();
-                let flags = isa.flags();
-                assert!(flags.enable_probestack(), "{}", target.triple);
-                assert!(
-                    matches!(flags.probestack_strategy(), ProbestackStrategy::Inline),
-                    "{}",
-                    target.triple
-                );
-                assert!(
-                    1usize << flags.probestack_size_log2()
-                        <= hirsel_lir::runtime_abi::STACK_GUARD_BYTES,
-                    "{}",
-                    target.triple
-                );
+                let old = isa(&target, opt).unwrap();
+                let core = crate::core::isa(&crate::core::Options {
+                    target: &target.triple,
+                    optimize: opt != OptLevel::None,
+                })
+                .unwrap();
+                for isa in [old, core] {
+                    let flags = isa.flags();
+                    assert!(flags.enable_probestack(), "{}", target.triple);
+                    assert!(
+                        matches!(flags.probestack_strategy(), ProbestackStrategy::Inline),
+                        "{}",
+                        target.triple
+                    );
+                    assert!(
+                        1usize << flags.probestack_size_log2()
+                            <= hirsel_lir::runtime_abi::STACK_GUARD_BYTES,
+                        "{}",
+                        target.triple
+                    );
+                }
             }
         }
     }

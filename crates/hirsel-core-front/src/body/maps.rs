@@ -391,6 +391,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
             n,
         );
+        // The new block and its index do not move during initialization. Compute
+        // the index base once so each store cannot invalidate a carrier reload.
+        let index_base = self.map_index_at(header, entry, zero, n)?;
+        let eight = self.konst(u, 8, n)?;
         let zero_head = self.new_block(&[u]);
         let zero_body = self.new_block(&[]);
         let cleared = self.new_block(&[]);
@@ -400,7 +404,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let more = self.map_compare(CompareOp::Lt, j, index_len, n);
         self.map_branch(more, zero_body, cleared, n);
         self.start(zero_body);
-        let at = self.map_index_at(header, entry, j, n)?;
+        let offset = self.map_binary(BinaryOp::Mul, j, eight, n);
+        let at = self.address(
+            AddressBase::Address(index_base),
+            &[Step::Byte(offset)],
+            PlaceTy::Value(u),
+            n,
+        );
         self.inst(
             Inst::Store {
                 address: at,

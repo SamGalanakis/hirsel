@@ -96,10 +96,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     },
                     n,
                 );
-                // Cross-carrier moves update both counts. A shift keeps the
+                // General transfers count both live sets. A shift keeps the
                 // count and permits self-moves without two mutable borrows.
-                // General transfers count both live sets. Sort's aliases leave
-                // both headers fixed: Hole tracks its exact live set and restores
+                // Sort's aliases leave both headers fixed: Hole tracks its exact live set and restores
                 // xs before the zero-length scratch's structural free.
                 if name == "slots_move" {
                     self.slots_count(source_header, false, n)?;

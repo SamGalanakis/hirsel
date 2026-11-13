@@ -3,13 +3,13 @@
   "basis": "Qualified frozen/source-growth audit43d46518..4fcdeb12. Fixed-manifest population7082/3691->7263/3872lines,351/173->365/187complete bodies. Deque9+1, split cursors2, Mapclone2 new bodies each corpus; changed JSON source adds20lines. All named body-free increments are excluded from growth. Retain all concurrent growth/census histories. Fixed named anchor residual reduced for542fd0f2; raw60000andproduct rules unchanged.",
   "corpora": {
     "m1": {
-      "code_lines": 7371,
+      "code_lines": 7453,
       "check_lower_per_line": 25400,
       "whole_request_per_line": 46700,
       "whole_process_per_line": 46800
     },
     "std": {
-      "code_lines": 3980,
+      "code_lines": 4062,
       "check_lower_per_line": 17500,
       "whole_request_per_line": 36300,
       "whole_process_per_line": 37000
@@ -96,19 +96,19 @@
   },
   "margin": "M1 growth observation+2%, std+5%, rounded up to100. Growth baseline is pre-anchor frozen work plus current compiler own-source minus frozen-source work. Named anchor residual is a fixed absolute instruction count, never part of the60000budget. Other body-free regressions remain red.",
   "finished_budget_per_line": 60000,
-  "forecast_revision": "51b95e82 + type overlay lookup",
+  "forecast_revision": "core-collections-918-slot-sort census; measured process retained from51b95e82 + type overlay lookup",
   "completion_forecast": {
     "m1": {
-      "complete_bodies": 371,
-      "bodies": 371,
+      "complete_bodies": 372,
+      "bodies": 372,
       "missing_check_lower_per_line": 0,
       "additional_publication_per_line": 0,
       "measured_process_per_line": 46897.03757970424,
       "finished_process_per_line": 46897.03757970424
     },
     "std": {
-      "complete_bodies": 193,
-      "bodies": 193,
+      "complete_bodies": 194,
+      "bodies": 194,
       "missing_check_lower_per_line": 0,
       "additional_publication_per_line": 0,
       "measured_process_per_line": 36473.40527638191,
@@ -2726,6 +2726,35 @@
           "whole_request_per_line": 36066.14271356784,
           "whole_process_per_line": 36228.8027638191
         }
+      }
+    },
+    {
+      "from_revision": "4c6529942b9b",
+      "to_revision": "core-collections-918-slot-sort",
+      "reason": "Core stable sort adds one completed public source body and private Hole cleanup; old std sort is removed from the same fixed manifest, so source-body count193->194. Slot aliases hold fixed headers; Hole restores every element and hands the inhabited prefix back with Unmark. Refresh deterministic body/line census only. Numeric ceilings, fixed60000, known residuals and product limits unchanged. No measurement repeated to refresh counts.",
+      "completed_bodies_before": {
+        "m1": [
+          371,
+          371
+        ],
+        "std": [
+          193,
+          193
+        ]
+      },
+      "completed_bodies_after": {
+        "m1": [
+          372,
+          372
+        ],
+        "std": [
+          194,
+          194
+        ]
+      },
+      "code_lines_after": {
+        "m1": 7453,
+        "std": 4062
       }
     }
   ],

@@ -13,17 +13,17 @@ pub opaque type Deque[T]: shareable + send {
     }
     let count = list.len(d.ring.raw)
     let cap = list.capacity(d.ring.raw)
-    let tail = cap - d.head
-    let wrapped: u64 = if count > tail { count - tail } else { 0 }
+    let tail = int.wrapping_sub(cap, d.head)
+    let wrapped: u64 = if count > tail { int.wrapping_sub(count, tail) } else { 0 }
     let moved: u64 = if count > tail { tail } else { count }
     let mut i: u64 = 0
     while count != cap && i < moved {
-        slots_shift(mut d.ring, d.head + i, wrapped + i)
-        i += 1
+        slots_shift(mut d.ring, int.wrapping_add(d.head, i), int.wrapping_add(wrapped, i))
+        i = int.wrapping_add(i, 1)
     }
-    reverse(mut d.ring.raw, 0, wrapped)
-    reverse(mut d.ring.raw, wrapped, count)
-    reverse(mut d.ring.raw, 0, count)
+    reverse(mut d.ring, 0, wrapped)
+    reverse(mut d.ring, wrapped, count)
+    reverse(mut d.ring, 0, count)
     d.head = 0
 }
 
@@ -77,13 +77,17 @@ fn grow[T](mut d: Deque[T]) -> Result[(), Capacity] {
     d.head = 0
     Ok(())
 }
-fn reverse[T](mut xs: List[T], lo: u64, hi: u64) {
+fn reverse[T](mut s: Slots[T], lo: u64, hi: u64) {
     let mut a = lo
     let mut b = hi
     while a < b {
-        b -= 1
-        if a < b { list.swap(mut xs, a, b) }
-        a += 1
+        b = int.wrapping_sub(b, 1)
+        if a < b {
+            let x = slots_take(mut s, a)
+            slots_shift(mut s, b, a)
+            slots_put(mut s, b, take x)
+        }
+        a = int.wrapping_add(a, 1)
     }
 }
 

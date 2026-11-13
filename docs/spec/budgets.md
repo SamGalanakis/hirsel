@@ -35,7 +35,9 @@ that outlives it: a bound scope's result and anything moved outward, the cause c
 failure raised under it ([FAIL-10](failure.md#fail-10-cause-chain)), values in a queue, and a
 task's result. So the lexical end of a limit and the death of what it funded are separate,
 and the limit a block's record leads to is always live. Transferring or refunding across
-tasks is an event in the run's event order ([CONC-10](tasks.md#conc-10-event-order)).
+tasks is an event in the run's event order ([CONC-10](tasks.md#conc-10-event-order)). An
+admission sees exactly the refunds from other tasks that the order puts before the
+admitting task's latest event; an admission that returns `Capacity` is itself an event.
 
 Records form a union-find forest, joined by rank with path compression; each tree's
 representative points to the live limit it leads to, so a refund costs amortised

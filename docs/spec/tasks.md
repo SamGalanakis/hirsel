@@ -145,22 +145,26 @@ cleaned ([T7.7](ownership.md#own-26-the-transition-table)).
 A run has one total order of **events**: spawn, task end, cancellation requests and their
 observation, every `task.check_cancel()`, publication by `send`, every `try_send` decision, delivery by `receive`, every
 change of a channel's sender count, `join`, channel close, every charge or refund that
-crosses tasks ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)), and every `Arc`
-creation, share, release and `try_unwrap`. Each operation observes the state that the order gives.
+crosses tasks ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)), every `Arc`
+creation, share, release and `try_unwrap`, and every admission that returns `Capacity`
+([MEM-21](budgets.md#mem-21-admission)). Each operation observes the state that the order gives.
 The order is chosen by the scheduler provider at the replay point
 ([CAP-8](capabilities.md#cap-8-the-replay-point)); with the same inputs and the same
 recorded choices, every task behaves identically on every engine.
 
-Every event is a point where the scheduler may run another task, and every scheduler
-provider is fair: no task performs unboundedly many events while another task that is
-not waiting performs none, unless that other task computes forever without an event. A
-task is waiting only inside a `waits` operation at a moment it would wait (CONC-7). A
-task that polls (a `try_send` returning `Full`, a failed `try_unwrap`, a `check_cancel`
-that finds no request) is not waiting, so the tasks it polls for reach their events.
-Fairness limits which orders the scheduler may choose; a replay follows the recorded
-order. A task that computes forever without an event is a program error: the run does not
-end, and which events other tasks perform meanwhile is not specified. Each `try_send`
-below is an event, so the parent that drains the gate runs while the child polls:
+A **poll** is a non-waiting operation that returns without effect because of another
+task's state: a `try_send` that returns `Full`, a `task.check_cancel()` that finds no
+request, a `try_unwrap` that returns the `Arc`, and an admission that returns `Capacity`;
+any later operation of that kind is a poll too. Every event is a point where the scheduler
+may run another task, and every scheduler provider is fair: no task performs unboundedly
+many polls while another task that is not waiting performs no event, unless that other
+task computes forever without an event. A task is waiting only inside a `waits` operation
+at a moment it would wait (CONC-7); a polling task is not waiting, so the tasks it polls
+for reach their events. Fairness limits which orders the scheduler may choose; a replay
+follows the recorded order. A task that runs forever with neither a poll nor a wait waits
+for nobody and may keep every other task from running; it is a program error: the run
+does not end, and which events other tasks perform meanwhile is not specified. Each `Full`
+below is a poll, so the parent that drains the gate runs while the child polls:
 
 ```hirsel
 fn wait_gate(tx: Sender[()]) {

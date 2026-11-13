@@ -102,14 +102,14 @@ Inline count offsets remain count=0, payload=8, aligned to 8 on both targets.
 Rc initialization/counts use ordinary u64 stores. Arc initialization uses an
 atomic u64 initialized to 1 before publication; share uses checked relaxed CAS,
 release uses release decrement plus an acquire fence at zero, and unwrap loads
-with acquire. The frozen context event word at offset8 is zero without an
-installed sink. Emitters test it after each Arc operation and call the context-first
-hirsel_core_arc_initialized/shared/released/unwrapped only on the cold nonzero
+with acquire. The frozen context event word at offset8 is nonzero in a running task,
+including without a recorder: failed Arc unwrap must reach poll scheduling. Emitters test it after each Arc operation and call the context-first
+hirsel_core_arc_initialized/shared/released/unwrapped on the nonzero
 branch, before last-release glue. The word points at this pinned task when enabled.
 The root sets it before execution and each child inherits recording but installs
 its own task pointer before publication. It is immutable until the task's run ends.
-The taken hook reads task/run directly from the word, without TLS. Hooks return no
-status and admit/allocate nothing.
+The hook reads task/run directly from the word, without TLS. A failed unwrap
+can schedule after the poll allowance; hooks return no status and admit nothing.
 The scheduler holds its event turn across the count operation and hook.
 Acceptance builds enable memcheck to register alternate stacks; Rust tests do so
 automatically. Normal archives carry no Valgrind stack-registration work.
@@ -143,3 +143,14 @@ drop callback exists. Dropping a chain, including an unjoined failed child,
 frees moved String backing exactly when capacity is nonzero. Prepaid logical
 cell charges and append order remain unchanged. abi_layout.rs and the C header
 publish these offsets; primitive raise passes the complete 40-byte value.
+
+CONC-10 poll fairness uses one allowance of 64 polls per task. The only polls are
+try_send Full, no-request check_cancel, Arc unwrap returning its holder, and
+Capacity refusal. No-request checks and Capacity have event codes 16 and 17;
+foreign CHARGE retains code 15. Successful operations never consume the allowance.
+Poll results are fixed before scheduling and never observe cancellation. Runnable
+pollers defer until already-ready peers have a turn; the provider records its
+choice among eligible peers. This is not a loop-backedge yield or a time quantum.
+MEM-20 foreign refunds stay in prepaid mailboxes until the owning task's event.
+Resuming only binds/normalizes custody. Draining a shared domain at an event
+applies only the current task's pending slots; other owners retain theirs.

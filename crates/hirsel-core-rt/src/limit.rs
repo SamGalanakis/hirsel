@@ -292,10 +292,10 @@ impl Payer {
                 r.outstanding = r.outstanding.wrapping_add(n);
                 Ok(())
             }
-            n => Err(Capacity {
-                requested: n.unwrap_or(u64::MAX),
-                available: r.available,
-            }),
+            n => Err(crate::tasks::capacity_refused(
+                n.unwrap_or(u64::MAX),
+                r.available,
+            )),
         }
     }
     #[cfg(any(test, feature = "testing"))]
@@ -491,12 +491,30 @@ impl Funding {
     fn drain_pending(&self) {
         let domain = self.payer.domain();
         let _remote = domain.remote.lock().unwrap();
-        domain.pending.store(false, Ordering::Relaxed);
         self.drain_locked(false);
+        let f = self.payer.forest();
+        domain.pending.store(
+            (0..f.length).any(|id| {
+                f.slot(id).pending.load(Ordering::Relaxed) != 0
+                    || f.slot(id).pending_zeros.load(Ordering::Relaxed) != 0
+            }),
+            Ordering::Release,
+        );
     }
     fn drain_locked(&self, retired: bool) {
         let f = self.payer.forest();
         for id in 0..f.length {
+            if !retired {
+                let pending = f.slot(id).pending.load(Ordering::Relaxed) != 0
+                    || f.slot(id).pending_zeros.load(Ordering::Relaxed) != 0;
+                if !pending {
+                    continue;
+                }
+                let canonical = f.find(id);
+                if f.record(canonical).live.owner != crate::tasks::current_id() {
+                    continue;
+                }
+            }
             let bytes = f.slot(id).pending.swap(0, Ordering::Relaxed);
             if bytes != 0 {
                 f.refund(id, bytes);
@@ -614,10 +632,7 @@ impl Funding {
         // SAFETY: the task exclusively owns this live canonical context record.
         let r = unsafe { &mut *self.raw_local() };
         if injected || bytes > r.available {
-            return Err(Capacity {
-                requested: bytes,
-                available: r.available,
-            });
+            return Err(crate::tasks::capacity_refused(bytes, r.available));
         }
         r.available = r.available.wrapping_sub(bytes);
         Ok(Live {

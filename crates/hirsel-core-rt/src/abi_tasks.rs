@@ -31,13 +31,13 @@ pub(crate) unsafe fn task_handover(context: *mut Context) {
         (*context).current.handover();
     }
 }
-/// Drain completed remote refunds before this task resumes pure code.
+/// Rebind task custody without making foreign refunds visible. Only the
+/// owning task's semantic events drain its prepaid refund mailboxes (MEM-20).
 #[inline(always)]
 pub(crate) fn task_resume(context: *mut Context) {
     // SAFETY: the cooperative scheduler owns this task's exclusive execution.
     unsafe {
         (*context).current.bind();
-        (*context).current.drain();
         (*context).current.normalize();
     }
 }
@@ -69,3 +69,10 @@ pub use crate::tasks::{
 pub(crate) fn payer_lease<R>(operation: impl FnOnce() -> R) -> R {
     operation()
 }
+
+/// Poll events: CHECK_CANCEL=16, CAPACITY=17 (CHARGE retains 15). A Capacity
+/// snapshot is recorded before the scheduling turn, admits nothing and observes
+/// no cancellation. The cold hook is shared by normal and scope admission.
+/// Owning-task events alone publish foreign refunds (MEM-20); task_resume only
+/// rebinds custody. abi_layout.rs and the context's frozen offsets are unchanged.
+pub use crate::tasks::{CAPACITY, CHECK_CANCEL};

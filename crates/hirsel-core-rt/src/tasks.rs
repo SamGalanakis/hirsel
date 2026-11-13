@@ -80,7 +80,8 @@ pub const ARC_SHARE: u8 = crate::abi_layout::ARC_EVENT_SHARE;
 pub const ARC_RELEASE: u8 = crate::abi_layout::ARC_EVENT_RELEASE;
 pub const ARC_UNWRAP: u8 = crate::abi_layout::ARC_EVENT_UNWRAP;
 pub const REFUND: u8 = 14;
-pub const CHECK_CANCEL: u8 = 15;
+pub const CHECK_CANCEL: u8 = 16;
+pub const CAPACITY: u8 = 17;
 /// Only no-effect polls count; effectful operations never consume this allowance.
 pub(crate) const POLLS_PER_TURN: u32 = 64;
 pub const CHARGE: u8 = 15;
@@ -231,6 +232,7 @@ pub(crate) fn event(kind: u8, object: u64, value: u64) {
     }
     // SAFETY: current pins its scheduler; callback cannot suspend or re-enter.
     unsafe {
+        (*(*task).context).current.drain();
         let run = &*(*task).run;
         if let Some(event) = run.provider.event {
             event(
@@ -254,6 +256,7 @@ pub(crate) unsafe fn event_in(context: *const Context, kind: u8, object: u64, va
     // SAFETY: the emitted gate proves the run has this immutable event sink.
     unsafe {
         let task = (*context).events as *const Task;
+        (*context).current.drain();
         let run = &*(*task).run;
         if let Some(sink) = run.provider.event {
             sink(
@@ -275,6 +278,7 @@ pub(crate) unsafe fn event_in(context: *const Context, kind: u8, object: u64, va
 unsafe fn poll_event(task: *mut Task, kind: u8, value: u64) {
     if (kind == TRY_SEND && value == 1)
         || ((kind == ARC_UNWRAP || kind == CHECK_CANCEL) && value == 0)
+        || kind == CAPACITY
     {
         // SAFETY: the active task exclusively owns its counter and event turn.
         unsafe {
@@ -295,6 +299,17 @@ unsafe fn poll_event(task: *mut Task, kind: u8, value: u64) {
                 }
             }
         }
+    }
+}
+/// Cold refusal only: the successful admission's instruction path is untouched.
+/// Snapshot the Capacity before scheduling so the poll never changes its result.
+#[cold]
+#[inline(never)]
+pub(crate) fn capacity_refused(requested: u64, available: u64) -> Capacity {
+    event(CAPACITY, requested, available);
+    Capacity {
+        requested,
+        available,
     }
 }
 pub(crate) fn current_id() -> u64 {

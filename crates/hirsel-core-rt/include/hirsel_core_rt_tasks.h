@@ -28,10 +28,16 @@ HirselCoreChannelNew hirsel_core_channel_new(HirselCoreContext *, uint64_t capac
 HirselCoreChannel *hirsel_core_channel_sender(HirselCoreChannel *);
 typedef struct { bool transferred; uint8_t status; } HirselCoreTransfer;
 HirselCoreTransfer hirsel_core_send(HirselCoreContext *, HirselCoreChannel *, void *input, uint64_t site);
+/* Full is a no-effect poll, not a cancellation point. Poll fairness offers
+   other runnable tasks a turn at least every 64 polls; Ok never switches.
+   The decision is fixed before scheduling, including if a peer drains it. */
 uint8_t hirsel_core_try_send(HirselCoreChannel *, void *input);
 HirselCoreTransfer hirsel_core_receive(HirselCoreContext *, HirselCoreChannel *, void *destination, uint64_t site);
 void hirsel_core_sender_drop(HirselCoreChannel *);
 uint8_t hirsel_core_receiver_drop(HirselCoreContext *, HirselCoreChannel *);
+/* Scheduler event additions: CHARGE 15 (effectful foreign growth),
+   CHECK_CANCEL 16 (no request), CAPACITY 17 (requested, available).
+   Only Full, no-request check, failed Arc unwrap and Capacity count as polls. */
 /* Event dispatch after an emitted Arc update/test. These do not change counts,
    admit storage or return a failure status. release_last follows the last event. */
 #endif

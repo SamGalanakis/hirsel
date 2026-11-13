@@ -15,6 +15,7 @@ struct Trace {
     child_started: bool,
     kind: u8,
     count: std::sync::atomic::AtomicU64,
+    allocation: *mut u8,
 }
 unsafe extern "C" fn record(state: *mut u8, event: Event) {
     // SAFETY: callbacks exclusively borrow pinned host instrumentation.
@@ -59,11 +60,28 @@ unsafe extern "C" fn child(ctx: *mut Context, _: *mut u8, input: *mut u8) -> u8 
     // SAFETY: owns both senders; the parent pins trace until join consumes this task.
     unsafe {
         let input = input.cast::<Input>().read();
+        if (*input.trace).kind == 4 {
+            let block = crate::block::Block::new(&*ctx, Some(800), 800, 8).unwrap();
+            (*input.trace).allocation = block.into_raw().as_ptr();
+        }
         let mut unit = 0u8;
         assert_eq!(hirsel_core_try_send(input.ready, &mut unit), 0);
         assert!(!(*input.trace).parent_ran, "successful try_send switched");
         (*input.trace).child_started = true;
-        if (*input.trace).kind == 1 {
+        if (*input.trace).kind == 4 {
+            loop {
+                match crate::block::Block::new(&*ctx, Some(800), 800, 8) {
+                    Ok(block) => {
+                        drop(block);
+                        break;
+                    }
+                    Err(_) => assert!((*ctx).causes.iter().next().is_none()),
+                }
+            }
+            hirsel_core_sender_drop(input.ready);
+            hirsel_core_sender_drop(input.gate);
+            return 0;
+        } else if (*input.trace).kind == 1 {
             loop {
                 if hirsel_core_check_cancel(ctx, 77) != 0 {
                     hirsel_core_sender_drop(input.ready);
@@ -72,7 +90,10 @@ unsafe extern "C" fn child(ctx: *mut Context, _: *mut u8, input: *mut u8) -> u8 
                 }
             }
         } else if (*input.trace).kind == 3 {
-            while !(*input.trace).parent_ran {
+            loop {
+                if (*input.trace).parent_ran {
+                    break;
+                }
                 assert_eq!(hirsel_core_check_cancel(ctx, 76), 0);
             }
         } else if (*input.trace).kind == 2 {
@@ -143,23 +164,39 @@ unsafe extern "C" fn root(ctx: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
         );
         assert!(!child.task.is_null());
         if (*trace).kind == 3 {
-            while !(*trace).child_started {
+            loop {
+                if (*trace).child_started {
+                    break;
+                }
                 assert_eq!(hirsel_core_check_cancel(ctx, 10), 0);
             }
         }
         assert!(hirsel_core_receive(ctx, ready.receiver, &mut unit, 10).transferred);
         (*trace).parent_ran = true;
-        hirsel_core_cancel(ctx, child.task);
+        if (*trace).kind == 4 {
+            // Foreign drop queues the refund to the child; it is not visible
+            // until a later semantic event owned by the child.
+            crate::abi::hirsel_core_free(ptr::NonNull::new((*trace).allocation).unwrap(), 800);
+        } else {
+            hirsel_core_cancel(ctx, child.task);
+        }
         (*trace)
             .count
             .fetch_sub(1, std::sync::atomic::Ordering::Release);
         assert!(hirsel_core_receive(ctx, gate.receiver, &mut unit, 11).transferred);
         let joined = hirsel_core_join(ctx, child.task, ptr::null_mut(), 12);
-        assert_eq!((joined.kind, joined.status), (2, 0));
+        assert_eq!(
+            (joined.kind, joined.status),
+            (if (*trace).kind == 4 { 0 } else { 2 }, 0)
+        );
         let causes = causes::Causes::from_raw(joined.causes);
         assert_eq!(
             causes.iter().map(|c| (c.kind, c.site)).collect::<Vec<_>>(),
-            [(causes::CANCELLED, 77)]
+            if (*trace).kind == 4 {
+                vec![]
+            } else {
+                vec![(causes::CANCELLED, 77)]
+            }
         );
         drop(causes);
         assert_eq!(hirsel_core_receiver_drop(ctx, ready.receiver), 0);
@@ -217,7 +254,7 @@ fn gate_replay_child() {
             .filter(|e| e.kind == CANCELLED)
             .map(|e| e.value)
             .collect::<Vec<_>>(),
-        [77]
+        if kind == 4 { vec![] } else { vec![77] }
     );
 }
 #[test]
@@ -263,4 +300,8 @@ fn failed_arc_unwrap_polls_fairly_without_cancellation_and_replays() {
 #[test]
 fn all_polling_peers_remain_runnable_when_the_ready_queue_is_empty() {
     run_bounded("3");
+}
+#[test]
+fn capacity_retries_observe_foreign_refunds_only_at_owner_events_and_replay() {
+    run_bounded("4");
 }

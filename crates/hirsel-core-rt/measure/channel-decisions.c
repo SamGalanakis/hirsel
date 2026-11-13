@@ -16,7 +16,11 @@ static uint8_t entry(HirselCoreContext *ctx, const HirselCoreProcessConfig *cfg,
     uint64_t x=7, y=0, checksum=0;
     if(operation==2 && hirsel_core_try_send(c.sender,&x)!=0) abort();
     for(uint64_t i=0;i<count;i++) {
-        if(operation==3) {
+        if(operation==4) {
+            HirselCoreAllocation a=hirsel_core_alloc(ctx,0,8,8,8,false,0);
+            if(!a.pointer) abort();
+            hirsel_core_free(a.pointer,8);
+        } else if(operation==3) {
             if(hirsel_core_check_cancel(ctx,3)) abort();
         } else if(operation==0) {
             HirselCoreTransfer s=hirsel_core_send(ctx,c.sender,&x,1);
@@ -39,7 +43,7 @@ static uint8_t entry(HirselCoreContext *ctx, const HirselCoreProcessConfig *cfg,
 static void diagnostic(void *s,const uint8_t *p,size_t n) { (void)s; fwrite(p,1,n,stderr); }
 int main(int argc,char **argv) {
     if(argc!=3) return 2;
-    operation=strcmp(argv[1],"send")==0 ? 0 : strcmp(argv[1],"ok")==0 ? 1 : strcmp(argv[1],"full")==0 ? 2 : 3;
+    operation=strcmp(argv[1],"send")==0 ? 0 : strcmp(argv[1],"ok")==0 ? 1 : strcmp(argv[1],"full")==0 ? 2 : strcmp(argv[1],"check")==0 ? 3 : 4;
     count=strtoull(argv[2],0,10);
     HirselCoreProcessConfig config={.root_limit=1000000,.diagnostic=diagnostic};
     return hirsel_core_run(&config,entry);

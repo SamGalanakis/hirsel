@@ -1,0 +1,16 @@
+type Input:send { ready:Sender[Bytes] }
+fn worker(take s:Input)->u64 {
+ let first:Bytes=result.unwrap(list.with_capacity(800))
+ result.unwrap(channel.try_send(s.ready,take first))
+ loop {
+  let next:Result[Bytes,Capacity]=list.with_capacity(800)
+  match next { Ok(b)=>return list.capacity(b), Error(_)=>{} }
+ }
+}
+pub fn main(tasks:Tasks)->Result[(),Exit] waits {
+ let (ready,ready_rx):(Sender[Bytes],Receiver[Bytes])=result.unwrap(channel.new(1))
+ let h=result.unwrap(task.spawn(tasks,bytes 1024,Input(ready:take ready),worker))
+ let _=result.unwrap(channel.receive(ready_rx))
+ let n=result.unwrap(task.join(take h))
+ if n==800u64 { Ok(()) } else { Error(Exit(status:1u8)) }
+}

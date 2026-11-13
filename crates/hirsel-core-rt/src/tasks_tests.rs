@@ -655,7 +655,7 @@ fn abandoning_successful_resource_result_propagates_its_finalizer_failure() {
 }
 
 #[test]
-fn foreign_growth_and_received_grant_observe_refunds_before_reusing_room() {
+fn foreign_growth_defers_parent_refunds_until_parent_events_and_received_grant_reuses_room() {
     #[derive(Clone, Copy)]
     struct Input {
         parent: *const Context,
@@ -672,7 +672,9 @@ fn foreign_growth_and_received_grant_observe_refunds_before_reusing_room() {
             drop(Block::from_raw(input.first, 8));
             let second = Block::from_raw(input.second, 8);
             let grown = second.replacement(&*context, Some(16), 16, 8).unwrap();
-            let growth = (*input.parent).available() == before - 8;
+            // MEM-20: the parent's eight-byte refund is still pending: this
+            // child event cannot make it visible to the parent's limit.
+            let growth = (*input.parent).available() == before - 16;
             drop(second);
             drop(grown);
             hirsel_core_finalizer_begin(context, input.resource);

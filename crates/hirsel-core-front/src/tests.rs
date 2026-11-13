@@ -618,6 +618,12 @@ fn layout_names_keep_nested_views() {
 }
 
 #[test]
+fn scalar_constants_are_not_callable() {
+    let failures = run_case(&root().join("cases/body/call-constant-refused.hirsel"));
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
 fn scalar_key_carriage() {
     let failures = run_case(&root().join("cases/body/scalar-key-carriage.hirsel"));
     assert!(failures.is_empty(), "{failures:?}");

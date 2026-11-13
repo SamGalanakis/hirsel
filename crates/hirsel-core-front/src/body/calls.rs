@@ -50,7 +50,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Some(Target::Definition(id)) => match p.by_definition[id.0 as usize].as_ref() {
                 Some(Def::Fn(f)) => *f as usize,
                 Some(Def::Type(d)) => return self.construct_record(n, *d, want),
-                None => return self.gap_ty(callee, "construction is not built"),
+                // A constant is a value, so use the ordinary callable type check.
+                None => return self.call_value(n, callee, args, want, scratch),
             },
             Some(Target::Missing) if self.kind(callee) == NodeKind::Path => {
                 self.halt();
@@ -872,10 +873,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     return None;
                 }
             };
-            let Some(v) = vals[i] else {
-                self.gap(n, "this argument is not built");
-                return None;
-            };
+            // Unit parameters were skipped above. An emission failure halts the
+            // body before this live-call path, so every carried argument has a value.
+            let v = vals[i].expect("a live call has every carried argument value");
             let arg = match r {
                 _ if p.mode == Mode::Mut => {
                     let id = self.e.type_row(self.p, &mut self.t, ty)?;

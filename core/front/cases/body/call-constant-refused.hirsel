@@ -1,0 +1,6 @@
+// LANG-13: a scalar constant has the same non-callable type through grouping.
+// expect: refuse LANG-13 at 5:20
+// expect: refuse LANG-13 at 6:21
+const C:u64=1
+fn direct()->u64 { C(2) }
+fn grouped()->u64 { (C)(2) }

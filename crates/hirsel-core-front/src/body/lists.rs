@@ -878,10 +878,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.gap(n, what);
                 return None;
             }
-            _ => {
-                self.gap(n, "List slice result layout is not built");
-                return None;
-            }
+            // core.list.slice returns View[List[T]] in xs. A List always has
+            // an address-carried fixed carrier, including when T has size zero.
+            _ => unreachable!("a List slice result has its list carrier"),
         };
         let len = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
         let ordered = self.list_compare(CompareOp::Le, lo, hi, n);

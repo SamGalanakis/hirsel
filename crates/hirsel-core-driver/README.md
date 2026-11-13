@@ -84,12 +84,19 @@ build/run JSON. Behind incomplete bodies the census follows resolved source
 names; completed bodies follow emitted calls/function references.
 
 FORM decision 44 gives each main capability/Args parameter one plain `u64`
-operand, filled from `Config.grants[i]` in declaration order. These parameters
-build through the normal source path. The standalone bootstrap refuses missing
-external grants before calling the run boundary. The provider's C constructor
-and close exports are still needed to supply real grants; they must outlive main
-cleanup and close without admission or failure. Owned error results still need
-the checker's cleanup support.
+operand, filled from `Config.grants[i]` in declaration order. The standalone
+bootstrap calls the runtime's OS process constructor with ordered kind/ordinal
+requirements. `--dir <path>` supplies a directory, in Dir parameter order;
+relative paths are resolved at executable startup. Repeat the option for more
+directories. `--grant <kind>` explicitly supplies Net, Clock, Random, Stdout,
+Stderr, Stdin, Env, Process or Tasks. Args is always present, including empty argv.
+These options configure the built executable and are part of its link cache key.
+For example, `hirsel-core run ... --dir . --grant Stdout -- input.txt normal`
+grants the current directory and stdout and passes two program arguments.
+Missing grants refuse configuration before main starts. The runtime closes grants
+after main cleanup and diagnostics, then the bootstrap frees process metadata.
+All three runtime headers are embedded and included in link keys. Owned error
+results still need the checker's cleanup support.
 
 ## Native compilation units
 

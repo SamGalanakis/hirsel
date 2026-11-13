@@ -34,6 +34,10 @@ pub struct NativeOptions {
     pub output: PathBuf,
     pub root_limit: u64,
     pub instance_limit: usize,
+    /// Paths are opened relative to the executable's working directory at startup.
+    pub directories: Vec<String>,
+    /// Explicit host authority, using the runtime's grant-kind bit positions.
+    pub grant_mask: u64,
 }
 #[derive(Debug)]
 pub enum NativeStop {
@@ -206,11 +210,15 @@ impl CheckProduct {
         options: &NativeOptions,
     ) -> Result<BuildProduct, NativeStop> {
         let instances = reached.require()?;
-        let source = self.process_entry(entry, options.root_limit)?;
+        let source = self.process_entry(entry, options)?;
         let objects = self.emit_instances(instances, options)?;
         link(&source, &objects, options)
     }
-    fn process_entry(&self, entry: &DefPath, limit: u64) -> Result<String, NativeStop> {
+    fn process_entry(
+        &self,
+        entry: &DefPath,
+        options: &NativeOptions,
+    ) -> Result<String, NativeStop> {
         let Some((path, binding)) = &self.native_entry else {
             return Err(NativeStop::Entry("no checked entry selected".into()));
         };
@@ -233,8 +241,8 @@ impl CheckProduct {
             &hirsel_cranelift::core::symbol(&instance),
             recipe,
             *exit_offset,
-            parameters.len(),
-            limit,
+            parameters,
+            options,
         )
     }
 }
@@ -320,12 +328,23 @@ pub(crate) fn bind_entry(
     (entry.clone(), binding)
 }
 
+/// Runtime CAP-4 kind numbers. Args is always supplied by the process constructor.
+pub fn grant_kind(name: &str) -> Option<u8> {
+    [
+        "Dir", "Net", "Clock", "Random", "Stdout", "Stderr", "Stdin", "Env", "Process", "Tasks",
+        "Args",
+    ]
+    .iter()
+    .position(|kind| *kind == name)
+    .map(|kind| kind as u8)
+}
+
 fn entry_source(
     symbol: &str,
     recipe: &Recipe,
     exit_offset: Option<u64>,
-    parameters: usize,
-    limit: u64,
+    parameters: &[String],
+    options: &NativeOptions,
 ) -> Result<String, NativeStop> {
     let Layout::Fixed(layout) = &recipe.layout else {
         return Err(NativeStop::Entry("Result needs fixed layout".into()));
@@ -341,19 +360,51 @@ fn entry_source(
     } else {
         "out->kind=1;".into()
     };
-    let parameter_types = ", uint64_t".repeat(parameters);
-    let grants = (0..parameters)
+    let mut ordinals = [0; 11];
+    let mut requirements = Vec::new();
+    for parameter in parameters {
+        let kind = parameter
+            .strip_prefix("core@1/core/")
+            .and_then(grant_kind)
+            .ok_or_else(|| {
+                NativeStop::Entry(format!("unsupported provider parameter {parameter}"))
+            })?;
+        requirements.push(format!("{{{kind},{}}}", ordinals[kind as usize]));
+        ordinals[kind as usize] += 1;
+    }
+    let requirements_len = requirements.len();
+    let requirements = if requirements.is_empty() {
+        "{0,0}".into()
+    } else {
+        requirements.join(",")
+    };
+    let directories_len = options.directories.len();
+    let directories = if options.directories.is_empty() {
+        "{0,0}".into()
+    } else {
+        options
+            .directories
+            .iter()
+            .map(|path| {
+                // Byte escapes preserve paths without treating their contents as C syntax.
+                let literal = path
+                    .as_bytes()
+                    .iter()
+                    .map(|b| format!("\\{b:03o}"))
+                    .collect::<String>();
+                format!("{{(const uint8_t *)\"{literal}\",{}}}", path.len())
+            })
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let parameter_types = ", uint64_t".repeat(parameters.len());
+    let grants = (0..parameters.len())
         .map(|i| format!(",cfg->grants[{i}]"))
         .collect::<String>();
-    let grant_check = if parameters == 0 {
-        String::new()
-    } else {
-        format!(
-            "if(cfg.grants_len < {parameters}) {{ fputs(\"missing entry grants\\n\",stderr); free(args); return 2; }}"
-        )
-    };
+    let limit = options.root_limit;
+    let grant_mask = options.grant_mask;
     Ok(format!(
-        r#"#include "hirsel_core_rt.h"
+        r#"#include "hirsel_core_rt_host.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -367,15 +418,25 @@ static uint8_t entry(HirselCoreContext *ctx, const HirselCoreProcessConfig *cfg,
     if(tag==1) {{ {error} }}
     return 0;
 }}
-static void diagnostic(void *state, const uint8_t *p, size_t n) {{ (void)state; fwrite(p,1,n,stderr); }}
+static const HirselCoreEntryRequirement parameters[] = {{{requirements}}};
+static const HirselCoreView directories[] = {{{directories}}};
 int main(int argc, char **argv) {{
     size_t n=(size_t)(argc-1);
     HirselCoreView *args=calloc(n ? n : 1,sizeof(*args));
     if(!args) {{ fputs("host argument allocation failed\n",stderr); return 102; }}
     for(size_t i=0;i<n;i++) {{ args[i].data=(const uint8_t *)argv[i+1]; args[i].len=strlen(argv[i+1]); }}
-    HirselCoreProcessConfig cfg={{0}}; cfg.root_limit=UINT64_C({limit}); cfg.args=args; cfg.args_len=n; cfg.diagnostic=diagnostic;
-    {grant_check}
-    uint8_t status=hirsel_core_run(&cfg,entry); free(args); return status;
+    HirselCoreOsConfig input={{0}};
+    input.root_limit=UINT64_C({limit}); input.args=args; input.args_len=n;
+    input.directories=directories; input.directories_len={directories_len};
+    input.grant_mask=UINT64_C({grant_mask}); input.stdout_fd=1; input.stderr_fd=2;
+    input.parameters=parameters; input.parameters_len={requirements_len};
+    HirselCoreOpenProcess opened=hirsel_core_os_process_new(&input);
+    free(args);
+    if(opened.error.tag) {{ fprintf(stderr,"entry configuration failed: IoError(%u,%u)\n",opened.error.tag,opened.error.code); return 2; }}
+    const HirselCoreProcessConfig *cfg=hirsel_core_os_process_config(opened.process);
+    uint8_t status=hirsel_core_run(cfg,entry);
+    hirsel_core_os_process_free(opened.process);
+    return status;
 }}
 "#,
         align = layout.align,
@@ -501,7 +562,7 @@ mod tests {
     fn source_request(source: &str, dir: &Path) -> CheckRequest {
         let mut request = crate::tests::request(source, dir);
         let core = dir.join("core.hirsel");
-        std::fs::write(&core, "pub type Result[T, E] = Ok(T) | Error(E)\npub type Exit: key { status: u8 }\npub opaque type Args\npub opaque type Stdout\n").unwrap();
+        std::fs::write(&core, "pub type Result[T, E] = Ok(T) | Error(E)\npub type Exit: key { status: u8 }\npub opaque type Args\npub opaque type Stdout\npub opaque type Dir\npub opaque type Net\npub opaque type Clock\npub opaque type Random\npub opaque type Stderr\npub opaque type Stdin\npub opaque type Env\npub opaque type Process\npub opaque type Tasks\n").unwrap();
         request.inputs.packages[0]
             .dependencies
             .push(package("core"));
@@ -538,6 +599,8 @@ mod tests {
             output: dir.path().join("program"),
             root_limit: 1_048_576,
             instance_limit: 64,
+            directories: vec![],
+            grant_mask: 0,
         };
         let entry = DefPath::from_full("app@1/main/main").unwrap();
         let literal = "pub fn main() -> Result[(), Exit] { Error(Exit(status: 7u8)) }\n";
@@ -629,7 +692,34 @@ mod tests {
         let result = Command::new(built.executable).output().unwrap();
         assert_eq!(result.status.code(), Some(2));
         assert!(result.stdout.is_empty());
-        assert_eq!(result.stderr, b"missing entry grants\n");
+        assert_eq!(result.stderr, b"entry configuration failed: IoError(2,0)\n");
+        options.grant_mask = 1 << grant_kind("Stdout").unwrap();
+        let granted = product.build(&entry, &options).unwrap();
+        assert_eq!(granted.compiled, 0);
+        assert!(
+            granted.linked,
+            "grant configuration is part of the executable key"
+        );
+        run_clean(&granted.executable, 7);
+        let source = "pub fn main(out: Stdout, d: Dir, a: Args, other: Dir, net: Net, clock: Clock, random: Random, err: Stderr, input: Stdin, env: Env, process: Process, tasks: Tasks) -> Result[(), Exit] { Error(Exit(status: 7u8)) }\n";
+        let product = driver
+            .check(source_request(source, dir.path()), &mut Meter::new(false))
+            .unwrap();
+        options.grant_mask = (1 << 10) - 2;
+        let escaped = dir.path().join("directory \"é");
+        std::fs::create_dir(&escaped).unwrap();
+        options.directories = vec![
+            dir.path().display().to_string(),
+            escaped.display().to_string(),
+        ];
+        let built = product.build(&entry, &options).unwrap();
+        run_clean(&built.executable, 7);
+        // Two Dir parameters require two explicit directories, in ordinal order.
+        options.directories.pop();
+        let built = product.build(&entry, &options).unwrap();
+        let result = Command::new(&built.executable).output().unwrap();
+        assert_eq!(result.status.code(), Some(2));
+        assert_eq!(result.stderr, b"entry configuration failed: IoError(2,0)\n");
         // A declared record crosses result and view-argument ABIs between units.
         // Its u64 field has padding before it, so reading it at byte 1 is wrong.
         options.optimize = matches!(backend, Backend::Llvm);

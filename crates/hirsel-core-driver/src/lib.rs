@@ -5,7 +5,7 @@ mod image;
 mod instances;
 mod native;
 mod reachability;
-pub use native::{Backend, BuildProduct, NativeOptions, NativeStop, ObjectProduct};
+pub use native::{Backend, BuildProduct, NativeOptions, NativeStop, ObjectProduct, grant_kind};
 pub use reachability::{GapStop, Reachable};
 mod meter;
 pub use diagnostics::{Diagnostic, IncompleteDiagnostic, SourceSite};

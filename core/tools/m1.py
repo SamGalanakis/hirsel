@@ -110,7 +110,8 @@ def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=No
                 path = entry['package']
                 entry_path = f"{path['name']}@{path['version']}/{entry['module']}/{entry['function']}"
                 command = [str(compiler), 'build', '--inputs', str(inputs), '--entry', entry_path,
-                           '--backend', engine, '--runtime', str(runtime), '--store',
+                           '--backend', engine, '--runtime', str(runtime),
+                           '--dir', '.', '--grant', 'Stdout', '--grant', 'Stderr', '--grant', 'Tasks', '--store',
                            str(store / entry['workload'] / entry['variant']), '--json', '-o', str(binary)]
                 if engine == 'llvm':
                     command.append('--release')

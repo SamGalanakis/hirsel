@@ -56,10 +56,20 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
         .map(|p| PathBuf::from(p).join("bin/clang"))
         .unwrap_or_else(|| PathBuf::from("cc"));
     let mut run_args = Vec::new();
+    let mut directories = Vec::new();
+    let mut grant_mask = 0;
     let mut json = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--json" => json = true,
+            "--dir" if native_command => {
+                directories.push(args.next().ok_or("missing directory grant path")?)
+            }
+            "--grant" if native_command => {
+                let kind = hirsel_core_driver::grant_kind(&args.next().ok_or("missing grant kind")?)
+                    .filter(|kind| (1..=9).contains(kind)).ok_or("expected Net, Clock, Random, Stdout, Stderr, Stdin, Env, Process or Tasks; use --dir for Dir; Args is always present")?;
+                grant_mask |= 1 << kind;
+            }
             "--release" => release = true,
             "--backend" => {
                 backend = Some(args.next().ok_or("missing backend")?.parse::<Backend>()?)
@@ -185,6 +195,8 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
             output: output_path.unwrap_or_else(|| PathBuf::from("program")),
             root_limit,
             instance_limit: 65_536,
+            directories,
+            grant_mask,
         };
         match product.build_reachable(
             selected_entry

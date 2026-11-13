@@ -34,6 +34,8 @@ args=sys.argv
 if args[1]=='image':
     print(json.dumps({'accepted':True, 'image':'canonical'}))
     raise SystemExit(0)
+assert args[args.index('--dir')+1] == '.'
+assert [args[i+1] for i, value in enumerate(args) if value == '--grant'] == ['Stdout', 'Stderr', 'Tasks']
 output=pathlib.Path(args[args.index('-o')+1])
 pathlib.Path(__file__).with_suffix('.count').open('a').write('build\\n')
 output.write_text("#!/usr/bin/env python3\\nimport os,pathlib,sys\\nprint(pathlib.Path(sys.argv[1]).read_text().strip()+os.environ['M1_CASE'])\\npathlib.Path('result').write_bytes(b'done')\\nsys.exit(7)\\n")

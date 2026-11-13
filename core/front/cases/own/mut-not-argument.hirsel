@@ -1,4 +1,4 @@
 // OWN-7, the spec's example: `mut p` is written only as an argument for a `mut` parameter.
 // expect: refuse OWN-7 at 4:28
-// expect: gap mut parameters are not built
+
 fn f(mut x: u64) { let y = mut x }

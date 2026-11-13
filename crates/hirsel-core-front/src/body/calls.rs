@@ -247,9 +247,13 @@ impl<'c, 'a> Cx<'c, 'a> {
                 let p = self.kids(e)[0];
                 match self.place(p) {
                     Ok(Some(at)) => {
+                        if at.shared {
+                            self.refuse("OWN-8", e, "nothing is written through a view");
+                            return true;
+                        }
                         self.use_place(at, Use::Mut(Hold::CallMut(call)), e);
                         self.arg_ty(pt, at.ty, e, found);
-                        self.gap(e, "mut arguments are not built");
+                        *val = self.place_ptr(at, e);
                     }
                     Ok(None) => {
                         let _ = self.expr(p, None);
@@ -465,10 +469,11 @@ impl<'c, 'a> Cx<'c, 'a> {
         let (dest, result_ty) = (sig.dest, sig.results.first().copied());
         // The destination is the first argument: a fresh place the result is written to.
         let dest = dest.map(|id| self.new_slot(PlaceTy::Declared(id), n));
-        let mut out: Vec<Arg> = dest.into_iter().map(Arg::Address).collect();
+        let start = self.b.pools.args.len();
+        self.b.pools.args.extend(dest.map(Arg::Address));
         for (i, p) in g.params.iter().enumerate() {
             let r = match self.rep(p.ty) {
-                Ok(Rep::None) => continue,
+                Ok(Rep::None) if p.mode != Mode::Mut => continue,
                 Ok(r) => r,
                 Err(what) => {
                     self.gap(n, what);
@@ -479,15 +484,21 @@ impl<'c, 'a> Cx<'c, 'a> {
                 self.gap(n, "this argument is not built");
                 return None;
             };
-            out.push(match r {
+            let arg = match r {
+                _ if p.mode == Mode::Mut => {
+                    let id = self.e.type_row(self.p, &mut self.t, p.ty)?;
+                    let a = self.address(AddressBase::Value(v), &[], PlaceTy::Declared(id), n);
+                    Arg::Address(a)
+                }
                 Rep::Place(id) => {
                     let a = self.address(AddressBase::Value(v), &[], PlaceTy::Declared(id), n);
                     Arg::Address(a)
                 }
                 _ => Arg::Value(v),
-            });
+            };
+            self.b.pools.args.push(arg);
         }
-        let args = PoolRange::push(&mut self.b.pools.args, out);
+        let args = PoolRange::new(start as u32, (self.b.pools.args.len() - start) as u32);
         let first = result_ty.map(|t| self.value(t));
         let results = PoolRange::push(&mut self.b.pools.values, first);
         self.b.calls.push(CallSite {

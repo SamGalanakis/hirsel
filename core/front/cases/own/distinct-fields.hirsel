@@ -2,8 +2,8 @@
 // expect: accept
 // expect: gap assignment to this place is not built
 // expect: gap calls to generic functions are not built
-// expect: gap mut arguments are not built
-// expect: gap mut parameters are not built
+// expect: gap cleanup of own values is not built
+
 // expect: gap values of this type are not built
 type Pair { left: List[u8], right: List[u8] }
 type P { a: u64, b: List[u8] }

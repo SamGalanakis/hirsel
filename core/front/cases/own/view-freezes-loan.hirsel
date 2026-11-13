@@ -1,8 +1,8 @@
 // OWN-8/OWN-10, the spec's pair: a let-bound view of `m.items` lasts to the block end, so lending `m.items` mut in that block is refused at the loan; ending the view in an inner block first is accepted.
 // expect: refuse OWN-10 at 15:14
 // expect: gap calls to generic functions are not built
-// expect: gap mut arguments are not built
-// expect: gap mut parameters are not built
+// expect: gap cleanup of own values is not built
+
 // expect: gap values of this type are not built
 type Inbox { items: List[String] }
 fn ok(mut m: Inbox) -> u64 {

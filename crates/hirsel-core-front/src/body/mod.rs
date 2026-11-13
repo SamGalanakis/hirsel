@@ -255,10 +255,15 @@ impl Emitter {
         let mut t = Local::new(&p.types);
         let mut params = vec![];
         for q in &fd.params {
+            let rep = self.rep(p, &mut t, q.ty)?;
             if q.mode == Mode::Mut {
-                return Err("mut parameters are not built");
+                let id = self
+                    .type_row(p, &mut t, q.ty)
+                    .ok_or("values of this type are not built")?;
+                params.push(Param::Address(id));
+                continue;
             }
-            match self.rep(p, &mut t, q.ty)? {
+            match rep {
                 Rep::None => {}
                 Rep::Scalar(s) => params.push(Param::Value(s)),
                 Rep::Place(id) => params.push(Param::Address(id)),
@@ -902,6 +907,10 @@ impl<'c, 'a> Cx<'c, 'a> {
             .binders;
         for pd in &self.fd.params {
             let v = match self.ir_ty(pd.ty) {
+                _ if pd.mode == Mode::Mut && k < entry_params.len() => {
+                    k += 1;
+                    Some(entry_params[k - 1])
+                }
                 Some(_) if k < entry_params.len() => {
                     k += 1;
                     Some(entry_params[k - 1])
@@ -917,7 +926,25 @@ impl<'c, 'a> Cx<'c, 'a> {
                     Mode::Mut => Origin::MutParam,
                     Mode::Take => Origin::TakeParam,
                 };
-                self.declare(b.id, pd.ty, Binding::Value(v), origin, body);
+                let binding = match (pd.mode, v) {
+                    (Mode::Mut, Some(v)) if self.live() => {
+                        let ty = match self.rep(pd.ty) {
+                            Ok(Rep::Scalar(t)) => Some(PlaceTy::Value(t)),
+                            Ok(Rep::Place(id)) => Some(PlaceTy::Declared(id)),
+                            Ok(Rep::None) => self
+                                .e
+                                .type_row(p, &mut self.t, pd.ty)
+                                .map(PlaceTy::Declared),
+                            Err(_) => None,
+                        };
+                        Binding::Slot(
+                            ty.map(|ty| self.address(AddressBase::Value(v), &[], ty, body)),
+                        )
+                    }
+                    (Mode::Take, _) => Binding::Slot(self.slot(pd.ty, v, body)),
+                    _ => Binding::Value(v),
+                };
+                self.declare(b.id, pd.ty, binding, origin, body);
             }
         }
         let result = self.fd.result;

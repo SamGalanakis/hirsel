@@ -1,4 +1,4 @@
 // OWN-11, the spec's example: `take` of a `mut` parameter.
 // expect: refuse OWN-11 at 4:44
-// expect: gap mut parameters are not built
+// expect: gap cleanup of own values is not built
 fn steal(mut xs: List[u64]) -> List[u64] { take xs }

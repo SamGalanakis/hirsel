@@ -137,7 +137,10 @@ impl<'c, 'a> Cx<'c, 'a> {
             return None;
         }
         let address = match r {
-            Rep::None => return None,
+            Rep::None => {
+                let id = self.e.type_row(self.p, &mut self.t, ty)?;
+                self.new_slot(PlaceTy::Declared(id), n)
+            }
             Rep::Scalar(t) => self.new_slot(PlaceTy::Value(t), n),
             Rep::Place(id) => self.new_slot(PlaceTy::Declared(id), n),
         };

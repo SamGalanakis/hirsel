@@ -1,0 +1,4 @@
+// OWN-9/OWN-11: the scalar mut loan blocks the later copy, even for a plain u8.
+// expect: refuse OWN-9 at 4:41
+fn hold(mut a: u8, b: u8) {}
+fn f() { let mut n: u8 = 1; hold(mut n, n) }

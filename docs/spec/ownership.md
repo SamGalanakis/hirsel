@@ -647,7 +647,7 @@ after a failure ([FAIL-7](failure.md#fail-7-one-owner-per-survivor)).
 | row | operation | success | failure | owner after failure |
 |---|---|---|---|---|
 | T1.1 | `T(a: take a, b: e)` | fields evaluated left to right into temporaries; value L, stored inline; nothing admitted | `e` fails | earlier temporaries dropped in reverse by statement cleanup; prop |
-| T1.2 | `T(..) in r`, a resource literal, an owning closure | as T1.1, then `chg` (commit) | `Capacity` | as T1.1, and the error is bare `Capacity` |
+| T1.2 | `T(..) in r`, a resource literal, an owning closure | as T1.1, then `chg` (commit) | `e` fails; `Capacity` at `chg` | `e`: as T1.1. `Capacity`: nothing admitted, cleaned or run. A placed literal's error is bare `Capacity`, its fields being copies. A resource literal's error is `(Capacity, F)`, owning `F`: its one field, or the tuple of all its fields in declaration order; with no fields, bare `Capacity`. An owning closure's is `(Capacity, F)`, `F` its one capture or the tuple of its captures in environment order |
 | T1.3 | `box.new(take x)`, `rc.new(take x)` | as T1.2, then `x` moved into the new node, count 1 for `rc`; no block `x` owns is freed | `Capacity` | the error owns `x` |
 | T1.4 | `arc.new(take x)` | as T1.3; a recorded event ([CONC-10](tasks.md#conc-10-event-order)) | `Capacity`, recorded | the error owns `x` |
 | T1.5 | `clone(x)`, `clone_in(r, x)` | copy L; `chg` per new block; `share` per counted edge | `Capacity` at block k | own blocks copied so far dropped and shares released in reverse, each `ref`; region bytes stay charged until close; `x` untouched |

@@ -318,16 +318,12 @@ type AppError = Io(WriteError) | Mem(Capacity)
 resource type Step { name: String, out: Stdout }
   drop(s) { let _ = stdout.write(s.out, "drop "); let _ = stdout.write(s.out, s.name) }
 
-fn mem[T](take r: Result[T, Capacity]) -> Result[T, AppError] {
-  match take r { Ok(take x) => Ok(take x), Error(c) => Error(Mem(c)) }
-}
-
 fn put(out: Stdout, s: String) -> Result[(), AppError] waits {
   match stdout.write(out, s) { Ok(()) => Ok(()), Error(e) => Error(Io(e)) }
 }
 
 fn step(out: Stdout, take name: String) -> Result[Step, AppError] {
-  mem(Step(name: take name, out: out))
+  match Step(name: take name, out: out) { Ok(take s) => Ok(take s), Error((c, _)) => Error(Mem(c)) }
 }
 
 fn close(take s: Step) -> Result[(), AppError] waits {
@@ -361,12 +357,12 @@ drop b
 drop a
 ```
 
-Outcome: failure, primary cause `Fail("stop")` at 27:21; the first call printed its three
+Outcome: failure, primary cause `Fail("stop")` at 23:21; the first call printed its three
 lines, the second dropped `b` then `a` before the failure ended the run.
 
 Refused edits:
 
-- Close `c` twice: repeat the line `close(take c)?`: refused, OWN-5 at 30:14, `c` was
+- Close `c` twice: repeat the line `close(take c)?`: refused, OWN-5 at 26:14, `c` was
   moved.
 - Use `?` in the finalizer: `drop(s) { stdout.write(s.out, s.name)? }`: refused, FAIL-11 at
   4:40, no `?` in a finalizer.

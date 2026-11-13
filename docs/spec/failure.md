@@ -50,10 +50,12 @@ fn put(mut q: List[HostFile], take f: HostFile) -> Result[(), (Capacity, HostFil
 
 A record or variant construction evaluates its field expressions left to right into
 statement temporaries; a placed literal `T(..) in r` and a resource literal then admit their
-charge. If a field expression or the admission fails, the temporaries are dropped by the
-statement's cleanup in reverse evaluation order, their finalizers included, and the error is
-bare `Capacity` ([T1.1, T1.2](ownership.md#own-26-the-transition-table)). A core constructor
-that takes an owner, such as `box.new`, returns it in the error instead (T1.3).
+charge. If a field expression fails, the completed temporaries are dropped by the
+statement's cleanup in reverse evaluation order, their finalizers included
+([T1.1](ownership.md#own-26-the-transition-table)). If the admission fails, nothing is
+cleaned and no finalizer runs: a resource literal hands its fields back in its error, as
+`box.new` hands back its value (T1.3), and a placed literal's error is bare `Capacity`
+([T1.2](ownership.md#own-26-the-transition-table)).
 
 ```hirsel
 type Pair { a: HostFile, b: HostFile }
@@ -150,7 +152,9 @@ resource type Temp { dir: Dir, name: String }
 ```
 
 A resource literal admits the resource's storage, cause cell and grant
-([MEM-24](budgets.md#mem-24-logical-charges)) and has type `Result[T, Capacity]`. A
+([MEM-24](budgets.md#mem-24-logical-charges)) and has type `Result[T, (Capacity, F)]`, with
+`F` its one field or the tuple of its fields in declaration order, or `Result[T, Capacity]`
+when it has no fields ([T1.2](ownership.md#own-26-the-transition-table)). A
 resource is cleaned exactly once: by its finalizer on implicit drop, or by an explicit
 consuming function. A consuming function in the defining module ends a resource without
 its finalizer by a whole destructure ([T3.7](ownership.md#own-26-the-transition-table)),
@@ -167,6 +171,7 @@ resource.
 ```hirsel
 resource type File { handle: HostFile }
   drop(f) { let _ = host.unlock(mut f.handle) }
+pub fn open(take h: HostFile) -> Result[File, (Capacity, HostFile)] { File(handle: take h) }
 pub fn close(take f: File) -> Result[(), IoError] waits {
   let File(handle: h) = take f          // f ends without its finalizer
   host.close(take h)

@@ -120,7 +120,9 @@ allocate nothing and charge 0; an explicit `span.with_capacity(r, 0)` and an emp
 charges each copy at capacity equal to its length, and a compact `clone_in` charges the
 selected value's bytes when its type is streamable and the whole copied blob otherwise ([MEM-17](memory.md#mem-17-clone)). An allocation not in this table does not exist in v1.
 
-Creating a resource admits its cause cell, and can therefore fail with `Capacity`, unless
+Creating a resource admits its cause cell, and can therefore fail with `Capacity`; then
+nothing was admitted, so nothing is refunded, and the literal's fields come back in its
+error ([T1.2](ownership.md#own-26-the-transition-table)). This holds unless
 it is **mechanical**: its cleanup can never add a cause. Exactly four resources are
 mechanical, and they have no cause cell: `Sender`, `Receiver`, `Task` and `HostFile`. The
 first three run no finalizer; their cleanup closes a channel or ends a child (CONC-8), and

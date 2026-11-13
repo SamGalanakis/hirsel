@@ -231,9 +231,10 @@ active ([OWN-21](ownership.md#own-21-scoped-callbacks)), and it never moves a ca
 closure with captures is an **owning closure**: creating it admits one environment block
 ([MEM-24](budgets.md#mem-24-logical-charges)) and then copies its plain captures into it and
 moves the others, whose slots become moved ([OWN-5](ownership.md#own-5-availability)); its
-literal has type `Result[own fn(..) -> R, Capacity]`, `own[send]` when every capture is
-`send`, and on `Capacity` its captures are dropped as a failed literal's fields are
-([T1.2](ownership.md#own-26-the-transition-table)). Its body reads captures as views and
+literal has type `Result[own fn(..) -> R, (Capacity, F)]`, `own[send]` when every capture is
+`send`, where `F` is its one capture, or the tuple of its captures in environment order. On
+`Capacity` nothing is admitted and the error hands every capture back to the caller
+([T1.2](ownership.md#own-26-the-transition-table)), as `box.new` hands back its value. Its body reads captures as views and
 cannot move, assign or lend them `mut`. An owning closure may capture only a value whose
 type holds no resource, no capability, no view, no scoped value and no stable reference at
 any depth, as its type
@@ -244,12 +245,12 @@ holds the captures in the order the body first names them, and cleaning it clean
 reverse.
 
 ```hirsel
-fn counter(take base: List[u64]) -> Result[own fn(u64) -> u64, Capacity] {
+fn counter(take base: List[u64]) -> Result[own fn(u64) -> u64, (Capacity, List[u64])] {
   fn(x: u64) -> u64 { x + list.len(base) }
 }
 ```
 ```hirsel
-fn counter(base: List[u64]) -> Result[own fn(u64) -> u64, Capacity] {
+fn counter(base: List[u64]) -> Result[own fn(u64) -> u64, (Capacity, List[u64])] {
   fn(x: u64) -> u64 { x + list.len(base) }                // refused: LANG-14, base is a view
 }
 ```

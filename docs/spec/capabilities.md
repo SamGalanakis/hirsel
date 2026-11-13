@@ -44,7 +44,7 @@ fn load(d: Dir, p: String, f: fn(Dir, String) -> Result[u64, IoError] waits) -> 
 }
 ```
 ```hirsel
-fn opener(d: Dir) -> Result[own fn(String) -> Result[HostFile, IoError] waits, Capacity] {
+fn opener(d: Dir) -> Result[own fn(String) -> Result[HostFile, IoError] waits, (Capacity, Dir)] {
   fn(p: String) -> Result[HostFile, IoError] waits { host.open(d, p, Read) }   // refused: LANG-14, captures Dir
 }
 ```

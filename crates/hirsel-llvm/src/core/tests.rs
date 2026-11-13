@@ -61,6 +61,14 @@ fn execute(module: &Module, cases: &[Case]) -> Vec<NativeReport> {
     execute_with_bindings(module, cases, "")
 }
 fn execute_with_bindings(module: &Module, cases: &[Case], bindings: &str) -> Vec<NativeReport> {
+    execute_with_configuration(module, cases, bindings, "")
+}
+fn execute_with_configuration(
+    module: &Module,
+    cases: &[Case],
+    bindings: &str,
+    configuration: &str,
+) -> Vec<NativeReport> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
         "hirsel-core-llvm-{}-{}",
@@ -154,8 +162,8 @@ static void prepare_files(HirselCoreContext *ctx, uint64_t last) {
 static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; fwrite(s,1,n,stderr); assert(0); }
 "#);
     let mut invocations = String::from(
-        "int main(void){ HirselCoreProcessConfig cfg={.root_limit=UINT64_MAX,.diagnostic=diagnostic,.scheduler={.event=record_event}};\n",
-    );
+        "int main(void){ HirselCoreProcessConfig cfg={.root_limit=UINT64_MAX,.diagnostic=diagnostic,.scheduler={.event=record_event}CONFIGURATION};\n",
+    ).replace("CONFIGURATION", configuration);
 
     for (k, case) in cases.iter().enumerate() {
         let f = case.function;
@@ -1410,5 +1418,110 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
             "{} status",
             op.name()
         );
+    }
+}
+
+#[test]
+fn native_provider_samples_and_refusals_match_the_hand_oracle() {
+    let module = text::parse(include_str!(
+        "../../../hirsel-core-ir/samples/providers.core"
+    ))
+    .unwrap();
+    wf::module(&module).unwrap();
+    let mut executions = 0;
+    for case in provider_cases() {
+        let baseline = eval::run_args(
+            &module,
+            case.call.function,
+            &case.call.args,
+            case.call.limit,
+            &case.argv,
+        );
+        let mut injections = vec![None];
+        for nth in 1..=baseline.admissions {
+            injections.extend([Some((nth, false)), Some((nth, true))]);
+        }
+        for injection in injections {
+            let expected = if injection.is_none() {
+                eval::run_args(
+                    &module,
+                    case.call.function,
+                    &case.call.args,
+                    case.call.limit,
+                    &case.argv,
+                )
+            } else {
+                assert!(case.argv.is_empty());
+                eval::run_injected(
+                    &module,
+                    case.call.function,
+                    &case.call.args,
+                    case.call.limit,
+                    injection,
+                )
+            };
+            let mut call = Case {
+                function: case.call.function,
+                args: case.call.args.clone(),
+                limit: case.call.limit,
+                injection,
+            };
+            // World's mock handles are zero; real capabilities are configured indices.
+            if call.function == FuncId(0) {
+                call.args[0] = 2;
+                call.args[1] = 1;
+            }
+            let configuration = format!(
+                ",.args=scripted_args,.args_len={},.capabilities=scripted_grants,.capabilities_len=7",
+                case.argv.len()
+            );
+            let reports = execute_with_configuration(
+                &module,
+                &[call],
+                include_str!("provider_tests.c"),
+                &configuration,
+            );
+            assert_eq!(reports.len(), 1);
+            assert_eq!(reports[0].outcome, expected.outcome);
+            assert_eq!(reports[0].used, expected.used);
+            assert_eq!(reports[0].admissions, expected.admissions);
+            executions += 1;
+        }
+    }
+    println!("native provider sample/refusal executions: {executions}");
+}
+
+#[test]
+fn provider_error_payload_and_nonwaiting_clocks_use_the_c_abi() {
+    let module = text::parse(include_str!("provider_abi_tests.core")).unwrap();
+    wf::module(&module).unwrap();
+    let cases = [
+        Case {
+            function: FuncId(0),
+            args: vec![7],
+            limit: 1000,
+            injection: None,
+        },
+        Case {
+            function: FuncId(1),
+            args: vec![3],
+            limit: 1000,
+            injection: None,
+        },
+    ];
+    let reports = execute_with_configuration(
+        &module,
+        &cases,
+        include_str!("provider_tests.c"),
+        ",.capabilities=scripted_grants,.capabilities_len=7",
+    );
+    assert_eq!(
+        reports[0].outcome,
+        eval::Outcome::Returned(vec![0, 5, 0xdecafbad, 0])
+    );
+    assert_eq!(reports[1].outcome, eval::Outcome::Returned(vec![0, 1]));
+    for report in reports {
+        assert_eq!(report.used, 0);
+        assert_eq!(report.admissions, 0);
     }
 }

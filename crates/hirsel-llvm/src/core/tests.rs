@@ -60,7 +60,11 @@ fn execute(module: &Module, cases: &[Case]) -> Vec<NativeReport> {
     struct Scratch(PathBuf);
     impl Drop for Scratch {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            if std::thread::panicking() {
+                eprintln!("native failure artifacts: {}", self.0.display());
+            } else {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
         }
     }
     let _scratch = Scratch(dir.clone());

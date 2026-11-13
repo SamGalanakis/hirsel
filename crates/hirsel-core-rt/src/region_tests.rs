@@ -144,3 +144,32 @@ fn shared_payer_entries_trim_each_builder_independently_across_spills_and_slot_p
     drop(region);
     assert_eq!(ctx.available(), 8192);
 }
+
+#[test]
+fn zero_charge_and_fully_trimmed_regions_outlive_their_payer_tables() {
+    let mut region = Region::new(64);
+    let ctx = Context::new(8);
+    let zero = region.allocate(&ctx, 1, 8, Some(0)).unwrap();
+    let empty_entry = region.entry;
+    let charged = region.allocate(&ctx, 8, 8, Some(8)).unwrap();
+    let entry = region.entry;
+    // SAFETY: both reservations are exclusively owned; all charged bytes are unused.
+    unsafe {
+        zero.as_ptr().write(42);
+        charged.as_ptr().write(7);
+        region.lower_charge(entry, 8, 0);
+    }
+    assert_eq!(ctx.available(), 8);
+    drop(ctx);
+    // SAFETY: a zero-size trim touches no dead payer; region chunks still own bytes.
+    unsafe {
+        region.lower_charge(empty_entry, 0, 0);
+        region.lower_charge(entry, 0, 0);
+        assert_eq!(zero.as_ptr().read(), 42);
+        assert_eq!(charged.as_ptr().read(), 7);
+    }
+    let next = Context::new(8);
+    region.allocate(&next, 8, 8, Some(8)).unwrap();
+    drop(next);
+    drop(region);
+}

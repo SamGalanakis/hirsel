@@ -341,10 +341,21 @@ impl FunctionEmitter<'_> {
                 let p = self.address(address);
                 self.put(result, &p);
             }
-            Inst::Trim { block, charge } => {
-                let p = self.get(block);
+            Inst::Trim {
+                region,
+                entry,
+                previous,
+                charge,
+                ..
+            } => {
+                let region = self.get(region);
+                let entry = self.get(entry);
+                let previous = self.get(previous);
                 let charge = self.get(charge);
-                self.runtime_void("hirsel_core_region_lower_charge", &[ptr(&p), word(charge)]);
+                self.runtime_void(
+                    "hirsel_core_region_lower_charge",
+                    &[ptr(&region), word(entry), word(previous), word(charge)],
+                );
             }
             Inst::Free { block, charge } => {
                 let p = self.get(block);

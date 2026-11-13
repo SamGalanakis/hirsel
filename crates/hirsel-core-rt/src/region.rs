@@ -52,7 +52,7 @@ impl Region {
     }
     #[inline(always)]
     fn charge(&mut self, payer: Payer, charge: u64) {
-        if self.payer == payer.record_pointer() {
+        if self.charge != 0 && self.payer == payer.record_pointer() {
             self.charge = self.charge.wrapping_add(charge);
         } else {
             self.change_payer(payer, charge);
@@ -85,7 +85,9 @@ impl Region {
     ) -> Result<NonNull<u8>, Capacity> {
         let payer = context.payer(None);
         payer.admit(charge)?;
-        self.charge(payer, charge.unwrap());
+        if charge != Some(0) {
+            self.charge(payer, charge.unwrap());
+        }
         let start = self.cursor.addr().wrapping_add(align - 1) & !(align - 1);
         let end = start.checked_add(bytes.max(1));
         if let Some(end) = end
@@ -115,6 +117,9 @@ impl Region {
     /// that amount. No other builder lowers this reservation.
     pub unsafe fn lower_charge(&mut self, entry: usize, previous: u64, retained: u64) {
         let refund = previous - retained;
+        if refund == 0 {
+            return;
+        }
         if entry == self.entry {
             Payer::from_current(self.payer).refund(refund);
             self.charge = self.charge.wrapping_sub(refund);

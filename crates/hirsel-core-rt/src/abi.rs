@@ -11,7 +11,8 @@
 //! context; other allocation success pointers address payload storage. Context
 //! and region creation return owned handles and admit no language storage.
 //! `try_unwrap` returns its uniqueness test. `causes_take` transfers a complete
-//! chain, null for empty; cause accessors return borrowed pointers. All other
+//! chain, null for empty; cause accessors return borrowed pointers. allocation_status
+//! returns 1 only for a null result under the current finalizer grant, else 0. Other
 //! entries return unit, except dest_id (u64) and native_alloc/region_refill
 //! (nonnull native base/payload). Count overflow and physical host exhaustion are run
 //! stops. A drop recipe's boolean means completion, with false requesting resume.

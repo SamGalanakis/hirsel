@@ -136,6 +136,7 @@ def sample(out, binary, workload, model, count):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', required=True, type=Path)
+    parser.add_argument('--models', nargs='+', help='sample only these models; keep existing rows')
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
     binary = build(args.out)
@@ -144,6 +145,8 @@ def main():
     done = {(r['workload'], r['model']) for r in rows}
     for workload, count, models in CASES:
         for model in models:
+            if args.models and model not in args.models:
+                continue
             if (workload, model) in done:
                 continue
             row = sample(args.out, binary, workload, model, count)

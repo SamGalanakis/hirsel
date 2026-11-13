@@ -1,0 +1,10 @@
+// Forwarding a mut loan cannot give a nested callee a foreign anchor.
+fn outer(mut out:Option[View[String]],t:String) {inner(mut out,t)}
+fn inner(mut out:Option[View[String]],t:String) {out=Some(view t)}
+// expect: refuse OWN-11 at 3:50
+
+fn captured(mut out:Option[View[String]],t:String) {
+ let action=scoped fn() {out=Some(view t)}
+ action()
+}
+// expect: refuse OWN-11 at 7:26

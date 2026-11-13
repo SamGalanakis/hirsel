@@ -34,6 +34,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             flagged: false,
             holds: 0,
             own: None,
+            anchors: 0,
+            mut_anchor: false,
         });
         self.born += 1;
         self.set(b, Avail::Live, n);
@@ -48,7 +50,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 v.avail,
                 v.at,
                 self.descriptors.slots.get(&s).copied(),
-                self.anchors.slots[s as usize],
+                v.anchors,
             ));
             v.avail = a;
             v.at = n;
@@ -63,7 +65,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             v.avail = a;
             v.at = at;
             self.descriptors.replace_slot(s, descriptor);
-            self.anchors.slots[s as usize] = anchors;
+            self.replace_slot_anchors(s, anchors);
         }
     }
     /// The current state of each slot changed since `mark`: one incoming edge of a join.
@@ -76,7 +78,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 s,
                 a,
                 self.descriptors.slots.get(&s).copied(),
-                self.anchors.slots[s as usize],
+                self.slot_anchors(s),
             ));
         }
         (start, self.diffs.len() as u32 - start)
@@ -147,8 +149,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 x.descriptor
             };
             let anchors = if (x.count as usize) < edges.len() {
-                self.anchors
-                    .union(x.anchors, self.anchors.slots[s as usize])
+                self.anchors.union(x.anchors, self.slot_anchors(s))
             } else {
                 x.anchors
             };
@@ -190,10 +191,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             if v.born < born
                 && !self.broken
+                && anchors != v.anchors
                 && kind(&self.p.decls, &self.t, v.ty, &self.params) == Kind::Scoped
                 && !self
                     .anchors
-                    .same(anchors, self.anchors.slots[s as usize], &self.steps)
+                    .same(anchors, self.slot_anchors(s), &self.steps)
             {
                 let name = self.slot_name(s);
                 self.refuse_at(
@@ -312,14 +314,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// The place `n` denotes: a local and its field and index steps (OWN-9). None when
     /// `n` is not a place; Err when it was refused or is not built.
     pub(super) fn place(&mut self, n: NodeId) -> Result<Option<At>, ()> {
-        let result = self.place_inner(n);
-        if let Ok(Some(at)) = result {
-            self.anchors.places.insert(n, at);
-        }
-        result
-    }
-    fn place_inner(&mut self, n: NodeId) -> Result<Option<At>, ()> {
-        match self.kind(n) {
+        let result = match self.kind(n) {
             NodeKind::Group => self.place(self.kids(n)[0]),
             NodeKind::Path => {
                 let p: &'c Program<'a> = self.p;
@@ -399,7 +394,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 Ok(Some(at))
             }
             _ => Ok(None),
+        };
+        if let Ok(Some(at)) = result {
+            self.anchors.place = Some((n, at));
         }
+        result
     }
     /// Step `at` to its field `name`; through a view, a field that is not plain reads
     /// as a view (OWN-8).

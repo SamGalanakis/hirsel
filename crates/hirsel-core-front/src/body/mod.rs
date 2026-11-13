@@ -821,6 +821,10 @@ struct Var {
     holds: u32,
     /// How it is cleaned, when it owns a value that needs cleanup.
     own: Option<cleanup::Own>,
+    /// The immutable provenance fact; zero has no allocated set.
+    anchors: anchors::Fact,
+    /// A borrowed mut parameter, including an alias captured by a nested callback.
+    mut_anchor: bool,
 }
 
 /// A place and its type.
@@ -1292,9 +1296,6 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         }
         let result = self.value(t);
         self.inst(Inst::Const { result, bits }, n);
-        if t == Ty::Scalar(Scalar::U64) {
-            self.anchors.constants.insert(result, bits);
-        }
         Some(result)
     }
     /// How a value of `ty` is carried in this body.
@@ -1728,7 +1729,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             .resolution
             .binders;
         let fd = self.fd.clone();
-        for pd in &fd.params {
+        for (parameter_index, pd) in fd.params.iter().enumerate() {
             let v = match self.ir_ty(pd.ty) {
                 _ if pd.mode == Mode::Mut && k < entry_params.len() => {
                     k += 1;
@@ -1800,13 +1801,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                     _ => Binding::Value(v),
                 };
                 self.declare(b.id, pd.ty, binding, origin, body);
-                if matches!(
-                    kind(&self.p.decls, &self.t, pd.ty, &self.params),
-                    Kind::Scoped | Kind::Stable
-                ) {
-                    let fact = self.anchor_root(Place::whole(b.id));
-                    self.anchors.slots[b.id as usize] = fact;
-                }
+                self.parameter_anchors(b.id, pd.ty, pd.mode, parameter_index as u32);
                 self.own(b.id, body);
             }
         }
@@ -1963,7 +1958,11 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     fn checked(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let outer = std::mem::replace(&mut self.node, n);
         let (t, v) = self.expr_inner(n, want);
-        self.finish_anchors(n, t, v);
+        if t.0 > HOLE.0 && self.anchor_tracked(t) {
+            self.finish_anchors(n, t, v);
+        } else {
+            self.anchors.last = 0;
+        }
         self.node = outer;
         self.synth_ty = t;
         if v.is_none()

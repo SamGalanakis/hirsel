@@ -485,7 +485,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let root = self.t.mk(TyKind::Region(root));
                 ty = self.t.mk(TyKind::Anchored(ty, root));
             }
-            let anchors = self.anchor_read(at);
+            let anchors = if self.anchor_tracked(at.ty) {
+                self.anchor_read(at)
+            } else {
+                0
+            };
             return Subject {
                 anchors,
                 ty,
@@ -612,7 +616,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             anchors::Component::Case(c, field)
         });
         let anchors = self.anchors.project(subject.anchors, component);
-        if let Some(v) = value {
+        if anchors != 0
+            && let Some(v) = value
+        {
             self.anchors.values.insert(v, anchors);
         }
         Subject {
@@ -801,13 +807,22 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     self.declare(b, ty, binding, origin, pat.site);
                     self.scope_slots.push(b);
                 }
-                if let Some((allowed, site)) = self.patterns.declared_anchors {
-                    self.declare_anchors(b, Some(allowed), subject.anchors, site);
-                } else {
-                    self.set_slot_anchors(b, subject.anchors);
-                }
-                if kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Scoped {
-                    self.freeze_anchors(subject.anchors, self.depth);
+                if self.anchor_tracked(ty) {
+                    // An own scrutinee needs provenance only if a binding borrows
+                    // it. Plain and taken pattern bindings allocate no anchor fact.
+                    if subject.anchors == 0
+                        && let Some(at) = subject.place
+                    {
+                        subject.anchors = self.anchor_read(at);
+                    }
+                    if let Some((allowed, site)) = self.patterns.declared_anchors {
+                        self.declare_anchors(b, Some(allowed), subject.anchors, site);
+                    } else {
+                        self.set_slot_anchors(b, subject.anchors);
+                    }
+                    if kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Scoped {
+                        self.freeze_anchors(subject.anchors, self.depth);
+                    }
                 }
                 self.own(b, pat.site);
             }

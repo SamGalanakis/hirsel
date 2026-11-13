@@ -937,12 +937,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             own: None,
             ..original
         });
-        if matches!(
-            kind(&self.p.decls, &self.t, original.ty, &self.params),
-            Kind::Scoped | Kind::Stable
-        ) {
+        if kind(&self.p.decls, &self.t, original.ty, &self.params) == Kind::Stable {
+            self.parameter_anchors(slot, original.ty, Mode::View, slot);
+        } else if self.anchor_tracked(original.ty) {
             let fact = self.anchor_root(Place::whole(slot));
-            self.anchors.slots[slot as usize] = fact;
+            self.replace_slot_anchors(slot, fact);
+        }
+        if original.mut_anchor {
+            self.parameter_anchors(slot, original.ty, Mode::Mut, slot);
         }
         // Import only this callback's roots. Marking its environment slot above
         // makes repeated and transitive captures reuse the same slot.
@@ -1158,13 +1160,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let before = self.descriptors.slots.get(&slot).copied();
         if before != id {
             let v = self.var(slot);
-            self.log.push((
-                slot,
-                v.avail,
-                v.at,
-                before,
-                self.anchors.slots[slot as usize],
-            ));
+            self.log
+                .push((slot, v.avail, v.at, before, self.slot_anchors(slot)));
             self.descriptors.replace_slot(slot, id);
         }
     }

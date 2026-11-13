@@ -2728,3 +2728,16 @@ fn captured_callback_cases() {
     }
     assert!(report.is_empty(), "{report:?}");
 }
+
+#[test]
+fn mut_scoped_parameters_keep_the_callers_anchors() {
+    let mut failures = vec![];
+    for case in [
+        "mut-scoped-anchors.hirsel",
+        "mut-scoped-anchors-refused.hirsel",
+        "mut-scoped-forward-refused.hirsel",
+    ] {
+        failures.extend(run_case(&root().join("cases/body").join(case)));
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}

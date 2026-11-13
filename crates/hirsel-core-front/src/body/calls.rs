@@ -191,6 +191,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 &mut vals[i],
                 roots,
             ) {
+                if g.anchors.contains(&(i as u32)) {
+                    let fact = self.anchor_argument(e);
+                    self.anchors.expressions.insert(e, fact);
+                }
                 self.activate(vals[i], call, e);
                 self.determined(f, found, checked, e);
                 continue;
@@ -271,6 +275,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     v
                 }
             };
+            if g.anchors.contains(&(i as u32)) {
+                let fact = self.anchor_argument(e);
+                self.anchors.expressions.insert(e, fact);
+            }
             self.activate(vals[i], call, e);
         }
         for &(i, e) in later.iter() {

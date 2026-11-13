@@ -143,12 +143,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 };
                 self.declare(b, ty, binding, origin, pat);
                 self.bind_descriptor(b, v);
-                let mut initial = self.anchor_expression(value);
-                if anchors.is_some() {
-                    let captures = self.capture_anchors(v);
-                    initial = self.anchors.union(initial, captures);
+                if self.anchor_tracked(ty) {
+                    let mut initial = self.anchor_expression(value);
+                    if anchors.is_some() {
+                        let captures = self.capture_anchors(v);
+                        initial = self.anchors.union(initial, captures);
+                    }
+                    self.declare_anchors(b, anchors, initial, value);
                 }
-                self.declare_anchors(b, anchors, initial, value);
                 self.own(b, pat);
                 self.scope_slots.push(b);
             }
@@ -896,7 +898,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             );
             self.temp(elem, value);
         }
-        let anchors = if range || consuming {
+        let anchors = if range || consuming || (!self.anchor_tracked(elem) && self.copies(elem)) {
             0
         } else {
             self.anchor_argument(source)

@@ -1,0 +1,12 @@
+// Direct, projected, and forwarded stores may not install a foreign anchor.
+fn put(mut out:Option[View[String]],t:String) {out=Some(view t)}
+scoped type Holder {value:Option[View[String]]}
+fn field(mut h:Holder,t:String) {h.value=Some(view t)}
+fn nested(mut h:Holder,t:String) {put(mut h.value,t)}
+fn repro()->u64 {
+ let mut out:Option[View[String]]=None
+ {let t="abc";put(mut out,t)}
+ match out {Some(s)=>string.byte_len(s),None=>0}
+}
+// expect: refuse OWN-11 at 2:48
+// expect: refuse OWN-11 at 4:34

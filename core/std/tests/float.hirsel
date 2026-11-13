@@ -238,3 +238,90 @@ fn infinity_not_finite() -> bool {
 fn nan_not_finite() -> bool {
     float.is_finite(float.from_bits64(0x7ff8000000000000))
 }
+
+// Formatting. Expected texts: exact binary values (0.125, 0.375, 2.5, 9.5, 1e22) rounded by
+// hand; the others from Python's exact Decimal(x) and repr(x) (David Gay's shortest), which
+// agree with Rust's `{:.N}` and `{}` digits.
+fn fixed(x: f64, n: u64) -> String {
+    let mut s = string.new()
+    result.unwrap(float.push_fixed64(mut s, x, n))
+    s
+}
+
+fn shown(x: f64) -> String {
+    let mut s = string.new()
+    result.unwrap(float.push_f64(mut s, x))
+    s
+}
+
+// Exact ties go to the even digit: 0.125 -> 0.12, 0.375 -> 0.38, 2.5 -> 2, 3.5 -> 4,
+// 0.5 -> 0.
+// expect: run fixed_ties_to_even() = true
+fn fixed_ties_to_even() -> bool {
+    fixed(0.125, 2) == "0.12" && fixed(0.375, 2) == "0.38" && fixed(2.5, 0) == "2" && fixed(3.5, 0) == "4" && fixed(0.5, 0) == "0"
+}
+
+// A carry through every digit adds one in front: 9.5 -> 10, 99.5 -> 100, 9.875 -> 9.88,
+// 9.996 (above 9.995) -> 10.00.
+// expect: run fixed_carry() = true
+fn fixed_carry() -> bool {
+    fixed(9.5, 0) == "10" && fixed(99.5, 0) == "100" && fixed(9.875, 2) == "9.88" && fixed(9.996, 2) == "10.00"
+}
+
+// 0.1 is 0.1000000000000000055511151231257827...: places 18 to 20 are 555, then 1.
+// expect: run fixed_exact_digits() = true
+fn fixed_exact_digits() -> bool {
+    fixed(0.1, 1) == "0.1" && fixed(0.1, 20) == "0.10000000000000000555" && fixed(0.3, 7) == "0.3000000" && fixed(123456.789, 7) == "123456.7890000"
+}
+
+// 2^-30 = 0.000000000931322574615478515625 exactly, padded to 40 places; 1e22 is exact.
+// expect: run fixed_wide() = true
+fn fixed_wide() -> bool {
+    fixed(float.from_bits64(0x3E10000000000000), 40) == "0.0000000009313225746154785156250000000000" && fixed(1e22, 1) == "10000000000000000000000.0"
+}
+
+// The sign bit always prints, also when the value rounds to zero; zero has one whole
+// digit; NaN has no sign.
+// expect: run fixed_signs_and_specials() = true
+fn fixed_signs_and_specials() -> bool {
+    fixed(-0.0, 1) == "-0.0" && fixed(-0.00000001, 7) == "-0.0000000" && fixed(0.0, 0) == "0" && fixed(-2.25, 1) == "-2.2" && fixed(float.from_bits64(0x7FF0000000000000), 3) == "inf" && fixed(float.from_bits64(0xFFF0000000000000), 3) == "-inf" && fixed(float.from_bits64(0xFFF8000000000000), 3) == "NaN"
+}
+
+// 1e300's exact value has 301 whole digits, beginning 1000000000000000052504760255204420.
+// expect: run fixed_huge() = true
+fn fixed_huge() -> bool {
+    let s = fixed(1e300, 7)
+    string.byte_len(s) == 309 && string.starts_with(s, "1000000000000000052504760255204420") && string.ends_with(s, "6865459400540160.0000000")
+}
+
+// Shortest digits in Rust's `{}` layout: no exponent, no ".0".
+// expect: run shown_plain() = true
+fn shown_plain() -> bool {
+    shown(0.1) == "0.1" && shown(1.0) == "1" && shown(-0.0) == "-0" && shown(0.0) == "0" && shown(123.456) == "123.456" && shown(1e21) == "1000000000000000000000" && shown(1e-7) == "0.0000001" && shown(0.1 + 0.2) == "0.30000000000000004"
+}
+
+// Powers of two: below 2^64 the gap is half the gap above, which makes the shortest
+// 18446744073709552 x 10^3 (a symmetric interval would give 1844674407370955 x 10^4);
+// likewise 2^-44 is 5.684341886080802e-14, and 2^60 is 1.152921504606847e18.
+// expect: run shown_powers_of_two() = true
+fn shown_powers_of_two() -> bool {
+    shown(float.from_bits64(0x43F0000000000000)) == "18446744073709552000" && shown(float.from_bits64(0x3D30000000000000)) == "0.00000000000005684341886080802" && shown(float.from_bits64(0x43B0000000000000)) == "1152921504606847000"
+}
+
+// The extremes: 5e-324 is "0." then 323 zeros then 5; the largest finite is
+// 17976931348623157 then 292 zeros; the smallest normal is 2.2250738585072014e-308.
+// expect: run shown_extremes() = true
+fn shown_extremes() -> bool {
+    let tiny = shown(float.from_bits64(1))
+    let big = shown(float.from_bits64(0x7FEFFFFFFFFFFFFF))
+    let normal = shown(float.from_bits64(0x0010000000000000))
+    string.byte_len(tiny) == 326 && string.ends_with(tiny, "05") && string.starts_with(tiny, "0.000") && string.byte_len(big) == 309 && string.starts_with(big, "179769313486231570") && string.ends_with(big, "000") && string.byte_len(normal) == 326 && string.ends_with(normal, "22250738585072014")
+}
+
+// expect: run shortest_pairs() = true
+fn shortest_pairs() -> bool {
+    let (c, p) = float.shortest64(0.3)
+    let (d, q) = float.shortest64(100.0)
+    let (z, w) = float.shortest64(0.0)
+    c == 3 && p == -1 && d == 1 && q == 2 && z == 0 && w == 0
+}

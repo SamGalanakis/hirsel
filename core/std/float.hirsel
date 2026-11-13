@@ -1347,3 +1347,309 @@ const POW5: Inline[(u64, u64), 651] =[(0xeef453d6923bd65a, 0x113faa2906a13b3f), 
 (0xe3d8f9e563a198e5, 0x58180fddd97723a6), // 5^307
 (0x8e679c2f5e44ff8f, 0x570f09eaa7ea7648), // 5^308
 ]
+
+// Formatting, after Rust's core::fmt::float and core::num::flt2dec (Dragon4 shortest and
+// exact modes). The finite value m x 2^e is made exact as a Decimal by `exact`: an f64 has
+// at most 767 significant decimal digits, so the 768 digits never truncate.
+
+/// Appends x as Rust's `{}` prints an f64: the shortest decimal that parses back to x
+/// (`shortest64`), never in exponent form: "0.1", "1", "-0", "1000000000000000000000",
+/// "0.000001"; "NaN", "inf", "-inf". Fails: Error(c); s then holds a prefix of the text.
+/// Alloc: at most 330 bytes for the text, then the push into s. Cost: O(digits of x).
+/// Ex: `float.push_f64(mut line, 0.1)?` appends "0.1"
+pub fn push_f64(mut s: String, x: f64) -> Result[(), Capacity] {
+    let bits = float.to_bits64(x)
+    if !is_finite(x) {
+        return string.push(mut s, special(bits))
+    }
+    if bits >> 63 != 0 {
+        string.push(mut s, "-")?
+    }
+    let (c, p) = shortest64(x)
+    if c == 0 {
+        return string.push(mut s, "0")
+    }
+    let mut t: Inline[u8, 20] =[0; 20]
+    let len = digits_of(c, mut t)
+    let width: i64 = int.narrow(len)
+    let point = width + p
+    // Three layouts: 0.000ddd, dd.ddd, ddd000.
+    let n: u64 = if point <= 0 {
+        let lead: u64 = int.narrow(-point)
+        2 + lead + len
+    } else if point < width {
+        len + 1
+    } else {
+        let tail: u64 = int.narrow(point)
+        tail
+    }
+    let mut o: Bytes = list.with_capacity(n)?
+    list.fill(mut o, n, b'0')?
+    let mut at: u64 = 0
+    if point <= 0 {
+        o[1] = b'.'
+        at = n - len
+    } else if point < width {
+        let dot: u64 = int.narrow(point)
+        o[dot] = b'.'
+    }
+    for i in 0 .. len {
+        if o[at] == b'.' {
+            at += 1
+        }
+        o[at] = b'0' + t[i]
+        at += 1
+    }
+    push_ascii(mut s, take o)
+}
+
+/// Appends x rounded to `digits` places after the point, as Rust's `{:.N}` prints an f64:
+/// the exact binary value rounded half to even, with no exponent and a '-' whenever x's
+/// sign bit is set ("-0.0000000" for -0.00000001 at 7); "NaN", "inf", "-inf".
+/// Fails: Error(c); s then holds a prefix of the text; Fail when the text length overflows
+/// u64. Alloc: the text (at most 310 + digits bytes), then the push into s.
+/// Cost: O(digits + digits of x).
+/// Ex: `float.push_fixed64(mut line, 0.125, 2)?` appends "0.12"
+pub fn push_fixed64(mut s: String, x: f64, digits: u64) -> Result[(), Capacity] {
+    let bits = float.to_bits64(x)
+    if !is_finite(x) {
+        return string.push(mut s, special(bits))
+    }
+    if bits >> 63 != 0 {
+        string.push(mut s, "-")?
+    }
+    let (m, e) = parts(bits)
+    let d = exact(m, e)
+    let whole: u64 = if d.count != 0 && d.point > 0 {
+        int.narrow(d.point)
+    } else {
+        1
+    }
+    let total = match int.checked_add(whole, digits) {
+        Some(t) => t,
+        None => fail("float.push_fixed64: text length overflows u64"),
+    }
+    // o = a spare byte for a carry, the whole digits, then '.' and the places.
+    let n = match int.checked_add(total, if digits > 0 { 2 } else { 1 }) {
+        Some(t) => t,
+        None => fail("float.push_fixed64: text length overflows u64"),
+    }
+    let mut o: Bytes = list.with_capacity(n)?
+    list.fill(mut o, n, b'0')?
+    if digits > 0 {
+        o[1 + whole] = b'.'
+    }
+    // Output digit q has place 10^(whole - 1 - q); it is d's digit base + q.
+    let lp: i64 = int.narrow(whole)
+    let base = d.point - lp
+    let count: i64 = int.narrow(d.count)
+    let mut i: i64 = if base < 0 { 0 } else { base }
+    let end: i64 = if base + int.narrow(total) < count { base + int.narrow(total) } else { count }
+    while i < end {
+        let q: u64 = int.narrow(i - base)
+        let iu: u64 = int.narrow(i)
+        o[place(q, whole)] = b'0' + d.digits[iu]
+        i += 1
+    }
+    // The first dropped digit is d's digit p: round half to even on the exact value.
+    let p = base + int.narrow(total)
+    let mut up = false
+    if p >= 0 && p < count {
+        let pu: u64 = int.narrow(p)
+        let dp = d.digits[pu]
+        if dp > 5 {
+            up = true
+        } else if dp == 5 {
+            up = pu + 1 < d.count || (pu > 0 && p - 1 >= base && d.digits[pu - 1] & 1 == 1)
+        }
+    }
+    let mut start: u64 = 1
+    if up {
+        let mut q = total
+        let mut carry = true
+        while carry && q > 0 {
+            q -= 1
+            let at = place(q, whole)
+            if o[at] == b'9' {
+                o[at] = b'0'
+            } else {
+                o[at] += 1
+                carry = false
+            }
+        }
+        if carry {
+            o[0] = b'1'
+            start = 0
+        }
+    }
+    let text = match string.from_utf8(take o) {
+        Ok(take t) => take t,
+        Error(_) => fail("float.push_fixed64: digits are ASCII"),
+    }
+    string.push(mut s, string.slice(text, start, n))
+}
+
+/// The shortest decimal that parses back to x, as (c, p) with |x| = c x 10^p and c
+/// without trailing zeros; when two such decimals of that length parse back to x, the one
+/// nearer x (Rust flt2dec's shortest mode, Steele and White's Dragon4). (0, 0) for a zero.
+/// Fails: Fail when x is not finite. Alloc: nothing. Cost: O(digits of x x 17).
+/// Ex: `float.shortest64(0.3)` is (3, -1)
+pub fn shortest64(x: f64) -> (u64, i64) {
+    if !is_finite(x) {
+        fail("float.shortest64: x is not finite")
+    }
+    let (m, e) = parts(float.to_bits64(x))
+    if m == 0 {
+        return (0, 0)
+    }
+    let v = exact(m, e)
+    // x rounds from the open interval (lower, upper), closed when m is even (ties to even);
+    // below a power of two the gap under x is half the gap over it.
+    let even = m & 1 == 0
+    let lower = if m == 4503599627370496 && e > -1074 {
+        exact(4 * m - 1, e - 2)
+    } else {
+        exact(2 * m - 1, e - 1)
+    }
+    let upper = exact(2 * m + 1, e - 1)
+    let mut len: i64 = 1
+    while len < 18 {
+        let p = v.point - len
+        let (f, rest) = prefix(v, p)
+        if !rest {
+            return strip(f, p)
+        }
+        let (lo, lo_rest) = prefix(lower, p)
+        let (hi, hi_rest) = prefix(upper, p)
+        let c = f + 1
+        let f_in = f > lo || (f == lo && !lo_rest && even)
+        let c_in = c < hi || (c == hi && (hi_rest || even))
+        if f_in && c_in {
+            // No tie is possible here: the nearer one by the first dropped digit.
+            let next: u64 = int.narrow(len)
+            return strip(if v.digits[next] >= 5 { c } else { f }, p)
+        }
+        if f_in {
+            return strip(f, p)
+        }
+        if c_in {
+            return strip(c, p)
+        }
+        len += 1
+    }
+    fail("float.shortest64: 17 digits always parse back")
+}
+
+fn special(bits: u64) -> String {
+    if bits & 0xfffffffffffff != 0 {
+        "NaN"
+    } else if bits >> 63 != 0 {
+        "-inf"
+    } else {
+        "inf"
+    }
+}
+
+/// A finite f64's magnitude as m x 2^e.
+fn parts(bits: u64) -> (u64, i64) {
+    let biased = (bits >> 52) & 0x7ff
+    let fraction = bits & 0xfffffffffffff
+    if biased == 0 {
+        (fraction, -1074)
+    } else {
+        let b: i64 = int.narrow(biased)
+        (fraction | 4503599627370496, b - 1075)
+    }
+}
+
+/// m x 2^e exactly, as a Decimal.
+fn exact(m: u64, e: i64) -> Decimal {
+    let mut d = Decimal(digits:[0; 768], count: 0, point: 0, truncated: false)
+    if m == 0 {
+        return d
+    }
+    let mut t: Inline[u8, 20] =[0; 20]
+    let len = digits_of(m, mut t)
+    for i in 0 .. len {
+        add_digit(mut d, t[i])
+    }
+    d.point = int.narrow(len)
+    trim(mut d)
+    let mut k = e
+    while k > 0 {
+        let step: i64 = if k > 60 { 60 } else { k }
+        shift_left(mut d, int.narrow(step))
+        k -= step
+    }
+    while k < 0 {
+        let step: i64 = if k < -60 { 60 } else { -k }
+        shift_right(mut d, int.narrow(step))
+        k += step
+    }
+    d
+}
+
+/// The decimal digits of v > 0 into t, most significant first; returns their count.
+fn digits_of(v: u64, mut t: Inline[u8, 20]) -> u64 {
+    let mut len: u64 = 0
+    let mut w = v
+    while w > 0 {
+        w = w / 10
+        len += 1
+    }
+    let mut i = len
+    w = v
+    while i > 0 {
+        i -= 1
+        t[i] = int.truncate(w % 10)
+        w = w / 10
+    }
+    len
+}
+
+/// d's digits from 10^(point - 1) down to 10^p as an integer (at most 19 of them), and
+/// whether any nonzero digit lies below 10^p.
+fn prefix(d: Decimal, p: i64) -> (u64, bool) {
+    let n = d.point - p
+    let count: i64 = int.narrow(d.count)
+    let mut v: u64 = 0
+    let mut i: i64 = 0
+    while i < n {
+        v = v * 10
+        if i < count {
+            let iu: u64 = int.narrow(i)
+            let x: u64 = int.widen(d.digits[iu])
+            v += x
+        }
+        i += 1
+    }
+    (v, if n < 0 { count > 0 } else { n < count })
+}
+
+/// (c, p) with c's trailing zeros moved into p.
+fn strip(c: u64, p: i64) -> (u64, i64) {
+    let mut v = c
+    let mut q = p
+    while v % 10 == 0 {
+        v = v / 10
+        q += 1
+    }
+    (v, q)
+}
+
+/// The index in push_fixed64's text of output digit q: after the carry byte, and past the
+/// '.' once the whole digits end.
+fn place(q: u64, whole: u64) -> u64 {
+    if q < whole {
+        1 + q
+    } else {
+        2 + q
+    }
+}
+
+fn push_ascii(mut s: String, take o: Bytes) -> Result[(), Capacity] {
+    match string.from_utf8(take o) {
+        Ok(take t) => string.push(mut s, t),
+        Error(_) => fail("float: formatted digits are ASCII"),
+    }
+}

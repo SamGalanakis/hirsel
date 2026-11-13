@@ -3,13 +3,13 @@
   "basis": "Map clone and reverse rollback complete two bodies; merged Deque clone completes one more. Fresh merged observation on the fixed M1/std manifest uses driver rechecked body counts (365/187), not the larger all-library-test inventory in the preceding Deque census. Preserve both histories. Observation plus 2 percent rounded up to 100; fixed60000 budget unchanged.",
   "corpora": {
     "m1": {
-      "code_lines": 7243,
+      "code_lines": 7336,
       "check_lower_per_line": 26800,
       "whole_request_per_line": 48500,
       "whole_process_per_line": 48600
     },
     "std": {
-      "code_lines": 3852,
+      "code_lines": 3945,
       "check_lower_per_line": 17800,
       "whole_request_per_line": 37200,
       "whole_process_per_line": 37400
@@ -96,19 +96,19 @@
   },
   "margin": "M1: 2 percent; std: 5 percent while library sources grow, rounded up to100. Active all-source observation is23365544 after supported source/body growth. The subsequent c98e8f58 anchor regression remains visible and owned by912; do not re-baseline it away. Lower after savings. Fixed60000 budget unchanged.",
   "finished_budget_per_line": 60000,
-  "forecast_revision": "3dd099f4",
+  "forecast_revision": "core-collections-918-hole-heap",
   "completion_forecast": {
     "m1": {
-      "complete_bodies": 365,
-      "bodies": 365,
+      "complete_bodies": 371,
+      "bodies": 371,
       "missing_check_lower_per_line": 0,
       "additional_publication_per_line": 0,
       "measured_process_per_line": 47560.58097473423,
       "finished_process_per_line": 47560.58097473423
     },
     "std": {
-      "complete_bodies": 187,
-      "bodies": 187,
+      "complete_bodies": 193,
+      "bodies": 193,
       "missing_check_lower_per_line": 0,
       "additional_publication_per_line": 0,
       "measured_process_per_line": 36661.60410176532,
@@ -2191,6 +2191,31 @@
           "whole_request_per_line": 36443.376947040495,
           "whole_process_per_line": 36661.60410176532
         }
+      }
+    },
+    {
+      "from_revision": "3dd099f4",
+      "to_revision": "core-collections-918-hole-heap",
+      "reason": "Core heap adds six completed source bodies (new,len,peek,push,pop,grow) to the guard manifest; its old std module was outside that explicit subset. Temporary holes are infallible ordered sifts; generic slots are shared. Refresh body/line census only; existing numeric ceilings, frozen-source regression rows, product savings and fixed60000 budget remain. Cold count/power-of-two overflow uses List declined admission.",
+      "completed_bodies_before": {
+        "m1": [
+          365,
+          365
+        ],
+        "std": [
+          187,
+          187
+        ]
+      },
+      "completed_bodies_after": {
+        "m1": [
+          371,
+          371
+        ],
+        "std": [
+          193,
+          193
+        ]
       }
     }
   ],

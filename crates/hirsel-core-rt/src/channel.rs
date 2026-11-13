@@ -287,3 +287,7 @@ pub unsafe extern "C" fn hirsel_core_receiver_drop(
         failed
     }
 }
+
+#[cfg(test)]
+#[path = "channel_rule_stop_tests.rs"]
+mod rule_stop_tests;

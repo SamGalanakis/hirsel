@@ -14,6 +14,7 @@ mod collections;
 mod empty;
 mod failure;
 mod fast;
+mod forward;
 mod scalar;
 mod storage;
 mod task_entry;
@@ -155,12 +156,24 @@ pub fn emit_ir(module: &Module) -> Result<String> {
             e.put(*v, &parameter);
         }
         e.line("br label %b0");
+        let mut forwarding = forward::Forwarding::new(body);
         for (i, b) in body.blocks.iter().enumerate() {
             writeln!(e.code, "b{i}:").unwrap();
+            let ending = forwarding.ending(module, &recipes, sig, e.constants, i);
+            let mut returned = false;
             for (offset, inst) in b.insts.get(&body.insts).unwrap().iter().enumerate() {
+                if let Some(ending) = &ending
+                    && offset == ending.prefix
+                    && e.return_call(&body.calls[ending.call.index()], ending)
+                {
+                    returned = true;
+                    break;
+                }
                 e.inst(inst, b.insts.start as usize + offset)?;
             }
-            e.term(&body.terminators[i])?;
+            if !returned {
+                e.term(&body.terminators[i])?;
+            }
         }
         let linkage = if has_status { "" } else { "internal " };
         let body_name = if has_status {

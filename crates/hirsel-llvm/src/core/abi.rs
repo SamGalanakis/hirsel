@@ -108,6 +108,77 @@ impl Return {
 }
 
 impl FunctionEmitter<'_> {
+    pub(super) fn return_call(&mut self, site: &CallSite, ending: &super::forward::Ending) -> bool {
+        let has_status = match site.callee {
+            Callee::Direct(f) => self.failures.may_fail[f.index()],
+            Callee::Indirect(_) => true,
+            Callee::Runtime(_) => return false,
+        };
+        let sig = &self.module.signatures[site.signature.index()];
+        let abi = if has_status {
+            Return::internal(&sig.results)
+        } else {
+            Return::new(&sig.results)
+        };
+        if has_status && !self.has_status {
+            return false;
+        }
+        let mut args = vec!["ptr %context".into()];
+        for (i, arg) in site
+            .args
+            .get(&self.body.pools.args)
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            args.push(if ending.destination && i == 0 {
+                "ptr %dest".into()
+            } else {
+                match *arg {
+                    Arg::Address(a) => format!("ptr {}", self.address(a)),
+                    Arg::Value(v) => {
+                        let x = self.get(v);
+                        format!("{}{} {x}", ty(self.vty(v)), extension(self.vty(v)))
+                    }
+                }
+            });
+        }
+        let callee = match site.callee {
+            Callee::Direct(f) => format!(
+                "@{}{}",
+                symbol(self.module, f),
+                if has_status { "" } else { ".infallible" }
+            ),
+            Callee::Indirect(v) => self.get(v),
+            Callee::Runtime(_) => unreachable!(),
+        };
+        if abi.fields != self.abi.fields {
+            // An infallible private callee has no status; the public caller
+            // still returns its constant zero. Its destination can be forwarded
+            // even though that return convention prevents a tail jump.
+            let values = self.invoke(&abi, &callee, args);
+            self.return_values(&values);
+            return true;
+        }
+        if abi.indirect {
+            args.insert(0, format!("ptr sret({}) %sret", abi.storage));
+        }
+        let tail = if ending.frame_safe { "tail " } else { "" };
+        let call = format!(
+            "{tail}call {} {callee}({})",
+            abi.return_type(),
+            args.join(", ")
+        );
+        if abi.ty == "void" {
+            self.line(call);
+            self.line("ret void");
+        } else {
+            let result = self.calc(call);
+            self.line(format!("ret {} {result}", abi.ty));
+        }
+        true
+    }
+
     fn offset(&mut self, p: &str, n: u64) -> String {
         self.calc(format!("getelementptr i8, ptr {p}, i64 {n}"))
     }

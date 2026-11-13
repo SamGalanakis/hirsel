@@ -978,6 +978,71 @@ b2:
 }
 
 #[test]
+fn terminal_results_forward_without_abandoning_cleanup_or_local_arguments() {
+    let module = text::parse(include_str!("../../tests/core_runtime/forward.core")).unwrap();
+    wf::module(&module).unwrap();
+    let recipes = hirsel_core_layout::compute(&module.types).unwrap();
+    let failures = failure::Failures::new(&module);
+    let ending = |f: usize| {
+        let function = &module.functions[f];
+        let body = function.body.as_ref().unwrap();
+        forward::Forwarding::new(body).ending(
+            &module,
+            &recipes,
+            &module.signatures[function.signature.index()],
+            &failures.constants[f],
+            0,
+        )
+    };
+    assert!(ending(1).unwrap().frame_safe);
+    assert!(!ending(3).unwrap().frame_safe);
+    let ir = emit_ir(&module).unwrap();
+    assert!(ir.contains(&format!(
+        "tail call zeroext i8 @{}(ptr %context, ptr %dest,",
+        symbol(&module, FuncId(2))
+    )));
+    assert!(!ir.contains(&format!(
+        "tail call void @{}.infallible",
+        symbol(&module, FuncId(4))
+    )));
+    agree(&module, &[(FuncId(0), vec![123]), (FuncId(0), vec![0])]);
+
+    // FAIL-8/OWN-12: a pending result stays local until its caller's
+    // finalizers have succeeded. Even an infallible drop ends forwarding.
+    let cleanup = include_str!("../../tests/core_runtime/forward.core")
+        .replace("  copy a1, a0, v2", "  drop a0 t0\n  copy a1, a0, v2");
+    let cleanup = text::parse(&cleanup).unwrap();
+    let body = cleanup.functions[1].body.as_ref().unwrap();
+    assert!(
+        forward::Forwarding::new(body)
+            .ending(
+                &cleanup,
+                &recipes,
+                &cleanup.signatures[1],
+                &failures.constants[1],
+                0
+            )
+            .is_none()
+    );
+    let cleanup =
+        text::parse(include_str!("../../../hirsel-core-ir/samples/failure.core")).unwrap();
+    let recipes = hirsel_core_layout::compute(&cleanup.types).unwrap();
+    let failures = failure::Failures::new(&cleanup);
+    let body = cleanup.functions[1].body.as_ref().unwrap();
+    assert!(
+        forward::Forwarding::new(body)
+            .ending(
+                &cleanup,
+                &recipes,
+                &cleanup.signatures[0],
+                &failures.constants[1],
+                1
+            )
+            .is_none()
+    );
+}
+
+#[test]
 fn every_memory_sample_admission_refusal_matches_the_evaluator() {
     let mut executions = 0;
     for source in [

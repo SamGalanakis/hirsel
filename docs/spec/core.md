@@ -120,6 +120,11 @@ operations it names; nothing else about them may be inferred from an implementat
   length, and `string.slice` also when `lo` or `hi` falls inside a scalar. A slice's
   capacity is its length; `string.as_bytes` reports its `String`'s capacity, 0 for static
   storage. No view grants spare capacity.
+- **Words.** `list.word_le(b, at)` reads the 8 bytes of `b` from `at` as a little-endian
+  `u64` and fails with `Bounds` unless `at + 8 ≤ len`; it is the only multi-byte load, and
+  there is no store. Byte search, UTF-8 validation and other scans are ordinary Hirsel over
+  it and the bit counts of [SEM-1](semantics.md#sem-1-integers) (`string.find` is std),
+  not engine kernels.
 - **Lists.** `list.set` returns the old element and `list.get` returns `None` out of range,
   where `xs[i]` and `list.set` fail with `Bounds`. `list.fill(mut xs, n, x)` appends `n`
   copies of `x`, growing once to at least `len + n`. `list.sum` adds the elements from index

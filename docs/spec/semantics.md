@@ -16,8 +16,11 @@ target from the expected type. `int.widen` is accepted only where every value of
 in `U`, and `int.truncate` only where `U` is no wider than `T`; any other instantiation is
 refused at the call. `int.narrow` fails with `Overflow`, `int.try_narrow` returns
 `Option[U]`, and `int.truncate` keeps the low bits. `int.mul_wide` gives the full 128-bit product of two `u64`
-as its high and low halves, and `int.leading_zeros` the count of zero bits above the highest
-one bit, the width for 0.
+as its high and low halves. The bit counts are `int.leading_zeros`, the zero bits above the
+highest one bit, `int.trailing_zeros`, the zero bits below the lowest one bit, and
+`int.count_ones`, the one bits; each returns a `u32`, the first two the width for 0, and
+reads a signed value's two's-complement bits. These are all of core's bit operations
+besides the operators of [LANG-21](language.md#lang-21-operators).
 
 ```hirsel
 fn add(x: u8) -> u8 { int.wrapping_add(x, 100) }

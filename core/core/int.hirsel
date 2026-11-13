@@ -14,6 +14,8 @@ pub fn saturating_sub[T: integer](a: T, b: T) -> T
 pub fn saturating_mul[T: integer](a: T, b: T) -> T
 pub fn mul_wide(a: u64, b: u64) -> (u64, u64)
 pub fn leading_zeros[T: integer](x: T) -> u32
+pub fn trailing_zeros[T: integer](x: T) -> u32
+pub fn count_ones[T: integer](x: T) -> u32
 pub fn widen[T: integer, U: integer](x: T) -> U
 pub fn narrow[T: integer, U: integer](x: T) -> U
 pub fn try_narrow[T: integer, U: integer](x: T) -> Option[U]

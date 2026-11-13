@@ -1,18 +1,18 @@
 {
   "measurement": "Buck release, CPU 16, jobs 1, instructions:u, fresh private store, complete driver interval including publication and teardown; separate perf stat instructions:u covers process startup, dynamic loader, output and exit",
-  "basis": "List kernels and typed generic numeric helpers complete more source bodies; the FORM61 range capacity correction and byte literal ownership are included. Ordinary release observations plus 2 percent, rounded up to 100. The fixed 60000 process budget is unchanged. The parallel runtime/view observation is retained in history; the active observation completes more bodies. Std check ceiling refreshed after recorded completion136/139 to139/139 over59630bcf..a526a304; M1 completion314/317 to317/317. Only std check ceiling changes, using14946.00034602076 plus2percent rounded up to100; the reader process regression is repaired, and the fixed60000 budget is unchanged. Core slot/Deque completion refreshes stale body census and current-work margins from the latest inherited all-source observation; product savings/fixed60000 retained.",
+  "basis": "Map clone and reverse rollback complete two bodies; merged Deque clone completes one more. Fresh merged observation on the fixed M1/std manifest uses driver rechecked body counts (365/187), not the larger all-library-test inventory in the preceding Deque census. Preserve both histories. Observation plus 2 percent rounded up to 100; fixed60000 budget unchanged.",
   "corpora": {
     "m1": {
-      "code_lines": 7220,
-      "check_lower_per_line": 26300,
-      "whole_request_per_line": 47700,
-      "whole_process_per_line": 47800
+      "code_lines": 7243,
+      "check_lower_per_line": 26800,
+      "whole_request_per_line": 48500,
+      "whole_process_per_line": 48600
     },
     "std": {
-      "code_lines": 3829,
-      "check_lower_per_line": 17700,
-      "whole_request_per_line": 37400,
-      "whole_process_per_line": 37600
+      "code_lines": 3852,
+      "check_lower_per_line": 17800,
+      "whole_request_per_line": 37200,
+      "whole_process_per_line": 37400
     },
     "product": {
       "measurement": "One ordinary release check/lower request per M1 entry, core and exact supplied std subset preproduced; fresh private request stores; perf instructions:u including GNU time and process exit. Fixed is empty main with std or core only. Marginal is (process-fixed std)/own checked source lines, excluding prechecked library source lines. Instances are collected after this boundary and reported separately.",
@@ -96,23 +96,23 @@
   },
   "margin": "M1: 2 percent; std: 5 percent while library sources grow, rounded up to100. Active all-source observation is23365544 after supported source/body growth. The subsequent c98e8f58 anchor regression remains visible and owned by912; do not re-baseline it away. Lower after savings. Fixed60000 budget unchanged.",
   "finished_budget_per_line": 60000,
-  "forecast_revision": "core-collections-918-plain-drop",
+  "forecast_revision": "3dd099f4",
   "completion_forecast": {
     "m1": {
-      "complete_bodies": 363,
-      "bodies": 363,
+      "complete_bodies": 365,
+      "bodies": 365,
       "missing_check_lower_per_line": 0,
       "additional_publication_per_line": 0,
-      "measured_process_per_line": 47328.39,
-      "finished_process_per_line": 47328.39
+      "measured_process_per_line": 47560.58097473423,
+      "finished_process_per_line": 47560.58097473423
     },
     "std": {
-      "complete_bodies": 185,
-      "bodies": 185,
+      "complete_bodies": 187,
+      "bodies": 187,
       "missing_check_lower_per_line": 0,
       "additional_publication_per_line": 0,
-      "measured_process_per_line": 36308.72,
-      "finished_process_per_line": 36308.72
+      "measured_process_per_line": 36661.60410176532,
+      "finished_process_per_line": 36661.60410176532
     }
   },
   "forecast_method": "Current process instructions plus recorded missing checker/emission and publication per line. Live construct self costs project the written population and calibrate to native check/lower less driver keys. Completed IR/template bytes per completed definition line are charged for every unfinished line, retaining partial IR, at measured definition-encoding and archive write/hash rates. Refresh projection/counts when support changes.",
@@ -2139,6 +2139,57 @@
           "check_lower_per_line": 17332.804183006538,
           "whole_request_per_line": 36082.237385620916,
           "whole_process_per_line": 36302.05045751634
+        }
+      }
+    },
+    {
+      "from_revision": "908c629c",
+      "to_revision": "3dd099f4",
+      "reason": "Map clone and reverse rollback complete two bodies; merged Deque clone completes one more. Fresh merged observation on the fixed M1/std manifest uses driver rechecked body counts (365/187), not the larger all-library-test inventory in the preceding Deque census. Preserve both histories. Observation plus 2 percent rounded up to 100; fixed60000 budget unchanged.",
+      "completed_bodies_before": {
+        "m1": [
+          362,
+          362
+        ],
+        "std": [
+          184,
+          184
+        ]
+      },
+      "completed_bodies_after": {
+        "m1": [
+          365,
+          365
+        ],
+        "std": [
+          187,
+          187
+        ]
+      },
+      "previous_ceilings": {
+        "m1": {
+          "code_lines": 7212,
+          "check_lower_per_line": 26300,
+          "whole_request_per_line": 47700,
+          "whole_process_per_line": 47800
+        },
+        "std": {
+          "code_lines": 3821,
+          "check_lower_per_line": 17700,
+          "whole_request_per_line": 37400,
+          "whole_process_per_line": 37600
+        }
+      },
+      "measured_per_line": {
+        "m1": {
+          "check_lower_per_line": 26232.55957476184,
+          "whole_request_per_line": 47461.80878089189,
+          "whole_process_per_line": 47560.58097473423
+        },
+        "std": {
+          "check_lower_per_line": 17356.616303219107,
+          "whole_request_per_line": 36443.376947040495,
+          "whole_process_per_line": 36661.60410176532
         }
       }
     }

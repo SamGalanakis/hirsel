@@ -16,7 +16,8 @@ target from the expected type. `int.widen` is accepted only where every value of
 in `U`, and `int.truncate` only where `U` is no wider than `T`; any other instantiation is
 refused at the call. `int.narrow` fails with `Overflow`, `int.try_narrow` returns
 `Option[U]`, and `int.truncate` keeps the low bits. `int.mul_wide` gives the full 128-bit product of two `u64`
-as its high and low halves.
+as its high and low halves, and `int.leading_zeros` the count of zero bits above the highest
+one bit, the width for 0.
 
 ```hirsel
 fn add(x: u8) -> u8 { int.wrapping_add(x, 100) }
@@ -50,7 +51,10 @@ anchored to `t`, with no copy, so every reading operation on strings, `==` and `
 `String` included, reads a `Text`. Length is `byte_len`; scalars are
 read with `string.next_scalar(s, at) -> Option[(char, u64)]`, which returns the scalar at
 byte position `at` and the next position. `string.slice` fails with `Bounds` at a position
-that would split a scalar. Equality, order and hashing are bytewise;
+that would split a scalar, and so does `string.truncate(mut s, n)`, which keeps the first
+`n` bytes, never shrinks the capacity and fails with `Bounds` past the length.
+`string.reserve(mut s, n)` grows the capacity to at least the length plus `n`, as
+`list.reserve` does (SEM-4). Equality, order and hashing are bytewise;
 normalisation is explicit. String formatting is ordinary calls; there are no format
 strings.
 

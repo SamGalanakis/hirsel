@@ -254,7 +254,8 @@ for a lexical **extent**:
 
 - bound by `let`: to the end of the enclosing block;
 - bound by a match arm or `if let`: to the end of the arm;
-- otherwise a temporary: to the end of its statement;
+- otherwise a temporary: to the end of its statement, or, in a block's tail, to the
+  block's exit unless the block's value reaches it ([LANG-6](language.md#lang-6-evaluation-order));
 - a parameter view: for the call.
 
 A view of a record reads its fields as views, and a view of a `Box`, `Rc` or `Arc` reads as
@@ -321,6 +322,9 @@ fn f(mut m: Inbox) -> u64 {
   list.clear(mut m.items)
   n
 }
+```
+```hirsel
+fn g() -> bool { let b = { let xs: List[u64] = list.new(); match list.get(xs, 0) { Some(_) => true, None => false } }; b }
 ```
 ```hirsel
 type Inbox { items: List[String] }

@@ -5,8 +5,10 @@
 Evaluation is strictly left to right: a call's arguments, then the call; a construction's
 fields; an operator's operands; an assignment's place, then its value
 ([OWN-12](ownership.md#own-12-assignment)). `&&` and `||` skip their right operand when the
-left decides. A temporary lives to the end of its statement, except that a temporary a
-`let` binding's value reaches lives as long as that binding. A moved argument stays a
+left decides. A temporary lives to the end of its statement; in a block's tail, a function
+body's included, it lives to that block's exit and ends before the block's locals are
+cleaned, unless the block's value reaches it; a temporary that a `let` binding's value, or
+a block's value, reaches lives as long as that value. A moved argument stays a
 caller-owned temporary until the callee is entered
 ([FAIL-3](failure.md#fail-3-commit-points)).
 
@@ -130,10 +132,23 @@ expected type is refused, at the innermost expression the expected type reached:
 { x } else { 0 }` checked against `u16` with `x: u8`, at `x`. This one rule covers a body
 and its result type, an arm, a `let` with a written type, an argument and a `break` value.
 A call has exactly one argument per parameter, in order; a missing argument is refused at
-the call's closing parenthesis, and an extra one at the first extra argument. At a call, the types of all arguments that synthesise one, and the
-expected result type, are collected before an unsuffixed literal argument is checked, so
-`f(1, x)` with `x: u8` types `1` as `u8`; a type parameter or region they leave
-undetermined, or determine twice differently, is refused. An unsuffixed number needs an
+the call's closing parenthesis, and an extra one at the first extra argument. A call's
+type parameters and regions are found in one forward visit of that call, in this order:
+
+1. The expected result type, where there is one, fixes what it can and leaves the rest as
+   **holes**.
+2. Each argument, left to right, is checked against its parameter type with what is fixed
+   so far filled in. An argument that is itself a call takes that partly known type as its
+   expected type, a hole constraining nothing, and its own result may fill holes.
+3. Last, each unsuffixed literal argument is checked against its now fixed parameter type,
+   so `f(1, x)` with `x: u8` types `1` as `u8`.
+
+So `let xs: List[u64] = result.unwrap(list.with_capacity(5))` fixes `unwrap`'s `T`, then
+`with_capacity`'s `T`, then `unwrap`'s `E` as `Capacity`. A parameter determined twice
+differently is refused at the argument or result that determined it second; a hole still
+open when its call has been visited is refused by
+[LANG-12](#lang-12-generics) at that call. Nothing is inferred across statements, from a
+later use or between definitions. An unsuffixed number needs an
 expected type ([LANG-3](syntax.md#lang-3-literals)); operands follow
 [LANG-21](#lang-21-operators). There are no implicit conversions except these: `Never` to any type; a
 `View[T]` of a plain `T` to `T` ([OWN-8](ownership.md#own-8-views)); a stable value to its
@@ -162,7 +177,8 @@ fn g() -> u8 { f(1, 2) }                                  // refused: LANG-11, a
 A definition may take type parameters with bounds, `[T: key + send]`. A generic body is
 checked once and uses only the bounds it declares
 ([OWN-23](ownership.md#own-23-generic-bodies)). Type arguments are never written at a
-call: they are found from that one call (LANG-11). A type argument that lacks a bound its
+call: they are found from that one call, as LANG-11 orders it, or the call is refused here.
+A type argument that lacks a bound its
 parameter declares is refused, at the argument or result that determined it. Each use of a generic type writes its
 arguments.
 
@@ -171,6 +187,9 @@ fn same[T: key](a: T, b: T) -> bool { a == b }
 ```
 ```hirsel
 fn same[T](a: T, b: T) -> bool { a == b }                 // refused: LANG-12, T is not key
+```
+```hirsel
+fn empty() -> u64 { list.len(list.new()) }                // refused: LANG-12, at list.new(): T is open
 ```
 ```hirsel
 fn f(a: f64, b: f64) -> f64 { int.wrapping_add(a, b) }    // refused: LANG-12, at a: f64 is not integer

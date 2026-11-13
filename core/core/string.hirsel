@@ -11,3 +11,5 @@ pub fn byte_len(s: String) -> u64
 pub fn push(mut s: String, t: String) -> Result[(), Capacity]
 pub fn push_char(mut s: String, c: char) -> Result[(), Capacity]
 pub fn push_u64(mut s: String, n: u64) -> Result[(), Capacity]
+pub fn reserve(mut s: String, n: u64) -> Result[(), Capacity]
+pub fn truncate(mut s: String, n: u64)

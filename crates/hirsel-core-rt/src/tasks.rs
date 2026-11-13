@@ -290,9 +290,7 @@ unsafe fn drain_refunds(task: *mut Task) {
     // SAFETY: this task owns execution; subscription keeps its atomic flag
     // registered until before its Context can release the payer domain.
     unsafe {
-        (*(*task).context)
-            .current
-            .drain_notified(&(*task).refund_pending);
+        (*(*task).context).current.drain_notified();
     }
 }
 /// The one trigger for the spec's no-effect poll family. Record the result

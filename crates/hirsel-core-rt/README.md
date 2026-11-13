@@ -35,14 +35,13 @@ emitter. Region close refunds the aggregate entries and frees chunks.
 Rc/Arc share and nonlast release inline; last release uses allocation-free,
 constant-stack resumable glue. A scheduler binds native task execution on resume
 and unbinds before moving it to another worker. Foreign refunds accumulate in
-prepaid per-slot mailboxes and are drained before resuming the payer task. MEM-26
-also makes growth of a received collection an ordered foreign charge. The task
-provider's payer_lease hook drains earlier refunds before foreign growth; received
-grants execute as the finalizing task until handover. One OS worker supplies the
-exclusive lease. With multiple workers, the scheduler must quiesce every task
-sharing the payer table for growth and for the entire received finalizer, including
-suspension. An empty mailbox uses one acquire load at task_resume, without exchange,
-locking, scanning or a call. A pending mailbox takes the cold mutex/drain path.
+prepaid per-slot mailboxes until the payer task's event. Resuming only binds
+execution custody and caches that task's inbox. MEM-26 also makes growth of a
+received collection an ordered foreign charge. The provider's payer_lease hook
+holds the table lease for foreign growth; received grants execute as the
+finalizing task until handover. One OS worker supplies the exclusive lease.
+With multiple workers, the scheduler must quiesce every task sharing the table
+for growth and the entire received finalizer, including suspension.
 Guard bounds cache the immutable page extent when each stack is mapped, so a
 normal scheduler switch performs no sysconf page-size query.
 
@@ -167,5 +166,20 @@ are set only by foreign refund publication or payer forwarding. A set flag
 enters cold drain_refunds; clearing it and unregistering share the mailbox
 mutex with notification, so neither a wake nor a flag lifetime can be lost.
 The subscription ends before the task Context can release its domain. Binding
-and successful admission remain unchanged. The no-request cancellation branch
+caches an owner inbox without applying refunds; successful admission stays unchanged.
+The no-request cancellation branch
 is inline; observing an actual request, draining and changing turns are cold.
+
+Populated refunds use one intrusive list per task owner, with links prepaid in
+payer slots. Multiple refunds to one slot accumulate in its single dirty entry;
+owner events drain only their inbox, without scanning clean records or another
+owner's refunds. The bound-inbox pending flag also prevents foreign-growth
+allocation paths from repeatedly scanning someone else's queue. Local worker
+publication notifies only the target owner. A foreign OS thread cannot read
+union records: it queues an unassigned entry and notifies owners; the next owner
+event routes those entries under the table lease. The domain mutex serializes
+publication, flag reset, forwarding and subscription removal. Handover routes
+queued entries to their new owner without delivering them. Live records and the
+bound cache pin inbox metadata; zero-pin inboxes enter an intrusive reap list
+and are removed under the next local mailbox lock. Metadata therefore follows
+live records and task registrations rather than historical task IDs.

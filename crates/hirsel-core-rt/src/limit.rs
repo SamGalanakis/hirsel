@@ -5,6 +5,10 @@
 //! their range; they do not add guards against incorrect generated bookkeeping.
 //! User-visible size arithmetic, Capacity and count-increment overflow stay checked.
 use crate::Capacity;
+#[path = "limit_refunds.rs"]
+mod refunds;
+pub(crate) use refunds::RefundSubscription;
+use refunds::{Inbox, Remote};
 use std::{
     cell::{Cell, UnsafeCell},
     ptr::NonNull,
@@ -19,12 +23,14 @@ struct Live {
     owner: u64,
     capacity: u64,
     parent: Option<Payer>,
+    inbox: NonNull<Inbox>,
 }
 impl Live {
     const EMPTY: Self = Self {
         owner: 0,
         capacity: 0,
         parent: None,
+        inbox: NonNull::dangling(),
     };
 }
 /// Frozen local record prefix. Emitters compare/subtract available and add the
@@ -46,6 +52,7 @@ pub(crate) struct Slot {
     local: UnsafeCell<LimitRecord>,
     pending: AtomicU64,
     pending_zeros: AtomicUsize,
+    next_pending: UnsafeCell<Option<NonNull<Slot>>>,
     domain: NonNull<Domain>,
     id: usize,
 }
@@ -94,6 +101,8 @@ impl Forest {
             r.refs = 1;
             r.parent = None;
             r.rank = 0;
+            // SAFETY: the initialized record and its domain stay live through release.
+            unsafe { r.live.inbox.as_ref().release(slot.as_ref().domain.as_ref()) };
             r.live = Live::EMPTY;
             #[cfg(any(test, feature = "testing"))]
             {
@@ -126,6 +135,7 @@ impl Forest {
                 }),
                 pending: AtomicU64::new(0),
                 pending_zeros: AtomicUsize::new(0),
+                next_pending: UnsafeCell::new(None),
                 domain,
                 id: id + i,
             })));
@@ -149,6 +159,8 @@ impl Forest {
         // SAFETY: the free list transfers its sole pin; charge and union rank are zero.
         let r = unsafe { &mut *slot.as_ref().local.get() };
         r.available = live.capacity;
+        // SAFETY: the domain-owned inbox is pinned by the parent/task creating this record.
+        unsafe { live.inbox.as_ref().retain() };
         r.live = live;
         #[cfg(any(test, feature = "testing"))]
         {
@@ -207,46 +219,14 @@ impl Forest {
         }
     }
 }
-struct Remote {
-    retired: bool,
-    signals: Vec<RefundSignal>,
-}
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct RefundSignal(NonNull<AtomicBool>);
-// SAFETY: signal pointers name pinned atomic task flags. The mailbox mutex
-// serializes every notification with unregistering before a task is destroyed.
-unsafe impl Send for RefundSignal {}
-impl Remote {
-    fn notify(&self) {
-        for signal in &self.signals {
-            // SAFETY: registration pins the task flag through this mutex turn.
-            unsafe { signal.0.as_ref().store(true, Ordering::Release) };
-        }
-    }
-}
-/// Task-owned registration; remove it before releasing the task's Context.
-pub(crate) struct RefundSubscription {
-    domain: NonNull<Domain>,
-    signal: RefundSignal,
-}
-impl Drop for RefundSubscription {
-    fn drop(&mut self) {
-        // SAFETY: the task still owns its Context, which pins this domain.
-        let domain = unsafe { self.domain.as_ref() };
-        domain
-            .remote
-            .lock()
-            .unwrap()
-            .signals
-            .retain(|s| *s != self.signal);
-    }
-}
 struct Domain {
     forest: UnsafeCell<Forest>,
     handles: Cell<usize>,
     owner: Option<usize>,
     remote: Mutex<Remote>,
     pending: AtomicBool,
+    active_inbox: Cell<NonNull<Inbox>>,
+    reap_inboxes: Cell<Option<NonNull<Inbox>>>,
 }
 thread_local! { static THREAD:u8=const{0}; static CURRENT_DOMAIN: Cell<usize> = const { Cell::new(0) }; }
 #[inline(always)]
@@ -373,9 +353,8 @@ impl Payer {
             let owner = root.forest().record(root.slot().id).live.owner;
             if owner != crate::tasks::current_id() && bytes != 0 {
                 crate::abi_tasks::cross_task_refund(owner, bytes);
-                self.slot().pending.fetch_add(bytes, Ordering::Relaxed);
-                d.pending.store(true, Ordering::Release);
-                d.remote.lock().unwrap().notify();
+                let inbox = root.forest().record(root.slot().id).live.inbox;
+                d.remote.lock().unwrap().enqueue(self, bytes, Some(inbox));
                 return;
             }
         }
@@ -395,7 +374,7 @@ impl Payer {
     #[cold]
     fn remote_refund(self, bytes: u64) {
         let d = self.domain();
-        let remote = d.remote.lock().unwrap();
+        let mut remote = d.remote.lock().unwrap();
         if remote.retired {
             let f = self.forest();
             f.refund(self.slot().id, bytes);
@@ -409,16 +388,11 @@ impl Payer {
                     drop(Box::from_raw(domain.as_ptr()));
                 }
             }
-        } else if bytes != 0 {
-            self.slot().pending.fetch_add(bytes, Ordering::Relaxed);
-            d.pending.store(true, Ordering::Release);
-            remote.notify();
         } else {
-            self.slot().pending_zeros.fetch_add(1, Ordering::Relaxed);
-            d.pending.store(true, Ordering::Release);
-            remote.notify();
+            remote.enqueue(self, bytes, None);
         }
     }
+
     /// Called under the scheduler's exclusive lease, including an orphan block.
     pub(crate) fn growth_funding(self) -> Funding {
         let d = self.domain();
@@ -447,6 +421,7 @@ impl Payer {
             self.slot().domain,
             Live {
                 owner: f.record(parent.slot().id).live.owner,
+                inbox: f.record(parent.slot().id).live.inbox,
                 capacity: bytes,
                 parent: Some(parent),
             },
@@ -464,6 +439,11 @@ pub struct Funding {
 }
 impl Funding {
     pub fn root(capacity: u64) -> Self {
+        let owner = crate::tasks::current_id();
+        let mut remote = Remote::new();
+        let inbox = remote.inbox(owner);
+        // SAFETY: the new domain's bound cache owns one inbox reference.
+        unsafe { inbox.as_ref().retain() };
         let domain = Box::new(Domain {
             forest: UnsafeCell::new(Forest {
                 pages: Vec::new(),
@@ -478,11 +458,10 @@ impl Funding {
             }),
             handles: Cell::new(1),
             owner: Some(thread()),
-            remote: Mutex::new(Remote {
-                retired: false,
-                signals: Vec::new(),
-            }),
+            remote: Mutex::new(remote),
             pending: AtomicBool::new(false),
+            active_inbox: Cell::new(inbox),
+            reap_inboxes: Cell::new(None),
         });
         let domain = NonNull::from(Box::leak(domain));
         // SAFETY: the fresh domain is exclusively owned until its first handle returns.
@@ -490,7 +469,8 @@ impl Funding {
         let id = f.insert(
             domain,
             Live {
-                owner: crate::tasks::current_id(),
+                owner,
+                inbox,
                 capacity,
                 parent: None,
             },
@@ -511,16 +491,33 @@ impl Funding {
         // SAFETY: Funding holds an untagged slot under exclusive execution.
         let domain = unsafe { self.payer.0.as_ref().domain };
         CURRENT_DOMAIN.with(|v| v.set(domain.as_ptr().addr()));
+        let payer = self.payer.canonical();
+        // SAFETY: bind holds the table lease. The cache owns an inbox pin even
+        // if handover has replaced the last record referring to its old owner.
+        unsafe {
+            let domain = domain.as_ref();
+            let inbox = (*payer.local()).live.inbox;
+            if inbox != domain.active_inbox.get() {
+                inbox.as_ref().retain();
+                domain.active_inbox.replace(inbox).as_ref().release(domain);
+            }
+        };
     }
     pub(crate) fn unbind() {
         CURRENT_DOMAIN.with(|v| v.set(0));
     }
-    /// Provider drains at event handoff, before this task resumes. No allocation.
+    /// Apply only the running owner's ordered refunds. No admission or allocation.
     #[inline(always)]
     pub fn drain(&self) {
         // SAFETY: a Funding handle is untagged and retains its entire domain.
         let domain = unsafe { self.payer.0.as_ref().domain.as_ref() };
-        if domain.pending.load(Ordering::Acquire) {
+        let pending = if CURRENT_DOMAIN.with(|v| v.get() == domain as *const Domain as usize) {
+            // SAFETY: bind cached the running task's domain-owned inbox.
+            unsafe { domain.active_inbox.get().as_ref().pending() }
+        } else {
+            domain.pending.load(Ordering::Acquire)
+        };
+        if pending {
             self.drain_pending();
         }
     }
@@ -532,71 +529,47 @@ impl Funding {
         signal: NonNull<AtomicBool>,
     ) -> RefundSubscription {
         let domain = self.payer.slot().domain;
+        let payer = self.payer.canonical();
+        let owner = payer.forest().record(payer.slot().id).live.owner;
         // SAFETY: the live Context pins the domain and the task pins its flag.
-        let d = unsafe { domain.as_ref() };
-        let mut remote = d.remote.lock().unwrap();
-        // SAFETY: exclusively registering this task's flag under the mailbox lock.
-        unsafe {
-            signal
-                .as_ref()
-                .store(d.pending.load(Ordering::Acquire), Ordering::Release)
-        };
-        let signal = RefundSignal(signal);
-        remote.signals.push(signal);
-        RefundSubscription { domain, signal }
+        unsafe { domain.as_ref() }
+            .remote
+            .lock()
+            .unwrap()
+            .subscribe(domain, owner, signal)
     }
-    /// Called only after the direct task flag's hot test. Notifications and flag
-    /// reset share the mailbox mutex, so a concurrent refund cannot be lost.
+    /// Owner-event delivery only. Notifications, routing and unregistering share
+    /// the domain mutex; local balance writes also hold the scheduler table lease.
     #[cold]
-    pub(crate) fn drain_notified(&self, signal: &AtomicBool) {
-        let domain = self.payer.domain();
-        let _remote = domain.remote.lock().unwrap();
-        signal.store(false, Ordering::Relaxed);
-        self.drain_locked(false);
-        self.update_pending();
-    }
-    fn update_pending(&self) {
-        let domain = self.payer.domain();
-        let f = self.payer.forest();
-        domain.pending.store(
-            (0..f.length).any(|id| {
-                f.slot(id).pending.load(Ordering::Relaxed) != 0
-                    || f.slot(id).pending_zeros.load(Ordering::Relaxed) != 0
-            }),
-            Ordering::Release,
-        );
+    pub(crate) fn drain_notified(&self) {
+        self.drain_pending();
     }
     #[cold]
     fn drain_pending(&self) {
         let domain = self.payer.domain();
-        let _remote = domain.remote.lock().unwrap();
-        self.drain_locked(false);
-        self.update_pending();
+        let mut remote = domain.remote.lock().unwrap();
+        self.drain_locked(&mut remote, false);
+        domain.pending.store(remote.pending(), Ordering::Release);
+        remote.reap(domain);
     }
-    fn drain_locked(&self, retired: bool) {
+    fn drain_locked(&self, remote: &mut Remote, retired: bool) {
+        remote.route_unassigned();
+        let owner = (!retired).then(crate::tasks::current_id);
         let f = self.payer.forest();
-        for id in 0..f.length {
-            if !retired {
-                let pending = f.slot(id).pending.load(Ordering::Relaxed) != 0
-                    || f.slot(id).pending_zeros.load(Ordering::Relaxed) != 0;
-                if !pending {
-                    continue;
-                }
-                let canonical = f.find(id);
-                if f.record(canonical).live.owner != crate::tasks::current_id() {
-                    continue;
-                }
-            }
-            let bytes = f.slot(id).pending.swap(0, Ordering::Relaxed);
+        while let Some(slot) = remote.pop(owner) {
+            // SAFETY: the dirty node retains a charge/zero pin until delivery;
+            // pop cleared its intrusive link under the same domain mutex.
+            let slot = unsafe { slot.as_ref() };
+            let bytes = slot.pending.swap(0, Ordering::Relaxed);
+            let zeros = slot.pending_zeros.swap(0, Ordering::Relaxed);
             if bytes != 0 {
-                f.refund(id, bytes);
+                f.refund(slot.id, bytes);
                 if retired {
                     f.retired_bytes -= bytes;
                 }
             }
-            let zeros = f.slot(id).pending_zeros.swap(0, Ordering::Relaxed);
             for _ in 0..zeros {
-                f.refund(id, 0);
+                f.refund(slot.id, 0);
             }
         }
     }
@@ -624,7 +597,21 @@ impl Funding {
     }
     pub(crate) fn task_owner(&self, owner: u64) {
         let payer = self.payer.canonical();
-        payer.forest().record_mut(payer.slot().id).live.owner = owner;
+        let old = payer.forest().record(payer.slot().id).live;
+        if old.owner != owner {
+            let domain = payer.domain();
+            let mut remote = domain.remote.lock().unwrap();
+            remote.reap(domain);
+            let inbox = remote.inbox(owner);
+            // SAFETY: the replacing live record takes over this inbox pin.
+            unsafe { inbox.as_ref().retain() };
+            let live = &mut payer.forest().record_mut(payer.slot().id).live;
+            live.owner = owner;
+            live.inbox = inbox;
+            // SAFETY: the map retains the previous inbox until the next reap.
+            unsafe { old.inbox.as_ref().release(domain) };
+            remote.reroute(old.inbox);
+        }
     }
     pub fn end(&self) {
         self.end_id();
@@ -660,6 +647,14 @@ impl Funding {
             }
             (parent, child)
         };
+        let previous_inbox = f.record(winner).live.inbox;
+        if previous_inbox != parent_live.inbox {
+            // SAFETY: the winner's replacement transfers its live-record pin.
+            unsafe {
+                parent_live.inbox.as_ref().retain();
+                previous_inbox.as_ref().release(self.payer.domain());
+            }
+        }
         f.record_mut(winner).live = parent_live;
         f.record_mut(winner).available = parent_available;
         f.retain(winner);
@@ -668,8 +663,8 @@ impl Funding {
         // Forwarding can change which task owns a pending slot. Re-notify the
         // domain's tasks, including an owner whose earlier event skipped it.
         let domain = self.payer.domain();
-        if domain.pending.load(Ordering::Acquire) {
-            domain.remote.lock().unwrap().notify();
+        if live.owner != parent_live.owner && domain.pending.load(Ordering::Acquire) {
+            domain.remote.lock().unwrap().reroute(live.inbox);
         }
         winner
     }
@@ -715,6 +710,7 @@ impl Funding {
         r.available = r.available.wrapping_sub(bytes);
         Ok(Live {
             owner: r.live.owner,
+            inbox: r.live.inbox,
             capacity: bytes,
             parent: Some(parent),
         })
@@ -773,6 +769,11 @@ impl Funding {
             let unused = r.available;
             let f = &mut *old.0.as_ref().domain.as_ref().forest.get();
             r.rank = 0;
+            r.live
+                .inbox
+                .as_ref()
+                .release(old.0.as_ref().domain.as_ref());
+            r.live = Live::EMPTY;
             #[cfg(any(test, feature = "testing"))]
             {
                 r.occupied = false;
@@ -845,7 +846,7 @@ impl Drop for Funding {
         remote.retired = true;
         let f = self.payer.forest();
         f.retired_bytes = (0..f.length).map(|id| f.record(id).outstanding).sum();
-        self.drain_locked(true);
+        self.drain_locked(&mut remote, true);
         self.payer.forest().release(self.payer.slot().id);
         let empty = self.payer.forest().retired_bytes == 0 && self.payer.forest().zeros == 0;
         drop(remote);
@@ -857,3 +858,7 @@ impl Drop for Funding {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "limit_refund_tests.rs"]
+mod refund_tests;

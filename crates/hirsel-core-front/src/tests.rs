@@ -2907,3 +2907,9 @@ fn for_carriers_share_the_loop_head_bound() {
     failures.extend(run_case(&root().join("cases/body/for-freeze.hirsel")));
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+#[test]
+fn guarded_prefix_checks_preserve_failure_order() {
+    let failures = run_case(&root().join("cases/body/guarded-byte-prefix.hirsel"));
+    assert!(failures.is_empty(), "{failures:#?}");
+}

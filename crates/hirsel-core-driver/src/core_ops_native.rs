@@ -1189,3 +1189,13 @@ fn for_carrier_bounds_cranelift() { for_carrier_bounds(Backend::Cranelift); }
 #[test]
 #[ignore = "explicit native integration target"]
 fn for_carrier_bounds_llvm() { for_carrier_bounds(Backend::Llvm); }
+
+fn guarded_byte_prefix(backend: Backend) {
+    run_lines_native(backend, include_str!("../../../core/front/cases/body/guarded-byte-prefix.hirsel"));
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn guarded_byte_prefix_cranelift() { guarded_byte_prefix(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn guarded_byte_prefix_llvm() { guarded_byte_prefix(Backend::Llvm); }

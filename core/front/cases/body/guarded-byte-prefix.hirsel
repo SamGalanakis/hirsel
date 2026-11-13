@@ -1,0 +1,29 @@
+// LANG-21/MEM-12: the fit predicate dominates both byte accesses. Keep the
+// checked subtraction's first failure: even an empty pattern at a past-end start
+// raises Overflow before the comparison. An ordinary unguarded access raises Bounds.
+// expect: run go(0,0) = true
+// expect: run go(3,1) = true
+// expect: run go(3,2) = false
+// expect: run go(4,1) = false
+// expect: run go(5,3) = true
+// expect: run go(0,3) = true
+// expect: run go(6,3) = fail Overflow
+// expect: run go(18446744073709551615,3) = fail Overflow
+// expect: run raw(4) = 101
+// expect: run raw(5) = fail Bounds
+fn prefix(b: Bytes, i: u64, p: Bytes) -> bool {
+    if list.len(p) > list.len(b) - i { return false }
+    for k in 0u64 .. list.len(p) {
+        if b[i + k] != p[k] { return false }
+    }
+    true
+}
+fn go(i: u64, which: u64) -> bool {
+    let p = if which == 0 { "ab" } else if which == 1 { "de" }
+        else if which == 2 { "df" } else { "" }
+    prefix(string.as_bytes("abcde"), i, string.as_bytes(p))
+}
+fn raw(i: u64) -> u64 {
+    let b = string.as_bytes("abcde")
+    int.widen(b[i])
+}

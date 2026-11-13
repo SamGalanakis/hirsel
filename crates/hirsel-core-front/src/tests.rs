@@ -580,6 +580,44 @@ fn call_region_grouped_binders() {
 }
 
 #[test]
+fn anchored_map_rows() {
+    for case in ["map-anchored", "mut-scoped-regional-call"] {
+        let failures = run_case(&root().join(format!("cases/body/{case}.hirsel")));
+        assert!(failures.is_empty(), "{case}: {failures:?}");
+    }
+}
+
+#[test]
+fn layout_names_keep_nested_views() {
+    let (index, modules) = program_inputs("fn named(a:Option[u64], b:Option[View[u64]]) {}");
+    let p = Program::declare(&index, &modules);
+    let f = p
+        .fns
+        .iter()
+        .position(|f| f.path.package_is("app", "1"))
+        .unwrap();
+    let mut emitter = Emitter::new();
+    let c = p.check_lower(f, &mut emitter);
+    assert!(c.refusals.is_empty() && c.gaps.is_empty(), "{c:?}");
+    let row = |name: &str| {
+        emitter
+            .module
+            .types
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap()
+    };
+    assert_eq!(
+        row("core@1/core/Option[u64]").repr,
+        hirsel_core_layout::Repr::Own
+    );
+    assert_eq!(
+        row("core@1/core/Option[View[u64]]").repr,
+        hirsel_core_layout::Repr::Scoped
+    );
+}
+
+#[test]
 fn scalar_key_carriage() {
     let failures = run_case(&root().join("cases/body/scalar-key-carriage.hirsel"));
     assert!(failures.is_empty(), "{failures:?}");

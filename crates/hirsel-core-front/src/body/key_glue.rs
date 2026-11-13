@@ -184,7 +184,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return None;
             };
             let function = if has_param(&self.t, ty) {
-                let name = crate::decls::canonical(&self.p.decls, &self.t, ty);
+                let name = self.e.module.types[id.index()].name.clone();
                 let function = self.e.add_function_abi(
                     InstanceKey {
                         definition: op.definition(),

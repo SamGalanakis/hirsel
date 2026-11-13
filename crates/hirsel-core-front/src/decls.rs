@@ -2445,21 +2445,33 @@ pub(crate) fn path_text(item: hirsel_core_syntax::Item<'_>, n: NodeId) -> String
         .to_owned()
 }
 
-/// The canonical text of a type: definition paths and scalar names, as instance keys and
-/// `Module::types` spell them (DECISIONS-883 decision 9).
+/// The canonical text of a source type, including its lifetime anchors.
+/// Layout rows and instance recipes use `layout_name` instead.
 pub fn canonical(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId) -> String {
     let mut s = String::new();
-    write_canonical(decls, t, ty, &mut s);
+    write_canonical::<false>(decls, t, ty, &mut s);
     s
 }
-fn write_canonical(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, s: &mut String) {
+/// Layout identity erases lifetime anchors at every depth. Nested views remain
+/// distinct because they change the field's cleanup and scoped representation.
+pub(crate) fn layout_name(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId) -> String {
+    let mut s = String::new();
+    write_canonical::<true>(decls, t, ty, &mut s);
+    s
+}
+fn write_canonical<const LAYOUT: bool>(
+    decls: &crate::Rows<TypeDecl>,
+    t: &impl TyRead,
+    ty: TyId,
+    s: &mut String,
+) {
     use std::fmt::Write;
     let list = |xs: &[TyId], s: &mut String| {
         for (i, &x) in xs.iter().enumerate() {
             if i > 0 {
                 s.push_str(", ");
             }
-            write_canonical(decls, t, x, s);
+            write_canonical::<LAYOUT>(decls, t, x, s);
         }
     };
     match t.kind(ty) {
@@ -2485,18 +2497,20 @@ fn write_canonical(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, s: 
         // instances, so a caller's local region and a callee's parameter name one row.
         TyKind::Region(_) => s.push_str("in r"),
         TyKind::Anchored(x, r) => {
-            write_canonical(decls, t, *x, s);
-            s.push(' ');
-            write_canonical(decls, t, *r, s);
+            write_canonical::<LAYOUT>(decls, t, *x, s);
+            if !LAYOUT {
+                s.push(' ');
+                write_canonical::<LAYOUT>(decls, t, *r, s);
+            }
         }
         TyKind::Array(x, n) => {
             s.push_str("Inline[");
-            write_canonical(decls, t, *x, s);
+            write_canonical::<LAYOUT>(decls, t, *x, s);
             let _ = write!(s, ", {n}]");
         }
         TyKind::View(x) => {
             s.push_str("View[");
-            write_canonical(decls, t, *x, s);
+            write_canonical::<LAYOUT>(decls, t, *x, s);
             s.push(']');
         }
         TyKind::Param(i) => {
@@ -2519,10 +2533,10 @@ fn write_canonical(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, s: 
                     Mode::Take => "take ",
                     Mode::Bytes => "bytes ",
                 });
-                write_canonical(decls, t, *p, s);
+                write_canonical::<LAYOUT>(decls, t, *p, s);
             }
             s.push_str(") -> ");
-            write_canonical(decls, t, *r, s);
+            write_canonical::<LAYOUT>(decls, t, *r, s);
             if *w {
                 s.push_str(" waits");
             }

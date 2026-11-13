@@ -61,7 +61,7 @@ impl NameRecipe {
     }
     fn ty(&mut self, p: &Program, t: &impl TyRead, ty: TyId) {
         if !has_param(t, ty) {
-            self.text(crate::decls::canonical(&p.decls, t, ty));
+            self.text(crate::decls::layout_name(&p.decls, t, ty));
             return;
         }
         match t.kind(ty) {
@@ -125,16 +125,15 @@ impl NameRecipe {
                     self.text(" waits");
                 }
             }
-            TyKind::Anchored(x, r) => {
-                self.ty(p, t, *x);
-                self.text(" ");
-                self.ty(p, t, *r);
-            }
-            TyKind::Region(_) => self.text(crate::decls::canonical(&p.decls, t, ty)),
+            TyKind::Anchored(x, _) => self.ty(p, t, *x),
+            TyKind::Region(_) => self.text(crate::decls::layout_name(&p.decls, t, ty)),
             _ => unreachable!("has_param identifies a structural type or a parameter"),
         }
     }
-    pub(super) fn of(p: &Program, t: &impl TyRead, ty: TyId) -> Self {
+    pub(super) fn of(p: &Program, t: &impl TyRead, mut ty: TyId) -> Self {
+        while let TyKind::Anchored(x, _) | TyKind::View(x) = *t.kind(ty) {
+            ty = x;
+        }
         let mut name = Self::default();
         name.ty(p, t, ty);
         name
@@ -705,11 +704,19 @@ impl Emitter {
 impl Emitter {
     /// Record semantic name parts for symbolic layout rows once, including a generic
     /// declaration's substituted fields. Closed names remain literal text.
-    pub(super) fn remember_generic_types(&mut self, p: &Program, t: &mut impl TyRead, ty: TyId) {
+    pub(super) fn remember_generic_types(
+        &mut self,
+        p: &Program,
+        t: &mut impl TyRead,
+        mut ty: TyId,
+    ) {
+        while let TyKind::Anchored(x, _) | TyKind::View(x) = *t.kind(ty) {
+            ty = x;
+        }
         if !has_param(t, ty) {
             return;
         }
-        let canonical = crate::decls::canonical(&p.decls, t, ty);
+        let canonical = crate::decls::layout_name(&p.decls, t, ty);
         let Some(&row) = self.types.get(&canonical) else {
             return;
         };

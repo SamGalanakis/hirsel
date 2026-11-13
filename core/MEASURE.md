@@ -13,8 +13,30 @@ Rust is 1.99.0, edition 2024, target `x86_64-unknown-linux-gnu`, target CPU `x86
 The standard library is the toolchain's prebuilt library. Both profiles enable overflow
 checks, disable incremental compilation and debug info, and use one codegen unit.
 Dev uses opt-level 0 and debug assertions; release uses opt-level 3 without debug
-assertions or LTO. Cargo manifests pin the same profile choices. No dependencies are
-fetched. Record `rustc -vV`, host CPU/OS, source base and profile flags beside the table.
+assertions or LTO. Cargo manifests pin the same profile choices. Nothing is fetched at
+build or measurement time. Record `rustc -vV`, host CPU/OS, source base and profile flags
+beside the table.
+
+## Twins
+
+Each workload has two Rust twins, measured and reported separately; no ratio, total or
+geomean combines them.
+
+- **Idiomatic.** The M1 programs' idiomatic twin is `twins/<program>`, which has no crate
+  dependencies. A LangArena task's idiomatic twin is the upstream Rust at kostya/LangArena
+  3c9f84d, unchanged. Its crates are vendored into the repository (`cargo vendor`) at the
+  versions in upstream's Cargo.lock and built with `--offline --locked`: serde 1.0.229,
+  serde_json 1.0.154, regex 1.13.1, once_cell 1.21.4, base64-simd 0.8.0, simd-csv 0.14.0,
+  rayon 1.12.0 and tokio 1.53.3, with their transitive dependencies as locked. A vendored
+  crate's lines are not first-party and never enter the source-line denominator.
+- **Matched.** The same algorithm, data representation, container shapes and arithmetic
+  checks as the Hirsel program, in safe Rust with no crates: a hand-written matcher where
+  Hirsel has no regex, the same JSON representation, checked arithmetic where Hirsel checks.
+  A lane other than its author reviews a matched twin before its first ratio is published
+  and records the review in the twin's header comment.
+
+Both twins print the Hirsel program's observable output (checksums for LangArena) for every
+measured configuration; a twin that does not is not measured.
 
 The serial instruction baseline runs on CPU 16, which is allowed by host rules. Run
 one measured process tree at a time, including all compiler workers and linker children.

@@ -184,3 +184,29 @@ fn parse_grammar_before_range() -> u64 {
     let r: Result[u64, ParseError] = int.parse("99999999999999999999x")
     unsigned_error(r)
 }
+
+// The body's u64 accumulator: up to 1844674407370955160 a step cannot wrap, so
+// 18446744073709551609 is the largest value read without a check. 18446744073709551610 is
+// read through the checked step and fits; 18446744073709551619 (whose last step starts past
+// the bound, and would wrap to 3 without a check) and a 21-digit numeral do not (3). Leading zeros
+// past 20 digits are still 42. A numeral too big for u64 is read to its bad byte at 30 (130).
+// expect: run parse_u64_accumulator_edge() = true
+fn parse_u64_accumulator_edge() -> bool {
+    let a: Result[u64, ParseError] = int.parse("18446744073709551609")
+    let b: Result[u64, ParseError] = int.parse("18446744073709551610")
+    let c: Result[u64, ParseError] = int.parse("184467440737095516150")
+    let d: Result[u64, ParseError] = int.parse("0000000000000000000000000042")
+    let e: Result[u64, ParseError] = int.parse("184467440737095516160000000000x")
+    let f: Result[u64, ParseError] = int.parse("18446744073709551619")
+    result.unwrap(a) == 18446744073709551609 && result.unwrap(b) == 18446744073709551610 && unsigned_error(c) == 3 && result.unwrap(d) == 42 && unsigned_error(e) == 130 && unsigned_error(f) == 3
+}
+
+// i64 on both sides of its range: one past MIN and one past MAX are OutOfRange (3); -1 is
+// read through the negative path with magnitude 1.
+// expect: run parse_i64_range_edges() = true
+fn parse_i64_range_edges() -> bool {
+    let low: Result[i64, ParseError] = int.parse("-9223372036854775809")
+    let high: Result[i64, ParseError] = int.parse("9223372036854775808")
+    let one: Result[i64, ParseError] = int.parse("-1")
+    signed_error(low) == 3 && signed_error(high) == 3 && result.unwrap(one) == -1
+}

@@ -24,7 +24,6 @@ pub fn parse[T: integer](s: String) -> Result[T, ParseError] {
     if n == 0 {
         return Error(Empty)
     }
-    let ten: T = int.narrow(10u8)
     // T is signed exactly when it holds -1.
     let minus_one: Option[T] = int.try_narrow(-1i8)
     let negative = b[0] == b'-' && match minus_one {
@@ -39,39 +38,60 @@ pub fn parse[T: integer](s: String) -> Result[T, ParseError] {
     if start == n {
         return Error(Invalid(0))
     }
-    // The grammar is checked to the end before the range: past the first value that does
-    // not fit, the digits are still read.
-    let mut v: T = int.narrow(0u8)
-    let mut fits = true
+    // The magnitude in u64, which holds every T's magnitude (|i64 MIN| = 2^63). Up to
+    // 1844674407370955160 (floor((2^64 - 1) / 10) - 1), ten times it plus a digit is at most
+    // 2^64 - 7, so that step cannot wrap; past it the step is checked and a magnitude past
+    // 2^64 - 1 only sets big. The grammar is still read to the end before the range.
+    let mut mag: u64 = 0
+    let mut big = false
     for i in start .. n {
         let x = b[i]
         if x < b'0' || x > b'9' {
             return Error(Invalid(i))
         }
-        if fits {
-            let d: T = int.narrow(x - b'0')
-            // Toward the sign, so a signed MIN fits.
-            let next: Option[T] = match int.checked_mul(v, ten) {
-                Some(m) => if negative {
-                    int.checked_sub(m, d)
-                } else {
-                    int.checked_add(m, d)
-                },
-                None => None,
-            }
-            match next {
-                Some(m) => {
-                    v = m
+        let d: u64 = int.widen(x - b'0')
+        if mag <= 1844674407370955160 {
+            mag = int.wrapping_add(int.wrapping_mul(mag, 10), d)
+        } else if !big {
+            match int.checked_mul(mag, 10) {
+                Some(m) => match int.checked_add(m, d) {
+                    Some(v) => {
+                        mag = v
+                    },
+                    None => {
+                        big = true
+                    },
                 },
                 None => {
-                    fits = false
+                    big = true
                 },
             }
         }
     }
-    if fits {
-        Ok(v)
-    } else {
-        Error(OutOfRange)
+    if big {
+        return Error(OutOfRange)
+    }
+    if !negative || mag == 0 {
+        let fit: Option[T] = int.try_narrow(mag)
+        return match fit {
+            Some(v) => Ok(v),
+            None => Error(OutOfRange),
+        }
+    }
+    // -mag fits exactly when mag - 1 fits, and is then (0 - (mag - 1)) - 1: both steps
+    // stay in [MIN, 0], so neither check can fail.
+    let below: Option[T] = int.try_narrow(mag - 1)
+    let zero: T = int.narrow(0u8)
+    let one: T = int.narrow(1u8)
+    let value: Option[T] = match below {
+        Some(v) => match int.checked_sub(zero, v) {
+            Some(w) => int.checked_sub(w, one),
+            None => None,
+        },
+        None => None,
+    }
+    match value {
+        Some(v) => Ok(v),
+        None => Error(OutOfRange),
     }
 }

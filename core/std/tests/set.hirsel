@@ -67,7 +67,7 @@ fn capacity_returns_key() -> u64 {
     let mut s: set.Set[String] = set.new()
     let k = result.unwrap(string.from("abc"))
     let r = bound bytes 0 { set.insert(mut s, take k) }
-    match r { Ok(Error((_, take original))) => list.len(string.as_bytes(original)) + set.len(s), _ => 99 }
+    match r { Ok(Error((_, take original))) => if original == "abc" { list.len(string.as_bytes(original)) + set.len(s) } else { 99 }, _ => 99 }
 }
 
 // expect: run duplicate_under_bound() = true

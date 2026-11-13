@@ -10,10 +10,9 @@
 // key type and keyed by a per-run seed (SEM-5); no operation reveals it. `for (k, v) in m`
 // binds `(View[K], View[V])` for each live entry in insertion order (SEM-6) and FREEZES m.
 //
-// A present key's value is replaced with core `map.set`, which takes no key and admits
-// nothing; a count is bumped with `map.get` then `map.set`. There is no `map.update` with
-// a callback: taking the value out needs a placeholder V to leave behind, and V has none
-// in general.
+// Core map.update lends a present value to a scoped callback after one lookup;
+// a tally uses update, then inserts only on None. map.set replaces a whole value
+// without allocating. Neither operation moves a present key or changes its order.
 /// Whether k is present: `map.get(m, k) != None`. Cost: as get. Ex: `map.contains(seen, k)`
 pub fn contains[K: key, V](m: Map[K, V], k: K) -> bool {
     match map.get(m, k) {

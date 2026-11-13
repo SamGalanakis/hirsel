@@ -36,7 +36,7 @@ fn capacity_returns_owner() -> u64 {
     let x = result.unwrap(string.from("abc"))
     let r = bound bytes 0 { heap.push(mut h, take x) }
     match r {
-        Ok(Error((_, take original))) => list.len(string.as_bytes(original)) + heap.len(h),
+        Ok(Error((_, take original))) => if original == "abc" { list.len(string.as_bytes(original)) + heap.len(h) } else { 99 },
         _ => 99,
     }
 }

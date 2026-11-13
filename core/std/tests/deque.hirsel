@@ -87,7 +87,7 @@ fn capacity_back() -> u64 {
     let mut d: deque.Deque[String] = deque.new()
     let s = result.unwrap(string.from("abc"))
     let r = bound bytes 0 { deque.push_back(mut d, take s) }
-    match r { Ok(Error((_, take x))) => list.len(string.as_bytes(x)) + deque.len(d), _ => 99 }
+    match r { Ok(Error((_, take x))) => if x == "abc" { list.len(string.as_bytes(x)) + deque.len(d) } else { 99 }, _ => 99 }
 }
 
 // expect: run capacity_front() = 3
@@ -95,7 +95,7 @@ fn capacity_front() -> u64 {
     let mut d: deque.Deque[String] = deque.new()
     let s = result.unwrap(string.from("abc"))
     let r = bound bytes 0 { deque.push_front(mut d, take s) }
-    match r { Ok(Error((_, take x))) => list.len(string.as_bytes(x)) + deque.len(d), _ => 99 }
+    match r { Ok(Error((_, take x))) => if x == "abc" { list.len(string.as_bytes(x)) + deque.len(d) } else { 99 }, _ => 99 }
 }
 
 // No admission on pop even after wraparound.
@@ -123,9 +123,10 @@ fn capacity_wrapped_growth() -> u64 {
     result.unwrap(deque.push_back(mut d, take c))
     let x = result.unwrap(string.from("xyz"))
     let r = bound bytes 0 { deque.push_front(mut d, take x) }
-    let returned: u64 = match r { Ok(Error((_, take value))) => list.len(string.as_bytes(value)), _ => 99 }
+    let returned: u64 = match r { Ok(Error((_, take value))) => if value == "xyz" { list.len(string.as_bytes(value)) } else { 99 }, _ => 99 }
     let first = option.unwrap(deque.pop_front(mut d))
     let last = option.unwrap(deque.pop_back(mut d))
+    if first != "bb" || last != "ccc" { return 99 }
     returned * 100 + list.len(string.as_bytes(first)) * 10 + list.len(string.as_bytes(last))
 }
 

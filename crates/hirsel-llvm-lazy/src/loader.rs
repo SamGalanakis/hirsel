@@ -15,8 +15,17 @@ struct Output {
 }
 type Compile = unsafe extern "C" fn(*const u8, usize, u8, *mut Output);
 type Free = unsafe extern "C" fn(*mut u8);
+#[repr(C)]
+struct Input {
+    data: *const u8,
+    len: usize,
+    imported: u8,
+}
+type Program =
+    unsafe extern "C" fn(*const Input, usize, *const *const libc::c_char, usize, u8, *mut Output);
 struct Backend {
     compile: Compile,
+    program: Program,
     free: Free,
     _image: File,
 }
@@ -76,20 +85,26 @@ fn load() -> Result<Backend, String> {
     // engine.c built in this same artifact. No foreign component is selected.
     let compile = unsafe { libc::dlsym(handle, c"hirsel_llvm_compile_v1".as_ptr()) };
     let free = unsafe { libc::dlsym(handle, c"hirsel_llvm_output_free_v1".as_ptr()) };
-    if compile.is_null() || free.is_null() {
+    let program = unsafe { libc::dlsym(handle, c"hirsel_llvm_program_v1".as_ptr()) };
+    if compile.is_null() || free.is_null() || program.is_null() {
         return Err(dl_error());
     }
     Ok(Backend {
         // SAFETY: same-build functions have the signatures above. They own no
         // Rust values across the C boundary; output is copied then freed there.
         compile: unsafe { std::mem::transmute::<*mut libc::c_void, Compile>(compile) },
+        // SAFETY: this export is built with the Input/Output C layouts above.
+        program: unsafe { std::mem::transmute::<*mut libc::c_void, Program>(program) },
         free: unsafe { std::mem::transmute::<*mut libc::c_void, Free>(free) },
         _image: image,
     })
 }
-pub(crate) fn compile(ir: &str, speed: bool) -> Result<Vec<u8>, String> {
+fn backend() -> Result<&'static Backend, String> {
     static BACKEND: OnceLock<Result<Backend, String>> = OnceLock::new();
-    let backend = BACKEND.get_or_init(load).as_ref().map_err(Clone::clone)?;
+    BACKEND.get_or_init(load).as_ref().map_err(Clone::clone)
+}
+pub(crate) fn compile(ir: &str, speed: bool) -> Result<Vec<u8>, String> {
+    let backend = backend()?;
     let mut output = Output {
         data: std::ptr::null_mut(),
         len: 0,
@@ -99,6 +114,47 @@ pub(crate) fn compile(ir: &str, speed: bool) -> Result<Vec<u8>, String> {
     // malloc buffer on every exit, which its paired free consumes once.
     unsafe {
         (backend.compile)(ir.as_ptr(), ir.len(), u8::from(speed), &mut output);
+        let bytes = std::slice::from_raw_parts(output.data, output.len).to_vec();
+        (backend.free)(output.data);
+        if output.failed == 0 {
+            Ok(bytes)
+        } else {
+            Err(String::from_utf8_lossy(&bytes).into_owned())
+        }
+    }
+}
+
+pub(crate) fn program(units: &[crate::Unit<'_>], exports: &[String]) -> Result<Vec<u8>, String> {
+    let backend = backend()?;
+    let inputs: Vec<_> = units
+        .iter()
+        .map(|u| Input {
+            data: u.ir.as_ptr(),
+            len: u.ir.len(),
+            imported: u8::from(u.imported),
+        })
+        .collect();
+    let names: Vec<_> = exports
+        .iter()
+        .map(|s| CString::new(s.as_str()).unwrap())
+        .collect();
+    let pointers: Vec<_> = names.iter().map(|s| s.as_ptr()).collect();
+    let mut output = Output {
+        data: std::ptr::null_mut(),
+        len: 0,
+        failed: 0,
+    };
+    // SAFETY: inputs and terminated export names stay borrowed through the
+    // synchronous C call. The paired component allocator owns its output.
+    unsafe {
+        (backend.program)(
+            inputs.as_ptr(),
+            inputs.len(),
+            pointers.as_ptr(),
+            pointers.len(),
+            1,
+            &mut output,
+        );
         let bytes = std::slice::from_raw_parts(output.data, output.len).to_vec();
         (backend.free)(output.data);
         if output.failed == 0 {

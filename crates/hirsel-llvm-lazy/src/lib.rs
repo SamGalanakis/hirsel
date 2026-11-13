@@ -14,6 +14,20 @@ pub fn compile_ir(ir: &str, speed: bool) -> Result<Vec<u8>, String> {
     loader::compile(ir, speed)
 }
 
+/// An already-published body, emitted with its unit-local type/static tables.
+pub struct Unit<'a> {
+    pub ir: &'a str,
+    /// Imported bodies are available for inlining; surviving calls link their
+    /// separately cached library object instead of emitting a second copy.
+    pub imported: bool,
+}
+
+/// One release codegen unit. LLVM resolves instance symbols, internalizes all
+/// owned definitions except `exports`, then runs the ordinary O3 pipeline.
+pub fn emit_program(units: &[Unit<'_>], exports: &[String]) -> Result<Vec<u8>, String> {
+    loader::program(units, exports)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::core;

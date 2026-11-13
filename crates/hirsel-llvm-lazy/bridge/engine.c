@@ -2,6 +2,7 @@
 // settings as hirsel-llvm's direct Context/Module/TargetMachine path.
 #include <llvm-c/Core.h>
 #include <llvm-c/IRReader.h>
+#include <llvm-c/Linker.h>
 #include <llvm-c/Error.h>
 #include <llvm-c/Target.h>
 #include <llvm-c/TargetMachine.h>
@@ -12,6 +13,7 @@
 #include <pthread.h>
 
 typedef struct { uint8_t *data; size_t len; uint8_t failed; } HirselLlvmOutput;
+typedef struct { const uint8_t *data; size_t len; uint8_t imported; } HirselLlvmUnit;
 static pthread_once_t initialized = PTHREAD_ONCE_INIT;
 static void initialize(void) {
     LLVMInitializeX86TargetInfo(); LLVMInitializeX86Target();
@@ -30,7 +32,9 @@ static void error(HirselLlvmOutput *out, const char *message) {
 __attribute__((visibility("default")))
 void hirsel_llvm_output_free_v1(uint8_t *data) { free(data); }
 __attribute__((visibility("default")))
-void hirsel_llvm_compile_v1(const uint8_t *ir, size_t len, uint8_t speed, HirselLlvmOutput *out) {
+void hirsel_llvm_program_v1(const HirselLlvmUnit *units, size_t count,
+                          const char *const *exports, size_t export_count,
+                          uint8_t speed, HirselLlvmOutput *out) {
     pthread_once(&initialized, initialize);
     unsigned major, minor, patch;
     LLVMGetVersion(&major, &minor, &patch);
@@ -47,11 +51,40 @@ void hirsel_llvm_compile_v1(const uint8_t *ir, size_t len, uint8_t speed, Hirsel
         speed ? LLVMCodeGenLevelAggressive : LLVMCodeGenLevelNone, LLVMRelocPIC, LLVMCodeModelDefault);
     if (!machine) { error(out, "LLVM could not create the target machine"); return; }
     LLVMContextRef context = LLVMContextCreate();
-    LLVMModuleRef module = NULL;
-    LLVMMemoryBufferRef buffer = LLVMCreateMemoryBufferWithMemoryRangeCopy((const char*)ir, len, "hirsel-core");
-    int failed = LLVMParseIRInContext2(context, buffer, &module, &message);
-    LLVMDisposeMemoryBuffer(buffer);
-    if (failed || !module) { error(out, message); LLVMDisposeMessage(message); goto done; }
+    // Standalone emission keeps the original module and symbol order exactly.
+    // Release composition goes through the linker, which may reorder globals.
+    int standalone = count == 1 && !export_count;
+    LLVMModuleRef module = standalone ? NULL : LLVMModuleCreateWithNameInContext("hirsel-core", context);
+    LLVMMemoryBufferRef buffer = NULL;
+    int failed;
+    for (size_t i = 0; i < count; ++i) {
+        LLVMModuleRef unit = NULL;
+        buffer = LLVMCreateMemoryBufferWithMemoryRangeCopy((const char*)units[i].data, units[i].len, "hirsel-core");
+        failed = LLVMParseIRInContext2(context, buffer, &unit, &message);
+        LLVMDisposeMemoryBuffer(buffer);
+        if (failed || !unit) { error(out, message); LLVMDisposeMessage(message); goto done; }
+        if (units[i].imported) {
+            for (LLVMValueRef f = LLVMGetFirstFunction(unit); f; f = LLVMGetNextFunction(f)) {
+                if (LLVMCountBasicBlocks(f) && LLVMGetLinkage(f) == LLVMExternalLinkage)
+                    LLVMSetLinkage(f, LLVMAvailableExternallyLinkage);
+            }
+        }
+        // The linker resolves each unit's instance-named declarations and
+        // renames its private statics/helpers. It consumes the source module.
+        if (standalone) module = unit;
+        else if (LLVMLinkModules2(module, unit)) { error(out, "LLVM module composition failed"); goto done; }
+    }
+    if (export_count) {
+        for (LLVMValueRef f = LLVMGetFirstFunction(module); f; f = LLVMGetNextFunction(f)) {
+            if (!LLVMCountBasicBlocks(f) || LLVMGetLinkage(f) != LLVMExternalLinkage) continue;
+            size_t len;
+            const char *name = LLVMGetValueName2(f, &len);
+            int exported = 0;
+            for (size_t i = 0; i < export_count; ++i)
+                if (strlen(exports[i]) == len && !memcmp(name, exports[i], len)) exported = 1;
+            if (!exported) LLVMSetLinkage(f, LLVMInternalLinkage);
+        }
+    }
     LLVMSetTarget(module, triple);
     LLVMTargetDataRef layout = LLVMCreateTargetDataLayout(machine);
     LLVMSetModuleDataLayout(module, layout); LLVMDisposeTargetData(layout);
@@ -85,4 +118,9 @@ void hirsel_llvm_compile_v1(const uint8_t *ir, size_t len, uint8_t speed, Hirsel
 done:
     if (module) LLVMDisposeModule(module);
     LLVMContextDispose(context); LLVMDisposeTargetMachine(machine);
+}
+__attribute__((visibility("default")))
+void hirsel_llvm_compile_v1(const uint8_t *ir, size_t len, uint8_t speed, HirselLlvmOutput *out) {
+    HirselLlvmUnit unit = { ir, len, 0 };
+    hirsel_llvm_program_v1(&unit, 1, NULL, 0, speed, out);
 }

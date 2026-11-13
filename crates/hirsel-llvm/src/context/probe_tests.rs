@@ -75,6 +75,17 @@ fn every_emitted_function_probes_its_frame_within_the_guard() {
         assert_probes(&module.text(), "lazy CoreIR reference", 2);
         let lazy = hirsel_llvm_lazy::compile_ir(IR, speed).unwrap();
         assert_eq!(lazy, direct, "lazy probe interval, speed={speed}");
+        if speed {
+            let composed = hirsel_llvm_lazy::emit_program(
+                &[hirsel_llvm_lazy::Unit {
+                    ir: IR,
+                    imported: false,
+                }],
+                &["wide".into(), "narrow".into()],
+            )
+            .unwrap();
+            assert_eq!(composed, direct, "release composition probe interval");
+        }
     }
     let core_ir = hirsel_core_ir::text::parse(
         r#"core v1

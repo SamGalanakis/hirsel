@@ -8,6 +8,9 @@ use std::fmt;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
+#[path = "release_native.rs"]
+mod release;
+
 pub const TARGET: &str = "x86_64-unknown-linux-gnu";
 #[derive(Clone, Copy, Debug, Serialize)]
 pub enum Backend {
@@ -148,18 +151,19 @@ fn define_once<'a>(module: &'a Module, emitted: &mut HashSet<InstanceKey>) -> Co
 }
 
 impl CheckProduct {
-    /// Each checked body is already an emitter module, with signature-only imports.
-    /// A callee implementation edit therefore recompiles its object alone.
+    /// Dev keeps each checked body as an independent object. LLVM release
+    /// composes owned bodies and published inline imports into one codegen unit.
     pub fn emit_reachable(
         &self,
         entry: &DefPath,
         options: &NativeOptions,
     ) -> Result<Vec<ObjectProduct>, NativeStop> {
         let reached = self.reachable(entry, options.instance_limit)?;
-        self.emit_instances(reached.require()?, &reached.materialized, options)
+        self.emit_instances(entry, reached.require()?, &reached.materialized, options)
     }
     fn emit_instances(
         &self,
+        entry: &DefPath,
         reached: &[InstanceKey],
         materialized: &crate::instances::InstanceSet,
         options: &NativeOptions,
@@ -179,6 +183,17 @@ impl CheckProduct {
             .as_ref()
             .map(|i| Store::new(&i.store_root().join("native")))
             .transpose()?;
+        if matches!(options.backend, Backend::Llvm) && options.optimize {
+            return self.emit_release(
+                entry,
+                reached,
+                materialized,
+                options,
+                runtime,
+                &store,
+                library_store.as_ref(),
+            );
+        }
         let mut objects = Vec::new();
         let mut emitted = HashSet::new();
         for instance in reached {
@@ -240,7 +255,7 @@ impl CheckProduct {
     ) -> Result<BuildProduct, NativeStop> {
         let instances = reached.require()?;
         let source = self.process_entry(entry, options)?;
-        let objects = self.emit_instances(instances, &reached.materialized, options)?;
+        let objects = self.emit_instances(entry, instances, &reached.materialized, options)?;
         link(&source, &objects, options)
     }
     fn process_entry(
@@ -911,9 +926,10 @@ b0:
         (Process, 8, process_cranelift_entry, process_llvm_entry),
         (Tasks, 9, tasks_cranelift_entry, tasks_llvm_entry),
     );
-    fn product_entry(backend: Backend) {
+    fn product_entry(backend: Backend, optimize: bool) {
         let dir = tempfile::tempdir().unwrap();
-        let options = native_options(backend, dir.path());
+        let mut options = native_options(backend, dir.path());
+        options.optimize = optimize;
         let source =
             "pub fn main() -> Result[(), Exit] { Error(Exit(status: identity(answer()))) }\n";
         let mut request = source_request(source, dir.path());
@@ -963,6 +979,7 @@ b0:
         assert_eq!(installed.image.as_ref().unwrap().decoded_bodies(), 2);
         // A second application's private native store still reuses core's objects.
         let mut other_options = native_options(backend, dir.path());
+        other_options.optimize = optimize;
         other_options.store = dir.path().join("another-app-native");
         let objects = installed.emit_reachable(&entry, &other_options).unwrap();
         let core = objects
@@ -971,6 +988,21 @@ b0:
             .collect::<Vec<_>>();
         assert_eq!(core.len(), 2);
         assert!(core.iter().all(|o| !o.compiled));
+        if optimize {
+            let answer = core
+                .iter()
+                .find(|o| o.instance.definition.to_string().ends_with("/answer"))
+                .unwrap();
+            let name = format!("h{}", selection(answer.instance.digest()));
+            let own = objects
+                .iter()
+                .find(|o| o.instance.definition == entry)
+                .unwrap();
+            assert!(
+                !own.bytes.windows(name.len()).any(|w| w == name.as_bytes()),
+                "the program must inline the published answer body, not reference its object"
+            );
+        }
         assert_eq!(objects.iter().filter(|o| o.compiled).count(), 1);
         // A cached negative body is refused only when this entry reaches it.
         let mut request = source_request(
@@ -990,12 +1022,17 @@ b0:
     #[test]
     #[ignore = "explicit native integration target"]
     fn published_core_entry_cranelift() {
-        product_entry(Backend::Cranelift);
+        product_entry(Backend::Cranelift, false);
     }
     #[test]
     #[ignore = "explicit native integration target"]
     fn published_core_entry_llvm() {
-        product_entry(Backend::Llvm);
+        product_entry(Backend::Llvm, false);
+    }
+    #[test]
+    #[ignore = "explicit native integration target"]
+    fn release_inlines_published_core_and_reuses_its_objects() {
+        product_entry(Backend::Llvm, true);
     }
     #[test]
     #[ignore = "explicit native integration target"]

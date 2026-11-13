@@ -156,14 +156,30 @@ pub fn materialize(
         .iter()
         .map(|&(owner, root)| import_type(&mut module, owner, root, &mut HashMap::default()))
         .collect::<Vec<_>>();
-    let target = FuncId(module.functions.len() as u32);
-    let instance = InstanceId(module.instances.len() as u32);
-    module.instances.push(key.clone());
-    module.functions.push(Function {
-        instance,
-        signature: source.functions[function.index()].signature,
-        body: None,
-    });
+    // A body that calls its own instance (a region-only generic's recursion erases to
+    // the instance's own key, MEM-6) already holds a signature-only row of that key:
+    // the body fills it, so the unit defines one function per link name.
+    let signature = source.functions[function.index()].signature;
+    let target = match module
+        .functions
+        .iter()
+        .position(|g| g.body.is_none() && &module.instances[g.instance.index()] == key)
+    {
+        Some(row) => {
+            module.functions[row].signature = signature;
+            FuncId(row as u32)
+        }
+        None => {
+            let instance = InstanceId(module.instances.len() as u32);
+            module.instances.push(key.clone());
+            module.functions.push(Function {
+                instance,
+                signature,
+                body: None,
+            });
+            FuncId(module.functions.len() as u32 - 1)
+        }
+    };
     fill(&mut module, function, target, template, &roots)?;
     fn retire(module: &mut Module, source: FuncId, template: &GenericTemplate) {
         module.functions[source.index()].body = None;

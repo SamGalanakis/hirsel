@@ -651,3 +651,41 @@ fn generic_view_payload_cranelift() { generic_view_payload(Backend::Cranelift); 
 #[test]
 #[ignore = "explicit native integration target"]
 fn generic_view_payload_llvm() { generic_view_payload(Backend::Llvm); }
+
+// std.json.write_value[in r] reaches itself through a closure; erasing its region gives
+// that call row the instance's own key, and materialization added the body as a second
+// row of the key: two definitions of one link name, which LLVM rejects (M1 json matched).
+fn region_recursive_instance(backend: Backend) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    std::fs::create_dir(&app).unwrap();
+    std::fs::write(
+        app.join("main.hirsel"),
+        r#"fn arr(r: Region, s: String) -> bool {
+    match std.json.parse(r, s) {
+        Ok(v) => match v { Arr(_) => true, _ => false },
+        Error(_) => false,
+    }
+}
+pub fn main() -> Result[(), Exit] {
+    let s = result.unwrap(string.from("[null, [true]]"))
+    region doc {
+        if arr(doc, s) { Ok(()) } else { Error(Exit(status: 3)) }
+    }
+}
+"#,
+    )
+    .unwrap();
+    let request = CheckRequest::directory(&app, &root.join("core"), &dir.path().join("store")).unwrap();
+    let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let built = product.build(&entry, &native_options(backend, dir.path())).unwrap();
+    run_clean(&built.executable, 0);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn region_recursive_instance_cranelift() { region_recursive_instance(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn region_recursive_instance_llvm() { region_recursive_instance(Backend::Llvm); }

@@ -210,7 +210,7 @@ def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=No
                     command.extend(['--cc', str(cc)])
                 build = subprocess.run(command, cwd=root, capture_output=True)
                 row = dict(program=entry['workload'], variant=entry['variant'], engine=engine,
-                           checked=False, built=False, passed=0, cases=len(cases), first_failure=None,
+                           checked=False, artifact_linked=False, built=False, passed=0, cases=len(cases), first_failure=None,
                            stopped=None)
                 rows.append(row)
                 try:
@@ -222,6 +222,8 @@ def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=No
                 row['incomplete'] = product.get('incomplete', [])
                 row['gap_sites'] = gap_sites(row['incomplete'], sources, product.get('reachable', {}).get('first_stops', []))
                 row['checked'] = bool(product['accepted'])
+                row['native'] = product.get('native')
+                row['artifact_linked'] = build.returncode == 0 and bool(row['native'])
                 row['census'] = product.get('reachable', {}).get('census', {})
                 row['first_stops'] = product.get('reachable', {}).get('first_stops', [])
                 row['reachable_bodies'] = product.get('reachable', {}).get('bodies')

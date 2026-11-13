@@ -90,6 +90,7 @@ print(json.dumps({'accepted':True, 'native':{'executable':str(output)}, 'diagnos
         self.assertFalse(row['built'])
         self.assertEqual(row['passed'], 0)
         self.assertIn('closure has 1 bodies', row['stopped'])
+        self.assertTrue(row['artifact_linked'])
         # An emitted artifact that runs but prints nothing also loses built status.
         # Only the second case is empty, so earlier successes must be discarded.
         emit = "print(pathlib.Path(sys.argv[1]).read_text().strip()+os.environ['M1_CASE'])"
@@ -100,6 +101,8 @@ print(json.dumps({'accepted':True, 'native':{'executable':str(output)}, 'diagnos
         self.assertEqual(row['passed'], 0)
         self.assertEqual(row['first_failure'], 'second')
         self.assertIn('empty stdout against nonempty EXPECTED', row['stopped'])
+        self.assertTrue(row['artifact_linked'])
+        self.assertIn('executable', row['native'])
         (self.corpus / 'EXPECTED/first.stdout').write_bytes(b'wrong')
         row = self.rows()[0]
         self.assertFalse(row['built'])

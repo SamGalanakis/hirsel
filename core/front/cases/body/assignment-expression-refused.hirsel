@@ -1,0 +1,7 @@
+// expect: refuse OWN-12 at 5:21
+// expect: refuse OWN-12 at 6:18
+// expect: refuse OWN-12 at 7:20
+fn value() -> u64 { 3 }
+fn literal_left() { 1u64 = 2u64 }
+fn call_left() { value() = 2u64 }
+fn binary_left() { (1u64 + 2u64) = 3u64 }

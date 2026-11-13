@@ -2317,3 +2317,15 @@ fn uninitialized_take_names_use_the_normal_slot_transition() {
     let failures = run_case(&root().join("cases/body/uninit-take-name.hirsel"));
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+#[test]
+fn indexing_has_one_closed_operand_rule() {
+    for case in [
+        "index-types-refused",
+        "index-sequence-refused",
+        "assignment-expression-refused",
+    ] {
+        let failures = run_case(&root().join(format!("cases/body/{case}.hirsel")));
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+}

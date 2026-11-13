@@ -205,7 +205,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let at = match self.place(place) {
             Ok(Some(at)) => at,
             Ok(None) => {
-                self.gap(place, "assignment to this place is not built");
+                // Classify an index's base even when it is a temporary, so the
+                // LANG-21 operand rule also owns invalid index assignments.
+                if self.kind(place) == NodeKind::Index {
+                    let base = self.kids(place)[0];
+                    let (ty, _) = self.expr(base, None);
+                    let (collection, _) = self.indexed_type(ty);
+                    if self.index_element(collection, place).is_err() {
+                        return false;
+                    }
+                }
+                self.refuse("OWN-12", place, "assignment requires a writable place");
                 return false;
             }
             Err(()) => return false,
@@ -246,7 +256,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
         };
         if !emitted && self.live() && self.ir_ty(at.ty).is_some() {
-            self.gap(place, "assignment to this place is not built");
+            unreachable!("a checked writable place with a built representation has an address");
         }
         let diverged = if !compound {
             let (t, v) = self.expr(value, expect(at.ty));

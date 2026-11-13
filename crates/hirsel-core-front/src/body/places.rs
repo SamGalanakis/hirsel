@@ -323,34 +323,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     return Ok(None);
                 };
                 let (collection, viewed) = self.indexed_type(at.ty);
-                let elem = match self.t.kind(collection) {
-                    TyKind::Array(elem, _) => *elem,
-                    TyKind::Adt(d, args)
-                        if matches!(
-                            self.p.decls[d.index()].role,
-                            Some(Role::List | Role::FixedSpan)
-                        ) =>
-                    {
-                        args[0]
-                    }
-                    TyKind::Adt(d, _)
-                        if matches!(
-                            self.p.decls[d.index()].role,
-                            Some(Role::SeqSpan | Role::IndexedSpan)
-                        ) =>
-                    {
-                        self.refuse(
-                            "MEM-12",
-                            n,
-                            "a variable-sized sequence is read with seq.nth or indexed.get",
-                        );
-                        return Err(());
-                    }
-                    _ => {
-                        self.gap(n, "indexing this type is not built");
-                        return Err(());
-                    }
-                };
+                let elem = self.index_element(collection, n)?;
                 // Index operands are evaluated once, before places are compared (OWN-9).
                 let (_, value) = self.expr(c[1], expect(scalar(Scalar::U64)));
                 let (s, l) = (at.place.start as usize, at.place.len as usize);
@@ -601,31 +574,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let c = self.kids(n);
         let (ty, value) = self.expr(c[0], None);
         let (collection, _) = self.indexed_type(ty);
-        let elem = match self.t.kind(collection) {
-            TyKind::Array(elem, _) => *elem,
-            TyKind::Adt(d, args)
-                if matches!(
-                    self.p.decls[d.index()].role,
-                    Some(Role::List | Role::FixedSpan)
-                ) =>
-            {
-                args[0]
-            }
-            TyKind::Adt(d, _)
-                if matches!(
-                    self.p.decls[d.index()].role,
-                    Some(Role::SeqSpan | Role::IndexedSpan)
-                ) =>
-            {
-                self.refuse(
-                    "MEM-12",
-                    n,
-                    "a variable-sized sequence is read with seq.nth or indexed.get",
-                );
-                return (ERROR, None);
-            }
-            TyKind::Error => return (ERROR, None),
-            _ => return self.gap_ty(n, "indexing this type is not built"),
+        let Ok(elem) = self.index_element(collection, n) else {
+            return (ERROR, None);
         };
         let (_, index) = self.expr(c[1], expect(scalar(Scalar::U64)));
         if !self.copies(elem) {
@@ -648,6 +598,25 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         })();
         (elem, result)
+    }
+    /// LANG-21's closed index row, shared by named and temporary bases.
+    pub(super) fn index_element(&mut self, collection: TyId, n: NodeId) -> Result<TyId, ()> {
+        match self.t.kind(collection) {
+            TyKind::Array(elem, _) => Ok(*elem),
+            TyKind::Adt(d, args)
+                if matches!(
+                    self.p.decls[d.index()].role,
+                    Some(Role::List | Role::FixedSpan)
+                ) =>
+            {
+                Ok(args[0])
+            }
+            TyKind::Error => Err(()),
+            _ => {
+                self.refuse("LANG-21", n, "this type has no index operation");
+                Err(())
+            }
+        }
     }
     pub(super) fn indexed_type(&self, mut ty: TyId) -> (TyId, bool) {
         let mut viewed = false;

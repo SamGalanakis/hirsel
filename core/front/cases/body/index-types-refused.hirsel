@@ -1,0 +1,14 @@
+// expect: refuse LANG-21 at 8:29
+// expect: refuse LANG-21 at 9:33
+// expect: refuse LANG-21 at 10:38
+// expect: refuse LANG-21 at 11:21
+// expect: refuse LANG-21 at 12:33
+// expect: refuse LANG-21 at 13:41
+// expect: refuse LANG-21 at 14:24
+fn string_read(s: String) { s[0] }
+fn map_read(m: Map[u64, u64]) { m[0] }
+fn map_write(mut m: Map[u64, u64]) { m[0] = 1 }
+fn literal_read() { "a"[0] }
+fn seq_read(xs: SeqSpan[u64]) { xs[0] }
+fn indexed_read(xs: IndexedSpan[u64]) { xs[0] }
+fn temporary_write() { "a"[0] = 1u8 }

@@ -1,0 +1,1 @@
+pub fn main(a: Args) -> Result[(), Exit] { if args.len(a) == 0u64 { Ok(()) } else { Error(Exit(status: 7u8)) } }

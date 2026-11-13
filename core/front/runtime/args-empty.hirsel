@@ -1,0 +1,5 @@
+// Native oracle: no argv, empty output, exit 0. This is the original OutsideReached repro.
+pub fn main(a: Args) -> Result[(), Exit] {
+    if args.len(a) != 0u64 { return Error(Exit(status: 1)) }
+    match args.get(a, 0) { None => Ok(()), Some(_) => Error(Exit(status: 2)) }
+}

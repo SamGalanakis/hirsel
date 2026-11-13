@@ -5,6 +5,8 @@ use hirsel_core_ir::{Counted, RtOp};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Kernel {
+    ArgsLen,
+    ArgsGet,
     NewOwner(Option<Counted>),
     Share(Counted),
     TryUnwrap(Counted),
@@ -44,8 +46,8 @@ operations! {
     ("arc", "new", Lane::Runtime(Kernel::NewOwner(Some(Counted::Arc)))),
     ("arc", "share", Lane::Runtime(Kernel::Share(Counted::Arc))),
     ("arc", "try_unwrap", Lane::Runtime(Kernel::TryUnwrap(Counted::Arc))),
-    ("args", "len", Lane::Runtime(Kernel::Blocked("provider extern rows are not built (FOR FORM)"))),
-    ("args", "get", Lane::Runtime(Kernel::Blocked("provider extern rows are not built (FOR FORM)"))),
+    ("args", "len", Lane::Runtime(Kernel::ArgsLen)),
+    ("args", "get", Lane::Runtime(Kernel::ArgsGet)),
     ("box", "new", Lane::Runtime(Kernel::NewOwner(None))),
     ("box", "unbox", Lane::Runtime(Kernel::Unbox)),
     ("channel", "new", Lane::Runtime(Kernel::ChannelNew)),
@@ -217,6 +219,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Kernel::Share(kind) => self.runtime_share(kind, vals[0]?, result, n),
             Kernel::TryUnwrap(kind) => self.runtime_try_unwrap(kind, types[0], vals[0]?, result, n),
             Kernel::Unbox => self.runtime_unbox(types[0], vals[0]?, n),
+            Kernel::ArgsLen => self
+                .runtime_row(RtOp::ArgsLen, &[Arg::Value(vals[0]?)], n)
+                .map(|values| values[0]),
+            Kernel::ArgsGet => self.runtime_args_get(vals, result, n),
             Kernel::Blocked(what) => {
                 self.gap(n, what);
                 None
@@ -1098,5 +1104,45 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             n,
         );
         output
+    }
+}
+
+impl<'c, 'a> Cx<'c, 'a, '_> {
+    fn runtime_args_get(
+        &mut self,
+        vals: &[Option<ValueId>],
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let [value, ..] = self.runtime_row(
+            RtOp::ArgsGet,
+            &[Arg::Value(vals[0]?), Arg::Value(vals[1]?)],
+            n,
+        )?;
+        let TyKind::Adt(_, arguments) = self.t.kind(result).clone() else {
+            return None;
+        };
+        let payload = arguments[0];
+        let id = self.runtime_type(result, n)?;
+        let to = self.new_slot(PlaceTy::Declared(id), n);
+        let none = self.runtime_compare(Ty::Ptr, value, 0, n)?;
+        let yes = self.new_block(&[]);
+        let no = self.new_block(&[]);
+        let join = self.new_block(&[]);
+        self.runtime_branch(none, no, yes, n);
+        self.start(yes);
+        self.runtime_case_payload(to, 1, payload, Some(value), n);
+        self.jump(join, &[], n);
+        self.start(no);
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 0,
+            },
+            n,
+        );
+        self.jump(join, &[], n);
+        self.start(join);
+        Some(self.pointer(to, n))
     }
 }

@@ -208,3 +208,41 @@ fn counted_and_box_kernels_preserve_payloads_handback_and_exact_refunds() {
         assert_eq!(run.used, 0, "{source}: leaked payload, holder or node");
     }
 }
+
+#[test]
+fn args_rows_return_count_and_run_owned_optional_views() {
+    let source = "fn count(a:Args) -> u64 { args.len(a) }\nfn first(a:Args) -> bool { match args.get(a,0) { None => false, Some(s) => s==\"alpha\" } }\nfn second(a:Args) -> bool { match args.get(a,1) { None => false, Some(s) => s==\"\" } }\nfn missing(a:Args) -> bool { match args.get(a,2) { None => true, Some(_) => false } }";
+    let (index, modules) = canonical(source);
+    let p = Program::declare(&index, &modules);
+    assert!(p.refusals.is_empty(), "{:?}", p.refusals);
+    let mut emitter = Emitter::new();
+    let mut functions = HashMap::new();
+    for (f, fd) in p
+        .fns
+        .iter()
+        .enumerate()
+        .filter(|(_, fd)| fd.path.0.package.name == "app")
+    {
+        let check = p.check_lower(f, &mut emitter);
+        assert!(
+            check.refusals.is_empty() && check.gaps.is_empty(),
+            "{check:?}"
+        );
+        functions.insert(fd.path.0.name.as_str(), check.function.unwrap());
+    }
+    wf::module(&emitter.module).unwrap();
+    for (argv, results) in [(vec![], [0, 0, 0, 1]), (vec!["alpha", ""], [2, 1, 1, 1])] {
+        for (name, expected) in ["count", "first", "second", "missing"]
+            .into_iter()
+            .zip(results)
+        {
+            let result = eval::run_args(&emitter.module, functions[name], &[0], 0, &argv);
+            assert_eq!(
+                result.outcome,
+                eval::Outcome::Returned(vec![expected]),
+                "{name} {argv:?}"
+            );
+            assert_eq!(result.used, 0, "argument views admit no storage");
+        }
+    }
+}

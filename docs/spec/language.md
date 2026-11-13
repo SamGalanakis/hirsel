@@ -306,6 +306,11 @@ that is `send` and otherwise at the second. An owning closure is never `shareabl
 ([OWN-4](ownership.md#own-4-bounds)). A callable type also says whether it is `waits` (LANG-8). A callable fits a callable type
 when its parameter modes and types and its result are identical, its kind is admitted, and
 it is `waits` only if the type is; one that does not fit is refused here, at the callable.
+A result's written anchors ([OWN-20](ownership.md#own-20-scoped-results-name-their-anchor))
+are part of it, and a callable type's parameters have no names, so its scoped result can
+name only a region, and one that names no anchor is refused at the written result type,
+OWN-20; a function whose result is anchored to one of its own parameters fits no callable
+type.
 A parameter's mode is unmarked, `mut`, `take` or `bytes`, so a function with a `bytes`
 parameter has a callable type such as `fn(bytes u64) -> u64`. Calling a callable never
 consumes it and follows the modes of a direct call, `bytes e` included
@@ -330,6 +335,10 @@ fn f() -> u64 { let h: fn(u64) -> u64 = sized; h(7) }     // refused: LANG-13, a
 ```
 ```hirsel
 fn run(take f: own[shareable] fn() -> u64) -> u64 { f() }   // refused: LANG-13, at shareable
+```
+```hirsel
+fn apply(f: fn(u64) -> scoped fn(u64) -> u64, a: u64) -> u64 { let g = f(a); g(1) }
+                                                          // refused: OWN-20, the result names no anchor
 ```
 ```hirsel
 fn keep(take s: String) -> fn() -> u64 { fn() -> u64 { string.byte_len(s) } }

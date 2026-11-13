@@ -360,3 +360,45 @@ fn float_constant_tables_are_read_only_data() {
     );
     println!("{}", hirsel_core_ir::text::print(&emitter.module));
 }
+
+/// Rigid numeric operands used to disappear from emission, making sum return zero.
+/// Until typed numeric helpers are materialized, these real source bodies must GAP.
+#[test]
+fn generic_scalar_operations_are_explicit_gaps() {
+    let corpus = manifest().load().unwrap();
+    let parsed = corpus.parse();
+    let index = corpus.index(&parsed);
+    let modules: Vec<_> = corpus
+        .sources
+        .iter()
+        .zip(parsed.files)
+        .map(|(s, p)| ModuleInput {
+            id: index.module(&s.module).unwrap(),
+            syntax: p.syntax,
+        })
+        .collect();
+    let p = Program::declare(&index, &modules);
+    let mut emitter = Emitter::new();
+    let mut checked = 0;
+    for (f, fd) in p.fns.iter().enumerate() {
+        if fd.path.package_is("core", "1")
+            && matches!(
+                (fd.path.0.modules[0].as_str(), fd.path.0.name.as_str()),
+                ("int", "parse") | ("list", "sum")
+            )
+        {
+            let check = p.check_lower(f, &mut emitter);
+            assert!(check.refusals.is_empty(), "{check:?}");
+            assert!(check.function.is_none(), "{check:?}");
+            assert!(
+                check
+                    .gaps
+                    .iter()
+                    .any(|g| g.what == "generic scalar operations are not built"),
+                "{check:?}"
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 2);
+}

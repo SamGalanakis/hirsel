@@ -42,12 +42,6 @@ impl MetadataWeight {
             self.vec(paths, |w, path| w.add(path.capacity()));
         }
     }
-    pub fn callees(&mut self, values: &BTreeMap<String, hirsel_run_schema::CalleeFacts>) {
-        self.map(values, |w, path, value| {
-            w.add(path.capacity());
-            w.code_reach(&value.reach);
-        });
-    }
 
     /// Bound a prospective clone+retain_owner or count its copied file/path
     /// buffers afterward; shared source text and original owners stay excluded.

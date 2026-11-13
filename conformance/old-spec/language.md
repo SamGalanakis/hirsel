@@ -520,25 +520,6 @@ fn run(text: String) -> Result[u64, AppError] {
 }
 ```
 
-Two arms carrying one type are two roles, so plain `?` names neither:
-
-```hirsel
-type DbError = Open(store.StoreError) | Close(store.StoreError) | Save(
-  store.TxFailure[store.TxError]
-)
-
-fn put_blob(mut tx: store.Tx, info: store.CallInfo, data: Bytes) -> Result[(), store.TxError] {
-  store.tx_put(mut tx, b"blob", unique data)
-}
-
-fn save(a: Authority, data: Bytes) -> Result[(), DbError] {
-  let mut s = store.open(a, store.default_config()) ? Open   // plain ? is LANG-8 here
-  store.transact(mut s, put_blob, data) ? Save
-  store.close(take s) ? Close
-  Ok(())
-}
-```
-
 ### LANG-9: Tests
 
 Tests are ordinary functions, pure or taking the `Test` capability, which the test runner

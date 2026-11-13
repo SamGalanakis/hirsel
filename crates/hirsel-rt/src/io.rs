@@ -614,28 +614,6 @@ pub enum Request {
         net: u64,
         path: String,
     },
-    /// A runner call (RUN-11): legacy providers wait for its outcome;
-    /// qualified transport acknowledges handoff with Ready, then RunnerPoll
-    /// observes the outcome. An immediate refusal is returned directly.
-    RunnerCall(Box<hirsel_run_schema::RunnerRequest>),
-    /// Qualified runner result probe; cancellation is forwarded once as part
-    /// of this bounded canonical request, before its outcome is observed.
-    RunnerPoll {
-        key: [u8; 32],
-        cancel: Option<u32>,
-    },
-    /// A cancellation forwarded to the call with key `key` (RUN-9), acknowledged with
-    /// `Ready`.
-    RunnerCancel {
-        key: [u8; 32],
-        cause: u32,
-    },
-    /// A callee run's own outcome as it ended (RUN-11), acknowledged with `Ready`: replay
-    /// checks it, and a joined tape check compares it with its caller's completion.
-    CallReturn(hirsel_run_schema::CalleeOutcome),
-    /// The run's place stopped it here, before its next request (a simulated place's crash,
-    /// RUN-6 `Abandoned`), acknowledged with `Ready`: replay stops the run at this event.
-    Stopped,
     /// A scheduling input of cooperative runs, never a capability request: the parked
     /// request of wait `wait` (creation ordinal) was ready at the scheduling point after the
     /// `points` it waited through since it parked or was last ready, and was re-issued there.
@@ -651,8 +629,6 @@ pub enum Request {
     },
     /// A settled native CPU prefix, recorded only at its serial retirement.
     CpuSummary(CpuSummary),
-    /// A store authority operation (STORE-11).
-    Seam(crate::authority::SeamRequest),
     /// Scoped CPU admission/drain receipt, not a capability request.
     CpuControl {
         width: u32,
@@ -789,8 +765,6 @@ pub enum Completion {
     GroupExit(Result<hirsel_run_schema::GroupOutput, hirsel_run_schema::ProcessFailure>),
     /// A durable journal barrier parked the request before provider issue.
     Held,
-    /// A store authority operation's answer.
-    Seam(crate::authority::SeamCompletion),
     /// The issued request would block and its task parked; `committed` when it already made part
     /// of its effect, so cancellation no longer completes it.
     Blocked {
@@ -799,8 +773,6 @@ pub enum Completion {
     /// The completion of a scheduling input, `Request::Ready` or `Request::Schedule`, and
     /// a forwarded cancellation's acknowledgement.
     Ready,
-    /// A runner call's outcome.
-    Runner(hirsel_run_schema::RunnerCompletion),
     /// `mapped.with`'s view.
     View(MapView),
     /// `watcher.next`'s event, its paths relative to the watcher's Dir.
@@ -1122,8 +1094,6 @@ pub(crate) struct State {
     pub(crate) random: RandomSource,
     /// The kinds the run's Signals observes, as bits; zero without the grant.
     pub(crate) signal_kinds: u8,
-    /// The run's granted store authorities, in name order.
-    pub(crate) authorities: Vec<crate::authority::Granted>,
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub env: BTreeMap<String, Option<String>>,
@@ -1183,7 +1153,6 @@ impl Default for State {
             test_clocks: Default::default(),
             random: RandomSource::SplitMix64(0),
             signal_kinds: 0,
-            authorities: Vec::new(),
             stdout: vec![],
             stderr: Vec::new(),
             env: BTreeMap::new(),
@@ -1474,20 +1443,6 @@ impl State {
                 .execute)(self, request);
         }
         // The seam's grant answers are the state's; a provider's are sampled inputs.
-        if let Request::Seam(seam) = request {
-            if fault.is_some() {
-                return Err(AdapterError::InvalidCompletion);
-            }
-            return self.execute_seam(seam);
-        }
-        if let Request::Close { handle } = request
-            && self.is_claim(*handle)
-        {
-            if fault.is_some() {
-                return Err(AdapterError::InvalidCompletion);
-            }
-            return self.close_claim(*handle);
-        }
         // Process outcomes are provider inputs too; only a host adapter can spawn.
         if self.is_process(request) {
             if fault.is_some() {
@@ -1633,9 +1588,6 @@ impl State {
             self.expect(*stdin, Grant::Stdin)?;
         }
         match (request, &input) {
-            (Request::Seam(seam), Completion::Seam(value)) => {
-                return self.sample_seam(seam, value);
-            }
             (Request::SignalWait { signals, kinds }, Completion::Signal(value)) => {
                 self.expect(*signals, Grant::Signals)?;
                 let check = self.signal_check(*kinds);
@@ -2759,14 +2711,6 @@ pub trait Adapter {
     fn has_ready(&mut self) -> Result<bool, AdapterError> {
         Ok(false)
     }
-    /// The cooperative readiness a runner call parks on and its callee runs share (RUN-12),
-    /// made at the first call of a live adapter that has none; None in replay, which starts
-    /// no callee.
-    fn runner_readiness(&mut self) -> Option<crate::readiness::Readiness> {
-        None
-    }
-    /// The outcome of the runner call parked under `token` arrived (`RealIo::deliver`).
-    fn deliver(&mut self, _token: u64, _completion: hirsel_run_schema::RunnerCompletion) {}
     /// Prepare an idle wait without blocking on a driver. A source-aware
     /// adapter flushes/delivers its idle observations here, then exposes all
     /// remaining drivers so another adapter's sources can be waited together.

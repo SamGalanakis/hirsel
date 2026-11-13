@@ -106,44 +106,20 @@ fn byte_descriptor_and_text_records_match_derivation_on_both_targets() {
     }
 }
 
-/// The runtime's own list descriptors are the derivation's, element for element, on both
-/// targets: `List[Bytes]` releases each owner; `List[Arrival]` closes each resource handle;
-/// `List[ObjectRef]` releases each digest's owner; `List[HistoryRecord]` releases the
-/// owners of each element's arm, its created and retired lists included.
+/// The runtime's Bytes list descriptor releases each element's owner on both targets.
 #[test]
 fn runtime_list_descriptors_match_derivation_on_both_targets() {
-    use hirsel_layout::layout::{LayoutBuilder, OwnerRepresentation, Owners};
+    use hirsel_layout::layout::{LayoutBuilder, Owners};
     use hirsel_lir::layout_types::{LayoutKind, TargetSpec};
     use hirsel_types::Primitive;
-    let arrival = hirsel_syntax::DefPath::core("Arrival");
-    let owners = Owners {
-        nominals: [(
-            hirsel_syntax::DefId::intern(&arrival),
-            OwnerRepresentation::Handle {
-                revision: hirsel_syntax::ContentHash::of_bytes(b"Arrival"),
-                resource: true,
-            },
-        )]
-        .into(),
-        ..Default::default()
-    };
+    let owners = Owners::default();
     for target in [
         TargetSpec::x86_64_unknown_linux_gnu(),
         TargetSpec::aarch64_unknown_linux_gnu(),
     ] {
         let mut ty = support::schema::ty();
         let bytes = ty.p(Primitive::Bytes);
-        let handle = ty.named(&arrival, vec![]);
-        let u64 = ty.p(Primitive::U64);
-        let object_ref = ty.record(&[u64, u64, bytes]);
-        let refs = ty.list(object_ref);
-        let record = ty.variant(&[&[u64, bytes, bytes], &[bytes, refs, refs]]);
-        for (element, runtime) in [
-            (object_ref, &OBJECT_REF_LIST_DESCRIPTOR.0),
-            (bytes, &BYTES_LIST_DESCRIPTOR.0),
-            (handle, &HANDLE_LIST_DESCRIPTOR.0),
-            (record, &HISTORY_LIST_DESCRIPTOR.0),
-        ] {
+        for (element, runtime) in [(bytes, &BYTES_LIST_DESCRIPTOR.0)] {
             let list = ty.list(element);
             let mut builder = LayoutBuilder::new(&target, &owners);
             let element = builder.layout(&ty.store, element).unwrap();

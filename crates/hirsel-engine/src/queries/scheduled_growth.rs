@@ -188,8 +188,6 @@ impl QueryFactory for Factory {
                 membership: None,
                 component_cursor: 0,
                 cursor: 0,
-                table_keys: BTreeMap::new(),
-                required: BTreeMap::new(),
                 reads: Vec::new(),
                 terminal: None,
             }));
@@ -534,8 +532,6 @@ struct Task {
     membership: Option<Arc<SourceMembership>>,
     component_cursor: usize,
     cursor: usize,
-    table_keys: BTreeMap<DefPath, Arc<crate::table_keys::TableKeyUse>>,
-    required: BTreeMap<DefPath, BTreeSet<usize>>,
     reads: Vec<Arc<Reads>>,
     terminal: Option<Result<ProductRef, Reference>>,
 }
@@ -612,25 +608,10 @@ impl Task {
             cx.consume(id);
             self.component_cursor += 1;
         }
-        // Table-key acceptance reduces the same complete checked roots. It
-        // neither builds membership nor solves a source component.
         while self.cursor < queries.roots.len() {
             let id = queries.selected_input(&self.front, queries.roots[self.cursor])?;
             let selected = cx.read(id);
             if let Some(checked) = self.front.checked(selected.clone()) {
-                for call in &checked.summary.summary.calls {
-                    let slots = hirsel_types::core_roles::table_key_parameters(call.callee.path());
-                    if !slots.is_empty() {
-                        self.required
-                            .entry(call.callee.path().clone())
-                            .or_default()
-                            .extend(slots);
-                    }
-                }
-                self.table_keys.insert(
-                    checked.summary.summary.owner.path().clone(),
-                    checked.table_keys,
-                );
                 self.reads.push(checked.reads.clone());
             } else if let Some(facts) = self.front.check_facts(selected.clone())
                 && matches!(facts.result, Err(QueryError::Diagnostics(_)))
@@ -646,42 +627,11 @@ impl Task {
     }
     fn complete(&mut self, _cx: &mut dyn QueryContext) -> Result<ProductRef, Reference> {
         let queries = &self.queries;
-        let mut table_reads = ReadsBuilder::new();
-        let mut provider = FrozenProvider::new(
-            self.front.snapshot(),
-            queries.package.clone(),
-            &mut table_reads,
-        );
-        let table_result = crate::table_keys::check_uses(
-            self.front.snapshot().types(),
-            &self.table_keys,
-            std::mem::take(&mut self.required),
-            &mut |definition| provider.signature(definition).map(Some),
-        );
-        let mut union = union_of(self.reads.iter().map(|reads| &**reads));
-        union.merge(&table_reads.finish().map_err(|_| queries.errors.protocol)?);
-        let reads = union.finish().map_err(|_| queries.errors.protocol)?;
+        let reads = union_of(self.reads.iter().map(|reads| &**reads))
+            .finish()
+            .map_err(|_| queries.errors.protocol)?;
         self.reads.clear();
         self.reads.shrink_to_fit();
-        let table_diagnostics = match table_result {
-            Ok(diagnostics) => diagnostics,
-            Err(error) => {
-                let bytes = queries
-                    .records
-                    .encode(&*queries.items, &(&error, &reads))
-                    .ok_or(queries.errors.resource)?;
-                if bytes.len() as u64 > queries.weight.scratch {
-                    return Err(queries.errors.resource);
-                }
-                let reference = queries
-                    .store
-                    .put_content(FAILURE, &bytes)
-                    .ok_or(queries.errors.resource)?;
-                *queries.failure.lock().unwrap_or_else(|e| e.into_inner()) =
-                    Some((reference, error));
-                return Err(reference);
-            }
-        };
         let membership = self.membership.as_ref().ok_or(queries.errors.protocol)?;
         let facets = queries
             .producer()
@@ -691,21 +641,17 @@ impl Task {
             )
             .ok_or(queries.errors.resource)?;
         let diagnostics = crate::select_diagnostics(
-            table_diagnostics
-                .into_iter()
-                .chain(
-                    facets
-                        .components
-                        .iter()
-                        .flat_map(|component| component.growing.iter().copied())
-                        .map(|site| {
-                            Diagnostic::error(
-                                const { RuleId::of("GEN-5") },
-                                site,
-                                "a recursive instantiation cycle grows its type arguments",
-                            )
-                        }),
-                )
+            facets
+                .components
+                .iter()
+                .flat_map(|component| component.growing.iter().copied())
+                .map(|site| {
+                    Diagnostic::error(
+                        const { RuleId::of("GEN-5") },
+                        site,
+                        "a recursive instantiation cycle grows its type arguments",
+                    )
+                })
                 .collect(),
             Some(&queries.sources),
         );

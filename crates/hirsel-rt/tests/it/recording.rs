@@ -330,7 +330,6 @@ fn bound_runs_round_trip_and_refuse_a_header_that_disagrees() {
         placement: None,
         admitted_at: -5,
         revocation: None,
-        instance: None,
     });
     let text = render_recording(&recording).unwrap();
     let parsed = parse_recording(&text).unwrap();
@@ -458,7 +457,6 @@ fn placement_header_is_diagnostic_validated_and_not_replayed() {
         canonical: run.canonical().to_vec(),
         admitted_at: 0,
         revocation: None,
-        instance: None,
         placement: Some(
             Placement {
                 cores: Cores::Fixed(8),
@@ -601,7 +599,6 @@ fn bound_scripted_world_refuses_physical_capacity_even_with_consistent_arithmeti
         canonical: run.canonical().to_vec(),
         admitted_at: 0,
         revocation: None,
-        instance: None,
         placement: Some(RecordedPlacement {
             schema: 1,
             request: Placement {

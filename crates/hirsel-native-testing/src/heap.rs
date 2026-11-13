@@ -16,7 +16,6 @@ use hirsel_run_schema::Access;
 use hirsel_syntax::DefPath;
 use std::collections::{BTreeMap, BTreeSet};
 
-mod authority;
 mod durability;
 mod env;
 mod file_faults;
@@ -25,17 +24,12 @@ mod input;
 mod net;
 mod numeric;
 mod process;
-mod runners;
 mod signals;
 
 /// The Io operations with a native entry (`hirsel_rt_operations`), over
 /// logical handles numbered as the runtime's adapter numbers them.
 #[derive(Clone)]
 struct Io {
-    instance: [u8; 16],
-    authorities: authority::Authorities,
-    runners: runners::Runners,
-    head: Option<runners::Head>,
     stdin: std::io::Cursor<Vec<u8>>,
     args: Vec<String>,
     file_reads: hirsel_run_schema::FileReadiness,
@@ -112,10 +106,6 @@ impl Io {
         hirsel_run_schema::validate_file_faults(&world.file_faults)
             .map_err(|e| NativeError::new(StageName::Heap, e))?;
         let mut io = Self::new();
-        io.instance = world.instance;
-        io.authorities = authority::Authorities::new(&world.authorities, world.instance);
-        io.runners.entries = world.runners.clone();
-        io.runners.facts = std::sync::Arc::new(world.callees.clone());
         io.args = world.args.clone();
         io.stdin = std::io::Cursor::new(world.stdin.clone());
         io.mounts = world.mounts.clone();
@@ -152,17 +142,12 @@ impl Io {
             hirsel_native::link::LaunchKind::Test => {
                 io.grants.insert(IO_HANDLE, IoGrant::Test);
             }
-            hirsel_native::link::LaunchKind::Main(_)
-            | hirsel_native::link::LaunchKind::Call { .. } => {}
+            hirsel_native::link::LaunchKind::Main(_) => {}
         }
         Ok(io)
     }
     fn new() -> Self {
         Self {
-            instance: [0; 16],
-            authorities: Default::default(),
-            runners: Default::default(),
-            head: None,
             stdin: std::io::Cursor::new(vec![]),
             args: vec![],
             file_reads: Default::default(),
@@ -197,182 +182,6 @@ impl Io {
 }
 
 impl Operations for Io {
-    fn domain(&self) -> hirsel_heapcheck::OperationDomain {
-        hirsel_heapcheck::OperationDomain::Simulation
-    }
-    fn fork_simulation(&self) -> Option<Box<dyn Operations>> {
-        Some(Box::new(self.clone()))
-    }
-    fn failure_source_position(&self, definition: &DefPath, site: SiteRange) -> Option<(u64, u64)> {
-        self.positions.get(&(definition.clone(), site)).copied()
-    }
-    fn path_text(&self, id: u64) -> Option<&str> {
-        self.paths
-            .get(id.checked_sub(1)? as usize)
-            .map(String::as_str)
-    }
-    fn intern_path(&mut self, text: &str) -> Option<u64> {
-        Some(self.path(text))
-    }
-    fn close_handle(
-        &mut self,
-        handle: u64,
-        output: &mut Vec<u8>,
-    ) -> Result<Option<String>, String> {
-        if let Some(id) = self.network_handles.remove(&handle) {
-            let completion = self
-                .network
-                .call(hirsel_rt::io::Request::Close { handle: id });
-            output.extend(self.network.take_report());
-            return match completion {
-                // A dropped accepted stream or listener left a scripted client's Expect unmet.
-                Ok(hirsel_rt::io::Completion::Checked(false)) => Ok(Some("LANG-9".into())),
-                Ok(_) => Ok(None),
-                Err(e) => Err(format!("network close: {e:?}")),
-            };
-        }
-        match self.grants.remove(&handle) {
-            Some(IoGrant::Inbox | IoGrant::Arrival) => Ok(None),
-            Some(IoGrant::Claim) => self.authorities.close(handle).map(|()| None),
-            Some(
-                IoGrant::File { .. }
-                | IoGrant::Mapped { .. }
-                | IoGrant::Watcher { .. }
-                | IoGrant::Span { .. },
-            ) => Ok(None),
-            Some(IoGrant::Atomic {
-                tree,
-                temporary,
-                directory,
-                ..
-            }) => {
-                if let Some(temporary) = self.physical_path(directory, &temporary) {
-                    self.trees.get_mut(&tree).unwrap().1.remove(&temporary);
-                    self.files.remove(&(tree, temporary));
-                }
-                Ok(None)
-            }
-            _ => Err(format!("model close of unknown handle {handle}")),
-        }
-    }
-    fn yielded(&mut self) -> bool {
-        std::mem::take(&mut self.yielded)
-    }
-    fn monotonic(&self, clock: u64) -> Option<u64> {
-        matches!(self.grants.get(&clock), Some(IoGrant::Monotonic))
-            .then_some(self.monotonic)
-            .flatten()
-    }
-    fn deliver_signal(&mut self) -> hirsel_heapcheck::SignalDelivery {
-        self.signals.deliver()
-    }
-    fn advance_monotonic(&mut self, ticks: u64) {
-        if let Some(now) = &mut self.monotonic {
-            *now = (*now).max(ticks);
-        }
-    }
-    /// The runtime's cancellation points (`hirsel-rt/src/host_waits.rs`): a canceled stdin
-    /// read, print, file or waiting network/process request checks program validity before
-    /// completing `Canceled(cause)` with no effect, and is still a capability operation.
-    fn canceled(
-        &mut self,
-        op: &OperationId,
-        args: &[OpValue],
-        cause: u32,
-        output: &mut Vec<u8>,
-    ) -> Option<OpOutcome> {
-        let path = &op.definition.0;
-        if !path.package.name_is("core") {
-            return None;
-        }
-        let module = path.modules.first().map(String::as_str);
-        let value = match (module, path.name.as_str(), args) {
-            (Some("runner"), "send", _) => return self.runner_canceled(args, cause),
-            // A zero-byte read is invalid before it is a cancellation point.
-            (Some("stdin"), "read", [_, _, OpValue::Bits { bits: 0, .. }]) => return None,
-            (Some("stdin"), "read", _) => OpValue::Variant {
-                tag: 1,
-                value: Box::new(OpValue::Variant {
-                    tag: 1,
-                    value: Box::new(OpValue::Variant {
-                        tag: cause,
-                        value: Box::new(OpValue::Unit),
-                    }),
-                }),
-            },
-            (Some("out"), "print" | "write", _) => {
-                let canceled = UnitResult::of(Err(hirsel_rt::io::IoError::Canceled(cause)));
-                let mut bytes = Vec::with_capacity(12);
-                for word in [canceled.tag, canceled.error, canceled.code] {
-                    bytes.extend_from_slice(&word.to_le_bytes());
-                }
-                OpValue::Plain(bytes)
-            }
-            (Some("err"), "print" | "write", _) => {
-                let mut bytes = 1u32.to_le_bytes().to_vec();
-                bytes.extend_from_slice(&cause.to_le_bytes());
-                OpValue::Variant {
-                    tag: 1,
-                    value: Box::new(OpValue::Plain(bytes)),
-                }
-            }
-            // WaitError::Canceled(cause).
-            (Some("clock"), "sleep_until", _) => OpValue::Variant {
-                tag: 1,
-                value: Box::new(OpValue::Variant {
-                    tag: 1,
-                    value: Box::new(OpValue::Variant {
-                        tag: cause,
-                        value: Box::new(OpValue::Unit),
-                    }),
-                }),
-            },
-            // `mapped.with`'s entries are no cancellation points.
-            (Some("$intrinsic"), "MappedView" | "MappedCheck", _) => return None,
-            (Some("watcher"), "next", [OpValue::Handle(directory), OpValue::Handle(watcher)]) => {
-                if !matches!(self.grants.get(watcher), Some(IoGrant::Watcher { directory: owner, .. }) if owner == directory)
-                {
-                    return Some(OpOutcome::Fail("CAP-2".into()));
-                }
-                let mut bytes = 1u32.to_le_bytes().to_vec();
-                bytes.extend_from_slice(&cause.to_le_bytes());
-                OpValue::Variant {
-                    tag: 1,
-                    value: Box::new(OpValue::Plain(bytes)),
-                }
-            }
-            (Some("net" | "udp" | "tls" | "read_half" | "write_half" | "$intrinsic"), _, _) => {
-                self.yielded = true;
-                let outcome = self.net(module, &path.name, args, Some(cause));
-                output.extend(self.network.take_report());
-                return outcome;
-            }
-            (Some("proc" | "child" | "group"), _, _) => {
-                self.yielded = true;
-                let outcome = self.process(module, &path.name, args, Some(cause));
-                output.extend(self.network.take_report());
-                return outcome;
-            }
-            (Some("signal"), "wait", _) => {
-                self.yielded = true;
-                return self.signals(module, &path.name, args, Some(cause));
-            }
-            (Some("file"), _, _) | (Some("dir"), "remove_all", _) => {
-                self.yielded = true;
-                return self.cancel_file(&path.name, args, cause);
-            }
-            _ => return None,
-        };
-        self.yielded = true;
-        Some(OpOutcome::Value(value))
-    }
-    fn iterator_next(
-        &mut self,
-        state: &mut OpValue,
-        canceled: Option<u32>,
-    ) -> Result<Option<OpValue>, String> {
-        self.directory_next(state, canceled)
-    }
     fn call(&mut self, op: &OperationId, args: &[OpValue], output: &mut Vec<u8>) -> OpOutcome {
         let path = &op.definition.0;
         if !path.package.name_is("core") {
@@ -389,26 +198,6 @@ impl Operations for Io {
         }
         if let Some(value) = instant(module, &path.name, args) {
             return OpOutcome::Value(value);
-        }
-        if self.head.is_some()
-            && module == Some("io")
-            && matches!(
-                path.name.as_str(),
-                "stdin"
-                    | "stderr"
-                    | "stdout"
-                    | "tasks"
-                    | "monotonic_clock"
-                    | "wall_clock"
-                    | "random"
-                    | "dir"
-                    | "net"
-                    | "process"
-                    | "signals"
-                    | "telemetry"
-            )
-        {
-            return OpOutcome::Value(grant_not_granted());
         }
         if module == Some("capture") || (module == Some("io") && path.name == "telemetry") {
             return self.telemetry(&path.name, args);
@@ -430,12 +219,6 @@ impl Operations for Io {
             return outcome;
         }
         if let Some(outcome) = self.filesystem(module, &path.name, args) {
-            return outcome;
-        }
-        if let Some(outcome) = self.runner(module, &path.name, args) {
-            return outcome;
-        }
-        if let Some(outcome) = self.authority(module, &path.name, args) {
             return outcome;
         }
         if let Some(outcome) = self.io(module, &path.name, args) {
@@ -530,19 +313,184 @@ impl Operations for Io {
             _ => OpOutcome::Unsupported,
         }
     }
+
+    fn domain(&self) -> hirsel_heapcheck::OperationDomain {
+        hirsel_heapcheck::OperationDomain::Simulation
+    }
+    fn fork_simulation(&self) -> Option<Box<dyn Operations>> {
+        Some(Box::new(self.clone()))
+    }
+    fn failure_source_position(&self, definition: &DefPath, site: SiteRange) -> Option<(u64, u64)> {
+        self.positions.get(&(definition.clone(), site)).copied()
+    }
+    fn path_text(&self, id: u64) -> Option<&str> {
+        self.paths
+            .get(id.checked_sub(1)? as usize)
+            .map(String::as_str)
+    }
+    fn intern_path(&mut self, text: &str) -> Option<u64> {
+        Some(self.path(text))
+    }
+    fn close_handle(
+        &mut self,
+        handle: u64,
+        output: &mut Vec<u8>,
+    ) -> Result<Option<String>, String> {
+        if let Some(id) = self.network_handles.remove(&handle) {
+            let completion = self
+                .network
+                .call(hirsel_rt::io::Request::Close { handle: id });
+            output.extend(self.network.take_report());
+            return match completion {
+                // A dropped accepted stream or listener left a scripted client's Expect unmet.
+                Ok(hirsel_rt::io::Completion::Checked(false)) => Ok(Some("LANG-9".into())),
+                Ok(_) => Ok(None),
+                Err(e) => Err(format!("network close: {e:?}")),
+            };
+        }
+        match self.grants.remove(&handle) {
+            Some(
+                IoGrant::File { .. }
+                | IoGrant::Mapped { .. }
+                | IoGrant::Watcher { .. }
+                | IoGrant::Span { .. },
+            ) => Ok(None),
+            Some(IoGrant::Atomic {
+                tree,
+                temporary,
+                directory,
+                ..
+            }) => {
+                if let Some(temporary) = self.physical_path(directory, &temporary) {
+                    self.trees.get_mut(&tree).unwrap().1.remove(&temporary);
+                    self.files.remove(&(tree, temporary));
+                }
+                Ok(None)
+            }
+            _ => Err(format!("model close of unknown handle {handle}")),
+        }
+    }
+    fn yielded(&mut self) -> bool {
+        std::mem::take(&mut self.yielded)
+    }
+    fn monotonic(&self, clock: u64) -> Option<u64> {
+        matches!(self.grants.get(&clock), Some(IoGrant::Monotonic))
+            .then_some(self.monotonic)
+            .flatten()
+    }
+    fn deliver_signal(&mut self) -> hirsel_heapcheck::SignalDelivery {
+        self.signals.deliver()
+    }
+    fn advance_monotonic(&mut self, ticks: u64) {
+        if let Some(now) = &mut self.monotonic {
+            *now = (*now).max(ticks);
+        }
+    }
+    /// The runtime's cancellation points (`hirsel-rt/src/host_waits.rs`): a canceled stdin
+    /// read, print, file or waiting network/process request checks program validity before
+    /// completing `Canceled(cause)` with no effect, and is still a capability operation.
+    fn canceled(
+        &mut self,
+        op: &OperationId,
+        args: &[OpValue],
+        cause: u32,
+        output: &mut Vec<u8>,
+    ) -> Option<OpOutcome> {
+        let path = &op.definition.0;
+        if !path.package.name_is("core") {
+            return None;
+        }
+        let module = path.modules.first().map(String::as_str);
+        let value = match (module, path.name.as_str(), args) {
+            // A zero-byte read is invalid before it is a cancellation point.
+            (Some("stdin"), "read", [_, _, OpValue::Bits { bits: 0, .. }]) => return None,
+            (Some("stdin"), "read", _) => OpValue::Variant {
+                tag: 1,
+                value: Box::new(OpValue::Variant {
+                    tag: 1,
+                    value: Box::new(OpValue::Variant {
+                        tag: cause,
+                        value: Box::new(OpValue::Unit),
+                    }),
+                }),
+            },
+            (Some("out"), "print" | "write", _) => {
+                let canceled = UnitResult::of(Err(hirsel_rt::io::IoError::Canceled(cause)));
+                let mut bytes = Vec::with_capacity(12);
+                for word in [canceled.tag, canceled.error, canceled.code] {
+                    bytes.extend_from_slice(&word.to_le_bytes());
+                }
+                OpValue::Plain(bytes)
+            }
+            (Some("err"), "print" | "write", _) => {
+                let mut bytes = 1u32.to_le_bytes().to_vec();
+                bytes.extend_from_slice(&cause.to_le_bytes());
+                OpValue::Variant {
+                    tag: 1,
+                    value: Box::new(OpValue::Plain(bytes)),
+                }
+            }
+            // WaitError::Canceled(cause).
+            (Some("clock"), "sleep_until", _) => OpValue::Variant {
+                tag: 1,
+                value: Box::new(OpValue::Variant {
+                    tag: 1,
+                    value: Box::new(OpValue::Variant {
+                        tag: cause,
+                        value: Box::new(OpValue::Unit),
+                    }),
+                }),
+            },
+            // `mapped.with`'s entries are no cancellation points.
+            (Some("$intrinsic"), "MappedView" | "MappedCheck", _) => return None,
+            (Some("watcher"), "next", [OpValue::Handle(directory), OpValue::Handle(watcher)]) => {
+                if !matches!(self.grants.get(watcher), Some(IoGrant::Watcher { directory: owner, .. }) if owner == directory)
+                {
+                    return Some(OpOutcome::Fail("CAP-2".into()));
+                }
+                let mut bytes = 1u32.to_le_bytes().to_vec();
+                bytes.extend_from_slice(&cause.to_le_bytes());
+                OpValue::Variant {
+                    tag: 1,
+                    value: Box::new(OpValue::Plain(bytes)),
+                }
+            }
+            (Some("net" | "udp" | "tls" | "read_half" | "write_half" | "$intrinsic"), _, _) => {
+                self.yielded = true;
+                let outcome = self.net(module, &path.name, args, Some(cause));
+                output.extend(self.network.take_report());
+                return outcome;
+            }
+            (Some("proc" | "child" | "group"), _, _) => {
+                self.yielded = true;
+                let outcome = self.process(module, &path.name, args, Some(cause));
+                output.extend(self.network.take_report());
+                return outcome;
+            }
+            (Some("signal"), "wait", _) => {
+                self.yielded = true;
+                return self.signals(module, &path.name, args, Some(cause));
+            }
+            (Some("file"), _, _) | (Some("dir"), "remove_all", _) => {
+                self.yielded = true;
+                return self.cancel_file(&path.name, args, cause);
+            }
+            _ => return None,
+        };
+        self.yielded = true;
+        Some(OpOutcome::Value(value))
+    }
+    fn iterator_next(
+        &mut self,
+        state: &mut OpValue,
+        canceled: Option<u32>,
+    ) -> Result<Option<OpValue>, String> {
+        self.directory_next(state, canceled)
+    }
 }
 
 #[derive(Clone)]
 enum IoGrant {
-    Runner {
-        index: usize,
-    },
-    Inbox,
-    Arrival,
-    Authority {
-        index: usize,
-    },
-    Claim,
     Telemetry,
     /// A live span of Telemetry `telemetry` and its context.
     Span {
@@ -2414,8 +2362,7 @@ fn config(
         context_handles: match kind {
             hirsel_native::link::LaunchKind::Zero => vec![],
             hirsel_native::link::LaunchKind::Test => vec![(IO_HANDLE, "Test".into())],
-            hirsel_native::link::LaunchKind::Main(roots)
-            | hirsel_native::link::LaunchKind::Call { roots, .. } => roots
+            hirsel_native::link::LaunchKind::Main(roots) => roots
                 .iter()
                 .map(|root| (hirsel_native::link::root_handle(*root), format!("{root:?}")))
                 .collect(),
@@ -2524,10 +2471,6 @@ fn observation(
 #[derive(Clone, Debug)]
 pub struct HeapWorld {
     pub campaign_partition: Option<hirsel_heapcheck::CampaignPartition>,
-    pub instance: [u8; 16],
-    pub runners: Vec<hirsel_run_schema::RunnerEntry>,
-    pub callees: BTreeMap<String, hirsel_run_schema::CalleeFacts>,
-    pub authorities: BTreeMap<String, hirsel_run_schema::AuthorityGrant>,
     /// Logical admission only. H never reserves host workers.
     pub cpu: Option<hirsel_run_schema::CpuGrant>,
     pub tasks_free: bool,
@@ -2560,10 +2503,6 @@ impl Default for HeapWorld {
     fn default() -> Self {
         Self {
             campaign_partition: None,
-            instance: [0; 16],
-            runners: Default::default(),
-            callees: Default::default(),
-            authorities: Default::default(),
             cpu: None,
             tasks_free: false,
             stdin: vec![],
@@ -2607,15 +2546,6 @@ pub fn run_heap_in(
 ) -> Result<HeapRun, NativeError> {
     let _progress =
         hirsel_intern::test_progress::enter("checked-h-execution", || entry.to_string());
-    if matches!(
-        program.launches.get(entry),
-        Some(hirsel_native::link::LaunchKind::Call { .. })
-    ) {
-        return Err(NativeError::new(
-            StageName::Launch,
-            "callee replay requires its canonical runner argument and reply protocol",
-        ));
-    }
     let heap = program.heap_program();
     let kind = program
         .launches
@@ -2624,8 +2554,7 @@ pub fn run_heap_in(
     let args = match kind {
         hirsel_native::link::LaunchKind::Zero => vec![],
         hirsel_native::link::LaunchKind::Test => vec![Arg::Handle(IO_HANDLE)],
-        hirsel_native::link::LaunchKind::Main(roots)
-        | hirsel_native::link::LaunchKind::Call { roots, .. } => roots
+        hirsel_native::link::LaunchKind::Main(roots) => roots
             .iter()
             .map(|root| Arg::Handle(hirsel_native::link::root_handle(*root)))
             .collect(),
@@ -2637,10 +2566,6 @@ pub fn run_heap_in(
         world,
     )?;
     io.positions = positions(program, sites);
-    if !world.runners.is_empty() {
-        io.runners.program = Some(std::sync::Arc::new(heap.clone()));
-        io.runners.config = Some(std::sync::Arc::new(config(program, None, kind, world)?));
-    }
     let run = hirsel_heapcheck::run_ready(
         &heap,
         entry,
@@ -2689,15 +2614,6 @@ pub fn heap_campaign_in(
     world: &HeapWorld,
 ) -> Result<HeapRun, NativeError> {
     let _progress = hirsel_intern::test_progress::enter("checked-h-campaign", || entry.to_string());
-    if matches!(
-        program.launches.get(entry),
-        Some(hirsel_native::link::LaunchKind::Call { .. })
-    ) {
-        return Err(NativeError::new(
-            StageName::Launch,
-            "callee replay requires its canonical runner argument and reply protocol",
-        ));
-    }
     let heap = program.heap_program();
     let kind = program
         .launches
@@ -2706,8 +2622,7 @@ pub fn heap_campaign_in(
     let args = match kind {
         hirsel_native::link::LaunchKind::Zero => vec![],
         hirsel_native::link::LaunchKind::Test => vec![Arg::Handle(IO_HANDLE)],
-        hirsel_native::link::LaunchKind::Main(roots)
-        | hirsel_native::link::LaunchKind::Call { roots, .. } => roots
+        hirsel_native::link::LaunchKind::Main(roots) => roots
             .iter()
             .map(|root| Arg::Handle(hirsel_native::link::root_handle(*root)))
             .collect(),
@@ -2719,10 +2634,6 @@ pub fn heap_campaign_in(
         world,
     )?;
     io.positions = positions(program, sites);
-    if !world.runners.is_empty() {
-        io.runners.program = Some(std::sync::Arc::new(heap.clone()));
-        io.runners.config = Some(std::sync::Arc::new(config(program, None, kind, world)?));
-    }
     let (campaign, timing) = hirsel_heapcheck::audit_campaign_ready(
         &heap,
         entry,

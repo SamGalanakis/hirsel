@@ -275,7 +275,6 @@ fn options(target: &TargetSpec, regions: bool, elide: bool, reuse: bool) -> Opti
         flat_walk: true,
         scoped_specialization: true,
         discharge: Default::default(),
-        places: Vec::new(),
     }
 }
 
@@ -499,16 +498,6 @@ pub fn same_options(a: &Options, b: &Options) -> bool {
         && a.reuse == b.reuse
         && a.flat_walk == b.flat_walk
         && a.scoped_specialization == b.scoped_specialization
-        && a.places == b.places
-}
-
-/// `options` building `fixture`'s program: with the place heads its runners name
-/// (`Options::places`), whatever its passes.
-fn fixture_options(options: &Options, fixture: &Fixture) -> Options {
-    Options {
-        places: fixture.place_heads(),
-        ..options.clone()
-    }
 }
 
 /// The matrix over supplied Ready programs, one per distinct pass options.
@@ -523,10 +512,6 @@ pub fn differential_ready<P: ReadyExecution>(
 ) -> Vec<(String, Outcome)> {
     let world = crate::HeapWorld {
         campaign_partition: fixture.heap_campaign_partition,
-        instance: [0; 16],
-        runners: fixture.runners.clone(),
-        callees: fixture.callees.clone(),
-        authorities: fixture.authorities.clone(),
         cpu: fixture.cpu.clone(),
         tasks_free: fixture.tasks_free,
         stdin: fixture.stdin.clone(),
@@ -585,73 +570,76 @@ pub fn differential_ready<P: ReadyExecution>(
         Ok(observation)
     };
     for configuration in configurations {
-        let observed = builds
-            .ready(&fixture_options(&configuration.options, fixture))
-            .and_then(|ready| match configuration.engine {
-                Engine::Heap { campaign: true } => {
-                    let (program, sites) = (ready.program(), &ready.sites());
-                    // What the runs cost, for sizing this campaign's parts.
-                    let measure = |sites: u64, clean, campaign| {
-                        if let Some(measures) = &fixture.heap_measures {
-                            measures.lock().expect("heap measures").push(HeapMeasure {
-                                configuration: configuration.name(),
-                                sites,
-                                clean,
-                                campaign,
-                            });
-                        }
-                    };
-                    let campaign = || {
-                        let started = std::time::Instant::now();
-                        crate::heap_campaign_in(program, entry, sites, &world).map(|run| {
-                            let campaign = HeapCampaignMeasure {
-                                partition: world.campaign_partition,
-                                wall: started.elapsed(),
-                                timing: run.timing.unwrap_or_default(),
-                            };
-                            (run.observation, run.sites, campaign)
-                        })
-                    };
-                    match fixture.heap_campaign_sites_max {
-                        Some(max) if world.campaign_partition.is_none() => {
+        let observed =
+            builds
+                .ready(&configuration.options)
+                .and_then(|ready| match configuration.engine {
+                    Engine::Heap { campaign: true } => {
+                        let (program, sites) = (ready.program(), &ready.sites());
+                        // What the runs cost, for sizing this campaign's parts.
+                        let measure = |sites: u64, clean, campaign| {
+                            if let Some(measures) = &fixture.heap_measures {
+                                measures.lock().expect("heap measures").push(HeapMeasure {
+                                    configuration: configuration.name(),
+                                    sites,
+                                    clean,
+                                    campaign,
+                                });
+                            }
+                        };
+                        let campaign = || {
                             let started = std::time::Instant::now();
-                            crate::run_heap_in(program, entry, sites, &world).and_then(|clean| {
-                                let wall = Some(started.elapsed());
-                                if clean.sites > max {
-                                    measure(clean.sites, wall, None);
-                                    Ok((clean.observation, Some(clean.sites)))
-                                } else {
-                                    campaign().map(|(observation, sites, run)| {
-                                        measure(sites, wall, Some(run));
-                                        (observation, None)
-                                    })
-                                }
+                            crate::heap_campaign_in(program, entry, sites, &world).map(|run| {
+                                let campaign = HeapCampaignMeasure {
+                                    partition: world.campaign_partition,
+                                    wall: started.elapsed(),
+                                    timing: run.timing.unwrap_or_default(),
+                                };
+                                (run.observation, run.sites, campaign)
                             })
+                        };
+                        match fixture.heap_campaign_sites_max {
+                            Some(max) if world.campaign_partition.is_none() => {
+                                let started = std::time::Instant::now();
+                                crate::run_heap_in(program, entry, sites, &world).and_then(
+                                    |clean| {
+                                        let wall = Some(started.elapsed());
+                                        if clean.sites > max {
+                                            measure(clean.sites, wall, None);
+                                            Ok((clean.observation, Some(clean.sites)))
+                                        } else {
+                                            campaign().map(|(observation, sites, run)| {
+                                                measure(sites, wall, Some(run));
+                                                (observation, None)
+                                            })
+                                        }
+                                    },
+                                )
+                            }
+                            _ => campaign().map(|(observation, sites, run)| {
+                                measure(sites, None, Some(run));
+                                (observation, None)
+                            }),
                         }
-                        _ => campaign().map(|(observation, sites, run)| {
-                            measure(sites, None, Some(run));
-                            (observation, None)
-                        }),
                     }
-                }
-                Engine::Heap { campaign: false } => {
-                    crate::run_heap_in(ready.program(), entry, &ready.sites(), &world)
-                        .map(|run| (run.observation, None))
-                }
-                Engine::Native {
-                    opt,
-                    partition,
-                    runtime,
-                } => native(Backend::Llvm, opt, partition, runtime, &ready).map(|o| (o, None)),
-                Engine::Cranelift { partition, runtime } => native(
-                    Backend::Cranelift,
-                    OptLevel::None,
-                    partition,
-                    runtime,
-                    &ready,
-                )
-                .map(|o| (o, None)),
-            });
+                    Engine::Heap { campaign: false } => {
+                        crate::run_heap_in(ready.program(), entry, &ready.sites(), &world)
+                            .map(|run| (run.observation, None))
+                    }
+                    Engine::Native {
+                        opt,
+                        partition,
+                        runtime,
+                    } => native(Backend::Llvm, opt, partition, runtime, &ready).map(|o| (o, None)),
+                    Engine::Cranelift { partition, runtime } => native(
+                        Backend::Cranelift,
+                        OptLevel::None,
+                        partition,
+                        runtime,
+                        &ready,
+                    )
+                    .map(|o| (o, None)),
+                });
         let outcome = match observed {
             Ok((observation, Some(sites))) if observation == *reference => {
                 Outcome::Parted { sites }
@@ -692,7 +680,7 @@ pub fn runner_oracle_ready<P: ReadyExecution>(
         let toolchain = toolchain.with_runtime(runtime.build());
         let diagnostic = runtime == Runtime::Diagnostic;
         let run = || -> Result<(), NativeError> {
-            let ready = builds.ready(&fixture_options(&configuration.options, fixture))?;
+            let ready = builds.ready(&configuration.options)?;
             let (program, sites) = (ready.program(), ready.sites());
             let target = &program.target;
             let objects = ready.objects(Emission {
@@ -765,17 +753,9 @@ pub fn runner_oracle_ready<P: ReadyExecution>(
                         revocations: None,
                     },
                 )?;
-                let mut recorded = observe(&recorded, program, &sites)?;
+                let recorded = observe(&recorded, program, &sites)?;
                 let replayed = launch(&paths[replayer], hirsel_native::link::Tape::Replay(&tape))?;
                 let replayed = observe(&replayed, program, &sites)?;
-                // A run with runners replays without its callees, printing only its own: an
-                // ordered tape's prints, or a Free phase tape's, which its replay checks.
-                if !fixture.runners.is_empty() {
-                    recorded.output = match tape_events(&tape)? {
-                        Some(events) => recorded_prints(&events),
-                        None => replayed.output.clone(),
-                    };
-                }
                 if replayed != recorded {
                     return Err(NativeError::new(
                         StageName::Launch,
@@ -868,7 +848,7 @@ pub fn real_io_replay_ready<P: ReadyExecution>(
     let mut run = || {
         let options = real_io_replay_options(launch_config.clone());
         let target = options.target.clone();
-        let ready = ready(&fixture_options(&options, fixture))?;
+        let ready = ready(&options)?;
         let (program, sites) = (ready.program(), &ready.sites());
         let objects = ready.objects(Emission {
             backend: Backend::Llvm,
@@ -917,13 +897,6 @@ pub fn real_io_replay_ready<P: ReadyExecution>(
             )?;
             let replayed = observe(&replayed, program, sites)?;
             // A run with runners replays without its callees (RUN-11), printing only its own.
-            if !fixture.runners.is_empty() {
-                let expected = Observation {
-                    output: replayed.output.clone(),
-                    ..real.clone()
-                };
-                return Ok(if replayed == expected { real } else { replayed });
-            }
             return Ok(replayed);
         }
         let text = hirsel_rt::launch::read_recording_text(&tape)
@@ -954,11 +927,7 @@ pub fn real_io_replay_ready<P: ReadyExecution>(
             .any(|e| e.completion == hirsel_rt::io::Completion::Checked(false));
         // A run with runners replays without its callees (RUN-11): its tape holds only its
         // own prints, which its replay alone reproduces; each callee's are on its own tape.
-        let alone = !fixture.runners.is_empty();
-        if !alone
-            && printed != reference.output
-            && !(reported && reference.output.starts_with(&printed))
-        {
+        if printed != reference.output && !(reported && reference.output.starts_with(&printed)) {
             return Err(NativeError::new(
                 StageName::Launch,
                 "the recorded prints are not the reference output",
@@ -974,13 +943,6 @@ pub fn real_io_replay_ready<P: ReadyExecution>(
             fixture,
         )?;
         let replayed = observe(&replayed, program, sites)?;
-        if alone {
-            let expected = Observation {
-                output: printed,
-                ..real.clone()
-            };
-            return Ok(if replayed == expected { real } else { replayed });
-        }
         Ok(replayed)
     };
     match run() {

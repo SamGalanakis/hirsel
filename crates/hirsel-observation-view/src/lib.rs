@@ -363,9 +363,7 @@ fn redact_request(request: &Request, canonical: &str) -> String {
         | R::ProcessSpawnPipeline { .. }
         | R::TestProcess { .. }
         | R::TestNet { .. }
-        | R::TestDir { .. }
-        | R::RunnerCall(_)
-        | R::CallReturn(_) => {
+        | R::TestDir { .. } => {
             let (operation, arguments) = canonical.split_once(' ').expect("request arguments");
             return format!(
                 "{operation} arguments={}",
@@ -379,7 +377,7 @@ fn redact_request(request: &Request, canonical: &str) -> String {
 
 fn redact_completion(completion: &Completion, canonical: &str) -> String {
     use Completion as C;
-    use hirsel_run_schema::{CallOutcome, PipelineOutcome, ProcessOutcome};
+    use hirsel_run_schema::{PipelineOutcome, ProcessOutcome};
     let mut words: Vec<String> = canonical.split(' ').map(String::from).collect();
     match completion {
         C::Random(Ok(bytes))
@@ -407,12 +405,6 @@ fn redact_completion(completion: &Completion, canonical: &str) -> String {
                 *word = payload_summary(bytes);
             }
         }
-        C::Runner(c) => match &c.outcome {
-            CallOutcome::Ok(bytes) | CallOutcome::Failed(bytes) | CallOutcome::Faulted(bytes) => {
-                words[2] = payload_summary(bytes);
-            }
-            _ => {}
-        },
         _ => {}
     }
     words.join(" ")
@@ -676,10 +668,6 @@ mod tests {
                     statuses: vec![hirsel_run_schema::ExitStatus::Exited(0)],
                     stderr: vec![secret.to_vec()],
                 })),
-            ),
-            (
-                Request::CallReturn(hirsel_run_schema::CalleeOutcome::Ok(secret.to_vec())),
-                Completion::Ready,
             ),
         ]
         .into_iter()

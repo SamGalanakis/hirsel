@@ -327,7 +327,6 @@ pub struct NativeExecution {
     pub request: NativeRequest,
     pub types: Arc<hirsel_types::TypeInterner>,
     pub code: hirsel_run_schema::CodeReach,
-    pub callees: std::collections::BTreeMap<String, hirsel_run_schema::CalleeFacts>,
     pub toolchain: Arc<hirsel_native::Toolchain>,
     pub run: Option<Arc<hirsel_run_config::ValidatedRun>>,
     pub foreign_unreplayable: bool,
@@ -423,7 +422,6 @@ pub struct NativeReady {
     pub sources: SourceMap,
     /// Source profiles, present when the request selected source/debug tables.
     pub profiles: Option<Arc<hirsel_native::ProfileSources>>,
-    pub callees: std::collections::BTreeMap<String, hirsel_run_schema::CalleeFacts>,
     pub(super) _owner: Arc<dyn Send + Sync>,
 }
 impl NativeReady {

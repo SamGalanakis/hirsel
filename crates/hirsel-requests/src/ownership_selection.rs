@@ -143,9 +143,6 @@ impl OwnershipExecution {
         if objects.root != self.root || !std::ptr::eq(&*objects._owner, self) {
             return Err("ownership objects belong to another selected completion".into());
         }
-        if matches!(launch, hirsel_host_io::launch::HostLaunch::Callee { .. }) {
-            return Err("ownership launch does not execute runner callees".into());
-        }
         let source = &self._owner._source;
         if selection.requires_replayable(launch) && !source.run.foreign.unmodeled.is_empty() {
             return Err("ownership recording requires replayable source effects".into());

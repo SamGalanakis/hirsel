@@ -66,28 +66,6 @@ N fn instant.checked_add(clock: MonotonicClock, start: Instant of clock, nanosec
 N fn io.net(rt: Io) -> Result[Net, GrantError]
 N fn io.random(rt: Io) -> Result[Random, GrantError]
 N fn io.signals(rt: Io) -> Result[Signals, GrantError]
-N fn io.authority(rt: Io, name: String) -> Result[Authority, GrantError]
-fn authority.levels(a: Authority) -> List[Level of a]
-fn authority.level(a: Authority, name: String) -> Option[Level of a]
-fn authority.floor(a: Authority) -> Level of a
-fn level.name(l: Level) -> String
-fn level.narrow(a: Authority, l: Level) -> Option[Level of a]
-fn authority.max_entry(a: Authority) -> u64
-fn authority.claim(a: Authority) -> Result[Claim of a, SeamError]
-fn claim.end(c: Claim) -> u64
-fn claim.narrow(a: Authority, take c: Claim) -> Option[Claim of a]
-fn authority.submit(a: Authority, mut c: Claim of a, take entry: Bytes, created: List[ObjectRef], retired: List[ObjectRef], at: Level of a) -> Result[u64, SeamError]
-fn authority.wait(a: Authority, mut c: Claim of a, position: u64) -> Advanced
-fn authority.durable(a: Authority, mut c: Claim of a, at: Level of a) -> Result[u64, SeamError]
-fn authority.read(a: Authority, from: u64, at: Level of a, max: u64) -> Result[List[HistoryRecord], SeamError]
-fn authority.last(a: Authority, at: Level of a) -> Result[Bytes, SeamError]
-fn authority.locate(a: Authority, mut c: Claim of a, position: u64) -> Result[Bytes, SeamError]
-fn authority.at(a: Authority, l: Bytes, from: u64, at: Level of a, max: u64) -> Result[List[HistoryRecord], SeamError]
-fn authority.get(a: Authority, r: ObjectRef) -> Result[Option[Bytes], SeamError]
-fn authority.put(a: Authority, mut c: Claim of a, r: ObjectRef, take data: Bytes) -> Result[(), SeamError]
-fn authority.reclaim(a: Authority, mut c: Claim of a, budget: u64) -> Result[Reclaimed, SeamError]
-fn authority.select(a: Authority, mut c: Claim of a, first: u64, take boot: Bytes) -> Result[(), SeamError]
-fn authority.base(a: Authority) -> Result[List[HistoryRecord], SeamError]
 N fn signal.wait(s: Signals, kinds: List[SignalKind]) -> Result[SignalKind, SignalError]
 fn random.bytes(r: Random, count: u64) -> Result[Bytes, RandomError]
 N fn io.process(rt: Io) -> Result[Proc, GrantError]
@@ -297,15 +275,6 @@ N fn list.swap[T](mut xs: unique List[T], a: u64, b: u64) -> ()
 fn iter.from[S, T](take state: S, take next: fn(mut S) -> Option[T]) -> Iter[T] uses {state, next}
 fn iter.next[T](mut it: Iter[T]) -> Option[T]
 
-// MODE-6
-// A Recorder is a local capability bound to the invocation that creates it. Append
-// borrows it and consumes one independently owned global inert event, recording it
-// or failing the run. Nothing reads, counts, clears or replaces its events; finish
-// consumes the recorder once no borrow of it remains and returns them in order.
-fn recorder.new[E: inert]() -> Recorder[E]
-fn recorder.append[E: inert](r: Recorder[E], take event: E) -> () uses {}
-fn recorder.finish[E: inert](take r: Recorder[E]) -> List[E] uses {}
-
 // SEM-1/2/3/5, GEN-2, MEM-8/9
 N fn int.widen[I, J](value: I) -> J
 N fn int.try_narrow[I, J](value: I) -> Option[J]
@@ -404,23 +373,6 @@ fn sorted_map.remove[K, V](by: Order[K], mut m: unique SortedMap[K, V] of by, ke
 N fn simd.splat[A, n: size](value: A) -> Simd[A, n]
 N fn simd.add[I, n: size](a: Simd[I, n], b: Simd[I, n]) -> Simd[I, n]
 
-// RUN-1..14, CAP-1/2, CONC-2/3/8, DET-1
-N fn io.runner(rt: Io, name: String) -> Result[Runner, GrantError]
-fn runner.grants(r: Runner) -> GrantSet
-fn runner.narrow(r: Runner, keep: GrantSet) -> Result[Runner, GrantError]
-fn runner.only(r: Runner, definitions: List[String]) -> Result[Runner, GrantError]
-fn runner.entry_id[F](f: Entry[F]) -> EntryId
-fn runner.apply[C, I, A: serializable, R: serializable, E: serializable](f: Entry[fn(c: C, call: I, a: A) -> Result[R, E]], c: C, call: I, a: A) -> Result[Result[R, E], Failure]
-fn runner.apply_mut[C, I, A: serializable, R: serializable, E: serializable](f: Entry[fn(mut c: C, call: I, a: A) -> Result[R, E]], mut c: C, call: I, a: A) -> Result[Result[R, E], Failure]
-fn runner.compute[A: serializable, R: serializable, E: serializable](r: Runner, f: Entry[fn(a: A) -> Result[R, E]], a: A) -> unique Result[R, RunError[E]]
-fn runner.call[A: serializable, R: serializable, E: serializable](r: Runner, f: Entry[fn(rt: Io, a: A) -> Result[R, E]], a: A) -> unique Result[R, RunError[E]]
-fn runner.spawn[A: serializable, R: serializable, E: serializable](s: Scope, r: Runner, f: Entry[fn(rt: Io, a: A) -> Result[R, E]], a: A) -> Task[Result[R, RunError[E]]] of s
-fn runner.send[F](r: Runner, form: CallForm, f: Entry[F], argument: Bytes) -> CallEnd
-N fn io.inbox(rt: Io) -> Result[Inbox, GrantError]
-fn inbox.take(mut i: Inbox, wait: bool) -> Option[List[Arrival]]
-fn arrival.request(a: Arrival) -> Arrived
-fn arrival.end(take a: Arrival, end: CallEnd) -> ()
-fn test.runner(t: Test) -> Runner
 ```
 
 A core operation that only advances an erased state it takes `mut` (`iter.next`) is
@@ -430,8 +382,7 @@ holds its written unknown captures.
 
 ## Authority and errors
 
-`Io`, `Args`, `Env`, `Unsafe` and the global projections, `Runner`
-([runners](runners.md)) included, are plain capabilities; `Path` is
+`Io`, `Args`, `Env`, `Unsafe` and the global projections carry explicit grants. `Path` is
 an inert, plain, immutable path value. `File`, `AtomicFile`, `Mapped` and `Watcher` carry `Dir` authority, `Span` carries `Telemetry`, task
 handles `Scope`, and `Mutex`, `Atomic` and channel handles `Tasks`. The latter use run-time
 scheduling-domain affinity, not an implicit static `of tasks` brand; an operation with
@@ -810,18 +761,6 @@ waiting on it is never Blocked ([CONC-8](concurrency.md#conc-8-global-quiescence
 scripted provider delivers its arrivals at the run's idle points
 ([providers](determinism.md#run-configuration)); a run waiting with none left to deliver is
 Blocked. A completed wait is recorded with its kind; replay returns it without a signal.
-
-`io.authority(rt, name)` projects the store authority the run configuration grants under
-`name` ([authority grants](determinism.md#authority-grants)), and `NotGranted()` for any
-other name. The `authority.*`, `level.*` and `claim.*` operations are the store authority
-seam, specified with their outcomes in
-[STORE-11](storage.md#store-11-engine-and-storage-seam) and, for levels,
-[STORE-2](storage.md#store-2-transactions). A `Level of a` is one of the levels `a`
-declares; it is plain, copyable and sendable but not data. It is `ordered of` its authority
-([SEM-5](semantics.md#sem-5-order-and-maps)): levels of one authority compare by the
-declared weakest-first list, and only those. A `Claim` is an affine resource; dropping one ends it. Each provider decision an
-operation observes (an outcome, a claim's attempt identity, the bytes read) is a
-recorded capability input, so a run replays from its tape without the provider.
 
 ### Telemetry capture
 
@@ -1875,13 +1814,6 @@ stay in comparator order. Lookup and removal use the same fixed binary-search pr
 as insertion, completing comparisons before mutation. Comparator failure leaves the
 map unchanged. The existing sequence representation gives O(log n) comparisons and
 O(n) movement on successful removal; no second ordered container is introduced.
-
-## Overview definitions
-
-The [first look](index.md#a-first-look) declares its own `Sku` and `StockError` and uses
-the store operations of [storage](storage.md); there are no application fixtures. `Tx`
-and `TxFailure` are `std@1/store`'s. The overview's `CliError` is
-`Usage(ArgError) | Files(FileError) | Output(OutputError)`.
 
 `type_shape.info` reads a compile-time `TypeShape[T]` as the `ShapeInfo` data of
 [CT-3](compile-time.md#ct-3-shapes); its data types `ShapeInfo`, `ShapeVisibility`,

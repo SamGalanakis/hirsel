@@ -12,4 +12,4 @@ A run without a launch record uses empty grants. `--grants grants.json` supplies
 
 `hirsel --help`, `hirsel help <command>` and `hirsel <command> --help` print usage without reading a source. `--timings[=json]` and `--mem-usage` report compiler costs on stderr. Build and pool commands are documented in [building.md](../../docs/building.md).
 
-The interpreter and its Value/host adapters remain internal evaluators and differential-test oracles. They are not launch engines of this command line. Proof, observation and store/RPC commands remain owned by their separate deletion lanes.
+The interpreter and its Value/host adapters remain internal evaluators and differential-test oracles. They are not launch engines of this command line. Proof and observation commands remain owned by their separate deletion lane.

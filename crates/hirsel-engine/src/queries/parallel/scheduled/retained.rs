@@ -29,23 +29,20 @@ pub(super) fn summary_shared(
 pub(super) fn metadata(
     outcome: &ModeResult,
     checked_product: &CheckedProduct,
-    table_keys: Option<&Arc<crate::table_keys::TableKeyUse>>,
     memos: &[(crate::memo::MemoKey, Arc<Reads>)],
 ) -> Option<u64> {
-    metadata_inner(outcome, checked_product, table_keys, memos, false)
+    metadata_inner(outcome, checked_product, memos, false)
 }
 pub(super) fn compact_metadata(
     outcome: &ModeResult,
     checked_product: &CheckedProduct,
-    table_keys: Option<&Arc<crate::table_keys::TableKeyUse>>,
     memos: &[(crate::memo::MemoKey, Arc<Reads>)],
 ) -> Option<u64> {
-    metadata_inner(outcome, checked_product, table_keys, memos, true)
+    metadata_inner(outcome, checked_product, memos, true)
 }
 fn metadata_inner(
     outcome: &ModeResult,
     checked_product: &CheckedProduct,
-    table_keys: Option<&Arc<crate::table_keys::TableKeyUse>>,
     memos: &[(crate::memo::MemoKey, Arc<Reads>)],
     compact: bool,
 ) -> Option<u64> {
@@ -107,9 +104,6 @@ fn metadata_inner(
             weight.add(dependencies.retained_bytes())
         });
     }
-    if let Some(keys) = table_keys {
-        weight.arc(keys, |w, keys| keys.retained(w));
-    }
     for (_, reads) in memos {
         weight.reads(reads);
     }
@@ -155,8 +149,8 @@ mod tests {
         let mut long = short.clone();
         long.definition = DefPath::core(&"long".repeat(4096));
         assert_eq!(
-            compact_metadata(&short, &selected, None, &[]),
-            compact_metadata(&long, &selected, None, &[])
+            compact_metadata(&short, &selected, &[]),
+            compact_metadata(&long, &selected, &[])
         );
         assert_eq!(
             FrontBodyQueries::input_bytes(&[short.definition.clone()]),
@@ -178,7 +172,7 @@ mod tests {
         let key = crate::memo::MemoKey::new(QueryKind::Modes, definition);
         let empty = Arc::new(Reads::empty());
         let first = outcome(empty.clone(), checked.clone());
-        let base = metadata(&first, &None, None, &[]).unwrap()
+        let base = metadata(&first, &None, &[]).unwrap()
             + hirsel_engine_admission::retained_arc_bytes(&OrderedSignatureReads::new(&[]));
         assert_eq!(
             metadata(
@@ -188,7 +182,6 @@ mod tests {
                     empty.clone(),
                     Arc::new(OrderedSignatureReads::new(&[]))
                 )),
-                None,
                 &[(key, empty)]
             ),
             Some(base)
@@ -208,7 +201,6 @@ mod tests {
                 reads.clone(),
                 Arc::new(OrderedSignatureReads::new(&[])),
             )),
-            None,
             &[(key, reads)],
         )
         .unwrap();
@@ -227,7 +219,6 @@ mod tests {
                 second.reads.clone(),
                 Arc::new(OrderedSignatureReads::new(&[])),
             )),
-            None,
             &[],
         )
         .unwrap();

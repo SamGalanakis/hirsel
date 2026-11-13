@@ -477,14 +477,7 @@ encoding writes it as a framed extension only when present, so other signatures'
 encodings are unchanged. `SignatureProvider::recursive_group` supplies a group's
 other members at a `GroupStage`; providers without groups return none.
 
-`structural_serializable` is the boolean form. Source consumers use checked
-snapshots; V independently replays admission rather than trusting this descriptor.
-Serializable generic evidence implies Inert and supplies no crossing proof.
-A nominal instantiation reached again, by recursion or along another path,
-references its first node. A declaration marked serializable whose authority is
-only its type parameters (core `Option`, `Result`, `Bounded`; std
-`ReadError[E]`, `store.TxFailure[E]`) is admitted with unbounded parameters; each use proves its arguments. A core `Path` is a
-nominal node over `String`, its text; it has no representation of its own.
+
 
 `wire` implements SER-2 version 1 over concrete `serialization` schema graphs.
 Its explicit envelope binds codec version and the complete canonical descriptor;
@@ -533,10 +526,6 @@ spelling, and successive nominal representation expansion. Import those modules
 directly. Core definitions, canonical CT spelling, graph transport, nominal proof
 memoization and basic property/crossing queries remain here. Cleanup-bound graph
 normalization remains with the shared property normalizer.
-
-`core_roles::table_key_parameters` identifies key argument positions of the
-std@1/table surface. It supplies operation identities, never a schema proof;
-source checking and V independently inspect the declared representations.
 
 `SharedPath::node_allocation_bytes` reports the current tail allocation including
 Arc counters and alignment, or zero for an empty path. Walk `prefix` and deduplicate

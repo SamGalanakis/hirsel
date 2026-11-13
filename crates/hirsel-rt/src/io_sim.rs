@@ -285,16 +285,12 @@ pub struct SimIo {
     mount_pins: MountPins,
     /// The requests the tape records as `blocked`, parked again in replay.
     waits: crate::readiness::WaitLog,
-    /// The parked waits that are sent runner calls: only a callee's end delivers them.
-    runner_waits: std::collections::BTreeSet<u64>,
     /// Scripted regular-file waits also have no source when their release never occurs.
     file_waits: std::collections::BTreeSet<u64>,
     /// Old durable tapes cannot distinguish barrier holds from issued waits.
     legacy_barrier_waits: bool,
     /// Scripted unanswered attempts consumed by a blocked request, until its token ends.
     unanswered_connects: std::collections::BTreeSet<u64>,
-    /// The recorded run instance (RUN-11).
-    pub(crate) instance: Option<[u8; 16]>,
     resources: Resources,
 }
 impl SimIo {
@@ -319,15 +315,6 @@ impl SimIo {
     pub fn set_signal_kinds(&mut self, kinds: u8) {
         self.state.signal_kinds = kinds;
         self.state.projections.insert("signals".into());
-    }
-    /// The admitted `io.authorities` grant: replay derives the grant's answers again and
-    /// admits each recorded provider outcome; it makes no provider.
-    pub fn set_authorities(
-        &mut self,
-        grants: &std::collections::BTreeMap<String, hirsel_run_schema::AuthorityGrant>,
-    ) -> Result<(), hirsel_run_schema::RunRefusal> {
-        self.state.authorities = crate::authority::granted(grants)?;
-        Ok(())
     }
     /// Replay uses the admitted projection set, independently of tape completions.
     pub fn set_projections(&mut self, projections: std::collections::BTreeSet<String>) {
@@ -355,11 +342,9 @@ impl SimIo {
             ending_observed: false,
             roots: Default::default(),
             waits: Default::default(),
-            runner_waits: Default::default(),
             file_waits: Default::default(),
             unanswered_connects: Default::default(),
             legacy_barrier_waits: false,
-            instance: None,
             resources: Resources::default(),
         }
     }
@@ -401,10 +386,6 @@ impl SimIo {
     /// Refuse ambiguous old durable scripted parks rather than guessing issue order.
     pub(crate) fn legacy_barrier_waits(&mut self, legacy: bool) {
         self.legacy_barrier_waits = legacy;
-    }
-    /// The run instance the recording's header names, for a run that calls runners.
-    pub fn instance(&self) -> Option<[u8; 16]> {
-        self.instance
     }
     /// Configure only the virtual selectors and rights; replay acquires no host authority.
     pub fn set_mounts(
@@ -635,7 +616,6 @@ impl Adapter for SimIo {
         self.state.timed_requests.remove(&token);
         self.state.timed_sleeps.remove(&token);
         self.waits.finish(token);
-        self.runner_waits.remove(&token);
         self.file_waits.remove(&token);
         self.unanswered_connects.remove(&token);
     }
@@ -820,8 +800,7 @@ impl Adapter for SimIo {
             // parked: their source never arrived, so replay blocks as the recording did.
             if self.position == self.tape.len()
                 && self.waits.tokens().all(|t| {
-                    self.runner_waits.contains(&t)
-                        || self.file_waits.contains(&t)
+                    self.file_waits.contains(&t)
                         || self.state.timed_process && self.state.next_process_time().is_none()
                 })
             {
@@ -858,10 +837,6 @@ impl Adapter for SimIo {
             .get(self.position)?
             .ok_or(AdapterError::MissingInput(self.position))?;
         // The recorded run's place stopped it before this request: so does replay.
-        if event.request == Request::Stopped && event.completion == Completion::Ready {
-            self.position += 1;
-            return Err(AdapterError::Stopped);
-        }
         if event.request != request {
             return Err(AdapterError::ReplayMismatch(self.position));
         }
@@ -983,9 +958,6 @@ impl Adapter for SimIo {
             self.position += 1;
             self.resources.apply(footprint.as_deref());
             self.waits.park(committed);
-            if matches!(request, Request::RunnerCall(_)) {
-                self.runner_waits.insert(self.waits.current());
-            }
             if matches!(request, Request::FileRead { .. }) && self.state.is_fake_request(&request) {
                 self.file_waits.insert(self.waits.current());
             }
@@ -1000,30 +972,6 @@ impl Adapter for SimIo {
             return Err(AdapterError::InvalidCompletion);
         }
         // A runner call's recorded outcome stands in for its place; no callee runs.
-        match (&request, &event.completion) {
-            (
-                Request::RunnerCall(_) | Request::RunnerPoll { .. },
-                Completion::Runner(_) | Completion::Ready,
-            )
-            | (Request::RunnerCancel { .. } | Request::CallReturn(_), Completion::Ready)
-                if event.fault.is_none() =>
-            {
-                let completion = event.completion.clone();
-                self.position += 1;
-                self.resources.apply(footprint.as_deref());
-                return Ok(completion);
-            }
-            (
-                Request::RunnerCall(_)
-                | Request::RunnerPoll { .. }
-                | Request::RunnerCancel { .. }
-                | Request::CallReturn(_),
-                _,
-            ) => {
-                return Err(AdapterError::InvalidCompletion);
-            }
-            _ => {}
-        }
         let mut state = self.state.clone();
         let mut tree = self.tree.clone();
         let mut roots = self.roots.clone();
@@ -1075,7 +1023,6 @@ impl Adapter for SimIo {
                 | Request::TelemetryBegin { .. }
                 | Request::SleepUntil { .. }
                 | Request::SignalWait { .. }
-                | Request::Seam(crate::authority::SeamRequest::Provider { .. })
         ) {
             if event.fault.is_some() {
                 return Err(AdapterError::InvalidCompletion);

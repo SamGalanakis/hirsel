@@ -201,10 +201,6 @@ pub fn owners(types: &TypeInterner, signatures: &BTreeMap<DefPath, SignatureRef>
         ("Child", true),
         ("ChildGroup", true),
         ("TaskSet", true),
-        ("Claim", true),
-        ("Recorder", true),
-        ("Inbox", true),
-        ("Arrival", true),
     ] {
         if let Some(signature) = signatures.get(&hirsel_syntax::DefPath::core(name)) {
             out.insert(
@@ -352,17 +348,6 @@ pub fn owners(types: &TypeInterner, signatures: &BTreeMap<DefPath, SignatureRef>
             shape,
         ),
     );
-
-    // A runner entry is its callable: code and the static empty environment (RUN-3).
-    let path = DefPath::core("Entry");
-    if let Some(signature) = signatures.get(&path) {
-        out.nominals.insert(
-            hirsel_syntax::DefId::intern(&path),
-            OwnerRepresentation::Entry {
-                revision: revision("Entry", Some(signature)),
-            },
-        );
-    }
 
     // The borrowed cursor: three words for every `T`.
     let path = cursor();

@@ -2548,16 +2548,6 @@ unsafe fn pick(ctx: *mut TaskCtx) -> Stopped<Option<u32>> {
 unsafe fn next_task(ctx: *mut TaskCtx) -> Stopped<u32> {
     // SAFETY: the context is live.
     unsafe { poll_parked(ctx) }?;
-    if unsafe { crate::runners::driving(ctx) } {
-        // An execution of several runs: with nothing runnable here, the others run until
-        // this run is next, and only the execution is Blocked (RUN-12).
-        while unsafe { role::with_held(ctx, |t| t.runnable.is_empty()) } {
-            unsafe {
-                crate::runners::idle(ctx)?;
-                poll_parked(ctx)?;
-            }
-        }
-    }
     // With nothing runnable, sleep until a parked host request may complete, then poll again.
     while unsafe { role::with_held(ctx, |t| t.runnable.is_empty()) }
         && unsafe { crate::host_waits::wait(ctx) }?
@@ -2626,10 +2616,6 @@ pub(crate) unsafe fn blocked_waits(ctx: *mut TaskCtx) -> Vec<hirsel_run_schema::
             Wait::Any { .. } => "task.await_any",
             Wait::Drain { .. } => "task.cancel_all",
             // SAFETY: the context and its binding are live.
-            Wait::Host { token } if unsafe { crate::host_waits::is_runner_call(ctx, token) } => {
-                targets.clear();
-                "runner.call"
-            }
             Wait::Host { .. } => "host request",
             Wait::Final => {
                 if unsafe { (*ctx).run_ref().free_replay } {

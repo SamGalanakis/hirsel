@@ -196,8 +196,8 @@ impl Tasks {
             child.canceled.get_or_insert(1);
         }
     }
-    /// A child of `scope` that runs no frames: the library finishes it (`finished`), as
-    /// `runner.spawn`'s call does.
+    /// A child of `scope` that runs no frames, completed by its provider.
+    #[cfg(test)]
     pub(super) fn native_child(&mut self, scope: u64) -> Result<u64, Error> {
         let task = self.fresh();
         let mut path = self.path();
@@ -668,59 +668,6 @@ impl Library {
             consumed,
             continuation: token,
         }
-    }
-    /// `runner.apply[_mut](f, c, call, a)` (RUN-3, FAIL-2): call the entry `f` on this task
-    /// as a failure boundary, with no scheduling point: its value is `Ok` of `f`'s result, a
-    /// failure in it `Error(failure)` once its cleanup has run. `apply_mut` writes `c` back.
-    pub(super) fn runner_apply(
-        &mut self,
-        name: &str,
-        a: &[Value],
-    ) -> Result<OperationResult, Error> {
-        let [f, c, call, argument] = a else {
-            return Err(invalid("runner.apply takes an entry and three arguments"));
-        };
-        // The entry `Entry[F]` is called as its definition, at F.
-        let Value::FunctionReference(entry) = f else {
-            return Err(invalid("runner.apply expects an Entry"));
-        };
-        let signature = match &entry.types.get(entry.ty).map(|t| &t.kind) {
-            Some(hirsel_types::TypeKind::Named {
-                definition,
-                arguments,
-            }) if definition.path() == &hirsel_syntax::DefPath::core("Entry") => {
-                match arguments[..] {
-                    [hirsel_types::GenericArgument::Type(signature)] => signature,
-                    _ => return Err(invalid("runner.apply entry type arguments")),
-                }
-            }
-            _ => return Err(invalid("runner.apply expects an Entry")),
-        };
-        let mut callee = entry.clone();
-        callee.ty = signature;
-        let f = &Value::FunctionReference(callee);
-        let token = self.next_callback;
-        self.next_callback += 1;
-        self.tasks.pending.insert(token, Pending::Isolate);
-        let mutable = name == "runner.apply_mut";
-        Ok(OperationResult::Call {
-            callee: f.clone(),
-            arguments: vec![c.clone(), call.clone(), argument.clone()],
-            mut_arguments: if mutable { vec![0] } else { vec![] },
-            writebacks: if mutable {
-                vec![crate::CallbackWriteback {
-                    parameter: 0,
-                    argument: 1,
-                    fields: vec![],
-                }]
-            } else {
-                vec![]
-            },
-            updates: vec![],
-            owned: vec![],
-            consumed: vec![],
-            continuation: token,
-        })
     }
     fn task_wait(
         &mut self,

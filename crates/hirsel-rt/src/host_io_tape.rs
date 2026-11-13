@@ -91,38 +91,10 @@ pub(crate) fn render_request(request: &Request) -> Option<String> {
         }
         Request::Process { io } => format!("process {io}"),
         Request::Signals { io } => format!("signals {io}"),
-        Request::Seam(seam) => format!("seam {}", hex(&seam.to_bytes())),
         // The kinds are their bits (`SignalKind::bit`).
         Request::SignalWait { signals, kinds } => format!("signal_wait {signals} {kinds}"),
         Request::Ready { wait, points } => format!("ready {wait} {points}"),
         // Every member is one word, so the request needs no counts.
-        Request::RunnerCall(call) => format!(
-            "runner_call {} {} {} {} {} {} {} {}",
-            hex(call.runner.as_bytes()),
-            call.form.name(),
-            hex(call.path.as_bytes()),
-            hex(&call.grants),
-            hex(&call.definitions),
-            hex(&call.key),
-            hex(&call.digest),
-            hex(&call.argument)
-        ),
-        Request::RunnerPoll { key, cancel } => format!(
-            "runner_poll {} {}",
-            hex(key),
-            cancel.map_or_else(|| "none".into(), |cause| cause.to_string())
-        ),
-        Request::RunnerCancel { key, cause } => format!("runner_cancel {} {cause}", hex(key)),
-        Request::CallReturn(outcome) => match outcome {
-            hirsel_run_schema::CalleeOutcome::Ok(bytes) => format!("call_return ok {}", hex(bytes)),
-            hirsel_run_schema::CalleeOutcome::Err(bytes) => {
-                format!("call_return err {}", hex(bytes))
-            }
-            hirsel_run_schema::CalleeOutcome::Failed(bytes) => {
-                format!("call_return failed {}", hex(bytes))
-            }
-        },
-        Request::Stopped => "stopped".into(),
         Request::Schedule { count, choice } => format!("schedule {count} {choice}"),
         Request::CpuControl {
             width,
@@ -292,19 +264,6 @@ pub(crate) fn render_completion(completion: &Completion) -> Option<String> {
         } => format!("span {handle} {} {}", hex(trace), hex(span)),
         Completion::Held => "held".into(),
         Completion::Blocked { committed } => format!("blocked {}", u8::from(*committed)),
-        Completion::Runner(completion) => {
-            use hirsel_run_schema::CallOutcome::*;
-            let outcome = match &completion.outcome {
-                Ok(bytes) => format!("ok {}", hex(bytes)),
-                Failed(bytes) => format!("failed {}", hex(bytes)),
-                Faulted(bytes) => format!("faulted {}", hex(bytes)),
-                NotRun(reason) => format!("not_run {reason}"),
-                InDoubt(reason) => format!("in_doubt {reason}"),
-                Canceled(cause) => format!("canceled {cause}"),
-            };
-            let callee = completion.callee.map_or_else(|| "none".into(), |c| hex(&c));
-            format!("runner {outcome} {callee}")
-        }
         Completion::Ready => "ready".into(),
         Completion::Env(Err(EnvError::NotGranted)) => "env not_granted".into(),
         Completion::Env(Err(EnvError::InvalidUtf8)) => "env invalid_utf8".into(),
@@ -318,7 +277,6 @@ pub(crate) fn render_completion(completion: &Completion) -> Option<String> {
             "wait out_of_range".into()
         }
         Completion::Wait(Err(WaitError::Canceled(cause))) => format!("wait canceled {cause}"),
-        Completion::Seam(seam) => format!("seam {}", hex(&seam.to_bytes())),
         Completion::Signal(Ok(kind)) => format!("signal {}", kind.name()),
         Completion::Signal(Err(SignalError::Canceled(cause))) => {
             format!("signal canceled {cause}")
@@ -495,10 +453,6 @@ pub(crate) fn parse_request(words: &[&str]) -> Result<Option<Request>, String> {
         ["stdin", io] => Request::Stdin { io: number(io)? },
         ["stderr", io] => Request::Stderr { io: number(io)? },
         ["signals", io] => Request::Signals { io: number(io)? },
-        ["seam", bytes] => Request::Seam(
-            crate::authority::SeamRequest::from_bytes(&self::bytes(bytes)?)
-                .ok_or("bad seam request")?,
-        ),
         ["signal_wait", signals, kinds] => Request::SignalWait {
             signals: number(signals)?,
             kinds: number(kinds)?,
@@ -545,45 +499,6 @@ pub(crate) fn parse_request(words: &[&str]) -> Result<Option<Request>, String> {
             wait: number(wait)?,
             points: number(points)?,
         },
-        [
-            "runner_call",
-            runner,
-            form,
-            path,
-            grants,
-            definitions,
-            key,
-            digest,
-            argument,
-        ] => Request::RunnerCall(Box::new(hirsel_run_schema::RunnerRequest {
-            runner: text(runner)?,
-            form: hirsel_run_schema::CallForm::parse(form).ok_or("bad runner call form")?,
-            path: text(path)?,
-            grants: bytes(grants)?,
-            definitions: bytes(definitions)?,
-            key: fixed(key)?,
-            digest: fixed(digest)?,
-            argument: bytes(argument)?,
-        })),
-        ["runner_poll", key, cancel] => Request::RunnerPoll {
-            key: fixed(key)?,
-            cancel: if *cancel == "none" {
-                None
-            } else {
-                Some(number(cancel)?)
-            },
-        },
-        ["runner_cancel", key, cause] => Request::RunnerCancel {
-            key: fixed(key)?,
-            cause: number(cause)?,
-        },
-        ["call_return", kind, value] => Request::CallReturn(match *kind {
-            "ok" => hirsel_run_schema::CalleeOutcome::Ok(bytes(value)?),
-            "err" => hirsel_run_schema::CalleeOutcome::Err(bytes(value)?),
-            "failed" => hirsel_run_schema::CalleeOutcome::Failed(bytes(value)?),
-            _ => return Err("bad call return".into()),
-        }),
-        ["stopped"] => Request::Stopped,
         ["process_settle", encoded] => Request::ProcessSettle {
             canceled: serde_json::from_slice(&bytes(encoded)?).map_err(|_| "bad process settle")?,
         },
@@ -785,24 +700,6 @@ pub(crate) fn parse_completion(words: &[&str]) -> Result<Option<Completion>, Str
         ["blocked", "0"] => Completion::Blocked { committed: false },
         ["blocked", "1"] => Completion::Blocked { committed: true },
         ["ready"] => Completion::Ready,
-        ["runner", kind, value, callee] => {
-            use hirsel_run_schema::CallOutcome::*;
-            Completion::Runner(hirsel_run_schema::RunnerCompletion {
-                outcome: match *kind {
-                    "ok" => Ok(bytes(value)?),
-                    "failed" => Failed(bytes(value)?),
-                    "faulted" => Faulted(bytes(value)?),
-                    "not_run" => NotRun(number(value)?),
-                    "in_doubt" => InDoubt(number(value)?),
-                    "canceled" => Canceled(number(value)?),
-                    _ => return Err("bad runner outcome".into()),
-                },
-                callee: match *callee {
-                    "none" => None,
-                    callee => Some(fixed(callee)?),
-                },
-            })
-        }
         ["env", "not_granted"] => Completion::Env(Err(EnvError::NotGranted)),
         ["env", "invalid_utf8"] => Completion::Env(Err(EnvError::InvalidUtf8)),
         ["random", "ok", b] => Completion::Random(Ok(bytes(b)?)),
@@ -811,10 +708,6 @@ pub(crate) fn parse_completion(words: &[&str]) -> Result<Option<Completion>, Str
         ["wait", "unavailable"] => Completion::Wait(Err(WaitError::Clock(ClockError::Unavailable))),
         ["wait", "out_of_range"] => Completion::Wait(Err(WaitError::Clock(ClockError::OutOfRange))),
         ["wait", "canceled", cause] => Completion::Wait(Err(WaitError::Canceled(number(cause)?))),
-        ["seam", bytes] => Completion::Seam(
-            crate::authority::SeamCompletion::from_bytes(&self::bytes(bytes)?)
-                .ok_or("bad seam completion")?,
-        ),
         ["signal", "canceled", cause] => {
             Completion::Signal(Err(SignalError::Canceled(number(cause)?)))
         }

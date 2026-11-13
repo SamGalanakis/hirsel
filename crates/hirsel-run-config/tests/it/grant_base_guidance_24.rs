@@ -112,39 +112,6 @@ fn escaped_host_and_template_directory_round_trip_in_refusal_json() {
 }
 
 #[test]
-fn nested_runner_mounts_use_the_same_base_and_guidance() {
-    let tree = Tree::new();
-    let runner = |host| {
-        json!({"io":{"dirs":[],"runners":[{
-            "name":"pool","provider":"local.threads@1",
-            "grants":{"dirs":[{"path":"data","host":host,"access":"read"}]}
-        }]}})
-    };
-    let run = tree.read("runner-good.json", &runner("fixtures")).unwrap();
-    let mount = &run.record().io.as_ref().unwrap().runners[0]
-        .grants
-        .as_ref()
-        .unwrap()
-        .dirs[0];
-    assert_eq!(
-        mount.host,
-        tree.0
-            .join("fixtures")
-            .canonicalize()
-            .unwrap()
-            .to_str()
-            .unwrap()
-    );
-    assert_eq!(mount.path, "data");
-    context(
-        tree.read("runner-bad.json", &runner("missing"))
-            .unwrap_err(),
-        &tree,
-        "missing",
-    );
-}
-
-#[test]
 fn absolute_hosts_keep_existing_validation_and_defer_existence_to_admission() {
     let tree = Tree::new();
     for (name, path) in [

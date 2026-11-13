@@ -114,45 +114,7 @@ and only then observes deadlines and provider outcomes (including resets, I/O er
 - Other effect-free program checks, including lexical path confinement, file modes and
   seek bounds, and a child's explicitly closed stdin.
 
-Nonblocking grant projections and clock sampling introduce no cancellation check and use
-their stated grant or source error variants. Telemetry capture is never a cancellation
-point either: an accepted observation is a scheduling point after its effect, so shielded
-cleanup can still finish spans ([telemetry capture](core-library.md#telemetry-capture)). Joins (`task.await`, `task.await_any`,
-`task.await_at`, `task.cancel_all`) and mutex acquisition are not cancellation points: a
-cancelled scope cancels its children, so a join waits only for them. `channel.send` is not
-a cancellation point: it succeeds or returns `Closed` with its value whatever its scope's
-cancellation; `task.check_canceled` marks producer loops. `Canceled` is returned only when
-the operation had no effect. A runner call (planned) is a cancellation point only until
-its request is sent; after that its scope's cancellation is forwarded to the place and the
-call waits for the acknowledgement ([RUN-9](runners.md#run-9-cancellation)). A store
-transaction checks no cancellation itself: its caller checks before starting it, and the
-call-stream form returns `Canceled` only from a runner; a body, once started, is not
-cancellable ([STORE-3](storage.md#store-3-transaction-scope)), nor is its commit: the store
-authority seam's operations are never cancellation points, under every provider
-([STORE-11](storage.md#store-11-engine-and-storage-seam)). Pure code is not
-cancellable; `task.check_canceled(s)?` marks long loops. The consuming
-[`stream.csv_fold_scoped`](std-library.md#scoped-csv-stream-consumption) driver places
-checks inside rejecting-record and bounded-refill loops; a check outside an
-unbounded pure filter cannot interrupt its next call. It borrows Scope only
-for the call and owns the source until completion or error. Each operation's signature states
-what it owns on success and on failure; a borrow or `mut` loan lasts until the call
-completes. Deadlines read the granted monotonic clock. A scope can carry a deadline:
-`task.scope_until(tasks, deadline, body)` runs `body` in a fresh scope as `task.scope`
-does, and when `deadline.clock` reaches `deadline.at` before that scope has exited,
-cancels the scope with cause `DeadlineExceeded`. From then every blocking `Io` call the
-body makes in the scope returns `Canceled(DeadlineExceeded())`, each child of the scope is
-cancelled with that cause and the children of scopes nested in the body with `Parent`, and
-the exit joins them as an error exit does. The call returns `Expired(r)` when the deadline
-cancelled the scope and `Finished(r)` otherwise, where `r` is the body's result. A
-deadline already reached at entry, or whose clock cannot be read, cancels the scope before
-the body runs. Nothing polls for a deadline: each scope arms one timer on its deadline's
-clock and removes it at exit. A pending scope deadline is an outstanding event source
-([CONC-8](#conc-8-global-quiescence)), so a body waiting for a message nobody will send is
-cancelled at its deadline, never Blocked. A network timeout (`NetTimeout`) is not a
-deadline: it is a relative bound measured by the network provider, observed only as the
-outcome `TimedOut()`, and needs no clock grant. Drops run shielded. An operation
-interrupted by environmental termination is never described as `Canceled` unless no effect
-was established under its contract; an unknown outcome is not a cancellation result.
+
 
 ### CONC-4: Memory model
 
@@ -256,9 +218,3 @@ of external operations. Reporting Blocked runs no user code, cancellation or des
 A receive on an empty channel with a live Sender keeps waiting even when the receiving task
 owns that Sender; whether the execution is Blocked is decided by this rule. Blocked is never
 returned from `receive`, `await` or `task.isolate`.
-
-Callee runs of in-process runner providers (planned) belong to their caller's execution
-for this rule; a request outstanding at an out-of-process place is an external event of
-unknown completion ([RUN-12](runners.md#run-12-quiescence-across-runners)). Blocked is
-never returned from a runner call; a callee Blocked at an out-of-process place reaches its
-caller as `InDoubt(Abandoned())`.

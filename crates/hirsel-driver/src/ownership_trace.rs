@@ -65,12 +65,11 @@ fn run_on_host(
     };
     let selection = crate::launch_binding::LaunchSelection::read(launch)?;
     let input = crate::request_tir(path, policy, selection.entry().cloned())?;
-    let (outcome, _) = crate::tir_execution::run_tir_on_host_traced(
+    let outcome = crate::tir_execution::run_tir_on_host_traced(
         &input,
         launch,
         selection,
         max_steps,
-        None,
         None,
         checked,
         None,

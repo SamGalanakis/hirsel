@@ -77,18 +77,7 @@ It requires explicit `max_workers` in 1..=16, `max_domains` equal to 1, and
 positive `max_physical_bytes` and `max_batch_bytes`. There are no default limits.
 Absent or null grants are omitted from canonical bytes. Present grants and every
 limit contribute to semantic identity and the grant subset relation. The schema
-does not itself start workers or certify physical width. Runner grant narrowing
-does not convey this adjunct implicitly.
-`io.authorities` maps a name (a lowercase letter, then lowercase letters and digits) to
-an `AuthorityGrant`: `authority.memory@1`, `authority.log@1` (a `mount` naming a granted
-read-write Dir and a canonical relative `path` in it; no two log directories nest) or
-`authority.objects@1` (an `objects` entry of the object-storage seam and its one
-`level`; no two `objects.dir@1` directories nest) or `authority.sim@1` (`seed`,
-`represent`, `levels`, `faults`), and a `floor` among the levels the provider
-declares. `hirsel_store_authority::check` owns the per-provider members; a member
-another provider takes refuses. `validate_authorities` reads the conformance
-`authorities` directive, which refuses `authority.log@1` (no host directory) and an
-`authority.objects@1` whose objects are not `objects.sim@1`.
+does not itself start workers or certify physical width.
 `inputs.scheduler` names `fifo`, `random` or `pct`, version 1 (conformance/old-spec/determinism.md,
 "Scheduler"); any other refuses as Unsupported. `Config::scheduler` projects its launch
 word (`Scheduler::CONTRACTS`, shared with `hirsel_kernels::schedule::Algorithm::code`) and
@@ -196,33 +185,6 @@ records without budgets keep their pre-budget identity), or `budgets.limits@3` w
 returns it; budgets are host policy, part of run identity, and grant nothing. Templates may
 choose them. An adapter that cannot enforce one refuses the launch (`BudgetKind` names the
 budget a stopped run exceeded).
-
-`io.runners` (conformance/old-spec/runners.md "Providers") lists the run's runners, sorted and
-unique by lowercase `name`; the canonical bytes omit the member when the list is empty,
-so records without runners keep their identity. `local.threads@1` takes `threads`
-(default 1, nonzero) and `queue` (default 64); `sim@1` takes a `node`, the contract it
-`models` (`local.threads@1`, `local.process@1` or `remote.tls@1`) and `faults`, rates in
-parts per million at the sites that contract can produce (`sim_model_sites`). The seam
-members `recording` (`none` or `record`; `durable` is unsupported), `retry` (`attempts`),
-`cache` (only null) and `code` (a `hirsel-code-store` entry: `code.none@1`, `code.dir@1`,
-`code.object@1` or `code.sim@1`) are run policy: each normalizes to absence at its
-default. `grants` is the callee's grant set, the `io` schema without `stdin` or
-`runners`, validated like `io`; `grants` and `definitions` (sorted, unique full
-versioned paths) are authority, spelled null when absent. `inputs.fault_seed` seeds
-`sim@1` fault decisions and is omitted when absent. `validate_runners` validates one
-list on its own, as a corpus fixture names it. A runner entry's `admission` (`{"code":
-"admit.safe@1"}`; `admit.any@1` normalizes to absence) is the place's code policy at arrival
-(`admits_only_safe`).
-
-A callee run's record (RUN-10) has `launch: call` and a `call` member, required exactly
-then: a `CallRecord` with the form (`compute` or `call`), the cause (the caller's 128-bit run
-instance, the request ordinal and the request digest, in lowercase hex) and the exact
-argument bytes. `calls.rs` holds the RUN-11 derivations both engines and the tape check
-share: `request_digest`, `call_key`, `callee_seed` and `callee_instance`, with the
-`RunnerRequest` and `RunnerCompletion` a caller records and the `CalleeOutcome` a callee
-records as it ends (`CallOutcome::carries` compares them). `ValidatedRun::instance` is the
-derived instance of a call launch; admission (`AdmittedRun::instance`) fixes it, or draws
-one from `HostAuthority::run_instance` for a run that names runners.
 
 `RunOutcome` is the host result of either engine. It retains the returned Result
 tag, the complete FAIL-1 chain, Blocked waits, budget/environmental stops,

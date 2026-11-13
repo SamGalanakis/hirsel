@@ -8,7 +8,7 @@ use hirsel_driver::CompilerRequestsExt;
 use hirsel_engine::{QueryError, RunOutcome, ToolError, Verify};
 use std::{env, ffi::OsString, path::Path, process::ExitCode};
 
-const USAGE: &str = "usage: hirsel [--verbose] [--timings[=json]] [--mem-usage] check [--verify-cache] [--watch] [--json | --safe] <source|manifest.json> | serve [--stop] [--workspace <dir>] [--idle <seconds>] | test [--no-verify] [--json] [--seed <u64>] [--scheduler <name@1:seed> | --explore <n> [--scheduler <name@1>]] [--bless | --bench [--bench-time <ms>]] [--backend llvm|cranelift] <source|manifest.json> [filter...] | run [--verify-cache] [--validate-stages] [--no-verify] [--json] [--backend llvm|cranelift] [--proofs <sidecar> [--trust <tool@version>]...] <source|manifest.json> [(--run <json> | --grants <json>) [--record <tape>] [--revocations <json>] | --replay <tape>] [--cores <n>] [--trace-events <jsonl>] [--trace-ownership <json>] [-- args...] | build [--verify-cache] [--validate-stages] [--no-verify] [--release | --debug] [--lto] [--backend llvm|cranelift] [--target x86_64-linux | aarch64-linux] [--proofs <sidecar> [--trust <tool@version>]...] <source|manifest.json> -o <exe> | new <dir> [--lib] | fmt [--check] <source|manifest.json> | expand <source|manifest.json> | hash <source|manifest.json> | export --tir|--run|--c-header|--native-abi <source|manifest.json> -o <file> | deps card <manifest.json> [--package name@ver[/module]] [--code-store config.json] [--json] | explain RULE [--json] | explain --list [--json] | doc <source|manifest.json> [-o <out.md>] [--json] | view <tape> --capture <id> -o <file> [--perfetto | --source <program> --analysis <id>] [--timing <sidecar>] | store verify <directory> | precompute <package manifest.json> -o <directory> | env --json | tapes check <tape>... | tapes trial <candidate manifest.json> --grants <json> [--from <n>] <tape> | ctl <socket> (cores <n> | metrics) | serve [--no-verify] [--backend llvm|cranelift] <source|manifest.json> --host <json>";
+const USAGE: &str = "usage: hirsel [--verbose] [--timings[=json]] [--mem-usage] check [--verify-cache] [--watch] [--json | --safe] <source|manifest.json> | serve [--stop] [--workspace <dir>] [--idle <seconds>] | test [--no-verify] [--json] [--seed <u64>] [--scheduler <name@1:seed> | --explore <n> [--scheduler <name@1>]] [--bless | --bench [--bench-time <ms>]] [--backend llvm|cranelift] <source|manifest.json> [filter...] | run [--verify-cache] [--validate-stages] [--no-verify] [--json] [--backend llvm|cranelift] [--proofs <sidecar> [--trust <tool@version>]...] <source|manifest.json> [(--run <json> | --grants <json>) [--record <tape>] [--revocations <json>] | --replay <tape>] [--cores <n>] [--trace-events <jsonl>] [--trace-ownership <json>] [-- args...] | build [--verify-cache] [--validate-stages] [--no-verify] [--release | --debug] [--lto] [--backend llvm|cranelift] [--target x86_64-linux | aarch64-linux] [--proofs <sidecar> [--trust <tool@version>]...] <source|manifest.json> -o <exe> | new <dir> [--lib] | fmt [--check] <source|manifest.json> | expand <source|manifest.json> | hash <source|manifest.json> | export --tir|--run|--c-header|--native-abi <source|manifest.json> -o <file> | deps card <manifest.json> [--package name@ver[/module]] [--code-store config.json] [--json] | explain RULE [--json] | explain --list [--json] | doc <source|manifest.json> [-o <out.md>] [--json] | view <tape> --capture <id> -o <file> [--perfetto | --source <program> --analysis <id>] [--timing <sidecar>] | store verify <directory> | precompute <package manifest.json> -o <directory> | env --json | ctl <socket> (cores <n> | metrics)";
 
 const FMT_HELP: &str = "usage: hirsel fmt [--check] <source|manifest.json>\n\nFormat a source file or a package's direct sources.\nExample: hirsel fmt app/hirsel.json\n--check reports differences without writing (exit 1; unchanged: 0).\nAll sources are prepared before writing; unchanged files are skipped.\nWrite errors are reported; writes across files are not atomic.";
 
@@ -104,18 +104,6 @@ enum Command {
         output: OsString,
     },
 
-    /// `tapes check <tape>...`: the joined check over linked tapes (RUN-11).
-    Tapes {
-        tapes: Vec<OsString>,
-    },
-    /// `tapes trial <candidate> --grants <json> [--from <n>] <tape>`: the tape's runner calls
-    /// issued again to a candidate revision's callees under the template's runners.
-    Trial {
-        candidate: OsString,
-        grants: OsString,
-        from: u64,
-        tape: OsString,
-    },
     DepsCard {
         manifest: OsString,
         package: Option<String>,
@@ -151,13 +139,6 @@ enum Command {
         kind: &'static str,
         entry: OsString,
         output: OsString,
-    },
-    /// A runner host for `remote.tls@1` callers.
-    Serve {
-        file: OsString,
-        host: OsString,
-        /// Run the place's head natively, on this back end.
-        native: Option<hirsel_native::Backend>,
     },
     Run {
         file: OsString,
@@ -546,64 +527,6 @@ fn parse_command(args: Vec<OsString>) -> Result<Command, lexopt::Error> {
                 output: args.value()?,
             }
         }
-        Some(Value(command)) if command == "tapes" => {
-            match args.next()? {
-                Some(Value(sub)) if sub == "check" => {}
-                Some(Value(sub)) if sub == "trial" => {
-                    let (mut candidate, mut grants, mut from, mut tape) = (None, None, None, None);
-                    while let Some(arg) = args.next()? {
-                        match arg {
-                            Long("grants") if grants.is_none() => grants = Some(args.value()?),
-                            Long("from") if from.is_none() => {
-                                let value = args.value()?;
-                                from = Some(
-                                    value
-                                        .to_str()
-                                        .and_then(|s| s.parse::<u64>().ok())
-                                        .ok_or("--from requires a request ordinal")?,
-                                );
-                            }
-                            Value(path)
-                                if candidate.is_none()
-                                    && !path.to_string_lossy().starts_with('-') =>
-                            {
-                                candidate = Some(path)
-                            }
-                            Value(path)
-                                if tape.is_none() && !path.to_string_lossy().starts_with('-') =>
-                            {
-                                tape = Some(path)
-                            }
-                            arg => return Err(arg.unexpected()),
-                        }
-                    }
-                    let (Some(candidate), Some(grants), Some(tape)) = (candidate, grants, tape)
-                    else {
-                        return Err(
-                            "tapes trial requires a candidate manifest, --grants and a tape".into(),
-                        );
-                    };
-                    return Ok(Command::Trial {
-                        candidate,
-                        grants,
-                        from: from.unwrap_or(0),
-                        tape,
-                    });
-                }
-                _ => return Err("tapes requires check or trial".into()),
-            }
-            let mut tapes = vec![];
-            while let Some(arg) = args.next()? {
-                match arg {
-                    Value(tape) if !tape.to_string_lossy().starts_with('-') => tapes.push(tape),
-                    arg => return Err(arg.unexpected()),
-                }
-            }
-            if tapes.is_empty() {
-                return Err("tapes check requires at least one tape".into());
-            }
-            Command::Tapes { tapes }
-        }
         Some(Value(command)) if command == "deps" => {
             if args.value()? != "card" {
                 return Err("deps requires card".into());
@@ -681,31 +604,6 @@ fn parse_command(args: Vec<OsString>) -> Result<Command, lexopt::Error> {
             flag: None,
             file: source_arg(&mut args)?,
         },
-        Some(Value(command)) if command == "serve" => {
-            let (mut file, mut host, mut selected) = (None, None, None);
-            while let Some(arg) = args.next()? {
-                match arg {
-                    Long("host") if host.is_none() => host = Some(args.value()?),
-                    Long("backend") if selected.is_none() => {
-                        selected = Some(backend(args.value()?)?)
-                    }
-                    Value(path) if file.is_none() && !path.to_string_lossy().starts_with('-') => {
-                        file = Some(path)
-                    }
-                    arg => return Err(arg.unexpected()),
-                }
-            }
-            match (file, host) {
-                // A native head is a deployment's: it builds as `build --release` does, with
-                // LLVM unless Cranelift is asked for.
-                (Some(file), Some(host)) => Command::Serve {
-                    file,
-                    host,
-                    native: Some(selected.unwrap_or(hirsel_native::Backend::Llvm)),
-                },
-                _ => return Err("serve requires a program and --host <json>".into()),
-            }
-        }
         Some(Value(command)) if command == "hash" => Command::Source {
             command: "hash",
             flag: None,
@@ -1024,10 +922,7 @@ fn execute_command(
     if verify == Verify::Off
         && !matches!(
             command,
-            Command::Test { .. }
-                | Command::Build { .. }
-                | Command::Run { .. }
-                | Command::Serve { .. }
+            Command::Test { .. } | Command::Build { .. } | Command::Run { .. }
         )
     {
         eprintln!("--no-verify applies only to run, test and build");
@@ -1037,7 +932,6 @@ fn execute_command(
     let results = match command {
         Command::Build { .. }
         | Command::Run { .. }
-        | Command::Serve { .. }
         | Command::Source {
             command: "check", ..
         } => hirsel_engine::Results::Host,
@@ -1326,84 +1220,6 @@ fn execute_command(
             println!("{text}");
             return 0;
         }
-        Command::Tapes { tapes } => {
-            let paths: Vec<_> = tapes.iter().map(std::path::PathBuf::from).collect();
-            return match hirsel_driver::check_tapes(&paths) {
-                Ok(links) => {
-                    for link in &links.checked {
-                        println!("checked: {link}");
-                    }
-                    for link in &links.unchecked {
-                        println!("unchecked: {link}");
-                    }
-                    println!(
-                        "tapes: {} links checked, {} unchecked",
-                        links.checked.len(),
-                        links.unchecked.len()
-                    );
-                    0
-                }
-                Err(mismatches) => {
-                    for mismatch in &mismatches {
-                        eprintln!("hirsel: tapes check: {mismatch}");
-                    }
-                    1
-                }
-            };
-        }
-        Command::Trial {
-            candidate,
-            grants,
-            from,
-            tape,
-        } => {
-            return match hirsel_driver::trial_tapes(
-                Path::new(&candidate),
-                &grants,
-                Path::new(&tape),
-                from,
-            ) {
-                Ok(calls) => {
-                    let mut first = None;
-                    for call in &calls {
-                        let verdict = match call.same_outcome {
-                            Some(true) => "same",
-                            Some(false) => "DIVERGED",
-                            None => "unrecorded",
-                        };
-                        if call.same_outcome == Some(false) && first.is_none() {
-                            first = Some(call.ordinal);
-                        }
-                        println!(
-                            "call {} {} ({}): {verdict}\n  recorded {}\n  trial    {}",
-                            call.ordinal,
-                            call.path,
-                            if call.same_code {
-                                "same code"
-                            } else {
-                                "changed code"
-                            },
-                            call.recorded,
-                            call.trial
-                        );
-                    }
-                    match first {
-                        Some(ordinal) => {
-                            println!(
-                                "trial: {} calls, first divergence at call {ordinal}",
-                                calls.len()
-                            );
-                            1
-                        }
-                        None => {
-                            println!("trial: {} calls, no divergence", calls.len());
-                            0
-                        }
-                    }
-                }
-                Err(error) => tool_error(error, false),
-            };
-        }
         Command::StoreVerify { root } => {
             return match hirsel_engine_store::InstalledPackage::verify_store(Path::new(&root)) {
                 Ok(()) => 0,
@@ -1548,19 +1364,6 @@ fn execute_command(
                     Ok(()) => 0,
                     Err(error) => tool_error(ToolError::Io(error), false),
                 },
-                Err(error) => tool_error(error, false),
-            };
-        }
-        Command::Serve { file, host, native } => {
-            let served = hirsel_driver::serve::serve(
-                Path::new(&file),
-                Path::new(&host),
-                native,
-                policy,
-                &mut |endpoint| eprintln!("hirsel serve: listening on {endpoint}"),
-            );
-            return match served {
-                Ok(()) => 0,
                 Err(error) => tool_error(error, false),
             };
         }

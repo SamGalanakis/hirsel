@@ -31,11 +31,7 @@ identities, capability authority or allocation sharing. A refined domain type, a
 opaque one without a check, converts explicitly to a serializable data type and validates
 again on reconstruction.
 
-A function value never occurs in a serializable schema. A runner call (planned) carries
-the callee's identity (its definition path, signature fingerprint and code hash) beside
-the encoded argument ([RUN-8](runners.md#run-8-identity-and-arrival)). That identity is
-data designating code the receiving place already holds or fetches by hash; it is never
-decoded into a function or closure value and confers no authority.
+
 
 ```hirsel
 @serializable
@@ -86,9 +82,7 @@ path as `path.of` does. No other core type is serializable: those that hold a ca
 type. The exact core identity matters: a same-spelled user type
 gets no exemption.
 
-`Entry[F]` is not serializable. A stored or sent name of an entry is an
-`entry_ref.EntryRef` ([RUN-3](runners.md#run-3-entries)), a path and a fingerprint that
-grant nothing and resolve only among the entries a program already holds.
+
 
 Schema admission and opt-in failures are SER-1 at the declaration or at the encoding use.
 
@@ -192,20 +186,7 @@ schemas can have identical bytes; this grants no nominal type equality.
 
 ### Envelope and admission
 
-A complete value is the four ASCII bytes `HSC1`, `u32` codec version 1, `u64` descriptor
-byte length, the complete descriptor, `u64` payload byte length and the payload. Exactly
-one envelope and no trailing bytes are accepted. The decoder receives a concrete expected
-checked schema from its caller; it compares descriptor bytes exactly and checks the
-version and lengths before constructing data. It never loads a schema, constructor, owner
-or capability from incoming bytes. A descriptor digest may index tooling but never
-replaces this check or authorizes reconstructing a type or brand. Nested values carry
-their payload only, without nested envelopes. Store tables (planned) are the one place
-descriptors are compared without exact Nominal version text: a table compares storage
-descriptors by names and shape, matching record fields by name, and stores payloads
-without envelopes ([STORE-7](storage.md#store-7-rows-and-storage-identity)). Every payload
-is still decoded with every validation below, and no type is ever reconstructed from
-stored bytes. Table keys use the separate order-preserving key encoding of
-[STORE-6](storage.md#store-6-key-encoding), not this codec.
+
 
 ### Validation
 

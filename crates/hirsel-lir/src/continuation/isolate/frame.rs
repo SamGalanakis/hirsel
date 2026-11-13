@@ -40,7 +40,6 @@ impl IsolateProtocol {
             if definition.is_core("$intrinsic.IsolateBegin") {
                 Some(CalleeClass::Boundary)
             } else if [
-                "$intrinsic.ApplyBegin",
                 "$intrinsic.IsolateEnd",
                 "$intrinsic.IsolateCount",
                 "$intrinsic.IsolateKind",

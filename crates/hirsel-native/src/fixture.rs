@@ -29,20 +29,11 @@ pub struct Fixture {
     pub process: Option<hirsel_run_schema::ProcessGrant>,
     /// The `io.signals` grant, with its script under `signals.script@1`.
     pub signals: Option<hirsel_run_schema::SignalsGrant>,
-    /// The `io.authorities` grant (`// authorities:`): simulated providers only.
-    pub authorities: std::collections::BTreeMap<String, hirsel_run_schema::AuthorityGrant>,
     /// The root Env's snapshot: each granted name and its value, null when unset.
     pub env: Option<std::collections::BTreeMap<String, Option<String>>>,
     /// A corpus program's raised interpreter step budget (`// steps:`); H's
     /// instruction limit rises by the same factor. None keeps both defaults.
     pub steps: Option<u64>,
-    /// The run's runners (`// runners:`) and the seed `sim@1` draws faults from
-    /// (`// fault_seed:`).
-    pub runners: Vec<hirsel_run_schema::RunnerEntry>,
-    pub fault_seed: Option<u64>,
-    /// What the launcher found about each callee entry of a run with runners, by full path
-    /// (`hirsel_engine::callee_facts`).
-    pub callees: std::collections::BTreeMap<String, hirsel_run_schema::CalleeFacts>,
     /// `--trace-roots` (S-14): native launches on the diagnostic archive write every live
     /// `Shared` root's count at every scheduling point into `Observation::roots`, to be
     /// compared with the interpreter's trace.
@@ -76,21 +67,7 @@ pub struct HeapCampaignMeasure {
 /// A run's heap measures, shared by the fixtures of its configurations.
 pub type HeapMeasures = std::sync::Arc<std::sync::Mutex<Vec<HeapMeasure>>>;
 
-impl Fixture {
-    /// The `db@1` place heads its runners name, which a build of its program roots
-    /// (`Options::places`).
-    pub fn place_heads(&self) -> Vec<hirsel_syntax::DefPath> {
-        let mut heads: Vec<_> = self
-            .runners
-            .iter()
-            .filter_map(|runner| runner.head.as_deref())
-            .filter_map(hirsel_syntax::DefPath::from_full)
-            .collect();
-        heads.sort();
-        heads.dedup();
-        heads
-    }
-}
+impl Fixture {}
 
 impl Default for Fixture {
     fn default() -> Self {
@@ -111,12 +88,8 @@ impl Default for Fixture {
             net: None,
             process: None,
             signals: None,
-            authorities: Default::default(),
             env: None,
             steps: None,
-            runners: vec![],
-            fault_seed: None,
-            callees: Default::default(),
             trace_roots: false,
             migrate: false,
         }
@@ -137,12 +110,8 @@ impl From<&Fixture> for hirsel_engine::SimulationConfig {
             net: fixture.net.clone(),
             process: fixture.process.clone(),
             signals: fixture.signals.clone(),
-            authorities: fixture.authorities.clone(),
             env: fixture.env.clone().unwrap_or_default(),
             monotonic: fixture.monotonic.unwrap_or(0),
-            runners: fixture.runners.clone(),
-            fault_seed: fixture.fault_seed.unwrap_or(0),
-            callees: std::sync::Arc::new(fixture.callees.clone()),
             trace_roots: fixture.trace_roots,
             ..Default::default()
         };

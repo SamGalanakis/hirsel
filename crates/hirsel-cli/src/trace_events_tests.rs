@@ -44,19 +44,3 @@ fn trace_events_rejects_missing_path_and_duplicate_selections() {
         assert!(parse_command(args(&words)).is_err(), "{words:?}");
     }
 }
-
-#[test]
-fn a_served_native_head_builds_with_llvm_unless_cranelift_is_asked_for() {
-    let head = |words: &[&str]| match parse_command(args(words)).unwrap() {
-        Command::Serve { native, .. } => native,
-        _ => panic!("serve"),
-    };
-    let host = ["program.hir", "--host", "host.json"];
-    let with = |flags: &[&'static str]| [flags, &host[..]].concat();
-    // LLVM is what the driver builds a place head with the release profile for.
-    assert_eq!(head(&with(&["serve"])), Some(hirsel_native::Backend::Llvm));
-    assert_eq!(
-        head(&with(&["serve", "--backend", "cranelift"])),
-        Some(hirsel_native::Backend::Cranelift)
-    );
-}

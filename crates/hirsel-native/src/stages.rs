@@ -45,9 +45,6 @@ pub struct Options {
     pub scoped_specialization: bool,
     /// PS-13 checks accepted evidence licenses removing (`--proofs`).
     pub discharge: Discharge,
-    /// The `db@1` place heads the build serves (STORE-12): each head's runner main is
-    /// rooted, and both are in the Entry table.
-    pub places: Vec<DefPath>,
 }
 
 impl Options {
@@ -63,7 +60,6 @@ impl Options {
             flat_walk: true,
             scoped_specialization: true,
             discharge: Discharge::default(),
-            places: Vec::new(),
         }
     }
 }
@@ -181,13 +177,8 @@ pub struct ReadyProgram {
     pub inline_instances: std::collections::BTreeSet<ContentHash>,
     /// The definitions some unit names as a C callback (PROG-4).
     pub callbacks: BTreeSet<DefPath>,
-    /// The definitions some unit makes an Entry value of (RUN-3): each one's
-    /// function-reference thunk and full path, which the program descriptor lists. A
-    /// thunk may carry several paths: place heads of one signature share their runner
-    /// main, one row per head.
+    /// Function-reference thunks and full definition paths for callable identity.
     pub entries: BTreeSet<(String, String)>,
-    /// Checked source facts, supplied through the engine's public admission API.
-    pub callee_facts: Option<hirsel_rt::program::CalleeMetadata>,
     /// Per resource layout, the instance digest of its drop body's unit.
     pub finalizers: BTreeMap<LayoutId, ContentHash>,
     /// Instance digest of each non-generic function, for entry lookup.
@@ -349,12 +340,6 @@ impl ReadyProgram {
             .launches
             .keys()
             .filter(|entry| self.functions.contains_key(*entry))
-            .filter(|entry| {
-                !matches!(
-                    self.launches.get(*entry),
-                    Some(super::link::LaunchKind::Call { .. })
-                )
-            })
             .map(|entry| {
                 super::exit_report::derive(input, self, entry).map(|report| (entry.clone(), report))
             })
@@ -365,22 +350,6 @@ impl ReadyProgram {
                 &super::observe::Sites::from_anchors(input.sources, input.anchors.clone()),
             )
         });
-        Ok(())
-    }
-    /// Bind source-checked runner facts to the same native Entry table.
-    pub fn bind_callees(
-        &mut self,
-        metadata: hirsel_rt::program::CalleeMetadata,
-    ) -> Result<(), NativeError> {
-        for path in metadata.facts.keys() {
-            if !self.entries.iter().any(|(_, entry)| entry == path) {
-                return Err(NativeError::new(
-                    StageName::Launch,
-                    format!("callee facts outside native Entry table: {path}"),
-                ));
-            }
-        }
-        self.callee_facts = Some(metadata);
         Ok(())
     }
 

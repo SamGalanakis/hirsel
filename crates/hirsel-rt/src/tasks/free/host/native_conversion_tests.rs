@@ -13,7 +13,6 @@ enum Case {
     Env,
     Entries,
     Walk,
-    RunnerEntry,
 }
 struct Payloads;
 impl ConcurrentAdapter for Payloads {
@@ -108,7 +107,6 @@ fn bulk_native_abi_conversions_keep_completed_payloads_owned_at_allocation_cuts(
             Case::Env,
             Case::Entries,
             Case::Walk,
-            Case::RunnerEntry,
         ] {
             let adapter = Arc::new(Payloads);
             let mut admitted = Some(adapter.clone());
@@ -125,23 +123,6 @@ fn bulk_native_abi_conversions_keep_completed_payloads_owned_at_allocation_cuts(
                 move |ctx| unsafe {
                     super::super::enable(ctx);
                     (*ctx).run().free_root_env = true;
-                    crate::runners::configure(
-                        ctx,
-                        crate::runners::Config {
-                            entries: vec![(42, "entry".repeat(2048))],
-                            callees: [(
-                                "entry".repeat(2048),
-                                hirsel_run_schema::CalleeFacts {
-                                    program: [0; 32],
-                                    code: [1; 32],
-                                    fingerprint: [2; 32],
-                                    reach: hirsel_run_schema::CodeReach::Safe,
-                                },
-                            )]
-                            .into(),
-                            ..Default::default()
-                        },
-                    );
                     install.root(ctx);
                 },
                 move |ctx| unsafe {
@@ -260,15 +241,6 @@ fn bulk_native_abi_conversions_keep_completed_payloads_owned_at_allocation_cuts(
                                 std::ptr::null_mut(),
                                 out.as_mut_ptr(),
                                 &directory.value,
-                            );
-                        }
-                        Case::RunnerEntry => {
-                            let mut out = std::mem::MaybeUninit::uninit();
-                            crate::runners::hirsel_rt_v2_runner_entry_id(
-                                ctx,
-                                std::ptr::null_mut(),
-                                out.as_mut_ptr(),
-                                &42,
                             );
                         }
                     }

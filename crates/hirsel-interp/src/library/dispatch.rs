@@ -21,7 +21,6 @@ pub struct Library {
     pub(super) tasks: super::tasks::Tasks,
     pub(super) channels: super::channels::Channels,
     pub(super) synchronizers: super::synchronization::Synchronizers,
-    pub(super) recorders: super::recorders::Recorders,
     pub(super) network_waits: std::collections::BTreeMap<u64, super::net::NetworkWait>,
     pub(super) file_waits: std::collections::BTreeMap<u64, Vec<Value>>,
     /// Parked `watcher.next` calls: watcher, Dir and recorded input.
@@ -29,7 +28,6 @@ pub struct Library {
     pub(super) process_advance: Option<(u64, u64)>,
     pub(super) timers: super::timers::Timers,
     pub(super) signals: super::signals::Signals,
-    pub(super) authorities: super::authority::Authorities,
     pub(super) callbacks: std::collections::BTreeMap<u64, super::callbacks::Pending>,
     pub(super) next_callback: u64,
     pub(super) cpu_certified: bool,
@@ -42,8 +40,6 @@ pub struct Library {
     pub(super) next_shared: u64,
     /// A scripted client's unmet Expect at the last handle drop (LANG-9).
     pub(super) drop_failure: Option<(String, String)>,
-    pub(super) runners: super::runners::Runners,
-    pub(super) places: super::places::Places,
     /// Free mode (`tasks.free@1`): the run's session and pending states.
     pub(super) free: Option<super::free::Free>,
 }
@@ -113,14 +109,12 @@ impl Library {
             tasks,
             channels: Default::default(),
             synchronizers: Default::default(),
-            recorders: Default::default(),
             network_waits: Default::default(),
             file_waits: Default::default(),
             watch_waits: Default::default(),
             process_advance: None,
             timers: Default::default(),
             signals: Default::default(),
-            authorities: Default::default(),
             callbacks: Default::default(),
             next_callback: 0,
             cpu_jobs: Default::default(),
@@ -132,8 +126,6 @@ impl Library {
             cpu_supplied: None,
             next_shared: 0,
             drop_failure: None,
-            runners: Default::default(),
-            places: Default::default(),
             free: None,
         })
     }
@@ -1421,15 +1413,6 @@ impl Library {
                 }
             }
         }
-        if self.runners.waits_on(token) {
-            return self.poll_runner(token, context);
-        }
-        if self.places.waits_on(token) {
-            return self.poll_place(token);
-        }
-        if self.places.inbox_waits_on(token) {
-            return self.poll_inbox(token);
-        }
         if self.signals.contains(token) {
             let saved = (!context.configuration.inputs.is_empty()).then(|| self.simulation.clone());
             let result = self.poll_signal(token, context);
@@ -1479,7 +1462,6 @@ impl Operations for Library {
         self.tasks
             .retained_bytes()
             .saturating_add(self.channels.retained_bytes())
-            .saturating_add(self.recorders.retained_bytes())
             .saturating_add(
                 self.cpu_waits
                     .values()
@@ -1772,41 +1754,6 @@ impl Operations for Library {
     fn wait(&mut self) -> Result<bool, Error> {
         Ok(self.deliver_signal()? || self.advance_virtual_time())
     }
-    fn take_calls(&mut self) -> Vec<crate::CalleeStart> {
-        self.take_runner_starts()
-    }
-    fn take_cancels(&mut self) -> Vec<u64> {
-        self.take_runner_cancels()
-    }
-    fn call_ended(
-        &mut self,
-        token: u64,
-        end: crate::CalleeEnd,
-        context: &mut OperationContext<'_>,
-    ) -> Result<(), Error> {
-        self.runner_ended(token, end, context)
-    }
-    fn take_arrivals(&mut self) -> Vec<crate::PlaceArrival> {
-        self.take_place_arrivals()
-    }
-    fn deliver_arrival(&mut self, id: u64, call: crate::ArrivedCall) -> Result<(), Error> {
-        self.deliver_place_arrival(id, call);
-        Ok(())
-    }
-    fn take_arrival_ends(&mut self) -> Vec<(u64, hirsel_run_schema::CallOutcome)> {
-        self.take_place_ends()
-    }
-    fn place_closed(&mut self) -> Vec<(u64, hirsel_run_schema::CallOutcome)> {
-        self.close_place()
-    }
-    fn arrival_ended(
-        &mut self,
-        token: u64,
-        end: hirsel_run_schema::CallOutcome,
-        _context: &mut OperationContext<'_>,
-    ) -> Result<(), Error> {
-        self.place_ended(token, end)
-    }
     fn cancel_run(&mut self) {
         // The provider cancels the callee run's root scope with cause `Parent` (RUN-9).
         self.tasks.cancel_root(1);
@@ -1875,22 +1822,6 @@ impl Operations for Library {
         }
         if kind == "TaskSet" {
             self.tasks.drop_set(id);
-            return Ok(());
-        }
-        if kind == "Claim" {
-            self.drop_claim(id);
-            return Ok(());
-        }
-        if kind == "Arrival" {
-            self.drop_arrival(id);
-            return Ok(());
-        }
-        if kind == "Inbox" {
-            self.drop_inbox();
-            return Ok(());
-        }
-        if kind == "Recorder" {
-            self.drop_recorder(id);
             return Ok(());
         }
         if matches!(kind, "ReadHalf" | "WriteHalf") {
@@ -2201,9 +2132,6 @@ primary_operations! { library, call, context, name, a, value;
         if result.is_err() && let Some(saved) = saved { library.simulation = saved; }
         return result.map(Some);
     },
-    Primitive: "recorder.new" | "recorder.append" | "recorder.finish" => {
-        return library.recorder_call(name, call.arguments).map(Some);
-    },
     Primitive: "slots.empty" | "slots.insert" | "slots.get" | "slots.remove" => {
         return super::slots::call(name, a).map(Some);
     },
@@ -2243,7 +2171,7 @@ primary_operations! { library, call, context, name, a, value;
     Capability: "io.process" | "proc.narrow" | "proc.run" | "proc.pipeline" | "test.process" | "proc.spawn" | "child.write" | "child.close_stdin" | "child.read_stdout" | "child.read_stderr" | "child.wait" | "child.kill" | "proc.spawn_pipeline" | "group.write" | "group.close_stdin" | "group.read_stdout" | "proc.wait_group" | "group.kill" => {
         return library.network_call(name, &call, context).map(Some);
     },
-    Unavailable: "$intrinsic.CpuMapScoped" | "$intrinsic.TaskScopeEnter" | "$intrinsic.TaskScopeExit" | "$intrinsic.TaskSetHas" | "$intrinsic.TaskSetTake" | "$intrinsic.TaskScopeEnterUntil" | "$intrinsic.TaskScopeExitUntil" | "$intrinsic.TaskSpawn" | "$intrinsic.TaskFinish" | "$intrinsic.TaskJoin" | "$intrinsic.ChannelOpen" | "$intrinsic.ChannelSend" | "$intrinsic.ChannelReceive" | "$intrinsic.MutexCreate" | "$intrinsic.MutexTake" | "$intrinsic.MutexPut" | "$intrinsic.MutexKill" | "$intrinsic.MutexCause" | "$intrinsic.RecorderOpen" | "$intrinsic.RecorderAppend" | "$intrinsic.RecorderCount" | "$intrinsic.RecorderTake" | "$intrinsic.AtomicCreate" | "$intrinsic.AtomicLoad" | "$intrinsic.AtomicStore" | "$intrinsic.SharedThawTurn" | "$intrinsic.TaskCanceled" | "$intrinsic.IsolateBegin" | "$intrinsic.ApplyBegin" | "$intrinsic.IsolateEnd" | "$intrinsic.IsolateCount" | "$intrinsic.IsolateKind" | "$intrinsic.IsolateRule" | "$intrinsic.IsolateDefinition" | "$intrinsic.IsolateLine" | "$intrinsic.IsolateColumn" | "$intrinsic.IsolateSpawn" | "$intrinsic.RunnerSend" | "$intrinsic.RunnerWait" | "$intrinsic.RunnerTake" | "$intrinsic.RunnerEntry" | "$intrinsic.RunnerArgument" | "$intrinsic.RunnerIo" | "$intrinsic.RunnerReply" | "$intrinsic.RunnerGrants" => { return Err(Error::Unavailable(format!("{name} is an entry of the native task runtime's compiled bodies; the reference executes the task operations"))); },
+    Unavailable: "$intrinsic.CpuMapScoped" | "$intrinsic.TaskScopeEnter" | "$intrinsic.TaskScopeExit" | "$intrinsic.TaskSetHas" | "$intrinsic.TaskSetTake" | "$intrinsic.TaskScopeEnterUntil" | "$intrinsic.TaskScopeExitUntil" | "$intrinsic.TaskSpawn" | "$intrinsic.TaskFinish" | "$intrinsic.TaskJoin" | "$intrinsic.ChannelOpen" | "$intrinsic.ChannelSend" | "$intrinsic.ChannelReceive" | "$intrinsic.MutexCreate" | "$intrinsic.MutexTake" | "$intrinsic.MutexPut" | "$intrinsic.MutexKill" | "$intrinsic.MutexCause" | "$intrinsic.AtomicCreate" | "$intrinsic.AtomicLoad" | "$intrinsic.AtomicStore" | "$intrinsic.SharedThawTurn" | "$intrinsic.TaskCanceled" | "$intrinsic.IsolateBegin" | "$intrinsic.IsolateEnd" | "$intrinsic.IsolateCount" | "$intrinsic.IsolateKind" | "$intrinsic.IsolateRule" | "$intrinsic.IsolateDefinition" | "$intrinsic.IsolateLine" | "$intrinsic.IsolateColumn" | "$intrinsic.IsolateSpawn" => { return Err(Error::Unavailable(format!("{name} is an entry of the native task runtime's compiled bodies; the reference executes the task operations"))); },
     Capability: "io.telemetry" | "capture.begin" | "capture.context" | "capture.event" | "capture.finish" | "capture.log" | "capture.measure" => {
         // A rejected replay never publishes effects or delivers identities.
         let saved = (!context.configuration.inputs.is_empty()).then(|| library.simulation.clone());
@@ -2261,27 +2189,6 @@ primary_operations! { library, call, context, name, a, value;
     Unavailable: "$intrinsic.MappedView" | "$intrinsic.MappedCheck" => { return Err(Error::Unavailable(format!("{name} is an entry of mapped.with's compiled body; the reference executes mapped.with"))); },
     Unavailable: "$intrinsic.NetReadInto" | "$intrinsic.ReadHalfReadInto" => { return Err(Error::Unavailable(format!("{name} is the native entry of a read_into's compiled body; the reference executes the read_into"))); },
     Primitive: "path.of" => path(text(arg(a, 0)?)?),
-    Primitive: "runner.entry_id" => library.entry_id(arg(a, 0)?)?,
-    Primitive: "runner.apply" | "runner.apply_mut" => { return library.runner_apply(name, a).map(Some); },
-    Capability: "io.runner" | "runner.grants" | "runner.narrow" | "runner.only" | "runner.compute" | "runner.call" | "runner.spawn" | "test.runner" => {
-        return library.runner_call(name, &call, context).map(Some);
-    },
-    Capability: "runner.send" | "io.inbox" | "inbox.take" | "arrival.request" | "arrival.end" => {
-        return library.place_call(name, &call, context).map(Some);
-    },
-    Capability: "io.authority" | "authority.levels" | "authority.level" | "authority.floor" | "level.name" | "level.narrow" | "authority.max_entry" | "authority.claim" | "claim.end" | "claim.narrow" | "authority.submit" | "authority.wait" | "authority.durable" | "authority.read" | "authority.last" | "authority.locate" | "authority.at" | "authority.get" | "authority.put" | "authority.reclaim" | "authority.select" | "authority.base" => {
-        // A rejected replay never publishes effects or keeps a claim.
-        let saved = (!context.configuration.inputs.is_empty()).then(|| (library.simulation.clone(), library.authorities.clone()));
-        let result = library.authority_call(name, &call, context);
-        if result.is_err() && let Some((simulation, authorities)) = saved { library.simulation = simulation; library.authorities = authorities; }
-        // No seam call is a cancellation point; a cancel delivered at one is observed later.
-        if result.is_ok() && matches!(name, "authority.claim" | "authority.submit" | "authority.wait" | "authority.durable" | "authority.read" | "authority.last" | "authority.locate" | "authority.at" | "authority.get" | "authority.put" | "authority.reclaim" | "authority.select" | "authority.base") {
-            library.authorities.seam_calls += 1;
-            if library.simulation.config.debug.cancel_at_seam == Some(library.authorities.seam_calls) { library.tasks.cancel_current(); }
-            if library.simulation_point(super::simulation::SchedulePoint::Seam) { context.trace.push(crate::TraceEvent::SimulationPoint(super::simulation::SchedulePoint::Seam)); }
-        }
-        return result.map(Some);
-    },
     Capability: "signal.wait" => {
         // The initial attempt suspends once. A host poll completes the same
         // wait through wait_signal without yielding its resumed task again.

@@ -409,12 +409,8 @@ runnable corpus case (run, fail, blocked and test headers; about 2,560)
 natively and compares the full interpreter observation: stdout, exit status,
 failure rule and site, with headers and `.stdout` sidecars as further oracles.
 Every case runs on Cranelift; a 1/16 slice that rotates with the run's seed, and
-every case with a pending row, also run on LLVM O0. A case whose header names
-`runners:` passes them, its `fault_seed:` and the launcher's callee facts to the
-executable, whose callee runs execute in its process as the interpreter's do.
-A `tasks: free` header runs the case under `tasks.free@1` in every engine;
-natively its run is admitted as a requested one is, so home serves its runners
-and `db@1` places, and it records and replays a Free phase tape.
+every case with a pending row, also run on LLVM O0. A `tasks: free` header runs the case under `tasks.free@1` in every engine and
+records and replays a Free phase tape.
 `native-tests/regressions/corpus-exclusions.tsv` names the cases never launched
 natively (MEM-12), and `corpus-pending.tsv` the failures still attempted on
 every run, each with its exact reason; an unlisted failure, a changed reason

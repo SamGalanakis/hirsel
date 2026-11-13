@@ -34,7 +34,6 @@ pub(crate) fn intrinsic(definition: &DefPath) -> Option<CalleeClass> {
         return Some(CalleeClass::Boundary);
     }
     [
-        "$intrinsic.ApplyBegin",
         "$intrinsic.IsolateEnd",
         "$intrinsic.IsolateCount",
         "$intrinsic.IsolateKind",

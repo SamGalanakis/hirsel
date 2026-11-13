@@ -188,10 +188,7 @@ pub fn add_owner(
         // Primitive capabilities are logical run-context handles. Instant and Level
         // use the same opaque one-word layout for ticks and a level word, with no
         // handle allocation.
-        None if t.capability.is_some()
-            || *path == hirsel_syntax::DefPath::core("Instant")
-            || *path == hirsel_syntax::DefPath::core("Level") =>
-        {
+        None if t.capability.is_some() || *path == hirsel_syntax::DefPath::core("Instant") => {
             OwnerRepresentation::Handle {
                 revision: signature.fingerprint,
                 resource: t.resource,

@@ -234,18 +234,7 @@ fn bad(c: MonotonicClock, d: MonotonicClock, a: Instant of c, b: Instant of d) -
 fn erased(a: Instant, b: Instant) -> bool { a < b } // PROV-2: the domain is unknown
 ```
 
-Canonical order is numeric for integers and `char`, false before true for `bool`, and
-byte-lexicographic for `String` and `Bytes`, a proper prefix before the longer value. Unit
-has one value. Tuples and opted-in records compare fields lexicographically in declaration
-order; opted-in variants compare declaration ordinal, then payload fields. Sequences
-(`Array`, `List`, `Inline`, `Packed`) compare lexicographically, proper prefix first.
-Boxes use payload order. Every component must itself qualify. Floats keep IEEE comparisons
-and are not `ordered`; functions, capabilities, resources, `Map`, `Set` and `Simd` acquire
-no canonical order. The core tokens order by a private word: `Instant of clock` by its
-ticks, and `Level of a` by its declared weakest-first ordinal
-([STORE-3](storage.md#store-2-transactions)). Comparison never samples a clock,
-consults authority state, allocates or serializes a token, and performs no domain check at
-run time: the domain is established statically.
+
 
 `Map[K: key, V]` iterates in insertion order; the hash seed affects placement only. Map
 `==` is order-sensitive, and `map.same_entries` compares as sets. `Set` equality

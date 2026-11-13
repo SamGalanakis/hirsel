@@ -1,6 +1,5 @@
 //! Object storage: objects by key, written create-if-absent or replaced
-//! conditionally on their entity tag. This is the storage seam the code store
-//! and `authority.objects@1` share: [`ObjectStorage`] is a conditional PUT
+//! conditionally on their entity tag. [`ObjectStorage`] provides a conditional PUT
 //! (`If-None-Match: *`), a conditional replace (`If-Match`), a GET with the
 //! object's tag, a listing and a delete, which a directory, an S3-compatible
 //! bucket and a simulation all implement.

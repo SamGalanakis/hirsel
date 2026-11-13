@@ -45,10 +45,7 @@ pub struct Config {
     pub hash_seed: u64,
     /// The linked program's immutable descriptor table; runtime descriptors occupy indices 0/1
     /// (0: the plain pointer-free sequence for Bytes and `List[SocketAddr]`; 1: file walk) and
-    /// the four indices after the table (the runtime's `List[Bytes]`, `text::bytes_list_index`,
-    /// its list of resource handles, `text::handle_list_index`, then `authority.read`'s
-    /// `List[HistoryRecord]`, `text::history_list_index`, and its records' `List[ObjectRef]`,
-    /// `text::object_ref_list_index`).
+    /// the index after the table for `List[Bytes]`, `text::bytes_list_index`.
     pub layouts: *const *const crate::Layout,
     pub layout_count: u32,
     pub reserved: u32,
@@ -393,14 +390,6 @@ pub(crate) struct RunShared {
     pub(crate) tasks: RoleCell<Option<Box<crate::tasks::Scheduler>>>,
     /// Where a stop of a width-1 run returns (`crate::stop`).
     pub(crate) driver: RoleCell<crate::stop::Driver>,
-    /// The root run's execution of runner calls and the callee runs they start (RUN-10).
-    pub(crate) runners: RoleCell<Option<Box<crate::runners::Execution>>>,
-    /// Immutable child-local runner data. Published before dispatch; workers
-    /// never follow a pointer into a parent's home-owned execution.
-    pub(crate) runner_call: Option<std::sync::Arc<crate::runners::native::CallState>>,
-    /// Send-only runner transport and a home-only service location. The actual
-    /// service remains on admission, so detached workers never destroy its Io.
-    pub(crate) runner_home: Option<std::sync::Arc<crate::runners::native::Slot>>,
     /// A callee run's execution root, whose launcher a stop returns to; null for a root.
     pub(crate) root: *mut RunShared,
     /// The run's stop word and what its host asks of it (`crate::stop`).
@@ -1060,9 +1049,6 @@ pub unsafe extern "C" fn hirsel_rt_v2_ctx_create(
         });
     }
     layouts.push(&crate::text::BYTES_LIST_DESCRIPTOR.0 as *const crate::Layout);
-    layouts.push(&crate::text::HANDLE_LIST_DESCRIPTOR.0 as *const crate::Layout);
-    layouts.push(&crate::text::HISTORY_LIST_DESCRIPTOR.0 as *const crate::Layout);
-    layouts.push(&crate::text::OBJECT_REF_LIST_DESCRIPTOR.0 as *const crate::Layout);
     for &layout in &layouts {
         unsafe {
             crate::release::check_layout(layout);
@@ -1095,9 +1081,6 @@ pub unsafe extern "C" fn hirsel_rt_v2_ctx_create(
         entry_result: RoleCell::new(None),
         tasks: RoleCell::new(None),
         driver: RoleCell::new(crate::stop::Driver::default()),
-        runners: RoleCell::new(None),
-        runner_call: None,
-        runner_home: None,
         root: ptr::null_mut(),
         control: Default::default(),
         io_facade: RoleCell::new(None),

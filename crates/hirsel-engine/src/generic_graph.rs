@@ -538,18 +538,7 @@ pub(crate) fn check(engine: &mut QueryEngine) -> Result<Vec<Diagnostic>, QueryEr
     let sites = engine
         .source_growth
         .growing_sites(&mut engine.work, settled);
-    let mut diagnostics = if let Some(cached) = engine.source_growth.table_result() {
-        cached
-    } else {
-        let generation = engine.source_growth.generation();
-        let result = crate::table_keys::check(engine)?;
-        if settled {
-            engine
-                .source_growth
-                .record_table_result(generation, result.clone());
-        }
-        result
-    };
+    let mut diagnostics = Vec::new();
     diagnostics.extend(crate::storage_graph::check(engine)?);
     diagnostics.extend(sites.into_iter().map(|site| {
         Diagnostic::error(

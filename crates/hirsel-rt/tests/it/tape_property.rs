@@ -3,8 +3,8 @@ use hirsel_rt::io::*;
 use hirsel_rt::launch::{parse_tape, render_tape};
 use hirsel_rt::net::{NetOperation, NetRule, NetTimeout, RootsDigest, ShutdownHow, TimeoutKind};
 use hirsel_run_schema::{
-    CallForm, CallOutcome, CalleeOutcome, ChildStream, Command, ExitStatus, GroupOutput,
-    PipelineOutcome, ProcessFailure, ProcessOutcome, ProcessRule, RunnerCompletion, Signal,
+    ChildStream, Command, ExitStatus, GroupOutput, PipelineOutcome, ProcessFailure, ProcessOutcome,
+    ProcessRule, Signal,
 };
 
 // The match is exhaustive: adding a Request variant requires a generated specimen here.
@@ -133,7 +133,7 @@ pub(super) fn requests(n: u64) -> Vec<Request> {
         2 => vec![String::new()],
         _ => vec!["h2".to_owned(), text.clone() + "#alpn", String::new()],
     };
-    let mut values = requests! {
+    let values = requests! {
         ProcessTime { from: n, to: n.saturating_add(5) },
         ProcessSettle { canceled: vec![n] },
         Stdin { io: n.wrapping_add(12) },
@@ -178,7 +178,6 @@ pub(super) fn requests(n: u64) -> Vec<Request> {
         TestClock { test: n.wrapping_add(29) },
         TestSeed { test: n.wrapping_add(29) },
         TestTasks { test: n.wrapping_add(29) },
-        Stopped {},
         TestLog { test: n.wrapping_add(29), text: if n == 0 { String::new() } else { format!("{text}#text") } },
         TestSnapshot { test: n.wrapping_add(29), name: if n == 0 { String::new() } else { format!("{text}#name") }, text: if n == 0 { String::new() } else { format!("{text}#text") } },
         TestNet { test: n.wrapping_add(29), peers: peers, listeners: listeners },
@@ -246,8 +245,6 @@ pub(super) fn requests(n: u64) -> Vec<Request> {
         LocalAddr { net: n.wrapping_add(17), listener: n.wrapping_add(13) },
         UnixConnect { net: n.wrapping_add(17), path: if n == 0 { String::new() } else { format!("{text}#path") } },
         UnixListen { net: n.wrapping_add(17), path: if n == 0 { String::new() } else { format!("{text}#path") } },
-        RunnerCancel { key: digest, cause: n as u32 },
-        RunnerPoll { key: digest, cancel: (n % 2 != 0).then_some(n as u32) },
         Ready { wait: n.wrapping_add(30), points: n.wrapping_add(20) },
         Schedule { count: n.wrapping_add(2), choice: n % 2 },
         CpuControl { width: n as u32, action: (n % 3) as u32, count: n, outcome: (n % 32) as u32 };
@@ -258,265 +255,8 @@ pub(super) fn requests(n: u64) -> Vec<Request> {
             pieces: vec![hirsel_rt::io::CpuPiece { credit: 0, net: n as i64, high: (n as i64).max(1) }],
             level: n, limit: u64::MAX, }),
         }),
-        RunnerCall(Box::new(hirsel_run_schema::RunnerRequest {
-            runner: if n == 0 { String::new() } else { format!("{text}#runner") },
-            form: if n % 2 == 0 { CallForm::Compute } else { CallForm::Call },
-            path: format!("{text}#path"),
-            grants: bytes.clone(),
-            definitions: vec![b'n', n as u8],
-            key: digest,
-            digest: std::array::from_fn(|i| digest[31 - i]),
-            argument: bytes.clone(),
-        })),
-        CallReturn([CalleeOutcome::Ok(bytes.clone()), CalleeOutcome::Err(vec![]), CalleeOutcome::Failed(bytes.clone())][n as usize % 3].clone()),
-        Seam(seam_requests(n, &text, &bytes).remove(0))
     };
-    values.extend(
-        seam_requests(n, &text, &bytes)
-            .into_iter()
-            .map(Request::Seam),
-    );
     values
-}
-
-fn seam_requests(n: u64, text: &str, bytes: &[u8]) -> Vec<hirsel_rt::authority::SeamRequest> {
-    use hirsel_rt::authority::SeamRequest as S;
-    use hirsel_store_authority::wire::Request as W;
-    let level = (n % 4) as u8;
-    let provider = |claim: Option<u64>, request| S::Provider {
-        authority: n,
-        claim,
-        request,
-    };
-    [
-        S::Project {
-            io: n,
-            name: text.to_owned(),
-        },
-        S::Levels { authority: n },
-        S::Level {
-            authority: n,
-            name: text.to_owned(),
-        },
-        S::Floor { authority: n },
-        S::LevelName { level: n },
-        S::LevelNarrow {
-            authority: n,
-            level: n.rotate_left(8),
-        },
-        S::MaxEntry { authority: n },
-        S::ClaimEnd { claim: n },
-        S::ClaimNarrow {
-            authority: n,
-            claim: !n,
-        },
-        provider(None, W::Claim),
-        provider(
-            Some(!n),
-            W::Submit {
-                at: level,
-                payload: bytes.to_vec(),
-                created: vec![hirsel_store_authority::ObjectRef {
-                    lifetime: n,
-                    epoch: !n,
-                    digest: [n as u8; 32],
-                }],
-                retired: vec![hirsel_store_authority::ObjectRef {
-                    lifetime: !n,
-                    epoch: n,
-                    digest: [!n as u8; 32],
-                }],
-            },
-        ),
-        provider(Some(!n), W::Wait { position: n }),
-        provider(Some(!n), W::Durable { at: level }),
-        provider(Some(!n), W::Reclaim { budget: n }),
-        provider(
-            Some(!n),
-            W::Select {
-                first: n,
-                boot: bytes.to_vec(),
-            },
-        ),
-        provider(None, W::Base),
-        provider(
-            None,
-            W::Read {
-                from: n,
-                at: level,
-                max: !n,
-            },
-        ),
-        provider(None, W::Last { at: level }),
-        provider(Some(!n), W::Locate { position: n }),
-        provider(
-            None,
-            W::At {
-                l: hirsel_store_authority::Locator {
-                    position: n,
-                    digest: [n as u8; 32],
-                },
-                from: !n,
-                at: level,
-                max: n,
-            },
-        ),
-        provider(
-            None,
-            W::Get {
-                r: hirsel_store_authority::ObjectRef {
-                    lifetime: n,
-                    epoch: !n,
-                    digest: [n as u8; 32],
-                },
-            },
-        ),
-        provider(
-            None,
-            W::Put {
-                r: hirsel_store_authority::ObjectRef {
-                    lifetime: n,
-                    epoch: !n,
-                    digest: [n as u8; 32],
-                },
-                data: bytes.to_vec(),
-            },
-        ),
-    ]
-    .into()
-}
-
-fn seam_completions(n: u64, text: &str, bytes: &[u8]) -> Vec<Completion> {
-    use hirsel_rt::authority::SeamCompletion as S;
-    use hirsel_store_authority::wire::Outcome as O;
-    use hirsel_store_authority::{Advanced, AuthorityError as M, Error as E};
-    let medium = [M::Io(0), M::Io(9), M::Status(n as u16), M::Unreachable][n as usize % 4].clone();
-    let error = [
-        E::Storage(medium.clone()),
-        E::Refused(medium.clone()),
-        E::Corrupt(text.to_owned()),
-        E::Fenced,
-        E::Format {
-            found: n.to_le_bytes(),
-            object: text.to_owned(),
-        },
-    ][n as usize % 5]
-        .clone();
-    let claim = (n % 2 == 0).then_some(!n);
-    [
-        S::Words(vec![]),
-        S::Words(vec![n, !n]),
-        S::Name(text.to_owned()),
-        S::Word(n),
-        S::Optional(None),
-        S::Optional(Some(n)),
-        S::Outcome {
-            outcome: O::Position(Ok(n)),
-            claim,
-        },
-        S::Outcome {
-            outcome: O::Position(Err(error.clone())),
-            claim: None,
-        },
-        S::Outcome {
-            outcome: O::Located(Ok(None)),
-            claim: None,
-        },
-        S::Outcome {
-            outcome: O::Located(Ok(Some(hirsel_store_authority::Locator {
-                position: n,
-                digest: [!n as u8; 32],
-            }))),
-            claim: None,
-        },
-        S::Outcome {
-            outcome: O::Located(Err(error.clone())),
-            claim: None,
-        },
-        S::Outcome {
-            outcome: O::Advanced(Advanced::Advanced(n)),
-            claim: None,
-        },
-        S::Outcome {
-            outcome: O::Advanced(Advanced::Fenced),
-            claim: None,
-        },
-        S::Outcome {
-            outcome: O::Advanced(Advanced::Refused(medium.clone())),
-            claim: None,
-        },
-        S::Outcome {
-            outcome: O::Advanced(Advanced::Undecided(medium)),
-            claim: None,
-        },
-        S::Outcome {
-            outcome: O::Read(Ok(vec![
-                hirsel_store_authority::Record::Claimed {
-                    epoch: n,
-                    attempt: [n as u8; 16],
-                    identity: [!(n as u8); 32],
-                    appended: (n % 2 == 1).then_some(hirsel_store_authority::Locator {
-                        position: !n,
-                        digest: [n as u8; 32],
-                    }),
-                },
-                hirsel_store_authority::Record::Appended {
-                    payload: bytes.to_vec(),
-                    created: vec![hirsel_store_authority::ObjectRef {
-                        lifetime: n,
-                        epoch: !n,
-                        digest: [!(n as u8); 32],
-                    }],
-                    retired: vec![hirsel_store_authority::ObjectRef {
-                        lifetime: !n,
-                        epoch: n,
-                        digest: [n as u8; 32],
-                    }],
-                },
-                hirsel_store_authority::Record::Appended {
-                    payload: vec![],
-                    created: vec![],
-                    retired: vec![],
-                },
-            ])),
-            claim: None,
-        },
-        S::Outcome {
-            outcome: O::Read(Err(error.clone())),
-            claim: None,
-        },
-        S::Outcome {
-            outcome: O::Get(Ok(None)),
-            claim: None,
-        },
-        S::Outcome {
-            outcome: O::Get(Ok(Some(bytes.to_vec()))),
-            claim: None,
-        },
-        S::Outcome {
-            outcome: O::Unit(Ok(())),
-            claim: None,
-        },
-        S::Outcome {
-            outcome: O::Unit(Err(error.clone())),
-            claim: None,
-        },
-        S::Outcome {
-            outcome: O::Reclaimed(Ok(hirsel_store_authority::Reclaimed::More)),
-            claim: None,
-        },
-        S::Outcome {
-            outcome: O::Reclaimed(Ok(hirsel_store_authority::Reclaimed::Done)),
-            claim: None,
-        },
-        S::Outcome {
-            outcome: O::Reclaimed(Err(error)),
-            claim: None,
-        },
-    ]
-    .into_iter()
-    .map(Completion::Seam)
-    .collect()
 }
 
 fn completions(n: u64) -> Vec<Completion> {
@@ -641,18 +381,6 @@ fn completions(n: u64) -> Vec<Completion> {
             },
             process_error
         )),
-        Completion::Runner(RunnerCompletion {
-            outcome: [
-                CallOutcome::Ok(bytes.clone()),
-                CallOutcome::Failed(vec![]),
-                CallOutcome::Faulted(vec![255]),
-                CallOutcome::NotRun(n as u32),
-                CallOutcome::InDoubt(n as u32),
-                CallOutcome::Canceled(n as u32),
-            ][n as usize % 6]
-                .clone(),
-            callee: (n % 2 == 0).then(|| [n as u8; 16]),
-        }),
         Completion::Blocked {
             committed: n % 2 == 0,
         },
@@ -667,12 +395,10 @@ fn completions(n: u64) -> Vec<Completion> {
         Completion::FileInput(FileInput::Size(n)),
         Completion::FileInput(FileInput::Bytes(bytes.clone())),
     ];
-    values.extend(seam_completions(n, &text, &bytes));
     // Adding a completion variant must add a specimen, just like requests.
     for completion in &values {
         match completion {
             Completion::FileInput(_) => (),
-            Completion::Seam(_) => (),
             Completion::Input(_) => (),
             Completion::Env(_) => (),
             Completion::ClockGrant(_) => (),
@@ -709,7 +435,6 @@ fn completions(n: u64) -> Vec<Completion> {
             Completion::ChildBytes(_) => (),
             Completion::ChildExit(_) => (),
             Completion::GroupExit(_) => (),
-            Completion::Runner(_) => (),
             Completion::View(_) => (),
             Completion::Watch(_) => (),
             Completion::Blocked { .. } => (),

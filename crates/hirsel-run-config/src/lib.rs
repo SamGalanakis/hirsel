@@ -4,9 +4,9 @@
 hirsel_guard::install!();
 
 use hirsel_run_schema::{
-    Admission, Budgets, CallRecord, CodeReach, Inputs, IoGrants, LaunchKind, NetGrant,
-    ProcessGrant, ProgramRevision, ProviderContract, RecordingLevel, RunRefusal, Scheduler,
-    SignalsGrant, call_key, callee_instance, hash_parts, hex,
+    Admission, Budgets, CodeReach, Inputs, IoGrants, LaunchKind, NetGrant, ProcessGrant,
+    ProgramRevision, ProviderContract, RecordingLevel, RunRefusal, Scheduler, SignalsGrant,
+    hash_parts, hex,
 };
 use serde::{Deserialize, Serialize};
 pub mod managed_cores;
@@ -15,15 +15,11 @@ pub use placement::{
     AutoCores, CapacityAdmission, CapacityExclusion, Commit, CoreRange, Cores, Pin, Placement,
     RecordedPlacement, Reorder,
 };
-mod calls;
 mod object_stores;
 pub use object_stores::{CredentialsReference, ObjectStore};
 
 mod grants;
 pub use grants::grants_within;
-pub mod host;
-mod runners;
-pub use runners::validate_runners;
 mod net;
 mod process;
 pub use net::validate_net_grant;
@@ -33,38 +29,6 @@ mod signals;
 use sha2::{Digest as _, Sha256};
 pub use signals::validate_signals_grant;
 
-/// An `io.authorities` object on its own, for a fixture with no mounts: simulated
-/// providers only, each checked as a run's would be.
-pub fn validate_authorities(
-    bytes: &[u8],
-) -> Result<BTreeMap<String, hirsel_run_schema::AuthorityGrant>, RunRefusal> {
-    let mut io = IoGrants {
-        authorities: serde_json::from_slice(bytes)
-            .map_err(|error| invalid("io.authorities", &error.to_string()))?,
-        ..IoGrants::default()
-    };
-    authorities(&io, "io.authorities")?;
-    if io
-        .authorities
-        .values()
-        .any(|g| g.provider == "authority.log@1")
-    {
-        return Err(invalid(
-            "io.authorities",
-            "a fixture has no host directory for authority.log@1",
-        ));
-    }
-    if io.authorities.values().any(|g| {
-        g.provider == "authority.objects@1"
-            && hirsel_store_authority::objects_provider(g) != Some("objects.sim@1")
-    }) {
-        return Err(invalid(
-            "io.authorities",
-            "a fixture's authority.objects@1 keeps its objects in objects.sim@1",
-        ));
-    }
-    Ok(std::mem::take(&mut io.authorities))
-}
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -124,10 +88,6 @@ pub struct RunConfig {
     pub program: String,
     pub entry: String,
     pub launch: LaunchKind,
-    /// A callee run's call (RUN-10): present exactly when `launch` is `call`, and absent
-    /// from every other record's canonical bytes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub call: Option<CallRecord>,
     pub inputs: Inputs,
     pub io: Option<IoGrants>,
     pub args: Option<Vec<String>>,
@@ -259,11 +219,7 @@ impl RunConfig {
         integer_tokens(bytes)?;
         let mut grants: Grants = schema_diagnostic::from_slice(bytes)?;
         if let (Some(base), Some(io)) = (base, &mut grants.io) {
-            // A runner's grant set names host directories as the run's own mounts do.
-            let runners = io.runners.iter_mut().filter_map(|r| r.grants.as_mut());
-            let mounts: Vec<&mut hirsel_run_schema::Mount> =
-                runners.flat_map(|grants| grants.dirs.iter_mut()).collect();
-            for mount in io.dirs.iter_mut().chain(mounts) {
+            for mount in &mut io.dirs {
                 let host = std::path::Path::new(&mount.host);
                 if host.is_relative() {
                     let candidate = base.join(host);
@@ -389,7 +345,6 @@ impl RunConfig {
             program: hex(&program),
             entry,
             launch,
-            call: None,
             inputs: Inputs::default(),
             io: None,
             args: None,
@@ -426,11 +381,6 @@ impl RunConfig {
                 "expected a full versioned definition path",
             ));
         }
-        match (&record.call, record.launch) {
-            (Some(call), LaunchKind::Call) => calls::validate(call)?,
-            (None, LaunchKind::Main | LaunchKind::Test) => {}
-            _ => return Err(invalid("call", "a call member exactly for a call launch")),
-        }
         if let Some(scripts) = &record.inputs.fixture_file_faults {
             hirsel_run_schema::validate_file_faults(scripts)
                 .map_err(|e| invalid("inputs.fixture_file_faults", &e))?;
@@ -444,7 +394,6 @@ impl RunConfig {
         object_stores::expand(record)?;
         if let Some(io) = &mut record.io {
             validate_io(io, "io")?;
-            runners::validate(&mut io.runners, validate_io)?;
         }
         if let Some(env) = &record.env {
             env_keys(env)?;
@@ -515,10 +464,6 @@ impl RunConfig {
                             .random
                             .as_deref()
                             .is_some_and(|p| p != ProviderContract::RandomSplitMix64.name())
-                        || io
-                            .runners
-                            .iter()
-                            .any(|r| r.provider != ProviderContract::RunnerSim.name())
                         || io
                             .net
                             .as_ref()
@@ -640,25 +585,6 @@ impl ValidatedRun {
     }
     pub fn record(&self) -> &RunConfig {
         &self.data.record
-    }
-    /// Whether the run calls runners, and so has a run instance.
-    pub fn calls(&self) -> bool {
-        self.data
-            .record
-            .io
-            .as_ref()
-            .is_some_and(|io| !io.runners.is_empty())
-    }
-    /// A callee run's instance, derived from its call's key as its seeds are.
-    pub fn instance(&self) -> Result<Option<[u8; 16]>, RunRefusal> {
-        let Some(call) = &self.data.record.call else {
-            return Ok(None);
-        };
-        let cause = call.cause()?;
-        Ok(Some(callee_instance(&call_key(
-            &cause.instance,
-            cause.ordinal,
-        ))))
     }
     pub fn canonical(&self) -> &[u8] {
         &self.data.canonical
@@ -892,11 +818,6 @@ impl BoundRun {
                 at: now,
                 revocation,
             },
-            instance: match self.run.instance()? {
-                Some(instance) => Some(instance),
-                None if self.run.calls() => Some(host.run_instance()?),
-                None => None,
-            },
         })
     }
 }
@@ -914,13 +835,6 @@ pub trait HostAuthority {
     /// Pin the host authority the validated run's grants name.
     fn authorize(&mut self, run: &ValidatedRun) -> Result<(), RunRefusal>;
     fn revocation(&mut self, reference: &str) -> Result<RevocationEvidence, RunRefusal>;
-    /// A fresh run instance from the host's secure generator (RUN-11), for a run that calls
-    /// runners. A host without one cannot admit such a run.
-    fn run_instance(&mut self) -> Result<[u8; 16], RunRefusal> {
-        Err(RunRefusal::Unsupported {
-            field: "io.runners".into(),
-        })
-    }
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -939,7 +853,6 @@ pub struct AdmissionEvidence {
 pub struct AdmittedRun {
     run: ValidatedRun,
     evidence: AdmissionEvidence,
-    instance: Option<[u8; 16]>,
 }
 impl AdmittedRun {
     pub fn run(&self) -> &ValidatedRun {
@@ -947,11 +860,6 @@ impl AdmittedRun {
     }
     pub fn evidence(&self) -> &AdmissionEvidence {
         &self.evidence
-    }
-    /// The run instance fixed at admission (RUN-11): a callee run's derived one, or the
-    /// host's fresh one for a run that calls runners; none for any other run.
-    pub fn instance(&self) -> Option<[u8; 16]> {
-        self.instance
     }
 }
 
@@ -1038,7 +946,6 @@ fn validate_io(io: &mut IoGrants, field: &str) -> Result<(), RunRefusal> {
         provider(&at("signals.provider"), &signals.provider)?;
         signals::validate(signals)?;
     }
-    authorities(io, &at("authorities"))?;
     if let Some(telemetry) = &io.telemetry {
         provider(&at("telemetry.provider"), &telemetry.provider)?;
         // The host provider draws its identities; only the null provider takes a seed
@@ -1052,76 +959,6 @@ fn validate_io(io: &mut IoGrants, field: &str) -> Result<(), RunRefusal> {
         }
     }
     Ok(())
-}
-/// `io.authorities` (determinism.md, Authority grants): each name, its provider's
-/// settings and floor, for a log a directory inside a writable mount that no other
-/// authority's directory contains or is contained by, and for object storage a
-/// directory, or a bucket prefix, no other authority's contains or is contained by.
-fn authorities(io: &IoGrants, field: &str) -> Result<(), RunRefusal> {
-    let mut logs: Vec<(&str, &str)> = vec![];
-    let mut object_scopes: Vec<((&str, &str), &str)> = vec![];
-    for (name, grant) in &io.authorities {
-        let at = format!("{field}.{name}");
-        if !name.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
-            || !name
-                .bytes()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-        {
-            return Err(invalid(
-                &at,
-                "name is lowercase ASCII letters and digits, starting with a letter",
-            ));
-        }
-        hirsel_store_authority::check(grant).map_err(|e| invalid(&at, &e.0))?;
-        if let (Some(mount), Some(path)) = (&grant.mount, &grant.path) {
-            if !io
-                .dirs
-                .iter()
-                .any(|m| m.path == *mount && m.access == hirsel_run_schema::Access::ReadWrite)
-            {
-                return Err(invalid(&at, "mount is not a granted writable directory"));
-            }
-            if !portable_path(path, false) {
-                return Err(invalid(&at, "path is a canonical relative directory"));
-            }
-            let nested = |a: &str, b: &str| a == b || b.starts_with(&format!("{a}/"));
-            if logs
-                .iter()
-                .any(|(m, p)| *m == mount && (nested(p, path) || nested(path, p)))
-            {
-                return Err(invalid(&at, "two authorities over one directory"));
-            }
-            logs.push((mount, path));
-        }
-        if let Some(scope) = object_scope(grant) {
-            let nested =
-                |a: &str, b: &str| a.is_empty() || a == b || b.starts_with(&format!("{a}/"));
-            if object_scopes
-                .iter()
-                .any(|(at, p)| *at == scope.0 && (nested(p, scope.1) || nested(scope.1, p)))
-            {
-                return Err(invalid(&at, "two authorities over one object prefix"));
-            }
-            object_scopes.push(scope);
-        }
-    }
-    Ok(())
-}
-/// Where an `authority.objects@1` grant keeps its objects outside the run: a
-/// directory (`objects.dir@1`, scope `("", "")`) or a bucket on an endpoint
-/// (`objects.s3@1`), with the path or key prefix inside it. A simulated bucket
-/// has none.
-fn object_scope(grant: &hirsel_run_schema::AuthorityGrant) -> Option<((&str, &str), &str)> {
-    let entry = grant.objects.as_ref()?;
-    let text = |m: &str| entry.get(m).and_then(|v| v.as_str());
-    match hirsel_store_authority::objects_provider(grant)? {
-        "objects.dir@1" => Some((("", ""), text("path")?.trim_end_matches('/'))),
-        "objects.s3@1" => Some((
-            (text("endpoint")?.trim_end_matches('/'), text("bucket")?),
-            text("prefix").unwrap_or(""),
-        )),
-        _ => None,
-    }
 }
 /// Whether every provider of one `io` grant set, at `field`, is supported.
 fn supported_io(io: &IoGrants, field: &str) -> Result<(), RunRefusal> {
@@ -1226,25 +1063,6 @@ fn supported_providers(record: &RunConfig) -> Result<(), RunRefusal> {
     }
     if let Some(io) = &record.io {
         supported_io(io, "io")?;
-        for runner in &io.runners {
-            if !matches!(
-                ProviderContract::parse(&runner.provider),
-                Some(
-                    ProviderContract::RunnerLocalThreads
-                        | ProviderContract::RunnerSim
-                        | ProviderContract::RunnerRemoteTls
-                )
-            ) {
-                return Err(unsupported("io.runners.provider"));
-            }
-            if let Some(grants) = &runner.grants {
-                supported_io(grants, "io.runners.grants")?;
-                // A callee run captures no telemetry of its own.
-                if grants.telemetry.is_some() {
-                    return Err(unsupported("io.runners.grants.telemetry"));
-                }
-            }
-        }
     }
     if let Some(code) = record.admission.as_ref().and_then(|a| a.code.as_ref())
         && !matches!(

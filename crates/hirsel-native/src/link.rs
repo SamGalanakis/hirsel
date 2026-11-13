@@ -707,16 +707,12 @@ pub enum LaunchKind {
     Zero,
     Main(Vec<hirsel_run_config::Root>),
     Test,
-    Call {
-        roots: Vec<hirsel_run_config::Root>,
-        decoder: String,
-    },
 }
 impl LaunchKind {
     pub fn roots(&self) -> &[hirsel_run_config::Root] {
         match self {
             Self::Zero => &[],
-            Self::Main(roots) | Self::Call { roots, .. } => roots,
+            Self::Main(roots) => roots,
             Self::Test => &[hirsel_run_config::Root::Test],
         }
     }
@@ -768,9 +764,6 @@ fn entry_result(
         definition: Some(entry.clone()),
         ..NativeError::new(StageName::Launch, format!("the entry contract: {what}"))
     };
-    if let Some(LaunchKind::Call { decoder, .. }) = program.launches.get(entry) {
-        return Ok((decoder.clone(), 1, false));
-    }
     let instance = program
         .functions
         .get(entry)
@@ -1306,7 +1299,6 @@ pub fn fixture_run_record(
     let mut record =
         hirsel_run_config::RunConfig::for_program(revision, hirsel_run_schema::LaunchKind::Main);
     record.inputs = program.launch.clone();
-    record.inputs.fault_seed = fixture.fault_seed;
     record.inputs.fixture_monotonic = fixture
         .process
         .as_ref()
@@ -1364,8 +1356,6 @@ pub fn fixture_run_record(
                 }),
         ),
         signals: fixture.signals.clone(),
-        runners: fixture.runners.clone(),
-        authorities: fixture.authorities.clone(),
         telemetry: Some(hirsel_run_schema::TelemetryGrant {
             provider: P::TelemetryNull.name().into(),
             seed: Some(0),
@@ -1614,7 +1604,6 @@ fn launcher_object_with_seed(
     let target = &program.target;
     let kind = &program.launches[entry];
     let roots = kind.roots();
-    let call_entry = matches!(kind, LaunchKind::Call { .. });
     let parameters = roots.iter().map(|_| ", ptr").collect::<String>();
     let mut loads = String::new();
     let mut arguments = String::new();
@@ -1625,34 +1614,17 @@ fn launcher_object_with_seed(
         ));
         arguments.push_str(&format!(", ptr %root{index}"));
     }
-    let callee_report = super::exit_report::Report {
-        declarations: String::new(),
-        nodes: vec![hirsel_cranelift::ReportNode::default()],
-        offset: 0,
-        root: 0,
-        result: hirsel_lir::layout_types::LayoutId(0),
-        return_kind: 1,
-        success_offset: 0,
-    };
-    let report = if call_entry {
-        &callee_report
-    } else {
-        program.exit_reports.get(entry).ok_or_else(|| {
-            NativeError::new(StageName::Launch, "missing checked exit-report description")
-        })?
-    };
+    let report = program.exit_reports.get(entry).ok_or_else(|| {
+        NativeError::new(StageName::Launch, "missing checked exit-report description")
+    })?;
     let return_kind = report.return_kind;
     let success_offset = report.success_offset;
     let report_declarations = &report.declarations;
     let report_root = report.root;
     let report_offset = report.offset;
-    let result_index = if call_entry {
-        0
-    } else {
-        registry
-            .index(report.result)
-            .ok_or_else(|| NativeError::new(StageName::Launch, "missing entry-result descriptor"))?
-    };
+    let result_index = registry
+        .index(report.result)
+        .ok_or_else(|| NativeError::new(StageName::Launch, "missing entry-result descriptor"))?;
     let caller_parameters = if caller_site { ", i64, i64" } else { "" };
     let caller_arguments = if caller_site { ", i64 0, i64 0" } else { "" };
     let report_branch = if return_kind == 1 {
@@ -1660,16 +1632,7 @@ fn launcher_object_with_seed(
     } else {
         " %tag = load i32, ptr %out, align 1\n %error = icmp eq i32 %tag, 1\n br i1 %error, label %report, label %done".to_owned()
     };
-    let declaration = if call_entry {
-        format!(
-            r#"declare i8 @"{symbol}"(ptr)
-define private i8 @hirsel.entry(ptr %ctx, ptr %dest, ptr %out, ptr %roots) {{
- %s = call i8 @"{symbol}"(ptr %ctx)
- store i8 0, ptr %out, align 1
- ret i8 %s
-}}"#
-        )
-    } else {
+    let declaration = {
         format!(
             r#"{report_declarations}
 declare void @hirsel_rt_v2_exit_report(ptr, ptr, i32, i64, ptr)
@@ -1700,9 +1663,7 @@ done:
             "missing checked semantic program revision",
         )
     })?;
-    let launch = if call_entry {
-        hirsel_run_schema::LaunchKind::Call
-    } else if *kind == LaunchKind::Test {
+    let launch = if *kind == LaunchKind::Test {
         hirsel_run_schema::LaunchKind::Test
     } else {
         hirsel_run_schema::LaunchKind::Main
@@ -1776,31 +1737,8 @@ done:
     // The code identities a stored callable can hold, from unit summaries, which
     // cached units retain: a closure body's `X` (its FnAbi has an environment) and the
     // function-ref thunk of each escaping definition. These diagnostic relocations do
-    // not extend the RUN-3 entries table.
+    // not extend the callable identity table.
     let value_codes = launcher_value_codes(program);
-    let callee_facts = program
-        .callee_facts
-        .as_ref()
-        .map(hirsel_rt::program::CalleeMetadata::json);
-    let callee_identity = program.callee_facts.as_ref().map_or([0; 32], |facts| {
-        hirsel_rt::program::callee_metadata_identity(&revision.digest(), facts)
-    });
-    let entries: Vec<&(String, String)> = program.entries.iter().collect();
-    let callee_rows: Vec<(usize, &(String, String))> = entries
-        .iter()
-        .copied()
-        .enumerate()
-        .filter(|(_, (_, path))| {
-            program
-                .callee_facts
-                .as_ref()
-                .is_some_and(|facts| facts.facts.contains_key(path))
-        })
-        .collect();
-    let callee_codes: Vec<_> = callee_rows
-        .iter()
-        .map(|(_, (thunk, path))| (thunk.clone(), path.as_bytes().to_vec()))
-        .collect();
     // The launcher object comes from the backend that emitted the program's objects, so a
     // Cranelift build never runs LLVM.
     let main = if cranelift_objects(objects) {
@@ -1819,13 +1757,6 @@ done:
             F::U64(name.len() as u64),
             F::Inline(revision.digest().to_vec()),
             F::Inline(config_bytes),
-            F::Entries(
-                entries
-                    .iter()
-                    .map(|(thunk, path)| (thunk.clone(), path.as_bytes().to_vec()))
-                    .collect(),
-            ),
-            F::U64(entries.len() as u64),
             F::U64(return_kind),
             F::U64(success_offset),
             F::Entries(
@@ -1835,18 +1766,6 @@ done:
                     .collect(),
             ),
             F::U64(value_codes.len() as u64),
-            match &callee_facts {
-                Some(text) => F::Bytes(text.as_bytes().to_vec()),
-                None => F::U64(0),
-            },
-            F::U64(callee_facts.as_ref().map_or(0, |text| text.len() as u64)),
-            if callee_codes.is_empty() {
-                F::U64(0)
-            } else {
-                F::Entries(callee_codes.clone())
-            },
-            F::U64(callee_codes.len() as u64),
-            F::Inline(callee_identity.to_vec()),
         ];
         let words: Vec<u64> = roots.iter().map(|r| root_index(*r) as u64).collect();
         let report = hirsel_cranelift::ExitReport {
@@ -1856,12 +1775,7 @@ done:
             root: report_root,
             nodes: report.nodes.clone(),
         };
-        let emit = if call_entry {
-            hirsel_cranelift::named_callee_launch_object
-        } else {
-            hirsel_cranelift::named_launch_object
-        };
-        emit(
+        hirsel_cranelift::named_launch_object(
             main_symbol,
             target,
             &symbol,
@@ -1879,30 +1793,6 @@ done:
                 .join(", ")
         };
         let text: String = table.iter().map(|b| format!("\\{b:02X}")).collect();
-        // Each Entry row: its function-reference thunk and its definition's full path. Rows
-        // sharing a thunk (one runner main for several place heads) declare it once.
-        let mut entry_ir = String::new();
-        let mut rows = Vec::new();
-        let mut declared = std::collections::BTreeSet::new();
-        for (index, (thunk, path)) in entries.iter().enumerate() {
-            entry_ir.push_str(&format!(
-                "@hirsel.entry.path.{index} = private constant [{} x i8] [{}]\n",
-                path.len(),
-                bytes(path.as_bytes())
-            ));
-            if declared.insert(thunk) {
-                entry_ir.push_str(&format!("declare void @\"{thunk}\"()\n"));
-            }
-            rows.push(format!(
-                "{{ ptr, ptr, i64 }} {{ ptr @\"{thunk}\", ptr @hirsel.entry.path.{index}, i64 {} }}",
-                path.len()
-            ));
-        }
-        entry_ir.push_str(&format!(
-            "@hirsel.entries = private constant [{} x {{ ptr, ptr, i64 }}] [{}]\n",
-            rows.len(),
-            rows.join(", ")
-        ));
         let mut code_ir = String::new();
         let mut code_rows = Vec::new();
         for (index, code) in value_codes.iter().enumerate() {
@@ -1912,10 +1802,7 @@ done:
                 bytes(code.as_bytes())
             ));
             let declaration = format!("@\"{code}\"(");
-            if code != &symbol
-                && !entry_ir.contains(&declaration)
-                && !report_declarations.contains(&declaration)
-            {
+            if code != &symbol && !report_declarations.contains(&declaration) {
                 code_ir.push_str(&format!("declare void @\"{code}\"()\n"));
             }
             code_rows.push(format!(
@@ -1928,39 +1815,14 @@ done:
             code_rows.len(),
             code_rows.join(", ")
         ));
-        let mut callee_ir = String::new();
-        let callee_facts_pointer = if let Some(text) = &callee_facts {
-            callee_ir.push_str(&format!(
-                "@hirsel.callee.facts = private constant [{} x i8] [{}]\n",
-                text.len(),
-                bytes(text.as_bytes())
-            ));
-            "@hirsel.callee.facts"
-        } else {
-            "null"
-        };
-        let callee_rows: Vec<_> = callee_rows.iter()
-            .map(|(index, (thunk, path))| format!(
-                "{{ ptr, ptr, i64 }} {{ ptr @\"{thunk}\", ptr @hirsel.entry.path.{index}, i64 {} }}", path.len()))
-            .collect();
-        let callee_code_pointer = if callee_rows.is_empty() {
-            "null"
-        } else {
-            callee_ir.push_str(&format!(
-                "@hirsel.callee.codes = private constant [{} x {{ ptr, ptr, i64 }}] [{}]\n",
-                callee_rows.len(),
-                callee_rows.join(", ")
-            ));
-            "@hirsel.callee.codes"
-        };
         let program_ir = format!(
             "@hirsel.failure.table = private constant [{table_len} x i8] c\"{text}\"\n\
              @hirsel.entry.name = private constant [{name_len} x i8] [{name_bytes}]\n\
-             {entry_ir}{code_ir}{callee_ir}\
-             @hirsel.program = private constant {{ i32, i32, i32, i32, ptr, i64, ptr, ptr, i64, ptr, i64, [32 x i8], [56 x i8], ptr, i64, i64, i64, ptr, i64, ptr, i64, ptr, i64, [32 x i8] }} \
+             {code_ir}\
+             @hirsel.program = private constant {{ i32, i32, i32, i32, ptr, i64, ptr, ptr, i64, ptr, i64, [32 x i8], [56 x i8], i64, i64, ptr, i64 }} \
              {{ i32 {abi}, i32 {flags}, i32 {roots_mask}, i32 {layout_count}, ptr @hirsel.entry, i64 {result_size}, \
              ptr @\"{registry_symbol}\", ptr @hirsel.failure.table, i64 {table_len}, ptr @hirsel.entry.name, i64 {name_len}, \
-             [32 x i8] [{digest}], [56 x i8] [{config}], ptr @hirsel.entries, i64 {entry_count}, i64 {return_kind}, i64 {success_offset}, ptr @hirsel.value.codes, i64 {value_code_count}, ptr {callee_facts_pointer}, i64 {callee_facts_length}, ptr {callee_code_pointer}, i64 {callee_code_count}, [32 x i8] [{callee_digest}] }}\n\
+             [32 x i8] [{digest}], [56 x i8] [{config}], i64 {return_kind}, i64 {success_offset}, ptr @hirsel.value.codes, i64 {value_code_count} }}\n\
              declare i32 @hirsel_rt_v2_main(ptr, i32, ptr)\n",
             table_len = table.len(),
             name_len = name.len(),
@@ -1970,11 +1832,7 @@ done:
             registry_symbol = registry.symbol(),
             digest = bytes(&revision.digest()),
             config = bytes(&config_bytes),
-            entry_count = entries.len(),
             value_code_count = value_codes.len(),
-            callee_facts_length = callee_facts.as_ref().map_or(0, |text| text.len()),
-            callee_code_count = callee_codes.len(),
-            callee_digest = bytes(&callee_identity),
         );
         let shim = format!(
             "target triple = \"{}\"\n{registry_declaration}\n{declaration}\n{program_ir}declare ptr @signal(i32, ptr)\ndefine i32 @{main_symbol}(i32 %argc, ptr %argv) {{\n %old_sigpipe = call ptr @signal(i32 13, ptr inttoptr (i64 1 to ptr))\n %r = call i32 @hirsel_rt_v2_main(ptr @hirsel.program, i32 %argc, ptr %argv)\n ret i32 %r\n}}\n",
@@ -2386,39 +2244,22 @@ fn write_link_objects(
     // The objects are the actual linked closure, including cached units and
     // generated registrations. A runtime feature's direct provider reference
     // must be present here, so a missing provider fails in the linker.
-    let runners = !program.entries.is_empty()
-        || !program.foreign_links.is_empty()
-        || objects.iter().flat_map(|o| &o.imports).any(|import| {
-            import.kind == hirsel_lir::stage::ObjectSymbolKind::Foreign
-                || import.name.contains("_runner_")
-                || import.name.ends_with("_runner")
-        });
-    let root = if runners {
-        "@hirsel.runtime.runners.provider = external constant i8\n\
-         @hirsel.runtime.runners = hidden constant ptr @hirsel.runtime.runners.provider\n"
-    } else {
-        "@hirsel.runtime.runners = hidden constant ptr null\n"
-    };
-    let tasks = runners
-        || objects.iter().flat_map(|o| &o.imports).any(|import| {
-            import.name.contains("_io_tasks")
-                || import.name.contains("_test_tasks")
-                || import.name.contains("_task_")
-                || import.name.contains("_cpu_")
-        });
+    let tasks = objects.iter().flat_map(|o| &o.imports).any(|import| {
+        import.name.contains("_io_tasks")
+            || import.name.contains("_test_tasks")
+            || import.name.contains("_task_")
+            || import.name.contains("_cpu_")
+    });
     let mut root = format!(
-        "{root}@hirsel.runtime.tasks = hidden constant i8 {}\n",
+        "@hirsel.runtime.tasks = hidden constant i8 {}\n",
         u8::from(tasks)
     );
     let imports = || objects.iter().flat_map(|o| &o.imports);
     // A standalone launch can select Free or grant an unused scripted world.
     // Their admission/recording behavior does not depend on a Tasks/Net projection.
-    let telemetry = runners
-        || imports().any(|i| {
-            i.name.contains("_telemetry")
-                || i.name.contains("_capture_")
-                || i.name.contains("_span_")
-        });
+    let telemetry = imports().any(|i| {
+        i.name.contains("_telemetry") || i.name.contains("_capture_") || i.name.contains("_span_")
+    });
     for (feature, selected) in [("free", true), ("script", true), ("telemetry", telemetry)] {
         if selected {
             root.push_str(&format!("@hirsel.runtime.{feature}.provider = external constant i8\n@hirsel.runtime.{feature} = hidden constant ptr @hirsel.runtime.{feature}.provider\n"));
@@ -2887,7 +2728,6 @@ pub fn launch_ownership(
         inherit: false,
         stdout: &mut stdout,
         stderr: &mut stderr,
-        place: None,
     });
     launch_impl(
         runnable,
@@ -3122,19 +2962,6 @@ fn launch_impl(
     if let Some(signals) = &fixture.signals {
         command.env("HIRSEL_RT_SIGNALS", serde_json::to_string(signals).unwrap());
     }
-    if !fixture.runners.is_empty() {
-        command.env(
-            "HIRSEL_RT_RUNNERS",
-            serde_json::to_string(&fixture.runners).unwrap(),
-        );
-        command.env(
-            "HIRSEL_RT_CALLEES",
-            hirsel_run_schema::callees_json(&fixture.callees),
-        );
-    }
-    if let Some(seed) = fixture.fault_seed {
-        command.env("HIRSEL_RT_FAULT_SEED", seed.to_string());
-    }
     if let Some(env) = &fixture.env {
         command.env("HIRSEL_RT_ENV", serde_json::to_string(env).unwrap());
     }
@@ -3165,12 +2992,6 @@ fn launch_impl(
             revocations,
         } => {
             if let Some(live) = &live {
-                if let Some(link) = live.place {
-                    use std::os::fd::AsRawFd;
-                    command
-                        .arg("--hirsel-place")
-                        .arg(link.as_raw_fd().to_string());
-                }
                 if let Some(path) = record {
                     // Observer controls belong to the host launcher, outside the
                     // admitted program environment and all replay inputs.
@@ -3227,21 +3048,6 @@ fn launch_impl(
     let output = match live {
         Some(live) => {
             let (mut process, _hold) = process(runnable, target, toolchain, &tooling, &command)?;
-            if let Some(link) = live.place {
-                use std::os::fd::AsRawFd;
-                use std::os::unix::process::CommandExt;
-                let fd = link.as_raw_fd();
-                // SAFETY: only the async-signal-safe fcntl runs between fork and exec; it
-                // keeps the link, and no other descriptor, open across exec in the child.
-                unsafe {
-                    process.pre_exec(move || {
-                        if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                        Ok(())
-                    });
-                }
-            }
             let observed = live
                 .run
                 .signals_grant()
@@ -3482,9 +3288,6 @@ pub struct LiveRun<'a> {
     pub inherit: bool,
     pub stdout: &'a mut dyn std::io::Write,
     pub stderr: &'a mut dyn std::io::Write,
-    /// A served place's head: the runner host's end of its link, which the head inherits
-    /// as `--hirsel-place <fd>`.
-    pub place: Option<std::os::fd::BorrowedFd<'a>>,
 }
 
 /// A user's server runs until it exits or is interrupted; harness timeouts remain tooling.

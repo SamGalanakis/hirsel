@@ -295,7 +295,6 @@ fn request_key(request: &NativeRequest, _: NativePurpose) -> Result<ContentHash,
             passes.flat_walk,
             passes.scoped_specialization,
             super::native_bootstrap::discharge_rows(&passes.discharge),
-            &passes.places,
         ),
         request.run.as_ref().map(|run| run.identity()),
         request

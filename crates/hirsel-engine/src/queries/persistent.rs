@@ -875,7 +875,6 @@ pub(super) struct FrozenMode {
         Arc<Reads>,
         Arc<parallel::OrderedSignatureReads>,
     )>,
-    pub(super) table_keys: Option<Arc<crate::table_keys::TableKeyUse>>,
     /// The package lint's facts of the checked body, under `signature`.
     pub(super) dead_arms: Option<crate::tools::DeadArmUse>,
 }
@@ -911,7 +910,6 @@ pub(super) fn restore_frozen_mode(
     if !roots.iter().all(|id| types.get(*id).is_some()) || !record.valid(&syntax) {
         return None;
     }
-    let mut table_keys = None;
     let mut dead_arms = None;
     let checked = record.checked.map(|checked| {
         let typed = TypedBody {
@@ -921,7 +919,6 @@ pub(super) fn restore_frozen_mode(
             unit: checked.unit,
             boolean: checked.boolean,
         };
-        table_keys = Some(Arc::new(crate::table_keys::TableKeyUse::capture(&typed)));
         dead_arms = Some(super::dead_arms::body_use(types, signature, &typed));
         let (summary, growth) = summarize(types, &typed);
         (
@@ -959,7 +956,6 @@ pub(super) fn restore_frozen_mode(
             diagnostic_phases: record.phases,
         },
         checked,
-        table_keys,
         dead_arms,
     })
 }

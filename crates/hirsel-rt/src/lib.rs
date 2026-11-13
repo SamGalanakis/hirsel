@@ -14,7 +14,6 @@
 #[cfg(all(test, not(feature = "tsan")))]
 hirsel_guard::install!(crate::io_real::borrowed_net_tests::Count: crate::io_real::borrowed_net_tests::Count);
 
-pub mod authority;
 mod base64;
 mod continuation;
 mod deadlines;
@@ -65,7 +64,6 @@ pub mod process;
 pub mod program;
 pub mod readiness;
 pub mod runner;
-pub mod runners;
 mod runtime_roots;
 pub mod signals;
 mod standalone;
@@ -108,7 +106,6 @@ pub mod measurement;
 mod memcheck;
 pub mod multicore_policy;
 pub mod ordered;
-mod recorders;
 pub mod region;
 pub mod release;
 mod remote;
@@ -122,7 +119,6 @@ mod slots;
 pub mod stop;
 mod sync;
 pub mod tape_binary;
-pub mod tape_links;
 mod tape_wire;
 pub mod tasks;
 mod trace_events;

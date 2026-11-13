@@ -25,8 +25,6 @@ pub const HIGHER_ORDER: &[&str] = &[
     "task.scope",
     "task.scope_until",
     "task.isolate",
-    "runner.apply",
-    "runner.apply_mut",
     "mutex.with",
 ];
 

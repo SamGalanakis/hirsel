@@ -8,7 +8,6 @@ rust-version.workspace = true
 [dependencies]
 libc = "0.2"
 hirsel-run-schema = { path = "../hirsel-run-schema" }
-hirsel-store-authority = { path = "../hirsel-store-authority" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_path_to_error = "=0.1.20"

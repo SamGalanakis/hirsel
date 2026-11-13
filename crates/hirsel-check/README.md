@@ -393,14 +393,6 @@ capture-bearing source row. It
 substitutes the declared callable contract rather than copying receiving promises.
 Missing context or an undetermined parameter reports LANG-2 naming the parameter.
 
-RUN-3: where `Entry[F]` is expected, a path naming a non-generic, non-extern, complete
-top-level function forms an entry when the definition has F's shape and stays within F's
-allocation contract and `uses`. The entry is typed `Entry[F']`, F with the definition's
-parameter and result types, so a generic call infers its actuals from it; a written F
-spells default effects, which a definition's derived evidence never equals. Any other
-expression there, and a generic definition, is RUN-3 at the expression. A call argument
-whose template is an Entry gets its unknown generics as fresh inference variables before
-the argument is checked. It lowers to the existing FunctionReference.
 Callable binding annotations keep the declared parameter/result header, including
 omitted mode defaults, separately from the initializer's actual callable. Receipt
 checks cannot silently inherit stronger uniqueness or locality promises.
@@ -409,8 +401,3 @@ Repeat-literal elements receive the expected sequence element type through
 ordinary `copy` expressions. Their one-element desugaring defers Inline length
 agreement to O, which has the evaluated count; ordinary literal lengths remain
 checked by H.
-
-STORE-6: typed-table calls and specialized function values reject a key descriptor
-containing Map, Set or Simd, including inactive arms. The check inspects the
-schema, so phantom arguments do not impose a key restriction on values they do
-not represent. Program-level wrapper obligations are discharged by the engine.

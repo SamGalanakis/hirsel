@@ -266,10 +266,9 @@ uint8_t hirsel_rt_v2_recorder_take(hirsel_rt_v2_ctx*, const uint64_t*, uint8_t*)
 uint8_t hirsel_rt_v2_thaw_turn(hirsel_rt_v2_ctx*, uint8_t*, hirsel_rt_v2_header*);
 /* task.check_canceled (CONC-3): 0, or 1 + the CancelCause ordinal. */
 uint8_t hirsel_rt_v2_task_canceled(hirsel_rt_v2_ctx*, uint32_t*, const uint64_t*);
-/* task.isolate and runner.apply (FAIL-2): the caught chain, record by record; the program
+/* task.isolate (FAIL-2): the caught chain, record by record; the program
    descriptor carries the failure table of site positions and rule IDs. */
 uint8_t hirsel_rt_v2_isolate_begin(hirsel_rt_v2_ctx*, uint64_t*, const uint64_t*);
-uint8_t hirsel_rt_v2_apply_begin(hirsel_rt_v2_ctx*, uint64_t*);
 uint8_t hirsel_rt_v2_isolate_end(hirsel_rt_v2_ctx*);
 uint8_t hirsel_rt_v2_isolate_count(hirsel_rt_v2_ctx*, uint64_t*);
 uint8_t hirsel_rt_v2_isolate_kind(hirsel_rt_v2_ctx*, uint32_t*, uint64_t);
@@ -278,55 +277,6 @@ uint8_t hirsel_rt_v2_isolate_definition(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_s
 uint8_t hirsel_rt_v2_isolate_line(hirsel_rt_v2_ctx*, uint64_t*, uint64_t);
 uint8_t hirsel_rt_v2_isolate_column(hirsel_rt_v2_ctx*, uint64_t*, uint64_t);
 uint8_t hirsel_rt_v2_isolate_spawn(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_header**, uint64_t);
-/* Runners (RUN-1..12): runner handles, the places' contracts and the callee runs of sent
-   calls; an entry is its definition's code word and the static empty environment. */
-uint8_t hirsel_rt_v2_io_runner(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*, hirsel_rt_v2_header*, uint64_t, uint64_t);
-uint8_t hirsel_rt_v2_test_runner(hirsel_rt_v2_ctx*, void*, uint64_t*, const uint64_t*);
-uint8_t hirsel_rt_v2_runner_grants(hirsel_rt_v2_ctx*, uint64_t*, const uint64_t*);
-uint8_t hirsel_rt_v2_runner_narrow(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*, const uint8_t*);
-uint8_t hirsel_rt_v2_runner_only(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*, hirsel_rt_v2_header*);
-/* EntryId: path, fingerprint and code, three slices. */
-uint8_t hirsel_rt_v2_runner_entry_id(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_slice*, const uintptr_t*);
-uint8_t hirsel_rt_v2_runner_send(hirsel_rt_v2_ctx*, uint64_t*, const uint64_t*, const uintptr_t*, hirsel_rt_v2_header*, uint64_t, uint64_t, const void*, const void*, uint64_t);
-uint8_t hirsel_rt_v2_runner_wait(hirsel_rt_v2_ctx*, uint64_t*, uint64_t);
-uint8_t hirsel_rt_v2_runner_take(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_slice*, uint64_t);
-uint8_t hirsel_rt_v2_runner_entry(hirsel_rt_v2_ctx*, void*, uintptr_t*);
-uint8_t hirsel_rt_v2_runner_argument(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_slice*);
-uint8_t hirsel_rt_v2_runner_io(hirsel_rt_v2_ctx*, void*, uint64_t*);
-uint8_t hirsel_rt_v2_runner_reply(hirsel_rt_v2_ctx*, uint64_t, hirsel_rt_v2_header*, uint64_t, uint64_t);
-/* db@1 places: Inbox and Arrival are handles; an Arrived image is 224 bytes, a CallEnd 32,
-   and inbox.take's Option[List[Arrival]] is a list block whose null is None. */
-uint8_t hirsel_rt_v2_io_inbox(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_handle_result*, const uint64_t*);
-uint8_t hirsel_rt_v2_inbox_take(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_header**, const uint64_t*, uint8_t);
-uint8_t hirsel_rt_v2_arrival_request(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*);
-uint8_t hirsel_rt_v2_arrival_end(hirsel_rt_v2_ctx*, const uint64_t*, const void*);
-uint8_t hirsel_rt_v2_place_send(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*, const uint32_t*, const uintptr_t*, hirsel_rt_v2_header*, uint64_t, uint64_t);
-/* The store authority seam: Authority and Claim are handles, a Level is a value word;
-   provider results are the Result[_, SeamError] images (64 bytes) and Advanced (24).
-   An ObjectRef is its lifetime, epoch and digest Bytes (40 bytes, a List's element). */
-typedef struct { uint64_t lifetime, epoch; hirsel_rt_v2_slice digest; } hirsel_rt_v2_object_ref;
-uint8_t hirsel_rt_v2_io_authority(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_handle_result*, const uint64_t*, hirsel_rt_v2_header*, uint64_t, uint64_t);
-uint8_t hirsel_rt_v2_authority_levels(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_header**, const uint64_t*);
-uint8_t hirsel_rt_v2_authority_level(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_handle_result*, const uint64_t*, hirsel_rt_v2_header*, uint64_t, uint64_t);
-uint8_t hirsel_rt_v2_authority_floor(hirsel_rt_v2_ctx*, void*, uint64_t*, const uint64_t*);
-uint8_t hirsel_rt_v2_authority_max_entry(hirsel_rt_v2_ctx*, uint64_t*, const uint64_t*);
-uint8_t hirsel_rt_v2_level_name(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_slice*, const uint64_t*);
-uint8_t hirsel_rt_v2_level_narrow(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_handle_result*, const uint64_t*, const uint64_t*);
-uint8_t hirsel_rt_v2_claim_end(hirsel_rt_v2_ctx*, uint64_t*, const uint64_t*);
-uint8_t hirsel_rt_v2_claim_narrow(hirsel_rt_v2_ctx*, void*, hirsel_rt_v2_handle_result*, const uint64_t*, uint64_t*);
-uint8_t hirsel_rt_v2_authority_claim(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*);
-uint8_t hirsel_rt_v2_authority_submit(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*, uint64_t*, hirsel_rt_v2_header*, uint64_t, uint64_t, hirsel_rt_v2_header*, hirsel_rt_v2_header*, const uint64_t*);
-uint8_t hirsel_rt_v2_authority_wait(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*, uint64_t*, uint64_t);
-uint8_t hirsel_rt_v2_authority_durable(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*, uint64_t*, const uint64_t*);
-uint8_t hirsel_rt_v2_authority_last(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*, const uint64_t*);
-uint8_t hirsel_rt_v2_authority_locate(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*, uint64_t*, uint64_t);
-uint8_t hirsel_rt_v2_authority_at(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*, hirsel_rt_v2_header*, uint64_t, uint64_t, uint64_t, const uint64_t*, uint64_t);
-uint8_t hirsel_rt_v2_authority_read(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*, uint64_t, const uint64_t*, uint64_t);
-uint8_t hirsel_rt_v2_authority_get(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*, const hirsel_rt_v2_object_ref*);
-uint8_t hirsel_rt_v2_authority_put(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*, uint64_t*, const hirsel_rt_v2_object_ref*, hirsel_rt_v2_header*, uint64_t, uint64_t);
-uint8_t hirsel_rt_v2_authority_select(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*, uint64_t*, uint64_t, hirsel_rt_v2_header*, uint64_t, uint64_t);
-uint8_t hirsel_rt_v2_authority_base(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*);
-uint8_t hirsel_rt_v2_authority_reclaim(hirsel_rt_v2_ctx*, void*, void*, const uint64_t*, uint64_t*, uint64_t);
 #ifdef __cplusplus
 }
 #endif

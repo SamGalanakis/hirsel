@@ -55,16 +55,7 @@ storage, projections, joins, erased values and captures. Calls and closure entri
 must match the linked body's nonretaining contract. A generic parameter that merely
 specializes to a callable does not acquire a new source promise.
 
-This proof transport retains the existing counted heap environment and cleanup.
-The scalar `invoke(fn() { n })` control still allocates and frees one environment;
-the zero-allocation CLO-1 guarantee above remains an implementation cost gap.
-No placement or reference-count elimination consumes this metadata. A per-unit
-receipt is not a complete module qualification; unknown indirect entry contracts
-remain unqualified while source acceptance keeps its heap baseline. Direct-capture
-elimination, distinct scoped data-pointer entries/adapters, dynamic frame extents,
-stale-generation checking and the associated owner/failure/native cost gates are
-separate future work. Unknown operations and bodyless retaining boundaries supply
-no nonretention proof. See [the implementation contract](scoped-transport.md).
+
 
 ### CLO-2: Transparent
 

@@ -469,8 +469,6 @@ struct Prepared {
     entry: hirsel_engine::DefPath,
     reference: Observation,
     compiled_only: bool,
-    /// A run with runners: what the launcher found about each callee entry.
-    callees: std::collections::BTreeMap<String, hirsel_run_schema::CalleeFacts>,
     /// The program's Args: its cut's `[K, B]` for a swept case, else none.
     args: Vec<String>,
 }
@@ -479,7 +477,6 @@ impl Prepared {
     /// The case's fixture, with what the launcher found about its callees.
     fn fixture(&self, source: &str) -> hirsel_native::Fixture {
         hirsel_native::Fixture {
-            callees: self.callees.clone(),
             args: self.args.clone(),
             ..crate::fixture(source).unwrap()
         }
@@ -553,13 +550,11 @@ fn checked_with_config(
         return Err(format!("check: {:?}", output.completion));
     }
     let entry = input.entry.clone();
-    let mut callees = BTreeMap::new();
     let reference = if let Some(expected) = expected {
         crate::fixture(source)?;
         expected
     } else {
         let tir = input.tir().map_err(|error| format!("reference: {error}"))?;
-        callees = tir.callees.clone();
         let config = hirsel_engine::RunConfiguration {
             entry: entry.clone(),
             hash_seed: launch.hash_seed,
@@ -590,7 +585,6 @@ fn checked_with_config(
         entry,
         reference,
         compiled_only,
-        callees,
         args,
     })
 }

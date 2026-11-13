@@ -28,28 +28,6 @@ N fn instant.checked_add(clock: MonotonicClock, start: Instant of clock, nanosec
 N fn io.net(rt: Io) -> Result[Net, GrantError]
 N fn io.random(rt: Io) -> Result[Random, GrantError]
 N fn io.signals(rt: Io) -> Result[Signals, GrantError]
-N fn io.authority(rt: Io, name: String) -> Result[Authority, GrantError]
-fn authority.levels(a: Authority) -> List[Level of a]
-fn authority.level(a: Authority, name: String) -> Option[Level of a]
-fn authority.floor(a: Authority) -> Level of a
-fn level.name(l: Level) -> String
-fn level.narrow(a: Authority, l: Level) -> Option[Level of a]
-fn authority.max_entry(a: Authority) -> u64
-fn authority.claim(a: Authority) -> Result[Claim of a, SeamError]
-fn claim.end(c: Claim) -> u64
-fn claim.narrow(a: Authority, take c: Claim) -> Option[Claim of a]
-fn authority.submit(a: Authority, mut c: Claim of a, take entry: Bytes, created: List[ObjectRef], retired: List[ObjectRef], at: Level of a) -> Result[u64, SeamError]
-fn authority.wait(a: Authority, mut c: Claim of a, position: u64) -> Advanced
-fn authority.durable(a: Authority, mut c: Claim of a, at: Level of a) -> Result[u64, SeamError]
-fn authority.read(a: Authority, from: u64, at: Level of a, max: u64) -> Result[List[HistoryRecord], SeamError]
-fn authority.last(a: Authority, at: Level of a) -> Result[Bytes, SeamError]
-fn authority.locate(a: Authority, mut c: Claim of a, position: u64) -> Result[Bytes, SeamError]
-fn authority.at(a: Authority, l: Bytes, from: u64, at: Level of a, max: u64) -> Result[List[HistoryRecord], SeamError]
-fn authority.get(a: Authority, r: ObjectRef) -> Result[Option[Bytes], SeamError]
-fn authority.put(a: Authority, mut c: Claim of a, r: ObjectRef, take data: Bytes) -> Result[(), SeamError]
-fn authority.reclaim(a: Authority, mut c: Claim of a, budget: u64) -> Result[Reclaimed, SeamError]
-fn authority.select(a: Authority, mut c: Claim of a, first: u64, take boot: Bytes) -> Result[(), SeamError]
-fn authority.base(a: Authority) -> Result[List[HistoryRecord], SeamError]
 N fn signal.wait(s: Signals, kinds: List[SignalKind]) -> Result[SignalKind, SignalError]
 fn random.bytes(r: Random, count: u64) -> Result[Bytes, RandomError]
 N fn io.process(rt: Io) -> Result[Proc, GrantError]
@@ -252,13 +230,6 @@ fn iter.from[S, T](take state: S, take next: fn(mut S) -> Option[T]) -> Iter[T] 
 fn iter.next[T](mut it: Iter[T]) -> Option[T]
 
 // MODE-6
-// A Recorder is a local capability bound to the invocation that creates it. Append
-// borrows it and consumes one independently owned global inert event, recording it
-// or failing the run. Nothing reads, counts, clears or replaces its events; finish
-// consumes the recorder once no borrow of it remains and returns them in order.
-fn recorder.new[E: inert]() -> Recorder[E]
-fn recorder.append[E: inert](r: Recorder[E], take event: E) -> () uses {}
-fn recorder.finish[E: inert](take r: Recorder[E]) -> List[E] uses {}
 
 // SEM-1/2/3/5, GEN-2, MEM-8/9
 N fn int.widen[I, J](value: I) -> J
@@ -357,21 +328,3 @@ fn sorted_map.get[K, V: copyable](by: Order[K], m: SortedMap[K, V] of by, key: K
 fn sorted_map.remove[K, V](by: Order[K], mut m: unique SortedMap[K, V] of by, key: K) -> unique Option[V]
 N fn simd.splat[A, n: size](value: A) -> Simd[A, n]
 N fn simd.add[I, n: size](a: Simd[I, n], b: Simd[I, n]) -> Simd[I, n]
-
-// RUN-1..14, CAP-1/2, CONC-2/3/8, DET-1
-N fn io.runner(rt: Io, name: String) -> Result[Runner, GrantError]
-fn runner.grants(r: Runner) -> GrantSet
-fn runner.narrow(r: Runner, keep: GrantSet) -> Result[Runner, GrantError]
-fn runner.only(r: Runner, definitions: List[String]) -> Result[Runner, GrantError]
-fn runner.entry_id[F](f: Entry[F]) -> EntryId
-fn runner.apply[C, I, A: serializable, R: serializable, E: serializable](f: Entry[fn(c: C, call: I, a: A) -> Result[R, E]], c: C, call: I, a: A) -> Result[Result[R, E], Failure]
-fn runner.apply_mut[C, I, A: serializable, R: serializable, E: serializable](f: Entry[fn(mut c: C, call: I, a: A) -> Result[R, E]], mut c: C, call: I, a: A) -> Result[Result[R, E], Failure]
-fn runner.compute[A: serializable, R: serializable, E: serializable](r: Runner, f: Entry[fn(a: A) -> Result[R, E]], a: A) -> unique Result[R, RunError[E]]
-fn runner.call[A: serializable, R: serializable, E: serializable](r: Runner, f: Entry[fn(rt: Io, a: A) -> Result[R, E]], a: A) -> unique Result[R, RunError[E]]
-fn runner.spawn[A: serializable, R: serializable, E: serializable](s: Scope, r: Runner, f: Entry[fn(rt: Io, a: A) -> Result[R, E]], a: A) -> Task[Result[R, RunError[E]]] of s
-fn runner.send[F](r: Runner, form: CallForm, f: Entry[F], argument: Bytes) -> CallEnd
-N fn io.inbox(rt: Io) -> Result[Inbox, GrantError]
-fn inbox.take(mut i: Inbox, wait: bool) -> Option[List[Arrival]]
-fn arrival.request(a: Arrival) -> Arrived
-fn arrival.end(take a: Arrival, end: CallEnd) -> ()
-fn test.runner(t: Test) -> Runner

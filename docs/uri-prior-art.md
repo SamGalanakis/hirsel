@@ -23,10 +23,6 @@ manifest. Repeated absolute URLs in Zig's RFC parse group are retained.
 | 566–586 | file | zig-06-file |
 | 588–602 | scheme | zig-07-scheme |
 | 604–645 | authority | zig-08-authority |
-| 647–660 | authority.password | zig-09-authority-password |
-| 667–678 | authority.dns-names | zig-10-authority-dns-names |
-| 680–690 | authority.IPv4 | zig-11-authority-ipv4 |
-| 692–708 | authority.IPv6 | zig-12-authority-ipv6 |
 | 710–722 | RFC example 1 | zig-13-rfc-example-1 |
 | 724–736 | RFC example 2 | zig-14-rfc-example-2 |
 | 740–754 | Examples from wikipedia | zig-15-wikipedia |

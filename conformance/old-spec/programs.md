@@ -14,11 +14,7 @@ package, version, module and item path. Content digests identify revisions or ar
 never establish nominal type equality. One implementation revision is selected for each
 definition in a program. Two versions of a package define distinct types.
 
-**One revision per run.** A run executes the one revision selected when it starts, and
-nothing replaces a revision during a run. Code changes between runs: work that must
-outlive a change of code ends its run by committing its state as data, and a later run
-on the newer revision resumes from that data
-([STORE-18](storage.md#store-18-runs-at-a-place)).
+
 
 Core nominal roles use the compiler-supplied `core@1` definition paths: core types are
 rooted directly under `core@1`, and operations are `core@1/module.item`. A source file
@@ -171,11 +167,7 @@ renders e and exits 1. A bare `u8` is not an eligible entry return type. The sta
 a return value: normal cleanup and drops finish before the host exits; recording
 and replay reproduce the same status without a new capability effect or trait.
 
-A **call entry** (planned) is the callee of a runner call: any top-level definition an
-`Entry` names ([RUN-3](runners.md#run-3-entries)). It is launched as its own run with
-`launch` `call`, its argument from the run record's `call` member, its capabilities from
-the place's grants and admission at the place ([RUN-10](runners.md#run-10-callee-runs)).
-Its outcome is reported to its caller, not as an exit status or launch report.
+
 
 Both interpreted and native launchers use the same run outcome and exit policy:
 

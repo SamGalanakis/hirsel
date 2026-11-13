@@ -157,7 +157,6 @@ impl Fixture {
             signatures: self.signatures.clone(),
             semantic: self.semantic.clone(),
             selected: &self.selected,
-            callees: None,
         }
     }
 }

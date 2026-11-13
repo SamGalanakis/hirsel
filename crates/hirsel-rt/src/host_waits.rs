@@ -478,7 +478,6 @@ pub(crate) fn request_kind(request: &Request) -> &'static str {
         Request::ChildWait { .. } => "child.wait",
         Request::GroupWait { .. } => "proc.wait_group",
         Request::WatchNext { .. } => "watcher.next",
-        Request::RunnerCall(_) => "runner.call",
         _ => "provider request",
     }
 }
@@ -499,7 +498,6 @@ pub(crate) fn may_park(request: &Request) -> bool {
             | Request::ChildRead { .. }
             | Request::ChildWait { .. }
             | Request::GroupWait { .. }
-            | Request::RunnerCall(_)
             | Request::WatchNext { .. }
     ) || crate::net::is_net_request(request)
 }
@@ -887,18 +885,6 @@ pub(crate) unsafe fn await_sent(ctx: *mut TaskCtx, token: u64) -> Stopped<Comple
         Some(Err(error)) => Err(Stop::refusal(error)),
         None => crate::fault("a runner wait resumed without its completion"),
     }
-}
-
-/// Whether the parked request under `token` is a runner call.
-///
-/// # Safety
-/// The context and its binding are live.
-pub(crate) unsafe fn is_runner_call(ctx: *mut TaskCtx, token: u64) -> bool {
-    let binding = unsafe { Binding::get(ctx) };
-    matches!(
-        binding.waits.parked.get(&token).map(|p| &p.request),
-        Some(Request::RunnerCall(_))
-    )
 }
 
 /// Execute borrowed live network storage only when it completes without a wait,
@@ -1930,9 +1916,7 @@ unsafe fn poll_binding_observed(
     };
     // A request that already committed part of its effect completes with its own outcome;
     // a sent runner call waits for its callee's, a cancellation being forwarded (RUN-9).
-    let cause = cause.filter(|_| {
-        binding.adapter.cancellable(token) && !matches!(request, Request::RunnerCall(_))
-    });
+    let cause = cause.filter(|_| binding.adapter.cancellable(token));
     if cause.is_none() && !ready {
         return Ok(false);
     }

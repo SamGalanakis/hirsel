@@ -141,15 +141,7 @@ pub(crate) fn run_bound_output(
     bound: BoundHostRun,
     output: super::tool::Output<'_>,
     trace_events: Option<&Path>,
-    place: Option<std::os::fd::BorrowedFd<'_>>,
 ) -> Result<Result<RunOutcome, NativeError>, ToolError> {
-    // A served place's head is the one callee run natively: it serves its place's arrivals
-    // over `place`.
-    if place.is_none() && matches!(launch, HostLaunch::Callee { .. }) {
-        return Err(ToolError::Runtime(
-            "launch: a runner host runs its callees interpreted".into(),
-        ));
-    }
     if (bound.is_replay()
         || matches!(
             launch,
@@ -181,17 +173,6 @@ pub(crate) fn run_bound_output(
                 link::Tape::Live {
                     record,
                     revocations,
-                },
-            )
-        }
-        (BoundHostRunParts::Live(bound), HostLaunch::Callee { record, .. }) => {
-            hirsel_rt::host_launch::recording_level(bound.run(), record.is_some())
-                .map_err(|e| ToolError::Runtime(format!("launch: {e}")))?;
-            (
-                bound.into_run(),
-                link::Tape::Live {
-                    record,
-                    revocations: None,
                 },
             )
         }
@@ -233,7 +214,6 @@ pub(crate) fn run_bound_output(
                 inherit,
                 stdout,
                 stderr,
-                place,
             },
         )?;
         link::observe_request(&launched, input.observation, input.sources)

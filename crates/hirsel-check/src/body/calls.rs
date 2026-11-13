@@ -41,15 +41,6 @@ impl Checker<'_, '_> {
         mut function: FunctionType,
         expected: Option<TypeId>,
     ) -> Result<TypeId, QueryError> {
-        // RUN-3: a generic definition forms no entry.
-        if expected.and_then(|ty| self.entry_signature(ty)).is_some() {
-            self.report(
-                const { RuleId::of("RUN-3") },
-                self.span(id),
-                Self::ENTRY_FORMATION,
-            );
-            return Ok(self.error());
-        }
         let mut inferred = vec![None; function.generics.len()];
         if let Some(TypeKind::Function(wanted)) = expected.map(|ty| self.kind(ty))
             && wanted.generics.is_empty()
@@ -79,11 +70,6 @@ impl Checker<'_, '_> {
             }
         }
         let arguments: Vec<_> = inferred.into_iter().flatten().collect();
-        if let Some((_, ResolvedName::Definition(path))) = self.input_name(id).cloned()
-            && !self.table_key_arguments(id, &path, &arguments)?
-        {
-            return Ok(self.error());
-        }
         // As for direct calls, a borrowed local result may require Copyable
         // even when the declaration did not spell that bound explicitly.
         for (parameter, actual) in local_result_generics(self.types, &function)
@@ -594,33 +580,6 @@ impl Checker<'_, '_> {
         };
         if let Some(slot) = self.creation_callback_slot(call, index) {
             expected = expected.map(|t| self.preserving_callback(t, slot));
-        }
-        // RUN-3: an entry parameter is expected as an entry even before its
-        // type arguments are known, so a named definition forms an entry
-        // whose callable type then supplies them. Unknown ones are holes.
-        if expected.is_none()
-            && let Some(template) = template
-            && self.entry_signature(template).is_some()
-        {
-            let holes: Vec<_> = inferred
-                .iter()
-                .enumerate()
-                .map(|(i, a)| match (a, generics.get(i)) {
-                    (Some(a), _) => a.clone(),
-                    (None, Some(GenericParameter::Size { .. })) => GenericArgument::Size(
-                        Size::Parameter(SizeParameterRef::bound(SizeParamId(i as u32))),
-                    ),
-                    (None, _) => {
-                        let variable = TypeParameterRef::body(
-                            self.site(NameSite::Expression(arg)),
-                            TypeParamId(i as u32),
-                        );
-                        self.inference_variables.insert(variable);
-                        GenericArgument::Type(self.ty(TypeKind::Parameter(variable)))
-                    }
-                })
-                .collect();
-            expected = Some(self.substitute(template, &holes)?);
         }
         self.work
             .push(Work::AfterChild(After::CallArgument(call, index)));
@@ -1317,12 +1276,6 @@ impl Checker<'_, '_> {
         } else {
             hirsel_types::unique_rows::erase_result_parts(self.types, ty)
         };
-        if !bad
-            && let CallTarget::Definition(callee) = &target
-            && !self.table_key_arguments(id, callee, &args)?
-        {
-            bad = true;
-        }
         // GEN-6: a specialization binds its binders' members, so it takes only
         // the declaration's own leading generics.
         let target_args = match &target {

@@ -38,20 +38,7 @@ not replace an already attributed failure or its causes.
 
 ### FAIL-2: Boundary
 
-`task.isolate(tasks, body) -> Result[R, Failure]` is the only place a failure is caught,
-besides `arena.bounded` for its own `OutOfSpace`, `runner.apply` and `runner.apply_mut`,
-which return a failure of the entry they apply as `Error(failure)`
-([RUN-3](runners.md#run-3-entries)), and a runner call (planned), whose callee runs as a
-separate run: a failure that ends the callee run reaches the caller as the outcome
-`Faulted(failure)` ([RUN-6](runners.md#run-6-outcomes)) and never unwinds the caller. A
-store transaction's body is applied this way, so its failure discards its writes and is
-the transaction's outcome `Faulted(failure)` ([STORE-2](storage.md#store-2-transactions)).
-Elsewhere a failure propagates: a failed
-child cancels its siblings, the scope joins them, and the failure continues outward; with
-several, the first in spawn order is reported. `Failure` is `data`: its kind, rule ID,
-source site, the path of spawn indices and an optional boxed cause
-([core library](core-library.md#concurrency)). The site follows the failing operation
-and `@track_caller` attribution above, rather than the isolation boundary.
+
 
 `task.isolate` consumes its body closure, so destroying that closure and its captured
 resources is part of the isolated body. A failure during that destruction is caught:
@@ -60,16 +47,7 @@ the body returned successfully.
 
 ### FAIL-3: What runs
 
-A failure unwinds: frames are released as at scope exit, counted values are released,
-regions and arenas opened inside are freed, and resource drops are the only user code that
-runs. A failure inside a drop abandons that drop and still releases its fields; if the drop
-belongs to a type declared in a package marked `unsafe ffi`, the process ends instead.
-A failure inside the check of a checked serializable type
-([SER-1](serialization.md#ser-1-serializable-schemas)) is the failure of the decode that
-called it: the reconstructed value is released, and the failure unwinds from the decode
-like any other. Inside a store body it ends the body as any failure does (`Faulted`). A served call's argument is decoded
-by `store.serve` before the body starts, outside it, so a failure there unwinds
-`store.serve` itself.
+
 
 The primary failure stays primary; failures during later cleanup extend its ordered cause
 chain. Cleanup continues across siblings after a failure in one of them. Shielding

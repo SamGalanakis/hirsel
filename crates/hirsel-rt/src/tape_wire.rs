@@ -420,19 +420,13 @@ wire_enum!(crate::io::Request {
     105 => LocalAddr{ net, listener },
     106 => UnixConnect{ net, path },
     107 => UnixListen{ net, path },
-    108 => RunnerCall(v0),
-    109 => RunnerCancel{ key, cause },
-    110 => CallReturn(v0),
-    111 => Stopped,
     112 => Ready{ wait, points },
     113 => Schedule{ count, choice },
     114 => OpenAppend{ directory, path },
-    116 => RunnerPoll{ key, cancel },
     117 => ProcessTime{ from, to },
     118 => ProcessSettle{ canceled },
     119 => CpuControl{ width, action, count, outcome },
     120 => CpuSummary(v0),
-    121 => Seam(v0)
 } retired { 60 => "retired eager read_dir recording; re-record with streaming file.read_dir", 59 => "retired Request::Walk recording; re-record with streaming file.walk" });
 
 wire_enum!(crate::io::ClockError {
@@ -495,32 +489,12 @@ wire_enum!(crate::io::Completion {
     36 => GroupExit(v0),
     37 => Blocked{ committed },
     38 => Ready,
-    39 => Runner(v0),
     40 => View(v0),
     41 => Watch(v0),
     42 => Span{ handle, trace, span },
     43 => FileInput(v0),
     44 => Held,
-    45 => Seam(v0)
 });
-
-impl Wire for crate::authority::SeamRequest {
-    fn encode(&self, out: &mut Vec<u8>) {
-        self.to_bytes().encode(out);
-    }
-    fn decode(input: &mut Decode<'_>) -> Result<Self, String> {
-        Self::from_bytes(&Vec::<u8>::decode(input)?).ok_or_else(|| "bad seam request".into())
-    }
-}
-
-impl Wire for crate::authority::SeamCompletion {
-    fn encode(&self, out: &mut Vec<u8>) {
-        self.to_bytes().encode(out);
-    }
-    fn decode(input: &mut Decode<'_>) -> Result<Self, String> {
-        Self::from_bytes(&Vec::<u8>::decode(input)?).ok_or_else(|| "bad seam completion".into())
-    }
-}
 
 wire_struct!(crate::io::Fault { error, partial });
 
@@ -705,41 +679,6 @@ wire_enum!(crate::watch::WatchEvent {
 });
 
 wire_struct!(crate::process::Deadline { clock, ticks });
-
-wire_enum!(hirsel_run_schema::CallForm {
-    0 => Compute,
-    1 => Call,
-    2 => Transact,
-    3 => Query
-});
-
-wire_struct!(hirsel_run_schema::RunnerRequest {
-    runner,
-    form,
-    path,
-    grants,
-    definitions,
-    key,
-    digest,
-    argument
-});
-
-wire_enum!(hirsel_run_schema::CallOutcome {
-    0 => Ok(v0),
-    1 => Failed(v0),
-    2 => Faulted(v0),
-    3 => NotRun(v0),
-    4 => InDoubt(v0),
-    5 => Canceled(v0)
-});
-
-wire_struct!(hirsel_run_schema::RunnerCompletion { outcome, callee });
-
-wire_enum!(hirsel_run_schema::CalleeOutcome {
-    0 => Ok(v0),
-    1 => Err(v0),
-    2 => Failed(v0)
-});
 
 wire_struct!(hirsel_run_schema::ProcessRule { program, env });
 

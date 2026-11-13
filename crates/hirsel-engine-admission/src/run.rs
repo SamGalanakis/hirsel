@@ -19,9 +19,6 @@ pub fn entry_roots(
     signature: &Signature,
     launch: LaunchKind,
 ) -> Result<Vec<Root>, RunRefusal> {
-    if launch == LaunchKind::Call {
-        return callee_roots(t, signature);
-    }
     let invalid = |detail: &str| RunRefusal::Invalid {
         field: "entry".into(),
         detail: detail.into(),
@@ -83,58 +80,6 @@ pub fn entry_roots(
         return Err(invalid("parameters do not match the launch kind"));
     }
     Ok(roots)
-}
-
-/// Whether a definition has an entry's identity (RUN-3, RUN-8): a complete, non-generic,
-/// non-foreign function returning `Result`, the shape of every runner callee and of every
-/// entry `runner.apply` runs. Its references are what `runner.entry_id` names.
-pub fn identified_entry(t: &TypeInterner, signature: &Signature) -> bool {
-    let SignatureKind::Function(function) = &signature.kind else {
-        return false;
-    };
-    function.generics.is_empty()
-        && !function.incomplete
-        && function.foreign.is_none()
-        && matches!(
-            t.get(function.result).map(|t| &t.kind),
-            Some(TypeKind::Named { definition, .. })
-                if definition.path().package_is("core", "1")
-                    && definition.path().0.modules.is_empty()
-                    && definition.path().0.name == "Result"
-        )
-}
-
-/// The roots of a callee run's entry (RUN-3, RUN-10): a complete, monomorphic Hirsel
-/// function of any visibility taking its argument, after the place's `Io` for the call
-/// form, and returning a `Result`.
-pub fn callee_roots(t: &TypeInterner, signature: &Signature) -> Result<Vec<Root>, RunRefusal> {
-    let invalid = || RunRefusal::Invalid {
-        field: "entry".into(),
-        detail: "expected a runner entry: fn(a: A) or fn(rt: Io, a: A), returning a Result".into(),
-    };
-    let SignatureKind::Function(function) = &signature.kind else {
-        return Err(invalid());
-    };
-    if !function.generics.is_empty() || function.incomplete || function.foreign.is_some() {
-        return Err(invalid());
-    }
-    let named = |ty, name: &str| {
-        matches!(
-            t.get(ty).map(|t| &t.kind),
-            Some(TypeKind::Named { definition, .. })
-                if definition.path().package_is("core", "1")
-                    && definition.path().0.modules.is_empty()
-                    && definition.path().0.name == name
-        )
-    };
-    if !named(function.result, "Result") {
-        return Err(invalid());
-    }
-    match &function.parameters[..] {
-        [_] => Ok(vec![]),
-        [io, _] if named(io.ty, "Io") => Ok(vec![Root::Io]),
-        _ => Err(invalid()),
-    }
 }
 
 /// Select the admission kind from the entry's checked nominal signature.

@@ -1289,7 +1289,6 @@ pub(crate) struct Run<'a, 'o> {
     pub validation: hirsel_native::Validation,
     pub output: crate::native::Output<'o>,
     pub trace_events: Option<&'a Path>,
-    pub place: Option<std::os::fd::BorrowedFd<'a>>,
 }
 
 type Ran = Result<Result<crate::RunOutcome, NativeError>, ToolError>;
@@ -1310,15 +1309,7 @@ pub(crate) fn run(
 ) -> Ran {
     session.invocation(|session| {
         let target = hirsel_native::TargetSpec::x86_64_unknown_linux_gnu();
-        // A served place's head is a deployment, linked as `hirsel build
-        // --release` links one (scoped specialization); Cranelift stays the
-        // unoptimized debug loop.
-        let options = match (run.place, run.backend) {
-            (Some(_), hirsel_native::Backend::Llvm) => hirsel_native::BuildProfile::Release
-                .options(run.backend, target, run.validation)
-                .unwrap_or_else(|_| unreachable!("release admits LLVM")),
-            _ => hirsel_native::BuildProfile::run_options(run.backend, target, run.validation),
-        };
+        let options = hirsel_native::BuildProfile::run_options(run.backend, target, run.validation);
         let observed = {
             let _phase = timings::phase(Phase::ProgramKey);
             session.observe_inputs()
@@ -1331,13 +1322,9 @@ pub(crate) fn run(
             crate::HostLaunch::Live { config, .. } => config.key(),
             _ => None,
         };
-        // A served place, a replay and a callee bind against a launch the
-        // record does not hold. Stage validation and the Cargo runtime
-        // fallback bypass as a build does.
-        let keyed = if run.place.is_some() {
-            Err("served place".to_owned())
-        } else if !matches!(run.launch, crate::HostLaunch::Live { .. }) {
-            Err("replay or callee launch".to_owned())
+        // A replay binds a launch the program record does not hold.
+        let keyed = if !matches!(run.launch, crate::HostLaunch::Live { .. }) {
+            Err("replay launch".to_owned())
         } else if run.validation == hirsel_native::Validation::EveryStage {
             Err("validate stages".to_owned())
         } else if std::env::var_os("HIRSEL_RUNTIME_ARCHIVES").is_none() {
@@ -1631,7 +1618,6 @@ fn fresh(
                 bound,
                 run.output.reborrow(),
                 run.trace_events,
-                run.place,
             )
         }
         crate::requests::CompileResult::NativeError(error) => Ok(Err(error.clone())),
@@ -1710,7 +1696,6 @@ fn replay_run(
         bound,
         run.output.reborrow(),
         run.trace_events,
-        run.place,
     ))
 }
 
@@ -1977,7 +1962,7 @@ mod tests {
             facts: hirsel_run_config::ProgramFacts {
                 program: [3; 32],
                 entry: "main".into(),
-                launch: hirsel_run_schema::LaunchKind::Call,
+                launch: hirsel_run_schema::LaunchKind::Test,
                 roots: vec![
                     hirsel_run_config::Root::Test,
                     hirsel_run_config::Root::Io,

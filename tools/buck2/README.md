@@ -49,15 +49,7 @@ python3 tools/buck2/prepare.py        # bootstrap.py, then the remote-execution 
 python3 tools/buck2/prepare.py --local  # or: no pool, every action on this host
 ```
 
-`bootstrap.py` installs the official Buck2 release pinned in `pins.json` at
-`.buck2/bin/buck2-real`, behind the checked-in `client.py` entry point
-`.buck2/bin/buck2`, its bundled prelude with the overlay below at
-`.buck2/prelude`, the Rust toolchain in `toolchain-lock.json` at
-`toolchains/rust-files/`, the LLVM tree at `toolchains/llvm-files/`
-(`bootstrap_llvm.py`) and Reindeer at `bin/reindeer`. Every download is
-checked against its pinned SHA-256. Inputs are shared between checkouts
-through the store in `bootstrap_store.py` (`$HIRSEL_BUCK2_STORE`, default
-`~/.cache/hirsel-buck2`; `off` disables it).
+
 
 A new worktree needs `prepare.py`: unlike `sync.py`, it installs the pinned
 client, prelude, Rust, LLVM (including the hermetic C++ headers) and Reindeer,

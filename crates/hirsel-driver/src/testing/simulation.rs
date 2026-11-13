@@ -9,7 +9,7 @@ use hirsel_engine::{
 pub fn observe_tir(
     input: &TirExecution,
     run: &RunConfiguration,
-    mut simulation: SimulationConfig,
+    simulation: SimulationConfig,
     limits: hirsel_interp::Limits,
     checked: bool,
 ) -> Result<ObservedExecution, ToolError> {
@@ -21,8 +21,6 @@ pub fn observe_tir(
         ));
     }
     crate::tir_execution::refuse_foreign_interpretation(input)?;
-    // Entry identities serve `runner.entry_id` and `runner.apply` as well as runner calls.
-    simulation.callees = std::sync::Arc::new(input.callees.clone());
     let mut runtime = (*input.runtime).clone();
     runtime.checked = if checked {
         // A computed checked runtime always names arena.with (MEM-4); a product

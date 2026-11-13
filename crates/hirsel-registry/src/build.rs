@@ -25,7 +25,6 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
         "Stderr",
         "Stdout",
         "Signals",
-        "Authority",
         "MonotonicClock",
         "WallClock",
         "Random",
@@ -33,7 +32,6 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
         "Tasks",
         "Net",
         "Proc",
-        "Runner",
         "Scope",
         "Arena",
         "Test",
@@ -69,24 +67,17 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
         );
     }
     // These inert, plain views/positions have intrinsic loop/brand rules (conformance/old-spec/core-library.md).
-    for name in [
-        "Instant",
-        "Level",
-        "Path",
-        "StrPos",
-        "ScalarView",
-        "PositionView",
-    ] {
+    for name in ["Instant", "Path", "StrPos", "ScalarView", "PositionView"] {
         let b = Builder::new(types, "").with_declarations(&out);
         let mut t = type_definition(vec![], None);
         t.bounds = vec![Bound::Copyable, Bound::Inert, Bound::NoallocDrop];
-        if matches!(name, "Instant" | "Level" | "Path" | "StrPos") {
+        if matches!(name, "Instant" | "Path" | "StrPos") {
             t.bounds.push(Bound::Plain);
         }
         if matches!(name, "Path" | "StrPos") {
             t.bounds.extend([Bound::Data, Bound::Key, Bound::Sendable]);
         }
-        if matches!(name, "Instant" | "Level") {
+        if matches!(name, "Instant") {
             // SEM-5: ticks and declared weakest-first ordinals order only within one
             // clock or authority, the value's brand.
             t.bounds.extend([Bound::Sendable, Bound::OrderedOf]);
@@ -117,22 +108,6 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
     publish(
         types,
         b.signature("Body", SignatureKind::Type(Box::new(t)), true),
-        &mut out,
-    );
-    // RUN-3: a reference to one top-level definition of callable type `F`. It names the
-    // definition, never an implementation, so it holds no authority and is not data.
-    let b = Builder::new(types, "F").with_declarations(&out);
-    let mut t = type_definition(b.generics.clone(), None);
-    t.bounds = vec![
-        Bound::Plain,
-        Bound::Copyable,
-        Bound::Inert,
-        Bound::Sendable,
-        Bound::NoallocDrop,
-    ];
-    publish(
-        types,
-        b.signature("Entry", SignatureKind::Type(Box::new(t)), true),
         &mut out,
     );
     for (name, generic, variants) in [
@@ -209,35 +184,6 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
             "Send(Bytes)|Expect(Bytes)|Stall()|Close()|Reset()|Truncate()",
         ),
         ("GrantError", "", "NotGranted()"),
-        // STORE-11: the store authority seam.
-        (
-            "AuthorityError",
-            "",
-            "Io(FileError)|Status(u16)|Unreachable()",
-        ),
-        (
-            "SeamError",
-            "",
-            "Storage(AuthorityError)|Refused(AuthorityError)|Corrupt(String)|Fenced()|Format(Bytes,String)",
-        ),
-        (
-            "Advanced",
-            "",
-            "Advanced(u64)|Fenced()|Refused(AuthorityError)|Undecided(AuthorityError)",
-        ),
-        (
-            "HistoryRecord",
-            "",
-            "Claimed(u64,Bytes,Bytes)|Appended(Bytes,List[ObjectRef],List[ObjectRef])",
-        ),
-        ("Reclaimed", "", "More()|Done()"),
-        ("GrantAccess", "", "Read()|ReadWrite()"),
-        (
-            "NotRunReason",
-            "",
-            "Denied()|VersionMismatch()|Unreachable()|Overloaded()|Rejected()",
-        ),
-        ("InDoubtReason", "", "Lost()|TimedOut()|Abandoned()"),
         ("ExitStatus", "", "Exited(i32)|Signaled(i32)"),
         ("Signal", "", "Interrupt()|Terminate()|Kill()"),
         (
@@ -296,7 +242,6 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
         ("Eq", "T", "equal: fn(T,T) -> bool uses {}"),
         ("Hasher", "T", "hash: fn(T,u64) -> u64 uses {}"),
         ("SourceSite", "", "definition: String,line: u64,column: u64"),
-        ("ObjectRef", "", "lifetime: u64,epoch: u64,digest: Bytes"),
         (
             "Failure",
             "",
@@ -351,21 +296,6 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
             "program: String,args: List[String],outcome: Result[ProcessOutput,ProcessError]",
         ),
         ("ProcessRule", "", "program: String,env: List[String]"),
-        ("DirGrant", "", "path: String,access: GrantAccess"),
-        // RUN-3: an entry's identity: its definition's full path, signature fingerprint and
-        // code hash.
-        ("EntryId", "", "path: String,fingerprint: Bytes,code: Bytes"),
-        // STORE-12: one request on a call stream.
-        (
-            "CallRequest",
-            "",
-            "stream: Bytes,epoch: u64,position: u64,digest: Bytes,acknowledged: u64",
-        ),
-        (
-            "GrantSet",
-            "",
-            "stdout: bool,stderr: bool,tasks: bool,monotonic_clock: bool,wall_clock: bool,random: bool,dirs: List[DirGrant],net: List[NetRule],process: List[ProcessRule]",
-        ),
         (
             "ChildScript",
             "",
@@ -451,87 +381,6 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
             &mut out,
         );
     }
-    // RUN-6: a runner call's outcome carries the callee's Failure.
-    variant(
-        types,
-        "RunError",
-        "E",
-        "NotRun(NotRunReason)|InDoubt(InDoubtReason)|Failed(E)|Faulted(Failure)|Canceled(CancelCause)",
-        &mut out,
-    );
-    // RUN-13: the frames a caller's remote.tls@1 provider and a runner host exchange.
-    variant(
-        types,
-        "CallForm",
-        "",
-        "Compute()|Call()|Transact()|Query()",
-        &mut out,
-    );
-    variant(
-        types,
-        "CallEnd",
-        "",
-        "Returned(Bytes)|Failed(Bytes)|Faulted(Bytes)|NotRun(NotRunReason)|InDoubt(InDoubtReason)|Canceled(CancelCause)",
-        &mut out,
-    );
-    for (name, fields) in [
-        ("SessionOpen", "stream: Bytes,instance: Bytes,epoch: u64"),
-        (
-            "SessionOpened",
-            "epoch: u64,incarnation: Bytes,applied: u64,reconciles: bool",
-        ),
-        ("CallRef", "epoch: u64,position: u64,key: Bytes"),
-        (
-            "RemoteCall",
-            "epoch: u64,position: u64,ordinal: u64,key: Bytes,form: CallForm,path: String,fingerprint: Bytes,code: Bytes,grants: GrantSet,definitions: Option[List[String]],argument: Bytes,acknowledged: u64,level: Option[String]",
-        ),
-        // db@1: one transact or query call a place's head took from its inbox.
-        (
-            "Arrived",
-            "form: CallForm,entry: EntryId,caller: String,request: CallRequest,level: Option[String],argument: Bytes",
-        ),
-        (
-            "RemoteOutcome",
-            "epoch: u64,position: u64,key: Bytes,digest: Bytes,end: CallEnd,callee: Option[Bytes],missing: List[Bytes]",
-        ),
-    ] {
-        let mut b = Builder::new(types, "").with_declarations(&out);
-        let repr = b.record(fields);
-        let mut t = type_definition(vec![], Some(repr));
-        serializable_core(name, &mut t);
-        publish(
-            types,
-            b.signature(name, SignatureKind::Type(Box::new(t)), false),
-            &mut out,
-        );
-    }
-    variant(
-        types,
-        "RunFrame",
-        "",
-        "Open(SessionOpen)|Opened(SessionOpened)|Refused(NotRunReason)|Call(RemoteCall)|Outcome(RemoteOutcome)|Cancel(CallRef,CancelCause)|Acknowledged(CallRef)|Status(CallRef)|Running(CallRef)|Unknown(CallRef)|Close(u64,u64)",
-        &mut out,
-    );
-    // STORE-11: a claim is the affine right to extend one authority's history.
-    {
-        let b = Builder::new(types, "").with_declarations(&out);
-        let mut t = type_definition(vec![], None);
-        t.resource = true;
-        t.bounds = vec![Bound::NoallocDrop];
-        t.destructor_allocation = Allocation::NoAlloc;
-        t.authority = AuthoritySummary::Known(
-            vec![AuthorityTerm::Capability(hirsel_syntax::DefPath::core(
-                "Authority",
-            ))]
-            .into(),
-        );
-        t.drop = Some(hirsel_syntax::DefPath::core("Claim"));
-        publish(
-            types,
-            b.signature("Claim", SignatureKind::Type(Box::new(t)), true),
-            &mut out,
-        );
-    }
     for (name, fields) in [
         ("File", ""),
         ("AtomicFile", "dir: Dir,tmp: Path,dst: Path"),
@@ -587,10 +436,6 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
         ("UdpSocket", "Net"),
         ("Child", "Proc"),
         ("ChildGroup", "Proc"),
-        // db@1: a place's inbox, and one arrived call owed exactly one end; dropping an
-        // Arrival ends its call InDoubt(Abandoned()).
-        ("Inbox", "Runner"),
-        ("Arrival", "Runner"),
     ] {
         let b = Builder::new(types, "").with_declarations(&out);
         let mut t = type_definition(vec![], None);
@@ -630,29 +475,6 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
         publish(
             types,
             b.signature("TaskSet", SignatureKind::Type(Box::new(t)), true),
-            &mut out,
-        );
-    }
-    // MODE-6: an invocation-bound append-only buffer of independently owned inert
-    // events. A local capability (never sendable, copyable or stored past its
-    // creating invocation) and an affine resource whose drop destroys its events.
-    {
-        let b = Builder::new(types, "E: inert").with_declarations(&out);
-        let mut t = type_definition(b.generics.clone(), None);
-        t.capability = Some(CapabilityKind::Scoped);
-        t.resource = true;
-        t.bounds = vec![Bound::NoallocDrop];
-        t.destructor_allocation = Allocation::NoAlloc;
-        t.authority = AuthoritySummary::Known(
-            vec![AuthorityTerm::Capability(hirsel_syntax::DefPath::core(
-                "Recorder",
-            ))]
-            .into(),
-        );
-        t.drop = Some(hirsel_syntax::DefPath::core("Recorder"));
-        publish(
-            types,
-            b.signature("Recorder", SignatureKind::Type(Box::new(t)), true),
             &mut out,
         );
     }
@@ -1030,34 +852,6 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
         ),
         ("T", "$intrinsic.MutexKill", "m: Mutex[T]", "()"),
         ("T", "$intrinsic.MutexCause", "m: Mutex[T]", "()"),
-        // A recorder's events are `Option[E]` images in a task-local queue (MODE-6):
-        // the open gives the runtime the `None` image an append leaves and the
-        // descriptor that drops events the recorder still holds when it closes; a
-        // take moves the oldest event out.
-        (
-            "E: inert",
-            "$intrinsic.RecorderOpen",
-            "none: Option[E], descriptor: u32",
-            "Recorder[E]",
-        ),
-        (
-            "E: inert",
-            "$intrinsic.RecorderAppend",
-            "r: Recorder[E], mut event: Option[E]",
-            "()",
-        ),
-        (
-            "E: inert",
-            "$intrinsic.RecorderCount",
-            "r: Recorder[E]",
-            "u64",
-        ),
-        (
-            "E: inert",
-            "$intrinsic.RecorderTake",
-            "r: Recorder[E], mut event: Option[E]",
-            "()",
-        ),
         (
             "A",
             "$intrinsic.AtomicCreate",
@@ -1102,11 +896,9 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
         // answer is an op's, recorded live and replayed.
         ("T", "$intrinsic.SharedThawTurn", "root: Shared[T]", "bool"),
         // A catch's begin (FAIL-2): `task.isolate`'s yields, as the task operation it is;
-        // `runner.apply`'s, which is no task operation, does not. The caught chain is read
         // record by record to build its `Failure`; End retires the catch. They read only the
         // running task's own failure state.
         ("", "$intrinsic.IsolateBegin", "tasks: Tasks", "u64"),
-        ("", "$intrinsic.ApplyBegin", "", "u64"),
         ("", "$intrinsic.IsolateEnd", "", "()"),
         ("", "$intrinsic.IsolateCount", "", "u64"),
         ("", "$intrinsic.IsolateKind", "index: u64", "u32"),
@@ -1115,25 +907,6 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
         ("", "$intrinsic.IsolateLine", "index: u64", "u64"),
         ("", "$intrinsic.IsolateColumn", "index: u64", "u64"),
         ("", "$intrinsic.IsolateSpawn", "index: u64", "List[u64]"),
-        // Runner calls (RUN-4) behind the compiled bodies of `runner.compute`, `runner.call`
-        // and `runner.spawn`: the caller sends `f`'s call with its argument's codec bytes and
-        // the callee's `main`, a static `fn() -> ()` that runs in the callee run, then waits
-        // for the outcome code and takes its bytes (`hirsel-rt/src/runners.rs`). The callee's
-        // `main` reads its entry, argument and root Io, and replies with its outcome's bytes.
-        (
-            "F",
-            "$intrinsic.RunnerSend",
-            "r: Runner, f: Entry[F], argument: Bytes, main: fn() -> (), form: u64",
-            "u64",
-        ),
-        ("", "$intrinsic.RunnerWait", "ticket: u64", "u64"),
-        ("", "$intrinsic.RunnerTake", "ticket: u64", "Bytes"),
-        ("F", "$intrinsic.RunnerEntry", "", "F"),
-        ("", "$intrinsic.RunnerArgument", "", "Bytes"),
-        ("", "$intrinsic.RunnerIo", "", "Io"),
-        ("", "$intrinsic.RunnerReply", "tag: u64, reply: Bytes", "()"),
-        // `runner.grants`' compiled body: the grant set's flags, one bit per field in order.
-        ("", "$intrinsic.RunnerGrants", "r: Runner", "u64"),
     ] {
         let mut b = Builder::new(types, generics).with_declarations(&out);
         let f = b.function(params, result, false);
@@ -1248,10 +1021,6 @@ fn variant(
                 | "NetStep"
                 | "ChildStep"
                 | "ShapeBody"
-                | "CallEnd"
-                | "RunFrame"
-                | "SeamError"
-                | "HistoryRecord"
         )
     {
         t.bounds = vec![
@@ -1267,7 +1036,7 @@ fn variant(
     if name == "ShapeBody" {
         t.bounds = shape_data_bounds();
     }
-    if matches!(name, "SeamError" | "HistoryRecord") {
+    if matches!(name, "SeamError") {
         // Their arms own Strings and Bytes: copyable by count, never plain.
         t.bounds = vec![
             Bound::Copyable,
@@ -1330,12 +1099,6 @@ fn serializable_core(name: &str, t: &mut TypeDefinition) {
             | "TlsFailure"
             | "NetError"
             | "GrantError"
-            | "AuthorityError"
-            | "SeamError"
-            | "Advanced"
-            | "HistoryRecord"
-            | "Reclaimed"
-            | "ObjectRef"
             | "ExitStatus"
             | "ProcessOutput"
             | "PipelineOutput"
@@ -1359,23 +1122,6 @@ fn serializable_core(name: &str, t: &mut TypeDefinition) {
             | "NetOperation"
             | "NetRule"
             | "ProcessRule"
-            | "GrantAccess"
-            | "DirGrant"
-            | "EntryId"
-            | "CallRequest"
-            | "GrantSet"
-            | "NotRunReason"
-            | "InDoubtReason"
-            | "RunError"
-            | "CallForm"
-            | "CallEnd"
-            | "SessionOpen"
-            | "SessionOpened"
-            | "CallRef"
-            | "RemoteCall"
-            | "Arrived"
-            | "RemoteOutcome"
-            | "RunFrame"
     ) {
         t.serializable = true;
         if t.generics.is_empty() {
@@ -1625,7 +1371,6 @@ impl Builder {
                                 | "Stderr"
                                 | "Stdout"
                                 | "Signals"
-                                | "Authority"
                                 | "MonotonicClock"
                                 | "WallClock"
                                 | "Random"
@@ -1633,7 +1378,6 @@ impl Builder {
                                 | "Tasks"
                                 | "Net"
                                 | "Proc"
-                                | "Runner"
                                 | "Scope"
                                 | "Arena"
                                 | "Test"

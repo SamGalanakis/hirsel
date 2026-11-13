@@ -4,10 +4,7 @@ hirsel_guard::install!();
 
 pub use hirsel_guard::admission::{MemoryReservation, ProcessBudget};
 mod run;
-pub use run::{
-    EntryFacts, admit_run, bind_run, callee_roots, entry_launch_kind, entry_roots,
-    identified_entry, read_run_record,
-};
+pub use run::{EntryFacts, admit_run, bind_run, entry_launch_kind, entry_roots, read_run_record};
 
 /// One retained value's charge on the request footprint, released when the
 /// value's last owner drops it.

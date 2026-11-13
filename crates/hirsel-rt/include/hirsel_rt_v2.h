@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define HIRSEL_RT_V2_ABI_VERSION 115
+#define HIRSEL_RT_V2_ABI_VERSION 116
 /* TaskSpawn trailing flags: compiler proofs, ignored in ordered execution and replay. */
 #define HIRSEL_RT_V2_SPAWN_IMMEDIATE_AWAIT 1
 #define HIRSEL_RT_V2_SPAWN_OP_FREE 2
@@ -416,8 +416,7 @@ int32_t hirsel_rt_v2_launch(uint8_t (*entry)(hirsel_rt_v2_ctx *, uint8_t *, uint
  * The failure table (ABI 22) is little-endian: u32 site and rule counts, 32-byte site records
  * (u64 code, u32 line, u32 column, u32 offset and length of the definition path, then of the
  * file path) sorted by code, 8-byte rule records (u32 offset, length), then a UTF-8 string
- * pool; the runtime reads it in place. The entry rows (ABI 30, RUN-3) name each definition the
- * program's units make an Entry value of: its function-reference code and full UTF-8 path. */
+ * pool; the runtime reads it in place. Value-code rows name callable thunks and UTF-8 paths. */
 typedef uint8_t (*hirsel_rt_v2_roots_entry)(hirsel_rt_v2_ctx *, uint8_t *, uint8_t *, uint64_t *);
 #define HIRSEL_RT_V2_PROGRAM_UNREPLAYABLE 1u
 #define HIRSEL_RT_V2_PROGRAM_STANDALONE 2u
@@ -439,19 +438,11 @@ typedef struct {
     uint64_t entry_name_length;
     uint8_t digest[32];
     hirsel_rt_v2_launch_config config;
-    const hirsel_rt_v2_entry_row *entries;
-    uint64_t entry_count;
     /* ABI 45: 0 = Result[(), E], 1 = ExitCode, 2 = Result[ExitCode, E]. */
     uint64_t return_kind, success_offset;
-    /* ABI 48: initialized callable values; separate from RUN-3 Entry admission. */
+    /* ABI 48: initialized callable values. */
     const hirsel_rt_v2_entry_row *value_codes;
     uint64_t value_code_count;
-    /* ABI 49: canonical runner CalleeFacts and verified RUN-3 code references. */
-    const uint8_t *callee_facts;
-    uint64_t callee_facts_length;
-    const hirsel_rt_v2_entry_row *callee_codes;
-    uint64_t callee_code_count;
-    uint8_t callee_identity[32];
 } hirsel_rt_v2_program_descriptor;
 HIRSEL_RT_V2_ASSERT_SIZE(hirsel_rt_v2_program_descriptor, 272);
 /* Load the program and launch the run argv (argv[0] names the program) selects; returns the

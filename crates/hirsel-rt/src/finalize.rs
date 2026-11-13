@@ -72,12 +72,6 @@ pub(crate) unsafe fn run_close(
     // or adapter. shielded retains cancellation scope and lends the role only
     // while the chosen cleanup runs; every branch shares this outer guard.
     let _role = unsafe { crate::tasks::role::Guard::new(ctx) };
-    if crate::recorders::is_recorder(handle) {
-        // SAFETY: the dropped value owned this recorder; its events are task-local.
-        return shielded(ctx, |ctx| unsafe {
-            crate::recorders::close(&mut *ctx, handle, anchor, operation_site)
-        });
-    }
     if handle & crate::sync::MUTEX != 0 && handle & crate::channels::ENDPOINT == 0 {
         // SAFETY: the wrapper owns the cell; detach before invoking user code.
         return shielded(ctx, |ctx| unsafe {
@@ -92,14 +86,6 @@ pub(crate) unsafe fn run_close(
             (crate::runtime_roots::free()
                 .unwrap_or_else(|| fault("an endpoint close without its task provider"))
                 .close_endpoint)(ctx, handle, anchor, operation_site)
-        });
-    }
-    if handle >> 59 == 1 {
-        // SAFETY: the dropped value owned this Inbox or Arrival of the running place head.
-        return shielded(ctx, |ctx| unsafe {
-            (crate::runtime_roots::runners()
-                .unwrap_or_else(|| fault("a place handle close without the runners provider"))
-                .close_place)(ctx, handle)
         });
     }
     let Some(close) = ctx.run_ref().close_handle else {

@@ -75,7 +75,6 @@ struct FrontFacts {
     checked: CheckedProduct,
     /// The package dead-arm lint's facts of a checked body.
     dead_arms: Option<LintFacts>,
-    table_keys: Option<Arc<crate::table_keys::TableKeyUse>>,
     memos: Box<[(crate::memo::MemoKey, Arc<Reads>)]>,
     diagnostic_sources: Option<Arc<namespace::DiagnosticSources>>,
     _backing: Arc<LiveSourceBacking>,
@@ -130,7 +129,6 @@ impl FrontFacts {
         diagnostic_phases: Vec<(Diagnostic, String)>,
         checked: CheckedProduct,
         dead_arms: Option<crate::tools::DeadArmUse>,
-        table_keys: Option<Arc<crate::table_keys::TableKeyUse>>,
         memos: Vec<(crate::memo::MemoKey, Arc<Reads>)>,
         backing: Arc<LiveSourceBacking>,
     ) -> Arc<Self> {
@@ -141,7 +139,6 @@ impl FrontFacts {
             diagnostic_phases,
             checked,
             dead_arms: dead_arms.map(LintFacts::capture),
-            table_keys,
             memos: memos.into_boxed_slice(),
             diagnostic_sources: None,
             _backing: backing,
@@ -282,7 +279,6 @@ pub struct FrontBodyOutput {
 /// carries the checked stage's complete reads rather than a provisional union.
 #[derive(Clone)]
 pub struct FrontCheckedOutput {
-    pub(crate) table_keys: Arc<crate::table_keys::TableKeyUse>,
     pub summary: Arc<CheckedSummary>,
     pub(crate) dependencies: Arc<OrderedSignatureReads>,
     pub reads: Arc<Reads>,
@@ -872,11 +868,10 @@ impl FrontBodyQueries {
         cx: &mut dyn QueryContext,
         outcome: &ModeResult,
         checked: &CheckedProduct,
-        table_keys: Option<&Arc<crate::table_keys::TableKeyUse>>,
         memos: &Vec<(crate::memo::MemoKey, Arc<Reads>)>,
         dead_arms: Option<&crate::tools::DeadArmUse>,
     ) -> Option<Arc<LiveSourceBacking>> {
-        let mut charge = retained::compact_metadata(outcome, checked, table_keys, memos)?;
+        let mut charge = retained::compact_metadata(outcome, checked, memos)?;
         if let Some(summary) = &outcome.summary {
             charge = charge.checked_add(LiveSummaryProduct::shared_payload_bytes(summary)?)?;
         }
@@ -1037,18 +1032,10 @@ impl FrontBodyQueries {
         mut outcome: ModeResult,
         mut checked: CheckedProduct,
         dead_arms: Option<crate::tools::DeadArmUse>,
-        table_keys: Option<Arc<crate::table_keys::TableKeyUse>>,
         mut memos: Vec<(crate::memo::MemoKey, Arc<Reads>)>,
     ) -> Option<FrontOutcome> {
         self.pool_completion_reads(cx, &mut outcome, &mut checked, &mut memos)?;
-        let backing = self.retain(
-            cx,
-            &outcome,
-            &checked,
-            table_keys.as_ref(),
-            &memos,
-            dead_arms.as_ref(),
-        )?;
+        let backing = self.retain(cx, &outcome, &checked, &memos, dead_arms.as_ref())?;
         let facts = FrontFacts::capture(
             &outcome.definition,
             outcome.phase,
@@ -1056,7 +1043,6 @@ impl FrontBodyQueries {
             outcome.diagnostic_phases.clone(),
             checked,
             dead_arms,
-            table_keys,
             memos,
             backing,
         );
@@ -1435,7 +1421,6 @@ impl FrontBodyQueries {
         let outcome = slots.get(&key)?;
         let (summary, reads, dependencies) = outcome.checked.as_ref()?;
         Some(FrontCheckedOutput {
-            table_keys: outcome.table_keys.as_ref()?.clone(),
             summary: summary.clone(),
             dependencies: dependencies.clone(),
             reads: reads.clone(),
@@ -2071,7 +2056,6 @@ impl BodyTask {
                 outcome,
                 None,
                 None,
-                None,
                 vec![],
             )
             .ok_or_else(|| queries.resource_refusal())?;
@@ -2287,7 +2271,6 @@ impl BodyTask {
             restored.outcome,
             restored.checked,
             restored.dead_arms,
-            restored.table_keys,
             memo_rows,
         )?;
         let terminal = match &cached.state {
@@ -2494,11 +2477,6 @@ impl BodyTask {
                 .entry((DefId::intern(&done.definition), kind))
                 .or_default() += 1;
         }
-        let table_keys = done
-            .checked
-            .as_ref()
-            .and_then(|p| p.result().ok())
-            .map(|checked| Arc::new(crate::table_keys::TableKeyUse::capture(&checked.value)));
         let result = done.result();
         let mut source = FrozenReadSource {
             declarations: &queries.declarations,
@@ -2625,7 +2603,6 @@ impl BodyTask {
                         output,
                         None,
                         None,
-                        None,
                         vec![],
                     )
                     .ok_or_else(|| queries.resource_refusal())?;
@@ -2680,7 +2657,7 @@ impl BodyTask {
             (!failed && !queries.store.persistence().publishes()).then(|| outcome.clone());
         let mut cached = queries
             .publish_facts(
-                cx, self.input, record, action, outcome, checked, dead_arms, table_keys, memo_rows,
+                cx, self.input, record, action, outcome, checked, dead_arms, memo_rows,
             )
             .ok_or_else(|| queries.resource_refusal())?;
         queries.store_compact(self.input, &mut cached, self.weight.scratch);

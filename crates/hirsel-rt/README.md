@@ -39,20 +39,7 @@ Invariants and boundary:
   PROG-3, refusal and stop reports. `Sinks::process()` are the process's streams;
   `Sink::capture()` keeps a run's output in memory. Standard input is one take-once
   `ProcessStdin` token, held from admission by the run whose record grants `io.stdin` and
-  returned when its Io drops; admission refuses a second holder. `Execution` groups the runs
-  that decide CONC-8 together: each started run begins its own until callee runs (`Selection`
-  for calls, runner-core) join their caller's. In the interpreter's host launch the runs of an
-  execution share one `Readiness`: a callee's tokens carry its tag in bits 48..61
-  (`Readiness::tagged`), each run takes only its own (`ready`), `deliver` readies a caller's
-  runner wait when its callee ends, and `has_ready` lets the driver ask every run before any
-  waits.
-- Runner calls are tape events (RUN-11): `runner_call` (the runner, form, path, grants,
-  allowlist, call key, digest and argument bytes) completes with `runner <outcome> <bytes>
-  <callee instance|none>`; `runner_cancel` and a callee's last event `call_return
-  ok|err|failed <bytes>` complete `ready`. The header records the `run_instance`.
-  `tape_links::check` is the joined check over a set of tapes (`hirsel tapes check`): each link
-  with both ends present must agree on digest, argument, form, path, callee instance and
-  outcome bytes; a link with one end missing is unchecked.
+  returned when its Io drops; admission refuses a second holder.
 - A launcher that reads the observation record also reads how a run stopped (`stopped
   refused|diverged|environmental ...`) and, from the file named by `HIRSEL_RT_REFUSAL`, a launch
   refused before entry (`refused <reason>`, a `RunRefusal`'s JSON when the host refused it);
@@ -1534,21 +1521,6 @@ create. Both use an open-loop client on CPU 7 and the server on CPU 31. The two
 sessions' absolute times are never compared. All speedups normalize a trace
 against that same trace's one-worker model. The observed sibling load was high,
 so these remain conditional projections, not measured multicore throughput.
-
-### Runner launcher
-
-`runner.rs` is a runner's launcher (link design §2): `hirsel_runner_main`, which a
-runner's link aliases as its `main`, runs a program image's `main` either in this
-process (`exec <tooling> <image> <argv...>`) or in a forked child per request of a
-single-threaded fork server on its standard input (`serve`). The server runs no
-program code, admits no run and maps no image; each child joins its own process
-group, takes the request's streams, closes the server's descriptors, restores
-the server's startup signal mask, enters the request's directory and
-environment, checks without loading it that the image is whole and that its
-`Hirsel` note names this runner's GNU build ID, then `dlopen`s it and calls its
-`main` (the generated launcher, which enters `hirsel_rt_v2_main`) and exits
-through `exit`. A failure before that is reported to the request's tooling path
-with exit status 125, never as a program outcome.
 
 `out.write` and `err.write` accept borrowed Bytes; `out.print` and `err.print`
 call the same byte-write entry points with their String slice. ABI revision 32

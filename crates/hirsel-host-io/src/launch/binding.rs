@@ -20,27 +20,13 @@ fn refused(error: hirsel_run_schema::RunRefusal) -> ToolError {
 
 impl LaunchSelection {
     pub fn read(launch: HostLaunch<'_>) -> Result<Self, ToolError> {
-        let (entry, replay) =
-            match launch {
-                HostLaunch::Replay(tape) => {
-                    let (io, run) = hirsel_rt::host_launch::replay(tape).map_err(refused)?;
-                    let entry = if run.record().launch == LaunchKind::Call {
-                        Some(super::def_path(&run.record().entry).ok_or_else(|| {
-                            ToolError::Runtime("replay refused: the callee entry's path".into())
-                        })?)
-                    } else {
-                        None
-                    };
-                    (entry, Some((io, run)))
-                }
-                HostLaunch::Callee { run, .. } => (
-                    Some(super::def_path(&run.record().entry).ok_or_else(|| {
-                        ToolError::Runtime("launch: the callee entry's path".into())
-                    })?),
-                    None,
-                ),
-                HostLaunch::Live { .. } => (None, None),
-            };
+        let (entry, replay) = match launch {
+            HostLaunch::Replay(tape) => {
+                let (io, run) = hirsel_rt::host_launch::replay(tape).map_err(refused)?;
+                (None, Some((io, run)))
+            }
+            HostLaunch::Live { .. } => (None, None),
+        };
         Ok(Self {
             entry,
             replay,
@@ -57,11 +43,6 @@ impl LaunchSelection {
                 CapturedConfig::read(config)
                     .map_err(|error| ToolError::Runtime(error.to_string()))?,
             ),
-            HostLaunch::Callee { run, .. } => Some(CapturedConfig {
-                record: run.record().clone(),
-                template: false,
-                cores: None,
-            }),
             HostLaunch::Replay(_) => None,
         };
         Ok(selected)
@@ -106,9 +87,6 @@ impl LaunchSelection {
                 HostLaunch::Live {
                     record: Some(_),
                     ..
-                } | HostLaunch::Callee {
-                    record: Some(_),
-                    ..
                 }
             )
     }
@@ -134,12 +112,8 @@ impl LaunchSelection {
         revision: &ProgramRevision,
         code: CodeReach,
     ) -> Result<EntryFacts, ToolError> {
-        let kind = match (&self.replay, launch) {
-            (Some((_, run)), _) if run.record().launch == LaunchKind::Call => LaunchKind::Call,
-            (_, HostLaunch::Callee { .. }) => LaunchKind::Call,
-            _ => hirsel_engine_admission::entry_launch_kind(types, signature)
-                .map_err(ToolError::Launch)?,
-        };
+        let kind = hirsel_engine_admission::entry_launch_kind(types, signature)
+            .map_err(ToolError::Launch)?;
         Ok(EntryFacts::of(types, signature, revision, kind, code))
     }
 
@@ -159,10 +133,6 @@ impl LaunchSelection {
                 }
                 .map_err(|e| ToolError::Runtime(e.to_string()))?;
                 let bound = facts.bind(Some(&requested)).map_err(ToolError::Launch)?;
-                Ok(BoundHostRun::live(bound))
-            }
-            (HostLaunch::Callee { run, .. }, _) => {
-                let bound = facts.bind(Some(run)).map_err(ToolError::Launch)?;
                 Ok(BoundHostRun::live(bound))
             }
             (HostLaunch::Replay(_), Some((io, run))) => {
@@ -314,40 +284,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn immutable_callee_binding_selects_its_own_entry_and_preserves_call_kind() {
-        hirsel_intern::jobs::with_compiler_stack(|| {
-            let (types, signature, revision) = fixture("worker", "x:u8");
-            let mut record = hirsel_run_config::RunConfig::for_program(&revision, LaunchKind::Call);
-            record.call = Some(hirsel_run_schema::CallRecord::new(
-                hirsel_run_schema::CallForm::Compute,
-                &hirsel_run_schema::Cause {
-                    instance: [1; 16],
-                    ordinal: 0,
-                    digest: [2; 32],
-                },
-                &[7],
-            ));
-            let run = record.validated().unwrap();
-            let launch = HostLaunch::Callee {
-                run: &run,
-                record: None,
-            };
-            let selected = LaunchSelection::read_for_compilation(launch).unwrap();
-            let inputs = selected.compiler_inputs().unwrap();
-            assert_eq!(inputs, run.record().inputs);
-            assert_eq!(selected.entry().unwrap().to_string(), revision.entry());
-            let BoundHostRunParts::Live(bound) = selected
-                .bind(launch, &types, &signature, &revision, CodeReach::Safe)
-                .unwrap()
-                .into_parts()
-            else {
-                panic!("a callee binds a live call")
-            };
-            assert_eq!(bound.run().record().entry, revision.entry());
-            assert_eq!(bound.run().record().launch, LaunchKind::Call);
-        });
-    }
     #[test]
     fn ownership_policy_capture_keeps_inputs_and_grants_after_the_file_changes() {
         hirsel_intern::jobs::with_compiler_stack(|| {

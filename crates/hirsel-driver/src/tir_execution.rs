@@ -3,7 +3,7 @@
 //! host effects, admission, recording, cancellation and budgets.
 use crate::launch_binding::LaunchSelection;
 use crate::requests::TirExecution;
-use crate::{HostLaunch, HostRun, RunOutcome, ToolError, call_schemas};
+use crate::{HostLaunch, HostRun, RunOutcome, ToolError};
 use std::path::Path;
 
 pub(crate) fn refuse_foreign_interpretation(input: &TirExecution) -> Result<(), ToolError> {
@@ -22,12 +22,9 @@ pub(crate) fn run_tir_on_host(
     selection: LaunchSelection,
     max_steps: Option<u64>,
     observed: Option<&mut Option<hirsel_interp::observation::Observable>>,
-    hosted: Option<hirsel_host_io::Hosted>,
     checked: bool,
-) -> Result<(RunOutcome, Option<hirsel_run_schema::CalleeOutcome>), ToolError> {
-    run_tir_on_host_with_grants(
-        input, launch, selection, max_steps, observed, hosted, checked, None,
-    )
+) -> Result<RunOutcome, ToolError> {
+    run_tir_on_host_with_grants(input, launch, selection, max_steps, observed, checked, None)
 }
 
 pub(crate) fn run_tir_on_host_with_grants(
@@ -36,12 +33,11 @@ pub(crate) fn run_tir_on_host_with_grants(
     selection: LaunchSelection,
     max_steps: Option<u64>,
     observed: Option<&mut Option<hirsel_interp::observation::Observable>>,
-    hosted: Option<hirsel_host_io::Hosted>,
     checked: bool,
     snapshot: Option<hirsel_rt::host_launch::HostGrants>,
-) -> Result<(RunOutcome, Option<hirsel_run_schema::CalleeOutcome>), ToolError> {
+) -> Result<RunOutcome, ToolError> {
     run_tir_on_host_traced(
-        input, launch, selection, max_steps, observed, hosted, checked, snapshot, None,
+        input, launch, selection, max_steps, observed, checked, snapshot, None,
     )
 }
 
@@ -51,11 +47,10 @@ pub(crate) fn run_tir_on_host_traced(
     selection: LaunchSelection,
     max_steps: Option<u64>,
     observed: Option<&mut Option<hirsel_interp::observation::Observable>>,
-    hosted: Option<hirsel_host_io::Hosted>,
     checked: bool,
     snapshot: Option<hirsel_rt::host_launch::HostGrants>,
     ownership: Option<&mut crate::ownership_trace::Capture>,
-) -> Result<(RunOutcome, Option<hirsel_run_schema::CalleeOutcome>), ToolError> {
+) -> Result<RunOutcome, ToolError> {
     refuse_foreign_interpretation(input)?;
     let facts = HostFacts {
         entry: input.entry.clone(),
@@ -64,7 +59,6 @@ pub(crate) fn run_tir_on_host_traced(
         runtime: input.runtime.clone(),
         checked_runtime: Some(input.checked_runtime.clone()),
         code: input.code.clone(),
-        callees: input.callees.clone(),
         revision: input.revision.clone(),
         foreign: input.foreign.clone(),
     };
@@ -75,7 +69,6 @@ pub(crate) fn run_tir_on_host_traced(
         selection,
         max_steps,
         observed,
-        hosted,
         checked,
         snapshot,
         ownership,
@@ -89,7 +82,6 @@ struct HostFacts {
     runtime: std::sync::Arc<hirsel_interp::aggregate::RuntimeTypes>,
     checked_runtime: Option<std::sync::Arc<hirsel_interp::checked::CheckedRuntime>>,
     code: hirsel_run_schema::CodeReach,
-    callees: std::collections::BTreeMap<String, hirsel_run_schema::CalleeFacts>,
     revision: hirsel_run_schema::ProgramRevision,
     foreign: hirsel_engine::ForeignUse,
 }
@@ -102,10 +94,9 @@ pub(crate) fn run_loaded_on_host_with_checks(
     launch: HostLaunch<'_>,
     max_steps: Option<u64>,
     observed: Option<&mut Option<hirsel_interp::observation::Observable>>,
-    hosted: Option<hirsel_host_io::Hosted>,
     checked: bool,
     snapshot: Option<hirsel_rt::host_launch::HostGrants>,
-) -> Result<(RunOutcome, Option<hirsel_run_schema::CalleeOutcome>), ToolError> {
+) -> Result<RunOutcome, ToolError> {
     use hirsel_engine::DefinitionQueries;
     let original = program.entry.clone();
     let result = (|| {
@@ -157,8 +148,6 @@ pub(crate) fn run_loaded_on_host_with_checks(
         } else {
             None
         };
-        let callees = hirsel_engine::callee_facts(&mut program.engine, &entry)
-            .map_err(|error| program.error(error))?;
         let allowed = if program.engine.closure_assertions {
             Some(
                 program
@@ -179,7 +168,6 @@ pub(crate) fn run_loaded_on_host_with_checks(
             runtime: std::sync::Arc::new(runtime),
             checked_runtime,
             code,
-            callees,
             revision,
             foreign,
         };
@@ -195,7 +183,6 @@ pub(crate) fn run_loaded_on_host_with_checks(
             selection,
             max_steps,
             observed,
-            hosted,
             checked,
             snapshot,
             None,
@@ -265,11 +252,10 @@ fn run_provider_on_host(
     selection: LaunchSelection,
     max_steps: Option<u64>,
     observed: Option<&mut Option<hirsel_interp::observation::Observable>>,
-    hosted: Option<hirsel_host_io::Hosted>,
     checked: bool,
     snapshot: Option<hirsel_rt::host_launch::HostGrants>,
     ownership: Option<&mut crate::ownership_trace::Capture>,
-) -> Result<(RunOutcome, Option<hirsel_run_schema::CalleeOutcome>), ToolError> {
+) -> Result<RunOutcome, ToolError> {
     let phase = if matches!(launch, HostLaunch::Replay(_)) {
         "replay"
     } else {
@@ -286,12 +272,10 @@ fn run_provider_on_host(
     }
     let host = snapshot.unwrap_or_else(hirsel_rt::host_launch::HostGrants::process);
     let tape = match launch {
-        HostLaunch::Live { record, .. } | HostLaunch::Callee { record, .. } => {
-            record.map(Path::to_path_buf)
-        }
+        HostLaunch::Live { record, .. } => record.map(Path::to_path_buf),
         HostLaunch::Replay(_) => None,
     };
-    let (run, io, instance, free) = match crate::admit_bound_host_run(
+    let (run, io, free) = match crate::admit_bound_host_run(
         selection.bind(
             launch,
             &input.runtime.types,
@@ -319,19 +303,14 @@ fn run_provider_on_host(
             (
                 admitted.run().clone(),
                 hirsel_host_io::HostIo::Live(io),
-                admitted.instance(),
                 free,
             )
         }
         // A replay parks where the recording parked (its `blocked` and `ready` events).
-        HostRun::Replay { run, io } => {
-            let instance = io.instance();
-            (run, hirsel_host_io::HostIo::Replay(io), instance, None)
-        }
+        HostRun::Replay { run, io } => (run, hirsel_host_io::HostIo::Replay(io), None),
     };
     // A callee replay selected its entry before requesting immutable TIR.
     let signature = input.signature.clone();
-    let call = run.record().call.clone();
     let tir_run = hirsel_tir::RunConfiguration {
         entry: input.entry.clone(),
         hash_seed: run.record().inputs.hash_seed,
@@ -363,70 +342,16 @@ fn run_provider_on_host(
     if observed.is_some() {
         operations.silence_replay_output();
     }
-    let call_schemas = match &call {
-        Some(_) => Some(call_schemas(&signature, &runtime)?),
-        None => None,
-    };
-    // Every run carries its entries' identities: `runner.entry_id` and `runner.apply` read
-    // them with no runner involved (RUN-3).
-    let callees = std::sync::Arc::new(input.callees.clone());
-    operations.set_callees(callees.clone());
-    if run.calls() || call.is_some() {
-        // A live run's remote runners open their providers now, reading their TLS material.
-        let remote = match &operations.io {
-            hirsel_host_io::HostIo::Live(_) => hirsel_host_io::RemoteRunners::open(
-                run.record()
-                    .io
-                    .as_ref()
-                    .map_or(&[][..], |io| io.runners.as_slice()),
-                instance.unwrap_or_default(),
-                || hirsel_host_io::remote_wire(&runtime, hirsel_remote::wire::DEFAULT_FRAME_BYTES),
-            )
-            .map_err(|e| ToolError::Runtime(format!("launch: {e}")))?,
-            hirsel_host_io::HostIo::Replay(_) => None,
-        };
-        operations.set_runners(hirsel_host_io::RunnerContext {
-            instance,
-            callees,
-            tape,
-            role: call_schemas.as_ref().map(|(schemas, _)| schemas.clone()),
-            remote,
-        });
-    }
-    if let Some(hosted) = hosted {
-        operations
-            .set_hosted(hosted)
-            .map_err(|e| ToolError::Runtime(format!("launch: {e}")))?;
-    }
     // F0's free-mode test channel (`hirsel_free::session::TestHook`).
     let free = hirsel_free::session::TestHook::from_env().map_err(ToolError::Runtime)?;
     if let Some(hook) = &free {
         let session = hook.session(&run.identity()).map_err(ToolError::Runtime)?;
         operations.library.enable_free(session, hook.seed);
     }
-    let args = match (&call, &call_schemas) {
-        // A callee run enters with its place's Io and the argument its call carries.
-        (Some(call), Some((_, argument))) => {
-            let bytes = call
-                .argument()
-                .map_err(|e| ToolError::Runtime(format!("launch: {e}")))?;
-            let value = hirsel_interp::library::runners::decode(argument, &bytes, &runtime)
-                .map_err(|e| ToolError::Runtime(format!("launch: the call's argument: {e:?}")))?;
-            match call.form() {
-                hirsel_run_schema::CallForm::Call => vec![operations.library.root_io(), value],
-                hirsel_run_schema::CallForm::Compute => vec![value],
-                hirsel_run_schema::CallForm::Transact | hirsel_run_schema::CallForm::Query => {
-                    return Err(ToolError::Runtime(
-                        "launch: a served call starts no callee run".into(),
-                    ));
-                }
-            }
-        }
-        _ => operations
-            .library
-            .entry_arguments(&runtime.types, &signature)
-            .map_err(|e| ToolError::Runtime(format!("launch: {e:?}")))?,
-    };
+    let args = operations
+        .library
+        .entry_arguments(&runtime.types, &signature)
+        .map_err(|e| ToolError::Runtime(format!("launch: {e:?}")))?;
     let sources = input.sources.clone();
     let limits = hirsel_interp::Limits {
         steps: max_steps,
@@ -472,7 +397,6 @@ fn run_provider_on_host(
             &runtime,
         )
     };
-    operations.close_place();
     if let Some(hook) = &free
         && let Some(session) = operations.library.take_free()
     {
@@ -511,34 +435,6 @@ fn run_provider_on_host(
         },
         error => ToolError::Runtime(format!("interpret: {error:?}")),
     })?;
-    // A callee run records its own outcome as it ended (RUN-11); replay checks it.
-    let end = match (&call, &execution.outcome) {
-        (Some(_), hirsel_interp::Outcome::Returned { value, .. }) => {
-            Some(hirsel_interp::CalleeEnd::Returned(value.clone()))
-        }
-        (Some(_), hirsel_interp::Outcome::Failed(_)) => {
-            Some(hirsel_interp::CalleeEnd::Failed(execution.failures.clone()))
-        }
-        _ => None,
-    };
-    let mut returned = None;
-    if let Some(end) = end {
-        let (mut stdout, mut trace) = (vec![], vec![]);
-        let mut cx = hirsel_interp::OperationContext {
-            configuration: &tir_run,
-            sources: &sources,
-            stdout: &mut stdout,
-            trace: &mut trace,
-            trace_mode: runtime.trace_mode,
-            anchor: None,
-        };
-        returned = operations.callee_return(&end, &mut cx).map_err(|e| {
-            ToolError::Runtime(match operations.refused.take() {
-                Some(refusal) if replay => format!("replay refused: {refusal}"),
-                _ => format!("the callee's outcome: {e:?}"),
-            })
-        })?;
-    }
     let outcome = hirsel_engine::project_outcome(&execution, &sources)
         .map_err(|error| ToolError::Runtime(format!("{error:?}")))?;
     if let RunOutcome::BudgetExceeded(kind) = outcome {
@@ -567,7 +463,7 @@ fn run_provider_on_host(
         io.finish_recording(&outcome)
             .map_err(|e| ToolError::Runtime(format!("the Io tape: {e}")))?;
     }
-    Ok((outcome, returned))
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -633,8 +529,6 @@ mod tests {
             runtime: Arc::new(engine.runtime_types().unwrap()),
             checked_runtime: Arc::new(checked_runtime),
             code: hirsel_run_schema::CodeReach::Safe,
-            callees: Default::default(),
-            entries: Default::default(),
             revision: engine.semantic_program_revision(&entry).unwrap(),
             foreign_unreplayable: false,
             foreign: Default::default(),
@@ -655,7 +549,6 @@ mod tests {
                 LaunchSelection::read(launch).unwrap(),
                 Some(10000),
                 None,
-                None,
                 false,
             )
             .unwrap_err();
@@ -674,7 +567,6 @@ mod tests {
                     launch,
                     LaunchSelection::read(launch).unwrap(),
                     Some(10000),
-                    None,
                     None,
                     false
                 )

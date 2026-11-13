@@ -843,10 +843,6 @@ fn lower<T>(
                     || unit.header.definition.is_core("$native.list_push_spare")
                     || unit.header.definition.is_core("net.read_into")
                     || unit.header.definition.is_core("read_half.read_into")
-                    // FAIL-2's boundary on every store commit: inlined, its no-failure
-                    // path is the failure-count read and the entry's direct call.
-                    || unit.header.definition.is_core("runner.apply")
-                    || unit.header.definition.is_core("runner.apply_mut")
                 {
                     Attribute::AlwaysInline
                 } else {

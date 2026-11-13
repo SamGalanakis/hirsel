@@ -90,32 +90,7 @@ from the pinned toolchains. Missing or relative paths refuse construction;
 there is no PATH search or system LLVM fallback. Memcheck launches retain their
 input library path when the child's environment is cleared.
 
-Every executable and program library links with the pinned `ld.lld` and the
-link kit (`hirsel-native/src/kit.rs`, built by `tools/buck2/native-toolchain/link_kit.py`):
-no compiler driver, host crt, libgcc or sysroot is on the line, for either
-target. The kit holds, per target, link-only stub DSOs for the glibc 2.28 ABI
-floor (libc, libm, libpthread, libdl, librt, libutil, libresolv and the loader,
-named in the loader's search order with libc before the loader), glibc 2.28's
-`Scrt1.o`/`crti.o`/`crtn.o`/`libc_nonshared.a`, LLVM's crtbegin/crtend and a
-static LLVM libunwind; its `digest` is its identity. An executable's line is
-`ld.lld -nostdlib --threads=1 -z now -z relro -z noexecstack --eh-frame-hdr
---hash-style=gnu [target options] -pie --dynamic-linker=<canonical loader>
-<crt start> main.o <units> libhirsel_rt.a libunwind.a <foreign inputs>
---as-needed <stubs> libc_nonshared.a <crt end> --gc-sections
---build-id=0x<id>`, run with a cleared environment. There is no RELR: the 2.28
-floor's loader predates DT_RELR. The build ID is a hash of the kit digest, the
-line with every input path replaced by that input's content hash, and those
-contents, so it never depends on a checkout, cache or scratch directory. A
-program image (`hirsel-native/src/runner.rs`) links its units, its launcher objects and
-the runtime's compiler builtins (`libhirsel_builtins.a`) `-shared -Bsymbolic`,
-leaving runtime entries to the process that loads it; `link_host`'s host is
-`host.c` compiled without headers by the pinned clang and linked by the same
-line, exporting the runner's export manifest. Memcheck launches replace the interpreter
-with Valgrind's pinned loader and its library directory as run path. A
-foreign `link` library the kit provides (`c`, `m`, `pthread`, ...) is its stub;
-any other resolves to the first `lib<name>.so` or `.a` in the host's system
-library directories and enters the build ID by content, the one link input
-outside the kit.
+
 
 Default links read the debug-stripped runtime archive. `hirsel build --debug`
 links the debug-bearing one (`debug/libhirsel_rt.a` beside it) and moves the
@@ -133,8 +108,8 @@ compiler-rt `gcc_personality_v0.c` implementation. They never read host libgcc.
 Frozen kits retain both closures within the existing file and byte bounds.
 Ordinary native executables select this fixed-address static closure by default. Foreign
 archive and relocatable object inputs stay static; explicit shared libraries and
-linker scripts retain the closed dynamic runtime. Runner hosts and images remain dynamic, as do
-executables launched with the explicit memcheck loader. Launch and validation
+linker scripts retain the closed dynamic runtime, as do executables launched with the explicit
+memcheck loader. Launch and validation
 inspect ELF program headers so static executable startup never runs through a
 dynamic loader.
 
@@ -160,17 +135,6 @@ run whose tasks interleave host requests by readiness replays its own schedule. 
 recorded Args/Env snapshots use the ordinary Library. `run_path`, `run_path_with_simulation` and `run_file` are the fake-provider
 entry points for semantic fixtures. Production native runs pass the same validated record
 to linking and launch; explicit host runs have streaming stdout and no harness wall-time limit.
-
-Runner calls on the host (`hirsel-host-io/src/runners.rs`): `HostLibrary` keeps the interpreter's runner
-state, issues each send as a `RunnerCall` request and parks the caller's task on it. At the
-caller's idle point `take_calls` starts each callee as its own admitted run: a call-launch
-record of the callee's entry with the call record, the derived seeds and instance, the
-call form's grants and the place's admission policy, sharing the execution's stdout and its
-`Readiness` under the callee's tag, and journaling to `<tape>.call-<ordinal>` when the
-caller records (`RunnerContext`). A callee's end records `call_return` on its own tape and
-delivers its outcome to the caller's wait. Replay returns the recorded completion and starts
-nothing; `check_tapes` loads a set for `hirsel tapes check`.
-
 
 `native::build_path_native` checks a source or manifest and writes a standalone
 executable. Its entry adapter forwards nominal roots in source parameter order,
@@ -252,27 +216,7 @@ all failure causes and source-linked parked waits. Native observation admission
 checks the actual process status against `RunOutcome::exit_code()` before an
 observation may enter differential/agreement comparison.
 
-Runners and program images (`hirsel-native/src/runner.rs`, link design §2): `link_runnable`
-links a program for a launch as an image of the toolchain's runner unless the
-toolchain selects executables (`Execution::Executable`) or the program needs one
-(any foreign-call surface, memcheck), and `link_tests` links a test package's
-dispatcher and adapters the same way; `launch_runnable`, the differential
-campaigns, `run` and `test` run either. A runner links the
-runtime archive and the kit's unwinder with `main` an lld alias of
-`hirsel_rt::runner`'s `hirsel_runner_main`, rooting and exporting its export
-manifest (the archive's `hirsel_rt*` definitions and the runtime symbols the
-builtin-support archive imports); its dynamic table is checked against the
-manifest and its startup audit (init arrays, `DT_INIT`, needed libraries) picks
-fork-server or exec mode, all recorded in `runners/<build-id>/runner.json`. An
-image's build ID is its key; its imports, needed libraries and segments are
-checked against the runner's exports and the kit's stub versions before it is
-published under `images/`. A refusal or an lld error falls back to an
-executable, counted by reason (`hirsel_native::counts`). Served runs go to a pool of
-fork servers, one request at a time each over a Unix socket that carries the
-run's streams (`SCM_RIGHTS`); the server replies with the child's process ID and
-then its raw wait status, and a timeout kills the child's process group.
-`runner_oracle_ready` holds a configuration's executable and image to byte-identical
-output, status and observation record, and cross-replays their tapes.
+
 
 `tests/it-stdlib/stdlib_table.rs` runs the typed-table storage fixtures through
 the real store and checksum implementations: CRUD/reopen, limit atomicity,

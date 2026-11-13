@@ -135,9 +135,6 @@ impl ConcurrentIo {
     pub fn finish_recording(&self, outcome: &hirsel_run_schema::RunOutcome) -> std::io::Result<()> {
         self.core.lock().unwrap().finish_recording(outcome)
     }
-    pub fn deliver(&self, token: u64, completion: hirsel_run_schema::RunnerCompletion) {
-        self.core.lock().unwrap().deliver(token, completion);
-    }
     /// Idle driving never holds the core lock: workers must be able to register interests.
     pub fn wait(&self) -> Result<bool, AdapterError> {
         self.wait_sources()?.wait()

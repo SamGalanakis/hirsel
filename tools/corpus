@@ -28,7 +28,7 @@ are sized from what runs measured: every campaign's injected runs are timed by
 site and recorded in the git common directory's hirsel-heap-costs.tsv (a row a
 run: its sites, the mean seconds of its slowest quarter of the site range, its
 clean run's seconds, the commit, and digests of its case file and of
-STORE_SOURCES; a row whose digests no longer match is not current). A parted
+RUNTIME_SOURCES; a row whose digests no longer match is not current). A parted
 campaign with a current row runs in ceil(sites x cost / (NATIVE_HEAP_FAULT_SECONDS
 - clean)) parts; one without first runs a probe, part 1 of sites // PROBE_SITES,
 whose measured costs size the remaining parts, which skip the probe's sites.
@@ -74,10 +74,9 @@ from sync import (CONFORMANCE_SLICE_PROGRAMS, NATIVE_CONFIG_SECONDS, NATIVE_COVE
                   NATIVE_SELECTED_SLICES, NATIVE_SLICE_SECONDS, SELECTED_SLICES)
 
 CUT = re.compile(r'^(.+\.hir)@(\d+)$')
-STORE = 'conformance/STORE/'
-# What a STORE case's fault sites and their cost follow besides the case file:
+# What a runtime case's fault sites and their cost follow besides the case file:
 # a cost-ledger row measured on other contents of these is not current.
-STORE_SOURCES = ('stdlib/std@1', 'crates/hirsel-store-authority/src')
+RUNTIME_SOURCES = ('stdlib/std@1', 'crates/hirsel-rt/src')
 # A campaign with no current cost-ledger row first runs a probe part of about
 # this many of its sites, spread over the whole site range.
 PROBE_SITES = 400
@@ -146,11 +145,11 @@ def digest(paths):
 def measured_costs(runs, ledger):
     """Each of `runs`' current cost-ledger row: run -> (sites, seconds a site,
     clean seconds, stamp). A row is current while its case file and
-    STORE_SOURCES digest as they do now, so a change to either retires it; the
+    RUNTIME_SOURCES digest as they do now, so a change to either retires it; the
     last current row of a run wins."""
     lines = ledger.read_text().splitlines() if ledger.exists() else []
     wanted, rows, cases = set(runs), {}, {}
-    store = digest(STORE_SOURCES) if lines else None
+    store = digest(RUNTIME_SOURCES) if lines else None
     for line in lines:
         stamp, _, run, case_digest, store_digest, sites, cost, clean = line.split('\t')
         if run not in wanted or store_digest != store:
@@ -197,7 +196,7 @@ def clean_seconds(measures):
 def record_costs(campaigns, commit, ledger):
     """Append a cost-ledger row for each run `campaigns` (heap_campaigns rows
     of this invocation's reports) injected sites of: when, the commit, the run,
-    the digests of its case file and of STORE_SOURCES, its sites, seconds a
+    the digests of its case file and of RUNTIME_SOURCES, its sites, seconds a
     site and clean seconds."""
     by_run = {}
     for measure in campaigns:
@@ -209,7 +208,7 @@ def record_costs(campaigns, commit, ledger):
             rows.append((run, max(m['sites'] for m in measures), cost, clean))
     if not rows:
         return
-    store = digest(STORE_SOURCES)
+    store = digest(RUNTIME_SOURCES)
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     with ledger.open('a') as out:
         for run, sites, cost, clean in rows:

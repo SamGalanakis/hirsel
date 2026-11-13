@@ -163,28 +163,6 @@ pub(super) fn eligible(
     generics: &GenericDeclarations,
     signatures: &Reader<'_>,
 ) -> Result<bool, QueryError> {
-    eligible_with_key_order(t, memo, root, generics, signatures, false)
-}
-
-/// STORE-6 proof over declared representations, independent of H's descriptor.
-pub(super) fn ordered_key(
-    t: &TypeInterner,
-    memo: &TypeMemo,
-    root: TypeId,
-    generics: &GenericDeclarations,
-    signatures: &Reader<'_>,
-) -> Result<bool, QueryError> {
-    eligible_with_key_order(t, memo, root, generics, signatures, true)
-}
-
-fn eligible_with_key_order(
-    t: &TypeInterner,
-    memo: &TypeMemo,
-    root: TypeId,
-    generics: &GenericDeclarations,
-    signatures: &Reader<'_>,
-    ordered: bool,
-) -> Result<bool, QueryError> {
     let mut pending = vec![(root, false)];
     let mut seen = HashSet::default();
     let mut expansions = NominalExpansions::default();
@@ -285,14 +263,6 @@ fn eligible_with_key_order(
                 pending.push((root, false));
             }
             TypeKind::Builtin { kind, arguments } => {
-                if ordered
-                    && matches!(
-                        kind,
-                        BuiltinType::Map | BuiltinType::Set | BuiltinType::Simd
-                    )
-                {
-                    return Ok(false);
-                }
                 let (types, size) = match kind {
                     BuiltinType::Array
                     | BuiltinType::List

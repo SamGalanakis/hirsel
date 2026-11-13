@@ -397,13 +397,7 @@ frozen stdout goldens in `GEN-2-schema-evolution-report-run` intentionally
 report different outcomes. Changed arbitrary predicates report uncertainty,
 including when a programmer believes a change widens acceptance.
 
-These operations remain pure source functions. I/O retains its capability and
-tape rules; replay repeats the same bytes and bound program revision without
-new schema events. Changing a predicate changes program identity. Migration is
-new authorized execution, not historical replay under a substituted predicate.
-[STORE-7/9](storage.md#store-7-rows-and-storage-identity) govern storage
-identity/history/migrations separately; this reporter neither compares storage
-or HSC1 descriptors nor changes their resolution rules.
+
 
 Evolution resolution adapts Apache Avro
 `3a207fa6e87c535b95eafca4cf5a6ef524d77df2`,

@@ -72,7 +72,7 @@ fn compare_at(
                 if let (Value::Handle { kind: ka, id: x }, Value::Handle { kind: kb, id: y }) =
                     (a, b)
                 {
-                    if ka != kb || !matches!(&**ka, "Instant" | "Level") {
+                    if ka != kb || !matches!(&**ka, "Instant") {
                         return Err(StructuralError::InvalidValue);
                     }
                     if x != y {

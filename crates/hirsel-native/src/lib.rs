@@ -147,40 +147,6 @@ fn profile_sources_for_owners<'a>(
         .collect()
 }
 
-/// Encode the same checked runner schemas from an already settled Run root.
-/// This boundary cannot demand source queries or reconstruct runtime types.
-pub fn settled_callee_metadata(
-    facts: std::collections::BTreeMap<String, hirsel_run_schema::CalleeFacts>,
-    runtime: &hirsel_interp::aggregate::RuntimeTypes,
-) -> Result<hirsel_rt::program::CalleeMetadata, NativeError> {
-    if facts.is_empty() {
-        return Ok(hirsel_rt::program::CalleeMetadata {
-            facts,
-            request_schemas: None,
-        });
-    }
-    let failed = |error: String| NativeError::new(StageName::Launch, error);
-    use hirsel_interp::library::runners::{allowlist_schema, core_schema};
-    let schemas = (|| {
-        Ok::<_, hirsel_interp::Error>((
-            core_schema(runtime, "GrantSet")?,
-            allowlist_schema(runtime)?,
-            core_schema(runtime, "RunFrame")?,
-        ))
-    })()
-    .map_err(|e| failed(format!("runner request schemas: {e:?}")))?;
-    let request_schemas = hirsel_rt::program::RunnerRequestSchemas::new(
-        schemas.0.codec.descriptor().to_vec(),
-        schemas.1.codec.descriptor().to_vec(),
-        schemas.2.codec.descriptor().to_vec(),
-    )
-    .map_err(failed)?;
-    Ok(hirsel_rt::program::CalleeMetadata {
-        facts,
-        request_schemas: Some(request_schemas),
-    })
-}
-
 pub use link::{CapturedExecutableLinkInputs, plan_captured_executable_link};
 
 pub mod request_observation;

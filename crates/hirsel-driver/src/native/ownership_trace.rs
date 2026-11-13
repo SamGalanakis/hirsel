@@ -32,11 +32,6 @@ pub fn run_path_with_launch(
         use crate::requests::{
             CompileOperation, CompileResult, CompilerRequests, OwnershipRequest,
         };
-        if matches!(launch, crate::HostLaunch::Callee { .. }) {
-            return Err(crate::ToolError::Runtime(
-                "launch: a runner host runs its callees interpreted".into(),
-            ));
-        }
         let selection = crate::launch_binding::LaunchSelection::read_for_compilation(launch)?;
         let inputs = selection.compiler_inputs()?;
         let definition = selection.entry().cloned();

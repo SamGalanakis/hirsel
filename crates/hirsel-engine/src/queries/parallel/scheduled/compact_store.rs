@@ -284,7 +284,6 @@ impl FrontBodyQueries {
             diagnostics,
             diagnostic_phases: &outcome.diagnostic_phases,
             lowering,
-            table_keys: outcome.table_keys.as_ref(),
         };
         drop(self.records.prepare_record_encoding(
             &facts,
@@ -493,7 +492,6 @@ mod tests {
                     diagnostics: &vec![],
                     diagnostic_phases: &vec![],
                     lowering: None,
-                    table_keys: None,
                 };
                 let mut record = Record {
                     key: key.0,

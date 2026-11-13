@@ -129,29 +129,6 @@ pub fn run_path_native_backend_with_trace_events(
         policy,
         validation,
         trace_events,
-        None,
-    )
-}
-
-/// Run a served `db@1` place's head natively: `launch` is its live tasks.free@1 call record,
-/// and `link` the runner host's end of the place link, which the head serves until it ends.
-pub fn run_place_head(
-    path: &Path,
-    launch: crate::HostLaunch<'_>,
-    backend: super::Backend,
-    policy: crate::session::Policy,
-    link: std::os::fd::BorrowedFd<'_>,
-) -> Result<Result<RunOutcome, NativeError>, ToolError> {
-    run_native(
-        path,
-        launch,
-        None,
-        backend,
-        Output::Inherit { json: false },
-        policy,
-        super::Validation::Ready,
-        None,
-        Some(link),
     )
 }
 
@@ -165,13 +142,7 @@ fn run_native(
     policy: crate::session::Policy,
     validation: super::Validation,
     trace_events: Option<&Path>,
-    place: Option<std::os::fd::BorrowedFd<'_>>,
 ) -> Result<Result<RunOutcome, NativeError>, ToolError> {
-    if place.is_none() && matches!(launch, crate::HostLaunch::Callee { .. }) {
-        return Err(ToolError::Runtime(
-            "launch: a runner host runs its callees interpreted".into(),
-        ));
-    }
     crate::session::with_session(path, policy, |session| {
         crate::program_record::run(
             session,
@@ -184,7 +155,6 @@ fn run_native(
                 validation,
                 output,
                 trace_events,
-                place,
             },
         )
     })

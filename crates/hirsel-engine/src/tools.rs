@@ -135,7 +135,7 @@ pub fn default_context() -> FileContext {
 }
 /// The spec's parts under conformance/old-spec, by file name, which the spec hash covers.
 /// The conformance spec_links test checks that they are the whole directory.
-pub const SPEC_PARTS: [(&str, &[u8]); 27] = [
+pub const SPEC_PARTS: [(&str, &[u8]); 24] = [
     (
         "brands.md",
         include_bytes!("../../../conformance/old-spec/brands.md"),
@@ -209,16 +209,8 @@ pub const SPEC_PARTS: [(&str, &[u8]); 27] = [
         include_bytes!("../../../conformance/old-spec/proof-seam.md"),
     ),
     (
-        "runners.md",
-        include_bytes!("../../../conformance/old-spec/runners.md"),
-    ),
-    (
         "schema.md",
         include_bytes!("../../../conformance/old-spec/schema.md"),
-    ),
-    (
-        "scoped-transport.md",
-        include_bytes!("../../../conformance/old-spec/scoped-transport.md"),
     ),
     (
         "semantics.md",
@@ -231,10 +223,6 @@ pub const SPEC_PARTS: [(&str, &[u8]); 27] = [
     (
         "std-library.md",
         include_bytes!("../../../conformance/old-spec/std-library.md"),
-    ),
-    (
-        "storage.md",
-        include_bytes!("../../../conformance/old-spec/storage.md"),
     ),
     (
         "syntax.md",
@@ -622,7 +610,7 @@ fn run_observed_bounded(
 fn run_observed(
     engine: &mut QueryEngine,
     config: &RunConfiguration,
-    mut simulation: SimulationConfig,
+    simulation: SimulationConfig,
     checked: bool,
 ) -> Result<ObservedExecution, ToolError> {
     let _progress =
@@ -633,10 +621,7 @@ fn run_observed(
         phase: Some(QueryKind::Signature),
         sources: error_sources.clone(),
     };
-    // Entry identities serve `runner.entry_id` and `runner.apply` as well as runner
     // calls, so a run without runners carries them too, as `tir_execution` does.
-    simulation.callees =
-        std::sync::Arc::new(crate::callee_facts(engine, &config.entry).map_err(query_error)?);
     let signature = engine
         .item_signature(&config.entry)
         .map_err(query_error)?

@@ -560,10 +560,7 @@ constant type/identity from the signature and construct nothing in the reading
 frame. Shared Materialized/ValueNode/ValueKind rows belong here; TirProvider must
 serve constant snapshots and dependency-first/source-ordered definitions (#63).
 FunctionReference names a callable and its generic arguments; V checks its
-signature-derived value promises directly. Typed `Entry[F]` (RUN-3), it must name a
-non-generic, non-extern, complete definition whose type has F's shape (parameters,
-passing modes, labels and result). Capture-free forwarding bodies and
-structural recognition of them are removed; literal/capturing closures stay Closure.
+signature-derived value promises directly.
 
 Closure invocation allocation is independently checked for String/Bytes, boxed,
 sequence, Map/Set and owned closure constructions. V computes construction escape
@@ -910,11 +907,6 @@ Constant reads independently check complete size actuals, their lexical declarat
 and the substituted constant result. Constant declarations admit size parameters
 only. The hand-built constant-size controls include a valid read, missing actuals,
 an undeclared size and a wrong instantiated Inline length.
-
-STORE-6 independently walks declared, substituted key representations at typed
-store calls and specialized function references. Map, Set and Simd are refused
-at every represented depth. `table_controls.rs` contains source-free call and
-function-value controls with scalar and sequence twins.
 
 Set `HIRSEL_VALIDATE_PROFILE=1` to print one tab-separated stderr row per
 validation: `hirsel-validate-profile`, definition path, elapsed nanoseconds,

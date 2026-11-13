@@ -2270,7 +2270,6 @@ impl<'a, 'input> Checker<'a, 'input> {
         }
         let (store, f, generics) = match callee {
             Callee::Definition { path, arguments } => {
-                self.table_key_arguments(path, arguments);
                 let Some(s) = self.signatures.get(path) else {
                     self.error(ViolationKind::MissingSignature(path.clone()));
                     return;
@@ -3023,7 +3022,6 @@ impl<'a, 'input> Checker<'a, 'input> {
                         entity: "indirect CPU operation",
                     });
                 }
-                self.table_key_arguments(definition, arguments);
                 let Some(signature) = self.signatures.get(definition) else {
                     self.error(ViolationKind::MissingSignature(definition.clone()));
                     return;
@@ -3144,31 +3142,12 @@ impl<'a, 'input> Checker<'a, 'input> {
                     }
                     _ => None,
                 };
-                // RUN-3: an entry `Entry[F]` names a non-generic, non-extern, complete
-                // definition of F's shape: parameters, passing modes, labels and result.
-                let entry = match &store.get(ty).map(|t| &t.kind) {
-                    Some(TypeKind::Named {
-                        definition: named,
-                        arguments,
-                    }) if *named.path() == DefPath::core("Entry") => match arguments[..] {
-                        [GenericArgument::Type(signature)] => Some(signature),
-                        _ => None,
-                    },
-                    _ => None,
-                };
-                let matches = match (callback, entry) {
-                    (Some(signature), _) => {
+                let matches = match callback {
+                    Some(signature) => {
                         store.shape_eq(signature, derived).unwrap_or(false)
                             && self.same_result_relations(store, signature, derived)
                     }
-                    (None, Some(signature)) => {
-                        declared.foreign.is_none()
-                            && declared.generics.is_empty()
-                            && !declared.incomplete
-                            && store.shape_eq(signature, derived).unwrap_or(false)
-                            && self.same_result_relations(store, signature, derived)
-                    }
-                    (None, None) => self.compatible(store, ty, derived, TypeRelation::Value),
+                    None => self.compatible(store, ty, derived, TypeRelation::Value),
                 };
                 if !matches {
                     self.error(ViolationKind::TypeMismatch {

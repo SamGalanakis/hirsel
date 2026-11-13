@@ -122,7 +122,6 @@ impl NativeBootstrap {
             plan.options.flat_walk,
             plan.options.scoped_specialization,
             discharge,
-            &plan.options.places,
             proofs
                 .as_ref()
                 .map(|proofs| super::native_products::evidence_identity(&proofs.evidence)),
@@ -362,9 +361,6 @@ impl NativeBootstrap {
             .map(|(path, context)| (path.clone(), context.entry.0))
             .collect();
         let operations = Arc::new(declarations.program.operation_registry());
-        let callees =
-            hirsel_native::settled_callee_metadata(facts.run.callees.clone(), &facts.run.runtime)
-                .map_err(|e| e.to_string())?;
         let mut source = NativeLinkSource::from_settled(
             NativeLinkFacts {
                 program: &declarations.program,
@@ -376,60 +372,10 @@ impl NativeBootstrap {
                 signatures: facts.signatures.clone(),
                 semantic: facts.semantic.clone(),
                 selected: std::slice::from_ref(&facts.run.entry),
-                callees: Some(callees),
             },
             &reader,
         )
         .map_err(|e| e.to_string())?;
-        let mut library_roots = if plan
-            .requested_run
-            .as_ref()
-            .is_some_and(|run| run.record().launch == hirsel_run_schema::LaunchKind::Call)
-        {
-            let (callee, form) = facts
-                .run
-                .entries
-                .get(&facts.run.entry.to_string())
-                .ok_or("native call has no checked Run entry")?;
-            let roots = hirsel_engine_admission::entry_roots(
-                &declarations.program.types,
-                &declarations.program.signatures[&facts.run.entry],
-                hirsel_run_schema::LaunchKind::Call,
-            )
-            .map_err(|e| e.to_string())?;
-            if callee.program != facts.run.revision.digest()
-                || *form
-                    != if roots.is_empty() {
-                        hirsel_run_schema::CallForm::Compute
-                    } else {
-                        hirsel_run_schema::CallForm::Call
-                    }
-            {
-                return Err("native call differs from checked Run entry".into());
-            }
-            vec![
-                source
-                    .bind_call(
-                        &declarations.program,
-                        &facts.run.entry,
-                        &plan.options.target,
-                    )
-                    .map_err(|e| e.to_string())?,
-            ]
-        } else {
-            Vec::new()
-        };
-        if !plan.options.places.is_empty() {
-            library_roots.extend(
-                source
-                    .bind_heads(
-                        &declarations.program,
-                        &plan.options.places,
-                        &plan.options.target,
-                    )
-                    .map_err(|e| e.to_string())?,
-            );
-        }
         if let Some(run) = plan.requested_run {
             source
                 .bind_run(&facts.run.entry, run)
@@ -446,8 +392,7 @@ impl NativeBootstrap {
         if plan.output != CompilationOutput::Objects {
             declarations.select_entries(
                 std::iter::once(facts.run.entry.clone())
-                    .chain(plan.test_entries.iter().map(|(path, _)| path.clone()))
-                    .chain(plan.options.places.iter().cloned()),
+                    .chain(plan.test_entries.iter().map(|(path, _)| path.clone())),
             )?;
         }
         let emission = EmissionOptions::request(
@@ -489,7 +434,7 @@ impl NativeBootstrap {
             plan.policy,
             self.weight,
             admission.instances,
-            &library_roots,
+            &[],
         )?
         .with_store_verification(plan.verify_store)?
         .with_front_lower(front)?;

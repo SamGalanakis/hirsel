@@ -6,7 +6,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-# The fake S3 server (`fake_s3`), for this crate's and hirsel-store-authority's tests.
+# The fake S3 server (`fake_s3`) for provider tests.
 testing = []
 
 [dependencies]

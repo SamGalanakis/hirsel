@@ -334,7 +334,6 @@ impl Registry {
             | R::Telemetry { .. } => keys.push((ROOT, S)),
             // Provider calls order against each other through the authority's history;
             // the whole seam is serialized, since authorities share no finer key yet.
-            R::Seam(_) => keys.push((ROOT, X)),
             R::EnvGet { .. }
             | R::EnvNarrow { .. }
             | R::Ready { .. }
@@ -471,11 +470,6 @@ impl Registry {
             R::Accept { listener, .. } | R::LocalAddr { listener, .. } => {
                 on(self, &mut keys, *listener, X)
             }
-            R::RunnerCall(_)
-            | R::RunnerPoll { .. }
-            | R::RunnerCancel { .. }
-            | R::CallReturn(_)
-            | R::Stopped => keys.push((PLACE, X)),
         }
         if self.unknown_storage && keys.iter().any(|(key, _)| *key == NAMESPACE) {
             keys.push((COUPLED, X));

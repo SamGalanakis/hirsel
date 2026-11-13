@@ -18,7 +18,6 @@ impl Wire for RecordedRun {
             .map(|p| (&p.reference, &p.revision, p.revoked))
             .map(|(a, b, c)| (a.clone(), b.clone(), c))
             .encode(out);
-        self.instance.encode(out);
     }
     fn decode(input: &mut Decode<'_>) -> Result<Self, String> {
         Ok(Self {
@@ -36,7 +35,6 @@ impl Wire for RecordedRun {
                     revoked,
                 },
             ),
-            instance: Wire::decode(input)?,
         })
     }
 }

@@ -17,26 +17,13 @@ mod path;
 pub use file_reads::{FileReadScript, FileReadiness};
 pub mod frame;
 pub mod ownership_trace;
-pub mod place;
 pub mod tape;
 pub use path::confined_relative;
 
-mod calls;
 mod grants;
-mod runners;
-pub use calls::{
-    CallCause, CallForm, CallOutcome, CallRecord, CalleeFacts, CalleeOutcome, Cause,
-    RunnerCompletion, RunnerRequest, call_key, callee_instance, callee_seed, callees_json,
-    parse_callees, request_digest,
-};
 pub use grants::{
     GrantSet, NET_OPERATIONS, allowlist_bytes, env_within, io_within, mount_within, narrow,
     net_operation_within, net_rule_within, process_rule_within,
-};
-pub use runners::{
-    DEFAULT_QUEUE, DEFAULT_RECONNECT, DEFAULT_THREADS, Endpoint, FaultRate, PlaceAdmission,
-    PlaceState, Placed, Retry, Roots, RunnerEntry, SIM_FAULT_SITES, TlsFiles, place_main_path,
-    sim_model_sites,
 };
 mod outcome;
 pub use outcome::{
@@ -54,9 +41,7 @@ pub use net::{
     encode_net_peers, first_expecting_client, listener_name, net_client_mismatch,
     net_client_unaccepted, net_client_unmet,
 };
-mod authorities;
 mod child;
-pub use authorities::AuthorityGrant;
 mod signals;
 pub use signals::{SignalKind, SignalsGrant, signal_kinds};
 pub mod tls;
@@ -95,9 +80,6 @@ pub enum ProviderContract {
     AdmitSafe,
     BudgetsNone,
     BudgetsLimits,
-    RunnerLocalThreads,
-    RunnerSim,
-    RunnerRemoteTls,
     TelemetryCapture,
     TelemetryNull,
 }
@@ -110,7 +92,6 @@ impl ProviderContract {
         Self::MonotonicNanoseconds,
         Self::WallUnixNanoseconds,
         Self::CpuScoped,
-        Self::RunnerLocalThreads,
         Self::NetScript,
         Self::NetStream,
         Self::ProcessScriptTimed,
@@ -118,10 +99,8 @@ impl ProviderContract {
         Self::ProcessSpawn,
         Self::RandomSplitMix64,
         Self::RandomSystem,
-        Self::RunnerRemoteTls,
         Self::SignalsHost,
         Self::SignalsScript,
-        Self::RunnerSim,
         Self::StderrBytes,
         Self::StdinBytes,
         Self::StdoutBytes,
@@ -153,9 +132,6 @@ impl ProviderContract {
             Self::AdmitSafe => "admit.safe@1",
             Self::BudgetsNone => "budgets.none@1",
             Self::BudgetsLimits => "budgets.limits@3",
-            Self::RunnerLocalThreads => "local.threads@1",
-            Self::RunnerSim => "sim@1",
-            Self::RunnerRemoteTls => "remote.tls@1",
             Self::TelemetryCapture => "telemetry.capture@1",
             Self::TelemetryNull => "telemetry.null@1",
         }
@@ -173,8 +149,6 @@ impl ProviderContract {
 pub enum LaunchKind {
     Main,
     Test,
-    /// A callee run answering a runner call (RUN-10); its record has a `call` member.
-    Call,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -190,10 +164,6 @@ pub struct Inputs {
     pub random_seed: u64,
     pub test_seed: u64,
     pub scheduler: Option<Scheduler>,
-    /// The seed `sim@1` runners draw their faults from; absent from canonical bytes when
-    /// absent, so records without one keep their identity.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fault_seed: Option<u64>,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -269,10 +239,6 @@ pub struct IoGrants {
     pub dirs: Vec<Mount>,
     pub net: Option<NetGrant>,
     pub process: Option<ProcessGrant>,
-    /// The runners this run calls through (RUN-1), sorted and unique by name; absent from
-    /// canonical bytes when there are none, so records without runners keep their identity.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub runners: Vec<RunnerEntry>,
     /// The Telemetry capture provider; absent from canonical bytes when absent, so
     /// records without telemetry keep their identity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -284,10 +250,6 @@ pub struct IoGrants {
     /// Finite scoped CPU service authority, subordinate to the Tasks grant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu: Option<CpuGrant>,
-    /// The store authorities `io.authority` returns, by name; absent from canonical
-    /// bytes when there are none, so records without them keep their identity.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub authorities: std::collections::BTreeMap<String, AuthorityGrant>,
 }
 /// A scoped CPU service's bounds. Validation requires Tasks, a known provider,
 /// 1..=16 workers, one active domain, and positive byte limits.

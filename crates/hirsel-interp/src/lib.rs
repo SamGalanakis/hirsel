@@ -239,89 +239,6 @@ pub(crate) fn invalid(message: impl Into<String>) -> Error {
     Error::InvalidTir(message.into())
 }
 
-/// A callee run a runner call started in this process (RUN-10). The caller's provider
-/// built its world; the execution runs it beside its caller (RUN-12).
-pub struct CalleeStart {
-    /// The caller's wait for the call's outcome.
-    pub token: u64,
-    pub configuration: RunConfiguration,
-    pub arguments: Vec<Value>,
-    pub operations: Box<dyn Operations>,
-    pub budgets: RunBudgets,
-    /// `sim@1`'s `crash` fault: the callee's place stops it at this point, counted in its
-    /// requests where its provider makes them (`Operations::stops_itself`), else in its
-    /// suspensions. A callee that ends first ends with its outcome withheld.
-    pub crash_after: Option<u32>,
-    /// The call as a host provider admits its callee run.
-    pub call: CallStart,
-}
-/// A sent call as its callee run's record states it (RUN-10).
-pub struct CallStart {
-    /// The place: the runner entry the call went through.
-    pub runner: hirsel_run_schema::RunnerEntry,
-    /// The grant set the request selected.
-    pub grants: hirsel_run_schema::IoGrants,
-    pub form: hirsel_run_schema::CallForm,
-    pub cause: hirsel_run_schema::Cause,
-    pub argument: Vec<u8>,
-    pub schemas: CallSchemas,
-}
-/// The codec schemas of a call's result and error, and of a run's `Failure`.
-#[derive(Clone, Debug)]
-pub struct CallSchemas {
-    pub result: std::sync::Arc<aggregate::CodecProgram>,
-    pub error: std::sync::Arc<aggregate::CodecProgram>,
-    pub failure: std::sync::Arc<aggregate::CodecProgram>,
-}
-/// A transact or query call to a `db@1` place in this execution (STORE-12): the
-/// execution delivers it to the place's head run, starting the head from `head` when the
-/// place has none yet, and returns the head's end to the caller's wait `token`.
-pub struct PlaceArrival {
-    /// The place: the `sim@1` node that holds it.
-    pub place: String,
-    pub token: u64,
-    /// The head's run, from the caller that first reached the place.
-    pub head: Option<HeadStart>,
-    pub call: ArrivedCall,
-}
-/// A place's head run: its entry's configuration and arguments, and its provider, which
-/// grants the place's inbox.
-pub struct HeadStart {
-    pub configuration: RunConfiguration,
-    pub arguments: Vec<Value>,
-    pub operations: Box<dyn Operations>,
-}
-/// One arrived call as the head's `arrival.request` states it (core `Arrived`).
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ArrivedCall {
-    pub form: hirsel_run_schema::CallForm,
-    pub path: String,
-    pub fingerprint: [u8; 32],
-    pub code: [u8; 32],
-    pub caller: String,
-    pub stream: [u8; 32],
-    pub epoch: u64,
-    pub position: u64,
-    pub digest: [u8; 32],
-    pub acknowledged: u64,
-    pub level: Option<String>,
-    pub argument: Vec<u8>,
-}
-
-/// How a callee run ended, as its caller's provider learns it.
-#[derive(Debug)]
-pub enum CalleeEnd {
-    /// Its entry returned this `Result`.
-    Returned(Value),
-    /// It ended in a language failure: the chain, primary first.
-    Failed(Vec<observation::FailureRecord>),
-    BudgetExceeded(BudgetKind),
-    /// Its call's cancellation arrived before it started.
-    Canceled,
-    /// Its place stopped it without an outcome (`sim@1`'s `crash`).
-    Abandoned,
-}
-
 /// The watched waits a poll may complete.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Woken {
@@ -439,9 +356,6 @@ operation_boundary! {
     fn ownership_task_path(&self, _id: u64) -> Option<Vec<u32>> { None }
     /// Actual provider channel identity for a live endpoint, only queried by diagnostics.
     fn ownership_channel(&self, _endpoint: u64) -> Option<u64> { None }
-    /// A callee run whose provider stops it at its place's crash point itself, before one
-    /// of its requests (`sim@1` on a host), instead of the execution counting suspensions.
-    fn stops_itself(&self) -> bool { false }
     /// Exact replay cannot issue cleanup requests after an artificial evaluator cut:
     /// the recording describes the uninterrupted run. Stop at the guard instead.
     /// Other providers retain their ordinary tooling cleanup.
@@ -573,55 +487,10 @@ operation_boundary! {
     /// Whether a parked operation is ready now, asked of every idle run of an execution
     /// before any of them waits (RUN-12); never blocks.
     fn ready_now(&mut self) -> Result<bool, Error> { Ok(false) }
-    /// The callee runs this run's runner calls sent since the last take (RUN-10).
-    fn take_calls(&mut self) -> Vec<CalleeStart> {
-        vec![]
-    }
-    /// The waits of sent calls whose scope was cancelled since the last take: each
-    /// call's cancellation is forwarded to its callee (RUN-9).
-    fn take_cancels(&mut self) -> Vec<u64> {
-        vec![]
-    }
-    /// The callee run of the call parked at `token` ended.
-    fn call_ended(&mut self,
-        _token: u64,
-        _end: CalleeEnd,
-        _context: &mut OperationContext<'_>) -> Result<(), Error> {
-        Err(invalid("unexpected callee outcome"))
-    }
-    /// The calls this run sent to places in this execution since the last take.
-    fn take_arrivals(&mut self) -> Vec<PlaceArrival> {
-        vec![]
-    }
-    /// This run is a place's head: `call` arrived in its inbox as arrival `id`.
-    fn deliver_arrival(&mut self, _id: u64, _call: ArrivedCall) -> Result<(), Error> {
-        Err(invalid("an arrival for a run that holds no inbox"))
-    }
-    /// The ends this head gave since the last take, by arrival.
-    fn take_arrival_ends(&mut self) -> Vec<(u64, hirsel_run_schema::CallOutcome)> {
-        vec![]
-    }
-    /// This head ended: the ends of the arrivals it held, `NotRun` for those it never
-    /// took. Any other arrival still owed an end is `InDoubt(Abandoned())`.
-    fn place_closed(&mut self) -> Vec<(u64, hirsel_run_schema::CallOutcome)> {
-        vec![]
-    }
-    /// The call this run sent to a place, parked at `token`, ended.
-    fn arrival_ended(&mut self,
-        _token: u64,
-        _end: hirsel_run_schema::CallOutcome,
-        _context: &mut OperationContext<'_>) -> Result<(), Error> {
-        Err(invalid("an end for a run that sent no arrival"))
-    }
+
+
     /// A forwarded cancellation: cancel this callee run's root scope with cause `Parent`.
     fn cancel_run(&mut self) {}
-    /// This run, a callee, ended: its provider records its outcome (RUN-11).
-    fn callee_ended(&mut self,
-        _end: &CalleeEnd,
-        _runtime: &aggregate::RuntimeTypes,
-        _context: &mut OperationContext<'_>) -> Result<(), Error> {
-        Ok(())
-    }
     }
     required {
     fn call(&mut self,

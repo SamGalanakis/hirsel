@@ -872,8 +872,6 @@ dependencies = [
  "hirsel-query-products",
  "hirsel-rc",
  "hirsel-registry",
- "hirsel-remote",
- "hirsel-remote-host",
  "hirsel-requests",
  "hirsel-resolve",
  "hirsel-rt",
@@ -1077,7 +1075,6 @@ dependencies = [
  "hirsel-intern",
  "hirsel-interp",
  "hirsel-registry",
- "hirsel-remote",
  "hirsel-rt",
  "hirsel-run-config",
  "hirsel-run-schema",
@@ -1114,7 +1111,6 @@ dependencies = [
  "hirsel-kernels",
  "hirsel-run-schema",
  "hirsel-span",
- "hirsel-store-authority",
  "hirsel-syntax",
  "hirsel-tir",
  "hirsel-type-analysis",
@@ -1407,7 +1403,6 @@ dependencies = [
  "hirsel-rt-operations",
  "hirsel-run-config",
  "hirsel-run-schema",
- "hirsel-store-authority",
  "hirsel-syntax",
  "libc",
  "object",
@@ -1664,29 +1659,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hirsel-remote"
-version = "0.1.0"
-dependencies = [
- "hirsel-guard",
- "hirsel-run-schema",
- "hirsel-types",
- "rustls",
- "rustls-webpki",
- "sha2",
- "webpki-roots",
-]
-
-[[package]]
-name = "hirsel-remote-host"
-version = "0.1.0"
-dependencies = [
- "hirsel-guard",
- "hirsel-remote",
- "hirsel-run-schema",
- "tempfile",
-]
-
-[[package]]
 name = "hirsel-requests"
 version = "0.1.0"
 dependencies = [
@@ -1724,7 +1696,6 @@ dependencies = [
  "hirsel-proof-export",
  "hirsel-query-products",
  "hirsel-rc",
- "hirsel-remote",
  "hirsel-rt",
  "hirsel-rt-operations",
  "hirsel-run-config",
@@ -1770,13 +1741,11 @@ dependencies = [
  "hirsel-kernels",
  "hirsel-layout",
  "hirsel-lir",
- "hirsel-remote",
  "hirsel-rt",
  "hirsel-rt-operations",
  "hirsel-run-config",
  "hirsel-run-schema",
  "hirsel-stack",
- "hirsel-store-authority",
  "hirsel-syntax",
  "hirsel-tir",
  "hirsel-types",
@@ -1804,7 +1773,6 @@ version = "0.1.0"
 dependencies = [
  "hirsel-guard",
  "hirsel-run-schema",
- "hirsel-store-authority",
  "libc",
  "proptest",
  "serde",
@@ -1856,18 +1824,6 @@ name = "hirsel-stack"
 version = "0.1.0"
 dependencies = [
  "hirsel-guard",
-]
-
-[[package]]
-name = "hirsel-store-authority"
-version = "0.1.0"
-dependencies = [
- "hirsel-guard",
- "hirsel-object-storage",
- "hirsel-run-schema",
- "libc",
- "sha2",
- "tempfile",
 ]
 
 [[package]]

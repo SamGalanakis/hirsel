@@ -1,12 +1,11 @@
 //! Source growth products are invalidated by the existing query graph. Only
 //! pending source roots demand checked summaries. Components name canonical
 //! parameter nodes and edges; their verdict references current position rows.
-use hirsel_diag::Diagnostic;
 use hirsel_query_products::CheckedSummary;
 use hirsel_query_products::GenericParameterRef;
 use hirsel_query_products::GrowthEdge;
 use hirsel_span::Span;
-use hirsel_syntax::{ContentHash, DefId, DefPath};
+use hirsel_syntax::{ContentHash, DefId};
 use hirsel_types::SharedSlice;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -18,13 +17,10 @@ pub(crate) struct SourceGrowth {
     roots: BTreeSet<DefId>,
     pending: BTreeMap<DefId, bool>,
     products: BTreeMap<DefId, SharedSlice<GrowthEdge>>,
-    table_calls: BTreeMap<DefId, BTreeSet<DefPath>>,
     region_calls: BTreeSet<DefId>,
     components: BTreeMap<ContentHash, Vec<EdgeRef>>,
     growing: Vec<EdgeRef>,
     topology_dirty: bool,
-    generation: u64,
-    table_result: Option<Vec<Diagnostic>>,
     unavailable: Option<Option<hirsel_query_products::QueryKind>>,
 }
 impl SourceGrowth {
@@ -35,17 +31,11 @@ impl SourceGrowth {
             self.roots.remove(&definition);
         }
         self.pending.insert(definition, present);
-        self.invalidate_table();
     }
     pub(crate) fn invalidate(&mut self, definition: DefId) {
         if self.roots.contains(&definition) {
             self.pending.insert(definition, true);
-            self.invalidate_table();
         }
-    }
-    pub(crate) fn invalidate_table(&mut self) {
-        self.generation += 1;
-        self.table_result = None;
     }
     pub(crate) fn unavailable(&mut self, unavailable: Option<hirsel_query_products::QueryKind>) {
         if self.unavailable != Some(unavailable) {
@@ -53,7 +43,6 @@ impl SourceGrowth {
             for &root in &self.roots {
                 self.pending.insert(root, true);
             }
-            self.invalidate_table();
         }
     }
     pub(crate) fn pop(&mut self) -> Option<(DefId, bool)> {
@@ -62,7 +51,6 @@ impl SourceGrowth {
     pub(crate) fn retire(&mut self, definition: DefId) {
         self.roots.remove(&definition);
         self.pending.remove(&definition);
-        self.table_calls.remove(&definition);
         self.region_calls.remove(&definition);
         self.topology_dirty |= self.products.remove(&definition).is_some();
     }
@@ -95,38 +83,10 @@ impl SourceGrowth {
         } else {
             self.products.insert(definition, edges);
         }
-        let calls: BTreeSet<_> = checked
-            .summary
-            .calls
-            .iter()
-            .filter_map(|call| {
-                let path = call.callee.path();
-                (!hirsel_types::core_roles::table_key_parameters(path).is_empty())
-                    .then(|| path.clone())
-            })
-            .collect();
-        if calls.is_empty() {
-            self.table_calls.remove(&definition);
-        } else {
-            self.table_calls.insert(definition, calls);
-        }
     }
-    pub(crate) fn table_calls(&self) -> impl Iterator<Item = &DefPath> {
-        self.table_calls.values().flat_map(|calls| calls.iter())
-    }
+
     pub(crate) fn has_region_calls(&self) -> bool {
         !self.region_calls.is_empty()
-    }
-    pub(crate) fn generation(&self) -> u64 {
-        self.generation
-    }
-    pub(crate) fn table_result(&self) -> Option<Vec<Diagnostic>> {
-        self.table_result.clone()
-    }
-    pub(crate) fn record_table_result(&mut self, generation: u64, result: Vec<Diagnostic>) {
-        if generation == self.generation && self.pending.is_empty() {
-            self.table_result = Some(result);
-        }
     }
     pub(crate) fn edges(&self) -> impl Iterator<Item = &GrowthEdge> {
         self.products.values().flat_map(|edges| edges.iter())

@@ -1,12 +1,9 @@
-//! `task.isolate` and `runner.apply` (FAIL-2): the runtime's `isolate.rs`. The `Isolate`
+//! `task.isolate` (FAIL-2): the runtime's `isolate.rs`. The `Isolate`
 //! terminator moves the running task's failures since the body's record count
 //! into the caught chain, its own attributed to its spawn path; the body reads
 //! each record's fields through the `$intrinsic.Isolate*` entries. A site's
 //! line and column come from the operations model, which holds the sources.
 use super::*;
-
-/// The runtime's `hirsel_rt::isolate::LAZY_START`: the start bit of a lazy invocation.
-const LAZY_START: u64 = 1 << 63;
 
 #[derive(Clone)]
 pub(super) struct Invocation {
@@ -23,10 +20,7 @@ impl<S: Stage> Machine<'_, S> {
         let Val::Bits { bits, .. } = self.read_use(f, start)? else {
             return fail(V::TypeConfusion, "an isolation start that is not a count");
         };
-        // `runner.apply`'s begin recorded no invocation; its catch records it (the runtime's
-        // `LAZY_START`).
-        let lazy = bits & u128::from(LAZY_START) != 0;
-        let start = (bits & !u128::from(LAZY_START)) as usize;
+        let start = bits as usize;
         if start >= self.failures.len() {
             return fail(V::Malformed, "an isolation that caught no failure");
         }
@@ -34,12 +28,6 @@ impl<S: Stage> Machine<'_, S> {
         self.unanchored_failures.retain(|&i| i < start);
         let s = self.scheduler();
         let current = s.current;
-        if lazy {
-            s.task(current)?.isolations.push(Invocation {
-                mark: start,
-                caught: None,
-            });
-        }
         let own = s.task(current)?.path.clone();
         let spawns = s.task_spawns();
         spawns.resize(start + failures.len(), None);
@@ -87,10 +75,6 @@ impl<S: Stage> Machine<'_, S> {
             bits: u128::from(bits),
         };
         let val = match name {
-            // `runner.apply`'s begin records nothing and is no scheduling point.
-            "$intrinsic.ApplyBegin" => {
-                bits(ScalarKind::U64, self.failures.len() as u64 | LAZY_START)
-            }
             "$intrinsic.IsolateBegin" => {
                 let count = self.failures.len() as u64;
                 let s = self.scheduler();

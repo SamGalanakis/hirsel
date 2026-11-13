@@ -173,7 +173,6 @@ pub(super) struct FactsRef<'a> {
     pub(super) diagnostics: &'a Vec<Diagnostic>,
     pub(super) diagnostic_phases: &'a Vec<(Diagnostic, String)>,
     pub(super) lowering: Option<&'a lowering::LoweringUse>,
-    pub(super) table_keys: Option<&'a Arc<crate::table_keys::TableKeyUse>>,
 }
 #[derive(Clone, serde::Deserialize)]
 #[serde(try_from = "PackedFacts")]
@@ -184,7 +183,6 @@ pub(super) struct Facts {
     pub(super) diagnostics: Vec<Diagnostic>,
     pub(super) diagnostic_phases: Vec<(Diagnostic, String)>,
     pub(super) lowering: Option<lowering::LoweringUse>,
-    pub(super) table_keys: Option<Arc<crate::table_keys::TableKeyUse>>,
 }
 impl Facts {
     fn view(&self) -> FactsRef<'_> {
@@ -195,7 +193,6 @@ impl Facts {
             diagnostics: &self.diagnostics,
             diagnostic_phases: &self.diagnostic_phases,
             lowering: self.lowering.as_ref(),
-            table_keys: self.table_keys.as_ref(),
         }
     }
     fn visit_types_mut(&mut self, mut visit: impl FnMut(&mut hirsel_types::TypeId)) {
@@ -221,9 +218,6 @@ impl Facts {
                 summary(&mut Arc::make_mut(checked).summary, &mut visit);
             }
             published.share_checked_storage();
-        }
-        if let Some(keys) = &mut self.table_keys {
-            Arc::make_mut(keys).visit_types_mut(visit);
         }
     }
     fn visit_spans_mut(&mut self, mut visit: impl FnMut(&mut Span)) {
@@ -277,9 +271,6 @@ impl Facts {
         for (value, _) in &mut self.diagnostic_phases {
             diagnostic(value, &mut visit);
         }
-        if let Some(keys) = &mut self.table_keys {
-            Arc::make_mut(keys).visit_spans_mut(visit);
-        }
     }
 }
 impl Facts {
@@ -323,7 +314,6 @@ struct PackedFactsRef<'a> {
     diagnostics: &'a Vec<Diagnostic>,
     diagnostic_phases: &'a Vec<(Diagnostic, String)>,
     lowering: Option<&'a lowering::LoweringUse>,
-    table_keys: Option<&'a Arc<crate::table_keys::TableKeyUse>>,
 }
 #[derive(serde::Deserialize)]
 struct PackedFacts {
@@ -333,7 +323,6 @@ struct PackedFacts {
     diagnostics: Vec<Diagnostic>,
     diagnostic_phases: Vec<(Diagnostic, String)>,
     lowering: Option<lowering::LoweringUse>,
-    table_keys: Option<Arc<crate::table_keys::TableKeyUse>>,
 }
 impl serde::Serialize for FactsRef<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -362,7 +351,6 @@ impl serde::Serialize for FactsRef<'_> {
             diagnostics: self.diagnostics,
             diagnostic_phases: self.diagnostic_phases,
             lowering: self.lowering,
-            table_keys: self.table_keys,
         }
         .serialize(serializer)
     }
@@ -376,7 +364,6 @@ impl serde::Serialize for Facts {
             diagnostics: &self.diagnostics,
             diagnostic_phases: &self.diagnostic_phases,
             lowering: self.lowering.as_ref(),
-            table_keys: self.table_keys.as_ref(),
         }
         .serialize(serializer)
     }
@@ -413,7 +400,6 @@ impl TryFrom<PackedFacts> for Facts {
             diagnostics: facts.diagnostics,
             diagnostic_phases: facts.diagnostic_phases,
             lowering: facts.lowering,
-            table_keys: facts.table_keys,
         })
     }
 }
@@ -470,9 +456,6 @@ impl FactsRef<'_> {
         if let Some(lowering) = self.lowering {
             lowering.retained(&mut w);
         }
-        if let Some(keys) = self.table_keys {
-            w.arc(keys, |w, keys| keys.retained(w));
-        }
         let mut dead = hirsel_query_products::retained::MetadataWeight::default();
         if let Some(uses) = self.dead_arms {
             if !uses.errors.is_empty() {
@@ -516,7 +499,6 @@ impl FrontBodyQueries {
             diagnostics: &facts.diagnostics,
             diagnostic_phases: &facts.diagnostic_phases,
             lowering: facts.lowering.as_ref(),
-            table_keys: facts.table_keys.as_ref(),
         };
         let summary = facts.summary.clone()?;
         let charge = view
@@ -539,7 +521,6 @@ impl FrontBodyQueries {
             facts.diagnostic_phases,
             facts.checked,
             facts.dead_arms,
-            facts.table_keys,
             memos,
             backing,
         );
@@ -663,7 +644,6 @@ impl BodyTask {
             diagnostics,
             diagnostic_phases: &outcome.diagnostic_phases,
             lowering: Some(lowering),
-            table_keys: outcome.table_keys.as_ref(),
         };
         if facts.summary.as_ref().is_some_and(|s| s.storage.is_some()) {
             return;
@@ -678,7 +658,6 @@ impl BodyTask {
             diagnostics: facts.diagnostics.clone(),
             diagnostic_phases: facts.diagnostic_phases.clone(),
             lowering: facts.lowering.cloned(),
-            table_keys: facts.table_keys.cloned(),
         };
         if let Some(carry) = carry {
             self.remember_live_facts(&carry, reference, outcome.reads.clone(), facts);
@@ -884,7 +863,6 @@ impl BodyTask {
             diagnostics: &facts.diagnostics,
             diagnostic_phases: &facts.diagnostic_phases,
             lowering: facts.lowering.as_ref(),
-            table_keys: facts.table_keys.as_ref(),
         };
         self.checkpoint(
             "facts retained bound",
@@ -1005,7 +983,6 @@ mod tests {
                             )],
                             diagnostic_phases: vec![],
                             lowering: None,
-                            table_keys: None,
                         },
                         BTreeMap::new(),
                         std::sync::Weak::new(),
@@ -1049,7 +1026,6 @@ mod tests {
                         )],
                         diagnostic_phases: vec![],
                         lowering: None,
-                        table_keys: None,
                     },
                     BTreeMap::new(),
                     std::sync::Weak::new(),
@@ -1107,7 +1083,6 @@ mod tests {
             diagnostics: vec![],
             diagnostic_phases: vec![],
             lowering: None,
-            table_keys: None,
         };
         let original = bincode::serialize(&facts).unwrap();
         let mut before = Weight::default();
@@ -1146,7 +1121,6 @@ mod tests {
             diagnostics: &vec![],
             diagnostic_phases: &vec![],
             lowering: None,
-            table_keys: None,
         };
         let bytes = bincode::serialize(&missing).unwrap();
         assert!(bincode::deserialize::<Facts>(&bytes).is_err());
@@ -1242,7 +1216,6 @@ mod tests {
                     },
                     diagnostic_phases: vec![],
                     lowering: None,
-                    table_keys: None,
                 };
                 let view = FactsRef {
                     summary: facts.summary.clone(),
@@ -1251,7 +1224,6 @@ mod tests {
                     diagnostics: &facts.diagnostics,
                     diagnostic_phases: &facts.diagnostic_phases,
                     lowering: facts.lowering.as_ref(),
-                    table_keys: facts.table_keys.as_ref(),
                 };
                 let store = Arc::new(persistent::Contents(Arc::new(
                     hirsel_engine_store::MemStore::default(),
@@ -1311,7 +1283,6 @@ hirsel_product_codec::decode_structure!(PackedFacts {
     diagnostics,
     diagnostic_phases,
     lowering,
-    table_keys
 });
 impl hirsel_product_codec::decode_schema::Walk for Facts {
     fn walk(scan: &mut hirsel_product_codec::decode_schema::Scan<'_>) -> Option<()> {

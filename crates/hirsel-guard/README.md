@@ -38,10 +38,3 @@ the run's grant, twice the binary's measured `memory_kb` (the pool kills a run p
 that), and the launcher applies it with `ulimit -d` before the harness starts.
 Raising a cap means re-measuring the request (`tools/buck2/test_sizes_from_usage.py`),
 never an ad hoc variable. Locally, `tools/capped` passes its cap through.
-
-Tests spawn the harness itself with a small limit: an allocation and a thread stack
-past it end with the message and status, the same work fits under a larger limit,
-a malformed limit is refused, a shell child inherits the limit, a guarded child
-cannot raise it, and only a `sanitized` child gets the hard limit back. The CLI (`hirsel-cli` `cli.rs`) and the conformance runner
-(`hirsel-conformance` `runner.rs`) each show a run whose working set exceeds a
-64M limit ending with the message.

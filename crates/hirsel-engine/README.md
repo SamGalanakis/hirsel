@@ -119,10 +119,7 @@ code objects.
 root definition and returns the shortest path to the first extern or
 `UnsafeOperation`-role core operation it reaches (CAP-6), or none. It is the
 checker query behind `hirsel check --safe` and the `admit.safe@1` admission
-policy; it adds nothing to TIR or LIR. `callee_facts(engine, entry)` lists, for each
-definition the entry's closure references as a value (a runner call's possible callee), its
-signature fingerprint, code hash and `unsafe_reach`, so a run's runner arrival checks the
-callee's identity and `admit.safe@1` without the engine (`SimulationConfig.callees`).
+policy; it adds nothing to TIR or LIR.
 
 Successful native import retains that same semantic graph privately in
 `ValidatedNativeInput`. Its `semantic_program_revision(entry)` works after the
@@ -761,9 +758,7 @@ A request at stack length n fails at its own site when n ≥ L =
 computed or reused, so the verdict and site equal a cache-free serial
 evaluation. Limit failures are operational and never cached.
 
-Dependency packages are checked in each engine unless ordinary query records cover them;
-cross-program reuse of checked results goes through the result store
-(`store.rs`: `none@1`, `mem@1`, `dir@1`, `sim@1`).
+
 
 Runtime archives have independent `RuntimeBuild` choices: `system_allocator`,
 `measurement` and `diagnostic`. `Toolchain::in_tree` selects the production
@@ -875,12 +870,6 @@ Repeat-literal counts use the ordinary closed compile-time evaluator as u64.
 Before lowering, O checks Array/Inline target kind and exact Inline length.
 Counts depending on abstract size parameters report CT-2 at the count; this
 form currently requires a definition-time-known size.
-
-`table_keys` propagates STORE-6 obligations backward over the source's checked
-generic instantiations. A wrapper's abstract key parameter defers its schema
-proof to the wrapper's callers, including through another wrapper. The verdict
-shares the existing program-verdict invalidation and adds no signature or TIR
-metadata. Programs without table calls build no schema for this check.
 
 `FrontBodyQueries` runs source requests on the admitted executor at every worker
 count. Workers share immutable declarations, type tables, phase handles and the

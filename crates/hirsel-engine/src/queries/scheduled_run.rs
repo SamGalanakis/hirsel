@@ -15,7 +15,7 @@ mod proof_export;
 mod semantic;
 mod source_products;
 pub use graph_reader::FrontSemanticGraph;
-use hirsel_run_schema::{CallForm, CalleeFacts, CodeReach, ProgramRevision};
+use hirsel_run_schema::{CodeReach, ProgramRevision};
 pub use precompute::FrontPrecomputeOutput;
 pub(crate) use precompute::{UNIVERSE, universe_action, universe_query};
 pub use proof_export::{
@@ -32,8 +32,6 @@ pub struct FrontRunOutput {
     pub code: CodeReach,
     pub foreign: ForeignUse,
     pub semantic: Arc<crate::NativeSemanticProgram>,
-    pub callees: BTreeMap<String, CalleeFacts>,
-    pub entries: Arc<BTreeMap<String, (CalleeFacts, CallForm)>>,
     pub runtime: Arc<hirsel_interp::aggregate::RuntimeTypes>,
     pub checked_runtime: Arc<hirsel_interp::checked::CheckedRuntime>,
     pub(crate) _owner: Arc<dyn Send + Sync>,
@@ -522,37 +520,6 @@ impl Task {
             self.pending.push(DefId::intern(&self.root));
             self.pending
                 .extend(self.queries.native_roots.iter().map(DefId::intern));
-            // Legacy served_entries selects every eligible source entry in the
-            // launch package, even when the root never references it.
-            for path in self.queries.inputs.iter() {
-                let launch_package = path.0.package == self.root.0.package
-                    || self.queries.batch.as_ref().is_some_and(|(_, roots)| {
-                        roots.iter().any(|root| root.0.package == path.0.package)
-                    });
-                if !launch_package
-                    || !self
-                        .queries
-                        .operation
-                        .capture()
-                        .bodies
-                        .contains_key(&DefId::intern(path))
-                {
-                    continue;
-                }
-                let input = match self.queries.input(path) {
-                    Ok(input) => input,
-                    Err(error) => return Err(self.queries.failure_record(error)),
-                };
-                if hirsel_engine_admission::entry_roots(
-                    self.queries.lower.signatures().types(),
-                    &input.signature,
-                    hirsel_run_schema::LaunchKind::Call,
-                )
-                .is_ok()
-                {
-                    self.pending.push(DefId::intern(path));
-                }
-            }
         }
         loop {
             while let Some(id) = self.pending.last().copied() {
@@ -1015,7 +982,7 @@ impl Task {
             )?,
         );
         let Some((batch, roots)) = &queries.batch else {
-            return self.complete_one(&self.root, self.query, hashes, checked_runtime, None, None);
+            return self.complete_one(&self.root, self.query, hashes, checked_runtime, None);
         };
         if self.query != *batch {
             return Err(operational("batch Run requires its batch root"));
@@ -1044,20 +1011,14 @@ impl Task {
         let semantic = std::cell::RefCell::new(None);
         let result = (|| {
             let mut nodes = BTreeSet::new();
-            let mut entries_seen = BTreeSet::new();
             let mut products = Vec::with_capacity(roots.len());
             let mut outputs = BTreeMap::new();
             for root in roots {
-                let entries = outputs
-                    .values()
-                    .find(|output: &&Arc<FrontRunOutput>| output.entry.0.package == root.0.package)
-                    .map(|output| &output.entries);
                 let product = self.complete_one(
                     root,
                     queries.ids[root],
                     hashes.clone(),
                     checked_runtime.clone(),
-                    entries,
                     Some(&semantic),
                 )?;
                 let output = queries
@@ -1075,14 +1036,6 @@ impl Task {
                 weight.program_revision(&output.revision);
                 weight.code_reach(&output.code);
                 weight.foreign_use(&output.foreign);
-                weight.callees(&output.callees);
-                if entries_seen.insert(Arc::as_ptr(&output.entries) as usize) {
-                    weight.arc(&output.entries);
-                    weight.map(&output.entries, |weight, name, (facts, _)| {
-                        weight.add(name.capacity());
-                        weight.code_reach(&facts.reach);
-                    });
-                }
                 output.semantic.metadata_weight(&mut weight, &mut nodes);
                 if weight.bytes() > queries.weight.retained {
                     return Err(operational("Run batch outputs exceed retained admission"));
@@ -1147,7 +1100,6 @@ impl Task {
         query: QueryId,
         hashes: Arc<BTreeMap<DefPath, ContentHash>>,
         checked_runtime: Arc<hirsel_interp::checked::CheckedRuntime>,
-        package_entries: Option<&Arc<BTreeMap<String, (CalleeFacts, CallForm)>>>,
         batch_semantic: Option<&std::cell::RefCell<Option<Arc<crate::NativeSemanticProgram>>>>,
     ) -> Result<ProductRef, QueryError> {
         let queries = &self.queries;
@@ -1170,89 +1122,7 @@ impl Task {
                 .reach(root, &escapes)
                 .map_or(CodeReach::Safe, |r| CodeReach::Escapes(r.spelled())))
         };
-        // The identity of an Entry formed from `path`, which `runner.entry_id`,
-        // `runner.apply` and runner calls read.
-        let identity = |path: &DefPath| -> Result<CalleeFacts, QueryError> {
-            let input = queries.input(path)?;
-            let code = hashes.get(path).ok_or_else(|| {
-                operational(format!("Run callable has no definition hash: {path}"))
-            })?;
-            let program = self.program(path)?;
-            Ok(CalleeFacts {
-                program: program.revision(path)?.digest(),
-                code: code.0,
-                fingerprint: input.signature.fingerprint.0,
-                reach: program
-                    .reach(path, &escapes)
-                    .map_or(CodeReach::Safe, |reach| CodeReach::Escapes(reach.spelled())),
-            })
-        };
-        let facts = |path: &DefPath| -> Result<Option<(CalleeFacts, CallForm)>, QueryError> {
-            let input = queries.input(path)?;
-            let Ok(roots) = hirsel_engine_admission::entry_roots(
-                snapshot.types(),
-                &input.signature,
-                hirsel_run_schema::LaunchKind::Call,
-            ) else {
-                return Ok(None);
-            };
-            Ok(Some((
-                identity(path)?,
-                if roots.is_empty() {
-                    CallForm::Compute
-                } else {
-                    CallForm::Call
-                },
-            )))
-        };
         let program = self.program(root)?;
-        let mut callees = BTreeMap::new();
-        for path in &program.definitions {
-            let Some(content) = self
-                .entries
-                .get(&DefId::intern(path))
-                .map(|entry| &entry.content)
-                .filter(|content| content.has_body())
-            else {
-                continue;
-            };
-            let DefinitionContent::Body { tir: Some(tir), .. } =
-                content.load(queries, path, queries.weight.scratch)?
-            else {
-                return Err(operational("Run content body disappeared"));
-            };
-            for site in hirsel_proof_export::call_sites(&tir, &hashes)
-                .map_err(|p| operational(format!("call outside Run closure: {p}")))?
-            {
-                // Every Entry the program can form, as `callee_facts` collects them.
-                if matches!(site.kind, hirsel_proof_export::CallSiteKind::Reference(_))
-                    && hirsel_engine_admission::identified_entry(
-                        snapshot.types(),
-                        &queries.input(&site.callee)?.signature,
-                    )
-                {
-                    callees.insert(site.callee.to_string(), identity(&site.callee)?);
-                }
-            }
-        }
-        let entries = if let Some(entries) = package_entries {
-            entries.clone()
-        } else {
-            let mut entries = BTreeMap::new();
-            for path in queries.inputs.iter() {
-                if queries
-                    .operation
-                    .capture()
-                    .bodies
-                    .contains_key(&DefId::intern(path))
-                    && path.0.package == root.0.package
-                    && let Some(facts) = facts(path)?
-                {
-                    entries.insert(path.to_string(), facts);
-                }
-            }
-            Arc::new(entries)
-        };
         let foreign = foreign_use(&program, queries);
         // PROG-4: C called outside a deterministic wrapper makes every run of
         // this entry unrecordable, as the checked package decides it.
@@ -1318,8 +1188,6 @@ impl Task {
             code,
             foreign,
             semantic,
-            callees,
-            entries,
             runtime: queries.runtime.clone().ok_or(QueryError::NotImplemented)?,
             checked_runtime,
             _owner: queries.ownership.clone(),
@@ -1332,8 +1200,6 @@ impl Task {
                 &(
                     output.entry.clone(),
                     output.revision.digest(),
-                    hirsel_run_schema::callees_json(&output.callees),
-                    output.entries.keys().collect::<Vec<_>>(),
                     output.foreign.externs.iter().collect::<Vec<_>>(),
                     output.foreign.unmodeled.iter().collect::<Vec<_>>(),
                 ),

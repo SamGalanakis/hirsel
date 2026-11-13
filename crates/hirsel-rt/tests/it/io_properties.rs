@@ -130,15 +130,9 @@ fn every_request_has_an_explicit_cancellation_classification() {
             Request::UnixConnect { .. } => true,
             Request::UnixListen { .. } => false,
             // A runner call is committed once sent; RUN-9 forwards its cancellation.
-            Request::RunnerCall(_) => false,
-            Request::RunnerPoll { .. } => false,
-            Request::RunnerCancel { .. } => false,
-            Request::CallReturn(_) => false,
-            Request::Stopped => false,
             Request::Ready { .. } => false,
             Request::Schedule { .. } | Request::CpuControl { .. } | Request::CpuSummary(_) => false,
             // A seam request is atomic at the authority: cancelling it would leave its effect undecided.
-            Request::Seam(_) => false,
         };
         assert_eq!(
             hirsel_rt::io_checks::cancel(&mut Classification, &request, 3).unwrap(),

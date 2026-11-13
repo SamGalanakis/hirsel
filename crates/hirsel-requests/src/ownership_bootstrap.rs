@@ -292,9 +292,6 @@ impl OwnershipBootstrap {
             })
             .map(|(path, context)| (path.clone(), context.entry.0))
             .collect();
-        let callees =
-            hirsel_native::settled_callee_metadata(facts.run.callees.clone(), &facts.run.runtime)
-                .map_err(|error| error.to_string())?;
         let link = Arc::new(
             NativeLinkSource::from_settled(
                 NativeLinkFacts {
@@ -307,7 +304,6 @@ impl OwnershipBootstrap {
                     signatures: facts.signatures.clone(),
                     semantic: facts.semantic.clone(),
                     selected: std::slice::from_ref(&facts.run.entry),
-                    callees: Some(callees),
                 },
                 &reader,
             )

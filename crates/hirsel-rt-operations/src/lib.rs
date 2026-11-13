@@ -12,12 +12,12 @@ include!(concat!(env!("OUT_DIR"), "/reviewed.rs"));
 /// (`hirsel_rt::ABI_VERSION`) and the compiler (`hirsel_lir::RUNTIME_ABI_VERSION`)
 /// both read. `hirsel_rt_v2.h` restates it for C; hirsel-lir's schema test
 /// requires the header to match.
-pub const RUNTIME_ABI_VERSION: u32 = 115;
+pub const RUNTIME_ABI_VERSION: u32 = 116;
 /// The ownership-trace extension's version, which emitted traced code passes to
 /// `hirsel_rt_v2_ownership_enter` and the runtime requires. One definition for the
 /// runtime and both native emitters; `hirsel_rt_ownership_trace.h` restates it
 /// for C, checked by hirsel-llvm's ownership_native test.
-pub const OWNERSHIP_TRACE_ABI_VERSION: u32 = 116;
+pub const OWNERSHIP_TRACE_ABI_VERSION: u32 = 117;
 const _: () = assert!(OWNERSHIP_TRACE_ABI_VERSION > RUNTIME_ABI_VERSION);
 /// Inaccessible bytes below every task stack (`hirsel-rt`'s fibers). Both native emitters
 /// probe any frame larger than their probe interval at that interval, which must not exceed
@@ -134,17 +134,8 @@ pub fn classify(mut row: OperationRow) -> Result<OperationRow, String> {
             | "atomic.load"
             | "atomic.store"
             | "task.isolate"
-            | "recorder.new"
-            | "recorder.append"
-            | "recorder.finish"
             | "task.check_canceled"
             | "mapped.with"
-            | "runner.compute"
-            | "runner.call"
-            | "runner.spawn"
-            | "runner.grants"
-            | "runner.apply"
-            | "runner.apply_mut"
     ) || MAP_BODIES.contains(&name.as_str())
     {
         row.dispositions.native = Disposition::Body;
@@ -320,10 +311,6 @@ pub fn classify(mut row: OperationRow) -> Result<OperationRow, String> {
         | "tls.peer"
         | "tls.negotiated_protocol"
         | "tls.close" => Some(format!("hirsel_rt_v2_{}", name.replace('.', "_"))),
-        // The store authority seam (`authority.rs`).
-        name if AUTHORITY_EXPORTS.contains(&name) => {
-            Some(format!("hirsel_rt_v2_{}", name.replace('.', "_")))
-        }
         // `net.read_into`'s compiled body calls this with its buffer's size.
         "$intrinsic.NetReadInto" => Some("hirsel_rt_v2_net_read_into".into()),
         // A half's operations are its stream's entries on the half's handle.
@@ -368,14 +355,9 @@ pub fn classify(mut row: OperationRow) -> Result<OperationRow, String> {
         "$intrinsic.AtomicStore" => Some("hirsel_rt_v2_atomic_store".into()),
         // `shared.thaw`'s compiled body asks the runtime whether its root is the last.
         "$intrinsic.SharedThawTurn" => Some("hirsel_rt_v2_thaw_turn".into()),
-        "$intrinsic.RecorderOpen" => Some("hirsel_rt_v2_recorder_open".into()),
-        "$intrinsic.RecorderAppend" => Some("hirsel_rt_v2_recorder_append".into()),
-        "$intrinsic.RecorderCount" => Some("hirsel_rt_v2_recorder_count".into()),
-        "$intrinsic.RecorderTake" => Some("hirsel_rt_v2_recorder_take".into()),
-        // `task.isolate`'s and `runner.apply`'s compiled bodies read their caught chain
+        // `task.isolate`'s compiled bodies read their caught chain
         // through these (`isolate.rs`).
         "$intrinsic.IsolateBegin" => Some("hirsel_rt_v2_isolate_begin".into()),
-        "$intrinsic.ApplyBegin" => Some("hirsel_rt_v2_apply_begin".into()),
         "$intrinsic.IsolateEnd" => Some("hirsel_rt_v2_isolate_end".into()),
         "$intrinsic.IsolateCount" => Some("hirsel_rt_v2_isolate_count".into()),
         "$intrinsic.IsolateKind" => Some("hirsel_rt_v2_isolate_kind".into()),
@@ -384,25 +366,6 @@ pub fn classify(mut row: OperationRow) -> Result<OperationRow, String> {
         "$intrinsic.IsolateLine" => Some("hirsel_rt_v2_isolate_line".into()),
         "$intrinsic.IsolateColumn" => Some("hirsel_rt_v2_isolate_column".into()),
         "$intrinsic.IsolateSpawn" => Some("hirsel_rt_v2_isolate_spawn".into()),
-        // Runners (RUN-1..4, `runners.rs`): the grants and narrowings are runtime entries;
-        // the calls' compiled bodies send, wait and reply through the intrinsics.
-        "io.runner" | "test.runner" | "runner.narrow" | "runner.only" | "runner.entry_id" => {
-            Some(format!("hirsel_rt_v2_{}", name.replace('.', "_")))
-        }
-        // db@1 places (STORE-12, `runners/places.rs`): a head's inbox and arrivals, and a
-        // caller's served call.
-        "io.inbox" | "inbox.take" | "arrival.request" | "arrival.end" => {
-            Some(format!("hirsel_rt_v2_{}", name.replace('.', "_")))
-        }
-        "runner.send" => Some("hirsel_rt_v2_place_send".into()),
-        "$intrinsic.RunnerSend" => Some("hirsel_rt_v2_runner_send".into()),
-        "$intrinsic.RunnerWait" => Some("hirsel_rt_v2_runner_wait".into()),
-        "$intrinsic.RunnerTake" => Some("hirsel_rt_v2_runner_take".into()),
-        "$intrinsic.RunnerEntry" => Some("hirsel_rt_v2_runner_entry".into()),
-        "$intrinsic.RunnerArgument" => Some("hirsel_rt_v2_runner_argument".into()),
-        "$intrinsic.RunnerIo" => Some("hirsel_rt_v2_runner_io".into()),
-        "$intrinsic.RunnerReply" => Some("hirsel_rt_v2_runner_reply".into()),
-        "$intrinsic.RunnerGrants" => Some("hirsel_rt_v2_runner_grants".into()),
         "$intrinsic.UnicodeScalars_open" => Some("hirsel_rt_v2_unicode_scalars_open".into()),
         "$intrinsic.UnicodeScalars_next" => Some("hirsel_rt_v2_unicode_scalars_next".into()),
         "$intrinsic.ScalarPositions_open" => Some("hirsel_rt_v2_scalar_positions_open".into()),
@@ -495,7 +458,6 @@ pub fn classify(mut row: OperationRow) -> Result<OperationRow, String> {
             | "watcher.next"
             | "test.dir_event"
     ) || NET_EXPORTS.contains(&name.as_str())
-        || AUTHORITY_EXPORTS.contains(&name.as_str())
         || HALF_EXPORTS.iter().any(|(n, _)| *n == name)
         || name == "$intrinsic.NetReadInto"
     {
@@ -577,32 +539,6 @@ pub const NET_EXPORTS: &[&str] = &[
     "tls.peer",
     "tls.negotiated_protocol",
     "tls.close",
-];
-
-/// The store authority seam's operations, each with its runtime entry (`authority.rs`).
-pub const AUTHORITY_EXPORTS: &[&str] = &[
-    "io.authority",
-    "authority.levels",
-    "authority.level",
-    "authority.floor",
-    "level.name",
-    "level.narrow",
-    "authority.max_entry",
-    "authority.claim",
-    "claim.end",
-    "claim.narrow",
-    "authority.submit",
-    "authority.wait",
-    "authority.durable",
-    "authority.read",
-    "authority.last",
-    "authority.locate",
-    "authority.at",
-    "authority.get",
-    "authority.put",
-    "authority.reclaim",
-    "authority.select",
-    "authority.base",
 ];
 
 /// The `net.split` halves' operations and their entries: each is its stream operation's
@@ -1023,45 +959,10 @@ pub const HIRSEL_ABI_EXPORTS: &[AbiExport] = &[
     },
     AbiExport {
         caller_site: false,
-        symbol: "hirsel_rt_v2_recorder_open",
-        destination: true,
-        result: Some((8, 8)),
-        parameters: &[Physical::Pointer, Physical::I32],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_recorder_append",
-        destination: false,
-        result: None,
-        parameters: &[Physical::Pointer, Physical::Pointer],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_recorder_count",
-        destination: false,
-        result: Some((8, 8)),
-        parameters: &[Physical::Pointer],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_recorder_take",
-        destination: false,
-        result: None,
-        parameters: &[Physical::Pointer, Physical::Pointer],
-    },
-    AbiExport {
-        caller_site: false,
         symbol: "hirsel_rt_v2_isolate_begin",
         destination: false,
         result: Some((8, 8)),
         parameters: &[Physical::Pointer],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_apply_begin",
-        destination: false,
-        result: Some((8, 8)),
-        parameters: &[],
     },
     AbiExport {
         caller_site: false,
@@ -1118,158 +1019,6 @@ pub const HIRSEL_ABI_EXPORTS: &[AbiExport] = &[
         destination: true,
         result: Some((8, 8)),
         parameters: &[Physical::I64],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_io_runner",
-        destination: true,
-        result: Some((16, 8)),
-        parameters: &[
-            Physical::Pointer,
-            Physical::Pointer,
-            Physical::I64,
-            Physical::I64,
-        ],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_test_runner",
-        destination: true,
-        result: Some((8, 8)),
-        parameters: &[Physical::Pointer],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_runner_narrow",
-        destination: true,
-        result: Some((16, 8)),
-        parameters: &[Physical::Pointer, Physical::Pointer],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_runner_only",
-        destination: true,
-        result: Some((16, 8)),
-        parameters: &[Physical::Pointer, Physical::Pointer],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_runner_entry_id",
-        destination: true,
-        result: Some((72, 8)),
-        parameters: &[Physical::Pointer],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_io_inbox",
-        destination: true,
-        result: Some((16, 8)),
-        parameters: &[Physical::Pointer],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_inbox_take",
-        destination: true,
-        result: Some((8, 8)),
-        parameters: &[Physical::Pointer, Physical::I8],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_arrival_request",
-        destination: true,
-        result: Some((224, 8)),
-        parameters: &[Physical::Pointer],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_arrival_end",
-        destination: false,
-        result: None,
-        parameters: &[Physical::Pointer, Physical::Pointer],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_place_send",
-        destination: true,
-        result: Some((32, 8)),
-        parameters: &[
-            Physical::Pointer,
-            Physical::Pointer,
-            Physical::Pointer,
-            Physical::Pointer,
-            Physical::I64,
-            Physical::I64,
-        ],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_runner_send",
-        destination: false,
-        result: Some((8, 8)),
-        parameters: &[
-            Physical::Pointer,
-            Physical::Pointer,
-            Physical::Pointer,
-            Physical::I64,
-            Physical::I64,
-            Physical::Pointer,
-            Physical::Pointer,
-            Physical::I64,
-        ],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_runner_wait",
-        destination: false,
-        result: Some((8, 8)),
-        parameters: &[Physical::I64],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_runner_take",
-        destination: true,
-        result: Some((24, 8)),
-        parameters: &[Physical::I64],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_runner_entry",
-        destination: true,
-        result: Some((16, 8)),
-        parameters: &[],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_runner_argument",
-        destination: true,
-        result: Some((24, 8)),
-        parameters: &[],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_runner_io",
-        destination: true,
-        result: Some((8, 8)),
-        parameters: &[],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_runner_reply",
-        destination: false,
-        result: None,
-        parameters: &[
-            Physical::I64,
-            Physical::Pointer,
-            Physical::I64,
-            Physical::I64,
-        ],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_runner_grants",
-        destination: false,
-        result: Some((8, 8)),
-        parameters: &[Physical::Pointer],
     },
     AbiExport {
         caller_site: true,
@@ -2469,206 +2218,6 @@ pub const HIRSEL_ABI_EXPORTS: &[AbiExport] = &[
     },
     AbiExport {
         caller_site: false,
-        symbol: "hirsel_rt_v2_io_authority",
-        destination: true,
-        result: Some((16, 8)),
-        parameters: &[
-            Physical::Pointer,
-            Physical::Pointer,
-            Physical::I64,
-            Physical::I64,
-        ],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_authority_levels",
-        destination: true,
-        result: Some((8, 8)),
-        parameters: &[Physical::Pointer],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_authority_level",
-        destination: true,
-        result: Some((16, 8)),
-        parameters: &[
-            Physical::Pointer,
-            Physical::Pointer,
-            Physical::I64,
-            Physical::I64,
-        ],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_authority_floor",
-        destination: true,
-        result: Some((8, 8)),
-        parameters: &[Physical::Pointer],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_authority_max_entry",
-        destination: false,
-        result: Some((8, 8)),
-        parameters: &[Physical::Pointer],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_level_name",
-        destination: true,
-        result: Some((24, 8)),
-        parameters: &[Physical::Pointer],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_level_narrow",
-        destination: true,
-        result: Some((16, 8)),
-        parameters: &[Physical::Pointer, Physical::Pointer],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_claim_end",
-        destination: false,
-        result: Some((8, 8)),
-        parameters: &[Physical::Pointer],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_claim_narrow",
-        destination: true,
-        result: Some((16, 8)),
-        parameters: &[Physical::Pointer, Physical::Pointer],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_authority_claim",
-        destination: true,
-        result: Some((64, 8)),
-        parameters: &[Physical::Pointer],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_authority_submit",
-        destination: true,
-        result: Some((64, 8)),
-        parameters: &[
-            Physical::Pointer,
-            Physical::Pointer,
-            Physical::Pointer,
-            Physical::I64,
-            Physical::I64,
-            Physical::Pointer,
-            Physical::Pointer,
-            Physical::Pointer,
-        ],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_authority_wait",
-        destination: true,
-        result: Some((24, 8)),
-        parameters: &[Physical::Pointer, Physical::Pointer, Physical::I64],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_authority_durable",
-        destination: true,
-        result: Some((64, 8)),
-        parameters: &[Physical::Pointer, Physical::Pointer, Physical::Pointer],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_authority_last",
-        destination: true,
-        result: Some((64, 8)),
-        parameters: &[Physical::Pointer, Physical::Pointer],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_authority_locate",
-        destination: true,
-        result: Some((64, 8)),
-        parameters: &[Physical::Pointer, Physical::Pointer, Physical::I64],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_authority_at",
-        destination: true,
-        result: Some((64, 8)),
-        parameters: &[
-            Physical::Pointer,
-            Physical::Pointer,
-            Physical::I64,
-            Physical::I64,
-            Physical::I64,
-            Physical::Pointer,
-            Physical::I64,
-        ],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_authority_read",
-        destination: true,
-        result: Some((64, 8)),
-        parameters: &[
-            Physical::Pointer,
-            Physical::I64,
-            Physical::Pointer,
-            Physical::I64,
-        ],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_authority_get",
-        destination: true,
-        result: Some((64, 8)),
-        parameters: &[Physical::Pointer, Physical::Pointer],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_authority_put",
-        destination: true,
-        result: Some((64, 8)),
-        parameters: &[
-            Physical::Pointer,
-            Physical::Pointer,
-            Physical::Pointer,
-            Physical::Pointer,
-            Physical::I64,
-            Physical::I64,
-        ],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_authority_reclaim",
-        destination: true,
-        result: Some((64, 8)),
-        parameters: &[Physical::Pointer, Physical::Pointer, Physical::I64],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_authority_select",
-        destination: true,
-        result: Some((64, 8)),
-        parameters: &[
-            Physical::Pointer,
-            Physical::Pointer,
-            Physical::I64,
-            Physical::Pointer,
-            Physical::I64,
-            Physical::I64,
-        ],
-    },
-    AbiExport {
-        caller_site: false,
-        symbol: "hirsel_rt_v2_authority_base",
-        destination: true,
-        result: Some((64, 8)),
-        parameters: &[Physical::Pointer],
-    },
-    AbiExport {
-        caller_site: false,
         symbol: "hirsel_rt_v2_io_signals",
         destination: true,
         result: Some((16, 8)),
@@ -2980,12 +2529,7 @@ pub const NATIVE_PATHS: &[&str] = &[
     "$intrinsic.TaskCanceled",
     "$intrinsic.MappedView",
     "$intrinsic.MappedCheck",
-    "$intrinsic.RecorderOpen",
-    "$intrinsic.RecorderAppend",
-    "$intrinsic.RecorderCount",
-    "$intrinsic.RecorderTake",
     "$intrinsic.IsolateBegin",
-    "$intrinsic.ApplyBegin",
     "$intrinsic.IsolateEnd",
     "$intrinsic.IsolateCount",
     "$intrinsic.IsolateKind",
@@ -2994,14 +2538,6 @@ pub const NATIVE_PATHS: &[&str] = &[
     "$intrinsic.IsolateLine",
     "$intrinsic.IsolateColumn",
     "$intrinsic.IsolateSpawn",
-    "$intrinsic.RunnerSend",
-    "$intrinsic.RunnerWait",
-    "$intrinsic.RunnerTake",
-    "$intrinsic.RunnerEntry",
-    "$intrinsic.RunnerArgument",
-    "$intrinsic.RunnerIo",
-    "$intrinsic.RunnerReply",
-    "$intrinsic.RunnerGrants",
     "$intrinsic.OrderCompare_i128",
     "$intrinsic.OrderCompare_i16",
     "$intrinsic.OrderCompare_i32",
@@ -3244,9 +2780,6 @@ pub const NATIVE_PATHS: &[&str] = &[
     "task.detach",
     "task.detach_all",
     "task.isolate",
-    "recorder.new",
-    "recorder.append",
-    "recorder.finish",
     "task.scope",
     "task.scope_until",
     "task.set",
@@ -3265,47 +2798,6 @@ pub const NATIVE_PATHS: &[&str] = &[
     // CT-3: compile-time only; no run-time code holds a TypeShape or Body.
     "type_shape.info",
     "codegen.body",
-    // RUN-1..14: runner grants and calls (`hirsel-rt/src/runners.rs`).
-    "io.runner",
-    "runner.grants",
-    "runner.narrow",
-    "runner.only",
-    "runner.entry_id",
-    "runner.apply",
-    "runner.apply_mut",
-    "runner.compute",
-    "runner.call",
-    "runner.spawn",
-    "test.runner",
-    // db@1 places (STORE-12, `hirsel-rt/src/runners/places.rs`).
-    "runner.send",
-    "io.inbox",
-    "inbox.take",
-    "arrival.request",
-    "arrival.end",
-    // The store authority seam (`hirsel-rt/src/authority.rs`).
-    "io.authority",
-    "authority.levels",
-    "authority.level",
-    "authority.floor",
-    "level.name",
-    "level.narrow",
-    "authority.max_entry",
-    "authority.claim",
-    "claim.end",
-    "claim.narrow",
-    "authority.submit",
-    "authority.wait",
-    "authority.durable",
-    "authority.read",
-    "authority.last",
-    "authority.locate",
-    "authority.at",
-    "authority.get",
-    "authority.put",
-    "authority.reclaim",
-    "authority.select",
-    "authority.base",
 ];
 
 /// Stable declaration ownership transport, used by the independently retained inventory.

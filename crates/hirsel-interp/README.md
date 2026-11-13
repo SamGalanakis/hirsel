@@ -585,24 +585,9 @@ failure and tooling abandonment before the continuation resumes. Runtime-managed
 owners such as mutexes use it to retain the final payload without rollback;
 abandoned payloads return to the evaluator's explicit cleanup worklist.
 
-## Runs of one execution
+## Internal evaluator execution
 
-`runs::execute` drives the root run and every callee run its runner calls start
-(conformance/old-spec/runners.md). Each run has its own `Scheduler` (frames, tasks, failures,
-outcome) and its own Operations; `execute_frames` runs one until none of its tasks can
-proceed and returns `Step::Idle` where it would wait. Ready runs take turns in the
-order they became ready. With nothing ready, each run's provider `wait`s in run order,
-and only when none progresses is the execution Blocked, with every run's waits (CONC-8
-across the execution, RUN-12). At a run's idle point the driver takes its new calls
-(`take_calls`: a `CalleeStart` with the callee's configuration, decoded arguments,
-operations, budgets and `sim@1` crash point) and its forwarded cancellations
-(`take_cancels`): a callee not yet started ends `Canceled` at once; a started one has
-its root scope cancelled (`cancel_run`) and its caller keeps waiting for its outcome
-(RUN-9). A callee's end reaches its caller through `call_ended` as a `CalleeEnd`. A
-callee's failure, Blocked state inside a run that waits, or budget refusal ends only
-it; its tooling limit, undefined behavior, trap or environmental stop ends the
-execution, as a process crash would. A callee in this process writes its stdout after
-the root's.
+`runs::execute` drives one run. Its Scheduler owns ordinary source tasks; an idle run asks its provider for readiness, then waits. With no runnable task and no external progress it returns Blocked with the parked waits.
 
 Production host operations are supplied by the driver's Operations adapter; this crate
 remains host-independent. Scripted `net.listen` checks the exact grant before any
@@ -638,14 +623,6 @@ UTF-8 argument text, and distinct stderr capture in ObservedSimulation. Each
 operation records its typed input and completion through the ordinary replay
 check. `supply_stdin` lets a host adapter provide one already-read chunk without
 changing authority or replay state; it then uses the same operation implementation.
-
-SimulationConfig's `authorities` are the `io.authorities` grants
-(`library/authority.rs`). Level and claim handles carry no state beyond their grant
-name; level, floor, name, narrow and entry-bound answers derive from the grant and are
-not recorded. `claim`, `advance`, `durable`, `reclaim`, `read`, `get` and `put` record
-under capability `Authority` in `hirsel_store_authority::wire` form, so replay needs no
-provider. Providers start on first use; `authority.log@1` is unavailable here, having
-no host directory. Claim attempts are drawn from the run instance.
 
 `OperationsAdapter` forwards every hook from the Operations method inventory; operation
 layers override only intercepted hooks. `Operations::wait` is called only after all

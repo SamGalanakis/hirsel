@@ -90,7 +90,7 @@ else:
         self.git('add', 'conformance/LANG/staged.hir')
         self.write('conformance/LANG/untracked.hir', 'fn f(){4u8}')
         (self.root / 'conformance/LANG/deleted.hir').unlink()
-        for file in ['conformance/LANG/reports/old.hir', 'stdlib/std@1/store.hir',
+        for file in ['conformance/LANG/reports/old.hir', 'stdlib/std@1/string.hir',
                      'native-tests/library/format-fixture.hir']:
             self.write(file, 'fn old(){1u8}')
         self.assertEqual(fmt.changed_cases(), [

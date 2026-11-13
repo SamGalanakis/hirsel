@@ -263,7 +263,6 @@ pub(super) fn operation(id: &hirsel_core_contract::OperationId) -> Option<&'stat
         "$intrinsic.AtomicStore",
         "$intrinsic.SharedThawTurn",
         "$intrinsic.IsolateBegin",
-        "$intrinsic.ApplyBegin",
         "$intrinsic.IsolateEnd",
         "$intrinsic.IsolateCount",
         "$intrinsic.IsolateKind",
@@ -865,7 +864,7 @@ impl<S: Stage> Machine<'_, S> {
                 };
                 self.task_return(f, &arguments, Some((result, val)), normal)
             }
-            name if name.starts_with("$intrinsic.Isolate") || name == "$intrinsic.ApplyBegin" => {
+            name if name.starts_with("$intrinsic.Isolate") => {
                 self.isolate_operation(f, site, name, &arguments, normal)
             }
             "$intrinsic.TaskScopeEnter" | "$intrinsic.TaskScopeEnterUntil" => {

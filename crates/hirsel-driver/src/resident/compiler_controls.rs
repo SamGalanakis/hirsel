@@ -361,13 +361,12 @@ fn selected_run_executes_tir_and_checked_after_host_drop() {
         for checked in [false, true] {
             let launch = crate::HostLaunch::empty();
             let mut observed = None;
-            let (outcome, callee) = crate::tir_execution::run_tir_on_host(
+            let outcome = crate::tir_execution::run_tir_on_host(
                 &input,
                 launch,
                 crate::launch_binding::LaunchSelection::read(launch).unwrap(),
                 Some(10000),
                 Some(&mut observed),
-                None,
                 checked,
             )
             .unwrap();
@@ -375,7 +374,6 @@ fn selected_run_executes_tir_and_checked_after_host_drop() {
                 outcome,
                 crate::RunOutcome::Returned(hirsel_run_schema::Returned::Ok)
             );
-            assert!(callee.is_none());
             let observed = observed.expect("settled execution has an observation");
             if let Some(prior) = prior {
                 assert_eq!(prior, observed);

@@ -264,7 +264,6 @@ pub fn backend_features<P: ReadyExecution>(
                 discharge: Default::default(),
                 launch: Default::default(),
                 validation: hirsel_native::Validation::EveryStage,
-                places: Vec::new(),
             };
             match ready(&options) {
                 Err(error) => {

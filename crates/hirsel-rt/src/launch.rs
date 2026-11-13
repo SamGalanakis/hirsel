@@ -145,17 +145,10 @@ impl Adapter for OrderedHome {
             token | crate::io_real::HOME_TOKEN,
         )
     }
-    fn runner_readiness(&mut self) -> Option<crate::readiness::Readiness> {
-        crate::io_concurrent::ConcurrentAdapter::readiness(&*self.io)
-    }
     /// Only the home binding's own ready tokens, as RealIo reported them: a
     /// conservative Every would re-issue, and record, every armed timer.
     fn ready(&mut self) -> Result<Ready, AdapterError> {
         self.io.ready_for(true)
-    }
-    fn deliver(&mut self, token: u64, completion: hirsel_run_schema::RunnerCompletion) {
-        self.io
-            .deliver(token | crate::io_real::HOME_TOKEN, completion);
     }
     /// With no service row pending, home waits here for its own timers and
     /// runner deliveries: the same core sources, journal flush included.
@@ -333,12 +326,6 @@ impl<A: Adapter> Adapter for Shared<A> {
     }
     fn has_ready(&mut self) -> Result<bool, AdapterError> {
         self.0.borrow_mut().has_ready()
-    }
-    fn runner_readiness(&mut self) -> Option<crate::readiness::Readiness> {
-        self.0.borrow_mut().runner_readiness()
-    }
-    fn deliver(&mut self, token: u64, completion: hirsel_run_schema::RunnerCompletion) {
-        self.0.borrow_mut().deliver(token, completion);
     }
     fn wait_sources(&mut self) -> Result<Option<crate::io::WaitSources>, AdapterError> {
         self.0.borrow_mut().wait_sources()
@@ -1091,9 +1078,6 @@ pub struct RecordedRun {
     pub placement: Option<hirsel_run_config::RecordedPlacement>,
     pub admitted_at: i64,
     pub revocation: Option<hirsel_run_config::RevocationEvidence>,
-    /// The run instance fixed at admission (RUN-11), for a run that calls runners or
-    /// answers a call; its header line is absent otherwise, so other tapes keep their bytes.
-    pub instance: Option<[u8; 16]>,
 }
 // Empty default fixture grants contain no scripted world. A configured peer or
 // listener is explicit scripted-provider input, separate from actual worker startup.
@@ -1126,12 +1110,6 @@ impl Recording {
                 revocation: binding.revocation.clone(),
             },
         )?;
-        let expected = run.instance()?;
-        if binding.instance.is_some() != (expected.is_some() || run.calls())
-            || expected.is_some_and(|instance| binding.instance != Some(instance))
-        {
-            return Err(invalid("the run instance disagrees with its run record"));
-        }
         if let Some(placement) = &binding.placement {
             placement.validate()?;
             if scripted_world(&run)
@@ -1168,9 +1146,6 @@ pub fn render_recording(record: &Recording) -> Result<String, String> {
             hex(&binding.canonical),
             binding.admitted_at
         );
-    }
-    if let Some(instance) = record.binding.as_ref().and_then(|b| b.instance) {
-        let _ = writeln!(text, "run_instance {}", hex(&instance));
     }
     if let Some(placement) = record.binding.as_ref().and_then(|b| b.placement.as_ref()) {
         placement.validate().map_err(|e| e.to_string())?;
@@ -1274,7 +1249,6 @@ pub fn parse_recording_prefix(text: &str) -> Result<(Recording, bool), String> {
     let (mut hash_seed, mut random_seed, mut test_seed) = (None, None, None);
     let (mut run, mut admitted_at) = (None, None);
     let mut revocation = None;
-    let mut instance = None;
     let mut placement = None;
     let mut arguments = vec![];
     let mut files = std::collections::BTreeMap::new();
@@ -1322,13 +1296,6 @@ pub fn parse_recording_prefix(text: &str) -> Result<(Recording, bool), String> {
                     return Err("bad recorded admission time".into());
                 }
                 admitted_at = Some(at);
-            }
-            ["run_instance", value] if instance.is_none() => {
-                instance = Some(
-                    bytes(value)?
-                        .try_into()
-                        .map_err(|_| "bad recorded run instance")?,
-                );
             }
             ["revocation", reference, revision, revoked @ ("0" | "1")] if revocation.is_none() => {
                 revocation = Some(hirsel_run_config::RevocationEvidence {
@@ -1451,13 +1418,8 @@ pub fn parse_recording_prefix(text: &str) -> Result<(Recording, bool), String> {
                     placement,
                     admitted_at,
                     revocation,
-                    instance,
                 }),
-                (None, None)
-                    if revocation.is_none() && instance.is_none() && placement.is_none() =>
-                {
-                    None
-                }
+                (None, None) if revocation.is_none() && placement.is_none() => None,
                 _ => return Err("a run record without its admission time".into()),
             },
             tree,
@@ -1662,9 +1624,6 @@ fn facts(
         crate::standalone::facts(digest, entry, program.code.roots(), program.escapes())?;
     // Bound executables also bind the complete run identity below. A Call
     // record cannot select another entry or replace a main launch's record.
-    if !program.standalone() && run.record().launch == hirsel_run_schema::LaunchKind::Call {
-        facts.launch = hirsel_run_schema::LaunchKind::Call;
-    }
     Ok(facts)
 }
 
@@ -1679,10 +1638,6 @@ unsafe fn launch(program: &Program, mut arguments: Vec<std::ffi::OsString>) -> R
     let refuse = |reason: &str| refused(&sinks, reason.into());
     let trace_events = match crate::trace_events::select(&mut arguments) {
         Ok(path) => path,
-        Err(error) => return refuse(&error),
-    };
-    let place = match select_place(&mut arguments) {
-        Ok(place) => place,
         Err(error) => return refuse(&error),
     };
     let selected = if program.standalone() {
@@ -1733,29 +1688,7 @@ unsafe fn launch(program: &Program, mut arguments: Vec<std::ffi::OsString>) -> R
     if let Some(path) = trace_events {
         run = run.with_trace_events(path);
     }
-    if let Some(link) = place {
-        run = run.with_place(link);
-    }
     run.wait()
-}
-
-/// `--hirsel-place <fd>`, taken out of the runtime prefix: the descriptor of the link a runner
-/// host passed this process to serve its place as the head.
-fn select_place(arguments: &mut Vec<std::ffi::OsString>) -> Result<Option<std::fs::File>, String> {
-    let options = crate::standalone::live_options(arguments).map_err(|e| e.to_string())?;
-    let Some((offset, fd)) = options.place else {
-        return Ok(None);
-    };
-    arguments.drain(offset..offset + 2);
-    // Own only an open descriptor, so the link is never another file's number.
-    if unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
-        return Err(format!("--hirsel-place {fd} is not an open descriptor"));
-    }
-    // SAFETY: the host passed this open descriptor for the place link alone, and nothing
-    // else in this process owns it.
-    Ok(Some(unsafe {
-        <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fd)
-    }))
 }
 
 #[inline(never)]
@@ -1881,11 +1814,6 @@ pub(crate) unsafe fn execute(
     let entry = program.code;
     let (result_size, layouts, layout_count) =
         (program.result_size, program.layouts, program.layout_count);
-    let runner_instance = match &selection {
-        crate::host::StoredSelection::Live { admitted, .. } => admitted.instance(),
-        crate::host::StoredSelection::Replay { io, .. } => io.borrow().instance,
-        crate::host::StoredSelection::Harness => None,
-    };
     let (requested, production_io, production_replay) = match selection {
         crate::host::StoredSelection::Harness => (None, None, None),
         crate::host::StoredSelection::Live { admitted, io, tape } => (
@@ -1923,13 +1851,6 @@ pub(crate) unsafe fn execute(
             .as_ref()
             .filter(|run| run.record().placement.is_some() || cpu_fixture.is_some())
     });
-    // Validate call metadata before allocating a context or starting workers.
-    let replay_call = requested
-        .as_ref()
-        .filter(|run| run.record().launch == hirsel_run_schema::LaunchKind::Call)
-        .map(|run| crate::runners::native::replay_state(program, run))
-        .transpose()?;
-    let callee_replay = replay_call.is_some();
     let budgets = requested.as_ref().and_then(|run| run.budgets()).cloned();
     // F0's explicit test channel replaces the logical schedule and suppresses
     // worker startup below. It cannot also install the production Ordered policy.
@@ -1950,22 +1871,6 @@ pub(crate) unsafe fn execute(
         .or_else(|| fixture_run.as_ref().filter(|_| cpu_fixture.is_none()))
         .filter(|run| free_tasks(run));
     let production_free = free_run.is_some();
-    // A served place's head: a live tasks.free@1 Call run its runner host links to. Its
-    // arrivals come from the host and are not on a tape, so the head records nothing.
-    let place_link = match options.place {
-        None => None,
-        Some(_) if !production_free || replay_call.is_none() || production_io.is_none() => {
-            return Err("--hirsel-place runs a live tasks.free@1 call run".into());
-        }
-        Some(_)
-            if production_io
-                .as_ref()
-                .is_some_and(|(_, _, tape)| tape.is_some()) =>
-        {
-            return Err("a served place's head does not record its arrivals".into());
-        }
-        Some(link) => Some(link),
-    };
     let mut free_session = None;
     let trace_destination = options
         .trace_events
@@ -2122,119 +2027,6 @@ pub(crate) unsafe fn execute(
             }
         },
     };
-    // The harness's runners (`HIRSEL_RT_RUNNERS`, a JSON array as `io.runners` spells it),
-    // the seed `sim@1` draws faults from (`HIRSEL_RT_FAULT_SEED`) and the launcher's callee
-    // facts (`HIRSEL_RT_CALLEES`, `hirsel_run_schema::callees_json`). A run record's runners
-    // are not offered natively yet.
-    if requested
-        .as_ref()
-        .and_then(|run| run.record().io.as_ref())
-        .is_some_and(|io| !io.runners.is_empty())
-    {
-        // The production execution seam remains gated until runner acceptance.
-        // Check descriptor authority before considering any harness-only path.
-        program.runner_callees()?;
-        if !production_free {
-            return Err("runners run natively only under the harness launcher".into());
-        }
-    }
-    let runners = if let Some(run) = free_run {
-        run.record()
-            .io
-            .as_ref()
-            .map(|io| io.runners.clone())
-            .unwrap_or_default()
-    } else {
-        match harness_text("HIRSEL_RT_RUNNERS")? {
-            Some(text) => hirsel_run_config::validate_runners(text.as_bytes())
-                .map_err(|error| format!("the runners: {error}"))?,
-            None => Vec::new(),
-        }
-    };
-    // Native places run in this process. Another host's (remote.tls@1) is reached by home's
-    // provider, so only a tasks.free@1 run, which has a home, sends to one.
-    if let Some(entry) = runners.iter().find(|e| {
-        !matches!(
-            e.provider.as_str(),
-            "local.threads@1" | "sim@1" | "remote.tls@1"
-        )
-    }) {
-        return Err(format!(
-            "runner {} names {}, which native code does not run",
-            entry.name, entry.provider
-        ));
-    }
-    if let Some(entry) = runners.iter().find(|e| e.provider == "remote.tls@1")
-        && !production_free
-    {
-        return Err(format!(
-            "runner {} is another host's (remote.tls@1), which native code reaches only under tasks.free@1",
-            entry.name
-        ));
-    }
-    // `runner.grants` compiles to the six flags and empty lists (RUN-2). A `db@1` place's
-    // head alone runs under its runner's grants, directories among them (in memory, as
-    // `sim@1` simulates them); its callers' calls never do.
-    let place = |e: &hirsel_run_schema::RunnerEntry| {
-        e.provider == "sim@1" && e.models.as_deref() == Some("db@1") && e.head.is_some()
-    };
-    // Another host runs a remote runner's callees under its grants.
-    if let Some(entry) = runners.iter().find(|e| {
-        e.provider != "remote.tls@1"
-            && e.grants.as_ref().is_some_and(|g| {
-                (!g.dirs.is_empty() && !place(e)) || g.net.is_some() || g.process.is_some()
-            })
-    }) {
-        return Err(format!(
-            "runner {} grants directories, network or processes, which native runners do not",
-            entry.name
-        ));
-    }
-    for entry in runners.iter().filter(|e| place(e)) {
-        // Home serves places, and only a tasks.free@1 run has a home.
-        if !production_free {
-            return Err(format!(
-                "runner {} is a db@1 place, which native code serves only under tasks.free@1",
-                entry.name
-            ));
-        }
-        // The build roots each head and its runner main (`Options::places`).
-        let head = entry.head.as_deref().unwrap_or_default();
-        for path in [head.to_owned(), hirsel_run_schema::place_main_path(head)] {
-            if !program.entries.iter().any(|(_, p)| *p == path) {
-                return Err(format!(
-                    "runner {}'s place head {head} is not built into this program ({path})",
-                    entry.name
-                ));
-            }
-        }
-    }
-    let fault_seed = if let Some(run) = free_run {
-        run.record().inputs.fault_seed.unwrap_or(0)
-    } else {
-        match harness_text("HIRSEL_RT_FAULT_SEED")? {
-            Some(text) => text
-                .parse::<u64>()
-                .map_err(|_| "invalid harness fault seed".to_string())?,
-            None => 0,
-        }
-    };
-    // A fixture's callee facts are the reference's, which the harness passes.
-    let callees = if production_free && requested.is_some() && !runners.is_empty() {
-        program.runner_callees()?.clone()
-    } else {
-        match harness_text("HIRSEL_RT_CALLEES")? {
-            Some(text) => hirsel_run_schema::parse_callees(&text)
-                .map_err(|error| format!("the callee facts: {error}"))?,
-            // Entry identities serve `runner.entry_id` and `runner.apply` as well as
-            // runner calls, so a run without runners reads the program's own facts.
-            None => program
-                .callees
-                .as_ref()
-                .map(|metadata| metadata.facts.clone())
-                .unwrap_or_default(),
-        }
-    };
     // net.script@2 peers serve the root Net's world; the rules alone decide policy.
     let net_rules = net.as_ref().map(NetRule::from_config).unwrap_or_default();
     let net_script = net.and_then(|grant| Some((grant.peers?, grant.listeners)));
@@ -2260,9 +2052,6 @@ pub(crate) unsafe fn execute(
     let mut pending_fixture_recording = None;
     let mut pending_host_journal = None;
     let mut replay = None;
-    // Preserve the admitted destination before live Free moves RealIo into
-    // its concurrent owner. Callee tapes belong beside this root tape.
-    let runner_tape = production_io.as_ref().and_then(|(_, _, tape)| tape.clone());
     let mut adapter: Box<dyn Adapter> = if let Some((io, admitted, tape)) = production_io {
         if production_free {
             free_session = crate::free_launch::Session::record(
@@ -2367,10 +2156,7 @@ pub(crate) unsafe fn execute(
                                     .map(|mount| (mount.path.clone(), mount.access)),
                             )
                             .map_err(|e| e.to_string())?;
-                            if let Some(io_grant) = &run.record().io {
-                                io.set_authorities(&io_grant.authorities)
-                                    .map_err(|e| format!("{e:?}"))?;
-                            }
+                            if let Some(io_grant) = &run.record().io {}
                         }
                         if std::env::var_os("HIRSEL_RT_DENY_OUTPUT").is_some() {
                             io.deny_output();
@@ -2505,15 +2291,6 @@ pub(crate) unsafe fn execute(
                         }
                         // A fixture's claim attempts draw from the fixture instance, as the
                         // reference's do.
-                        if let Some(grants) = fixture_run
-                            .as_ref()
-                            .and_then(|run| run.record().io.as_ref())
-                            .map(|io| &io.authorities)
-                            .filter(|grants| !grants.is_empty())
-                            && let Err(error) = io.set_authorities(grants, Some([0; 16]))
-                        {
-                            return Err(format!("the authorities grant: {error:?}"));
-                        }
                         if let Some((peers, listeners)) = net_script.clone()
                             && let Err(error) = io.set_net_script(peers, listeners)
                         {
@@ -2561,7 +2338,6 @@ pub(crate) unsafe fn execute(
                                     ),
                                     admitted_at: 0,
                                     revocation: None,
-                                    instance: runner_instance,
                                 }),
                                 tree: initial_tree.clone(),
                                 events: vec![],
@@ -2581,16 +2357,14 @@ pub(crate) unsafe fn execute(
                                 hash_seed: launch_config.hash_seed,
                                 random_seed: launch_config.random_seed,
                                 test_seed: launch_config.test_seed,
-                                binding: fixture_run
-                                    .as_ref()
-                                    .filter(|run| !entry.is_test() && !run.calls())
-                                    .map(|run| RecordedRun {
+                                binding: fixture_run.as_ref().filter(|run| !entry.is_test()).map(
+                                    |run| RecordedRun {
                                         canonical: run.canonical().to_vec(),
                                         placement: run.record().placement.clone().map(Into::into),
                                         admitted_at: 0,
                                         revocation: None,
-                                        instance: None,
-                                    }),
+                                    },
+                                ),
                                 tree: initial_tree.clone(),
                                 events: vec![],
                             };
@@ -2797,9 +2571,7 @@ pub(crate) unsafe fn execute(
     if unsafe { hirsel_rt_v2_ctx_create(&config, &mut ctx) } != 0 {
         return Err("the runtime configuration".into());
     }
-    unsafe {
-        (*ctx).run().runner_call = replay_call;
-    }
+    unsafe {}
     let control = options.control;
     // A test's host stop from another thread (`HIRSEL_RT_STOP_AFTER_MS`), as an embedding
     // host's `RunControl::stop`: the run is hosted before its budgets take their chunks.
@@ -2896,42 +2668,8 @@ pub(crate) unsafe fn execute(
             }
         }
     }
-    let runner_launch = crate::runtime_roots::runners();
-    if place_link.is_some() && runner_launch.is_none() {
-        return Err("a served place's head without the runner provider".into());
-    }
-    let (_runners_home, free_adapter) = if let Some(provider) = runner_launch {
-        let runner_config = crate::runners::Config {
-            runners: runners.clone(),
-            fault_seed,
-            callees,
-            request_schemas: program
-                .callees
-                .as_ref()
-                .and_then(|m| m.request_schemas.clone()),
-            entries: program.entries.clone(),
-            tape: runner_tape.or_else(|| fixture_tape.clone()),
-            stdout: Some(sinks.stdout.clone()),
-            runtime: config,
-            failure_table: program.failure_table,
-        };
-        unsafe {
-            (provider.admit)(
-                ctx,
-                runner_config,
-                runner_instance,
-                production_free,
-                free_adapter,
-                place_link,
-            )
-        }?
-    } else {
-        (
-            None,
-            free_adapter
-                .map(|io| io as std::sync::Arc<dyn crate::io_concurrent::ConcurrentAdapter>),
-        )
-    };
+    let free_adapter =
+        free_adapter.map(|io| io as std::sync::Arc<dyn crate::io_concurrent::ConcurrentAdapter>);
     crate::tasks::free::record::bind_terminal(unsafe { &*ctx });
     if let Some(io) = free_adapter
         && let Err(error) =
@@ -2962,7 +2700,6 @@ pub(crate) unsafe fn execute(
             || (options.workers.is_some()
                 && control.width.load(std::sync::atomic::Ordering::Acquire) != 0))
         && unsafe { &mut *ctx }.run().free.is_none()
-        && (runners.is_empty() || production_free)
     {
         // SAFETY: the root context, on the admission thread, before the run's code runs.
         if ordered_enabled {
@@ -3216,18 +2953,6 @@ pub(crate) unsafe fn execute(
     let frame =
         unsafe { crate::stop::LaunchFrame::new(root, IO_HANDLE, ARGS_HANDLE, roots, &mut report) };
     let mut ran = unsafe { crate::stop::run_root(ctx, frame) };
-    if callee_replay && matches!(ran, Ok(STATUS_OK)) {
-        match unsafe {
-            (runner_launch
-                .expect("callee replay without runner roots")
-                .finish_replay)(ctx)
-        } {
-            Ok(code) => unsafe {
-                (*ctx).run().launch.as_mut().unwrap().words.result[0] = u128::from(code);
-            },
-            Err(stop) => ran = Err(stop),
-        }
-    }
 
     let mut replay_outcome = None;
     if let Some(session) = &free_session
@@ -3603,8 +3328,6 @@ pub(crate) struct Options {
     /// The scheduling row counters, when the host asked for them.
     pub(crate) metrics: Option<std::sync::Arc<crate::pool::WorkerMetrics>>,
     pub(crate) trace_events: Option<std::path::PathBuf>,
-    /// A served place's link to its runner host (`--hirsel-place`).
-    pub(crate) place: Option<std::fs::File>,
 }
 
 /// The delay after which a test stops the run from another thread: `HIRSEL_RT_STOP_AFTER_MS`.

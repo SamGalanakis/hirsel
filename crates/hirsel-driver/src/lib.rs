@@ -49,18 +49,12 @@ use hirsel_requests as requests;
 #[path = "../../hirsel-requests/src/lib.rs"]
 pub mod requests;
 pub mod resident;
-pub mod serve;
 pub mod session;
 pub mod testing;
 mod tir_execution;
-mod trial;
 use std::{io::Write, path::Path};
-pub use trial::{TrialCall, trial_tapes};
 
-use hirsel_compiler_identity::COMPILER_IDENTITY;
 use hirsel_front_phases::COMPILER;
-use hirsel_front_phases::compiler_adapters;
-use hirsel_front_phases::load_program;
 
 /// A partial pipeline can produce rejection diagnostics, but never a clean acceptance.
 pub fn check_path(path: &Path, policy: session::Policy) -> Result<CheckOutput, ToolError> {
@@ -384,13 +378,12 @@ pub fn replay_observations_checked(
     max_steps: Option<u64>,
 ) -> Result<hirsel_interp::observation::Observable, ToolError> {
     let mut observed = None;
-    let (outcome, _) = run_request_on_host(
+    let outcome = run_request_on_host(
         path,
         session::Policy::default(),
         HostLaunch::Replay(tape),
         max_steps,
         Some(&mut observed),
-        None,
         true,
     )?;
     replay_observation(observed, &outcome)
@@ -434,13 +427,12 @@ pub fn record_prepared_fixture_observations(
         fixture.stdin.clone(),
         fixture.monotonic.unwrap_or(0),
     );
-    let (outcome, _) = tir_execution::run_tir_on_host_with_grants(
+    let outcome = tir_execution::run_tir_on_host_with_grants(
         input,
         launch,
         selection,
         fixture.steps,
         Some(&mut observed),
-        None,
         checked,
         Some(host),
     )?;
@@ -457,13 +449,12 @@ pub fn replay_prepared_observations(
     let launch = HostLaunch::Replay(tape);
     let selection = launch_binding::LaunchSelection::read(launch)?;
     let mut observed = None;
-    let (outcome, _) = tir_execution::run_tir_on_host(
+    let outcome = tir_execution::run_tir_on_host(
         input,
         launch,
         selection,
         max_steps,
         Some(&mut observed),
-        None,
         checked,
     )?;
     replay_observation(observed, &outcome)
@@ -493,11 +484,10 @@ pub fn record_loaded_fixture_observations(
         },
         fixture.steps,
         Some(&mut observed),
-        None,
         checked,
         Some(host),
     );
-    let (outcome, _) = outcome?;
+    let outcome = outcome?;
     replay_observation(observed, &outcome)
 }
 
@@ -509,12 +499,11 @@ pub fn replay_loaded_observations(
     checked: bool,
 ) -> Result<hirsel_interp::observation::Observable, ToolError> {
     let mut observed = None;
-    let (outcome, _) = tir_execution::run_loaded_on_host_with_checks(
+    let outcome = tir_execution::run_loaded_on_host_with_checks(
         program,
         HostLaunch::Replay(tape),
         max_steps,
         Some(&mut observed),
-        None,
         checked,
         None,
     )?;
@@ -539,8 +528,7 @@ fn run_path_on_host_observed(
     policy: session::Policy,
     observed: Option<&mut Option<hirsel_interp::observation::Observable>>,
 ) -> Result<RunOutcome, ToolError> {
-    run_request_on_host(path, policy, launch, max_steps, observed, None, false)
-        .map(|(outcome, _)| outcome)
+    run_request_on_host(path, policy, launch, max_steps, observed, false)
 }
 
 /// Prepare the selected entry through the ordinary immutable compiler graph.
@@ -566,9 +554,8 @@ pub(crate) fn run_request_on_host(
     launch: HostLaunch<'_>,
     max_steps: Option<u64>,
     observed: Option<&mut Option<hirsel_interp::observation::Observable>>,
-    hosted: Option<hirsel_host_io::Hosted>,
     checked: bool,
-) -> Result<(RunOutcome, Option<hirsel_run_schema::CalleeOutcome>), ToolError> {
+) -> Result<RunOutcome, ToolError> {
     let selection = launch_binding::LaunchSelection::read(launch)?;
     let input = if let Some((revision, entry)) = selection.replay_product() {
         match hirsel_intern::jobs::with_compiler_stack(|| {
@@ -581,9 +568,7 @@ pub(crate) fn run_request_on_host(
     } else {
         request_tir(path, policy, selection.entry().cloned())?
     };
-    tir_execution::run_tir_on_host(
-        &input, launch, selection, max_steps, observed, hosted, checked,
-    )
+    tir_execution::run_tir_on_host(&input, launch, selection, max_steps, observed, checked)
 }
 
 /// End this process by `kind`'s default action, as a standalone launcher ends a `Signaled`
@@ -598,25 +583,6 @@ pub fn end_by_signal(kind: hirsel_run_schema::SignalKind) -> u8 {
     hirsel_run_schema::RunOutcome::Signaled(kind).exit_code() as u8
 }
 
-/// `hirsel tapes check`: the joined check over linked tapes (RUN-11).
-pub fn check_tapes(
-    paths: &[std::path::PathBuf],
-) -> Result<hirsel_rt::tape_links::Links, Vec<String>> {
-    let mut tapes = vec![];
-    for path in paths {
-        let bytes = std::fs::read(path).map_err(|e| vec![format!("{}: {e}", path.display())])?;
-        let recording = if bytes.starts_with(hirsel_free::tape::MAGIC) {
-            hirsel_rt::free_replay::linked_recording(&bytes)
-                .map_err(|e| vec![format!("{}: {e}", path.display())])?
-        } else {
-            hirsel_rt::host_launch::read_recording(path)
-                .map_err(|e| vec![format!("{}: {e}", path.display())])?
-        };
-        tapes.push((path.display().to_string(), recording));
-    }
-    hirsel_rt::tape_links::check(&tapes)
-}
-
 use hirsel_engine::LoadedProgram;
 
 #[cfg(test)]
@@ -627,3 +593,8 @@ mod candidate;
 #[cfg(test)]
 #[path = "../../hirsel-observation-view/src/lib.rs"]
 mod observation_view;
+
+#[cfg(test)]
+use hirsel_compiler_identity::COMPILER_IDENTITY;
+#[cfg(test)]
+use hirsel_front_phases::compiler_adapters;

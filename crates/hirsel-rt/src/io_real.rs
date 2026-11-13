@@ -47,8 +47,6 @@ pub struct RealCore<S: Streams> {
     /// The host process provider, once a process entry handed its constructor over
     /// (`Adapter::process`); without it a host process call is a tool refusal.
     children: Option<Box<dyn crate::process::ProcessHost + Send>>,
-    /// Runner call outcomes delivered and not yet taken, by wait token (RUN-11).
-    delivered: BTreeMap<u64, hirsel_run_schema::RunnerCompletion>,
     /// The admitted `io.signals` source, and the parked signal waits by token: their kinds
     /// as bits and whether their task parked.
     signals: Option<crate::signals::SignalSource>,
@@ -57,8 +55,6 @@ pub struct RealCore<S: Streams> {
     current: u64,
     /// A script delivered an arrival at the last idle point (no cooperative readiness).
     signal_delivered: bool,
-    /// The admitted `io.authorities` providers and the provider claims the program holds.
-    authorities: Option<crate::authority::Providers>,
     /// A keyed caller's events, recorded once it supplies their resource footprint.
     staged: Option<Vec<Event>>,
     /// The home adapter's resource discovery, admitted at its first use; the
@@ -336,45 +332,6 @@ impl<S: Streams> RealCore<S> {
     ) -> Result<(), AdapterError> {
         self.state.set_net_script(peers, listeners)
     }
-    /// The admitted `io.authorities` grant. A log keeps its history in a directory of its
-    /// mount's pinned descriptor; `seeded` draws each claim's identities from a fixture
-    /// seed, else from the host's secure generator.
-    pub fn set_authorities(
-        &mut self,
-        grants: &std::collections::BTreeMap<String, hirsel_run_schema::AuthorityGrant>,
-        seeded: Option<[u8; 16]>,
-    ) -> Result<(), hirsel_run_schema::RunRefusal> {
-        self.state.authorities = crate::authority::granted(grants)?;
-        let mounts: BTreeMap<String, std::path::PathBuf> = self
-            .disk
-            .mounts
-            .iter()
-            .map(|(path, pin)| {
-                (
-                    path.clone(),
-                    std::path::PathBuf::from(format!(
-                        "/proc/self/fd/{}",
-                        pin.descriptor().as_raw_fd()
-                    )),
-                )
-            })
-            .collect();
-        let directory = move |g: &hirsel_run_schema::AuthorityGrant| {
-            let mount = g.mount.as_deref().unwrap_or_default();
-            let root = mounts
-                .get(mount)
-                .ok_or_else(|| format!("authority.log@1: no host directory for mount `{mount}`"))?;
-            Ok(root.join(g.path.as_deref().unwrap_or_default()))
-        };
-        self.authorities = Some(crate::authority::Providers::new(
-            match seeded {
-                Some(seed) => crate::authority::Draws::Seeded(seed),
-                None => crate::authority::Draws::System,
-            },
-            Box::new(directory),
-        ));
-        Ok(())
-    }
     /// The admitted `io.signals` grant: its script, or the process's signal hold, which a
     /// second holder is refused.
     pub fn set_signal_grant(
@@ -547,12 +504,10 @@ impl RealIo {
             cooperative_net: false,
             test_clock: None,
             children: None,
-            delivered: BTreeMap::new(),
             signals: None,
             signal_waits: BTreeMap::new(),
             current: 0,
             signal_delivered: false,
-            authorities: None,
             staged: None,
             registry: Default::default(),
             file_reads: Default::default(),
@@ -621,14 +576,6 @@ impl<S: Streams> RealCore<S> {
         self.cooperative
             .as_ref()
             .map(|(readiness, _)| readiness.clone())
-    }
-    /// The outcome of the runner call parked under `token`: re-issuing the call completes
-    /// it, and the wait is ready at the next scheduling point.
-    pub fn deliver(&mut self, token: u64, completion: hirsel_run_schema::RunnerCompletion) {
-        self.delivered.insert(token, completion);
-        if let Some((readiness, _)) = &self.cooperative {
-            readiness.deliver(token);
-        }
     }
     /// Record through `journal`, the recording level the run selected.
     pub fn send_journal_to(&mut self, journal: Box<dyn crate::journal::Journal + Send>) {
@@ -1502,11 +1449,7 @@ impl<S: Streams> Adapter for RealCore<S> {
     fn ready_deadline(&self) -> Option<std::time::Instant> {
         // Durable barriers, signal delivery, test time and runner completions
         // have readiness semantics beyond an exclusive real timer driver.
-        if self.journal.durable()
-            || self.test_clock.is_some()
-            || !self.signal_waits.is_empty()
-            || !self.delivered.is_empty()
-        {
+        if self.journal.durable() || self.test_clock.is_some() || !self.signal_waits.is_empty() {
             return None;
         }
         self.cooperative.as_ref()?.0.ready_deadline()
@@ -1517,17 +1460,6 @@ impl<S: Streams> Adapter for RealCore<S> {
         {
             log.advance(points);
         }
-    }
-    fn runner_readiness(&mut self) -> Option<crate::readiness::Readiness> {
-        if self.cooperative.is_none() {
-            // A harness run's in-process callees keep virtual time from 0, as its own
-            // virtual clock would.
-            self.set_cooperative(crate::readiness::Readiness::virtual_clock(0));
-        }
-        self.readiness()
-    }
-    fn deliver(&mut self, token: u64, completion: hirsel_run_schema::RunnerCompletion) {
-        RealCore::deliver(self, token, completion);
     }
     fn has_ready(&mut self) -> Result<bool, AdapterError> {
         if self.signal_delivered && !self.signal_waits.is_empty() {
@@ -1711,43 +1643,6 @@ impl<S: Streams> RealCore<S> {
         Err(AdapterError::Blocked)
     }
     fn perform(&mut self, request: Request) -> Result<Completion, AdapterError> {
-        match &request {
-            // A runner call completes with its delivered outcome, else waits for it.
-            Request::RunnerPoll { .. } => {
-                return Err(AdapterError::Unsupported(
-                    "runner polls require qualified runner transport".into(),
-                ));
-            }
-            Request::RunnerCall(_) => {
-                let (readiness, log) = self.cooperative.as_ref().ok_or_else(|| {
-                    AdapterError::Unsupported("a runner call without cooperative tasks".into())
-                })?;
-                let Some(completion) = self.delivered.remove(&log.current()) else {
-                    readiness.await_delivery();
-                    return Err(AdapterError::Blocked);
-                };
-                let completion = Completion::Runner(completion);
-                self.record(Event {
-                    request,
-                    completion: completion.clone(),
-                    fault: None,
-                    resources: None,
-                })?;
-                return Ok(completion);
-            }
-            // The in-process place acknowledges a forwarded cancellation at once; a
-            // callee's outcome is recorded as it ended.
-            Request::RunnerCancel { .. } | Request::CallReturn(_) | Request::Stopped => {
-                self.record(Event {
-                    request,
-                    completion: Completion::Ready,
-                    fault: None,
-                    resources: None,
-                })?;
-                return Ok(Completion::Ready);
-            }
-            _ => {}
-        }
         if matches!(request, Request::TestClock { .. }) {
             if self.cooperative.is_none() {
                 self.set_cooperative(Default::default());
@@ -1755,12 +1650,6 @@ impl<S: Streams> RealCore<S> {
             self.test_clock
                 .get_or_insert_with(|| crate::readiness::Readiness::virtual_clock(0));
         }
-        // A claim the program closes, or `claim.narrow` refuses, ends with its provider's.
-        let ending_claim = match &request {
-            Request::Close { handle } if self.state.is_claim(*handle) => Some(*handle),
-            Request::Seam(crate::authority::SeamRequest::ClaimNarrow { claim, .. }) => Some(*claim),
-            _ => None,
-        };
         let fake = self.state.is_fake_request(&request);
         if !self.journal.absent() {
             self.state.capture_views = self.journal.records() || self.retain_history;
@@ -1776,7 +1665,6 @@ impl<S: Streams> RealCore<S> {
                     | Request::Stderr { .. }
                     | Request::Signals { .. }
                     | Request::SignalWait { .. }
-                    | Request::Seam(_)
                     | Request::ReadStdin { max: 0, .. }
                     | Request::EnvGet { .. }
                     | Request::EnvNarrow { .. }
@@ -1799,12 +1687,6 @@ impl<S: Streams> RealCore<S> {
         let before = self.state.stdout.len();
         let stderr_before = self.state.stderr.len();
         let result = match &request {
-            Request::Seam(crate::authority::SeamRequest::Provider { .. }) => {
-                match &mut self.authorities {
-                    Some(providers) => providers.perform(&mut self.state, &request),
-                    None => Err(AdapterError::InvalidCompletion),
-                }
-            }
             Request::SignalWait { signals, kinds } => {
                 self.state
                     .expect(*signals, crate::handles::Grant::Signals)?;
@@ -1954,12 +1836,6 @@ impl<S: Streams> RealCore<S> {
                     .execute(&mut self.disk, net, &request, fault.as_ref())
             }
         };
-        if let Some(claim) = ending_claim
-            && !self.state.is_claim(claim)
-            && let Some(providers) = &mut self.authorities
-        {
-            providers.forget(claim);
-        }
         if matches!(
             request,
             Request::Monotonic { .. }
@@ -3638,14 +3514,12 @@ impl RealIo {
             cooperative_net,
             test_clock,
             children,
-            delivered,
             signals,
             signal_waits,
             current,
             signal_delivered,
             staged,
             registry,
-            authorities,
         } = self;
         let Output::Send(output) = streams.output else {
             unreachable!()
@@ -3682,14 +3556,12 @@ impl RealIo {
             cooperative_net,
             test_clock,
             children,
-            delivered,
             signals,
             signal_waits,
             current,
             signal_delivered,
             staged,
             registry,
-            authorities,
         };
         Ok(ConcurrentIo::new(core))
     }

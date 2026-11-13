@@ -273,7 +273,7 @@ impl<'a> Validator<'a> {
                 );
                 self.copy(&s, r, CopyRecipe::Dup);
             }
-            // A static callable (an `Entry`, RUN-3) is its code and the static empty
+            // A static callable is its code and the static empty
             // environment, which is never counted: plain bits.
             LayoutKind::Callable { environment: None }
                 if r.scan.is_empty() && r.drop.is_empty() && r.copy == CopyRecipe::Bits =>

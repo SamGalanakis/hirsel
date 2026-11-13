@@ -1,4 +1,4 @@
-//! `task.isolate[R](tasks, take body)` and `runner.apply[_mut]` (FAIL-2) over the runtime's
+//! `task.isolate[R](tasks, take body)` (FAIL-2) over the runtime's
 //! `isolate.rs`.
 //!
 //! The body reads the running task's failure record count, then calls `body`. A
@@ -28,20 +28,12 @@ pub static ISOLATE: LibraryBody = LibraryBody {
     path: || DefPath::core("task.isolate"),
     build: isolate,
 };
-pub static APPLY: LibraryBody = LibraryBody {
-    path: || DefPath::core("runner.apply"),
-    build: apply,
-};
-pub static APPLY_MUT: LibraryBody = LibraryBody {
-    path: || DefPath::core("runner.apply_mut"),
-    build: apply,
-};
 
 /// `FailureKind`'s variants, by the ordinal `$intrinsic.IsolateKind` returns.
 const KINDS: u32 = hirsel_core_contract::FAILURE_KINDS;
 
 pub(super) struct Entries {
-    /// `IsolateBegin(tasks)` for `task.isolate`, `ApplyBegin()` for `runner.apply`.
+    /// `IsolateBegin(tasks)` for `task.isolate`.
     begin: Intrinsic,
     end: Intrinsic,
     count: Intrinsic,
@@ -154,101 +146,6 @@ fn isolate(cx: &mut Cx<'_>) -> R<LirUnit<Value>> {
     Ok(b.finish())
 }
 
-/// `runner.apply[_mut](f, c, call, a)` (RUN-3, FAIL-2): call the entry `f` on this task with
-/// the other parameters as they arrived, inside a catch that is no scheduling point. The
-/// no-failure path is `ApplyBegin`'s read of the failure count and the call, direct once
-/// `closure_calls` specializes the known entry; a failure has run `f`'s cleanup (FAIL-3)
-/// when the `Isolate` terminator catches it here, and only that path records and ends an
-/// invocation.
-fn apply(cx: &mut Cx<'_>) -> R<LirUnit<Value>> {
-    let entry = parameter(cx.types, cx.callable, 0)?;
-    let f = super::runners::entry_callable(cx.types, entry)?;
-    let f_abi = cx
-        .layouts
-        .fn_abi(cx.types, f, CallableShape::Closure)
-        .map_err(|e| PassError::Layout(cx.path.clone(), e))?;
-    let returned = cx
-        .fn_abi()
-        .result
-        .map(|r| r.layout)
-        .ok_or_else(|| PassError::Malformed("runner.apply returns a Result".into()))?;
-    let entries = entries(cx, "ApplyBegin")?;
-    let mut b = Body::new(cx)?;
-    let failure = payload(&b, returned, RESULT_ERROR)
-        .ok_or_else(|| PassError::Malformed("runner.apply's Result has no error".into()))?;
-    let shape = shape(&b, failure)?;
-    let parameters = b.parameters.clone();
-    let Some((f_parameter, forwarded)) = parameters.split_first() else {
-        return Err(PassError::Malformed("runner.apply parameters".into()));
-    };
-    let start = begin(&mut b, &entries, None)?;
-    let held = b.held_state();
-    let normal = b.current();
-    let catching = b.block(BlockKind::FailureCleanup, &[]);
-    let caught = b.block(BlockKind::Body, &[]);
-    b.at(catching);
-    let resume = b.edge(caught, &[]);
-    b.terminate(Terminator::Isolate {
-        start,
-        caught: resume,
-    });
-    b.at(normal);
-    let unwound = b.failure_to(catching, &[], None);
-    let (callee, f_loan) = b.borrow(f_parameter.address, false)?;
-    let mut loans = vec![f_loan];
-    let mut arguments = Vec::new();
-    for (ordinal, p) in forwarded.iter().enumerate() {
-        let value = match p.passing {
-            Passing::Borrow => {
-                let (value, loan) = b.borrow(p.address, false)?;
-                loans.push(loan);
-                ArgumentValue::Value(value)
-            }
-            // `apply_mut`'s `c`, prepared at entry: the call defines its next version.
-            Passing::Mut => {
-                let version = b.version(p.slot);
-                b.set_reaching(p.slot, version);
-                ArgumentValue::Address {
-                    address: p.address,
-                    version,
-                }
-            }
-            Passing::Take => {
-                return Err(PassError::Malformed(
-                    "runner.apply forwards no owned parameter".into(),
-                ));
-            }
-        };
-        arguments.push(CallArgument {
-            parameter: ordinal as u32,
-            passing: p.passing,
-            value,
-        });
-    }
-    let value = invoke(
-        &mut b,
-        (Callee::Indirect(callee), Vec::new()),
-        f_abi,
-        arguments,
-        &loans,
-        unwound,
-        BlockKind::Body,
-    )
-    .ok_or_else(|| PassError::Malformed("an applied entry returns its Result".into()))?;
-    // `ApplyBegin` recorded no invocation: the catch records it, so only the caught path
-    // ends one.
-    let value = variant(&mut b, returned, "Result", RESULT_OK, &[value]);
-    b.ret(Some(value));
-
-    b.at(caught);
-    b.restore_held(&held);
-    self::caught(&mut b, &entries);
-    let failure = chain(&mut b, &entries, &shape)?;
-    let value = variant(&mut b, returned, "Result", RESULT_ERROR, &[failure]);
-    returning(&mut b, &entries, value)?;
-    Ok(b.finish())
-}
-
 /// The caught chain's entries, under no actuals, opened by the intrinsic `begin`.
 pub(super) fn entries(cx: &mut Cx<'_>, begin: &str) -> R<Entries> {
     let mut entry = |name: &str| intrinsic(cx, name, Vec::new());
@@ -278,22 +175,11 @@ pub(super) fn shape(b: &Body<'_, '_>, failure: LayoutId) -> R<Shape> {
     })
 }
 
-/// `IsolateBegin(tasks)` or `ApplyBegin()`: the running task's failure record count, the
-/// start of a catch. `ApplyBegin` records no invocation, so a stop propagating past it has
-/// none to end until its catch records one ([`caught`]); `IsolateBegin`'s is ended on the
-/// way out from here.
+/// Begin a task isolation and route propagation through its End.
 pub(super) fn begin(b: &mut Body<'_, '_>, entries: &Entries, tasks: Option<ValueId>) -> R<ValueId> {
     let mark = read(b, &entries.begin, tasks)?;
-    if tasks.is_some() {
-        ending(b, entries);
-    }
-    Ok(mark)
-}
-
-/// At the resumption of `ApplyBegin`'s catch, which recorded its invocation: a stop
-/// propagating from here ends it.
-pub(super) fn caught(b: &mut Body<'_, '_>, entries: &Entries) {
     ending(b, entries);
+    Ok(mark)
 }
 
 /// Route propagation from here through End.

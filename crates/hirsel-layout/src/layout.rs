@@ -59,9 +59,6 @@ pub enum OwnerRepresentation {
     ViewCursor { revision: ContentHash },
     /// A core string view has exactly String's layout, including its copy recipe.
     StringView,
-    /// A runner entry `Entry[F]` (RUN-3) is a static callable: the named definition's code
-    /// and the static empty environment, never counted, copied as bits.
-    Entry { revision: ContentHash },
 }
 
 /// The library-owned opaque containers, whose private shapes come from owners.
@@ -1151,10 +1148,6 @@ impl<'o> LayoutBuilder<'o> {
                         Some(OwnerRepresentation::ViewCursor { revision }) => {
                             e.atom(&revision.0);
                             e.atom(&[0, 4]);
-                        }
-                        Some(OwnerRepresentation::Entry { revision }) => {
-                            e.atom(&revision.0);
-                            e.atom(&[0, 5]);
                         }
                         Some(OwnerRepresentation::StringView) => unreachable!("handled above"),
                         None => return Err(LayoutError::MissingOwner(describe(definition.path()))),
@@ -2569,7 +2562,7 @@ impl<'o> LayoutBuilder<'o> {
                         }
                         // SEM-5: an `ordered of` token's word is its ticks or
                         // ordinal, the only handle a comparison may read.
-                        "Instant" | "Level" => {
+                        "Instant" => {
                             handle.scan = vec![ScanStep::Handle {
                                 offset: 0,
                                 kind: HandleKind::Word,
@@ -2656,15 +2649,6 @@ impl<'o> LayoutBuilder<'o> {
             }
             // A static callable: the definition's code and the static empty environment,
             // never counted, so plain bits as the type's Plain bound says.
-            OwnerRepresentation::Entry { revision } => {
-                let mut entry =
-                    self.callable_record(key, None, hirsel_lir::abi_types::CallMultiplicity::Many);
-                entry.scan.clear();
-                entry.drop.clear();
-                entry.copy = CopyRecipe::Bits;
-                entry.key.owner_revision = Some(*revision);
-                return Ok(entry);
-            }
             OwnerRepresentation::Defined(record) => record,
         };
         let nf = self.enter(walk, record, arguments, f)?;

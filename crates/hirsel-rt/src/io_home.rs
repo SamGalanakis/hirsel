@@ -350,19 +350,6 @@ impl Adapter for HomeAdapter {
         self.with(|adapter| adapter.has_ready())
     }
 
-    fn runner_readiness(&mut self) -> Option<crate::readiness::Readiness> {
-        // Local runners execute on admission at width 1. Readiness contains
-        // Rc state and must never be returned to a compute or pool thread.
-        if crate::pool::on_pool() || crate::pool::compute_index().is_some() {
-            return None;
-        }
-        self.with(|adapter| adapter.runner_readiness())
-    }
-
-    fn deliver(&mut self, _token: u64, _completion: hirsel_run_schema::RunnerCompletion) {
-        self.with(|adapter| adapter.deliver(_token, _completion))
-    }
-
     fn wait_sources(&mut self) -> Result<Option<WaitSources>, AdapterError> {
         self.with(|adapter| adapter.wait_sources())
     }

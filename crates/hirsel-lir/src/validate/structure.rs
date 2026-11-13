@@ -3190,7 +3190,7 @@ impl<S: Stage> Checker<'_, '_, S> {
                         );
                     }
                 }
-                // FAIL-2: only the library bodies of `task.isolate` and `runner.apply`
+                // FAIL-2: only the library bodies of `task.isolate`
                 // catch, from the record count (a u64) they read before the callee ran.
                 Terminator::Isolate { start, .. } => {
                     self.library_only(site, Opcode::Isolate);
@@ -3307,7 +3307,6 @@ impl<S: Stage> Checker<'_, '_, S> {
     /// Check scope transitions independently of the library builder and physical
     /// continuation plan. Failure edges retain the invocation until its End;
     /// a successful begin creates it, and a catch handles its suffix only once.
-    /// `runner.apply`'s begin is lazy: the runtime records its invocation at the
     /// catch, so only a caught path ends it and an uncaught one must not.
     fn isolate_protocol(&mut self) {
         let unit = self.cx.unit;
@@ -3321,14 +3320,12 @@ impl<S: Stage> Checker<'_, '_, S> {
         #[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
         struct State {
             scope: Option<(ValueId, bool)>,
-            lazy: bool,
             failing: bool,
         }
         let mut pending = vec![(
             unit.entry,
             State {
                 scope: None,
-                lazy: false,
                 failing: false,
             },
         )];
@@ -3386,15 +3383,8 @@ impl<S: Stage> Checker<'_, '_, S> {
                         match state.scope.take() {
                             None => self
                                 .add(site, K::Placement("isolation End without its active begin")),
-                            Some((_, false)) if state.lazy => self.add(
-                                site,
-                                K::Placement(
-                                    "an uncaught apply isolation has no invocation to End",
-                                ),
-                            ),
                             Some(_) => {}
                         }
-                        state.lazy = false;
                     }
                     pending.push((
                         target(unit.tables.failures[failure.index()].cleanup),
@@ -3408,8 +3398,6 @@ impl<S: Stage> Checker<'_, '_, S> {
                             self.add(site, K::Placement("isolation begin repeated before End"));
                         }
                         state.scope = call.result.map(|mark| (mark, false));
-                        state.lazy =
-                            operation.is_some_and(|path| path.is_core("$intrinsic.ApplyBegin"));
                     } else if matches!(call.callee, Callee::Indirect(_) | Callee::Bound { .. })
                         && state.scope.is_none()
                     {
@@ -3433,7 +3421,7 @@ impl<S: Stage> Checker<'_, '_, S> {
                     pending.push((target(caught), state));
                 }
                 Terminator::Return(_) | Terminator::Propagate => {
-                    if state.scope.is_some_and(|(_, caught)| caught || !state.lazy) {
+                    if state.scope.is_some() {
                         self.add(site, K::Placement("isolation terminal path without End"));
                     }
                 }
@@ -5431,7 +5419,6 @@ fn early_unique_collection_cursor<S>(cx: &Cx<'_, S>, queried: ValueId, answer: V
 }
 
 /// The intrinsics that open an isolation invocation: `task.isolate`'s scheduling begin and
-/// `runner.apply`'s in-task begin (FAIL-2).
 fn opens_isolation(path: &hirsel_syntax::DefPath) -> bool {
-    path.is_core("$intrinsic.IsolateBegin") || path.is_core("$intrinsic.ApplyBegin")
+    path.is_core("$intrinsic.IsolateBegin")
 }

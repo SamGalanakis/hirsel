@@ -197,7 +197,7 @@ fn evaluate_on_compiler_thread(path: &Path, expect: &Expect, hash_seed: u64) -> 
             Err(error) => return whole(Status::Fail(format!("test check: {error}")), observation),
         };
         for test in &tests {
-            let mut execute = |checked| {
+            let execute = |checked| {
                 let input = batch.entry(&test.entry)?;
                 hirsel_driver::testing::execute(&input, test, checked, hash_seed, limits)
             };
@@ -463,7 +463,7 @@ fn evaluate_on_compiler_thread(path: &Path, expect: &Expect, hash_seed: u64) -> 
     let mut interpret = |simulation: hirsel_engine::SimulationConfig,
                          mut observation: Observation|
      -> (Status, Observation) {
-        let mut execute = |checked| {
+        let execute = |checked| {
             hirsel_driver::testing::observe_tir(
                 &prepared,
                 &config,

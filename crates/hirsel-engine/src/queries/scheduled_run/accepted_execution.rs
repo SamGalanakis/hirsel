@@ -29,11 +29,6 @@ pub struct AcceptedExecutionProduct {
     pub runtime: Arc<hirsel_interp::aggregate::RuntimeTypes>,
     pub checked_runtime: Arc<hirsel_interp::checked::CheckedRuntime>,
     pub code: hirsel_run_schema::CodeReach,
-    pub callees: std::collections::BTreeMap<String, hirsel_run_schema::CalleeFacts>,
-    pub entries: std::collections::BTreeMap<
-        String,
-        (hirsel_run_schema::CalleeFacts, hirsel_run_schema::CallForm),
-    >,
     pub revision: hirsel_run_schema::ProgramRevision,
     pub foreign_unreplayable: bool,
     pub foreign: crate::ForeignUse,
@@ -127,7 +122,6 @@ impl Locator {
     }
 }
 type Reach = Option<Vec<String>>;
-type Callee = ([u8; 32], [u8; 32], [u8; 32], Reach);
 type Node = (String, Vec<Vec<u8>>, Vec<String>);
 #[derive(Serialize, Deserialize)]
 struct Row {
@@ -174,8 +168,6 @@ struct Product {
     sources: Vec<SourceFile>,
     nodes: Vec<Node>,
     code: Reach,
-    callees: BTreeMap<String, Callee>,
-    entries: BTreeMap<String, (Callee, bool)>,
     foreign_unreplayable: bool,
     externs: BTreeSet<DefPath>,
     unmodeled: BTreeMap<DefPath, DefPath>,
@@ -194,8 +186,6 @@ hirsel_product_codec::decode_structure!(Product {
     sources,
     nodes,
     code,
-    callees,
-    entries,
     foreign_unreplayable,
     externs,
     unmodeled
@@ -221,22 +211,6 @@ fn reach(value: &CodeReach) -> Reach {
 }
 fn code(value: Reach) -> CodeReach {
     value.map_or(CodeReach::Safe, CodeReach::Escapes)
-}
-fn callee(value: &CalleeFacts) -> Callee {
-    (
-        value.program,
-        value.code,
-        value.fingerprint,
-        reach(&value.reach),
-    )
-}
-fn facts(value: Callee) -> CalleeFacts {
-    CalleeFacts {
-        program: value.0,
-        code: value.1,
-        fingerprint: value.2,
-        reach: code(value.3),
-    }
 }
 fn failure(message: impl Into<String>) -> QueryError {
     operational(format!("accepted execution: {}", message.into()))
@@ -748,18 +722,6 @@ impl FrontRunQueries {
             sources,
             nodes,
             code: reach(&output.code),
-            callees: output
-                .callees
-                .iter()
-                .map(|(path, value)| (path.clone(), callee(value)))
-                .collect(),
-            entries: output
-                .entries
-                .iter()
-                .map(|(path, (value, form))| {
-                    (path.clone(), (callee(value), *form == CallForm::Call))
-                })
-                .collect(),
             foreign_unreplayable: output.semantic.foreign_unreplayable(),
             externs: output.foreign.externs.clone(),
             unmodeled: output.foreign.unmodeled.clone(),
@@ -1147,28 +1109,6 @@ fn load(
         runtime,
         checked_runtime,
         code: code(product.code),
-        callees: product
-            .callees
-            .into_iter()
-            .map(|(path, value)| (path, facts(value)))
-            .collect(),
-        entries: product
-            .entries
-            .into_iter()
-            .map(|(path, (value, call))| {
-                (
-                    path,
-                    (
-                        facts(value),
-                        if call {
-                            CallForm::Call
-                        } else {
-                            CallForm::Compute
-                        },
-                    ),
-                )
-            })
-            .collect(),
         revision,
         foreign_unreplayable: product.foreign_unreplayable,
         foreign: ForeignUse {

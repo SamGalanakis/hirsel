@@ -110,12 +110,6 @@ pub enum HostLaunch<'a> {
         revocations: Option<&'a Path>,
     },
     Replay(&'a Path),
-    /// A callee run a runner host admits for an arrived call (RUN-10): its validated `call`
-    /// record, and the tape it records to.
-    Callee {
-        run: &'a hirsel_run_config::ValidatedRun,
-        record: Option<&'a Path>,
-    },
 }
 impl HostLaunch<'static> {
     /// The launch without a record: the empty-grant record with all seeds zero
@@ -206,7 +200,6 @@ pub fn admit_bound_host_run(
             revocations,
             ..
         } => (*record, *revocations),
-        HostLaunch::Callee { record, .. } => (*record, None),
         HostLaunch::Replay(_) => (None, None),
     };
     match bound.into_parts() {
@@ -238,50 +231,4 @@ pub fn admit_bound_host_run(
         }
         BoundHostRunParts::Replay { run, io } => Ok(HostRun::Replay { run, io }),
     }
-}
-
-/// A callee entry's call schemas and its argument's codec program, from its checked signature.
-pub fn call_schemas(
-    signature: &hirsel_types::Signature,
-    runtime: &hirsel_interp::aggregate::RuntimeTypes,
-) -> Result<
-    (
-        hirsel_interp::CallSchemas,
-        std::sync::Arc<hirsel_interp::aggregate::CodecProgram>,
-    ),
-    ToolError,
-> {
-    let invalid = || ToolError::Runtime("launch: a callee entry's signature".into());
-    let hirsel_types::SignatureKind::Function(function) = &signature.kind else {
-        return Err(invalid());
-    };
-    let schema = |ty| {
-        runtime
-            .codec(&runtime.types, ty)
-            .ok()
-            .flatten()
-            .ok_or_else(invalid)
-    };
-    let Some(hirsel_types::TypeKind::Named { arguments, .. }) =
-        runtime.types.get(function.result).map(|t| &t.kind)
-    else {
-        return Err(invalid());
-    };
-    let [
-        hirsel_types::GenericArgument::Type(ok),
-        hirsel_types::GenericArgument::Type(error),
-    ] = arguments.as_ref()
-    else {
-        return Err(invalid());
-    };
-    let argument = function.parameters.last().ok_or_else(invalid)?.ty;
-    Ok((
-        hirsel_interp::CallSchemas {
-            result: schema(*ok)?,
-            error: schema(*error)?,
-            failure: hirsel_interp::library::runners::failure_schema(runtime)
-                .map_err(|_| invalid())?,
-        },
-        schema(argument)?,
-    ))
 }

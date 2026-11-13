@@ -64,16 +64,7 @@ type misses a declared bound is refused at the implementation, citing the bound'
   allocation prohibition without this bound.
 - Serialization: `serializable` ([SER-1](serialization.md#ser-1-serializable-schemas)).
 
-An opaque type's bounds and authority summary are part of its signature, and opaque
-declarations are checked against their representation in the owner's view, sealed
-capabilities included; [CAP-5](capabilities.md#cap-5-capability-sealing) changes
-authority abstraction only, not structural-bound proof. There is no universal `==`.
-`Shared`, `Slots`, `TypeShape`, `SortedMap` and the planned `Entry`
-([RUN-3](runners.md#run-3-entries)) satisfy neither `data` nor `key`, including
-inside aggregates; `Map` and `Set` have their specified structural equality
-([SEM-5](semantics.md#sem-5-order-and-maps)). Finite or regular nominal type graphs have no semantic
-depth or width cutoff for proving bounds; only strictly growing polymorphic expansion may
-stop, as an operational tooling limit, never as false evidence.
+
 
 **Serializable.** Schema eligibility and explicit `@serializable` opt-in follow
 [SER-1](serialization.md#ser-1-serializable-schemas); the canonical codec is

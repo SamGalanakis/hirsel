@@ -214,3 +214,54 @@ fn all_four_projection_controls_propagate_not_granted_without_dummy_capabilities
         }
     });
 }
+
+#[test]
+fn isolated_mutating_callback_drops_the_installed_resource_before_catch() {
+    hirsel_intern::jobs::with_compiler_stack(|| {
+        let source = r#"
+resource type Item { output: Stdout, name: String }
+drop(item) { let _ = out.print(item.output, item.name) }
+fn install_then_fail(mut item: Item, output: Stdout) {
+  item = Item(output: output, name: "new\n")
+  failure.check(false, Arithmetic())
+}
+pub fn main(rt: Io) -> Result[(), GrantError] {
+  let tasks = io.tasks(rt)?
+  let output = io.stdout(rt)?
+  let status = task.isolate(tasks, fn() -> () {
+    let mut item = Item(output: output, name: "old\n")
+    install_then_fail(mut item, output)
+  })
+  match status {
+    Error(failure) => { let _ = out.print(output, "caught\n") },
+    Ok(_) => failure.check(false, Arithmetic()),
+  }
+  Ok(())
+}
+"#;
+        let mut engine = QueryEngine::new(default_environment(), compiler_adapters());
+        let file = engine
+            .sources
+            .add("isolated-mutation.hir", source.into())
+            .unwrap();
+        let checked = source_check_request(&mut engine, file, &default_context()).unwrap();
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        let mut stdout = vec![];
+        let result = run_snapshot(
+            &mut engine,
+            &RunConfiguration {
+                entry: entry_path(&default_context()),
+                hash_seed: 0,
+                inputs: vec![],
+            },
+            SimulationConfig::default(),
+            &mut stdout,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            RunOutcome::Returned(hirsel_run_schema::Returned::Ok)
+        );
+        assert_eq!(stdout, b"old\nnew\ncaught\n");
+    });
+}

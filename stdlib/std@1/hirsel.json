@@ -342,36 +342,6 @@
       ]
     },
     {
-      "path": "history.hir",
-      "module": [
-        "history"
-      ]
-    },
-    {
-      "path": "store.hir",
-      "module": [
-        "store"
-      ]
-    },
-    {
-      "path": "runner.hir",
-      "module": [
-        "runner"
-      ]
-    },
-    {
-      "path": "call_info.hir",
-      "module": [
-        "call_info"
-      ]
-    },
-    {
-      "path": "entry_ref.hir",
-      "module": [
-        "entry_ref"
-      ]
-    },
-    {
       "path": "schema.hir",
       "module": [
         "schema"
@@ -389,19 +359,6 @@
       "module": [
         "internal",
         "decimal_seq"
-      ]
-    },
-    {
-      "path": "table_schema.hir",
-      "module": [
-        "internal",
-        "table_schema"
-      ]
-    },
-    {
-      "path": "table.hir",
-      "module": [
-        "table"
       ]
     },
     {

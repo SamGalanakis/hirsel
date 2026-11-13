@@ -95,17 +95,15 @@ zero. Process snapshots contribute to the admitted run identity like any other i
 |---|---|
 | `schema` | Run-record format version (1). |
 | `program` | Digest of the selected semantic program revision: transitive source and core implementations, selected constant dependencies and the runtime's semantic contract. |
-| `entry`, `launch` | The entry's full versioned definition path, and `main` or `test`; planned: `call` for a callee run ([RUN-10](runners.md#run-10-callee-runs)). |
 | `call` | Planned. Present exactly when `launch` is `call`: the call form; the cause (the caller's run instance, request ordinal and request digest); and the argument bytes as lowercase hexadecimal. |
 | `inputs` | `hash_seed`, `random_seed` and `test_seed`, each an explicit `u64`; and, for a simulation, a separate scheduler algorithm, version and seed; optional `fault_seed`, a `u64` that seeds `sim@1` runners' fault decisions and defaults to zero when absent. |
-| `io` | Absent or null, or a closed grant record: stdout sink, Tasks provider, monotonic clock, wall clock, Random provider, directory mounts, network grant and process grant, and optionally the Telemetry provider (`telemetry`, absent from canonical bytes when absent); planned: runners (`runners`, [providers](runners.md#providers)). Each absent projection is denied. |
 | `args` | Absent or null, or the exact ordered UTF-8 snapshot, explicit empty included. |
 | `env` | Absent or null, or exact key-to-value entries, with null for a granted key that is unset; denied keys are distinguishable from granted unset keys. |
 | `unsafe` | Boolean explicit root grant, false by default. |
 | `admission` | Optional launch-only constraints: not-before, expiry, an external revocation reference and the code policy `code`, `admit.any@1` (the default when absent) or `admit.safe@1` ([CAP-6](capabilities.md#cap-6-safe-code)). The resolved decision and its evidence are captured in the validated record. |
 | `placement` | Execution placement, outside identity: core width and host placement settings; validated and reported as provenance, then stripped from canonical bytes. |
 | `budgets` | Absent (`budgets.none@1`), or the host's resource budgets for the run (**Budgets** below). |
-| `recording` | Run-policy member: `none`, `record` or `durable` ([RUN-14](runners.md#run-14-recording-levels), [Recording levels](#recording-levels)); absent, the host's launcher chooses and the validated record states the choice. |
+
 
 **Directory mounts** are sorted, unique, portable virtual paths (the empty path is the
 virtual root), each with an explicit absolute host root designator and `read` or
@@ -140,24 +138,7 @@ so adding the member leaves every earlier record's identity unchanged; a null me
 read as absent. Absent, the projection is denied and every host signal keeps its default
 action ([CAP-1](capabilities.md#cap-1-authority)).
 
-**Providers** name versioned observable contracts, identical for real hosts, simulation
-and replay: `stdout.bytes@1`, `random.splitmix64@1`, `random.system@1`,
-`clock.monotonic.ns@1`, `clock.wall.unix_ns@1`, `tasks.cooperative@1`, `tasks.free@1`,
-`net.stream@1`, `net.script@2`, `process.spawn@1`, `process.script@1`,
-`telemetry.capture@1`, `telemetry.null@1`, `budgets.none@1` and `budgets.limits@3`. Planned: the runner providers `local.threads@1`,
-`local.process@1`, `sim@1` and `remote.tls@1` and the code stores `code.none@1`,
-`code.dir@1`, `code.object@1` and `code.sim@1`. Each is a seam under
-[RUN-13](runners.md#run-13-provider-seams): its choice changes cost, latency and crash
-survival, never meaning. `tasks.cooperative@1` supplies structured tasks with cooperative
-scheduling at the suspension points of [CONC-1](concurrency.md#conc-1-runtime). Host
-readiness waits suspend only their task; the provider waits for external readiness only
-when no task is runnable. Cancellation is checked before blocking effects and when an
-effect-free wait resumes, with destruction shielded as required by CONC-3. Its
-observations are those of one cooperative scheduler at every execution width. An
-implementation may run several tasks' code between scheduling points at once on several
-threads. Scheduling points, synchronising operations, host requests, `shared.thaw` tests,
-failures, stops and budget charges take effect in the order the selected scheduler gives.
-Execution width is a placement member and never part of identity.
+
 
 An implementation may evaluate private computation before its logical turn,
 including a child whose spawn is reserved but has not taken effect. This is not a
@@ -355,23 +336,9 @@ constants, implicit finalizers and selected dependency/entry changes remain boun
 the validated run's grants and provider contracts. Failure locations resolve against the
 current source map; generated bodies keep their generated-source provenance.
 
-**Validated records.** The validated record states the effective grants, provider contracts
-and normalized snapshots; a recording embeds those canonical bytes and their digest. Its
-header also states the recording schema, the deterministic input model, the program
-identity and the execution origin; planned: the run instance, a 128-bit value fixed at
-admission that distinguishes runs of identical records and names the run in call keys and
-call streams ([RUN-11](runners.md#run-11-linked-tapes)). A native artifact digest is diagnostic provenance:
-replay agreement across native topologies and targets uses the semantic program digest
-rather than identical machine code. Observations carry the same program and run identity.
-Public signature digests alone are insufficient: a body change invalidates replay even when
-request prefixes match.
 
-**Revisions.** A run executes one revision ([PROG-1](programs.md#prog-1-names)). A
-runner's callee run executes the revision its place selects for the callee, and the place
-refuses a call whose code hash differs from the request's
-([RUN-8](runners.md#run-8-identity-and-arrival)); a call never changes the caller's
-revision. A place changes the revision it selects only by an activation
-([STORE-19](storage.md#store-19-activation)).
+
+
 
 **Admission.** Optional time and revocation checks run once, before entry. The launcher
 records the decision and the evidence it used. An accepted grant is an endowment for the
@@ -384,16 +351,7 @@ specified event-capable provider whose events are recorded and obey cancellation
 no-effect rule. Resuming into real `Io` is a new admission that validates live host grants
 again; a recording is never authority to reconnect ([PROG-6](programs.md#prog-6-grant-admission)).
 
-**Seeds.** The hash placement seed affects only placement ([SEM-5](semantics.md#sem-5-order-and-maps)).
-The Random and Test seeds are separate even when a user chooses equal numbers, and so is
-`inputs.fault_seed`, which drives `sim@1` runners' fault-site enablement, firing and crash
-points ([providers](runners.md#providers)). When present, it contributes to run identity
-and appears in the canonical run record embedded in a recording. Replay binds that
-record, checks locally decided outcomes against recorded completions, and takes callee
-outcomes from the tape without running callees. It needs no separately supplied fault
-seed. A scheduler seed describes simulator policy; the recorded event and scheduling trace is the
-authoritative replay input. A user `Hasher` receives only an explicit seed from its caller,
-never the hidden placement seed.
+
 
 **Scheduler.** `inputs.scheduler` is absent or null, or `{"algorithm", "version", "seed"}`
 naming one of three contracts, each version 1; any other algorithm or version refuses
@@ -433,13 +391,7 @@ Invalid query names are expected `EnvError` values.
 
 ## Recording and resuming
 
-Ordinary execution and non-durable recording cannot be resumed. The optional durable
-recording profile uses the protocol below; the run-record member `recording`
-selects `none`, `record` or `durable` ([RUN-14](runners.md#run-14-recording-levels)).
-**InDoubt** is a tooling recovery disposition for a request whose completion was never
-recorded, never a `Failure`, `Canceled` or a source `Result` variant. A runner call's
-`InDoubt` outcome ([RUN-6](runners.md#run-6-outcomes)) is a different thing: a live
-provider outcome, recorded as a completion and replayed like any other.
+
 
 Bind and durably create the header first. Allocate a run-local request ordinal and append
 `Prepared(id, anchor, task-path, request)`; make that record and its log location durable
@@ -450,63 +402,13 @@ cancellation with no effect, failure cleanup operations and ordinary successful 
 all recorded. Concurrent operations have preparation and completion ordinals plus the
 recorded scheduling order; an id is not an exactly-once key at the external service.
 
-Records are framed, with lengths, sequence checks and corruption detection, and a final
-complete-run trailer. A durable run has one journal writer. Live continuation requires
-exclusive journal ownership and evidence that the previous executor stopped or was fenced;
-otherwise continuation is refused. A journal lock alone is not a distributed exactly-once
-guarantee. Durable writes include the file and directory synchronization the storage
-provider's durability model requires. Prepared work may be batched before its effects are
-issued, and completions may share a barrier before their results are delivered; effects are
-never issued unlogged in order to batch. A recording failure before preparation prevents
-issuance. A recording failure after issuance is environmental and leaves the request in
-doubt; it is never returned as `Canceled` or as proof of no effect. A torn completion leaves
-its `Prepared` record in doubt; unrecoverable corruption refuses recovery rather than guess
-that a log prefix is complete. A crash after a durable preparation but before issuance may
-conservatively produce InDoubt although no effect happened. Planned exceptions: a compute
-runner call is recorded but not journaled, and recovery re-issues it, because its
-signature proves it has no effect ([RUN-7](runners.md#run-7-retry-classes)); and a store
-commit's in-doubt append is settled by reading the store's history
-([STORE-10](storage.md#store-10-recording)). The journal records of a durable run that
-belongs to a place commit in that place's store, with the run's writes
-([STORE-18](storage.md#store-18-runs-at-a-place)); the rules of this section hold
-unchanged for them.
 
-A terminal trailer proves a complete recording. Its absence alone does not make durable
-completions doubtful: recovery scans the valid records and distinguishes a completed
-prefix, unresolved requests and unclean termination with no pending request. Non-durable
-recordings cannot prove the absence of effects beyond their last durable bytes and are
-labelled as having an unknown suffix. Completed operations replay only in simulation.
-Reconciling InDoubt requires external evidence or an explicit application or provider
-recovery procedure; it never defaults to a retry, even for apparently idempotent
-operations. Call-key status queries and call streams
-([RUN-11](runners.md#run-11-linked-tapes)) are such provider procedures. An explicit live continuation is newly admitted and records its recovery
-decision. Generic resurrection of host file descriptors, channel state or arbitrary
-foreign resources is not promised; a provider must support reacquisition and reconciliation
-or continuation is refused.
 
-### Runner and store recording
 
-Runner calls are recorded as [RUN-11](runners.md#run-11-linked-tapes) specifies:
-one request and one completion at the caller, parked and readied under
-`tasks.cooperative@1` as network requests are, and replayed without contacting a place.
-A store's requests of its authority are capability requests, recorded like any others
-([STORE-10](storage.md#store-10-recording)), and replay never reaches a real authority.
-A simulated authority's crash is the simulated disk's crash below, applied to its log or
-objects: it keeps exactly what the levels the crash spares had made durable, and the
-crash seed chooses the rest.
 
 ### Recording levels
 
-The run record's run-policy member `recording`
-([RUN-14](runners.md#run-14-recording-levels)) selects how a host run is recorded:
-`"none"`, `"record"` or `"durable"`. It is absent by default, and absent means the host
-decides, as before the member existed: a launch with a recording destination (`--record`)
-records at level `record`, and one without records nothing. The level is a host
-implementation choice behind one seam: it never changes what a program may do or observe
-(DET-3), and only the recording, its cost and its recovery differ. A record that names a
-level and a launch that disagrees with it refuse before entry: `record` or `durable` without
-a destination, or `none` with one. The destination is host input, never part of the record's
-identity, and lies outside every granted mount and output file.
+
 
 - `none` records nothing.
 - `record` writes the ordinary tape: its header before entry, then each completion flushed
@@ -519,16 +421,7 @@ that issues no request, is never journaled.
 
 ### Durable journal
 
-An ordinary tape's magic is `hirsel-io-tape 13` followed by NUL; a durable
-journal's is `hirsel-journal 5` followed by newline. Both are framed files (below) whose
-identity is the 32-byte run identity and whose generation is 0; the header record's run
-identity must equal the file's. The remote call journal (`journal.dir@1`,
-[runners](runners.md)) is the third framed file, and the segments of a store's local
-history ([STORE-11](storage.md#store-11-engine-and-storage-seam)) the fourth. Every framed file uses one envelope
-and one recovery classifier, in `hirsel-run-schema`'s `frame` module. Bodies are encoded
-in place after a reserved header, without a second payload encoding or copy. Writes use
-reusable buffers and preserve every existing flush and synchronization point. Older
-tape and journal versions are refused by name; there is no second decoder.
+
 
 **Frames and recovery.** A framed file starts with a file header: the format's magic
 (which names its version), the file's identity, a 64-bit little-endian generation, and a
@@ -654,10 +547,7 @@ withdrawal, in preparation order) and the trailer's outcome when present. A comp
 incomplete one refuses replay and names its requests in doubt. This release offers no live
 continuation: continuation is refused, since no provider supports reacquisition.
 
-**Simulated disk.** Every simulated `Dir`, the simulated journal and `authority.sim@1` share one crash model
-([Durability](core-library.md#durability)): a crash keeps each file's last synchronized bytes and each
-directory's last synchronized listing, and the last unsynced write survives as a prefix
-chosen by the crash seed when everything before it in its file is durable.
+
 
 ### Telemetry recording
 
@@ -1101,69 +991,6 @@ while preserving original capture identity. Lost ack retries use identical bytes
 and may duplicate accepted data; receipts mark that ambiguity. Operator re-export
 can duplicate data too. Replay never invokes the exporter or reconnects to a
 collector; source has no global exporter or exporter-controlled enabled branch.
-
-### Authority grants
-
-A run's `io` grants may declare a sorted object `authorities`, naming the
-store authorities `io.authority` returns ([STORE-11](storage.md#store-11-engine-and-storage-seam)).
-Omission and the empty object normalize to no member. Names follow the rules of
-`object_stores` names. Each entry has `provider`, `floor` (the name of a level the
-provider declares, [STORE-2](storage.md#store-2-transactions), such as `"host"` for
-`authority.log@1`) and the provider's settings:
-
-- `authority.memory@1`: none.
-- `authority.log@1`: `mount` (the virtual path of an explicitly granted writable Dir) and
-  `path` (a canonical relative directory within it).
-- `authority.objects@1`: `objects` (an entry of the host's object-storage seam, as for
-  `code.object@1`, [RUN-13](runners.md#run-13-provider-seams)) and `level`, the name of
-  the one level the operator states that storage provides, such as `"zone"`.
-- `authority.sim@1`: `seed`, `represent` (`"log"` or `"objects"`), `levels` (a nonempty
-  list of distinct level names, weakest first, which the simulated authority declares;
-  exactly one for `"objects"`) and `faults`, a sorted object mapping each fault the
-  simulated authority injects to a `fail_one_in` count (u64, 0 for never): for `"log"`
-  `barrier`, `garbage`, `lost_response`, `refuse` and `torn`, for `"objects"`
-  `incomplete_listing`, `lost_response` and `refuse`. For `"log"`, `faults` may also
-  name **cuts**, each mapped to a request number `k` (the authority's requests counted
-  from 1, every seam operation one request): `fail_at` refuses request `k` with no
-  effect; `lose_response_at` applies it and answers undecided; `tear_at` crashes the
-  simulated disk before it and answers undecided; `crash_at` crashes the simulated disk
-  after it. A crash keeps exactly the durable prefix (the simulated disk, [Resource
-  footprints](#resource-footprints)) and an undecided answer to a claimed request ends
-  that claim.
-
-An `objects.sim@1` entry of `authority.objects@1` takes the same kind of cuts as members,
-each a request number `k` (the object requests counted from 1: every get, put, conditional
-replace, listing and delete, one per key): `fail_at` answers request `k` with a definite
-refusal and no effect; `lose_unapplied_at` loses it before its effect, unanswered;
-`lose_response_at` applies it and loses its reply; `delays`, a list of `{"at": k,
-"lands": m}` with `k < m` and each `k` distinct, answers each request `k` unavailable at
-once and holds its write back until just before request `m`, when the write lands with
-its condition checked then, as a request that arrives late does; any number of delays may
-be outstanding together, a client restart neither drops nor lands them, and writes due
-before the same request land in the order the list gives; `crash_at` ends the client right after it, so every later request of that
-client fails with no effect, and the authority continues as a new client that keeps
-nothing of the old one and whose old claims are dead; `claim_at` has another client of
-the same objects claim the history just before request `k` is served, its own requests
-counted, so a later claim can land between the requests of one advance; `stale_read_at`,
-a nonempty list of request numbers rather than one, answers a get at each of them of a key
-whose latest write replaced or deleted bytes with those bytes, as a lagging replica would,
-so consecutive numbers answer one reader stale again and again. Entries in one run that name the same `world` (a nonempty
-name) are clients of one bucket and must be the same entry: they share its objects, its
-request count, its cuts and its held writes, so request `k` is the world's `k`th
-whichever client sends it, and `crash_at` ends only the client that sent request `k`. An
-entry without `world` has objects of its own. An object write is whole or absent, so no cut tears one. The objects authority
-settles a head replace that got no success answer by reading the head again, and refuses
-an append whose record put failed (the record, if written, is an orphan no head names), so
-what the store sees, refused before any effect or undecided, follows from where the request
-was cut and that read, not from the kind of failure. No other provider or representation takes a cut:
-`objects.dir@1` and `objects.s3@1` refuse the members.
-
-A floor the provider does not declare, a level name that is not lowercase ASCII letters
-and digits starting with a letter, two entries over the same directory or object prefix,
-unknown fields and references outside a granted mount refuse before entry. An authority
-grant gives the run nothing else: its provider reaches its directory or objects itself,
-and `io.authority` on an undeclared name returns `NotGranted()`. The grants determine
-admission, subset checks, run identity, recording and replay like any other.
 
 ### Object-store grants
 

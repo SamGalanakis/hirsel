@@ -5,7 +5,6 @@ pub mod integer;
 pub mod simulation;
 pub mod string;
 pub use simulation::{FileReadScript, Simulation, SimulationConfig};
-mod authority;
 mod codec;
 mod dictionaries;
 mod dispatch;
@@ -28,7 +27,6 @@ pub use cpu::{CpuControl, CpuRetirement};
 mod cpu_trace;
 pub use cpu_trace::{CpuBoundary, CpuPhase};
 pub mod race;
-mod recorders;
 mod root_trace;
 mod sealed;
 mod shared;
@@ -86,8 +84,6 @@ pub fn operation_dispatch()
     result
 }
 
-mod places;
-pub mod runners;
 mod tasks;
 mod timers;
 

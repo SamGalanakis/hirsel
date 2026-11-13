@@ -15,14 +15,7 @@ use hirsel_syntax::DefPath;
 use hirsel_types::{BuiltinType, Primitive};
 use std::collections::BTreeMap;
 mod free;
-mod remote;
-mod runners;
 mod walk;
-pub use remote::{
-    CancelHandle, ExternalCancel, Hosted, PlaceFeed, PlaceHandle, RemoteRunners,
-    wire as remote_wire,
-};
-pub use runners::RunnerContext;
 
 fn invalid() -> Error {
     Error::InvalidTir("host network operation schema".into())
@@ -368,7 +361,6 @@ pub struct HostLibrary {
     free_progressed: bool,
     free_drops: BTreeMap<u64, free::Drop>,
     free_checks: BTreeMap<u64, free::Check>,
-    free_runners: BTreeMap<u64, free::Runner>,
     pending_free_drop: Option<OperationResult>,
     free_ready: Option<(R, Result<C, hirsel_rt::io::AdapterError>)>,
     pub io: HostIo,
@@ -390,7 +382,6 @@ pub struct HostLibrary {
     /// The library's cancellation count at the last scheduling point.
     cancellations: u64,
     yield_now: bool,
-    runners: runners::HostRunners,
     /// The host `mapped.with` calls whose bodies run, by continuation: Dir and Mapped.
     mapped: BTreeMap<u64, (u64, u64)>,
     next_continuation: u64,
@@ -471,18 +462,7 @@ impl HostLibrary {
             telemetry_seed: admitted.telemetry_provider().map_or(0, |(_, seed, _)| seed),
             test_seed: record.inputs.test_seed,
             scheduler: record.inputs.scheduler.clone(),
-            runners: record
-                .io
-                .as_ref()
-                .map(|io| io.runners.clone())
-                .unwrap_or_default(),
-            fault_seed: record.inputs.fault_seed.unwrap_or(0),
             // The host adapter serves them (`host_authority`); the library keeps the grant.
-            authorities: record
-                .io
-                .as_ref()
-                .map(|io| io.authorities.clone())
-                .unwrap_or_default(),
             ..Default::default()
         };
         let mut library = Library::new(run, config)?;
@@ -509,7 +489,6 @@ impl HostLibrary {
             free_progressed: false,
             free_drops: BTreeMap::new(),
             free_checks: BTreeMap::new(),
-            free_runners: BTreeMap::new(),
             pending_free_drop: None,
             free_ready: None,
             next_wait: 1 << 62,
@@ -519,7 +498,6 @@ impl HostLibrary {
             ready: Ready::Tokens(Vec::new()),
             cancellations: 0,
             yield_now: false,
-            runners: Default::default(),
             library,
             io,
             refused: None,
@@ -826,7 +804,6 @@ impl HostLibrary {
                 "Free host request has no evaluator continuation".into(),
             ));
         }
-        self.crash_point()?;
         if self.io.adapter().wants_issuer() {
             let task = self.library.task_path();
             self.io.adapter().issuer(&task);
@@ -839,9 +816,7 @@ impl HostLibrary {
                 }),
             None => self.io.call(request),
         };
-        if !matches!(result, Err(hirsel_rt::io::AdapterError::Blocked)) {
-            self.runners.requests += 1;
-        }
+        if !matches!(result, Err(hirsel_rt::io::AdapterError::Blocked)) {}
         result.map_err(|e| match e {
             hirsel_rt::io::AdapterError::Blocked => Error::Blocked(vec![]),
             hirsel_rt::io::AdapterError::Stopped => {
@@ -870,99 +845,6 @@ impl HostLibrary {
             self.echoed = (stdout.len(), stderr.len());
         }
         Ok(())
-    }
-    /// The store authorities are the host adapter's, as a native run's are, so a host tape
-    /// holds the same seam requests: the library keeps the program's handles and what the
-    /// grant answers, and each projection, narrowing and provider request is the host's.
-    fn host_authority(
-        &mut self,
-        name: &str,
-        operation: hirsel_interp::OperationId,
-        call: OperationCall<'_>,
-        cx: &mut OperationContext<'_>,
-    ) -> Result<Option<OperationResult>, Error> {
-        use hirsel_rt::authority::{SeamCompletion, SeamRequest};
-        let a: &[Value] = &call.arguments;
-        let returned = |result: &Option<OperationResult>| match result {
-            Some(OperationResult::Complete { value, .. }) => Some(value.clone()),
-            _ => None,
-        };
-        match name {
-            "io.authority" => {
-                let request = R::Seam(SeamRequest::Project {
-                    io: 1,
-                    name: text(&a[1])?,
-                });
-                let result = self.library.call_resolved(operation, call, cx)?;
-                match (returned(&result), self.host(request)?) {
-                    (Some(Value::Variant { variant: 0, fields }), C::Handle(Ok(host))) => {
-                        let Some(Some(Value::Handle { id, .. })) = fields.first() else {
-                            return Err(invalid());
-                        };
-                        self.handles.insert(*id, host);
-                    }
-                    (
-                        Some(Value::Variant { variant: 1, .. }),
-                        C::Handle(Err(hirsel_rt::io::IoError::NotGranted)),
-                    ) => {}
-                    _ => return Err(invalid()),
-                }
-                Ok(result)
-            }
-            "claim.narrow" => {
-                let request = R::Seam(SeamRequest::ClaimNarrow {
-                    authority: self.id(&a[0])?,
-                    claim: self.id(&a[1])?,
-                });
-                let C::Seam(SeamCompletion::Optional(kept)) = self.host(request)? else {
-                    return Err(invalid());
-                };
-                let narrowed = match &a[1] {
-                    Value::Handle { id, .. } => *id,
-                    _ => return Err(invalid()),
-                };
-                let result = self.library.call_resolved(operation, call, cx)?;
-                match returned(&result) {
-                    Some(Value::Variant { variant: 1, .. }) if kept.is_some() => {}
-                    Some(Value::Variant { variant: 0, .. }) if kept.is_none() => {
-                        self.handles.remove(&narrowed);
-                    }
-                    _ => return Err(invalid()),
-                }
-                Ok(result)
-            }
-            _ => {
-                let Some(request) = self.library.authority_request(name, a)? else {
-                    return self.library.call_resolved(operation, call, cx);
-                };
-                let seam = SeamRequest::Provider {
-                    authority: self.id(&a[0])?,
-                    claim: if request.claimed() {
-                        Some(self.id(&a[1])?)
-                    } else {
-                        None
-                    },
-                    request: request.clone(),
-                };
-                let C::Seam(SeamCompletion::Outcome { outcome, claim }) =
-                    self.host(R::Seam(seam))?
-                else {
-                    return Err(invalid());
-                };
-                self.library.host_authority_outcome(request, outcome);
-                let result = self.library.call_resolved(operation, call, cx)?;
-                if let Some(host) = claim {
-                    let Some(Value::Variant { variant: 0, fields }) = returned(&result) else {
-                        return Err(invalid());
-                    };
-                    let Some(Some(Value::Handle { id, .. })) = fields.first() else {
-                        return Err(invalid());
-                    };
-                    self.handles.insert(*id, host);
-                }
-                Ok(result)
-            }
-        }
     }
     fn id(&self, v: &Value) -> Result<u64, Error> {
         if let Value::Handle { id, .. } = v {
@@ -2677,7 +2559,6 @@ enum HostRoute {
     Random,
     Signal,
     Telemetry,
-    Runner,
     Sleep,
     Projection,
     Watch,
@@ -2695,7 +2576,6 @@ fn host_route(name: &str) -> HostRoute {
         "random.bytes" => HostRoute::Random,
         "signal.wait" => HostRoute::Signal,
         "io.telemetry" => HostRoute::Telemetry,
-        "runner.compute" | "runner.call" | "runner.spawn" | "runner.send" => HostRoute::Runner,
         "clock.sleep_until" => HostRoute::Sleep,
         "io.dir" | "io.monotonic_clock" | "io.wall_clock" => HostRoute::Projection,
         "watcher.next" => HostRoute::Watch,
@@ -2845,10 +2725,7 @@ impl hirsel_interp::OperationsAdapter for HostLibrary {
     /// request is parked or a deadline armed), and the due scope deadlines expire by
     /// deadline, ties in entry order.
     fn expire_deadlines(&mut self, cx: &mut OperationContext<'_>) -> Result<(), Error> {
-        if self.free.is_some() {
-            self.free_runner_children(cx)?;
-        }
-        self.remote_deliveries();
+        if self.free.is_some() {}
         let mut armed = std::mem::take(&mut self.armed);
         armed.retain(|(token, scope, _)| {
             let live = self.library.deadline_pending(*scope);
@@ -2859,11 +2736,9 @@ impl hirsel_interp::OperationsAdapter for HostLibrary {
         });
         self.ready = if self.waits.is_empty()
             && armed.is_empty()
-            && !self.runner_waits()
             && self.free_waits.is_empty()
             && self.free_drops.is_empty()
             && self.free_checks.is_empty()
-            && self.free_runners.is_empty()
             && !self.io.adapter().process_sources()
         {
             Ready::Tokens(Vec::new())
@@ -2955,13 +2830,12 @@ impl hirsel_interp::OperationsAdapter for HostLibrary {
         }
         // Keep entry order for the next poll's ties.
         self.armed.sort_by_key(|(token, _, _)| *token);
-        self.runner_children(cx)
+        Ok(())
     }
     fn wait(&mut self) -> Result<bool, Error> {
         if self.library.free_replay() {
             return Ok(false);
         }
-        self.remote_deliveries();
         self.io.adapter().wait().map_err(|e| match e {
             hirsel_rt::io::AdapterError::Signaled(kind) => Error::Signaled(kind),
             e => Error::Unavailable(format!("host readiness: {e:?}")),
@@ -2983,65 +2857,16 @@ impl hirsel_interp::OperationsAdapter for HostLibrary {
             };
             return Ok(progressed || ready);
         }
-        self.remote_deliveries();
         self.io
             .adapter()
             .has_ready()
             .map_err(|e| Error::Unavailable(format!("host readiness: {e:?}")))
     }
-    fn take_calls(&mut self) -> Vec<hirsel_interp::CalleeStart> {
-        self.runner_calls()
-    }
-    fn take_cancels(&mut self) -> Vec<u64> {
-        if self.free.is_some() {
-            return Vec::new();
-        }
-        self.runner_cancels()
-    }
-    fn call_ended(
-        &mut self,
-        token: u64,
-        end: hirsel_interp::CalleeEnd,
-        cx: &mut OperationContext<'_>,
-    ) -> Result<(), Error> {
-        self.runner_ended(token, end, cx)
-    }
-    fn callee_ended(
-        &mut self,
-        end: &hirsel_interp::CalleeEnd,
-        _runtime: &hirsel_interp::aggregate::RuntimeTypes,
-        cx: &mut OperationContext<'_>,
-    ) -> Result<(), Error> {
-        self.callee_finished(end, cx)
-    }
     // A sim@1 place runs in this execution, so replay runs it again.
-    fn take_arrivals(&mut self) -> Vec<hirsel_interp::PlaceArrival> {
-        self.library.take_arrivals()
-    }
-    fn deliver_arrival(&mut self, id: u64, call: hirsel_interp::ArrivedCall) -> Result<(), Error> {
-        self.library.deliver_arrival(id, call)
-    }
-    fn take_arrival_ends(&mut self) -> Vec<(u64, hirsel_run_schema::CallOutcome)> {
-        self.arrival_ends()
-    }
-    fn place_closed(&mut self) -> Vec<(u64, hirsel_run_schema::CallOutcome)> {
-        self.library.place_closed()
-    }
-    fn arrival_ended(
-        &mut self,
-        token: u64,
-        end: hirsel_run_schema::CallOutcome,
-        cx: &mut OperationContext<'_>,
-    ) -> Result<(), Error> {
-        self.library.arrival_ended(token, end, cx)
-    }
-    fn stops_itself(&self) -> bool {
-        self.runners.crash.is_some()
-    }
     fn parked(&mut self, token: u64) {
-        if self.waits.contains_key(&token) || self.waits_on_runner(token) {
+        if self.waits.contains_key(&token) {
             self.io.adapter().parked(token);
-        } else if !self.park_inbox(token) {
+        } else {
             self.library.parked(token);
         }
     }
@@ -3050,9 +2875,6 @@ impl hirsel_interp::OperationsAdapter for HostLibrary {
         token: u64,
         cx: &mut OperationContext<'_>,
     ) -> Result<Option<OperationResult>, Error> {
-        if self.free_runners.contains_key(&token) {
-            return self.free_poll_runner(token, cx);
-        }
         if self.free_drops.contains_key(&token) {
             return self.free_poll_drop(token, cx);
         }
@@ -3062,17 +2884,12 @@ impl hirsel_interp::OperationsAdapter for HostLibrary {
         if self.free_waits.contains_key(&token) {
             return self.free_poll(token, cx);
         }
-        if self.waits_on_runner(token) {
-            return self.runner_poll(token, cx);
-        }
         let Some(wait) = self.waits.get(&token) else {
             if let Some(request) = self.library.cpu_pending_request(token)? {
                 self.cpu_receipt(request)?;
             }
             let result = self.library.poll(token, cx)?;
-            if result.is_some() {
-                self.inbox_taken(token);
-            }
+            if result.is_some() {}
             return Ok(result);
         };
         let canceled = self.library.cancellation().is_some() && self.io.cancellable(token);
@@ -3243,14 +3060,6 @@ impl hirsel_interp::OperationsAdapter for HostLibrary {
         {
             return self.host_telemetry(&name, call.arguments).map(Some);
         }
-        if route == HostRoute::Runner as usize {
-            let result = self.library.call_resolved(operation, call, cx)?;
-            if self.free.is_some() {
-                return self.free_runner(result.ok_or_else(invalid)?, cx).map(Some);
-            }
-            self.runner_sends(cx)?;
-            return Ok(result);
-        }
         if route == HostRoute::Sleep as usize
             && call.arguments.first().is_some_and(|v| self.id(v).is_ok())
         {
@@ -3322,9 +3131,6 @@ impl hirsel_interp::OperationsAdapter for HostLibrary {
         {
             return self.host_network(&name, call.arguments, cx).map(Some);
         }
-        if name == "io.authority" || name.starts_with("authority.") || name == "claim.narrow" {
-            return self.host_authority(&name, operation, call, cx);
-        }
         let result = self.library.call_resolved(operation, call, cx);
         for (scope, clock, at) in self.library.take_deadlines() {
             // Native Free replay has no timer request or live readiness source.
@@ -3369,11 +3175,6 @@ impl hirsel_interp::OperationsAdapter for HostLibrary {
             return Ok(());
         }
         // A dropped claim ends at the host and in the library.
-        if kind == "Claim"
-            && let Some(handle) = self.handles.remove(&id)
-        {
-            self.host(R::Close { handle })?;
-        }
         if matches!(
             kind,
             "Stream"

@@ -1255,11 +1255,6 @@ impl Producer<'_, '_> {
                     "sorted_map.insert",
                     "sorted_map.get",
                     "sorted_map.remove",
-                    "runner.compute",
-                    "runner.call",
-                    "runner.spawn",
-                    "runner.apply",
-                    "runner.apply_mut",
                 ]
                 .iter()
                 .any(|name| path.is_core(name));

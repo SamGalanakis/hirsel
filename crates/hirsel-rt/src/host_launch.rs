@@ -118,7 +118,6 @@ pub(crate) fn header(
             placement: Some(run.record().placement.clone().unwrap_or_default().into()),
             admitted_at: admitted.evidence().at,
             revocation: admitted.evidence().revocation.clone(),
-            instance: admitted.instance(),
         }),
         tree,
         events: vec![],
@@ -243,7 +242,6 @@ pub fn replay(path: &Path) -> Result<(SimIo, ValidatedRun), RunRefusal> {
     let run = recording.bound_run()?;
     let legacy_barriers = !has_held
         && (journal || run.record().recording == Some(hirsel_run_schema::RecordingLevel::Durable));
-    let instance = recording.binding.as_ref().and_then(|b| b.instance);
     let mut io = match binary {
         Some(tape) => SimIo::from_binary(recording.tree, tape),
         None => SimIo::new(recording.tree, recording.events),
@@ -253,7 +251,6 @@ pub fn replay(path: &Path) -> Result<(SimIo, ValidatedRun), RunRefusal> {
     }
     io.legacy_barrier_waits(legacy_barriers);
     io.free_tape = free;
-    io.instance = instance;
     configure_replay(&mut io, &run)?;
     Ok((io, run))
 }
@@ -289,9 +286,6 @@ pub(crate) fn configure_replay(io: &mut SimIo, run: &ValidatedRun) -> Result<(),
     }
     if let Some(grant) = run.signals_grant() {
         io.set_signal_kinds(grant.bits());
-    }
-    if let Some(grant) = &run.record().io {
-        io.set_authorities(&grant.authorities)?;
     }
     Ok(())
 }
@@ -564,23 +558,11 @@ impl HostAuthority for HostGrants {
         }
         // A fixture's claim attempts draw from the fixture instance, as the reference's
         // do; a live run's from the host's secure generator.
-        if let Some(grant) = record.io.as_ref().filter(|io| !io.authorities.is_empty()) {
-            io.set_authorities(&grant.authorities, is_snapshot.then_some([0; 16]))?;
-        }
         if self.process_streams && !is_snapshot {
             crate::host::Sinks::process().preserve_send_streams(&mut io);
         }
         self.io = Some(io);
         Ok(())
-    }
-    fn run_instance(&mut self) -> Result<[u8; 16], RunRefusal> {
-        crate::io::RandomSource::System
-            .draw(16)
-            .ok()
-            .and_then(|bytes| bytes.try_into().ok())
-            .ok_or_else(|| RunRefusal::Unauthorized {
-                field: "io.runners: the host's secure generator is unavailable".into(),
-            })
     }
     fn revocation(&mut self, reference: &str) -> Result<RevocationEvidence, RunRefusal> {
         self.revocations

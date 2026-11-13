@@ -996,28 +996,6 @@
       1792530192
     ]
   },
-  "hirsel-remote-unittest": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.0,
-    "mean_wall_seconds": 0.1,
-    "memory_kb": 131072,
-    "memory_kills": 0,
-    "p95_cores": 0.0,
-    "parallel_fraction": null,
-    "pss_peak_mib": 1,
-    "pss_runs": 2,
-    "requested": [
-      "1/2097152"
-    ],
-    "runs": 2,
-    "timed_runs": 0,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792524525,
-      1792531680
-    ]
-  },
   "hirsel-rt-test-descriptors": {
     "cpu_class": "",
     "cpu_count": 1,

@@ -138,7 +138,6 @@ impl NativeBuildReadiness {
         );
         weight.path(&source.run.entry);
         weight.source_snapshot(&source.roots.sources);
-        weight.callees(&source.run.callees);
         observation_metadata(&mut weight, &mut view.observation);
         request_metadata(&mut weight, &self.request);
         let allowance = self
@@ -162,7 +161,6 @@ impl NativeBuildReadiness {
             }),
             sources: source.roots.sources.clone().retain_owner(owner.clone()),
             profiles: view.profiles,
-            callees: source.run.callees.clone(),
             _owner: owner,
         });
         *completed = Some(output.clone());
@@ -250,7 +248,6 @@ impl NativeBuildReadiness {
         copied.source_snapshot(&source.roots.sources);
         copied.program_revision(&source.run.revision);
         copied.code_reach(&source.run.code);
-        copied.callees(&source.run.callees);
         copied.foreign_use(&source.run.foreign);
         copied.vec(&report, |w, line| w.add(line.capacity()));
         observation_metadata(&mut copied, &mut observation);
@@ -287,7 +284,6 @@ impl NativeBuildReadiness {
             request: self.request.clone(),
             types: source.signatures.types().clone(),
             code: source.run.code.clone(),
-            callees: source.run.callees.clone(),
             toolchain: self.toolchain.clone(),
             run: self.request.run.clone(),
             foreign_unreplayable: source.roots.foreign_unreplayable,
@@ -369,9 +365,6 @@ pub(super) fn request_metadata(
     weight.add(target.cpu.capacity());
     weight.vec(&target.features, |w, feature| w.add(feature.capacity()));
     weight.add(target.llvm_data_layout.capacity());
-    weight.vec(&request.options.passes.places, |weight, path| {
-        weight.path(path)
-    });
     if let Some(scheduler) = &request.options.passes.launch.scheduler {
         weight.add(scheduler.algorithm.capacity());
     }

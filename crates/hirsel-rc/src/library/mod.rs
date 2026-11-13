@@ -28,8 +28,6 @@ pub mod mapped;
 pub mod net;
 pub mod owners;
 mod packed_list_9;
-pub mod recorders;
-pub mod runners;
 pub mod sealed_region;
 pub mod shared;
 pub mod slots;
@@ -156,23 +154,11 @@ pub const BODIES: &[&LibraryBody] = &[
     // mapped (fs-watch-mmap): mapped.with over its view and check entries.
     &mapped::WITH,
     &isolate::ISOLATE,
-    &isolate::APPLY,
-    &isolate::APPLY_MUT,
-    // runners (native-runner-entry): runner calls over the runtime's runner entries.
-    &runners::COMPUTE,
-    &runners::CALL,
-    &runners::SPAWN,
-    &runners::GRANTS,
-    &runners::MAIN,
-    &runners::AWAIT,
     &channels::OPEN,
     &channels::SEND,
     &channels::RECEIVE,
     &sync::MUTEX_CREATE,
     &sync::MUTEX_WITH,
-    &recorders::NEW,
-    &recorders::APPEND,
-    &recorders::FINISH,
     &sync::ATOMIC_CREATE,
     &sync::ATOMIC_LOAD,
     &sync::ATOMIC_STORE,

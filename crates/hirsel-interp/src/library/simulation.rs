@@ -46,9 +46,6 @@ pub struct FileMetadata {
 pub enum SchedulePoint {
     RootRelease,
     AtomicStore,
-    /// After each seam call that reaches a provider, so tasks holding stores of
-    /// one authority interleave request by request (STORE-11).
-    Seam,
 }
 
 /// Opt-in tooling; excluded from run identity, semantic observations and Io tapes.
@@ -57,11 +54,6 @@ pub struct SimulationDebug {
     pub races: bool,
     pub root_releases: bool,
     pub atomic_stores: bool,
-    pub seam_calls: bool,
-    /// Cancel the calling task, as `task.cancel` would, just after the run's k-th seam
-    /// call that reaches a provider (claim, advance, durable, read, get, put, reclaim):
-    /// the cancellation sweep over a commit's Io points (STORE-3, STORE-11).
-    pub cancel_at_seam: Option<u64>,
 }
 impl SimulationDebug {
     /// Comma-separated point names used by the test CLI and simulation JSON.
@@ -71,7 +63,6 @@ impl SimulationDebug {
             match name {
                 "root-release" if !debug.root_releases => debug.root_releases = true,
                 "atomic-store" if !debug.atomic_stores => debug.atomic_stores = true,
-                "seam" if !debug.seam_calls => debug.seam_calls = true,
                 _ => return None,
             }
         }
@@ -81,7 +72,6 @@ impl SimulationDebug {
         [
             self.root_releases.then_some("root-release"),
             self.atomic_stores.then_some("atomic-store"),
-            self.seam_calls.then_some("seam"),
         ]
         .into_iter()
         .flatten()
@@ -92,7 +82,6 @@ impl SimulationDebug {
         match point {
             SchedulePoint::RootRelease => self.root_releases,
             SchedulePoint::AtomicStore => self.atomic_stores,
-            SchedulePoint::Seam => self.seam_calls,
         }
     }
 }
@@ -109,8 +98,6 @@ pub struct SimulationConfig {
     /// The observed kinds and the `signals.script@1` arrivals; absent, the run has no
     /// Signals and receives no signal.
     pub signals: Option<hirsel_run_schema::SignalsGrant>,
-    /// The store authorities `io.authority` projects, by name.
-    pub authorities: BTreeMap<String, hirsel_run_schema::AuthorityGrant>,
     pub random_seed: u64,
     pub test_seed: u64,
     /// The `telemetry.null@1` identity seed: a stream separate from Random's.
@@ -142,19 +129,9 @@ pub struct SimulationConfig {
     pub invalid_path_code: u32,
     /// Fault queues are consumed by operation name, in order, never host errno.
     pub faults: BTreeMap<String, VecDeque<Fault>>,
-    /// The runners the run's Io projects (RUN-1), sorted by name.
-    pub runners: Vec<hirsel_run_schema::RunnerEntry>,
-    /// The seed `sim@1` runners draw their faults from (`inputs.fault_seed`).
-    pub fault_seed: u64,
-    /// This run's instance (RUN-11): call keys and callee seeds derive from it.
-    pub instance: [u8; 16],
-    /// The callee entries the program names, by full versioned path (RUN-8, RUN-11).
-    pub callees: std::sync::Arc<BTreeMap<String, hirsel_run_schema::CalleeFacts>>,
     /// Record every live `Shared` root's count at every scheduling point
     /// (`--trace-roots`, S-14) into `ObservedSimulation::root_trace`.
     pub trace_roots: bool,
-    /// This run is a `db@1` place's head: `io.inbox` grants its inbox once (STORE-12).
-    pub place: bool,
 }
 impl Default for SimulationConfig {
     fn default() -> Self {
@@ -165,7 +142,6 @@ impl Default for SimulationConfig {
             cpu: None,
             tasks_free: false,
             signals: None,
-            authorities: BTreeMap::new(),
             random_seed: 0,
             test_seed: 0,
             telemetry_seed: 0,
@@ -204,12 +180,7 @@ impl Default for SimulationConfig {
             wall: 0,
             invalid_path_code: 1,
             faults: BTreeMap::new(),
-            runners: vec![],
-            fault_seed: 0,
-            instance: [0; 16],
-            callees: Default::default(),
             trace_roots: false,
-            place: false,
         }
     }
 }
@@ -268,8 +239,6 @@ pub(crate) enum Grant {
         dir: u64,
         identity: u64,
     },
-    /// A runner: its place and the authority its callees run under (RUN-1, RUN-2).
-    Runner(Box<super::runners::RunnerGrant>),
     /// A read-only mapping of `length` bytes of an opened identity; `truncated` once a
     /// check found the identity shorter, after which every check reports it.
     Mapped {
@@ -353,11 +322,6 @@ pub struct ObservedSimulation {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ObservedGrant {
-    /// A runner: the entry's name and the definitions it runs.
-    Runner {
-        name: String,
-        definitions: Option<Vec<String>>,
-    },
     Net {
         world: u64,
         rules: Vec<hirsel_run_schema::NetRule>,
@@ -488,10 +452,6 @@ impl Simulation {
                             temporary: temp.clone(),
                             destination: dst.clone(),
                             directory: *dir,
-                        },
-                        Grant::Runner(runner) => ObservedGrant::Runner {
-                            name: runner.entry.name.clone(),
-                            definitions: runner.definitions.clone(),
                         },
                         Grant::Mapped {
                             tree,
@@ -1128,7 +1088,6 @@ impl Simulation {
                 Some(Grant::Dir { .. }) => kind == "Dir",
                 Some(Grant::File { .. }) => kind == "File",
                 Some(Grant::Atomic { .. }) => kind == "AtomicFile",
-                Some(Grant::Runner(_)) => kind == "Runner",
                 Some(Grant::Mapped { .. }) => kind == "Mapped",
                 Some(Grant::Watcher { .. }) => kind == "Watcher",
                 Some(Grant::Span { .. }) => kind == "Span",

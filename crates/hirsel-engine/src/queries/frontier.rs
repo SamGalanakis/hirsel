@@ -145,10 +145,6 @@ impl QueryEngine {
         if changes.is_empty() {
             return;
         }
-        // STORE-6 can demand private schema signatures beyond the checked
-        // call graph. Keep its own result conservative until those reads
-        // are an independently recorded query product.
-        self.source_growth.invalidate_table();
         let mut changes = changes.clone();
         // Body-only changes deliberately do not touch broad V inputs.
         // Header/candidate/signature changes can affect every overlay's

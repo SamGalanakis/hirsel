@@ -6,12 +6,6 @@
 use crate::isolate::FailureTable;
 use crate::launch::{Config, Entry, RootsEntry, TestEntry, ZeroEntry};
 use crate::{ABI_VERSION, Layout};
-mod callees;
-#[doc(hidden)]
-pub use callees::{
-    Metadata as CalleeMetadata, RequestSchemas as RunnerRequestSchemas,
-    identity as callee_identity, metadata_identity as callee_metadata_identity,
-};
 
 /// [`ProgramDescriptor::flags`]: the program calls C outside a deterministic wrapper, so its
 /// runs cannot be recorded or replayed (PROG-4).
@@ -48,29 +42,16 @@ pub struct ProgramDescriptor {
     pub digest: [u8; 32],
     /// The bound run's seeds and identity; zero for a [`STANDALONE`] program.
     pub config: Config,
-    /// The definitions the program's units name as Entry values (ABI 30, RUN-3): each one's
-    /// function-reference code and full path, which runner calls are made by.
-    pub entries: *const EntryRow,
-    pub entry_count: u64,
     /// ABI 45: 0 = Result[(), E], 1 = ExitCode, 2 = Result[ExitCode, E].
     pub return_kind: u64,
     /// Offset of the unsigned status byte for return kinds 1 and 2.
     pub success_offset: u64,
-    /// ABI 48: stable identities for callable/iterator code, separate from
-    /// RUN-3 Entry authority. These rows never grant runner entry admission.
+    /// ABI 48: stable identities for callable and iterator code.
     pub value_codes: *const EntryRow,
     pub value_code_count: u64,
-    /// ABI 49: canonical callee metadata JSON, sealed with the program identity.
-    /// Missing data carries no authority to launch production runner calls.
-    pub callee_facts: *const u8,
-    pub callee_facts_length: u64,
-    /// Code references for the facts; each must match the RUN-3 Entry table.
-    pub callee_codes: *const EntryRow,
-    pub callee_code_count: u64,
-    pub callee_identity: [u8; 32],
 }
 
-/// One row of [`ProgramDescriptor::entries`].
+/// One row of [`ProgramDescriptor::value_codes`].
 #[repr(C)]
 pub struct EntryRow {
     pub code: *const std::ffi::c_void,
@@ -122,11 +103,8 @@ pub struct Program {
     pub(crate) entry_name: String,
     pub(crate) flags: u32,
     pub(crate) config: Config,
-    /// Each Entry's code word and its definition's full path.
-    pub(crate) entries: Vec<(usize, String)>,
     pub(crate) value_codes: std::sync::Arc<ValueCodes>,
     pub(crate) ordered_image: std::sync::Arc<crate::tasks::ordered::image::Image>,
-    pub(crate) callees: Option<CalleeMetadata>,
 }
 
 impl Program {
@@ -175,20 +153,7 @@ impl Program {
         let entry_name = std::str::from_utf8(bytes(d.entry_name, d.entry_name_length)?)
             .map_err(|_| "invalid entry name")?
             .to_owned();
-        let count = usize::try_from(d.entry_count).map_err(|_| "a descriptor length overflows")?;
-        if count != 0 && d.entries.is_null() {
-            return Err("a descriptor names null data".into());
-        }
-        let mut entries = Vec::with_capacity(count);
-        for index in 0..count {
-            // SAFETY: caller contract: `entry_count` rows are live.
-            let row = unsafe { &*d.entries.add(index) };
-            let path = std::str::from_utf8(bytes(row.path, row.path_length)?)
-                .map_err(|_| "invalid entry path")?;
-            entries.push((row.code as usize, path.to_owned()));
-        }
         let value_codes = unsafe { load_value_codes(d.value_codes, d.value_code_count) }?;
-        let callees = unsafe { callees::load(d, &entries) }?;
         Ok(Program {
             code: Code::Roots(d.entry, roots),
             result_size: d.result_size,
@@ -201,10 +166,8 @@ impl Program {
             entry_name,
             flags: d.flags,
             config: d.config,
-            entries,
             value_codes: std::sync::Arc::new(value_codes),
             ordered_image: Default::default(),
-            callees,
         })
     }
 
@@ -228,19 +191,9 @@ impl Program {
             entry_name: String::new(),
             flags: 0,
             config,
-            entries: Vec::new(),
             value_codes: Default::default(),
             ordered_image: Default::default(),
-            callees: None,
         }
-    }
-
-    pub(crate) fn runner_callees(
-        &self,
-    ) -> Result<&std::collections::BTreeMap<String, hirsel_run_schema::CalleeFacts>, String> {
-        self.callees.as_ref().map(|m| &m.facts).ok_or_else(|| {
-            "production runners require compiled callee facts (runtime ABI 49)".into()
-        })
     }
 
     pub(crate) fn standalone(&self) -> bool {
@@ -319,7 +272,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn value_code_table_is_bounded_text_and_never_runner_entry_authority() {
+    fn value_code_table_checks_text_and_preserves_stable_identity() {
         let row = |code: usize, name: &'static [u8]| EntryRow {
             code: code as *const std::ffi::c_void,
             path: name.as_ptr(),
@@ -330,13 +283,6 @@ mod tests {
         assert_eq!(
             *codes.index(),
             std::collections::BTreeMap::from([(7, "a".into()), (9, "different".into())])
-        );
-        let mut program =
-            Program::harness(Code::Zero(noop), 0, std::ptr::null(), 0, Config::default());
-        program.value_codes = codes.into();
-        assert!(
-            program.entries.is_empty(),
-            "code identities grant no RUN-3 authority"
         );
         assert!(
             unsafe { load_value_codes(std::ptr::null(), 0) }
@@ -374,9 +320,5 @@ mod tests {
         ] {
             assert!(unsafe { load_value_codes(&row, 1) }.is_err());
         }
-    }
-
-    unsafe extern "C" fn noop(_: *mut crate::TaskCtx, _: *mut u8, _: *mut u8) -> u8 {
-        crate::STATUS_OK
     }
 }

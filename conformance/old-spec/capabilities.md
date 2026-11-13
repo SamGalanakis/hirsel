@@ -98,15 +98,7 @@ Interrupt while one is pending keeps the default action, so a program that stops
 can still be interrupted. An arrival before the projection or of an unobserved kind takes
 the default action as well.
 
-**Runners and stores.** A `Runner` (planned) designates a place functions can run together
-with a grant set the run configuration fixes; it can only be narrowed, a call through it
-carries data and a definition's identity, never authority, and the callee's capabilities
-come only from the place ([runners](runners.md)). A store is opened over an `Authority`
-(planned), which `io.authority` returns for a name the run configuration grants
-([STORE-11](storage.md#store-11-engine-and-storage-seam)), and its authority is exactly
-that one store's history and objects; a transaction on it gives its
-body only a scoped `Tx`, which the body can only narrow
-([STORE-3](storage.md#store-3-transaction-scope)).
+
 
 Libraries define further capabilities and declare each global or scoped.
 A package type that holds authority is opaque or sealed, and offers attenuated facets.
@@ -168,13 +160,7 @@ cannot erase those selectors merely because no parameter is a nominal capability
 
 ### CAP-3: Restriction
 
-A scope-forming library function (a transaction, [STORE-3](storage.md#store-3-transaction-scope);
-a sandbox; a read-only query) gives its
-body a scoped capability, declares the body `uses {}`, and bounds the body's result
-`inert`. Together these mean the body holds only what it is passed, cannot keep it, and
-cannot return authority. Authority (`uses`), locality (`in`) and identity (`of`) are
-separate judgments. A closure whose own `uses` clause excludes authority it captures is
-CAP-3 at the first such capture.
+
 
 ```hirsel
 fn probe(d: Dir, p: Path) -> u64 {
@@ -185,17 +171,7 @@ fn probe(d: Dir, p: Path) -> u64 {
 }
 ```
 
-**Narrowing.** A narrowing operation mints a new capability of its argument's type whose
-authority is within its argument's, served by the same provider: `dir.narrow` to a
-subdirectory, `dir.read_only` to read-only access, `net.narrow` and `proc.narrow` to rules
-within their argument's, `env.narrow` to a subset of names, and `store.narrow` to a key
-scope within a `Tx`'s
-([STORE-3](storage.md#store-3-transaction-scope)). A request outside the argument's
-authority mints nothing: it returns `NotGranted()`, `FileFault` for a path that escapes a
-`Dir`, or `OutOfScope()` for a `Tx`. Each use checks the narrowed capability's own
-authority before any effect, so code holding only it cannot reach its parent's.
-Narrowings of host capabilities are run inputs, recorded and replayed like the operations
-that use them; narrowing a `Tx` is computation inside a body and records nothing.
+
 
 **Grant subset.** One run configuration's grants are *within* another's when they hold no
 authority the other lacks: `Unsafe` only if the other grants it; each Io projection (stdin,

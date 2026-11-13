@@ -108,13 +108,13 @@ class NativeShards(unittest.TestCase):
 
     def test_a_cost_ledger_row_retires_when_its_case_or_the_store_sources_change(self):
         # A row a run recorded is current until its case file or a file under
-        # STORE_SOURCES changes; restoring them makes it current again, and of
+        # RUNTIME_SOURCES changes; restoring them makes it current again, and of
         # two current rows the later wins.
         corpus = runpy.run_path(str(Path(__file__).resolve().parents[1] / 'corpus'))
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             case = root / 'conformance/STORE/STORE-1-a-run.hir'
-            source = root / 'crates/hirsel-store-authority/src/lib.rs'
+            source = root / 'crates/hirsel-rt/src/lib.rs'
             for path, text in [(case, 'case\n'), (source, 'store\n'), (root / 'stdlib/std@1/a.hir', 'std\n')]:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(text)

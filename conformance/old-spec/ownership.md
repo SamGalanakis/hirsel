@@ -130,7 +130,7 @@ fn escape(xs: List[u64]) -> List[u64] { xs }   // MODE-1: a borrowed xs is local
 
 **Result parts.** A result may instead relate disjoint parts: the elements of a result
 tuple and the payloads of a result `Result` or `Option`, at any depth through these
-carriers (`-> Result[Option[Bytes] in tx, TxError]`). A whole-result relation is the
+carriers (`-> Result[Option[Bytes] in source, ReadError]`). A whole-result relation is the
 shorthand for the root; a result relates either its root or its parts, never both, and a
 related part cannot contain another. Each related part obeys the rules above with its own
 sources, which name parameters (not `env`); every other part must be global, however inert
@@ -550,7 +550,7 @@ environment-local result specializes to global ([CLO-1](closures.md#clo-1-scoped
 ### MODE-6: Scoped capabilities
 
 A capability is either global (`Dir`, `MonotonicClock`, `WallClock`, `Net`, `Stdout`, `Telemetry`,
-`Tasks`, `Runner`) or scoped (`Tx`, `Scope`, `Arena`, `Test`, `Recorder`; always local). Its declaration says
+`Tasks`) or scoped (`Scope`, `Arena`, `Test`; always local). Its declaration says
 which. A scoped capability received by a closure cannot be returned, stored or captured by
 an escaping closure, so it cannot leave the call that created it.
 
@@ -563,12 +563,7 @@ cannot hold scoped capabilities or scoped content. A local capability is non-pla
 always bounded by its creating invocation and every scope its contents reach; a
 declaration cannot remove those bounds.
 
-`Recorder[E: inert]` is the core local capability for append-only recording. `recorder.new`
-creates one bound to the calling invocation; `recorder.append(r, take event)` borrows it and
-consumes one event; `recorder.finish(take r)` consumes it and returns the events in append
-order. Nothing reads, counts, clears or replaces a recorder's events, and dropping one
-destroys them. Wrappers that hold a recorder, and borrowed facets of them, are local
-capabilities too: they inherit its scope and non-sendability and are invariant in `E`.
+
 
 This is sound for these reasons:
 - Append writes through a shared borrow, but no operation observes the buffer before

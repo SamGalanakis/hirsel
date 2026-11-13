@@ -381,8 +381,7 @@ fn locate(
     })
 }
 
-/// A language failure's chain, primary first, as the host sees it: a run's ending, or a
-/// callee run's (RUN-10).
+/// A run's language failure chain, primary first, as the host sees it.
 pub fn project_failures(
     failures: &[hirsel_interp::observation::FailureRecord],
     sources: &hirsel_span::SourceMap,

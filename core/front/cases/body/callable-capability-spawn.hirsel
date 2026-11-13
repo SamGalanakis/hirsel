@@ -1,0 +1,12 @@
+// A direct capability must reach the child payload; cancellation precedes its write.
+// expect: accept
+// Parent cancels before the child issues its write: Cancelled and no output.
+fn child(take out: Stdout) -> u64 waits { result.unwrap(stdout.write(out, "bad")); 7u64 }
+pub fn main(out: Stdout, tasks: Tasks) -> Result[(), Exit] {
+    let mut h = result.unwrap(task.spawn(tasks, bytes 0, out, child))
+    task.cancel(mut h)
+    match task.join(take h) {
+        Error(Cancelled(take causes)) => { let _ = take causes; Ok(()) },
+        _ => Error(Exit(status: 1))
+    }
+}

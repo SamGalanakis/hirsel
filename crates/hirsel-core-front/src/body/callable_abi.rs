@@ -9,7 +9,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         environment: bool,
         buffer: &mut Vec<Param>,
-    ) -> Option<SigId> {
+    ) -> Result<SigId, &'static str> {
         #[cfg(test)]
         {
             self.e.callable_signature_builds += 1;
@@ -23,13 +23,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             ps.push(if mode == Mode::View && self.region_handle(ty) {
                 Param::Value(Ty::Ptr)
             } else {
-                Param::Address(self.e.type_row(self.p, &mut self.t, ty)?)
+                Param::Address(
+                    self.e
+                        .type_row(self.p, &mut self.t, ty)
+                        .ok_or("callable payload layouts are not built")?,
+                )
             });
         }
         let dest = if result == NEVER {
             None
         } else {
-            Some(self.e.type_row(self.p, &mut self.t, result)?)
+            Some(
+                self.e
+                    .type_row(self.p, &mut self.t, result)
+                    .ok_or("callable payload layouts are not built")?,
+            )
         };
         let signature = Signature {
             params: std::mem::take(buffer),
@@ -39,9 +47,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         if let Some(&row) = self.e.sigs.get(&signature) {
             *buffer = signature.params;
-            Some(row)
+            Ok(row)
         } else {
-            Some(self.e.sig(signature))
+            Ok(self.e.sig(signature))
         }
     }
 
@@ -51,7 +59,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
     /// Read a source value from its callable argument/result place.
     pub(super) fn read_carried(&mut self, at: AddressId, ty: TyId, n: NodeId) -> Option<ValueId> {
-        let rep = self.rep(ty).ok()?;
+        let rep = match self.rep(ty) {
+            Ok(rep) => rep,
+            Err(what) => {
+                self.gap(n, what);
+                return None;
+            }
+        };
         self.read_carried_rep(at, rep, n)
     }
     pub(super) fn read_carried_rep(
@@ -118,13 +132,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return None;
             }
         }
-        let Some(signature) = self.indirect_signature(&params, result, environment, &mut vec![])
-        else {
-            self.gap(
-                n,
-                "a callable whose parameter or result has no layout row is not built",
-            );
-            return None;
+        let signature = match self.indirect_signature(&params, result, environment, &mut vec![]) {
+            Ok(signature) => signature,
+            Err(what) => {
+                self.gap(n, what);
+                return None;
+            }
         };
         if let Some(&row) = self.e.callable_adapters.get(&(raw, signature)) {
             return Some(row);
@@ -154,7 +167,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             child.e.module.signatures[signature.index()].clone(),
         );
         child.func = Some(row);
-        child.e.callable_adapters.insert((raw, signature), row);
         let block = child.new_block(&vec![
             Ty::Ptr;
             params.len()
@@ -176,7 +188,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let value = if mode == Mode::Mut || child.region_handle(ty) {
                 Some(incoming[k + i])
             } else {
-                let id = child.e.type_row(child.p, &mut child.t, ty)?;
+                let Param::Address(id) = child.e.module.signatures[signature.index()].params
+                    [i + usize::from(environment)]
+                else {
+                    unreachable!("non-Region callable payload has an address parameter")
+                };
                 let at = child.address(
                     AddressBase::Value(incoming[k + i]),
                     &[],
@@ -202,13 +218,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         if child.live() {
             if result != NEVER {
-                let rep = child.rep(result).ok()?;
-                if let Some(place) = rep.stored() {
-                    let at = child.address(AddressBase::Value(incoming[0]), &[], place, n);
-                    child.install(at, rep, value, n);
+                match child.rep(result) {
+                    Ok(rep) => {
+                        if let Some(place) = rep.stored() {
+                            let at = child.address(AddressBase::Value(incoming[0]), &[], place, n);
+                            child.install(at, rep, value, n);
+                        }
+                        child.consume(value, n);
+                        child.end(Terminator::Return(PoolRange::EMPTY), Some(n));
+                    }
+                    Err(what) => child.gap(n, what),
                 }
-                child.consume(value, n);
-                child.end(Terminator::Return(PoolRange::EMPTY), Some(n));
             } else {
                 child.end(Terminator::Unreachable, Some(n));
             }
@@ -223,6 +243,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.out.counts += out.counts;
         if out.function.is_none() {
             self.halt();
+        } else {
+            self.e.callable_adapters.insert((raw, signature), row);
         }
         out.function
     }
@@ -243,9 +265,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         args.extend(dest.map(Arg::Address));
         args.extend(env.map(Arg::Value));
         for (i, &(mode, ty)) in params.iter().enumerate() {
-            let rep = self.rep(ty).ok()?;
+            let rep = match self.rep(ty) {
+                Ok(rep) => rep,
+                Err(what) => {
+                    self.gap(n, what);
+                    return None;
+                }
+            };
             if mode == Mode::Mut || matches!(rep, Rep::Place(_)) {
-                let id = self.e.type_row(self.p, &mut self.t, ty)?;
+                let Some(id) = self.e.type_row(self.p, &mut self.t, ty) else {
+                    self.gap(n, "callable payload layouts are not built");
+                    return None;
+                };
                 args.push(Arg::Address(self.address(
                     AddressBase::Value(values[i]?),
                     &[],

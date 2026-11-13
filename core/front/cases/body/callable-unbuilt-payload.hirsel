@@ -1,0 +1,6 @@
+// Unsupported payload layouts must stop at the function item, never disappear.
+// expect: gap callable payload layouts are not built
+fn borrow(v: View[u64]) {}
+fn checked() { let f: fn(View[u64]) = borrow }
+fn result(v: View[u64]) -> View[u64] in v { v }
+fn result_item() { let f: fn(View[u64]) -> View[u64] = result }

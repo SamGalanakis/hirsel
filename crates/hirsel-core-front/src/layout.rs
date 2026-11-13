@@ -179,9 +179,9 @@ impl<T: TyRead> Shapes<'_, T> {
                         let body = record(vec![("handle", FieldTy::Handle(handle))]);
                         return self.fill(r, LRepr::Own, body, None);
                     }
-                    // A capability or Args held as a value: its one u64 handle word,
+                    // A capability, Args, Unique or Site: its one u64 word,
                     // never cleaned (the provider owns it).
-                    _ if handle(decl) => {
+                    _ if handle(decl) || matches!(decl.role, Some(Role::Unique | Role::Site)) => {
                         let body = record(vec![("handle", FieldTy::Scalar(Scalar::U64))]);
                         return self.fill(r, LRepr::Own, body, None);
                     }

@@ -403,6 +403,52 @@ fn list_allocation() {
     assert!(failures.is_empty(), "{failures:?}");
 }
 
+/// Every source type carried as a provider/identity word has the same payload
+/// width as its direct scalar ABI, including arguments and returned values.
+#[test]
+fn callable_provider_and_identity_words() {
+    let names = [
+        "Args", "Dir", "Net", "Clock", "Random", "Stdout", "Stderr", "Stdin", "Env", "Process",
+        "Tasks", "Unique", "Site",
+    ];
+    let source = names.iter().enumerate().map(|(i, name)| format!(
+        "fn id{i}(take x:{name})->{name}{{x}}\nfn f{i}(x:{name})->{name}{{let f:fn(take {name})->{name}=id{i};f(x)}}\n"
+    )).collect::<String>();
+    let (index, inputs) = inputs_with_core(&source, &root().join("../core"));
+    let p = Program::declare(&index, &inputs);
+    assert!(
+        p.refusals.is_empty() && p.gaps.is_empty(),
+        "{:?} {:?}",
+        p.refusals,
+        p.gaps
+    );
+    let mut emitter = Emitter::new();
+    let mut targets = vec![];
+    for (f, fd) in p.fns.iter().enumerate() {
+        if !fd.path.package_is("app", "1") {
+            continue;
+        }
+        let check = p.check_lower(f, &mut emitter);
+        assert!(
+            check.refusals.is_empty() && check.gaps.is_empty(),
+            "{}: {check:?}",
+            fd.path
+        );
+        if fd.path.0.name.starts_with('f') {
+            targets.push(check.function.unwrap());
+        }
+    }
+    wf::module(&emitter.module).unwrap();
+    for target in targets {
+        let report = eval::run(&emitter.module, target, &[0x1234_5678_90ab_cdef], 0);
+        assert_eq!(
+            report.outcome,
+            eval::Outcome::Returned(vec![0x1234_5678_90ab_cdef])
+        );
+        assert_eq!(report.used, 0);
+    }
+}
+
 #[test]
 fn corpus() {
     let mut paths = vec![];

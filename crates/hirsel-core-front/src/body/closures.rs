@@ -244,6 +244,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let mut scratch = self.call_scratch.pop().unwrap_or_default();
         let TyKind::Fn(params, result, _, callable) = self.t.kind(ty).clone() else {
             self.call_scratch.push(scratch);
+            self.gap(n, "invocation of this lowered callable type is not built");
             return None;
         };
         scratch.params.clear();
@@ -304,14 +305,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         {
             Some(abi) => abi,
             None => {
-                let Some(signature) = self.indirect_signature(
+                let signature = match self.indirect_signature(
                     &scratch.params,
                     result,
                     environment,
                     &mut scratch.ir_params,
-                ) else {
-                    self.gap(n, "callable payload layouts are not built");
-                    return None;
+                ) {
+                    Ok(signature) => signature,
+                    Err(what) => {
+                        self.gap(n, what);
+                        return None;
+                    }
                 };
                 let start = self.callable_reps.len();
                 for &(_, ty) in &scratch.params {
@@ -823,7 +827,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         .unwrap_or(layout.size),
                 )
             }
-            _ => (0, 1, 0),
+            Ok(Rep::View(_)) => (0, 1, 0),
+            Err(what) => {
+                self.gap(n, what);
+                (0, 1, 0)
+            }
         };
         let send = has_bounds(&self.p.decls, &self.t, original.ty, &self.params) & crate::SEND != 0;
         let frame = self.capture_frame.as_mut().unwrap();
@@ -944,7 +952,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     fn capture_address(&mut self, slot: u32, n: NodeId) -> Option<ValueId> {
         self.capture_slot(slot, n);
         let var = self.var(slot);
-        match (var.binding, self.rep(var.ty).ok()?) {
+        let rep = match self.rep(var.ty) {
+            Ok(rep) => rep,
+            Err(what) => {
+                self.gap(n, what);
+                return None;
+            }
+        };
+        match (var.binding, rep) {
             (Binding::Slot(Some(a)), _) => Some(self.pointer(a, n)),
             (Binding::Value(Some(p)), Rep::Place(_)) => Some(p),
             (Binding::Value(value), _) => {
@@ -1214,7 +1229,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         let id = match self.rep(callable) {
             Ok(Rep::Place(id)) => id,
-            _ => return (result, None),
+            Ok(_) => unreachable!("an owning callable has a carrier"),
+            Err(what) => {
+                self.gap(n, what);
+                return (result, None);
+            }
         };
         let allocation = admission::OwnedAllocation {
             kind: AllocKind::Own,
@@ -1284,7 +1303,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         child.start(entry);
         let environment = child.block_params(entry)[0];
         for (capture, &ty) in frame.captures.iter().zip(types).rev() {
-            if let Some(place) = child.rep(ty).ok().and_then(Rep::stored) {
+            let place = match child.rep(ty) {
+                Ok(rep) => rep.stored(),
+                Err(what) => {
+                    child.gap(n, what);
+                    None
+                }
+            };
+            if let Some(place) = place {
                 let offset = child
                     .konst(Ty::Scalar(Scalar::U64), capture.offset, n)
                     .unwrap();

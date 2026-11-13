@@ -52,6 +52,10 @@ pub type ParseError = Empty | Invalid(u64) | OutOfRange
 
 pub opaque type Map[K: key, V]
 pub opaque type Causes
+
+// Provider/task declarations used by callable admission and cancellation cases.
 pub opaque type Stdout
 pub opaque type Tasks
 pub type JoinError = Failed(Causes) | Cancelled(Causes)
+pub type IoError = NotFound | Denied | Exists | Closed | Other(u32)
+pub type WriteError { written: u64, error: IoError }

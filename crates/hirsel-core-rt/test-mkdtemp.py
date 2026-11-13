@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run mkdtemp prefix contracts on both engines through the std native walker."""
+"""Run host path and mkdtemp contracts on both engines through the std native walker."""
 import argparse
 import json
 from pathlib import Path
@@ -20,14 +20,17 @@ def main():
     parser.add_argument('--out', required=True, type=Path)
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
-    fixture = Path(__file__).resolve().parent / 'fixtures/mkdtemp.hirsel'
     contracts = []
-    for line, text in enumerate(fixture.read_text().splitlines(), 1):
-        match = re.fullmatch(r'\s*// expect: run (.*?) = (.*?)\s*', text)
-        if match:
-            contracts.append(std_native.Contract(fixture, line, *match.groups(), True))
-    if not contracts:
-        raise ValueError('mkdtemp fixture has no contracts')
+    for name in ['mkdtemp', 'host_paths']:
+        fixture = Path(__file__).resolve().parent / f'fixtures/{name}.hirsel'
+        selected = []
+        for line, text in enumerate(fixture.read_text().splitlines(), 1):
+            match = re.fullmatch(r'\s*// expect: run (.*?) = (.*?)\s*', text)
+            if match:
+                selected.append(std_native.Contract(fixture, line, *match.groups(), True))
+        if not selected:
+            raise ValueError(f'{fixture} has no contracts')
+        contracts.extend(selected)
     owners = json.loads((ROOT / 'core/tools/std_native_owners.json').read_text())
     rows = std_native.run(ROOT, args.compiler.resolve(), args.runtime.resolve(), contracts,
                           ['cranelift', 'llvm'], args.out / 'cases.json', owners)

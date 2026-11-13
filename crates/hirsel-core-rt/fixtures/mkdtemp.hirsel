@@ -28,17 +28,15 @@ fn prefix_slash(d: Dir) -> bool waits {
     let empty_parent = match host.remove(d, "p") { Ok(()) => true, _ => false }
     denied && untouched && empty_parent
 }
+// Dot prefixes are ordinary basenames once the suffix is appended.
 // expect: run prefix_parent(dir) = true
-fn prefix_parent(d: Dir) -> bool waits {
-    let mut name = result.unwrap(string.with_capacity(40))
-    result.unwrap(string.push(mut name, ".."))
-    let denied = match dir.create_temp(d, mut name) { Error(Denied) => true, _ => false }
-    denied && name == ".."
-}
+fn prefix_parent(d: Dir) -> bool waits { round_trip(d, "..", 40) }
 // expect: run prefix_dot(dir) = true
-fn prefix_dot(d: Dir) -> bool waits {
+fn prefix_dot(d: Dir) -> bool waits { round_trip(d, ".", 40) }
+// expect: run prefix_nul(dir) = true
+fn prefix_nul(d: Dir) -> bool waits {
     let mut name = result.unwrap(string.with_capacity(40))
-    result.unwrap(string.push(mut name, "."))
+    result.unwrap(string.push(mut name, "nul\0byte"))
     let denied = match dir.create_temp(d, mut name) { Error(Denied) => true, _ => false }
-    denied && name == "."
+    denied && name == "nul\0byte"
 }

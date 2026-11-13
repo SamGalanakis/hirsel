@@ -68,7 +68,13 @@ Read and mkdtemp append into the caller's Buffer capacity and update its len;
 write reports committed bytes even on error. No operation admits language
 storage. IoError tags and operation numbers are fixed in the process header.
 The OS adapter pins configured directory grants and uses Linux openat2 with
-RESOLVE_BENEATH for every path traversal. Unsupported kernels report ENOSYS.
+RESOLVE_BENEATH for every path traversal. Before any host effect, open, mkdir,
+remove and remove_tree reject NUL, absolute paths and empty/dot/dotdot components
+with Denied. Mkdtemp takes a basename prefix, permits empty/dot/dotdot prefixes,
+rejects slash or NUL with Denied, and creates the prefix plus an alphanumeric
+suffix. Only the suffix is appended, within the 32 prepaid spare bytes; collision
+retries stay within one issue and stop after 128 attempts. Unsupported kernels
+report ENOSYS.
 It permits links that stay beneath a grant and never follows links during
 remove_tree. Host descriptor tables belong to the run, outside task limits.
 

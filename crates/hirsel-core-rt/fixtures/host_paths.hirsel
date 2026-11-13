@@ -1,0 +1,36 @@
+// Uniform path refusal, run with crates/hirsel-core-rt/test-mkdtemp.py.
+fn refused(d: Dir, path: String) -> bool waits {
+    result.unwrap(host.mkdir(d, "a"))
+    result.unwrap(file.write(d, "keep", string.as_bytes("root")))
+    result.unwrap(file.write(d, "a/keep", string.as_bytes("child")))
+    let open_denied = match host.open(d, path, Read) { Error(Denied) => true, _ => false }
+    let mkdir_denied = match host.mkdir(d, path) { Error(Denied) => true, _ => false }
+    let remove_denied = match host.remove(d, path) { Error(Denied) => true, _ => false }
+    let tree_denied = match host.remove_tree(d, path) { Error(Denied) => true, _ => false }
+    let root = result.unwrap(file.read_string(d, "keep"))
+    let child = result.unwrap(file.read_string(d, "a/keep"))
+    result.unwrap(host.remove_tree(d, "a"))
+    result.unwrap(host.remove(d, "keep"))
+    open_denied && mkdir_denied && remove_denied && tree_denied && root == "root" && child == "child"
+}
+// expect: run nul(dir) = true
+fn nul(d: Dir) -> bool waits { refused(d, "keep\0ignored") }
+// expect: run dot(dir) = true
+fn dot(d: Dir) -> bool waits { refused(d, ".") }
+// expect: run parent(dir) = true
+fn parent(d: Dir) -> bool waits { refused(d, "..") }
+// expect: run absolute(dir) = true
+fn absolute(d: Dir) -> bool waits { refused(d, "/") }
+// expect: run escape(dir) = true
+fn escape(d: Dir) -> bool waits { refused(d, "a/../..") }
+// Normalisation must not turn invalid input into an effect on the sentinel.
+// expect: run normalized(dir) = true
+fn normalized(d: Dir) -> bool waits { refused(d, "a/../keep") }
+// expect: run empty_component(dir) = true
+fn empty_component(d: Dir) -> bool waits { refused(d, "a//keep") }
+// expect: run empty_path(dir) = true
+fn empty_path(d: Dir) -> bool waits { refused(d, "") }
+// expect: run trailing_separator(dir) = true
+fn trailing_separator(d: Dir) -> bool waits { refused(d, "a/") }
+// expect: run dot_component(dir) = true
+fn dot_component(d: Dir) -> bool waits { refused(d, "a/./keep") }

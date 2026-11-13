@@ -71,6 +71,9 @@ impl OsProvider {
         } else {
             unsafe { std::slice::from_raw_parts(request.path, request.path_len) }
         };
+        if matches!(request.operation, OPEN | MKDIR | REMOVE | REMOVE_TREE) {
+            valid_path(path)?;
+        }
         match request.operation {
             OPEN => {
                 let flags = match request.mode {
@@ -154,16 +157,15 @@ impl OsProvider {
             }
             MKDTEMP => {
                 let fd = self.directories[&request.handle].as_raw_fd();
-                // Caller bytes are a basename prefix, not a parent path. Match
-                // parent()'s Denied outcome for an invalid component. CString
-                // below rejects NUL with the same mapping as other host paths.
+                // Only the completed basename must be valid: dot prefixes are
+                // ordinary names once the nonempty alphanumeric suffix is added.
                 let prefix = if request.buffer.len == 0 {
                     &[]
                 } else {
                     // SAFETY: issue borrows the carrier's existing initialized bytes.
                     unsafe { std::slice::from_raw_parts(request.buffer.data, request.buffer.len) }
                 };
-                if prefix.contains(&b'/') || prefix == b"." || prefix == b".." {
+                if prefix.contains(&b'/') || prefix.contains(&0) {
                     return Err(io::Error::from_raw_os_error(libc::EACCES));
                 }
                 for _ in 0..TEMP_ATTEMPTS {
@@ -171,7 +173,7 @@ impl OsProvider {
                     self.temporary = sequence
                         .checked_add(1)
                         .unwrap_or_else(|| crate::process::stop(b"HostNames"));
-                    let suffix = format!("h{:x}-{:x}", std::process::id(), sequence);
+                    let suffix = format!("h{:x}x{:x}", std::process::id(), sequence);
                     let mut name = prefix.to_vec();
                     name.extend_from_slice(suffix.as_bytes());
                     let name_c = CString::new(name)?;
@@ -298,6 +300,18 @@ fn write_all(fd: i32, bytes: &[u8]) -> Outcome {
     }
 }
 
+// Validate user paths once, before any operation can touch the host. Internal
+// descriptor walks may still use "." to duplicate their already granted parent.
+fn valid_path(path: &[u8]) -> io::Result<()> {
+    if path.contains(&0)
+        || path
+            .split(|&byte| byte == b'/')
+            .any(|part| part.is_empty() || part == b"." || part == b"..")
+    {
+        return Err(io::Error::from_raw_os_error(libc::EACCES));
+    }
+    Ok(())
+}
 fn beneath(fd: i32, path: &[u8], flags: i32) -> io::Result<OwnedFd> {
     let path = CString::new(path)?;
     // SAFETY: open_how is an integer-only Linux UAPI structure.
@@ -326,9 +340,6 @@ fn parent(fd: i32, path: &[u8]) -> io::Result<(OwnedFd, CString)> {
         Some(at) => (&path[..at], &path[at + 1..]),
         None => (b".".as_slice(), path),
     };
-    if name.is_empty() || name == b"." || name == b".." || path.starts_with(b"/") {
-        return Err(io::Error::from_raw_os_error(libc::EACCES));
-    }
     Ok((
         beneath(fd, prefix, libc::O_PATH | libc::O_DIRECTORY)?,
         CString::new(name)?,

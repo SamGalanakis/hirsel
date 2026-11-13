@@ -180,6 +180,38 @@ fn paths_cannot_escape_grants_and_tree_drop_never_follows_links() {
     );
 }
 #[test]
+fn invalid_host_paths_are_denied_before_any_effect() {
+    for operation in [OPEN, MKDIR, REMOVE, REMOVE_TREE] {
+        let mut f = Fixture::new();
+        std::fs::create_dir(f.root.join("a")).unwrap();
+        std::fs::write(f.root.join("keep"), b"root").unwrap();
+        std::fs::write(f.root.join("a/keep"), b"child").unwrap();
+        let entries = std::fs::read_dir(&f.root).unwrap().count();
+        for path in [
+            b"keep\0ignored".as_slice(),
+            b".",
+            b"..",
+            b"/absolute",
+            b"a/../..",
+            b"a/../keep",
+            b"a/./keep",
+            b"a//keep",
+            b"a/",
+            b"",
+        ] {
+            assert_eq!(
+                f.simple(operation, f.dir, path, 1).error,
+                IoError::from_errno(libc::EACCES),
+                "op={operation}, path={path:?}"
+            );
+            assert_eq!(std::fs::read(f.root.join("keep")).unwrap(), b"root");
+            assert_eq!(std::fs::read(f.root.join("a/keep")).unwrap(), b"child");
+            assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), entries);
+            assert_eq!(std::fs::read_dir(f.root.join("a")).unwrap().count(), 1);
+        }
+    }
+}
+#[test]
 fn clocks_and_argv_are_borrowed_inputs() {
     let mut f = Fixture::new();
     let wall = f.simple(WALL_MS, 1, b"", 0).value;
@@ -207,7 +239,7 @@ fn clocks_and_argv_are_borrowed_inputs() {
 }
 #[test]
 fn temp_basename_matches_the_completed_carrier_and_invalid_prefixes_do_not_create() {
-    for prefix in [b"t-".as_slice(), b"", b"prefix--"] {
+    for prefix in [b"t-".as_slice(), b"", b"prefix--", b".", b".."] {
         let mut f = Fixture::new();
         let mut name = vec![0xa5; prefix.len() + 32];
         name[..prefix.len()].copy_from_slice(prefix);
@@ -215,7 +247,11 @@ fn temp_basename_matches_the_completed_carrier_and_invalid_prefixes_do_not_creat
         assert_eq!(out.error, IoError::OK);
         assert!(len > prefix.len() && len <= name.len());
         assert_eq!(&name[..prefix.len()], prefix);
-        assert!(name[prefix.len()..len].is_ascii());
+        assert!(
+            name[prefix.len()..len]
+                .iter()
+                .all(u8::is_ascii_alphanumeric)
+        );
         let basename = std::str::from_utf8(&name[..len]).unwrap();
         let file = f.simple(OPEN, out.value, b"x", 3);
         assert_eq!(file.error, IoError::OK);
@@ -234,21 +270,14 @@ fn temp_basename_matches_the_completed_carrier_and_invalid_prefixes_do_not_creat
         );
         assert!(!f.root.join(basename).exists());
     }
-    for prefix in [b"a/b".as_slice(), b"/", b".", b"..", b"nul\0byte"] {
+    for prefix in [b"a/b".as_slice(), b"/", b"nul\0byte"] {
         let mut f = Fixture::new();
         let mut name = vec![0xa5; prefix.len() + 32];
         name[..prefix.len()].copy_from_slice(prefix);
         let before = name.clone();
         let before_entries = std::fs::read_dir(&f.root).unwrap().count();
         let (out, len) = f.call(MKDTEMP, f.dir, b"", 0, &mut name, prefix.len());
-        assert_eq!(
-            out.error,
-            if prefix.contains(&0) {
-                IoError::from_errno(libc::EIO)
-            } else {
-                IoError::from_errno(libc::EACCES)
-            }
-        );
+        assert_eq!(out.error, IoError::from_errno(libc::EACCES));
         assert_eq!((name, len), (before, prefix.len()));
         assert_eq!(std::fs::read_dir(&f.root).unwrap().count(), before_entries);
     }
@@ -258,7 +287,7 @@ fn temp_collisions_retry_inside_issue_and_exhaustion_preserves_the_carrier() {
     let mut f = Fixture::new();
     // Host fixture occupies the provider's deterministic first candidate. The
     // oracle is freshness/preservation, not which suffix the next attempt uses.
-    let occupied = format!("retry-h{:x}-0", std::process::id());
+    let occupied = format!("retry-h{:x}x0", std::process::id());
     std::fs::create_dir(f.root.join(&occupied)).unwrap();
     let mut name = [0xa5; 40];
     name[..6].copy_from_slice(b"retry-");
@@ -275,7 +304,7 @@ fn temp_collisions_retry_inside_issue_and_exhaustion_preserves_the_carrier() {
     for sequence in 0..crate::os::TEMP_ATTEMPTS {
         std::fs::create_dir(
             f.root
-                .join(format!("retry-h{:x}-{sequence:x}", std::process::id())),
+                .join(format!("retry-h{:x}x{sequence:x}", std::process::id())),
         )
         .unwrap();
     }

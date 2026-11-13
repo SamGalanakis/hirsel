@@ -137,6 +137,15 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
         }
     }
     let mut meter = Meter::new(metrics.is_some());
+    // Source comparison uses checkout sources when Buck's build-time package
+    // path is relative to its action directory. Installed builds need no files.
+    if (source_std || source_core)
+        && manifest.is_none()
+        && libraries == Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core")
+        && Path::new("core/std").is_dir()
+    {
+        libraries = PathBuf::from("core");
+    }
     let store = store.unwrap_or_else(|| {
         dir.as_deref()
             .unwrap_or(Path::new("."))

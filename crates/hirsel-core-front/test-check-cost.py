@@ -48,6 +48,18 @@ class ProcessCeiling(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'negative missing work'):
             forecast(1, 1000, projection, 60000)
 
+    def test_product_fixed_and_marginal_are_separate_limits(self):
+        check = GUARD['product_ceiling']
+        self.assertEqual(check(70_000_000, 10_000_000, 1000, 60_000, 60_000), (60_000, []))
+        value, errors = check(70_000_001, 10_000_000, 1000, 61_000, 60_000)
+        self.assertGreater(value, 60_000)
+        self.assertEqual(len(errors), 1)
+        self.assertIn('budget 60000', errors[0])
+        self.assertEqual(len(check(70_000_001, 10_000_000, 1000, 60_000, 60_000)[1]), 2)
+        for process, fixed, lines in [(1, 2, 1), (1, 0, 1), (2, 1, 0)]:
+            with self.assertRaisesRegex(ValueError, 'invalid fixed/marginal'):
+                check(process, fixed, lines, 60000, 60000)
+
     def test_process_counter_requires_one_complete_event(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / 'perf.txt'

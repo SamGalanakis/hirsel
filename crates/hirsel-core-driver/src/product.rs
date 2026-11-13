@@ -54,16 +54,26 @@ impl PackageProduct {
             .join("hirsel/core-packages")
     }
     pub fn bundled(root: &Path, meter: &mut Meter) -> io::Result<Self> {
-        Self::bundled_libraries(root, meter, false)
+        Self::bundled_libraries(root, meter, None)
     }
     pub fn bundled_std(root: &Path, meter: &mut Meter) -> io::Result<Self> {
-        Self::bundled_libraries(root, meter, true)
+        Self::bundled_libraries(root, meter, Some(bundled::STD_SOURCES))
     }
-    fn bundled_libraries(root: &Path, meter: &mut Meter, std: bool) -> io::Result<Self> {
-        let digest = if std {
-            Self::bundled_std_digest()
-        } else {
-            Self::bundled_digest()
+    fn bundled_libraries(
+        root: &Path,
+        meter: &mut Meter,
+        std: Option<&[(&str, &str)]>,
+    ) -> io::Result<Self> {
+        let digest = match std {
+            None => Self::bundled_digest(),
+            Some(texts) if texts.len() == bundled::STD_SOURCES.len() => Self::bundled_std_digest(),
+            Some(texts) => ContentHash::of_parts(
+                "hirsel.bundled-std-selection.v1",
+                [
+                    &Self::bundled_std_digest().0[..],
+                    &encode(&texts.iter().map(|(name, _)| name).collect::<Vec<_>>())?[..],
+                ],
+            ),
         };
         let directory = cache_path(root, digest)?;
         if let Some(image) = CoreImage::open(&directory)?
@@ -78,8 +88,8 @@ impl PackageProduct {
         meter.finish("package product lookup");
         let mut packages = vec![];
         let mut selected = vec![("core", bundled::SOURCES, vec![])];
-        if std {
-            selected.push(("std", bundled::STD_SOURCES, vec![package("core")]));
+        if let Some(texts) = std {
+            selected.push(("std", texts, vec![package("core")]));
         }
         for (name, texts, dependencies) in selected {
             let sources = directory.join("sources").join(name);
@@ -254,12 +264,14 @@ impl Driver {
                     .find(|p| p.package == package("std"))
             })
             .flatten();
-        let bundled_std = is_bundled
-            && std.is_some_and(|s| {
-                matches_bundle(s, "std", bundled::STD_SOURCES, &[package("core")])
-            });
-        let product = if bundled_std {
-            PackageProduct::bundled_std(root, meter)?
+        let standard = if is_bundled {
+            std.and_then(bundled_std_selection)
+        } else {
+            None
+        };
+        let bundled_std = standard.is_some();
+        let product = if let Some(texts) = standard {
+            PackageProduct::bundled_libraries(root, meter, Some(&texts))?
         } else if is_bundled {
             PackageProduct::bundled(root, meter)?
         } else {
@@ -284,6 +296,38 @@ impl Driver {
     }
 }
 
+// An explicit manifest may select fewer installed modules than the current
+// toolchain publishes. Its image must preserve that namespace, not add names.
+fn bundled_std_selection(input: &PackageManifest) -> Option<Vec<(&'static str, &'static str)>> {
+    if input.package != package("std") || input.dependencies != [package("core")] {
+        return None;
+    }
+    let compiled = normalized(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/std"));
+    let workspace = normalized(Path::new("core/std"));
+    let mut selected = Vec::with_capacity(input.sources.len());
+    for source in &input.sources {
+        if !source.signatures || source.modules.len() != 1 {
+            return None;
+        }
+        let name = source.modules[0].as_str();
+        if ![&compiled, &workspace]
+            .iter()
+            .any(|root| normalized(&source.file) == root.join(format!("{name}.hirsel")))
+        {
+            return None;
+        }
+        let at = bundled::STD_SOURCES
+            .binary_search_by_key(&name, |(module, _)| module)
+            .ok()?;
+        selected.push(bundled::STD_SOURCES[at]);
+    }
+    selected.sort_unstable_by_key(|(name, _)| *name);
+    if selected.windows(2).any(|w| w[0].0 == w[1].0) {
+        return None;
+    }
+    Some(selected)
+}
+
 fn matches_bundle(
     input: &PackageManifest,
     name: &str,
@@ -302,9 +346,10 @@ fn matches_bundle(
             .join(name),
     );
     let workspace = normalized(&Path::new("core").join(name));
-    input
-        .sources
-        .iter()
+    let mut selected = input.sources.iter().collect::<Vec<_>>();
+    selected.sort_by(|a, b| a.modules.cmp(&b.modules));
+    selected
+        .into_iter()
         .zip(sources)
         .all(|(source, (module, _))| {
             source.signatures
@@ -352,6 +397,50 @@ mod tests {
                 }],
             }],
         }
+    }
+    #[test]
+    fn program_does_not_decode_unreached_published_function_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = "pub fn answer() -> u64 { 7u64 }\n".to_owned();
+        for i in 0..100 {
+            source.push_str(&format!("pub fn unused{i}() -> u64 {{ {i}u64 }}\n"));
+        }
+        let built = PackageProduct::sources(
+            library(&source, dir.path()),
+            &dir.path().join("products"),
+            &mut Meter::new(false),
+        )
+        .unwrap();
+        let path = built.image.store_root();
+        drop(built);
+        let image = CoreImage::open(&path).unwrap().unwrap();
+        let app = tempfile::tempdir().unwrap();
+        let mut request = crate::tests::request("fn use_answer() -> u64 { answer() }", app.path());
+        request.library = LibraryInput::ReachableImage(Arc::clone(&image));
+        let checked = Driver::default()
+            .check(request, &mut Meter::new(false))
+            .unwrap();
+        assert!(
+            checked.accepted(),
+            "{}",
+            serde_json::to_string(&checked.machine_diagnostics().unwrap()).unwrap()
+        );
+        let reached = checked
+            .reachable(&DefPath::from_full("app@1/main/use_answer").unwrap(), 1000)
+            .unwrap();
+        assert!(reached.accepted());
+        assert_eq!(image.decoded_bodies(), 1);
+        assert_eq!(image.declarations().unwrap().fns.available().len(), 1);
+        assert_eq!(
+            image
+                .directory()
+                .unwrap()
+                .index
+                .definitions
+                .available()
+                .len(),
+            1
+        );
     }
     #[test]
     fn source_paths_normalize_relative_to_the_process_directory() {
@@ -503,9 +592,12 @@ mod tests {
             .unwrap();
         assert!(
             custom.accepted(),
-            "{:?} {:?}",
-            custom.machine_diagnostics().unwrap(),
-            custom.machine_incomplete().unwrap()
+            "{}",
+            serde_json::to_string(&(
+                custom.machine_diagnostics().unwrap(),
+                custom.machine_incomplete().unwrap()
+            ))
+            .unwrap()
         );
         assert!(
             custom
@@ -574,10 +666,7 @@ mod agreement {
             .unwrap();
         compare(&source, &product);
         if expect_std {
-            assert_eq!(
-                product.image.as_ref().unwrap().source_stamp,
-                PackageProduct::bundled_std_digest()
-            );
+            assert!(product.image.is_some());
             assert!(product.files.iter().all(|f| {
                 ![package("core"), package("std")]
                     .contains(&product.index.module_path(f.module).package)

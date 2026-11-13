@@ -101,6 +101,7 @@ impl CheckRequest {
     pub fn program(dir: &Path, libraries: &Path, store: &Path) -> io::Result<Self> {
         if product::normalized(libraries)
             != product::normalized(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core"))
+            && product::normalized(libraries) != product::normalized(Path::new("core"))
         {
             return Self::directory(dir, libraries, store);
         }
@@ -611,7 +612,8 @@ impl Driver {
             }));
             meter.finish("declarations/layout");
             let declarations_accepted = result.accepted();
-            for (f, fd) in p.fns.iter().enumerate().skip(p.fns.base_len()) {
+            for f in p.fns.base_len()..p.fns.len() {
+                let fd = &p.fns[f];
                 if fd.body.is_none() {
                     continue;
                 }
@@ -698,7 +700,7 @@ impl Driver {
         }
         meter.finish("check/lower");
         let mut names: BTreeMap<ModuleId, Vec<Definition>> = BTreeMap::new();
-        for (_, d) in index.definitions() {
+        for d in index.definitions.own_iter() {
             names.entry(d.site.module).or_default().push(*d);
         }
         for (m, (_, path, _, _, source)) in modules.into_iter().zip(sources) {

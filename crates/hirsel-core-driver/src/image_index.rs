@@ -206,7 +206,9 @@ impl Publisher for Writer<'_> {
     ) -> io::Result<Map<K, V>> {
         let mut rows = vec![];
         let mut keys = vec![];
-        for (i, (key, value)) in map.iter().enumerate() {
+        let mut entries = map.iter().collect::<Vec<_>>();
+        entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+        for (i, (key, value)) in entries.into_iter().enumerate() {
             rows.push((i as u32, self.store.put(&encode(&(key, value))?)?));
             keys.push((ContentHash::of_bytes(&encode(key)?), i as u32));
         }

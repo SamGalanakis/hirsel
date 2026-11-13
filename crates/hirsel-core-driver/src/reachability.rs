@@ -71,9 +71,9 @@ impl CheckProduct {
         for (id, definition) in self
             .index
             .definitions
-            .iter()
+            .own_iter()
             .enumerate()
-            .skip(self.index.definitions.base_len())
+            .map(|(i, d)| (self.index.definitions.base_len() + i, d))
         {
             if definition.kind == hirsel_core_resolve::DefinitionKind::Constant {
                 let path = self

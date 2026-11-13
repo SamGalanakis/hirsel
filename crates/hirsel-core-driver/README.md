@@ -38,24 +38,40 @@ those immutable indexes, so a damaged index is an IO cache miss. Signature
 imports neither read library sources nor decode callee bodies. Image byte damage
 is reported as a cache miss requiring an image rebuild.
 
-Native `build` and `run` use the published core package by default. The compiler
-build freezes `core/core` sources and their digest; the shared package cache is
-keyed by that digest and the compiler identity. A miss produces it once; later
-builds remove core's source inputs before parsing, resolution and checking. The
-cache is `$XDG_CACHE_HOME/hirsel/core-packages`, or `$HOME/.cache/hirsel/core-packages`.
-`core-product --store <cache>` explicitly produces/reopens it. `--core-product
-<cache>` selects that cache and also enables package consumption for `check`;
-`--source-core` checks the supplied source instead, for development/comparison.
-Explicit custom core manifests produce a package keyed by their source contents
-and dependencies. Toolchain-source edits require rebuilding the compiler to
-change its bundled digest. Custom manifests hash their source bytes on lookup.
+Native `build` and `run` use published core and std packages by default. The
+compiler build embeds the root library sources and freezes their digests. The
+shared package cache is keyed by source selection and compiler identity. A miss
+produces the package once; later builds parse, resolve and check only application
+sources. Std contract-test files are not installed library sources. Explicit
+canonical manifests preserve exactly their supplied std module subset, even when
+the installed toolchain contains newer modules.
 
-The package contains declarations, summaries/layout recipes, checked generic
-templates and nongeneric CoreIR. Reached generic instances use the ordinary
-materializer. Incomplete body outcomes are cached as diagnostics, so reachable
-incomplete bodies still refuse native assembly. This reusable package is not a
-claim that the strict canonical `image` has been accepted. The same producer and
-format support core+std; automatic std-package selection is not enabled yet.
+The cache is `$XDG_CACHE_HOME/hirsel/core-packages`, or
+`$HOME/.cache/hirsel/core-packages`. `core-product --store <cache>` and
+`std-product --store <cache>` explicitly produce/reopen the corresponding
+package. `--core-product <cache>` selects that cache and enables package
+consumption for `check`; ordinary package `check` still checks everything given.
+`--source-std` checks std sources while keeping core published; `--source-core`
+checks the supplied library sources. In a checkout these controls use its `core`
+directory; `--libraries` supplies another source root. Installed product builds
+need no extracted library source files.
+
+The same producer and format contain declarations, summaries/layout recipes,
+checked generic templates and nongeneric CoreIR for both libraries. Stale source
+stamps and foreign compiler products miss and rebuild. Custom source manifests
+remain source inputs rather than gaining bundled declarations. Compiler/source
+changes require rebuilding the toolchain's embedded digests. Non-generic reached
+bodies retain their published CoreIR by reference; only generic templates are
+mechanically specialized. Incomplete reached bodies still refuse assembly.
+
+`hirsel-core-request-cost` measures the native request through check/lower and
+publication, before instance collection, engine emission and linking. Its optional
+instance-details output measures collection separately, including body loads,
+generic specialization and dependency discovery. It does not publish instances.
+The cost guard keeps its two source corpora and adds published-library requests
+with an absolute empty-program fixed cost and a separate marginal cost per own
+source line. The 60,000 instruction budget remains independent of observed
+regression ceilings.
 
 Package opening allocates no slot per library row. Immutable prefixes use sparse
 fixed-height caches and request-owned suffixes; request snapshots store prefix

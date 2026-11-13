@@ -362,9 +362,9 @@ impl NameIndex {
         if let Some(module) = self.child(self.packages[package.0 as usize].root, name) {
             for (i, d) in self
                 .definitions
-                .iter()
+                .own_iter()
                 .enumerate()
-                .skip(self.definitions.base_len())
+                .map(|(i, d)| (self.definitions.base_len() + i, d))
             {
                 if d.site.module == module && d.public {
                     self.prelude.insert(d.name, DefinitionId(i as u32));
@@ -374,9 +374,9 @@ impl NameIndex {
         self.variants.sort_unstable_by_key(|&(s, d)| (s, d));
         let mut heads: Vec<_> = self
             .modules
-            .iter()
+            .own_iter()
             .enumerate()
-            .skip(self.modules.base_len())
+            .map(|(i, m)| (self.modules.base_len() + i, m))
             .filter(|(_, m)| m.depth == 1)
             .map(|(i, m)| (m.name, ModuleId(i as u32)))
             .collect();

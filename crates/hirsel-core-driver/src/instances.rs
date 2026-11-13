@@ -76,11 +76,31 @@ impl CheckProduct {
         limit: usize,
         instances: &mut InstanceSet,
     ) -> Result<Vec<InstanceKey>, InstanceStop> {
+        self.instances_observed(roots, limit, instances, |_, _| {})
+    }
+    /// Measure library loading and mechanical specialization without changing the
+    /// native collection path. The ordinary path erases the no-op observer.
+    pub fn observe_instances(
+        &self,
+        roots: impl IntoIterator<Item = InstanceKey>,
+        limit: usize,
+        observe: impl FnMut(&InstanceKey, &'static str),
+    ) -> Result<Vec<InstanceKey>, InstanceStop> {
+        self.instances_observed(roots, limit, &mut InstanceSet::default(), observe)
+    }
+    fn instances_observed(
+        &self,
+        roots: impl IntoIterator<Item = InstanceKey>,
+        limit: usize,
+        instances: &mut InstanceSet,
+        mut observe: impl FnMut(&InstanceKey, &'static str),
+    ) -> Result<Vec<InstanceKey>, InstanceStop> {
         // A concrete argument names a shape published by the caller that requested
         // it. Numeric indices keep these references independent of mutable storage.
         let mut shapes =
             std::collections::BTreeMap::<String, (usize, hirsel_core_layout::TypeRef)>::new();
         collect_instances(roots, limit, |key| {
+            observe(key, "start");
             let installed = self
                 .image
                 .as_ref()
@@ -106,6 +126,7 @@ impl CheckProduct {
             let Some(mut function) = product.check.function else {
                 return Err(InstanceStop::Incomplete(key.definition.clone()));
             };
+            observe(key, "load");
             let module = if let Some(template) = &product.check.template {
                 let arguments = key
                     .types
@@ -137,6 +158,7 @@ impl CheckProduct {
             } else {
                 None
             };
+            observe(key, "materialize");
             let row = instances.bodies.len();
             instances.rows.insert(key.clone(), row);
             instances.bodies.push(InstanceBody { product, module });
@@ -150,7 +172,9 @@ impl CheckProduct {
                 .into_iter()
                 .map(|f| ir.instances[ir.functions[f.index()].instance.index()].clone())
                 .collect::<BTreeSet<_>>();
-            Ok(pending.into_iter().collect())
+            let pending = pending.into_iter().collect();
+            observe(key, "dependencies");
+            Ok(pending)
         })
     }
 }

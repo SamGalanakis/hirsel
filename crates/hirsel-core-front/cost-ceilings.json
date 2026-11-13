@@ -13,6 +13,85 @@
       "check_lower_per_line": 16200,
       "whole_request_per_line": 35600,
       "whole_process_per_line": 35800
+    },
+    "product": {
+      "measurement": "One ordinary release check/lower request per M1 entry, core and exact supplied std subset preproduced; fresh private request stores; perf instructions:u including GNU time and process exit. Fixed is empty main with std or core only. Marginal is (process-fixed std)/own checked source lines, excluding prechecked library source lines. Instances are collected after this boundary and reported separately.",
+      "fixed_std_instructions": 6596800,
+      "fixed_core_instructions": 5658700,
+      "entries": {
+        "bfs-idiomatic": {
+          "own_lines": 373,
+          "marginal_per_line": 132400
+        },
+        "bfs-matched": {
+          "own_lines": 373,
+          "marginal_per_line": 132600
+        },
+        "generics-idiomatic": {
+          "own_lines": 346,
+          "marginal_per_line": 150100
+        },
+        "generics-matched": {
+          "own_lines": 346,
+          "marginal_per_line": 150100
+        },
+        "lru-idiomatic": {
+          "own_lines": 496,
+          "marginal_per_line": 127900
+        },
+        "lru-matched": {
+          "own_lines": 496,
+          "marginal_per_line": 127900
+        },
+        "files-idiomatic": {
+          "own_lines": 351,
+          "marginal_per_line": 162400
+        },
+        "files-matched": {
+          "own_lines": 351,
+          "marginal_per_line": 162400
+        },
+        "json-idiomatic": {
+          "own_lines": 743,
+          "marginal_per_line": 108600
+        },
+        "json-matched": {
+          "own_lines": 743,
+          "marginal_per_line": 108600
+        },
+        "pipeline-idiomatic": {
+          "own_lines": 848,
+          "marginal_per_line": 116500
+        },
+        "pipeline-matched": {
+          "own_lines": 848,
+          "marginal_per_line": 116400
+        },
+        "request-scratch-idiomatic": {
+          "own_lines": 407,
+          "marginal_per_line": 140700
+        },
+        "request-scratch-matched": {
+          "own_lines": 407,
+          "marginal_per_line": 140800
+        },
+        "rope-idiomatic": {
+          "own_lines": 490,
+          "marginal_per_line": 131000
+        },
+        "rope-matched": {
+          "own_lines": 490,
+          "marginal_per_line": 130900
+        },
+        "versions-idiomatic": {
+          "own_lines": 449,
+          "marginal_per_line": 129900
+        },
+        "versions-matched": {
+          "own_lines": 449,
+          "marginal_per_line": 129900
+        }
+      }
     }
   },
   "margin": "m1: 2 percent over the ordinary release observation, rounded up to 100 instructions per code line (the nine stable programs are the regression detector). std: 5 percent over the observation, rounded up to 100, while M2 adds library source under six lanes (orchestrator ruling 2026-11-13); return to 2 percent when M2's library growth ends. Lower ceilings after savings. Re-baseline expected work growth only with reason, completed-body counts and commit range; do not change the fixed finished-process budget.",
@@ -422,6 +501,131 @@
           "check_per_line": 15355.39,
           "request_per_line": 33839.21,
           "process_per_line": 34092.26
+        }
+      }
+    },
+    {
+      "from_revision": "350e56ff",
+      "to_revision": "75ad209b",
+      "reason": "Add a third, published-library corpus per orchestrator ruling. Existing source corpora, six ceilings and fixed60000 budget unchanged. Empty-main prefix decoding and digest filename formatting are repaired. New absolute fixed and marginal observation ceilings use the measured ordinary release result plus2percent rounded up to100. Marginal60000 budget misses remain explicit findings, not new budget ceilings.",
+      "fixed_before": {
+        "std": 36718652,
+        "core": 25346171
+      },
+      "fixed_after": {
+        "std": 6467420,
+        "core": 5547673
+      },
+      "completed_bodies_before": {
+        "m1": [
+          317,
+          317
+        ],
+        "std": [
+          139,
+          139
+        ]
+      },
+      "completed_bodies_after": {
+        "m1": [
+          326,
+          326
+        ],
+        "std": [
+          148,
+          148
+        ]
+      },
+      "observations": {
+        "bfs-idiomatic": {
+          "process": 54873798,
+          "own_lines": 373,
+          "marginal_per_line": 129775.81233243967
+        },
+        "bfs-matched": {
+          "process": 54922354,
+          "own_lines": 373,
+          "marginal_per_line": 129905.98927613941
+        },
+        "generics-idiomatic": {
+          "process": 57380284,
+          "own_lines": 346,
+          "marginal_per_line": 147147.0057803468
+        },
+        "generics-matched": {
+          "process": 57368976,
+          "own_lines": 346,
+          "marginal_per_line": 147114.32369942198
+        },
+        "lru-idiomatic": {
+          "process": 68622511,
+          "own_lines": 496,
+          "marginal_per_line": 125312.68346774194
+        },
+        "lru-matched": {
+          "process": 68622226,
+          "own_lines": 496,
+          "marginal_per_line": 125312.10887096774
+        },
+        "files-idiomatic": {
+          "process": 62332785,
+          "own_lines": 351,
+          "marginal_per_line": 159160.58404558405
+        },
+        "files-matched": {
+          "process": 62317935,
+          "own_lines": 351,
+          "marginal_per_line": 159118.27635327636
+        },
+        "json-idiomatic": {
+          "process": 85514060,
+          "own_lines": 743,
+          "marginal_per_line": 106388.47913862718
+        },
+        "json-matched": {
+          "process": 85509069,
+          "own_lines": 743,
+          "marginal_per_line": 106381.76177658142
+        },
+        "pipeline-idiomatic": {
+          "process": 103240589,
+          "own_lines": 848,
+          "marginal_per_line": 114119.30306603774
+        },
+        "pipeline-matched": {
+          "process": 103196881,
+          "own_lines": 848,
+          "marginal_per_line": 114067.76061320755
+        },
+        "request-scratch-idiomatic": {
+          "process": 62596012,
+          "own_lines": 407,
+          "marginal_per_line": 137908.08845208844
+        },
+        "request-scratch-matched": {
+          "process": 62611740,
+          "own_lines": 407,
+          "marginal_per_line": 137946.73218673217
+        },
+        "rope-idiomatic": {
+          "process": 69358796,
+          "own_lines": 490,
+          "marginal_per_line": 128349.74693877551
+        },
+        "rope-matched": {
+          "process": 69333183,
+          "own_lines": 490,
+          "marginal_per_line": 128297.47551020408
+        },
+        "versions-idiomatic": {
+          "process": 63643441,
+          "own_lines": 449,
+          "marginal_per_line": 127340.80400890869
+        },
+        "versions-matched": {
+          "process": 63636944,
+          "own_lines": 449,
+          "marginal_per_line": 127326.33407572383
         }
       }
     }

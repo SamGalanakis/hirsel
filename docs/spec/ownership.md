@@ -632,6 +632,32 @@ anchors are live and frozen. It may not be:
   collection;
 - captured by an owning closure, sent, or returned past its anchor.
 
+A slot whose written type names its anchors, `let mut x: Option[View[T]] in xs = None`, as
+a result type does (OWN-20), has exactly that anchor set for its whole extent, whatever it
+holds: each anchor is frozen from the declaration on (OWN-10), even while the slot holds
+`None`, and a value assigned to it or initialising it may read only those anchors, a part
+or sub-view of one included, or it is refused there. Its set is then the same at a loop's
+head and at every edge (OWN-17), so a loop may keep a view it finds; a slot without a
+written anchor starts with its initialiser's set, which is why `last_len` (OWN-8) is
+refused and `last` below is not.
+
+```hirsel
+fn last(xs: List[String], n: u64) -> Option[View[String]] in xs {
+  let mut found: Option[View[String]] in xs = None
+  for s in xs { if string.byte_len(s) == n { found = Some(s) } }
+  found
+}
+```
+```hirsel
+fn last_local(xs: List[String]) -> u64 {
+  let mut found: Option[View[String]] in xs = None
+  for s in xs {
+    let t = string.new()
+    found = Some(view t)                        // refused: OWN-19, t is not an anchor of found
+  }
+  0
+}
+```
 ```hirsel
 fn longest(a: String, b: String) -> u64 {
   let pair = (view a, view b)

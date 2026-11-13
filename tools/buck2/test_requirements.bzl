@@ -25,5 +25,9 @@ OPENAT2_TEST_CASES = {
         "native::tests::dir_llvm_entry",
         "native::tests::host_operations_cranelift",
         "native::tests::host_operations_llvm",
+        "native::tests::startup_refusals_cranelift",
+        "native::tests::startup_refusals_llvm",
+        "native::tests::cranelift_source_entries_link_run_and_reuse",
+        "native::tests::llvm_source_entries_link_run_and_reuse",
     ],
 }

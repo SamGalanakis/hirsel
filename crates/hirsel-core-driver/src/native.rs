@@ -296,7 +296,12 @@ impl CheckProduct {
 pub(crate) struct EntryAbi {
     recipe: Recipe,
     exit_offset: Option<u64>,
-    parameters: Vec<String>,
+    parameters: Vec<EntryParameter>,
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct EntryParameter {
+    ty: String,
+    name: String,
 }
 pub(crate) type EntryBinding = (DefPath, Result<EntryAbi, String>);
 pub(crate) fn bind_entry(
@@ -359,7 +364,10 @@ pub(crate) fn bind_entry(
                 let TyKind::Adt(d, _) = p.types.kind(param.ty) else {
                     return Err("entry parameter has no provider handle type");
                 };
-                Ok(p.decls[d.index()].path.to_string())
+                Ok(EntryParameter {
+                    ty: p.decls[d.index()].path.to_string(),
+                    name: p.index.symbols.text(param.name).to_owned(),
+                })
             })
             .collect::<Result<Vec<_>, &str>>()?;
         Ok(EntryAbi {
@@ -387,7 +395,7 @@ fn entry_source(
     symbol: &str,
     recipe: &Recipe,
     exit_offset: Option<u64>,
-    parameters: &[String],
+    parameters: &[EntryParameter],
     options: &NativeOptions,
 ) -> Result<String, NativeStop> {
     let Layout::Fixed(layout) = &recipe.layout else {
@@ -407,38 +415,14 @@ fn entry_source(
     };
     let mut ordinals = [0usize; 11];
     let mut requirements = Vec::new();
-    for (position, parameter) in parameters.iter().enumerate() {
-        let (name, kind) = parameter
+    for parameter in parameters {
+        let kind = parameter
+            .ty
             .strip_prefix("core@1/core/")
-            .and_then(|name| grant_kind(name).map(|kind| (name, kind)))
+            .and_then(grant_kind)
             .ok_or_else(|| {
-                NativeStop::Entry(format!("unsupported provider parameter {parameter}"))
+                NativeStop::Entry(format!("unsupported provider parameter {}", parameter.ty))
             })?;
-        let ordinal = ordinals[kind as usize];
-        let supplied = match kind {
-            0 => options.directories.len(),
-            10 => 1,
-            _ => {
-                if options.grant_mask & (1 << kind) != 0 {
-                    1
-                } else {
-                    0
-                }
-            }
-        };
-        if ordinal >= supplied {
-            let hint = match (kind, ordinal) {
-                (0, _) => "add --dir <path> for this Dir parameter".into(),
-                (10, _) => "the OS configuration supplies Args once".into(),
-                (_, 0) => format!("add --grant {name}"),
-                _ => format!("the OS configuration supplies {name} once"),
-            };
-            return Err(NativeStop::Entry(format!(
-                "main parameter {} ({name}, grant {}) has no configured grant; {hint}",
-                position + 1,
-                ordinal + 1
-            )));
-        }
         requirements.push(format!("{{{kind},{}}}", ordinals[kind as usize]));
         ordinals[kind as usize] += 1;
     }
@@ -455,15 +439,16 @@ fn entry_source(
         options
             .directories
             .iter()
-            .map(|path| {
-                // Byte escapes preserve paths without treating their contents as C syntax.
-                let literal = path
-                    .as_bytes()
-                    .iter()
-                    .map(|b| format!("\\{b:03o}"))
-                    .collect::<String>();
-                format!("{{(const uint8_t *)\"{literal}\",{}}}", path.len())
-            })
+            .map(|path| c_view(path))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    let parameter_names = if parameters.is_empty() {
+        "{0,0}".into()
+    } else {
+        parameters
+            .iter()
+            .map(|p| c_view(&p.name))
             .collect::<Vec<_>>()
             .join(",")
     };
@@ -489,6 +474,7 @@ static uint8_t entry(HirselCoreContext *ctx, const HirselCoreProcessConfig *cfg,
     return 0;
 }}
 static const HirselCoreEntryRequirement parameters[] = {{{requirements}}};
+static const HirselCoreView parameter_names[] = {{{parameter_names}}};
 static const HirselCoreView directories[] = {{{directories}}};
 int main(int argc, char **argv) {{
     size_t n=(size_t)(argc-1);
@@ -500,12 +486,8 @@ int main(int argc, char **argv) {{
     input.directories=directories; input.directories_len={directories_len};
     input.grant_mask=UINT64_C({grant_mask}); input.stdout_fd=1; input.stderr_fd=2;
     input.parameters=parameters; input.parameters_len={requirements_len};
-    HirselCoreOpenProcess opened=hirsel_core_os_process_new(&input);
+    uint8_t status=hirsel_core_os_run(&input,parameter_names,entry);
     free(args);
-    if(opened.error.tag) {{ fprintf(stderr,"entry configuration failed: IoError(%u,%u)\n",opened.error.tag,opened.error.code); return 2; }}
-    const HirselCoreProcessConfig *cfg=hirsel_core_os_process_config(opened.process);
-    uint8_t status=hirsel_core_run(cfg,entry);
-    hirsel_core_os_process_free(opened.process);
     return status;
 }}
 "#,
@@ -548,6 +530,15 @@ fn c_case(tag: &hirsel_core_layout::Tag, word: &str) -> String {
     let mut c = C(vec![word.to_string()]);
     let v = hirsel_core_layout::read_case(tag, &mut c, 0);
     c.0.swap_remove(v)
+}
+fn c_view(text: &str) -> String {
+    // Fixed-width byte escapes preserve UTF-8 and never form C source tokens.
+    let literal = text
+        .as_bytes()
+        .iter()
+        .map(|b| format!("\\{b:03o}"))
+        .collect::<String>();
+    format!("{{(const uint8_t *)\"{literal}\",{}}}", text.len())
 }
 fn command(command: &mut Command) -> Result<Vec<u8>, NativeStop> {
     let result = command
@@ -726,6 +717,7 @@ b0:
     include!("instance_native.rs");
     include!("callable_native.rs");
     include!("finalizer_native.rs");
+    include!("startup_native.rs");
 
     fn run_clean(binary: &Path, exit: i32) {
         let result = Command::new(binary).output().unwrap();
@@ -840,9 +832,10 @@ b0:
         let product = driver
             .check(source_request(source, dir.path()), &mut Meter::new(false))
             .unwrap();
-        assert!(
-            matches!(product.build(&entry, &options), Err(NativeStop::Entry(message))
-            if message.contains("Stdout") && message.contains("--grant Stdout"))
+        let refused = product.build(&entry, &options).unwrap();
+        assert_not_started(
+            &Command::new(refused.executable).output().unwrap(),
+            "not started: grant `out` is not in the run's configuration\n",
         );
         options.grant_mask = 1 << grant_kind("Stdout").unwrap();
         let granted = product.build(&entry, &options).unwrap();
@@ -870,9 +863,10 @@ b0:
         run_clean(&built.executable, 7);
         // Two Dir parameters require two explicit directories, in ordinal order.
         options.directories.pop();
-        assert!(
-            matches!(product.build(&entry, &options), Err(NativeStop::Entry(message))
-            if message.contains("Dir, grant 2") && message.contains("--dir"))
+        let refused = product.build(&entry, &options).unwrap();
+        assert_not_started(
+            &Command::new(refused.executable).output().unwrap(),
+            "not started: grant `other` is not in the run's configuration\n",
         );
         // A declared record crosses result and view-argument ABIs between units.
         // Its u64 field has padding before it, so reading it at byte 1 is wrong.
@@ -929,9 +923,10 @@ b0:
         );
         let entry = DefPath::from_full("app@1/main/main").unwrap();
         if expected_kind != 10 {
-            assert!(
-                matches!(product.build(&entry, &options), Err(NativeStop::Entry(message))
-                if message.contains(kind) && message.contains("no configured grant"))
+            let refused = product.build(&entry, &options).unwrap();
+            assert_not_started(
+                &Command::new(refused.executable).output().unwrap(),
+                "not started: grant `cap` is not in the run's configuration\n",
             );
         }
         // Numbers come from hirsel_core_rt_host.h, independently of grant_kind.

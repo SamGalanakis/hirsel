@@ -62,6 +62,7 @@ operations! {
     ("string", "from_utf8", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("string", "into_bytes", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("string", "next_scalar", Lane::PendingCode, "C", "std-seed-api-889", false),
+    ("string", "push_scalar", Lane::PendingCode, "C", "std-seed-api-889", true),
     ("string", "push_char", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("string", "push_u64", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("string", "truncate", Lane::PendingCode, "C", "std-seed-api-889", false),
@@ -133,6 +134,14 @@ operations! {
     ("int", "narrow", Lane::Numeric, "A", "core-check-index-912", false),
     ("int", "try_narrow", Lane::Numeric, "A", "core-check-index-912", false),
     ("int", "truncate", Lane::Numeric, "A", "core-check-index-912", false),
+    ("list", "slots_empty", Lane::Value, "A", "core-collections-918", true),
+    ("list", "slots_new", Lane::Value, "A", "core-collections-918", true),
+    ("list", "slots_put", Lane::Value, "A", "core-collections-918", true),
+    ("list", "slots_take", Lane::Value, "A", "core-collections-918", true),
+    ("list", "slots_view", Lane::Value, "A", "core-collections-918", true),
+    ("list", "slots_move", Lane::Value, "A", "core-collections-918", true),
+    ("list", "slots_shift", Lane::Value, "A", "core-collections-918", true),
+    ("list", "slots_free", Lane::Value, "A", "core-collections-918", true),
     ("list", "new", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "with_capacity", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "len", Lane::Value, "A", "core-check-calls-910", false),
@@ -913,9 +922,10 @@ pub(crate) fn assert_declarations(p: &Program<'_>) {
                 entry.module == "string"
                     && matches!(
                         entry.name,
-                        "of_bytes" | "to_bytes" | "view_string" | "shorten"
+                        "of_bytes" | "to_bytes" | "view_string" | "shorten" | "push_scalar"
                     )
                     || entry.module == "map"
+                    || entry.module == "list" && entry.name.starts_with("slots_")
             );
         }
     }

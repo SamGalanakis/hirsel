@@ -18,6 +18,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let module = g.path.0.modules.as_slice();
         let name = g.path.0.name.as_str();
+        if matches!(module, [m] if matches!(m.as_str(), "list" | "deque" | "heap"))
+            && name.starts_with("slots_")
+        {
+            return self.slots_value(name, types[0], vals, result, n);
+        }
         if module == ["map"] {
             return self.map_value(name, types, vals, result, n);
         }

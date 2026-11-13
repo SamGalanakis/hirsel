@@ -1,0 +1,469 @@
+//! Core-private uninhabited storage over the shared List admission/carrier.
+//! Slots is the nominal single-field record { raw: List[T] }. Its header's
+//! length counts live slots; locations of holes remain core's responsibility.
+use super::*;
+use hirsel_core_ir::{ArithMode, ArithOp};
+
+impl<'c, 'a> Cx<'c, 'a, '_> {
+    pub(super) fn slots_value(
+        &mut self,
+        name: &str,
+        item: TyId,
+        vals: &[Option<ValueId>],
+        result: TyId,
+        n: NodeId,
+    ) -> Option<Option<ValueId>> {
+        match name {
+            // list_with_capacity writes the payload's three carrier words by
+            // byte offset. Slots' sole raw field has exactly those same words.
+            "slots_new" => Some(self.slots_new(item, vals[0]?, result, n)),
+            "slots_empty" => Some(self.empty_list(result, n)),
+            "slots_put" => {
+                let header = vals[0]?;
+                let index = vals[1]?;
+                let (at, ty) = self.slots_at(item, header, index, n)?;
+                let rep = self.rep(item).ok()?;
+                self.install(at, rep, vals[2], n);
+                self.consume(vals[2], n);
+                self.inst(
+                    Inst::Mark {
+                        address: at,
+                        ty,
+                        live: true,
+                    },
+                    n,
+                );
+                self.slots_count(header, true, n)?;
+                Some(None)
+            }
+            "slots_take" => {
+                let header = vals[0]?;
+                let index = vals[1]?;
+                let (at, ty) = self.slots_at(item, header, index, n)?;
+                let value = self.read_carried(at, item, n);
+                let saved = self.slot(item, value, n)?;
+                self.inst(
+                    Inst::Mark {
+                        address: at,
+                        ty,
+                        live: false,
+                    },
+                    n,
+                );
+                self.slots_count(header, false, n)?;
+                let value = self.read_carried(saved, item, n);
+                self.temp(result, value);
+                Some(value)
+            }
+            "slots_view" => {
+                let (at, _) = self.slots_at(item, vals[0]?, vals[1]?, n)?;
+                Some(self.read_carried(at, item, n))
+            }
+            "slots_move" | "slots_shift" => {
+                let source_header = vals[0]?;
+                let (target_header, to) = if name == "slots_shift" {
+                    (source_header, vals[2]?)
+                } else {
+                    (vals[2]?, vals[3]?)
+                };
+                let (source, ty) = self.slots_at(item, source_header, vals[1]?, n)?;
+                let (target, _) = self.slots_at(item, target_header, to, n)?;
+                let bytes = self.layout_size(item, false, n)?;
+                self.inst(
+                    Inst::Copy {
+                        to: target,
+                        from: source,
+                        bytes,
+                    },
+                    n,
+                );
+                self.inst(
+                    Inst::Mark {
+                        address: source,
+                        ty,
+                        live: false,
+                    },
+                    n,
+                );
+                self.inst(
+                    Inst::Mark {
+                        address: target,
+                        ty,
+                        live: true,
+                    },
+                    n,
+                );
+                // Cross-carrier moves update both counts. A shift keeps the
+                // count and permits self-moves without two mutable borrows.
+                if name == "slots_move" {
+                    self.slots_count(source_header, false, n)?;
+                    self.slots_count(target_header, true, n)?;
+                }
+                Some(None)
+            }
+            "slots_free" => {
+                self.slots_free(item, vals[0]?, n)?;
+                Some(None)
+            }
+            _ => None,
+        }
+    }
+
+    fn slots_new(
+        &mut self,
+        item: TyId,
+        count: ValueId,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let value = self.list_with_capacity(item, count, result, n)?;
+        // List uses MAX capacity for ZSTs. A ring still needs its requested
+        // power-of-two capacity, even though its slots occupy no bytes.
+        let result_id = match self.rep(result).ok()? {
+            Rep::Place(id) => id,
+            _ => return None,
+        };
+        let payload = match self.t.kind(result) {
+            TyKind::Adt(_, args) => args[0],
+            _ => return None,
+        };
+        let payload_id = match self.rep(payload).ok()? {
+            Rep::Place(id) => id,
+            _ => return None,
+        };
+        let at = self.address(
+            AddressBase::Value(value),
+            &[],
+            PlaceTy::Declared(result_id),
+            n,
+        );
+        let tag = self.value(Ty::Scalar(Scalar::U32));
+        self.inst(
+            Inst::Case {
+                result: tag,
+                address: at,
+            },
+            n,
+        );
+        let zero = self.konst(Ty::Scalar(Scalar::U32), 0, n)?;
+        let ok = self.value(Ty::Scalar(Scalar::Bool));
+        self.inst(
+            Inst::Compare {
+                result: ok,
+                op: CompareOp::Eq,
+                left: tag,
+                right: zero,
+            },
+            n,
+        );
+        let yes = self.new_block(&[]);
+        let done = self.new_block(&[]);
+        let ye = self.edge(yes, &[]);
+        let ne = self.edge(done, &[]);
+        self.end(
+            Terminator::Branch {
+                condition: ok,
+                yes: ye,
+                no: ne,
+            },
+            Some(n),
+        );
+        self.start(yes);
+        let carrier = self.address(
+            AddressBase::Address(at),
+            &[Step::CaseField { case: 0, field: 0 }],
+            PlaceTy::Declared(payload_id),
+            n,
+        );
+        let pointer = self.pointer(carrier, n);
+        self.sequence_word(pointer, 16, Ty::Scalar(Scalar::U64), count, n);
+        self.jump(done, &[], n);
+        self.start(done);
+        Some(value)
+    }
+
+    fn slots_at(
+        &mut self,
+        item: TyId,
+        header: ValueId,
+        index: ValueId,
+        n: NodeId,
+    ) -> Option<(AddressId, PlaceTy)> {
+        let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
+        let stride = self.layout_size(item, false, n)?;
+        let (offset, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, index, stride, n);
+        let place = self.place_ty(item, n)?;
+        Some((
+            self.address(AddressBase::Value(data), &[Step::Byte(offset)], place, n),
+            place,
+        ))
+    }
+
+    fn slots_count(&mut self, header: ValueId, add: bool, n: NodeId) -> Option<()> {
+        let count = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
+        let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
+        let op = if add { ArithOp::Add } else { ArithOp::Sub };
+        let (count, _) = self.list_arith(op, ArithMode::Wrapping, count, one, n);
+        self.sequence_word(header, 8, Ty::Scalar(Scalar::U64), count, n);
+        Some(())
+    }
+
+    fn slots_free(&mut self, item: TyId, header: ValueId, n: NodeId) -> Option<()> {
+        let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
+        let capacity = self.read_sequence_word(header, 16, Ty::Scalar(Scalar::U64), n);
+        let plan = self.list_plan(item, capacity, None, n)?;
+        let null = self.konst(Ty::Ptr, 0, n)?;
+        let nonnull = self.value(Ty::Scalar(Scalar::Bool));
+        self.inst(
+            Inst::Compare {
+                result: nonnull,
+                op: CompareOp::Ne,
+                left: data,
+                right: null,
+            },
+            n,
+        );
+        let free = self.new_block(&[]);
+        let done = self.new_block(&[]);
+        let yes = self.edge(free, &[]);
+        let no = self.edge(done, &[]);
+        self.end(
+            Terminator::Branch {
+                condition: nonnull,
+                yes,
+                no,
+            },
+            Some(n),
+        );
+        self.start(free);
+        self.inst(
+            Inst::Free {
+                block: data,
+                charge: plan.charge,
+            },
+            n,
+        );
+        self.jump(done, &[], n);
+        self.start(done);
+        self.consume(Some(header), n);
+        Some(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ModuleInput;
+    use hirsel_core_resolve::{CorpusManifest, PackageManifest};
+    use std::{collections::HashMap, path::Path};
+
+    const SLOT_LAWS: &str = r#"// test-of: core.list
+// test-reason: exercise private uninhabited slot ownership and evaluator marks
+
+// expect: run slots_move_law() = 11
+fn slots_move_law() -> u64 {
+    let mut s: Slots[u64] = result.unwrap(slots_new(4))
+    slots_put(mut s, 1, 11)
+    slots_shift(mut s, 1, 3)
+    let got = slots_take(mut s, 3)
+    slots_free(take s)
+    got
+}
+
+// expect: run slots_owned_law() = true
+fn slots_owned_law() -> bool {
+    let mut s: Slots[String] = result.unwrap(slots_new(4))
+    slots_put(mut s, 0, result.unwrap(string.from("abc")))
+    slots_shift(mut s, 0, 2)
+    let text = slots_take(mut s, 2)
+    slots_free(take s)
+    let another = result.unwrap(string.from("xyz"))
+    text == "abc" && another == "xyz"
+}
+
+// expect: run slots_capacity_law() = 32
+fn slots_capacity_law() -> u64 {
+    let r = bound bytes 0 {
+        let s: Result[Slots[u64], Capacity] = slots_new(4)
+        s
+    }
+    match r { Ok(Error(c)) => c.requested, _ => 99 }
+}
+
+// expect: run slots_zero_size_law() = true
+fn slots_zero_size_law() -> bool {
+    let mut a: Slots[()] = result.unwrap(slots_new(4))
+    let mut b: Slots[()] = result.unwrap(slots_new(4))
+    slots_put(mut a, 0, ())
+    slots_put(mut a, 1, ())
+    slots_put(mut b, 0, ())
+    let _ = slots_take(mut a, 1)
+    let _ = slots_take(mut b, 0)
+    let _ = slots_take(mut a, 0)
+    let caps = list.capacity(a.raw) == 4 && list.capacity(b.raw) == 4
+    slots_free(take a)
+    slots_free(take b)
+    caps
+}
+
+// expect: slot-fault put over the live slot
+fn slots_double_put() {
+    let mut s: Slots[u64] = result.unwrap(slots_new(4))
+    slots_put(mut s, 0, 1)
+    slots_put(mut s, 0, 2)
+}
+
+// expect: slot-fault read of the empty slot
+fn slots_double_take() -> u64 {
+    let mut s: Slots[u64] = result.unwrap(slots_new(4))
+    slots_put(mut s, 0, 1)
+    let _ = slots_take(mut s, 0)
+    slots_take(mut s, 0)
+}
+
+// expect: slot-fault read of the empty slot
+fn slots_empty_view() -> u64 {
+    let mut s: Slots[u64] = result.unwrap(slots_new(4))
+    slots_put(mut s, 1, 7)
+    let _ = slots_take(mut s, 1)
+    let x: u64 = slots_view(s, 1)
+    x
+}
+
+// expect: slot-fault free of a block whose slot
+fn slots_free_live() {
+    let mut s: Slots[String] = result.unwrap(slots_new(4))
+    slots_put(mut s, 3, result.unwrap(string.from("abc")))
+    slots_free(take s)
+}
+
+// expect: slot-fault put over the live slot
+fn slots_move_over_live() {
+    let mut s: Slots[u64] = result.unwrap(slots_new(4))
+    slots_put(mut s, 0, 1)
+    slots_put(mut s, 1, 2)
+    slots_shift(mut s, 0, 1)
+}
+
+// expect: run slots_cross_block_law() = 711
+fn slots_cross_block_law() -> u64 {
+    let mut a: Slots[u64] = result.unwrap(slots_new(2))
+    let mut b: Slots[u64] = result.unwrap(slots_new(4))
+    slots_put(mut a, 1, 7)
+    slots_put(mut b, 3, 11)
+    slots_move(mut a, 1, mut b, 0)
+    slots_shift(mut b, 3, 3)
+    let answer = slots_take(mut b, 0) * 100 + slots_take(mut b, 3)
+    slots_free(take a)
+    slots_free(take b)
+    answer
+}
+"#;
+
+    #[test]
+    fn own_finalizers_are_core_only() {
+        let (index, modules) =
+            crate::tests::program_inputs("type Hole { n: u64 } drop(h) {} fn go() {}");
+        let p = Program::declare(&index, &modules);
+        assert!(
+            p.refusals
+                .iter()
+                .any(|r| r.rule == "FAIL-11" && r.message.contains("only core")),
+            "{:?}",
+            p.refusals
+        );
+    }
+
+    #[test]
+    fn private_slot_contracts_and_misuse() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let package = hirsel_core_ids::PackageId {
+            name: "core".into(),
+            version: "1".into(),
+        };
+        let mut corpus = CorpusManifest {
+            core: package.clone(),
+            packages: vec![
+                PackageManifest::directory(&root.join("core/core"), package, true).unwrap(),
+            ],
+        }
+        .load()
+        .unwrap();
+        let mut laws = SLOT_LAWS.to_string();
+        laws.push_str("\ntype TestOwn { xs: List[u64] } drop(t) { list.swap(mut t.xs, 0, 1) }\n// expect: run slots_own_finalizer() = 9\nfn slots_own_finalizer() -> u64 { let mut xs: List[u64] = list.new(); result.unwrap(list.push(mut xs, 1)); result.unwrap(list.push(mut xs, 2)); let x = TestOwn(xs: take xs); let _ = take x; 9 }\n");
+        corpus
+            .sources
+            .iter_mut()
+            .find(|s| s.module.modules == ["list"])
+            .unwrap()
+            .text
+            .push_str(&laws);
+        let parsed = corpus.parse();
+        let index = corpus.index(&parsed);
+        let modules: Vec<_> = corpus
+            .sources
+            .iter()
+            .zip(parsed.files)
+            .map(|(s, p)| ModuleInput {
+                id: index.module(&s.module).unwrap(),
+                syntax: p.syntax,
+            })
+            .collect();
+        let p = Program::declare(&index, &modules);
+        assert!(p.refusals.is_empty(), "{:?}", p.refusals);
+        let mut emitter = Emitter::new();
+        let mut functions = HashMap::new();
+        for (f, fd) in p.fns.iter().enumerate().filter(|(_, f)| f.body.is_some()) {
+            let check = p.check_lower(f, &mut emitter);
+            assert!(
+                check.refusals.is_empty() && check.gaps.is_empty(),
+                "{}: {check:?}",
+                fd.path
+            );
+            functions.insert(fd.path.0.name.clone(), check.function.unwrap());
+        }
+        emitter.materialize_instances().unwrap();
+        hirsel_core_ir::wf::module(&emitter.module).unwrap();
+        let mut passed = 0;
+        let mut faults = 0;
+        let mut pending_fault = None;
+        for line in laws.lines() {
+            if let Some(expect) = line.strip_prefix("// expect: run ") {
+                let (call, want) = expect.split_once(" = ").unwrap();
+                let name = call.strip_suffix("()").unwrap();
+                let f = functions[name];
+                eprintln!("running {name}");
+                let sig = &emitter.module.signatures
+                    [emitter.module.functions[f.index()].signature.index()];
+                let report = hirsel_core_ir::eval::run(&emitter.module, f, &[], u64::MAX);
+                assert_eq!(
+                    report.outcome,
+                    hirsel_core_ir::eval::Outcome::Returned(vec![hirsel_core_ir::eval::scalar(
+                        sig.results[0],
+                        want
+                    )]),
+                    "{name}"
+                );
+                assert_eq!(report.used, 0, "{name} leaked its admission");
+                passed += 1;
+            } else if let Some(fault) = line.strip_prefix("// expect: slot-fault ") {
+                pending_fault = Some(fault);
+            } else if let Some(fault) = pending_fault.take() {
+                let name = line.strip_prefix("fn ").unwrap().split('(').next().unwrap();
+                let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    hirsel_core_ir::eval::run(&emitter.module, functions[name], &[], u64::MAX)
+                }))
+                .err()
+                .expect("slot misuse must fault on the evaluator");
+                let message = panic
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| panic.downcast_ref::<&str>().copied())
+                    .unwrap();
+                assert!(message.contains(fault), "{name}: {message}, want {fault}");
+                faults += 1;
+            }
+        }
+        assert_eq!((passed, faults), (6, 5));
+    }
+}

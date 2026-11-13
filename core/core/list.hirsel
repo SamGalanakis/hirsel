@@ -40,3 +40,17 @@ pub fn sum[T: integer](xs: List[T]) -> T {
     }
     t
 }
+
+// Private uninhabited storage. len is the number of live slots, not a prefix.
+// Callers must empty it before free or normalize it before ordinary cleanup.
+type Slots[T] { raw: List[T] }
+fn slots_empty[T]() -> Slots[T]
+fn slots_new[T](n: u64) -> Result[Slots[T], Capacity]
+fn slots_put[T](mut s: Slots[T], i: u64, take x: T)
+fn slots_take[T](mut s: Slots[T], i: u64) -> T
+fn slots_view[T](s: Slots[T], i: u64) -> View[T] in s
+// Distinct mutable carriers. Updates both live counts.
+fn slots_move[T](mut src: Slots[T], i: u64, mut dst: Slots[T], j: u64)
+// Same carrier, including i == j. Keeps its live count.
+fn slots_shift[T](mut s: Slots[T], i: u64, j: u64)
+fn slots_free[T](take s: Slots[T])

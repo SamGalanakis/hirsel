@@ -522,6 +522,13 @@ impl Program<'_> {
                     }
                     _ => continue,
                 };
+                if drop.is_some() && repr != Repr::Resource && !path.package_is("core", "1") {
+                    self.refusals.push(refusal(
+                        "FAIL-11",
+                        site,
+                        "only core types may declare a finalizer on an own row",
+                    ));
+                }
                 let id = DeclId(self.decls.len() as u32);
                 let finalizer = drop.map(|d| {
                     let f = self.fns.len() as u32;

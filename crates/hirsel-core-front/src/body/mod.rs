@@ -58,6 +58,7 @@ mod ops;
 mod patterns;
 mod places;
 mod scalar_abi;
+mod slots;
 mod spans;
 mod stable;
 mod templates;
@@ -1630,7 +1631,13 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 let binding = match (pd.mode, v) {
                     // A finalizer receives its resource's block pointer: `t` is a
                     // holder slot of it, so fields are reached as through any holder.
-                    (Mode::Mut, Some(v)) if self.live() && self.fd.drop_of.is_some() => {
+                    (Mode::Mut, Some(v))
+                        if self.live()
+                            && self
+                                .fd
+                                .drop_of
+                                .is_some_and(|d| p.decls[d.index()].repr == Repr::Resource) =>
+                    {
                         let holder = match self.rep(pd.ty) {
                             Ok(Rep::Place(id)) => {
                                 let h = self.new_slot(PlaceTy::Declared(id), body);

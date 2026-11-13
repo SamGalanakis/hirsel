@@ -1682,6 +1682,12 @@ impl Program<'_> {
                     SEND
                 } else {
                     0
+                }
+                // SEM-7: resources and scoped types have neither `key` nor `ordered`.
+                | if matches!(decl.repr, Repr::Resource | Repr::Scoped) {
+                    KEY | ORDERED
+                } else {
+                    0
                 };
             if declared & forbidden != 0 {
                 out.push(refusal(
@@ -2227,10 +2233,12 @@ pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, para
                         bounds
                     }
                 };
-                let declared = if matches!(decl.repr, Repr::Stable | Repr::Scoped) {
-                    declared & !(SEND | SHAREABLE)
-                } else {
-                    declared
+                let declared = match decl.repr {
+                    Repr::Stable => declared & !(SEND | SHAREABLE),
+                    Repr::Scoped => declared & !(SEND | SHAREABLE | KEY | ORDERED),
+                    // SEM-7: a resource is never compared, whatever it declares.
+                    Repr::Resource => declared & !(KEY | ORDERED),
+                    Repr::Own => declared,
                 };
                 declared | encoding_bounds(decls, t, ty, params) & ENCODED
             }

@@ -1,0 +1,33 @@
+// FAIL-4: a construction evaluates its fields left to right into statement temporaries.
+// When a field fails, the completed temporaries are dropped by the statement's cleanup in
+// reverse evaluation order, finalizers included, and later fields are never evaluated: a
+// failing third field drops 11 then 7; a failing second drops 7 and never makes 13. When
+// a resource literal's admission fails, nothing is cleaned there: its fields come back in
+// the error (m.id 7, k 3) and 7 is finalized once, by the caller.
+// expect: accept
+// expect: run third_fails() = 5 trace 11,7
+// expect: run second_fails() = 5 trace 7
+// expect: run admission_fails() = 703 trace 7
+resource type Mark { id: u64 } drop(m) { let _ = m.id }
+type Three { a: Mark, b: Mark, c: Mark }
+resource type Held { m: Mark, k: u64 }
+fn mark(id: u64) -> Result[Mark, Capacity] {
+  match Mark(id: id) { Ok(take m) => Ok(take m), Error((e, _)) => Error(e) }
+}
+fn missing() -> Result[Mark, Capacity] { Error(Capacity(requested: 5, available: 0)) }
+fn third() -> Result[Three, Capacity] { Ok(Three(a: mark(7)?, b: mark(11)?, c: missing()?)) }
+fn second() -> Result[Three, Capacity] { Ok(Three(a: mark(7)?, b: missing()?, c: mark(13)?)) }
+fn third_fails() -> u64 { match third() { Ok(_) => 1, Error(e) => e.requested } }
+fn second_fails() -> u64 { match second() { Ok(_) => 1, Error(e) => e.requested } }
+fn admission_fails() -> u64 {
+  let got = bound bytes 60 {
+    match mark(7) {
+      Ok(take m) => match Held(m: take m, k: 3) {
+        Ok(_) => 1u64,
+        Error((_, (take back, k))) => back.id * 100 + k,
+      },
+      Error(_) => 2u64,
+    }
+  }
+  match got { Ok(v) => v, Error(_) => 9u64 }
+}

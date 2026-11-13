@@ -916,6 +916,62 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
 }
 
+/// CAP-6: a kernel that observes outside its operands (the host, the standard streams,
+/// the process arguments) is reached only through an operation with an authority
+/// operand: a capability, `Args`, or a core resource made from one (CAP-7). The match
+/// has no wildcard, so a new kernel is classified before it can bind.
+#[cfg(test)]
+pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
+    fn ambient(k: Kernel) -> bool {
+        match k {
+            Kernel::Stream(_) | Kernel::Host(_) | Kernel::ArgsLen | Kernel::ArgsGet => true,
+            Kernel::CarrierMove
+            | Kernel::CarrierView
+            | Kernel::StringShorten
+            | Kernel::StringList(_)
+            | Kernel::Unique
+            | Kernel::NewOwner(_)
+            | Kernel::Share(_)
+            | Kernel::TryUnwrap(_)
+            | Kernel::Unbox
+            | Kernel::Spawn
+            | Kernel::CheckCancel
+            | Kernel::Cancel
+            | Kernel::Join
+            | Kernel::ChannelNew
+            | Kernel::ChannelSender
+            | Kernel::Send
+            | Kernel::TrySend
+            | Kernel::Receive => false,
+        }
+    }
+    for (f, fd) in p.fns.iter().enumerate() {
+        let Some(i) = p.core_operations[f] else {
+            continue;
+        };
+        let Lane::Runtime(kernel) = OPERATIONS[i as usize].lane else {
+            continue;
+        };
+        if !ambient(kernel) {
+            continue;
+        }
+        let authority = fd.params.iter().any(|param| match p.types.kind(param.ty) {
+            TyKind::Adt(d, _) => {
+                let decl = &p.decls[d.index()];
+                crate::layout::handle(decl)
+                    || decl.repr == crate::decls::Repr::Resource
+                        && decl.path.package_is("core", "1")
+            }
+            _ => false,
+        });
+        assert!(
+            authority,
+            "CAP-6: {} observes outside its operands without an authority operand",
+            fd.path
+        );
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn assert_declarations(p: &Program<'_>) {
     use std::collections::BTreeSet;

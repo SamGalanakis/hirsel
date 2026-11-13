@@ -17,6 +17,13 @@ fn core_operation_declarations_do_not_drift() {
 }
 
 #[test]
+fn cap6_ambient_kernels_take_authority() {
+    let (index, modules) = canonical("");
+    let p = Program::declare(&index, &modules);
+    crate::body::core_ops::assert_no_ambient_input(&p);
+}
+
+#[test]
 fn channel_rows_preserve_values_charges_and_closed_errors() {
     let prefix = "fn close(take rx: Receiver[u64]) {}\nfn close_tx(take tx: Sender[u64]) {}\n";
     let cases = [

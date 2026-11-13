@@ -829,6 +829,8 @@ fn run_lines_native(backend: Backend, case: &str) {
     });
     for (i, line) in runs.enumerate() {
         let (call, want) = line.split_once(" = ").expect("a run line");
+        // A finalizer trace is the evaluator's to observe; natively the value is checked.
+        let want = want.split_once(" trace ").map_or(want, |(v, _)| v);
         if want == "fail Bounds" {
             let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
             let dir = tempfile::tempdir().unwrap();
@@ -1146,3 +1148,14 @@ fn seq_index_cranelift() { seq_index(Backend::Cranelift); }
 #[test]
 #[ignore = "explicit native integration target"]
 fn seq_index_llvm() { seq_index(Backend::Llvm); }
+/// FAIL-4: construction temporaries on a failing field and on a refused admission, on
+/// each engine (values here; the drop order is the evaluator's trace).
+fn constructor_temporaries(backend: Backend) {
+    run_lines_native(backend, include_str!("../../../core/front/cases/body/constructor-temporaries.hirsel"));
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn constructor_temporaries_cranelift() { constructor_temporaries(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn constructor_temporaries_llvm() { constructor_temporaries(Backend::Llvm); }

@@ -95,7 +95,12 @@ void hirsel_llvm_program_v1(const HirselLlvmUnit *units, size_t count,
         LLVMPassBuilderOptionsSetLoopVectorization(options, 1);
         LLVMPassBuilderOptionsSetSLPVectorization(options, 1);
         LLVMPassBuilderOptionsSetMergeFunctions(options, 1);
-        LLVMErrorRef e = LLVMRunPasses(module, "default<O3>", machine, options);
+        // The ordinary pipeline infers nonrecursive cleanup attributes after
+        // argument promotion. Revisit those arguments, then expose their local
+        // carrier values and fold checks implied by the caller's room test.
+        LLVMErrorRef e = LLVMRunPasses(module,
+            "default<O3>,cgscc(argpromotion),function(sroa,early-cse,correlated-propagation,instcombine,simplifycfg)",
+            machine, options);
         LLVMDisposePassBuilderOptions(options);
         if (e) {
             char *text = LLVMGetErrorMessage(e); error(out, text);

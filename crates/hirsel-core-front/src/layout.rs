@@ -559,7 +559,8 @@ pub(crate) fn recipes(p: &mut Program) {
         hooks: vec![],
     };
     let mut roots = vec![];
-    for (d, decl) in s.decls.iter().enumerate().skip(s.decls.base_len()) {
+    for (i, decl) in s.decls.own_iter().enumerate() {
+        let d = s.decls.base_len() + i;
         if !decl.generics.is_empty()
             || decl.role.is_some()
             || matches!(decl.body, DeclBody::Alias(_))
@@ -625,5 +626,66 @@ pub(crate) fn recipes(p: &mut Program) {
                 ));
             }
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hirsel_core_ids::published::{Descriptor, Provider, Table, bind};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct Prefix {
+        row: crate::TypeDecl,
+        reads: Arc<AtomicUsize>,
+    }
+    impl Provider<crate::TypeDecl> for Prefix {
+        fn row(&self, _: u32) -> std::io::Result<crate::TypeDecl> {
+            self.reads.fetch_add(1, Ordering::Relaxed);
+            Ok(self.row.clone())
+        }
+    }
+    #[test]
+    fn recipes_skip_undemanded_published_prefix() {
+        let (index, modules) = crate::tests::program_inputs("type Local { n: u64 }\n");
+        let mut p = Program::declare(&index, &modules);
+        assert!(p.refusals.is_empty(), "{:?}", p.refusals);
+        let mut local = p
+            .decls
+            .iter()
+            .find(|d| d.path.0.name == "Local")
+            .unwrap()
+            .clone();
+        local.summary.recipe = None;
+        let reads = Arc::new(AtomicUsize::new(0));
+        let descriptor = Descriptor {
+            namespace: hirsel_core_ids::ContentHash::of_bytes(b"layout-prefix-test"),
+            table: 0,
+            len: 128,
+            rows: Default::default(),
+            lookup: Default::default(),
+        };
+        let prefix = Table::published(bind(
+            descriptor,
+            Arc::new(Prefix {
+                row: local.clone(),
+                reads: Arc::clone(&reads),
+            }),
+        ));
+        p.decls = crate::Rows::overlay(Arc::new(prefix));
+        p.decls.push(local);
+        recipes(&mut p);
+        assert_eq!(
+            reads.load(Ordering::Relaxed),
+            0,
+            "unrelated library declarations were decoded"
+        );
+        let recipe = p.decls[128].summary.recipe.as_ref().unwrap();
+        let hirsel_core_layout::Layout::Fixed(fixed) = &recipe.layout else {
+            panic!("fixed u64 record")
+        };
+        assert_eq!((fixed.size, fixed.align), (8, 8));
     }
 }

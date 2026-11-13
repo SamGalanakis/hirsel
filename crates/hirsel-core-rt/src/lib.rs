@@ -41,9 +41,9 @@ pub struct Capacity {
 pub struct Context {
     // Funding's first word is the one frozen current-record pointer.
     pub(crate) current: Funding,
-    /// Frozen event gate. Zero means no scheduler event sink; otherwise this
+    /// Frozen event gate. Zero outside a running scheduler; otherwise this
     /// is the pinned Task pointer used by context-first Arc completion hooks.
-    /// The root sets it before execution; children inherit the enabled state
+    /// The root enables it for poll fairness before execution; children inherit it
     /// and install their own Task pointer before publication. It is immutable
     /// for the task's run, then cleared when the root returns.
     pub events: usize,
@@ -173,3 +173,6 @@ mod entry_tests;
 mod host_file_tests;
 #[cfg(test)]
 mod host_ops_tests;
+
+#[cfg(test)]
+mod retry_tests;

@@ -1,0 +1,19 @@
+type Input:send { ready:Sender[()],value:Arc[u64] }
+fn worker(take s:Input)->u64 {
+ let Input(ready:ready,value:value)=take s
+ result.unwrap(channel.try_send(ready,()))
+ let mut a=take value
+ loop { match arc.try_unwrap(take a) { Ok(n)=>return n, Error(h)=>{a=take h} } }
+}
+pub fn main(tasks:Tasks)->Result[(),Exit] waits {
+ let (ready,ready_rx):(Sender[()],Receiver[()])=result.unwrap(channel.new(1))
+ let h={
+  let retained=result.unwrap(arc.new(7u64))
+  let value=arc.share(retained)
+  let h=result.unwrap(task.spawn(tasks,bytes 1024,Input(ready:take ready,value:take value),worker))
+  result.unwrap(channel.receive(ready_rx))
+  h
+ }
+ let n=result.unwrap(task.join(take h))
+ if n==7u64 { Ok(()) } else { Error(Exit(status:1u8)) }
+}

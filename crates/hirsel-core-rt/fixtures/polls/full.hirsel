@@ -1,0 +1,17 @@
+type Input:send { ready:Sender[()],gate:Sender[()] }
+fn worker(take s:Input) {
+ result.unwrap(channel.try_send(s.ready,()))
+ loop { match channel.try_send(s.gate,()) { Ok(())=>break, Error(Full(_))=>{}, Error(Closed(_))=>fail("closed") } }
+ task.check_cancel()
+}
+pub fn main(tasks:Tasks)->Result[(),Exit] waits {
+ let (ready,ready_rx):(Sender[()],Receiver[()])=result.unwrap(channel.new(1))
+ let (gate,gate_rx):(Sender[()],Receiver[()])=result.unwrap(channel.new(1))
+ result.unwrap(channel.try_send(gate,()))
+ let mut h=result.unwrap(task.spawn(tasks,bytes 1024,Input(ready:take ready,gate:take gate),worker))
+ result.unwrap(channel.receive(ready_rx))
+ task.cancel(mut h)
+ result.unwrap(channel.receive(gate_rx))
+ let _=task.join(take h)
+ Ok(())
+}

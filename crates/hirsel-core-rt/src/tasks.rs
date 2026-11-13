@@ -80,6 +80,9 @@ pub const ARC_SHARE: u8 = crate::abi_layout::ARC_EVENT_SHARE;
 pub const ARC_RELEASE: u8 = crate::abi_layout::ARC_EVENT_RELEASE;
 pub const ARC_UNWRAP: u8 = crate::abi_layout::ARC_EVENT_UNWRAP;
 pub const REFUND: u8 = 14;
+pub const CHECK_CANCEL: u8 = 15;
+/// Only no-effect polls count; effectful operations never consume this allowance.
+pub(crate) const POLLS_PER_TURN: u32 = 64;
 pub const CHARGE: u8 = 15;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,6 +119,7 @@ enum State {
     Ended,
 }
 pub struct Task {
+    polls_left: u32,
     context: *mut Context,
     owned_context: Option<Context>,
     run: *mut Scheduler,
@@ -133,6 +137,8 @@ pub struct Task {
     record: Option<Block>,
 }
 struct Scheduler {
+    deferred: *mut Task,
+    deferred_tail: *mut Task,
     host: Stack,
     idle: *mut u8,
     head: *mut Task,
@@ -164,6 +170,13 @@ impl Scheduler {
         }
     }
     unsafe fn pop(&mut self) -> *mut Task {
+        // Pollers wait until the already-runnable peers have had a turn. This
+        // also prevents an adversarial replay chooser alternating two pollers
+        // forever while a third ready task never performs an event.
+        if self.head.is_null() {
+            self.head = std::mem::replace(&mut self.deferred, ptr::null_mut());
+            self.tail = std::mem::replace(&mut self.deferred_tail, ptr::null_mut());
+        }
         let mut count = 0;
         let mut at = self.head;
         // SAFETY: run queue links belong exclusively to the idle scheduler.
@@ -210,6 +223,7 @@ impl Scheduler {
 
 /// Record only semantic identifiers, never native addresses. Arc IDs are assigned
 /// by their event stream; zero denotes the operation's implicit current object.
+#[inline(always)]
 pub(crate) fn event(kind: u8, object: u64, value: u64) {
     let task = CURRENT.get();
     if task.is_null() {
@@ -229,26 +243,58 @@ pub(crate) fn event(kind: u8, object: u64, value: u64) {
                 },
             );
         }
+        poll_event(task, kind, value);
     }
 }
 /// Complete a recorded inline operation without consulting task TLS.
 /// # Safety
 /// Context's immutable event word is nonzero and pins its current Task/run.
+#[inline(always)]
 pub(crate) unsafe fn event_in(context: *const Context, kind: u8, object: u64, value: u64) {
     // SAFETY: the emitted gate proves the run has this immutable event sink.
     unsafe {
         let task = (*context).events as *const Task;
         let run = &*(*task).run;
-        let sink = run.provider.event.unwrap_unchecked();
-        sink(
-            run.provider.state,
-            Event {
-                kind,
-                task: (*task).id,
-                object,
-                value,
-            },
-        );
+        if let Some(sink) = run.provider.event {
+            sink(
+                run.provider.state,
+                Event {
+                    kind,
+                    task: (*task).id,
+                    object,
+                    value,
+                },
+            );
+        }
+        poll_event(task.cast_mut(), kind, value);
+    }
+}
+/// The one trigger for the spec's no-effect poll family. Record the result
+/// before scheduling; never observe cancellation or change that result here.
+#[inline]
+unsafe fn poll_event(task: *mut Task, kind: u8, value: u64) {
+    if (kind == TRY_SEND && value == 1)
+        || ((kind == ARC_UNWRAP || kind == CHECK_CANCEL) && value == 0)
+    {
+        // SAFETY: the active task exclusively owns its counter and event turn.
+        unsafe {
+            (*task).polls_left -= 1;
+            if (*task).polls_left == 0 {
+                (*task).polls_left = POLLS_PER_TURN;
+                let run = (*task).run;
+                if !(*run).head.is_null() || !(*run).deferred.is_null() {
+                    (*task).state = State::Ready;
+                    (*task).ready = ptr::null_mut();
+                    if (*run).deferred_tail.is_null() {
+                        (*run).deferred = task;
+                    } else {
+                        (*(*run).deferred_tail).ready = task;
+                    }
+                    (*run).deferred_tail = task;
+                    hirsel_stack::switch(&raw mut (*task).sp, (*run).idle);
+                }
+            }
+        }
     }
 }
 pub(crate) fn current_id() -> u64 {
@@ -331,10 +377,10 @@ pub unsafe extern "C" fn hirsel_core_check_cancel(context: *mut Context, site: u
         if check_cancel(context, site) != 0 {
             return 1;
         }
-        if (*context).finalizing == 0 && (*context).cancel_shield == 0 {
-            checkpoint(false);
+        if (*context).events != 0 {
+            event_in(context, CHECK_CANCEL, 0, 0);
         }
-        check_cancel(context, site)
+        0
     }
 }
 
@@ -376,6 +422,8 @@ pub unsafe fn run_root(
 ) -> u8 {
     crate::fiber::arm();
     let mut run = Scheduler {
+        deferred: ptr::null_mut(),
+        deferred_tail: ptr::null_mut(),
         host: Stack::with_bytes(8 << 20),
         idle: ptr::null_mut(),
         head: ptr::null_mut(),
@@ -391,6 +439,7 @@ pub unsafe fn run_root(
         drop: no_drop,
     };
     let mut root = Box::new(Task {
+        polls_left: POLLS_PER_TURN,
         context,
         owned_context: None,
         run: &mut run,
@@ -417,11 +466,7 @@ pub unsafe fn run_root(
     unsafe {
         ptr::copy_nonoverlapping(argument, root.input.as_ptr(), input_bytes);
         let root_pointer: *mut Task = &mut *root;
-        (*context).events = if run.provider.event.is_some() {
-            root_pointer.expose_provenance()
-        } else {
-            0
-        };
+        (*context).events = root_pointer.expose_provenance();
         root.sp = root
             .stack
             .prepare(start, root_pointer.cast(), ptr::null_mut());
@@ -486,6 +531,7 @@ pub unsafe extern "C" fn hirsel_core_spawn(
         let id = (*run).id();
         let child_context = abi::task_child(context, &mut record, bytes, id);
         let task = Box::new(Task {
+            polls_left: POLLS_PER_TURN,
             context: ptr::null_mut(),
             owned_context: Some(child_context),
             run,

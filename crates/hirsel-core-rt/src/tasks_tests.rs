@@ -267,7 +267,9 @@ unsafe extern "C" fn cancelled_join(context: *mut Context, destination: *mut u8,
             layout::<*mut Channel, ()>(0),
         );
         assert!(!child.task.is_null());
-        assert_eq!(hirsel_core_check_cancel(context, 0), 0); // Child reaches its blocking receive.
+        for _ in 0..POLLS_PER_TURN {
+            assert_eq!(hirsel_core_check_cancel(context, 0), 0);
+        } // The poll allowance expires and the child reaches its blocking receive.
         hirsel_core_cancel(context, child.task);
         (*context).current.inject(1, true);
         let mut unit = 0u8;
@@ -503,7 +505,9 @@ fn arc_unwrap_observes_release_order_and_foreign_last_refund() {
                 layout::<*mut u8, ()>(0),
             );
             if release_first {
-                assert_eq!(hirsel_core_check_cancel(context, 1), 0);
+                for _ in 0..POLLS_PER_TURN {
+                    assert_eq!(hirsel_core_check_cancel(context, 1), 0);
+                }
             }
             let unique = hirsel_core_try_unwrap(node, true);
             assert_eq!(unique, release_first);
@@ -803,7 +807,7 @@ fn inline_arc_count_operations_publish_the_same_events_as_runtime_entries() {
 }
 
 #[test]
-fn event_gate_skips_all_arc_hooks_without_a_sink_and_children_inherit_recording() {
+fn event_gate_enables_poll_hooks_without_a_sink_and_children_inherit_the_gate() {
     unsafe extern "C" fn child(context: *mut Context, out: *mut u8, input: *mut u8) -> u8 {
         // SAFETY: parent transfers one expected recording bit and owns result.
         unsafe {
@@ -869,12 +873,12 @@ fn event_gate_skips_all_arc_hooks_without_a_sink_and_children_inherit_recording(
     assert_eq!(context.events, 0);
     assert_eq!(
         ARC_HOOK_CALLS.get(),
-        0,
-        "a no-sink run must never enter a hook"
+        4,
+        "a no-sink run must enter Arc poll hooks"
     );
     let (result, events) = run(root, ());
     assert_eq!(result, 1);
-    assert_eq!(ARC_HOOK_CALLS.get(), 4);
+    assert_eq!(ARC_HOOK_CALLS.get(), 8);
     let arc: Vec<_> = events
         .iter()
         .filter(|e| (ARC_NEW..=ARC_UNWRAP).contains(&e.kind))

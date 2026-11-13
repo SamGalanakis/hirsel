@@ -1,3 +1,4 @@
-// LANG-8: the spec's example; the body's value is not the declared unit result.
-// expect: refuse LANG-8 at 3:20
+// LANG-11: the spec's LANG-8 pair as it now is (Q22): the body's value is checked against
+// the declared unit result, refused at the innermost expression.
+// expect: refuse LANG-11 at 4:20
 fn twice(x: u64) { x * 2 }

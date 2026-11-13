@@ -3,7 +3,7 @@
 //! nothing else is read).
 //!
 //! Emitted so far: scalars and unit, blocks, `let` and `let mut`, assignment and compound
-//! assignment, the operators of SEM-1, SEM-2 and SEM-7, `if`, `loop`, `while`, labels,
+//! assignment, the operators of LANG-21 (SEM-1, SEM-2, SEM-7), `if`, `loop`, `while`, labels,
 //! `break`, `continue`, `return`, direct calls of non-generic functions and the core
 //! integer operations. Checked but not yet emitted: values of own types, their places
 //! (fields, tuple components, `List` elements), `take`, `view`, `mut` arguments, and the
@@ -200,22 +200,16 @@ impl Program<'_> {
     }
 }
 
-/// What an expression is checked against, and the rule a mismatch breaks: LANG-8 where
-/// the signature's result is expected, SEM-1 for an operator's second operand, LANG-11
-/// elsewhere.
+/// What an expression is checked against; every mismatch is LANG-11, at the innermost
+/// expression the expected type reached.
 #[derive(Clone, Copy)]
 struct Want {
     ty: TyId,
-    rule: &'static str,
     /// An argument for a view parameter: a view of `ty` is also accepted (OWN-7).
     view: bool,
 }
-fn want(ty: TyId) -> Option<Want> {
-    Some(Want {
-        ty,
-        rule: "LANG-11",
-        view: false,
-    })
+fn expect(ty: TyId) -> Option<Want> {
+    Some(Want { ty, view: false })
 }
 
 /// A local's value: an immutable binding holds its value, a `let mut` binding a slot.
@@ -450,7 +444,14 @@ impl<'c, 'a> Cx<'c, 'a> {
     fn span(&self, n: NodeId) -> Span {
         self.item.tree.node(n).origin.span
     }
-    /// The closing `}` of block `n`.
+    /// The operator token of a unary, binary or compound-assignment node `n`.
+    fn op_span(&self, n: NodeId) -> Span {
+        match self.item.tree.node(n).token {
+            Some(t) => self.item.tree.tokens[t.0 as usize].span,
+            None => self.span(n),
+        }
+    }
+    /// The closing `}` (or `)`) of node `n`.
     fn close_brace(&self, n: NodeId) -> Span {
         let s = self.span(n);
         Span {
@@ -476,7 +477,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         let viewed = w.view && matches!(self.t.kind(t), TyKind::View(x) if *x == w.ty);
         if t != w.ty && !viewed && t != NEVER && t != ERROR && w.ty != ERROR {
             let (a, b) = (self.name(w.ty), self.name(t));
-            self.refuse(w.rule, n, format!("expected `{a}`, found `{b}`"));
+            self.refuse("LANG-11", n, format!("expected `{a}`, found `{b}`"));
         }
     }
 
@@ -874,7 +875,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                     }
                 };
                 // Index operands are evaluated before places are compared (OWN-9).
-                let (_, _) = self.expr(c[1], want_rule(scalar(Scalar::U64), "LANG-11"));
+                let (_, _) = self.expr(c[1], expect(scalar(Scalar::U64)));
                 let (s, l) = (at.place.start as usize, at.place.len as usize);
                 if s + l != self.steps.len() {
                     self.steps.extend_from_within(s..s + l);
@@ -957,7 +958,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                 }
                 match v.origin {
                     Origin::ViewParam => {
-                        // The spec does not say which rule refuses this (Q23).
+                        // OWN-7: a view parameter of a moving type is never moved.
                         self.refuse("OWN-7", n, format!("`{name}` is a view parameter"));
                         return;
                     }
@@ -1095,7 +1096,6 @@ impl<'c, 'a> Cx<'c, 'a> {
             body,
             Some(Want {
                 ty: result,
-                rule: "LANG-8",
                 view: false,
             }),
         );
@@ -1207,8 +1207,8 @@ impl<'c, 'a> Cx<'c, 'a> {
         (ERROR, None)
     }
 
-    /// Whether `n` has a type without an expected one (LANG-11): everything but an
-    /// unsuffixed number and arithmetic made only of such. Memoised per node, so
+    /// Whether `n` has a type without an expected one (LANG-11): everything but a
+    /// literal operand (LANG-21). Memoised per node, so
     /// operator chains stay linear.
     fn synthesises(&mut self, n: NodeId) -> bool {
         self.out.counts.nodes += 1;
@@ -1221,17 +1221,10 @@ impl<'c, 'a> Cx<'c, 'a> {
         let r = match self.kind(n) {
             NodeKind::Literal => !self.unsuffixed_number(n),
             NodeKind::Group => self.synthesises(c[0]),
-            NodeKind::Unary => match self.token_text(n) {
-                "-" | "~" | "copy" => self.synthesises(c[0]),
-                _ => true,
-            },
-            NodeKind::Binary => match self.token_text(n) {
-                "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" => {
-                    self.synthesises(c[0]) || self.synthesises(c[1])
-                }
-                "<<" | ">>" => self.synthesises(c[0]),
-                _ => true,
-            },
+            // LANG-21: a literal operand is an unsuffixed number, or a unary `-`, a
+            // binary operator or parentheses over literal operands only.
+            NodeKind::Unary => self.token_text(n) != "-" || self.synthesises(c[0]),
+            NodeKind::Binary => self.synthesises(c[0]) || self.synthesises(c[1]),
             _ => true,
         };
         self.synth[n.0 as usize] = if r { 1 } else { 2 };
@@ -1283,8 +1276,16 @@ impl<'c, 'a> Cx<'c, 'a> {
                 let Some(s) = suffix.or(scalar_want.filter(|s| numeric(*s))) else {
                     return self.untyped_number(n, want);
                 };
+                // LANG-3: an integer token takes only an integer type; a suffix names it.
+                if suffix.is_none() && matches!(s, Scalar::F32 | Scalar::F64) {
+                    let a = self.name(scalar(s));
+                    self.refuse("LANG-3", n, format!("an integer literal is not `{a}`"));
+                    return (ERROR, None);
+                }
                 let Some(m) = int_magnitude(digits) else {
-                    return self.gap_ty(n, "integer literal out of range for its type (Q12)");
+                    let a = self.name(scalar(s));
+                    self.refuse("LANG-3", n, format!("the literal does not fit `{a}`"));
+                    return (ERROR, None);
                 };
                 if matches!(s, Scalar::F32 | Scalar::F64) {
                     let x = if negate { -(m as f64) } else { m as f64 };
@@ -1297,7 +1298,9 @@ impl<'c, 'a> Cx<'c, 'a> {
                         (1u128 << w) - 1
                     };
                     if m > limit {
-                        return self.gap_ty(n, "integer literal out of range for its type (Q12)");
+                        let a = self.name(scalar(s));
+                        self.refuse("LANG-3", n, format!("the literal does not fit `{a}`"));
+                        return (ERROR, None);
                     }
                     let v = if negate {
                         (m as i128).wrapping_neg() as u64
@@ -1313,12 +1316,9 @@ impl<'c, 'a> Cx<'c, 'a> {
                     return self.untyped_number(n, want);
                 };
                 if !matches!(s, Scalar::F32 | Scalar::F64) {
+                    // LANG-3: a float token takes only a float type.
                     let a = self.name(scalar(s));
-                    self.refuse(
-                        want.map_or("LANG-11", |w| w.rule),
-                        n,
-                        format!("expected `{a}`, found a fractional number"),
-                    );
+                    self.refuse("LANG-3", n, format!("a fractional literal is not `{a}`"));
                     return (ERROR, None);
                 }
                 let digits: String = digits.chars().filter(|&c| c != '_').collect();
@@ -1344,7 +1344,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             Some(w) if w.ty == ERROR => {}
             Some(w) => {
                 let a = self.name(w.ty);
-                self.refuse(w.rule, n, format!("expected `{a}`, found a number"));
+                self.refuse("LANG-11", n, format!("expected `{a}`, found a number"));
             }
             None => self.refuse("LANG-11", n, "an unsuffixed number needs an expected type"),
         }
@@ -1429,7 +1429,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             self.gap(rest[0], "let-else is not built");
         }
         let freezes = self.freezes.len();
-        let (t, v) = self.expr(value, declared.and_then(want));
+        let (t, v) = self.expr(value, declared.and_then(expect));
         let ty = declared.unwrap_or(t);
         // A let-bound view lasts to the end of its block (OWN-8).
         if crate::decls::kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Scoped {
@@ -1570,7 +1570,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             self.gap(place, "assignment to this place is not built");
         }
         let diverged = if !compound {
-            let (t, v) = self.expr(value, want(at.ty));
+            let (t, v) = self.expr(value, expect(at.ty));
             if let (Some(address), Some(value)) = (address, v) {
                 self.inst(Inst::Store { address, value }, s);
             }
@@ -1595,14 +1595,13 @@ impl<'c, 'a> Cx<'c, 'a> {
                 }
                 _ => None,
             };
-            let (t, rv) = self.expr(
-                value,
-                Some(Want {
-                    ty: at.ty,
-                    rule: "SEM-1",
-                    view: false,
-                }),
-            );
+            let before = self.out.refusals.len();
+            let rv = self.second_operand(s, value, at.ty);
+            let t = if self.out.refusals.len() > before {
+                ERROR
+            } else {
+                at.ty
+            };
             if let Some(new) = self.arith(bop, at.ty, old, rv, s)
                 && let Some(address) = address
             {
@@ -1630,7 +1629,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         if self.kind(c[0]) == NodeKind::ConditionLet {
             return self.gap_ty(c[0], "match and patterns are not built");
         }
-        let (_, cv) = self.expr(c[0], want_rule(BOOL, "LANG-11"));
+        let (_, cv) = self.expr(c[0], expect(BOOL));
         let join = self.new_join();
         let mut no_block = None;
         if self.live()
@@ -1654,7 +1653,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         let (was_dead, mark) = (self.dead, self.log.len());
         let Some(&other) = c.get(2) else {
             // Without `else` the type is unit (LANG-11).
-            let (_, _) = self.expr(c[1], want_rule(UNIT, "LANG-11"));
+            let (_, _) = self.expr(c[1], expect(UNIT));
             let yes = self.arm_edge(mark);
             self.goto(join, UNIT, None, c[1]);
             if let Some(no) = no_block {
@@ -1673,11 +1672,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             self.start(no);
         }
         // An arm of type Never constrains nothing (LANG-11).
-        let other_want = want.or(if yt == NEVER {
-            None
-        } else {
-            want_rule(yt, "LANG-11")
-        });
+        let other_want = want.or(if yt == NEVER { None } else { expect(yt) });
         let (ot, ov) = self.expr(other, other_want);
         let no = self.arm_edge(mark);
         let ty = if yt == NEVER { ot } else { yt };
@@ -1755,12 +1750,9 @@ impl<'c, 'a> Cx<'c, 'a> {
         }
         (f.ty.unwrap_or(UNIT), v)
     }
-    /// A loop body's value is discarded; the spec does not say it must be unit (Q16).
+    /// A loop body is checked against unit (LANG-15, LANG-11).
     fn loop_body(&mut self, body: NodeId) {
-        let (t, _) = self.expr(body, None);
-        if t != UNIT && t != NEVER && t != ERROR {
-            self.gap(body, "a loop body whose value is not unit (Q16)");
-        }
+        let _ = self.expr(body, expect(UNIT));
     }
 
     fn while_(&mut self, n: NodeId, label: Option<String>) -> (TyId, Option<ValueId>) {
@@ -1777,7 +1769,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             header = Some(h);
             self.frames.last_mut().unwrap().header = header;
         }
-        let (_, cv) = self.expr(c[0], want_rule(BOOL, "LANG-11"));
+        let (_, cv) = self.expr(c[0], expect(BOOL));
         // The condition's false edge leaves for the exit (OWN-17).
         self.exit_edge(self.frames.len() - 1);
         let exit = self.frames.last().unwrap().exit;
@@ -1821,15 +1813,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                 let fixed = self.frames.last().unwrap().ty;
                 let ty = match fixed {
                     Some(f) if t != NEVER => {
-                        self.coerce(
-                            t,
-                            Want {
-                                ty: f,
-                                rule: "LANG-11",
-                                view: false,
-                            },
-                            e,
-                        );
+                        self.coerce(t, Want { ty: f, view: false }, e);
                         f
                     }
                     Some(f) => f,
@@ -1856,7 +1840,8 @@ impl<'c, 'a> Cx<'c, 'a> {
             None => f.kind != FrameKind::Block,
         });
         if i.is_none() {
-            self.gap(n, "an exit with no enclosing loop or label (Q17)");
+            // Refused LANG-15 by the resolver.
+            self.halt();
         }
         i
     }
@@ -1867,23 +1852,16 @@ impl<'c, 'a> Cx<'c, 'a> {
             return (NEVER, None);
         };
         if self.frames[i].kind == FrameKind::While && value.is_some() {
-            self.gap(n, "`break` with a value out of `while` (Q18)");
+            // Refused LANG-15 by the resolver.
+            self.halt();
             return (NEVER, None);
         }
         let fixed = self.frames[i].ty;
         let (t, v) = match value {
-            Some(e) => self.expr(e, fixed.and_then(want)),
+            Some(e) => self.expr(e, fixed.and_then(expect)),
             None => {
                 if let Some(f) = fixed {
-                    self.coerce(
-                        UNIT,
-                        Want {
-                            ty: f,
-                            rule: "LANG-11",
-                            view: false,
-                        },
-                        n,
-                    );
+                    self.coerce(UNIT, Want { ty: f, view: false }, n);
                 }
                 (UNIT, None)
             }
@@ -1905,7 +1883,8 @@ impl<'c, 'a> Cx<'c, 'a> {
             return (NEVER, None);
         };
         if self.frames[i].kind == FrameKind::Block {
-            self.gap(n, "`continue` naming a labelled block (Q17)");
+            // Refused LANG-15 by the resolver.
+            self.halt();
             return (NEVER, None);
         }
         if let Some(h) = self.frames[i].header {
@@ -1920,7 +1899,6 @@ impl<'c, 'a> Cx<'c, 'a> {
     fn return_(&mut self, n: NodeId) -> (TyId, Option<ValueId>) {
         let w = Want {
             ty: self.fd.result,
-            rule: "LANG-8",
             view: false,
         };
         let v = match self.kids(n).first() {
@@ -1963,16 +1941,11 @@ impl<'c, 'a> Cx<'c, 'a> {
                 if t == ERROR || t == NEVER {
                     return (t, None);
                 }
+                // Unary minus is for signed integers and floats (LANG-21).
                 let r = match int_of(&self.t, t) {
                     Some((true, _)) => self.emit_unary(UnaryOp::Neg, t, v, n),
-                    // Unary minus fails with Overflow unless the result fits (SEM-1): on
-                    // an unsigned type that is 0 - x.
-                    Some((false, _)) => {
-                        let zero = self.konst(value_ty(&self.t, t).ok().flatten().unwrap(), 0, n);
-                        self.emit_binary(BinaryOp::Sub, t, zero, v, n)
-                    }
                     None if is_float(&self.t, t) => self.emit_unary(UnaryOp::Neg, t, v, n),
-                    None => return self.no_operator(n, t),
+                    _ => return self.no_operator(n, t),
                 };
                 (t, r)
             }
@@ -2031,14 +2004,19 @@ impl<'c, 'a> Cx<'c, 'a> {
             }
         }
     }
+    /// LANG-21: an operator applies only to the operand types its table lists; anything
+    /// else is refused at the operator.
     fn no_operator(&mut self, n: NodeId, t: TyId) -> (TyId, Option<ValueId>) {
         if t == ERROR || t == NEVER {
             return (t, None);
         }
-        self.gap_ty(
-            n,
-            "an operator on a type the spec does not define it for (Q11)",
-        )
+        let (op, a) = (self.token_text(n), self.name(t));
+        self.refuse_at(
+            "LANG-21",
+            self.op_span(n),
+            format!("`{op}` does not apply to `{a}`"),
+        );
+        (ERROR, None)
     }
     fn is_numeric(&self, t: TyId) -> bool {
         matches!(self.t.kind(t), TyKind::Scalar(s) if numeric(*s))
@@ -2093,14 +2071,12 @@ impl<'c, 'a> Cx<'c, 'a> {
     }
 
     fn binary(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
-        let c = self.kids(n);
-        let (l, r) = (c[0], c[1]);
         let op = self.token_text(n);
         match op {
             "&&" | "||" => self.short_circuit(n, op == "&&"),
             ".." | "..=" => self.gap_ty(n, "ranges are not built"),
             "==" | "!=" | "<" | "<=" | ">" | ">=" => {
-                let (t, lv, rv) = self.operands(l, r, None);
+                let (t, lv, rv) = self.operands(n, None);
                 if t == ERROR || t == NEVER {
                     return (BOOL, None);
                 }
@@ -2150,7 +2126,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             }
             _ => {
                 let hint = want.filter(|w| self.is_numeric(w.ty));
-                let (t, lv, rv) = self.operands(l, r, hint);
+                let (t, lv, rv) = self.operands(n, hint);
                 if t == ERROR || t == NEVER {
                     return (t, None);
                 }
@@ -2159,17 +2135,17 @@ impl<'c, 'a> Cx<'c, 'a> {
         }
     }
 
-    /// Type an operator's two operands, which have one type (SEM-1): the first that
-    /// synthesises one fixes it, else the expected type does (LANG-11). A number literal
-    /// on the left is emitted after the right operand fixes its type; it has no effect.
+    /// Type binary operator `n`'s two operands, which have one type (LANG-21): an
+    /// operand that is not a literal operand fixes it, else the expected type does
+    /// (LANG-11). A literal operand on the left is emitted after the right operand fixes
+    /// its type.
     fn operands(
         &mut self,
-        l: NodeId,
-        r: NodeId,
+        n: NodeId,
         hint: Option<Want>,
     ) -> (TyId, Option<ValueId>, Option<ValueId>) {
         let before = self.out.refusals.len();
-        let (t, lv, rv) = self.operand_pair(l, r, hint);
+        let (t, lv, rv) = self.operand_pair(n, hint);
         // A refused operand is the program's one refusal here; the operator's own
         // checks and its result do not add another.
         if self.out.refusals.len() > before && t != NEVER {
@@ -2179,17 +2155,11 @@ impl<'c, 'a> Cx<'c, 'a> {
     }
     fn operand_pair(
         &mut self,
-        l: NodeId,
-        r: NodeId,
+        n: NodeId,
         hint: Option<Want>,
     ) -> (TyId, Option<ValueId>, Option<ValueId>) {
-        let same = |t: TyId| {
-            Some(Want {
-                ty: t,
-                rule: "SEM-1",
-                view: false,
-            })
-        };
+        let c = self.kids(n);
+        let (l, r) = (c[0], c[1]);
         if self.synthesises(l) {
             let (lt, lv) = self.expr(l, None);
             if lt == NEVER || lt == ERROR {
@@ -2198,27 +2168,41 @@ impl<'c, 'a> Cx<'c, 'a> {
                 }
                 return (lt, None, None);
             }
-            let (_, rv) = self.expr(r, same(lt));
+            let rv = self.second_operand(n, r, lt);
             return (lt, lv, rv);
         }
-        if self.bare_number(l).is_some() && self.synthesises(r) {
+        if self.synthesises(r) {
             let (rt, rv) = self.expr(r, None);
             if rt == NEVER || rt == ERROR {
                 return (rt, None, None);
             }
-            let (_, lv) = self.expr(l, same(rt));
+            let (_, lv) = self.expr(l, expect(rt));
             return (rt, lv, rv);
         }
         let Some(h) = hint else {
-            self.refuse("LANG-11", l, "an unsuffixed number needs an expected type");
+            self.refuse("LANG-11", l, "a literal operand needs an expected type");
             return (ERROR, None, None);
         };
         let (lt, lv) = self.expr(l, Some(h));
-        let (_, rv) = self.expr(r, same(lt));
+        let (_, rv) = self.expr(r, expect(lt));
         (lt, lv, rv)
     }
+    /// The operand after one of type `t`: a literal operand takes `t`; any other must
+    /// have it, or operator `n` is refused (LANG-21, no mixed widths or kinds).
+    fn second_operand(&mut self, n: NodeId, r: NodeId, t: TyId) -> Option<ValueId> {
+        if !self.synthesises(r) {
+            return self.expr(r, expect(t)).1;
+        }
+        let (rt, rv) = self.expr(r, None);
+        if rt != t && rt != NEVER && rt != ERROR {
+            let (op, a, b) = (self.token_text(n), self.name(t), self.name(rt));
+            self.refuse_at("LANG-21", self.op_span(n), format!("`{a}` {op} `{b}`"));
+            return None;
+        }
+        rv
+    }
 
-    /// An arithmetic, bitwise or shift operator on two values of `t` (SEM-1, SEM-2).
+    /// An arithmetic, bitwise or shift operator on two values of `t` (LANG-21, SEM-1).
     fn arith(
         &mut self,
         op: &str,
@@ -2243,10 +2227,6 @@ impl<'c, 'a> Cx<'c, 'a> {
         };
         let ok = match bop {
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => int || float,
-            BinaryOp::Rem if float => {
-                self.refuse("SEM-2", n, "`%` is integer-only");
-                return None;
-            }
             _ => int,
         };
         if t == ERROR || t == NEVER {
@@ -2329,8 +2309,21 @@ impl<'c, 'a> Cx<'c, 'a> {
             _ => return self.gap_ty(callee, "calls through values are not built"),
         };
         let g = &self.p.fns[f];
-        if args.len() != g.params.len() {
-            return self.gap_ty(n, "a call with the wrong number of arguments (Q13)");
+        // LANG-11: one argument per parameter; a missing one is refused at the call's
+        // `)`, an extra one at the first extra argument.
+        if args.len() < g.params.len() {
+            let k = g.params.len();
+            self.refuse_at(
+                "LANG-11",
+                self.close_brace(n),
+                format!("expected {k} arguments"),
+            );
+            return (ERROR, None);
+        }
+        if args.len() > g.params.len() {
+            let k = g.params.len();
+            self.refuse("LANG-11", args[k], format!("expected {k} arguments"));
+            return (ERROR, None);
         }
         if g.waits {
             self.waited = true;
@@ -2343,9 +2336,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             }
         }
         let mut found: Vec<Option<TyId>> = vec![None; g.generics.len()];
-        if let Some(w) = want {
-            self.unify(g.result, w.ty, &mut found);
-        }
+        let mut checked = 0u64;
         let mut vals: Vec<Option<ValueId>> = vec![None; args.len()];
         let mut later = vec![];
         self.call_seq += 1;
@@ -2366,9 +2357,11 @@ impl<'c, 'a> Cx<'c, 'a> {
                 &mut found,
                 &mut vals[i],
             ) {
+                self.determined(f, &found, &mut checked, e);
                 continue;
             }
-            if self.bare_number(e).is_some() && !self.synthesises(e) {
+            // A literal operand waits for the other arguments and the result (LANG-21).
+            if !self.synthesises(e) {
                 later.push(i);
                 continue;
             }
@@ -2377,11 +2370,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                 Some(t) => {
                     let view = g.params[i].mode == Mode::View
                         && !matches!(self.t.kind(t), TyKind::View(_));
-                    let w = Want {
-                        ty: t,
-                        rule: "LANG-11",
-                        view,
-                    };
+                    let w = Want { ty: t, view };
                     self.expr(e, Some(w)).1
                 }
                 None => {
@@ -2393,14 +2382,20 @@ impl<'c, 'a> Cx<'c, 'a> {
                             "a type parameter is determined twice differently",
                         );
                     }
+                    self.determined(f, &found, &mut checked, e);
                     v
                 }
             };
         }
+        // The arguments determine the type parameters first, then the expected result.
+        if let Some(w) = want {
+            self.unify(g.result, w.ty, &mut found);
+            self.determined(f, &found, &mut checked, n);
+        }
         for i in later {
             let e = self.kids(args[i])[0];
             match self.known(g.params[i].ty, &found) {
-                Some(t) => vals[i] = self.expr(e, want_rule(t, "LANG-11")).1,
+                Some(t) => vals[i] = self.expr(e, expect(t)).1,
                 None => {
                     self.refuse("LANG-11", e, "an unsuffixed number needs an expected type");
                 }
@@ -2527,15 +2522,7 @@ impl<'c, 'a> Cx<'c, 'a> {
     /// An argument of type `at` for a parameter of type `pt` (LANG-11).
     fn arg_ty(&mut self, pt: TyId, at: TyId, e: NodeId, found: &mut [Option<TyId>]) {
         match self.known(pt, found) {
-            Some(t) => self.coerce(
-                at,
-                Want {
-                    ty: t,
-                    rule: "LANG-11",
-                    view: false,
-                },
-                e,
-            ),
+            Some(t) => self.coerce(at, Want { ty: t, view: false }, e),
             None => {
                 if !self.unify(pt, at, found) {
                     self.refuse(
@@ -2561,6 +2548,25 @@ impl<'c, 'a> Cx<'c, 'a> {
     }
     /// Find type arguments from one argument type; false when one is found twice
     /// differently (LANG-11). A mismatch elsewhere is the argument's own refusal.
+    /// LANG-12: a type argument that lacks a bound its parameter declares is refused at
+    /// the argument or result that determined it; `checked` marks those already seen.
+    fn determined(&mut self, f: usize, found: &[Option<TyId>], checked: &mut u64, n: NodeId) {
+        let p: &'c Program<'a> = self.p;
+        for (i, t) in found.iter().enumerate() {
+            let Some(t) = *t else { continue };
+            if *checked & (1 << i) != 0 {
+                continue;
+            }
+            *checked |= 1 << i;
+            let g = &p.fns[f].generics[i];
+            let missing = g.bounds & !has_bounds(&p.decls, &self.t, t, &self.params);
+            if missing != 0 {
+                let (a, b) = (self.name(t), crate::decls::bound_names(missing));
+                self.refuse("LANG-12", n, format!("`{a}` is not {b}"));
+                return;
+            }
+        }
+    }
     fn unify(&mut self, pt: TyId, at: TyId, s: &mut [Option<TyId>]) -> bool {
         self.out.counts.types += 1;
         if at == NEVER || at == ERROR {
@@ -2639,7 +2645,7 @@ impl<'c, 'a> Cx<'c, 'a> {
     }
 
     /// The core integer operations built so far (SEM-1); T and U range over the
-    /// integer types, which no bound states (Q15).
+    /// integer types (their `integer` bound, checked by LANG-12 at the call).
     fn intrinsic(
         &mut self,
         f: usize,
@@ -2658,7 +2664,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         }
         let ints: Vec<(bool, u32)> = tys.iter().filter_map(|&t| int_of(&self.t, t)).collect();
         if ints.len() != tys.len() {
-            self.gap(n, "a core integer operation on a non-integer type (Q15)");
+            // Refused LANG-12 where the type argument was determined.
             return None;
         }
         let arith = |m: ArithMode, op: ArithOp| Some((m, op));
@@ -2703,7 +2709,8 @@ impl<'c, 'a> Cx<'c, 'a> {
             }
             "truncate" if ints[1].1 <= ints[0].1 => ConvertMode::Truncate,
             "truncate" => {
-                self.gap(n, "`int.truncate` to a wider type (Q15)");
+                let (x, y) = (self.name(tys[0]), self.name(tys[1]));
+                self.refuse("SEM-1", n, format!("`{y}` is wider than `{x}`"));
                 return None;
             }
             _ => {
@@ -2783,14 +2790,6 @@ impl<'c, 'a> Cx<'c, 'a> {
             }
         }
     }
-}
-
-fn want_rule(ty: TyId, rule: &'static str) -> Option<Want> {
-    Some(Want {
-        ty,
-        rule,
-        view: false,
-    })
 }
 
 fn is_type_node(k: NodeKind) -> bool {

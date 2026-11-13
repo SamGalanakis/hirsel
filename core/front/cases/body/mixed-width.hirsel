@@ -1,3 +1,4 @@
-// SEM-1: operands have one type; the spec's example, refused at the second operand.
-// expect: refuse SEM-1 at 3:36
+// LANG-21: the spec's example; operands have one type, so no mixed widths; refused at
+// the operator.
+// expect: refuse LANG-21 at 4:34
 fn add(x: u8, y: u16) -> u16 { x + y }

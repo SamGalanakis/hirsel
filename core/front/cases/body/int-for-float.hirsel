@@ -1,0 +1,5 @@
+// LANG-3: the spec's example; an integer token takes only an integer type (Q20). A suffix
+// names a float type.
+// expect: refuse LANG-3 at 4:17
+fn f() -> f64 { 1 }
+fn g() -> f64 { 1f64 }

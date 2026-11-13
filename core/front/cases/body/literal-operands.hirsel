@@ -1,0 +1,5 @@
+// LANG-21: literal operands wait for the other operand (the spec's `(1 + 2) < x`); with
+// no other operand and a bool result they have no type, LANG-11 (`1 < 2`, Q19).
+// expect: refuse LANG-11 at 5:18
+fn f(x: u8) -> bool { (1 + 2) < x && !(x == 7) }
+fn g() -> bool { 1 < 2 }

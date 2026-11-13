@@ -14,18 +14,32 @@ pub const SHAREABLE: u8 = 2;
 pub const SEND: u8 = 4;
 pub const KEY: u8 = 8;
 pub const ORDERED: u8 = 16;
+/// Exactly the integer types, and exactly f32 and f64: written only on type parameters of
+/// bodiless core declarations (OWN-4; the resolver refuses them elsewhere).
+pub const INTEGER: u8 = 32;
+pub const FLOAT: u8 = 64;
 pub fn bound_bit(name: &str) -> u8 {
     match name {
         "plain" => PLAIN,
         "shareable" => SHAREABLE,
         "send" => SEND,
         "key" => KEY,
+        "integer" => INTEGER,
+        "float" => FLOAT,
         _ => ORDERED,
     }
 }
 pub fn bound_names(b: u8) -> String {
-    let names = ["plain", "shareable", "send", "key", "ordered"];
-    (0..5)
+    let names = [
+        "plain",
+        "shareable",
+        "send",
+        "key",
+        "ordered",
+        "integer",
+        "float",
+    ];
+    (0..7)
         .filter(|i| b & (1 << i) != 0)
         .map(|i| names[i])
         .collect::<Vec<_>>()
@@ -1265,8 +1279,10 @@ pub fn has_bounds(decls: &[TypeDecl], t: &impl TyRead, ty: TyId, params: &[u8]) 
     };
     plain_extra
         | match t.kind(ty) {
-            TyKind::Error | TyKind::Never | TyKind::Unit => all,
-            TyKind::Scalar(Scalar::F32 | Scalar::F64) => PLAIN | SHAREABLE | SEND,
+            TyKind::Error | TyKind::Never => all | INTEGER | FLOAT,
+            TyKind::Unit => all,
+            TyKind::Scalar(Scalar::F32 | Scalar::F64) => PLAIN | SHAREABLE | SEND | FLOAT,
+            TyKind::Scalar(s) if hirsel_core_ir::Ty::Scalar(*s).int().is_some() => all | INTEGER,
             TyKind::Scalar(_) => all,
             TyKind::Fn(..) => PLAIN | SHAREABLE | SEND,
             TyKind::Tuple(xs) => meet(xs),

@@ -1,0 +1,4 @@
+// LANG-11: a loop body is checked against unit (Q16); a trailing `;` discards the value.
+// expect: refuse LANG-11 at 3:17
+fn f() { loop { 5u8 } }
+fn g() { loop { 5u8; } }

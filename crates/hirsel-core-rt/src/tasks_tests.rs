@@ -710,5 +710,20 @@ fn foreign_growth_and_received_grant_observe_refunds_before_reusing_room() {
         }
         0
     }
-    assert_eq!(run(root, ()).0, 3);
+    let (result, events) = run(root, ());
+    assert_eq!(result, 3);
+    let refund = events.iter().position(|e| e.kind == REFUND && e.value == 8).unwrap();
+    let charge = events.iter().position(|e| e.kind == CHARGE && e.value == 16).unwrap();
+    assert!(refund < charge);
+    // SAFETY: native context binding has the same logical task ownership as Rust.
+    unsafe {
+        let context = hirsel_core_context_new(1 << 20);
+        assert!(!hirsel_core_task_start(context).pointer.is_null());
+        let before = (*context).available();
+        let mut result = 0u64;
+        assert_eq!(run_root(context, root, ptr::null_mut(), (&mut result as *mut u64).cast(), 0, 8, SchedulerProvider::default()), 0);
+        assert_eq!(result, 3);
+        assert_eq!((*context).available(), before);
+        hirsel_core_context_free(context);
+    }
 }

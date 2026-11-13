@@ -318,7 +318,9 @@ impl Payer {
     #[inline]
     pub(crate) fn settle(self, bytes: u64) {
         let d = self.domain();
-        if d.owner == Some(thread()) && d.handles.get() != 0 {
+        let local = d.owner == Some(thread())
+            || CURRENT_DOMAIN.with(|v| v.get() == self.slot().domain.as_ptr().addr());
+        if local && d.handles.get() != 0 {
             let root = self.canonical();
             let owner = root.forest().record(root.slot().id).live.owner;
             if owner != crate::tasks::current_id() && bytes != 0 {
@@ -328,10 +330,7 @@ impl Payer {
                 return;
             }
         }
-        if (d.owner == Some(thread())
-            || CURRENT_DOMAIN.with(|v| v.get() == self.slot().domain.as_ptr().addr()))
-            && d.handles.get() != 0
-        {
+        if local && d.handles.get() != 0 {
             // SAFETY: this task owns all local fields; remote events use only mailbox atoms.
             let r = unsafe { &mut *self.local() };
             if bytes != 0 && r.parent.is_none() && r.refs != 0 {

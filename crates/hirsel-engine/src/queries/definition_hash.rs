@@ -116,7 +116,7 @@ impl QueryEngine {
         self.materialize(path)?;
         let form = if let Some(source) = self.items.get(path).and_then(|items| items.first()) {
             match () {
-                _ if generation::executable(source) => Form::Tir,
+                _ if staging::executable(source) => Form::Tir,
                 _ if is_type => Form::Type,
                 _ => {
                     let (content, reads) = self.semantic_node(path)?;

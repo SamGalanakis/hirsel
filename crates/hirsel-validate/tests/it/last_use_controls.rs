@@ -46,7 +46,6 @@ fn holder(resource: bool) -> Holder {
             distinct: false,
             resource: true,
             drop: Some(path("guard_drop")),
-            fact: None,
             captures: None,
         }));
         f.signatures.insert(id("guard"), signature);

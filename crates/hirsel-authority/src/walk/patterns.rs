@@ -174,7 +174,7 @@ impl Checker<'_> {
         let authority = self.receipt_authority(plan.source, authority, &frame);
         // Nested callable parameters are provision independent of their capture
         // ceiling, as for an explicit named call (CLO-2).
-        let parameters = if matches!(frame.owner, NameSite::Item) || self.in_clause {
+        let parameters = if matches!(frame.owner, NameSite::Item) {
             vec![authority]
         } else {
             vec![AuthoritySummary::inert()]

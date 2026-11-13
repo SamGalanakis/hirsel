@@ -75,20 +75,11 @@ pub(crate) fn capture_source_facts(syntax: &ItemSyntax) -> hirsel_query_products
         })
         .collect();
     hirsel_query_products::SourceFacts {
-        generator: generation::generator(syntax).is_some(),
-        instance_bodied: generation::instance_bodied(syntax),
-        executable: generation::executable(syntax),
+        executable: staging::executable(syntax),
         body_kind,
         specializes: crate::families::closes(syntax),
         staged: super::scheduled_stage::has_staged_body(syntax),
         comptime,
-        fact: matches!(
-            item.kind,
-            ItemKind::Type {
-                body: TypeBody::Distinct { fact: Some(_), .. },
-                ..
-            }
-        ),
         associations: item
             .attributes
             .iter()
@@ -586,22 +577,6 @@ impl Catalog {
     pub(super) fn facts(&self, path: &DefPath) -> Option<&SourceFacts> {
         Some(&self.candidates.get(path)?.first()?.facts)
     }
-    /// Ordinary heads cannot become generic generators through syntax
-    /// shadowing. Consult the live syntax map only for positive candidates.
-    /// A package `indexed` by N answers from N, not from adopted heads.
-    pub(super) fn has_instance_bodied(
-        &self,
-        indexed: impl Fn(&PackageId) -> bool,
-        mut shadowed: impl FnMut(&DefPath) -> bool,
-    ) -> bool {
-        self.candidates.iter().any(|(path, candidates)| {
-            !indexed(&path.0.package)
-                && candidates
-                    .first()
-                    .is_some_and(|candidate| candidate.facts.instance_bodied)
-                && !shadowed(path)
-        })
-    }
 
     pub(super) fn source_items(&self, file: FileId) -> Option<Vec<SourceItem>> {
         self.files.contains_key(&file).then(|| {
@@ -631,8 +606,7 @@ impl Catalog {
                 .into_iter()
                 .map(|(_, item)| item)
                 .filter(|item| {
-                    hirsel_check_protocol::fact::fact_owner(&item.definition).is_none()
-                        && !item.definition.0.name.starts_with("$dictionary$")
+                    !item.definition.0.name.starts_with("$dictionary$")
                         && !crate::families::derived(&item.definition)
                 })
                 .collect()
@@ -654,18 +628,6 @@ impl Catalog {
     }
     pub(crate) fn body(&self, path: &DefPath) -> Option<ContentHash> {
         Some(self.candidates.get(path)?.first()?.head.body)
-    }
-    pub(super) fn storeable(&self, path: &DefPath, kind: QueryKind) -> bool {
-        self.candidates
-            .get(path)
-            .and_then(|c| c.first())
-            .is_some_and(|c| {
-                if kind == QueryKind::Generate {
-                    c.facts.generator
-                } else {
-                    !c.facts.generator
-                }
-            })
     }
     pub(crate) fn cited_text(&self, sources: &SourceMap, path: &DefPath) -> Option<ContentHash> {
         let parts: Vec<_> = self
@@ -852,7 +814,6 @@ impl QueryEngine {
                 self.sources
                     .anchor(syntax.anchor)
                     .is_some_and(|(owner, _)| owner == file)
-                    && hirsel_check_protocol::fact::fact_owner(path).is_none()
                     && !path.0.name.starts_with("$dictionary$")
                     && !crate::families::derived(path)
             })
@@ -1299,11 +1260,6 @@ impl QueryEngine {
             return Ok(());
         }
         if !self.items.contains_key(path)
-            && let Some(owner) = hirsel_check_protocol::fact::fact_owner(path)
-        {
-            return self.materialize(&owner);
-        }
-        if !self.items.contains_key(path)
             && let Some((base, bindings)) = hirsel_types::specialization_parts(path)
         {
             return self.materialize_specialization(path, &base, &bindings);
@@ -1470,9 +1426,6 @@ impl QueryEngine {
                 }
                 listed.push(item);
             };
-            if let Some(helper) = crate::facts::snapshot(syntax) {
-                add(helper);
-            }
             for helper in crate::dictionaries::literal_snapshots(syntax) {
                 add(helper);
             }
@@ -1696,84 +1649,6 @@ mod tests {
     }
 
     #[test]
-    fn generated_probe_uses_positive_heads_and_preserves_syntax_shadowing() {
-        hirsel_intern::jobs::with_compiler_stack(|| {
-            for generic in [false, true] {
-                let store = Arc::new(hirsel_engine_store::MemStore::default());
-                let create = || {
-                    QueryEngine::new(
-                        default_environment(),
-                        PhaseAdapters {
-                            lexer: Some(Arc::new(crate::LexerAdapter)),
-                            parser: Some(Arc::new(crate::ParserAdapter)),
-                            ..Default::default()
-                        },
-                    )
-                    .with_result_store(store.clone())
-                };
-                let context = default_context();
-                let mut source = (0..64)
-                    .map(|i| format!("fn ordinary_{i}() {{}}\n"))
-                    .collect::<String>();
-                if generic {
-                    source.push_str("fn generated[T]() = comptime make()\n");
-                }
-                let mut seed = create();
-                let file = seed.sources.add("probe.hir", source.clone()).unwrap();
-                seed.index_source(file, &context).unwrap();
-                let mut engine = create();
-                let file = engine.sources.add("probe.hir", source).unwrap();
-                engine.index_source(file, &context).unwrap();
-                assert!(
-                    engine.items.is_empty(),
-                    "probe uses durable heads without materializing bodies"
-                );
-                assert_eq!(engine.catalog.paths().count(), 64 + usize::from(generic));
-                let mut probes = 0;
-                assert_eq!(
-                    engine.catalog.has_instance_bodied(
-                        |_| false,
-                        |_| {
-                            probes += 1;
-                            false
-                        }
-                    ),
-                    generic
-                );
-                assert_eq!(
-                    probes,
-                    usize::from(generic),
-                    "ordinary heads need no path lookup"
-                );
-                assert!(
-                    !engine.catalog.has_instance_bodied(|_| false, |_| true),
-                    "live non-generated syntax shadows a positive stored head"
-                );
-                for path in engine.catalog.paths() {
-                    assert_eq!(
-                        engine.instance_bodied(path),
-                        engine.catalog.facts(path).unwrap().instance_bodied
-                    );
-                }
-                if generic {
-                    let path = engine
-                        .catalog
-                        .paths()
-                        .find(|path| path.0.name == "generated")
-                        .unwrap()
-                        .clone();
-                    engine.materialize(&path).unwrap();
-                    assert!(
-                        engine.instance_bodied(&path),
-                        "classification survives materialization"
-                    );
-                    assert!(!engine.catalog.has_instance_bodied(|_| false, |_| false));
-                }
-            }
-        });
-    }
-
-    #[test]
     fn parse_heads_refuse_every_single_byte_corruption() {
         hirsel_intern::jobs::with_compiler_stack(|| {
             use hirsel_engine_store::ResultStore;
@@ -1843,14 +1718,11 @@ mod tests {
                         header: ContentHash::default(),
                         body: ContentHash::default(),
                         facts: SourceFacts {
-                            generator: false,
-                            instance_bodied: false,
                             executable: false,
                             body_kind: BodyKind::None,
                             specializes: false,
                             staged: false,
                             comptime: vec![],
-                            fact: false,
                             associations: vec![],
                             arms: vec![],
                         },
@@ -1923,7 +1795,6 @@ impl QueryEngine {
                     types: head.kind >= 2,
                     visibility: head.visibility,
                     source: source(file)?,
-                    instance_bodied: super::generation::instance_bodied(first),
                 },
             );
         }
@@ -1940,7 +1811,6 @@ impl QueryEngine {
                     types: first.head.kind >= 2,
                     visibility: first.head.visibility,
                     source: source(first.file)?,
-                    instance_bodied: first.facts.instance_bodied,
                 },
             );
         }

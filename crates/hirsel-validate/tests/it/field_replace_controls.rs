@@ -67,7 +67,6 @@ fn replaced_field() -> (Fixture, u32, u32) {
             distinct: false,
             resource: true,
             drop: None,
-            fact: None,
             captures: None,
             destructor_allocation: Allocation::NoAlloc,
         })),

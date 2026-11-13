@@ -217,7 +217,6 @@ pub fn has_owned_crossing_requirement(
                     BuiltinType::Shared
                     | BuiltinType::Ptr
                     | BuiltinType::FnPtr
-                    | BuiltinType::TypeShape
                     | BuiltinType::SlotId
                     | BuiltinType::Iter,
                 ..
@@ -399,7 +398,6 @@ pub fn owned_unique_parts(
                     | BuiltinType::Receiver
                     | BuiltinType::Ptr
                     | BuiltinType::FnPtr
-                    | BuiltinType::TypeShape
                     | BuiltinType::SlotId,
                 ..
             }
@@ -451,7 +449,6 @@ fn owned_receipts(
                         | BuiltinType::Atomic
                         | BuiltinType::Ptr
                         | BuiltinType::FnPtr
-                        | BuiltinType::TypeShape
                         | BuiltinType::SlotId,
                     ..
                 }
@@ -505,7 +502,6 @@ fn owned_receipts(
                     | BuiltinType::Iter
                     | BuiltinType::Ptr
                     | BuiltinType::FnPtr
-                    | BuiltinType::TypeShape
                     | BuiltinType::SlotId,
                 ..
             } => (),

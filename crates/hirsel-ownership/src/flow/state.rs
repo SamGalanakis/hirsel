@@ -50,7 +50,7 @@ impl Checker<'_, '_> {
     }
     fn implemented_callable(&self) -> Option<(FunctionType, bool)> {
         let ty = match self.graph.owner {
-            NameSite::Item if self.graph.clause.is_none() => {
+            NameSite::Item => {
                 return match &self.own.kind {
                     SignatureKind::Function(f) => Some((f.clone(), true)),
                     _ => None,

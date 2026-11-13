@@ -1204,7 +1204,6 @@ fn token_signature() -> Signature {
         distinct: false,
         resource: true,
         drop: Some(path("Token_drop")),
-        fact: None,
         captures: None,
     }));
     signature
@@ -1360,7 +1359,6 @@ fn tagged(thunk: bool) -> Signature {
         distinct: false,
         resource: false,
         drop: None,
-        fact: None,
         captures: None,
         destructor_allocation: Allocation::NoAlloc,
     }));

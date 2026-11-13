@@ -106,7 +106,6 @@ impl Bytes<'_> {
             allocation: _,
             authority,
             uses,
-            contracts,
             incomplete: _,
             foreign,
         } = value;
@@ -124,7 +123,6 @@ impl Bytes<'_> {
         if let Uses::Only(value) = uses {
             self.authority(value);
         }
-        self.flat(contracts);
         if let Some(value) = foreign {
             self.string(&value.abi);
             self.string(&value.aliasing_contract);

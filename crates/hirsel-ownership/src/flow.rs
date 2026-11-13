@@ -1285,79 +1285,6 @@ impl InitialStorage {
             }),
         );
     }
-    pub(super) fn postcondition_inputs(
-        &mut self,
-        t: &TypeInterner,
-        syntax: &ItemSyntax,
-        owner: NameSite,
-        body: &mut CheckedBody,
-        properties: &mut PropertyTable,
-        uniqueness: &BTreeMap<ParamId, bool>,
-        sendability: &BTreeMap<ParamId, bool>,
-    ) {
-        let tree = &syntax.tree;
-        let syntax = match owner {
-            NameSite::Item => match &syntax.item.kind {
-                hirsel_syntax::ItemKind::Function { signature, .. } => signature,
-                _ => return,
-            },
-            NameSite::Statement(statement) => match &tree.statements[statement.0 as usize].kind {
-                hirsel_syntax::StmtKind::Function { signature, .. } => signature,
-                _ => return,
-            },
-            NameSite::Expression(expression) => match &tree.expressions[expression.0 as usize].kind
-            {
-                ExprKind::Closure { signature, .. } => signature,
-                _ => return,
-            },
-            _ => return,
-        };
-        for clause in syntax
-            .contracts
-            .iter()
-            .filter(|clause| clause.kind == hirsel_syntax::ContractKind::Ensures)
-        {
-            let scope = NameSite::Expression(clause.expression);
-            let mut ordinal = 0;
-            for (parameter, declaration) in syntax.parameters.iter().enumerate() {
-                if declaration.passing == PassingMode::Take {
-                    continue;
-                }
-                let unique = uniqueness.get(&ParamId(parameter as u32)).copied();
-                if let Some(unique) = unique {
-                    if let Some(&index) = self
-                        .bindings
-                        .get(&(scope, BindingKey::Parameter(ParamId(ordinal))))
-                        .and_then(|indices| indices.first())
-                    {
-                        let old = body.bindings[index].ty;
-                        let mut row = t.get(old).unwrap().clone();
-                        row.modes.uniqueness = if unique {
-                            Uniqueness::Unique
-                        } else {
-                            Uniqueness::Aliased
-                        };
-                        if let Some(sendable) = sendability.get(&ParamId(parameter as u32)) {
-                            row.modes.sendability = if *sendable {
-                                Sendability::Sendable
-                            } else {
-                                Sendability::NotSendable
-                            };
-                            if !sendable {
-                                row.sendability_requirement = SendabilityRequirement::None;
-                            }
-                        }
-                        if &row != t.get(old).unwrap() {
-                            body.bindings[index].ty = t.intern(row);
-                            properties.inherit(body.bindings[index].ty, old);
-                            self.refresh(t, index, body, properties);
-                        }
-                    }
-                }
-                ordinal += 1;
-            }
-        }
-    }
     pub(super) fn environment_frames(&self) -> &BTreeSet<ExprId> {
         &self.environment_frames
     }
@@ -3922,8 +3849,7 @@ impl Checker<'_, '_> {
                 .0
                 .iter()
                 .any(|(path, _, deep)| self.unique_contract_on(binding.ty, path, *deep));
-            if self.graph.clause.is_none()
-                && state.slots[index].available == LIVE
+            if state.slots[index].available == LIVE
                 && (nested_unique_lost
                     || (promised
                         || self.unique_proof.is_none()
@@ -3995,7 +3921,7 @@ impl Checker<'_, '_> {
         let mut site = self.graph.nodes[self.node].span;
         site.start = site.end.saturating_sub(1);
         self.mutable_crossing_exit(state, site, held);
-        if self.emit && self.graph.clause.is_none() {
+        if self.emit {
             for &index in &self.parameters {
                 let ResolvedName::Parameter(parameter) = self.body.bindings[index].binding else {
                     unreachable!()
@@ -4013,24 +3939,6 @@ impl Checker<'_, '_> {
             }
         }
     }
-    fn clause_parameter(&self, state: &State, binding: usize) -> Option<ExprId> {
-        let root = self.graph.clause?;
-        let mut current = Some(binding);
-        let mut seen = BTreeSet::new();
-        while let Some(index) = current {
-            if !seen.insert(index) {
-                break;
-            }
-            let binding = &self.body.bindings[index];
-            if binding.owner == NameSite::Expression(root)
-                && matches!(binding.binding, ResolvedName::Parameter(_))
-            {
-                return Some(root);
-            }
-            current = state.slots[index].value.aliased();
-        }
-        None
-    }
     fn access_diagnostic(
         &mut self,
         state: &State,
@@ -4040,15 +3948,7 @@ impl Checker<'_, '_> {
         message: &str,
         explain: impl FnOnce(&Self) -> causes::Pending,
     ) {
-        if let Some(root) = self.clause_parameter(state, place.binding) {
-            self.diagnostic(
-                const { RuleId::of("FACT-1") },
-                self.tree.expressions[root.0 as usize].origin.span,
-                "contract parameters are read-only",
-            );
-        } else {
-            self.report(rule, site, message, explain);
-        }
+        self.report(rule, site, message, explain);
     }
     /// Escaping environments own their capture slots even while a Many
     /// invocation borrows them. This permits another legal copy of global

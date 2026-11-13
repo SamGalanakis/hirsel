@@ -106,10 +106,7 @@ pub(crate) fn reached_files(
             continue;
         };
         for (path, facts) in names.paths(package) {
-            if facts.instance_bodied
-                || path.0.name.contains('$')
-                || words.contains(path.0.name.as_str())
-            {
+            if path.0.name.contains('$') || words.contains(path.0.name.as_str()) {
                 work.push(path.clone());
             }
             in_source

@@ -190,8 +190,6 @@ read-only resource/capability borrows permit many calls and never finalize the
 capture. Taken or owned noncopyable captures and once function captures require
 once; borrowing a once function does not permit its invocation.
 
-
-
 | Prefix | Verified | Eligible | Outside operative rules |
 | --- | ---: | ---: | ---: |
 | OWN | 222 | 260 | 1 |
@@ -573,11 +571,6 @@ Divergent aliases receive their binding's fresh identity at a continuing join. J
 
 Identity introductions are restricted by I's initialized-binding proof at the same expression convergence or loop head. Returning paths do not enter that fixed point; bindings moved on any incoming path receive no introduction. K transports the remaining J/I rows, so naming a join never reads unavailable storage.
 
-Contract clauses have distinct readonly parameter rows, including through aliases
-and nested closures. Their ownership graphs do not consume the ordinary frame's
-parameters. Clause parameter access violations use FACT-1 at the whole clause;
-ordinary type, locality and copy constraints keep their normal diagnostics.
-
 Projection lifetime plans cover both computed roots and binding roots. Reads use
 the receiver's current lifetime only for parts declared Global; an inferred Local
 part retains its lifetime after a fresh whole replacement. A field writes no
@@ -899,7 +892,6 @@ prefixes remain distinct. Projection and union commute with the original prefix
 predicate, so recursive list traversal converges without an iteration limit or a
 weaker result-source rule. No expanded parameter path is retained in flow values.
 
-
 Forward ownership propagation uses a reverse-postorder priority worklist. A
 solve-local exact ordered slot-join cache preserves the existing slot operator,
 shares repeated inactive subtrees and reports changes during the merge instead
@@ -983,7 +975,6 @@ creation rules as closure literals. J reconstructs the declaration from its lexi
 binding, checks crossing/authority bounds, and publishes a capture table and formal
 forwarding result. I checks its construction through the existing Capture operation;
 the lexical generic body's own frame remains checked at its declaration.
-
 
 A call reads only the callee's declared contracts (`@preserves_unique(p)`,
 `mut p: unique T`, `-> unique T`, authority and capture declarations), whatever the

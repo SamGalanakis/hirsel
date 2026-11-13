@@ -36,7 +36,6 @@ fn declaration(
             distinct: false,
             resource: false,
             drop: None,
-            fact: None,
             captures: None,
             destructor_allocation: Allocation::NoAlloc,
         })),
@@ -812,7 +811,6 @@ fn serializable_ir_rejects_hidden_authority_and_unsupported_runtime_containers()
         BuiltinType::Mutex,
         BuiltinType::Iter,
         BuiltinType::SortedMap,
-        BuiltinType::TypeShape,
         BuiltinType::Region,
         BuiltinType::Atomic,
         BuiltinType::Task,
@@ -1020,25 +1018,6 @@ fn only_the_core_path_is_serializable_as_opaque_text() {
 }
 
 #[test]
-fn refined_distinct_ir_cannot_opt_in_but_unconstrained_data_can() {
-    let mut s = serializable_declaration(TypeKind::Primitive(Primitive::U64));
-    let SignatureKind::Type(d) = &mut s.kind else {
-        unreachable!()
-    };
-    d.distinct = true;
-    verdict(s.clone(), true);
-    let SignatureKind::Type(d) = &mut s.kind else {
-        unreachable!()
-    };
-    d.fact = Some(Contract {
-        kind: hirsel_syntax::ContractKind::Requires,
-        ordinal: 0,
-        code_hash: ContentHash::default(),
-    });
-    verdict(s, false);
-}
-
-#[test]
 fn serializable_inert_callable_ir_still_has_no_codec() {
     let mut s = serializable_declaration(TypeKind::Primitive(Primitive::U64));
     let result = match &s.kind {
@@ -1054,7 +1033,6 @@ fn serializable_inert_callable_ir_still_has_no_codec() {
         allocation: Allocation::NoAlloc,
         authority: AuthoritySummary::inert(),
         uses: Uses::Only(AuthoritySummary::inert()),
-        contracts: vec![].into(),
         incomplete: false,
         foreign: None,
     })));

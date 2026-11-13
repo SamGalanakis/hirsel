@@ -354,7 +354,6 @@ impl Checker<'_, '_> {
                     allocation: Allocation::MayAllocate,
                     authority: AuthoritySummary::Unknown,
                     uses: Uses::Unrestricted,
-                    contracts: vec![].into(),
                     incomplete: false,
                     foreign: None,
                 }
@@ -1305,31 +1304,6 @@ impl Checker<'_, '_> {
                         expression: id,
                         callee: callee.clone(),
                         arguments: target_args.clone(),
-                    });
-                }
-            }
-        }
-        if !bad {
-            if let CallTarget::Constructor(ContextualName::Constructor(owner)) = &target {
-                let declaration = self.snapshot(owner)?;
-                if matches!(&declaration.kind, SignatureKind::Type(td) if td.fact.is_some()) {
-                    let helper =
-                        hirsel_check_protocol::fact::fact_signature(self.types, &declaration)?;
-                    let SignatureKind::Function(f) = &helper.kind else {
-                        unreachable!()
-                    };
-                    let result = self.import(f.result)?;
-                    self.plans.facts.push(FactPlan {
-                        expression: id,
-                        predicate: helper.definition.path().clone(),
-                        arguments: args.clone(),
-                        result,
-                        usage: UseKind::Borrow,
-                    });
-                    self.body.instantiations.push(Instantiation {
-                        expression: id,
-                        callee: helper.definition.path().clone(),
-                        arguments: args.clone(),
                     });
                 }
             }

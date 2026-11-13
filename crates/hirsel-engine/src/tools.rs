@@ -135,7 +135,7 @@ pub fn default_context() -> FileContext {
 }
 /// The spec's parts under conformance/old-spec, by file name, which the spec hash covers.
 /// The conformance spec_links test checks that they are the whole directory.
-pub const SPEC_PARTS: [(&str, &[u8]); 24] = [
+pub const SPEC_PARTS: [(&str, &[u8]); 22] = [
     (
         "brands.md",
         include_bytes!("../../../conformance/old-spec/brands.md"),
@@ -155,10 +155,6 @@ pub const SPEC_PARTS: [(&str, &[u8]); 24] = [
     (
         "concurrency.md",
         include_bytes!("../../../conformance/old-spec/concurrency.md"),
-    ),
-    (
-        "contracts.md",
-        include_bytes!("../../../conformance/old-spec/contracts.md"),
     ),
     (
         "core-library.md",
@@ -207,10 +203,6 @@ pub const SPEC_PARTS: [(&str, &[u8]); 24] = [
     (
         "proof-seam.md",
         include_bytes!("../../../conformance/old-spec/proof-seam.md"),
-    ),
-    (
-        "schema.md",
-        include_bytes!("../../../conformance/old-spec/schema.md"),
     ),
     (
         "semantics.md",
@@ -478,13 +470,6 @@ impl<P: TirProvider> TirProvider for Closed<'_, P> {
     }
     fn constant_definitions(&mut self) -> Result<Vec<DefPath>, QueryError> {
         TirProvider::constant_definitions(self.engine)
-    }
-    fn instance_body(
-        &mut self,
-        path: &DefPath,
-        arguments: &[hirsel_types::GenericArgument],
-    ) -> Result<Option<DefPath>, QueryError> {
-        TirProvider::instance_body(self.engine, path, arguments)
     }
 }
 /// Execute a checked program with explicitly simulated capabilities.

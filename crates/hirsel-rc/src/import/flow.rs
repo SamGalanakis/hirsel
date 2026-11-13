@@ -393,7 +393,7 @@ impl Importer<'_> {
         for block in &body.blocks {
             for i in &block.instructions {
                 match &i.kind {
-                    K::Assign { destination, .. } | K::Snapshot { destination, .. } => {
+                    K::Assign { destination, .. } => {
                         written.insert(root(destination));
                     }
                     K::Replace {

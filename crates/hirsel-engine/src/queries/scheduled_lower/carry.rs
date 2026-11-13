@@ -11,7 +11,6 @@ struct Row {
     reads: Reads,
     outcome: Outcome,
     raw: Option<RawLowerOutput>,
-    demands: Vec<namespace::reopen::ManifestDemand>,
     bindings: BTreeMap<hirsel_span::Anchor, (DefId, u32)>,
     types: std::sync::Weak<hirsel_types::TypeInterner>,
     type_rows: Option<Arc<hirsel_types::TypeInterner>>,
@@ -248,9 +247,6 @@ impl FrontLowerQueries {
         else {
             return;
         };
-        let Some(mut demands) = self.namespace.live_demands_for_reads(owner, &outcome.reads) else {
-            return;
-        };
         let mut estimate = outcome.retained_bytes().unwrap_or(u64::MAX);
         if let Some((output, materialized)) = raw {
             estimate = estimate
@@ -297,7 +293,7 @@ impl FrontLowerQueries {
         }
         let mut raw = raw.clone();
         let mut roots = Vec::new();
-        if visit_types(&mut outcome, &mut raw, &mut demands, |ty| roots.push(*ty)).is_none() {
+        if visit_types(&mut outcome, &mut raw, |ty| roots.push(*ty)).is_none() {
             return;
         }
         let type_rows = if roots.is_empty() {
@@ -341,11 +337,6 @@ impl FrontLowerQueries {
         };
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.tree::<hirsel_span::Anchor, (DefId, u32)>(bindings.len());
-        weight.add(demands.capacity() * size_of::<namespace::reopen::ManifestDemand>());
-        for demand in &demands {
-            weight.path(&demand.declaration);
-            weight.flat_vec(&demand.arguments);
-        }
         if let Some((output, materialized)) = &raw {
             let Some(bytes) = hirsel_query_products::retained::retained_tir_bytes(&output.value)
                 .checked_add(
@@ -379,7 +370,6 @@ impl FrontLowerQueries {
                 reads: outcome.reads.clone(),
                 outcome,
                 raw,
-                demands,
                 bindings,
                 types: Arc::downgrade(self.namespace.snapshot.types()),
                 type_rows,
@@ -417,9 +407,7 @@ impl FrontLowerQueries {
             .ptr_eq(&Arc::downgrade(self.namespace.snapshot.types()))
         {
             let mut roots = Vec::new();
-            visit_types(&mut row.outcome, &mut row.raw, &mut row.demands, |ty| {
-                roots.push(*ty)
-            })?;
+            visit_types(&mut row.outcome, &mut row.raw, |ty| roots.push(*ty))?;
             if !roots.is_empty() {
                 let map = live_record::import_types(
                     row.type_rows.as_ref()?,
@@ -427,54 +415,14 @@ impl FrontLowerQueries {
                     &roots,
                 )?;
                 let mut valid = true;
-                visit_types(
-                    &mut row.outcome,
-                    &mut row.raw,
-                    &mut row.demands,
-                    |ty| match map.get(ty) {
-                        Some(mapped) => *ty = *mapped,
-                        None => valid = false,
-                    },
-                )?;
+                visit_types(&mut row.outcome, &mut row.raw, |ty| match map.get(ty) {
+                    Some(mapped) => *ty = *mapped,
+                    None => valid = false,
+                })?;
                 if !valid {
                     return None;
                 }
             }
-        }
-        if let Some(producer) = self.demand_producer() {
-            let mut capture = self.namespace.clone();
-            let mut successor = None;
-            for demand in &row.demands {
-                let site = capture
-                    .bodies
-                    .get(&DefId::intern(&demand.declaration))
-                    .and_then(|body| body.queries.as_ref())
-                    .map(|keys| keys.site)
-                    .unwrap_or_default();
-                let product = producer
-                    .demand(
-                        &capture,
-                        &demand.declaration,
-                        &demand.arguments,
-                        site,
-                        query_reads.clone(),
-                    )
-                    .ok()?;
-                product.result.ok()?;
-                if let Some(next) = product.successor {
-                    capture = next.namespace().clone();
-                    successor = Some(next);
-                }
-            }
-            if let Some(successor) = successor
-                && capture.identity() != self.namespace.identity()
-            {
-                let owner = successor.owner().clone();
-                let actual = owner.id(path, id.kind)?;
-                return Some(self.forward_capture(id, actual, owner, query_reads));
-            }
-        } else if !row.demands.is_empty() {
-            return None;
         }
         let clean = self
             .carry_changes
@@ -501,7 +449,6 @@ impl FrontLowerQueries {
                 path,
                 &outcome.reads,
                 outcome.execution.as_ref(),
-                &self.registrations_admitted,
                 |path, read| self.observe(path, read),
             )
             .ok()?;
@@ -605,12 +552,8 @@ pub(super) fn materialized_types(
 fn visit_types(
     outcome: &mut Outcome,
     raw: &mut Option<RawLowerOutput>,
-    demands: &mut [namespace::reopen::ManifestDemand],
     mut visit: impl FnMut(&mut hirsel_types::TypeId),
 ) -> Option<()> {
-    for demand in demands {
-        arguments_types(&mut demand.arguments, &mut visit);
-    }
     if let Ok(Value::Constant(constants)) = &mut outcome.result {
         constants.visit_types_mut(&mut visit)?;
     }
@@ -629,7 +572,6 @@ fn visit_types(
             }
             for rvalue in &mut body.rvalues {
                 match rvalue {
-                    hirsel_tir::Rvalue::Shape(ty) => visit(ty),
                     hirsel_tir::Rvalue::FunctionReference { arguments, .. } => {
                         arguments_types(arguments, &mut visit)
                     }

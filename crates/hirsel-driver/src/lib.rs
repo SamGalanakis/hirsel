@@ -239,21 +239,6 @@ pub fn hash_path(path: &Path) -> Result<String, ToolError> {
     }
     Ok(text)
 }
-/// `hirsel expand <file>`: each generated body (CT-5) of the file's declarations, in
-/// source order, exactly as its generator wrote it, so diagnostic lines match.
-pub fn expand_path(path: &Path) -> Result<String, ToolError> {
-    let output = session::request(
-        path,
-        session::Policy::default(),
-        requests::CompileOperation::Expand,
-    )?;
-    match &output.result {
-        requests::CompileResult::Expansion(text) => Ok(text.to_string()),
-        _ => Err(ToolError::Runtime(
-            "expansion request returned another operation".into(),
-        )),
-    }
-}
 /// Narrow conformance adapter returns diagnostics with revision-1 completion.
 pub fn check_file(path: &Path) -> Result<CheckOutput, NotImplemented> {
     check_path(path, crate::session::Policy::default()).map_err(|_| NotImplemented)

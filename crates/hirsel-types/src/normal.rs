@@ -255,7 +255,6 @@ fn shape_row(row: &Type) -> Type {
             allocation: Allocation::MayAllocate,
             authority: AuthoritySummary::Unknown,
             uses: Uses::Unrestricted,
-            contracts: SharedSlice::default(),
             incomplete: false,
             foreign: None,
         }),

@@ -39,7 +39,6 @@ pub struct StorageReads {
     pub constants: Vec<(DefId, Option<ContentHash>)>,
     pub derived: Vec<(StorageCallable, ContentHash)>,
     pub declarations: Vec<VRead>,
-    pub selections: Vec<(DefId, Option<GeneratedActualKey>, Option<DefId>, bool)>,
 }
 #[derive(Clone, Debug, Default)]
 pub struct StorageValidation {
@@ -56,19 +55,11 @@ pub fn validate_program(
     definitions: &[tir::DefinitionRef],
     signatures: &crate::SignatureMap,
     constants: &BTreeMap<DefPath, tir::Materialized>,
-    instances: &tir::InstanceBodies,
     declared: &[CallableStorageProfile],
 ) -> StorageValidation {
     let mut validation = StorageValidation::default();
     let reader = Reader::new(types, signatures);
-    reconstruct(
-        types,
-        definitions,
-        &reader,
-        constants,
-        instances,
-        &mut validation,
-    );
+    reconstruct(types, definitions, &reader, constants, &mut validation);
     reader
         .finish(&mut validation.reads.declarations)
         .expect("a held map has no sourced view to refuse");
@@ -116,7 +107,6 @@ fn reconstruct(
     definitions: &[tir::DefinitionRef],
     reader: &Reader<'_>,
     constants: &BTreeMap<DefPath, tir::Materialized>,
-    instances: &tir::InstanceBodies,
     validation: &mut StorageValidation,
 ) {
     // Detect the obligation in actual executable calls, not a source flag or
@@ -146,7 +136,6 @@ fn reconstruct(
         })
         .collect();
     let mut products = Vec::new();
-    let selections = RefCell::new(Vec::new());
     for definition in definitions {
         validation.reads.bodies.push((
             definition.path,
@@ -222,22 +211,8 @@ fn reconstruct(
         }
     }
     let domains: Vec<_> = products.iter().map(StorageDomain::for_body).collect();
-    let select = |declaration, arguments: &[GenericArgument]| {
-        let selected = instances.resolve(declaration, types, arguments);
-        selections.borrow_mut().push((
-            declaration,
-            tir::InstanceBodies::key(types, arguments),
-            selected.as_ref().ok().copied().flatten(),
-            selected.is_ok(),
-        ));
-        match selected {
-            Ok(Some(definition)) => Some(definition),
-            Ok(None) => Some(declaration),
-            Err(_) => None,
-        }
-    };
+    let select = |declaration, _: &[GenericArgument]| Some(declaration);
     let proved = program::analyze(types, &select, &products, &domains);
-    validation.reads.selections = selections.into_inner();
     let proof = match proved {
         Ok(proof) => proof,
         Err(_) => {
@@ -381,7 +356,7 @@ impl Producer<'_> {
                     definition,
                     arguments,
                 } => {
-                    complete &= generated_actual_key(self.types, arguments).is_some();
+                    complete &= closed_actual_key(self.types, arguments).is_some();
                     let id = DefId::intern(definition);
                     let primitive = if arguments.is_empty() {
                         self.integer_order(id)
@@ -446,7 +421,6 @@ impl Producer<'_> {
             || function.allocation != Allocation::NoAlloc
             || function.authority != AuthoritySummary::inert()
             || function.uses != Uses::Only(AuthoritySummary::inert())
-            || !function.contracts.is_empty()
             || !function.state_promises.is_empty()
             || function.incomplete
             || function.foreign.is_some()
@@ -457,9 +431,7 @@ impl Producer<'_> {
     }
     fn rvalue(&self, value: &tir::Rvalue) -> StorageValue {
         match value {
-            tir::Rvalue::Constant(_) | tir::Rvalue::Size(_) | tir::Rvalue::Shape(_) => {
-                StorageValue::Fresh
-            }
+            tir::Rvalue::Constant(_) | tir::Rvalue::Size(_) => StorageValue::Fresh,
             tir::Rvalue::ReadConstant {
                 definition,
                 arguments,
@@ -1205,9 +1177,6 @@ impl Producer<'_> {
                         ),
                         (self.place(*destination), self.operand(value)),
                     ]),
-                    tir::InstructionKind::Snapshot { destination, value } => {
-                        StorageOp::Assign(vec![(self.place(*destination), self.operand(value))])
-                    }
                     tir::InstructionKind::StorageLive(local) => StorageOp::Kill(vec![local.0]),
                     _ => StorageOp::Nop,
                 };

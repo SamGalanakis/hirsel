@@ -236,13 +236,6 @@ impl hirsel_tir::TirProvider for LoadedProvider<'_> {
     ) -> Result<Vec<hirsel_syntax::DefPath>, hirsel_types::QueryError> {
         hirsel_tir::TirProvider::constant_definitions(self.engine)
     }
-    fn instance_body(
-        &mut self,
-        path: &hirsel_syntax::DefPath,
-        actuals: &[hirsel_types::GenericArgument],
-    ) -> Result<Option<hirsel_syntax::DefPath>, hirsel_types::QueryError> {
-        hirsel_tir::TirProvider::instance_body(self.engine, path, actuals)
-    }
 }
 
 fn run_provider_on_host(
@@ -490,13 +483,6 @@ mod tests {
         }
         fn constant_definitions(&self) -> Result<Vec<DefPath>, QueryError> {
             Ok(vec![])
-        }
-        fn instance_body(
-            &self,
-            _: &DefPath,
-            _: &[GenericArgument],
-        ) -> Result<Option<DefPath>, QueryError> {
-            Ok(None)
         }
     }
 

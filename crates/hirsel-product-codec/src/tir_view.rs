@@ -86,18 +86,6 @@ impl<'a> TirView<'a> {
             }
         }
     }
-    pub fn contract_count(self) -> usize {
-        match self {
-            Self::Live(value) => value.contracts.len(),
-            Self::Archived(value) => value.contract_count() as usize,
-        }
-    }
-    pub fn contract(self, n: usize) -> Option<Cow<'a, (u32, BodyId)>> {
-        match self {
-            Self::Live(value) => Some(Cow::Borrowed(value.contracts.get(n)?)),
-            Self::Archived(value) => Some(Cow::Owned(value.contract(n.try_into().ok()?)?)),
-        }
-    }
     pub fn materialize(self) -> Option<Definition> {
         match self {
             Self::Live(value) => Some(value.clone()),

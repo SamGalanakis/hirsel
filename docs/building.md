@@ -82,7 +82,7 @@ hirsel doc stdlib/std@1/hirsel.json          # core and std signatures on stdout
 It lists every definition visible to other packages under PROG-2, including
 transparent constructors, and keeps opaque representations and `internal` modules
 hidden. Signatures retain modes, brands and sibling origins, relations, `uses`,
-contracts and attributes; attached `///` comments keep their full text and
+attributes; attached `///` comments keep their full text and
 paragraphs. Bodies and constant initializers are not checked or evaluated.
 Documentation examples are not executed.
 

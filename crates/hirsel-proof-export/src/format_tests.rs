@@ -3,8 +3,8 @@ use super::*;
 
 #[test]
 fn sealed_regions_33_combined_format_refuses_each_previous_identity() {
-    assert_eq!(TIR_VERSION, 17);
-    assert_eq!(FORMAT, "hirsel.tir.export.v16");
+    assert_eq!(TIR_VERSION, 18);
+    assert_eq!(FORMAT, "hirsel.tir.export.v17");
     let environment = Environment {
         interface_version: 1,
         compiler_version: "combined-depth-grant-format-control".into(),
@@ -31,7 +31,7 @@ fn sealed_regions_33_combined_format_refuses_each_previous_identity() {
     assert_eq!(export(&accepted.to_input()), text);
     let header = format!("(Header \"{FORMAT}\" {TIR_VERSION}\n");
     assert_eq!(text.matches(&header).count(), 1);
-    for previous in [11, 12, 13, 14, 15] {
+    for previous in [11, 12, 13, 14, 15, 16] {
         for (format, version, at) in [
             (
                 format!("hirsel.tir.export.v{previous}"),
@@ -50,6 +50,11 @@ fn sealed_regions_33_combined_format_refuses_each_previous_identity() {
             assert_eq!(refused.at, at, "{refused}");
         }
     }
+    let changed = text.replacen(&header, &format!("(Header \"{FORMAT}\" 17\n"), 1);
+    assert_eq!(
+        import(&changed, &environment, &input.types).unwrap_err().at,
+        "header.tir_version"
+    );
 }
 
 #[test]

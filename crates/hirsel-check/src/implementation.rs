@@ -288,22 +288,6 @@ fn classify(
             format!("`{target}` uses authority operation `{member}` does not grant"),
         );
     }
-    if found
-        .contracts
-        .iter()
-        .any(|c| c.kind == hirsel_syntax::ContractKind::Requires)
-        || wanted
-            .contracts
-            .iter()
-            .any(|c| c.kind == hirsel_syntax::ContractKind::Ensures)
-    {
-        return refusal(
-            const { RuleId::of("FACT-1") },
-            format!(
-                "the contracts of `{target}` are not implied by operation `{member}`: a target cannot require more, nor a header ensure more"
-            ),
-        );
-    }
     // Parameters are received by the target; the result by the caller.
     let mut pairs: Vec<(TypeId, TypeId, TypeRelation, String)> = wanted
         .parameters

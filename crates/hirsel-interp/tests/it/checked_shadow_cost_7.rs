@@ -337,7 +337,6 @@ fn frame(tree: Shadow, projection: Vec<hirsel_tir::Projection>) -> crate::frame:
         signature_hash: Default::default(),
         bodies: vec![body],
         entry: BodyId(0),
-        contracts: vec![],
     };
     let mut frame =
         crate::frame::Frame::new(types, std::sync::Arc::new(definition), vec![Value::Unit])

@@ -1744,7 +1744,6 @@ mod tests {
             signature_hash: ContentHash::default(),
             bodies: vec![],
             entry: hirsel_tir::BodyId(0),
-            contracts: vec![],
         };
         let encoded = records.encode_tir(&definition, |_| None).unwrap();
         let reference = hirsel_product_codec::CheckedTir::DOMAIN

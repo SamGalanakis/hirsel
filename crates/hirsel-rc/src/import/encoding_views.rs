@@ -69,11 +69,6 @@ impl Importer<'_> {
                             stable[root(p)] = false;
                         }
                     }
-                    K::Snapshot { destination, value } => {
-                        invalid[root(*destination)] = true;
-                        invalid[root(value.place)] = true;
-                        stable[root(*destination)] = false;
-                    }
                     K::Check { condition, .. } => invalid[root(condition.place)] = true,
                     _ => {}
                 }

@@ -96,8 +96,7 @@ pub fn storage_type_paths(
                     | BuiltinType::Iter
                     | BuiltinType::Ptr
                     | BuiltinType::FnPtr
-                    | BuiltinType::SlotId
-                    | BuiltinType::TypeShape,
+                    | BuiltinType::SlotId,
                 ..
             } => (),
             TypeKind::Builtin {

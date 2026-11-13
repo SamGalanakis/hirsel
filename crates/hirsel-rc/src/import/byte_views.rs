@@ -104,11 +104,6 @@ pub(super) fn aliases(
                     owner_invalid[root(*displaced)] = true;
                     operand(value, &mut invalid, &mut owner_invalid);
                 }
-                K::Snapshot { destination, value } => {
-                    invalid[parent[root(*destination)]] = true;
-                    owner_invalid[root(*destination)] = true;
-                    operand(value, &mut invalid, &mut owner_invalid);
-                }
                 K::Check { condition, .. } => operand(condition, &mut invalid, &mut owner_invalid),
                 _ => {}
             }

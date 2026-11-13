@@ -161,7 +161,6 @@ pub struct FrontCheckQueries {
     storage: Option<Arc<FrontStorageGraphQueries>>,
     lint: Option<DeadArmLint>,
     constants: BTreeSet<DefId>,
-    instances: Vec<DefPath>,
     sources: SourceMap,
     /// The indexed modules, read only to explain a missing name (PROG-1).
     declarations: Arc<crate::snapshot::Declarations>,
@@ -433,23 +432,12 @@ enum Publication {
         file: usize,
         root: usize,
     },
-    SelectInstances {
-        file: usize,
-    },
-    Instances {
-        file: usize,
-        paths: Vec<DefPath>,
-        next: usize,
-    },
     SelectStaged {
         file: usize,
     },
     RuntimeStaged {
         file: usize,
         selections: Vec<super::scheduled_lower::staged_runtime::Selection>,
-        next: usize,
-    },
-    Extra {
         next: usize,
     },
     Growth,
@@ -462,8 +450,6 @@ impl Publication {
     fn file(&self) -> Option<usize> {
         match *self {
             Self::Roots { file, .. }
-            | Self::SelectInstances { file }
-            | Self::Instances { file, .. }
             | Self::SelectStaged { file }
             | Self::RuntimeStaged { file, .. } => Some(file),
             _ => None,
@@ -513,7 +499,7 @@ impl Task {
                 Publication::Roots { file, root } => {
                     let file_index = *file;
                     let Some(file) = self.files.get_mut(file_index) else {
-                        self.publication = Publication::Extra { next: 0 };
+                        self.publication = Publication::Growth;
                         continue;
                     };
                     if file.input.error.is_some() || has_errors(&file.input.diagnostics) {
@@ -521,7 +507,7 @@ impl Task {
                         continue;
                     }
                     if *root == file.input.paths.len() {
-                        self.publication = Publication::SelectInstances { file: file_index };
+                        self.publication = Publication::SelectStaged { file: file_index };
                         continue;
                     }
                     let read = admission::read_root(
@@ -534,52 +520,6 @@ impl Task {
                     let path = file.input.paths[*root].path.clone();
                     *root += 1;
                     self.publish_root(cx, file_index, path, read)?;
-                }
-                Publication::SelectInstances { file } => {
-                    let index = *file;
-                    if !self.files[index].clean() {
-                        self.publication = Publication::roots(index + 1);
-                        continue;
-                    }
-                    let roots = self.files[index]
-                        .input
-                        .paths
-                        .iter()
-                        .map(|work| work.path.clone());
-                    match self.queries.plan.lower.selected_instances_for_check(
-                        roots,
-                        self.queries.weight.scratch,
-                        cx,
-                    ) {
-                        Ok(paths) => {
-                            self.publication = Publication::Instances {
-                                file: index,
-                                paths: paths.into_iter().collect(),
-                                next: 0,
-                            }
-                        }
-                        Err(error) => {
-                            self.files[index].error(error, Some(QueryKind::Lower));
-                            self.publication = Publication::roots(index + 1);
-                        }
-                    }
-                }
-                Publication::Instances { file, paths, next } => {
-                    let index = *file;
-                    if !self.files[index].clean() || *next == paths.len() {
-                        self.publication = Publication::SelectStaged { file: index };
-                        continue;
-                    }
-                    let path = paths[*next].clone();
-                    let id = self
-                        .queries
-                        .plan
-                        .lower
-                        .query(&path)
-                        .ok_or(self.queries.errors.protocol)?;
-                    let facts = self.queries.plan.lower.poll_check(cx, id)?;
-                    *next += 1;
-                    self.publish_lower(index, path, facts)?;
                 }
                 Publication::SelectStaged { file } => {
                     let index = *file;
@@ -637,21 +577,6 @@ impl Task {
                             Some(QueryKind::Lower),
                         );
                     }
-                    *next += 1;
-                }
-                Publication::Extra { next } => {
-                    let Some(path) = self.queries.instances.get(*next) else {
-                        self.publication = Publication::Growth;
-                        continue;
-                    };
-                    let id = self
-                        .queries
-                        .plan
-                        .front
-                        .query(path)
-                        .ok_or(self.queries.errors.protocol)?;
-                    let _ = cx.read(id);
-                    cx.consume(id);
                     *next += 1;
                 }
                 Publication::Growth => {
@@ -1071,7 +996,6 @@ impl QueryEngine {
     pub fn front_check_input_bytes(
         &self,
         files: &[(FileId, FileContext)],
-        selected: &[DefPath],
         lint_package: Option<&hirsel_syntax::PackageId>,
         weight: MemoryWeight,
     ) -> Option<u64> {
@@ -1085,26 +1009,7 @@ impl QueryEngine {
                 if lint_package == Some(&context.package) {
                     lint.insert(&item);
                 }
-                if item.facts.fact {
-                    definitions.insert(hirsel_check_protocol::fact::fact_path(&item.definition));
-                }
                 definitions.insert(item.definition);
-            }
-        }
-        // Match the instance table captured by front_lower_queries. Generated
-        // instance sources are not members of the original package file list.
-        let selected: BTreeSet<_> = selected.iter().map(DefId::intern).collect();
-        for declaration in &selected {
-            if !self.instance_bodied(declaration.path()) {
-                continue;
-            }
-            if let Some(instances) = self.instance_bodies.instances.get(declaration) {
-                definitions.extend(
-                    instances
-                        .values()
-                        .filter(|instance| selected.contains(&instance.definition))
-                        .map(|instance| instance.definition.path().clone()),
-                );
             }
         }
         let definitions: Vec<_> = definitions.into_iter().collect();
@@ -1199,33 +1104,15 @@ impl QueryEngine {
                     input.paths.push(RootInput {
                         path: item.definition.clone(),
                         executable: item.facts.executable,
-                        ordered_front: item.facts.generator || item.facts.specializes,
+                        ordered_front: item.facts.specializes,
                     });
-                    if item.facts.fact {
-                        input.paths.push(RootInput {
-                            path: hirsel_check_protocol::fact::fact_path(&item.definition),
-                            executable: true,
-                            ordered_front: false,
-                        });
-                    }
                 }
             }
             files.push(input);
         }
-        let mut instances: Vec<_> = plan.lower.instance_definitions().cloned().collect();
-        instances.sort();
-        instances.dedup();
-        for path in &instances {
-            if plan.front.query(path).is_none() || plan.lower.query(path).is_none() {
-                return Err(refusal());
-            }
-        }
-        // This also reserves the static instance inventory and the one saved
-        // per-file selection cursor. The selection walk uses root scratch.
         let definitions: BTreeSet<_> = files
             .iter()
             .flat_map(|file| file.paths.iter().map(|work| work.path.clone()))
-            .chain(instances.iter().cloned())
             .collect();
         let definitions: Vec<_> = definitions.into_iter().collect();
         let lint = (!lint.declarations.is_empty()).then_some(lint);
@@ -1257,9 +1144,6 @@ impl QueryEngine {
                 file_identity.extend(work.path.fingerprint().0);
             }
         }
-        for instance in &instances {
-            file_identity.extend(instance.fingerprint().0);
-        }
         let query = QueryId {
             kind: FRONT_CHECK_KIND,
             address: hirsel_artifact_store::Address(ContentHash::of_parts(
@@ -1278,7 +1162,6 @@ impl QueryEngine {
             storage: None,
             lint,
             constants,
-            instances,
             sources: capture.sources.clone(),
             declarations: capture.declarations.clone(),
             records: crate::NativeRecords::new(self.types.clone(), store.clone()),

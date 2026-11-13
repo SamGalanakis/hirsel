@@ -361,7 +361,6 @@ fn finalizer(order: &[u32]) -> Fixture {
         distinct: false,
         resource: true,
         drop: Some(path("main")),
-        fact: None,
         captures: None,
     }));
     f.signatures.insert(id("main"), signature);
@@ -499,15 +498,6 @@ fn structure_rejects_each_malformed_arena() {
             ViolationKind::WrongKind {
                 entity: "match table without entry",
                 index: 1,
-            }
-        }),
-        ("duplicate contract ordinal", |f| {
-            let clause = empty_body(f);
-            f.definition.bodies.push(clause);
-            f.definition.contracts = vec![(0, BodyId(1)), (0, BodyId(1))];
-            ViolationKind::Duplicate {
-                entity: "contract",
-                index: 0,
             }
         }),
         ("duplicate parameter", |f| {

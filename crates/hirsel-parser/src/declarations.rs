@@ -308,7 +308,7 @@ impl Parser<'_> {
                 }
             } else if self.eat("fn") {
                 let name = self.name()?;
-                let signature = self.header(false, true)?;
+                let signature = self.header(false)?;
                 MemberSpec::Operation {
                     name,
                     signature,
@@ -442,16 +442,11 @@ impl Parser<'_> {
         self.expect("{", const { RuleId::of("CLO-4") })?;
         Ok(Some(self.list("}", |p| p.path(false))?))
     }
-    pub(super) fn header(&mut self, anonymous: bool, contracts: bool) -> Parsed<FunctionSyntax> {
-        self.annotated_header(anonymous, contracts, false)
+    pub(super) fn header(&mut self, anonymous: bool) -> Parsed<FunctionSyntax> {
+        self.annotated_header(anonymous, false)
     }
     /// A function header; a definition's parameters may carry analysis annotations (PS-17).
-    fn annotated_header(
-        &mut self,
-        anonymous: bool,
-        contracts: bool,
-        annotated: bool,
-    ) -> Parsed<FunctionSyntax> {
+    fn annotated_header(&mut self, anonymous: bool, annotated: bool) -> Parsed<FunctionSyntax> {
         let generics = if anonymous { vec![] } else { self.generics()? };
         self.expect("(", const { RuleId::of("LANG-1") })?;
         let mut index = 0;
@@ -475,32 +470,14 @@ impl Parser<'_> {
         } else {
             None
         };
-        let mut signature = FunctionSyntax {
+        let signature = FunctionSyntax {
             generics,
             parameters,
             result,
             uses,
             ..Default::default()
         };
-        if contracts {
-            self.contracts(&mut signature)?;
-        }
         Ok(signature)
-    }
-    pub(super) fn contracts(&mut self, signature: &mut FunctionSyntax) -> Parsed<()> {
-        while self.at("requires") || self.at("ensures") {
-            let kind = if self.eat("requires") {
-                ContractKind::Requires
-            } else {
-                self.pos += 1;
-                ContractKind::Ensures
-            };
-            signature.contracts.push(ContractSyntax {
-                kind,
-                expression: self.expr(0)?,
-            });
-        }
-        Ok(())
     }
     fn parameter(&mut self, anonymous: bool) -> Parsed<Parameter> {
         self.misplaced_analysis()?;
@@ -594,15 +571,10 @@ impl Parser<'_> {
             };
             self.expect("fn", const { RuleId::of("LANG-6") })?;
             let name = self.name()?;
-            let mut signature = self.annotated_header(false, true, true)?;
+            let mut signature = self.annotated_header(false, true)?;
             signature.attributes = attributes.clone();
             let body = if self.at("{") {
                 Some(self.block()?)
-            } else if self.eat("=") {
-                let expr_start = self.pos;
-                self.expect("comptime", const { RuleId::of("CT-1") })?;
-                let value = self.expr(0)?;
-                Some(self.push_expr(expr_start, ExprKind::Comptime(value)))
             } else {
                 None
             };
@@ -691,7 +663,7 @@ impl Parser<'_> {
             visibility,
             attributes,
             kind,
-            generated: None,
+            implementation_bindings: None,
         })
     }
     /// The doc comments directly before the item starting at significant
@@ -815,12 +787,7 @@ impl Parser<'_> {
             self.whitespace -= 1;
             let field = result?;
             self.expect(")", const { RuleId::of("LANG-7") })?;
-            let fact = if self.eat("where") {
-                Some(self.expr(0)?)
-            } else {
-                None
-            };
-            TypeBody::Distinct { field, fact }
+            TypeBody::Distinct { field }
         } else if self.eat("{") {
             let mut fields = vec![];
             while !self.eat("}") {
@@ -857,12 +824,6 @@ impl Parser<'_> {
                 "type requires fields or a right-hand side",
             );
         };
-        if self.at("where") {
-            return self.fail(
-                const { RuleId::of("FACT-2") },
-                "where is allowed only on a distinct plain-field declaration",
-            );
-        }
         let annotated_drop =
             self.at("@") && self.text_at(1) == "noalloc" && self.text_at(2) == "drop";
         if (self.at("drop") || annotated_drop) && flavor != TypeFlavor::Resource {

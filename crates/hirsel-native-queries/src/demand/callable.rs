@@ -1071,7 +1071,6 @@ impl DemandInstances {
                         .iter()
                         .map(|(request, _)| request.clone())
                         .collect(),
-                    selection_reads: original.facts.source.selection_reads.clone(),
                     constant_reads: original.facts.source.constant_reads.clone(),
                     templates: templates.clone(),
                     operation_freedom: operation_freedom.clone(),
@@ -1259,7 +1258,6 @@ mod tests {
             InstanceSourceFacts {
                 _owner: Some(owner.clone()),
                 _window: None,
-                selection_reads: Vec::new(),
                 constant_reads: Vec::new(),
                 discharge: Default::default(),
                 ready_source: ReadySourceFacts::decode(

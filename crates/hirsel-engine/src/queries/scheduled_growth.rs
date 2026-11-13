@@ -723,17 +723,11 @@ impl QueryEngine {
             .collect()
     }
     pub(super) fn source_root_ids(&self) -> BTreeSet<DefId> {
-        let mut roots: BTreeSet<_> = self
+        let roots: BTreeSet<_> = self
             .source_paths_iter()
             .filter(|path| !self.installed_definition(path))
             .map(DefId::intern)
             .collect();
-        let helpers: Vec<_> = roots
-            .iter()
-            .filter(|id| self.source_facts(id.path()).is_some_and(|facts| facts.fact))
-            .map(|id| DefId::intern(&hirsel_check_protocol::fact::fact_path(id.path())))
-            .collect();
-        roots.extend(helpers);
         roots
     }
     /// Capture the complete selected source-root set, including declarations

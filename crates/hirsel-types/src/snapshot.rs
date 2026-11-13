@@ -62,6 +62,5 @@ unit_enum!(BuiltinType {
     Mutex,
     Atomic,
     Ptr,
-    FnPtr,
-    TypeShape
+    FnPtr
 });

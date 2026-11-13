@@ -154,14 +154,6 @@ impl SignatureAdapter {
         stage: Option<hirsel_types::GroupStage>,
     ) -> Result<QueryOutput<Signature>, QueryError> {
         let item = &syntax.item;
-        if let Some(owner) = hirsel_check_protocol::fact::fact_owner(&item.definition) {
-            let owner = provider.signature(DefId::intern(&owner))?;
-            return Ok(QueryOutput {
-                value: hirsel_check_protocol::fact::fact_signature(t, &owner)?,
-                diagnostics: vec![],
-                dependencies: hirsel_check_protocol::fact::fact_dependencies(&owner),
-            });
-        }
         if let Some(signature) = crate::dictionaries::literal_signature(t, m, &syntax, provider)? {
             return Ok(signature);
         }

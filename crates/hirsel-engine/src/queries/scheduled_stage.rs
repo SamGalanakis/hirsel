@@ -558,13 +558,7 @@ impl QueryEngine {
         if registrations.len() != output.data.sites.len() {
             return Err(refused("staged expression sites are incomplete".into()));
         }
-        let syntax = match output.owner.front.registration(output.owner()) {
-            Some(accepted) => {
-                accepted.validate(self)?;
-                accepted.syntax.clone()
-            }
-            None => self.snapshot(output.owner())?,
-        };
+        let syntax = self.snapshot(output.owner())?;
         let mut registrations = registrations.clone();
         for (row, site) in registrations.iter_mut().zip(&output.data.sites) {
             let expression = syntax

@@ -44,15 +44,12 @@ pub fn storage_definition(
     signature: &Signature,
     checked: &CheckedBody,
     captures: &[CaptureMode],
-    clauses: &[(ExprId, TypeId)],
     results: &[(NameSite, TypeId)],
     provider: &mut dyn SignatureProvider,
 ) -> Result<QueryOutput<hirsel_types::storage::graph::StorageDefinition>, QueryError> {
     let mut body = checked.clone();
     let rows = source_rows::SourceRows::new(&body);
-    let graphs = cfg::build(
-        t, syntax, signature, &mut body, captures, clauses, results, &rows,
-    )?;
+    let graphs = cfg::build(t, syntax, signature, &mut body, captures, results, &rows)?;
     let generics = body.resolution.generic_declarations.clone();
     let reader = hirsel_modes::reader::Reader::new(provider, signature);
     let mut read = |definition| reader.borrow_mut().read(definition).map(Some);
@@ -101,14 +98,13 @@ impl Place {
 /// Clause roots already have H's distinct borrowed parameter rows.
 /// `results` are the authority pass's formal frame results: they are derived
 /// summaries of the same rows as the callable types, and are normalised with them.
-pub fn check_ownership_with_clauses(
+pub fn check_ownership(
     t: &TypeInterner,
     m: &TypeMemo,
     syntax: &ItemSyntax,
     signature: &Signature,
     body: &mut CheckedBody,
     captures: &[CaptureMode],
-    clauses: &[(ExprId, TypeId)],
     results: &mut [(hirsel_types::NameSite, TypeId)],
     identity_joins: &[(NameSite, NameSite, Origin)],
     identity_fields: &[(NameSite, NameSite, Origin, Vec<(FieldId, TypeId)>)],
@@ -143,9 +139,7 @@ pub fn check_ownership_with_clauses(
     let memo = ContextMemo::new(t, &generics, &mut read);
     let flow_memo = ContextMemo::new(t, &generics, &mut flow_read);
     let mut signatures = properties::Signatures::new(m, &reader, memo, flow_memo);
-    let mut graphs = cfg::build(
-        t, syntax, signature, body, captures, clauses, results, &rows,
-    )?;
+    let mut graphs = cfg::build(t, syntax, signature, body, captures, results, &rows)?;
     // Direct-call evidence lives in the declaration metadata, independently
     // of the callable row. Read these headers even for structurally plain calls.
     let direct: Vec<_> = body
@@ -174,7 +168,6 @@ pub fn check_ownership_with_clauses(
         .chain(field_loan_places.values().map(|p| p.declared))
         .chain(cfg::graph_types(&graphs))
         .chain(results.iter().map(|(_, ty)| *ty))
-        .chain(clauses.iter().map(|(_, ty)| *ty))
         .chain(
             identity_fields
                 .iter()
@@ -264,7 +257,6 @@ pub fn check_ownership_with_clauses(
     let mut replacement_live = std::collections::BTreeMap::new();
     let mut initial_storage = flow::InitialStorage::new(t, tree, body, &properties);
     // A postcondition observes continuing exits, including modes lost in the body.
-    graphs.sort_by_key(|graph| graph.clause.is_some());
     let frame_results: std::collections::BTreeMap<_, _> = results.iter().cloned().collect();
     let capture_crossing_uses =
         flow::capture_crossing_uses(t, body, &graphs, &rows, signature, &signatures)?;
@@ -290,7 +282,7 @@ pub fn check_ownership_with_clauses(
     // no earlier graph can publish a changed input before the ordinary run.
     let prepared = graphs
         .first()
-        .filter(|g| g.owner == NameSite::Item && g.clause.is_none())
+        .filter(|g| g.owner == NameSite::Item)
         .map(|graph| {
             flow::prepare(
                 t,
@@ -303,10 +295,7 @@ pub fn check_ownership_with_clauses(
             )
         });
     for parameter in promised {
-        for graph in graphs
-            .iter()
-            .filter(|g| g.owner == NameSite::Item && g.clause.is_none())
-        {
+        for graph in graphs.iter().filter(|g| g.owner == NameSite::Item) {
             let mut proof_body = body.clone();
             let mut proof_properties = properties.clone();
             let mut proof_storage = initial_storage.clone();
@@ -370,15 +359,6 @@ pub fn check_ownership_with_clauses(
         );
         signatures.record(Arc::make_mut(&mut body.resolution.reads));
         let checked = checked?;
-        initial_storage.postcondition_inputs(
-            t,
-            syntax,
-            graph.owner,
-            body,
-            &mut properties,
-            &checked.return_uniqueness,
-            &checked.return_sendability,
-        );
         mutation_sites.extend(checked.mutation_sites);
         for (expression, live) in checked.replacements {
             replacement_live
@@ -566,44 +546,6 @@ pub fn check_ownership_with_clauses(
 }
 fn suffix(rule: &str) -> u32 {
     rule.split_once('-').unwrap().1.parse().unwrap()
-}
-
-/// Build internal clause headers from independently checked formal rows.
-/// Entry clauses keep entry modes; postconditions carry continuing-exit modes.
-pub fn checked_clause_types(
-    t: &TypeInterner,
-    body: &mut CheckedBody,
-    clauses: &[(ExprId, TypeId)],
-) -> Result<Vec<TypeId>, GraphError> {
-    let formals: std::collections::BTreeMap<_, _> = body
-        .bindings
-        .iter()
-        .filter_map(|binding| {
-            let ResolvedName::Parameter(parameter) = binding.binding else {
-                return None;
-            };
-            Some(((binding.owner, parameter), binding.ty))
-        })
-        .collect();
-    clauses
-        .iter()
-        .map(|(expression, original)| {
-            let scope = NameSite::Expression(*expression);
-            let mut row = t.get(*original).unwrap().clone();
-            let TypeKind::Function(function) = &mut row.kind else {
-                return Ok(*original);
-            };
-            let mut parameters = function.parameters.to_vec();
-            for (ordinal, parameter) in parameters.iter_mut().enumerate() {
-                if let Some(&ty) = formals.get(&(scope, ParamId(ordinal as u32))) {
-                    parameter.ty = ty;
-                }
-            }
-            function.parameters = parameters.into();
-            let row = t.intern(row);
-            abstract_parameter_scope(t, row, body.lexical.site(scope))
-        })
-        .collect()
 }
 
 mod source_rows;

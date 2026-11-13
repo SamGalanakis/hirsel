@@ -179,7 +179,6 @@ fn empty_function(result: TypeId) -> FunctionType {
         allocation: Allocation::MayAllocate,
         authority: AuthoritySummary::Unknown,
         uses: Uses::Unrestricted,
-        contracts: Default::default(),
         incomplete: false,
         foreign: None,
     }
@@ -428,7 +427,6 @@ impl OperationRegistry {
                     allocation: function.allocation,
                     authority: AuthoritySummary::Unknown,
                     uses: function.uses.clone(),
-                    contracts: Vec::new().into(),
                     incomplete: false,
                     foreign: function.foreign.clone(),
                 }))
@@ -552,7 +550,6 @@ fn builtin_to_native(value: BuiltinType) -> hirsel_lir::operation::BuiltinType {
         BuiltinType::Atomic => hirsel_lir::operation::BuiltinType::Atomic,
         BuiltinType::Ptr => hirsel_lir::operation::BuiltinType::Ptr,
         BuiltinType::FnPtr => hirsel_lir::operation::BuiltinType::FnPtr,
-        BuiltinType::TypeShape => hirsel_lir::operation::BuiltinType::TypeShape,
     }
 }
 
@@ -578,6 +575,5 @@ fn builtin_from_native(value: hirsel_lir::operation::BuiltinType) -> BuiltinType
         hirsel_lir::operation::BuiltinType::Atomic => BuiltinType::Atomic,
         hirsel_lir::operation::BuiltinType::Ptr => BuiltinType::Ptr,
         hirsel_lir::operation::BuiltinType::FnPtr => BuiltinType::FnPtr,
-        hirsel_lir::operation::BuiltinType::TypeShape => BuiltinType::TypeShape,
     }
 }

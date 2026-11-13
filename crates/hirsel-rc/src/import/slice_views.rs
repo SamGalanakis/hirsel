@@ -89,11 +89,6 @@ pub(super) fn discover(
                         invalid[parent[root(p)]] = true;
                     }
                 }
-                K::Snapshot { destination, value } => {
-                    for p in [*destination, value.place] {
-                        invalid[parent[root(p)]] = true;
-                    }
-                }
                 K::Check { condition, .. } => invalid[parent[root(condition.place)]] = true,
                 _ => {}
             }

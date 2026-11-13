@@ -53,7 +53,6 @@ pub use views::{
     CheckedEnvironment, EnvironmentStamp, Installed, InstalledViews, OwnedEnvironment,
     PackageUniverse, PackageViews, SignatureInputs, View, ViewSource, ViewTable,
 };
-mod instances;
 mod invocations;
 pub use invocations::invocation_coverage;
 mod matching;
@@ -89,10 +88,6 @@ pub use input::{
     HeapObservation, HeapPath, IdentifiedSignature, Pin, SignatureLookup, SignatureMap,
     SignatureSource, UniverseErrors, VRead, ValidatedSignatures, ValidationDigest, ViewInput,
     ViewRefusal, ViewVerdict, check_view, digest, errors_digest, read_holds,
-};
-pub use instances::{
-    InstanceViolation, validate_instance_bodies, validate_instance_catalog, validate_instance_rows,
-    validate_instance_uses,
 };
 pub use matching::{MAX_MATCH_WORK, tooling_limit_error};
 
@@ -372,27 +367,6 @@ fn validate_input(
         .is_some_and(|s| s.metadata.track_caller)
     {
         caller_bodies.push(definition.entry);
-        let contracts: BTreeSet<_> = definition
-            .contracts
-            .iter()
-            .map(|(_, body)| body.0)
-            .collect();
-        caller_bodies.extend(
-            definition.bodies[definition.entry.0 as usize]
-                .rvalues
-                .iter()
-                .filter_map(|value| {
-                    if let Rvalue::Closure { body, .. } = value
-                        && contracts.contains(&body.0)
-                    {
-                        Some(*body)
-                    } else {
-                        None
-                    }
-                }),
-        );
-        caller_bodies.sort_unstable_by_key(|body| body.0);
-        caller_bodies.dedup();
     }
     if definition.caller_bodies != caller_bodies {
         errors.push(Violation {
@@ -419,19 +393,6 @@ fn validate_input(
             }],
         };
     };
-    // Clause purity also applies to executable lambdas nested inside a clause.
-    let mut contract_bodies: BTreeSet<u32> =
-        definition.contracts.iter().map(|(_, b)| b.0).collect();
-    let mut pending: Vec<_> = contract_bodies.iter().copied().collect();
-    while let Some(index) = pending.pop() {
-        for rvalue in &definition.bodies[index as usize].rvalues {
-            if let Rvalue::Closure { body, .. } = rvalue {
-                if contract_bodies.insert(body.0) {
-                    pending.push(body.0);
-                }
-            }
-        }
-    }
     let scratch = scratch::Scratch::new(definition.bodies.len());
     for (index, body) in definition.bodies.iter().enumerate() {
         let mut checker = Checker {
@@ -442,7 +403,6 @@ fn validate_input(
             signatures,
             declarations: &declarations,
             scratch: &scratch,
-            contract: contract_bodies.contains(&(index as u32)),
             site: Site {
                 body: BodyId(index as u32),
                 block: None,
@@ -525,7 +485,6 @@ fn validate_input(
     // Its ordinary reporting pass proves the same flow below; there is no
     // capture snapshot to discover in a preliminary copy of that fixed point.
     let entry_only = definition.bodies.len() == 1
-        && definition.contracts.is_empty()
         && definition.bodies[0]
             .rvalues
             .iter()
@@ -537,10 +496,6 @@ fn validate_input(
     let mut pending = VecDeque::new();
     environments.insert(definition.entry.0, vec![]);
     pending.push_back(definition.entry.0);
-    for (_, body) in &definition.contracts {
-        environments.insert(body.0, vec![]);
-        pending.push_back(body.0);
-    }
     while let Some(index) = pending.pop_front() {
         if entry_only {
             continue;
@@ -554,7 +509,6 @@ fn validate_input(
             signatures,
             declarations: &declarations,
             scratch: &scratch,
-            contract: contract_bodies.contains(&(index as u32)),
             site: Site {
                 body: BodyId(index),
                 block: None,
@@ -595,7 +549,6 @@ fn validate_input(
             signatures,
             declarations: &declarations,
             scratch: &scratch,
-            contract: contract_bodies.contains(&(index as u32)),
             site: Site {
                 body: BodyId(index as u32),
                 block: None,
@@ -632,7 +585,6 @@ fn validate_input(
                         signatures,
                         declarations: &declarations,
                         scratch: &scratch,
-                        contract: false,
                         site: Site {
                             body: BodyId(index as u32),
                             block: None,
@@ -763,7 +715,6 @@ struct Checker<'a, 'input> {
     signatures: &'a Reader<'a>,
     declarations: &'a [hirsel_types::GenericDeclarations],
     scratch: &'a scratch::Scratch,
-    contract: bool,
     site: Site,
     errors: Vec<Violation>,
     captured: BTreeMap<u32, Vec<flow_origins::CapturedOrigin>>,

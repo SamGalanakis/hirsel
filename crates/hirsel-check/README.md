@@ -110,15 +110,6 @@ shared substitution and recording every consulted signature dependency. It
 produces source diagnostics; the driver alone selects their order under conformance/old-spec/diagnostics.md.
 Stable flat byte encoding remains issue #1 and is not inferred from target ABI.
 
-Contract clauses receive ordinary body elaborations, calls and provider reads in
- their lexical function frame. `hirsel_check_protocol::body::Plans.contracts` carries checked roots and
-plain `before` occurrences; lowering snapshots those on entry and checks requires
-there, and checks ensures against an extracted result on every return. Contract
-loans and temporary owners end after each check. These are ordinary TIR Check
-instructions with the declaration span, so expression failures keep their own
-rule and site. The checker enforces boolean clauses, signature-derived purity,
-plain snapshots and before-only postcondition references to taken parameters.
-
 The allocation audit consumes J's `call_allocations` and I's allocating copy and
 mutation decisions as plain slices. It checks every executable branch, nested
 function/literal frame, contract call and owned binding under a noalloc promise;
@@ -141,13 +132,6 @@ Inline layout auditing follows nominal representations with generic arguments
 substituted, rejecting cycles at their field annotation under MEM-7. Boxes and
 block containers break the inline graph; zero-capacity Inline storage has no child
 edge. This is a source layout judgment and leaves TIR validation unchanged.
-
-`hirsel_check_protocol::fact::fact_signature` supplies the private predicate convention from the
-declaring type signature, and `hirsel_check_protocol::body::Plans.facts` retains its checked bool type,
-borrow convention and instantiated edge. Lowering uses those facts to call and
-check the predicate before constructing the nominal value. The signature checker
-requires a plain base for `where` and hashes rooted parameter projections by their
-field spellings, without querying them as definition paths.
 
 Generic graph substitution takes the declared `NominalRoles` and normalizes
 `FunctionType.error` from its substituted result, including nested callbacks.
@@ -228,14 +212,6 @@ Pending resource/release/loan obligations and postconditions retain ordinary cal
 ConstructorHole is reserved until spec issue #46 settles its continuation policy.
 
 Borrowed and mutable Map/SortedMap loops publish indexed entry plans and a whole-source loop loan. Keys and whole entries are read-only; destructured values may be mutable. Consuming map loops publish Take-only owning cursor calls with owned Option entries. Lowering transports these plans, preserving insertion/key order and cleanup on break.
-
-Each requires/ensures clause has an H-owned, capture-free all-Borrow callable
-plan and a distinct parameter scope. Ordinary parameter references, snapshots
-and the virtual result map to explicit clause formals; lexical generic references
-retain their original declaring scope. J/I check those roots independently of
-the ordinary body. K emits one clause producer per clause and calls it at entry
-or every normal exit, with FACT-1 checks at the clause span. Snapshot children
-remain original-frame entry expressions and are evaluated exactly once.
 
 A bare record value must have a complete generic context and no required fields.
 H reports missing generic context at the name under LANG-2, then missing labelled

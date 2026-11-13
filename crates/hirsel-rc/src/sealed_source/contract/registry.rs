@@ -123,12 +123,6 @@ pub enum Expansion {
         callback: u32,
         targets: Vec<ContextId>,
     },
-    /// Actual original CT-5 selection. This is dependency data; the source
-    /// query owner independently rechecks it against the current catalogue.
-    Generated {
-        selection: crate::instance::SelectionRead,
-        target: ContextId,
-    },
     /// Independently complete source operation data, including known empty.
     External(ExternalDemand),
 }
@@ -471,22 +465,6 @@ impl Registry {
                     }
                 }
             }
-            if let Expansion::Generated { selection, target } = expansion {
-                let target = self
-                    .rows
-                    .get(target.0)
-                    .ok_or(SourceError::Malformed("receipt target context index"))?;
-                if !selection.valid()
-                    || !selection.generated
-                    || !matches!(&source.calls()[&block].callee,
-                        hirsel_tir::Callee::Definition { path, .. } if path == &selection.declaration)
-                    || selection.selected.as_ref() != Some(&target.entry.reference().definition)
-                {
-                    return Err(SourceError::Malformed(
-                        "receipt generated target differs from original selection",
-                    ));
-                }
-            }
             if let Expansion::Targets(targets) = expansion {
                 targets.sort_unstable();
                 targets.dedup();
@@ -581,9 +559,6 @@ impl Registry {
                                 },
                                 Expansion::Targets(targets) => {
                                     CallDemand::Bodies(targets.iter().map(|id| id.0).collect())
-                                }
-                                Expansion::Generated { target, .. } => {
-                                    CallDemand::Bodies(vec![target.0])
                                 }
                                 Expansion::External(data) => CallDemand::External(data.clone()),
                             },

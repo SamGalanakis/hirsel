@@ -395,10 +395,6 @@ mod tests {
                     include_str!("../../../../../stdlib/std@1/string.hir"),
                 ),
                 ("list", include_str!("../../../../../stdlib/std@1/list.hir")),
-                (
-                    "derive",
-                    include_str!("../../../../../stdlib/std@1/derive.hir"),
-                ),
             ] {
                 let store = Arc::new(MemStore::default());
                 let context = default_context();

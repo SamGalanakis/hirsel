@@ -64,7 +64,6 @@ impl FrontRunQueries {
                 dependencies: record.semantic_dependencies.into_iter().collect(),
                 source: true,
                 executable: record.discovery.executable,
-                generated: record.discovery.generator && !record.discovery.instance_bodied,
                 implementation: record.implementation,
             });
         }
@@ -106,12 +105,10 @@ impl FrontRunQueries {
             dependencies.extend(semantic.into_iter().map(|id| id.path().clone()));
         }
         let mut executable = false;
-        let mut generated = false;
         let mut implementation = ContentHash::default();
         if source {
             let syntax = namespace.syntax(path)?;
-            executable = generation::executable(&syntax);
-            generated = generation::generator(&syntax).is_some();
+            executable = staging::executable(&syntax);
             implementation = syntax.text_hash;
             if executable || !matches!(signature.kind, SignatureKind::Type(_)) {
                 content.extend(
@@ -122,9 +119,6 @@ impl FrontRunQueries {
         }
         if let SignatureKind::Type(declaration) = &signature.kind {
             dependencies.extend(declaration.drop.iter().cloned());
-            if declaration.fact.is_some() {
-                dependencies.insert(hirsel_check_protocol::fact::fact_path(path));
-            }
             if let Some(check) = &declaration.serializable_check {
                 dependencies.insert(check.function.clone());
             }
@@ -146,7 +140,6 @@ impl FrontRunQueries {
             dependencies,
             source,
             executable,
-            generated,
             implementation,
         })
     }

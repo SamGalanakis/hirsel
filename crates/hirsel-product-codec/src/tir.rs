@@ -21,7 +21,6 @@ const CALLERS: u32 = 5;
 const ASSOCIATIONS: u32 = 6;
 const TYPES: u32 = 7;
 const BODIES: u32 = 8;
-const CONTRACTS: u32 = 9;
 const LOCALS: u32 = 10;
 const PLACES: u32 = 11;
 const SCOPES: u32 = 12;
@@ -258,9 +257,6 @@ fn encode_definition<W: RowWriter>(definition: crate::TirView<'_>) -> Option<W::
                     .map(|n| encode_body::<W>(definition.body(n)?))
                     .collect::<Option<Vec<_>>>()?,
             )?,
-            array::<W, _>(CONTRACTS, definition.contract_count(), |n| {
-                definition.contract(n)
-            })?,
         ],
     )
 }
@@ -464,7 +460,7 @@ pub fn tir_decode_bytes(bytes: &[u8]) -> Option<u64> {
     // ProductTypes/source directories and scopes are charged by Scan::record.
     let layout = crate::EnvelopeLayout::open(bytes)?;
     let rows = Rows::open(&bytes[layout.payload_start..], ROOT)?;
-    if rows.count != 6 {
+    if rows.count != 5 {
         return None;
     }
     scan.add(size_of::<Definition>() + 2 * size_of::<usize>())?;
@@ -477,7 +473,6 @@ pub fn tir_decode_bytes(bytes: &[u8]) -> Option<u64> {
     for n in 0..bodies.count {
         walk_body(Rows::open(bodies.row(n)?, BODY)?, &mut scan)?;
     }
-    array::<(u32, BodyId)>(rows.section(5, CONTRACTS)?, &mut scan)?;
     // The payload was traversed as indexed rows rather than a single serde value.
     Some(scan.required_bytes())
 }
@@ -523,7 +518,7 @@ impl CheckedTir {
             next_anchor: 0,
         };
         let rows = Rows::open(&payload, ROOT)?;
-        if rows.count != 6 {
+        if rows.count != 5 {
             return None;
         }
         scalar::<TirHeader>(rows.row(0)?, &mut validation)?;
@@ -542,7 +537,6 @@ impl CheckedTir {
         for n in 0..bodies.count {
             check_body(Rows::open(bodies.row(n)?, BODY)?, &mut validation)?;
         }
-        check_array::<(u32, BodyId)>(rows.section(5, CONTRACTS)?, &mut validation)?;
         if validation.next_type != envelope.type_count()
             || validation.next_anchor != envelope.anchor_count()
         {
@@ -640,23 +634,11 @@ impl CheckedTir {
     pub fn protocol_association(&self, n: u32) -> Option<ProtocolAssociationReceipt> {
         self.source.decode(self.root().checked_section(2)?.row(n)?)
     }
-    pub fn contract_count(&self) -> u32 {
-        self.root()
-            .checked_section(5)
-            .expect("checked contracts")
-            .count
-    }
-    pub fn contract(&self, n: u32) -> Option<(u32, BodyId)> {
-        self.source.decode(self.root().checked_section(5)?.row(n)?)
-    }
     pub fn caller_bodies(&self) -> Option<Vec<BodyId>> {
         self.collect(self.root().checked_section(1)?)
     }
     pub fn protocol_associations(&self) -> Option<Vec<ProtocolAssociationReceipt>> {
         self.collect(self.root().checked_section(2)?)
-    }
-    pub fn contracts(&self) -> Option<Vec<(u32, BodyId)>> {
-        self.collect(self.root().checked_section(5)?)
     }
     fn collect<T: DeserializeOwned>(&self, rows: Rows<'_>) -> Option<Vec<T>> {
         (0..rows.count)
@@ -678,7 +660,6 @@ impl CheckedTir {
             bodies: (0..self.body_count())
                 .map(|n| self.body(n)?.materialize())
                 .collect::<Option<_>>()?,
-            contracts: self.contracts()?,
         })
     }
 }

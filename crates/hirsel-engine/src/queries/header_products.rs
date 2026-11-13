@@ -1805,7 +1805,7 @@ mod retention_tests {
     #[test]
     fn released_validation_demand_does_not_pin_its_capture() {
         let mut engine = QueryEngine::new(default_environment(), PhaseAdapters::default());
-        let capture = engine.capture_namespace(&[], &[], 1 << 20).unwrap();
+        let capture = engine.capture_namespace(&[], 1 << 20).unwrap();
         let headers = capture.snapshot.header_products().unwrap();
         let budget = ProcessBudget::new(1 << 19);
         let backing: Arc<dyn HeaderAllowance> = Arc::new(Allowance(budget.clone()));

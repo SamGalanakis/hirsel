@@ -111,9 +111,6 @@ pub struct Plans {
     pub tries: Vec<TryPlan>,
     pub loops: Vec<ForPlan>,
     pub functions: Vec<FunctionPlan>,
-    pub shapes: Vec<(ast::ExprId, ast::TypeExprId, TypeId)>,
-    pub contracts: Vec<ContractPlan>,
-    pub facts: Vec<FactPlan>,
     /// Plain `?` sites with no arm for their error (LANG-8), each with the
     /// arm its diagnostic proposes adding to the enclosing error's declaration.
     pub arm_fixes: Vec<ArmFix>,
@@ -131,30 +128,6 @@ pub struct ArmFix {
     pub target: String,
     /// The owner is `@serializable`, so the arm changes its schema (SER-2, STORE-7).
     pub serializable: bool,
-}
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
-pub struct FactPlan {
-    pub expression: ast::ExprId,
-    pub predicate: ast::DefPath,
-    pub arguments: Vec<GenericArgument>,
-    pub result: TypeId,
-    pub usage: UseKind,
-}
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
-pub struct ContractPlan {
-    pub owner: NameSite,
-    pub expression: ast::ExprId,
-    pub kind: ast::ContractKind,
-    pub snapshots: Vec<ast::ExprId>,
-    /// H-owned capture-free clause convention, in a distinct lexical frame.
-    pub function: TypeId,
-    pub parameters: Vec<ContractParameter>,
-}
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
-pub enum ContractParameter {
-    Parameter(ParamId),
-    Snapshot(ast::ExprId),
-    Result,
 }
 
 /// The lexical size inputs needed to stage one checked expression. Sizes

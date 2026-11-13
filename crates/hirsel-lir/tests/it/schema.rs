@@ -549,7 +549,6 @@ fn fixture_unit<S: Stage>(table: &LayoutTable) -> LirUnit<S> {
         SymbolKind::Constant,
         SymbolKind::Type,
         SymbolKind::Finalizer,
-        SymbolKind::Shape,
     ]
     .into_iter()
     .enumerate()
@@ -1171,7 +1170,6 @@ fn fixture_unit<S: Stage>(table: &LayoutTable) -> LirUnit<S> {
         UnavailableFeature::ReleaseRegion,
         UnavailableFeature::CloseArena,
         UnavailableFeature::JoinTasks,
-        UnavailableFeature::Shape,
     ] {
         insts.push(Inst::Unavailable {
             feature,
@@ -1994,7 +1992,6 @@ mod instance_keys {
             signature_hash: hash("f signature"),
             bodies: vec![super::tir_coverage_body()],
             entry: hirsel_tir::BodyId(0),
-            contracts: Vec::new(),
         });
         let key = InstanceKey::new(&path("f"), 0, &[], &store, None, None).unwrap();
         let view = InstanceView::from_definition(

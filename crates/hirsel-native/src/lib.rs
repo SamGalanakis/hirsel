@@ -78,27 +78,6 @@ pub fn backend_version() -> hirsel_syntax::ContentHash {
     }
 }
 
-/// For a generated (`= comptime`) body, the item-relative offset of its
-/// `comptime` expression, where its sites are reported: they are offsets into the
-/// generated text, not into the item's file.
-fn generator_site(syntax: &hirsel_syntax::ItemSyntax) -> Option<u32> {
-    let hirsel_syntax::ItemKind::Function {
-        body: Some(body), ..
-    } = syntax.item.kind
-    else {
-        return None;
-    };
-    let body = &syntax.tree.expressions[body.0 as usize];
-    matches!(body.kind, hirsel_syntax::ExprKind::Comptime(_)).then(|| {
-        let span = body.origin.span;
-        if span.anchor == syntax.anchor {
-            span.start
-        } else {
-            0
-        }
-    })
-}
-
 /// Retain immutable source ownership for line/site profiling without querying a backend.
 pub fn profile_sources(input: &hirsel_engine::NativeInput) -> ProfileSources {
     profile_sources_for_owners(
@@ -133,7 +112,6 @@ fn profile_sources_for_owners<'a>(
                     path: file.path.clone(),
                     file: file.clone(),
                     base,
-                    generated: generator_site(&owner.syntax),
                     anchors: anchors
                         .into_iter()
                         .filter_map(|anchor| {

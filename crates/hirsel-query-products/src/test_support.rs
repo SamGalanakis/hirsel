@@ -56,13 +56,13 @@ pub fn syntax_fixture(width: usize) -> ast::ItemSyntax {
                     contract: Some("contract".repeat(width)),
                 }),
             },
-            generated: Some(ast::Generated::Specialization(vec![
+            implementation_bindings: Some(vec![
                 (
                     Symbol::intern("I"),
                     ast::DefPath::core("source.binding")
                 );
                 width
-            ])),
+            ]),
         },
         tree: ast::SyntaxTree {
             expressions: vec![
@@ -165,6 +165,5 @@ pub fn definition() -> Definition {
             matches: vec![],
         }],
         entry: BodyId(0),
-        contracts: vec![],
     }
 }

@@ -431,9 +431,6 @@ impl Checker<'_, '_> {
                         touches(*destination)
                             || typing::operands(&self.body.rvalues[value.0 as usize]).any(consumes)
                     }
-                    InstructionKind::Snapshot { destination, value } => {
-                        touches(*destination) || consumes(value)
-                    }
                     InstructionKind::Replace {
                         destination,
                         value,

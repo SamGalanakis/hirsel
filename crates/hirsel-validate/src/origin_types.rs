@@ -146,7 +146,6 @@ mod tests {
                 allocation: Allocation::NoAlloc,
                 authority: AuthoritySummary::Unknown,
                 uses: Uses::Unrestricted,
-                contracts: vec![].into(),
                 incomplete: false,
                 foreign: None,
             }),

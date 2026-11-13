@@ -651,11 +651,6 @@ impl KeyEncoder<'_> {
                         self.authority(a)?;
                     }
                 }
-                self.number(f.contracts.len() as u64);
-                for c in f.contracts.iter() {
-                    self.number(u64::from(c.ordinal));
-                    self.atom(&c.code_hash.0);
-                }
                 self.boolean(f.foreign.is_some());
             }
             TypeKind::Box(inner) => {
@@ -686,7 +681,6 @@ impl KeyEncoder<'_> {
                     B::Atomic => "Atomic",
                     B::Ptr => "Ptr",
                     B::FnPtr => "FnPtr",
-                    B::TypeShape => "TypeShape",
                 });
                 self.arguments(arguments)?;
             }

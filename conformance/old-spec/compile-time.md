@@ -2,10 +2,7 @@
 
 `comptime e` evaluates an ordinary expression while compiling, to initialize a constant or
 to produce a value inside a body. Evaluation calls ordinary declared functions, and its
-result is materialized data. Static checking still reads only signatures. Compile-time
-code can also read a nominal type's declared fields and variants through `shape(T)`
-([CT-3](#ct-3-shapes)), and a function whose header is written in source can take its body
-from a compile-time generator ([CT-5](#ct-5-generation)).
+result is materialized data. Static checking still reads only signatures.
 
 ```hirsel
 fn square(x: u64) -> u64 { x * x }
@@ -27,8 +24,7 @@ comptime operation that fails during evaluation is CT-1 at the comptime expressi
 underlying failure as a note. Static errors inside comptime keep their ordinary owners.
 Static checking reads only declared signatures; evaluation executes the selected
 implementations and records them as dependencies. There is no implicit build grant, no
-reflection over function bodies or source text (CT-3 reads type declarations only).
-Generated function bodies are [CT-5](#ct-5-generation); no declaration is generated.
+reflection over function bodies or source text.
 
 ### CT-2: Materialisation
 
@@ -62,112 +58,27 @@ the same materialized data.
 Outer runtime bindings, captures and abstract type names still fail CT-2 at the name,
 with the comptime expression as a secondary site. A selected instantiation's failure
 keeps CT-1 at the comptime expression and cites the selecting site and size actuals.
-Closed expressions inside generic declarations remain legal. Enclosing contracts
-are not inherited, but called helpers' contracts apply. Size arithmetic in type
-positions remains forbidden, and an abstract type's shape stays a closed-frame failure
-([CT-3](#ct-3-shapes)), except in a generic generated declaration's generator, which is
-evaluated per selected instance ([CT-5](#ct-5-generation)).
-
-### CT-3: Shapes
-
-`shape(T)` is a compile-time value of type `TypeShape[T]`: a token, with no payload of its
-own, standing for the declared representation of a nominal record or variant type `T`.
-`type_shape.info(s)` reads it as ordinary core data:
-
-```text
-ShapeInfo       { name: String, visibility: ShapeVisibility, body: ShapeBody }
-ShapeVisibility = Private() | Public() | Opaque()
-ShapeBody       = Record(List[FieldShape]) | Choice(List[VariantShape])
-FieldShape      { name: String, ty: String }
-VariantShape    { name: String, payload: List[PayloadShape] }
-PayloadShape    { label: Option[String], ty: String }
-```
-
-```hirsel
-type User {
-  id: u64,
-  name: String,
-}
-
-fn field_names[T](s: TypeShape[T]) -> List[String] {
-  let mut names: List[String] = []
-  match type_shape.info(s).body {
-    Record(fields) => {
-      for f in fields {
-        list.push(mut names, copy f.name)
-      }
-    }
-    Choice(_) => (),
-  }
-  take names
-}
-
-const USER_FIELDS: List[String] = comptime field_names(shape(User))
-```
-
-- **Placement.** `shape(T)` is written only in compile-time code: inside a `comptime`
-  expression or a constant initializer. Elsewhere it is CT-3 at the shape expression. A
-  helper's body is run-time code even when only compile-time code calls it, so helpers
-  take a `TypeShape[T]` parameter and their callers write `shape(T)`.
-- **Subject.** `T` is written at the shape and must be known where it is written: an
-  abstract type parameter fails the closed frame of [CT-2](#ct-2-materialisation),
-  except the generic parameters of a generated declaration in its generator, which are
-  closed per instance ([CT-5](#ct-5-generation)).
-  Eligibility is [GEN-3](generics.md#gen-3-reflection); a hidden representation is
-  [PROG-2](programs.md#prog-2-visibility). A transparent alias has its target's shape.
-- **Content.** `name` and every `ty` spell a type canonically (below). Fields, variants
-  and payloads keep declaration order; a positional payload has no `label`. `visibility`
-  is the declaration's own (PROG-2); fields have no separate visibility, so it covers them
-  all. Brands, relations, `@growable` markers, bounds, attributes, `uses`, contracts and
-  finalizers are not part of a shape.
-- **Canonical spelling.** The spelling is valid source in every module: `bool`, `char`,
-  sized integers, floats, `String` and `Bytes` by name; tuples `(A, B)` and `(A,)`;
-  builtin constructors by name with their arguments (`List[String]`, `Inline[u8, 4]`);
-  `box T`; function types as `fn(take A, mut B, C) -> R`, with passing modes and without
-  effects; every nominal type, core included, by its full versioned path with its
-  arguments (`core@1/Option[u64]`, `app@1/orders.Order`). A generic declaration's
-  parameters spell as the actual arguments of the shaped instance.
-- **Not data.** A `TypeShape` value never crosses CT-2's materialization boundary: it fails
-  CT-2 at the enclosing initializer or comptime expression, as a callable does.
-  `ShapeInfo` and its parts are ordinary data and materialize like any other constant.
-- **Compile-time-only values.** `TypeShape[T]` and the generated-body type `Body[F]`
-  ([CT-5](#ct-5-generation)) are compile-time-only types. A definition whose
-  signature mentions one in a parameter or result is a *compile-time-only definition*.
-  An expression whose type mentions a compile-time-only type is written only in
-  compile-time code or in the body of a compile-time-only definition; elsewhere it is
-  CT-3 at the outermost such expression. Run-time code therefore never holds a shape or a
-  body, and never calls or names a compile-time-only definition. A non-generic
-  compile-time-only definition never runs, so native code omits it; a generic one has
-  instances only in compile-time evaluation.
-- **Declarations only.** A shape is computed from the type's checked declaration (the owner
-  view for an owner), never from a function body or source text. Evaluation records the
-  declaration as a compile-time dependency, so editing it, private representation
-  included, re-evaluates every reader. `type_shape.info` is a capability-free core
-  operation; nothing enumerates a module's declarations, reads attributes or source, or
-  reaches the compiler host.
-
-External tools may generate source definitions, which are checked like other source; that
-does not replace or exclude in-language generation.
+Closed expressions inside generic declarations remain legal. Size arithmetic in type
+positions remains forbidden.
 
 ### CT-4: Order
 
 Compile-time evaluations depend on each other acyclically; a dependency cycle cites its
 earliest dependency reference.
 
-Each evaluation (a constant initializer, a selected staged expression or a generator
-evaluation) has its own budget B of charged source events, 1,000,000 by default. Charges
+Each evaluation (a constant initializer or a selected staged expression) has its own budget B of charged source events, 1,000,000 by default. Charges
 are defined on source, before lowering:
 
 - **Calls.** One unit before each executed source call enters its callee: after its
-  arguments are evaluated, before transfer, contracts or effects. Calls written in
-  contracts and callbacks count, a `?` error mapper counts, a call to a core primitive costs
+  arguments are evaluated, before transfer or effects. Calls written in
+  callbacks count, a `?` error mapper counts, a call to a core primitive costs
   one whatever its implementation, and every tail or constructor-tail restart charges
   its call.
 - **Iterations.** One unit on each entered body iteration of a `while` or `for` loop,
   after its condition or `next` succeeds and before body work.
 - **Nothing else.** Literals, reads, scalar operators, constructors, branches, matches
   and mechanical cleanup cost zero; source calls and loops they execute still charge.
-  Compiler-created calls (contract and fact checks, iterator scaffolding, forwarding
+  Compiler-created calls (iterator scaffolding, forwarding
   wrappers) and optimizer copies add none, while the source bodies they run charge their
   own calls and iterations.
 
@@ -198,112 +109,3 @@ by the charging version, B and the executed dependencies, so editing the budget
 invalidates them and diagnostics retry. Host CPU, memory, call-depth and
 dependency-depth safeguards are operational tooling outcomes, not comparable language
 results, and PROG-3's interpreter fixture steps are a separate measure.
-
-### CT-5: Generation
-
-A generated function is an ordinary declaration whose complete header is written in source
-and whose body is `= comptime e`. The header (name, generics, labelled parameters with
-modes, result, `uses`, `@noalloc`, contracts and attributes) is published exactly like a
-written one, before any generator runs, and dependents check against it. Evaluation never
-publishes a declaration: no name, signature, type or item comes out of a generator, so every
-callable an agent can use is written in source and checking stays signature-only and
-independent of topology ([PROG-5](programs.md#prog-5-topology)).
-
-- **Typing.** `e` has type `Result[Body[F], String]`, where `F` is the declared function
-  type without uniqueness: its parameter types with their passing modes, result and
-  `uses`, with every `unique` dropped. The declaration alone decides uniqueness, since the
-  generated body is checked against its header (below), so one generator serves
-  `-> Result[T, String]` and `-> Result[unique T, String]`. `Body[F]` is a
-  compile-time-only core type ([CT-3](#ct-3-shapes)). Generators are ordinary functions;
-  the shaped type's parameter links shape and body, so `record_value(shape(Todo))` with
-  `fn record_value[T](s: TypeShape[T]) -> Result[Body[fn(T) -> json.Value uses {}], String]`
-  checks from signatures alone as a body for `fn(Todo) -> json.Value uses {}`, and a
-  declaration with any other header is LANG-7 at `e` before evaluation. `e` is inside
-  CT-2's closed frame: it reads no parameter, and naming a declared parameter in `e` is
-  CT-2 at the name. In a generic declaration `e` may also use the declaration's own generic
-  parameters, in `shape(T)` and as type arguments: they are closed per instance (below).
-- **Bodies.** `codegen.body(text)` builds a `Body[F]`, taking `F` from the expected type.
-  `Error(message)` from a generator is CT-1 at `e`, with the message as a note; a failing
-  evaluation is CT-1 as for any comptime expression. The text must be one function literal
-  `fn(..) -> .. uses {..} { .. }` and nothing else, or CT-5 at its first token. The literal's
-  type must equal the declared function type up to uniqueness, or LANG-7 at its header. Its
-  parameters bind the declared parameters by position: the body uses the literal's names,
-  and diagnostics in the body name them at the literal's parameters, while the header and
-  contracts keep the declared ones. Shapes spell types canonically, so a generator can write parameter and
-  field types that resolve the same way in every module.
-- **Checking.** A generated body is checked exactly as if written in the declaring module:
-  that module's names, package view and PROG-2 opacity, against the declared header, under
-  every ownership, mode, authority, allocation and contract rule, so a `-> unique T`
-  header requires a body that builds a fresh value (MODE-2). A client package cannot
-  reach an opaque representation through generated text. Diagnostics keep their ordinary
-  rule owners. For a nongeneric declaration the primary span is in the generated text and
-  a secondary label marks `e`. For a selected generic instance the primary span marks the
-  selecting call, with the generated text's byte span as a note and `e` as a secondary site.
-  Generated bodies construct and read values only through ordinary source, so nominal
-  identities, explicit capability parameters and allocation sites stay visible in them.
-  `hirsel expand <file>` prints each generated body of a source file as source.
-- **Staging.** For each generated definition: its header is published; dependents check
-  against it; the generator call is checked from signatures and evaluated with no
-  capability and the CT-4 budget; the resulting text is cached under the implementations it
-  executed and the declarations its shapes read ([CT-2](#ct-2-materialisation)); then the
-  generated body is checked and lowered like any body. The same inputs give the same text.
-  Generation that needs its own result is a CT-4 cycle at `e`.
-- **Instances.** A generic declaration publishes its header once and dependents check
-  against it like any generic function's, but the declaration itself has no body. Each
-  closed argument list that a call or function reference selects, from the program's
-  definitions and transitively from other instances' bodies, is an instance: the
-  declaration's text with its generic list dropped and each generic parameter replaced by
-  its argument's canonical spelling (CT-3), staged as a private monomorphic definition of
-  the declaring module and generated, checked and lowered like a non-generic declaration.
-  A call at those arguments runs the instance. Instances are cached by the spellings of
-  their arguments, so every call at the same arguments shares one, and the arguments'
-  own modes do not distinguish instances: an instance's header takes the closed types'
-  defaults ([MODE-7](ownership.md#mode-7-modes-inside-a-body)). Unselected instances are never generated, and a call
-  evaluated at compile time selects its instance when it runs. An instance's diagnostics
-  point at the call that selected it, with the instantiated or emitted text's byte span
-  as a note. One declaration selects at most 256 instances; selecting another is CT-1
-  at `e`, with a secondary label at the selecting call, so a body that selects ever-new
-  instances stops. Each generator evaluation has the CT-4 budget.
-
-**Example.** The generator returns source for a body whose header is checked against
-`square`'s declared signature:
-
-```hirsel
-fn square_body() -> Result[Body[fn(u64) -> u64 uses {}], String] {
-  Ok(codegen.body("fn(x: u64) -> u64 uses {} { x * x }"))
-}
-
-fn square(x: u64) -> u64 uses {} = comptime square_body()
-```
-
-For shape-driven generation, see [`std@1/derive.json_value`](std-library.md#derived-bodies)
-and the complete `examples/todo-api` package. Adding a field re-evaluates a shape reader;
-an unsupported field type fails CT-1 at the generation expression, naming the type.
-Field naming, omission and domain policy are explicit generator code; nothing is derived
-implicitly.
-
-## Reserved for future compile-time features
-
-Generating declarations at compile time is reserved, not excluded; its API, ownership and
-staging contracts are for a future revision. Callable materialization follows
-[CT-2](#ct-2-materialisation); generated function bodies are [CT-5](#ct-5-generation).
-
-- **Syntax.** The `comptime` keyword and the `comptime` prefix stay syntactically reserved
-  where unsupported, with no other meaning
-  assigned. LANG-2's rule that expressions carry no type arguments describes the current
-  language, not a prohibition on future typed compile-time forms. The `file` and `item`
-  productions govern written source, not the kinds of checked declaration a future
-  generator may publish.
-- **Evaluation and publication.** CT-2's closed frame is the eligibility rule for inline
-  expressions only; size inputs are admitted as above. It does not rule out future
-  explicit compile-time type, shape or callable inputs. The data-only boundary restricts values
-  materialized into a program, not internal callable evaluation or a future typed body or
-  declaration artifact. Any future generation publishes declared signatures before
-  dependent checking ([LANG-6](language.md#lang-6-signatures),
-  [PROG-1](programs.md#prog-1-names)), preserving signature-only checking and nominal
-  identity.
-
-## Rationale: shapes and generation
-
-Typed shape tokens link a generator's input type to its promised body; checked source text
-keeps generation within the ordinary language, opacity and signature rules (CT-3, CT-5).

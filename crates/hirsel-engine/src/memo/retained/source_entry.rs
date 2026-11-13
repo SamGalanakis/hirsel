@@ -2,7 +2,6 @@
 //! These are payload components; source maps, interners and table buckets have
 //! separate owners. Repeated shared occurrences are charged conservatively.
 use super::{Weight, arc_bytes, retained_signature_payload_bytes};
-use hirsel_types::{ContextualName, Resolution, ResolvedName};
 
 trait SourceWeight {
     fn resolver_snapshot(&mut self, value: &crate::ResolverSnapshot);
@@ -188,9 +187,8 @@ fn signature_entry_bytes(
         weight.add(size_of_val(&*depth.first));
     }
     weight.vec(&entry.selections, |w, selection| {
-        if let crate::comptime::Selection::Staged(_, arguments) = selection {
-            w.flat_vec(arguments);
-        }
+        let crate::comptime::Selection::Staged(_, arguments) = selection;
+        w.flat_vec(arguments);
     });
     weight.cloned_vectors = false;
     if let Some(receipt) = &entry.acceptance {
@@ -338,7 +336,7 @@ mod tests {
                         ty: TypeExprId(0),
                         value: ExprId(0),
                     },
-                    generated: None,
+                    implementation_bindings: None,
                 },
                 tree: SyntaxTree {
                     tokens: Vec::with_capacity(width),
@@ -371,7 +369,6 @@ mod tests {
             distinct: false,
             resource: false,
             drop: Some(path.clone()),
-            fact: None,
             captures: Some(vec![0; width].into()),
             destructor_allocation: Allocation::NoAlloc,
         }

@@ -830,69 +830,15 @@ impl NativeRecordContext {
                 ordinary_anchors.push(((RecordOwner::capture(owner.0), owner.1), anchor));
             }
         }
-        let mut generated = BTreeMap::new();
-        for (path, source) in &engine.generated {
-            generated.entry(source.file).or_insert_with(|| {
-                (
-                    RecordOwner::capture(&super::persistent::generated_codec_owner(
-                        path,
-                        &source.text,
-                    )),
-                    DefId::intern(path),
-                )
-            });
-        }
-        // Registration can repeat identical text while inferred headers still
-        // cite its earlier placed source. Only the same logical source and
-        // exact bytes may share its content-bound codec owner.
-        let mut generations = BTreeMap::new();
-        for (file, binding) in &generated {
-            if let Some(identity) =
-                super::persistent::generated_source_identity(&engine.sources, *file)
-            {
-                generations
-                    .entry(identity)
-                    .or_insert_with(|| binding.clone());
-            }
-        }
-        let mut current_anchors = BTreeMap::new();
-        for (anchor, file, base) in engine.sources.anchors() {
-            if let Some((owner, _)) = generated.get(&file) {
-                current_anchors
-                    .entry((owner.clone(), base))
-                    .or_insert(anchor);
-            }
-        }
         let mut anchors = ordinary_anchors;
-        for (owner, anchor) in &current_anchors {
-            anchors.push((owner.clone(), *anchor));
-        }
-        let mut seen = std::collections::BTreeSet::new();
-        for (_, file, _) in engine.sources.anchors() {
-            if generated.contains_key(&file) || !seen.insert(file) {
-                continue;
-            }
-            if let Some(identity) =
-                super::persistent::generated_source_identity(&engine.sources, file)
-                && let Some(binding) = generations.get(&identity)
-            {
-                generated.insert(file, binding.clone());
-            }
-        }
-        for (anchor, file, base) in engine.sources.anchors() {
-            let owner = owners.get(&anchor).cloned().or_else(|| {
-                generated
-                    .get(&file)
-                    .map(|(path, _)| (path.clone(), base))
-                    .or_else(|| catalog_owners.get(&anchor).cloned())
-            });
+        for (anchor, _, _) in engine.sources.anchors() {
+            let owner = owners
+                .get(&anchor)
+                .cloned()
+                .or_else(|| catalog_owners.get(&anchor).cloned());
             if let Some(owner) = owner {
                 anchors.push((owner.clone(), anchor));
-                let declaration = generated
-                    .get(&file)
-                    .map(|(_, declaration)| *declaration)
-                    .unwrap_or_else(|| DefId::intern(owner.0.path()));
-                source_definitions.insert(anchor, declaration);
+                source_definitions.insert(anchor, DefId::intern(owner.0.path()));
                 owners.insert(anchor, owner);
             }
         }

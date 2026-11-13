@@ -240,11 +240,6 @@ impl Importer<'_> {
                             bad(&mut webs, on(p));
                         }
                     }
-                    K::Snapshot { destination, value } => {
-                        operands(value, &mut reads);
-                        bad(&mut webs, on(*destination));
-                        bad(&mut webs, on(value.place));
-                    }
                     K::Check { condition, .. } => {
                         operands(condition, &mut reads);
                         bad(&mut webs, on(condition.place));

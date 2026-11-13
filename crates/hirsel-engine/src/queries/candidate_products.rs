@@ -92,45 +92,6 @@ impl CheckedProducts {
             .collect()
     }
 }
-impl QueryEngine {
-    /// Existing accepted namespace records, in the same order used by the
-    /// checked-product digest. This formats settled registrations only.
-    pub(crate) fn checked_registration_records(&self) -> Vec<Vec<u8>> {
-        let mut registrations = Vec::new();
-        for (path, generated) in &self.generated {
-            let mut key = vec![];
-            hirsel_query_products::reads::encode_def_path(&mut key, path);
-            registrations.push(key);
-            registrations.push(generated.text.as_bytes().to_vec());
-        }
-        for declaration in &self.instance_bodies.declarations {
-            let mut key = vec![];
-            hirsel_query_products::reads::encode_def_path(&mut key, declaration.path());
-            registrations.push(key);
-        }
-        for (declaration, instances) in &self.instance_bodies.instances {
-            let mut records: Vec<_> = instances
-                .iter()
-                .map(|(actual, body)| {
-                    let mut record = vec![];
-                    hirsel_query_products::reads::encode_def_path(&mut record, declaration.path());
-                    for spelling in actual.spellings() {
-                        record.extend_from_slice(&(spelling.len() as u64).to_le_bytes());
-                        record.extend_from_slice(spelling.as_bytes());
-                    }
-                    hirsel_query_products::reads::encode_def_path(
-                        &mut record,
-                        body.definition.path(),
-                    );
-                    record
-                })
-                .collect();
-            records.sort();
-            registrations.extend(records);
-        }
-        registrations
-    }
-}
 
 /// Canonical encoding of already settled source obligations. This formats
 /// ordinary immutable data and cannot demand a query or supply V authority.
@@ -161,13 +122,10 @@ impl CheckedProductEncoder {
             types: input.types.clone(),
         })
     }
-    /// Complete read rows and the existing canonical generated/instance
-    /// registration records, in source order. None may be inferred from a
-    /// semantic cache or omitted because its body was evicted.
+    /// Bind every required read to the canonical product bytes.
     pub fn finish(
         self,
         required_reads: BTreeMap<DefPath, Arc<hirsel_query_products::reads::Reads>>,
-        registrations: Vec<Vec<u8>>,
     ) -> CheckedProducts {
         let canonical = self.canonical;
         let mut reads: BTreeMap<DefPath, BTreeMap<Vec<u8>, ContentHash>> = BTreeMap::new();
@@ -179,7 +137,7 @@ impl CheckedProductEncoder {
                 edges.insert(bytes, *value);
             }
         }
-        let mut parts = registrations;
+        let mut parts = Vec::new();
         for (path, observed) in &reads {
             let mut key = vec![];
             hirsel_query_products::reads::encode_def_path(&mut key, path);
@@ -205,23 +163,21 @@ impl CheckedProductEncoder {
 }
 
 #[cfg(test)]
-mod registration_tests {
+mod tests {
     use super::*;
     #[test]
     fn checked_digest_borrows_detached_canonical_text_without_copying_its_payload() {
         let types = hirsel_types::TypeInterner::new(None);
         for width in [1, 4, 16] {
             let canonical: Arc<str> = "λ🐑canonical\n".repeat(width * 1024).into();
-            let registrations = vec![b"registration-one".to_vec(), b"registration-two".to_vec()];
             let expected = ContentHash::of_parts(
                 "hirsel.checked-products.v1",
-                std::iter::once(canonical.as_bytes())
-                    .chain(registrations.iter().map(Vec::as_slice)),
+                std::iter::once(canonical.as_bytes()),
             );
             let pointer = canonical.as_ptr();
             let (actual, count) = crate::test_alloc::measured(|| {
                 CheckedProductEncoder::from_canonical(canonical, types.clone())
-                    .finish(BTreeMap::new(), registrations)
+                    .finish(BTreeMap::new())
             });
             assert_eq!(actual.digest, expected);
             assert_eq!(actual.canonical.as_ref().unwrap().as_ptr(), pointer);
@@ -287,73 +243,5 @@ mod registration_tests {
         assert_eq!(budget.reserved(), needed);
         drop(held);
         assert_eq!(budget.reserved(), 0);
-    }
-
-    #[test]
-    fn registration_records_keep_generated_text_and_sorted_instance_actuals() {
-        let mut engine = QueryEngine::new(crate::default_environment(), PhaseAdapters::default());
-        let generated = DefPath::core("generated");
-        let declaration = DefId::intern(&DefPath::core("factory"));
-        let file = engine.sources.add("generated.hir", String::new()).unwrap();
-        engine.generated.insert(
-            generated.clone(),
-            GeneratedSource {
-                file,
-                text: "fn generated(){}".into(),
-                site: Span::default(),
-            },
-        );
-        engine.instance_bodies.declarations.insert(declaration);
-        let mut instances = std::collections::HashMap::new();
-        for n in [2, 1] {
-            let arguments = vec![hirsel_types::GenericArgument::Size(
-                hirsel_types::Size::Constant(n),
-            )];
-            let key = hirsel_tir::InstanceBodies::key(&engine.types, &arguments).unwrap();
-            instances.insert(
-                key,
-                hirsel_tir::InstanceBody {
-                    arguments,
-                    definition: DefId::intern(&DefPath::core(&format!("factory_{n}"))),
-                },
-            );
-        }
-        engine
-            .instance_bodies
-            .instances
-            .insert(declaration, instances);
-        let records = engine.checked_registration_records();
-        let encode = |path: &DefPath| {
-            let mut bytes = Vec::new();
-            hirsel_query_products::reads::encode_def_path(&mut bytes, path);
-            bytes
-        };
-        assert_eq!(records.len(), 5);
-        assert_eq!(records[0], encode(&generated));
-        assert_eq!(records[1], b"fn generated(){}");
-        assert_eq!(records[2], encode(declaration.path()));
-        assert!(records[3] < records[4]);
-        for record in &records[3..] {
-            assert!(record.starts_with(&encode(declaration.path())));
-        }
-        let entries = engine
-            .instance_bodies
-            .instances
-            .remove(&declaration)
-            .unwrap();
-        let mut entries = entries.into_iter().collect::<Vec<_>>();
-        entries.reverse();
-        engine
-            .instance_bodies
-            .instances
-            .insert(declaration, entries.into_iter().collect());
-        assert_eq!(engine.checked_registration_records(), records);
-        engine.generated.get_mut(&generated).unwrap().text.push(' ');
-        let changed = engine.checked_registration_records();
-        assert_ne!(
-            changed, records,
-            "accepted generated text participates verbatim"
-        );
-        assert_eq!(&changed[2..], &records[2..]);
     }
 }

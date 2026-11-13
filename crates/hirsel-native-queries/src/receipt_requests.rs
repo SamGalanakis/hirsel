@@ -4,7 +4,7 @@ use hirsel_engine::NativeRecords;
 use hirsel_engine_store::Domain;
 use hirsel_lir::sealed_payload_source::ReceiptSource;
 use hirsel_native::receipt_source::factory::*;
-use hirsel_native::receipt_source::provider::SelectionProvider;
+use hirsel_native::receipt_source::provider::Provider;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -109,7 +109,7 @@ pub fn current(
 }
 
 pub fn reconstruct(
-    provider: &dyn SelectionProvider,
+    provider: &dyn Provider,
     roots: Vec<NamedInput>,
     program: &hirsel_rc::instance::Program,
 ) -> Result<(NamedGraph, Sources), String> {

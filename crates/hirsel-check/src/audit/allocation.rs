@@ -132,7 +132,6 @@ struct BodyProof {
 struct FrameProof {
     noalloc: bool,
     cleanup: EffectResult,
-    contracts: EffectResult,
     body: BodyProof,
 }
 impl FrameProof {
@@ -140,7 +139,6 @@ impl FrameProof {
         let mut result = EffectResult::default();
         if self.noalloc {
             result.join(self.cleanup);
-            result.join(self.contracts);
             result.join(self.body.execution);
         }
         result.join(self.body.nested);
@@ -236,9 +234,6 @@ impl<'a> Audit<'a, '_> {
             ) => {
                 if f.allocation == Allocation::NoAlloc {
                     result.join(self.cleanup(&owner, *body)?);
-                    for contract in &signature.contracts {
-                        result.join(self.contract_allocations(contract.expression)?);
-                    }
                 }
                 if let Some(root) = body {
                     let store = self.types;
@@ -438,14 +433,6 @@ impl<'a> Audit<'a, '_> {
         root: Option<ExprId>,
     ) -> Result<EffectResult, QueryError> {
         let mut result = EffectResult::default();
-        let can_fail_contract = self.function_syntax(owner).is_some_and(|s| {
-            s.contracts.iter().any(|c| {
-                !matches!(
-                    self.input.syntax.tree.expressions[c.expression.0 as usize].kind,
-                    ast::ExprKind::Literal(ast::Literal::Bool(true))
-                )
-            })
-        });
         let lets = root.map(|root| self.let_patterns(root)).unwrap_or_default();
         for binding in &self.input.checked.bindings {
             if binding.owner != *owner
@@ -474,7 +461,7 @@ impl<'a> Audit<'a, '_> {
             // parameter is owned from entry; a let binding from its statement
             // to the end of its block.
             let mut boundary = None;
-            if !can_fail_contract {
+            {
                 let moved = match (&binding.binding, binding.site, root) {
                     (ResolvedName::Parameter(_), _, Some(root)) => {
                         self.ownership(&binding.binding, root).received()
@@ -512,21 +499,6 @@ impl<'a> Audit<'a, '_> {
                 if let Ownership::Exposed(site) = moved {
                     boundary = site;
                 }
-            } else {
-                boundary = self
-                    .function_syntax(owner)
-                    .and_then(|s| {
-                        s.contracts.iter().find(|c| {
-                            (matches!(binding.binding, ResolvedName::Parameter(_))
-                                || c.kind == ast::ContractKind::Ensures)
-                                && !matches!(
-                                    self.input.syntax.tree.expressions[c.expression.0 as usize]
-                                        .kind,
-                                    ast::ExprKind::Literal(ast::Literal::Bool(true))
-                                )
-                        })
-                    })
-                    .map(|c| c.expression);
             }
             // Only taken parameters own their entry values. Plain borrowed parameters
             // can be represented as Copy, and their cleanup is already NoAlloc.
@@ -575,7 +547,7 @@ impl<'a> Audit<'a, '_> {
             );
         }
         if let Some(root) = root {
-            result.join(self.temporaries(root, can_fail_contract)?);
+            result.join(self.temporaries(root, false)?);
         }
         Ok(result)
     }
@@ -769,9 +741,9 @@ impl<'a> Audit<'a, '_> {
     /// A constructor of a type that checks no fact and is not a resource.
     fn infallible_constructor(&mut self, callee: ExprId) -> bool {
         match self.source_name(callee).map(|(_, n)| n.clone()) {
-            Some(ResolvedName::Definition(path)) => self.snapshot(&hirsel_syntax::DefId::intern(&path)).is_ok_and(
-                |s| matches!(&s.kind, SignatureKind::Type(d) if !d.resource && d.fact.is_none()),
-            ),
+            Some(ResolvedName::Definition(path)) => self
+                .snapshot(&hirsel_syntax::DefId::intern(&path))
+                .is_ok_and(|s| matches!(&s.kind, SignatureKind::Type(d) if !d.resource)),
             _ => false,
         }
     }
@@ -1022,40 +994,6 @@ impl<'a> Audit<'a, '_> {
             _ => true,
         }
     }
-    fn contract_allocations(&mut self, root: ExprId) -> Result<EffectResult, QueryError> {
-        let mut result = EffectResult::default();
-        // Contracts belong to signature code. H/J currently check executable bodies;
-        // resolve contract calls through declarations, never through implementations.
-        let mut todo = vec![root];
-        while let Some(e) = todo.pop() {
-            let expression = &self.input.syntax.tree.expressions[e.0 as usize];
-            if let ast::ExprKind::Call { callee, .. } = expression.kind {
-                let resolved = self.source_name(callee).map(|(_, n)| n.clone());
-                let allocation = match resolved {
-                    Some(ResolvedName::Definition(d)) => {
-                        let signature = self.snapshot(&hirsel_syntax::DefId::intern(&d))?;
-                        match &signature.kind {
-                            SignatureKind::Function(f) => Some(f.allocation),
-                            _ => None,
-                        }
-                    }
-                    Some(name @ (ResolvedName::Parameter(_) | ResolvedName::Local(_))) => self
-                        .source_binding(&name, None)
-                        .and_then(|b| self.types.get(b.ty))
-                        .and_then(|t| match &t.kind {
-                            TypeKind::Function(f) => Some(f.allocation),
-                            _ => None,
-                        }),
-                    _ => None,
-                };
-                if allocation == Some(Allocation::MayAllocate) {
-                    result.add(expression.origin.span, AllocationReasonKind::Call);
-                }
-            }
-            todo.extend(children(&expression.kind));
-        }
-        Ok(result)
-    }
     fn local_frame(
         &mut self,
         owner: NameSite,
@@ -1071,17 +1009,10 @@ impl<'a> Audit<'a, '_> {
         } else {
             EffectResult::default()
         };
-        let mut contracts = EffectResult::default();
-        if noalloc {
-            for contract in &self.function_syntax(&owner).unwrap().contracts {
-                contracts.join(self.contract_allocations(contract.expression)?);
-            }
-        }
         let body = self.walk_allocations(owner, body, noalloc, true, proofs)?;
         let proof = FrameProof {
             noalloc,
             cleanup,
-            contracts,
             body,
         };
         proofs.insert(owner, proof.clone());
@@ -1436,7 +1367,6 @@ fn children(kind: &ast::ExprKind) -> Vec<ExprId> {
         ast::ExprKind::Index { base, index } => vec![*base, *index],
         ast::ExprKind::Unary { value, .. }
         | ast::ExprKind::Try { value, .. }
-        | ast::ExprKind::Before(value)
         | ast::ExprKind::Comptime(value) => vec![*value],
         ast::ExprKind::Binary { left, right, .. } => vec![*left, *right],
         ast::ExprKind::If {

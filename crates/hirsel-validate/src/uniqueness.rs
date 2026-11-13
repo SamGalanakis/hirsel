@@ -389,10 +389,7 @@ impl Checker<'_, '_> {
                         &self.generic_declarations(),
                     )
             }
-            Rvalue::Constant(_)
-            | Rvalue::Size(_)
-            | Rvalue::Shape(_)
-            | Rvalue::FunctionReference { .. } => true,
+            Rvalue::Constant(_) | Rvalue::Size(_) | Rvalue::FunctionReference { .. } => true,
             Rvalue::Construct { fields, .. } => fields.iter().all(|field| {
                 let ty = self.transferred_type(state, &field.value, store);
                 store.get(ty).unwrap().modes.sendability == Sendability::Sendable
@@ -1310,7 +1307,7 @@ impl Checker<'_, '_> {
     }
     pub(super) fn rvalue_unique(&self, state: &State, value: &Rvalue) -> bool {
         match value {
-            Rvalue::Constant(_) | Rvalue::Size(_) | Rvalue::Shape(_) | Rvalue::FunctionReference { .. } => true,
+            Rvalue::Constant(_) | Rvalue::Size(_) | Rvalue::FunctionReference { .. } => true,
             Rvalue::ReadConstant { definition, .. } => self.signatures.get(definition).is_some_and(|s| matches!(s.kind, SignatureKind::Const { ty: ty, .. } if self.bound(self.t, ty, hirsel_types::Bound::Plain, &hirsel_types::GenericDeclarations::default()) || self.bound(self.t, ty, hirsel_types::Bound::Flat, &hirsel_types::GenericDeclarations::default()) || matches!(&self.t.get(ty).unwrap().kind, TypeKind::Builtin { kind: hirsel_types::BuiltinType::Shared, .. }))),
             Rvalue::Use(value) => {
                 self.operand_unique(state, value)

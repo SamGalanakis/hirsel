@@ -29,7 +29,6 @@ pub(super) fn derive(
     };
     let bodies = graphs
         .iter()
-        .filter(|graph| graph.clause.is_none())
         .map(|graph| producer.body(graph))
         .collect::<Result<_, _>>()?;
     Ok(StorageDefinition { bodies })
@@ -500,9 +499,7 @@ impl Producer<'_, '_> {
                                 placement: self.placement(*expression, graph.owner, sequence),
                             }
                         }
-                        ExprKind::Literal(_) | ExprKind::Heap | ExprKind::Shape(_) => {
-                            StorageValue::Fresh
-                        }
+                        ExprKind::Literal(_) | ExprKind::Heap => StorageValue::Fresh,
                         ExprKind::Path(_) => {
                             self.named_callable(*expression).unwrap_or(if *fresh {
                                 StorageValue::Fresh

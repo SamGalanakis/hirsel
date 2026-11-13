@@ -24,7 +24,6 @@ pub(super) fn signatures(types: &Arc<TypeInterner>) -> Vec<Signature> {
         distinct: false,
         resource: false,
         drop: None,
-        fact: None,
         captures: None,
         destructor_allocation: Allocation::NoAlloc,
     };
@@ -118,7 +117,6 @@ pub(super) fn signatures(types: &Arc<TypeInterner>) -> Vec<Signature> {
         distinct: false,
         resource: true,
         drop: None,
-        fact: None,
         captures: None,
         destructor_allocation: Allocation::NoAlloc,
     };
@@ -198,7 +196,6 @@ pub(super) fn signatures(types: &Arc<TypeInterner>) -> Vec<Signature> {
             distinct: false,
             resource: true,
             drop: None,
-            fact: None,
             captures: None,
             destructor_allocation: Allocation::NoAlloc,
         };

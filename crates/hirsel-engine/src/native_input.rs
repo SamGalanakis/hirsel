@@ -10,9 +10,6 @@ use std::{collections::BTreeMap, sync::Arc};
 pub struct NativeSource {
     pub syntax: Arc<ItemSyntax>,
     pub implementation_revision: ContentHash,
-    /// Existing generated text and its declaring span, retained for origin
-    /// diagnostics; source selectors refer to the exact TIR anchors below it.
-    pub generated: Option<crate::queries::GeneratedSource>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NativeStatus {
@@ -42,8 +39,6 @@ pub struct NativeInput {
     pub audits: BTreeMap<DefPath, SourceAudit>,
     /// GEN-5 instance requirements; import recollects them and rejects growth.
     pub instances: InstanceGraph,
-    /// CT-5 instance bodies of the selected generic generated declarations.
-    pub instance_bodies: hirsel_tir::InstanceBodies,
     /// Static callable placement claims. Import reconstructs required behavior
     /// from executable operands; an empty table cannot disable a demanded proof.
     pub storage_profiles: Vec<hirsel_types::storage::CallableStorageProfile>,
@@ -165,13 +160,12 @@ impl QueryEngine {
                 representations.insert(path.clone(), record);
             }
             let syntax = self.parse_definition(&path)?.value;
-            let executable = crate::queries::generation::executable(&syntax);
+            let executable = crate::queries::staging::executable(&syntax);
             source_owners.insert(
                 path.clone(),
                 NativeSource {
                     syntax: syntax.clone(),
                     implementation_revision: syntax.text_hash,
-                    generated: None,
                 },
             );
             if executable {
@@ -224,9 +218,6 @@ impl QueryEngine {
                 );
             }
         }
-        for (path, source) in &mut source_owners {
-            source.generated = self.generated_source(path).cloned();
-        }
         let registry = hirsel_registry::BuiltinRegistry::shared();
         let mut input = NativeInput {
             types: self.types.clone(),
@@ -245,7 +236,6 @@ impl QueryEngine {
             completed_source_stages: NativeStatus::Complete,
             audits,
             instances: InstanceGraph::default(),
-            instance_bodies: self.instance_bodies(&paths),
             storage_profiles: crate::storage_graph::profiles(self)?,
             foreign_links: self.foreign_links.clone(),
             foreign_unreplayable: self.foreign_unreplayable,
@@ -345,7 +335,7 @@ impl QueryEngine {
                     return Err(invalid("source snapshot mismatch"));
                 }
             }
-            if crate::queries::generation::executable(&syntax) {
+            if crate::queries::staging::executable(&syntax) {
                 executable_paths.insert(path.clone());
             } else {
                 let diagnostics = self.definition_diagnostics(path)?;
@@ -380,9 +370,6 @@ impl QueryEngine {
                 && definition.as_ref() != current.value.as_ref()
             {
                 return Err(invalid("forged implementation"));
-            }
-            if input.source_owners[path].generated.as_ref() != self.generated_source(path) {
-                return Err(invalid("forged generated source origin"));
             }
             // Revalidate every source the exact TIR cites, including generated
             // text and nested bodies. A valid declaration anchor alone cannot
@@ -492,20 +479,6 @@ impl QueryEngine {
         {
             return Err(invalid("forged declaration dependencies"));
         }
-        if input.instance_bodies != self.instance_bodies(&paths) {
-            return Err(invalid("forged or incomplete instance bodies"));
-        }
-        let timing = hirsel_intern::timings::phase(hirsel_intern::timings::Phase::Verify);
-        let violations = hirsel_validate::validate_instance_bodies(
-            &input.types,
-            &input.instance_bodies,
-            &input.signatures,
-            &input.definitions,
-        );
-        drop(timing);
-        if !violations.is_empty() {
-            return Err(invalid(format!("invalid instance bodies: {violations:?}")));
-        }
         let storage = validate_storage_input(&input);
         if !storage.violations.is_empty() {
             return Err(invalid(format!(
@@ -582,7 +555,6 @@ fn validate_storage_input(input: &NativeInput) -> hirsel_validate::storage::Stor
         &definitions,
         &signatures,
         &input.constants,
-        &input.instance_bodies,
         &input.storage_profiles,
     )
 }

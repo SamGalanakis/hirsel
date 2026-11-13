@@ -56,7 +56,6 @@ pub fn function(result: TypeId) -> FunctionType {
         allocation: Allocation::NoAlloc,
         authority: AuthoritySummary::inert(),
         uses: Uses::Unrestricted,
-        contracts: vec![].into(),
         incomplete: false,
         foreign: None,
     }
@@ -68,7 +67,6 @@ pub fn syntax_function() -> FunctionSyntax {
         parameters: vec![],
         result: None,
         uses: None,
-        contracts: vec![],
     }
 }
 pub fn type_row(kind: TypeKind) -> Type {
@@ -155,7 +153,7 @@ impl Fixture {
                     body,
                     abi: None,
                 },
-                generated: None,
+                implementation_bindings: None,
             },
             tree: self.tree.clone(),
             anchor: hirsel_span::Anchor(0),
@@ -344,7 +342,6 @@ impl Fixture {
                     distinct: false,
                     resource,
                     drop: None,
-                    fact: None,
                     captures: None,
                     destructor_allocation: Allocation::NoAlloc,
                 })),
@@ -435,7 +432,7 @@ impl Fixture {
         }
         publish_places(&self.types, &self.tree, &mut self.body);
         let syntax = self.syntax(Some(root));
-        check_file_with_clauses(
+        check_file(
             &self.types,
             &self.memo,
             &syntax,
@@ -443,7 +440,6 @@ impl Fixture {
             self.body,
             &mut self.provider,
             &self.intrinsics,
-            &[],
             &[],
         )
     }

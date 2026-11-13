@@ -2,19 +2,9 @@
 //! they never refresh its declarations, instance bindings or source owners.
 use super::*;
 use crate::{NativeRecordContext, NativeRecords};
-use hirsel_engine_store::{Domain, EntryKey, Reference};
+use hirsel_engine_store::{EntryKey, Reference};
 mod carried;
-pub(in crate::queries) mod reopen;
 pub(crate) use carried::{Recheck, ViewBase};
-
-const GENERATION: Domain = Domain {
-    kind: 0x4601_0008,
-    schema: 3,
-};
-const MANIFEST: Domain = Domain {
-    kind: 0x4601_0009,
-    schema: 3,
-};
 
 #[derive(PartialEq)]
 pub(crate) struct BodyKeys {
@@ -29,7 +19,6 @@ pub(crate) struct BodyInput {
     pub syntax: ContentHash,
     pub implementation: ContentHash,
     pub executable: bool,
-    pub generated: bool,
     pub queries: Option<Arc<BodyKeys>>,
 }
 pub(crate) struct HeaderInput {
@@ -49,17 +38,13 @@ pub struct NamespaceCapture {
     pub(crate) sources: SourceMap,
     pub(crate) anchors: Arc<NativeRecordContext>,
     store: Arc<dyn hirsel_engine_store::ResultStore>,
-    pub(crate) instances: Arc<hirsel_tir::InstanceBodies>,
     pub(crate) bodies: operation_inputs::InputIndex<DefId, Arc<BodyInput>>,
-    pub(crate) registrations: operation_inputs::InputIndex<DefId, Arc<AcceptedFrontRegistration>>,
     private_sources: operation_inputs::InputIndex<(DefId, u32), hirsel_span::Anchor>,
     _delta: Arc<CaptureDelta>,
     pub(crate) records: crate::NativeRecords,
     pub(crate) limits: crate::ComptimeLimits,
     environment: ContentHash,
     verify: Verify,
-    pub(crate) manifest: ContentHash,
-    manifest_inputs: Manifest,
     identity: ContentHash,
     pub(crate) installation: ContentHash,
     retained: u64,
@@ -73,20 +58,16 @@ pub struct NamespaceCapture {
 }
 
 pub(crate) struct CaptureDelta {
-    registrations: operation_inputs::InputIndex<DefId, Arc<AcceptedFrontRegistration>>,
     private_sources: operation_inputs::InputIndex<(DefId, u32), hirsel_span::Anchor>,
 }
 impl CaptureDelta {
     fn unadmitted_bytes(&self) -> u64 {
-        self.registrations
-            .unadmitted_bytes()
-            .saturating_add(self.private_sources.unadmitted_bytes())
+        self.private_sources.unadmitted_bytes()
     }
     fn admit(
         &self,
         allowance: &mut hirsel_engine_admission::MemoryReservation,
     ) -> Result<(), QueryError> {
-        self.registrations.admit(allowance)?;
         self.private_sources.admit(allowance)
     }
 }
@@ -120,9 +101,7 @@ impl OperationLease {
         &self.capture
     }
     pub(crate) fn native_sources(&self) -> impl Iterator<Item = &DefPath> {
-        self.capture.bodies.iter().filter_map(|(id, body)| {
-            (!body.generated || self.capture.registrations.contains_key(id)).then_some(id.path())
-        })
+        self.capture.bodies.keys().map(|id| id.path())
     }
 }
 
@@ -133,63 +112,35 @@ struct CaptureInputs {
     catalog: catalog::CatalogIdentity,
     items: std::sync::Weak<BTreeMap<DefPath, Vec<Arc<ItemSyntax>>>>,
     indexed: BTreeMap<FileId, (FileContext, QueryEnvironment)>,
-    generated: std::sync::Weak<BTreeMap<DefPath, GeneratedSource>>,
     definitions: Vec<DefId>,
-    registrations: Vec<std::sync::Weak<AcceptedFrontRegistration>>,
     staged: BTreeMap<DefPath, crate::comptime::StagedConstant>,
-    instances: hirsel_tir::InstanceBodies,
-    selected: BTreeMap<DefId, BTreeSet<hirsel_types::GeneratedActualKey>>,
     store: Option<std::sync::Weak<dyn hirsel_engine_store::ResultStore>>,
     limit: u64,
 }
 impl CaptureInputs {
-    fn new(
-        engine: &QueryEngine,
-        definitions: &[DefPath],
-        registrations: &[Arc<AcceptedFrontRegistration>],
-        limit: u64,
-    ) -> Self {
+    fn new(engine: &QueryEngine, definitions: &[DefPath], limit: u64) -> Self {
         Self {
             declarations: engine.declarations.observations(),
             catalog: engine.catalog.identity(),
             items: engine.items.owner(),
             indexed: engine.indexed_sources.clone(),
-            generated: engine.generated.owner(),
             definitions: definitions.iter().map(DefId::intern).collect(),
-            registrations: registrations.iter().map(Arc::downgrade).collect(),
             staged: engine.staged_constants.clone(),
-            instances: engine.instance_bodies.clone(),
-            selected: engine.selected_instances.clone(),
             store: engine.result_store.as_ref().map(Arc::downgrade),
             limit,
         }
     }
-    fn matches(
-        &self,
-        engine: &QueryEngine,
-        definitions: &[DefPath],
-        registrations: &[Arc<AcceptedFrontRegistration>],
-        limit: u64,
-    ) -> bool {
+    fn matches(&self, engine: &QueryEngine, definitions: &[DefPath], limit: u64) -> bool {
         self.limit == limit
             && self.declarations.shares_inputs(&engine.declarations)
             && self.catalog.matches(&engine.catalog)
             && self.items.ptr_eq(&engine.items.owner())
             && self.indexed == engine.indexed_sources
-            && self.generated.ptr_eq(&engine.generated.owner())
             && self
                 .definitions
                 .iter()
                 .copied()
                 .eq(definitions.iter().map(DefId::intern))
-            && self.registrations.len() == registrations.len()
-            && self
-                .registrations
-                .iter()
-                .zip(registrations)
-                .all(|(previous, current)| previous.ptr_eq(&Arc::downgrade(current)))
-            && self.instances == engine.instance_bodies
-            && self.selected == engine.selected_instances
             && self.staged.len() == engine.staged_constants.len()
             && self.staged.iter().zip(&engine.staged_constants).all(
                 |((path, previous), (current_path, current))| {
@@ -210,7 +161,6 @@ impl CaptureInputs {
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<Self>() + 256);
         weight.flat_vec(&self.definitions);
-        weight.flat_vec(&self.registrations);
         weight.tree::<FileId, (FileContext, QueryEnvironment)>(self.indexed.len());
         for (context, environment) in self.indexed.values() {
             weight.add(
@@ -223,16 +173,11 @@ impl CaptureInputs {
             });
         }
 
-        weight.instance_bodies(&mut self.instances);
         weight.tree::<DefPath, crate::comptime::StagedConstant>(self.staged.len());
         for (path, staged) in &self.staged {
             weight.path(path);
             weight.path(&staged.owner);
             weight.flat_vec(&staged.inputs);
-        }
-        weight.tree::<DefId, BTreeSet<hirsel_types::GeneratedActualKey>>(self.selected.len());
-        for keys in self.selected.values() {
-            weight.tree::<hirsel_types::GeneratedActualKey, ()>(keys.len());
         }
         weight.bytes().checked_add(self.catalog.retained_bytes())
     }
@@ -245,12 +190,8 @@ pub(crate) struct DiagnosticSources {
 }
 impl DiagnosticSources {
     pub(crate) fn owner(&self, anchor: hirsel_span::Anchor) -> Option<(DefPath, u32)> {
-        let (file, base) = self.sources.anchor(anchor)?;
-        let source = self.sources.file(file)?;
-        Some((
-            persistent::generated_codec_owner(self.definition.path(), source.text()),
-            base,
-        ))
+        let (_, base) = self.sources.anchor(anchor)?;
+        Some((self.definition.path().clone(), base))
     }
 }
 
@@ -293,67 +234,9 @@ struct Manifest {
     dependencies: Vec<(DefId, ContentHash)>,
     generations: Vec<Reference>,
     trace: Vec<DefId>,
-    instances: Arc<hirsel_tir::InstanceBodies>,
     budget: u64,
     depth: usize,
     charging_version: u32,
-}
-
-impl Manifest {
-    fn identity(&self) -> ContentHash {
-        let mut identity = ContentHash::of_parts(
-            "hirsel.namespace.manifest.v3",
-            [
-                self.base.0.as_slice(),
-                self.budget.to_le_bytes().as_slice(),
-                (self.depth as u64).to_le_bytes().as_slice(),
-                self.charging_version.to_le_bytes().as_slice(),
-            ],
-        );
-        for (id, value) in &self.dependencies {
-            identity = ContentHash::of_parts(
-                "hirsel.namespace.dependency.v1",
-                [
-                    identity.0.as_slice(),
-                    id.path().fingerprint().0.as_slice(),
-                    value.0.as_slice(),
-                ],
-            );
-        }
-        for id in &self.trace {
-            identity = ContentHash::of_parts(
-                "hirsel.namespace.trace.v1",
-                [identity.0.as_slice(), id.path().fingerprint().0.as_slice()],
-            );
-        }
-        for id in &self.instances.declarations {
-            identity = ContentHash::of_parts(
-                "hirsel.namespace.instance-declaration.v1",
-                [identity.0.as_slice(), id.path().fingerprint().0.as_slice()],
-            );
-        }
-        for (id, rows) in &self.instances.instances {
-            let mut rows = rows.iter().collect::<Vec<_>>();
-            rows.sort_by_key(|(key, _)| **key);
-            for (key, row) in rows {
-                identity = ContentHash::of_parts(
-                    "hirsel.namespace.instance.v1",
-                    [
-                        identity.0.as_slice(),
-                        id.path().fingerprint().0.as_slice(),
-                        row.definition.path().fingerprint().0.as_slice(),
-                    ],
-                );
-                for spelling in key.spellings() {
-                    identity = ContentHash::of_parts(
-                        "hirsel.namespace.actual.v1",
-                        [identity.0.as_slice(), spelling.as_bytes()],
-                    );
-                }
-            }
-        }
-        identity
-    }
 }
 
 impl NamespaceCapture {
@@ -451,15 +334,8 @@ impl NamespaceCapture {
         owner: &DefPath,
         reads: &Reads,
         execution: Option<&hirsel_validate::ExecutionReceipt>,
-        registrations: &std::sync::OnceLock<()>,
         mut observe: impl FnMut(&DefPath, &ReadKey) -> Option<ContentHash>,
     ) -> Result<(Reads, Option<hirsel_validate::ExecutionReceipt>), QueryError> {
-        if registrations.get().is_none() {
-            for registration in self.registrations.values() {
-                registration.validate_current(self, &mut observe)?;
-            }
-            let _ = registrations.set(());
-        }
         if let Some(key) = reads.first_changed(|key| {
             if matches!(key, ReadKey::ValidationUniverse(_)) && execution.is_some() {
                 reads.get(key)
@@ -500,12 +376,6 @@ impl NamespaceCapture {
                         && previous.implementation == current.implementation
                 })
             })
-            && self.registrations.iter().all(|(id, previous)| {
-                successor
-                    .registrations
-                    .get(id)
-                    .is_some_and(|current| previous.text() == current.text())
-            })
     }
     /// Reconstruct metadata from this capture for a registration transaction.
     /// This assembler has no session, active S1 stack or ambient body cache.
@@ -531,15 +401,8 @@ impl NamespaceCapture {
         engine.verify = self.verify;
         engine.sources = self.sources.clone();
         engine.result_store = Some(self.store.clone());
-        engine.instance_bodies = (*self.instances).clone();
-        engine.generated.bind(engine.source_ownership.clone());
         // Metadata assembly never schedules pending generated consumers.
         engine.bootstrap_active = true;
-        for (id, registration) in &self.registrations {
-            engine
-                .generated
-                .insert(id.path().clone(), registration.source());
-        }
         engine.snapshot = Some((
             engine.snapshot_stamp(),
             crate::snapshot::SnapshotCache::new(&self.snapshot),
@@ -558,12 +421,11 @@ impl NamespaceCapture {
         weight.add(definitions.len().checked_mul(
             size_of::<BodyInput>() + size_of::<BodyKeys>() + 4 * size_of::<usize>(),
         )?);
-        weight.tree::<DefId, Arc<AcceptedFrontRegistration>>(definitions.len());
         weight.tree::<(DefId, u32), hirsel_span::Anchor>(definitions.len());
         Some(weight.bytes())
     }
 
-    pub(crate) fn view_bytes(_registrations: usize, _private_sources: usize) -> Option<u64> {
+    pub(crate) fn view_bytes(_private_sources: usize) -> Option<u64> {
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(
             size_of::<NamespaceCapture>()
@@ -666,9 +528,6 @@ impl NamespaceCapture {
     pub(crate) fn consumers_admitted(&self) -> bool {
         self.consumer_scope.get().is_some()
     }
-    pub fn generation_manifest(&self) -> ContentHash {
-        self.manifest
-    }
     pub(crate) fn installed_input(
         &self,
         path: &DefPath,
@@ -725,19 +584,6 @@ impl NamespaceCapture {
         // written instance is indexed by the closed instance identity. Follow
         // that relation only through the exact accepted syntax, then let the
         // ordinary captured binding check validate the written source.
-        let written = if matches!(
-            syntax.item.generated,
-            Some(hirsel_syntax::Generated::Body(_))
-        ) {
-            self.registrations
-                .values()
-                .find(|registration| registration.syntax.as_ref() == syntax)
-                .map(|registration| self.syntax(registration.definition()))
-                .transpose()?
-        } else {
-            None
-        };
-        let syntax = written.as_deref().unwrap_or(syntax);
         if let Some(items) = self.inputs.siblings(syntax)? {
             return Ok(items);
         }
@@ -826,9 +672,6 @@ impl NamespaceCapture {
             Err(refused("consumer captures differ"))
         }
     }
-    pub(crate) fn manifest_holds(&self, identity: ContentHash, limit: u64) -> bool {
-        identity == self.manifest && self.retained <= limit
-    }
 }
 
 #[cfg(test)]
@@ -841,41 +684,10 @@ fn refused(message: &str) -> QueryError {
         message: message.into(),
     })
 }
-fn generation_bytes(
-    records: &NativeRecords,
-    anchors: &NativeRecordContext,
-    registration: &AcceptedFrontRegistration,
-) -> Option<Vec<u8>> {
-    records.encode(
-        anchors,
-        &(
-            DefId::intern(registration.definition()),
-            registration.text(),
-            &registration.syntax,
-            registration.reads(),
-            registration.checked_prefix(),
-            registration.depth(),
-        ),
-    )
-}
 impl QueryEngine {
-    pub(crate) fn prepare_namespace_registrations(
-        &mut self,
-        registrations: &[Arc<AcceptedFrontRegistration>],
-    ) -> Result<(), QueryError> {
-        self.prepare_namespace_scope();
-        for registration in registrations {
-            registration.validate(self)?;
-        }
-        Ok(())
-    }
     /// One definition's namespace row; `true` when it is an ordinary,
     /// unregistered declaration whose row a later view may carry.
-    fn namespace_body(
-        &mut self,
-        path: &DefPath,
-        registration: Option<&Arc<AcceptedFrontRegistration>>,
-    ) -> Result<(Arc<BodyInput>, bool), QueryError> {
+    fn namespace_body(&mut self, path: &DefPath) -> Result<(Arc<BodyInput>, bool), QueryError> {
         let facts = self
             .source_facts(path)
             .ok_or_else(|| refused("missing declaration facts"))?;
@@ -890,24 +702,9 @@ impl QueryEngine {
             .or_else(|| self.catalog.site(path))
             .or_else(|| self.captured_text(path).map(|text| text.site))
             .ok_or_else(|| refused(&format!("missing declaration site for {path}")))?;
-        let generated = facts.generator && !facts.instance_bodied;
-        let mut ordinary = false;
-        let [modes, lower, evaluate] = match registration {
-            Some(accepted) => self.accepted_front_store_keys(accepted)?,
-            None if facts.generator && self.items.contains_key(path) => [
-                self.front_declaration_store_key(path, QueryKind::Modes)?,
-                self.front_declaration_store_key(path, QueryKind::Lower)?,
-                self.front_declaration_store_key(path, QueryKind::Evaluate)?,
-            ],
-            None => {
-                ordinary = true;
-                // The seed depends on the path, not the kind: one serves all three.
-                let seed = self.product_seed(path);
-                [QueryKind::Modes, QueryKind::Lower, QueryKind::Evaluate].map(|kind| {
-                    EntryKey::new(seed, path, implementation, kind, LoweringPolicy::Reachable)
-                })
-            }
-        };
+        let seed = self.product_seed(path);
+        let [modes, lower, evaluate] = [QueryKind::Modes, QueryKind::Lower, QueryKind::Evaluate]
+            .map(|kind| EntryKey::new(seed, path, implementation, kind, LoweringPolicy::Reachable));
         let body = Arc::new(BodyInput {
             syntax: ContentHash::of_parts(
                 "hirsel.namespace.syntax-input.v1",
@@ -918,7 +715,6 @@ impl QueryEngine {
             ),
             implementation,
             executable: facts.executable,
-            generated,
             queries: Some(Arc::new(BodyKeys {
                 implementation,
                 site,
@@ -927,7 +723,7 @@ impl QueryEngine {
                 evaluate,
             })),
         });
-        Ok((body, ordinary))
+        Ok((body, true))
     }
     pub(super) fn prepare_namespace_scope(&mut self) {
         let previous = self
@@ -945,17 +741,15 @@ impl QueryEngine {
     pub fn capture_namespace(
         &mut self,
         definitions: &[DefPath],
-        registrations: &[Arc<AcceptedFrontRegistration>],
         limit: u64,
     ) -> Result<Arc<NamespaceCapture>, QueryError> {
-        self.capture_namespace_after(definitions, registrations, limit, None)
+        self.capture_namespace_after(definitions, limit, None)
     }
     /// As `capture_namespace`, reusing each row of `base` whose witnesses
     /// still hold and leaving in `base` this capture's rows for the next.
     pub(crate) fn capture_namespace_after(
         &mut self,
         definitions: &[DefPath],
-        registrations: &[Arc<AcceptedFrontRegistration>],
         limit: u64,
         mut view_base: Option<&mut ViewBase>,
     ) -> Result<Arc<NamespaceCapture>, QueryError> {
@@ -979,9 +773,7 @@ impl QueryEngine {
                     && Arc::ptr_eq(&previous.snapshot, &snapshot)
                     && previous.same_sources(&self.sources)
                     && previous.anchors.bindings_hold(&self.source_records())
-                    && previous
-                        .capture_inputs
-                        .matches(self, definitions, registrations, limit)
+                    && previous.capture_inputs.matches(self, definitions, limit)
             })
         {
             return Ok(previous);
@@ -996,7 +788,7 @@ impl QueryEngine {
             .unwrap_or_else(|| Arc::new(hirsel_engine_store::NoneStore));
         let records = NativeRecords::new(self.types.clone(), store.clone());
         let mut bodies = BTreeMap::new();
-        let mut private_sources = BTreeMap::new();
+        let private_sources = BTreeMap::new();
         let base = self
             .source_paths_iter()
             .map(|path| {
@@ -1014,21 +806,12 @@ impl QueryEngine {
             std::iter::once(self.environment_value().0.as_slice())
                 .chain(base.iter().map(|hash| hash.0.as_slice())),
         );
-        // The first registration for each definition, as a scan would find.
-        let mut registered = hirsel_syntax::DefMap::default();
-        for accepted in registrations {
-            registered
-                .entry(DefId::intern(accepted.definition()))
-                .or_insert(accepted);
-        }
         let mut carried = view_base.as_deref_mut().and_then(|base| base.take(self));
         let mut next = view_base.is_some().then(carried::Rows::default);
         for path in definitions {
             let id = DefId::intern(path);
-            let registration = registered.get(&id).copied();
             let reused = carried
                 .as_mut()
-                .filter(|_| registration.is_none())
                 .and_then(|carried| carried.reuse(self, id, path));
             let body = match reused {
                 Some(row) => {
@@ -1037,7 +820,7 @@ impl QueryEngine {
                         .as_ref()
                         .is_some_and(|carried| carried.rechecks(path))
                     {
-                        let (fresh, _) = self.namespace_body(path, None)?;
+                        let (fresh, _) = self.namespace_body(path)?;
                         assert!(
                             *fresh == **row.body(),
                             "a carried namespace row for {path} differs from its recomputation"
@@ -1050,7 +833,7 @@ impl QueryEngine {
                     body
                 }
                 None => {
-                    let (body, ordinary) = self.namespace_body(path, registration)?;
+                    let (body, ordinary) = self.namespace_body(path)?;
                     if let Some(next) = next.as_mut()
                         && ordinary
                     {
@@ -1059,121 +842,13 @@ impl QueryEngine {
                     body
                 }
             };
-            if body.generated {
-                let site = body
-                    .queries
-                    .as_ref()
-                    .ok_or_else(|| refused("missing declaration site"))?
-                    .site;
-                private_sources.insert(
-                    (
-                        DefId::intern(&generation::task::GeneratorInput::private_path(path)),
-                        0,
-                    ),
-                    site.anchor,
-                );
-            }
             bodies.insert(id, body);
         }
         if let (Some(base), Some(next)) = (view_base, next) {
             base.replace(self, next);
         }
-        self.prepare_namespace_registrations(registrations)?;
         let snapshot = self.signature_inputs();
         let inputs = header_products::SourceInputs::capture(self);
-        let selected = definitions.iter().cloned().collect::<BTreeSet<_>>();
-        let mut instances = self.instance_bodies(&selected);
-        for path in definitions {
-            if self
-                .source_facts(path)
-                .is_some_and(|facts| facts.instance_bodied)
-            {
-                let id = DefId::intern(path);
-                instances.declarations.insert(id);
-                if let Some(bodies) = self.instance_bodies.instances.get(&id) {
-                    let bodies = bodies
-                        .iter()
-                        .filter(|(_, body)| selected.contains(body.definition.path()))
-                        .map(|(key, body)| (*key, body.clone()))
-                        .collect::<std::collections::HashMap<_, _>>();
-                    if !bodies.is_empty() {
-                        instances.instances.insert(id, bodies);
-                    }
-                }
-            }
-        }
-        let mut dependencies = BTreeMap::new();
-        for registration in registrations {
-            let id = DefId::intern(registration.definition());
-            let mut identity = ContentHash::of_parts(
-                "hirsel.namespace.generation.v2",
-                [
-                    id.path().fingerprint().0.as_slice(),
-                    registration.text().as_bytes(),
-                    registration.syntax.text_hash.0.as_slice(),
-                    registration.reads().digest().0.as_slice(),
-                ],
-            );
-            for dependency in registration.checked_prefix() {
-                identity = ContentHash::of_parts(
-                    "hirsel.namespace.generation-prefix.v1",
-                    [
-                        identity.0.as_slice(),
-                        dependency.definition.path().fingerprint().0.as_slice(),
-                        dependency.fingerprint.0.as_slice(),
-                    ],
-                );
-            }
-            if dependencies.insert(id, identity).is_some() {
-                return Err(refused("duplicate accepted registration"));
-            }
-        }
-        // Portable generation dependencies name only their generating
-        // declarations. The capture identity retains the complete
-        // written base; unrelated headers must not change ordinary records.
-        let generation_headers = registrations
-            .iter()
-            .map(|registration| {
-                let id = DefId::intern(registration.definition());
-                (id, self.candidates_value(id.path()))
-            })
-            .chain(
-                instances
-                    .declarations
-                    .iter()
-                    .map(|id| (*id, self.candidates_value(id.path()))),
-            )
-            .collect::<BTreeMap<_, _>>();
-        let generation_base =
-            generation_headers
-                .iter()
-                .fold(self.environment_value(), |identity, (id, value)| {
-                    ContentHash::of_parts(
-                        "hirsel.generation.header.v2",
-                        [
-                            identity.0.as_slice(),
-                            id.path().fingerprint().0.as_slice(),
-                            value.0.as_slice(),
-                        ],
-                    )
-                });
-        let mut instance_weight = hirsel_query_products::retained::MetadataWeight::default();
-        instance_weight.instance_bodies(&mut instances);
-        let instances = Arc::new(instances);
-        let manifest_inputs = Manifest {
-            base: generation_base,
-            dependencies: dependencies.into_iter().collect(),
-            generations: vec![],
-            trace: registrations
-                .iter()
-                .map(|r| DefId::intern(r.definition()))
-                .collect(),
-            instances: instances.clone(),
-            budget: self.comptime_limits.budget,
-            depth: self.comptime_limits.call_depth,
-            charging_version: hirsel_tir::CHARGING_VERSION,
-        };
-        let manifest = manifest_inputs.identity();
         let mut body_index = self
             .operation
             .bodies
@@ -1235,34 +910,22 @@ impl QueryEngine {
             [
                 base.0.as_slice(),
                 installation.0.as_slice(),
-                manifest.0.as_slice(),
                 body_identity.0.as_slice(),
                 staged.0.as_slice(),
             ],
         );
-        let registrations: BTreeMap<_, _> = registrations
-            .iter()
-            .map(|r| (DefId::intern(r.definition()), r.clone()))
-            .collect();
         let mut delta_owner = self
             .operation
             .delta
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let previous = delta_owner.as_ref().and_then(std::sync::Weak::upgrade);
-        let registrations = operation_inputs::InputIndex::capture_by(
-            registrations,
-            previous.as_ref().map(|delta| &delta.registrations),
-            |_| Some(0),
-            Arc::ptr_eq,
-        )?;
         let private_sources = operation_inputs::InputIndex::capture(
             private_sources,
             previous.as_ref().map(|delta| &delta.private_sources),
             |_| Some(0),
         )?;
         let delta = Arc::new(CaptureDelta {
-            registrations: registrations.clone(),
             private_sources: private_sources.clone(),
         });
         *delta_owner = Some(Arc::downgrade(&delta));
@@ -1279,28 +942,14 @@ impl QueryEngine {
             .into_boxed_slice();
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of_val(&*source_paths) + size_of_val(&*roots));
-        weight.flat_vec(&manifest_inputs.dependencies);
-        weight.flat_vec(&manifest_inputs.trace);
         weight.tree::<DefId, ()>(self.unreached_installed.len());
-        let mut capture_inputs = CaptureInputs::new(
-            self,
-            definitions,
-            &registrations.values().cloned().collect::<Vec<_>>(),
-            limit,
-        );
-        // The caller's order is semantic, independently of the keyed registry.
-        capture_inputs.registrations = manifest_inputs
-            .trace
-            .iter()
-            .map(|id| Arc::downgrade(&registrations[id]))
-            .collect();
+        let mut capture_inputs = CaptureInputs::new(self, definitions, limit);
         let capture_bytes = capture_inputs
             .retained_bytes()
             .ok_or_else(|| refused("capture input size overflow"))?;
-        let retained = NamespaceCapture::view_bytes(registrations.len(), private_sources.len())
+        let retained = NamespaceCapture::view_bytes(private_sources.len())
             .and_then(|bytes| bytes.checked_add(capture_bytes))
             .and_then(|bytes| bytes.checked_add(weight.bytes()))
-            .and_then(|bytes| bytes.checked_add(instance_weight.bytes()))
             .ok_or_else(|| refused("capture size overflow"))?;
         if std::env::var_os("HIRSEL_OPERATION_OWNER_TRACE").is_some() {
             crate::queries::operation_owner_trace(format_args!(
@@ -1312,18 +961,16 @@ impl QueryEngine {
                 delta.unadmitted_bytes()
             ));
             crate::queries::operation_owner_trace(format_args!(
-                "OWNER CAPTURE fixed={:p} body={:p} view={} selection={} paths={} instances={} source_total={} source_pending={} bodies_pending={} definitions={} registrations={} limit={}",
+                "OWNER CAPTURE fixed={:p} body={:p} view={} selection={} paths={} source_total={} source_pending={} bodies_pending={} definitions={} limit={}",
                 Arc::as_ptr(&inputs),
                 &bodies,
                 retained,
                 capture_bytes,
                 weight.bytes(),
-                instance_weight.bytes(),
                 inputs.retained_bytes(),
                 inputs.unadmitted_bytes(),
                 bodies.unadmitted_bytes(),
                 definitions.len(),
-                registrations.len(),
                 limit
             ));
         }
@@ -1345,17 +992,13 @@ impl QueryEngine {
             sources: self.sources.clone(),
             anchors,
             store,
-            instances,
             bodies,
-            registrations,
             private_sources,
             _delta: delta,
             records,
             limits: self.comptime_limits,
             environment: self.environment_value(),
             verify: self.verify,
-            manifest,
-            manifest_inputs,
             identity,
             installation,
             retained,
@@ -1382,7 +1025,7 @@ impl QueryEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hirsel_engine_store::{MemStore, ResultStore};
+    use hirsel_engine_store::{Domain, MemStore, ResultStore};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Default)]
@@ -1468,7 +1111,7 @@ mod tests {
             );
             let mut view = |engine: &mut QueryEngine, definitions: &[DefPath]| {
                 engine
-                    .capture_namespace_after(definitions, &[], 8 << 20, Some(&mut base))
+                    .capture_namespace_after(definitions, 8 << 20, Some(&mut base))
                     .unwrap()
             };
             let row = |capture: &NamespaceCapture, id| capture.bodies.get(&id).unwrap().clone();
@@ -1519,9 +1162,7 @@ mod tests {
                 engine.items.is_empty(),
                 "warm declaration indexing must be body free"
             );
-            let capture = engine
-                .capture_namespace(&definitions, &[], 8 << 20)
-                .unwrap();
+            let capture = engine.capture_namespace(&definitions, 8 << 20).unwrap();
             assert!(
                 engine.items.is_empty(),
                 "installing a capture must not demand any body"
@@ -1546,23 +1187,17 @@ mod tests {
             let (other, _) = indexed(store.clone());
             let before =
                 hirsel_intern::work::read(hirsel_intern::work::Counter::NamespaceConstructions);
-            let capture = engine
-                .capture_namespace(&definitions, &[], 8 << 20)
-                .unwrap();
+            let capture = engine.capture_namespace(&definitions, 8 << 20).unwrap();
             for _ in 0..3 {
-                let same = engine
-                    .capture_namespace(&definitions, &[], 8 << 20)
-                    .unwrap();
+                let same = engine.capture_namespace(&definitions, 8 << 20).unwrap();
                 assert!(Arc::ptr_eq(&capture, &same));
             }
             let subset = engine
-                .capture_namespace(&definitions[..1], &[], 8 << 20)
+                .capture_namespace(&definitions[..1], 8 << 20)
                 .unwrap();
             assert_eq!(subset.bodies.len(), 1);
             assert!(!Arc::ptr_eq(&capture, &subset));
-            let again = engine
-                .capture_namespace(&definitions, &[], 8 << 20)
-                .unwrap();
+            let again = engine.capture_namespace(&definitions, 8 << 20).unwrap();
             assert!(Arc::ptr_eq(&capture, &again));
             assert_eq!(
                 hirsel_intern::work::read(hirsel_intern::work::Counter::NamespaceConstructions)
@@ -1571,10 +1206,8 @@ mod tests {
                 "two independently selected input sets build twice, regardless of consumer order/count"
             );
             engine.comptime_limits.budget -= 1;
-            let changed = engine
-                .capture_namespace(&definitions, &[], 8 << 20)
-                .unwrap();
-            assert_ne!(capture.manifest, changed.manifest);
+            let changed = engine.capture_namespace(&definitions, 8 << 20).unwrap();
+            assert_ne!(capture.identity(), changed.identity());
             assert!(!Arc::ptr_eq(&capture, &changed));
             assert!(
                 capture.require_environment(&other).is_err(),
@@ -1602,9 +1235,7 @@ mod tests {
             );
             assert!(Arc::ptr_eq(operation.namespace(), &capture));
             engine.comptime_limits = capture.limits;
-            let next = engine
-                .capture_namespace(&definitions, &[], 8 << 20)
-                .unwrap();
+            let next = engine.capture_namespace(&definitions, 8 << 20).unwrap();
             assert!(!Arc::ptr_eq(&capture, &next));
             let expanded = next
                 .admit_consumers(ContentHash::of_bytes(b"expanded roots"))
@@ -1710,9 +1341,7 @@ mod tests {
                     engine.sources = engine.sources.clone().retain_owner(Arc::new(()));
                 }
                 let definitions = engine.source_paths();
-                let capture = engine
-                    .capture_namespace(&definitions, &[], 8 << 20)
-                    .unwrap();
+                let capture = engine.capture_namespace(&definitions, 8 << 20).unwrap();
                 drop(engine);
                 if cold {
                     capture.header(&definitions[0]).unwrap();
@@ -1769,7 +1398,7 @@ mod tests {
             let mut fixed = None;
             for successor in 0..8 {
                 let capture = engine
-                    .capture_namespace(&definitions, &[], (8 << 20) - successor)
+                    .capture_namespace(&definitions, (8 << 20) - successor)
                     .unwrap();
                 let required = capture.retained_bytes();
                 if let Some((inputs, bodies, anchors)) = fixed {
@@ -1869,9 +1498,7 @@ mod tests {
                 let (mut engine, definitions) = indexed(store);
                 engine.adapters.signature = Some(Arc::new(Header));
                 assert!(engine.items.is_empty());
-                let capture = engine
-                    .capture_namespace(&definitions, &[], 8 << 20)
-                    .unwrap();
+                let capture = engine.capture_namespace(&definitions, 8 << 20).unwrap();
                 let types = engine.types.clone();
                 drop(engine);
                 let headers = capture.snapshot.header_products().unwrap().clone();
@@ -2099,7 +1726,7 @@ mod tests {
             changed.index_source(file, &default_context()).unwrap();
             let changed_definitions = changed.source_paths();
             let changed_capture = changed
-                .capture_namespace(&changed_definitions, &[], 8 << 20)
+                .capture_namespace(&changed_definitions, 8 << 20)
                 .unwrap();
             assert_eq!(
                 hirsel_intern::work::read(hirsel_intern::work::Counter::ValidationBaseBuilds)

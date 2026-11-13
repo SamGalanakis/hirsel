@@ -54,8 +54,6 @@ pub enum QueryKind {
     CheckedSummary,
     Registration,
     Evaluate,
-    Generate,
-    GeneratedRegistration,
     SourceAudit,
     SemanticBody,
 }
@@ -75,8 +73,6 @@ impl QueryKind {
             Self::CheckedSummary => "checked definition summary",
             Self::Registration => "staged declaration registration",
             Self::Evaluate => "compile-time evaluation",
-            Self::Generate => "generated source evaluation",
-            Self::GeneratedRegistration => "generated instance registration",
             Self::SourceAudit => "source allocation audit",
             Self::SemanticBody => "semantic source body",
         }
@@ -163,14 +159,11 @@ pub enum BodyKind {
 /// Declaration observations needed by checking without retaining syntax.
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SourceFacts {
-    pub generator: bool,
-    pub instance_bodied: bool,
     pub executable: bool,
     pub body_kind: BodyKind,
     pub specializes: bool,
     pub staged: bool,
     pub comptime: Vec<(u32, u32, u32)>,
-    pub fact: bool,
     pub associations: Vec<(u8, u32, u32)>,
     pub arms: Vec<(String, u32, u32)>,
 }

@@ -160,7 +160,6 @@ impl Fixture {
                 path: id("main"),
                 signature_hash: ContentHash::default(),
                 entry: BodyId(0),
-                contracts: vec![],
                 bodies: vec![Body {
                     arena_scope_grant: None,
                     scoped_parameters: Vec::new(),
@@ -390,7 +389,6 @@ pub(crate) fn function_signature(
             allocation: Allocation::NoAlloc,
             authority: AuthoritySummary::inert(),
             uses: Uses::Only(AuthoritySummary::inert()),
-            contracts: vec![].into(),
             incomplete: false,
             foreign: None,
         }),
@@ -472,7 +470,6 @@ pub(crate) fn arena_slot(f: &mut Fixture, storage: Storage) -> u32 {
         distinct: false,
         resource: false,
         drop: None,
-        fact: None,
         captures: None,
         destructor_allocation: Allocation::NoAlloc,
     }));
@@ -552,7 +549,6 @@ pub(crate) fn capability_signature(name: &str) -> Signature {
         distinct: false,
         resource: false,
         drop: None,
-        fact: None,
         captures: None,
     }));
     s
@@ -665,7 +661,6 @@ pub(crate) fn fn_type(parameters: Vec<Parameter>, result: TypeId) -> FunctionTyp
         allocation: Allocation::NoAlloc,
         authority: AuthoritySummary::inert(),
         uses: Uses::Only(AuthoritySummary::inert()),
-        contracts: vec![].into(),
         incomplete: false,
         foreign: None,
     }

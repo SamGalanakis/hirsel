@@ -14,12 +14,11 @@ use hirsel_types::{
 };
 use std::sync::Arc;
 
-/// Exact demand order across staged values and generated source selections.
+/// Exact demand order across staged constant values.
 /// This is replay metadata, never verification authority.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub(crate) enum Selection {
     Staged(DefId, Vec<u64>),
-    Generated(DefId),
 }
 
 /// A constant evaluation and the substitutions used to lower its source initializer.
@@ -686,13 +685,6 @@ impl crate::queries::s1::DependencySource for EngineDependencies<'_> {
     ) -> crate::queries::s1::DependencyProduct<hirsel_tir::MaterializedRef> {
         self.recorded(|engine| engine.constant_instance(path, arguments))
     }
-    fn instance_body(
-        &mut self,
-        path: &DefPath,
-        arguments: &[hirsel_types::GenericArgument],
-    ) -> crate::queries::s1::DependencyProduct<Option<DefPath>> {
-        self.recorded(|engine| engine.resolve_instance(path, arguments))
-    }
     fn definition(
         &mut self,
         path: &DefPath,
@@ -897,17 +889,7 @@ impl QueryEngine {
             frame.push(Selection::Staged(path, arguments.to_vec()));
         }
     }
-    pub(crate) fn record_generated_selection(&mut self, path: DefId) {
-        for frame in &mut self.evaluation_selections {
-            frame.push(Selection::Generated(path));
-        }
-    }
     pub(crate) fn record_selections(&mut self, selections: &[Selection]) -> Result<(), QueryError> {
-        for selection in selections {
-            if let Selection::Generated(instance) = selection {
-                self.charge_generated_path(*instance)?;
-            }
-        }
         for frame in &mut self.evaluation_selections {
             frame.extend_from_slice(selections);
         }
@@ -1660,14 +1642,6 @@ fn specialize_sizes(
                     }
                 }
                 hirsel_tir::Rvalue::FunctionReference { arguments: a, .. } => arguments(a)?,
-                hirsel_tir::Rvalue::Shape(t) => {
-                    let mut a = vec![GenericArgument::Type(*t)];
-                    arguments(&mut a)?;
-                    let GenericArgument::Type(root) = a[0] else {
-                        unreachable!()
-                    };
-                    *t = root;
-                }
                 _ => (),
             }
         }

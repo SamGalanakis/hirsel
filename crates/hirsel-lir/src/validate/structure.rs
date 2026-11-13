@@ -1311,7 +1311,7 @@ impl<S: Stage> Checker<'_, '_, S> {
             Inst::ReadStatic { result, symbol } => {
                 if !matches!(
                     unit.tables.symbols[symbol.index()].kind,
-                    SymbolKind::Constant | SymbolKind::Shape
+                    SymbolKind::Constant
                 ) {
                     self.add(site, K::Type("static read"));
                 }

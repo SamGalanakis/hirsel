@@ -1424,10 +1424,6 @@ fn discarded_callable_reads(body: &tir::Body, types: &TypeInterner) -> Vec<bool>
                         used[root(p)] = true;
                     }
                 }
-                K::Snapshot { destination, value } => {
-                    used[root(*destination)] = true;
-                    used[root(value.place)] = true;
-                }
                 K::Defuse { place }
                 | K::EndOrigin(place)
                 | K::BeginLoan { place, .. }
@@ -1515,7 +1511,6 @@ fn nullary_temporaries(body: &tir::Body) -> Vec<Option<u32>> {
                     written[root(*destination)] = true;
                     written[root(*displaced)] = true;
                 }
-                K::Snapshot { destination, .. } => written[root(*destination)] = true,
                 K::BeginLoan {
                     place,
                     mutable: true,
@@ -1662,10 +1657,6 @@ fn view_assignments(body: &tir::Body) -> (Vec<Vec<Option<ViewSource>>>, Vec<bool
                     disqualified[root(*displaced)] = true;
                     operand(value, &mut disqualified);
                 }
-                K::Snapshot { destination, value } => {
-                    disqualified[root(*destination)] = true;
-                    operand(value, &mut disqualified);
-                }
                 K::Check { condition, .. } => operand(condition, &mut disqualified),
                 K::BeginLoan {
                     place,
@@ -1760,7 +1751,6 @@ fn index_stable(body: &tir::Body, l: usize, viewed: tir::PlaceId, at: (usize, us
                     displaced,
                     ..
                 } => hit(destination) || hit(displaced) || used(value),
-                K::Snapshot { destination, value } => hit(destination) || used(value),
                 K::Check { condition, .. } => used(condition),
                 K::StorageDead { place, .. } | K::Drop { place, .. } => hit(place),
                 K::BeginLoan {

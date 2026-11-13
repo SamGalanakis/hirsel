@@ -16,15 +16,9 @@ pub struct FrontCheckedSignatures {
     inputs: BTreeMap<DefPath, Input>,
     front: Arc<FrontBodyQueries>,
     environment: hirsel_proof_export::Environment,
-    registrations: Vec<Vec<u8>>,
     _allowance: hirsel_engine_admission::MemoryReservation,
 }
 impl FrontCheckedSignatures {
-    /// Canonical records of the accepted S0 namespace bound to this producer.
-    /// Later registration transactions require a new producer and inventory.
-    pub fn registrations(&self) -> &[Vec<u8>] {
-        &self.registrations
-    }
     pub fn environment(&self) -> &hirsel_proof_export::Environment {
         &self.environment
     }
@@ -111,31 +105,9 @@ impl QueryEngine {
                     .is_some_and(|current| Arc::ptr_eq(snapshot, &current))
         })
     }
-    fn validate_checked_registrations(
-        &mut self,
-        front: &FrontBodyQueries,
-    ) -> Result<(), QueryError> {
+    fn require_unstaged_headers(&self) -> Result<(), QueryError> {
         if !self.staged_constants.is_empty() || !self.staged_values.is_empty() {
             return Err(QueryError::NotImplemented);
-        }
-        let paths: Vec<_> = self.generated.keys().cloned().collect();
-        for path in paths {
-            let accepted = front.registration(&path).ok_or_else(|| {
-                QueryError::Operational(hirsel_types::OperationalFailure {
-                    operation: "checked signature inputs".into(),
-                    message: format!(
-                        "generated declaration lacks its accepted front registration: {path}"
-                    ),
-                })
-            })?;
-            accepted.validate(self)?;
-            if self
-                .generated
-                .get(&path)
-                .is_none_or(|source| source.text != accepted.text())
-            {
-                return Err(QueryError::NotImplemented);
-            }
         }
         Ok(())
     }
@@ -152,7 +124,7 @@ impl QueryEngine {
                 message: "captured header snapshot differs from current source inputs".into(),
             }));
         }
-        self.validate_checked_registrations(front)?;
+        self.require_unstaged_headers()?;
         let capture = self.capture_checked_signature_inputs(front.clone())?;
         let paths: BTreeSet<_> = self
             .source_paths()
@@ -168,8 +140,6 @@ impl QueryEngine {
         weight.add(size_of::<FrontCheckedSignatures>() + 2 * size_of::<usize>());
         weight.tree::<DefPath, Input>(paths.len());
         weight.add(self.environment.compiler_version.capacity());
-        let registrations = self.checked_registration_records();
-        weight.vec(&registrations, |w, row| w.add(row.capacity()));
         let mut owned = hirsel_query_products::retained::Weight::default();
         for path in paths {
             let id = DefId::intern(&path);
@@ -229,7 +199,7 @@ impl QueryEngine {
         if !self.retains_signature_inputs(&front.signatures()) {
             return Err(header_refusal());
         }
-        self.validate_checked_registrations(&front)?;
+        self.require_unstaged_headers()?;
         Ok(CapturedCheckedSignatures {
             paths: self
                 .source_paths()
@@ -245,7 +215,6 @@ impl QueryEngine {
             builtins: self.builtins.clone(),
             registry: self.registry.clone(),
             environment: self.proof_environment(),
-            registrations: self.checked_registration_records(),
         })
     }
     /// Size the immutable export factory without demanding any header product.
@@ -288,7 +257,6 @@ pub(super) struct CapturedCheckedSignatures {
     builtins: BTreeMap<DefPath, hirsel_types::SignatureRef>,
     registry: hirsel_registry::BuiltinRegistry,
     environment: hirsel_proof_export::Environment,
-    registrations: Vec<Vec<u8>>,
 }
 impl CapturedCheckedSignatures {
     fn retained_bytes(&self) -> u64 {
@@ -299,7 +267,6 @@ impl CapturedCheckedSignatures {
             weight.path(path);
         }
         weight.add(self.environment.compiler_version.capacity());
-        weight.vec(&self.registrations, |w, row| w.add(row.capacity()));
         weight.tree::<DefPath, hirsel_types::SignatureRef>(self.builtins.len());
         let mut owned = hirsel_query_products::retained::Weight::default();
         for (path, signature) in &self.builtins {
@@ -339,7 +306,6 @@ impl CapturedCheckedSignatures {
         weight.add(size_of::<FrontCheckedSignatures>() + 2 * size_of::<usize>());
         weight.tree::<DefPath, Input>(self.paths.len());
         weight.add(self.environment.compiler_version.capacity());
-        weight.vec(&self.registrations, |w, row| w.add(row.capacity()));
         let mut owned_signatures = hirsel_query_products::retained::Weight::default();
         for path in &self.paths {
             let id = DefId::intern(path);
@@ -366,7 +332,6 @@ impl CapturedCheckedSignatures {
         weight.add(size_of::<FrontCheckedSignatures>() + 2 * size_of::<usize>());
         weight.tree::<DefPath, Input>(self.paths.len());
         weight.add(self.environment.compiler_version.capacity());
-        weight.vec(&self.registrations, |w, row| w.add(row.capacity()));
         if weight.bytes() > allowance.bytes() {
             return Err(header_refusal());
         }
@@ -411,7 +376,6 @@ impl CapturedCheckedSignatures {
             inputs,
             front: self.front.clone(),
             environment: self.environment.clone(),
-            registrations: self.registrations.clone(),
             _allowance: allowance,
         }))
     }

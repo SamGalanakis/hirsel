@@ -133,11 +133,6 @@ impl CheckedReceipt {
     }
 }
 
-struct Expansion {
-    text: Arc<str>,
-    _allowance: hirsel_engine_admission::MemoryReservation,
-}
-
 #[derive(Default)]
 pub(super) struct SourceIndexSlot {
     generation: Arc<()>,
@@ -170,7 +165,6 @@ struct SourceProducts {
     declaration_export: bool,
     hash_selection: Option<(Option<hirsel_syntax::PackageId>, DefPath)>,
     native_sources: Option<(Vec<DefPath>, Arc<hirsel_engine::FrontNativeQueries>)>,
-    expansion: Option<Arc<Expansion>>,
     entry: DefPath,
     inputs: CompileInputs,
     lowering: LoweringPolicy,
@@ -312,7 +306,6 @@ impl GraphProducts for SourceProducts {
                 .run
                 .as_ref()
                 .is_some_and(|run| run.precompute_query().is_some()),
-            CompileOperation::Expand => self.expansion.is_some(),
             CompileOperation::Hashes { package } => self
                 .hash_selection
                 .as_ref()
@@ -461,7 +454,6 @@ impl GraphProducts for SourceProducts {
                     .and_then(|run| run.precompute_query())
                     .ok_or_else(|| uninstalled())?,
             ],
-            CompileOperation::Expand => vec![self.check.query()],
             CompileOperation::Hashes { .. } => vec![
                 self.run
                     .as_ref()
@@ -510,7 +502,6 @@ impl GraphProducts for SourceProducts {
         let export = self.export.clone();
         let lower = self.lower.clone();
         let receipt = self.receipt.clone();
-        let expansion = self.expansion.clone();
         let native_sources = self.native_sources.clone();
         let expected = check.query();
         let entry = match &operation {
@@ -718,39 +709,6 @@ impl GraphProducts for SourceProducts {
                                     .outcome(product.clone())
                                     .ok_or_else(|| uninstalled())?
                                     .products,
-                            )
-                        }
-                        CompileOperation::Expand => {
-                            let [product] = products else {
-                                return Err(uninstalled());
-                            };
-                            let completed = check
-                                .outcome(product.clone())
-                                .ok_or_else(|| uninstalled())?;
-                            if completed.checked.completion
-                                != hirsel_engine::CheckCompletion::Complete
-                            {
-                                return Err(ToolError::Query {
-                                    error: QueryError::NotImplemented,
-                                    phase: None,
-                                    sources: completed.checked.sources,
-                                });
-                            }
-                            if completed.checked.diagnostics.iter().any(|diagnostic| {
-                                diagnostic.severity == hirsel_diag::Severity::Error
-                            }) {
-                                return Err(ToolError::Query {
-                                    error: QueryError::Diagnostics(completed.checked.diagnostics),
-                                    phase: None,
-                                    sources: completed.checked.sources,
-                                });
-                            }
-                            CompileResult::Expansion(
-                                expansion
-                                    .as_ref()
-                                    .ok_or_else(|| uninstalled())?
-                                    .text
-                                    .clone(),
                             )
                         }
                         CompileOperation::Check { .. } => {
@@ -1048,7 +1006,6 @@ pub(super) fn install(
     );
     let (lowering, needs_run) = match &request.operation {
         CompileOperation::CheckedProducts { lowering, .. } => (*lowering, false),
-        CompileOperation::Expand => (LoweringPolicy::Comptime, false),
         CompileOperation::SafeCheck => (config.lowering, true),
         CompileOperation::Check { .. }
         | CompileOperation::Precompute
@@ -1193,7 +1150,7 @@ pub(super) fn install(
             ),
         receipt: matches!(request.operation, CompileOperation::CheckedProducts { .. }),
         export: artifacts,
-        storage: !matches!(request.operation, CompileOperation::Expand),
+        storage: true,
         batch: matches!(request.operation, CompileOperation::TirBatch { .. }),
     };
     let root_package = program.entry.0.package.clone();
@@ -1277,7 +1234,6 @@ pub(super) fn install(
     let demand_policy = match &request.operation {
         CompileOperation::Check { lowering }
         | CompileOperation::CheckedProducts { lowering, .. } => *lowering,
-        CompileOperation::Expand => LoweringPolicy::Comptime,
         _ => LoweringPolicy::Reachable,
     };
     let prefix = matches!(
@@ -1308,7 +1264,6 @@ pub(super) fn install(
         demand_policy,
         prefix,
         shape,
-        config.jobs,
         limits,
         &host,
         &mut loading,
@@ -1415,44 +1370,6 @@ pub(super) fn install(
             request: installed.request.clone(),
             products: std::sync::OnceLock::new(),
             digest_view: std::sync::OnceLock::new(),
-        }))
-    } else {
-        None
-    };
-    let expansion = if matches!(request.operation, CompileOperation::Expand) {
-        let mut generated = program
-            .engine
-            .generated_sources()
-            .filter(|(_, generated)| {
-                program.engine.sources.resolve(generated.site).file == program.primary
-            })
-            .collect::<Vec<_>>();
-        generated
-            .sort_by_key(|(_, generated)| program.engine.sources.resolve(generated.site).start);
-        let bytes = generated
-            .iter()
-            .try_fold(0usize, |bytes, (path, source)| {
-                bytes
-                    .checked_add(path.to_string().len())?
-                    .checked_add(source.text.len())?
-                    .checked_add(24)
-            })
-            .ok_or_else(|| uninstalled())?;
-        let allowance = installed
-            .request
-            .reserve(bytes as u64)
-            .map_err(ToolError::Io)?;
-        let mut text = String::with_capacity(bytes);
-        for (path, generated) in generated {
-            if !text.is_empty() {
-                text.push('\n');
-            }
-            use std::fmt::Write;
-            writeln!(text, "// generated body of {path}\n{}", generated.text).unwrap();
-        }
-        Some(Arc::new(Expansion {
-            text: text.into(),
-            _allowance: allowance,
         }))
     } else {
         None
@@ -2052,7 +1969,6 @@ pub(super) fn install(
         declaration_export: matches!(request.operation, CompileOperation::DataAbi),
         hash_selection,
         native_sources,
-        expansion,
         entry: program.entry,
         inputs: request.inputs.clone(),
         lowering,

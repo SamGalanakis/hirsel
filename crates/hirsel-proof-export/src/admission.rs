@@ -168,8 +168,7 @@ fn rvalue_uses(value: &Rvalue) -> Option<usize> {
         Rvalue::Constant(_)
         | Rvalue::ReadConstant { .. }
         | Rvalue::FunctionReference { .. }
-        | Rvalue::Size(_)
-        | Rvalue::Shape(_) => 0,
+        | Rvalue::Size(_) => 0,
     })
 }
 fn instruction_uses(body: &Body, kind: &InstructionKind) -> Option<usize> {
@@ -180,7 +179,7 @@ fn instruction_uses(body: &Body, kind: &InstructionKind) -> Option<usize> {
         | InstructionKind::BeginLoan { .. }
         | InstructionKind::Drop { .. }
         | InstructionKind::Check { .. } => 1,
-        InstructionKind::BindOrigin { .. } | InstructionKind::Snapshot { .. } => 2,
+        InstructionKind::BindOrigin { .. } => 2,
         InstructionKind::BindFields { fields, .. } => fields.len().checked_add(1)?,
         InstructionKind::Assign { value, .. } => match body.rvalues.get(value.0 as usize) {
             Some(value) => rvalue_uses(value)?.checked_add(1)?,
@@ -451,7 +450,6 @@ fn build_tables_layout(
 ) -> Option<BuildTablesLayout> {
     let mut types = WireShape::default();
     let mut type_rows = 0usize;
-    let mut max_contracts = 0usize;
     for id in input
         .types
         .ids()
@@ -467,9 +465,6 @@ fn build_tables_layout(
         }
         types = types.add(row_shape)?;
         type_rows = type_rows.checked_add(1)?;
-        if let hirsel_types::TypeKind::Function(function) = &row.kind {
-            max_contracts = max_contracts.max(function.contracts.len());
-        }
     }
     let edges = types.types;
     let mut data = WireShape::default();
@@ -497,9 +492,6 @@ fn build_tables_layout(
         let mut section_shape = shape_captured(&section.dependencies, input, 0, captured)?;
         for signature in std::iter::once(&section.public).chain(section.owner_view.as_ref()) {
             section_shape = section_shape.add(shape_captured(signature, input, 0, captured)?)?;
-            if let SignatureKind::Function(function) = &signature.kind {
-                max_contracts = max_contracts.max(function.contracts.len());
-            }
         }
         data = data.add(section_shape)?;
         largest_section = largest_section.upper_max(section_shape);
@@ -556,17 +548,10 @@ fn build_tables_layout(
         let mut checks = 0usize;
         let mut arithmetic = 0usize;
         let mut failures = 0usize;
-        let mut call_clauses = 0usize;
+        let call_clauses = 0usize;
         let mut projected = 0usize;
-        let owner_contracts = input
-            .signatures
-            .get(definition.path.path())
-            .and_then(|s| match &s.public.kind {
-                SignatureKind::Function(f) => Some(f.contracts.len()),
-                _ => None,
-            })
-            .unwrap_or(0);
-        let mut max_rule = 6usize; // built-in FACT-1, MEM-13/14 and SEM-1
+        let owner_contracts = 0usize;
+        let mut max_rule = 6usize; // built-in MEM-13/14 and SEM-1
         let mut map_rows = 0usize;
         for body in &definition.bodies {
             places = places.checked_add(body.places.len())?;
@@ -588,36 +573,8 @@ fn build_tables_layout(
             }
             for block in &body.blocks {
                 uses = uses.checked_add(terminator_uses(&block.terminator)?)?;
-                if let Terminator::Call { callee, .. } = &block.terminator {
+                if let Terminator::Call { .. } = &block.terminator {
                     calls = calls.checked_add(1)?;
-                    let function = match callee {
-                        Callee::Definition { path, .. } => {
-                            input
-                                .signatures
-                                .get(path)
-                                .and_then(|s| match &s.public.kind {
-                                    SignatureKind::Function(f) => Some(f),
-                                    _ => None,
-                                })
-                        }
-                        Callee::Indirect { value, .. } => body
-                            .places
-                            .get(value.place.0 as usize)
-                            .and_then(|p| input.types.get_if_loaded(p.ty))
-                            .and_then(|row| match &row.kind {
-                                hirsel_types::TypeKind::Function(f) => Some(f),
-                                _ => None,
-                            }),
-                    };
-                    if let Some(function) = function {
-                        call_clauses = call_clauses.checked_add(
-                            function
-                                .contracts
-                                .iter()
-                                .filter(|c| c.kind == hirsel_syntax::ContractKind::Requires)
-                                .count(),
-                        )?;
-                    }
                 }
                 if let Terminator::Fail { rule, .. } = &block.terminator {
                     failures = failures.checked_add(1)?;
@@ -656,17 +613,16 @@ fn build_tables_layout(
             .checked_add(call_clauses)?
             .checked_add(projected_sites)?;
         let mut tables = Bytes::default();
-        tables.rows::<(ObligationId, Vec<Site>, crate::Detail)>(obligations)?;
+        tables.rows::<(ObligationId, Vec<Site>)>(obligations)?;
         tables.rows::<crate::Obligation>(obligations)?;
         tables.rows::<Site>(sites.checked_add(obligations.checked_mul(4)?)?)?;
         tables.tree::<(RuleId, ObligationKind), u32>(obligations)?;
         tables.tree::<ObligationId, (hirsel_tir::BodyId, PlaceId)>(projected)?;
-        tables.tree::<u32, Vec<Site>>(max_contracts)?;
+        tables.tree::<u32, Vec<Site>>(0usize)?;
         tables.hash::<(usize, usize, usize), u32>(instructions)?;
-        tables.hash::<hirsel_tir::BodyId, u32>(max_contracts)?;
+        tables.hash::<hirsel_tir::BodyId, u32>(0usize)?;
         tables.hash::<LocalId, hirsel_tir::BodyId>(map_rows)?;
         tables.hash::<LocalId, hirsel_tir::BodyId>(map_rows)?;
-        tables.rows::<&hirsel_types::Contract>(max_contracts.checked_mul(2)?)?;
         tables.add(
             obligations
                 .checked_mul(2)?
@@ -1096,7 +1052,6 @@ pub(crate) mod tests {
             path: DefId::intern(&path),
             signature_hash: ContentHash::default(),
             entry: BodyId(0),
-            contracts: vec![],
             bodies: vec![Body {
                 arena_scope_grant: None,
                 parameter_scope: hirsel_syntax::LexicalOwner::first(&path)

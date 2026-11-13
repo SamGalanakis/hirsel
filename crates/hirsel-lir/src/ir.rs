@@ -542,8 +542,6 @@ pub enum UnavailableFeature {
     ReleaseRegion,
     CloseArena,
     JoinTasks,
-    /// A `TypeShape` whose static data is not materialized.
-    Shape,
 }
 
 /// One instruction row. Every variant is at most seven 32-bit words so the row is
@@ -1569,7 +1567,6 @@ pub enum SymbolKind {
     Constant,
     Type,
     Finalizer,
-    Shape,
 }
 
 /// A link-level symbol: definition plus instance digest for specialized code.
@@ -3490,7 +3487,6 @@ snapshot_enum!(UnavailableFeature {
     ReleaseRegion,
     CloseArena,
     JoinTasks,
-    Shape,
 });
 snapshot_enum!(FlatFieldOp {
     Open,
@@ -3713,8 +3709,7 @@ snapshot_enum!(SymbolKind {
     Function,
     Constant,
     Type,
-    Finalizer,
-    Shape
+    Finalizer
 });
 snapshot_struct!(Symbol {
     kind,

@@ -152,8 +152,7 @@ impl NativeLinkSource {
             }
             // A fact helper's code is its owner's `where` predicate, so the
             // anchors it cites belong to the owner's declaration.
-            let declaration =
-                hirsel_check_protocol::fact::fact_owner(path).unwrap_or_else(|| path.clone());
+            let declaration = path.clone();
             for anchor in anchors {
                 let owner = context.record_owner(*anchor);
                 let canonical = owner.as_ref().and_then(|(owner, occurrence)| {
@@ -461,7 +460,6 @@ impl NativeLinkSource {
                     path,
                     file(&source.file),
                     source.base,
-                    source.generated,
                     source
                         .anchors
                         .iter()

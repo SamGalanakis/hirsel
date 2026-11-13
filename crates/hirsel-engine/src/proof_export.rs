@@ -6,8 +6,8 @@ use hirsel_proof_export::{
     Anchor, Annotation, Environment, Export, ExportInput, Header, ImportError, Location, Locator,
     SignatureSection, Skipped,
 };
+use hirsel_syntax::AnalysisSite;
 use hirsel_syntax::ContentHash;
-use hirsel_syntax::{AnalysisSite, ItemKind, TypeBody};
 use hirsel_types::{SignatureKind, TypeInterner};
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
@@ -127,8 +127,7 @@ impl QueryEngine {
                 modules.insert(self.item_file(&syntax), module_identity(path));
                 // A FACT-2 helper shares its owner's tree; the annotations
                 // are the owner declaration's alone.
-                let own = hirsel_check_protocol::fact::fact_owner(path).is_none();
-                for a in syntax.tree.analyses.iter().filter(|_| own) {
+                for a in syntax.tree.analyses.iter() {
                     let anchor = match a.site {
                         AnalysisSite::Item => Anchor::Item,
                         AnalysisSite::Parameter(i) => Anchor::Parameter(i),
@@ -140,14 +139,8 @@ impl QueryEngine {
                     annotated.push((path.clone(), anchor, a.clone()));
                 }
                 match &syntax.item.kind {
-                    _ if crate::queries::generation::executable(&syntax) => {
+                    _ if crate::queries::staging::executable(&syntax) => {
                         executable.insert(path.clone());
-                    }
-                    ItemKind::Type {
-                        body: TypeBody::Distinct { fact: Some(_), .. },
-                        ..
-                    } => {
-                        executable.insert(hirsel_check_protocol::fact::fact_path(path));
                     }
                     _ => {}
                 }

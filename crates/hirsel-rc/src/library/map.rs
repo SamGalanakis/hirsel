@@ -275,7 +275,6 @@ fn helper(
             allocation,
             authority: AuthoritySummary::Unknown,
             uses: Uses::Unrestricted,
-            contracts: vec![].into(),
             incomplete: false,
             foreign: None,
         }),

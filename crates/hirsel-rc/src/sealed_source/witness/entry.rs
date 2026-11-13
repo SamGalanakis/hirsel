@@ -321,7 +321,6 @@ impl SourceInput {
             allocation: hirsel_types::Allocation::MayAllocate,
             authority: hirsel_types::AuthoritySummary::Unknown,
             uses: hirsel_types::Uses::Unrestricted,
-            contracts: Vec::new().into(),
             incomplete: false,
             foreign: None,
         };

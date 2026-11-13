@@ -201,8 +201,6 @@ pub enum CompileOperation {
     /// Populate complete source semantic, audit, Lower and constant products.
     Precompute,
     SafeCheck,
-    /// Generated bodies in primary-source order after the accepted Check.
-    Expand,
     /// LANG-6 hashes of a package and its complete source closure.
     Hashes {
         package: Option<hirsel_syntax::PackageId>,

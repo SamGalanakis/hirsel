@@ -214,7 +214,6 @@ fn schema_inner(
                 if d.capability.is_some()
                     || d.resource
                     || d.drop.is_some()
-                    || d.fact.is_some()
                     || (signature.metadata.visibility == hirsel_syntax::Visibility::PublicOpaque)
                         != check.is_some()
                     || check.is_some()

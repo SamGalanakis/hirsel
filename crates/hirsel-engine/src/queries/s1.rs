@@ -4,7 +4,6 @@
 //! returns products for its caller to merge, including when evaluation fails.
 use super::*;
 use hirsel_tir::{DefinitionRef, MaterializedRef, TirProvider};
-use hirsel_types::GenericArgument;
 
 /// A dependency's complete read record survives failure and cache hits alike.
 /// The source owns depth admission and registration requests; this bridge only
@@ -26,11 +25,6 @@ pub(crate) trait DependencySource {
         path: &DefPath,
         arguments: &[u64],
     ) -> DependencyProduct<MaterializedRef>;
-    fn instance_body(
-        &mut self,
-        path: &DefPath,
-        arguments: &[GenericArgument],
-    ) -> DependencyProduct<Option<DefPath>>;
 }
 
 /// An immutable private artifact after V admission. It can execute with any
@@ -283,14 +277,6 @@ impl<S: DependencySource> TirProvider for EvaluationProvider<'_, S> {
         let product = self.source.constant_instance(path, arguments);
         self.merge(product)
     }
-    fn instance_body(
-        &mut self,
-        path: &DefPath,
-        arguments: &[GenericArgument],
-    ) -> Result<Option<DefPath>, QueryError> {
-        let product = self.source.instance_body(path, arguments);
-        self.merge(product)
-    }
     fn constant_definitions(&mut self) -> Result<Vec<DefPath>, QueryError> {
         Ok(vec![])
     }
@@ -328,13 +314,6 @@ mod tests {
             _: &DefPath,
             _: &[u64],
         ) -> DependencyProduct<MaterializedRef> {
-            self.product()
-        }
-        fn instance_body(
-            &mut self,
-            _: &DefPath,
-            _: &[GenericArgument],
-        ) -> DependencyProduct<Option<DefPath>> {
             self.product()
         }
     }
@@ -418,7 +397,6 @@ mod tests {
             signature_hash: ContentHash::default(),
             bodies: vec![body],
             entry: BodyId(0),
-            contracts: vec![],
         };
         definition.types = definition_types(types, &definition);
         crate::comptime::PreparedEvaluation {
@@ -478,17 +456,6 @@ mod tests {
             _: &[u64],
         ) -> DependencyProduct<MaterializedRef> {
             self.constant(path)
-        }
-        fn instance_body(
-            &mut self,
-            _: &DefPath,
-            _: &[GenericArgument],
-        ) -> DependencyProduct<Option<DefPath>> {
-            DependencyProduct {
-                successor: None,
-                result: Ok(None),
-                reads: Reads::empty(),
-            }
         }
     }
     fn reference(text: &[u8]) -> hirsel_engine_store::Reference {
@@ -777,7 +744,6 @@ mod tests {
             signature_hash: ContentHash::default(),
             bodies: vec![],
             entry: BodyId(0),
-            contracts: vec![],
         });
         let reads = Reads::from_vec(vec![(
             ReadKey::ExecutedBody(DefId::intern(&dependency)),
@@ -794,8 +760,7 @@ mod tests {
         assert!(provider.definition(&dependency).is_err());
         assert!(provider.constant(&dependency).is_err());
         assert!(provider.constant_instance(&dependency, &[3]).is_err());
-        assert!(provider.instance_body(&dependency, &[]).is_err());
         assert_eq!(provider.finish().unwrap(), reads);
-        assert_eq!(source.calls, 4);
+        assert_eq!(source.calls, 3);
     }
 }

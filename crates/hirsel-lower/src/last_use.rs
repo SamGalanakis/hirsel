@@ -723,7 +723,6 @@ impl Builder<'_, '_> {
             }
             InstructionKind::RunCleanup(cleanup) => self.cleanup_uses(*cleanup, &mut step),
             InstructionKind::Check { condition, .. } => self.read(condition.place, &mut step),
-            InstructionKind::Snapshot { value, .. } => self.read(value.place, &mut step),
             InstructionKind::StorageLive(local) => {
                 step.defines.push(self.roots[local.0 as usize]);
             }

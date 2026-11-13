@@ -464,11 +464,6 @@ fn clone_static(
                 origin(binding);
             }
         }
-        for rvalue in &mut body.rvalues {
-            if let Rvalue::Shape(ty) = rvalue {
-                graph(ty)?;
-            }
-        }
     }
     let mut ty = root_ty;
     graph(&mut ty)?;

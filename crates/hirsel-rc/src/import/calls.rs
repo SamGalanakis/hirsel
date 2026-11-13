@@ -333,13 +333,7 @@ impl Importer<'_> {
                     let (abi, actuals) = self.operation_abi(path, arguments)?;
                     operation_arguments = actuals;
                     (Callee::Operation(reference), abi)
-                } else if self.instances.has_function(path)
-                    || self
-                        .program
-                        .instance_bodies
-                        .declarations
-                        .contains(&DefId::intern(path))
-                {
+                } else if self.instances.has_function(path) {
                     let (symbol, abi) = self.direct(path, arguments)?;
                     (Callee::Direct(symbol), abi)
                 } else if let Some(abi) = self.foreign_abi(path)? {

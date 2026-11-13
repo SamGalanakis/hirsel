@@ -348,7 +348,6 @@ impl Schema {
                     .finalizer
                     .as_ref()
                     .map(|(definition, _)| definition.clone()),
-                fact: None,
                 captures: None,
             })),
         }))

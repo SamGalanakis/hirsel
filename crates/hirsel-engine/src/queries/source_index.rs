@@ -183,7 +183,6 @@ impl QueryEngine {
             || !self.active.is_empty()
             || !self.signature_stack.is_empty()
             || !self.execution_stack.is_empty()
-            || !self.generated.is_empty()
             || !self.staged_constants.is_empty()
             || !self.staged_values.is_empty()
         {
@@ -669,11 +668,11 @@ mod tests {
                     definition: path.clone(),
                     visibility: Visibility::Public,
                     attributes: vec![],
+                    implementation_bindings: None,
                     kind: ItemKind::Const {
                         ty: TypeExprId(0),
                         value: ExprId(0),
                     },
-                    generated: None,
                 },
                 tree: SyntaxTree::default(),
                 anchor,

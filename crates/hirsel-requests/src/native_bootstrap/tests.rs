@@ -1255,7 +1255,7 @@ fn native_bootstrap_policy_case(bind_run: bool) {
 }
 
 const PROOF_SOURCE: &str = r#"
-fn bump(xs:List[u32],i:u64,y:u32)->u32 ensures result>=y {xs[i]+y}
+fn bump(xs:List[u32],i:u64,y:u32)->u32 { let value=xs[i]+y; failure.check(value>=y, TextInvariant()); value }
 pub fn main()->Result[(),()] {let n=bump([1u32,2u32],1u64,3u32);Ok(())}
 "#;
 
@@ -1409,7 +1409,7 @@ fn proof_graph(
     }
 }
 
-/// Evidence for the export's two `bump` obligations, signed by `prover@1`.
+/// Evidence for the export's arithmetic `bump` obligation, signed by `prover@1`.
 fn proof_evidence(graph: &mut ProofGraph) -> hirsel_native::Evidence {
     let request = graph.runtime.request(&[graph.source.query()]);
     let completed = graph.runtime.wait(request).unwrap()[0].clone();
@@ -1425,7 +1425,7 @@ fn proof_evidence(graph: &mut ProofGraph) -> hirsel_native::Evidence {
         .flat_map(|d| &d.obligations)
         .filter(|o| {
             let id = o.id.to_string();
-            id.contains("/bump#FACT-1/") || id.contains("/bump#SEM-1/")
+            id.contains("/bump#SEM-1/")
         })
         .map(|o| hirsel_proof_export::sidecar::Record {
             revision: table.header.program_revision.unwrap(),
@@ -1439,7 +1439,7 @@ fn proof_evidence(graph: &mut ProofGraph) -> hirsel_native::Evidence {
             verdict: hirsel_proof_export::sidecar::Verdict::Proved,
         })
         .collect::<Vec<_>>();
-    assert_eq!(records.len(), 2);
+    assert_eq!(records.len(), 1);
     hirsel_native::Evidence {
         records,
         trusted: vec![checker],
@@ -1515,7 +1515,7 @@ fn native_bootstrap_assesses_evidence_against_its_settled_source_root_before_ins
             compilation: budget.reserve(32 << 20).unwrap(),
         };
         let mut queries = vec![];
-        for (selected, removed) in [(Some(&evidence), 2), (Some(&untrusted), 0), (None, 0)] {
+        for (selected, removed) in [(Some(&evidence), 1), (Some(&untrusted), 0), (None, 0)] {
             let mut graph = proof_graph(&manifest, &store, &budget, errors, weight);
             let routing = NativeRouting::new(
                 super::super::native_assembly::KINDS,

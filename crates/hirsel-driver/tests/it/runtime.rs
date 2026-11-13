@@ -106,7 +106,6 @@ fn fixture(fail: bool) -> (Fixture, SourceMap, RunConfiguration) {
         signature_hash: ContentHash::default(),
         bodies: vec![body],
         entry: BodyId(0),
-        contracts: vec![],
     };
     definition.types = hirsel_tir::definition_types(&types, &definition);
     (

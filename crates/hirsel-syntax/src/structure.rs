@@ -49,9 +49,6 @@ impl Graph {
         if let Some(result) = signature.result {
             self.t(owner, result)?;
         }
-        for contract in &signature.contracts {
-            self.e(owner, contract.expression)?;
-        }
         Some(())
     }
     fn acyclic(self) -> bool {
@@ -118,11 +115,6 @@ impl ItemSyntax {
         origin(self.item.origin)?;
         span(self.item.name_span)?;
         attributes(&self.item.attributes)?;
-        if let Some(Generated::Body(names)) = &self.item.generated {
-            for (_, site) in names {
-                span(*site)?;
-            }
-        }
         let mut graph = Graph::new(tree);
         for (i, expression) in tree.expressions.iter().enumerate() {
             origin(expression.origin)?;
@@ -198,15 +190,13 @@ impl ItemSyntax {
                         graph.e(owner, *id)?;
                     }
                 }
-                ExprKind::Shape(id) => graph.t(owner, *id)?,
-                ExprKind::Before(id)
-                | ExprKind::Comptime(id)
-                | ExprKind::Formatter(FormatStep::Pad(id)) => graph.e(owner, *id)?,
+                ExprKind::Comptime(id) | ExprKind::Formatter(FormatStep::Pad(id)) => {
+                    graph.e(owner, *id)?
+                }
                 ExprKind::Literal(_)
                 | ExprKind::Path(_)
                 | ExprKind::Continue(_)
                 | ExprKind::Heap
-                | ExprKind::Result
                 | ExprKind::Todo(_)
                 | ExprKind::Formatter(_)
                 | ExprKind::Error => (),
@@ -360,12 +350,9 @@ impl ItemSyntax {
                         }
                     }
                     TypeBody::Alias(id) => graph.t(None, *id)?,
-                    TypeBody::Distinct { field, fact } => {
+                    TypeBody::Distinct { field } => {
                         origin(field.origin)?;
                         graph.t(None, field.ty)?;
-                        if let Some(id) = fact {
-                            graph.e(None, *id)?;
-                        }
                     }
                     TypeBody::Opaque => (),
                 }

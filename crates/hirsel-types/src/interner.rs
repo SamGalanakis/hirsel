@@ -793,7 +793,6 @@ fn row_bytes(row: &Type) -> u64 {
         TypeKind::Function(f) => {
             std::mem::size_of_val(&f.parameters[..])
                 + std::mem::size_of_val(&f.generics[..])
-                + std::mem::size_of_val(&f.contracts[..])
                 + std::mem::size_of_val(&f.state_promises[..])
         }
         TypeKind::Named { arguments, .. } | TypeKind::Builtin { arguments, .. } => {

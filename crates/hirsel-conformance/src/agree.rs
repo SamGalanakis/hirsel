@@ -1247,9 +1247,7 @@ impl Catalogue<'_> {
                     self.expr(v, scope);
                 }
             }
-            ExprKind::Try { value, .. } | ExprKind::Before(value) | ExprKind::Comptime(value) => {
-                self.expr(value, scope)
-            }
+            ExprKind::Try { value, .. } | ExprKind::Comptime(value) => self.expr(value, scope),
             ExprKind::Return(value) | ExprKind::Break { value, .. } => {
                 if let Some(v) = value {
                     self.expr(v, scope);

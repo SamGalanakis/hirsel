@@ -86,17 +86,7 @@ impl QueryEngine {
         let mut visited = BTreeSet::new();
         let mut uses = BTreeMap::new();
         let mut pending: Vec<_> = roots.into_iter().collect();
-        // CT-5: the closure also holds every instance of a generic generated
-        // declaration that it selects, and what those instances reach.
-        loop {
-            self.semantic_closure(&mut pending, &mut visited, &mut uses, &mut nodes)?;
-            let selected =
-                self.select_generated_instances(visited.iter().cloned().collect::<Vec<_>>())?;
-            pending.extend(selected.into_iter().filter(|path| !visited.contains(path)));
-            if pending.is_empty() {
-                break;
-            }
-        }
+        self.semantic_closure(&mut pending, &mut visited, &mut uses, &mut nodes)?;
         Ok(SemanticProgram {
             nodes,
             definitions: visited,
@@ -185,11 +175,6 @@ impl QueryEngine {
         }
         if let SignatureKind::Type(declaration) = &signature.value.kind {
             dependencies.extend(declaration.drop.iter().cloned());
-            // FACT-2: construction runs the fact's helper, which closes over
-            // what its predicate calls.
-            if declaration.fact.is_some() {
-                dependencies.insert(hirsel_check_protocol::fact::fact_path(path));
-            }
             // SER-1: decoding a checked opaque type calls its check.
             if let Some(check) = &declaration.serializable_check {
                 dependencies.insert(check.function.clone());
@@ -238,7 +223,7 @@ impl QueryEngine {
                 }
                 let syntax = &analyzed.value.typed.syntax;
                 body_content.extend(self.semantic_tokens(syntax)?);
-                if generation::executable(syntax) {
+                if staging::executable(syntax) {
                     let lowered = self.lower_to_tir(path)?;
                     if has_errors(&lowered.diagnostics) {
                         return Err(QueryError::Diagnostics(lowered.diagnostics));
@@ -263,8 +248,7 @@ impl QueryEngine {
                     );
                 }
             }
-            // A generated body (CT-5) depends on what its generator executed,
-            // and every body on the private representations it read.
+            // Every body depends on executed constants and private representations it reads.
             let id = hirsel_syntax::DefId::intern(path);
             let reads = [
                 self.checked.get(&id).map(|e| e.memo.reads.clone()),

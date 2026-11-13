@@ -11,7 +11,6 @@ pub(super) type Descriptor = (
     DepthEvidence<Span>,
     bool,
     staged::Selections,
-    Reference,
 );
 pub(super) type ConstantDescriptor = (
     Materialized,
@@ -20,7 +19,6 @@ pub(super) type ConstantDescriptor = (
     DepthEvidence<Span>,
     bool,
     staged::Selections,
-    Reference,
 );
 #[derive(Clone)]
 pub(super) struct Archive {
@@ -42,7 +40,7 @@ impl Archive {
                 return None;
             }
             let bytes = store.get_content(self.reference)?;
-            let ((_, _, reads, _, _, _, _), _): (ConstantDescriptor, u64) =
+            let ((_, _, reads, _, _, _), _): (ConstantDescriptor, u64) =
                 records.decode_admitted(anchors, bytes, allowance)?;
             return (reads.len() == self.len && self.dependencies == 0).then_some(reads);
         }

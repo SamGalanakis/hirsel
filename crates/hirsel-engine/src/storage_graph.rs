@@ -70,13 +70,6 @@ fn derive(
             break;
         }
     }
-    let selected = engine.select_generated_instances(
-        pending
-            .iter()
-            .map(|definition| definition.path().clone())
-            .collect::<Vec<_>>(),
-    )?;
-    pending.extend(selected.iter().map(hirsel_syntax::DefId::intern));
     let mut bodies = BTreeMap::new();
     while let Some(definition) = pending.pop_first() {
         if !seen.insert(definition) {
@@ -84,7 +77,7 @@ fn derive(
         }
         // Reviewed bodyless operations have independently checked recipes in
         // the product. A missing source body is never invented for a core name.
-        if definition.path().0.package.name == "core" || engine.instance_bodied(definition.path()) {
+        if definition.path().0.package.name == "core" {
             continue;
         }
         let summary = engine.storage_definition_summary(definition)?;
@@ -175,13 +168,7 @@ fn derive(
         }
     }
     let bodies: Vec<_> = bodies.into_values().collect();
-    let instances = engine.instance_bodies.clone();
-    let select = |definition, arguments: &[hirsel_types::GenericArgument]| {
-        instances
-            .resolve(definition, &engine.types, arguments)
-            .ok()
-            .map(|selected| selected.unwrap_or(definition))
-    };
+    let select = |definition, _: &[hirsel_types::GenericArgument]| Some(definition);
     finish(&engine.types, &select, bodies)
 }
 
@@ -279,48 +266,14 @@ fn invalid(message: impl Into<String>) -> QueryError {
 }
 
 fn selected_definition(
-    engine: &mut QueryEngine,
+    _engine: &mut QueryEngine,
     declaration: hirsel_syntax::DefId,
-    arguments: &[hirsel_types::GenericArgument],
+    _arguments: &[hirsel_types::GenericArgument],
 ) -> Result<Option<hirsel_syntax::DefId>, QueryError> {
     if declaration.path().0.package.name == "core" {
         return Ok(None);
     }
-    if !engine.instance_bodied(declaration.path()) {
-        return Ok(Some(declaration));
-    }
-    let signature = hirsel_types::SignatureProvider::signature(engine, declaration)?;
-    let hirsel_types::SignatureKind::Function(function) = &signature.kind else {
-        return Ok(None);
-    };
-    if function.generics.len() != arguments.len()
-        || !function
-            .generics
-            .iter()
-            .zip(arguments)
-            .all(|(parameter, argument)| {
-                matches!(
-                    (parameter, argument),
-                    (
-                        hirsel_types::GenericParameter::Type { .. },
-                        hirsel_types::GenericArgument::Type(_)
-                    ) | (
-                        hirsel_types::GenericParameter::Size { .. },
-                        hirsel_types::GenericArgument::Size(_)
-                    )
-                )
-            })
-    {
-        return Ok(None);
-    }
-    // An open generic reference has no selected executable body in this
-    // source context. It must not fall back to the declaration's signature.
-    if hirsel_tir::InstanceBodies::key(&engine.types, arguments).is_none() {
-        return Ok(None);
-    }
-    engine
-        .resolve_instance(declaration.path(), arguments)
-        .map(|body| body.map(|path| hirsel_syntax::DefId::intern(&path)))
+    Ok(Some(declaration))
 }
 
 // Source consumes the declared constant's own evaluated field graph. V reads
@@ -341,7 +294,7 @@ pub(crate) fn constant_value(
                 definition,
                 arguments,
             } => {
-                complete &= hirsel_types::generated_actual_key(types, arguments).is_some();
+                complete &= hirsel_types::closed_actual_key(types, arguments).is_some();
                 let id = hirsel_syntax::DefId::intern(definition);
                 let primitive =
                     if StoragePrimitive::integer_order_type(id).is_some() && arguments.is_empty() {
@@ -413,7 +366,6 @@ fn integer_order(
         && function.allocation == Allocation::NoAlloc
         && function.authority == AuthoritySummary::inert()
         && function.uses == Uses::Only(AuthoritySummary::inert())
-        && function.contracts.is_empty()
         && function.state_promises.is_empty()
         && !function.incomplete
         && function.foreign.is_none();

@@ -153,7 +153,6 @@ pub enum CompileResult {
     Inspect(Arc<CompileInspection>),
     Artifacts(std::collections::BTreeMap<String, Vec<u8>>),
     ExportTir(String),
-    Expansion(Arc<str>),
     Hashes(Arc<std::collections::BTreeMap<DefPath, hirsel_syntax::ContentHash>>),
     /// Native pipeline failures retain their existing inner error category.
     NativeError(hirsel_native::NativeError),

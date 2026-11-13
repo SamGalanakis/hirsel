@@ -197,7 +197,7 @@ impl NativeDiscoveryCache {
         engine.verify == Verify::On
             && engine.verify_store != hirsel_engine_store::VerifyStore::Recompute
             && source.summary_identity.is_some()
-            && (!crate::queries::generation::executable(&source.source.syntax)
+            && (!crate::queries::staging::executable(&source.source.syntax)
                 || source.lower.is_some())
     }
     pub fn query_id(path: &DefPath) -> hirsel_engine_runtime::QueryId {
@@ -226,7 +226,7 @@ impl NativeDiscoveryCache {
             && record.definition == *path
             && record.binders.windows(2).all(|w| w[0].0 < w[1].0)
             && record.contracts.is_some()
-                == crate::queries::generation::executable(&source.source.syntax)
+                == crate::queries::staging::executable(&source.source.syntax)
             && record
                 .contracts
                 .as_ref()
@@ -261,7 +261,7 @@ impl NativeDiscoveryCache {
             }
         }
         self.counts.misses += 1;
-        let body = if crate::queries::generation::executable(&source.source.syntax) {
+        let body = if crate::queries::staging::executable(&source.source.syntax) {
             self.counts.body_demands += 1;
             let (body, output) = engine.native_definition_body_with_output(&source)?;
             source.lower = output;

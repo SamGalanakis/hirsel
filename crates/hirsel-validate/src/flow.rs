@@ -3275,26 +3275,6 @@ impl Checker<'_, '_> {
             }
         }
         if report
-            && self.contract
-            && (operand.usage == UseKind::Mut
-                || operand.usage == UseKind::Take
-                    && needs_release(self, self.place_type(place), self.t))
-        {
-            let mut read = operand.clone();
-            read.usage = UseKind::Borrow;
-            let root = self.body.places[place.0 as usize].root.0 as usize;
-            let readonly = state.contract_readonly.contains(&root)
-                || !state.must[root].has(MustFacts::OWNED)
-                    && !relocate_view
-                    && self
-                        .sources(model, state, &read)
-                        .iter()
-                        .any(|source| state.contract_readonly.contains(source));
-            if readonly {
-                self.flow_error(report, ViolationKind::InvalidUse(place));
-            }
-        }
-        if report
             && (matches!(operand.usage, UseKind::Take | UseKind::Mut)
                 && self.readonly_map_entry(place)
                 || operand.usage == UseKind::Mut && self.readonly_byte_index(place))
@@ -6188,48 +6168,6 @@ impl Checker<'_, '_> {
                         state.cursor_views.set(root, cursor_view);
                     }
                 }
-                InstructionKind::Snapshot { destination, value } => {
-                    let authority = self.operand_authority(model, state, value.place);
-                    let tag_parts = self.tag_parts(state, value);
-                    let source = model.mapping[value.place.0 as usize];
-                    let identity = self.origin_identity(model, state, value.place);
-                    let parts = Self::storage_partition(
-                        model,
-                        state,
-                        &self.body.places[value.place.0 as usize],
-                    );
-                    let environment = self.environment(model, state, value.place);
-                    let proof = state.origins.proofs[source].clone();
-                    let expired = state.origins.expired[source].clone();
-                    let transfer_store = self.t;
-                    let transferred = self.transferred_type(state, value, transfer_store);
-                    let sendable = transfer_store.get(transferred).unwrap().modes.sendability
-                        == Sendability::Sendable;
-                    let crossing = self.operand_crossing_parts(state, value);
-                    let shares = self.operand_shares(state, value);
-                    self.mode_transfer(state, self.place_type(*destination), value, report);
-                    self.read(model, state, value, report);
-                    self.reset_unique(state, *destination);
-                    self.set_borrowed_shares(model, state, *destination, shares, true);
-                    self.set_current_sendable(state, *destination, sendable);
-                    self.install_crossing_parts(
-                        state,
-                        *destination,
-                        &crossing,
-                        sendable,
-                        model.crossing_depth,
-                    );
-                    self.write(model, state, *destination, true, false, report);
-                    self.set_authority(model, state, *destination, authority);
-                    self.install_tags(model, state, *destination, tag_parts);
-                    self.set_dependencies(model, state, *destination, BTreeSet::new());
-                    self.set_origin_proof(model, state, *destination, proof, expired);
-                    state.origins.identities[model.mapping[destination.0 as usize]] =
-                        identity.into();
-                    state.origins.parts[model.mapping[destination.0 as usize]] = parts.into();
-                    state.origins.owners[model.mapping[destination.0 as usize]].clear();
-                    self.set_environment(model, state, *destination, &environment);
-                }
                 InstructionKind::BeginLoan {
                     id,
                     place,
@@ -7619,7 +7557,6 @@ mod nominal_limit_tests {
                         resource: true,
                         distinct: false,
                         drop: None,
-                        fact: None,
                         captures: None,
                         destructor_allocation: Allocation::MayAllocate,
                     })),
@@ -7662,7 +7599,6 @@ mod nominal_limit_tests {
                             resource: false,
                             distinct: false,
                             drop: None,
-                            fact: None,
                             captures: None,
                             destructor_allocation: Allocation::NoAlloc,
                         })),
@@ -7698,7 +7634,6 @@ mod nominal_limit_tests {
                 signatures: &reader,
                 declarations: &declarations,
                 scratch: &scratch,
-                contract: false,
                 site: Site {
                     body: BodyId(0),
                     block: None,
@@ -7778,7 +7713,6 @@ mod header_name_tests {
                     allocation: Allocation::NoAlloc,
                     authority: AuthoritySummary::inert(),
                     uses: Uses::Unrestricted,
-                    contracts: vec![].into(),
                     incomplete: false,
                     foreign: None,
                 })))
@@ -7817,7 +7751,6 @@ mod header_name_tests {
                 signatures: &reader,
                 declarations: &declarations,
                 scratch: &scratch,
-                contract: false,
                 site: Site {
                     body: BodyId(1),
                     block: None,
@@ -7917,7 +7850,6 @@ mod header_name_tests {
                 signatures: &reader,
                 declarations: &declarations,
                 scratch: &scratch,
-                contract: false,
                 site: Site {
                     body: BodyId(1),
                     block: None,

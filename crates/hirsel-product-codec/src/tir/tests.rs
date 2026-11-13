@@ -69,7 +69,6 @@ fn fixture(reverse: bool) -> (Arc<TypeRecords>, Definition, Anchor) {
             signature_hash: ContentHash::default(),
             bodies: vec![body],
             entry: BodyId(0),
-            contracts: vec![],
         },
         anchor,
     )
@@ -331,7 +330,6 @@ fn checked_row_stream_preserves_the_complete_definition_serde_contract() {
     });
     definition.bodies.push(definition.bodies[0].clone());
     definition.caller_bodies.push(BodyId(0));
-    definition.contracts.push((7, BodyId(1)));
     let reader = open(
         bytes(&records, &definition, anchor),
         records.clone(),

@@ -439,7 +439,6 @@ impl Request {
                 allocation: hirsel_types::Allocation::NoAlloc,
                 authority: hirsel_types::AuthoritySummary::Unknown,
                 uses: hirsel_types::Uses::Unrestricted,
-                contracts: Vec::new().into(),
                 incomplete: false,
                 foreign: None,
             },
@@ -489,7 +488,6 @@ fn declaration(path: &DefPath) -> tir::DefinitionRef {
         signature_hash: revision(path),
         bodies: Vec::new(),
         entry: tir::BodyId(0),
-        contracts: Vec::new(),
     })
 }
 

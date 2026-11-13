@@ -95,15 +95,6 @@ fn canonical_detail(mut detail: DependencyReads) -> DependencyReads {
     detail
 }
 
-/// Syntax registration is an ordinary product, separate from generator text
-/// and independent V authority. Lossless actuals use canonical type records.
-#[derive(Serialize, Deserialize)]
-struct GeneratedRegistration {
-    declaration: DefId,
-    arguments: Vec<hirsel_types::GenericArgument>,
-    instance: DefId,
-}
-
 #[derive(Serialize, Deserialize)]
 struct SignatureRecord {
     output: Result<QueryOutput<hirsel_types::SignatureRef>, QueryError>,
@@ -365,20 +356,6 @@ fn valid_body_indices(
                 && row.cursor().is_none_or(|cursor| expression(cursor.source))
         })
         && plans.functions.iter().all(|row| site(row.owner))
-        && plans
-            .shapes
-            .iter()
-            .all(|(a, b, _)| expression(*a) && site(NameSite::Type(*b)))
-        && plans.contracts.iter().all(|row| {
-            site(row.owner)
-                && expression(row.expression)
-                && row.snapshots.iter().copied().all(expression)
-                && row.parameters.iter().all(|p| match p {
-                    hirsel_check_protocol::body::ContractParameter::Snapshot(id) => expression(*id),
-                    _ => true,
-                })
-        })
-        && plans.facts.iter().all(|row| expression(row.expression))
 }
 fn valid_ownership(syntax: &ItemSyntax, facts: &OwnershipFacts) -> bool {
     let expression = |id| valid_expression(syntax, id);
@@ -581,17 +558,6 @@ struct EvaluationRecord {
     constant: crate::comptime::EvaluatedConstant,
 }
 #[derive(Serialize, Deserialize)]
-pub(super) struct GenerationRecord {
-    pub owner: DefId,
-    pub body: hirsel_syntax::ExprId,
-    pub text: String,
-    pub detail: DependencyReads,
-    pub depth: hirsel_query_products::depth::DepthEvidence<Span>,
-    pub selections: Vec<crate::comptime::Selection>,
-    #[serde(skip)]
-    pub acceptance: Option<hirsel_validate::ExecutionReceipt>,
-}
-#[derive(Serialize, Deserialize)]
 struct StagedEvaluationRecord {
     declaration: DefId,
     arguments: Vec<u64>,
@@ -713,50 +679,6 @@ pub(crate) fn anchor_owner(
             .find(|item| item.anchor == anchor)
             .map(|item| (path.clone(), item.occurrence))
     })
-}
-/// V identities include every span, including generated literal bodies. The
-/// source map supplies the placed base; the local generation table supplies
-/// its owner and exact text. This does not admit producer-supplied anchors.
-#[cfg(test)]
-pub(crate) fn artifact_anchor_owner(
-    items: &BTreeMap<DefPath, Vec<Arc<ItemSyntax>>>,
-    sources: &SourceMap,
-    generated: &BTreeMap<DefPath, generation::GeneratedSource>,
-    anchor: Anchor,
-) -> Option<(DefPath, u32)> {
-    anchor_owner(items, anchor).or_else(|| {
-        let (file, base) = sources.anchor(anchor)?;
-        let (owner, source) = generated
-            .iter()
-            .find(|(_, source)| source.file == file)
-            .or_else(|| {
-                let identity = generated_source_identity(sources, file)?;
-                generated.iter().find(|(_, source)| {
-                    generated_source_identity(sources, source.file) == Some(identity)
-                })
-            })?;
-        Some((generated_codec_owner(owner, &source.text), base))
-    })
-}
-pub(crate) fn generated_source_identity(
-    sources: &SourceMap,
-    file: FileId,
-) -> Option<(&std::path::Path, &str)> {
-    let source = sources.file(file)?;
-    Some((source.logical_path(), source.text()))
-}
-pub(super) fn generated_codec_owner(owner: &DefPath, text: &str) -> DefPath {
-    let hash = ContentHash::of_bytes(text.as_bytes());
-    let mut identity = owner.clone();
-    identity.0.name = format!(
-        "$generated-source:{}:{}",
-        owner.0.name,
-        hash.0
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    );
-    identity
 }
 pub(super) struct Contents(pub(super) Arc<dyn hirsel_engine_store::ResultStore>);
 impl hirsel_artifact_store::Contents for Contents {
@@ -1458,41 +1380,17 @@ impl QueryEngine {
     pub(super) fn store_key(&mut self, path: &DefPath, kind: QueryKind) -> Option<EntryKey> {
         // Source-owned generated Lower products bind the accepted text below.
         // Synthetic instance registrations still replay through S1.
-        if !self.items.contains_key(path) && self.catalog.body(path).is_some() {
-            if !self.catalog.storeable(path, kind) {
-                return None;
-            }
-        } else {
-            let (generator, instance_bodied, file) = match self.items.get(path) {
-                Some(items) => {
-                    let item = items.first()?;
-                    (
-                        generation::generator(item).is_some(),
-                        generation::instance_bodied(item),
-                        self.item_file(item),
-                    )
-                }
-                // A signature keys on its header capture's facts, so a store
-                // hit decodes none of the definition's syntax.
+        if self.items.contains_key(path) || self.catalog.body(path).is_none() {
+            let file = match self.items.get(path) {
+                Some(items) => self.item_file(items.first()?),
                 None if kind == QueryKind::Signature => {
-                    let headers = self.header_products.as_ref()?;
-                    let id = DefId::intern(path);
-                    let facts = headers.source_facts(id)?;
-                    let file = headers.captured_text(id)?.file;
-                    (facts.generator, facts.instance_bodied, file)
+                    self.header_products
+                        .as_ref()?
+                        .captured_text(DefId::intern(path))?
+                        .file
                 }
                 None => return None,
             };
-            if kind == QueryKind::Generate {
-                if !generator || instance_bodied {
-                    return None;
-                }
-            } else if kind != QueryKind::GeneratedRegistration
-                && !(kind == QueryKind::Lower && self.source_owned_generator(path))
-                && (generator || self.generated.contains_key(path))
-            {
-                return None;
-            }
             if self
                 .sources
                 .file(file)?
@@ -1503,14 +1401,7 @@ impl QueryEngine {
                 return None;
             }
         }
-        let mut text = self.key_text(path, kind).ok()?;
-        if kind == QueryKind::Lower && self.source_owned_generator(path) {
-            let generated = self.generated.get(path)?;
-            text = ContentHash::of_parts(
-                "hirsel.generated-lower.inputs.v1",
-                [text.0.as_slice(), generated.text.as_bytes()],
-            );
-        }
+        let text = self.key_text(path, kind).ok()?;
         Some(self.product_store_key(path, kind, text))
     }
     /// A canonical product address is independent of its source-admission gate.
@@ -1548,100 +1439,7 @@ impl QueryEngine {
             ],
         )
     }
-    /// The bodyless header of a generic generated declaration is an ordinary
-    /// front product. This gate cannot admit a mono generator or an instance.
-    pub(super) fn front_declaration_store_key(
-        &mut self,
-        path: &DefPath,
-        kind: QueryKind,
-    ) -> Result<EntryKey, QueryError> {
-        let syntax = self.snapshot(path)?;
-        if generation::generator(&syntax).is_none()
-            || !matches!(
-                kind,
-                QueryKind::Modes | QueryKind::Lower | QueryKind::Evaluate
-            )
-        {
-            return Err(QueryError::NotImplemented);
-        }
-        let text = self.key_text(path, kind)?;
-        Ok(self.product_store_key(path, kind, text))
-    }
-    pub(super) fn accepted_front_store_keys(
-        &mut self,
-        accepted: &AcceptedFrontRegistration,
-    ) -> Result<[EntryKey; 3], QueryError> {
-        let path = accepted.definition();
-        let input = self.key_text(path, QueryKind::Modes)?;
-        // All three body kinds observe the same declaration and exact private
-        // execution. Deriving their addresses consumes that one predicate.
-        accepted.validate(self)?;
-        let key = |kind| -> Result<EntryKey, QueryError> {
-            let mut text = input;
-            let manifest = bincode::serialize(&accepted.generation_manifest())
-                .map_err(|_| QueryError::NotImplemented)?;
-            text = ContentHash::of_parts(
-                "hirsel.generated-source.inputs.v1",
-                [text.0.as_slice(), manifest.as_slice()],
-            );
-            if kind == QueryKind::Modes {
-                let dependencies = bincode::serialize(accepted.checked_prefix())
-                    .map_err(|_| QueryError::NotImplemented)?;
-                text = ContentHash::of_parts(
-                    "hirsel.generated-mode.inputs.v2",
-                    [
-                        text.0.as_slice(),
-                        accepted.text().as_bytes(),
-                        dependencies.as_slice(),
-                    ],
-                );
-            }
-            if kind == QueryKind::Lower {
-                text = ContentHash::of_parts(
-                    "hirsel.generated-lower.inputs.v1",
-                    [text.0.as_slice(), accepted.text().as_bytes()],
-                );
-            }
-            Ok(self.product_store_key(path, kind, text))
-        };
-        Ok([
-            key(QueryKind::Modes)?,
-            key(QueryKind::Lower)?,
-            key(QueryKind::Evaluate)?,
-        ])
-    }
-    fn source_owned_generator(&self, path: &DefPath) -> bool {
-        self.items
-            .get(path)
-            .and_then(|items| items.first())
-            .is_some_and(|item| {
-                generation::generator(item).is_some()
-                    && !generation::instance_bodied(item)
-                    && self
-                        .sources
-                        .file(self.item_file(item))
-                        .is_some_and(|file| !file.path.to_string_lossy().starts_with('<'))
-            })
-    }
-    fn prepare_lower_generation(&mut self, path: &DefPath) -> Option<()> {
-        if self.source_owned_generator(path) {
-            // Reconstruct and accept the current generated source before an old
-            // payload can resolve its content-bound anchors. This is ordinary
-            // generation replay, never authority supplied by the Lower bytes.
-            // Anchor preparation is not another execution demand. The checked
-            // generation retains its own transitive selection log; a Lower hit
-            // replays its stored log, and a miss records the ordinary request.
-            // Keep this preparation out of every enclosing selection frame.
-            let selections = std::mem::take(&mut self.evaluation_selections);
-            let prepared = self.check_query(path);
-            self.evaluation_selections = selections;
-            prepared.ok()?;
-        }
-        Some(())
-    }
-    /// Current owned source identity, including literal generated bodies. The
-    /// generated owner includes its exact text hash; arbitrary persisted ids
-    /// cannot name an anchor in another source generation.
+    /// Current owned source identity.
     pub(crate) fn record_anchor_owner(&self, anchor: Anchor) -> Option<(DefPath, u32)> {
         use crate::NativeRecordSource;
         self.source_records().record_owner(anchor)
@@ -1802,12 +1600,6 @@ impl QueryEngine {
             let declaration_owner = self.staged_declaration_owner(id.path())?;
             self.load_registrations(&declaration_owner)?;
             self.staged_constants.get(id.path())?;
-        }
-        if let Some(id) = read.definition()
-            && id.path().0.name.contains("$instance$")
-            && !self.items.contains_key(id.path())
-        {
-            self.load_generated_registration(id.path())?;
         }
         Some(())
     }
@@ -2122,153 +1914,6 @@ impl QueryEngine {
         self.write_record(path, QueryKind::Registration, &reads, &record)
     }
 
-    fn generated_registration_key(&mut self, instance: &DefPath) -> Option<(DefPath, EntryKey)> {
-        let (name, suffix) = instance.0.name.rsplit_once("$instance$")?;
-        if suffix.len() != 16
-            || !suffix
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        {
-            return None;
-        }
-        let mut declaration = instance.clone();
-        declaration.0.name = name.into();
-        let item = self.items.get(&declaration)?.first()?;
-        if !generation::instance_bodied(item) {
-            return None;
-        }
-        let mut key = self.store_key(&declaration, QueryKind::GeneratedRegistration)?;
-        key.0 = ContentHash::of_parts(
-            "hirsel.result.generated-registration-address.v1",
-            [key.0.0.as_slice(), instance.fingerprint().0.as_slice()],
-        );
-        key.2 = QueryKind::GeneratedRegistration;
-        Some((declaration, key))
-    }
-    fn valid_generated_registration(
-        &self,
-        instance: &DefPath,
-        record: &GeneratedRegistration,
-    ) -> bool {
-        let Some(syntax) = self
-            .items
-            .get(record.declaration.path())
-            .and_then(|items| items.first())
-        else {
-            return false;
-        };
-        let hirsel_syntax::ItemKind::Function { signature, .. } = &syntax.item.kind else {
-            return false;
-        };
-        if !generation::instance_bodied(syntax)
-            || signature.generics.len() != record.arguments.len()
-            || !signature
-                .generics
-                .iter()
-                .zip(&record.arguments)
-                .all(|(parameter, argument)| {
-                    matches!(
-                        (&parameter.kind, argument),
-                        (
-                            hirsel_syntax::GenericKind::Type(_),
-                            hirsel_types::GenericArgument::Type(_)
-                        ) | (
-                            hirsel_syntax::GenericKind::Size,
-                            hirsel_types::GenericArgument::Size(hirsel_types::Size::Constant(_))
-                        )
-                    )
-                })
-        {
-            return false;
-        }
-        let Some(key) = hirsel_tir::InstanceBodies::key(&self.types, &record.arguments) else {
-            return false;
-        };
-        record.instance.path() == instance
-            && generation::instance_path(record.declaration.path(), key) == *instance
-    }
-    pub(super) fn store_generated_registration(
-        &mut self,
-        declaration: &DefPath,
-        arguments: &[hirsel_types::GenericArgument],
-        instance: &DefPath,
-    ) -> Result<(), QueryError> {
-        if self.result_store.is_none() || !self.s1.failure_is_own() {
-            return Ok(());
-        }
-        let Some((owner, key)) = self.generated_registration_key(instance) else {
-            return Ok(());
-        };
-        if owner != *declaration {
-            return Ok(());
-        }
-        let record = GeneratedRegistration {
-            declaration: DefId::intern(declaration),
-            arguments: arguments.to_vec(),
-            instance: DefId::intern(instance),
-        };
-        if !self.valid_generated_registration(instance, &record) {
-            return Ok(());
-        }
-        let Some(payload) = self.encode_record(&record) else {
-            return Ok(());
-        };
-        let mut reads = ReadsBuilder::new();
-        reads.record(
-            ReadKey::ExecutedBody(record.declaration),
-            memos::optional(self.implementation_hash(declaration)),
-        );
-        let reads = reads.finish().map_err(|_| QueryError::NotImplemented)?;
-        EncodedWriter {
-            types: self.type_records().expect("enabled registration types"),
-            store: self
-                .result_store
-                .as_ref()
-                .expect("enabled registration store")
-                .clone(),
-            key,
-            path: instance.clone(),
-            kind: QueryKind::GeneratedRegistration,
-            expected: self
-                .pending_store_checks
-                .remove(&(record.instance, QueryKind::GeneratedRegistration)),
-        }
-        .write(&reads, payload)
-    }
-    pub(super) fn load_generated_registration(&mut self, instance: &DefPath) -> Option<()> {
-        let (declaration, key) = self.generated_registration_key(instance)?;
-        let variant = self.stored_variant_at(instance, &key)?;
-        let record: GeneratedRegistration = self.decode_record(&variant.payload)?;
-        if record.declaration.path() != &declaration
-            || !self.valid_generated_registration(instance, &record)
-        {
-            return None;
-        }
-        if self.verify_store == hirsel_engine_store::VerifyStore::Recompute {
-            self.pending_store_checks.insert(
-                (record.instance, QueryKind::GeneratedRegistration),
-                Expected::capture(variant, &mut self.store_check_spool),
-            );
-            return None;
-        }
-        let site = self.snapshot(&declaration).ok()?.item.name_span;
-        let (registered, _) = self
-            .register_generated_instance(
-                &declaration,
-                &hirsel_types::Actuals {
-                    arguments: record.arguments,
-                },
-                site,
-            )
-            .ok()?;
-        if registered != *instance {
-            return None;
-        }
-        timings::count(Count::StoreHits);
-        self.store_adoptions += 1;
-        Some(())
-    }
-
     /// The receiver's execution requirement for `path`'s Lower-family product
     /// with validated dependencies `reads`.
     pub(crate) fn execution_requirement(&self, path: &DefPath, reads: &Reads) -> bool {
@@ -2305,25 +1950,10 @@ impl QueryEngine {
             }
             // Merely calling a declared generated function reads its public
             // signature, not its generated implementation or registration.
-            if matches!(read, ReadKey::Signature(_) | ReadKey::ExecutedSignature(_))
-                && self.source_owned_generator(path)
-            {
-                return true;
-            }
-            if self.generated.contains_key(path) || path.0.name.contains("$instance$")
-                || self.items.get(path).and_then(|items| items.first()).is_some_and(|syntax| generation::generator(syntax).is_some() && !generation::instance_bodied(syntax))
-            {
-                return owner == Some(path) || selections.contains(&Selection::Generated(id));
-            }
             !path.0.name.starts_with('$')
         }) && selections.iter().all(|selection| match selection {
             Selection::Staged(id, arguments) => {
                 self.staged_constants.get(id.path()).is_some_and(|constant| constant.inputs.len() == arguments.len())
-                    && reads.iter().any(|(read, _)| matches!(read, ReadKey::Signature(observed) | ReadKey::ExecutedSignature(observed) if observed == id))
-            }
-            Selection::Generated(id) => {
-                self.items.get(id.path()).and_then(|items| items.first()).is_some_and(|syntax| generation::generator(syntax).is_some() && !generation::instance_bodied(syntax))
-                    && reads.iter().any(|(read, _)| matches!(read, ReadKey::ExecutedBody(observed) if observed == id))
                     && reads.iter().any(|(read, _)| matches!(read, ReadKey::Signature(observed) | ReadKey::ExecutedSignature(observed) if observed == id))
             }
         })
@@ -2359,20 +1989,6 @@ impl QueryEngine {
                             )
                         })?;
                         self.staged_values.insert(key, selected);
-                    }
-                    Selection::Generated(id) => {
-                        self.charge_generated_path(*id).ok()?;
-                        let old = self.checked.get(id).cloned();
-                        let valid = old.is_some_and(|entry| {
-                            self.key_text(id.path(), QueryKind::Check)
-                                .ok()
-                                .is_some_and(|text| self.memo_valid(&entry, text))
-                                && self.lower_acceptance_holds(entry.acceptance.as_ref())
-                                && entry.result().is_ok()
-                        });
-                        if !valid {
-                            self.check_query(id.path()).ok()?;
-                        }
                     }
                 }
             }
@@ -2413,27 +2029,6 @@ impl QueryEngine {
                     self.store_registrations(&owner)?;
                     self.store_staged_evaluation(id.path(), arguments, &selected)?;
                 }
-                Selection::Generated(id) => {
-                    if !self.generated.contains_key(id.path()) {
-                        return Ok(false);
-                    }
-                    if let Some((declaration, instance)) =
-                        self.instance_bodies.instances.iter().find_map(
-                            |(declaration, instances)| {
-                                instances
-                                    .values()
-                                    .find(|instance| instance.definition == *id)
-                                    .map(|instance| (*declaration, instance.clone()))
-                            },
-                        )
-                    {
-                        self.store_generated_registration(
-                            declaration.path(),
-                            &instance.arguments,
-                            id.path(),
-                        )?;
-                    }
-                }
             }
         }
         Ok(true)
@@ -2464,102 +2059,6 @@ impl QueryEngine {
                 }
                 _ => true,
             })
-    }
-    pub(super) fn load_generation(
-        &mut self,
-        path: &DefPath,
-        body: hirsel_syntax::ExprId,
-    ) -> Result<Option<(GenerationRecord, Reads)>, QueryError> {
-        let mut replay_error: Option<QueryError> = None;
-        let value = (|| {
-            let key = self.store_key(path, QueryKind::Generate)?;
-            let variant = self.stored_variant(path, QueryKind::Generate)?;
-            let mut record: GenerationRecord = self.decode_record(&variant.payload)?;
-            if record.owner != DefId::intern(path)
-                || record.body != body
-                || !self.portable_lower_reads(path, &variant.reads, &record.selections)
-                || record.depth.bounded
-                || record.depth.first.len() != self.depth_limit() as usize + 1
-                || record
-                    .depth
-                    .first
-                    .iter()
-                    .flatten()
-                    .any(|site| self.sources.slice(*site).is_none())
-            {
-                return None;
-            }
-            if self.verify == Verify::On {
-                record.acceptance = Some(cached_result!(
-                    replay_error,
-                    self.load_execution_receipt(evaluation_subject(
-                        &key,
-                        &variant.reads,
-                        &variant.payload
-                    ))
-                )?);
-            }
-            if self.verify_store == hirsel_engine_store::VerifyStore::Recompute {
-                self.pending_store_checks.insert(
-                    (DefId::intern(path), QueryKind::Generate),
-                    Expected::capture(variant, &mut self.store_check_spool),
-                );
-                return None;
-            }
-            cached_result!(replay_error, self.replay_selections(&record.selections))?;
-            timings::count(Count::StoreHits);
-            self.store_adoptions += 1;
-            Some((record, variant.reads))
-        })();
-        match replay_error {
-            Some(error) => Err(error),
-            None => Ok(value),
-        }
-    }
-    pub(super) fn store_generation(
-        &mut self,
-        path: &DefPath,
-        reads: &Reads,
-        mut record: GenerationRecord,
-    ) -> Result<(), QueryError> {
-        let Some(reads) = persisted_execution_reads(reads, record.acceptance.as_ref()) else {
-            return Ok(());
-        };
-        if self.result_store.is_none()
-            || !self.s1.failure_is_own()
-            || !self.portable_lower_reads(path, &reads, &record.selections)
-            || !self.store_selections(&record.selections)?
-        {
-            return Ok(());
-        }
-        let Some(key) = self.store_key(path, QueryKind::Generate) else {
-            return Ok(());
-        };
-        record.detail = canonical_detail(record.detail);
-        let Some(payload) = self.encode_record(&record) else {
-            return Ok(());
-        };
-        let store = self
-            .result_store
-            .as_ref()
-            .expect("enabled generation store")
-            .clone();
-        if let Some(receipt) = &record.acceptance
-            && let Some(cache) = store.verifier()
-        {
-            cache.publish_execution(evaluation_subject(&key, &reads, &payload), receipt);
-        }
-        EncodedWriter {
-            types: self.type_records().expect("enabled generation types"),
-            store,
-            key,
-            path: path.clone(),
-            kind: QueryKind::Generate,
-            expected: self
-                .pending_store_checks
-                .remove(&(DefId::intern(path), QueryKind::Generate)),
-        }
-        .write(&reads, payload)
     }
     pub(super) fn load_semantic_body(
         &mut self,
@@ -2853,7 +2352,6 @@ impl QueryEngine {
                 return None;
             }
             self.result_store.as_ref()?;
-            self.prepare_lower_generation(path)?;
             let variant = self.stored_variant(path, QueryKind::Lower)?;
             let record = self.decode_lower_record(&variant.payload)?;
             if record.output.value.path != DefId::intern(path)
@@ -3621,7 +3119,7 @@ mod malformed_tests {
         for anchor in &anchors {
             assert_eq!(
                 engine.record_anchor_owner(*anchor),
-                artifact_anchor_owner(&engine.items, &engine.sources, &engine.generated, *anchor)
+                anchor_owner(&engine.items, *anchor)
             );
         }
         let removed = engine
@@ -3636,40 +3134,9 @@ mod malformed_tests {
         for anchor in anchors {
             assert_eq!(
                 engine.record_anchor_owner(anchor),
-                artifact_anchor_owner(&engine.items, &engine.sources, &engine.generated, anchor)
+                anchor_owner(&engine.items, anchor)
             );
         }
-    }
-
-    #[test]
-    fn source_generated_signature_reads_do_not_grant_execution_selection() {
-        let (engine, syntax) = fixture_source("fn main()->u32 uses {}=comptime ignored()");
-        let id = DefId::intern(&syntax.item.definition);
-        let caller = DefPath::core("caller");
-        let digest = syntax.text_hash;
-        let signature = vec![
-            (ReadKey::Signature(id), digest),
-            (ReadKey::ExecutedSignature(id), digest),
-        ];
-        assert!(engine.portable_lower_reads(
-            &caller,
-            &Reads::from_vec(signature.clone()).unwrap(),
-            &[],
-        ));
-        let mut executed = signature;
-        executed.push((ReadKey::ExecutedBody(id), digest));
-        let executed = Reads::from_vec(executed).unwrap();
-        assert!(!engine.portable_lower_reads(&caller, &executed, &[]));
-        assert!(engine.portable_lower_reads(
-            &caller,
-            &executed,
-            &[crate::comptime::Selection::Generated(id)],
-        ));
-        assert!(!engine.portable_lower_reads(
-            &caller,
-            &Reads::from_vec(vec![(ReadKey::ExecutedBody(id), digest)]).unwrap(),
-            &[crate::comptime::Selection::Generated(id)],
-        ));
     }
 
     #[test]
@@ -3717,7 +3184,7 @@ mod malformed_tests {
             hirsel_engine_store::VerifyStore::Off,
             hirsel_engine_store::VerifyStore::Recompute,
         ] {
-            for fault in 0..4 {
+            for fault in 0..3 {
                 let (mut engine, syntax) = fixture();
                 let path = &syntax.item.definition;
                 let mut record = SemanticBodyRecord {
@@ -3731,11 +3198,6 @@ mod malformed_tests {
                     0 => record.owner = DefId::intern(&DefPath::core("foreign")),
                     1 => record.content.clear(),
                     2 => record.depth.first = Box::new([]),
-                    3 => record
-                        .selections
-                        .push(crate::comptime::Selection::Generated(DefId::intern(
-                            &DefPath::core("absent-generator"),
-                        ))),
                     _ => unreachable!(),
                 }
                 engine
@@ -3758,7 +3220,7 @@ mod malformed_tests {
             hirsel_engine_store::VerifyStore::Off,
             hirsel_engine_store::VerifyStore::Recompute,
         ] {
-            for fault in 0..7 {
+            for fault in 0..6 {
                 let (mut engine, syntax) = fixture();
                 let path = &syntax.item.definition;
                 let mut record = AuditRecord {
@@ -3789,12 +3251,7 @@ mod malformed_tests {
                         hirsel_syntax::ExprId(u32::MAX),
                         hirsel_types::Allocation::NoAlloc,
                     )),
-                    5 => record
-                        .selections
-                        .push(crate::comptime::Selection::Generated(DefId::intern(
-                            &DefPath::core("absent-generator"),
-                        ))),
-                    6 => record.selections.push(crate::comptime::Selection::Staged(
+                    5 => record.selections.push(crate::comptime::Selection::Staged(
                         DefId::intern(&DefPath::core("absent-stage")),
                         vec![2],
                     )),
@@ -3816,136 +3273,6 @@ mod malformed_tests {
     }
 
     #[test]
-    fn generated_registrations_validate_before_installation_and_comparison() {
-        use hirsel_types::{GenericArgument, Size};
-        for verify in [
-            hirsel_engine_store::VerifyStore::Off,
-            hirsel_engine_store::VerifyStore::Recompute,
-        ] {
-            for fault in 0..7 {
-                let (mut engine, syntax) =
-                    fixture_source("fn main[T,n:size]()->u32 uses {}=comptime ignored()");
-                engine.adapters.lexer = Some(Arc::new(crate::adapters::LexerAdapter));
-                engine.adapters.parser = Some(Arc::new(crate::adapters::ParserAdapter));
-                let declaration = syntax.item.definition.clone();
-                let arguments = vec![
-                    GenericArgument::Type(engine.types.intern(hirsel_types::Type::unit())),
-                    GenericArgument::Size(Size::Constant(2)),
-                ];
-                let canonical = hirsel_tir::InstanceBodies::key(&engine.types, &arguments).unwrap();
-                let instance = generation::instance_path(&declaration, canonical);
-                let mut record = GeneratedRegistration {
-                    declaration: DefId::intern(&declaration),
-                    instance: DefId::intern(&instance),
-                    arguments,
-                };
-                match fault {
-                    0 => (),
-                    1 => record.declaration = DefId::intern(&DefPath::core("foreign")),
-                    2 => record.instance = DefId::intern(&DefPath::core("foreign")),
-                    3 => {
-                        record.arguments.pop();
-                    }
-                    4 => record.arguments[0] = GenericArgument::Size(Size::Constant(2)),
-                    5 => {
-                        record.arguments[1] = GenericArgument::Size(Size::Parameter(
-                            hirsel_types::SizeParameterRef::bound(hirsel_types::SizeParamId(0)),
-                        ))
-                    }
-                    6 => record.arguments[1] = GenericArgument::Size(Size::Constant(3)),
-                    _ => unreachable!(),
-                }
-                let (_, key) = engine.generated_registration_key(&instance).unwrap();
-                let payload = engine.encode_record(&record).unwrap();
-                let store = engine.result_store.as_ref().unwrap().clone();
-                let mut entry = StoredEntry::default();
-                entry.insert(VariantRef::publish(&*store, &key, Reads::empty(), &payload).unwrap());
-                store.put(&key, &entry.encode_for(&key));
-                engine.verify_store = verify;
-                let hit = engine.load_generated_registration(&instance);
-                let accepted = fault == 0 && verify == hirsel_engine_store::VerifyStore::Off;
-                assert_eq!(hit.is_some(), accepted, "fault={fault} verify={verify:?}");
-                assert_eq!(engine.items.contains_key(&instance), accepted);
-                assert_eq!(
-                    engine.instance_bodies.instances.len(),
-                    usize::from(accepted)
-                );
-                assert!(
-                    engine.generated_source(&instance).is_none(),
-                    "registration never executes or publishes generator text"
-                );
-                if fault != 0 {
-                    assert_eq!(engine.store_adoptions(), 0);
-                    assert!(engine.pending_store_checks.is_empty());
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn malformed_generation_records_miss_before_source_publication() {
-        for verify in [
-            hirsel_engine_store::VerifyStore::Off,
-            hirsel_engine_store::VerifyStore::Recompute,
-        ] {
-            for fault in 0..7 {
-                let (mut engine, syntax) =
-                    fixture_source("fn main()->u32 uses {}=comptime ignored()");
-                engine.verify = Verify::Off;
-                let path = &syntax.item.definition;
-                let body = generation::generator(&syntax).unwrap();
-                let mut depth =
-                    hirsel_query_products::depth::DepthEvidence::leaf(engine.depth_limit());
-                depth.bounded = false;
-                let mut record = GenerationRecord {
-                    owner: DefId::intern(path),
-                    body,
-                    depth,
-                    text: "fn()->u32 uses {}{7u32}".into(),
-                    detail: Default::default(),
-                    selections: vec![],
-                    acceptance: None,
-                };
-                match fault {
-                    0 => (),
-                    1 => record.owner = DefId::intern(&DefPath::core("foreign")),
-                    2 => record.body = hirsel_syntax::ExprId(u32::MAX),
-                    3 => record.depth.bounded = true,
-                    4 => record.depth.first = Box::new([]),
-                    5 => record.selections.push(crate::comptime::Selection::Staged(
-                        DefId::intern(&DefPath::core("absent-stage")),
-                        vec![2],
-                    )),
-                    6 => record
-                        .selections
-                        .push(crate::comptime::Selection::Generated(DefId::intern(
-                            &DefPath::core("absent-generator"),
-                        ))),
-                    _ => unreachable!(),
-                }
-                engine
-                    .write_record(path, QueryKind::Generate, &Reads::empty(), &record)
-                    .unwrap();
-                engine.verify_store = verify;
-                let hit = engine.load_generation(path, body).unwrap();
-                assert_eq!(
-                    hit.is_some(),
-                    fault == 0 && verify == hirsel_engine_store::VerifyStore::Off,
-                    "fault={fault} verify={verify:?}"
-                );
-                assert!(
-                    engine.generated_source(path).is_none(),
-                    "a text query does not publish generated syntax"
-                );
-                if fault != 0 {
-                    assert_eq!(engine.store_adoptions(), 0);
-                    assert!(engine.pending_store_checks.is_empty());
-                }
-            }
-        }
-    }
-
-    #[test]
     fn durable_evaluation_requires_exact_coverage_for_every_removed_v_guard() {
         use hirsel_tir::*;
         let (engine, syntax) = fixture();
@@ -3959,7 +3286,6 @@ mod malformed_tests {
             entry: BodyId(0),
             caller_bodies: vec![],
             protocol_associations: vec![],
-            contracts: vec![],
             bodies: vec![hirsel_tir::Body {
                 arena_scope_grant: None,
                 scoped_parameters: vec![],
@@ -4245,7 +3571,7 @@ mod malformed_tests {
             hirsel_engine_store::VerifyStore::Off,
             hirsel_engine_store::VerifyStore::Recompute,
         ] {
-            for fault in 0..7 {
+            for fault in 0..6 {
                 let (mut engine, syntax) = fixture_source("const VALUE:u8=7u8");
                 engine.verify = Verify::Off;
                 let path = &syntax.item.definition;
@@ -4290,12 +3616,6 @@ mod malformed_tests {
                             DefId::intern(&DefPath::core("absent-stage")),
                             vec![2],
                         )),
-                    6 => record
-                        .constant
-                        .selections
-                        .push(crate::comptime::Selection::Generated(DefId::intern(
-                            &DefPath::core("absent-generator"),
-                        ))),
                     _ => unreachable!(),
                 }
                 engine
@@ -4717,84 +4037,6 @@ mod malformed_tests {
             }
         }
     }
-    #[test]
-    fn rejected_lower_probe_keeps_generated_check_observations_private() {
-        struct Header;
-        impl SignaturePhase for Header {
-            fn signature(
-                &self,
-                types: &hirsel_types::TypeInterner,
-                _: &hirsel_types::TypeMemo,
-                syntax: Arc<ItemSyntax>,
-                _: &Declarations,
-                _: &mut PhaseProducts,
-                _: &mut dyn SignatureProvider,
-            ) -> Result<QueryOutput<Signature>, QueryError> {
-                Ok(output(Signature {
-                    metadata: Default::default(),
-                    definition: DefId::intern(&syntax.item.definition),
-                    kind: hirsel_types::SignatureKind::Const {
-                        ty: types.intern(hirsel_types::Type::unit()),
-                        generics: Default::default(),
-                    },
-                    fingerprint: syntax.text_hash,
-                }))
-            }
-        }
-        hirsel_intern::jobs::with_compiler_stack(|| {
-            let (mut engine, syntax) = fixture_source("fn main()->u32 uses {}=comptime ignored()");
-            engine.adapters.signature = Some(Arc::new(Header));
-            engine.verify = Verify::Off;
-            let path = &syntax.item.definition;
-            let signature = engine.signature_output(path).unwrap();
-            let id = DefId::intern(path);
-            let mut observed = Observed::default();
-            observed
-                .merged
-                .record(ReadKey::Signature(id), signature.value.fingerprint);
-            let text = engine.key_text(path, QueryKind::Check).unwrap();
-            let entry = engine.record(
-                MemoKey::new(QueryKind::Check, id),
-                text,
-                Err::<Arc<QueryOutput<Arc<TypedBody>>>, _>(QueryError::NotImplemented),
-                Default::default(),
-                &observed,
-            );
-            engine.checked.insert(id, Arc::new(entry));
-            let sentinel = ContentHash::of_bytes(b"accepted outer environment");
-            let mut outer = ReadsBuilder::new();
-            outer.record(ReadKey::Environment, sentinel);
-            engine.execution_stack.push(outer);
-            engine.evaluation_validation.push(Some(Default::default()));
-            engine.evaluation_acceptance.push(Some(Vec::new()));
-            engine.evaluation_selections.push(Vec::new());
-            assert!(engine.load_lower(path).unwrap().is_none());
-            let reads = engine.execution_stack.pop().unwrap().finish().unwrap();
-            assert_eq!(
-                reads.len(),
-                1,
-                "rejected preparation leaked a Signature read"
-            );
-            assert_eq!(reads.get(&ReadKey::Environment), Some(sentinel));
-            assert!(
-                engine
-                    .evaluation_validation
-                    .pop()
-                    .unwrap()
-                    .unwrap()
-                    .is_empty()
-            );
-            assert!(
-                engine
-                    .evaluation_acceptance
-                    .pop()
-                    .unwrap()
-                    .unwrap()
-                    .is_empty()
-            );
-            assert!(engine.evaluation_selections.pop().unwrap().is_empty());
-        });
-    }
 
     #[test]
     fn malformed_lower_depth_is_rejected_before_adoption_or_replay() {
@@ -4844,7 +4086,6 @@ mod malformed_tests {
                         types: Arc::from([]),
                         bodies: vec![],
                         entry: hirsel_tir::BodyId(0),
-                        contracts: vec![],
                     })),
                     detail: Default::default(),
                 };
@@ -5125,7 +4366,6 @@ mod malformed_tests {
             types: vec![unit].into(),
             bodies: vec![],
             entry: hirsel_tir::BodyId(0),
-            contracts: vec![],
         });
         let record = LowerRecord {
             selections: vec![],

@@ -1,5 +1,5 @@
 //! The coordinator against a cache-free serial depth-first evaluation, over a
-//! model of S1's three request kinds, at jobs 1, 2 and 8, cold and with
+//! model of S1's constant and staged request kinds, at jobs 1, 2 and 8, cold and with
 //! partial cache hits.
 use super::*;
 use std::collections::BTreeMap;
@@ -13,9 +13,6 @@ enum Kind {
     Constant,
     /// A staged constant instance: bounded; a cycle is CT-4 at the request.
     Staged,
-    /// A generated declaration: not bounded; requested at its body's site; a
-    /// cycle is CT-4 at that site; its failures are memoized.
-    Generator,
 }
 
 #[derive(Clone, Debug)]
@@ -36,9 +33,6 @@ enum Fail {
     Own(usize),
 }
 
-fn body_site(node: usize) -> u32 {
-    100_000 + node as u32
-}
 fn root_site(node: usize) -> u32 {
     200_000 + node as u32
 }
@@ -51,7 +45,7 @@ fn mix(a: u64, b: u64) -> u64 {
 fn cycle(kind: Kind, mut sites: impl Iterator<Item = u32>, site: u32) -> Fail {
     match kind {
         Kind::Constant => Fail::Cycle(sites.by_ref().min().unwrap()),
-        Kind::Staged | Kind::Generator => Fail::Cycle(site),
+        Kind::Staged => Fail::Cycle(site),
     }
 }
 
@@ -64,11 +58,6 @@ fn reference(
     site: u32,
 ) -> Result<u64, Fail> {
     let n = &graph[node];
-    let site = if n.kind == Kind::Generator {
-        body_site(node)
-    } else {
-        site
-    };
     if let Some(start) = stack.iter().position(|(k, _)| *k == node) {
         let sites: Vec<u32> = stack[start + 1..]
             .iter()
@@ -77,7 +66,7 @@ fn reference(
             .collect();
         return Err(cycle(n.kind, sites.into_iter(), site));
     }
-    if n.kind != Kind::Generator && stack.len() as u32 >= limit {
+    if stack.len() as u32 >= limit {
         return Err(Fail::Overflow(site));
     }
     stack.push((node, site));
@@ -129,11 +118,6 @@ impl Model {
     /// The engine's request path: memo, cycle, depth, claim, evaluate.
     fn request(&self, w: &mut S1Worker<usize, u32>, node: usize, site: u32) -> Result<u64, Fail> {
         let n = &self.graph[node];
-        let site = if n.kind == Kind::Generator {
-            body_site(node)
-        } else {
-            site
-        };
         loop {
             let hit = self.memo.lock().unwrap().get(&node).cloned();
             if let Some((result, evidence)) = hit {
@@ -145,10 +129,8 @@ impl Model {
                 w.fail_cycle();
                 return Err(cycle(n.kind, w.cycle_sites(start, site), site));
             }
-            if n.kind != Kind::Generator {
-                w.admit(&DepthEvidence::leaf(self.limit), site)
-                    .map_err(Fail::Overflow)?;
-            }
+            w.admit(&DepthEvidence::leaf(self.limit), site)
+                .map_err(Fail::Overflow)?;
             match w.enter(node, site) {
                 Entered::Run => break,
                 Entered::Settled => continue,
@@ -176,12 +158,9 @@ impl Model {
             }
             Ok(value)
         })();
-        let bounded = n.kind != Kind::Generator;
-        let evidence = w.composed(self.limit, bounded);
-        // Store before leaving, so a waiter finds it; a failure is stored
-        // only by a generator, and only when it is the generator's own.
-        let own = w.failure_is_own();
-        if result.is_ok() || (n.kind == Kind::Generator && own) {
+        let evidence = w.composed(self.limit, true);
+        // Publish successful values before releasing the claim to waiters.
+        if result.is_ok() {
             self.memo
                 .lock()
                 .unwrap()
@@ -258,7 +237,6 @@ fn random_graph(rng: &mut Rng, size: usize, cyclic: bool) -> Graph {
         .map(|node| {
             let kind = match rng.below(4) {
                 0 => Kind::Staged,
-                1 => Kind::Generator,
                 _ => Kind::Constant,
             };
             let mut requests = vec![];
@@ -291,7 +269,7 @@ fn shuffled(rng: &mut Rng, size: usize) -> Vec<usize> {
     order
 }
 
-/// Random graphs with cycles, own failures, all three kinds and small
+/// Random graphs with cycles, own failures, both request kinds and small
 /// limits: every root's outcome at jobs 1/2/8, cold and over a memo warmed by
 /// a subset of roots, equals the cache-free serial evaluation.
 #[test]
@@ -356,7 +334,7 @@ fn two_task_cycle_reports_the_serial_diagnostic() {
     }
 }
 
-/// A constant → generator → staged → constant cycle entered by three tasks at
+/// A constant → staged → staged → constant cycle entered by three tasks at
 /// once, and the same cycle entered at each point serially.
 #[test]
 fn mixed_three_task_cycle_matches_serial() {
@@ -367,7 +345,7 @@ fn mixed_three_task_cycle_matches_serial() {
             own_failure: None,
         },
         Node {
-            kind: Kind::Generator,
+            kind: Kind::Staged,
             requests: vec![(2, 20)],
             own_failure: None,
         },
@@ -407,7 +385,7 @@ fn saturated_chain_parks_and_keeps_serial_depth() {
     let mut graph: Graph = (0..len)
         .map(|i| Node {
             kind: if i % 5 == 4 {
-                Kind::Generator
+                Kind::Staged
             } else {
                 Kind::Constant
             },
@@ -441,38 +419,6 @@ fn saturated_chain_parks_and_keeps_serial_depth() {
             let (got, _) = within(move || run(&model, jobs, &order));
             assert_eq!(got, want, "jobs {jobs}, warm {warm:?}");
         }
-    }
-}
-
-/// A generator's result requested at or past the limit: it is not bounded
-/// itself, so a leaf generator succeeds where a bounded request would fail,
-/// warm and cold alike.
-#[test]
-fn unbounded_generator_evidence_matches_cold() {
-    // 0 (constant) → 1 (constant) → 2 (generator, leaf); limit 2.
-    let graph = vec![
-        Node {
-            kind: Kind::Constant,
-            requests: vec![(1, 1)],
-            own_failure: None,
-        },
-        Node {
-            kind: Kind::Constant,
-            requests: vec![(2, 2)],
-            own_failure: None,
-        },
-        Node {
-            kind: Kind::Generator,
-            requests: vec![],
-            own_failure: None,
-        },
-    ];
-    let want = expected(&graph, 2);
-    assert!(want[&0].is_ok(), "{want:?}");
-    for warm in [vec![], vec![1], vec![2], vec![2, 1]] {
-        let model = Model::new(graph.clone(), 2);
-        run(&model, 1, &warm);
-        assert_eq!(run(&model, 1, &[0, 1, 2]).0, want, "warm {warm:?}");
     }
 }
 

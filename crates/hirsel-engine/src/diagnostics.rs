@@ -88,7 +88,7 @@ fn specialized(special: &str, general: &str) -> bool {
             | ("MEM-4" | "MEM-12" | "MEM-13" | "MEM-11", "GEN-1" | "LANG-7")
             | ("MEM-11", "MODE-2" | "CAP-2")
             | ("MEM-13", "MODE-1")
-            | ("SEM-4" | "FACT-1" | "FACT-2", "LANG-7")
+            | ("SEM-4", "LANG-7")
     )
 }
 /// Spec #38: an invalid type-argument instantiation
@@ -333,7 +333,6 @@ mod tests {
             ("MEM-13", "MODE-1"),
             ("CONC-6", "GEN-1"),
             ("SEM-4", "LANG-7"),
-            ("FACT-2", "LANG-7"),
             ("PROV-5", "PROV-1"),
             ("CAP-3", "CLO-2"),
         ] {

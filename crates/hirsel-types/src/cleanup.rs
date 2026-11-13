@@ -45,8 +45,7 @@ pub fn cleanup_summary(
             | BuiltinType::Atomic
             // MEM-4 seal prohibits user resources in the complete payload.
             // Dropping the affine owner releases storage mechanically.
-            | BuiltinType::Region
-            | BuiltinType::TypeShape => DropAllocation::NoAlloc,
+            | BuiltinType::Region => DropAllocation::NoAlloc,
             BuiltinType::Iter | BuiltinType::SortedMap => DropAllocation::MayAllocate,
             _ => join(
                 arguments

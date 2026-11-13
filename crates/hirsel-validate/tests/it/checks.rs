@@ -100,7 +100,7 @@ fn binary_types_and_lowered_operators() {
     f.broken(vec![ViolationKind::InvalidOperator]);
 }
 #[test]
-fn unary_types_snapshot_and_shape() {
+fn unary_types() {
     let mut f = Fixture::unit();
     let p = f.slot(TypeKind::Primitive(Primitive::Bool), Storage::Temporary);
     f.assign(p, Rvalue::Constant(Constant::Bool(true)), 0);
@@ -119,33 +119,6 @@ fn unary_types_snapshot_and_shape() {
         value: copy(p),
     };
     f.broken(vec![ViolationKind::InvalidOperator]);
-    let mut f = Fixture::unit();
-    let p = f.slot(TypeKind::Tuple(vec![].into()), Storage::Temporary);
-    f.emit(InstructionKind::Snapshot {
-        destination: PlaceId(p),
-        value: copy(0),
-    });
-    f.valid();
-    let bool_ty = f
-        .definition
-        .types
-        .push(ty(TypeKind::Primitive(Primitive::Bool)));
-    f.body().places[p as usize].ty = bool_ty;
-    f.body().locals[p as usize].ty = bool_ty;
-    f.broken(vec![ViolationKind::TypeMismatch { entity: "snapshot" }]);
-    let mut f = Fixture::unit();
-    let unit_ty = f.body().result;
-    let shape = f.slot(
-        TypeKind::Builtin {
-            kind: BuiltinType::TypeShape,
-            arguments: vec![GenericArgument::Type(unit_ty)].into(),
-        },
-        Storage::Temporary,
-    );
-    f.assign(shape, Rvalue::Shape(unit_ty), 0);
-    f.valid();
-    f.body().rvalues[1] = Rvalue::Shape(f.body().places[shape as usize].ty);
-    f.broken(vec![ViolationKind::TypeMismatch { entity: "shape" }]);
 }
 #[test]
 fn tuple_constructor_arity_and_field_types() {
@@ -489,17 +462,6 @@ fn moves_at_a_cfg_join_are_not_definitely_live() {
     };
     f.body().result = f.body().places[c as usize].ty;
     f.valid();
-    f.body().blocks[3].instructions.push(inst(
-        InstructionKind::Snapshot {
-            destination: PlaceId(dest),
-            value: copy(0),
-        },
-        0,
-    ));
-    f.broken(vec![
-        ViolationKind::UseAfterMove(PlaceId(0)),
-        ViolationKind::WriteToLive(PlaceId(dest)),
-    ]);
 }
 #[test]
 fn run_cleanup_releases_slots_before_continuing() {
@@ -1299,19 +1261,6 @@ fn builtin_type_arity_and_argument_kind_are_validated() {
         arguments: vec![].into(),
     }));
     f.broken(vec![ViolationKind::InvalidTypeGraph]);
-}
-
-#[test]
-fn snapshot_requires_plain_values() {
-    let mut f = Fixture::string();
-    let dest = f.slot(TypeKind::Primitive(Primitive::String), Storage::Temporary);
-    f.emit(InstructionKind::Snapshot {
-        destination: PlaceId(dest),
-        value: copy(1),
-    });
-    f.broken(vec![ViolationKind::TypeMismatch {
-        entity: "nonplain snapshot",
-    }]);
 }
 
 #[test]
@@ -2181,7 +2130,6 @@ fn type_owned_resource_finalizer_borrows_self() {
         distinct: false,
         resource: true,
         drop: Some(path("main")),
-        fact: None,
         captures: None,
     }));
     f.signatures.insert(id("main"), signature);
@@ -2677,7 +2625,6 @@ fn generic_variant_equality_fixture(data_payload: bool) -> Fixture {
             allocation: Allocation::NoAlloc,
             authority: AuthoritySummary::inert(),
             uses: Uses::Only(AuthoritySummary::inert()),
-            contracts: vec![].into(),
             incomplete: false,
             foreign: None,
         })))
@@ -2745,7 +2692,6 @@ fn generic_variant_equality_fixture(data_payload: bool) -> Fixture {
             distinct: false,
             resource: false,
             drop: None,
-            fact: None,
             captures: None,
             destructor_allocation: Allocation::NoAlloc,
         })),
@@ -2990,7 +2936,6 @@ fn nominal_copy_fixture(payload: TypeKind, resource: bool) -> Fixture {
                 distinct: false,
                 resource,
                 drop: None,
-                fact: None,
                 captures: None,
                 destructor_allocation: Allocation::NoAlloc,
             })),
@@ -3667,7 +3612,6 @@ fn function_authority_flow_fixture(
         allocation: Allocation::NoAlloc,
         authority,
         uses,
-        contracts: vec![].into(),
         incomplete: false,
         foreign: None,
     };
@@ -3864,7 +3808,6 @@ fn nested_callback_shapes(f: &mut Fixture, narrow: bool) -> Vec<(&'static str, N
             Uses::Unrestricted => AuthoritySummary::Unknown,
         },
         uses,
-        contracts: vec![].into(),
         incomplete: false,
         foreign: None,
     };
@@ -4316,7 +4259,6 @@ fn proven_global_content_is_acquired_at_depth_at_each_storage_flow() {
                 allocation: Allocation::NoAlloc,
                 authority: AuthoritySummary::inert(),
                 uses: Uses::Only(AuthoritySummary::inert()),
-                contracts: vec![].into(),
                 incomplete: false,
                 foreign: None,
             };
@@ -4379,7 +4321,6 @@ fn callable_allocation_promises_weaken_only_from_noalloc_to_may_allocate() {
             allocation,
             authority: AuthoritySummary::inert(),
             uses: Uses::Unrestricted,
-            contracts: vec![].into(),
             incomplete: false,
             foreign: None,
         };
@@ -4895,7 +4836,6 @@ fn builtin_handle_authority_is_checked_inside_generic_callable_results() {
         allocation: Allocation::NoAlloc,
         authority,
         uses: Uses::Unrestricted,
-        contracts: vec![].into(),
         incomplete: false,
         foreign: None,
     };
@@ -4995,7 +4935,6 @@ fn erased_capture_results_are_proved_from_actual_parameters() {
             distinct: false,
             resource: false,
             drop: None,
-            fact: None,
             captures: None,
             destructor_allocation: Allocation::NoAlloc,
         })),
@@ -6688,7 +6627,6 @@ fn indirect_generic_calls_check_actuals_arity_kinds_and_bounds() {
         allocation: Allocation::MayAllocate,
         authority: AuthoritySummary::inert(),
         uses: Uses::Unrestricted,
-        contracts: vec![].into(),
         incomplete: false,
         foreign: None,
     };
@@ -7333,7 +7271,6 @@ fn empty_materialized_maps_still_require_data_values() {
         allocation: Allocation::NoAlloc,
         authority: AuthoritySummary::inert(),
         uses: Uses::Only(AuthoritySummary::inert()),
-        contracts: vec![].into(),
         incomplete: false,
         foreign: None,
     })));

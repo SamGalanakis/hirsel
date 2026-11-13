@@ -76,7 +76,6 @@ pub(super) struct ReadDefinition<'a> {
     pub(super) protocol_associations: Rows<'a, ProtocolAssociationReceipt>,
     pub(super) types: Rows<'a, TypeId>,
     pub(super) bodies: Rows<'a, ReadBody<'a>>,
-    pub(super) contracts: Rows<'a, (u32, BodyId)>,
 }
 impl<'a> ReadDefinition<'a> {
     pub(super) fn live(value: &'a Definition) -> Self {
@@ -116,14 +115,6 @@ impl<'a> ReadDefinition<'a> {
                 TirView::Live(value) => Rows::Live(&value.types),
                 TirView::Archived(_) => Rows::indexed(view.type_count(), move |n| {
                     view.type_id(n).expect("bound checked TIR row").into_owned()
-                }),
-            },
-            contracts: match view {
-                TirView::Live(value) => Rows::Live(&value.contracts),
-                TirView::Archived(_) => Rows::indexed(view.contract_count(), move |n| {
-                    view.contract(n)
-                        .expect("bound checked TIR row")
-                        .into_owned()
                 }),
             },
             bodies: Rows::indexed(view.body_count(), move |n| {

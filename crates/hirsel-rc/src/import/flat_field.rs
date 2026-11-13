@@ -84,7 +84,6 @@ fn instruction_places(body: &tir::Body, kind: &tir::InstructionKind) -> Vec<tir:
         } => out.extend([*destination, value.place, *displaced]),
         K::BeginLoan { place, .. } => out.push(*place),
         K::Check { condition, .. } => out.push(condition.place),
-        K::Snapshot { destination, value } => out.extend([*destination, value.place]),
         K::StorageLive(_)
         | K::EndScope(_)
         | K::EndLoan { .. }
@@ -110,8 +109,7 @@ fn rvalue_places(rvalue: &tir::Rvalue) -> Vec<tir::PlaceId> {
         tir::Rvalue::Constant(_)
         | tir::Rvalue::ReadConstant { .. }
         | tir::Rvalue::FunctionReference { .. }
-        | tir::Rvalue::Size(_)
-        | tir::Rvalue::Shape(_) => Vec::new(),
+        | tir::Rvalue::Size(_) => Vec::new(),
     }
 }
 

@@ -54,10 +54,6 @@ pub(crate) struct Task {
     pub(crate) syntax: Arc<ItemSyntax>,
     pub(crate) signature: Result<Arc<QueryOutput<SignatureRef>>, QueryError>,
     pub(crate) signature_reads: Arc<Reads>,
-    /// A generated definition's accepted view: its generator's signature
-    /// prefix and complete execution reads join this body's Check receipt,
-    /// as the scalar Check of generated text inherits its generation.
-    pub(crate) registration: Option<Arc<AcceptedFrontRegistration>>,
     pub(crate) resolution: Option<Arc<Entry<Resolution>>>,
     pub(crate) checked: Option<Arc<Entry<Arc<TypedBody>>>>,
     pub(crate) text: ContentHash,
@@ -277,7 +273,6 @@ impl Worker<'_> {
         let owner = DefId::intern(&task.definition);
         // A checked memo already includes the complete resolution reads. A
         // partial hit needs no resolver work, but remains the same task path.
-        let mut resolution_provider_reads = None;
         let checked = if let Some(entry) = task.checked {
             Product::Hit(entry)
         } else {
@@ -304,10 +299,6 @@ impl Worker<'_> {
                     ),
                     None => Err(QueryError::NotImplemented),
                 };
-                resolution_provider_reads = task
-                    .registration
-                    .as_ref()
-                    .map(|_| stage.detail.signatures.clone());
                 stage.complete(result, products);
                 Product::Computed(stage)
             };
@@ -339,51 +330,18 @@ impl Worker<'_> {
             done.phase = QueryKind::Check;
             initial.signatures.extend(resolution.dependencies.clone());
             initial.signatures.extend(signature.dependencies.clone());
-            let declared_header = if task.registration.is_some() {
-                match generation::declared_header_read(self.types, &signature.value) {
-                    Ok(value) => Some(value),
-                    Err(error) => {
-                        done.result = Err(error);
-                        return done;
-                    }
-                }
-            } else {
-                initial.signatures.push(SignatureDependency {
-                    definition: hirsel_syntax::DefId::intern(&task.definition),
-                    fingerprint: signature.value.fingerprint,
-                });
-                None
-            };
+            initial.signatures.push(SignatureDependency {
+                definition: hirsel_syntax::DefId::intern(&task.definition),
+                fingerprint: signature.value.fingerprint,
+            });
             let _timing = timings::phase(Phase::Check);
             timings::count(Count::Definitions);
             let mut stage = Stage {
                 result: Err(QueryError::NotImplemented),
                 detail: initial,
-                observed: {
-                    // The generator's verifier receipt is acceptance evidence,
-                    // checked when the view installs, not a Check input.
-                    let mut observed = Observed::default();
-                    if let Some(value) = declared_header {
-                        observed
-                            .merged
-                            .record(ReadKey::DeclaredSignature(owner), value);
-                    }
-                    for &(key, value) in task.registration.iter().flat_map(|r| r.reads.iter()) {
-                        if !matches!(
-                            key,
-                            ReadKey::ValidationView(..)
-                                | ReadKey::ValidationUniverse(_)
-                                | ReadKey::UniverseErrors(_)
-                                | ReadKey::HeapRole(_)
-                        ) {
-                            observed.merged.record(key, value);
-                        }
-                    }
-                    observed
-                },
+                observed: Observed::default(),
                 unavailable: None,
             };
-            let initial_signatures = stage.detail.signatures.len();
             let mut provider = WorkerRecorder::new(self, owner, &mut stage);
             let mut result = self.structural_check(
                 task.syntax,
@@ -401,27 +359,7 @@ impl Worker<'_> {
                     },
                 );
             }
-            let exact = resolution_provider_reads.map(|mut signatures| {
-                let mut prefix = task
-                    .registration
-                    .as_ref()
-                    .expect("captured accepted generator prefix")
-                    .checked_prefix()
-                    .to_vec();
-                signatures.extend_from_slice(&stage.detail.signatures[initial_signatures..]);
-                if let Ok(output) = &result {
-                    signatures.extend_from_slice(&output.dependencies);
-                }
-                prefix.extend(signatures);
-                prefix
-            });
             stage.complete(result.map(shared_output), PhaseProducts::default());
-            if let Some(dependencies) = exact {
-                stage.detail.signatures = dependencies.clone();
-                if let Ok(output) = &mut stage.result {
-                    Arc::make_mut(output).dependencies = dependencies;
-                }
-            }
             Product::Computed(stage)
         };
         done.phase = QueryKind::Check;
@@ -916,7 +854,6 @@ mod frozen_task_tests {
                     syntax: engine.items[&path][0].clone(),
                     signature: engine.signatures[&id].result(),
                     signature_reads: engine.signatures[&id].memo.reads.clone(),
-                    registration: None,
                     resolution: None,
                     checked: None,
                     text: ContentHash::default(),
@@ -1176,7 +1113,6 @@ mod frozen_task_tests {
                 allocation: hirsel_types::Allocation::MayAllocate,
                 authority: hirsel_types::AuthoritySummary::Known(Default::default()),
                 uses: hirsel_types::Uses::Unrestricted,
-                contracts: Default::default(),
                 incomplete: false,
                 foreign: None,
             }),
@@ -1310,7 +1246,6 @@ mod frozen_task_tests {
                     syntax: engine.items[&path][0].clone(),
                     signature: engine.signatures[&id].result(),
                     signature_reads: engine.signatures[&id].memo.reads.clone(),
-                    registration: None,
                     resolution: partial.then(|| engine.resolutions[&id].clone()),
                     checked: None,
                     text: ContentHash::default(),
@@ -1378,7 +1313,6 @@ mod frozen_task_tests {
                 syntax: engine.items[&path][0].clone(),
                 signature: Err(QueryError::NotImplemented),
                 signature_reads: Arc::new(Reads::from_vec(vec![(key, receipt)]).unwrap()),
-                registration: None,
                 resolution: None,
                 checked: None,
                 text: ContentHash::default(),

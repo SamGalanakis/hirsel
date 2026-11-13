@@ -252,9 +252,7 @@ impl Importer<'_> {
                 self.elided_place(*place)
             }
             K::BeginLoan { id, place, .. } => self.elided_place(*place) || self.elided_loan(*id),
-            K::Assign { destination, .. } | K::Snapshot { destination, .. } => {
-                self.elided_place(*destination)
-            }
+            K::Assign { destination, .. } => self.elided_place(*destination),
             K::BindOrigin { source, place, .. } => {
                 self.elided_place(*source) || self.elided_place(*place)
             }
@@ -328,13 +326,6 @@ impl Importer<'_> {
                 let rvalue = &self.body.rvalues[value.0 as usize];
                 let p = self.place(*destination)?;
                 let v = self.rvalue(rvalue, p.ty)?;
-                let v = self.weaken(v, p.ty);
-                let address = self.address(&p)?;
-                self.store(&p, address, v)?;
-            }
-            K::Snapshot { destination, value } => {
-                let p = self.place(*destination)?;
-                let v = self.operand(value)?;
                 let v = self.weaken(v, p.ty);
                 let address = self.address(&p)?;
                 self.store(&p, address, v)?;
@@ -978,14 +969,6 @@ impl Importer<'_> {
                 });
                 result
             }
-            V::Shape(_) => {
-                let anchor = self.anchor_here();
-                self.push(Inst::Unavailable {
-                    feature: hirsel_lir::ir::UnavailableFeature::Shape,
-                    anchor,
-                });
-                return unsupported("Shape static data is not materialized");
-            }
         })
     }
 
@@ -1485,32 +1468,6 @@ impl Importer<'_> {
     ) -> R<(SymbolId, FnAbiId)> {
         // CT-5: a generic generated declaration is its selected instance's
         // monomorphic definition.
-        if self
-            .program
-            .instance_bodies
-            .declarations
-            .contains(&DefId::intern(path))
-        {
-            let callee = crate::instance::callee_actuals(
-                self.types,
-                &self.program.memo,
-                None,
-                arguments,
-                self.actuals,
-                false,
-                path,
-            )?;
-            let instance = match self.program.instance_bodies.resolve(
-                DefId::intern(path),
-                self.types,
-                &callee.arguments,
-            ) {
-                Ok(Some(instance)) => instance.path().clone(),
-                Ok(None) => return unsupported(format!("{path:?} has no instance bodies")),
-                Err(error) => return unsupported(format!("{error:?}")),
-            };
-            return self.direct(&instance, &[]);
-        }
         if let Some(body) = crate::library::body_index(path) {
             let request = self.library_request(body, path, arguments)?;
             let direct = self.require(request)?;

@@ -27,7 +27,6 @@ pub(super) fn declaration(
         || d.capability.is_some()
         || d.resource
         || d.drop.is_some()
-        || d.fact.is_some()
         || s.metadata.visibility == hirsel_syntax::Visibility::PublicOpaque
         || d.authority != AuthoritySummary::inert() && !(d.serializable && parametric)
     {
@@ -93,7 +92,6 @@ fn checked(
         || d.capability.is_some()
         || d.resource
         || d.drop.is_some()
-        || d.fact.is_some()
         || !check_function(t, s.definition.path(), &check.function, signatures)
     {
         return Ok(false);
@@ -152,7 +150,6 @@ fn text_path(d: &TypeDefinition, arguments: &[GenericArgument]) -> bool {
         && d.capability.is_none()
         && !d.resource
         && d.drop.is_none()
-        && d.fact.is_none()
         && d.authority == AuthoritySummary::inert()
 }
 
@@ -219,7 +216,6 @@ pub(super) fn eligible(
                 if d.capability.is_some()
                     || d.resource
                     || d.drop.is_some()
-                    || d.fact.is_some()
                     || (s.metadata.visibility == hirsel_syntax::Visibility::PublicOpaque)
                         != check.is_some()
                     || check.is_some_and(|c| {

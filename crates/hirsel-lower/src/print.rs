@@ -53,7 +53,6 @@ pub fn definition(definition: &Definition) -> String {
         }
         for (i, rv) in body.rvalues.iter().enumerate() {
             let text = match rv {
-                Rvalue::Shape(ty) => format!("Shape(t{})", index(&ty)),
                 _ => format!("{rv:?}"),
             };
             output.push_str(&format!("  rvalue {i}: {text}\n"));

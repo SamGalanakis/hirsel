@@ -1066,7 +1066,6 @@ fn sealed_regions_33_read_callback_cannot_escape_a_capture_nested_in_a_record() 
         distinct: false,
         resource: false,
         drop: None,
-        fact: None,
         captures: None,
     }));
     f.signatures.insert(id("Envelope"), envelope);

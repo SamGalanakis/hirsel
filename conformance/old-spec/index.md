@@ -74,7 +74,6 @@ Cost reports (where layer-0 code counts, copies or keeps checks) are tooling.
 | [Failure and destruction](failure.md) | FAIL-1 to FAIL-4, DROP-1 to DROP-4 |
 | [Determinism and replay](determinism.md): run configuration, recording, Blocked | DET-1 to DET-4 |
 | [Everyday semantics](semantics.md): integers, floats, strings, iteration, maps | SEM-1 to SEM-5 |
-| [Contracts and facts](contracts.md) | FACT-1 to FACT-3 |
 | [Compile time](compile-time.md) | CT-1 to CT-5 |
 | [Programs and packages](programs.md): names, visibility, entry, interop, topology, launch | PROG-1 to PROG-6 |
 | [Core library](core-library.md): the `core@1` signature ledger and its contracts | |

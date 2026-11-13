@@ -11,7 +11,7 @@ export that carries them, and a findings sidecar for the results
 fixes their shape and the rules every consumer obeys. Rule IDs are `PS-n`.
 
 Nothing here changes what compiles or what a program means
-([not in Hirsel](index.md#not-in-hirsel), [FACT-3](contracts.md#fact-3-checking),
+([not in Hirsel](index.md#not-in-hirsel),
 [DET-3](determinism.md#det-3-no-switches)). The export is read-only with respect to the
 compiler: lowering, the low-level IR, interpreter failure records and every other digest
 are unchanged by it.
@@ -21,7 +21,7 @@ are unchanged by it.
 ### PS-1: Id
 
 `ObligationId = (DefPath, RuleId, kind, ordinal)`, written `pkg@ver/mod/name#RULE/kind/ordinal`,
-for example `standalone@0/clamp#FACT-1/ensures/0`. The ordinal is the position among the
+for example `standalone@0/clamp#SEM-1/failure-edge/0`. The ordinal is the position among the
 definition's sites with the same `(RuleId, kind)` under the canonical traversal
 ([PS-3](#ps-3-canonical-traversal)). Ids never contain arena indices, spans or hashes.
 
@@ -33,16 +33,10 @@ so adding a kind is not a format break ([PS-12](#ps-12-sidecar-evidence-only)).
 
 | Kind | Site in TIR | Rule | Ordinal over |
 |---|---|---|---|
-| `check` | an `InstructionKind::Check { rule }` that is not a contract site (FACT-2 constructor facts, entry checks, contract checks of closures) | the check's rule | check sites |
+| `check` | an `InstructionKind::Check { rule }` | the check's rule | check sites |
 | `failure-edge` | an operation that can take its failure edge: an `Assign` of integer `Add`, `Sub`, `Mul`, `Div`, `Rem`, `Shl`, `Shr` or integer `Neg` (SEM-1); a projected place with an `Index` (MEM-14) or a `VariantField` (MEM-13) projection, one obligation per (body, root, projection) whose sites are every instruction or terminator naming it; a `Terminator::Fail { rule }` | SEM-1, MEM-14, MEM-13, or the `Fail`'s rule | sites; a projected place at its first naming |
-| `requires-at-call` | a `Terminator::Call` whose callee's function type (the signature for `Callee::Definition`, the operand's type for `Callee::Indirect`) has `requires` clauses: one obligation per (call, clause), clauses in declaration order | FACT-1 | (call, clause) pairs |
-| `ensures` | one per `ensures` clause of the definition; its sites are the exit checks on every return path | FACT-1 | clauses, declaration order |
-| `requires` | one per `requires` clause of the definition, the precondition as an assumption; its site is the entry check | FACT-1 | clauses, declaration order |
 
-A contract site is a `Check { rule: FACT-1 }` whose condition is the result of an
-`Indirect` call of a closure over a body listed in `Definition.contracts`, created in the
-entry body. Its clause is the `Definition.contracts` ordinal, and its kind comes from the
-owner signature's `Contract` with that ordinal. Library operation failures belong to the
+Library operation failures belong to the
 callee, call failure edges to the callee's obligations, `Unreachable` to the IR validator
 (it is a compiler assertion, not a user obligation): none of these produce obligations.
 
@@ -51,8 +45,7 @@ callee, call failure edges to the callee's obligations, `Unreachable` to the IR 
 Bodies in `Definition.bodies` order, blocks in arena order, instructions in order, then the
 terminator; at one instruction, its own `check` or arithmetic site first, then the places it
 names in field order; at a terminator, its `Fail` or call sites, then its places. Lowering
-appends in source order, so this is source order within each body. An obligation table lists
-the `requires` obligations first, then the sites in this order, then `ensures`.
+appends in source order, so this is source order within each body. An obligation table lists sites in this order.
 
 ### PS-4: Stability
 
@@ -68,8 +61,7 @@ Its ordinal shifts when a same-`(RuleId, kind)` site is added or removed earlier
 order, when code containing such sites is reordered, or when the lowering of this definition
 changes. Ids are positional, not semantic: a consumer that wants to carry evidence across
 such edits re-pairs by checksum ([PS-6](#ps-6-obligation-checksum)) or by its own shape
-matching, never silently. `requires-at-call` ordinals also shift when the callee gains or
-loses a `requires` clause, because the callee's signature changed.
+matching, never silently.
 
 ## Content hashes
 
@@ -178,8 +170,7 @@ and field, or the validator violation's body, block and instruction), on:
 - a format, `TIR_VERSION` or interface version other than its own (exact equality);
 - an export digest, TIR digest, reference list, obligation table or checksum that does not
   recompute to the stored value;
-- a signature fingerprint that does not re-derive: every fingerprint (of a declaration, a
-  fact helper or a registry row) has one derivation, its encoding over the dependency list
+- a signature fingerprint that does not re-derive: every fingerprint (of a declaration or a registry row) has one derivation, its encoding over the dependency list
   it covers, and the importer recomputes it from the exported signature and that list; an
   owner view is consistent exactly when it seals to its public signature. Then every
   dependency, reference and definition signature hash must name those fingerprints;
@@ -197,7 +188,7 @@ plugin API: consumers read the file.
 ### PS-11: Proof never decides
 
 Proof output never decides acceptance or meaning. It can inform, and it can license a
-[FACT-3](contracts.md#fact-3-checking) check removal; it never rejects or admits a program
+check removal; it never rejects or admits a program
 and is never a flag that changes semantics.
 
 ### PS-12: Sidecar evidence only
@@ -205,8 +196,7 @@ and is never a flag that changes semantics.
 Evidence lives only in a sidecar keyed by `(program revision, ObligationId, checksum)`: the
 checksum decides currency ([PS-7](#ps-7-what-digests-bind)); the revision records the
 program it was checked for and binds any removal set to one launch. Source never carries
-proof syntax or prover hints; source contracts stay executable code
-([FACT-1](contracts.md#fact-1-contracts)). Unknown kinds in a newer export are ignored by
+proof syntax or prover hints. Unknown kinds in a newer export are ignored by
 older consumers, not misread.
 
 ### PS-13: Fail-safe removal
@@ -237,17 +227,15 @@ PS-12 and PS-13 apply to `hirsel build` and
   `steps`, `heartbeats`, `conflicts`, `rlimit` or `fuel`
   ([PS-15](#ps-15-deterministic-budgets-replayable-evidence)). A record from
   any other checker is unreplayable; a verdict other than `proved` is rejected.
-- **Removal forms.** An accepted `check` or `ensures` obligation removes the
-  `Check` at each of its sites. The clause is still evaluated, so its own
-  failures remain. An accepted SEM-1 `failure-edge` on integer `Add`, `Sub`,
+- **Removal forms.** An accepted `check` obligation removes the
+  `Check` at each of its sites. An accepted SEM-1 `failure-edge` on integer `Add`, `Sub`,
   `Mul`, `Div`, `Rem`, `Shl`, `Shr` or `Neg` removes that operation's checks:
   the unchecked operation is exact whenever its obligation holds. One Div
   obligation covers both zero and signed overflow; signed `MIN % -1` still
   yields zero. An accepted MEM-14 or MEM-13 `failure-edge` removes respectively
   the bounds or active-tag guards of exactly its projected place at its sites;
   other projection guards and storage/ownership checks remain. Every other
-  obligation keeps its check and is reported: `requires` (the entry check
-  stands for every caller), `requires-at-call`, and `Fail`. Removal applies to
+  obligation keeps its check and is reported. Removal applies to
   native code only; the interpreter checks everything.
 - **Validation.** Removal happens in SSA import. The low-level IR validator
   compares each discharged unit with a reference import that keeps every check,
@@ -369,11 +357,6 @@ What lowering erases, and how a consumer recovers it:
   consumers recover natural loops from back edges, and the header block's location names the
   source loop. An `invariant` clause form will arrive with its own obligation kind and
   anchor.
-- **`before(e)` and contract parameter roles.** `before(e)` lowers to an entry temporary
-  passed as a clause argument; whether a clause argument is a parameter, a snapshot or
-  `result` is recoverable by dataflow from the clause call.
-- **Closure contracts** export as `check` obligations with rule FACT-1, not as `requires`
-  or `ensures` of the closure.
 - **Expression trees** are flattened into temporaries in evaluation order, and
   short-circuit operators become branches; def-use rebuilds them.
 - **Operation semantics.** Registry operations have signatures and effect flags but no

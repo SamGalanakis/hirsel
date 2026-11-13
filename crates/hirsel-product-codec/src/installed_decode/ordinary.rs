@@ -84,7 +84,7 @@ structure!(tir::Place {
 });
 structure!(tir::Scope { parent, span });
 structure!(tir::ConstructField { field, value });
-variants!(tir::Rvalue { Constant(f0), ReadConstant { definition, arguments }, FunctionReference { definition, arguments }, Size(f0), Use(f0), Unary { op, value }, Binary { op, left, right }, Construct { constructor, fields, destination }, Closure { context, body, captures, destination }, Shape(f0) });
+variants!(tir::Rvalue { Constant(f0), ReadConstant { definition, arguments }, FunctionReference { definition, arguments }, Size(f0), Use(f0), Unary { op, value }, Binary { op, left, right }, Construct { constructor, fields, destination }, Closure { context, body, captures, destination } });
 structure!(tir::Cleanup { head });
 variants!(tir::CleanupAction { Drop { place, if_live }, EndLoan { loan, if_active }, ReleaseRegion(f0), CloseArena(f0), JoinTasks { scope, cancel } });
 structure!(tir::CleanupNode { action, parent });
@@ -104,7 +104,7 @@ structure!(tir::ScopedParameter { parameter, fields });
 variants!(tir::OriginBindingKind { Alias, Fresh });
 variants!(tir::SourceEventKind { Call, Iteration, CountedIteration, CountedEntry { from, to, inclusive }, Entry });
 structure!(tir::SourceEvent { kind, source });
-variants!(tir::InstructionKind { Defuse { place }, BindOrigin { source, place, kind }, BindFields { source, fields }, EndOrigin(f0), StorageLive(f0), StorageDead { place, if_live }, EndScope(f0), Assign { destination, value }, Replace { destination, value, displaced, if_live }, BeginLoan { id, place, mutable, if_inactive }, EndLoan { loan, if_active }, Drop { place, if_live }, RunCleanup(f0), Check { condition, rule }, Snapshot { destination, value }, Charge(f0) });
+variants!(tir::InstructionKind { Defuse { place }, BindOrigin { source, place, kind }, BindFields { source, fields }, EndOrigin(f0), StorageLive(f0), StorageDead { place, if_live }, EndScope(f0), Assign { destination, value }, Replace { destination, value, displaced, if_live }, BeginLoan { id, place, mutable, if_inactive }, EndLoan { loan, if_active }, Drop { place, if_live }, RunCleanup(f0), Check { condition, rule }, Charge(f0) });
 structure!(tir::Instruction {
     kind,
     span,
@@ -166,7 +166,6 @@ structure!(tir::Definition {
     signature_hash,
     bodies,
     entry,
-    contracts
 });
 variants!(tir::Callee { Definition { path, arguments }, Indirect { forward_caller, value, arguments } });
 variants!(tir::Terminator { Goto(f0), Match { table, from }, Branch { condition, yes, no }, Switch { value, arms, otherwise }, Call { callee, arguments, returns, on_failure }, Return { value, cleanup }, Fail { rule, cleanup }, Unreachable });

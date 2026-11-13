@@ -210,7 +210,7 @@ attach to the core path, never to the spelling, so a user `Map` is an ordinary n
 type that core's `map` operations do not accept. Where a diagnostic shows two types with
 the same name, it spells both by their full paths, as in `app@1/Map[u64]` and
 `core@1/Map[K, V]`. Primitive names and the constructors with no core declaration
-(`FnPtr`, `TypeShape`) are reserved instead ([LANG-7](#lang-7-types)).
+(`FnPtr`) are reserved instead ([LANG-7](#lang-7-types)).
 
 A contextual variant selected by the expected type wins over a same-named function
 or type. This applies through nested constructor arguments and patterns, whose
@@ -337,8 +337,8 @@ signatures obey the same rule.
 ### LANG-7: Types
 
 A user type name cannot be a primitive type name (`bool`, `char`, the sized integers and
-floats, `String`, `Bytes`, `Never`) or `FnPtr`, `TypeShape` or `any`; choose a domain
-name. Literals and operators produce the primitives, and `FnPtr` and `TypeShape` have no
+floats, `String`, `Bytes`, `Never`) or `FnPtr` or `any`; choose a domain
+name. Literals and operators produce the primitives, and `FnPtr` has no
 core declaration a full path could reach. Every other core type name, including
 `Array`, `List` and `Map`, may be declared and shadows the core one
 ([LANG-4](#lang-4-names)).
@@ -577,12 +577,11 @@ program that needs deep recursion over untrusted input bounds it explicitly.
 A self call in constructor-tail position is a guaranteed loop too: it runs in constant
 stack, however deep the result it builds. The position is exact:
 
-- The function is a top-level, non-generic, non-foreign `fn` without `ensures`
-  ([FACT-1](contracts.md#fact-1-contracts)). Its result has the global relation, and its
+- The function is a top-level, non-generic, non-foreign `fn`. Its result has the global relation, and its
   result and parameter types are `Data`, so no capability is held and nothing suspends.
 - A `return`, the body's final expression, or an `if` or `match` arm in tail position
   returns a chain of constructions: tuples, `box`, and records and variants of ordinary
-  types (no `distinct`, resource, fact, capability, `drop` or layout annotation). The
+  types (no `distinct`, resource, capability, `drop` or layout annotation). The
   innermost level is `box`, whose operand is the self call itself, not a `let`-bound
   result.
 - At every level the chain continues in the last field written. Earlier fields are any
@@ -604,9 +603,9 @@ The result is built in place, outermost level first. Until the outermost invocat
 returns, the partial result is unobservable: nothing reads, borrows, compares, hashes,
 publishes, shares, sends or captures it. If an iteration fails, the failure is reported
 at its own site as usual, and the partial result is released once, every part already
-built included; its unfilled `box` frees its storage without being read. A reused frame still pays each source call's `requires` checks and tooling steps. Every
+built included; its unfilled `box` frees its storage without being read. A reused frame still pays each source call's tooling steps. Every
 other site is ordinary recursion, which uses stack: a field after the call, a `let`-bound result, an
-`ensures`, a mutual or indirect call, and a constructor function.
+a mutual or indirect call, and a constructor function.
 
 ### LANG-11: Blocks
 

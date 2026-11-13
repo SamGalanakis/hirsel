@@ -2682,7 +2682,6 @@ extern "unused" fn unused()"#
             distinct: false,
             resource: false,
             drop: None,
-            fact: None,
             captures: None,
         }));
         let mut private = public.clone();

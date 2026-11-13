@@ -19,8 +19,8 @@ pub enum Fault {
     DivideByZero,
     /// MEM-14: an inline array index equal to its length.
     Index,
-    /// FACT-1: a call that violates its `requires`.
-    Requires,
+    /// SEM-3: an explicit ordinary failure check.
+    Check,
 }
 
 pub const FAULTS: [Fault; 5] = [
@@ -28,7 +28,7 @@ pub const FAULTS: [Fault; 5] = [
     Fault::Underflow,
     Fault::DivideByZero,
     Fault::Index,
-    Fault::Requires,
+    Fault::Check,
 ];
 
 struct Rng(u64);
@@ -96,9 +96,8 @@ fn keep[T: copyable](take a: T) -> T {
 fn sum_to(i: u64, n: u64, acc: u64) -> u64 {
   if i == n { acc } else { sum_to(i + 1u64, n, acc + i * i) }
 }
-fn small(a: u64) -> u64
-  requires a < 1000u64
-{
+fn small(a: u64) -> u64 {
+  failure.check(a < 1000u64, TextInvariant())
   a + 1u64
 }
 ",
@@ -254,7 +253,7 @@ fn small(a: u64) -> u64
                 Fault::Index => format!(
                     "  let ys: Inline[u64, 3] = [1u64, 2u64, 3u64]\n  let at: u64 = {name} - {name} + 3u64\n  let bad = if ys[at] == 1u64 {{ 1u64 }} else {{ 2u64 }}\n"
                 ),
-                Fault::Requires => format!("  let bad = small({name} - {name} + 1000u64)\n"),
+                Fault::Check => format!("  let bad = small({name} - {name} + 1000u64)\n"),
             });
             text.push_str("  let _ = out.print(s, \"after the failure\\n\")\n");
         }

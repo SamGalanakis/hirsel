@@ -184,40 +184,6 @@ an error without accepting that byte. Admission precedes the callback, arithmeti
 cannot wrap, and refusal stops the walk immediately. Sink failure retains its
 typed payload; the caller retains the accepted prefix and owns cleanup.
 
-## Schema boundaries
-
-`schema` supplies pure explicit dictionaries between inert domain values and
-inert structural wire data, structured issues and shared traversal limits.
-The complete contracts, ownership rules, budgets and JSON adapter guarantees
-are in [pure representation boundaries](schema.md). Facts and opaque domains
-are reconstructed by their owners after validation; canonical HSC1 admission
-and legacy JSON derive behavior are unchanged.
-
-`std@1/schema_evolution` is optional pure tooling for explicit DTO evolution.
-It exports `Compatibility = Exact | AdapterRequired | Incompatible | UnknownPredicate`,
-`Scalar = U8 | U16 | U32 | U64 | Text | Boolean`, and these inert summaries:
-
-```hirsel
-pub type Identity { package: String, wire_policy: String, constructor: String, codec_envelope: String }
-pub type Field { name: String, aliases: List[String], scalar: Scalar, predicate_version: Option[String], default: Option[json.Value] }
-pub type Record { identity: Identity, fields: List[Field] }
-pub type Finding { field: String, code: String, compatibility: Compatibility }
-pub type Report { compatibility: Compatibility, findings: List[Finding] }
-```
-
-```text
-fn schema_evolution.compare(writer: Record, reader: Record, options: schema.Options)
-  -> Result[Report, schema.SchemaError] uses {}
-```
-
-Compare each writer/reader direction separately. Reports describe flat strict
-JSON record summaries and reviewed adapter requirements; they never execute a
-decoder, predicate, default constructor or migration. Changed arbitrary facts
-remain unknown. Actual upgrades and fallible downgrades are program-written,
-and defaults still pass the real boundary. See [explicit evolution](schema.md#explicit-evolution)
-for scope, ordering, precedence, work charges and reference vectors. HSC1 and
-storage descriptors keep their existing separate contracts.
-
 ## The catalogue
 
 These declarations are normative: the source package must declare exactly these
@@ -263,35 +229,6 @@ N fn unicode.graphemes(s: String) -> GraphemeView in s
 fn json.parse(take text: String) -> Result[Value, JsonError] uses {}
 fn json.stringify(value: Value) -> Result[unique String, JsonError] uses {}
 @preserves_unique(out) fn json.stringify_into(value: Value, mut out: List[u8]) -> Result[(), JsonError] uses {}
-fn schema_evolution.compare(writer: Record, reader: Record, options: std@1/schema.Options) -> Result[Report, std@1/schema.SchemaError] uses {}
-fn schema.default_options() -> Options uses {}
-fn schema.check_state(o: Options) -> Result[CheckState, SchemaError] uses {}
-fn schema.charge_check(mut check: CheckState) -> Result[(), SchemaError] uses {}
-fn schema.enter_node(mut check: CheckState) -> Result[(), SchemaError] uses {}
-fn schema.leave_node(mut check: CheckState) -> () uses {}
-fn schema.should_stop(check: CheckState) -> bool uses {}
-fn schema.invalid( mut check: CheckState, code: String, stage: Stage, schema_site: String, expected: Option[String] ) -> SchemaError uses {}
-fn schema.decode[D: inert, W: data + inert](b: Boundary[D, W], wire: W, o: Options) -> Result[ D, SchemaError ] uses {}
-fn schema.encode[D: inert, W: data + inert](b: Boundary[D, W], value: D, o: Options) -> Result[ W, SchemaError ] uses {}
-fn schema.decode_only[D: inert, W: data + inert](b: Decoder[D, W], wire: W, o: Options) -> Result[ D, SchemaError ] uses {}
-fn schema.then[A: inert, B: data + inert, W: data + inert]( take outer: Boundary[B, W], take inner: Boundary[A, B] ) -> Boundary[A, W] uses {}
-fn schema.prefix(segment: Segment, take issues: Issues) -> Issues uses {}
-fn schema.prefix_error(segment: Segment, take error: SchemaError) -> SchemaError uses {}
-fn schema.empty_issues() -> Issues uses {}
-fn schema.append_issues(mut into: Issues, take more: Issues) -> () uses {}
-fn schema.format(issues: Issues) -> String uses {}
-fn schema.identity[W: plain + data + inert]() -> Boundary[W, W] uses {}
-fn schema.u8_json() -> Boundary[u8, std@1/json.Value] uses {}
-fn schema.text_json() -> Boundary[String, std@1/json.Value] uses {}
-fn schema.list[D: inert, W: data + inert](take item: Boundary[D, W]) -> Boundary[ List[D], List[W] ] uses {}
-fn schema.array_json() -> Boundary[List[std@1/json.Value], std@1/json.Value] uses {}
-fn schema.list_json[D: inert](take item: Boundary[D, std@1/json.Value]) -> Boundary[ List[D], std@1/json.Value ] uses {}
-fn schema.parse_json[D: inert]( b: Boundary[D, std@1/json.Value], input: String, o: Options ) -> Result[D, BoundaryError] uses {}
-fn schema.write_json[D: inert](b: Boundary[D, std@1/json.Value], value: D, o: Options) -> Result[ String, BoundaryError ] uses {}
-fn schema.write_checked[D: inert, P: serializable]( b: Boundary[D, std@1/json.Value], value: D, projection: fn(D) -> P uses {}, o: Options ) -> Result[String, CheckedWriteError] uses {}
-fn schema.write_json_checked[D: inert, P: serializable]( b: Boundary[D, std@1/json.Value], value: D, projection: fn(D) -> P uses {}, o: Options ) -> Result[String, CheckedWriteError] uses {}
-fn schema.check_round_trip[D: inert, W: data + inert, P: serializable]( b: Boundary[D, W], value: D, projection: fn(D) -> P uses {}, o: Options ) -> Result[(), LawError] uses {}
-fn schema.check_normalization[D: inert, W: data + inert, P: serializable]( b: Boundary[D, W], wire: W, projection: fn(W) -> P uses {}, o: Options ) -> Result[(), LawError] uses {}
 fn msgpack.decode(data: Bytes) -> Result[json.Value, binary.DecodeError] uses {}
 fn msgpack.encode(value: json.Value) -> Result[unique Bytes, binary.DecodeError] uses {}
 fn cbor.decode(data: Bytes) -> Result[json.Value, binary.DecodeError] uses {}
@@ -830,21 +767,6 @@ on UTF-8 input. Container opening uses `check_depth` with the same nesting limit
 reporting the input position for reader errors. Lexical `next_token` alone does not
 validate container grammar; use the structured operations or `skip` for that.
 
-`derive.from_json_reader(shape(T))` generates a
-`fn(mut json.Reader) -> Result[T, String]` body; nominal fields call their type's
-`<snake_name>_from_json_reader`. `derive.from_json_bytes(shape(T))` generates a
-`fn(Bytes) -> Result[T, String]` document entry calling that reader function. It
-validates UTF-8, consumes exactly one root, and reports `not UTF-8` or `not JSON`
-at this String-error boundary. On a typed error it validates the whole document
-with `skip` first, preserving syntax/duplicate/nesting error precedence over type
-errors. Records ignore unknown fields; missing options become `None`, other
-missing fields fail. Variants retain the existing externally tagged JSON form;
-numbers use the existing fitting and nonfinite rules. `number_text` copies only
-the short spelling for the existing String-based scalar parsers. Successful decoding never
-constructs a `json.Value`. The byte boundary explicitly detaches the typed Result
-for independent ownership, currently costing one typed-result graph copy. The existing `derive.from_json` Value entry remains
-available for dynamic callers and shares scalar fitting and variant diagnostics.
-
 `json.stringify` borrows a `Value` and returns compact UTF-8 JSON; `json.stringify_into` borrows it
 and appends to a mutable builder, keeping existing content and possibly leaving a written
 prefix on error. Both validate every `Number` against
@@ -955,8 +877,7 @@ errors identify the repeated key header. Both enforce the same library nesting p
 JSON: at most 128 open arrays/maps, with scalar leaves consuming no level. Encoder nesting
 errors identify the attempted depth, 128. Partial results are released on error.
 
-These are ordinary source codecs over explicit values. Record/variant conversion can use
-the existing `derive.json_value` and `derive.from_json` functions; the canonical
+These are ordinary source codecs over explicit values. The canonical
 `codec.encode/decode[T: serializable]` envelope remains a separate wire format.
 
 ## YAML
@@ -2839,30 +2760,6 @@ assertion failure. These are ordinary source operations using the existing Test
 capability. The resource-valued conformance example is
 `conformance/SEM/SEM-3-test-extra-fail.hir`.
 
-## SHA-256
-
-`std@1/sha256` exposes allocation-free SHA-256. Its one-shot `digest` delegates
-to the checked RustCrypto runtime primitive; incremental operations remain ordinary source.
-Its opaque `State` contains eight chaining words, a partial 64-byte block and a
-byte count. The public operations are:
-
-```text
-fn sha256.new() -> State uses {}
-fn sha256.update(mut state: State, data: Bytes) -> () uses {}
-fn sha256.finish(take state: State) -> Inline[u8, 32] uses {}
-fn sha256.digest(data: Bytes) -> Inline[u8, 32] uses {}
-fn sha256.digest_hex(data: Bytes) -> unique String uses {}
-```
-
-Update borrows bytes and accepts an empty chunk. Before changing state it checks
-that total input remains at most 2^61-1 bytes, the maximum whole-byte message
-whose bit length fits SHA-256's 64-bit length field; exceeding it fails SEM-1.
-Finish consumes state, pads once, and emits exactly 32 bytes in big-endian word
-order. Round additions wrap deliberately at 32 bits. `digest` is the one-shot
-form with the same digest bytes and input-length contract. Hexadecimal rendering is a separate codec;
-`digest_hex` is `hex.encode(bytes.from_inline(digest(data)))`. This is a
-digest, without password-hashing or signature operations.
-
 ## SHA-1, SHA-2 family and MD5
 
 `sha1`, `sha224`, `sha384`, `sha512`, `sha512_256` and `md5` follow the `sha256`
@@ -3176,195 +3073,6 @@ by the FNV prime modulo 2^64); `fnv.finish(take state)` returns the `u64` hash, 
 `fnv.digest(data)` is the one-shot form. It is a fast non-cryptographic hash for
 tables and fingerprints, not a cryptographic digest.
 
-## Derived bodies
-
-`std@1/derive` holds generators for `= comptime` function bodies
-([CT-5](compile-time.md#ct-5-generation)). Each takes a record or variant type's
-shape and returns the body for the header written in source:
-
-```text
-fn derive.json_value[T](s: TypeShape[T]) -> Result[Body[fn(T) -> json.Value uses {}], String] uses {}
-fn derive.from_json[T](s: TypeShape[T]) -> Result[Body[fn(json.Value) -> Result[T, String] uses {}], String] uses {}
-fn derive.schema_decode[T](s: TypeShape[T], p: schema.Policy) -> Result[Body[fn(json.Value, mut schema.CheckState) -> Result[T, schema.SchemaError] uses {}], String] uses {}
-fn derive.schema_encode[T](s: TypeShape[T], p: schema.Policy) -> Result[Body[fn(T, mut schema.CheckState) -> Result[json.Value, schema.SchemaError] uses {}], String] uses {}
-fn derive.equal[T](s: TypeShape[T]) -> Result[Body[fn(T, T) -> bool uses {}], String] uses {}
-fn derive.format[T](s: TypeShape[T]) -> Result[Body[fn(T, mut List[u8]) -> () uses {}], String] uses {}
-fn derive.hash[T](s: TypeShape[T]) -> Result[Body[fn(T, mut siphash.State) -> () uses {}], String] uses {}
-```
-
-```text
-fn todo_value(t: Todo) -> json.Value uses {} = comptime derive.json_value(shape(Todo))
-```
-
-The `schema_decode`/`schema_encode` pair uses one explicit strict
-`schema.Policy`, structured issues and the operation's shared mutable
-CheckState. See [paired structural generation](schema.md#paired-structural-generation)
-for aliases, validated wire defaults, missing/null behavior, exact tags,
-map entry paths, custom leaf pairs and uniqueness contracts. Existing
-`json_value`/`from_json` acceptance and String errors remain unchanged.
-
-Field and payload types may be `bool`, `String`, the sized integers, `f32`,
-`f64`, another record or variant type, and `Option`, `List`, `Set`, `Map` and
-tuples of supported types; any other is the generator's `Error`, `no JSON form
-for T`, `no text form for T` or `no hash form for T`, which CT-5 reports as
-CT-1 at the declaration.
-
-A field of another record or variant type `Item` (any package, generic
-instances included) uses `Item`'s own deriver, named from its declared name in
-snake case: `item_to_json`, `item_from_json`, `item_format` and `item_hash`
-(`TodoItem` gives `todo_item_to_json`, `HTTPRequest` gives
-`http_request_to_json`). Every generated nested call is qualified with the field
-type's canonical package and module, so a field `model.Draft` calls
-`model.draft_to_json`, `model.draft_from_json`, `model.draft_format` or
-`model.draft_hash`, without forwarding functions in the enclosing record's
-module. Ordinary visibility applies. The deriver may be derived or written by
-hand. A missing JSON helper is LANG-4 at the original call in generated text,
-with labels on the enclosing source field or variant payload and the generating
-`= comptime` body. The field label gives the canonical helper path and its
-directional signature; wrong helper types and modes retain their own rules.
-See the [complete nested JSON recipe](#nested-json-helpers). A naming convention keeps
-headers exactly what their writers declare, where a dictionary argument would
-add a parameter to every derived function and its callers. A type that recurses
-through a `List`, `Set` or `Map` gets a deriver that calls itself. A `box T`
-field has no form: a deriver takes its type by value and a box's payload is
-reached only through patterns ([MEM-7](memory.md#mem-7-layout)). `equal`
-compares every field with `==`, nested types included.
-
-### Nested JSON helpers
-
-Declare a helper for each nominal type reached through a field or payload,
-including inside `List`, `Option`, tuples, sets and maps. Deriving `Report`
-does not synthesize helpers for `Item`:
-
-```hirsel
-type Item { name: String }
-type Report { items: List[Option[Item]] }
-
-fn item_to_json(value: Item) -> json.Value uses {} = comptime derive.json_value(shape(Item))
-fn item_from_json(value: json.Value) -> Result[unique Item, String] uses {} = comptime derive.from_json(shape(Item))
-fn report_to_json(value: Report) -> json.Value uses {} = comptime derive.json_value(shape(Report))
-fn report_from_json(value: json.Value) -> Result[unique Report, String] uses {} = comptime derive.from_json(shape(Report))
-
-pub fn main() -> Result[(), String] uses {} {
-  let original = Report(items: [Some(Item(name: "雪")), None])
-  let wire = report_to_json(original)
-  let decoded = report_from_json(wire)?
-  if decoded != original { return Error("roundtrip") }
-  let Ok(encoded) = json.stringify(report_to_json(decoded)) else {
-    return Error("JSON encoding failed")
-  }
-  if encoded != "{\"items\":[{\"name\":\"雪\"},null]}" { return Error("JSON form") }
-  Ok(())
-}
-```
-
-The helper argument is borrowed (`value: Item` or `value: json.Value`);
-`take value` and `mut value` change the call contract. Encoding returns
-`json.Value`; decoding returns `Result[Item, String]`. A decoder whose caller
-requires `unique Item` must itself promise `Result[unique Item, String]`, as in
-the recipe. Keep these ownership promises on handwritten helpers too. Errors
-from a nested decoder propagate unchanged, before later fields are decoded.
-
-For `model.Item`, put the helpers in `model` as `item_to_json` and
-`item_from_json`, with public visibility when another module needs them. The
-call uses that declared type's canonical package/module path, including across
-packages. A payload `Batch(items: List[Item])` names `Batch.items` in the field
-label; an unlabelled payload names its zero-based position, such as `Batch.0`.
-The label still points to the enclosing field when the nominal type sits inside
-containers. Breadcrumb comments in generated text only explain a failure;
-they do not define a helper, change visibility or make an ill-typed call legal.
-
-A generic declaration derives each instance separately (CT-5 instances), so one
-declaration serves every instance of a generic type, and a nested `T` field uses
-the deriver of each instance's argument:
-
-```text
-fn page_to_json[T](p: Page[T]) -> json.Value uses {} = comptime derive.json_value(shape(Page[T]))
-```
-
-A decoder declared `-> Result[unique T, String]` builds every nested value it
-holds through its nested types' decoders, so they are declared `unique` too.
-
-A record's JSON form is an object with a member per field, in declaration
-order; integers are JSON numbers, and so are finite floats, written by
-`to_string`; `NaN`, `inf` and `-inf` are those JSON strings. `None` is `null`,
-so `Option[Option[T]]`, at any depth, has no JSON form. A list, a set and a
-tuple are arrays; a `Map[String, V]` is an object and any other map an array of
-`[key, value]` arrays. A variant is externally tagged, as serde writes it
-(serde_derive `serialize_externally_tagged_variant`, serde_json
-`serialize_*_variant`): a variant without payload is its name as a JSON string,
-and any other is an object whose single member, its name, holds a single
-positional payload itself, the array of two or more positional payloads, or the
-object of labelled payloads:
-
-```text
-type Animal = Dog | Frog(String, List[i64]) | Cat(age: u64, name: String) | AntHive(List[String])
-Dog                         "Dog"
-Frog("Henry", [349, 102])   {"Frog":["Henry",[349,102]]}
-Cat(age: 5, name: "Kate")   {"Cat":{"age":5,"name":"Kate"}}
-AntHive(["Bob", "Stuart"])  {"AntHive":["Bob","Stuart"]}
-```
-
-`from_json` reads that form back with serde_json's rules for a decoded value
-(`serde_json::from_value`). A unit variant is also read from `{"Name": null}`.
-An object holding a variant has exactly one member. A positional variant's
-array has exactly its payload count, and a labelled variant needs an object.
-Labelled payloads and record fields decode alike: an absent member of an
-`Option` field is `None`, any other absent member is an error, and unknown
-members are ignored. A duplicate set element or map key, and any other mismatch,
-is `Error`. Structural errors carry serde's messages without a text position,
-such as `unknown variant `x`, expected one of `Dog`, `Frog`, `Cat`, `AntHive``,
-`invalid type: unit variant, expected tuple variant`, `invalid type: map,
-expected unit`, `invalid length 1, expected tuple variant Animal::Frog with 2
-elements`, `missing field `age`` and `invalid type: string "x", expected struct
-Todo`. Its body builds every value fresh, so a header may
-declare `-> Result[unique T, String]` (CT-5 decides uniqueness from the header).
-`json_into` writes the same text as `json_value` followed by
-`json.stringify_into`, under the same nesting limit.
-
-**Format note (2026-10-20).** Derived JSON variants used to be an object whose
-member held the array of all payloads, `{"Circle":[2]}` and `{"Rect":[3,4]}`
-for `Circle(u32)` and `Rect(width: u32, height: u32)`. They are now serde's
-externally tagged form, `{"Circle":2}` and `{"Rect":{"width":3,"height":4}}`,
-so derived JSON interoperates with Rust serde types of the same shape. Unit
-variants, records and every non-variant form are unchanged. The old form is
-not read. A derived `hash` used to be FNV-1a over formatted text; it now
-streams into SipHash-1-3, so every hash value changed.
-
-`format` writes `Name(field: value, ..)` for a record and `Variant(payload, ..)`
-or `Variant` for a variant; strings are written unquoted, `Option` as `Some(..)`
-or `None`, lists as `[a, b]`, sets as `{a, b}`, maps as `{k: v}` and tuples as
-`(a, b)` or `(a,)`. Its header is that of an `@format` function.
-
-`hash` streams a value into a `std@1/siphash.State`, as Rust's
-`#[derive(Hash)]` streams into a `Hasher`. A record writes its fields in order.
-A variant of a type with more than one variant writes its declaration index as
-a `u64` and then its payloads. Integers and `bool` are their little-endian
-bytes, a `String` its bytes and then 0xFF, a list its length and then each item,
-a map its length and then each key and value in order, an `Option` its index
-(`None` 0, `Some` 1) and payload, and a tuple each component. A nested type
-streams through its own `_hash`. A set, whose equality ignores order, writes
-its length and then the wrapping sum of each element's hash under the same
-keys, so equal sets hash alike. Floats are not `key` ([GEN-1](generics.md#gen-1-bounds))
-and have no hash form. `siphash.hash_one(value, item_hash, k0, k1)` returns the
-hash. For a shape Rust can spell, it equals Rust's under `SipHasher13` with
-those keys, and keys 0 and 0 give `DefaultHasher::new()`'s. The keys are always the
-caller's, never the run's hidden placement seed ([SEM-5](semantics.md#sem-5-order-and-maps)),
-so a hash is the same in every run. `json_bool`, `json_text`, `json_number`,
-`json_float`, `json_float_text`, `parsed`, `json_unexpected`,
-`json_invalid_type`, `unknown_variant` and `json_length` are the helpers
-generated bodies call.
-
-`std@1/siphash` is SipHash-1-3 after Rust's `core::hash::sip`, the hash behind
-Rust's `DefaultHasher` and the runtime's keyed table hash.
-`siphash.new(k0, k1)` starts a state. `write(mut state, data)`,
-`write_str` (bytes, then 0xFF), `write_bool` and `write_u8` through
-`write_i128` (little-endian bytes) feed it, and how input is split across
-writes never changes the hash. `finish(state)` returns the `u64` hash without
-consuming the state. `fresh(state)` starts a new state under the same keys, and
-`digest(k0, k1, data)` is the one-shot form. It is a keyed hash for tables, not
-a cryptographic MAC.
-
 ## ASCII radix digits
 
 `ascii.digit_value_radix(c: u8, radix: u8) -> Option[u8] uses {}` accepts
@@ -3533,67 +3241,6 @@ input byte offsets. Decoding checks digits in order; an invalid final byte
 precedes an odd-length error. No partial output is returned. Both functions
 are pure ordinary source and borrow their input; outputs are owned. Encoding
 checks doubled size for overflow before building.
-
-## Ordered keys
-
-`std@1/keys` is the order-preserving key encoding `hirsel.key.v1`, after the
-FoundationDB tuple layer: for keys `a` and `b` of one type, `encode(a) <
-encode(b)` bytewise exactly when `a` precedes `b` in key order.
-
-```text
-@preserves_unique(out) fn keys.encode_into[K: serializable](key: K, mut out: List[u8]) -> () uses {}
-fn keys.encode[K: serializable](key: K) -> unique Bytes uses {}
-fn keys.decode[K: serializable](data: Bytes) -> Result[K, DecodeError] uses {}
-fn keys.prefix_end(prefix: Bytes) -> Option[unique Bytes] uses {}
-```
-
-A key is any `serializable` value ([SER-1](serialization.md#ser-1-serializable-schemas))
-whose schema holds no `Map`, `Set` or `Simd`; with one anywhere in `K`'s schema, every
-`encode` and `decode` at `K` fails SEM-3, whatever the value. The encoding is directed by
-the schema, so no element carries a type code:
-
-| Schema constructor | Key bytes |
-|---|---|
-| `bool` | `00` for false, `01` for true |
-| `u8` to `u128` | big-endian, exactly the type's width |
-| `i8` to `i128` | big-endian two's complement with the sign bit inverted, exactly the type's width |
-| `f32`, `f64` | the big-endian IEEE bits with every bit inverted when the sign bit is set, else the sign bit alone |
-| `char` | the scalar value as a big-endian `u32` |
-| `String`, `Bytes` | each byte in order, with `00` written as `00 FF`; then `00 01` |
-| unit | nothing |
-| tuple, record | the fields in declaration order |
-| variant, including core `Option` and `Result` and `Packed[T]` | the arm's declaration ordinal as a big-endian `u32`, then its fields in order |
-| `box T`; an opted-in transparent nominal or distinct type | the payload's bytes |
-| `Array[T]`, `List[T]` | for each element, `01` then the element; then `00` |
-| `Inline[T, n]` | the `n` elements in order |
-
-Every encoding is self-delimiting given the schema, so a tuple's encoding is the
-concatenation of its fields' and `encode_into` appends one key after another. The string
-terminator `00 01` sorts below the escape `00 FF` and above the end of a shorter string,
-so a proper prefix precedes its extensions whatever field follows. **Key order** follows
-the same structure: integers and `char` numerically, `false` before `true`, floats by IEEE
-total order (`-0.0` before `0.0`, the canonical NaN after `inf`), `String` and `Bytes`
-byte-lexicographically with a proper prefix first, tuples and records lexicographically
-by field, variants by arm ordinal and then payload (so `None` precedes every `Some`), and
-sequences lexicographically with a proper prefix first.
-
-`decode` accepts exactly the encodings `encode` produces, validating escapes,
-terminators, sequence markers, arm ordinals and trailing bytes as well as every scalar
-the canonical codec validates. Input that ends early is `Truncated`; a `00` in a string
-followed by anything but `FF` or `01` is `Scalar`; a sequence marker other than `00` or
-`01`, or an arm ordinal past the last arm, is `Tag`; bytes after the key are `Trailing`;
-an invalid `bool`, `char` or NaN is `Scalar` and invalid UTF-8 `Utf8`, as in
-[SER-2](serialization.md#ser-2-canonical-codec). Both functions go through the canonical
-codec: `encode` rewrites `codec.encode(key)`'s payload under its own descriptor, and
-`decode` rewrites a key into a canonical `Option[K]` payload, under the descriptor of
-`codec.encode` of `None`, for `codec.decode`.
-
-For the encoding `e` of a key's leading fields (their `encode_into` calls in order, or
-`encode` of a tuple of them), the keys whose leading fields have those values are exactly
-those in the half-open range `[e, prefix_end(e))`. `prefix_end(prefix)` is the least byte
-string above every extension of `prefix`: `prefix` with its trailing `FF` bytes removed
-and its last remaining byte incremented, or `None` when no byte remains, where the range
-has no upper bound (FoundationDB's `strinc`).
 
 ## Lazy iteration
 

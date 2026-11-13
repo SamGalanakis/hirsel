@@ -11,12 +11,7 @@ pub struct ProfileSource {
     pub path: std::path::PathBuf,
     pub file: hirsel_span::SourceFile,
     pub base: u32,
-    /// For a generated (`= comptime`) body, the item-relative offset of its
-    /// `comptime` expression. The body's sites are offsets into its generated
-    /// text, not into this file, so every one of them is reported there, as a
-    /// macro's expansion is reported at its call.
-    pub generated: Option<u32>,
-    /// The original definition's canonical sources, including generated text.
+    /// The original definition's canonical source anchors.
     pub anchors: Vec<(hirsel_span::SourceFile, u32)>,
 }
 impl ProfileSource {
@@ -38,7 +33,6 @@ impl ProfileSource {
     }
     /// The line and column of an item-relative site offset.
     pub fn location(&self, site: u32) -> Option<hirsel_span::LineColumn> {
-        let site = self.generated.unwrap_or(site);
         self.file.location(self.base.checked_add(site)?)
     }
 }

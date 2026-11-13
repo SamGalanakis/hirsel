@@ -49,7 +49,6 @@ fn function(
         allocation: Allocation::NoAlloc,
         authority: AuthoritySummary::Unknown,
         uses: Uses::Unrestricted,
-        contracts: Default::default(),
         incomplete: false,
         foreign: None,
     }

@@ -299,7 +299,7 @@ impl Parser<'_> {
                         "closure literals cannot declare generic parameters",
                     );
                 }
-                p.header(false, true)
+                p.header(false)
             })?;
             let body = self.block()?;
             if self.at("uses") {
@@ -341,24 +341,6 @@ impl Parser<'_> {
             ExprKind::Continue(self.exit_label())
         } else if self.eat("heap") {
             ExprKind::Heap
-        } else if self.eat("result") {
-            ExprKind::Result
-        } else if self.eat("shape") {
-            self.expect("(", const { RuleId::of("CT-3") })?;
-            self.whitespace += 1;
-            let result = self.ty();
-            self.whitespace -= 1;
-            let ty = result?;
-            self.expect(")", const { RuleId::of("LANG-1") })?;
-            ExprKind::Shape(ty)
-        } else if self.eat("before") {
-            self.expect("(", const { RuleId::of("FACT-1") })?;
-            self.whitespace += 1;
-            let result = self.expr(0);
-            self.whitespace -= 1;
-            let value = result?;
-            self.expect(")", const { RuleId::of("LANG-1") })?;
-            ExprKind::Before(value)
         } else if self.eat("todo") {
             let message = if self.eat("(") {
                 if !matches!(self.token(0).map(|t| &t.kind), Some(TokenKind::String)) {
@@ -571,7 +553,7 @@ impl Parser<'_> {
         if self.at("fn") && self.ident(1) {
             self.pos += 1;
             let name = self.name()?;
-            let signature = self.required(|p| p.header(false, true))?;
+            let signature = self.required(|p| p.header(false))?;
             let body = self.block()?;
             return Ok(StmtKind::Function {
                 name,

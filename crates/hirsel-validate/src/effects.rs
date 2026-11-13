@@ -823,9 +823,7 @@ impl Checker<'_, '_> {
                 entity: "body allocation",
             });
         }
-        if self.contract {
-            return;
-        } // Clause purity has the stricter inert check.
+        // Clause purity has the stricter inert check.
         let Some(allowed) = self.frame_authority() else {
             return;
         };

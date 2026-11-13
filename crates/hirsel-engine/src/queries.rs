@@ -53,11 +53,6 @@ pub use scheduled_check::{
 };
 pub use scheduled_stage::{FRONT_STAGE_KIND, FrontStageOutput, FrontStageQueries};
 mod scheduled_growth;
-pub use generation::{
-    AcceptedFrontRegistration, FrontDemandAdmission, FrontDemandError, FrontDemandScope,
-    FrontInstanceDiscovery, FrontInstanceRequest, FrontInstanceSyntax,
-    FrontRegistrationBootstrapError, FrontRegistrationFailure,
-};
 pub use parallel::{
     FRONT_BODY_KIND, FRONT_STORAGE_KIND, FrontBodyOutput, FrontBodyQueries, FrontCarry,
     FrontCheckedOutput, FrontInputFootprint, FrontMemoryRefusal, FrontStorageOutput,
@@ -65,10 +60,10 @@ pub use parallel::{
 };
 pub use scheduled_growth::{FRONT_GROWTH_KIND, FrontGrowthOutput, FrontGrowthQueries};
 pub use scheduled_lower::{
-    DefinitionDecodeLayout, FRONT_EVALUATE_KIND, FRONT_LOWER_KIND, FRONT_REGISTRATION_KIND,
-    FrontLowerDependencies, FrontLowerOutput, FrontLowerQueries, FrontLowerWork,
-    FrontRegistrationOutput, FrontRegistrationQueries, LowerCarry,
+    DefinitionDecodeLayout, FRONT_EVALUATE_KIND, FRONT_LOWER_KIND, FrontLowerDependencies,
+    FrontLowerOutput, FrontLowerQueries, FrontLowerWork, LowerCarry,
 };
+pub use staging::{FrontDemandAdmission, FrontDemandError, FrontDemandScope};
 /// Engine-owned complete canonical input. Only admitted source wrappers
 /// implement this lifetime/size seam; it supplies no validation authority.
 pub(crate) trait AdmittedProofInput {
@@ -103,10 +98,9 @@ mod dead_arms;
 mod definition_hash;
 pub use definition_hash::DefinitionHashes;
 mod dependencies;
-pub(crate) mod generation;
-pub use generation::GeneratedSource;
 pub(crate) mod lowering;
 pub(crate) mod memos;
+pub(crate) mod staging;
 pub(crate) use memos::{Entry, Observed, Table};
 mod program_revision;
 pub use program_revision::ForeignUse;
@@ -269,11 +263,6 @@ pub struct QueryEngine {
     materialization_environment: Option<(QueryEnvironment, crate::ComptimeLimits, Verify)>,
     pub(crate) staged_constants: BTreeMap<DefPath, crate::comptime::StagedConstant>,
     pub(crate) staged_values: BTreeMap<(DefPath, Vec<u64>), crate::comptime::EvaluatedConstant>,
-    /// Generated function bodies (CT-5), by declaration.
-    generated: native_records::SourceTable<DefPath, GeneratedSource>,
-    /// Selected instances of generic generated declarations (CT-5).
-    pub(crate) instance_bodies: hirsel_tir::InstanceBodies,
-    pub(crate) selected_instances: BTreeMap<DefId, BTreeSet<hirsel_types::GeneratedActualKey>>,
     pub sources: SourceMap,
     pub environment: QueryEnvironment,
     pub adapters: PhaseAdapters,
@@ -284,9 +273,6 @@ pub struct QueryEngine {
     detached: Vec<Arc<ItemSyntax>>,
     parsed: BTreeMap<FileId, ParsedFile>,
     pub(crate) installed_sources: BTreeSet<FileId>,
-    /// The instance-bodied names of every installed package with a name
-    /// index (N), whether or not the request adopted their files.
-    pub(crate) installed_instance_bodied: BTreeSet<DefPath>,
     /// Installed names whose files the request did not reach (reach.rs).
     pub(crate) unreached_installed: Arc<BTreeSet<DefId>>,
     pub(crate) registry: hirsel_registry::BuiltinRegistry,
@@ -481,13 +467,7 @@ impl Drop for QueryEngine {
             "engine: snapshot row provenance",
             take(&mut self.snapshot_sources),
         );
-        released("engine: instance bodies", take(&mut self.instance_bodies));
-        released(
-            "engine: instance selections",
-            take(&mut self.selected_instances),
-        );
         released("engine: staged values", take(&mut self.staged_values));
-        released("engine: generated", take(&mut self.generated));
         released("engine: recomputes", take(&mut self.recomputes));
         released(
             "engine: scalar lower calls",
@@ -589,25 +569,6 @@ impl QueryEngine {
     ) -> Result<BTreeSet<DefPath>, QueryError> {
         let mut selected = self.semantic_program(roots)?.definitions;
         selected.retain(|path| self.declared(path));
-        // CT-3: a non-generic compile-time-only function never runs: no
-        // run-time code can hold the TypeShape or Body its signature mentions.
-        let mut compile_time = vec![];
-        for path in &selected {
-            let signature = self.item_signature(path)?.value;
-            if let hirsel_types::SignatureKind::Function(f) = &signature.kind
-                && f.generics.is_empty()
-                && f.parameters
-                    .iter()
-                    .map(|p| p.ty)
-                    .chain([f.result])
-                    .any(|t| hirsel_types::mentions_compile_time_only(&self.types, t))
-            {
-                compile_time.push(path.clone());
-            }
-        }
-        for path in compile_time {
-            selected.remove(&path);
-        }
         Ok(selected)
     }
     pub(crate) fn native_builtin_signatures(
@@ -710,9 +671,6 @@ impl QueryEngine {
             materialization_environment: None,
             staged_constants: BTreeMap::new(),
             staged_values: BTreeMap::new(),
-            generated: native_records::SourceTable::new(source_ownership.clone()),
-            instance_bodies: hirsel_tir::InstanceBodies::default(),
-            selected_instances: BTreeMap::new(),
             sources: SourceMap::default(),
             environment,
             adapters,
@@ -720,7 +678,6 @@ impl QueryEngine {
             detached: vec![],
             parsed: BTreeMap::new(),
             installed_sources: BTreeSet::new(),
-            installed_instance_bodied: BTreeSet::new(),
             unreached_installed: Arc::default(),
             registry,
             builtins: BTreeMap::new(),
@@ -1311,37 +1268,17 @@ impl QueryEngine {
             .collect();
         // A detached item stands where it was dropped until this index adopts it.
         let carried = std::mem::take(&mut self.detached);
-        // Fact helpers are derived again from their sources below.
         let mut previous: Vec<Arc<ItemSyntax>> = owned
             .iter()
             .flat_map(|path| &self.items[path])
             .filter(|old| {
                 from_source(self, old)
-                    && hirsel_check_protocol::fact::fact_owner(&old.item.definition).is_none()
                     && !old.item.definition.0.name.starts_with("$dictionary$")
                     && !crate::families::derived(&old.item.definition)
             })
             .cloned()
             .collect();
         previous.extend(carried.iter().cloned());
-        // CT-5: a retired declaration's instances are made again from its new
-        // text when a call selects them. Their disappearance is an ordinary
-        // input change too: retire growth roots and invalidate all subscribers.
-        let mut retired_instances = BTreeSet::new();
-        for path in &owned {
-            let id = DefId::intern(path);
-            self.instance_bodies.declarations.remove(&id);
-            for (_, instance) in self
-                .instance_bodies
-                .instances
-                .remove(&id)
-                .unwrap_or_default()
-            {
-                self.items.remove(instance.definition.path());
-                self.generated.remove(instance.definition.path());
-                retired_instances.insert(instance.definition.path().clone());
-            }
-        }
         for path in &owned {
             let kept: Vec<_> = self.items[path]
                 .iter()
@@ -1354,7 +1291,7 @@ impl QueryEngine {
                 self.items.insert(path.clone(), kept);
             }
         }
-        let mut affected: BTreeSet<DefPath> = owned.into_iter().chain(retired_instances).collect();
+        let mut affected: BTreeSet<DefPath> = owned.into_iter().collect();
         // Occurrences: this source's items take their places among each
         // definition's other candidates.
         let new_positions: Vec<_> = file.items.iter().map(|new| self.position(new)).collect();
@@ -1406,18 +1343,6 @@ impl QueryEngine {
                 if Arc::ptr_eq(candidate, &old) {
                     *candidate = moved.clone();
                 }
-            }
-            if let Some(helper) = crate::facts::snapshot(&moved) {
-                let helper_path = helper.item.definition.clone();
-                for candidate in self.items.get_mut(&helper_path).into_iter().flatten() {
-                    if candidate.anchor == moved.anchor {
-                        *candidate = Arc::new(ItemSyntax {
-                            occurrence,
-                            ..(*helper).clone()
-                        });
-                    }
-                }
-                affected.insert(helper_path);
             }
             affected.insert(path);
         }
@@ -1476,13 +1401,6 @@ impl QueryEngine {
         for new in &file.items {
             // Duplicate paths keep one semantic identity and multiple addressable items.
             // Task E diagnoses overloading as LANG-7 at the later definition's name.
-            if let Some(helper) = crate::facts::snapshot(new) {
-                affected.insert(helper.item.definition.clone());
-                self.items
-                    .entry(helper.item.definition.clone())
-                    .or_default()
-                    .push(helper);
-            }
             for helper in crate::dictionaries::literal_snapshots(new)
                 .into_iter()
                 .chain(crate::families::snapshots(new))
@@ -1721,16 +1639,6 @@ impl QueryEngine {
         {
             // Checking a generated declaration owns an S1 frame even when
             // its analyzed body is retained. Preserve that request on a hit.
-            if let Some(syntax) = self
-                .items
-                .get(definition)
-                .and_then(|rows| rows.first())
-                .cloned()
-                && let Some(body) = generation::generator(&syntax)
-                && !generation::instance_bodied(&syntax)
-            {
-                self.generated_check_query(definition, syntax, body)?;
-            }
             return self.mode_result(entry);
         }
         if let Some(entry) = self.load_mode(definition) {
@@ -1811,17 +1719,13 @@ impl QueryEngine {
         for path in representations {
             self.read_layout_body(&path);
         }
-        self.label_generated_result(entry.result())
+        entry.result()
     }
     fn check_query(
         &mut self,
         definition: &DefPath,
     ) -> Result<Arc<QueryOutput<Arc<TypedBody>>>, QueryError> {
         self.materialize(definition)?;
-        let snapshot = self.snapshot(definition)?;
-        if let Some(body) = generation::generator(&snapshot) {
-            return self.generated_check_query(definition, snapshot, body);
-        }
         let id = DefId::intern(definition);
         let text = self.key_text(definition, QueryKind::Check)?;
         if let Some(entry) = self.checked.get(&id).cloned()
@@ -2329,7 +2233,6 @@ impl DefinitionQueries for QueryEngine {
                 return result.clone();
             }
         }
-        self.selected_instances.clear();
         let mut output = match self.parse_syntax(file, context) {
             Ok(output) => output,
             Err(error) => {
@@ -2514,13 +2417,6 @@ impl TirProvider for QueryEngine {
 
     fn definition(&mut self, path: &DefPath) -> Result<hirsel_tir::DefinitionRef, QueryError> {
         self.lower_to_tir(path).map(|o| o.value)
-    }
-    fn instance_body(
-        &mut self,
-        path: &DefPath,
-        arguments: &[hirsel_types::GenericArgument],
-    ) -> Result<Option<DefPath>, QueryError> {
-        self.resolve_instance(path, arguments)
     }
 }
 struct Recorder<'a> {

@@ -255,7 +255,6 @@ pub struct NativeOriginalContext {
     signatures: Arc<SignatureSnapshot>,
     cache: Option<Arc<hirsel_validate::VerifierCache>>,
     policy: ContentHash,
-    instances: Arc<hirsel_tir::InstanceBodies>,
     expected: Arc<BTreeMap<DefPath, ContentHash>>,
     verify: Verify,
     reuse: bool,
@@ -356,7 +355,6 @@ impl NativeOriginalContext {
                 cache: self.cache.clone(),
                 policy: self.policy,
                 selected,
-                instances: self.instances.clone(),
             },
             ordinary,
             verify: self.verify,
@@ -387,7 +385,6 @@ impl QueryEngine {
             signatures: namespace.snapshot.clone(),
             cache: self.product_store().and_then(|store| store.verifier()),
             policy: self.source_verification_policy(),
-            instances: namespace.instances.clone(),
             expected: Arc::new(expected),
             verify: self.verify,
             reuse: self.native_query_policy().reuse,
@@ -417,7 +414,6 @@ impl QueryEngine {
             signatures: self.signature_inputs(),
             cache: self.product_store().and_then(|store| store.verifier()),
             policy: self.source_verification_policy(),
-            instances: Arc::new(self.instance_bodies(&paths)),
             expected: Arc::new(expected),
             verify: self.verify,
             reuse: self.native_query_policy().reuse,
@@ -439,7 +435,6 @@ pub struct NativeLowerReader {
     cache: Option<Arc<hirsel_validate::VerifierCache>>,
     policy: ContentHash,
     selected: BTreeMap<DefPath, Selected>,
-    instances: Arc<hirsel_tir::InstanceBodies>,
 }
 /// One demanded original source body, carrying only the actual selected V
 /// output and source observations. It grants no native Value/Ready authority.
@@ -484,16 +479,7 @@ impl NativeLowerReader {
         let selected = self.selected.get(path)?;
         let archive = self.archive(path, self.anchors.clone())?;
         let header = archive.header()?;
-        if header.path.path() != path
-            || header.signature_hash != selected.signature
-            || !hirsel_validate::validate_instance_rows(
-                self.anchors.record_types(),
-                &self.instances,
-                path,
-                hirsel_product_codec::TirView::Archived(&archive),
-            )?
-            .is_empty()
-        {
+        if header.path.path() != path || header.signature_hash != selected.signature {
             return None;
         }
         Some(NativeLowerBody {
@@ -545,7 +531,7 @@ impl QueryEngine {
         let paths: BTreeSet<_> = paths.iter().cloned().collect();
         for path in &paths {
             let source = self.native_definition_product(path)?;
-            if !crate::queries::generation::executable(&source.source.syntax) {
+            if !crate::queries::staging::executable(&source.source.syntax) {
                 continue;
             }
             let Some(output) = source.lower else {
@@ -566,7 +552,6 @@ impl QueryEngine {
             cache: Some(cache),
             policy: self.source_verification_policy(),
             selected,
-            instances: Arc::new(self.instance_bodies(&paths)),
         }))
     }
 }
@@ -620,12 +605,6 @@ impl NativeOriginalReader {
     /// settled source metadata without decoding an original body.
     pub fn signatures(&self) -> &Arc<SignatureSnapshot> {
         &self.verified.signatures
-    }
-    /// Current CT-5 catalogue captured with this original source snapshot.
-    /// It contains selected declaration/actual/path data, never native code or
-    /// a substitute source/V witness for the selected monomorphic definition.
-    pub fn instance_bodies(&self) -> &hirsel_tir::InstanceBodies {
-        &self.verified.instances
     }
 
     /// Copied reader maps and path buffers only. Shared source/signature/V,
@@ -719,16 +698,7 @@ impl NativeOriginalReader {
         let raw = source.value.open(self.admission.as_ref())?;
         let view = raw.view();
         let header = view.header()?;
-        if header.path.path() != path
-            || header.signature_hash != source.signature
-            || !hirsel_validate::validate_instance_rows(
-                self.verified.anchors.record_types(),
-                &self.verified.instances,
-                path,
-                view,
-            )?
-            .is_empty()
-        {
+        if header.path.path() != path || header.signature_hash != source.signature {
             return None;
         }
         // A refused V universe reads no body: neither reuse nor V can run.
@@ -812,7 +782,7 @@ impl QueryEngine {
         let paths: BTreeSet<_> = paths.iter().cloned().collect();
         for path in &paths {
             let source = self.native_definition_product(path)?;
-            if !crate::queries::generation::executable(&source.source.syntax) {
+            if !crate::queries::staging::executable(&source.source.syntax) {
                 continue;
             }
             let revision = source.source.implementation_revision;
@@ -861,7 +831,6 @@ impl QueryEngine {
                 cache,
                 policy: self.source_verification_policy(),
                 selected,
-                instances: Arc::new(self.instance_bodies(&paths)),
             },
             ordinary,
             verify: self.verify,
@@ -936,7 +905,6 @@ impl QueryEngine {
                 cache: Some(cache),
                 policy,
                 selected,
-                instances: Arc::new(input.instance_bodies.clone()),
             },
             ordinary: BTreeMap::new(),
             verify: self.verify,

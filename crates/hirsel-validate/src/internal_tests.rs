@@ -35,7 +35,6 @@ fn weakening_a_captured_generic_uses_its_outer_sendability_bound() {
         signatures: &reader,
         declarations: &declarations,
         scratch: &scratch,
-        contract: false,
         site: Site {
             body: BodyId(1),
             block: None,
@@ -95,7 +94,6 @@ fn substituted_call_rows_normalize_with_the_actual_declaring_binder() {
         signatures: &reader,
         declarations: &declarations,
         scratch: &scratch,
-        contract: false,
         site: Site {
             body: BodyId(1),
             block: None,
@@ -194,7 +192,6 @@ fn sorted_map_equality_and_key_validation_accounts_for_the_order_dictionary() {
             signatures: &reader,
             declarations: &declarations,
             scratch: &scratch,
-            contract: false,
             site: Site {
                 body: BodyId(0),
                 block: None,
@@ -345,7 +342,6 @@ fn capability_authority_is_nominal_even_with_an_incomplete_snapshot() {
             signatures: &reader,
             declarations: &typing::declaration_tables(interner(), &definition, &reader).unwrap(),
             scratch: &scratch::Scratch::new(f.definition.bodies.len()),
-            contract: false,
             site: Site {
                 body: BodyId(0),
                 block: None,
@@ -412,7 +408,6 @@ fn nonregular_nominal_bound_reports_the_declared_tooling_limit() {
                 resource: false,
                 distinct: false,
                 drop: None,
-                fact: None,
                 captures: None,
                 destructor_allocation: Allocation::NoAlloc,
             })),
@@ -439,7 +434,6 @@ fn nonregular_nominal_bound_reports_the_declared_tooling_limit() {
         signatures: &reader,
         declarations: &declarations,
         scratch: &scratch,
-        contract: false,
         site: Site {
             body: BodyId(0),
             block: None,
@@ -510,7 +504,6 @@ fn finite_layout_cleanup_and_packed_carriers_have_no_nominal_depth_cutoff() {
                             resource: false,
                             distinct: false,
                             drop: None,
-                            fact: None,
                             captures: None,
                             destructor_allocation: Allocation::NoAlloc,
                         })),
@@ -534,7 +527,6 @@ fn finite_layout_cleanup_and_packed_carriers_have_no_nominal_depth_cutoff() {
                 signatures: &reader,
                 declarations: &declarations,
                 scratch: &scratch,
-                contract: false,
                 site: Site {
                     body: BodyId(0),
                     block: None,
@@ -594,7 +586,6 @@ fn repeated_flat_copies_keep_canonical_rows_without_reinterning() {
         signatures: &reader,
         declarations: &declarations,
         scratch: &scratch,
-        contract: false,
         site: Site {
             body: BodyId(0),
             block: None,
@@ -633,7 +624,6 @@ fn a_single_body_without_closures_solves_its_flow_once() {
     let mut fixture = Fixture::unit();
     owner_sig(&mut fixture, &[]);
     assert_eq!(fixture.definition.bodies.len(), 1);
-    assert!(fixture.definition.contracts.is_empty());
     assert_eq!(fixture.definition.bodies[0].blocks.len(), 1);
     let before = hirsel_intern::work::read(hirsel_intern::work::Counter::ValidateFlowSteps);
     fixture.valid();
@@ -661,7 +651,6 @@ fn row_transformations_respect_a_foreign_generic_environment() {
         signatures: &reader,
         declarations: &declarations,
         scratch: &scratch,
-        contract: false,
         site: Site {
             body: BodyId(0),
             block: None,

@@ -362,10 +362,6 @@ pub enum Count {
     BodyWalksCheckQuery,
     /// Body walks entered from structural production.
     BodyWalksStructural,
-    /// Body walks of compile-time generator constants.
-    BodyWalksGenerator,
-    /// Body walks of generated (CT-5) bodies.
-    BodyWalksGenerated,
     /// Body walks for headers declared without a body.
     BodyWalksDeclaration,
     /// Program record lookups answered from a stored record.
@@ -382,7 +378,7 @@ pub enum Count {
 
 impl Count {
     /// Every count, in declaration order.
-    pub const ALL: [Count; 111] = [
+    pub const ALL: [Count; 109] = [
         Count::Definitions,
         Count::Units,
         Count::VRuns,
@@ -486,8 +482,6 @@ impl Count {
         Count::BodyWalks,
         Count::BodyWalksCheckQuery,
         Count::BodyWalksStructural,
-        Count::BodyWalksGenerator,
-        Count::BodyWalksGenerated,
         Count::BodyWalksDeclaration,
         Count::ProgramRecordHits,
         Count::ProgramRecordMisses,
@@ -509,8 +503,6 @@ impl Count {
             Count::BodyWalks => "body walks",
             Count::BodyWalksCheckQuery => "body walks: check query",
             Count::BodyWalksStructural => "body walks: structural production",
-            Count::BodyWalksGenerator => "body walks: generator",
-            Count::BodyWalksGenerated => "body walks: generated body",
             Count::BodyWalksDeclaration => "body walks: bodyless declaration",
             Count::ProgramRecordHits => "program record hits",
             Count::ProgramRecordMisses => "program record misses",

@@ -42,7 +42,6 @@ fn declaration(kind: CapabilityKind, owner: bool) -> Signature {
             distinct: false,
             resource: false,
             drop: None,
-            fact: None,
             captures: None,
             destructor_allocation: Allocation::NoAlloc,
             loop_source: None,

@@ -1,7 +1,7 @@
 //! Retain current original inventory independently of restored native recipes.
 use hirsel_lir::operation::OperationDeclarations;
 use hirsel_native::receipt_source::factory::NamedGraph;
-use hirsel_native::receipt_source::provider::SelectionProvider;
+use hirsel_native::receipt_source::provider::Provider;
 use hirsel_rc::sealed_source::{SourceDeclarations, SourceExpectation, SourceInput};
 use hirsel_syntax::{ContentHash, DefPath};
 use std::collections::{BTreeMap, BTreeSet};
@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub type Sources = BTreeMap<(DefPath, ContentHash), SourceExpectation>;
 
 pub fn current(
-    provider: &dyn SelectionProvider,
+    provider: &dyn Provider,
     graph: &NamedGraph,
     program: &hirsel_rc::instance::Program,
     target: &hirsel_lir::TargetSpec,

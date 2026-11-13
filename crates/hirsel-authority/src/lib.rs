@@ -90,8 +90,8 @@ impl AuthorityOutput {
     }
 }
 
-/// H's signature clauses are checked in distinct all-borrow frames.
-pub fn check_file_with_clauses(
+/// Check the body's authority and cursor-loop plans.
+pub fn check_file(
     t: &TypeInterner,
     m: &TypeMemo,
     syntax: &ItemSyntax,
@@ -100,7 +100,6 @@ pub fn check_file_with_clauses(
     provider: &mut dyn SignatureProvider,
     intrinsics: &Intrinsics,
     loops: &[CursorPlan],
-    clauses: &[(ExprId, TypeId)],
 ) -> AuthorityOutput {
     let generics = body.resolution.generic_declarations.clone();
     let reader = hirsel_modes::reader::Reader::new(&mut *provider, signature);
@@ -109,7 +108,6 @@ pub fn check_file_with_clauses(
     let memo = ContextMemo::new(t, &generics, &mut lookup);
     walk::Checker::new(t, m, syntax, signature, body, &reader, memo, intrinsics)
         .with_cursor_loops(loops)
-        .with_clauses(clauses)
         .run()
 }
 

@@ -70,13 +70,10 @@ impl SuccessorCapture {
         reads: &Reads,
         execution: Option<&hirsel_validate::ExecutionReceipt>,
     ) -> Result<(Reads, Option<hirsel_validate::ExecutionReceipt>), QueryError> {
-        self.namespace().admit_reuse(
-            owner,
-            reads,
-            execution,
-            &self.owner.registrations_admitted,
-            |path, key| self.owner.observe(path, key),
-        )
+        self.namespace()
+            .admit_reuse(owner, reads, execution, |path, key| {
+                self.owner.observe(path, key)
+            })
     }
 }
 pub(super) fn refused(message: &str) -> QueryError {

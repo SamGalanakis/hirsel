@@ -5,7 +5,7 @@ mod code;
 mod operations;
 use hirsel_layout::instance::InstanceKey;
 use hirsel_lir::sealed_payload_source::ClosedStorageProfile;
-use hirsel_rc::instance::{Actuals, SelectionRead, substitute};
+use hirsel_rc::instance::{Actuals, substitute};
 use hirsel_rc::sealed_source::{
     SourceCallableEntry,
     contract::{
@@ -225,7 +225,6 @@ pub struct CallObservation {
     pub caller: ContextId,
     pub block: u32,
     pub target: ContextId,
-    pub selection: SelectionRead,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -265,7 +264,7 @@ impl NamedGraph {
     /// This checks source data, not native C or metadata custody.
     pub fn recheck(
         &self,
-        provider: &dyn provider::SelectionProvider,
+        provider: &dyn provider::Provider,
         roots: impl IntoIterator<Item = NamedInput>,
         cases: &mut impl FnMut(
             &SourceCallableEntry,
@@ -316,7 +315,7 @@ impl NamedGraph {
 /// none becomes a known-empty expansion or an ordinary fallback request.
 /// Source-available support for those boundaries belongs in this same factory.
 pub fn named_graph(
-    provider: &dyn provider::SelectionProvider,
+    provider: &dyn provider::Provider,
     roots: impl IntoIterator<Item = NamedInput>,
     cases: &mut impl FnMut(&SourceCallableEntry, Port, TypeId) -> Result<Vec<CallableCase>, SourceError>,
 ) -> Result<NamedGraph, SourceError> {
@@ -431,7 +430,6 @@ pub fn named_graph(
                 code.targets(block)?
             };
             let mut targets = Vec::new();
-            let mut generated = None;
             for selected in selected {
                 match selected {
                     code::Target::Closure(value) => {
@@ -447,7 +445,6 @@ pub fn named_graph(
                             &contexts[index].input.actuals,
                             &memo,
                         )?;
-                        let selection = target.selection;
                         let context = named(
                             provider,
                             NamedInput {
@@ -461,14 +458,10 @@ pub fn named_graph(
                         if target.index() == contexts.len() {
                             contexts.push(context);
                         }
-                        if selection.generated && !indirect {
-                            generated = Some((selection.clone(), target));
-                        }
                         observations.push(CallObservation {
                             caller: id,
                             block,
                             target,
-                            selection,
                         });
                         targets.push(target);
                     }
@@ -494,13 +487,6 @@ pub fn named_graph(
                     callback,
                     targets: targets.clone(),
                 }
-            } else if let Some((selection, target)) = generated {
-                if targets != [target] {
-                    return Err(SourceError::Malformed(
-                        "receipt direct generated call has multiple targets",
-                    ));
-                }
-                Expansion::Generated { selection, target }
             } else {
                 Expansion::Targets(targets.clone())
             };

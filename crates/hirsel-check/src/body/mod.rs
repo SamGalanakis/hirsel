@@ -4,14 +4,12 @@ use hirsel_type_analysis::cleanup::{
 };
 mod calls;
 mod comptime;
-mod contracts;
 mod formats;
 mod inject;
 mod intrinsics;
 mod iteration;
 mod literals;
 mod patterns;
-mod shapes;
 mod source_rows;
 mod tails;
 
@@ -140,12 +138,6 @@ fn check_inner(
                 && c.diagnostics.is_empty()
             {
                 c.final_return(*body);
-                if hirsel_check_protocol::fact::fact_owner(c.input.signature.definition.path())
-                    .is_some()
-                {
-                    c.expected_sites
-                        .insert(*body, (c.span(*body), const { RuleId::of("FACT-2") }));
-                }
                 c.work
                     .push(Work::Enter(*body, c.frames[frame].result, frame));
             }
@@ -258,9 +250,7 @@ fn check_inner(
     while let Some(work) = c.work.pop() {
         c.step(work)?;
     }
-    c.check_contracts()?;
     c.check_closed_comptimes()?;
-    c.check_compile_time_values();
     c.publish_tails()?;
     for f in &c.frames {
         if let Some(result) = f.result {
@@ -1082,18 +1072,6 @@ impl Checker<'_, '_> {
                 });
             }
         }
-        for contract in syntax.contracts.iter().rev() {
-            let boolean = self.primitive(Primitive::Bool);
-            self.expected_sites.insert(
-                contract.expression,
-                (
-                    self.span(contract.expression),
-                    const { RuleId::of("FACT-1") },
-                ),
-            );
-            self.work
-                .push(Work::Enter(contract.expression, Some(boolean), frame));
-        }
         frame
     }
     fn final_return(&mut self, body: ast::ExprId) {
@@ -1171,8 +1149,6 @@ impl Checker<'_, '_> {
             E::Path(_)
             | E::Formatter(_)
             | E::Heap
-            | E::Result
-            | E::Shape(_)
             | E::Todo(_)
             | E::Error
             | E::Break { value: None, .. }
@@ -1338,9 +1314,7 @@ impl Checker<'_, '_> {
                 };
                 self.schedule(id, expected, frame, vec![(value, e)]);
             }
-            E::Before(value) | E::Comptime(value) => {
-                self.schedule(id, expected, frame, vec![(value, expected)])
-            }
+            E::Comptime(value) => self.schedule(id, expected, frame, vec![(value, expected)]),
             E::Try { value, .. } => {
                 let operand = if let (Some(ok), Some(result)) =
                     (expected, self.frames[frame].result)
@@ -2042,21 +2016,7 @@ impl Checker<'_, '_> {
                     self.primitive(Primitive::Never)
                 }
             }
-            E::Before(v) | E::Comptime(v) => self.value(v),
-            E::Shape(t) => {
-                let syntax = t;
-                let t = self.syntax_type(t, frame)?;
-                match self.shape_subject(id, t)? {
-                    Some(t) => {
-                        self.plans.shapes.push((id, syntax, t));
-                        self.ty(TypeKind::Builtin {
-                            kind: BuiltinType::TypeShape,
-                            arguments: vec![GenericArgument::Type(t)].into(),
-                        })
-                    }
-                    None => self.error(),
-                }
-            }
+            E::Comptime(v) => self.value(v),
             E::Heap => {
                 let role = self
                     .input
@@ -2104,7 +2064,6 @@ impl Checker<'_, '_> {
                 });
                 result
             }
-            E::Result => self.frames[frame].result.unwrap_or_else(|| self.error()),
             E::Todo(_) => {
                 if !self.frames[frame].incomplete {
                     self.report(
@@ -2628,16 +2587,6 @@ impl Checker<'_, '_> {
                 };
                 self.plans.loops.push(ForPlan { protocol, kind });
                 if marker == UseKind::Mut && !iterator {
-                    if let TypeKind::Named { definition, .. } = self.kind(e) {
-                        let s = self.snapshot(&definition)?;
-                        if matches!(&s.kind,SignatureKind::Type(td) if td.fact.is_some()) {
-                            self.report(
-                                const { RuleId::of("SEM-4") },
-                                self.input.syntax.tree.statements[id.0 as usize].origin.span,
-                                "mutable iteration element may not carry facts",
-                            );
-                        }
-                    }
                     let base = match self.input.syntax.tree.expressions[source.0 as usize].kind {
                         ast::ExprKind::Unary { value, .. } => value,
                         _ => source,

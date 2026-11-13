@@ -26,7 +26,6 @@ fn with_model(f: &Fixture, run: impl FnOnce(&mut Checker<'_, '_>, &Model, State)
         signatures: &reader,
         declarations: &declarations,
         scratch: &scratch,
-        contract: false,
         site: Site {
             body: BodyId(0),
             block: None,

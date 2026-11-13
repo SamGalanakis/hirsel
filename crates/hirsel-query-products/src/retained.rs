@@ -51,7 +51,6 @@ fn tir_bytes(definition: &Definition, mut weight: Weight) -> u64 {
         signature_hash: _,
         bodies,
         entry: _,
-        contracts,
     } = definition;
     weight.flat_vec(caller_bodies);
     weight.vec(protocol_associations, |w, r| {
@@ -59,7 +58,6 @@ fn tir_bytes(definition: &Definition, mut weight: Weight) -> u64 {
     });
     weight.arc_slice(types);
     weight.vec(bodies, Weight::body);
-    weight.flat_vec(contracts);
     weight.bytes
 }
 
@@ -577,7 +575,6 @@ impl Weight<'_> {
                     allocation: _,
                     authority,
                     uses,
-                    contracts,
                     incomplete: _,
                     foreign,
                 } = function;
@@ -596,7 +593,6 @@ impl Weight<'_> {
                     hirsel_types::Uses::Only(terms) => self.authority(terms),
                     hirsel_types::Uses::Unrestricted => (),
                 }
-                self.shared_slice(contracts);
                 if let Some(foreign) = foreign {
                     self.add(foreign.abi.capacity());
                     self.add(foreign.aliasing_contract.capacity());
@@ -625,7 +621,6 @@ impl Weight<'_> {
             distinct: _,
             resource: _,
             drop,
-            fact: _,
             captures,
         } = definition;
         if let Some(hirsel_types::LoopSourceDeclaration { open, next, option }) = loop_source {
@@ -748,11 +743,7 @@ impl Weight<'_> {
                 self.flat_vec(captures);
                 self.destination(destination);
             }
-            Rvalue::Size(_)
-            | Rvalue::Use(_)
-            | Rvalue::Unary { .. }
-            | Rvalue::Binary { .. }
-            | Rvalue::Shape(_) => (),
+            Rvalue::Size(_) | Rvalue::Use(_) | Rvalue::Unary { .. } | Rvalue::Binary { .. } => (),
         }
     }
     fn instruction(&mut self, instruction: &Instruction) {
@@ -771,7 +762,6 @@ impl Weight<'_> {
             | InstructionKind::Drop { .. }
             | InstructionKind::RunCleanup(_)
             | InstructionKind::Check { .. }
-            | InstructionKind::Snapshot { .. }
             | InstructionKind::Charge(_) => (),
         }
     }

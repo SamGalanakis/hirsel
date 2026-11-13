@@ -23,7 +23,6 @@ pub struct NameFacts {
     pub visibility: Visibility,
     /// Index into the header's sources.
     pub source: u32,
-    pub instance_bodied: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

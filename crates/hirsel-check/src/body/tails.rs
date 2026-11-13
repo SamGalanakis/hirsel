@@ -72,20 +72,11 @@ enum Visit {
 impl Checker<'_, '_> {
     pub(super) fn publish_tails(&mut self) -> Result<(), QueryError> {
         let ast::ItemKind::Function {
-            body: Some(root),
-            signature,
-            ..
+            body: Some(root), ..
         } = &self.input.syntax.item.kind
         else {
             return Ok(());
         };
-        if signature
-            .contracts
-            .iter()
-            .any(|c| c.kind == ast::ContractKind::Ensures)
-        {
-            return Ok(());
-        }
         if !self.body.calls.iter().any(|c|matches!(&c.target,CallTarget::Definition(p) if p == self.input.signature.definition.path())) {return Ok(());}
         let constructor_tail = self.constructor_tail_function()?;
         let mut holes: BTreeMap<ast::ExprId, Hole> = BTreeMap::new();
@@ -295,7 +286,6 @@ impl Checker<'_, '_> {
                         E::Unary { value, .. }
                         | E::Field { base: value, .. }
                         | E::Try { value, .. }
-                        | E::Before(value)
                         | E::Comptime(value) => {
                             todo.push(Visit::Expression(value, false, barrier, state))
                         }
@@ -327,9 +317,7 @@ impl Checker<'_, '_> {
                         | E::Path(_)
                         | E::With { .. }
                         | E::Formatter(_)
-                        | E::Shape(_)
                         | E::Heap
-                        | E::Result
                         | E::Todo(_)
                         | E::Error => (),
                         E::Break { value, .. } if exits.contains_key(&id) => {
@@ -691,7 +679,6 @@ impl Checker<'_, '_> {
         Ok((t.layout == hirsel_types::Layout::default()
             && !t.distinct
             && !t.resource
-            && t.fact.is_none()
             && t.capability.is_none()
             && t.drop.is_none())
         .then_some(ordinal))

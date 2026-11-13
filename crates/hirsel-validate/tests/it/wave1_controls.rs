@@ -12,7 +12,6 @@ fn callback(selected: bool) -> Fixture {
         allocation: Allocation::NoAlloc,
         authority: AuthoritySummary::Unknown,
         uses: Uses::Unrestricted,
-        contracts: vec![].into(),
         incomplete: false,
         foreign: None,
     };
@@ -83,7 +82,6 @@ fn nested_once_callback(selected: Option<bool>) -> Fixture {
         allocation: Allocation::NoAlloc,
         authority: AuthoritySummary::Unknown,
         uses: Uses::Unrestricted,
-        contracts: vec![].into(),
         incomplete: false,
         foreign: None,
     };
@@ -340,7 +338,6 @@ fn inactive_payload(present: bool) -> Fixture {
                 distinct: false,
                 resource: false,
                 drop: None,
-                fact: None,
                 captures: None,
                 destructor_allocation: Allocation::NoAlloc,
             })),
@@ -496,7 +493,6 @@ fn captured_inactive_payload(present: bool) -> Fixture {
         allocation: Allocation::MayAllocate,
         authority: AuthoritySummary::inert(),
         uses: Uses::Only(AuthoritySummary::inert()),
-        contracts: vec![].into(),
         incomplete: false,
         foreign: None,
     };

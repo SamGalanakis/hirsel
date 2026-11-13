@@ -163,9 +163,6 @@ pub fn capture(
                         code.definitions[root(body, place)?].push(Definition::Unknown);
                     }
                 }
-                InstructionKind::Snapshot { destination, .. } => {
-                    code.definitions[root(body, destination)?].push(Definition::Unknown);
-                }
                 _ => (),
             }
         }

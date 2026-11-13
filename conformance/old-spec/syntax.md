@@ -16,7 +16,7 @@ they may not split a token or a package/version prefix.
 Hirsel is procedural, with value semantics: `fn`, `let`, `match`, module-qualified calls,
 `todo` holes, `[T]` generics, `?`, sized numerics, tuples `(a, b)` with unit `()`,
 `let mut`, assignment and compound assignment, `for`, `while`, `break`, `continue`, `if`,
-contracts `requires`/`ensures`, value modifiers written before a type (`unique List[T]`,
+value modifiers written before a type (`unique List[T]`,
 `once fn() -> T`) and a brand and relation written after it (`T of p`, `T in x`).
 
 Where only spelling differs from Rust, TypeScript or Python, the majority spelling wins;
@@ -48,8 +48,8 @@ The reserved keywords are exactly:
 
 ```text
 fn let mut match if else for in while break continue return take copy unique
-type distinct flat resource box pub opaque const comptime shape heap
-before requires ensures result where uses of local global once todo extern
+type distinct flat resource box pub opaque const comptime heap
+where uses of local global once todo extern
 unsafe true false
 ```
 
@@ -226,7 +226,7 @@ only (LANG-1, LANG-11):
    `return\n x` does not return `x`.
 4. These continuations take priority over rule 3, across blank lines and comments: `else`
    belongs to the nearest unmatched `if`; `drop` or `@noalloc drop` belongs to the
-   preceding resource declaration; `->`, `uses`, `requires`, `ensures`, `=` and a
+   preceding resource declaration; `->`, `uses` and a
    body-opening `{` continue a function declaration that has no body yet; `uses`
    immediately after a closure block belongs to that closure; a declaration's attributes
    and visibility wait for the declaration; `where` continues a distinct declaration. No
@@ -295,9 +295,9 @@ state-attribute = ("advance_only" | "preserves_captures" | "preserves_unique" | 
 type-state-attribute = ("advance_only" | "preserves_captures" | "captures"),
                   "(", nonempty(value-path), ")" ; (* CLO-2, LANG-7 *)
 function     = [ "extern", string ], "fn", name, fn-header,
-               [ block | "=", "comptime", expression ] ; (* LANG-6/10, PROG-4, CT-1 *)
+               [ block ] ; (* LANG-6/10, PROG-4, CT-1 *)
 fn-header    = [ generics ], "(", list(parameter), ")",
-               [ "->", type ], [ uses ], { contract } ;  (* LANG-6/12, FACT-1, CLO-4 *)
+               [ "->", type ], [ uses ] ;  (* LANG-6/12, CLO-4 *)
 parameter    = { analysis }, [ name ], [ passing ], name, ":", type ; (* LANG-12, OWN-1/2/3, PS-17 *)
 passing      = "take" | "mut" ;                          (* OWN-1/2/3 *)
 const-def    = "const", name, ":", type, "=", expression ; (* LANG-6, CT-1 *)
@@ -310,13 +310,11 @@ bounds       = bound, { "+", bound } ;                   (* GEN-1 *)
 bound        = "plain" | "flat" | "data" | "key" | "sendable" | "inert" | "copyable"
              | "noalloc_drop" | "serializable" | "ordered", [ "of" ] ; (* GEN-1, MEM-5, SER-1, SEM-5 *)
 uses         = "uses", "{", list(value-path), "}" ;      (* CAP-2/3, CLO-2/4 *)
-contract     = ( "requires" | "ensures" ), expression ;  (* FACT-1 *)
 type-def     = [ "flat" | "resource" ], "type", name, [ generics ],
                [ ":", type-bounds ], [ uses ],
                ( record-fields | "=", type-rhs | opaque-end ), [ drop-def ]
              | "distinct", "type", name, [ generics ], [ ":", type-bounds ],
-               "(", { analysis }, name, ":", part-type, ")",
-               [ "where", expression ] ;  (* LANG-7, GEN-1, CAP-5, SER-1, MEM-12, DROP-2, FACT-2 *)
+               "(", { analysis }, name, ":", part-type, ")" ;  (* LANG-7, GEN-1, CAP-5, SER-1, MEM-12, DROP-2 *)
 type-bounds  = bounds | "(", ")" ;                       (* LANG-6, GEN-1, PROG-2 *)
 record-fields= "{", [ { analysis }, field, { entry-sep, { analysis }, field }, [ entry-sep ] ], "}" ; (* LANG-7/12, PS-17 *)
 field        = name, ":", part-type, [ "@", "growable" ] ; (* LANG-12, PROV-5, MEM-12 *)
@@ -483,23 +481,21 @@ postfix      = primary, { [ with-clause ], "(", list(argument), ")" | "[", expre
 with-clause  = "with", "(", nonempty(static-actual), ")" ; (* GEN-6 *)
 static-actual = name, "=", value-path ;                 (* GEN-6 *)
 argument     = [ name, ":" ], expression ;               (* LANG-12 *)
-primary      = literal | f-string | value-path | "heap" | "result"
+primary      = literal | f-string | value-path | "heap"
              | "(", ")" | "(", expression, ")"
              | "(", expression, ",", list(expression), ")"
              | "[", list(expression), "]"
              | "[", expression, ";", expression, "]"
              | block | loop-label, ":", block | if-expr | match-expr | closure
-             | "shape", "(", type, ")"
-             | "before", "(", expression, ")"
              | "todo", [ "(", string, ")" ]
              | "return", [ expression ] | "break", [ loop-label, [ expression ] ]
-             | "continue", [ loop-label ] ; (* LANG-1/2/11, MEM-4, FACT-1, CT-3 *)
+             | "continue", [ loop-label ] ; (* LANG-1/2/11, MEM-4 *)
 if-expr      = "if", ( expression | let-cond ), block, [ "else", (block | if-expr) ] ; (* LANG-1/13 *)
 match-expr   = "match", expression, "{",
                [ arm, { entry-sep, arm }, [ entry-sep ] ], "}" ; (* LANG-7/13 *)
 arm          = pattern, [ "if", expression ], "=>", expression ; (* LANG-7/13 *)
 closure      = "fn", "(", list(parameter), ")", [ "->", type ],
-               [ uses ], { contract }, block, [ uses ] ; (* CLO-1/4, FACT-1 *)
+               [ uses ], block, [ uses ] ; (* CLO-1/4 *)
 pattern      = alternative, { "|", alternative } ;      (* LANG-13 *)
 alternative  = "_" | name | scalar, [ "..=", scalar ]
              | "(", ")" | "(", pattern, ")"
@@ -555,11 +551,7 @@ that default. Empty literals still need an expected sequence type. `[e; N]` repe
 `Array[T]` or `Inline[T, n]`: `N` is a definition-time-known `u64` expression,
 and for `Inline` it must equal `n`. The element is evaluated once, including
 when `N` is zero; a nonconstant element must be copyable
-([LANG-7](language.md#lang-7-types)). `box e` builds the block a `box T` needs. The
-`= comptime expression` function body takes a generated body
-([CT-5](compile-time.md#ct-5-generation)); `shape(T)` reads a type's shape at
-compile time ([CT-3](compile-time.md#ct-3-shapes)). `comptime e` has prefix precedence; parenthesize a
-larger operand.
+([LANG-7](language.md#lang-7-types)). `box e` builds the block a `box T` needs. `comptime e` has prefix precedence; parenthesize a larger operand.
 
 A closure literal may omit its result type, which is then inferred inside the enclosing
 body; a declared function or function type with no arrow returns unit. A closure may

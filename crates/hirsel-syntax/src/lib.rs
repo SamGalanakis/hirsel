@@ -64,12 +64,7 @@ pub enum Keyword {
     Opaque,
     Const,
     Comptime,
-    Shape,
     Heap,
-    Before,
-    Requires,
-    Ensures,
-    Result,
     Where,
     Uses,
     Of,
@@ -110,12 +105,7 @@ impl Keyword {
             Keyword::Opaque => "opaque",
             Keyword::Const => "const",
             Keyword::Comptime => "comptime",
-            Keyword::Shape => "shape",
             Keyword::Heap => "heap",
-            Keyword::Before => "before",
-            Keyword::Requires => "requires",
-            Keyword::Ensures => "ensures",
-            Keyword::Result => "result",
             Keyword::Where => "where",
             Keyword::Uses => "uses",
             Keyword::Of => "of",
@@ -156,12 +146,7 @@ impl Keyword {
             "opaque" => Keyword::Opaque,
             "const" => Keyword::Const,
             "comptime" => Keyword::Comptime,
-            "shape" => Keyword::Shape,
             "heap" => Keyword::Heap,
-            "before" => Keyword::Before,
-            "requires" => Keyword::Requires,
-            "ensures" => Keyword::Ensures,
-            "result" => Keyword::Result,
             "where" => Keyword::Where,
             "uses" => Keyword::Uses,
             "of" => Keyword::Of,
@@ -581,11 +566,8 @@ pub enum ExprKind {
         value: Option<ExprId>,
     },
     Continue(Option<Symbol>),
-    Shape(TypeExprId),
-    Before(ExprId),
     Comptime(ExprId),
     Heap,
-    Result,
     Todo(Option<String>),
     /// The callee of one step of a desugared f-string (SEM-3), only ever called:
     /// the body checker selects its std operation from the step and, for an
@@ -999,18 +981,6 @@ pub struct Attribute {
     pub arguments: Vec<AttributeArgument>,
     pub origin: Origin,
 }
-/// Contract kind; before() snapshots are expressions (FACT-1).
-#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub enum ContractKind {
-    Requires,
-    Ensures,
-}
-/// Executable public signature expression, never inferred from the body (FACT-1, LANG-6).
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
-pub struct ContractSyntax {
-    pub kind: ContractKind,
-    pub expression: ExprId,
-}
 /// None uses is distinct from explicitly empty uses (CLO-2/4, CAP-3).
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Default)]
 pub struct FunctionSyntax {
@@ -1019,7 +989,6 @@ pub struct FunctionSyntax {
     pub parameters: Vec<Parameter>,
     pub result: Option<TypeExprId>,
     pub uses: Option<Vec<Path>>,
-    pub contracts: Vec<ContractSyntax>,
 }
 /// Private/public/opaque visibility is package-based (PROG-2).
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
@@ -1028,7 +997,7 @@ pub enum Visibility {
     Public,
     PublicOpaque,
 }
-/// Type storage/ownership declaration (MEM-12, DROP-2, FACT-2).
+/// Type storage/ownership declaration (MEM-12, DROP-2).
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TypeFlavor {
     Ordinary,
@@ -1057,10 +1026,7 @@ pub enum TypeBody {
     Record(Vec<FieldSyntax>),
     Variants(Vec<VariantSyntax>),
     Alias(TypeExprId),
-    Distinct {
-        field: FieldSyntax,
-        fact: Option<ExprId>,
-    },
+    Distinct { field: FieldSyntax },
     Opaque,
 }
 /// Resource finalizer belongs to the declaring type (DROP-2/3).
@@ -1157,25 +1123,8 @@ pub struct Item {
     pub visibility: Visibility,
     pub attributes: Vec<Attribute>,
     pub kind: ItemKind,
-    /// The item's role in typed generation (CT-5), if any.
-    pub generated: Option<Generated>,
-}
-/// Items the compiler builds for a `= comptime e` declaration (CT-5).
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
-pub enum Generated {
-    /// The declaration with its generated body: the function literal's
-    /// parameter names (None for `_`) and their sites, which bind the declared
-    /// parameters by position in the body. The header and its contracts keep
-    /// the declared names.
-    Body(Vec<(Option<Symbol>, Span)>),
-    /// The generator `e`, checked as a constant: the declared parameter names.
-    /// They are run-time values of the generated function, which `e` cannot read.
-    Generator(Vec<Symbol>),
-    /// A specialization of a declaration with implementation binders (GEN-6):
-    /// each bound binder's name and its terminal implementation. The item is
-    /// the declaration's own syntax; inside it a bound binder's members name
-    /// the implementation's exact targets.
-    Specialization(Vec<(Symbol, DefPath)>),
+    /// Closed implementation binders for an ordinary specialization.
+    pub implementation_bindings: Option<Vec<(Symbol, DefPath)>>,
 }
 /// Written repeat literal, represented by a typed count binding and a one-element
 /// sequence. Lowering repeats that element's prepared value, never its evaluation.
@@ -1296,7 +1245,6 @@ impl SyntaxTree {
                 | ExprKind::With { callee: value, .. }
                 | ExprKind::Unary { value, .. }
                 | ExprKind::Try { value, .. }
-                | ExprKind::Before(value)
                 | ExprKind::Comptime(value)
                 | ExprKind::Return(Some(value)) => children.push(Step::Expr(*value)),
                 ExprKind::Index { base, index } => {
@@ -1324,9 +1272,7 @@ impl SyntaxTree {
                 | ExprKind::Path(_)
                 | ExprKind::Return(None)
                 | ExprKind::Continue(_)
-                | ExprKind::Shape(_)
                 | ExprKind::Heap
-                | ExprKind::Result
                 | ExprKind::Todo(_)
                 | ExprKind::Formatter(_)
                 | ExprKind::Error => {}
@@ -1626,11 +1572,6 @@ impl ItemSyntax {
                 }
             }
             ItemKind::Const { .. } => (),
-        }
-        if let Some(Generated::Body(names)) = &mut item.generated {
-            for (_, site) in names {
-                span(site);
-            }
         }
     }
 }

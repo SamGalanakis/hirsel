@@ -759,12 +759,6 @@ impl Builder<'_, '_> {
                 );
                 return Ok(None);
             }
-            ExprKind::Shape(ty) => {
-                let Some((_, ty)) = self.decisions.shapes.get(&ty).iter().copied().next() else {
-                    return self.error(span, "missing shape type plan");
-                };
-                self.rvalue(row.ty, Rvalue::Shape(*ty), span)
-            }
             ExprKind::Todo(_) => {
                 let cleanup = self.cleanup();
                 self.terminate(
@@ -775,33 +769,6 @@ impl Builder<'_, '_> {
                     span,
                 );
                 return Ok(None);
-            }
-            ExprKind::Before(_) => {
-                let place = self
-                    .snapshots
-                    .iter()
-                    .find(|(e, _)| *e == id)
-                    .map(|(_, p)| *p)
-                    .ok_or_else(|| LowerError {
-                        site: span,
-                        message: "missing checked entry snapshot".into(),
-                    })?;
-                return Ok(Some(Value {
-                    checked_ty: None,
-                    place,
-                    usage: UseKind::Copy,
-                }));
-            }
-            ExprKind::Result => {
-                let place = self.contract_result.ok_or_else(|| LowerError {
-                    site: span,
-                    message: "result outside exit check".into(),
-                })?;
-                return Ok(Some(Value {
-                    checked_ty: None,
-                    place,
-                    usage: UseKind::Borrow,
-                }));
             }
             ExprKind::Comptime(_) => {
                 let inputs = hirsel_check_protocol::body::comptime_inputs(
@@ -1504,20 +1471,6 @@ impl Builder<'_, '_> {
             if charge {
                 self.charge(hirsel_tir::SourceEventKind::Call, id.0, span);
             }
-            if let Some(fact) = self
-                .decisions
-                .facts
-                .get(&id)
-                .iter()
-                .copied()
-                .find(|f| f.expression == id)
-                .cloned()
-            {
-                if prepared.len() != 1 {
-                    return self.error(span, "facted constructor requires its one checked base");
-                }
-                self.fact_check(&fact, prepared[0].1, span)?;
-            }
             let fields: Vec<_> = prepared
                 .into_iter()
                 .map(|(field, v)| ConstructField {
@@ -1950,7 +1903,6 @@ impl Builder<'_, '_> {
                 Self::binding_origin(self.decisions.lexical, owner, &capture.binding);
             child.bindings.push((owner, capture.binding, slot));
         }
-        child.entry_checks(bodies)?;
         if let Some(value) = child.expression(expression, bodies)? {
             child.return_value(value, span, bodies)?;
         }

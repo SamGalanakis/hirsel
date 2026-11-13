@@ -87,4 +87,3 @@ declaration, its selected instances keyed by the canonical spelling of their
 closed arguments (`InstanceBodies::key`). A declaration has no `Definition`;
 `resolve` gives the monomorphic definition a call at closed arguments runs, and
 `TirProvider::instance_body` serves the same lookup lazily (default: none).
-

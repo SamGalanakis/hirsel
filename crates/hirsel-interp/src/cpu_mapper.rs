@@ -393,7 +393,6 @@ mod tests {
                 scoped_parameters: vec![],
             }],
             entry: BodyId(0),
-            contracts: vec![],
         }));
         let mapper = Value::FunctionReference(Box::new(crate::value::NamedFunction {
             definition: path,

@@ -24,11 +24,6 @@ enum Node {
     Map(Vec<(u32, u32)>),
     Set(Vec<u32>),
 }
-#[derive(Clone, Copy)]
-enum Producer {
-    Value(RvalueId),
-    Snapshot(PlaceId),
-}
 pub(super) struct Values {
     nodes: Vec<Node>,
     values: Vec<Option<u32>>,
@@ -41,13 +36,7 @@ impl Values {
         for block in &body.blocks {
             for instruction in &block.instructions {
                 let output = match instruction.kind {
-                    InstructionKind::Assign { destination, value } => {
-                        Some((destination, Producer::Value(value)))
-                    }
-                    InstructionKind::Snapshot {
-                        destination,
-                        ref value,
-                    } => Some((destination, Producer::Snapshot(value.place))),
+                    InstructionKind::Assign { destination, value } => Some((destination, value)),
                     InstructionKind::Replace {
                         destination,
                         displaced,
@@ -102,15 +91,12 @@ impl Values {
                 if !leaving {
                     colors[root] = 1;
                     stack.push((root, true));
-                    let dependencies: Vec<_> = match producer {
-                        Producer::Snapshot(place) => vec![place],
-                        Producer::Value(value) => match &body.rvalues[value.0 as usize] {
-                            Rvalue::Use(value) => vec![value.place],
-                            Rvalue::Construct { fields, .. } => {
-                                fields.iter().map(|f| f.value.place).collect()
-                            }
-                            _ => vec![],
-                        },
+                    let dependencies: Vec<_> = match &body.rvalues[producer.0 as usize] {
+                        Rvalue::Use(value) => vec![value.place],
+                        Rvalue::Construct { fields, .. } => {
+                            fields.iter().map(|f| f.value.place).collect()
+                        }
+                        _ => vec![],
                     };
                     for place in dependencies.into_iter().rev() {
                         let input = body.places[place.0 as usize].root.0 as usize;
@@ -121,45 +107,39 @@ impl Values {
                     continue;
                 }
                 colors[root] = 2;
-                let node = match producer {
-                    Producer::Snapshot(place) => {
-                        result.values[root] = result.place(body, place);
+                let node = match &body.rvalues[producer.0 as usize] {
+                    Rvalue::Use(value) => {
+                        result.values[root] = result.place(body, value.place);
                         continue;
                     }
-                    Producer::Value(value) => match &body.rvalues[value.0 as usize] {
-                        Rvalue::Use(value) => {
-                            result.values[root] = result.place(body, value.place);
-                            continue;
-                        }
-                        Rvalue::Constant(value) => Some(Node::Atom(match value {
-                            Constant::Unit => Atom::Unit,
-                            Constant::Bool(v) => Atom::Bool(*v),
-                            Constant::Integer(v) => Atom::Integer(*v),
-                            Constant::F32(v) => Atom::F32(*v),
-                            Constant::F64(v) => Atom::F64(*v),
-                            Constant::String(v) => Atom::String(v.clone()),
-                            Constant::Bytes(v) => Atom::Bytes(v.clone()),
-                        })),
-                        Rvalue::Construct {
-                            constructor,
-                            fields,
-                            ..
-                        } => {
-                            let mut ordered: Vec<_> = fields.iter().collect();
-                            ordered.sort_by_key(|field| field.field);
-                            let children: Option<Vec<_>> = ordered
-                                .iter()
-                                .enumerate()
-                                .map(|(ordinal, field)| {
-                                    (field.field == ordinal as u32)
-                                        .then(|| result.place(body, field.value.place))
-                                        .flatten()
-                                })
-                                .collect();
-                            children.and_then(|children| result.construct(constructor, children))
-                        }
-                        _ => None,
-                    },
+                    Rvalue::Constant(value) => Some(Node::Atom(match value {
+                        Constant::Unit => Atom::Unit,
+                        Constant::Bool(v) => Atom::Bool(*v),
+                        Constant::Integer(v) => Atom::Integer(*v),
+                        Constant::F32(v) => Atom::F32(*v),
+                        Constant::F64(v) => Atom::F64(*v),
+                        Constant::String(v) => Atom::String(v.clone()),
+                        Constant::Bytes(v) => Atom::Bytes(v.clone()),
+                    })),
+                    Rvalue::Construct {
+                        constructor,
+                        fields,
+                        ..
+                    } => {
+                        let mut ordered: Vec<_> = fields.iter().collect();
+                        ordered.sort_by_key(|field| field.field);
+                        let children: Option<Vec<_>> = ordered
+                            .iter()
+                            .enumerate()
+                            .map(|(ordinal, field)| {
+                                (field.field == ordinal as u32)
+                                    .then(|| result.place(body, field.value.place))
+                                    .flatten()
+                            })
+                            .collect();
+                        children.and_then(|children| result.construct(constructor, children))
+                    }
+                    _ => None,
                 };
                 if let Some(node) = node {
                     let id = *intern.entry(node.clone()).or_insert_with(|| {

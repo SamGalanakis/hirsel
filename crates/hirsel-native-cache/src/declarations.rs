@@ -123,15 +123,6 @@ impl NativeDeclarations {
             .get_mut(path)
             .ok_or_else(|| invalid(format!("missing native source declaration {path}")))?;
         let (definition, output) = engine.native_definition_body_with_output(source)?;
-        let violations = hirsel_validate::validate_instance_uses(
-            &self.program.types,
-            &self.program.instance_bodies,
-            path,
-            &definition,
-        );
-        if !violations.is_empty() {
-            return Err(invalid(format!("invalid instance bodies: {violations:?}")));
-        }
         Arc::make_mut(source).lower = output;
         Ok(definition)
     }
@@ -250,10 +241,9 @@ impl NativeDeclarations {
         }
         let selected: BTreeSet<_> = roots.definitions.iter().cloned().collect();
         if !selected.iter().all(|path| catalogue.contains_key(path))
-            || catalogue.iter().any(|(path, product)| {
-                !selected.contains(path)
-                    && !compile_time_only(&product.source.signature, signatures)
-            })
+            || catalogue
+                .iter()
+                .any(|(path, product)| !selected.contains(path))
         {
             return Err(invalid(
                 "settled native source catalogue differs from root selection",
@@ -300,7 +290,6 @@ impl NativeDeclarations {
             requirements: Vec::new(),
             owners: Default::default(),
             constants: BTreeMap::new(),
-            instance_bodies: roots.instance_bodies.clone(),
         };
         for (path, signature) in &program.signatures {
             hirsel_native::adapt::add_owner(&mut program.owners, path, signature, None);
@@ -397,16 +386,6 @@ impl NativeDeclarations {
         }
         program.constants.extend(statics.constants);
         program.signatures.extend(statics.generated_signatures);
-        let executable = context.sources.keys().cloned().collect();
-        let violations = hirsel_validate::validate_instance_catalog(
-            &program.types,
-            &program.instance_bodies,
-            &program.signatures,
-            &executable,
-        );
-        if !violations.is_empty() {
-            return Err(invalid(format!("invalid instance bodies: {violations:?}")));
-        }
         let entries = context
             .sources
             .keys()
@@ -429,16 +408,6 @@ impl NativeDeclarations {
             entries,
         })
     }
-}
-fn compile_time_only(
-    signature: &hirsel_types::SignatureRef,
-    signatures: &hirsel_engine::SignatureSnapshot,
-) -> bool {
-    matches!(&signature.kind, hirsel_types::SignatureKind::Function(function)
-        if function.generics.is_empty()
-            && function.parameters.iter().map(|parameter| parameter.ty)
-                .chain([function.result])
-                .any(|ty| hirsel_types::mentions_compile_time_only(signatures.types(), ty)))
 }
 
 fn invalid(message: impl Into<String>) -> QueryError {

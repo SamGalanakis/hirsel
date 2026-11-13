@@ -60,12 +60,7 @@ variants!(ast::Keyword {
     Opaque,
     Const,
     Comptime,
-    Shape,
     Heap,
-    Before,
-    Requires,
-    Ensures,
-    Result,
     Where,
     Uses,
     Of,
@@ -112,15 +107,12 @@ structure!(ast::Parameter {
     passing,
     ty
 });
-variants!(ast::ContractKind { Requires, Ensures });
-structure!(ast::ContractSyntax { kind, expression });
 structure!(ast::FunctionSyntax {
     attributes,
     generics,
     parameters,
     result,
     uses,
-    contracts
 });
 structure!(ast::ForeignAbi { literal, contract });
 variants!(ast::TypeFlavor {
@@ -136,7 +128,7 @@ structure!(ast::FieldSyntax {
     origin
 });
 structure!(ast::VariantSyntax { name, fields });
-variants!(ast::TypeBody { Record(f0), Variants(f0), Alias(f0), Distinct{field,fact}, Opaque });
+variants!(ast::TypeBody { Record(f0), Variants(f0), Alias(f0), Distinct{field}, Opaque });
 structure!(ast::DropSyntax {
     noalloc,
     binding,
@@ -145,7 +137,6 @@ structure!(ast::DropSyntax {
 variants!(ast::MemberSpec { Type{name,bounds,authority,origin}, Size{name,origin}, Operation{name,signature,origin} });
 variants!(ast::MemberDefinition { Type{name,ty,origin}, Size{name,value,origin}, Operation{name,target,origin} });
 variants!(ast::ItemKind { Function{signature,body,abi}, Const{ty,value}, Type{flavor,generics,bounds,authority,body,drop}, Signature{members}, Implementation{signature,members} });
-variants!(ast::Generated { Body(f0), Generator(f0), Specialization(f0) });
 structure!(ast::Item {
     name_span,
     origin,
@@ -154,7 +145,7 @@ structure!(ast::Item {
     visibility,
     attributes,
     kind,
-    generated
+    implementation_bindings
 });
 variants!(ast::Punct {
     LParen,
@@ -275,7 +266,7 @@ structure!(ast::StaticBinding {
     implementation,
     origin
 });
-variants!(ast::ExprKind { Literal(f0), Path(f0), Tuple(f0), Sequence(f0), Call{callee,arguments}, Field{base,field}, Index{base,index}, Unary{op,value}, Binary{op,left,right}, Try{value,map_error}, Block{label,statements,tail}, If{condition,then_branch,else_branch}, Match{value,arms}, Closure{signature,body}, Return(f0), Break{label,value}, Continue(f0), Shape(f0), Before(f0), Comptime(f0), Heap, Result, Todo(f0), Formatter(f0), With{callee,bindings}, Error });
+variants!(ast::ExprKind { Literal(f0), Path(f0), Tuple(f0), Sequence(f0), Call{callee,arguments}, Field{base,field}, Index{base,index}, Unary{op,value}, Binary{op,left,right}, Try{value,map_error}, Block{label,statements,tail}, If{condition,then_branch,else_branch}, Match{value,arms}, Closure{signature,body}, Return(f0), Break{label,value}, Continue(f0), Comptime(f0), Heap, Todo(f0), Formatter(f0), With{callee,bindings}, Error });
 structure!(ast::Expr { origin, kind });
 impl Walk for ast::AssignOp {
     fn walk(scan: &mut Scan<'_>) -> Option<()> {
@@ -412,11 +403,6 @@ variants!(ty::Allocation {
 variants!(ty::AuthorityTerm { Capability(f0), Parameter(f0), TypeParameter(f0) });
 variants!(ty::AuthoritySummary { Known(f0), Unknown });
 variants!(ty::Uses { Unrestricted, Only(f0) });
-structure!(ty::Contract {
-    kind,
-    ordinal,
-    code_hash
-});
 structure!(ty::ForeignContract {
     abi,
     blocking,
@@ -431,7 +417,6 @@ structure!(ty::FunctionType {
     allocation,
     authority,
     uses,
-    contracts,
     incomplete,
     foreign
 });
@@ -464,7 +449,6 @@ structure!(ty::TypeDefinition {
     distinct,
     resource,
     drop,
-    fact,
     captures
 });
 variants!(ty::FamilyMemberKind { Type{bounds}, Size, Operation });

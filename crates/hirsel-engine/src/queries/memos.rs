@@ -511,7 +511,7 @@ impl QueryEngine {
     }
 
     /// The value `owner` observes for `read` now.
-    pub(crate) fn observe(&mut self, owner: &DefPath, read: &ReadKey) -> Option<ContentHash> {
+    pub(crate) fn observe(&mut self, _owner: &DefPath, read: &ReadKey) -> Option<ContentHash> {
         Some(match *read {
             ReadKey::DeclaredSignature(d) => self
                 .current_snapshot_signature(d)
@@ -851,7 +851,6 @@ impl QueryEngine {
             self.verify,
         );
         if self.environment_seen.as_ref() != Some(&now) {
-            self.selected_instances.clear();
             if self.environment_seen.is_some() {
                 let mut changes = Changes::default();
                 changes.read(ReadKey::Environment);

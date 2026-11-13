@@ -33,9 +33,6 @@ pub(super) fn declaration_tables(
     if let Some(signature) = signatures.get(definition.path) {
         let parameters: std::sync::Arc<[GenericParameter]> = signature.generics().into();
         scopes[definition.entry.0 as usize].2 = parameters.clone();
-        for (_, id) in &definition.contracts {
-            scopes[id.0 as usize].2 = parameters.clone();
-        }
     }
     for (parent_id, parent) in definition.bodies.iter().enumerate() {
         for instruction in parent.blocks.iter().flat_map(|b| &b.instructions) {
@@ -402,18 +399,6 @@ impl<'a, 'input> Checker<'a, 'input> {
                     InstructionKind::Assign { destination, value } => {
                         self.rvalue_type(*destination, &self.body.rvalues[value.0 as usize])
                     }
-                    InstructionKind::Snapshot { destination, value } => {
-                        self.same(
-                            self.place_type(*destination),
-                            self.place_type(value.place),
-                            "snapshot",
-                        );
-                        if super::flow::needs_release(self, self.place_type(*destination), self.t) {
-                            self.error(ViolationKind::TypeMismatch {
-                                entity: "nonplain snapshot",
-                            });
-                        }
-                    }
                     InstructionKind::Check { condition, .. } => {
                         self.boolean(condition, "check condition")
                     }
@@ -588,22 +573,8 @@ impl<'a, 'input> Checker<'a, 'input> {
                     }
                 }
             }
-            for (_, clause) in &self.definition.contracts {
-                if *clause == self.definition.entry || !producers.contains(&clause.0) {
-                    self.error(ViolationKind::WrongKind {
-                        entity: "contract producer",
-                        index: clause.0,
-                    });
-                }
-            }
             let mut bodies = vec![false; self.definition.bodies.len()];
-            let mut pending: Vec<_> = self
-                .definition
-                .contracts
-                .iter()
-                .map(|c| c.1)
-                .chain([self.definition.entry])
-                .collect();
+            let mut pending = vec![self.definition.entry];
             while let Some(b) = pending.pop() {
                 if std::mem::replace(&mut bodies[b.0 as usize], true) {
                     continue;
@@ -2298,20 +2269,7 @@ impl<'a, 'input> Checker<'a, 'input> {
                 value: o,
                 arguments: generics,
             } => {
-                // Only generated contract invocations are transparent function-value calls.
-                // Reconstruct the target from all possible producers, including overwrites.
-                let clause = !self.definition.contracts.is_empty()
-                    && self
-                        .local_callable_bodies(self.site.body, o.place)
-                        .is_some_and(|bodies| {
-                            bodies.iter().all(|body| {
-                                self.definition
-                                    .contracts
-                                    .iter()
-                                    .any(|(_, clause)| clause == body)
-                            })
-                        });
-                if *forward_caller != clause {
+                if *forward_caller {
                     self.error(ViolationKind::TypeMismatch {
                         entity: "caller forwarding",
                     });
@@ -2406,53 +2364,6 @@ impl<'a, 'input> Checker<'a, 'input> {
                 )
             })
             .collect();
-        if self.contract {
-            let parameters: Vec<_> = (0..f.parameters.len())
-                .map(|i| {
-                    authorities
-                        .get(&ParameterRef::bound(ParamId(i as u32)))
-                        .cloned()
-                        .unwrap_or(AuthoritySummary::Unknown)
-                })
-                .collect();
-            let generic_authorities: Vec<_> = generics
-                .iter()
-                .map(|g| match g {
-                    GenericArgument::Type(t) => self.authority(*t),
-                    _ => AuthoritySummary::inert(),
-                })
-                .collect();
-            let required = match &f.authority {
-                AuthoritySummary::Unknown => AuthoritySummary::Unknown,
-                AuthoritySummary::Known(terms) => {
-                    terms.iter().fold(AuthoritySummary::inert(), |a, term| {
-                        let actual = match term {
-                            AuthorityTerm::Parameter(ParameterRef::Bound {
-                                depth: 0,
-                                parameter,
-                            }) => parameters
-                                .get(parameter.0 as usize)
-                                .cloned()
-                                .unwrap_or(AuthoritySummary::Unknown),
-                            AuthorityTerm::TypeParameter(TypeParameterRef::Bound {
-                                depth: 0,
-                                parameter,
-                            }) => generic_authorities
-                                .get(parameter.0 as usize)
-                                .cloned()
-                                .unwrap_or(AuthoritySummary::Unknown),
-                            term => AuthoritySummary::Known(vec![term.clone()].into()),
-                        };
-                        a.join(actual)
-                    })
-                }
-            };
-            if required != AuthoritySummary::inert() {
-                self.error(ViolationKind::TypeMismatch {
-                    entity: "contract call authority",
-                });
-            }
-        }
         self.invocation_effects(callee, f, generics, arguments);
         // A retained argument's crossing evidence is its flow-proven current
         // content, as for its parameter receipt, not only what its declared
@@ -2985,7 +2896,6 @@ impl<'a, 'input> Checker<'a, 'input> {
             r,
             Rvalue::Constant(_)
                 | Rvalue::Size(_)
-                | Rvalue::Shape(_)
                 | Rvalue::Binary { .. }
                 | Rvalue::Construct { .. }
                 | Rvalue::Closure { .. }
@@ -3480,39 +3390,6 @@ impl<'a, 'input> Checker<'a, 'input> {
                     self.error(ViolationKind::TypeMismatch { entity: "closure" });
                     return;
                 };
-                if self
-                    .definition
-                    .contracts
-                    .iter()
-                    .any(|(_, clause)| clause == body)
-                {
-                    if !captures.is_empty()
-                        || self.definition.bodies[body.0 as usize]
-                            .locals
-                            .iter()
-                            .any(|l| l.storage == Storage::Capture)
-                    {
-                        self.error(ViolationKind::TypeMismatch {
-                            entity: "contract captures",
-                        });
-                    }
-                    if f.parameters
-                        .iter()
-                        .any(|p| p.passing != PassingMode::Borrow)
-                    {
-                        self.error(ViolationKind::TypeMismatch {
-                            entity: "contract parameters",
-                        });
-                    }
-                    if !matches!(
-                        self.t.get(f.result).unwrap().kind,
-                        TypeKind::Primitive(Primitive::Bool)
-                    ) {
-                        self.error(ViolationKind::TypeMismatch {
-                            entity: "contract result",
-                        });
-                    }
-                }
                 if self.t.get(ty).unwrap().drop_allocation == DropAllocation::NoAlloc
                     && captures
                         .iter()
@@ -3810,12 +3687,6 @@ impl<'a, 'input> Checker<'a, 'input> {
                     }
                 }
             }
-            Rvalue::Shape(t) => {
-                if !matches!(kind, TypeKind::Builtin { kind: BuiltinType::TypeShape, arguments } if arguments.len() == 1 && matches!(arguments[0], GenericArgument::Type(id) if self.t.semantic_eq(id, *t)))
-                {
-                    self.error(ViolationKind::TypeMismatch { entity: "shape" });
-                }
-            }
         }
     }
     pub(super) fn has_origins(&self, store: &TypeInterner, ty: TypeId) -> bool {
@@ -3927,8 +3798,7 @@ impl<'a, 'input> Checker<'a, 'input> {
                             _ => other(&mut writes, *destination),
                         }
                     }
-                    InstructionKind::Replace { destination, .. }
-                    | InstructionKind::Snapshot { destination, .. } => {
+                    InstructionKind::Replace { destination, .. } => {
                         other(&mut writes, *destination)
                     }
                     // A mutable loan (a `mut` hand-back among them) may

@@ -50,9 +50,7 @@ impl Builder<'_, '_> {
                     pending.push(*base)
                 }
                 ExprKind::Index { base, index } => pending.extend([*base, *index]),
-                ExprKind::Unary { value, .. }
-                | ExprKind::Before(value)
-                | ExprKind::Comptime(value) => pending.push(*value),
+                ExprKind::Unary { value, .. } | ExprKind::Comptime(value) => pending.push(*value),
                 ExprKind::Binary { left, right, .. } => pending.extend([*left, *right]),
                 ExprKind::Call { callee, arguments } => {
                     pending.push(*callee);
@@ -122,11 +120,7 @@ impl Builder<'_, '_> {
                 ExprKind::Return(value) | ExprKind::Break { value, .. } => pending.extend(value),
                 // Captures, implicit mapper inputs and materialized shape code
                 // are deliberately outside this small proof.
-                ExprKind::Closure { .. }
-                | ExprKind::Try { .. }
-                | ExprKind::Shape(_)
-                | ExprKind::Result
-                | ExprKind::Error => return false,
+                ExprKind::Closure { .. } | ExprKind::Try { .. } | ExprKind::Error => return false,
             }
         }
         true

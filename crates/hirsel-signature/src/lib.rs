@@ -4,7 +4,6 @@
 #[cfg(test)]
 hirsel_guard::install!();
 
-mod contracts;
 mod destruction;
 mod import;
 pub mod protocol;
@@ -309,8 +308,7 @@ fn normalize_inner(
             if (attrs.serializable || bounds.iter().flatten().any(|b| *b == Bound::Serializable))
                 && (item.visibility == ast::Visibility::PublicOpaque && check.is_none()
                     || *flavor == ast::TypeFlavor::Resource
-                    || attrs.capability.is_some()
-                    || matches!(body, ast::TypeBody::Distinct { fact: Some(_), .. }))
+                    || attrs.capability.is_some())
             {
                 return Err(diagnostic(
                     const { RuleId::of("SER-1") },
@@ -366,18 +364,6 @@ fn normalize_inner(
             if let ast::TypeBody::Distinct { field, .. } = body {
                 n.parameters = vec![Some(field.name.as_str().to_owned())];
             }
-            let fact = if let ast::TypeBody::Distinct { fact: Some(e), .. } = body {
-                if !repr.is_some_and(|r| n.satisfies(r, Bound::Plain)) {
-                    return Err(diagnostic(
-                        const { RuleId::of("FACT-2") },
-                        item.origin.span,
-                        "a distinct fact requires a plain base",
-                    ));
-                }
-                Some(n.contract(ast::ContractKind::Requires, *e, 0)?)
-            } else {
-                None
-            };
             if *flavor == ast::TypeFlavor::Flat
                 && repr.is_some_and(|r| !n.flat_storage(r, &mut IdSet::default()))
             {
@@ -610,7 +596,6 @@ fn normalize_inner(
                 distinct: *flavor == ast::TypeFlavor::Distinct,
                 resource: *flavor == ast::TypeFlavor::Resource,
                 drop: drop.as_ref().map(|_| item.definition.clone()),
-                fact,
                 captures: carrier.as_ref().map(|fields| {
                     if opaque {
                         SharedSlice::default()
@@ -753,7 +738,6 @@ fn provisional(
                     distinct: flavor == ast::TypeFlavor::Distinct,
                     resource: flavor == ast::TypeFlavor::Resource,
                     drop: None,
-                    fact: None,
                     captures: None,
                 })),
                 fingerprint: ast::ContentHash::default(),
@@ -1633,12 +1617,7 @@ impl Normalizer<'_, '_> {
         } else {
             authority
         };
-        let contracts = s
-            .contracts
-            .iter()
-            .enumerate()
-            .map(|(i, c)| self.contract(c.kind, c.expression, i as u32))
-            .collect::<Result<_, _>>()?;
+
         let error = result_error(
             &self.types,
             result,
@@ -1666,7 +1645,6 @@ impl Normalizer<'_, '_> {
             },
             authority,
             uses,
-            contracts,
             incomplete: outer.incomplete || attrs.incomplete,
             foreign: None,
         })
@@ -2760,7 +2738,6 @@ impl Normalizer<'_, '_> {
             || attrs.serializable
             || *flavor == ast::TypeFlavor::Resource
             || *flavor == ast::TypeFlavor::Flat
-            || matches!(body, ast::TypeBody::Distinct { fact: Some(_), .. })
         {
             return reject(
                 "an erased carrier cannot be a capability, resource, flat, serializable or refined type",
@@ -2978,7 +2955,6 @@ impl Normalizer<'_, '_> {
                 distinct: false,
                 resource: false,
                 drop: None,
-                fact: None,
                 captures: None,
             })),
             fingerprint: Default::default(),
@@ -3094,10 +3070,7 @@ impl Normalizer<'_, '_> {
             if matches!(
                 row.kind,
                 TypeKind::Builtin {
-                    kind: BuiltinType::Ptr
-                        | BuiltinType::FnPtr
-                        | BuiltinType::SlotId
-                        | BuiltinType::TypeShape,
+                    kind: BuiltinType::Ptr | BuiltinType::FnPtr | BuiltinType::SlotId,
                     ..
                 }
             ) {
@@ -3283,7 +3256,6 @@ impl Normalizer<'_, '_> {
                     distinct: *flavor == ast::TypeFlavor::Distinct,
                     resource: *flavor == ast::TypeFlavor::Resource,
                     drop: None,
-                    fact: None,
                     captures: None,
                     destructor_allocation: Allocation::MayAllocate,
                 })),
@@ -3456,7 +3428,6 @@ fn builtin(s: &str) -> Option<BuiltinType> {
         "Atomic" => BuiltinType::Atomic,
         "Ptr" => BuiltinType::Ptr,
         "FnPtr" => BuiltinType::FnPtr,
-        "TypeShape" => BuiltinType::TypeShape,
         _ => return None,
     })
 }

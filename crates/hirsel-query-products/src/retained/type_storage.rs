@@ -43,15 +43,6 @@ fn function(width: usize, ty: TypeId, path: &DefPath) -> FunctionType {
         uses: Uses::Only(AuthoritySummary::Known(
             vec![AuthorityTerm::Capability(path.clone()); width].into(),
         )),
-        contracts: vec![
-            Contract {
-                kind: hirsel_syntax::ContractKind::Requires,
-                ordinal: 0,
-                code_hash: ContentHash::default()
-            };
-            width
-        ]
-        .into(),
         incomplete: false,
         foreign: Some(ForeignContract {
             abi: "C".repeat(width),

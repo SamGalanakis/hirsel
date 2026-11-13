@@ -19,10 +19,9 @@ pub fn expression_children(tree: &SyntaxTree, e: ExprId) -> Vec<ExprId> {
             .collect(),
         ExprKind::Field { base, .. } => vec![*base],
         ExprKind::Index { base, index } => vec![*base, *index],
-        ExprKind::Unary { value, .. }
-        | ExprKind::Try { value, .. }
-        | ExprKind::Before(value)
-        | ExprKind::Comptime(value) => vec![*value],
+        ExprKind::Unary { value, .. } | ExprKind::Try { value, .. } | ExprKind::Comptime(value) => {
+            vec![*value]
+        }
         ExprKind::Binary { left, right, .. } => vec![*left, *right],
         ExprKind::If {
             condition,

@@ -36,12 +36,6 @@ work_stats! {
     association_visits,
     /// Parsed definitions examined to plan the program frontier.
     planning_visits,
-    /// Definitions examined to detect generated declarations.
-    selection_probe_visits,
-    /// Root definitions examined by generated-instance selection.
-    selection_root_visits,
-    /// Generated-instance selection work-list entries popped.
-    selection_walk_visits,
     /// Checked summaries visited to assemble the GEN-5 graph.
     gen5_visits,
     /// Source growth component verdicts computed after topology changes.

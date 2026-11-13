@@ -583,7 +583,7 @@ impl FrontBodyQueries {
                         observed
                     }
                     _ => {
-                        let observed = self.observe_in(&owner.path().0.package, read);
+                        let observed = self.observe_in(read);
                         previous = Some((*read, *owner, observed));
                         observed
                     }
@@ -924,7 +924,6 @@ impl BodyTask {
             ));
         }
         queries.pool_observed_reads(
-            cx,
             &mut reads,
             &mut facts.summary,
             &mut facts.checked,

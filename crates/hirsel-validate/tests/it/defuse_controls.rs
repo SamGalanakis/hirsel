@@ -42,7 +42,6 @@ fn fixture(mutation: Mutation) -> Fixture {
         } else {
             Some(path("Token_drop"))
         },
-        fact: None,
         captures: None,
     }));
     f.signatures.insert(id("Token"), signature);

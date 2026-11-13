@@ -169,9 +169,6 @@ impl QueryEngine {
             return Err(refused());
         }
         let sibling_bytes = sibling_input_bytes(self.front_sibling_files()).ok_or_else(refused)?;
-        let mut instance_weight = hirsel_query_products::retained::MetadataWeight::default();
-        instance_weight
-            .instance_bodies(&mut self.instance_bodies(&definitions.iter().cloned().collect()));
         let roots = self.source_root_ids();
         let source_rows = self
             .source_paths_iter()
@@ -184,7 +181,6 @@ impl QueryEngine {
             .ok_or_else(refused)?;
         let front_inputs = FrontBodyQueries::input_bytes(definitions)
             .and_then(|bytes| bytes.checked_add(owner_bytes))
-            .and_then(|bytes| bytes.checked_add(instance_weight.bytes()))
             .and_then(|bytes| {
                 bytes.checked_add(header_products::HeaderProducts::written_source_bytes(self))
             })
@@ -272,9 +268,7 @@ mod tests {
             .iter()
             .map(|syntax| syntax.item.definition.clone())
             .collect::<Vec<_>>();
-        let namespace = engine
-            .capture_namespace(&definitions, &[], 8 << 20)
-            .unwrap();
+        let namespace = engine.capture_namespace(&definitions, 8 << 20).unwrap();
         // The partition holds the inputs; sibling views are charged to the
         // rest of the request's process budget.
         let budget = hirsel_engine_admission::ProcessBudget::new(16 << 20);
@@ -355,29 +349,18 @@ mod tests {
     }
     #[test]
     fn live_siblings_admit_syntax_derived_from_a_captured_declaration() {
-        // Shaped as generation/syntax.rs Literal::finish and parse_literal make
-        // a `= comptime` body and its normalized header: the written anchor,
-        // a rehashed body or a renamed definition. Both stand in the captured
-        // file, so they read its written siblings.
+        // Ordinary renamed syntax keeps its captured declaration's siblings.
         let definitions = |items: &[Arc<ItemSyntax>]| {
             items
                 .iter()
                 .map(|item| item.item.definition.clone())
                 .collect::<Vec<_>>()
         };
-        for generated in [true, false] {
+        {
             let (sources, written) = fixture();
             let mut derived = (*written[2]).clone();
-            if generated {
-                derived.item.generated = Some(hirsel_syntax::Generated::Body(vec![]));
-                derived.text_hash = hirsel_syntax::ContentHash::of_parts(
-                    "hirsel.generated-item.v1",
-                    [written[2].text_hash.0.as_slice(), b"fn() -> u8 { 1u8 }"],
-                );
-            } else {
-                derived.item.definition.0.name = "answer$header".into();
-                derived.occurrence = 0;
-            }
+            derived.item.definition.0.name = "answer$header".into();
+            derived.occurrence = 0;
             let items = sources
                 .siblings(&derived)
                 .expect("derived syntax reads its declaration's siblings");

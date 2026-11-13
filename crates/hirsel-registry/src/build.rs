@@ -100,16 +100,6 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
             &mut out,
         );
     }
-    // Typed generation: a generated body for the function type `F`. Like a TypeShape it is
-    // compile-time only and not data; it holds text, never authority.
-    let b = Builder::new(types, "F").with_declarations(&out);
-    let mut t = type_definition(b.generics.clone(), None);
-    t.bounds = vec![Bound::Copyable, Bound::Inert, Bound::NoallocDrop];
-    publish(
-        types,
-        b.signature("Body", SignatureKind::Type(Box::new(t)), true),
-        &mut out,
-    );
     for (name, generic, variants) in [
         ("Result", "T,E", "Ok(T)|Error(E)"),
         (
@@ -228,12 +218,6 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
             "",
             "Check()|Contract()|OutOfSpace()|DeadMutex()",
         ),
-        ("ShapeVisibility", "", "Private()|Public()|Opaque()"),
-        (
-            "ShapeBody",
-            "",
-            "Record(List[FieldShape])|Choice(List[VariantShape])",
-        ),
     ] {
         variant(types, name, generic, variants, &mut out);
     }
@@ -321,18 +305,6 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
             "",
             "from: SocketAddr,tls: PeerTls,steps: List[NetStep]",
         ),
-        ("FieldShape", "", "name: String,ty: String"),
-        ("PayloadShape", "", "label: Option[String],ty: String"),
-        (
-            "VariantShape",
-            "",
-            "name: String,payload: List[PayloadShape]",
-        ),
-        (
-            "ShapeInfo",
-            "",
-            "name: String,visibility: ShapeVisibility,body: ShapeBody",
-        ),
         (
             "NetListener",
             "",
@@ -344,12 +316,6 @@ pub(crate) fn registry(types: &Arc<TypeInterner>) -> BTreeMap<DefId, SignatureRe
             .with_schema(super::schema(name));
         let repr = b.record(fields);
         let mut t = type_definition(b.generics.clone(), Some(repr));
-        if matches!(
-            name,
-            "FieldShape" | "PayloadShape" | "VariantShape" | "ShapeInfo"
-        ) {
-            t.bounds = shape_data_bounds();
-        }
         if name == "Deadline" {
             // A deadline holds its clock, so it carries that clock's authority.
             t.bounds = vec![
@@ -1014,13 +980,7 @@ fn variant(
     if b.generics.is_empty()
         && !matches!(
             name,
-            "TlsRoots"
-                | "TlsClientAuth"
-                | "PeerTls"
-                | "NetConnection"
-                | "NetStep"
-                | "ChildStep"
-                | "ShapeBody"
+            "TlsRoots" | "TlsClientAuth" | "PeerTls" | "NetConnection" | "NetStep" | "ChildStep"
         )
     {
         t.bounds = vec![
@@ -1032,9 +992,6 @@ fn variant(
             Bound::Inert,
             Bound::NoallocDrop,
         ];
-    }
-    if name == "ShapeBody" {
-        t.bounds = shape_data_bounds();
     }
     if matches!(name, "SeamError") {
         // Their arms own Strings and Bytes: copyable by count, never plain.
@@ -1055,17 +1012,6 @@ fn variant(
         b.signature(name, SignatureKind::Type(Box::new(t)), false),
         out,
     );
-}
-/// CT-3 shape data holds only strings and lists of them: structurally
-/// copyable, data, key, inert and noalloc_drop, but neither plain nor sendable.
-fn shape_data_bounds() -> Vec<Bound> {
-    vec![
-        Bound::Copyable,
-        Bound::Data,
-        Bound::Key,
-        Bound::Inert,
-        Bound::NoallocDrop,
-    ]
 }
 /// SER-1: the core errors and outcomes that can cross a runner call or be stored, and the
 /// data they carry. A generic one (`Option`, `Result`, `Bounded`) admits no
@@ -1148,7 +1094,6 @@ fn type_definition(
         distinct: false,
         resource: false,
         drop: None,
-        fact: None,
         captures: None,
         destructor_allocation: Allocation::NoAlloc,
     }
@@ -1418,7 +1363,6 @@ impl Builder {
             },
             authority,
             uses,
-            contracts: vec![].into(),
             incomplete: false,
             foreign: None,
         }
@@ -1665,7 +1609,6 @@ fn builtin(n: &str) -> Option<BuiltinType> {
         "Mutex" => Mutex,
         "Atomic" => Atomic,
         "Ptr" => Ptr,
-        "TypeShape" => TypeShape,
         _ => return None,
     })
 }

@@ -41,7 +41,7 @@ impl Serialize for TirView<'_> {
         let header = self
             .header()
             .ok_or_else(|| S::Error::custom("unavailable checked TIR header"))?;
-        let mut value = serializer.serialize_struct("Definition", 8)?;
+        let mut value = serializer.serialize_struct("Definition", 7)?;
         value.serialize_field(
             "caller_bodies",
             &sequence!(self, caller_body_count, caller_body),
@@ -55,7 +55,6 @@ impl Serialize for TirView<'_> {
         value.serialize_field("signature_hash", &header.signature_hash)?;
         value.serialize_field("bodies", &sequence!(self, body_count, body))?;
         value.serialize_field("entry", &header.entry)?;
-        value.serialize_field("contracts", &sequence!(self, contract_count, contract))?;
         value.end()
     }
 }

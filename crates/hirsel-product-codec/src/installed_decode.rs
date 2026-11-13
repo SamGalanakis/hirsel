@@ -311,6 +311,8 @@ macro_rules! tuples { ($($name:ident),+) => {
 }; }
 tuples!(A, B, C);
 tuples!(A, B, C, D);
+tuples!(A, B, C, D, E, F);
+tuples!(A, B, C, D, E, F, G, H, I);
 tuples!(A, B, C, D, E, F, G);
 tuples!(A, B, C, D, E, F, G, H, I, J);
 impl<T: Walk, const N: usize> Walk for [T; N] {

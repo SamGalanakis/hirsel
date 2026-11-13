@@ -156,25 +156,3 @@ pub fn closure(
     let (_, original) = original(provider, base.definition())?;
     super::closure(&original, base, provider.types(), parent, block, statement)
 }
-
-/// Original generated-call selection, kept separate from body/source access.
-/// Unknown or unselected generated actuals are errors, never ordinary fallback.
-pub trait SelectionProvider: Provider {
-    fn selected_instance(
-        &self,
-        declaration: DefId,
-        arguments: &[hirsel_types::GenericArgument],
-    ) -> Result<Option<DefId>, SourceError>;
-}
-impl SelectionProvider for Front<'_> {
-    fn selected_instance(
-        &self,
-        declaration: DefId,
-        arguments: &[hirsel_types::GenericArgument],
-    ) -> Result<Option<DefId>, SourceError> {
-        self.reader
-            .instance_bodies()
-            .resolve(declaration, self.types(), arguments)
-            .map_err(|error| SourceError::Type(format!("{error:?}")))
-    }
-}

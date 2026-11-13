@@ -220,7 +220,7 @@ impl Checker<'_, '_> {
         };
         // A plain nominal's whole-value authority, cleanup and brands are its
         // parts'; only a seal, finalizer or fact adds an independent effect.
-        !declaration.resource && declaration.capability.is_none() && declaration.fact.is_none()
+        !declaration.resource && declaration.capability.is_none()
     }
     /// The `@captures` selection of the callable this graph implements.
     pub(super) fn creation_selectors(&self) -> Option<&[RelationPlace]> {

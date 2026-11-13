@@ -205,8 +205,6 @@ pub(super) struct Checker<'a> {
     /// result type or an annotated binding), through block tails, branches,
     /// tuple parts and `Some`/`Ok` payloads, with the declared row there.
     declared: HashMap<ExprId, TypeId>,
-    clauses: Vec<(ExprId, TypeId)>,
-    in_clause: bool,
 }
 pub(super) type BindingKey = (NameSite, u8, u32);
 fn binding_key(b: &BindingDecision) -> BindingKey {
@@ -455,16 +453,10 @@ impl<'a> Checker<'a> {
             direct_callee: None,
             inferred_initializer: None,
             declared: HashMap::default(),
-            clauses: vec![],
-            in_clause: false,
         }
     }
     pub(super) fn with_cursor_loops(mut self, loops: &[CursorPlan]) -> Self {
         self.cursor_loops = loops.iter().map(|l| (l.statement, l.clone())).collect();
-        self
-    }
-    pub(super) fn with_clauses(mut self, clauses: &[(ExprId, TypeId)]) -> Self {
-        self.clauses = clauses.to_vec();
         self
     }
     pub(super) fn run(mut self) -> AuthorityOutput {
@@ -576,25 +568,6 @@ impl<'a> Checker<'a> {
             self.return_value(body, self.result_span(body));
             self.check_pending_tasks();
         }
-        for (root, function) in self.clauses.clone() {
-            let TypeKind::Function(function) = self.t.get(function).unwrap().kind.clone() else {
-                continue;
-            };
-            self.frames.push(Frame {
-                owner: NameSite::Expression(root),
-                allowed: Uses::Only(AuthoritySummary::inert()),
-                receipts: BTreeSet::new(),
-                result: Some(function.result),
-                restriction: const { RuleId::of("FACT-1") },
-            });
-            self.in_clause = true;
-            self.expr(root, None);
-            self.in_clause = false;
-            self.frames.pop();
-            self.out
-                .result_types
-                .push((NameSite::Expression(root), function.result));
-        }
         self.out.call_allocations.sort_by_key(|(e, _)| *e);
         self.out.call_allocations.dedup_by_key(|(e, _)| *e);
         self.out.identity_joins.sort();
@@ -651,26 +624,6 @@ impl<'a> Checker<'a> {
     }
     fn error(&mut self, rule: RuleId, span: Span, message: &str) {
         if self.out.failure.is_none() && !self.failed_read {
-            let purity =
-                self.in_clause && (rule.as_str().starts_with("CAP-") || rule.as_str() == "CLO-1");
-            let span = if purity {
-                self.clauses
-                    .iter()
-                    .find_map(|(root, _)| {
-                        self.frames
-                            .iter()
-                            .any(|f| f.owner == NameSite::Expression(*root))
-                            .then_some(self.span(*root))
-                    })
-                    .unwrap_or(span)
-            } else {
-                span
-            };
-            let rule = if purity {
-                const { RuleId::of("FACT-1") }
-            } else {
-                rule
-            };
             self.emit(Diagnostic::error(rule, span, message));
         }
     }
@@ -1930,11 +1883,6 @@ impl<'a> Checker<'a> {
                         }
                     }
                 }
-            }
-            ExprKind::Before(_) if self.in_clause => (),
-            ExprKind::Before(value) => {
-                self.expr(value, None);
-                used = self.used(value);
             }
             ExprKind::Comptime(value) => {
                 self.expr(value, None);

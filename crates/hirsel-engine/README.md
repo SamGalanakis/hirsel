@@ -266,7 +266,6 @@ candidate indexing, build-manifest exposures/FFI inputs, formatter fallback
 projection and interpreter source/output projection. Native resolver envelopes have been retired; shared Resolution tables retain
 their syntax owners.
 
-
 Production body queries return `TypedBody`: the owning syntax/item snapshot,
 checked tables, H plans and selected unit/bool rows. Mode queries consume it and
 return `AnalyzedBody` with the refined cursor plans, formal frame results,
@@ -350,14 +349,6 @@ CT-2 at their initializer or explicit comptime expression under conservative spe
 values and layouts unavailable to the initializer remain operational failures.
 The manufactured aggregate boundary tests are green; source tuple/Percent/Result
 construction drift is dependency-owned K, while distinct fact execution is N.
-
-Distinct `where` code has a private owner-derived `$fact$0` snapshot, containing
-only the declared predicate as a function body. Its parameter/result convention
-and fingerprint come from the owner's signature. It goes through ordinary body,
-mode, lowering and full validation queries, and remains inaccessible to source
-identifiers. Static checking also visits unused predicates. Constructor plans
-call the predicate before creating the value and check FACT-2 at the construction
-span; runtime metadata and the interpreter require no contract special case.
 
 The ownership adapter forwards I’s shared `OwnershipFacts` directly to K.
 Source operand evaluation and callee consumption are distinct; the adapter
@@ -536,7 +527,6 @@ is retained, but DET-1, semantic parity and cleanup guarantees do not apply (#49
 No language failure is synthesized; observable returns None and CLI exits 2.
 Malformed operation schemas remain API errors.
 
-
 `ObservedExecution.exit_report` is the optional PROG-3 host diagnostic derived from the interpreter's returned value. It is outside the semantic observation and captured program output.
 
 ## Syntax review dispositions
@@ -556,15 +546,6 @@ not decide it.
 | Malformed-syntax rule IDs | Existing specialized IDs retained; spec #55 records section 23 versus corpus obligations. Missing closing boundaries now have empty spans. |
 | Canonical formatting | Equal trees and idempotence enforced across every parse-clean corpus file; spec #56 asks about original-byte fidelity. |
 
-Versioned paths stop before division after a dotted member or before a non-name
-operand, as the grammar already requires. The ambiguous `pkg@1/a / b` spelling
-retains greedy module separators pending spec #59; type-path separators remain
-unchanged. Contract `result`/`before` are rejected outside `ensures` with FACT-1;
-nested function bodies establish their own contract context. Mutual aliases are
-LANG-7 at the alias target; direct self-alias layout keeps MEM-7. Invalid UTF-8
-is SEM-3 at the first invalid boundary before indexing, with original prefix
-coordinates. Brace recovery counts consumed and skipped nested braces.
-
 Nominal expansion proofs retain separate conservative policy bounds in
 hirsel-types: structural properties cap distinct nominal applications at 128,
 and Data/Key declaration proofs cap expansions along a path at 128. These can
@@ -581,7 +562,6 @@ retaining insertion order and omitting removed entries. Checked key/value rows
 supply Map entry tuples with their own canonical summaries. Native snapshots carry
 these constructors unchanged and reject forged materialized keys. Dictionary-bearing
 SortedMap and non-data payloads remain CT-2 under spec #44.
-
 
 TirProvider serves shared hirsel-tir Materialized snapshots and the complete
 constant initialization order. The interpreter decodes compiled values once before
@@ -758,8 +738,6 @@ A request at stack length n fails at its own site when n ≥ L =
 computed or reused, so the verdict and site equal a cache-free serial
 evaluation. Limit failures are operational and never cached.
 
-
-
 Runtime archives have independent `RuntimeBuild` choices: `system_allocator`,
 `measurement` and `diagnostic`. `Toolchain::in_tree` selects the production
 archive; `in_tree_with_runtime` makes these choices explicit and includes them
@@ -809,7 +787,6 @@ Native import infers body result-arena summaries after callable specialization.
 The driver checks their complete call-graph binding, then every unit's independent
 C return proof, before publishing a program. Placement may omit an arena payload's
 credit walk only under C's same-token child proof.
-
 
 `tests/it/stdlib_net.rs` and `stdlib_uri.rs` port Rust core::net parsing/display
 and Zig HostName/Uri vectors through the ordinary std package graph. IP/socket

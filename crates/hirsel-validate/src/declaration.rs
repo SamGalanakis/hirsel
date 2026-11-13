@@ -42,7 +42,6 @@ pub(super) fn valid(t: &TypeInterner, s: &Signature, signatures: &Reader<'_>) ->
             || d.resource
             || d.serializable
             || d.layout.flat
-            || d.fact.is_some()
             || d.bounds.contains(&Bound::Inert))
     {
         return false;
@@ -217,10 +216,7 @@ fn global_representation(
         if !matches!(
             row.kind,
             TypeKind::Builtin {
-                kind: BuiltinType::Ptr
-                    | BuiltinType::FnPtr
-                    | BuiltinType::SlotId
-                    | BuiltinType::TypeShape,
+                kind: BuiltinType::Ptr | BuiltinType::FnPtr | BuiltinType::SlotId,
                 ..
             }
         ) {

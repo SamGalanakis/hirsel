@@ -35,8 +35,6 @@ pub struct NativeSourceRoots {
     pub registry_revision: ContentHash,
     pub operations: BTreeMap<OperationKey, OperationRecord>,
     pub builtins: BTreeMap<DefPath, SignatureRef>,
-    /// CT-5 selected declaration/actual/path metadata, without TIR bodies.
-    pub instance_bodies: hirsel_tir::InstanceBodies,
     pub sources: SourceMap,
     pub foreign_links: Vec<LinkInput>,
     pub foreign_unreplayable: bool,
@@ -94,7 +92,6 @@ impl QueryEngine {
         let registry = hirsel_registry::BuiltinRegistry::shared();
         Ok(NativeSourceRoots {
             definitions: paths.iter().cloned().collect(),
-            instance_bodies: self.instance_bodies(&paths),
             environment: self.environment.clone(),
             registry_revision: registry.revision(),
             operations: registry.operation_inventory(),
@@ -191,7 +188,7 @@ impl QueryEngine {
             return Err(QueryError::Diagnostics(signature.diagnostics));
         }
         let syntax = self.parse_definition(path)?.value;
-        let executable = crate::queries::generation::executable(&syntax);
+        let executable = crate::queries::staging::executable(&syntax);
         let summary = self.definition_summary(DefId::intern(path))?;
         let summary_identity = self.definition_summary_identity(DefId::intern(path))?;
         let lower = if executable {
@@ -230,7 +227,6 @@ impl QueryEngine {
             source: NativeSource {
                 implementation_revision: syntax.text_hash,
                 syntax,
-                generated: self.generated_source(path).cloned(),
             },
             summary,
             summary_identity,
@@ -303,7 +299,7 @@ impl QueryEngine {
         selected: &std::collections::BTreeSet<DefPath>,
     ) -> Result<NativeDefinitionExpansion, QueryError> {
         self.check_native_definition_product(product)?;
-        let body = if crate::queries::generation::executable(&product.source.syntax) {
+        let body = if crate::queries::staging::executable(&product.source.syntax) {
             Some(self.native_definition_body(product)?)
         } else {
             None

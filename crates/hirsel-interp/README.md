@@ -288,8 +288,6 @@ If cleanup invalidates a returned value, that value is released too; ignored
 continuations' newly owned temporaries are also released. No host destructor runs
 Hirsel finalizers, and no callback or finalizer recurses on the host stack.
 
-
-
 `OperationResult::Call.updates` publishes saved mutable argument snapshots before
 scheduling the callback. Each `(parameter_ordinal, value)` must target an original
 Mut operand; invalid or duplicate ordinals are API errors. An iterator moving an
@@ -431,7 +429,6 @@ replacement retains its old key and insertion position; duplicate Set insertion
 returns its unused input for ordinary release. Consumed file handles explicitly
 transfer out of evaluator cleanup even when their operation returns an error Result.
 
-
 The primary operation macro and comparator/cursor tables export the exact paths
 that they dispatch. `operation_dispatch()` includes explicit unavailable operations
 and the evaluator's forget role. Registry coverage is checked in both directions
@@ -448,16 +445,6 @@ Violated executable unchecked preconditions stop with UndefinedBehavior carrying
 is retained, but DET-1, semantic parity and cleanup guarantees do not apply (#49).
 No language failure is synthesized; observable returns None and CLI exits 2.
 Malformed operation schemas remain API errors.
-
-`Body.tail_sites` transports H's source-authorized decisions; V independently
-checks declarations, surviving owners, borrows and return continuations. A checked
-self-tail site reuses its frame, preserving lexical size bindings and its caller
-continuation. Single-use counted temporary borrow arguments move into internal
-owners; ordinary release replaces each old owner and releases the last on return
-or language/tooling failure. `LoopOwnership` is an accounting trace, excluded from semantic observations:
-its live count measures retained internal slots, not every physical allocation.
-Pending resource finalization, frame borrows and exit contracts keep ordinary
-calls. Constructor-hole normalization remains reserved under spec issue #46.
 
 Map Index projects the insertion-order entry tuple; SortedMap Index projects its key-order entry array while preserving the hidden Order dictionary. Borrow/mut loops use those addresses. Consuming map cursors own the entire original container and remove each entry before returning it in Complete; opening transfers operand zero, and cleanup retains the remaining entries and comparator.
 
@@ -666,17 +653,6 @@ ordinary roots, so this transport cannot erase a genuine borrowed lifetime.
 
 Failure observations retain and compare the original operation site independently
 of the primary attribution. Tooling reports render both complete locations.
-
-Caller attribution travels as an immutable definition handle, body and source span,
-with no per-call allocation to discover a site. Marked named bodies inherit their
-caller's site through direct calls and generated contract invocations. Ordinary
-function-value invocations, callbacks and spawned tasks establish their actual
-invocation as the boundary. A marked entry with no language caller retains no
-inherited site and reports its own operation. Primitive continuations and release
-work carry the selected policy explicitly, so temporary cleanup cannot recover a
-surrounding marked frame's attribution after a function-value boundary. Failure
-records retain the actual operation separately; existing anchored child failures
-and ordered cleanup causes keep their original sites.
 
 SortedMap keeps its arena storage tag on its entries sequence across comparator
 continuations. Once comparison succeeds, an `OperationResult::ArenaCharge`

@@ -448,7 +448,6 @@ impl Checker<'_> {
             return explanation;
         };
         let body = *body;
-        let contracts = !signature.contracts.is_empty();
         let Some(annotation) = signature.result else {
             return explanation;
         };
@@ -482,7 +481,6 @@ impl Checker<'_> {
         };
         let tail = *tail;
         if !statements.is_empty()
-            || contracts
             || function.allocation == Allocation::NoAlloc
             || !matches!(
                 self.tree.expressions[tail.0 as usize].kind,
@@ -560,7 +558,7 @@ impl Checker<'_> {
         let TypeKind::Function(f) = &row.kind else {
             return None;
         };
-        if !f.generics.is_empty() || f.error.is_some() || !f.contracts.is_empty() {
+        if !f.generics.is_empty() || f.error.is_some() {
             return None;
         }
         let uses = match &f.uses {

@@ -1,6 +1,6 @@
 //! The prover-neutral proof seam: stable obligation ids,
 //! per-definition TIR digests and obligation checksums, and the canonical
-//! `hirsel.tir.export.v16` text that consumers read out of process. Import
+//! `hirsel.tir.export.v17` text that consumers read out of process. Import
 //! decodes, re-derives every signature fingerprint, recomputes every digest
 //! and table, and re-validates each definition with V; any difference is a
 //! located refusal.
@@ -31,7 +31,7 @@ pub use content::{
     definition_hashes_loading, group_hashes, references,
 };
 pub use obligations::{
-    Detail, Obligation, ObligationId, ObligationKind, Site, SitePosition, projected_places,
+    Obligation, ObligationId, ObligationKind, Site, SitePosition, projected_places,
 };
 pub use wire::{Cx, Locator};
 
@@ -56,7 +56,7 @@ use std::sync::Arc;
 /// v11: contextual arena-scope grant ownership.
 /// v12: combined grant encoding and logical invocation semantics.
 /// v13: compile-time source-event charges (CT-4).
-pub const FORMAT: &str = "hirsel.tir.export.v16";
+pub const FORMAT: &str = "hirsel.tir.export.v17";
 /// PS-5.
 pub const TIR_DIGEST_DOMAIN: &str = "hirsel.tir.digest.v1";
 /// PS-6.
@@ -460,11 +460,10 @@ fn section(
     let obligations = table
         .obligations
         .into_iter()
-        .map(|(id, sites, detail)| Obligation {
+        .map(|(id, sites)| Obligation {
             checksum: checksum(&id, &digested.tir_digest, &digested.references),
             id,
             sites,
-            detail,
         })
         .collect();
     Ok(DefinitionSection {
@@ -496,11 +495,10 @@ fn section_owned(
     let obligations = table
         .obligations
         .into_iter()
-        .map(|(id, sites, detail)| Obligation {
+        .map(|(id, sites)| Obligation {
             checksum: checksum(&id, &digested.tir_digest, &digested.references),
             id,
             sites,
-            detail,
         })
         .collect();
     Ok(DefinitionSection {

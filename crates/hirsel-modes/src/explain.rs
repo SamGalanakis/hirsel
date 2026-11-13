@@ -1269,12 +1269,6 @@ impl Sites<'_> {
     /// A parameter's name and its written type's site. A generated body (CT-5)
     /// binds the parameter by its function literal's name, at that name's site.
     pub fn parameter(&self, owner: NameSite, parameter: ParamId) -> Option<(String, Span)> {
-        if let NameSite::Item = owner
-            && let Some(hirsel_syntax::Generated::Body(names)) = &self.syntax.item.generated
-        {
-            let &(name, span) = names.get(parameter.0 as usize)?;
-            return Some((name.map_or_else(|| "_".into(), |s| self.name(s)), span));
-        }
         let syntax = self
             .signature(owner)?
             .parameters

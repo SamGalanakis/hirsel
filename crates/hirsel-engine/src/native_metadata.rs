@@ -22,7 +22,7 @@ impl NativeMetadataExt for MetadataWeight {
             definition,
             signature: _,
             signature_dependencies,
-            source,
+            source: _,
             summary: _,
             summary_identity: _,
             lower: _,
@@ -33,9 +33,6 @@ impl NativeMetadataExt for MetadataWeight {
         } = value;
         self.path(definition);
         self.flat_vec(signature_dependencies);
-        if let Some(generated) = &source.generated {
-            self.add(generated.text.capacity());
-        }
         if let Some(audit) = audit {
             self.path(&audit.definition);
             self.flat_vec(&audit.cleanup);
@@ -57,7 +54,6 @@ impl NativeMetadataExt for MetadataWeight {
             registry_revision: _,
             operations,
             builtins,
-            instance_bodies,
             sources: _,
             foreign_links,
             foreign_unreplayable: _,
@@ -71,7 +67,6 @@ impl NativeMetadataExt for MetadataWeight {
             w.flat_vec(&value.parameters);
         });
         self.map(builtins, |w, key, _| w.path(key));
-        self.instance_bodies(instance_bodies);
         self.vec(foreign_links, |w, value| match value {
             crate::LinkInput::Library(name) => w.add(name.capacity()),
             crate::LinkInput::File(path) => w.add(path.capacity()),

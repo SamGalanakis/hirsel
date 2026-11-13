@@ -254,14 +254,13 @@ fn immutable_launch_manifest_binds_run_seed_and_all_profile_fields() {
         assert!(source.bind_run(entry, Arc::new(wrong)).is_err());
         let original = source.profiles.as_ref().clone();
         let baseline = source.manifest_bytes().unwrap();
-        for change in 0..4 {
+        for change in 0..3 {
             let mut profiles = original.clone();
             let profile = profiles.get_mut(entry).unwrap();
             match change {
                 0 => profile.base += 1,
-                1 => profile.generated = Some(1),
-                2 => profile.anchors[0].1 += 1,
-                3 => {
+                1 => profile.anchors[0].1 += 1,
+                2 => {
                     let mut map = SourceMap::default();
                     let file = map
                         .add("changed-logical.hir", profile.file.text().into())
@@ -291,36 +290,6 @@ fn immutable_launch_manifest_binds_run_seed_and_all_profile_fields() {
         profile.path = profile.file.path.clone();
         source.profiles = Arc::new(profiles);
         assert_eq!(source.manifest_bytes().unwrap(), baseline);
-    });
-}
-
-#[test]
-fn generated_source_selectors_keep_exact_source_ownership() {
-    hirsel_intern::jobs::with_compiler_stack(|| {
-        let source = "fn body()->Result[Body[fn(u64)->u64 uses {}],String]{Ok(codegen.body(\"fn(x:u64)->u64 uses {} {9u64/x}\"))}\nfn generated(x:u64)->u64 uses {}=comptime body()\npub fn main()->Result[(),()]{let _=generated(0u64);Ok(())}";
-        let mut fixture = Fixture::with_source(Verify::On, source);
-        NativeLinkSource::from_settled(fixture.facts(), &fixture.lower).unwrap();
-        let mut generated = fixture.selected[0].clone();
-        generated.0.name = "generated".into();
-        let original = fixture.anchors[&generated].clone();
-        assert!(
-            original.iter().any(|anchor| fixture
-                .lower
-                .record_context()
-                .record_owner(*anchor)
-                .is_some_and(|(owner, _)| owner != generated)),
-            "generated text must use its codec owner"
-        );
-        // A valid anchor from another source in the same context cannot be
-        // substituted for this definition's source selector.
-        fixture.anchors.get_mut(&generated).unwrap()[0] = fixture.anchors[&fixture.selected[0]][0];
-        assert!(NativeLinkSource::from_settled(fixture.facts(), &fixture.lower).is_err());
-        fixture.anchors.insert(generated.clone(), original);
-        let other = Fixture::with_source(Verify::On, &source.replace("9u64/x", "8u64/x"));
-        fixture
-            .anchors
-            .insert(generated.clone(), other.anchors[&generated].clone());
-        assert!(NativeLinkSource::from_settled(fixture.facts(), &fixture.lower).is_err());
     });
 }
 

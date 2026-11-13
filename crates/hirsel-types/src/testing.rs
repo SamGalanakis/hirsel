@@ -130,7 +130,6 @@ impl Types {
                 allocation: Allocation::MayAllocate,
                 authority: AuthoritySummary::inert(),
                 uses: Uses::Unrestricted,
-                contracts: Vec::new().into(),
                 incomplete: false,
                 foreign: None,
             }),

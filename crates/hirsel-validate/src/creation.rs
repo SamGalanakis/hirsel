@@ -202,7 +202,7 @@ impl Checker<'_, '_> {
             return false;
         };
         // Only a seal, finalizer or fact adds an effect beyond the parts.
-        !declaration.resource && declaration.capability.is_none() && declaration.fact.is_none()
+        !declaration.resource && declaration.capability.is_none()
     }
 
     fn inert_creation(&self, ty: TypeId) -> bool {

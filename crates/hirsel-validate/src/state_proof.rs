@@ -340,7 +340,6 @@ impl Checker<'_, '_> {
                         .get(value.0 as usize)
                         .is_some_and(|r| typing::operands(r).any(escapes)),
                     InstructionKind::Replace { value, .. }
-                    | InstructionKind::Snapshot { value, .. }
                     | InstructionKind::Check {
                         condition: value, ..
                     } => escapes(value),

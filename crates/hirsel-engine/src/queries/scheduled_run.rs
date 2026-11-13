@@ -73,7 +73,6 @@ struct Input {
     dependencies: BTreeSet<DefPath>,
     source: bool,
     executable: bool,
-    generated: bool,
     implementation: ContentHash,
     _charge: Option<inputs::InputCharge>,
 }
@@ -559,18 +558,6 @@ impl Task {
                     return Err(self.queries.errors.resource);
                 }
             }
-            match self.queries.lower.selected_instances(
-                self.entries.keys().map(|id| id.path().clone()),
-                self.queries.weight.scratch,
-            ) {
-                Ok(instances) => self.pending.extend(
-                    instances
-                        .into_iter()
-                        .filter(|p| !self.entries.contains_key(&DefId::intern(p)))
-                        .map(|path| DefId::intern(&path)),
-                ),
-                Err(error) => return Err(self.queries.failure_record(error)),
-            }
             if self.pending.is_empty() {
                 break;
             }
@@ -633,7 +620,6 @@ impl Task {
         let mut dependencies = input.dependencies.clone();
         let mut tir = None;
         let mut source_products = None;
-        let mut generated_tokens = None;
         if input.source
             && (input.executable || !matches!(input.signature.kind, SignatureKind::Type(_)))
         {
@@ -680,14 +666,6 @@ impl Task {
                 return Err(
                     queries.failure_record(QueryError::Diagnostics(analyzed.diagnostics.clone()))
                 );
-            }
-            if input.generated {
-                generated_tokens = match hirsel_fmt::semantic_item(&analyzed.value.typed.syntax) {
-                    Some(tokens) => Some(tokens),
-                    None => {
-                        return Err(queries.failure_record(QueryError::NotImplemented));
-                    }
-                };
             }
             dependencies.extend(
                 analyzed
@@ -817,17 +795,10 @@ impl Task {
                     .ok_or_else(|| operational("invalid Run input content"))?;
                 Ok((content, charge))
             })();
-        let (mut source_content, _content_charge) = match source_content {
+        let (source_content, _content_charge) = match source_content {
             Ok(content) => content,
             Err(error) => return Err(queries.failure_record(error)),
         };
-        if let Some(tokens) = generated_tokens {
-            // Scalar semantic_body_node hashes the analyzed source: a generic
-            // generated header has no body, and a selected instance carries
-            // its accepted literal rather than the original generator call.
-            source_content.truncate(1);
-            source_content.extend(tokens);
-        }
         let content = if matches!(input.signature.kind, SignatureKind::Type(_)) {
             DefinitionContent::Body {
                 signature: input.owner_signature.clone(),
@@ -889,13 +860,6 @@ impl Task {
                     );
                 }
             }
-            pending.extend(
-                self.queries
-                    .lower
-                    .selected_instances(definitions.iter().cloned(), self.queries.weight.scratch)?
-                    .into_iter()
-                    .filter(|p| !definitions.contains(p)),
-            );
             if pending.is_empty() {
                 break;
             }
@@ -1312,7 +1276,7 @@ impl QueryEngine {
             .is_some_and(|store| store.installation_output().is_some())
         {}
         let definitions = self.source_paths();
-        let namespace = self.capture_namespace(&definitions, &[], limit)?;
+        let namespace = self.capture_namespace(&definitions, limit)?;
         self.front_run_inputs_in(namespace, limit)
     }
     pub fn front_run_inputs_in(

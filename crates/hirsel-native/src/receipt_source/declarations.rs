@@ -20,7 +20,7 @@ pub struct ReceiptDeclarations<'a> {
 impl NamedGraph {
     pub fn declarations<'a>(
         &self,
-        provider: &dyn provider::SelectionProvider,
+        provider: &dyn provider::Provider,
         roots: impl IntoIterator<Item = NamedInput>,
         cases: &mut impl FnMut(
             &SourceCallableEntry,

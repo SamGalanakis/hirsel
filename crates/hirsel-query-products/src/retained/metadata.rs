@@ -163,37 +163,4 @@ impl MetadataWeight {
             }
         }
     }
-    /// Compact private CT-5 hash tables before counting their allocation.
-    /// hashbrown raw/mod.rs shrink_to (889-949), capacity_to_buckets (105-166),
-    /// calculate_layout_for: after shrink_to_fit, buckets are bounded by the
-    /// smallest power of two accommodating len at 7/8 load. Unlike capacity(),
-    /// this remains valid for a map that previously retained deleted buckets.
-    pub fn instance_bodies(&mut self, value: &mut hirsel_tir::InstanceBodies) {
-        self.tree::<hirsel_syntax::DefId, ()>(value.declarations.len());
-        self.tree::<hirsel_syntax::DefId,std::collections::HashMap<hirsel_types::GeneratedActualKey,hirsel_tir::InstanceBody>>(value.instances.len());
-        for values in value.instances.values_mut() {
-            values.shrink_to_fit();
-            if !values.is_empty() {
-                let buckets = values
-                    .len()
-                    .saturating_mul(8)
-                    .div_ceil(7)
-                    .checked_next_power_of_two()
-                    .unwrap_or(usize::MAX)
-                    .max(4);
-                // 16-byte control group plus alignment of the key/value pair.
-                let entry =
-                    Layout::new::<(hirsel_types::GeneratedActualKey, hirsel_tir::InstanceBody)>();
-                self.add(
-                    buckets
-                        .saturating_mul(entry.size().saturating_add(1))
-                        .saturating_add(16)
-                        .saturating_add(entry.align() - 1),
-                );
-            }
-            for value in values.values() {
-                self.flat_vec(&value.arguments);
-            }
-        }
-    }
 }

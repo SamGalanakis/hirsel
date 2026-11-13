@@ -142,13 +142,6 @@ impl ModesPhase for ModeAdapter {
         signature: &Signature,
         signatures: &mut dyn SignatureProvider,
     ) -> Result<QueryOutput<hirsel_types::storage::graph::StorageDefinition>, QueryError> {
-        let clauses: Vec<_> = body
-            .typed
-            .plans
-            .contracts
-            .iter()
-            .map(|clause| (clause.expression, clause.function))
-            .collect();
         hirsel_ownership::storage_definition(
             t,
             m,
@@ -156,7 +149,6 @@ impl ModesPhase for ModeAdapter {
             signature,
             &body.typed.checked,
             &body.ownership.captures,
-            &clauses,
             &body.results,
             signatures,
         )
@@ -181,13 +173,7 @@ impl ModesPhase for ModeAdapter {
             .iter()
             .filter_map(|l| l.cursor().cloned())
             .collect();
-        let clauses: Vec<_> = typed
-            .plans
-            .contracts
-            .iter()
-            .map(|c| (c.expression, c.function))
-            .collect();
-        let mut output = hirsel_authority::check_file_with_clauses(
+        let mut output = hirsel_authority::check_file(
             t,
             m,
             &syntax,
@@ -196,7 +182,6 @@ impl ModesPhase for ModeAdapter {
             provider,
             &intrinsics,
             &loops,
-            &clauses,
         );
         products.mode_diagnostics.extend(
             output
@@ -218,14 +203,13 @@ impl ModesPhase for ModeAdapter {
             );
         }
         // Run I even when J reports source errors: availability can own the obligation.
-        let owned = hirsel_ownership::check_ownership_with_clauses(
+        let owned = hirsel_ownership::check_ownership(
             t,
             m,
             &syntax,
             signature,
             &mut output.body,
             &captures,
-            &clauses,
             &mut output.result_types,
             &output.identity_joins,
             &output.identity_fields,
@@ -248,13 +232,6 @@ impl ModesPhase for ModeAdapter {
             }
             Err(error) => return Err(error),
         };
-        let clause_types = hirsel_ownership::checked_clause_types(t, &mut output.body, &clauses)
-            .map_err(|error| {
-                invariant(&format!("checked clause parameter transport: {error:?}"))
-            })?;
-        for (clause, function) in typed.plans.contracts.iter_mut().zip(clause_types) {
-            clause.function = function;
-        }
         // Rebuild implicit calls from declarations after I has judged the
         // source's current content. J's selected source identity stays fixed.
         if !output
@@ -458,47 +435,9 @@ fn lower_expression(
     let mut plans = lower::Plans::from_body(t, &file.tree, checked, &typed.plans, expression)
         .map_err(|e| invariant(e.to_string()))?;
     plans.staged = staged.to_vec();
-    let owner_span = |owner| match owner {
-        NameSite::Item => Some(file.item.origin.span),
-        NameSite::Statement(id) => Some(file.tree.statements[id.0 as usize].origin.span),
-        NameSite::Expression(id) => Some(file.tree.expressions[id.0 as usize].origin.span),
-        _ => None,
-    };
     if evaluation_result.is_some() {
         plans.evaluation_frame = true;
-        let frame = file.tree.expressions[expression.0 as usize].origin.span;
-        // A synthetic initializer evaluates this expression alone. Enclosing
-        // and unrelated declared contracts remain on their ordinary bodies.
-        plans.contracts.retain(|clause| {
-            owner_span(clause.owner)
-                .is_some_and(|owner| owner.start >= frame.start && owner.end <= frame.end)
-        });
     }
-    // A materialized subtree no longer emits its nested callable bodies. Their
-    // clauses were checked and executed during evaluation, not by its reader.
-    let mut materialized: Vec<_> = constants
-        .iter()
-        .map(|(id, _)| file.tree.expressions[id.0 as usize].origin.span)
-        .collect();
-    materialized.sort_by_key(|span| span.start);
-    let mut ranges: Vec<hirsel_span::Span> = vec![];
-    for span in materialized {
-        if let Some(previous) = ranges
-            .last_mut()
-            .filter(|previous| previous.end >= span.start)
-        {
-            previous.end = previous.end.max(span.end);
-        } else {
-            ranges.push(span);
-        }
-    }
-    plans.contracts.retain(|clause| {
-        let Some(owner) = owner_span(clause.owner) else {
-            return false;
-        };
-        let index = ranges.partition_point(|range| range.start <= owner.start);
-        index == 0 || ranges[index - 1].end < owner.end
-    });
     for (expression, value) in constants {
         if let hirsel_tir::ValueKind::Constant(constant) = &value.root.kind {
             plans.constants.push((*expression, constant.clone()));

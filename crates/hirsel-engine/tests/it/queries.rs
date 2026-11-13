@@ -137,7 +137,7 @@ impl ParserPhase for Fake {
                         contract: None,
                     }),
                 },
-                generated: None,
+                implementation_bindings: None,
             };
             items.push(Arc::new(ItemSyntax {
                 retention: Default::default(),
@@ -227,7 +227,6 @@ impl SignaturePhase for Fake {
                 allocation: Allocation::MayAllocate,
                 authority: AuthoritySummary::inert(),
                 uses: Uses::Unrestricted,
-                contracts: Default::default(),
                 incomplete: false,
                 foreign: None,
             }),
@@ -317,7 +316,6 @@ impl LoweringPhase for Fake {
                 vec![unit_body(signature, syntax, syntax.item.origin.span)]
             },
             entry: hirsel_tir::BodyId(0),
-            contracts: vec![],
         };
         definition.types = hirsel_tir::definition_types(t, &definition);
         Ok(out(definition))
@@ -873,94 +871,6 @@ fn missing_stages_remain_unavailable_and_diagnostic_sources_survive_edits_on_com
         Err(QueryError::NotImplemented)
     ));
     assert_eq!(engine.unavailable, Some(QueryKind::Lower));
-}
-
-struct ContractSignatures;
-impl SignaturePhase for ContractSignatures {
-    fn signature(
-        &self,
-        t: &hirsel_types::TypeInterner,
-        _m: &hirsel_types::TypeMemo,
-        syntax: Arc<ItemSyntax>,
-        _declarations: &Declarations,
-        _products: &mut PhaseProducts,
-        provider: &mut dyn SignatureProvider,
-    ) -> Result<QueryOutput<Signature>, QueryError> {
-        let item = &syntax.item;
-        let ItemKind::Function {
-            abi: Some(header), ..
-        } = &item.kind
-        else {
-            unreachable!()
-        };
-        let mut fingerprint = ContentHash::of_bytes(header.literal.as_bytes());
-        let mut contracts = vec![];
-        if item.definition == path("a") {
-            let used = provider.signature(DefId::intern(&path("contract")))?;
-            fingerprint = ContentHash::of_parts(
-                "fixture.contract.signature",
-                [fingerprint.0.as_slice(), used.fingerprint.0.as_slice()],
-            );
-            contracts.push(hirsel_types::Contract {
-                kind: hirsel_syntax::ContractKind::Requires,
-                ordinal: 0,
-                code_hash: fingerprint,
-            });
-        }
-        let result = t.intern(hirsel_types::Type {
-            drop_allocation: hirsel_types::DropAllocation::MayAllocate,
-            ..hirsel_types::Type::with_kind(TypeKind::Tuple(vec![].into()))
-        });
-        Ok(out(Signature {
-            metadata: Default::default(),
-            definition: DefId::intern(&item.definition),
-            fingerprint,
-            kind: SignatureKind::Function(FunctionType {
-                state_promises: Default::default(),
-                generics: vec![].into(),
-                parameters: vec![].into(),
-                result,
-                error: None,
-                allocation: Allocation::MayAllocate,
-                authority: AuthoritySummary::inert(),
-                uses: Uses::Unrestricted,
-                contracts: contracts.into(),
-                incomplete: false,
-                foreign: None,
-            }),
-        }))
-    }
-}
-#[test]
-fn contract_signature_reads_invalidate_the_owner_and_its_users() {
-    hirsel_intern::jobs::with_compiler_stack(
-        contract_signature_reads_invalidate_the_owner_and_its_users_on_compiler_thread,
-    );
-}
-fn contract_signature_reads_invalidate_the_owner_and_its_users_on_compiler_thread() {
-    let (mut engine, _) = make_engine(None, false);
-    engine.adapters.signature = Some(Arc::new(ContractSignatures));
-    parse(
-        &mut engine,
-        "fn a () { 1 }\nfn b () { 2 }\nfn contract () { 3 }\n",
-    );
-    engine.lower_to_tir(&path("b")).unwrap();
-    let reads = engine
-        .dependency_reads(&path("a"), QueryKind::Signature)
-        .unwrap();
-    assert_eq!(*reads.signatures[0].definition.path(), path("contract"));
-    let previous = engine.item_signature(&path("a")).unwrap().value.fingerprint;
-    parse(
-        &mut engine,
-        "fn a () { 1 }\nfn b () { 2 }\nfn contract (changed) { 3 }\n",
-    );
-    engine.lower_to_tir(&path("b")).unwrap();
-    assert_ne!(
-        engine.item_signature(&path("a")).unwrap().value.fingerprint,
-        previous
-    );
-    assert_eq!(engine.recompute_count(&path("a"), QueryKind::Signature), 2);
-    assert_eq!(engine.recompute_count(&path("b"), QueryKind::Check), 2);
 }
 
 #[test]

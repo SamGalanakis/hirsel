@@ -664,7 +664,7 @@ pub(crate) mod tests {
             std::fs::create_dir_all(&root).unwrap();
             let fixture = Self(root);
             fixture.write("dep.hir", "pub fn unused() -> u64 { unknown() }\n");
-            fixture.write("api.hir", "pub fn unused() -> u64 { let x: Missing = unknown(); x }\npub const CYCLE: u64 = CYCLE\npub fn generated() -> u64 = comptime missing_generator()\npub fn generic[T]() -> u64 = comptime missing_generator()\n");
+            fixture.write("api.hir", "pub fn unused() -> u64 { let x: Missing = unknown(); x }\npub const CYCLE: u64 = CYCLE\npub fn unresolved() -> u64 { missing() }\npub fn generic[T]() -> u64 { missing() }\n");
             fixture.manifest(serde_json::json!([{
                 "manifest": "dep.json", "package": {"name":"dep","version":"1"}, "expose": []
             }]));
@@ -706,7 +706,6 @@ pub(crate) mod tests {
         assert!(engine.constant_values.is_empty());
         assert!(engine.staged_values.is_empty());
         assert!(engine.staged_constants.is_empty());
-        assert_eq!(engine.generated_sources().count(), 0);
         assert!(engine.last_comptime_limit.is_none());
     }
 

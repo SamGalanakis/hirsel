@@ -500,21 +500,10 @@ impl HeaderSources {
                 .as_ref()
                 .map_or(Ok(None), |parent| parent.siblings(syntax));
         };
-        // Siblings belong to the written declaration the requester stands at.
-        // Derived syntax (a generated body, its normalized header, a generator
-        // constant, a specialization) keeps that declaration's anchor but may
-        // rename it; only a generated body rehashes, folding the written hash
-        // into its generated text, so it is bound by its unchanged definition
-        // and occurrence instead.
-        let id = DefId::intern(&syntax.item.definition);
-        let stands = |&(definition, body, anchor, occurrence): &SyntaxBinding| {
-            anchor == syntax.anchor
-                && match syntax.item.generated {
-                    Some(hirsel_syntax::Generated::Body(_)) => {
-                        definition == id && occurrence == syntax.occurrence
-                    }
-                    _ => body == syntax.text_hash,
-                }
+        // Ordinary renamed specializations retain their written declaration's
+        // anchor and token hash when reading its siblings.
+        let stands = |&(_, body, anchor, _): &SyntaxBinding| {
+            anchor == syntax.anchor && body == syntax.text_hash
         };
         if !owner.bindings.iter().any(stands) {
             return Err(source_refusal("captured sibling binding changed"));
@@ -636,7 +625,7 @@ impl HeaderSources {
                     let written = written.remove(&file);
                     let transport = written.as_ref().is_some_and(|items| {
                         items.iter().any(|syntax| {
-                            syntax.item.generated.is_some()
+                            syntax.item.implementation_bindings.is_some()
                                 || engine.adapters.lexer.is_none()
                                 || engine.adapters.parser.is_none()
                                 || !engine.indexed_sources.contains_key(&file)

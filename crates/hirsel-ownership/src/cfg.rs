@@ -132,7 +132,6 @@ pub(super) struct Graph {
     pub result_ty: Option<TypeId>,
     pub expressions: Vec<ExprId>,
     pub scoped: bool,
-    pub clause: Option<ExprId>,
     // Identities only: nested graphs read the current published capture row.
     pub captures: Vec<(NameSite, ResolvedName, usize)>,
     pub capture_modes: std::sync::Arc<super::source_rows::CaptureRows>,
@@ -458,7 +457,6 @@ pub(super) fn build(
     own: &Signature,
     body: &mut CheckedBody,
     capture_modes: &[CaptureMode],
-    clauses: &[(ExprId, TypeId)],
     results: &[(NameSite, TypeId)],
     rows: &super::source_rows::SourceRows,
 ) -> Result<Vec<Graph>, QueryError> {
@@ -492,23 +490,9 @@ pub(super) fn build(
         _ => Modes::global(),
     };
     let mut todo = vec![(root, NameSite::Item, root_modes, false, vec![])];
-    todo.extend(clauses.iter().map(|(root, _)| {
-        (
-            *root,
-            NameSite::Expression(*root),
-            Modes::global(),
-            false,
-            vec![],
-        )
-    }));
-    let mut clause_scopes: BTreeMap<_, _> = clauses
-        .iter()
-        .map(|(root, _)| (NameSite::Expression(*root), *root))
-        .collect();
     let mut graphs = vec![];
     while let Some((root, owner, mut result, scoped, captures)) = todo.pop() {
         result.relation = arenas.lifetime(&result.relation);
-        let clause = clause_scopes.get(&owner).copied();
         let result_ty = results
             .iter()
             .find(|(site, _)| *site == owner)
@@ -603,23 +587,6 @@ pub(super) fn build(
         // H keeps snapshot children in the declaring frame, while the clause
         // reads only their plain saved results. Check those children in the
         // frame's entry state, before the body can weaken parameter modes.
-        for snapshot in entry_snapshots(syntax, owner).into_iter().rev() {
-            let next = entry;
-            entry = reserve(
-                &mut nodes,
-                tree.expressions[snapshot.0 as usize].origin.span,
-            );
-            jobs.push(Job::Expr {
-                entry,
-                expression: snapshot,
-                context: Context::Read,
-                operation: snapshot,
-                escaping: false,
-                owning: false,
-                next,
-                env: env.clone(),
-            });
-        }
         while let Some(job) = jobs.pop() {
             match job {
                 Job::Expr {
@@ -820,19 +787,7 @@ pub(super) fn build(
                                 fresh: true,
                             }
                         }
-                        ExprKind::Before(_)
-                            if clauses
-                                .iter()
-                                .any(|(e, _)| owner == NameSite::Expression(*e)) =>
-                        {
-                            Op::Finish {
-                                expression,
-                                context,
-                                children: vec![],
-                                fresh: true,
-                            }
-                        }
-                        ExprKind::Before(value) | ExprKind::Comptime(value) => {
+                        ExprKind::Comptime(value) => {
                             children.push((*value, context, escaping, owning));
                             Op::Forward {
                                 expression,
@@ -1440,9 +1395,6 @@ pub(super) fn build(
                                     )
                                 })
                                 .collect();
-                            if let Some(root) = clause {
-                                clause_scopes.insert(NameSite::Expression(expression), root);
-                            }
                             todo.push((
                                 *closure_body,
                                 NameSite::Expression(expression),
@@ -1982,9 +1934,6 @@ pub(super) fn build(
                                         .collect()
                                 })
                                 .unwrap_or_default();
-                            if let Some(root) = clause {
-                                clause_scopes.insert(NameSite::Statement(statement), root);
-                            }
                             todo.push((
                                 *fn_body,
                                 NameSite::Statement(statement),
@@ -2008,7 +1957,6 @@ pub(super) fn build(
             result_ty,
             expressions,
             scoped,
-            clause,
             captures,
             capture_modes: capture_modes.clone(),
             lifetimes: std::sync::Arc::new(lifetimes),
@@ -2021,88 +1969,6 @@ pub(super) fn build(
     Ok(graphs)
 }
 
-fn entry_snapshots(syntax: &ItemSyntax, owner: NameSite) -> Vec<ExprId> {
-    let tree = &syntax.tree;
-    let signature = match owner {
-        NameSite::Item => match &syntax.item.kind {
-            ItemKind::Function { signature, .. } => Some(signature),
-            _ => None,
-        },
-        NameSite::Statement(id) => match &tree.statements[id.0 as usize].kind {
-            StmtKind::Function { signature, .. } => Some(signature),
-            _ => None,
-        },
-        NameSite::Expression(id) => match &tree.expressions[id.0 as usize].kind {
-            ExprKind::Closure { signature, .. } => Some(signature),
-            _ => None,
-        },
-        _ => None,
-    };
-    let mut pending: Vec<_> = signature
-        .into_iter()
-        .flat_map(|s| &s.contracts)
-        .map(|contract| contract.expression)
-        .collect();
-    let mut seen = BTreeSet::new();
-    let mut snapshots = vec![];
-    while let Some(id) = pending.pop() {
-        if !seen.insert(id) {
-            continue;
-        }
-        match &tree.expressions[id.0 as usize].kind {
-            ExprKind::Before(value) => snapshots.push(*value),
-            ExprKind::Tuple(values) | ExprKind::Sequence(values) => pending.extend(values),
-            ExprKind::Call { callee, arguments } => {
-                pending.push(*callee);
-                pending.extend(arguments.iter().map(|a| a.value));
-            }
-            ExprKind::Field { base, .. } => pending.push(*base),
-            ExprKind::Index { base, index } => pending.extend([*base, *index]),
-            ExprKind::Unary { value, .. }
-            | ExprKind::Try { value, .. }
-            | ExprKind::Comptime(value) => pending.push(*value),
-            ExprKind::Binary { left, right, .. } => pending.extend([*left, *right]),
-            ExprKind::If {
-                condition,
-                then_branch,
-                else_branch,
-            } => {
-                pending.extend([*condition, *then_branch]);
-                pending.extend(else_branch);
-            }
-            ExprKind::Match { value, arms } => {
-                pending.push(*value);
-                pending.extend(
-                    arms.iter()
-                        .flat_map(|a| a.guard.iter().chain(std::iter::once(&a.body))),
-                );
-            }
-            ExprKind::Return(value) | ExprKind::Break { value, .. } => pending.extend(value),
-            ExprKind::Block {
-                statements, tail, ..
-            } => {
-                pending.extend(tail);
-                for statement in statements {
-                    match &tree.statements[statement.0 as usize].kind {
-                        StmtKind::Let {
-                            value, otherwise, ..
-                        } => pending.extend(std::iter::once(*value).chain(*otherwise)),
-                        StmtKind::Expr(value) => pending.push(*value),
-                        StmtKind::Assign { place, value, .. } => pending.extend([*place, *value]),
-                        StmtKind::While {
-                            condition, body, ..
-                        } => pending.extend([*condition, *body]),
-                        StmtKind::For { source, body, .. } => pending.extend([*source, *body]),
-                        _ => (),
-                    }
-                }
-            }
-            _ => (), // Nested callable bodies have their own entry snapshots.
-        }
-    }
-    snapshots.sort_by_key(|id| tree.expressions[id.0 as usize].origin.span.start);
-    snapshots
-}
 // J proves structural bounds before I discovers sharing. A bare sendable
 // parameter also needs the argument's current root evidence at the call.
 fn sendable_parameter(

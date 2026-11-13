@@ -9,8 +9,8 @@ use crate::{
     FRONT_LOWER_KIND, FRONT_STORAGE_GRAPH_KIND, FrontBodyQueries, FrontCarry, FrontCheckPlan,
     FrontCheckQueries, FrontDemandAdmission, FrontDemandError, FrontDemandScope,
     FrontGrowthQueries, FrontInputFootprint, FrontLowerQueries, FrontNativeDefinitionInputs,
-    FrontRegistrationBootstrapError, FrontRunInputs, FrontStorageGraphQueries, FrontStorageQueries,
-    LowerCarry, QueryEngine, QueryError, ToolError, UnsafeFfiPackage,
+    FrontRunInputs, FrontStorageGraphQueries, FrontStorageQueries, LowerCarry, QueryEngine,
+    QueryError, ToolError, UnsafeFfiPackage,
 };
 use hirsel_engine_runtime::*;
 use hirsel_engine_store::{Domain, NoneStore, RequestStore, ResultStore};
@@ -535,7 +535,6 @@ impl SourcePlanner<'_> {
         let check_inventory = engine
             .front_check_input_bytes(
                 &contexts,
-                definitions,
                 self.selection.lint_package.as_ref(),
                 MemoryWeight::default(),
             )
@@ -598,12 +597,7 @@ fn plan_source(
         };
         // Ordinary catalogue capture can name specializations. Generated
         // declarations need their accepted views from bootstrap first.
-        let generated = match engine.front_generator_roots(&definitions) {
-            Ok(generators) => !generators.is_empty(),
-            Err(error) => return Err(engine_error(engine, error)),
-        };
-        let catalogue = if (shape.native || shape.ownership) && (!generated || namespace.is_some())
-        {
+        let catalogue = if shape.native || shape.ownership {
             let captured = match namespace {
                 Some(namespace) => {
                     engine.front_native_catalogue_inputs(namespace.lease(), limits.snapshot_bytes)
@@ -659,7 +653,6 @@ pub fn prepare_source_scope(
     policy: LoweringPolicy,
     stop_on_error: bool,
     shape: SourceShape,
-    jobs: Jobs,
     limits: RequestLimits,
     host: &dyn SourceHost,
     loading: &mut LoadingAdmission,
@@ -672,13 +665,10 @@ pub fn prepare_source_scope(
     // Headers this request produces are charged to its existing partition.
     engine.headers_hosted = true;
     let definitions = selected_definitions(engine)?;
-    let generators = engine
-        .front_generator_roots(&definitions)
-        .map_err(|error| engine_error(engine, error))?;
     let staged = engine
         .front_staged_roots(&definitions)
         .map_err(|error| engine_error(engine, error))?;
-    if generators.is_empty() && staged.is_empty() {
+    if staged.is_empty() {
         return Ok((None, limits));
     }
     let planned = plan_source(
@@ -707,13 +697,11 @@ pub fn prepare_source_scope(
         .demand_front_scope_with_policy(
             &definitions,
             roots,
-            &generators,
             policy,
             stop_on_error,
             FrontDemandAdmission {
                 carry: carry.map(|carry| carry.front.clone()),
                 lower_carry: carry.map(|carry| carry.lower.clone()),
-                jobs,
                 weight: plan.body,
                 max_reads: lower_reads(&definitions)?,
                 runtime,
@@ -775,14 +763,6 @@ pub fn install(
         Err(error) => return Err(loading.failed(error)),
     };
     let final_limits = limits;
-    let registrations = namespace.as_ref().map_or_else(Vec::new, |namespace| {
-        namespace.registrations.values().cloned().collect()
-    });
-    if (shape.run || shape.ownership) && namespace.is_none() {
-        if let Err(error) = engine.prepare_namespace_registrations(&registrations) {
-            return Err(loading.failed(engine_error(engine, error)));
-        }
-    }
     let namespace = match namespace {
         Some(capture) => {
             capture
@@ -790,11 +770,7 @@ pub fn install(
                 .map_err(|error| engine_error(engine, error))?;
             capture
         }
-        None => match engine.capture_namespace(
-            &definitions,
-            &registrations,
-            final_limits.snapshot_bytes,
-        ) {
+        None => match engine.capture_namespace(&definitions, final_limits.snapshot_bytes) {
             Ok(capture) => capture,
             Err(error) => return Err(loading.failed(engine_error(engine, error))),
         },
@@ -873,7 +849,7 @@ pub fn install(
             current_definitions.len()
         ))));
     }
-    let mut plan = planner.within(
+    let plan = planner.within(
         final_limits,
         engine,
         &definitions,
@@ -1216,7 +1192,6 @@ impl QueryEngine {
             LoweringPolicy::Comptime,
             false,
             shape,
-            jobs,
             limits,
             &BudgetHost(budget),
             &mut loading,
@@ -1333,7 +1308,7 @@ fn instance_bootstrap_error(
     errors: RuntimeErrors,
 ) -> ToolError {
     match error {
-        FrontDemandError::Generator(error) => bootstrap_error(engine, error),
+        FrontDemandError::Admission(error) => engine_error(engine, error),
         FrontDemandError::Front {
             reference,
             error,
@@ -1370,44 +1345,7 @@ fn instance_bootstrap_error(
             error,
             sources,
             owner,
-        } => language_error(error, hirsel_query_products::QueryKind::Generate, sources.retain_owner(owner)),
-    }
-}
-
-fn bootstrap_error(engine: &QueryEngine, error: FrontRegistrationBootstrapError) -> ToolError {
-    match error {
-        FrontRegistrationBootstrapError::Admission(error) => engine_error(engine, error),
-        FrontRegistrationBootstrapError::Runtime {
-            error,
-            sources,
-            owner,
-            ..
-        } => language_error(
-            error.unwrap_or_else(|| {
-                QueryError::Operational(hirsel_types::OperationalFailure {
-                    operation: "generator bootstrap".into(),
-                    message: "a generator task failed without a diagnostic".into(),
-                })
-            }),
-            hirsel_query_products::QueryKind::Generate,
-            sources.retain_owner(owner),
-        ),
-        FrontRegistrationBootstrapError::Acceptance(failure) => {
-            if failure.error == QueryError::NotImplemented {
-                ToolError::Unsupported {
-                    phase: hirsel_query_products::QueryKind::GeneratedRegistration,
-                    construct: failure.definition,
-                    span: failure.span,
-                    sources: failure.sources,
-                }
-            } else {
-                language_error(
-                    failure.error,
-                    hirsel_query_products::QueryKind::GeneratedRegistration,
-                    failure.sources,
-                )
-            }
-        }
+        } => language_error(error, hirsel_query_products::QueryKind::Check, sources.retain_owner(owner)),
     }
 }
 
@@ -1530,17 +1468,6 @@ pub fn selected_definitions(engine: &mut QueryEngine) -> Result<Vec<DefPath>, To
     Ok(indexed
         .into_iter()
         .chain(engine.front_source_roots())
-        .chain(
-            engine
-                .instance_bodies
-                .instances
-                .values()
-                .flat_map(|instances| {
-                    instances
-                        .values()
-                        .map(|instance| instance.definition.path().clone())
-                }),
-        )
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect())
@@ -1629,34 +1556,5 @@ mod tests {
                 .is_err()
         );
         assert_eq!(budget.reserved(), 0);
-    }
-
-    #[test]
-    fn unavailable_registration_reports_its_phase_declaration_and_source_location() {
-        let mut sources = SourceMap::default();
-        let file = sources
-            .add("todo-api.hir", "\nfn main() {}".into())
-            .unwrap();
-        let span = hirsel_span::Span::new(sources.file_anchor(file), 4, 8).unwrap();
-        let error = ToolError::Unsupported {
-            phase: hirsel_query_products::QueryKind::GeneratedRegistration,
-            construct: crate::DefId::intern(&crate::entry_path(&crate::default_context())),
-            span: Some(span),
-            sources: sources.clone(),
-        };
-        let missing = language_error(
-            QueryError::NotImplemented,
-            hirsel_query_products::QueryKind::Generate,
-            sources,
-        );
-        assert_eq!(
-            missing.to_string(),
-            "generated source evaluation: unsupported compiler query"
-        );
-        let error = retain_error(error, Arc::new(()));
-        assert_eq!(
-            error.to_string(),
-            "generated instance registration: unsupported declaration `standalone@0/main` at todo-api.hir:2:4"
-        );
     }
 }

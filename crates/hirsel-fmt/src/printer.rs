@@ -359,17 +359,6 @@ impl<'a> Printer<'a> {
         if let Some(u) = &sig.uses {
             ds.extend([Space, self.uses(u)?]);
         }
-        for c in &sig.contracts {
-            ds.push(nest(cat([
-                Line,
-                token(match c.kind {
-                    ContractKind::Requires => "requires",
-                    ContractKind::Ensures => "ensures",
-                }),
-                Space,
-                self.expr(c.expression, 0)?,
-            ])));
-        }
         Some(cat(ds))
     }
     fn result_accepts_uses(&self, id: TypeExprId) -> Option<bool> {
@@ -640,15 +629,12 @@ impl<'a> Printer<'a> {
                         ]);
                     }
                     TypeBody::Alias(t) => ds.extend([Space, token("="), Space, self.ty(*t)?]),
-                    TypeBody::Distinct { field, fact } => {
+                    TypeBody::Distinct { field } => {
                         ds.extend([
                             token("("),
                             self.field(field, true, AnalysisSite::Field(0))?,
                             token(")"),
                         ]);
-                        if let Some(e) = fact {
-                            ds.extend([Space, token("where"), Space, self.expr(*e, 0)?]);
-                        }
                     }
                     TypeBody::Opaque => {}
                 }
@@ -1278,14 +1264,9 @@ impl<'a> Printer<'a> {
                 cat(ds)
             }
             ExprKind::Continue(label) => cat([token("continue"), self.loop_label(*label, false)?]),
-            ExprKind::Shape(t) => cat([token("shape"), token("("), self.ty(*t)?, token(")")]),
-            ExprKind::Before(v) => {
-                cat([token("before"), token("("), self.expr(*v, 0)?, token(")")])
-            }
             ExprKind::Comptime(v) => cat([token("comptime"), Space, self.expr(*v, 11)?]),
             ExprKind::Heap => token("heap"),
             ExprKind::Formatter(_) => return None,
-            ExprKind::Result => token("result"),
             ExprKind::Todo(s) => {
                 let mut ds = vec![token("todo")];
                 if let Some(s) = s {

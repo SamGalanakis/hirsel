@@ -673,7 +673,7 @@ mod matrix {
             "pub opaque type Secret: data uses {} { x:u64, }\nfn get(s:Secret)->u64{s.x}\npub fn main()->u64{1}\n",
             "pub opaque type Secret: data uses {} { x:bool, }\nfn get(s:Secret)->u64{s.x}\npub fn main()->u64{1}\n",
             "fn missing()->u64{2}\npub fn main()->u64{missing()}\n",
-            "fn source()->String{\"fn(x:u64)->u64 uses {} {x+3}\"}\nfn body()->Result[Body[fn(u64)->u64 uses {}],String]{Ok(codegen.body(source()))}\nfn generated(x:u64)->u64 uses {} = comptime body()\npub fn main()->u64{generated(1)}\n",
+            "fn bumped(x:u64)->u64 uses {} {x+3}\npub fn main()->u64{bumped(1)}\n",
             "\n\nfn bad(x:u64)->u64{x}\npub fn main()->u64{bad(true)}\n",
             "pub fn main()->u64{8}\n",
         ];

@@ -48,7 +48,6 @@ fn callback(f: &mut Fixture, guarantee: Guarantee, promised: bool) -> FunctionTy
         allocation: Allocation::MayAllocate,
         authority: AuthoritySummary::Unknown,
         uses: Uses::Unrestricted,
-        contracts: vec![].into(),
         state_promises: if matches!(guarantee, Guarantee::AdvanceOnly) && promised {
             vec![StatePromise {
                 selector: ParameterRef::bound(ParamId(0)).into(),
@@ -282,7 +281,6 @@ fn header(parameters: Vec<(PassingMode, TypeId)>, result: TypeId) -> FunctionTyp
         allocation: Allocation::MayAllocate,
         authority: AuthoritySummary::Unknown,
         uses: Uses::Unrestricted,
-        contracts: vec![].into(),
         state_promises: vec![].into(),
         incomplete: false,
         foreign: None,

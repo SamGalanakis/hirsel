@@ -172,8 +172,7 @@ impl FrontCheckScope {
         entry: &DefPath,
     ) -> Result<CheckedProducts, QueryError> {
         let input = self.checked_product_input(headers, entry)?;
-        Ok(CheckedProductEncoder::new(&input)?
-            .finish(self.reads().clone(), headers.registrations().to_vec()))
+        Ok(CheckedProductEncoder::new(&input)?.finish(self.reads().clone()))
     }
 
     /// CheckedProducts' canonical input has all headers, only demanded bodies
@@ -303,29 +302,13 @@ fn receipt_input_failure(kind: &str, path: &DefPath, error: QueryError) -> Query
 impl FrontCheckScope {
     /// Receipt read-key maps and digest-part buffers, after canonical text is
     /// separately admitted. No key encoder or allocation runs during inspection.
-    pub(crate) fn receipt_finish_bytes(
-        &self,
-        headers: &FrontCheckedSignatures,
-        _canonical: usize,
-    ) -> Result<u64, QueryError> {
+    pub(crate) fn receipt_finish_bytes(&self, _canonical: usize) -> Result<u64, QueryError> {
         let missing = || QueryError::NotImplemented;
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(receipt_owner_bytes().ok_or_else(missing)?);
         weight.tree::<DefPath, Arc<Reads>>(self.reads().len());
         weight.tree::<DefPath, BTreeMap<Vec<u8>, ContentHash>>(self.reads().len());
-        let mut parts = 1usize
-            .checked_add(headers.registrations().len())
-            .ok_or_else(missing)?;
-        for registration in headers.registrations() {
-            weight.add(registration.len());
-        }
-        weight.add(
-            headers
-                .registrations()
-                .len()
-                .checked_mul(size_of::<Vec<u8>>())
-                .ok_or_else(missing)?,
-        );
+        let mut parts = 1usize;
         for (path, reads) in self.reads() {
             weight.path(path);
             weight.tree::<Vec<u8>, ContentHash>(reads.len());

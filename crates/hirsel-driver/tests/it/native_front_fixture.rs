@@ -104,9 +104,9 @@ pub(super) fn products(
             continue;
         }
         let file = engine
-            .generated_source(path)
-            .map(|generated| engine.sources.resolve(generated.site).file)
-            .or_else(|| engine.sources.anchor(syntax.anchor).map(|(file, _)| file))
+            .sources
+            .anchor(syntax.anchor)
+            .map(|(file, _)| file)
             .ok_or(QueryError::NotImplemented)?;
         files.insert(file, path.0.modules.clone());
     }

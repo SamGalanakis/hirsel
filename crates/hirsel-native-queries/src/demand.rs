@@ -15,7 +15,7 @@ use hirsel_lir::{
     products::LayoutClosure,
     validate::{Inputs, NativeEnvironment},
 };
-use hirsel_rc::instance::{InstanceId, Instances, SelectionRead};
+use hirsel_rc::instance::{InstanceId, Instances};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 mod seal_equations;
@@ -130,7 +130,6 @@ struct Discovery {
     seal_demand: hirsel_rc::seal_demand::equations::LocalDemandEquations,
     callees: Vec<hirsel_rc::arena_credit::equations::Function>,
     requests: Vec<Request>,
-    selection_reads: Vec<SelectionRead>,
     constant_reads: Vec<hirsel_syntax::DefPath>,
     templates: super::optimizer::TemplateFacts,
     operation_freedom: hirsel_rc::closure_calls::OperationFreedom,
@@ -225,7 +224,6 @@ impl std::fmt::Debug for InstanceBodyFacts {
 #[derive(Clone)]
 pub struct InstanceSourceFacts {
     pub ready_source: ReadySourceFacts,
-    pub selection_reads: Vec<SelectionRead>,
     pub constant_reads: Vec<hirsel_syntax::DefPath>,
     pub discharge: super::discharge::NativeDischargeFacts,
     _owner: Option<Arc<hirsel_engine_admission::MemoryReservation>>,
@@ -258,14 +256,12 @@ impl PartialEq for InstanceSourceFacts {
     fn eq(&self, other: &Self) -> bool {
         let Self {
             ready_source,
-            selection_reads,
             constant_reads,
             discharge,
             _owner: _,
             _window: _,
         } = self;
         ready_source == &other.ready_source
-            && selection_reads == &other.selection_reads
             && constant_reads == &other.constant_reads
             && discharge == &other.discharge
     }
@@ -275,7 +271,6 @@ impl std::fmt::Debug for InstanceSourceFacts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InstanceSourceFacts")
             .field("ready_source", &self.ready_source)
-            .field("selection_reads", &self.selection_reads)
             .field("constant_reads", &self.constant_reads)
             .field("discharge", &self.discharge)
             .finish()
@@ -336,30 +331,12 @@ impl InstanceFacts {
 }
 impl InstanceSourceFacts {
     fn packed(mut self) -> Self {
-        self.selection_reads.shrink_to_fit();
-        for read in &mut self.selection_reads {
-            if let Some(arguments) = &mut read.arguments {
-                arguments.shrink_to_fit();
-                for argument in arguments {
-                    argument.shrink_to_fit();
-                }
-            }
-        }
         self.constant_reads.shrink_to_fit();
         self
     }
     fn retained_metadata_bytes(&self) -> u64 {
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<Self>() + 2 * size_of::<usize>());
-        weight.vec(&self.selection_reads, |w, read| {
-            w.path(&read.declaration);
-            if let Some(arguments) = &read.arguments {
-                w.vec(arguments, |w, argument| w.add(argument.capacity()));
-            }
-            if let Some(path) = &read.selected {
-                w.path(path);
-            }
-        });
         weight.vec(&self.constant_reads, |w, path| w.path(path));
         weight
             .bytes()
@@ -517,13 +494,10 @@ impl DemandInstances {
             .queries
             .candidate(key)
             .and_then(|product| self.descriptor(key, &product).ok());
-        let reads = previous
-            .as_ref()
-            .map_or(&[][..], |d| d.selection_reads.as_slice());
         let constants = previous
             .as_ref()
             .map_or(&[][..], |d| d.constant_reads.as_slice());
-        let action = self.action(source, request, options, reads, constants)?;
+        let action = self.action(source, request, options, constants)?;
         serde_json::to_vec(&(request, action.0)).map_err(|e| e.to_string())
     }
     /// Current original receipt profiles paired with the caller's independent
@@ -993,7 +967,6 @@ impl DemandInstances {
         inputs: &impl NativeSourceProvider,
         request: &Request,
         options: &hirsel_native::Options,
-        selection_reads: &[SelectionRead],
         constant_reads: &[hirsel_syntax::DefPath],
     ) -> Result<Action, String> {
         let declarations = inputs.declarations();
@@ -1056,15 +1029,11 @@ impl DemandInstances {
             receipts,
             options.flat_walk,
             format!("{:?}", options.discharge.sites(&request.key.definition)),
-            selection_reads
-                .iter()
-                .map(|read| read.current(&declarations.program.instance_bodies))
-                .collect::<Vec<_>>(),
             constants,
         ))
         .map_err(|e| e.to_string())?;
         Ok(Action(ContentHash::of_parts(
-            "hirsel.native.demand-import-action.v16",
+            "hirsel.native.demand-import-action.v17",
             [bytes.as_slice()],
         )))
     }
@@ -1094,10 +1063,6 @@ impl DemandInstances {
                 .any(|w| w[0].key.encoding >= w[1].key.encoding)
             || discovery.callees.windows(2).any(|w| w[0] >= w[1])
             || discovery.constant_reads.windows(2).any(|w| w[0] >= w[1])
-            || discovery.selection_reads.iter().any(|read| !read.valid())
-            || discovery.selection_reads.windows(2).any(|w| {
-                (&w[0].declaration, &w[0].arguments) >= (&w[1].declaration, &w[1].arguments)
-            })
         {
             return Err("noncanonical native discovery".into());
         }
@@ -1127,7 +1092,6 @@ impl DemandInstances {
                 source: Arc::new(
                     InstanceSourceFacts {
                         ready_source,
-                        selection_reads: discovery.selection_reads,
                         constant_reads: discovery.constant_reads,
                         discharge: discovery.discharge,
                         _owner: self.retained_owner.clone(),
@@ -1276,13 +1240,10 @@ impl DemandInstances {
             .queries
             .candidate(key)
             .and_then(|product| self.descriptor(key, &product).ok());
-        let selection_reads = previous
-            .as_ref()
-            .map_or(&[][..], |record| record.selection_reads.as_slice());
         let constant_reads = previous
             .as_ref()
             .map_or(&[][..], |record| record.constant_reads.as_slice());
-        let action = self.action(inputs, &request, options, selection_reads, constant_reads)?;
+        let action = self.action(inputs, &request, options, constant_reads)?;
         if request.receipt_roots.is_none()
             && previous.is_some()
             && let Some(output) = self.completed.get(key.instance.encoding())
@@ -1565,7 +1526,6 @@ impl DemandInstances {
             .collect::<Vec<_>>();
         callees.sort();
         callees.dedup();
-        let selection_reads = instances.selection_reads();
         let mut constant_reads = unit
             .instructions
             .iter()
@@ -1582,7 +1542,7 @@ impl DemandInstances {
             .collect::<Vec<_>>();
         constant_reads.sort();
         constant_reads.dedup();
-        let action = self.action(inputs, &request, options, &selection_reads, &constant_reads)?;
+        let action = self.action(inputs, &request, options, &constant_reads)?;
         let finalizers = hirsel_rc::cleanup::Finalizers::planned(&instances, &table);
         let reached_finalizers = finalizers.reached(&unit, &table);
         let templates = super::optimizer::TemplateFacts::of(
@@ -1602,7 +1562,6 @@ impl DemandInstances {
                 )?,
                 callees,
                 requests,
-                selection_reads,
                 constant_reads,
                 templates,
                 operation_freedom: hirsel_rc::closure_calls::OperationFreedom::extract(

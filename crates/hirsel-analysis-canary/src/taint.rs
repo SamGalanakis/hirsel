@@ -49,8 +49,7 @@ pub fn analyze(export: &Export) -> Vec<Finding> {
                             }
                             InstructionKind::Replace {
                                 destination, value, ..
-                            }
-                            | InstructionKind::Snapshot { destination, value } => {
+                            } => {
                                 flows.push((
                                     vec![operand_root(body, value)],
                                     root(body, *destination),

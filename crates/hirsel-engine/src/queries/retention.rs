@@ -156,18 +156,6 @@ impl QueryEngine {
         if self.retention != Retention::Batch || !self.s1.is_empty() {
             return Ok(false);
         }
-        // Generated analyzed syntax contains the generated body; the indexed
-        // declaration still contains `= comptime ...`. Until token evidence is
-        // retained independently, use the original analyzed-syntax path.
-        if self.generated.contains_key(path)
-            || self
-                .items
-                .get(path)
-                .and_then(|items| items.first())
-                .is_some_and(|syntax| generation::generator(syntax).is_some())
-        {
-            return Ok(false);
-        }
         let id = DefId::intern(path);
         let receipt = self.lower_receipts.get(&id).cloned().or_else(|| {
             self.lowered.get(&id).map(|entry| {

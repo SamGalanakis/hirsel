@@ -304,8 +304,6 @@ impl Checker<'_, '_> {
             && want.allocation == Allocation::MayAllocate
             && have.state_promises.is_empty()
             && want.state_promises.is_empty()
-            && have.contracts.is_empty()
-            && want.contracts.is_empty()
             && !have.incomplete
             && !want.incomplete
             && have.foreign.is_none()
@@ -338,7 +336,6 @@ impl Checker<'_, '_> {
             && want.allocation == Allocation::MayAllocate
             && want.uses == Uses::Unrestricted
             && want.state_promises.is_empty()
-            && want.contracts.is_empty()
             && want.foreign.is_none()
             && self.types.row(expected).modes.multiplicity == Multiplicity::Many
             && self.types.row(expected).modes.uniqueness == Uniqueness::Aliased
@@ -1387,7 +1384,6 @@ impl Checker<'_, '_> {
             },
             authority,
             uses,
-            contracts: vec![].into(),
             incomplete: s
                 .attributes
                 .iter()
@@ -2329,7 +2325,6 @@ fn builtin(name: &str) -> Option<BuiltinType> {
         "Atomic" => Atomic,
         "Ptr" => Ptr,
         "FnPtr" => FnPtr,
-        "TypeShape" => TypeShape,
         _ => return None,
     })
 }

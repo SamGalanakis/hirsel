@@ -367,11 +367,6 @@ impl DeclarationFile {
     }
 }
 
-/// A CT-5 instance's generated item (`instance$<hash>`, generation.rs): its
-/// own source, never indexed, so making one leaves the module input alone.
-fn generated(path: &DefPath) -> bool {
-    path.0.name.starts_with("instance$")
-}
 /// Where an item stands: its file, the file's path and its anchor's base.
 fn place(sources: &SourceMap, syntax: &ItemSyntax) -> (FileId, std::path::PathBuf, u32) {
     let (file, base) = sources
@@ -556,7 +551,7 @@ impl DeclarationIndex {
     pub(crate) fn paths(&self) -> impl Iterator<Item = &DefPath> {
         self.rows.keys().map(|id| id.path())
     }
-    /// Index every item afresh, except generated instances.
+    /// Index every ordinary item afresh.
     pub(crate) fn rebuild(
         &mut self,
         items: &BTreeMap<DefPath, Vec<Arc<ItemSyntax>>>,
@@ -570,7 +565,7 @@ impl DeclarationIndex {
             ..Self::default()
         };
         let mut files: BTreeMap<FileId, Vec<Arc<ItemSyntax>>> = BTreeMap::new();
-        for (path, candidates) in items.iter().filter(|(path, _)| !generated(path)) {
+        for (path, candidates) in items {
             for candidate in candidates {
                 files
                     .entry(place(sources, candidate).0)

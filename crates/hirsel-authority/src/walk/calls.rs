@@ -1658,8 +1658,7 @@ impl Checker<'_> {
                     // frame was created. Parameters and calls may derive new
                     // capability values inside it; their operation's input
                     // authority is checked by provision, not as ambient uses.
-                    let ambient = if self.in_clause
-                        || matches!(frame.owner, NameSite::Item)
+                    let ambient = if matches!(frame.owner, NameSite::Item)
                         || transparent && receipt_required == AuthoritySummary::Unknown
                     {
                         receipt_required.clone()
@@ -1685,8 +1684,7 @@ impl Checker<'_> {
                     // authorized Seal parameter. Prove the actual input values,
                     // never a type-level Dir <= Seal relation. Environment
                     // authority required beyond those inputs remains ambient.
-                    let derived_inputs = !self.in_clause
-                        && required != AuthoritySummary::Unknown
+                    let derived_inputs = required != AuthoritySummary::Unknown
                         && matches!(frame.owner, NameSite::Item)
                         && arguments
                             .iter()
@@ -2060,7 +2058,6 @@ impl Checker<'_> {
                     ..
                 }
                 | ExprKind::Comptime(_)
-                | ExprKind::Shape(_)
                 | ExprKind::Heap
                 | ExprKind::Todo(_)
                 | ExprKind::Error => return false,
@@ -2089,16 +2086,7 @@ impl Checker<'_> {
                     // checks a fact (FACT-2) calls that check.
                     let constructor = self
                         .call_row(e)
-                        .is_some_and(|call| matches!(call.target, CallTarget::Constructor(_)))
-                        && !row.is_some_and(|row| match &row.kind {
-                            TypeKind::Named { definition, .. } => {
-                                self.read(*definition).is_none_or(|signature| {
-                                    !matches!(&signature.kind,
-                                        SignatureKind::Type(d) if d.fact.is_none())
-                                })
-                            }
-                            _ => false,
-                        });
+                        .is_some_and(|call| matches!(call.target, CallTarget::Constructor(_)));
                     let noalloc = self
                         .out
                         .call_allocations
@@ -3765,11 +3753,8 @@ impl Checker<'_> {
                 *a = a.clone().join(self.authority(p.ty));
             }
         }
-        self.frames.last_mut().unwrap().allowed = if self.in_clause {
-            Uses::Only(AuthoritySummary::inert())
-        } else {
-            allowed.map(Uses::Only).unwrap_or(Uses::Unrestricted)
-        };
+        self.frames.last_mut().unwrap().allowed =
+            allowed.map(Uses::Only).unwrap_or(Uses::Unrestricted);
         let temporaries = self.temporaries.len();
         self.expr(
             body,
@@ -3796,9 +3781,6 @@ impl Checker<'_> {
         // are code of their own, which this proof does not read.
         let proves_noalloc = expected_function.is_none()
             && matches!(owner, NameSite::Expression(_))
-            && syntax
-                .as_ref()
-                .is_some_and(|signature| signature.contracts.is_empty())
             && f.allocation == Allocation::MayAllocate
             && self.noalloc_evidence(&owner, body);
         if proves_noalloc {

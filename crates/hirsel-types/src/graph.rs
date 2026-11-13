@@ -96,32 +96,6 @@ impl TypeKind {
         }
     }
 }
-/// CT-3: a compile-time-only value type: a `TypeShape` or a core `Body`.
-pub fn compile_time_only(kind: &TypeKind) -> bool {
-    match kind {
-        TypeKind::Builtin { kind, .. } => *kind == BuiltinType::TypeShape,
-        TypeKind::Named { definition, .. } => definition.is_core("Body"),
-        _ => false,
-    }
-}
-/// Whether `ty` reaches a compile-time-only type through its complete graph,
-/// type arguments and callable headers included; nominal representations are
-/// their declarations' own.
-pub fn mentions_compile_time_only(store: &TypeInterner, ty: TypeId) -> bool {
-    let mut seen = IdSet::default();
-    let mut pending = vec![ty];
-    while let Some(ty) = pending.pop() {
-        if !seen.insert(ty) {
-            continue;
-        }
-        let Some(row) = store.get(ty) else { continue };
-        if compile_time_only(&row.kind) {
-            return true;
-        }
-        pending.extend(row.kind.graph_edges().into_iter().map(|e| e.ty));
-    }
-    false
-}
 /// Whether `ty` names a generic type or size parameter anywhere in its graph.
 pub fn mentions_parameter(store: &TypeInterner, ty: TypeId) -> bool {
     let mut seen = IdSet::default();

@@ -72,12 +72,6 @@
       ]
     },
     {
-      "path": "bytes.hir",
-      "module": [
-        "bytes"
-      ]
-    },
-    {
       "path": "time.hir",
       "module": [
         "time"
@@ -120,18 +114,6 @@
       ]
     },
     {
-      "path": "u8.hir",
-      "module": [
-        "u8"
-      ]
-    },
-    {
-      "path": "u8_ops.hir",
-      "module": [
-        "u8"
-      ]
-    },
-    {
       "path": "u64.hir",
       "module": [
         "u64"
@@ -153,12 +135,6 @@
       "path": "u128_ops.hir",
       "module": [
         "u128"
-      ]
-    },
-    {
-      "path": "f32.hir",
-      "module": [
-        "f32"
       ]
     },
     {
@@ -245,12 +221,6 @@
       ]
     },
     {
-      "path": "sha256.hir",
-      "module": [
-        "sha256"
-      ]
-    },
-    {
       "path": "unicode_properties.hir",
       "module": [
         "unicode"
@@ -260,18 +230,6 @@
       "path": "unicode_property_tables.hir",
       "module": [
         "unicode"
-      ]
-    },
-    {
-      "path": "hex.hir",
-      "module": [
-        "hex"
-      ]
-    },
-    {
-      "path": "keys.hir",
-      "module": [
-        "keys"
       ]
     },
     {
@@ -312,18 +270,6 @@
       ]
     },
     {
-      "path": "siphash.hir",
-      "module": [
-        "siphash"
-      ]
-    },
-    {
-      "path": "derive.hir",
-      "module": [
-        "derive"
-      ]
-    },
-    {
       "path": "hpack_tables.hir",
       "module": [
         "hpack"
@@ -333,18 +279,6 @@
       "path": "markdown_tables.hir",
       "module": [
         "markdown"
-      ]
-    },
-    {
-      "path": "ordered_map.hir",
-      "module": [
-        "ordered_map"
-      ]
-    },
-    {
-      "path": "schema.hir",
-      "module": [
-        "schema"
       ]
     },
     {
@@ -362,18 +296,6 @@
       ]
     },
     {
-      "path": "schema_derive.hir",
-      "module": [
-        "derive"
-      ]
-    },
-    {
-      "path": "schema_structural.hir",
-      "module": [
-        "schema"
-      ]
-    },
-    {
       "path": "substring.hir",
       "module": [
         "internal",
@@ -381,34 +303,10 @@
       ]
     },
     {
-      "path": "schema_checked.hir",
-      "module": [
-        "schema"
-      ]
-    },
-    {
-      "path": "schema_evolution.hir",
-      "module": [
-        "schema_evolution"
-      ]
-    },
-    {
       "path": "internal/curve25519_table.hir",
       "module": [
         "internal",
         "curve25519_table"
-      ]
-    },
-    {
-      "path": "bool.hir",
-      "module": [
-        "bool"
-      ]
-    },
-    {
-      "path": "digest.hir",
-      "module": [
-        "digest"
       ]
     }
   ],

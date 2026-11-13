@@ -380,9 +380,7 @@ fn forms(
             })
             .collect());
     }
-    if !matches!(kind, ObligationKind::Check | ObligationKind::Ensures)
-        && !(kind == ObligationKind::FailureEdge && sem1)
-    {
+    if kind != ObligationKind::Check && !(kind == ObligationKind::FailureEdge && sem1) {
         return Err(format!(
             "no removal form for a {} {} obligation",
             obligation.id.rule,

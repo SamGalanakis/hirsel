@@ -10,8 +10,6 @@ fn codec.encode_payload[T: serializable](value: T) -> Bytes
 fn codec.decode_payload[T: serializable](sample: Option[T], data: Bytes) -> unique Result[T, DecodeError]
 
 // CT-3
-fn type_shape.info[T](s: TypeShape[T]) -> ShapeInfo
-fn codegen.body[F](text: String) -> Body[F]
 
 // CAP-1/2/4, LANG-9, CONC-3
 N fn io.stdin(rt: Io) -> Result[Stdin, GrantError]

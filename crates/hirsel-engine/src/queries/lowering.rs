@@ -129,7 +129,7 @@ impl QueryEngine {
             };
             parsed.value.items.iter().all(|syntax| {
                 let item = &syntax.item;
-                !generation::executable(syntax)
+                !staging::executable(syntax)
                     || self
                         .lowered
                         .contains_key(&hirsel_syntax::DefId::intern(&item.definition))

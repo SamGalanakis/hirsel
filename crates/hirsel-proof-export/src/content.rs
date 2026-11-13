@@ -593,7 +593,6 @@ mod tests {
                         signature_hash: ContentHash([3; 32]),
                         bodies: vec![],
                         entry: BodyId(0),
-                        contracts: vec![],
                     })),
                 },
                 DefinitionContent::Named {

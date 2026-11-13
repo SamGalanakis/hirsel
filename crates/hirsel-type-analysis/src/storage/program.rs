@@ -717,7 +717,7 @@ impl Program<'_> {
         let selected = (self.select)(declaration, &actuals.arguments);
         // Key only tests closedness. Exact full argument rows remain the
         // context identity; CT5 key equivalence never erases their port modes.
-        hirsel_types::generated_actual_key(self.types, &actuals.arguments)?;
+        hirsel_types::closed_actual_key(self.types, &actuals.arguments)?;
         let selected = selected?;
         let body = *self.definitions.get(&selected)?;
         let mut bindings = ActualBindings::new();
@@ -1275,7 +1275,7 @@ impl Program<'_> {
                                     // Materialized constants are closed global values. Never
                                     // close a forged open code leaf in a caller context: it
                                     // has no original call edge for the growth preflight.
-                                    if hirsel_types::generated_actual_key(
+                                    if hirsel_types::closed_actual_key(
                                         self.types,
                                         &reference.arguments,
                                     )

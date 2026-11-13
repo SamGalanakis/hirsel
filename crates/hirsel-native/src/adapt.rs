@@ -101,7 +101,6 @@ pub fn program(validated: &ValidatedNativeInput) -> Program {
             .collect(),
         requirements: input.instances.edges.iter().map(requirement).collect(),
         owners,
-        instance_bodies: input.instance_bodies.clone(),
         constants: input.constants.clone(),
     }
 }

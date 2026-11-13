@@ -175,7 +175,6 @@ impl Checker<'_, '_> {
                             | BuiltinType::FnPtr
                             | BuiltinType::SlotId
                             | BuiltinType::Region
-                            | BuiltinType::TypeShape
                     ) {
                         continue;
                     }
@@ -276,7 +275,6 @@ impl Checker<'_, '_> {
                 signatures: self.signatures,
                 declarations: self.declarations,
                 scratch: self.scratch,
-                contract: self.contract,
                 site: Site {
                     body: BodyId(id),
                     block: None,

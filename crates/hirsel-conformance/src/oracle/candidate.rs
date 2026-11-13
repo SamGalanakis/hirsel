@@ -298,8 +298,6 @@ pub fn matrix_cell(root: &Path, config: &Config, work: &Path, exe: &Path) -> Res
         "signature-public",
         "definition-add",
         "definition-remove",
-        "generator-helper-body",
-        "reflected-helper-lookup",
         "secondary-diagnostic-site",
         "duplicate-insert-file",
         "duplicate-remove-file",
@@ -390,9 +388,7 @@ fn eight_candidates(
     let original = format!(
         "{}\ntype Secret {{ level:u64 }}\nfn view(x:Secret)->u64{{x.level}}\n\
         fn missing_user()->u64{{formerly_missing()}}\n\
-        fn source()->String{{\"fn(x: u64) -> u64 uses {{}} {{ x + 1 }}\"}}\n\
-        fn body_text()->Result[Body[fn(u64)->u64 uses {{}}],String]{{Ok(codegen.body(source()))}}\n\
-        fn bumped(n:u64)->u64 uses {{}} = comptime body_text()\n",
+        fn bumped(x:u64)->u64 uses {{}} {{ x + 1 }}\n",
         scenario.before["main.hir"]
     );
     std::fs::write(before.join("main.hir"), &original).map_err(|e| e.to_string())?;
@@ -409,7 +405,7 @@ fn eight_candidates(
             .replace("level:u64", "level:u32")
             .replace("view(x:Secret)->u64", "view(x:Secret)->u32"),
         format!("{original}\nfn formerly_missing()->u64{{9}}\n"),
-        original.replace("x + 1 }\"", "x + 5 }\""),
+        original.replace("x + 1 }", "x + 5 }"),
         original
             .replace(
                 "fn callee(x: u64)",

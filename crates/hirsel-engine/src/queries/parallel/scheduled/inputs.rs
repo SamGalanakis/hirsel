@@ -16,11 +16,6 @@ impl PartialEq for Input {
             && self.implementation == other.implementation
             && self.key == other.key
             && self.weight == other.weight
-            && match (&self.registration, &other.registration) {
-                (None, None) => true,
-                (Some(previous), Some(current)) => Arc::ptr_eq(previous, current),
-                _ => false,
-            }
     }
 }
 impl Inputs {

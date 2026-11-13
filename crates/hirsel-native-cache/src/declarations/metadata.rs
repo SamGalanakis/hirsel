@@ -77,7 +77,6 @@ impl NativeDeclarations {
         w.packed_map(&mut program.owners.containers, |w, _, value| {
             w.representation(value)
         });
-        w.instance_bodies(&mut program.instance_bodies);
         w.packed_map(&mut context.sources, |w, path, source| {
             w.path(path);
             w.flat_vec(&source.entry_parameters);

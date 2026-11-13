@@ -8,7 +8,6 @@ pub(super) mod evidence;
 mod inputs;
 mod inspection;
 mod reads;
-mod registration;
 mod staged;
 pub(super) mod staged_runtime;
 use super::*;
@@ -31,10 +30,6 @@ use hirsel_syntax::PackageId;
 use hirsel_tir::{DefinitionRef, Materialized, MaterializedRef};
 use inputs::Inputs;
 pub use inspection::FrontLowerDependencies;
-pub(in crate::queries) use registration::Data as GeneratorResult;
-pub use registration::{
-    FRONT_REGISTRATION_KIND, FrontRegistrationOutput, FrontRegistrationQueries,
-};
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
@@ -49,7 +44,7 @@ const FAILURE: Domain = Domain {
 };
 const LOWER_DESCRIPTOR: Domain = Domain {
     kind: 0x4600_0006,
-    schema: 10,
+    schema: 11,
 };
 // Ordinary immutable substitution bytes, owned by the selected provider like
 // the original body archive. Inspectors decode under their working allowance.
@@ -59,7 +54,7 @@ const LOWER_MATERIALIZED: Domain = Domain {
 };
 const CONSTANT_DESCRIPTOR: Domain = Domain {
     kind: 0x4600_0007,
-    schema: 6,
+    schema: 7,
 };
 const LOWER_VERIFICATION: Domain = Domain {
     kind: 0x4600_0033,
@@ -477,17 +472,14 @@ struct ForwardedLower {
     alias: Result<ProductRef, Reference>,
 }
 pub struct FrontLowerQueries {
-    demand: std::sync::OnceLock<std::sync::Weak<generation::demand::DemandProducer>>,
-    demand_owner: Mutex<Option<Arc<generation::demand::DemandProducer>>>,
+    demand: std::sync::OnceLock<std::sync::Weak<staging::demand::DemandProducer>>,
+    demand_owner: Mutex<Option<Arc<staging::demand::DemandProducer>>>,
     forwarded: Mutex<BTreeMap<(u32, ContentHash), ForwardedLower>>,
     namespace: Arc<NamespaceCapture>,
     inputs: Inputs,
     waiting: Mutex<inputs::Waiting>,
-    generator: Option<(DefId, Span)>,
     staged: staged::Staged,
     paths: inputs::Paths,
-    /// Every namespace registration validated through this owner's observer.
-    registrations_admitted: std::sync::OnceLock<()>,
     /// Implementation hashes of the opaque types a lowered body can read the
     /// private representation of: its LayoutBody inputs.
     layouts: Arc<inputs::Shared<BTreeMap<DefId, ContentHash>>>,
@@ -548,19 +540,19 @@ impl FrontLowerQueries {
     }
     pub(crate) fn bind_demand(
         self: &Arc<Self>,
-        demand: &Arc<generation::demand::DemandProducer>,
+        demand: &Arc<staging::demand::DemandProducer>,
     ) -> Result<(), QueryError> {
         self.front.bind_demand(demand)?;
         let _ = self.demand.set(Arc::downgrade(demand));
         Ok(())
     }
-    pub(crate) fn keep_demand(&self, demand: Arc<generation::demand::DemandProducer>) {
+    pub(crate) fn keep_demand(&self, demand: Arc<staging::demand::DemandProducer>) {
         *self.demand_owner.lock().unwrap_or_else(|e| e.into_inner()) = Some(demand);
     }
     pub(crate) fn owns_query(&self, id: QueryId) -> bool {
         self.path(id).is_some()
     }
-    fn demand_producer(&self) -> Option<Arc<generation::demand::DemandProducer>> {
+    fn demand_producer(&self) -> Option<Arc<staging::demand::DemandProducer>> {
         if self.namespace.consumers_admitted() {
             return None;
         }
@@ -1046,205 +1038,6 @@ impl FrontLowerQueries {
                 })
             })
             .collect()
-    }
-    pub fn settled_instance(
-        &self,
-        path: &DefPath,
-        arguments: &[hirsel_types::GenericArgument],
-    ) -> Result<Option<DefPath>, QueryError> {
-        self.namespace
-            .instances
-            .resolve(
-                DefId::intern(path),
-                self.namespace.snapshot.types(),
-                arguments,
-            )
-            .map(|selected| selected.map(|id| id.path().clone()))
-    }
-
-    pub(crate) fn instance_definitions(&self) -> impl Iterator<Item = &DefPath> {
-        self.namespace
-            .instances
-            .instances
-            .values()
-            .flat_map(|instances| instances.values())
-            .map(|instance| instance.definition.path())
-    }
-
-    /// Close CT-5 calls through generic helpers using this view's settled
-    /// summaries and instance table. Unlike source registration, Run cannot
-    /// create a missing instance or execute its generator.
-    pub(crate) fn selected_instances(
-        &self,
-        roots: impl IntoIterator<Item = DefPath>,
-        limit: u64,
-    ) -> Result<BTreeSet<DefPath>, QueryError> {
-        self.selected_instances_with(roots, limit, |path| Ok(self.front.checked_definition(path)))
-    }
-    pub(crate) fn selected_instances_for_check(
-        &self,
-        roots: impl IntoIterator<Item = DefPath>,
-        limit: u64,
-        cx: &mut dyn QueryContext,
-    ) -> Result<BTreeSet<DefPath>, QueryError> {
-        self.selected_instances_with(roots, limit, |path| {
-            let query = self.front.query(path).ok_or(QueryError::NotImplemented)?;
-            let selected = cx.read(query);
-            if let Some(product) = self.front.checked(selected.clone()) {
-                return Ok(Some(product));
-            }
-            Err(self
-                .front
-                .completed_error(path)
-                .or_else(|| {
-                    selected
-                        .err()
-                        .and_then(|reference| self.front.runtime_error(reference))
-                })
-                .unwrap_or(QueryError::NotImplemented))
-        })
-    }
-    fn selected_instances_with(
-        &self,
-        roots: impl IntoIterator<Item = DefPath>,
-        limit: u64,
-        mut checked: impl FnMut(&DefPath) -> Result<Option<FrontCheckedOutput>, QueryError>,
-    ) -> Result<BTreeSet<DefPath>, QueryError> {
-        if self.namespace.instances.declarations.is_empty() {
-            return Ok(BTreeSet::new());
-        }
-        let refused = || {
-            QueryError::Operational(hirsel_types::OperationalFailure {
-                operation: "Run instance selection".into(),
-                message: "closed instance selection exceeds admission or lacks a settled summary"
-                    .into(),
-            })
-        };
-        let mut pending: Vec<_> = roots
-            .into_iter()
-            .map(|p| (DefId::intern(&p), BTreeMap::new(), DefId::intern(&p)))
-            .collect();
-        let mut seen = BTreeSet::new();
-        let mut selected = BTreeSet::new();
-        let mut work = hirsel_query_products::retained::MetadataWeight::default();
-        work.flat_vec(&pending);
-        while let Some((path, bindings, root)) = pending.pop() {
-            let key: Vec<_> = bindings
-                .iter()
-                .map(
-                    |(site, actuals): (&hirsel_types::SiteRef, &hirsel_types::Actuals)| {
-                        (
-                            *site,
-                            hirsel_tir::InstanceBodies::key(
-                                self.namespace.snapshot.types(),
-                                &actuals.arguments,
-                            ),
-                        )
-                    },
-                )
-                .collect();
-            work.flat_vec(&key);
-            if !seen.insert((path, key)) {
-                continue;
-            }
-            work.add(
-                size_of::<(
-                    DefId,
-                    Vec<(
-                        hirsel_types::SiteRef,
-                        Option<hirsel_types::GeneratedActualKey>,
-                    )>,
-                )>() + 16 * size_of::<usize>(),
-            );
-            if seen.len() > 65536 || work.bytes() > limit {
-                return Err(refused());
-            }
-            if !self.inputs.contains_key(path.path())
-                || self.namespace.instances.declarations.contains(&path)
-                || !self
-                    .namespace
-                    .bodies
-                    .get(&path)
-                    .is_some_and(|body| body.executable)
-            {
-                continue;
-            }
-            let product = checked(path.path())?.ok_or_else(|| {
-                self.front.completed_error(path.path()).unwrap_or_else(|| {
-                    QueryError::Operational(hirsel_types::OperationalFailure {
-                        operation: "Run instance selection".into(),
-                        message: format!("{} has no settled summary", path.path()),
-                    })
-                })
-            })?;
-            let summary = &product.summary.summary;
-            if bindings.is_empty() && summary.frames[0].generic {
-                continue;
-            }
-            for call in summary
-                .calls
-                .iter()
-                .filter(|call| call.target_frame.is_none())
-            {
-                if !self.inputs.contains_key(call.callee.path()) {
-                    continue;
-                }
-                let actuals = hirsel_types::close_arguments(
-                    self.namespace.snapshot.types(),
-                    &self.memo,
-                    &call.arguments,
-                    &bindings,
-                )
-                .map_err(|_| refused())?;
-                let closed = hirsel_tir::InstanceBodies::key(
-                    self.namespace.snapshot.types(),
-                    &actuals.arguments,
-                )
-                .is_some();
-                let next = if self.namespace.instances.declarations.contains(&call.callee) {
-                    if !closed {
-                        continue;
-                    }
-                    let instance = self
-                        .namespace
-                        .instances
-                        .resolve(
-                            call.callee,
-                            self.namespace.snapshot.types(),
-                            &actuals.arguments,
-                        )
-                        .inspect_err(|_| self.front.require_discovery(root.path()))?
-                        .ok_or_else(refused)?;
-                    if !selected.contains(instance.path()) {
-                        work.tree::<DefPath, ()>(0);
-                        work.path(instance.path());
-                        if work.bytes() > limit {
-                            return Err(refused());
-                        }
-                        selected.insert(instance.path().clone());
-                    }
-                    (instance, BTreeMap::new())
-                } else if actuals.arguments.is_empty() {
-                    (call.callee, BTreeMap::new())
-                } else if closed {
-                    (call.callee, BTreeMap::from([(call.binder, actuals)]))
-                } else {
-                    continue;
-                };
-                // Bound all visited and queued cursor allocations cumulatively;
-                // released cursors never grant extra space to this walk.
-                work.add(size_of_val(&next) + size_of::<DefId>() + 16 * size_of::<usize>());
-                work.tree::<hirsel_types::SiteRef, hirsel_types::Actuals>(next.1.len());
-                for actuals in next.1.values() {
-                    work.flat_vec(&actuals.arguments);
-                }
-                if work.bytes() > limit {
-                    return Err(refused());
-                }
-                pending.push((next.0, next.1, root));
-            }
-        }
-        Ok(selected)
     }
 
     pub fn work(&self, path: &DefPath) -> FrontLowerWork {
@@ -1901,12 +1694,6 @@ impl FrontLowerQueries {
                 [
                     key.0.0.as_slice(),
                     key.1.0.as_slice(),
-                    self.manifest_for_outcome(id, &outcome.reads)
-                        .ok_or(self.errors.resource)?
-                        .output
-                        .0
-                        .0
-                        .as_slice(),
                     domain.kind.to_le_bytes().as_slice(),
                     domain.schema.to_le_bytes().as_slice(),
                 ],
@@ -2171,16 +1958,6 @@ impl FrontLowerQueries {
                     .map_err(|_| source.refused(self.protocol_refusal()))?,
             );
         }
-        if let Some(registration) = self.front.registration(path) {
-            source
-                .evidence
-                .borrow_mut()
-                .dependency(true, registration.acceptance());
-            source
-                .depth
-                .borrow_mut()
-                .observe_transparent(registration.depth());
-        }
         // As a materialization of the checked body, Lower also depends on the
         // private shapes that body read, beyond their representation digests.
         for (read, _) in body.outcome.reads.iter() {
@@ -2427,7 +2204,7 @@ impl FrontLowerQueries {
             [
                 key.0.0.as_slice(),
                 key.1.0.as_slice(),
-                self.namespace.manifest.0.as_slice(),
+                self.namespace.identity().0.as_slice(),
                 id.kind.to_le_bytes().as_slice(),
             ],
         ))
@@ -2450,7 +2227,7 @@ impl FrontLowerQueries {
             outcome.depth.evidence(),
             outcome.executed,
             outcome.selections.clone(),
-            self.namespace.manifest,
+            self.namespace.identity(),
         );
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of_val(&metadata) + size_of::<LowerCharge>() + 8 * size_of::<usize>());
@@ -2572,7 +2349,7 @@ impl FrontLowerQueries {
                             outcome.depth.evidence(),
                             outcome.executed,
                             outcome.selections.clone(),
-                            self.namespace.manifest,
+                            self.namespace.identity(),
                         ),
                         domain: Domain {
                             kind: 0x4600_0041,
@@ -2632,7 +2409,7 @@ impl FrontLowerOutput {
 
 struct Factory {
     owner: Arc<FrontLowerQueries>,
-    _demand: Option<Arc<generation::demand::DemandProducer>>,
+    _demand: Option<Arc<staging::demand::DemandProducer>>,
 }
 impl LocalQueryFactory for Factory {
     fn weight(&self, id: QueryId) -> Result<MemoryWeight, Reference> {
@@ -2907,16 +2684,6 @@ impl Source<'_> {
     }
     fn value(&self, path: &DefPath, kind: u32, site: Span) -> Result<Value, QueryError> {
         let owner = self.active_owner();
-        if kind == FRONT_LOWER_KIND
-            && let Some((generator, site)) = owner.generator
-            && generator.path() == path
-        {
-            return Err(QueryError::Diagnostics(vec![Diagnostic::error(
-                const { RuleId::of("CT-4") },
-                site,
-                "compile-time dependency cycle: this generator runs its own declaration",
-            )]));
-        }
         let id = owner.id(path, kind).ok_or_else(|| {
             QueryError::Operational(hirsel_types::OperationalFailure {
                 operation: "Lower dependency".into(),
@@ -3165,68 +2932,6 @@ impl s1::DependencySource for Source<'_> {
             reads: Reads::empty(),
         }
     }
-    fn instance_body(
-        &mut self,
-        path: &DefPath,
-        arguments: &[hirsel_types::GenericArgument],
-    ) -> s1::DependencyProduct<Option<DefPath>> {
-        let previous = self.capture();
-        let active = self.active_owner();
-        let result = if let Some(producer) = active.demand_producer() {
-            match producer.demand(
-                &previous,
-                path,
-                arguments,
-                previous
-                    .syntax(path)
-                    .map_or(Span::default(), |syntax| syntax.item.name_span),
-                self.reads.clone(),
-            ) {
-                Ok(product) => {
-                    if let Err(error) = &product.result {
-                        if let Ok(failure) = producer.demand_failure(
-                            path,
-                            &previous,
-                            error.clone(),
-                            product.reads.clone(),
-                        ) {
-                            *self.diagnostic_sources.borrow_mut() = Some(failure.sources);
-                        }
-                    }
-                    let joined = self.join(product.successor);
-                    self.merge(&product.reads);
-                    joined.and(product.result)
-                }
-                Err(error) => {
-                    if let Ok(failure) =
-                        producer.demand_failure(path, &previous, error.clone(), Reads::empty())
-                    {
-                        *self.diagnostic_sources.borrow_mut() = Some(failure.sources);
-                    }
-                    Err(error)
-                }
-            }
-        } else {
-            let resolved = active.namespace.instances.resolve(
-                DefId::intern(path),
-                active.namespace.snapshot.types(),
-                arguments,
-            );
-            if resolved.is_err()
-                && hirsel_tir::InstanceBodies::key(active.namespace.snapshot.types(), arguments)
-                    .is_some()
-            {
-                active.front.require_discovery(self.root.path());
-            }
-            resolved.map(|selected| selected.map(|id| id.path().clone()))
-        };
-        let successor = self.successor_since(&previous);
-        s1::DependencyProduct {
-            successor: successor.as_ref().ok().and_then(Clone::clone),
-            result: successor.and(result),
-            reads: Reads::empty(),
-        }
-    }
 }
 /// The dictionary declaration's field evaluations, which take only the
 /// evaluated value.
@@ -3386,6 +3091,7 @@ impl crate::materialized::MaterializationSource for Materializer<'_, '_> {
 impl QueryEngine {
     /// Capture input identities and immutable phase handles. This does no body
     /// checking, lowering or interpretation, and never calls the S1 controller.
+    #[allow(clippy::too_many_arguments)]
     pub fn front_lower_queries(
         &mut self,
         definitions: &[DefPath],
@@ -3395,46 +3101,12 @@ impl QueryEngine {
         request: &Arc<hirsel_engine_admission::ProcessBudget>,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontLowerQueries>, QueryError> {
-        self.front_lower_queries_in_generator(
-            definitions,
-            front,
-            weight,
-            max_reads,
-            request,
-            errors,
-            None,
-        )
-    }
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn front_lower_queries_in_generator(
-        &mut self,
-        definitions: &[DefPath],
-        front: Arc<FrontBodyQueries>,
-        weight: MemoryWeight,
-        max_reads: usize,
-        request: &Arc<hirsel_engine_admission::ProcessBudget>,
-        errors: RuntimeErrors,
-        generator: Option<(DefId, Span)>,
-    ) -> Result<Arc<FrontLowerQueries>, QueryError> {
         front.namespace().require_environment(self)?;
-        let pending = generator.is_none()
-            && !front.namespace().consumers_admitted()
+        let pending = !front.namespace().consumers_admitted()
             && !self.bootstrap_active
-            && (!self.front_staged_roots(definitions)?.is_empty()
-                || !front.namespace().instances.declarations.is_empty()
-                || definitions.iter().any(|path| {
-                    front
-                        .namespace()
-                        .bodies
-                        .get(&DefId::intern(path))
-                        .is_some_and(|body| body.generated)
-                        && !front
-                            .namespace()
-                            .registrations
-                            .contains_key(&DefId::intern(path))
-                }));
+            && !self.front_staged_roots(definitions)?.is_empty();
         let demand_admission = if pending {
-            Some(generation::demand::DemandAdmission {
+            Some(staging::demand::DemandAdmission {
                 carry: None,
                 lower_carry: None,
                 request: request.clone(),
@@ -3450,11 +3122,10 @@ impl QueryEngine {
             max_reads,
             &partition,
             errors,
-            generator,
             None,
         )?;
         if let Some(admission) = demand_admission {
-            generation::demand::DemandProducer::new(
+            staging::demand::DemandProducer::new(
                 self,
                 lower.clone(),
                 admission,
@@ -3474,7 +3145,6 @@ impl QueryEngine {
         max_reads: usize,
         partition: &LowerPartition,
         errors: RuntimeErrors,
-        generator: Option<(DefId, Span)>,
         previous: Option<&FrontLowerQueries>,
     ) -> Result<Arc<FrontLowerQueries>, QueryError> {
         front.namespace().require_environment(self)?;
@@ -3523,9 +3193,6 @@ impl QueryEngine {
         for path in definitions {
             if front.query(path).is_none() {
                 return Err(refuse(format!("missing Front query for {path}")));
-            }
-            if let Some(accepted) = front.registration(path) {
-                accepted.validate(self)?;
             }
             front
                 .namespace()
@@ -3611,10 +3278,8 @@ impl QueryEngine {
             source,
             inputs,
             waiting: Mutex::new(inputs::Waiting::new(partition, previous.is_none())),
-            generator,
             staged,
             paths,
-            registrations_admitted: std::sync::OnceLock::new(),
             layouts,
             front,
             namespace,

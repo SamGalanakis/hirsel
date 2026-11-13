@@ -48,8 +48,6 @@ fn codec.encode_payload[T: serializable](value: T) -> Bytes
 fn codec.decode_payload[T: serializable](sample: Option[T], data: Bytes) -> unique Result[T, DecodeError]
 
 // CT-3
-fn type_shape.info[T](s: TypeShape[T]) -> ShapeInfo
-fn codegen.body[F](text: String) -> Body[F]
 
 // CAP-1/2/4, LANG-9, CONC-3
 N fn io.stdin(rt: Io) -> Result[Stdin, GrantError]
@@ -1814,16 +1812,6 @@ stay in comparator order. Lookup and removal use the same fixed binary-search pr
 as insertion, completing comparisons before mutation. Comparator failure leaves the
 map unchanged. The existing sequence representation gives O(log n) comparisons and
 O(n) movement on successful removal; no second ordered container is introduced.
-
-`type_shape.info` reads a compile-time `TypeShape[T]` as the `ShapeInfo` data of
-[CT-3](compile-time.md#ct-3-shapes); its data types `ShapeInfo`, `ShapeVisibility`,
-`ShapeBody`, `FieldShape`, `VariantShape` and `PayloadShape` are root core types with the
-`copyable`, `data`, `key`, `inert` and `noalloc_drop` bounds. It runs only during
-compile-time evaluation and has no run-time implementation. `codegen.body` builds the
-opaque root core type `Body[F]` (bounds `copyable`, `inert` and `noalloc_drop`, no
-authority) that [generated bodies](compile-time.md#ct-5-generation) return; like a
-`TypeShape` it is compile-time only ([CT-3](compile-time.md#ct-3-shapes)) and has no
-run-time implementation.
 
 `codec.encode` and `codec.decode` use the [canonical codec](serialization.md#ser-2-canonical-codec).
 `DecodeError` is the nullary variant `Version | SchemaMismatch | Truncated |

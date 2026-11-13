@@ -119,9 +119,6 @@ impl Weight<'_> {
             tries,
             loops,
             functions,
-            shapes,
-            contracts,
-            facts,
             arm_fixes,
         } = value;
         self.vec(resource_patterns, |w, (_, types)| w.flat_vec(types));
@@ -174,15 +171,6 @@ impl Weight<'_> {
             }
         });
         self.flat_vec(functions);
-        self.flat_vec(shapes);
-        self.vec(contracts, |w, plan| {
-            w.flat_vec(&plan.snapshots);
-            w.flat_vec(&plan.parameters);
-        });
-        self.vec(facts, |w, plan| {
-            w.def_path(&plan.predicate);
-            w.flat_vec(&plan.arguments);
-        });
         self.vec(arm_fixes, |w, fix| {
             w.def_path(&fix.owner);
             w.add(fix.arm.capacity());

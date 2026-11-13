@@ -38,9 +38,8 @@ pub(crate) fn retained_lower_entry_bytes(
     weight.detail(&entry.detail);
     weight.flat_vec(&entry.covered);
     weight.vec(&entry.selections, |w, selection| {
-        if let crate::comptime::Selection::Staged(_, arguments) = selection {
-            w.flat_vec(arguments);
-        }
+        let crate::comptime::Selection::Staged(_, arguments) = selection;
+        w.flat_vec(arguments);
     });
     if let Some(depth) = &entry.depth {
         weight.add(size_of_val(&*depth.first));

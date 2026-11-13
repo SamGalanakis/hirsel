@@ -106,9 +106,6 @@ pub(super) struct Builder<'a, 'b> {
     pub format_destinations: BTreeMap<ExprId, Value>,
     cleanup_nodes: std::collections::HashMap<CleanupNode, CleanupNodeId>,
     cleanup_roots: std::collections::HashMap<Option<CleanupNodeId>, CleanupId>,
-    pub snapshots: Vec<(ExprId, PlaceId)>,
-    pub contract_result: Option<PlaceId>,
-    pub clauses: Vec<(ExprId, PlaceId)>,
     /// While binding one way an irrefutable pattern's alternatives match: the
     /// slot every way moves or copies each bound local into (LANG-13).
     pub joining: Option<BTreeMap<hirsel_types::LocalId, PlaceId>>,
@@ -183,9 +180,6 @@ impl<'a, 'b> Builder<'a, 'b> {
             format_destinations: BTreeMap::new(),
             cleanup_nodes: Default::default(),
             cleanup_roots: [(None, CleanupId(0))].into(),
-            snapshots: vec![],
-            contract_result: None,
-            clauses: vec![],
             joining: None,
         };
         this.current = Some(this.block(Span::default()));
@@ -1451,19 +1445,6 @@ impl<'a, 'b> Builder<'a, 'b> {
         span: Span,
         bodies: &mut Vec<Option<Body>>,
     ) -> Result<()> {
-        if self
-            .decisions
-            .contracts
-            .get(&self.owner)
-            .iter()
-            .copied()
-            .any(|c| c.owner == self.owner && c.kind == hirsel_syntax::ContractKind::Ensures)
-        {
-            value = self.transport(value, Storage::Temporary, span);
-            self.contract_result = Some(value.place);
-            self.exit_checks(bodies)?;
-            self.contract_result = None;
-        }
         // Return extracts first; its cleanup is the post-extraction state.
         let _ = self.loan(&mut value, span);
         let operand = self.consume(value);

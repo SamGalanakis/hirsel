@@ -3,8 +3,8 @@
 //! an ordinary item over its source item's syntax, so each later phase and
 //! engine sees ordinary declarations and direct calls.
 use hirsel_syntax::{
-    DefPath, ExprKind, Generated, GenericKind, GenericParam, ItemKind, ItemSyntax, Literal,
-    MemberDefinition, MemberSpec, TypeArgument, TypeBody, TypeExprKind, TypeFlavor,
+    DefPath, ExprKind, GenericKind, GenericParam, ItemKind, ItemSyntax, Literal, MemberDefinition,
+    MemberSpec, TypeArgument, TypeBody, TypeExprKind, TypeFlavor,
 };
 use std::sync::Arc;
 
@@ -128,7 +128,7 @@ pub(crate) fn specialization(
     // A closed instance may name its private implementation's associated aliases.
     syntax.item.visibility = hirsel_syntax::Visibility::Private;
     syntax.item.name = hirsel_intern::Symbol::intern(&path.0.name);
-    syntax.item.generated = Some(Generated::Specialization(
+    syntax.item.implementation_bindings = Some(
         bindings
             .iter()
             .map(|(binder, implementation)| {
@@ -138,7 +138,7 @@ pub(crate) fn specialization(
                 )
             })
             .collect(),
-    ));
+    );
     let sizes = |binder: &str, member: &str| {
         let (_, implementation) = implementations.iter().find(|(b, _)| b == binder)?;
         let ItemKind::Implementation { members, .. } = &implementation.as_ref()?.item.kind else {

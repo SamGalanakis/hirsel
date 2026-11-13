@@ -190,18 +190,6 @@ fn larger(a: u32, b: u32, by: Order[u32]) -> u32 {
 }
 ```
 
-### GEN-3: Reflection
-
-A type has a shape ([CT-3](compile-time.md#ct-3-shapes)) when it is a nominal record or
-variant declaration, or a transparent alias of one, and its representation is visible to
-the package that writes `shape(T)` ([PROG-2](programs.md#prog-2-visibility)). Scalars,
-tuples, function types, builtin collections, `distinct` types and aliases of any of these
-have none: `shape(T)` of one is GEN-3. A generic declaration has a shape at each concrete
-instance. `TypeShape[T]` carries no structural operation, and taking a shape adds no bound or
-operation to the shaped type. Generated function bodies read shapes
-([CT-5](compile-time.md#ct-5-generation)); generating declarations is reserved
-([reserved compile-time features](compile-time.md#reserved-for-future-compile-time-features)).
-
 ### GEN-4: Representation
 
 Generic code never boxes: `T` is laid out as `T` in every instantiation. Foreign functions
@@ -275,10 +263,7 @@ Members pair by name and kind; a missing, extra or wrong-kind member is GEN-6. E
 actual meets its member's bounds. Each operation target is instantiated from the header
 at the actuals and must stand where the header is specified: passing modes (OWN-1),
 types (GEN-6), allocation (MEM-5), authority within the header's (CAP-2), result
-relations (MODE-1), brands (PROV-1) and value modes (MODE-2). Contracts must be implied:
-a target may not require, nor a header ensure, anything the matcher cannot show (FACT-1);
-write an adapter function where implication cannot be shown. Every refusal names the
-member.
+relations (MODE-1), brands (PROV-1) and value modes (MODE-2). Every refusal names the member.
 
 Implementation binders appear only on top-level functions, after their ordinary
 generics. `H.T`, `H.n` and `H.op` name the binder's members; a size member used as a

@@ -740,18 +740,6 @@ pub(crate) fn load_program_inputs_with_source_index(
             .as_deref()
             .map(|products| (package, products))
     }));
-    engine.installed_instance_bodied = graph
-        .packages
-        .iter()
-        .filter_map(|(package, selected)| Some((package, selected.products.as_deref()?.names()?)))
-        .flat_map(|(package, names)| {
-            names
-                .paths(package)
-                .filter(|(_, facts)| facts.instance_bodied)
-                .map(|(path, _)| path)
-                .collect::<Vec<_>>()
-        })
-        .collect();
     let installed_names = {
         let previous = &engine.declarations.inputs().installed_names;
         graph

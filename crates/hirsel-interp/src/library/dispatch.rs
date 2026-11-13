@@ -2087,9 +2087,6 @@ primary_operations! { library, call, context, name, a, value;
         return super::codec::call(library, name, &call).map(Some);
     },
     Primitive: "codec.descriptor" | "codec.descriptor_digest" => super::codec::descriptor(name, &call)?,
-    Primitive: "type_shape.info" => super::shape::info(&call)?,
-    // Typed generation: a generated body is its text; only the compiler reads it.
-    Primitive: "codegen.body" => Value::String(text(arg(a, 0)?)?.to_owned()),
     Primitive: "$intrinsic.heap" => {
         if !a.is_empty() { return Err(invalid("heap operation arity")); }
         Value::Handle { kind: "$Heap".into(), id: 0 }
@@ -2952,7 +2949,6 @@ pub(super) fn encode_value(value: &Value) -> Vec<u8> {
             Atomic => 17,
             Ptr => 18,
             FnPtr => 19,
-            TypeShape => 20,
         }
     }
     fn size_bindings(out: &mut Vec<u8>, sizes: &[Option<u64>]) {

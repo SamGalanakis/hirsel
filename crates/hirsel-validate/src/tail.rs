@@ -139,7 +139,6 @@ pub(crate) fn verify_self_tail(
                         })
                     }
                     InstructionKind::Replace { value, .. }
-                    | InstructionKind::Snapshot { value, .. }
                     | InstructionKind::Check {
                         condition: value, ..
                     } => uses_root(value.place),
@@ -309,8 +308,7 @@ fn rvalue_operands(value: &Rvalue) -> Vec<&Operand> {
         Rvalue::Constant(_)
         | Rvalue::ReadConstant { .. }
         | Rvalue::FunctionReference { .. }
-        | Rvalue::Size(_)
-        | Rvalue::Shape(_) => vec![],
+        | Rvalue::Size(_) => vec![],
     }
 }
 
@@ -372,9 +370,6 @@ fn live_at_call(body: &ReadBody<'_>, target: BlockId) -> Option<BTreeSet<u32>> {
                     take(body, &mut live, value);
                     live.insert(body.places.get(destination.0 as usize)?.root.0);
                     live.insert(body.places.get(displaced.0 as usize)?.root.0);
-                }
-                InstructionKind::Snapshot { destination, .. } => {
-                    live.insert(body.places.get(destination.0 as usize)?.root.0);
                 }
                 InstructionKind::Drop { place, .. }
                 | InstructionKind::StorageDead { place, .. } => drop_place(body, &mut live, *place),
@@ -762,7 +757,6 @@ pub(crate) fn ordinary_constructor(reader: &crate::input::Reader<'_>, path: &Def
                 t.layout == hirsel_types::Layout::default()
                     && !t.distinct
                     && !t.resource
-                    && t.fact.is_none()
                     && t.capability.is_none()
                     && t.drop.is_none()
             }

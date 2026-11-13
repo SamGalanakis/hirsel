@@ -23,7 +23,6 @@ impl Heights {
             .iter()
             .map(|p| self.ty(p.ty))
             .chain(sig.result.map(|id| self.ty(id)))
-            .chain(sig.contracts.iter().map(|c| self.expr(c.expression)))
             .max()
             .unwrap_or(0)
     }
@@ -42,7 +41,6 @@ impl Heights {
             ExprKind::Index { base, index } => self.expr(*base).max(self.expr(*index)),
             ExprKind::Unary { value, .. }
             | ExprKind::Try { value, .. }
-            | ExprKind::Before(value)
             | ExprKind::Comptime(value) => self.expr(*value),
             ExprKind::Binary { left, right, .. } => self.expr(*left).max(self.expr(*right)),
             ExprKind::Block {
@@ -77,13 +75,11 @@ impl Heights {
             ExprKind::Return(value) | ExprKind::Break { value, .. } => {
                 value.map_or(0, |id| self.expr(id))
             }
-            ExprKind::Shape(id) => self.ty(*id),
             ExprKind::Literal(_)
             | ExprKind::Path(_)
             | ExprKind::Formatter(_)
             | ExprKind::Continue(_)
             | ExprKind::Heap
-            | ExprKind::Result
             | ExprKind::Todo(_)
             | ExprKind::Error => 0,
         };

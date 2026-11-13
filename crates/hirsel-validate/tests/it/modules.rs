@@ -11,7 +11,6 @@ mod cpu_closed;
 mod destructure_failure_order_17;
 mod generic_bound_22;
 mod generic_result_v_21;
-mod instance_controls;
 mod logical_depth_31;
 mod match_coverage_22;
 mod mode_proof_mutations_21;

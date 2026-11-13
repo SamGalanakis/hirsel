@@ -42,7 +42,7 @@ pub use cleanup::{CleanupLeaf, cleanup_summary, declared_cleanup, specialized_cl
 use hirsel_intern::Symbol;
 use hirsel_syntax::FileContext;
 pub use hirsel_syntax::{Bound, LexicalOwner, NameSite, PassingMode, SiteRef};
-use hirsel_syntax::{ContentHash, ContractKind, DefId, DefPath, ExprId, PatternId, TypeExprId};
+use hirsel_syntax::{ContentHash, DefId, DefPath, ExprId, PatternId, TypeExprId};
 pub use metadata::*;
 pub use properties::*;
 
@@ -401,7 +401,6 @@ pub enum BuiltinType {
     Atomic,
     Ptr,
     FnPtr,
-    TypeShape,
 }
 /// Semantic field; dependent sibling brands refer to its index (PROV-5).
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
@@ -531,14 +530,6 @@ pub struct Parameter {
     pub passing: PassingMode,
     pub ty: TypeId,
 }
-/// Signature-owned code identity. Contract code is queried with its owner and ordinal (FACT-1, CT-2).
-/// Hash includes resolved names and referenced signatures, excludes locations and arena IDs.
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct Contract {
-    pub kind: ContractKind,
-    pub ordinal: u32,
-    pub code_hash: ContentHash,
-}
 /// FFI declarations are trusted but explicit and monomorphic (PROG-4).
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ForeignContract {
@@ -598,7 +589,6 @@ pub struct FunctionType {
     pub allocation: Allocation,
     pub authority: AuthoritySummary,
     pub uses: Uses,
-    pub contracts: SharedSlice<Contract>,
     pub incomplete: bool,
     pub foreign: Option<ForeignContract>,
 }
@@ -721,7 +711,6 @@ pub struct TypeDefinition {
     pub distinct: bool,
     pub resource: bool,
     pub drop: Option<DefPath>,
-    pub fact: Option<Contract>,
     /// `@captures(fields)`: an erased carrier. Its value authority joins the
     /// declared summary with each value's own erased evidence (CAP-2, CLO-4).
     /// The selected representation field ordinals (a distinct type's field is

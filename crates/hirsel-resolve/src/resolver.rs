@@ -256,12 +256,10 @@ pub fn resolve_view(
         variants: VariantIndex::default(),
         next_local: 0,
         alternative_locals: Vec::new(),
-        generator_parameters: Vec::new(),
         callees: BTreeSet::new(),
         local_function_depth: 0,
         return_type: ExpectedType::Unknown,
         block_labels: Vec::new(),
-        contract_kind: None,
         exported: false,
         shaping: BTreeSet::new(),
         type_arguments: vec![],
@@ -316,7 +314,6 @@ struct Resolver<'a, P: ?Sized> {
     /// Each enclosing labelled block's expected type, for its break operands
     /// (LANG-11); a closure or local function starts empty.
     block_labels: Vec<(Symbol, ExpectedType)>,
-    contract_kind: Option<ContractKind>,
     exported: bool,
     shaping: BTreeSet<DefPath>,
     /// While shaping a same-file generic type: its parameters' arguments.
@@ -330,9 +327,6 @@ struct Resolver<'a, P: ?Sized> {
     /// While resolving a later alternative of an or-pattern: the locals the
     /// first alternative bound, and whether this alternative has bound each.
     alternative_locals: Vec<BTreeMap<Symbol, (LocalId, bool)>>,
-    /// While resolving a CT-5 generator: the generated function's declared
-    /// parameters, which name run-time values outside its closed frame.
-    generator_parameters: Vec<Symbol>,
 }
 
 impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
@@ -552,19 +546,6 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
                         d.primary = span;
                         d
                     }))
-            }
-            LookupError::Missing
-                if path.package.is_none()
-                    && matches!(&path.segments[..], [segment] if self.generator_parameters.contains(segment)) =>
-            {
-                self.diagnostic(
-                    const { RuleId::of("CT-2") },
-                    span,
-                    format!(
-                        "a generator reads no parameter: `{name}` is a run-time value of the \
-                         generated function"
-                    ),
-                )
             }
             LookupError::Missing => self.diagnostic(
                 const { RuleId::of("LANG-4") },
@@ -999,8 +980,8 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
             }
             None => return None,
         };
-        let implementation = match &self.syntax.item.generated {
-            Some(Generated::Specialization(bindings)) => bindings
+        let implementation = match &self.syntax.item.implementation_bindings {
+            Some(bindings) => bindings
                 .iter()
                 .find(|(name, _)| *name == parameter.name)
                 .map(|(_, implementation)| implementation.clone()),
@@ -1503,19 +1484,6 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
                 self.return_type = result.clone();
                 // CT-5: a generated body binds the declared parameters by its
                 // literal's names; the header and its contracts keep the declared ones.
-                if let Some(Generated::Body(names)) = &item.generated {
-                    let scope = self.scopes.last_mut().unwrap();
-                    let bindings: Vec<_> = signature
-                        .parameters
-                        .iter()
-                        .map(|p| p.name.and_then(|name| scope.values.remove(&name)))
-                        .collect();
-                    for (&(name, span), binding) in names.iter().zip(bindings) {
-                        if let (Some(name), Some(binding)) = (name, binding) {
-                            self.bind(name, Binding { span, ..binding });
-                        }
-                    }
-                }
                 if let Some(body) = body
                     && !matches!(self.view, ResolveView::Header)
                 {
@@ -1523,9 +1491,6 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
                 }
             }
             ItemKind::Const { ty, value } => {
-                if let Some(Generated::Generator(names)) = &item.generated {
-                    self.generator_parameters = names.clone();
-                }
                 let expected = self.type_expr(ty);
                 self.exported = false;
                 if !matches!(self.view, ResolveView::Header) {
@@ -1559,8 +1524,7 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
                 // declaration have no full path left to reach them by.
                 let spelling = self.spelling(item.name);
                 if !item.definition.package_is("core", "1")
-                    && (matches!(spelling.as_str(), "FnPtr" | "TypeShape")
-                        || primitive(&spelling).is_some())
+                    && (matches!(spelling.as_str(), "FnPtr") || primitive(&spelling).is_some())
                 {
                     self.diagnostic(const { RuleId::of("LANG-7") }, item.name_span,
                         &format!("type `{spelling}` conflicts with a builtin type name; choose a domain name for the type"));
@@ -1659,13 +1623,10 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
                     TypeBody::Alias(ty) => {
                         self.type_expr(ty);
                     }
-                    TypeBody::Distinct { field, fact } => {
+                    TypeBody::Distinct { field } => {
                         let expected = self.type_expr(field.ty);
                         self.exported = false;
                         self.local(field.name, field.origin.span, expected);
-                        if let Some(fact) = fact {
-                            self.expr(fact, ExpectedType::Unknown);
-                        }
                     }
                     TypeBody::Opaque => {}
                 }
@@ -1692,7 +1653,6 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
         span: Span,
         site: NameSite,
     ) -> ExpectedType {
-        let enclosing_contract = self.contract_kind.take();
         let origin = self.origin(site);
         let diagnostics_before = self.output.query.diagnostics.len();
         self.scopes.last_mut().unwrap().owner = Some(site.clone());
@@ -1753,11 +1713,6 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
         }
         let exported = self.exported;
         self.exported = false;
-        for contract in &signature.contracts {
-            self.contract_kind = Some(contract.kind);
-            self.expr(contract.expression, ExpectedType::Unknown);
-        }
-        self.contract_kind = enclosing_contract;
         self.exported = exported;
         // Signature normalization runs only after a valid resolved header. Keep
         // that suppression policy when reporting its label obligation here.
@@ -2774,28 +2729,6 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
             }
             // The body checker selects a formatter's operation (SEM-3).
             ExprKind::Formatter(_) => ExpectedType::Unknown,
-            ExprKind::Result => {
-                if self.contract_kind != Some(ContractKind::Ensures) {
-                    self.diagnostic(
-                        const { RuleId::of("FACT-1") },
-                        span,
-                        "result is available only inside ensures",
-                    );
-                }
-                expected
-            }
-            ExprKind::Before(value) => {
-                if self.contract_kind != Some(ContractKind::Ensures) {
-                    self.diagnostic(
-                        const { RuleId::of("FACT-1") },
-                        span,
-                        "before is available only inside ensures",
-                    );
-                    expected
-                } else {
-                    self.expr(value, expected)
-                }
-            }
             ExprKind::Tuple(elements) => {
                 let types = if let ExpectedType::Tuple(types) = expected {
                     types
@@ -2973,9 +2906,7 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
                 };
                 let old = std::mem::replace(&mut self.return_type, result.clone());
                 let labels = std::mem::take(&mut self.block_labels);
-                let enclosing_contract = self.contract_kind.take();
                 self.expr(body, result);
-                self.contract_kind = enclosing_contract;
                 self.block_labels = labels;
                 self.return_type = old;
                 self.local_function_depth -= 1;
@@ -2986,10 +2917,6 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
                 if let Some(value) = value {
                     self.expr(value, self.return_type.clone());
                 }
-                expected
-            }
-            ExprKind::Shape(ty) => {
-                self.type_expr(ty);
                 expected
             }
         }
@@ -3638,9 +3565,7 @@ impl<'a, P: SignatureProvider + ?Sized> Resolver<'a, P> {
                 );
                 let old = std::mem::replace(&mut self.return_type, result.clone());
                 let labels = std::mem::take(&mut self.block_labels);
-                let enclosing_contract = self.contract_kind.take();
                 self.expr(body, result.clone());
-                self.contract_kind = enclosing_contract;
                 self.block_labels = labels;
                 self.return_type = old;
                 self.local_function_depth -= 1;
@@ -4062,6 +3987,5 @@ fn native_type(path: &Path) -> bool {
                 | "Atomic"
                 | "Ptr"
                 | "FnPtr"
-                | "TypeShape"
         )
 }

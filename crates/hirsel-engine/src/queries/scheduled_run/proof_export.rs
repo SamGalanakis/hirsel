@@ -3,7 +3,7 @@
 //! source metadata is inspected only for the completed export closure.
 use super::*;
 use hirsel_proof_export::{Anchor, Annotation, ExportInput, Header, Location, Locator};
-use hirsel_syntax::{AnalysisSite, ItemKind, TypeBody};
+use hirsel_syntax::AnalysisSite;
 use std::rc::Rc;
 
 /// An immutable package export selection, retaining the exact ordinary source
@@ -284,11 +284,11 @@ impl FrontBuiltProof {
     /// Complete checked-product read maps and digest scratch, independent of
     /// the canonical text output allowance. PS9-only inputs cannot mint this.
     pub fn checked_products_bytes(&self) -> Result<u64, QueryError> {
-        let (scope, headers) = self
+        let (scope, _) = self
             .input
             .checked_receipt()
             .ok_or(QueryError::NotImplemented)?;
-        scope.receipt_finish_bytes(headers, self.encoded_bytes()?)
+        scope.receipt_finish_bytes(self.encoded_bytes()?)
     }
     pub fn checked_products_with_allowances(
         &self,
@@ -301,14 +301,14 @@ impl FrontBuiltProof {
                 "checked receipt read/digest buffers exceed admission",
             ));
         }
-        let (scope, headers) = self
+        let (scope, _) = self
             .input
             .checked_receipt()
             .ok_or(QueryError::NotImplemented)?;
         let encoded = self.encode_with_allowance(output)?;
         let (canonical, output_owner) = encoded.into_parts();
         let products = CheckedProductEncoder::from_canonical(canonical, self.export.types.clone())
-            .finish(scope.reads().clone(), headers.registrations().to_vec());
+            .finish(scope.reads().clone());
         let retained = products
             .receipt_retained_bytes()
             .ok_or(QueryError::NotImplemented)?;
@@ -392,8 +392,7 @@ impl FrontProofExport {
         let mut files = BTreeMap::new();
         let namespace = self.run.lower.capture();
         for path in closure {
-            let owner =
-                hirsel_check_protocol::fact::fact_owner(path).unwrap_or_else(|| path.clone());
+            let owner = path.clone();
             if !namespace.source_paths.contains(&DefId::intern(&owner)) {
                 continue;
             }
@@ -413,9 +412,8 @@ impl FrontProofExport {
                 .entry(path.clone())
                 .or_insert_with(Vec::new)
                 .push(file);
-            let own = hirsel_check_protocol::fact::fact_owner(path).is_none();
             let rows = annotations.entry(path.clone()).or_insert_with(Vec::new);
-            for a in syntax.tree.analyses.iter().filter(|_| own) {
+            for a in syntax.tree.analyses.iter() {
                 let anchor = match a.site {
                     AnalysisSite::Item => Anchor::Item,
                     AnalysisSite::Parameter(i) => Anchor::Parameter(i),
@@ -425,14 +423,8 @@ impl FrontProofExport {
                 rows.push((anchor, a.clone()));
             }
             match &syntax.item.kind {
-                _ if generation::executable(&syntax) => {
+                _ if staging::executable(&syntax) => {
                     executable.insert(path.clone());
-                }
-                ItemKind::Type {
-                    body: TypeBody::Distinct { fact: Some(_), .. },
-                    ..
-                } => {
-                    executable.insert(hirsel_check_protocol::fact::fact_path(&owner));
                 }
                 _ => {}
             }

@@ -76,7 +76,7 @@ impl Fixture {
                     body: None,
                     abi: None,
                 },
-                generated: None,
+                implementation_bindings: None,
             },
             tree: SyntaxTree::default(),
             anchor: fixture_anchor(),
@@ -562,7 +562,6 @@ pub fn function(parameters: Vec<hirsel_types::Parameter>, result: TypeId) -> Fun
         allocation: Allocation::MayAllocate,
         authority: AuthoritySummary::inert(),
         uses: Uses::Unrestricted,
-        contracts: vec![].into(),
         incomplete: false,
         foreign: None,
     }

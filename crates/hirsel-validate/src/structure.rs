@@ -59,31 +59,6 @@ pub(super) fn validate_bound(definition: &ReadDefinition<'_>, t: &TypeInterner) 
             );
         }
     }
-    let mut ordinals = BTreeSet::new();
-    for (ordinal, body) in &definition.contracts {
-        if !ordinals.insert(*ordinal) {
-            add(
-                None,
-                None,
-                None,
-                ViolationKind::Duplicate {
-                    entity: "contract",
-                    index: *ordinal,
-                },
-            );
-        }
-        if body.0 as usize >= definition.bodies.len() {
-            add(
-                None,
-                None,
-                None,
-                ViolationKind::InvalidId {
-                    arena: "body",
-                    index: body.0,
-                },
-            );
-        }
-    }
     for (bi, body) in definition.bodies.iter().enumerate() {
         let bid = Some(BodyId(bi as u32));
         let mut refs = Vec::new();
@@ -321,10 +296,6 @@ pub(super) fn validate_bound(definition: &ReadDefinition<'_>, t: &TypeInterner) 
                     InstructionKind::Check { condition, .. } => {
                         refs.push((block_id, ins, "place", condition.place.0))
                     }
-                    InstructionKind::Snapshot { destination, value } => {
-                        refs.push((block_id, ins, "place", destination.0));
-                        refs.push((block_id, ins, "place", value.place.0));
-                    }
                 }
             }
             for target in body.successors(&block.terminator) {
@@ -484,7 +455,6 @@ pub(super) fn validate_bound(definition: &ReadDefinition<'_>, t: &TypeInterner) 
             }
             match rvalue {
                 Rvalue::Closure { body, .. } => refs.push((None, None, "body", body.0)),
-                Rvalue::Shape(t) => type_roots.push(*t),
                 _ => (),
             }
         }
@@ -615,7 +585,6 @@ mod tests {
         for mutate in [
             |d: &mut Definition| d.entry = BodyId(9),
             |d: &mut Definition| d.caller_bodies = vec![BodyId(9)],
-            |d: &mut Definition| d.contracts = vec![(3, BodyId(9)), (3, BodyId(0))],
             |d: &mut Definition| d.bodies[0].entry = BlockId(9),
             |d: &mut Definition| d.bodies[0].parameters = vec![LocalId(0), LocalId(0), LocalId(9)],
             |d: &mut Definition| d.bodies[0].locals[0].storage = Storage::Capture,

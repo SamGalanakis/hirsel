@@ -1,22 +1,19 @@
-//! `GeneratedActualKey`: the CT-5 instance equivalence (design §1a, rule 4).
-//! It is main's key exactly, the CT-3 closed canonical spelling of each actual
-//! (modes and callable parameter names are not spelled, sizes are decimal),
-//! interned once so selection compares ids.
+//! Interned identity for ordinary closed type and size actuals.
+//! Type spellings omit modes and callable parameter names; sizes are decimal.
 use crate::*;
 use hirsel_intern::Symbol;
 use std::sync::Arc;
 
-/// Separates actuals in the interned key; no CT-3 spelling contains it, and
-/// it orders before every character, so keys order as main's spelling lists.
+/// Separates actual spellings; no canonical type spelling contains it.
 const SEPARATOR: char = '\u{0}';
 
-/// The interned closed spelling of a generated declaration's actuals. Eq and
-/// Hash compare ids; Ord compares the spellings, as main's `Vec<String>` keys.
+/// Interned closed generic actuals. Equality and hashing compare ids; ordering
+/// compares their canonical spellings.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct GeneratedActualKey(Symbol);
+pub struct ClosedActualKey(Symbol);
 
-impl GeneratedActualKey {
-    /// Each actual's spelling, in argument order, as main's key listed them.
+impl ClosedActualKey {
+    /// Each actual's spelling, in argument order.
     pub fn spellings(self) -> Vec<&'static str> {
         let text = self.0.as_str();
         if text.is_empty() {
@@ -25,16 +22,9 @@ impl GeneratedActualKey {
         text[1..].split(SEPARATOR).collect()
     }
 }
-impl GeneratedActualKey {
-    /// The generated instance's item name, as main spelled it:
-    /// `declaration[spelling, ...]`.
-    pub fn instance_name(self, declaration: &hirsel_syntax::DefPath) -> String {
-        format!("{}[{}]", declaration, self.spellings().join(", "))
-    }
-}
-impl std::fmt::Debug for GeneratedActualKey {
+impl std::fmt::Debug for ClosedActualKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("GeneratedActualKey")
+        f.debug_tuple("ClosedActualKey")
             .field(&self.spellings())
             .finish()
     }
@@ -42,10 +32,10 @@ impl std::fmt::Debug for GeneratedActualKey {
 
 /// The key of closed `arguments`; None when an argument still names a
 /// parameter. Each type's spelling is memoized per TypeId.
-pub fn generated_actual_key(
+pub fn closed_actual_key(
     t: &TypeInterner,
     arguments: &[GenericArgument],
-) -> Option<GeneratedActualKey> {
+) -> Option<ClosedActualKey> {
     let mut key = String::new();
     for argument in arguments {
         key.push(SEPARATOR);
@@ -55,10 +45,10 @@ pub fn generated_actual_key(
             GenericArgument::Size(Size::Parameter(_)) => return None,
         }
     }
-    Some(GeneratedActualKey(Symbol::intern(&key)))
+    Some(ClosedActualKey(Symbol::intern(&key)))
 }
 
-/// CT-3 closed spelling of `ty`, or None if it names a parameter or its
+/// Closed spelling of `ty`, or None if it names a parameter or its
 /// graph is invalid (a recovery row or a cycle has no instance).
 fn closed_spelling(t: &TypeInterner, ty: TypeId) -> Option<Arc<str>> {
     let compute = || {
@@ -73,7 +63,7 @@ fn closed_spelling(t: &TypeInterner, ty: TypeId) -> Option<Arc<str>> {
 }
 
 /// Persisted as the spellings, never as a session id.
-impl serde::Serialize for GeneratedActualKey {
+impl serde::Serialize for ClosedActualKey {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeSeq;
         let spellings = self.0.as_str().split(SEPARATOR).skip(1);
@@ -84,7 +74,7 @@ impl serde::Serialize for GeneratedActualKey {
         sequence.end()
     }
 }
-impl<'de> serde::Deserialize<'de> for GeneratedActualKey {
+impl<'de> serde::Deserialize<'de> for ClosedActualKey {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let spellings: Vec<String> = serde::Deserialize::deserialize(d)?;
         let mut key = String::new();
@@ -92,6 +82,6 @@ impl<'de> serde::Deserialize<'de> for GeneratedActualKey {
             key.push(SEPARATOR);
             key.push_str(&spelling);
         }
-        Ok(GeneratedActualKey(Symbol::intern(&key)))
+        Ok(ClosedActualKey(Symbol::intern(&key)))
     }
 }

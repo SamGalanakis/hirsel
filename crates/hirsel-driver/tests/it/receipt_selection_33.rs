@@ -7,14 +7,12 @@ use hirsel_native::receipt_source::provider::*;
 use hirsel_native::receipt_source::selection::*;
 use hirsel_rc::instance::{Actuals, key_of};
 use hirsel_rc::sealed_source::{SourceError, closed_storage_type};
-use hirsel_syntax::{DefId, DefPath};
-use hirsel_tir::InstanceBodies;
+use hirsel_syntax::DefPath;
 use hirsel_types::{GenericArgument, SignatureRef, TypeInterner, TypeMemo};
 use std::sync::Arc;
 
 struct Simulated<'a> {
     front: &'a Front<'a>,
-    catalogue: InstanceBodies,
     stale: Option<DefPath>,
 }
 impl Provider for Simulated<'_> {
@@ -33,17 +31,6 @@ impl Provider for Simulated<'_> {
     }
     fn original(&self, path: &DefPath) -> Result<Arc<NativeOriginalBody>, SourceError> {
         self.front.original(path)
-    }
-}
-impl SelectionProvider for Simulated<'_> {
-    fn selected_instance(
-        &self,
-        declaration: DefId,
-        arguments: &[GenericArgument],
-    ) -> Result<Option<DefId>, SourceError> {
-        self.catalogue
-            .resolve(declaration, self.types(), arguments)
-            .map_err(|error| SourceError::Type(format!("{error:?}")))
     }
 }
 
@@ -103,7 +90,6 @@ pub fn main()->u64 { wrap(7u64) }
         let root = base(&front, &path);
         let mut simulated = Simulated {
             front: &front,
-            catalogue: reader.instance_bodies().clone(),
             stale: None,
         };
         let block = call_block(&front, &root, &Actuals::none(), "wrap");
@@ -115,8 +101,6 @@ pub fn main()->u64 { wrap(7u64) }
             actual.source.demand().projection(),
             same.source.demand().projection()
         );
-        assert!(actual.selection.valid());
-        assert!(!actual.selection.generated);
         let [GenericArgument::Type(ty)] = actual.actuals.arguments.as_slice() else {
             panic!("one selected original type")
         };
@@ -198,53 +182,6 @@ pub fn main()->u64 { wrap(7u64) }
             Err(SourceError::Malformed(
                 "receipt direct-call source selector"
             ))
-        ));
-    });
-}
-
-#[test]
-fn original_generated_calls_select_the_current_ct5_body_and_refuse_missing_selection() {
-    with_compiler_stack(|| {
-        let (_engine, reader, path) = source(
-            r#"
-type Point { x:u64 }
-fn make[T](s:TypeShape[T])->Result[Body[fn(T)->u64 uses {}],String] {
-  Ok(codegen.body("fn(v: standalone@0/Point) -> u64 uses {} { v.x }"))
-}
-fn generated[T](v:T)->u64 uses {} = comptime make(shape(T))
-pub fn main()->u64 { generated(Point(x:7u64)) }
-"#,
-        );
-        let front = Front::new(&reader);
-        let root = base(&front, &path);
-        let block = call_block(&front, &root, &Actuals::none(), "generated");
-        let selected = direct(&front, &root, &Actuals::none(), block, &TypeMemo::new()).unwrap();
-        assert!(selected.selection.valid());
-        assert!(selected.selection.generated);
-        assert_eq!(
-            selected.selection.selected.as_ref(),
-            Some(selected.base.definition())
-        );
-        assert_ne!(selected.base.definition(), &selected.selection.declaration);
-        assert!(selected.actuals.arguments.is_empty());
-        assert_eq!(
-            selected.source.entry().reference().definition,
-            *selected.base.definition()
-        );
-        let mut simulated = Simulated {
-            front: &front,
-            catalogue: reader.instance_bodies().clone(),
-            stale: None,
-        };
-        let same = direct(&simulated, &root, &Actuals::none(), block, &TypeMemo::new()).unwrap();
-        assert_eq!(selected.base, same.base);
-        assert_eq!(selected.selection, same.selection);
-        assert_eq!(selected.source.entry(), same.source.entry());
-        let declaration = DefId::intern(&selected.selection.declaration);
-        simulated.catalogue.instances.remove(&declaration);
-        assert!(matches!(
-            direct(&simulated, &root, &Actuals::none(), block, &TypeMemo::new()),
-            Err(SourceError::Type(_))
         ));
     });
 }

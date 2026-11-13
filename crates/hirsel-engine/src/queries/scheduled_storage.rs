@@ -34,7 +34,6 @@ pub struct FrontStorageGraphOutput {
 pub struct FrontStorageGraphQueries {
     query: QueryId,
     definitions: Vec<DefId>,
-    instances: Box<[DefId]>,
     front: Arc<FrontBodyQueries>,
     growth: Arc<FrontGrowthQueries>,
     recipes: Arc<FrontStorageQueries>,
@@ -265,8 +264,7 @@ impl Task {
                 }
                 // Reviewed core recipes are independent. An instance body is
                 // selected through the immutable instance table at each use.
-                if path.0.package.name == "core" || owner.instances.contains(&DefId::intern(&path))
-                {
+                if path.0.package.name == "core" {
                     continue;
                 }
                 let Some(query) = owner.recipes.query(&path) else {
@@ -361,13 +359,11 @@ impl Task {
                             callee:
                                 StorageCallee::Apply {
                                     definition,
-                                    arguments,
+                                    arguments: _,
                                 },
                             ..
                         } => {
-                            if let Err(error) = self.reference(*definition, arguments) {
-                                return Err(owner.fail(error));
-                            }
+                            self.pending.insert(definition.path().clone());
                         }
                         StorageOp::Call {
                             callee: StorageCallee::Definition(definition),
@@ -380,20 +376,14 @@ impl Task {
                                 match value {
                                     StorageValue::Reference {
                                         definition,
-                                        arguments,
+                                        arguments: _,
                                     } => {
-                                        if let Err(error) = self.reference(*definition, arguments) {
-                                            return Err(owner.fail(error));
-                                        }
+                                        self.pending.insert(definition.path().clone());
                                     }
                                     StorageValue::Constant { code, .. } => {
                                         for reference in code {
-                                            if let Err(error) = self.reference(
-                                                reference.definition,
-                                                &reference.arguments,
-                                            ) {
-                                                return Err(owner.fail(error));
-                                            }
+                                            self.pending
+                                                .insert(reference.definition.path().clone());
                                         }
                                     }
                                     StorageValue::Callable { target, .. } => {
@@ -433,66 +423,12 @@ impl Task {
             ],
         );
     }
-    fn reference(
-        &mut self,
-        definition: DefId,
-        arguments: &[hirsel_types::GenericArgument],
-    ) -> Result<(), QueryError> {
-        self.pending.insert(definition.path().clone());
-        if definition.path().0.package.name == "core" || !self.owner.instances.contains(&definition)
-        {
-            return Ok(());
-        }
-        let signature = self.owner.lower.signature(definition.path())?;
-        let hirsel_types::SignatureKind::Function(function) = &signature.kind else {
-            return Ok(());
-        };
-        if function.generics.len() != arguments.len()
-            || !function.generics.iter().zip(arguments).all(|(p, a)| {
-                matches!(
-                    (p, a),
-                    (
-                        hirsel_types::GenericParameter::Type { .. },
-                        hirsel_types::GenericArgument::Type(_)
-                    ) | (
-                        hirsel_types::GenericParameter::Size { .. },
-                        hirsel_types::GenericArgument::Size(_)
-                    )
-                )
-            })
-        {
-            return Ok(());
-        }
-        if hirsel_tir::InstanceBodies::key(self.owner.lower.signatures().types(), arguments)
-            .is_none()
-        {
-            return Ok(());
-        }
-        let selected = self
-            .owner
-            .lower
-            .settled_instance(definition.path(), arguments)?
-            .ok_or_else(|| {
-                invalid(format!(
-                    "missing selected generated storage instance for {}",
-                    definition.path()
-                ))
-            })?;
-        self.pending.insert(selected);
-        Ok(())
-    }
     fn complete(&mut self) -> Result<ProductRef, QueryError> {
         let owner = &self.owner;
         let bodies = std::mem::take(&mut self.bodies)
             .into_values()
             .collect::<Vec<_>>();
-        let lower = owner.lower.clone();
-        let select = |definition: DefId, arguments: &[hirsel_types::GenericArgument]| {
-            lower
-                .settled_instance(definition.path(), arguments)
-                .ok()
-                .map(|selected| selected.map_or(definition, |p| DefId::intern(&p)))
-        };
+        let select = |definition: DefId, _: &[hirsel_types::GenericArgument]| Some(definition);
         owner.executions.fetch_add(1, Relaxed);
         let (profiles, diagnostics) =
             crate::storage_graph::finish(owner.lower.signatures().types(), &select, bodies)?;
@@ -601,18 +537,6 @@ impl QueryEngine {
             .reserve(inventory)
             .map_err(|_| invalid("source storage inventory exceeds the request footprint"))?;
         let outputs = request.clone();
-        let instances = definitions
-            .iter()
-            .filter(|p| {
-                front
-                    .namespace()
-                    .instances
-                    .declarations
-                    .contains(&DefId::intern(p))
-            })
-            .map(DefId::intern)
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
         let store = self
             .result_store
             .clone()
@@ -631,7 +555,6 @@ impl QueryEngine {
         Ok(Arc::new(FrontStorageGraphQueries {
             query,
             definitions: definitions.iter().map(DefId::intern).collect(),
-            instances,
             front,
             growth,
             recipes,

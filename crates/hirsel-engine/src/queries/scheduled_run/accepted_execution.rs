@@ -7,18 +7,13 @@ use cache::{EncodingStore, PublicationError};
 use hirsel_artifact_store::{Action, Address, Store};
 use hirsel_product_codec::{TypeRecords, decode_schema::Walk};
 use hirsel_tir::{DefinitionRef, MaterializedRef, TirProvider};
-use hirsel_types::{GenericArgument, TypeInterner};
+use hirsel_types::TypeInterner;
 use serde::{Deserialize, Serialize};
 
 pub trait ExecutionProducts: Send + Sync {
     fn definition(&self, path: &DefPath) -> Result<DefinitionRef, QueryError>;
     fn constant(&self, path: &DefPath, actuals: &[u64]) -> Result<MaterializedRef, QueryError>;
     fn constant_definitions(&self) -> Result<Vec<DefPath>, QueryError>;
-    fn instance_body(
-        &self,
-        path: &DefPath,
-        actuals: &[GenericArgument],
-    ) -> Result<Option<DefPath>, QueryError>;
 }
 #[derive(Clone)]
 pub struct AcceptedExecutionProduct {
@@ -57,13 +52,6 @@ impl TirProvider for ExecutionProvider<'_> {
     }
     fn constant_definitions(&mut self) -> Result<Vec<DefPath>, QueryError> {
         self.0.constant_definitions()
-    }
-    fn instance_body(
-        &mut self,
-        path: &DefPath,
-        actuals: &[GenericArgument],
-    ) -> Result<Option<DefPath>, QueryError> {
-        self.0.instance_body(path, actuals)
     }
 }
 
@@ -164,7 +152,6 @@ struct Product {
     entry: DefPath,
     rows: Vec<Row>,
     constants: Vec<DefPath>,
-    instances: Vec<(DefPath, Vec<(Vec<GenericArgument>, DefPath)>)>,
     sources: Vec<SourceFile>,
     nodes: Vec<Node>,
     code: Reach,
@@ -182,7 +169,6 @@ hirsel_product_codec::decode_structure!(Product {
     entry,
     rows,
     constants,
-    instances,
     sources,
     nodes,
     code,
@@ -323,7 +309,6 @@ struct Products {
     retain: ExecutionRetention,
     constants: BTreeMap<DefPath, MaterializedRef>,
     order: Vec<DefPath>,
-    instances: hirsel_tir::InstanceBodies,
     _admission: Arc<dyn Send + Sync>,
 }
 impl ExecutionProducts for Products {
@@ -413,15 +398,6 @@ impl ExecutionProducts for Products {
     }
     fn constant_definitions(&self) -> Result<Vec<DefPath>, QueryError> {
         Ok(self.order.clone())
-    }
-    fn instance_body(
-        &self,
-        path: &DefPath,
-        actuals: &[GenericArgument],
-    ) -> Result<Option<DefPath>, QueryError> {
-        self.instances
-            .resolve(DefId::intern(path), &self.types, actuals)
-            .map(|id| id.map(|id| id.path().clone()))
     }
 }
 
@@ -683,20 +659,6 @@ impl FrontRunQueries {
                 anchors,
             });
         }
-        let mut instances = Vec::new();
-        for declaration in &self.operation.capture().instances.declarations {
-            let values = self
-                .operation
-                .capture()
-                .instances
-                .instances
-                .get(declaration)
-                .into_iter()
-                .flat_map(|values| values.values())
-                .map(|value| (value.arguments.clone(), value.definition.path().clone()))
-                .collect();
-            instances.push((declaration.path().clone(), values));
-        }
         let nodes = output
             .semantic
             .execution_nodes()
@@ -718,7 +680,6 @@ impl FrontRunQueries {
             entry: output.entry.clone(),
             rows,
             constants,
-            instances,
             sources,
             nodes,
             code: reach(&output.code),
@@ -1012,33 +973,6 @@ fn load(
     {
         return Err(failure("constant initialization order"));
     }
-    let mut instances = hirsel_tir::InstanceBodies::default();
-    for (path, values) in product.instances {
-        let id = DefId::intern(&path);
-        if !instances.declarations.insert(id) {
-            return Err(failure("duplicate instance declaration"));
-        }
-        for (arguments, definition) in values {
-            let key = hirsel_tir::InstanceBodies::key(&types, &arguments)
-                .ok_or_else(|| failure("open instance"))?;
-            let definition = DefId::intern(&definition);
-            if instances
-                .instances
-                .entry(id)
-                .or_default()
-                .insert(
-                    key,
-                    hirsel_tir::InstanceBody {
-                        arguments,
-                        definition,
-                    },
-                )
-                .is_some()
-            {
-                return Err(failure("duplicate instance"));
-            }
-        }
-    }
     profile(started, "body descriptors loaded");
     let revision = ProgramRevision::encode(
         &product.entry.to_string(),
@@ -1081,7 +1015,6 @@ fn load(
         retain: reserve,
         constants,
         order: product.constants,
-        instances,
         _admission: Arc::new(owners),
     });
     let runtime = Arc::new(crate::queries::runtime_types_over(

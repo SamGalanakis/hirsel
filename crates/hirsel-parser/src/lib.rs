@@ -350,7 +350,6 @@ impl Parser<'_> {
                         "for" | "while" | "break" | "continue" | "in" => "loop syntax",
                         "return" => "returning from a function",
                         "take" | "copy" | "unique" | "mut" => "an ownership operation",
-                        "requires" | "ensures" => "a contract clause",
                         "uses" => "an authority restriction",
                         "of" | "local" | "global" | "once" => "a type qualifier",
                         "true" | "false" => "a boolean literal",

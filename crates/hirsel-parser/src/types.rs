@@ -127,7 +127,7 @@ impl Parser<'_> {
             self.expect("fn", const { RuleId::of("LANG-7") })?;
             // A callable binder ends the enclosing result's selectable parts.
             let result_parts = std::mem::replace(&mut self.result_parts, false);
-            let signature = self.header(true, false);
+            let signature = self.header(true);
             self.result_parts = result_parts;
             let mut signature = signature?;
             signature.attributes = attrs;

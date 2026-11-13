@@ -432,15 +432,7 @@ impl DefinitionsState {
         let signatures = current.signatures();
         let anchors = current.namespace().anchors.clone();
         let original_context = owner.definitions.original_context();
-        let native_selected = self
-            .selected
-            .iter()
-            .filter_map(|path| {
-                let signature = signatures.signature(DefId::intern(path))?.ok()?;
-                scheduled_native::native_declaration(signatures.types(), &signature)
-                    .then(|| path.clone())
-            })
-            .collect::<Vec<_>>();
+        let native_selected = self.selected.iter().cloned().collect::<Vec<_>>();
         let selected_set = native_selected.iter().cloned().collect::<BTreeSet<_>>();
         // Decorating the external map copies its file/path metadata. Shared
         // text, lines and anchors keep their original producer reservations.
@@ -452,14 +444,6 @@ impl DefinitionsState {
         let mut roots = owner.template.clone();
         roots.definitions = native_selected;
         roots.foreign_unreplayable = run.semantic.foreign_unreplayable();
-        roots
-            .instance_bodies
-            .declarations
-            .retain(|id| selected_set.contains(id.path()));
-        roots.instance_bodies.instances.retain(|id, instances| {
-            instances.retain(|_, instance| selected_set.contains(instance.definition.path()));
-            roots.instance_bodies.declarations.contains(id) && !instances.is_empty()
-        });
         let source_constants = self
             .definitions
             .iter()
@@ -562,7 +546,6 @@ impl DefinitionsState {
                 &(
                     &roots.definitions,
                     roots.registry_revision,
-                    &roots.instance_bodies,
                     &statics.constants,
                     &statics.definitions,
                     &statics.generated_signatures,
@@ -736,7 +719,6 @@ impl QueryEngine {
             registry_revision: registry.revision(),
             operations: registry.operation_inventory(),
             builtins: self.native_builtin_signatures(),
-            instance_bodies: self.instance_bodies(&all.iter().cloned().collect()),
             sources: self.sources.clone(),
             foreign_links: self.foreign_links.clone(),
             // The Run decides PROG-4 from the entry's foreign use.

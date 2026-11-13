@@ -839,7 +839,6 @@ mod sorted_tests {
                 allocation: hirsel_types::Allocation::NoAlloc,
                 authority: hirsel_types::AuthoritySummary::inert(),
                 uses: hirsel_types::Uses::Only(hirsel_types::AuthoritySummary::inert()),
-                contracts: vec![].into(),
                 incomplete: false,
                 foreign: None,
             },
@@ -948,7 +947,6 @@ mod invocation_tests {
             allocation: Allocation::NoAlloc,
             authority: AuthoritySummary::inert(),
             uses: Uses::Only(AuthoritySummary::inert()),
-            contracts: vec![].into(),
             incomplete: false,
             foreign: None,
         }));

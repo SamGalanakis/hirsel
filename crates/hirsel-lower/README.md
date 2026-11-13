@@ -73,7 +73,6 @@ fail closed (missing ownership sidecars, cursor declarations, contract
 before/result and unmaterialized comptime). Logical frame bytes remain
 zero until #16 supplies a charge model; this field is not an allocation estimate.
 
-
 `Input.ownership` consumes shared mode rows, with no hirsel-modes dependency:
 `OwnershipFacts.unique` contains `UniqueDecision` rows with an ExprId and
 `UniqueAction::{AlreadyUnique,DeepCopy,Detach}`.
@@ -111,13 +110,6 @@ Borrowed pattern
 bindings retain scoped source views, so successive cursor iterations do not
 reinitialize a live borrowed alias. Tests execute all registered operations through
 the real interpreter library and cover continue, break, return and failure.
-
-`Plans.entry_checks` accepts N-authored `(NameSite, checked ExprId, RuleId)` checks.
-It emits the checked expression and explicit Check at entry, preserving the
-contract span and caller/callee cleanup. Source contract elaboration and before/
-ensures remain N-owned. The corpus fixture inventory now contains 43 programs,
-checked from their original source through the full pipeline, including three
-check/call examples and two contract-site failures.
 
 Lowered resource fixtures execute real finalizer bodies on `hirsel-interp` and
 assert observable drop order for scope exit, replacement, argument preparation
@@ -368,17 +360,6 @@ cleanup fold are removed; explicit subset cleanup retains its existing ordering.
 `work::read(Counter::LoweringCleanupRootRows)` counts inspected cleanup input roots, with cold let
 and closure source tests bounding the work independently of elapsed time.
 
-Statement retirement compares changed live-tree nodes to its pre-statement
-snapshot, so reactivated old slots remain eligible and unchanged slots are skipped.
-Active loan IDs use the existing source rows instead of searching instructions.
-Scope retirement prunes immutable scope bounds on the same primary nodes; scope
-IDs are allocated in lexical preorder and Local.scope stays fixed. Whole live-set
-iteration/retention is removed. `work::read(Counter::LoweringRetirementRows)` counts inspected live
-and loan-source rows in cold straight-line/nested-block source regressions.
-Internal executable contract headers use mode-checked formal rows. Requires
-parameters describe entry, while ensures parameters describe continuing exits;
-the original exported signature and plain before snapshots remain declared.
-
 Block result transport retains only permissions used by outgoing content and
 their temporary-source dependencies. Dead sibling permissions remain in the
 exiting scope for ordered cleanup. This moves permissions on surviving source
@@ -412,9 +393,6 @@ one TIR `Replace`, and the displaced temporary becomes the call result without
 destruction. Assignment uses the same exchange helper, then drops that temporary.
 
 Labelled exits select an enclosing Loop entry, end its exited scopes with existing cleanup, and publish break/feedback states to that selected entry. Inner loop preparation ends on an outer exit; the selected loop preparation survives continue. A labelled block lowers as an `if` join: one result slot in the enclosing scope, its tail and each `break 'l value` transferred into it (lent for a borrowed join), and the break extracting its value as a block tail does before the exited scopes clean up (LANG-11). No TIR construct is added.
-
-`Input.track_caller` transports declaration metadata into TIR. Internal contract
-invocations inherit attribution; source function-value calls retain their boundary.
 
 Lexical generic function values closure-convert to an ordinary monomorphic Closure
 with a Call carrying the inferred actuals. Capturing names borrow their existing

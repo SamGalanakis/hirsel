@@ -156,7 +156,6 @@ struct Input {
     definition: DefId,
     text: ContentHash,
     implementation: ContentHash,
-    registration: Option<Arc<AcceptedFrontRegistration>>,
     key: EntryKey,
     weight: MemoryWeight,
 }
@@ -232,7 +231,7 @@ struct Forwarded {
     successor: scheduled_lower::SuccessorCapture,
 }
 pub struct FrontBodyQueries {
-    demand: Mutex<std::sync::Weak<generation::demand::DemandProducer>>,
+    demand: Mutex<std::sync::Weak<staging::demand::DemandProducer>>,
     forwarded: Mutex<BTreeMap<Key, Forwarded>>,
     /// A late dependency invalidates this whole consumer attempt.
     discovery_dependency: Mutex<Option<DefPath>>,
@@ -363,7 +362,7 @@ impl FrontBodyQueries {
     }
     pub(crate) fn bind_demand(
         &self,
-        demand: &Arc<generation::demand::DemandProducer>,
+        demand: &Arc<staging::demand::DemandProducer>,
     ) -> Result<(), QueryError> {
         let mut installed = self.demand.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(previous) = installed.upgrade()
@@ -377,7 +376,7 @@ impl FrontBodyQueries {
         *installed = Arc::downgrade(demand);
         Ok(())
     }
-    pub(crate) fn demand_producer(&self) -> Option<Arc<generation::demand::DemandProducer>> {
+    pub(crate) fn demand_producer(&self) -> Option<Arc<staging::demand::DemandProducer>> {
         if self.namespace.consumers_admitted() {
             return None;
         }
@@ -501,63 +500,6 @@ impl FrontBodyQueries {
             allowance,
         )
     }
-    pub(crate) fn prepare_generator(
-        &self,
-        syntax: Arc<ItemSyntax>,
-        signer: &dyn SignaturePhase,
-        instance: bool,
-    ) -> s1::DependencyProduct<generation::task::PreparedGenerator> {
-        let (Some(resolver), Some(checker), Some(modes)) = (
-            self.resolver.as_deref(),
-            self.checker.as_deref(),
-            self.modes.as_deref(),
-        ) else {
-            return s1::DependencyProduct {
-                successor: None,
-                result: Err(QueryError::NotImplemented),
-                reads: Reads::empty(),
-            };
-        };
-        let _validation = match self.namespace.demand_validation() {
-            Ok(validation) => validation,
-            Err(error) => {
-                return s1::DependencyProduct {
-                    successor: None,
-                    result: Err(error),
-                    reads: Reads::empty(),
-                };
-            }
-        };
-        let path = syntax.item.definition.clone();
-        // A closed instance is a parser-created single-declaration source. Its
-        // private generator reads that source, which is not an ordinary body
-        // input in this view. Keep the source context explicit and local to
-        // preparation, under the admitted worker's existing scratch grant.
-        let declarations = if instance {
-            self.declarations
-                .with_archived_siblings(Arc::new(generation::task::InstanceSiblings(
-                    syntax.clone(),
-                )))
-        } else {
-            self.declarations.clone()
-        };
-        generation::task::prepare(
-            &path,
-            syntax,
-            &self.types,
-            &self.memo,
-            &self.namespace.snapshot,
-            &declarations,
-            &self.citations,
-            self.environment,
-            &generation::task::GeneratorPhases {
-                signature: signer,
-                resolver,
-                checker,
-                modes,
-            },
-        )
-    }
     pub(crate) fn stage_source(&self) -> crate::queries::scheduled_stage::StageSource {
         crate::queries::scheduled_stage::StageSource {
             snapshot: self.namespace.snapshot.clone(),
@@ -603,9 +545,6 @@ impl FrontBodyQueries {
         {
             reads.merge(entry.reads());
         }
-        if let Some(registration) = &input.registration {
-            reads.merge(&registration.reads);
-        }
         let signature =
             product.map_or_else(|| self.signature(input), |product| product.result.clone());
         reads
@@ -625,24 +564,6 @@ impl FrontBodyQueries {
         // Accepted literals are parser-created immutable source, and legitimately
         // combine the written header's anchor with generated body anchors. They
         // never enter the ordinary single-source untrusted archive decoder.
-        if let Some(registration) = &input.registration {
-            let syntax = &registration.syntax;
-            // Instance bodies retain the declaring source's lexical owner,
-            // as on the scalar path. The opaque registration binds the query
-            // identity; the syntax's owner is not a second instance identity.
-            return (registration.definition() == input.definition.path()
-                && syntax.text_hash == input.implementation)
-                .then(|| syntax.clone())
-                .ok_or_else(|| {
-                    QueryError::Operational(hirsel_types::OperationalFailure {
-                        operation: "Front syntax recovery".into(),
-                        message: format!(
-                            "accepted registration differs from the input for {}",
-                            input.definition.path()
-                        ),
-                    })
-                });
-        }
         let syntax = self.namespace.syntax(input.definition.path())?;
         if syntax.text_hash != input.implementation {
             return Err(QueryError::Operational(hirsel_types::OperationalFailure {
@@ -652,13 +573,6 @@ impl FrontBodyQueries {
                     input.definition.path()
                 ),
             }));
-        }
-        if generation::instance_bodied(&syntax) {
-            let mut header = (*syntax).clone();
-            if let hirsel_syntax::ItemKind::Function { body, .. } = &mut header.item.kind {
-                *body = None;
-            }
-            return Ok(Arc::new(header));
         }
         Ok(syntax)
     }
@@ -689,16 +603,14 @@ impl FrontBodyQueries {
     }
     fn pool_completion_reads(
         &self,
-        cx: &mut dyn QueryContext,
         outcome: &mut ModeResult,
         checked: &mut CheckedProduct,
         memos: &mut [(crate::memo::MemoKey, Arc<Reads>)],
     ) -> Option<()> {
-        self.pool_observed_reads(cx, &mut outcome.reads, &mut outcome.summary, checked, memos)
+        self.pool_observed_reads(&mut outcome.reads, &mut outcome.summary, checked, memos)
     }
     fn pool_observed_reads(
         &self,
-        cx: &mut dyn QueryContext,
         reads: &mut Arc<Reads>,
         summary: &mut Option<Arc<PublishedSummary>>,
         checked: &mut CheckedProduct,
@@ -1034,7 +946,7 @@ impl FrontBodyQueries {
         dead_arms: Option<crate::tools::DeadArmUse>,
         mut memos: Vec<(crate::memo::MemoKey, Arc<Reads>)>,
     ) -> Option<FrontOutcome> {
-        self.pool_completion_reads(cx, &mut outcome, &mut checked, &mut memos)?;
+        self.pool_completion_reads(&mut outcome, &mut checked, &mut memos)?;
         let backing = self.retain(cx, &outcome, &checked, &memos, dead_arms.as_ref())?;
         let facts = FrontFacts::capture(
             &outcome.definition,
@@ -1146,32 +1058,10 @@ impl FrontBodyQueries {
             LookupSource::Head | LookupSource::Candidates => None,
         }
     }
-    fn provisional_generated_header(&self, id: DefId) -> bool {
-        self.namespace
-            .bodies
-            .get(&id)
-            .is_some_and(|body| body.generated)
-            && !self.namespace.registrations.contains_key(&id)
-            && self
-                .declarations
-                .metadata()
-                .definitions
-                .get(id.path())
-                .is_some_and(|metadata| !metadata.public)
+    pub(crate) fn observe(&self, _owner: &DefPath, read: &ReadKey) -> Option<ContentHash> {
+        self.observe_in(read)
     }
-    pub(crate) fn observe(&self, owner: &DefPath, read: &ReadKey) -> Option<ContentHash> {
-        self.observe_in(&owner.0.package, read)
-    }
-    fn observe_in(
-        &self,
-        package: &hirsel_syntax::PackageId,
-        read: &ReadKey,
-    ) -> Option<ContentHash> {
-        if let ReadKey::Signature(id) | ReadKey::ExecutedSignature(id) = read
-            && self.provisional_generated_header(*id)
-        {
-            return None;
-        }
+    fn observe_in(&self, read: &ReadKey) -> Option<ContentHash> {
         use hirsel_query_products::reads::LookupSource;
         Some(match *read {
             ReadKey::DeclaredSignature(id) => {
@@ -1358,9 +1248,6 @@ impl FrontBodyQueries {
                 message: format!("stale front summary for {path}"),
             }));
         }
-        if let Some(accepted) = &input.registration {
-            accepted.validate(engine)?;
-        }
         Ok(Some(output))
     }
     /// Actual settled checked summary, including after a later Modes failure.
@@ -1457,7 +1344,6 @@ impl FrontBodyQueries {
             materialize: true,
             weight: self.inputs.get(&input)?.weight,
             terminal: None,
-            demand: None,
             slot_admitted: false,
         }))
     }
@@ -1677,15 +1563,6 @@ impl FrontBodyQueries {
             _body_owner: body_owner,
         })
     }
-    pub(crate) fn registration_handle(
-        &self,
-        path: &DefPath,
-    ) -> Option<&Arc<AcceptedFrontRegistration>> {
-        self.inputs
-            .definition(DefId::get(path)?)?
-            .registration
-            .as_ref()
-    }
 
     /// Immutable ordinary input transport. Decoding starts only on demand;
     /// this performs no compiler phase or namespace publication.
@@ -1734,9 +1611,6 @@ impl FrontBodyQueries {
                 },
             })
             .collect()
-    }
-    pub(crate) fn registration(&self, path: &DefPath) -> Option<&AcceptedFrontRegistration> {
-        self.registration_handle(path).map(Arc::as_ref)
     }
     fn worker(&self) -> Worker<'_> {
         Worker {
@@ -1809,7 +1683,6 @@ impl QueryFactory for Factory {
             materialize,
             weight: input.weight,
             terminal: None,
-            demand: None,
             slot_admitted: false,
         }))
     }
@@ -1821,7 +1694,6 @@ struct BodyTask {
     materialize: bool,
     weight: MemoryWeight,
     terminal: Option<Result<ProductRef, Reference>>,
-    demand: Option<DefId>,
     slot_admitted: bool,
 }
 impl Drop for BodyTask {
@@ -1834,7 +1706,6 @@ impl Drop for BodyTask {
 }
 enum BodyRunError {
     Refused(Reference),
-    Demand(DefId),
 }
 impl From<Reference> for BodyRunError {
     fn from(reference: Reference) -> Self {
@@ -1863,105 +1734,6 @@ impl QueryTask for BodyTask {
             }
             self.slot_admitted = true;
         }
-        let pending = self
-            .queries
-            .namespace
-            .bodies
-            .get(&definition)
-            .is_some_and(|body| body.generated)
-            && self.queries.inputs[&self.input].registration.is_none();
-        if pending {
-            self.demand = Some(definition);
-        }
-        if let Some(dependency) = self.demand {
-            let Some(producer) = self.queries.demand_producer() else {
-                if self.queries.namespace.consumers_admitted() {
-                    self.queries.require_discovery(dependency.path());
-                    let result = self.publish_failure(
-                        cx,
-                        QueryError::Operational(hirsel_types::OperationalFailure {
-                            operation: "consumer discovery dependency".into(),
-                            message: format!(
-                                "{} requires an accepted registration",
-                                dependency.path()
-                            ),
-                        }),
-                        Arc::new(Reads::empty()),
-                        None,
-                        Some(QueryKind::Generate),
-                    );
-                    self.terminal = Some(result.clone());
-                    return result;
-                }
-                return Err(self.queries.protocol_failure(self.query, &format!(
-                    "generated declaration {} has no accepted registration and no live demand producer",
-                    definition.path(),
-                )));
-            };
-            let demand = match producer.query(
-                self.queries.namespace.clone(),
-                dependency.path(),
-                self.queries
-                    .namespace
-                    .syntax(dependency.path())
-                    .map_or(Span::default(), |syntax| syntax.item.name_span),
-            ) {
-                Ok(query) => query,
-                Err(_) => return Err(self.queries.resource_refusal()),
-            };
-            let selected = cx.read(demand);
-            if let Some(failure) = producer.failed(demand) {
-                let result = self.publish_demand_failure(cx, failure);
-                self.terminal = Some(result.clone());
-                return result;
-            }
-            let successor = match producer.completed(demand) {
-                Some(Ok(successor)) => successor,
-                _ => {
-                    return Err(selected.err().unwrap_or_else(|| {
-                        self.queries.protocol_failure(
-                            self.query,
-                            "generation demand settled without a successor or failure",
-                        )
-                    }));
-                }
-            };
-            let owner = successor.owner().body_front().clone();
-            let Some(query) = (if self.materialize {
-                owner.body_query(definition.path())
-            } else {
-                owner.query(definition.path())
-            }) else {
-                return Err(self.queries.protocol_failure(
-                    self.query,
-                    &format!(
-                        "accepted successor has no Front producer for {}",
-                        definition.path(),
-                    ),
-                ));
-            };
-            let selected = cx.read(query);
-            let alias = selected.clone().map(|mut product| {
-                product.address = self.query.address;
-                product
-            });
-            self.queries
-                .forwarded
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(
-                    // Summary and materialization queries must retain distinct aliases.
-                    self.query.address.0,
-                    Forwarded {
-                        owner,
-                        selected,
-                        alias: alias.clone(),
-                        successor,
-                    },
-                );
-            self.terminal = Some(alias.clone());
-            return alias;
-        }
         if self.materialize {
             let parent = QueryId {
                 kind: FRONT_BODY_KIND,
@@ -1978,29 +1750,12 @@ impl QueryTask for BodyTask {
         let result = match self.execute(cx) {
             Ok(product) => Ok(product),
             Err(BodyRunError::Refused(reference)) => Err(reference),
-            Err(BodyRunError::Demand(dependency)) => {
-                self.demand = Some(dependency);
-                return self.run(cx);
-            }
         };
         self.terminal = Some(result.clone());
         result
     }
 }
 impl BodyTask {
-    fn publish_demand_failure(
-        &self,
-        cx: &mut dyn QueryContext,
-        failure: generation::demand::DemandFailure,
-    ) -> Result<ProductRef, Reference> {
-        self.publish_failure(
-            cx,
-            failure.error,
-            failure.reads,
-            Some(failure.sources),
-            Some(QueryKind::Generate),
-        )
-    }
     fn publish_failure(
         &self,
         cx: &mut dyn QueryContext,
@@ -2073,7 +1828,7 @@ impl BodyTask {
     ) -> Result<ProductRef, Reference> {
         let queries = &self.queries;
         let input = &queries.inputs[&self.input];
-        let (mut reference, reads, summary) = {
+        let (mut reference, summary) = {
             let slots = queries.slots.lock().unwrap_or_else(|e| e.into_inner());
             let old = slots
                 .get(&self.input)
@@ -2115,7 +1870,7 @@ impl BodyTask {
                 return Err(queries.protocol_refusal());
             }
             outcome.phase = old.phase;
-            (reference, old.reads.clone(), summary)
+            (reference, summary)
         };
         if let Some(bytes) = bytes {
             let domain = hirsel_engine_store::product_domain(QueryKind::Modes);
@@ -2425,13 +2180,12 @@ impl BodyTask {
             queries.resource_refusal()
         })?;
         let site = syntax.item.name_span;
-        let mut done = worker.run(Task {
+        let done = worker.run(Task {
             index: 0,
             definition: input.definition.path().clone(),
             syntax,
             signature,
             signature_reads,
-            registration: input.registration.clone(),
             text: input.text,
             resolution: None,
             checked: None,
@@ -2448,7 +2202,7 @@ impl BodyTask {
             let reads = done.complete_reads(&mut source).map_err(|_| {
                 queries.protocol_failure(self.query, "operational phase reads disagree")
             })?;
-            let error = generation::locate_failure(
+            let error = staging::locate_failure(
                 QueryError::Operational(refusal.clone()),
                 &queries.citations.sources,
                 site,
@@ -2456,18 +2210,6 @@ impl BodyTask {
             return self
                 .publish_failure(cx, error, Arc::new(reads), None, Some(done.phase))
                 .map_err(Into::into);
-        }
-        if let Some(registration) = &input.registration {
-            registration.explain(&mut done.result, &queries.citations.sources);
-            if let Some(Product::Computed(stage)) = &mut done.resolution {
-                registration.explain(&mut stage.result, &queries.citations.sources);
-            }
-            if let Some(Product::Computed(stage)) = &mut done.checked {
-                registration.explain(&mut stage.result, &queries.citations.sources);
-            }
-            if let Some(Product::Computed(stage)) = &mut done.modes {
-                registration.explain(&mut stage.result, &queries.citations.sources);
-            }
         }
         for kind in done.recomputed() {
             *queries
@@ -2501,16 +2243,6 @@ impl BodyTask {
         );
         // A generated private header is provisional until its accepted body
         // supplies the module proof. Do not publish a caller under that row.
-        if queries.demand_producer().is_some()
-            && let Some(dependency) = completed.outcome().reads.iter().find_map(|(key, _)| {
-                let (ReadKey::Signature(id) | ReadKey::ExecutedSignature(id)) = key else {
-                    return None;
-                };
-                queries.provisional_generated_header(*id).then_some(*id)
-            })
-        {
-            return Err(BodyRunError::Demand(dependency));
-        }
         let memo_rows = completed.memo_snapshot();
         let checked = completed.checked_product();
         let dead_arms = completed.take_dead_arms();
@@ -2820,33 +2552,7 @@ impl QueryEngine {
         request: &Arc<hirsel_engine_admission::ProcessBudget>,
         errors: RuntimeErrors,
     ) -> Result<Arc<FrontBodyQueries>, QueryError> {
-        self.front_body_queries_with_registrations(definitions, &[], weight, request, errors)
-    }
-    /// Freeze original bodies together with explicitly accepted generated views.
-    pub fn front_body_queries_with_registrations(
-        &mut self,
-        definitions: &[DefPath],
-        registrations: &[Arc<AcceptedFrontRegistration>],
-        weight: MemoryWeight,
-        request: &Arc<hirsel_engine_admission::ProcessBudget>,
-        errors: RuntimeErrors,
-    ) -> Result<Arc<FrontBodyQueries>, QueryError> {
-        let capture = self.capture_namespace(definitions, registrations, request.free())?;
-        for definition in definitions {
-            if capture
-                .bodies
-                .get(&DefId::intern(definition))
-                .is_some_and(|body| body.generated)
-                && !capture
-                    .registrations
-                    .contains_key(&DefId::intern(definition))
-            {
-                return Err(QueryError::Operational(hirsel_types::OperationalFailure {
-                    operation: "front query admission".into(),
-                    message: "generated body requires an accepted registration view".into(),
-                }));
-            }
-        }
+        let capture = self.capture_namespace(definitions, request.free())?;
         self.front_body_queries_in(definitions, capture, weight, request, errors)
     }
     pub fn front_body_queries_in(
@@ -2960,14 +2666,11 @@ impl QueryEngine {
         let mut selected = Vec::new();
         for definition in definitions {
             let id = DefId::intern(definition);
-            let registration = namespace.registrations.get(&id);
             let input = namespace
                 .bodies
                 .get(&id)
                 .ok_or_else(|| refusal("definition outside accepted capture"))?;
-            let implementation = registration.map_or(input.implementation, |registration| {
-                registration.syntax.text_hash
-            });
+            let implementation = input.implementation;
             let text = input.implementation;
             let key = input
                 .queries
@@ -2975,25 +2678,18 @@ impl QueryEngine {
                 .ok_or_else(|| refusal("definition outside accepted capture"))?
                 .modes
                 .clone();
-            selected.push((
-                definition.clone(),
-                text,
-                implementation,
-                key,
-                registration.cloned(),
-            ));
+            selected.push((definition.clone(), text, implementation, key));
         }
         let snapshot = namespace.snapshot.clone();
         if let Some(headers) = snapshot.header_products() {
             headers.share_scope();
         }
         let mut inputs = BTreeMap::new();
-        for (definition, text, implementation, key, registration) in selected {
+        for (definition, text, implementation, key) in selected {
             let id = DefId::intern(&definition);
             inputs.insert(
                 id,
                 Input {
-                    registration,
                     definition: id,
                     text,
                     implementation,

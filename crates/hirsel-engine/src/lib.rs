@@ -64,7 +64,6 @@ pub use snapshot::{
     PackageViews, SignatureSnapshot, View, ViewTable,
 };
 mod adapters;
-mod facts;
 pub use adapters::*;
 pub mod loader_inputs;
 mod package;
@@ -195,8 +194,6 @@ impl DefinitionKey {
             QueryKind::Interpret => 8,
             QueryKind::Registration => 11,
             QueryKind::Evaluate => 12,
-            QueryKind::Generate => 13,
-            QueryKind::GeneratedRegistration => 14,
             QueryKind::SourceAudit => 15,
             QueryKind::SemanticBody => 16,
             QueryKind::Lex => 4,

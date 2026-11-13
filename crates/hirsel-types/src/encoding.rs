@@ -1,6 +1,6 @@
 use crate::*;
 use hirsel_intern::Symbol;
-use hirsel_syntax::{Bound, ContentHash, ContractKind, DefPath, PassingMode};
+use hirsel_syntax::{Bound, ContentHash, DefPath, PassingMode};
 use std::collections::BTreeSet;
 
 /// A malformed hand-built semantic graph cannot have a canonical fingerprint.
@@ -79,7 +79,7 @@ fn encode_signature(
         scope_capability,
         heap,
     } = &**roles;
-    e.atom(b"hirsel.signature.encoding.v16");
+    e.atom(b"hirsel.signature.encoding.v17");
     e.path(definition.path());
     e.tag(match visibility {
         hirsel_syntax::Visibility::Private => "private",
@@ -225,7 +225,6 @@ fn encode_signature(
                 distinct,
                 resource,
                 drop,
-                fact,
                 captures,
             } = &**definition;
             let Layout {
@@ -280,7 +279,6 @@ fn encode_signature(
             e.boolean(*resource);
             e.boolean(*destructor_allocation == Allocation::NoAlloc);
             e.option(drop.as_ref(), |e, p| e.path(p));
-            e.option(fact.as_ref(), |e, c| e.contract(c));
             // Absent for ordinary declarations, so existing vectors are unchanged.
             if let Some(fields) = captures {
                 e.tag("erased-carrier-v1");
@@ -636,7 +634,6 @@ impl Encoder {
                     BuiltinType::Atomic => "Atomic",
                     BuiltinType::Ptr => "Ptr",
                     BuiltinType::FnPtr => "FnPtr",
-                    BuiltinType::TypeShape => "TypeShape",
                 });
                 self.arguments(arguments, s)?;
             }
@@ -779,14 +776,6 @@ impl Encoder {
         }
         Ok(())
     }
-    fn contract(&mut self, c: &Contract) {
-        self.tag(match c.kind {
-            ContractKind::Requires => "requires",
-            ContractKind::Ensures => "ensures",
-        });
-        self.number(c.ordinal as u64);
-        self.atom(&c.code_hash.0);
-    }
     pub fn function(&mut self, f: &FunctionType, s: &TypeInterner) -> Result<(), EncodingError> {
         // No `..`: a new field must be encoded here or excluded with a reason.
         let FunctionType {
@@ -798,7 +787,6 @@ impl Encoder {
             allocation,
             authority,
             uses,
-            contracts,
             incomplete,
             foreign,
         } = f;
@@ -856,10 +844,7 @@ impl Encoder {
                 self.authority(a);
             }
         }
-        self.number(contracts.len() as u64);
-        for c in contracts {
-            self.contract(c);
-        }
+
         self.boolean(*incomplete);
         self.boolean(foreign.is_some());
         if let Some(ForeignContract {

@@ -75,7 +75,6 @@ impl Weight<'_> {
             parameters,
             result: _,
             uses,
-            contracts,
         } = function;
         self.vec(attributes, Self::ast_attribute);
         self.vec(generics, Self::ast_generic);
@@ -83,7 +82,6 @@ impl Weight<'_> {
         if let Some(paths) = uses {
             self.vec(paths, Self::ast_path);
         }
-        self.flat_vec(contracts);
     }
     fn ast_expression(&mut self, expression: &ast::Expr) {
         match &expression.kind {
@@ -117,11 +115,8 @@ impl Weight<'_> {
             | ast::ExprKind::Return(_)
             | ast::ExprKind::Break { .. }
             | ast::ExprKind::Continue(_)
-            | ast::ExprKind::Shape(_)
-            | ast::ExprKind::Before(_)
             | ast::ExprKind::Comptime(_)
             | ast::ExprKind::Heap
-            | ast::ExprKind::Result
             | ast::ExprKind::Formatter(_)
             | ast::ExprKind::Error => (),
         }
@@ -190,7 +185,7 @@ impl Weight<'_> {
             visibility: _,
             attributes,
             kind,
-            generated,
+            implementation_bindings,
         } = item;
         self.def_path(definition);
         self.vec(attributes, Self::ast_attribute);
@@ -249,14 +244,8 @@ impl Weight<'_> {
             }
             ast::ItemKind::Const { .. } => (),
         }
-        if let Some(generated) = generated {
-            match generated {
-                ast::Generated::Body(names) => self.flat_vec(names),
-                ast::Generated::Generator(names) => self.flat_vec(names),
-                ast::Generated::Specialization(bindings) => {
-                    self.vec(bindings, |w, (_, path)| w.def_path(path))
-                }
-            }
+        if let Some(bindings) = implementation_bindings {
+            self.vec(bindings, |w, (_, path)| w.def_path(path));
         }
         let ast::SyntaxTree {
             tokens,

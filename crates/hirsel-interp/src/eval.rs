@@ -225,20 +225,6 @@ impl<P: TirProvider + ?Sized> TirProvider for Resolved<'_, P> {
     ) -> Result<Vec<hirsel_syntax::DefPath>, hirsel_types::QueryError> {
         self.provider.constant_definitions()
     }
-    fn instance_body(
-        &mut self,
-        path: &hirsel_syntax::DefPath,
-        arguments: &[hirsel_types::GenericArgument],
-    ) -> Result<Option<hirsel_syntax::DefPath>, hirsel_types::QueryError> {
-        if self.own_bodies.contains(path) {
-            return Ok(None);
-        }
-        let instance = self.provider.instance_body(path, arguments)?;
-        if instance.is_none() {
-            self.own_bodies.insert(path.clone());
-        }
-        Ok(instance)
-    }
 }
 /// What one run's scheduler holds between steps: its task stacks, budgets and
 /// constants, and what its entry returned so far.
@@ -3570,8 +3556,6 @@ fn rvalue(
             }
             value
         }
-        // CT-3: a shape is a payload-free token; `type_shape.info` reads its type actual.
-        Rvalue::Shape(_) => Value::Unit,
         Rvalue::Size(parameter) => {
             let ty = frame.place(destination)?.ty;
             if !matches!(
@@ -4603,13 +4587,6 @@ fn execute_instruction(
                 }
             }
         }
-        InstructionKind::Snapshot {
-            destination,
-            ref value,
-        } => {
-            let (value, shadow) = frame.operand_shadow(value)?;
-            frame.assign_shadow(destination, value, shadow)?;
-        }
         // The scheduler charges before it steps an instruction.
         InstructionKind::Drop { .. }
         | InstructionKind::RunCleanup(_)
@@ -4948,13 +4925,6 @@ fn target(
     };
     // CT-5: a generic generated declaration runs the monomorphic body of its
     // selected instance.
-    if let Some(instance) = provider
-        .instance_body(&path, &actuals.arguments)
-        .map_err(Error::Query)?
-    {
-        path = instance;
-        actuals.arguments.clear();
-    }
     let tail = (path == *frame.definition.path.path())
         .then(|| {
             frame

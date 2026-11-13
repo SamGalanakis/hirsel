@@ -314,7 +314,6 @@ fn builtin_name(kind: BuiltinType) -> &'static str {
         BuiltinType::Atomic => "Atomic",
         BuiltinType::Ptr => "Ptr",
         BuiltinType::FnPtr => "FnPtr",
-        BuiltinType::TypeShape => "TypeShape",
     }
 }
 
@@ -3003,7 +3002,6 @@ impl<'o> LayoutBuilder<'o> {
             BuiltinType::Ptr | BuiltinType::FnPtr => {
                 Ok(self.scalar_record(key, ScalarKind::Pointer))
             }
-            BuiltinType::TypeShape => unavailable(None, "TypeShape materialization as static data"),
             // A run-local task-table word (CONC-2); a handle nobody awaited needs no drop:
             // its scope's exit joins the child.
             BuiltinType::Task => {

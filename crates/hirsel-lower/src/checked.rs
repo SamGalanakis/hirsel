@@ -34,8 +34,6 @@ impl Plans {
         };
         let mut output = Plans::default();
         output.resource_patterns = source.resource_patterns.clone();
-        output.contracts = source.contracts.clone();
-        output.facts = source.facts.clone();
         output.pattern_literals = source.pattern_literals.clone();
         output.unreachable_arms = source.unreachable_arms.clone();
         for propagation in &source.tries {
@@ -191,9 +189,6 @@ impl Plans {
                 },
             }
         }
-        output
-            .shapes
-            .extend(source.shapes.iter().map(|(_, syntax, ty)| (*syntax, *ty)));
         Ok(output)
     }
 }

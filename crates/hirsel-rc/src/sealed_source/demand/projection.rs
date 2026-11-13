@@ -165,8 +165,7 @@ impl BodyProjection {
                             Rvalue::Constant(_)
                             | Rvalue::ReadConstant { .. }
                             | Rvalue::FunctionReference { .. }
-                            | Rvalue::Size(_)
-                            | Rvalue::Shape(_) => None,
+                            | Rvalue::Size(_) => None,
                         };
                         for input in inputs {
                             out.values(destination, input)?;
@@ -203,9 +202,6 @@ impl BodyProjection {
                     } => {
                         out.values(local(*destination)?, local(value.place)?)?;
                         out.values(local(*displaced)?, local(*destination)?)?;
-                    }
-                    InstructionKind::Snapshot { destination, value } => {
-                        out.values(local(*destination)?, local(value.place)?)?;
                     }
                     // Cleanup and lexical liveness never erase retained history.
                     _ => (),

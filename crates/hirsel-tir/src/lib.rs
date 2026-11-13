@@ -8,9 +8,7 @@ use hirsel_span::Span;
 use hirsel_syntax::DefId;
 use hirsel_syntax::{BinaryOp, ContentHash, DefPath, UnaryOp};
 use hirsel_types::QueryError;
-use hirsel_types::{
-    Destination, GeneratedActualKey, GenericArgument, TypeId, TypeInterner, UseKind,
-};
+use hirsel_types::{ClosedActualKey, Destination, GenericArgument, TypeId, TypeInterner, UseKind};
 
 /// Borrowed-association receipts revised the formerly implicit v1 TIR schema;
 /// v3 adds diverging calls; v4 retains named-entry caller attribution;
@@ -24,7 +22,7 @@ use hirsel_types::{
 /// v12 binds the combined grant and logical invocation semantics.
 /// v13 adds compile-time source-event charges (CT-4).
 /// v14 published inferred private-helper uniqueness evidence; v17 removes it (MODE-2: declared contracts only).
-pub const TIR_VERSION: u32 = 17;
+pub const TIR_VERSION: u32 = 18;
 
 pub mod representation;
 
@@ -173,7 +171,6 @@ pub enum Rvalue {
         captures: Vec<Operand>,
         destination: Destination,
     },
-    Shape(TypeId),
 }
 /// Binding introduction is distinct from moving storage between compiler slots.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq)]
@@ -251,11 +248,6 @@ pub enum InstructionKind {
     Check {
         condition: Operand,
         rule: RuleId,
-    },
-    /// Saves a plain before(e) result at entry for the exit contract (FACT-1).
-    Snapshot {
-        destination: PlaceId,
-        value: Operand,
     },
     /// One unit of a compile-time evaluation's source budget (CT-4): the last
     /// instruction before a source call's transfer, or the first of a loop
@@ -593,7 +585,7 @@ impl MatchPatternKind {
         }
     }
 }
-/// One definition's lowered bodies, including closures and contract bodies (FACT-1, CT-2).
+/// One definition's lowered bodies, including closures (CT-2).
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
 pub struct ProtocolAssociationReceipt {
     pub association: hirsel_types::ProtocolAssociation,
@@ -616,7 +608,6 @@ pub struct Definition {
     pub signature_hash: ContentHash,
     pub bodies: Vec<Body>,
     pub entry: BodyId,
-    pub contracts: Vec<(u32, BodyId)>,
 }
 impl Definition {
     /// Whether a validated body inherits the declaration's caller attribution.
@@ -644,7 +635,6 @@ pub fn definition_types(t: &TypeInterner, definition: &Definition) -> std::sync:
         roots.extend(body.places.iter().map(|p| p.ty));
         for rvalue in &body.rvalues {
             match rvalue {
-                Rvalue::Shape(t) => roots.push(*t),
                 Rvalue::FunctionReference { arguments, .. } => actuals(arguments, &mut roots),
                 _ => (),
             }
@@ -699,80 +689,6 @@ pub enum ValueKind {
 /// Immutable materialized constant snapshot.
 pub type MaterializedRef = std::sync::Arc<Materialized>;
 
-/// CT-5 instance bodies. A generic generated declaration has no definition of
-/// its own: each selected instance at closed generic arguments is a monomorphic
-/// definition, and a call of the declaration at those arguments runs it.
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, Eq, PartialEq)]
-pub struct InstanceBodies {
-    /// Every generic generated declaration of the program, selected or not.
-    pub declarations: std::collections::BTreeSet<DefId>,
-    /// Selected instances by declaration and their actuals' CT-5 key.
-    #[serde(with = "sorted_instances")]
-    pub instances: std::collections::BTreeMap<
-        DefId,
-        std::collections::HashMap<GeneratedActualKey, InstanceBody>,
-    >,
-}
-/// One selected instance: its closed lossless actuals (the first selected in
-/// key order represents the key) and the monomorphic definition that is the
-/// declaration's body at them.
-#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]
-pub struct InstanceBody {
-    pub arguments: Vec<GenericArgument>,
-    pub definition: DefId,
-}
-impl InstanceBodies {
-    /// The CT-5 key of closed `arguments`; None when one still names a parameter.
-    pub fn key(types: &TypeInterner, arguments: &[GenericArgument]) -> Option<GeneratedActualKey> {
-        hirsel_types::generated_actual_key(types, arguments)
-    }
-    /// The definition that runs a call of `path` at closed `arguments`: None
-    /// when `path` is not a generic generated declaration, and an error when
-    /// it is but that instance was never selected.
-    pub fn resolve(
-        &self,
-        path: DefId,
-        types: &TypeInterner,
-        arguments: &[GenericArgument],
-    ) -> Result<Option<DefId>, QueryError> {
-        if !self.declarations.contains(&path) {
-            return Ok(None);
-        }
-        let unselected = || {
-            QueryError::Operational(hirsel_types::OperationalFailure {
-                operation: "generated instance".into(),
-                message: format!("{path} has no selected instance at these arguments"),
-            })
-        };
-        let key = Self::key(types, arguments).ok_or_else(unselected)?;
-        self.instances
-            .get(&path)
-            .and_then(|instances| instances.get(&key))
-            .map(|instance| Some(instance.definition))
-            .ok_or_else(unselected)
-    }
-}
-/// Instances persist in key order, never hash order.
-mod sorted_instances {
-    use super::*;
-    use std::collections::{BTreeMap, HashMap};
-    type Instances = BTreeMap<DefId, HashMap<GeneratedActualKey, InstanceBody>>;
-    pub fn serialize<S: serde::Serializer>(map: &Instances, s: S) -> Result<S::Ok, S::Error> {
-        let sorted: BTreeMap<&DefId, BTreeMap<&GeneratedActualKey, &InstanceBody>> = map
-            .iter()
-            .map(|(d, instances)| (d, instances.iter().collect()))
-            .collect();
-        serde::Serialize::serialize(&sorted, s)
-    }
-    pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Instances, D::Error> {
-        let sorted: BTreeMap<DefId, BTreeMap<GeneratedActualKey, InstanceBody>> =
-            serde::Deserialize::deserialize(d)?;
-        Ok(sorted
-            .into_iter()
-            .map(|(d, instances)| (d, instances.into_iter().collect()))
-            .collect())
-    }
-}
 /// Execution requests other definitions lazily, permitting any topology (PROG-5).
 pub trait TirProvider {
     fn definition(&mut self, path: &DefPath) -> Result<DefinitionRef, QueryError>;
@@ -792,16 +708,6 @@ pub trait TirProvider {
     }
     /// Program constants in dependency order, with source-order ties (#63).
     fn constant_definitions(&mut self) -> Result<Vec<DefPath>, QueryError>;
-    /// CT-5: the definition that runs a call of `path` at closed `arguments`
-    /// (`InstanceBodies::resolve`); None for a declaration with its own body.
-    fn instance_body(
-        &mut self,
-        path: &DefPath,
-        arguments: &[GenericArgument],
-    ) -> Result<Option<DefPath>, QueryError> {
-        let _ = (path, arguments);
-        Ok(None)
-    }
 }
 /// Simulation input events are ordered and explicit; real external effects are not ambient (DET-1, CAP-1).
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq)]

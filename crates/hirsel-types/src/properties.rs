@@ -471,10 +471,7 @@ pub(crate) fn proof_step(
             }
             if matches!(
                 kind,
-                BuiltinType::SlotId
-                    | BuiltinType::TypeShape
-                    | BuiltinType::Ptr
-                    | BuiltinType::FnPtr
+                BuiltinType::SlotId | BuiltinType::Ptr | BuiltinType::FnPtr
             ) {
                 // GEN-1 pointer bits are Plain; MODE-4 makes Plain values
                 // sendable. Phantom pointees are not retained payloads.

@@ -11,8 +11,8 @@ use hirsel_codec::{DecodeError, Reader, Snapshot, Writer, snapshot_enum, snapsho
 use hirsel_diag::RuleId;
 use hirsel_span::{Anchor, Span};
 use hirsel_syntax::{
-    BinaryOp, Bound, ContentHash, ContractKind, DefPath, ExprId, LexicalOwner, PassingMode,
-    PatternId, SiteRef, StmtId, TypeExprId, UnaryOp, Visibility,
+    BinaryOp, Bound, ContentHash, DefPath, ExprId, LexicalOwner, PassingMode, PatternId, SiteRef,
+    StmtId, TypeExprId, UnaryOp, Visibility,
 };
 use hirsel_tir::{
     ArenaScopeGrant, Block, BlockId, Body, BodyId, BorrowCursor, CallArgument, CallReturn, Callee,
@@ -25,13 +25,13 @@ use hirsel_tir::{
 };
 use hirsel_types::{
     Allocation, AllocationTarget, AuthoritySummary, AuthorityTerm, BinderRef, Brand,
-    CapabilityKind, CaptureContext, Contract, Destination, DropAllocation, ErasedCaptures,
-    FamilyMember, FamilyMemberKind, FamilySignature, Field, FieldId, ForeignContract,
-    ForeignWrapper, FunctionType, GenericArgument, GenericParameter, HeapRole,
-    ImplementationBinder, ImplementationSignature, Layout, LoopSourceDeclaration, MemberActual,
-    Modes, Multiplicity, NameSite, NominalRoles, Origin, OriginRoot, ParamId, Parameter,
-    ProtocolAssociation, Reach, RegionId, Relation, RelationPlace, ScalarDomain, SchemaConstraint,
-    Sendability, SendabilityRequirement, SerializableCheck, SharedPath, SharedSlice, Signature,
+    CapabilityKind, CaptureContext, Destination, DropAllocation, ErasedCaptures, FamilyMember,
+    FamilyMemberKind, FamilySignature, Field, FieldId, ForeignContract, ForeignWrapper,
+    FunctionType, GenericArgument, GenericParameter, HeapRole, ImplementationBinder,
+    ImplementationSignature, Layout, LoopSourceDeclaration, MemberActual, Modes, Multiplicity,
+    NameSite, NominalRoles, Origin, OriginRoot, ParamId, Parameter, ProtocolAssociation, Reach,
+    RegionId, Relation, RelationPlace, ScalarDomain, SchemaConstraint, Sendability,
+    SendabilityRequirement, SerializableCheck, SharedPath, SharedSlice, Signature,
     SignatureDependency, SignatureKind, SignatureMetadata, Size, SizeParamId, StatePromise, Type,
     TypeDefinition, TypeId, TypeInterner, TypeKind, TypeParamId, Uniqueness, UseKind, Uses,
     Variant, VariantId, WrapperKind,
@@ -552,7 +552,6 @@ snapshot_enum!(Bound {
     Ordered,
     OrderedOf
 } in Cx);
-snapshot_enum!(ContractKind { Requires, Ensures } in Cx);
 snapshot_enum!(PassingMode { Borrow, Take, Mut } in Cx);
 snapshot_enum!(Visibility {
     Private,
@@ -721,12 +720,6 @@ erasing_struct!(Parameter {
     passing,
     ty
 });
-erasing_struct!(Contract {
-    kind,
-    ordinal,
-    // Derived from resolved names; the contract code is in its owner's TIR.
-    code_hash => ContentHash::default()
-});
 erasing_struct!(ForeignContract {
     abi,
     blocking,
@@ -751,7 +744,6 @@ snapshot_struct!(FunctionType {
     allocation,
     authority,
     uses,
-    contracts,
     incomplete,
     foreign
 } in Cx);
@@ -791,7 +783,6 @@ snapshot_struct!(TypeDefinition {
     distinct,
     resource,
     drop,
-    fact,
     captures
 } in Cx);
 snapshot_struct!(SerializableCheck {
@@ -1014,7 +1005,6 @@ snapshot_enum!(Rvalue {
     Binary { op, left, right },
     Construct { constructor, fields, destination },
     Closure { context, body, captures, destination },
-    Shape(t)
 } in Cx);
 snapshot_enum!(OriginBindingKind { Alias, Fresh } in Cx);
 snapshot_enum!(InstructionKind {
@@ -1032,7 +1022,6 @@ snapshot_enum!(InstructionKind {
     Drop { place, if_live },
     RunCleanup(c),
     Check { condition, rule },
-    Snapshot { destination, value },
     Charge(e)
 } in Cx);
 snapshot_enum!(SourceEventKind { Call, Iteration, CountedIteration, CountedEntry { from, to, inclusive }, Entry } in Cx);
@@ -1145,7 +1134,6 @@ impl Snapshot<Cx> for Definition {
             }
             self.bodies.write(w);
             self.entry.write(w);
-            self.contracts.write(w);
         });
         w.close();
     }
@@ -1160,7 +1148,6 @@ impl Snapshot<Cx> for Definition {
             signature_hash: Snapshot::read(r)?,
             bodies: Snapshot::read(r)?,
             entry: Snapshot::read(r)?,
-            contracts: Snapshot::read(r)?,
         };
         r.close()?;
         value.types = hirsel_tir::definition_types(&r.context.types, &value);

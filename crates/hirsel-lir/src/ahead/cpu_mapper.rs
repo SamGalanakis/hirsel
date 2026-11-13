@@ -517,7 +517,7 @@ fn instruction(u: &LirUnit<Ready>, table: &LayoutTable, inst: &Inst) -> Option<A
                     .symbols
                     .get(symbol.index())
                     .map(|symbol| symbol.kind),
-                Some(SymbolKind::Constant | SymbolKind::Shape)
+                Some(SymbolKind::Constant)
             ) && cpu_owned_layout(
                 table,
                 u.types[u.values[result.index()].ty.index()].layout,

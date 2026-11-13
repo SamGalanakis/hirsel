@@ -2,13 +2,10 @@
 //! instance producer that suspended Lower and Front consumers use.
 use super::*;
 use hirsel_engine_runtime::*;
-use hirsel_intern::jobs::Jobs;
 
 pub struct FrontDemandAdmission {
     pub carry: Option<Arc<FrontCarry>>,
     pub lower_carry: Option<Arc<crate::queries::scheduled_lower::LowerCarry>>,
-    /// Kept to preserve the size-based admission footprint.
-    pub jobs: Jobs,
     pub weight: MemoryWeight,
     pub max_reads: usize,
     pub runtime: hirsel_engine_admission::MemoryReservation,
@@ -17,7 +14,7 @@ pub struct FrontDemandAdmission {
 }
 
 pub enum FrontDemandError {
-    Generator(FrontRegistrationBootstrapError),
+    Admission(QueryError),
     Front {
         reference: hirsel_engine_store::Reference,
         error: Option<QueryError>,
@@ -33,7 +30,7 @@ pub enum FrontDemandError {
 impl std::fmt::Debug for FrontDemandError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Generator(error) => f.debug_tuple("Generator").field(error).finish(),
+            Self::Admission(error) => f.debug_tuple("Admission").field(error).finish(),
             Self::Front {
                 reference, error, ..
             } => f
@@ -49,7 +46,6 @@ pub struct FrontDemandScope {
     operation: OperationLease,
     carry: Option<Arc<FrontCarry>>,
     definitions: Vec<DefPath>,
-    registrations: Vec<Arc<AcceptedFrontRegistration>>,
     namespace: Arc<NamespaceCapture>,
     front: Option<Arc<FrontBodyQueries>>,
     rounds: usize,
@@ -63,9 +59,6 @@ impl FrontDemandScope {
     }
     pub fn definitions(&self) -> &[DefPath] {
         &self.definitions
-    }
-    pub fn registrations(&self) -> &[Arc<AcceptedFrontRegistration>] {
-        &self.registrations
     }
     pub fn namespace(&self) -> &Arc<NamespaceCapture> {
         &self.namespace
@@ -88,14 +81,16 @@ impl FrontDemandScope {
             None => Ok(self),
         }
     }
-    pub fn input_bytes(definitions: &[DefPath], generators: &[DefPath]) -> Option<u64> {
+    pub fn input_bytes(definitions: &[DefPath]) -> Option<u64> {
         let mut weight = hirsel_query_products::retained::MetadataWeight::default();
         weight.add(size_of::<Self>() + size_of::<FrontDemandAdmission>());
         weight.add(
-            (definitions.len().checked_mul(3)? + generators.len())
+            definitions
+                .len()
+                .checked_mul(3)?
                 .checked_mul(size_of::<DefPath>())?,
         );
-        for path in definitions.iter().chain(generators) {
+        for path in definitions.iter() {
             weight.path(path);
         }
         Some(weight.bytes())
@@ -106,14 +101,12 @@ impl QueryEngine {
         &mut self,
         definitions: &[DefPath],
         roots: &[DefPath],
-        generators: &[DefPath],
         admission: FrontDemandAdmission,
         errors: RuntimeErrors,
     ) -> Result<FrontDemandScope, FrontDemandError> {
         self.demand_front_scope_with_policy(
             definitions,
             roots,
-            generators,
             LoweringPolicy::Reachable,
             false,
             admission,
@@ -125,39 +118,32 @@ impl QueryEngine {
         &mut self,
         definitions: &[DefPath],
         roots: &[DefPath],
-        generators: &[DefPath],
         policy: LoweringPolicy,
         stop_on_error: bool,
         admission: FrontDemandAdmission,
         errors: RuntimeErrors,
     ) -> Result<FrontDemandScope, FrontDemandError> {
         let admission_error = |message: &str| {
-            FrontDemandError::Generator(FrontRegistrationBootstrapError::Admission(
-                QueryError::Operational(hirsel_types::OperationalFailure {
-                    operation: "generated instance demand admission".into(),
-                    message: message.into(),
-                }),
-            ))
+            FrontDemandError::Admission(QueryError::Operational(hirsel_types::OperationalFailure {
+                operation: "staged dependency demand admission".into(),
+                message: message.into(),
+            }))
         };
-        let staged = self.front_staged_roots(definitions).map_err(|error| {
-            FrontDemandError::Generator(FrontRegistrationBootstrapError::Admission(error))
-        })?;
+        let staged = self
+            .front_staged_roots(definitions)
+            .map_err(|error| FrontDemandError::Admission(error))?;
         // With every nongeneric namespace producer explicitly requested, the
         // ordinary bodies cannot add another registration. Leave their Front
         // work to the final graph. Prefix requests still visit roots in order.
-        let preparation_roots = (!stop_on_error
-            && generators
-                .iter()
-                .all(|path| !self.instance_bodied(path) && roots.contains(path))
-            && staged.iter().all(|path| roots.contains(path)))
-        .then(|| {
-            roots
-                .iter()
-                .filter(|path| generators.contains(*path) || staged.contains(*path))
-                .cloned()
-                .collect::<Vec<_>>()
-        });
-        let required = FrontDemandScope::input_bytes(definitions, generators)
+        let preparation_roots = (!stop_on_error && staged.iter().all(|path| roots.contains(path)))
+            .then(|| {
+                roots
+                    .iter()
+                    .filter(|path| staged.contains(*path))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            });
+        let required = FrontDemandScope::input_bytes(definitions)
             .ok_or_else(|| admission_error("metadata size overflow"))?;
         if roots.iter().any(|root| !definitions.contains(root)) {
             return Err(admission_error("scope cursors exceed the source inventory"));
@@ -165,7 +151,6 @@ impl QueryEngine {
         let FrontDemandAdmission {
             carry,
             lower_carry,
-            jobs: _,
             weight,
             max_reads,
             runtime,
@@ -177,7 +162,7 @@ impl QueryEngine {
         let previous = self.bootstrap_active;
         self.bootstrap_active = true;
         let prepared = (|| {
-            let capture = self.capture_namespace(definitions, &[], request.free())?;
+            let capture = self.capture_namespace(definitions, request.free())?;
             let front =
                 self.front_body_queries_in(definitions, capture, weight, &request, errors)?;
             if let Some(carry) = &carry {
@@ -192,9 +177,7 @@ impl QueryEngine {
             Ok(lower)
         })();
         self.bootstrap_active = previous;
-        let initial = prepared.map_err(|error| {
-            FrontDemandError::Generator(FrontRegistrationBootstrapError::Admission(error))
-        })?;
+        let initial = prepared.map_err(|error| FrontDemandError::Admission(error))?;
         let producer = demand::DemandProducer::new(
             self,
             initial.clone(),
@@ -207,9 +190,7 @@ impl QueryEngine {
             max_reads,
             errors,
         )
-        .map_err(|error| {
-            FrontDemandError::Generator(FrontRegistrationBootstrapError::Admission(error))
-        })?;
+        .map_err(|error| FrontDemandError::Admission(error))?;
         let query = producer
             .scope_query(
                 initial.namespace().clone(),
@@ -218,9 +199,7 @@ impl QueryEngine {
                 stop_on_error,
                 preparation_roots.as_deref(),
             )
-            .map_err(|error| {
-                FrontDemandError::Generator(FrontRegistrationBootstrapError::Admission(error))
-            })?;
+            .map_err(|error| FrontDemandError::Admission(error))?;
         let mut runtime = AdmittedRuntime::new(runtime, errors)
             .map_err(|_| admission_error("runtime partition"))?;
         runtime
@@ -243,9 +222,6 @@ impl QueryEngine {
         let successor = match result {
             Ok(successor) if selected.is_ok() => successor,
             result => {
-                if let Some(failure) = producer.take_failure() {
-                    return Err(FrontDemandError::Generator(failure));
-                }
                 let error = result.err().unwrap_or(QueryError::NotImplemented);
                 return Err(FrontDemandError::Discovery {
                     error,
@@ -257,9 +233,7 @@ impl QueryEngine {
         let namespace = successor.namespace().clone();
         let operation = namespace
             .admit_consumers(query.address.0)
-            .map_err(|error| {
-                FrontDemandError::Generator(FrontRegistrationBootstrapError::Admission(error))
-            })?;
+            .map_err(|error| FrontDemandError::Admission(error))?;
         let failure = producer.front_failure(roots);
         let rounds = producer.rounds();
         let definitions = namespace
@@ -267,14 +241,11 @@ impl QueryEngine {
             .keys()
             .map(|id| id.path().clone())
             .collect();
-        let registrations = namespace.registrations.values().cloned().collect();
         if Arc::ptr_eq(&namespace, initial.namespace()) {
             self.adopt_completed_headers();
         } else {
             self.adopt_namespace_inputs(&namespace, Some(initial.namespace().as_ref()))
-                .map_err(|error| {
-                    FrontDemandError::Generator(FrontRegistrationBootstrapError::Admission(error))
-                })?;
+                .map_err(|error| FrontDemandError::Admission(error))?;
         }
         let front = carry
             .as_ref()
@@ -286,7 +257,6 @@ impl QueryEngine {
             operation,
             carry,
             definitions,
-            registrations,
             namespace,
             front,
             rounds,
@@ -303,7 +273,6 @@ impl QueryEngine {
         namespace.require_environment(self)?;
         let previous = previous.filter(|previous| previous.admits_successor(namespace));
         self.sources = namespace.sources.clone();
-        self.instance_bodies = (*namespace.instances).clone();
         if let Some(headers) = namespace.snapshot.header_products() {
             self.staged_constants = headers.staged_constants().clone();
         }
@@ -342,10 +311,6 @@ impl QueryEngine {
                 self.items
                     .insert(id.path().clone(), vec![namespace.syntax(id.path())?]);
             }
-        }
-        for (id, registration) in &namespace.registrations {
-            self.generated
-                .insert(id.path().clone(), registration.source());
         }
         self.snapshot = Some((
             self.snapshot_stamp(),

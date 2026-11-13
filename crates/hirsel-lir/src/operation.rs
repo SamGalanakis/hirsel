@@ -94,7 +94,6 @@ pub enum BuiltinType {
     Atomic,
     Ptr,
     FnPtr,
-    TypeShape,
 }
 snapshot_enum!(BuiltinType {
     Array,
@@ -116,8 +115,7 @@ snapshot_enum!(BuiltinType {
     Mutex,
     Atomic,
     Ptr,
-    FnPtr,
-    TypeShape
+    FnPtr
 });
 /// Independently supplied operation declarations. Implementations derive from
 /// the declaration and actuals, never from the candidate unit or its call ABI.

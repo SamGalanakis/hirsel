@@ -34,7 +34,6 @@ the extra restriction it introduces:
 | mutex payload, capture and result | CONC-5 |
 | channel payload | CONC-6 |
 | iteration marker and place | SEM-4 |
-| contracts and facts | FACT-1, FACT-2 |
 | other closure construction and escape | CLO-1 for scoped values, CLO-4 for escaping capture and authority |
 | a restricted scope-forming callback's authority | CAP-3 |
 | a transparent scoped call's unknown or joined authority | CLO-2 |
@@ -232,7 +231,7 @@ Invalidated brands are reported at their first incompatible use, with the invali
 note, never as an earlier primary error.
 
 Reserved identifiers cite the keyword (LANG-14), forbidden labels, patterns and facts cite
-their form's rule (LANG-12, LANG-13, FACT-2), and other malformed syntax cites LANG-1, except
+their form's rule (LANG-12, LANG-13), and other malformed syntax cites LANG-1, except
 for these missing or malformed declaration components, owned by their own rules:
 
 | Missing or malformed declaration component | Owner |
@@ -260,7 +259,7 @@ budget exhaustion cites CT-1 at the comptime expression too, with the denied cal
 as a secondary site and the budget as a note. Static errors inside comptime keep
 their ordinary owners. Run-time failures keep their operative rule. Their primary location follows
 [`@track_caller`](failure.md#fail-1-kinds); the original operation remains available
-independently. A false `ensures` has the declared clause as its operation site. Run-time order is
+independently. Run-time order is
 execution order, except for the spawn-order selection of
 [FAIL-2](failure.md#fail-2-boundary).
 

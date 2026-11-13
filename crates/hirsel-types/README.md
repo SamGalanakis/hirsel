@@ -4,79 +4,6 @@ Own semantic types, complete signatures, checked decisions and shared query data
 Allowed dependencies: syntax, intern, span, diag, codec; no implementation crates.
 Wire tests use run-config's shared `hex` formatter as a dev dependency.
 
-- `TypeInterner` is the session's one canonical, concurrent type interner
-  (design §1a). Every phase and thread interns into it exactly and losslessly
-  (`intern`), so one row has one `TypeId` and promotion cannot fork identity.
-  `TypeId(u32)` has no provenance and no order; ids never reach output.
-  Rows live in address-stable chunks over an optional immutable `TypeBase`
-  (the std image), indexed by 64 hash shards. `intern_graph` admits rows
-  naming each other before they exist (hand-built and invalid cyclic graphs).
-  Per-id memos: `validate`/`valid` (missing rows, recovery rows, cycles),
-  `sem` (callable parameter names erased, erased captures sorted, Known(Unknown)
-  as None), `strip_modes` and `shape`. `semantic_eq` is `valid` and equal `sem`.
-- `TypeMemo` (structural, session-wide, one each for I and V) memoizes
-  `substitute` by root, binder, arguments, authorities and roles; `instantiate`
-  by the view's exact `ViewDigest` and actuals; `project` by (owner, part,
-  plain). `ContextMemo` (one per query, bound to its `GenericDeclarations` and
-  signature lookup) memoizes `prove`, `plain` and the directional `compatible`
-  relation, and replays each entry's lookups on a hit.
-- Persisted forms use canonical per-definition tables (`closure`,
-  `encode_table`, `decode_table`): first-encounter order from the roots, never
-  interner numbering. `TypeId` serializes only inside `with_table_encoding`/
-  `with_table_decoding`, as a table position. The std image's one table grows
-  as its values serialize (`TableBuilder`), and its rows become an immutable
-  `TypeBase` (`TypeTable::into_base`) whose positions values decode to
-  directly (`with_base_decoding`).
-- `GeneratedActualKey` is main's CT-5 key, the CT-3 closed spelling of each
-  actual, interned once and memoized per TypeId.
-- `Signature` is self-contained. Fixed header defaults never come from bodies
-  (LANG-6). `SignatureMetadata` carries visibility, transparent-alias status,
-  the `unsafe ffi` package fact, a safe wrapper's trusted kind and model, and nominal
-  Unsafe/Result roles. Opaque representation details, including whether the hidden
-  representation is an alias, are private. `FunctionType.foreign` is an extern's
-  ForeignContract (PROG-4). Manifest `Metadata` (with each selected `unsafe ffi`
-  package's wrappers)/`DefinitionMetadata`/`DeclarationSite` are shared inputs.
-- Signatures carry declared contracts only. `unique_rows::result_rows` lists a
-  declared `-> unique` result's rows; no body-derived summary is published.
-- `Type.drop_allocation` is independent of function invocation allocation:
-  NoAlloc, MayAllocate, or a conjunction of generic NoallocDrop obligations.
-  Unproved erased cleanup defaults to MayAllocate. Resource
-  `TypeDefinition.destructor_allocation` is MayAllocate unless explicitly promised
-  NoAlloc; that promise covers body and field cleanup. `Field.growable` is layout
-  metadata. Normalized bounds remain a vector after syntax clause validation.
-- Modes, passing, placement, brands, authority and destruction are separate.
-  Authority/brand alternatives and obligation lists are sorted and deduplicated.
-  `AuthoritySummary::join` unions declared fields and explicit resource uses;
-  Unknown cannot prove inert. A finalizer inherits that authority, or a represented capability’s private
-  implementation ceiling, never exports body-inferred authority. A whole
-  capability contributes only its nominal declaration identity; generic actuals
-  and private ceilings never widen it. Global kind alone proves no structural
-  bound. The v20 normalization follow-up installs these policies.
-- `import_type`, `substitute_type` and `semantic_equal` operate on explicit rooted
-  graphs, remapping every type edge. Substitution arguments belong to the target
-  store; authority substitutions are supplied from declarations. Nested generic
-  functions establish fresh binder scopes. Scoped parameter graph transport is shared; J supplies checked actual identities and authority. GraphError is data, not a source diagnostic. Equality assumes
-  normalized sets and exact binder references; it is neither alias expansion
-  nor subtyping. Rust Eq compares snapshots, not separately allocated meanings.
-- `Resolution` includes expression/type/binding/dependency rows plus reads,
-  contextual, paths, local_functions, deferred, generics, generic_declarations and
-  value reference_scopes. Contextual ordinals have nominal owners; value, type and
-  size parameter references carry their declaring binder. `types` carries primitive and type-parameter
-  uses as ResolvedName::Primitive/TypeParameter. IDs require the retained
-  syntax snapshot. Failed signature reads use fingerprint None, never disappear.
-- `CheckedBody` has expression, binding, pattern, checked-call, instantiation and capture
-  decisions. Every binder and pattern, even unused/wildcard, gets a unique row.
-  BindingDecision names its owner and source site; PatternDecision maps children
-  to declaration-order fields. A let's root PatternDecision carries the
-  `WrittenModes` its annotation writes; no later phase reads the annotation syntax. All TypeIds belong to CheckedBody.types. H supplies
-  types/elaborations; I/J refine use/mode judgments; K consumes them. Resolver
-  LocalId and hirsel-tir LocalId are distinct namespaces.
-- H retains actual mode-bearing expression types and instantiation arguments
-  before parameter weakening (MODE-4/#29). Every repeated generic argument
-  occurrence is checked independently. A sendability proof never grants unique
-  mutation through an unannotated parameter. Capture-at-creation use is explicit
-  and differs from the use inside a closure.
-
 SignatureProvider returns Arc `SignatureRef`; lookup returns `LookupOutput` with
 a manifest revision even on an error. `DependencyRead::ProviderLookup` can retain
 that result separately from resolver-index reads. Missing module members and ambiguous
@@ -129,20 +56,6 @@ written from GEN-1, MODE-2, MODE-4 and MEM-12, over random graphs with modes, ha
 nominal declarations behind a stub lookup and every bound set. J, I and V all read
 these kernels, so their agreement cannot see a fault in one; the references can.
 
-Structural properties have one declaration-based implementation:
-`structural_property` proves Plain, Copyable, Sendable and NeedsRelease;
-`structural_sendability` derives conditional generic summaries. Transparent
-nominals substitute their actual arguments into their representation; opaque
-nominals require exported bounds. Phantom arguments of Ptr/FnPtr/SlotId/TypeShape
-are not owned payloads. Concrete locality excludes Sendable, even for flat
-values. Function and erased Iter capture summaries remain explicit producer facts.
-`projected_type` applies owner locality and the derived root sendability to
-nonplain parts, preserving nested declared contracts.
-`normalize_type_properties` rebuilds immutable graphs after substitution or mode
-refinement and applies the Plain canonical form to every row its declarations
-prove plain, structurally or by a bound of the binder the row names.
-Provider callbacks retain each phase's dependency/error policy.
-
 Data/Key structural equality also borrows owner rows and imports only reachable
 nominal actuals into private scratch storage. Its nominal fixed points and
 per-path expansion-depth guard are independent of unrelated sibling applications.
@@ -158,7 +71,6 @@ other type argument are exact. A row along such a path that is Sendable is
 received where sendability is not promised.
 The comparator never repairs actual evidence before validating it. Signature
 specialization and producers derive summaries before publication instead.
-
 
 `ParameterRef::Bound { depth, parameter }` names a lexical signature binder;
 `ParameterRef::Body { scope, parameter }` names a retained checked source scope.
@@ -476,8 +388,6 @@ callables and unsupported runtime constructors fail closed at every depth.
 encoding writes it as a framed extension only when present, so other signatures'
 encodings are unchanged. `SignatureProvider::recursive_group` supplies a group's
 other members at a `GroupStage`; providers without groups return none.
-
-
 
 `wire` implements SER-2 version 1 over concrete `serialization` schema graphs.
 Its explicit envelope binds codec version and the complete canonical descriptor;

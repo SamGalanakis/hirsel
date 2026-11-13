@@ -269,34 +269,52 @@ fn scoped_allocation(ctx: &mut Context) {
 }
 
 #[inline(never)]
-fn material_scope<const BOUND: bool, const ALLOCATE: bool>() -> u64 {
+fn material_scope<const BOUND: bool, const ALLOCATE: bool, const C_ABI: bool>() -> u64 {
     let mut ctx = Context::new(if BOUND { 1024 } else { 64 });
     let mut sum = 0;
     for _ in 0..COUNT {
         let bytes = black_box(64);
         if BOUND {
-            ctx.limit_enter(bytes).unwrap();
+            if C_ABI {
+                // SAFETY: the benchmark owns its live native context and matching exit.
+                let admitted =
+                    unsafe { hirsel_core_rt::abi::hirsel_core_limit_enter(&mut ctx, bytes) };
+                assert!(!admitted.pointer.is_null());
+            } else {
+                ctx.limit_enter(bytes).unwrap();
+            }
         }
         if ALLOCATE {
             scoped_allocation(black_box(&mut ctx));
         }
         sum += black_box(black_box(&mut ctx).available());
         if BOUND {
-            ctx.limit_exit();
+            if C_ABI {
+                // SAFETY: exactly the successful entry above, with no surviving owners.
+                unsafe {
+                    hirsel_core_rt::abi::hirsel_core_limit_exit(&mut ctx);
+                }
+            } else {
+                ctx.limit_exit();
+            }
         }
     }
     sum
 }
 
 fn limits(mode: &str) -> u64 {
-    if mode == "full_alloc" {
-        material_scope::<true, true>()
+    if mode == "c_full_alloc" {
+        material_scope::<true, true, true>()
+    } else if mode == "c_full" {
+        material_scope::<true, false, true>()
+    } else if mode == "full_alloc" {
+        material_scope::<true, true, false>()
     } else if mode == "alloc_control" {
-        material_scope::<false, true>()
+        material_scope::<false, true, false>()
     } else if mode == "query" {
-        material_scope::<false, false>()
+        material_scope::<false, false, false>()
     } else if mode == "full" {
-        material_scope::<true, false>()
+        material_scope::<true, false, false>()
     } else if mode == "runtime" {
         let ctx = Context::new(1024);
         let mut sum = 0;

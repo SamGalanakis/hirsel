@@ -204,8 +204,8 @@ fn completed_view_survives_failed_stream() -> bool {
     })
 }
 
-// A formal Region keeps this concrete writer independent of the pending local-Region
-// callback substitution. The four local-Region stream laws above retain that coverage.
+// This formal-Region writer isolates original-payer refunds. The local-Region
+// stream laws above separately cover callback argument and result root substitution.
 fn reserved_text(r: Region) -> Result[Builder[Text, in r], BuildError] {
     build_stream_in(r, bytes 64, fn(take w: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
         emit(take w, "hi")

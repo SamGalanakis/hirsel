@@ -1238,6 +1238,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         };
         let allocation = admission::OwnedAllocation {
+            layout: None,
             kind: AllocKind::Own,
             charge,
             size: (frame.physical + 7) & !7,

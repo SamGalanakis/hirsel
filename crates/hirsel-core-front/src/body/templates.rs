@@ -14,10 +14,17 @@ pub struct CopySize {
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct AllocationLayout {
+    pub result: ValueId,
+    pub ty: TypeId,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GenericTemplate {
     pub signatures: BTreeMap<SigId, scalar_abi::SignatureAbi>,
     pub parameters: Vec<Option<TypeId>>,
     pub copies: Vec<CopySize>,
+    pub allocations: Vec<AllocationLayout>,
     pub nested: BTreeMap<FuncId, GenericTemplate>,
     pub types: BTreeMap<TypeId, NameRecipe>,
     pub calls: BTreeMap<FuncId, GenericCall>,
@@ -564,12 +571,65 @@ fn fill(
         .iter()
         .map(|copy| (copy.value, (s.ty(copy.ty), copy.logical)))
         .collect::<HashMap<_, _>>();
+    let allocations = template
+        .allocations
+        .iter()
+        .map(|a| (a.result, s.ty(a.ty)))
+        .collect::<HashMap<_, _>>();
     let recipes = hirsel_core_layout::compute(&s.module.types)
         .map_err(|e| format!("instance layout: {e:?}"))?;
+    // A constructor allocates its block, rather than its carried holder. Its
+    // requested charge is also returned by the Capacity handback on refusal.
+    let mut allocation_constants = HashMap::default();
     for inst in &mut body.insts {
-        if let Inst::Const { result, bits } = inst
-            && let Some(&(ty, logical)) = sizes.get(result)
-        {
+        let Inst::Alloc {
+            result,
+            charge,
+            size,
+            align,
+            kind,
+            overflow,
+            ..
+        } = inst
+        else {
+            continue;
+        };
+        let Some(&ty) = allocations.get(result) else {
+            continue;
+        };
+        let recipe = &recipes[ty.index()];
+        let Layout::Fixed(fixed) = &recipe.layout else {
+            return Err("a generic constructor requires a fixed block layout".into());
+        };
+        let logical = recipe
+            .logical_size
+            .ok_or("a generic constructor requires a logical block size")?;
+        let amount = match kind {
+            AllocKind::Resource { grant } => {
+                *grant = s.module.types[ty.index()].grant;
+                hirsel_core_layout::charge::resource(logical, *grant)
+            }
+            AllocKind::Plain => logical.checked_add(7).map(|n| n & !7),
+            _ => unreachable!("only typed resource and region constructors use block relocation"),
+        };
+        allocation_constants.insert(*charge, amount.unwrap_or(u64::MAX));
+        allocation_constants.insert(*size, fixed.size);
+        allocation_constants.insert(overflow.unwrap(), u64::from(amount.is_none()));
+        // The closed charge is known here. Keep only a true overflow operand;
+        // an admitted resource uses its resource allocation and cause cell.
+        if amount.is_some() {
+            *overflow = None;
+        }
+        *align = fixed.align;
+    }
+    for inst in &mut body.insts {
+        if let Inst::Const { result, bits } = inst {
+            if let Some(value) = allocation_constants.get(result) {
+                *bits = *value;
+            }
+            let Some(&(ty, logical)) = sizes.get(result) else {
+                continue;
+            };
             *bits = if s.module.types[ty.index()].repr == LRepr::Resource {
                 hirsel_core_layout::POINTER
             } else if logical {

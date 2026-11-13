@@ -77,6 +77,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.admit_with_handback(
             ty,
             admission::OwnedAllocation {
+                layout: Some(rid),
                 kind: AllocKind::Resource { grant },
                 charge,
                 size,
@@ -227,6 +228,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let block = self.value(Ty::Ptr);
         let available = self.value(u64t);
         let fail = self.fail_to(n);
+        let overflow = self.allocation_layout(id, block, n);
         self.inst(
             Inst::Alloc {
                 result: block,
@@ -235,7 +237,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 kind: AllocKind::Plain,
                 place: AllocPlace::Region(region),
                 charge,
-                overflow: None,
+                overflow,
                 size: sz,
                 align,
                 fail,

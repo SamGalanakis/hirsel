@@ -248,6 +248,50 @@ fn run_case(path: &Path) -> Vec<String> {
             }
         }
     }
+    if path
+        .file_stem()
+        .is_some_and(|x| x == "generic-allocation-layout")
+    {
+        use hirsel_core_ir::{AllocKind, Inst};
+        let mut checked = 0;
+        for f in &module.functions {
+            let key = &module.instances[f.instance.index()];
+            let expected = match (key.definition.0.name.as_str(), key.types.as_slice()) {
+                ("hold", [t]) if t == "u32" => (44, 16, 8),
+                ("hold", [t]) if t == "()" => (40, 8, 8),
+                ("hold", [t]) if t == "app@1/main/Big" => (104, 72, 8),
+                ("hold_only", [t]) if t == "u32" => (36, 4, 4),
+                _ => continue,
+            };
+            let Some(b) = &f.body else { continue };
+            let constant = |value| {
+                b.insts
+                    .iter()
+                    .find_map(|i| match i {
+                        Inst::Const { result, bits } if *result == value => Some(*bits),
+                        _ => None,
+                    })
+                    .unwrap()
+            };
+            let actual = b
+                .insts
+                .iter()
+                .find_map(|i| match i {
+                    Inst::Alloc {
+                        kind: AllocKind::Resource { .. },
+                        charge,
+                        size,
+                        align,
+                        ..
+                    } => Some((constant(*charge), constant(*size), *align)),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(actual, expected, "{key:?}");
+            checked += 1;
+        }
+        assert_eq!(checked, 4);
+    }
     if path.file_stem().is_some_and(|x| x == "ordered-cost") {
         let find = |name: &str, generic: bool| {
             module
@@ -514,6 +558,12 @@ fn cases(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(e);
         }
     }
+}
+
+#[test]
+fn generic_allocation_layout() {
+    let failures = run_case(&root().join("cases/body/generic-allocation-layout.hirsel"));
+    assert!(failures.is_empty(), "{failures:?}");
 }
 
 #[test]

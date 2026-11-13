@@ -6,9 +6,26 @@ pub(super) struct OwnedAllocation {
     pub charge: u64,
     pub size: u64,
     pub align: u64,
+    pub layout: Option<TypeId>,
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
+    /// Called immediately before emitting a typed block allocation. Copies and
+    /// owner operations use held-value sizes, which differ for a resource.
+    pub(super) fn allocation_layout(
+        &mut self,
+        ty: TypeId,
+        result: ValueId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        if !self.e.generic_names.contains_key(&ty) {
+            return None;
+        }
+        let overflow = self.konst(Ty::Scalar(Scalar::Bool), 0, n)?;
+        self.allocations.push(AllocationLayout { result, ty });
+        Some(overflow)
+    }
+
     pub(super) fn admit_with_handback(
         &mut self,
         ty: TyId,
@@ -31,6 +48,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let block = self.value(Ty::Ptr);
         let available = self.value(Ty::Scalar(Scalar::U64));
         let fail = self.fail_to(n);
+        let overflow = allocation
+            .layout
+            .and_then(|id| self.allocation_layout(id, block, n));
         self.inst(
             Inst::Alloc {
                 result: block,
@@ -39,7 +59,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 kind: allocation.kind,
                 place: AllocPlace::Current,
                 charge: c,
-                overflow: None,
+                overflow,
                 size: sz,
                 align: allocation.align,
                 fail,

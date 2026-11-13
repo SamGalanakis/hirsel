@@ -63,7 +63,7 @@ mod stable;
 mod templates;
 mod types;
 mod writers;
-use templates::{CopySize, GenericCall, NameRecipe};
+use templates::{AllocationLayout, CopySize, GenericCall, NameRecipe};
 pub use templates::{GenericTemplate, materialize};
 mod values;
 use types::*;
@@ -927,6 +927,7 @@ struct Cx<'c, 'a, 'e> {
     placing: Option<Placing>,
     scope_slots: Vec<u32>,
     copies: Vec<CopySize>,
+    allocations: Vec<AllocationLayout>,
     nested: std::collections::BTreeMap<FuncId, GenericTemplate>,
     call_seq: u32,
     callable_signatures: Vec<Option<closures::CallableAbi>>,
@@ -1041,6 +1042,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             placing: None,
             scope_slots: vec![],
             copies: vec![],
+            allocations: vec![],
             nested: Default::default(),
             call_seq: 0,
             callable_signatures: vec![],
@@ -1740,6 +1742,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                     signatures,
                     parameters,
                     copies: std::mem::take(&mut self.copies),
+                    allocations: std::mem::take(&mut self.allocations),
                     nested: std::mem::take(&mut self.nested),
                     types: self.e.generic_names.clone(),
                     calls: self.e.generic_calls.clone(),

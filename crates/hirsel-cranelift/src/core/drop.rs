@@ -498,6 +498,15 @@ impl Glue<'_, '_, '_> {
                     + 16;
                 self.free_buffer(p, cap, logical)?;
             }
+            FieldTy::Handle(hirsel_core_layout::Handle::HostFile) => {
+                let handle = self.load(at, 0);
+                self.call(
+                    "hirsel_core_hostfile_drop",
+                    &[P, U],
+                    &[],
+                    &[self.ctx, handle],
+                )?;
+            }
             FieldTy::Handle(hirsel_core_layout::Handle::Causes) => {
                 let p = self.load(at, 0);
                 self.call("hirsel_core_causes_drop", &[P], &[], &[p])?;

@@ -488,7 +488,7 @@ pub(super) fn declare_allocators(
     for body in input.functions.iter().filter_map(|f| f.body.as_ref()) {
         for inst in &body.insts {
             if let Inst::Alloc {
-                kind: kind @ (AllocKind::Plain | AllocKind::Counted),
+                kind: kind @ (AllocKind::Plain | AllocKind::Own | AllocKind::Counted(_)),
                 align,
                 place: AllocPlace::Current | AllocPlace::Like(_),
                 ..

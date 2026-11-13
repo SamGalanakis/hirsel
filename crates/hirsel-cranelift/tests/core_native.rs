@@ -72,27 +72,41 @@ fn execute_reports(
     injection: Option<(usize, bool)>,
     reports: Option<&[eval::Report]>,
 ) {
-    let scheduled = module
-        .functions
-        .iter()
-        .filter_map(|f| f.body.as_ref())
-        .any(|body| {
-            body.calls.iter().any(|call| {
-                matches!(
-                    call.callee,
-                    Callee::Runtime(
-                        RtOp::Spawn { .. }
-                            | RtOp::Join { .. }
-                            | RtOp::Cancel
-                            | RtOp::ChannelNew { .. }
-                            | RtOp::ChannelSender
-                            | RtOp::Send { .. }
-                            | RtOp::TrySend { .. }
-                            | RtOp::Receive { .. }
+    fn has_hostfile(field: &hirsel_core_layout::FieldTy) -> bool {
+        use hirsel_core_layout::{FieldTy, Handle};
+        match field {
+            FieldTy::Handle(Handle::HostFile) => true,
+            FieldTy::Array(t, _) | FieldTy::Seq(t) => has_hostfile(t),
+            FieldTy::Map(k, v) => has_hostfile(k) || has_hostfile(v),
+            _ => false,
+        }
+    }
+    let host_files = module.types.iter().any(|t| {
+        t.fields(None)
+            .is_some_and(|fields| fields.iter().any(|f| has_hostfile(&f.ty)))
+    });
+    let scheduled = !host_files
+        && module
+            .functions
+            .iter()
+            .filter_map(|f| f.body.as_ref())
+            .any(|body| {
+                body.calls.iter().any(|call| {
+                    matches!(
+                        call.callee,
+                        Callee::Runtime(
+                            RtOp::Spawn { .. }
+                                | RtOp::Join { .. }
+                                | RtOp::Cancel
+                                | RtOp::ChannelNew { .. }
+                                | RtOp::ChannelSender
+                                | RtOp::Send { .. }
+                                | RtOp::TrySend { .. }
+                                | RtOp::Receive { .. }
+                        )
                     )
-                )
-            })
-        });
+                })
+            });
     let scratch = Scratch::new();
     let layouts = hirsel_core_layout::compute(&module.types).unwrap();
     let artifact = emit_object_for_test(
@@ -174,7 +188,23 @@ fn execute_reports(
             source.push_str("); return 0; }\n");
         }
     }
-    source.push_str("#include <sys/resource.h>\nint main(void) {\n");
+    let mut process_calls = String::new();
+    if host_files {
+        source.push_str(r#"
+extern void hirsel_core_test_reset_limit(HirselCoreContext *,uint64_t);
+static HirselCoreHostOutcome file_issue(void *state,HirselCoreHostRequest *r) {
+ if(r->operation==0) return (HirselCoreHostOutcome){.value=r->handle};
+ if(r->operation!=3) __builtin_abort();
+ hirsel_core_test_drop_trace(r->handle);
+ return (HirselCoreHostOutcome){.error={5,99},.status=1};
+}
+static HirselCoreHostOutcome file_deliver(void *s,HirselCoreHostRequest *r,HirselCoreHostOutcome out) { return out; }
+static HirselCoreHostOutcome wrong_provider(void *s,HirselCoreHostRequest *r) { __builtin_abort(); }
+static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
+"#);
+    } else {
+        source.push_str("#include <sys/resource.h>\nint main(void) {\n");
+    }
     if reports.is_some() {
         source.push_str(
             "struct rlimit stack = {65536,65536}; if(setrlimit(RLIMIT_STACK,&stack)) return 7;\n",
@@ -215,12 +245,22 @@ fn execute_reports(
             }
         }
         expected.push(report.used);
-        source.push_str("{\n");
-        writeln!(
-            source,
-            "HirselCoreContext *ctx = hirsel_core_test_context_new(UINT64_C({limit})); traces=0;"
-        )
-        .unwrap();
+        if host_files {
+            writeln!(source, "static uint8_t fixture{i}(HirselCoreContext *ctx,const HirselCoreProcessConfig *cfg,HirselCoreMainResult *out) {{ hirsel_core_test_reset_limit(ctx,UINT64_C({limit}));").unwrap();
+            // The scalar sample ABI erases which input word is an opaque handle.
+            // Seed the authored input keys through real OPEN/registry operations;
+            // the run owns and drains the unused fixture keys after observation.
+            let maximum = args.iter().copied().max().unwrap_or(0);
+            writeln!(source, "HirselCoreProvider issuing={{0,file_issue,file_deliver}}; for(uint64_t key=1;key<=UINT64_C({maximum});key++) {{ HirselCoreHostRequest request={{.operation=0,.handle=key}}; HirselCoreHostOutcome opened=hirsel_core_host_file_open(ctx,&issuing,&request);if(opened.status || opened.error.tag || opened.value!=key) __builtin_abort(); }} traces=0;").unwrap();
+            writeln!(
+                process_calls,
+                "if(hirsel_core_run(&config,fixture{i})) return 11;"
+            )
+            .unwrap();
+        } else {
+            source.push_str("{\n");
+            writeln!(source, "HirselCoreContext *ctx = hirsel_core_test_context_new(UINT64_C({limit})); traces=0;").unwrap();
+        }
         if let Some((n, later)) = injection {
             writeln!(
                 source,
@@ -323,7 +363,18 @@ fn execute_reports(
         expected.extend(&report.trace);
         expected.push(report.admissions as u64);
         writeln!(source,"uint64_t used = UINT64_C({limit}) - hirsel_core_test_available(ctx); fwrite(&used,8,1,stdout); uint64_t nt=traces; fwrite(&nt,8,1,stdout); fwrite(trace,8,traces,stdout); uint64_t na=hirsel_core_test_attempts(ctx); fwrite(&na,8,1,stdout); hirsel_core_causes_drop(causes); if(status && hirsel_core_test_available(ctx) != UINT64_C({limit})) return 9; hirsel_core_context_free(ctx);").unwrap();
-        source.push_str("}\n");
+        if host_files {
+            // Context/run ownership belongs to hirsel_core_run in this path.
+            let end = source.rfind("hirsel_core_context_free(ctx);").unwrap();
+            source.replace_range(end..end + "hirsel_core_context_free(ctx);".len(), "");
+            source.push_str("return 0; }\n");
+        } else {
+            source.push_str("}\n");
+        }
+    }
+    if host_files {
+        source.push_str("int main(void) { HirselCoreProvider other={0,wrong_provider,file_deliver}; HirselCoreProcessConfig config={.root_limit=1000000,.provider=&other,.diagnostic=diagnostic};\n");
+        source.push_str(&process_calls);
     }
     source.push_str("return 0; }\n");
     let actual = link_run(&scratch, &source);
@@ -1262,17 +1313,31 @@ b5:
 fn inlined_arc_updates_keep_the_provider_event_order() {
     let module = text::parse(
         r#"core v1
-type t0 = own "Payload" { value: u64 }
-sig g0 = (ptr) -> (bool)
-inst n0 = test@0/arc/events [] []
-fn f0 = n0 g0 {
-b0(v0: ptr):
-  share v0 arc
-  v1: bool = try_unwrap v0 arc
-  release v0 arc t0
-  v2: bool = try_unwrap v0 arc
-  return v2
-}
+ type t0 = own "Payload" { value: u64 }
+ sig g0 = () -> (bool)
+ inst n0 = test@0/arc/events [] []
+ fn f0 = n0 g0 {
+   addr a0 = v2 byte v1 : u64
+ b0:
+   v0: u64 = const 16
+   v1: u64 = const 8
+   v2: ptr, v3: u64 = alloc counted arc v0 align 8 charge v0
+   v4: ptr = const 0x0
+   v5: bool = ne v2, v4
+   branch v5, b1, b2
+ b1:
+   v6: u64 = const 7
+   address a0
+   store a0, v6
+   share v2 arc
+   v7: bool = try_unwrap v2 arc
+   release v2 arc t0
+   v8: bool = try_unwrap v2 arc
+   release v2 arc t0
+   return v8
+ b2:
+   raise unwrap
+ }
 "#,
     )
     .unwrap();
@@ -1294,23 +1359,21 @@ b0(v0: ptr):
 #include <stdlib.h>
 #include "hirsel_core_rt.h"
 struct R {{ uint8_t value,status; }};
-extern struct R {function}(void*,void*);
+extern struct R {function}(void*);
 extern HirselCoreContext *hirsel_core_test_context_new(uint64_t);
 extern uint64_t hirsel_core_test_available(const HirselCoreContext*);
 extern uint8_t hirsel_core_test_run_events(HirselCoreContext*,uint8_t (*)(HirselCoreContext*,void*,void*),void*,void*,size_t,size_t,HirselCoreSchedulerProvider);
-static uint64_t kinds[4],values[4],count;
+static uint64_t kinds[6],values[6],count;
 static void event(void *state,HirselCoreEvent e) {{
- if(e.kind>=11 && e.kind<=13) {{ if(count==4 || e.task!=0 || e.object!=0) abort(); kinds[count]=e.kind;values[count++]=e.value; }}
+ if(e.kind>=10 && e.kind<=13) {{ if(count==6 || e.task!=0 || e.object!=0) abort(); kinds[count]=e.kind;values[count++]=e.value; }}
 }}
-static uint8_t body(HirselCoreContext *ctx,void *out,void *in) {{ *(struct R*)out={function}(ctx,*(void**)in);return 0; }}
+static uint8_t body(HirselCoreContext *ctx,void *out,void *in) {{ *(struct R*)out={function}(ctx);return 0; }}
 int main(void) {{
  HirselCoreContext *ctx=hirsel_core_test_context_new(1000);
- void *node=hirsel_core_alloc(ctx,0,16,8,16,false,HIRSEL_CORE_NATIVE_GRAPH).pointer;if(!node)return 1;
- hirsel_core_counted_init(node,true);((uint64_t*)node)[1]=7;
  HirselCoreSchedulerProvider provider={{0,event,0}};struct R out;
- if(hirsel_core_test_run_events(ctx,body,&node,&out,sizeof node,sizeof out,provider) || out.status || !out.value)return 2;
- if(count!=4 || kinds[0]!=11 || values[0]!=2 || kinds[1]!=13 || values[1]!=0 || kinds[2]!=12 || values[2]!=0 || kinds[3]!=13 || values[3]!=1)return 3;
- hirsel_core_free_value(node,16);if(hirsel_core_test_available(ctx)!=1000)return 4;
+ if(hirsel_core_test_run_events(ctx,body,0,&out,0,sizeof out,provider) || out.status || !out.value)return 2;
+ if(count!=6 || kinds[0]!=10 || values[0]!=1 || kinds[1]!=11 || values[1]!=2 || kinds[2]!=13 || values[2]!=0 || kinds[3]!=12 || values[3]!=0 || kinds[4]!=13 || values[4]!=1 || kinds[5]!=12 || values[5]!=1)return 3;
+ if(hirsel_core_test_available(ctx)!=1000)return 4;
  hirsel_core_context_free(ctx);return 0;
 }}
 "#,

@@ -1,4 +1,5 @@
 // Reviewed-by: langs-numeric-920 2026-11-13; BFS/DFS/AStar preserve nested i32 adjacency, byte bool marks, FIFO/LIFO/min-heap priorities, LCG and checked arithmetic; overflow checks required.
+// BFS/DFS checked index conversions now mirror int.narrow; delta re-review pending langs-numeric-920.
 // Matched twin of graph.hirsel. Reviewed below.
 // kostya/LangArena3c9f84d benchmarks/graph_path.rs:11-316.
 // Adjacency vectors, FIFO/LIFO searches, minimum (f,vertex) heap and explicit LCG.
@@ -81,22 +82,22 @@ fn bfs_shortest_path(graph: &Graph, start: i32, target: i32) -> i64 {
         return 0;
     }
 
-    let vertices = graph.vertices as usize;
+    let vertices = usize::try_from(graph.vertices).unwrap();
     let mut visited = vec![false; vertices];
     let mut queue = VecDeque::new();
 
-    visited[start as usize] = true;
+    visited[usize::try_from(start).unwrap()] = true;
     queue.push_back((start, 0));
 
     while let Some((v, dist)) = queue.pop_front() {
-        let v_idx = v as usize;
+        let v_idx = usize::try_from(v).unwrap();
 
         for &neighbor in &graph.adj[v_idx] {
             if neighbor == target {
                 return (dist + 1) as i64;
             }
 
-            let neighbor_idx = neighbor as usize;
+            let neighbor_idx = usize::try_from(neighbor).unwrap();
             if !visited[neighbor_idx] {
                 visited[neighbor_idx] = true;
                 queue.push_back((neighbor, dist + 1));
@@ -111,23 +112,23 @@ fn dfs_find_path(graph: &Graph, start: i32, target: i32) -> i64 {
         return 0;
     }
 
-    let vertices = graph.vertices as usize;
+    let vertices = usize::try_from(graph.vertices).unwrap();
     let mut visited = vec![false; vertices];
     let mut stack = vec![(start, 0)];
     let mut best_path = i32::MAX;
 
     while let Some((v, dist)) = stack.pop() {
-        if visited[v as usize] || dist >= best_path {
+        if visited[usize::try_from(v).unwrap()] || dist >= best_path {
             continue;
         }
-        visited[v as usize] = true;
+        visited[usize::try_from(v).unwrap()] = true;
 
-        for &neighbor in &graph.adj[v as usize] {
+        for &neighbor in &graph.adj[usize::try_from(v).unwrap()] {
             if neighbor == target {
                 if dist + 1 < best_path {
                     best_path = dist + 1;
                 }
-            } else if !visited[neighbor as usize] {
+            } else if !visited[usize::try_from(neighbor).unwrap()] {
                 stack.push((neighbor, dist + 1));
             }
         }

@@ -1,4 +1,5 @@
 // Reviewed-by: langs-numeric-920 2026-11-13; Generator/BFS/AStar: same nested cells, shuffled inline neighbors, flat BFS marks, i32 path/scores, min priorities and LCG. Overflow checks required.
+// BFS/AStar checked path conversions and inline neighbor copies now mirror Hirsel; delta re-review pending langs-numeric-920.
 // Matched twin of maze.hirsel. Reviewed below.
 // kostya/LangArena3c9f84d benchmarks/maze.rs:8-468.
 // Nested cell vectors, four ordered neighbors, u32 kinds, same path arrays and LCG.
@@ -230,14 +231,15 @@ fn bfs(m: &Maze, start: (usize, usize), target: (usize, usize)) -> Vec<(usize, u
     while let Some(path_id) = queue.pop_front() {
         let (y, x, _) = path[path_id];
 
-        for &(ny, nx) in &m.get_cell(y, x).neighbors {
+        let neighbors = m.get_cell(y, x).neighbors;
+        for (ny, nx) in neighbors {
             if (ny, nx) == target {
                 let mut result = vec![target];
-                let mut current = path_id as i32;
+                let mut current = i32::try_from(path_id).unwrap();
                 while current >= 0 {
-                    let (py, px, _) = path[current as usize];
+                    let (py, px, _) = path[usize::try_from(current).unwrap()];
                     result.push((py, px));
-                    current = path[current as usize].2;
+                    current = path[usize::try_from(current).unwrap()].2;
                 }
                 result.reverse();
                 return result;
@@ -245,7 +247,7 @@ fn bfs(m: &Maze, start: (usize, usize), target: (usize, usize)) -> Vec<(usize, u
 
             if walkable(m.get_cell(ny, nx).kind) && !visited[ny * width + nx] {
                 visited[ny * width + nx] = true;
-                path.push((ny, nx, path_id as i32));
+                path.push((ny, nx, i32::try_from(path_id).unwrap()));
                 queue.push_back(path.len() - 1);
             }
         }
@@ -281,12 +283,12 @@ fn astar(m: &Maze, start: (usize, usize), target: (usize, usize)) -> Vec<(usize,
     while let Some(Reverse((_, current_idx))) = open_set.pop() {
         if current_idx == target_idx {
             let mut path = Vec::new();
-            let mut cur = current_idx as i32;
+            let mut cur = i32::try_from(current_idx).unwrap();
             while cur != -1 {
-                let y = (cur as usize) / width;
-                let x = (cur as usize) % width;
+                let y = (usize::try_from(cur).unwrap()) / width;
+                let x = (usize::try_from(cur).unwrap()) % width;
                 path.push((y, x));
-                cur = came_from[cur as usize];
+                cur = came_from[usize::try_from(cur).unwrap()];
             }
             path.reverse();
             return path;
@@ -296,7 +298,8 @@ fn astar(m: &Maze, start: (usize, usize), target: (usize, usize)) -> Vec<(usize,
         let current_x = current_idx % width;
         let current_g = g_score[current_idx];
 
-        for &(ny, nx) in &m.get_cell(current_y, current_x).neighbors {
+        let neighbors = m.get_cell(current_y, current_x).neighbors;
+        for (ny, nx) in neighbors {
             if !walkable(m.get_cell(ny, nx).kind) {
                 continue;
             }
@@ -305,7 +308,7 @@ fn astar(m: &Maze, start: (usize, usize), target: (usize, usize)) -> Vec<(usize,
             let tentative_g = current_g + 1;
 
             if tentative_g < g_score[neighbor_idx] {
-                came_from[neighbor_idx] = current_idx as i32;
+                came_from[neighbor_idx] = i32::try_from(current_idx).unwrap();
                 g_score[neighbor_idx] = tentative_g;
                 let f_new = tentative_g + heuristic((ny, nx), target);
 

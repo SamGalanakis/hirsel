@@ -1,4 +1,5 @@
 // Reviewed-by: langs-numeric-920 2026-11-13; all eight generated-input variants including HuffEncode/HuffDecode/LZWDecode; matching stable merge, boxed trees, first-equal insertion, arithmetic tables and byte dictionaries; overflow checks required.
+// ArithEncode checked signed-frequency conversions now mirror int.narrow; delta re-review pending langs-numeric-920.
 // Matched twin of compress.hirsel. All eight generated-input variants reviewed.
 // Additional review langs-numeric-920: HuffEncode/HuffDecode/LZWDecode use matching boxed trees, first-equal insertion, i32 bit/frequency vectors, deep byte copies and owned dictionaries.
 // kostya/LangArena3c9f84d benchmarks/compress.rs. Same prefix-doubling BWT,
@@ -319,12 +320,13 @@ fn arith_encode(data: &[u8]) -> ArithEncodedResult {
     let mut pending = 0u64;
     let mut output = BitOutputStream::new();
 
+    let total = u64::try_from(freq_table.total).unwrap();
     for &byte in data {
         let idx = byte as usize;
         let range = high - low + 1;
 
-        high = low + (range * freq_table.high[idx] as u64 / freq_table.total as u64) - 1;
-        low = low + (range * freq_table.low[idx] as u64 / freq_table.total as u64);
+        high = low + (range * u64::try_from(freq_table.high[idx]).unwrap() / total) - 1;
+        low = low + (range * u64::try_from(freq_table.low[idx]).unwrap() / total);
 
         loop {
             if high < 0x80000000 {

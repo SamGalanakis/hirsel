@@ -575,29 +575,79 @@ fn repeated_reads_are_a_set_but_missing_and_shadowed_reads_survive() {
 }
 #[test]
 fn numeric_bounds_only_on_core_type_parameters() {
-    for (source, allowed) in [
+    for (source, core_allowed) in [
         ("pub fn f[T: integer, F: float](x: T) -> F", true),
         ("pub opaque type Numeric[T: integer]", true),
+        ("fn f[F: float](x: F) -> F { x }", true),
         ("fn f[T: integer](x: T) -> T { x }", true),
         ("type Numeric[T: float] { n: T }", true),
         ("type Numeric: integer", false),
+        ("type Numeric: float { n: f64 }", false),
     ] {
-        let (i, f) = packages(&[("core", "numeric", source)], Symbols::default());
-        let r = run(&i, &f, 0, 0);
-        assert_eq!(
-            r.diagnostics.iter().any(|d| d.rule == "OWN-4"),
-            !allowed,
-            "{source}: {:?}",
-            r.diagnostics
-        );
-        if allowed {
-            let (i, f) = packages(&[("app", "numeric", source)], Symbols::default());
-            assert!(
-                run(&i, &f, 0, 0)
-                    .diagnostics
-                    .iter()
-                    .any(|d| d.rule == "OWN-4")
+        for pkg in ["core", "app"] {
+            let (i, f) = packages(&[(pkg, "numeric", source)], Symbols::default());
+            let r = run(&i, &f, 0, 0);
+            let allowed = pkg == "core" && core_allowed;
+            assert_eq!(
+                r.diagnostics.iter().any(|d| d.rule == "OWN-4"),
+                !allowed,
+                "{pkg}: {source}: {:?}",
+                r.diagnostics
             );
+            if allowed {
+                assert!(r.diagnostics.is_empty(), "{source}: {:?}", r.diagnostics);
+            }
+            for d in r.diagnostics.iter().filter(|d| d.rule == "OWN-4") {
+                assert_eq!(d.primary.module, f[0].0);
+                assert_eq!(d.primary.item, 0);
+                let span = d.primary.span;
+                assert!(matches!(
+                    &source[span.start as usize..span.end as usize],
+                    "integer" | "float"
+                ));
+            }
+        }
+    }
+}
+#[test]
+fn only_core_functions_may_end_at_their_header() {
+    for source in [
+        "fn width() -> u64",
+        "fn width() -> u64   // no body\n",
+        "fn width() -> u64\nfn next() -> u64 { 1 }",
+        "pub fn width() -> u64 waits\n",
+        "fn width[in r](x: u64) -> u64 where r: r\n",
+    ] {
+        for pkg in ["core", "app"] {
+            let (i, f) = packages(&[(pkg, "m", source)], Symbols::default());
+            let r = run(&i, &f, 0, 0);
+            if pkg == "core" {
+                assert!(r.diagnostics.is_empty(), "{source}: {:?}", r.diagnostics);
+            } else {
+                assert_eq!(r.diagnostics.len(), 1, "{source}: {:?}", r.diagnostics);
+                let d = &r.diagnostics[0];
+                assert_eq!(d.rule, "LANG-5");
+                let end = source
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .split(" //")
+                    .next()
+                    .unwrap()
+                    .trim_end()
+                    .len() as u32;
+                assert_eq!(
+                    d.primary,
+                    Site {
+                        module: f[0].0,
+                        item: 0,
+                        span: hirsel_core_syntax::Span { start: end, end },
+                    }
+                );
+            }
+            if f[0].1.items.len() > 1 {
+                assert!(run(&i, &f, 0, 1).diagnostics.is_empty());
+            }
         }
     }
 }

@@ -427,7 +427,13 @@ impl Parser<'_> {
             if self.at(sym::LBRACE) {
                 c.push(self.block()?);
             } else if self.mode != ParseMode::Signatures {
-                return self.fail("LANG-5", "function requires a body");
+                let end = self.tokens[self.significant[self.pos - 1]].span.end;
+                self.diagnostics.push(Diagnostic::error(
+                    "LANG-5",
+                    Span { start: end, end },
+                    "function requires a body",
+                ));
+                return Err(());
             }
             return Ok(self.node(s, NodeKind::Function, Some(name), &c));
         }

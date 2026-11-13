@@ -146,6 +146,25 @@ pub fn resolve(index: &NameIndex, module: ModuleId, ordinal: u32, item: Item<'_>
             ..Resolution::default()
         },
     };
+    if Some(index.module_package(module)) != index.core
+        && item.tree.node(item.root).kind == NodeKind::Function
+        && !item
+            .tree
+            .children(item.root)
+            .iter()
+            .any(|&c| item.tree.node(c).kind == NodeKind::Block)
+    {
+        let end = item.tree.node(item.root).origin.span.end;
+        r.out.diagnostics.push(Refusal::new(
+            "LANG-5",
+            Site {
+                module,
+                item: ordinal,
+                span: Span { start: end, end },
+            },
+            "a function outside core requires a body",
+        ));
+    }
     r.visit(item.root);
     r.out
 }

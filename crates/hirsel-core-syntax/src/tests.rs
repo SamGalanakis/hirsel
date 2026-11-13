@@ -267,7 +267,20 @@ fn literals_are_lossless_and_decode_the_new_rules() {
 fn signature_mode_is_explicit_and_diagnostics_are_machine_readable() {
     let s = "pub fn push[T](mut xs: List[T], take x: T) -> Result[(), Capacity] waits\n";
     assert!(parse(s, ParseMode::Signatures).diagnostics.is_empty());
-    assert!(!parse(s, ParseMode::Source).diagnostics.is_empty());
+    let source = parse(s, ParseMode::Source);
+    assert_eq!(source.diagnostics.len(), 1);
+    assert_eq!(source.diagnostics[0].rule, "LANG-5");
+    let end = s.trim_end().len() as u32;
+    assert_eq!(source.diagnostics[0].primary, Span { start: end, end });
+    let source = parse(
+        "fn width() -> u64  // no body\nfn next() { 1 }",
+        ParseMode::Source,
+    );
+    assert_eq!(source.diagnostics.len(), 1);
+    assert_eq!(source.diagnostics[0].rule, "LANG-5");
+    assert_eq!(source.diagnostics[0].primary, Span { start: 17, end: 17 });
+    assert_eq!(source.syntax.items.len(), 2);
+    assert!(!source.syntax.item(1).range.has_errors);
     let d = Diagnostic::error("LANG-5", Span { start: 4, end: 5 }, "expected type");
     let json = serde_json::to_value(d).unwrap();
     assert_eq!(json["rule"], "LANG-5");

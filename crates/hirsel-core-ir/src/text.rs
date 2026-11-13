@@ -89,6 +89,7 @@ pub fn uses_v1(m: &Module) -> bool {
                                 | Inst::Copy { .. }
                                 | Inst::RegionOpen { .. }
                                 | Inst::RegionClose { .. }
+                                | Inst::Trim { .. }
                                 | Inst::LimitEnter { .. }
                                 | Inst::LimitExit
                                 | Inst::Drop { .. }
@@ -97,8 +98,10 @@ pub fn uses_v1(m: &Module) -> bool {
                                 | Inst::TryUnwrap { .. }
                                 | Inst::Case { .. }
                                 | Inst::SetCase { .. }
+                                | Inst::Pointer { .. }
                         )
                 })
+                || b.pools.steps.iter().any(|s| matches!(s, Step::Byte(_)))
         })
 }
 
@@ -165,6 +168,7 @@ fn field_ty(f: &FieldTy) -> String {
         FieldTy::IndexedSpan(e) => format!("indexed {}", field_ty(e)),
         FieldTy::Link(t) => format!("link t{}", t.0),
         FieldTy::OptLink(t) => format!("optlink t{}", t.0),
+        FieldTy::Locator => "locator".into(),
     }
 }
 fn fields(fs: &[hirsel_core_layout::Field]) -> String {
@@ -222,6 +226,7 @@ fn rt(op: RtOp) -> String {
         RtOp::Send { item } => format!("rt.send[t{}]", item.0),
         RtOp::TrySend { item } => format!("rt.try_send[t{}]", item.0),
         RtOp::Receive { item } => format!("rt.receive[t{}]", item.0),
+        RtOp::DestId => "rt.dest_id".into(),
     }
 }
 fn list<T>(items: impl IntoIterator<Item = T>, f: impl Fn(T) -> String) -> String {
@@ -310,6 +315,7 @@ impl Printer {
                     Step::CaseField { case, field } => format!(" case {case} {field}"),
                     Step::Index(v) => format!(" index v{}", v.0),
                     Step::Element(v) => format!(" element v{}", v.0),
+                    Step::Byte(v) => format!(" byte v{}", v.0),
                 };
             }
             l += &format!(" : {}", place(a.ty));
@@ -462,6 +468,9 @@ impl Printer {
                         format!("{} = {op} a{}", def(*result), address.0)
                     }
                     Inst::Store { address, value } => format!("store a{}, {}", address.0, v(value)),
+                    Inst::Pointer { result, address } => {
+                        format!("{} = pointer a{}", def(*result), address.0)
+                    }
                     Inst::StorageLive { slot } => format!("live s{}", slot.0),
                     Inst::StorageDead { slot } => format!("dead s{}", slot.0),
                     Inst::UpdateMask {
@@ -522,9 +531,10 @@ impl Printer {
                             AllocPlace::Region(r) => format!(" in v{}", r.0),
                         };
                         format!(
-                            "{}, {} = alloc {kind} {size} align {align} charge {}{place}{}",
+                            "{}, {} = alloc {kind} {} align {align} charge {}{place}{}",
                             def(*result),
                             def(*available),
+                            v(size),
                             v(charge),
                             fail(*f)
                         )
@@ -541,6 +551,9 @@ impl Printer {
                     Inst::SetCase { address, case } => format!("set_case a{}, {case}", address.0),
                     Inst::RegionOpen { result } => format!("{} = region_open", def(*result)),
                     Inst::RegionClose { region } => format!("region_close {}", v(region)),
+                    Inst::Trim { block, charge } => {
+                        format!("trim {} charge {}", v(block), v(charge))
+                    }
                     Inst::LimitEnter {
                         admitted,
                         available,
@@ -832,6 +845,7 @@ impl<'a> Line<'a> {
                     "causes" => FieldTy::Handle(Handle::Causes),
                     "hostfile" => FieldTy::Handle(Handle::HostFile),
                     "text" => FieldTy::Text,
+                    "locator" => FieldTy::Locator,
                     w => match (Scalar::from_name(w), w.strip_prefix('t').map(str::parse)) {
                         (Some(s), _) => FieldTy::Scalar(s),
                         (None, Some(Ok(n))) => FieldTy::Inline(hirsel_core_layout::TypeRef(n)),
@@ -1091,6 +1105,15 @@ impl BodyParser {
                 l.next()?;
                 return Ok(Inst::RegionClose { region: l.value()? });
             }
+            Some("trim") => {
+                l.next()?;
+                let block = l.value()?;
+                l.expect("charge")?;
+                return Ok(Inst::Trim {
+                    block,
+                    charge: l.value()?,
+                });
+            }
             Some("limit_exit") => {
                 l.next()?;
                 return Ok(Inst::LimitExit);
@@ -1169,7 +1192,7 @@ impl BodyParser {
                 }
                 k => return Err(format!("unknown allocation kind `{k}`")),
             };
-            let size = l.num()?;
+            let size = l.value()?;
             l.expect("align")?;
             let align = l.num()?;
             l.expect("charge")?;
@@ -1241,6 +1264,12 @@ impl BodyParser {
                 left,
                 right,
                 addend: l.value()?,
+            }
+        } else if op == "pointer" {
+            one(&defs)?;
+            Inst::Pointer {
+                result,
+                address: AddressId(l.id('a')?),
             }
         } else if op == "read" || op == "take" {
             one(&defs)?;
@@ -1353,6 +1382,7 @@ impl BodyParser {
                 "send" => RtOp::Send { item: tys(1)?[0] },
                 "try_send" => RtOp::TrySend { item: tys(1)?[0] },
                 "receive" => RtOp::Receive { item: tys(1)?[0] },
+                "dest_id" => RtOp::DestId,
                 _ => return Err(format!("unknown engine operation `{t}`")),
             })
         } else {
@@ -1657,6 +1687,7 @@ impl Parser {
                             },
                             "index" => Step::Index(l.value()?),
                             "element" => Step::Element(l.value()?),
+                            "byte" => Step::Byte(l.value()?),
                             s => return Err(format!("unknown step `{s}`")),
                         });
                     }

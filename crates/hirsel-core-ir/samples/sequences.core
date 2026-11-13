@@ -1,0 +1,236 @@
+; CoreIR sample, family: compact sequences written in place (MEM-4, MEM-9, MEM-12 at spec
+; 6ef88514), lowered as the crate docs' "Compact data" says: a blob is a region block
+; of a 16-byte engine header (used bytes, then W) and the data; every blob byte is
+; reached through a `byte` step; `finish_trim` is `trim`; identities come from
+; `rt.dest_id`.
+;
+; Source (package samples@0, module seq):
+;   @compact(u32) stable type J = Null | Arr(SeqSpan[J])
+;   f0: build_stream_in(r, bytes n, w) whose writer emits Arr, then appends k Nulls and
+;       closes; finish_trim; returns (status, count, byte length, used, room left)
+;   f1: dest.put of a literal holding one Link child that is from this destination or
+;       (foreign) from another one, into a destination with n bytes left
+;   f2: build_stream_in of a root IndexedSpan[u16] (W = u64) of k elements 0, 7, 14, ..,
+;       closed, finish_trim, then indexed.get(s, 2)
+; Status 0 is Ok, 1 is Error(Overflow) (a value, not a failure). The room left is read
+; by a probe allocation the root limit refuses (MEM-22).
+;
+; Behaviour, derived by hand. J's Arr is tag 1 (1 byte), count and byte length (4 + 4),
+; then one tag byte per Null: 9 + k bytes. The charge is round8(n) until finish_trim
+; lowers it to round8(used) (MEM-24).
+; run limit 1000: f0(3, 64) -> 0, 3, 3, 12, 984 | used 0    ; 64 charged, trimmed to 16
+; run limit 1000: f0(0, 9) -> 0, 0, 0, 9, 984 | used 0      ; an empty Arr fills 9 exactly
+; run limit 1000: f0(3, 10) -> 1, 1, 0, 0, 984 | used 0     ; the second Null does not fit
+; run limit 1000: f0(3, 8) -> 1, 0, 0, 0, 992 | used 0      ; the header does not fit
+; A Link is 4 bytes at W = u32; the identity check comes before the size check:
+; run: f1(true, 0) -> fail Bounds    ; foreign and too big: Bounds, not Overflow
+; run: f1(true, 64) -> fail Bounds
+; run: f1(false, 0) -> 1
+; run: f1(false, 4) -> 0
+; IndexedSpan[u16] of 3 at W = u64: count and length 16, elements 6 (length 6), then a
+; trailer of 3 offsets 0, 2, 4 (24 bytes), checked whole before the first is stored:
+; used 46. get(s, 2) loads offset 4, then the element there: 14.
+; run limit 1000: f2(3, 64) -> 0, 46, 14 | used 0
+; run limit 1000: f2(3, 46) -> 0, 46, 14 | used 0           ; the trailer fits exactly
+; run limit 1000: f2(3, 40) -> 1, 0, 0 | used 0             ; the elements fit, the trailer not
+core v1
+sig g0 = (u64, u64) -> (u64, u64, u64, u64, u64)
+sig g1 = () -> (u64)
+sig g2 = (bool, u64) -> (u64)
+sig g3 = (u64, u64) -> (u64, u64, u64)
+inst n0 = samples@0/seq/nulls [] []
+inst n1 = samples@0/seq/put [] []
+inst n2 = samples@0/seq/indexed [] []
+fn f0 = n0 g0 {
+  addr a0 = v9 byte v7 : u8            ; the root's tag, the first data byte
+  addr a1 = v9 byte v17 : u8           ; the element at the cursor
+  addr a2 = v9 byte v12 : u32          ; the sequence's count
+  addr a3 = v9 byte v28 : u32          ; its byte length
+  addr a4 = v9 : u64                   ; header: used bytes
+  addr a5 = v9 byte v30 : u64          ; header: W
+  addr a6 = v9 byte v35 : u32          ; the byte length, found through the header's W
+b0(v0: u64, v1: u64):
+  v2: ptr = region_open
+  v3: u64 = const 7
+  v4: u64 = add v1, v3
+  v5: u64 = const 18446744073709551608
+  v6: u64 = bitand v4, v5              ; round8(n)
+  v7: u64 = const 16
+  v8: u64 = add v1, v7                 ; the header and n bytes; also the end
+  v9: ptr, v10: u64 = alloc own v8 align 8 charge v6 in v2   ; admitted in every run
+  v11: u64 = const 0
+  v12: u64 = const 17
+  v13: bool = le v12, v8               ; the tag, before it is written
+  branch v13, b1, b6(v11)
+b1:
+  address a0
+  v14: u8 = const 1
+  store a0, v14                        ; Arr
+  v15: u64 = const 25
+  v16: bool = le v15, v8               ; the count and byte length, reserved
+  branch v16, b2(v15, v11), b6(v11)
+b2(v17: u64, v18: u64):
+  v19: bool = lt v18, v0
+  branch v19, b3, b5
+b3:
+  v20: u64 = const 1
+  v21: u64 = add v17, v20
+  v22: bool = le v21, v8               ; the element's byte, before it is written
+  branch v22, b4, b6(v18)
+b4:
+  address a1
+  v23: u8 = const 0
+  store a1, v23                        ; Null
+  v24: u64 = add v18, v20              ; the count advances once the element is complete
+  jump b2(v21, v24)
+b5:
+  v25: u64 = sub v17, v15              ; the elements' byte length
+  v26: u32 = truncate v18
+  v27: u32 = truncate v25
+  address a2
+  store a2, v26
+  v28: u64 = const 21
+  address a3
+  store a3, v27
+  v29: u64 = sub v17, v7               ; used
+  address a4
+  store a4, v29
+  v30: u64 = const 8
+  address a5
+  v31: u64 = const 4
+  store a5, v31
+  v32: u64 = add v29, v3
+  v33: u64 = bitand v32, v5
+  trim v9 charge v33                   ; finish_trim refunds round8(n) - round8(used)
+  v34: u64 = read a5
+  v35: u64 = add v12, v34
+  address a6
+  v36: u32 = read a6
+  v37: u64 = widen v36
+  v38: u64 = const 18446744073709551615
+  v39: ptr, v40: u64 = alloc own v30 align 8 charge v38   ; refused: v40 is the room
+  region_close v2
+  return v11, v18, v37, v29, v40
+b6(v41: u64):                          ; Overflow: nothing published, round8(n) stays
+  v42: u64 = const 18446744073709551615
+  v43: u64 = const 8
+  v44: ptr, v45: u64 = alloc own v43 align 8 charge v42
+  region_close v2
+  v46: u64 = const 1
+  return v46, v41, v11, v11, v45
+}
+fn f1 = n1 g2 {
+b0(v0: bool, v1: u64):
+  v2: u64 = call rt.dest_id g1 ()      ; the destination the child came from
+  v3: u64 = call rt.dest_id g1 ()      ; the destination being written
+  branch v0, b1(v2), b1(v3)
+b1(v4: u64):                           ; the child's identity
+  v5: bool = ne v4, v3
+  branch v5, b2, b3
+b2:
+  raise bounds
+b3:
+  v6: u64 = const 4
+  v7: bool = lt v1, v6                 ; then the size: one Link at W = u32
+  branch v7, b4, b5
+b4:
+  v8: u64 = const 1
+  return v8
+b5:
+  v9: u64 = const 0
+  return v9
+}
+fn f2 = n2 g3 {
+  addr a0 = v9 byte v14 : u16          ; the element at the cursor
+  addr a1 = v9 byte v30 : u64          ; the trailer entry being stored
+  addr a2 = v9 byte v7 : u64           ; the count
+  addr a3 = v9 byte v35 : u64          ; the byte length
+  addr a4 = v9 : u64                   ; header: used bytes
+  addr a5 = v9 byte v37 : u64          ; header: W
+  addr a6 = v9 byte v45 : u64          ; get: trailer entry 2
+  addr a7 = v9 byte v47 : u16          ; get: the element it locates
+b0(v0: u64, v1: u64):
+  v2: ptr = region_open
+  v3: u64 = const 7
+  v4: u64 = add v1, v3
+  v5: u64 = const 18446744073709551608
+  v6: u64 = bitand v4, v5              ; round8(n)
+  v7: u64 = const 16
+  v8: u64 = add v1, v7                 ; the end
+  v9: ptr, v10: u64 = alloc own v8 align 8 charge v6 in v2
+  v11: u64 = const 0
+  v12: u64 = const 32
+  v13: bool = le v12, v8               ; the count and byte length, reserved
+  branch v13, b1(v12, v11), b8
+b1(v14: u64, v15: u64):
+  v16: bool = lt v15, v0
+  branch v16, b2, b4
+b2:
+  v17: u64 = const 2
+  v18: u64 = add v14, v17
+  v19: bool = le v18, v8
+  branch v19, b3, b8
+b3:
+  address a0
+  v20: u64 = mul v15, v3
+  v21: u16 = truncate v20
+  store a0, v21                        ; element i is 7i
+  v22: u64 = const 1
+  v23: u64 = add v15, v22
+  jump b1(v18, v23)
+b4:
+  v24: u64 = sub v14, v12              ; the byte length, without the trailer
+  v25: u64 = const 8
+  v26: u64 = mul v15, v25
+  v27: u64 = add v14, v26
+  v28: bool = le v27, v8               ; the whole trailer, before any entry is stored
+  branch v28, b5(v11), b8
+b5(v29: u64):
+  v30: u64 = add v14, v29
+  v31: bool = lt v29, v26
+  branch v31, b6, b7
+b6:
+  address a1
+  v32: u64 = const 4
+  v33: u64 = div v29, v32              ; entry j sits at 8j and holds 2j
+  store a1, v33
+  v34: u64 = add v29, v25
+  jump b5(v34)
+b7:
+  address a2
+  store a2, v15
+  v35: u64 = const 24
+  address a3
+  store a3, v24
+  v36: u64 = sub v27, v7               ; used
+  address a4
+  store a4, v36
+  v37: u64 = const 8
+  address a5
+  store a5, v37
+  v38: u64 = add v36, v3
+  v39: u64 = bitand v38, v5
+  trim v9 charge v39
+  v40: u64 = const 2
+  v41: bool = lt v40, v15              ; get's one bounds test
+  branch v41, b9, b10
+b8:                                    ; Overflow: nothing published
+  region_close v2
+  v42: u64 = const 1
+  return v42, v11, v11
+b9:
+  v43: u64 = add v12, v24              ; the trailer starts after the elements
+  v44: u64 = const 16
+  v45: u64 = add v43, v44
+  address a6
+  v46: u64 = read a6
+  v47: u64 = add v12, v46
+  address a7
+  v48: u16 = read a7
+  v49: u64 = widen v48
+  region_close v2
+  return v11, v36, v49
+b10:
+  region_close v2
+  return v11, v36, v11
+}

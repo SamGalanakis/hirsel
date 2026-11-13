@@ -229,7 +229,7 @@ pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
             })?,
         }
         for s in a.steps.get(&b.pools.steps).ok_or("steps out of pool")? {
-            if let Step::Index(v) | Step::Element(v) = s {
+            if let Step::Index(v) | Step::Element(v) | Step::Byte(v) = s {
                 need(c.ty(*v)?.int().is_some(), || {
                     format!("a{i}: index is not an integer")
                 })?;
@@ -620,12 +620,13 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             kind: _,
             place,
             charge,
-            size: _,
+            size,
             align,
             fail,
         } => {
             c.def(result)?;
             c.def(available)?;
+            c.is(size, Ty::Scalar(Scalar::U64))?;
             c.is(result, Ty::Ptr)?;
             c.is(available, Ty::Scalar(Scalar::U64))?;
             c.is(charge, Ty::Scalar(Scalar::U64))?;
@@ -662,6 +663,15 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             c.is(result, Ty::Ptr)
         }
         Inst::RegionClose { region } => c.is(region, Ty::Ptr),
+        Inst::Trim { block, charge } => {
+            c.is(block, Ty::Ptr)?;
+            c.is(charge, Ty::Scalar(Scalar::U64))
+        }
+        Inst::Pointer { result, address } => {
+            c.def(result)?;
+            c.is(result, Ty::Ptr)?;
+            c.place(address).map(|_| ())
+        }
         Inst::LimitEnter {
             admitted,
             available,

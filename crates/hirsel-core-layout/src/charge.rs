@@ -104,7 +104,19 @@ pub const fn span_builder(capacity: u64, elem: u64) -> Option<u64> {
     }
 }
 
-/// A region allocation (a placed literal, a sized destination).
+/// `seq.index_in` of a sequence of `count` elements (MEM-24).
+pub const fn seq_index(count: u64) -> Option<u64> {
+    match count.checked_mul(8) {
+        Some(n) => match n.checked_add(24) {
+            Some(m) => round8(m),
+            None => None,
+        },
+        None => None,
+    }
+}
+
+/// A region allocation (a placed literal, a sized destination, `build_in` and
+/// `build_stream_in` of `n` bytes; `finish_trim` lowers it to the used bytes).
 pub const fn region(bytes: u64) -> Option<u64> {
     round8(bytes)
 }

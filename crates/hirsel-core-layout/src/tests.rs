@@ -187,7 +187,7 @@ fn le(bytes: &[u8], at: u64, n: u64) -> u64 {
 /// Bug: a field after a variable field placed at a constant offset, or a Text or
 /// SeqSpan skipped wrongly. `@compact(u32) Entry {id: u64, name: Text, tags:
 /// SeqSpan[Text]}` with id = 1, name "abc", tags ["ab", "c"]. `Text` is a `W`
-/// byte count, then the bytes (MEM-12); SeqSpan (draft) is count, extent, elements.
+/// byte count, then the bytes (MEM-12); SeqSpan is count, byte length, elements.
 /// id 8 bytes @0; name @8 = count 3 (4) + "abc" = 7 bytes; tags @15 = count 2 (4),
 /// extent 11 (4), then "ab" (4+2) and "c" (4+1) = 19; total 8 + 7 + 19 = 34.
 #[test]
@@ -222,6 +222,77 @@ fn compact_record_walks_variable_fields_by_their_stored_lengths() {
         compact_starts(&r, c, &c.fields[0], 0, &rw, &rt),
         vec![0, 8, 15]
     );
+}
+
+/// Bug: a plain element encoded at its native, padded stride (MEM-12 packs it as its
+/// fields back to back), or an element that is not packed accepted. `Pt {x: u16, y:
+/// u8}` (native size 4) in `@compact(u32) S {xs: FixedSpan[Pt], ys: SeqSpan[Pt]}`:
+/// xs is count 2 (4) + 2 × 3 = 10 bytes; ys @10 is count 1 (4), length 3 (4) and 3
+/// bytes; extent 21. Refused: an empty record and a link as elements, a plain record
+/// as a compact field (MEM-9), and a compact target referenced other than by locator.
+#[test]
+fn plain_elements_are_packed_and_only_packed_types_are_elements() {
+    let pt = record(
+        "Pt",
+        Repr::Own,
+        vec![field("x", u(Scalar::U16)), field("y", u(Scalar::U8))],
+    );
+    let pt_ = |c: fn(Box<FieldTy>) -> FieldTy| c(Box::new(FieldTy::Inline(TypeRef(0))));
+    let s = record(
+        "S",
+        Repr::Compact(Width::U32),
+        vec![
+            field("xs", pt_(FieldTy::FixedSpan)),
+            field("ys", pt_(FieldTy::SeqSpan)),
+        ],
+    );
+    let r = compute(&[pt.clone(), s]).unwrap();
+    let Layout::Compact(set) = &r[1].layout else {
+        panic!()
+    };
+    let c = set.declared();
+    let mut b = vec![2, 0, 0, 0, 1, 0, 9, 2, 0, 8];
+    b.extend([1, 0, 0, 0, 3, 0, 0, 0, 7, 0, 6]);
+    let rw = |at| le(&b, at, 4);
+    let rt = |at, n| le(&b, at, n);
+    assert_eq!(compact_extent(&r, TypeRef(1), Width::U32, 0, &rw, &rt), 21);
+    assert_eq!(
+        compact_starts(&r, c, &c.fields[0], 0, &rw, &rt),
+        vec![0, 10]
+    );
+    let refused = |elem: FieldTy, extra: Shape| {
+        let s = record("S", Repr::Compact(Width::U32), vec![field("xs", elem)]);
+        assert!(matches!(
+            compute(&[extra, s]),
+            Err(LayoutError::Field { .. })
+        ));
+    };
+    refused(
+        pt_(FieldTy::SeqSpan).clone(),
+        record("E", Repr::Own, vec![]),
+    );
+    refused(
+        FieldTy::SeqSpan(Box::new(FieldTy::Link(TypeRef(1)))),
+        pt.clone(),
+    );
+    refused(FieldTy::Inline(TypeRef(0)), pt.clone());
+    let blob = record(
+        "C",
+        Repr::Compact(Width::U16),
+        vec![field("n", u(Scalar::U8))],
+    );
+    let by_ptr = record(
+        "H",
+        Repr::Stable,
+        vec![field("c", FieldTy::Stable(TypeRef(0)))],
+    );
+    assert!(matches!(
+        compute(&[blob.clone(), by_ptr]),
+        Err(LayoutError::Field { .. })
+    ));
+    let by_loc = record("H", Repr::Stable, vec![field("c", FieldTy::Locator)]);
+    let r = compute(&[blob, by_loc]).unwrap();
+    assert_eq!((fixed(&r[1]).size, r[1].logical_size), (16, Some(16)));
 }
 
 /// Bug: compact variants occupying their largest case (MEM-11 says active size), or a
@@ -342,7 +413,7 @@ fn representation_refusals() {
 /// A task with an 8-byte result and `bytes 4096`: 256 + 8 + 32 + 4096 = 4392; a
 /// 16-byte resource with `grant bytes 256`: 16 + 32 + 256 = 304; a standalone Text
 /// of 5 bytes: 8 + 5 = 13 → 16; a span builder of capacity 3 for u32: 12 + 8 = 20 →
-/// 24.
+/// 24; `seq.index_in` of 3 elements: 24 + 3 × 8 = 48.
 #[test]
 fn charge_v1_matches_the_spec_table() {
     assert_eq!(charge::seq(3, 3), Some(16));
@@ -353,6 +424,7 @@ fn charge_v1_matches_the_spec_table() {
     assert_eq!(charge::standalone(5), Some(16));
     assert_eq!(charge::span_builder(3, 4), Some(24));
     assert_eq!(charge::channel(2, 24), Some(112));
+    assert_eq!(charge::seq_index(3), Some(48));
     assert_eq!(charge::grown_capacity(0, 1), Some(4));
     assert_eq!(charge::grown_capacity(4, 5), Some(8));
     assert_eq!(charge::grown_capacity(8, 100), Some(100));

@@ -54,12 +54,51 @@
 //!   admitting nothing. `HostFile` is a handle (`hostfile`) of a mechanical
 //!   resource: no cause cell, cleaned by closing it and ignoring the outcome.
 //!
-//! **Still draft (MEM-12 is OPEN on compact sequences):** `SeqSpan` and
-//! `IndexedSpan` and their extent and index encodings, reading compact values
-//! through views, the destination writer (`build_in`, `Dest`, `Child`, `Builder`)
-//! and its runtime state. Nothing frozen assumes a fixed element stride or that a
-//! writer makes one fixed-size child. Brands, `SlotOwner` and `uses` lists are not
-//! in FORM v1 at all: a pool handle is plain data checked at run time.
+//! Brands, `SlotOwner` and `uses` lists are not in FORM v1 at all: a pool handle
+//! is plain data checked at run time.
+//!
+//! # Compact data (FORM v1b, spec 6ef88514)
+//!
+//! Compact values are region bytes. FORM adds four primitives for them and
+//! nothing else: a `byte vN` step (an unaligned byte offset), `pointer aN` (an
+//! address as a `ptr`), `trim vB charge vN` (lowers a region block's charge and
+//! refunds the difference to its record) and `rt.dest_id` (a run-unique `u64`,
+//! cannot fail). `alloc`'s size is a value, so a blob of `n` bytes is one alloc.
+//! Writers, readers, `clone_in`, `seq.index_in`, `text.as_string`, `writer.push`
+//! and `emit` are ordinary producer code over these, `copy`, `read` and `store`.
+//! - **Blob**: a region block of a 16-byte engine header (used bytes at 0,
+//!   written at finish; W in bytes at 8) then the data, charged round8(n) and
+//!   never the header (MEM-24). Data offsets below are from the block pointer.
+//! - **Locator**: a view of, or stable reference to, compact data is
+//!   `{blob ptr, at}` (`FieldTy::Locator`, logically 16); `Stable` of a compact
+//!   type is refused. An `IndexedSpan` reads and iterates as a `SeqSpan` with the
+//!   same locator and W; its trailer (count W-wide offsets from the first element
+//!   byte) follows the elements, outside its own length but inside the holder's
+//!   extent. It is never a writer, a `Child` or a field encoding.
+//! - **Build**: a record `{blob, cursor, end = 16 + n, w, id = rt.dest_id}`; a
+//!   writer frame `{record, start, count, last}`; a `Child` `{id, at}`. Every
+//!   write checks, in order: the identity of each link it stores, in field order
+//!   (`Bounds`); then fit and the W cap (`Overflow`, an earlier fit failure
+//!   first); then writes, each header, scalar or field checked before its bytes.
+//!   An appended element's returned `Child` is checked at receipt (id and at are
+//!   the frame's, else `Bounds`) before the count advances. Closing an
+//!   `IndexedSpan` checks the whole trailer fits before storing any entry.
+//!   `build_stream_in` refuses with `Overflow` when n exceeds the W cap, then
+//!   admits round8(n). Finish stores used = cursor - 16 and W; `finish_trim`
+//!   then `trim`s the blob to round8(used) (MEM-23). Streaming roots are stable
+//!   streamable types only.
+//! - **Packed** element types (layout's predicate): numbers, bool, char, `Text`,
+//!   compact types, non-empty plain records and tuples of packed fields (encoded
+//!   field after field), `FixedSpan` and sequences of packed types. `()`, Never,
+//!   callables, capabilities, links and `Inline` of anything else are refused.
+//! - **`clone_in`** of a streamable value copies exactly its bytes at its own W
+//!   into a new blob, as a new root, charged round8(length); any other compact
+//!   value copies its whole blob. `copy_closed_in` does not exist.
+//!   `seq.index_in` allocates round8(24 + 8 count) (`charge::seq_index`).
+//! - `text.as_string(t)` is a `String` view `{pointer of the bytes, length}`;
+//!   `emit` of a `String` view or a `Text` into a `Text` is one fit check and one
+//!   `copy`. An unmarked `T` parameter also takes a `View[T]` (OWN-7): the
+//!   producer passes the locator.
 //!
 //! # Failure (FORM v1a)
 //!
@@ -132,7 +171,8 @@
 //! ([`RtOp::fails`]: `join`, `check_cancel`, `channel_new`, `send`, `receive`)
 //! append the `u8` status, and only those may name a failure successor. The
 //! runtime entries behind instructions (`alloc`, `free`, `limit_enter`, region
-//! operations) are not calls in FORM and report refusals as values.
+//! operations, `trim`) are not calls in FORM and report refusals as values.
+//! `rt.dest_id` is a runtime row with no parameters and one `u64`, no status.
 //!
 //! Layouts are the recipes': resources and boxes are pointers, counted nodes are
 //! count then payload.

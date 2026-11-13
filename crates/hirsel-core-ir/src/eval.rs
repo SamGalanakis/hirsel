@@ -4,8 +4,9 @@
 //! out by the layout recipes. Limits keep exact `used` totals and hand over by
 //! forwarding. A spawned child runs to its end at the spawn, so the event order is
 //! the program order and nothing waits. A delivered `Causes` owns the child's used
-//! cells until it is dropped. Sequences, maps, regions' compact contents and static
-//! data are not modelled and panic.
+//! cells until it is dropped. Compact data is region bytes read and written through
+//! `byte` steps, as a producer lowers it. Lists, maps and static data are not
+//! modelled and panic.
 
 use crate::*;
 use hirsel_core_layout::{
@@ -113,6 +114,8 @@ struct Machine<'m> {
     /// Every inline array field type of the module: element and length.
     arrays: Vec<(FieldTy, u64)>,
     trace: Vec<u64>,
+    /// The last destination identity handed out (`rt.dest_id`).
+    dests: u64,
 }
 
 fn collect_arrays(ty: &FieldTy, out: &mut Vec<(FieldTy, u64)>) {
@@ -142,6 +145,7 @@ pub fn run(m: &Module, f: FuncId, args: &[u64], limit: u64) -> Report {
         causes: Vec::new(),
         arrays: Vec::new(),
         trace: Vec::new(),
+        dests: 0,
     };
     for shape in &m.types {
         let fields: Vec<&hirsel_core_layout::Field> = match &shape.body {
@@ -557,6 +561,10 @@ impl Machine<'_> {
                 }
             }
             RtOp::Cancel | RtOp::CheckCancel => vec![], // every child has already ended
+            RtOp::DestId => {
+                self.dests += 1;
+                vec![self.dests]
+            }
             RtOp::ChannelNew { item } => {
                 let item = TypeRef(item.0);
                 if a[0] == 0 {
@@ -751,6 +759,11 @@ impl Machine<'_> {
                     }
                     p += i * self.stride(e);
                     at = self.at_field(e);
+                    continue;
+                }
+                Step::Byte(n) => {
+                    p += vals[n.index()];
+                    at = At::Other;
                     continue;
                 }
                 Step::Index(i) => {
@@ -1054,7 +1067,7 @@ impl Machine<'_> {
                             }),
                             _ => None,
                         };
-                        let p = self.block(size, Some(l), n, res);
+                        let p = self.block(vals[size.index()], Some(l), n, res);
                         if kind == AllocKind::Counted {
                             self.store(p, 8, 1);
                         }
@@ -1073,6 +1086,17 @@ impl Machine<'_> {
                     "free refunds another charge"
                 );
                 self.free(p);
+            }
+            Inst::Pointer { result, address } => vals[result.index()] = places[address.index()].0,
+            Inst::Trim { block, charge } => {
+                let (blk, o) = split(vals[block.index()]);
+                let (n, old) = (vals[charge.index()], self.mem[blk].charge);
+                assert!(
+                    o == 0 && n <= old,
+                    "trim of a non-block or above its charge"
+                );
+                self.mem[blk].charge = n;
+                self.refund(self.mem[blk].limit.expect("a region block"), old - n);
             }
             Inst::RegionOpen { result } => {
                 self.regions.push(Vec::new());

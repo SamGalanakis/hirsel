@@ -85,11 +85,11 @@ pub enum Size {
     FixedSpan {
         stride: u64,
     },
-    /// FORM v1b draft (MEM-12 OPEN): `W` count, `W` element-byte extent, then the
-    /// elements.
+    /// `W` count, `W` byte length of the elements, then the elements (MEM-12).
     SeqSpan,
-    /// `W` count, `W` element-byte extent, a table of `count` `W` entries (each the
-    /// distance from the table's start to its element), then the elements.
+    /// As `SeqSpan`, then a trailer of `count` `W` offsets, each from the first
+    /// element byte to its element. The stored byte length excludes the trailer;
+    /// the holder's extent includes it.
     IndexedSpan,
     /// An inline compact value whose extent is walked by its recipe at the holder's
     /// width.
@@ -356,7 +356,11 @@ fn measure<'r>(
                 _ => return Err("an inline array larger than 2^64 - 1 bytes"),
             }
         }
+        FieldTy::Stable(t) if matches!(shapes[t.index()].repr, Repr::Compact(_)) => {
+            return Err("a reference to compact data is a locator");
+        }
         FieldTy::Stable(_) => (POINTER, POINTER, 16),
+        FieldTy::Locator => (2 * POINTER, POINTER, 16),
         FieldTy::Fn => (POINTER, POINTER, 8),
         FieldTy::Borrow if holder != Repr::Scoped => {
             return Err("views and scoped callables live only in scoped types");
@@ -471,7 +475,7 @@ fn compact(
             let mut pos = Pos::At(start);
             let mut cfs = Vec::with_capacity(row.len());
             for (i, f) in row.iter().enumerate() {
-                let size = compact_size(shapes, shape, f, &f.ty, w, out)?;
+                let size = compact_size(shapes, shape, f, &f.ty, w, false, out)?;
                 let next = match (&size, pos) {
                     (Size::Fixed(n), Pos::At(o)) => Pos::At(o + n),
                     (Size::Fixed(n), Pos::After { field, plus }) => Pos::After {
@@ -528,10 +532,18 @@ fn compact_size(
     f: &Field,
     ty: &FieldTy,
     w: Width,
+    element: bool,
     out: &[Option<Recipe>],
 ) -> Result<Size, LayoutError> {
     Ok(match ty {
         FieldTy::Scalar(s) => Size::Fixed(s.size()),
+        FieldTy::Link(_) | FieldTy::OptLink(_) if element => {
+            return Err(err(
+                shape,
+                f,
+                "a link is a field, never an element (MEM-10)",
+            ));
+        }
         FieldTy::Link(t) | FieldTy::OptLink(t) => {
             if !matches!(shapes[t.index()].repr, Repr::Compact(_)) {
                 return Err(err(
@@ -544,13 +556,16 @@ fn compact_size(
         }
         FieldTy::Inline(t) => match &done(out, *t).layout {
             Layout::Compact(set) => set.at(w).fixed_extent.map_or(Size::Inline(*t), Size::Fixed),
-            Layout::Fixed(_) => {
-                return Err(err(
-                    shape,
-                    f,
-                    "a compact type holds only compact data inline",
-                ));
-            }
+            Layout::Fixed(_) => match packed_plain(shapes, *t) {
+                Some(n) if element => Size::Fixed(n),
+                _ => {
+                    return Err(err(
+                        shape,
+                        f,
+                        "a compact type holds only compact data inline; an element is packed",
+                    ));
+                }
+            },
         },
         FieldTy::Text => Size::FixedSpan { stride: 1 },
         FieldTy::Array(..) => {
@@ -560,12 +575,12 @@ fn compact_size(
                 "a compact type holds no inline array (MEM-9)",
             ));
         }
-        FieldTy::FixedSpan(e) => match compact_size(shapes, shape, f, e, w, out)? {
+        FieldTy::FixedSpan(e) => match compact_size(shapes, shape, f, e, w, true, out)? {
             Size::Fixed(stride) => Size::FixedSpan { stride },
             _ => return Err(err(shape, f, "FixedSpan elements have one fixed size")),
         },
         FieldTy::SeqSpan(e) | FieldTy::IndexedSpan(e) => {
-            compact_size(shapes, shape, f, e, w, out)?;
+            compact_size(shapes, shape, f, e, w, true, out)?;
             if matches!(ty, FieldTy::SeqSpan(_)) {
                 Size::SeqSpan
             } else {
@@ -580,6 +595,22 @@ fn compact_size(
             ));
         }
     })
+}
+
+/// MEM-12: the packed encoding of a plain record or tuple with at least one field,
+/// each a scalar or such a record, as its fields back to back (MEM-9); its size.
+fn packed_plain(shapes: &[Shape], t: TypeRef) -> Option<u64> {
+    let s = &shapes[t.index()];
+    match &s.body {
+        Body::Record(fs) if s.repr == Repr::Own && !fs.is_empty() => {
+            fs.iter().try_fold(0, |n, f| match &f.ty {
+                FieldTy::Scalar(x) => Some(n + x.size()),
+                FieldTy::Inline(u) => packed_plain(shapes, *u).map(|m| n + m),
+                _ => None,
+            })
+        }
+        _ => None,
+    }
 }
 
 /// Bytes a compact value occupies, read from its blob: the walk the recipe

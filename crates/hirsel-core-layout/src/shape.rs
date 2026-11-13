@@ -174,13 +174,17 @@ pub enum FieldTy {
     Text,
     /// `W` count, then the elements at the element's fixed stride (MEM-12).
     FixedSpan(Box<FieldTy>),
-    /// FORM v1b draft, waiting on MEM-12's OPEN compact sequences: variable-size
-    /// elements, `W` count and `W` payload extent, then the elements.
+    /// Elements of a packed type, each its own size: `W` count, `W` byte length,
+    /// then the elements (MEM-12).
     SeqSpan(Box<FieldTy>),
-    /// FORM v1b draft, as `SeqSpan`, with a table of `W` offsets.
+    /// As `SeqSpan`, then a trailer of `count` `W` offsets (MEM-12).
     IndexedSpan(Box<FieldTy>),
     Link(TypeRef),
     OptLink(TypeRef),
+    /// A reference to compact data held outside a blob (a compact value, `Text` or a
+    /// sequence in some region): the blob pointer, then the value's offset from it
+    /// (crate `hirsel-core-ir`, "Compact data"). Plain, logically 16 (MEM-24).
+    Locator,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]

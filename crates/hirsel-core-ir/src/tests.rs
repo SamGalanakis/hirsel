@@ -21,6 +21,7 @@ const SAMPLES: &[(&str, &str)] = &[
     ("counted", include_str!("../samples/counted.core")),
     ("custody", include_str!("../samples/custody.core")),
     ("variants", include_str!("../samples/variants.core")),
+    ("sequences", include_str!("../samples/sequences.core")),
 ];
 
 fn load(name: &str, text: &str) -> Module {

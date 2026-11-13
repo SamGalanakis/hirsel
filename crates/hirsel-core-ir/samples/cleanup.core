@@ -47,7 +47,8 @@ fn f0 = n0 g0 {
   addr a1 = a0 field 0 : u64
 b0(v0: u64):
   v1: u64 = const 40
-  v2: ptr, v3: u64 = alloc resource grant 0 8 align 8 charge v1
+  v4: u64 = const 8
+  v2: ptr, v3: u64 = alloc resource grant 0 v4 align 8 charge v1
   address a0
   address a1
   store a1, v0
@@ -195,7 +196,8 @@ b1(v2: u64):
 b2:
   v4: ptr = call f0 g0 (v2) fail b4
   v5: u64 = const 24
-  v6: ptr, v7: u64 = alloc own 24 align 8 charge v5
+  v9: u64 = const 24
+  v6: ptr, v7: u64 = alloc own v9 align 8 charge v5
   address a3
   copy a3, a2, v5                      ; Box(l): l moves into the box
   set_case a2, 1

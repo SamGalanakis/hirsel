@@ -152,6 +152,10 @@ pub enum Step {
     /// An element of an inline array place (`Inline[T, n]`, SEM-9, FORM v1b): fails
     /// with `Bounds` when the index is not below `n`, at the `Address` instruction.
     Element(ValueId),
+    /// Compact data (FORM v1b): the place this many bytes further on. Blob bytes have
+    /// no alignment (MEM-9), so a read, store or copy through an address with a
+    /// `byte` step is unaligned. Unchecked.
+    Byte(ValueId),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -395,9 +399,17 @@ pub enum Inst {
     Call {
         call: CallId,
     },
+    /// FORM v1b: the address of a place, as a pointer value (a view's bytes, a
+    /// locator's blob).
+    Pointer {
+        result: ValueId,
+        address: AddressId,
+    },
 
     // ---- FORM v1a ----
-    /// Admit `charge` and allocate a block of `size` bytes aligned to `align`
+    /// Admit `charge` and allocate a block of `size` bytes (a `u64` value: a
+    /// sized destination's `n` and a text's length are known only at run time)
+    /// aligned to `align`
     /// (MEM-21). On refusal `result` is null and `available` is the room left in the
     /// limit tried (MEM-22), and nothing is allocated; on success `available` is 0. Under a finalizer's grant a
     /// refusal is a failure with cause `Capacity` instead (MEM-27).
@@ -407,7 +419,7 @@ pub enum Inst {
         kind: AllocKind,
         place: AllocPlace,
         charge: ValueId,
-        size: u64,
+        size: ValueId,
         align: u64,
         fail: Option<BlockId>,
     },
@@ -448,6 +460,14 @@ pub enum Inst {
     /// Free and refund everything allocated in the region at once (MEM-8).
     RegionClose {
         region: ValueId,
+    },
+    /// `finish_trim` (MEM-4): lower the retained charge of the region block `block`
+    /// to `charge`, refunding the difference to the limit its record leads to
+    /// (MEM-20), whatever limit is current. `charge` is at most the block's charge.
+    /// Moves nothing and never fails; the region's close refunds the rest.
+    Trim {
+        block: ValueId,
+        charge: ValueId,
     },
     // ---- FORM v1a ----
     /// Enter `bound bytes n`: admit `bytes` against the current limit and make a new
@@ -539,6 +559,7 @@ pub enum RtOp {
     Send { item: TypeId },
     TrySend { item: TypeId },
     Receive { item: TypeId },
+    DestId,
 }
 
 /// The primary cause a `Raise` records (FAIL-2). Overflow, Bounds and Division are
@@ -567,6 +588,7 @@ impl RtOp {
     /// | `send[T]` | sender `ptr`, `&T` | `bool`: published (false: `Closed`, the item stays) |
     /// | `try_send[T]` | sender `ptr`, `&T` | status `u8`: 0 published, 1 `Full`, 2 `Closed` |
     /// | `receive[T]` | receiver `ptr`, `&T` | `bool`: received (false: `Closed`) |
+    /// | `dest_id` | | `u64`: a destination identity no other call of the run returns (MEM-4) |
     ///
     /// `f` is a plain function `(&X) -> () dest R`. `channel_new` with `cap` 0 fails
     /// with `Bounds`; `send`, `receive`, `join` and `check_cancel` fail with
@@ -590,6 +612,7 @@ impl RtOp {
             RtOp::Send { item } => (vec![V(p), A(item)], vec![bool_]),
             RtOp::TrySend { item } => (vec![V(p), A(item)], vec![u8_]),
             RtOp::Receive { item } => (vec![V(p), A(item)], vec![bool_]),
+            RtOp::DestId => (vec![], vec![u64_]),
         };
         Signature {
             params,
@@ -620,7 +643,7 @@ impl RtOp {
             | RtOp::Send { item }
             | RtOp::TrySend { item }
             | RtOp::Receive { item } => vec![item],
-            RtOp::Cancel | RtOp::CheckCancel | RtOp::ChannelSender => vec![],
+            RtOp::Cancel | RtOp::CheckCancel | RtOp::ChannelSender | RtOp::DestId => vec![],
         }
     }
 }

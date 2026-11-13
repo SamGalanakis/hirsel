@@ -324,14 +324,20 @@ impl<'c, 'a> Cx<'c, 'a> {
                 let value = self.emit_place(at, e);
                 self.synth_ty = at.ty;
                 return match self.t.kind(at.ty) {
-                    TyKind::View(x) if !self.copies(*x) => (*x, None),
+                    TyKind::View(x) => {
+                        let x = *x;
+                        (x, if self.copies(x) { self.read_plain_view(x, value, e) } else { None })
+                    },
                     _ => (at.ty, value),
                 };
             }
             Ok(None) => {
                 let (t, v) = self.expr_hinted(e, hint);
                 return match self.t.kind(t) {
-                    TyKind::View(x) if !self.copies(*x) => (*x, None),
+                    TyKind::View(x) => {
+                        let x = *x;
+                        (x, if self.copies(x) { self.read_plain_view(x, v, e) } else { None })
+                    },
                     _ => (t, v),
                 };
             }

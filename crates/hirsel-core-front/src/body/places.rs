@@ -582,6 +582,47 @@ impl<'c, 'a> Cx<'c, 'a> {
             _ => None,
         }
     }
+    /// Native Map slots retain insertion order; a removed slot has state 0.
+    /// The two metadata words precede the key/value at map_entry's offsets.
+    pub(super) fn map_pair(&mut self, header: ValueId, collection: TyId, index: ValueId, pair: TyId, advance: BlockId, n: NodeId) -> Option<ValueId> {
+        let id = self.rep(collection).ok()?.pointee()?;
+        let (stride, key, value) = {
+            let hirsel_core_layout::Body::Record(fs) = &self.e.module.types[id.index()].body else { return None; };
+            let hirsel_core_layout::FieldTy::Map(k, v) = &fs[0].ty else { return None; };
+            let layout = hirsel_core_layout::map_entry(&self.e.module.types, &self.e.recipes, k, v);
+            (layout.stride, layout.key, layout.value)
+        };
+        let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
+        let stride = self.konst(Ty::Scalar(Scalar::U64), stride, n)?;
+        let offset = self.value(Ty::Scalar(Scalar::U64));
+        self.inst(Inst::Binary { result: offset, op: BinaryOp::Mul, left: index, right: stride, fail: None }, n);
+        let eight = self.konst(Ty::Scalar(Scalar::U64), 8, n)?;
+        let state_at = self.value(Ty::Scalar(Scalar::U64));
+        self.inst(Inst::Binary { result: state_at, op: BinaryOp::Add, left: offset, right: eight, fail: None }, n);
+        let address = self.address(AddressBase::Value(data), &[Step::Byte(state_at)], PlaceTy::Value(Ty::Scalar(Scalar::U64)), n);
+        let state = self.value(Ty::Scalar(Scalar::U64));
+        self.inst(Inst::Read { result: state, address, mode: ReadMode::Bits }, n);
+        let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
+        let condition = self.value(Ty::Scalar(Scalar::Bool));
+        self.inst(Inst::Compare { result: condition, op: CompareOp::Eq, left: state, right: one }, n);
+        let live = self.new_block(&[]);
+        let yes = self.edge(live, &[]);
+        let no = self.edge(advance, &[]);
+        self.end(Terminator::Branch { condition, yes, no }, Some(n));
+        self.start(live);
+        let place = self.place_ty(pair, n)?;
+        let to = self.new_slot(place, n);
+        for (i, field) in [key, value].into_iter().enumerate() {
+            let part = self.konst(Ty::Scalar(Scalar::U64), field, n)?;
+            let at = self.value(Ty::Scalar(Scalar::U64));
+            self.inst(Inst::Binary { result: at, op: BinaryOp::Add, left: offset, right: part, fail: None }, n);
+            let address = self.address(AddressBase::Value(data), &[Step::Byte(at)], PlaceTy::Value(Ty::Scalar(Scalar::U8)), n);
+            let pointer = self.pointer(address, n);
+            let field = self.address(AddressBase::Address(to), &[Step::Field(i as u32)], PlaceTy::Value(Ty::Ptr), n);
+            self.inst(Inst::Store { address: field, value: pointer }, n);
+        }
+        Some(self.pointer(to, n))
+    }
     /// FORM's Seq carrier is data/length/capacity; a word read does not copy storage.
     pub(super) fn read_sequence_word(
         &mut self,

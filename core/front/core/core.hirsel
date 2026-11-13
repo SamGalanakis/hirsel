@@ -39,3 +39,5 @@ pub opaque type Link[T]
 pub type Order: key + ordered = Less | Equal | Greater
 pub type FloatError = NaN | OutOfRange
 pub type ParseError = Empty | Invalid(u64) | OutOfRange
+
+pub opaque type Map[K: key, V]

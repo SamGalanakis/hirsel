@@ -565,11 +565,18 @@ impl<'c, 'a> Cx<'c, 'a> {
                 TyKind::Adt(d, args) if self.p.decls[d.index()].role == Some(Role::List) => {
                     (args[0], None)
                 }
+                TyKind::Adt(d, args) if self.p.decls[d.index()].role == Some(Role::Map) => {
+                    let (key, value) = (args[0], args[1]);
+                    let key = self.t.mk(TyKind::View(key));
+                    let value = self.t.mk(TyKind::View(value));
+                    let pair = self.t.mk(TyKind::Tuple(vec![key, value]));
+                    (pair, None)
+                }
                 TyKind::Error => return (ERROR, None),
                 TyKind::Adt(d, _)
                     if is_core_prelude(
                         &self.p.decls[d.index()].path,
-                        &["FixedSpan", "SeqSpan", "IndexedSpan", "Map", "Causes"],
+                        &["FixedSpan", "SeqSpan", "IndexedSpan", "Causes"],
                     ) =>
                 {
                     return self.gap_ty(
@@ -683,6 +690,10 @@ impl<'c, 'a> Cx<'c, 'a> {
         self.depth += 1;
         let value = match (flow, sequence) {
             (Some((_, _, _, index, _, _, _)), Some((collection, Some(pointer)))) => {
+                if matches!(self.t.kind(collection), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::Map)) {
+                    let advance = flow.unwrap().1;
+                    self.map_pair(pointer, collection, index, elem, advance, n)
+                } else {
                 let place = self.place_ty(collection, n);
                 let element = self.place_ty(elem, n);
                 match (place, element) {
@@ -701,6 +712,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                         at.and_then(|at| self.iteration_value(at, elem, n))
                     }
                     _ => None,
+                }
                 }
             }
             (Some((_, _, _, index, _, _, _)), None) => Some(index),

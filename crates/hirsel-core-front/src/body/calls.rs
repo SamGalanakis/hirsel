@@ -366,6 +366,9 @@ impl<'c, 'a> Cx<'c, 'a> {
                     }
                     _ => ty,
                 };
+                if mode == Mode::View && t != ty && self.copies(t) {
+                    *val = self.read_plain_view(t, *val, e);
+                }
                 self.arg_ty(pt, t, e, found);
                 true
             }

@@ -136,6 +136,7 @@ def sample(out, binary, workload, model, count):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', required=True, type=Path)
+    parser.add_argument('--workloads', nargs='+', choices=[case[0] for case in CASES], help='sample only these workloads')
     parser.add_argument('--models', nargs='+', help='sample only these models; keep existing rows')
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
@@ -144,6 +145,8 @@ def main():
     rows = list(csv.DictReader(rows_path.open(), delimiter='\t')) if rows_path.exists() else []
     done = {(r['workload'], r['model']) for r in rows}
     for workload, count, models in CASES:
+        if args.workloads and workload not in args.workloads:
+            continue
         for model in models:
             if args.models and model not in args.models:
                 continue

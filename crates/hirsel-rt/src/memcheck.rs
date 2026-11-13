@@ -36,39 +36,8 @@ const DESTROY_MEMPOOL: u64 = 0x1304;
 const MEMPOOL_ALLOC: u64 = 0x1305;
 const MEMPOOL_FREE: u64 = 0x1306;
 const MEMPOOL_CHANGE: u64 = 0x1309;
-const STACK_REGISTER: u64 = 0x1501;
-const STACK_DEREGISTER: u64 = 0x1502;
 
-/// One client request: `VALGRIND_DO_CLIENT_REQUEST_EXPR(default, code, a1, a2, a3, a4, 0)`.
-#[inline(always)]
-fn request(default: u64, code: u64, [a1, a2, a3, a4]: [usize; 4]) -> u64 {
-    #[cfg(target_arch = "x86_64")]
-    {
-        let args: [u64; 6] = [code, a1 as u64, a2 as u64, a3 as u64, a4 as u64, 0];
-        let mut result = default;
-        // SAFETY: the rotations total 128 bits, so they leave rdi as it was, and
-        // `xchg rbx, rbx` changes nothing: natively the sequence only reads `args`. Valgrind
-        // recognises it and answers the request in rdx.
-        unsafe {
-            std::arch::asm!(
-                "rol rdi, 3",
-                "rol rdi, 13",
-                "rol rdi, 61",
-                "rol rdi, 51",
-                "xchg rbx, rbx",
-                inout("rdx") result,
-                in("rax") args.as_ptr(),
-                options(nostack),
-            );
-        }
-        result
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        let _ = (code, a1, a2, a3, a4);
-        default
-    }
-}
+use hirsel_stack::valgrind_request as request;
 
 /// Nonzero under Valgrind.
 pub(crate) fn running_on_valgrind() -> u64 {
@@ -113,17 +82,7 @@ pub(crate) fn pool_resize(pool: *const u8, address: *const u8, bytes: usize) {
     request(0, MEMPOOL_CHANGE, [pool.addr(), address, address, bytes]);
 }
 
-/// Tell Valgrind that `start .. end` is a stack (a task fiber's), so switching to it is not a
-/// frame of that size. Returns the stack's ID. A core request: every Valgrind tool answers it,
-/// so every archive makes it.
-pub(crate) fn stack_register(start: *const u8, end: *const u8) -> u64 {
-    request(0, STACK_REGISTER, [start.addr(), end.addr(), 0, 0])
-}
-
-/// Forget a stack [`stack_register`] described.
-pub(crate) fn stack_deregister(id: u64) {
-    request(0, STACK_DEREGISTER, [id as usize, 0, 0, 0]);
-}
+pub(crate) use hirsel_stack::{stack_deregister, stack_register};
 
 #[cfg(test)]
 mod tests {

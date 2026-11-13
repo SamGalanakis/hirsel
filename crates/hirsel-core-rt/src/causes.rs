@@ -244,8 +244,12 @@ pub unsafe fn finalizer_begin(context: &mut Context, pointer: std::ptr::NonNull<
     ));
     // SAFETY: the state stays alive through finalizer_end and field cleanup.
     context.active_resource = unsafe { block::resource(pointer) };
-    context.current.normalize();
-    context.current.bind();
+    crate::abi_tasks::payer_lease(|| {
+        context.current.drain();
+        context.current.normalize();
+        context.current.task_owner(crate::tasks::current_id());
+        context.current.bind();
+    });
     context.finalizing += 1;
 }
 

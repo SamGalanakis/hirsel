@@ -10,7 +10,7 @@ use std::{
     ptr::NonNull,
     sync::{
         Mutex,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
 };
 
@@ -215,6 +215,7 @@ struct Domain {
     handles: Cell<usize>,
     owner: Option<usize>,
     remote: Mutex<Remote>,
+    pending: AtomicBool,
 }
 thread_local! { static THREAD:u8=const{0}; static CURRENT_DOMAIN: Cell<usize> = const { Cell::new(0) }; }
 #[inline(always)]
@@ -323,6 +324,7 @@ impl Payer {
             if owner != crate::tasks::current_id() && bytes != 0 {
                 crate::abi_tasks::cross_task_refund(owner, bytes);
                 self.slot().pending.fetch_add(bytes, Ordering::Relaxed);
+                d.pending.store(true, Ordering::Release);
                 return;
             }
         }
@@ -361,9 +363,30 @@ impl Payer {
             }
         } else if bytes != 0 {
             self.slot().pending.fetch_add(bytes, Ordering::Relaxed);
+            d.pending.store(true, Ordering::Release);
         } else {
             self.slot().pending_zeros.fetch_add(1, Ordering::Relaxed);
+            d.pending.store(true, Ordering::Release);
         }
+    }
+    /// Called under the scheduler's exclusive lease, including an orphan block.
+    pub(crate) fn growth_funding(self) -> Funding {
+        let d = self.domain();
+        if d.handles.get() == 0 {
+            let mut remote = d.remote.lock().unwrap();
+            remote.retired = false;
+            d.handles.set(1);
+            self.forest().retain(self.slot().id);
+        } else {
+            d.handles.set(d.handles.get() + 1);
+            self.forest().retain(self.slot().id);
+        }
+        let mut funding = Funding {
+            payer: self.with_tag(0),
+        };
+        funding.drain();
+        funding.normalize();
+        funding
     }
     pub(crate) fn prepaid(self, bytes: u64) -> Funding {
         let parent = self.canonical();
@@ -406,6 +429,7 @@ impl Funding {
             handles: Cell::new(1),
             owner: Some(thread()),
             remote: Mutex::new(Remote { retired: false }),
+            pending: AtomicBool::new(false),
         });
         let domain = NonNull::from(Box::leak(domain));
         // SAFETY: the fresh domain is exclusively owned until its first handle returns.
@@ -437,6 +461,9 @@ impl Funding {
     }
     /// Provider drains at event handoff, before this task resumes. No allocation.
     pub fn drain(&self) {
+        if !self.payer.domain().pending.swap(false, Ordering::Acquire) {
+            return;
+        }
         let _remote = self.payer.domain().remote.lock().unwrap();
         self.drain_locked(false);
     }
@@ -474,6 +501,9 @@ impl Funding {
     pub fn reserve(&self, bytes: u64) -> Result<Self, Capacity> {
         self.admit(Some(bytes))?;
         Ok(self.payer.prepaid(bytes))
+    }
+    pub(crate) fn owner(&self) -> u64 {
+        self.payer.forest().record(self.payer.slot().id).live.owner
     }
     pub(crate) fn task_owner(&self, owner: u64) {
         let payer = self.payer.canonical();

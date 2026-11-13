@@ -651,3 +651,64 @@ fn abandoning_successful_resource_result_propagates_its_finalizer_failure() {
     }
     assert_eq!(context.available(), before);
 }
+
+#[test]
+fn foreign_growth_and_received_grant_observe_refunds_before_reusing_room() {
+    #[derive(Clone, Copy)]
+    struct Input {
+        parent: *const Context,
+        first: std::ptr::NonNull<u8>,
+        second: std::ptr::NonNull<u8>,
+        resource: std::ptr::NonNull<u8>,
+    }
+    unsafe extern "C" fn child(context: *mut Context, out: *mut u8, input: *mut u8) -> u8 {
+        // SAFETY: the child owns both transferred blocks and the resource, while
+        // its blocked parent grants exclusive access to its original payer.
+        unsafe {
+            let input = input.cast::<Input>().read();
+            let before = (*input.parent).available();
+            drop(Block::from_raw(input.first, 8));
+            let second = Block::from_raw(input.second, 8);
+            let grown = second.replacement(&*context, Some(16), 16, 8).unwrap();
+            let growth = (*input.parent).available() == before - 8;
+            drop(second);
+            drop(grown);
+            hirsel_core_finalizer_begin(context, input.resource);
+            let first = Block::new(&*context, Some(16), 16, 8).unwrap();
+            drop(first);
+            let next = Block::new(&*context, Some(16), 16, 8);
+            let grant = next.is_ok();
+            drop(next);
+            hirsel_core_finalizer_end(context, input.resource);
+            hirsel_core_resource_free(input.resource, 0);
+            out.cast::<u64>()
+                .write(u64::from(growth) | (u64::from(grant) << 1));
+        }
+        0
+    }
+    unsafe extern "C" fn root(context: *mut Context, out: *mut u8, _: *mut u8) -> u8 {
+        // SAFETY: prepared owners move once to a child; join moves its plain result.
+        unsafe {
+            let mut input = Input {
+                parent: context,
+                first: Block::new(&*context, Some(8), 8, 8).unwrap().into_raw(),
+                second: Block::new(&*context, Some(8), 8, 8).unwrap().into_raw(),
+                resource: std::ptr::NonNull::new(
+                    hirsel_core_resource_alloc(&*context, 1, 8, 0, 16).pointer,
+                )
+                .unwrap(),
+            };
+            let task = hirsel_core_spawn(
+                context,
+                0,
+                (&mut input as *mut Input).cast(),
+                child,
+                layout::<Input, u64>(8),
+            );
+            let joined = hirsel_core_join(context, task.task, out, 1);
+            assert_eq!((joined.kind, joined.status), (0, 0));
+        }
+        0
+    }
+    assert_eq!(run(root, ()).0, 3);
+}

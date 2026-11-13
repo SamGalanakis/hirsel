@@ -115,3 +115,43 @@ pub unsafe extern "C" fn switch(_save: *mut *mut u8, _to: *mut u8) {
 unsafe extern "C" fn fiber_start() {
     core::arch::naked_asm!("mov x0, x19", "mov x1, x20", "blr x21", "brk #0")
 }
+
+/// One client request: `VALGRIND_DO_CLIENT_REQUEST_EXPR(default, code, a1, a2, a3, a4, 0)`.
+#[inline(always)]
+pub fn valgrind_request(default: u64, code: u64, [a1, a2, a3, a4]: [usize; 4]) -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let args: [u64; 6] = [code, a1 as u64, a2 as u64, a3 as u64, a4 as u64, 0];
+        let mut result = default;
+        // SAFETY: the rotations total 128 bits, so they leave rdi as it was, and
+        // `xchg rbx, rbx` changes nothing: natively the sequence only reads `args`. Valgrind
+        // recognises it and answers the request in rdx.
+        unsafe {
+            std::arch::asm!(
+                "rol rdi, 3",
+                "rol rdi, 13",
+                "rol rdi, 61",
+                "rol rdi, 51",
+                "xchg rbx, rbx",
+                inout("rdx") result,
+                in("rax") args.as_ptr(),
+                options(nostack),
+            );
+        }
+        result
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = (code, a1, a2, a3, a4);
+        default
+    }
+}
+
+/// Describe a live fiber stack to Valgrind. Native execution returns zero.
+pub fn stack_register(start: *const u8, end: *const u8) -> u64 {
+    valgrind_request(0, 0x1501, [start.addr(), end.addr(), 0, 0])
+}
+/// Forget the stack after its final suspension.
+pub fn stack_deregister(id: u64) {
+    valgrind_request(0, 0x1502, [id as usize, 0, 0, 0]);
+}

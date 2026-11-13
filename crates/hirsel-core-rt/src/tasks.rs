@@ -74,6 +74,7 @@ pub const ARC_SHARE: u8 = 11;
 pub const ARC_RELEASE: u8 = 12;
 pub const ARC_UNWRAP: u8 = 13;
 pub const REFUND: u8 = 14;
+pub const CHARGE: u8 = 15;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Event {

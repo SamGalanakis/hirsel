@@ -42,6 +42,8 @@ fn page() -> usize {
 pub(crate) struct Stack {
     base: NonNull<u8>,
     len: usize,
+    #[cfg(any(test, feature = "memcheck"))]
+    valgrind: u64,
 }
 impl Stack {
     pub(crate) fn new() -> Self {
@@ -73,6 +75,11 @@ impl Stack {
             Self {
                 base: NonNull::new_unchecked(raw.cast()),
                 len,
+                #[cfg(any(test, feature = "memcheck"))]
+                valgrind: hirsel_stack::stack_register(
+                    raw.cast::<u8>().add(page()),
+                    raw.cast::<u8>().add(len),
+                ),
             }
         }
     }
@@ -101,6 +108,8 @@ impl Stack {
 }
 impl Drop for Stack {
     fn drop(&mut self) {
+        #[cfg(any(test, feature = "memcheck"))]
+        hirsel_stack::stack_deregister(self.valgrind);
         // SAFETY: the scheduler unmaps only a stack whose fiber ended permanently.
         unsafe {
             libc::munmap(self.base.as_ptr().cast(), self.len);

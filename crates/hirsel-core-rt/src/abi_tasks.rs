@@ -78,3 +78,14 @@ pub extern "C" fn hirsel_core_arc_released(last: bool) {
 pub extern "C" fn hirsel_core_arc_unwrapped(unique: bool) {
     crate::tasks::event(crate::tasks::ARC_UNWRAP, 0, u64::from(unique));
 }
+
+/// Exclusive execution of the payer's entire table, including queued refunds.
+/// The current scheduler has one OS worker and callbacks here cannot suspend,
+/// so its running turn already holds the lease. A multiworker scheduler must
+/// acquire the payer domain before invoking this closure, quiesce every task
+/// sharing that domain, and retain the lease until the closure returns. It must
+/// also hold it for a received finalizer's full body, even across suspension.
+#[inline]
+pub(crate) fn payer_lease<R>(operation: impl FnOnce() -> R) -> R {
+    operation()
+}

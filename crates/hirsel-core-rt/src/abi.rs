@@ -387,8 +387,9 @@ pub unsafe extern "C" fn hirsel_core_alloc(
 ) -> Allocation {
     // SAFETY: the emitter supplies a live context and optional live block.
     let (context, like) = unsafe { (&*context, NonNull::new(like).map(|p| funding(p))) };
-    match allocate(
-        context.payer(like),
+    match crate::block::allocate_like(
+        context,
+        like,
         (!overflow).then_some(charge),
         bytes,
         align,

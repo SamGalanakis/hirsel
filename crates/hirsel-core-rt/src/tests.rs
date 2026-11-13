@@ -297,3 +297,17 @@ fn owned_failure_string_outlives_its_frame_and_context_without_admission() {
         }
     }
 }
+
+#[test]
+fn original_payer_growth_outlives_its_last_context_and_old_block() {
+    let source = Context::new(48);
+    let old = Block::new(&source, Some(8), 8, 8).unwrap();
+    drop(source);
+    let receiver = Context::new(0);
+    let next = old.replacement(&receiver, Some(16), 16, 8).unwrap();
+    drop(old);
+    let last = next.replacement(&receiver, Some(24), 24, 8).unwrap();
+    drop(next);
+    drop(last);
+    assert_eq!(receiver.available(), 0);
+}

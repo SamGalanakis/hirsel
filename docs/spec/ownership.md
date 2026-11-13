@@ -67,7 +67,8 @@ fn bad(x: own Inbox) {}                        // refused: LANG-5, no representa
 
 Each type declaration publishes one **summary**. This is its whole content:
 
-- its kind (OWN-3) and declared bounds (OWN-4);
+- its kind (OWN-3) and declared bounds (OWN-4), with the type parameters that condition
+  each;
 - its region parameters and anchors ([MEM-6](memory.md#mem-6-roots), OWN-22);
 - its logical size ([MEM-24](budgets.md#mem-24-logical-charges)), its layout obligations
   ([MEM-9](memory.md#mem-9-compact-types)), whether it is `packed` and `streamable`
@@ -94,6 +95,9 @@ holding every category its bounds do not exclude: `plain` excludes resource, sco
 stable reference and opaque owner, but not capability, so `Wrap[T: plain] { item: T }` may hold a
 capability. A generic declaration's summary is stated
 in terms of its parameters and instantiated from the arguments' summaries at each use. A
+parameter that no field **mentions** contributes nothing to it: a field mentions `T` when its
+type is `T`, or names a type whose summary lets that argument position condition something,
+at any depth. So a phantom parameter holds nothing and conditions no bound. A
 `type` whose fields are all plain is **plain**: it is copied by `let`, by passing and by
 capture, and has no cleanup. Scalars, `bool`, `char`, unit, plain callables, and tuples,
 `Option` and `Result` of plain types are plain. The summaries of built-in types are in
@@ -162,15 +166,28 @@ the declaration is checked once against its fields; a field naming a type, the d
 type included, reads that type's declared bounds and does not re-derive them, so there is
 no fixpoint. A generic type's declared bounds are conditional, as a built-in's are: the
 declaration is checked as if each type parameter had those bounds as well, and an
-instance has a declared bound exactly when each of its type arguments has it, so
-`type Pair[T]: shareable { a: T, b: T }` makes `Pair[u64]` shareable and
-`Pair[HostFile]` not. A refusal is reported at the field whose type breaks the bound. A type without a declaration of `shareable`, `send`, `key` or `ordered` does
+instance has a declared bound exactly when each type argument that the fields mention
+(OWN-2) has it. So `type Pair[T]: shareable { a: T, b: T }` makes `Pair[u64]` shareable and
+`Pair[HostFile]` not, while `type Id[T]: key { slot: u64 }` makes every `Id[X]` key. The
+same rule gives the built-in rows of [core](core.md#built-in-types) their "when T", and an
+opaque type's published summary carries which parameters condition each bound, without
+its fields. A refusal is reported at the field whose type breaks the bound. A type without a declaration of `shareable`, `send`, `key` or `ordered` does
 not have it, plain types' `shareable` and `send` excepted. `plain`, `packed` and `streamable` are never declared.
 
 ```hirsel
 type Leaf: shareable + send { n: List[u64] }
 type Pair[T]: shareable { a: T, b: T }
 type Holder { r: Rc[Pair[u64]] }
+```
+```hirsel
+type Entry { name: String }
+type Id[T]: key { slot: u64, generation: u64 }
+fn same(a: Id[Entry], b: Id[Entry]) -> bool { a == b }      // T is phantom: Id[Entry] is key
+```
+```hirsel
+type Entry { name: String }
+type Item[T]: key { item: T }
+fn same(a: Item[Entry], b: Item[Entry]) -> bool { a == b }  // refused: LANG-21, Entry is not key
 ```
 ```hirsel
 type Tree: shareable { kids: List[Rc[Tree]], log: HostFile }  // refused: OWN-4, at log

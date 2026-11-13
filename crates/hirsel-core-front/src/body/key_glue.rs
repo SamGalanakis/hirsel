@@ -21,6 +21,8 @@ pub enum KeyOp {
     /// `$encode[T](from, blob, at)`: MEM-9's packed encoding of a plain `T` written at
     /// byte `at` of `blob` (a span builder's push in a rigid body, MEM-12).
     Encode,
+    /// Core-private closed cleanup property; no value is inspected at runtime.
+    NeedsDrop,
 }
 impl KeyOp {
     fn definition(self) -> DefPath {
@@ -38,6 +40,7 @@ impl KeyOp {
             Self::CloneIn(_) => "core.$clone_in",
             Self::CloneTwin(_) => "core.$clone_twin",
             Self::Encode => "span.$encode",
+            Self::NeedsDrop => "core.$needs_drop",
         })
     }
     fn signature(self, ty: TypeId) -> Signature {
@@ -52,6 +55,14 @@ impl KeyOp {
         };
         let mut params = vec![view(ty)];
         match self {
+            Self::NeedsDrop => {
+                return Signature {
+                    params: vec![],
+                    results: vec![Ty::Scalar(Scalar::Bool)],
+                    dest: None,
+                    never: false,
+                };
+            }
             Self::Hash => {}
             Self::Fold => params.push(Param::Value(Ty::Scalar(Scalar::U64))),
             Self::Equal | Self::Order | Self::Ordered(_) => params.push(view(ty)),
@@ -189,6 +200,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                                 result: false,
                             }
                         }
+                        KeyOp::NeedsDrop => scalar_abi::SignatureAbi {
+                            params: vec![],
+                            result: true,
+                        },
                         KeyOp::Encode => scalar_abi::SignatureAbi {
                             params: vec![false; 3],
                             result: false,
@@ -211,7 +226,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     .or_insert_with(|| GenericCall {
                         arguments: vec![NameRecipe::of(self.p, &self.t, ty)],
                         dictionaries: vec![],
-                        operation: Some(op),
+                        operation: Some((op, id)),
                     });
                 function
             } else {
@@ -504,7 +519,9 @@ impl Derive<'_> {
             row
         };
         self.active.push((ty, op));
-        let mut c = Code::new(if op == KeyOp::Hash {
+        let mut c = Code::new(if op == KeyOp::NeedsDrop {
+            &[]
+        } else if op == KeyOp::Hash {
             &[Ty::Ptr]
         } else if op == KeyOp::Fold {
             &[Ty::Ptr, Ty::Scalar(Scalar::U64)]
@@ -513,6 +530,15 @@ impl Derive<'_> {
         } else {
             &[Ty::Ptr, Ty::Ptr]
         });
+        if op == KeyOp::NeedsDrop {
+            let value = c.boolean(self.recipes[ty.index()].drop.is_some());
+            let returns = PoolRange::push(&mut c.body.pools.values, [value]);
+            c.end(Terminator::Return(returns));
+            order_instructions(&mut c.body);
+            self.module.functions[row.index()].body = Some(c.body);
+            self.active.pop();
+            return Ok(row);
+        }
         let ps = c.params(BlockId(0));
         if op == KeyOp::Clone {
             self.clone_function(&mut c, ty, ps[0], ps[1])?;
@@ -550,6 +576,7 @@ impl Derive<'_> {
             return Ok(row);
         }
         let result = match op {
+            KeyOp::NeedsDrop => unreachable!("cleanup properties return above"),
             KeyOp::Hash => {
                 let zero = c.constant(0);
                 let fold = self.function(ty, KeyOp::Fold)?;

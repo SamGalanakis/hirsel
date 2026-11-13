@@ -85,3 +85,27 @@ fn aggregate_callback_cranelift(){aggregate_callback(Backend::Cranelift);}
 #[test]
 #[ignore="explicit native integration target"]
 fn aggregate_callback_llvm(){aggregate_callback(Backend::Llvm);}
+
+fn slots_needs_drop(backend: Backend) {
+    let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir=tempfile::tempdir().unwrap();
+    let core=dir.path().join("core");std::fs::create_dir(&core).unwrap();
+    for file in std::fs::read_dir(root.join("core/core")).unwrap() {
+        let path=file.unwrap().path();
+        if path.extension().is_some_and(|e|e=="hirsel") {std::fs::copy(&path,core.join(path.file_name().unwrap())).unwrap();}
+    }
+    let file=core.join("list.hirsel");
+    let mut source=std::fs::read_to_string(&file).unwrap();
+    source.push_str(include_str!("../../../core/front/fixtures/slots-needs-drop.hirsel"));std::fs::remove_file(&file).unwrap();std::fs::write(file,source).unwrap();
+    let mut request=source_request("pub fn main()->Result[(),Exit] {if list.needs_drop_law() {Ok(())}else{Error(Exit(status:1))}}",dir.path());
+    request.inputs.packages[1]=PackageManifest::directory(&core,package("core"),true).unwrap();
+    let product=Driver::default().check(request,&mut Meter::new(false)).unwrap();
+    let built=product.build(&DefPath::from_full("app@1/main/main").unwrap(),&native_options(backend,dir.path())).unwrap();
+    run_clean(&built.executable,0);
+}
+#[test]
+#[ignore="explicit native integration target"]
+fn slots_needs_drop_cranelift(){slots_needs_drop(Backend::Cranelift);}
+#[test]
+#[ignore="explicit native integration target"]
+fn slots_needs_drop_llvm(){slots_needs_drop(Backend::Llvm);}

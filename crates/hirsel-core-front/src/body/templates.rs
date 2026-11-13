@@ -142,7 +142,7 @@ impl NameRecipe {
 }
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct GenericCall {
-    pub operation: Option<key_glue::KeyOp>,
+    pub operation: Option<(key_glue::KeyOp, TypeId)>,
     pub arguments: Vec<NameRecipe>,
     pub dictionaries: Vec<NameRecipe>,
 }
@@ -445,13 +445,8 @@ impl Substitution<'_> {
                 .map(|name| name.render(&self.names))
                 .collect(),
         };
-        if let Some(op) = call.operation {
+        if let Some((op, ty)) = call.operation {
             self.signature(function.signature);
-            let Param::Address { ty, .. } =
-                self.module.signatures[function.signature.index()].params[0]
-            else {
-                unreachable!("symbolic key payload")
-            };
             let ty = self.ty(ty);
             if !key_glue::inline_scalar(self.module, ty, op) {
                 return match key_glue::ensure(self.module, ty, op) {

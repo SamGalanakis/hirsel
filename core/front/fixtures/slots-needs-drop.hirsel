@@ -1,0 +1,21 @@
+// Appended to core.list only by the test harness; not a source-language predicate.
+fn slots_needs_drop[T](s:Slots[T])->bool
+fn verdict[T](s:Slots[T],expected:bool)->bool {slots_needs_drop(s)==expected}
+type DropPlain {value:u64}
+type DropOwner {text:String}
+type DropFinalizer {value:u64} drop(x) {}
+// expect: run needs_drop_law() = true
+pub fn needs_drop_law()->bool {
+ let a:Slots[u64]=slots_empty()
+ let b:Slots[DropPlain]=slots_empty()
+ let c:Slots[Inline[u64,2]]=slots_empty()
+ let d:Slots[fn()->u64]=slots_empty()
+ let e:Slots[String]=slots_empty()
+ let f:Slots[List[u64]]=slots_empty()
+ let g:Slots[DropOwner]=slots_empty()
+ let h:Slots[DropFinalizer]=slots_empty()
+ let i:Slots[own fn()->u64]=slots_empty()
+ let j:Slots[Inline[String,2]]=slots_empty()
+ verdict(a,false)&&verdict(b,false)&&verdict(c,false)&&verdict(d,false)&&
+ verdict(e,true)&&verdict(f,true)&&verdict(g,true)&&verdict(h,true)&&verdict(i,true)&&verdict(j,true)
+}

@@ -14,6 +14,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<Option<ValueId>> {
         match name {
+            "slots_needs_drop" => {
+                Some(self.key_operation(key_glue::KeyOp::NeedsDrop, item, &[], n))
+            }
             // list_with_capacity writes the payload's three carrier words by
             // byte offset. Slots' sole raw field has exactly those same words.
             "slots_new" => Some(self.slots_new(item, vals[0]?, result, n)),
@@ -532,6 +535,9 @@ fn clone_kernel_hook_law() -> u64 {
     fn private_slot_contracts_and_misuse() {
         let mut laws = SLOT_LAWS.to_string();
         laws.push_str(CLONE_LAWS);
+        laws.push_str(include_str!(
+            "../../../../core/front/fixtures/slots-needs-drop.hirsel"
+        ));
         laws.push_str("\ntype TestOwn { xs: List[u64] } drop(t) { list.swap(mut t.xs, 0, 1) }\n// expect: run slots_own_finalizer() = 9\nfn slots_own_finalizer() -> u64 { let mut xs: List[u64] = list.new(); result.unwrap(list.push(mut xs, 1)); result.unwrap(list.push(mut xs, 2)); let x = TestOwn(xs: take xs); let _ = take x; 9 }\n");
         let (index, modules) = core_inputs(CLONE_PRELUDE, &laws);
         let p = Program::declare(&index, &modules);
@@ -589,6 +595,6 @@ fn clone_kernel_hook_law() -> u64 {
                 faults += 1;
             }
         }
-        assert_eq!((passed, faults), (9, 5));
+        assert_eq!((passed, faults), (10, 5));
     }
 }

@@ -120,8 +120,15 @@
 //!   plain packed element decodes it field after field into a native place (a compact
 //!   field becomes its locator); a view of a compact element is its locator.
 //!   Iterating a span advances by the element's packed size, constant for a plain
-//!   element and `compact_extent` at the holder's W otherwise. A `FixedSpan` element
-//!   MEM-9 does not fix uses the same packed encoding.
+//!   element and `compact_extent` at the holder's W otherwise.
+//! - **A `FixedSpan` element MEM-9 does not fix** (MEM-12: private, at a stride of
+//!   the logical size) is encoded in its logical layout, which fills that stride
+//!   exactly: a record or tuple field after field, each field so encoded; a plain
+//!   variant its case index (declaration order) as a little-endian u64, then the
+//!   active case's fields after field, zero up to 8 plus the largest payload; an
+//!   `Inline[T, n]` its elements in turn. For scalar records this is MEM-9's
+//!   encoding, so a type has one encoding. `FixedSpan[Small(u8) | Large(u64)]`
+//!   strides 16: `Small(7)` is `0u64, 7, 0 x7`; `Large(x)` is `1u64, x`.
 //!
 //! # Views (FORM v1b)
 //!

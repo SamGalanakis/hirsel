@@ -1,0 +1,30 @@
+// MEM-6 / OWN-20: parentheses preserve a Region binder's identity.
+// Two direct and two function-valued calls each return requested=1;
+// two callback invocations each read one byte, for a total of six.
+// expect: run checked() = 6
+stable type Doc {value:u64}
+fn parse(r:Region)->Result[Doc in r,Capacity] {
+ Error(Capacity(requested:1,available:0))
+}
+fn direct(r:Region)->u64 {
+ let x:Result[Doc in r,Capacity]=parse(((r)))
+ match x {Error(c)=>c.requested,Ok(_)=>0u64}
+}
+fn indirect(r:Region)->u64 {
+ let f=parse
+ let x:Result[Doc in r,Capacity]=f(((r)))
+ match x {Error(c)=>c.requested,Ok(_)=>0u64}
+}
+fn invoke(r:Region,f:scoped fn(Text in r)->u64)->u64 {
+ let t=result.unwrap(text.copy_in(r,"x"));f(t)
+}
+fn callback(r:Region)->u64 {
+ invoke(((r)),fn(t:Text in r)->u64{text.len(t)})
+}
+fn checked()->u64 {region r {
+ direct((r))+indirect((r))+callback((r))+
+ (match parse((r)) {Error(c)=>c.requested,Ok(_)=>0u64})+
+ {let f=parse;match f((r)) {Error(c)=>c.requested,Ok(_)=>0u64}}+
+ invoke((r),fn(t:Text in r)->u64{text.len(t)})
+}}
+pub fn main()->Result[(),Exit] {if checked()==6u64 {Ok(())}else{Error(Exit(status:1))}}

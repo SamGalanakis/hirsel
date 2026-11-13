@@ -83,12 +83,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 _ => None,
             })
             .collect();
-        if rooted.iter().any(|&i| {
-            args.get(i).is_none_or(|&e| {
-                self.kind(e) != NodeKind::Path
-                    || !matches!(self.p.target(self.at, e), Some(Target::Binder(_)))
-            })
-        }) {
+        if rooted
+            .iter()
+            .any(|&i| args.get(i).is_none_or(|&e| self.binder_path(e).is_none()))
+        {
             return self.gap_ty(
                 n,
                 "a call result rooted in a Region expression is not built",
@@ -370,8 +368,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         for (i, &(_, ty)) in params.iter().enumerate() {
             if matches!(self.t.kind(ty), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::Region))
                 && let Some(&arg) = args.get(i)
-                && self.kind(arg) == NodeKind::Path
-                && matches!(self.p.target(self.at, arg), Some(Target::Binder(_)))
+                && self.binder_path(arg).is_some()
             {
                 roots.resize(i + 1, None);
                 roots[i] = Some(self.body_root(arg, true));

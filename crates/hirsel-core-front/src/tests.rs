@@ -574,6 +574,12 @@ fn call_region_callback_substitution() {
 }
 
 #[test]
+fn call_region_grouped_binders() {
+    let failures = run_case(&root().join("cases/body/call-region-grouped.hirsel"));
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
 fn scalar_key_carriage() {
     let failures = run_case(&root().join("cases/body/scalar-key-carriage.hirsel"));
     assert!(failures.is_empty(), "{failures:?}");

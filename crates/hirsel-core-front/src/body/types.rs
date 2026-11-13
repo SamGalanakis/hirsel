@@ -1,7 +1,20 @@
 use super::*;
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
+    // Grouping does not change the identity of a region argument (MEM-6).
+    pub(super) fn binder_path(&self, mut n: NodeId) -> Option<NodeId> {
+        while self.kind(n) == NodeKind::Group {
+            n = self.kids(n)[0];
+        }
+        (self.kind(n) == NodeKind::Path
+            && matches!(self.p.target(self.at, n), Some(Target::Binder(_))))
+        .then_some(n)
+    }
+
     pub(super) fn body_root(&mut self, n: NodeId, region_only: bool) -> TyId {
+        let Some(n) = self.binder_path(n) else {
+            return ERROR;
+        };
         let Some(Target::Binder(b)) = self.p.target(self.at, n).copied() else {
             return ERROR;
         };

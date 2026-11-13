@@ -126,8 +126,8 @@ fn names(store: &Store, entries: &[(ContentHash, u32)]) -> io::Result<ContentHas
 }
 pub(crate) struct DiskIndex {
     pub store: Store,
-    nodes: Mutex<BTreeMap<ContentHash, Arc<Node>>>,
-    pages: Mutex<BTreeMap<ContentHash, Arc<Vec<u8>>>>,
+    nodes: Mutex<rustc_hash::FxHashMap<ContentHash, Arc<Node>>>,
+    pages: Mutex<rustc_hash::FxHashMap<ContentHash, Arc<Vec<u8>>>>,
     reads: std::sync::atomic::AtomicUsize,
     rows: std::sync::atomic::AtomicUsize,
 }

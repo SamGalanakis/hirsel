@@ -721,6 +721,7 @@ dependencies = [
  "hirsel-intern",
  "hirsel-llvm-lazy",
  "object",
+ "rustc-hash",
  "serde",
  "serde_json",
  "sha2",

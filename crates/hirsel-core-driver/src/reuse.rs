@@ -23,6 +23,33 @@ pub(crate) struct Header {
     pub(crate) site: Site,
     pub(crate) anchor: (ModuleId, u32),
 }
+/// Numeric signature rows are separate from the path index. Already resolved
+/// dependencies demand a row directly, without re-encoding its canonical path.
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub(crate) struct Headers {
+    pub(crate) rows: hirsel_core_ids::published::Table<Option<Header>>,
+    names: hirsel_core_ids::published::Map<DefPath, DefinitionId>,
+}
+impl Headers {
+    pub(crate) fn get(&self, path: &DefPath) -> Option<&Header> {
+        self.by_id(*self.names.get(path)?)
+    }
+    pub(crate) fn contains_key(&self, path: &DefPath) -> bool {
+        self.get(path).is_some()
+    }
+    fn by_id(&self, id: DefinitionId) -> Option<&Header> {
+        self.rows.get(id.0 as usize)?.as_ref()
+    }
+    pub(crate) fn publish(
+        &self,
+        writer: &mut impl hirsel_core_ids::published::Publisher,
+    ) -> io::Result<Self> {
+        Ok(Self {
+            rows: writer.table(&self.rows)?,
+            names: writer.map(&self.names)?,
+        })
+    }
+}
 // Request-owned IDs get direct slots; the installed prefix is sparse and is
 // allocated only as a request names it. Each semantic lookup is performed once.
 struct Demand<T> {
@@ -52,18 +79,13 @@ impl<T> Demand<T> {
         Ok(cell.get().unwrap())
     }
 }
-struct Dependencies {
-    digest: ContentHash,
-    reads: Vec<usize>,
-}
 pub(crate) struct Keys {
-    pub(crate) headers: hirsel_core_ids::published::Map<DefPath, Header>,
+    pub(crate) headers: Headers,
     environment: ContentHash,
     paths: Demand<Arc<DefPath>>,
     modules: Demand<ModulePath>,
     packages: Demand<PackageId>,
     anchors: hirsel_core_ids::published::Map<(ModuleId, u32), DefPath>,
-    dependencies: Demand<Dependencies>,
 }
 impl Keys {
     pub fn new(
@@ -72,11 +94,12 @@ impl Keys {
         resolutions: &[Vec<Arc<Resolution>>],
         inputs: &CorpusManifest,
         compiler: ContentHash,
-        image_headers: Option<&hirsel_core_ids::published::Map<DefPath, Header>>,
+        image_headers: Option<&Headers>,
         image_anchors: Option<&hirsel_core_ids::published::Map<(ModuleId, u32), DefPath>>,
         entry: Option<&DefPath>,
     ) -> io::Result<Self> {
         let mut headers = image_headers.cloned().unwrap_or_default();
+        headers.rows.resize(index.definitions.len(), None);
         let mut anchors = image_anchors.cloned().unwrap_or_default();
         let mut namespaces: Vec<_> = inputs
             .packages
@@ -88,7 +111,6 @@ impl Keys {
             "hirsel.core-environment.v1",
             [&encode(&(compiler, &inputs.core, namespaces, entry))?[..]],
         );
-        let mut source_definitions = Vec::new();
         for (m, rows) in modules.iter().zip(resolutions) {
             for (ordinal, (item, resolution)) in m.syntax.items().zip(rows).enumerate() {
                 let Some(definition) = index.item_definition(m.id, ordinal as u32, item) else {
@@ -117,7 +139,6 @@ impl Keys {
                         index.module_path(m.id)
                     )));
                 };
-                source_definitions.push(definition.0 as usize);
                 let path = index.definition_path(definition);
                 let end = header_end(item);
                 let digest = ContentHash::of_bytes(&item.source_text().as_bytes()[..end]);
@@ -131,18 +152,16 @@ impl Keys {
                     }
                 }
                 anchors.insert((m.id, ordinal as u32), path.clone());
-                headers.insert(
-                    path,
-                    Header {
-                        digest,
-                        has_body: end < item.source_text().len(),
-                        header_end: end as u32,
-                        site: index.get(definition).site,
-                        body_reads: body_reads.into_iter().collect(),
-                        reads: reads.into_iter().collect(),
-                        anchor: (m.id, ordinal as u32),
-                    },
-                );
+                headers.names.insert(path, definition);
+                headers.rows[definition.0 as usize] = Some(Header {
+                    digest,
+                    has_body: end < item.source_text().len(),
+                    header_end: end as u32,
+                    site: index.get(definition).site,
+                    body_reads: body_reads.into_iter().collect(),
+                    reads: reads.into_iter().collect(),
+                    anchor: (m.id, ordinal as u32),
+                });
             }
         }
         let keys = Self {
@@ -152,29 +171,17 @@ impl Keys {
             paths: Demand::new(index.definitions.base_len(), index.definitions.len()),
             modules: Demand::new(index.modules.base_len(), index.modules.len()),
             packages: Demand::new(index.packages.base_len(), index.packages.len()),
-            dependencies: Demand::new(index.definitions.base_len(), index.definitions.len()),
         };
-        // Signature binding belongs to declaration setup for source-owned rows.
-        // Installed rows remain demand-loaded; no package prefix is enumerated.
-        for id in source_definitions {
-            keys.dependency(index, id)?;
-        }
         Ok(keys)
     }
-    fn dependency(&self, index: &NameIndex, id: usize) -> io::Result<&Dependencies> {
+    fn dependency(&self, index: &NameIndex, id: usize) -> io::Result<&Header> {
         hirsel_core_front::cost_scope!("key query", "dependency lookup");
-        self.dependencies.get_or_try_init(id as u64, || {
-            hirsel_core_front::cost_scope!("key query", "dependency miss");
-            let path = self.path(index, hirsel_core_resolve::DefinitionId(id as u32));
-            let h = self.headers.get(path.as_ref()).ok_or_else(|| {
-                io::Error::other(format!(
-                    "core signature demand outside reached definitions: {path}"
-                ))
-            })?;
-            Ok(Dependencies {
-                digest: h.digest,
-                reads: h.reads.iter().map(|id| id.0 as usize).collect(),
-            })
+        let id = hirsel_core_resolve::DefinitionId(id as u32);
+        self.headers.by_id(id).ok_or_else(|| {
+            io::Error::other(format!(
+                "core signature demand outside reached definitions: {}",
+                index.definition_path(id)
+            ))
         })
     }
     fn path(&self, index: &NameIndex, id: hirsel_core_resolve::DefinitionId) -> &Arc<DefPath> {
@@ -234,16 +241,12 @@ impl Keys {
         &self,
         index: &NameIndex,
         path: &DefPath,
+        module: ModuleId,
+        ordinal: u32,
         item: Item<'_>,
         resolution: &Resolution,
     ) -> io::Result<DefinitionKey> {
         hirsel_core_front::cost_scope!("phase", "driver keys/anchors");
-        let header = self.headers.get(path).ok_or_else(|| {
-            io::Error::other(format!(
-                "internal error: core reuse body `{path}` has no header"
-            ))
-        })?;
-        let (module, ordinal) = header.anchor;
         let own = index
             .item_definition(module, ordinal, item)
             .ok_or_else(|| {
@@ -284,7 +287,7 @@ impl Keys {
                 let path = self.path(index, hirsel_core_resolve::DefinitionId(id as u32));
                 let dependency = self.dependency(index, id)?;
                 signatures.insert(Arc::clone(path), dependency.digest);
-                pending.extend(dependency.reads.iter().copied());
+                pending.extend(dependency.reads.iter().map(|id| id.0 as usize));
             }
             signatures
         };

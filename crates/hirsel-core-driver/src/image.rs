@@ -25,7 +25,7 @@ pub(crate) struct ImageDirectory {
     pub inputs: CorpusManifest,
     pub index: Arc<NameIndex>,
     pub files: Table<ImageFile>,
-    pub headers: Arc<Map<DefPath, reuse::Header>>,
+    pub headers: Arc<reuse::Headers>,
     pub anchors: Map<(ModuleId, u32), DefPath>,
     pub offsets: Map<(ModuleId, u32), u32>,
     pub declarations: ContentHash,
@@ -286,8 +286,15 @@ impl Driver {
             definitions.insert(path.clone(), hash);
         }
         let mut anchors = Map::default();
-        for (path, header) in product.headers.iter() {
-            anchors.insert(header.anchor, path.clone());
+        for (id, header) in product.headers.rows.iter().enumerate() {
+            if let Some(header) = header {
+                anchors.insert(
+                    header.anchor,
+                    product
+                        .index
+                        .definition_path(hirsel_core_resolve::DefinitionId(id as u32)),
+                );
+            }
         }
         let mut offsets = Map::default();
         for file in &product.files {
@@ -307,7 +314,7 @@ impl Driver {
             inputs,
             index: Arc::new(product.index.publish(&mut writer)?),
             files: writer.table(&files.into())?,
-            headers: Arc::new(writer.map(&product.headers)?),
+            headers: Arc::new(product.headers.publish(&mut writer)?),
             anchors: writer.map(&anchors)?,
             offsets: writer.map(&offsets)?,
             declarations: store.put(&encode(&library.publish(&mut writer)?)?)?,

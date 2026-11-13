@@ -150,20 +150,27 @@ impl CheckProduct {
         }
         let owners: BTreeMap<_, _> = self
             .headers
+            .rows
             .available()
             .into_iter()
-            .map(|(p, h)| (h.anchor, (p, h)))
+            .filter_map(|(id, h)| {
+                let h = h.as_ref()?;
+                let path = self
+                    .index
+                    .definition_path(hirsel_core_resolve::DefinitionId(id as u32));
+                Some((h.anchor, (path, h)))
+            })
             .collect();
         let needed = |site: &Site| -> bool {
             if let Some((path, header)) = owners.get(&(site.module, site.item)) {
-                bodies.contains(*path)
-                    || declarations.contains(*path) && site.span.start < header.header_end
+                bodies.contains(path)
+                    || declarations.contains(path) && site.span.start < header.header_end
             } else {
                 // Module-wide decoding/resource failures affect each demand from it.
                 site.item == u32::MAX
                     && owners.values().any(|(p, h)| {
                         h.anchor.0 == site.module
-                            && (bodies.contains(*p) || declarations.contains(*p))
+                            && (bodies.contains(p) || declarations.contains(p))
                     })
             }
         };

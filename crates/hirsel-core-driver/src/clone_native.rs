@@ -19,7 +19,7 @@ fn clone_body_keys_preserve_type_identity_across_edits_and_reordering() {
     let first = driver.check(clone_request(CLONE_PROBE, dir.path()), &mut Meter::new(false)).unwrap();
     assert!(first.accepted(), "{:?} {:?}", first.diagnostics, first.incomplete);
     assert!(first.tests().next().is_none());
-    assert!(first.headers[&path].has_body, "a published clone is a demanded body");
+    assert!(first.headers.get(&path).unwrap().has_body, "a published clone is a demanded body");
     let changed = CLONE_PROBE.replace("let copied:", "let _ = 0u64; let copied:");
     let edited = driver.check(clone_request(&changed, dir.path()), &mut Meter::new(false)).unwrap();
     assert!(edited.accepted(), "{:?} {:?}", edited.diagnostics, edited.incomplete);
@@ -31,7 +31,7 @@ fn clone_body_keys_preserve_type_identity_across_edits_and_reordering() {
     assert!(reordered.accepted(), "{:?} {:?}", reordered.diagnostics, reordered.incomplete);
     assert!(reordered.rechecked.is_empty(), "{:?}", reordered.rechecked);
     assert_eq!(edited.definitions[&path].key, reordered.definitions[&path].key);
-    assert_eq!(reordered.headers[&path].anchor.1, 2);
+    assert_eq!(reordered.headers.get(&path).unwrap().anchor.1, 2);
 }
 
 fn clone_product(backend: Backend) {

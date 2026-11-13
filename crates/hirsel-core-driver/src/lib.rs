@@ -185,7 +185,7 @@ pub struct CheckProduct {
     pub(crate) library: Option<Arc<hirsel_core_front::Library>>,
     native_entry: Option<native::EntryBinding>,
     test_entries: BTreeMap<DefPath, Result<native::EntryAbi, String>>,
-    headers: Arc<hirsel_core_ids::published::Map<DefPath, reuse::Header>>,
+    headers: Arc<reuse::Headers>,
     records: Option<Root>,
 }
 impl CheckProduct {
@@ -272,7 +272,7 @@ struct Root {
     snapshot: ContentHash,
     bytes: usize,
     identities: Record,
-    headers: Arc<hirsel_core_ids::published::Map<DefPath, reuse::Header>>,
+    headers: Arc<reuse::Headers>,
     declarations: Option<Record>,
     files: Vec<Record>,
     definitions: BTreeMap<DefPath, Record>,
@@ -628,7 +628,14 @@ impl Driver {
                 let item = modules[fd.at.module as usize]
                     .syntax
                     .item(fd.at.item as usize);
-                let key = keys.for_body(&index, &fd.path, item, &resolution)?;
+                let key = keys.for_body(
+                    &index,
+                    &fd.path,
+                    modules[fd.at.module as usize].id,
+                    fd.at.item,
+                    item,
+                    &resolution,
+                )?;
                 let resident = self
                     .published
                     .as_ref()

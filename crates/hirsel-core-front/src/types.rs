@@ -88,6 +88,8 @@ pub enum TyKind {
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct Types {
     base: Option<std::sync::Arc<Types>>,
+    #[serde(skip)]
+    base_len: usize,
     kinds: Table<TyKind>,
     #[serde(skip)]
     map: HashMap<TyKind, TyId>,
@@ -102,7 +104,8 @@ impl<'de> serde::Deserialize<'de> for Types {
             published_map: Map<TyKind, TyId>,
         }
         let wire: Wire = serde::Deserialize::deserialize(decoder)?;
-        let offset = wire.base.as_ref().map_or(0, |b| b.len()) + wire.kinds.base_len();
+        let base_len = wire.base.as_ref().map_or(0, |b| b.len());
+        let offset = base_len + wire.kinds.base_len();
         let map = wire
             .kinds
             .own_iter()
@@ -111,6 +114,7 @@ impl<'de> serde::Deserialize<'de> for Types {
             .collect();
         Ok(Self {
             base: wire.base,
+            base_len,
             kinds: wire.kinds,
             map,
             published_map: wire.published_map,
@@ -130,6 +134,7 @@ impl Types {
             .collect();
         Ok(Self {
             base: None,
+            base_len: 0,
             kinds: writer.table(&rows)?,
             map: HashMap::default(),
             published_map: writer.map(&map)?,
@@ -147,8 +152,10 @@ impl Types {
         t
     }
     pub fn overlay(base: std::sync::Arc<Types>) -> Self {
+        let base_len = base.len();
         Self {
             base: Some(base),
+            base_len,
             kinds: Table::default(),
             map: HashMap::default(),
             published_map: Map::default(),
@@ -173,16 +180,15 @@ impl Types {
     }
     #[inline(always)]
     pub fn kind(&self, t: TyId) -> &TyKind {
-        let base_len = self.base.as_ref().map_or(0, |b| b.len());
-        if (t.0 as usize) < base_len {
+        if (t.0 as usize) < self.base_len {
             self.base.as_ref().unwrap().kind(t)
         } else {
-            &self.kinds[t.0 as usize - base_len]
+            &self.kinds[t.0 as usize - self.base_len]
         }
     }
     #[inline(always)]
     pub fn len(&self) -> usize {
-        self.base.as_ref().map_or(0, |b| b.len()) + self.kinds.len()
+        self.base_len + self.kinds.len()
     }
     pub fn is_empty(&self) -> bool {
         self.len() == 0
@@ -495,5 +501,26 @@ mod interner_tests {
         assert_eq!(second.kind(second_id), &three);
         assert_eq!(program.find(&two), None);
         assert_eq!(base.len(), start);
+        let wire = serde_json::to_value(&program).unwrap();
+        assert_eq!(
+            wire.as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["base", "kinds", "published_map"]
+        );
+        let decoded: Types = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded.len(), program.len());
+        for i in 0..program.len() {
+            assert_eq!(decoded.kind(TyId(i as u32)), program.kind(TyId(i as u32)));
+        }
+        let mut nested = Types::overlay(std::sync::Arc::new(decoded));
+        let before = nested.len();
+        let added = nested.intern(TyKind::Array(pair_id, 7));
+        assert_eq!(added, TyId(before as u32));
+        assert_eq!(nested.len(), before + 1);
+        assert_eq!(nested.kind(pair_id), program.kind(pair_id));
+        assert_eq!(nested.kind(added), &TyKind::Array(pair_id, 7));
     }
 }

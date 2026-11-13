@@ -12,7 +12,7 @@ pub(super) struct CallScratch {
     pub(super) ir_results: Vec<Ty>,
 }
 
-impl<'c, 'a> Cx<'c, 'a> {
+impl<'c, 'a> Cx<'c, 'a, '_> {
     // ---- calls
     pub(super) fn call(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let mut scratch = self.call_scratch.pop().unwrap_or_default();
@@ -153,6 +153,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                 found,
                 &mut vals[i],
             ) {
+                self.activate(vals[i], call, e);
                 self.determined(f, found, checked, e);
                 continue;
             }
@@ -179,6 +180,13 @@ impl<'c, 'a> Cx<'c, 'a> {
                         want.and_then(|w| self.payload_argument(g.result, pt, w))
                     {
                         self.expr_hinted(e, Some(hint))
+                    } else if matches!(self.kind(e), NodeKind::Closure | NodeKind::ScopedClosure) {
+                        let w = Want {
+                            ty: self.partial(pt, found),
+                            view: false,
+                            payload: 0,
+                        };
+                        self.expr_hinted(e, Some(w))
                     } else if self.kind(e) == NodeKind::Call {
                         self.out.counts.nodes += 1;
                         let w = Want {
@@ -222,6 +230,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                     v
                 }
             };
+            self.activate(vals[i], call, e);
         }
         for &(i, e) in later.iter() {
             match self.known(g.params[i].ty, found) {

@@ -141,30 +141,42 @@ impl CheckProduct {
                     .entry(shape.name.clone())
                     .or_insert((row, hirsel_core_layout::TypeRef(i as u32)));
             }
-            let body = ir.functions[function.index()]
-                .body
-                .as_ref()
-                .expect("successful CoreCheck has its emitted body");
-            let mut pending = BTreeSet::new();
-            for call in &body.calls {
-                match call.callee {
-                    Callee::Direct(f) => {
-                        pending
-                            .insert(ir.instances[ir.functions[f.index()].instance.index()].clone());
-                    }
-                    // Code pointers enter a program through FunctionRef rows below.
-                    // A call through one introduces no additional code identity.
-                    Callee::Runtime(_) | Callee::Indirect(_) => {}
-                }
-            }
-            for inst in &body.insts {
-                if let Inst::FunctionRef { function, .. } = inst {
-                    pending.insert(
-                        ir.instances[ir.functions[function.index()].instance.index()].clone(),
-                    );
-                }
-            }
+            let pending = external_functions(ir, function)
+                .into_iter()
+                .map(|f| ir.instances[ir.functions[f.index()].instance.index()].clone())
+                .collect::<BTreeSet<_>>();
             Ok(pending.into_iter().collect())
         })
     }
+}
+
+/// Generated closure bodies share their producer's module; only signature-only rows
+/// require another source product.
+pub(crate) fn external_functions(
+    module: &hirsel_core_ir::Module,
+    root: hirsel_core_ir::FuncId,
+) -> BTreeSet<hirsel_core_ir::FuncId> {
+    let mut pending = vec![root];
+    let mut visited = BTreeSet::new();
+    let mut external = BTreeSet::new();
+    while let Some(function) = pending.pop() {
+        if !visited.insert(function) {
+            continue;
+        }
+        let Some(body) = &module.functions[function.index()].body else {
+            external.insert(function);
+            continue;
+        };
+        for call in &body.calls {
+            if let Callee::Direct(f) = call.callee {
+                pending.push(f);
+            }
+        }
+        for inst in &body.insts {
+            if let Inst::FunctionRef { function, .. } = inst {
+                pending.push(*function);
+            }
+        }
+    }
+    external
 }

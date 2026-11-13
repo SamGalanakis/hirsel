@@ -1,6 +1,6 @@
 use super::*;
 
-impl<'c, 'a> Cx<'c, 'a> {
+impl<'c, 'a> Cx<'c, 'a, '_> {
     // ---- operators
     pub(super) fn unary(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let e = self.kids(n)[0];

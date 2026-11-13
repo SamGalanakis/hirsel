@@ -1,0 +1,7 @@
+// LANG-14: even an explicitly taken capture cannot move out of a scoped closure.
+// expect: refuse LANG-14 at 5:30
+fn eat(take xs: List[u64]) {}
+fn f(take src: List[u64]) {
+  let cb = scoped fn() { eat(take src) }
+  cb()
+}

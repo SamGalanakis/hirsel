@@ -1,6 +1,6 @@
 //! Build acceptance uses demanded definitions; package check keeps every diagnostic.
 use super::*;
-use hirsel_core_ir::{Callee, Inst, InstanceKey};
+use hirsel_core_ir::InstanceKey;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Serialize)]
@@ -84,18 +84,7 @@ impl CheckProduct {
                 let product = self.demand_body(&path)?;
                 if let Some(function) = product.check.function {
                     let ir = &product.ir;
-                    let b = ir.functions[function.index()].body.as_ref().unwrap();
-                    let mut functions = BTreeSet::new();
-                    for call in &b.calls {
-                        if let Callee::Direct(f) = call.callee {
-                            functions.insert(f);
-                        }
-                    }
-                    for inst in &b.insts {
-                        if let Inst::FunctionRef { function, .. } = inst {
-                            functions.insert(*function);
-                        }
-                    }
+                    let functions = crate::instances::external_functions(ir, function);
                     pending.extend(functions.into_iter().map(|f| {
                         (
                             ir.instances[ir.functions[f.index()].instance.index()]

@@ -1,0 +1,7 @@
+// OWN-21: a parameter of an invocation never escapes into the callback's captures.
+// expect: refuse OWN-21 at 6:24
+fn each(cb: scoped fn(String)) {}
+fn f() {
+  let mut last: Option[View[String]] = None
+  each(fn(s: String) { last = Some(view s) })
+}

@@ -1,0 +1,9 @@
+// A mut capture is reserved when its callback argument is evaluated.
+// expect: refuse OWN-9 at 8:15
+fn receive(cb: scoped fn(), other: u64) { cb() }
+fn f() {
+  let mut n: u64 = 1
+  let cb = scoped fn() { n += 1 }
+  n = 3
+  receive(cb, n)
+}

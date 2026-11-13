@@ -1,6 +1,6 @@
 use super::*;
 
-impl<'c, 'a> Cx<'c, 'a> {
+impl<'c, 'a> Cx<'c, 'a, '_> {
     pub(super) fn unsuffixed_number(&self, n: NodeId) -> bool {
         match self.token_kind(n) {
             Some(TokenKind::Integer) => int_suffix(self.token_text(n)).1.is_none(),

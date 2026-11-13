@@ -59,7 +59,7 @@ pub(super) struct Own {
     pub flag: AddressId,
 }
 
-impl<'c, 'a> Cx<'c, 'a> {
+impl<'c, 'a> Cx<'c, 'a, '_> {
     /// The row of a value of `ty` that needs cleanup.
     pub(super) fn drop_id(&mut self, ty: TyId) -> Option<TypeId> {
         match self.rep(ty) {
@@ -623,7 +623,7 @@ impl<'c, 'a> Cx<'c, 'a> {
     }
 }
 
-impl<'c, 'a> Cx<'c, 'a> {
+impl<'c, 'a> Cx<'c, 'a, '_> {
     pub(super) fn temp_live(&self, i: usize) -> bool {
         matches!(self.owners[i], Owner::Temp(t) if t.avail == Avail::Live)
     }

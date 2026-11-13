@@ -1,6 +1,6 @@
 use super::*;
 
-impl<'c, 'a> Cx<'c, 'a> {
+impl<'c, 'a> Cx<'c, 'a, '_> {
     // ---- ownership state (OWN-5, OWN-9 to OWN-18)
     pub(super) fn var(&self, s: u32) -> Var {
         self.vars[s as usize].expect("declared slot")
@@ -29,6 +29,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             avail: Avail::Uninit,
             at: n,
             born: self.born,
+            depth: self.depth,
             flagged: false,
             holds: 0,
             own: None,
@@ -40,18 +41,20 @@ impl<'c, 'a> Cx<'c, 'a> {
         let v = self.vars[s as usize].as_mut().expect("declared slot");
         if v.avail != a {
             self.epoch += 1;
-            self.log.push((s, v.avail, v.at));
+            self.log
+                .push((s, v.avail, v.at, self.descriptors.slots.get(&s).copied()));
             v.avail = a;
             v.at = n;
         }
     }
     pub(super) fn undo(&mut self, mark: usize) {
         while self.log.len() > mark {
-            let (s, a, at) = self.log.pop().expect("logged");
+            let (s, a, at, descriptor) = self.log.pop().expect("logged");
             self.epoch += 1;
             let v = self.vars[s as usize].as_mut().expect("declared slot");
             v.avail = a;
             v.at = at;
+            self.descriptors.replace_slot(s, descriptor);
         }
     }
     /// The current state of each slot changed since `mark`: one incoming edge of a join.
@@ -60,7 +63,8 @@ impl<'c, 'a> Cx<'c, 'a> {
         for i in mark..self.log.len() {
             let s = self.log[i].0;
             let a = self.var(s).avail;
-            self.diffs.push((s, a));
+            self.diffs
+                .push((s, a, self.descriptors.slots.get(&s).copied()));
         }
         (start, self.diffs.len() as u32 - start)
     }
@@ -77,7 +81,13 @@ impl<'c, 'a> Cx<'c, 'a> {
             self.edges_seen += 1;
             let e = self.edges_seen;
             for k in start..start + len {
-                let (s, a) = self.diffs[k as usize];
+                let (s, a, descriptor) = self.diffs[k as usize];
+                let previous = self.acc[s as usize];
+                let descriptor = if previous.merge == m && previous.edge != e {
+                    self.union_descriptor(previous.descriptor, descriptor)
+                } else {
+                    descriptor
+                };
                 let x = &mut self.acc[s as usize];
                 if x.edge == e {
                     continue;
@@ -89,11 +99,13 @@ impl<'c, 'a> Cx<'c, 'a> {
                         count: 1,
                         merge: m,
                         edge: e,
+                        descriptor,
                     };
                     touched.push(s);
                 } else {
                     x.avail = join(x.avail, a);
                     x.count += 1;
+                    x.descriptor = descriptor;
                 }
             }
         }
@@ -108,6 +120,12 @@ impl<'c, 'a> Cx<'c, 'a> {
             if a == Avail::Maybe {
                 self.vars[s as usize].as_mut().unwrap().flagged = true;
             }
+            let descriptor = if (x.count as usize) < edges.len() {
+                self.union_descriptor(x.descriptor, self.descriptors.slots.get(&s).copied())
+            } else {
+                x.descriptor
+            };
+            self.set_slot_descriptor(s, descriptor);
             self.set(s, a, n);
         }
         self.touched = touched;
@@ -123,12 +141,19 @@ impl<'c, 'a> Cx<'c, 'a> {
         let m = self.merges;
         let end = self.log.len();
         for i in mark..end {
-            let (s, entry, _) = self.log[i];
+            let (s, entry, _, descriptor) = self.log[i];
             if self.acc[s as usize].merge == m {
                 continue;
             }
             self.acc[s as usize].merge = m;
             let v = self.var(s);
+            if v.born < born && self.descriptors.slots.get(&s).copied() != descriptor {
+                self.out.gaps.push(Gap::new(
+                    self.p.site_span(self.at, site),
+                    "loop-carried capture descriptors are not built",
+                ));
+                self.halt();
+            }
             if v.born < born && v.avail != entry {
                 let name = self.slot_name(s);
                 self.refuse_at(
@@ -183,6 +208,9 @@ impl<'c, 'a> Cx<'c, 'a> {
         self.check_holds_at(p, act, self.span(n))
     }
     pub(super) fn check_holds_at(&mut self, p: Place, act: Act, site: Span) -> bool {
+        if matches!(act, Act::Write) {
+            self.capture_write(p.slot);
+        }
         if self.var(p.slot).holds == 0 {
             return true;
         }
@@ -244,6 +272,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                 let Target::Binder(b) = u.target else {
                     return Ok(None);
                 };
+                self.capture_slot(b, n);
                 let Some(var) = self.vars[b as usize] else {
                     self.gap(n, "this kind of name is not built");
                     return Err(());
@@ -371,6 +400,9 @@ impl<'c, 'a> Cx<'c, 'a> {
     /// Use place `at` at `n` (OWN-5 to OWN-14); its type.
     pub(super) fn use_place(&mut self, at: At, how: Use, n: NodeId) {
         let s = at.place.slot;
+        if !self.capture_move(s, how, at.ty, n) {
+            return;
+        }
         let v = self.var(s);
         let name = self.slot_name(s);
         if self.patterns.guard
@@ -534,6 +566,9 @@ impl<'c, 'a> Cx<'c, 'a> {
         element: PlaceTy,
         n: NodeId,
     ) -> Option<AddressId> {
+        if !self.live() {
+            return None;
+        }
         match self.t.kind(collection) {
             TyKind::Array(..) => Some(self.address(
                 AddressBase::Address(base),
@@ -925,6 +960,11 @@ impl<'c, 'a> Cx<'c, 'a> {
     }
     /// The address of a used place as a pointer, for an argument passed by address.
     pub(super) fn place_ptr(&mut self, at: At, n: NodeId) -> Option<ValueId> {
+        let value = self.place_ptr_inner(at, n);
+        self.read_descriptor(at.place.slot, value);
+        value
+    }
+    fn place_ptr_inner(&mut self, at: At, n: NodeId) -> Option<ValueId> {
         if !self.live() {
             return None;
         }
@@ -945,6 +985,11 @@ impl<'c, 'a> Cx<'c, 'a> {
     }
     /// The value of a used place: a local, or a field of one read in place.
     pub(super) fn emit_place(&mut self, at: At, n: NodeId) -> Option<ValueId> {
+        let value = self.emit_place_inner(at, n);
+        self.read_descriptor(at.place.slot, value);
+        value
+    }
+    fn emit_place_inner(&mut self, at: At, n: NodeId) -> Option<ValueId> {
         if at.place.len > 0 {
             if !self.live() {
                 return None;

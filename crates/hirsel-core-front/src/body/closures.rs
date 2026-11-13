@@ -2,7 +2,7 @@
 use super::calls::CallScratch;
 use super::*;
 
-impl<'c, 'a> Cx<'c, 'a> {
+impl<'c, 'a> Cx<'c, 'a, '_> {
     pub(super) fn function_value(
         &mut self,
         f: usize,
@@ -160,6 +160,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         if kind(&self.p.decls, &self.t, result, &self.params) == Kind::Scoped {
             self.gap(n, "scoped callable result anchors are not built");
         }
+        self.activate(value, call, n);
         scratch.vals.clear();
         scratch.vals.resize(args.len(), None);
         scratch.found.clear();
@@ -201,6 +202,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                     )
                     .1;
             }
+            self.activate(scratch.vals[i], call, arg);
         }
         self.unfreeze(holds, |hold| match hold {
             Hold::CallView(c, _) | Hold::CallMut(c) if c == call => None,
@@ -362,6 +364,517 @@ impl<'c, 'a> Cx<'c, 'a> {
                 Some(ptr)
             }
             None => first,
+        }
+    }
+}
+
+impl<'c, 'a> Cx<'c, 'a, '_> {
+    pub(super) fn closure(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
+        if !self.fd.generics.is_empty() {
+            return self.gap_ty(n, "closure bodies inside generic definitions are not built");
+        }
+        let mut fd = self.fd.as_ref().clone();
+        fd.drop_of = None;
+        fd.params.clear();
+        fd.body = None;
+        fd.result = UNIT;
+        fd.waits = false;
+        fd.anchors.clear();
+        fd.region_anchors.clear();
+        fd.outlives.clear();
+        fd.path.0.name = format!(
+            "{}$closure{}",
+            fd.path.0.name,
+            n.0 - self.item.range.nodes.start
+        );
+        fd.site = self.p.site(self.at, n);
+        let mut written_result = false;
+        for &child in self.kids(n) {
+            match self.kind(child) {
+                NodeKind::Parameters => {
+                    for &param in self.kids(child) {
+                        let Some(token) = self.item.tree.node(param).token else {
+                            return self.gap_ty(
+                                param,
+                                "closure parameters require written names and types",
+                            );
+                        };
+                        let ty = self.ty(self.kids(param)[0]);
+                        fd.params.push(crate::decls::ParamDecl {
+                            bytes: self.kind(param) == NodeKind::BytesParameter,
+                            name: self.item.symbol(token),
+                            mode: crate::decls::mode_of(self.kind(param)),
+                            ty,
+                            site: self.p.site(self.at, param),
+                        });
+                    }
+                }
+                NodeKind::ResultType => {
+                    written_result = true;
+                    fd.result = self.ty(self.kids(child)[0]);
+                    fd.result_site = self.p.site(self.at, child);
+                }
+                NodeKind::Waits => fd.waits = true,
+                NodeKind::Block => fd.body = Some(child),
+                _ => {}
+            }
+        }
+        if !written_result && let Some(w) = want.filter(|w| w.payload == 0) {
+            if let TyKind::Fn(_, result, _, _) = self.t.kind(w.ty)
+                && *result != HOLE
+            {
+                fd.result = *result;
+            }
+        }
+        let scoped = self.kind(n) == NodeKind::ScopedClosure
+            || want.is_some_and(|w| {
+                matches!(self.t.kind(w.ty), TyKind::Fn(_, _, _, Callable::Scoped))
+            });
+        let ty = self.t.mk(TyKind::Fn(
+            fd.params.iter().map(|p| (p.mode, p.ty)).collect(),
+            fd.result,
+            fd.waits,
+            if scoped {
+                Callable::Scoped
+            } else {
+                Callable::Plain
+            },
+        ));
+        fd.callable = ty;
+        let body = fd.body.unwrap();
+        let mut child = Cx::new(self.p, self.definition, self.e);
+        child.fd = std::borrow::Cow::Owned(fd);
+        child.header = n;
+        child.entry = false;
+        child.capture_frame = Some(CaptureFrame {
+            outer: self.vars.clone(),
+            by_slot: vec![None; self.vars.len()],
+            captures: vec![],
+            environment: None,
+            has_environment: scoped,
+        });
+        std::mem::swap(&mut child.t, &mut self.t);
+        let signature = child.callable_signature(ty, scoped);
+        let row = signature.map(|signature| {
+            let signature = child.e.sig(signature);
+            let f = child.e.function(
+                &child.fd.path,
+                child.e.module.signatures[signature.index()].clone(),
+            );
+            (f, signature)
+        });
+        child.run_row(row, body);
+        std::mem::swap(&mut child.t, &mut self.t);
+        let captures = child.capture_frame.take().unwrap().captures;
+        let out = child.finish();
+        let function = out.function;
+        self.out.refusals.extend(out.refusals);
+        self.out.gaps.extend(out.gaps);
+        self.out.counts += out.counts;
+        if function.is_none() {
+            self.halt();
+        }
+        if !scoped && !captures.is_empty() {
+            if want
+                .is_some_and(|w| matches!(self.t.kind(w.ty), TyKind::Fn(_, _, _, Callable::Plain)))
+            {
+                self.refuse("LANG-13", n, "a plain callable captures nothing");
+                return (ERROR, None);
+            }
+            return self.gap_ty(n, "owning closure admission is not built");
+        }
+        let value = if self.live() {
+            let function = function.unwrap();
+            let result = self.value(Ty::Ptr);
+            self.inst(Inst::FunctionRef { result, function }, n);
+            if scoped {
+                self.scoped_value(result, &captures, n)
+            } else {
+                Some(result)
+            }
+        } else {
+            None
+        };
+        (ty, value)
+    }
+
+    fn callable_signature(
+        &mut self,
+        ty: TyId,
+        environment: bool,
+    ) -> Result<Signature, &'static str> {
+        let TyKind::Fn(ps, r, _, _) = self.t.kind(ty) else {
+            unreachable!()
+        };
+        let (len, r) = (ps.len(), *r);
+        let mut params = vec![];
+        if environment {
+            params.push(Param::Value(Ty::Ptr));
+        }
+        for i in 0..len {
+            let TyKind::Fn(ps, _, _, _) = self.t.kind(ty) else {
+                unreachable!()
+            };
+            let (mode, t) = ps[i];
+            let rep = self.rep(t)?;
+            params.push(if mode == Mode::Mut {
+                Param::Address(
+                    self.e
+                        .type_row(self.p, &mut self.t, t)
+                        .ok_or("closure parameter layout is not built")?,
+                )
+            } else {
+                match rep {
+                    Rep::None => continue,
+                    Rep::Scalar(t) => Param::Value(t),
+                    Rep::View(_) => Param::Value(Ty::Ptr),
+                    Rep::Place(id) => Param::Address(id),
+                }
+            });
+        }
+        let (results, dest) = match self.rep(r)? {
+            Rep::None => (vec![], None),
+            Rep::Scalar(t) => (vec![t], None),
+            Rep::View(_) => (vec![Ty::Ptr], None),
+            Rep::Place(id) => (vec![], Some(id)),
+        };
+        Ok(Signature {
+            params,
+            results,
+            dest,
+            never: r == NEVER,
+        })
+    }
+}
+
+/// One whole outer slot in first-naming order (LANG-14, OWN-21).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Capture {
+    slot: u32,
+    mode: Mode,
+}
+
+pub(super) struct CaptureFrame {
+    outer: Vec<Option<Var>>,
+    by_slot: Vec<Option<usize>>,
+    captures: Vec<Capture>,
+    pub(super) environment: Option<ValueId>,
+    pub(super) has_environment: bool,
+}
+
+#[derive(Default)]
+pub(super) struct Descriptors {
+    pub(super) captures: Vec<Capture>,
+    pub(super) ranges: Vec<PoolRange<Capture>>,
+    pub(super) values: HashMap<ValueId, u32>,
+    pub(super) slots: HashMap<u32, u32>,
+}
+impl Descriptors {
+    fn add(&mut self, captures: &[Capture]) -> Option<u32> {
+        if captures.is_empty() {
+            return None;
+        }
+        let id = self.ranges.len() as u32;
+        self.ranges.push(PoolRange::push(
+            &mut self.captures,
+            captures.iter().copied(),
+        ));
+        Some(id)
+    }
+    pub(super) fn of(&self, value: Option<ValueId>) -> Option<u32> {
+        self.values.get(&value?).copied()
+    }
+}
+
+impl<'c, 'a> Cx<'c, 'a, '_> {
+    /// Discover an outer slot exactly when its first source use is visited.
+    pub(super) fn capture_slot(&mut self, slot: u32, n: NodeId) {
+        let Some(frame) = &mut self.capture_frame else {
+            return;
+        };
+        let Some(original) = frame.outer[slot as usize] else {
+            return;
+        };
+        if frame.by_slot[slot as usize].is_some() {
+            return;
+        }
+        if matches!(
+            self.t.kind(original.ty),
+            TyKind::Fn(_, _, _, Callable::Scoped)
+        ) {
+            self.gap(n, "captured callback descriptor substitution is not built");
+            return;
+        }
+        if matches!(self.t.kind(original.ty),TyKind::Adt(d,_) if self.p.decls[d.index()].role==Some(Role::Writer))
+        {
+            self.refuse("MEM-4", n, "a Writer is never captured");
+            return;
+        }
+        let frame = self.capture_frame.as_mut().unwrap();
+        let index = frame.captures.len();
+        frame.by_slot[slot as usize] = Some(index);
+        frame.captures.push(Capture {
+            slot,
+            mode: Mode::View,
+        });
+        let environment = frame.environment;
+        let binding = if let Some(environment) = environment.filter(|_| self.live()) {
+            let offset = self
+                .konst(Ty::Scalar(Scalar::U64), index as u64 * 8, n)
+                .unwrap();
+            let address = self.address(
+                AddressBase::Value(environment),
+                &[Step::Byte(offset)],
+                PlaceTy::Value(Ty::Ptr),
+                n,
+            );
+            let pointer = self.value(Ty::Ptr);
+            self.inst(
+                Inst::Read {
+                    result: pointer,
+                    address,
+                    mode: ReadMode::Bits,
+                },
+                n,
+            );
+            let address = self
+                .rep(original.ty)
+                .ok()
+                .and_then(Rep::stored)
+                .map(|ty| self.address(AddressBase::Value(pointer), &[], ty, n));
+            Binding::Slot(address)
+        } else {
+            Binding::Value(None)
+        };
+        self.vars[slot as usize] = Some(Var {
+            binding,
+            origin: if original.origin.writable() {
+                Origin::MutParam
+            } else {
+                Origin::ViewParam
+            },
+            avail: Avail::Live,
+            holds: 0,
+            own: None,
+            ..original
+        });
+    }
+    pub(super) fn capture_write(&mut self, slot: u32) {
+        if let Some(frame) = &mut self.capture_frame
+            && let Some(i) = frame.by_slot[slot as usize]
+        {
+            frame.captures[i].mode = Mode::Mut;
+        }
+    }
+    pub(super) fn capture_move(&mut self, slot: u32, how: Use, ty: TyId, n: NodeId) -> bool {
+        if self
+            .capture_frame
+            .as_ref()
+            .is_some_and(|f| f.outer[slot as usize].is_some())
+            && matches!(how, Use::Take | Use::Value)
+            && !self.copies(ty)
+        {
+            self.refuse("LANG-14", n, "a scoped closure never moves a capture");
+            return false;
+        }
+        true
+    }
+    fn capture_address(&mut self, slot: u32, n: NodeId) -> Option<ValueId> {
+        self.capture_slot(slot, n);
+        let var = self.var(slot);
+        match (var.binding, self.rep(var.ty).ok()?) {
+            (Binding::Slot(Some(a)), _) => Some(self.pointer(a, n)),
+            (Binding::Value(Some(p)), Rep::Place(_)) => Some(p),
+            (Binding::Value(value), _) => {
+                let address = self.slot(var.ty, value, n)?;
+                self.vars[slot as usize].as_mut().unwrap().binding = Binding::Slot(Some(address));
+                Some(self.pointer(address, n))
+            }
+            _ => None,
+        }
+    }
+    fn raw_frame(&mut self, words: usize, n: NodeId) -> Option<ValueId> {
+        let ty = self.t.mk(TyKind::Array(scalar(Scalar::U64), words as u64));
+        let address = self.slot(ty, None, n)?;
+        Some(self.pointer(address, n))
+    }
+    fn store_word(&mut self, base: ValueId, offset: u64, value: ValueId, n: NodeId) {
+        let offset = self.konst(Ty::Scalar(Scalar::U64), offset, n).unwrap();
+        let address = self.address(
+            AddressBase::Value(base),
+            &[Step::Byte(offset)],
+            PlaceTy::Value(Ty::Ptr),
+            n,
+        );
+        self.inst(Inst::Store { address, value }, n);
+    }
+    fn scoped_value(&mut self, code: ValueId, captures: &[Capture], n: NodeId) -> Option<ValueId> {
+        let environment = self.raw_frame(captures.len(), n)?;
+        for (i, capture) in captures.iter().enumerate() {
+            let pointer = self.capture_address(capture.slot, n)?;
+            self.store_word(environment, i as u64 * 8, pointer, n);
+        }
+        let carrier = self.raw_frame(2, n)?;
+        self.store_word(carrier, 0, code, n);
+        self.store_word(carrier, 8, environment, n);
+        if let Some(id) = self.descriptors.add(captures) {
+            self.descriptors.values.insert(carrier, id);
+        }
+        Some(carrier)
+    }
+    pub(super) fn bind_descriptor(&mut self, slot: u32, value: Option<ValueId>) {
+        self.set_slot_descriptor(slot, self.descriptors.of(value));
+    }
+    pub(super) fn read_descriptor(&mut self, slot: u32, value: Option<ValueId>) {
+        if let (Some(value), Some(&id)) = (value, self.descriptors.slots.get(&slot)) {
+            self.descriptors.values.insert(value, id);
+        }
+    }
+    pub(super) fn activate(&mut self, value: Option<ValueId>, call: u32, n: NodeId) {
+        let Some(id) = self.descriptors.of(value) else {
+            return;
+        };
+        let range = self.descriptors.ranges[id as usize];
+        for i in range.start..range.start + range.len {
+            let capture = self.descriptors.captures[i as usize];
+            let at = At {
+                place: Place::whole(capture.slot),
+                ty: self.var(capture.slot).ty,
+                shared: false,
+            };
+            self.use_place(
+                at,
+                if capture.mode == Mode::Mut {
+                    Use::Mut(Hold::CallMut(call))
+                } else {
+                    Use::View(Hold::CallView(call, u32::MAX))
+                },
+                n,
+            );
+        }
+    }
+    pub(super) fn descriptor_scope(&mut self, scope: usize, value: Option<ValueId>, n: NodeId) {
+        let Some(id) = self.descriptors.of(value) else {
+            return;
+        };
+        let range = self.descriptors.ranges[id as usize];
+        if range
+            .get(&self.descriptors.captures)
+            .unwrap()
+            .iter()
+            .any(|c| self.scope_slots[scope..].contains(&c.slot))
+        {
+            self.refuse_at(
+                "OWN-21",
+                self.close_brace(n),
+                "a captured slot must outlive its scoped callback",
+            );
+        }
+    }
+}
+
+impl<'c, 'a> Cx<'c, 'a, '_> {
+    pub(super) fn join_descriptor(&mut self, j: usize, value: Option<ValueId>) {
+        self.joins[j].descriptor =
+            self.union_descriptor(self.joins[j].descriptor, self.descriptors.of(value));
+    }
+    pub(super) fn union_descriptor(&mut self, a: Option<u32>, b: Option<u32>) -> Option<u32> {
+        let (a, b) = match (a, b) {
+            (Some(a), Some(b)) if a != b => (a, b),
+            _ => return a.or(b),
+        };
+        let start = self.descriptors.captures.len();
+        let ra = self.descriptors.ranges[a as usize];
+        for i in ra.start..ra.start + ra.len {
+            let c = self.descriptors.captures[i as usize];
+            self.descriptors.captures.push(c);
+        }
+        let rb = self.descriptors.ranges[b as usize];
+        for i in rb.start..rb.start + rb.len {
+            let c = self.descriptors.captures[i as usize];
+            if let Some(other) = self.descriptors.captures[start..]
+                .iter_mut()
+                .find(|other| other.slot == c.slot)
+            {
+                if c.mode == Mode::Mut {
+                    other.mode = Mode::Mut;
+                }
+            } else {
+                self.descriptors.captures.push(c);
+            }
+        }
+        let id = self.descriptors.ranges.len() as u32;
+        self.descriptors.ranges.push(PoolRange::new(
+            start as u32,
+            (self.descriptors.captures.len() - start) as u32,
+        ));
+        Some(id)
+    }
+    pub(super) fn set_slot_descriptor(&mut self, slot: u32, id: Option<u32>) {
+        let before = self.descriptors.slots.get(&slot).copied();
+        if before != id {
+            let v = self.var(slot);
+            self.log.push((slot, v.avail, v.at, before));
+            self.descriptors.replace_slot(slot, id);
+        }
+    }
+    pub(super) fn descriptor_store(&mut self, at: At, value: Option<ValueId>, n: NodeId) {
+        if let Some(id) = self.descriptors.of(value) {
+            if at.place.len > 0 {
+                self.gap(
+                    n,
+                    "capture descriptors in scoped aggregate fields are not built",
+                );
+                return;
+            }
+            let target = self.var(at.place.slot).depth;
+            let range = self.descriptors.ranges[id as usize];
+            if range
+                .get(&self.descriptors.captures)
+                .unwrap()
+                .iter()
+                .any(|c| self.var(c.slot).depth > target)
+            {
+                self.refuse(
+                    "OWN-21",
+                    n,
+                    "a scoped callback cannot outlive a captured slot",
+                );
+                return;
+            }
+        }
+        if at.place.len == 0 {
+            self.bind_descriptor(at.place.slot, value);
+        }
+    }
+    pub(super) fn capture_store(&mut self, at: At, ty: TyId, n: NodeId) {
+        let Some(frame) = &self.capture_frame else {
+            return;
+        };
+        if frame.outer[at.place.slot as usize].is_none() {
+            return;
+        }
+        if kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Scoped
+            && self.freezes.iter().any(|f| {
+                frame.outer[f.place.slot as usize].is_none()
+                    && self.var(f.place.slot).origin == Origin::ViewParam
+            })
+        {
+            self.refuse(
+                "OWN-21",
+                n,
+                "a callback invocation parameter cannot escape into a capture",
+            );
+        }
+    }
+}
+
+impl Descriptors {
+    pub(super) fn replace_slot(&mut self, slot: u32, id: Option<u32>) {
+        if let Some(id) = id {
+            self.slots.insert(slot, id);
+        } else {
+            self.slots.remove(&slot);
         }
     }
 }

@@ -1,0 +1,15 @@
+// A callback assigned in either branch keeps both descriptors at the join.
+// expect: refuse OWN-10 at 13:3
+fn f(c: bool) {
+  let mut x: u64 = 1
+  let mut y: u64 = 2
+  let mut cb: scoped fn() = scoped fn() {}
+  if c {
+    cb = scoped fn() { x += 1 }
+  } else {
+    cb = scoped fn() { y += 1 }
+  }
+  let seen = view x
+  cb()
+  let _ = seen
+}

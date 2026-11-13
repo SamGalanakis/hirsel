@@ -645,6 +645,7 @@ struct Var {
     at: NodeId,
     /// Declaration order, so a loop tells the slots declared outside it (OWN-17).
     born: u32,
+    depth: u32,
     /// It reached maybe at a join (OWN-18).
     flagged: bool,
     /// Freeze and reservation records naming it; with none, no record is searched.
@@ -680,6 +681,7 @@ struct Acc {
     count: u32,
     merge: u32,
     edge: u32,
+    descriptor: Option<u32>,
 }
 
 /// A block every one of whose predecessors is known only as they are emitted; it is
@@ -687,6 +689,7 @@ struct Acc {
 #[derive(Default)]
 struct Join {
     block: Option<BlockId>,
+    descriptor: Option<u32>,
     /// The row of the own value its edges carry, which is a temporary after it.
     drop: Option<TypeId>,
 }
@@ -726,14 +729,16 @@ struct BodyInstance {
     row: (FuncId, SigId),
 }
 
-struct Cx<'c, 'a> {
+struct Cx<'c, 'a, 'e> {
     p: &'c Program<'a>,
     at: ItemRef,
     item: Item<'a>,
-    fd: &'c FnDecl,
+    fd: std::borrow::Cow<'c, FnDecl>,
+    definition: usize,
+    header: NodeId,
     params: Vec<u16>,
     t: Local<'c>,
-    e: &'c mut Emitter,
+    e: &'e mut Emitter,
     b: Body,
     func: Option<FuncId>,
     ir_item: ItemId,
@@ -745,9 +750,9 @@ struct Cx<'c, 'a> {
     /// The slot table, indexed by binder id.
     vars: Vec<Option<Var>>,
     /// Availability changes, undone to a mark when a branch ends: (slot, old, old site).
-    log: Vec<(u32, Avail, NodeId)>,
+    log: Vec<(u32, Avail, NodeId, Option<u32>)>,
     /// Join inputs: the slots one incoming edge changed and their states.
-    diffs: Vec<(u32, Avail)>,
+    diffs: Vec<(u32, Avail, Option<u32>)>,
     /// Edges to open frames' exits: (frame, start, len) in `diffs`.
     exits: Vec<(usize, u32, u32)>,
     edge_buf: Vec<(u32, u32)>,
@@ -806,10 +811,12 @@ struct Cx<'c, 'a> {
     /// The pending result of the exit edge [`Self::unwind`] cleans next (FAIL-9).
     pending: Option<(AddressBase, TypeId)>,
     out: CoreCheck,
+    capture_frame: Option<closures::CaptureFrame>,
+    descriptors: closures::Descriptors,
 }
 
-impl<'c, 'a> Cx<'c, 'a> {
-    fn new(p: &'c Program<'a>, f: usize, e: &'c mut Emitter) -> Self {
+impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
+    fn new(p: &'c Program<'a>, f: usize, e: &'e mut Emitter) -> Self {
         let fd = &p.fns[f];
         let item = p.item(fd.at);
         let info = &p.items[fd.at.module as usize][fd.at.item as usize];
@@ -824,7 +831,9 @@ impl<'c, 'a> Cx<'c, 'a> {
             p,
             at: fd.at,
             item,
-            fd,
+            fd: std::borrow::Cow::Borrowed(fd),
+            definition: f,
+            header: item.root,
             params: fd.generics.iter().map(|g| g.bounds).collect(),
             t: Local::new(&p.types),
             e,
@@ -846,6 +855,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                     count: 0,
                     merge: 0,
                     edge: 0,
+                    descriptor: None,
                 };
                 info.resolution.binders.len()
             ],
@@ -884,6 +894,8 @@ impl<'c, 'a> Cx<'c, 'a> {
             edge: None,
             pending: None,
             out: CoreCheck::default(),
+            capture_frame: None,
+            descriptors: closures::Descriptors::default(),
         }
     }
 
@@ -1107,6 +1119,14 @@ impl<'c, 'a> Cx<'c, 'a> {
     /// Copy the value of row `id` that `from` points at into place `to` (a move or a
     /// copy of plain data: the source needs no cleanup afterwards).
     fn copy_to(&mut self, to: AddressId, from: ValueId, id: TypeId, n: NodeId) {
+        if self.descriptors.of(Some(from)).is_some() && self.b.addresses[to.index()].steps.len != 0
+        {
+            self.gap(
+                n,
+                "capture descriptors in scoped aggregate fields are not built",
+            );
+            return;
+        }
         if self.e.needs_drop(id) {
             self.consume(Some(from), n);
         }
@@ -1138,6 +1158,13 @@ impl<'c, 'a> Cx<'c, 'a> {
     /// the destination first.
     fn ret(&mut self, v: Option<ValueId>, n: NodeId) {
         if !self.live() {
+            return;
+        }
+        if self.descriptors.of(v).is_some() {
+            self.gap(
+                n,
+                "returning scoped capture environments is not represented",
+            );
             return;
         }
         let v = match (self.dest, v) {
@@ -1239,6 +1266,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             self.consume(v, n);
             self.joins[j].drop = Some(id);
         }
+        self.join_descriptor(j, v);
         let args: Vec<ValueId> = v.into_iter().collect();
         self.jump(blk, &args, n);
     }
@@ -1247,6 +1275,9 @@ impl<'c, 'a> Cx<'c, 'a> {
         let blk = self.joins[j].block?;
         self.start(blk);
         let v = self.block_params(blk).first().copied();
+        if let (Some(value), Some(id)) = (v, self.joins[j].descriptor) {
+            self.descriptors.values.insert(value, id);
+        }
         if let (Some(id), Some(value), true) = (self.joins[j].drop, v, self.live()) {
             self.owners.push(cleanup::Owner::Temp(cleanup::Temp {
                 value,
@@ -1261,7 +1292,11 @@ impl<'c, 'a> Cx<'c, 'a> {
 
     // ---- the definition
     fn run(&mut self, f: usize, body: NodeId) {
-        match self.e.row(self.p, f) {
+        let row = self.e.row(self.p, f);
+        self.run_row(row, body);
+    }
+    fn run_row(&mut self, row: Result<(FuncId, SigId), &'static str>, body: NodeId) {
+        match row {
             Ok((func, sig)) => {
                 self.func = Some(func);
                 let s = &self.e.module.signatures[sig.index()];
@@ -1294,11 +1329,18 @@ impl<'c, 'a> Cx<'c, 'a> {
             vec![]
         };
         let mut k = usize::from(self.dest.is_some());
+        if let Some(frame) = &mut self.capture_frame
+            && frame.has_environment
+        {
+            frame.environment = entry_params.get(k).copied();
+            k += 1;
+        }
         let p: &'c Program<'a> = self.p;
         let binders = &p.items[self.at.module as usize][self.at.item as usize]
             .resolution
             .binders;
-        for pd in &self.fd.params {
+        let fd = self.fd.clone();
+        for pd in &fd.params {
             let v = match self.ir_ty(pd.ty) {
                 _ if pd.mode == Mode::Mut && k < entry_params.len() => {
                     k += 1;
@@ -1310,10 +1352,12 @@ impl<'c, 'a> Cx<'c, 'a> {
                 }
                 _ => None,
             };
-            if let Some(b) = binders
-                .iter()
-                .find(|b| b.name == pd.name && b.kind == hirsel_core_resolve::BinderKind::Parameter)
-            {
+            if let Some(b) = binders.iter().find(|b| {
+                b.name == pd.name
+                    && b.kind == hirsel_core_resolve::BinderKind::Parameter
+                    && pd.site.span.start <= b.site.span.start
+                    && b.site.span.end <= pd.site.span.end
+            }) {
                 let origin = match pd.mode {
                     Mode::View => Origin::ViewParam,
                     Mode::Mut => Origin::MutParam,
@@ -1378,7 +1422,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         // Only a body checked to its end shows that nothing it calls waits.
         if self.fd.waits && !self.waited && !self.entry && self.fd.drop_of.is_none() && !self.broken
         {
-            let root = self.item.root;
+            let root = self.header;
             let w = self
                 .kids(root)
                 .iter()
@@ -1521,7 +1565,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             NodeKind::Region => self.region_(n, want),
             NodeKind::Bound => self.bound_(n, want),
             NodeKind::Placement => self.gap_ty(n, "stable placement is not built"),
-            NodeKind::Closure | NodeKind::ScopedClosure => self.gap_ty(n, "closures are not built"),
+            NodeKind::Closure | NodeKind::ScopedClosure => self.closure(n, want),
             _ => self.gap_ty(n, "expression form is not built"),
         }
     }

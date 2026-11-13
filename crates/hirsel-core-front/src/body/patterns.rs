@@ -56,7 +56,7 @@ struct Subject {
     viewed: bool,
 }
 
-impl<'c, 'a> Cx<'c, 'a> {
+impl<'c, 'a> Cx<'c, 'a, '_> {
     fn pat_push(&mut self, site: NodeId, ty: TyId, head: Head, fields: PoolRange<u32>) -> u32 {
         let id = self.patterns.pats.len() as u32 + 1;
         self.patterns.pats.push(Pat {

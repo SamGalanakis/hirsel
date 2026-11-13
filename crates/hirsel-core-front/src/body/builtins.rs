@@ -1,7 +1,7 @@
 //! Core operations whose definition is the typed value operation itself.
 use super::*;
 
-impl<'c, 'a> Cx<'c, 'a> {
+impl<'c, 'a> Cx<'c, 'a, '_> {
     /// None means this operation needs a different kernel. Some(None) is a handled
     /// operation with a unit result or an already reported emission gap.
     pub(super) fn core_value(

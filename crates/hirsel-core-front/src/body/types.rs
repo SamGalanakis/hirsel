@@ -1,6 +1,6 @@
 use super::*;
 
-impl<'c, 'a> Cx<'c, 'a> {
+impl<'c, 'a> Cx<'c, 'a, '_> {
     fn body_root(&mut self, n: NodeId, region_only: bool) -> TyId {
         let Some(Target::Binder(b)) = self.p.target(self.at, n).copied() else {
             return ERROR;
@@ -160,7 +160,7 @@ impl<'c, 'a> Cx<'c, 'a> {
     }
 }
 
-impl<'c, 'a> Cx<'c, 'a> {
+impl<'c, 'a> Cx<'c, 'a, '_> {
     /// A named type written in a body, with its arguments: an alias names its right side
     /// (LANG-9), `View[T]` is the view type, and each argument has the bounds its
     /// parameter declares (LANG-12, OWN-4 for Rc and Arc) and, for a generic other than

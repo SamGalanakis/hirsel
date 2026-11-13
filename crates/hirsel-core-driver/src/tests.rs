@@ -775,10 +775,7 @@ fn incomplete_source_is_not_an_emittable_instance() {
     let dir = tempfile::tempdir().unwrap();
     let product = Driver::default()
         .check(
-            request(
-                "fn root() -> u64 { let f = fn() { 42u64 }; 42 }\n",
-                dir.path(),
-            ),
+            request("fn root() -> u64 { let _ = b\"bytes\"; 42 }\n", dir.path()),
             &mut Meter::new(false),
         )
         .unwrap();
@@ -822,7 +819,7 @@ fn reachable_build_ignores_unreached_bodies_and_declarations_after_disk_reuse() 
 #[test]
 fn reachable_build_refuses_and_censuses_the_incomplete_callee() {
     let dir = tempfile::tempdir().unwrap();
-    let source = "fn answer() -> u8 { unfinished() }\nfn unfinished() -> u8 { let _ = fn(x: u8) -> u8 { x }; 7u8 }\nfn unused[T](take x: T) -> T { x }\n";
+    let source = "fn answer() -> u8 { unfinished() }\nfn unfinished() -> u8 { let _ = b\"bytes\"; 7u8 }\nfn unused[T](take x: T) -> T { x }\n";
     let entry = DefPath::from_full("app@1/main/answer").unwrap();
     let product = Driver::default()
         .check(request(source, dir.path()), &mut Meter::new(false))
@@ -873,7 +870,7 @@ fn reachable_build_keeps_refusals_in_named_signature_declarations() {
 #[test]
 fn reachable_census_follows_names_beyond_an_incomplete_entry() {
     let dir = tempfile::tempdir().unwrap();
-    let source = "fn answer() -> u8 { let _ = fn(x: u8) -> u8 { x }; unfinished() }\nfn unfinished() -> u8 { let _ = fn(x: u8) -> u8 { x }; 7u8 }\n";
+    let source = "fn answer() -> u8 { let _ = b\"bytes\"; unfinished() }\nfn unfinished() -> u8 { let _ = b\"bytes\"; 7u8 }\n";
     let product = Driver::default()
         .check(request(source, dir.path()), &mut Meter::new(false))
         .unwrap();
@@ -1058,4 +1055,24 @@ fn installed_generic_template_needs_no_source_or_body_recheck() {
     assert!(reached.accepted(), "{:?}", reached.instances);
     assert_eq!(reached.instances.as_ref().unwrap().len(), 2);
     assert_eq!(image.decoded_bodies(), 1);
+}
+
+#[test]
+fn closure_instances_include_calls_inside_the_generated_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let product=Driver::default().check(request("fn leaf(x: u64) -> u64 {x + 1}\nfn root() -> u64 {let cb: fn(u64) -> u64 = fn(x: u64) {leaf(x)}; cb(41)}\n",dir.path()),&mut Meter::new(false)).unwrap();
+    assert!(product.accepted());
+    let root = hirsel_core_ir::InstanceKey {
+        definition: DefPath::from_full("app@1/main/root").unwrap(),
+        types: vec![],
+        dictionaries: vec![],
+    };
+    let instances = product.instances([root], 8).unwrap();
+    assert_eq!(
+        instances
+            .iter()
+            .map(|i| i.definition.0.name.as_str())
+            .collect::<Vec<_>>(),
+        ["leaf", "root"]
+    );
 }

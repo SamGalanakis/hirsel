@@ -1,6 +1,6 @@
 use super::*;
 
-impl<'c, 'a> Cx<'c, 'a> {
+impl<'c, 'a> Cx<'c, 'a, '_> {
     // ---- blocks and control flow
     pub(super) fn block(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         self.depth += 1;
@@ -9,6 +9,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         self.tail_ty = UNIT;
         let r = self.statements(n, want);
         let value = std::mem::replace(&mut self.tail_ty, UNIT);
+        self.descriptor_scope(scope, r.1, n);
         self.close_scope(scope, freezes, n, value);
         // The tail's temporaries end at the block's exit, before its locals, unless
         // the block's value is one (LANG-6).
@@ -116,6 +117,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                     (Binding::Value(v), Origin::Let)
                 };
                 self.declare(b, ty, binding, origin, pat);
+                self.bind_descriptor(b, v);
                 self.own(b, pat);
                 self.scope_slots.push(b);
             }
@@ -231,11 +233,13 @@ impl<'c, 'a> Cx<'c, 'a> {
                 None => (None, false),
             },
         };
-        if !emitted && self.ir_ty(at.ty).is_some() {
+        if !emitted && self.live() && self.ir_ty(at.ty).is_some() {
             self.gap(place, "assignment to this place is not built");
         }
         let diverged = if !compound {
             let (t, v) = self.expr(value, expect(at.ty));
+            self.descriptor_store(at, v, place);
+            self.capture_store(at, t, place);
             if let (Some(address), Ok(r)) = (address, self.rep(at.ty)) {
                 // OWN-12: the old value is cleaned when it is live, or maybe with its
                 // flag set; then the new one is installed and the flag set (T3.2-T3.4).

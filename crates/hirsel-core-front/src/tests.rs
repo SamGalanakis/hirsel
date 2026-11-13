@@ -2868,3 +2868,9 @@ fn aggregate_callback_cases() {
     }
     assert!(failures.is_empty(), "{failures:?}");
 }
+
+#[test]
+fn map_clone_cases() {
+    let failures=run_case(&root().join("cases/body/map-clone.hirsel"));
+    assert!(failures.is_empty(), "{failures:?}");
+}

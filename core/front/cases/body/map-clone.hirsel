@@ -1,0 +1,64 @@
+// Clones retain live insertion order, own independent buffers, and admit live capacity.
+// expect: run empty() = true
+// expect: run compacted() = 678
+// expect: run strings() = true
+// expect: run admission_indices() = true
+fn empty()->bool {
+ let m:Map[u64,u64]=map.new()
+ let attempt:Result[bool,Capacity]=bound bytes 0 {
+  let duplicated:Map[u64,u64]=result.unwrap(clone(m))
+  map.len(duplicated)==0
+ }
+ result.unwrap(attempt)
+}
+fn compacted()->u64 {
+ let mut m:Map[u64,u64]=map.new()
+ for i in 0u64..8u64 {result.unwrap(map.insert(mut m,i,i+10))}
+ for i in 0u64..6u64 {let _=map.remove(mut m,i)}
+ result.unwrap(map.insert(mut m,8,18))
+ let duplicated:Map[u64,u64]=result.unwrap(clone(m))
+ let mut order:u64=0
+ for (k,_) in duplicated {order=order*10+k}
+ order
+}
+fn seed()->Map[String,String] {
+ let mut m:Map[String,String]=map.new()
+ result.unwrap(map.insert(mut m,result.unwrap(string.from("a")),result.unwrap(string.from("one"))))
+ result.unwrap(map.insert(mut m,result.unwrap(string.from("b")),result.unwrap(string.from("two"))))
+ take m
+}
+fn strings()->bool {
+ let m=seed()
+ let mut duplicated:Map[String,String]=result.unwrap(clone(m))
+ let _=result.unwrap(map.set(mut duplicated,"a",result.unwrap(string.from("new"))))
+ let _=map.remove(mut duplicated,"b")
+ option.unwrap(map.get(m,"a"))=="one" && option.unwrap(map.get(m,"b"))=="two" &&
+ option.unwrap(map.get(duplicated,"a"))=="new" && map.len(duplicated)==1
+}
+fn refused(m:Map[String,String],budget:u64,request:u64)->bool {
+ let checked:Result[bool,Capacity]=bound bytes budget {
+  let attempt:Result[Map[String,String],Capacity]=clone(m)
+  let good=match take attempt {Ok(_)=>false,Error(c)=>c.requested==request && c.available==0}
+  // All failed prefixes, including the carrier, must have refunded their charge.
+  let probe:Bytes=result.unwrap(list.with_capacity(budget))
+  good && list.len(probe)==0 && option.unwrap(map.get(m,"b"))=="two"
+ }
+ result.unwrap(checked)
+}
+fn full_charge(m:Map[String,String],fresh:bool)->bool {
+ let checked:Result[bool,Capacity]=bound bytes 288 {
+  let duplicated:Map[String,String]=if fresh {seed()}else{result.unwrap(clone(m))}
+  let probe:Result[Bytes,Capacity]=list.with_capacity(1)
+  let full=match take probe {Ok(_)=>false,Error(c)=>c.requested==8 && c.available==0}
+  full && map.len(duplicated)==2
+ }
+ result.unwrap(checked)
+}
+fn admission_indices()->bool {
+ let m=seed()
+ refused(m,0,256) && refused(m,256,8) && refused(m,264,8) && refused(m,272,8) && refused(m,280,8) &&
+ full_charge(m,false) && full_charge(m,true)
+}
+pub fn main()->Result[(),Exit] {
+ if empty() && compacted()==678 && strings() && admission_indices() {Ok(())}else{Error(Exit(status:1))}
+}

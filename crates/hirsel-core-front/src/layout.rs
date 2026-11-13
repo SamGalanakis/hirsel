@@ -121,6 +121,16 @@ impl<T: TyRead> Shapes<'_, T> {
             TyKind::Adt(d, args) => {
                 let decls = self.decls;
                 let decl = &decls[d.index()];
+                // Core storage hooks also apply to built-in carriers, whose body
+                // below is supplied by the form rather than source fields.
+                self.shapes[r.index()].clone = match decl.clone_body {
+                    Some(f) if self.module => {
+                        self.hooks.push((r, Hook::Clone, f, args.clone()));
+                        Some(FuncRef(u32::MAX))
+                    }
+                    Some(_) => Some(FuncRef(d.0)),
+                    None => None,
+                };
                 match decl.role {
                     // The core collections' carriers (message.core: `own "String"`).
                     Some(Role::String) => {
@@ -241,8 +251,6 @@ impl<T: TyRead> Shapes<'_, T> {
                     None => None,
                 };
                 let finalizer = hook(Hook::Finalizer, decl.finalizer);
-                let clone = hook(Hook::Clone, decl.clone_body);
-                self.shapes[r.index()].clone = clone;
                 self.shapes[r.index()].grant = decl.grant;
                 (repr, body, finalizer)
             }
@@ -401,7 +409,7 @@ impl<T: TyRead> Shapes<'_, T> {
                 Some(Role::Arc) => FieldTy::Arc(self.shape(args[0])?),
                 Some(Role::List) => FieldTy::Seq(Box::new(self.field(args[0])?)),
                 Some(Role::String) => FieldTy::Seq(Box::new(FieldTy::Scalar(Scalar::U8))),
-                Some(Role::Map) => self.map_field(&args)?,
+                Some(Role::Map) => FieldTy::Inline(self.shape(ty)?),
                 _ if handle(&self.decls[d.index()]) => FieldTy::Scalar(Scalar::U64),
                 Some(Role::Task) => FieldTy::Handle(Handle::Task),
                 Some(Role::Sender) => FieldTy::Handle(Handle::Sender),

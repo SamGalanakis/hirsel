@@ -26,6 +26,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 Some(self.map_len(vals[0]?, entry, n))
             }
             "push_entry" => Some(self.map_push(types, vals, n)),
+            "pop_entry" => Some(self.map_pop(types, vals[0]?, result, n)),
             "compact" => {
                 let entry = self.map_entry(types[0], types[1], n)?;
                 let header = vals[0]?;
@@ -117,6 +118,39 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             _ => None,
         }
+    }
+
+    /// Undo only a clone's contiguous live prefix. The source loop supplies the
+    /// reverse entry order; the returned tuple drops value before key.
+    fn map_pop(&mut self, types: &[TyId], header: ValueId, result: TyId, n: NodeId) -> Option<ValueId> {
+        let u = Ty::Scalar(Scalar::U64);
+        let count = self.read_sequence_word(header, 8, u, n);
+        let one = self.konst(u, 1, n)?;
+        let last = self.map_binary(BinaryOp::Sub, count, one, n);
+        let collection = self.map_type(types)?;
+        let entry = self.map_entry_at(header, collection, last, n)?;
+        let to = self.slot(result, None, n)?;
+        for (field, &ty) in types[..2].iter().enumerate() {
+            let rep = match self.rep(ty) {
+                Ok(rep) => rep,
+                Err(what) => { self.gap(n, what); return None; }
+            };
+            let Some(place) = rep.stored() else { continue };
+            let from = self.address(AddressBase::Address(entry), &[Step::Field(field as u32 + 2)], place, n);
+            let value = self.read_carried_rep(from, rep, n);
+            let dest = self.address(AddressBase::Address(to), &[Step::Field(field as u32)], place, n);
+            self.install(dest, rep, value, n);
+        }
+        let zero = self.konst(u, 0, n)?;
+        let state = self.address(AddressBase::Address(entry), &[Step::Field(1)], PlaceTy::Value(u), n);
+        self.inst(Inst::Store { address: state, value: zero }, n);
+        self.sequence_word(header, 8, u, last, n);
+        let layout = self.map_entry(types[0], types[1], n)?;
+        let live_at = self.map_live_at(header, layout, n)?;
+        self.inst(Inst::Store { address: live_at, value: last }, n);
+        let value = self.pointer(to, n);
+        self.temp(result, Some(value));
+        Some(value)
     }
 
     fn map_push(&mut self, types: &[TyId], vals: &[Option<ValueId>], n: NodeId) -> Option<ValueId> {

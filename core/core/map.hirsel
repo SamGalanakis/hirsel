@@ -125,3 +125,40 @@ fn install_index[K: key, V](mut m: Map[K,V], h: u64, s: u64) {
   while index_get(m, j) != 0 { j = int.wrapping_add(j, 1) & mask }
   index_set(mut m, j, s)
 }
+
+// Core-private clone item in core.map; declaration-only MEM-17 eligibility.
+clone[K:key,V](x:Map[K,V]) {
+  let mut copied: Map[K,V] = new()
+  let count = len(x)
+  if count == 0 { return Ok(take copied) }
+  let mut cap: u64 = 4
+  while cap < count { cap *= 2 }
+  regrow(mut copied,cap)?
+  let mut i: u64 = 0
+  while i < slots(x) {
+    if slot_live(x,i) {
+      let key_result:Result[K,Capacity]=clone(slot_key(x,i))
+      let key:K = match take key_result {
+        Ok(key) => take key,
+        Error(c) => {undo_clone(mut copied);return Error(c)}
+      }
+      let value_result:Result[V,Capacity]=clone(slot_value(x,i))
+      let value:V = match take value_result {
+        Ok(value) => take value,
+        Error(c) => {let _=take key;undo_clone(mut copied);return Error(c)}
+      }
+      let h=slot_hash(x,i)
+      let s=slots(copied)+1
+      push_entry(mut copied,h,take key,take value)
+      install_index(mut copied,h,s)
+    }
+    i+=1
+  }
+  Ok(take copied)
+}
+
+// Only clone rollback consumes the new contiguous live prefix in reverse.
+fn pop_entry[K:key,V](mut m:Map[K,V])->(K,V)
+fn undo_clone[K:key,V](mut m:Map[K,V]) {
+  while slots(m) != 0 {let _=pop_entry(mut m)}
+}

@@ -222,6 +222,6 @@ writes one line to stderr, `run stop: ` and the stop's name
 | a channel's senders would pass `2^64 − 1` | `ChannelSenders` |
 | an engine counter would pass `2^64 − 1`: task ids, host handles, temporary names, runs in the process, destination identities ([MEM-4](memory.md#mem-4-sized-destinations)) | `TaskIds`, `HostHandles`, `HostNames`, `ActiveRuns`, `DestinationIds` |
 | the host refuses memory the engine needs | `HostMemory` |
-| the host refuses the signal stack, a signal action or the clock | `SignalStack`, `Signal`, `Clock` |
+| the host refuses the signal stack, a signal action, the clock or the page size | `SignalStack`, `Signal`, `Clock`, `PageSize` |
 
 Termination by the host writes nothing and its status is the host's.

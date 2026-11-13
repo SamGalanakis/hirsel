@@ -1,6 +1,6 @@
 {
   "measurement": "Buck release, CPU 16, jobs 1, instructions:u, fresh private store, complete driver interval including publication and teardown",
-  "basis": "2e8792ee plus linked identity and terminal CLI exit: the one-shot CLI does not free resident products before exiting. Paired ordinary-driver results in NON-CHECK.md. Existing lower ceilings are retained when newer sibling work exceeds them; this change does not raise either ceiling.",
+  "basis": "0f347e69 plus terminal CLI exit and shared immutable signature paths. Current source grows to 6132/2741 lines; ordinary check/lower 26614.97/14901.59 and whole 46350.52/32505.36. Keep all four stricter previous ceilings despite sibling emission growth; no ceiling is raised. Rebase retains the newer source denominators 6208/2817.",
   "corpora": {
     "m1": {
       "code_lines": 6208,

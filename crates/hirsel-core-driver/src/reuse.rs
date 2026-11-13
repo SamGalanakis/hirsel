@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DefinitionKey {
     pub body: ContentHash,
-    pub signatures: BTreeMap<DefPath, ContentHash>,
+    pub signatures: BTreeMap<Arc<DefPath>, ContentHash>,
     pub lookups: ContentHash,
     pub environment: ContentHash,
 }
@@ -25,6 +25,7 @@ pub(crate) struct Keys {
     pub(crate) headers: BTreeMap<DefPath, Header>,
     environment: ContentHash,
     paths: Vec<DefPath>,
+    signature_paths: Vec<Arc<DefPath>>,
     modules: Vec<ModulePath>,
     packages: Vec<PackageId>,
     dependencies: Vec<Option<HeaderRow>>,
@@ -113,6 +114,7 @@ impl Keys {
             anchors,
             headers,
             environment,
+            signature_paths: paths.iter().cloned().map(Arc::new).collect(),
             paths,
             modules: (0..index.modules.len())
                 .map(|i| index.module_path(ModuleId(i as u32)))
@@ -198,7 +200,7 @@ impl Keys {
                     self.paths[id]
                 ))
             })?;
-            signatures.insert(self.paths[id].clone(), h.digest);
+            signatures.insert(Arc::clone(&self.signature_paths[id]), h.digest);
             for read in &h.reads {
                 match read {
                     Ok(id) => pending.push(*id),

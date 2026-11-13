@@ -52,3 +52,13 @@ fn map_string_words_cranelift(){map_string_words(Backend::Cranelift);}
 #[test]
 #[ignore="explicit native integration target"]
 fn map_string_words_llvm(){map_string_words(Backend::Llvm);}
+
+fn callable_item_conversions(backend: Backend) {
+    ordered_case(backend, include_str!("../../../core/front/cases/body/callable-item-conversions.hirsel"));
+}
+#[test]
+#[ignore="explicit native integration target"]
+fn callable_item_conversions_cranelift(){callable_item_conversions(Backend::Cranelift);}
+#[test]
+#[ignore="explicit native integration target"]
+fn callable_item_conversions_llvm(){callable_item_conversions(Backend::Llvm);}

@@ -105,7 +105,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return None;
             }
         };
-        self.callable_adapter(raw, Some((item, types)), ty, false, n)
+        let environment =
+            matches!(self.t.kind(ty), TyKind::Fn(_, _, _, k) if *k != Callable::Plain);
+        self.callable_adapter(raw, Some((item, types)), ty, environment, n)
     }
     pub(super) fn row_adapter(
         &mut self,

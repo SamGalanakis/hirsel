@@ -1190,11 +1190,11 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 || crate::decls::stable_parameter(&self.p.decls, &self.t, t, w.ty));
         let callable = matches!((self.t.kind(t), self.t.kind(w.ty)),
             (TyKind::Fn(a, ar, aw, ak), TyKind::Fn(b, br, bw, bk))
-                if a == b && ar == br && ak == bk && (!aw || *bw));
+                if a == b && ar == br && (ak == bk || matches!((ak,bk), (Callable::OwnSend, Callable::Own))) && (!aw || *bw));
         if matches!((self.t.kind(t), self.t.kind(w.ty)),
             (TyKind::Fn(a, ar, aw, ak), TyKind::Fn(b, br, bw, bk))
                 if a == b && ar == br && (!aw || *bw) && ak != bk
-                    && matches!((ak,bk), (Callable::Plain, Callable::Own | Callable::OwnSend | Callable::Scoped) | (Callable::OwnSend, Callable::Own | Callable::Scoped) | (Callable::Own,Callable::Scoped)))
+                    && matches!((ak,bk), (Callable::Plain, Callable::Own | Callable::OwnSend | Callable::Scoped) | (Callable::OwnSend, Callable::Scoped) | (Callable::Own,Callable::Scoped)))
         {
             self.gap(n, "callable kind conversions are not built");
             return;

@@ -1,0 +1,7 @@
+// Stored code pointers need a general kind-conversion convention; this remains
+// separate from a named item, whose environment-taking adapter is known.
+// expect: gap callable kind conversions are not built
+fn f(code:fn(u64)->u64)->u64 {
+ let owned:own fn(u64)->u64=code
+ owned(1)
+}

@@ -62,7 +62,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         scratch
             .tys
             .extend(scratch.found.iter().map(|t| t.unwrap_or(ERROR)));
-        let ty = subst(&mut self.t, ty, &scratch.tys);
+        let mut ty = subst(&mut self.t, ty, &scratch.tys);
+        // A named item can use an environment-taking adapter without allocating
+        // an environment. Its code identity is known at this value's creation.
+        if let Some(w) = want.filter(|w| w.payload == 0)
+            && matches!((self.t.kind(ty), self.t.kind(w.ty)),
+                (TyKind::Fn(a, ar, aw, Callable::Plain), TyKind::Fn(b, br, bw, Callable::Own | Callable::OwnSend | Callable::Scoped))
+                    if a == b && ar == br && (!aw || *bw))
+        {
+            ty = w.ty;
+        }
         let Some(function) = self.item_adapter(f, &scratch.tys, ty, n) else {
             return (ty, None);
         };
@@ -72,6 +81,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Some(result)
         } else {
             None
+        };
+        let value = match self.t.kind(ty) {
+            TyKind::Fn(_, _, _, Callable::Own | Callable::OwnSend) => {
+                let value = value.and_then(|code| self.empty_own_callable(code, n));
+                self.temp(ty, value);
+                value
+            }
+            TyKind::Fn(_, _, _, Callable::Scoped) => {
+                value.and_then(|code| self.scoped_value(code, &[], n))
+            }
+            _ => value,
         };
         (ty, value)
     }

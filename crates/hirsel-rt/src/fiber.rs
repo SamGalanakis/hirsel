@@ -401,23 +401,6 @@ mod tsan {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
-fn initial_frame(entry: Entry, first: *mut u8, second: *mut u8) -> [u64; 8] {
-    // From the stack pointer up: the control words fiber_switch restores (MXCSR's default
-    // 0x1F80 and the x87 control word's 0x037F), r15, r14, r13, r12, rbx, rbp, the return
-    // address. After the return the stack pointer is 16-aligned, as `fiber_start`'s call needs.
-    [
-        0x037F_u64 << 32 | 0x1F80,
-        0,
-        entry as usize as u64,
-        second as u64,
-        first as u64,
-        0,
-        0,
-        fiber_start as usize as u64,
-    ]
-}
-
 #[cfg(all(target_arch = "x86_64", feature = "tsan"))]
 pub(crate) unsafe extern "C" fn tsan_switch_target(
     to: *mut u8,
@@ -450,114 +433,23 @@ pub(crate) unsafe extern "C" fn fiber_switch(_save: *mut *mut u8, _to: *mut u8) 
     )
 }
 
-#[cfg(target_arch = "x86_64")]
-macro_rules! x86_switch {
-    ($name:ident, $update:literal) => {
-        #[unsafe(naked)]
-        pub(crate) unsafe extern "C" fn $name(_save: *mut *mut u8, _to: *mut u8) {
-            core::arch::naked_asm!(
-                $update,
-                "push rbp",
-                "push rbx",
-                "push r12",
-                "push r13",
-                "push r14",
-                "push r15",
-                "sub rsp, 8",
-                "stmxcsr [rsp]",
-                "fnstcw [rsp + 4]",
-                "mov [rdi], rsp",
-                "mov rsp, rsi",
-                "ldmxcsr [rsp]",
-                "fldcw [rsp + 4]",
-                "add rsp, 8",
-                "pop r15",
-                "pop r14",
-                "pop r13",
-                "pop r12",
-                "pop rbx",
-                "pop rbp",
-                "ret",
-            )
-        }
-    };
-}
-#[cfg(all(target_arch = "x86_64", not(feature = "tsan")))]
-x86_switch!(fiber_switch, "");
+pub(crate) use hirsel_stack::initial_frame;
+#[cfg(any(
+    target_arch = "aarch64",
+    all(target_arch = "x86_64", not(feature = "tsan"))
+))]
+pub(crate) use hirsel_stack::switch as fiber_switch;
 #[cfg(all(target_arch = "x86_64", feature = "tsan"))]
-x86_switch!(
-    fiber_switch_raw,
-    "
-    mov r11, qword ptr fs:[hirsel_tsan_idle@TPOFF]
-    test r11, r11
-    je 3f
-    cmp rdi, r11
-    jne 2f
-    mov byte ptr fs:[hirsel_tsan_private@TPOFF], 1
-    jmp 3f
-    2:
-    cmp rsi, [r11]
-    jne 3f
-    mov byte ptr fs:[hirsel_tsan_private@TPOFF], 0
-    3:
-"
-);
-
-#[cfg(target_arch = "x86_64")]
 #[unsafe(naked)]
-unsafe extern "C" fn fiber_start() {
-    core::arch::naked_asm!("mov rdi, r12", "mov rsi, r13", "call r14", "ud2")
-}
-
-#[cfg(target_arch = "aarch64")]
-fn initial_frame(entry: Entry, first: *mut u8, second: *mut u8) -> [u64; 20] {
-    // From the stack pointer up: x19 .. x28, x29 (frame pointer), x30 (return address),
-    // d8 .. d15. x19, x20 and x21 carry the entry's arguments and the entry.
-    let mut words = [0u64; 20];
-    words[0] = first as u64;
-    words[1] = second as u64;
-    words[2] = entry as usize as u64;
-    words[11] = fiber_start as usize as u64;
-    words
-}
-
-#[cfg(target_arch = "aarch64")]
-#[unsafe(naked)]
-unsafe extern "C" fn fiber_switch(_save: *mut *mut u8, _to: *mut u8) {
+unsafe extern "C" fn fiber_switch_raw(_save: *mut *mut u8, _to: *mut u8) {
     core::arch::naked_asm!(
-        "sub sp, sp, #160",
-        "stp x19, x20, [sp, #0]",
-        "stp x21, x22, [sp, #16]",
-        "stp x23, x24, [sp, #32]",
-        "stp x25, x26, [sp, #48]",
-        "stp x27, x28, [sp, #64]",
-        "stp x29, x30, [sp, #80]",
-        "stp d8, d9, [sp, #96]",
-        "stp d10, d11, [sp, #112]",
-        "stp d12, d13, [sp, #128]",
-        "stp d14, d15, [sp, #144]",
-        "mov x2, sp",
-        "str x2, [x0]",
-        "mov sp, x1",
-        "ldp x19, x20, [sp, #0]",
-        "ldp x21, x22, [sp, #16]",
-        "ldp x23, x24, [sp, #32]",
-        "ldp x25, x26, [sp, #48]",
-        "ldp x27, x28, [sp, #64]",
-        "ldp x29, x30, [sp, #80]",
-        "ldp d8, d9, [sp, #96]",
-        "ldp d10, d11, [sp, #112]",
-        "ldp d12, d13, [sp, #128]",
-        "ldp d14, d15, [sp, #144]",
-        "add sp, sp, #160",
-        "ret",
+        "mov r11, qword ptr fs:[hirsel_tsan_idle@TPOFF]",
+        "test r11, r11", "je 3f", "cmp rdi, r11", "jne 2f",
+        "mov byte ptr fs:[hirsel_tsan_private@TPOFF], 1", "jmp 3f",
+        "2:", "cmp rsi, [r11]", "jne 3f",
+        "mov byte ptr fs:[hirsel_tsan_private@TPOFF], 0", "3:",
+        "jmp {switch}", switch = sym hirsel_stack::switch,
     )
-}
-
-#[cfg(target_arch = "aarch64")]
-#[unsafe(naked)]
-unsafe extern "C" fn fiber_start() {
-    core::arch::naked_asm!("mov x0, x19", "mov x1, x20", "blr x21", "brk #0")
 }
 
 #[cfg(test)]

@@ -29,6 +29,7 @@ const CRATES: &[(&str, Class)] = &[
     // Data rather than a leaf utility: its content keys are ContentHash values.
     ("hirsel-graph", Class::Data),
     ("hirsel-guard", Class::LeafUtility),
+    ("hirsel-stack", Class::LeafUtility),
     // Shared protocol data and operations; debug sections use hirsel-guard.
     ("hirsel-free", Class::Data),
     ("hirsel-span", Class::Data),

@@ -35,6 +35,11 @@ pub struct Config {
     /// Source binder formats the cause and rebound site as one line, without a
     /// newline. Its immutable view lives through diagnostic. Null uses tag/site.
     pub describe: Option<unsafe extern "C" fn(*mut u8, *const Cause) -> View>,
+    pub scheduler: crate::tasks::SchedulerProvider,
+    pub stop_fd: i32,
+    pub capabilities: *const crate::entry::Grant,
+    pub capabilities_len: usize,
+    pub close_grants: Option<unsafe extern "C" fn(*mut u8)>,
 }
 
 /// # Safety
@@ -46,13 +51,48 @@ pub unsafe extern "C" fn hirsel_core_run(config: *const Config, entry: Entry) ->
     unsafe {
         let config = &*config;
         let mut context = Context::new(config.root_limit);
+        context.run = config;
         if causes::task_start(&mut context).is_err() {
             diagnostic(config, b"Capacity at 0\n");
+            if let Some(close) = config.close_grants {
+                close(config.state);
+            }
             return 101;
         }
         let mut result = MainResult::default();
-        let failed = entry(&mut context, config, &mut result);
-        if failed != 0 {
+        struct Call {
+            entry: Entry,
+            config: *const Config,
+        }
+        unsafe extern "C" fn invoke(
+            context: *mut Context,
+            result: *mut u8,
+            argument: *mut u8,
+        ) -> u8 {
+            // SAFETY: root wrapper pins Call and the MainResult destination.
+            unsafe {
+                *result.cast::<MainResult>() = MainResult::default();
+                let call = &*argument.cast::<Call>();
+                (call.entry)(context, call.config, result.cast())
+            }
+        }
+        let mut call = Call { entry, config };
+        let previous_fd = crate::fiber::set_stop_fd(if config.stop_fd == 0 {
+            2
+        } else {
+            config.stop_fd
+        });
+        let failed = crate::tasks::run_root(
+            &mut context,
+            invoke,
+            (&mut call as *mut Call).cast(),
+            (&mut result as *mut MainResult).cast(),
+            size_of::<Call>(),
+            size_of::<MainResult>(),
+            config.scheduler,
+        );
+        crate::fiber::set_stop_fd(previous_fd);
+        let status = if failed != 0 {
             for cause in context.causes.iter() {
                 if let Some(describe) = config.describe {
                     let line = describe(config.state, cause);
@@ -78,7 +118,12 @@ pub unsafe extern "C" fn hirsel_core_run(config: *const Config, entry: Entry) ->
                 2 if (1..=100).contains(&result.exit) => result.exit,
                 _ => 1,
             }
+        };
+        drop(context);
+        if let Some(close) = config.close_grants {
+            close(config.state);
         }
+        status
     }
 }
 unsafe fn diagnostic(config: &Config, bytes: &[u8]) {
@@ -90,9 +135,9 @@ unsafe fn diagnostic(config: &Config, bytes: &[u8]) {
 /// # Safety
 /// Args is the run's live configuration; the returned view stays pinned by it.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_args_len(config: *const Config) -> u64 {
+pub unsafe extern "C" fn hirsel_core_args_len(context: *const Context, _args: u64) -> u64 {
     // SAFETY: the run owns immutable argument descriptors.
-    unsafe { (*config).args_len as u64 }
+    unsafe { (*(*context).run).args_len as u64 }
 }
 #[repr(C)]
 pub struct Argument {
@@ -102,10 +147,14 @@ pub struct Argument {
 /// # Safety
 /// Same as args_len. Index is user input and is checked before address arithmetic.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn hirsel_core_args_get(config: *const Config, index: u64) -> Argument {
+pub unsafe extern "C" fn hirsel_core_args_get(
+    context: *const Context,
+    _args: u64,
+    index: u64,
+) -> Argument {
     // SAFETY: configuration is live; only a checked index reads its argument table.
     unsafe {
-        let config = &*config;
+        let config = &*(*context).run;
         if index >= config.args_len as u64 {
             return Argument {
                 value: View {
@@ -127,8 +176,9 @@ pub unsafe extern "C" fn hirsel_core_args_get(config: *const Config, index: u64)
 pub fn stop(name: &[u8]) -> ! {
     // SAFETY: static/borrowed bytes remain live until _exit, no Rust unwinding.
     unsafe {
-        libc::write(2, name.as_ptr().cast(), name.len());
-        libc::write(2, b"\n".as_ptr().cast(), 1);
+        let fd = crate::fiber::stop_fd();
+        libc::write(fd, name.as_ptr().cast(), name.len());
+        libc::write(fd, b"\n".as_ptr().cast(), 1);
         libc::_exit(102)
     }
 }

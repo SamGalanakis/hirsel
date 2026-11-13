@@ -5,9 +5,14 @@
 hirsel_guard::install!();
 
 pub mod abi;
+pub mod abi_host;
+pub mod abi_tasks;
 pub mod block;
 pub mod causes;
+pub mod channel;
 pub mod counted;
+pub mod entry;
+mod fiber;
 pub mod limit;
 pub mod os;
 pub mod process;
@@ -28,7 +33,9 @@ pub struct Capacity {
 /// The hidden first argument of native functions. A task owns its context;
 /// custody can carry funding records beyond this context's lifetime.
 pub struct Context {
+    pub(crate) run: *const crate::process::Config,
     pub(crate) cancel_requested: bool,
+    pub(crate) cancel_shield: usize,
     pub(crate) current: Funding,
     pub(crate) stack: Vec<Funding>,
     pub(crate) finalizing: usize,
@@ -45,9 +52,15 @@ pub struct Context {
 impl Context {
     /// The task provider admits its task record and primary cell separately.
     pub fn new(bytes: u64) -> Self {
+        Self::with_funding(Funding::root(bytes))
+    }
+
+    pub(crate) fn with_funding(funding: Funding) -> Self {
         Self {
+            run: std::ptr::null(),
             cancel_requested: false,
-            current: Funding::root(bytes),
+            cancel_shield: 0,
+            current: funding,
             stack: Vec::new(),
             finalizing: 0,
             grant_depth: usize::MAX,
@@ -116,3 +129,12 @@ mod tests;
 
 #[cfg(test)]
 mod provider_tests;
+
+#[cfg(test)]
+mod tasks_tests;
+
+#[cfg(test)]
+mod schedule_tests;
+
+#[cfg(test)]
+mod entry_tests;

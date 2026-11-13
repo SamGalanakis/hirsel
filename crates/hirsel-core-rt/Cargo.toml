@@ -13,6 +13,7 @@ crate-type = ["rlib", "staticlib"]
 testing = []
 
 [dependencies]
+hirsel-stack = { path = "../hirsel-stack" }
 libc = { version = "0.2", default-features = false }
 hirsel-core-layout = { path = "../hirsel-core-layout" }
 

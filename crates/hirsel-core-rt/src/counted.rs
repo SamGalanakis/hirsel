@@ -23,6 +23,7 @@ pub unsafe fn initialize(node: NonNull<u8>, atomic: bool) {
     unsafe {
         if atomic {
             node.cast::<AtomicU64>().as_ptr().write(AtomicU64::new(1));
+            crate::tasks::event(crate::tasks::ARC_NEW, 0, 1);
         } else {
             node.cast::<u64>().as_ptr().write(1);
         }
@@ -42,13 +43,18 @@ pub unsafe fn share(node: NonNull<u8>, atomic: bool) {
                 .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
                 .is_err()
             {
-                std::process::abort();
+                crate::process::stop(b"CountOverflow");
             }
+            crate::tasks::event(
+                crate::tasks::ARC_SHARE,
+                0,
+                node.cast::<AtomicU64>().as_ref().load(Ordering::Relaxed),
+            );
         } else {
             let count = &mut *node.cast::<u64>().as_ptr();
             *count = count
                 .checked_add(1)
-                .unwrap_or_else(|| std::process::abort());
+                .unwrap_or_else(|| crate::process::stop(b"CountOverflow"));
         }
     }
 }
@@ -61,7 +67,9 @@ pub unsafe fn try_unwrap(node: NonNull<u8>, atomic: bool) -> bool {
     // SAFETY: the caller's holder pins the initialized count word.
     unsafe {
         if atomic {
-            node.cast::<AtomicU64>().as_ref().load(Ordering::Acquire) == 1
+            let unique = node.cast::<AtomicU64>().as_ref().load(Ordering::Acquire) == 1;
+            crate::tasks::event(crate::tasks::ARC_UNWRAP, 0, u64::from(unique));
+            unique
         } else {
             node.cast::<u64>().as_ptr().read() == 1
         }
@@ -89,6 +97,7 @@ pub unsafe fn enqueue(
             if last {
                 fence(Ordering::Acquire);
             }
+            crate::tasks::event(crate::tasks::ARC_RELEASE, 0, u64::from(last));
             last
         } else {
             let count = &mut *node.cast::<u64>().as_ptr();

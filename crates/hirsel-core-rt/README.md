@@ -19,14 +19,14 @@ bookkeeping never contribute to logical charges.
 using this crate's normal Cargo dependencies. Each target also has an `x86_64`
 or `aarch64` subtarget. This namespace has no old-runtime feature variants or
 old-language startup training. The emitters supply resumable mechanical drop
-glue through the ABI module.
+glue through the ABI modules.
 
 `MEASUREMENTS.md` records the instruction samples and missed targets. Reproduce
 them with `python3 crates/hirsel-core-rt/measure.py --out <new-directory>` from
 the repo root. `--abi-only` instead compiles and runs `tests/abi.c` against the
 published header and a static archive. Ordinary Rust tests run through Buck.
 
-`include/hirsel_core_process.h` declares process entry and the host provider ABI.
+`include/hirsel_core_rt_host.h` declares process entry and the host provider ABI.
 The driver pins a Config with immutable argv, explicit grants, the provider and
 source-bound diagnostic callbacks. The generated entry thunk calls main,
 cleans its returned error and live owners, and then writes MainResult. Only
@@ -41,3 +41,28 @@ The OS adapter pins configured directory grants and uses Linux openat2 with
 RESOLVE_BENEATH for every path traversal. Unsupported kernels report ENOSYS.
 It permits links that stay beneath a grant and never follows links during
 remove_tree. Host descriptor tables belong to the run, outside task limits.
+
+`include/hirsel_core_rt_tasks.h` declares the generic task/channel ABI. Emitters
+specialize the frozen FORM rows with ValueLayout constants and drop thunks;
+task bodies accept context, result destination and the transferred input slot.
+Task argument/result storage and channel rings are prepaid. The scheduler
+executes stackful tasks on one worker, switches only at blocking operations or
+explicit checkpoints, and records completed events through SchedulerProvider.
+All root and child stacks have a guard and page-probed language frames. The
+OS adapter runs non-suspending libc calls on a separate guarded host stack.
+The common register switch lives in hirsel-stack and also serves hirsel-rt.
+
+The cross-task memory hooks live in abi_tasks.rs. Task end forwards surviving funding
+to the parent. Cross-task refunds update the effective payer, then publish one
+event. The current synchronized funding forest settles directly; a task-local
+representation drains its prepaid pending slots in task_resume before code can
+attempt another admission. Event callbacks cannot suspend or re-enter; provider
+issue/delivery callbacks can suspend on their task's own stack.
+
+FORM decision 44 fixes every capability and Args operand as a plain u64 provider
+handle. OsConfig.parameters lists main's parameter kinds and ordinals in source
+order; the C constructor fills Config.grants[i] with those handles and refuses
+missing grants before startup. Core adapters resolve provider metadata through
+the task context. Args accessors take context and its u64 Args handle. Run closes
+all grants after main cleanup and diagnostics, without admission or failure;
+os_process_free then releases host argv/metadata. No program drop visits a grant.

@@ -195,11 +195,12 @@ fn clocks_and_argv_are_borrowed_inputs() {
     let config = config(args.as_ptr(), 1, &mut stderr);
     // SAFETY: table and bytes live through every borrowed view.
     unsafe {
-        assert_eq!(hirsel_core_args_len(&config), 1);
-        let v = hirsel_core_args_get(&config, 0);
+        (*f.context).run = &config;
+        assert_eq!(hirsel_core_args_len(f.context, 1), 1);
+        let v = hirsel_core_args_get(f.context, 1, 0);
         assert!(v.present);
         assert_eq!(std::slice::from_raw_parts(v.value.data, v.value.len), bytes);
-        assert!(!hirsel_core_args_get(&config, u64::MAX).present);
+        assert!(!hirsel_core_args_get(f.context, 1, u64::MAX).present);
     }
 }
 unsafe extern "C" fn diagnostic(state: *mut u8, p: *const u8, n: usize) {
@@ -219,6 +220,11 @@ fn config(args: *const View, args_len: usize, stderr: &mut Vec<u8>) -> Config {
         state: (stderr as *mut Vec<u8>).cast(),
         diagnostic,
         describe: None,
+        scheduler: crate::tasks::SchedulerProvider::default(),
+        stop_fd: 2,
+        capabilities: std::ptr::null(),
+        capabilities_len: 0,
+        close_grants: None,
     }
 }
 unsafe extern "C" fn main_result(
@@ -492,4 +498,54 @@ fn scripted_host_errors_preserve_the_named_partial_effect_contracts() {
         assert_eq!(state.closed, operation == CLOSE);
         assert_eq!(state.lock, operation == UNLOCK);
     }
+}
+#[test]
+fn guarded_root_routes_real_os_calls_through_the_separate_host_stack() {
+    unsafe extern "C" fn main(
+        context: *mut crate::Context,
+        config: *const Config,
+        result: *mut MainResult,
+    ) -> u8 {
+        // SAFETY: live run grants/provider, static path, no returned owners.
+        unsafe {
+            *result = MainResult::default();
+            let config = &*config;
+            let mut request = Request {
+                operation: MKDIR,
+                mode: 0,
+                handle: *config.grants,
+                path: b"from-main".as_ptr(),
+                path_len: 9,
+                buffer: Buffer {
+                    data: ptr::null_mut(),
+                    len: 0,
+                    capacity: 0,
+                },
+                site: 1,
+            };
+            assert_eq!(
+                hirsel_core_host(context, config.provider, &mut request).error,
+                IoError::OK
+            );
+            request.operation = REMOVE;
+            assert_eq!(
+                hirsel_core_host(context, config.provider, &mut request).error,
+                IoError::OK
+            );
+        }
+        0
+    }
+    use std::ptr;
+    let mut fixture = Fixture::new();
+    let provider = fixture.os.provider();
+    let grants = [fixture.dir];
+    let mut stderr = vec![];
+    let mut config = config(ptr::null(), 0, &mut stderr);
+    config.provider = &provider;
+    config.grants = grants.as_ptr();
+    config.grants_len = 1;
+    // SAFETY: config, OS adapter and grants outlive the guarded root.
+    assert_eq!(unsafe { hirsel_core_run(&config, main) }, 0);
+    assert!(stderr.is_empty());
+    assert!(!fixture.root.join("from-main").exists());
 }

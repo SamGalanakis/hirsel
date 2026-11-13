@@ -55,7 +55,7 @@ pub struct Cell {
     string: MaybeUninit<StringMessage>,
 }
 impl Cell {
-    fn prepaid(funding: Funding) -> Box<Self> {
+    pub(crate) fn prepaid(funding: Funding) -> Box<Self> {
         Box::new(Self {
             funding,
             cause: None,

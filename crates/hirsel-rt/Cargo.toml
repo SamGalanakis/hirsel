@@ -25,6 +25,7 @@ operation-latency = []
 ownership-trace = []
 
 [dependencies]
+hirsel-stack = { path = "../hirsel-stack" }
 base64-simd = "=0.8.0"
 simdutf8 = "=0.1.5"
 serde_json = "1"

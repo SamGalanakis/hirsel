@@ -6,6 +6,7 @@ use crate::Capacity;
 use std::sync::{Arc, Mutex};
 
 struct Live {
+    owner: u64,
     capacity: u64,
     used: u64,
     parent: Option<usize>,
@@ -129,9 +130,11 @@ impl Forest {
             }),
         }
     }
-    fn refund(&mut self, id: usize, bytes: u64) {
+    fn refund(&mut self, id: usize, bytes: u64) -> u64 {
         let root = self.find(id);
-        self.record_mut(root).live.as_mut().unwrap().used -= bytes;
+        let live = self.record_mut(root).live.as_mut().unwrap();
+        live.used -= bytes;
+        live.owner
     }
 }
 
@@ -152,6 +155,7 @@ impl Funding {
             fail: None,
         };
         let id = forest.insert(Live {
+            owner: crate::tasks::current_id(),
             capacity,
             used: 0,
             parent: None,
@@ -171,7 +175,8 @@ impl Funding {
         self.forest.lock().unwrap().admit(self.id, bytes)
     }
     pub(crate) fn refund(&self, bytes: u64) {
-        self.forest.lock().unwrap().refund(self.id, bytes);
+        let owner = self.forest.lock().unwrap().refund(self.id, bytes);
+        crate::abi_tasks::cross_task_refund(owner, bytes);
     }
     pub fn reserve(&self, bytes: u64) -> Result<Self, Capacity> {
         self.admit(Some(bytes))?;
@@ -181,7 +186,10 @@ impl Funding {
     pub(crate) fn prepaid(&self, bytes: u64) -> Self {
         let mut forest = self.forest.lock().unwrap();
         forest.retain(self.id);
+        let root = forest.find(self.id);
+        let owner = forest.record(root).live.as_ref().unwrap().owner;
         let id = forest.insert(Live {
+            owner,
             capacity: bytes,
             used: 0,
             parent: Some(self.id),
@@ -191,13 +199,20 @@ impl Funding {
             id,
         }
     }
+    pub(crate) fn task_owner(&self, owner: u64) {
+        let mut forest = self.forest.lock().unwrap();
+        let root = forest.find(self.id);
+        forest.record_mut(root).live.as_mut().unwrap().owner = owner;
+    }
     pub fn end(&self) {
         let mut f = self.forest.lock().unwrap();
         let child = f.find(self.id);
         let live = f.record_mut(child).live.take().unwrap();
         let original_parent = live.parent.unwrap();
         let parent = f.find(original_parent);
-        f.record_mut(parent).live.as_mut().unwrap().used -= live.capacity - live.used;
+        let unused = live.capacity - live.used;
+        let owner = f.record(parent).live.as_ref().unwrap().owner;
+        f.record_mut(parent).live.as_mut().unwrap().used -= unused;
         let parent_live = f.record_mut(parent).live.take();
         let (winner, loser) = if f.record(child).rank > f.record(parent).rank {
             (child, parent)
@@ -211,6 +226,8 @@ impl Funding {
         f.retain(winner);
         f.record_mut(loser).parent = Some(winner);
         f.release(original_parent);
+        drop(f);
+        crate::abi_tasks::cross_task_refund(owner, unused);
     }
     #[cfg(any(test, feature = "testing"))]
     pub(crate) fn inject(&self, n: usize, later: bool) {

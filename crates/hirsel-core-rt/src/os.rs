@@ -224,6 +224,10 @@ impl OsProvider {
 /// # Safety
 /// State is the run's live OsProvider; request meets the provider ABI contract.
 pub unsafe extern "C" fn issue(state: *mut u8, request: *mut Request) -> Outcome {
+    // SAFETY: OS adapter issues synchronously, without task callbacks or suspension.
+    unsafe { crate::tasks::host_operation(state, request, issue_on_stack) }
+}
+unsafe extern "C" fn issue_on_stack(state: *mut u8, request: *mut Request) -> Outcome {
     // SAFETY: a provider operation exclusively owns the adapter during issue.
     match unsafe { (&mut *state.cast::<OsProvider>()).execute(&mut *request) } {
         Ok(out) => out,
@@ -365,4 +369,18 @@ fn remove_tree(fd: i32, name: &CString) -> io::Result<()> {
     // SAFETY: remove only the named root, without following a replacement link.
     syscall(unsafe { libc::unlinkat(fd, name.as_ptr(), libc::AT_REMOVEDIR) } as isize)?;
     Ok(())
+}
+
+/// # Safety
+/// Live descriptor and borrowed diagnostic bytes; no user cancellation applies.
+pub(crate) unsafe fn diagnostic(fd: i32, data: *const u8, len: usize) {
+    // SAFETY: run diagnostics pin their byte view for this synchronous write.
+    unsafe {
+        let bytes = if len == 0 {
+            &[]
+        } else {
+            std::slice::from_raw_parts(data, len)
+        };
+        let _ = write_all(fd, bytes);
+    }
 }

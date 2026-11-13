@@ -772,6 +772,7 @@ dependencies = [
 name = "hirsel-core-rt"
 version = "0.1.0"
 dependencies = [
+ "hirsel-stack",
  "bumpalo",
  "hirsel-core-layout",
  "hirsel-guard",
@@ -1747,6 +1748,7 @@ dependencies = [
 name = "hirsel-rt"
 version = "0.1.0"
 dependencies = [
+ "hirsel-stack",
  "base64",
  "base64-simd",
  "hirsel-core-contract",
@@ -1833,6 +1835,13 @@ dependencies = [
  "hirsel-guard",
  "hirsel-intern",
  "serde",
+]
+
+[[package]]
+name = "hirsel-stack"
+version = "0.1.0"
+dependencies = [
+ "hirsel-guard",
 ]
 
 [[package]]

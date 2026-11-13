@@ -353,7 +353,7 @@ fn entry_source(
         )
     };
     Ok(format!(
-        r#"#include "hirsel_core_process.h"
+        r#"#include "hirsel_core_rt.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -403,10 +403,14 @@ fn link(
     options: &NativeOptions,
 ) -> Result<BuildProduct, NativeStop> {
     let runtime = read_input(&options.runtime)?;
-    let headers = ["hirsel_core_process.h", "hirsel_core_rt.h"]
-        .map(|n| read_input(&options.include.join(n)))
-        .into_iter()
-        .collect::<io::Result<Vec<_>>>()?;
+    let headers = [
+        "hirsel_core_rt.h",
+        "hirsel_core_rt_host.h",
+        "hirsel_core_rt_tasks.h",
+    ]
+    .map(|n| read_input(&options.include.join(n)))
+    .into_iter()
+    .collect::<io::Result<Vec<_>>>()?;
     let cc = command(Command::new(&options.cc).arg("--version"))?;
     let identities: Vec<_> = objects.iter().map(|o| o.identity).collect();
     let link_key = key(

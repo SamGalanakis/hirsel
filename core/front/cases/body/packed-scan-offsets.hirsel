@@ -1,0 +1,64 @@
+// MEM-9/12: read the already admitted encoding, retaining source bounds and sums.
+// One three-item cycle contributes Flag(true)=1, Name("abc")=3, Scores(2,3,4)=9.
+// The next cycle has Flag(false)=0, Name=3, Scores=9: total 25 for six items.
+// expect: run scan(0) = 0
+// expect: run scan(1) = 1
+// expect: run scan(2) = 4
+// expect: run scan(3) = 13
+// expect: run scan(6) = 25
+// expect: run fixed(0,2) = 2
+// expect: run fixed(2,2) = 4
+// expect: run fixed(3,2) = fail Bounds
+// expect: run fixed(18446744073709551615,2) = fail Bounds
+// expect: run failure_order(0) = fail Overflow
+// expect: run failure_order(3) = fail Bounds
+@compact(u16) stable type Item = Flag(bool) | Name(Text) | Scores(FixedSpan[u64])
+@compact(u16) stable type Batch { items: IndexedSpan[Item] }
+@compact(u16) stable type Numbers { xs: FixedSpan[u64] }
+fn scan(n: u64) -> u64 {
+    let mut source: List[u64] = list.new()
+    let _ = list.push(mut source, 2)
+    let _ = list.push(mut source, 3)
+    let _ = list.push(mut source, 4)
+    region r {
+        let b = match build_stream_in(r, bytes 256, fn(take w: Writer[Batch, in r]) -> Result[Child[Batch], BuildError] {
+            emit(take w, Batch(items: emit(fn(take xs: Writer[IndexedSpan[Item], in r]) -> Result[Child[IndexedSpan[Item]], BuildError] {
+                for i in 0u64 .. n {
+                    writer.append(mut xs, fn(take item: Writer[Item, in r]) -> Result[Child[Item], BuildError] {
+                        if i % 3 == 0 { emit(take item, Flag(i % 2 == 0)) }
+                        else if i % 3 == 1 { emit(take item, Name("abc")) }
+                        else { emit(take item, Scores(source)) }
+                    })?
+                }
+                writer.close(take xs)
+            })))
+        }) { Ok(b) => b, Error(_) => return 99 }
+        let doc = finish(take b)
+        let mut sum: u64 = 0
+        for item in doc.items {
+            sum += match item {
+                Flag(x) => if x { 1 } else { 0 },
+                Name(t) => string.byte_len(text.as_string(t)),
+                Scores(xs) => xs[0] + xs[1] + xs[2],
+            }
+        }
+        sum
+    }
+}
+fn fixed(i: u64, first: u64) -> u64 {
+    let mut source: List[u64] = list.new()
+    let _ = list.push(mut source, first)
+    let _ = list.push(mut source, 3)
+    let _ = list.push(mut source, 4)
+    region r {
+        let b = match build_stream_in(r, bytes 26, fn(take w: Writer[Numbers, in r]) -> Result[Child[Numbers], BuildError] {
+            emit(take w, Numbers(xs: source))
+        }) { Ok(b) => b, Error(_) => return 99 }
+        let doc = finish(take b)
+        doc.xs[i]
+    }
+}
+fn failure_order(i: u64) -> u64 {
+    let x = fixed(i, 18446744073709551615)
+    x + 3
+}

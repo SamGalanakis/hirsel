@@ -751,9 +751,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         let bytes = if role == Role::FixedSpan {
                             w
                         } else {
-                            self.add(w, w, n)
+                            self.packed_add(w, w, n)
                         };
-                        let first = self.add(at, bytes, n);
+                        let first = self.packed_add(at, bytes, n);
                         self.slot(scalar(Scalar::U64), Some(first), n)
                             .map(|slot| (blob, w, slot))
                     })

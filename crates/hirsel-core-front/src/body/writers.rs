@@ -1897,8 +1897,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let used = self.state_word(state, 8, u64t, n)?;
             let start = self.get_word(AddressBase::Value(frame), 8, u64t, n)?;
             let count = self.get_word(AddressBase::Value(frame), 16, u64t, n)?;
-            let second = self.add(start, w, n);
-            let data = self.add(second, w, n);
+            let second = self.packed_add(start, w, n);
+            let data = self.packed_add(second, w, n);
             let len = self.word_op(BinaryOp::Sub, used, data, n);
             if shape == Shape::Indexed {
                 let k = self.mul(count, w, n);
@@ -1913,12 +1913,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let (body, after) = (self.new_block(&[]), self.new_block(&[]));
                 self.branch(more, body, after, n);
                 self.start(body);
-                let iw = self.mul(i, w, n);
-                let slot = self.add(table, iw, n);
+                let iw = self.packed_mul(i, w, n);
+                let slot = self.packed_add(table, iw, n);
                 let off = self.word_op(BinaryOp::Sub, at, data, n);
                 self.put_w(blob, slot, w, off, n)?;
                 let next = self.skip(blob, at, w, elem, n)?;
-                let i1 = self.add_k(i, 1, n)?;
+                let i1 = self.packed_add_k(i, 1, n)?;
                 self.jump(lp, &[i1, next], n);
                 self.start(after);
             }
@@ -1938,7 +1938,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     fn as_string(&mut self, header: ValueId, n: NodeId) -> Option<ValueId> {
         let (blob, at, w) = self.locator(header, n)?;
         let len = self.word_in(blob, at, w, n)?;
-        let data = self.add(at, w, n);
+        let data = self.packed_add(at, w, n);
         let bytes = self.address(
             AddressBase::Value(blob),
             &[Step::Byte(data)],
@@ -2024,15 +2024,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let u64t = Ty::Scalar(Scalar::U64);
         let elem = self.bare(elem);
         let (blob, at, w) = self.locator(header, n)?;
-        let second = self.add(at, w, n);
-        let data = self.add(second, w, n);
+        let second = self.packed_add(at, w, n);
+        let data = self.packed_add(second, w, n);
         let found = if indexed {
             let len = self.word_in(blob, second, w, n)?;
-            let table = self.add(data, len, n);
-            let iw = self.mul(index, w, n);
-            let slot = self.add(table, iw, n);
+            let table = self.packed_add(data, len, n);
+            let iw = self.packed_mul(index, w, n);
+            let slot = self.packed_add(table, iw, n);
             let off = self.word_in(blob, slot, w, n)?;
-            self.add(data, off, n)
+            self.packed_add(data, off, n)
         } else {
             let zero = self.u64k(0, n)?;
             let lp = self.new_block(&[u64t, u64t]);
@@ -2045,7 +2045,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.branch(more, body, after, n);
             self.start(body);
             let next = self.skip(blob, el, w, elem, n)?;
-            let i1 = self.add_k(i, 1, n)?;
+            let i1 = self.packed_add_k(i, 1, n)?;
             self.jump(lp, &[i1, next], n);
             self.start(after);
             el

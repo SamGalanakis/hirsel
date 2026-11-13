@@ -821,7 +821,7 @@ fn stable_placement_llvm() { stable_placement(Backend::Llvm); }
 /// the first line that differs.
 /// The case's run lines (and `// native: run` lines, for what the evaluator does not
 /// run) on a native engine: the returning ones in one program, and each
-/// `fail Bounds` in its own, which must stop with exit 101 and `Bounds` on stderr.
+/// failure in its own, which must stop with exit 101 and that cause on stderr.
 fn run_lines_native(backend: Backend, case: &str) {
     let mut main = String::from("pub fn main() -> Result[(), Exit] {\n");
     let runs = case.lines().filter_map(|l| {
@@ -831,7 +831,7 @@ fn run_lines_native(backend: Backend, case: &str) {
         let (call, want) = line.split_once(" = ").expect("a run line");
         // A finalizer trace is the evaluator's to observe; natively the value is checked.
         let want = want.split_once(" trace ").map_or(want, |(v, _)| v);
-        if want == "fail Bounds" {
+        if let Some(cause) = want.strip_prefix("fail ") {
             let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
             let dir = tempfile::tempdir().unwrap();
             let source = format!("{case}\npub fn main() -> Result[(), Exit] {{ let _ = {call}; Ok(()) }}\n");
@@ -842,7 +842,7 @@ fn run_lines_native(backend: Backend, case: &str) {
             let built = product.build(&entry, &native_options(backend, dir.path())).unwrap();
             let output = Command::new(&built.executable).output().unwrap();
             assert_eq!(output.status.code(), Some(101), "{call}: {output:?}");
-            assert!(output.stderr.starts_with(b"Bounds"), "{call}: {output:?}");
+            assert!(output.stderr.starts_with(cause.as_bytes()), "{call}: {output:?}");
             continue;
         }
         main += &format!("  if {call} != {want} {{ return Error(Exit(status: {})) }}\n", i + 1);
@@ -1169,3 +1169,13 @@ fn packed_writer_reservation_cranelift() { packed_writer_reservation(Backend::Cr
 #[test]
 #[ignore = "explicit native integration target"]
 fn packed_writer_reservation_llvm() { packed_writer_reservation(Backend::Llvm); }
+
+fn packed_scan_offsets(backend: Backend) {
+    run_lines_native(backend, include_str!("../../../core/front/cases/body/packed-scan-offsets.hirsel"));
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn packed_scan_offsets_cranelift() { packed_scan_offsets(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn packed_scan_offsets_llvm() { packed_scan_offsets(Backend::Llvm); }

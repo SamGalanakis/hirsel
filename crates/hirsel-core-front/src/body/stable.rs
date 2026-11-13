@@ -63,23 +63,6 @@ impl Cx<'_, '_, '_> {
     ) -> AddressId {
         self.address(AddressBase::Value(base), &[Step::Byte(offset)], ty, n)
     }
-    fn offset_sum(&mut self, left: ValueId, right: ValueId, n: NodeId) -> Option<ValueId> {
-        if !self.live() {
-            return None;
-        }
-        let result = self.value(Ty::Scalar(Scalar::U64));
-        self.inst(
-            Inst::Binary {
-                result,
-                op: BinaryOp::Add,
-                left,
-                right,
-                fail: None,
-            },
-            n,
-        );
-        Some(result)
-    }
     /// W is a property of our blob, so selecting its load width needs no validation.
     pub(super) fn packed_count(
         &mut self,
@@ -206,7 +189,7 @@ impl Cx<'_, '_, '_> {
                             None
                         };
                         self.inst(Inst::SetCase { address: to, case }, n);
-                        let mut off = self.add_k(at, 8, n)?;
+                        let mut off = self.packed_add_k(at, 8, n)?;
                         for (i, field) in
                             self.compact_fields(ty, Some(case))?.into_iter().enumerate()
                         {
@@ -222,7 +205,7 @@ impl Cx<'_, '_, '_> {
                             );
                             self.decode_plain(blob, off, w, field, dest, n)?;
                             let size = self.packed_plain_size(field)?;
-                            off = self.add_k(off, size, n)?;
+                            off = self.packed_add_k(off, size, n)?;
                         }
                         self.jump(done, &[], n);
                         if let Some(next) = next {
@@ -256,8 +239,8 @@ impl Cx<'_, '_, '_> {
                         n,
                     );
                     self.decode_plain(blob, off, w, elem, dest, n)?;
-                    let next = self.add_k(index, 1, n)?;
-                    let after = self.add(off, stride, n);
+                    let next = self.packed_add_k(index, 1, n)?;
+                    let after = self.packed_add(off, stride, n);
                     self.jump(head, &[next, after], n);
                     self.start(done);
                     return Some(());
@@ -330,33 +313,13 @@ impl Cx<'_, '_, '_> {
             self.start(load);
         }
         let stride = self.konst(Ty::Scalar(Scalar::U64), stride, n)?;
-        let offset = self.mul(index, stride, n);
+        let offset = self.packed_mul(index, stride, n);
         let mut header_bytes = w;
         if header_words == 2 {
-            header_bytes = self.offset_sum(w, w, n)?;
+            header_bytes = self.packed_add(w, w, n);
         }
-        let data = self.value(Ty::Scalar(Scalar::U64));
-        self.inst(
-            Inst::Binary {
-                result: data,
-                op: BinaryOp::Add,
-                left: at,
-                right: header_bytes,
-                fail: None,
-            },
-            n,
-        );
-        let from = self.value(Ty::Scalar(Scalar::U64));
-        self.inst(
-            Inst::Binary {
-                result: from,
-                op: BinaryOp::Add,
-                left: data,
-                right: offset,
-                fail: None,
-            },
-            n,
-        );
+        let data = self.packed_add(at, header_bytes, n);
+        let from = self.packed_add(data, offset, n);
         let place = self.place_ty(elem, n)?;
         let to = self.new_slot(place, n);
         self.decode_plain(blob, from, w, elem, to, n)?;

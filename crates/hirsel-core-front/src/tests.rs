@@ -2884,3 +2884,9 @@ fn packed_writer_reservation_boundaries() {
     let failures = run_case(&root().join("cases/body/packed-writer-reservation.hirsel"));
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+#[test]
+fn packed_scan_offsets_preserve_source_failures() {
+    let failures = run_case(&root().join("cases/body/packed-scan-offsets.hirsel"));
+    assert!(failures.is_empty(), "{failures:#?}");
+}

@@ -151,6 +151,36 @@ impl Cx<'_, '_, '_> {
         );
         result
     }
+    // Construction admits the whole encoding before publishing a locator. For
+    // offsets inside that encoding, its count/stride/header bounds already prove
+    // these operations fit. Keep source arithmetic on the checked helpers above.
+    pub(super) fn packed_add(&mut self, left: ValueId, right: ValueId, n: NodeId) -> ValueId {
+        self.list_arith(
+            hirsel_core_ir::ArithOp::Add,
+            hirsel_core_ir::ArithMode::Wrapping,
+            left,
+            right,
+            n,
+        )
+        .0
+    }
+    pub(super) fn packed_mul(&mut self, left: ValueId, right: ValueId, n: NodeId) -> ValueId {
+        self.list_arith(
+            hirsel_core_ir::ArithOp::Mul,
+            hirsel_core_ir::ArithMode::Wrapping,
+            left,
+            right,
+            n,
+        )
+        .0
+    }
+    pub(super) fn packed_add_k(&mut self, left: ValueId, k: u64, n: NodeId) -> Option<ValueId> {
+        if k == 0 {
+            return Some(left);
+        }
+        let k = self.konst(Ty::Scalar(Scalar::U64), k, n)?;
+        Some(self.packed_add(left, k, n))
+    }
     /// The `W`-width word at `blob + at`, widened.
     pub(super) fn word_in(
         &mut self,
@@ -203,7 +233,7 @@ impl Cx<'_, '_, '_> {
     ) -> Option<ValueId> {
         let ty = self.bare(ty);
         match self.t.kind(ty).clone() {
-            TyKind::Scalar(s) => return self.add_k(at, s.size(), n),
+            TyKind::Scalar(s) => return self.packed_add_k(at, s.size(), n),
             TyKind::Unit => return Some(at),
             _ => {}
         }
@@ -211,43 +241,43 @@ impl Cx<'_, '_, '_> {
             return match role {
                 Role::Text => {
                     let count = self.word_in(blob, at, w, n)?;
-                    let body = self.add(at, w, n);
-                    Some(self.add(body, count, n))
+                    let body = self.packed_add(at, w, n);
+                    Some(self.packed_add(body, count, n))
                 }
                 Role::FixedSpan => {
                     let count = self.word_in(blob, at, w, n)?;
                     let stride = self.packed_plain_size(args[0])?;
                     let stride = self.konst(Ty::Scalar(Scalar::U64), stride, n)?;
-                    let bytes = self.mul(count, stride, n);
-                    let body = self.add(at, w, n);
-                    Some(self.add(body, bytes, n))
+                    let bytes = self.packed_mul(count, stride, n);
+                    let body = self.packed_add(at, w, n);
+                    Some(self.packed_add(body, bytes, n))
                 }
                 Role::SeqSpan | Role::IndexedSpan => {
-                    let len_at = self.add(at, w, n);
+                    let len_at = self.packed_add(at, w, n);
                     let len = self.word_in(blob, len_at, w, n)?;
-                    let body = self.add(len_at, w, n);
-                    let mut end = self.add(body, len, n);
+                    let body = self.packed_add(len_at, w, n);
+                    let mut end = self.packed_add(body, len, n);
                     if role == Role::IndexedSpan {
                         let count = self.word_in(blob, at, w, n)?;
-                        let table = self.mul(count, w, n);
-                        end = self.add(end, table, n);
+                        let table = self.packed_mul(count, w, n);
+                        end = self.packed_add(end, table, n);
                     }
                     Some(end)
                 }
-                Role::Link => Some(self.add(at, w, n)),
+                Role::Link => Some(self.packed_add(at, w, n)),
                 _ => None,
             };
         }
         if let Some(size) = self.packed_plain_size(ty) {
-            return self.add_k(at, size, n);
+            return self.packed_add_k(at, size, n);
         }
         if let Some(cases) = self.variant_cases(ty) {
             if self.link_option(ty).is_some() {
-                return Some(self.add(at, w, n));
+                return Some(self.packed_add(at, w, n));
             }
             let tag_s = Self::tag_scalar(cases);
             let tag = self.tag_at(blob, at, tag_s, n);
-            let start = self.add_k(at, tag_s.size(), n)?;
+            let start = self.packed_add_k(at, tag_s.size(), n)?;
             let done = self.new_block(&[Ty::Scalar(Scalar::U64)]);
             for c in 0..cases as u32 {
                 // The last case is reached by elimination.
@@ -324,7 +354,7 @@ impl Cx<'_, '_, '_> {
         let mut off = at;
         if case.is_some() {
             let cases = self.variant_cases(ty)?;
-            off = self.add_k(off, Self::tag_scalar(cases).size(), n)?;
+            off = self.packed_add_k(off, Self::tag_scalar(cases).size(), n)?;
         }
         for &f in &fields[..field as usize] {
             off = self.skip(blob, off, w, f, n)?;

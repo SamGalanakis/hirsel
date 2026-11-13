@@ -150,6 +150,17 @@ fn lower_range_edges() -> bool {
     s == "@az[`az{É"
 }
 
+// The edge rows of upper_range_edges and lower_range_edges four times over (44 bytes), so
+// each neighbour of a-z and A-Z falls in several lanes of a 16-byte vector and in the tail.
+// expect: run case_edges_across_vectors() = true
+fn case_edges_across_vectors() -> bool {
+    let mut up = result.unwrap(string.repeat("`az{@AZ[é", 4))
+    result.unwrap(string.make_ascii_upper(mut up))
+    let mut low = result.unwrap(string.repeat("@AZ[`az{É", 4))
+    result.unwrap(string.make_ascii_lower(mut low))
+    same(up, result.unwrap(string.repeat("`AZ{@AZ[é", 4))) && same(low, result.unwrap(string.repeat("@az[`az{É", 4)))
+}
+
 // expect: run repeat_three() = true
 fn repeat_three() -> bool {
     let r = result.unwrap(string.repeat("aé", 3))

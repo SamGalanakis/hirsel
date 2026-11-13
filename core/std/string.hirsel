@@ -106,9 +106,12 @@ pub fn make_ascii_upper(mut s: String) -> Result[(), Capacity] {
     }
     for i in 0 .. list.len(b) {
         let x = b[i]
-        // One comparison: below b'a' wraps past 25.
-        if int.wrapping_sub(x, b'a') < 26 {
-            b[i] = x - 32
+        // One comparison: below b'a' wraps past 25. Every byte is stored, changed or not, so
+        // the loop has no branch and LLVM vectorizes it.
+        b[i] = if int.wrapping_sub(x, b'a') < 26 {
+            int.wrapping_sub(x, 32)
+        } else {
+            x
         }
     }
     match string.from_utf8(take b) {
@@ -137,9 +140,12 @@ pub fn make_ascii_lower(mut s: String) -> Result[(), Capacity] {
     }
     for i in 0 .. list.len(b) {
         let x = b[i]
-        // One comparison: below b'A' wraps past 25.
-        if int.wrapping_sub(x, b'A') < 26 {
-            b[i] = x + 32
+        // One comparison: below b'A' wraps past 25. Every byte is stored, changed or not, so
+        // the loop has no branch and LLVM vectorizes it.
+        b[i] = if int.wrapping_sub(x, b'A') < 26 {
+            int.wrapping_add(x, 32)
+        } else {
+            x
         }
     }
     match string.from_utf8(take b) {

@@ -39,7 +39,7 @@ fn startup_refusals(backend: Backend) {
     let mut options = native_options(backend, dir.path());
     let entry = DefPath::from_full("app@1/main/main").unwrap();
     let source = r#"pub fn main(files: Dir, output: Stdout) -> Result[(), Exit] waits {
-        let f = result.unwrap(host.open(files, "effect", OpenMode.CreateNew));
+        let f = result.unwrap(host.open(files, "effect", CreateNew));
         result.unwrap(host.close(take f));
         result.unwrap(stdout.write(output, "entered\n"));
         Ok(())
@@ -136,11 +136,11 @@ fn startup_refusals(backend: Backend) {
 }
 #[test]
 #[ignore = "explicit native integration target"]
-fn startup_refusals_cranelift() {
+fn prog3_startup_refusals_cranelift() {
     startup_refusals(Backend::Cranelift);
 }
 #[test]
 #[ignore = "explicit native integration target"]
-fn startup_refusals_llvm() {
+fn prog3_startup_refusals_llvm() {
     startup_refusals(Backend::Llvm);
 }

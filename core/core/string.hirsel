@@ -21,8 +21,9 @@ pub fn from_utf8(take b: Bytes) -> Result[String, Bytes] {
                 while i + 16 <= n && (list.word_le(b, i) | list.word_le(b, i + 8)) & 0x8080808080808080 == 0 {
                     i += 16
                 }
-                // The block that stopped the loop (or the short tail) goes one byte at a time.
-                if i < n && b[i] < 0x80 {
+                // The block that stopped the loop, or the tail under 16 bytes: its ASCII bytes in
+                // one tight loop (at most 15 before the stop), not one per outer step.
+                while i < n && b[i] < 0x80 {
                     i += 1
                 }
             } else {

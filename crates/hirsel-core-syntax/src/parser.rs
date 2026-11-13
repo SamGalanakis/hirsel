@@ -5,6 +5,9 @@ type Nodes = smallvec::SmallVec<[NodeId; 24]>;
 use smallvec::smallvec;
 type Parsed<T> = Result<T, ()>;
 
+/// Maximum simultaneously active recursive parser productions, not a language limit.
+pub const PARSER_NESTING_LIMIT: usize = 128;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ParseMode {
     Source,
@@ -14,7 +17,28 @@ pub enum ParseMode {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ResourceRefusal {
     SourceTooLarge,
-    ParserStack { at: Span },
+    ParserStack { at: Span, limit: usize },
+}
+impl ResourceRefusal {
+    /// File-relative byte site of the compiler's resource exhaustion.
+    pub fn site(&self) -> Span {
+        match self {
+            Self::SourceTooLarge => Span::default(),
+            Self::ParserStack { at, .. } => *at,
+        }
+    }
+}
+impl std::fmt::Display for ResourceRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SourceTooLarge => f.write_str("source exceeds the u32-indexed byte capacity"),
+            Self::ParserStack { at, limit } => write!(
+                f,
+                "parser nesting limit of {limit} active productions reached at bytes {}..{}",
+                at.start, at.end
+            ),
+        }
+    }
 }
 #[derive(Clone, Debug)]
 pub struct ParseOutput {
@@ -291,9 +315,10 @@ impl Parser<'_> {
     fn nested<T>(&mut self, f: impl FnOnce(&mut Self) -> Parsed<T>) -> Parsed<T> {
         // A finite compiler stack allocation, not a language nesting limit. The incomplete
         // result is separate from refusals and callers must not publish it as parsed source.
-        if self.depth >= 384 {
+        if self.depth >= PARSER_NESTING_LIMIT {
             self.resource = Some(ResourceRefusal::ParserStack {
                 at: self.token(0).span,
+                limit: PARSER_NESTING_LIMIT,
             });
             return Err(());
         }
@@ -587,7 +612,7 @@ impl Parser<'_> {
         }
         let s = self.pos;
         self.expect(sym::LPAREN)?;
-        let ps = self.list(sym::RPAREN, |p| p.parameter(top, true))?;
+        let ps = self.list(sym::RPAREN, |p| p.parameter(top))?;
         c.push(self.node(s, NodeKind::Parameters, None, &ps));
         if self.eat(sym::ARROW) {
             let st = self.pos - 1;
@@ -612,17 +637,20 @@ impl Parser<'_> {
         }
         Ok(c)
     }
-    fn parameter(&mut self, named: bool, sized: bool) -> Parsed<NodeId> {
+    fn parameter(&mut self, named: bool) -> Parsed<NodeId> {
         let s = self.pos;
         let k = if self.eat(sym::TAKE) {
             NodeKind::TakeParameter
         } else if self.eat(sym::MUT) {
             NodeKind::MutParameter
-        } else if sized && self.eat(sym::BYTES) {
+        } else if self.eat(sym::BYTES) {
             NodeKind::BytesParameter
         } else {
             NodeKind::Parameter
         };
+        if matches!(self.word(0), sym::TAKE | sym::MUT | sym::BYTES) {
+            return self.fail("LANG-5", "a parameter has at most one mode");
+        }
         let n = if named || (self.token(0).kind == TokenKind::Ident && self.word(1) == sym::COLON) {
             let n = self.name()?;
             self.expect(sym::COLON)?;
@@ -638,6 +666,12 @@ impl Parser<'_> {
     }
     fn ty_inner(&mut self) -> Parsed<NodeId> {
         let s = self.pos;
+        if matches!(self.word(0), sym::TAKE | sym::MUT | sym::BYTES) {
+            return self.fail(
+                "LANG-5",
+                "a parameter has at most one mode; a type has none",
+            );
+        }
         let mut n = if self.at(sym::FN)
             || self.at(sym::SCOPED)
             || (self.at(sym::OWN) && matches!(self.word(1), sym::FN | sym::LBRACKET))
@@ -848,6 +882,9 @@ impl Parser<'_> {
                         {
                             token = Some(p.bump());
                             p.expect(sym::COLON)?;
+                            if p.at(sym::BYTES) {
+                                return p.fail("LANG-5", "a bytes argument has no label");
+                            }
                             NodeKind::LabelledArgument
                         } else if p.eat(sym::BYTES) {
                             NodeKind::BytesArgument
@@ -939,6 +976,9 @@ impl Parser<'_> {
         self.compound_primary()
     }
     fn compound_primary(&mut self) -> Parsed<NodeId> {
+        self.nested(|p| p.compound_primary_inner())
+    }
+    fn compound_primary_inner(&mut self) -> Parsed<NodeId> {
         let s = self.pos;
         if PREFIX.contains(&self.word(0)) {
             let op = self.bump();

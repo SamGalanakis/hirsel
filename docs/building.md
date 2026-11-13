@@ -489,6 +489,33 @@ artifact with the pinned qemu and a glibc for AArch64 (the cross sysroot here):
   --hirsel-run /absolute/path/run.json
 ```
 
+### Core parser nesting
+
+`hirsel_core_syntax::PARSER_NESTING_LIMIT` is **128 simultaneously active recursive
+productions**. It is an implementation resource ceiling, not a restriction on Hirsel
+programs. Exhaustion returns `ResourceRefusal::ParserStack` with that limit and the
+file-relative byte span of the token where the next production would start. The CLI
+and driver report an incomplete compiler outcome, never a source-language refusal or
+a successful parse. The formatter does not print an incomplete tree.
+
+One shared guard runs before recursive expressions, compound expressions, types,
+patterns and blocks. Compound expressions include labels and `else if`; type recursion
+includes generic arguments and callable parameter/result types. Several guarded
+productions may be active for one pair of source delimiters. Attributes, qualified
+paths, lists of declarations/parameters and postfix chains use loops; they have no
+recursive nesting charge. The limit applies to mixed constructs through one counter.
+
+On x86-64 with Rust 1.99, stack-address probes across those paths measured at most
+9,120 bytes between guarded entries in an unoptimized build, 1,488 in the checked
+build and 1,977 in release. The unoptimized main-thread and default Rust-worker
+measurements agree. A conservative allowance of 12 KiB per entry gives 1.5 MiB at
+128 entries, leaving 512 KiB for caller and leaf frames on the smallest supported
+stack, a 2 MiB default Rust worker (also used by unit tests). The measured Linux main
+thread has an 8 MiB stack; compiler workers below use 128 MiB. No stack size is enlarged
+to accommodate parsing. The boundary and 100,000-depth cases cover each recursive
+path, and long iterative paths remain accepted. Recheck the stack allowance when
+changing parser frames, compiler profiles or supported platforms.
+
 ### Compiler worker limits
 
 Set `HIRSEL_JOBS=1` when running several CLI invocations on a shared host. This

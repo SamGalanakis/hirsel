@@ -445,7 +445,7 @@ impl Driver {
             );
             syntax_diagnostics.extend(output.diagnostics.into_iter().map(|d| (path, d)));
             if let Some(r) = output.resource_refusal {
-                syntax_incomplete.push((path, format!("parser resource refusal: {r:?}")));
+                syntax_incomplete.push((path, r.site(), format!("parser resource refusal: {r}")));
             }
             modules.push((path, output.syntax));
         }
@@ -497,12 +497,12 @@ impl Driver {
                 .diagnostics
                 .push(Refusal::syntax(index.module(path).unwrap(), &d));
         }
-        for (path, message) in syntax_incomplete {
+        for (path, span, message) in syntax_incomplete {
             result.incomplete.push(Incomplete {
                 primary: Site {
                     module: index.module(path).unwrap(),
                     item: u32::MAX,
-                    span: Default::default(),
+                    span,
                 },
                 message,
             });

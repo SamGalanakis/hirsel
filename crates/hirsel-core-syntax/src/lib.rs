@@ -11,7 +11,9 @@ mod token;
 pub use format::format;
 pub use lexer::{LexOutput, lex};
 pub use literals::{byte_value, character_value};
-pub use parser::{ParseMode, ParseOutput, ResourceRefusal, parse, parse_bytes};
+pub use parser::{
+    PARSER_NESTING_LIMIT, ParseMode, ParseOutput, ResourceRefusal, parse, parse_bytes,
+};
 use std::ops::Range;
 pub use symbols::{Symbol, Symbols, keyword_symbol, sym};
 pub use token::*;

@@ -1023,3 +1023,29 @@ fn a_qualified_constant_keeps_its_field_suffix_and_a_function_does_not() {
                 && r.result == LookupResult::Missing)
     );
 }
+
+#[test]
+fn callable_bytes_parameters_and_arguments_resolve() {
+    let (i, f) = fixture(&[(
+        "m",
+        "fn f(g: fn(bytes n: u64) -> u64) -> u64 { let h = fn(bytes n: u64) -> u64 { n }; h(bytes g(bytes 1)) }",
+    )]);
+    let r = run(&i, &f, 0, 0);
+    assert!(r.diagnostics.is_empty(), "{:?}", r.diagnostics);
+    let item = f[0].1.item(0);
+    let use_n = r
+        .names
+        .iter()
+        .find(|n| {
+            item.tree
+                .node(n.node)
+                .token
+                .is_some_and(|t| item.symbol(t) == sym(&i, "n"))
+        })
+        .unwrap();
+    let Target::Binder(id) = use_n.target else {
+        panic!("{use_n:?}")
+    };
+    assert_eq!(r.binders[id as usize].kind, BinderKind::Parameter);
+    assert_eq!(r.binders[id as usize].name, sym(&i, "n"));
+}

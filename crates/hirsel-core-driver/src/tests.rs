@@ -1392,3 +1392,38 @@ fn copied_indexed_image_reads_its_live_store() {
             .unwrap()
     );
 }
+
+#[test]
+fn parser_nesting_exhaustion_keeps_its_file_site_and_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let limit = hirsel_core_syntax::PARSER_NESTING_LIMIT;
+    let source = format!(
+        "// header\ntype T = {}u64{}",
+        "List[".repeat(limit),
+        "]".repeat(limit)
+    );
+    let at = source.find("u64").unwrap() as u32;
+    let product = Driver::default()
+        .check(request(&source, dir.path()), &mut Meter::new(false))
+        .unwrap();
+    assert!(!product.accepted());
+    assert!(product.diagnostics.is_empty());
+    let resource = product
+        .incomplete
+        .iter()
+        .find(|r| r.message.starts_with("parser resource refusal:"))
+        .unwrap();
+    assert_eq!(resource.primary.item, u32::MAX);
+    assert_eq!(
+        resource.primary.span,
+        hirsel_core_syntax::Span {
+            start: at,
+            end: at + 3
+        }
+    );
+    assert!(
+        resource
+            .message
+            .contains(&format!("nesting limit of {limit}"))
+    );
+}

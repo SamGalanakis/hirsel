@@ -499,3 +499,238 @@ fn positional_arguments_are_direct_expression_rows() {
         ]
     );
 }
+
+#[test]
+fn callable_parameter_modes_and_refused_mode_positions() {
+    for (mark, kind) in [
+        ("", NodeKind::Parameter),
+        ("mut ", NodeKind::MutParameter),
+        ("take ", NodeKind::TakeParameter),
+        ("bytes ", NodeKind::BytesParameter),
+    ] {
+        for name in ["", "n: "] {
+            for prefix in ["", "scoped ", "own "] {
+                let text = format!("fn f(g: {prefix}fn({mark}{name}u64) -> u64) {{}}");
+                let f = good(&text);
+                let parameters = f.tree.nodes.iter().filter(|n| n.kind == kind).count();
+                assert_eq!(parameters, if mark.is_empty() { 2 } else { 1 }, "{text}");
+                let canonical = formatted(&text, ParseMode::Source);
+                assert!(
+                    canonical.contains(&format!("{mark}{name}u64")),
+                    "{canonical}"
+                );
+            }
+            let text = format!("fn f() {{ let g = fn({mark}{name}u64) -> u64 {{ 1 }}; }}");
+            good(&text);
+            formatted(&text, ParseMode::Source);
+        }
+    }
+    for first in ["mut", "take", "bytes"] {
+        for second in ["mut", "take", "bytes"] {
+            for text in [
+                format!("fn f(g: fn({first} {second} u64)) {{}}"),
+                format!("fn f({first} {second} n: u64) {{}}"),
+                format!("fn f() {{ let g = fn({first} {second} n: u64) {{}}; }}"),
+            ] {
+                let p = parse(&text, ParseMode::Source);
+                assert_eq!(
+                    p.diagnostics.first().map(|d| d.rule.as_str()),
+                    Some("LANG-5"),
+                    "{text}: {:?}",
+                    p.diagnostics
+                );
+            }
+        }
+        let text = format!("fn f(g: fn() -> {first} u64) {{}}");
+        let p = parse(&text, ParseMode::Source);
+        assert_eq!(
+            p.diagnostics.first().map(|d| d.rule.as_str()),
+            Some("LANG-5"),
+            "{text}: {:?}",
+            p.diagnostics
+        );
+    }
+    let p = parse(
+        "fn f(g: fn(bytes u64) -> u64) { g(n: bytes 1) }",
+        ParseMode::Source,
+    );
+    assert_eq!(
+        p.diagnostics.first().map(|d| d.rule.as_str()),
+        Some("LANG-5"),
+        "{:?}",
+        p.diagnostics
+    );
+}
+
+struct NestingCase {
+    name: &'static str,
+    context: (&'static str, &'static str),
+    syntax: (&'static str, &'static str, &'static str),
+    depth: (usize, usize),
+}
+impl NestingCase {
+    fn source(&self, layers: usize) -> String {
+        format!(
+            "{}{}{}{}{}",
+            self.context.0,
+            self.syntax.0.repeat(layers),
+            self.syntax.1,
+            self.syntax.2.repeat(layers),
+            self.context.1
+        )
+    }
+}
+fn nesting_cases() -> impl Iterator<Item = NestingCase> {
+    let e = ("fn f() { ", " }");
+    let t = ("type T = ", "");
+    let p = ("fn f() { let ", " = 1; }");
+    [
+        ("group expression", e, ("(", "1", ")"), (2, 2)),
+        ("tuple expression", e, ("(1, ", "1", ")"), (2, 2)),
+        ("array expression", e, ("[", "1", "]"), (2, 2)),
+        ("unary expression", e, ("!", "true", ""), (2, 2)),
+        ("binary right operand", e, ("1 + (", "1", ")"), (2, 3)),
+        ("call argument", e, ("g(", "1", ")"), (2, 1)),
+        (
+            "labelled constructor argument",
+            e,
+            ("Node(child: ", "1", ")"),
+            (2, 1),
+        ),
+        ("index expression", e, ("g[", "1", "]"), (2, 1)),
+        ("block", e, ("{", "1", "}"), (2, 3)),
+        ("closure body", e, ("fn() {", "1", "}"), (2, 3)),
+        (
+            "scoped closure body",
+            e,
+            ("scoped fn() {", "1", "}"),
+            (2, 3),
+        ),
+        ("if body", e, ("if true {", "1", "}"), (2, 3)),
+        ("else if", e, ("if true {} else ", "{}", ""), (3, 1)),
+        ("match arm", e, ("match 1 { _ => ", "1", "}"), (2, 2)),
+        ("loop", e, ("loop {", "1", "}"), (2, 3)),
+        ("while", e, ("while true {", "1", "}"), (2, 3)),
+        ("for", e, ("for x in 0 {", "1", "}"), (2, 3)),
+        ("region", e, ("region r {", "1", "}"), (2, 3)),
+        ("bound", e, ("bound bytes 1 {", "1", "}"), (2, 3)),
+        ("labelled loop", e, ("'a: loop {", "1", "}"), (2, 4)),
+        ("return operand", e, ("return ", "1", ""), (2, 2)),
+        ("group type", t, ("(", "u64", ")"), (1, 1)),
+        ("tuple type", t, ("(u64, ", "u64", ")"), (1, 1)),
+        ("generic type argument", t, ("List[", "u64", "]"), (1, 1)),
+        ("callable parameter type", t, ("fn(", "u64", ")"), (1, 1)),
+        (
+            "own callable parameter type",
+            t,
+            ("own[send] fn(", "u64", ")"),
+            (1, 1),
+        ),
+        ("callable result type", t, ("fn() -> ", "u64", ""), (1, 1)),
+        ("tuple pattern", p, ("(", "x", ")"), (2, 1)),
+        ("constructor pattern", p, ("Some(", "x", ")"), (2, 1)),
+        (
+            "labelled constructor pattern",
+            p,
+            ("Node(child: ", "x", ")"),
+            (2, 1),
+        ),
+        ("range pattern", p, ("1..=", "x", ""), (2, 1)),
+    ]
+    .into_iter()
+    .map(|(name, context, syntax, depth)| NestingCase {
+        name,
+        context,
+        syntax,
+        depth,
+    })
+}
+
+#[test]
+fn recursive_productions_obey_one_nesting_budget() {
+    for case in nesting_cases() {
+        let last_complete = (PARSER_NESTING_LIMIT - case.depth.0) / case.depth.1;
+        for layers in [last_complete, last_complete + 1, 100_000] {
+            let text = case.source(layers);
+            let p = parse(&text, ParseMode::Source);
+            assert!(
+                p.diagnostics.is_empty(),
+                "{} at {layers}: {:?}",
+                case.name,
+                p.diagnostics
+            );
+            assert_eq!(p.syntax.text(), text);
+            if layers == last_complete {
+                assert_eq!(p.resource_refusal, None, "{} at {layers}", case.name);
+            } else {
+                assert!(
+                    matches!(p.resource_refusal,
+                    Some(ResourceRefusal::ParserStack { limit: PARSER_NESTING_LIMIT, at }) if at.start < at.end && at.end as usize <= text.len()),
+                    "{} at {layers}: {:?}",
+                    case.name,
+                    p.resource_refusal
+                );
+                assert!(format(&p).is_none());
+            }
+        }
+    }
+}
+
+#[test]
+fn nesting_budget_has_an_exact_boundary_and_a_located_tool_message() {
+    let text = format!(
+        "// header\ntype T = {}u64{}",
+        "List[".repeat(PARSER_NESTING_LIMIT - 1),
+        "]".repeat(PARSER_NESTING_LIMIT - 1)
+    );
+    let p = parse(&text, ParseMode::Source);
+    assert!(p.diagnostics.is_empty());
+    assert_eq!(p.resource_refusal, None);
+    let text = format!(
+        "// header\ntype T = {}u64{}",
+        "List[".repeat(PARSER_NESTING_LIMIT),
+        "]".repeat(PARSER_NESTING_LIMIT)
+    );
+    let p = parse(&text, ParseMode::Source);
+    assert!(p.diagnostics.is_empty());
+    let at = text.find("u64").unwrap() as u32;
+    let resource = p.resource_refusal.unwrap();
+    assert_eq!(
+        resource.site(),
+        Span {
+            start: at,
+            end: at + 3
+        }
+    );
+    assert_eq!(
+        resource.to_string(),
+        format!(
+            "parser nesting limit of {PARSER_NESTING_LIMIT} active productions reached at bytes {at}..{}",
+            at + 3
+        )
+    );
+}
+
+#[test]
+fn iterative_attributes_paths_and_postfixes_do_not_spend_nesting_budget() {
+    for text in [
+        format!("{}type T {{}}", "@test ".repeat(100_000)),
+        format!("@twin({}T) type T {{}}", "m.".repeat(100_000)),
+        format!("fn f() {{ x{} }}", ".field".repeat(100_000)),
+        format!("fn f() {{ x{} }}", "()".repeat(100_000)),
+    ] {
+        let p = parse(&text, ParseMode::Source);
+        assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+        assert_eq!(p.resource_refusal, None);
+        assert_eq!(p.syntax.text(), text);
+    }
+    let text = format!(
+        "@twin({}T{}) type T {{}}",
+        "(".repeat(100_000),
+        ")".repeat(100_000)
+    );
+    let p = parse(&text, ParseMode::Source);
+    assert!(p.diagnostics.iter().any(|d| d.rule == "LANG-5"));
+    assert_eq!(p.resource_refusal, None);
+    assert_eq!(p.syntax.text(), text);
+}

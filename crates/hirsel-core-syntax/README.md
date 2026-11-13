@@ -15,6 +15,14 @@ reconstructs the original bytes from token spans and source gaps, including inva
 A compiler `ResourceRefusal` is separate from language diagnostics; incomplete syntax
 must not be published as a successful parse.
 
+`PARSER_NESTING_LIMIT` is 128 simultaneously active recursive productions, shared by
+expressions, compound expressions, types, patterns and blocks. It is an implementation
+resource ceiling, not a language limit. `ParserStack { at, limit }` identifies the next
+token and the exhausted budget; its Display message includes both. Generic arguments
+and callable headers recurse through types; attributes, paths and postfix chains are
+iterative. The stack measurements and supported thread stacks are documented under
+[core parser nesting](../../docs/building.md#core-parser-nesting).
+
 The scanner, trivia/literal decoding, recovery, precedence climbing and relative source
 anchors adapt the old front end. Grammar, nodes and token vocabulary belong to the new
 language. Goose, Zig and rustc informed the flat arenas and symbols; the lane's

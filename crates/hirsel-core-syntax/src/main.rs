@@ -21,7 +21,7 @@ fn main() -> Result<ExitCode, Box<dyn std::error::Error>> {
             eprintln!("{path}:{line}: {} {}", d.rule, d.message);
         }
         if let Some(r) = parsed.resource_refusal {
-            eprintln!("{path}: incomplete compiler outcome: {r:?}");
+            eprintln!("{path}: incomplete compiler outcome: {r}");
         }
         return Ok(ExitCode::FAILURE);
     };

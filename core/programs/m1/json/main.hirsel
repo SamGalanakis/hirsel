@@ -1,0 +1,442 @@
+type Json = Null | Bool(bool) | Num(String) | Str(String) | Arr(List[Json]) | Obj(Map[String, Json])
+
+type Cursor {
+    at: u64,
+    nodes: u64
+}
+
+fn syntax() -> m1.support.Error {
+    m1.support.error("Syntax")
+}
+
+fn peek(s: String, p: Cursor) -> u8 {
+    if p.at < string.byte_len(s) {
+        string.as_bytes(s)[p.at]
+    } else {
+        0
+    }
+}
+
+fn whitespace(s: String, mut p: Cursor) {
+    loop {
+        let b = peek(s, p)
+        if b == 32 || b == 9 || b == 10 || b == 13 {
+            p.at += 1
+        } else {
+            break
+        }
+    }
+}
+
+fn expect(s: String, mut p: Cursor, b: u8) -> Result[(), m1.support.Error] {
+    whitespace(s, mut p)
+    if peek(s, p) != b {
+        return Error(syntax())
+    }
+    p.at += 1
+    Ok(())
+}
+
+fn hex(s: String, mut p: Cursor) -> Result[u32, m1.support.Error] {
+    if p.at + 4 > string.byte_len(s) {
+        return Error(syntax())
+    }
+    for b in list.slice(string.as_bytes(s), p.at, p.at + 4) {
+        if !((b >= b'0' && b <= b'9') || (b >= b'a' && b <= b'f') || (b >= b'A' && b <= b'F')) {
+            return Error(syntax())
+        }
+    }
+    let part = string.slice(s, p.at, p.at + 4)
+    let n = match int.parse_uint(part, 16) {
+        Ok(n) => n,
+        Error(_) => return Error(syntax())
+    }
+    p.at += 4
+    Ok(int.narrow(n))
+}
+
+fn quoted(s: String, mut p: Cursor) -> Result[String, m1.support.Error] {
+    expect(s, mut p, b'"')?
+    let mut out = string.new()
+    let mut begin = p.at
+    loop {
+        if p.at >= string.byte_len(s) {
+            return Error(syntax())
+        }
+        let b = peek(s, p)
+        if b == b'"' || b == b'\\' {
+            m1.support.add(mut out, string.slice(s, begin, p.at))?
+            p.at += 1
+            if b == b'"' {
+                return Ok(take out)
+            }
+            let esc = peek(s, p)
+            p.at += 1
+            let c: char = match esc {
+                b'"' => '"',
+                b'\\' => '\\',
+                b'/' => '/',
+                b'b' => '\u{8}',
+                b'f' => '\u{c}',
+                b'n' => '\n',
+                b'r' => '\r',
+                b't' => '\t',
+                b'u' => {
+                    let a = hex(s, mut p)?
+                    let cp = if a >= 0xd800 && a <= 0xdbff {
+                        // Escape continuations are contiguous, with no intervening whitespace.
+                        if peek(s, p) != b'\\' {
+                            return Error(syntax())
+                        }
+                        p.at += 1
+                        if peek(s, p) != b'u' {
+                            return Error(syntax())
+                        }
+                        p.at += 1
+                        let low = hex(s, mut p)?
+                        if low < 0xdc00 || low > 0xdfff {
+                            return Error(syntax())
+                        }
+                        0x10000 + (a - 0xd800) * 1024 + low - 0xdc00
+                    } else {
+                        a
+                    }
+                    match char.from_u32(cp) {
+                        Some(c) => c,
+                        None => return Error(syntax())
+                    }
+                },
+                _ => return Error(syntax()),
+            }
+            m1.support.mem(string.push_char(mut out, c))?
+            begin = p.at
+        } else {
+            if b < 32 {
+                return Error(syntax())
+            }
+            p.at += 1
+        }
+    }
+}
+
+fn digit(b: u8) -> bool {
+    b >= b'0' && b <= b'9'
+}
+
+fn number(s: String, mut p: Cursor) -> Result[String, m1.support.Error] {
+    let begin = p.at
+    if peek(s, p) == b'-' {
+        p.at += 1
+    }
+    let first = peek(s, p)
+    if first == b'0' {
+        p.at += 1
+    } else if first >= b'1' && first <= b'9' {
+        while digit(peek(s, p)) {
+            p.at += 1
+        }
+    } else {
+        return Error(syntax())
+    }
+    if peek(s, p) == b'.' {
+        p.at += 1
+        let start = p.at
+        while digit(peek(s, p)) {
+            p.at += 1
+        }
+        if start == p.at {
+            return Error(syntax())
+        }
+    }
+    if peek(s, p) == b'e' || peek(s, p) == b'E' {
+        p.at += 1
+        if peek(s, p) == b'+' || peek(s, p) == b'-' {
+            p.at += 1
+        }
+        let start = p.at
+        while digit(peek(s, p)) {
+            p.at += 1
+        }
+        if start == p.at {
+            return Error(syntax())
+        }
+    }
+    let lexeme = string.slice(s, begin, p.at)
+    match float.parse64(lexeme) {
+        Ok(_) => {},
+        Error(_) => return Error(m1.support.error("InvalidNumber"))
+    }
+    m1.support.mem(string.from(lexeme))
+}
+
+fn literal(s: String, mut p: Cursor, word: String) -> Result[(), m1.support.Error] {
+    if !string.starts_with(string.slice(s, p.at, string.byte_len(s)), word) {
+        return Error(syntax())
+    }
+    p.at += string.byte_len(word)
+    Ok(())
+}
+
+fn value(s: String, mut p: Cursor, docnum: u64, variant: String) -> Result[Json, m1.support.Error] {
+    whitespace(s, mut p)
+    p.nodes += 1
+    let mut site = m1.support.name("document", docnum, ".node")?
+    m1.support.num(mut site, p.nodes)?
+    m1.support.admission(variant, site, 0)?
+    let b = peek(s, p)
+    if b == b'"' {
+        return Ok(Str(quoted(s, mut p)?))
+    }
+    if b == b'[' {
+        p.at += 1
+        whitespace(s, mut p)
+        let mut xs: List[Json] = list.new()
+        if peek(s, p) != b']' {
+            loop {
+                m1.support.push(mut xs, value(s, mut p, docnum, variant)?)?
+                whitespace(s, mut p)
+                if peek(s, p) != b',' {
+                    break
+                }
+                p.at += 1
+            }
+        }
+        expect(s, mut p, b']')?
+        return Ok(Arr(take xs))
+    }
+    if b == b'{' {
+        p.at += 1
+        whitespace(s, mut p)
+        let mut fields: Map[String, Json] = map.new()
+        if peek(s, p) != b'}' {
+            loop {
+                let key = quoted(s, mut p)?
+                expect(s, mut p, b':')?
+                let v = value(s, mut p, docnum, variant)?
+                m1.support.insert(mut fields, take key, take v)?
+                whitespace(s, mut p)
+                if peek(s, p) != b',' {
+                    break
+                }
+                p.at += 1
+            }
+        }
+        expect(s, mut p, b'}')?
+        return Ok(Obj(take fields))
+    }
+    if b == b'n' {
+        literal(s, mut p, "null")?;
+        return Ok(Null)
+    }
+    if b == b't' {
+        literal(s, mut p, "true")?;
+        return Ok(Bool(true))
+    }
+    if b == b'f' {
+        literal(s, mut p, "false")?;
+        return Ok(Bool(false))
+    }
+    if b == b'-' || digit(b) {
+        return Ok(Num(number(s, mut p)?))
+    }
+    Error(syntax())
+}
+
+fn quote(mut out: String, s: String) -> Result[(), m1.support.Error] {
+    m1.support.add(mut out, "\"")?
+    let mut at: u64 = 0
+    while let Some((c, next)) = string.next_scalar(s, at) {
+        at = next
+        match c {
+            '"' => m1.support.add(mut out, "\\\"")?,
+            '\\' => m1.support.add(mut out, "\\\\")?,
+            '\n' => m1.support.add(mut out, "\\n")?,
+            '\r' => m1.support.add(mut out, "\\r")?,
+            '\t' => m1.support.add(mut out, "\\t")?,
+            '\u{8}' => m1.support.add(mut out, "\\b")?,
+            '\u{c}' => m1.support.add(mut out, "\\f")?,
+            _ => {
+                if char.to_u32(c) < 32 {
+                    m1.support.add(mut out, "\\u")?
+                    m1.support.mem(string.push_uint(mut out, int.widen(char.to_u32(c)), 16, 4, '0'))?
+                } else {
+                    m1.support.mem(string.push_char(mut out, c))?
+                }
+            },
+        }
+    }
+    m1.support.add(mut out, "\"")
+}
+
+fn indent(mut out: String, depth: u64) -> Result[(), m1.support.Error] {
+    let mut i: u64 = 0
+    while i < depth {
+        m1.support.add(mut out, "  ")?;
+        i += 1
+    }
+    Ok(())
+}
+
+fn render(mut out: String, j: Json, depth: u64, pretty: bool) -> Result[(), m1.support.Error] {
+    match j {
+        Null => m1.support.add(mut out, "null"),
+        Bool(b) => m1.support.add(mut out, if b {
+            "true"
+        } else {
+            "false"
+        }),
+        Num(s) => m1.support.add(mut out, s),
+        Str(s) => quote(mut out, s),
+        Arr(xs) => {
+            m1.support.add(mut out, "[")?
+            let mut first = true
+            for x in xs {
+                if !first {
+                    m1.support.add(mut out, ",")?
+                }
+                if pretty {
+                    m1.support.add(mut out, "\n")?;
+                    indent(mut out, depth + 1)?
+                }
+                first = false
+                render(mut out, x, depth + 1, pretty)?
+            }
+            if pretty && !first {
+                m1.support.add(mut out, "\n")?;
+                indent(mut out, depth)?
+            }
+            m1.support.add(mut out, "]")
+        },
+        Obj(fields) => {
+            m1.support.add(mut out, "{")?
+            let mut first = true
+            for (key, v) in fields {
+                if !first {
+                    m1.support.add(mut out, ",")?
+                }
+                if pretty {
+                    m1.support.add(mut out, "\n")?;
+                    indent(mut out, depth + 1)?
+                }
+                first = false
+                quote(mut out, key)?
+                m1.support.add(mut out, if pretty {
+                    ": "
+                } else {
+                    ":"
+                })?
+                render(mut out, v, depth + 1, pretty)?
+            }
+            if pretty && !first {
+                m1.support.add(mut out, "\n")?;
+                indent(mut out, depth)?
+            }
+            m1.support.add(mut out, "}")
+        },
+    }
+}
+
+fn query(j: Json, path: String, at: u64) -> Result[View[Json], m1.support.Error] in j {
+    if at > string.byte_len(path) {
+        return Ok(view j)
+    }
+    let end = match string.find(path, at, "/") {
+        Some(n) => n,
+        None => string.byte_len(path)
+    }
+    let key = string.slice(path, at, end)
+    let next = end + 1
+    match j {
+        Obj(fields) => match map.get(fields, key) {
+            Some(v) => query(v, path, next),
+            None => Error(m1.support.error("MissingPath")),
+        },
+        Arr(xs) => {
+            let index: u64 = match int.parse(key) {
+                Ok(n) => n,
+                Error(_) => return Error(m1.support.error("WrongKind"))
+            }
+            match list.get(xs, index) {
+                Some(v) => query(v, path, next),
+                None => Error(m1.support.error("MissingPath"))
+            }
+        },
+        _ => Error(m1.support.error("WrongKind")),
+    }
+}
+
+fn document(out: Stdout, s: String, path: String, variant: String, n: u64, tx: Sender[String]) -> Result[(u64, u64), m1.support.Error] waits {
+    let owner = m1.support.marker(tx, m1.support.name("document", n, "")?)?
+    let mut p = Cursor(at: 0, nodes: 0)
+    let root = match value(s, mut p, n, variant) {
+        Ok(take j) => j,
+        Error(take e) => {
+            if e.code == 3 {
+                return Error(take e)
+            }
+            let mut label = m1.support.mem(string.from(e.label))?
+            m1.support.add(mut label, "@document")?
+            m1.support.num(mut label, n)?
+            return Error(m1.support.error(take label))
+        },
+    }
+    whitespace(s, mut p)
+    if p.at != string.byte_len(s) {
+        return Error(m1.support.error(m1.support.name("Syntax@document", n, "")?))
+    }
+    let mut pretty = string.new()
+    render(mut pretty, root, 0, true)?
+    let selected = query(root, path, 1)?
+    let mut answer = m1.support.name("query", n, "=")?
+    render(mut answer, selected, 0, false)?
+    m1.support.add(mut answer, "\n")?
+    m1.support.put(out, answer)?
+    if variant == "print" {
+        m1.support.put(out, pretty)?;
+        m1.support.put(out, "\n")?
+    }
+    Ok((string.byte_len(pretty), list.sum_bytes(string.as_bytes(pretty))))
+}
+
+fn documents(out: Stdout, input: String, variant: String, tx: Sender[String], mut count: u64, mut total: u64, mut checksum: u64) -> Result[(), m1.support.Error] waits {
+    let mut at: u64 = 0
+    let path = m1.support.line(input, mut at)
+    while at < string.byte_len(input) {
+        let s = m1.support.line(input, mut at)
+        let (n, sum) = document(out, s, path, variant, count + 1, tx)?
+        count += 1
+        total += n
+        checksum += sum
+    }
+    Ok(())
+}
+
+fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> Result[(), m1.support.Error] waits {
+    let mut count: u64 = 0
+    let mut total: u64 = 0
+    let mut checksum: u64 = 0
+    let outcome = documents(out, input, variant, tx, mut count, mut total, mut checksum)
+    let mut rendered = string.new()
+    m1.support.add(mut rendered, "documents=")?
+    m1.support.num(mut rendered, count)?
+    m1.support.add(mut rendered, " pretty-bytes=")?
+    m1.support.num(mut rendered, total)?
+    m1.support.add(mut rendered, " sum=")?
+    m1.support.num(mut rendered, checksum)?
+    m1.support.add(mut rendered, "\n")?
+    m1.support.put(out, rendered)?
+    outcome
+}
+
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] waits {
+    let input = m1.support.input(d, argv)?
+    let mut at: u64 = 0
+    let mut events: u64 = 2
+    while at < string.byte_len(input) {
+        let _ = m1.support.line(input, mut at);
+        events += 2
+    }
+    let (tx, rx): (Sender[String], Receiver[String]) = m1.support.mem(channel.new(events))?
+    let outcome = run(out, input, m1.support.case_variant(argv), take tx)
+    m1.support.finish(out, take rx, take outcome)
+}

@@ -42,3 +42,7 @@ Instrumentation is separate: String trace items count 24 bytes; a channel charge
 24×event-capacity+64. Each Marker reserves 24+8+32+256=320, plus its release
 string storage; its 256-byte finalizer grant covers one release-line copy.
 These are source derivations, not executed Hirsel results.
+
+## Source length
+
+Physical lines, including comments and blanks: 78 idiomatic, 133 matched; Rust entry + shared program: 72 idiomatic and 109 matched. Shared support is counted separately in the lane report.

@@ -79,7 +79,11 @@ pub fn admission(variant: String, site: String, requested: u64) -> Result[(), Er
         if s == site {
             let mut label = mem(string.from("Capacity@"))?
             add(mut label, site)?
-            return Error(Error(code: 3, label: take label, capacity: Some(Capacity(requested: requested, available: 0))))
+            return Error(Error(code: 3, label: take label, capacity: Some(Capacity(requested: if requested > 18446744073709551608 {
+                18446744073709551615
+            } else {
+                ((requested + 7) / 8) * 8
+            }, available: 0))))
         }
     }
     Ok(())

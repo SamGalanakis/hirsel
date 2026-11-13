@@ -35,12 +35,12 @@ fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> 
             return Error(m1.support.error("Parse@edge"))
         }
         let u = m1.support.number(a)? + 1
-        let _ = list.set(mut offsets, u, offsets[u] + 1)
+        offsets[u] += 1
         edge_count += 1
     }
     let mut i: u64 = 1
     while i <= n {
-        let _ = list.set(mut offsets, i, offsets[i] + offsets[i - 1]);
+        offsets[i] = offsets[i] + offsets[i - 1];
         i += 1
     }
     let mut positions: List[u32] = m1.support.mem(list.with_capacity(n))?
@@ -60,7 +60,7 @@ fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> 
         let u = m1.support.number(a)?
         let pos: u64 = int.widen(positions[u])
         let _ = list.set(mut neighbors, pos, int.narrow(m1.support.number(b)?))
-        let _ = list.set(mut positions, u, positions[u] + 1)
+        positions[u] += 1
     }
     m1.support.admission(variant, "search.parent", 8 * n)?
     let parent_owner = m1.support.marker(tx, "parent")?

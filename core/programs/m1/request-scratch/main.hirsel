@@ -1,0 +1,134 @@
+type Config: shareable + send {
+    routes: Map[String, String]
+}
+
+type Header {
+    name_lo: u64,
+    name_hi: u64,
+    value_lo: u64,
+    value_hi: u64
+}
+
+fn header_value(s: String, hs: FixedSpan[Header], key: String) -> Option[View[String]] in s {
+    for h in hs {
+        if string.slice(s, h.name_lo, h.name_hi) == key {
+            return Some(string.slice(s, h.value_lo, h.value_hi))
+        }
+    }
+    None
+}
+
+fn request(block: String, variant: String, number: u64, take config: Arc[Config], tx: Sender[String]) -> Result[(u64, u64), m1.support.Error] {
+    let socket_owner = m1.support.marker(tx, m1.support.name("socket#", number, "")?)?
+    let scratch_owner = m1.support.marker(tx, m1.support.name("scratch#", number, "")?)?
+    region scratch {
+        let mut at: u64 = 0
+        let first = m1.support.line(block, mut at)
+        let Some(route) = string.strip_prefix(first, "GET ") else {
+            return Error(m1.support.error("Parse@method"))
+        }
+        let header_start = at
+        let mut count: u64 = 0
+        while at < string.byte_len(block) {
+            let _ = m1.support.line(block, mut at);
+            count += 1
+        }
+        let mut headers: SpanBuilder[Header, in scratch] = m1.support.mem(span.with_capacity(scratch, count))?
+        at = header_start
+        let mut h: u64 = 0
+        while at < string.byte_len(block) {
+            let lo = at
+            let row = m1.support.line(block, mut at)
+            h += 1
+            let mut site = m1.support.name("request", number, ".header")?
+            m1.support.num(mut site, h)?
+            m1.support.admission(variant, site, 0)?
+            let Some(colon) = string.find(row, 0, ": ") else {
+                return Error(m1.support.error("Parse@header"))
+            }
+            let value = Header(name_lo: lo, name_hi: lo + colon, value_lo: lo + colon + 2, value_hi: lo + string.byte_len(row))
+            m1.support.mem(result.capacity_only(span.push(mut headers, value)))?
+        }
+        let hs = span.finish(take headers)
+        let Some(banner) = map.get(config.routes, route) else {
+            return Error(m1.support.error("Route@path"))
+        }
+        let Some(id) = header_value(block, hs, "X-Id") else {
+            return Error(m1.support.error("Parse@id"))
+        }
+        let Some(content) = header_value(block, hs, "Content") else {
+            return Error(m1.support.error("Parse@content"))
+        }
+        let size = string.byte_len(banner) + string.byte_len(id) + string.byte_len(content) + 2
+        m1.support.admission(variant, m1.support.name("request", number, ".reply")?, size)?
+        let mut reply = m1.support.mem(string.with_capacity(size))?
+        m1.support.add(mut reply, banner)?
+        m1.support.add(mut reply, ":")?
+        m1.support.add(mut reply, id)?
+        m1.support.add(mut reply, ":")?
+        m1.support.add(mut reply, content)?
+        if variant == "error" && number == 2 {
+            return Error(m1.support.error("Io@request2.write"))
+        }
+        Ok((string.byte_len(reply), list.sum_bytes(string.as_bytes(reply))))
+    }
+}
+
+fn serve(input: String, variant: String, config: Arc[Config], tx: Sender[String], mut requests: u64, mut total: u64, mut checksum: u64) -> Result[(), m1.support.Error] {
+    let mut at: u64 = 0
+    while at < string.byte_len(input) {
+        let end = match string.find(input, at, "\n\n") {
+            Some(n) => n,
+            None => string.byte_len(input)
+        }
+        if end > at {
+            let block = string.slice(input, at, end)
+            let (n, sum) = request(block, variant, requests + 1, arc.share(config), tx)?
+            total += n
+            checksum += sum
+            requests += 1
+        }
+        at = if end < string.byte_len(input) {
+            end + 2
+        } else {
+            end
+        }
+    }
+    Ok(())
+}
+
+fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> Result[(), m1.support.Error] waits {
+    let mut routes: Map[String, String] = map.new()
+    m1.support.insert(mut routes, "/alpha", "welcome")?
+    m1.support.insert(mut routes, "/beta", "ready")?
+    let config = m1.support.mem(result.capacity_only(arc.new(Config(routes: take routes))))?
+    let mut requests: u64 = 0
+    let mut total: u64 = 0
+    let mut checksum: u64 = 0
+    let outcome = serve(input, variant, config, tx, mut requests, mut total, mut checksum)
+    let mut rendered = string.new()
+    m1.support.add(mut rendered, "requests=")?
+    m1.support.num(mut rendered, requests)?
+    m1.support.add(mut rendered, " bytes=")?
+    m1.support.num(mut rendered, total)?
+    m1.support.add(mut rendered, " sum=")?
+    m1.support.num(mut rendered, checksum)?
+    m1.support.add(mut rendered, "\n")?
+    m1.support.put(out, rendered)?
+    outcome
+}
+
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] waits {
+    let input = m1.support.input(d, argv)?
+    let mut events: u64 = 4
+    let mut at: u64 = 0
+    while at < string.byte_len(input) {
+        let row = m1.support.line(input, mut at);
+        if string.starts_with(row, "GET ") {
+            events += 4
+        }
+    }
+    let (tx, rx): (Sender[String], Receiver[String]) = m1.support.mem(channel.new(events))?
+    let outcome = run(out, input, m1.support.case_variant(argv), take tx)
+    m1.support.finish(out, take rx, take outcome)
+}

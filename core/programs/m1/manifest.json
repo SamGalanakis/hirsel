@@ -74,6 +74,13 @@
           "signatures": true
         },
         {
+          "file": "core/core/indexed.hirsel",
+          "modules": [
+            "indexed"
+          ],
+          "signatures": true
+        },
+        {
           "file": "core/core/int.hirsel",
           "modules": [
             "int"
@@ -112,6 +119,13 @@
           "file": "core/core/result.hirsel",
           "modules": [
             "result"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/core/seq.hirsel",
+          "modules": [
+            "seq"
           ],
           "signatures": true
         },
@@ -161,6 +175,13 @@
           "file": "core/core/unique.hirsel",
           "modules": [
             "unique"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/core/writer.hirsel",
+          "modules": [
+            "writer"
           ],
           "signatures": true
         }
@@ -397,6 +418,232 @@
           "version": "1"
         }
       ]
+    },
+    {
+      "package": {
+        "name": "json",
+        "version": "1"
+      },
+      "sources": [
+        {
+          "file": "core/programs/m1/json/main.hirsel",
+          "modules": [
+            "main"
+          ],
+          "signatures": false
+        }
+      ],
+      "dependencies": [
+        {
+          "name": "core",
+          "version": "1"
+        },
+        {
+          "name": "std",
+          "version": "1"
+        },
+        {
+          "name": "m1",
+          "version": "1"
+        }
+      ]
+    },
+    {
+      "package": {
+        "name": "request_scratch",
+        "version": "1"
+      },
+      "sources": [
+        {
+          "file": "core/programs/m1/request-scratch/main.hirsel",
+          "modules": [
+            "main"
+          ],
+          "signatures": false
+        },
+        {
+          "file": "core/programs/m1/request-scratch/matched.hirsel",
+          "modules": [
+            "matched"
+          ],
+          "signatures": false
+        }
+      ],
+      "dependencies": [
+        {
+          "name": "core",
+          "version": "1"
+        },
+        {
+          "name": "std",
+          "version": "1"
+        },
+        {
+          "name": "m1",
+          "version": "1"
+        }
+      ]
+    },
+    {
+      "package": {
+        "name": "rope",
+        "version": "1"
+      },
+      "sources": [
+        {
+          "file": "core/programs/m1/rope/main.hirsel",
+          "modules": [
+            "main"
+          ],
+          "signatures": false
+        },
+        {
+          "file": "core/programs/m1/rope/matched.hirsel",
+          "modules": [
+            "matched"
+          ],
+          "signatures": false
+        }
+      ],
+      "dependencies": [
+        {
+          "name": "core",
+          "version": "1"
+        },
+        {
+          "name": "std",
+          "version": "1"
+        },
+        {
+          "name": "m1",
+          "version": "1"
+        }
+      ]
     }
-  ]
+  ],
+  "charge_policy": "charge-v1",
+  "root_limit_bytes": 67108864,
+  "checker": "report",
+  "entries": [
+    {
+      "workload": "bfs",
+      "variant": "idiomatic",
+      "package": {
+        "name": "bfs",
+        "version": "1"
+      },
+      "module": "main",
+      "function": "main"
+    },
+    {
+      "workload": "bfs",
+      "variant": "matched",
+      "package": {
+        "name": "bfs",
+        "version": "1"
+      },
+      "module": "matched",
+      "function": "main"
+    },
+    {
+      "workload": "generics",
+      "variant": "idiomatic",
+      "package": {
+        "name": "generics",
+        "version": "1"
+      },
+      "module": "main",
+      "function": "main"
+    },
+    {
+      "workload": "generics",
+      "variant": "matched",
+      "package": {
+        "name": "generics",
+        "version": "1"
+      },
+      "module": "matched",
+      "function": "main"
+    },
+    {
+      "workload": "lru",
+      "variant": "idiomatic",
+      "package": {
+        "name": "lru",
+        "version": "1"
+      },
+      "module": "main",
+      "function": "main"
+    },
+    {
+      "workload": "lru",
+      "variant": "matched",
+      "package": {
+        "name": "lru",
+        "version": "1"
+      },
+      "module": "matched",
+      "function": "main"
+    },
+    {
+      "workload": "json",
+      "variant": "idiomatic",
+      "package": {
+        "name": "json",
+        "version": "1"
+      },
+      "module": "main",
+      "function": "main"
+    },
+    {
+      "workload": "request-scratch",
+      "variant": "idiomatic",
+      "package": {
+        "name": "request_scratch",
+        "version": "1"
+      },
+      "module": "main",
+      "function": "main"
+    },
+    {
+      "workload": "request-scratch",
+      "variant": "matched",
+      "package": {
+        "name": "request_scratch",
+        "version": "1"
+      },
+      "module": "matched",
+      "function": "main"
+    },
+    {
+      "workload": "rope",
+      "variant": "idiomatic",
+      "package": {
+        "name": "rope",
+        "version": "1"
+      },
+      "module": "main",
+      "function": "main"
+    },
+    {
+      "workload": "rope",
+      "variant": "matched",
+      "package": {
+        "name": "rope",
+        "version": "1"
+      },
+      "module": "matched",
+      "function": "main"
+    }
+  ],
+  "host_outcome_contract": {
+    "arguments": [
+      "input path relative to Dir",
+      "case variant"
+    ],
+    "stderr": "empty",
+    "success_exit": 0,
+    "error_exit_code_field": "code",
+    "error_prefix_printed_by_program": true
+  }
 }

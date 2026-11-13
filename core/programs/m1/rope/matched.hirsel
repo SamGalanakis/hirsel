@@ -1,0 +1,214 @@
+type Chunk {
+    value: String,
+    refs: u64
+}
+
+type Slot = Live(Chunk) | Free(Option[u32])
+
+type Piece {
+    id: u32,
+    lo: u32,
+    hi: u32
+}
+
+type Store {
+    slots: List[Slot],
+    free: Option[u32],
+    live: u64
+}
+
+fn chunk(s: Store, id: u32) -> View[Chunk] in s {
+    match s.slots[int.widen(id)] {
+        Live(c) => c,
+        Free(_) => fail("vacant chunk")
+    }
+}
+
+fn retain(mut s: Store, p: Piece) -> Piece {
+    let slot = list.set(mut s.slots, int.widen(p.id), Free(None))
+    let Live(take c) = take slot else {
+        fail("vacant chunk")
+    }
+    let mut value = c
+    value.refs += 1
+    let _ = list.set(mut s.slots, int.widen(p.id), Live(take value))
+    p
+}
+
+fn release_piece(mut s: Store, p: Piece) {
+    let slot = list.set(mut s.slots, int.widen(p.id), Free(None))
+    let Live(take c) = take slot else {
+        fail("vacant chunk")
+    }
+    let mut value = c
+    value.refs -= 1
+    if value.refs == 0 {
+        let free = s.free
+        let _ = list.set(mut s.slots, int.widen(p.id), Free(free))
+        s.free = Some(p.id)
+        s.live -= 1
+    } else {
+        let _ = list.set(mut s.slots, int.widen(p.id), Live(take value))
+    }
+}
+
+fn release(mut s: Store, take root: List[Piece]) {
+    for p in root {
+        release_piece(mut s, p)
+    }
+}
+
+fn piece(mut s: Store, value: String) -> Result[Piece, m1.support.Error] {
+    let hi: u32 = int.narrow(string.byte_len(value))
+    let c = Chunk(value: m1.support.mem(string.from(value))?, refs: 1)
+    let id: u32 = if let Some(i) = s.free {
+        let next = match s.slots[int.widen(i)] {
+            Free(n) => n,
+            Live(_) => fail("occupied free chunk")
+        }
+        let _ = list.set(mut s.slots, int.widen(i), Live(take c))
+        s.free = next
+        i
+    } else {
+        let id: u32 = int.narrow(list.len(s.slots))
+        m1.support.push(mut s.slots, Live(take c))?
+        id
+    }
+    s.live += 1
+    Ok(Piece(id: id, lo: 0, hi: hi))
+}
+
+fn length(root: List[Piece]) -> u64 {
+    let mut n: u64 = 0;
+    for p in root {
+        n += int.widen(p.hi - p.lo)
+    };
+    n
+}
+
+fn boundary(s: Store, root: List[Piece], at: u64) -> bool {
+    let mut offset: u64 = 0
+    for p in root {
+        let end = offset + int.widen(p.hi - p.lo)
+        if at >= offset && at <= end {
+            return string.is_boundary(chunk(s, p.id).value, int.widen(p.lo) + at - offset)
+        }
+        offset = end
+    }
+    at == offset
+}
+
+fn range(mut s: Store, mut out: List[Piece], root: List[Piece], lo: u64, hi: u64) {
+    let mut offset: u64 = 0
+    for p in root {
+        let end = offset + int.widen(p.hi - p.lo)
+        if lo < end && hi > offset {
+            let base: u64 = int.widen(p.lo)
+            let a: u32 = int.narrow(base + if lo > offset {
+                lo - offset
+            } else {
+                0
+            })
+            let b: u32 = int.narrow(base + if hi < end {
+                hi - offset
+            } else {
+                end - offset
+            })
+            let kept = retain(mut s, Piece(id: p.id, lo: a, hi: b))
+            result.unwrap(list.push(mut out, kept))
+        }
+        offset = end
+    }
+}
+
+fn edit(mut s: Store, root: List[Piece], pos: u64, len: u64, replacement: String, variant: String, number: u64) -> Result[List[Piece], m1.support.Error] {
+    let n = length(root)
+    if pos > n || len > n - pos || !boundary(s, root, pos) || !boundary(s, root, pos + len) {
+        return Error(m1.support.error("InvalidPosition"))
+    }
+    let cap = list.len(root) + 2
+    m1.support.admission(variant, m1.support.name("edit", number, ".piece")?, ((cap * 12 + 7) / 8) * 8)?
+    let mut out: List[Piece] = m1.support.mem(list.with_capacity(cap))?
+    // Stage every fallible allocation before adding any borrowed edge to the new root.
+    let inserted = if string.byte_len(replacement) > 0 {
+        Some(piece(mut s, replacement)?)
+    } else {
+        None
+    }
+    range(mut s, mut out, root, 0, pos)
+    if let Some(p) = inserted {
+        result.unwrap(list.push(mut out, p))
+    }
+    range(mut s, mut out, root, pos + len, n)
+    Ok(take out)
+}
+
+fn operations(input: String, start: u64, variant: String, mut s: Store, mut current: List[Piece], mut history: List[List[Piece]], mut edits: u64) -> Result[(), m1.support.Error] {
+    let mut at = start
+    while at < string.byte_len(input) {
+        let row = m1.support.line(input, mut at)
+        if row == "UNDO" {
+            let Some(take old) = list.pop(mut history) else {
+                return Error(m1.support.error("EmptyUndo"))
+            }
+            let displaced = replace(mut current, take old)
+            release(mut s, take displaced)
+        } else {
+            let Some((a, rest)) = string.split_once(row, " ") else {
+                return Error(m1.support.error("InvalidPosition"))
+            }
+            let Some((b, replacement)) = string.split_once(rest, " ") else {
+                return Error(m1.support.error("InvalidPosition"))
+            }
+            let needed = list.len(history) + 1
+            m1.support.mem(list.reserve(mut history, needed))?
+            let next = edit(mut s, current, m1.support.number(a)?, m1.support.number(b)?, replacement, variant, edits + 1)?
+            let old = replace(mut current, take next)
+            result.unwrap(list.push(mut history, take old))
+            edits += 1
+            if list.len(history) > 64 {
+                release(mut s, list.remove(mut history, 0))
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] waits {
+    let input = m1.support.input(d, argv)?
+    let mut at: u64 = 0
+    let initial = m1.support.line(input, mut at)
+    let mut s = Store(slots: list.new(), free: None, live: 0)
+    let mut current: List[Piece] = m1.support.mem(list.with_capacity(1))?
+    m1.support.push(mut current, piece(mut s, initial)?)?
+    let mut history: List[List[Piece]] = list.new()
+    let mut edits: u64 = 0
+    let outcome = operations(input, at, m1.support.case_variant(argv), mut s, mut current, mut history, mut edits)
+    let mut checksum: u64 = 0
+    for p in current {
+        checksum += list.sum_bytes(list.slice(string.as_bytes(chunk(s, p.id).value), int.widen(p.lo), int.widen(p.hi)))
+    }
+    let mut rendered = m1.support.name("edits=", edits, " undo=")?
+    m1.support.num(mut rendered, list.len(history))?
+    m1.support.add(mut rendered, " bytes=")?
+    m1.support.num(mut rendered, length(current))?
+    m1.support.add(mut rendered, " sum=")?
+    m1.support.num(mut rendered, checksum)?
+    m1.support.add(mut rendered, " live=")?
+    m1.support.num(mut rendered, s.live)?
+    m1.support.add(mut rendered, "\nafter-history=")?
+    while let Some(take old) = list.pop(mut history) {
+        release(mut s, take old)
+    }
+    m1.support.num(mut rendered, s.live)?
+    m1.support.add(mut rendered, "\nafter-text=")?
+    release(mut s, take current)
+    m1.support.num(mut rendered, s.live)?
+    m1.support.add(mut rendered, "\n")?
+    m1.support.put(out, rendered)?
+    let (tx, rx): (Sender[String], Receiver[String]) = m1.support.mem(channel.new(1))?
+    {
+        let closed = tx
+    }
+    m1.support.finish(out, take rx, take outcome)
+}

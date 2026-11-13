@@ -764,8 +764,10 @@ dependencies = [
 name = "hirsel-core-rt"
 version = "0.1.0"
 dependencies = [
+ "bumpalo",
  "hirsel-core-layout",
  "hirsel-guard",
+ "mimalloc",
 ]
 
 [[package]]

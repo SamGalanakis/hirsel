@@ -141,6 +141,7 @@ def expand(paths: list[str]) -> list[str]:
 CORPUS_DATA = ["conformance/**", "packages/**", "stdlib/**", CORPUS_PACKAGES]
 
 RUNTIME_DATA = {
+    "hirsel-core-ir": ["crates/*/Cargo.toml"],
     "hirsel-cranelift": ["crates/hirsel-rt/include/**"],
     "hirsel-cli": [*CORPUS_DATA],
     "hirsel-conformance": [*CORPUS_DATA, "bench/native/programs/**", "crates/hirsel-conformance/oracles/**", "conformance/old-spec/**", "native-tests/**"],
@@ -1075,6 +1076,17 @@ def declared_deps(package: dict, packages: dict) -> list[str]:
                   if d["kind"] is None and not d["optional"])
 
 
+def static_archive_rule(package: dict, packages: dict, attrs: dict) -> str:
+    """Only the old runtime uses its feature matrix and startup training."""
+    name = package['name']
+    if name != 'hirsel-rt':
+        return call('hirsel_core_runtime_archives', name=f'{name}-archives',
+                    library=f'//:{name}', archive_name=f"lib{attrs['crate']}.a")
+    return call('hirsel_runtime_archives', name=f'{name}-archives',
+                deps=declared_deps(package, packages), feature_deps=feature_deps(package),
+                **{**attrs, 'features': ['default'], 'build_script': None})
+
+
 def feature_deps(package: dict) -> dict[str, list[str]]:
     """The optional dependencies each feature enables (`dep:x`), transitively."""
     optional = {d["name"] for d in package["dependencies"] if d["optional"]}
@@ -1126,7 +1138,7 @@ def first_party(meta: dict) -> str:
     archive_consumers = set()
     out = [
         HEADER,
-        'load("//tools/buck2:defs.bzl", "hirsel_binary", "hirsel_build_script", "hirsel_command_test", "hirsel_products", "hirsel_library", "hirsel_link_hosts_test", "hirsel_runtime_archives", "hirsel_tsan_runtime_archives", "hirsel_script_test", "hirsel_source_audit", "hirsel_test", "hirsel_toolchain_bundle")\n',
+        'load("//tools/buck2:defs.bzl", "hirsel_binary", "hirsel_build_script", "hirsel_command_test", "hirsel_products", "hirsel_library", "hirsel_link_hosts_test", "hirsel_runtime_archives", "hirsel_core_runtime_archives", "hirsel_tsan_runtime_archives", "hirsel_script_test", "hirsel_source_audit", "hirsel_test", "hirsel_toolchain_bundle")\n',
         'load("//tools/buck2:native_selection.bzl", "hirsel_native_selection")\n',
     ]
 
@@ -1227,13 +1239,7 @@ def first_party(meta: dict) -> str:
             out.append("\n" + call("hirsel_library", name=name, deps=normal, doctests=has_doctests(package_dir) or None,
                                     **attrs))
             if "staticlib" in lib["crate_types"]:
-                out.append("\n" + call(
-                    "hirsel_runtime_archives",
-                    name=f"{name}-archives",
-                    deps=declared_deps(package, packages),
-                    feature_deps=feature_deps(package),
-                    **{**attrs, "features": ["default"], "build_script": None},
-                ))
+                out.append("\n" + static_archive_rule(package, packages, attrs))
             if lib.get("test", True) and f"{name}-unittest" not in EMPTY_UNIT_HARNESSES:
                 binary = f"{name}-unittest"
                 count, costs, case_shards = shards(binary)

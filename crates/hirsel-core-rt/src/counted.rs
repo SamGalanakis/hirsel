@@ -39,7 +39,7 @@ pub unsafe fn share(node: NonNull<u8>, atomic: bool) {
             if node
                 .cast::<AtomicU64>()
                 .as_ref()
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
                 .is_err()
             {
                 std::process::abort();

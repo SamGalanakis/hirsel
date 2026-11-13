@@ -76,6 +76,35 @@ class ProductionFeatures(unittest.TestCase):
 
 
 class CargoUnits(unittest.TestCase):
+    def test_new_runtime_archives_keep_their_own_cargo_library_and_namespace(self):
+        from cargo_units import Resolution, calls, literal
+        r = Resolution.__new__(Resolution)
+        r.packages = {name: {'name': name, 'version': '1'} for name in ('layout', 'core', 'old')}
+        r.members = set(r.packages)
+        r.units, r.names, r.preferred, r.test_binaries = {}, {}, {}, {}
+        graph = {'units': [
+            dict(pkg_id='layout',target=dict(name='layout',kind=['lib']),mode='build',features=[],dependencies=[]),
+            dict(pkg_id='core',target=dict(name='core',kind=['lib']),mode='build',features=[],
+                 dependencies=[dict(index=0,extern_crate_name='layout')]),
+            dict(pkg_id='old',target=dict(name='old',kind=['lib']),mode='build',features=[],dependencies=[]),
+        ]}
+        keys = r.add(graph)
+        for index in range(3):
+            base = r.base(r.units[keys[index]])
+            r.preferred[base] = keys[index]
+            r.names[keys[index]] = base
+        r.runtime = {'x86_64-unknown-linux-gnu': keys[2], 'aarch64-unknown-linux-gnu': keys[2]}
+        source = ''.join(sync.call('hirsel_library',name=n,package_name=n,features=[],deps=[],crate_root='src/lib.rs')
+                         for n in ('layout','core','old'))
+        source += sync.static_archive_rule({'name':'core'}, {}, {'crate':'core'})
+        projected = {literal(call,'name'):(call.func.id,attrs) for _,call,attrs in calls(r.first_party(source,sync.starlark))}
+        self.assertEqual(ast.literal_eval(projected['core'][1]['deps']), ['//:layout'])
+        kind, archive = projected['core-archives']
+        self.assertEqual(kind, 'hirsel_core_runtime_archives')
+        self.assertEqual(ast.literal_eval(archive['library']), '//:core')
+        self.assertEqual(ast.literal_eval(archive['archive_name']), 'libcore.a')
+        self.assertNotIn('target_deps', archive)
+
     def test_dev_features_fork_transitive_users_but_share_unchanged_leaves(self):
         from cargo_units import Resolution, calls, literal
         r = Resolution.__new__(Resolution)

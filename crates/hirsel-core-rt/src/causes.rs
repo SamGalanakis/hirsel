@@ -44,12 +44,12 @@ impl Cell {
 }
 impl Drop for Cell {
     fn drop(&mut self) {
-        if let Some(cause) = &self.cause {
-            if let Some(drop_message) = cause.drop_message {
-                // SAFETY: the used cell owns the message and its generated drop recipe.
-                unsafe {
-                    drop_message(cause.message);
-                }
+        if let Some(cause) = &self.cause
+            && let Some(drop_message) = cause.drop_message
+        {
+            // SAFETY: the used cell owns the message and its generated drop recipe.
+            unsafe {
+                drop_message(cause.message);
             }
         }
         self.funding.refund(charge::CAUSE_CELL);

@@ -13,4 +13,6 @@ hirsel-core-layout = { path = "../hirsel-core-layout" }
 
 [dev-dependencies]
 hirsel-guard = { path = "../hirsel-guard" }
+bumpalo = "=3.20.3"
+mimalloc = { version = "=0.1.52", default-features = false }
 

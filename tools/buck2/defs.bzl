@@ -1001,6 +1001,37 @@ def hirsel_runtime_archives(name, crate, crate_root, srcs, features, deps, featu
                       exec_compatible_with = [budget_constraint(pool_budget_name(4, 2097152))],
                       visibility = ["PUBLIC"])
 
+def hirsel_core_runtime_archives(name, library, archive_name):
+    """The new Rust-only runtime, in its own archive namespace on both targets.
+
+    Use the library's Cargo-resolved dependencies. There are no old-language
+    features, startup training or std-product dependencies on this path.
+    """
+    archives = {}
+    for triple, platform in RUNTIME_TARGETS.items():
+        configured = name + "-" + triple.split("-")[0]
+        native.configured_alias(name = configured, actual = library, platform = platform)
+        archives[triple] = ":" + configured
+    _core_runtime_archives(name = name, archives = archives, archive_name = archive_name,
+                           visibility = ["PUBLIC"])
+
+def _core_runtime_archives_impl(ctx):
+    entries = {}
+    views = {}
+    for triple, dep in ctx.attrs.archives.items():
+        archive = dep[DefaultInfo].sub_targets["staticlib"][DefaultInfo].default_outputs[0]
+        entries[triple + "/" + ctx.attrs.archive_name] = archive
+        views[triple.split("-")[0]] = [DefaultInfo(default_output = archive)]
+    return [DefaultInfo(default_output = ctx.actions.symlinked_dir(ctx.label.name, entries), sub_targets = views)]
+
+_core_runtime_archives = rule(
+    impl = _core_runtime_archives_impl,
+    attrs = {
+        "archives": attrs.dict(attrs.string(), attrs.dep()),
+        "archive_name": attrs.string(),
+    },
+)
+
 def hirsel_tsan_runtime_archives(name):
     """One instrumented native runtime, with its matching sanitizer and std."""
     if read_root_config("hirsel", "native_tsan", "false") != "true":

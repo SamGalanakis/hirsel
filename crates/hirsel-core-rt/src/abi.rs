@@ -5,6 +5,19 @@
 //! Capacity failure path on null. `free`, limit exit and mechanical release never
 //! fail. `alloc like` follows the original payer except within finalizers.
 //!
+//! `region_alloc`, `resource_alloc` and `task_start` use the same Allocation
+//! convention. Success pointers from `limit_enter` and `task_start` equal the
+//! context; other allocation success pointers address payload storage. Context
+//! and region creation return owned handles and admit no language storage.
+//! `try_unwrap` returns its uniqueness test. `causes_take` transfers a complete
+//! chain, null for empty; cause accessors return borrowed pointers. All other
+//! entries return unit. Count overflow and physical host exhaustion are run
+//! stops. A drop recipe's boolean means completion, with false requesting resume.
+//!
+//! These C signatures are complete. The FORM function-row u8 failure status is
+//! handled by the emitter. FORM decision 39 fixes successful admission's
+//! available field at zero; no source-level Capacity exists on success.
+//!
 //! Contexts are task-owned. Allocation pointers, sizes, alignment and remaining
 //! logical charges are trusted emitter operands. None may be stale. Provider
 //! operations serialize Arc operations and cross-task refunds in event order.

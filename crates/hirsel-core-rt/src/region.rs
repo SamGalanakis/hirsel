@@ -67,19 +67,18 @@ impl Region {
                 .and_then(|v| v.checked_add(prefix))
                 .and_then(|v| v.checked_add(align - 1))
                 .map(|v| v & !(align - 1));
-            if let Some(offset) = address.and_then(|v| v.checked_sub(base)) {
-                if let Some(end) = offset.checked_add(bytes.max(1)) {
-                    if end <= chunk.layout.size() {
-                        chunk.used = end;
-                        // SAFETY: start and offset are aligned, disjoint from prior
-                        // allocations and inside this chunk's allocation.
-                        unsafe {
-                            return (
-                                chunk.pointer.as_ptr().add(start).cast(),
-                                NonNull::new_unchecked(chunk.pointer.as_ptr().add(offset)),
-                            );
-                        }
-                    }
+            if let Some(offset) = address.and_then(|v| v.checked_sub(base))
+                && let Some(end) = offset.checked_add(bytes.max(1))
+                && end <= chunk.layout.size()
+            {
+                chunk.used = end;
+                // SAFETY: start and offset are aligned, disjoint from prior
+                // allocations and inside this chunk's allocation.
+                unsafe {
+                    return (
+                        chunk.pointer.as_ptr().add(start).cast(),
+                        NonNull::new_unchecked(chunk.pointer.as_ptr().add(offset)),
+                    );
                 }
             }
         }

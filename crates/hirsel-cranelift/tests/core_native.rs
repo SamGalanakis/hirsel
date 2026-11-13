@@ -384,7 +384,12 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
     }
     source.push_str("return 0; }\n");
     let actual = link_run(&scratch, &source);
-    assert_eq!(actual, expected, "optimize={optimize}");
+    assert_eq!(
+        actual,
+        expected,
+        "optimize={optimize}\n{}",
+        text::print(module)
+    );
 }
 
 fn link_program(scratch: &Scratch, source: &str) -> PathBuf {

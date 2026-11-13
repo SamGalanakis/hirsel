@@ -183,7 +183,7 @@ TEST_DATA = {
     "hirsel-core-resolve-unittest": ["docs/spec/**", "core/core/**"],
     "hirsel-core-front-unittest": ["core/front/**", "core/core/**", "core/std/**", "core/programs/m1/**"],
     "hirsel-core-driver-unittest": ["core/core/**", "core/front/**", "core/std/**", "core/programs/m1/**"],
-    "hirsel-cranelift-test-core_native": ["core/front/**"],
+    "hirsel-cranelift-test-core_native": ["core/front/**", "core/core/**"],
     "hirsel-cli-test-cli": ["tools/capped", "conformance/old-spec/core-library.md", "conformance/old-spec/std-library.md", "docs/dependency-card.schema.json"],
     "hirsel-driver-test-it": ["crates/hirsel-driver/tests/fixtures/**", "crates/hirsel-rt/include/**"],
     "hirsel-llvm-test-it": ["crates/hirsel-llvm/tests/native/**"],

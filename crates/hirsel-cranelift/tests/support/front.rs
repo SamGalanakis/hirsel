@@ -14,7 +14,7 @@ pub fn lower(root: &Path, source: &str) -> (Module, HashMap<String, FuncId>) {
         name: name.into(),
         version: "1".into(),
     };
-    let core = PackageManifest::directory(&root.join("core"), package("core"), true).unwrap();
+    let core = PackageManifest::directory(&root.join("../core"), package("core"), true).unwrap();
     let app = PackageManifest {
         package: package("app"),
         sources: vec![ModuleSource {

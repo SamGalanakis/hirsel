@@ -1,4 +1,4 @@
-// Review pending: langs-text-921. No matched ratio before independent review.
+// Reviewed-by: langs-text-921 2026-11-13; Quick/Merge and source introsort Self match pivots, cutoffs, heap fallback, scratch arrays, retained LCG resets; compile with overflow checks.
 // Matches sort.hirsel, including std.list introsort for Sort::Self.
 #[allow(dead_code)]
 mod support;

@@ -1,4 +1,4 @@
-// Review pending: langs-text-921. No matched ratio before independent review.
+// Reviewed-by: langs-text-921 2026-11-13; Array jump table/30000-byte tape and recursive Vec<Op>/one-byte tape match parsing, loops and wrapping output; compile with overflow checks.
 // Matches brainfuck.hirsel: array jump table or recursive Vec<Op>; fresh byte tape.
 #[allow(dead_code)]
 mod support;

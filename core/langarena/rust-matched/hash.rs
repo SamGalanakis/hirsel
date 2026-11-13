@@ -1,4 +1,4 @@
-// Review pending: langs-text-921. No matched ratio before independent review.
+// Reviewed-by: langs-text-921 2026-11-13; CRC32/SimpleSHA256 byte loops, fixed inline lanes/digest, LCG and wrapping totals match; compile with overflow checks.
 // Matches hash.hirsel, including upstream SimpleSHA256 (not cryptographic SHA256).
 #[allow(dead_code)]
 mod support;

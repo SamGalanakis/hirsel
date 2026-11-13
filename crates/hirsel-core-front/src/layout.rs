@@ -6,7 +6,8 @@ use crate::Program;
 use crate::decls::{DeclBody, Repr, Role};
 use crate::types::*;
 use hirsel_core_layout::{
-    Body, Case, Field, FieldTy, FuncRef, Handle, Repr as LRepr, Scalar, Shape, TypeRef, compute,
+    Body, Case, Field, FieldTy, FuncRef, Handle, LayoutError, Repr as LRepr, Scalar, Shape,
+    TypeRef, compute,
 };
 use std::collections::HashMap;
 
@@ -46,6 +47,14 @@ impl Shapes<'_> {
                 None,
             ),
             TyKind::Unit => (LRepr::Own, Body::Record(vec![]), None),
+            TyKind::Array(x, n) => (
+                LRepr::Own,
+                Body::Record(vec![Field {
+                    name: "0".into(),
+                    ty: FieldTy::Array(Box::new(self.field(x)?), n),
+                }]),
+                None,
+            ),
             TyKind::Tuple(xs) => {
                 let mut fields = vec![];
                 for (i, x) in xs.into_iter().enumerate() {
@@ -116,9 +125,19 @@ impl Shapes<'_> {
                 Some(Role::Task) => FieldTy::Handle(Handle::Task),
                 Some(Role::Sender) => FieldTy::Handle(Handle::Sender),
                 Some(Role::Receiver) => FieldTy::Handle(Handle::Receiver),
+                Some(Role::HostFile) => FieldTy::Handle(Handle::HostFile),
                 Some(_) => return None,
                 None => FieldTy::Inline(self.shape(ty)?),
             },
+            TyKind::Array(x, n) => {
+                if !matches!(
+                    crate::decls::kind(self.decls, self.types, x, &[]),
+                    crate::Kind::Plain | crate::Kind::Own
+                ) {
+                    return None;
+                }
+                FieldTy::Array(Box::new(self.field(x)?), n)
+            }
             TyKind::Tuple(_) | TyKind::Unit => FieldTy::Inline(self.shape(ty)?),
             _ => return None,
         })
@@ -153,10 +172,40 @@ pub(crate) fn recipes(p: &mut Program) {
             }
         }
     }
-    let recipes = compute(&s.shapes);
-    if let Ok(recipes) = recipes {
-        for (d, r) in roots {
-            p.decls[d].summary.recipe = Some(recipes[r.index()].clone());
+    match compute(&s.shapes) {
+        Ok(recipes) => {
+            for (d, r) in roots {
+                p.decls[d].summary.recipe = Some(recipes[r.index()].clone());
+            }
+        }
+        Err(error) => {
+            let (name, field, why) = match &error {
+                LayoutError::Field { ty, field, why } => (ty, Some(field.as_str()), *why),
+                LayoutError::Cycle { ty } => (ty, None, "inline containment cycle"),
+                LayoutError::TooLarge { ty } => (ty, None, "compact extent exceeds its width"),
+                LayoutError::Empty { ty } => (ty, None, "compact encoding has zero size"),
+            };
+            let declaration = s.decls.iter().find(|d| d.path.to_string() == *name);
+            if let Some(decl) = declaration {
+                let site = field
+                    .and_then(|name| decl.all_fields().find(|f| f.name == name))
+                    .map_or(decl.site, |f| f.site);
+                let rule = if why.contains("overflow") || why.contains("2^64") {
+                    "OWN-2"
+                } else if decl.repr == Repr::Stable {
+                    "MEM-2"
+                } else if matches!(error, LayoutError::Cycle { .. }) {
+                    "OWN-2"
+                } else {
+                    "OWN-19"
+                };
+                p.refusals.push(crate::refusal(rule, site, why));
+            } else if let Some(&(d, _)) = roots.first() {
+                p.gaps.push(crate::Gap::new(
+                    s.decls[d].site,
+                    "nested layout failure is not diagnosed",
+                ));
+            }
         }
     }
 }

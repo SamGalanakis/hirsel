@@ -38,6 +38,8 @@ pub enum TyKind {
     Unit,
     Scalar(Scalar),
     Tuple(Vec<TyId>),
+    /// An inline array with a literal length (SEM-9).
+    Array(TyId, u64),
     /// A nominal type: a declaration and its arguments.
     Adt(DeclId, Vec<TyId>),
     /// `View[T]` (OWN-8).
@@ -214,6 +216,10 @@ pub fn subst(t: &mut impl TyRead, ty: TyId, args: &[TyId]) -> TyId {
             let xs = xs.iter().map(|&x| subst(t, x, args)).collect();
             t.mk(TyKind::Adt(d, xs))
         }
+        TyKind::Array(x, n) => {
+            let x = subst(t, x, args);
+            t.mk(TyKind::Array(x, n))
+        }
         TyKind::View(x) => {
             let x = subst(t, x, args);
             t.mk(TyKind::View(x))
@@ -232,7 +238,7 @@ pub fn has_hole(t: &impl TyRead, ty: TyId) -> bool {
     match t.kind(ty) {
         TyKind::Hole => true,
         TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs.iter().any(|&x| has_hole(t, x)),
-        TyKind::View(x) => has_hole(t, *x),
+        TyKind::View(x) | TyKind::Array(x, _) => has_hole(t, *x),
         TyKind::Fn(ps, r, _) => ps.iter().any(|&(_, p)| has_hole(t, p)) || has_hole(t, *r),
         _ => false,
     }
@@ -241,7 +247,7 @@ pub fn has_param(t: &impl TyRead, ty: TyId) -> bool {
     match t.kind(ty) {
         TyKind::Param(_) => true,
         TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs.iter().any(|&x| has_param(t, x)),
-        TyKind::View(x) => has_param(t, *x),
+        TyKind::View(x) | TyKind::Array(x, _) => has_param(t, *x),
         TyKind::Fn(ps, r, _) => ps.iter().any(|&(_, p)| has_param(t, p)) || has_param(t, *r),
         _ => false,
     }

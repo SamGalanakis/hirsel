@@ -13,6 +13,34 @@ impl<'c, 'a> Cx<'c, 'a> {
                 self.t.mk(TyKind::Tuple(xs))
             }
             NodeKind::TypePath => self.named_ty(n, &[]),
+            NodeKind::TypeArguments if matches!(self.p.target(self.at, c[0]), Some(Target::Builtin(name)) if self.p.index.symbols.text(*name) == "Inline") =>
+            {
+                if c.len() != 3 {
+                    self.refuse(
+                        "LANG-12",
+                        n,
+                        "Inline takes an element type and a literal length",
+                    );
+                    return ERROR;
+                }
+                let element = self.ty(c[1]);
+                let Some(count) = crate::decls::literal_length(self.p.item(self.at), c[2]) else {
+                    self.refuse("SEM-9", c[2], "Inline length is a u64 integer literal");
+                    return ERROR;
+                };
+                if !matches!(
+                    kind(&self.p.decls, &self.t, element, &self.params),
+                    Kind::Plain | Kind::Own
+                ) {
+                    self.refuse(
+                        "SEM-9",
+                        c[1],
+                        "Inline elements must be plain or own; a type parameter must be plain",
+                    );
+                    return ERROR;
+                }
+                self.t.mk(TyKind::Array(element, count))
+            }
             NodeKind::TypeArguments => {
                 let mut args = vec![];
                 for &a in &c[1..] {

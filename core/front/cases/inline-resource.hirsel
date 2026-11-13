@@ -1,0 +1,4 @@
+// expect: refuse SEM-9 at 4:26
+// SEM-9: zero length does not make a resource a legal array element.
+resource type R {}
+type Bad { items: Inline[R, 0] }

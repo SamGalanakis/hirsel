@@ -114,6 +114,7 @@ pub enum Role {
     Task,
     Sender,
     Receiver,
+    HostFile,
 }
 impl Role {
     fn of(path: &DefPath) -> Option<Role> {
@@ -133,6 +134,7 @@ impl Role {
             "Task" => Role::Task,
             "Sender" => Role::Sender,
             "Receiver" => Role::Receiver,
+            "HostFile" => Role::HostFile,
             "Dir" | "Net" | "Clock" | "Random" | "Stdout" | "Stderr" | "Stdin" | "Env"
             | "Process" | "Tasks" => Role::Capability,
             _ => return None,
@@ -145,7 +147,7 @@ impl Role {
             Role::View | Role::Region => Kind::Scoped,
             Role::Text => Kind::Stable,
             Role::Capability => Kind::Plain,
-            Role::Task | Role::Sender | Role::Receiver => Kind::Resource,
+            Role::Task | Role::Sender | Role::Receiver | Role::HostFile => Kind::Resource,
         }
     }
 }
@@ -183,6 +185,9 @@ pub struct Summary {
     pub kind_fixed: Option<Kind>,
     /// Parameters held inline (they decide kind, size and layout).
     pub inline_params: u64,
+    /// Argument positions that condition declared bounds (OWN-4). Phantom parameters
+    /// condition nothing, including when hidden behind another phantom type.
+    pub bound_params: Vec<u32>,
     pub holds: u8,
     /// Parameters named anywhere in the fields: an argument there adds its holds.
     pub holds_params: u64,
@@ -282,6 +287,11 @@ pub(crate) enum Pending {
     },
     /// A type argument of a generic other than Option and Result is not scoped (OWN-19).
     NotScoped { ty: TyId, site: Site },
+    Array {
+        ty: TyId,
+        params: Vec<u8>,
+        site: Site,
+    },
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -540,6 +550,33 @@ impl Program<'_> {
                 self.types.intern(TyKind::Tuple(xs))
             }
             NodeKind::TypePath => self.named_ty(at, n, &[], generics),
+            NodeKind::TypeArguments if matches!(self.target(at, children[0]), Some(Target::Builtin(name)) if self.index.symbols.text(*name) == "Inline") =>
+            {
+                if children.len() != 3 {
+                    self.refusals.push(refusal(
+                        "LANG-12",
+                        self.site(at, n),
+                        "Inline takes an element type and a literal length",
+                    ));
+                    return ERROR;
+                }
+                let element = self.lower_ty(at, children[1], generics);
+                let count = literal_length(item, children[2]);
+                let Some(count) = count else {
+                    self.refusals.push(refusal(
+                        "SEM-9",
+                        self.site(at, children[2]),
+                        "Inline length is a u64 integer literal",
+                    ));
+                    return ERROR;
+                };
+                self.pending.push(Pending::Array {
+                    ty: element,
+                    params: generics.iter().map(|g| g.bounds).collect(),
+                    site: self.site(at, children[1]),
+                });
+                self.types.intern(TyKind::Array(element, count))
+            }
             NodeKind::TypeArguments => {
                 let mut args = vec![];
                 for &c in &children[1..] {
@@ -810,6 +847,7 @@ impl Program<'_> {
                 self.inline_visit(DeclId(d as u32), &mut state, &mut stack);
             }
         }
+        self.bound_conditions();
         self.holds();
         self.check_declared_bounds();
         let pending = std::mem::take(&mut self.pending);
@@ -831,6 +869,18 @@ impl Program<'_> {
                             rule,
                             site,
                             format!("type argument is not {}", bound_names(bounds & !have)),
+                        ));
+                    }
+                }
+                Pending::Array { ty, params, site } => {
+                    if !matches!(
+                        kind(&self.decls, &self.types, ty, &params),
+                        Kind::Plain | Kind::Own
+                    ) {
+                        self.refusals.push(refusal(
+                            "SEM-9",
+                            site,
+                            "Inline elements must be plain or own; a type parameter must be plain",
                         ));
                     }
                 }
@@ -909,6 +959,7 @@ impl Program<'_> {
                 }
                 (k, p)
             }
+            TyKind::Array(x, _) => self.inline_ty(x, state, stack),
             TyKind::View(_) => (Kind::Scoped, 0),
             TyKind::Adt(e, args) => {
                 if let Some(r) = self.decls[e.index()].role {
@@ -1015,6 +1066,26 @@ impl Program<'_> {
         )
     }
 
+    /// Parameter dependency reachability, from declarations alone. Each edge follows a
+    /// field's type-argument position; a phantom position has no path to a field.
+    fn bound_conditions(&mut self) {
+        for d in self.decls.base_len()..self.decls.len() {
+            let mut mentioned = vec![];
+            for i in 0..self.decls[d].generics.len() {
+                if mentions(
+                    &self.decls,
+                    &self.types,
+                    DeclId(d as u32),
+                    i as u32,
+                    &mut vec![],
+                ) {
+                    mentioned.push(i as u32);
+                }
+            }
+            self.decls[d].summary.bound_params = mentioned;
+        }
+    }
+
     /// Holds sets: types that name each other through any field form a group, and each
     /// member holds the group's union (OWN-2). One Tarjan pass, no iteration.
     fn holds(&mut self) {
@@ -1026,7 +1097,7 @@ impl Program<'_> {
             let mut params = 0u64;
             let mut h = match decl.role {
                 Some(Role::Capability) => H_CAPABILITY,
-                Some(Role::Task | Role::Sender | Role::Receiver) => H_RESOURCE,
+                Some(Role::Task | Role::Sender | Role::Receiver | Role::HostFile) => H_RESOURCE,
                 Some(Role::View | Role::Region) => H_SCOPED,
                 Some(Role::Text) => H_STABLE,
                 Some(_) => 0,
@@ -1039,7 +1110,14 @@ impl Program<'_> {
             };
             if decl.role.is_none() {
                 for f in decl.all_fields() {
-                    walk_holds(&self.types, f.ty, &mut h, &mut params, &mut refs[d]);
+                    walk_holds(
+                        &self.decls,
+                        &self.types,
+                        f.ty,
+                        &mut h,
+                        &mut params,
+                        &mut refs[d],
+                    );
                 }
             }
             direct[d] = h;
@@ -1076,8 +1154,8 @@ impl Program<'_> {
             if decl.role.is_some() {
                 continue;
             }
-            let params: Vec<u8> = decl.generics.iter().map(|g| g.bounds).collect();
             let declared = decl.declared & !PLAIN;
+            let params: Vec<u8> = decl.generics.iter().map(|g| g.bounds | declared).collect();
             let mut out = vec![];
             if declared & SHAREABLE != 0 && decl.repr != Repr::Own {
                 out.push(refusal(
@@ -1173,25 +1251,77 @@ impl Tarjan<'_> {
     }
 }
 
-fn walk_holds(t: &Types, ty: TyId, h: &mut u8, params: &mut u64, refs: &mut Vec<usize>) {
+fn walk_holds(
+    decls: &crate::Rows<TypeDecl>,
+    t: &Types,
+    ty: TyId,
+    h: &mut u8,
+    params: &mut u64,
+    refs: &mut Vec<usize>,
+) {
     match t.kind(ty) {
         TyKind::Param(i) => *params |= 1 << i,
         TyKind::Tuple(xs) => {
             for &x in xs {
-                walk_holds(t, x, h, params, refs);
+                walk_holds(decls, t, x, h, params, refs);
             }
         }
+        TyKind::Array(x, _) => walk_holds(decls, t, *x, h, params, refs),
         TyKind::View(x) => {
             *h |= H_SCOPED;
-            walk_holds(t, *x, h, params, refs);
+            walk_holds(decls, t, *x, h, params, refs);
         }
         TyKind::Adt(e, xs) => {
             refs.push(e.index());
-            for &x in xs {
-                walk_holds(t, x, h, params, refs);
+            for &i in &decls[e.index()].summary.bound_params {
+                walk_holds(decls, t, xs[i as usize], h, params, refs);
             }
         }
         _ => {}
+    }
+}
+
+fn mentions(
+    decls: &crate::Rows<TypeDecl>,
+    t: &Types,
+    d: DeclId,
+    i: u32,
+    seen: &mut Vec<(DeclId, u32)>,
+) -> bool {
+    if seen.contains(&(d, i)) {
+        return false;
+    }
+    seen.push((d, i));
+    let decl = &decls[d.index()];
+    if let Some(role) = decl.role {
+        return matches!(
+            role,
+            Role::View | Role::Box | Role::Rc | Role::Arc | Role::List | Role::Map | Role::Task
+        );
+    }
+    fn ty_mentions(
+        decls: &crate::Rows<TypeDecl>,
+        t: &Types,
+        ty: TyId,
+        i: u32,
+        seen: &mut Vec<(DeclId, u32)>,
+    ) -> bool {
+        match t.kind(ty) {
+            TyKind::Param(p) => *p == i,
+            TyKind::Tuple(xs) => xs.iter().any(|&x| ty_mentions(decls, t, x, i, seen)),
+            TyKind::View(x) | TyKind::Array(x, _) => ty_mentions(decls, t, *x, i, seen),
+            TyKind::Adt(d, xs) => xs.iter().enumerate().any(|(p, &x)| {
+                ty_mentions(decls, t, x, i, seen)
+                    && mentions(decls, t, *d, p as u32, &mut seen.clone())
+            }),
+            _ => false,
+        }
+    }
+    match decl.body {
+        DeclBody::Alias(ty) => ty_mentions(decls, t, ty, i, seen),
+        _ => decl
+            .all_fields()
+            .any(|f| ty_mentions(decls, t, f.ty, i, seen)),
     }
 }
 
@@ -1218,6 +1348,7 @@ pub fn kind(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[
         TyKind::Tuple(xs) => xs
             .iter()
             .fold(Kind::Plain, |k, &x| join(k, kind(decls, t, x, params))),
+        TyKind::Array(x, _) => kind(decls, t, *x, params),
         TyKind::View(_) => Kind::Scoped,
         TyKind::Param(i) => {
             if params.get(*i as usize).is_some_and(|b| b & PLAIN != 0) {
@@ -1304,6 +1435,7 @@ pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, para
             TyKind::Scalar(_) => all,
             TyKind::Fn(..) => PLAIN | SHAREABLE | SEND,
             TyKind::Tuple(xs) => meet(xs),
+            TyKind::Array(x, _) => has_bounds(decls, t, *x, params) & all,
             TyKind::View(x) => has_bounds(decls, t, *x, params) & (KEY | ORDERED),
             TyKind::Param(i) => params.get(*i as usize).copied().unwrap_or(0),
             TyKind::Adt(d, args) => {
@@ -1315,12 +1447,18 @@ pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, para
                     Some(Role::Rc) => SHAREABLE | (meet(args) & (KEY | ORDERED)),
                     Some(Role::Arc) => SHAREABLE | SEND | (meet(args) & (KEY | ORDERED)),
                     Some(Role::Box) => meet(args) & (SHAREABLE | SEND | KEY | ORDERED),
-                    Some(Role::Sender | Role::Receiver) => SEND,
+                    Some(Role::Sender | Role::Receiver | Role::HostFile) => SEND,
                     Some(Role::Map) => meet(args) & (SHAREABLE | SEND),
                     Some(Role::Capability) => PLAIN | SHAREABLE | SEND,
                     Some(_) => 0,
                     None if decl.structural => meet(args),
-                    None => decl.declared & !PLAIN,
+                    None => {
+                        let mut bounds = decl.declared & !PLAIN;
+                        for &i in &decl.summary.bound_params {
+                            bounds &= has_bounds(decls, t, args[i as usize], params);
+                        }
+                        bounds
+                    }
                 }
             }
         }
@@ -1380,6 +1518,11 @@ fn write_canonical(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, s: 
                 s.push(']');
             }
         }
+        TyKind::Array(x, n) => {
+            s.push_str("Inline[");
+            write_canonical(decls, t, *x, s);
+            let _ = write!(s, ", {n}]");
+        }
         TyKind::View(x) => {
             s.push_str("View[");
             write_canonical(decls, t, *x, s);
@@ -1408,4 +1551,27 @@ fn write_canonical(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, s: 
             }
         }
     }
+}
+
+/// A literal inline length, checked without evaluating a body or a constant.
+pub(crate) fn literal_length(item: hirsel_core_syntax::Item<'_>, n: NodeId) -> Option<u64> {
+    if item.tree.node(n).kind != NodeKind::Literal {
+        return None;
+    }
+    let token = item.tree.node(n).token?;
+    let text = item.tree.token_text(item.text, token).replace('_', "");
+    let digits = ["u8", "u16", "u32", "u64", "i8", "i16", "i32", "i64"]
+        .iter()
+        .find_map(|suffix| text.strip_suffix(suffix))
+        .unwrap_or(&text);
+    let (radix, digits) = if let Some(d) = digits.strip_prefix("0x") {
+        (16, d)
+    } else if let Some(d) = digits.strip_prefix("0o") {
+        (8, d)
+    } else if let Some(d) = digits.strip_prefix("0b") {
+        (2, d)
+    } else {
+        (10, digits)
+    };
+    u64::from_str_radix(digits, radix).ok()
 }

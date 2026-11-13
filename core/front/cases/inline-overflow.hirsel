@@ -1,0 +1,3 @@
+// expect: refuse OWN-2 at 3:12
+// OWN-2: 8 times u64::MAX is larger than the portable logical size.
+type Bad { data: Inline[u64, 18446744073709551615] }

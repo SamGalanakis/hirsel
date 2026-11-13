@@ -1,0 +1,6 @@
+// expect: refuse LANG-12 at 6:25
+// OWN-4: Item's field mentions T, so Item[Entry] is not key.
+type Entry { name: String }
+type Item[T]: key { item: T }
+type Check[K: key] { value: K }
+type Bad { value: Check[Item[Entry]] }

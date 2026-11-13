@@ -1,0 +1,12 @@
+// expect: accept
+// OWN-4: an unused argument cannot remove a declared bound, even through Id.
+type Entry { name: String }
+type Id[T]: key { slot: u64 }
+type Outer[T]: key { id: Id[T] }
+type Check[K: key] { value: K }
+type Good { value: Check[Outer[Entry]] }
+resource type R {}
+type Phantom { id: Outer[R] }
+// expect: holds Phantom -
+type Pair[T]: shareable { value: T }
+type Shareable { value: Rc[Pair[u64]] }

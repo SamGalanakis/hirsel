@@ -1261,3 +1261,154 @@ R1 EXTERNAL(void *context, uint64_t mode) {
         eval::Outcome::Failed(vec!["Cancelled".into()])
     );
 }
+
+struct ProviderCase {
+    call: Case,
+    argv: Vec<&'static str>,
+    outcome: eval::Outcome,
+    stdout: Vec<u8>,
+}
+fn provider_cases() -> Vec<ProviderCase> {
+    use eval::Outcome::{Failed, Returned};
+    // The eight hand-derived runs in providers.core, in their documented order.
+    [
+        (
+            0,
+            vec![0, 0, 1],
+            u64::MAX,
+            vec!["prog", "hello"],
+            Returned(vec![2, 5]),
+            b"hello".to_vec(),
+        ),
+        (
+            0,
+            vec![0, 0, 2],
+            u64::MAX,
+            vec!["prog", "hello"],
+            Returned(vec![2, 0]),
+            vec![],
+        ),
+        (
+            0,
+            vec![0, 0, 0],
+            u64::MAX,
+            vec![],
+            Returned(vec![0, 0]),
+            vec![],
+        ),
+        (
+            1,
+            vec![7],
+            1000,
+            vec![],
+            Returned(vec![3, 2, 105, 2]),
+            vec![],
+        ),
+        (1, vec![7], 4, vec![], Failed(vec!["Unwrap".into()]), vec![]),
+        (2, vec![7, 40], 1000, vec![], Returned(vec![2, 3]), vec![]),
+        (2, vec![7, 32], 1000, vec![], Returned(vec![2, 3]), vec![]),
+        (
+            2,
+            vec![7, 31],
+            1000,
+            vec![],
+            Failed(vec!["Bounds".into()]),
+            vec![],
+        ),
+    ]
+    .into_iter()
+    .map(|(f, args, limit, argv, outcome, stdout)| ProviderCase {
+        call: Case {
+            function: FuncId(f),
+            args,
+            limit,
+            injection: None,
+        },
+        argv,
+        outcome,
+        stdout,
+    })
+    .collect()
+}
+
+#[test]
+fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
+    let module = text::parse(include_str!(
+        "../../../hirsel-core-ir/samples/providers.core"
+    ))
+    .unwrap();
+    wf::module(&module).unwrap();
+    let context = Context::new();
+    LlvmModule::parse(&context, "providers", &emit_ir(&module).unwrap())
+        .unwrap()
+        .verify()
+        .unwrap();
+    for case in provider_cases() {
+        let expected = eval::run_args(
+            &module,
+            case.call.function,
+            &case.call.args,
+            case.call.limit,
+            &case.argv,
+        );
+        assert_eq!(expected.outcome, case.outcome);
+        assert_eq!(expected.used, 0);
+        assert_eq!(expected.stdout, case.stdout);
+        assert!(expected.stderr.is_empty());
+    }
+    for op in HostOp::ALL {
+        let params: &[&str] = match op {
+            HostOp::Open => &["u64", "ptr", "u8"],
+            HostOp::Close | HostOp::TryLock | HostOp::Unlock | HostOp::WallMs | HostOp::MonoNs => {
+                &["u64"]
+            }
+            _ => &["u64", "ptr"],
+        };
+        let results: &[&str] = if op.waits() {
+            &["u64", "u8", "u32", "u64"]
+        } else {
+            &["u64"]
+        };
+        let names = |n: usize| {
+            (0..n)
+                .map(|i| format!("v{i}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let typed = |ts: &[&str], offset: usize| {
+            ts.iter()
+                .enumerate()
+                .map(|(i, t)| format!("v{}: {t}", i + offset))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let source = format!(
+            "core v1\nsig g0 = ({}) -> ({})\ninst n0 = tests@0/provider/{} [] []\nfn f0 = n0 g0 {{\nb0({}):\n {} = call rt.{} g0 ({})\n return {}\n}}\n",
+            params.join(", "),
+            results.join(", "),
+            op.name(),
+            typed(params, 0),
+            typed(results, params.len()),
+            op.name(),
+            names(params.len()),
+            (params.len()..params.len() + results.len())
+                .map(|i| format!("v{i}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let module = text::parse(&source).unwrap();
+        wf::module(&module).unwrap();
+        let ir = emit_ir(&module).unwrap();
+        LlvmModule::parse(&context, op.name(), &ir)
+            .unwrap()
+            .verify()
+            .unwrap();
+        assert!(ir.contains("sret([32 x i8])"));
+        assert_eq!(
+            ir.contains("icmp ne i8"),
+            op.waits(),
+            "{} status",
+            op.name()
+        );
+    }
+}

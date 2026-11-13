@@ -55,6 +55,26 @@ impl FunctionEmitter<'_> {
             args.iter().map(|(t, v)| format!("{t} {v}")).collect(),
         )
     }
+    fn host_call(&mut self, op: HostOp, args: &[String]) -> Vec<String> {
+        let operand = args.get(1).map(String::as_str).unwrap_or("null");
+        let mode = args.get(2).map(String::as_str).unwrap_or("0");
+        let mut values = self.native_call(
+            "hirsel_core_host_op",
+            &[U, K, Ty::Scalar(Scalar::U32), U, K],
+            &[
+                ("ptr".into(), "%context".into()),
+                ("i8 zeroext".into(), op.code().to_string()),
+                ("i64".into(), args[0].clone()),
+                ("ptr".into(), operand.into()),
+                ("i8 zeroext".into(), mode.into()),
+                ("i64".into(), "0".into()),
+            ],
+        );
+        if !op.waits() {
+            values.truncate(1);
+        }
+        values
+    }
     pub(super) fn runtime_call(&mut self, op: RtOp, site: &CallSite) -> Result<()> {
         let args = site
             .args
@@ -70,6 +90,15 @@ impl FunctionEmitter<'_> {
         let u = |v: &str| ("i64".into(), v.to_string());
         let values = match op {
             RtOp::DestId => self.native_call("hirsel_core_dest_id", &[U], &[]),
+            RtOp::ArgsLen => {
+                self.native_call("hirsel_core_args_len", &[U], &[p("%context"), u(&args[0])])
+            }
+            RtOp::ArgsGet => self.native_call(
+                "hirsel_core_args_get",
+                &[P],
+                &[p("%context"), u(&args[0]), u(&args[1])],
+            ),
+            RtOp::Host(op) => self.host_call(op, &args),
             RtOp::CompareBytes => {
                 vec![self.compare_bytes(&[p(&args[0]), u(&args[1]), p(&args[2]), u(&args[3])])]
             }

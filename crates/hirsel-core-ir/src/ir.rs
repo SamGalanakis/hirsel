@@ -560,16 +560,31 @@ pub enum Counted {
 /// operation's commit point (FAIL-3), so a refused operation leaves it in place.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum RtOp {
-    Spawn { x: TypeId, r: TypeId },
-    Join { r: TypeId },
+    Spawn {
+        x: TypeId,
+        r: TypeId,
+    },
+    Join {
+        r: TypeId,
+    },
     Cancel,
     CheckCancel,
-    ChannelNew { item: TypeId },
+    ChannelNew {
+        item: TypeId,
+    },
     ChannelSender,
-    Send { item: TypeId },
-    TrySend { item: TypeId },
-    Receive { item: TypeId },
+    Send {
+        item: TypeId,
+    },
+    TrySend {
+        item: TypeId,
+    },
+    Receive {
+        item: TypeId,
+    },
     DestId,
+    /// Bytewise order of two byte ranges (SEM-7): `String`, `Text` and `Bytes`.
+    CompareBytes,
 }
 
 /// The primary cause a `Raise` records (FAIL-2). Overflow, Bounds and Division are
@@ -599,11 +614,16 @@ impl RtOp {
     /// | `try_send[T]` | sender `ptr`, `&T` | status `u8`: 0 published, 1 `Full`, 2 `Closed` |
     /// | `receive[T]` | receiver `ptr`, `&T` | `bool`: received (false: `Closed`) |
     /// | `dest_id` | | `u64`: a destination identity no other call of the run returns (MEM-4) |
+    /// | `compare_bytes` | `a: ptr`, `a_len: u64`, `b: ptr`, `b_len: u64` | `i8`: -1, 0 or 1 as `a` orders before, equal to or after `b` |
     ///
     /// `f` is a plain function `(&X) -> () dest R`. `channel_new` with `cap` 0 fails
     /// with `Bounds`; `send`, `receive`, `join` and `check_cancel` fail with
     /// `Cancelled` when they observe it (CONC-7). These five are the rows that can
     /// fail ([`RtOp::fails`]); the others never do.
+    ///
+    /// `compare_bytes` orders unsigned bytes from the first, a proper prefix first
+    /// (SEM-7); it reads both ranges, writes nothing, admits nothing and takes no
+    /// context. A pointer with length 0 is never read, so it may be null.
     pub fn signature(self) -> Signature {
         use Param::{Address as A, Value as V};
         let (u8_, u64_, bool_) = (
@@ -623,6 +643,10 @@ impl RtOp {
             RtOp::TrySend { item } => (vec![V(p), A(item)], vec![u8_]),
             RtOp::Receive { item } => (vec![V(p), A(item)], vec![bool_]),
             RtOp::DestId => (vec![], vec![u64_]),
+            RtOp::CompareBytes => (
+                vec![V(p), V(u64_), V(p), V(u64_)],
+                vec![Ty::Scalar(Scalar::I8)],
+            ),
         };
         Signature {
             params,
@@ -653,7 +677,11 @@ impl RtOp {
             | RtOp::Send { item }
             | RtOp::TrySend { item }
             | RtOp::Receive { item } => vec![item],
-            RtOp::Cancel | RtOp::CheckCancel | RtOp::ChannelSender | RtOp::DestId => vec![],
+            RtOp::Cancel
+            | RtOp::CheckCancel
+            | RtOp::ChannelSender
+            | RtOp::DestId
+            | RtOp::CompareBytes => vec![],
         }
     }
 }

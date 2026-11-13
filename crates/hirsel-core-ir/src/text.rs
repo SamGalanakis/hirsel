@@ -227,6 +227,7 @@ fn rt(op: RtOp) -> String {
         RtOp::TrySend { item } => format!("rt.try_send[t{}]", item.0),
         RtOp::Receive { item } => format!("rt.receive[t{}]", item.0),
         RtOp::DestId => "rt.dest_id".into(),
+        RtOp::CompareBytes => "rt.compare_bytes".into(),
     }
 }
 fn list<T>(items: impl IntoIterator<Item = T>, f: impl Fn(T) -> String) -> String {
@@ -1414,6 +1415,7 @@ impl BodyParser {
                 "try_send" => RtOp::TrySend { item: tys(1)?[0] },
                 "receive" => RtOp::Receive { item: tys(1)?[0] },
                 "dest_id" => RtOp::DestId,
+                "compare_bytes" => RtOp::CompareBytes,
                 _ => return Err(format!("unknown engine operation `{t}`")),
             })
         } else {

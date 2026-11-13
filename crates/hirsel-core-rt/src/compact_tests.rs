@@ -244,3 +244,23 @@ fn index_charge_overflow_is_a_capacity_value_before_any_storage_is_written() {
     drop(region);
     assert_eq!(ctx.available(), 128);
 }
+
+/// SEM-7: text orders by unsigned bytes, a proper prefix first. The bugs: a
+/// memcmp over the shorter length that stops there (prefix compares equal), and a
+/// signed-byte compare (0x80 before 0x7f). Empty ranges are never read.
+#[test]
+fn byte_order_is_unsigned_with_a_proper_prefix_first() {
+    let cmp = |a: &[u8], b: &[u8]| {
+        // SAFETY: both ranges are live slices.
+        unsafe { hirsel_core_compare_bytes(a.as_ptr(), a.len() as u64, b.as_ptr(), b.len() as u64) }
+    };
+    assert_eq!(cmp(b"ab", b"abc"), -1);
+    assert_eq!(cmp(b"abd", b"abc"), 1);
+    assert_eq!(cmp(b"abc", b"abc"), 0);
+    assert_eq!(cmp(&[0x80], &[0x7f]), 1);
+    // SAFETY: length 0 is never read.
+    assert_eq!(
+        unsafe { hirsel_core_compare_bytes(std::ptr::null(), 0, std::ptr::null(), 0) },
+        0
+    );
+}

@@ -116,6 +116,33 @@
 //!   `copy`. An unmarked `T` parameter also takes a `View[T]` (OWN-7): the
 //!   producer passes the locator.
 //!
+//! # Strings and literals (FORM v1b)
+//!
+//! A `List`, `String` or `Map` carrier `{data, length, capacity}` owns storage
+//! exactly when its capacity is not 0. Cleanup, the counted release's last step
+//! and growth test the capacity, never the data pointer: a capacity-0 carrier frees
+//! nothing, and its first growth is an `alloc own` against the current limit
+//! (MEM-26), never `alloc .. like`.
+//! - **A string literal** (core.md "Literals") is `{static dN, byte length, 0}`:
+//!   one `static` read and two constants, stored through `byte` steps over the
+//!   carrier. It admits nothing, charges nothing and cannot fail. `""` may use a
+//!   null pointer. Passed to a view parameter it is that carrier in a frame slot,
+//!   with nothing to clean: a capacity-0 `String` has no storage and plain
+//!   elements, so a producer may omit its `drop`.
+//! - A literal's length exceeds its capacity, so every room test is
+//!   `length + n > capacity` (after the overflow check), never `capacity - length`.
+//!   Growth copies `length` bytes out of the static data and frees nothing. Static
+//!   data is read-only: no `store` or `copy` targets it (the evaluator stops on
+//!   one). `string.into_bytes` and `clone` of a capacity-0 `String` copy into
+//!   newly admitted storage of capacity equal to the length (core.md, MEM-24);
+//!   `string.as_bytes` reports capacity 0.
+//! - **Order** of `String`, `Text` (through its `text.as_string` view), `Bytes`
+//!   and `List[u8]` is `rt.compare_bytes(a, a_len, b, b_len) -> i8` (-1, 0, 1;
+//!   unsigned bytes, a proper prefix first, SEM-7): `==` is `eq r, 0`, `<` is
+//!   `lt r, 0`. Other sequences, tuples, records and variants compare by producer
+//!   code over their components, calling it for each text component. Comparison
+//!   admits nothing.
+//!
 //! # Capabilities and the entry (FORM v1b)
 //!
 //! A capability value (`Dir`, `Net`, `Clock`, `Random`, `Stdout`, `Stderr`,
@@ -219,7 +246,8 @@
 //! append the `u8` status, and only those may name a failure successor. The
 //! runtime entries behind instructions (`alloc`, `free`, `limit_enter`, region
 //! operations, `trim`) are not calls in FORM and report refusals as values.
-//! `rt.dest_id` is a runtime row with no parameters and one `u64`, no status.
+//! `rt.dest_id` is a runtime row with no parameters and one `u64`, no status;
+//! `rt.compare_bytes` likewise takes no context and has no status.
 //!
 //! Layouts are the recipes': resources and boxes are pointers, counted nodes are
 //! count then payload.

@@ -22,6 +22,7 @@ const SAMPLES: &[(&str, &str)] = &[
     ("custody", include_str!("../samples/custody.core")),
     ("variants", include_str!("../samples/variants.core")),
     ("sequences", include_str!("../samples/sequences.core")),
+    ("strings", include_str!("../samples/strings.core")),
 ];
 
 fn load(name: &str, text: &str) -> Module {

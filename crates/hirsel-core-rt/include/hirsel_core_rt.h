@@ -31,6 +31,10 @@ typedef struct { uint64_t requested, available; } HirselCoreCapacity;
 typedef struct { void *pointer; HirselCoreCapacity capacity; } HirselCoreAllocation;
 /* rt.dest_id: no hidden context or failure status; never admits or allocates. */
 uint64_t hirsel_core_dest_id(void);
+/* rt.compare_bytes: bytewise order (SEM-7), -1, 0 or 1, a proper prefix first; no
+   context or failure status; an empty range is never read. */
+int8_t hirsel_core_compare_bytes(const uint8_t *a, uint64_t a_len, const uint8_t *b,
+                                 uint64_t b_len);
 HirselCoreContext *hirsel_core_context_new(uint64_t bytes);
 void hirsel_core_context_free(HirselCoreContext *);
 HirselCoreAllocation hirsel_core_alloc(const HirselCoreContext *, void *like,

@@ -13,7 +13,7 @@
 //! `try_unwrap` returns its uniqueness test. `causes_take` transfers a complete
 //! chain, null for empty; cause accessors return borrowed pointers. allocation_status
 //! returns 1 only for a null result under the current finalizer grant, else 0. Other
-//! entries return unit, except dest_id (u64) and native_alloc/region_refill
+//! entries return unit, except dest_id (u64), compare_bytes (i8) and native_alloc/region_refill
 //! (nonnull native base/payload). Count overflow and physical host exhaustion are run
 //! stops. A drop recipe's boolean means completion, with false requesting resume.
 //!
@@ -22,7 +22,9 @@
 //! available field at zero; no source-level Capacity exists on success.
 //!
 //! FORM v1b: `rt.dest_id` maps to `hirsel_core_dest_id() -> u64`, with no
-//! parameters, context or failure status. `trim` maps to region_lower_charge;
+//! parameters, context or failure status. `rt.compare_bytes` maps to
+//! `hirsel_core_compare_bytes(a, a_len, b, b_len) -> i8`, likewise without
+//! context or status. `trim` maps to region_lower_charge;
 //! allocation's byte size is already a dynamic parameter. The producer writes
 //! the 16-byte blob header and data, checks Child identity/offset and width/fit,
 //! and emits writer/copy/index operations over these entries and byte accesses.
@@ -286,6 +288,27 @@ use std::ptr::{self, NonNull};
 #[unsafe(no_mangle)]
 pub extern "C" fn hirsel_core_dest_id() -> u64 {
     crate::destination::next()
+}
+
+/// `rt.compare_bytes`: the bytewise order of two byte ranges (SEM-7), -1, 0 or 1,
+/// a proper prefix first. No context, admission or failure status; a range of
+/// length 0 is never read, so its pointer may be null or static.
+///
+/// # Safety
+/// Each non-empty range must be readable for its length.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_compare_bytes(
+    a: *const u8,
+    a_len: u64,
+    b: *const u8,
+    b_len: u64,
+) -> i8 {
+    let range = |p: *const u8, n: u64| match n {
+        0 => &[][..],
+        // SAFETY: the caller passes a readable range of n bytes.
+        n => unsafe { std::slice::from_raw_parts(p, n as usize) },
+    };
+    range(a, a_len).cmp(range(b, b_len)) as i8
 }
 
 #[cfg(test)]

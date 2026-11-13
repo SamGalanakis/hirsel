@@ -5,8 +5,10 @@
 //! forwarding. A spawned child runs to its end at the spawn, so the event order is
 //! the program order and nothing waits. A delivered `Causes` owns the child's used
 //! cells until it is dropped. Compact data is region bytes read and written through
-//! `byte` steps, as a producer lowers it. Lists, maps and static data are not
-//! modelled and panic.
+//! `byte` steps, as a producer lowers it. Each static is a read-only block made
+//! at the start of the run: a store into one, or a `free` of one, stops the run.
+//! Sequence storage is cleaned by its carrier; list and map operations are the
+//! producer's code.
 
 use crate::*;
 use hirsel_core_layout::{
@@ -54,6 +56,8 @@ struct Blk {
     res: Option<Res>,
     /// A counted node's kind, fixed by its `alloc`; its operations must name it.
     counted: Option<Counted>,
+    /// Static data (`static dN`): read, never written or freed.
+    fixed: bool,
 }
 struct Res {
     grant: u64,
@@ -165,6 +169,11 @@ pub fn run_injected(
         admissions: 0,
         injection,
     };
+    for s in &m.statics {
+        let p = mach.block(s.bytes.len() as u64, None, 0, None);
+        mach.mem[split(p).0].bytes.clone_from(&s.bytes);
+        mach.mem[split(p).0].fixed = true;
+    }
     for shape in &m.types {
         let fields: Vec<&hirsel_core_layout::Field> = match &shape.body {
             Shaped::Record(f) => f.iter().collect(),
@@ -229,6 +238,7 @@ impl Machine<'_> {
             charge,
             res,
             counted: None,
+            fixed: false,
         });
         ptr(self.mem.len() - 1, 0)
     }
@@ -245,6 +255,7 @@ impl Machine<'_> {
     fn put(&mut self, p: u64, bytes: &[u8]) {
         let (b, o) = split(p);
         assert!(self.mem[b].live, "use of a freed block");
+        assert!(!self.mem[b].fixed, "a store into static data");
         self.mem[b].bytes[o..o + bytes.len()].copy_from_slice(bytes);
     }
     fn store(&mut self, p: u64, n: usize, v: u64) {
@@ -255,6 +266,7 @@ impl Machine<'_> {
     fn free(&mut self, p: u64) {
         let (b, o) = split(p);
         assert!(o == 0 && self.mem[b].live, "free of a non-block");
+        assert!(!self.mem[b].fixed, "a free of static data");
         let blk = &mut self.mem[b];
         blk.live = false;
         let mut n = blk.charge;
@@ -442,12 +454,15 @@ impl Machine<'_> {
             FieldTy::Seq(element) => {
                 let block = self.load(at, 8);
                 let length = self.load(at + 8, 8);
+                let capacity = self.load(at + 16, 8);
                 let stride = self.stride(element);
                 let mut failed = false;
                 for i in 0..length {
                     failed |= self.drop_field(t, block + i * stride, element);
                 }
-                if block != 0 {
+                // Capacity 0 has no storage: empty, or static data the carrier does
+                // not own (core.md "Literals").
+                if capacity != 0 {
                     self.free(block);
                 }
                 failed
@@ -630,6 +645,14 @@ impl Machine<'_> {
             RtOp::DestId => {
                 self.dests += 1;
                 vec![self.dests]
+            }
+            RtOp::CompareBytes => {
+                let range = |p: u64, n: u64| match n {
+                    0 => Vec::new(),
+                    n => self.get(p, n as usize).to_vec(),
+                };
+                let order = range(a[0], a[1]).cmp(&range(a[2], a[3]));
+                vec![order as i8 as u8 as u64]
             }
             RtOp::ChannelNew { item } => {
                 let item = TypeRef(item.0);
@@ -868,7 +891,8 @@ impl Machine<'_> {
             Inst::FunctionRef { result, function } => {
                 vals[result.index()] = FN_BASE + u64::from(function.0)
             }
-            Inst::ReadStatic { .. } => panic!("static data is not modelled"),
+            // Statics are the first blocks, in module order.
+            Inst::ReadStatic { result, data } => vals[result.index()] = ptr(data.index(), 0),
             Inst::Unary {
                 result,
                 op,

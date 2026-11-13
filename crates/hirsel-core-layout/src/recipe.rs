@@ -127,7 +127,9 @@ pub struct FieldDrop {
 /// insertion order, each key before its value ([`map_entry`]). Those loops are in
 /// the glue built from this recipe. A `Seq` or `Map` with storage then frees it,
 /// refunding round8(capacity × element logical size), resp. round8(capacity ×
-/// (key + value + 16)) (MEM-24), to its own record; capacity 0 has no storage.
+/// (key + value + 16)) (MEM-24), to its own record; capacity 0 has no storage,
+/// whatever its data pointer (a string literal points at static data), so engines
+/// test the capacity, never the pointer.
 ///
 /// **Counted cleanup** visits the same order, one step at a time, so a release
 /// yields one descendant at a time and resumes by a cursor of steps taken. Steps,

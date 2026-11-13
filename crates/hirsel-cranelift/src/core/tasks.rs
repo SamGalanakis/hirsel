@@ -42,7 +42,7 @@ impl Function<'_, '_, '_> {
         Ok(storage)
     }
     pub fn runtime_call(&mut self, op: RtOp, call: &CallSite) -> Result<()> {
-        let mut args = [Value::from_u32(0); 3];
+        let mut args = [Value::from_u32(0); 4];
         for (i, arg) in call
             .args
             .get(&self.body.pools.args)
@@ -60,6 +60,15 @@ impl Function<'_, '_, '_> {
         let n = match op {
             RtOp::DestId => {
                 outputs[0] = self.c_call("hirsel_core_dest_id", &[], &[U], &[])?[0];
+                1
+            }
+            RtOp::CompareBytes => {
+                outputs[0] = self.c_call(
+                    "hirsel_core_compare_bytes",
+                    &[P, U, P, U],
+                    &[Ty::Scalar(Scalar::I8)],
+                    &args,
+                )?[0];
                 1
             }
             RtOp::CheckCancel => {

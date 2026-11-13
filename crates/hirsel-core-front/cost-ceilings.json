@@ -1,39 +1,39 @@
 {
   "measurement": "Buck release, CPU 16, jobs 1, instructions:u, fresh private store, complete driver interval including publication and teardown; separate perf stat instructions:u covers process startup, dynamic loader, output and exit",
-  "basis": "core-ops-914 generic runtime/count-layout substitution, FORM 56 carrier views and fourth private string kernel complete more source bodies. Actual fixed-manifest code lines and current projections; observation plus two percent rounded up to 100. Fixed finished-process budget remains 60000.",
+  "basis": "List kernels and typed generic numeric helpers complete more source bodies; the FORM61 range capacity correction and byte literal ownership are included. Ordinary release observations plus 2 percent, rounded up to 100. The fixed 60000 process budget is unchanged. The parallel runtime/view observation is retained in history; the active observation completes more bodies.",
   "corpora": {
     "m1": {
-      "code_lines": 6235,
-      "check_lower_per_line": 24800,
-      "whole_request_per_line": 46700,
-      "whole_process_per_line": 46800
+      "code_lines": 6268,
+      "check_lower_per_line": 24900,
+      "whole_request_per_line": 46800,
+      "whole_process_per_line": 46900
     },
     "std": {
-      "code_lines": 2844,
-      "check_lower_per_line": 14700,
-      "whole_request_per_line": 34000,
-      "whole_process_per_line": 34200
+      "code_lines": 2877,
+      "check_lower_per_line": 14900,
+      "whole_request_per_line": 34400,
+      "whole_process_per_line": 34600
     }
   },
   "margin": "2 percent over the ordinary release observation, rounded up to 100 instructions per code line. Lower ceilings after savings. Re-baseline expected work growth only with reason, completed-body counts and commit range; do not change the fixed finished-process budget.",
   "finished_budget_per_line": 60000,
-  "forecast_revision": "ce2ddd012b79d8913c9699326a0950c29c2bd94e",
+  "forecast_revision": "14419966ec9d9f7d0c693a31639726dc6dc2f442",
   "completion_forecast": {
     "m1": {
-      "complete_bodies": 306,
-      "bodies": 315,
-      "missing_check_lower_per_line": 938.8105937426301,
-      "additional_publication_per_line": 114.81939866623404,
-      "measured_process_per_line": 45825.550601443465,
-      "finished_process_per_line": 46879.18059385233
+      "complete_bodies": 314,
+      "bodies": 317,
+      "missing_check_lower_per_line": 916.2693948419568,
+      "additional_publication_per_line": 28.035942323484033,
+      "measured_process_per_line": 45952.71011486918,
+      "finished_process_per_line": 46897.01545203461
     },
     "std": {
-      "complete_bodies": 129,
-      "bodies": 137,
-      "missing_check_lower_per_line": 508.3604085208754,
-      "additional_publication_per_line": 144.94875149162684,
-      "measured_process_per_line": 33495.685302391,
-      "finished_process_per_line": 34148.9944624035
+      "complete_bodies": 136,
+      "bodies": 139,
+      "missing_check_lower_per_line": 461.59434453738186,
+      "additional_publication_per_line": 38.13690161708365,
+      "measured_process_per_line": 33855.46784845325,
+      "finished_process_per_line": 34355.19909460771
     }
   },
   "forecast_method": "Current process instructions plus recorded missing checker/emission and publication per line. Live construct self costs project the written population and calibrate to native check/lower less driver keys. Completed IR/template bytes per completed definition line are charged for every unfinished line, retaining partial IR, at measured definition-encoding and archive write/hash rates. Refresh projection/counts when support changes.",
@@ -245,6 +245,57 @@
           "check_lower_per_line": 14329.386427566807,
           "whole_request_per_line": 33315.15576652602,
           "whole_process_per_line": 33495.685302391
+        }
+      }
+    },
+    {
+      "from_revision": "9f0f79277830b53372e22c488552e36a13318269",
+      "to_revision": "14419966ec9d9f7d0c693a31639726dc6dc2f442",
+      "reason": "Expected support growth from List reserve/push/append/pop/clear/slice and byte/rigid setters, typed generic numeric helpers for core parse/sum, and adjacent Map/source/view support since the recorded baseline. Actual core/std source closure grew. FORM61 corrects range capacity; this rebaseline preserves the fixed finished-process budget.",
+      "completed_bodies_before": {
+        "m1": [
+          304,
+          315
+        ],
+        "std": [
+          127,
+          137
+        ]
+      },
+      "completed_bodies_after": {
+        "m1": [
+          314,
+          317
+        ],
+        "std": [
+          136,
+          139
+        ]
+      },
+      "previous_ceilings": {
+        "m1": {
+          "code_lines": 6239,
+          "check_lower_per_line": 24300,
+          "whole_request_per_line": 45700,
+          "whole_process_per_line": 45800
+        },
+        "std": {
+          "code_lines": 2848,
+          "check_lower_per_line": 14500,
+          "whole_request_per_line": 33800,
+          "whole_process_per_line": 33900
+        }
+      },
+      "measured_per_line": {
+        "m1": {
+          "check_lower_per_line": 24358.382418634334,
+          "whole_request_per_line": 45870.68602425016,
+          "whole_process_per_line": 45952.71011486918
+        },
+        "std": {
+          "check_lower_per_line": 14581.68230795968,
+          "whole_request_per_line": 33676.86583246437,
+          "whole_process_per_line": 33855.46784845325
         }
       }
     }

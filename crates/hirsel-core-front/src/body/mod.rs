@@ -46,6 +46,7 @@ mod compact;
 mod compare;
 mod control;
 pub(crate) mod core_ops;
+mod key_glue;
 mod lists;
 mod maps;
 mod ops;
@@ -331,6 +332,7 @@ impl Emitter {
                 GenericCall {
                     arguments: names,
                     dictionaries,
+                    operation: None,
                 },
             );
         }
@@ -677,6 +679,21 @@ fn is_float(t: &impl TyRead, ty: TyId) -> bool {
     matches!(t.kind(ty), TyKind::Scalar(Scalar::F32 | Scalar::F64))
 }
 
+/// Lay out emitted instructions in block order after control-flow construction.
+fn order_instructions(b: &mut Body) {
+    let mut insts = Vec::with_capacity(b.insts.len());
+    let mut anchors = Vec::with_capacity(b.insts.len());
+    for block in &mut b.blocks {
+        let (start, len) = (block.insts.start as usize, block.insts.len as usize);
+        let at = insts.len() as u32;
+        insts.extend_from_slice(&b.insts[start..start + len]);
+        anchors.extend_from_slice(&b.inst_anchors[start..start + len]);
+        block.insts = PoolRange::new(at, len as u32);
+    }
+    b.insts = insts;
+    b.inst_anchors = anchors;
+}
+
 impl Program<'_> {
     /// Check function `f`'s body and emit it into `e` (LANG-8: one visit, reading only
     /// this body, signatures and summaries).
@@ -903,6 +920,10 @@ struct Cx<'c, 'a, 'e> {
     callable_reps: Vec<Rep>,
     callable_regions: Vec<u32>,
     map_entries: HashMap<(TyId, TyId), maps::MapEntry>,
+    key_functions: HashMap<(TyId, key_glue::KeyOp), (TypeId, FuncId, Rep)>,
+    key_args: Vec<Arg>,
+    #[cfg(test)]
+    key_metadata_builds: usize,
     patterns: patterns::Patterns,
     /// Reused call workspaces, one for each active nesting level.
     call_scratch: Vec<calls::CallScratch>,
@@ -1006,6 +1027,10 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             callable_reps: vec![],
             callable_regions: vec![],
             map_entries: HashMap::default(),
+            key_functions: HashMap::default(),
+            key_args: vec![],
+            #[cfg(test)]
+            key_metadata_builds: 0,
             patterns: patterns::Patterns::default(),
             call_scratch: vec![],
             array_parts: vec![],
@@ -1408,18 +1433,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     /// Blocks end in visit order, which is not block order (a join is made before the
     /// arms that reach it end); a body's instructions are laid out in block order.
     fn block_order(&mut self) {
-        let b = &mut self.b;
-        let mut insts = Vec::with_capacity(b.insts.len());
-        let mut anchors = Vec::with_capacity(b.insts.len());
-        for blk in &mut b.blocks {
-            let (start, len) = (blk.insts.start as usize, blk.insts.len as usize);
-            let at = insts.len() as u32;
-            insts.extend_from_slice(&b.insts[start..start + len]);
-            anchors.extend_from_slice(&b.inst_anchors[start..start + len]);
-            blk.insts = PoolRange::new(at, len as u32);
-        }
-        b.insts = insts;
-        b.inst_anchors = anchors;
+        order_instructions(&mut self.b);
     }
     fn edge(&mut self, target: BlockId, args: &[ValueId]) -> EdgeId {
         let args = PoolRange::push(&mut self.b.pools.values, args.iter().copied());

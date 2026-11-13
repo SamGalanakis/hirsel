@@ -2,6 +2,8 @@
 use super::*;
 use hirsel_core_ir::InstanceKey;
 use hirsel_core_layout::{Layout, Recipe};
+use std::borrow::Cow;
+use std::collections::HashSet;
 use std::fmt;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
@@ -131,6 +133,20 @@ fn emit_unit(module: &Module, options: &NativeOptions) -> Result<Vec<u8>, String
     }
 }
 
+/// Recipe glue may be present in several independent definition products. Its
+/// instance identity names one symbol; later units import the first definition.
+fn define_once<'a>(module: &'a Module, emitted: &mut HashSet<InstanceKey>) -> Cow<'a, Module> {
+    let mut result = Cow::Borrowed(module);
+    for (i, function) in module.functions.iter().enumerate() {
+        if function.body.is_some()
+            && !emitted.insert(module.instances[function.instance.index()].clone())
+        {
+            result.to_mut().functions[i].body = None;
+        }
+    }
+    result
+}
+
 impl CheckProduct {
     /// Each checked body is already an emitter module, with signature-only imports.
     /// A callee implementation edit therefore recompiles its object alone.
@@ -164,6 +180,7 @@ impl CheckProduct {
             .map(|i| Store::new(&i.store_root().join("native")))
             .transpose()?;
         let mut objects = Vec::new();
+        let mut emitted = HashSet::new();
         for instance in reached {
             let store = if !self.definitions.contains_key(&instance.definition) {
                 library_store.as_ref().unwrap_or(&store)
@@ -172,7 +189,7 @@ impl CheckProduct {
             };
             let instance_body = materialized.get(instance);
             let body = &instance_body.product;
-            let ir = instance_body.ir();
+            let ir = define_once(instance_body.ir(), &mut emitted);
             let object_key = key(
                 "hirsel.core-object.v1",
                 &(
@@ -183,14 +200,14 @@ impl CheckProduct {
                     runtime,
                     &instance,
                     &body.key,
-                    ir,
+                    &*ir,
                 ),
             )?;
             let (identity, bytes, compiled) =
                 if let Some((hash, bytes)) = cached(store, object_key)? {
                     (hash, bytes, false)
                 } else {
-                    let bytes = emit_unit(ir, options).map_err(|message| NativeStop::Emit {
+                    let bytes = emit_unit(&ir, options).map_err(|message| NativeStop::Emit {
                         definition: instance.definition.clone(),
                         message,
                     })?;
@@ -596,6 +613,41 @@ fn link(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_glue_has_one_object_definition() {
+        fn unit(name: &str) -> Module {
+            hirsel_core_ir::text::parse(&format!(
+                r#"core v1
+sig g0 = () -> (u64)
+inst n0 = app@1/main/{name} [] []
+inst n1 = core@1/map/$key_equal ["u64"] []
+fn f0 = n0 g0 {{
+b0:
+ v0: u64 = call f1 g0 ()
+ return v0
+}}
+fn f1 = n1 g0 {{
+b0:
+ v0: u64 = const 17
+ return v0
+}}
+"#
+            ))
+            .unwrap()
+        }
+        let a = unit("a");
+        let b = unit("b");
+        let mut emitted = HashSet::new();
+        assert!(matches!(define_once(&a, &mut emitted), Cow::Borrowed(_)));
+        let selected = define_once(&b, &mut emitted);
+        assert!(selected.functions[0].body.is_some());
+        assert!(selected.functions[1].body.is_none());
+        assert!(
+            b.functions[1].body.is_some(),
+            "immutable source product remains complete"
+        );
+    }
     fn source_request(source: &str, dir: &Path) -> CheckRequest {
         let mut request = crate::tests::request(source, dir);
         let core = dir.join("core.hirsel");

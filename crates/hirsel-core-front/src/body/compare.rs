@@ -22,6 +22,26 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             TyKind::View(x) => *x,
             _ => t,
         };
+        if has_param(&self.t, t) && matches!(op, CompareOp::Eq | CompareOp::Ne) {
+            let value = self.key_operation(key_glue::KeyOp::Equal, t, &[l, r], n);
+            return Ok(if op == CompareOp::Ne {
+                value.map(|operand| {
+                    let result = self.value(Ty::Scalar(Scalar::Bool));
+                    self.inst(
+                        Inst::Unary {
+                            result,
+                            op: UnaryOp::Not,
+                            operand,
+                            fail: None,
+                        },
+                        n,
+                    );
+                    result
+                })
+            } else {
+                value
+            });
+        }
         self.comparable(t, 0)?;
         let (Some(l), Some(r)) = (l, r) else {
             return Ok(None);

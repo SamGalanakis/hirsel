@@ -1326,12 +1326,15 @@ impl Machine<'_> {
                 let exact = match op {
                     ArithOp::Add => Some(a + c),
                     ArithOp::Sub => Some(a - c),
-                    ArithOp::Mul => Some(a * c),
+                    ArithOp::Mul => Some(a.saturating_mul(c)),
                     ArithOp::Div => (c != 0).then(|| a / c),
                 };
                 let fits = exact.and_then(|e| fit(t, e));
                 vals[result.index()] = match mode {
                     ArithMode::Checked if op == ArithOp::Div => fits.unwrap_or(0),
+                    ArithMode::Wrapping | ArithMode::Checked if op == ArithOp::Mul => {
+                        mask(t, vals[left.index()].wrapping_mul(vals[right.index()]))
+                    }
                     ArithMode::Wrapping | ArithMode::Checked => mask(t, exact.unwrap() as u64),
                     ArithMode::Saturating => {
                         let (lo, hi) = range(t);

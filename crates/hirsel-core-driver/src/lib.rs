@@ -1,8 +1,12 @@
 //! One core-only request path from an immutable source snapshot to published products.
 //! Sources and signatures are explicit inputs; no old compiler or std image is loaded.
+mod diagnostics;
 mod image;
-pub use image::{CoreImage, LibraryInput};
+mod instances;
 mod meter;
+pub use diagnostics::{Diagnostic, IncompleteDiagnostic, SourceSite};
+pub use image::{CoreImage, LibraryInput};
+pub use instances::{InstanceStop, collect_instances};
 mod reuse;
 mod store;
 use bincode::Options;

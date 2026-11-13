@@ -5,14 +5,14 @@ use std::path::{Path, PathBuf};
 hirsel_guard::install!();
 
 #[derive(Serialize)]
-struct Output {
+struct Output<'a> {
     accepted: bool,
     root: String,
     files: usize,
     rechecked: usize,
     source_bytes: usize,
-    diagnostics: Vec<hirsel_core_resolve::Refusal>,
-    incomplete: Vec<hirsel_core_driver::Incomplete>,
+    diagnostics: Vec<hirsel_core_driver::Diagnostic<'a>>,
+    incomplete: Vec<hirsel_core_driver::IncompleteDiagnostic<'a>>,
     image: Option<String>,
 }
 fn hex(hash: hirsel_core_ids::ContentHash) -> String {
@@ -100,12 +100,16 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
     };
     let output = Output {
         accepted: product.accepted(),
-        root: hex(product.root),
+        root: if json {
+            hex(product.root)
+        } else {
+            String::new()
+        },
         files: product.files.len(),
         rechecked: product.rechecked.len(),
         source_bytes: product.bytes,
-        diagnostics: product.diagnostics.clone(),
-        incomplete: product.incomplete.clone(),
+        diagnostics: product.machine_diagnostics()?,
+        incomplete: product.machine_incomplete()?,
         image: image.map(|i| hex(i.identity)),
     };
     if json {
@@ -113,13 +117,13 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
     } else {
         for d in &output.diagnostics {
             eprintln!(
-                "{} {:?} {}..{}: {}",
+                "{} {} {}..{}: {}",
                 d.rule, d.primary.module, d.primary.span.start, d.primary.span.end, d.message
             );
         }
         for g in &output.incomplete {
             eprintln!(
-                "incomplete {:?} {}..{}: {}",
+                "incomplete {} {}..{}: {}",
                 g.primary.module, g.primary.span.start, g.primary.span.end, g.message
             );
         }
@@ -139,6 +143,7 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
     } else {
         i32::from(!product.diagnostics.is_empty())
     };
+    drop(output);
     meter.finish("output/render");
     drop(product);
     meter.finish("output/drop returned Arc");

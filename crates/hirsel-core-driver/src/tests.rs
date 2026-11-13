@@ -513,6 +513,92 @@ fn refused_library_never_publishes_an_image() {
 }
 
 #[test]
+fn machine_refusal_spans_point_into_current_file_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "// leading comment\nfn good() -> u64 { 42 }\nfn bad() -> u64 { let n = 7; 0 }\n";
+    let result = Driver::default()
+        .check(request(source, dir.path()), &mut Meter::new(false))
+        .unwrap();
+    let diagnostics = result.machine_diagnostics().unwrap();
+    let refusal = diagnostics.iter().find(|d| d.rule == "LANG-11").unwrap();
+    assert_eq!(refusal.primary.module, "app@1/main");
+    let span = refusal.primary.span;
+    assert_eq!(&source[span.start as usize..span.end as usize], "7");
+    let json = serde_json::to_value(refusal).unwrap();
+    for key in ["rule", "primary", "causal", "declared", "required"] {
+        assert!(json.get(key).is_some());
+    }
+}
+#[test]
+fn instance_collection_is_finite_deduplicated_and_order_independent() {
+    use hirsel_core_ir::InstanceKey;
+    let definition = |name: &str| DefPath::from_full(&format!("app@1/main/{name}")).unwrap();
+    let key = |name: &str| InstanceKey {
+        definition: definition(name),
+        types: vec![],
+        dictionaries: vec![],
+    };
+    let a = key("a");
+    let b = key("b");
+    let leaf = key("leaf");
+    let edges = |k: &InstanceKey| {
+        Ok(if *k == a || *k == b {
+            vec![leaf.clone(), leaf.clone()]
+        } else {
+            vec![]
+        })
+    };
+    assert_eq!(
+        collect_instances([a.clone(), b.clone()], 3, edges).unwrap(),
+        collect_instances([b.clone(), a.clone()], 3, edges).unwrap()
+    );
+    let root = InstanceKey {
+        definition: definition("growing"),
+        types: vec!["u64".into()],
+        dictionaries: vec![],
+    };
+    let stop = collect_instances([root], 8, |key| {
+        let mut next = key.clone();
+        next.types[0] = format!("List[{}]", key.types[0]);
+        Ok(vec![next])
+    })
+    .unwrap_err();
+    assert!(matches!(stop, InstanceStop::Resource { limit: 8, .. }));
+}
+#[test]
+fn checked_instance_collection_follows_calls_without_body_rechecks() {
+    let dir = tempfile::tempdir().unwrap();
+    let product = Driver::default()
+        .check(
+            request(
+                "fn leaf() -> u64 { 42 }\nfn root() -> u64 { leaf() }\n",
+                dir.path(),
+            ),
+            &mut Meter::new(false),
+        )
+        .unwrap();
+    let root = product
+        .definitions
+        .keys()
+        .find(|p| p.0.name == "root")
+        .unwrap();
+    let root = hirsel_core_ir::InstanceKey {
+        definition: root.clone(),
+        types: vec![],
+        dictionaries: vec![],
+    };
+    let instances = product.instances([root], 8).unwrap();
+    assert_eq!(
+        instances
+            .iter()
+            .map(|i| i.definition.0.name.as_str())
+            .collect::<Vec<_>>(),
+        ["leaf", "root"]
+    );
+    assert_eq!(names(&product), ["leaf", "root"]);
+}
+
+#[test]
 fn entry_waits_policy_is_an_explicit_cached_request_input() {
     let dir = tempfile::tempdir().unwrap();
     let source = "pub fn main() waits {}\n";
@@ -592,5 +678,51 @@ fn directory_source_file_symlinks_are_checked_instead_of_skipped() {
     assert_eq!(
         eval::run(&body.ir, body.check.function.unwrap(), &[], 1_000_000).outcome,
         eval::Outcome::Returned(vec![42])
+    );
+}
+
+#[test]
+fn installed_image_instances_are_demanded_without_source_rechecks() {
+    let lib = tempfile::tempdir().unwrap();
+    Driver::default()
+        .produce_image(
+            library_request("pub fn answer() -> u64 { 42 }\n", lib.path()),
+            &mut Meter::new(false),
+        )
+        .unwrap();
+    let image = CoreImage::open(&lib.path().join("store")).unwrap().unwrap();
+    let app = tempfile::tempdir().unwrap();
+    let mut req = request("fn caller() -> u64 { lib.answer() }\n", app.path());
+    req.library = LibraryInput::Image(Arc::clone(&image));
+    let product = Driver::default()
+        .check(req, &mut Meter::new(false))
+        .unwrap();
+    assert!(product.accepted(), "{:?}", product.diagnostics);
+    assert_eq!(image.decoded_bodies(), 0);
+    let key = hirsel_core_ir::InstanceKey {
+        definition: DefPath::from_full("app@1/main/caller").unwrap(),
+        types: vec![],
+        dictionaries: vec![],
+    };
+    let instances = product.instances([key], 8).unwrap();
+    assert_eq!(instances.len(), 2);
+    assert_eq!(image.decoded_bodies(), 1);
+    assert_eq!(names(&product), ["caller"]);
+}
+
+#[test]
+fn invalid_utf8_diagnostics_keep_raw_byte_spans() {
+    let dir = tempfile::tempdir().unwrap();
+    let req = request("", dir.path());
+    std::fs::write(dir.path().join("main.hirsel"), [0xf0, 0x28, 0x8c, 0x28]).unwrap();
+    let product = Driver::default()
+        .check(req, &mut Meter::new(false))
+        .unwrap();
+    let diagnostics = product.machine_diagnostics().unwrap();
+    assert!(!diagnostics.is_empty());
+    assert_eq!(diagnostics[0].primary.module, "app@1/main");
+    assert_eq!(
+        diagnostics[0].primary.span,
+        hirsel_core_syntax::Span { start: 0, end: 1 }
     );
 }

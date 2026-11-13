@@ -36,6 +36,15 @@ signature demand, and file/text/body rows decode on individual demand. Signature
 imports neither read library sources nor decode callee bodies. Image byte damage
 is reported as a cache miss requiring an image rebuild.
 
+`collect_instances` collects reachable distinct instances without source rechecking,
+with an explicit compiler-resource stop for growing instance families. The checked
+product adapter follows direct calls/function references in the CoreIR the checker
+currently emits; it explicitly stops when generic materialization or indirect target
+information is still unavailable. Native code production belongs to the emitters.
+
+`--json` emits PROG-7 rule IDs, module paths with absolute file byte spans, causal
+sites, and declared/required facts supplied by the checker. Refusals exit 1; compiler
+gaps and tool/resource errors exit 2; an accepted check exits 0.
 `--metrics <file>` records exclusive user-instruction stages or a counter refusal.
 Their sum is the independently read counter interval. External process-tree perf
 also counts startup and reporting outside that interval; report that residual.

@@ -51,6 +51,8 @@ an environment (OWN-19), so it has no heap size; a scoped type's own fields
 | `String` | own | `shareable`, `send`, `key`, `ordered` | 24 | nothing |
 | `List[T]` | own | `shareable`, `send`, `key`, `ordered` when T | 24 | T's |
 | `Map[K, V]` | own | `shareable`, `send` when K and V | 24 | K's and V's |
+| `Deque[T]` | own | `shareable`, `send` when T | 32 | T's |
+| `Heap[T]` | own | `shareable`, `send` when T | 24 | T's |
 | `Box[T]` | own | `shareable`, `send`, `key`, `ordered` when T | 8 | T's |
 | `Rc[T]` | counted | `shareable`; `key`, `ordered` when T | 8 | T's |
 | `Arc[T]` | counted | `shareable`, `send`; `key`, `ordered` when T | 8 | T's |
@@ -129,7 +131,26 @@ operations it names; nothing else about them may be inferred from an implementat
   where `xs[i]` and `list.set` fail with `Bounds`. `list.fill(mut xs, n, x)` appends `n`
   copies of `x`, growing once to at least `len + n`. `list.sum` adds the elements from index
   0, returns 0 for an empty list, and fails with `Overflow` at the first sum that does not
-  fit. A `List` is cleaned element by element from index 0.
+  fit. A `List` is cleaned element by element from index 0. `list.swap(mut xs, i, j)`
+  exchanges elements `i` and `j`, does nothing when `i == j`, admits nothing, and fails with
+  `Bounds` when either index is not below the length, as `list.set` does.
+  `list.sort_stable(mut xs, before)` permutes `xs` so that no element is followed by one
+  that `before` orders `Less` than it, keeping the original order of elements it orders
+  `Equal`; when `before` is not a total preorder the result is still a permutation of `xs`.
+  For two or more elements it admits one scratch block of `len` elements as a `List[T]`
+  ([MEM-24](budgets.md#mem-24-logical-charges)) before moving any, and refunds it before it
+  returns; on `Capacity` `xs` is unchanged. A failure inside `before` leaves `xs` holding
+  every element it had, in an unspecified order, refunds the scratch and propagates.
+- **Deques and heaps.** `deque.push_back` and `deque.push_front` add at either end of a
+  `Deque[T]`, and `heap.push` adds to a `Heap[T]`; on `Capacity` each returns `x` and leaves
+  the collection unchanged. `deque.pop_front`, `deque.pop_back` and `heap.pop` remove and
+  return an element, `None` when empty, and admit nothing; `heap.pop` returns a least element
+  by `<` ([SEM-7](semantics.md#sem-7-equality-and-order)), and `heap.peek` views the
+  element the next `pop` would return. `new` admits nothing and `len` counts elements. Both
+  grow by MEM-24 and never shrink. A `Deque` is cleaned from front to back, a `Heap` in an
+  unspecified order. A heap compares with `<` on an `ordered` type, which never fails, so
+  only `sort_stable` calls a caller's comparator. Both are core Hirsel code over private
+  bodiless functions, as `Map` is; no library module provides a deque or a heap.
 - **Maps.** `map.insert` returns its key and value with `Capacity`. `map.set(mut m, k, take
   v)` returns `Ok(old)` when `k` is present, after installing `v` in place, and `Error(v)`
   when it is absent; it copies no key and admits nothing. `map.update(mut m, k, f)`, where

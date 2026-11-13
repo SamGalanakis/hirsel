@@ -102,7 +102,8 @@ A charge is the logical size of what is allocated under the policy `charge-v1`:
 | allocation | charge |
 |---|---|
 | `Box[T]` node | the payload's size, rounded up to 8 |
-| `List[T]`, `String` storage | capacity × element size (`String`: 1), rounded up to 8 |
+| `List[T]`, `Deque[T]`, `Heap[T]`, `String` storage | capacity × element size (`String`: 1), rounded up to 8 |
+| `list.sort_stable` scratch | length × element size, rounded up to 8, refunded before it returns |
 | `Map[K, V]` storage | capacity × (key size + value size + 16), rounded up to 8 |
 | counted node | payload size + 8, rounded up to 8 |
 | owning closure environment | the sum of its captures' sizes, rounded up to 8 |
@@ -116,7 +117,7 @@ A charge is the logical size of what is allocated under the policy `charge-v1`:
 | `main`'s task at startup | 256 + 32, from the root limit before `main` runs; a root limit smaller than this does not start the run |
 | channel | capacity × item size + 64 |
 
-`list.new`, `string.new`, `map.new`, `list.with_capacity(0)` and an empty span builder
+`list.new`, `string.new`, `map.new`, `deque.new`, `heap.new`, `list.with_capacity(0)` and an empty span builder
 allocate nothing and charge 0; an explicit `span.with_capacity(r, 0)` and an empty
 `text.copy_in` still admit their count header ([core](core.md)). A `clone` or `clone_in`
 charges each copy at capacity equal to its length, and a compact `clone_in` charges the

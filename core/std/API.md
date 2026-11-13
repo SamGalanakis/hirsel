@@ -21,7 +21,7 @@ test log and writes nothing to the tree; the report depends on the checker, so i
 
 **Naming std from another package.** There are no imports (LANG-7). A module that extends core
 (list, string, char, int, float, map, result) merges into core's name, so `list.sort` and
-`string.find` are written bare everywhere. Modules that are std's alone (order, set, pool, dir,
+`string.find` are written bare everywhere. The deque and the heap are core modules (`Deque[T]`, `deque.push_back`, `Heap[T]`, `heap.pop`; docs/spec/core.md), not std: `std.deque` and `std.heap` are deleted, not re-exported, and `list.swap` and `list.sort_stable` are core. Modules that are std's alone (order, set, pool, dir,
 file) are reached from another package through the package name: `std.order.compare`,
 `std.set.Set[u64]`, `std.pool.Pool[T]`, `std.file.read(d, p)`, `std.file.Error`. Variants are
 written bare (`Held(f)`, `NotUtf8`).

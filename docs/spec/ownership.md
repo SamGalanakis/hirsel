@@ -156,9 +156,16 @@ The bounds are:
 - `integer`: exactly the integer types; `float`: exactly `f32` and `f64`. They are written
   only on the type parameters of core declarations ([core](core.md)), and are refused
   anywhere else: numeric generics are not in v1
-  ([reserved](reserved.md#not-in-v1)).
+  ([reserved](reserved.md#not-in-v1)). Each implies every bound that all the types it admits
+  have, so a body may rely on those and an instance needs no further check: `T: integer` is
+  also `plain`, `shareable`, `send`, `key`, `ordered`, `packed` and `streamable`, and `T:
+  float` is `plain`, `shareable`, `send`, `packed` and `streamable` but neither `key` nor
+  `ordered`. So a core body `fn max[T: integer](a: T, b: T) -> T { if a < b { b } else { a }
+  }` copies and compares, and `fn same[T: float](a: T, b: T) -> bool { a == b }` is refused
+  by [LANG-21](language.md#lang-21-operators).
 - `packed`, `streamable`: compact encodings
-  ([MEM-12](memory.md#mem-12-stable-sequences)), computed like `plain`.
+  ([MEM-12](memory.md#mem-12-stable-sequences)), computed like `plain`; `streamable` implies
+  `packed`, as MEM-12 defines it.
 
 Plain types are `shareable` and `send` without declaring it. Otherwise a nominal type
 declares the bounds it promises after its name (`type Node: shareable + send { .. }`), and

@@ -102,11 +102,13 @@ operations it names; nothing else about them may be inferred from an implementat
   operation grows by
   [MEM-24](budgets.md#mem-24-logical-charges). `string.from` copies a literal or a view.
 - **Literals.** A string literal has type `String`, is static, allocates nothing and is never
-  charged; it has capacity 0, so the first push onto it grows it into new storage, and no
-  operation writes static storage. A byte-string literal (`b".."`, `br#".."#`) is the same: it
-  has type `Bytes`, is static with capacity 0, allocates nothing, is never charged and cannot
-  fail, and `clone` and the transferring operations copy it into admitted storage as they do a
-  string literal. `""` and `b""` are the empty values of capacity 0.
+  charged; it has capacity 0, so the first push onto it grows it into new storage. This is
+  sound because no operation writes a `String`'s bytes in place: growth moves them into new
+  storage, and `truncate` and `clear` only shorten it. A `List` has in-place element writes
+  (`list.set`, `xs[i] = x`), so an own `List` that has elements always owns its storage:
+  capacity 0 means length 0, and no `List` is static. A byte-string literal (`b".."`,
+  `br#".."#`) therefore has type `Result[Bytes, Capacity]`: it admits its length as
+  `List[u8]` storage and copies its bytes. `""` is the empty `String` of capacity 0.
 - **Strings.** `string.into_bytes(take s)` transfers `s`'s owned storage unchanged, with its
   length, capacity and charge; a static `s` is copied into newly admitted storage of capacity
   equal to its length, and on `Capacity` the error returns `s`. `string.from_utf8` returns its

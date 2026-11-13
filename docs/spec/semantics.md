@@ -66,11 +66,19 @@ fail with `Bounds`, or return `None`, when `i` is out of range. `list.push` and 
 growing operations return `Result[_, (Capacity, T)]` or `Result[_, Capacity]` and grow as
 [MEM-24](budgets.md#mem-24-logical-charges) says; `list.capacity` reads the capacity and
 `list.reserve(mut xs, n)` grows it to at least `len + n`. Removing elements never
-allocates or shrinks. A view
+allocates or shrinks. A `List[T]` whose `T` has size 0 ([core](core.md#built-in-types)) has
+no element storage: its capacity is `2^64 − 1` from creation, and creating, reserving and
+growing it admit nothing; only its length is bounded, so a `reserve` past `2^64 − 1`
+elements and a push at that length return `Capacity` with `requested` `2^64 − 1`
+([MEM-22](budgets.md#mem-22-the-capacity-value)). A view
 returned by `list.get` or indexing is anchored to the list
 ([OWN-20](ownership.md#own-20-scoped-results-name-their-anchor)) and freezes it until the
 view's extent ends ([OWN-10](ownership.md#own-10-freezes)); iteration freezes it for the
 loop (SEM-6).
+
+```hirsel
+fn units() -> u64 { let xs: List[()] = list.new(); list.capacity(xs) }   // 2^64 − 1
+```
 
 ### SEM-5: Maps
 

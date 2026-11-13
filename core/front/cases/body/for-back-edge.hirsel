@@ -1,5 +1,4 @@
-// expect: refuse OWN-17 at 5:3
-// expect: gap cleanup of own values is not built
+// expect: refuse OWN-17 at 4:3
 fn f(take xs: List[u8]) {
   for _ in 0u8..3 { let _ = consume(take xs)
   }

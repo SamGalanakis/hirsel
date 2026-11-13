@@ -503,6 +503,8 @@ impl<'c, 'a> Cx<'c, 'a> {
     pub(super) fn for_(&mut self, n: NodeId, label: Option<String>) -> (TyId, Option<ValueId>) {
         let c = self.kids(n);
         let source = c[1];
+        let consuming = self.kind(n) == NodeKind::ForTake;
+        let source_owners = self.owner_mark();
         let mut ungrouped = source;
         while self.kind(ungrouped) == NodeKind::Group {
             ungrouped = self.kids(ungrouped)[0];
@@ -535,9 +537,25 @@ impl<'c, 'a> Cx<'c, 'a> {
             };
             let (ty, value) = if let Some(at) = at {
                 self.out.counts.nodes += 1;
-                self.need_live(at.place.slot, source);
-                self.check_holds(at.place, Act::Read, source);
-                (at.ty, self.place_ptr(at, source))
+                if consuming {
+                    if !matches!(self.t.kind(at.ty), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::List))
+                    {
+                        self.refuse(
+                            "LANG-16",
+                            source,
+                            "only an own List is consumed by iteration",
+                        );
+                        return (ERROR, None);
+                    }
+                    self.use_place(at, Use::Take, source);
+                    let value = self.emit_place(at, source);
+                    self.temp(at.ty, value);
+                    (at.ty, value)
+                } else {
+                    self.need_live(at.place.slot, source);
+                    self.check_holds(at.place, Act::Read, source);
+                    (at.ty, self.place_ptr(at, source))
+                }
             } else {
                 self.expr(source, None)
             };
@@ -564,18 +582,18 @@ impl<'c, 'a> Cx<'c, 'a> {
                     return (ERROR, None);
                 }
             };
-            if self.kind(n) == NodeKind::ForTake {
-                if matches!(self.t.kind(inner), TyKind::Array(..)) {
-                    self.refuse(
-                        "LANG-16",
-                        source,
-                        "only an own List is consumed by iteration",
-                    );
-                    return (ERROR, None);
-                }
-                return self.gap_ty(n, "consuming List iteration cleanup is not built");
+            if consuming
+                && (ty != inner
+                    || !matches!(self.t.kind(inner), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::List)))
+            {
+                self.refuse(
+                    "LANG-16",
+                    source,
+                    "only an own List is consumed by iteration",
+                );
+                return (ERROR, None);
             }
-            if let Some(at) = at {
+            if !consuming && let Some(at) = at {
                 self.freeze(at.place, Hold::View(Extent::Block(self.depth + 1)));
             }
             let start = self.konst(Ty::Scalar(Scalar::U64), 0, n);
@@ -588,6 +606,33 @@ impl<'c, 'a> Cx<'c, 'a> {
         let index_ty = if range { elem } else { scalar(Scalar::U64) };
         let index_ir = self.ir_ty(index_ty);
         let index_slot = self.slot(index_ty, start, n);
+        let drain_data = if consuming {
+            match (sequence, index_slot, limit) {
+                (Some((_, Some(header))), Some(next), Some(end)) if self.live() => {
+                    let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
+                    let eight = self.konst(Ty::Scalar(Scalar::U64), 8, n).unwrap();
+                    let len = self.address(
+                        AddressBase::Value(header),
+                        &[Step::Byte(eight)],
+                        PlaceTy::Value(Ty::Scalar(Scalar::U64)),
+                        n,
+                    );
+                    let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n).unwrap();
+                    self.inst(
+                        Inst::Store {
+                            address: len,
+                            value: zero,
+                        },
+                        n,
+                    );
+                    self.drain_owner(data, next, end, elem);
+                    Some(data)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
         self.push_frame(label, FrameKind::While, Some(UNIT));
         let fi = self.frames.len() - 1;
         let mut flow = None;
@@ -643,7 +688,16 @@ impl<'c, 'a> Cx<'c, 'a> {
                 match (place, element) {
                     (Some(place), Some(element)) => {
                         let base = self.address(AddressBase::Value(pointer), &[], place, n);
-                        let at = self.index_address(base, collection, index, element, n);
+                        let at = if let Some(data) = drain_data {
+                            Some(self.address(
+                                AddressBase::Value(data),
+                                &[Step::Index(index)],
+                                element,
+                                n,
+                            ))
+                        } else {
+                            self.index_address(base, collection, index, element, n)
+                        };
                         at.and_then(|at| self.iteration_value(at, elem, n))
                     }
                     _ => None,
@@ -652,9 +706,35 @@ impl<'c, 'a> Cx<'c, 'a> {
             (Some((_, _, _, index, _, _, _)), None) => Some(index),
             _ => None,
         };
-        self.for_pattern(c[0], elem, value, range);
+        if consuming
+            && let Some((_, _, _, index, _, index_ir, next_slot)) = flow
+            && self.live()
+        {
+            let one = self.konst(index_ir, 1, n).unwrap();
+            let after = self.value(index_ir);
+            self.inst(
+                Inst::Binary {
+                    result: after,
+                    op: BinaryOp::Add,
+                    left: index,
+                    right: one,
+                    fail: None,
+                },
+                n,
+            );
+            self.inst(
+                Inst::Store {
+                    address: next_slot,
+                    value: after,
+                },
+                n,
+            );
+            self.temp(elem, value);
+        }
+        self.for_pattern(c[0], elem, value, range || consuming);
         self.loop_body(c[2]);
         self.close_scope(scope, iteration_holds, c[2], UNIT);
+        self.end_owners(self.frames[fi].owners, None, false, c[2]);
         self.depth -= 1;
         self.back_edge(fi, self.close_brace(c[2]));
         if let Some((head, advance, out, index, limit, index_ir, index_slot)) = flow
@@ -687,29 +767,36 @@ impl<'c, 'a> Cx<'c, 'a> {
                 );
                 self.start(increment);
             }
-            let one = self.konst(index_ir, 1, n).unwrap();
-            let next = self.value(index_ir);
-            self.inst(
-                Inst::Binary {
-                    result: next,
-                    op: BinaryOp::Add,
-                    left: index,
-                    right: one,
-                    fail: None,
-                },
-                n,
-            );
-            self.inst(
-                Inst::Store {
-                    address: index_slot,
-                    value: next,
-                },
-                n,
-            );
-            self.jump(head, &[], n);
+            if consuming {
+                self.jump(head, &[], n);
+            } else {
+                let one = self.konst(index_ir, 1, n).unwrap();
+                let next = self.value(index_ir);
+                self.inst(
+                    Inst::Binary {
+                        result: next,
+                        op: BinaryOp::Add,
+                        left: index,
+                        right: one,
+                        fail: None,
+                    },
+                    n,
+                );
+                self.inst(
+                    Inst::Store {
+                        address: index_slot,
+                        value: next,
+                    },
+                    n,
+                );
+                self.jump(head, &[], n);
+            }
         }
         let frame = self.pop_frame(n);
         self.land(frame.exit);
+        if consuming {
+            self.end_owners(source_owners, None, false, n);
+        }
         self.unfreeze(freezes, |_| None);
         (UNIT, None)
     }

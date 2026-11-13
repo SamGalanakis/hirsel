@@ -774,3 +774,205 @@ fn generic_call_keys_separate_widths_and_reuse_equal_instances() {
         assert_eq!(key.dictionaries, [format!("key[{ty}]")]);
     }
 }
+
+/// The carrier is an independent hand-written FORM producer, so these cases can
+/// exercise populated Lists before the allocation/growth core calls are emitted.
+/// Three elements 7,11,13 have sum 31; both success and failure must refund 24 bytes.
+#[test]
+fn list_index_iteration_and_failure_cleanup() {
+    use hirsel_core_ir::{TypeId, text};
+    let vectors = [
+        (
+            "fn f(xs: List[u64]) -> u64 { let v = view xs; v[1] }",
+            false,
+            eval::Outcome::Returned(vec![11]),
+        ),
+        (
+            "fn f(xs: List[u64]) -> u64 { xs[3] }",
+            false,
+            eval::Outcome::Failed(vec!["Bounds".into()]),
+        ),
+        (
+            "fn f(mut xs: List[u64]) -> u64 { xs[1] += 5; xs[1] }",
+            false,
+            eval::Outcome::Returned(vec![16]),
+        ),
+        (
+            "fn f(xs: List[u64]) -> u64 { let mut s: u64 = 0; for x in xs { s += x }; s }",
+            false,
+            eval::Outcome::Returned(vec![31]),
+        ),
+        (
+            "fn f(xs: List[u64]) -> u64 { let mut s: u64 = 0; for x in xs { if x == 11 { continue }; s += x }; s }",
+            false,
+            eval::Outcome::Returned(vec![20]),
+        ),
+        (
+            "fn f(xs: List[u64]) -> u64 { let mut s: u64 = 0; for x in xs { s += x; break }; s }",
+            false,
+            eval::Outcome::Returned(vec![7]),
+        ),
+        (
+            "fn f(take xs: List[u64]) -> u64 { let mut s: u64 = 0; for take x in xs { s += x }; s }",
+            true,
+            eval::Outcome::Returned(vec![31]),
+        ),
+        (
+            "fn f(take xs: List[u64]) -> u64 { let mut s: u64 = 0; for take x in xs { s += x; break }; s }",
+            true,
+            eval::Outcome::Returned(vec![7]),
+        ),
+        (
+            "fn f(take xs: List[u64]) -> u64 { let mut s: u64 = 0; for take x in xs { if x == 11 { continue }; s += x }; s }",
+            true,
+            eval::Outcome::Returned(vec![20]),
+        ),
+        (
+            "fn f(take xs: List[u64]) -> u64 { for take x in xs { return x }; 0 }",
+            true,
+            eval::Outcome::Returned(vec![7]),
+        ),
+        (
+            "fn f(take xs: List[List[u64]]) -> u64 { let mut s: u64 = 0; for take row in xs { s += row[0]; break }; s }",
+            true,
+            eval::Outcome::Returned(vec![7]),
+        ),
+        (
+            "fn f(take xs: List[List[u64]]) -> u64 { let mut s: u64 = 0; for take row in xs { s += row[0] }; s }",
+            true,
+            eval::Outcome::Returned(vec![31]),
+        ),
+        (
+            "fn f(take xs: List[List[u64]]) -> u64 { for take row in xs { return row[0] }; 0 }",
+            true,
+            eval::Outcome::Returned(vec![7]),
+        ),
+        (
+            "fn f(take xs: List[List[u64]]) -> u64 { for take row in xs { let n: u8 = int.narrow(256u64) }; 0 }",
+            true,
+            eval::Outcome::Failed(vec!["Overflow".into()]),
+        ),
+        (
+            "fn f(take xs: List[u64]) -> u64 { let a = [take xs]; let mut s: u64 = 0; for row in a { s += row[1] }; s }",
+            true,
+            eval::Outcome::Returned(vec![11]),
+        ),
+        (
+            "fn f(take xs: List[u64]) -> u64 { let a = [take xs]; let row = a[0]; row[1] }",
+            true,
+            eval::Outcome::Returned(vec![11]),
+        ),
+        (
+            "fn f(take xs: List[u64]) -> u64 { let n: u8 = int.narrow(256u64); 0 }",
+            true,
+            eval::Outcome::Failed(vec!["Overflow".into()]),
+        ),
+        (
+            "fn f(take xs: List[u64]) -> u64 { let a = [take xs, { let z = 1u64 / 0u64; loop {} }]; 0 }",
+            true,
+            eval::Outcome::Failed(vec!["Division".into()]),
+        ),
+    ];
+    for (source, takes, expected) in vectors {
+        let (index, inputs) = program_inputs(source);
+        let p = Program::declare(&index, &inputs);
+        assert!(p.refusals.is_empty(), "{source}: {:?}", p.refusals);
+        let f = p.fns.iter().position(|f| f.path.0.name == "f").unwrap();
+        let mut emitter = Emitter::new();
+        let check = p.check_lower(f, &mut emitter);
+        assert!(
+            check.refusals.is_empty() && check.gaps.is_empty(),
+            "{source}: {:?} {:?}",
+            check.refusals,
+            check.gaps
+        );
+        let target = check.function.unwrap();
+        let module = &emitter.module;
+        let signature = module.functions[target.index()].signature;
+        let Param::Address(TypeId(list)) = module.signatures[signature.index()].params[0] else {
+            panic!("List by address")
+        };
+        let (g, instance, entry) = (
+            module.signatures.len(),
+            module.instances.len(),
+            module.functions.len(),
+        );
+        let drop = if takes {
+            String::new()
+        } else {
+            format!("drop a0 t{list}\n")
+        };
+        let fixture = format!(
+            r#"
+{}
+sig g{g} = () -> (u64)
+inst n{instance} = app@1/fixture/entry [] []
+fn f{entry} = n{instance} g{g} {{
+ slot s0 = t{list}
+ addr a0 = s0 : t{list}
+ addr a1 = a0 byte v1 : ptr
+ addr a2 = a0 byte v2 : u64
+ addr a3 = a0 byte v3 : u64
+ addr a4 = v4 : u64
+ addr a5 = v4 byte v2 : u64
+ addr a6 = v4 byte v3 : u64
+ b0:
+  live s0
+  v0: u64 = const 24
+  v1: u64 = const 0
+  v2: u64 = const 8
+  v3: u64 = const 16
+  v4: ptr, v5: u64 = alloc own v0 align 8 charge v0
+  v6: u64 = const 7
+  v7: u64 = const 11
+  v8: u64 = const 13
+  v9: u64 = const 3
+  address a0
+  address a1
+  address a2
+  address a3
+  address a4
+  address a5
+  address a6
+  store a1, v4
+  store a2, v9
+  store a3, v9
+  store a4, v6
+  store a5, v7
+  store a6, v8
+  v10: u64 = call f{} g{} (&a0) fail b1
+  {drop}
+  return v10
+ b1:
+  {drop}
+  propagate
+}}
+"#,
+            text::print(module),
+            target.0,
+            signature.0
+        );
+        let fixture = if source.contains("List[List[u64]]") {
+            let mut addresses = String::new();
+            let mut build = String::new();
+            for i in 0..3 {
+                let a = 7 + 4 * i;
+                let v = 11 + 7 * i;
+                let offset = i * 24;
+                addresses.push_str(&format!("addr a{a} = v4 byte v{v} : ptr\naddr a{} = v4 byte v{} : u64\naddr a{} = v4 byte v{} : u64\naddr a{} = v{} : u64\n",a+1,v+1,a+2,v+2,a+3,v+3));
+                build.push_str(&format!("v{v}: u64 = const {offset}\nv{}: u64 = const {}\nv{}: u64 = const {}\nv{}: ptr, v{}: u64 = alloc own v2 align 8 charge v2\nv{}: u64 = const 1\nv{}: u64 = const {}\naddress a{a}\naddress a{}\naddress a{}\naddress a{}\nstore a{a}, v{}\nstore a{}, v{}\nstore a{}, v{}\nstore a{}, v{}\n",v+1,offset+8,v+2,offset+16,v+3,v+4,v+5,v+6,[7,11,13][i],a+1,a+2,a+3,v+3,a+1,v+5,a+2,v+5,a+3,v+6));
+            }
+            fixture
+                .replace("v0: u64 = const 24", "v0: u64 = const 72")
+                .replace(" b0:", &format!("{addresses} b0:"))
+                .replace("store a4, v6\n  store a5, v7\n  store a6, v8", &build)
+        } else {
+            fixture
+        };
+        let fixture = text::parse(&fixture).unwrap();
+        wf::module(&fixture).unwrap();
+        let report = eval::run(&fixture, FuncId(entry as u32), &[], 1_000_000);
+        assert_eq!(report.outcome, expected, "{source}");
+        assert_eq!(report.used, 0, "{source}: list storage leaked");
+    }
+}

@@ -654,6 +654,8 @@ struct Cx<'c, 'a> {
     patterns: patterns::Patterns,
     /// Reused call workspaces, one for each active nesting level.
     call_scratch: Vec<calls::CallScratch>,
+    /// Completed array elements still owned separately during construction.
+    array_parts: Vec<ValueId>,
     instance_heads: HashMap<u64, usize>,
     instance_rows: Vec<BodyInstance>,
     instance_args: Vec<TyId>,
@@ -735,6 +737,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             call_seq: 0,
             patterns: patterns::Patterns::default(),
             call_scratch: vec![],
+            array_parts: vec![],
             instance_heads: HashMap::new(),
             instance_rows: vec![],
             instance_args: vec![],
@@ -915,16 +918,15 @@ impl<'c, 'a> Cx<'c, 'a> {
     }
     /// Evaluate a new address (`Inst::Address`).
     fn address(&mut self, base: AddressBase, steps: &[Step], ty: PlaceTy, n: NodeId) -> AddressId {
+        let fail = if steps.iter().any(|s| matches!(s, Step::Element(_))) {
+            self.fail_to(n)
+        } else {
+            None
+        };
         let steps = PoolRange::push(&mut self.b.pools.steps, steps.iter().copied());
         self.b.addresses.push(AddressInfo { base, steps, ty });
         let address = AddressId(self.b.addresses.len() as u32 - 1);
-        self.inst(
-            Inst::Address {
-                address,
-                fail: None,
-            },
-            n,
-        );
+        self.inst(Inst::Address { address, fail }, n);
         address
     }
     /// A new slot of `ty`, begun here, and its address.

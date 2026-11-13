@@ -561,10 +561,11 @@ impl<'c, 'a> Cx<'c, 'a> {
                     Some(n),
                 );
                 self.start(no);
+                let cleanup = self.fail_to(n);
                 self.end(
                     Terminator::Raise {
                         cause: hirsel_core_ir::RaiseCause::Bounds,
-                        cleanup: None,
+                        cleanup,
                     },
                     Some(n),
                 );
@@ -660,6 +661,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             self.refuse("LANG-11", n, "an empty array needs an expected type");
             return (ERROR, None);
         }
+        let parts = self.array_parts.len();
         let mut elem = expected.map(|(_, elem, _)| elem);
         let mut result = expected.map(|(ty, _, _)| ty);
         let mut to = None;
@@ -711,6 +713,14 @@ impl<'c, 'a> Cx<'c, 'a> {
                         child,
                     );
                     self.install(address, rep, value, child);
+                    // Keep each completed element owned until the array is complete.
+                    // Failure cleans those temporaries in reverse construction order.
+                    if let Some(value) = value
+                        && self.drop_id(elem).is_some()
+                    {
+                        self.temp(elem, Some(value));
+                        self.array_parts.push(value);
+                    }
                 }
             }
         }
@@ -721,7 +731,13 @@ impl<'c, 'a> Cx<'c, 'a> {
         {
             to = Some(self.new_slot(place, n));
         }
-        (ty, to.filter(|_| self.live()).map(|a| self.pointer(a, n)))
+        let value = to.filter(|_| self.live()).map(|a| self.pointer(a, n));
+        for i in parts..self.array_parts.len() {
+            self.consume(Some(self.array_parts[i]), n);
+        }
+        self.array_parts.truncate(parts);
+        self.temp(ty, value);
+        (ty, value)
     }
     fn repeat_array(
         &mut self,

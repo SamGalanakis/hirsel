@@ -1,0 +1,5 @@
+// expect: run f(1) = 11
+// expect: run f(2) = fail Bounds
+// expect: run sum(0) = 18
+fn f(i: u64) -> u64 { let xs = [7u64, 11u64]; let v = view xs; v[i] }
+fn sum(n: u64) -> u64 { let xs = [7u64, 11u64]; let v = view xs; let mut s = n; for x in v { s += x }; s }

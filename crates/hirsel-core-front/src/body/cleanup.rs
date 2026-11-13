@@ -11,6 +11,14 @@ pub(super) enum Owner {
     /// A slot of the table that owns its value (its `own` row).
     Slot(u32),
     Temp(Temp),
+    /// Remaining elements of a consuming List. Its ordinary owner retains the
+    /// original allocation with length zero, and is cleaned after this suffix.
+    Drain {
+        data: ValueId,
+        next: AddressId,
+        end: ValueId,
+        elem: TypeId,
+    },
 }
 /// A statement temporary: an own value no consumer has taken yet.
 #[derive(Clone, Copy)]
@@ -173,6 +181,15 @@ impl<'c, 'a> Cx<'c, 'a> {
                 )
             }
             Owner::Temp(t) => (AddressBase::Value(t.value), t.id, t.avail, t.flag),
+            Owner::Drain {
+                data,
+                next,
+                end,
+                elem,
+            } => {
+                self.clean_drain(data, next, end, elem, n);
+                return;
+            }
         };
         match (avail, flag) {
             (Avail::Live, _) => self.emit_drop(base, id, n),
@@ -204,6 +221,82 @@ impl<'c, 'a> Cx<'c, 'a> {
             }
             _ => {}
         }
+    }
+    pub(super) fn drain_owner(&mut self, data: ValueId, next: AddressId, end: ValueId, elem: TyId) {
+        if let Some(elem) = self.drop_id(elem) {
+            self.owners.push(Owner::Drain {
+                data,
+                next,
+                end,
+                elem,
+            });
+            self.changed();
+        }
+    }
+    fn clean_drain(
+        &mut self,
+        data: ValueId,
+        next: AddressId,
+        end: ValueId,
+        elem: TypeId,
+        n: NodeId,
+    ) {
+        let head = self.new_block(&[]);
+        let body = self.new_block(&[]);
+        let out = self.new_block(&[]);
+        self.jump(head, &[], n);
+        self.start(head);
+        let index = self.value(Ty::Scalar(Scalar::U64));
+        self.inst(
+            Inst::Read {
+                result: index,
+                address: next,
+                mode: ReadMode::Bits,
+            },
+            n,
+        );
+        let condition = self.value(Ty::Scalar(Scalar::Bool));
+        self.inst(
+            Inst::Compare {
+                result: condition,
+                op: CompareOp::Lt,
+                left: index,
+                right: end,
+            },
+            n,
+        );
+        let yes = self.edge(body, &[]);
+        let no = self.edge(out, &[]);
+        self.end(Terminator::Branch { condition, yes, no }, Some(n));
+        self.start(body);
+        let address = self.address(
+            AddressBase::Value(data),
+            &[Step::Index(index)],
+            PlaceTy::Declared(elem),
+            n,
+        );
+        self.emit_drop(AddressBase::Address(address), elem, n);
+        let one = self.konst(Ty::Scalar(Scalar::U64), 1, n).unwrap();
+        let after = self.value(Ty::Scalar(Scalar::U64));
+        self.inst(
+            Inst::Binary {
+                result: after,
+                op: BinaryOp::Add,
+                left: index,
+                right: one,
+                fail: None,
+            },
+            n,
+        );
+        self.inst(
+            Inst::Store {
+                address: next,
+                value: after,
+            },
+            n,
+        );
+        self.jump(head, &[], n);
+        self.start(out);
     }
     fn emit_drop(&mut self, base: AddressBase, id: TypeId, n: NodeId) {
         let address = match base {
@@ -298,6 +391,7 @@ impl<'c, 'a> Cx<'c, 'a> {
         let any = self.owners.iter().any(|&o| match o {
             Owner::Slot(s) => matches!(self.var(s).avail, Avail::Live | Avail::Maybe),
             Owner::Temp(t) => matches!(t.avail, Avail::Live | Avail::Maybe),
+            Owner::Drain { .. } => true,
         });
         if !any && !self.open_scopes() {
             return None;

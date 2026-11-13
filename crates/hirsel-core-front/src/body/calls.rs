@@ -873,6 +873,11 @@ impl<'c, 'a> Cx<'c, 'a> {
         if !self.live() {
             return None;
         }
+        let fail = if op.can_fail(ty) {
+            self.fail_to(n)
+        } else {
+            None
+        };
         let result = self.value(ty);
         self.inst(
             Inst::Binary {
@@ -880,7 +885,7 @@ impl<'c, 'a> Cx<'c, 'a> {
                 op,
                 left,
                 right,
-                fail: None,
+                fail,
             },
             n,
         );

@@ -1,6 +1,4 @@
-// expect: gap assignment to this place is not built
-// expect: gap cleanup of own values is not built
-// expect: gap values of this type are not built
+// expect: accept
 fn read(xs: List[u64], i: u64) -> u64 { xs[i] }
 fn view_read(xs: View[List[u64]], i: u64) -> u64 { xs[i] }
 fn write(mut xs: List[u64], i: u64) { xs[i] = 11 }

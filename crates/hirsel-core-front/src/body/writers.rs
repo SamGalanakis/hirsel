@@ -1170,8 +1170,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(self.pointer(to, n))
     }
 
-    /// `text.as_string`: the `View[String]` carrier `{blob + at + W, count, 0}`
-    /// (FORM #56). It points into the text's blob and owns nothing, so it may be
+    /// `text.as_string`: the `View[String]` carrier `{blob + at + W, count, count}`
+    /// (FORM #56; a range view's capacity is its length, #61). It points into the text's blob and owns nothing, so it may be
     /// returned: the carrier is copied into the caller's dest like any view.
     fn as_string(&mut self, header: ValueId, n: NodeId) -> Option<ValueId> {
         let (blob, at, w) = self.locator(header, n)?;
@@ -1188,10 +1188,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let string = self.t.mk(TyKind::Adt(string, vec![]));
         let id = self.declared(string)?;
         let to = self.new_slot(PlaceTy::Declared(id), n);
-        let zero = self.u64k(0, n)?;
         self.put_word(AddressBase::Address(to), &[], 0, data, n)?;
         self.put_word(AddressBase::Address(to), &[], 8, len, n)?;
-        self.put_word(AddressBase::Address(to), &[], 16, zero, n)?;
+        self.put_word(AddressBase::Address(to), &[], 16, len, n)?;
         Some(self.pointer(to, n))
     }
     /// `text.copy_in(r, s)`: `{_, W = 8 @8, count @16, bytes @24}`, charged

@@ -38,6 +38,7 @@ const CHAN_BASE: u64 = 0x30_0000;
 const CAUSES_BASE: u64 = 0x40_0000;
 
 /// Why an instruction stopped: a new cause, or a callee's failure already chained.
+#[derive(Debug)]
 enum Stop {
     Cause(&'static str),
     Chained,
@@ -383,6 +384,12 @@ impl Machine<'_> {
     }
     fn drop_field(&mut self, t: &mut Task, at: u64, ty: &FieldTy) -> bool {
         match ty {
+            FieldTy::Scalar(_)
+            | FieldTy::Fn
+            | FieldTy::Stable(_)
+            | FieldTy::Locator
+            | FieldTy::Borrow
+            | FieldTy::Handle(Handle::Capability) => false,
             FieldTy::Inline(x) => self.drop_value(t, at, *x),
             // SEM-9: an inline array is cleaned from index 0 up.
             FieldTy::Array(e, n) => {
@@ -414,6 +421,28 @@ impl Machine<'_> {
                     self.refund(l, n);
                 }
                 failed
+            }
+            FieldTy::Seq(element) => {
+                let block = self.load(at, 8);
+                let length = self.load(at + 8, 8);
+                let stride = self.stride(element);
+                let mut failed = false;
+                for i in 0..length {
+                    failed |= self.drop_field(t, block + i * stride, element);
+                }
+                if block != 0 {
+                    self.free(block);
+                }
+                failed
+            }
+            FieldTy::OwnFn => {
+                let environment = self.load(at + 8, 8);
+                if environment != 0 {
+                    let glue = FuncId((self.load(environment, 8) - FN_BASE) as u32);
+                    self.call(t, glue, &[environment])
+                        .expect("mechanical closure cleanup");
+                }
+                false
             }
             FieldTy::Rc(x) | FieldTy::Arc(x) => {
                 let node = self.load(at, 8);

@@ -61,22 +61,32 @@ fn every_emitted_function_probes_its_frame_within_the_guard() {
         assert_probes(&module.text(), &target.triple, 2);
     }
     let core_ir = hirsel_core_ir::text::parse(
-        r#"core v0
+        r#"core v1
+type t0 = own "Probe" { value: u64 }
 sig g0 = (u64) -> (u64)
 inst n0 = tests@0/probes/core [] []
 fn f0 = n0 g0 {
+  slot s0 = t0
+  addr a0 = s0 field 0 : u64
+  addr a1 = s0 : t0
 b0(v0: u64):
+  live s0
+  address a0
+  address a1
+  store a0, v0
+  drop a1 t0
+  dead s0
   return v0
 }
 "#,
     )
     .unwrap();
-    for opt in [
-        crate::core::Optimization::None,
-        crate::core::Optimization::Speed,
+    for (opt, definitions) in [
+        (crate::core::Optimization::None, 2),
+        (crate::core::Optimization::Speed, 1),
     ] {
         let text = crate::core::emitted_ir(&core_ir, opt).unwrap();
-        assert_probes(&text, "CoreIR x86_64", 1);
+        assert_probes(&text, "CoreIR x86_64", definitions);
     }
 }
 

@@ -121,13 +121,8 @@ pub unsafe fn release(
         while let Some(node) = list.head {
             let dead = block::dead(node);
             let recipe = (*dead).recipe;
-            let offset = (*dead).payload_offset;
-            if recipe(
-                context,
-                node.as_ptr().add(offset),
-                &mut (*dead).cursor,
-                &mut list,
-            ) {
+            let payload = (*dead).payload;
+            if recipe(context, payload, &mut (*dead).cursor, &mut list) {
                 list.head = (*dead).next;
                 block::free(node, (*dead).charge);
             }

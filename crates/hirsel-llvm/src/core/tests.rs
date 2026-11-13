@@ -47,6 +47,7 @@ struct NativeReport {
     used: u64,
     trace: Vec<u64>,
     admissions: usize,
+    messages: Vec<String>,
 }
 fn execute(module: &Module, cases: &[Case]) -> Vec<NativeReport> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -74,7 +75,6 @@ fn execute(module: &Module, cases: &[Case]) -> Vec<NativeReport> {
     );
     for (i, f) in module.functions.iter().enumerate() {
         let s = &module.signatures[f.signature.index()];
-        assert!(s.dest.is_none(), "destination C fixture");
         let mut fields = s.results.clone();
         fields.push(Ty::Scalar(Scalar::U8));
         let ret = if fields.len() == 1 {
@@ -98,6 +98,7 @@ fn execute(module: &Module, cases: &[Case]) -> Vec<NativeReport> {
             "extern {ret} {}({});",
             symbol(module, FuncId(i as u32)),
             std::iter::once("void *")
+                .chain(s.dest.iter().map(|_| "void *"))
                 .chain(s.params.iter().map(|p| match p {
                     Param::Value(t) => cty(*t),
                     Param::Address(_) => "void *",
@@ -111,6 +112,7 @@ fn execute(module: &Module, cases: &[Case]) -> Vec<NativeReport> {
     for (k, case) in cases.iter().enumerate() {
         let f = case.function;
         let sig = &module.signatures[module.functions[f.index()].signature.index()];
+        assert!(sig.dest.is_none(), "entry returns scalars to the C fixture");
         let args = sig
             .params
             .iter()
@@ -157,7 +159,7 @@ fn execute(module: &Module, cases: &[Case]) -> Vec<NativeReport> {
             writeln!(c,"uint64_t b{k}_{j}=0; memcpy(&b{k}_{j},&r{k}.r{j},{}); printf(\" %llu\",(unsigned long long)b{k}_{j});",size(t)).unwrap();
         }
         c.push_str("}\n");
-        writeln!(c,"HirselCoreCauseCell *chain=hirsel_core_causes_take(ctx); if({status}) for(const HirselCoreCauseCell *p=chain;p;p=hirsel_core_cause_next(p)) printf(\" %s\",causes[hirsel_core_cause_value(p)->kind]); printf(\"|%llu|\",(unsigned long long)(initial-hirsel_core_test_available(ctx))); for(size_t i=0;i<traces;i++) printf(\" %llu\",(unsigned long long)trace[i]); printf(\"|%zu\\n\",hirsel_core_test_attempts(ctx)); hirsel_core_causes_drop(chain); hirsel_core_context_free(ctx); }}").unwrap();
+        writeln!(c,"HirselCoreCauseCell *chain=hirsel_core_causes_take(ctx); if({status}) for(const HirselCoreCauseCell *p=chain;p;p=hirsel_core_cause_next(p)) printf(\" %s\",causes[hirsel_core_cause_value(p)->kind]); printf(\"|%llu|\",(unsigned long long)(initial-hirsel_core_test_available(ctx))); for(size_t i=0;i<traces;i++) printf(\" %llu\",(unsigned long long)trace[i]); printf(\"|%zu|\",hirsel_core_test_attempts(ctx)); for(const HirselCoreCauseCell *p=chain;p;p=hirsel_core_cause_next(p)) if(hirsel_core_cause_value(p)->kind==4) {{ const HirselCoreStringMessage *msg=(const HirselCoreStringMessage *)hirsel_core_cause_value(p)->message; for(uint64_t i=0;i<msg->len;i++) printf(\"%02x\",((const unsigned char *)msg->data)[i]); printf(\" \"); }} printf(\"\\n\"); hirsel_core_causes_drop(chain); hirsel_core_context_free(ctx); }}").unwrap();
     }
     c.push_str("return 0;}\n");
     std::fs::write(dir.join("test.c"), c).unwrap();
@@ -201,6 +203,12 @@ fn execute(module: &Module, cases: &[Case]) -> Vec<NativeReport> {
                     .map(|s| s.parse().unwrap())
                     .collect(),
                 admissions: parts.next().unwrap().parse().unwrap(),
+                messages: parts
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .map(str::to_string)
+                    .collect(),
             }
         })
         .collect()
@@ -621,4 +629,226 @@ fn every_guarded_admission_refusal_matches_the_evaluator() {
         agree_cases(&module, &cases, true);
     }
     println!("guarded injected executions: {executions}");
+}
+
+#[test]
+fn every_compact_sequence_sample_matches_the_evaluator() {
+    let source = include_str!("../../../hirsel-core-ir/samples/sequences.core");
+    let module = text::parse(source).unwrap();
+    wf::module(&module).unwrap();
+    let cases = sample_cases(&module, source);
+    assert_eq!(cases.len(), 11);
+    agree_cases(&module, &cases, true);
+}
+
+#[test]
+fn owning_callable_and_failure_message_transfer_match_the_evaluator() {
+    let source = include_str!("../../tests/core_runtime/callable.core");
+    let module = text::parse(source).unwrap();
+    wf::module(&module).unwrap();
+    let mut cases = vec![
+        Case {
+            function: FuncId(0),
+            args: vec![7, 0],
+            limit: 256,
+            injection: None,
+        },
+        Case {
+            function: FuncId(0),
+            args: vec![7, 1],
+            limit: 256,
+            injection: None,
+        },
+        Case {
+            function: FuncId(3),
+            args: vec![],
+            limit: 256,
+            injection: None,
+        },
+    ];
+    for later in [false, true] {
+        cases.push(Case {
+            function: FuncId(0),
+            args: vec![7, 1],
+            limit: 256,
+            injection: Some((1, later)),
+        });
+    }
+    let got = execute(&module, &cases);
+    for (case, got) in cases.iter().zip(got) {
+        let expected = eval::run_injected(
+            &module,
+            case.function,
+            &case.args,
+            case.limit,
+            case.injection,
+        );
+        assert_eq!(got.outcome, expected.outcome);
+        assert_eq!(got.used, expected.used);
+        assert_eq!(got.admissions, expected.admissions);
+        assert_eq!(
+            got.messages,
+            if case.function.0 == 3 {
+                vec!["686921".to_string()]
+            } else {
+                vec![]
+            }
+        );
+    }
+    let source = source.replace("  raise fail a0", "  drop a0 t1\n  return");
+    let module = text::parse(&source).unwrap();
+    agree_cases(
+        &module,
+        &[Case {
+            function: FuncId(3),
+            args: vec![],
+            limit: 256,
+            injection: None,
+        }],
+        true,
+    );
+}
+
+#[test]
+fn counted_sequences_destroy_deep_chains_with_constant_stack() {
+    let source = include_str!("../../tests/core_runtime/counted_sequence.core");
+    let module = text::parse(source).unwrap();
+    wf::module(&module).unwrap();
+    let cases = [0, 32, 50_000].map(|n| Case {
+        function: FuncId(0),
+        args: vec![n],
+        limit: u64::MAX,
+        injection: None,
+    });
+    let got = execute(&module, &cases);
+    for (case, got) in cases.iter().zip(got) {
+        let n = case.args[0];
+        assert_eq!(got.outcome, eval::Outcome::Returned(vec![n]));
+        assert_eq!(got.used, 0);
+        assert_eq!(got.admissions, 1 + 2 * n as usize);
+        if n <= 32 {
+            let expected = eval::run(&module, case.function, &case.args, case.limit);
+            assert_eq!(got.outcome, expected.outcome);
+            assert_eq!(got.used, expected.used);
+        }
+    }
+}
+
+#[test]
+fn text_fixed_span_and_pointer_views_use_packed_unaligned_bytes() {
+    let source = include_str!("../../tests/core_runtime/text_span.core");
+    let module = text::parse(source).unwrap();
+    wf::module(&module).unwrap();
+    let expected = eval::run(&module, FuncId(0), &[], 256);
+    assert_eq!(
+        expected.outcome,
+        eval::Outcome::Returned(vec![3, 2, 22, 2_189_672])
+    );
+    agree_cases(
+        &module,
+        &[Case {
+            function: FuncId(0),
+            args: vec![],
+            limit: 256,
+            injection: None,
+        }],
+        true,
+    );
+}
+
+#[test]
+fn counted_strings_release_their_dynamic_byte_buffer() {
+    let source = include_str!("../../tests/core_runtime/callable.core")
+        .replace("  addr a6 = v4 byte v1 : u8", "  addr a6 = v4 byte v1 : u8\n  addr a7 = v10 byte v2 : t1")
+        .replace("  raise fail a0", "  v9: u64 = const 32\n  v10: ptr, v11: u64 = alloc counted v9 align 8 charge v9\n  address a7\n  v12: u64 = const 24\n  copy a7, a0, v12\n  release v10 rc t1\n  return");
+    let module = text::parse(&source).unwrap();
+    wf::module(&module).unwrap();
+    agree_cases(
+        &module,
+        &[Case {
+            function: FuncId(3),
+            args: vec![],
+            limit: 256,
+            injection: None,
+        }],
+        true,
+    );
+}
+
+#[test]
+fn address_shapes_do_not_depend_on_block_emission_order() {
+    let source = r#"core v1
+type t0 = own "Record" { value: u64 }
+sig g0 = (u64) -> (u64)
+inst n0 = llvm@1/addresses/order [] []
+fn f0 = n0 g0 {
+  slot s0 = t0
+  addr a0 = s0 : t0
+  addr a1 = a0 field 0 : u64
+b0(v0: u64):
+  live s0
+  jump b2
+b1:
+  address a1
+  store a1, v0
+  v1: u64 = read a1
+  dead s0
+  return v1
+b2:
+  address a0
+  jump b1
+}
+"#;
+    let module = text::parse(source).unwrap();
+    wf::module(&module).unwrap();
+    agree(&module, &[(FuncId(0), vec![123])]);
+}
+
+#[test]
+fn aggregate_destination_precedes_parameters_and_returns_failure_status() {
+    let source = r#"core v1
+type t0 = own "Pair" { left: u64, right: u64 }
+sig g0 = (u64) -> (u64, u64)
+sig g1 = (u64, u64) -> () dest t0
+inst n0 = llvm@1/destination/run [] []
+inst n1 = llvm@1/destination/write [] []
+fn f0 = n0 g0 {
+  slot s0 = t0
+  addr a0 = s0 : t0
+  addr a1 = s0 field 0 : u64
+  addr a2 = s0 field 1 : u64
+b0(v0: u64):
+  live s0
+  address a0
+  address a1
+  address a2
+  v1: u64 = const 9
+  call f1 g1 (&a0, v0, v1)
+  v2: u64 = read a1
+  v3: u64 = read a2
+  dead s0
+  return v2, v3
+}
+fn f1 = n1 g1 {
+  addr a0 = v0 : t0
+  addr a1 = a0 field 0 : u64
+  addr a2 = a0 field 1 : u64
+b0(v0: ptr, v1: u64, v2: u64):
+  v3: u64 = const 0
+  v4: bool = eq v1, v3
+  branch v4, b1, b2
+b1:
+  raise unwrap
+b2:
+  address a0
+  address a1
+  address a2
+  store a1, v1
+  store a2, v2
+  return
+}
+"#;
+    let module = text::parse(source).unwrap();
+    wf::module(&module).unwrap();
+    agree(&module, &[(FuncId(0), vec![123]), (FuncId(0), vec![0])]);
 }

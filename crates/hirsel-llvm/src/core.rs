@@ -2,6 +2,7 @@
 //! staging, manifest or receipt participates in this entry point.
 
 mod abi;
+mod cleanup;
 mod scalar;
 mod storage;
 #[cfg(test)]
@@ -108,7 +109,6 @@ pub fn emit_ir(module: &Module) -> Result<String> {
             module,
             body,
             recipes: &recipes,
-            address_kinds: vec![storage::At::Other; body.addresses.len()],
             abi,
             code: String::new(),
             allocations: String::new(),
@@ -161,7 +161,7 @@ pub fn emit_ir(module: &Module) -> Result<String> {
         )
         .unwrap();
     }
-    storage::drop_glue(module, &recipes, &mut text, &mut intrinsics)?;
+    cleanup::drop_glue(module, &recipes, &mut text, &mut intrinsics)?;
     for decl in intrinsics {
         writeln!(text, "{decl}").unwrap();
     }
@@ -251,7 +251,6 @@ struct FunctionEmitter<'a> {
     module: &'a Module,
     body: &'a Body,
     recipes: &'a [hirsel_core_layout::Recipe],
-    address_kinds: Vec<storage::At>,
     abi: abi::Return,
     code: String,
     allocations: String,
@@ -621,8 +620,18 @@ impl FunctionEmitter<'_> {
                 match cause {
                     RaiseCause::Unwrap => self.raise(3),
                     RaiseCause::Bounds => self.raise(1),
-                    RaiseCause::Fail(_) => {
-                        return Err(Error::Unsupported("owned failure messages".into()));
+                    RaiseCause::Fail(address) => {
+                        let at = self.address(address);
+                        let data = self.calc(format!("load ptr, ptr {at}, align 1"));
+                        let length = self.calc(format!("getelementptr i8, ptr {at}, i64 8"));
+                        let length = self.calc(format!("load i64, ptr {length}, align 1"));
+                        let capacity = self.calc(format!("getelementptr i8, ptr {at}, i64 16"));
+                        let capacity = self.calc(format!("load i64, ptr {capacity}, align 1"));
+                        self.intrinsics.insert(
+                            "declare void @hirsel_core_raise_string(ptr, i64, ptr, i64, i64)"
+                                .into(),
+                        );
+                        self.line(format!("call void @hirsel_core_raise_string(ptr %context, i64 0, ptr {data}, i64 {length}, i64 {capacity})"));
                     }
                 }
                 self.propagate_to(cleanup);

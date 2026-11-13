@@ -471,3 +471,22 @@ mod destination_tests {
         assert!(ids.windows(2).all(|pair| pair[0] != pair[1]));
     }
 }
+
+/// Enqueue owned sequence storage while its descriptor remains in its parent.
+/// # Safety
+/// Buffer is exclusively owned. The borrowed payload is in the live parent
+/// worklist frame and remains alive through this child's depth-first cleanup.
+/// Recipe follows the ordinary resumable mechanical recipe contract.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_release_buffer_enqueue(
+    list: *mut Worklist,
+    buffer: NonNull<u8>,
+    charge: u64,
+    payload: *mut u8,
+    recipe: Recipe,
+) {
+    // SAFETY: the emitter transfers the buffer while its parent pins the descriptor.
+    unsafe {
+        crate::block::push_buffer(&mut *list, buffer, charge, recipe, payload);
+    }
+}

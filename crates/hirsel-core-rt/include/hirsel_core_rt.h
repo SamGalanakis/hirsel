@@ -59,4 +59,6 @@ const HirselCoreCause *hirsel_core_cause_value(const HirselCoreCauseCell *);
 uint8_t hirsel_core_allocation_status(const HirselCoreContext *, void *allocation);
 void hirsel_core_free_value(void *, uint64_t charge);
 uint64_t hirsel_core_dest_id(void);
+/* Recipe borrows its descriptor from the still-live parent frame. */
+void hirsel_core_release_buffer_enqueue(HirselCoreWorklist *, void *buffer, uint64_t charge, void *payload, HirselCoreDropRecipe);
 #endif

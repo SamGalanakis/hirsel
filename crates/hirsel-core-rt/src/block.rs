@@ -15,7 +15,7 @@ pub(crate) struct Dead {
     pub(crate) next: Option<NonNull<u8>>,
     pub(crate) charge: u64,
     pub(crate) recipe: crate::counted::Recipe,
-    pub(crate) payload_offset: usize,
+    pub(crate) payload: *mut u8,
     pub(crate) cursor: u64,
 }
 
@@ -55,11 +55,28 @@ pub(crate) unsafe fn push_dead(
             next: list.head,
             charge,
             recipe,
-            payload_offset,
+            payload: payload.as_ptr().add(payload_offset),
             cursor: 0,
         });
     }
     list.head = Some(payload);
+}
+/// Enqueue buffer storage whose recipe borrows a descriptor in its live parent.
+/// # Safety
+/// The list is depth first. The parent frame owns the descriptor until this
+/// child finishes, and the buffer is exclusively owned and not already queued.
+pub(crate) unsafe fn push_buffer(
+    list: &mut crate::counted::Worklist,
+    block: NonNull<u8>,
+    charge: u64,
+    recipe: crate::counted::Recipe,
+    payload: *mut u8,
+) {
+    // SAFETY: the buffer owns its native frame and its parent pins the payload.
+    unsafe {
+        push_dead(list, block, charge, recipe, 0);
+        (*dead(block)).payload = payload;
+    }
 }
 pub(crate) unsafe fn dead(payload: NonNull<u8>) -> *mut Dead {
     // SAFETY: push_dead initialized the frame in this exclusively owned node.

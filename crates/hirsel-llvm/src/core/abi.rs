@@ -149,6 +149,14 @@ impl FunctionEmitter<'_> {
         self.line(format!("ret {} {r}", self.abi.ty));
     }
     pub(super) fn call(&mut self, site: &CallSite) -> Result<()> {
+        if site.callee == Callee::Runtime(RtOp::DestId) {
+            self.intrinsics
+                .insert("declare i64 @hirsel_core_dest_id()".into());
+            let value = self.calc("call i64 @hirsel_core_dest_id()");
+            let result = site.results.get(&self.body.pools.values).unwrap()[0];
+            self.put(result, &value);
+            return Ok(());
+        }
         let sig = &self.module.signatures[site.signature.index()];
         let abi = Return::internal(&sig.results);
         let mut args = vec![];

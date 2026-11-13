@@ -123,27 +123,36 @@ fn c_abi_admission_growth_copy_free_and_handover() {
 
 #[test]
 fn owned_failure_string_outlives_its_frame_and_context_without_admission() {
-    // SAFETY: this fixture transfers each buffer/cell once and inspects the
-    // carrier only while its delivered cause chain owns it.
-    unsafe {
-        let mut ctx = Context::new(1000);
-        assert!(!hirsel_core_task_start(&mut ctx).pointer.is_null());
-        let root = ctx.current.clone();
-        let allocation = hirsel_core_alloc(&ctx, std::ptr::null_mut(), 8, 1, 8, false);
-        std::ptr::copy_nonoverlapping(b"hey".as_ptr(), allocation.pointer, 3);
-        ctx.current.inject(1, true);
-        hirsel_core_raise_string(&mut ctx, 77, allocation.pointer, 3, 8);
-        assert_eq!(ctx.current.attempts(), 0);
-        let chain = hirsel_core_causes_take(&mut ctx);
-        drop(ctx);
-        let cause = &*hirsel_core_cause_value(chain);
-        assert_eq!((cause.kind, cause.site), (crate::causes::FAIL, 77));
-        let message = &*cause.message.cast::<crate::causes::StringMessage>();
-        assert_eq!((message.len, message.capacity), (3, 8));
-        assert_eq!(std::slice::from_raw_parts(message.data, 3), b"hey");
-        assert_eq!(root.available(), 1000 - 32 - 8);
-        hirsel_core_causes_drop(chain);
-        assert_eq!(root.available(), 1000);
-        assert_eq!(root.attempts(), 0);
+    for (capacity, reserved) in [(8, true), (0, true), (0, false)] {
+        // SAFETY: this fixture transfers each buffer/cell once and inspects the
+        // carrier only while its delivered cause chain owns it.
+        unsafe {
+            let mut ctx = Context::new(1000);
+            assert!(!hirsel_core_task_start(&mut ctx).pointer.is_null());
+            let root = ctx.current.clone();
+            ctx.limit_enter(capacity).unwrap();
+            let len = if capacity == 0 { 0 } else { 3 };
+            let data = if reserved {
+                let allocation = hirsel_core_alloc(&ctx, std::ptr::null_mut(), capacity, 1, capacity, false);
+                std::ptr::copy_nonoverlapping(b"hey".as_ptr(), allocation.pointer, len);
+                allocation.pointer
+            } else { std::ptr::null_mut() };
+            ctx.limit_exit();
+            ctx.current.inject(1, true);
+            hirsel_core_raise_string(&mut ctx, 77, data, len as u64, capacity);
+            assert_eq!(ctx.current.attempts(), 0);
+            let chain = hirsel_core_causes_take(&mut ctx);
+            drop(ctx);
+            let cause = &*hirsel_core_cause_value(chain);
+            assert_eq!((cause.kind, cause.site), (crate::causes::FAIL, 77));
+            let message = &*cause.message.cast::<crate::causes::StringMessage>();
+            assert_eq!((message.len, message.capacity), (len as u64, capacity));
+            if len != 0 { assert_eq!(std::slice::from_raw_parts(message.data, len), b"hey"); }
+            assert_eq!(root.available(), 1000 - 32 - capacity);
+            hirsel_core_causes_drop(chain);
+            assert_eq!(root.available(), 1000);
+            assert_eq!(root.attempts(), 0);
+            assert_eq!(root.records(), 1);
+        }
     }
 }

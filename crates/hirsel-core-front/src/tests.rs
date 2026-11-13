@@ -930,6 +930,21 @@ fn list_index_iteration_and_failure_cleanup() {
     use hirsel_core_ir::{TypeId, text};
     let vectors = [
         (
+            "fn f(xs: FixedSpan[Inline[(u8,u64),2]]) -> u64 { let mut s:u64=0; for row in xs { for (_, y) in row { s += y } }; s }",
+            false,
+            eval::Outcome::Returned(vec![341]),
+        ),
+        (
+            "fn f(xs: FixedSpan[Inline[(u8,u64),2]]) -> u64 { let (_,y) = xs[1][1]; y }",
+            false,
+            eval::Outcome::Returned(vec![110]),
+        ),
+        (
+            "fn f(xs: FixedSpan[Site]) -> u64 { if xs[0] == xs[2] { 1 } else { 0 } }",
+            false,
+            eval::Outcome::Returned(vec![0]),
+        ),
+        (
             "type Entry { tiny: u8, num: u64 }\nfn f(xs: FixedSpan[Entry]) -> u64 { xs[1].num }",
             false,
             eval::Outcome::Returned(vec![11]),
@@ -1322,14 +1337,22 @@ fn f{entry} = n{instance} g{g} {{
             if source.contains("IndexedSpan[") {
                 fields.extend([(44, 0, "u16"), (46, 8, "u16"), (48, 16, "u16")]);
             }
+            let array = source.contains("FixedSpan[Inline[");
             for (i, bits) in [7, 11, 13].into_iter().enumerate() {
-                let offset = 16
-                    + width as usize * if sequence { 2 } else { 1 }
-                    + i * if tuple { 9 } else { 8 };
-                if tuple {
-                    fields.push((offset, 1, "u8"));
+                let first = 16 + width as usize * if sequence { 2 } else { 1 };
+                if array {
+                    for (j, bits) in [bits, bits * 10].into_iter().enumerate() {
+                        let offset = first + i * 18 + j * 9;
+                        fields.push((offset, 1, "u8"));
+                        fields.push((offset + 1, bits, "u64"));
+                    }
+                } else {
+                    let offset = first + i * if tuple { 9 } else { 8 };
+                    if tuple {
+                        fields.push((offset, 1, "u8"));
+                    }
+                    fields.push((offset + usize::from(tuple), bits, "u64"));
                 }
-                fields.push((offset + usize::from(tuple), bits, "u64"));
             }
             for (i, (offset, bits, ty)) in fields.into_iter().enumerate() {
                 let a = 7 + i;
@@ -1338,7 +1361,7 @@ fn f{entry} = n{instance} g{g} {{
                 build.push_str(&format!("v{v}: u64 = const {offset}\nv{}: {ty} = const {bits}\naddress a{a}\nstore a{a}, v{}\n",v+1,v+1));
             }
             fixture
-                .replace("v0: u64 = const 24", "v0: u64 = const 64")
+                .replace("v0: u64 = const 24", "v0: u64 = const 128")
                 .replace(" b0:", &format!("{addresses} b0:"))
                 .replace("store a3, v9", "")
                 .replace("store a2, v9", "store a2, v3")
@@ -1912,5 +1935,25 @@ fn aggregate_constant_errors_are_checked_before_use() {
         assert!(p.gaps.is_empty(), "{source}: {:?}", p.gaps);
         assert_eq!(p.refusals.len(), 1, "{source}: {:?}", p.refusals);
         assert_eq!(p.refusals[0].rule, "LANG-20", "{source}: {:?}", p.refusals);
+    }
+}
+
+#[test]
+fn unsupported_private_span_reads_record_a_gap_in_each_body() {
+    let (index, inputs) = program_inputs(include_str!(
+        "../../../core/front/cases/body/span-private-variant-gap.hirsel"
+    ));
+    let p = Program::declare(&index, &inputs);
+    for name in ["direct", "each"] {
+        let f = p.fns.iter().position(|f| f.path.0.name == name).unwrap();
+        let mut e = Emitter::new();
+        let c = p.check_lower(f, &mut e);
+        assert!(c.refusals.is_empty());
+        assert_eq!(c.gaps.len(), 1, "{name}: {:?}", c.gaps);
+        assert_eq!(
+            c.gaps[0].what,
+            "the private encoding of this FixedSpan element is not built"
+        );
+        assert!(c.function.is_none());
     }
 }

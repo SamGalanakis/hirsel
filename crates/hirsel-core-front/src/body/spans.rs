@@ -433,11 +433,11 @@ impl Cx<'_, '_, '_> {
     ) -> Option<()> {
         match (self.t.kind(ty).clone(), r) {
             (TyKind::Unit, _) => Some(()),
-            (TyKind::Scalar(s), Rep::Scalar(_)) => {
+            (_, Rep::Scalar(t)) => {
                 let a = self.address(
                     AddressBase::Value(blob),
                     &[Step::Byte(at)],
-                    PlaceTy::Value(Ty::Scalar(s)),
+                    PlaceTy::Value(t),
                     n,
                 );
                 self.inst(
@@ -451,6 +451,42 @@ impl Cx<'_, '_, '_> {
             }
             (_, Rep::Place(id)) => {
                 let whole = self.address(AddressBase::Value(x), &[], PlaceTy::Declared(id), n);
+                if let TyKind::Array(elem, count) = *self.t.kind(ty) {
+                    let u64t = Ty::Scalar(Scalar::U64);
+                    let stride = self.packed_plain_size(elem)?;
+                    let stride = self.konst(u64t, stride, n)?;
+                    let limit = self.konst(u64t, count, n)?;
+                    let zero = self.konst(u64t, 0, n)?;
+                    let head = self.new_block(&[u64t, u64t]);
+                    let body = self.new_block(&[]);
+                    let done = self.new_block(&[]);
+                    self.jump(head, &[zero, at], n);
+                    self.start(head);
+                    let params = self.block_params(head);
+                    let (index, off) = (params[0], params[1]);
+                    let more = self.test(CompareOp::Lt, index, limit, n);
+                    self.branch(more, body, done, n);
+                    self.start(body);
+                    let rep = self.rep(elem).ok()?;
+                    if let Some(place) = rep.stored() {
+                        let from = self.address(
+                            AddressBase::Address(whole),
+                            &[Step::Field(0), Step::Element(index)],
+                            place,
+                            n,
+                        );
+                        let value = match rep {
+                            Rep::Scalar(t) => self.read_bits(from, t, n),
+                            _ => self.pointer(from, n),
+                        };
+                        self.encode_plain(blob, off, elem, rep, value, n)?;
+                    }
+                    let next = self.add_k(index, 1, n)?;
+                    let after = self.add(off, stride, n);
+                    self.jump(head, &[next, after], n);
+                    self.start(done);
+                    return Some(());
+                }
                 let count = self.plain_fields(ty)?;
                 let mut offset = 0;
                 for i in 0..count {

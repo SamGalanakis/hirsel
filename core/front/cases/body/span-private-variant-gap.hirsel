@@ -1,0 +1,5 @@
+// The unfixed read kept typing after an unsupported decode without recording GAP.
+// expect: gap the private encoding of this FixedSpan element is not built
+type Choice = Small(u8) | Large(u64)
+fn direct(xs:FixedSpan[Choice]) -> Choice { xs[0] }
+fn each(xs:FixedSpan[Choice]) { for _ in xs {} }

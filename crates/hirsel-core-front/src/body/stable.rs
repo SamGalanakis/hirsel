@@ -4,15 +4,19 @@ impl Cx<'_, '_, '_> {
     /// MEM-9/12 packs scalar fields without native padding. Decode plain elements
     /// into their ordinary native places; no view of a temporary escapes.
     pub(super) fn packed_plain_size(&mut self, ty: TyId) -> Option<u64> {
-        match self.t.kind(ty) {
-            TyKind::Scalar(s) => Some(s.size()),
+        let ty = self.bare(ty);
+        if let Ok(Rep::Scalar(Ty::Scalar(s))) = self.rep(ty) {
+            return Some(s.size());
+        }
+        match self.t.kind(ty).clone() {
             TyKind::Unit => Some(0),
+            TyKind::Array(elem, count) => self.packed_plain_size(elem)?.checked_mul(count),
             _ => {
                 let count = self.plain_fields(ty)?;
-                let mut size = 0;
+                let mut size = 0u64;
                 for i in 0..count {
                     let field = self.field_ty(ty, i)?;
-                    size += self.packed_plain_size(field)?;
+                    size = size.checked_add(self.packed_plain_size(field)?)?;
                 }
                 Some(size)
             }
@@ -174,6 +178,36 @@ impl Cx<'_, '_, '_> {
             }
             Rep::None => {}
             Rep::Place(_) => {
+                if let TyKind::Array(elem, count) = *self.t.kind(ty) {
+                    let stride = self.packed_plain_size(elem)?;
+                    let u64t = Ty::Scalar(Scalar::U64);
+                    let limit = self.konst(u64t, count, n)?;
+                    let zero = self.konst(u64t, 0, n)?;
+                    let stride = self.konst(u64t, stride, n)?;
+                    let head = self.new_block(&[u64t, u64t]);
+                    let body = self.new_block(&[]);
+                    let done = self.new_block(&[]);
+                    self.jump(head, &[zero, at], n);
+                    self.start(head);
+                    let params = self.block_params(head);
+                    let (index, off) = (params[0], params[1]);
+                    let more = self.test(CompareOp::Lt, index, limit, n);
+                    self.branch(more, body, done, n);
+                    self.start(body);
+                    let place = self.place_ty(elem, n)?;
+                    let dest = self.address(
+                        AddressBase::Address(to),
+                        &[Step::Field(0), Step::Element(index)],
+                        place,
+                        n,
+                    );
+                    self.decode_plain(blob, off, w, elem, dest, n)?;
+                    let next = self.add_k(index, 1, n)?;
+                    let after = self.add(off, stride, n);
+                    self.jump(head, &[next, after], n);
+                    self.start(done);
+                    return Some(());
+                }
                 let count = self.plain_fields(ty)?;
                 let mut from = at;
                 for i in 0..count {
@@ -198,6 +232,13 @@ impl Cx<'_, '_, '_> {
         header_words: u64,
         n: NodeId,
     ) -> Option<AddressId> {
+        let Some(stride) = self.packed_plain_size(elem) else {
+            self.gap(
+                n,
+                "the private encoding of this FixedSpan element is not built",
+            );
+            return None;
+        };
         let (blob, at, w, count) = self.span_parts(header, n)?;
         if checked {
             let condition = self.value(Ty::Scalar(Scalar::Bool));
@@ -226,24 +267,7 @@ impl Cx<'_, '_, '_> {
             );
             self.start(load);
         }
-        let stride = if let Some(size) = self.packed_plain_size(elem) {
-            self.konst(Ty::Scalar(Scalar::U64), size, n)?
-        } else {
-            let first = self.add(at, w, n);
-            let end = self.skip(blob, first, w, elem, n)?;
-            let stride = self.value(Ty::Scalar(Scalar::U64));
-            self.inst(
-                Inst::Binary {
-                    result: stride,
-                    op: BinaryOp::Sub,
-                    left: end,
-                    right: first,
-                    fail: None,
-                },
-                n,
-            );
-            stride
-        };
+        let stride = self.konst(Ty::Scalar(Scalar::U64), stride, n)?;
         let offset = self.mul(index, stride, n);
         let mut header_bytes = w;
         if header_words == 2 {

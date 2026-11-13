@@ -238,7 +238,7 @@ impl Cx<'_, '_, '_> {
                 _ => None,
             };
         }
-        if let Some(size) = self.plain_fields(ty).and(self.packed_plain_size(ty)) {
+        if let Some(size) = self.packed_plain_size(ty) {
             return self.add_k(at, size, n);
         }
         if let Some(cases) = self.variant_cases(ty) {
@@ -394,7 +394,9 @@ impl Cx<'_, '_, '_> {
                 if self.is_locator(bare) {
                     return self.new_locator(bare, blob, off, n);
                 }
-                if self.plain_fields(bare).is_some() {
+                if self.plain_fields(bare).is_some()
+                    || matches!(self.t.kind(bare), TyKind::Array(..))
+                {
                     let to = self.new_slot(PlaceTy::Declared(id), n);
                     self.decode_plain(blob, off, w, bare, to, n)?;
                     return Some(to);

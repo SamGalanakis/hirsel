@@ -1,0 +1,18 @@
+// Private FixedSpan elements use the same field-wise encoding without native padding.
+// Values are 7,11,13,17: sum=48; second[1]=17; first[1]=11.
+// expect: accept
+// expect: run values() = 114817
+fn values() -> u64 {
+  region r {
+    let mut b: SpanBuilder[Inline[(u8,u64),2], in r] = span.builder(r)
+    match span.push(mut b, [(1u8,7u64),(2u8,11u64)]) { Ok(()) => {}, Error(_) => return 998 }
+    match span.push(mut b, [(3u8,13u64),(4u8,17u64)]) { Ok(()) => {}, Error(_) => return 998 }
+    let xs = span.finish(take b)
+    let mut total:u64 = 0
+    for row in xs { for (_,value) in row { total += value } }
+    let (_,last) = xs[1][1]
+    let first = match span.get(xs,0) { Some(row) => { let (_,value)=row[1]; value }, None => 999u64 }
+    first * 10000 + total * 100 + last
+  }
+}
+pub fn main() -> Result[(),Exit] { if values()==114817u64 { Ok(()) } else { Error(Exit(status:1)) } }

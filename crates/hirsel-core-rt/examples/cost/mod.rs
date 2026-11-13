@@ -42,7 +42,64 @@ fn allocation<const N: usize>(runtime: bool) -> u64 {
     sum
 }
 
+fn emitted_growth() -> u64 {
+    let ctx = Context::new(u64::MAX);
+    let mut data: *mut u64 = ptr::null_mut();
+    let mut len = 0usize;
+    let mut capacity = 0usize;
+    for i in 0..COUNT {
+        if len == capacity {
+            let next_capacity =
+                charge::grown_capacity(capacity as u64, len as u64 + 1).unwrap() as usize;
+            // SAFETY: this is the emitted slow grow path. Each old carrier owns
+            // its prefix; admission precedes copy and the old block's refund.
+            unsafe {
+                let next = hirsel_core_rt::abi::hirsel_core_alloc(
+                    &ctx,
+                    data.cast(),
+                    next_capacity * 8,
+                    8,
+                    charge::seq(next_capacity as u64, 8).unwrap(),
+                    false,
+                    hirsel_core_rt::block::PLAIN,
+                )
+                .pointer
+                .cast::<u64>();
+                assert!(!next.is_null());
+                if capacity != 0 {
+                    ptr::copy_nonoverlapping(data, next, len);
+                    hirsel_core_rt::abi::hirsel_core_free(
+                        std::ptr::NonNull::new_unchecked(data.cast()),
+                        charge::seq(capacity as u64, 8).unwrap(),
+                    );
+                }
+                data = next;
+                capacity = next_capacity;
+            }
+        }
+        // SAFETY: len < capacity; this slot is uninitialized and exclusively owned.
+        unsafe {
+            data.add(len).write(black_box(i));
+        }
+        len = len.wrapping_add(1);
+    }
+    // SAFETY: all len elements are initialized; the final carrier owns the block.
+    unsafe {
+        let sum = black_box(std::slice::from_raw_parts(data, len))
+            .iter()
+            .sum();
+        hirsel_core_rt::abi::hirsel_core_free(
+            std::ptr::NonNull::new_unchecked(data.cast()),
+            charge::seq(capacity as u64, 8).unwrap(),
+        );
+        sum
+    }
+}
+
 fn growth(mode: &str) -> u64 {
+    if mode == "runtime" {
+        return emitted_growth();
+    }
     if mode == "rust" {
         let mut values = Vec::new();
         for i in 0..COUNT {

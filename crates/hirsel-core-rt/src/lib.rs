@@ -37,11 +37,11 @@ pub struct Capacity {
 /// custody can carry funding records beyond this context's lifetime.
 #[repr(C)]
 pub struct Context {
-    pub(crate) current_limit: *mut limit::LimitRecord,
+    // Funding's first word is the one frozen current-record pointer.
+    pub(crate) current: Funding,
     pub(crate) run: *const crate::process::Config,
     pub(crate) cancel_requested: bool,
     pub(crate) cancel_shield: usize,
-    pub(crate) current: Funding,
     pub(crate) finalizing: usize,
     pub(crate) bound_depth: usize,
     pub(crate) grant_depth: usize,
@@ -60,13 +60,11 @@ impl Context {
 
     pub(crate) fn with_funding(mut current: Funding) -> Self {
         current.normalize();
-        let current_limit = current.fast();
         Self {
-            current_limit,
+            current,
             run: std::ptr::null(),
             cancel_requested: false,
             cancel_shield: 0,
-            current,
             finalizing: 0,
             bound_depth: 0,
             grant_depth: usize::MAX,
@@ -80,7 +78,6 @@ impl Context {
     #[cfg(feature = "testing")]
     pub fn reset_test_limit(&mut self, bytes: u64) {
         self.current = Funding::root(bytes);
-        self.current_limit = self.current.fast();
         self.current.bind();
     }
     #[cfg(feature = "testing")]
@@ -93,37 +90,38 @@ impl Context {
     }
     /// Native emitter pointer to the frozen current-limit prefix. Dereferencing
     /// requires the task-exclusive discipline of the C ABI.
+    #[inline(always)]
     pub fn limit_record(&self) -> *mut limit::LimitRecord {
-        self.current_limit
+        self.current.raw_local()
     }
 
     #[inline]
     pub fn available(&self) -> u64 {
         // SAFETY: native entry/resume and every limit/grant transition install
         // this context's live canonical record before it can execute.
-        unsafe { (*self.current_limit).available }
+        unsafe { (*self.limit_record()).available }
     }
 
     #[inline]
     pub fn limit_enter(&mut self, bytes: u64) -> Result<(), Capacity> {
-        self.current_limit = self.current.enter(bytes)?;
+        self.current.enter(bytes)?;
         self.bound_depth = self.bound_depth.wrapping_add(1);
         Ok(())
     }
 
     #[inline]
     pub fn limit_exit(&mut self) {
-        self.current_limit = self.current.exit();
+        self.current.exit();
         self.bound_depth = self.bound_depth.wrapping_sub(1);
     }
 
     #[inline]
     pub(crate) fn payer(&self, like: Option<&limit::Payer>) -> limit::Payer {
         if self.finalizing != 0 {
-            limit::Payer::from_current(self.current_limit)
+            limit::Payer::from_current(self.limit_record())
         } else {
             like.copied().map_or_else(
-                || limit::Payer::from_current(self.current_limit),
+                || limit::Payer::from_current(self.limit_record()),
                 limit::Payer::canonical,
             )
         }

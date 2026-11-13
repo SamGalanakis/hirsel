@@ -34,7 +34,6 @@ pub(crate) fn task_resume(context: *mut Context) {
         (*context).current.bind();
         (*context).current.drain();
         (*context).current.normalize();
-        (*context).current_limit = (*context).current.fast();
     }
 }
 

@@ -303,12 +303,12 @@ pub(crate) unsafe fn free_in(
     // SAFETY: recover the live block's payer before deallocating its native bytes.
     unsafe {
         let payer = *funding(payload);
-        if charge != 0 && payer.record_pointer() == context.current_limit {
+        if charge != 0 && payer.record_pointer() == context.limit_record() {
             // The task pins its current canonical record and owns these local writes.
-            (*context.current_limit).available =
-                (*context.current_limit).available.wrapping_add(charge);
-            (*context.current_limit).outstanding =
-                (*context.current_limit).outstanding.wrapping_sub(charge);
+            (*context.limit_record()).available =
+                (*context.limit_record()).available.wrapping_add(charge);
+            (*context.limit_record()).outstanding =
+                (*context.limit_record()).outstanding.wrapping_sub(charge);
         } else {
             payer.settle(charge);
         }

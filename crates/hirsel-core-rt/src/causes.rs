@@ -245,7 +245,6 @@ pub unsafe fn finalizer_begin(context: &mut Context, pointer: std::ptr::NonNull<
     // SAFETY: the state stays alive through finalizer_end and field cleanup.
     context.active_resource = unsafe { block::resource(pointer) };
     context.current.normalize();
-    context.current_limit = context.current.fast();
     context.current.bind();
     context.finalizing += 1;
 }
@@ -261,7 +260,6 @@ pub unsafe fn finalizer_end(context: &mut Context, pointer: std::ptr::NonNull<u8
     context.active_resource = resource.previous_resource;
     context.grant_depth = resource.previous_grant_depth;
     context.current.normalize();
-    context.current_limit = context.current.fast();
     context.current.bind();
     context.finalizing -= 1;
 }

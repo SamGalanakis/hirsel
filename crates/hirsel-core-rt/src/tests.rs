@@ -182,7 +182,7 @@ fn native_task_context_moves_workers_with_exclusive_execution_custody() {
 fn frozen_prefixes_match_the_emitter_contract() {
     use crate::region::Region;
     assert_eq!(
-        std::mem::offset_of!(Context, current_limit),
+        std::mem::offset_of!(Context, current),
         CONTEXT_CURRENT_LIMIT
     );
     assert_eq!(

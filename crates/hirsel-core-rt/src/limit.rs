@@ -89,6 +89,8 @@ impl Forest {
                 return;
             }
             let parent = r.parent.or_else(|| r.live.parent.map(|p| p.slot().id));
+            // The free list takes over the final slot pin until its next use.
+            r.refs = 1;
             r.parent = None;
             r.rank = 0;
             r.live = Live::EMPTY;
@@ -113,7 +115,7 @@ impl Forest {
                 local: UnsafeCell::new(LimitRecord {
                     available: 0,
                     outstanding: 0,
-                    refs: 0,
+                    refs: 1,
                     parent: None,
                     rank: 0,
                     live: Live::EMPTY,
@@ -139,10 +141,9 @@ impl Forest {
         } else {
             self.fresh(domain)
         };
-        // SAFETY: this free record has zero charge/refs, no union edge and rank zero.
+        // SAFETY: the free list transfers its sole pin; charge and union rank are zero.
         let r = unsafe { &mut *slot.as_ref().local.get() };
         r.available = live.capacity;
-        r.refs = 1;
         r.live = live;
         #[cfg(any(test, feature = "testing"))]
         {
@@ -519,11 +520,11 @@ impl Funding {
         self.payer = canonical;
     }
     #[inline(always)]
-    fn raw_local(&self) -> *mut LimitRecord {
+    pub(crate) fn raw_local(&self) -> *mut LimitRecord {
         self.payer.0.as_ptr().cast()
     }
     #[inline(always)]
-    pub(crate) fn enter(&mut self, bytes: u64) -> Result<*mut LimitRecord, Capacity> {
+    pub(crate) fn enter(&mut self, bytes: u64) -> Result<(), Capacity> {
         // Active contexts always hold a canonical record. A reservation moves
         // available bytes, not outstanding charges, and transfers the parent's pin.
         let parent = self.payer;
@@ -554,10 +555,10 @@ impl Funding {
         let domain = unsafe { parent.0.as_ref().domain };
         let forest = unsafe { &mut *domain.as_ref().forest.get() };
         self.payer = forest.take(domain, live);
-        Ok(self.raw_local())
+        Ok(())
     }
     #[inline(always)]
-    pub(crate) fn exit(&mut self) -> *mut LimitRecord {
+    pub(crate) fn exit(&mut self) {
         let old = self.payer;
         // SAFETY: the active context pins its live canonical record exclusively.
         let r = unsafe { &mut *self.raw_local() };
@@ -565,7 +566,6 @@ impl Funding {
             let parent = r.live.parent.unwrap();
             // SAFETY: the active Funding slot and its domain are task-exclusive.
             let f = unsafe { &mut *old.0.as_ref().domain.as_ref().forest.get() };
-            r.refs = 0;
             r.rank = 0;
             #[cfg(any(test, feature = "testing"))]
             {
@@ -588,7 +588,6 @@ impl Funding {
             f.release(old.slot().id);
             self.payer = Payer(NonNull::from(f.slot(winner)));
         }
-        self.raw_local()
     }
     #[cfg(any(test, feature = "testing"))]
     pub(crate) fn inject(&self, n: usize, later: bool) {

@@ -91,7 +91,7 @@ fn boundary(s: Store, root: List[Piece], at: u64) -> bool {
     for p in root {
         let end = offset + int.widen(p.hi - p.lo)
         if at >= offset && at <= end {
-            return string.is_boundary(chunk(s, p.id).value, int.widen(p.lo) + at - offset)
+            return string.is_boundary(chunk(s, p.id).value, at + int.widen(p.lo) - offset)
         }
         offset = end
     }

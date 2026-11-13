@@ -16,29 +16,29 @@ fn io(r: Result[(), IoError]) -> u64 {
 // Created (0), then Exists (3).
 // expect: run create_twice(dir) = 3
 fn create_twice(d: Dir) -> u64 waits {
-    let first = io(std.dir.create_dir(d, "sub"))
-    let second = io(std.dir.create_dir(d, "sub"))
+    let first = io(dir.create_dir(d, "sub"))
+    let second = io(dir.create_dir(d, "sub"))
     first * 10 + second
 }
 
 // expect: run create_without_parent(dir) = 1
 fn create_without_parent(d: Dir) -> u64 waits {
-    io(std.dir.create_dir(d, "no/sub"))
+    io(dir.create_dir(d, "no/sub"))
 }
 
 // Removes the tree: the file below it is gone after.
 // expect: run remove_all_tree(dir) = 1
 fn remove_all_tree(d: Dir) -> u64 waits {
-    result.unwrap(std.dir.create_dir(d, "sub"))
-    result.unwrap(std.dir.create_dir(d, "sub/deeper"))
-    result.unwrap(std.file.write(d, "sub/deeper/x", string.as_bytes("1")))
-    result.unwrap(std.dir.remove_all(d, "sub"))
-    io(std.file.remove(d, "sub/deeper/x"))
+    result.unwrap(dir.create_dir(d, "sub"))
+    result.unwrap(dir.create_dir(d, "sub/deeper"))
+    result.unwrap(file.write(d, "sub/deeper/x", string.as_bytes("1")))
+    result.unwrap(dir.remove_all(d, "sub"))
+    io(file.remove(d, "sub/deeper/x"))
 }
 
 // expect: run remove_all_missing(dir) = 1
 fn remove_all_missing(d: Dir) -> u64 waits {
-    io(std.dir.remove_all(d, "absent"))
+    io(dir.remove_all(d, "absent"))
 }
 
 // The fresh name is appended after the prefix the caller wrote, and the directory exists:
@@ -47,10 +47,10 @@ fn remove_all_missing(d: Dir) -> u64 waits {
 fn create_temp_names(d: Dir) -> bool waits {
     let mut name = result.unwrap(string.with_capacity(40))
     result.unwrap(string.push(mut name, "t-"))
-    let tmp = result.unwrap(std.dir.create_temp(d, mut name))
-    result.unwrap(std.file.write(tmp, "x", string.as_bytes("1")))
+    let tmp = result.unwrap(dir.create_temp(d, mut name))
+    result.unwrap(file.write(tmp, "x", string.as_bytes("1")))
     let grew = string.byte_len(name) > 2 && string.starts_with(name, "t-")
-    result.unwrap(std.dir.remove_all(d, name))
+    result.unwrap(dir.remove_all(d, name))
     grew
 }
 
@@ -58,6 +58,6 @@ fn create_temp_names(d: Dir) -> bool waits {
 // expect: run create_temp_small_name(dir) = fail Bounds
 fn create_temp_small_name(d: Dir) -> bool waits {
     let mut name = string.new()
-    let _ = std.dir.create_temp(d, mut name)
+    let _ = dir.create_temp(d, mut name)
     true
 }

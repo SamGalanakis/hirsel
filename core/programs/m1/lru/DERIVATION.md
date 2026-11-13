@@ -37,10 +37,8 @@ Instrumentation is separate: String trace items count 24 bytes; a channel charge
 string storage; its 256-byte finalizer grant covers one release-line copy.
 These are source derivations, not executed Hirsel results.
 
-The opaque Id[T] key promise is conditional on its type argument under OWN-4.
-Entry therefore declares key for recency-handle comparison; all its fields are
-key, with the recursive promise read through Id. This changes no representation
-or admission. The phantom parameter requiring that promise is an API cost.
+Id[T] is key whatever T is (4eeee159: a parameter no field mentions adds no
+condition), so recency handles compare and Entry declares no bound.
 
 ## Source length
 

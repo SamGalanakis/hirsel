@@ -131,7 +131,7 @@ pub fn shown[in a](x: ObjectIndex[in a], i: u64) -> Option[(View[String], View[J
     }
     let k = text.as_string(member(x.members, int.narrow(i)).key)
     let first = below(x, k)
-    if int.widen(x.ordinals[first]) != i {
+    if i != int.widen(x.ordinals[first]) {
         return None
     }
     let last = member(x.members, x.ordinals[above(x, k) - 1])

@@ -352,7 +352,8 @@ fn query(j: Json, path: String, at: u64) -> Result[View[Json], m1.support.Error]
             None => Error(m1.support.error("MissingPath")),
         },
         Arr(xs) => {
-            let index: u64 = match int.parse(key) {
+            let parsed: Result[u64, ParseError] = int.parse(key)
+            let index: u64 = match parsed {
                 Ok(n) => n,
                 Error(_) => return Error(m1.support.error("WrongKind"))
             }

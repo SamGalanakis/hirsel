@@ -46,12 +46,13 @@ fn sources(dir: &Path, prefix: &[&str], signatures: bool) -> Vec<ModuleSource> {
         .collect()
 }
 
-/// core (declarations), std (library code, depends on core) and std_tests (the contract
-/// tests as modules `tests.<module>`, depending on std, so `list.sort` reads std's).
+/// core (declarations) and std (library code, depends on core), laid out as the canonical
+/// image reads `core/std`: one package, the contract tests its modules `tests.<module>`.
 fn manifest() -> CorpusManifest {
     let root = repo();
     let core = package("core");
-    let std = package("std");
+    let mut std_sources = sources(&root.join("core/std"), &[], false);
+    std_sources.extend(sources(&root.join("core/std/tests"), &["tests"], false));
     CorpusManifest {
         core: core.clone(),
         packages: vec![
@@ -61,21 +62,20 @@ fn manifest() -> CorpusManifest {
                 dependencies: vec![],
             },
             PackageManifest {
-                package: std.clone(),
-                sources: sources(&root.join("core/std"), &[], false),
-                dependencies: vec![core.clone()],
-            },
-            PackageManifest {
-                package: package("std_tests"),
-                sources: sources(&root.join("core/std/tests"), &["tests"], false),
-                dependencies: vec![core, std],
+                package: package("std"),
+                sources: std_sources,
+                dependencies: vec![core],
             },
         ],
     }
 }
 
 fn is_seed(p: &PackageId) -> bool {
-    p.name == "std" || p.name == "std_tests"
+    p.name == "std"
+}
+
+fn is_test(s: &hirsel_core_resolve::CorpusSource) -> bool {
+    s.module.modules.first().is_some_and(|m| m == "tests")
 }
 
 #[test]
@@ -178,11 +178,7 @@ fn std_seed_check_report() {
         .expect("materialize seed instances");
     // Contract tests: `// expect: run f() = R` before a test function, run when emitted.
     let mut runs = vec![];
-    for s in corpus
-        .sources
-        .iter()
-        .filter(|s| s.module.package.name == "std_tests")
-    {
+    for s in corpus.sources.iter().filter(|s| is_test(s)) {
         let module = s.module.modules.join(".");
         let none = HashMap::new();
         let functions = emitted.get(&module).unwrap_or(&none);

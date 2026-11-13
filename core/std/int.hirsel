@@ -45,7 +45,8 @@ pub fn parse_int(s: String, base: u32) -> Result[i64, ParseError] {
     }
     let m = digits(b, start, base)?
     if !negative {
-        return match int.try_narrow(m) {
+        let narrowed: Option[i64] = int.try_narrow(m)
+        return match narrowed {
             Some(x) => Ok(x),
             None => Error(OutOfRange),
         }

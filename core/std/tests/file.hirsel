@@ -21,7 +21,7 @@ fn io_code(e: IoError) -> u64 {
 }
 
 /// 0 for Ok, an IoError's code, 6 for Capacity, 7 for NotUtf8.
-fn read_code(e: std.file.Error) -> u64 {
+fn read_code(e: file.Error) -> u64 {
     match e {
         Io(x) => io_code(x),
         Capacity(_) => 6,
@@ -32,17 +32,17 @@ fn read_code(e: std.file.Error) -> u64 {
 // 'h' + 'e' + 'l' + 'l' + 'o' = 104 + 101 + 108 + 108 + 111.
 // expect: run write_then_read(dir) = 532
 fn write_then_read(d: Dir) -> u64 waits {
-    result.unwrap(std.file.write(d, "a.txt", string.as_bytes("hello")))
-    let b = result.unwrap(std.file.read(d, "a.txt"))
+    result.unwrap(file.write(d, "a.txt", string.as_bytes("hello")))
+    let b = result.unwrap(file.read(d, "a.txt"))
     list.sum_bytes(b)
 }
 
 // Write replaces what was there.
 // expect: run write_empties_first(dir) = 2
 fn write_empties_first(d: Dir) -> u64 waits {
-    result.unwrap(std.file.write(d, "a.txt", string.as_bytes("hello")))
-    result.unwrap(std.file.write(d, "a.txt", string.as_bytes("hi")))
-    let b = result.unwrap(std.file.read(d, "a.txt"))
+    result.unwrap(file.write(d, "a.txt", string.as_bytes("hello")))
+    result.unwrap(file.write(d, "a.txt", string.as_bytes("hi")))
+    let b = result.unwrap(file.read(d, "a.txt"))
     list.len(b)
 }
 
@@ -51,14 +51,14 @@ fn write_empties_first(d: Dir) -> u64 waits {
 fn read_grows(d: Dir) -> u64 waits {
     let mut data: Bytes = list.new()
     result.unwrap(list.fill(mut data, 10000, 7))
-    result.unwrap(std.file.write(d, "big", data))
-    let b = result.unwrap(std.file.read(d, "big"))
+    result.unwrap(file.write(d, "big", data))
+    let b = result.unwrap(file.read(d, "big"))
     list.len(b)
 }
 
 // expect: run read_missing(dir) = 1
 fn read_missing(d: Dir) -> u64 waits {
-    match std.file.read(d, "absent") {
+    match file.read(d, "absent") {
         Ok(_) => 0,
         Error(e) => read_code(e),
     }
@@ -66,8 +66,8 @@ fn read_missing(d: Dir) -> u64 waits {
 
 // expect: run read_string_text(dir) = true
 fn read_string_text(d: Dir) -> bool waits {
-    result.unwrap(std.file.write(d, "t", string.as_bytes("héllo")))
-    let s = result.unwrap(std.file.read_string(d, "t"))
+    result.unwrap(file.write(d, "t", string.as_bytes("héllo")))
+    let s = result.unwrap(file.read_string(d, "t"))
     s == "héllo"
 }
 
@@ -76,8 +76,8 @@ fn read_string_text(d: Dir) -> bool waits {
 fn read_string_not_utf8(d: Dir) -> u64 waits {
     let mut data: Bytes = list.new()
     result.unwrap(list.fill(mut data, 1, 255))
-    result.unwrap(std.file.write(d, "bad", data))
-    match std.file.read_string(d, "bad") {
+    result.unwrap(file.write(d, "bad", data))
+    match file.read_string(d, "bad") {
         Ok(_) => 0,
         Error(e) => read_code(e),
     }
@@ -86,47 +86,47 @@ fn read_string_not_utf8(d: Dir) -> u64 waits {
 // "abc" read through a 2-byte buffer: 2 bytes, then 1, then 0 at the end: 210.
 // expect: run read_into_in_steps(dir) = 210
 fn read_into_in_steps(d: Dir) -> u64 waits {
-    let mut out = result.unwrap(std.file.open(d, "s", Write))
-    result.unwrap(std.file.write_all(mut out, string.as_bytes("abc")))
-    result.unwrap(std.file.close(take out))
-    let mut src = result.unwrap(std.file.open(d, "s", Read))
+    let mut out = result.unwrap(file.open(d, "s", Write))
+    result.unwrap(file.write_all(mut out, string.as_bytes("abc")))
+    result.unwrap(file.close(take out))
+    let mut src = result.unwrap(file.open(d, "s", Read))
     let mut buf: Bytes = result.unwrap(list.with_capacity(2))
-    let a = result.unwrap(std.file.read_into(mut src, mut buf))
+    let a = result.unwrap(file.read_into(mut src, mut buf))
     list.clear(mut buf)
-    let b = result.unwrap(std.file.read_into(mut src, mut buf))
+    let b = result.unwrap(file.read_into(mut src, mut buf))
     list.clear(mut buf)
-    let c = result.unwrap(std.file.read_into(mut src, mut buf))
-    result.unwrap(std.file.close(take src))
+    let c = result.unwrap(file.read_into(mut src, mut buf))
+    result.unwrap(file.close(take src))
     a * 100 + b * 10 + c
 }
 
 // A buffer with no spare capacity reads nothing.
 // expect: run read_into_full_buffer(dir) = 0
 fn read_into_full_buffer(d: Dir) -> u64 waits {
-    result.unwrap(std.file.write(d, "s", string.as_bytes("abc")))
-    let mut src = result.unwrap(std.file.open(d, "s", Read))
+    result.unwrap(file.write(d, "s", string.as_bytes("abc")))
+    let mut src = result.unwrap(file.open(d, "s", Read))
     let mut buf: Bytes = list.new()
-    let n = result.unwrap(std.file.read_into(mut src, mut buf))
-    result.unwrap(std.file.close(take src))
+    let n = result.unwrap(file.read_into(mut src, mut buf))
+    result.unwrap(file.close(take src))
     n
 }
 
 // Append writes after what is there.
 // expect: run append_adds(dir) = 5
 fn append_adds(d: Dir) -> u64 waits {
-    result.unwrap(std.file.write(d, "log", string.as_bytes("abc")))
-    let mut f = result.unwrap(std.file.open(d, "log", Append))
-    result.unwrap(std.file.write_all(mut f, string.as_bytes("de")))
-    result.unwrap(std.file.close(take f))
-    list.len(result.unwrap(std.file.read(d, "log")))
+    result.unwrap(file.write(d, "log", string.as_bytes("abc")))
+    let mut f = result.unwrap(file.open(d, "log", Append))
+    result.unwrap(file.write_all(mut f, string.as_bytes("de")))
+    result.unwrap(file.close(take f))
+    list.len(result.unwrap(file.read(d, "log")))
 }
 
 // expect: run create_new_existing(dir) = 3
 fn create_new_existing(d: Dir) -> u64 waits {
-    result.unwrap(std.file.write(d, "x", string.as_bytes("1")))
-    match std.file.open(d, "x", CreateNew) {
+    result.unwrap(file.write(d, "x", string.as_bytes("1")))
+    match file.open(d, "x", CreateNew) {
         Ok(f) => {
-            let _ = std.file.close(take f)
+            let _ = file.close(take f)
             0
         }
         Error(e) => io_code(e),
@@ -135,9 +135,9 @@ fn create_new_existing(d: Dir) -> u64 waits {
 
 // expect: run open_missing(dir) = 1
 fn open_missing(d: Dir) -> u64 waits {
-    match std.file.open(d, "absent", Read) {
+    match file.open(d, "absent", Read) {
         Ok(f) => {
-            let _ = std.file.close(take f)
+            let _ = file.close(take f)
             0
         }
         Error(e) => io_code(e),
@@ -146,35 +146,35 @@ fn open_missing(d: Dir) -> u64 waits {
 
 // expect: run remove_then_missing(dir) = 1
 fn remove_then_missing(d: Dir) -> u64 waits {
-    result.unwrap(std.file.write(d, "x", string.as_bytes("1")))
-    result.unwrap(std.file.remove(d, "x"))
-    io(std.file.remove(d, "x"))
+    result.unwrap(file.write(d, "x", string.as_bytes("1")))
+    result.unwrap(file.remove(d, "x"))
+    io(file.remove(d, "x"))
 }
 
 // A second handle to a locked file is refused with Held; after unlock it locks.
 // expect: run lock_held_then_free(dir) = true
 fn lock_held_then_free(d: Dir) -> bool waits {
-    result.unwrap(std.file.write(d, "lock", string.as_bytes("")))
-    let first = result.unwrap(std.file.open(d, "lock", Read))
-    let second = result.unwrap(std.file.open(d, "lock", Read))
-    let held = match std.file.try_lock(take first) {
+    result.unwrap(file.write(d, "lock", string.as_bytes("")))
+    let first = result.unwrap(file.open(d, "lock", Read))
+    let second = result.unwrap(file.open(d, "lock", Read))
+    let held = match file.try_lock(take first) {
         Ok(l) => l,
         Error(_) => fail("file test: the first lock was refused"),
     }
-    let refused = match std.file.try_lock(take second) {
+    let refused = match file.try_lock(take second) {
         Ok(_) => return false,
         Error(Held(f)) => f,
         Error(Io(_, _)) => return false,
         Error(Capacity(_, _)) => return false,
     }
-    let back = match std.file.unlock(take held) {
+    let back = match file.unlock(take held) {
         Ok(f) => f,
         Error(_) => return false,
     }
-    let ok = match std.file.try_lock(take refused) {
+    let ok = match file.try_lock(take refused) {
         Ok(_) => true,
         Error(_) => false,
     }
-    let _ = std.file.close(take back)
+    let _ = file.close(take back)
     ok
 }

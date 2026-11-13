@@ -3,21 +3,21 @@
 // a tag 1, a Text 4 + its bytes, a container 1 + 4 + 4 + its items + 4 per item, a member
 // 4 + its key's bytes + its value.
 fn size_of(s: String) -> u64 {
-    match std.json.size(s) {
+    match json.size(s) {
         Ok(n) => n,
         Error(_) => 999,
     }
 }
 
 fn syntax_at(s: String) -> u64 {
-    match std.json.size(s) {
+    match json.size(s) {
         Error(Syntax(i)) => i,
         _ => 999,
     }
 }
 
 fn not_finite_at(s: String) -> u64 {
-    match std.json.size(s) {
+    match json.size(s) {
         Error(NotFinite(i)) => i,
         _ => 999,
     }
@@ -117,7 +117,7 @@ fn truncated_literal() -> u64 {
 }
 
 /// Whether v is a number spelled w.
-fn spelled(v: std.json.Json, w: String) -> bool {
+fn spelled(v: json.Json, w: String) -> bool {
     match v {
         Num(t) => text.as_string(t) == w,
         _ => false,
@@ -128,7 +128,7 @@ fn spelled(v: std.json.Json, w: String) -> bool {
 // 4 items; item 1 is a Str of 2 bytes; item 3 is an empty Arr: 4 x 10 + 2.
 fn parse_reads_items() -> u64 {
     region r {
-        match result.unwrap(std.json.parse(r, "[12,\"ab\",[true,30],[]]")) {
+        match result.unwrap(json.parse(r, "[12,\"ab\",[true,30],[]]")) {
             Arr(xs) => {
                 let n = seq.len(xs) * 10
                 let b = match indexed.get(xs, 1) {
@@ -150,18 +150,18 @@ fn parse_reads_items() -> u64 {
 // In {"b":1,"a":2,"b":3}, b is 3 (the last value), a is 2, and c is absent.
 fn lookup_takes_last() -> bool {
     region r {
-        match result.unwrap(std.json.parse(r, "{\"b\":1,\"a\":2,\"b\":3}")) {
+        match result.unwrap(json.parse(r, "{\"b\":1,\"a\":2,\"b\":3}")) {
             Obj(ms) => {
-                let x = result.unwrap(std.json.index(ms))
-                let b = match std.json.get(x, "b") {
+                let x = result.unwrap(json.index(ms))
+                let b = match json.get(x, "b") {
                     Some(v) => spelled(v, "3"),
                     None => false,
                 }
-                let a = match std.json.get(x, "a") {
+                let a = match json.get(x, "a") {
                     Some(v) => spelled(v, "2"),
                     None => false,
                 }
-                let c = match std.json.get(x, "c") {
+                let c = match json.get(x, "c") {
                     Some(_) => false,
                     None => true,
                 }
@@ -177,22 +177,22 @@ fn lookup_takes_last() -> bool {
 // hidden (b was shown at 0), and 3 is past the end.
 fn render_keeps_first_position() -> bool {
     region r {
-        match result.unwrap(std.json.parse(r, "{\"b\":1,\"a\":2,\"b\":3}")) {
+        match result.unwrap(json.parse(r, "{\"b\":1,\"a\":2,\"b\":3}")) {
             Obj(ms) => {
-                let x = result.unwrap(std.json.index(ms))
-                let first = match std.json.shown(x, 0) {
+                let x = result.unwrap(json.index(ms))
+                let first = match json.shown(x, 0) {
                     Some((k, v)) => k == "b" && spelled(v, "3"),
                     None => false,
                 }
-                let second = match std.json.shown(x, 1) {
+                let second = match json.shown(x, 1) {
                     Some((k, v)) => k == "a" && spelled(v, "2"),
                     None => false,
                 }
-                let third = match std.json.shown(x, 2) {
+                let third = match json.shown(x, 2) {
                     Some(_) => false,
                     None => true,
                 }
-                let past = match std.json.shown(x, 3) {
+                let past = match json.shown(x, 3) {
                     Some(_) => false,
                     None => true,
                 }
@@ -207,14 +207,14 @@ fn render_keeps_first_position() -> bool {
 // Three equal keys: the lookup gives the last (3); render shows the first position only.
 fn equal_keys_order_by_ordinal() -> bool {
     region r {
-        match result.unwrap(std.json.parse(r, "{\"k\":1,\"k\":2,\"k\":3}")) {
+        match result.unwrap(json.parse(r, "{\"k\":1,\"k\":2,\"k\":3}")) {
             Obj(ms) => {
-                let x = result.unwrap(std.json.index(ms))
-                let last = match std.json.get(x, "k") {
+                let x = result.unwrap(json.index(ms))
+                let last = match json.get(x, "k") {
                     Some(v) => spelled(v, "3"),
                     None => false,
                 }
-                let shown_once = match (std.json.shown(x, 0), std.json.shown(x, 1), std.json.shown(x, 2)) {
+                let shown_once = match (json.shown(x, 0), json.shown(x, 1), json.shown(x, 2)) {
                     (Some((_, v)), None, None) => spelled(v, "3"),
                     _ => false,
                 }

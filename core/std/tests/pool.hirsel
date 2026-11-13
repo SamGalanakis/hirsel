@@ -2,7 +2,7 @@
 // library bodies. Each test returns a scalar; the line `// expect: run f() = R` above it
 // gives the result derived by hand from the contract, or `fail Cause` for the failure the
 // contract names.
-fn handle(r: Result[std.pool.Id[u64], (Capacity, u64)]) -> std.pool.Id[u64] {
+fn handle(r: Result[pool.Id[u64], (Capacity, u64)]) -> pool.Id[u64] {
     match r {
         Ok(h) => h,
         Error(_) => fail("pool test: insert refused"),
@@ -10,7 +10,7 @@ fn handle(r: Result[std.pool.Id[u64], (Capacity, u64)]) -> std.pool.Id[u64] {
 }
 
 /// 0 for Ok, 1 for WrongPool, 2 for Removed.
-fn stale(r: Result[View[u64], std.pool.Stale]) -> u64 {
+fn stale(r: Result[View[u64], pool.Stale]) -> u64 {
     match r {
         Ok(_) => 0,
         Error(WrongPool) => 1,
@@ -20,78 +20,78 @@ fn stale(r: Result[View[u64], std.pool.Stale]) -> u64 {
 
 // expect: run insert_and_get() = 1020
 fn insert_and_get() -> u64 {
-    let mut p: std.pool.Pool[u64] = std.pool.new()
-    let a = handle(std.pool.insert(mut p, 10))
-    let b = handle(std.pool.insert(mut p, 20))
-    std.pool.get_or(p, a, 0) * 100 + std.pool.get_or(p, b, 0)
+    let mut p: pool.Pool[u64] = pool.new()
+    let a = handle(pool.insert(mut p, 10))
+    let b = handle(pool.insert(mut p, 20))
+    pool.get_or(p, a, 0) * 100 + pool.get_or(p, b, 0)
 }
 
 // expect: run len_counts_live() = 1
 fn len_counts_live() -> u64 {
-    let mut p: std.pool.Pool[u64] = std.pool.new()
-    let a = handle(std.pool.insert(mut p, 10))
-    let _ = handle(std.pool.insert(mut p, 20))
-    let _ = std.pool.remove(mut p, a)
-    std.pool.len(p)
+    let mut p: pool.Pool[u64] = pool.new()
+    let a = handle(pool.insert(mut p, 10))
+    let _ = handle(pool.insert(mut p, 20))
+    let _ = pool.remove(mut p, a)
+    pool.len(p)
 }
 
 // expect: run remove_returns_value() = 10
 fn remove_returns_value() -> u64 {
-    let mut p: std.pool.Pool[u64] = std.pool.new()
-    let a = handle(std.pool.insert(mut p, 10))
-    result.unwrap(std.pool.remove(mut p, a))
+    let mut p: pool.Pool[u64] = pool.new()
+    let a = handle(pool.insert(mut p, 10))
+    result.unwrap(pool.remove(mut p, a))
 }
 
 // A removed Id is Removed, for get, contains and a second remove.
 // expect: run removed_is_stale() = true
 fn removed_is_stale() -> bool {
-    let mut p: std.pool.Pool[u64] = std.pool.new()
-    let a = handle(std.pool.insert(mut p, 10))
-    let _ = std.pool.remove(mut p, a)
-    let again = match std.pool.remove(mut p, a) {
+    let mut p: pool.Pool[u64] = pool.new()
+    let a = handle(pool.insert(mut p, 10))
+    let _ = pool.remove(mut p, a)
+    let again = match pool.remove(mut p, a) {
         Ok(_) => false,
         Error(Removed) => true,
         Error(WrongPool) => false,
     }
-    stale(std.pool.get(p, a)) == 2 && !std.pool.contains(p, a) && again
+    stale(pool.get(p, a)) == 2 && !pool.contains(p, a) && again
 }
 
 // A reused slot has a new generation: the old Id stays stale and differs from the new one.
 // expect: run reuse_keeps_old_stale() = true
 fn reuse_keeps_old_stale() -> bool {
-    let mut p: std.pool.Pool[u64] = std.pool.new()
-    let a = handle(std.pool.insert(mut p, 10))
-    let _ = std.pool.remove(mut p, a)
-    let c = handle(std.pool.insert(mut p, 30))
-    std.pool.get_or(p, a, 0) == 0 && std.pool.get_or(p, c, 0) == 30 && a != c
+    let mut p: pool.Pool[u64] = pool.new()
+    let a = handle(pool.insert(mut p, 10))
+    let _ = pool.remove(mut p, a)
+    let c = handle(pool.insert(mut p, 30))
+    pool.get_or(p, a, 0) == 0 && pool.get_or(p, c, 0) == 30 && a != c
 }
 
 // expect: run other_pool_is_wrong() = 1
 fn other_pool_is_wrong() -> u64 {
-    let mut p: std.pool.Pool[u64] = std.pool.new()
-    let mut q: std.pool.Pool[u64] = std.pool.new()
-    let _ = handle(std.pool.insert(mut p, 1))
-    let h = handle(std.pool.insert(mut q, 1))
-    stale(std.pool.get(p, h))
+    let mut p: pool.Pool[u64] = pool.new()
+    let mut q: pool.Pool[u64] = pool.new()
+    let _ = handle(pool.insert(mut p, 1))
+    let h = handle(pool.insert(mut q, 1))
+    stale(pool.get(p, h))
 }
 
 // expect: run update_in_place() = 2121
 fn update_in_place() -> u64 {
-    let mut p: std.pool.Pool[u64] = std.pool.new()
-    let b = handle(std.pool.insert(mut p, 20))
-    let r = result.unwrap(std.pool.update(mut p, b, fn(mut x: u64) -> u64 {
+    let mut p: pool.Pool[u64] = pool.new()
+    let b = handle(pool.insert(mut p, 20))
+    let r = result.unwrap(pool.update(mut p, b, fn(mut x: u64) -> u64 {
         x += 1
         x
     }))
-    r * 100 + std.pool.get_or(p, b, 0)
+    r * 100 + pool.get_or(p, b, 0)
 }
 
 // expect: run update_stale() = true
 fn update_stale() -> bool {
-    let mut p: std.pool.Pool[u64] = std.pool.new()
-    let b = handle(std.pool.insert(mut p, 20))
-    let _ = std.pool.remove(mut p, b)
-    match std.pool.update(mut p, b, fn(mut x: u64) -> u64 {
+    let mut p: pool.Pool[u64] = pool.new()
+    let b = handle(pool.insert(mut p, 20))
+    let _ = pool.remove(mut p, b)
+    match pool.update(mut p, b, fn(mut x: u64) -> u64 {
         x
     }) {
         Ok(_) => false,
@@ -103,9 +103,9 @@ fn update_stale() -> bool {
 // A failure inside f propagates out of update (the slot is left vacant at a new generation).
 // expect: run update_failure_retires() = fail Overflow
 fn update_failure_retires() -> u64 {
-    let mut p: std.pool.Pool[u64] = std.pool.new()
-    let b = handle(std.pool.insert(mut p, 18446744073709551615))
-    let r = std.pool.update(mut p, b, fn(mut x: u64) -> u64 {
+    let mut p: pool.Pool[u64] = pool.new()
+    let b = handle(pool.insert(mut p, 18446744073709551615))
+    let r = pool.update(mut p, b, fn(mut x: u64) -> u64 {
         x += 1
         x
     })
@@ -115,6 +115,6 @@ fn update_failure_retires() -> u64 {
 
 // expect: run with_capacity_is_empty() = 0
 fn with_capacity_is_empty() -> u64 {
-    let p: std.pool.Pool[u64] = result.unwrap(std.pool.with_capacity(4))
-    std.pool.len(p)
+    let p: pool.Pool[u64] = result.unwrap(pool.with_capacity(4))
+    pool.len(p)
 }

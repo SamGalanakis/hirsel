@@ -990,8 +990,9 @@ fn every_memory_sample_admission_refusal_matches_the_evaluator() {
         executions += cases.len();
         agree_cases(&module, &cases, true);
     }
-    // The HostFile cleanup sample adds one baseline and two admission refusals.
-    assert_eq!(executions, 150);
+    // cleanup.core's f7 runs under limits 64, 100 and 150 make 1, 2 and 3 admissions:
+    // each adds its baseline and two refusals per admission (3 + 5 + 7) to 158.
+    assert_eq!(executions, 173);
     println!("whole memory sample executions including every admission refusal: {executions}");
 }
 

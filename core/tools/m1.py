@@ -130,7 +130,7 @@ class IncompleteWorkload(AssertionError):
     """The artifact did not demonstrate execution of the selected workload."""
 
 
-def compare_case(binary, directory, case, scratch):
+def compare_case(binary, directory, case, scratch, timeout=None):
     """Each run owns an isolated directory. Only explicit outputs may remain."""
     work = scratch / case['name']
     work.mkdir()
@@ -144,8 +144,11 @@ def compare_case(binary, directory, case, scratch):
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(directory / source, destination)
     before = files_below(work)
-    result = subprocess.run([str(binary), case['input'], case['variant']], cwd=work,
-                            env={**os.environ, **case.get('env', {})}, capture_output=True)
+    try:
+        result = subprocess.run([str(binary), case['input'], case['variant']], cwd=work,
+                                env={**os.environ, **case.get('env', {})}, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        return f'hang after {timeout:g}s: stdout {error.stdout or b""!r}, stderr {error.stderr or b""!r}'
     expected = directory / 'EXPECTED' / case['name']
     want = (expected.with_suffix('.stdout').read_bytes(), expected.with_suffix('.stderr').read_bytes(),
             int(expected.with_suffix('.exit').read_text()))
@@ -168,7 +171,7 @@ def compare_case(binary, directory, case, scratch):
     return None
 
 
-def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=None):
+def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=None, case_timeouts=None):
     manifest = json.loads(manifest_path.read_text())
     entries = [e for e in manifest['entries'] if not only or e['workload'] in only]
     if not entries:
@@ -211,7 +214,7 @@ def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=No
                 build = subprocess.run(command, cwd=root, capture_output=True)
                 row = dict(program=entry['workload'], variant=entry['variant'], engine=engine,
                            checked=False, artifact_linked=False, built=False, passed=0, cases=len(cases), first_failure=None,
-                           stopped=None)
+                           stopped=None, case_outcomes=[])
                 rows.append(row)
                 try:
                     product = json.loads(build.stdout)
@@ -240,7 +243,8 @@ def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=No
                 row['built'] = True
                 for case in cases:
                     try:
-                        failure = compare_case(binary, corpus, case, scratch)
+                        failure = compare_case(binary, corpus, case, scratch,
+                                               (case_timeouts or {}).get(entry['workload'] + '/' + case['name']))
                     except IncompleteWorkload as error:
                         row['built'] = False
                         row['passed'] = 0
@@ -252,6 +256,7 @@ def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=No
                         break
                     except (OSError, ValueError) as error:
                         failure = f'run tool: {error}'
+                    row['case_outcomes'].append(dict(name=case['name'], passed=failure is None, failure=failure))
                     if failure:
                         if row['first_failure'] is None:
                             row['first_failure'] = case['name']
@@ -353,12 +358,19 @@ def main():
     parser.add_argument('--cc', type=Path, default=(Path(os.environ['LLVM_SYS_231_PREFIX']) / 'bin/clang') if 'LLVM_SYS_231_PREFIX' in os.environ else None)
     parser.add_argument('--only', nargs='+')
     parser.add_argument('--report', type=Path)
+    parser.add_argument('--timeout-case', action='append', default=[], metavar='PROGRAM/CASE=SECONDS')
     args = parser.parse_args()
+    case_timeouts = {}
+    for specification in args.timeout_case:
+        name, seconds = specification.rsplit('=', 1)
+        case_timeouts[name] = float(seconds)
+        if case_timeouts[name] <= 0:
+            parser.error('--timeout-case needs a positive duration')
     engines = ['cranelift', 'llvm'] if args.backend == 'both' else [args.backend]
     with tempfile.TemporaryDirectory(prefix='hirsel-m1-store-') as store:
         rows = run(args.compiler.resolve(), args.runtime.resolve(), engines, args.manifest.resolve(),
                    args.root.resolve(), args.store.resolve() if args.store else Path(store),
-                   args.cc.resolve() if args.cc else None, args.only)
+                   args.cc.resolve() if args.cc else None, args.only, case_timeouts)
     print(report(rows))
     if args.report:
         args.report.write_text(json.dumps(rows, indent=2) + '\n')

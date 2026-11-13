@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from m1 import census_table, gap_sites, gap_table, inputs_for, run, table
+from m1 import compare_case, census_table, gap_sites, gap_table, inputs_for, run, table
 
 
 class Milestone(unittest.TestCase):
@@ -178,6 +178,17 @@ print(json.dumps({'accepted':True, 'native':{'executable':str(output)}, 'diagnos
         self.assertEqual(gap_sites([gap('iteration of this stable or map representation is not built', 40)])[0]['slice'], 'E')
         rows[0]['incomplete'].append(gap('new unassigned construct', 30))
         self.assertEqual(gap_sites(rows[0]['incomplete'])[-1]['slice'], 'unassigned')
+
+    def test_case_timeout_reports_hang_and_keeps_other_cases(self):
+        binary = self.root / 'hang'
+        binary.write_text('#!/usr/bin/env python3\nimport time\ntime.sleep(60)\n')
+        binary.chmod(0o755)
+        scratch = self.root / 'timeout'
+        scratch.mkdir()
+        case = json.loads((self.corpus / 'cases.json').read_text())[0]
+        failure = compare_case(binary, self.corpus, case, scratch, timeout=0.02)
+        self.assertIn('hang after 0.02s', failure)
+        self.assertEqual(self.rows()[0]['passed'], 2)
 
     def test_empty_selection_is_not_success(self):
         with self.assertRaisesRegex(ValueError, 'no entries'):

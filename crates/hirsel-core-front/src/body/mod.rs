@@ -1104,6 +1104,12 @@ fn mentions_error(t: &impl TyRead, ty: TyId) -> bool {
         TyKind::Fn(ps, r, _) => {
             mentions_error(t, *r) || ps.iter().any(|&(_, x)| mentions_error(t, x))
         }
-        TyKind::Never | TyKind::Unit | TyKind::Scalar(_) | TyKind::Param(_) | TyKind::Hole => false,
+        TyKind::Anchored(x, root) => mentions_error(t, *x) || mentions_error(t, *root),
+        TyKind::Never
+        | TyKind::Unit
+        | TyKind::Scalar(_)
+        | TyKind::Param(_)
+        | TyKind::Hole
+        | TyKind::Region(_) => false,
     }
 }

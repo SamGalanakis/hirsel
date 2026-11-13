@@ -946,7 +946,7 @@ impl Program<'_> {
                 .iter()
                 .position(|p| self.index.symbols.text(p.name) == parts)
             {
-                Some(i) if params[i].mode == Mode::View => anchors.push(i as u32),
+                Some(i) => anchors.push(i as u32),
                 _ if generics
                     .iter()
                     .any(|g| g.region && self.index.symbols.text(g.name) == parts) => {}
@@ -1098,7 +1098,7 @@ impl Program<'_> {
                         } else if scoped && p.mode != Mode::View {
                             self.refusals.push(refusal(
                                 "OWN-20",
-                                site,
+                                fd.result_site,
                                 "a scoped anchor names a view or Region parameter",
                             ));
                         }

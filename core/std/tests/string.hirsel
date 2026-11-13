@@ -222,6 +222,67 @@ fn find_every_offset() -> u64 {
     total
 }
 
+// 37 bytes of 'a' (two 16-byte blocks and a 5-byte tail) with a newline at q and r, and 'b'
+// after r when b_after; an offset of 37 or more places nothing.
+fn newlines(q: u64, r: u64, b_after: bool) -> String {
+    let mut out: Bytes = list.new()
+    result.unwrap(list.fill(mut out, 37, 0x61))
+    if q < 37 {
+        let _ = list.set(mut out, q, 0x0A)
+    }
+    if r < 37 {
+        let _ = list.set(mut out, r, 0x0A)
+        if b_after {
+            let _ = list.set(mut out, r + 1, 0x62)
+        }
+    }
+    match string.from_utf8(take out) {
+        Ok(take text) => text,
+        Error(_) => string.new(),
+    }
+}
+
+// One-byte needle at every offset q of the blocks and the tail: found at q, sum 0 + ... + 36
+// = 666. A second newline at each later r, in the same word or after it: still q, sum of
+// q * (36 - q) = 7770. Reported as the first sum * 100000 + the second.
+// expect: run find_byte_every_offset() = 66607770
+fn find_byte_every_offset() -> u64 {
+    let mut one: u64 = 0
+    let mut two: u64 = 0
+    for q in 0u64 .. 37 {
+        one += found(string.find(newlines(q, 99, false), 0, "\n"))
+        for r in q + 1 .. 37 {
+            two += found(string.find(newlines(q, r, false), 0, "\n"))
+        }
+    }
+    one * 100000 + two
+}
+
+// "\nb" where a newline at q is followed by 'a' and "\nb" sits at r >= q + 2: the candidate
+// at q fails its compare and the scan resumes inside the block; found at r, sum 14280.
+// expect: run find_after_failed_candidate() = 14280
+fn find_after_failed_candidate() -> u64 {
+    let mut total: u64 = 0
+    for q in 0u64 .. 34 {
+        for r in q + 2 .. 36 {
+            total += found(string.find(newlines(q, r, true), 0, "\nb"))
+        }
+    }
+    total
+}
+
+// A newline at 30, searched from every start 0 to 37: found at 30 from starts 0 to 30, None
+// (99) from 31 to 37: 31 * 30 + 7 * 99 = 1623.
+// expect: run find_byte_from_every_start() = 1623
+fn find_byte_from_every_start() -> u64 {
+    let text = newlines(30, 99, false)
+    let mut total: u64 = 0
+    for st in 0u64 .. 38 {
+        total += found(string.find(text, st, "\n"))
+    }
+    total
+}
+
 // expect: run find_start_past_end() = fail Bounds
 fn find_start_past_end() -> u64 {
     found(string.find("abc", 4, "a"))

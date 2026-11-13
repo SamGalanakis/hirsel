@@ -203,17 +203,45 @@ pub fn find(s: String, start: u64, pat: String) -> Option[u64] {
     }
     // Scan for the first byte alone; compare the rest only at a candidate.
     let first = needle[0]
+    let one: u64 = int.widen(first)
+    let spread = one * 0x0101010101010101
     let last = rest - m
     let mut i: u64 = 0
     while i <= last {
-        if hay[i] == first {
-            let mut k: u64 = 1
-            while k < m && hay[i + k] == needle[k] {
-                k += 1
+        // Two words at a time while neither holds the first byte. A word w holds it where
+        // w ^ spread has a zero byte; (v - 0x01..) & ~v & 0x80.. marks the lowest zero byte
+        // of v exactly (a borrow can mark only bytes above it).
+        while i + 16 <= rest {
+            let v0 = list.word_le(hay, i) ^ spread
+            let v1 = list.word_le(hay, i + 8) ^ spread
+            let z0 = int.wrapping_sub(v0, 0x0101010101010101) & ~v0 & 0x8080808080808080
+            let z1 = int.wrapping_sub(v1, 0x0101010101010101) & ~v1 & 0x8080808080808080
+            if z0 | z1 != 0 {
+                // Bit 8j + 7 marks byte j of its word.
+                let low: u64 = int.widen(int.trailing_zeros(z0))
+                let high: u64 = int.widen(int.trailing_zeros(z1))
+                if z0 != 0 {
+                    i += low >> 3
+                } else {
+                    i += 8 + (high >> 3)
+                }
+                break
             }
-            if k == m {
-                return Some(start + i)
-            }
+            i += 16
+        }
+        // At a candidate, or within 16 bytes of the end: byte steps to the next candidate.
+        while i <= last && hay[i] != first {
+            i += 1
+        }
+        if i > last {
+            return None
+        }
+        let mut k: u64 = 1
+        while k < m && hay[i + k] == needle[k] {
+            k += 1
+        }
+        if k == m {
+            return Some(start + i)
         }
         i += 1
     }

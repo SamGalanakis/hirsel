@@ -393,6 +393,25 @@ def hirsel_source_audit(name, binary, cwd, data, args = []):
         visibility = ["PUBLIC"],
     )
 
+def hirsel_core_cranelift_test(name, case, data):
+    """A named native acceptance body, sharing the existing CoreIR harness."""
+    binary = "hirsel-cranelift-test-core_native"
+    _rust_test(
+        name = name,
+        harness = "//:" + binary + "-harness",
+        args = [case, "--exact", "--nocapture"],
+        data = data,
+        files_env = {"HIRSEL_CORE_RUNTIME_ARCHIVE": "//:core-llvm-runtime-fixture[staticlib]"},
+        llvm = "root//tools/buck2/native-toolchain:llvm",
+        llvm_libraries = "toolchains//:llvm-libraries",
+        cwd = "crates/hirsel-cranelift",
+        test_binary = binary,
+        request = _request(binary),
+        exec_compatible_with = _test_platform(binary),
+        pool = not TESTS_ON_HOST,
+        visibility = ["PUBLIC"],
+    )
+
 def _rust_test_impl(ctx):
     binaries = dict(ctx.attrs.bin_exes)
     binaries.update(ctx.attrs.release_bin_exes)

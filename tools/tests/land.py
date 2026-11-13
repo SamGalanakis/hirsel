@@ -70,6 +70,8 @@ if os.environ.get('FAKE_RED_AFTER_RACE') and STAGE == os.environ['FAKE_RED_AFTER
 FAKE_BUCK = '''#!/bin/sh
 if [ "$1" = test ]; then
   case "$*" in
+    *land-core-cranelift-custody*)
+      if [ -f broken-custody ]; then echo 'custody native agreement failed' >&2; exit 1; fi ;;
     *land-audit-runtime-schema*)
       if [ -f broken-runtime-header ]; then echo 'runtime declarations disagree with C header' >&2; exit 1; fi ;;
     *) [ -z "$FAKE_SLOW_TEST" ] || sleep "$FAKE_SLOW_TEST" ;;
@@ -159,6 +161,16 @@ class Land(unittest.TestCase):
         with events.open(newline='') as source:
             rows = list(csv.reader(source, delimiter='\t'))
         return done, log.read_text(), rows
+
+    def test_red_core_custody_refuses_the_push(self):
+        (self.lane / 'broken-custody').write_text('broken sample\n')
+        self.git(self.lane, 'add', 'broken-custody')
+        self.git(self.lane, 'commit', '-qm', 'break custody')
+        refused = self.land()
+        self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+        self.assertIn('FAIL  CoreIR custody', refused.stdout)
+        self.assertIn('custody native agreement failed', refused.stdout)
+        self.assertEqual(self.main_log(), ['base'])
 
     def test_detached_wrapper_records_submission_and_one_completion_with_the_landed_sha(self):
         done, log, rows = self.wrapped_land()

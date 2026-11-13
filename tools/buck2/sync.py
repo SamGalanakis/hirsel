@@ -1139,7 +1139,7 @@ def first_party(meta: dict) -> str:
     archive_consumers = set()
     out = [
         HEADER,
-        'load("//tools/buck2:defs.bzl", "hirsel_binary", "hirsel_build_script", "hirsel_command_test", "hirsel_core_llvm_native_test", "hirsel_core_driver_native_test", "hirsel_core_image", "hirsel_products", "hirsel_library", "hirsel_link_hosts_test", "hirsel_runtime_archives", "hirsel_core_runtime_archives", "hirsel_tsan_runtime_archives", "hirsel_script_test", "hirsel_source_audit", "hirsel_test", "hirsel_toolchain_bundle")\n',
+        'load("//tools/buck2:defs.bzl", "hirsel_binary", "hirsel_build_script", "hirsel_command_test", "hirsel_core_llvm_native_test", "hirsel_core_driver_native_test", "hirsel_core_cranelift_test", "hirsel_core_image", "hirsel_products", "hirsel_library", "hirsel_link_hosts_test", "hirsel_runtime_archives", "hirsel_core_runtime_archives", "hirsel_tsan_runtime_archives", "hirsel_script_test", "hirsel_source_audit", "hirsel_test", "hirsel_toolchain_bundle")\n',
         'load("//tools/buck2:native_selection.bzl", "hirsel_native_selection")\n',
     ]
 
@@ -1311,6 +1311,9 @@ def first_party(meta: dict) -> str:
         crate="core_llvm_runtime_fixture", crate_root="crates/hirsel-llvm/tests/core_runtime/lib.rs",
         srcs=["crates/hirsel-llvm/tests/core_runtime/lib.rs"], features=[], deps=["//:hirsel-core-rt-native-fixture"],
         manifest_dir="crates/hirsel-llvm", package_name="hirsel-llvm", version="0.1.0", edition="2024"))
+    out.append("\n" + call("hirsel_core_cranelift_test", name="land-core-cranelift-custody",
+        case="every_custody_sample_and_injected_admission_matches_evaluator",
+        data=["crates/hirsel-cranelift/Cargo.toml"]))
     for name, binary, cwd, args, data in (
         ("workspace-layering", "hirsel-lir-test-it", "crates/hirsel-lir", ["dependencies::"],
          ["//tools/buck2:workspace-metadata.json", "crates/hirsel-lir/Cargo.toml"]),

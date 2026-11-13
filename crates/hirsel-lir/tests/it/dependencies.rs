@@ -62,6 +62,7 @@ const CRATES: &[(&str, Class)] = &[
     ("hirsel-core-syntax", Class::Data),
     ("hirsel-core-resolve", Class::Implementation),
     ("hirsel-core-front", Class::Implementation),
+    ("hirsel-core-driver", Class::Wiring),
     ("hirsel-core-ir", Class::Data),
     ("hirsel-core-layout", Class::Data),
     ("hirsel-core-rt", Class::Implementation),
@@ -199,6 +200,18 @@ fn check_edge(from: &str, to: &str, kind: Kind) -> Result<(), String> {
         return Ok(());
     }
     let allowed = match (source, target) {
+        _ if from == "hirsel-core-driver" => matches!(
+            to,
+            "hirsel-core-ids"
+                | "hirsel-core-syntax"
+                | "hirsel-core-resolve"
+                | "hirsel-core-front"
+                | "hirsel-core-ir"
+                | "hirsel-core-layout"
+                | "hirsel-intern"
+                | "hirsel-guard"
+                | "hirsel-graph"
+        ),
         _ if from == "hirsel-core-resolve" => matches!(
             to,
             "hirsel-core-syntax" | "hirsel-core-ids" | "hirsel-guard" | "hirsel-graph"
@@ -406,6 +419,16 @@ fn workspace_edges_respect_the_crate_layering() {
 
 #[test]
 fn layering_controls() {
+    assert!(check_edge("hirsel-core-driver", "hirsel-core-front", Kind::Production).is_ok());
+    for old in [
+        "hirsel-driver",
+        "hirsel-requests",
+        "hirsel-engine",
+        "hirsel-tir",
+        "hirsel-syntax",
+    ] {
+        assert!(check_edge("hirsel-core-driver", old, Kind::Production).is_err());
+    }
     // The graph helpers serve every compiler layer and read only data crates
     // and leaf utilities.
     for &(consumer, kind) in CRATES {

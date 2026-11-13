@@ -24,12 +24,10 @@ file) are reached from another package through the package name: `std.order.comp
 `std.set.Set[u64]`, `std.pool.Pool[T]`, `std.file.read(d, p)`, `std.file.Error`. Variants are
 written bare (`Held(f)`, `NotUtf8`).
 
-**Pending.** `core/std/pending/` holds library code that main's formatter parses but main's
-resolver cannot resolve yet: `json` (the matched json workload's compact document, its sizing pass and
-its object key index) uses the compact sequences of spec a721bcc9 (`IndexedSpan`, `seq`,
-`indexed`, `build_stream_in`), which the resolver does not know yet (core-syntax-891). Its contract tests are in
-`pending/tests/`. The gate does not read `pending/`. Each file moves up into `core/std` once it
-resolves.
+**json.** `std.json` is the matched json workload's library: the compact document
+(`Json`, `Member`), its exact sizing pass (`size`), `parse` in one reservation, and the object
+key index (`ObjectIndex`: `index`, `get`, `shown`). Walking and positional access use core's
+`match`, `seq.len` and `indexed.get`. A key or a Str is read through `text.as_string`.
 
 **Authority.** The language rules are spec round 4 (`docs/spec/*.md` and `core/core/*.hirsel`
 at 0d649bad; rule ids such as MEM-26 refer to it). The core library is source in `core/core/`; the

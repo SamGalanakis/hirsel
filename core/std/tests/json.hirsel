@@ -1,6 +1,5 @@
-// Contract tests for `json` (core/std/pending/json.hirsel), written to run once an engine
-// runs library bodies. Pending with the module, because the parser does not yet accept
-// compact types and writers. Sizes come from the layout in the module header, by hand:
+// Contract tests for `json` (core/std/json.hirsel), written to run once an engine runs
+// library bodies. Sizes come from the layout in the module header, by hand:
 // a tag 1, a Text 4 + its bytes, a container 1 + 4 + 4 + its items + 4 per item, a member
 // 4 + its key's bytes + its value.
 fn size_of(s: String) -> u64 {
@@ -118,9 +117,9 @@ fn truncated_literal() -> u64 {
 }
 
 /// Whether v is a number spelled w.
-fn spelled(r: Region, v: std.json.Json, w: String) -> bool {
+fn spelled(v: std.json.Json, w: String) -> bool {
     match v {
-        Num(t) => t == result.unwrap(text.copy_in(r, w)),
+        Num(t) => text.as_string(t) == w,
         _ => false,
     }
 }
@@ -154,15 +153,15 @@ fn lookup_takes_last() -> bool {
         match result.unwrap(std.json.parse(r, "{\"b\":1,\"a\":2,\"b\":3}")) {
             Obj(ms) => {
                 let x = result.unwrap(std.json.index(ms))
-                let b = match std.json.get(x, result.unwrap(text.copy_in(r, "b"))) {
-                    Some(v) => spelled(r, v, "3"),
+                let b = match std.json.get(x, "b") {
+                    Some(v) => spelled(v, "3"),
                     None => false,
                 }
-                let a = match std.json.get(x, result.unwrap(text.copy_in(r, "a"))) {
-                    Some(v) => spelled(r, v, "2"),
+                let a = match std.json.get(x, "a") {
+                    Some(v) => spelled(v, "2"),
                     None => false,
                 }
-                let c = match std.json.get(x, result.unwrap(text.copy_in(r, "c"))) {
+                let c = match std.json.get(x, "c") {
                     Some(_) => false,
                     None => true,
                 }
@@ -181,14 +180,12 @@ fn render_keeps_first_position() -> bool {
         match result.unwrap(std.json.parse(r, "{\"b\":1,\"a\":2,\"b\":3}")) {
             Obj(ms) => {
                 let x = result.unwrap(std.json.index(ms))
-                let b = result.unwrap(text.copy_in(r, "b"))
-                let a = result.unwrap(text.copy_in(r, "a"))
                 let first = match std.json.shown(x, 0) {
-                    Some((k, v)) => k == b && spelled(r, v, "3"),
+                    Some((k, v)) => k == "b" && spelled(v, "3"),
                     None => false,
                 }
                 let second = match std.json.shown(x, 1) {
-                    Some((k, v)) => k == a && spelled(r, v, "2"),
+                    Some((k, v)) => k == "a" && spelled(v, "2"),
                     None => false,
                 }
                 let third = match std.json.shown(x, 2) {
@@ -213,12 +210,12 @@ fn equal_keys_order_by_ordinal() -> bool {
         match result.unwrap(std.json.parse(r, "{\"k\":1,\"k\":2,\"k\":3}")) {
             Obj(ms) => {
                 let x = result.unwrap(std.json.index(ms))
-                let last = match std.json.get(x, result.unwrap(text.copy_in(r, "k"))) {
-                    Some(v) => spelled(r, v, "3"),
+                let last = match std.json.get(x, "k") {
+                    Some(v) => spelled(v, "3"),
                     None => false,
                 }
                 let shown_once = match (std.json.shown(x, 0), std.json.shown(x, 1), std.json.shown(x, 2)) {
-                    (Some((_, v)), None, None) => spelled(r, v, "3"),
+                    (Some((_, v)), None, None) => spelled(v, "3"),
                     _ => false,
                 }
                 last && shown_once

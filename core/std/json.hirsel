@@ -2,10 +2,6 @@
 // compact blob, written once in a region and never moved (MEM-4, MEM-9, MEM-12). This is
 // the document library of the json workload's matched variant (NINE.md).
 //
-// PENDING: this file sits in core/std/pending because the parser does not yet accept
-// `@compact`, `Writer`, `emit` and `build_stream_in` (core-syntax-891). Once it does, the
-// file moves to core/std, where the std_seed gate reads it.
-//
 // Layout, W = u32 (MEM-9). Seven variants, so the tag is one byte.
 //   Null, False, True                 1
 //   Num(Text): the spelling as read   1 + 4 + len
@@ -25,10 +21,8 @@
 // (goose-attack-898 ADVICE: every container indexed). Whitespace and escapes only lower
 // it. A document of more than 2^32 - 1 bytes is Error(Build(Overflow)).
 //
-// Reading text. Core reads a Text only through `text.len`, `==` and `<`. Nothing views its
-// bytes or a String of the same bytes, so a Str, a Num or a key cannot be printed yet.
-// REPORT.md FOR SPEC J1 asks for `text.as_string(t) -> View[String] in t`. That is why
-// ObjectIndex.get takes its key as a Text: Text is the one type it can be compared with.
+// Reading text. `text.as_string(t)` views a Str, a Num's spelling or a key as a String with
+// no copy, so every string reader prints or compares it (`text.as_string(k) == step`).
 @compact(u32)
 pub stable type Json = Null | False | True | Num(Text) | Str(Text) | Arr(IndexedSpan[Json]) | Obj(IndexedSpan[Member])
 
@@ -111,14 +105,14 @@ pub fn index[in a](ms: IndexedSpan[Member] in a) -> Result[ObjectIndex[in a], Ca
 /// The value of key k: the value of k's last member (the last-value rule; RFC 8259 leaves
 /// duplicates open, and Python's json.loads keeps the last). None when no member has k.
 /// Cost: O(log m) key comparisons (an upper-bound search).
-/// Ex: `let k = text.copy_in(r, step)?; match std.json.get(x, k) { Some(v) => .., None => .. }`
-pub fn get[in a](x: ObjectIndex[in a], k: Text) -> Option[View[Json]] in x {
+/// Ex: `match std.json.get(x, step) { Some(v) => .., None => .. }`
+pub fn get[in a](x: ObjectIndex[in a], k: String) -> Option[View[Json]] in x {
     let p = above(x, k)
     if p == 0 {
         return None
     }
     let m = member(x.members, x.ordinals[p - 1])
-    if m.key == k {
+    if text.as_string(m.key) == k {
         Some(m.value)
     } else {
         None
@@ -127,15 +121,15 @@ pub fn get[in a](x: ObjectIndex[in a], k: Text) -> Option[View[Json]] in x {
 
 /// Member i in render order. None when i is past the last member, or when an earlier
 /// member has the same key (that key is shown there). Otherwise Some((key, value)): member
-/// i's key, with the value of that key's last member. For i from 0 to seq.len(ms), this
-/// gives each key once, at its first position, with its last value.
+/// i's key, as a String view, with the value of that key's last member. For i from 0 to
+/// seq.len(ms), this gives each key once, at its first position, with its last value.
 /// Cost: O(log m) key comparisons.
 /// Ex: `for i in 0 .. seq.len(ms) { if let Some((k, v)) = std.json.shown(x, i) { .. } }`
-pub fn shown[in a](x: ObjectIndex[in a], i: u64) -> Option[(View[Text], View[Json])] in x {
+pub fn shown[in a](x: ObjectIndex[in a], i: u64) -> Option[(View[String], View[Json])] in x {
     if i >= list.len(x.ordinals) {
         return None
     }
-    let k = member(x.members, int.narrow(i)).key
+    let k = text.as_string(member(x.members, int.narrow(i)).key)
     let first = below(x, k)
     if int.widen(x.ordinals[first]) != i {
         return None
@@ -145,12 +139,12 @@ pub fn shown[in a](x: ObjectIndex[in a], i: u64) -> Option[(View[Text], View[Jso
 }
 
 /// The first position in x.ordinals whose key is above k.
-fn above[in a](x: ObjectIndex[in a], k: Text) -> u64 {
+fn above[in a](x: ObjectIndex[in a], k: String) -> u64 {
     let mut lo: u64 = 0
     let mut hi = list.len(x.ordinals)
     while lo < hi {
         let mid = lo + (hi - lo) / 2
-        if k < member(x.members, x.ordinals[mid]).key {
+        if k < text.as_string(member(x.members, x.ordinals[mid]).key) {
             hi = mid
         } else {
             lo = mid + 1
@@ -160,12 +154,12 @@ fn above[in a](x: ObjectIndex[in a], k: Text) -> u64 {
 }
 
 /// The first position in x.ordinals whose key is not below k.
-fn below[in a](x: ObjectIndex[in a], k: Text) -> u64 {
+fn below[in a](x: ObjectIndex[in a], k: String) -> u64 {
     let mut lo: u64 = 0
     let mut hi = list.len(x.ordinals)
     while lo < hi {
         let mid = lo + (hi - lo) / 2
-        if member(x.members, x.ordinals[mid]).key < k {
+        if text.as_string(member(x.members, x.ordinals[mid]).key) < k {
             lo = mid + 1
         } else {
             hi = mid
@@ -426,24 +420,27 @@ fn write_value[in r](s: String, mut i: u64, take w: Writer[Json, in r]) -> Resul
             writer.close(take ms)
         })))
     } else {
-        emit(take w, Num(emit(fn(take t: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
-            write_number(s, mut i, take t)
-        })))
+        // A number: its spelling, copied in one write.
+        let start = i
+        while is_number_byte(at(s, i)) {
+            i += 1
+        }
+        emit(take w, Num(string.slice(s, start, i)))
     }
 }
 
-/// At the opening '"': writes the decoded string, then closes it.
+/// At the opening '"': writes the decoded string, then closes it. Each run between
+/// escapes is one push; each escape is one scalar. The runs end at '"' or '\\', which are
+/// ASCII, so every slice is on a scalar boundary.
 fn write_string[in r](s: String, mut i: u64, take t: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
     i += 1
     while at(s, i) != b'"' {
         if at(s, i) != b'\\' {
-            match string.next_scalar(s, i) {
-                Some((c, next)) => {
-                    writer.scalar(mut t, c)?
-                    i = next
-                }
-                None => fail("json: a string ends inside a checked document"),
+            let start = i
+            while at(s, i) != b'"' && at(s, i) != b'\\' {
+                i += 1
             }
+            writer.push(mut t, string.slice(s, start, i))?
         } else if at(s, i + 1) == b'u' {
             let c = match unicode(s, mut i) {
                 Ok(c) => c,
@@ -456,15 +453,6 @@ fn write_string[in r](s: String, mut i: u64, take t: Writer[Text, in r]) -> Resu
         }
     }
     i += 1
-    writer.close(take t)
-}
-
-/// Writes the number's spelling, which is ASCII, then closes it.
-fn write_number[in r](s: String, mut i: u64, take t: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
-    while is_number_byte(at(s, i)) {
-        writer.scalar(mut t, ascii(at(s, i)))?
-        i += 1
-    }
     writer.close(take t)
 }
 

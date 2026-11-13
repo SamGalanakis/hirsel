@@ -193,12 +193,9 @@ impl Doc {
     fn word(&self, at: usize) -> usize {
         u32::from_le_bytes(self.data[at..at + 4].try_into().unwrap()) as usize
     }
-    fn text(&self, at: usize) -> (&str, usize) {
+    fn text(&self, at: usize) -> (&[u8], usize) {
         let n = self.word(at);
-        (
-            std::str::from_utf8(&self.data[at + 4..at + 4 + n]).unwrap(),
-            at + 4 + n,
-        )
+        (&self.data[at + 4..at + 4 + n], at + 4 + n)
     }
     fn count(&self, at: usize) -> usize {
         self.word(at + 1)
@@ -213,7 +210,7 @@ impl Doc {
         let mut found = None;
         for i in 0..self.count(at) {
             let (k, value) = self.text(self.child(at, i));
-            if k == key {
+            if k == key.as_bytes() {
                 found = Some(value);
             }
         }
@@ -221,60 +218,73 @@ impl Doc {
     }
     fn number(&self, at: usize) -> f64 {
         assert_eq!(self.data[at], 3);
-        self.text(at + 1).0.parse().unwrap()
+        std::str::from_utf8(self.text(at + 1).0)
+            .unwrap()
+            .parse()
+            .unwrap()
     }
-    fn write(&self, at: usize, out: &mut String) {
+    fn write(&self, at: usize, out: &mut Vec<u8>) {
         match self.data[at] {
-            0 => out.push_str("null"),
-            1 => out.push_str("false"),
-            2 => out.push_str("true"),
-            3 => out.push_str(self.text(at + 1).0),
+            0 => out.extend_from_slice(b"null"),
+            1 => out.extend_from_slice(b"false"),
+            2 => out.extend_from_slice(b"true"),
+            3 => out.extend_from_slice(self.text(at + 1).0),
             4 => quote(out, self.text(at + 1).0),
             tag @ 5..=6 => {
-                out.push(if tag == 5 { '[' } else { '{' });
+                out.push(if tag == 5 { b'[' } else { b'{' });
                 for i in 0..self.count(at) {
                     if i > 0 {
-                        out.push(',');
+                        out.push(b',');
                     }
                     let child = self.child(at, i);
                     if tag == 6 {
                         let (key, value) = self.text(child);
                         quote(out, key);
-                        out.push(':');
+                        out.push(b':');
                         self.write(value, out);
                     } else {
                         self.write(child, out);
                     }
                 }
-                out.push(if tag == 5 { ']' } else { '}' });
+                out.push(if tag == 5 { b']' } else { b'}' });
             }
             _ => panic!("invalid tag"),
         }
     }
 }
-fn quote(out: &mut String, s: &str) {
-    out.push('"');
-    let b = s.as_bytes();
+fn quote(out: &mut Vec<u8>, b: &[u8]) {
+    out.push(b'"');
     let mut start = 0;
     for (i, &c) in b.iter().enumerate() {
         if c < 0x20 || c == b'"' || c == b'\\' {
-            out.push_str(&s[start..i]);
+            out.extend_from_slice(&b[start..i]);
             match c {
-                b'"' => out.push_str("\\\""),
-                b'\\' => out.push_str("\\\\"),
-                8 => out.push_str("\\b"),
-                9 => out.push_str("\\t"),
-                10 => out.push_str("\\n"),
-                12 => out.push_str("\\f"),
-                13 => out.push_str("\\r"),
-                _ => out.push_str(&format!("\\u00{:02x}", c)),
-            };
+                b'"' => out.extend_from_slice(b"\\\""),
+                b'\\' => out.extend_from_slice(b"\\\\"),
+                8 => out.extend_from_slice(b"\\b"),
+                9 => out.extend_from_slice(b"\\t"),
+                10 => out.extend_from_slice(b"\\n"),
+                12 => out.extend_from_slice(b"\\f"),
+                13 => out.extend_from_slice(b"\\r"),
+                _ => {
+                    const HEX: &[u8] = b"0123456789abcdef";
+                    out.extend_from_slice(&[
+                        b'\\',
+                        b'u',
+                        b'0',
+                        b'0',
+                        HEX[usize::from(c / 16)],
+                        HEX[usize::from(c % 16)],
+                    ]);
+                }
+            }
             start = i + 1;
         }
     }
-    out.push_str(&s[start..]);
-    out.push('"');
+    out.extend_from_slice(&b[start..]);
+    out.push(b'"');
 }
+
 fn next(g: &mut i32) -> f64 {
     *g = g.wrapping_mul(3877).wrapping_add(29573) % 139968;
     f64::from(*g) / 139968.0
@@ -331,11 +341,21 @@ fn average(doc: &Doc, mapping: bool) -> Coordinate {
     let mut mapped = Vec::new();
     for i in 0..doc.count(a) {
         let p = doc.child(a, i);
-        let c = Coordinate {
-            x: doc.number(doc.field(p, "x")),
-            y: doc.number(doc.field(p, "y")),
-            z: doc.number(doc.field(p, "z")),
+        let mut c = Coordinate {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
         };
+        for j in 0..doc.count(p) {
+            let (key, value) = doc.text(doc.child(p, j));
+            if key == b"x" {
+                c.x = doc.number(value);
+            } else if key == b"y" {
+                c.y = doc.number(value);
+            } else if key == b"z" {
+                c.z = doc.number(value);
+            }
+        }
         if mapping {
             mapped.push(c);
         } else {
@@ -373,11 +393,11 @@ fn main() {
     let mut result = 0u32;
     if task == "Json::Generate" {
         let doc = parse(&source);
-        let mut rendered = String::new();
+        let mut rendered = Vec::new();
         for _ in 0..warmup.checked_add(iterations).unwrap() {
-            rendered = String::new();
+            rendered = Vec::new();
             doc.write(0, &mut rendered);
-            if rendered.starts_with("{\"coordinates\":") {
+            if rendered.starts_with(b"{\"coordinates\":") {
                 result = result.checked_add(1).unwrap();
             }
         }

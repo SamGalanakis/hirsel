@@ -1,4 +1,5 @@
-// Matched twin of log_parser.hirsel. Review pending langs-numeric-920.
+// Reviewed-by: langs-numeric-920 2026-11-13; same13 hand byte matchers, non-overlap scanning, owned tally keys/u64 counts and generated input. Overflow checks required.
+// Matched twin of log_parser.hirsel. Reviewed below.
 // kostya/LangArena3c9f84d benchmarks/log_parser.rs:12-149.
 // Same 13 byte matchers and leftmost non-overlapping scans, owned tally keys.
 mod text_support;

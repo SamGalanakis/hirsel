@@ -1,8 +1,69 @@
-// Matched twin of compress.hirsel. Review pending langs-numeric-920.
+// Reviewed-by: langs-numeric-920 2026-11-13; BWTEncode/Decode, ArithEncode/Decode and LZWEncode only: matched indirect stable merge/scratch, frequency construction, binary search, byte dictionaries and counter widths. Overflow checks required.
+// Matched twin of compress.hirsel. Five supported tasks reviewed below; Huff/LZWDecode pending native qualification.
 // kostya/LangArena3c9f84d benchmarks/compress.rs. Same prefix-doubling BWT,
 // stable rank sort, arithmetic bitstreams/tables, and owned LZW dictionary bytes.
 mod text_support;
 use std::collections::HashMap;
+// core/std/list.hirsel sort_stable: indirect bottom-up merge, two index vectors.
+fn sort_stable<T>(xs: &mut [T], mut before: impl FnMut(&T, &T) -> std::cmp::Ordering) {
+    let n = xs.len();
+    if n < 2 {
+        return;
+    }
+    let mut indices = Vec::with_capacity(n);
+    let mut scratch = Vec::with_capacity(n);
+    for i in 0..n {
+        indices.push(i);
+        scratch.push(0usize);
+    }
+    let mut width = 1usize;
+    while width < n {
+        let mut lo = 0;
+        while lo < n {
+            let mid = lo + width.min(n - lo);
+            let end = mid + width.min(n - mid);
+            let mut a = lo;
+            let mut b = mid;
+            let mut out = lo;
+            while out < end {
+                let right = if b == end {
+                    false
+                } else if a == mid {
+                    true
+                } else {
+                    before(&xs[indices[b]], &xs[indices[a]]) == std::cmp::Ordering::Less
+                };
+                let selected = if right {
+                    let k = indices[b];
+                    b += 1;
+                    k
+                } else {
+                    let k = indices[a];
+                    a += 1;
+                    k
+                };
+                scratch[out] = selected;
+                out += 1;
+            }
+            lo = end;
+        }
+        std::mem::swap(&mut indices, &mut scratch);
+        if width > n / 2 {
+            break;
+        }
+        width *= 2;
+    }
+    for i in 0..n {
+        scratch[indices[i]] = i;
+    }
+    for i in 0..n {
+        while scratch[i] != i {
+            let to = scratch[i];
+            xs.swap(i, to);
+            scratch.swap(i, to);
+        }
+    }
+}
 struct BWTResult {
     transformed: Vec<u8>,
     original_idx: i32,
@@ -39,7 +100,6 @@ struct ArithFreqTable {
 
 impl ArithFreqTable {
     fn new(frequencies: &[i32]) -> Self {
-        let total: i32 = frequencies.iter().sum();
         let mut low = vec![0; 256];
         let mut high = vec![0; 256];
 
@@ -50,7 +110,11 @@ impl ArithFreqTable {
             high[i] = cum;
         }
 
-        Self { total, low, high }
+        Self {
+            total: cum,
+            low,
+            high,
+        }
     }
 }
 
@@ -162,7 +226,7 @@ fn bwt_transform(input: &[u8]) -> BWTResult {
                 pairs.push((rank[i], rank[(i + k) % n]));
             }
 
-            sa.sort_by(|&a, &b| {
+            sort_stable(&mut sa, |&a, &b| {
                 let pa = pairs[a];
                 let pb = pairs[b];
                 if pa.0 != pb.0 {
@@ -251,7 +315,7 @@ fn arith_encode(data: &[u8]) -> ArithEncodedResult {
 
     let mut low = 0u64;
     let mut high = 0xFFFFFFFFu64;
-    let mut pending = 0;
+    let mut pending = 0u64;
     let mut output = BitOutputStream::new();
 
     for &byte in data {
@@ -310,19 +374,11 @@ fn arith_encode(data: &[u8]) -> ArithEncodedResult {
 }
 
 fn arith_decode(encoded: &ArithEncodedResult) -> Vec<u8> {
-    let frequencies = &encoded.frequencies;
-    let total: i32 = frequencies.iter().sum();
-    let data_size = total as usize;
-
-    let mut low_table = vec![0i32; 256];
-    let mut high_table = vec![0i32; 256];
-    let mut cum = 0;
-    for i in 0..256 {
-        low_table[i] = cum;
-        cum += frequencies[i];
-        high_table[i] = cum;
-    }
-
+    let table = ArithFreqTable::new(&encoded.frequencies);
+    let total = table.total;
+    let data_size = usize::try_from(total).unwrap();
+    let low_table = &table.low;
+    let high_table = &table.high;
     let mut result = vec![0u8; data_size];
     let mut position = 0u64;
 
@@ -338,8 +394,18 @@ fn arith_decode(encoded: &ArithEncodedResult) -> Vec<u8> {
         let range = high - low + 1;
         let scaled = ((value - low + 1) * total as u64 - 1) / range;
 
-        let symbol = high_table.partition_point(|&x| x as u64 <= scaled) as u8;
-        result[j] = symbol as u8;
+        let mut left = 0usize;
+        let mut right = 256usize;
+        while left < right {
+            let middle = left + (right - left) / 2;
+            if u64::try_from(high_table[middle]).unwrap() <= scaled {
+                left = middle + 1;
+            } else {
+                right = middle;
+            }
+        }
+        let symbol = left;
+        result[j] = u8::try_from(symbol).unwrap();
 
         high = low + (range * high_table[symbol as usize] as u64 / total as u64) - 1;
         low = low + (range * low_table[symbol as usize] as u64 / total as u64);
@@ -412,11 +478,11 @@ fn lzw_encode(input: &[u8]) -> LZWResult {
         return LZWResult::new();
     }
 
-    let mut dict = HashMap::new();
-    for i in 0..256 {
+    let mut dict: HashMap<Vec<u8>, u32> = HashMap::new();
+    for i in 0u32..256u32 {
         dict.insert(vec![i as u8], i);
     }
-    let mut next_code = 256;
+    let mut next_code = 256u32;
     let mut result = Vec::with_capacity(input.len() * 2);
     let mut current = vec![input[0]];
 
@@ -503,7 +569,7 @@ fn build_huffman_tree(frequencies: &[i32]) -> Option<Box<HuffmanNode>> {
         .map(|(i, &freq)| Box::new(HuffmanNode::new(freq, i as u8, true)))
         .collect();
 
-    nodes.sort_by(|a, b| a.frequency.cmp(&b.frequency));
+    sort_stable(&mut nodes, |a, b| a.frequency.cmp(&b.frequency));
 
     if nodes.len() == 1 {
         let node = nodes.remove(0);

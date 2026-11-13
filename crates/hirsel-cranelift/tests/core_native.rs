@@ -731,6 +731,7 @@ fn every_front_end_run_case_matches_evaluator() {
         if !source.lines().any(|l| l.starts_with("// expect: run ")) {
             continue;
         }
+        println!("front-end fixture: {}", file.display());
         let (module, functions) = front::lower(&root, &source);
         let mut runs = Vec::new();
         for line in source
@@ -758,6 +759,7 @@ fn every_front_end_run_case_matches_evaluator() {
         execute(&module, &runs, false);
     }
     assert!(count > 0, "the front-end corpus must execute run cases");
+    println!("front-end run cases executed: {count}");
 }
 
 #[test]

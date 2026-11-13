@@ -496,7 +496,7 @@ fn fill(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-assembly"))]
 impl Emitter {
     /// Test/evaluator assembly. Production materializes one immutable definition
     /// product at a time, using the same `materialize` transformation.

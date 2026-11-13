@@ -5,6 +5,7 @@
     "hirsel-artifact-store/test-support": "test-only",
     "hirsel-authority/testing": "test-only",
     "hirsel-cli/native-tsan": "test-only",
+    "hirsel-core-front/test-assembly": "test-only",
     "hirsel-core-ir/eval": "test-only",
     "hirsel-core-rt/testing": "test-only",
     "hirsel-core-rt/memcheck": "test-only",

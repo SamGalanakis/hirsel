@@ -113,7 +113,7 @@ pub struct Emitter {
     recipes: Vec<Recipe>,
     generic_names: std::collections::BTreeMap<TypeId, NameRecipe>,
     generic_calls: std::collections::BTreeMap<FuncId, GenericCall>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-assembly"))]
     templates: HashMap<DefPath, (FuncId, GenericTemplate)>,
     /// Per row, whether cleaning it may run code (memoised [`Self::runs_code`]).
     runs: HashMap<TypeId, bool>,
@@ -1488,7 +1488,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                     types: self.e.generic_names.clone(),
                     calls: self.e.generic_calls.clone(),
                 };
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-assembly"))]
                 self.e
                     .templates
                     .insert(self.fd.path.clone(), (f, template.clone()));

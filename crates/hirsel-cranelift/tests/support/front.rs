@@ -71,5 +71,8 @@ pub fn lower(root: &Path, source: &str) -> (Module, HashMap<String, FuncId>) {
         assert!(checked.gaps.is_empty(), "{:?}", checked.gaps);
         functions.insert(f.path.0.name.clone(), checked.function.unwrap());
     }
+    emitter
+        .materialize_instances()
+        .expect("materialize the front-end fixture call closure");
     (emitter.module, functions)
 }

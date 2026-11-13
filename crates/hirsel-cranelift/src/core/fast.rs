@@ -288,11 +288,19 @@ pub(super) fn arc_event(
     let empty = b.ins().icmp_imm_s(IntCC::Equal, events, 0);
     b.ins().brif(empty, done, &[], call, &[]);
     b.switch_to_block(call);
-    let mut params = vec![P];
-    params.extend_from_slice(argument_types);
-    let mut args = vec![context];
-    args.extend_from_slice(arguments);
-    calls.c(object, b, name, &params, &[], &args)?;
+    // These four frozen hooks take context and at most one event operand.
+    let mut params = [P; 2];
+    params[1..1 + argument_types.len()].copy_from_slice(argument_types);
+    let mut args = [context; 2];
+    args[1..1 + arguments.len()].copy_from_slice(arguments);
+    calls.c(
+        object,
+        b,
+        name,
+        &params[..1 + argument_types.len()],
+        &[],
+        &args[..1 + arguments.len()],
+    )?;
     b.ins().jump(done, &[]);
     b.switch_to_block(done);
     Ok(())

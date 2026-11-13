@@ -5,6 +5,9 @@ edition.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+test-assembly = []
+
 [dependencies]
 serde = { version = "1", features = ["derive", "rc"] }
 hirsel-core-ids = { path = "../hirsel-core-ids" }

@@ -613,3 +613,41 @@ fn ordered_generic_cranelift(){ordered_generic(Backend::Cranelift);}
 #[test]
 #[ignore="explicit native integration target"]
 fn ordered_generic_llvm(){ordered_generic(Backend::Llvm);}
+
+// map.get's Option[View[V]] row is made by substitution in the instance's own module.
+// With the rigid V placeholder left in its view field, the instance copied 24 bytes into
+// the caller's 8-byte slot: a segfault on Cranelift, a missed key under LLVM (M1 json).
+fn generic_view_payload(backend: Backend) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let source = r#"fn grown(src: String, lo: u64, hi: u64) -> String {
+  let mut out = string.new()
+  result.unwrap(string.push(mut out, string.slice(src, lo, hi)))
+  out
+}
+fn probe(path: String, doc: String) -> u64 {
+  let mut m: Map[String, u64] = map.new()
+  let _ = map.insert(mut m, grown(doc, 2, 7), 5u64)
+  let _ = map.insert(mut m, grown(doc, 9, 10), 6u64)
+  let key = string.slice(path, 1, 6)
+  match map.get(m, key) { Some(v) => v, None => 99 }
+}
+pub fn main() -> Result[(), Exit] {
+  let p = result.unwrap(string.from("/items/1/name"))
+  let d = result.unwrap(string.from("{\"items\":\"n\"}"))
+  if probe(p, d) == 5 { Ok(()) } else { Error(Exit(status: 3)) }
+}
+"#;
+    let mut request = source_request(source, dir.path());
+    request.inputs.packages[1] = PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let built = product.build(&entry, &native_options(backend, dir.path())).unwrap();
+    run_clean(&built.executable, 0);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn generic_view_payload_cranelift() { generic_view_payload(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn generic_view_payload_llvm() { generic_view_payload(Backend::Llvm); }

@@ -1,0 +1,25 @@
+// A generic body's View[T] field is substituted with T's row at each instance (FORM #56:
+// materialization is substitution alone). Unsubstituted, an instance kept the rigid
+// placeholder's 24-byte row in its Option[View[T]] payload and copied 24 bytes into the
+// caller's 8-byte view slot: map.get[String, u64] corrupted the caller's frame (a
+// segfault on Cranelift; a missed key under LLVM optimization in M1 json). Here the
+// Option[View[u64]] row exists only inside the instance of `has_some`, where
+// substitution alone must make it (the corpus harness checks no concrete row reaches a
+// rigid one). Hand-derived: a Holder always has its value, so inner() is 1.
+// expect: accept
+// expect: run inner() = 1
+type Holder[T] { v: T }
+fn peek[T](h: Holder[T]) -> Option[View[T]] in h { Some(view h.v) }
+fn has_some[T](h: Holder[T]) -> bool {
+  match peek(h) {
+    Some(_) => true,
+    None => false,
+  }
+}
+fn inner() -> u64 {
+  let h = Holder(v: 7u64)
+  if has_some(h) { 1 } else { 0 }
+}
+pub fn main() -> Result[(), Exit] {
+  if inner() == 1 { Ok(()) } else { Error(Exit(status: 3)) }
+}

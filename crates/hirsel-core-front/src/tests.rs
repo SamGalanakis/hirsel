@@ -132,6 +132,59 @@ fn holds_names(h: u8) -> String {
 }
 
 /// Run one case; returns its failures.
+/// Materialization is substitution alone (FORM #56): a concrete row (no `$i` in its
+/// name) never holds a rigid parameter's placeholder row in any field. Walks every
+/// FieldTy variant on its own, independent of the substitution's field mapper.
+fn concrete_rows_reaching_rigid(module: &Module) -> Vec<(String, String)> {
+    use hirsel_core_layout::{Body as ShapeBody, FieldTy};
+    fn refs(ty: &FieldTy, out: &mut Vec<u32>) {
+        match ty {
+            FieldTy::Inline(r)
+            | FieldTy::Box(r)
+            | FieldTy::Rc(r)
+            | FieldTy::Arc(r)
+            | FieldTy::Stable(r)
+            | FieldTy::Link(r)
+            | FieldTy::OptLink(r) => out.push(r.0),
+            FieldTy::Seq(e)
+            | FieldTy::Array(e, _)
+            | FieldTy::View(e)
+            | FieldTy::Locator(e)
+            | FieldTy::FixedSpan(e)
+            | FieldTy::SeqSpan(e)
+            | FieldTy::IndexedSpan(e) => refs(e, out),
+            FieldTy::Map(k, v) => {
+                refs(k, out);
+                refs(v, out);
+            }
+            FieldTy::Scalar(_)
+            | FieldTy::Fn
+            | FieldTy::OwnFn
+            | FieldTy::Borrow
+            | FieldTy::Handle(_)
+            | FieldTy::Text => {}
+        }
+    }
+    let mut found = vec![];
+    for shape in module.types.iter().filter(|s| !s.name.contains('$')) {
+        let mut out = vec![];
+        let fields: Vec<_> = match &shape.body {
+            ShapeBody::Record(fs) => fs.iter().collect(),
+            ShapeBody::Variant(cs) => cs.iter().flat_map(|c| &c.fields).collect(),
+        };
+        for f in fields {
+            refs(&f.ty, &mut out);
+        }
+        for r in out {
+            let name = &module.types[r as usize].name;
+            if name.contains('$') {
+                found.push((shape.name.clone(), name.clone()));
+            }
+        }
+    }
+    found
+}
+
 fn run_case(path: &Path) -> Vec<String> {
     let source = std::fs::read_to_string(path).expect("case reads");
     let (index, modules) = program_inputs(&source);
@@ -165,6 +218,12 @@ fn run_case(path: &Path) -> Vec<String> {
         .materialize_instances()
         .expect("materialize checked generic bodies");
     let module = &emitter.module;
+    let rigid = concrete_rows_reaching_rigid(module);
+    assert!(
+        rigid.is_empty(),
+        "{}: concrete rows reach a rigid parameter row: {rigid:?}",
+        path.display()
+    );
     if path
         .file_stem()
         .is_some_and(|name| name == "map-operations")

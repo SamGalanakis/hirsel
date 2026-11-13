@@ -114,11 +114,17 @@ fn make_room[K:key,V](mut m:Map[K,V])->Result[(),Capacity] {
     let new_cap:u64 = if cap == 0 {4} else {cap * 2}
     regrow(mut m,new_cap)?
   }
+  // Reindexing changes only index words, never the entry count or index length.
+  let count = slots(m)
+  let mask = int.wrapping_sub(index_len(m), 1)
   let mut i:u64 = 0
-  while i < slots(m) {
+  while i < count {
     let stored_hash=slot_hash(m,i)
-    install_index(mut m,stored_hash,i+1)
-    i+=1
+    let mut j = stored_hash & mask
+    while index_get(m,j) != 0 {j=int.wrapping_add(j,1)&mask}
+    let s=int.wrapping_add(i,1)
+    index_set(mut m,j,s)
+    i=s
   }
   Ok(())
 }

@@ -1,3 +1,4 @@
+fn compare(a:u64,b:u64)->Order { if a < b { Less } else if a > b { Greater } else { Equal } }
 fn five(a: u64, b: u64, c: u64, d: u64, e: u64) -> List[u64] {
     let mut xs: List[u64] = result.unwrap(list.with_capacity(5))
     result.unwrap(list.push(mut xs, a))
@@ -22,23 +23,23 @@ fn digits(xs: List[u64]) -> u64 {
 // expect: run stable_equal_keys() = true
 fn stable_equal_keys() -> bool {
     let mut xs = five(21, 11, 22, 12, 23)
-    result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order { std.order.compare(a / 10, b / 10) }))
+    result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order { compare(a / 10, b / 10) }))
     xs[0] == 11 && xs[1] == 12 && xs[2] == 21 && xs[3] == 22 && xs[4] == 23
 }
 
 // expect: run stable_empty_singleton() = 7
 fn stable_empty_singleton() -> u64 {
     let mut xs: List[u64] = list.new()
-    result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order { std.order.compare(a / 10, b / 10) }))
+    result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order { compare(a / 10, b / 10) }))
     result.unwrap(list.push(mut xs, 7))
-    result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order { std.order.compare(a / 10, b / 10) }))
+    result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order { compare(a / 10, b / 10) }))
     digits(xs)
 }
 
 // expect: run stable_capacity_unchanged() = 54321
 fn stable_capacity_unchanged() -> u64 {
     let mut xs = five(5, 4, 3, 2, 1)
-    let r = bound bytes 0 { list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order { std.order.compare(a, b) }) }
+    let r = bound bytes 0 { list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order { compare(a, b) }) }
     match r { Ok(Error(_)) => digits(xs), _ => 99 }
 }
 
@@ -50,7 +51,7 @@ fn stable_owned_strings() -> bool {
     result.unwrap(list.push(mut xs, result.unwrap(string.from("a"))))
     result.unwrap(list.push(mut xs, result.unwrap(string.from("cc"))))
     result.unwrap(list.sort_stable(mut xs, fn(a: String, b: String) -> Order {
-        std.order.compare(list.len(string.as_bytes(a)), list.len(string.as_bytes(b)))
+        compare(list.len(string.as_bytes(a)), list.len(string.as_bytes(b)))
     }))
     xs[0] == "a" && xs[1] == "bb" && xs[2] == "cc"
 }
@@ -59,7 +60,7 @@ fn stable_owned_strings() -> bool {
 // expect: run stable_one_allocation() = 12345
 fn stable_one_allocation() -> u64 {
     let mut xs = five(5, 4, 3, 2, 1)
-    let r = bound bytes 40 { list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order { std.order.compare(a, b) }) }
+    let r = bound bytes 40 { list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order { compare(a, b) }) }
     match r { Ok(Ok(())) => digits(xs), _ => 99 }
 }
 
@@ -75,7 +76,7 @@ fn model_all_small_sizes() -> bool {
             expected_mask |= 1u64 << i
         }
         let cap = list.capacity(xs)
-        result.unwrap(list.sort_stable(mut xs, fn(a:u64,b:u64)->Order { std.order.compare(a / 100,b / 100) }))
+        result.unwrap(list.sort_stable(mut xs, fn(a:u64,b:u64)->Order { compare(a / 100,b / 100) }))
         if list.len(xs) != n || list.capacity(xs) != cap { return false }
         let mut mask: u64 = 0
         for i in 0u64 .. n {

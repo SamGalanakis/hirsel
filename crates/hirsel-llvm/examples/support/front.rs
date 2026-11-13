@@ -72,17 +72,41 @@ pub fn lower(
     }
     let mut emitter = Emitter::new();
     let mut names = HashMap::new();
+    let mut refusals = Vec::new();
     for (f, fd) in program.fns.iter().enumerate() {
         if index.module_package(fd.site.module) != index.module_package(main) || fd.body.is_none() {
             continue;
         }
         let check = program.check_lower(f, &mut emitter);
-        if !check.refusals.is_empty() || !check.gaps.is_empty() {
+        if !check.gaps.is_empty() {
             return Err(format!("{check:?}"));
+        }
+        for refusal in &check.refusals {
+            let site = &refusal.primary;
+            let input = modules.iter().find(|m| m.id == site.module).unwrap();
+            let start = input.syntax.items[site.item as usize].file_offset + site.span.start;
+            let before = &input.syntax.text()[..start as usize];
+            let line = before.matches('\n').count() + 1;
+            let col = before.len() - before.rfind('\n').map_or(0, |i| i + 1) + 1;
+            refusals.push(format!("{} at {line}:{col}", refusal.rule));
         }
         if let Some(id) = check.function {
             names.insert(fd.path.0.name.clone(), id);
         }
     }
+    let mut expected = source
+        .lines()
+        .filter_map(|line| {
+            line.trim()
+                .strip_prefix("// expect: refuse ")
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>();
+    expected.sort();
+    refusals.sort();
+    if refusals != expected {
+        return Err(format!("refusals: {refusals:?}; expected: {expected:?}"));
+    }
+    emitter.materialize_instances()?;
     Ok((emitter.module, names))
 }

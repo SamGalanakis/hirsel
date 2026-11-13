@@ -7,6 +7,7 @@ pub mod memory_layout {
 }
 
 mod abi;
+mod bytes;
 mod cleanup;
 mod collections;
 mod empty;

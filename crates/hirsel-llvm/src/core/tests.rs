@@ -1093,3 +1093,33 @@ fn static_capacity_zero_carriers_drop_and_grow_through_runtime_cleanup() {
         assert_eq!(got.admissions, [0, 1, 1, 2][case.function.index()]);
     }
 }
+
+#[test]
+fn string_literals_growth_and_byte_order_match_the_evaluator() {
+    let source = include_str!("../../../hirsel-core-ir/samples/strings.core");
+    let module = text::parse(source).unwrap();
+    wf::module(&module).unwrap();
+    let cases = sample_cases(&module, source);
+    assert_eq!(cases.len(), 4);
+    // Refuse each growth/probe admission without ever freeing the static carrier.
+    let mut refusals = Vec::new();
+    for case in &cases {
+        let baseline = eval::run(&module, case.function, &case.args, case.limit);
+        for nth in 1..=baseline.admissions {
+            for later in [false, true] {
+                refusals.push(Case {
+                    function: case.function,
+                    args: case.args.clone(),
+                    limit: case.limit,
+                    injection: Some((nth, later)),
+                });
+            }
+        }
+    }
+    agree_cases(&module, &refusals, true);
+    println!(
+        "string sample runs: {}; refusal runs: {}",
+        cases.len(),
+        refusals.len()
+    );
+}

@@ -188,7 +188,7 @@ impl FunctionEmitter<'_> {
                     (t.into(), self.get(v))
                 })
                 .collect::<Vec<_>>();
-            let value = self.intrinsic("hirsel_core_compare_bytes", "i8", &args);
+            let value = self.compare_bytes(&args);
             let result = site.results.get(&self.body.pools.values).unwrap()[0];
             self.put(result, &value);
             return Ok(());

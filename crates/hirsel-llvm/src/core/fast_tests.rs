@@ -250,13 +250,13 @@ inst n1 = tests@0/push/grow [] []
 fn f0 = n0 g0 {
   addr a0 = v0 index v1 : u64
 b0(v0: ptr, v1: u64, v2: u64, v3: u64):
-  v4: bool = lt v1, v2
+  v5: u64 = const 1
+  v6: u64 = wrapping_add v1, v5
+  v4: bool = le v6, v2
   branch v4, b1, b2
 b1:
   address a0
   store a0, v3
-  v5: u64 = const 1
-  v6: u64 = wrapping_add v1, v5
   return v6
 b2:
   v7: u64 = call f1 g0 (v0, v1, v2, v3)
@@ -281,9 +281,9 @@ fn f1 = n1 g0 extern
         if block.contains("store i64") {
             hot = true;
             assert!(!block.contains("call "), "{block}");
-            assert!(block.contains("add "), "{block}");
         }
     }
+    assert!(definition.contains("add "));
     assert!(hot, "{definition}");
     assert!(definition.contains(&format!("@{}", symbol(&module, FuncId(1)))));
     assert!(!definition.contains("@hirsel_core_"));

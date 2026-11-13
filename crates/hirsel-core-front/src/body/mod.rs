@@ -1022,6 +1022,7 @@ struct Cx<'c, 'a, 'e> {
     owners: Vec<cleanup::Owner>,
     owner_buf: Vec<cleanup::Owner>,
     retained_owners: Vec<usize>,
+    reached_temps: Vec<temporaries::Reached>,
     entry_setup: Vec<Inst>,
     /// Counts changes of owner and scope state; a failure successor made at one
     /// state serves every failing instruction until it changes.
@@ -1136,6 +1137,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             owners: vec![],
             owner_buf: vec![],
             retained_owners: vec![],
+            reached_temps: vec![],
             entry_setup: vec![],
             epoch: 0,
             fail_cache: None,
@@ -1679,10 +1681,12 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         self.start(blk);
         let v = self.block_params(blk).first().copied();
         let anchors = self.joins[j].anchors;
-        self.anchors.expressions.insert(self.node, anchors);
         self.anchors.last = anchors;
-        if let Some(v) = v {
-            self.anchors.values.insert(v, anchors);
+        if anchors != 0 {
+            self.anchors.expressions.insert(self.node, anchors);
+            if let Some(v) = v {
+                self.anchors.values.insert(v, anchors);
+            }
         }
         if let (Some(value), Some(id)) = (v, self.joins[j].descriptor) {
             self.descriptors.values.insert(value, id);
@@ -1694,8 +1698,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 id,
                 avail: Avail::Live,
                 flag: None,
-                storage: None,
-                held: None,
+                reached: 0,
             }));
             self.epoch += 1;
         }

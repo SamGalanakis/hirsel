@@ -461,10 +461,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return;
         }
         let fact = self.anchor_argument(n);
-        self.anchors.expressions.insert(n, fact);
         self.anchors.last = fact;
-        if let Some(value) = value {
-            self.anchors.values.insert(value, fact);
+        if fact != 0 {
+            self.anchors.expressions.insert(n, fact);
+            if let Some(value) = value {
+                self.anchors.values.insert(value, fact);
+            }
         }
     }
     pub(super) fn anchor_root(&mut self, place: Place) -> Fact {

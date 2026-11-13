@@ -2,7 +2,42 @@
 //! provenance arena and the existing flagged cleanup machinery.
 use super::*;
 
+#[derive(Clone, Copy, Default)]
+pub(super) struct Reached {
+    storage: Option<AddressId>,
+    held: Option<u32>,
+}
+
 impl<'c, 'a> Cx<'c, 'a, '_> {
+    #[inline(always)]
+    pub(super) fn temporary_storage(&self, t: cleanup::Temp) -> Option<AddressId> {
+        if t.reached == 0 {
+            None
+        } else {
+            self.reached_temps[t.reached as usize - 1].storage
+        }
+    }
+    #[inline(always)]
+    pub(super) fn temporary_held(&self, t: cleanup::Temp, statement: bool) -> bool {
+        t.reached != 0
+            && self.reached_temps[t.reached as usize - 1]
+                .held
+                .is_some_and(|d| statement || d < self.depth)
+    }
+    fn reached_temporary(&mut self, i: usize) -> usize {
+        let cleanup::Owner::Temp(t) = self.owners[i] else {
+            unreachable!("a reached owner is temporary")
+        };
+        if t.reached != 0 {
+            return t.reached as usize - 1;
+        }
+        let id = self.reached_temps.len();
+        self.reached_temps.push(Reached::default());
+        if let cleanup::Owner::Temp(t) = &mut self.owners[i] {
+            t.reached = id as u32 + 1;
+        }
+        id
+    }
     pub(super) fn hold_reached(&mut self, fact: anchors::Fact) {
         if fact == 0 {
             return;
@@ -11,9 +46,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.retain_anchor_owners(fact);
         for k in start..self.retained_owners.len() {
             let i = self.retained_owners[k];
-            if let cleanup::Owner::Temp(t) = &mut self.owners[i] {
-                t.held = Some(t.held.map_or(self.depth, |d| d.min(self.depth)));
-            }
+            let id = self.reached_temporary(i);
+            let held = &mut self.reached_temps[id].held;
+            *held = Some(held.map_or(self.depth, |d| d.min(self.depth)));
         }
         self.retained_owners.truncate(start);
         self.epoch += 1;
@@ -28,6 +63,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         ty: TyId,
         n: NodeId,
     ) {
+        if self.owners.len() == mark {
+            return;
+        }
         let reach = if self.anchor_tracked(ty)
             && kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Scoped
         {
@@ -52,7 +90,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         }
         self.retained_owners.truncate(start);
-        self.end_reached_owners(mark, value, false, reach, n);
+        self.end_reached_owners::<true>(mark, value, false, reach, n);
     }
 }
 
@@ -77,7 +115,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let cleanup::Owner::Temp(t) = self.owners[i] else {
             return;
         };
-        if t.storage.is_some() || !self.live() {
+        if self.temporary_storage(t).is_some() || !self.live() {
             return;
         }
         let storage = self.entry_slot(PlaceTy::Declared(t.id), n);
@@ -118,8 +156,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
             n,
         );
+        let reached = self.reached_temporary(i);
+        self.reached_temps[reached].storage = Some(storage);
         if let cleanup::Owner::Temp(t) = &mut self.owners[i] {
-            t.storage = Some(storage);
             t.flag = Some(flag);
             t.avail = Avail::Maybe;
         }

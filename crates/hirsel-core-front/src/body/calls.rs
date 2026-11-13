@@ -192,7 +192,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             ) {
                 if g.anchors.contains(&(i as u32)) {
                     let fact = self.anchor_argument(e);
-                    self.anchors.expressions.insert(e, fact);
+                    if fact != 0 {
+                        self.anchors.expressions.insert(e, fact);
+                    }
                 }
                 self.activate(vals[i], call, e);
                 self.determined(f, found, checked, e);
@@ -276,7 +278,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             };
             if g.anchors.contains(&(i as u32)) {
                 let fact = self.anchor_argument(e);
-                self.anchors.expressions.insert(e, fact);
+                if fact != 0 {
+                    self.anchors.expressions.insert(e, fact);
+                }
             }
             self.activate(vals[i], call, e);
         }
@@ -354,7 +358,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let argument = self.anchor_argument(args[i as usize]);
                 fact = self.anchors.union(fact, argument);
             }
-            self.anchors.expressions.insert(n, fact);
+            if fact != 0 {
+                self.anchors.expressions.insert(n, fact);
+            }
         }
         (result, v)
     }

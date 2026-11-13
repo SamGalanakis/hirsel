@@ -1721,7 +1721,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let success_subject = self.pattern_at(subject, Some(ok_case), 0, success, n);
         let value = success_subject.value;
-        self.anchors.expressions.insert(n, success_subject.anchors);
+        if success_subject.anchors != 0 {
+            self.anchors.expressions.insert(n, success_subject.anchors);
+        }
         self.temp(success, value);
         (success, value)
     }

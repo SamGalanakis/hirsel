@@ -29,10 +29,8 @@ pub(super) struct Temp {
     pub avail: Avail,
     /// Its drop flag, when arms of a match may or may not take it (OWN-18).
     pub flag: Option<AddressId>,
-    /// A carrier slot when the owner survives a branch or nested block.
-    pub storage: Option<AddressId>,
-    /// The lexical depth of a binding that reaches it (LANG-6).
-    pub held: Option<u32>,
+    /// Zero for an ordinary temporary; otherwise its reached-owner arena row.
+    pub reached: u32,
 }
 /// What the cleanup being emitted has already done on its edge, for the failure block
 /// of a drop that runs code (FAIL-9, FAIL-12): owners from `from` on are cleaned,
@@ -108,8 +106,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 id,
                 avail: Avail::Live,
                 flag: None,
-                storage: None,
-                held: None,
+                reached: 0,
             }));
             self.changed();
         }
@@ -314,7 +311,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 )
             }
             Owner::Temp(t) => (
-                t.storage
+                self.temporary_storage(t)
                     .map_or(AddressBase::Value(t.value), AddressBase::Address),
                 t.id,
                 t.avail,
@@ -354,7 +351,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     Some(n),
                 );
                 self.start(yes);
-                if matches!(o,Owner::Temp(t) if t.storage.is_some()) {
+                if matches!(o,Owner::Temp(t) if self.temporary_storage(t).is_some()) {
                     self.store_flag(flag, false, n);
                 }
                 self.emit_drop(base, id, n);
@@ -504,7 +501,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Owner::Drain { .. } => false,
             Owner::Temp(t) if Some(t.value) == edge.keep => edge.pending.is_some(),
             Owner::Slot(_) if edge.temps => false,
-            Owner::Temp(t) if t.held.is_some_and(|d| edge.temps || d < cx.depth) => false,
+            Owner::Temp(t) if cx.temporary_held(t, edge.temps) => false,
             _ if edge.retained.get(&cx.retained_owners).unwrap().contains(&i) => false,
             _ => i >= edge.from,
         };
@@ -557,9 +554,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         temps: bool,
         n: NodeId,
     ) {
-        self.end_reached_owners(mark, keep, temps, 0, n);
+        if self.owners.len() != mark {
+            self.end_reached_owners::<false>(mark, keep, temps, 0, n);
+        }
     }
-    pub(super) fn end_reached_owners(
+    pub(super) fn end_reached_owners<const REACHED: bool>(
         &mut self,
         mark: usize,
         keep: Option<ValueId>,
@@ -573,11 +572,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let mut kept = std::mem::take(&mut self.owner_buf);
         let retained_start = self.retained_owners.len();
-        self.retain_anchor_owners(reach);
-        let retained = PoolRange::new(
-            retained_start as u32,
-            (self.retained_owners.len() - retained_start) as u32,
-        );
+        let retained = if REACHED {
+            self.retain_anchor_owners(reach);
+            PoolRange::new(
+                retained_start as u32,
+                (self.retained_owners.len() - retained_start) as u32,
+            )
+        } else {
+            PoolRange::EMPTY
+        };
         let saved = self.edge;
         let pending = keep.and_then(|v| {
             let i = self.temp_index(Some(v))?;
@@ -591,8 +594,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             match o {
                 Owner::Temp(t) if Some(t.value) == keep && t.avail == Avail::Live => kept.push(o),
                 Owner::Slot(_) if temps => kept.push(o),
-                Owner::Temp(t) if t.held.is_some_and(|d| temps || d < self.depth) => kept.push(o),
-                _ if retained.get(&self.retained_owners).unwrap().contains(&i) => kept.push(o),
+                Owner::Temp(t) if self.temporary_held(t, temps) => kept.push(o),
+                _ if REACHED && retained.get(&self.retained_owners).unwrap().contains(&i) => {
+                    kept.push(o)
+                }
                 _ => {
                     self.edge = Some(Edge {
                         from: i,
@@ -610,7 +615,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.owners.truncate(mark);
         self.owners.extend(kept.drain(..).rev());
         self.owner_buf = kept;
-        self.retained_owners.truncate(retained_start);
+        if REACHED {
+            self.retained_owners.truncate(retained_start);
+        }
         self.changed();
     }
     /// An exit edge's cleanup, which changes no state: the owners begun since

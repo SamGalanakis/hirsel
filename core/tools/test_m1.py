@@ -40,7 +40,7 @@ output=pathlib.Path(args[args.index('-o')+1])
 pathlib.Path(__file__).with_suffix('.count').open('a').write('build\\n')
 output.write_text("#!/usr/bin/env python3\\nimport os,pathlib,sys\\nprint(pathlib.Path(sys.argv[1]).read_text().strip()+os.environ['M1_CASE'])\\npathlib.Path('result').write_bytes(b'done')\\nsys.exit(7)\\n")
 output.chmod(0o755)
-print(json.dumps({'accepted':True, 'native':{'executable':str(output)}, 'diagnostics':[], 'incomplete':[]}))
+print(json.dumps({'accepted':True, 'native':{'executable':str(output)}, 'diagnostics':[], 'incomplete':[], 'reachable':{'bodies': 2, 'declarations': 3}}))
 ''')
         self.compiler.chmod(0o755)
         cases = []
@@ -81,6 +81,38 @@ print(json.dumps({'accepted':True, 'native':{'executable':str(output)}, 'diagnos
             expected.write_bytes(original)
         (self.corpus / 'EXPECTED/first.files/result').write_bytes(b'wrong')
         self.assertIn('files differ', self.rows()[0]['stopped'])
+
+    def test_empty_output_and_wrapper_only_closures_are_not_built(self):
+        original = self.compiler.read_text()
+        # Even exact output cannot qualify a wrapper-only closure as the workload.
+        self.compiler.write_text(original.replace("'bodies': 2", "'bodies': 1"))
+        row = self.rows()[0]
+        self.assertFalse(row['built'])
+        self.assertEqual(row['passed'], 0)
+        self.assertIn('closure has 1 bodies', row['stopped'])
+        # An emitted artifact that runs but prints nothing also loses built status.
+        # Only the second case is empty, so earlier successes must be discarded.
+        emit = "print(pathlib.Path(sys.argv[1]).read_text().strip()+os.environ['M1_CASE'])"
+        conditional = emit + " if not sys.argv[1].endswith('second') else None"
+        self.compiler.write_text(original.replace(emit, conditional))
+        row = self.rows()[0]
+        self.assertFalse(row['built'])
+        self.assertEqual(row['passed'], 0)
+        self.assertEqual(row['first_failure'], 'second')
+        self.assertIn('empty stdout against nonempty EXPECTED', row['stopped'])
+        (self.corpus / 'EXPECTED/first.stdout').write_bytes(b'wrong')
+        row = self.rows()[0]
+        self.assertFalse(row['built'])
+        self.assertEqual(row['passed'], 0)
+        self.assertEqual(row['first_failure'], 'first')
+        self.assertIn('runner assertion at second', row['stopped'])
+        # Error cases with an empty oracle remain legitimate observations.
+        for name in ['first', 'second']:
+            (self.corpus / f'EXPECTED/{name}.stdout').write_bytes(b'')
+        self.compiler.write_text(original.replace(emit, 'pass'))
+        row = self.rows()[0]
+        self.assertTrue(row['built'])
+        self.assertEqual(row['passed'], 2)
 
     def test_refused_and_unsupported_entries_remain_failing_rows(self):
         for product, reason in [

@@ -51,6 +51,10 @@ def files_below(directory):
     return {str(p.relative_to(directory)): p.read_bytes() for p in directory.rglob('*') if p.is_file()}
 
 
+class IncompleteWorkload(AssertionError):
+    """The artifact did not demonstrate execution of the selected workload."""
+
+
 def compare_case(binary, directory, case, scratch):
     """Each run owns an isolated directory. Only explicit outputs may remain."""
     work = scratch / case['name']
@@ -70,6 +74,9 @@ def compare_case(binary, directory, case, scratch):
     expected = directory / 'EXPECTED' / case['name']
     want = (expected.with_suffix('.stdout').read_bytes(), expected.with_suffix('.stderr').read_bytes(),
             int(expected.with_suffix('.exit').read_text()))
+    if want[0] and not result.stdout:
+        raise IncompleteWorkload(
+            f'empty stdout against nonempty EXPECTED; exit status {result.returncode}, stderr {result.stderr!r}')
     labels = ('stdout', 'stderr', 'exit status')
     for label, actual, desired in zip(labels, (result.stdout, result.stderr, result.returncode), want):
         if actual != desired:
@@ -137,10 +144,25 @@ def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=No
                 if build.returncode or not product.get('native'):
                     row['stopped'] = first_stop(product, entry)
                     continue
+                expects_output = any((corpus / 'EXPECTED' / c['name']).with_suffix('.stdout').stat().st_size
+                                     for c in cases)
+                if expects_output and (row['reachable_bodies'] is None or row['reachable_bodies'] <= 1):
+                    row['stopped'] = (f"runner assertion: reachable closure has {row['reachable_bodies']} bodies "
+                                      'against nonempty EXPECTED; workload requires more than its entry wrapper')
+                    continue
                 row['built'] = True
                 for case in cases:
                     try:
                         failure = compare_case(binary, corpus, case, scratch)
+                    except IncompleteWorkload as error:
+                        row['built'] = False
+                        row['passed'] = 0
+                        if row['first_failure'] is None:
+                            row['first_failure'] = case['name']
+                            row['stopped'] = f'runner assertion: {error}'
+                        else:
+                            row['stopped'] += f"; runner assertion at {case['name']}: {error}"
+                        break
                     except (OSError, ValueError) as error:
                         failure = f'run tool: {error}'
                     if failure:

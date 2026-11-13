@@ -53,8 +53,9 @@ process early.
 | `Error(e)`, `E` not `Exit` | 1 | nothing |
 | failure | 101 | the cause chain, one line per cause, primary first: the cause and its site |
 | run stop ([FAIL-15](failure.md#fail-15-run-stops)) | 102 | one line naming the stop |
+| not started ([CAP-4](capabilities.md#cap-4-entry-grants), [MEM-19](budgets.md#mem-19-limits)) | 103 | one line naming what could not be given |
 
-So 101 and 102 never come from an `Exit`. The stderr writes are the run's, not the
+So 101 to 103 never come from an `Exit`. The stderr writes are the run's, not the
 program's. A program writes its own diagnostics before it returns.
 
 ```hirsel

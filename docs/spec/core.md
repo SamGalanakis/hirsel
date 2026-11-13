@@ -198,6 +198,12 @@ operations it names; nothing else about them may be inferred from an implementat
   `/`, where no component is empty, `.` or `..`, and no byte is NUL; so it is never absolute
   and never names the `Dir` itself. Every Host operation that takes a path returns `Denied`
   for one that is not valid, or that leaves its `Dir`, and then has no host effect.
+  A provider gives a `Dir` this confinement or does not exist; none opens a path any weaker
+  way. On Linux the host's provider needs Linux 5.6 or later with `openat2` permitted by
+  every sandbox in force, which a version check alone cannot show, so a run granted a host
+  `Dir` tries `openat2` once before `main`. Where it is unavailable the grant cannot be
+  given and the run does not start
+  ([CAP-4](capabilities.md#cap-4-entry-grants)); a run granted no `Dir` makes no such check.
   `OpenMode`:
   `Read` opens an existing file for reading (`NotFound` when absent); `Write` opens for
   writing, creating the file when absent and emptying it otherwise; `Append` opens for

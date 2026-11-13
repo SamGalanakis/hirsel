@@ -53,8 +53,11 @@ fn opener(d: Dir) -> Result[own fn(String) -> Result[HostFile, IoError] waits, (
 
 The only capabilities a run starts with are the arguments of `main`
 ([PROG-3](programs.md#prog-3-entry)). The run's configuration grants each parameter; a run
-whose configuration does not grant one of them does not start. Nothing else in a program
-receives authority from the host.
+whose configuration does not grant one of them, or whose provider cannot give one on this
+host (a `Dir`'s minimum host, [core](core.md#contracts-the-signatures-do-not-state)), does not start: it runs no
+program code and has no host effect, and reports as
+[PROG-3](programs.md#prog-3-entry) says. Nothing else in a program receives authority from
+the host.
 
 ### CAP-5: Provider operations
 

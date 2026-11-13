@@ -1,6 +1,6 @@
 use super::*;
 
-impl Cx<'_, '_> {
+impl Cx<'_, '_, '_> {
     /// MEM-9/12 packs scalar fields without native padding. Decode plain elements
     /// into their ordinary native places; no view of a temporary escapes.
     fn packed_plain_size(&mut self, ty: TyId) -> Option<u64> {

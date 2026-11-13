@@ -707,10 +707,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let iteration_holds = self.freezes.len();
         self.depth += 1;
         let value = match (flow, sequence) {
-            (Some((_, _, _, index, _, _, _)), Some((collection, Some(pointer)))) => {
+            (Some((_, advance, _, index, _, _, _)), Some((collection, Some(pointer)))) => {
                 if matches!(self.t.kind(collection), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::Map))
                 {
-                    let advance = flow.unwrap().1;
                     self.map_pair(pointer, collection, index, elem, advance, n)
                 } else if matches!(self.t.kind(collection), TyKind::Adt(d, _) if matches!(self.p.decls[d.index()].role, Some(Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan)))
                 {

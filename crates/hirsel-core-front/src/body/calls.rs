@@ -1056,6 +1056,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.end(Terminator::Branch { condition, yes, no }, Some(n));
     }
     fn require_numeric(&mut self, ok: ValueId, n: NodeId) {
+        if !self.live() {
+            return;
+        }
         let yes = self.new_block(&[]);
         let no = self.new_block(&[]);
         self.numeric_branch(ok, yes, no, n);

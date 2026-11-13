@@ -148,6 +148,18 @@ impl DefPath {
     pub fn package_is(&self, name: &str, version: &str) -> bool {
         self.0.package.package_is(name, version)
     }
+    /// Write the canonical spelling directly to an existing text buffer.
+    pub fn write_to(&self, out: &mut impl std::fmt::Write) -> std::fmt::Result {
+        let item = &self.0;
+        out.write_str(&item.package.name)?;
+        out.write_str("@")?;
+        out.write_str(&item.package.version)?;
+        for part in item.modules.iter().chain(std::iter::once(&item.name)) {
+            out.write_str("/")?;
+            out.write_str(part)?;
+        }
+        Ok(())
+    }
     /// The path a full versioned spelling `package@version/module/.../name` names: the
     /// inverse of `Display`.
     pub fn from_full(path: &str) -> Option<Self> {
@@ -176,11 +188,37 @@ impl DefPath {
 /// The canonical definition spelling used by semantic entries and proof exports.
 impl std::fmt::Display for DefPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let item = &self.0;
-        write!(f, "{}@{}", item.package.name, item.package.version)?;
-        for part in item.modules.iter().chain(std::iter::once(&item.name)) {
-            write!(f, "/{part}")?;
+        self.write_to(f)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fmt::Write;
+
+    #[test]
+    fn canonical_spelling_appends_and_propagates_sink_refusal() {
+        let path = DefPath(ItemPath {
+            package: PackageId {
+                name: "app".into(),
+                version: "2".into(),
+            },
+            modules: vec!["outer".into(), "inner".into()],
+            name: "item".into(),
+        });
+        let expected = "app@2/outer/inner/item";
+        let mut text = "prefix:".to_owned();
+        path.write_to(&mut text).unwrap();
+        assert_eq!(text, format!("prefix:{expected}"));
+        assert_eq!(path.to_string(), expected);
+        struct Refuse;
+        impl Write for Refuse {
+            fn write_str(&mut self, _: &str) -> std::fmt::Result {
+                Err(std::fmt::Error)
+            }
         }
-        Ok(())
+        assert!(path.write_to(&mut Refuse).is_err());
+        assert!(write!(&mut Refuse, "{path}").is_err());
     }
 }

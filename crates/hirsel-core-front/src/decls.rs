@@ -2088,7 +2088,7 @@ fn write_canonical(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, s: 
             s.push(')');
         }
         TyKind::Adt(d, xs) => {
-            let _ = write!(s, "{}", decls[d.index()].path);
+            let _ = decls[d.index()].path.write_to(s);
             if !xs.is_empty() {
                 s.push('[');
                 list(xs, s);

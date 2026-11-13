@@ -54,6 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "places": d.check.counts.places,
             "types": d.check.counts.types,
             "ir_bytes": d.check.counts.bytes,
+            "publication_payload_bytes": bincode::serialized_size(&(&d.ir, &d.check.template)).unwrap(),
             "template": d.check.template.is_some(),
             "key": {
                 "body":d.key.body, "lookups":d.key.lookups,

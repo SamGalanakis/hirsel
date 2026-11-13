@@ -307,6 +307,20 @@ fn from_utf8_boundaries() -> u64 {
     v * 10 + utf8(b"\xF5\x80\x80\x80")
 }
 
+// The ASCII run before each scalar, one digit per case, 1 for valid: empty; ten ASCII bytes
+// to the end; nine then FF; a run, é, a run to the end; the same then a lone 80; a run then
+// a truncated E2 82; é é then a run.
+// expect: run from_utf8_ascii_runs() = 1101001
+fn from_utf8_ascii_runs() -> u64 {
+    let mut v: u64 = utf8(b"")
+    v = v * 10 + utf8(b"abcdefghij")
+    v = v * 10 + utf8(b"abcdefghi\xFF")
+    v = v * 10 + utf8(b"abcdefgh\xC3\xA9ijklmnop")
+    v = v * 10 + utf8(b"abcdefgh\xC3\xA9ijklmnop\x80")
+    v = v * 10 + utf8(b"abcdefgh\xE2\x82")
+    v * 10 + utf8(b"\xC3\xA9\xC3\xA9abc")
+}
+
 // The argument comes back unchanged.
 // expect: run from_utf8_returns_argument() = 3
 fn from_utf8_returns_argument() -> u64 {

@@ -5,7 +5,8 @@ operations that complete their families. Each module is one source file in this 
 its types, and each function's signature, contract and body. This document holds what the files
 share: how to read a contract, the design of each family, and the spec gaps that still shape a
 signature. Every signature and every implementation lives in exactly one place, its `.hirsel`
-file. The operation index at the end is generated from those files.
+file. The operation index under "Files" is generated from those files by
+`python3 core/tools/std_api_index.py --write` (`--check` exits 1 when it is stale).
 
 **Core declarations and library code.** `core/core/*.hirsel` is the core library. It holds
 declarations only: a function there has no body, because each engine provides it. `core/std/*.hirsel`
@@ -49,19 +50,23 @@ the seed's, read through one name. No extension declares a core member's name.
 
 | Module | Extends | Ops | Operations |
 |---|---|---|---|
-| list | yes | 10 | first, last, remove, insert, swap_remove, swap, truncate, reverse, sort, sum_bytes |
-| string | yes | 12 | with_capacity, is_boundary, push_i64, push_uint, clear, find, starts_with, ends_with, split_once, strip_prefix, strip_suffix, trim_ascii |
-| char | yes | 3 | utf8_len, to_ascii_upper, digit |
-| int | yes | 2 | parse_uint, parse_int |
-| float | yes | 3 | parse64, parse32, is_finite |
-| order |  | 3 | compare, min, max |
-| map | yes | 2 | contains, get_or |
-| set |  | 5 | new, len, contains, insert, remove |
-| pool |  | 9 | new, with_capacity, len, insert, get, get_or, contains, update, remove |
-| result | yes | 2 | map_err, capacity_only |
+| arena |  | 3 | batch, copy_span, collect_span |
+| char | yes | 7 | utf8_len, to_ascii_upper, to_ascii_lower, is_ascii_digit, is_ascii_alpha, is_ascii_whitespace, digit |
 | dir |  | 3 | create_dir, remove_all, create_temp |
 | file |  | 10 | open, read_into, write_all, close, read, read_string, write, remove, try_lock, unlock |
-| **total** | **7 of 12** | **65** | |
+| float | yes | 7 | parse64, parse32, is_finite, push_f64, push_fixed64, shortest64, exp |
+| heap |  | 5 | new, len, push, peek, pop |
+| int | yes | 2 | parse_uint, parse_int |
+| io |  | 7 | lines, prefix, read_line, out, pending, flush, write |
+| json |  | 6 | size, parse, push_json, index, get, shown |
+| list | yes | 15 | first, last, remove, insert, swap_remove, truncate, reverse, sort, sum_bytes, contains, binary_search, dedup, extend, sort_stable, binary_search_by |
+| map | yes | 3 | contains, get_or, get_or_insert |
+| order |  | 5 | compare, min, max, reverse, then |
+| pool |  | 11 | new, with_capacity, len, insert, get, get_or, contains, update, remove, clear, next |
+| result | yes | 2 | map_err, capacity_only |
+| set |  | 6 | new, len, contains, insert, remove, entries |
+| string | yes | 15 | with_capacity, is_boundary, push_i64, push_uint, repeat, clear, find, starts_with, ends_with, split_once, next_split, next_line, strip_prefix, strip_suffix, trim_ascii |
+| **total** | **7 of 16** | **107** | |
 
 **Known cost.** float's push_fixed64 and its push_ascii helper build their digits as Bytes
 and pass them through `string.from_utf8`, revalidating about 20 ASCII bytes per number that

@@ -14,6 +14,7 @@
 ;       type Opened { f: HostFile, r: Res }
 ;       fn opened(f: HostFile, x: u64) { let o = Opened { f, r: mk(x) } }
 ;       type Table { m: Map[u64, Res] }
+;       fn units() { let l: List[List[()]] = [list of five ()] }   ; f8, below
 ;       fn table(full: bool) { let t = Table { m: if full { {1: mk(10), 2: mk(20), 3: mk(30)}
 ;                                                          then remove(2), dropping mk(20) }
 ;                                                  else { map.new() } } }
@@ -45,6 +46,12 @@
 ; the entries (3 × 32 charged); an empty map (capacity 0) has no storage:
 ; run: f7(true) -> | used 0 | trace 10, 30
 ; run: f7(false) -> | used 0
+; SEM-4: a List of a zero-sized element has no storage: its carrier is {null, length,
+; 2^64 - 1} and nothing cleans it. f8 holds a List[List[()]]: an outer block of one
+; 24-byte carrier (charged 24), whose element is {0, 5, 2^64 - 1}. The drop frees the outer
+; block and nothing for the inner list, so the run ends with nothing used:
+; run: f8() -> | used 0
+; Refused (the admission tests), f8 makes nothing and cleans nothing.
 core v1
 item i0 = samples@0/cleanup/flags
 type t0 = resource "Res" { id: u64 }
@@ -52,6 +59,8 @@ type t1 = own "Pair" { a: t0, b: t0 }
 type t2 = own "Node" | Nil { } | Cons { r: t0, next: box t2 }
 type t3 = own "Opened" { f: hostfile, r: t0 }
 type t4 = own "Table" { m: map u64 t0 }
+type t5 = own "Unit" { }
+type t6 = own "Units" { l: seq seq t5 }
 sig g0 = (u64) -> (ptr)
 sig g1 = (u64, u64) -> ()
 sig g2 = (bool) -> ()
@@ -60,6 +69,7 @@ sig g4 = (u64, u64, u64) -> ()
 sig g5 = (u64) -> ()
 sig g6 = (u64, u64) -> ()
 sig g7 = (bool) -> ()
+sig g8 = () -> ()
 inst n0 = samples@0/cleanup/mk [] []
 inst n1 = samples@0/cleanup/pair [] []
 inst n2 = samples@0/cleanup/flags [] []
@@ -68,6 +78,7 @@ inst n4 = samples@0/cleanup/replace [] []
 inst n5 = samples@0/cleanup/chain [] []
 inst n6 = samples@0/cleanup/opened [] []
 inst n7 = samples@0/cleanup/table [] []
+inst n8 = samples@0/cleanup/units [] []
 fn f0 = n0 g0 {
   addr a0 = v2 : t0
   addr a1 = a0 field 0 : u64
@@ -357,5 +368,57 @@ b2:
 b3:
   drop a3 t4
   dead s0
+  return
+}
+fn f8 = n8 g8 {
+  slot s0 = t6                         ; l
+  slot s1 = t5                         ; a unit element read out
+  addr a0 = s0 field 0 byte v0 : ptr   ; outer data
+  addr a1 = s0 field 0 byte v1 : u64   ; outer length
+  addr a2 = s0 field 0 byte v2 : u64   ; outer capacity
+  addr a3 = s0 : t6
+  addr a4 = v4 byte v0 : u64           ; inner data: none
+  addr a5 = v4 byte v1 : u64           ; inner length
+  addr a6 = v4 byte v2 : u64           ; inner capacity
+  addr a7 = v6 byte v0 : t5            ; element 0 at the null data
+  addr a8 = s1 : t5
+b0:
+  live s0
+  live s1
+  v0: u64 = const 0
+  v1: u64 = const 8
+  v2: u64 = const 16
+  v3: u64 = const 24
+  v4: ptr, v5: u64 = alloc own v3 align 8 charge v3
+  v6: ptr = const 0x0
+  v7: bool = ne v4, v6
+  branch v7, b1, b2
+b1:
+  v8: u64 = const 5
+  v9: u64 = const 18446744073709551615
+  address a4
+  address a5
+  address a6
+  store a4, v0
+  store a5, v8
+  store a6, v9
+  address a7
+  address a8
+  copy a8, a7, v0                      ; a unit element: 0 bytes, no storage touched
+  v10: u64 = const 1
+  address a0
+  address a1
+  address a2
+  address a3
+  store a0, v4
+  store a1, v10
+  store a2, v10
+  drop a3 t6
+  dead s0
+  dead s1
+  return
+b2:                                    ; refused: nothing was made, nothing to clean
+  dead s0
+  dead s1
   return
 }

@@ -711,6 +711,10 @@ impl Machine<'_> {
                 let length = self.load(at + 8, 8);
                 let capacity = self.load(at + 16, 8);
                 let stride = self.stride(element);
+                if stride == 0 {
+                    // SEM-4: no element storage, nothing to clean (capacity 2^64 - 1).
+                    return false;
+                }
                 let mut failed = false;
                 for i in 0..length {
                     failed |= self.drop_field(t, block + i * stride, element);
@@ -1584,6 +1588,11 @@ impl Machine<'_> {
             }
             Inst::Copy { to, from, bytes } => {
                 let n = vals[bytes.index()] as usize;
+                if n == 0 {
+                    // Zero bytes touch no storage; a zero-sized `List`'s null data is
+                    // a valid operand (SEM-4).
+                    return Ok(());
+                }
                 let src = self.get(places[from.index()].0, n).to_vec();
                 self.put(places[to.index()].0, &src);
             }

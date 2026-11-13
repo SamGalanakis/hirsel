@@ -46,6 +46,7 @@ pub(super) fn plan_type(tables: &Tables<'_>, t: TypeRef) -> Result<Plan> {
 fn plan_field(tables: &Tables<'_>, t: &FieldTy) -> Result<Plan> {
     Ok(match t {
         FieldTy::Inline(t) => plan_type(tables, *t)?,
+        FieldTy::Seq(_) if hirsel_core_layout::storage_free(&tables.input.types, t) => Plan::Empty,
         FieldTy::Box(_) | FieldTy::Rc(_) | FieldTy::Arc(_) | FieldTy::Seq(_) | FieldTy::Map(..) => {
             Plan::Leaf(t.clone())
         }

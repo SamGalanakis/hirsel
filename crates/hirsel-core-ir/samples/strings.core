@@ -35,16 +35,17 @@
 ; Views returned out of the function that made them (crate docs, "Views"): a `View[String]`
 ; is carried exactly as a `String` is, its own carrier bytes {data, length, capacity},
 ; never cleaned; returned, it is written into the caller's destination. A range a callee
-; makes is a new carrier {data + lo, hi - lo, 0} in that destination, so nothing dangles.
+; makes is a new carrier {data + lo, hi - lo, hi - lo} in that destination, so nothing
+; dangles; a slice's capacity is its length (core.md "Slices"), so no view grants spare room.
 ;   f3: fn slice(s: String, lo: u64, hi: u64) -> View[String] in s   ; Bounds unless lo <= hi <= len
 ;   f4: fn mid(s: String) -> View[String] in s { slice(s, 1, 4) }   ; passes its own dest down
 ;   f5: fn as_string(blob: ptr, at: u64) -> View[String]   ; text.as_string of the Text at
-;       `at` (a W = 4 instance): {blob + at + W, the u32 count, 0}
+;       `at` (a W = 4 instance): {blob + at + W, the u32 count, the u32 count}
 ;   f6: fn views() { let s = "hello"; let m = mid(s); let t = as_string(T, 16);
 ;         (len m, m <=> "ell", capacity m, len t, t <=> "abc") }
 ;   f7: fn cut(lo: u64, hi: u64) -> u64 { byte_len(slice("hello", lo, hi)) }
 ; T (d8) is a blob: header used 7, W 4, then the Text at 16: count 3, "abc".
-; run: f6() -> 3, 0, 0, 3, 0 | used 0
+; run: f6() -> 3, 0, 3, 3, 0 | used 0
 ; run: f7(1, 4) -> 3 | used 0
 ; run: f7(5, 5) -> 0 | used 0
 ; run: f7(4, 2) -> fail Bounds | used 0
@@ -204,7 +205,7 @@ b2:
   address a7
   store a5, v11
   store a6, v12
-  store a7, v4                         ; capacity 0: the range owns nothing
+  store a7, v12                        ; capacity = length: no spare room
   return
 b3:
   raise bounds
@@ -246,7 +247,7 @@ b0(v0: ptr, v1: ptr, v2: u64):
   address a6
   store a4, v10
   store a5, v9
-  store a6, v3
+  store a6, v9                         ; capacity = length
   return
 }
 fn f6 = n6 g8 {

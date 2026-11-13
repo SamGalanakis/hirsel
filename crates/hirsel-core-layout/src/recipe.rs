@@ -516,13 +516,43 @@ pub fn field_size(shapes: &[Shape], recipes: &[Recipe], ty: &FieldTy) -> (u64, u
     measure(shapes, Repr::Own, ty, &|t| &recipes[t.index()]).expect("an accepted field type")
 }
 
+/// SEM-4: a `List` of a zero-sized element has no element storage (its capacity is
+/// 2^64 - 1 from creation and nothing is admitted), so it has nothing to clean.
+pub fn storage_free(shapes: &[Shape], ty: &FieldTy) -> bool {
+    matches!(ty, FieldTy::Seq(e) if zero_sized(shapes, e, &mut vec![]))
+}
+
+/// Whether a field of type `ty` has size 0, read from the shapes alone (a list's
+/// element need not be computed before its holder): a record whose fields all have
+/// size 0, or an array of none or of such. A variant has a tag; anything else holds
+/// a scalar, a pointer or a carrier.
+fn zero_sized(shapes: &[Shape], ty: &FieldTy, seen: &mut Vec<TypeRef>) -> bool {
+    match ty {
+        FieldTy::Inline(t) => {
+            let shape = &shapes[t.index()];
+            if seen.contains(t) || matches!(shape.repr, Repr::Resource | Repr::Compact(_)) {
+                return false;
+            }
+            let Body::Record(fields) = &shape.body else {
+                return false;
+            };
+            seen.push(*t);
+            let zero = fields.iter().all(|f| zero_sized(shapes, &f.ty, seen));
+            seen.pop();
+            zero
+        }
+        FieldTy::Array(e, n) => *n == 0 || zero_sized(shapes, e, seen),
+        _ => false,
+    }
+}
+
 fn needs_drop(shapes: &[Shape], ty: &FieldTy, out: &Computed<'_>) -> bool {
     match ty {
+        FieldTy::Seq(e) => !zero_sized(shapes, e, &mut vec![]),
         FieldTy::Inline(t) => {
             !matches!(shapes[t.index()].repr, Repr::Compact(_)) && done(out, *t).drop.is_some()
         }
         FieldTy::Box(_)
-        | FieldTy::Seq(_)
         | FieldTy::Rc(_)
         | FieldTy::Arc(_)
         | FieldTy::Map(..)

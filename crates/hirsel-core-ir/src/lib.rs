@@ -143,11 +143,12 @@
 //!   `{data, length, capacity}`. A view of a whole value copies the owner's
 //!   capacity, so `list.capacity` and `string.into_bytes` read the truth through
 //!   an unmarked parameter (OWN-7); it frees nothing because nobody cleans a view.
-//!   A view of a range that a function makes is a new carrier of capacity 0
-//!   written into that function's `dest`: `list.slice(xs, lo, hi)` and
-//!   `string.slice` write `{data + lo * stride, hi - lo, 0}` after the bounds check
+//!   A view of a range that a function makes is a new carrier whose capacity is
+//!   its length (core.md "Slices": no view grants spare capacity), written into
+//!   that function's `dest`: `list.slice(xs, lo, hi)` and `string.slice` write
+//!   `{data + lo * stride, hi - lo, hi - lo}` after the bounds check
 //!   `lo <= hi <= length` (`Bounds`); `text.as_string(t)` writes
-//!   `{blob + at + W, count, 0}`. A literal passed to a view parameter is its
+//!   `{blob + at + W, count, count}`. A literal passed to a view parameter is its
 //!   carrier in a frame slot (Strings and literals).
 //! - **Kernels that only retype** are the carrier bytes themselves: the views
 //!   `string.as_bytes` and `string.view_string` copy the 24 bytes into `dest` (or
@@ -174,27 +175,58 @@
 //! # Strings and literals (FORM v1b)
 //!
 //! A `List`, `String` or `Map` carrier `{data, length, capacity}` owns storage
-//! exactly when its capacity is not 0. Cleanup, the counted release's last step
-//! and growth test the capacity, never the data pointer: a capacity-0 carrier frees
-//! nothing, and its first growth is an `alloc own` against the current limit
-//! (MEM-26), never `alloc .. like`.
+//! exactly when its capacity is not 0, except a `List` of a zero-sized element,
+//! which never does (below). Cleanup, the counted release's last step and growth
+//! test the capacity, never the data pointer: a capacity-0 carrier frees nothing,
+//! and its first growth is an `alloc own` against the current limit (MEM-26),
+//! never `alloc .. like`.
 //! A dynamic ordinary/counted or region allocation may carry `overflow vN`, a
 //! bool saying its exact logical charge exceeds u64. It refuses admission even
 //! with u64::MAX available, reports that limit's actual room, and follows the
 //! same finalizer-grant failure path as any refusal. Omission means false.
-//! - **A string literal** (core.md "Literals") is `{static dN, byte length, 0}`:
-//!   one `static` read and two constants, stored through `byte` steps over the
-//!   carrier. It admits nothing, charges nothing and cannot fail. `""` may use a
-//!   null pointer. Passed to a view parameter it is that carrier in a frame slot,
-//!   with nothing to clean: a capacity-0 `String` has no storage and plain
-//!   elements, so a producer may omit its `drop`.
-//! - A literal's length exceeds its capacity, so every room test is
+//! - **Only a `String` is ever static** (core.md "Literals"). An own `List`,
+//!   `Bytes` or `Map` with elements always owns its storage: capacity 0 means
+//!   length 0, because a `List` has in-place element writes. So a carrier of
+//!   capacity 0 and length > 0 is typed `String`, or a view (`string.as_bytes`
+//!   of a static `String` is `View[Bytes]` `{static dN, length, 0}`: nothing
+//!   writes through a view), never an own `List`, `Bytes` or `Map`.
+//! - **A string literal** is `{static dN, byte length, 0}`: one `static` read
+//!   and two constants, stored through `byte` steps over the carrier. It admits
+//!   nothing, charges nothing and cannot fail. `""` may use a null pointer.
+//!   Passed to a view parameter it is that carrier in a frame slot, with nothing
+//!   to clean: a capacity-0 `String` has no storage and plain elements, so a
+//!   producer may omit its `drop`.
+//! - **A byte-string literal** (`b".."`) is `Result[Bytes, Capacity]`: it admits
+//!   `round8(length)` as `List[u8]` storage (`alloc own` against the current
+//!   limit) and copies its bytes out of `static dN` into `{data, length,
+//!   length}`; a refusal is the `Capacity` value. `b""` is `Ok({0, 0, 0})`.
+//! - A static `String`'s length exceeds its capacity, so every room test is
 //!   `length + n > capacity` (after the overflow check), never `capacity - length`.
 //!   Growth copies `length` bytes out of the static data and frees nothing. Static
 //!   data is read-only: no `store` or `copy` targets it (the evaluator stops on
 //!   one). `string.into_bytes` and `clone` of a capacity-0 `String` copy into
 //!   newly admitted storage of capacity equal to the length (core.md, MEM-24);
 //!   `string.as_bytes` reports capacity 0.
+//! - **The private kernel `string.to_bytes`** is zero instructions, so it
+//!   requires a `String` that owns its storage or is empty (capacity not 0, or
+//!   length 0); it never turns a static carrier into an own `Bytes`. Callers meet
+//!   it by growing first (`push_char`, `push_u64` reserve), by testing the
+//!   capacity (`into_bytes` copies a static `s`), or, for an operation that only
+//!   shortens (`truncate`, `clear`), through the private `shorten(mut s, n)`: one
+//!   store of the length word, data and capacity unchanged.
+//! - **A `List` of a zero-sized element** (SEM-4: a record whose fields are all
+//!   zero-sized, or an array of none or of such; `hirsel_core_layout::storage_free`)
+//!   is `{0, length, 2^64 - 1}` from `list.new` on: it has no element storage.
+//!   Creating, reserving, growing and cloning it emit no `alloc` and no charge
+//!   (its logical charge is 0); clone copies the carrier. Only the length is
+//!   bounded: a `reserve` past `2^64 - 1` elements or a push at that length is
+//!   `Capacity` with `requested` `2^64 - 1`, made by an `alloc own` of that
+//!   charge with `overflow` true against the current limit, which always refuses
+//!   and reports that limit's room as `available` (MEM-22). Its cleanup is none,
+//!   decided from the layout (its drop glue never reads the carrier), so the null
+//!   data pointer under capacity `2^64 - 1` is never freed. An element access is
+//!   zero bytes: a `copy` of 0 bytes touches no storage, so its addresses (the
+//!   null data plus an offset) need not point at any.
 //! - **Order** of `String`, `Text` (through its `text.as_string` view), `Bytes`
 //!   and `List[u8]` is `rt.compare_bytes(a, a_len, b, b_len) -> i8` (-1, 0, 1;
 //!   unsigned bytes, a proper prefix first, SEM-7): `==` is `eq r, 0`, `<` is

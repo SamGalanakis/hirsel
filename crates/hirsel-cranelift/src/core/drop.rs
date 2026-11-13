@@ -480,6 +480,8 @@ impl Glue<'_, '_, '_> {
                 let len = self.icon(*n);
                 self.array(at, e, len)?;
             }
+            // SEM-4: a List of a zero-sized element has no storage to clean.
+            FieldTy::Seq(_) if hirsel_core_layout::storage_free(&self.tables.input.types, t) => {}
             FieldTy::Seq(e) => {
                 let p = self.load(at, 0);
                 let len = self.load(at, 8);

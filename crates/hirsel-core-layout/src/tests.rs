@@ -688,3 +688,34 @@ fn a_view_of_a_compact_type_is_its_locator() {
     let f = fixed(&out[1]);
     assert_eq!((f.size, f.align, &f.offsets[0][..]), (24, 8, &[0, 16][..]));
 }
+
+/// Bug: a `List[()]` is cleaned like a list with storage, freeing a block that was
+/// never admitted (SEM-4: a list of a zero-sized element has no element storage and
+/// capacity 2^64 - 1), or a list of a sized element loses its cleanup.
+/// `{units: List[()], n: u64}` needs no cleanup; `{bytes: List[u8]}` frees its block.
+#[test]
+fn a_list_of_a_zero_sized_element_has_nothing_to_clean() {
+    let unit = record("Unit", Repr::Own, vec![]);
+    let seq = |e| FieldTy::Seq(Box::new(e));
+    let units = record(
+        "Units",
+        Repr::Own,
+        vec![
+            field("units", seq(FieldTy::Inline(TypeRef(0)))),
+            field("n", u(Scalar::U64)),
+        ],
+    );
+    let bytes = record("Bytes", Repr::Own, vec![field("b", seq(u(Scalar::U8)))]);
+    let r = compute(&[unit, units, bytes]).unwrap();
+    assert_eq!(fixed(&r[0]).size, 0, "() has size 0");
+    assert!(r[1].drop.is_none());
+    assert!(r[2].drop.is_some());
+    // The element declared after its holder is not computed yet when the holder is.
+    let late = record(
+        "Late",
+        Repr::Own,
+        vec![field("u", seq(FieldTy::Inline(TypeRef(1))))],
+    );
+    let r = compute(&[late, record("Unit", Repr::Own, vec![])]).unwrap();
+    assert!(r[0].drop.is_none());
+}

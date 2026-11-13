@@ -76,6 +76,10 @@ impl FunctionEmitter<'_> {
         carrier: &str,
         status: &str,
     ) -> Result<()> {
+        // SEM-4: a List of a zero-sized element has no storage to clean.
+        if hirsel_core_layout::storage_free(&self.module.types, field) {
+            return Ok(());
+        }
         let entries = Entries::new(self.module, self.recipes, field);
         let block = self.calc(format!("load ptr, ptr {carrier}, align 1"));
         let length = self.carrier_word(carrier, 8);
@@ -132,6 +136,10 @@ impl FunctionEmitter<'_> {
         Ok(())
     }
     pub(super) fn enqueue_collection(&mut self, field: &FieldTy, carrier: &str) {
+        if hirsel_core_layout::storage_free(&self.module.types, field) {
+            self.line("ret i1 false");
+            return;
+        }
         let entries = Entries::new(self.module, self.recipes, field);
         let buffer = self.calc(format!("load ptr, ptr {carrier}, align 1"));
         let capacity = self.carrier_word(carrier, 16);

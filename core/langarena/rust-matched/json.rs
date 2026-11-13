@@ -1,4 +1,5 @@
-// Matched twin of json.hirsel. Re-review pending langs-numeric-920/core-regions-pools-922.
+// Reviewed-by: core-regions-pools-922 2026-11-13; Generate/ParseDom/ParseMapping, frozen valid test/run inputs; review8b04b7a4.
+// Count-only sizing, one compact blob/trailer walk, byte-run writes, ASCII Clinger numbers, first coordinates key.
 // Same two-pass JSON parse into one compact u32 blob, indexed containers, text numbers.
 // Compact tags/layout: core/std/json.hirsel Json/Member and docs/spec/memory.md MEM-9.
 // Parser/trailer walk adapted from reviewed layout/json_matched.rs. Numeric scan and

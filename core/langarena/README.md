@@ -123,3 +123,11 @@ Report peak charged bytes, both sides' peak RSS and their RSS ratio alongside th
 instruction ratio; unavailable charge telemetry is explicitly unavailable. When
 Hirsel RSS exceeds Rust by about 1.5 times, identify the retained representation or
 capacity overhead for the collection and layout owners.
+
+Peak root reservation is collected separately with the documented
+`--logical-charge-report <file>` diagnostic build and the optional
+`//:hirsel-core-rt-observed-archives` runtime. Record `observation_mode: true`
+and the diagnostic compiler/runtime identities. MEM-19 reservation includes
+bounds, task reservations, finalizer grants and startup; it excludes physical
+chunk slack and engine bookkeeping. It is distinct from peak RSS. Observed
+execution counters and timings never enter performance ratios or geomeans.

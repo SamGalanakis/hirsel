@@ -3,13 +3,13 @@
   "basis": "List kernels and typed generic numeric helpers complete more source bodies; the FORM61 range capacity correction and byte literal ownership are included. Ordinary release observations plus 2 percent, rounded up to 100. The fixed 60000 process budget is unchanged. The parallel runtime/view observation is retained in history; the active observation completes more bodies. Std check ceiling refreshed after recorded completion136/139 to139/139 over59630bcf..a526a304; M1 completion314/317 to317/317. Only std check ceiling changes, using14946.00034602076 plus2percent rounded up to100; the reader process regression is repaired, and the fixed60000 budget is unchanged. Core slot/Deque completion refreshes stale body census and current-work margins from the latest inherited all-source observation; product savings/fixed60000 retained.",
   "corpora": {
     "m1": {
-      "code_lines": 7212,
+      "code_lines": 7220,
       "check_lower_per_line": 26300,
       "whole_request_per_line": 47700,
       "whole_process_per_line": 47800
     },
     "std": {
-      "code_lines": 3821,
+      "code_lines": 3829,
       "check_lower_per_line": 17700,
       "whole_request_per_line": 37400,
       "whole_process_per_line": 37600
@@ -96,23 +96,23 @@
   },
   "margin": "M1: 2 percent; std: 5 percent while library sources grow, rounded up to100. Active all-source observation is23365544 after supported source/body growth. The subsequent c98e8f58 anchor regression remains visible and owned by912; do not re-baseline it away. Lower after savings. Fixed60000 budget unchanged.",
   "finished_budget_per_line": 60000,
-  "forecast_revision": "core-collections-918-deque-clone",
+  "forecast_revision": "core-collections-918-plain-drop",
   "completion_forecast": {
     "m1": {
-      "complete_bodies": 380,
-      "bodies": 380,
+      "complete_bodies": 363,
+      "bodies": 363,
       "missing_check_lower_per_line": 0,
       "additional_publication_per_line": 0,
-      "measured_process_per_line": 46837.031228216925,
-      "finished_process_per_line": 46837.031228216925
+      "measured_process_per_line": 47328.39,
+      "finished_process_per_line": 47328.39
     },
     "std": {
-      "complete_bodies": 202,
-      "bodies": 202,
+      "complete_bodies": 185,
+      "bodies": 185,
       "missing_check_lower_per_line": 0,
       "additional_publication_per_line": 0,
-      "measured_process_per_line": 35752.158910629296,
-      "finished_process_per_line": 35752.158910629296
+      "measured_process_per_line": 36308.72,
+      "finished_process_per_line": 36308.72
     }
   },
   "forecast_method": "Current process instructions plus recorded missing checker/emission and publication per line. Live construct self costs project the written population and calibrate to native check/lower less driver keys. Completed IR/template bytes per completed definition line are charged for every unfinished line, retaining partial IR, at measured definition-encoding and archive write/hash rates. Refresh projection/counts when support changes.",
@@ -1999,7 +1999,7 @@
     {
       "from_revision": "4edfc66f2cea86127a77122249f2122fa4f62860",
       "to_revision": "core-collections-918-deque-clone",
-      "reason": "Completed core slot/Deque source and declared live-range clone. Reuse the fresher inherited all-source observation in6115b33e history (supersedes my older c23e5ad1), no repeated campaign. Canonical source-body census202 accepted plus unchanged178 M1 bodies; core Deque9->10. M1 margin2percent/std5percent. Retain915 product savings and fixed60000 budget.",
+      "reason": "Completed core slot/Deque source and declared live-range clone. Reuse the fresher inherited all-source observation in6115b33e history (supersedes my older c23e5ad1), no repeated campaign. Exact guard-manifest census185 accepted core/std plus unchanged178 M1 bodies (canonical202 includes17 arena/heap/io bodies outside this manifest); core Deque9->10. M1 margin2percent/std5percent. Retain915 product savings and fixed60000 budget.",
       "completed_bodies_before": {
         "m1": [
           362,
@@ -2016,12 +2016,12 @@
       },
       "completed_bodies_after": {
         "m1": [
-          380,
-          380
+          363,
+          363
         ],
         "std": [
-          202,
-          202
+          185,
+          185
         ],
         "core.deque": [
           10,
@@ -2052,6 +2052,42 @@
           "check_lower_per_line": 16812.432575356954,
           "whole_request_per_line": 35528.096774193546,
           "whole_process_per_line": 35752.158910629296
+        }
+      }
+    },
+    {
+      "to_revision": "core-collections-918-plain-drop",
+      "reason": "Correct clone history census scope: guard uses the M1 manifest subset185/363, not the canonical std_seed202/380. Plain slot disposal and closed NeedsDrop branch add no source body. New current line counts only; numeric ceilings, fixed budget and published/frozen regression rows unchanged. Last landed measurements e2e629104de2 at batch542fd0f2.",
+      "completed_bodies_before": {
+        "m1": [
+          363,
+          363
+        ],
+        "std": [
+          185,
+          185
+        ]
+      },
+      "completed_bodies_after": {
+        "m1": [
+          363,
+          363
+        ],
+        "std": [
+          185,
+          185
+        ]
+      },
+      "measured_per_line": {
+        "m1": {
+          "check_lower_per_line": 26038.36,
+          "whole_request_per_line": 47230.14,
+          "whole_process_per_line": 47328.39
+        },
+        "std": {
+          "check_lower_per_line": 17068.17,
+          "whole_request_per_line": 36090.96,
+          "whole_process_per_line": 36308.72
         }
       }
     }

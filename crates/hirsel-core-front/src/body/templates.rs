@@ -1,6 +1,6 @@
 //! Mechanical specialization of a body checked once with rigid type parameters.
 //! Generic values use places, including when their closed type is a scalar. Layout
-//! rows and copy-size constants are substituted; source is never opened here.
+//! rows, storage-byte constants and logical-size constants are substituted; source is never opened here.
 use super::*;
 use hirsel_core_layout::{Body as ShapeBody, FieldTy, Shape};
 use std::collections::BTreeMap;
@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 pub struct CopySize {
     pub value: ValueId,
     pub ty: TypeId,
+    pub logical: bool,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -474,18 +475,26 @@ fn fill(
     let sizes = template
         .copies
         .iter()
-        .map(|copy| (copy.value, s.ty(copy.ty)))
+        .map(|copy| (copy.value, (s.ty(copy.ty), copy.logical)))
         .collect::<HashMap<_, _>>();
     let recipes = hirsel_core_layout::compute(&s.module.types)
         .map_err(|e| format!("instance layout: {e:?}"))?;
     for inst in &mut body.insts {
         if let Inst::Const { result, bits } = inst
-            && let Some(ty) = sizes.get(result)
+            && let Some(&(ty, logical)) = sizes.get(result)
         {
-            *bits = match &recipes[ty.index()].layout {
-                Layout::Fixed(f) => f.size,
-                Layout::Compact(_) => {
-                    return Err("copying a compact generic value is not built".into());
+            *bits = if s.module.types[ty.index()].repr == LRepr::Resource {
+                hirsel_core_layout::POINTER
+            } else if logical {
+                recipes[ty.index()]
+                    .logical_size
+                    .ok_or("logical size of a compact generic value is not built")?
+            } else {
+                match &recipes[ty.index()].layout {
+                    Layout::Fixed(f) => f.size,
+                    Layout::Compact(_) => {
+                        return Err("copying a compact generic value is not built".into());
+                    }
                 }
             };
         }
@@ -571,6 +580,82 @@ impl Emitter {
                 }
             }
             _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn logical_and_storage_constants() {
+        let (index, modules) = crate::tests::program_inputs("fn size[T](x: T) -> u64 { 0 }");
+        let p = Program::declare(&index, &modules);
+        let f = p.fns.iter().position(|f| f.path.0.name == "size").unwrap();
+        let mut emitter = Emitter::new();
+        let check = p.check_lower(f, &mut emitter);
+        assert!(
+            check.refusals.is_empty() && check.gaps.is_empty(),
+            "{check:?}"
+        );
+        let source = check.function.unwrap();
+        let mut template = check.template.unwrap();
+        let body = emitter.module.functions[source.index()]
+            .body
+            .as_ref()
+            .unwrap();
+        let value = body
+            .insts
+            .iter()
+            .find_map(|i| match i {
+                Inst::Const { result, bits: 0 }
+                    if body.values[result.index()] == Ty::Scalar(Scalar::U64) =>
+                {
+                    Some(*result)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let ty = template.parameters[0].unwrap();
+        let shape = Shape {
+            name: "Padded".into(),
+            repr: LRepr::Own,
+            body: ShapeBody::Record(vec![
+                hirsel_core_layout::Field {
+                    name: "a".into(),
+                    ty: FieldTy::Scalar(Scalar::U8),
+                },
+                hirsel_core_layout::Field {
+                    name: "b".into(),
+                    ty: FieldTy::Scalar(Scalar::U64),
+                },
+            ]),
+            finalizer: None,
+            grant: 0,
+        };
+        // This template constant is the producer's size query, independent of any
+        // source-level sizeof feature. The record's logical 9 bytes pad to 16.
+        for (logical, expected) in [(true, 9), (false, 16)] {
+            template.copies = vec![CopySize { value, ty, logical }];
+            let key = InstanceKey {
+                definition: p.fns[f].path.clone(),
+                types: vec!["Padded".into()],
+                dictionaries: vec![],
+            };
+            let (module, target) = materialize(
+                &emitter.module,
+                source,
+                &template,
+                &key,
+                &[(&[shape.clone()], TypeRef(0))],
+            )
+            .unwrap();
+            let report = hirsel_core_ir::eval::run(&module, target, &[0], u64::MAX);
+            assert_eq!(
+                report.outcome,
+                hirsel_core_ir::eval::Outcome::Returned(vec![expected])
+            );
         }
     }
 }

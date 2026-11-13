@@ -317,3 +317,19 @@ fn coreir_data_crates_depend_only_on_neutral_crates() {
         }
     }
 }
+
+#[test]
+fn allocation_overflow_refuses_at_maximum_limit() {
+    let source = "core v1\nsig g0 = (bool, u64) -> (bool, u64)\ninst n0 = p@1/m/alloc [] []\nfn f0 = n0 g0 {\nb0(v0: bool, v1: u64):\n  v2: u64 = const 8\n  v3: ptr, v4: u64 = alloc own v2 align 8 charge v1 overflow v0\n  v5: ptr = const 0x0\n  v6: bool = ne v3, v5\n  branch v6, b1, b2\nb1:\n  free v3 charge v1\n  jump b2\nb2:\n  return v6, v4\n}\n";
+    let module = parse(source).unwrap();
+    wf::module(&module).unwrap();
+    assert_eq!(parse(&print(&module)).unwrap(), module);
+    for (args, expected) in [
+        ([1, 0], vec![0, u64::MAX]),
+        ([1, u64::MAX], vec![0, u64::MAX]),
+        ([0, 8], vec![1, 0]),
+    ] {
+        let report = eval::run(&module, FuncId(0), &args, u64::MAX);
+        assert_eq!(report.outcome, eval::Outcome::Returned(expected));
+    }
+}

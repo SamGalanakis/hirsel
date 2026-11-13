@@ -941,6 +941,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 kind: kind.map_or(AllocKind::Own, AllocKind::Counted),
                 place: AllocPlace::Current,
                 charge,
+                overflow: None,
                 size,
                 align: align.max(if kind.is_some() { 8 } else { 1 }),
                 fail,

@@ -22,7 +22,7 @@ fn package(name: &str) -> PackageId {
 
 /// The core fixture and one application module, indexed with the core fixture as the
 /// core package (its `core` module is the prelude).
-fn program_inputs(source: &str) -> (NameIndex, Vec<ModuleInput>) {
+pub(crate) fn program_inputs(source: &str) -> (NameIndex, Vec<ModuleInput>) {
     inputs_with_core(source, &root().join("core"))
 }
 
@@ -389,6 +389,12 @@ fn cases(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(e);
         }
     }
+}
+
+#[test]
+fn list_allocation() {
+    let failures = run_case(&root().join("cases/body/list-with-capacity.hirsel"));
+    assert!(failures.is_empty(), "{failures:?}");
 }
 
 #[test]

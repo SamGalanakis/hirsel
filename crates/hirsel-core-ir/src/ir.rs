@@ -423,6 +423,9 @@ pub enum Inst {
         kind: AllocKind,
         place: AllocPlace,
         charge: ValueId,
+        /// Exact logical charge exceeds u64; admission refuses even at MAX room.
+        /// Ordinary/counted and region storage only; a resource has a fixed total.
+        overflow: Option<ValueId>,
         size: ValueId,
         align: u64,
         fail: Option<BlockId>,

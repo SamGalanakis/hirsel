@@ -21,6 +21,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if module == ["list"] {
             match name {
                 "new" => return Some(self.empty_list(result, n)),
+                "with_capacity" => {
+                    return Some(self.list_with_capacity(types[0], vals[0]?, result, n));
+                }
                 "len" | "capacity" => {
                     let value = vals[0]?;
                     let offset = if name == "len" { 8 } else { 16 };
@@ -64,7 +67,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(pointer)
     }
 
-    fn sequence_word(&mut self, pointer: ValueId, offset: u64, ty: Ty, value: ValueId, n: NodeId) {
+    pub(super) fn sequence_word(
+        &mut self,
+        pointer: ValueId,
+        offset: u64,
+        ty: Ty,
+        value: ValueId,
+        n: NodeId,
+    ) {
         let offset = self.konst(Ty::Scalar(Scalar::U64), offset, n).unwrap();
         let address = self.address(
             AddressBase::Value(pointer),

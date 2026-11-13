@@ -618,9 +618,10 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             result,
             available,
             region_entry,
-            kind: _,
+            kind,
             place,
             charge,
+            overflow,
             size,
             align,
             fail,
@@ -638,6 +639,12 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             c.is(result, Ty::Ptr)?;
             c.is(available, Ty::Scalar(Scalar::U64))?;
             c.is(charge, Ty::Scalar(Scalar::U64))?;
+            if let Some(flag) = overflow {
+                need(!matches!(kind, AllocKind::Resource { .. }), || {
+                    "resource allocation has a fixed charge".into()
+                })?;
+                c.is(flag, Ty::Scalar(Scalar::Bool))?;
+            }
             if let AllocPlace::Like(v) | AllocPlace::Region(v) = place {
                 c.is(v, Ty::Ptr)?;
             }

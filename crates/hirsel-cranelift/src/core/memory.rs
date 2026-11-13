@@ -26,6 +26,7 @@ impl Function<'_, '_, '_> {
                 kind,
                 place,
                 charge,
+                overflow,
                 size,
                 align,
                 fail,
@@ -42,7 +43,33 @@ impl Function<'_, '_, '_> {
                 // Allocation = {pointer, Capacity{requested,available}}, a C
                 // struct of three words. On refusal only the pointer is null;
                 // there is no guessed function status or call to the old runtime.
-                let values = if let AllocKind::Resource { grant } = kind {
+                let values = if let Some(overflow) = overflow {
+                    let overflow = self.get(overflow);
+                    let r = if matches!(place, AllocPlace::Region(_)) {
+                        self.c_call(
+                            "hirsel_core_region_alloc",
+                            &[p, p, u, u, u, boolean],
+                            &[p, u, u],
+                            &[ctx, payer, size, align, charge, overflow],
+                        )?
+                    } else {
+                        let like = match place {
+                            AllocPlace::Like(v) => self.get(v),
+                            _ => self.b.ins().iconst(types::I64, 0),
+                        };
+                        let kind = self
+                            .b
+                            .ins()
+                            .iconst(types::I8, i64::from(kind != AllocKind::Plain));
+                        self.c_call(
+                            "hirsel_core_alloc",
+                            &[p, p, u, u, u, boolean, Ty::Scalar(Scalar::U8)],
+                            &[p, u, u],
+                            &[ctx, like, size, align, charge, overflow, kind],
+                        )?
+                    };
+                    [r[0], r[1], r[2]]
+                } else if let AllocKind::Resource { grant } = kind {
                     let storage = self.b.ins().iadd_imm_s(
                         charge,
                         -(hirsel_core_layout::charge::CAUSE_CELL as i64) - grant as i64,

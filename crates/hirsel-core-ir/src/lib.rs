@@ -123,6 +123,10 @@
 //! and growth test the capacity, never the data pointer: a capacity-0 carrier frees
 //! nothing, and its first growth is an `alloc own` against the current limit
 //! (MEM-26), never `alloc .. like`.
+//! A dynamic ordinary/counted or region allocation may carry `overflow vN`, a
+//! bool saying its exact logical charge exceeds u64. It refuses admission even
+//! with u64::MAX available, reports that limit's actual room, and follows the
+//! same finalizer-grant failure path as any refusal. Omission means false.
 //! - **A string literal** (core.md "Literals") is `{static dN, byte length, 0}`:
 //!   one `static` read and two constants, stored through `byte` steps over the
 //!   carrier. It admits nothing, charges nothing and cannot fail. `""` may use a

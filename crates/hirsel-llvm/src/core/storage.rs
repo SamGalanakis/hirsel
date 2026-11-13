@@ -248,74 +248,86 @@ impl FunctionEmitter<'_> {
                 kind,
                 place,
                 charge,
+                overflow,
                 size,
                 align,
                 fail,
             } => {
                 let charge = self.get(charge);
                 let size = self.get(size);
-                let (block, room) =
-                    if let Some(fast) = self.fast_allocate(kind, place, &charge, &size, align) {
-                        fast
-                    } else {
-                        let (name, mut args) = match (kind, place) {
-                            (AllocKind::Resource { grant }, _) => {
-                                let without_grant = self.calc(format!("sub i64 {charge}, {grant}"));
-                                let storage = self.calc(format!("sub i64 {without_grant}, 32"));
-                                (
-                                    "hirsel_core_resource_alloc",
-                                    vec![
-                                        ptr("%context"),
-                                        word(size.to_string()),
-                                        word(align.to_string()),
-                                        word(storage),
-                                        word(grant.to_string()),
-                                    ],
-                                )
-                            }
-                            (_, AllocPlace::Region(r)) => {
-                                let r = self.get(r);
-                                (
-                                    "hirsel_core_region_alloc",
-                                    vec![
-                                        ptr("%context"),
-                                        ptr(&r),
-                                        word(size.to_string()),
-                                        word(align.to_string()),
-                                        word(charge),
-                                    ],
-                                )
-                            }
-                            (_, place) => {
-                                let like = match place {
-                                    AllocPlace::Like(v) => self.get(v),
-                                    _ => "null".into(),
-                                };
-                                (
-                                    "hirsel_core_alloc",
-                                    vec![
-                                        ptr("%context"),
-                                        ptr(&like),
-                                        word(size.to_string()),
-                                        word(align.to_string()),
-                                        word(charge),
-                                    ],
-                                )
-                            }
-                        };
-                        if !matches!(kind, AllocKind::Resource { .. }) {
-                            args.push(("i1 zeroext".into(), "false".into()));
+                let fast = if overflow.is_none() {
+                    self.fast_allocate(kind, place, &charge, &size, align)
+                } else {
+                    None
+                };
+                let (block, room) = if let Some(fast) = fast {
+                    fast
+                } else {
+                    let (name, mut args) = match (kind, place) {
+                        (AllocKind::Resource { grant }, _) => {
+                            let without_grant = self.calc(format!("sub i64 {charge}, {grant}"));
+                            let storage = self.calc(format!("sub i64 {without_grant}, 32"));
+                            (
+                                "hirsel_core_resource_alloc",
+                                vec![
+                                    ptr("%context"),
+                                    word(size.to_string()),
+                                    word(align.to_string()),
+                                    word(storage),
+                                    word(grant.to_string()),
+                                ],
+                            )
                         }
-                        if !matches!(kind, AllocKind::Resource { .. })
-                            && !matches!(place, AllocPlace::Region(_))
-                        {
-                            args.push((
-                                "i8 zeroext".into(),
-                                u8::from(kind != AllocKind::Plain).to_string(),
-                            ));
+                        (_, AllocPlace::Region(r)) => {
+                            let r = self.get(r);
+                            (
+                                "hirsel_core_region_alloc",
+                                vec![
+                                    ptr("%context"),
+                                    ptr(&r),
+                                    word(size.to_string()),
+                                    word(align.to_string()),
+                                    word(charge),
+                                ],
+                            )
                         }
-                        self.allocation(name, &args)
+                        (_, place) => {
+                            let like = match place {
+                                AllocPlace::Like(v) => self.get(v),
+                                _ => "null".into(),
+                            };
+                            (
+                                "hirsel_core_alloc",
+                                vec![
+                                    ptr("%context"),
+                                    ptr(&like),
+                                    word(size.to_string()),
+                                    word(align.to_string()),
+                                    word(charge),
+                                ],
+                            )
+                        }
                     };
+                    if !matches!(kind, AllocKind::Resource { .. }) {
+                        let overflow = overflow.map_or_else(
+                            || "false".into(),
+                            |v| {
+                                let value = self.get(v);
+                                self.calc(format!("icmp ne i8 {value}, 0"))
+                            },
+                        );
+                        args.push(("i1 zeroext".into(), overflow));
+                    }
+                    if !matches!(kind, AllocKind::Resource { .. })
+                        && !matches!(place, AllocPlace::Region(_))
+                    {
+                        args.push((
+                            "i8 zeroext".into(),
+                            u8::from(kind != AllocKind::Plain).to_string(),
+                        ));
+                    }
+                    self.allocation(name, &args)
+                };
                 if let Some(token) = region_entry {
                     let AllocPlace::Region(region) = place else {
                         unreachable!()

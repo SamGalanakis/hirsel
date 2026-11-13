@@ -1352,6 +1352,7 @@ impl Machine<'_> {
                 kind,
                 place,
                 charge,
+                overflow,
                 size,
                 ..
             } => {
@@ -1370,7 +1371,13 @@ impl Machine<'_> {
                     vals[token.index()] = 0;
                 }
                 let n = vals[charge.index()];
-                match self.admit(l, n) {
+                let admission = if overflow.is_some_and(|v| vals[v.index()] != 0) {
+                    self.admissions += 1;
+                    Err(self.limits[l].cap - self.limits[l].used)
+                } else {
+                    self.admit(l, n)
+                };
+                match admission {
                     Err(_) if self.limits[l].grant => return Err(Stop::Cause("Capacity")),
                     Err(room) => (vals[result.index()], vals[available.index()]) = (0, room),
                     Ok(()) => {

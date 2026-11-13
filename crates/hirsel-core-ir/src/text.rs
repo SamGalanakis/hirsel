@@ -521,6 +521,7 @@ impl Printer {
                         kind,
                         place,
                         charge,
+                        overflow,
                         size,
                         align,
                         fail: f,
@@ -537,12 +538,13 @@ impl Printer {
                             AllocPlace::Region(r) => format!(" in v{}", r.0),
                         };
                         format!(
-                            "{}, {}{} = alloc {kind} {} align {align} charge {}{place}{}",
+                            "{}, {}{} = alloc {kind} {} align {align} charge {}{place}{}{}",
                             def(*result),
                             def(*available),
                             region_entry.map_or_else(String::new, |v| format!(", {}", def(v))),
                             v(size),
                             v(charge),
+                            overflow.map_or_else(String::new, |v| format!(" overflow v{}", v.0)),
                             fail(*f)
                         )
                     }
@@ -1238,6 +1240,11 @@ impl BodyParser {
             } else {
                 AllocPlace::Current
             };
+            let overflow = if l.eat("overflow") {
+                Some(l.value()?)
+            } else {
+                None
+            };
             Inst::Alloc {
                 result,
                 available,
@@ -1245,6 +1252,7 @@ impl BodyParser {
                 kind,
                 place,
                 charge,
+                overflow,
                 size,
                 align,
                 fail: l.fail()?,

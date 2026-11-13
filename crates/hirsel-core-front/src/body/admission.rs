@@ -39,6 +39,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 kind: allocation.kind,
                 place: AllocPlace::Current,
                 charge: c,
+                overflow: None,
                 size: sz,
                 align: allocation.align,
                 fail,

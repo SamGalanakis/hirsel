@@ -45,6 +45,7 @@ mod closures;
 mod compare;
 mod control;
 pub(crate) mod core_ops;
+mod lists;
 mod ops;
 mod patterns;
 mod places;
@@ -1176,6 +1177,45 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         self.inst(Inst::Pointer { result, address }, n);
         result
     }
+    /// A held value's native stride or portable logical size. Rigid parameters
+    /// retain the kind of size until mechanical instance materialization.
+    pub(super) fn layout_size(&mut self, ty: TyId, logical: bool, n: NodeId) -> Option<ValueId> {
+        let id = match self.rep(ty) {
+            Ok(Rep::Scalar(Ty::Scalar(s))) => {
+                return self.konst(Ty::Scalar(Scalar::U64), s.size(), n);
+            }
+            Ok(Rep::Scalar(Ty::Ptr) | Rep::View(_)) => {
+                return self.konst(Ty::Scalar(Scalar::U64), hirsel_core_layout::POINTER, n);
+            }
+            Ok(Rep::None) => return self.konst(Ty::Scalar(Scalar::U64), 0, n),
+            Ok(Rep::Place(id)) => id,
+            Err(what) => {
+                self.gap(n, what);
+                return None;
+            }
+        };
+        let recipe = &self.e.recipes[id.index()];
+        let bits = if logical {
+            recipe.logical_size.unwrap()
+        } else {
+            self.e.size(id)
+        };
+        let bits = if self.e.is_resource(id) {
+            hirsel_core_layout::POINTER
+        } else {
+            bits
+        };
+        let value = self.konst(Ty::Scalar(Scalar::U64), bits, n)?;
+        if self.e.generic_names.contains_key(&id) {
+            self.copies.push(CopySize {
+                value,
+                ty: id,
+                logical,
+            });
+        }
+        Some(value)
+    }
+
     /// Copy the value of row `id` that `from` points at into place `to` (a move or a
     /// copy of plain data: the source needs no cleanup afterwards).
     fn copy_to(&mut self, to: AddressId, from: ValueId, id: TypeId, n: NodeId) {
@@ -1197,6 +1237,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             self.copies.push(CopySize {
                 value: bytes,
                 ty: id,
+                logical: false,
             });
         }
         self.inst(

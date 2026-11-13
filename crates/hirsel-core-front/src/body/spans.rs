@@ -167,6 +167,7 @@ impl Cx<'_, '_, '_> {
                 kind: AllocKind::Plain,
                 place: AllocPlace::Region(region),
                 charge,
+                overflow: None,
                 size,
                 align: 8,
                 fail,

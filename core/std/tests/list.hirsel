@@ -1,0 +1,260 @@
+// Contract tests for `list` (core/std/list.hirsel), written to run once an engine runs
+// library bodies. Each test returns a scalar; the line `// expect: run f() = R` above it
+// gives the result derived by hand from the contract, or `fail Cause` for the failure the
+// contract names. Lists are read back as numbers, one decimal digit per element.
+/// [a, b, c, d, e] in capacity reserved first.
+fn five(a: u64, b: u64, c: u64, d: u64, e: u64) -> List[u64] {
+    let mut xs: List[u64] = result.unwrap(list.with_capacity(5))
+    result.unwrap(list.push(mut xs, a))
+    result.unwrap(list.push(mut xs, b))
+    result.unwrap(list.push(mut xs, c))
+    result.unwrap(list.push(mut xs, d))
+    result.unwrap(list.push(mut xs, e))
+    xs
+}
+
+/// The elements as the digits of one number, first element first: [3, 1, 2] is 312.
+fn digits(xs: List[u64]) -> u64 {
+    let mut v: u64 = 0
+    for x in xs {
+        v = v * 10 + x
+    }
+    v
+}
+
+fn present(o: Option[View[u64]]) -> u64 {
+    match o {
+        Some(v) => v,
+        None => 99,
+    }
+}
+
+// expect: run first_of_five() = 7
+fn first_of_five() -> u64 {
+    let xs = five(7, 1, 2, 3, 4)
+    present(list.first(xs))
+}
+
+// expect: run first_of_empty() = 99
+fn first_of_empty() -> u64 {
+    let xs: List[u64] = list.new()
+    present(list.first(xs))
+}
+
+// expect: run last_of_five() = 4
+fn last_of_five() -> u64 {
+    let xs = five(7, 1, 2, 3, 4)
+    present(list.last(xs))
+}
+
+// expect: run last_of_empty() = 99
+fn last_of_empty() -> u64 {
+    let xs: List[u64] = list.new()
+    present(list.last(xs))
+}
+
+// Removes 6 and keeps the order of the rest: 6, then 5789.
+// expect: run remove_keeps_order() = 65789
+fn remove_keeps_order() -> u64 {
+    let mut xs = five(5, 6, 7, 8, 9)
+    let r = list.remove(mut xs, 1)
+    r * 10000 + digits(xs)
+}
+
+// expect: run remove_last() = 95678
+fn remove_last() -> u64 {
+    let mut xs = five(5, 6, 7, 8, 9)
+    let r = list.remove(mut xs, 4)
+    r * 10000 + digits(xs)
+}
+
+// expect: run remove_past_end() = fail Bounds
+fn remove_past_end() -> u64 {
+    let mut xs = five(5, 6, 7, 8, 9)
+    list.remove(mut xs, 5)
+}
+
+// expect: run insert_middle() = 129345
+fn insert_middle() -> u64 {
+    let mut xs = five(1, 2, 3, 4, 5)
+    result.unwrap(list.insert(mut xs, 2, 9))
+    digits(xs)
+}
+
+// Inserting at len appends.
+// expect: run insert_at_len() = 123459
+fn insert_at_len() -> u64 {
+    let mut xs = five(1, 2, 3, 4, 5)
+    result.unwrap(list.insert(mut xs, 5, 9))
+    digits(xs)
+}
+
+// expect: run insert_at_front() = 912345
+fn insert_at_front() -> u64 {
+    let mut xs = five(1, 2, 3, 4, 5)
+    result.unwrap(list.insert(mut xs, 0, 9))
+    digits(xs)
+}
+
+// expect: run insert_past_len() = fail Bounds
+fn insert_past_len() -> u64 {
+    let mut xs = five(1, 2, 3, 4, 5)
+    result.unwrap(list.insert(mut xs, 6, 9))
+    digits(xs)
+}
+
+// Removes 2 and moves the last element, 5, into its place.
+// expect: run swap_remove_middle() = 21534
+fn swap_remove_middle() -> u64 {
+    let mut xs = five(1, 2, 3, 4, 5)
+    let r = list.swap_remove(mut xs, 1)
+    r * 10000 + digits(xs)
+}
+
+// expect: run swap_remove_last() = 51234
+fn swap_remove_last() -> u64 {
+    let mut xs = five(1, 2, 3, 4, 5)
+    let r = list.swap_remove(mut xs, 4)
+    r * 10000 + digits(xs)
+}
+
+// expect: run swap_remove_past_end() = fail Bounds
+fn swap_remove_past_end() -> u64 {
+    let mut xs = five(1, 2, 3, 4, 5)
+    list.swap_remove(mut xs, 5)
+}
+
+// expect: run swap_ends() = 52341
+fn swap_ends() -> u64 {
+    let mut xs = five(1, 2, 3, 4, 5)
+    list.swap(mut xs, 0, 4)
+    digits(xs)
+}
+
+// expect: run swap_reversed_indexes() = 14325
+fn swap_reversed_indexes() -> u64 {
+    let mut xs = five(1, 2, 3, 4, 5)
+    list.swap(mut xs, 3, 1)
+    digits(xs)
+}
+
+// expect: run swap_with_itself() = 12345
+fn swap_with_itself() -> u64 {
+    let mut xs = five(1, 2, 3, 4, 5)
+    list.swap(mut xs, 2, 2)
+    digits(xs)
+}
+
+// expect: run swap_past_end() = fail Bounds
+fn swap_past_end() -> u64 {
+    let mut xs = five(1, 2, 3, 4, 5)
+    list.swap(mut xs, 0, 5)
+    digits(xs)
+}
+
+// expect: run truncate_shorter() = 12
+fn truncate_shorter() -> u64 {
+    let mut xs = five(1, 2, 3, 4, 5)
+    list.truncate(mut xs, 2)
+    digits(xs)
+}
+
+// expect: run truncate_longer() = 12345
+fn truncate_longer() -> u64 {
+    let mut xs = five(1, 2, 3, 4, 5)
+    list.truncate(mut xs, 9)
+    digits(xs)
+}
+
+// expect: run truncate_to_zero() = 0
+fn truncate_to_zero() -> u64 {
+    let mut xs = five(1, 2, 3, 4, 5)
+    list.truncate(mut xs, 0)
+    list.len(xs)
+}
+
+// expect: run reverse_odd() = 54321
+fn reverse_odd() -> u64 {
+    let mut xs = five(1, 2, 3, 4, 5)
+    list.reverse(mut xs)
+    digits(xs)
+}
+
+// expect: run reverse_even() = 4321
+fn reverse_even() -> u64 {
+    let mut xs = five(1, 2, 3, 4, 5)
+    list.truncate(mut xs, 4)
+    list.reverse(mut xs)
+    digits(xs)
+}
+
+// expect: run sort_ascending() = 11345
+fn sort_ascending() -> u64 {
+    let mut xs = five(3, 1, 4, 1, 5)
+    list.sort(mut xs, fn(a: u64, b: u64) -> Order {
+        std.order.compare(a, b)
+    })
+    digits(xs)
+}
+
+// expect: run sort_descending() = 54311
+fn sort_descending() -> u64 {
+    let mut xs = five(3, 1, 4, 1, 5)
+    list.sort(mut xs, fn(a: u64, b: u64) -> Order {
+        std.order.compare(b, a)
+    })
+    digits(xs)
+}
+
+// Past 16 elements the quicksort partitions: (7i) % 20 for i in 0..20 is a permutation of
+// 0..20 (7 and 20 are coprime), so sorted, element i is i at all 20 positions.
+// expect: run sort_permutation_of_twenty() = 20
+fn sort_permutation_of_twenty() -> u64 {
+    let mut xs: List[u64] = list.new()
+    for i in 0 .. 20 {
+        result.unwrap(list.push(mut xs, (7 * i) % 20))
+    }
+    list.sort(mut xs, fn(a: u64, b: u64) -> Order {
+        std.order.compare(a, b)
+    })
+    let mut placed: u64 = 0
+    for i in 0 .. 20 {
+        if xs[i] == i {
+            placed += 1
+        }
+    }
+    placed
+}
+
+// Thirty elements i % 3: sorted, ten 0s, ten 1s and ten 2s, so element i is i / 10.
+// expect: run sort_many_equal() = 30
+fn sort_many_equal() -> u64 {
+    let mut xs: List[u64] = list.new()
+    for i in 0 .. 30 {
+        result.unwrap(list.push(mut xs, i % 3))
+    }
+    list.sort(mut xs, fn(a: u64, b: u64) -> Order {
+        std.order.compare(a, b)
+    })
+    let mut placed: u64 = 0
+    for i in 0 .. 30 {
+        if xs[i] == i / 10 {
+            placed += 1
+        }
+    }
+    placed
+}
+
+// 'a' + 'b' + 'c' = 97 + 98 + 99.
+// expect: run sum_bytes_of_text() = 294
+fn sum_bytes_of_text() -> u64 {
+    list.sum_bytes(string.as_bytes("abc"))
+}
+
+// 300 bytes of 255 sum past u8 and u16 without overflow: 300 x 255.
+// expect: run sum_bytes_wide() = 76500
+fn sum_bytes_wide() -> u64 {
+    let mut b: Bytes = list.new()
+    result.unwrap(list.fill(mut b, 300, 255))
+    list.sum_bytes(b)
+}

@@ -10,56 +10,265 @@
 // was made. GROWTH: max(needed, 4, 2 x capacity), admitted before the old block is
 // refunded. Removing never allocates or shrinks; storage is refunded when the list is
 // cleaned.
-
 /// A view of the first element, or None when empty: `list.get(xs, 0)`, returned under
 /// OWN-20. View: anchored to xs; FREEZE xs. Cost: O(1).
 /// Ex: `let Some(h) = list.first(lines) else { return Error(Empty) }`
-pub fn first[T](xs: List[T]) -> Option[View[T]] in xs
+pub fn first[T](xs: List[T]) -> Option[View[T]] in xs {
+    list.get(xs, 0)
+}
 
 /// A view of the last element, or None when empty. View: anchored to xs; FREEZE xs.
 /// Cost: O(1). Ex: `if let Some(top) = list.last(stack) { .. }`
-pub fn last[T](xs: List[T]) -> Option[View[T]] in xs
+pub fn last[T](xs: List[T]) -> Option[View[T]] in xs {
+    let n = list.len(xs)
+    if n == 0 {
+        None
+    } else {
+        list.get(xs, n - 1)
+    }
+}
 
 /// Removes and returns element i, shifting i+1.. down; order kept. Library code: a chain
 /// of `list.set` from the end after a `list.pop`.
 /// Fails: Bounds (failure) when i >= len. Alloc: nothing. Cost: O(len - i) moves.
 /// Ex: `let oldest = list.remove(mut undo, 0)`
-pub fn remove[T](mut xs: List[T], i: u64) -> T
+pub fn remove[T](mut xs: List[T], i: u64) -> T {
+    check_index(xs, i)
+    let mut x = option.unwrap(list.pop(mut xs))
+    let mut j = list.len(xs)
+    while j > i {
+        j -= 1
+        let y = list.set(mut xs, j, take x)
+        x = y
+    }
+    x
+}
 
 /// Inserts x at i, shifting i.. up by one.
 /// Fails: Bounds (failure) when i > len, checked before growth; Error((c, x)) when GROWTH
 /// is refused, xs unchanged. Alloc: GROWTH. Cost: O(len - i) moves.
 /// Ex: `list.insert(mut xs, 0, take s)?`
-pub fn insert[T](mut xs: List[T], i: u64, take x: T) -> Result[(), (Capacity, T)]
+pub fn insert[T](mut xs: List[T], i: u64, take x: T) -> Result[(), (Capacity, T)] {
+    let n = list.len(xs)
+    if i != n {
+        check_index(xs, i)
+    }
+    if let Error(c) = list.reserve(mut xs, 1) {
+        return Error((c, take x))
+    }
+    let mut cur = x
+    for j in i .. n {
+        let y = list.set(mut xs, j, take cur)
+        cur = y
+    }
+    push_reserved(mut xs, take cur)
+    Ok(())
+}
 
 /// Removes and returns element i, moving the last element into its place; order not kept.
 /// Fails: Bounds (failure) when i >= len. Alloc: nothing. Cost: O(1).
 /// Ex: `let x = list.swap_remove(mut xs, i)`
-pub fn swap_remove[T](mut xs: List[T], i: u64) -> T
+pub fn swap_remove[T](mut xs: List[T], i: u64) -> T {
+    check_index(xs, i)
+    let tail = option.unwrap(list.pop(mut xs))
+    if i == list.len(xs) {
+        tail
+    } else {
+        list.set(mut xs, i, take tail)
+    }
+}
 
 /// Exchanges elements i and j. Fails: Bounds (failure) when either is >= len.
 /// Alloc: nothing (the pop and push it is built from stay within capacity). Cost: O(1).
 /// Ex: `list.swap(mut xs, 0, list.len(xs) - 1)`
-pub fn swap[T](mut xs: List[T], i: u64, j: u64)
+pub fn swap[T](mut xs: List[T], i: u64, j: u64) {
+    check_index(xs, i)
+    check_index(xs, j)
+    if i == j {
+        return
+    }
+    let a = order.min(i, j)
+    let b = order.max(i, j)
+    let tail = option.unwrap(list.pop(mut xs))
+    if b == list.len(xs) {
+        // tail is element b: put it at a and element a at the end.
+        let old_a = list.set(mut xs, a, take tail)
+        push_reserved(mut xs, take old_a)
+    } else {
+        let old_a = list.set(mut xs, a, take tail)
+        let old_b = list.set(mut xs, b, take old_a)
+        let back = list.set(mut xs, a, take old_b)
+        push_reserved(mut xs, take back)
+    }
+}
 
 /// Cleans elements n.. from the highest index down; no change when n >= len.
 /// Alloc: nothing. Cost: O(len - n). Ex: `list.truncate(mut xs, 64)`
-pub fn truncate[T](mut xs: List[T], n: u64)
+pub fn truncate[T](mut xs: List[T], n: u64) {
+    while list.len(xs) > n {
+        let _ = list.pop(mut xs)
+    }
+}
 
 /// Reverses the elements in place. Alloc: nothing. Cost: O(len). Ex: `list.reverse(mut path)`
-pub fn reverse[T](mut xs: List[T])
+pub fn reverse[T](mut xs: List[T]) {
+    let mut i: u64 = 0
+    let mut j = list.len(xs)
+    while i + 1 < j {
+        j -= 1
+        swap(mut xs, i, j)
+        i += 1
+    }
+}
 
 /// Sorts in place; `before(a, b)` returns Less when a goes first. Not stable.
-/// Pattern-defeating quicksort with a heapsort fallback (Rust sort_unstable).
+/// Introsort: quicksort with a median-of-three pivot, insertion sort below 17 elements and
+/// heapsort past 2 log2(len) partition levels (Rust's sort_unstable is pdqsort, which adds
+/// pattern detection on top of the same three parts).
 /// `before` is a `scoped fn` (OWN-21): it may view the caller's locals and does not wait;
 /// it does not escape the call. If it is not a total order, xs still holds each element exactly once, in an unspecified
 /// order. A failure inside `before` propagates with the same guarantee.
 /// Alloc: nothing. Cost: O(len log len) worst case.
-/// Ex: `list.sort(mut xs, fn(a: u64, b: u64) -> Order { order.compare(a, b) })`
-pub fn sort[T](mut xs: List[T], before: scoped fn(T, T) -> Order)
+/// Ex: `list.sort(mut xs, fn(a: u64, b: u64) -> Order { std.order.compare(a, b) })`
+pub fn sort[T](mut xs: List[T], before: scoped fn(T, T) -> Order) {
+    let n = list.len(xs)
+    let mut limit: u64 = 0
+    let mut m = n
+    while m > 1 {
+        limit += 2
+        m = m / 2
+    }
+    sort_range(mut xs, 0, n, limit, before)
+}
 
 /// Sum of the bytes of b in u64: the corpus checksum. `list.sum` sums in u8 and would fail
 /// with Overflow; there is no generic widening sum (no numeric bound, OWN-4). Cannot
 /// overflow below 2^56 bytes. Alloc: nothing. Cost: O(len).
 /// Ex: `let s = list.sum_bytes(string.as_bytes(out))`
-pub fn sum_bytes(b: Bytes) -> u64
+pub fn sum_bytes(b: Bytes) -> u64 {
+    let mut total: u64 = 0
+    for x in b {
+        let v: u64 = int.widen(x)
+        total += v
+    }
+    total
+}
+
+// Private helpers. Moving elements uses only `list.pop`, `list.set` and `list.push`:
+// `list.set` returns the element it replaces, so no placeholder value is needed.
+/// Fails with Bounds when i >= len, at the index.
+fn check_index[T](xs: List[T], i: u64) {
+    let _ = view xs[i]
+}
+
+/// Pushes into capacity a `list.reserve` or a `list.pop` already made spare, so the push
+/// admits nothing and cannot be refused.
+fn push_reserved[T](mut xs: List[T], take x: T) {
+    match list.push(mut xs, take x) {
+        Ok(()) => {},
+        Error(_) => fail("list: a push into reserved capacity was refused"),
+    }
+}
+
+fn less[T](xs: List[T], i: u64, j: u64, before: scoped fn(T, T) -> Order) -> bool {
+    match before(xs[i], xs[j]) {
+        Less => true,
+        _ => false,
+    }
+}
+
+/// Sorts xs[start..end]; recurses into the smaller part and loops on the larger, so the
+/// depth is at most log2(len).
+fn sort_range[T](mut xs: List[T], start: u64, end: u64, limit: u64, before: scoped fn(T, T) -> Order) {
+    let mut a = start
+    let mut b = end
+    let mut depth = limit
+    while b - a > 16 {
+        if depth == 0 {
+            heapsort(mut xs, a, b, before)
+            return
+        }
+        depth -= 1
+        let p = partition(mut xs, a, b, before)
+        if p - a < b - p {
+            sort_range(mut xs, a, p, depth, before)
+            a = p + 1
+        } else {
+            sort_range(mut xs, p + 1, b, depth, before)
+            b = p
+        }
+    }
+    insertion_sort(mut xs, a, b, before)
+}
+
+/// Lomuto partition of xs[a..b] (b - a >= 3) around the median of its first, middle and
+/// last elements; returns the pivot's final index.
+fn partition[T](mut xs: List[T], a: u64, b: u64, before: scoped fn(T, T) -> Order) -> u64 {
+    let mid = a + (b - a) / 2
+    let hi = b - 1
+    if less(xs, mid, a, before) {
+        swap(mut xs, mid, a)
+    }
+    if less(xs, hi, a, before) {
+        swap(mut xs, hi, a)
+    }
+    if less(xs, mid, hi, before) {
+        swap(mut xs, mid, hi)
+    }
+    let mut store = a
+    for i in a .. hi {
+        if less(xs, i, hi, before) {
+            swap(mut xs, i, store)
+            store += 1
+        }
+    }
+    swap(mut xs, store, hi)
+    store
+}
+
+fn insertion_sort[T](mut xs: List[T], a: u64, b: u64, before: scoped fn(T, T) -> Order) {
+    if b - a < 2 {
+        return
+    }
+    for i in (a + 1) .. b {
+        let mut j = i
+        while j > a && less(xs, j, j - 1, before) {
+            swap(mut xs, j, j - 1)
+            j -= 1
+        }
+    }
+}
+
+fn heapsort[T](mut xs: List[T], a: u64, b: u64, before: scoped fn(T, T) -> Order) {
+    let n = b - a
+    let mut i = n / 2
+    while i > 0 {
+        i -= 1
+        sift_down(mut xs, a, i, n, before)
+    }
+    let mut end = n
+    while end > 1 {
+        end -= 1
+        swap(mut xs, a, a + end)
+        sift_down(mut xs, a, 0, end, before)
+    }
+}
+
+/// Restores the max-heap below `root` in the heap xs[base..base + n].
+fn sift_down[T](mut xs: List[T], base: u64, root: u64, n: u64, before: scoped fn(T, T) -> Order) {
+    let mut r = root
+    loop {
+        let mut child = 2 * r + 1
+        if child >= n {
+            break
+        }
+        if child + 1 < n && less(xs, base + child, base + child + 1, before) {
+            child += 1
+        }
+        if !less(xs, base + r, base + child, before) {
+            break
+        }
+        swap(mut xs, base + r, base + child)
+        r = child
+    }
+}

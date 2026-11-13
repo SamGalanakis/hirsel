@@ -1103,7 +1103,8 @@ impl<'c, 'a> Cx<'c, 'a> {
             let r = PoolRange::push(&mut self.b.pools.values, v);
             self.end(Terminator::Return(r), Some(body));
         }
-        if self.fd.waits && !self.waited && !self.entry {
+        // Only a body checked to its end shows that nothing it calls waits.
+        if self.fd.waits && !self.waited && !self.entry && !self.broken {
             let root = self.item.root;
             let w = self
                 .kids(root)

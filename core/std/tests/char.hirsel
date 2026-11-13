@@ -1,0 +1,85 @@
+// Contract tests for `char` (core/std/char.hirsel), written to run once an engine runs
+// library bodies. Each test returns a scalar; the line `// expect: run f() = R` above it
+// gives the result derived by hand from the contract, or `fail Cause` for the failure the
+// contract names. Lists are read back as numbers, one decimal digit per element.
+fn value(o: Option[u32]) -> u32 {
+    match o {
+        Some(v) => v,
+        None => 99,
+    }
+}
+
+// expect: run utf8_len_ascii() = 1
+fn utf8_len_ascii() -> u64 {
+    char.utf8_len('a')
+}
+
+// U+00E9.
+// expect: run utf8_len_two() = 2
+fn utf8_len_two() -> u64 {
+    char.utf8_len('é')
+}
+
+// U+20AC.
+// expect: run utf8_len_three() = 3
+fn utf8_len_three() -> u64 {
+    char.utf8_len('€')
+}
+
+// U+1F600.
+// expect: run utf8_len_four() = 4
+fn utf8_len_four() -> u64 {
+    char.utf8_len('😀')
+}
+
+// 'Q' is 81.
+// expect: run upper_letter() = 81
+fn upper_letter() -> u32 {
+    char.to_u32(char.to_ascii_upper('q'))
+}
+
+// '`' (96) and '{' (123) border a-z and stay; é (233) is not ASCII and stays.
+// expect: run upper_borders() = true
+fn upper_borders() -> bool {
+    char.to_u32(char.to_ascii_upper('`')) == 96 && char.to_u32(char.to_ascii_upper('{')) == 123 && char.to_u32(char.to_ascii_upper('é')) == 233
+}
+
+// expect: run digit_hex_lower() = 15
+fn digit_hex_lower() -> u32 {
+    value(char.digit('f', 16))
+}
+
+// expect: run digit_hex_upper() = 15
+fn digit_hex_upper() -> u32 {
+    value(char.digit('F', 16))
+}
+
+// expect: run digit_past_base() = 99
+fn digit_past_base() -> u32 {
+    value(char.digit('g', 16))
+}
+
+// expect: run digit_decimal() = 9
+fn digit_decimal() -> u32 {
+    value(char.digit('9', 10))
+}
+
+// expect: run digit_base_36() = 35
+fn digit_base_36() -> u32 {
+    value(char.digit('z', 36))
+}
+
+// expect: run digit_at_base() = 99
+fn digit_at_base() -> u32 {
+    value(char.digit('7', 7))
+}
+
+// expect: run digit_base_37() = fail Fail
+fn digit_base_37() -> u32 {
+    value(char.digit('0', 37))
+}
+
+// expect: run digit_base_1() = fail Fail
+fn digit_base_1() -> u32 {
+    value(char.digit('0', 1))
+}

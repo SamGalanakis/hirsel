@@ -10,18 +10,21 @@
 //
 // Left out: `narrow` (a Dir for a subdirectory). core.md has no host primitive that
 // returns a Dir for an existing directory, only `host.mkdtemp`.
-
 /// Creates the directory p; its parent must exist. `host.mkdir`.
 /// Fails: Error(Exists | NotFound | Denied | Other(_)).
 /// Prefix: on failure nothing was created; a cancellation observed at delivery leaves the
-/// directory created. Ex: `dir.create_dir(d, "tmp")?`
-pub fn create_dir(d: Dir, p: String) -> Result[(), IoError] waits
+/// directory created. Ex: `std.dir.create_dir(d, "tmp")?`
+pub fn create_dir(d: Dir, p: String) -> Result[(), IoError] waits {
+    host.mkdir(d, p)
+}
 
 /// Removes p and everything below it, depth first. `host.remove_tree`.
 /// Fails: Error(NotFound | Denied | Other(_)) at the first entry that cannot be removed.
 /// Prefix: entries removed before the failure stay removed; not atomic.
-/// Ex: `dir.remove_all(d, "tmp")?`
-pub fn remove_all(d: Dir, p: String) -> Result[(), IoError] waits
+/// Ex: `std.dir.remove_all(d, "tmp")?`
+pub fn remove_all(d: Dir, p: String) -> Result[(), IoError] waits {
+    host.remove_tree(d, p)
+}
 
 /// Creates a new empty directory with a fresh name directly below d, appends that name (at
 /// most 32 ASCII bytes) to `name` and returns a Dir for it (Go os.MkdirTemp).
@@ -31,5 +34,7 @@ pub fn remove_all(d: Dir, p: String) -> Result[(), IoError] waits
 /// Fails: Bounds (failure), checked before issue, when name has less than 32 bytes spare;
 /// Error(Denied | Other(_)), name unchanged. Prefix: on failure nothing was created; a
 /// cancellation observed at delivery leaves the directory created and name unchanged.
-/// Ex: `let mut name = string.with_capacity(32)?; let tmp = dir.create_temp(d, mut name)?; ..; dir.remove_all(d, name)?`
-pub fn create_temp(d: Dir, mut name: String) -> Result[Dir, IoError] waits
+/// Ex: `let mut name = string.with_capacity(32)?; let tmp = std.dir.create_temp(d, mut name)?; ..; std.dir.remove_all(d, name)?`
+pub fn create_temp(d: Dir, mut name: String) -> Result[Dir, IoError] waits {
+    host.mkdtemp(d, mut name)
+}

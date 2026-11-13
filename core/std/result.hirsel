@@ -3,15 +3,24 @@
 // (LANG-18): `e?` propagates an error only when the function's error type is exactly e's;
 // anything else is converted first. These two cover the conversions the nine workloads
 // repeat; a one-off is a `match`.
-
 /// r with its error mapped by f; Ok is passed through untouched (Rust map_err). f is a
 /// `scoped fn` (OWN-21): it may view the caller's locals, does not wait and does not
 /// escape the call. Alloc: nothing of its own. Cost: O(1) plus f.
 /// Ex: `let n = result.map_err(int.parse(field), fn(take e: ParseError) -> AppError { BadNumber(e) })?`
-pub fn map_err[T, E, F](take r: Result[T, E], f: scoped fn(take E) -> F) -> Result[T, F]
+pub fn map_err[T, E, F](take r: Result[T, E], f: scoped fn(take E) -> F) -> Result[T, F] {
+    match r {
+        Ok(take x) => Ok(take x),
+        Error(take e) => Error(f(take e)),
+    }
+}
 
 /// r with the argument an allocating core operation gave back dropped from its error,
 /// leaving the Capacity (`list.push`, `box.new` and `pool.insert` return what they would
 /// have taken, core.md "Errors"). The argument is cleaned. Cost: O(1) plus that cleanup.
 /// Ex: `result.capacity_only(list.push(mut path, v))?` in a function returning `Result[_, Capacity]`
-pub fn capacity_only[T, X](take r: Result[T, (Capacity, X)]) -> Result[T, Capacity]
+pub fn capacity_only[T, X](take r: Result[T, (Capacity, X)]) -> Result[T, Capacity] {
+    match r {
+        Ok(take x) => Ok(take x),
+        Error((c, _)) => Error(c),
+    }
+}

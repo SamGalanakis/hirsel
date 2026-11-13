@@ -14,25 +14,80 @@
 // `string.slice`, returning the sub-view the call gave for s (OWN-20); they allocate
 // nothing and FREEZE s for the result's extent. Scalars are read with `next_scalar` in a
 // `while let` loop; `for` iterates only built-in sources (SEM-6).
-
 /// An empty string with storage for n bytes: `string.from_utf8` of `list.with_capacity(n)`.
 /// Fails: Error(c). Alloc: n rounded to 8, current limit. Cost: O(1).
 /// Ex: `let mut reply = string.with_capacity(256)?`
-pub fn with_capacity(n: u64) -> Result[String, Capacity]
+pub fn with_capacity(n: u64) -> Result[String, Capacity] {
+    let b: Bytes = list.with_capacity(n)?
+    match string.from_utf8(take b) {
+        Ok(take s) => Ok(take s),
+        Error(_) => fail("string.with_capacity: empty bytes are UTF-8"),
+    }
+}
 
 /// Whether i is a scalar boundary: i == byte_len, or i < byte_len and byte i is not a
 /// continuation byte. Cost: O(1). Ex: `if !string.is_boundary(text, at) { return Error(BadPosition) }`
-pub fn is_boundary(s: String, i: u64) -> bool
+pub fn is_boundary(s: String, i: u64) -> bool {
+    let n = string.byte_len(s)
+    if i >= n {
+        return i == n
+    }
+    let b = string.as_bytes(s)
+    b[i] & 0xc0 != 0x80
+}
 
-/// Appends n in decimal, with '-' when negative. Fails: Error(c); s unchanged.
-/// Alloc: one GROWTH, at most 20 bytes. Ex: `string.push_i64(mut s, -3)?`
-pub fn push_i64(mut s: String, n: i64) -> Result[(), Capacity]
+/// Appends n in decimal, with '-' when negative. Fails: Error(c); s then holds a prefix
+/// of the text (core has no `string.reserve` to make the append atomic).
+/// Alloc: GROWTH, at most twice. Ex: `string.push_i64(mut s, -3)?`
+pub fn push_i64(mut s: String, n: i64) -> Result[(), Capacity] {
+    // The magnitude in u64: two's complement negation of the same bits, exact for MIN.
+    let bits: u64 = int.truncate(n)
+    if n < 0 {
+        string.push_char(mut s, '-')?
+        string.push_u64(mut s, int.wrapping_neg(bits))
+    } else {
+        string.push_u64(mut s, bits)
+    }
+}
 
 /// Appends n in `base` (2 to 36, lower-case), left-padded with `pad` to at least `width`
-/// scalars (Go strconv.AppendUint plus padding). Fails: Bounds (failure) when base is
-/// outside 2..=36; Error(c) when the one admission of the whole text is refused, s
-/// unchanged. Cost: O(digits + width). Ex: `string.push_uint(mut out, 31, 16, 4, '0')?` appends "001f"
-pub fn push_uint(mut s: String, n: u64, base: u32, width: u64, pad: char) -> Result[(), Capacity]
+/// scalars (Go strconv.AppendUint plus padding). Fails: Fail when base is outside
+/// 2..=36; Error(c) when a growth is refused, s then holding a prefix of the text (no
+/// `string.reserve`). Alloc: GROWTH per push_char. Cost: O(digits + width). Ex: `string.push_uint(mut out, 31, 16, 4, '0')?` appends "001f"
+pub fn push_uint(mut s: String, n: u64, base: u32, width: u64, pad: char) -> Result[(), Capacity] {
+    if base < 2 || base > 36 {
+        fail("string.push_uint: base outside 2..=36")
+    }
+    let radix: u64 = int.widen(base)
+    // Digits least significant first; 64 is enough for base 2.
+    let mut digits: Inline[u8, 64] =[0; 64]
+    let mut count: u64 = 0
+    let mut v = n
+    loop {
+        let d: u8 = int.narrow(v % radix)
+        digits[count] = if d < 10 {
+            b'0' + d
+        } else {
+            b'a' + (d - 10)
+        }
+        count += 1
+        v = v / radix
+        if v == 0 {
+            break
+        }
+    }
+    let mut padded = count
+    while padded < width {
+        string.push_char(mut s, pad)?
+        padded += 1
+    }
+    while count > 0 {
+        count -= 1
+        let code: u32 = int.widen(digits[count])
+        string.push_char(mut s, option.unwrap(char.from_u32(code)))?
+    }
+    Ok(())
+}
 
 /// Upper-cases ASCII a-z in place; other bytes are unchanged, so the result is valid UTF-8
 /// of the same length (Rust make_ascii_uppercase). Library code over into_bytes and
@@ -40,40 +95,138 @@ pub fn push_uint(mut s: String, n: u64, base: u32, width: u64, pad: char) -> Res
 /// into_bytes cannot admit its copy (core.md, "Strings"); s unchanged.
 /// Alloc: nothing for an owned s; byte_len rounded to 8 for a static one. Cost: O(len).
 /// Ex: `let mut up = string.from(row)?; string.make_ascii_upper(mut up)?`
-pub fn make_ascii_upper(mut s: String) -> Result[(), Capacity]
+pub fn make_ascii_upper(mut s: String) -> Result[(), Capacity] {
+    let owned = replace(mut s, string.new())
+    let mut b = match string.into_bytes(take owned) {
+        Ok(take bs) => take bs,
+        Error((c, take back)) => {
+            s = back
+            return Error(c)
+        },
+    }
+    for i in 0 .. list.len(b) {
+        let x = b[i]
+        if x >= b'a' && x <= b'z' {
+            b[i] = x - 32
+        }
+    }
+    match string.from_utf8(take b) {
+        Ok(take up) => {
+            s = up
+        },
+        Error(_) => fail("string.make_ascii_upper: ASCII case change kept UTF-8"),
+    }
+    Ok(())
+}
 
-/// Empties s; keeps storage. Alloc: nothing. Cost: O(1). Ex: `string.clear(mut line)`
-pub fn clear(mut s: String)
+/// Empties s; keeps an owned s's storage (into_bytes, list.clear, from_utf8). A static s
+/// (a literal) is copied by into_bytes first; if that copy is refused, s becomes
+/// `string.new()`. Alloc: nothing for an owned s. Cost: O(1).
+/// Ex: `string.clear(mut line)`
+pub fn clear(mut s: String) {
+    let owned = replace(mut s, string.new())
+    if let Ok(take bs) = string.into_bytes(take owned) {
+        let mut b = bs
+        list.clear(mut b)
+        if let Ok(take empty) = string.from_utf8(take b) {
+            s = empty
+        }
+    }
+}
 
 /// The first byte position at or after `start` where pat occurs, or None. An empty pat is
-/// found at `start`. Fails: Bounds (failure) when start > byte_len. Alloc: nothing.
+/// found at `start`. Fails: Bounds (failure) when start > byte_len (`list.slice`).
+/// Alloc: nothing.
 /// Cost: O(len x len(pat)) worst case (naive search, as Go for short patterns).
 /// Ex: `let Some(colon) = string.find(line, 0, ":") else { return Error(Malformed) }`
-pub fn find(s: String, start: u64, pat: String) -> Option[u64]
+pub fn find(s: String, start: u64, pat: String) -> Option[u64] {
+    let n = string.byte_len(s)
+    let hay = list.slice(string.as_bytes(s), start, n)
+    let needle = string.as_bytes(pat)
+    let m = list.len(needle)
+    let rest = list.len(hay)
+    if m > rest {
+        return None
+    }
+    let mut i: u64 = 0
+    while i + m <= rest {
+        let mut k: u64 = 0
+        while k < m && hay[i + k] == needle[k] {
+            k += 1
+        }
+        if k == m {
+            return Some(start + i)
+        }
+        i += 1
+    }
+    None
+}
 
 /// Whether s begins with p. Cost: O(len(p)). Ex: `string.starts_with(line, "GET ")`
-pub fn starts_with(s: String, p: String) -> bool
+pub fn starts_with(s: String, p: String) -> bool {
+    let m = string.byte_len(p)
+    m <= string.byte_len(s) && list.slice(string.as_bytes(s), 0, m) == string.as_bytes(p)
+}
 
 /// Whether s ends with p. Cost: O(len(p)). Ex: `string.ends_with(name, ".json")`
-pub fn ends_with(s: String, p: String) -> bool
+pub fn ends_with(s: String, p: String) -> bool {
+    let n = string.byte_len(s)
+    let m = string.byte_len(p)
+    m <= n && list.slice(string.as_bytes(s), n - m, n) == string.as_bytes(p)
+}
 
 /// The parts of s before and after the first occurrence of sep, or None when sep does not
 /// occur (Rust str::split_once). An empty sep splits at 0. View: both anchored to s;
 /// FREEZE s. Alloc: nothing. Cost: as find.
 /// Ex: `let Some((key, value)) = string.split_once(line, ": ") else { return Error(NoColon) }`
-pub fn split_once(s: String, sep: String) -> Option[(View[String], View[String])] in s
+pub fn split_once(s: String, sep: String) -> Option[(View[String], View[String])] in s {
+    // A match of valid UTF-8 in valid UTF-8 starts and ends on scalar boundaries, so
+    // neither slice can fail.
+    let Some(at) = find(s, 0, sep) else {
+        return None
+    }
+    let n = string.byte_len(s)
+    Some((string.slice(s, 0, at), string.slice(s, at + string.byte_len(sep), n)))
+}
 
 /// s without its leading p, or None when s does not begin with p (Rust strip_prefix).
 /// View: anchored to s; FREEZE s. Alloc: nothing. Cost: O(len(p)).
 /// Ex: `let Some(route) = string.strip_prefix(line, "GET ") else { return Error(NotGet) }`
-pub fn strip_prefix(s: String, p: String) -> Option[View[String]] in s
+pub fn strip_prefix(s: String, p: String) -> Option[View[String]] in s {
+    if starts_with(s, p) {
+        Some(string.slice(s, string.byte_len(p), string.byte_len(s)))
+    } else {
+        None
+    }
+}
 
 /// s without its trailing p, or None when s does not end with p (Rust strip_suffix).
 /// View: anchored to s; FREEZE s. Alloc: nothing. Cost: O(len(p)).
 /// Ex: `let stem = match string.strip_suffix(name, ".json") { Some(t) => t, None => name }`
-pub fn strip_suffix(s: String, p: String) -> Option[View[String]] in s
+pub fn strip_suffix(s: String, p: String) -> Option[View[String]] in s {
+    if ends_with(s, p) {
+        Some(string.slice(s, 0, string.byte_len(s) - string.byte_len(p)))
+    } else {
+        None
+    }
+}
 
 /// s without leading and trailing ASCII whitespace (space, \t, \n, \r, form feed), as
 /// Rust trim_ascii; no other scalar is whitespace here. View: anchored to s; FREEZE s.
 /// Alloc: nothing. Cost: O(whitespace trimmed). Ex: `let v = string.trim_ascii(value)`
-pub fn trim_ascii(s: String) -> View[String] in s
+pub fn trim_ascii(s: String) -> View[String] in s {
+    let b = string.as_bytes(s)
+    let mut lo: u64 = 0
+    let mut hi = list.len(b)
+    while lo < hi && is_ascii_space(b[lo]) {
+        lo += 1
+    }
+    while hi > lo && is_ascii_space(b[hi - 1]) {
+        hi -= 1
+    }
+    string.slice(s, lo, hi)
+}
+
+fn is_ascii_space(x: u8) -> bool {
+    x == b' ' || x == b'\t' || x == b'\n' || x == b'\r' || x == 0x0c
+}

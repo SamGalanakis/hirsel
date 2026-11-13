@@ -391,3 +391,6 @@ fn doubling() {
         assert!(b2 * 100 <= b1 * 210, "{shape}: bytes {b1} then {b2}");
     }
 }
+
+#[path = "std_seed.rs"]
+mod std_seed;

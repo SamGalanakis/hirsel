@@ -14,10 +14,19 @@
 // nothing; a count is bumped with `map.get` then `map.set`. There is no `map.update` with
 // a callback: taking the value out needs a placeholder V to leave behind, and V has none
 // in general.
-
 /// Whether k is present: `map.get(m, k) != None`. Cost: as get. Ex: `map.contains(seen, k)`
-pub fn contains[K: key, V](m: Map[K, V], k: K) -> bool
+pub fn contains[K: key, V](m: Map[K, V], k: K) -> bool {
+    match map.get(m, k) {
+        Some(_) => true,
+        None => false,
+    }
+}
 
 /// k's value copied out, or x when absent. Cost: as get.
 /// Ex: `let n = map.get_or(counts, w, 0); let _ = map.set(mut counts, w, n + 1)`
-pub fn get_or[K: key, V: plain](m: Map[K, V], k: K, x: V) -> V
+pub fn get_or[K: key, V: plain](m: Map[K, V], k: K, x: V) -> V {
+    match map.get(m, k) {
+        Some(v) => v,
+        None => x,
+    }
+}

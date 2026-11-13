@@ -16,7 +16,6 @@
 //
 // IoError has no arm for Capacity or invalid data, so the operations that allocate
 // return `file.Error`.
-
 /// IoError plus what the allocating operations add: Capacity from a refused admission,
 /// NotUtf8 from read_string.
 pub type Error = Io(IoError) | Capacity(Capacity) | NotUtf8
@@ -24,71 +23,147 @@ pub type Error = Io(IoError) | Capacity(Capacity) | NotUtf8
 /// Opens p in mode. `host.open`. Fails: Error(NotFound | Denied | Exists | Other(_)).
 /// Prefix: nothing on failure; on success Write and CreateNew may have created p and Write
 /// emptied it. A cancellation at delivery closes the handle.
-/// Ex: `let src = file.open(d, "source.txt", Read)?`
-pub fn open(d: Dir, p: String, mode: OpenMode) -> Result[HostFile, IoError] waits
+/// Ex: `let src = std.file.open(d, "source.txt", Read)?`
+pub fn open(d: Dir, p: String, mode: OpenMode) -> Result[HostFile, IoError] waits {
+    host.open(d, p, mode)
+}
 
 /// Reads at most capacity(buf) - len(buf) bytes from f's position and appends them to
 /// buf; Ok(0) at end of file or when buf has no spare capacity. `host.read`.
 /// Fails: Error(Denied | Closed | Other(_)); buf unchanged. Alloc: nothing; buf never
 /// grows. Prefix: on failure nothing was read. Cost: O(n) bytes.
-/// Ex: `list.clear(mut buf); let n = file.read_into(mut src, mut buf)?`
-pub fn read_into(mut f: HostFile, mut buf: Bytes) -> Result[u64, IoError] waits
+/// Ex: `list.clear(mut buf); let n = std.file.read_into(mut src, mut buf)?`
+pub fn read_into(mut f: HostFile, mut buf: Bytes) -> Result[u64, IoError] waits {
+    host.read(mut f, mut buf)
+}
 
 /// Writes all of data at f's position. `host.write`.
 /// Fails: Error(WriteError(written: n, error: e)).
 /// Prefix: the first n bytes are written and stay written; the position moved by n.
-/// Alloc: nothing. Cost: O(len). Ex: `file.write_all(mut dst, list.slice(buf, 0, 17))?`
-pub fn write_all(mut f: HostFile, data: Bytes) -> Result[(), WriteError] waits
+/// Alloc: nothing. Cost: O(len). Ex: `std.file.write_all(mut dst, list.slice(buf, 0, 17))?`
+pub fn write_all(mut f: HostFile, data: Bytes) -> Result[(), WriteError] waits {
+    host.write(mut f, data)
+}
 
 /// Closes f and reports the host's close error. `host.close`. Either way f is ended and
-/// its finalizer does not run. Ex: `file.close(take src)?`
-pub fn close(take f: HostFile) -> Result[(), IoError] waits
+/// its finalizer does not run. Ex: `std.file.close(take src)?`
+pub fn close(take f: HostFile) -> Result[(), IoError] waits {
+    host.close(take f)
+}
 
 /// Reads the whole file p: opens it Read, then `list.reserve` and `host.read` until
 /// Ok(0), then closes it. Grows by GROWTH from 4096 bytes.
 /// Fails: Error(Io(_)) from the host, Error(Capacity(c)) when growth is refused; the
 /// bytes read so far are cleaned and refunded (FAIL-5). Alloc: the Bytes, current limit.
 /// Prefix: nothing on the host changes. Cost: O(size).
-/// Ex: `let raw = file.read(d, "input.txt")?`
-pub fn read(d: Dir, p: String) -> Result[Bytes, Error] waits
+/// Ex: `let raw = std.file.read(d, "input.txt")?`
+pub fn read(d: Dir, p: String) -> Result[Bytes, Error] waits {
+    let mut f = match host.open(d, p, Read) {
+        Ok(take h) => take h,
+        Error(e) => return Error(Io(e)),
+    }
+    let mut buf: Bytes = list.new()
+    loop {
+        if list.len(buf) == list.capacity(buf) {
+            let want: u64 = if list.capacity(buf) == 0 {
+                4096
+            } else {
+                list.capacity(buf)
+            }
+            if let Error(c) = list.reserve(mut buf, want) {
+                return Error(Capacity(c))
+            }
+        }
+        match host.read(mut f, mut buf) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Error(e) => return Error(Io(e)),
+        }
+    }
+    match host.close(take f) {
+        Ok(()) => Ok(take buf),
+        Error(e) => Error(Io(e)),
+    }
+}
 
 /// As read, then `string.from_utf8`; Error(NotUtf8) when it is not UTF-8 (the bytes
-/// are cleaned). Ex: `let s = file.read_string(d, input)?`
-pub fn read_string(d: Dir, p: String) -> Result[String, Error] waits
+/// are cleaned). Ex: `let s = std.file.read_string(d, input)?`
+pub fn read_string(d: Dir, p: String) -> Result[String, Error] waits {
+    let b = read(d, p)?
+    match string.from_utf8(take b) {
+        Ok(take s) => Ok(take s),
+        Error(_) => Error(NotUtf8),
+    }
+}
 
 /// Opens p Write, writes all of data, then closes it.
 /// Fails: Error(Io(e)) from any of the three. Prefix: the file may exist holding a
 /// prefix of data of unknown length (use open, write_all and close to learn it).
-/// Alloc: nothing. Ex: `file.write(d, "source.txt", data)?`
-pub fn write(d: Dir, p: String, data: Bytes) -> Result[(), IoError] waits
+/// Alloc: nothing. Ex: `std.file.write(d, "source.txt", data)?`
+pub fn write(d: Dir, p: String, data: Bytes) -> Result[(), IoError] waits {
+    let mut f = host.open(d, p, Write)?
+    if let Error(e) = host.write(mut f, data) {
+        return Error(e.error)
+    }
+    host.close(take f)
+}
 
 /// Removes the file p. `host.remove`. Fails: Error(NotFound | Denied | Other(_)).
-/// Prefix: a cancellation at delivery leaves it removed. Ex: `file.remove(d, p)?`
-pub fn remove(d: Dir, p: String) -> Result[(), IoError] waits
+/// Prefix: a cancellation at delivery leaves it removed. Ex: `std.file.remove(d, p)?`
+pub fn remove(d: Dir, p: String) -> Result[(), IoError] waits {
+    host.remove(d, p)
+}
 
 // The OS file lock: advisory, exclusive, whole-file (flock semantics, as Rust's
 // File::try_lock). Lock is a `send` resource that owns the locked file, so the lock is
 // released exactly once: by `unlock`, or by its finalizer, which unlocks (ignoring the
 // error) and then cleans the file field, whose finalizer closes the handle. Making a Lock
 // admits 32 bytes for its cause cell (budgets.md, "resource value"); try_lock makes it
-// before asking the host, so a refused admission leaves the host untouched.
+// before asking the host, so a refused admission leaves the host untouched. A refused
+// resource literal drops its fields (T1.2), so on Capacity the file is closed, not returned.
+pub opaque resource type Lock: send {
+    f: HostFile
+} drop(l) {
+    let _ = host.unlock(mut l.f)
+}
 
-pub opaque resource type Lock: send { f: HostFile }
-  drop(l) { let _ = host.unlock(mut l.f) }
-
-/// Held: another handle holds the lock. Io: the host refused for another reason.
-/// Capacity: the Lock's cause cell was refused, before the host was asked.
-pub type LockError = Held | Io(IoError) | Capacity(Capacity)
+/// Held(f): another handle holds the lock; f comes back unlocked. Io(e, f): the host
+/// refused for another reason; f comes back unlocked. Capacity(c): the Lock's cause cell
+/// was refused before the host was asked, and f was closed with the refused literal.
+pub type LockError = Held(HostFile) | Io(IoError, HostFile) | Capacity(Capacity)
 
 /// Takes the lock on f without blocking. `host.try_lock`.
-/// Fails: Error((Held, f)), Error((Io(e), f)) or Error((Capacity(c), f)); f is returned
-/// unlocked and the Lock's cell refunded. Alloc: 32, current limit. Prefix: on failure the
-/// lock is not held. Cost: one host call.
-/// Ex: `let l = match file.try_lock(take lf) { Ok(l) => l, Error((e, lf)) => .. }`
-pub fn try_lock(take f: HostFile) -> Result[Lock, (LockError, HostFile)] waits
+/// Fails: Error(Held(f)) or Error(Io(e, f)), f unlocked and the Lock's cell refunded;
+/// Error(Capacity(c)), f closed. Alloc: 32, current limit. Prefix: on failure the lock is
+/// not held. Cost: one host call.
+/// Ex: `let l = match std.file.try_lock(take lf) { Ok(take l) => l, Error(Held(take lf)) => .. }`
+pub fn try_lock(take f: HostFile) -> Result[Lock, LockError] waits {
+    let mut l = match Lock(f: take f) {
+        Ok(take made) => take made,
+        Error(c) => return Error(Capacity(c)),
+    }
+    match host.try_lock(mut l.f) {
+        Ok(true) => Ok(take l),
+        Ok(false) => {
+            let Lock(f: take back) = take l
+            Error(Held(take back))
+        }
+        Error(e) => {
+            let Lock(f: take back) = take l
+            Error(Io(e, take back))
+        }
+    }
+}
 
 /// Unlocks and returns the file, still open. `host.unlock`. Fails: Error((e, f)): the
 /// unlock failed and the lock state is the host's; closing f releases it. Either way l
 /// is ended exactly once. Alloc: nothing; the cause cell is refunded.
-/// Ex: `let lf = file.unlock(take l)?`
-pub fn unlock(take l: Lock) -> Result[HostFile, (IoError, HostFile)] waits
+/// Ex: `let lf = std.file.unlock(take l)?`
+pub fn unlock(take l: Lock) -> Result[HostFile, (IoError, HostFile)] waits {
+    let Lock(f: take f) = take l
+    let mut g = take f
+    match host.unlock(mut g) {
+        Ok(()) => Ok(take g),
+        Error(e) => Error((e, take g)),
+    }
+}

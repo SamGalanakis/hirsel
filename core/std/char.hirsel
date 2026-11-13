@@ -2,15 +2,51 @@
 // core members from_u32 and to_u32 (core/core/char.hirsel). `char` is also the builtin type
 // name: a type position reads the type, so `fn f(c: char)` and `char.digit(c, 16)` do not
 // collide. A char is plain, 4 bytes, key + ordered.
-
 /// Number of UTF-8 bytes, 1 to 4. Cost: O(1). Ex: `char.utf8_len('é')` is 2
-pub fn utf8_len(c: char) -> u64
+pub fn utf8_len(c: char) -> u64 {
+    let v = char.to_u32(c)
+    if v < 0x80 {
+        1
+    } else if v < 0x800 {
+        2
+    } else if v < 0x10000 {
+        3
+    } else {
+        4
+    }
+}
 
 /// 'a'..='z' mapped to 'A'..='Z'; every other scalar unchanged. Cost: O(1).
 /// Ex: `string.push_char(mut out, char.to_ascii_upper(c))?`
-pub fn to_ascii_upper(c: char) -> char
+pub fn to_ascii_upper(c: char) -> char {
+    if c >= 'a' && c <= 'z' {
+        option.unwrap(char.from_u32(char.to_u32(c) - 32))
+    } else {
+        c
+    }
+}
 
-/// The value of an ASCII digit in `base` (2 to 36), or None.
-/// Fails: Bounds (failure) when base is outside 2..=36. Cost: O(1).
+/// The value of an ASCII digit in `base` (2 to 36), or None: '0'..'9', then 'a'..'z' or
+/// 'A'..'Z' for 10 to 35 (Rust char::to_digit). Fails: Fail when base is outside 2..=36.
+/// Cost: O(1).
 /// Ex: `char.digit('f', 16)` is Some(15)
-pub fn digit(c: char, base: u32) -> Option[u32]
+pub fn digit(c: char, base: u32) -> Option[u32] {
+    if base < 2 || base > 36 {
+        fail("char.digit: base outside 2..=36")
+    }
+    let v = char.to_u32(c)
+    let d: u32 = if v >= 0x30 && v <= 0x39 {
+        v - 0x30
+    } else if v >= 0x61 && v <= 0x7a {
+        v - 0x61 + 10
+    } else if v >= 0x41 && v <= 0x5a {
+        v - 0x41 + 10
+    } else {
+        return None
+    }
+    if d < base {
+        Some(d)
+    } else {
+        None
+    }
+}

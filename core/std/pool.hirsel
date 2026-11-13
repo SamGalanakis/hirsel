@@ -17,13 +17,25 @@
 // cleans every live value by ordinary list cleanup (FAIL-8). Unique is plain, so a
 // `clone` of a pool keeps its identity and an Id of the original resolves in the copy
 // (MEM-18), as in slotmap.
+pub opaque type Pool[T] {
+    me: Unique,
+    slots: List[Slot[T]],
+    free: u64,
+    live: u64
+}
 
-pub opaque type Pool[T] { me: Unique, slots: List[Slot[T]], free: u64, live: u64 }
-type Slot[T] = Occupied(u64, T) | Vacant(u64, u64)        // (generation, value | next free)
+type Slot[T] = Occupied(u64, T) | Vacant(u64, u64) // (generation, value | next free)
 
-/// A handle to one value in one pool. Plain + key, 24 bytes. Equal Ids name the same slot
-/// of the same pool at the same generation.
-pub opaque type Id[T]: plain + key { pool: Unique, index: u64, generation: u64 }
+/// The end of the free list, and the generation at which a slot retires.
+const NONE: u64 = 18446744073709551615
+
+/// A handle to one value in one pool: plain (its fields are) and key, 24 bytes. Equal Ids
+/// name the same slot of the same pool at the same generation.
+pub opaque type Id[T]: key {
+    pool: Unique,
+    index: u64,
+    generation: u64
+}
 
 /// Why an Id did not resolve. WrongPool: it was issued by a pool with another identity
 /// (another pool, or what this place held before a new pool was assigned to it).
@@ -32,45 +44,128 @@ pub opaque type Id[T]: plain + key { pool: Unique, index: u64, generation: u64 }
 pub type Stale = WrongPool | Removed
 
 /// An empty pool with no storage and a fresh identity (`unique.new`, which cannot fail).
-/// Alloc: nothing. Ex: `let mut p: pool.Pool[Entry] = pool.new()`
-pub fn new[T]() -> Pool[T]
+/// Alloc: nothing. Ex: `let mut p: std.pool.Pool[Entry] = std.pool.new()`
+pub fn new[T]() -> Pool[T] {
+    Pool(me: unique.new(), slots: list.new(), free: NONE, live: 0)
+}
 
 /// An empty pool with storage for n slots: `list.with_capacity` of slots.
 /// Fails: Error(c). Alloc: n x size(Slot[T]) rounded to 8, current limit.
-/// Ex: `let mut p: pool.Pool[Entry] = pool.with_capacity(64)?`
-pub fn with_capacity[T](n: u64) -> Result[Pool[T], Capacity]
+/// Ex: `let mut p: std.pool.Pool[Entry] = std.pool.with_capacity(64)?`
+pub fn with_capacity[T](n: u64) -> Result[Pool[T], Capacity] {
+    let slots: List[Slot[T]] = list.with_capacity(n)?
+    Ok(Pool(me: unique.new(), slots: take slots, free: NONE, live: 0))
+}
 
-/// Number of live values. Cost: O(1). Ex: `pool.len(p)`
-pub fn len[T](p: Pool[T]) -> u64
+/// Number of live values. Cost: O(1). Ex: `std.pool.len(p)`
+pub fn len[T](p: Pool[T]) -> u64 {
+    p.live
+}
 
 /// Stores x in a vacant slot (the most recently vacated first) or a new one.
 /// Fails: Error((c, x)) when a new slot is needed and GROWTH is refused; p unchanged.
 /// Alloc: GROWTH of slots only when no slot is vacant. Cost: amortised O(1).
-/// Ex: `let h = pool.insert(mut l.pool, take entry)?`
-pub fn insert[T](mut p: Pool[T], take x: T) -> Result[Id[T], (Capacity, T)]
+/// Ex: `let h = std.pool.insert(mut l.pool, take entry)?`
+pub fn insert[T](mut p: Pool[T], take x: T) -> Result[Id[T], (Capacity, T)] {
+    if p.free == NONE {
+        let index = list.len(p.slots)
+        if let Error((c, take slot)) = list.push(mut p.slots, Occupied(0, take x)) {
+            return match slot {
+                Occupied(_, take v) => Error((c, take v)),
+                Vacant(_, _) => fail("pool.insert: push returned another slot"),
+            }
+        }
+        p.live += 1
+        return Ok(Id(pool: p.me, index: index, generation: 0))
+    }
+    let index = p.free
+    let (generation, next) = match p.slots[index] {
+        Vacant(g, n) => (g, n),
+        Occupied(_, _) => fail("pool: the free list names an occupied slot"),
+    }
+    let _ = list.set(mut p.slots, index, Occupied(generation, take x))
+    p.free = next
+    p.live += 1
+    Ok(Id(pool: p.me, index: index, generation: generation))
+}
 
 /// A view of h's value. Fails: Error(Stale). View: anchored to p; FREEZE p. Cost: O(1).
-/// Ex: `match pool.get(l.pool, h) { Ok(e) => string.byte_len(e.value), Error(_) => 0 }`
-pub fn get[T](p: Pool[T], h: Id[T]) -> Result[View[T], Stale] in p
+/// Ex: `match std.pool.get(l.pool, h) { Ok(e) => string.byte_len(e.value), Error(_) => 0 }`
+pub fn get[T](p: Pool[T], h: Id[T]) -> Result[View[T], Stale] in p {
+    if h.pool != p.me {
+        return Error(WrongPool)
+    }
+    match list.get(p.slots, h.index) {
+        Some(Occupied(g, v)) if g == h.generation => Ok(v),
+        _ => Error(Removed),
+    }
+}
 
-/// h's value copied out, or x when h is stale. Cost: O(1). Ex: `pool.get_or(b, i, 0)`
-pub fn get_or[T: plain](p: Pool[T], h: Id[T], x: T) -> T
+/// h's value copied out, or x when h is stale. Cost: O(1). Ex: `std.pool.get_or(b, i, 0)`
+pub fn get_or[T: plain](p: Pool[T], h: Id[T], x: T) -> T {
+    match get(p, h) {
+        Ok(v) => v,
+        Error(_) => x,
+    }
+}
 
-/// Whether h resolves. Cost: O(1). Ex: `pool.contains(p, h)`
-pub fn contains[T](p: Pool[T], h: Id[T]) -> bool
+/// Whether h resolves. Cost: O(1). Ex: `std.pool.contains(p, h)`
+pub fn contains[T](p: Pool[T], h: Id[T]) -> bool {
+    match get(p, h) {
+        Ok(_) => true,
+        Error(_) => false,
+    }
+}
 
 /// Calls f with h's value as an owned local and puts the value back; returns f's result.
 /// The value is taken out with `list.set` of a Vacant placeholder and installed again
 /// after f, so no mutable view is needed. f is a `scoped fn` (OWN-21): it may view or
 /// lend `mut` the caller's locals but not p, which is lent for the call. If f fails, the
 /// failure propagates, the value is cleaned with the local, and the slot is left vacant at
-/// a new generation, so h is stale from then on.
+/// a new generation and off the free list, so h is stale from then on.
 /// Fails: Error(Stale) without calling f. Alloc: nothing. Cost: O(1) plus f.
-/// Ex: `pool.update(mut l.pool, h, fn(mut e: Entry) { e.prev = None })?`
-pub fn update[T, R](mut p: Pool[T], h: Id[T], f: scoped fn(mut T) -> R) -> Result[R, Stale]
+/// Ex: `std.pool.update(mut l.pool, h, fn(mut e: Entry) { e.prev = None })?`
+pub fn update[T, R](mut p: Pool[T], h: Id[T], f: scoped fn(mut T) -> R) -> Result[R, Stale] {
+    check(p, h)?
+    // An occupied slot's generation is below NONE (a slot retires on reaching it).
+    let placeholder = Vacant(h.generation + 1, NONE)
+    let slot = list.set(mut p.slots, h.index, placeholder)
+    let mut value = match slot {
+        Occupied(_, take v) => take v,
+        Vacant(_, _) => fail("pool.update: a checked slot was vacant"),
+    }
+    let r = f(mut value)
+    let _ = list.set(mut p.slots, h.index, Occupied(h.generation, take value))
+    Ok(take r)
+}
 
 /// Removes h's value and returns it; the slot's generation rises by one, so every Id to
 /// it is stale from now on; at 2^64 - 1 the slot retires instead of joining the free
 /// list. Fails: Error(Stale), p unchanged. Alloc: nothing. Cost: O(1).
-/// Ex: `let old = pool.remove(mut l.pool, tail)?`
-pub fn remove[T](mut p: Pool[T], h: Id[T]) -> Result[T, Stale]
+/// Ex: `let old = std.pool.remove(mut l.pool, tail)?`
+pub fn remove[T](mut p: Pool[T], h: Id[T]) -> Result[T, Stale] {
+    check(p, h)?
+    let bumped = h.generation + 1
+    let retired = bumped == NONE
+    let link = if retired {
+        NONE
+    } else {
+        p.free
+    }
+    let slot = list.set(mut p.slots, h.index, Vacant(bumped, link))
+    if !retired {
+        p.free = h.index
+    }
+    p.live -= 1
+    match slot {
+        Occupied(_, take v) => Ok(take v),
+        Vacant(_, _) => fail("pool.remove: a checked slot was vacant"),
+    }
+}
+
+fn check[T](p: Pool[T], h: Id[T]) -> Result[(), Stale] {
+    match get(p, h) {
+        Ok(_) => Ok(()),
+        Error(e) => Error(e),
+    }
+}

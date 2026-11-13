@@ -1,0 +1,34 @@
+// Contract tests for `map` (core/std/map.hirsel), written to run once an engine runs
+// library bodies. Each test returns a scalar; the line `// expect: run f() = R` above it
+// gives the result derived by hand from the contract, or `fail Cause` for the failure the
+// contract names.
+/// {1: 10}.
+fn one_entry() -> Map[u64, u64] {
+    let mut m: Map[u64, u64] = map.new()
+    result.unwrap(map.insert(mut m, 1, 10))
+    m
+}
+
+// expect: run contains_present() = true
+fn contains_present() -> bool {
+    let m = one_entry()
+    map.contains(m, 1)
+}
+
+// expect: run contains_absent() = false
+fn contains_absent() -> bool {
+    let m = one_entry()
+    map.contains(m, 2)
+}
+
+// expect: run get_or_present() = 10
+fn get_or_present() -> u64 {
+    let m = one_entry()
+    map.get_or(m, 1, 7)
+}
+
+// expect: run get_or_absent() = 7
+fn get_or_absent() -> u64 {
+    let m = one_entry()
+    map.get_or(m, 2, 7)
+}

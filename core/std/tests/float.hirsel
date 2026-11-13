@@ -1,0 +1,240 @@
+// Contract tests for `float` (core/std/float.hirsel), written to run once an engine runs
+// library bodies. Each test returns a scalar; the line `// expect: run f() = R` above it
+// gives the result derived by hand from the contract, or `fail Cause` for the failure the
+// contract names.
+//
+// A float result is read as its bits (float.to_bits64, to_bits32). Each expected pattern
+// was derived from the IEEE layout by hand and checked against Python's correctly
+// rounded float parser.
+fn bits64(r: Result[f64, ParseError]) -> u64 {
+    float.to_bits64(result.unwrap(r))
+}
+
+fn bits32(r: Result[f32, ParseError]) -> u32 {
+    float.to_bits32(result.unwrap(r))
+}
+
+/// 0 for Ok, 1 for Empty, 100 + i for Invalid(i), 3 for OutOfRange.
+fn error64(r: Result[f64, ParseError]) -> u64 {
+    match r {
+        Ok(_) => 0,
+        Error(Empty) => 1,
+        Error(Invalid(i)) => 100 + i,
+        Error(OutOfRange) => 3,
+    }
+}
+
+fn error32(r: Result[f32, ParseError]) -> u64 {
+    match r {
+        Ok(_) => 0,
+        Error(Empty) => 1,
+        Error(Invalid(i)) => 100 + i,
+        Error(OutOfRange) => 3,
+    }
+}
+
+// expect: run zero() = 0
+fn zero() -> u64 {
+    bits64(float.parse64("0"))
+}
+
+// Only the sign bit, 2^63.
+// expect: run negative_zero() = 9223372036854775808
+fn negative_zero() -> u64 {
+    bits64(float.parse64("-0"))
+}
+
+// Biased exponent 1023, 0x3FF0000000000000.
+// expect: run one() = 4607182418800017408
+fn one() -> u64 {
+    bits64(float.parse64("1"))
+}
+
+// 0x3FB999999999999A: the mantissa rounds up at the last place.
+// expect: run one_tenth() = 4591870180066957722
+fn one_tenth() -> u64 {
+    bits64(float.parse64("0.1"))
+}
+
+// 1.23456, with an exponent folded into the fraction.
+// expect: run fraction_and_exponent() = 4608238783128613432
+fn fraction_and_exponent() -> u64 {
+    bits64(float.parse64("123.456e-2"))
+}
+
+// Past the exact fast path (10^23 is not exact in f64): Eisel-Lemire decides it.
+// expect: run ten_to_23() = 4950912855330343670
+fn ten_to_23() -> u64 {
+    bits64(float.parse64("1e23"))
+}
+
+// 2^53 + 1 lies halfway between 2^53 and 2^53 + 2: ties to even gives 2^53, biased
+// exponent 1076 and a zero mantissa.
+// expect: run halfway_to_even() = 4845873199050653696
+fn halfway_to_even() -> u64 {
+    bits64(float.parse64("9007199254740993"))
+}
+
+// The same digits a hair above halfway, past 19 significant digits: 2^53 + 2.
+// expect: run above_halfway_long() = 4845873199050653697
+fn above_halfway_long() -> u64 {
+    bits64(float.parse64("9007199254740993.0000000000000000001"))
+}
+
+// The largest subnormal, 0x000FFFFFFFFFFFFF.
+// expect: run largest_subnormal() = 4503599627370495
+fn largest_subnormal() -> u64 {
+    bits64(float.parse64("2.2250738585072011e-308"))
+}
+
+// The smallest subnormal, 2^-1074.
+// expect: run smallest_subnormal() = 1
+fn smallest_subnormal() -> u64 {
+    bits64(float.parse64("4.9406564584124654e-324"))
+}
+
+// Just below half of 2^-1074 rounds to zero ...
+// expect: run below_half_subnormal() = 0
+fn below_half_subnormal() -> u64 {
+    bits64(float.parse64("2.4703282292062327e-324"))
+}
+
+// ... and just above it to 2^-1074.
+// expect: run above_half_subnormal() = 1
+fn above_half_subnormal() -> u64 {
+    bits64(float.parse64("2.4703282292062328e-324"))
+}
+
+// expect: run underflow_is_zero() = 0
+fn underflow_is_zero() -> u64 {
+    bits64(float.parse64("1e-400"))
+}
+
+// The largest finite f64, 0x7FEFFFFFFFFFFFFF.
+// expect: run largest_finite() = 9218868437227405311
+fn largest_finite() -> u64 {
+    bits64(float.parse64("1.7976931348623157e308"))
+}
+
+// Past the halfway point to 2^1024 the value rounds to an infinity.
+// expect: run rounds_to_infinity() = 3
+fn rounds_to_infinity() -> u64 {
+    error64(float.parse64("1.7976931348623159e308"))
+}
+
+// expect: run far_out_of_range() = 3
+fn far_out_of_range() -> u64 {
+    error64(float.parse64("-1e400"))
+}
+
+// expect: run empty() = 1
+fn empty() -> u64 {
+    error64(float.parse64(""))
+}
+
+// expect: run sign_alone() = 101
+fn sign_alone() -> u64 {
+    error64(float.parse64("-"))
+}
+
+// expect: run leading_zero() = 101
+fn leading_zero() -> u64 {
+    error64(float.parse64("01"))
+}
+
+// expect: run dot_without_digits() = 102
+fn dot_without_digits() -> u64 {
+    error64(float.parse64("1."))
+}
+
+// expect: run dot_first() = 100
+fn dot_first() -> u64 {
+    error64(float.parse64(".5"))
+}
+
+// expect: run exponent_without_digits() = 102
+fn exponent_without_digits() -> u64 {
+    error64(float.parse64("1e"))
+}
+
+// expect: run exponent_sign_without_digits() = 103
+fn exponent_sign_without_digits() -> u64 {
+    error64(float.parse64("1e+"))
+}
+
+// expect: run plus_sign() = 100
+fn plus_sign() -> u64 {
+    error64(float.parse64("+1"))
+}
+
+// expect: run infinity_word() = 100
+fn infinity_word() -> u64 {
+    error64(float.parse64("inf"))
+}
+
+// expect: run trailing_byte() = 101
+fn trailing_byte() -> u64 {
+    error64(float.parse64("1x"))
+}
+
+// 0x3F800000.
+// expect: run one_32() = 1065353216
+fn one_32() -> u32 {
+    bits32(float.parse32("1"))
+}
+
+// 0x3DCCCCCD, rounded once from the decimal, not from the f64.
+// expect: run one_tenth_32() = 1036831949
+fn one_tenth_32() -> u32 {
+    bits32(float.parse32("0.1"))
+}
+
+// 2^24 + 1 is halfway: ties to even gives 2^24, 0x4B800000.
+// expect: run halfway_to_even_32() = 1266679808
+fn halfway_to_even_32() -> u32 {
+    bits32(float.parse32("16777217"))
+}
+
+// The largest finite f32, 0x7F7FFFFF.
+// expect: run largest_finite_32() = 2139095039
+fn largest_finite_32() -> u32 {
+    bits32(float.parse32("3.4028235e38"))
+}
+
+// Past the halfway point to 2^128.
+// expect: run rounds_to_infinity_32() = 3
+fn rounds_to_infinity_32() -> u64 {
+    error32(float.parse32("3.4028236e38"))
+}
+
+// The smallest f32 subnormal, 2^-149, about 1.401e-45.
+// expect: run smallest_subnormal_32() = 1
+fn smallest_subnormal_32() -> u32 {
+    bits32(float.parse32("1.4e-45"))
+}
+
+// Below 2^-150, half the smallest subnormal: zero.
+// expect: run below_half_subnormal_32() = 0
+fn below_half_subnormal_32() -> u32 {
+    bits32(float.parse32("7.0e-46"))
+}
+
+// expect: run finite_number() = true
+fn finite_number() -> bool {
+    float.is_finite(1.5)
+}
+
+// expect: run largest_is_finite() = true
+fn largest_is_finite() -> bool {
+    float.is_finite(float.from_bits64(0x7fefffffffffffff))
+}
+
+// expect: run infinity_not_finite() = false
+fn infinity_not_finite() -> bool {
+    float.is_finite(float.from_bits64(0x7ff0000000000000))
+}
+
+// expect: run nan_not_finite() = false
+fn nan_not_finite() -> bool {
+    float.is_finite(float.from_bits64(0x7ff8000000000000))
+}

@@ -1,0 +1,52 @@
+// Contract tests for `order` (core/std/order.hirsel), written to run once an engine runs
+// library bodies. Each test returns a scalar; the line `// expect: run f() = R` above it
+// gives the result derived by hand from the contract, or `fail Cause` for the failure the
+// contract names.
+/// Less 0, Equal 1, Greater 2.
+fn rank(o: Order) -> u64 {
+    match o {
+        Less => 0,
+        Equal => 1,
+        Greater => 2,
+    }
+}
+
+// expect: run compare_less() = 0
+fn compare_less() -> u64 {
+    let one: u64 = 1
+    rank(std.order.compare(one, 2))
+}
+
+// expect: run compare_greater() = 2
+fn compare_greater() -> u64 {
+    let two: u64 = 2
+    rank(std.order.compare(two, 1))
+}
+
+// expect: run compare_equal() = 1
+fn compare_equal() -> u64 {
+    let five: u64 = 5
+    rank(std.order.compare(five, 5))
+}
+
+// expect: run compare_signed() = 0
+fn compare_signed() -> u64 {
+    let a: i64 = -1
+    rank(std.order.compare(a, 1))
+}
+
+// expect: run min_of_two() = 3
+fn min_of_two() -> u64 {
+    std.order.min(9, 3)
+}
+
+// expect: run max_of_two() = 9
+fn max_of_two() -> u64 {
+    std.order.max(3, 9)
+}
+
+// expect: run min_equal() = -4
+fn min_equal() -> i64 {
+    let a: i64 = -4
+    std.order.min(a, -4)
+}

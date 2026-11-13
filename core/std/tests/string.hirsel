@@ -1,0 +1,279 @@
+// Contract tests for `string` (core/std/string.hirsel), written to run once an engine runs
+// library bodies. Each test returns a scalar; the line `// expect: run f() = R` above it
+// gives the result derived by hand from the contract, or `fail Cause` for the failure the
+// contract names. Lists are read back as numbers, one decimal digit per element.
+fn same(a: String, b: String) -> bool {
+    a == b
+}
+
+fn found(o: Option[u64]) -> u64 {
+    match o {
+        Some(i) => i,
+        None => 99,
+    }
+}
+
+// expect: run with_capacity_is_empty() = true
+fn with_capacity_is_empty() -> bool {
+    let s = result.unwrap(string.with_capacity(10))
+    string.byte_len(s) == 0 && list.capacity(string.as_bytes(s)) >= 10
+}
+
+// "é" is the two bytes C3 A9.
+// expect: run boundary_inside_scalar() = false
+fn boundary_inside_scalar() -> bool {
+    string.is_boundary("é", 1)
+}
+
+// expect: run boundary_at_end() = true
+fn boundary_at_end() -> bool {
+    string.is_boundary("é", 2)
+}
+
+// expect: run boundary_past_end() = false
+fn boundary_past_end() -> bool {
+    string.is_boundary("é", 3)
+}
+
+// expect: run boundary_before_scalar() = true
+fn boundary_before_scalar() -> bool {
+    string.is_boundary("aé", 1)
+}
+
+// expect: run push_i64_signs() = true
+fn push_i64_signs() -> bool {
+    let mut s = string.new()
+    result.unwrap(string.push_i64(mut s, -3))
+    result.unwrap(string.push_i64(mut s, 0))
+    result.unwrap(string.push_i64(mut s, -9223372036854775808))
+    result.unwrap(string.push_i64(mut s, 9223372036854775807))
+    same(s, "-30-92233720368547758089223372036854775807")
+}
+
+// The contract's example: 31 in base 16, padded with '0' to 4 scalars.
+// expect: run push_uint_padded_hex() = true
+fn push_uint_padded_hex() -> bool {
+    let mut s = string.new()
+    result.unwrap(string.push_uint(mut s, 31, 16, 4, '0'))
+    same(s, "001f")
+}
+
+// expect: run push_uint_binary() = true
+fn push_uint_binary() -> bool {
+    let mut s = string.new()
+    result.unwrap(string.push_uint(mut s, 255, 2, 0, ' '))
+    same(s, "11111111")
+}
+
+// Zero is one digit; the pad scalar may be any scalar.
+// expect: run push_uint_zero_padded() = true
+fn push_uint_zero_padded() -> bool {
+    let mut s = string.new()
+    result.unwrap(string.push_uint(mut s, 0, 10, 3, '*'))
+    same(s, "**0")
+}
+
+// A width below the digit count pads nothing.
+// expect: run push_uint_narrow_width() = true
+fn push_uint_narrow_width() -> bool {
+    let mut s = string.new()
+    result.unwrap(string.push_uint(mut s, 12345, 10, 2, '0'))
+    same(s, "12345")
+}
+
+// expect: run push_uint_base_36() = true
+fn push_uint_base_36() -> bool {
+    let mut s = string.new()
+    result.unwrap(string.push_uint(mut s, 35, 36, 1, '0'))
+    same(s, "z")
+}
+
+// expect: run push_uint_base_37() = fail Fail
+fn push_uint_base_37() -> bool {
+    let mut s = string.new()
+    result.unwrap(string.push_uint(mut s, 1, 37, 0, '0'))
+    true
+}
+
+// expect: run push_uint_base_1() = fail Fail
+fn push_uint_base_1() -> bool {
+    let mut s = string.new()
+    result.unwrap(string.push_uint(mut s, 1, 1, 0, '0'))
+    true
+}
+
+// Only a-z change; É (two bytes) and '-' are kept.
+// expect: run upper_owned() = true
+fn upper_owned() -> bool {
+    let mut s = result.unwrap(string.from("abc-Éz"))
+    result.unwrap(string.make_ascii_upper(mut s))
+    same(s, "ABC-ÉZ")
+}
+
+// A literal is copied first.
+// expect: run upper_static() = true
+fn upper_static() -> bool {
+    let mut s = "hello"
+    result.unwrap(string.make_ascii_upper(mut s))
+    same(s, "HELLO")
+}
+
+// expect: run clear_keeps_storage() = true
+fn clear_keeps_storage() -> bool {
+    let mut s = result.unwrap(string.from("abc"))
+    string.clear(mut s)
+    string.byte_len(s) == 0 && list.capacity(string.as_bytes(s)) >= 3
+}
+
+// expect: run clear_static() = 0
+fn clear_static() -> u64 {
+    let mut s = "xyz"
+    string.clear(mut s)
+    string.byte_len(s)
+}
+
+// expect: run find_first() = 2
+fn find_first() -> u64 {
+    found(string.find("abcabc", 0, "ca"))
+}
+
+// expect: run find_from_start() = 4
+fn find_from_start() -> u64 {
+    found(string.find("abcabc", 3, "bc"))
+}
+
+// A partial match at 0 ("aa" then 'a' against 'b') must not hide the match at 1.
+// expect: run find_after_partial_match() = 1
+fn find_after_partial_match() -> u64 {
+    found(string.find("aaab", 0, "aab"))
+}
+
+// expect: run find_absent() = 99
+fn find_absent() -> u64 {
+    found(string.find("abc", 0, "x"))
+}
+
+// expect: run find_longer_than_rest() = 99
+fn find_longer_than_rest() -> u64 {
+    found(string.find("abc", 2, "cd"))
+}
+
+// expect: run find_empty_pattern() = 1
+fn find_empty_pattern() -> u64 {
+    found(string.find("abc", 1, ""))
+}
+
+// expect: run find_empty_at_end() = 3
+fn find_empty_at_end() -> u64 {
+    found(string.find("abc", 3, ""))
+}
+
+// expect: run find_start_past_end() = fail Bounds
+fn find_start_past_end() -> u64 {
+    found(string.find("abc", 4, "a"))
+}
+
+// expect: run starts_with_prefix() = true
+fn starts_with_prefix() -> bool {
+    string.starts_with("GET /", "GET ")
+}
+
+// expect: run starts_with_longer() = false
+fn starts_with_longer() -> bool {
+    string.starts_with("GE", "GET")
+}
+
+// expect: run starts_with_empty() = true
+fn starts_with_empty() -> bool {
+    string.starts_with("abc", "")
+}
+
+// expect: run ends_with_suffix() = true
+fn ends_with_suffix() -> bool {
+    string.ends_with("a.json", ".json")
+}
+
+// expect: run ends_with_longer() = false
+fn ends_with_longer() -> bool {
+    string.ends_with("json", ".json")
+}
+
+// expect: run split_once_first() = true
+fn split_once_first() -> bool {
+    match string.split_once("a=b=c", "=") {
+        Some((before, after)) => same(before, "a") && same(after, "b=c"),
+        None => false,
+    }
+}
+
+// expect: run split_once_two_bytes() = true
+fn split_once_two_bytes() -> bool {
+    match string.split_once("key: value", ": ") {
+        Some((before, after)) => same(before, "key") && same(after, "value"),
+        None => false,
+    }
+}
+
+// expect: run split_once_empty_sep() = true
+fn split_once_empty_sep() -> bool {
+    match string.split_once("abc", "") {
+        Some((before, after)) => same(before, "") && same(after, "abc"),
+        None => false,
+    }
+}
+
+// expect: run split_once_absent() = false
+fn split_once_absent() -> bool {
+    match string.split_once("abc", "x") {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+// expect: run strip_prefix_present() = true
+fn strip_prefix_present() -> bool {
+    match string.strip_prefix("GET /x", "GET ") {
+        Some(rest) => same(rest, "/x"),
+        None => false,
+    }
+}
+
+// expect: run strip_prefix_absent() = false
+fn strip_prefix_absent() -> bool {
+    match string.strip_prefix("PUT /x", "GET ") {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+// expect: run strip_suffix_present() = true
+fn strip_suffix_present() -> bool {
+    match string.strip_suffix("a.json", ".json") {
+        Some(stem) => same(stem, "a"),
+        None => false,
+    }
+}
+
+// expect: run strip_suffix_absent() = false
+fn strip_suffix_absent() -> bool {
+    match string.strip_suffix("a.js", ".json") {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+// expect: run trim_both_ends() = true
+fn trim_both_ends() -> bool {
+    same(string.trim_ascii("  \t hi there \r\n"), "hi there")
+}
+
+// expect: run trim_all_space() = 0
+fn trim_all_space() -> u64 {
+    string.byte_len(string.trim_ascii(" \n\t "))
+}
+
+// Only ASCII whitespace is trimmed; É is kept.
+// expect: run trim_keeps_other_scalars() = true
+fn trim_keeps_other_scalars() -> bool {
+    same(string.trim_ascii(" É "), "É")
+}

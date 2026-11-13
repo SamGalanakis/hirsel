@@ -3,23 +3,43 @@
 // size(V) = 0: capacity x (size(K) + 16). There is no `for k in s`: SEM-6 makes only
 // built-in sources iterable, so a set is not; a program that iterates keeps the Map.
 // Field legend: API.md.
+pub opaque type Set[K: key] {
+    m: Map[K, ()]
+}
 
-pub opaque type Set[K: key] { m: Map[K, ()] }
+/// An empty set with no storage. Ex: `let mut seen: std.set.Set[u64] = std.set.new()`
+pub fn new[K: key]() -> Set[K] {
+    Set(m: map.new())
+}
 
-/// An empty set with no storage. Ex: `let mut seen: set.Set[u64] = set.new()`
-pub fn new[K: key]() -> Set[K]
+/// Number of keys. Cost: O(1). Ex: `std.set.len(seen)`
+pub fn len[K: key](s: Set[K]) -> u64 {
+    map.len(s.m)
+}
 
-/// Number of keys. Cost: O(1). Ex: `set.len(seen)`
-pub fn len[K: key](s: Set[K]) -> u64
-
-/// Whether k is present. Cost: expected O(1). Ex: `set.contains(seen, id)`
-pub fn contains[K: key](s: Set[K], k: K) -> bool
+/// Whether k is present. Cost: expected O(1). Ex: `std.set.contains(seen, id)`
+pub fn contains[K: key](s: Set[K], k: K) -> bool {
+    map.contains(s.m, k)
+}
 
 /// Adds k; Ok(true) when added, Ok(false) when already present (k is then dropped).
 /// Fails: Error((c, k)) when growth is refused; s unchanged.
-/// Alloc: GROWTH as map.insert. Cost: amortised O(1). Ex: `set.insert(mut seen, id)?`
-pub fn insert[K: key](mut s: Set[K], take k: K) -> Result[bool, (Capacity, K)]
+/// Alloc: GROWTH as map.insert. Cost: amortised O(1). Ex: `std.set.insert(mut seen, id)?`
+pub fn insert[K: key](mut s: Set[K], take k: K) -> Result[bool, (Capacity, K)] {
+    if map.contains(s.m, k) {
+        return Ok(false)
+    }
+    match map.insert(mut s.m, take k, ()) {
+        Ok(()) => Ok(true),
+        Error((c, take given, _)) => Error((c, take given)),
+    }
+}
 
 /// Removes k; true when it was present. Alloc: nothing. Cost: expected O(1).
-/// Ex: `set.remove(mut seen, id)`
-pub fn remove[K: key](mut s: Set[K], k: K) -> bool
+/// Ex: `std.set.remove(mut seen, id)`
+pub fn remove[K: key](mut s: Set[K], k: K) -> bool {
+    match map.remove(mut s.m, k) {
+        Some(_) => true,
+        None => false,
+    }
+}

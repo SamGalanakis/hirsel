@@ -1,0 +1,43 @@
+// Contract tests for `result` (core/std/result.hirsel), written to run once an engine runs
+// library bodies. Each test returns a scalar; the line `// expect: run f() = R` above it
+// gives the result derived by hand from the contract, or `fail Cause` for the failure the
+// contract names.
+/// Ok(v) as v, Error(e) as 1000 + e.
+fn read(r: Result[u64, u64]) -> u64 {
+    match r {
+        Ok(v) => v,
+        Error(e) => 1000 + e,
+    }
+}
+
+// expect: run map_err_error() = 1004
+fn map_err_error() -> u64 {
+    let r: Result[u64, u64] = Error(3)
+    read(result.map_err(take r, fn(take e: u64) -> u64 {
+        e + 1
+    }))
+}
+
+// expect: run map_err_ok() = 5
+fn map_err_ok() -> u64 {
+    let r: Result[u64, u64] = Ok(5)
+    read(result.map_err(take r, fn(take e: u64) -> u64 {
+        e + 1
+    }))
+}
+
+// The Capacity is kept and the value it carried is dropped.
+// expect: run capacity_only_error() = 8
+fn capacity_only_error() -> u64 {
+    let r: Result[u64, (Capacity, u64)] = Error((Capacity(requested: 8, available: 0), 7))
+    match result.capacity_only(take r) {
+        Ok(_) => 0,
+        Error(c) => c.requested,
+    }
+}
+
+// expect: run capacity_only_ok() = 6
+fn capacity_only_ok() -> u64 {
+    let r: Result[u64, (Capacity, u64)] = Ok(6)
+    result.unwrap(result.capacity_only(take r))
+}

@@ -585,7 +585,13 @@ impl Program<'_> {
         let target = self.target(at, path).cloned();
         let decl = match target {
             Some(Target::Builtin(name)) => {
-                return self.no_args(scalar(Scalar::from_name(&name).unwrap()), args, &site);
+                let Some(s) = Scalar::from_name(&name) else {
+                    // The one builtin that is not a scalar: `Inline[T, n]`.
+                    self.gaps
+                        .push(Gap::new(site, "inline array types are not built"));
+                    return ERROR;
+                };
+                return self.no_args(scalar(s), args, &site);
             }
             Some(Target::Definition(p)) if is_core_prelude(&p, &["Never"]) => {
                 return self.no_args(NEVER, args, &site);

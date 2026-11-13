@@ -1,0 +1,128 @@
+// Contract tests for `int` (core/std/int.hirsel), written to run once an engine runs
+// library bodies. Each test returns a scalar; the line `// expect: run f() = R` above it
+// gives the result derived by hand from the contract, or `fail Cause` for the failure the
+// contract names. Lists are read back as numbers, one decimal digit per element.
+/// 0 for Ok, 1 for Empty, 100 + i for Invalid(i), 3 for OutOfRange.
+fn unsigned_error(r: Result[u64, ParseError]) -> u64 {
+    match r {
+        Ok(_) => 0,
+        Error(Empty) => 1,
+        Error(Invalid(i)) => 100 + i,
+        Error(OutOfRange) => 3,
+    }
+}
+
+fn signed_error(r: Result[i64, ParseError]) -> u64 {
+    match r {
+        Ok(_) => 0,
+        Error(Empty) => 1,
+        Error(Invalid(i)) => 100 + i,
+        Error(OutOfRange) => 3,
+    }
+}
+
+// expect: run uint_hex() = 255
+fn uint_hex() -> u64 {
+    result.unwrap(int.parse_uint("ff", 16))
+}
+
+// expect: run uint_hex_upper() = 255
+fn uint_hex_upper() -> u64 {
+    result.unwrap(int.parse_uint("FF", 16))
+}
+
+// expect: run uint_max() = 18446744073709551615
+fn uint_max() -> u64 {
+    result.unwrap(int.parse_uint("18446744073709551615", 10))
+}
+
+// expect: run uint_empty() = 1
+fn uint_empty() -> u64 {
+    unsigned_error(int.parse_uint("", 10))
+}
+
+// expect: run uint_bad_digit() = 102
+fn uint_bad_digit() -> u64 {
+    unsigned_error(int.parse_uint("12a", 10))
+}
+
+// expect: run uint_digit_past_base() = 101
+fn uint_digit_past_base() -> u64 {
+    unsigned_error(int.parse_uint("12", 2))
+}
+
+// expect: run uint_past_max() = 3
+fn uint_past_max() -> u64 {
+    unsigned_error(int.parse_uint("18446744073709551616", 10))
+}
+
+// The overflow at the 20th digit is reported before the bad byte after it.
+// expect: run uint_overflow_first() = 3
+fn uint_overflow_first() -> u64 {
+    unsigned_error(int.parse_uint("99999999999999999999x", 10))
+}
+
+// expect: run uint_bad_byte_first() = 101
+fn uint_bad_byte_first() -> u64 {
+    unsigned_error(int.parse_uint("1x99999999999999999999", 10))
+}
+
+// expect: run uint_no_sign() = 100
+fn uint_no_sign() -> u64 {
+    unsigned_error(int.parse_uint("+1", 10))
+}
+
+// expect: run uint_base_37() = fail Fail
+fn uint_base_37() -> u64 {
+    unsigned_error(int.parse_uint("1", 37))
+}
+
+// expect: run int_negative() = -128
+fn int_negative() -> i64 {
+    result.unwrap(int.parse_int("-128", 10))
+}
+
+// expect: run int_min() = -9223372036854775808
+fn int_min() -> i64 {
+    result.unwrap(int.parse_int("-9223372036854775808", 10))
+}
+
+// expect: run int_max() = 9223372036854775807
+fn int_max() -> i64 {
+    result.unwrap(int.parse_int("9223372036854775807", 10))
+}
+
+// expect: run int_negative_base_36() = -35
+fn int_negative_base_36() -> i64 {
+    result.unwrap(int.parse_int("-z", 36))
+}
+
+// expect: run int_past_max() = 3
+fn int_past_max() -> u64 {
+    signed_error(int.parse_int("9223372036854775808", 10))
+}
+
+// expect: run int_past_min() = 3
+fn int_past_min() -> u64 {
+    signed_error(int.parse_int("-9223372036854775809", 10))
+}
+
+// expect: run int_sign_alone() = 101
+fn int_sign_alone() -> u64 {
+    signed_error(int.parse_int("-", 10))
+}
+
+// expect: run int_two_signs() = 101
+fn int_two_signs() -> u64 {
+    signed_error(int.parse_int("--1", 10))
+}
+
+// expect: run int_plus() = 100
+fn int_plus() -> u64 {
+    signed_error(int.parse_int("+1", 10))
+}
+
+// expect: run int_empty() = 1
+fn int_empty() -> u64 {
+    signed_error(int.parse_int("", 10))
+}

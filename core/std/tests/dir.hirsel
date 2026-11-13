@@ -1,0 +1,63 @@
+// Contract tests for `dir` (core/std/dir.hirsel), written to run once an engine runs
+// library bodies with a host. Each test takes `dir`, a fresh empty directory the runner
+// provides, and returns a scalar; the line `// expect: run f(dir) = R` above it gives the
+// result derived by hand from the contract.
+fn io(r: Result[(), IoError]) -> u64 {
+    match r {
+        Ok(()) => 0,
+        Error(NotFound) => 1,
+        Error(Denied) => 2,
+        Error(Exists) => 3,
+        Error(Closed) => 4,
+        Error(Other(_)) => 5,
+    }
+}
+
+// Created (0), then Exists (3).
+// expect: run create_twice(dir) = 3
+fn create_twice(d: Dir) -> u64 waits {
+    let first = io(std.dir.create_dir(d, "sub"))
+    let second = io(std.dir.create_dir(d, "sub"))
+    first * 10 + second
+}
+
+// expect: run create_without_parent(dir) = 1
+fn create_without_parent(d: Dir) -> u64 waits {
+    io(std.dir.create_dir(d, "no/sub"))
+}
+
+// Removes the tree: the file below it is gone after.
+// expect: run remove_all_tree(dir) = 1
+fn remove_all_tree(d: Dir) -> u64 waits {
+    result.unwrap(std.dir.create_dir(d, "sub"))
+    result.unwrap(std.dir.create_dir(d, "sub/deeper"))
+    result.unwrap(std.file.write(d, "sub/deeper/x", string.as_bytes("1")))
+    result.unwrap(std.dir.remove_all(d, "sub"))
+    io(std.file.remove(d, "sub/deeper/x"))
+}
+
+// expect: run remove_all_missing(dir) = 1
+fn remove_all_missing(d: Dir) -> u64 waits {
+    io(std.dir.remove_all(d, "absent"))
+}
+
+// The fresh name is appended after the prefix the caller wrote, and the directory exists:
+// a file can be written in it through the Dir returned.
+// expect: run create_temp_names(dir) = true
+fn create_temp_names(d: Dir) -> bool waits {
+    let mut name = result.unwrap(string.with_capacity(40))
+    result.unwrap(string.push(mut name, "t-"))
+    let tmp = result.unwrap(std.dir.create_temp(d, mut name))
+    result.unwrap(std.file.write(tmp, "x", string.as_bytes("1")))
+    let grew = string.byte_len(name) > 2 && string.starts_with(name, "t-")
+    result.unwrap(std.dir.remove_all(d, name))
+    grew
+}
+
+// Less than 32 bytes of spare capacity in name.
+// expect: run create_temp_small_name(dir) = fail Bounds
+fn create_temp_small_name(d: Dir) -> bool waits {
+    let mut name = string.new()
+    let _ = std.dir.create_temp(d, mut name)
+    true
+}

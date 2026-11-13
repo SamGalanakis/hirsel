@@ -1,0 +1,41 @@
+// Contract tests for `set` (core/std/set.hirsel), written to run once an engine runs
+// library bodies. Each test returns a scalar; the line `// expect: run f() = R` above it
+// gives the result derived by hand from the contract, or `fail Cause` for the failure the
+// contract names.
+fn added(r: Result[bool, (Capacity, u64)]) -> u64 {
+    match r {
+        Ok(true) => 1,
+        Ok(false) => 0,
+        Error(_) => 9,
+    }
+}
+
+// The first insert adds 5 (1), the second finds it (0); then len 1.
+// expect: run insert_twice() = 101
+fn insert_twice() -> u64 {
+    let mut s: std.set.Set[u64] = std.set.new()
+    let first = added(std.set.insert(mut s, 5))
+    let second = added(std.set.insert(mut s, 5))
+    first * 100 + second * 10 + std.set.len(s)
+}
+
+// expect: run contains_after_insert() = true
+fn contains_after_insert() -> bool {
+    let mut s: std.set.Set[u64] = std.set.new()
+    let _ = added(std.set.insert(mut s, 5))
+    std.set.contains(s, 5) && !std.set.contains(s, 6)
+}
+
+// The first remove finds 5, the second does not; then len 0.
+// expect: run remove_twice() = true
+fn remove_twice() -> bool {
+    let mut s: std.set.Set[u64] = std.set.new()
+    let _ = added(std.set.insert(mut s, 5))
+    std.set.remove(mut s, 5) && !std.set.remove(mut s, 5) && std.set.len(s) == 0
+}
+
+// expect: run new_is_empty() = 0
+fn new_is_empty() -> u64 {
+    let s: std.set.Set[u64] = std.set.new()
+    std.set.len(s)
+}

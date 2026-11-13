@@ -394,10 +394,6 @@ mod tests {
                     "string",
                     include_str!("../../../../../stdlib/std@1/string.hir"),
                 ),
-                (
-                    "actor",
-                    include_str!("../../../../../stdlib/std@1/actor.hir"),
-                ),
                 ("list", include_str!("../../../../../stdlib/std@1/list.hir")),
                 (
                     "derive",

@@ -11,13 +11,85 @@ Samples using this command share a per-user lock; the wall timer starts after ad
 """
 import argparse
 import fcntl
-import importlib.machinery
-import importlib.util
 import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import time
+
+
+ROOT = Path(__file__).resolve().parents[1]
+FORBIDDEN = set(range(12, 16)) | set(range(28, 32))
+CHILD = '''import json, resource, subprocess, sys
+p = subprocess.run(sys.argv[2:])
+with open(sys.argv[1], 'w') as f:
+    json.dump({'exit': p.returncode, 'rss_kib': resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss}, f)
+raise SystemExit(p.returncode if p.returncode >= 0 else 128 - p.returncode)
+'''
+
+def perf_instructions(text):
+    counts = {}
+    for line in text.splitlines():
+        fields = line.split(';')
+        if len(fields) > 2 and fields[2] in ('instructions:u', 'instructions'):
+            if fields[2] in counts or len(fields) < 5 or float(fields[4]) != 100:
+                raise ValueError('fresh std requires one unscaled whole-process count per counter')
+            count = int(fields[0])
+            if count <= 0:
+                raise ValueError('fresh std counted no instructions')
+            counts[fields[2]] = count
+    if counts.keys() != {'instructions:u', 'instructions'}:
+        raise ValueError('fresh std requires user and inclusive instruction counters')
+    return counts
+
+def environment(toolchain, scratch, fresh):
+    env = {key: os.environ[key] for key in
+           ('PATH', 'HOME', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS') if key in os.environ}
+    llvm = ROOT / 'tools/buck2/toolchains/llvm-files'
+    env.update(LC_ALL='C', HIRSEL_DAEMON='off', HIRSEL_PROGRAM_CACHE='off',
+               HIRSEL_RESULTS='none@1', HIRSEL_JOBS='1', HIRSEL_MEMORY_LIMIT='2G',
+               LLVM_SYS_231_PREFIX=str(llvm), LD_LIBRARY_PATH=str(llvm / 'lib'),
+               LLVM_PROFILE_FILE=os.devnull,
+               HIRSEL_PRODUCTS=str(scratch / 'absent-products' if fresh else toolchain / 'hirsel-std.products'))
+    return env
+
+def measure(toolchain, path, cpu, scratch, fresh):
+    counters, status, stderr = (scratch / name for name in ('perf', 'status', 'stderr'))
+    command = [str(ROOT / 'tools/capped'), 'taskset', '-c', str(cpu),
+               'perf', 'stat', '-x', ';', '-o', str(counters),
+               '-e', 'instructions:u,instructions', '--', sys.executable, '-c', CHILD, str(status),
+               str(toolchain / 'hirsel'), 'check', '--timings=json', str(path)]
+    try:
+        with stderr.open('w') as err:
+            done = subprocess.run(command, cwd=ROOT, env=environment(toolchain, scratch, fresh),
+                                  stdout=subprocess.DEVNULL, stderr=err)
+    except OSError as error:
+        return None, str(error)
+    text = stderr.read_text()
+    reports, diagnostics = [], []
+    for line in text.splitlines():
+        try:
+            report = json.loads(line)
+        except ValueError:
+            report = None
+        if isinstance(report, dict) and report.get('schema') == 1 and 'phases' in report:
+            reports.append(report)
+        else:
+            diagnostics.append(line)
+    child = json.loads(status.read_text()) if status.exists() else {}
+    if done.returncode or child.get('exit') != 0:
+        return None, f'exit {done.returncode}, compiler {child.get("exit", "unobserved")}; ' + '\n'.join(diagnostics)[-2000:]
+    try:
+        counts = perf_instructions(counters.read_text())
+        if not reports or not isinstance(reports[-1].get('counts'), dict) or not reports[-1]['counts']:
+            raise ValueError('compiler work counters missing')
+        if child.get('rss_kib', 0) <= 0:
+            raise ValueError('compiler peak RSS missing')
+        return dict({'instructions:u': counts['instructions:u'], 'peak_rss_kib': child['rss_kib']},
+                    **{'work/' + key: value for key, value in reports[-1]['counts'].items()}), ''
+    except (OSError, ValueError) as error:
+        return None, str(error)
 
 
 def main():
@@ -28,10 +100,7 @@ def main():
     parser.add_argument('--output', type=Path, required=True, help='new evidence directory')
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
-    loader = importlib.machinery.SourceFileLoader('fresh_std_trend', str(root / 'tools/cost-trend'))
-    trend = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
-    loader.exec_module(trend)
-    if args.cpu not in os.sched_getaffinity(0) or args.cpu in trend.FORBIDDEN:
+    if args.cpu not in os.sched_getaffinity(0) or args.cpu in FORBIDDEN:
         parser.error('CPU must be available and outside 12-15 and 28-31')
     toolchain = args.toolchain.resolve()
     source = root / 'stdlib/std@1/hirsel.json'
@@ -46,7 +115,7 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX)
         source_revision = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=root, text=True).strip()
         started = time.monotonic()
-        values, error = trend.measure(toolchain, source, args.cpu, output, True)
+        values, error = measure(toolchain, source, args.cpu, output, True)
         elapsed = time.monotonic() - started
     reports = []
     for line in (output / 'stderr').read_text().splitlines():

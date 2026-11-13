@@ -67,33 +67,18 @@ checked compiler and std products, its `[inputs]` subtarget): a daemon serves
 one command at a time while another holds a different state, so separate
 concurrent checks would wait for each other. Clippy and the manifests check
 then only read reports and run. The land checkout's daemon keeps 128 remote
-actions in flight, a lane's 32 (`.buckconfig`, `HIRSEL_BUCK2_RE_CONCURRENCY`).
-The build covers workspace compilation, including test harness compilation;
+actions in flight, a lane's 32 (`.buckconfig`, `HIRSEL_BUCK2_RE_CONCURRENCY`). The build covers workspace compilation, including test harness compilation;
 it excludes test execution, campaigns, the two-host link check, std images
 and native std precompilation/packaging. The latter are integration artifacts
 covered by main-runs, and never replace the workspace build. At this
 change, the build query selects 200 targets, including all 84 Rust test
 harness build targets, `hirsel-cli-bin-hirsel` and `hirsel-rt`. Compared with
 the old query on the same inventory, exactly `hirsel-std-objects` is removed;
-packaging targets were already excluded through the std image.
-Build, Clippy and fmt always check their full aggregates.
-It pushes the exact checked commit SHA, after verifying that HEAD and the
+packaging targets were already excluded through the std image. Build, Clippy and fmt always check their full aggregates. It pushes the exact checked commit SHA, after verifying that HEAD and the
 worktree still match. A red check refuses the push. Source conflicts stop
 and abort the rebase; resolve them yourself and run land again. Land does
-not run other tests or commit generated files. `test-package-manifests` checks
-every package and example manifest with the checked compiler and current std products,
-in four shards (`test-package-manifests-shard-<i>`) that deal the manifests longest
-first by the seconds in `tools/tests/package_manifests.tsv`; a manifest without a
-row costs the mean, so each is checked by exactly one shard.
-Lands therefore build no release-profile code. The release compiler is built
-and exercised by main runs, the dist toolchain and the `production` script
-gates (perf counts, langarena, h2spec, core-broker, free-genmc) and
-`tools/perf-counts --fresh-std` in both main-run tiers, which run before a release; a land
-no longer shows that the release profile compiles or that the manifests check
-passes with debug assertions off.
-It requires the named rejection for the two intentional negative package
-fixtures and generates the ignored JSON-kit hooks as its guide requires.
-Manual main runs own the API index; the generated-file and independent-line-list
+not run other tests or commit generated files. Lands therefore build no release-profile code. It requires the named rejection for the two intentional negative package
+fixtures and generates the ignored JSON-kit hooks as its guide requires. Manual main runs own the API index; the generated-file and independent-line-list
 rules still apply. They have no automatic schedule and are not part of the land
 gate. From an updated checkout, run a chosen profile on current `origin/main`:
 

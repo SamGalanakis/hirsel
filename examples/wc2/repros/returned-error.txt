@@ -1,2 +1,0 @@
-error: ()
-EXIT 1

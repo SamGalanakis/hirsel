@@ -2,7 +2,7 @@
 
 This page covers building, testing and landing changes to the compiler,
 runtime, libraries and documentation. For writing Hirsel programs, start
-with the [tour](tour.md), [building and running programs](building.md) and
+with the tour, [building and running programs](building.md) and
 [concurrency guide](concurrent-agents.md).
 
 ## Layout
@@ -98,8 +98,7 @@ test; regenerate them after a merge instead of hand-merging their contents.
 native operation tables; native inventory generation reads the registry without
 building runtime archives, so the command also handles new or changed operations.
 The registry and native coverage tests check their identities and contracts;
-ordinary native builds still refuse unreviewed operations. Only main's runs write `docs/api.md`; the full gate's
-drift tests compare it with every public core and std export on main. Sorted
+ordinary native builds still refuse unreviewed operations. Sorted
 lists such as these merge without conflicts when contributors add or remove different
 entries (the `hirsel` merge driver, `tools/buck2/merging.py`). The conformance gate checks
 each sorted, unique `path # reason` line of `conformance/pending.txt`; the full-gate counter
@@ -115,9 +114,7 @@ only an AddressSanitizer executable is launched with it lifted
 (`hirsel_guard::sanitized`), since its shadow mapping needs terabytes of address
 space and the run's cgroup or pool reservation bounds it anyway. A
 run that reaches it stops at once with `hirsel: memory limit 4G reached
-(HIRSEL_MEMORY_LIMIT); ...` and exit status 71. The native benchmark suite
-(`bench/native/suite.py`) sets the same limit on itself, so every build and
-benchmark it launches inherits it. Under Buck2 each test's limit is
+(HIRSEL_MEMORY_LIMIT); ...` and exit status 71. Under Buck2 each test's limit is
 its measured grant (twice its `memory_kb` in `tools/buck2/test_sizes.bzl`); a test
 that needs more gets a re-measured request, not a variable.
 
@@ -220,7 +217,7 @@ expected outcome.
 ## Testing and landing
 
 For deterministic full-app native Pending/AfterWrite tests, use the public
-[scripted fixture recipe](native-test-fixtures.md) with the same Args, files and
+scripted fixture recipe with the same Args, files and
 mount rights on each engine.
 
 Run `.buck2/bin/buck2 kill` in your worktree when you finish and
@@ -284,7 +281,7 @@ to it holds at once. Each push appends a row (`landed`, `branch`, `base`,
 which a main run identifies a commit's contributor.
 
 No change commits a generated file, so no rebase conflicts on one: land
-refuses a change that touches `docs/api.md` or a gitignored build file, with
+refuses a change that force-adds a gitignored build file, with
 the commands that drop it. The files contributors commonly add to merge with
 `tools/buck2/merging.py`, the `hirsel` merge driver `.gitattributes` names:
 rows both sides append to `third-party/NOTICES.md` are both kept, package
@@ -358,17 +355,11 @@ newest copied to `latest.md`): every red the known failures do not explain,
 with its likely culprit (of the commits since the last run of its stage, the one that
 changed the most files under the red's crate or among its failing corpus
 cases) and that commit's contributor from the landings log. Fix failures
-attributed to your changes. After the run it regenerates `docs/api.md` with the built CLI
-and after a full run ratchets `tools/perf-counts.tsv` down to what `gate-perf-counts` measured
-beyond the 1% noise, pushing each change straight to main.
-`tools/perf-counts --bless` measures on the pool and rewrites the table: the
-reviewed step after an intended change of counts.
+attributed to your changes.
 
-Both tiers also run `tools/perf-counts --fresh-std` on the host. It builds the
+It builds the
 release compiler and checks std at jobs 1, with daemon, products and result
-reuse disabled, under `tools/capped` with 2 GiB and 60 CPU seconds. Whole-process
-`perf stat -e instructions:u` must stay within 3% of `tools/perf-fresh-std.json`;
-kernel-inclusive instructions are printed as context. Missing or multiplexed
+reuse disabled, under `tools/capped` with 2 GiB and 60 CPU seconds. Missing or multiplexed
 counters and failed checks fail the stage. Update this baseline manually in
 the commit that intentionally changes it, with a one-line `reason`. Neither
 blessing nor the automatic Cachegrind ratchet updates it.
@@ -439,10 +430,7 @@ combinations (`generated/bug-0` to `-17`), interpreter against LLVM O0 and
 Cranelift. Known failures are rows of `native-tests/regressions/bug-pending.tsv`,
 judged like `corpus-pending.tsv`; a new failure prints a line-minimized program.
 
-`gate-checker-scaling-shard-<i>` (`tools/checker-scaling.py`, one family per
-shard) checks generated programs at N=10, 40 and 160: `match` arms assigning
-record fields through `?`, record field count, nested loops with `?`, closure
-captures, long `if`/`else if` chains and deep nesting. Instructions are
+Instructions are
 Cachegrind Ir under the pinned Valgrind, deterministic as in `gate-perf-counts`;
 peak RSS comes from a separate uninstrumented run, and wall time is printed
 only for diagnosis. Over an empty-program baseline (0.59 billion Ir), the
@@ -457,10 +445,6 @@ each.
 
 Run one family directly from a checkout with a built toolchain:
 
-```sh
-python3 tools/checker-scaling.py --hirsel /path/to/hirsel --family record_fields
-```
-
 The runner asks `hirsel env --json` for the compiler's installed-product location
 before starting Cachegrind's explicit loader. It keeps `HOME` and `XDG_CACHE_HOME`
 for the compiler's existing cache discovery and disables daemon dispatch so the
@@ -470,10 +454,7 @@ checked work runs in the measured process. Explicit `HIRSEL_RESULTS` and
 Tests that execute the full native matrix or take about a minute or longer
 carry `#[ignore = "full gate"]` and a `full_gate_` name prefix. Keep their
 inputs and assertions intact; add a separate bounded smoke test when useful.
-Cases that call `full_matrix` only for discovery, and the drift tests of
-`docs/api.md` (current on main alone, since only main's runs write it), are
-skipped by name outside the full suite (`FULL_GATE_SKIPS` in
-`tools/buck2/sync.py`).
+
 
 `tools/main-stall-alarm`
 appends to `alarms.log` in `$HIRSEL_MAIN_RUNS` when main gets no commit for

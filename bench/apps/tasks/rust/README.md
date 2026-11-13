@@ -24,8 +24,3 @@ One serialized writer publishes only after saving; failed saves retain the
 in-memory mutation, as in Hirsel. Watch receivers coalesce revisions under
 backpressure, as does the Hirsel hub. The Rust HTTP parser is Hyper's; malformed
 wire requests can have different error wording/framing from Hirsel's parser.
-
-Run `../e2e --hirsel /absolute/path/to/hirsel` from this directory, or invoke it
-from the repository root as `bench/apps/tasks/e2e`. It executes the unchanged
-Hirsel HTTP suite, including restart and stream shutdown, against this server.
-`../bench` builds and measures the implementations; see the parent README.

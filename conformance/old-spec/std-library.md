@@ -122,7 +122,7 @@ The generated conformance programs compare the exact published HTML for all
 652 CommonMark examples and the GFM table, strikethrough, autolink and task-list
 examples. Each has an independently reference-rendered truncated-input twin
 with NUL and unterminated bracket/entity syntax, using the same extension
-options as its published example. `tools/generate-markdown.py`
+options as its published example. `the retired source`
 pins both upstream checkouts and regenerates entity data and vectors.
 
 `parse_owned` and `parse_bounded_owned` return deeply unique trees. Temporary
@@ -3745,7 +3745,7 @@ the original core reads rather than inventing one read per output row.
 ### Scoped prefetch signature spike
 
 Prefetch is not a public std operation yet. The checked prototype is
-[`prefetch_spike@1/prototype`](../../packages/fixtures/prefetch_spike@1/prototype.hir),
+[`prefetch_spike@1/prototype`](../../the retired source),
 with this real signature (the prototype's `slots` must be positive):
 
 ```text
@@ -5757,7 +5757,7 @@ again after restore without counting it twice. The evidence digest is a
 provenance binding, not an authentication mechanism for externally supplied
 checkpoint contents.
 
-Prior art and deviations: `docs/research/std-metrics.md`.
+Prior art and deviations: `the retired source`.
 
 ## Typed tables
 

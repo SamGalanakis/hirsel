@@ -61,5 +61,3 @@ violation-capsule proposals remain phase factories/tooling sidecars.
 When a diagnostic has neither a replacement nor a `help: ` note, both renderers
 append the rule's typical repair from `src/guidance.tsv`. This does not invent a
 replacement span. Producer-supplied repairs take precedence. The same table
-owns the generated repair reference in `docs/diagnostics.md`; regenerate it with
-`python3 tools/generate-diagnostics.py` and check it with `--check`.

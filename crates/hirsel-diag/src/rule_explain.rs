@@ -1,8 +1,8 @@
 //! Read-only rule catalogue, separate from diagnostic-specific repairs.
 //!
 //! Primary guidance.tsv remains the authority for diagnostic fallbacks. The
-//! related table transcribes tools/generate-diagnostics.py's RELATED mapping;
-//! reference consistency tests detect drift without changing generated docs.
+//! related table transcribes the related guidance mapping;
+//! Catalogue tests compare the primary and related guidance entries.
 
 /// Established guidance. Repairs retain the diagnostic's `help: ` prefix and
 /// are conditional advice, never an instruction to apply an automatic edit.
@@ -59,9 +59,7 @@ mod rule_explain_tests {
     #[test]
     fn catalogue_matches_every_primary_and_related_reference_entry() {
         let catalogue = rule_guidance();
-        let reference = include_str!("../../../docs/diagnostics.md");
         let mut expected = std::collections::BTreeSet::new();
-        let mut count = 0;
         for (level, source) in [
             ("##", include_str!("guidance.tsv")),
             ("###", include_str!("rule_explain_related.tsv")),
@@ -92,21 +90,8 @@ mod rule_explain_tests {
                     (actual.rule, actual.title, actual.meaning, actual.repair),
                     (entry.rule, entry.title, entry.meaning, entry.repair)
                 );
-                let repair = entry.repair.unwrap().strip_prefix("help: ").unwrap();
-                assert!(reference.contains(&format!(
-                    "{level} {}: {}\n\n{}\n\nTypical fix: {repair}\n",
-                    entry.rule, entry.title, entry.meaning
-                )));
-                count += 1;
             }
         }
-        assert_eq!(
-            count,
-            reference
-                .lines()
-                .filter(|s| s.starts_with("## ") || s.starts_with("### "))
-                .count()
-        );
         assert_eq!(
             catalogue.iter().map(|e| e.rule).collect::<Vec<_>>(),
             expected.into_iter().collect::<Vec<_>>()

@@ -1,26 +1,4 @@
 {
-  "gate-checker-scaling": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.99,
-    "mean_wall_seconds": 59.5,
-    "memory_kb": 131072,
-    "memory_kills": 0,
-    "p95_cores": 1.0,
-    "parallel_fraction": null,
-    "pss_peak_mib": 20,
-    "pss_runs": 13,
-    "requested": [
-      "1/2097152"
-    ],
-    "runs": 13,
-    "timed_runs": 13,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792488439,
-      1792500260
-    ]
-  },
   "gate-conformance": {
     "cpu_class": "fast",
     "cpu_count": 1,
@@ -71,28 +49,6 @@
     "window": [
       1792446950,
       1792532525
-    ]
-  },
-  "gate-h2spec": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.93,
-    "mean_wall_seconds": 33.6,
-    "memory_kb": 983040,
-    "memory_kills": 0,
-    "p95_cores": 0.97,
-    "parallel_fraction": null,
-    "pss_peak_mib": 795,
-    "pss_runs": 4,
-    "requested": [
-      "1/2097152"
-    ],
-    "runs": 4,
-    "timed_runs": 3,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792510138,
-      1792516317
     ]
   },
   "gate-link-hosts": {
@@ -278,28 +234,6 @@
     "window": [
       1792446898,
       1792524127
-    ]
-  },
-  "gate-perf-counts": {
-    "cpu_class": "",
-    "cpu_count": 1,
-    "mean_cores": 0.94,
-    "mean_wall_seconds": 114.7,
-    "memory_kb": 1310720,
-    "memory_kills": 0,
-    "p95_cores": 0.98,
-    "parallel_fraction": null,
-    "pss_peak_mib": 1062,
-    "pss_runs": 74,
-    "requested": [
-      "1/2097152"
-    ],
-    "runs": 74,
-    "timed_runs": 73,
-    "two_cpu_slowdown": null,
-    "window": [
-      1792454848,
-      1792527765
     ]
   },
   "hirsel-cli-args-unittest": {
@@ -1386,10 +1320,5 @@
     "memory_kb": 1572864,
     "cpu_class": "",
     "inherited_from": "hirsel-driver-unittest"
-  },
-  "test-package-manifests": {
-    "cpu_class": "",
-    "cpu_count": 2,
-    "memory_kb": 2097152
   }
 }

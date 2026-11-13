@@ -1,3 +1,0 @@
-pub fn marker() -> u64 uses {} {
-  2
-}

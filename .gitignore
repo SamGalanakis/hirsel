@@ -39,10 +39,5 @@ __pycache__/
 # Measurement sessions and analyzer scratch belong under hirsel-briefs.
 /bench/**/reports/
 /bench/**/results/
-/bench/flate/results.json
-/bench/micro/http/*evidence.json
-/bench/micro/http/measurements.json
-/bench/micro/http/profile-*.tsv
 /bench/**/RESULTS-*
-/tools/compiler-bench/RESULTS-*
 /tools/buck2/toolchains/tsan-files/

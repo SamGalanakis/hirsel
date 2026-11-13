@@ -24,12 +24,6 @@ negative controls for it are `harness_objects.rs` (`no_cas`, `any_epoch`,
 
 ## Memory and compaction cost
 
-`bench/store/measure.hir`, built with `hirsel build --release`, loads `n` keys
-(16-byte keys, 100-byte values) through `store.transact`, 100 keys per commit,
-on a real directory, run under `perf stat -e instructions:u` and
-`/usr/bin/time` on CPU 7. Instruction counts repeat to within 0.05%. The table
-is the store before this change, which leaves compaction as it was.
-
 | n | load (instr) | full compaction (instr) | compaction after 1 more key (instr) | snapshot bytes | max RSS |
 |---|---|---|---|---|---|
 | 1,000 | 18.85 M | 3.47 M | 3.35 M | 132,042 | 12.3 MB |

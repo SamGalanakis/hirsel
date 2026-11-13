@@ -469,8 +469,7 @@ class Tiers(unittest.TestCase):
         fast = [n for n in named['fast'] if not n.startswith(('tool tests: ', 'interpreter conformance: ', 'ownership trace: '))]
         self.assertEqual(fast, ['Buck2 toolchains and pool configuration', 'Buck2 build files and test-cost coverage',
                                 'workspace build', 'workspace clippy', 'formatting', 'workspace tests',
-                                'free-mode GenMC models',
-                                'fresh std instruction budget'])
+                                'free-mode GenMC models'])
         self.assertEqual(named['full'][:len(named['fast'])], named['fast'])
         self.assertIn('retained component matrix: reference, heap, LLVM, Cranelift and Rust', named['full'])
         # A fast tick is skipped by a full run of main; a full tick is not skipped by a fast run.
@@ -1126,61 +1125,6 @@ class RollingBatches(unittest.TestCase):
         self.assertLessEqual(peak, 4)
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stdout, ''.join(targets))
-
-
-class PerfChecks(unittest.TestCase):
-    def test_ratchet_records_large_drops_after_push_in_report_and_history(self):
-        tool = runpy.run_path(str(ROOT / 'tools/main-runs'))
-        counts = runpy.run_path(str(ROOT / 'tools/perf-counts'))
-        profile = lambda n: dict(Ir=n, functions={'work': n})
-        baseline = dict(large=profile(10000), boundary=profile(10000), noise=profile(10000))
-        measured = dict(large=profile(8400), boundary=profile(8500), noise=profile(10001))
-        for pushed in (True, False):
-            with self.subTest(pushed=pushed), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary)
-                (root / 'tools').mkdir()
-                shutil.copy(ROOT / 'tools/perf-counts', root / 'tools/perf-counts')
-                table = root / 'tools/perf-counts.tsv'
-                table.write_text(counts['table'](baseline))
-                def push(name, update):
-                    if name.startswith('Ratchet'):
-                        update(root)
-                        return 'cafebabe' if pushed else None
-                output = io.StringIO()
-                with patch.dict(tool['run'].__globals__, RUNS=root, ROWS=root / 'runs.jsonl',
-                                run_stages=lambda *args: ({}, ['retained component matrix: reference, heap, LLVM, Cranelift and Rust'], [], measured, empty_status()),
-                                attribute=lambda *args: [], rows=lambda: [], push_to_main=push), \
-                        contextlib.redirect_stdout(output):
-                    tool['run']('0123456789abcdef', 'full')
-                actual = counts['read_table'](table)
-                self.assertEqual(actual, baseline | dict(large=measured['large'], boundary=measured['boundary']))
-                history = json.loads((root / 'runs.jsonl').read_text())
-                expected = [dict(count='large', old=10000, new=8400,
-                                 measured_sha='0123456789abcdef', pushed='cafebabe')] if pushed else []
-                self.assertEqual(history['perf_checks'], expected)
-                self.assertEqual('PERF-CHECK large 10000 -> 8400' in output.getvalue(), pushed)
-                self.assertEqual('PERF-CHECK large 10000 -> 8400' in (root / 'latest.md').read_text(), pushed)
-                self.assertNotIn('PERF-CHECK boundary', output.getvalue())
-
-    def test_retry_reports_only_changes_against_the_new_baseline(self):
-        tool = runpy.run_path(str(ROOT / 'tools/main-runs'))
-        counts = runpy.run_path(str(ROOT / 'tools/perf-counts'))
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            (root / 'tools').mkdir()
-            shutil.copy(ROOT / 'tools/perf-counts', root / 'tools/perf-counts')
-            table = root / 'tools/perf-counts.tsv'
-            profile = lambda n: dict(Ir=n, functions={'work': n})
-            table.write_text(counts['table']({'a': profile(10000)}))
-            checks = []
-            update = tool['ratchet']({'a': profile(8000)}, checks)
-            update(root)
-            self.assertEqual(checks, [dict(count='a', old=10000, new=8000)])
-            # Another run won the push race with a lower count.
-            table.write_text(counts['table']({'a': profile(7000)}))
-            update(root)
-            self.assertEqual(checks, [])
-            self.assertEqual(counts['read_table'](table)['a']['Ir'], 7000)
 
 
 class Reds(unittest.TestCase):

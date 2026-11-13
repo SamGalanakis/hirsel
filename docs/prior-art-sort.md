@@ -6,11 +6,11 @@ The source is `lib/std/sort/block.zig`: Range, Iterator and Pull at lines 7–10
 internal-buffer discovery, extraction, block tagging, rolling and redistribution
 at 320–755; constrained rotation merge at 758–803; internal swap merge at
 806–839; block swap and biased binary searches at 842–983.
-The implementation is in `stdlib/std@1/list_block.hir`, in the existing `list`
+The former implementation used the `list`
 module. It replaces the recursive rotation merge with the cache-free block
 algorithm: O(n log n) time and O(1) auxiliary space.
 
-The vectors in `packages/fixtures/list_sort_vectors@1/vectors.hir` port
+The former sort vectors ported
 `lib/std/sort.zig:178–222` (two nine-element IdAndValue cases), 225–252
 (ten stability fuzz trials), 254–330 (six u8 and seven i32 input/output pairs),
 and 471–513 (all twelve binary-search assertions). The thirteen literal sort

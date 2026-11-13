@@ -1,10 +1,10 @@
 # Building and running Hirsel programs
 
-Browse the [full signature index](api.md) for every public core and std declaration.
+Use `hirsel doc <manifest.json>` to inspect a package's public declarations.
 
-New to the language? Start with the [runnable language tour](tour.md), then
-try the [runnable tools](../examples/README.md).
-[Replay a service](replay-a-service.md) records a ledger service under injected faults,
+New to the language? Start with the runnable language tour, then
+try the runnable tools.
+Replay a service records a ledger service under injected faults,
 replays it from its tapes and trials a changed function against recorded calls.
 The [concurrent agent guide](concurrent-agents.md) covers compute fan-out,
 actors, shared state and scheduling tests. To work on the compiler, runtime
@@ -28,7 +28,7 @@ Discover exact options with `hirsel check --help`, `hirsel run --help`,
 manifest, toolchain, cache or grants. Use help before a source operand;
 `hirsel run app.hir -- --help` passes `--help` to the application.
 Compiler flags differ from standalone launch prefixes: see the
-[native recording recipe](native-verification.md#record-remove-host-access-replay).
+native recording recipe.
 For a standalone executable, runtime options such as `--hirsel-record` and
 `--hirsel-grants` may appear in any order before the first application argument
 or `--`. The delimiter ends runtime option parsing and is omitted from Args.
@@ -66,7 +66,7 @@ paths for a package tied to an installed toolchain.
 `check`, `test` and `doc` accept a library manifest without `entry`; `build` and
 `run` require a launch manifest with an entry. To add a CLI without turning a
 library into an application, keep a second launch manifest listing the library
-sources plus a driver. [snapshift](../examples/snapshift/README.md) shows both
+sources plus a driver. snapshift shows both
 manifests and direct typed JSON decoding with a checked Date.
 
 ## Document a package
@@ -91,7 +91,7 @@ source file or reordering declarations preserves links. JSON contains `schema: 1
 and an `entries` array with `identity`, `anchor`, `name`, `declaration`,
 `description` and resolved `links` (`identity`, `name`, `url`). Markdown uses the
 same anchors and references. Core and std references link to the published
-[API page](api.md); other dependency references use
+API page; other dependency references use
 `../<package>@<version>/api.md#<anchor>`, so publishing package pages in sibling
 versioned directories keeps those links intact. `-o` also accepts JSON output.
 Std's manifest publishes core registry entries and std declarations together
@@ -264,9 +264,9 @@ hirsel build hello.hir --debug --backend llvm -o hello-llvm-debug  # LLVM O0
 hirsel build hello.hir --target aarch64-linux -o hello-arm64
 ```
 
-The edit loop's commands, `build --debug` and `run --native`, compile with
+The edit loop's commands, `build --debug` and `run`, compile with
 Cranelift unless `--backend llvm` asks for LLVM; default and release builds use
-LLVM O2, and so does a `serve --native` place head unless `--backend cranelift` asks for
+LLVM O2, and so does a `serve` place head unless `--backend cranelift` asks for
 Cranelift. `--lto` explicitly requests whole-module LLVM O2;
 it cannot be combined with `--debug` or `--backend cranelift`. Combining
 `--release` with `--backend cranelift` is refused. The backends' own
@@ -277,7 +277,7 @@ compilers built with debug assertions, as every test build is.
 
 ### What a native build needs
 
-`build`, `run --native` and `test --native` read their tools from absolute paths in
+`build`, `run` and `test` read their tools from absolute paths in
 the environment; nothing is searched on `PATH`. Each command needs only the tools
 of the targets it builds for:
 
@@ -433,19 +433,12 @@ with the exact UTF-8 snapshot, including an explicitly empty snapshot. Without
 are authoritative and trailing arguments are an error. Without either option,
 `hirsel run program.hir -- args...` grants only Args with exactly those values,
 including an explicitly empty snapshot. No other authority is implied. A bare
-`hirsel run program.hir`, in either engine, admits the empty-grant record: a root-free
+`hirsel run program.hir`, admits the empty-grant record: a root-free
 `main()` runs, and an entry taking `Io`, `Args` or `Env` is refused at launch
-(`{"kind":"not_granted","root":"Io"}`, exit 3), with a line naming `--grants` and
-`--simulation <json>`, followed by a working inline `--grants '{...}'` template
+(`{"kind":"not_granted","root":"Io"}`, exit 3), with a line naming `--grants`, followed by a working inline `--grants '{...}'` template
 for exactly the entry's requested roots. The hint grants `Io` only stdout, `Args`
 an empty snapshot, `Env` an empty map and `Unsafe` its explicit root, as requested.
-It changes no grants until the caller supplies it. A simulated world requires that explicit option and is available
-only in the interpreter; ordinary runs follow [entry admission](../conformance/old-spec/programs.md#prog-3-entry).
-
-Interpreted host runs (`--run` and `--grants`) have no default step budget;
-simulated runs and runs without `--run` or `--grants` keep a 1,000,000,000-step budget. `--max-steps <n>` selects a
-nonnegative u64 bound, and `--max-steps unbounded` removes it. These are tooling
-limits, independent of language semantics; `--native` rejects the option.
+It changes no grants until the caller supplies it. Source runs compile and launch natively.
 
 For a record pinned to a particular semantic program revision, export its binding,
 edit its grants, and select it explicitly:
@@ -555,15 +548,15 @@ client, rather than the source constructor's `from: SocketAddr` field:
 
 For a server grant, use `"peers":[]` and add, for example,
 `"listeners":[{"address":"127.0.0.1","port":18765,"clients":[{"address":"127.0.0.1","port":40000,"tls":"plain","steps":[{"send":[71,69,84,32,120,10]},"stall"]}]}]`
-alongside an exact `listen` rule. See [linkcheck](../examples/linkcheck/grants.json)
-and [kvd](../examples/kvd/session-grants.json) for complete launch templates.
+alongside an exact `listen` rule. See linkcheck
+and kvd for complete launch templates.
 An exhausted listener reports `ConnectionAborted`; keep its scripted client at
 `"stall"` when testing graceful shutdown with a scripted signal. A
 `signals.script@1` arrival is delivered only when all tasks are idle.
 
 ### Native runs without an executable
 
-`hirsel run --native`, `hirsel test --native` and the native agreement and
+`hirsel run`, `hirsel test` and the native agreement and
 differential campaigns write no executable. A program links once, per changed
 revision, into a content-keyed program *image*: a shared object of its units
 and the same launcher objects an executable links, plus the builtin-support
@@ -599,7 +592,7 @@ A runner whose startup audit admits every constructor that runs before its
 capture) serves bounded runs (tests and campaigns) from one fork server per
 runner: each run is a forked child in its own process group, which takes the
 run's streams, environment and directory, checks the image's note, `dlopen`s it
-and calls its `main`. `run --native`, runs under a launch wrapper and runners the
+and calls its `main`. `run`, runs under a launch wrapper and runners the
 audit refuses start a fresh runner process per run (`hirsel-runner exec`), in
 the launcher's process group as an executable would be. AArch64 runners run
 under qemu like executables, children forked inside the emulator.
@@ -612,141 +605,13 @@ through the other with the same observation.
 
 ## Run a package's tests
 
-```sh
-hirsel test examples/calculator/hirsel.json
-hirsel test app/manifest.json parser decode      # match either substring of the stable path
-hirsel test app/manifest.json --seed 42 --json
-hirsel test app/manifest.json --native
-hirsel test app/manifest.json --native --backend cranelift
-hirsel test app/manifest.json --bless             # accept the actual snapshots
-hirsel test app/manifest.json --bench --bench-time 500
-hirsel test app/manifest.json --explore 100       # 100 seeded random@1 schedules per test
-hirsel test app/manifest.json --explore 100 --scheduler pct@1
-hirsel test app/manifest.json race --scheduler random@1:7   # replay one schedule
-```
+`hirsel test app/hirsel.json [filter...]` compiles matching marked functions with LLVM, then launches each in a fresh native process. `--backend cranelift` selects Cranelift. Filters match substrings of versioned definition paths, with multiple filters ORed. A nonempty filter matching no tests fails.
 
-Test manifests may omit `entry`; no launch main is needed. Mark ordinary functions
-with `@test`. They may be private, take no parameters or
-one borrowed `Test`, and return `()` or `Result[(), E]`. Generic functions, other
-parameters and other results are rejected. The command checks the whole package,
-then selects only marked functions in its manifest sources, never dependencies.
-Filters match substrings of versioned definition paths; multiple filters are ORed.
-An empty selection succeeds with zero tests. Tests run in stable path order.
+Mark functions with `@test`. They may take no parameters or one borrowed `Test`, and return `()` or `Result[(), E]`. Test manifests may omit `entry`. `test.check`, `test.fail`, `test.log` and the seed/case checks remain available. Failures run normal cleanup and do not prevent later tests from running. Exit 1 reports a failed test.
 
-Every test gets a fresh Test context and fake providers, with no host grants.
-Its default seed depends only on its stable definition path, so filtering or
-moving the definition between files does not change it. `--seed` supplies the
-same u64 seed to every selected test. Failures (including Error results and
-runtime checks) run normal cleanup and do not prevent later tests from running.
-The runner prints each test's name, outcome and seed, then totals; exit 1 means
-at least one failed. Native mode links the package's tests once, as one image
-(or, when the package calls C, one executable), and runs it in a fresh process
-for each selected test, with the same output and seeds.
+`--seed <u64>` supplies a repeatable seed. `--scheduler <name@1:seed>` selects one schedule; `--explore <n> [--scheduler random@1|pct@1]` explores schedule seeds. `--json` reports each result and its seed. `--bench [--bench-time <ms>]` runs marked benchmarks natively and cannot combine with schedule exploration.
 
-Interpreted tests run under a budget of 10^9 interpreter steps each, the `run`
-default; `--max-steps <n|unbounded>` replaces it, and a test that exhausts it fails
-with a tooling limit. Native tests have no step budget.
-
-A test reports through its stdout, one escaped line per record (see
-[core-library.md](../conformance/old-spec/core-library.md)): `test.log` text, the `test failure: seed=S
-case=C` line of a failed case check, and `test.expect_snapshot` records. Under each
-failed test the runner prints its report, indented, with log text unescaped, so
-`test.assert_eq` shows both values and a failed property shows its shrunk
-counterexample followed by the seed and case that `--seed` replays. A passing test's
-report is not printed.
-
-### Schedules
-
-A test's tasks (`test.tasks`) run under the run's scheduler (`inputs.scheduler` in
-[determinism.md](../conformance/old-spec/determinism.md#run-configuration)), `fifo@1` by default.
-`test.clock(t)` supplies a fake clock starting at zero; it advances to the earliest
-live timer only when no task can run. Blocked tests fail with their outstanding waits.
-`--scheduler <name@1:seed>` runs every selected test once under that scheduler.
-`--explore <n>` runs each selected test under seeds 0 to n-1 of `random@1`, or of the policy
-`--scheduler <name@1>` names (`random@1` or `pct@1`, without a seed), and stops that test
-at its first failing schedule, a Blocked run (CONC-8) included. The runner then prints the
-failing scheduler and how many schedules ran, `(seed=S, scheduler=pct@1:7, schedule 8)`,
-and under the failure's report a `replay:` line: the `hirsel test` command that reruns
-exactly that schedule, in the same engine. A passing test prints how many schedules it
-explored. With `--json` each test also carries `scheduler`, `schedules` and `replay`.
-The same seed selects the same schedule interpreted and native.
-
-For application-level races, add `--race` to an interpreted test or exploration:
-
-```sh
-hirsel test app/manifest.json --explore 100 --race
-hirsel test app/manifest.json --explore 100 --scheduler pct@1 --race --sim-points root-release,atomic-store
-```
-
-On failure its report names both operations in each race candidate: task spawn
-path, access occurrence, operation, source file, line and column, and the shared
-object. It watches atomic loads/stores and `shared.thaw` versus root releases.
-These are cross-task accesses to the same object with at least one write, not a
-happens-before proof or a causal diagnosis of the assertion. Synchronised and
-intentional accesses can appear too. The report keeps at most 16 distinct source
-pairs; a passing test emits no candidates. Hirsel remains data-race-free (CONC-4).
-
-`--sim-points` optionally adds a suspension before each `atomic.store`
-call (`atomic-store`), after each root release, including aggregate cleanup
-(`root-release`), and after each store authority request that reaches its provider
-(`seam`), so tasks holding stores of one authority interleave request by request.
-Choose any of the names, comma-separated. Atomic operations already suspend after the
-operation; the extra store point explores its entry too. These simulator-only points can
-explore interleavings outside ordinary cooperative suspension points. The points
-are off by default, require interpreted tests, and are included in the printed
-replay command. The same seed **and point settings** reproduce the run. Diagnostics
-and point markers stay outside semantic observations and Io tapes.
-
-The simulation JSON also accepts `scheduler` (for example `"pct@1:7"`), `race`
-(a boolean) and `sim_points` (the same comma-separated names). The interpreter API
-exports candidates separately from its semantic observation; test reports display
-them on failure. These settings do not change production or native scheduling.
-
-### Snapshots
-
-`test.expect_snapshot(t, name, text)` compares `text` with the committed file
-`snapshots/<file>.<test>.<name>.snap` beside the test's source file, where `<file>` is
-the source file name without its extension and `<test>` the test function's name. The
-file holds the text byte for byte. After the test finishes, each missing or different
-snapshot fails it, naming the file, and the report shows a unified diff from the
-committed text to the actual text: three lines of context, anchored on lines unique to
-both sides (Go's internal/diff), so the same inputs always print the same diff. The
-test itself keeps running after a mismatch. Recording the same name twice in one test
-fails it. `--bless` writes every recorded snapshot instead of comparing, creating the
-`snapshots/` directory as needed, and never deletes files; a test that otherwise
-passes then passes. Interpreted and native runs compare the same files.
-
-### Benchmarks
-
-`--bench` runs the package's `@bench` functions instead of its tests, under the same
-selection, filters and seeds. A bench takes no parameters or one borrowed `Test`, as a
-test does. For each bench the runner generates loop entries calling it a fixed 0, 1,
-10, ... 10^9 times, and times whole launches: one call to warm up, the zero-call
-launch as the baseline, then one call, then the least power of ten predicted to run
-for 1.2 times the target time but at most a hundred times the last count, until a launch spends at least the target time beyond
-the baseline or the 10^9 count has run (as Go's testing.B grows b.N). `--bench-time
-<ms>` sets the target, 1000 ms by default. Each bench prints one line:
-
-```text
-bench app@1/parse_header ... 1000000 iterations, 41.3 ns/iter
-bench result: ok. 1 measured; 0 failed; 1 total
-```
-
-`ns/iter` is the measured launch's time beyond the baseline divided by its count,
-rounded to one decimal. There are no thresholds: a bench fails only when a call
-fails, which prints `FAILED (seed=S): <failure>` and exit 1. Native benches build at
-the default optimization level; interpreted benches run with no step budget, and
-their times measure the interpreter. `--bench` takes neither `--bless` nor
-`--max-steps`.
-
-`--json` writes one schema-1 object with `tests` and `summary`. Each test has
-`name`, `seed`, `status` (`passed` or `failed`), `failure` (null on success) and
-`report`, the unindented report text. The summary has `passed`, `failed` and
-`total`. With `--bench` the object has `benches`, each with `name`, `seed`,
-`status` (`measured` or `failed`), `failure`, `iterations` and `nanoseconds` (the
-measured launch's time beyond the baseline), and a summary of `measured`, `failed`
-and `total`. Package checking errors use the ordinary check diagnostics and prevent
-execution.
+The CLI has no interpreted launch, simulation JSON, interpreter step bound, race instrumentation or simulation-point options. The internal evaluator and scripted providers remain available to compiler and runtime tests.
 
 ## Record and replay a run
 
@@ -759,7 +624,7 @@ often as needed, after the files, stdin and peers are gone:
 ```sh
 hirsel run app.hir --grants grants.json --record failing.tape < input.txt
 hirsel run app.hir --replay failing.tape              # same stdout, stderr and exit
-hirsel run app.hir --replay failing.tape --native     # the same tape, compiled
+hirsel run app.hir --replay failing.tape --backend llvm  # select LLVM
 ```
 
 Executables take the same inputs: `--hirsel-record <tape>` precedes their launch input,
@@ -927,8 +792,8 @@ call frames across tail calls and links the debug-bearing runtime archive.
 Use it for attribution. Take acceptance numbers from `--release`.
 
 ```sh
-hirsel build --profile examples/csvjson/hirsel.json -o /tmp/csvjson-profile
-perf record --call-graph dwarf -o /tmp/csvjson.perf /tmp/csvjson-profile --hirsel-grants examples/csvjson/stdin-grants.json < examples/csvjson/demo.json
+hirsel build --profile app/hirsel.json -o /tmp/csvjson-profile
+perf record --call-graph dwarf -o /tmp/csvjson.perf /tmp/csvjson-profile --hirsel-grants app/grants.json < app/input.json
 perf report -i /tmp/csvjson.perf --stdio --sort symbol,srcline
 ```
 
@@ -941,7 +806,7 @@ Its `.sites.json` output splits allocation and RC counts by initiating source.
 ## Query CPU profiles
 
 ```sh
-hirsel check --query-profile /tmp/check.jsonl examples/csvjson/hirsel.json
+hirsel check --query-profile /tmp/check.jsonl app/hirsel.json
 tools/query-profile /tmp/check.jsonl --top 20
 hirsel build --query-profile /tmp/build.jsonl app/hirsel.json -o app
 tools/query-profile diff /tmp/check-before.jsonl /tmp/check.jsonl
@@ -1098,7 +963,7 @@ an atomic update to every allocation, so time a run without `--mem-usage`.
 
 `hirsel deps card <manifest.json> [--package name@version[/module]] [--json]`
 reports computed authority, weight, public API exposure, replay constraints and
-health. See [Dependency cards for agents](dependency-cards.md) for field semantics,
+health. See Dependency cards for agents for field semantics,
 cache reuse and optional verified code-store provenance.
 
 ## Native unit objects

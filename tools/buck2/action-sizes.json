@@ -950,30 +950,6 @@
           1794361139
         ]
       },
-      "hirsel-conformance-bin-profile": {
-        "cpu_count": 1,
-        "mean_cores": 1.5959749800099952,
-        "memory_kb": 3211264,
-        "p95_cores": 1.7581615,
-        "p99_peak_bytes": 973844480,
-        "phases": {
-          "link [pic]": {
-            "cpu_seconds": 638.709,
-            "max_wall_seconds": 13.964,
-            "requested_cpus": [
-              1
-            ],
-            "samples": 60,
-            "wall_seconds": 407.697
-          }
-        },
-        "pss_peak_bytes": 2707003392,
-        "samples": 60,
-        "window": [
-          1794280878,
-          1794361139
-        ]
-      },
       "hirsel-conformance-unittest-harness": {
         "cpu_count": 2,
         "mean_cores": 2.8037544272905723,
@@ -16040,12 +16016,6 @@
       "profile": "dev",
       "samples": 5,
       "target": "hirsel-conformance-bin-oracle"
-    },
-    {
-      "phase": "link [pic]",
-      "profile": "dev",
-      "samples": 4,
-      "target": "hirsel-conformance-bin-profile"
     },
     {
       "phase": "rlib [pic]",

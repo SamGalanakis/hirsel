@@ -1,1 +1,0 @@
-{"service":"search","revision":7,"replicas":2,"labels":{"team/platform":"infra"},"checks":["ready"],"staging":{"timeout":30}}

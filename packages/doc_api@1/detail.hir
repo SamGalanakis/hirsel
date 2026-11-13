@@ -1,2 +1,0 @@
-/// Nested public modules retain their full definition path.
-pub fn value() -> u64 { 1 }

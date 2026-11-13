@@ -338,7 +338,7 @@ retain the same evidence under their job directory's `timeouts/`, or under
 A native configuration names the runtime archive it links: `diagnostic`
 (poisoning, header checks and the exit leak audit; its compiled fast paths stay
 off, so every allocation, free and dup reaches a checked entry), `default` (the
-archive `hirsel run --native` ships, with the inlined fast paths) or `system`
+archive `hirsel run` ships, with the inlined fast paths) or `system`
 (the system-allocator archive). Every launch is killed after
 `LAUNCH_TIMEOUT` (120 s, ten times that under memcheck) and that configuration
 of that case fails by name.

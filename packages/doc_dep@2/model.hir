@@ -1,2 +1,0 @@
-/// A dependency definition linked by its selected identity.
-pub type Token { value: u64 }

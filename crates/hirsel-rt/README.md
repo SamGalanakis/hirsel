@@ -1224,7 +1224,7 @@ checks its run record against the header and recorded admission (`Recording::bou
 checks program, entry, launch kind and roots against the executable, then runs SimIo
 with the record's projections, mounts, Env snapshot, clocks and Net rules. Replay needs
 no grants and acquires no host resource; a recording of other code refuses before entry.
-Source-run launches (`hirsel run --native`) accept the same two spellings beside
+Source-run launches (`hirsel run`) accept the same two spellings beside
 `--hirsel-run`, and the interpreter's host launch uses the same helpers, so a tape
 recorded by either engine replays in the other when it has no budget stop.
 Ordered CPU receipt v2 separates the portable retirement index, job ordinal,
@@ -1488,12 +1488,6 @@ internal commit kinds. Nested runtime helpers share the outer operation.
 No tape event, scheduling decision, provider identity, or ABI changes. The
 module, fields, and all call sites are cfg-elided without `measurement`.
 The environment switch is off by default, including in measurement archives.
-
-```sh
-python3 tools/mc-profile.py /absolute/path/to/measurement
-python3 tools/mc-profile.py --json --commit-ns 200 /absolute/path/to/measurement
-python3 tools/tests/mc_profile.py
-```
 
 The offline model has N segment workers and one separate serial commit server,
 including at N=1. Eligible segments start in recorded commit order; workers

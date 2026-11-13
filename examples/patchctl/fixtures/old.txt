@@ -1,3 +1,0 @@
-agent: review-bot
-mode: suggest
-write_source: false

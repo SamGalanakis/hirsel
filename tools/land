@@ -23,7 +23,7 @@ full. Transient push failures retry the same checked commit once while main
 is unchanged, fetching to resolve ambiguous completion. A red check
 refuses the push and prints its first error.
 
-Land checks every package and example manifest before pushing. The lane runs
+Land produces the retained std package before pushing. The lane runs
 the other tests its change can break, and
 tools/main-runs runs a chosen suite or selection on current main when requested
 by hand; it has no automatic schedule. Each push is appended
@@ -72,17 +72,13 @@ ENV = {'HIRSEL_BUCK2_CONFIG': ' '.join(CONFIG), 'GIT_EDITOR': 'true',
 # precomputation (integration artifacts, not workspace compilation).
 # Test harnesses stay out: each one's Clippy twin (CLIPPY_TWINS) checks the same
 # crate, sources and dependencies, so linking it again on every batch at checked
-# O3 only re-proves the link. The manifests check builds its own harness through
-# `[inputs]`; the lane that runs a harness, or a main run, links it.
+# O3 only re-proves the link. A lane that runs a test harness links it.
 BUILD_SET = ('root//: - kind("_rust_test", root//:) - attrregexfilter(name, "-clippy$", root//:)'
              ' - attrregexfilter(name, "-harness$", root//:)'
              ' - attrfilter(labels, gate, root//:) - kind("_link_hosts_local", root//:)'
              ' - rdeps(root//:, kind("_hirsel_products", root//:))')
 # tools/buck2/clippy.py's query: the twins whose reports Clippy reads.
 CLIPPY_TWINS = 'attrregexfilter(name, "-clippy$", kind("^rust_(library|binary)$", root//:))'
-# The manifests check: one test, or its shards `-shard-<i>` (tools/buck2/sync.py),
-# never their suite `test-package-manifests`, which the tool before this one runs.
-MANIFESTS = 'kind("_rust_test", attrregexfilter(name, "^test-package-manifests(-shard-[0-9]+)?$", root//:))'
 # These reuse the existing harnesses with source data only.
 SOURCE_AUDITS = ('//:land-audit-workspace-layering', '//:land-audit-runtime-schema',
                  '//:land-audit-runtime-descriptors', '//:land-audit-environment-inventory')
@@ -538,21 +534,18 @@ def full(tree, screened=False):
         # Buck2 serves one command at a time when another holds a different
         # state (a running `buck2 test` refuses even a same-config query), so
         # one build compiles everything the checks read: the workspace, the
-        # Clippy reports and the manifests check's compiler and std products.
-        # Clippy and the manifests run then only read and execute.
-        queries = [run([BUCK2, 'uquery', *CONFIG, expression]) for expression in (BUILD_SET, CLIPPY_TWINS, MANIFESTS)]
+        # Clippy reports and std products.
+        # Clippy then reads the compiled reports.
+        queries = [run([BUCK2, 'uquery', *CONFIG, expression]) for expression in (BUILD_SET, CLIPPY_TWINS)]
         if any(query.returncode or not query.stdout.strip() for query in queries):
             failed = next(query for query in queries if query.returncode or not query.stdout.strip())
             report = ['FAIL  the build set query', *first_error(failed.stderr).splitlines()]
             say('\n'.join(report))
         else:
-            manifests = queries[2].stdout.split()
-            targets = [*queries[0].stdout.split(), *(t + '[clippy.txt]' for t in queries[1].stdout.split()),
-                       *(t + '[inputs]' for t in manifests)]
+            targets = [*queries[0].stdout.split(), *(t + '[clippy.txt]' for t in queries[1].stdout.split()), '//:hirsel-std-products']
             report = (check('workspace build', [PY, 'tools/buck2/event_logs.py', 'build', *CONFIG,
                                                 '--materializations', 'none', *targets])
-                      or check('Clippy', [PY, 'tools/buck2/clippy.py'])
-                      or check('package and example manifests', [BUCK2, 'test', *CONFIG, *manifests]))
+                      or check('Clippy', [PY, 'tools/buck2/clippy.py']))
     # fast(tree) checked this exact tree's formatting (now or when screened);
     # fmt checks Rust plus the changed cases against the candidate formatter; no rerun.
     if not unchanged(tree):

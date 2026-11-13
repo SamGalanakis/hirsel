@@ -1,5 +1,4 @@
 //! The Io ordering row's headroom counters (design §5 Headroom, B1's `io_ordering` row in
-//! `bench/multicore/manifest.json`). A run holds them only when metrics are enabled: every
 //! collection point is behind an `Option<Arc<IoMetrics>>`, so a run without metrics pays one
 //! branch and reads no clock.
 

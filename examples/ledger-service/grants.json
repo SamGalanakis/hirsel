@@ -1,1 +1,0 @@
-{"io":{"stdout":"stdout.bytes@1","tasks":"tasks.cooperative@1","dirs":[],"runners":[{"name":"ledger","provider":"sim@1","node":"ledger","models":"db@1","head":"ledger_service@1/head","grants":{"dirs":[{"path":"ledger","host":"db","access":"read_write"}],"authorities":{"ledger":{"provider":"authority.memory@1","floor":"memory"}}},"definitions":null}]},"args":[]}

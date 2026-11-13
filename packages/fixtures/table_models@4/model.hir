@@ -1,5 +1,0 @@
-@serializable
-pub type Row {
-  total: String,
-  label: String,
-}

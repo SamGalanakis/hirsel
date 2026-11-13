@@ -1,4 +1,0 @@
-@noalloc
-pub fn answer() -> u64 uses {} {
-  42
-}

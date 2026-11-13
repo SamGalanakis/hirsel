@@ -556,7 +556,6 @@ struct ComputeWorkers {
 }
 
 /// The scheduling row's headroom counters (design §5 Headroom, B1's `switch_queue`,
-/// `fiber_creation` and `migration` rows in `bench/multicore/manifest.json`). A run holds
 /// them only when metrics are enabled: every collection point is behind an
 /// `Option<Arc<WorkerMetrics>>`, so a run without metrics pays one branch and reads no
 /// clock.
@@ -668,7 +667,6 @@ impl WorkerMetrics {
     pub(crate) fn stack_rss(&self, bytes: u64) {
         self.stack_rss.store(bytes, Relaxed);
     }
-    /// The rows' metrics by their names in `bench/multicore/telemetry.json`:
     /// `switches_per_op`, `queue_ops_per_op`, `spawn_ns` (mean per child),
     /// `rss_bytes_per_task` (touched stack bytes per simultaneously resident task),
     /// `migrations_per_s` and `refresh_ns` (mean per refresh). A metric whose denominator
@@ -728,7 +726,6 @@ impl WorkerMetrics {
 }
 
 /// The extern row's headroom counters (design §5 Headroom, B1's `extern` row in
-/// `bench/multicore/manifest.json`). A run holds them only when metrics are enabled: every
 /// collection point is behind an `Option<Arc<ExternMetrics>>`, so a run without metrics pays
 /// one branch and reads no clock.
 #[derive(Debug, Default)]
@@ -759,7 +756,6 @@ impl ExternMetrics {
     pub fn dispatches(&self) -> u64 {
         self.dispatches.load(Relaxed)
     }
-    /// The row's metrics by their names in `bench/multicore/telemetry.json`: `extern_ns`, the
     /// mean time of an extern call from its dispatch to its return to the caller's thread;
     /// `pool_queue_ns`, the mean time a blocking call's post waited for its pool thread to
     /// take it; `gate_wait_ns`, the mean time an outermost `serial` gate entry waited. A

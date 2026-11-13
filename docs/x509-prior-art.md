@@ -4,7 +4,7 @@ The reference is [Go ebe2feefc400f813aefdc8a036e66d2619da6649](https://github.co
 cloned for this port. All line numbers below refer to that commit. The Go
 BSD license is reproduced in [third-party/NOTICES.md](../third-party/NOTICES.md).
 
-`stdlib/std@1/x509.hir` follows these implementation paths:
+The former X.509 wrapper followed these implementation paths:
 
 - `src/vendor/golang.org/x/crypto/cryptobyte/asn1.go:755-835`: single-octet
   tags, definite lengths of at most four octets, no leading zero length

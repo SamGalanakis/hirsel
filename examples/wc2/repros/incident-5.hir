@@ -1,7 +1,0 @@
-fn unit() -> Result[(), ()] {
-  Ok(())
-}
-
-pub fn main() -> Result[(), ()] {
-  unit()?
-}

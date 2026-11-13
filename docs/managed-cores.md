@@ -92,16 +92,6 @@ threads exit, heaps become orphaned, and subsequent growth re-adopts those heaps
 No pure segment or foreign interval is preempted. Retired destination objects
 stay alive until run reclamation so suspended handoff frames remain valid.
 
-The existing process permit pool covers width-one roots, compute workers,
-callbacks, scheduler code and local runners. Waiting callers release their
-permit before entering a callee. Stopped computing workers retain theirs;
-`pool::lost_compute_permits()` includes such workers even after their run handles
-are dropped. A manager can raise `set_compute_grant`, but no launch manufactures
-replacement permits. Effective diagnostic width is capped by the process grant
-minus lost permits. `permit_wait_ns` is the mean acquisition time in B1's
-`bench/multicore/telemetry.json`; clocks and counters run only when worker metrics
-are enabled.
-
 The native Ordered startup/resize guarantee is specified in
 [CONC-1](../conformance/old-spec/concurrency.md#conc-1-runtime). `worker_phase` distinguishes
 `starting`, `running`, `draining` and `finished` (null for embeddings that do not
@@ -121,14 +111,6 @@ They must not assert equality against the first socket reply, silently clamp the
 requested width, or count an incomplete sample as physical scaling evidence.
 Timing runs keep their observation outside the application and include startup;
 a separate readiness-qualified run does not certify every short timed run's width.
-
-Prior art: the existing Rust std condition-variable predicate and Tokio permit
-return-before-wake protocol cited in `docs/notes/multicore-workers.md` are retained.
-Socket creation follows Rust std `ea137335b788`,
-`library/std/src/os/unix/net/listener.rs:73-109`; credentials follow
-`library/std/src/os/unix/net/ucred.rs:49-78`. The deviations are a pinned parent,
-exclusive new leaf, chmod before listen, bounded newline transactions and a
-shutdown descriptor, required for capability exclusion and prompt host cleanup.
 
 Integration tests add repeated 1/2/4/8 growth/shrink, whole-request refusal,
 external contraction, production gating, mount/sink exclusion and socket mode.

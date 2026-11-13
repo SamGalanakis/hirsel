@@ -152,16 +152,7 @@ const VARIABLES: &[(&str, Class)] = &[
         "HIRSEL_BUCK2_STORE",
         Class::HostOnly("tools/buck2/bootstrap_store.py"),
     ),
-    ("HIRSEL_CACHE", Class::HostOnly("tools/compiler-bench/run")),
     ("HIRSEL_CAPPED_SLOTS", Class::HostOnly("tools/capped")),
-    (
-        "HIRSEL_COST_COMMIT",
-        Class::HostOnly("tools/cost-trend.service"),
-    ),
-    (
-        "HIRSEL_COST_TOOLCHAIN",
-        Class::HostOnly("tools/cost-trend.service"),
-    ),
     (
         "HIRSEL_CPU_OVERLAP_COMMANDS",
         Class::HostOnly("tools/ignored-tests"),
@@ -214,18 +205,9 @@ const VARIABLES: &[(&str, Class)] = &[
         Class::HostOnly("tools/buck2/link_hosts.py"),
     ),
     (
-        "HIRSEL_MAIN_RUNS",
-        Class::HostOnly("tools/compiler-bench/run-main"),
-    ),
-    (
         "HIRSEL_MAIN_RUN_PROGRESS",
         Class::HostOnly("tools/buck2/event_logs.py"),
     ),
-    (
-        "HIRSEL_MAIN_WORKTREES",
-        Class::HostOnly("tools/compiler-bench/run-main"),
-    ),
-    ("HIRSEL_MODES", Class::HostOnly("tools/compiler-bench/run")),
     (
         "HIRSEL_NATIVE_CPU_HARNESS",
         Class::HostOnly("tools/workers-tsan"),
@@ -238,15 +220,10 @@ const VARIABLES: &[(&str, Class)] = &[
         "HIRSEL_PACKAGE_CACHE",
         Class::HostOnly("tools/arch_deletions.py"),
     ),
-    ("HIRSEL_PRECHECK", Class::HostOnly("tools/runtime-corpus")),
     ("HIRSEL_PRIORITY", Class::HostOnly("tools/check-native.sh")),
     (
         "HIRSEL_PRIVATE_NATIVE_INPUTS",
         Class::HostOnly("tools/buck2/test_launcher.sh"),
-    ),
-    (
-        "HIRSEL_PROGRAM_CACHE",
-        Class::HostOnly("tools/compiler-bench/run"),
     ),
     (
         "HIRSEL_REPLAY_BACKEND",

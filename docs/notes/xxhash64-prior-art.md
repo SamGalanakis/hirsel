@@ -11,11 +11,6 @@ The update structure is ported from [cespare/xxhash](https://github.com/cespare/
 - `xxhash_test.go:13-67`, `TestAll`: all nine seeded/unseeded golden rows and
   every chunk size from 1 through the input length, with one size for empty input.
 
-`stdlib/std@1/xxhash64.hir` follows that sequence for both `Bytes` and `List[u8]`.
-Only partial stripes enter `State.mem`. Both direct loops and the buffered
-stripe use the same four-word `stripe` kernel. State layout and public APIs
-are unchanged.
-
 ## Adaptations and deviations
 
 - Separate word readers and loops for Bytes and List, over the same stripe
@@ -87,12 +82,6 @@ The cited 19.26% absorb profile used commit
 Both benchmark variants therefore use that commit's compiler, runtime and
 stdlib; only the after variant's xxhash64 source is replaced by this port.
 No compiler/runtime change is part of this patch. Both are release builds.
-
-Measurements use `bench/micro/run`, ten interleaved rounds, seed 42, CPU31,
-with perf instructions/cycles (total and user) and task-clock. A separate
-997-Hz cycles:u profile repeats each executable 100 times to obtain more
-samples than the original 78-sample profile. No cross-session timing ratio
-is used. Raw measurement artifacts live outside the repository.
 
 
 Session `4a2a0f18-e798-4480-a142-9fa3ae634a26`:

@@ -1703,7 +1703,7 @@ initialized destination. A shared tracked arena charges exactly `L` bytes before
 copying; a writable arena charges nothing. Exhaustion leaves destination and
 aliases unchanged. This ordinary MayAllocate operation borrows but does not retain
 source provenance, has no capability or new error arm, and uses normal completion,
-cleanup and FAIL-3 shielding. See `docs/http-replace-range.md` for implementation
+cleanup and FAIL-3 shielding. See `the retired source` for implementation
 constraints and prior art.
 
 **History byte append.** `bytes.append_from_history(mut out, distance, count)`

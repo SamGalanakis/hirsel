@@ -1,5 +1,0 @@
-pub type Status { url: String }
-pub fn main(tasks: Tasks, mut incoming: Receiver[unique Status], mut rows: List[Status]) -> Result[(), ChannelError] {
-  list.push(mut rows, channel.receive(tasks, mut incoming)?)
-  Ok(())
-}

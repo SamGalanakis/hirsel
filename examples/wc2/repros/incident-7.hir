@@ -1,5 +1,0 @@
-fn counts() {}
-
-pub fn main() {
-  let counts = 0u64
-}

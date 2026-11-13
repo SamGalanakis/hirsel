@@ -2,13 +2,13 @@
 //!
 //! Structure: rust a7c37f9f0ee5e93396106e9de20f4a86b4154e63,
 //! compiler/rustc_driver_impl/src/lib.rs:208-211,427-473 and
-//! compiler/rustc_errors/src/codes.rs:29-58. See docs/rule-explain.md.
+//! compiler/rustc_errors/src/codes.rs:29-58.
 
 use hirsel_cli_args::lexopt::{self, Arg::*, Parser};
 use hirsel_diag::{RuleGuidance, RuleId};
 use std::{ffi::OsString, io::Write};
 
-const USAGE: &str = "usage: hirsel explain RULE [--json] | hirsel explain --list [--json]\nSee docs/rule-explain.md";
+const USAGE: &str = "usage: hirsel explain RULE [--json] | hirsel explain --list [--json]";
 
 struct Options {
     rule: Option<RuleId>,

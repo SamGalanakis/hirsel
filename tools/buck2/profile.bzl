@@ -33,8 +33,7 @@ RUNTIME_FLAGS = RELEASE_FLAGS + ["-Cembed-bitcode=yes", "-Clto=fat", "-Ccodegen-
 
 # The runtime archives that programs ship with or that are timed keep fat LTO:
 # the default runtime of each target, the one `hirsel --trace-ownership` links,
-# and system-allocator, whose executables bench/native times (its
-# regions-off-system configuration, crates/hirsel-native-build). Every other
+# and system-allocator, used by native configuration comparisons. Every other
 # variant (diagnostic, measurement, memcheck and the combinations) is read only
 # by tests and by counter builds, whose numbers do not depend on the runtime's
 # code generation, so it skips cross-crate LTO: 135 instead of 254 CPU-s per

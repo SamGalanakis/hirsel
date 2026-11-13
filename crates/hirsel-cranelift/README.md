@@ -4,7 +4,7 @@ The Cranelift backend, for fast debug builds: emission of validated Ready LIR
 units through Cranelift 0.136.3 (`cranelift-codegen`, `-frontend`, `-module`,
 `-object`, pinned `=0.136.3`) into an owned `hirsel_lir::ObjectArtifact`. It
 links with the same runtime archive and calls at the same ABI as `hirsel-llvm`.
-`hirsel build --backend cranelift` and `hirsel run --native --backend cranelift`
+`hirsel build --backend cranelift` and `hirsel run --backend cranelift`
 select it. The Cranelift parity gate holds it to LLVM's observations.
 
 Allowed dependencies: the pure `hirsel-graph` utility, the shared data crates

@@ -679,7 +679,7 @@ recorded, then on simulated Io consuming exactly that tape.
 Effects (resource, finalizer and capability events) are not part of the common
 observation: the heap executor and the launcher do not report them yet.
 
-`run_path_native` is `hirsel run --native` without a record, under the empty-grant record. It builds the runtime archive from
+`run_path_native` is `hirsel run` without a record, under the empty-grant record. It builds the runtime archive from
 this checkout with cargo into `HIRSEL_NATIVE_CACHE` (default
 `$TMPDIR/hirsel-native-runtime-<effective uid>`); the cache directory must be
 owned by the current user with mode 0700. Every archive reuse verifies a private

@@ -1,2 +1,0 @@
-git status --short
-git diff -- "src/agent notes.hir

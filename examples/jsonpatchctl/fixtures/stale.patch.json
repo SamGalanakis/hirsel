@@ -1,5 +1,0 @@
-[
-  {"op":"replace","path":"/replicas","value":3},
-  {"op":"test","path":"/revision","value":6},
-  {"op":"replace","path":"/revision","value":8}
-]

@@ -937,7 +937,6 @@ fn only_a_build_or_run_keys_the_mapped_libllvm_and_native_tools() {
     pipe(root);
     let run = [
         "run",
-        "--native",
         "--backend",
         "llvm",
         "pipe/hirsel.json",
@@ -1044,7 +1043,6 @@ fn a_run_record_launches_its_executable_with_this_runs_inputs() {
     let run = |args: &[&'static str]| -> Vec<&'static str> {
         let mut all = vec![
             "run",
-            "--native",
             "pipe/hirsel.json",
             "--grants",
             "pipe/grants.json",
@@ -1098,7 +1096,7 @@ fn a_run_record_launches_its_executable_with_this_runs_inputs() {
     // An LLVM run lives at the address its backend names: on its own
     // backend it misses, publishes and hits, and the build of the same
     // sources with the same backend keeps its own record.
-    let llvm = [&["run", "--native", "--backend", "llvm"][..], &one[2..]].concat();
+    let llvm = [&["run", "--backend", "llvm"][..], &one[1..]].concat();
     let cold = home.cold_in(root, &llvm, &[], b"l");
     assert_eq!(cold.stdout, b"arg a\nl", "{cold:?}");
     let (answer, counts) = home.warm_in(root, &llvm, b"l");
@@ -1118,8 +1116,8 @@ fn a_run_record_launches_its_executable_with_this_runs_inputs() {
         (home.cold_in(root, &one, &[], b"z"), MISS),
         "first arguments again"
     );
-    // Launch-only variables: run --native is x86_64 only, so no emulator is
-    // selected, and memcheck runtimes are test --native's. Neither keys a run
+    // Launch-only variables: run is x86_64 only, so no emulator is
+    // selected, and memcheck runtimes are test's. Neither keys a run
     // nor changes what it launches.
     let tools = [
         ("HIRSEL_QEMU_AARCH64", "/nonexistent/qemu"),
@@ -1258,11 +1256,12 @@ fn a_run_record_launches_its_executable_with_this_runs_inputs() {
         r#"{"schema":1,"revoked":[]}"#,
     )
     .unwrap();
+    let delimiter = one.iter().position(|arg| *arg == "--").unwrap();
     let taped = |tape: &'static str| {
         [
-            &one[..5],
+            &one[..delimiter],
             &["--record", tape, "--revocations", "pipe/revoked.json"][..],
-            &one[5..],
+            &one[delimiter..],
         ]
         .concat()
     };
@@ -1273,13 +1272,7 @@ fn a_run_record_launches_its_executable_with_this_runs_inputs() {
         (cold.clone(), HIT),
         "tape and revocations"
     );
-    let replay = [
-        "run",
-        "--native",
-        "pipe/hirsel.json",
-        "--replay",
-        "hit.tape",
-    ];
+    let replay = ["run", "pipe/hirsel.json", "--replay", "hit.tape"];
     let (answer, counts, _) = home.report_in(&home.state(), root, &replay, &env, b"");
     assert_eq!(
         (answer.status, answer.stdout, counts),
@@ -1303,7 +1296,12 @@ fn a_run_record_launches_its_executable_with_this_runs_inputs() {
         r#"{"io":{"stdin":"stdin.bytes@1","stdout":"stdout.bytes@1","stderr":"stderr.bytes@1","dirs":[{"path":"d","host":"d","access":"read"}]},"args":[]}"#,
     )
     .unwrap();
-    let dirs = [&one[..4], &["pipe/dirs.json"][..], &one[5..]].concat();
+    let dirs = [
+        &one[..delimiter - 1],
+        &["pipe/dirs.json"][..],
+        &one[delimiter..],
+    ]
+    .concat();
     let cold = home.cold_in(root, &dirs, &env, b"d");
     let (answer, counts, _) = home.report_in(&home.state(), root, &dirs, &env, b"d");
     assert_eq!((answer, counts), (cold.clone(), MISS), "granted directory");

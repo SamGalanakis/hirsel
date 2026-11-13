@@ -41,7 +41,7 @@ PARTS = {
                     'tools/buck2/workspace-metadata.json', 'tools/native-toolchain/pins.bzl'),
 }
 BUILD_INPUTS = tuple(sorted(path for outputs in PARTS.values() for path in outputs))
-MAIN_WRITTEN = ('docs/api.md',)
+MAIN_WRITTEN = ()
 STAMP = '.buck2/sync-stamp.json'
 SYNC_HINT = 'run python3 tools/buck2/sync.py'
 
@@ -199,7 +199,7 @@ def refusal(paths) -> list[str]:
     pages = [path for path in touched if path in MAIN_WRITTEN]
     inputs = [path for path in touched if path in BUILD_INPUTS]
     return [f'the change touches generated files, which no lane commits: {", ".join(touched)}',
-            'main\'s hourly run (tools/main-runs) regenerates docs/api.md, and sync.py regenerates the '
+            'sync.py regenerates the '
             'gitignored build files on demand. Drop them from the change:',
             *([f'  git checkout $(git merge-base HEAD origin/main) -- {" ".join(pages)}'] if pages else []),
             *([f'  git rm -q --cached {" ".join(inputs)}'] if inputs else []),

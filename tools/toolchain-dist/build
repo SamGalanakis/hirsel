@@ -45,7 +45,7 @@ def manifest(output, mode):
                   patch_sha256=hashlib.sha256(command('git', 'diff', 'HEAD').encode()).hexdigest(),
                   rustc=command(str(ROOT / 'tools/buck2/toolchains/rust-files/bin/rustc'), '-vV'),
                   profile='dist', pgo=mode, lto='fat', codegen_units=1,
-                  training='compiler-bench examples + syn3k: check, debug Cranelift, release LLVM',
+                  training='retained native hello: check, Cranelift, LLVM',
                   hirsel_sha256=digest(output / 'hirsel'),
                   std_products_sha256=hashlib.sha256(json.dumps({str(p.relative_to(output / 'hirsel-std.products')): digest(p) for p in sorted((output / 'hirsel-std.products').rglob('*')) if p.is_file()}, sort_keys=True, separators=(',', ':')).encode()).hexdigest(),
                   notices_sha256=digest(output / 'notices/manifest.json'))
@@ -68,7 +68,7 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--work', type=Path)
     parser.add_argument('--pgo', action='store_true')
-    parser.add_argument('--cpu', type=int, default=29)
+    parser.add_argument('--cpu', type=int, default=8)
     parser.add_argument('--profdata', help='LLVM tools matching the pinned rustc')
     args = parser.parse_args()
     output = args.output.resolve()

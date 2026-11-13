@@ -284,9 +284,8 @@ class GeneratedStamp(unittest.TestCase):
 
     def test_a_lane_change_touching_a_generated_file_is_refused_with_the_commands_that_drop_it(self):
         self.assertEqual(sync.generated.refusal(['README.md', 'crates/a/src/lib.rs']), [])
-        refused = '\n'.join(sync.generated.refusal(['docs/api.md', 'BUCK', 'README.md']))
-        self.assertIn('no lane commits: BUCK, docs/api.md', refused)
-        self.assertIn('git checkout $(git merge-base HEAD origin/main) -- docs/api.md', refused)
+        refused = '\n'.join(sync.generated.refusal(['BUCK', 'README.md']))
+        self.assertIn('no lane commits: BUCK', refused)
         self.assertIn('git rm -q --cached BUCK', refused)
 
 

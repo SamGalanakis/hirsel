@@ -1,4 +1,0 @@
-pub fn main() -> Result[(), ()] uses {} {
-  let _ = json.parse("null")
-  Ok(())
-}

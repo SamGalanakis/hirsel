@@ -33,12 +33,6 @@ No lane commits a generated file, so no rebase can conflict on one
   `.buckconfig`), which fails saying to run `sync.py`. The files are
   byte-identical to the committed ones they replace, so every action key, and
   so remote execution and its cache, is unchanged.
-- **`docs/api.md` is committed, and only main's hourly run writes it**:
-  `tools/main-runs` regenerates the page with the built CLI after each run and
-  pushes a change straight to main, so main's page trails its sources by at
-  most one run and no test compares the two. `tools/land` refuses a change
-  that touches it (or force-adds a build input) and prints the commands that
-  drop it.
 - **Files many lanes add to merge themselves.** `.gitattributes` gives
   `third-party/NOTICES.md`, every `hirsel.json` and the sorted ratchet and
   expectation lists (`SORTED_LISTS` in `merging.py`) the `hirsel` merge
@@ -105,48 +99,6 @@ runs `--format-only --path <case>` for each selected path. This uses the same
 `format_path` seam as `hirsel fmt` and the corpus's exact rule/line exemptions
 for intentional syntax errors; it executes no case programs. A Rust-only change
 needs no formatter binary build.
-
-## Compiler cost trend
-
-`tools/cost-trend` accepts an already-built **release** bundle and builds nothing:
-
-```sh
-tools/cost-trend --toolchain /path/to/release/hirsel-toolchain --commit <built-sha>
-```
-
-The caller supplies the commit built into the bundle; it must match the clean
-tracked checkout. Distribution/PGO and checked bundles use different contracts
-and must not be supplied as release bundles. Binary hashes are saved beside the
-TSV for provenance; they may change between compared commits.
-
-The runner measures fresh std with products absent, as `tools/perf-counts
---fresh-std` does, then csvjson, strbuild and todo-api checks with the bundle's
-installed std. All use `none@1` result storage, a fresh process, one job,
-`perf stat` instructions:u and inclusive instructions, the compiler's JSON work
-counts and peak compiler RSS. Three seeded interleaved rounds produce medians.
-Each process uses `tools/capped` and a 2 GiB memory cap. The lowest available
-allowed CPU is the default; `--cpu` can select another, except 12-15 or 28-31.
-Only one process is measured at a time. Refusals stop that workload's remaining
-rounds and write refused rows instead of partial medians.
-
-Rows append to `~/.cache/hirsel-cost-trend/trend.tsv`, one per commit, workload
-and metric. The text diff uses the previous observation of the same contract,
-including refused observations. Profile, workload set, counters, machine/CPU,
-cache policy, sampling protocol and pinned build tools define the contract.
-Missing work counters or masked compiler failures are refused, not measurements.
-A previously recorded commit/contract is skipped, including refused workloads.
-This records cost; it never changes `tools/perf-fresh-std.json` or its +3% gate.
-
-`tools/cost-trend.service` and `tools/cost-trend.timer` are supplied **disabled**.
-The orchestrator installs them into `~/.config/systemd/user/` and enables the
-timer after landing. The hourly timer samples the latest published main release
-at most once for each commit and contract. Its EnvironmentFile,
-`~/.config/hirsel/cost-trend.env`, contains `HIRSEL_COST_TOOLCHAIN` and
-`HIRSEL_COST_COMMIT`. The existing release publisher must update these to the
-already-built main bundle and its commit, and keep `/workspace/code/hirsellang`
-at that clean commit with origin/main fetched. The service refuses a stale
-bundle/checkout instead of building or labeling an older compiler as main.
-Commits superseded between hourly samples are not backfilled.
 
 ## Stale outputs
 
@@ -239,7 +191,7 @@ host build scripts are independent of this archive profile.
 `tools/toolchain-dist/build --pgo --output /tmp/hirsel-dist` builds the shipped
 compiler with `//tools/buck2:dist`: fat LTO, one codegen unit and PGO trained on
 compiler-bench's examples and syn3k. The existing mimalloc dependency already
-builds v3. `tools/compiler-bench/run-main` measures this distribution pipeline.
+builds v3. The distribution builder packages this profile.
 Developer `dev` and `release`, checked tools and runtime archives keep their
 existing profiles. See [the pipeline](../toolchain-dist/README.md) for exact
 commands, profile provenance, interleaved measurements and the declined BOLT trial.
@@ -266,11 +218,6 @@ tools/land                                           # rebase, build, Clippy, fm
 [Landing and race retries](../../docs/landing.md) describes the exact-tree checks,
 conservative incoming-crate selection and unbounded retries with jitter.
 Every attempted tree passes build, Clippy and fmt; no retry skips a check.
-
-After each run, `tools/main-runs` runs the built `hirsel doc stdlib/std@1/hirsel.json`
-and pushes a changed `docs/api.md` straight to main. The index's export-count
-test checks the renderer; nothing compares the committed page, which only
-main-runs writes.
 
 Builds use Buck2's default isolation dir, `v2`: never pass
 `--isolation-dir` (or pass only `--isolation-dir v2`) and leave
@@ -354,7 +301,7 @@ resolves `LLVM_SYS_231_PREFIX` and each variable of
 `HIRSEL_QEMU_AARCH64`, `HIRSEL_VALGRIND`, `VALGRIND_LIB`,
 `HIRSEL_VALGRIND_RUNTIME`, `HIRSEL_LINK_KIT`, `HIRSEL_GLIBC_FLOOR`: a path inside
 one toolchain) to absolute input paths before changing directory;
-`bench/native/suite.py` sets the same table. The driver links with the input
+The driver links with the input
 `ld.lld` and the link kit's line (`crates/hirsel-native/src/kit.rs`),
 never a compiler driver. Native launches preserve the selected
 Valgrind support directory when clearing the child's environment.
@@ -389,51 +336,6 @@ Target names follow Cargo's targets, all in the root package:
 requires all 75 named Rust bodies exactly once, all 31 reference programs and all
 36 native files on each engine. The four scalar PORT files are frozen source data.
 Protected V/depth fixtures remain with their deletion owners, outside this matrix.
-
-## Instruction budgets
-
-`.buck2/bin/buck2 test //:gate-perf-counts` checks the
-17 small native benchmarks and all eight `bench/micro/programs/*.hir` at
-N=1000 (one epoch) on the pool. The complete 25-case measurement, including
-builds and annotation, reserved 125.37 seconds on one pool CPU (2.09
-pool-minutes) and used 119.46 CPU-seconds. Run it for changes
-to LLVM, RC, LIR, the runtime,
-stdlib and benchmark programs. Valgrind, its loader/libc, LLVM and the runtime
-archives are pinned inputs. Native builds use LLVM O3, one epoch of each
-small input read through an explicit `fixtures` directory grant, and must
-print the committed checksum. Runtime input prevents compile-time folding of
-the workload. Native counts cover fixture loading, the original workload,
-checksum, complete teardown and stdout. Both builds and diagnostic compiler
-checks use the production release compiler and the pinned std image,
-with one compiler worker. Cache simulation is disabled: only `Ir` is counted,
-so host cache geometry and wall time cannot change the verdict.
-
-`tools/perf-counts --bless` measures on the pool and regenerates
-[`tools/perf-counts.tsv`](../perf-counts.tsv) on the host. Review and commit
-that diff. An increase beyond 1% fails; exactly 1% passes. A decrease passes
-and prints `perf-counts: improvement`; main's full run (`tools/main-runs`)
-writes the lower counts it measures into the table with a direct push.
-An automatic update never raises a budget; upward moves require an explicit
-reviewed bless with a reason. Drops over 15% still update the baseline and
-print `main-runs: PERF-CHECK <count> <old> -> <new> (run: <sha>)` after a
-successful push. The report and the run's `runs.jsonl` row retain these
-`perf_checks`, including the measured and pushed SHAs, for review of skipped
-work. Exactly 15% does not alert. A rejected push regenerates from the newer
-baseline and reports only the changes that actually land.
-The table retains the top 50 `cg_annotate` function counts per case, without
-worker source paths. Failures print the largest 20 function deltas against
-those saved counts. Missing and removed cases fail too.
-
-The two compiler cases remain explicitly open in the runner and table:
-`check/hello-web` took 113 seconds with the checked compiler, and
-`check/todo-api` exceeded the unchanged 240-second process limit with checked
-code and took 232.56 seconds (27,528,240,687 instructions) in release. The owner
-approved landing the 25 native/micro cells within five reserved pool-minutes
-while compiler performance is addressed. A diagnostic case remains runnable:
-
-```sh
-.buck2/bin/buck2 test -c hirsel.tests=focus //:gate-perf-counts -- --test-arg=--record --test-arg=--filter --test-arg=check/todo-api
-```
 
 ## Blessing expectations
 

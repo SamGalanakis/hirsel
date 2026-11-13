@@ -171,7 +171,6 @@ impl Meter {
     }
 }
 
-/// What the run's budget machinery counted (bench/multicore/telemetry.json, R4 rows).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Counters {
     /// Logical charges and credits applied under a memory budget.

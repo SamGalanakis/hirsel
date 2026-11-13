@@ -1,7 +1,6 @@
 //! AWS Signature Version 4, a structural port of botocore `auth.py` SigV4Auth
 //! (botocore 4d9f375e71c1a97693d961cdefb1827bdaaccfb9: canonical headers :304,
 //! canonical request :373, string to sign :408, key derivation :420) and of
-//! `packages/s3@1/sigv4.hir`, which ports the same lines.
 //!
 //! Deviations, each for the no-allocation rule: the canonical request is
 //! written into a buffer the signer owns and reuses; the string to sign is

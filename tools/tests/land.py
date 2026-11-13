@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """tools/land against a scratch origin with fake Buck2 checks: a push rejected
 because main moved goes back to the rebase, and a red check refuses the push."""
+import ast
 import csv
 import fcntl
 import io
@@ -125,6 +126,11 @@ class Land(unittest.TestCase):
                                'tools/buck2/rust_environment.py': (ROOT / 'tools/buck2/rust_environment.py').read_text(),
                                'tools/buck2/priorities.bzl': (ROOT / 'tools/buck2/priorities.bzl').read_text(),
                                '.gitignore': '.buck2/\n__pycache__/\n'})
+        # The line-list audit imports main-runs' exact corpus ID expansion.
+        source = (ROOT / 'tools/buck2/conformance.py').read_text()
+        function = next(node for node in ast.parse(source).body
+                        if isinstance(node, ast.FunctionDef) and node.name == 'run_ids')
+        files['tools/buck2/conformance.py'] = 'import re\n' + ast.get_source_segment(source, function) + '\n'
         for name, text in files.items():
             (self.lane / name).parent.mkdir(parents=True, exist_ok=True)
             (self.lane / name).write_text(text)
@@ -189,15 +195,15 @@ class Land(unittest.TestCase):
         self.assertFalse(builds.exists(), refused.stdout)
         self.assertEqual(self.main_log(), ['base'])
 
-    def test_manifest_compile_failure_refuses_the_push(self):
-        prepare = self.lane / 'tools/buck2/prepare.py'
-        with prepare.open('a') as script:
-            script.write("\np.write_text('#!/bin/sh\\nif [ \"$1\" = test ]; then case \"$*\" in *land-audit-*) ;; *) echo LANG-4 >&2; exit 1;; esac; fi\\necho root//:a\\n')\n")
-        self.git(self.lane, 'add', str(prepare.relative_to(self.lane)))
-        self.git(self.lane, 'commit', '-qm', 'manifest check refuses')
+    def test_std_compile_failure_refuses_the_push(self):
+        events = self.lane / 'tools/buck2/event_logs.py'
+        with events.open('a') as script:
+            script.write("\nif __name__ == '__main__':\n import sys\n assert '//:hirsel-std-products' in sys.argv\n print('LANG-4')\n sys.exit(1)\n")
+        self.git(self.lane, 'add', str(events.relative_to(self.lane)))
+        self.git(self.lane, 'commit', '-qm', 'std production refuses')
         refused = self.land()
         self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
-        self.assertIn('package and example manifests', refused.stdout)
+        self.assertIn('workspace build', refused.stdout)
         self.assertIn('LANG-4', refused.stdout)
         self.assertEqual(self.main_log(), ['base'])
 
@@ -349,8 +355,7 @@ Path(os.environ['FAKE_PREPARED']).write_text(found)
                 self.assertFalse((self.lane / '.git/land-queue').exists())
 
     def test_a_tree_without_a_target_mains_tool_asks_for_is_refused_before_queueing(self):
-        # Ticket 3505: a tree that renamed `//:test-package-manifests` joined a
-        # batch whose head ran main's tools/land, which asked for the old name.
+        # A tree that renames a target must not join a batch still requesting it.
         other = self.top / 'other'
         self.git(self.top, 'clone', '-q', str(self.origin), str(other))
         with (other / 'tools/land').open('a') as tool:
@@ -1256,25 +1261,7 @@ if not marker.exists():
         self.git(self.lane, 'push', '-q', 'origin', 'main')
         self.git(self.lane, 'checkout', '-q', 'my-lane')
 
-    def test_generated_pages_keep_mains_writer_and_preserve_source_commits(self):
-        self.conflicting_lanes('docs/api.md')
-        landed = self.land()
-        self.assertEqual(landed.returncode, 0, landed.stdout + landed.stderr)
-        self.assertEqual(landed.stdout.count('resolved generated conflict in docs/api.md'), 2)
-        self.assertEqual(self.git(self.origin, 'show', 'main:docs/api.md'), 'main generator output\n')
-        self.assertEqual(self.main_log()[:2], ['change 1', 'change 0'])
-        for i in range(2):
-            self.assertEqual((self.lane / f'source-{i}').read_text(), 'source change\n')
 
-    def test_a_generated_only_conflict_drops_the_obsolete_generated_commit(self):
-        self.conflicting_lanes('docs/api.md')
-        (self.lane / 'docs/api.md').write_text('obsolete generated-only page\n')
-        self.git(self.lane, 'add', 'docs/api.md')
-        self.git(self.lane, 'commit', '-qm', 'obsolete generated page')
-        landed = self.land()
-        self.assertEqual(landed.returncode, 0, landed.stdout + landed.stderr)
-        self.assertNotIn('obsolete generated page', self.main_log())
-        self.assertEqual(self.git(self.origin, 'show', 'main:docs/api.md'), 'main generator output\n')
 
     def test_generated_build_inventory_is_untracked_and_regenerated(self):
         self.conflicting_lanes('BUCK')
@@ -1296,11 +1283,9 @@ if not marker.exists():
         self.assertIn('conflicts in: source.rs', refused.stdout)
         self.assertEqual(self.git(self.lane, 'branch', '--show-current').strip(), 'my-lane')
 
-    def test_a_clippy_red_refuses_before_the_manifests_run(self):
-        # One build compiles for every check; Clippy then reads its reports in
-        # seconds, so its red refuses without waiting for a minute-long manifests run.
+    def test_a_clippy_red_refuses_the_push(self):
         started = time.monotonic()
-        refused = self.land(FAKE_CLIPPY_RED='1', FAKE_SLOW_TEST='60')
+        refused = self.land(FAKE_CLIPPY_RED='1')
         self.assertLess(time.monotonic() - started, 30, refused.stdout + refused.stderr)
         self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
         self.assertIn('FAIL  Clippy', refused.stdout)

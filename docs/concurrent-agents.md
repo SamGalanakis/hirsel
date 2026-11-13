@@ -72,7 +72,7 @@ that cannot run until its current call finishes.
 
 For short, nonblocking updates, use `mutex.with(tasks, state, body)` instead.
 The body cannot wait, do I/O, acquire another mutex or use channels. The
-[key-value server](../examples/kvstore/main.hir) shows parallel parsing, a
+key-value server shows parallel parsing, a
 mutex as the single state writer and a separate writer task for output.
 
 ## Make cancellation and scheduling deliberate
@@ -101,4 +101,4 @@ task paths, source locations and the shared object. Candidates are possible
 interactions, not proof of what caused the failure. Replay the printed command
 to reproduce its scheduler seed and simulator point settings. See
 [testing](building.md#schedules) and [determinism](../conformance/old-spec/determinism.md) for recording and
-replay, and the [API index](api.md) for complete signatures.
+replay, and the API index for complete signatures.

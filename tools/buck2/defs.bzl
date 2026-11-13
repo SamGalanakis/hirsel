@@ -747,6 +747,9 @@ def _link_hosts_local_impl(ctx):
     env = {
         "LLVM_SYS_231_PREFIX": cmd_args(tools["llvm"]),
         "HIRSEL_LINK_KIT": cmd_args(tools["kit"]),
+        "HIRSEL_CAPTURE_LINKER": cmd_args(tools["linker"]),
+        "HIRSEL_GLIBC_FLOOR": cmd_args(tools["glibc_floor"]),
+        "HIRSEL_AUDITOR_PACKAGE": cmd_args(tools["runtime-auditor"]),
         "HIRSEL_RUNTIME_ARCHIVES": cmd_args(tools["archives"]),
         "HIRSEL_PRODUCTS": cmd_args(tools["products"]),
         "HIRSEL_QEMU_AARCH64": cmd_args(tools["qemu"], "/qemu-aarch64", delimiter = ""),
@@ -778,6 +781,9 @@ def hirsel_link_hosts_test(name, listing, data, runtime_archives):
         tools = {
             "llvm": "root//tools/buck2/native-toolchain:llvm",
             "kit": "root//tools/buck2/native-toolchain:kit",
+            "linker": "root//tools/buck2/native-toolchain:linker",
+            "glibc_floor": "root//tools/buck2/native-toolchain:glibc_floor",
+            "runtime-auditor": "root//tools/buck2/native-toolchain:runtime-auditor",
             "qemu": "root//tools/buck2/native-toolchain:qemu",
             "arm": "root//tools/buck2/native-toolchain:arm",
             "products": "//:hirsel-std-products",

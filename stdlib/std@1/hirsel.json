@@ -6,12 +6,6 @@
   },
   "sources": [
     {
-      "path": "http_date.hir",
-      "module": [
-        "http_date"
-      ]
-    },
-    {
       "path": "identity.hir",
       "module": [
         "probe"
@@ -27,31 +21,6 @@
       "path": "char.hir",
       "module": [
         "char"
-      ]
-    },
-    {
-      "path": "priority_queue.hir",
-      "module": [
-        "priority_queue"
-      ]
-    },
-    {
-      "path": "heap_ops.hir",
-      "module": [
-        "internal",
-        "heap_ops"
-      ]
-    },
-    {
-      "path": "deque.hir",
-      "module": [
-        "deque"
-      ]
-    },
-    {
-      "path": "process.hir",
-      "module": [
-        "process"
       ]
     },
     {
@@ -145,46 +114,9 @@
       ]
     },
     {
-      "path": "tzif.hir",
-      "module": [
-        "time"
-      ]
-    },
-    {
-      "path": "time_zone.hir",
-      "module": [
-        "time_zone"
-      ]
-    },
-    {
-      "path": "sample.hir",
-      "module": [
-        "internal",
-        "sample"
-      ]
-    },
-    {
-      "path": "prng.hir",
-      "module": [
-        "prng"
-      ]
-    },
-    {
-      "path": "random.hir",
-      "module": [
-        "random"
-      ]
-    },
-    {
       "path": "scalar.hir",
       "module": [
         "scalar"
-      ]
-    },
-    {
-      "path": "bool.hir",
-      "module": [
-        "bool"
       ]
     },
     {
@@ -197,30 +129,6 @@
       "path": "u8_ops.hir",
       "module": [
         "u8"
-      ]
-    },
-    {
-      "path": "u16.hir",
-      "module": [
-        "u16"
-      ]
-    },
-    {
-      "path": "u16_ops.hir",
-      "module": [
-        "u16"
-      ]
-    },
-    {
-      "path": "u32.hir",
-      "module": [
-        "u32"
-      ]
-    },
-    {
-      "path": "u32_ops.hir",
-      "module": [
-        "u32"
       ]
     },
     {
@@ -248,66 +156,6 @@
       ]
     },
     {
-      "path": "i8.hir",
-      "module": [
-        "i8"
-      ]
-    },
-    {
-      "path": "i8_ops.hir",
-      "module": [
-        "i8"
-      ]
-    },
-    {
-      "path": "i16.hir",
-      "module": [
-        "i16"
-      ]
-    },
-    {
-      "path": "i16_ops.hir",
-      "module": [
-        "i16"
-      ]
-    },
-    {
-      "path": "i32.hir",
-      "module": [
-        "i32"
-      ]
-    },
-    {
-      "path": "i32_ops.hir",
-      "module": [
-        "i32"
-      ]
-    },
-    {
-      "path": "i64.hir",
-      "module": [
-        "i64"
-      ]
-    },
-    {
-      "path": "i64_ops.hir",
-      "module": [
-        "i64"
-      ]
-    },
-    {
-      "path": "i128.hir",
-      "module": [
-        "i128"
-      ]
-    },
-    {
-      "path": "i128_ops.hir",
-      "module": [
-        "i128"
-      ]
-    },
-    {
       "path": "f32.hir",
       "module": [
         "f32"
@@ -315,30 +163,6 @@
     },
     {
       "path": "f32_math.hir",
-      "module": [
-        "f32"
-      ]
-    },
-    {
-      "path": "f32_exp.hir",
-      "module": [
-        "f32"
-      ]
-    },
-    {
-      "path": "f32_power.hir",
-      "module": [
-        "f32"
-      ]
-    },
-    {
-      "path": "f32_trig.hir",
-      "module": [
-        "f32"
-      ]
-    },
-    {
-      "path": "f32_hyperbolic.hir",
       "module": [
         "f32"
       ]
@@ -353,37 +177,6 @@
       "path": "f64_math.hir",
       "module": [
         "f64"
-      ]
-    },
-    {
-      "path": "f64_exp.hir",
-      "module": [
-        "f64"
-      ]
-    },
-    {
-      "path": "f64_power.hir",
-      "module": [
-        "f64"
-      ]
-    },
-    {
-      "path": "f64_trig.hir",
-      "module": [
-        "f64"
-      ]
-    },
-    {
-      "path": "f64_hyperbolic.hir",
-      "module": [
-        "f64"
-      ]
-    },
-    {
-      "path": "libm.hir",
-      "module": [
-        "internal",
-        "libm"
       ]
     },
     {
@@ -434,12 +227,6 @@
       ]
     },
     {
-      "path": "path.hir",
-      "module": [
-        "path"
-      ]
-    },
-    {
       "path": "duration.hir",
       "module": [
         "duration"
@@ -452,251 +239,15 @@
       ]
     },
     {
-      "path": "yaml.hir",
-      "module": [
-        "yaml"
-      ]
-    },
-    {
-      "path": "toml.hir",
-      "module": [
-        "toml"
-      ]
-    },
-    {
-      "path": "x509.hir",
-      "module": [
-        "x509"
-      ]
-    },
-    {
-      "path": "test.hir",
-      "module": [
-        "test"
-      ]
-    },
-    {
-      "path": "http_wire.hir",
-      "module": [
-        "http_wire"
-      ]
-    },
-    {
-      "path": "net.hir",
-      "module": [
-        "net"
-      ]
-    },
-    {
-      "path": "uri.hir",
-      "module": [
-        "uri"
-      ]
-    },
-    {
-      "path": "http_h2.hir",
-      "module": [
-        "http"
-      ]
-    },
-    {
-      "path": "http.hir",
-      "module": [
-        "http"
-      ]
-    },
-    {
       "path": "input.hir",
       "module": [
         "input"
       ]
     },
     {
-      "path": "bufio.hir",
-      "module": [
-        "bufio"
-      ]
-    },
-    {
       "path": "sha256.hir",
       "module": [
         "sha256"
-      ]
-    },
-    {
-      "path": "sha224.hir",
-      "module": [
-        "sha224"
-      ]
-    },
-    {
-      "path": "sha512.hir",
-      "module": [
-        "sha512"
-      ]
-    },
-    {
-      "path": "sha384.hir",
-      "module": [
-        "sha384"
-      ]
-    },
-    {
-      "path": "sha512_256.hir",
-      "module": [
-        "sha512_256"
-      ]
-    },
-    {
-      "path": "aes_gcm.hir",
-      "module": [
-        "aes_gcm"
-      ]
-    },
-    {
-      "path": "aead.hir",
-      "module": [
-        "aead"
-      ]
-    },
-    {
-      "path": "chacha_poly.hir",
-      "module": [
-        "internal",
-        "chacha_poly"
-      ]
-    },
-    {
-      "path": "chacha20poly1305.hir",
-      "module": [
-        "chacha20poly1305"
-      ]
-    },
-    {
-      "path": "xchacha20poly1305.hir",
-      "module": [
-        "xchacha20poly1305"
-      ]
-    },
-    {
-      "path": "keccak.hir",
-      "module": [
-        "internal",
-        "keccak"
-      ]
-    },
-    {
-      "path": "sha3_224.hir",
-      "module": [
-        "sha3_224"
-      ]
-    },
-    {
-      "path": "sha3_256.hir",
-      "module": [
-        "sha3_256"
-      ]
-    },
-    {
-      "path": "sha3_384.hir",
-      "module": [
-        "sha3_384"
-      ]
-    },
-    {
-      "path": "sha3_512.hir",
-      "module": [
-        "sha3_512"
-      ]
-    },
-    {
-      "path": "shake128.hir",
-      "module": [
-        "shake128"
-      ]
-    },
-    {
-      "path": "shake256.hir",
-      "module": [
-        "shake256"
-      ]
-    },
-    {
-      "path": "sha1.hir",
-      "module": [
-        "sha1"
-      ]
-    },
-    {
-      "path": "md5.hir",
-      "module": [
-        "md5"
-      ]
-    },
-    {
-      "path": "blake2b.hir",
-      "module": [
-        "blake2b"
-      ]
-    },
-    {
-      "path": "blake2s.hir",
-      "module": [
-        "blake2s"
-      ]
-    },
-    {
-      "path": "crc32.hir",
-      "module": [
-        "crc32"
-      ]
-    },
-    {
-      "path": "crc32c.hir",
-      "module": [
-        "crc32c"
-      ]
-    },
-    {
-      "path": "adler32.hir",
-      "module": [
-        "adler32"
-      ]
-    },
-    {
-      "path": "xxhash64.hir",
-      "module": [
-        "xxhash64"
-      ]
-    },
-    {
-      "path": "digest.hir",
-      "module": [
-        "digest"
-      ]
-    },
-    {
-      "path": "constant_time.hir",
-      "module": [
-        "constant_time"
-      ]
-    },
-    {
-      "path": "hmac.hir",
-      "module": [
-        "hmac"
-      ]
-    },
-    {
-      "path": "hkdf.hir",
-      "module": [
-        "hkdf"
-      ]
-    },
-    {
-      "path": "pbkdf2.hir",
-      "module": [
-        "pbkdf2"
       ]
     },
     {
@@ -712,12 +263,6 @@
       ]
     },
     {
-      "path": "csv.hir",
-      "module": [
-        "csv"
-      ]
-    },
-    {
       "path": "hex.hir",
       "module": [
         "hex"
@@ -727,72 +272,6 @@
       "path": "keys.hir",
       "module": [
         "keys"
-      ]
-    },
-    {
-      "path": "iter.hir",
-      "module": [
-        "iter"
-      ]
-    },
-    {
-      "path": "stream.hir",
-      "module": [
-        "stream"
-      ]
-    },
-    {
-      "path": "regex.hir",
-      "module": [
-        "regex"
-      ]
-    },
-    {
-      "path": "bigint.hir",
-      "module": [
-        "bigint"
-      ]
-    },
-    {
-      "path": "bigdecimal.hir",
-      "module": [
-        "decimal"
-      ]
-    },
-    {
-      "path": "glob.hir",
-      "module": [
-        "glob"
-      ]
-    },
-    {
-      "path": "base64.hir",
-      "module": [
-        "base64"
-      ]
-    },
-    {
-      "path": "utf8.hir",
-      "module": [
-        "utf8"
-      ]
-    },
-    {
-      "path": "file.hir",
-      "module": [
-        "file"
-      ]
-    },
-    {
-      "path": "cli.hir",
-      "module": [
-        "cli"
-      ]
-    },
-    {
-      "path": "log.hir",
-      "module": [
-        "log"
       ]
     },
     {
@@ -815,18 +294,6 @@
       ]
     },
     {
-      "path": "task.hir",
-      "module": [
-        "task"
-      ]
-    },
-    {
-      "path": "actor.hir",
-      "module": [
-        "actor"
-      ]
-    },
-    {
       "path": "unicode_compatibility_tables.hir",
       "module": [
         "unicode"
@@ -845,30 +312,6 @@
       ]
     },
     {
-      "path": "flate.hir",
-      "module": [
-        "flate"
-      ]
-    },
-    {
-      "path": "tar.hir",
-      "module": [
-        "tar"
-      ]
-    },
-    {
-      "path": "zip.hir",
-      "module": [
-        "zip"
-      ]
-    },
-    {
-      "path": "fnv.hir",
-      "module": [
-        "fnv"
-      ]
-    },
-    {
       "path": "siphash.hir",
       "module": [
         "siphash"
@@ -881,82 +324,15 @@
       ]
     },
     {
-      "path": "cookie.hir",
-      "module": [
-        "cookie"
-      ]
-    },
-    {
-      "path": "hpack.hir",
-      "module": [
-        "hpack"
-      ]
-    },
-    {
       "path": "hpack_tables.hir",
       "module": [
         "hpack"
       ]
     },
     {
-      "path": "http2_wire.hir",
-      "module": [
-        "http2_wire"
-      ]
-    },
-    {
-      "path": "http2.hir",
-      "module": [
-        "http2"
-      ]
-    },
-    {
-      "path": "binary_json.hir",
-      "module": [
-        "internal",
-        "binary_json"
-      ]
-    },
-    {
-      "path": "msgpack.hir",
-      "module": [
-        "msgpack"
-      ]
-    },
-    {
-      "path": "cbor.hir",
-      "module": [
-        "cbor"
-      ]
-    },
-    {
-      "path": "binary.hir",
-      "module": [
-        "binary"
-      ]
-    },
-    {
-      "path": "zstd.hir",
-      "module": [
-        "zstd"
-      ]
-    },
-    {
-      "path": "markdown.hir",
-      "module": [
-        "markdown"
-      ]
-    },
-    {
       "path": "markdown_tables.hir",
       "module": [
         "markdown"
-      ]
-    },
-    {
-      "path": "html.hir",
-      "module": [
-        "html"
       ]
     },
     {
@@ -996,69 +372,9 @@
       ]
     },
     {
-      "path": "shlex.hir",
-      "module": [
-        "shlex"
-      ]
-    },
-    {
-      "path": "uuid.hir",
-      "module": [
-        "uuid"
-      ]
-    },
-    {
-      "path": "semver.hir",
-      "module": [
-        "semver"
-      ]
-    },
-    {
-      "path": "diff.hir",
-      "module": [
-        "diff"
-      ]
-    },
-    {
       "path": "schema.hir",
       "module": [
         "schema"
-      ]
-    },
-    {
-      "path": "schedule.hir",
-      "module": [
-        "schedule"
-      ]
-    },
-    {
-      "path": "telemetry.hir",
-      "module": [
-        "telemetry"
-      ]
-    },
-    {
-      "path": "telemetry_context.hir",
-      "module": [
-        "telemetry"
-      ]
-    },
-    {
-      "path": "list_block.hir",
-      "module": [
-        "list"
-      ]
-    },
-    {
-      "path": "markdown_render.hir",
-      "module": [
-        "markdown"
-      ]
-    },
-    {
-      "path": "markdown_footnotes.hir",
-      "module": [
-        "markdown"
       ]
     },
     {
@@ -1066,19 +382,6 @@
       "module": [
         "internal",
         "format"
-      ]
-    },
-    {
-      "path": "stream_bytes.hir",
-      "module": [
-        "stream"
-      ]
-    },
-    {
-      "path": "http1_parse.hir",
-      "module": [
-        "internal",
-        "http1_parse"
       ]
     },
     {
@@ -1102,18 +405,6 @@
       ]
     },
     {
-      "path": "telemetry_capture.hir",
-      "module": [
-        "telemetry"
-      ]
-    },
-    {
-      "path": "metrics.hir",
-      "module": [
-        "metrics"
-      ]
-    },
-    {
       "path": "schema_derive.hir",
       "module": [
         "derive"
@@ -1133,30 +424,6 @@
       ]
     },
     {
-      "path": "websocket.hir",
-      "module": [
-        "websocket"
-      ]
-    },
-    {
-      "path": "sse.hir",
-      "module": [
-        "sse"
-      ]
-    },
-    {
-      "path": "multipart.hir",
-      "module": [
-        "multipart"
-      ]
-    },
-    {
-      "path": "jwt.hir",
-      "module": [
-        "jwt"
-      ]
-    },
-    {
       "path": "schema_checked.hir",
       "module": [
         "schema"
@@ -1169,13 +436,6 @@
       ]
     },
     {
-      "path": "internal/curve25519.hir",
-      "module": [
-        "internal",
-        "curve25519"
-      ]
-    },
-    {
       "path": "internal/curve25519_table.hir",
       "module": [
         "internal",
@@ -1183,201 +443,15 @@
       ]
     },
     {
-      "path": "x25519.hir",
+      "path": "bool.hir",
       "module": [
-        "x25519"
+        "bool"
       ]
     },
     {
-      "path": "ed25519.hir",
+      "path": "digest.hir",
       "module": [
-        "ed25519"
-      ]
-    },
-    {
-      "path": "json_document.hir",
-      "module": [
-        "json_document"
-      ]
-    },
-    {
-      "path": "sorted.hir",
-      "module": [
-        "sorted"
-      ]
-    },
-    {
-      "path": "peekable.hir",
-      "module": [
-        "peekable"
-      ]
-    },
-    {
-      "path": "edit_distance.hir",
-      "module": [
-        "edit_distance"
-      ]
-    },
-    {
-      "path": "bitset.hir",
-      "module": [
-        "bitset"
-      ]
-    },
-    {
-      "path": "regex_fold.hir",
-      "module": [
-        "regex"
-      ]
-    },
-    {
-      "path": "line_scan.hir",
-      "module": [
-        "line_scan"
-      ]
-    },
-    {
-      "path": "lru.hir",
-      "module": [
-        "lru"
-      ]
-    },
-    {
-      "path": "base32.hir",
-      "module": [
-        "base32"
-      ]
-    },
-    {
-      "path": "utf16.hir",
-      "module": [
-        "utf16"
-      ]
-    },
-    {
-      "path": "json_merge_patch.hir",
-      "module": [
-        "json_merge_patch"
-      ]
-    },
-    {
-      "path": "quoted_printable.hir",
-      "module": [
-        "quoted_printable"
-      ]
-    },
-    {
-      "path": "list_drift.hir",
-      "module": [
-        "list"
-      ]
-    },
-    {
-      "path": "cidr.hir",
-      "module": [
-        "cidr"
-      ]
-    },
-    {
-      "path": "text_similarity.hir",
-      "module": [
-        "text_similarity"
-      ]
-    },
-    {
-      "path": "varint.hir",
-      "module": [
-        "varint"
-      ]
-    },
-    {
-      "path": "toposort.hir",
-      "module": [
-        "toposort"
-      ]
-    },
-    {
-      "path": "json_pointer.hir",
-      "module": [
-        "json_pointer"
-      ]
-    },
-    {
-      "path": "union_find.hir",
-      "module": [
-        "union_find"
-      ]
-    },
-    {
-      "path": "ascii85.hir",
-      "module": [
-        "ascii85"
-      ]
-    },
-    {
-      "path": "list_copy.hir",
-      "module": [
-        "list"
-      ]
-    },
-    {
-      "path": "dns_message.hir",
-      "module": [
-        "dns_message"
-      ]
-    },
-    {
-      "path": "mail.hir",
-      "module": [
-        "mail"
-      ]
-    },
-    {
-      "path": "json_patch.hir",
-      "module": [
-        "json_patch"
-      ]
-    },
-    {
-      "path": "html_tokenizer.hir",
-      "module": [
-        "html_tokenizer"
-      ]
-    },
-    {
-      "path": "json_access.hir",
-      "module": [
-        "json_access"
-      ]
-    },
-    {
-      "path": "regex_prefilter.hir",
-      "module": [
-        "regex"
-      ]
-    },
-    {
-      "path": "regex_dfa.hir",
-      "module": [
-        "regex"
-      ]
-    },
-    {
-      "path": "regex_capture.hir",
-      "module": [
-        "regex"
-      ]
-    },
-    {
-      "path": "markdown_source.hir",
-      "module": [
-        "markdown"
-      ]
-    },
-    {
-      "path": "cpu.hir",
-      "module": [
-        "cpu"
+        "digest"
       ]
     }
   ],

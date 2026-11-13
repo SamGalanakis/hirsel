@@ -27,6 +27,12 @@ pub fn test_path(
     let tests = &discovery.tests;
     if tests.is_empty() {
         crate::testing::check_empty_selection(path, &discovery, &mut selector)?;
+        if !filters.is_empty() {
+            return Err(ToolError::Runtime(format!(
+                "no tests match {}",
+                filters.join(", ")
+            )));
+        }
         return Ok(vec![]);
     }
     run(path, &discovery, tests, selector, backend, bless, schedules)
@@ -48,6 +54,12 @@ pub fn bench_path(
     let benches = &discovery.tests;
     if benches.is_empty() {
         crate::testing::check_empty_selection(path, &discovery, &mut selector)?;
+        if !filters.is_empty() {
+            return Err(ToolError::Runtime(format!(
+                "no tests match {}",
+                filters.join(", ")
+            )));
+        }
         return Ok(vec![]);
     }
     bench(path, &discovery, benches, selector, backend, target)

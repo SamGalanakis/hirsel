@@ -1,4 +1,3 @@
-//! Safe streaming twin for bench/micro/programs/extended/gzip_read.hir.
 #![forbid(unsafe_code)]
 use std::io::Read;
 

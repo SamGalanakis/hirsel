@@ -1,3 +1,0 @@
-pub fn byte_len(s: String) -> u64 uses {} {
-  core@1/string.byte_len(s)
-}

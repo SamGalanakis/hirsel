@@ -50,9 +50,7 @@ units, sessions and interpretation.
 BUCK inventories and related build inputs are already ignored and derived by
 `tools/buck2/sync.py --if-stale`. Do not commit them. Landing can replay legacy
 commits with conflicts in generated files: build inputs are untracked and
-regenerated before checks; `docs/api.md` keeps origin/main's generated page,
-and its sole writer, `tools/main-runs`, regenerates it after landing. Source
-conflicts still abort the rebase. No lane commits a generated page.
+regenerated before checks. Source conflicts still abort the rebase. No lane commits a generated file.
 
 Corpus passing/pending lists use the existing `hirsel` driver, installed by
 bootstrap and landing. They merge by path even for unsorted appends alongside
@@ -68,44 +66,6 @@ per path (including historical paths removed or moved since those commits).
 Counts measure touches, not just additions; the high-frequency candidates were
 also inspected with `--numstat`. Implementation code such as CLI `src/main.rs`
 is excluded: its edits are not independent registrations.
-
-| File | Commits | Resolution |
-| --- | ---: | --- |
-| `conformance/passing.txt` | 176 | Path-set merge accepts unsorted appends/comments; preserves removals |
-| `third-party/NOTICES.md` | 96 | Existing append-only merge driver; preserve notice prose/attribution |
-| `tools/known-failures.tsv` | 84 | Three-way line set; removals survive; land resolves IDs by date, then incoming row |
-| `docs/api.md` | 42 | Existing main-runs generator; legacy rebase conflicts keep main's writer |
-| `crates/hirsel-registry/src/review-table.txt` | 35 | Existing semantic sorted-list merge |
-| `BUCK` | 31 | Already removed from Git, generated on demand |
-| `native-tests/library/operations.tsv` | 30 | Existing semantic sorted-list merge |
-| `crates/hirsel-driver/tests/it/main.rs` | 17 | Line-set `modules.rs` |
-| `crates/hirsel-rt/tests/it/main.rs` | 9 | Line-set `modules.rs` |
-| `crates/hirsel-run-config/tests/it/main.rs` | 8 | Line-set `modules.rs` |
-| `tools/buck2/BUCK` | 7 | Build rules, not an append-only test registry; unchanged |
-| `crates/hirsel-pipeline-tests/tests/front/main.rs` | 6 | Line-set `modules.rs` |
-| `crates/hirsel-rt/tests/descriptors/main.rs` | 5 | Actual test bodies, not a registry; unchanged |
-| `crates/hirsel-ownership/src/tests/{passing,pending}.txt` | 5 each | Path-set merge, accepting unsorted appends |
-| `crates/hirsel-llvm/tests/it/main.rs` | 5 | Line-set `modules.rs` |
-| `bench/langarena/RESULTS.md` | 5 | Historical; new reports shard by session |
-| `bench/tasks-perf/RESULTS.md` | 4 | Historical; explicit per-session output |
-| `bench/apps/tasks/RESULTS.md` | 3 | Historical; runner shards by session |
-| `third-party/BUCK` | 3 | Already ignored, generated on demand |
-| `crates/hirsel-interp/tests/it/main.rs` | 3 | Line-set `modules.rs` |
-| `crates/hirsel-free/tests/it/main.rs` | 3 | Line-set `modules.rs` |
-| `crates/hirsel-{validate,parser,lir,conformance}/tests/it/main.rs` | 2 each | Line-set `modules.rs` |
-| `crates/hirsel-{object-storage,code-store}/tests/it/main.rs` | 2 each | Actual test bodies, not registries; unchanged |
-| `crates/hirsel-driver/tests/it-precheck/main.rs` | 2 | Historical path, removed on main |
-| `crates/hirsel-modes/src/ownership/tests/passing.txt` | 2 | Historical path, moved to hirsel-ownership |
-| `crates/hirsel-modes/src/authority/corpus/pending.txt` | 2 | Historical path, moved to hirsel-authority |
-| `bench/micro/http/RESULTS.md` | 2 | Historical; runner already requires output |
-| `tools/toolchain-dist/BUCK`, `tools/buck2/native-toolchain/BUCK`, `bench/micro-json-reference/BUCK` | 2 each | Build rules, not test inventories; unchanged |
-| `crates/hirsel-{run-schema,remote,heapcheck,engine}/tests/it/main.rs` | 1 each | Line-set `modules.rs` |
-| `conformance/pending.txt` | 1 | Path-set merge, accepting unsorted appends |
-| `tools/h2spec/passing.txt` | 1 | Static baseline, not shared lane registration; unchanged |
-| `tools/compiler-bench/RESULTS.md`, `bench/micro/net/RESULTS.md` | 1 each | Historical; new reports shard |
-| `/workspace/code/hirsel-briefs/port-3/repo-evidence/bench/langarena/RESULTS-port-3.md` | 1 | Already sharded |
-| `tools/buck2/toolchains/BUCK` | 1 | Build rules, unchanged |
-| `BUCK.unsynced`, `third-party/BUCK.unsynced` | 1 each | Constant bootstrap stubs, unchanged |
 
 | `tools/buck2/workspace-metadata.json` | 10 | Already ignored, generated on demand |
 | `tools/buck2/test_sizes.bzl` | 6 | Already ignored, generated on demand |

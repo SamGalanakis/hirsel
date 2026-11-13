@@ -50,11 +50,6 @@ path = "src/bin/corpus-fmt.rs"
 test = false
 
 [[bin]]
-name = "profile"
-path = "src/bin/profile.rs"
-test = false
-
-[[bin]]
 name = "oracle"
 path = "src/bin/oracle.rs"
 test = false

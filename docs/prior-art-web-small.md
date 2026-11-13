@@ -116,10 +116,6 @@ Adaptations:
   than a per-call 10-second context; this bounds a hung peer without adding a
   clock to this test's protocol assertion.
 
-`packages/grpc@1/interop/check.py` runs all 14 cases against grpc-go in both
-directions with isolated loopback grants, bounded clients and reaped servers.
-See its README for the measured results and reproduction command.
-
 ## Citation corrections
 
 HTML's replacement table is Go standard library `src/html/escape.go`, whose

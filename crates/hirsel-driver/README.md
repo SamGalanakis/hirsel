@@ -222,7 +222,6 @@ using the declaration-only loader and compiler resolver for dependency links.
 It retains source signatures, constructor payloads and attached doc comments,
 without checking bodies or exposing opaque representations or internal modules.
 Markdown and JSON share stable versioned definition-path anchors. std's manifest
-also publishes core registry entries through the same renderer in `docs/api.md`.
 
 Host timer waits expose their original absolute deadline to the interpreter's poll
 ordering. Several overdue timers resume by deadline, with suspension order breaking
@@ -258,7 +257,7 @@ links a program for a launch as an image of the toolchain's runner unless the
 toolchain selects executables (`Execution::Executable`) or the program needs one
 (any foreign-call surface, memcheck), and `link_tests` links a test package's
 dispatcher and adapters the same way; `launch_runnable`, the differential
-campaigns, `run --native` and `test --native` run either. A runner links the
+campaigns, `run` and `test` run either. A runner links the
 runtime archive and the kit's unwinder with `main` an lld alias of
 `hirsel_rt::runner`'s `hirsel_runner_main`, rooting and exporting its export
 manifest (the archive's `hirsel_rt*` definitions and the runtime symbols the

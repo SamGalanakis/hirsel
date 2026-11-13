@@ -1,6 +1,5 @@
 # The variables a native test or tool run sets from the unpacked toolchains of this
 # package: variable, toolchain target, path inside it. tools/buck2/test_launcher.sh
-# (from HIRSEL_TOOLCHAIN_<TARGET>) and bench/native/suite.py both read this table.
 HIRSEL_AARCH64_CC	arm	bin/aarch64-none-linux-gnu-gcc
 HIRSEL_AARCH64_SYSROOT	arm	aarch64-none-linux-gnu/libc
 HIRSEL_QEMU_AARCH64	qemu	qemu-aarch64

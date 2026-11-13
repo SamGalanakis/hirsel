@@ -4,6 +4,3 @@ native-tests/link/hello.hir x86_64-linux default
 native-tests/link/hello.hir x86_64-linux debug
 native-tests/link/hello.hir aarch64-linux default
 native-tests/link/hello.hir aarch64-linux debug
-examples/todo-api/hirsel.json x86_64-linux default
-examples/todo-api/hirsel.json aarch64-linux release
-examples/wordscan/hirsel.json x86_64-linux debug

@@ -14,7 +14,7 @@ an explicit policy for editable ASTs. GFM enables `Options.tagfilter`,
 ported from cmark-gfm `extensions/tagfilter.c:5-60`, independently of unsafe
 rendering. It escapes the leading angle bracket of the nine forbidden tags.
 
-`tools/generate-markdown-hostile.py` imports the following pinned vectors,
+The retired Markdown generator imported the following pinned vectors,
 each as a bounded Hirsel fixture. Programs within one million interpreter
 steps run in the conformance corpus. Sixteen measured larger fixtures run in
 budget and the Buck2 runner's timeout. Their sources and expected HTML are
@@ -87,8 +87,7 @@ The paragraph, text and emphasis subtree expectations are copied unchanged from
 `fd9a392ef45a4285d963c5a1530cafe46107d03c4b5fed363cf17d6d336d953e`.
 The bounded fixture also exercises existing safe/raw/GFM serialization and checks
 exact-cap equality against unrestricted output. Existing conformance importers
-`tools/generate-markdown.py`, `tools/generate-markdown-hostile.py` and
-`packages/fixtures/markdown_vectors@1/harness.hir` still call the unrestricted
+The former Markdown generators and harness called the unrestricted
 surface and retain their pinned oracles; no oracle regeneration is required.
 
 The cap and fallible byte sink are Hirsel adaptations, not upstream features.

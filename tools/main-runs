@@ -14,8 +14,7 @@ plan: it neither fetches nor consumes pool work. Stage selectors are name
 prefixes within the chosen tier; corpus selectors are repository-relative
 directories, cases or prefixes. Selections always prepare the pinned tools.
 
-Fast retains the build, Clippy, fmt, workspace/tool tests, GenMC and fresh std
-budget. The explicit conformance profile runs every interpreter directory in
+Fast retains the build, Clippy, fmt, workspace/tool tests, and GenMC. The explicit conformance profile runs every interpreter directory in
 at most 32 slices each; ownership-trace selects the registered diagnostic
 runtime tests; native-smoke selects the existing conformance smoke list.
 Full includes these profiles and the expensive release/native campaigns.
@@ -30,8 +29,7 @@ owner, code, infrastructure and exception-observation sections remain.
 RUNNING.md publishes completed targets and command identities during a run;
 only completed matching inputs can be reused. It is removed on completion.
 
-The manual run also regenerates docs/api.md and can ratchet measured budgets;
-these updates are pushed on main when changed. Invalid exception tables stop
+Invalid exception tables stop
 execution. Reports and runs.jsonl retain exception_status v1 and execution
 provenance. Only fresh complete exact passes are recovery candidates; cached,
 partial, skipped and unobserved results are not recovery proof.
@@ -61,10 +59,9 @@ from run_failures import first_error_line, infra_reason  # noqa: E402
 
 PY = sys.executable
 RUNS = Path(os.environ.get('HIRSEL_MAIN_RUNS') or Path.home() / '.local/state/hirsel/main-runs')
-RUN_TREE, PUSH_TREE = RUNS / 'worktrees/main-runs', RUNS / 'worktrees/main-push'
+RUN_TREE = RUNS / 'worktrees/main-runs'
 ROWS = RUNS / 'runs.jsonl'
 PASSED = (event_logs.PASS, event_logs.SKIP, event_logs.OMITTED)
-PERF_MARKER = 'PERF_COUNTS_RECORD '
 # The run's own settings, which the tool tests never inherit.
 RUN_VARIABLES = ('HIRSEL_BUCK2_CONFIG', 'HIRSEL_BUCK2_LOG_DIR', 'HIRSEL_PRIORITY', 'HIRSEL_MAIN_RUNS', 'HIRSEL_TEST_BATCH_SIZE', 'HIRSEL_TEST_BATCH_CONCURRENCY', 'HIRSEL_MAIN_RUN_PROGRESS')
 
@@ -262,7 +259,6 @@ def stages(stage, tier, *, planning=False):
     for test in sorted((TREE / 'tools/tests').glob('*.py')):
         stage(f'tool tests: tools/tests/{test.name}', [PY, str(test)], isolated=True)
     stage('tool tests: conformance.py --self-test', [PY, 'tools/buck2/conformance.py', '--self-test'], isolated=True)
-    stage('tool tests: bench/native/tests', [PY, '-m', 'unittest', 'discover', '-s', 'bench/native/tests'], isolated=True)
 
     def query(expression):
         if planning:
@@ -296,7 +292,6 @@ def stages(stage, tier, *, planning=False):
     stage('workspace tests', test(*tests), target_inventory=tests)
     # The Loom models are workspace crates (proofs/free/loom, proofs/heaps/loom), so in the stage above.
     stage('free-mode GenMC models', test('//:gate-free-genmc'))
-    stage('fresh std instruction budget', [PY, 'tools/perf-counts', '--fresh-std'])
     if tier == 'fast':
         return
     stage('retained component matrix: reference, heap, LLVM, Cranelift and Rust',
@@ -682,9 +677,6 @@ def run_stages(directory, log, tier, running=None, selectors=()):
                             if phase.get('phase') == 'corpus-case' and str(phase.get('detail', '')).startswith('conformance/'):
                                 observations.append(observation | dict(identity=phase['detail'], scope='case',
                                                                         wrongly_accepted=False))
-                if target == 'gate-perf-counts' and result['status'] == event_logs.PASS:
-                    perf.extend(json.loads(line.removeprefix(PERF_MARKER)) for line in
-                                result['details'].splitlines() if line.startswith(PERF_MARKER))
                 if result['status'] in PASSED:
                     continue
                 failed = True
@@ -932,41 +924,10 @@ def red_sections(sha, status, history, reds):
     return lines
 
 
-def push_to_main(message, update):
-    """Commit what `update(tree)` changes on a fresh origin/main and push it."""
-    for _ in range(5):
-        git('fetch', '-q', 'origin', 'main')
-        checkout(PUSH_TREE, git('rev-parse', 'refs/remotes/origin/main'))
-        update(PUSH_TREE)
-        if not git('status', '--porcelain', cwd=PUSH_TREE):
-            return None
-        git('commit', '-qam', message, cwd=PUSH_TREE)
-        if subprocess.run(['git', 'push', '-q', 'origin', 'HEAD:main'], cwd=PUSH_TREE).returncode == 0:
-            return git('rev-parse', 'HEAD', cwd=PUSH_TREE)
-    return None
 
 
-def api_index(tree):
-    cli = 'root//:hirsel-cli-bin-hirsel'
-    config = os.environ.get('HIRSEL_BUCK2_CONFIG', '').split()
-    built = subprocess.run([str(TREE / '.buck2/bin/buck2'), 'build', *config, '--show-json-output', cli], cwd=TREE,
-                           capture_output=True, text=True, check=True)
-    page = subprocess.run([str(TREE / json.loads(built.stdout)[cli]), 'doc', 'stdlib/std@1/hirsel.json'],
-                          cwd=TREE, capture_output=True, check=True).stdout
-    (tree / 'docs/api.md').write_bytes(page)
 
 
-def ratchet(measured, perf_checks):
-    def update(tree):
-        counts = runpy.run_path(str(tree / 'tools/perf-counts'))
-        rows, improvements = counts['ratchet'](counts['read_table'](tree / 'tools/perf-counts.tsv'), [measured])
-        # push_to_main can retry against a newer baseline. Only report the
-        # changes in the successful push, never a superseded attempt.
-        perf_checks[:] = [item for item in improvements
-                          if (item['old'] - item['new']) * 100 > item['old'] * 15]
-        if improvements:
-            (tree / 'tools/perf-counts.tsv').write_text(counts['table'](rows))
-    return update
 
 
 def run(sha, tier, selections=()):
@@ -1005,18 +966,6 @@ def publish(sha, tier, directory, start, reds, ran, skipped, perf, status,
     details = red_sections(sha, status, history, reds)
     owners = attribute(sha, reds, history)
     pushed, perf_checks = [], []
-    ratchet_checks = []
-    for name, update in (('Regenerate the API index.', api_index),
-                         ('Ratchet the instruction budgets main measured.', ratchet(perf, ratchet_checks) if perf else None)):
-        try:
-            if update_main and not configuration_error and update and (commit := push_to_main(name, update)):
-                pushed.append(f'{commit[:12]} {name}')
-                if name == 'Ratchet the instruction budgets main measured.':
-                    for item in ratchet_checks:
-                        say(f'PERF-CHECK {item["count"]} {item["old"]} -> {item["new"]} (run: {sha[:12]})')
-                        perf_checks.append(dict(item, measured_sha=sha, pushed=commit))
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, KeyError, ValueError) as error:
-            pushed.append(f'{name} failed: {error}')
     minutes = ((time.time() if finished is None else finished) - start) / 60
     infra = sum(red.get('kind') == 'infra' for red in reds.values())
     configurations = sum(red.get('kind') == 'configuration' for red in reds.values())

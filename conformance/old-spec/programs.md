@@ -117,7 +117,7 @@ or privileges.
 graph and its entry. A command on a source file uses that file's exact `file.hir.json`
 sidecar when present, else `standalone@0` with the toolchain's `std@1` as its only
 dependency; no parent manifest is searched for. A sidecar
-must assign the source to its root package. `hirsel fmt examples/configctl/hirsel.json`
+must assign the source to its root package. `hirsel fmt the retired source`
 formats only that package's explicit direct sources, in manifest order with canonical
 paths deduplicated; no entrypoint or dependency bodies are needed. `hirsel fmt file.hir`
 formats just that source. `--check` never writes and exits 1 for differences or 0 if

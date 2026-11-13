@@ -113,7 +113,7 @@ MANIFEST_REFERENCE = re.compile(r'"manifest"\s*:\s*"([^"]+)"')
 @functools.cache
 def corpus_packages() -> list[str]:
     """The directories of packages the corpus's manifests name outside the
-    corpus, the stdlib and packages/ (crate test fixtures), as globs."""
+    corpus and retained stdlib as globs."""
     found = set()
     for manifest in READS.glob(ROOT / "conformance", "**/*.json"):
         for reference in MANIFEST_REFERENCE.findall(READS.text(manifest)):
@@ -122,7 +122,7 @@ def corpus_packages() -> list[str]:
                 relative = target.parent.relative_to(ROOT).as_posix()
             except ValueError:
                 continue
-            if not relative.startswith(("conformance/", "packages/", "stdlib/")):
+            if not relative.startswith(("conformance/", "stdlib/")):
                 found.add(relative + "/**")
     return sorted(found)
 
@@ -138,13 +138,13 @@ def expand(paths: list[str]) -> list[str]:
 
 # A conformance program's manifests reach the stdlib, the package fixtures and
 # some crates' test packages.
-CORPUS_DATA = ["conformance/**", "packages/**", "stdlib/**", CORPUS_PACKAGES]
+CORPUS_DATA = ["conformance/**", "stdlib/**", CORPUS_PACKAGES]
 
 RUNTIME_DATA = {
     "hirsel-core-ir": ["crates/*/Cargo.toml"],
     "hirsel-cranelift": ["crates/hirsel-rt/include/**"],
     "hirsel-cli": [*CORPUS_DATA],
-    "hirsel-conformance": [*CORPUS_DATA, "bench/native/programs/**", "crates/hirsel-conformance/oracles/**", "conformance/old-spec/**", "native-tests/**"],
+    "hirsel-conformance": [*CORPUS_DATA, "crates/hirsel-conformance/oracles/**", "conformance/old-spec/**", "native-tests/**"],
     "hirsel-engine": ["stdlib/**"],
     "hirsel-driver": [*CORPUS_DATA, "conformance/old-spec/**", "native-tests/**"],
     "hirsel-candidate": [*CORPUS_DATA, "conformance/old-spec/**", "native-tests/**"],
@@ -162,10 +162,10 @@ RUNTIME_DATA = {
     # tools/native-toolchain/check reads Cargo.lock's llvm-sys pin.
     "hirsel-llvm": ["crates/hirsel-core-ir/samples/**", "Cargo.lock", "crates/hirsel-rt/include/**", "stdlib/**", "tools/native-toolchain/llvm-23.lock", "tools/native-toolchain/check", "tools/native-toolchain/fixtures/**"],
     "hirsel-authority": [*CORPUS_DATA],
-    "hirsel-ownership": [*CORPUS_DATA, "bench/native/programs/**", "crates/hirsel-driver/tests/fixtures/**"],
+    "hirsel-ownership": [*CORPUS_DATA, "crates/hirsel-driver/tests/fixtures/**"],
     "hirsel-parser": ["conformance/old-spec/**"],
     "hirsel-pipeline-tests": [
-        *CORPUS_DATA, "bench/native/programs/**", "crates/hirsel-driver/tests/fixtures/**", "crates/hirsel-rt/harness/**",
+        *CORPUS_DATA, "crates/hirsel-driver/tests/fixtures/**", "crates/hirsel-rt/harness/**",
         "crates/hirsel-rt/include/**", "conformance/old-spec/**", "native-tests/**", "tools/native-toolchain/llvm-23.lock", "tools/native-toolchain/check", "tools/native-toolchain/fixtures/**",
     ],
     "hirsel-rc": [*CORPUS_DATA, "crates/hirsel-rt/include/**", "native-tests/**"],
@@ -458,7 +458,7 @@ RUNTIME_ARCHIVE_VIEWS = {'hirsel-cli-bin-hirsel-unittest': ['x86_64-default', 'x
                        'aarch64-system-allocator+measurement',
                        'aarch64-diagnostic+system-allocator+measurement'],
  'hirsel-conformance-bin-native-unittest': ['x86_64-default']}
-# The deadline replay cells run `hirsel run --native` on the host.
+# The deadline replay cells run `hirsel run` on the host.
 REPLAY_VIEWS = ["x86_64-default"]
 
 
@@ -666,12 +666,10 @@ def check_cost_coverage() -> list[str]:
 # The corpus campaigns as tests over the whole corpus, so
 # an unchanged corpus and compiler are a cache hit on the pool.
 CORPUS = [
-    "bench/native/programs/**",
     "conformance/**",
     "crates/hirsel-conformance/Cargo.toml",
     "native-tests/**",
     "conformance/old-spec/**",
-    "packages/**",
     "stdlib/**",
     CORPUS_PACKAGES,
 ]
@@ -1305,13 +1303,6 @@ def first_party(meta: dict) -> str:
     out.append("\n" + call("hirsel_native_selection", name="native-selection", collector="//:hirsel-conformance-bin-native-select", products=PRODUCTS, data=Raw(f"glob({starlark(expand(CORPUS), 4)})")))
     for gate in GATE_TESTS + conformance_tests(READS):
         out.append("\n" + call("hirsel_command_test", **gate, products=PRODUCTS, data=Raw(f"glob({starlark(expand(CORPUS), 4)})")))
-    for index, family in enumerate(("match_try_fields", "record_fields", "nested_loops_try", "closure_captures", "if_chain", "deep_nesting"), 1):
-        name = f"gate-checker-scaling-shard-{index}"
-        # Cachegrind Ir under the pinned Valgrind (a native tool input), as gate-perf-counts.
-        out.append("\n" + call("hirsel_script_test", name=name, script="tools/checker-scaling.py", full=False,
-                               args=["--family", family, "--hirsel", f"buck-out/tmp/cargo-bin-exe/{name}/hirsel"],
-                               bin_exes={"hirsel": "//:hirsel-cli-bin-hirsel"}, runtime_archives=archive_views("x86_64-default"),
-                               products=PRODUCTS, data=Raw('glob(["tools/checker-scaling.py", "stdlib/**"])')))
     out.append("\n" + call("hirsel_test", name="hirsel-test-tool-profile", crate="test_tool_profile",
                             crate_root="tools/tests/test_tool_profile.rs", srcs=["tools/tests/test_tool_profile.rs"],
                             features=[], deps=[], manifest_dir=".", package_name="test-tool-profile",
@@ -1323,7 +1314,7 @@ def first_party(meta: dict) -> str:
                             products=PRODUCTS, std=Raw('glob(["stdlib/std@1/**"])'), visibility=["PUBLIC"]))
     out.append("\n" + call("hirsel_link_hosts_test", name="gate-link-hosts", listing="native-tests/link/hosts.txt",
                             runtime_archives=archive_views(*on_both("default")),
-                            data=Raw(f"glob({starlark(['native-tests/link/**', 'examples/todo-api/**', 'examples/wordscan/**', 'examples/common.hir', 'stdlib/std@1/**'], 4)})")))
+                            data=Raw('glob(["native-tests/link/**", "stdlib/std@1/**"])')))
     # Narrow real-I/O sanitizer/overlap probe: normal production dependencies only.
     out.append("\n" + call("hirsel_binary", name="io-real-workers", bin_name="io-real-workers", crate="io_real_workers",
                             crate_root="tools/tests/io_real_tsan.rs", srcs=["tools/tests/io_real_tsan.rs"],
@@ -1336,54 +1327,19 @@ def first_party(meta: dict) -> str:
     out.append("\n" + call("hirsel_tsan_runtime_archives", name="hirsel-rt-tsan-archives"))
     out.append("\n" + call("hirsel_script_test", name="test-workers-tsan", script="tools/tests/workers_tsan.py", full=False,
                             data=["tools/workers-tsan", "tools/tests/workers_tsan.py"]))
-    out.append("\n" + call("hirsel_script_test", name="gate-perf-counts", script="tools/perf-counts",
-                            full=False, production=True, bin_exes={"hirsel": "//:hirsel-cli-bin-hirsel"},
-                            products=PRODUCTS, runtime_archives=archive_views("x86_64-default"),
-                            data=Raw(f"glob({starlark(['bench/native/programs/**', 'bench/native/inputs/**', 'bench/native/manifest.json', 'bench/micro/**', 'examples/hello-web/**', 'examples/todo-api/**', 'examples/common.hir', 'stdlib/**', 'tools/perf-counts.tsv'], 4)})")))
     # GenMC is built on this host by proofs/free/check.sh (pinned, outside Buck2); its models run here.
     out.append("\n" + call("hirsel_script_test", name="gate-free-genmc", script="proofs/free/check.sh", full=False,
                             host=True, args=["--prebuilt", "genmc"], data=Raw('glob(["proofs/free/check.sh", "proofs/free/genmc/**", "proofs/loom.sh"])')))
     out.append("\n" + call("hirsel_script_test", name="gate-core-broker", script="tools/tests/core_broker.py", full=False,
                             data=["tools/core-broker", "tools/tests/core_broker.py"]))
-    out.append("\n" + call("hirsel_script_test", name="gate-langarena", script="bench/langarena/tests.py",
-                            full=False, production=True, bin_exes={"hirsel": "//:hirsel-cli-bin-hirsel"},
-                            products=PRODUCTS, runtime_archives=archive_views("x86_64-default"),
-                            data=Raw('glob(["bench/langarena/*.hir", "bench/langarena/*.py", "bench/langarena/*.js", "bench/micro/measure.py", "stdlib/**"])')))
-    for suite, case in (("bwt", "BwtOracles"), ("crc32", "CRC32Recurrence")):
-        for engine in ("interpreter", "llvm", "cranelift"):
-            name = f"gate-langarena-{suite}-9-{engine}"
-            out.append("\n" + call("hirsel_script_test", name=name, script=f"bench/langarena/tests_{suite}_9.py",
-                                    full=False, production=True, bin_exes={"hirsel": "//:hirsel-cli-bin-hirsel"},
-                                    args=["--hirsel", f"buck-out/tmp/cargo-bin-exe/{name}/hirsel", f"{case}.test_{engine}"],
-                                    runtime_archives=archive_views("x86_64-default"),
-                                    data=Raw('glob(["bench/langarena/*.hir", "bench/langarena/*.py", "bench/langarena/*.js", "bench/micro/measure.py", "stdlib/**"])')))
-    out.append("\n" + call("hirsel_script_test", name="gate-langarena-astar-9", script="bench/langarena/tests_astar_9.py",
-                            full=False, production=True, bin_exes={"hirsel": "//:hirsel-cli-bin-hirsel"},
-                            runtime_archives=archive_views("x86_64-default"),
-                            data=Raw('glob(["bench/langarena/*.hir", "bench/langarena/*.py", "bench/langarena/*.js", "bench/micro/measure.py", "stdlib/**"])')))
-    out.append("\n" + call("hirsel_script_test", name="gate-langarena-words-9", script="bench/langarena/tests_words_9.py",
-                            full=False, production=True, bin_exes={"hirsel": "//:hirsel-cli-bin-hirsel"},
-                            runtime_archives=archive_views("x86_64-default"),
-                            data=Raw('glob(["bench/langarena/words.hir", "bench/langarena/harness.hir", "bench/langarena/build.py", "bench/langarena/test.js", "stdlib/**"])')))
     out.append("\n" + call("hirsel_script_test", name="gate-distribution-notices", script="tools/tests/distribution_notices.py", full=False,
                             data=["tools/tests/distribution_notices.py"],
                             files_env={"HIRSEL_DISTRIBUTION_NOTICES": "//tools/toolchain-dist:notices.py"}))
-    # Four cost-balanced shards of two CPUs on the checked compiler, so a land
-    # compiles no release-profile code (docs/landing.md): the slowest manifest
-    # (Tasks) bounds each shard, and the rest fit beside it
-    # (tools/tests/package_manifests.py).
-    out.append("\n" + call("hirsel_script_test", name="test-package-manifests",
-                            script="tools/tests/package_manifests.py", full=False,
-                            bin_exes={"hirsel": "//:hirsel-cli-bin-hirsel"}, products=PRODUCTS,
-                            args=["--hirsel", "buck-out/tmp/cargo-bin-exe/test-package-manifests/hirsel",
-                                  "--costs", "tools/tests/package_manifests.tsv"],
-                            data=Raw('["tools/json-hooks", "tools/tests/package_manifests.tsv"] + glob(["packages/**", "examples/**", "stdlib/**"])'),
-                            shards=4))
     out.append("\n" + call("hirsel_script_test", name="test-land", script="tools/tests/land.py", full=False, host=True,
                             data=["tools/land", "tools/land-run", "tools/land_events.py", "tools/tests/land.py", "tools/check-hot-files", "tools/main-runs",
                                   "//tools/buck2:run_failures.py", "//tools/buck2:generated.py",
                                   "//tools/buck2:merging.py", "//tools/buck2:clippy.py", "//tools/buck2:fmt.py",
-                                  "//tools/buck2:event_logs.py", "//tools/buck2:rust_environment.py",
+                                  "//tools/buck2:event_logs.py", "//tools/buck2:conformance.py", "//tools/buck2:rust_environment.py",
                                   "//tools/buck2:priorities.bzl"],
                             files_env={"HIRSEL_TEST_CASE_FORMATTER": "//:hirsel-conformance-bin-hirsel-conformance"}))
     out.append("\n" + call("hirsel_test", name="test-report-fixture", crate="test_report_fixture",
@@ -1401,38 +1357,6 @@ def first_party(meta: dict) -> str:
                                        "HIRSEL_TEST_PRIVATE_NATIVE_INPUTS": "//tools/buck2:private_native_inputs.py",
                                        **{f"HIRSEL_TEST_{name.upper()}": f"//tools/buck2:{name}.bzl"
                                           for name in ("platforms", "test_requirements", "test_sizes", "exec_sizes", "priorities")}}))
-    out.append("\n" + call("hirsel_script_test", name="test-free-b1", script="tools/tests/free_b1.py", full=False,
-                            data=["tools/tests/free_b1.py", "bench/multicore/b1.py", "bench/micro/measure.py"]))
-    out.append("\n" + call("hirsel_script_test", name="test-tasks-bench", script="tools/tests/tasks_bench.py", full=False,
-                            data=["tools/tests/tasks_bench.py", "bench/apps/tasks/bench", "bench/apps/tasks/support.py",
-                                  "bench/micro/measure.py"]))
-    out.append("\n" + call("hirsel_script_test", name="test-json-hooks", script="tools/tests/test_json_hooks.py", full=False,
-                            args=["Unit"], data=["tools/json-hooks", "tools/tests/test_json_hooks.py"]))
-    out.append("\n" + call("hirsel_script_test", name="test-json-hooks-integration", script="tools/tests/test_json_hooks.py", full=False,
-                            args=["--hirsel", "buck-out/tmp/cargo-bin-exe/test-json-hooks-integration/hirsel", "Integration"],
-                            bin_exes={"hirsel": "//:hirsel-cli-bin-hirsel"}, products=PRODUCTS,
-                            runtime_archives=archive_views("x86_64-default"),
-                            data=Raw('glob(["tools/json-hooks", "tools/tests/test_json_hooks.py", "examples/typed-json-kit/main.hir", "examples/typed-json-kit/check.hir", "examples/typed-json-kit/hirsel.json", "examples/typed-json-kit/check.json", "stdlib/std@1/**"])')))
-    out.append("\n" + call("hirsel_script_test", name="test-portable-manifest", script="tools/tests/portable_manifest.py", full=False,
-                            data=["tools/portable-manifest", "tools/tests/portable_manifest.py"]))
-    out.append("\n" + call("hirsel_script_test", name="test-portable-manifest-integration", script="tools/tests/portable_manifest.py", full=False,
-                            args=["--hirsel", "buck-out/tmp/cargo-bin-exe/test-portable-manifest-integration/hirsel", "Integration"],
-                            bin_exes={"hirsel": "//:hirsel-cli-bin-hirsel"}, runtime_archives=archive_views("x86_64-default"),
-                            data=["tools/portable-manifest", "tools/tests/portable_manifest.py"]))
-    out.append("\n" + call("hirsel_script_test", name="test-native-verification-9", script="tools/tests/native_verification_9.py", full=False,
-                            args=["--hirsel", "buck-out/tmp/cargo-bin-exe/test-native-verification-9/hirsel"],
-                            bin_exes={"hirsel": "//:hirsel-cli-bin-hirsel"}, products=PRODUCTS,
-                            runtime_archives=archive_views("x86_64-default"),
-                            data=Raw('glob(["tools/tests/native_verification_9.py", "docs/native-verification.md", "examples/native-verification-9/**", "stdlib/**"])')))
-    # summerwind/h2spec v2.6.0, the latest release (tools/h2spec/run).
-    out.append("\n" + call("http_file", name="h2spec-release",
-                            urls=["https://github.com/summerwind/h2spec/releases/download/v2.6.0/h2spec_linux_amd64.tar.gz"],
-                            sha256="157ee0de702e01ad40e752dbf074b366027e550c8e7504f9450da2809e279318",
-                            size_bytes=5207004))
-    out.append("\n" + call("hirsel_script_test", name="gate-h2spec", script="tools/h2spec/run", full=False, production=True,
-                            bin_exes={"hirsel": "//:hirsel-cli-bin-hirsel"}, products=PRODUCTS,
-                            runtime_archives=archive_views("x86_64-default"), files_env={"H2SPEC_ARCHIVE": ":h2spec-release"},
-                            data=Raw(f"glob({starlark(['tools/h2spec/**', 'stdlib/std@1/**'], 4)})")))
     for name, script, data, archives in (
         ("gate-native-runtime-c", "crates/hirsel-rt/harness/run.sh", ["crates/hirsel-rt/harness/**", "crates/hirsel-rt/include/**"], archive_views(*on_both("default", "diagnostic"))),
         ("gate-native-library-c", "native-tests/library/run-c.sh", ["native-tests/library/**", "crates/hirsel-rt/include/**", "stdlib/native/**"], archive_views(*on_both("default", "diagnostic"))),

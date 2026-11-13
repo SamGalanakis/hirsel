@@ -42,6 +42,7 @@ fn allocation<const N: usize>(runtime: bool) -> u64 {
     sum
 }
 
+#[inline(never)]
 fn emitted_growth() -> u64 {
     let ctx = Context::new(u64::MAX);
     let mut data: *mut u64 = ptr::null_mut();
@@ -97,31 +98,41 @@ fn emitted_growth() -> u64 {
 }
 
 fn growth(mode: &str) -> u64 {
-    if mode == "runtime" {
-        return emitted_growth();
+    match mode {
+        "rust" => rust_growth(),
+        "matched" => matched_growth(),
+        "runtime" => emitted_growth(),
+        _ => wrapped_growth(),
     }
-    if mode == "rust" {
-        let mut values = Vec::new();
-        for i in 0..COUNT {
-            values.push(black_box(i));
+}
+
+#[inline(never)]
+fn rust_growth() -> u64 {
+    let mut values = Vec::new();
+    for i in 0..COUNT {
+        values.push(black_box(i));
+    }
+    return black_box(values).iter().sum();
+}
+
+#[inline(never)]
+fn matched_growth() -> u64 {
+    let mut values = Vec::new();
+    for i in 0..COUNT {
+        if values.len() == values.capacity() {
+            let capacity = charge::grown_capacity(values.capacity() as u64, values.len() as u64 + 1)
+                .unwrap() as usize;
+            let mut next = Vec::with_capacity(capacity);
+            next.extend_from_slice(&values);
+            values = next;
         }
-        return black_box(values).iter().sum();
+        values.push(black_box(i));
     }
-    if mode == "matched" {
-        let mut values = Vec::new();
-        for i in 0..COUNT {
-            if values.len() == values.capacity() {
-                let capacity =
-                    charge::grown_capacity(values.capacity() as u64, values.len() as u64 + 1)
-                        .unwrap() as usize;
-                let mut next = Vec::with_capacity(capacity);
-                next.extend_from_slice(&values);
-                values = next;
-            }
-            values.push(black_box(i));
-        }
-        return black_box(values).iter().sum();
-    }
+    return black_box(values).iter().sum();
+}
+
+#[inline(never)]
+fn wrapped_growth() -> u64 {
     let ctx = Context::new(u64::MAX);
     let mut storage: Option<Block> = None;
     let mut capacity = 0;

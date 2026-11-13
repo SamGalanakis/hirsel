@@ -131,6 +131,9 @@ class Land(unittest.TestCase):
                                'tools/buck2/run_failures.py': (ROOT / 'tools/buck2/run_failures.py').read_text(),
                                'tools/buck2/rust_environment.py': (ROOT / 'tools/buck2/rust_environment.py').read_text(),
                                'tools/buck2/priorities.bzl': (ROOT / 'tools/buck2/priorities.bzl').read_text(),
+                               'core/tools/std_api_index.py': (ROOT / 'core/tools/std_api_index.py').read_text(),
+                               'core/std/example.hirsel': 'pub fn present() -> void {}\n',
+                               'core/std/API.md': '| Module | Extends | Ops | Operations |\n| **total** | | | |\n',
                                '.gitignore': '.buck2/\n__pycache__/\n'})
         # The line-list audit imports main-runs' exact corpus ID expansion.
         source = (ROOT / 'tools/buck2/conformance.py').read_text()
@@ -141,6 +144,8 @@ class Land(unittest.TestCase):
             (self.lane / name).parent.mkdir(parents=True, exist_ok=True)
             (self.lane / name).write_text(text)
         (self.lane / '.buck2/bin/buck2').chmod(0o755)
+        subprocess.run([sys.executable, 'core/tools/std_api_index.py', '--write'],
+                       cwd=self.lane, check=True)
         self.git(self.lane, 'checkout', '-q', '-b', 'main')
         self.git(self.lane, 'add', '-A')
         self.git(self.lane, 'commit', '-qm', 'base')
@@ -175,6 +180,23 @@ class Land(unittest.TestCase):
         self.assertIn('FAIL  Core suites', refused.stdout)
         self.assertIn('custody native agreement failed', refused.stdout)
         self.assertEqual(self.main_log(), ['base'])
+
+    def test_stale_std_api_index_refuses_the_push_until_regenerated(self):
+        source = self.lane / 'core/std/example.hirsel'
+        source.write_text(source.read_text() + 'pub fn added() -> void {}\n')
+        self.git(self.lane, 'add', 'core/std/example.hirsel')
+        self.git(self.lane, 'commit', '-qm', 'add an operation without updating its index')
+        refused = self.land()
+        self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+        self.assertIn('FAIL  screen: std API index', refused.stdout)
+        self.assertIn('operation index is stale', refused.stdout)
+        self.assertEqual(self.main_log(), ['base'])
+        subprocess.run([sys.executable, 'core/tools/std_api_index.py', '--write'],
+                       cwd=self.lane, check=True)
+        self.git(self.lane, 'add', 'core/std/API.md')
+        self.git(self.lane, 'commit', '-qm', 'regenerate the operation index')
+        accepted = self.land()
+        self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
 
     def test_red_whole_core_suite_refuses_the_push(self):
         (self.lane / 'broken-core-suite').write_text('broken evaluator body\n')

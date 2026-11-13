@@ -1377,7 +1377,7 @@ def first_party(meta: dict) -> str:
                             data=["tools/tests/distribution_notices.py"],
                             files_env={"HIRSEL_DISTRIBUTION_NOTICES": "//tools/toolchain-dist:notices.py"}))
     out.append("\n" + call("hirsel_script_test", name="test-land", script="tools/tests/land.py", full=False, host=True,
-                            data=["tools/land", "tools/land-run", "tools/land_events.py", "tools/tests/land.py", "tools/check-hot-files", "tools/main-runs",
+                            data=["tools/land", "tools/land-run", "tools/land_events.py", "tools/tests/land.py", "tools/check-hot-files", "tools/main-runs", "core/tools/std_api_index.py",
                                   "//tools/buck2:run_failures.py", "//tools/buck2:generated.py",
                                   "//tools/buck2:merging.py", "//tools/buck2:clippy.py", "//tools/buck2:fmt.py",
                                   "//tools/buck2:event_logs.py", "//tools/buck2:conformance.py", "//tools/buck2:rust_environment.py",

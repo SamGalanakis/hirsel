@@ -531,6 +531,7 @@ def fast(tree, base=None):
     report = (check('screen: prepare.py', [PY, 'tools/buck2/prepare.py'])
               or check('screen: sync.py --if-stale', [PY, 'tools/buck2/sync.py', '--if-stale'])
               or check('screen: independent line lists', [PY, 'tools/check-hot-files'])
+              or check('screen: std API index', [PY, 'core/tools/std_api_index.py', '--check'])
               or check('screen: formatting', formatting)
               or check('screen: source audits', [BUCK2, 'test', *CONFIG, *SOURCE_AUDITS]))
     if not unchanged(tree):

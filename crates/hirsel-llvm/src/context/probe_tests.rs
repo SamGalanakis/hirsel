@@ -60,6 +60,22 @@ fn every_emitted_function_probes_its_frame_within_the_guard() {
         module.emit_object(&machine).unwrap();
         assert_probes(&module.text(), &target.triple, 2);
     }
+    // The lazy C-ABI phase must probe just as the direct Rust phase does.
+    // This live 256 KiB frame makes a missing or different probe interval
+    // observable in the object even when a program would fault by accident.
+    for speed in [false, true] {
+        let machine = TargetMachine::new(&TargetSpec::x86_64_unknown_linux_gnu(), speed).unwrap();
+        let context = Context::new();
+        let module = Module::parse(&context, "hirsel-core", IR).unwrap();
+        module.set_target(&machine);
+        if speed {
+            module.run_core_passes(&machine).unwrap();
+        }
+        let direct = module.emit_object(&machine).unwrap();
+        assert_probes(&module.text(), "lazy CoreIR reference", 2);
+        let lazy = hirsel_llvm_lazy::compile_ir(IR, speed).unwrap();
+        assert_eq!(lazy, direct, "lazy probe interval, speed={speed}");
+    }
     let core_ir = hirsel_core_ir::text::parse(
         r#"core v1
 type t0 = own "Probe" { value: u64 }

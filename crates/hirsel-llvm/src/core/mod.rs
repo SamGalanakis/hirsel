@@ -3,7 +3,7 @@
 
 /// Frozen native memory layout, shared with hirsel-core-rt.
 pub mod memory_layout {
-    include!("../../hirsel-core-rt/src/abi_layout.rs");
+    include!("../../../hirsel-core-rt/src/abi_layout.rs");
 }
 
 mod abi;
@@ -16,7 +16,7 @@ mod fast;
 mod scalar;
 mod storage;
 mod tasks;
-#[cfg(test)]
+#[cfg(all(test, not(hirsel_lazy_core)))]
 mod tests;
 
 use std::collections::BTreeSet;
@@ -24,6 +24,7 @@ use std::fmt::{self, Write};
 
 use hirsel_core_ir::*;
 
+#[cfg(not(hirsel_lazy_core))]
 use crate::context::{Context, Module as LlvmModule, TargetMachine};
 
 /// Optimisation of the generated object. All levels preserve checked arithmetic.
@@ -189,7 +190,15 @@ pub fn emit_ir(module: &Module) -> Result<String> {
 /// retained LLVM target/handle machinery, without the old product pipeline.
 /// The caller supplies its linker and entry harness; objects have FORM symbols.
 pub fn emit_object(module: &Module, opt: Optimization) -> Result<Vec<u8>> {
-    compile(module, opt, |_| (), |_| ()).map(|(bytes, ())| bytes)
+    #[cfg(not(hirsel_lazy_core))]
+    {
+        compile(module, opt, |_| (), |_| ()).map(|(bytes, ())| bytes)
+    }
+    #[cfg(hirsel_lazy_core)]
+    {
+        crate::loader::compile(&emit_ir(module)?, matches!(opt, Optimization::Speed))
+            .map_err(Error::Llvm)
+    }
 }
 
 /// Exclusive compilation stages, for the developer measurement entry.
@@ -204,6 +213,7 @@ pub enum CompilationStage {
 }
 
 /// Observe stage boundaries without changing the generated program.
+#[cfg(not(hirsel_lazy_core))]
 pub fn emit_object_observed(
     module: &Module,
     opt: Optimization,
@@ -212,11 +222,12 @@ pub fn emit_object_observed(
     compile(module, opt, |_| (), observer).map(|(bytes, ())| bytes)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(hirsel_lazy_core)))]
 pub(crate) fn emitted_ir(module: &Module, opt: Optimization) -> Result<String> {
     compile(module, opt, |llvm| llvm.text(), |_| ()).map(|(_, ir)| ir)
 }
 
+#[cfg(not(hirsel_lazy_core))]
 fn compile<R>(
     module: &Module,
     opt: Optimization,

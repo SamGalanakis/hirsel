@@ -707,7 +707,7 @@ dependencies = [
  "hirsel-cranelift",
  "hirsel-guard",
  "hirsel-intern",
- "hirsel-llvm",
+ "hirsel-llvm-lazy",
  "object",
  "serde",
  "serde_json",
@@ -1202,12 +1202,23 @@ dependencies = [
  "hirsel-intern",
  "hirsel-layout",
  "hirsel-lir",
+ "hirsel-llvm-lazy",
  "hirsel-run-schema",
  "hirsel-syntax",
  "hirsel-tir",
  "hirsel-types",
  "llvm-sys",
  "object",
+]
+
+[[package]]
+name = "hirsel-llvm-lazy"
+version = "0.1.0"
+dependencies = [
+ "hirsel-core-ir",
+ "hirsel-core-layout",
+ "hirsel-guard",
+ "libc",
 ]
 
 [[package]]

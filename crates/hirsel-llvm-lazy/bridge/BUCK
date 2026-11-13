@@ -1,0 +1,20 @@
+cxx_library(
+    name = "engine",
+    srcs = ["engine.c"],
+    compiler_flags = ["-O2", "-fvisibility=hidden"],
+    deps = ["toolchains//:libllvm"],
+    preferred_linkage = "shared",
+    visibility = ["PUBLIC"],
+)
+
+# Embed the actual shared artifact, with no link edge from the Rust compiler
+# binary to it or libLLVM. include! resolves the adjacent image at compile time.
+genrule(
+    name = "image",
+    out = "OUT_DIR",
+    cmd = """mkdir -p "$OUT"
+cp "$(location :engine[shared])" "$OUT/engine.so"
+printf '%s\\n' 'static COMPONENT: &[u8] = include_bytes!("engine.so");' 'const LLVM_LIBRARY: &str = "libLLVM.so.23.1";' > "$OUT/component.rs"
+""",
+    visibility = ["PUBLIC"],
+)

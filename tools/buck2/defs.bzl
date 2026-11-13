@@ -128,10 +128,16 @@ def _codegen_flags(name):
     })
 
 def _flags(manifest_dir, extra = [], host_code = False, target = None):
+    if manifest_dir in ["crates/hirsel-llvm", "crates/hirsel-llvm-lazy"]:
+        extra = extra + ["--check-cfg=cfg(hirsel_lazy_core)"]
+    if manifest_dir == "crates/hirsel-llvm-lazy":
+        extra = extra + ["--cfg=hirsel_lazy_core"]
     return ["-Zunstable-options", _env_set("CARGO_MANIFEST_DIR", _from_package(manifest_dir, manifest_dir))] + extra + workspace_profile_flags(host_code) + (_codegen_flags(target) if target else []) + runtime_profile_flags(manifest_dir.split("/")[-1].replace("-", "_"))
 
 def _compile_env(package_name, crate, version, build_script):
     env = _cargo_env(package_name, crate, version)
+    if package_name == "hirsel-llvm-lazy":
+        env["OUT_DIR"] = "$(location //crates/hirsel-llvm-lazy/bridge:image)"
     if build_script:
         env["OUT_DIR"] = "$(location {})".format(build_script)
     return env

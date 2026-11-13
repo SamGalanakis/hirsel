@@ -170,7 +170,7 @@ class Resolution:
             # Reindeer's exact base label is filled in from its manifest env.
             return None
         if kind == 'custom-build':
-            return name + '-build-script' if mode == 'run-custom-build' and name != 'hirsel-llvm' else None
+            return name + '-build-script' if mode == 'run-custom-build' and name not in ('hirsel-llvm', 'hirsel-llvm-lazy') else None
         if kind in ('lib', 'rlib', 'staticlib', 'proc-macro'):
             return name + ('-unittest' if mode == 'test' else '')
         if kind == 'bin':

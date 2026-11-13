@@ -1212,7 +1212,7 @@ def first_party(meta: dict) -> str:
         lib = next((t for t in package["targets"] if set(t["kind"]) & {"lib", "rlib", "staticlib"}), None)
         build = next((t for t in package["targets"] if t["kind"] == ["custom-build"]), None)
         build_script = None
-        if build and name != "hirsel-llvm":
+        if build and name not in ("hirsel-llvm", "hirsel-llvm-lazy"):
             build_script = f"{name}-build-script"
             src = pathlib.Path(build["src_path"])
             out.append("\n" + call(

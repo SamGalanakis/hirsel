@@ -1542,3 +1542,27 @@ fn joined_cause_views_use_core_layout() {
     assert_eq!(actual[0].used, 0);
     assert_eq!(actual[0].trace, vec![7]);
 }
+
+#[test]
+fn lazy_component_preserves_exact_core_objects() {
+    for source in [
+        include_str!("../../../hirsel-core-ir/samples/arith.core"),
+        include_str!("../../../hirsel-core-ir/samples/strings.core"),
+        include_str!("../../../hirsel-core-ir/samples/custody.core"),
+    ] {
+        let module = text::parse(source).unwrap();
+        for speed in [false, true] {
+            let direct = emit_object(
+                &module,
+                if speed {
+                    Optimization::Speed
+                } else {
+                    Optimization::None
+                },
+            )
+            .unwrap();
+            let lazy = hirsel_llvm_lazy::compile_ir(&emit_ir(&module).unwrap(), speed).unwrap();
+            assert_eq!(lazy, direct, "identical LLVM objects, speed={speed}");
+        }
+    }
+}

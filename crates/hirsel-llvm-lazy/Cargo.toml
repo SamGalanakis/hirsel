@@ -1,0 +1,14 @@
+[package]
+name = "hirsel-llvm-lazy"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hirsel-core-ir = { path = "../hirsel-core-ir" }
+hirsel-core-layout = { path = "../hirsel-core-layout" }
+libc = "0.2"
+
+[dev-dependencies]
+hirsel-guard = { path = "../hirsel-guard" }

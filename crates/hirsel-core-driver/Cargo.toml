@@ -17,7 +17,7 @@ hirsel-core-front = { path = "../hirsel-core-front" }
 hirsel-core-ir = { path = "../hirsel-core-ir" }
 hirsel-core-layout = { path = "../hirsel-core-layout" }
 hirsel-cranelift = { path = "../hirsel-cranelift" }
-hirsel-llvm = { path = "../hirsel-llvm" }
+hirsel-llvm-lazy = { path = "../hirsel-llvm-lazy" }
 hirsel-intern = { path = "../hirsel-intern" }
 hirsel-guard = { path = "../hirsel-guard" }
 serde = { version = "1", features = ["derive", "rc"] }

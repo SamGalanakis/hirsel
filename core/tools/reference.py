@@ -70,6 +70,10 @@ def json_ref(text, variant):
                 # Corpus numeric lexemes are canonical integers or -2.5. No float-format oracle coupling.
                 if '1e999' in line:
                     error = f'InvalidNumber@document{i}'
+                elif variant == f'capacity:document{i}.blob':
+                    # The matched reservation is reached only after sizing accepts
+                    # the entire document; it precedes every publication write.
+                    error = f'Capacity@document{i}.blob'
                 else:
                     p = doc
                     for key in path:
@@ -341,7 +345,7 @@ def datasets():
         return [('small', small, 'normal'), ('normal', large, 'normal'), *extra]
     return {
         'request-scratch': cases(small_requests, requests, [('error', small_requests, 'error'), ('malformed', small_requests.replace('Content: abc', 'broken'), 'normal'), ('capacity', small_requests, 'capacity:request2.header2'), ('capacity-reply', small_requests, 'capacity:request2.reply')]),
-        'json': cases(small_json, documents, [('pretty', small_json, 'print'), ('error', small_json + '{"items":[1,]}\n', 'normal'), ('missing', '/missing\n{}\n', 'normal'), ('wrong-kind', '/x\n1\n', 'normal'), ('invalid-number', '/x\n{"x":1e999}\n', 'normal'), ('capacity', small_json+small_json.split('\n')[1]+'\n', 'capacity:document2.node3')]),
+        'json': cases(small_json, documents, [('pretty', small_json, 'print'), ('error', small_json + '{"items":[1,]}\n', 'normal'), ('missing', '/missing\n{}\n', 'normal'), ('wrong-kind', '/x\n1\n', 'normal'), ('invalid-number', '/x\n{"x":1e999}\n', 'normal'), ('capacity', small_json+small_json.split('\n')[1]+'\n', 'capacity:document2.node3', ['idiomatic']), ('capacity-blob', small_json+small_json.split('\n')[1]+'\n', 'capacity:document2.blob', ['matched'])]),
         'lru': cases(small_lru, lru_ops, [('error', lru_ops+'S\n', 'normal'), ('capacity', small_lru, 'capacity:put2.payload')]),
         'bfs': cases(graph_small, graph, [('error', '3 0 2\n0 1\n', 'normal'), ('invalid', '3 0 2\n0 3\n', 'normal'), *[(f'capacity-{i}', graph_small, 'capacity:'+site) for i, site in enumerate(['search.parent', 'search.queue', 'result.path'])]]),
         'pipeline': cases(small_rows, rows, [('error', small_rows, 'error'), ('capacity', small_rows, 'capacity:batch2.output'), ('cancel', small_rows, 'cancel'), ('cancel-receive', small_rows, 'cancel-receive'), ('cancel-send', small_rows, 'cancel-send')]),
@@ -355,18 +359,23 @@ def datasets():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--write', action='store_true')
+    parser.add_argument('--only', nargs='+', choices=sorted(REFERENCES))
     args = parser.parse_args()
     total = 0
     for name, cases in datasets().items():
+        if args.only and name not in args.only:
+            continue
         directory = CORPUS / name
         if args.write:
             directory.mkdir(parents=True, exist_ok=True)
             (directory/'inputs').mkdir(exist_ok=True)
             (directory/'EXPECTED').mkdir(exist_ok=True)
         listing = []
-        for case, data, variant in cases:
+        for case, data, variant, *layouts in cases:
             stdout, code = REFERENCES[name](data, variant)
             listing.append({'name': case, 'input': f'inputs/{case}.txt', 'variant': variant})
+            if layouts:
+                listing[-1]['layouts'] = layouts[0]
             files = {f'inputs/{case}.txt': data, f'EXPECTED/{case}.stdout': stdout, f'EXPECTED/{case}.stderr': '', f'EXPECTED/{case}.exit': str(code)+'\n'}
             for file, value in files.items():
                 path = directory / file

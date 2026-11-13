@@ -508,9 +508,7 @@ fn m1_program_manifest() {
                 matches!(
                     index.module_path(m.id).package.name.as_str(),
                     "core" | "std" | "m1"
-                ) || m.id == entry.id
-                    || (index.module_path(entry.id).package.name == "files"
-                        && index.module_package(m.id) == index.module_package(entry.id))
+                ) || index.module_package(m.id) == index.module_package(entry.id)
             })
             .map(|m| ModuleInput {
                 id: m.id,

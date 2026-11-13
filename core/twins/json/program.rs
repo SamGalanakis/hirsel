@@ -9,6 +9,10 @@ pub enum Value<N> {
 }
 pub trait Document: Default {
     type Node;
+    const NODE_ADMISSIONS: bool = true;
+    fn prepare(&mut self, _input: &str, _document: usize, _admission: &Admission) -> Result<()> {
+        Ok(())
+    }
     fn node(&mut self, v: Value<Self::Node>) -> Self::Node;
     fn pretty(&self, n: &Self::Node) -> String;
     fn query(&self, n: &Self::Node, path: &[&str]) -> Result<String>;
@@ -146,8 +150,10 @@ impl<D: Document> Parser<'_, '_, D> {
     fn value(&mut self) -> Result<D::Node> {
         self.ws();
         self.nodes += 1;
-        self.admission
-            .at(&format!("document{}.node{}", self.document, self.nodes))?;
+        if D::NODE_ADMISSIONS {
+            self.admission
+                .at(&format!("document{}.node{}", self.document, self.nodes))?;
+        }
         let v = match self.src.get(self.at) {
             Some(b'"') => Value::Text(self.string()?),
             Some(b'[') => {
@@ -218,6 +224,27 @@ impl<D: Document> Parser<'_, '_, D> {
         Ok(self.store.node(v))
     }
 }
+pub fn parse_into<D: Document>(
+    source: &str,
+    document: usize,
+    admission: &Admission,
+    store: &mut D,
+) -> Result<D::Node> {
+    let mut parser = Parser {
+        src: source.as_bytes(),
+        at: 0,
+        nodes: 0,
+        document,
+        admission,
+        store,
+    };
+    let root = parser.value()?;
+    parser.ws();
+    if parser.at != parser.src.len() {
+        return Err("Syntax".into());
+    }
+    Ok(root)
+}
 pub fn quote(s: &str) -> String {
     let mut out = String::from("\"");
     for c in s.chars() {
@@ -264,20 +291,8 @@ pub fn run<D: Document>() {
             let _region = Resource::new(format!("document{}", i + 1), &trace);
             let mut store = D::default();
             let parsed = (|| {
-                let mut p = Parser {
-                    src: line.as_bytes(),
-                    at: 0,
-                    nodes: 0,
-                    document: i + 1,
-                    admission: &admission,
-                    store: &mut store,
-                };
-                let root = p.value()?;
-                p.ws();
-                if p.at != p.src.len() {
-                    return Err("Syntax".into());
-                }
-                Ok(root)
+                store.prepare(line, i + 1, &admission)?;
+                parse_into(line, i + 1, &admission, &mut store)
             })();
             let root = parsed.map_err(|e: String| {
                 if e.starts_with("Capacity") {

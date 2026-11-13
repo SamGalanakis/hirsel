@@ -1,4 +1,4 @@
-type Entry {
+type Entry: key {
     key: String,
     payload: String,
     prev: Option[std.pool.Id[Entry]],

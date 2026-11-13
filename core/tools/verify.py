@@ -17,7 +17,7 @@ def verify(binary_dir, selected=None):
         if not directory.is_dir() or selected and directory.name not in selected:
             continue
         for case in json.loads((directory/'cases.json').read_text()):
-            for layout in ('idiomatic', 'matched'):
+            for layout in case.get('layouts', ('idiomatic', 'matched')):
                 binary = binary_dir / f'{directory.name}-{layout}'
                 result = subprocess.run([str(binary), str(directory/case['input']), case['variant']], capture_output=True)
                 expected = directory / 'EXPECTED' / case['name']

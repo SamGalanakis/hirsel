@@ -54,8 +54,14 @@ fn event(tx: Sender[Event], prefix: String, name: String) -> Result[(), m1.suppo
 fn acquired(take handle: Option[HostFile], take lock: Option[std.file.Lock], name: String, variant: String, tx: Sender[Event]) -> Result[Owned, m1.support.Error] {
     let mut failure = m1.support.mem(string.from("error-release-"))?
     m1.support.add(mut failure, name)?
-    event(tx, "acquire=", name)?
-    m1.support.mem(Owned(handle: take handle, lock: take lock, name: m1.support.mem(string.from(name))?, injected: variant == failure || variant == "error-cleanup-all", tx: channel.sender(tx)))
+    let mut line = m1.support.mem(string.from("acquire="))?
+    m1.support.add(mut line, name)?
+    let owner = m1.support.mem(result.capacity_only(Owned(handle: take handle, lock: take lock, name: m1.support.mem(string.from(name))?, injected: variant == failure || variant == "error-cleanup-all", tx: channel.sender(tx))))?
+    match channel.try_send(tx, Line(take line)) {
+        Ok(()) => {},
+        Error(_) => fail("trace capacity")
+    }
+    Ok(take owner)
 }
 
 fn io[T](take r: Result[T, IoError], label: String) -> Result[T, m1.support.Error] {
@@ -63,6 +69,15 @@ fn io[T](take r: Result[T, IoError], label: String) -> Result[T, m1.support.Erro
         Ok(take x) => Ok(take x),
         Error(_) => Error(m1.support.error(m1.support.mem(string.from(label))?))
     }
+}
+
+// A refused Lock never held an OS lock. Its returned file is cleaned in this
+// scope, shielded as mechanical cleanup, before Capacity is propagated.
+fn lock_capacity(c: Capacity, take returned: HostFile) -> Result[(), m1.support.Error] {
+    {
+        let file_to_close = returned
+    }
+    m1.support.mem(Error(c))
 }
 
 fn copy_files(d: Dir, variant: String, tx: Sender[Event]) -> Result[(), m1.support.Error] waits {
@@ -78,7 +93,7 @@ fn copy_files(d: Dir, variant: String, tx: Sender[Event]) -> Result[(), m1.suppo
     let lf = io(std.file.open(d, "lock.txt", Append), "Lock@acquire")?
     let locked = match std.file.try_lock(take lf) {
         Ok(take l) => l,
-        Error(Capacity(c, _)) => return m1.support.mem(Error(c)),
+        Error(Capacity(c, take returned)) => return lock_capacity(c, take returned),
         Error(_) => return Error(m1.support.error("Lock@acquire"))
     }
     let lock_owner = acquired(None, Some(take locked), "lock", variant, tx)?
@@ -119,7 +134,13 @@ fn copy_files(d: Dir, variant: String, tx: Sender[Event]) -> Result[(), m1.suppo
 fn run(out: Stdout, parent: Dir, input: String, variant: String, take tx: Sender[Event], take rx: Receiver[Event]) -> Result[(), m1.support.Error] waits {
     let mut name = m1.support.mem(string.with_capacity(32))?
     let directory = io(std.dir.create_temp(parent, mut name), "Io@temp")?
-    let temporary = m1.support.mem(Temp(parent: parent, name: take name))?
+    let temporary = match Temp(parent: parent, name: take name) {
+        Ok(take t) => t,
+        Error((c, (owner, take returned_name))) => {
+            let _ = std.dir.remove_all(owner, returned_name)
+            return m1.support.mem(Error(c))
+        },
+    }
     io(std.file.write(directory, "source.txt", string.as_bytes(input)), "Io@setup")?
     if variant == "error-second" {
         io(std.file.write(directory, "destination.txt", b"existing"), "Io@setup")?
@@ -129,6 +150,7 @@ fn run(out: Stdout, parent: Dir, input: String, variant: String, take tx: Sender
         let f = io(std.file.open(directory, "lock.txt", Append), "Io@setup")?
         holder = Some(match std.file.try_lock(take f) {
             Ok(take l) => l,
+            Error(Capacity(c, take returned)) => return lock_capacity(c, take returned),
             Error(_) => return Error(m1.support.error("Lock@setup"))
         })
     }
@@ -137,6 +159,7 @@ fn run(out: Stdout, parent: Dir, input: String, variant: String, take tx: Sender
     let probe = io(std.file.open(directory, "lock.txt", Append), "Io@probe")?
     let free = match std.file.try_lock(take probe) {
         Ok(_) => true,
+        Error(Capacity(c, take returned)) => return lock_capacity(c, take returned),
         Error(_) => false
     }
     let data = match std.file.read(directory, "destination.txt") {

@@ -73,7 +73,7 @@ fn batch(id: u64, take rows: List[String], released: Sender[u64]) -> Result[Batc
         m1.support.add(mut data, row)?
         m1.support.push(mut offsets, int.narrow(string.byte_len(data)))?
     }
-    m1.support.mem(Batch(id: id, data: take data, offsets: take offsets, released: channel.sender(released)))
+    m1.support.mem(result.capacity_only(Batch(id: id, data: take data, offsets: take offsets, released: channel.sender(released))))
 }
 
 fn publish(tx: Sender[Batch], take b: Batch) -> bool waits {
@@ -152,7 +152,8 @@ fn upper(mut b: Batch) -> Result[(), m1.support.Error] {
 
 fn transform(take t: Transform) -> Result[TransformResult, m1.support.Error] waits {
     let _ = channel.receive(t.start)
-    if t.variant == "cancel-send" {
+    let cancel_send = t.variant == "cancel-send"
+    if cancel_send {
         let mut count: u64 = 0
         while count < 8 {
             let _ = channel.receive(t.input);

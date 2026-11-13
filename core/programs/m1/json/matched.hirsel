@@ -1,0 +1,185 @@
+fn problem(e: std.json.Error, number: u64) -> Result[m1.support.Error, m1.support.Error] {
+    let label = match e {
+        Syntax(_) => m1.support.name("Syntax@document", number, "")?,
+        NotFinite(_) => m1.support.name("InvalidNumber@document", number, "")?,
+        Build(Capacity(c)) => return Ok(m1.support.Error(code: 3, label: "Capacity@ambient", capacity: Some(c))),
+        Build(Overflow) => m1.support.name("Build@document", number, "")?,
+    }
+    Ok(m1.support.error(take label))
+}
+
+fn size(s: String, number: u64) -> Result[u64, m1.support.Error] {
+    match std.json.size(s) {
+        Ok(n) => Ok(n),
+        Error(e) => Error(problem(e, number)?)
+    }
+}
+
+fn parse(r: Region, s: String, number: u64) -> Result[std.json.Json in r, m1.support.Error] {
+    match std.json.parse(r, s) {
+        Ok(j) => Ok(j),
+        Error(e) => Error(problem(e, number)?)
+    }
+}
+
+fn render(mut out: String, j: std.json.Json, depth: u64, pretty: bool) -> Result[(), m1.support.Error] {
+    match j {
+        Null => m1.support.add(mut out, "null"),
+        False => m1.support.add(mut out, "false"),
+        True => m1.support.add(mut out, "true"),
+        Num(t) => m1.support.add(mut out, text.as_string(t)),
+        Str(t) => main.quote(mut out, text.as_string(t)),
+        Arr(xs) => {
+            m1.support.add(mut out, "[")?
+            let mut first = true
+            for x in xs {
+                if !first {
+                    m1.support.add(mut out, ",")?
+                }
+                if pretty {
+                    m1.support.add(mut out, "\n")?;
+                    main.indent(mut out, depth + 1)?
+                }
+                first = false
+                render(mut out, x, depth + 1, pretty)?
+            }
+            if pretty && !first {
+                m1.support.add(mut out, "\n")?;
+                main.indent(mut out, depth)?
+            }
+            m1.support.add(mut out, "]")
+        },
+        Obj(ms) => {
+            let index = m1.support.mem(std.json.index(ms))?
+            let mut i: u64 = 0
+            let mut first = true
+            m1.support.add(mut out, "{")?
+            while i < seq.len(ms) {
+                if let Some((key, value)) = std.json.shown(index, i) {
+                    if !first {
+                        m1.support.add(mut out, ",")?
+                    }
+                    if pretty {
+                        m1.support.add(mut out, "\n")?;
+                        main.indent(mut out, depth + 1)?
+                    }
+                    first = false
+                    main.quote(mut out, key)?
+                    m1.support.add(mut out, if pretty {
+                        ": "
+                    } else {
+                        ":"
+                    })?
+                    render(mut out, value, depth + 1, pretty)?
+                }
+                i += 1
+            }
+            if pretty && !first {
+                m1.support.add(mut out, "\n")?;
+                main.indent(mut out, depth)?
+            }
+            m1.support.add(mut out, "}")
+        },
+    }
+}
+
+// Return owned output, so a result view never outlives a local ObjectIndex.
+fn query(mut out: String, j: std.json.Json, path: String, at: u64) -> Result[(), m1.support.Error] {
+    if at > string.byte_len(path) {
+        return render(mut out, j, 0, true)
+    }
+    let end = match string.find(path, at, "/") {
+        Some(n) => n,
+        None => string.byte_len(path)
+    }
+    let step = string.slice(path, at, end)
+    match j {
+        Obj(ms) => {
+            let index = m1.support.mem(std.json.index(ms))?
+            let Some(child) = std.json.get(index, step) else {
+                return Error(m1.support.error("MissingPath"))
+            }
+            query(mut out, child, path, end + 1)
+        },
+        Arr(xs) => {
+            let i: u64 = match int.parse(step) {
+                Ok(n) => n,
+                Error(_) => return Error(m1.support.error("WrongKind"))
+            }
+            let Some(child) = indexed.get(xs, i) else {
+                return Error(m1.support.error("MissingPath"))
+            }
+            query(mut out, child, path, end + 1)
+        },
+        _ => Error(m1.support.error("WrongKind")),
+    }
+}
+
+fn document(out: Stdout, s: String, path: String, variant: String, number: u64, tx: Sender[String]) -> Result[(u64, u64), m1.support.Error] waits {
+    let owner = m1.support.marker(tx, m1.support.name("document", number, "")?)?
+    region doc {
+        // Only the injection run sizes here. Ordinary runs let parse do exactly its
+        // sizing pass and writing pass, without a redundant caller sizing pass.
+        if let Some(site) = string.strip_prefix(variant, "capacity:") {
+            let reservation = m1.support.name("document", number, ".blob")?
+            if site == reservation {
+                m1.support.admission(variant, reservation, size(s, number)?)?
+            }
+        }
+        let root = parse(doc, s, number)?
+        let mut pretty = string.new()
+        render(mut pretty, root, 0, true)?
+        let mut answer = m1.support.name("query", number, "=")?
+        query(mut answer, root, path, 1)?
+        m1.support.add(mut answer, "\n")?
+        m1.support.put(out, answer)?
+        if variant == "print" {
+            m1.support.put(out, pretty)?;
+            m1.support.put(out, "\n")?
+        }
+        Ok((string.byte_len(pretty), list.sum_bytes(string.as_bytes(pretty))))
+    }
+}
+
+fn documents(out: Stdout, input: String, variant: String, tx: Sender[String], mut count: u64, mut total: u64, mut checksum: u64) -> Result[(), m1.support.Error] waits {
+    let mut at: u64 = 0
+    let path = m1.support.line(input, mut at)
+    while at < string.byte_len(input) {
+        let s = m1.support.line(input, mut at)
+        let (n, sum) = document(out, s, path, variant, count + 1, tx)?
+        count += 1
+        total += n
+        checksum += sum
+    }
+    Ok(())
+}
+
+fn run(out: Stdout, input: String, variant: String, take tx: Sender[String]) -> Result[(), m1.support.Error] waits {
+    let mut count: u64 = 0
+    let mut total: u64 = 0
+    let mut checksum: u64 = 0
+    let outcome = documents(out, input, variant, tx, mut count, mut total, mut checksum)
+    let mut rendered = string.new()
+    m1.support.add(mut rendered, "documents=")?
+    m1.support.num(mut rendered, count)?
+    m1.support.add(mut rendered, " pretty-bytes=")?
+    m1.support.num(mut rendered, total)?
+    m1.support.add(mut rendered, " sum=")?
+    m1.support.num(mut rendered, checksum)?
+    m1.support.add(mut rendered, "\n")?
+    m1.support.put(out, rendered)?
+    outcome
+}
+
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] waits {
+    let input = m1.support.input(d, argv)?
+    let mut at: u64 = 0
+    let mut events: u64 = 2
+    while at < string.byte_len(input) {
+        let _ = m1.support.line(input, mut at);
+        events += 2
+    }
+    let (tx, rx): (Sender[String], Receiver[String]) = m1.support.mem(channel.new(events))?
+    let outcome = run(out, input, m1.support.case_variant(argv), take tx)
+    m1.support.finish(out, take rx, take outcome)
+}

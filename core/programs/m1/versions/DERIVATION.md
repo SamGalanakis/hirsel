@@ -43,4 +43,6 @@ results.
 
 ## Source length
 
-Physical lines, including comments and blanks: 138 idiomatic, 188 matched; Rust entry + shared program: 163 idiomatic and 185 matched. Shared support is counted separately in the lane report.
+Physical lines, including comments and blanks: 138 idiomatic and 188 matched;
+Rust entry plus shared program.rs: 163 idiomatic and 185 matched.
+Shared support is counted separately in REPORT.md.

@@ -33,10 +33,17 @@ Charges use MEM-24, charge-v1, independently of native layout. The corpus inject
 logical refusal before a named source operation; it does not set an ambient quota.
 `requested` records the stated charge and `available` is 0 for this synthetic event.
 Instrumentation is separate: String trace items count 24 bytes; a channel charges
-24×event-capacity+64. Each Marker reserves 24+8+32+256=320, plus its release
+24×event-capacity+64. Each Marker reserves 24+24+32+256=336, plus its release
 string storage; its 256-byte finalizer grant covers one release-line copy.
 These are source derivations, not executed Hirsel results.
 
+The opaque Id[T] key promise is conditional on its type argument under OWN-4.
+Entry therefore declares key for recency-handle comparison; all its fields are
+key, with the recursive promise read through Id. This changes no representation
+or admission. The phantom parameter requiring that promise is an API cost.
+
 ## Source length
 
-Physical lines, including comments and blanks: 174 idiomatic, 195 matched; Rust entry + shared program: 148 idiomatic and 175 matched. Shared support is counted separately in the lane report.
+Physical lines, including comments and blanks: 174 idiomatic and 195 matched;
+Rust entry plus shared program.rs: 148 idiomatic and 175 matched.
+Shared support is counted separately in REPORT.md.

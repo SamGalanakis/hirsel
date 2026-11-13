@@ -102,15 +102,16 @@ pub resource type Marker grant bytes 256 {
 }
 
 pub fn marker(tx: Sender[String], label: String) -> Result[Marker, Error] {
-    let mut a = mem(string.from("acquire="))?
-    add(mut a, label)?
-    match channel.try_send(tx, take a) {
+    let mut acquired = mem(string.from("acquire="))?
+    add(mut acquired, label)?
+    let mut released = mem(string.from("release="))?
+    add(mut released, label)?
+    let owner = mem(result.capacity_only(Marker(release: take released, events: channel.sender(tx))))?
+    match channel.try_send(tx, take acquired) {
         Ok(()) => {},
         Error(_) => fail("trace capacity")
     }
-    let mut r = mem(string.from("release="))?
-    add(mut r, label)?
-    mem(Marker(release: take r, events: channel.sender(tx)))
+    Ok(take owner)
 }
 
 pub fn finish(out: Stdout, take rx: Receiver[String], take outcome: Result[(), Error]) -> Result[(), Error] waits {

@@ -37,6 +37,17 @@
   {
     "name": "capacity",
     "input": "inputs/capacity.txt",
-    "variant": "capacity:document2.node3"
+    "variant": "capacity:document2.node3",
+    "layouts": [
+      "idiomatic"
+    ]
+  },
+  {
+    "name": "capacity-blob",
+    "input": "inputs/capacity-blob.txt",
+    "variant": "capacity:document2.blob",
+    "layouts": [
+      "matched"
+    ]
   }
 ]

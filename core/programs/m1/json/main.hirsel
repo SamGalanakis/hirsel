@@ -242,7 +242,7 @@ fn value(s: String, mut p: Cursor, docnum: u64, variant: String) -> Result[Json,
     Error(syntax())
 }
 
-fn quote(mut out: String, s: String) -> Result[(), m1.support.Error] {
+pub fn quote(mut out: String, s: String) -> Result[(), m1.support.Error] {
     m1.support.add(mut out, "\"")?
     let mut at: u64 = 0
     while let Some((c, next)) = string.next_scalar(s, at) {
@@ -268,7 +268,7 @@ fn quote(mut out: String, s: String) -> Result[(), m1.support.Error] {
     m1.support.add(mut out, "\"")
 }
 
-fn indent(mut out: String, depth: u64) -> Result[(), m1.support.Error] {
+pub fn indent(mut out: String, depth: u64) -> Result[(), m1.support.Error] {
     let mut i: u64 = 0
     while i < depth {
         m1.support.add(mut out, "  ")?;
@@ -388,7 +388,7 @@ fn document(out: Stdout, s: String, path: String, variant: String, n: u64, tx: S
     render(mut pretty, root, 0, true)?
     let selected = query(root, path, 1)?
     let mut answer = m1.support.name("query", n, "=")?
-    render(mut answer, selected, 0, false)?
+    render(mut answer, selected, 0, true)?
     m1.support.add(mut answer, "\n")?
     m1.support.put(out, answer)?
     if variant == "print" {

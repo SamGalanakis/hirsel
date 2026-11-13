@@ -38,10 +38,12 @@ Charges use MEM-24, charge-v1, independently of native layout. The corpus inject
 logical refusal before a named source operation; it does not set an ambient quota.
 `requested` records the stated charge and `available` is 0 for this synthetic event.
 Instrumentation is separate: String trace items count 24 bytes; a channel charges
-24×event-capacity+64. Each Marker reserves 24+8+32+256=320, plus its release
+24×event-capacity+64. Each Marker reserves 24+24+32+256=336, plus its release
 string storage; its 256-byte finalizer grant covers one release-line copy.
 These are source derivations, not executed Hirsel results.
 
 ## Source length
 
-Physical lines, including comments and blanks: 105 idiomatic, 128 matched; Rust entry + shared program: 89 idiomatic and 106 matched. Shared support is counted separately in the lane report.
+Physical lines, including comments and blanks: 105 idiomatic and 128 matched;
+Rust entry plus shared program.rs: 89 idiomatic and 106 matched.
+Shared support is counted separately in REPORT.md.

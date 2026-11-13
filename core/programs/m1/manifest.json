@@ -230,6 +230,13 @@
           "signatures": true
         },
         {
+          "file": "core/std/json.hirsel",
+          "modules": [
+            "json"
+          ],
+          "signatures": true
+        },
+        {
           "file": "core/std/list.hirsel",
           "modules": [
             "list"
@@ -465,6 +472,13 @@
           "file": "core/programs/m1/json/main.hirsel",
           "modules": [
             "main"
+          ],
+          "signatures": false
+        },
+        {
+          "file": "core/programs/m1/json/matched.hirsel",
+          "modules": [
+            "matched"
           ],
           "signatures": false
         }
@@ -721,6 +735,16 @@
         "version": "1"
       },
       "module": "main",
+      "function": "main"
+    },
+    {
+      "workload": "json",
+      "variant": "matched",
+      "package": {
+        "name": "json",
+        "version": "1"
+      },
+      "module": "matched",
       "function": "main"
     },
     {

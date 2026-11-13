@@ -7,6 +7,28 @@ use support::*;
 struct Blob {
     bytes: Vec<u8>,
 }
+#[derive(Default)]
+struct Size {
+    bytes: usize,
+}
+impl Document for Size {
+    type Node = ();
+    const NODE_ADMISSIONS: bool = false;
+    fn node(&mut self, value: Value<()>) {
+        self.bytes += match value {
+            Value::Null | Value::Bool(_) => 1,
+            Value::Number(s) | Value::Text(s) => 5 + s.len(),
+            Value::Array(xs) => 5 + 4 * xs.len(),
+            Value::Object(xs) => 5 + xs.iter().map(|(key, _)| 8 + key.len()).sum::<usize>(),
+        };
+    }
+    fn pretty(&self, _: &()) -> String {
+        unreachable!("the sizing pass produces no document")
+    }
+    fn query(&self, _: &(), _: &[&str]) -> Result<String> {
+        unreachable!("the sizing pass produces no document")
+    }
+}
 impl Blob {
     fn word(&mut self, n: u32) {
         self.bytes.extend_from_slice(&n.to_le_bytes());
@@ -63,6 +85,14 @@ impl Blob {
 }
 impl Document for Blob {
     type Node = u32;
+    const NODE_ADMISSIONS: bool = false;
+    fn prepare(&mut self, input: &str, document: usize, admission: &Admission) -> Result<()> {
+        let mut size = Size::default();
+        program::parse_into(input, document, admission, &mut size)?;
+        admission.at(&format!("document{document}.blob"))?;
+        self.bytes = Vec::with_capacity(size.bytes);
+        Ok(())
+    }
     fn node(&mut self, v: Value<u32>) -> u32 {
         let id = u32::try_from(self.bytes.len()).unwrap();
         match v {
@@ -131,4 +161,27 @@ impl Document for Blob {
 }
 fn main() {
     program::run::<Blob>();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sized_blob_does_not_grow_during_publication() {
+        let admission = Admission::new("normal");
+        for input in [
+            include_str!("../../corpus/m1/json/inputs/small.txt"),
+            include_str!("../../corpus/m1/json/inputs/normal.txt"),
+        ] {
+            for (i, source) in input.lines().skip(1).enumerate() {
+                let mut blob = Blob::default();
+                blob.prepare(source, i + 1, &admission).unwrap();
+                let reserved = blob.bytes.capacity();
+                program::parse_into(source, i + 1, &admission, &mut blob).unwrap();
+                assert_eq!(blob.bytes.len(), reserved, "sizing must be exact");
+                assert_eq!(blob.bytes.capacity(), reserved, "publication must not grow");
+            }
+        }
+    }
 }

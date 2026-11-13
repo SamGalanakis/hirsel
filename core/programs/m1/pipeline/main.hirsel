@@ -61,7 +61,7 @@ fn wait_cancel_gate(tx: Sender[()]) {
 }
 
 fn batch(id: u64, take rows: List[String], released: Sender[u64]) -> Result[Batch, m1.support.Error] {
-    m1.support.mem(Batch(id: id, rows: take rows, released: channel.sender(released)))
+    m1.support.mem(result.capacity_only(Batch(id: id, rows: take rows, released: channel.sender(released))))
 }
 
 fn publish(tx: Sender[Batch], take b: Batch) -> bool waits {
@@ -144,7 +144,8 @@ fn upper(mut b: Batch) -> Result[(), m1.support.Error] {
 
 fn transform(take t: Transform) -> Result[TransformResult, m1.support.Error] waits {
     let _ = channel.receive(t.start)
-    if t.variant == "cancel-send" {
+    let cancel_send = t.variant == "cancel-send"
+    if cancel_send {
         let mut count: u64 = 0
         while count < 8 {
             let _ = channel.receive(t.input);

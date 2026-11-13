@@ -27,8 +27,10 @@ destination-bytes=12 sum=1126 lock-free=true
 |---|---|
 | copy.buffer | exactly List[u8] capacity 4096 = 4096 |
 
-HostFile acquisition is mechanical and admits no cause cell. std.file.try_lock
-admits its Lock cause cell, 32, before the OS call. Three traced Owned resources
+HostFile acquisition is mechanical and admits no cause cell. By MEM-24,
+std.file.try_lock admits a Lock block of HostFile(8)+cause(32)=40 before the OS
+call. The seed comment's Alloc:32 omits the field; this derivation follows the
+normative resource table. Three traced Owned resources
 reserve their declared finalizer grants of 1024 each, plus fields and cause
 cells. Their Option placeholders allow consuming close/unlock without a partial
 move from a resource. Finalizers allocate only from those grants and never
@@ -46,6 +48,24 @@ or allocator-call counters. Output and instrumentation charges are separate
 from the payload charges above. These are hand derivations, not executed Hirsel
 results.
 
+Resource admission follows 77ad169e. A refused Temp returns its parent/name,
+so the already-created directory is removed before Capacity propagates. Other
+resource literals pass their returned fields through result.capacity_only.
+For 9175e560, LockError.Capacity returns the unacquired HostFile. lock_capacity
+moves it into a local scope: its mechanical, shielded cleanup closes it exactly
+once before the original Capacity is returned. No lock was held, so no lock
+acquire/release event is invented. Already-owned destination and source then clean
+in the usual order. This decision applies to acquisition, setup and probe calls.
+
+Sender and Receiver have logical width 24 (core.md), so each traced Owned block
+holds Option[HostFile](16)+Option[Lock](16)+String(24)+bool(1)+Sender(24),
+plus its cause cell 32 and finalizer grant 1024, totaling 1137. This resource row
+says fields+cell+grant, without an engine alignment charge. Temp holds Dir(8),
+String(24) and cause(32), totaling 64; its name block is separate.
+
 ## Source length
 
-Physical lines, including comments and blanks: 194 idiomatic, 4 matched; Rust entry + shared program: 175 idiomatic and 175 matched. Files matched is a four-line entry into the 194-line shared implementation. Shared support is counted separately in the lane report.
+Physical lines, including comments and blanks: 217 idiomatic and 4 matched;
+Rust entry plus shared program.rs: 175 idiomatic and 175 matched. The matched
+entry calls the same 217-line implementation, so its effective total is 221.
+Shared support is counted separately in REPORT.md.

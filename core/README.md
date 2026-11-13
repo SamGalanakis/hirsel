@@ -46,8 +46,8 @@ cargo +1.99.0 build --manifest-path core/twins/Cargo.toml --locked --offline --w
 python3 core/tools/verify.py --target-dir /tmp/core-twins --profile release
 ```
 
-The CI workflow runs these output comparisons in both profiles. It does not rely on
-Rust's empty unit-test harnesses. `MEASURE.md` defines the ratio protocol and the
+The CI workflow runs these output comparisons in both profiles and the named
+exact-reservation JSON test. It does not count empty Rust unit-test harnesses as evidence. `MEASURE.md` defines the ratio protocol and the
 committed Rust numbers. `SPEC-COMPARISON.md` lists the gaps in the spec draft.
 
 To run the new-source acceptance gate once:
@@ -60,8 +60,8 @@ It fails on a parse or resolve refusal, a formatter refusal or non-idempotence.
 It also visits the real declaration/body checker and prints every current refusal
 and implementation gap. Manifest `checker: "report"` makes that slice diagnostic;
 change it to `"require"` when those checker constructs are implemented. This is not
-native execution evidence. The manifest includes all seventeen available entries;
-JSON's matched blob entry awaits the compact-sequence rules and separate fixture change.
+native execution evidence. The manifest includes all eighteen entries. JSON's matched entry uses `std.json`
+to size once and publish one closed indexed blob per document.
 `files` shares one implementation across its two entries, as its Rust twins do.
 The host outcome contract records the required mapping from `support.Error.code`
 to 2, 3 or 4. PROG-3 itself defines an error outcome and does not specify OS exit
@@ -73,3 +73,11 @@ at the specified observation boundaries. Their fallible staging rolls back new
 edges. The idiomatic variants use Rc and Arc and count reachable identities for
 the same liveness observations. Every DERIVATION includes both representations'
 charges and the independent small expected output.
+
+JSON's `capacity` case selects the idiomatic preorder site; `capacity-blob`
+selects the matched document reservation. Optional case `layouts` are honored by
+`tools/verify.py`, retaining sixteen JSON comparisons. `tools/reference.py --only json`
+verifies that family without running unrelated oracles. The matched Rust publication
+test additionally requires an exact reservation and no blob growth during writing.
+The prior recorded JSON Rust measurements predate the sizing pass and need a refresh
+before a runtime comparison; this source lane reports no new performance numbers.

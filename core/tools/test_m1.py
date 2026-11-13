@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from m1 import census_table, inputs_for, run, table
+from m1 import census_table, gap_sites, gap_table, inputs_for, run, table
 
 
 class Milestone(unittest.TestCase):
@@ -125,9 +125,49 @@ print(json.dumps({'accepted':True, 'native':{'executable':str(output)}, 'diagnos
             self.assertFalse(row['built'])
             self.assertEqual((row['passed'], row['cases']), (0, 2))
             self.assertIn(reason, table([row]))
+        self.compiler.write_text("#!/usr/bin/env python3\nimport sys\nprint('checker panicked', file=sys.stderr)\nraise SystemExit(101)\n")
+        row = self.rows()[0]
+        self.assertFalse(row['built'])
+        self.assertIn('exit 101', row['stopped'])
+        self.assertIn('census unavailable', census_table([row]))
+        self.assertIn('| cranelift | ? |', gap_table([row]))
+        self.assertNotIn('| 0 |', gap_table([row]))
         selected = inputs_for(self.manifest, self.manifest['entries'][0], self.root)
         self.assertEqual([p['package']['name'] for p in selected['packages']], ['example'])
         self.assertEqual([s['modules'] for s in selected['packages'][0]['sources']], [['main'], ['matched']])
+
+    def test_distinct_gap_sites_include_stops_after_a_definitions_first_stop(self):
+        def gap(message, start):
+            return dict(message=message, primary=dict(module='example@1/main', span=dict(start=start, end=start+1)))
+        first = gap('resource literals are not built', 5)
+        later = gap('generic definitions are not built', 12)
+        another = gap('generic definitions are not built', 20)
+        rows = [dict(program='example', variant='idiomatic', engine='cranelift', checked=False, built=False,
+                     passed=0, cases=2, reachable_bodies=2, reachable_declarations=3,
+                     census={'resource literals are not built': 1},
+                     incomplete=[first, later, later, another], diagnostics=[])]
+        self.assertEqual([s['slice'] for s in gap_sites(rows[0]['incomplete'])], ['A1', 'B', 'B'])
+        self.assertIn('resource literals are not built | 1 | 1 |', census_table(rows))
+        self.assertIn('generic definitions are not built | 0 | 2 |', census_table(rows))
+        self.assertIn('| cranelift | 1 | 2 | 0 | 0 | 0 | 0 | 0 | 0 | 3 | 0 |', gap_table(rows))
+        # Builtin container and channel gaps need their source callee to route correctly.
+        for expression, owner in [('list.len(xs)', 'A1'), ('channel.try_send(tx, x)', 'writers/sequences/regions/tasks')]:
+            operation = gap('this generic core operation is not built', 0)
+            operation['primary']['span']['end'] = len(expression)
+            sites = gap_sites([operation], {'example@1/main': expression.encode()})
+            self.assertEqual(sites[0]['slice'], owner)
+        missing = dict(rule='instances', construct='native body is unavailable',
+                       primary=dict(module='core@1/string', span=dict(start=410, end=418)))
+        self.assertEqual(gap_sites([], first_stops=[missing])[0]['slice'], 'A1')
+        missing['primary']['module'] = 'core@1/host'
+        self.assertEqual(gap_sites([], first_stops=[missing])[0]['slice'], 'writers/sequences/regions/tasks')
+        # Same source span with a different gap message remains one site per slice.
+        rows[0]['incomplete'].append(gap('calls to generic functions are not built', 12))
+        self.assertEqual(len(gap_sites(rows[0]['incomplete'])), 3)
+        self.assertIn('calls to generic functions are not built | 0 | 1 |', census_table(rows))
+        self.assertEqual(gap_sites([gap('iteration of this stable or map representation is not built', 40)])[0]['slice'], 'E')
+        rows[0]['incomplete'].append(gap('new unassigned construct', 30))
+        self.assertEqual(gap_sites(rows[0]['incomplete'])[-1]['slice'], 'unassigned')
 
     def test_empty_selection_is_not_success(self):
         with self.assertRaisesRegex(ValueError, 'no entries'):

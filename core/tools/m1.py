@@ -4,6 +4,7 @@ import argparse
 import copy
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -45,6 +46,76 @@ def first_stop(product, entry):
         span = site['span']
         return f"check {rule} {site['module']}:{span['start']}..{span['end']}: {d['message']}"
     return product.get('stopped') or 'build failed without a diagnostic'
+
+
+CHECK_SLICES = ('A1', 'B', 'C', 'E', 'writers/sequences/regions/tasks', 'A2', 'D', 'unassigned')
+
+
+def checker_slice(message, expression=""):
+    """Route reported implementation gaps; unknown constructs stay visible."""
+    text = message.lower()
+    if text == 'this generic core operation is not built':
+        head = re.match(r'\s*([A-Za-z_]\w*)', expression)
+        if not head:
+            return 'unassigned'
+        module = head[1]
+        if module in ('channel', 'task', 'writer', 'span', 'seq', 'indexed', 'region', 'build_in', 'emit'):
+            return 'writers/sequences/regions/tasks'
+        if module in ('list', 'map', 'string', 'box', 'rc', 'arc', 'option', 'result', 'replace', 'clone'):
+            return 'A1'
+        if module in ('int', 'float', 'char'):
+            return 'E'
+        return 'unassigned'
+    if 'function, constant and module' in text or 'kind of name' in text:
+        return 'B'
+    if any(word in text for word in ('callable', 'closure', 'calls through values')):
+        return 'C'
+    if any(word in text for word in ('pattern', 'match', '`?`')):
+        return 'A2'
+    if 'iteration' in text:
+        return 'E'
+    if any(word in text for word in ('region', 'stable', 'writer', 'sequence', 'span', 'task', 'channel')):
+        return 'writers/sequences/regions/tasks'
+    if any(word in text for word in ('generic', 'type parameter', 'type argument', 'argument is not built', 'call')):
+        return 'B'
+    if any(word in text for word in ('index', 'iteration', 'range', 'integer', 'float', 'array', 'for loop',
+                                      'expression form', 'operator', 'character literal', 'byte literal')):
+        return 'E'
+    if any(word in text for word in ('resource', 'cleanup', 'literal', 'construction', 'values of', 'views of',
+                                      'field', 'tuple', 'assignment', '`view`', 'comparison of this type')):
+        return 'A1'
+    if any(word in text for word in ('declaration', 'outlives', 'sized parameter')):
+        return 'D'
+    return 'unassigned'
+
+
+def gap_sites(incomplete, sources=None, first_stops=()):
+    """Count source spans, not duplicate messages or the first message per body."""
+    sites = {}
+    instance_gaps = [dict(message=stop['construct'], primary=stop['primary'], rule=stop['rule'])
+                     for stop in first_stops if stop['rule'] == 'instances']
+    for gap in [*incomplete, *instance_gaps]:
+        primary = gap['primary']
+        span = primary['span']
+        source = (sources or {}).get(primary['module'])
+        expression = source[span['start']:span['end']].decode(errors='replace') if source is not None else ''
+        owner = checker_slice(gap['message'], expression)
+        if gap.get('rule') == 'instances':
+            module = primary['module']
+            if gap['message'] == 'native body is unavailable':
+                if module.startswith(('core@1/string', 'core@1/list', 'core@1/map', 'core@1/box', 'core@1/rc', 'core@1/arc', 'core@1/option', 'core@1/result')):
+                    owner = 'A1'
+                elif module.startswith(('core@1/int', 'core@1/float', 'core@1/char')):
+                    owner = 'E'
+                elif module.startswith(('core@1/host', 'core@1/args', 'core@1/task', 'core@1/channel', 'core@1/region', 'core@1/writer', 'core@1/span', 'core@1/seq', 'core@1/indexed')):
+                    owner = 'writers/sequences/regions/tasks'
+            elif 'generic' in gap['message']:
+                owner = 'B'
+            elif 'indirect' in gap['message']:
+                owner = 'C'
+        key = (owner, primary['module'], span['start'], span['end'])
+        sites.setdefault(key, dict(slice=owner, primary=primary, message=gap['message'], expression=expression))
+    return list(sites.values())
 
 
 def files_below(directory):
@@ -107,12 +178,21 @@ def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=No
                      if entry['variant'] in c.get('layouts', ['idiomatic', 'matched'])]
             if not cases:
                 raise ValueError(f'entry has no applicable cases: {entry}')
+            selected_inputs = inputs_for(manifest, entry, root)
+            sources = {}
+            for package in selected_inputs['packages']:
+                for source in package['sources']:
+                    file = Path(source['file'])
+                    if file.is_file():
+                        name = package['package']
+                        module = f"{name['name']}@{name['version']}/" + '/'.join(source['modules'])
+                        sources[module] = file.read_bytes()
             for engine in engines:
                 name = f"{entry['workload']}-{entry['variant']}-{engine}"
                 scratch = temp / name
                 scratch.mkdir()
                 inputs = scratch / 'inputs.json'
-                inputs.write_text(json.dumps(inputs_for(manifest, entry, root)))
+                inputs.write_text(json.dumps(selected_inputs))
                 binary = scratch / 'program'
                 path = entry['package']
                 entry_path = f"{path['name']}@{path['version']}/{entry['module']}/{entry['function']}"
@@ -136,6 +216,7 @@ def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=No
                     continue
                 row['diagnostics'] = product.get('diagnostics', [])
                 row['incomplete'] = product.get('incomplete', [])
+                row['gap_sites'] = gap_sites(row['incomplete'], sources, product.get('reachable', {}).get('first_stops', []))
                 row['checked'] = bool(product['accepted'])
                 row['census'] = product.get('reachable', {}).get('census', {})
                 row['first_stops'] = product.get('reachable', {}).get('first_stops', [])
@@ -190,23 +271,58 @@ def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=No
 
 
 def census_table(rows):
-    lines = ['| program | variant | engine | reachable bodies / declarations | first-stop construct | count |',
-             '|---|---|---|---|---|---|']
+    lines = ['| program | variant | engine | reachable bodies / declarations | first-stop construct | first-stop definitions | all reported gap sites |',
+             '|---|---|---|---|---|---|---|']
     for row in rows:
         if row['variant'] == 'libraries' or row['built'] and row['passed'] == row['cases']:
             continue
-        counts = row.get('census', {})
+        if 'incomplete' not in row:
+            lines.append(f"| {row['program']} | {row['variant']} | {row['engine']} | ? / ? | census unavailable: build tool stopped before JSON | ? | ? |")
+            continue
+        counts = dict(row.get('census', {}))
         if not counts and row['checked']:
             counts = {'no checker stops': 0}
+        all_sites = row['gap_sites'] if 'gap_sites' in row else gap_sites(row.get('incomplete', []), first_stops=row.get('first_stops', []))
+        for gap in [*row.get('incomplete', []), *all_sites]:
+            counts.setdefault(gap['message'], 0)
         for construct, count in sorted(counts.items()):
+            sites = gap_sites([g for g in row.get('incomplete', []) if g['message'] == construct],
+                              first_stops=[g for g in row.get('first_stops', []) if g['construct'] == construct])
             construct = construct.replace('|', r'\|').replace('\n', ' ')
             lines.append(f"| {row['program']} | {row['variant']} | {row['engine']} | "
-                         f"{row.get('reachable_bodies', '?')} / {row.get('reachable_declarations', '?')} | {construct} | {count} |")
+                         f"{row.get('reachable_bodies', '?')} / {row.get('reachable_declarations', '?')} | {construct} | {count} | {len(sites)} |")
+    return '\n'.join(lines)
+
+
+def gap_table(rows):
+    lines = ['| program | variant | engine | ' + ' | '.join(CHECK_SLICES) + ' | distinct gap sites | refusal sites |',
+             '|---|---|---|' + '---|' * (len(CHECK_SLICES) + 2)]
+    for row in rows:
+        if row['variant'] == 'libraries':
+            continue
+        if 'incomplete' not in row:
+            lines.append(f"| {row['program']} | {row['variant']} | {row['engine']} | " + ' | '.join(['?'] * (len(CHECK_SLICES) + 2)) + ' |')
+            continue
+        sites = row['gap_sites'] if 'gap_sites' in row else gap_sites(row.get('incomplete', []), first_stops=row.get('first_stops', []))
+        counts = [sum(s['slice'] == owner for s in sites) for owner in CHECK_SLICES]
+        def source_key(site):
+            return (site['module'], site['span']['start'], site['span']['end'])
+        total = len({source_key(s['primary']) for s in sites})
+        refusals = len({source_key(d['primary']) for d in row.get('diagnostics', [])})
+        lines.append(f"| {row['program']} | {row['variant']} | {row['engine']} | " +
+                     ' | '.join(map(str, [*counts, total, refusals])) + ' |')
     return '\n'.join(lines)
 
 
 def report(rows):
-    return table(rows) + '\n\nReachable closure census. Each definition contributes its first stop; completed bodies follow emitted calls, while incomplete bodies follow resolved source names. Later stops remain unknown.\n\n' + census_table(rows)
+    return (table(rows) + '\n\nReachable closure census. Each definition contributes its first stop; '
+            'the second count includes every reported gap span for that construct. Completed bodies follow emitted calls, '
+            'while incomplete bodies follow resolved source names.\n\n' + census_table(rows) +
+            '\n\nDistinct reported gap sites by checker slice. A1 includes values, cleanup and resource literals. '
+            'Counts include checker gaps and reported missing-instance bodies; they deduplicate module and byte span within each slice; totals deduplicate across slices. '
+            'Refusals are separate from implementation gaps. The checker suppresses repeated constructs within a body '
+            'and some early stops prevent later checks, so these are observed lower bounds, not a count of unseen constructs.\n\n' +
+            gap_table(rows))
 
 
 def table(rows):

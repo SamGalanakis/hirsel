@@ -71,6 +71,7 @@ pub struct Outcome {
 /// result instead of touching the OS. Delivery always runs after an issued call,
 /// even if cancellation was requested meanwhile. State is host-owned for the run.
 #[repr(C)]
+#[derive(Clone, Copy)]
 pub struct Provider {
     pub state: *mut u8,
     pub issue: unsafe extern "C" fn(*mut u8, *mut Request) -> Outcome,

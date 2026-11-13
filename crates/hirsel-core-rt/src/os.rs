@@ -21,6 +21,10 @@ pub struct OsProvider {
     pub stderr: OwnedFd,
 }
 impl OsProvider {
+    #[cfg(test)]
+    pub(crate) fn file_descriptor(&self, handle: u64) -> i32 {
+        self.files[&handle].as_raw_fd()
+    }
     pub fn new(stdout: OwnedFd, stderr: OwnedFd) -> Self {
         Self {
             directories: BTreeMap::new(),

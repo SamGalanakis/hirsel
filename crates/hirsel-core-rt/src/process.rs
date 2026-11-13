@@ -53,6 +53,8 @@ pub unsafe extern "C" fn hirsel_core_run(config: *const Config, entry: Entry) ->
         let _pipe_policy = PipePolicy::enter();
         let mut context = Context::new(config.root_limit);
         context.run = config;
+        let mut files = crate::host_file::Files::default();
+        context.host_files = &mut files;
         if causes::task_start(&mut context).is_err() {
             diagnostic(config, b"Capacity at 0\n");
             if let Some(close) = config.close_grants {
@@ -112,6 +114,7 @@ pub unsafe extern "C" fn hirsel_core_run(config: *const Config, entry: Entry) ->
                 _ => 1,
             }
         };
+        files.close_all(&mut context);
         drop(context);
         if let Some(close) = config.close_grants {
             close(config.state);

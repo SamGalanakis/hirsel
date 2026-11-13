@@ -27,6 +27,18 @@ typedef struct {
     HirselCoreHostOutcome (*deliver)(void *, HirselCoreHostRequest *, HirselCoreHostOutcome);
 } HirselCoreProvider;
 HirselCoreHostOutcome hirsel_core_host(HirselCoreContext *, const HirselCoreProvider *, HirselCoreHostRequest *);
+/* HostFile (FORM #47): u64 provider handle; no cell, grant or charge.
+   No public fields or inline offsets. OPEN returns it in
+   Outcome.value; file operations use its retained issuing provider. CLOSE
+   consumes it even on error/cancellation. A key cannot escape its run. */
+typedef uint64_t HirselCoreHostFile;
+HirselCoreHostOutcome hirsel_core_host_file_open(HirselCoreContext *, const HirselCoreProvider *, HirselCoreHostRequest *);
+HirselCoreHostOutcome hirsel_core_host_file(HirselCoreContext *, HirselCoreHostFile, HirselCoreHostRequest *);
+/* Drop consumes a live key once: no admission, cancellation or failure result;
+   ignores close errors (MEM-24), never retries close. Remaining files close
+   before grants at normal/failure exit; run stops skip cleanup (_exit closes
+   descriptors). OS calls retain the guarded foreign-call stack rule. */
+void hirsel_core_hostfile_drop(HirselCoreContext *, HirselCoreHostFile);
 typedef struct { const uint8_t *data; size_t len; } HirselCoreView;
 typedef struct { uint8_t kind, exit; } HirselCoreMainResult;
 typedef struct { uint8_t kind; uint64_t task, object, value; } HirselCoreEvent;

@@ -33,6 +33,17 @@ pub use crate::entry::{
 pub use crate::process::{hirsel_core_args_get, hirsel_core_args_len, hirsel_core_run};
 pub use crate::provider::hirsel_core_host;
 
+/// HostFile is an opaque u64 provider handle, with no cell, grant or charge
+/// (FORM #47, 778f4f0a). No field offsets are read inline. Open publishes
+/// provider identity + native designation in run-owned bookkeeping. File calls
+/// retain that provider; explicit CLOSE and mechanical drop consume the key.
+/// Drop bypasses cancellation, admits nothing and ignores the close outcome.
+/// Remaining files close before grants on return; a run stop skips cleanup and
+/// _exit closes OS descriptors. A carrier never escapes its run.
+pub use crate::host_file::{
+    hirsel_core_host_file, hirsel_core_host_file_open, hirsel_core_hostfile_drop,
+};
+
 /// # Safety
 /// The live cause owns/pins its message; a nonnull Fail message uses the FORM
 /// StringMessage carrier. String bytes are already UTF-8 by source typing.

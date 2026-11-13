@@ -16,6 +16,7 @@ pub mod counted;
 mod destination;
 pub mod entry;
 mod fiber;
+pub mod host_file;
 pub mod limit;
 pub mod os;
 pub mod process;
@@ -49,6 +50,7 @@ pub struct Context {
     pub(crate) causes: causes::Causes,
     pub(crate) task_record: Option<block::Block>,
     pub(crate) active_resource: *mut causes::Resource,
+    pub(crate) host_files: *mut host_file::Files,
 }
 
 impl Context {
@@ -72,6 +74,7 @@ impl Context {
             causes: causes::Causes::default(),
             task_record: None,
             active_resource: std::ptr::null_mut(),
+            host_files: std::ptr::null_mut(),
         }
     }
 
@@ -158,3 +161,5 @@ mod schedule_tests;
 
 #[cfg(test)]
 mod entry_tests;
+#[cfg(test)]
+mod host_file_tests;

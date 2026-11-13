@@ -315,7 +315,14 @@ impl<'c, 'a> Cx<'c, 'a> {
     /// An argument of type `at` for a parameter of type `pt` (LANG-11).
     pub(super) fn arg_ty(&mut self, pt: TyId, at: TyId, e: NodeId, found: &mut [Option<TyId>]) {
         match self.known(pt, found) {
-            Some(t) => self.coerce(at, Want { ty: t, view: false }, e),
+            Some(t) => self.coerce(
+                at,
+                Want {
+                    ty: t,
+                    view: kind(&self.p.decls, &self.t, t, &self.params) == Kind::Stable,
+                },
+                e,
+            ),
             None => {
                 if !self.unify(pt, at, found) {
                     self.refuse(
@@ -332,7 +339,18 @@ impl<'c, 'a> Cx<'c, 'a> {
     pub(super) fn partial(&mut self, pt: TyId, s: &[Option<TyId>]) -> TyId {
         fn fill(t: &mut impl TyRead, ty: TyId, found: &[Option<TyId>]) -> TyId {
             match t.kind(ty).clone() {
-                TyKind::Param(i) => found[i as usize].unwrap_or(HOLE),
+                TyKind::Param(i) | TyKind::Region(Root::Generic(i)) => {
+                    found[i as usize].unwrap_or(HOLE)
+                }
+                TyKind::Anchored(x, root) => {
+                    let x = fill(t, x, found);
+                    let root = fill(t, root, found);
+                    t.mk(TyKind::Anchored(x, root))
+                }
+                TyKind::Array(x, n) => {
+                    let x = fill(t, x, found);
+                    t.mk(TyKind::Array(x, n))
+                }
                 TyKind::Tuple(xs) => {
                     let xs = xs.into_iter().map(|x| fill(t, x, found)).collect();
                     t.mk(TyKind::Tuple(xs))
@@ -365,7 +383,9 @@ impl<'c, 'a> Cx<'c, 'a> {
     pub(super) fn known(&mut self, pt: TyId, s: &[Option<TyId>]) -> Option<TyId> {
         fn ready(t: &impl TyRead, ty: TyId, found: &[Option<TyId>]) -> bool {
             match t.kind(ty) {
-                TyKind::Param(i) => found[*i as usize].is_some(),
+                TyKind::Param(i) | TyKind::Region(Root::Generic(i)) => found[*i as usize].is_some(),
+                TyKind::Anchored(x, root) => ready(t, *x, found) && ready(t, *root, found),
+                TyKind::Array(x, _) => ready(t, *x, found),
                 TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs.iter().all(|&x| ready(t, x, found)),
                 TyKind::View(x) => ready(t, *x, found),
                 TyKind::Fn(ps, r, _) => {
@@ -415,14 +435,18 @@ impl<'c, 'a> Cx<'c, 'a> {
         }
         match (self.t.kind(pt).clone(), self.t.kind(at).clone()) {
             // A partly known type fixes nothing whole (LANG-11).
-            (TyKind::Param(_), _) if has_hole(&self.t, at) => true,
-            (TyKind::Param(i), _) => match s[i as usize] {
-                None => {
-                    s[i as usize] = Some(at);
-                    true
+            (TyKind::Param(_) | TyKind::Region(Root::Generic(_)), _) if has_hole(&self.t, at) => {
+                true
+            }
+            (TyKind::Param(i), _) | (TyKind::Region(Root::Generic(i)), TyKind::Region(_)) => {
+                match s[i as usize] {
+                    None => {
+                        s[i as usize] = Some(at);
+                        true
+                    }
+                    Some(x) => x == at || x == ERROR,
                 }
-                Some(x) => x == at || x == ERROR,
-            },
+            }
             (TyKind::Tuple(a), TyKind::Tuple(b)) if a.len() == b.len() => {
                 a.iter().zip(&b).all(|(&x, &y)| self.unify(x, y, s))
             }
@@ -437,6 +461,15 @@ impl<'c, 'a> Cx<'c, 'a> {
                 a.iter().zip(&b).all(|(&x, &y)| self.unify(x, y, s))
             }
             (TyKind::View(a), TyKind::View(b)) => self.unify(a, b, s),
+            (TyKind::Array(a, n), TyKind::Array(b, m)) if n == m => self.unify(a, b, s),
+            (TyKind::Anchored(a, ar), TyKind::Anchored(b, br)) => {
+                self.unify(a, b, s) && self.unify(ar, br, s)
+            }
+            (_, TyKind::Anchored(b, _))
+                if kind(&self.p.decls, &self.t, b, &self.params) == Kind::Stable =>
+            {
+                self.unify(pt, b, s)
+            }
             (TyKind::Fn(a, ar, aw), TyKind::Fn(b, br, bw)) if a.len() == b.len() && (!bw || aw) => {
                 a.iter()
                     .zip(&b)

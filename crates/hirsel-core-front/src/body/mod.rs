@@ -651,7 +651,9 @@ impl<'c, 'a> Cx<'c, 'a> {
     /// `t` where `w` is expected: equal, or Never, or an already refused type.
     fn coerce(&mut self, t: TyId, w: Want, n: NodeId) {
         self.out.counts.types += 1;
-        let viewed = w.view && matches!(self.t.kind(t), TyKind::View(x) if *x == w.ty);
+        let viewed = w.view
+            && (matches!(self.t.kind(t), TyKind::View(x) if *x == w.ty)
+                || crate::decls::stable_parameter(&self.p.decls, &self.t, t, w.ty));
         let sequence = matches!((self.t.kind(w.ty), self.t.kind(t)),
             (TyKind::Adt(d, a), TyKind::Adt(e, b))
                 if a == b && is_core_prelude(&self.p.decls[d.index()].path, &["SeqSpan"])

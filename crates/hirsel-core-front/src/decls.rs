@@ -918,19 +918,18 @@ impl Program<'_> {
                 }
                 NodeKind::Waits => waits = true,
                 NodeKind::Outlives => {
-                    for pair in item.tree.children(c).chunks_exact(2) {
+                    for pair in item.tree.children(c).as_chunks::<2>().0 {
                         let a = self.root_ty(at, pair[0], &generics);
                         let b = self.root_ty(at, pair[1], &generics);
                         for (&node, root) in pair.iter().zip([a, b]) {
-                            if let TyKind::Region(Root::Parameter(i)) = self.types.kind(root) {
-                                if !matches!(self.types.kind(params[*i as usize].ty), TyKind::Adt(d, _) if self.decls[d.index()].role == Some(Role::Region))
-                                {
-                                    self.refusals.push(refusal(
-                                        "MEM-6",
-                                        self.site(at, node),
-                                        "an outlives clause names only region parameters",
-                                    ));
-                                }
+                            if let TyKind::Region(Root::Parameter(i)) = self.types.kind(root)
+                                && !matches!(self.types.kind(params[*i as usize].ty), TyKind::Adt(d, _) if self.decls[d.index()].role == Some(Role::Region))
+                            {
+                                self.refusals.push(refusal(
+                                    "MEM-6",
+                                    self.site(at, node),
+                                    "an outlives clause names only region parameters",
+                                ));
                             }
                         }
                         self.fns[f].outlives.push((a, b));
@@ -1941,6 +1940,32 @@ pub(crate) fn scoped_payload(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty:
             decl.repr == Repr::Scoped
                 || decl.role.is_some_and(|r| r.kind() == Kind::Scoped)
                 || decl.structural && xs.iter().any(|&x| scoped_payload(decls, t, x))
+        }
+        _ => false,
+    }
+}
+/// A bare stable parameter reads the caller's value in its original region (MEM-6).
+/// This conversion is only for parameter reads, never for storing or returning it.
+pub(crate) fn stable_parameter(
+    decls: &crate::Rows<TypeDecl>,
+    t: &impl TyRead,
+    actual: TyId,
+    expected: TyId,
+) -> bool {
+    let actual = match t.kind(actual) {
+        TyKind::Anchored(x, _) => *x,
+        _ => actual,
+    };
+    match (t.kind(actual), t.kind(expected)) {
+        (TyKind::Adt(a, xs), TyKind::Adt(b, ys)) => {
+            xs == ys
+                && ((a == b
+                    && (decls[b.index()].repr == Repr::Stable
+                        || decls[b.index()]
+                            .role
+                            .is_some_and(|r| r.kind() == Kind::Stable)))
+                    || decls[a.index()].role == Some(Role::IndexedSpan)
+                        && decls[b.index()].role == Some(Role::SeqSpan))
         }
         _ => false,
     }

@@ -1,0 +1,6 @@
+// expect: gap packed and streamable bounds are not built
+// expect: gap generic definitions are not built
+// expect: gap calls to generic functions are not built
+// std.json.index: a bare stable parameter reads a rooted indexed span as a SeqSpan.
+fn len[T: packed](xs: SeqSpan[T]) -> u64 { 0 }
+fn index[in a](ms: IndexedSpan[u64] in a) -> u64 { len(ms) }

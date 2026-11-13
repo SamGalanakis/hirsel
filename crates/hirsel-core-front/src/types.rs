@@ -259,7 +259,8 @@ pub fn has_hole(t: &impl TyRead, ty: TyId) -> bool {
     match t.kind(ty) {
         TyKind::Hole => true,
         TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs.iter().any(|&x| has_hole(t, x)),
-        TyKind::Anchored(x, _) | TyKind::View(x) | TyKind::Array(x, _) => has_hole(t, *x),
+        TyKind::Anchored(x, root) => has_hole(t, *x) || has_hole(t, *root),
+        TyKind::View(x) | TyKind::Array(x, _) => has_hole(t, *x),
         TyKind::Fn(ps, r, _) => ps.iter().any(|&(_, p)| has_hole(t, p)) || has_hole(t, *r),
         _ => false,
     }

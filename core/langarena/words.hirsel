@@ -1,0 +1,52 @@
+// kostya/LangArena 3c9f84d benchmarks/words.rs:32-73.
+// Owned keys because core Map cannot retain slices into the input String.
+fn tally(source:String)->Result[u32,helper.Error] {
+    let mut frequencies:Map[String,u32]=map.new()
+    let b=string.as_bytes(source)
+    let n=list.len(b)
+    let mut i:u64=0
+    // The generator emits only a-z and space, so split_whitespace is a space scan.
+    while i<n {
+        while i<n && b[i]==b' ' {i+=1}
+        let start=i
+        while i<n && b[i]!=b' ' {i+=1}
+        if i>start {
+            let word=string.slice(source,start,i)
+            let previous=map.get_or(frequencies,word,0u32)
+            if previous==0 {
+                let key=helper.mem(string.from(word))?
+                match map.insert(mut frequencies,take key,1u32) {Ok(())=>{},Error((c,_,_))=>return Error(Capacity(c))}
+            } else {let _=map.set(mut frequencies,word,previous+1)}
+        }
+    }
+    let mut best=string.new()
+    let mut maximum:u32=0
+    for (word,count) in frequencies {
+        if count>maximum {best=helper.mem(string.from(word))?;maximum=count}
+    }
+    let a=int.wrapping_add(maximum,helper.checksum_str(best))
+    Ok(int.wrapping_add(a,int.narrow(map.len(frequencies))))
+}
+pub fn dispatch(config:String,name:String,warmup:u64,iterations:u64)->Result[u32,helper.Error] {
+    if name!="Etc::Words" {return Error(UnknownTask)}
+    let count=helper.config_i64(config,name,"words")?
+    let word_len=helper.config_i64(config,name,"word_len")?
+    if count<0 || word_len<=0 || word_len>2147483647 {return Error(Config)}
+    let mut g=helper.lcg()
+    let mut source=helper.mem(string.with_capacity(int.narrow(count*(word_len+1))))?
+    for i in 0 .. count {
+        let len=helper.next_int(mut g,int.narrow(word_len))+helper.next_int(mut g,3)+3
+        for _ in 0 .. len {
+            let digit:u32=int.narrow(helper.next_int(mut g,26))
+            let code:u32=97+digit
+            helper.mem(string.push_char(mut source,option.unwrap(char.from_u32(code))))?
+        }
+        if i+1<count {helper.mem(string.push(mut source," "))?}
+    }
+    let mut checksum:u32=0
+    for _ in 0 .. warmup+iterations {checksum=int.wrapping_add(checksum,tally(source)?)}
+    Ok(checksum)
+}
+pub fn main(out:Stdout,d:Dir,argv:Args)->Result[(),Exit] waits {
+    harness.main(out,d,argv,fn(c:String,n:String,w:u64,i:u64)->Result[u32,helper.Error] {dispatch(c,n,w,i)})
+}

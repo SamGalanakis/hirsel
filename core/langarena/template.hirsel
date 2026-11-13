@@ -1,0 +1,77 @@
+// kostya/LangArena 3c9f84d benchmarks/template.rs:49-216.
+// Regex uses a hand matcher for {{(.*?)}}. A capture cannot cross a newline.
+fn numbered(prefix:String,i:u64)->Result[String,helper.Error] {
+    let mut key=helper.mem(string.from(prefix))?
+    helper.mem(string.push_u64(mut key,i))?
+    Ok(take key)
+}
+fn bind(mut vars:Map[String,String],take key:String,value:String)->Result[(),helper.Error] {
+    let owned=helper.mem(string.from(value))?
+    match map.insert(mut vars,take key,take owned) {
+        Ok(())=>Ok(()),Error((c,_,_))=>Error(Capacity(c)),
+    }
+}
+fn render(source:String,vars:Map[String,String],regex:bool)->Result[String,helper.Error] {
+    let n=string.byte_len(source)
+    let b=string.as_bytes(source)
+    let mut out=helper.mem(string.with_capacity(n+n/2))?
+    let mut i:u64=0
+    while i<n {
+        if i+1<n && b[i]==b'{' && b[i+1]==b'{' {
+            let mut j=i+2
+            while j+1<n {
+                if b[j]==b'}' && b[j+1]==b'}' {break}
+                if regex && b[j]==b'\n' {break}
+                j+=1
+            }
+            if j+1<n && b[j]==b'}' && b[j+1]==b'}' {
+                let key=string.trim_ascii(string.slice(source,i+2,j))
+                if let Some(value)=map.get(vars,key) {helper.mem(string.push(mut out,value))?}
+                i=j+2
+                continue
+            }
+        }
+        // The upstream fixture is ASCII, including the single-brace literals.
+        helper.mem(string.push_char(mut out,option.unwrap(char.from_u32(int.widen(b[i])))))?
+        i+=1
+    }
+    Ok(take out)
+}
+pub fn dispatch(config:String,name:String,warmup:u64,iterations:u64)->Result[u32,helper.Error] {
+    if name!="Template::Parse" && name!="Template::Regex" {return Error(UnknownTask)}
+    let count=helper.config_i64(config,name,"count")?
+    if count<0 {return Error(Config)}
+    let first:Inline[String,8]=["John","Jane","Bob","Alice","Charlie","Diana","Sarah","Mike"]
+    let last:Inline[String,8]=["Smith","Johnson","Brown","Taylor","Wilson","Davis","Miller","Jones"]
+    let cities:Inline[String,6]=["New York","Los Angeles","Chicago","Houston","Phoenix","San Francisco"]
+    let mut vars:Map[String,String]=map.new()
+    bind(mut vars,helper.mem(string.from("TITLE"))?,"Template title")?
+    let mut source=helper.mem(string.from("<html><body><h1>{{TITLE}}</h1><p>Lorem {ipsum} dolor {sit} amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore {et} dolore magna aliqua. </p><table>"))?
+    for row in 0 .. count {
+        let i:u64=int.narrow(row)
+        if i%3==0 {helper.mem(string.push(mut source,"<!-- {comment} -->"))?}
+        helper.mem(string.push(mut source,"<tr><td>{{ FIRST_NAME"))?
+        helper.mem(string.push_u64(mut source,i))?
+        helper.mem(string.push(mut source," }}</td><td>{{LAST_NAME"))?
+        helper.mem(string.push_u64(mut source,i))?
+        helper.mem(string.push(mut source,"}}</td><td>{{  CITY"))?
+        helper.mem(string.push_u64(mut source,i))?
+        helper.mem(string.push(mut source,"  }}</td><td>{balance: "))?
+        helper.mem(string.push_u64(mut source,i%100))?
+        helper.mem(string.push(mut source,"}</td></tr>\n"))?
+        bind(mut vars,numbered("FIRST_NAME",i)?,first[i%8])?
+        bind(mut vars,numbered("LAST_NAME",i)?,last[i%8])?
+        bind(mut vars,numbered("CITY",i)?,cities[i%6])?
+    }
+    helper.mem(string.push(mut source,"</table></body></html>"))?
+    let mut rendered=string.new()
+    let mut checksum:u32=0
+    for _ in 0 .. warmup+iterations {
+        rendered=render(source,vars,name=="Template::Regex")?
+        checksum=int.wrapping_add(checksum,int.narrow(string.byte_len(rendered)))
+    }
+    Ok(int.wrapping_add(checksum,helper.checksum_str(rendered)))
+}
+pub fn main(out:Stdout,d:Dir,argv:Args)->Result[(),Exit] waits {
+    harness.main(out,d,argv,fn(c:String,n:String,w:u64,i:u64)->Result[u32,helper.Error] {dispatch(c,n,w,i)})
+}

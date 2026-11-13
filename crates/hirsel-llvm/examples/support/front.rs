@@ -4,7 +4,7 @@ use hirsel_core_ids::PackageId;
 use hirsel_core_ir::{FuncId, Module};
 use hirsel_core_resolve::{ModuleSource, NameIndex, PackageManifest};
 use hirsel_core_syntax::{ParseMode, Symbols, parse};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 pub fn lower(
@@ -72,11 +72,13 @@ pub fn lower(
     }
     let mut emitter = Emitter::new();
     let mut names = HashMap::new();
+    let mut checked = HashSet::new();
     let mut refusals = Vec::new();
     for (f, fd) in program.fns.iter().enumerate() {
         if index.module_package(fd.site.module) != index.module_package(main) || fd.body.is_none() {
             continue;
         }
+        checked.insert(fd.path.clone());
         let check = program.check_lower(f, &mut emitter);
         if !check.gaps.is_empty() {
             return Err(format!("{check:?}"));
@@ -106,6 +108,33 @@ pub fn lower(
     refusals.sort();
     if refusals != expected {
         return Err(format!("refusals: {refusals:?}; expected: {expected:?}"));
+    }
+    // The fixture owns one combined module. Pull in the source/template bodies
+    // named by its external rows, as the driver's instance collector does for
+    // separately published definitions, before closing generic instances.
+    loop {
+        let needed = emitter
+            .module
+            .functions
+            .iter()
+            .filter(|f| f.body.is_none())
+            .filter_map(|f| {
+                let key = &emitter.module.instances[f.instance.index()];
+                program.fns.iter().position(|fd| {
+                    fd.path == key.definition && fd.body.is_some() && !checked.contains(&fd.path)
+                })
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        if needed.is_empty() {
+            break;
+        }
+        for f in needed {
+            checked.insert(program.fns[f].path.clone());
+            let check = program.check_lower(f, &mut emitter);
+            if !check.refusals.is_empty() || !check.gaps.is_empty() {
+                return Err(format!("{}: {check:?}", program.fns[f].path));
+            }
+        }
     }
     emitter.materialize_instances()?;
     Ok((emitter.module, names))

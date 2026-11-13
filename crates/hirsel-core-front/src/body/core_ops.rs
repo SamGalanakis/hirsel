@@ -303,7 +303,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
     /// Runtime rows use their own fixed ABI, with the context supplied by the engine.
     /// A call's failure edge is captured before any normal-result custody changes.
-    pub(super) fn runtime_row(&mut self, op: RtOp, args: &[Arg], n: NodeId) -> Option<[ValueId; 4]> {
+    pub(super) fn runtime_row(
+        &mut self,
+        op: RtOp,
+        args: &[Arg],
+        n: NodeId,
+    ) -> Option<[ValueId; 4]> {
         if !self.live() {
             return None;
         }

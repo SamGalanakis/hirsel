@@ -1505,11 +1505,26 @@ b0:
 fn causes_iteration_reads_complete_cells_and_preserves_order() {
     use hirsel_core_ir::text;
     let vectors = [
-        ("let mut s: u64 = 0; for c in cs { let k = match c.kind { Fail(m) => if m == \"data\" { 14u64 } else { 90u64 }, Overflow => 1, _ => 90 }; s = s * 100 + k; if c.site == target { s += 1 } }; s", eval::Outcome::Returned(vec![1501])),
-        ("let mut s: u64 = 0; for c in cs { match c.kind { Fail(_) => continue, _ => {} }; s += 1 }; s", eval::Outcome::Returned(vec![1])),
-        ("let mut s: u64 = 0; for c in cs { s += 1; break }; s", eval::Outcome::Returned(vec![1])),
-        ("for c in cs { return match c.kind { Fail(m) => if m == \"data\" { 4u64 } else { 0u64 }, _ => 0 } }; 99", eval::Outcome::Returned(vec![4])),
-        ("for c in cs { let n: u8 = int.narrow(256u64) }; 0", eval::Outcome::Failed(vec!["Overflow".into()])),
+        (
+            "let mut s: u64 = 0; for c in cs { let k = match c.kind { Fail(m) => if m == \"data\" { 14u64 } else { 90u64 }, Overflow => 1, _ => 90 }; s = s * 100 + k; if c.site == target { s += 1 } }; s",
+            eval::Outcome::Returned(vec![1501]),
+        ),
+        (
+            "let mut s: u64 = 0; for c in cs { match c.kind { Fail(_) => continue, _ => {} }; s += 1 }; s",
+            eval::Outcome::Returned(vec![1]),
+        ),
+        (
+            "let mut s: u64 = 0; for c in cs { s += 1; break }; s",
+            eval::Outcome::Returned(vec![1]),
+        ),
+        (
+            "for c in cs { return match c.kind { Fail(m) => if m == \"data\" { 4u64 } else { 0u64 }, _ => 0 } }; 99",
+            eval::Outcome::Returned(vec![4]),
+        ),
+        (
+            "for c in cs { let n: u8 = int.narrow(256u64) }; 0",
+            eval::Outcome::Failed(vec!["Overflow".into()]),
+        ),
     ];
     for (body, expected) in vectors {
         let source = format!("fn f(cs: Causes, target: Site) -> u64 {{ {body} }}");
@@ -1519,26 +1534,60 @@ fn causes_iteration_reads_complete_cells_and_preserves_order() {
         let f = p.fns.iter().position(|f| f.path.0.name == "f").unwrap();
         let mut emitter = Emitter::new();
         let check = p.check_lower(f, &mut emitter);
-        assert!(check.refusals.is_empty() && check.gaps.is_empty(), "{source}: {check:?}");
+        assert!(
+            check.refusals.is_empty() && check.gaps.is_empty(),
+            "{source}: {check:?}"
+        );
         let target = check.function.unwrap();
         let m = &emitter.module;
         let sig = m.functions[target.index()].signature;
-        let Param::Address(cs) = m.signatures[sig.index()].params[0] else { panic!("Causes carrier") };
+        let Param::Address(cs) = m.signatures[sig.index()].params[0] else {
+            panic!("Causes carrier")
+        };
         let (g, instance, entry) = (m.signatures.len(), m.instances.len(), m.functions.len());
         // Two complete cells: Fail(message length 4, site 17), then Overflow(site 23).
         // They are ordinary owned fixture blocks; f only borrows the chain.
-        let mut fixture = format!("{}\nsig g{g} = () -> (u64)\ninst n{instance} = app@1/fixture/causes [] []\nfn f{entry} = n{instance} g{g} {{\nslot s0 = t{}\naddr a0 = s0 : t{}\naddr a1 = a0 : ptr\n", text::print(m), cs.0, cs.0);
+        let mut fixture = format!(
+            "{}\nsig g{g} = () -> (u64)\ninst n{instance} = app@1/fixture/causes [] []\nfn f{entry} = n{instance} g{g} {{\nslot s0 = t{}\naddr a0 = s0 : t{}\naddr a1 = a0 : ptr\n",
+            text::print(m),
+            cs.0,
+            cs.0
+        );
         let words = [
-            ("v1", 0, "u8", 4), ("v1", 16, "u64", 4), ("v1", 24, "u64", 8), ("v1", 32, "u64", 17),
-            ("v3", 0, "u8", 0), ("v3", 8, "u64", 0), ("v3", 16, "u64", 0), ("v3", 24, "u64", 0), ("v3", 32, "u64", 23), ("v3", 40, "ptr", 0),
+            ("v1", 0, "u8", 4),
+            ("v1", 16, "u64", 4),
+            ("v1", 24, "u64", 8),
+            ("v1", 32, "u64", 17),
+            ("v3", 0, "u8", 0),
+            ("v3", 8, "u64", 0),
+            ("v3", 16, "u64", 0),
+            ("v3", 24, "u64", 0),
+            ("v3", 32, "u64", 23),
+            ("v3", 40, "ptr", 0),
         ];
-        for (i, (base, _, ty, _)) in words.iter().enumerate() { fixture += &format!("addr a{} = {base} byte v{} : {ty}\n", i+2, 10+2*i); }
+        for (i, (base, _, ty, _)) in words.iter().enumerate() {
+            fixture += &format!("addr a{} = {base} byte v{} : {ty}\n", i + 2, 10 + 2 * i);
+        }
         fixture += "addr a12 = v1 byte v30 : ptr\naddr a13 = v1 byte v31 : ptr\naddr a14 = v6 : u32\nb0:\nlive s0\nv0: u64 = const 48\nv1: ptr, v2: u64 = alloc own v0 align 8 charge v0\nv3: ptr, v4: u64 = alloc own v0 align 8 charge v0\nv5: u64 = const 8\nv6: ptr, v7: u64 = alloc own v5 align 1 charge v5\nv8: u64 = const 17\nv9: u32 = const 1635017060\naddress a14\nstore a14, v9\n";
         for (i, (_, offset, ty, bits)) in words.iter().enumerate() {
-            let bits = if *ty == "ptr" { format!("0x{bits:x}") } else { bits.to_string() };
-            fixture += &format!("v{}: u64 = const {offset}\nv{}: {ty} = const {bits}\naddress a{}\nstore a{}, v{}\n",10+2*i,11+2*i,i+2,i+2,11+2*i);
+            let bits = if *ty == "ptr" {
+                format!("0x{bits:x}")
+            } else {
+                bits.to_string()
+            };
+            fixture += &format!(
+                "v{}: u64 = const {offset}\nv{}: {ty} = const {bits}\naddress a{}\nstore a{}, v{}\n",
+                10 + 2 * i,
+                11 + 2 * i,
+                i + 2,
+                i + 2,
+                11 + 2 * i
+            );
         }
-        fixture += &format!("v30: u64 = const 8\nv31: u64 = const 40\naddress a12\naddress a13\nstore a12, v6\nstore a13, v3\naddress a0\naddress a1\nstore a1, v1\nv32: u64 = call f{} g{} (&a0, v8) fail b1\nfree v6 charge v5\nfree v3 charge v0\nfree v1 charge v0\nreturn v32\nb1:\nfree v6 charge v5\nfree v3 charge v0\nfree v1 charge v0\npropagate\n}}", target.0, sig.0);
+        fixture += &format!(
+            "v30: u64 = const 8\nv31: u64 = const 40\naddress a12\naddress a13\nstore a12, v6\nstore a13, v3\naddress a0\naddress a1\nstore a1, v1\nv32: u64 = call f{} g{} (&a0, v8) fail b1\nfree v6 charge v5\nfree v3 charge v0\nfree v1 charge v0\nreturn v32\nb1:\nfree v6 charge v5\nfree v3 charge v0\nfree v1 charge v0\npropagate\n}}",
+            target.0, sig.0
+        );
         let module = text::parse(&fixture).unwrap();
         wf::module(&module).unwrap_or_else(|e| panic!("{e}\n{}", text::print(&module)));
         let report = eval::run(&module, FuncId(entry as u32), &[], 10000);

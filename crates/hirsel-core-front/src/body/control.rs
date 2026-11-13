@@ -630,7 +630,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.freeze(at.place, Hold::View(Extent::Block(self.depth + 1)));
             }
             let start = if causes {
-                value.filter(|_| self.live()).map(|v| self.read_sequence_word(v, 0, Ty::Ptr, n))
+                value
+                    .filter(|_| self.live())
+                    .map(|v| self.read_sequence_word(v, 0, Ty::Ptr, n))
             } else {
                 self.konst(Ty::Scalar(Scalar::U64), 0, n)
             };
@@ -647,11 +649,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             (elem, start, limit, false, Some((inner, value)))
         };
         let index_ty = if range { elem } else { scalar(Scalar::U64) };
-        let index_ir = if causes { Some(Ty::Ptr) } else { self.ir_ty(index_ty) };
+        let index_ir = if causes {
+            Some(Ty::Ptr)
+        } else {
+            self.ir_ty(index_ty)
+        };
         let index_slot = if causes {
             start.filter(|_| self.live()).map(|value| {
                 let slot = self.new_slot(PlaceTy::Value(Ty::Ptr), n);
-                self.inst(Inst::Store { address: slot, value }, n);
+                self.inst(
+                    Inst::Store {
+                        address: slot,
+                        value,
+                    },
+                    n,
+                );
                 slot
             })
         } else {
@@ -737,7 +749,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let value = match (flow, sequence) {
             (Some((_, advance, _, index, _, _, _)), Some((collection, Some(pointer)))) => {
                 if causes {
-                    self.runtime_row(hirsel_core_ir::RtOp::CauseValue, &[Arg::Value(index)], n).map(|v| v[0])
+                    self.runtime_row(hirsel_core_ir::RtOp::CauseValue, &[Arg::Value(index)], n)
+                        .map(|v| v[0])
                 } else if matches!(self.t.kind(collection), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::Map))
                 {
                     self.map_pair(pointer, collection, index, elem, advance, n)
@@ -848,8 +861,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             if consuming {
                 self.jump(head, &[], n);
             } else if causes {
-                if let Some(value) = self.runtime_row(hirsel_core_ir::RtOp::CauseNext, &[Arg::Value(index)], n) {
-                    self.inst(Inst::Store { address: index_slot, value: value[0] }, n);
+                if let Some(value) =
+                    self.runtime_row(hirsel_core_ir::RtOp::CauseNext, &[Arg::Value(index)], n)
+                {
+                    self.inst(
+                        Inst::Store {
+                            address: index_slot,
+                            value: value[0],
+                        },
+                        n,
+                    );
                     self.jump(head, &[], n);
                 }
             } else {

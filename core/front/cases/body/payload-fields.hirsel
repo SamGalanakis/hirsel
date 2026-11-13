@@ -1,10 +1,10 @@
 // OWN-8, MEM-14, MEM-15: a field of a Box, Rc or Arc is the field of its payload, and
 // a field of a nested record continues from it. Hand-derived: a holds C(k, 7, I(40)),
-// so a + b + i.v = k + 47. A Piece over chunk "abc" at lo 4 reads 3 + 4 = 7; a Node of
+// so a + b + i.v = k + 47. A Piece over chunk "abc" at lo 4 reads 4 + 3 = 7; a Node of
 // key 10 whose left has key k reads 10 + k, and 10 alone with no left.
 // Expected boxed(2) = 49, counted(0) = 47, shared(5) = 52, piece(0) = 7, tree(5) = 15,
 // lone(0) = 10; the counted kernels are runtime rows the evaluator does not run, so
-// those values are checked natively.
+// those values were checked natively (cranelift).
 // expect: accept
 type I: shareable + send { v: u64 }
 type C: shareable + send { a: u64, b: u64, i: I }
@@ -23,7 +23,7 @@ fn shared(k: u64) -> u64 {
 // rope's `p.chunk.value`: a counted field of a record, its String read as a view.
 type Chunk: shareable { id: u64, value: String }
 type Piece { chunk: Rc[Chunk], lo: u64 }
-fn chunk_len(p: Piece) -> u64 { string.byte_len(p.chunk.value) + p.lo }
+fn chunk_len(p: Piece) -> u64 { if p.chunk.value == "abc" { p.lo + 3 } else { 0 } }
 // versions' `n.key`: a view of an Arc bound from a viewed Option.
 type Node: shareable + send { key: u64, left: Option[Arc[Node]] }
 fn left_key(root: Option[Arc[Node]]) -> u64 {

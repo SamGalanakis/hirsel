@@ -30,6 +30,11 @@ pub use crate::entry::{
     hirsel_core_os_process_new,
 };
 
+/// FORM #50: closed provider rows resolve the capability or HostFile provider.
+/// Operands point to carriers; only read/mkdtemp can change length. Capacity 0
+/// never owns storage. Outcome is value@0, error-tag@8, code@12, written@16,
+/// status@24; clocks/args have no failure status. C declarations are in host.h.
+pub use crate::host_ops::hirsel_core_host_op;
 pub use crate::process::{hirsel_core_args_get, hirsel_core_args_len, hirsel_core_run};
 pub use crate::provider::hirsel_core_host;
 

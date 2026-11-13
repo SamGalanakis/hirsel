@@ -25,7 +25,7 @@ pub type Entry = unsafe extern "C" fn(*mut Context, *const Config, *mut MainResu
 #[repr(C)]
 pub struct Config {
     pub root_limit: u64,
-    pub args: *const View,
+    pub args: *const crate::provider::Buffer,
     pub args_len: usize,
     pub grants: *const u64,
     pub grants_len: usize,
@@ -135,11 +135,6 @@ pub unsafe extern "C" fn hirsel_core_args_len(context: *const Context, _args: u6
     // SAFETY: the run owns immutable argument descriptors.
     unsafe { (*(*context).run).args_len as u64 }
 }
-#[repr(C)]
-pub struct Argument {
-    pub value: View,
-    pub present: bool,
-}
 /// # Safety
 /// Same as args_len. Index is user input and is checked before address arithmetic.
 #[unsafe(no_mangle)]
@@ -147,23 +142,14 @@ pub unsafe extern "C" fn hirsel_core_args_get(
     context: *const Context,
     _args: u64,
     index: u64,
-) -> Argument {
+) -> *const crate::provider::Buffer {
     // SAFETY: configuration is live; only a checked index reads its argument table.
     unsafe {
         let config = &*(*context).run;
         if index >= config.args_len as u64 {
-            return Argument {
-                value: View {
-                    data: std::ptr::null(),
-                    len: 0,
-                },
-                present: false,
-            };
+            return std::ptr::null();
         }
-        Argument {
-            value: *config.args.add(index as usize),
-            present: true,
-        }
+        config.args.add(index as usize)
     }
 }
 

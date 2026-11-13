@@ -17,6 +17,7 @@ mod destination;
 pub mod entry;
 mod fiber;
 pub mod host_file;
+pub mod host_ops;
 pub mod limit;
 pub mod os;
 pub mod process;
@@ -170,3 +171,5 @@ mod schedule_tests;
 mod entry_tests;
 #[cfg(test)]
 mod host_file_tests;
+#[cfg(test)]
+mod host_ops_tests;

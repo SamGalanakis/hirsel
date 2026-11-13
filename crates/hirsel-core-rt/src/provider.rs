@@ -40,7 +40,8 @@ impl IoError {
     }
 }
 
-/// Caller-owned capacity. read/mkdtemp append and update len; writes only read len.
+/// FORM String/Bytes carrier. Capacity 0 borrows storage even when data is
+/// nonnull and len is nonzero. Read/mkdtemp never grow; writes only read len.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Buffer {
@@ -97,7 +98,13 @@ pub unsafe extern "C" fn hirsel_core_host(
                     ..Outcome::default()
                 };
             }
-            if request.operation == MKDTEMP && request.buffer.capacity - request.buffer.len < 32 {
+            if request.operation == MKDTEMP
+                && request
+                    .buffer
+                    .len
+                    .checked_add(32)
+                    .is_none_or(|n| n > request.buffer.capacity)
+            {
                 causes::record(
                     &mut *context,
                     causes::Cause {

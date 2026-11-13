@@ -8,19 +8,39 @@ struct File {
     provider: Provider,
     handle: u64,
 }
+pub(crate) const DYNAMIC_GRANT: u64 = 1 << 63;
 #[derive(Default)]
 pub(crate) struct Files {
     next: u64,
     live: BTreeMap<u64, File>,
+    grants: BTreeMap<u64, Box<File>>,
 }
 impl Files {
-    fn insert(&mut self, file: File) -> u64 {
+    fn id(&mut self) -> u64 {
         self.next = self
             .next
             .checked_add(1)
             .unwrap_or_else(|| crate::process::stop(b"HostHandles"));
-        self.live.insert(self.next, file);
+        if self.next == DYNAMIC_GRANT {
+            crate::process::stop(b"HostHandles");
+        }
         self.next
+    }
+    fn insert(&mut self, file: File) -> u64 {
+        let id = self.id();
+        self.live.insert(id, file);
+        id
+    }
+    pub(crate) fn grant(&mut self, provider: Provider, handle: u64) -> u64 {
+        let id = DYNAMIC_GRANT | self.id();
+        self.grants.insert(id, Box::new(File { provider, handle }));
+        id
+    }
+    pub(crate) fn grant_provider(&self, handle: u64) -> *const Provider {
+        &raw const self.grants[&handle].provider
+    }
+    pub(crate) fn grant_handle(&self, handle: u64) -> u64 {
+        self.grants[&handle].handle
     }
     pub(crate) unsafe fn close_all(&mut self, context: *mut Context) {
         while let Some((_, file)) = self.live.pop_last() {

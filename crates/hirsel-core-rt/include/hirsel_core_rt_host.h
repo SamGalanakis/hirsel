@@ -27,6 +27,13 @@ typedef struct {
     HirselCoreHostOutcome (*deliver)(void *, HirselCoreHostRequest *, HirselCoreHostOutcome);
 } HirselCoreProvider;
 HirselCoreHostOutcome hirsel_core_host(HirselCoreContext *, const HirselCoreProvider *, HirselCoreHostRequest *);
+/* FORM #50: outcome layout value@0, error.tag@8, error.code@12, written@16,
+   status@24 (failure convention 3c242a8a). error 0 succeeds; 1..5 are IoError
+   case + 1. Clock rows ignore status and use value; waiting rows can fail with
+   Cancelled, mkdtemp also Bounds. Only read/mkdtemp update operand.len; data
+   and capacity never change. Capacity 0 borrows storage (even if len > 0).
+   No row admits or grows/frees carrier storage. Null operand for no operand. */
+HirselCoreHostOutcome hirsel_core_host_op(HirselCoreContext *, uint8_t op, uint64_t handle, HirselCoreBuffer *operand, uint8_t mode, uint64_t site);
 /* HostFile (FORM #47): u64 provider handle; no cell, grant or charge.
    No public fields or inline offsets. OPEN returns it in
    Outcome.value; file operations use its retained issuing provider. CLOSE
@@ -54,7 +61,7 @@ typedef struct { uint8_t kind; size_t index; } HirselCoreEntryRequirement;
    are plain u64 provider handles, eight physical/logical bytes in FORM. */
 typedef struct HirselCoreProcessConfig {
     uint64_t root_limit;
-    const HirselCoreView *args;
+    const HirselCoreBuffer *args;
     size_t args_len;
     const uint64_t *grants;
     size_t grants_len;
@@ -71,8 +78,9 @@ typedef struct HirselCoreProcessConfig {
 typedef uint8_t (*HirselCoreEntry)(HirselCoreContext *, const HirselCoreProcessConfig *, HirselCoreMainResult *);
 uint8_t hirsel_core_run(const HirselCoreProcessConfig *, HirselCoreEntry);
 uint64_t hirsel_core_args_len(const HirselCoreContext *, uint64_t args);
-typedef struct { HirselCoreView value; bool present; } HirselCoreArgument;
-HirselCoreArgument hirsel_core_args_get(const HirselCoreContext *, uint64_t args, uint64_t index);
+/* Null means None; otherwise one pinned capacity-0 String carrier per argument,
+   borrowed until the run ends. The caller never frees it or its bytes. */
+const HirselCoreBuffer *hirsel_core_args_get(const HirselCoreContext *, uint64_t args, uint64_t index);
 uint8_t hirsel_core_check_cancel(HirselCoreContext *, uint64_t site);
 /* Constructor fills cfg.grants[i] in main parameter order from requirements.
    Main takes one uint64_t per parameter. entry_grant returns zero when missing.

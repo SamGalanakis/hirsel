@@ -187,9 +187,10 @@ fn clocks_and_argv_are_borrowed_inputs() {
     let mono = f.simple(MONO_NS, 1, b"", 0).value;
     assert!(f.simple(MONO_NS, 1, b"", 0).value >= mono);
     let bytes = b"argument";
-    let args = [View {
-        data: bytes.as_ptr(),
+    let args = [Buffer {
+        data: bytes.as_ptr().cast_mut(),
         len: bytes.len(),
+        capacity: 0,
     }];
     let mut stderr = Vec::new();
     let config = config(args.as_ptr(), 1, &mut stderr);
@@ -198,9 +199,10 @@ fn clocks_and_argv_are_borrowed_inputs() {
         (*f.context).run = &config;
         assert_eq!(hirsel_core_args_len(f.context, 1), 1);
         let v = hirsel_core_args_get(f.context, 1, 0);
-        assert!(v.present);
-        assert_eq!(std::slice::from_raw_parts(v.value.data, v.value.len), bytes);
-        assert!(!hirsel_core_args_get(f.context, 1, u64::MAX).present);
+        assert!(!v.is_null());
+        assert_eq!((*v).capacity, 0);
+        assert_eq!(std::slice::from_raw_parts((*v).data, (*v).len), bytes);
+        assert!(hirsel_core_args_get(f.context, 1, u64::MAX).is_null());
     }
 }
 unsafe extern "C" fn diagnostic(state: *mut u8, p: *const u8, n: usize) {
@@ -209,7 +211,7 @@ unsafe extern "C" fn diagnostic(state: *mut u8, p: *const u8, n: usize) {
         (&mut *state.cast::<Vec<u8>>()).extend_from_slice(std::slice::from_raw_parts(p, n));
     }
 }
-fn config(args: *const View, args_len: usize, stderr: &mut Vec<u8>) -> Config {
+fn config(args: *const Buffer, args_len: usize, stderr: &mut Vec<u8>) -> Config {
     Config {
         root_limit: 1024,
         args,

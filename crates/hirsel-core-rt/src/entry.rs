@@ -5,7 +5,7 @@ use crate::{
     Context,
     os::OsProvider,
     process::{Config, View},
-    provider::{IoError, Provider},
+    provider::{Buffer, IoError, Provider},
 };
 use std::{
     ffi::OsStr,
@@ -89,7 +89,13 @@ pub unsafe extern "C" fn hirsel_core_capability_provider(
     handle: u64,
 ) -> *const Provider {
     // SAFETY: trusted emitted operands designate the run's indexed grant metadata.
-    unsafe { (*(*(*context).run).capabilities.add((handle - 1) as usize)).provider }
+    unsafe {
+        if handle & crate::host_file::DYNAMIC_GRANT != 0 {
+            (*(*context).host_files).grant_provider(handle)
+        } else {
+            (*(*(*context).run).capabilities.add((handle - 1) as usize)).provider
+        }
+    }
 }
 /// # Safety
 /// Same as capability_provider. Dir selects a pinned directory; clock/stream/task
@@ -100,7 +106,13 @@ pub unsafe extern "C" fn hirsel_core_capability_handle(
     handle: u64,
 ) -> u64 {
     // SAFETY: the run owns this immutable capability's provider-local designation.
-    unsafe { (*(*(*context).run).capabilities.add((handle - 1) as usize)).handle }
+    unsafe {
+        if handle & crate::host_file::DYNAMIC_GRANT != 0 {
+            (*(*context).host_files).grant_handle(handle)
+        } else {
+            (*(*(*context).run).capabilities.add((handle - 1) as usize)).handle
+        }
+    }
 }
 #[repr(C)]
 pub struct OsConfig {
@@ -121,7 +133,7 @@ pub struct OsProcess {
     os: Option<Box<OsProvider>>,
     _provider: Box<Provider>,
     _args: Vec<Vec<u8>>,
-    _views: Vec<View>,
+    _carriers: Vec<Buffer>,
     _metadata: Box<[Grant]>,
     grants: Vec<u64>,
     diagnostic: Vec<u8>,
@@ -176,9 +188,10 @@ impl OsProcess {
             }
             let views = args
                 .iter()
-                .map(|a| View {
-                    data: a.as_ptr(),
+                .map(|a| Buffer {
+                    data: a.as_ptr().cast_mut(),
                     len: a.len(),
+                    capacity: 0,
                 })
                 .collect::<Vec<_>>();
             let provider = Box::new(os.provider());
@@ -226,7 +239,7 @@ impl OsProcess {
                 os: Some(os),
                 _provider: provider,
                 _args: args,
-                _views: views,
+                _carriers: views,
                 _metadata: metadata,
                 grants: Vec::with_capacity(input.parameters_len),
                 diagnostic: vec![],

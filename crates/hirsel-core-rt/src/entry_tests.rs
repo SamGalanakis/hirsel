@@ -80,7 +80,7 @@ fn c_entry_constructor_fills_main_order_with_u64_handles_and_copies_argv() {
         assert_eq!(hirsel_core_args_len(&context, args), 1);
         let arg = hirsel_core_args_get(&context, args, 0);
         assert_eq!(
-            std::slice::from_raw_parts(arg.value.data, arg.value.len),
+            std::slice::from_raw_parts((*arg).data, (*arg).len),
             b"copied"
         );
         assert_eq!(hirsel_core_entry_grant(process, DIR, 2), 0);

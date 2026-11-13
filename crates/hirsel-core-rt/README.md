@@ -124,3 +124,14 @@ Tags can cause only a false negative. Outstanding bytes prevent reuse of the
 stored slot through exit/re-entry, and current is canonical. The C entry
 hirsel_core_refund_in(context,payer,bytes) uses the same fast path. Both preserve MEM-20/MEM-26.
 Canonical admission and the plain/align8 prefix store need no tag mask.
+
+FORM #50 provider rows use `hirsel_core_host_op(context, op, handle, operand,
+mode, site)`, with HostOp codes 0..13. Operand points to a String/Bytes carrier;
+only read/mkdtemp update its length. Capacity zero borrows storage regardless of
+the pointer or length. No provider call frees, grows or admits carrier storage.
+Open returns a provider-aware HostFile; mkdtemp returns a provider-aware Dir.
+Outcome fields are value at 0, IoError tag at 8, code at 12, written at 16 and
+failure status at 24. Waiting rows expose status; clocks use only value.
+`hirsel_core_args_get(context, args, index)` returns a pointer to a pinned
+capacity-zero carrier or null for None. The process constructor copies argv and
+owns these carriers for the run; Config.args is now their immutable table.

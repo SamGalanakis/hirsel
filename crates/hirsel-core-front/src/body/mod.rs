@@ -1257,37 +1257,50 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     /// A held value's native stride or portable logical size. Rigid parameters
     /// retain the kind of size until mechanical instance materialization.
     pub(super) fn layout_size(&mut self, ty: TyId, logical: bool, n: NodeId) -> Option<ValueId> {
-        let id = match self.rep(ty) {
-            Ok(Rep::Scalar(Ty::Scalar(s))) => {
-                return self.konst(Ty::Scalar(Scalar::U64), s.size(), n);
+        self.layout_size_inner(ty, logical, false, n)
+    }
+    pub(super) fn nonzero_size(&mut self, ty: TyId, n: NodeId) -> Option<ValueId> {
+        self.layout_size_inner(ty, true, true, n)
+    }
+    fn layout_size_inner(
+        &mut self,
+        ty: TyId,
+        logical: bool,
+        nonzero: bool,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let (id, bits) = match self.rep(ty) {
+            Ok(Rep::Scalar(Ty::Scalar(s))) => (None, s.size()),
+            Ok(Rep::Scalar(Ty::Ptr) | Rep::View(_)) => (None, hirsel_core_layout::POINTER),
+            Ok(Rep::None) => (None, 0),
+            Ok(Rep::Place(id)) => {
+                let bits = if self.e.is_resource(id) {
+                    hirsel_core_layout::POINTER
+                } else if logical {
+                    self.e.recipes[id.index()].logical_size.unwrap()
+                } else {
+                    self.e.size(id)
+                };
+                (Some(id), bits)
             }
-            Ok(Rep::Scalar(Ty::Ptr) | Rep::View(_)) => {
-                return self.konst(Ty::Scalar(Scalar::U64), hirsel_core_layout::POINTER, n);
-            }
-            Ok(Rep::None) => return self.konst(Ty::Scalar(Scalar::U64), 0, n),
-            Ok(Rep::Place(id)) => id,
             Err(what) => {
                 self.gap(n, what);
                 return None;
             }
         };
-        let recipe = &self.e.recipes[id.index()];
-        let bits = if logical {
-            recipe.logical_size.unwrap()
-        } else {
-            self.e.size(id)
-        };
-        let bits = if self.e.is_resource(id) {
-            hirsel_core_layout::POINTER
-        } else {
-            bits
-        };
+        if nonzero && bits == 0 {
+            self.gap(n, "zero-sized List growth is not specified (FOR SPEC)");
+            return None;
+        }
         let value = self.konst(Ty::Scalar(Scalar::U64), bits, n)?;
-        if self.e.generic_names.contains_key(&id) {
+        if let Some(id) = id
+            && self.e.generic_names.contains_key(&id)
+        {
             self.copies.push(CopySize {
                 value,
                 ty: id,
                 logical,
+                nonzero,
             });
         }
         Some(value)
@@ -1315,6 +1328,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 value: bytes,
                 ty: id,
                 logical: false,
+                nonzero: false,
             });
         }
         self.inst(

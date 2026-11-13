@@ -1,0 +1,81 @@
+// Growth charges the new capacity before refunding the old one.
+// expect: accept
+// expect: run fresh() = 4
+// expect: run no_growth() = 9
+// expect: run current_payer() = 4
+// expect: run failed_growth() = 13231
+// expect: run refunded_growth() = 46408
+// expect: run padded() = 47216
+// expect: run static_contents() = 97100
+// expect: run static_capacity() = 405
+// expect: run count_overflow() = 18446744073709551615
+fn reserve[T](mut xs: List[T], n: u64) -> Result[(), Capacity] { list.reserve(mut xs, n) }
+fn fresh() -> u64 {
+    let mut xs: List[u64] = list.new()
+    result.unwrap(reserve(mut xs, 1))
+    list.capacity(xs)
+}
+fn no_growth() -> u64 {
+    let r = bound bytes 72 {
+        let mut xs: List[u64] = list.with_capacity(9)?
+        reserve(mut xs, 9)?
+        list.capacity(xs)
+    }
+    match r { Ok(n) => n, Error(e) => e.requested + 1000 }
+}
+fn current_payer() -> u64 {
+    let mut xs: List[u64] = result.unwrap(list.with_capacity(1))
+    let r = bound bytes 0 { reserve(mut xs, 2)?; list.capacity(xs) }
+    match r { Ok(n) => n, Error(e) => e.requested + 1000 }
+}
+fn failed_growth() -> u64 {
+    let r = bound bytes 39 {
+        let mut xs: List[u64] = list.with_capacity(1)?
+        match reserve(mut xs, 2) {
+            Ok(()) => 999u64,
+            Error(e) => list.capacity(xs) * 10000 + e.requested * 100 + e.available,
+        }
+    }
+    match r { Ok(n) => n, Error(_) => 0 }
+}
+fn refunded_growth() -> u64 {
+    let r = bound bytes 40 {
+        let mut xs: List[u64] = list.with_capacity(1)?
+        reserve(mut xs, 2)?
+        match reserve(mut xs, 5) {
+            Ok(()) => 999u64,
+            Error(e) => list.capacity(xs) * 10000 + e.requested * 100 + e.available,
+        }
+    }
+    match r { Ok(n) => n, Error(_) => 0 }
+}
+type Padded { a: u8, b: u64 }
+fn padded() -> u64 {
+    let r = bound bytes 56 {
+        let mut xs: List[Padded] = list.with_capacity(1)?
+        reserve(mut xs, 2)?
+        match reserve(mut xs, 5) {
+            Ok(()) => 999u64,
+            Error(e) => list.capacity(xs) * 10000 + e.requested * 100 + e.available,
+        }
+    }
+    match r { Ok(n) => n, Error(_) => 0 }
+}
+fn static_contents() -> u64 {
+    let mut xs = b"abcd"
+    result.unwrap(reserve(mut xs, 1))
+    result.unwrap(reserve(mut xs, 2))
+    let a: u64 = int.widen(xs[0])
+    let b: u64 = int.widen(xs[3])
+    a * 1000 + b
+}
+fn static_capacity() -> u64 {
+    let mut xs = b"abcd"
+    result.unwrap(reserve(mut xs, 1))
+    list.len(xs) * 100 + list.capacity(xs)
+}
+fn count_overflow() -> u64 {
+    let mut xs = b"abcd"
+    result.unwrap(reserve(mut xs, 1))
+    match reserve(mut xs, 18446744073709551615u64) { Ok(()) => 0u64, Error(e) => e.requested }
+}

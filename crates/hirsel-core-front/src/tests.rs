@@ -392,6 +392,20 @@ fn cases(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 #[test]
+fn list_growth() {
+    for case in [
+        "list-reserve.hirsel",
+        "list-reserve-zero-gap.hirsel",
+        "list-push.hirsel",
+        "list-append.hirsel",
+        "list-append-alias.hirsel",
+    ] {
+        let failures = run_case(&root().join("cases/body").join(case));
+        assert!(failures.is_empty(), "{case}: {failures:?}");
+    }
+}
+
+#[test]
 fn list_lookup() {
     let failures = run_case(&root().join("cases/body/list-get.hirsel"));
     assert!(failures.is_empty(), "{failures:?}");

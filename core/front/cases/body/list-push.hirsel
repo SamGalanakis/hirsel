@@ -1,0 +1,42 @@
+// expect: accept
+// expect: run fresh_push() = 711
+// expect: run grew() = 711
+// expect: run returned_input() = 73231 trace 7
+// expect: run stored_input() = 7 trace 7
+// expect: run grant_failure() = fail Capacity
+fn push[T](mut xs: List[T], take x: T) -> Result[(), (Capacity, T)] { list.push(mut xs, take x) }
+fn fresh_push() -> u64 {
+    let mut xs: List[u64] = list.new()
+    result.unwrap(push(mut xs, 7u64))
+    result.unwrap(push(mut xs, 11u64))
+    if list.len(xs) == 2 && list.capacity(xs) == 4 { xs[0] * 100 + xs[1] } else { 0 }
+}
+fn grew() -> u64 {
+    let mut xs: List[u64] = result.unwrap(list.with_capacity(1))
+    result.unwrap(push(mut xs, 7u64))
+    result.unwrap(push(mut xs, 11u64))
+    if list.len(xs) == 2 && list.capacity(xs) == 4 { xs[0] * 100 + xs[1] } else { 0 }
+}
+resource type Mark { id: u64 } drop(m) { let _ = m.id }
+fn returned_input() -> u64 {
+    let r = bound bytes 71 {
+        let mut xs: List[Mark] = list.new()
+        let x = result.unwrap(Mark(id: 7))
+        match list.push(mut xs, take x) {
+            Ok(()) => 999u64,
+            Error((e, take back)) => back.id * 10000 + e.requested * 100 + e.available + list.len(xs),
+        }
+    }
+    match r { Ok(n) => n, Error(_) => 0 }
+}
+fn stored_input() -> u64 {
+    let mut xs: List[Mark] = list.new()
+    let x = result.unwrap(Mark(id: 7))
+    result.unwrap(list.push(mut xs, take x))
+    xs[0].id
+}
+resource type Grow { xs: List[u64] } drop(m) { let _ = list.reserve(mut m.xs, 2) }
+fn grant_failure() -> u64 {
+    let xs: List[u64] = result.unwrap(list.with_capacity(1))
+    match Grow(xs: take xs) { Ok(_g) => 0u64, Error(_) => 999 }
+}

@@ -1,0 +1,31 @@
+// Capacity max(2+4,4,0)=6; round8(4+32)=40, with 17 available.
+// expect: accept
+// expect: run appended() = 606
+// expect: run unchanged() = 0
+// expect: run rejected() = 404017
+fn append[T: plain](mut xs: List[T], ys: List[T]) -> Result[(), Capacity] { list.append(mut xs, ys) }
+fn appended() -> u64 {
+    let mut xs = b"ab"
+    let ys = b"cdef"
+    result.unwrap(append(mut xs, ys))
+    let a: u64 = int.widen(xs[0])
+    let z: u64 = int.widen(xs[5])
+    if a == 97 && z == 102 { list.len(xs) * 100 + list.capacity(xs) } else { 0 }
+}
+fn unchanged() -> u64 {
+    let mut xs: List[u8] = list.new()
+    let ys = b""
+    result.unwrap(append(mut xs, ys))
+    list.capacity(xs)
+}
+fn rejected() -> u64 {
+    let r = bound bytes 17 {
+        let mut xs = b"abcd"
+        let ys = b"01234567890123456789012345678901"
+        match append(mut xs, ys) {
+            Ok(()) => 999u64,
+            Error(e) => list.len(xs) * 100000 + e.requested * 100 + e.available,
+        }
+    }
+    match r { Ok(n) => n, Error(_) => 0 }
+}

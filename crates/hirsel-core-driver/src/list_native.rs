@@ -61,3 +61,71 @@ fn list_lookup_cranelift() {
 fn list_lookup_llvm() {
     list_lookup(Backend::Llvm);
 }
+
+// Exercise growth through checked generic bodies and real admission/refund paths.
+fn list_growth(backend: Backend) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (cases, check, exit, limit) in [
+        (
+            include_str!("../../../core/front/cases/body/list-reserve.hirsel"),
+            "fresh()==4u64 && no_growth()==9u64 && current_payer()==4u64 && failed_growth()==13231u64 && refunded_growth()==46408u64 && padded()==47216u64 && static_contents()==97100u64 && static_capacity()==405u64 && count_overflow()==18446744073709551615u64",
+            0,
+            1_048_576,
+        ),
+        (
+            include_str!("../../../core/front/cases/body/list-push.hirsel"),
+            "fresh_push()==711u64 && grew()==711u64 && returned_input()==73231u64 && stored_input()==7u64",
+            0,
+            1_048_576,
+        ),
+        // A second resource allocation under the same finite root budget proves
+        // that the failed push returned an input that was dropped and refunded.
+        (
+            include_str!("../../../core/front/cases/body/list-push.hirsel"),
+            "returned_input()==73231u64 && returned_input()==73231u64",
+            0,
+            288 + 71,
+        ),
+        (
+            include_str!("../../../core/front/cases/body/list-push.hirsel"),
+            "grant_failure()==0u64",
+            101,
+            1_048_576,
+        ),
+        (
+            include_str!("../../../core/front/cases/body/list-append.hirsel"),
+            "appended()==606u64 && unchanged()==0u64 && rejected()==404017u64",
+            0,
+            1_048_576,
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let source = format!(
+            "{cases}\npub fn main() -> Result[(), Exit] {{ if {check} {{ Ok(()) }} else {{ Error(Exit(status:1)) }} }}"
+        );
+        let mut request = source_request(&source, dir.path());
+        request.inputs.packages[1] =
+            PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+        let product = Driver::default()
+            .check(request, &mut Meter::new(false))
+            .unwrap();
+        let mut options = native_options(backend, dir.path());
+        options.root_limit = limit;
+        let built = product
+            .build(&DefPath::from_full("app@1/main/main").unwrap(), &options)
+            .unwrap();
+        let output = Command::new(&built.executable).output().unwrap();
+        assert_eq!(output.status.code(), Some(exit), "{check}: {output:?}");
+        assert!(output.stdout.is_empty(), "{check}: {output:?}");
+    }
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn list_growth_cranelift() {
+    list_growth(Backend::Cranelift);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn list_growth_llvm() {
+    list_growth(Backend::Llvm);
+}

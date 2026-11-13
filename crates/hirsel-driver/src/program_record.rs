@@ -332,7 +332,7 @@ const VARIABLES: &[(&str, Class)] = &[
     ),
     (
         "HIRSEL_TEST_HOST_CASES",
-        Class::HostOnly("tools/tests/buck2_launcher.py"),
+        Class::HostOnly("tools/buck2/test_launcher.sh"),
     ),
     (
         "HIRSEL_TEST_HOST_ONLY",

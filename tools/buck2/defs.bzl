@@ -304,7 +304,12 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
         visibility = ["PUBLIC"],
     )
     host_cases = OPENAT2_TEST_CASES.get(name, [])
-    isolated = ISOLATED_TEST_CASES.get(name, []) + host_cases
+    isolated = ISOLATED_TEST_CASES.get(name, [])
+    selection_env = {}
+    if isolated:
+        selection_env["HIRSEL_TEST_ISOLATED_CASES"] = " ".join(isolated)
+    if host_cases:
+        selection_env["HIRSEL_TEST_HOST_CASES"] = " ".join(host_cases)
     case_cpus = EXACT_CASE_CPUS.get(name, {})
     widths = sorted({width: True for width in case_cpus.values()}.keys())
     if sorted(case_shards.keys()) != widths:
@@ -325,7 +330,7 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
                 request = _request(name, exact_cpus),
                 exact_cpus = exact_cpus,
                 pool = not TESTS_ON_HOST,
-                extra_env = {"HIRSEL_TEST_ISOLATED_CASES": " ".join(isolated)} if isolated else {},
+                extra_env = selection_env,
                 **common
             )
     isolated_common = {key: value for key, value in common.items() if key != "args"}

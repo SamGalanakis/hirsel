@@ -43,6 +43,7 @@ class FilterOwners(unittest.TestCase):
 
     def test_host_required_body_has_one_host_owner_even_under_a_positive_filter(self):
         host = 'root//:suite-openat2-1'
+        self.assertEqual(self.tool['family'](host), 'suite')
         self.graph[host] = dict(test_binary='suite', labels=['requires-openat2'],
                                 extra_env={'HIRSEL_TEST_DEDICATED_CASE': 'x'})
         with patch.dict(self.globals, graph_for=lambda *_: self.graph,

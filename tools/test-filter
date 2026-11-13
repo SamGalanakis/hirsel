@@ -24,7 +24,7 @@ CONSUMERS = runpy.run_path(str(ROOT / 'tools/consumers'))
 
 
 def family(label):
-    return re.sub(r'(?:-cpus-\d+)?-shard-\d+$', '', label.split(':')[-1])
+    return re.sub(r'(?:(?:-cpus-\d+)?-shard-\d+|-openat2-\d+)$', '', label.split(':')[-1])
 
 
 def graph_for(binaries, config):

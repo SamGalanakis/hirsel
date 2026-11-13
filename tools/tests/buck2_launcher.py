@@ -614,6 +614,19 @@ class LauncherSelection(LauncherFixture):
         dedicated, _ = self.run_cases('--exact', 'pool::smoke', 'full_gate_', '--ignored', expected_status=2)
         self.assertEqual(dedicated['cases'], [])
 
+    def test_host_required_cases_never_run_on_a_pool_shard_even_with_positive_filters(self):
+        before = [case for i in (1, 2) for case in self.run_cases(shard=f'{i}/2')[0]['cases']]
+        self.env['HIRSEL_TEST_HOST_CASES'] = 'pool::smoke'
+        after = [case for i in (1, 2) for case in self.run_cases(shard=f'{i}/2')[0]['cases']]
+        self.assertCountEqual(after, [case for case in before if case != 'pool::smoke'])
+        explicit = [case for i in (1, 2)
+                    for case in self.run_cases('pool::', shard=f'{i}/2', expected_status=0)[0]['cases']]
+        self.assertNotIn('pool::smoke', explicit)
+        self.assertIn('pool::other', explicit)
+        self.env['HIRSEL_TEST_DEDICATED_CASE'] = 'pool::smoke'
+        dedicated, _ = self.run_cases('--exact', 'pool::smoke')
+        self.assertEqual(dedicated['cases'], ['pool::smoke'])
+
     def test_width_groups_partition_cases_and_refuse_a_narrower_action(self):
         # pool::smoke declares two CPUs. The measured shards deal the other
         # cases as if it were absent; its group's own shard runs it alone.

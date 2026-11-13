@@ -542,6 +542,13 @@ if [ -n "${HIRSEL_TEST_ISOLATED_CASES:-}" ] && [ -n "$shard" ] && ! "$filtered";
     !($0 in excluded)')"
 fi
 unset HIRSEL_TEST_ISOLATED_CASES
+# Host requirements remain physical ownership under positive filters as well.
+if [ -n "${HIRSEL_TEST_HOST_CASES:-}" ] && [ -n "$shard" ]; then
+  cases="$(printf '%s\n' "$cases" | awk -v isolated="$HIRSEL_TEST_HOST_CASES" '
+    BEGIN { n = split(isolated, names, " "); for (i = 1; i <= n; i++) excluded[names[i]] = 1 }
+    !($0 in excluded)')"
+fi
+unset HIRSEL_TEST_HOST_CASES
 if [ -z "$cases" ] && "$filtered" && ! "$discovery"; then
   printf 'test_launcher.sh: selector [%s] matched no test bodies on %s shard %s\n' "$*" "$test_binary" "${shard:-dedicated}" >&2
   cat "$owners" >&2

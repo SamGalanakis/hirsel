@@ -5,7 +5,9 @@ The source files and test/run configurations are unchanged. Cargo profiles add
 the fixed checked-arithmetic settings from core/MEASURE.md. Dependencies use
 the supplied upstream lockfile. Run `core/langarena/rust/vendor.sh` once to
 populate `core/langarena/rust/vendor/`, which is ignored by git. Build from
-this directory with `cargo build --offline --locked`, or add `--release`.
+this directory with `rustup run 1.99.0 cargo build --offline --locked`,
+or add `--release`. Upstream uses edition 2021; its unchanged patterns do
+not compile under edition 2024. Matched twins use edition 2024.
 The measurement runner checks the vendor files against the locked checksums
 and refuses an absent or changed dependency before measuring.
 

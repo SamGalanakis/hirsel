@@ -82,8 +82,7 @@ fn counted_operations(backend: Backend) {
             include:root.join("crates/hirsel-core-rt/include"),
             cc:PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
             store:dir.path().join("native"), output:dir.path().join("program"), root_limit:288+room,
-            instance_limit:64, directories:vec![], grant_mask:0 };
-            logical_charge_report: None,
+            instance_limit:64, directories:vec![], grant_mask:0, logical_charge_report: None };
         let built = match product.build(&entry, &options) {
             Ok(built) => built,
             Err(e) => { failures.push(format!("{source}: {e}")); continue; }
@@ -118,8 +117,7 @@ fn args_operations(backend: Backend, len_only: bool) {
             include:root.join("crates/hirsel-core-rt/include"),
             cc:PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
             store:dir.path().join("native"), output:dir.path().join("program"), root_limit:1_048_576,
-            instance_limit:64, directories:vec![], grant_mask:0 };
-            logical_charge_report: None,
+            instance_limit:64, directories:vec![], grant_mask:0, logical_charge_report: None };
         let built = product.build(&entry, &options).unwrap();
         let result = Command::new(built.executable).args(argv).output().unwrap();
         assert_eq!(result.status.code(),Some(0),"{name}: {:?}",String::from_utf8_lossy(&result.stderr));
@@ -163,8 +161,7 @@ fn stream_operations(backend: Backend) {
             include:root.join("crates/hirsel-core-rt/include"),
             cc:PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
             store:dir.path().join("native"), output:dir.path().join("program"), root_limit:1_048_576,
-            instance_limit:64, directories:vec![], grant_mask:(1<<4) | (1<<5) | (1<<9) };
-            logical_charge_report: None,
+            instance_limit:64, directories:vec![], grant_mask:(1<<4) | (1<<5) | (1<<9), logical_charge_report: None };
         let built = product.build(&entry, &options).unwrap();
         let mut command = Command::new(built.executable);
         command.args(argv);
@@ -214,8 +211,7 @@ fn host_operations(backend: Backend) {
             include:root.join("crates/hirsel-core-rt/include"),
             cc:PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
             store:dir.path().join("native"), output:dir.path().join("program"), root_limit:1_048_576,
-            instance_limit:64, directories:vec![grant.to_str().unwrap().into()], grant_mask:(1<<2)|(1<<9) };
-            logical_charge_report: None,
+            instance_limit:64, directories:vec![grant.to_str().unwrap().into()], grant_mask:(1<<2)|(1<<9), logical_charge_report: None };
         let built = product.build(&entry, &options).unwrap();
         let output = Command::new(built.executable).output().unwrap();
         assert_eq!(output.status.code(),Some(expected_exit),"{name}: {:?}",String::from_utf8_lossy(&output.stderr));

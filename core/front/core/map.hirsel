@@ -1,0 +1,8 @@
+// Module `map` (SEM-5).
+
+pub fn new[K: key, V]() -> Map[K, V]
+pub fn len[K: key, V](m: Map[K, V]) -> u64
+pub fn get[K: key, V](m: Map[K, V], k: K) -> Option[View[V]] in m
+pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), (Capacity, K, V)]
+pub fn set[K: key, V](mut m: Map[K, V], k: K, take v: V) -> Result[V, V]
+pub fn remove[K: key, V](mut m: Map[K, V], k: K) -> Option[V]

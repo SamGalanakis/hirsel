@@ -3,7 +3,7 @@ use super::*;
 use hirsel_core_ir::{ArithMode, ArithOp};
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
-    fn list_arith(
+    pub(super) fn list_arith(
         &mut self,
         op: ArithOp,
         mode: ArithMode,

@@ -47,6 +47,7 @@ mod compare;
 mod control;
 pub(crate) mod core_ops;
 mod lists;
+mod maps;
 mod ops;
 mod patterns;
 mod places;
@@ -901,6 +902,7 @@ struct Cx<'c, 'a, 'e> {
     callable_signatures: Vec<Option<closures::CallableAbi>>,
     callable_reps: Vec<Rep>,
     callable_regions: Vec<u32>,
+    map_entries: HashMap<(TyId, TyId), maps::MapEntry>,
     patterns: patterns::Patterns,
     /// Reused call workspaces, one for each active nesting level.
     call_scratch: Vec<calls::CallScratch>,
@@ -1003,6 +1005,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             callable_signatures: vec![],
             callable_reps: vec![],
             callable_regions: vec![],
+            map_entries: HashMap::new(),
             patterns: patterns::Patterns::default(),
             call_scratch: vec![],
             array_parts: vec![],

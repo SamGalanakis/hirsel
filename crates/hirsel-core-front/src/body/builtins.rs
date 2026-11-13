@@ -18,6 +18,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let module = g.path.0.modules.as_slice();
         let name = g.path.0.name.as_str();
+        if module == ["map"] {
+            return self.map_value(name, types, vals, result, n);
+        }
         if module == ["list"] {
             return self.list_value(name, types[0], vals, result, n);
         }
@@ -62,7 +65,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         None
     }
 
-    fn empty_list(&mut self, ty: TyId, n: NodeId) -> Option<ValueId> {
+    pub(super) fn empty_list(&mut self, ty: TyId, n: NodeId) -> Option<ValueId> {
         let id = match self.rep(ty) {
             Ok(Rep::Place(id)) => id,
             Err(what) => {

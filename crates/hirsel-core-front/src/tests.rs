@@ -963,6 +963,21 @@ fn list_index_iteration_and_failure_cleanup() {
             eval::Outcome::Returned(vec![11]),
         ),
         (
+            "fn f(xs: Map[u64,u64]) -> u64 { map.len(xs) }",
+            false,
+            eval::Outcome::Returned(vec![2]),
+        ),
+        (
+            "fn count[K:key,V](m:Map[K,V])->u64 { map.len(m) }\nfn f(xs:Map[u64,u64])->u64 { count(xs) }",
+            false,
+            eval::Outcome::Returned(vec![2]),
+        ),
+        (
+            "fn count[K:key,V](m:Map[K,V])->u64 { let mut n:u64=0; for (k,v) in m { n+=1 }; n }\nfn f(xs:Map[u64,u64])->u64 { count(xs) }",
+            false,
+            eval::Outcome::Returned(vec![2]),
+        ),
+        (
             "fn f(xs: Map[u64,u64]) -> u64 { let mut s: u64 = 0; for (k,v) in xs { s += k + v }; s }",
             false,
             eval::Outcome::Returned(vec![220]),
@@ -1087,6 +1102,7 @@ fn list_index_iteration_and_failure_cleanup() {
             check.gaps
         );
         let target = check.function.unwrap();
+        emitter.materialize_instances().unwrap();
         let module = &emitter.module;
         let signature = module.functions[target.index()].signature;
         let Param::Address(TypeId(list)) = module.signatures[signature.index()].params[0] else {
@@ -1233,6 +1249,7 @@ fn f{entry} = n{instance} g{g} {{
                 (72, 1),
                 (80, 13),
                 (88, 130),
+                (96, 2), // live count differs from the three occupied slots
             ]
             .into_iter()
             .enumerate()
@@ -1243,7 +1260,14 @@ fn f{entry} = n{instance} g{g} {{
                 build.push_str(&format!("v{v}: u64 = const {offset}\nv{}: u64 = const {bits}\naddress a{a}\nstore a{a}, v{}\n",v+1,v+1));
             }
             fixture
-                .replace("v0: u64 = const 24", "v0: u64 = const 96")
+                .replace(
+                    "v0: u64 = const 24",
+                    "v0: u64 = const 96\n  v31: u64 = const 168",
+                )
+                .replace(
+                    "alloc own v0 align 8 charge v0",
+                    "alloc own v31 align 8 charge v0",
+                )
                 .replace(" b0:", &format!("{addresses} b0:"))
                 .replace("store a4, v6\n  store a5, v7\n  store a6, v8", &build)
                 .replace(&format!("drop a0 t{list}"), "free v4 charge v0")

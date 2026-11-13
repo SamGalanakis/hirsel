@@ -58,6 +58,7 @@ pub(super) fn emit(
             observe_charge: false,
             facts,
             aliases: None,
+            private_float: Vec::new(),
             empty_bounds: empty::EmptyBounds::new(&body, &[]),
             code: String::new(),
             allocations: String::new(),

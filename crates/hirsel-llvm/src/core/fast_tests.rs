@@ -234,6 +234,7 @@ fn atomic_helpers_use_checked_cas_and_release_acquire() {
         observe_charge: false,
         facts: true,
         aliases: None,
+        private_float: Vec::new(),
         empty_bounds: empty::EmptyBounds::default(),
         code: String::new(),
         allocations: String::new(),

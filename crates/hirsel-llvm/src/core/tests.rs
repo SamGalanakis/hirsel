@@ -804,6 +804,7 @@ fn numerical_chains_canonicalize_at_memory_bits_calls_and_returns() {
     ] {
         let identity = source.matches("\nfn ").count();
         writeln!(source, "sig g{identity} = ({kind}) -> ({kind})\ninst n{identity} = tests@0/numeric/{kind}_identity [] []\nfn f{identity} = n{identity} g{identity} {{\nb0(v0: {kind}):\n return v0\n}}").unwrap();
+        let bytes = if kind == "f32" { 4 } else { 8 };
         for op in [
             "add",
             "sub",
@@ -816,9 +817,10 @@ fn numerical_chains_canonicalize_at_memory_bits_calls_and_returns() {
         ] {
             let i = source.matches("\nfn ").count();
             // A raw integer read observes the actual float store, independently
-            // of reinterpret's normalization. The edge and later operations may
-            // carry noncanonical NaNs internally; all three observations agree.
-            writeln!(source, "sig g{i} = ({kind}, {kind}) -> ({kind}, {word}, {word})\ninst n{i} = tests@0/numeric/{kind}_{op} [] []\nfn f{i} = n{i} g{i} {{\n slot s0 = {kind}\n addr a0 = s0 : {kind}\n addr a1 = v9 index v8 : {word}\nb0(v0: {kind}, v1: {kind}):\n v2: {kind} = {op} v0, v1\n jump b1(v2)\nb1(v3: {kind}):\n v4: {kind} = neg v3\n v5: {kind} = abs v4\n v6: {kind} = sqrt v5\n v7: {kind} = mul_add v6, v6, v3\n live s0\n address a0\n store a0, v7\n v8: u64 = const 0\n v9: ptr = pointer a0\n address a1\n v10: {word} = read a1\n v11: {word} = reinterpret v7\n v12: {kind} = call f{identity} g{identity} (v7)\n dead s0\n return v12, v10, v11\n}}").unwrap();
+            // of reinterpret's normalization. Separate private and byte-copied
+            // float slots distinguish unobserved storage from memory observers.
+            // The edge and pure operations may carry noncanonical NaNs.
+            writeln!(source, "sig g{i} = ({kind}, {kind}) -> ({kind}, {word}, {word}, {word}, {word})\ninst n{i} = tests@0/numeric/{kind}_{op} [] []\nfn f{i} = n{i} g{i} {{\n slot s0 = {kind}\n slot s1 = {kind}\n slot s2 = {kind}\n slot s3 = {word}\n addr a0 = s0 : {kind}\n addr a1 = v9 index v8 : {word}\n addr a2 = s1 : {kind}\n addr a3 = s2 : {kind}\n addr a4 = s3 : {word}\nb0(v0: {kind}, v1: {kind}):\n v2: {kind} = {op} v0, v1\n jump b1(v2)\nb1(v3: {kind}):\n v4: {kind} = neg v3\n v5: {kind} = abs v4\n v6: {kind} = sqrt v5\n v7: {kind} = mul_add v6, v6, v3\n live s0\n address a0\n store a0, v7\n live s1\n live s2\n live s3\n address a2\n address a3\n address a4\n store a2, v7\n store a3, v7\n v13: u64 = const {bytes}\n copy a4, a3, v13\n v14: {kind} = read a2\n v15: {word} = reinterpret v14\n v16: {word} = read a4\n v8: u64 = const 0\n v9: ptr = pointer a0\n address a1\n v10: {word} = read a1\n v11: {word} = reinterpret v7\n v12: {kind} = call f{identity} g{identity} (v7)\n dead s3\n dead s2\n dead s1\n dead s0\n return v12, v10, v11, v15, v16\n}}").unwrap();
             for &a in &inputs {
                 for &b in &inputs {
                     cases.push(Case {

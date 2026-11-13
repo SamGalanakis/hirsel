@@ -187,6 +187,7 @@ pub(super) fn glue(
             observe_charge: false,
             facts,
             aliases: None,
+            private_float: Vec::new(),
             empty_bounds: empty::EmptyBounds::default(),
             code: String::new(),
             allocations: String::new(),

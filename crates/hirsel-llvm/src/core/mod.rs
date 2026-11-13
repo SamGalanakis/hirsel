@@ -16,6 +16,7 @@ mod empty;
 mod failure;
 mod fast;
 mod forward;
+mod private_float;
 mod scalar;
 mod storage;
 mod task_entry;
@@ -136,6 +137,7 @@ fn emit_ir_with_facts(module: &Module, observe_charge: bool, facts: bool) -> Res
             .then(|| alias::Scopes::new(module, f, &name, &mut next_scope, &mut intrinsics))
             .flatten();
         let mut e = FunctionEmitter {
+            private_float: private_float::addresses(body),
             aliases,
             module,
             body,
@@ -385,6 +387,7 @@ struct FunctionEmitter<'a> {
     observe_charge: bool,
     facts: bool,
     aliases: Option<alias::Scopes>,
+    private_float: Vec<bool>,
     code: String,
     allocations: String,
     next: usize,
@@ -668,7 +671,16 @@ impl FunctionEmitter<'_> {
             }
             Inst::Store { address, value } => {
                 let p = self.address(address);
-                let x = self.get(value);
+                let x = if self
+                    .private_float
+                    .get(address.index())
+                    .copied()
+                    .unwrap_or(false)
+                {
+                    self.numeric(value)
+                } else {
+                    self.get(value)
+                };
                 let metadata = self.access_facts(&[address]);
                 self.line(format!(
                     "store {} {x}, ptr {p}, align 1{metadata}",

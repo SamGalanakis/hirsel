@@ -15,6 +15,7 @@ pub struct CopySize {
 pub struct GenericTemplate {
     pub parameters: Vec<Option<TypeId>>,
     pub copies: Vec<CopySize>,
+    pub nested: BTreeMap<FuncId, GenericTemplate>,
     pub types: BTreeMap<TypeId, NameRecipe>,
     pub calls: BTreeMap<FuncId, GenericCall>,
 }
@@ -182,7 +183,13 @@ pub fn materialize(
         body: None,
     });
     fill(&mut module, function, target, template, &roots)?;
-    module.functions[function.index()].body = None;
+    fn retire(module: &mut Module, source: FuncId, template: &GenericTemplate) {
+        module.functions[source.index()].body = None;
+        for (&nested, template) in &template.nested {
+            retire(module, nested, template);
+        }
+    }
+    retire(&mut module, function, template);
     Ok((module, target))
 }
 
@@ -255,6 +262,8 @@ struct Substitution<'a> {
     names: Vec<String>,
     type_names: &'a BTreeMap<TypeId, NameRecipe>,
     call_names: &'a BTreeMap<FuncId, GenericCall>,
+    nested: &'a BTreeMap<FuncId, GenericTemplate>,
+    error: Option<String>,
     types: HashMap<TypeId, TypeId>,
     functions: HashMap<FuncId, FuncId>,
     signatures: HashMap<SigId, SigId>,
@@ -316,6 +325,36 @@ impl Substitution<'_> {
         }
         let function = self.module.functions[old.index()].clone();
         let key = &self.module.instances[function.instance.index()];
+        if let Some(template) = self.nested.get(&old) {
+            let key = InstanceKey {
+                definition: key.definition.clone(),
+                types: self.names.clone(),
+                dictionaries: vec![],
+            };
+            if let Some(i) = self
+                .module
+                .functions
+                .iter()
+                .position(|f| self.module.instances[f.instance.index()] == key)
+            {
+                let row = FuncId(i as u32);
+                self.functions.insert(old, row);
+                return row;
+            }
+            let instance = InstanceId(self.module.instances.len() as u32);
+            self.module.instances.push(key);
+            let row = FuncId(self.module.functions.len() as u32);
+            self.module.functions.push(Function {
+                instance,
+                signature: function.signature,
+                body: None,
+            });
+            self.functions.insert(old, row);
+            if let Err(error) = fill(self.module, old, row, template, self.arguments) {
+                self.error = Some(error);
+            }
+            return row;
+        }
         let Some(call) = self.call_names.get(&old) else {
             return old;
         };
@@ -402,6 +441,8 @@ fn fill(
         names,
         type_names: &template.types,
         call_names: &template.calls,
+        nested: &template.nested,
+        error: None,
         types: HashMap::new(),
         functions: HashMap::from([(source, target)]),
         signatures: HashMap::new(),
@@ -447,6 +488,9 @@ fn fill(
                 }
             };
         }
+    }
+    if let Some(error) = s.error {
+        return Err(error);
     }
     s.module.functions[target.index()].body = Some(body);
     Ok(())

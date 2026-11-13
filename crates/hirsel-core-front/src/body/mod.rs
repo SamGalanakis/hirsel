@@ -38,6 +38,7 @@ use std::collections::HashMap;
 
 mod admission;
 mod builtins;
+mod callable_abi;
 mod calls;
 mod cleanup;
 mod closures;
@@ -100,6 +101,7 @@ pub struct CoreCheck {
 pub struct Emitter {
     pub module: Module,
     funcs: HashMap<InstanceKey, FuncId>,
+    callable_adapters: HashMap<(FuncId, SigId), FuncId>,
     sigs: HashMap<Signature, SigId>,
     items: HashMap<DefPath, ItemId>,
     /// Per non-generic definition of the program, its function row once mentioned.
@@ -777,6 +779,7 @@ struct Cx<'c, 'a, 'e> {
     tail_ty: TyId,
     scope_slots: Vec<u32>,
     copies: Vec<CopySize>,
+    nested: std::collections::BTreeMap<FuncId, GenericTemplate>,
     call_seq: u32,
     patterns: patterns::Patterns,
     /// Reused call workspaces, one for each active nesting level.
@@ -874,6 +877,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             tail_ty: UNIT,
             scope_slots: vec![],
             copies: vec![],
+            nested: Default::default(),
             call_seq: 0,
             patterns: patterns::Patterns::default(),
             call_scratch: vec![],
@@ -1464,6 +1468,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 let template = GenericTemplate {
                     parameters,
                     copies: std::mem::take(&mut self.copies),
+                    nested: std::mem::take(&mut self.nested),
                     types: self.e.generic_names.clone(),
                     calls: self.e.generic_calls.clone(),
                 };

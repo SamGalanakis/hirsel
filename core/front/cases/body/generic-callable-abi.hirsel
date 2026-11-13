@@ -1,7 +1,20 @@
 // A rigid T travels by address. A scalar callable needs an adapter rather than
 // using that address convention as an ordinary scalar function pointer.
-// expect: gap generic function-value ABI adapters are not built
-// expect: gap indirect calls with opaque generic values are not built
+// expect: run f() = 7
+// expect: run direct() = 19
+// expect: run zero() = 9
 fn id[T: plain](x: T) -> T { copy x }
 fn apply[T: plain](cb: fn(T) -> T, x: T) -> T { cb(x) }
 fn f() -> u8 { let cb: fn(u8) -> u8 = id; apply(cb, 7) }
+
+fn direct() -> u64 { apply(fn(x: u64) -> u64 { x + 12 }, 7) }
+fn unit(x: ()) { x }
+fn zero() -> u64 { let cb: fn(()) -> () = unit; apply(cb, ()); 9 }
+
+// This adapter itself is a nested rigid template, specialized with its producer.
+// expect: run nested() = 23
+fn inside[T: plain](x: T) -> T {
+  let cb: fn(T) -> T = id
+  cb(x)
+}
+fn nested() -> u64 { inside(23) }

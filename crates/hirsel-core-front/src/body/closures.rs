@@ -26,9 +26,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if g.params.iter().any(|p| p.bytes) {
             return self.gap_ty(n, "function values with bytes parameters are not built");
         }
-        if g.body.is_none() && g.path.package_is("core", "1") {
-            return self.gap_ty(n, "core function values need callable wrappers");
-        }
         let ty = g.callable;
         scratch.found.clear();
         scratch.found.resize(g.generics.len(), None);
@@ -61,19 +58,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             .tys
             .extend(scratch.found.iter().map(|t| t.unwrap_or(ERROR)));
         let ty = subst(&mut self.t, ty, &scratch.tys);
-        // A direct rigid T uses an address ABI. Exposing its scalar/unit closed
-        // instance as a normal callable requires an adapter, which is not emitted.
-        let direct_result = matches!(self.t.kind(g.result), TyKind::Param(_));
-        let direct_params = g
-            .params
-            .iter()
-            .any(|p| p.mode != Mode::Mut && matches!(self.t.kind(p.ty), TyKind::Param(_)));
-        if direct_result || direct_params {
-            return self.gap_ty(n, "generic function-value ABI adapters are not built");
-        }
-        let (function, _) = match self.instance_row(f, &scratch.tys) {
-            Ok(row) => row,
-            Err(what) => return self.gap_ty(n, what),
+        let Some(function) = self.item_adapter(f, &scratch.tys, ty, n) else {
+            return (ty, None);
         };
         let value = if self.live() {
             let result = self.value(Ty::Ptr);
@@ -116,13 +102,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return (ERROR, None);
             }
         };
-        if matches!(self.t.kind(result), TyKind::Param(_))
-            || scratch.params.iter().any(|(mode, ty)| {
-                *mode != Mode::Mut && matches!(self.t.kind(*ty), TyKind::Param(_))
-            })
-        {
-            return self.gap_ty(n, "indirect calls with opaque generic values are not built");
-        }
         if args.len() < scratch.params.len() {
             self.refuse_at(
                 "LANG-11",
@@ -259,97 +238,41 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return None;
         }
         let code = code?;
-        scratch.ir_params.clear();
-        scratch.ir_results.clear();
-        scratch
-            .ir_params
-            .extend(environment.map(|_| Param::Value(Ty::Ptr)));
-        for &(mode, ty) in &scratch.params {
-            let rep = match self.rep(ty) {
-                Ok(r) => r,
-                Err(what) => {
-                    self.gap(n, what);
-                    return None;
-                }
-            };
-            let param = if mode == Mode::Mut {
-                Param::Address(self.e.type_row(self.p, &mut self.t, ty)?)
-            } else {
-                match rep {
-                    Rep::None => continue,
-                    Rep::Scalar(t) => Param::Value(t),
-                    Rep::View(_) => Param::Value(Ty::Ptr),
-                    Rep::Place(id) => Param::Address(id),
-                }
-            };
-            scratch.ir_params.push(param);
-        }
-        let dest = match self.rep(result) {
-            Ok(Rep::None) => None,
-            Ok(Rep::Scalar(t)) => {
-                scratch.ir_results.push(t);
-                None
-            }
-            Ok(Rep::View(_)) => {
-                scratch.ir_results.push(Ty::Ptr);
-                None
-            }
-            Ok(Rep::Place(id)) => Some(id),
-            Err(what) => {
-                self.gap(n, what);
-                return None;
-            }
-        };
-        let signature = Signature {
-            params: std::mem::take(&mut scratch.ir_params),
-            results: std::mem::take(&mut scratch.ir_results),
-            dest,
-            never: result == NEVER,
-        };
-        let signature = if let Some(&id) = self.e.sigs.get(&signature) {
-            scratch.ir_params = signature.params;
-            scratch.ir_results = signature.results;
-            id
-        } else {
-            self.e.sig(signature)
-        };
-        let dest = dest.map(|id| self.new_slot(PlaceTy::Declared(id), n));
-        let start = self.b.pools.args.len();
-        self.b.pools.args.extend(dest.map(Arg::Address));
-        self.b.pools.args.extend(environment.map(Arg::Value));
+        let signature = self.indirect_signature(
+            &scratch.params,
+            result,
+            environment.is_some(),
+            &mut scratch.ir_params,
+        )?;
+        let dest = self.e.module.signatures[signature.index()]
+            .dest
+            .map(|id| self.new_slot(PlaceTy::Declared(id), n));
+        // Scalar arguments are spilled; rigid generic values already travel by address.
+        scratch.ir_args.clear();
+        scratch.ir_args.extend(dest.map(Arg::Address));
+        scratch.ir_args.extend(environment.map(Arg::Value));
         for (i, &(mode, ty)) in scratch.params.iter().enumerate() {
             if mode == Mode::Take {
                 self.consume(scratch.vals[i], n);
             }
-            let rep = self.rep(ty).ok()?;
-            if rep == Rep::None && mode != Mode::Mut {
-                continue;
-            }
-            let v = scratch.vals[i]?;
-            let arg = if mode == Mode::Mut {
-                let id = self.e.type_row(self.p, &mut self.t, ty)?;
-                Arg::Address(self.address(AddressBase::Value(v), &[], PlaceTy::Declared(id), n))
-            } else if let Rep::Place(id) = rep {
-                Arg::Address(self.address(AddressBase::Value(v), &[], PlaceTy::Declared(id), n))
+            let pointer = if mode == Mode::Mut {
+                scratch.vals[i]
             } else {
-                Arg::Value(v)
-            };
-            self.b.pools.args.push(arg);
+                self.slot(ty, scratch.vals[i], n)
+                    .map(|at| self.pointer(at, n))
+            }?;
+            let id = self.e.type_row(self.p, &mut self.t, ty)?;
+            let at = self.address(AddressBase::Value(pointer), &[], PlaceTy::Declared(id), n);
+            scratch.ir_args.push(Arg::Address(at));
         }
-        let args = PoolRange::new(start as u32, (self.b.pools.args.len() - start) as u32);
-        let first = self.e.module.signatures[signature.index()]
-            .results
-            .first()
-            .copied()
-            .map(|ty| self.value(ty));
-        let results = PoolRange::push(&mut self.b.pools.values, first);
+        let args = PoolRange::push(&mut self.b.pools.args, scratch.ir_args.iter().copied());
         let fail = self.fail_to(n);
         let call = CallId(self.b.calls.len() as u32);
         self.b.calls.push(CallSite {
             callee: Callee::Indirect(code),
             signature,
             args,
-            results,
+            results: PoolRange::EMPTY,
             fail,
         });
         self.inst(Inst::Call { call }, n);
@@ -357,14 +280,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.end(Terminator::Unreachable, Some(n));
             return None;
         }
-        match dest {
-            Some(a) => {
-                let ptr = self.pointer(a, n);
-                self.temp(result, Some(ptr));
-                Some(ptr)
-            }
-            None => first,
-        }
+        let value = self.read_carried(dest?, result, n);
+        self.temp(result, value);
+        value
     }
 }
 
@@ -496,7 +414,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if function.is_none() {
             return (if refused { ERROR } else { ty }, None);
         }
-        let function = function.unwrap();
+        let raw = function.unwrap();
+        let Some(function) = self.row_adapter(raw, ty, frame.has_environment, n) else {
+            return (ty, None);
+        };
         let code = if self.live() {
             let v = self.value(Ty::Ptr);
             self.inst(

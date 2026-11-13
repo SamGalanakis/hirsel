@@ -1,0 +1,12 @@
+// Adapters expose core operations with the same generic callable convention.
+// expect: run sum() = 8
+// expect: run count() = 0
+fn sum() -> u8 {
+  let cb: fn(u8, u8) -> u8 = int.wrapping_add
+  cb(251, 13)
+}
+fn count() -> u64 {
+  let cb: fn(List[u64]) -> u64 = list.len
+  let xs: List[u64] = list.new()
+  cb(xs)
+}

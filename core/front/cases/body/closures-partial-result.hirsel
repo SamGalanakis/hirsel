@@ -1,5 +1,5 @@
 // A hole in a generic callback result does not invent a result type for its body.
 // The omitted, unconstrained result is unit and fixes R exactly once.
-// expect: gap indirect calls with opaque generic values are not built
+// expect: accept
 fn update[R](cb: scoped fn() -> R) -> R { cb() }
 fn f() { let _ = update(fn() {}) }

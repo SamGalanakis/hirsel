@@ -10,6 +10,7 @@ pub(super) struct CallScratch {
     pub(super) params: Vec<(Mode, TyId)>,
     pub(super) ir_params: Vec<Param>,
     pub(super) ir_results: Vec<Ty>,
+    pub(super) ir_args: Vec<Arg>,
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {

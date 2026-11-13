@@ -219,3 +219,70 @@ fn host_operations_cranelift() { host_operations(Backend::Cranelift); }
 #[test]
 #[ignore = "explicit native integration target"]
 fn host_operations_llvm() { host_operations(Backend::Llvm); }
+
+fn string_carrier_operations(backend: Backend) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let source = r#"pub fn main() -> Result[(),Exit] {
+        let empty = string.new()
+        if string.byte_len(empty)!=0u64 { return Error(Exit(status:1)) }
+        let borrowed = string.proof_view(b"abc")
+        if string.byte_len(borrowed)!=3u64 { return Error(Exit(status:2)) }
+        let bs = string.as_bytes(borrowed)
+        if list.len(bs)!=3u64 || bs[1]!=b'b' { return Error(Exit(status:3)) }
+        if string.proof_moves()!=4u64 { return Error(Exit(status:4)) }
+        let a = unique.new()
+        let b = unique.new()
+        if a==b { return Error(Exit(status:5)) }
+        Ok(())
+    }"#;
+    let mut request = source_request(source,dir.path());
+    request.inputs.packages[1] = PackageManifest::directory(&root.join("core/core"),package("core"),true).unwrap();
+    let module = request.inputs.packages[1].sources.iter_mut().find(|s| s.modules==["string"]).unwrap();
+    let mut text = std::fs::read_to_string(&module.file).unwrap();
+    // Test-package bodies call all three private kernels with valid empty/ASCII bytes.
+    text.push_str(r#"
+pub fn proof_view(b:Bytes) -> View[String] in b { view_string(b) }
+pub fn proof_moves() -> u64 {
+    let b:Bytes = result.unwrap(list.with_capacity(4))
+    let s = of_bytes(take b)
+    if string.byte_len(s)!=0u64 { return 0u64 }
+    let back = to_bytes(take s)
+    list.capacity(back)
+}
+"#);
+    module.file = dir.path().join("string.hirsel");
+    std::fs::write(&module.file,text).unwrap();
+    let product = Driver::default().check(request,&mut Meter::new(false)).unwrap();
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let mut options = native_options(backend,dir.path());
+    options.root_limit = 296; // 288 main + round8(4); the carrier moves admit nothing.
+    let built = product.build(&entry,&options).unwrap_or_else(|error| panic!("{error:?}\n{}",hirsel_core_ir::text::print(&product.demand(&entry).unwrap().ir)));
+    run_clean(&built.executable,0);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn string_carrier_operations_cranelift() { string_carrier_operations(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn string_carrier_operations_llvm() { string_carrier_operations(Backend::Llvm); }
+
+fn bodied_core_operations(backend: Backend) {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "pub fn main(a:Args) -> Result[(),Exit] { if args.echo(args.len(a))==42u64 && args.echo(7u8)==7u8 { Ok(()) } else { Error(Exit(status:1)) } }";
+    let mut request = source_request(source,dir.path());
+    let file = dir.path().join("args.hirsel");
+    std::fs::write(&file,"pub fn len(a:Args) -> u64 { 42u64 }\npub fn echo[T:plain](take x:T) -> T { x }\n").unwrap();
+    request.inputs.packages[1].sources.push(hirsel_core_resolve::ModuleSource { file, modules:vec!["args".into()], signatures:true });
+    let product = Driver::default().check(request,&mut Meter::new(false)).unwrap();
+    let entry = DefPath::from_full("app@1/main/main").unwrap();
+    let options = native_options(backend,dir.path());
+    let built = product.build(&entry,&options).unwrap();
+    run_clean(&built.executable,0);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn bodied_core_operations_cranelift() { bodied_core_operations(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn bodied_core_operations_llvm() { bodied_core_operations(Backend::Llvm); }

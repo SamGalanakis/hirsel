@@ -313,3 +313,34 @@ fn host_rows_preserve_handles_result_tags_and_mutated_carriers() {
         "file handles admit nothing; the four-byte buffer is refunded"
     );
 }
+
+#[test]
+fn string_views_empty_carriers_and_unique_ids_admit_nothing() {
+    let source = r#"fn f() -> u64 {
+        let s = string.new()
+        if string.byte_len(s)!=0u64 { return 1u64 }
+        let b = string.as_bytes("abc")
+        if list.len(b)!=3u64 || b[1]!=b'b' { return 2u64 }
+        let a = unique.new()
+        let other = unique.new()
+        if a==other { return 3u64 }
+        7u64
+    }"#;
+    let (index, modules) = canonical(source);
+    let p = Program::declare(&index, &modules);
+    let mut emitter = Emitter::new();
+    let f = p
+        .fns
+        .iter()
+        .position(|f| f.path.0.package.name == "app")
+        .unwrap();
+    let check = p.check_lower(f, &mut emitter);
+    assert!(
+        check.refusals.is_empty() && check.gaps.is_empty(),
+        "{check:?}"
+    );
+    wf::module(&emitter.module).unwrap();
+    let run = eval::run(&emitter.module, check.function.unwrap(), &[], 0);
+    assert_eq!(run.outcome, eval::Outcome::Returned(vec![7]));
+    assert_eq!(run.used, 0);
+}

@@ -224,7 +224,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     let eq = matches!(cop, CompareOp::Eq | CompareOp::Le | CompareOp::Ge);
                     return (BOOL, self.konst(Ty::Scalar(Scalar::Bool), u64::from(eq), n));
                 }
-                if value_ty(&self.t, t).ok().flatten().is_none() {
+                if value_ty(&self.t, t).ok().flatten().is_none() && !self.word_like(t) {
                     return match self.compare_places(t, cop, lv, rv, n) {
                         Ok(v) => (BOOL, v),
                         Err(what) => self.gap_ty(n, what),

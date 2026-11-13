@@ -259,7 +259,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
     /// `Unique` and `Site`: `key` values of one u64 word (core.md "Core types"), equal
     /// exactly when their words are.
-    fn word_like(&self, t: TyId) -> bool {
+    pub(super) fn word_like(&self, t: TyId) -> bool {
         matches!(self.t.kind(t), TyKind::Adt(d, _)
             if matches!(self.p.decls[d.index()].role, Some(Role::Unique | Role::Site)))
     }

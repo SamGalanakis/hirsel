@@ -6,6 +6,10 @@ use hirsel_core_ir::{Counted, HostOp, RtOp};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Kernel {
     Stream(HostOp),
+    CarrierMove,
+    CarrierView,
+    StringList(&'static str),
+    Unique,
     Host(HostOp),
     ArgsLen,
     ArgsGet,
@@ -161,15 +165,15 @@ operations! {
     ("span", "get", Lane::Language, "A", "core-check-895", false),
     ("stderr", "write", Lane::Runtime(Kernel::Stream(HostOp::Stderr)), "B", "core-ops-914", false),
     ("stdout", "write", Lane::Runtime(Kernel::Stream(HostOp::Stdout)), "B", "core-ops-914", false),
-    ("string", "new", Lane::PendingCode, "A", "core-ops-914", false),
-    ("string", "as_bytes", Lane::PendingCode, "A", "core-ops-914", false),
+    ("string", "new", Lane::Runtime(Kernel::StringList("new")), "A", "core-ops-914", false),
+    ("string", "as_bytes", Lane::Runtime(Kernel::CarrierView), "A", "core-ops-914", false),
     ("string", "slice", Lane::PendingCode, "C", "std-seed-api-889", false),
-    ("string", "byte_len", Lane::PendingCode, "A", "core-ops-914", false),
-    ("string", "push", Lane::PendingCode, "A", "core-ops-914", false),
-    ("string", "reserve", Lane::PendingCode, "A", "core-ops-914", false),
-    ("string", "of_bytes", Lane::Value, "A", "core-ops-914", true),
-    ("string", "to_bytes", Lane::Value, "A", "core-ops-914", true),
-    ("string", "view_string", Lane::Value, "A", "core-ops-914", true),
+    ("string", "byte_len", Lane::Runtime(Kernel::StringList("len")), "A", "core-ops-914", false),
+    ("string", "push", Lane::Runtime(Kernel::StringList("append")), "A", "core-ops-914", false),
+    ("string", "reserve", Lane::Runtime(Kernel::StringList("reserve")), "A", "core-ops-914", false),
+    ("string", "of_bytes", Lane::Runtime(Kernel::CarrierMove), "A", "core-ops-914", true),
+    ("string", "to_bytes", Lane::Runtime(Kernel::CarrierMove), "A", "core-ops-914", true),
+    ("string", "view_string", Lane::Runtime(Kernel::CarrierView), "A", "core-ops-914", true),
     ("task", "spawn", Lane::Runtime(Kernel::Spawn), "B", "core-ops-914", false),
     ("task", "join", Lane::Runtime(Kernel::Join), "B", "core-ops-914", false),
     ("task", "cancel", Lane::Runtime(Kernel::Cancel), "B", "core-ops-914", false),
@@ -177,7 +181,7 @@ operations! {
     ("text", "len", Lane::Language, "A", "core-check-895", false),
     ("text", "as_string", Lane::Language, "A", "core-check-895", false),
     ("text", "copy_in", Lane::Language, "A", "core-check-895", false),
-    ("unique", "new", Lane::Runtime(Kernel::Blocked("Unique runtime identity binding is not specified (FOR FORM)")), "B", "core-ops-914", false),
+    ("unique", "new", Lane::Runtime(Kernel::Unique), "B", "core-ops-914", false),
     ("writer", "append", Lane::Language, "A", "core-check-895", false),
     ("writer", "scalar", Lane::Language, "A", "core-check-895", false),
     ("writer", "push", Lane::Language, "A", "core-check-895", false),
@@ -227,6 +231,35 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<ValueId> {
         match kernel {
+            Kernel::Unique => self
+                .runtime_row(RtOp::DestId, &[], n)
+                .map(|values| values[0]),
+            Kernel::CarrierView => vals[0],
+            Kernel::CarrierMove => {
+                self.consume(vals[0], n);
+                self.temp(result, vals[0]);
+                vals[0]
+            }
+            Kernel::StringList(name) => {
+                if !self.live() {
+                    return None;
+                }
+                match self.list_value(name, scalar(Scalar::U8), vals, result, n) {
+                    Some(value) => value,
+                    None => {
+                        self.gap(
+                            n,
+                            match name {
+                                "reserve" => "shared List reserve kernel is not built",
+                                "append" => "shared List append kernel is not built",
+                                _ => "shared List carrier kernel is not built",
+                            },
+                        );
+                        None
+                    }
+                }
+            }
+
             Kernel::NewOwner(kind) => self.runtime_new_owner(kind, types[0], vals[0], result, n),
             Kernel::Share(kind) => self.runtime_share(kind, vals[0]?, result, n),
             Kernel::TryUnwrap(kind) => self.runtime_try_unwrap(kind, types[0], vals[0]?, result, n),

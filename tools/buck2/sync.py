@@ -1383,6 +1383,8 @@ def first_party(meta: dict) -> str:
                                   "//tools/buck2:event_logs.py", "//tools/buck2:conformance.py", "//tools/buck2:rust_environment.py",
                                   "//tools/buck2:priorities.bzl"],
                             files_env={"HIRSEL_TEST_CASE_FORMATTER": "//:hirsel-conformance-bin-hirsel-conformance"}))
+    out.append("\n" + call("hirsel_script_test", name="test-core-sweep", script="tools/tests/core_sweep.py", full=False,
+                            data=["tools/sweep"]))
     out.append("\n" + call("hirsel_test", name="test-report-fixture", crate="test_report_fixture",
                             crate_root="tools/tests/fixtures/test_report.rs",
                             srcs=["tools/tests/fixtures/test_report.rs"], features=[], deps=[],

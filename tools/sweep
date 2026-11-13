@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+"""Run the scheduled core native + land-tool sweep; retain dated /tmp results."""
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+import time
+
+ROOT = Path(__file__).resolve().parents[1]
+SUITES = (
+    ('native', 'core-driver-native', ['--test-arg=--test-threads=1']),
+    ('land', 'test-land', []),
+)
+
+
+def bodies(details, python=False):
+    if python:
+        counts = re.findall(r'^Ran (\d+) tests? in ', details, re.M)
+        ignored = re.findall(r'^(?:OK|FAILED) \([^\n]*skipped=(\d+)', details, re.M)
+        return max(0, int(counts[-1]) - (int(ignored[-1]) if ignored else 0)) if counts else 0
+    # Nested libtests may be forwarded to stderr by an outer test. Count only
+    # outer stdout, as tools/test-filter's completed_bodies does.
+    stdout = re.split(r'^---- STDERR ----$', details, maxsplit=1, flags=re.M)[0]
+    return len(re.findall(r'^test \S+(?: - should panic)? \.\.\. (?:ok|FAILED)\b', stdout, re.M))
+
+
+def summarize(records, expected):
+    targets, errors = [], []
+    for target, result in records:
+        name = target.removeprefix('root//:')
+        if name != expected and not name.startswith(expected + '-'):
+            errors.append(f'unexpected target {target}')
+        details = result.get('details', '')
+        count = bodies(details, python=expected == 'test-land')
+        targets.append(dict(target=target, bodies=count, **result))
+        if result.get('status') != 1:
+            errors.append(f'{target}: test status {result.get("status")}')
+        if not count:
+            errors.append(f'{target}: no completed test bodies')
+    if not targets:
+        errors.append(f'{expected}: no test results')
+    return dict(targets=targets, bodies=sum(row['bodies'] for row in targets), errors=errors)
+
+
+def wait_load():
+    started = time.monotonic()
+    announced = False
+    while os.getloadavg()[0] > 32:
+        if not announced:
+            print('sweep: waiting for one-minute load <=32', flush=True)
+            announced = True
+        time.sleep(5)
+    return time.monotonic() - started
+
+
+def execute(suite, base, event_logs):
+    label, target, arguments = suite
+    events = Path(str(base) + f'-{label}.pb.zst')
+    log = Path(str(base) + f'-{label}.log')
+    command = [str(ROOT / '.buck2/bin/buck2'), 'test', '--event-log', str(events),
+               '-c', 'hirsel.clippy=true', '-c', 'hirsel.full=true', '//:' + target]
+    if arguments:
+        command += ['--', *arguments]
+    waited = wait_load()
+    started = time.monotonic()
+    row = dict(suite=target, command=command, log=str(log), events=str(events),
+               load_wait_seconds=waited)
+    try:
+        with log.open('w') as output:
+            done = subprocess.run(command, cwd=ROOT, stdout=output, stderr=subprocess.STDOUT)
+        row['buck_exit_status'] = done.returncode
+        row.update(summarize(event_logs.test_results(
+            events, history=event_logs.NoTestHistory(), all_results=True), target))
+        if done.returncode:
+            row['errors'].append(f'buck test exited {done.returncode}')
+    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        row.update(bodies=0, targets=[], errors=[str(error)])
+    row['duration_seconds'] = time.monotonic() - started
+    return row
+
+
+def main():
+    if len(sys.argv) != 1:
+        raise SystemExit('usage: tools/sweep (fixed full suites; no selection arguments)')
+    sys.path.insert(0, str(ROOT / 'tools/buck2'))
+    import event_logs
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    descriptor, output = tempfile.mkstemp(prefix=f'hirsel-core-sweep-{stamp}-', suffix='.json', dir='/tmp')
+    os.close(descriptor)
+    output = Path(output)
+    base = output.with_suffix('')
+    started = time.monotonic()
+    report = dict(started_at=stamp, source=subprocess.check_output(
+        ['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(), status='running', suites=[])
+    output.write_text(json.dumps(report, indent=2) + '\n')
+    print(f'sweep result: {output}', flush=True)
+    try:
+        report['setup_load_wait_seconds'] = wait_load()
+        setup = Path(str(base) + '-setup.log')
+        with setup.open('w') as log:
+            prepared = subprocess.run([sys.executable, 'tools/buck2/prepare.py'], cwd=ROOT,
+                                      stdout=log, stderr=subprocess.STDOUT)
+        report['setup_log'] = str(setup)
+        if prepared.returncode:
+            raise RuntimeError(f'prepare.py exited {prepared.returncode}; see {setup}')
+        # Each native harness is serial; independent suites retain their normal
+        # pool/host placement and run concurrently. Python gets no Rust flags.
+        with ThreadPoolExecutor(max_workers=len(SUITES)) as pool:
+            report['suites'] = list(pool.map(lambda suite: execute(suite, base, event_logs), SUITES))
+        errors = [error for row in report['suites'] for error in row['errors']]
+    except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as error:
+        errors = [str(error)]
+    except KeyboardInterrupt:
+        errors = ['sweep interrupted']
+    report.update(status='failed' if errors else 'passed', errors=errors,
+                  duration_seconds=time.monotonic() - started,
+                  bodies=sum(row['bodies'] for row in report['suites']))
+    output.write_text(json.dumps(report, indent=2) + '\n')
+    for row in report['suites']:
+        print(f"{row['suite']}: {row['bodies']} bodies, {row['duration_seconds']:.3f}s, log {row['log']}", flush=True)
+    for error in errors:
+        print(error, file=sys.stderr)
+    print(f"{report['status']}: {report['duration_seconds']:.3f}s; {output}", flush=True)
+    return int(bool(errors))
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

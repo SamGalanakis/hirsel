@@ -112,3 +112,17 @@ pub unsafe extern "C" fn hirsel_core_test_run_events(
         )
     }
 }
+
+/// Reset a process fixture's allowance after real task startup.
+/// # Safety
+/// Context is live and exclusively owned by the fixture entry.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_test_reset_limit(
+    context: *mut hirsel_core_rt::Context,
+    bytes: u64,
+) {
+    // SAFETY: the process entry exclusively borrows this live context.
+    unsafe {
+        (&mut *context).reset_test_limit(bytes);
+    }
+}

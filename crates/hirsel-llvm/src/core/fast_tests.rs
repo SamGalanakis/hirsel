@@ -186,16 +186,12 @@ fn own_fast_paths_and_zero_charge_and_large_alignment_fallbacks_agree() {
 fn counted_hot_paths_are_inline_and_last_release_is_cold() {
     let module = text::parse(include_str!("../../../hirsel-core-ir/samples/counted.core")).unwrap();
     let ir = emit_ir(&module).unwrap();
-    assert!(
-        ir.lines()
-            .any(|line| line.contains("call void @hirsel_core_release(")
-                && line.contains("i1 zeroext true"))
-    );
-    assert!(
-        !ir.lines()
-            .any(|line| line.contains("call void @hirsel_core_release(")
-                && line.contains("i1 zeroext false"))
-    );
+    assert!(!ir.contains("@hirsel_core_release("));
+    assert!(ir.contains("cmpxchg weak ptr"));
+    assert!(ir.contains("atomicrmw sub ptr"));
+    assert!(ir.contains("call void @hirsel_core_counted_init"));
+    assert!(ir.contains("call void @hirsel_core_arc_shared"));
+    assert!(ir.contains("call void @hirsel_core_arc_released"));
     assert!(ir.lines().any(
         |line| line.contains("call void @hirsel_core_release_last") && line.ends_with(" cold")
     ));
@@ -289,4 +285,48 @@ fn f1 = n1 g0 extern
     assert!(hot, "{definition}");
     assert!(definition.contains(&format!("@{}", symbol(&module, FuncId(1)))));
     assert!(!definition.contains("@hirsel_core_"));
+}
+
+#[test]
+fn arc_initialization_share_release_and_unwrap_preserve_provider_events() {
+    let source = include_str!("../../../hirsel-core-ir/samples/counted.core");
+    let module = text::parse(source).unwrap();
+    wf::module(&module).unwrap();
+    let case = Case {
+        function: FuncId(2),
+        args: vec![5],
+        limit: 1000,
+        injection: None,
+    };
+    let reports = execute(&module, &[case]);
+    assert_eq!(
+        reports[0].arc_events,
+        vec![(10, 1), (11, 2), (12, 0), (12, 1)]
+    );
+    assert_eq!(reports[0].outcome, eval::Outcome::Returned(vec![]));
+    assert_eq!(reports[0].used, 0);
+    // Reuse the same ownership/unwrapping program with Arc carriers and operations.
+    let source = source
+        .replace("alloc counted rc", "alloc counted arc")
+        .replace(" rc", " arc");
+    let module = text::parse(&source).unwrap();
+    wf::module(&module).unwrap();
+    let reports = execute(
+        &module,
+        &[Case {
+            function: FuncId(1),
+            args: vec![5],
+            limit: 1000,
+            injection: None,
+        }],
+    );
+    assert_eq!(
+        reports[0].arc_events,
+        vec![(10, 1), (11, 2), (13, 0), (12, 0), (13, 1)]
+    );
+    assert_eq!(
+        reports[0].outcome,
+        eval::Outcome::Returned(vec![1, 0, 1, 5])
+    );
+    assert_eq!(reports[0].used, 0);
 }

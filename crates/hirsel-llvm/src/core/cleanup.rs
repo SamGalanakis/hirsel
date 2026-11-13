@@ -238,6 +238,14 @@ impl FunctionEmitter<'_> {
                 None
             }
             FieldTy::Scalar(_) | FieldTy::Stable(_) | FieldTy::Fn | FieldTy::Borrow => None,
+            FieldTy::Handle(hirsel_core_layout::Handle::HostFile) => {
+                let handle = self.calc(format!("load i64, ptr {p}, align 1"));
+                self.runtime_void(
+                    "hirsel_core_hostfile_drop",
+                    &[("ptr".into(), "%context".into()), ("i64".into(), handle)],
+                );
+                None
+            }
             FieldTy::Handle(hirsel_core_layout::Handle::Causes) => {
                 let chain = self.calc(format!("load ptr, ptr {p}, align 1"));
                 self.runtime_void("hirsel_core_causes_drop", &[ptr(&chain)]);
@@ -255,20 +263,7 @@ impl FunctionEmitter<'_> {
     pub(super) fn release_node(&mut self, node: &str, t: TypeRef, atomic: bool) -> Result<()> {
         let logical = self.recipes[t.index()].logical_size.unwrap();
         let charge = hirsel_core_layout::charge::counted(logical).unwrap();
-        if atomic {
-            self.runtime_void(
-                "hirsel_core_release",
-                &[
-                    ("ptr".into(), "%context".into()),
-                    ("ptr".into(), node.into()),
-                    ("i1 zeroext".into(), "true".into()),
-                    ("i64".into(), charge.to_string()),
-                    ("ptr".into(), format!("@core_counted_drop_{}", t.0)),
-                ],
-            );
-        } else {
-            self.release_fast(node, charge, &format!("@core_counted_drop_{}", t.0), false);
-        }
+        self.release_fast(node, charge, &format!("@core_counted_drop_{}", t.0), atomic);
         Ok(())
     }
 }

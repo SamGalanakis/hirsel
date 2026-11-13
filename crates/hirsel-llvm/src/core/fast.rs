@@ -348,6 +348,24 @@ impl FunctionEmitter<'_> {
             self.line(format!("br label %retained{n}"));
         }
         writeln!(self.code, "retained{n}:").unwrap();
+        if atomic {
+            self.runtime_void("hirsel_core_arc_shared", &[("ptr".into(), node.into())]);
+        }
+    }
+    pub(super) fn unique_node(&mut self, node: &str, atomic: bool) -> String {
+        let count = self.calc(if atomic {
+            format!("load atomic i64, ptr {node} acquire, align 8")
+        } else {
+            format!("load i64, ptr {node}, align 8")
+        });
+        let unique = self.calc(format!("icmp eq i64 {count}, 1"));
+        if atomic {
+            self.runtime_void(
+                "hirsel_core_arc_unwrapped",
+                &[("i1 zeroext".into(), unique.clone())],
+            );
+        }
+        unique
     }
     pub(super) fn decrement_node(&mut self, node: &str, atomic: bool) -> String {
         if atomic {
@@ -367,12 +385,24 @@ impl FunctionEmitter<'_> {
         let retained = self.calc(format!("xor i1 {last}, true"));
         self.likely(
             &retained,
-            &format!("released{n}"),
+            &format!("release_nonlast{n}"),
             &format!("release_last{n}"),
         );
+        writeln!(self.code, "release_nonlast{n}:").unwrap();
+        if atomic {
+            self.runtime_void(
+                "hirsel_core_arc_released",
+                &[("i1 zeroext".into(), "false".into())],
+            );
+        }
+        self.line(format!("br label %released{n}"));
         writeln!(self.code, "release_last{n}:").unwrap();
         if atomic {
             self.line("fence acquire");
+            self.runtime_void(
+                "hirsel_core_arc_released",
+                &[("i1 zeroext".into(), "true".into())],
+            );
         }
         self.cold_void(
             "hirsel_core_release_last",

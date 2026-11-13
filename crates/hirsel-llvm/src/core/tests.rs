@@ -48,6 +48,14 @@ struct NativeReport {
     trace: Vec<u64>,
     admissions: usize,
     messages: Vec<String>,
+    arc_events: Vec<(u8, u64)>,
+}
+fn has_hostfile_field(shape: &hirsel_core_layout::Shape) -> bool {
+    shape.fields(None).is_some_and(|fields| {
+        fields.iter().any(|field| {
+            field.ty == hirsel_core_layout::FieldTy::Handle(hirsel_core_layout::Handle::HostFile)
+        })
+    })
 }
 fn execute(module: &Module, cases: &[Case]) -> Vec<NativeReport> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -112,7 +120,39 @@ fn execute(module: &Module, cases: &[Case]) -> Vec<NativeReport> {
         )
         .unwrap();
     }
-    c.push_str("int main(void){\n");
+    c.push_str(r#"
+extern void hirsel_core_test_reset_limit(HirselCoreContext *, uint64_t);
+static HirselCoreEvent arc_events[4096]; static size_t arc_count;
+static void record_event(void *state, HirselCoreEvent e) {
+    (void)state;
+    if (e.kind>=10 && e.kind<=13) { assert(arc_count<4096); arc_events[arc_count++]=e; }
+}
+static size_t file_closes, file_deliveries;
+static HirselCoreHostOutcome file_issue(void *state, HirselCoreHostRequest *r) {
+    (void)state; HirselCoreHostOutcome out={0};
+    if (r->operation==0) out.value=r->handle;
+    else { assert(r->operation==3); file_closes++; hirsel_core_test_drop_trace(r->handle); out.status=1; out.error.tag=5; out.error.code=5; }
+    return out;
+}
+static HirselCoreHostOutcome file_deliver(void *state, HirselCoreHostRequest *r, HirselCoreHostOutcome out) {
+    (void)state; if(r->operation==3) file_deliveries++; return out;
+}
+static void prepare_files(HirselCoreContext *ctx, uint64_t last) {
+    HirselCoreProvider provider={.issue=file_issue,.deliver=file_deliver};
+    for(uint64_t i=1;i<=last;i++) {
+        HirselCoreHostRequest request={.operation=0,.handle=i};
+        HirselCoreHostOutcome out=hirsel_core_host_file_open(ctx,&provider,&request);
+        assert(out.status==0 && out.error.tag==0 && out.value==i);
+    }
+    for(uint64_t i=1;i<last;i++) hirsel_core_hostfile_drop(ctx,i);
+    file_closes=0; file_deliveries=0;
+}
+static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; fwrite(s,1,n,stderr); assert(0); }
+"#);
+    let mut invocations = String::from(
+        "int main(void){ HirselCoreProcessConfig cfg={.root_limit=UINT64_MAX,.diagnostic=diagnostic,.scheduler={.event=record_event}};\n",
+    );
+
     for (k, case) in cases.iter().enumerate() {
         let f = case.function;
         let sig = &module.signatures[module.functions[f.index()].signature.index()];
@@ -148,12 +188,36 @@ fn execute(module: &Module, cases: &[Case]) -> Vec<NativeReport> {
             .injection
             .map(|(n, later)| format!("hirsel_core_test_inject(ctx,{n},{});", u8::from(later)))
             .unwrap_or_default();
-        writeln!(c,"{{ HirselCoreContext *ctx = hirsel_core_test_context_new(UINT64_C({limit})); traces=0; {inject} uint64_t initial=hirsel_core_test_available(ctx); {ret} r{k} = {}({args});",symbol(module,f)).unwrap();
+        let hostfile = module.functions[f.index()]
+            .body
+            .as_ref()
+            .is_some_and(|body| {
+                body.slots.iter().any(|slot| {
+                    let PlaceTy::Declared(t) = slot else {
+                        return false;
+                    };
+                    has_hostfile_field(&module.types[t.index()])
+                })
+            });
+        let files = if hostfile {
+            format!("prepare_files(ctx,UINT64_C({}));", case.args[0])
+        } else {
+            String::new()
+        };
+        writeln!(c,"static uint8_t case{k}(HirselCoreContext *ctx,const HirselCoreProcessConfig *cfg,HirselCoreMainResult *result) {{ (void)cfg; (void)result; hirsel_core_test_reset_limit(ctx,UINT64_C({limit})); {files} traces=0; arc_count=0; {inject} uint64_t initial=hirsel_core_test_available(ctx); {ret} r{k} = {}({args});",symbol(module,f)).unwrap();
+        writeln!(invocations, "assert(hirsel_core_run(&cfg,case{k})==0);").unwrap();
         let status = if sig.results.is_empty() {
             format!("r{k}")
         } else {
             format!("r{k}.r{}", sig.results.len())
         };
+        if hostfile {
+            writeln!(
+                c,
+                "assert(file_closes==({status} ? 0 : 1)); assert(file_deliveries==file_closes);"
+            )
+            .unwrap();
+        }
         writeln!(
             c,
             "if ({status}) {{ printf(\"F\"); }} else {{ printf(\"R\");"
@@ -163,9 +227,10 @@ fn execute(module: &Module, cases: &[Case]) -> Vec<NativeReport> {
             writeln!(c,"uint64_t b{k}_{j}=0; memcpy(&b{k}_{j},&r{k}.r{j},{}); printf(\" %llu\",(unsigned long long)b{k}_{j});",size(t)).unwrap();
         }
         c.push_str("}\n");
-        writeln!(c,"HirselCoreCauseCell *chain=hirsel_core_causes_take(ctx); if({status}) for(const HirselCoreCauseCell *p=chain;p;p=hirsel_core_cause_next(p)) printf(\" %s\",causes[hirsel_core_cause_value(p)->kind]); printf(\"|%llu|\",(unsigned long long)(initial-hirsel_core_test_available(ctx))); for(size_t i=0;i<traces;i++) printf(\" %llu\",(unsigned long long)trace[i]); printf(\"|%zu|\",hirsel_core_test_attempts(ctx)); for(const HirselCoreCauseCell *p=chain;p;p=hirsel_core_cause_next(p)) if(hirsel_core_cause_value(p)->kind==4) {{ const HirselCoreStringMessage *msg=(const HirselCoreStringMessage *)hirsel_core_cause_value(p)->message; for(uint64_t i=0;i<msg->len;i++) printf(\"%02x\",((const unsigned char *)msg->data)[i]); printf(\" \"); }} printf(\"\\n\"); hirsel_core_causes_drop(chain); hirsel_core_context_free(ctx); }}").unwrap();
+        writeln!(c,"HirselCoreCauseCell *chain=hirsel_core_causes_take(ctx); if({status}) for(const HirselCoreCauseCell *p=chain;p;p=hirsel_core_cause_next(p)) printf(\" %s\",causes[hirsel_core_cause_value(p)->kind]); printf(\"|%llu|\",(unsigned long long)(initial-hirsel_core_test_available(ctx))); for(size_t i=0;i<traces;i++) printf(\" %llu\",(unsigned long long)trace[i]); printf(\"|%zu|\",hirsel_core_test_attempts(ctx)); for(const HirselCoreCauseCell *p=chain;p;p=hirsel_core_cause_next(p)) if(hirsel_core_cause_value(p)->kind==4) {{ const HirselCoreStringMessage *msg=(const HirselCoreStringMessage *)hirsel_core_cause_value(p)->message; for(uint64_t i=0;i<msg->len;i++) printf(\"%02x\",((const unsigned char *)msg->data)[i]); printf(\" \"); }} printf(\"|\"); for(size_t j=0;j<arc_count;j++) printf(\" %u:%llu\",arc_events[j].kind,(unsigned long long)arc_events[j].value); printf(\"\\n\"); hirsel_core_causes_drop(chain); return 0; }}").unwrap();
     }
-    c.push_str("return 0;}\n");
+    invocations.push_str("return 0;}\n");
+    c.push_str(&invocations);
     std::fs::write(dir.join("test.c"), c).unwrap();
     let prefix =
         PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").expect("pinned LLVM prefix"));
@@ -212,6 +277,15 @@ fn execute(module: &Module, cases: &[Case]) -> Vec<NativeReport> {
                     .unwrap()
                     .split_whitespace()
                     .map(str::to_string)
+                    .collect(),
+                arc_events: parts
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .map(|pair| {
+                        let (kind, value) = pair.split_once(':').unwrap();
+                        (kind.parse().unwrap(), value.parse().unwrap())
+                    })
                     .collect(),
             }
         })
@@ -887,8 +961,8 @@ fn every_memory_sample_admission_refusal_matches_the_evaluator() {
         executions += cases.len();
         agree_cases(&module, &cases, true);
     }
-    // The two inner-bound finalizer cases add seven executions each.
-    assert_eq!(executions, 144);
+    // The HostFile cleanup sample adds one baseline and two admission refusals.
+    assert_eq!(executions, 147);
     println!("whole memory sample executions including every admission refusal: {executions}");
 }
 

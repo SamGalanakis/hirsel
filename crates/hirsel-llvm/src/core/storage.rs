@@ -349,9 +349,7 @@ impl FunctionEmitter<'_> {
                 writeln!(self.code, "allocation_success{n}:").unwrap();
                 self.put(result, &block);
                 self.put(available, &room);
-                if matches!(kind, AllocKind::Counted(_)) {
-                    // Both count implementations use the same initial word; later operations
-                    // select Rc/Arc from their instruction, including shared constructors.
+                if let AllocKind::Counted(counted) = kind {
                     let missing = self.calc(format!("icmp eq ptr {block}, null"));
                     let n = self.next;
                     self.next += 1;
@@ -359,7 +357,14 @@ impl FunctionEmitter<'_> {
                         "br i1 {missing}, label %allocated{n}, label %counted{n}"
                     ));
                     writeln!(self.code, "counted{n}:").unwrap();
-                    self.line(format!("store i64 1, ptr {block}, align 8"));
+                    if counted == Counted::Arc {
+                        self.runtime_void(
+                            "hirsel_core_counted_init",
+                            &[ptr(&block), ("i1 zeroext".into(), "true".into())],
+                        );
+                    } else {
+                        self.line(format!("store i64 1, ptr {block}, align 8"));
+                    }
                     self.line(format!("br label %allocated{n}"));
                     writeln!(self.code, "allocated{n}:").unwrap();
                 }
@@ -461,26 +466,11 @@ impl FunctionEmitter<'_> {
             }
             Inst::Share { node, kind } => {
                 let p = self.get(node);
-                if kind == Counted::Arc {
-                    // The provider currently records Arc events inside this entry.
-                    self.runtime_void(
-                        "hirsel_core_share",
-                        &[ptr(&p), ("i1 zeroext".into(), "true".into())],
-                    );
-                } else {
-                    self.share_node(&p, false);
-                }
+                self.share_node(&p, kind == Counted::Arc);
             }
             Inst::TryUnwrap { result, node, kind } => {
                 let p = self.get(node);
-                let yes = self.intrinsic(
-                    "hirsel_core_try_unwrap",
-                    "i1",
-                    &[
-                        ptr(&p),
-                        ("i1 zeroext".into(), (kind == Counted::Arc).to_string()),
-                    ],
-                );
+                let yes = self.unique_node(&p, kind == Counted::Arc);
                 let yes = self.calc(format!("zext i1 {yes} to i8"));
                 self.put(result, &yes);
             }

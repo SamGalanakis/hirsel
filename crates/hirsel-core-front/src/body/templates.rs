@@ -172,6 +172,16 @@ pub fn materialize(
         }
     }
     retire(&mut module, function, template);
+    // A shape at the template's rigid parameters (`$i`) is dead once substituted; its
+    // finalizer's rigid instance must not become a dependency of this unit.
+    for t in 0..module.types.len() {
+        if let Some(f) = module.types[t].finalizer {
+            let key = &module.instances[module.functions[f.0 as usize].instance.index()];
+            if key.types.iter().any(|name| name.contains('$')) {
+                module.types[t].finalizer = None;
+            }
+        }
+    }
     Ok((module, target))
 }
 
@@ -305,6 +315,10 @@ impl Substitution<'_> {
         self.types.insert(old, row);
         self.module.types.push(shape.clone());
         map_fields(&mut shape, &mut |id| TypeRef(self.ty(TypeId(id.0)).0));
+        // A generic resource's finalizer is the instance at the substituted arguments.
+        shape.finalizer = shape
+            .finalizer
+            .map(|f| FuncRef(self.function(FuncId(f.0)).0));
         self.module.types[row.index()] = shape;
         row
     }

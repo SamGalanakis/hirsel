@@ -371,8 +371,14 @@ impl Emitter {
             s.truncate(mark);
         }
         let finalizers = std::mem::take(&mut s.finalizers);
-        for (row, f) in finalizers {
-            let func = self.finalizer_row(p, f as usize);
+        for (row, f, arguments) in finalizers {
+            // A generic resource's finalizer is its template's instance at the row's
+            // arguments, materialized as any other generic callee.
+            let func = if arguments.is_empty() {
+                self.finalizer_row(p, f as usize)
+            } else {
+                self.instance(p, t, f as usize, &arguments).ok()?.0
+            };
             self.module.types[row.index()].finalizer = Some(hirsel_core_layout::FuncRef(func.0));
         }
         let row = TypeId(r?.0);

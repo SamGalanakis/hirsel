@@ -21,10 +21,11 @@ pub(crate) struct Shapes<'p, T: TyRead> {
     pub shapes: &'p mut Vec<Shape>,
     pub of: &'p mut HashMap<String, TypeRef>,
     /// A body module's table: a finalizer names a function row this table cannot name
-    /// yet, so it is left to [`Self::finalizers`]; a generic one is not built.
+    /// yet, so it is left to [`Self::finalizers`].
     pub module: bool,
-    /// The rows whose finalizer is the program's function `.1`, for the caller to name.
-    pub finalizers: Vec<(TypeRef, u32)>,
+    /// The rows whose finalizer is the program's function `.1` at the type's arguments
+    /// `.2` (its instance when the type is generic), for the caller to name.
+    pub finalizers: Vec<(TypeRef, u32, Vec<TyId>)>,
 }
 
 impl<T: TyRead> Shapes<'_, T> {
@@ -190,8 +191,7 @@ impl<T: TyRead> Shapes<'_, T> {
                     Some(_) => return None,
                     None => {}
                 }
-                if decl.summary.cycle || self.module && decl.finalizer.is_some() && !args.is_empty()
-                {
+                if decl.summary.cycle {
                     return None;
                 }
                 let repr = match decl.repr {
@@ -239,7 +239,7 @@ impl<T: TyRead> Shapes<'_, T> {
                 let finalizer = match decl.finalizer {
                     // A body module names the function row once the emitter has one.
                     Some(f) if self.module => {
-                        self.finalizers.push((r, f));
+                        self.finalizers.push((r, f, args.clone()));
                         Some(FuncRef(u32::MAX))
                     }
                     Some(_) => Some(FuncRef(d.0)),
@@ -269,7 +269,7 @@ impl<T: TyRead> Shapes<'_, T> {
     pub fn truncate(&mut self, mark: usize) {
         self.shapes.truncate(mark);
         self.of.retain(|_, r| (r.0 as usize) < mark);
-        self.finalizers.retain(|(r, _)| (r.0 as usize) < mark);
+        self.finalizers.retain(|(r, ..)| (r.0 as usize) < mark);
     }
 
     fn map_field(&mut self, args: &[TyId]) -> Option<FieldTy> {

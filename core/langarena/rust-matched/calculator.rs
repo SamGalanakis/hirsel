@@ -1,4 +1,5 @@
-// Matched twin of calculator.hirsel. Review pending langs-numeric-920.
+// Reviewed-by: langs-numeric-920 (Calculator Ast/Interpreter, generated valid inputs).
+// Same recursive descent, owned boxed enum/variable strings, checked positions, wrapping evaluation/checksum; map rebuilt each iteration.
 // kostya/LangArena3c9f84d calculator_ast.rs and calculator_interpreter.rs.
 // Recursive descent, owned boxed enum nodes, byte position, owned variable names.
 mod text_support;

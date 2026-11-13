@@ -1,5 +1,6 @@
-// Reviewed-by: langs-numeric-920 2026-11-13; BWTEncode/Decode, ArithEncode/Decode and LZWEncode only: matched indirect stable merge/scratch, frequency construction, binary search, byte dictionaries and counter widths. Overflow checks required.
-// Matched twin of compress.hirsel. Five supported tasks reviewed below; Huff/LZWDecode pending native qualification.
+// Reviewed-by: langs-numeric-920 2026-11-13; all eight generated-input variants including HuffEncode/HuffDecode/LZWDecode; matching stable merge, boxed trees, first-equal insertion, arithmetic tables and byte dictionaries; overflow checks required.
+// Matched twin of compress.hirsel. All eight generated-input variants reviewed.
+// Additional review langs-numeric-920: HuffEncode/HuffDecode/LZWDecode use matching boxed trees, first-equal insertion, i32 bit/frequency vectors, deep byte copies and owned dictionaries.
 // kostya/LangArena3c9f84d benchmarks/compress.rs. Same prefix-doubling BWT,
 // stable rank sort, arithmetic bitstreams/tables, and owned LZW dictionary bytes.
 mod text_support;

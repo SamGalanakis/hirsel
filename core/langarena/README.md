@@ -108,9 +108,11 @@ whole-suite comparison does not replace the per-task runtime comparisons.
 A task proven to exceed the default root with live data uses the driver's documented
 `--limit <bytes>` build setting. Choose the smallest power-of-two root that admits
 the unchanged input on both engines and record it beside the task's measurements.
-Graph::BFS, Graph::DFS and Graph::AStar use root: 128 MiB (default 64), subject to
-successful run qualification. Preserve their default-root Capacity results.
-CacheSimulation stays at the default root while its reclaimable Map storage is fixed.
+Graph::BFS, Graph::DFS and Graph::AStar use root: 128 MiB (default 64).
+Maze::Generator, Maze::BFS and Maze::AStar use root: 256 MiB (default 64); their
+live cell construction also exceeds 128 MiB. These roots admit the unchanged
+upstream run on both engines. Preserve the smaller-root Capacity results.
+CacheSimulation uses the default 64 MiB root; Map compaction reclaims its dead slots.
 Report peak charged bytes, both sides' peak RSS and their RSS ratio alongside the
 instruction ratio; unavailable charge telemetry is explicitly unavailable. When
 Hirsel RSS exceeds Rust by about 1.5 times, identify the retained representation or

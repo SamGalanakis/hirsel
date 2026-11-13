@@ -13,6 +13,8 @@
 #[cfg(test)]
 hirsel_guard::install!();
 
+pub mod core;
+
 mod ahead;
 mod bounded;
 mod compare;

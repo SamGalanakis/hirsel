@@ -9,6 +9,7 @@ rust-version.workspace = true
 native-tsan = []
 
 [dependencies]
+hirsel-core-ir = { path = "../hirsel-core-ir" }
 hirsel-core-contract = { path = "../hirsel-core-contract" }
 hirsel-graph = { path = "../hirsel-graph" }
 hirsel-lir = { path = "../hirsel-lir" }
@@ -20,4 +21,5 @@ cranelift-object = { version = "=0.136.3", default-features = false }
 gimli = { version = "=0.33.0", default-features = false, features = ["read", "write", "std"] }
 
 [dev-dependencies]
+hirsel-core-ir = { path = "../hirsel-core-ir", features = ["eval", "wf"] }
 hirsel-guard = { path = "../hirsel-guard" }

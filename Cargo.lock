@@ -770,6 +770,7 @@ dependencies = [
  "cranelift-object",
  "gimli",
  "hirsel-core-contract",
+ "hirsel-core-ir",
  "hirsel-graph",
  "hirsel-guard",
  "hirsel-lir",

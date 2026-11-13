@@ -101,3 +101,15 @@ ABI v3 has the same optional caller/operation u64 carrier and source attribution
 policy as LLVM. Function-value boundaries survive Direct/Bound specialization;
 root and C callback adapters provide zero when there is no Hirsel caller. Runtime
 cleanup and task startup pass the pair explicitly.
+
+The new `core::emit_object` entry accepts CoreIR directly, with an explicit target
+and optimization policy, and returns relocatable bytes with the form's instance
+symbols. It currently handles the runtime-independent scalar, comparison,
+conversion, slot, CFG and call subset on x86-64 Linux. Multiple scalar results use
+the System V C struct convention, including indirect large returns. Functions
+receive the form's hidden context pointer. Failure/status and memory operations
+remain unsupported until the core runtime ABI is frozen and integrated. This entry
+uses no old products, receipts, lowering, or production verifier. Its tests execute
+the emitted object through separately compiled C callers and compare against the
+CoreIR evaluator. Source anchors remain available for future debug information;
+AArch64 ABI classification and driver-owned object reuse remain to be added.

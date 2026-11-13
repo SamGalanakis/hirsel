@@ -422,7 +422,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
     pub(super) fn short_circuit(&mut self, n: NodeId, and: bool) -> (TyId, Option<ValueId>) {
         let c = self.kids(n);
+        // LANG-6, OWN-8: an operand's temporaries and temporary views end once its bool
+        // is produced.
+        let (freezes, owners) = (self.freezes.len(), self.owner_mark());
         let (lt, lv) = self.expr(c[0], None);
+        self.unfreeze(freezes, |h| (h != Hold::View(Extent::Temp)).then_some(h));
+        self.end_owners(owners, None, true, c[0]);
         if lt != BOOL {
             return self.no_operator(n, lt);
         }
@@ -451,9 +456,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         // The right side runs on one path only: its effects join with none (OWN-16).
         let (was_dead, mark) = (self.dead, self.log.len());
-        let owners = self.owner_mark();
+        let (freezes, owners) = (self.freezes.len(), self.owner_mark());
         let (rt, rv) = self.expr(c[1], None);
         // Its temporaries end with it, on the one path that ran it.
+        self.unfreeze(freezes, |h| (h != Hold::View(Extent::Temp)).then_some(h));
         self.end_owners(owners, None, true, c[1]);
         let ran = self.arm_edge(mark);
         let skipped = Some((self.diffs.len() as u32, 0));

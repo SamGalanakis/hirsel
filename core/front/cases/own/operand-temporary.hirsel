@@ -1,0 +1,9 @@
+// LANG-6, OWN-8 (Q34): a temporary view in an operand of `&&` ends when that operand's bool
+// is produced, so the right operand may move the place the left one read. Hand-derived:
+// "x" == "x" runs keep, giving true; "y" == "x" is false and skips it.
+// expect: run go(0) = true
+// expect: run go(1) = false
+type T { name: String }
+fn keep(take t: T) -> bool { let T(name: _) = take t; true }
+fn both(take a: T) -> bool { a.name == "x" && keep(take a) }
+fn go(x: u64) -> bool { if x == 0 { both(T(name: "x")) } else { both(T(name: "y")) } }

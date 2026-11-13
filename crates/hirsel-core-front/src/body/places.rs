@@ -706,7 +706,10 @@ impl<'c, 'a> Cx<'c, 'a> {
         ty: Ty,
         n: NodeId,
     ) -> ValueId {
-        let offset = self.konst(Ty::Scalar(Scalar::U64), offset, n).unwrap();
+        // Past a gap or a diverging point nothing is emitted, and the value is unused.
+        let Some(offset) = self.konst(Ty::Scalar(Scalar::U64), offset, n) else {
+            return self.value(ty);
+        };
         let address = self.address(
             AddressBase::Value(header),
             &[Step::Byte(offset)],

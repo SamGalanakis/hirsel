@@ -179,16 +179,23 @@ pub(super) fn inline_ordered(module: &Module, body: &mut Body) {
                     return None;
                 };
                 let key = &module.instances[module.functions[f.index()].instance.index()];
-                if key.definition.0.package.name != "core" || key.definition.0.modules != ["order"]
-                {
+                if key.definition.0.package.name != "core" {
                     return None;
                 }
-                let op = match key.definition.0.name.as_str() {
-                    "$lt" => CompareOp::Lt,
-                    "$le" => CompareOp::Le,
-                    "$gt" => CompareOp::Gt,
-                    "$ge" => CompareOp::Ge,
-                    _ => return None,
+                let op = if key.definition.0.modules == ["map"]
+                    && key.definition.0.name == "$key_equal"
+                {
+                    CompareOp::Eq
+                } else if key.definition.0.modules == ["order"] {
+                    match key.definition.0.name.as_str() {
+                        "$lt" => CompareOp::Lt,
+                        "$le" => CompareOp::Le,
+                        "$gt" => CompareOp::Gt,
+                        "$ge" => CompareOp::Ge,
+                        _ => return None,
+                    }
+                } else {
+                    return None;
                 };
                 let Param::Address(ty) = module.signatures[call.signature.index()].params[0] else {
                     return None;
@@ -1242,6 +1249,9 @@ mod ordered_cost_tests {
     fn scalar_order_instances_are_direct_predicates() {
         let source = r#"
 fn less[T:ordered](a:View[T],b:View[T])->bool { a < b }
+fn equal[T:key](a:T,b:T)->bool { a == b }
+fn equal_same()->bool { equal(7u64,7u64) }
+fn equal_different()->bool { equal(7u64,9u64) }
 fn closed(a:View[u64],b:View[u64])->bool { a < b }
 fn closed_text(a:View[String],b:View[String])->bool { a < b }
 fn closed_min(a:u64,b:u64)->u64 { if b<a {b} else {a} }
@@ -1278,7 +1288,7 @@ fn text()->bool { let a="a"; let b="b"; less(view a,view b) }
                 || key.definition.0.name == "closed_text"
                 || matches!(
                     key.definition.0.name.as_str(),
-                    "less" | "min" | "borrowed_min" | "closed_min" | "closed_borrowed"
+                    "less" | "equal" | "min" | "borrowed_min" | "closed_min" | "closed_borrowed"
                 )
             {
                 if let Some(body) = &f.body {
@@ -1297,12 +1307,26 @@ fn text()->bool { let a="a"; let b="b"; less(view a,view b) }
                         key,
                         body.insts.len()
                     );
-                    if key.types == ["u64"] && key.definition.0.name == "less" {
+                    if key.types == ["u64"]
+                        && matches!(key.definition.0.name.as_str(), "less" | "equal")
+                    {
                         assert_eq!(calls, 0);
                         assert_eq!(comparisons, 1);
                     }
                 }
             }
+        }
+        for (name, expected) in [("equal_same", 1), ("equal_different", 0)] {
+            let f = e
+                .module
+                .functions
+                .iter()
+                .position(|f| e.module.instances[f.instance.index()].definition.0.name == name)
+                .unwrap();
+            assert_eq!(
+                hirsel_core_ir::eval::run(&e.module, FuncId(f as u32), &[], 0).outcome,
+                hirsel_core_ir::eval::Outcome::Returned(vec![expected]),
+            );
         }
         eprintln!("{}", hirsel_core_ir::text::print(&e.module));
     }

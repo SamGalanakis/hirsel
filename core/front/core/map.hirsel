@@ -3,7 +3,20 @@
 pub fn new[K: key, V]() -> Map[K, V]
 pub fn len[K: key, V](m: Map[K, V]) -> u64
 pub fn get[K: key, V](m: Map[K, V], k: K) -> Option[View[V]] in m {
-  match find(m, k, hash(k)) { Some(i) => Some(slot_value(m, i)), None => None }
+  let n = index_len(m)
+  if n == 0 { return None }
+  let mask = n - 1
+  let h = hash(k)
+  let mut j = h & mask
+  loop {
+    let s = index_get(m, j)
+    if s == 0 { return None }
+    let i = s - 1
+    if slot_live(m, i) && slot_hash(m, i) == h && slot_key(m, i) == k {
+      return Some(slot_value(m, i))
+    }
+    j = int.wrapping_add(j, 1) & mask
+  }
 }
 pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), (Capacity, K, V)] {
   let h = hash(k)

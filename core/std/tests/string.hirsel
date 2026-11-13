@@ -298,6 +298,83 @@ fn ends_with_longer() -> bool {
     string.ends_with("json", ".json")
 }
 
+// Every piece of s from next_split (sep given) or next_line (sep empty), each in brackets.
+fn pieces(s: String, sep: String) -> String {
+    let mut out = string.new()
+    let mut at: u64 = 0
+    if string.byte_len(sep) == 0 {
+        while let Some((line, next)) = string.next_line(s, at) {
+            result.unwrap(string.push(mut out, "["))
+            result.unwrap(string.push(mut out, line))
+            result.unwrap(string.push(mut out, "]"))
+            at = next
+        }
+    } else {
+        while let Some((piece, next)) = string.next_split(s, at, sep) {
+            result.unwrap(string.push(mut out, "["))
+            result.unwrap(string.push(mut out, piece))
+            result.unwrap(string.push(mut out, "]"))
+            at = next
+        }
+    }
+    out
+}
+
+// Rust's "a,b,,c,".split(','): a, b, "", c, and the empty piece after the trailing comma.
+// expect: run next_split_pieces() = true
+fn next_split_pieces() -> bool {
+    same(pieces("a,b,,c,", ","), "[a][b][][c][]")
+}
+
+// Rust: "".split(',') is one empty piece; "abc" with no comma is itself; "x::y:::z" split
+// on "::" is x, y, ":z" (the first "::" of ":::" is the separator); é pieces keep both bytes.
+// expect: run next_split_edges() = true
+fn next_split_edges() -> bool {
+    same(pieces("", ","), "[]") && same(pieces("abc", ","), "[abc]") && same(pieces("x::y:::z", "::"), "[x][y][:z]") && same(pieces("é;é", ";"), "[é][é]")
+}
+
+// Cursor 5 is one past "a,b,"'s end (4 + 1): None. Cursor 6 is past that.
+// expect: run next_split_past_end() = fail Bounds
+fn next_split_past_end() -> u64 {
+    match string.next_split("a,b,", 5, ",") {
+        Some(_) => 1,
+        None => match string.next_split("a,b,", 6, ",") {
+            Some(_) => 2,
+            None => 3,
+        },
+    }
+}
+
+// expect: run next_split_empty_sep() = fail Fail
+fn next_split_empty_sep() -> u64 {
+    match string.next_split("abc", 0, "") {
+        Some(_) => 1,
+        None => 2,
+    }
+}
+
+// Rust's "a\r\nb\n\nc\r".lines(): a (CRLF ending), b, "", and "c\r" (a lone CR stays).
+// expect: run next_line_endings() = true
+fn next_line_endings() -> bool {
+    same(pieces("a\r\nb\n\nc\r", ""), "[a][b][][c\r]")
+}
+
+// Rust: "".lines() is empty; "a\n" is one line (no empty line after the final ending);
+// "\n" is one empty line; "\r\n" one empty line; "x\n\n" is x then one empty line.
+// expect: run next_line_edges() = true
+fn next_line_edges() -> bool {
+    same(pieces("", ""), "") && same(pieces("a\n", ""), "[a]") && same(pieces("\n", ""), "[]") && same(pieces("\r\n", ""), "[]") && same(pieces("x\n\n", ""), "[x][]")
+}
+
+// A cursor inside é (bytes 1 and 2 of "aé") is refused.
+// expect: run next_line_inside_scalar() = fail Bounds
+fn next_line_inside_scalar() -> u64 {
+    match string.next_line("aé\n", 2) {
+        Some((_, next)) => next,
+        None => 0,
+    }
+}
+
 // expect: run split_once_first() = true
 fn split_once_first() -> bool {
     match string.split_once("a=b=c", "=") {

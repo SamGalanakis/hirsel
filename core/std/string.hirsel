@@ -205,6 +205,50 @@ pub fn split_once(s: String, sep: String) -> Option[(View[String], View[String])
     Some((string.slice(s, 0, at), string.slice(s, at + string.byte_len(sep), n)))
 }
 
+/// The piece of s from at up to the next sep, and the cursor after that sep: the pieces of
+/// Rust str::split(sep), one per call, starting from 0. A piece that runs to the end returns
+/// cursor byte_len(s) + 1, after which the result is None, so a trailing sep yields a final
+/// empty piece and "" yields one empty piece, as in Rust. Fails: Bounds when at exceeds
+/// byte_len(s) + 1 or falls inside a scalar; Fail when sep is empty. View: anchored to s;
+/// FREEZE s. Alloc: nothing. Cost: as find from at.
+/// Ex: `while let Some((field, next)) = string.next_split(row, at, ",") { ...; at = next }`
+pub fn next_split(s: String, at: u64, sep: String) -> Option[(View[String], u64)] in s {
+    let n = string.byte_len(s)
+    if at == n + 1 {
+        return None
+    }
+    let m = string.byte_len(sep)
+    if m == 0 {
+        fail("string.next_split: the separator is empty")
+    }
+    match find(s, at, sep) {
+        Some(i) => Some((string.slice(s, at, i), i + m)),
+        None => Some((string.slice(s, at, n), n + 1)),
+    }
+}
+
+/// The line of s from at, without its line ending, and the cursor after that ending: the
+/// lines of Rust str::lines, one per call, starting from 0. A line ends at "\n" or "\r\n"; the
+/// last line's ending is optional, so a final "\n" yields no empty line, and a lone "\r" stays
+/// in its line. None when at is byte_len(s). Fails: Bounds when at exceeds byte_len(s) or
+/// falls inside a scalar. View: anchored to s; FREEZE s. Alloc: nothing. Cost: as find from at.
+/// Ex: `while let Some((line, next)) = string.next_line(text, at) { ...; at = next }`
+pub fn next_line(s: String, at: u64) -> Option[(View[String], u64)] in s {
+    let n = string.byte_len(s)
+    if at == n {
+        return None
+    }
+    let Some(i) = find(s, at, "\n") else {
+        return Some((string.slice(s, at, n), n))
+    }
+    // A "\r" just before the "\n" belongs to the line ending.
+    let b = string.as_bytes(s)
+    if i > at && b[i - 1] == 0x0D {
+        return Some((string.slice(s, at, i - 1), i + 1))
+    }
+    Some((string.slice(s, at, i), i + 1))
+}
+
 /// s without its leading p, or None when s does not begin with p (Rust strip_prefix).
 /// View: anchored to s; FREEZE s. Alloc: nothing. Cost: O(len(p)).
 /// Ex: `let Some(route) = string.strip_prefix(line, "GET ") else { return Error(NotGet) }`

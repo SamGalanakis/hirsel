@@ -32,6 +32,7 @@ class Contract:
     stderr: bytes = b""
     first_write: int | None = None
     test_of: str | None = None
+    host_op: int = 0
 
     @property
     def name(self):
@@ -88,13 +89,18 @@ def discover(root, filters):
         test_of = test_module(root, file, source)
         stdout = stderr = b""
         first_write = None
+        host_op = 0
         for line, text in enumerate(source.splitlines(), 1):
             if text.startswith("// expect: stdout "):
                 stdout = json.loads(text.removeprefix("// expect: stdout ")).encode()
             if text.startswith("// expect: stderr "):
                 stderr = json.loads(text.removeprefix("// expect: stderr ")).encode()
             if text.startswith("// host: first_write "):
-                first_write = int(text.removeprefix("// host: first_write "))
+                words = text.removeprefix("// host: first_write ").split()
+                first_write = int(words[0])
+                host_op = 2 if words[1:] == ["file"] else 0
+            if text == "// host: remove_tree_prefix a":
+                first_write, host_op = 0, 9
             match = re.fullmatch(r'\s*// expect: run (.*?) = (.*?)\s*', text)
             if not match:
                 if text.strip().startswith('// expect: run '):
@@ -105,9 +111,10 @@ def discover(root, filters):
             header = re.search(r'\bfn\s+' + re.escape(name) + r'\s*\([^)]*\)([^\{]*)\{', source)
             if header is None:
                 raise ValueError(f'{file}:{line}: no function for {call}')
-            case = Contract(file, line, call, expected, bool(re.search(r'\bwaits\b', header[1])), stdout, stderr, first_write, test_of)
+            case = Contract(file, line, call, expected, bool(re.search(r'\bwaits\b', header[1])), stdout, stderr, first_write, test_of, host_op)
             stdout = stderr = b""
             first_write = None
+            host_op = 0
             if not filters or any(case.name.startswith(f) or str(file.relative_to(root)).startswith(f) for f in filters):
                 contracts.append(case)
     if not contracts:
@@ -220,7 +227,7 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     actual = str(cc or Path(shutil.which('cc')))
                     source = root / 'core/tools/std_host.c'
                     include = root / 'crates/hirsel-core-rt/include'
-                    linker.write_text('#!/bin/sh\nexec ' + shlex.quote(actual) + ' \"$@\" ' + shlex.quote(str(source)) + ' -I' + shlex.quote(str(include)) + f' -DFIRST={case.first_write} -Wl,--wrap=hirsel_core_host_op\n')
+                    linker.write_text('#!/bin/sh\nexec ' + shlex.quote(actual) + ' \"$@\" ' + shlex.quote(str(source)) + ' -I' + shlex.quote(str(include)) + f' -DFIRST={case.first_write} -DFIRST_OP={case.host_op} -Wl,--wrap=hirsel_core_host_op\n')
                     linker.chmod(0o755)
                 if linker:
                     command.extend(['--cc', str(linker)])

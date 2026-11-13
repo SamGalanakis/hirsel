@@ -178,3 +178,38 @@ fn lock_held_then_free(d: Dir) -> bool waits {
     let _ = file.close(take back)
     ok
 }
+
+// The scripted host commits ab, then EIO. write_all reports the committed byte count.
+// host: first_write 2 file
+// expect: run write_all_keeps_committed_prefix(dir) = true
+fn write_all_keeps_committed_prefix(d:Dir)->bool waits {
+    let mut f=result.unwrap(file.open(d,"partial",Write))
+    match file.write_all(mut f,string.as_bytes("abcdef")) {
+        Error(e)=>{
+            if e.written!=2 {return false}
+            match e.error {Other(5)=>{},_=>return false}
+        },
+        _=>return false,
+    }
+    result.unwrap(file.close(take f))
+    let b=result.unwrap(file.read(d,"partial"))
+    list.len(b)==2 && b[0]==b'a' && b[1]==b'b'
+}
+
+// The high-level helper returns IoError but still leaves exactly the committed prefix.
+// host: first_write 2 file
+// expect: run write_keeps_committed_prefix(dir) = true
+fn write_keeps_committed_prefix(d:Dir)->bool waits {
+    match file.write(d,"partial",string.as_bytes("abcdef")) {Error(Other(5))=>{},_=>return false}
+    let b=result.unwrap(file.read(d,"partial"))
+    list.len(b)==2 && b[0]==b'a' && b[1]==b'b'
+}
+
+// Uniform path rule: NUL and dot components are Denied, with no created file.
+// expect: run invalid_path_denied(dir) = true
+fn invalid_path_denied(d:Dir)->bool waits {
+    for name in ["bad\0name","./bad","x/../bad",".."] {
+        match file.open(d,name,Write) {Error(Denied)=>{},_=>return false}
+    }
+    match file.open(d,"bad",Read) {Error(NotFound)=>true,_=>false}
+}

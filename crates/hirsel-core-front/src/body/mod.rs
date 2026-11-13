@@ -135,7 +135,7 @@ pub struct Emitter {
     #[cfg(any(test, feature = "test-assembly"))]
     templates: HashMap<DefPath, (FuncId, GenericTemplate)>,
     /// Per row, whether cleaning it may run code (memoised [`Self::runs_code`]).
-    runs: HashMap<(TypeId, bool), bool>,
+    runs: Vec<[Option<bool>; 2]>,
     /// `module.statics` rows by their bytes.
     statics: HashMap<Vec<u8>, hirsel_core_ir::StaticId>,
     constant_statics: HashMap<crate::ConstValue, hirsel_core_ir::StaticId>,
@@ -458,7 +458,7 @@ impl Emitter {
                     self.module.types.truncate(mark);
                     self.types.retain(|_, r| (r.0 as usize) < mark);
                     self.generic_names.retain(|id, _| id.index() < mark);
-                    self.runs.retain(|(r, _), _| r.index() < mark);
+                    self.runs.truncate(mark);
                     return None;
                 }
             }
@@ -525,12 +525,14 @@ impl Emitter {
         self.cleanup_code(id, false)
     }
     fn cleanup_code(&mut self, id: TypeId, rigid_may_run: bool) -> bool {
-        let key = (id, rigid_may_run);
-        if let Some(&r) = self.runs.get(&key) {
+        let mode = usize::from(rigid_may_run);
+        if let Some(r) = self.runs.get(id.index()).and_then(|row| row[mode]) {
             return r;
         }
         let r = self.runs_code_walk(id, rigid_may_run);
-        self.runs.insert(key, r);
+        self.runs
+            .resize(self.runs.len().max(id.index() + 1), [None; 2]);
+        self.runs[id.index()][mode] = Some(r);
         r
     }
     fn runs_code_walk(&self, id: TypeId, rigid_may_run: bool) -> bool {

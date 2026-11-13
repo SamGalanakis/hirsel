@@ -71,10 +71,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if self.is_view(ty) {
             return None;
         }
-        let plain = kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Plain;
+        // Only a symbolic row's placeholder can invent cleanup for a plain
+        // parameter. Closed rows already have their actual cleanup recipe.
         match self.rep(ty) {
             Ok(Rep::Place(id))
-                if self.e.needs_drop(id) && (!plain || self.e.runs_known_code(id)) =>
+                if self.e.needs_drop(id)
+                    && (!self.e.generic_names.contains_key(&id)
+                        || kind(&self.p.decls, &self.t, ty, &self.params) != Kind::Plain
+                        || self.e.runs_known_code(id)) =>
             {
                 Some(id)
             }

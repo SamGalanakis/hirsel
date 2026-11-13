@@ -325,3 +325,43 @@ fn shortest_pairs() -> bool {
     let (z, w) = float.shortest64(0.0)
     c == 3 && p == -1 && d == 1 && q == 2 && z == 0 && w == 0
 }
+
+// exp, within 1 ulp of the correctly rounded value (fdlibm's bound). Each expected bit
+// pattern is e^x computed by Python's decimal module to 80 digits and rounded once.
+fn ulps(x: f64, want: u64) -> u64 {
+    let got = float.to_bits64(float.exp(x))
+    if got > want {
+        got - want
+    } else {
+        want - got
+    }
+}
+
+// expect: run exp_ordinary() = true
+fn exp_ordinary() -> bool {
+    ulps(1.0, 0x4005bf0a8b145769) <= 1 && ulps(-1.0, 0x3fd78b56362cef38) <= 1 && ulps(0.5, 0x3ffa61298e1e069c) <= 1 && ulps(0.3, 0x3ff599058c8c1a96) <= 1 && ulps(10.0, 0x40d5829dcf950560) <= 1 && ulps(-20.0, 0x3e21b48655f37267) <= 1 && ulps(100.0, 0x48f3494a9b171bf5) <= 1
+}
+
+// Both reduction branches meet near 0.5 ln2 and 1.5 ln2: e^(0.5 ln2) = sqrt 2,
+// e^(1.5 ln2) = 2 sqrt 2.
+// expect: run exp_reduction_edges() = true
+fn exp_reduction_edges() -> bool {
+    ulps(0.34657359027997264, 0x3ff6a09e667f3bcc) <= 1 && ulps(1.0397207708399179, 0x4006a09e667f3bcc) <= 1
+}
+
+// Near overflow, deep in the subnormals (the k < -1021 path), and the tiny-x path.
+// expect: run exp_range_ends() = true
+fn exp_range_ends() -> bool {
+    ulps(709.7, 0x7fed75ae7a50ee14) <= 1 && ulps(-708.5, 0x000e6cf6d08897ac) <= 1 && ulps(-740.0, 0x55) <= 1 && ulps(-745.1, 0x1) <= 1 && ulps(float.from_bits64(0x3E10000000000000), 0x3ff0000000400000) <= 1
+}
+
+fn e(x: u64) -> u64 {
+    float.to_bits64(float.exp(float.from_bits64(x)))
+}
+
+// exp(0) is exactly 1; past the thresholds inf and 0; exp(-inf) = 0, exp(inf) = inf,
+// exp(NaN) is NaN.
+// expect: run exp_specials() = true
+fn exp_specials() -> bool {
+    e(0) == 0x3ff0000000000000 && e(0x8000000000000000) == 0x3ff0000000000000 && float.to_bits64(float.exp(709.8)) == 0x7ff0000000000000 && float.to_bits64(float.exp(-745.2)) == 0 && e(0xfff0000000000000) == 0 && e(0x7ff0000000000000) == 0x7ff0000000000000 && !float.is_finite(float.exp(float.from_bits64(0x7ff8000000000000)))
+}

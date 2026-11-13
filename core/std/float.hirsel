@@ -1653,3 +1653,101 @@ fn push_ascii(mut s: String, take o: Bytes) -> Result[(), Capacity] {
         Error(_) => fail("float: formatted digits are ASCII"),
     }
 }
+
+/// e^x within 1 ulp, after fdlibm's e_exp.c (Sun, 1993; FreeBSD's msun and Rust's libm
+/// crate carry the same code): x = k ln2 + r with |r| <= 0.5 ln2, a degree-5 Remez
+/// polynomial for e^r, then k added to the exponent. Overflows to inf above
+/// 709.782712893384, underflows to 0 below -745.1332191019411; exp(NaN) is NaN,
+/// exp(-inf) is 0. Alloc: nothing. Cost: O(1).
+/// Ex: `let decay = float.exp(-t / tau)`
+pub fn exp(x: f64) -> f64 {
+    // fdlibm's constants (bit patterns in comments): ln2 split into 32 high bits and the rest,
+    // 1/ln2, and the Remez coefficients of R(r^2) on [0, 0.347^2] (error below 2^-59). They are
+    // lets, not consts: the front reads a const's bare float literal as a grant (LANG-3).
+    let ln2_hi: f64 = 6.93147180369123816490e-01 // 0x3fe62e42fee00000
+    let ln2_lo: f64 = 1.90821492927058770002e-10 // 0x3dea39ef35793c76
+    let invln2: f64 = 1.44269504088896338700e+00 // 0x3ff71547652b82fe
+    let p1: f64 = 1.66666666666666019037e-01 // 0x3FC555555555553E
+    let p2: f64 = -2.77777777770155933842e-03 // 0xBF66C16C16BEBD93
+    let p3: f64 = 6.61375632143793436117e-05 // 0x3F11566AAF25DE2C
+    let p4: f64 = -1.65339022054652515390e-06 // 0xBEBBBD41C5D26BF1
+    let p5: f64 = 4.13813679705723846039e-08 // 0x3E66376972BEA4D0
+    let bits = float.to_bits64(x)
+    let hx = (bits >> 32) & 0x7fffffff
+    let negative = bits >> 63 != 0
+    if hx >= 0x40862E42 {
+        // |x| >= 709.78...
+        if hx >= 0x7ff00000 {
+            if bits & 0xfffffffffffff != 0 {
+                return x + x
+            }
+            return if negative {
+                0.0
+            } else {
+                x
+            }
+        }
+        // Same-sign finite f64s order as their bits: x > 7.09782712893383973096e+02
+        // (0x40862E42FEFA39EF) overflows, x < -7.45133219101941108420e+02
+        // (0xC0874910D52D3051) underflows.
+        if !negative && bits > 0x40862E42FEFA39EF {
+            return float.from_bits64(0x7ff0000000000000)
+        }
+        if negative && bits > 0xC0874910D52D3051 {
+            return 0.0
+        }
+    }
+    let mut hi: f64 = 0.0
+    let mut lo: f64 = 0.0
+    let mut k: i64 = 0
+    let mut r = x
+    if hx > 0x3fd62e42 {
+        // |x| > 0.5 ln2: reduce.
+        if hx < 0x3FF0A2B2 {
+            // and |x| < 1.5 ln2: k is 1 or -1.
+            if negative {
+                hi = x + ln2_hi
+                lo = -ln2_lo
+                k = -1
+            } else {
+                hi = x - ln2_hi
+                lo = ln2_lo
+                k = 1
+            }
+        } else {
+            let half: f64 = if negative {
+                -0.5
+            } else {
+                0.5
+            }
+            let nearest: Result[i64, FloatError] = float.to_int(invln2 * x + half)
+            k = match nearest {
+                Ok(v) => v,
+                Error(_) => fail("float.exp: |x| < 746 makes k fit"),
+            }
+            let t: f64 = float.from_int(k)
+            // t x ln2_hi is exact: ln2_hi has 32 significant bits and |k| < 1076.
+            hi = x - t * ln2_hi
+            lo = t * ln2_lo
+        }
+        r = hi - lo
+    } else if hx < 0x3e300000 {
+        // |x| < 2^-28: e^x rounds to 1 + x.
+        return 1.0 + x
+    }
+    let t = r * r
+    let c = r - t * (p1 + t * (p2 + t * (p3 + t * (p4 + t * p5))))
+    if k == 0 {
+        return 1.0 - ((r * c) / (c - 2.0) - r)
+    }
+    let y = 1.0 - ((lo - (r * c) / (2.0 - c)) - hi)
+    // Add k to y's exponent; below the normal range add k + 1000 and scale by 2^-1000.
+    if k >= -1021 {
+        let shift: u64 = int.wrapping_shl(int.truncate(k), 52)
+        float.from_bits64(int.wrapping_add(float.to_bits64(y), shift))
+    } else {
+        let shift: u64 = int.wrapping_shl(int.truncate(k + 1000), 52)
+        float.from_bits64(int.wrapping_add(float.to_bits64(y), shift)) * float.from_bits64(0x0170000000000000)
+    }
+}
+

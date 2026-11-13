@@ -16,5 +16,4 @@
   must return `R` or fail with `Cause`. Values are written at the signature's types
   (`-3`, `true`, `0.5`), comma-separated without spaces.
 
-`core/` is a test fixture of the core library: the subset of the spec's canonical
-`core/core/` the cases use (prelude, role types, integer operations), as it declares them.
+Every case is checked against the one core package, `core/core/`, as every program is.

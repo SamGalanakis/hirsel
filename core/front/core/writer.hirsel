@@ -1,7 +1,0 @@
-
-pub fn append[S, T, in r](mut w: Writer[S, in r], f: scoped fn(take Writer[T, in r]) -> Result[Child[T], BuildError]) -> Result[(), BuildError]
-pub fn scalar[in r](mut w: Writer[Text, in r], c: char) -> Result[(), BuildError]
-pub fn push[in r](mut w: Writer[Text, in r], s: String) -> Result[(), BuildError]
-pub fn close[S, in r](take w: Writer[S, in r]) -> Result[Child[S], BuildError]
-pub fn completed[S, T, in r](w: Writer[S, in r], i: u64) -> Option[View[T]] in r
-pub fn last_completed[S, T, in r](w: Writer[S, in r]) -> Option[View[T]] in r

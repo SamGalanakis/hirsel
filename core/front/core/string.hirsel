@@ -1,5 +1,0 @@
-pub fn new() -> String
-pub fn byte_len(s: String) -> u64
-pub fn into_bytes(take s: String) -> Result[Bytes, (Capacity, String)]
-pub fn as_bytes(s: String) -> View[Bytes] in s
-pub fn push(mut s: String, t: String) -> Result[(), Capacity]

@@ -10,9 +10,8 @@ way (LANG-9). Declared bounds are read, never re-derived (OWN-4).
 Constructs this crate does not build yet are recorded as `Gap`s, never accepted silently
 and never reported as refusals of the program.
 
-Cases live in `core/front/cases` with hand-derived `// expect:` lines; `core/front/core`
-is a fixture of the core library until the spec's `core/core/` signature files reach the
-tools. See `core/front/README.md`.
+Cases live in `core/front/cases` with hand-derived `// expect:` lines and are checked
+against the one core package, `core/core`. See `core/front/README.md`.
 
 
 The front-end input uses one compilation symbol table and one arena per source file.

@@ -1,6 +1,0 @@
-// Module `task` (CONC-1 to CONC-8).
-
-pub fn spawn[X: send, R: send](tasks: Tasks, bytes n: u64, take x: X, f: fn(take X) -> R waits) -> Result[Task[R], (Capacity, X)]
-pub fn join[R: send](take h: Task[R]) -> Result[R, JoinError] waits
-pub fn cancel[R: send](mut h: Task[R])
-pub fn check_cancel()

@@ -1,4 +1,0 @@
-// Module `char` (SEM-3). The type `char` is a builtin type name (LANG-7).
-
-pub fn from_u32(n: u32) -> Option[char]
-pub fn to_u32(c: char) -> u32

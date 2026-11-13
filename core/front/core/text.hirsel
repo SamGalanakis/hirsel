@@ -1,4 +1,0 @@
-
-pub fn len(t: Text) -> u64
-pub fn as_string(t: Text) -> View[String] in t
-pub fn copy_in(r: Region, s: String) -> Result[Text in r, Capacity]

@@ -8,7 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let [input, output] = args.as_slice() else {
         return Err("expected input.hirsel output.core".into());
     };
-    let core = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/front/core");
+    let core = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
     let (module, _) = front::lower(&std::fs::read_to_string(input)?, &core, "f")?;
     std::fs::write(output, hirsel_core_ir::text::print(&module))?;
     Ok(())

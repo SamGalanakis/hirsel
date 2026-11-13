@@ -13,6 +13,11 @@ fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/front")
 }
 
+/// The one core package, as every program checks against it.
+fn core_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/core")
+}
+
 fn package(name: &str) -> PackageId {
     PackageId {
         name: name.into(),
@@ -20,10 +25,9 @@ fn package(name: &str) -> PackageId {
     }
 }
 
-/// The core fixture and one application module, indexed with the core fixture as the
-/// core package (its `core` module is the prelude).
+/// The core package and one application module (core's `core` module is the prelude).
 pub(crate) fn program_inputs(source: &str) -> (NameIndex, Vec<ModuleInput>) {
-    inputs_with_core(source, &root().join("core"))
+    inputs_with_core(source, &core_dir())
 }
 
 fn inputs_with_core(source: &str, core_dir: &Path) -> (NameIndex, Vec<ModuleInput>) {
@@ -575,14 +579,13 @@ fn callable_provider_and_identity_words() {
 /// have, and a core body may rely on them. `T: integer` is plain and ordered, so `max`
 /// copies and compares; `T: float` is not key, so `same`'s `==` is refused under
 /// LANG-21 (7d90583a, Q41).
-/// These bounds are written only in core, so the bodies are a module of a copy of the
-/// core fixture.
+/// These bounds are written only in core, so the bodies are a module of a copy of core.
 #[test]
 fn integer_and_float_bounds_imply_their_types_bounds() {
     let dir = std::env::temp_dir().join(format!("hirsel-own4-core-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    for e in std::fs::read_dir(root().join("core")).unwrap() {
+    for e in std::fs::read_dir(core_dir()).unwrap() {
         let path = e.unwrap().path();
         std::fs::copy(&path, dir.join(path.file_name().unwrap())).unwrap();
     }
@@ -1403,9 +1406,9 @@ fn list_index_iteration_and_failure_cleanup() {
         } else {
             format!("drop a0 t{list}\n")
         };
+        // The entry alone: the vectors below edit its text, never the core bodies.
         let fixture = format!(
             r#"
-{}
 sig g{g} = () -> (u64)
 inst n{instance} = app@1/fixture/entry [] []
 fn f{entry} = n{instance} g{g} {{
@@ -1449,9 +1452,7 @@ fn f{entry} = n{instance} g{g} {{
   propagate
 }}
 "#,
-            text::print(module),
-            target.0,
-            signature.0
+            target.0, signature.0
         );
         let fixture = if source.contains("FixedSpan[")
             || source.contains("SeqSpan[")
@@ -1609,7 +1610,7 @@ fn f{entry} = n{instance} g{g} {{
         } else {
             fixture
         };
-        let fixture = text::parse(&fixture).unwrap();
+        let fixture = text::parse(&format!("{}{fixture}", text::print(module))).unwrap();
         wf::module(&fixture).unwrap();
         let report = eval::run(&fixture, FuncId(entry as u32), &[], 1_000_000);
         assert_eq!(report.outcome, expected, "{source}");
@@ -2165,7 +2166,7 @@ fn task_send_and_waits_spec_examples() {
 fn core_bodies_check_waits_while_bodiless_rows_use_the_written_effect() {
     let dir = std::env::temp_dir().join(format!("hirsel-waits-core-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    for file in std::fs::read_dir(root().join("core")).unwrap() {
+    for file in std::fs::read_dir(core_dir()).unwrap() {
         let file = file.unwrap();
         if file.path().is_file() {
             std::fs::copy(file.path(), dir.join(file.file_name())).unwrap();

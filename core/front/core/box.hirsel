@@ -1,2 +1,0 @@
-pub fn new[T](take x: T) -> Result[Box[T], (Capacity, T)]
-pub fn unbox[T](take b: Box[T]) -> T

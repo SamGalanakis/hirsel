@@ -1,7 +1,0 @@
-// Module `channel` (CONC-4, CONC-5).
-
-pub fn new[T: send](cap: u64) -> Result[(Sender[T], Receiver[T]), Capacity]
-pub fn sender[T: send](tx: Sender[T]) -> Sender[T]
-pub fn send[T: send](tx: Sender[T], take x: T) -> Result[(), Closed[T]] waits
-pub fn try_send[T: send](tx: Sender[T], take x: T) -> Result[(), SendError[T]]
-pub fn receive[T: send](rx: Receiver[T]) -> Result[T, Closed[()]] waits

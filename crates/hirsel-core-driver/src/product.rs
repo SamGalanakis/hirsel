@@ -440,8 +440,8 @@ mod agreement {
         let mut cases = vec![];
         walk(&root.join("core/front/cases"), &mut cases);
         cases.sort();
-        let core = PackageManifest::directory(&root.join("core/front/core"), package("core"), true)
-            .unwrap();
+        let core =
+            PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
         let count = cases.len();
         assert!(count > 200);
         for (i, file) in cases.into_iter().enumerate() {

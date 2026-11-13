@@ -341,7 +341,10 @@ fn scalars(s: String) -> u64 {
 => e` is a `bool` expression that may not move, assign or lend `mut`, and a guarded arm
 never counts toward exhaustiveness. Patterns are literals, closed ranges `a..=b` of
 integers or `char`, names, `_`, tuples and variants with labelled or positional fields, and
-`..` for remaining fields. `let p = e` needs an irrefutable pattern; `let p = e else { .. }`
+`..` for remaining fields. A literal pattern matches exactly when `scrutinee == literal` is
+true, and is refused here wherever that `==` would be refused
+([LANG-21](#lang-21-operators)). Floats are not `key`, so a float literal is never a
+pattern; compare with `float.total_order`. `let p = e` needs an irrefutable pattern; `let p = e else { .. }`
 takes a refutable one, and its `else` block has type `Never`. `if let` and `while let` take
 refutable patterns. Arms of an owned scrutinee bind by
 [OWN-15](ownership.md#own-15-match-on-an-owned-value).
@@ -354,6 +357,12 @@ fn area(s: Shape) -> f64 { match s { Circle(r) => 3.14 * r * r, Rect(w: w, h: h)
 type Shape = Circle(f64) | Rect(w: f64, h: f64)
 fn area(s: Shape) -> f64 { match s { Circle(r) => 3.14 * r * r } }   // refused: LANG-17, Rect missing
 ```
+```hirsel
+fn zero(x: f64) -> u64 { match float.total_order(x, 0.0) { Equal => 1, _ => 2 } }
+```
+```hirsel
+fn zero(x: f64) -> u64 { match x { 0.0 => 1, _ => 2 } }   // refused: LANG-17, f64 is not key
+```
 
 ### LANG-18: Errors
 
@@ -362,7 +371,12 @@ evaluates to the `Ok` payload, or exits the function with `Error` of the same pa
 function's error type must be exactly `E`. A different error type is converted explicitly,
 with `match`. `e?` on `Option[T]` in a function returning `Option` exits with `None`. Inside
 a bound scope of the same function, `?` on an error of type exactly `Capacity` exits the
-scope instead ([MEM-25](budgets.md#mem-25-the-bound-scope)). An expression statement whose
+scope instead ([MEM-25](budgets.md#mem-25-the-bound-scope)). Which exit `?` takes is chosen
+from its operand's type, so nothing gives the operand an expected error type: an expected
+type `T` of `e?` reaches `e` only as its payload; whether `e` is a `Result` or an `Option`,
+and its error type, are found from `e` alone, and neither the function's result type nor an enclosing bound is an expected type of `e`.
+A type argument that only the error would fix is refused by
+[LANG-12](#lang-12-generics) at its call; the error type is written on a binding. An expression statement whose
 value is a `Result` is refused; `let _ = e` discards it explicitly.
 
 ```hirsel
@@ -372,6 +386,14 @@ fn quarter(n: u64) -> Result[u64, ParseError] { let h = half(n)?; half(h) }
 ```hirsel
 fn half(n: u64) -> Result[u64, ParseError] { Ok(n / 2) }
 fn quarter(n: u64) -> Result[u64, ParseError] { half(n); Ok(0) }   // refused: LANG-18, unused Result
+```
+```hirsel
+fn receipt[E]() -> Result[u64, E] { loop {} }
+fn f() -> Result[u64, Capacity] { bound bytes 0 { let r: Result[u64, Capacity] = receipt(); let n = r?; n } }
+```
+```hirsel
+fn receipt[E]() -> Result[u64, E] { loop {} }
+fn f() -> Result[u64, Capacity] { bound bytes 0 { let n: u64 = receipt()?; n } }   // refused: LANG-12, at receipt(): E is open
 ```
 
 ### LANG-19: Recursion

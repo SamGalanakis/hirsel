@@ -11,7 +11,7 @@
 //! so nothing drops a part that was not replaced.
 //!
 //! A core row whose storage is not its structure (a `Deque`'s slots, a `Map`'s index)
-//! declares its own copy, `clone(x) { .. }` (`Shape::clone`): the row's `$clone` is its
+//! declares its own copy, `clone[..](x: T) { .. }` (`Shape::clone`): the row's `$clone` is its
 //! byte copy and then that body, at any depth, never a walk of its fields.
 use super::key_glue::{Code, Derive, KeyOp};
 use super::*;

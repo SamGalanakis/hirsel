@@ -129,6 +129,7 @@ pub fn resolve(index: &NameIndex, module: ModuleId, ordinal: u32, item: Item<'_>
             && matches!(
                 item.tree.node(item.root).kind,
                 NodeKind::Function
+                    | NodeKind::CloneHook
                     | NodeKind::TypeDecl
                     | NodeKind::StableType
                     | NodeKind::ResourceType
@@ -784,6 +785,7 @@ impl<'a> Resolver<'a> {
         let c = self.children(n);
         match kind {
             NodeKind::Function
+            | NodeKind::CloneHook
             | NodeKind::Closure
             | NodeKind::ScopedClosure
             | NodeKind::CallableType
@@ -860,7 +862,7 @@ impl<'a> Resolver<'a> {
                     r.visit(child);
                 }
             }),
-            NodeKind::Region | NodeKind::Drop | NodeKind::CloneBody => self.scope(|r| {
+            NodeKind::Region | NodeKind::Drop => self.scope(|r| {
                 r.bind(
                     n,
                     token.unwrap(),

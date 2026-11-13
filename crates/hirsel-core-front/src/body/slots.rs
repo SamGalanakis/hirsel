@@ -379,7 +379,7 @@ fn slots_cross_block_law() -> u64 {
     #[test]
     fn clone_bodies_are_core_only() {
         let (index, modules) = crate::tests::program_inputs(
-            "type Hole { n: u64 } clone(h) { Ok(Hole(n: 1)) } fn go() {}",
+            "type Hole { n: u64 }\nclone(h: Hole) { Ok(Hole(n: 1)) }\nfn go() {}",
         );
         let p = Program::declare(&index, &modules);
         assert!(
@@ -392,16 +392,21 @@ fn slots_cross_block_law() -> u64 {
     }
 
     /// MEM-17 clone bodies (oracle: the body adds 100 to `n`, which no field walk does,
-    /// and refuses `n == 0` with (7, 3)). The derived clone calls each generic
-    /// instance's body at depth and inside a generic body, and on a refusal drops what it already copied (`used`
-    /// is 0: the first copy holds a block) and returns the body's request.
+    /// and refuses `n == 0` with (7, 3)). `TestCopy` is declared in the prelude and its
+    /// body in `list`, where the private kernel `test_bump` lives, as the Map's body sits
+    /// beside its kernels; the body clones `List[T]` for an unbounded `T`, admitted only
+    /// by the clone assumption. The derived clone calls each generic instance's body at
+    /// depth and inside a generic body, and on a refusal drops what it already copied
+    /// (`used` is 0) and returns the body's request.
+    const CLONE_PRELUDE: &str = "\npub type TestCopy[T] { xs: List[T], n: u64 }\n";
     const CLONE_LAWS: &str = r#"
-type TestCopy[T] { xs: List[T], n: u64 } clone(t) {
+clone[T](t: TestCopy[T]) {
     match t.n {
         0 => Error(Capacity(requested: 7, available: 3))
-        _ => Ok(TestCopy(xs: list.with_capacity(1)?, n: t.n + 100))
+        _ => Ok(TestCopy(xs: clone(t.xs)?, n: test_bump(t)))
     }
 }
+fn test_bump[T](t: TestCopy[T]) -> u64 { t.n + 100 }
 type TestPair { a: TestCopy[u64], b: TestCopy[String] }
 fn test_dup[T: plain](seed: T, n: u64) -> u64 {
     let x: TestCopy[T] = TestCopy(xs: list.new(), n: n)
@@ -409,12 +414,14 @@ fn test_dup[T: plain](seed: T, n: u64) -> u64 {
     y.n
 }
 
-// expect: run clone_body_law() = 105107109
+// expect: run clone_body_law() = 105107110
 fn clone_body_law() -> u64 {
-    let p = TestPair(a: TestCopy(xs: list.new(), n: 5), b: TestCopy(xs: list.new(), n: 7))
+    let mut xs: List[u64] = list.new()
+    result.unwrap(list.push(mut xs, 4))
+    let p = TestPair(a: TestCopy(xs: take xs, n: 5), b: TestCopy(xs: list.new(), n: 7))
     let q: TestPair = result.unwrap(clone(p))
     let seed: u8 = 0
-    q.a.n * 1000000 + q.b.n * 1000 + test_dup(seed, 9)
+    q.a.n * 1000000 + q.b.n * 1000 + test_dup(seed, 9) + list.len(q.a.xs)
 }
 
 // expect: run clone_body_refusal_law() = 73
@@ -423,7 +430,8 @@ fn clone_body_refusal_law() -> u64 {
     let q: Result[TestPair, Capacity] = clone(p)
     match q { Ok(_) => 0, Error(c) => c.requested * 10 + c.available }
 }
-type TestSlotCopy[T] { s: Slots[T], n: u64 } clone(t) {
+type TestSlotCopy[T] { s: Slots[T], n: u64 }
+clone[T](t: TestSlotCopy[T]) {
     Ok(TestSlotCopy(s: slots_empty(), n: t.n + 100))
 }
 type TestSlotPair { value: TestSlotCopy[u64] }
@@ -439,8 +447,11 @@ fn clone_kernel_hook_law() -> u64 {
 
 "#;
 
-    #[test]
-    fn private_slot_contracts_and_misuse() {
+    /// The real core, with `prelude` appended to module `core` and `list` to `list`.
+    fn core_inputs(
+        prelude: &str,
+        list: &str,
+    ) -> (hirsel_core_resolve::NameIndex, Vec<ModuleInput>) {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let package = hirsel_core_ids::PackageId {
             name: "core".into(),
@@ -454,19 +465,18 @@ fn clone_kernel_hook_law() -> u64 {
         }
         .load()
         .unwrap();
-        let mut laws = SLOT_LAWS.to_string();
-        laws.push_str(CLONE_LAWS);
-        laws.push_str("\ntype TestOwn { xs: List[u64] } drop(t) { list.swap(mut t.xs, 0, 1) }\n// expect: run slots_own_finalizer() = 9\nfn slots_own_finalizer() -> u64 { let mut xs: List[u64] = list.new(); result.unwrap(list.push(mut xs, 1)); result.unwrap(list.push(mut xs, 2)); let x = TestOwn(xs: take xs); let _ = take x; 9 }\n");
-        corpus
-            .sources
-            .iter_mut()
-            .find(|s| s.module.modules == ["list"])
-            .unwrap()
-            .text
-            .push_str(&laws);
+        for (module, text) in [("core", prelude), ("list", list)] {
+            corpus
+                .sources
+                .iter_mut()
+                .find(|s| s.module.modules == [module])
+                .unwrap()
+                .text
+                .push_str(text);
+        }
         let parsed = corpus.parse();
         let index = corpus.index(&parsed);
-        let modules: Vec<_> = corpus
+        let modules = corpus
             .sources
             .iter()
             .zip(parsed.files)
@@ -475,6 +485,42 @@ fn clone_kernel_hook_law() -> u64 {
                 syntax: p.syntax,
             })
             .collect();
+        (index, modules)
+    }
+
+    /// MEM-17: a clone body runs for every instance its type may be cloned at, so a
+    /// second body for the type, or one assuming a bound the type does not declare (here
+    /// `plain`, which `TestCopy[String]` lacks), is refused.
+    #[test]
+    fn clone_body_is_one_per_type_and_assumes_no_bound() {
+        for (extra, message) in [
+            (
+                "clone[T](t: TestCopy[T]) { Error(Capacity(requested: 1, available: 0)) }",
+                "one clone body",
+            ),
+            (
+                "type TestBound[T] { x: T }\nclone[T: plain](t: TestBound[T]) { Ok(TestBound(x: t.x)) }",
+                "no stronger bounds",
+            ),
+        ] {
+            let (index, modules) = core_inputs(CLONE_PRELUDE, &format!("{CLONE_LAWS}\n{extra}\n"));
+            let p = Program::declare(&index, &modules);
+            assert!(
+                p.refusals
+                    .iter()
+                    .any(|r| r.rule == "MEM-17" && r.message.contains(message)),
+                "{message}: {:?}",
+                p.refusals
+            );
+        }
+    }
+
+    #[test]
+    fn private_slot_contracts_and_misuse() {
+        let mut laws = SLOT_LAWS.to_string();
+        laws.push_str(CLONE_LAWS);
+        laws.push_str("\ntype TestOwn { xs: List[u64] } drop(t) { list.swap(mut t.xs, 0, 1) }\n// expect: run slots_own_finalizer() = 9\nfn slots_own_finalizer() -> u64 { let mut xs: List[u64] = list.new(); result.unwrap(list.push(mut xs, 1)); result.unwrap(list.push(mut xs, 2)); let x = TestOwn(xs: take xs); let _ = take x; 9 }\n");
+        let (index, modules) = core_inputs(CLONE_PRELUDE, &laws);
         let p = Program::declare(&index, &modules);
         assert!(p.refusals.is_empty(), "{:?}", p.refusals);
         let mut emitter = Emitter::new();

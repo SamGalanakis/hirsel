@@ -114,8 +114,9 @@ pub enum NodeKind {
     Variant,
     Payload,
     Drop,
-    /// `clone(x) { .. }`: a core type's own copy (MEM-17), next to `drop(m)`.
-    CloneBody,
+    /// `clone[..](x: T) { .. }`: a core item, the own copy of core type `T` (MEM-17),
+    /// declared in the core module that holds `T`'s storage kernels.
+    CloneHook,
     Block,
     Let,
     LetMut,
@@ -220,7 +221,7 @@ impl ResolutionSize {
             | NodeKind::TakeParameter
             | NodeKind::MutParameter
             | NodeKind::BytesParameter => self.binders += 1,
-            NodeKind::Region | NodeKind::Drop | NodeKind::CloneBody => {
+            NodeKind::Region | NodeKind::Drop => {
                 self.binders += 1;
                 self.scopes += 1;
             }
@@ -233,6 +234,7 @@ impl ResolutionSize {
                 self.scopes += 1;
             }
             NodeKind::Function
+            | NodeKind::CloneHook
             | NodeKind::Closure
             | NodeKind::ScopedClosure
             | NodeKind::CallableType

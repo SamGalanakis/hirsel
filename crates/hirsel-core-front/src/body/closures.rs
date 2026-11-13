@@ -1000,6 +1000,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
     pub(super) fn capture_holds(&self, ty: TyId) -> u8 {
         match self.t.kind(ty) {
+            // MEM-17: a clone body runs only for a value whose clone passed this check,
+            // so its parameters hold no resource, scoped value or opaque value.
+            TyKind::Param(i) if self.fd.clone_of.is_some() => {
+                crate::param_holds(self.params[*i as usize])
+                    & !(crate::H_RESOURCE | crate::H_SCOPED | crate::H_OPAQUE)
+            }
             TyKind::Param(i) => crate::param_holds(self.params[*i as usize]),
             TyKind::View(_) => crate::H_SCOPED,
             TyKind::Region(_) => crate::H_SCOPED,

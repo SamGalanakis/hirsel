@@ -285,7 +285,7 @@ pub struct TypeDecl {
     pub structural: bool,
     /// The function row of its `drop` block (FAIL-11), a body of this item.
     pub finalizer: Option<u32>,
-    /// The function row of its `clone(x)` block (MEM-17), a body of this item.
+    /// The function row of its `clone[..](x: T)` item (MEM-17), declared in any core module.
     pub clone_body: Option<u32>,
     /// `grant bytes n` (MEM-27): the limit its finalizer runs under; 0 if undeclared.
     pub grant: u64,
@@ -416,6 +416,15 @@ impl Program<'_> {
                     item: i as u32,
                 };
                 let name_span = item.token_span(name);
+                if root.kind == NodeKind::CloneHook {
+                    let site = Site {
+                        module: module.id,
+                        item: i as u32,
+                        span: name_span,
+                    };
+                    self.register_clone_hook(at, site);
+                    continue;
+                }
                 let Some(definition) = self.index.definition(module.id, item.symbol(name)) else {
                     continue;
                 };
@@ -430,7 +439,6 @@ impl Program<'_> {
                 let mut generics = vec![];
                 let mut declared = 0;
                 let mut drop = None;
-                let mut clone_node = None;
                 let mut grant = 0;
                 let mut compact = None;
                 for &c in item.tree.children(item.root) {
@@ -454,7 +462,6 @@ impl Program<'_> {
                             }
                         }
                         NodeKind::Drop => drop = Some(c),
-                        NodeKind::CloneBody => clone_node = Some(c),
                         NodeKind::Literal
                             if matches!(
                                 root.kind,
@@ -563,37 +570,6 @@ impl Program<'_> {
                     });
                     f
                 });
-                if clone_node.is_some() && !path.package_is("core", "1") {
-                    self.refusals.push(refusal(
-                        "MEM-17",
-                        site,
-                        "only core types may declare a clone body",
-                    ));
-                }
-                let clone_body = clone_node.map(|d| {
-                    let f = self.fns.len() as u32;
-                    let body = item.tree.children(d).last().copied();
-                    let mut hook = path.clone();
-                    hook.0.name = format!("{}.$clone", hook.0.name);
-                    self.fns.push(FnDecl {
-                        path: hook,
-                        result_site: site,
-                        site: self.site(at, d),
-                        at,
-                        generics: generics.clone(),
-                        params: vec![],
-                        result: UNIT,
-                        callable: ERROR,
-                        anchors: vec![],
-                        region_anchors: vec![],
-                        outlives: vec![],
-                        waits: false,
-                        body,
-                        drop_of: None,
-                        clone_of: Some(id),
-                    });
-                    f
-                });
                 let role = Role::of(&path);
                 let structural = is_core_prelude(&path, &["Option", "Result"]);
                 self.decls.push(TypeDecl {
@@ -609,7 +585,7 @@ impl Program<'_> {
                     role,
                     structural,
                     finalizer,
-                    clone_body,
+                    clone_body: None,
                     grant,
                     compact,
                     twin: None,
@@ -651,7 +627,131 @@ impl Program<'_> {
         }
         for f in self.fns.base_len()..self.fns.len() {
             self.lower_signature(f);
+            let at = self.fns[f].at;
+            let item = self.item(at);
+            if item.tree.node(item.root).kind == NodeKind::CloneHook {
+                self.clone_hook(f);
+            }
         }
+    }
+
+    /// MEM-17: `clone[..](x: T[..]) { .. }` is a core item, so a core type's copy is
+    /// written in the module holding its storage kernels. Its type is attached in
+    /// `clone_hook`, once the parameter's type is lowered.
+    fn register_clone_hook(&mut self, at: ItemRef, site: Site) {
+        let m = self.index.module_path(site.module);
+        let path = DefPath(hirsel_core_ids::ItemPath {
+            package: m.package,
+            modules: m.modules,
+            name: "$clone".into(),
+        });
+        if !path.package_is("core", "1") {
+            self.refusals.push(refusal(
+                "MEM-17",
+                site,
+                "only core types may declare a clone body",
+            ));
+            return;
+        }
+        let item = self.item(at);
+        let kids = item.tree.children(item.root);
+        let generics_node = kids
+            .iter()
+            .copied()
+            .find(|&c| item.tree.node(c).kind == NodeKind::Generics);
+        let body = kids
+            .iter()
+            .copied()
+            .find(|&c| item.tree.node(c).kind == NodeKind::Block);
+        let generics = generics_node.map_or(vec![], |g| self.generics(at, g));
+        self.fns.push(FnDecl {
+            path,
+            result_site: site,
+            site,
+            at,
+            generics,
+            params: vec![],
+            result: UNIT,
+            callable: ERROR,
+            anchors: vec![],
+            region_anchors: vec![],
+            outlives: vec![],
+            waits: false,
+            body,
+            drop_of: None,
+            clone_of: None,
+        });
+    }
+
+    /// MEM-17: the clone body takes one view of a core own type `T[P..]`, generic in
+    /// exactly `T`'s parameters with no stronger bounds (it runs for every instance that
+    /// may be cloned), and returns `Result[T[P..], Capacity]`. A type has one.
+    fn clone_hook(&mut self, f: usize) {
+        let fd = &self.fns[f];
+        let n = fd.generics.len();
+        let target = match fd.params.as_slice() {
+            [p] if p.mode == Mode::View && fd.result == UNIT && !fd.waits => {
+                match self.types.kind(p.ty) {
+                    TyKind::Adt(d, args)
+                        if args.len() == n
+                            && args.iter().enumerate().all(|(i, &a)| {
+                                matches!(self.types.kind(a), TyKind::Param(j) if *j as usize == i)
+                            }) =>
+                    {
+                        Some(*d)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let target = target.filter(|d| {
+            let t = &self.decls[d.index()];
+            d.index() >= self.decls.base_len()
+                && t.repr == Repr::Own
+                && t.generics.len() == n
+                && t.generics
+                    .iter()
+                    .zip(&fd.generics)
+                    .all(|(t, h)| t.region == h.region && h.bounds & !t.bounds == 0)
+        });
+        let site = fd.site;
+        let Some(d) = target else {
+            self.refusals.push(refusal(
+                "MEM-17",
+                site,
+                "a clone body takes one view of a core own type, generic in exactly its parameters with no stronger bounds, and writes no result",
+            ));
+            return;
+        };
+        if let Some(first) = self.decls[d.index()].clone_body {
+            let mut r = refusal("MEM-17", site, "a type has one clone body");
+            r.causal.push(self.fns[first as usize].site);
+            self.refusals.push(r);
+            return;
+        }
+        let ty = self.fns[f].params[0].ty;
+        let result = match (self.core_decl("Result"), self.core_decl("Capacity")) {
+            (Some(r), Some(c)) => {
+                let cap = self.types.intern(TyKind::Adt(c, vec![]));
+                self.types.intern(TyKind::Adt(r, vec![ty, cap]))
+            }
+            _ => ERROR,
+        };
+        let callable = self.types.intern(TyKind::Fn(
+            vec![(Mode::View, ty)],
+            result,
+            false,
+            Callable::Plain,
+        ));
+        let mut path = self.decls[d.index()].path.clone();
+        path.0.name = format!("{}.$clone", path.0.name);
+        let fd = &mut self.fns[f];
+        fd.path = path;
+        fd.result = result;
+        fd.callable = callable;
+        fd.clone_of = Some(d);
+        self.decls[d.index()].clone_body = Some(f as u32);
     }
 
     fn alias_visit(&self, d: DeclId) -> u8 {
@@ -1152,46 +1252,6 @@ impl Program<'_> {
                 vec![(Mode::Mut, ty)],
                 UNIT,
                 true,
-                Callable::Plain,
-            ));
-            return;
-        }
-        if let Some(d) = self.fns[f].clone_of {
-            // MEM-17: `clone(x)` views the value and returns its copy, or the refused
-            // request; lowered to the row's clone body (`Shape::clone`).
-            let args = (0..self.fns[f].generics.len())
-                .map(|i| self.types.intern(TyKind::Param(i as u32)))
-                .collect();
-            let ty = self.types.intern(TyKind::Adt(d, args));
-            let result = match (self.core_decl("Result"), self.core_decl("Capacity")) {
-                (Some(r), Some(c)) => {
-                    let cap = self.types.intern(TyKind::Adt(c, vec![]));
-                    self.types.intern(TyKind::Adt(r, vec![ty, cap]))
-                }
-                _ => ERROR,
-            };
-            let node = item
-                .tree
-                .children(item.root)
-                .iter()
-                .copied()
-                .find(|&c| item.tree.node(c).kind == NodeKind::CloneBody)
-                .unwrap();
-            let name = item.symbol(item.tree.node(node).token.unwrap());
-            let site = self.fns[f].site;
-            let fd = &mut self.fns[f];
-            fd.params = vec![ParamDecl {
-                bytes: false,
-                name,
-                mode: Mode::View,
-                ty,
-                site,
-            }];
-            fd.result = result;
-            fd.callable = self.types.intern(TyKind::Fn(
-                vec![(Mode::View, ty)],
-                result,
-                false,
                 Callable::Plain,
             ));
             return;
@@ -1734,7 +1794,11 @@ impl Program<'_> {
                     Repr::Own => 0,
                 },
             };
-            if decl.role.is_none() {
+            if decl.role.is_some() {
+                // A built-in holds what its arguments hold: `List[T]` holds a resource
+                // when `T` does (MEM-17 never clones it, LANG-14 never captures it).
+                params = (1u64 << decl.generics.len()) - 1;
+            } else {
                 for f in decl.all_fields() {
                     walk_holds(
                         &self.decls,

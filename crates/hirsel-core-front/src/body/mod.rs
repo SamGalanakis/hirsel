@@ -63,6 +63,7 @@ mod slots;
 mod spans;
 mod stable;
 mod templates;
+mod temporaries;
 mod types;
 mod writers;
 use templates::{AllocationLayout, CopySize, GenericCall, NameRecipe};
@@ -998,6 +999,8 @@ struct Cx<'c, 'a, 'e> {
     /// The owners of the body, in the order they began (FAIL-8).
     owners: Vec<cleanup::Owner>,
     owner_buf: Vec<cleanup::Owner>,
+    retained_owners: Vec<usize>,
+    entry_setup: Vec<Inst>,
     /// Counts changes of owner and scope state; a failure successor made at one
     /// state serves every failing instruction until it changes.
     epoch: u64,
@@ -1110,6 +1113,8 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             reps: HashMap::default(),
             owners: vec![],
             owner_buf: vec![],
+            retained_owners: vec![],
+            entry_setup: vec![],
             epoch: 0,
             fail_cache: None,
             failing: false,
@@ -1667,11 +1672,12 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         if let (Some(id), Some(value), true) = (self.joins[j].drop, v, self.live()) {
             self.owners.push(cleanup::Owner::Temp(cleanup::Temp {
                 value,
+                source: self.node,
                 id,
                 avail: Avail::Live,
                 flag: None,
-                reached: false,
-                held: false,
+                storage: None,
+                held: None,
             }));
             self.epoch += 1;
         }
@@ -1867,6 +1873,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         if !self.broken
             && let Some(f) = self.func
         {
+            self.install_entry_setup();
             self.block_order();
             if self.fd.generics.is_empty() {
                 scalar_abi::inline_keys(&self.e.module, &mut self.b);

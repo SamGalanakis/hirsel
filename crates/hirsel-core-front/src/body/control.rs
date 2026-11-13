@@ -13,7 +13,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.close_scope(scope, freezes, n, value);
         // The tail's temporaries end at the block's exit, before its locals, unless
         // the block's value is one (LANG-6).
-        self.end_owners(owners, r.1, false, n);
+        self.end_value_owners(owners, r.1, value, n);
         self.depth -= 1;
         r
     }
@@ -98,7 +98,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return self.destructure_let(s, pat, value, declared, rest.first().copied());
         }
         let freezes = self.freezes.len();
-        let owners = self.owner_mark();
         let (t, v) = self.expr(value, declared.and_then(expect));
         let ty = declared.unwrap_or(t);
         let anchors = if kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Scoped {
@@ -109,7 +108,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // A let-bound view lasts to the end of its block (OWN-8), and so do the
         // temporaries it reaches (LANG-6).
         if crate::decls::kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Scoped {
-            self.hold_reached(owners);
+            self.hold_reached(self.anchor_expression(value));
             let fact = self.anchor_expression(value);
             if anchors.is_none() {
                 self.freeze_anchors(fact, self.depth);

@@ -540,9 +540,7 @@ impl Cx<'_, '_, '_> {
             match self.rep(ft).ok()? {
                 r @ Rep::Scalar(_) => Some(self.read_bits(address, r.ty()?, n)),
                 Rep::Place(_) if ty != ft => {
-                    if owner {
-                        self.reach_temporary(Some(v));
-                    }
+                    if owner {}
                     Some(self.pointer(address, n))
                 }
                 Rep::Place(id) => {

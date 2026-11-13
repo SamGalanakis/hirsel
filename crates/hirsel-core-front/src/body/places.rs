@@ -652,9 +652,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return (ERROR, None);
         };
         let (_, index) = self.expr(c[1], expect(scalar(Scalar::U64)));
-        if !self.copies(elem) {
-            return self.gap_ty(n, "a view of an indexed temporary owner is not built");
-        }
+        let viewed = !self.copies(elem);
+        let ty = if viewed {
+            self.t.mk(TyKind::View(elem))
+        } else {
+            elem
+        };
         let result = (|| {
             let pointer = value?;
             let index = index?;
@@ -665,13 +668,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             match self.rep(elem).ok()? {
                 Rep::None => None,
                 Rep::Scalar(t) => Some(self.read_bits(at, t, n)),
+                Rep::Place(_) if viewed => Some(self.pointer(at, n)),
                 Rep::Place(id) => {
                     let pointer = self.pointer(at, n);
                     Some(self.snapshot(pointer, id, n))
                 }
             }
         })();
-        (elem, result)
+        (ty, result)
     }
     /// LANG-21's closed index row, shared by named and temporary bases.
     pub(super) fn index_element(&mut self, collection: TyId, n: NodeId) -> Result<TyId, ()> {
@@ -1336,7 +1340,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             })();
             current = payload;
         }
-        self.reach_temporary(value);
         Some((
             if self.is_view(expected) {
                 expected

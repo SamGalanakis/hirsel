@@ -24,15 +24,15 @@ pub(super) enum Owner {
 #[derive(Clone, Copy)]
 pub(super) struct Temp {
     pub value: ValueId,
+    pub source: NodeId,
     pub id: TypeId,
     pub avail: Avail,
     /// Its drop flag, when arms of a match may or may not take it (OWN-18).
     pub flag: Option<AddressId>,
-    /// A view into it was made ([`Cx::reach_temporary`]).
-    pub reached: bool,
-    /// A `let` binding's value reaches it: it lives to the binding's block exit, not
-    /// its statement's end (LANG-6).
-    pub held: bool,
+    /// A carrier slot when the owner survives a branch or nested block.
+    pub storage: Option<AddressId>,
+    /// The lexical depth of a binding that reaches it (LANG-6).
+    pub held: Option<u32>,
 }
 /// What the cleanup being emitted has already done on its edge, for the failure block
 /// of a drop that runs code (FAIL-9, FAIL-12): owners from `from` on are cleaned,
@@ -45,6 +45,7 @@ pub(super) struct Edge {
     pub temps: bool,
     pub scopes: usize,
     pub pending: Option<(AddressBase, TypeId)>,
+    pub retained: PoolRange<usize>,
 }
 
 /// An old value moved aside to be finalized after an install (T3.2), and the value of
@@ -98,11 +99,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         {
             self.owners.push(Owner::Temp(Temp {
                 value,
+                source: self.node,
                 id,
                 avail: Avail::Live,
                 flag: None,
-                reached: false,
-                held: false,
+                storage: None,
+                held: None,
             }));
             self.changed();
         }
@@ -112,33 +114,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let v = v?;
         self.owners
             .iter()
-            .rposition(|o| matches!(o, Owner::Temp(t) if t.value == v && t.avail == Avail::Live))
-    }
-    /// LANG-6's reach hook: a view into the live temporary owner `v` (a field or an
-    /// element of a call result, say) was made. The temporary lives to the end of its
-    /// statement as any other; when a `let` binds a scoped value whose evaluation
-    /// reached it, [`Cx::hold_reached`] keeps it as long as that binding.
-    pub(super) fn reach_temporary(&mut self, v: Option<ValueId>) {
-        if let Some(i) = self.temp_index(v)
-            && let Owner::Temp(t) = &mut self.owners[i]
-        {
-            t.reached = true;
-            self.changed();
-        }
-    }
-    /// A `let` binds a scoped value: the reached temporaries begun since `mark` live to
-    /// its block's exit and are cleaned there, after the binding (LANG-6).
-    pub(super) fn hold_reached(&mut self, mark: usize) {
-        let mark = mark.min(self.owners.len());
-        for o in &mut self.owners[mark..] {
-            if let Owner::Temp(t) = o
-                && t.reached
-                && t.avail == Avail::Live
-            {
-                t.held = true;
-            }
-        }
-        self.changed();
+            .rposition(|o| matches!(o, Owner::Temp(t) if t.value == v && matches!(t.avail,Avail::Live|Avail::Maybe)))
     }
     /// A consumer takes `v`: when it is a temporary, nothing cleans it any more.
     pub(super) fn consume(&mut self, v: Option<ValueId>, n: NodeId) {
@@ -332,7 +308,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     Some(own.flag),
                 )
             }
-            Owner::Temp(t) => (AddressBase::Value(t.value), t.id, t.avail, t.flag),
+            Owner::Temp(t) => (
+                t.storage
+                    .map_or(AddressBase::Value(t.value), AddressBase::Address),
+                t.id,
+                t.avail,
+                t.flag,
+            ),
             Owner::Drain {
                 data,
                 next,
@@ -367,6 +349,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     Some(n),
                 );
                 self.start(yes);
+                if matches!(o,Owner::Temp(t) if t.storage.is_some()) {
+                    self.store_flag(flag, false, n);
+                }
                 self.emit_drop(base, id, n);
                 self.jump(next, &[], n);
                 self.start(next);
@@ -498,6 +483,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             temps: false,
             scopes: self.patterns_len(),
             pending: None,
+            retained: PoolRange::EMPTY,
         });
         let cur = self.cur.take();
         let open = std::mem::take(&mut self.open);
@@ -513,7 +499,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Owner::Drain { .. } => false,
             Owner::Temp(t) if Some(t.value) == edge.keep => edge.pending.is_some(),
             Owner::Slot(_) if edge.temps => false,
-            Owner::Temp(t) if edge.temps && t.held => false,
+            Owner::Temp(t) if t.held.is_some_and(|d| edge.temps || d < cx.depth) => false,
+            _ if edge.retained.get(&cx.retained_owners).unwrap().contains(&i) => false,
             _ => i >= edge.from,
         };
         let mut top = self.owners.len();
@@ -565,11 +552,27 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         temps: bool,
         n: NodeId,
     ) {
+        self.end_reached_owners(mark, keep, temps, 0, n);
+    }
+    pub(super) fn end_reached_owners(
+        &mut self,
+        mark: usize,
+        keep: Option<ValueId>,
+        temps: bool,
+        reach: anchors::Fact,
+        n: NodeId,
+    ) {
         crate::cost_scope!("phase", "cleanup emission");
         if self.owners.len() == mark {
             return;
         }
         let mut kept = std::mem::take(&mut self.owner_buf);
+        let retained_start = self.retained_owners.len();
+        self.retain_anchor_owners(reach);
+        let retained = PoolRange::new(
+            retained_start as u32,
+            (self.retained_owners.len() - retained_start) as u32,
+        );
         let saved = self.edge;
         let pending = keep.and_then(|v| {
             let i = self.temp_index(Some(v))?;
@@ -583,7 +586,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             match o {
                 Owner::Temp(t) if Some(t.value) == keep && t.avail == Avail::Live => kept.push(o),
                 Owner::Slot(_) if temps => kept.push(o),
-                Owner::Temp(t) if temps && t.held => kept.push(o),
+                Owner::Temp(t) if t.held.is_some_and(|d| temps || d < self.depth) => kept.push(o),
+                _ if retained.get(&self.retained_owners).unwrap().contains(&i) => kept.push(o),
                 _ => {
                     self.edge = Some(Edge {
                         from: i,
@@ -591,6 +595,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         temps,
                         scopes: self.patterns_len(),
                         pending,
+                        retained,
                     });
                     self.clean(o, n);
                 }
@@ -600,6 +605,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.owners.truncate(mark);
         self.owners.extend(kept.drain(..).rev());
         self.owner_buf = kept;
+        self.retained_owners.truncate(retained_start);
         self.changed();
     }
     /// An exit edge's cleanup, which changes no state: the owners begun since
@@ -622,6 +628,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     temps: false,
                     scopes: s + 1,
                     pending,
+                    retained: PoolRange::EMPTY,
                 });
                 self.clean(self.owners[i], n);
             }
@@ -635,6 +642,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 temps: false,
                 scopes,
                 pending,
+                retained: PoolRange::EMPTY,
             });
             self.clean(self.owners[i], n);
         }
@@ -708,6 +716,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     temps: true,
                     scopes: self.patterns_len(),
                     pending: None,
+                    retained: PoolRange::EMPTY,
                 });
                 self.clean(o, n);
             }

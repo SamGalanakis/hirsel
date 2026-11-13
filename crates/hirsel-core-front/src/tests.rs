@@ -2741,3 +2741,9 @@ fn mut_scoped_parameters_keep_the_callers_anchors() {
     }
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+#[test]
+fn temporary_index_views_keep_the_reached_owner() {
+    let failures = run_case(&root().join("cases/body/index-temporary-owner.hirsel"));
+    assert!(failures.is_empty(), "{failures:#?}");
+}

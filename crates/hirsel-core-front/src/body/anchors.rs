@@ -14,6 +14,7 @@ enum Root {
     Place(Place),
     Region(crate::types::Root),
     Temporary(NodeId),
+    Owner(ValueId),
 }
 #[derive(Clone, Copy)]
 enum Node {
@@ -165,6 +166,7 @@ impl Anchors {
         let same = |a: Root, b: Root| match (a, b) {
             (Root::Region(a), Root::Region(b)) => a == b,
             (Root::Temporary(a), Root::Temporary(b)) => a == b,
+            (Root::Owner(a), Root::Owner(b)) => a == b,
             (Root::Place(a), Root::Place(b)) => {
                 a.slot == b.slot
                     && a.len == b.len
@@ -197,6 +199,7 @@ impl Anchors {
         let part = |actual: Root, allowed: Root| match (actual, allowed) {
             (Root::Region(a), Root::Region(b)) => a == b,
             (Root::Temporary(a), Root::Temporary(b)) => a == b,
+            (Root::Owner(a), Root::Owner(b)) => a == b,
             (Root::Place(a), Root::Place(b)) => {
                 a.slot == b.slot
                     && a.len >= b.len
@@ -364,6 +367,22 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             .expect("declared slot")
             .anchors = fact;
     }
+    pub(super) fn retain_anchor_owners(&mut self, fact: Fact) {
+        if fact == 0 {
+            return;
+        }
+        let mut roots = std::mem::take(&mut self.anchors.left);
+        roots.clear();
+        self.anchors.collect(fact, &mut roots);
+        for &root in &roots {
+            if let Root::Owner(value) = root
+                && let Some(i) = self.temp_index(Some(value))
+            {
+                self.retained_owners.push(i);
+            }
+        }
+        self.anchors.left = roots;
+    }
     pub(super) fn anchor_expression(&self, n: NodeId) -> Fact {
         self.anchors.expressions.get(&n).copied().unwrap_or(0)
     }
@@ -390,6 +409,34 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let joined = self.anchors.union(old, field);
         self.anchors.expressions.insert(n, joined);
     }
+    fn anchor_temporary(&mut self, n: NodeId) -> Fact {
+        let mut source = n;
+        let root = loop {
+            if let Some(value) = self.owners.iter().rev().find_map(|owner| match owner {
+                cleanup::Owner::Temp(temp)
+                    if temp.source == source && temp.avail != Avail::Moved =>
+                {
+                    Some(temp.value)
+                }
+                _ => None,
+            }) {
+                break Root::Owner(value);
+            }
+            // Wrappers forward their tail's owner without creating a new one.
+            // Peel them only when a scoped result actually reaches that owner.
+            source = match self.kind(source) {
+                NodeKind::Group | NodeKind::ExpressionStatement => self.kids(source)[0],
+                NodeKind::Block | NodeKind::Region | NodeKind::Bound => {
+                    let Some(&tail) = self.kids(source).last() else {
+                        break Root::Temporary(n);
+                    };
+                    tail
+                }
+                _ => break Root::Temporary(n),
+            };
+        };
+        self.anchors.node(Node::Root(root))
+    }
     pub(super) fn anchor_argument(&mut self, n: NodeId) -> Fact {
         let n = if matches!(
             self.kind(n),
@@ -406,7 +453,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if let Some((_, at)) = self.anchors.place.filter(|(node, _)| *node == n) {
             self.anchor_read(at)
         } else {
-            self.anchors.node(Node::Root(Root::Temporary(n)))
+            self.anchor_temporary(n)
         }
     }
     pub(super) fn anchor_payload(&mut self, n: NodeId, ty: TyId, value: Option<ValueId>) {
@@ -536,7 +583,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         if fact != 0 {
                             fact
                         } else {
-                            self.anchors.node(Node::Root(Root::Temporary(base)))
+                            self.anchor_temporary(base)
                         }
                     } else {
                         0

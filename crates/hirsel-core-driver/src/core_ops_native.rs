@@ -1069,3 +1069,22 @@ fn mut_scoped_anchors_cranelift(){mut_scoped_anchors(Backend::Cranelift);}
 #[test]
 #[ignore="explicit native integration target"]
 fn mut_scoped_anchors_llvm(){mut_scoped_anchors(Backend::Llvm);}
+
+fn temporary_owner_views(backend:Backend) {
+    let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir=tempfile::tempdir().unwrap();
+    let source=include_str!("../../../core/front/cases/body/index-temporary-owner.hirsel");
+    let source=format!("{source}\npub fn main()->Result[(),Exit] {{ if positive() {{ Ok(()) }} else {{ Error(Exit(status:1)) }} }}");
+    let mut request=source_request(&source,dir.path());
+    request.inputs.packages[1]=PackageManifest::directory(&root.join("core/core"),package("core"),true).unwrap();
+    let product=Driver::default().check(request,&mut Meter::new(false)).unwrap();
+    let entry=DefPath::from_full("app@1/main/main").unwrap();
+    let built=product.build(&entry,&native_options(backend,dir.path())).unwrap();
+    run_clean(&built.executable,0);
+}
+#[test]
+#[ignore="explicit native integration target"]
+fn temporary_owner_views_cranelift(){temporary_owner_views(Backend::Cranelift);}
+#[test]
+#[ignore="explicit native integration target"]
+fn temporary_owner_views_llvm(){temporary_owner_views(Backend::Llvm);}

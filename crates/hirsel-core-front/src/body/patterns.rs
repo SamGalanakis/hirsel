@@ -824,6 +824,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         self.freeze_anchors(subject.anchors, self.depth);
                     }
                 }
+                if kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Scoped {
+                    self.hold_reached(subject.anchors);
+                }
                 self.own(b, pat.site);
             }
             Head::Product(case) => {
@@ -1044,6 +1047,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         } else if let Some((ty, value)) =
             self.payload_view_value(subject.ty, subject.value, expected, n)
         {
+            subject.anchors = self.anchor_argument(n);
             subject.ty = ty;
             subject.value = value;
             subject.viewed = true;
@@ -1373,7 +1377,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             });
         }
         self.close_scope(scope, holds, n, ty);
-        self.end_owners(owners, keep, false, n);
+        self.end_value_owners(owners, keep, ty, n);
         if scoped {
             for &f in &self.freezes[holds..] {
                 self.patterns.escaping.push(f);

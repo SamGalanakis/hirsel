@@ -8,7 +8,8 @@ A task's handle is a resource that is not `send`, so it stays in the task that s
 and a task ends only after cleaning its handles (CONC-8): no task outlives its spawner.
 A value passes from one task to another only by moving through a spawn, a channel or a
 join. The only program memory two tasks can both read is the immutable payload of an `Arc`
-(CONC-11). Whether tasks run in parallel is the engine's choice and is not observable.
+(CONC-11). Whether tasks run in parallel is the engine's choice and is not observable,
+except in a run that CONC-10 leaves unspecified.
 
 ### CONC-2: The send bound
 
@@ -118,7 +119,9 @@ else is done. A provider operation that has been issued completes and delivers i
 A user function declared `waits` is not itself a cancellation point. Observing it is a failure with cause `Cancelled`
 ([FAIL-2](failure.md#fail-2-causes)), which runs the task's cleanup. Pure code is never
 interrupted, finalizers are shielded and observe nothing, and no engine inserts a yield or a check. A loop that
-should be cancellable calls `task.check_cancel()`.
+should be cancellable calls `task.check_cancel()`. A task holds itself at a point that is
+not a cancellation point by polling a non-waiting operation such as `try_send`; under the
+fairness of CONC-10 the tasks it polls for still run.
 
 ```hirsel
 fn spin(n: u64) -> u64 { let mut i: u64 = 0; while i < n { task.check_cancel(); i += 1 }; i }
@@ -140,13 +143,32 @@ cleaned ([T7.7](ownership.md#own-26-the-transition-table)).
 ### CONC-10: Event order
 
 A run has one total order of **events**: spawn, task end, cancellation requests and their
-observation, publication by `send`, every `try_send` decision, delivery by `receive`, every
+observation, every `task.check_cancel()`, publication by `send`, every `try_send` decision, delivery by `receive`, every
 change of a channel's sender count, `join`, channel close, every charge or refund that
 crosses tasks ([MEM-20](budgets.md#mem-20-limit-records-and-hand-over)), and every `Arc`
 creation, share, release and `try_unwrap`. Each operation observes the state that the order gives.
 The order is chosen by the scheduler provider at the replay point
 ([CAP-8](capabilities.md#cap-8-the-replay-point)); with the same inputs and the same
 recorded choices, every task behaves identically on every engine.
+
+Every event is a point where the scheduler may run another task, and every scheduler
+provider is fair: no task performs unboundedly many events while another task that is
+not waiting performs none, unless that other task computes forever without an event. A
+task is waiting only inside a `waits` operation at a moment it would wait (CONC-7). A
+task that polls (a `try_send` returning `Full`, a failed `try_unwrap`, a `check_cancel`
+that finds no request) is not waiting, so the tasks it polls for reach their events.
+Fairness limits which orders the scheduler may choose; a replay follows the recorded
+order. A task that computes forever without an event is a program error: the run does not
+end, and which events other tasks perform meanwhile is not specified. Each `try_send`
+below is an event, so the parent that drains the gate runs while the child polls:
+
+```hirsel
+fn wait_gate(tx: Sender[()]) {
+  loop {
+    match channel.try_send(tx, ()) { Ok(()) => break, Error(Full(_)) => {}, Error(Closed(_)) => fail("gate closed") }
+  }
+}
+```
 
 ### CONC-11: Arc across tasks
 

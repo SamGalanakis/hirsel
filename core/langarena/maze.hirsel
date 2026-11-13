@@ -1,0 +1,196 @@
+// kostya/LangArena 3c9f84d benchmarks/maze.rs:8-468.
+// Wall0 Space1 Start2 Finish3 Border4; shuffled four-neighbor cells.
+type Cell { kind:u32, neighbors:Inline[(u64,u64),4], x:u64, y:u64 }
+type Maze { width:u64, height:u64, cells:List[List[Cell]] }
+fn push[T](mut xs:List[T],take x:T)->Result[(),helper.Error] {
+    match list.push(mut xs,take x) {Ok(())=>Ok(()),Error((c,_))=>Error(Capacity(c))}
+}
+fn walkable(k:u32)->bool {k==1 || k==2 || k==3}
+fn make(width:u64,height:u64,mut g:helper.Lcg)->Result[Maze,helper.Error] {
+    let w:u64=if width<5 {5} else {width}
+    let h:u64=if height<5 {5} else {height}
+    let mut cells:List[List[Cell]]=helper.mem(list.with_capacity(h))?
+    for y in 0 .. h {
+        let mut row:List[Cell]=helper.mem(list.with_capacity(w))?
+        for x in 0 .. w {
+            let mut neighbors:Inline[(u64,u64),4]=[(0u64,0u64);4]
+            let border=x==0 || y==0 || x==w-1 || y==h-1
+            if !border {
+                neighbors=[(y-1,x),(y+1,x),(y,x+1),(y,x-1)]
+                for _ in 0u64 .. 4u64 {
+                    let i:u64=int.narrow(helper.next_int(mut g,4))
+                    let j:u64=int.narrow(helper.next_int(mut g,4))
+                    if i!=j {let tmp=neighbors[i];neighbors[i]=neighbors[j];neighbors[j]=tmp}
+                }
+            }
+            push(mut row,Cell(kind:if border {4} else {0},neighbors:neighbors,x:x,y:y))?
+        }
+        push(mut cells,take row)?
+    }
+    cells[1][1].kind=2
+    cells[h-2][w-2].kind=3
+    Ok(Maze(width:w,height:h,cells:take cells))
+}
+fn reset(mut m:Maze) {
+    for y in 0 .. m.height {for x in 0 .. m.width {if m.cells[y][x].kind==1 {m.cells[y][x].kind=0}}}
+    m.cells[1][1].kind=2
+    m.cells[m.height-2][m.width-2].kind=3
+}
+fn dig(mut m:Maze,start:(u64,u64))->Result[(),helper.Error] {
+    let mut stack:List[(u64,u64)]=helper.mem(list.with_capacity(m.width*m.height))?
+    push(mut stack,start)?
+    while let Some((y,x))=list.pop(mut stack) {
+        let neighbors:Inline[(u64,u64),4]=m.cells[y][x].neighbors
+        let mut count:u64=0
+        for (ny,nx) in neighbors {if walkable(m.cells[ny][nx].kind) {count+=1}}
+        if count==1 {
+            m.cells[y][x].kind=1
+            for (ny,nx) in neighbors {if m.cells[ny][nx].kind==0 {push(mut stack,(ny,nx))?}}
+        }
+    }
+    Ok(())
+}
+fn open_finish(mut m:Maze,y:u64,x:u64)->Result[(),helper.Error] {
+    m.cells[y][x].kind=1
+    let neighbors:Inline[(u64,u64),4]=m.cells[y][x].neighbors
+    let mut walls:List[(u64,u64)]=list.new()
+    let mut count:u64=0
+    for (ny,nx) in neighbors {
+        if m.cells[ny][nx].kind==0 {push(mut walls,(ny,nx))?}
+        if walkable(m.cells[ny][nx].kind) {count+=1}
+    }
+    if count>1 {return Ok(())}
+    for (ny,nx) in walls {open_finish(mut m,ny,nx)?}
+    Ok(())
+}
+fn generate(mut m:Maze)->Result[(),helper.Error] {
+    let start:Inline[(u64,u64),4]=m.cells[1][1].neighbors
+    for (y,x) in start {if m.cells[y][x].kind==0 {dig(mut m,(y,x))?}}
+    let finish_neighbors:Inline[(u64,u64),4]=m.cells[m.height-2][m.width-2].neighbors
+    for (y,x) in finish_neighbors {if m.cells[y][x].kind==0 {open_finish(mut m,y,x)?}}
+    Ok(())
+}
+fn maze_hash(m:Maze)->u32 {
+    let mut h:u32=2166136261
+    for row in m.cells {for cell in row {
+        if cell.kind==1 {let v:u32=int.truncate(cell.x*cell.y);h=int.wrapping_mul(h^v,16777619u32)}
+    }}
+    h
+}
+fn bfs(m:Maze)->Result[List[(u64,u64)],helper.Error] {
+    let target=(m.height-2,m.width-2)
+    let mut seen:List[bool]=list.new()
+    helper.mem(list.fill(mut seen,m.width*m.height,false))?
+    seen[m.width+1]=true
+    let mut path:List[(u64,u64,i32)]=list.new()
+    push(mut path,(1u64,1u64,-1i32))?
+    let mut queue:std.deque.Deque[u64]=std.deque.new()
+    match std.deque.push_back(mut queue,0u64) {Ok(())=>{},Error((c,_))=>return Error(Capacity(c))}
+    while let Some(id)=std.deque.pop_front(mut queue) {
+        let (y,x,_)=path[id]
+        let neighbors:Inline[(u64,u64),4]=m.cells[y][x].neighbors
+        for (ny,nx) in neighbors {
+            if (ny,nx)==target {
+                let mut result:List[(u64,u64)]=list.new()
+                push(mut result,target)?
+                let mut current:i32=int.narrow(id)
+                while current>=0 {
+                    let (py,px,prev)=path[int.narrow(current)]
+                    push(mut result,(py,px))?
+                    current=prev
+                }
+                list.reverse(mut result)
+                return Ok(take result)
+            }
+            let at=ny*m.width+nx
+            if walkable(m.cells[ny][nx].kind) && !seen[at] {
+                seen[at]=true
+                let prev:i32=int.narrow(id)
+                push(mut path,(ny,nx,prev))?
+                match std.deque.push_back(mut queue,list.len(path)-1) {Ok(())=>{},Error((c,_))=>return Error(Capacity(c))}
+            }
+        }
+    }
+    Ok(list.new())
+}
+fn heuristic(y:u64,x:u64,ty:u64,tx:u64)->i32 {
+    let dy=if y>ty {y-ty} else {ty-y}
+    let dx=if x>tx {x-tx} else {tx-x}
+    int.narrow(dy+dx)
+}
+fn astar(m:Maze)->Result[List[(u64,u64)],helper.Error] {
+    let w=m.width
+    let size=w*m.height
+    let ty=m.height-2
+    let tx=w-2
+    let target=ty*w+tx
+    let start=w+1
+    let mut from:List[i32]=list.new()
+    let mut scores:List[i32]=list.new()
+    let mut best:List[i32]=list.new()
+    helper.mem(list.fill(mut from,size,-1i32))?
+    helper.mem(list.fill(mut scores,size,2147483647i32))?
+    helper.mem(list.fill(mut best,size,2147483647i32))?
+    scores[start]=0
+    let f=heuristic(1,1,ty,tx)
+    best[start]=f
+    let mut open:std.heap.Heap[(i32,u64)]=std.heap.new()
+    match std.heap.push(mut open,(f,start)) {Ok(())=>{},Error((c,_))=>return Error(Capacity(c))}
+    while let Some((_,current))=std.heap.pop(mut open) {
+        if current==target {
+            let mut result:List[(u64,u64)]=list.new()
+            let mut cur:i32=int.narrow(current)
+            while cur != -1i32 {
+                let at:u64=int.narrow(cur)
+                push(mut result,(at/w,at%w))?
+                cur=from[at]
+            }
+            list.reverse(mut result)
+            return Ok(take result)
+        }
+        let neighbors:Inline[(u64,u64),4]=m.cells[current/w][current%w].neighbors
+        let current_g=scores[current]
+        for (ny,nx) in neighbors {
+            if !walkable(m.cells[ny][nx].kind) {continue}
+            let at=ny*w+nx
+            let tentative=current_g+1
+            if tentative<scores[at] {
+                from[at]=int.narrow(current)
+                scores[at]=tentative
+                let next=tentative+heuristic(ny,nx,ty,tx)
+                if next<best[at] {
+                    best[at]=next
+                    match std.heap.push(mut open,(next,at)) {Ok(())=>{},Error((c,_))=>return Error(Capacity(c))}
+                }
+            }
+        }
+    }
+    Ok(list.new())
+}
+pub fn dispatch(config:String,name:String,warmup:u64,iterations:u64)->Result[u32,helper.Error] {
+    if name!="Maze::Generator" && name!="Maze::BFS" && name!="Maze::AStar" {return Error(UnknownTask)}
+    let w=helper.config_i64(config,name,"w")?
+    let h=helper.config_i64(config,name,"h")?
+    if w<0 || h<0 {return Error(Config)}
+    let mut g=helper.lcg()
+    let mut m=make(int.narrow(w),int.narrow(h),mut g)?
+    if name!="Maze::Generator" {generate(mut m)?}
+    let mut path:List[(u64,u64)]=list.new()
+    let mut checksum:u32=0
+    for _ in 0 .. warmup+iterations {
+        if name=="Maze::Generator" {
+            reset(mut m)
+            generate(mut m)?
+            checksum=int.wrapping_add(checksum,m.cells[m.height/2][m.width/2].kind)
+        } else {
+            path=if name=="Maze::BFS" {bfs(m)?} else {astar(m)?}
+            checksum=int.wrapping_add(checksum,int.narrow(list.len(path)))
+        }
+    }
+    if name=="Maze::Generator" {return Ok(int.wrapping_add(checksum,maze_hash(m)))}
+    let mid:u32=if list.len(path)>0 {let (y,x)=path[list.len(path)/2];int.truncate(x*y)} else {0}
+    Ok(int.wrapping_add(checksum,mid))
+}
+pub fn main(out:Stdout,d:Dir,argv:Args)->Result[(),Exit] waits {
+    harness.main(out,d,argv,fn(c:String,n:String,w:u64,i:u64)->Result[u32,helper.Error] {dispatch(c,n,w,i)})
+}

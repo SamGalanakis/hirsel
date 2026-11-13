@@ -1,4 +1,5 @@
-// Matched twin of template.hirsel. Review pending langs-numeric-920.
+// Reviewed-by: langs-numeric-920 2026-11-13; Parse/Regex: same ASCII fixture, owned String hash map, byte matcher, and checked sizes; overflow checks required.
+// Matched twin of template.hirsel. Reviewed below.
 // Source: kostya/LangArena 3c9f84d benchmarks/template.rs:49-216.
 // Same owned String keys/values, hash lookup, ASCII fixture and hand matcher.
 use std::collections::HashMap;

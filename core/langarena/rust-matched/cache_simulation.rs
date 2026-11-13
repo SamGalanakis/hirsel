@@ -1,4 +1,5 @@
-// Matched twin of cache_simulation.hirsel. Review pending langs-numeric-920.
+// Reviewed-by: langs-numeric-920 2026-11-13; same owned keys/values, indexed nodes, LIFO reuse, LRU links, warmup/reset, and checked counters; overflow checks required.
+// Matched twin of cache_simulation.hirsel. Reviewed below.
 // Source: kostya/LangArena 3c9f84d benchmarks/cache_simulation.rs:5-207.
 // Identical indexed nodes, LIFO free list, owned keys and values, explicit LCG.
 use std::collections::HashMap;

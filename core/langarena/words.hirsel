@@ -12,11 +12,11 @@ fn tally(source:String)->Result[u32,helper.Error] {
         while i<n && b[i]!=b' ' {i+=1}
         if i>start {
             let word=string.slice(source,start,i)
-            let previous=map.get_or(frequencies,word,0u32)
-            if previous==0 {
+            let present=map.update(mut frequencies,word,fn(mut count:u32) {count+=1})
+            if present==None {
                 let key=helper.mem(string.from(word))?
                 match map.insert(mut frequencies,take key,1u32) {Ok(())=>{},Error((c,_,_))=>return Error(Capacity(c))}
-            } else {let _=map.set(mut frequencies,word,previous+1)}
+            }
         }
     }
     let mut best=string.new()

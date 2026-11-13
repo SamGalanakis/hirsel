@@ -58,7 +58,8 @@ impl Context {
         Self::with_funding(Funding::root(bytes))
     }
 
-    pub(crate) fn with_funding(current: Funding) -> Self {
+    pub(crate) fn with_funding(mut current: Funding) -> Self {
+        current.normalize();
         let current_limit = current.fast();
         Self {
             current_limit,
@@ -98,22 +99,22 @@ impl Context {
 
     #[inline]
     pub fn available(&self) -> u64 {
-        self.current.available()
+        // SAFETY: native entry/resume and every limit/grant transition install
+        // this context's live canonical record before it can execute.
+        unsafe { (*self.current_limit).available }
     }
 
     #[inline]
     pub fn limit_enter(&mut self, bytes: u64) -> Result<(), Capacity> {
-        self.current.enter(bytes)?;
+        self.current_limit = self.current.enter(bytes)?;
         self.bound_depth += 1;
-        self.current_limit = self.current.fast();
         Ok(())
     }
 
     #[inline]
     pub fn limit_exit(&mut self) {
-        self.current.exit();
+        self.current_limit = self.current.exit();
         self.bound_depth -= 1;
-        self.current_limit = self.current.fast();
     }
 
     #[inline]

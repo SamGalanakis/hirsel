@@ -33,6 +33,7 @@ pub(crate) fn task_resume(context: *mut Context) {
     unsafe {
         (*context).current.bind();
         (*context).current.drain();
+        (*context).current.normalize();
         (*context).current_limit = (*context).current.fast();
     }
 }

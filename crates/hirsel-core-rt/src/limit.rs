@@ -17,7 +17,14 @@ use std::{
 struct Live {
     owner: u64,
     capacity: u64,
-    parent: Option<usize>,
+    parent: Option<Payer>,
+}
+impl Live {
+    const EMPTY: Self = Self {
+        owner: 0,
+        capacity: 0,
+        parent: None,
+    };
 }
 /// Frozen local record prefix. Emitters compare/subtract available and add the
 /// admitted bytes to outstanding. Neither operation is atomic.
@@ -28,8 +35,9 @@ pub struct LimitRecord {
     refs: usize,
     parent: Option<usize>,
     rank: u32,
-    live: Option<Live>,
-    next_free: Option<usize>,
+    live: Live,
+    next_free: Option<NonNull<Slot>>,
+    #[cfg(any(test, feature = "testing"))]
     occupied: bool,
 }
 #[repr(C, align(32))]
@@ -43,7 +51,7 @@ struct Slot {
 struct Forest {
     pages: Vec<Box<[Slot; 64]>>,
     length: usize,
-    free: Option<usize>,
+    free: Option<NonNull<Slot>>,
     // Read/written only after the last local handle retires.
     retired_bytes: u64,
     zeros: usize,
@@ -73,16 +81,23 @@ impl Forest {
     }
     fn release(&mut self, mut id: usize) {
         loop {
-            let free = self.free;
-            let r = self.record_mut(id);
+            let slot = NonNull::from(self.slot(id));
+            // SAFETY: this task owns the table; a structural pin or charge retains slot.
+            let r = unsafe { &mut *slot.as_ref().local.get() };
             r.refs -= 1;
             if r.refs != 0 || r.outstanding != 0 {
                 return;
             }
-            let parent = r.parent.or_else(|| r.live.and_then(|l| l.parent));
-            r.occupied = false;
-            r.next_free = free;
-            self.free = Some(id);
+            let parent = r.parent.or_else(|| r.live.parent.map(|p| p.slot().id));
+            r.parent = None;
+            r.rank = 0;
+            r.live = Live::EMPTY;
+            #[cfg(any(test, feature = "testing"))]
+            {
+                r.occupied = false;
+            }
+            r.next_free = self.free;
+            self.free = Some(slot);
             if let Some(p) = parent {
                 id = p;
             } else {
@@ -90,44 +105,53 @@ impl Forest {
             }
         }
     }
-    fn insert(&mut self, domain: NonNull<Domain>, live: Live) -> usize {
-        let id = if let Some(id) = self.free {
-            self.free = self.record(id).next_free;
-            id
+    #[cold]
+    fn fresh(&mut self, domain: NonNull<Domain>) -> NonNull<Slot> {
+        let id = self.length;
+        if id.is_multiple_of(64) {
+            self.pages.push(Box::new(std::array::from_fn(|i| Slot {
+                local: UnsafeCell::new(LimitRecord {
+                    available: 0,
+                    outstanding: 0,
+                    refs: 0,
+                    parent: None,
+                    rank: 0,
+                    live: Live::EMPTY,
+                    next_free: None,
+                    #[cfg(any(test, feature = "testing"))]
+                    occupied: false,
+                }),
+                pending: AtomicU64::new(0),
+                pending_zeros: AtomicUsize::new(0),
+                domain,
+                id: id + i,
+            })));
+        }
+        self.length += 1;
+        NonNull::from(self.slot(id))
+    }
+    #[inline(always)]
+    fn take(&mut self, domain: NonNull<Domain>, live: Live) -> Payer {
+        let slot = if let Some(slot) = self.free {
+            // SAFETY: only this task takes records; every returned record is uncharged.
+            self.free = unsafe { (*slot.as_ref().local.get()).next_free };
+            slot
         } else {
-            let id = self.length;
-            if id.is_multiple_of(64) {
-                self.pages.push(Box::new(std::array::from_fn(|i| Slot {
-                    local: UnsafeCell::new(LimitRecord {
-                        available: 0,
-                        outstanding: 0,
-                        refs: 0,
-                        parent: None,
-                        rank: 0,
-                        live: None,
-                        next_free: None,
-                        occupied: false,
-                    }),
-                    pending: AtomicU64::new(0),
-                    pending_zeros: AtomicUsize::new(0),
-                    domain,
-                    id: id + i,
-                })));
-            }
-            self.length += 1;
-            id
+            self.fresh(domain)
         };
-        *self.record_mut(id) = LimitRecord {
-            available: live.capacity,
-            outstanding: 0,
-            refs: 1,
-            parent: None,
-            rank: 0,
-            live: Some(live),
-            next_free: None,
-            occupied: true,
-        };
-        id
+        // SAFETY: this free record has zero charge/refs, no union edge and rank zero.
+        let r = unsafe { &mut *slot.as_ref().local.get() };
+        r.available = live.capacity;
+        r.refs = 1;
+        r.live = live;
+        #[cfg(any(test, feature = "testing"))]
+        {
+            r.occupied = true;
+        }
+        Payer(slot)
+    }
+    fn insert(&mut self, domain: NonNull<Domain>, live: Live) -> usize {
+        self.take(domain, live).slot().id
     }
     #[inline(always)]
     fn find(&mut self, id: usize) -> usize {
@@ -288,7 +312,7 @@ impl Payer {
         let d = self.domain();
         if d.owner == Some(thread()) && d.handles.get() != 0 {
             let root = self.canonical();
-            let owner = root.forest().record(root.slot().id).live.unwrap().owner;
+            let owner = root.forest().record(root.slot().id).live.owner;
             if owner != crate::tasks::current_id() && bytes != 0 {
                 crate::abi_tasks::cross_task_refund(owner, bytes);
                 self.slot().pending.fetch_add(bytes, Ordering::Relaxed);
@@ -342,9 +366,9 @@ impl Payer {
         let id = f.insert(
             self.slot().domain,
             Live {
-                owner: f.record(parent.slot().id).live.unwrap().owner,
+                owner: f.record(parent.slot().id).live.owner,
                 capacity: bytes,
-                parent: Some(parent.slot().id),
+                parent: Some(parent),
             },
         );
         self.domain().handles.set(self.domain().handles.get() + 1);
@@ -446,13 +470,7 @@ impl Funding {
     }
     pub(crate) fn task_owner(&self, owner: u64) {
         let payer = self.payer.canonical();
-        payer
-            .forest()
-            .record_mut(payer.slot().id)
-            .live
-            .as_mut()
-            .unwrap()
-            .owner = owner;
+        payer.forest().record_mut(payer.slot().id).live.owner = owner;
     }
     pub fn end(&self) {
         self.end_id();
@@ -460,14 +478,14 @@ impl Funding {
     fn end_id(&self) -> usize {
         let f = self.payer.forest();
         let child = f.find(self.payer.slot().id);
-        let live = f.record_mut(child).live.take().unwrap();
-        let original_parent = live.parent.unwrap();
+        let live = f.record(child).live;
+        let original_parent = live.parent.unwrap().slot().id;
         let parent = f.find(original_parent);
         let unused = f.record(child).available;
-        crate::abi_tasks::cross_task_refund(f.record(parent).live.unwrap().owner, unused);
+        crate::abi_tasks::cross_task_refund(f.record(parent).live.owner, unused);
         f.record_mut(parent).available += unused;
         let parent_available = f.record(parent).available;
-        let parent_live = f.record_mut(parent).live.take();
+        let parent_live = f.record(parent).live;
         let (winner, loser) = if f.record(child).rank > f.record(parent).rank {
             (child, parent)
         } else {
@@ -483,54 +501,80 @@ impl Funding {
         f.release(original_parent);
         winner
     }
-    #[inline]
-    pub(crate) fn enter(&mut self, bytes: u64) -> Result<(), Capacity> {
-        self.admit(Some(bytes))?;
-        let parent = self.payer.canonical();
-        let f = self.payer.forest();
-        f.record_mut(parent.slot().id).outstanding -= bytes;
-        f.retain(parent.slot().id);
-        let id = f.insert(
-            self.payer.slot().domain,
-            Live {
-                owner: f.record(parent.slot().id).live.unwrap().owner,
-                capacity: bytes,
-                parent: Some(parent.slot().id),
-            },
-        );
-        f.release(self.payer.slot().id);
-        self.payer = Payer(NonNull::from(f.slot(id)));
-        Ok(())
-    }
-    #[inline]
-    pub(crate) fn exit(&mut self) {
-        let old = self.payer.slot().id;
-        let f = self.payer.forest();
-        let r = f.record(old);
-        // Empty lexical scopes leave no funding record or union edge behind.
-        if r.refs == 1 && r.available == r.live.unwrap().capacity {
-            let live = r.live.unwrap();
-            let parent = f.find(live.parent.unwrap());
-            f.record_mut(parent).available += live.capacity;
-            f.retain(parent);
-            f.release(old);
-            self.payer = Payer(NonNull::from(f.slot(parent)));
-        } else {
-            let winner = self.end_id();
+    /// Move a retained forwarding handle to its canonical record at a context switch.
+    #[inline(always)]
+    pub(crate) fn normalize(&mut self) {
+        let canonical = self.payer.canonical();
+        if canonical != self.payer {
             let f = self.payer.forest();
-            f.retain(winner);
-            f.release(old);
-            self.payer = Payer(NonNull::from(f.slot(winner)));
+            f.retain(canonical.slot().id);
+            f.release(self.payer.slot().id);
+            self.payer = canonical;
         }
     }
-    pub(crate) fn has_parent(&self) -> bool {
-        let p = self.payer.canonical();
-        p.forest()
-            .record(p.slot().id)
-            .live
-            .unwrap()
-            .parent
-            .is_some()
+    #[inline(always)]
+    pub(crate) fn enter(&mut self, bytes: u64) -> Result<*mut LimitRecord, Capacity> {
+        // Active contexts always hold a canonical record. A reservation moves
+        // available bytes, not outstanding charges, and transfers the parent's pin.
+        let parent = self.payer;
+        #[cfg(any(test, feature = "testing"))]
+        let injected = {
+            let f = parent.forest();
+            f.attempts += 1;
+            f.fail
+                .is_some_and(|(n, later)| f.attempts == n || later && f.attempts >= n)
+        };
+        #[cfg(not(any(test, feature = "testing")))]
+        let injected = false;
+        // SAFETY: the task exclusively owns this live canonical context record.
+        let r = unsafe { &mut *parent.local() };
+        if injected || bytes > r.available {
+            return Err(Capacity {
+                requested: bytes,
+                available: r.available,
+            });
+        }
+        r.available = r.available.wrapping_sub(bytes);
+        let live = Live {
+            owner: r.live.owner,
+            capacity: bytes,
+            parent: Some(parent),
+        };
+        self.payer = parent.forest().take(parent.slot().domain, live);
+        Ok(self.payer.local())
+    }
+    #[inline(always)]
+    pub(crate) fn exit(&mut self) -> *mut LimitRecord {
+        let old = self.payer;
+        // SAFETY: the active context pins its live canonical record exclusively.
+        let r = unsafe { &mut *old.local() };
+        if r.refs == 1 && r.available == r.live.capacity {
+            let parent = r.live.parent.unwrap();
+            let f = old.forest();
+            r.refs = 0;
+            r.rank = 0;
+            #[cfg(any(test, feature = "testing"))]
+            {
+                r.occupied = false;
+            }
+            r.next_free = f.free;
+            f.free = Some(old.0);
+            // The parent edge's existing pin becomes this context's pin.
+            self.payer = parent;
+            self.normalize();
+            // SAFETY: normalize transferred the pin if an inactive parent merged.
+            unsafe {
+                (*self.payer.local()).available =
+                    (*self.payer.local()).available.wrapping_add(r.available);
+            }
+        } else {
+            let winner = self.end_id();
+            let f = old.forest();
+            f.retain(winner);
+            f.release(old.slot().id);
+            self.payer = Payer(NonNull::from(f.slot(winner)));
+        }
+        self.payer.local()
     }
     #[cfg(any(test, feature = "testing"))]
     pub(crate) fn inject(&self, n: usize, later: bool) {

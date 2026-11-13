@@ -195,7 +195,7 @@ fn limits(mode: &str) -> u64 {
         let mut sum = 0;
         for _ in 0..COUNT {
             ctx.limit_enter(black_box(64)).unwrap();
-            sum += black_box(ctx.available());
+            sum += black_box(black_box(&mut ctx).available());
             ctx.limit_exit();
         }
         sum

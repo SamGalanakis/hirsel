@@ -59,11 +59,12 @@ def build(out, env):
     targets = [
         ('hirsel_core_layout', charge_root, '2024', []),
         ('libc', source('libc-0.2.190'), '2021', []),
+        ('hirsel_stack', ROOT/'crates/hirsel-stack/src/lib.rs', '2024', []),
         ('bumpalo', source('bumpalo-3.20.3'), '2021', []),
         ('libmimalloc_sys', source('libmimalloc-sys-0.1.49'), '2018', ['-l', 'dylib=mimalloc']),
         ('mimalloc', source('mimalloc-0.1.52'), '2018', ['--extern', f'libmimalloc_sys={libs}/liblibmimalloc_sys.rlib']),
-        ('hirsel_core_rt', CRATE/'src/lib.rs', '2024', ['--extern', f'libc={libs}/liblibc.rlib', '--extern', f'hirsel_core_layout={libs}/libhirsel_core_layout.rlib']),
-        ('hirsel_core_rt_mimalloc', CRATE/'src/lib.rs', '2024', ['--cfg', 'feature="mimalloc"', '--extern', f'libc={libs}/liblibc.rlib', '--extern', f'libmimalloc_sys={libs}/liblibmimalloc_sys.rlib', '--extern', f'hirsel_core_layout={libs}/libhirsel_core_layout.rlib']),
+        ('hirsel_core_rt', CRATE/'src/lib.rs', '2024', ['--extern', f'hirsel_stack={libs}/libhirsel_stack.rlib', '--extern', f'libc={libs}/liblibc.rlib', '--extern', f'hirsel_core_layout={libs}/libhirsel_core_layout.rlib']),
+        ('hirsel_core_rt_mimalloc', CRATE/'src/lib.rs', '2024', ['--cfg', 'feature="mimalloc"', '--extern', f'hirsel_stack={libs}/libhirsel_stack.rlib', '--extern', f'libc={libs}/liblibc.rlib', '--extern', f'libmimalloc_sys={libs}/liblibmimalloc_sys.rlib', '--extern', f'hirsel_core_layout={libs}/libhirsel_core_layout.rlib']),
     ]
     for name, src, edition, extra in targets:
         artifact = libs / f'lib{name}.rlib'
@@ -110,7 +111,7 @@ def abi_smoke(out, env):
         extra = [] if allocator == 'system' else ['--cfg', 'feature="mimalloc"', '--extern', f'libmimalloc_sys={out}/lib/liblibmimalloc_sys.rlib']
         commands = [
             ['taskset','-c','16',rustc,str(CRATE/'src/lib.rs'),'--crate-name','hirsel_core_rt',
-             '--crate-type','staticlib','--edition=2024',*FLAGS,*extra,'--extern',f'libc={out}/lib/liblibc.rlib','--extern',
+             '--crate-type','staticlib','--edition=2024',*FLAGS,*extra,'--extern',f'hirsel_stack={out}/lib/libhirsel_stack.rlib','--extern',f'libc={out}/lib/liblibc.rlib','--extern',
              f'hirsel_core_layout={out}/lib/libhirsel_core_layout.rlib','-L',f'dependency={out}/lib','-o',str(archive)],
             ['taskset','-c','16','cc','-std=c11','-O3','-Wall','-Wextra','-Werror','-pedantic',
              '-I'+str(CRATE/'include'),str(CRATE/'tests/abi.c'),str(archive),
@@ -163,6 +164,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--abi-only', action='store_true', help='compile and run the public C header fixture instead of cost samples')
+    parser.add_argument('--workloads', nargs='+', choices=WORKLOADS, default=WORKLOADS)
+    parser.add_argument('--modes', nargs='+', help='sample only these modes')
     args = parser.parse_args()
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -182,8 +185,10 @@ def main():
         if not rows:
             writer.writeheader()
         for allocator in ['system', 'mimalloc']:
-            for workload in WORKLOADS:
+            for workload in args.workloads:
                 for mode in ['rust', 'runtime'] + (['matched'] if workload == 'growth' else ['full'] if workload == 'limits' else []):
+                    if args.modes and mode not in args.modes:
+                        continue
                     if (allocator, workload, mode) in done:
                         continue
                     row = sample(out, allocator, workload, mode, env)

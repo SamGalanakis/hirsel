@@ -5,7 +5,9 @@
 Evaluation is strictly left to right: a call's arguments, then the call; a construction's
 fields; an operator's operands; an assignment's place, then its value
 ([OWN-12](ownership.md#own-12-assignment)). `&&` and `||` skip their right operand when the
-left decides. A temporary lives to the end of its statement; in a block's tail, a function
+left decides. A temporary lives to the end of its statement; in the condition of an `if` or
+`while`, it ends when the condition has been evaluated, before a branch or the loop body
+runs; in a block's tail, a function
 body's included, it lives to that block's exit and ends before the block's locals are
 cleaned, unless the block's value reaches it; a temporary that a `let` binding's value, or
 a block's value, reaches lives as long as that value. A moved argument stays a

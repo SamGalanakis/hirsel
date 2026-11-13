@@ -39,11 +39,35 @@ ends when `main` returns and its cleanup is done: `Ok(())` is success, `Error(e)
 error outcome carrying `e`, a failure is a failure outcome
 ([FAIL-14](failure.md#fail-14-failure-boundary)).
 
+A run in a process reports its outcome as the exit status, only after the run has ended, so
+every cleanup and finalizer has run; a run stop is the one exception, because it skips
+cleanup. A program chooses its status only through `main`'s result. Core's plain
+`Exit { status: u8 }` is the error type that carries a status. No operation ends the
+process early.
+
+| outcome | exit status | stderr |
+|---|---|---|
+| `Ok(())` | 0 | nothing |
+| `Error(Exit(status: s))`, `s` from 1 to 100 | `s` | nothing |
+| `Error(Exit(status: s))`, `s` 0 or above 100 | 1 | nothing |
+| `Error(e)`, `E` not `Exit` | 1 | nothing |
+| failure | 101 | the cause chain, one line per cause, primary first: the cause and its site |
+| run stop ([FAIL-15](failure.md#fail-15-run-stops)) | 102 | one line naming the stop |
+
+So 101 and 102 never come from an `Exit`. The stderr writes are the run's, not the
+program's. A program writes its own diagnostics before it returns.
+
 ```hirsel
 pub fn main(out: Stdout, argv: Args) -> Result[(), WriteError] waits { stdout.write(out, "hello\n") }
 ```
 ```hirsel
+pub fn main(out: Stdout) -> Result[(), Exit] waits {
+  match stdout.write(out, "hello\n") { Ok(()) => Ok(()), Error(_) => Error(Exit(status: 2)) }
+}
+```
+```hirsel
 pub fn main(take xs: List[u64]) -> Result[(), ()] { Ok(()) }   // refused: PROG-3
+pub fn main() -> u8 { 3 }                                     // refused: PROG-3, not Result[(), E]
 ```
 
 ### PROG-4: Tests

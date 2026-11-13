@@ -6,6 +6,7 @@
 pub type Option[T] = None | Some(T)
 pub type Result[T, E] = Ok(T) | Error(E)
 pub type Order: key + ordered = Less | Equal | Greater
+pub type Exit: key { status: u8 }
 pub opaque type Never
 
 pub opaque type String

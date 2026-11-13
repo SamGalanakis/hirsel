@@ -2,7 +2,7 @@
 //! Generic values use places, including when their closed type is a scalar. Layout
 //! rows, storage-byte constants and logical-size constants are substituted; source is never opened here.
 use super::*;
-use hirsel_core_layout::{Body as ShapeBody, FieldTy, Shape};
+use hirsel_core_layout::{Body as ShapeBody, FieldTy, FuncRef, Shape};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -133,48 +133,25 @@ pub struct GenericCall {
     pub dictionaries: Vec<NameRecipe>,
 }
 
-/// An instance's type arguments are already published shapes, not source types.
-/// This is the only additional input specialization needs from its caller.
+/// An instance's type arguments are shapes already published by their owner modules,
+/// not source types. This is the only additional input specialization needs from its
+/// caller. A resource argument's finalizer is named by its owner's function row and
+/// imported by instance key (FAIL-11).
 pub fn materialize(
     source: &Module,
     function: FuncId,
     template: &GenericTemplate,
     key: &InstanceKey,
-    arguments: &[(&[Shape], TypeRef)],
+    arguments: &[(&Module, TypeRef)],
 ) -> Result<(Module, FuncId), String> {
     crate::cost_scope!("instance", format!("{key:?}"));
     if arguments.len() != template.parameters.len() {
         return Err("the entry has undetermined generic type arguments".into());
     }
-    fn resource(
-        shapes: &[Shape],
-        root: TypeRef,
-        seen: &mut std::collections::HashSet<TypeRef>,
-    ) -> bool {
-        if !seen.insert(root) {
-            return false;
-        }
-        let mut shape = shapes[root.index()].clone();
-        if shape.finalizer.is_some() || shape.repr == hirsel_core_layout::Repr::Resource {
-            return true;
-        }
-        let mut found = false;
-        map_fields(&mut shape, &mut |r| {
-            found |= resource(shapes, r, seen);
-            r
-        });
-        found
-    }
-    if arguments
-        .iter()
-        .any(|&(shapes, root)| resource(shapes, root, &mut Default::default()))
-    {
-        return Err("generic resource carrier materialization is not built".into());
-    }
     let mut module = source.clone();
     let roots = arguments
         .iter()
-        .map(|&(shapes, root)| import_type(&mut module, shapes, root, &mut HashMap::new()))
+        .map(|&(owner, root)| import_type(&mut module, owner, root, &mut HashMap::new()))
         .collect::<Vec<_>>();
     let target = FuncId(module.functions.len() as u32);
     let instance = InstanceId(module.instances.len() as u32);
@@ -197,14 +174,14 @@ pub fn materialize(
 
 fn import_type(
     module: &mut Module,
-    source: &[Shape],
+    owner: &Module,
     root: TypeRef,
     seen: &mut HashMap<TypeRef, TypeRef>,
 ) -> TypeId {
     if let Some(&row) = seen.get(&root) {
         return TypeId(row.0);
     }
-    let shape = &source[root.index()];
+    let shape = &owner.types[root.index()];
     if let Some(row) = module.types.iter().position(|s| s.name == shape.name) {
         return TypeId(row as u32);
     }
@@ -213,10 +190,43 @@ fn import_type(
     module.types.push(shape.clone());
     let mut shape = shape.clone();
     map_fields(&mut shape, &mut |id| {
-        TypeRef(import_type(module, source, id, seen).0)
+        TypeRef(import_type(module, owner, id, seen).0)
     });
+    shape.finalizer = shape
+        .finalizer
+        .map(|f| FuncRef(import_function(module, owner, FuncId(f.0)).0));
     module.types[row.index()] = shape;
     TypeId(row.0)
+}
+
+/// The row of `owner`'s function `f` in `module`: the row with its instance key, or a
+/// new signature-only row the instance collector resolves as any other callee.
+fn import_function(module: &mut Module, owner: &Module, f: FuncId) -> FuncId {
+    let from = &owner.functions[f.index()];
+    let key = &owner.instances[from.instance.index()];
+    if let Some(row) = module
+        .functions
+        .iter()
+        .position(|g| &module.instances[g.instance.index()] == key)
+    {
+        return FuncId(row as u32);
+    }
+    let signature = &owner.signatures[from.signature.index()];
+    let signature = match module.signatures.iter().position(|s| s == signature) {
+        Some(i) => SigId(i as u32),
+        None => {
+            module.signatures.push(signature.clone());
+            SigId(module.signatures.len() as u32 - 1)
+        }
+    };
+    let instance = InstanceId(module.instances.len() as u32);
+    module.instances.push(key.clone());
+    module.functions.push(Function {
+        instance,
+        signature,
+        body: None,
+    });
+    FuncId(module.functions.len() as u32 - 1)
 }
 
 fn map_fields(shape: &mut Shape, f: &mut impl FnMut(TypeRef) -> TypeRef) {
@@ -587,6 +597,83 @@ impl Emitter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hirsel_core_ir::wf;
+
+    /// FAIL-11 through materialization: a resource argument's finalizer is its owner's
+    /// function row, which the generic's own module does not have, at an index of the
+    /// owner's numbering. The instance's shape must name the owner's finalizer by its
+    /// instance key; an unbuilt instance, or a row left at the owner's index (another
+    /// function, or none), loses the finalizer.
+    #[test]
+    fn resource_argument_keeps_its_finalizer() {
+        let (index, modules) = crate::tests::program_inputs(
+            "resource type R { id: u64, d: u64 }\n  drop(t) { let _ = 100 / t.d }\n\
+             fn eat[T](take x: T) -> u64 { 5 }\n\
+             fn go(d: u64) -> u64 { match R(id: 1, d: d) { Ok(take r) => eat(take r), Error(_) => 0 } }",
+        );
+        let p = Program::declare(&index, &modules);
+        assert!(p.refusals.is_empty(), "{:?}", p.refusals);
+        // As the driver does: the generic's module holds only its own definition.
+        let (mut generic, mut owner) = (Emitter::new(), Emitter::new());
+        let mut eat = None;
+        for (f, fd) in p.fns.iter().enumerate() {
+            if !fd.path.package_is("app", "1") {
+                continue;
+            }
+            let into = if fd.path.0.name == "eat" {
+                &mut generic
+            } else {
+                &mut owner
+            };
+            let check = p.check_lower(f, into);
+            assert!(
+                check.refusals.is_empty() && check.gaps.is_empty(),
+                "{check:?}"
+            );
+            if fd.path.0.name == "eat" {
+                eat = Some((check.function.unwrap(), check.template.unwrap()));
+            }
+        }
+        let (source, template) = eat.unwrap();
+        let mut owner = owner.module;
+        let key = owner
+            .instances
+            .iter()
+            .find(|k| k.definition.0.name == "eat" && !k.types.is_empty())
+            .unwrap()
+            .clone();
+        // The owner's rows sit one function later than its own numbering would put them.
+        owner.functions.insert(0, owner.functions[0].clone());
+        for shape in &mut owner.types {
+            if let Some(f) = &mut shape.finalizer {
+                f.0 += 1;
+            }
+        }
+        let root = owner
+            .types
+            .iter()
+            .position(|s| s.name == key.types[0])
+            .unwrap();
+        let finalizer = |m: &Module, ty: usize| {
+            let f = m.types[ty].finalizer.unwrap();
+            m.instances[m.functions[f.0 as usize].instance.index()].clone()
+        };
+        let (module, _) = materialize(
+            &generic.module,
+            source,
+            &template,
+            &key,
+            &[(&owner, TypeRef(root as u32))],
+        )
+        .unwrap();
+        wf::module(&module).unwrap();
+        let imported = module
+            .types
+            .iter()
+            .position(|s| s.name == key.types[0])
+            .unwrap();
+        assert_eq!(finalizer(&module, imported), finalizer(&owner, root));
+    }
 
     #[test]
     fn logical_and_storage_constants() {
@@ -643,12 +730,16 @@ mod tests {
                 types: vec!["Padded".into()],
                 dictionaries: vec![],
             };
+            let owner = Module {
+                types: vec![shape.clone()],
+                ..Module::default()
+            };
             let (module, target) = materialize(
                 &emitter.module,
                 source,
                 &template,
                 &key,
-                &[(&[shape.clone()], TypeRef(0))],
+                &[(&owner, TypeRef(0))],
             )
             .unwrap();
             let report = hirsel_core_ir::eval::run(&module, target, &[0], u64::MAX);

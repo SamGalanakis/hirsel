@@ -111,7 +111,7 @@ impl CheckProduct {
                                 definition: key.definition.clone(),
                                 message: format!("unpublished instance type {name}"),
                             })?;
-                        Ok((instances.bodies[owner].ir().types.as_slice(), root))
+                        Ok((instances.bodies[owner].ir(), root))
                     })
                     .collect::<Result<Vec<_>, InstanceStop>>()?;
                 let (ir, row) = hirsel_core_front::materialize(

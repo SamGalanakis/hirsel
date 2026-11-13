@@ -1,5 +1,23 @@
 # Memory cost samples
 
+## Task-local custody integration
+
+Candidate `480f33c6`, same provider harness/toolchain/CPU16/jobs1/2GiB method. One Core sample for each named workload; reuse the provider lane's unchanged Tokio references. All checksums pass.
+
+| workload | provider Core instr/op | current Core instr/op | Tokio instr/op | current / Tokio |
+|---|---:|---:|---:|---:|
+| spawn + join | 3,424 | 2,137.11 | 2,014 | 1.061x |
+| channel round trip | 848 | 910.78 | 2,318 | 0.393x |
+| three-stage pipeline | 1,278 | 1,405.76 | 2,748 | 0.512x |
+
+Spawn meets 1.2x. The first task-local pilot measured 2,685.47 instructions. Co-locating Context in Task, eliminating both zero-sized slots and using the no-survivor record return lowers that to 2,137.11. The remaining 123 instructions versus Tokio are a whole-lifecycle difference, not a quantified subtraction per mechanism. Source differences remain three separate heap objects for an empty child (Task with Context, prepaid primary Cell, charged record), stable payer slot management, stack switches and mmap/mprotect/munmap of a guarded stack. Kernel work is excluded by instructions:u; user-space mapping wrappers and setup are included. Tokio co-locates its task/future and needs no separate stack. Channel/pipeline are 7.4%/10.0% above the provider lane's Core samples, but remain below both Tokio targets; no improvement over the old Core rows is claimed.
+
+There is no synchronized Funding implementation in the task path. Local admission/refund and scope entry/exit use the task-local table. Foreign refunds emit REFUND then queue to prepaid atomic mailboxes; task_resume checks one domain pending flag and locks/scans only when pending. A foreign growth lease drains prior events before admission, then records CHARGE on success. A received grant executes with the receiving task's owner ID and hands survivors back afterwards. The single worker owns the complete table exclusively; multiple workers must serialize all tasks sharing that table for foreign growth, and through a received finalizer's full execution including suspension. Original-payer growth after its last Context also temporarily pins/reactivates the retired table and recomputes retirement after growth, keeping new blocks alive without another accounting implementation.
+
+`hirsel_core_arc_event(u8 operation,u64 value) -> ()` is the completion hook LLVM needed for inline Arc operations. It has no status, allocation, admission or count mutation. Event codes NEW/SHARE/RELEASE/UNWRAP are frozen in abi_layout.rs and the C header. Rc uses ordinary u64 initialization/counts; Arc initializes aligned atomic u64 to 1 before publication, shares with checked relaxed CAS, releases with release decrement/acquire fence at zero, and tests uniqueness with acquire. The scheduler event turn covers inline count and hook; release publishes before last-release glue/refunds.
+
+Evidence: `/workspace/code/hirsel-briefs/core-memory-900/task-local-compact-cost/`; reference `/workspace/code/hirsel-briefs/core-tasks-provider-907/MEASUREMENTS.md`. Reproduce with measure-tasks.py --models core --workloads spawn roundtrip pipeline. Optional memcheck acceptance builds and Rust tests register alternate stacks via the isolated Valgrind helpers moved to hirsel-stack; normal archives add no registration instructions.
+
 ## Allocating bounds and emitted growth
 
 Scope source `d571858c`; growth source `6f939ec3`, unchanged by the later scope edits. Same Rust 1.99.0, CPU16/jobs1/2GiB, checked opt3/no LTO method as below. One first-run sample per configuration, one million iterations, verified checksums. Frozen offsets and C signatures are unchanged.

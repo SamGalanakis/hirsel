@@ -31,9 +31,12 @@ Rc/Arc share and nonlast release inline; last release uses allocation-free,
 constant-stack resumable glue. A scheduler binds native task execution on resume
 and unbinds before moving it to another worker. Foreign refunds accumulate in
 prepaid per-slot mailboxes and are drained before resuming the payer task. MEM-26
-also makes growth of a received collection an ordered foreign charge; the later
-task provider must obtain exclusive payer execution custody around that operation
-and a received resource's finalizer grant. These memory entries are not a scheduler.
+also makes growth of a received collection an ordered foreign charge. The task
+provider's payer_lease hook drains earlier refunds before foreign growth; received
+grants execute as the finalizing task until handover. One OS worker supplies the
+exclusive lease. With multiple workers, the scheduler must quiesce every task
+sharing the payer table for growth and for the entire received finalizer, including
+suspension. An empty mailbox bypasses locking and scanning at task_resume.
 
 System allocation is the default. The optional `mimalloc` backend uses native
 malloc/free for ordinary alignment and aligned allocation above 16 bytes. The
@@ -72,10 +75,11 @@ OS adapter runs non-suspending libc calls on a separate guarded host stack.
 The common register switch lives in hirsel-stack and also serves hirsel-rt.
 
 The cross-task memory hooks live in abi_tasks.rs. Task end forwards surviving funding
-to the parent. Cross-task refunds update the effective payer, then publish one
-event. Task-local accounting drains prepaid pending slots in task_resume before code
-can attempt another admission. Foreign growth and received grants still require
-the exclusive payer lease described above. Event callbacks cannot suspend or re-enter; provider
+to the parent. Cross-task refunds publish one event and enter prepaid pending slots, which
+task_resume drains before an admission. Foreign growth drains under the exclusive
+payer lease and publishes its successful charge. Child Context lives inside Task;
+zero-sized input/result slots allocate no heap storage. Empty child reservations
+return their slot directly instead of building a union edge. Event callbacks cannot suspend or re-enter; provider
 issue/delivery callbacks can suspend on their task's own stack.
 
 FORM decision 44 fixes every capability and Args operand as a plain u64 provider
@@ -85,3 +89,13 @@ missing grants before startup. Core adapters resolve provider metadata through
 the task context. Args accessors take context and its u64 Args handle. Run closes
 all grants after main cleanup and diagnostics, without admission or failure;
 os_process_free then releases host argv/metadata. No program drop visits a grant.
+
+Inline count offsets remain count=0, payload=8, aligned to 8 on both targets.
+Rc initialization/counts use ordinary u64 stores. Arc initialization uses an
+atomic u64 initialized to 1 before publication; share uses checked relaxed CAS,
+release uses release decrement plus an acquire fence at zero, and unwrap loads
+with acquire. Emitters call hirsel_core_arc_event after each Arc operation, before
+last-release glue. The hook returns no status and admits/allocates nothing.
+The scheduler holds its event turn across the count operation and hook.
+Acceptance builds enable memcheck to register alternate stacks; Rust tests do so
+automatically. Normal archives carry no Valgrind stack-registration work.

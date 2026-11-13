@@ -58,9 +58,11 @@
 //! Scheduler binds native execution on resume and unbinds before transferring
 //! it. Bind drains prepaid per-slot remote refunds; local accounting has no
 //! atomics or lock. Foreign-payer growth (MEM-26) and a received resource's grant
-//! also require an ordered provider lease over the original payer task, with
-//! that task quiescent for the call. The provider must take that rare path before
-//! alloc-like/finalizer_begin; these entries do not implement a scheduler.
+//! use abi_tasks::payer_lease over the original payer's complete table and drain
+//! prior refunds before admission. The one-worker scheduler owns that lease
+//! throughout its turn. Multiple workers must quiesce every task sharing the
+//! domain across growth; a received grant keeps the lease through finalizer_end,
+//! including suspension. No local admission/refund/enter/exit acquires a lock.
 
 // Offset and header constants are shared verbatim with both native emitters.
 pub use crate::abi_layout::*;

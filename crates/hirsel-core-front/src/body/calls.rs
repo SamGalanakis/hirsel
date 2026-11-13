@@ -428,6 +428,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         }
                         self.use_place(at, Use::Mut(Hold::CallMut(call)), e);
                         self.arg_ty_rooted(pt, at.ty, e, found, roots);
+                        if self.contains_callback(at.ty) {
+                            self.gap(
+                                e,
+                                "capture descriptor updates through mut arguments are not built",
+                            );
+                            return true;
+                        }
                         *val = self.place_ptr(at, e);
                     }
                     Ok(None) => {

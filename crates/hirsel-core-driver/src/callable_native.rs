@@ -72,3 +72,16 @@ fn captured_callback_cranelift(){captured_callback(Backend::Cranelift);}
 #[test]
 #[ignore="explicit native integration target"]
 fn captured_callback_llvm(){captured_callback(Backend::Llvm);}
+
+fn aggregate_callback(backend: Backend) {
+    ordered_case(backend, include_str!("../../../core/front/cases/body/callable-aggregate.hirsel"));
+    ordered_case(backend, include_str!("../../../core/front/cases/body/callable-aggregate-captured.hirsel"));
+    ordered_case(backend, include_str!("../../../core/front/cases/body/callable-aggregate-overwrite.hirsel"));
+    ordered_case(backend, include_str!("../../../core/front/cases/body/callable-aggregate-viewed.hirsel"));
+}
+#[test]
+#[ignore="explicit native integration target"]
+fn aggregate_callback_cranelift(){aggregate_callback(Backend::Cranelift);}
+#[test]
+#[ignore="explicit native integration target"]
+fn aggregate_callback_llvm(){aggregate_callback(Backend::Llvm);}

@@ -1,0 +1,3 @@
+// A freshly captured scoped environment cannot live in its callee's stack on return.
+// expect: gap returning scoped capture environments is not represented
+fn make(a:u64)->(scoped fn()->u64) in a {scoped fn()->u64 {a}}

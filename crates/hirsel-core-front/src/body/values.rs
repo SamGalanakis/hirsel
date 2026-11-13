@@ -903,6 +903,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     }
                 }
                 let value = self.pointer(slot, n);
+                for (i, &child) in scratch.vals.iter().enumerate() {
+                    self.descriptor_component(
+                        Some(value),
+                        anchors::Component::Field(i as u32),
+                        child,
+                    );
+                }
                 self.temp(ty, Some(value));
                 Some(value)
             }
@@ -1260,6 +1267,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.install(at, r, vals[i], n);
         }
         let p = self.pointer(to, n);
+        for (i, &child) in vals.iter().enumerate() {
+            let component = case.map_or(anchors::Component::Field(i as u32), |case| {
+                anchors::Component::Case(case, i as u32)
+            });
+            self.descriptor_component(Some(p), component, child);
+        }
         self.temp(ty, Some(p));
         (ty, Some(p))
     }

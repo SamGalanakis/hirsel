@@ -1,0 +1,6 @@
+// OWN-20: callable types do not yet publish ordinary scoped-result anchor positions.
+// expect: gap scoped callable result anchors are not built
+fn plus(x:u64)->u64 {x+1}
+fn make(a:u64)->(scoped fn(u64)->u64) in a {plus}
+fn apply(f:fn(u64)->scoped fn(u64)->u64,a:u64)->u64 {let g=f(a);g(1)}
+fn checked()->u64 {apply(make,7)}

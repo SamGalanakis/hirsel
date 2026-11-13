@@ -1,0 +1,9 @@
+// An aggregate cannot outlive a callback's captured local slot.
+// expect: refuse OWN-21 at 7:2
+fn f() {
+ let p={
+  let n:u64=1
+  (scoped fn()->u64 {n},2u64)
+ }
+ let _=p.0()
+}

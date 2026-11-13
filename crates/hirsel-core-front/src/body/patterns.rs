@@ -615,6 +615,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let component = case.map_or(anchors::Component::Field(field), |c| {
             anchors::Component::Case(c, field)
         });
+        self.project_descriptor(subject.value, value, component);
         let anchors = self.anchors.project(subject.anchors, component);
         if anchors != 0
             && let Some(v) = value
@@ -807,6 +808,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     self.declare(b, ty, binding, origin, pat.site);
                     self.scope_slots.push(b);
                 }
+                self.bind_descriptor(b, value);
                 if self.anchor_tracked(ty) {
                     // An own scrutinee needs provenance only if a binding borrows
                     // it. Plain and taken pattern bindings allocate no anchor fact.
@@ -1598,6 +1600,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.install(at, rep, value, n);
         }
         let p = self.pointer(to, n);
+        self.descriptor_component(Some(p), anchors::Component::Case(case, 0), value);
         self.temp(ty, Some(p));
         Some(p)
     }

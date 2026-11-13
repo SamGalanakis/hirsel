@@ -1,0 +1,17 @@
+// A viewed variant field is still an invocable scoped callback.
+// expect: run checked() = 3
+// expect: run view_kinds() = 5
+fn checked()->u64 {
+ let mut n:u64=1
+ let p:Option[scoped fn(u64)->u64]=Some(scoped fn(x:u64)->u64 {n+=x;n})
+ match p {Some(cb)=>cb(2),None=>0}
+}
+fn plus(x:u64)->u64 {x+1}
+fn view_kinds()->u64 {
+ let owned:own fn(u64)->u64=plus
+ let borrowed=view owned
+ let plain:fn(u64)->u64=plus
+ let borrowed_plain=view plain
+ borrowed(1)+borrowed_plain(2)
+}
+pub fn main()->Result[(),Exit] {if checked()==3 && view_kinds()==5 {Ok(())}else{Error(Exit(status:1))}}

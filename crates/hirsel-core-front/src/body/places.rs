@@ -1061,7 +1061,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// The address of a used place as a pointer, for an argument passed by address.
     pub(super) fn place_ptr(&mut self, at: At, n: NodeId) -> Option<ValueId> {
         let value = self.place_ptr_inner(at, n);
-        self.read_descriptor(at.place.slot, value);
+        self.read_descriptor(at, value, n);
         value
     }
     fn place_ptr_inner(&mut self, at: At, n: NodeId) -> Option<ValueId> {
@@ -1081,7 +1081,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// The value of a used place: a local, or a field of one read in place.
     pub(super) fn emit_place(&mut self, at: At, n: NodeId) -> Option<ValueId> {
         let value = self.emit_place_inner(at, n);
-        self.read_descriptor(at.place.slot, value);
+        self.read_descriptor(at, value, n);
         value
     }
     fn emit_place_inner(&mut self, at: At, n: NodeId) -> Option<ValueId> {

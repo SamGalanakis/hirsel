@@ -1430,14 +1430,6 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     /// Copy the value of row `id` that `from` points at into place `to` (a move or a
     /// copy of plain data: the source needs no cleanup afterwards).
     fn copy_to(&mut self, to: AddressId, from: ValueId, id: TypeId, n: NodeId) {
-        if self.descriptors.of(Some(from)).is_some() && self.b.addresses[to.index()].steps.len != 0
-        {
-            self.gap(
-                n,
-                "capture descriptors in scoped aggregate fields are not built",
-            );
-            return;
-        }
         if self.e.needs_drop(id) {
             self.consume(Some(from), n);
         }
@@ -1491,7 +1483,11 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     fn snapshot(&mut self, from: ValueId, id: TypeId, n: NodeId) -> ValueId {
         let to = self.new_slot(PlaceTy::Declared(id), n);
         self.copy_to(to, from, id, n);
-        self.pointer(to, n)
+        let value = self.pointer(to, n);
+        if let Some(id) = self.descriptors.of(Some(from)) {
+            self.descriptors.values.insert(value, id);
+        }
+        value
     }
     /// Return `v`, a value of the body's result type: a declared result is written to
     /// the destination first.

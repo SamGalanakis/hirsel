@@ -1,0 +1,10 @@
+// Equal root unions do not make swapped callback fields equal at a back edge.
+// expect: refuse OWN-17 at 9:2
+fn f() {
+ let mut a:u64=1
+ let mut b:u64=10
+ let mut p=(scoped fn() {a+=1},scoped fn() {b+=1})
+ for _ in 0u64..1u64 {
+  p=(scoped fn() {b+=1},scoped fn() {a+=1})
+ }
+}

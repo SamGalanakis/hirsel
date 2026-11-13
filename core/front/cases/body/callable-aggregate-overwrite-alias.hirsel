@@ -1,0 +1,9 @@
+// The replacement callback's roots replace the old field's roots.
+// expect: refuse OWN-9 at 8:6
+fn f()->u64 {
+ let mut a:u64=1
+ let mut b:u64=10
+ let mut p=(scoped fn(x:u64)->u64 {a+=x;a},2u64)
+ p.0=scoped fn(x:u64)->u64 {b+=x;b}
+ p.0(b)
+}

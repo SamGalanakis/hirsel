@@ -2798,3 +2798,29 @@ fn temporary_index_views_keep_the_reached_owner() {
     let failures = run_case(&root().join("cases/body/index-temporary-owner.hirsel"));
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+#[test]
+fn aggregate_callback_cases() {
+    let mut failures = vec![];
+    for name in [
+        "callable-aggregate",
+        "callable-aggregate-alias",
+        "callable-aggregate-destructure-alias",
+        "callable-aggregate-lifetime",
+        "callable-aggregate-captured",
+        "callable-aggregate-overwrite",
+        "callable-aggregate-record-alias",
+        "callable-aggregate-overwrite-alias",
+        "callable-aggregate-loop-fields",
+        "callable-aggregate-viewed",
+        "callable-aggregate-captured-store-gap",
+        "callable-aggregate-mut-argument-gap",
+    ] {
+        failures.extend(
+            run_case(&root().join("cases/body").join(format!("{name}.hirsel")))
+                .into_iter()
+                .map(|f| format!("{name}: {f}")),
+        );
+    }
+    assert!(failures.is_empty(), "{failures:?}");
+}

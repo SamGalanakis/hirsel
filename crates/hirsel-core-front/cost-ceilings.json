@@ -5,114 +5,114 @@
     "m1": {
       "code_lines": 7453,
       "check_lower_per_line": 24900,
-      "whole_request_per_line": 45500,
-      "whole_process_per_line": 45600
+      "whole_request_per_line": 44300,
+      "whole_process_per_line": 44400
     },
     "std": {
       "code_lines": 4062,
       "check_lower_per_line": 16800,
-      "whole_request_per_line": 35400,
-      "whole_process_per_line": 35600
+      "whole_request_per_line": 34700,
+      "whole_process_per_line": 34800
     },
     "product": {
       "measurement": "One ordinary release check/lower request per M1 entry, core and exact supplied std subset preproduced; fresh private request stores; perf instructions:u including GNU time and process exit. Fixed is empty main with std or core only. Marginal is (process-fixed std)/own checked source lines, excluding prechecked library source lines. Instances are collected after this boundary and reported separately.",
       "fixed_std_instructions": 3219400,
-      "fixed_core_instructions": 2873300,
+      "fixed_core_instructions": 2869100,
       "entries": {
         "bfs-idiomatic": {
           "own_lines": 373,
-          "marginal_per_line": 91200
+          "marginal_per_line": 88800
         },
         "bfs-matched": {
           "own_lines": 373,
-          "marginal_per_line": 91200
+          "marginal_per_line": 88800
         },
         "generics-idiomatic": {
           "own_lines": 346,
-          "marginal_per_line": 101700
+          "marginal_per_line": 99200
         },
         "generics-matched": {
           "own_lines": 346,
-          "marginal_per_line": 101700
+          "marginal_per_line": 99200
         },
         "lru-idiomatic": {
           "own_lines": 496,
-          "marginal_per_line": 88800
+          "marginal_per_line": 86500
         },
         "lru-matched": {
           "own_lines": 496,
-          "marginal_per_line": 88800
+          "marginal_per_line": 86500
         },
         "files-idiomatic": {
           "own_lines": 351,
-          "marginal_per_line": 111000
+          "marginal_per_line": 107800
         },
         "files-matched": {
           "own_lines": 351,
-          "marginal_per_line": 110900
+          "marginal_per_line": 107700
         },
         "json-idiomatic": {
           "own_lines": 743,
-          "marginal_per_line": 76600
+          "marginal_per_line": 74200
         },
         "json-matched": {
           "own_lines": 743,
-          "marginal_per_line": 76600
+          "marginal_per_line": 74200
         },
         "pipeline-idiomatic": {
           "own_lines": 848,
-          "marginal_per_line": 87500
+          "marginal_per_line": 85000
         },
         "pipeline-matched": {
           "own_lines": 848,
-          "marginal_per_line": 87500
+          "marginal_per_line": 85000
         },
         "request-scratch-idiomatic": {
           "own_lines": 407,
-          "marginal_per_line": 97400
+          "marginal_per_line": 94800
         },
         "request-scratch-matched": {
           "own_lines": 407,
-          "marginal_per_line": 97500
+          "marginal_per_line": 94800
         },
         "rope-idiomatic": {
           "own_lines": 490,
-          "marginal_per_line": 92500
+          "marginal_per_line": 90100
         },
         "rope-matched": {
           "own_lines": 490,
-          "marginal_per_line": 92500
+          "marginal_per_line": 90100
         },
         "versions-idiomatic": {
           "own_lines": 449,
-          "marginal_per_line": 90700
+          "marginal_per_line": 88500
         },
         "versions-matched": {
           "own_lines": 449,
-          "marginal_per_line": 90700
+          "marginal_per_line": 88500
         }
       }
     }
   },
   "margin": "M1 growth observation+2%, std+5%, rounded up to100. Growth baseline is pre-anchor frozen work plus current compiler own-source minus frozen-source work. Named anchor residual is a fixed absolute instruction count, never part of the60000budget. Other body-free regressions remain red.",
   "finished_budget_per_line": 60000,
-  "forecast_revision": "915 slice24 effb2adc base; complete372/194bodies7453/4062lines",
+  "forecast_revision": "915 slice25 4adc5386base; complete372/194bodies7453/4062lines",
   "completion_forecast": {
     "m1": {
       "complete_bodies": 372,
       "bodies": 372,
       "missing_check_lower_per_line": 0,
       "additional_publication_per_line": 0,
-      "measured_process_per_line": 45076.69716892527,
-      "finished_process_per_line": 45076.69716892527
+      "measured_process_per_line": 43909.39983899101,
+      "finished_process_per_line": 43909.39983899101
     },
     "std": {
       "complete_bodies": 194,
       "bodies": 194,
       "missing_check_lower_per_line": 0,
       "additional_publication_per_line": 0,
-      "measured_process_per_line": 35064.670605613,
-      "finished_process_per_line": 35064.670605613
+      "measured_process_per_line": 34317.76267848351,
+      "finished_process_per_line": 34317.76267848351
     }
   },
   "forecast_method": "Current process instructions plus recorded missing checker/emission and publication per line. Live construct self costs project the written population and calibrate to native check/lower less driver keys. Completed IR/template bytes per completed definition line are charged for every unfinished line, retaining partial IR, at measured definition-encoding and archive write/hash rates. Refresh projection/counts when support changes.",
@@ -3030,6 +3030,148 @@
           "check_lower_per_line": 16439.182914820285,
           "whole_request_per_line": 34677.32299359921,
           "whole_process_per_line": 34825.005908419495
+        }
+      },
+      "completed_bodies_before": {
+        "m1": 372,
+        "std": 194
+      },
+      "completed_bodies_after": {
+        "m1": 372,
+        "std": 194
+      }
+    },
+    {
+      "to_revision": "4adc53864c32b982d7f9ba8df7c50ba4e3a8e325",
+      "reason": "915 slice25 resolved body-reference edges; same4adc5386base372/194complete bodies7453/4062lines, no completed-body change; keep direct target push; lower observations only",
+      "margin": "observation+2%,rounded up to100; ceilings only decrease",
+      "previous_ceilings": {
+        "m1": {
+          "code_lines": 7453,
+          "check_lower_per_line": 24900,
+          "whole_request_per_line": 45500,
+          "whole_process_per_line": 45600
+        },
+        "std": {
+          "code_lines": 4062,
+          "check_lower_per_line": 16800,
+          "whole_request_per_line": 35400,
+          "whole_process_per_line": 35600
+        },
+        "product": {
+          "measurement": "One ordinary release check/lower request per M1 entry, core and exact supplied std subset preproduced; fresh private request stores; perf instructions:u including GNU time and process exit. Fixed is empty main with std or core only. Marginal is (process-fixed std)/own checked source lines, excluding prechecked library source lines. Instances are collected after this boundary and reported separately.",
+          "fixed_std_instructions": 3219400,
+          "fixed_core_instructions": 2873300,
+          "entries": {
+            "bfs-idiomatic": {
+              "own_lines": 373,
+              "marginal_per_line": 91200
+            },
+            "bfs-matched": {
+              "own_lines": 373,
+              "marginal_per_line": 91200
+            },
+            "generics-idiomatic": {
+              "own_lines": 346,
+              "marginal_per_line": 101700
+            },
+            "generics-matched": {
+              "own_lines": 346,
+              "marginal_per_line": 101700
+            },
+            "lru-idiomatic": {
+              "own_lines": 496,
+              "marginal_per_line": 88800
+            },
+            "lru-matched": {
+              "own_lines": 496,
+              "marginal_per_line": 88800
+            },
+            "files-idiomatic": {
+              "own_lines": 351,
+              "marginal_per_line": 111000
+            },
+            "files-matched": {
+              "own_lines": 351,
+              "marginal_per_line": 110900
+            },
+            "json-idiomatic": {
+              "own_lines": 743,
+              "marginal_per_line": 76600
+            },
+            "json-matched": {
+              "own_lines": 743,
+              "marginal_per_line": 76600
+            },
+            "pipeline-idiomatic": {
+              "own_lines": 848,
+              "marginal_per_line": 87500
+            },
+            "pipeline-matched": {
+              "own_lines": 848,
+              "marginal_per_line": 87500
+            },
+            "request-scratch-idiomatic": {
+              "own_lines": 407,
+              "marginal_per_line": 97400
+            },
+            "request-scratch-matched": {
+              "own_lines": 407,
+              "marginal_per_line": 97500
+            },
+            "rope-idiomatic": {
+              "own_lines": 490,
+              "marginal_per_line": 92500
+            },
+            "rope-matched": {
+              "own_lines": 490,
+              "marginal_per_line": 92500
+            },
+            "versions-idiomatic": {
+              "own_lines": 449,
+              "marginal_per_line": 90700
+            },
+            "versions-matched": {
+              "own_lines": 449,
+              "marginal_per_line": 90700
+            }
+          }
+        }
+      },
+      "product_fixed": {
+        "std": 3156360,
+        "core": 2812828
+      },
+      "product_marginal_per_line": {
+        "bfs-idiomatic": 87014.43699731903,
+        "bfs-matched": 87009.58445040215,
+        "generics-idiomatic": 97234.87572254335,
+        "generics-matched": 97234.12427745665,
+        "lru-idiomatic": 84777.41935483871,
+        "lru-matched": 84784.20967741935,
+        "files-idiomatic": 105631.5698005698,
+        "files-matched": 105558.07407407407,
+        "json-idiomatic": 72719.399730821,
+        "json-matched": 72717.65545087484,
+        "pipeline-idiomatic": 83309.89268867925,
+        "pipeline-matched": 83311.20990566038,
+        "request-scratch-idiomatic": 92921.65110565111,
+        "request-scratch-matched": 92918.08845208846,
+        "rope-idiomatic": 88316.17142857143,
+        "rope-matched": 88315.8612244898,
+        "versions-idiomatic": 86721.52561247216,
+        "versions-matched": 86718.64810690423
+      },
+      "measured_per_line": {
+        "m1": {
+          "check_lower_per_line": 24371.651683885684,
+          "whole_request_per_line": 43361.40520595733,
+          "whole_process_per_line": 43457.07768683752
+        },
+        "std": {
+          "check_lower_per_line": 16440.192023633677,
+          "whole_request_per_line": 33930.24913835549,
+          "whole_process_per_line": 34078.097981290004
         }
       },
       "completed_bodies_before": {

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAGIC: &[u8; 8] = b"HCORE\0\0\0";
-const VERSION: u32 = 10;
+const VERSION: u32 = 11;
 const HEADER: usize = 12;
 const TRAILER: usize = 40;
 static NEXT: AtomicU64 = AtomicU64::new(0);

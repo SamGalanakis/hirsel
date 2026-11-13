@@ -95,7 +95,12 @@ impl CheckProduct {
                 pending.insert((path.clone(), false));
                 if let Some(header) = self.headers.get(&path) {
                     // Named types/signatures are needed even when folding removes a call.
-                    pending.extend(header.body_reads.iter().cloned().map(|p| (p, false)));
+                    pending.extend(
+                        header
+                            .body_reads
+                            .iter()
+                            .map(|&id| (self.index.definition_path(id), false)),
+                    );
                 }
                 if !self.definitions.contains_key(&path)
                     && !image_directory
@@ -124,8 +129,8 @@ impl CheckProduct {
                         header
                             .body_reads
                             .iter()
-                            .filter(|p| self.headers.get(*p).is_some_and(|h| h.has_body))
-                            .cloned()
+                            .map(|&id| self.index.definition_path(id))
+                            .filter(|p| self.headers.get(p).is_some_and(|h| h.has_body))
                             .map(|p| (p, true)),
                     );
                 }

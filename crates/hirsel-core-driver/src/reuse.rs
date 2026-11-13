@@ -17,7 +17,7 @@ pub(crate) struct Header {
     // Publication preserves definition IDs, and requests append to that index.
     // Signature dependencies are already resolved by the producing request.
     pub(crate) reads: Vec<DefinitionId>,
-    pub(crate) body_reads: Vec<DefPath>,
+    pub(crate) body_reads: Vec<DefinitionId>,
     pub(crate) has_body: bool,
     pub(crate) header_end: u32,
     pub(crate) site: Site,
@@ -125,17 +125,9 @@ impl Keys {
                 let mut body_reads = BTreeSet::new();
                 for name in &resolution.names {
                     if (item.tree.node(name.node).origin.span.start as usize) < end {
-                        match name.target {
-                            Target::Definition(id) => {
-                                reads.insert(id);
-                            }
-                            Target::ContextualConstructor { name } => {
-                                reads.extend(index.constructor_candidates(m.id, name));
-                            }
-                            _ => {}
-                        }
+                        reads.extend(target_definitions(index, m.id, name.target));
                     } else {
-                        targets(index, m.id, name.target, &mut body_reads);
+                        body_reads.extend(target_definitions(index, m.id, name.target));
                     }
                 }
                 anchors.insert((m.id, ordinal as u32), path.clone());
@@ -392,18 +384,26 @@ fn target_ids(index: &NameIndex, module: ModuleId, target: Target, out: &mut Vec
         _ => {}
     }
 }
-fn targets(index: &NameIndex, module: ModuleId, target: Target, out: &mut BTreeSet<DefPath>) {
-    match target {
-        Target::Definition(d) => {
-            out.insert(index.definition_path(d));
-        }
-        Target::ContextualConstructor { name } => out.extend(
-            index
-                .constructor_candidates(module, name)
-                .map(|d| index.definition_path(d)),
-        ),
-        _ => {}
-    }
+fn target_definitions(
+    index: &NameIndex,
+    module: ModuleId,
+    target: Target,
+) -> impl Iterator<Item = DefinitionId> + '_ {
+    let direct = if let Target::Definition(id) = target {
+        Some(id)
+    } else {
+        None
+    };
+    let constructor = if let Target::ContextualConstructor { name } = target {
+        Some(name)
+    } else {
+        None
+    };
+    direct.into_iter().chain(
+        constructor
+            .into_iter()
+            .flat_map(move |name| index.constructor_candidates(module, name)),
+    )
 }
 fn header_end(item: Item<'_>) -> usize {
     if !matches!(

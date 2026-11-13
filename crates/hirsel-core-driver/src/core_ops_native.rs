@@ -767,6 +767,28 @@ fn stable_placement_cranelift() { stable_placement(Backend::Cranelift); }
 #[test]
 #[ignore = "explicit native integration target"]
 fn stable_placement_llvm() { stable_placement(Backend::Llvm); }
+/// Run a front case natively: `main` checks each `// expect: run f(args) = v` line of the
+/// case, so both engines meet the case's own hand-derived values; exit status i + 1 names
+/// the first line that differs.
+fn run_lines_native(backend: Backend, case: &str) {
+    let mut main = String::from("pub fn main() -> Result[(), Exit] {\n");
+    for (i, line) in case.lines().filter_map(|l| l.strip_prefix("// expect: run ")).enumerate() {
+        let (call, want) = line.split_once(" = ").expect("a run line");
+        main += &format!("  if {call} != {want} {{ return Error(Exit(status: {})) }}\n", i + 1);
+    }
+    main += "  Ok(())\n}\n";
+    ordered_case(backend, &format!("{case}\n{main}"));
+}
+/// core.md "Floats": the unary float operations, bit for bit, on each engine.
+fn float_unary(backend: Backend) {
+    run_lines_native(backend, include_str!("../../../core/front/cases/body/float-unary.hirsel"));
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn float_unary_cranelift() { float_unary(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn float_unary_llvm() { float_unary(Backend::Llvm); }
 
 fn uninitialized_take_names(backend: Backend) {
     let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

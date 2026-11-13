@@ -443,5 +443,20 @@
     "row": "R7",
     "message": "this argument is not built",
     "owner": "910"
+  },
+  {
+    "row": "N1",
+    "message": "this core float operation is not built",
+    "owner": "895"
+  },
+  {
+    "row": "N2",
+    "message": "a float operation on a type parameter is not built",
+    "owner": "895"
+  },
+  {
+    "row": "N3",
+    "message": "this core integer operation is not built",
+    "owner": "895"
   }
 ]

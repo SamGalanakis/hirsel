@@ -53,10 +53,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) -> Option<ValueId> {
         let g = &self.p.fns[f];
         let Some(op) = NumericOp::named(&g.path.0.name) else {
-            if !self.live() {
-                return None;
+            if self.live() {
+                self.gap(n, "this core integer operation is not built");
             }
-            unreachable!("canonical rigid integer bodies use the published numeric operations");
+            return None;
         };
         let key = (f, tys[0], tys.get(1).copied().unwrap_or(ERROR));
         let abi = if let Some(&abi) = self.numeric_functions.get(&key) {

@@ -1,0 +1,60 @@
+// core.md "Floats": sqrt, abs, floor, ceil, trunc, round (ties away) and round_even (ties
+// to even) are the IEEE 754 operations; a NaN operand gives the canonical NaN. Operands
+// and results are bit patterns; each value is derived by hand (hex in each comment).
+// expect: run sqrt(0) = 0
+// expect: run sqrt(9223372036854775808) = 9223372036854775808
+// expect: run sqrt(4611686018427387904) = 4609047870845172685
+// expect: run sqrt(1) = 2188749418902061056
+// expect: run sqrt(9218868437227405312) = 9218868437227405312
+// expect: run sqrt(13830554455654793216) = 9221120237041090560
+// expect: run sqrt(18444492273895866369) = 9221120237041090560
+// expect: run abs(13832806255468478464) = 4609434218613702656
+// expect: run abs(9223372036854775808) = 0
+// expect: run floor(13826050856027422720) = 13830554455654793216
+// expect: run floor(4612811918334230528) = 4611686018427387904
+// expect: run ceil(13826050856027422720) = 9223372036854775808
+// expect: run ceil(4612811918334230528) = 4613937818241073152
+// expect: run trunc(13836183955189006336) = 13835058055282163712
+// expect: run trunc(13826050856027422720) = 9223372036854775808
+// expect: run round(4612811918334230528) = 4613937818241073152
+// expect: run round(13826050856027422720) = 13830554455654793216
+// expect: run round_even(4612811918334230528) = 4611686018427387904
+// expect: run round_even(13826050856027422720) = 9223372036854775808
+// expect: run round_even(4612811918334230527) = 4611686018427387904
+// expect: run round_even(9218868437227405312) = 9218868437227405312
+// expect: run floor(9221120237041090561) = 9221120237041090560
+// expect: run sqrt32(1073741824) = 1068827891
+// expect: run sqrt32(3221225472) = 2143289344
+//
+//   sqrt(0x0) = 0x0
+//   sqrt(0x8000000000000000) = 0x8000000000000000: sqrt(-0) is -0
+//   sqrt(0x4000000000000000) = 0x3ff6a09e667f3bcd: sqrt 2, nearest f64 (arith.core)
+//   sqrt(0x1) = 0x1e60000000000000: least subnormal 2^-1074: root 2^-537 exact
+//   sqrt(0x7ff0000000000000) = 0x7ff0000000000000: +inf
+//   sqrt(0xbff0000000000000) = 0x7ff8000000000000: below zero: canonical NaN
+//   sqrt(0xfff8000000000001) = 0x7ff8000000000000: a NaN operand: canonical NaN
+//   abs(0xbff8000000000000) = 0x3ff8000000000000: -1.5 to 1.5
+//   abs(0x8000000000000000) = 0x0: clears the sign of -0
+//   floor(0xbfe0000000000000) = 0xbff0000000000000: floor(-0.5) = -1.0 (core.md)
+//   floor(0x4004000000000000) = 0x4000000000000000: floor(2.5) = 2.0
+//   ceil(0xbfe0000000000000) = 0x8000000000000000: ceil(-0.5) = -0.0 (core.md)
+//   ceil(0x4004000000000000) = 0x4008000000000000: ceil(2.5) = 3.0
+//   trunc(0xc004000000000000) = 0xc000000000000000: trunc(-2.5) = -2.0
+//   trunc(0xbfe0000000000000) = 0x8000000000000000: trunc(-0.5) = -0.0
+//   round(0x4004000000000000) = 0x4008000000000000: round(2.5) = 3.0, ties away
+//   round(0xbfe0000000000000) = 0xbff0000000000000: round(-0.5) = -1.0, ties away
+//   round_even(0x4004000000000000) = 0x4000000000000000: round_even(2.5) = 2.0, ties to even
+//   round_even(0xbfe0000000000000) = 0x8000000000000000: round_even(-0.5) = -0.0
+//   round_even(0x4003ffffffffffff) = 0x4000000000000000: 2.4999999999999996: nearest is 2
+//   round_even(0x7ff0000000000000) = 0x7ff0000000000000: infinities unchanged
+//   floor(0x7ff8000000000001) = 0x7ff8000000000000: a NaN operand: canonical NaN
+//   sqrt32(0x40000000) = 0x3fb504f3: nearest f32 to sqrt 2 (arith.core)
+//   sqrt32(0xc0000000) = 0x7fc00000: the f32 canonical NaN
+fn sqrt(b: u64) -> u64 { float.to_bits64(float.sqrt(float.from_bits64(b))) }
+fn abs(b: u64) -> u64 { float.to_bits64(float.abs(float.from_bits64(b))) }
+fn floor(b: u64) -> u64 { float.to_bits64(float.floor(float.from_bits64(b))) }
+fn ceil(b: u64) -> u64 { float.to_bits64(float.ceil(float.from_bits64(b))) }
+fn trunc(b: u64) -> u64 { float.to_bits64(float.trunc(float.from_bits64(b))) }
+fn round(b: u64) -> u64 { float.to_bits64(float.round(float.from_bits64(b))) }
+fn round_even(b: u64) -> u64 { float.to_bits64(float.round_even(float.from_bits64(b))) }
+fn sqrt32(b: u32) -> u32 { float.to_bits32(float.sqrt(float.from_bits32(b))) }

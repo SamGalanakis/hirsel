@@ -927,10 +927,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return if g.path.0.modules == ["int"] {
                 self.generic_numeric(f, tys, vals, n)
             } else {
-                if !self.live() {
-                    return None;
+                if self.live() {
+                    self.gap(n, "a float operation on a type parameter is not built");
                 }
-                unreachable!("canonical core has no rigid float operation body")
+                None
             };
         }
         if g.path.0.modules == ["float"] {
@@ -1064,7 +1064,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             "narrow" | "try_narrow" => ConvertMode::TryNarrow,
             _ => {
-                unreachable!("every canonical core integer intrinsic has a lowering");
+                self.gap(n, "this core integer operation is not built");
+                return None;
             }
         };
         let operand = vals[0]?;
@@ -1356,8 +1357,31 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             "to_int" => return self.float_to_int(result_ty, tys[1], operand, n),
             "total_order" => return self.float_total_order(result_ty, operand, vals[1]?, n),
+            "sqrt" | "abs" | "floor" | "ceil" | "trunc" | "round" | "round_even" => {
+                use hirsel_core_ir::ScalarUnaryOp as U;
+                let op = match name {
+                    "sqrt" => U::Sqrt,
+                    "abs" => U::Abs,
+                    "floor" => U::Floor,
+                    "ceil" => U::Ceil,
+                    "trunc" => U::Trunc,
+                    "round" => U::Round,
+                    _ => U::RoundEven,
+                };
+                let result = self.value(result_ir?);
+                self.inst(
+                    Inst::ScalarUnary {
+                        result,
+                        op,
+                        operand,
+                    },
+                    n,
+                );
+                return Some(result);
+            }
             _ => {
-                unreachable!("every canonical core float intrinsic has a lowering");
+                self.gap(n, "this core float operation is not built");
+                return None;
             }
         };
         self.numeric_convert(result_ir?, mode, operand, n)

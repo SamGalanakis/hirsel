@@ -66,6 +66,9 @@ impl CheckProduct {
                     definition: key.definition.clone(),
                     message: e.to_string(),
                 })?;
+            if !product.check.refusals.is_empty() || !product.incomplete.is_empty() {
+                return Err(InstanceStop::Incomplete(key.definition.clone()));
+            }
             let Some(function) = product.check.function else {
                 return Err(InstanceStop::Incomplete(key.definition.clone()));
             };

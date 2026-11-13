@@ -726,3 +726,64 @@ fn invalid_utf8_diagnostics_keep_raw_byte_spans() {
         hirsel_core_syntax::Span { start: 0, end: 1 }
     );
 }
+
+#[test]
+fn session_id_changes_reuse_and_rebind_cached_refusals() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "fn bad() -> u64 { let n = 7; 0 }\n";
+    let mut driver = Driver::default();
+    let old = driver
+        .check(request(source, dir.path()), &mut Meter::new(false))
+        .unwrap();
+    let earlier = dir.path().join("earlier.hirsel");
+    std::fs::write(&earlier, "fn extra() -> u64 { 42 }\n").unwrap();
+    let configured = || {
+        let mut req = request(source, dir.path());
+        req.inputs.packages[0]
+            .sources
+            .push(hirsel_core_resolve::ModuleSource {
+                file: earlier.clone(),
+                modules: vec!["aaa".into()],
+                signatures: false,
+            });
+        req
+    };
+    let edited = driver.check(configured(), &mut Meter::new(false)).unwrap();
+    assert_eq!(names(&edited), ["extra"]);
+    assert_ne!(
+        old.diagnostics[0].primary.module,
+        edited.diagnostics[0].primary.module
+    );
+    let disk = Driver::default()
+        .check(configured(), &mut Meter::new(false))
+        .unwrap();
+    assert!(disk.rechecked.is_empty());
+    for product in [&edited, &disk] {
+        let diagnostics = product.machine_diagnostics().unwrap();
+        let refusal = diagnostics.iter().find(|d| d.rule == "LANG-11").unwrap();
+        assert_eq!(refusal.primary.module, "app@1/main");
+        let span = refusal.primary.span;
+        assert_eq!(&source[span.start as usize..span.end as usize], "7");
+    }
+}
+
+#[test]
+fn incomplete_source_is_not_an_emittable_instance() {
+    let dir = tempfile::tempdir().unwrap();
+    let product = Driver::default()
+        .check(
+            request("fn root() -> u64 { for n in [1u64] {}; 42 }\n", dir.path()),
+            &mut Meter::new(false),
+        )
+        .unwrap();
+    assert!(!product.incomplete.is_empty());
+    let key = hirsel_core_ir::InstanceKey {
+        definition: DefPath::from_full("app@1/main/root").unwrap(),
+        types: vec![],
+        dictionaries: vec![],
+    };
+    assert!(matches!(
+        product.instances([key], 8),
+        Err(InstanceStop::Incomplete(_))
+    ));
+}

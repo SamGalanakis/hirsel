@@ -110,6 +110,15 @@ fn upper_owned() -> bool {
     same(s, "ABC-ÉZ")
 }
 
+// The neighbours of a-z: '`' (0x60) and '{' (0x7B) stay, as do '@' and '['; 0xFF-range
+// bytes of é are not shifted by the one-comparison test.
+// expect: run upper_range_edges() = true
+fn upper_range_edges() -> bool {
+    let mut s = result.unwrap(string.from("`az{@AZ[é"))
+    result.unwrap(string.make_ascii_upper(mut s))
+    same(s, "`AZ{@AZ[é")
+}
+
 // A literal is copied first.
 // expect: run upper_static() = true
 fn upper_static() -> bool {

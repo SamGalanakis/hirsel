@@ -106,7 +106,8 @@ pub fn make_ascii_upper(mut s: String) -> Result[(), Capacity] {
     }
     for i in 0 .. list.len(b) {
         let x = b[i]
-        if x >= b'a' && x <= b'z' {
+        // One comparison: below b'a' wraps past 25.
+        if int.wrapping_sub(x, b'a') < 26 {
             b[i] = x - 32
         }
     }

@@ -133,10 +133,13 @@ fn owned_failure_string_outlives_its_frame_and_context_without_admission() {
             ctx.limit_enter(capacity).unwrap();
             let len = if capacity == 0 { 0 } else { 3 };
             let data = if reserved {
-                let allocation = hirsel_core_alloc(&ctx, std::ptr::null_mut(), capacity, 1, capacity, false);
+                let allocation =
+                    hirsel_core_alloc(&ctx, std::ptr::null_mut(), capacity, 1, capacity, false);
                 std::ptr::copy_nonoverlapping(b"hey".as_ptr(), allocation.pointer, len);
                 allocation.pointer
-            } else { std::ptr::null_mut() };
+            } else {
+                std::ptr::null_mut()
+            };
             ctx.limit_exit();
             ctx.current.inject(1, true);
             hirsel_core_raise_string(&mut ctx, 77, data, len as u64, capacity);
@@ -147,7 +150,9 @@ fn owned_failure_string_outlives_its_frame_and_context_without_admission() {
             assert_eq!((cause.kind, cause.site), (crate::causes::FAIL, 77));
             let message = &*cause.message.cast::<crate::causes::StringMessage>();
             assert_eq!((message.len, message.capacity), (len as u64, capacity));
-            if len != 0 { assert_eq!(std::slice::from_raw_parts(message.data, len), b"hey"); }
+            if len != 0 {
+                assert_eq!(std::slice::from_raw_parts(message.data, len), b"hey");
+            }
             assert_eq!(root.available(), 1000 - 32 - capacity);
             hirsel_core_causes_drop(chain);
             assert_eq!(root.available(), 1000);

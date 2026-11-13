@@ -115,29 +115,186 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
         )
     }
-    /// A string or byte-string literal is static (core.md "Literals"): a `String` or a
-    /// `Bytes` (`List[u8]`) whose carrier is `{static data, byte length, capacity 0}`. It
-    /// admits nothing, is never charged and cannot fail; capacity 0 owns no storage, so
-    /// its cleanup frees nothing (FORM "Strings and literals"). `""` and `b""` have a
-    /// null data pointer. Where a view of that type is expected, the literal is the view
-    /// of its frame slot.
-    fn static_literal(
-        &mut self,
-        n: NodeId,
-        bytes: bool,
-        want: Option<Want>,
-    ) -> (TyId, Option<ValueId>) {
+    /// A byte-string literal is not static (core.md "Literals", c8e2e795): an own `List`
+    /// with elements owns its storage, because a `List` has in-place element writes. It
+    /// has type `Result[Bytes, Capacity]`, admits its length as `List[u8]` storage and
+    /// copies its bytes. The empty literal is `{null, 0, 0}`: capacity 0 means length 0,
+    /// so it admits nothing and cannot fail, like `list.with_capacity(0)`.
+    fn byte_string(&mut self, n: NodeId) -> (TyId, Option<ValueId>) {
         let p = self.p;
-        let decl = p.core_decl(if bytes { "List" } else { "String" });
-        let (Some(data), Some(decl)) = (quoted_bytes(self.token_text(n), bytes), decl) else {
+        let (Some(bytes), Some(result), Some(list), Some(cap)) = (
+            quoted_bytes(self.token_text(n), true),
+            p.core_decl("Result"),
+            p.core_decl("List"),
+            p.core_decl("Capacity"),
+        ) else {
+            return self.gap_ty(n, "byte string literal form is not built");
+        };
+        let list = self.t.mk(TyKind::Adt(list, vec![scalar(Scalar::U8)]));
+        let cap = self.t.mk(TyKind::Adt(cap, vec![]));
+        let ty = self.t.mk(TyKind::Adt(result, vec![list, cap]));
+        let (id, list_id, cap_id) = match (self.rep(ty), self.rep(list), self.rep(cap)) {
+            (Ok(Rep::Place(a)), Ok(Rep::Place(b)), Ok(Rep::Place(c))) => (a, b, c),
+            (Err(what), _, _) | (_, Err(what), _) | (_, _, Err(what)) => {
+                return self.gap_ty(n, what);
+            }
+            _ => return (ty, None),
+        };
+        if !self.live() {
+            return (ty, None);
+        }
+        let to = self.new_slot(PlaceTy::Declared(id), n);
+        let u64t = Ty::Scalar(Scalar::U64);
+        let len = bytes.len() as u64;
+        let (Some(length), Some(null)) = (self.konst(u64t, len, n), self.konst(Ty::Ptr, 0, n))
+        else {
+            return (ty, None);
+        };
+        // Ok: the carrier {storage, length, capacity = length}.
+        let ok = |cx: &mut Self, block: ValueId| {
+            cx.inst(
+                Inst::SetCase {
+                    address: to,
+                    case: 0,
+                },
+                n,
+            );
+            let carrier = cx.address(
+                AddressBase::Address(to),
+                &[Step::CaseField { case: 0, field: 0 }],
+                PlaceTy::Declared(list_id),
+                n,
+            );
+            for (k, value) in [block, length, length].into_iter().enumerate() {
+                let Some(offset) = cx.konst(u64t, 8 * k as u64, n) else {
+                    return;
+                };
+                let at = cx.address(
+                    AddressBase::Address(carrier),
+                    &[Step::Byte(offset)],
+                    PlaceTy::Value(if k == 0 { Ty::Ptr } else { u64t }),
+                    n,
+                );
+                cx.inst(Inst::Store { address: at, value }, n);
+            }
+        };
+        if bytes.is_empty() {
+            ok(self, null);
+        } else {
+            let Some(charge) = self.konst(u64t, len.next_multiple_of(8), n) else {
+                return (ty, None);
+            };
+            // MEM-24: `List[u8]` storage of capacity `len`, charged rounded up to 8; the
+            // block is that rounded size so the bytes go in as whole words.
+            let block = self.value(Ty::Ptr);
+            let available = self.value(u64t);
+            self.inst(
+                Inst::Alloc {
+                    result: block,
+                    available,
+                    region_entry: None,
+                    kind: AllocKind::Plain,
+                    place: AllocPlace::Current,
+                    charge,
+                    overflow: None,
+                    size: charge,
+                    align: 8,
+                    fail: None,
+                },
+                n,
+            );
+            let admitted = self.value(Ty::Scalar(Scalar::Bool));
+            self.inst(
+                Inst::Compare {
+                    result: admitted,
+                    op: CompareOp::Ne,
+                    left: block,
+                    right: null,
+                },
+                n,
+            );
+            let (yes, no, join) = (
+                self.new_block(&[]),
+                self.new_block(&[]),
+                self.new_block(&[]),
+            );
+            let (ye, ne) = (self.edge(yes, &[]), self.edge(no, &[]));
+            self.end(
+                Terminator::Branch {
+                    condition: admitted,
+                    yes: ye,
+                    no: ne,
+                },
+                Some(n),
+            );
+            self.start(yes);
+            // The bytes as little-endian words (memory.md: scalars are little-endian),
+            // the last one zero-padded inside the rounded block.
+            for (k, word) in bytes.chunks(8).enumerate() {
+                let mut w = [0u8; 8];
+                w[..word.len()].copy_from_slice(word);
+                let (Some(offset), Some(value)) = (
+                    self.konst(u64t, 8 * k as u64, n),
+                    self.konst(u64t, u64::from_le_bytes(w), n),
+                ) else {
+                    return (ty, None);
+                };
+                let at = self.address(
+                    AddressBase::Value(block),
+                    &[Step::Byte(offset)],
+                    PlaceTy::Value(u64t),
+                    n,
+                );
+                self.inst(Inst::Store { address: at, value }, n);
+            }
+            ok(self, block);
+            self.jump(join, &[], n);
+            // Error: `Capacity { requested, available }`.
+            self.start(no);
+            self.inst(
+                Inst::SetCase {
+                    address: to,
+                    case: 1,
+                },
+                n,
+            );
+            let err = self.address(
+                AddressBase::Address(to),
+                &[Step::CaseField { case: 1, field: 0 }],
+                PlaceTy::Declared(cap_id),
+                n,
+            );
+            for (k, value) in [charge, available].into_iter().enumerate() {
+                let at = self.address(
+                    AddressBase::Address(err),
+                    &[Step::Field(k as u32)],
+                    PlaceTy::Value(u64t),
+                    n,
+                );
+                self.inst(Inst::Store { address: at, value }, n);
+            }
+            self.jump(join, &[], n);
+            self.start(join);
+        }
+        let v = self.pointer(to, n);
+        self.temp(ty, Some(v));
+        (ty, Some(v))
+    }
+    /// A string literal is static (core.md "Literals"): a `String` whose carrier is
+    /// `{static data, byte length, capacity 0}`. It admits nothing, is never charged and
+    /// cannot fail; capacity 0 owns no storage, so its cleanup frees nothing (FORM
+    /// "Strings and literals"), and no operation writes a `String`'s bytes in place. `""`
+    /// has a null data pointer. Where a view of `String` is expected, the literal is the
+    /// view of its frame slot.
+    fn static_literal(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
+        let p = self.p;
+        let (Some(data), Some(decl)) = (
+            quoted_bytes(self.token_text(n), false),
+            p.core_decl("String"),
+        ) else {
             return self.gap_ty(n, "string literal form is not built");
         };
-        let args = if bytes {
-            vec![scalar(Scalar::U8)]
-        } else {
-            vec![]
-        };
-        let ty = self.t.mk(TyKind::Adt(decl, args));
+        let ty = self.t.mk(TyKind::Adt(decl, vec![]));
         let viewed = want.is_some_and(|w| matches!(self.t.kind(w.ty), TyKind::View(x) if *x == ty));
         let shown = if viewed {
             self.t.mk(TyKind::View(ty))
@@ -272,8 +429,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 };
                 (s, float_bits(s, if negate { -x } else { x }))
             }
-            Some(TokenKind::Bytes) => return self.static_literal(n, true, want),
-            Some(TokenKind::String) => return self.static_literal(n, false, want),
+            Some(TokenKind::Bytes) => return self.byte_string(n),
+            Some(TokenKind::String) => return self.static_literal(n, want),
             _ => return self.gap_ty(n, "literal form is not built"),
         };
         let v = self.konst(Ty::Scalar(ty), bits, n);

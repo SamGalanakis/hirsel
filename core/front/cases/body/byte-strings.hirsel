@@ -1,7 +1,7 @@
-// S5 (core.md "Literals"): a byte-string literal is a static `Bytes` of capacity 0, like a
-// string literal: no Result, nothing admitted or charged (each run ends with used 0).
-// Hand-derived: b"a\x00\xff\n" is the bytes 97, 0, 255, 10; br#"x"y"# is 120, 34, 121;
-// b"" has length 0; a literal's capacity is 0.
+// core.md "Literals" (c8e2e795, S5 withdrawn): a byte-string literal is
+// `Result[Bytes, Capacity]`, admits its length as storage and copies its bytes; the run
+// harness checks the storage is freed (used 0). Hand-derived: b"a\x00\xff\n" is the bytes
+// 97, 0, 255, 10; br#"x"y"# is 120, 34, 121; b"" has length 0 and capacity 0.
 // expect: run at(0) = 97
 // expect: run at(1) = 0
 // expect: run at(2) = 255
@@ -10,15 +10,27 @@
 // expect: run count(0) = 4
 // expect: run raw(1) = 34
 // expect: run empty(0) = 0
-// expect: run cap(0) = 0
 fn at(i: u64) -> u64 {
-  let xs = b"a\x00\xff\n"
-  int.widen(xs[i])
+  match b"a\x00\xff\n" {
+    Ok(xs) => int.widen(xs[i]),
+    Error(_) => 1000
+  }
 }
-fn count(x: u64) -> u64 { list.len(b"a\x00\xff\n") + x }
+fn count(x: u64) -> u64 {
+  match b"a\x00\xff\n" {
+    Ok(xs) => list.len(xs) + x,
+    Error(_) => 1000
+  }
+}
 fn raw(i: u64) -> u64 {
-  let xs = br#"x"y"#
-  int.widen(xs[i])
+  match br#"x"y"# {
+    Ok(xs) => int.widen(xs[i]),
+    Error(_) => 1000
+  }
 }
-fn empty(x: u64) -> u64 { list.len(b"") + x }
-fn cap(x: u64) -> u64 { list.capacity(b"abc") + x }
+fn empty(x: u64) -> u64 {
+  match b"" {
+    Ok(xs) => list.len(xs) + x,
+    Error(_) => 1000
+  }
+}

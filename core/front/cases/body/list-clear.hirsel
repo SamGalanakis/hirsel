@@ -1,7 +1,8 @@
-// Clear drops elements in ascending order, including the suffix after failure.
+// Clear drops elements in ascending order, including the suffix after failure, and keeps
+// the storage: b"abc" owns capacity 3 (core.md "Literals").
 // expect: accept
 // expect: run reuse() = 904
-// expect: run static_value() = 0
+// expect: run static_value() = 3
 // expect: run resources() = 4 trace 7,11
 // expect: run failed_drop() = fail Unwrap,Unwrap trace 7,11
 fn clear[T](mut xs: List[T]) { list.clear(mut xs) }
@@ -14,7 +15,7 @@ fn reuse() -> u64 {
     xs[0] * 100 + list.capacity(xs)
 }
 fn static_value() -> u64 {
-    let mut xs = b"abc"
+    let mut xs = result.unwrap(b"abc")
     clear(mut xs)
     list.len(xs) + list.capacity(xs)
 }

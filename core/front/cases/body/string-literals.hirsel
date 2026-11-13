@@ -29,7 +29,7 @@ fn le(a: u64, b: u64) -> bool { pick(a) <= pick(b) }
 fn eq(a: u64, b: u64) -> bool { pick(a) == pick(b) }
 fn rec_lt(a: u64, b: u64) -> bool { N(name: "ab", k: a) < N(name: "ab", k: b) }
 fn rec_gt(x: u64) -> bool { N(name: "b", k: x) > N(name: "ab", k: 9) }
-fn bytes_lt(x: u64) -> bool { b"ab" < b"abc" && b"\xff" > b"\x7f\xff" }
+fn bytes_lt(x: u64) -> bool { result.unwrap(b"ab") < result.unwrap(b"abc") && result.unwrap(b"\xff") > result.unwrap(b"\x7f\xff") }
 fn viewed(x: u64) -> bool {
   let s: View[String] = "ab"
   if x == 0 { s < "abc" } else { s > "abc" }

@@ -1,8 +1,8 @@
-// Pop transfers the last element and preserves the allocation.
+// Pop transfers the last element and preserves the allocation (b"abc" owns capacity 3).
 // expect: accept
 // expect: run values() = 110704
 // expect: run empty() = 0
-// expect: run static_value() = 990200
+// expect: run static_value() = 990203
 // expect: run resource_value() = 7 trace 7
 fn pop[T](mut xs: List[T]) -> Option[T] { list.pop(mut xs) }
 fn values() -> u64 {
@@ -18,7 +18,7 @@ fn empty() -> u64 {
     match pop(mut xs) { None => list.capacity(xs), Some(_) => 999 }
 }
 fn static_value() -> u64 {
-    let mut xs = b"abc"
+    let mut xs = result.unwrap(b"abc")
     let last: u64 = int.widen(option.unwrap(pop(mut xs)))
     last * 10000 + list.len(xs) * 100 + list.capacity(xs)
 }

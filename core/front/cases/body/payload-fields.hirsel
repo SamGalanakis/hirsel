@@ -17,3 +17,14 @@ fn counted(k: u64) -> u64 {
 fn shared(k: u64) -> u64 {
   match arc.new(C(a: k, b: 7, i: I(v: 40))) { Ok(h) => sum_arc(h), Error(_) => 999 }
 }
+// rope's `p.chunk.value`: a counted field of a record, its String read as a view.
+type Chunk: shareable { id: u64, value: String }
+type Piece { chunk: Rc[Chunk], lo: u64 }
+fn chunk_len(p: Piece) -> u64 { string.byte_len(p.chunk.value) + p.lo }
+// versions' `n.key`: a view of an Arc bound from a viewed Option.
+type Node: shareable + send { key: u64, left: Option[Arc[Node]] }
+fn left_key(root: Option[Arc[Node]]) -> u64 {
+  let Some(n) = view root else { return 0 }
+  let Some(l) = view n.left else { return n.key }
+  n.key + l.key
+}

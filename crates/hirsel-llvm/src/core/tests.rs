@@ -10,6 +10,35 @@ use std::sync::atomic::{AtomicU64, Ordering};
 mod host_memory;
 
 #[test]
+fn storage_roles_keep_moved_buffers_in_one_scope() {
+    let module = text::parse(include_str!("../../tests/core_runtime/roles.core")).unwrap();
+    wf::module(&module).unwrap();
+    let mut declarations = BTreeSet::new();
+    let scopes = alias::Scopes::new(
+        &module,
+        &module.functions[0],
+        "test",
+        &mut 2,
+        &mut declarations,
+    )
+    .unwrap();
+    assert_eq!(
+        scopes.access(&[AddressId(3)]),
+        scopes.access(&[AddressId(7)]),
+        "a move changes the carrier, not the buffer role"
+    );
+    let on = emit_ir_with_facts(&module, false, true).unwrap();
+    assert!(on.contains("@llvm.experimental.noalias.scope.decl(metadata !{"));
+    assert!(on.contains("!alias.scope !{"));
+    assert!(on.contains("!noalias !{"));
+    let off = emit_ir_with_facts(&module, false, false).unwrap();
+    assert!(!off.contains("!alias.scope"));
+    assert!(!off.contains("!noalias"));
+    assert!(!off.contains("@llvm.experimental.noalias.scope.decl"));
+    agree(&module, &[(FuncId(0), vec![])]);
+}
+
+#[test]
 fn loan_facts_and_diagnostic_off_preserve_abi_and_legal_aliases() {
     let module = text::parse(include_str!("../../tests/core_runtime/loans.core")).unwrap();
     wf::module(&module).unwrap();

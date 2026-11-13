@@ -186,6 +186,7 @@ pub(super) fn glue(
             constants: &[],
             observe_charge: false,
             facts,
+            aliases: None,
             empty_bounds: empty::EmptyBounds::default(),
             code: String::new(),
             allocations: String::new(),

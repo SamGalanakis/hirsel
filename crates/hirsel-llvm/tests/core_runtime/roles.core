@@ -1,0 +1,46 @@
+core v1
+type t0 = own "List[u8]" { items: seq u8 }
+sig g0 = () -> (u8)
+inst n0 = core@1/m/k [] []
+fn f0 = n0 g0 {
+  slot s0 = t0
+  slot s1 = t0
+  addr a0 = s0 byte v0 : ptr
+  addr a1 = s0 byte v1 : u64
+  addr a2 = s0 byte v2 : u64
+  addr a3 = v6 index v0 : u8
+  addr a4 = s1 : t0
+  addr a5 = s0 : t0
+  addr a6 = s1 byte v0 : ptr
+  addr a7 = v9 index v0 : u8
+b0:
+  live s0
+  live s1
+  v0: u64 = const 0
+  v1: u64 = const 8
+  v2: u64 = const 16
+  v3: u64 = const 1
+  v4: ptr, v5: u64 = alloc own v1 align 8 charge v1
+  address a0
+  address a1
+  address a2
+  store a0, v4
+  store a1, v3
+  store a2, v1
+  v6: ptr = read a0
+  v7: u8 = const 5
+  address a3
+  store a3, v7
+  v8: u64 = const 24
+  address a4
+  address a5
+  copy a4, a5, v8
+  address a6
+  v9: ptr = read a6
+  address a7
+  v10: u8 = read a7
+  free v4 charge v1
+  dead s1
+  dead s0
+  return v10
+}

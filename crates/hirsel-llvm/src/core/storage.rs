@@ -196,6 +196,9 @@ impl FunctionEmitter<'_> {
         Ok(())
     }
     pub(super) fn runtime_void(&mut self, name: &str, args: &[(String, String)]) {
+        self.runtime_void_metadata(name, args, "");
+    }
+    fn runtime_void_metadata(&mut self, name: &str, args: &[(String, String)], metadata: &str) {
         self.intrinsics.insert(format!(
             "declare void @{name}({})",
             args.iter()
@@ -204,7 +207,7 @@ impl FunctionEmitter<'_> {
                 .join(", ")
         ));
         self.line(format!(
-            "call void @{name}({})",
+            "call void @{name}({}){metadata}",
             args.iter()
                 .map(|(t, v)| format!("{t} {v}"))
                 .collect::<Vec<_>>()
@@ -410,12 +413,14 @@ impl FunctionEmitter<'_> {
                 self.free_block(&p, &n);
             }
             Inst::Copy { to, from, bytes } => {
+                let metadata = self.access_facts(&[to, from]);
                 let to = self.address(to);
                 let from = self.address(from);
                 let n = self.get(bytes);
-                self.runtime_void(
+                self.runtime_void_metadata(
                     "llvm.memcpy.p0.p0.i64",
                     &[ptr(&to), ptr(&from), word(n), ("i1".into(), "false".into())],
+                    &metadata,
                 );
             }
             Inst::LimitEnter {

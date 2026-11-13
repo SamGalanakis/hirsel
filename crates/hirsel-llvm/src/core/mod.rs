@@ -7,6 +7,7 @@ pub mod memory_layout {
 }
 
 mod abi;
+mod alias;
 mod bytes;
 mod case;
 mod cleanup;
@@ -109,6 +110,7 @@ fn emit_ir_with_facts(module: &Module, observe_charge: bool, facts: bool) -> Res
     }
     let recipes = hirsel_core_layout::compute(&module.types).expect("producer layouts");
     let mut intrinsics = BTreeSet::new();
+    let mut next_scope = 2;
     let failures = failure::Failures::new(module);
     for (i, f) in module.functions.iter().enumerate() {
         let sig = &module.signatures[f.signature.index()];
@@ -130,7 +132,11 @@ fn emit_ir_with_facts(module: &Module, observe_charge: bool, facts: bool) -> Res
             .unwrap();
             continue;
         };
+        let aliases = facts
+            .then(|| alias::Scopes::new(module, f, &name, &mut next_scope, &mut intrinsics))
+            .flatten();
         let mut e = FunctionEmitter {
+            aliases,
             module,
             body,
             recipes: &recipes,
@@ -177,6 +183,9 @@ fn emit_ir_with_facts(module: &Module, observe_charge: bool, facts: bool) -> Res
                 format!("%p{}", i - usize::from(sig.dest.is_some()))
             };
             e.put(*v, &parameter);
+        }
+        if let Some(aliases) = &e.aliases {
+            e.line(aliases.declaration());
         }
         e.line("br label %b0");
         let mut forwarding = forward::Forwarding::new(body);
@@ -360,6 +369,7 @@ struct FunctionEmitter<'a> {
     empty_bounds: empty::EmptyBounds,
     observe_charge: bool,
     facts: bool,
+    aliases: Option<alias::Scopes>,
     code: String,
     allocations: String,
     next: usize,
@@ -394,6 +404,11 @@ impl FunctionEmitter<'_> {
     }
     fn put(&mut self, v: ValueId, x: &str) {
         self.line(format!("store {} {x}, ptr %v{}", ty(self.vty(v)), v.0));
+    }
+    fn access_facts(&self, addresses: &[AddressId]) -> String {
+        self.aliases
+            .as_ref()
+            .map_or_else(String::new, |a| a.access(addresses))
     }
     fn address(&mut self, a: AddressId) -> String {
         self.calc(format!("load ptr, ptr %a{}", a.0))
@@ -622,14 +637,19 @@ impl FunctionEmitter<'_> {
                 result, address, ..
             } => {
                 let p = self.address(address);
-                let x = self.calc(format!("load {}, ptr {p}, align 1", ty(self.vty(result))));
+                let metadata = self.access_facts(&[address]);
+                let x = self.calc(format!(
+                    "load {}, ptr {p}, align 1{metadata}",
+                    ty(self.vty(result))
+                ));
                 self.put(result, &x);
             }
             Inst::Store { address, value } => {
                 let p = self.address(address);
                 let x = self.get(value);
+                let metadata = self.access_facts(&[address]);
                 self.line(format!(
-                    "store {} {x}, ptr {p}, align 1",
+                    "store {} {x}, ptr {p}, align 1{metadata}",
                     ty(self.vty(value))
                 ));
             }

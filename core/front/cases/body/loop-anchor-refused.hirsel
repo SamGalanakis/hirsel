@@ -1,0 +1,17 @@
+// OWN-17: every scoped slot preserves its anchor set at each back edge.
+// expect: refuse OWN-17 at 8:3
+// expect: refuse OWN-17 at 16:2
+fn different(a:List[u64],b:List[u64]) {
+ let mut v=view a
+ loop {
+  v=view b
+  continue
+ }
+}
+scoped type Holder { xs:View[List[u64]] }
+fn record(a:List[u64],b:List[u64]) {
+ let mut h=Holder(xs:view a)
+ loop {
+  h=Holder(xs:view b)
+ }
+}

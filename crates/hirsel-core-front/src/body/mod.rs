@@ -39,6 +39,7 @@ use hirsel_core_syntax::{Item, NodeId, NodeKind, Span, TokenKind, byte_value, ch
 use rustc_hash::FxHashMap as HashMap;
 
 mod admission;
+mod anchors;
 mod builtins;
 mod callable_abi;
 mod calls;
@@ -827,6 +828,7 @@ struct Acc {
     merge: u32,
     edge: u32,
     descriptor: Option<u32>,
+    anchors: u32,
 }
 
 /// A block every one of whose predecessors is known only as they are emitted; it is
@@ -835,6 +837,7 @@ struct Acc {
 struct Join {
     block: Option<BlockId>,
     descriptor: Option<u32>,
+    anchors: u32,
     /// The row of the own value its edges carry, which is a temporary after it.
     drop: Option<TypeId>,
 }
@@ -901,9 +904,9 @@ struct Cx<'c, 'a, 'e> {
     /// The slot table, indexed by binder id.
     vars: Vec<Option<Var>>,
     /// Availability changes, undone to a mark when a branch ends: (slot, old, old site).
-    log: Vec<(u32, Avail, NodeId, Option<u32>)>,
+    log: Vec<(u32, Avail, NodeId, Option<u32>, u32)>,
     /// Join inputs: the slots one incoming edge changed and their states.
-    diffs: Vec<(u32, Avail, Option<u32>)>,
+    diffs: Vec<(u32, Avail, Option<u32>, u32)>,
     /// Edges to open frames' exits: (frame, start, len) in `diffs`.
     exits: Vec<(usize, u32, u32)>,
     edge_buf: Vec<(u32, u32)>,
@@ -978,6 +981,8 @@ struct Cx<'c, 'a, 'e> {
     out: CoreCheck,
     capture_frame: Option<closures::CaptureFrame>,
     descriptors: closures::Descriptors,
+    anchors: anchors::Anchors,
+    anchor_path: Vec<anchors::Component>,
 }
 
 /// The gap a body reports when its emission stopped with no refusal or gap to say why.
@@ -1027,6 +1032,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                     merge: 0,
                     edge: 0,
                     descriptor: None,
+                    anchors: 0,
                 };
                 info.resolution.binders.len()
             ],
@@ -1079,6 +1085,8 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             out: CoreCheck::default(),
             capture_frame: None,
             descriptors: closures::Descriptors::default(),
+            anchors: anchors::Anchors::new(info.resolution.binders.len()),
+            anchor_path: vec![],
         }
     }
 
@@ -1255,6 +1263,9 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         }
         let result = self.value(t);
         self.inst(Inst::Const { result, bits }, n);
+        if t == Ty::Scalar(Scalar::U64) {
+            self.anchors.constants.insert(result, bits);
+        }
         Some(result)
     }
     /// How a value of `ty` is carried in this body.
@@ -1529,6 +1540,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             self.joins[j].drop = Some(id);
         }
         self.join_descriptor(j, v);
+        self.joins[j].anchors = self.anchors.union(self.joins[j].anchors, self.anchors.last);
         let args: Vec<ValueId> = v.into_iter().collect();
         self.jump(blk, &args, n);
     }
@@ -1537,6 +1549,12 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         let blk = self.joins[j].block?;
         self.start(blk);
         let v = self.block_params(blk).first().copied();
+        let anchors = self.joins[j].anchors;
+        self.anchors.expressions.insert(self.node, anchors);
+        self.anchors.last = anchors;
+        if let Some(v) = v {
+            self.anchors.values.insert(v, anchors);
+        }
         if let (Some(value), Some(id)) = (v, self.joins[j].descriptor) {
             self.descriptors.values.insert(value, id);
         }
@@ -1677,6 +1695,13 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                     _ => Binding::Value(v),
                 };
                 self.declare(b.id, pd.ty, binding, origin, body);
+                if matches!(
+                    kind(&self.p.decls, &self.t, pd.ty, &self.params),
+                    Kind::Scoped | Kind::Stable
+                ) {
+                    let fact = self.anchor_root(Place::whole(b.id));
+                    self.anchors.slots[b.id as usize] = fact;
+                }
                 self.own(b.id, body);
             }
         }
@@ -1788,6 +1813,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         {
             t = payload;
             v = value;
+            self.anchor_payload(n, t, v);
         }
         match want {
             Some(w) if t != NEVER && w.payload != 0 => {
@@ -1819,6 +1845,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     fn checked(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let outer = std::mem::replace(&mut self.node, n);
         let (t, v) = self.expr_inner(n, want);
+        self.finish_anchors(n, t, v);
         self.node = outer;
         self.synth_ty = t;
         if v.is_none()
@@ -1932,7 +1959,15 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                     };
                     return (ty, value);
                 }
-                if at.place.len > 0 && self.is_view(at.ty) {
+                if at.place.len > 0
+                    && self.is_view(at.ty)
+                    && kind(
+                        &self.p.decls,
+                        &self.t,
+                        self.var(at.place.slot).ty,
+                        &self.params,
+                    ) != Kind::Scoped
+                {
                     self.use_place(at, Use::View(Hold::View(Extent::Temp)), n);
                     let value = if matches!(self.rep(at.ty), Ok(Rep::Place(_))) {
                         self.place_ptr(at, n)

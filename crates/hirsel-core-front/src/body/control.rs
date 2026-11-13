@@ -101,6 +101,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // temporaries it reaches (LANG-6).
         if crate::decls::kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Scoped {
             self.hold_reached(owners);
+            let fact = self.anchor_expression(value);
+            self.freeze_anchors(fact, self.depth);
             let d = self.depth;
             self.unfreeze(freezes, |h| {
                 Some(if h == Hold::View(Extent::Temp) {
@@ -130,6 +132,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 };
                 self.declare(b, ty, binding, origin, pat);
                 self.bind_descriptor(b, v);
+                self.set_slot_anchors(b, self.anchor_expression(value));
                 self.own(b, pat);
                 self.scope_slots.push(b);
             }
@@ -267,6 +270,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let diverged = if !compound {
             let (t, v) = self.expr(value, expect(at.ty));
             self.descriptor_store(at, v, place);
+            self.anchor_store(at, value);
             self.capture_store(at, t, place);
             if let (Some(address), Ok(r)) = (address, self.rep(at.ty)) {
                 // OWN-12: the old value is cleaned when it is live, or maybe with its
@@ -867,7 +871,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             );
             self.temp(elem, value);
         }
-        self.for_pattern(c[0], elem, value, range || consuming);
+        let anchors = if range || consuming {
+            0
+        } else {
+            self.anchor_argument(source)
+        };
+        self.for_pattern(c[0], elem, value, range || consuming, anchors);
         self.loop_body(c[2]);
         self.close_scope(scope, iteration_holds, c[2], UNIT);
         self.end_owners(self.frames[fi].owners, None, false, c[2]);

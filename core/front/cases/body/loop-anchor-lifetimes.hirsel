@@ -1,0 +1,38 @@
+// An outer scoped slot cannot acquire a different anchor on a back edge.
+fn dangling(mut xs:List[String]) {
+ let mut last:Option[View[String]]=None
+ loop {
+  list.clear(mut xs)
+  match list.get(xs,0) {Some(s)=>{last=Some(s)},None=>break}
+ }
+}
+fn last_len(xs:List[String])->u64 {
+ let mut last:Option[View[String]]=None
+ let mut i:u64=0
+ while let Some(s)=list.get(xs,i) {
+  last=Some(s)
+  i+=1
+ }
+ 0
+}
+// Provenance must cross Option's case and the match binder, including aliases.
+fn retained(mut xs:List[String]) {
+ let mut last:Option[View[String]]=None
+ match list.get(xs,0) {Some(s)=>{let t=s;last=Some(t)},None=>{}}
+ list.clear(mut xs)
+ let _=last
+}
+// Zero-size views have no emitted ValueId, but still have source anchors.
+fn zero(a:(),b:()) {
+ let mut last=view a
+ loop {last=view b;continue}
+}
+fn parameter(a:View[String],b:View[String]) {
+ let mut last=a
+ loop {last=b}
+}
+// expect: refuse OWN-17 at 7:2
+// expect: refuse OWN-17 at 15:2
+// expect: refuse OWN-10 at 22:13
+// expect: refuse OWN-17 at 28:20
+// expect: refuse OWN-17 at 32:14

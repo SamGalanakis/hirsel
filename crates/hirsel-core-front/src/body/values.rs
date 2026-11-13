@@ -880,6 +880,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let (ty, value) = self.expr(field, expected.and_then(expect));
             scratch.tys.push(ty);
             scratch.vals.push(value);
+            self.anchor_field(n, anchors::Component::Field(i as u32), field);
         }
         let ty = self.t.mk(TyKind::Tuple(scratch.tys.clone()));
         let value = match self.rep(ty) {
@@ -1194,6 +1195,20 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.refuse("LANG-12", n, "a type parameter of the type is still open");
             }
             return (ERROR, None);
+        }
+        for (i, &arg) in args.iter().enumerate() {
+            let child = if matches!(
+                self.kind(arg),
+                NodeKind::LabelledArgument | NodeKind::BytesArgument
+            ) {
+                self.kids(arg)[0]
+            } else {
+                arg
+            };
+            let component = case.map_or(anchors::Component::Field(i as u32), |case| {
+                anchors::Component::Case(case, i as u32)
+            });
+            self.anchor_field(n, component, child);
         }
         let tys: Vec<TyId> = found.into_iter().flatten().collect();
         if let Some(pl) = placed {

@@ -49,6 +49,7 @@ struct Scope {
 
 #[derive(Clone, Copy)]
 struct Subject {
+    anchors: anchors::Fact,
     ty: TyId,
     value: Option<ValueId>,
     place: Option<At>,
@@ -429,6 +430,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Ok(at) => at,
             Err(()) => {
                 return Subject {
+                    anchors: 0,
                     ty: ERROR,
                     value: None,
                     place: None,
@@ -482,7 +484,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let root = self.t.mk(TyKind::Region(root));
                 ty = self.t.mk(TyKind::Anchored(ty, root));
             }
+            let anchors = self.anchor_read(at);
             return Subject {
+                anchors,
                 ty,
                 value,
                 place: Some(at),
@@ -497,6 +501,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             _ => ty,
         };
         Subject {
+            anchors: self.anchor_expression(n),
             ty,
             value,
             place: None,
@@ -602,7 +607,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         } else {
             None
         };
+        let component = case.map_or(anchors::Component::Field(field), |c| {
+            anchors::Component::Case(c, field)
+        });
+        let anchors = self.anchors.project(subject.anchors, component);
+        if let Some(v) = value {
+            self.anchors.values.insert(v, anchors);
+        }
         Subject {
+            anchors,
             ty,
             value,
             place,
@@ -787,6 +800,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     self.declare(b, ty, binding, origin, pat.site);
                     self.scope_slots.push(b);
                 }
+                self.set_slot_anchors(b, subject.anchors);
+                if kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Scoped {
+                    self.freeze_anchors(subject.anchors, self.depth);
+                }
                 self.own(b, pat.site);
             }
             Head::Product(case) => {
@@ -887,6 +904,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         ty: TyId,
         value: Option<ValueId>,
         owned: bool,
+        anchors: anchors::Fact,
     ) {
         let id = self.pattern(pat, ty);
         let matrix = self.patterns.matrix.len();
@@ -904,6 +922,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.bind_pattern(
             id,
             Subject {
+                anchors,
                 ty,
                 value,
                 place: None,
@@ -986,6 +1005,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 } else {
                     self.emit_place(at, n)
                 };
+                subject.anchors = self.anchor_read(at);
                 subject.place = Some(at);
                 subject.ty = at.ty;
                 subject.viewed = true;
@@ -1662,7 +1682,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if let Some(no) = no {
             self.start(no);
         }
-        let value = self.pattern_at(subject, Some(ok_case), 0, success, n).value;
+        let success_subject = self.pattern_at(subject, Some(ok_case), 0, success, n);
+        let value = success_subject.value;
+        self.anchors.expressions.insert(n, success_subject.anchors);
         self.temp(success, value);
         (success, value)
     }

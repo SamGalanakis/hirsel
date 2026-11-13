@@ -337,6 +337,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         } else {
             self.emit_call(f, tys, vals, result, n)
         };
+        if kind(&self.p.decls, &self.t, result, &self.params) == Kind::Scoped {
+            let mut fact = 0;
+            for &i in &g.anchors {
+                let argument = self.anchor_argument(args[i as usize]);
+                fact = self.anchors.union(fact, argument);
+            }
+            self.anchors.expressions.insert(n, fact);
+        }
         (result, v)
     }
 
@@ -426,7 +434,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         .is_some();
                 let ty = at.ty;
                 if (projected && (self.is_view(ty) || !self.copies(ty)))
-                    || (at.place.len > 0 && self.is_view(ty))
+                    || (at.place.len > 0
+                        && self.is_view(ty)
+                        && kind(
+                            &self.p.decls,
+                            &self.t,
+                            self.var(at.place.slot).ty,
+                            &self.params,
+                        ) != Kind::Scoped)
                 {
                     self.use_place(at, Use::View(Hold::CallView(call, i as u32)), e);
                     *val = if matches!(self.rep(ty), Ok(Rep::Place(_))) {

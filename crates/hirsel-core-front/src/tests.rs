@@ -2617,3 +2617,16 @@ fn holder_payloads_are_read_where_a_view_is_expected() {
     let failures = run_case(&root().join("cases/body/holder-payload-refused.hirsel"));
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+#[test]
+fn loop_scoped_slots_preserve_their_anchor_sets() {
+    let mut failures = vec![];
+    for case in [
+        "loop-anchor-refused.hirsel",
+        "loop-anchor-lifetimes.hirsel",
+        "loop-anchor-accepted.hirsel",
+    ] {
+        failures.extend(run_case(&root().join("cases/body").join(case)));
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}

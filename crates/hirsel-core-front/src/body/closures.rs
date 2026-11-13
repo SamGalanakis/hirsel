@@ -924,6 +924,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             own: None,
             ..original
         });
+        if matches!(
+            kind(&self.p.decls, &self.t, original.ty, &self.params),
+            Kind::Scoped | Kind::Stable
+        ) {
+            let fact = self.anchor_root(Place::whole(slot));
+            self.anchors.slots[slot as usize] = fact;
+        }
     }
     pub(super) fn capture_write(&mut self, slot: u32, site: Span) {
         if let Some(frame) = &mut self.capture_frame
@@ -1116,7 +1123,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let before = self.descriptors.slots.get(&slot).copied();
         if before != id {
             let v = self.var(slot);
-            self.log.push((slot, v.avail, v.at, before));
+            self.log.push((
+                slot,
+                v.avail,
+                v.at,
+                before,
+                self.anchors.slots[slot as usize],
+            ));
             self.descriptors.replace_slot(slot, id);
         }
     }

@@ -43,8 +43,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let v = self.vars[s as usize].as_mut().expect("declared slot");
         if v.avail != a {
             self.epoch += 1;
-            self.log
-                .push((s, v.avail, v.at, self.descriptors.slots.get(&s).copied()));
+            self.log.push((
+                s,
+                v.avail,
+                v.at,
+                self.descriptors.slots.get(&s).copied(),
+                self.anchors.slots[s as usize],
+            ));
             v.avail = a;
             v.at = n;
         }
@@ -52,12 +57,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     pub(super) fn undo(&mut self, mark: usize) {
         crate::cost_scope!("phase", "ownership state");
         while self.log.len() > mark {
-            let (s, a, at, descriptor) = self.log.pop().expect("logged");
+            let (s, a, at, descriptor, anchors) = self.log.pop().expect("logged");
             self.epoch += 1;
             let v = self.vars[s as usize].as_mut().expect("declared slot");
             v.avail = a;
             v.at = at;
             self.descriptors.replace_slot(s, descriptor);
+            self.anchors.slots[s as usize] = anchors;
         }
     }
     /// The current state of each slot changed since `mark`: one incoming edge of a join.
@@ -66,8 +72,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         for i in mark..self.log.len() {
             let s = self.log[i].0;
             let a = self.var(s).avail;
-            self.diffs
-                .push((s, a, self.descriptors.slots.get(&s).copied()));
+            self.diffs.push((
+                s,
+                a,
+                self.descriptors.slots.get(&s).copied(),
+                self.anchors.slots[s as usize],
+            ));
         }
         (start, self.diffs.len() as u32 - start)
     }
@@ -85,12 +95,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.edges_seen += 1;
             let e = self.edges_seen;
             for k in start..start + len {
-                let (s, a, descriptor) = self.diffs[k as usize];
+                let (s, a, descriptor, anchors) = self.diffs[k as usize];
                 let previous = self.acc[s as usize];
                 let descriptor = if previous.merge == m && previous.edge != e {
                     self.union_descriptor(previous.descriptor, descriptor)
                 } else {
                     descriptor
+                };
+                let anchors = if previous.merge == m && previous.edge != e {
+                    self.anchors.union(previous.anchors, anchors)
+                } else {
+                    anchors
                 };
                 let x = &mut self.acc[s as usize];
                 if x.edge == e {
@@ -104,12 +119,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         merge: m,
                         edge: e,
                         descriptor,
+                        anchors,
                     };
                     touched.push(s);
                 } else {
                     x.avail = join(x.avail, a);
                     x.count += 1;
                     x.descriptor = descriptor;
+                    x.anchors = anchors;
                 }
             }
         }
@@ -129,6 +146,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             } else {
                 x.descriptor
             };
+            let anchors = if (x.count as usize) < edges.len() {
+                self.anchors
+                    .union(x.anchors, self.anchors.slots[s as usize])
+            } else {
+                x.anchors
+            };
+            self.set_slot_anchors(s, anchors);
             self.set_slot_descriptor(s, descriptor);
             self.set(s, a, n);
         }
@@ -145,7 +169,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let m = self.merges;
         let end = self.log.len();
         for i in mark..end {
-            let (s, entry, _, descriptor) = self.log[i];
+            let (s, entry, _, descriptor, anchors) = self.log[i];
             if self.acc[s as usize].merge == m {
                 continue;
             }
@@ -162,6 +186,20 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     "OWN-17",
                     site,
                     format!("`{name}` changes its captured places or modes when the loop repeats"),
+                );
+            }
+            if v.born < born
+                && !self.broken
+                && kind(&self.p.decls, &self.t, v.ty, &self.params) == Kind::Scoped
+                && !self
+                    .anchors
+                    .same(anchors, self.anchors.slots[s as usize], &self.steps)
+            {
+                let name = self.slot_name(s);
+                self.refuse_at(
+                    "OWN-17",
+                    site,
+                    format!("`{name}` changes its anchor set when the loop repeats"),
                 );
             }
             if v.born < born && v.avail != entry {
@@ -274,6 +312,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// The place `n` denotes: a local and its field and index steps (OWN-9). None when
     /// `n` is not a place; Err when it was refused or is not built.
     pub(super) fn place(&mut self, n: NodeId) -> Result<Option<At>, ()> {
+        let result = self.place_inner(n);
+        if let Ok(Some(at)) = result {
+            self.anchors.places.insert(n, at);
+        }
+        result
+    }
+    fn place_inner(&mut self, n: NodeId) -> Result<Option<At>, ()> {
         match self.kind(n) {
             NodeKind::Group => self.place(self.kids(n)[0]),
             NodeKind::Path => {
@@ -1045,7 +1090,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 (address, r @ Rep::Scalar(_)) => Some(self.read_bits(address, r.ty().unwrap(), n)),
                 // A part reached through a view is read in place, frozen while the
                 // view lives (OWN-10).
-                (address, Rep::Place(_)) if matches!(self.t.kind(at.ty), TyKind::View(_)) => {
+                (address, Rep::Place(_))
+                    if matches!(self.t.kind(at.ty), TyKind::View(_))
+                        && kind(
+                            &self.p.decls,
+                            &self.t,
+                            self.var(at.place.slot).ty,
+                            &self.params,
+                        ) != Kind::Scoped =>
+                {
                     Some(self.pointer(address, n))
                 }
                 (address, Rep::Place(id)) => {

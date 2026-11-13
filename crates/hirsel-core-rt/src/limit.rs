@@ -560,12 +560,30 @@ impl Funding {
     #[inline(always)]
     pub(crate) fn exit(&mut self) {
         let old = self.payer;
-        // SAFETY: the active context pins its live canonical record exclusively.
+        // SAFETY: the active context pins its canonical record exclusively.
         let r = unsafe { &mut *self.raw_local() };
-        if r.refs == 1 && r.available == r.live.capacity {
-            let parent = r.live.parent.unwrap();
-            // SAFETY: the active Funding slot and its domain are task-exclusive.
-            let f = unsafe { &mut *old.0.as_ref().domain.as_ref().forest.get() };
+        if r.refs != 1 || r.available != r.live.capacity {
+            return self.exit_survivors();
+        }
+        let parent = r.live.parent.unwrap();
+        // SAFETY: lexical parent identities are untagged, retained slot pointers.
+        if unsafe { (*parent.0.as_ref().local.get()).parent.is_some() } {
+            return self.exit_forwarded_parent();
+        }
+        let unused = self.recycle_scope(parent);
+        // SAFETY: the parent edge's existing pin becomes this context's pin.
+        unsafe {
+            (*self.raw_local()).available = (*self.raw_local()).available.wrapping_add(unused);
+        }
+    }
+    #[inline(always)]
+    fn recycle_scope(&mut self, parent: Payer) -> u64 {
+        let old = self.payer;
+        // SAFETY: the sole context pin and full room prove this record has no survivors.
+        unsafe {
+            let r = &mut *self.raw_local();
+            let unused = r.available;
+            let f = &mut *old.0.as_ref().domain.as_ref().forest.get();
             r.rank = 0;
             #[cfg(any(test, feature = "testing"))]
             {
@@ -573,21 +591,29 @@ impl Funding {
             }
             r.next_free = f.free;
             f.free = Some(old.0);
-            // The parent edge's existing pin becomes this context's pin.
             self.payer = parent;
-            self.normalize();
-            // SAFETY: normalize transferred the pin if an inactive parent merged.
-            unsafe {
-                (*self.raw_local()).available =
-                    (*self.raw_local()).available.wrapping_add(r.available);
-            }
-        } else {
-            let winner = self.end_id();
-            let f = old.forest();
-            f.retain(winner);
-            f.release(old.slot().id);
-            self.payer = Payer(NonNull::from(f.slot(winner)));
+            unused
         }
+    }
+    #[cold]
+    fn exit_forwarded_parent(&mut self) {
+        // SAFETY: exit selected a live lexical scope whose retained parent merged.
+        let parent = unsafe { (*self.raw_local()).live.parent.unwrap_unchecked() };
+        let unused = self.recycle_scope(parent);
+        self.normalize_merged();
+        // SAFETY: normalization transferred the context's sole pin to the winner.
+        unsafe {
+            (*self.raw_local()).available = (*self.raw_local()).available.wrapping_add(unused);
+        }
+    }
+    #[cold]
+    fn exit_survivors(&mut self) {
+        let old = self.payer;
+        let winner = self.end_id();
+        let f = old.forest();
+        f.retain(winner);
+        f.release(old.slot().id);
+        self.payer = Payer(NonNull::from(f.slot(winner)));
     }
     #[cfg(any(test, feature = "testing"))]
     pub(crate) fn inject(&self, n: usize, later: bool) {

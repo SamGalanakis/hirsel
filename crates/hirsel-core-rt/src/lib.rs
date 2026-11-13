@@ -111,8 +111,8 @@ impl Context {
 
     #[inline]
     pub fn limit_exit(&mut self) {
-        self.current.exit();
         self.bound_depth = self.bound_depth.wrapping_sub(1);
+        self.current.exit();
     }
 
     #[inline]

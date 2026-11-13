@@ -72,6 +72,77 @@ pub fn parse(r: Region, s: String) -> Result[Json in r, Error] {
     }
 }
 
+/// Appends compact JSON, with members and duplicates in document order. Numbers keep
+/// their original spelling; strings escape controls, quotes and backslashes (RFC 8259).
+/// Fails: Error(Capacity) at the first refused append. Prefix: all earlier appends stay
+/// in s, possibly an unfinished JSON value; the refused append changes nothing.
+/// Alloc: GROWTH of s. Cost: O(encoded bytes). Ex: `std.json.push_json(mut s, doc)?`
+pub fn push_json(mut s: String, x: Json) -> Result[(), Capacity] {
+    match x {
+        Null => string.push(mut s, "null"),
+        False => string.push(mut s, "false"),
+        True => string.push(mut s, "true"),
+        Num(t) => string.push(mut s, text.as_string(t)),
+        Str(t) => push_quoted(mut s, text.as_string(t)),
+        Arr(xs) => {
+            string.push(mut s, "[")?
+            let mut first = true
+            for v in xs {
+                if !first { string.push(mut s, ",")? }
+                push_json(mut s, v)?
+                first = false
+            }
+            string.push(mut s, "]")
+        }
+        Obj(ms) => {
+            string.push(mut s, "{")?
+            let mut first = true
+            for m in ms {
+                if !first { string.push(mut s, ",")? }
+                push_quoted(mut s, text.as_string(m.key))?
+                string.push(mut s, ":")?
+                push_json(mut s, m.value)?
+                first = false
+            }
+            string.push(mut s, "}")
+        }
+    }
+}
+
+// Goose stdlib/json.goose:35 and serde_json 1.0.154 ser.rs:2079: copy runs
+// between ASCII escapes. Each cut is a UTF-8 boundary, including after an escape.
+fn push_quoted(mut s: String, value: String) -> Result[(), Capacity] {
+    string.push(mut s, "\"")?
+    let b = string.as_bytes(value)
+    let mut start: u64 = 0
+    for i in 0 .. list.len(b) {
+        let c = b[i]
+        if c < 0x20 || c == b'"' || c == b'\\' {
+            string.push(mut s, string.slice(value, start, i))?
+            if c == b'"' { string.push(mut s, "\\\"")? }
+            else if c == b'\\' { string.push(mut s, "\\\\")? }
+            else if c == 8 { string.push(mut s, "\\b")? }
+            else if c == 9 { string.push(mut s, "\\t")? }
+            else if c == 10 { string.push(mut s, "\\n")? }
+            else if c == 12 { string.push(mut s, "\\f")? }
+            else if c == 13 { string.push(mut s, "\\r")? }
+            else {
+                // Commit the whole six-byte escape in one append.
+                let hex = "0123456789abcdef"
+                let hi: u64 = int.widen(c / 16)
+                let lo: u64 = int.widen(c % 16)
+                string.reserve(mut s, 6)?
+                string.push(mut s, "\\u00")?
+                string.push(mut s, string.slice(hex, hi, hi + 1))?
+                string.push(mut s, string.slice(hex, lo, lo + 1))?
+            }
+            start = i + 1
+        }
+    }
+    string.push(mut s, string.slice(value, start, list.len(b)))?
+    string.push(mut s, "\"")
+}
+
 /// An object's members ordered for lookup: a permutation of member ordinals, sorted by key
 /// bytes and then by ordinal (goose-attack-898 APPENDIX C7). The members themselves never
 /// move. Opaque, so nothing outside this module replaces the members or adds ordinals that

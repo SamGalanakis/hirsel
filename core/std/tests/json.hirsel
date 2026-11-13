@@ -224,3 +224,35 @@ fn equal_keys_order_by_ordinal() -> bool {
         }
     }
 }
+
+// RFC 8259: remove insignificant whitespace; keep number spelling and duplicates.
+// A comma-before-first or deduplicating printer changes this hand-written text.
+// expect: run print_nested_round_trip() = true
+fn print_nested_round_trip() -> bool {
+    region r {
+        let doc = result.unwrap(json.parse(r, " {\"b\": [null, false, true, -0.50e+2], \"b\":{}, \"a\": []} "))
+        let mut out = result.unwrap(string.from("prefix:"))
+        let _ = result.unwrap(json.push_json(mut out, doc))
+        let expected = "{\"b\":[null,false,true,-0.50e+2],\"b\":{},\"a\":[]}"
+        let again = result.unwrap(json.parse(r, string.slice(out, 7, string.byte_len(out))))
+        let mut second = string.new()
+        let _ = result.unwrap(json.push_json(mut second, again))
+        string.slice(out, 7, string.byte_len(out)) == expected && second == expected
+    }
+}
+
+// The short escapes, two hex escapes, quote, backslash, slash and UTF-8 runs.
+// Omitting the escaping branch produces either different or invalid JSON.
+// expect: run print_escapes_round_trip() = true
+fn print_escapes_round_trip() -> bool {
+    region r {
+        let doc = result.unwrap(json.parse(r, "{\"\\u0000\\u001f\":\"é\\b\\t\\n\\f\\r\\\"\\\\/😀\"}"))
+        let mut out = string.new()
+        let _ = result.unwrap(json.push_json(mut out, doc))
+        let expected = "{\"\\u0000\\u001f\":\"é\\b\\t\\n\\f\\r\\\"\\\\/😀\"}"
+        let again = result.unwrap(json.parse(r, out))
+        let mut second = string.new()
+        let _ = result.unwrap(json.push_json(mut second, again))
+        out == expected && second == expected
+    }
+}

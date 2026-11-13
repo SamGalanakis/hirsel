@@ -1,0 +1,375 @@
+resource type Batch: send {
+    id: u64,
+    rows: List[String],
+    released: Sender[u64]
+} drop(b) {
+    let _ = channel.try_send(b.released, b.id)
+}
+
+type Source: send {
+    input: String,
+    variant: String,
+    output: Sender[Batch],
+    released: Sender[u64],
+    ready: Sender[()],
+    cancel_gate: Sender[()]
+}
+
+type Transform: send {
+    variant: String,
+    input: Receiver[Batch],
+    output: Sender[Batch],
+    start: Receiver[()],
+    ready: Sender[()],
+    forwarded: Sender[()],
+    cancel_gate: Sender[()]
+}
+
+type Sink: send {
+    input: Receiver[Batch],
+    start: Receiver[()]
+}
+
+type SourceResult: send {
+    sent: u64,
+    full: bool
+}
+
+type TransformResult: send {
+    completed: u64,
+    error: Option[m1.support.Error],
+    retained: Option[Receiver[Batch]]
+}
+
+type Stats {
+    batches: u64,
+    rows: u64,
+    size: u64,
+    checksum: u64
+}
+
+// A scripted cancellation is delivered after this nonblocking handshake. The spin
+// has no cancellation point, so the next check/receive/send is the observed site.
+fn wait_cancel_gate(tx: Sender[()]) {
+    loop {
+        match channel.try_send(tx, ()) {
+            Ok(()) => break,
+            Error(Full(_)) => {},
+            Error(Closed(_)) => fail("cancel gate closed")
+        }
+    }
+}
+
+fn batch(id: u64, take rows: List[String], released: Sender[u64]) -> Result[Batch, m1.support.Error] {
+    m1.support.mem(Batch(id: id, rows: take rows, released: channel.sender(released)))
+}
+
+fn publish(tx: Sender[Batch], take b: Batch) -> bool waits {
+    match channel.send(tx, take b) {
+        Ok(()) => true,
+        Error(_) => false
+    }
+}
+
+fn source(take s: Source) -> Result[SourceResult, m1.support.Error] waits {
+    let mut at: u64 = 0
+    let batch_size = m1.support.number(m1.support.line(s.input, mut at))?
+    let failed = s.variant != "normal"
+    let limit: u64 = if s.variant == "cancel-receive" {
+        1
+    } else if failed {
+        2
+    } else {
+        18446744073709551615
+    }
+    let mut sent: u64 = 0
+    let mut full = false
+    while at < string.byte_len(s.input) && sent < limit {
+        let mut rows: List[String] = m1.support.mem(list.with_capacity(batch_size))?
+        while at < string.byte_len(s.input) && list.len(rows) < batch_size {
+            m1.support.push(mut rows, m1.support.mem(string.from(m1.support.line(s.input, mut at)))?)?
+        }
+        let b = batch(sent + 1, take rows, s.released)?
+        if s.variant == "normal" && sent == 8 {
+            let pending = match channel.try_send(s.output, take b) {
+                Error(Full(take p)) => p,
+                _ => fail("q1 fullness witness")
+            }
+            full = true
+            let _ = channel.try_send(s.ready, ())
+            if !publish(s.output, take pending) {
+                break
+            }
+        } else if !publish(s.output, take b) {
+            break
+        }
+        sent += 1
+    }
+    if s.variant == "cancel-send" {
+        let mut id: u64 = 3
+        while id <= 8 {
+            let mut rows: List[String] = list.new()
+            m1.support.push(mut rows, "cancel")?
+            let _ = publish(s.output, batch(id, take rows, s.released)?)
+            id += 1
+        }
+        let mut rows: List[String] = list.new()
+        m1.support.push(mut rows, "cancel")?
+        let ninth = batch(9, take rows, s.released)?
+        let pending = match channel.try_send(s.output, take ninth) {
+            Error(Full(take p)) => p,
+            _ => fail("q1 fullness witness")
+        }
+        let _ = channel.try_send(s.ready, ())
+        wait_cancel_gate(s.cancel_gate)
+        let _ = channel.send(s.output, take pending)
+        return Ok(SourceResult(sent: 8, full: true))
+    }
+    if !full {
+        let _ = channel.try_send(s.ready, ())
+    }
+    Ok(SourceResult(sent: sent, full: full))
+}
+
+fn upper(mut b: Batch) -> Result[(), m1.support.Error] {
+    let mut output: List[String] = m1.support.mem(list.with_capacity(list.len(b.rows)))?
+    for row in b.rows {
+        let mut value = m1.support.mem(string.from(row))?
+        m1.support.mem(string.make_ascii_upper(mut value))?
+        m1.support.push(mut output, take value)?
+    }
+    let _ = replace(mut b.rows, take output)
+    Ok(())
+}
+
+fn transform(take t: Transform) -> Result[TransformResult, m1.support.Error] waits {
+    let _ = channel.receive(t.start)
+    if t.variant == "cancel-send" {
+        let mut count: u64 = 0
+        while count < 8 {
+            let _ = channel.receive(t.input);
+            count += 1
+        }
+        let Transform(variant: _, input: rx, output: _, start: _, ready: _, forwarded: _, cancel_gate: _) = take t
+        return Ok(TransformResult(completed: 0, error: Some(m1.support.Error(code: 4, label: "Cancelled@source.send", capacity: None)), retained: Some(take rx)))
+    }
+    let mut completed: u64 = 0
+    while let Ok(take b) = channel.receive(t.input) {
+        let mut current = b
+        if current.id == 2 && t.variant != "normal" {
+            if t.variant == "cancel" {
+                let _ = channel.try_send(t.ready, ())
+                wait_cancel_gate(t.cancel_gate)
+                task.check_cancel()
+            }
+            let size = output_charge(current.rows)
+            m1.support.admission(t.variant, "batch2.output", size)?
+            return Error(m1.support.error("Transform@batch2"))
+        }
+        upper(mut current)?
+        if !publish(t.output, take current) {
+            break
+        }
+        completed += 1
+        let _ = channel.try_send(t.forwarded, ())
+        if t.variant == "cancel-receive" {
+            let _ = channel.try_send(t.ready, ())
+            wait_cancel_gate(t.cancel_gate)
+            // Cancellation wins at the next receive, even when the last sender closed.
+        }
+    }
+    Ok(TransformResult(completed: completed, error: None, retained: None))
+}
+
+fn output_charge(rows: List[String]) -> u64 {
+    let mut n = 24 * list.len(rows)
+    for row in rows {
+        n += ((string.byte_len(row) + 7) / 8) * 8
+    }
+    n
+}
+
+fn sink(take s: Sink) -> Stats waits {
+    let _ = channel.receive(s.start)
+    let mut stats = Stats(batches: 0, rows: 0, size: 0, checksum: 0)
+    while let Ok(take b) = channel.receive(s.input) {
+        stats.batches += 1
+        stats.rows += list.len(b.rows)
+        for row in b.rows {
+            stats.size += string.byte_len(row);
+            stats.checksum += list.sum_bytes(string.as_bytes(row))
+        }
+    }
+    stats
+}
+
+fn spawn_source(tasks: Tasks, take s: Source) -> Result[Task[Result[SourceResult, m1.support.Error]], m1.support.Error] {
+    m1.support.mem(result.capacity_only(task.spawn(tasks, bytes 4194304, take s, source)))
+}
+
+fn spawn_transform(tasks: Tasks, take t: Transform) -> Result[Task[Result[TransformResult, m1.support.Error]], m1.support.Error] {
+    m1.support.mem(result.capacity_only(task.spawn(tasks, bytes 4194304, take t, transform)))
+}
+
+fn spawn_sink(tasks: Tasks, take s: Sink) -> Result[Task[Stats], m1.support.Error] {
+    m1.support.mem(result.capacity_only(task.spawn(tasks, bytes 4194304, take s, sink)))
+}
+
+fn joined_source(take h: Task[Result[SourceResult, m1.support.Error]]) -> Result[SourceResult, m1.support.Error] waits {
+    match task.join(take h) {
+        Ok(take r) => r,
+        Error(_) => Error(m1.support.Error(code: 4, label: "Cancelled@source.send", capacity: None))
+    }
+}
+
+fn ids(mut out: String, xs: List[u64]) -> Result[(), m1.support.Error] {
+    let mut first = true
+    for id in xs {
+        if !first {
+            m1.support.add(mut out, ",")?
+        };
+        first = false;
+        m1.support.num(mut out, id)?
+    }
+    m1.support.add(mut out, "\n")
+}
+
+pub fn main(out: Stdout, d: Dir, argv: Args, tasks: Tasks) -> Result[(), m1.support.Error] waits {
+    let input = m1.support.input(d, argv)?
+    let variant = m1.support.case_variant(argv)
+    let failed = variant != "normal"
+    let mut rows: u64 = 0
+    let mut at: u64 = 0
+    let batch_size = m1.support.number(m1.support.line(input, mut at))?
+    while at < string.byte_len(input) {
+        let _ = m1.support.line(input, mut at);
+        rows += 1
+    }
+    let batches: u64 = if variant == "cancel-send" {
+        9
+    } else {
+        (rows + batch_size - 1) / batch_size
+    }
+    let (released, releases): (Sender[u64], Receiver[u64]) = m1.support.mem(channel.new(batches))?
+    let (q1, r1): (Sender[Batch], Receiver[Batch]) = m1.support.mem(channel.new(8))?
+    let (q2, r2): (Sender[Batch], Receiver[Batch]) = m1.support.mem(channel.new(8))?
+    let (start, started): (Sender[()], Receiver[()]) = m1.support.mem(channel.new(1))?
+    let (sink_start, sink_started): (Sender[()], Receiver[()]) = m1.support.mem(channel.new(1))?
+    let (ready, ready_rx): (Sender[()], Receiver[()]) = m1.support.mem(channel.new(1))?
+    let (transform_ready, transform_ready_rx): (Sender[()], Receiver[()]) = m1.support.mem(channel.new(1))?
+    let (source_cancel, source_cancel_rx): (Sender[()], Receiver[()]) = m1.support.mem(channel.new(1))?
+    let (transform_cancel, transform_cancel_rx): (Sender[()], Receiver[()]) = m1.support.mem(channel.new(1))?
+    let _ = channel.try_send(source_cancel, ())
+    let _ = channel.try_send(transform_cancel, ())
+    let s = Source(input: take input, variant: m1.support.mem(string.from(variant))?, output: take q1, released: take released, ready: take ready, cancel_gate: take source_cancel)
+    let mut src = spawn_source(tasks, take s)?
+    let (forwarded, progress): (Sender[()], Receiver[()]) = m1.support.mem(channel.new(batches))?
+    let t = Transform(variant: m1.support.mem(string.from(variant))?, input: take r1, output: take q2, start: take started, ready: take transform_ready, forwarded: take forwarded, cancel_gate: take transform_cancel)
+    let mut trans = spawn_transform(tasks, take t)?
+    let snk = spawn_sink(tasks, Sink(input: take r2, start: take sink_started))?
+    let _ = channel.receive(ready_rx)
+    let mut sent: u64 = 0
+    let mut full = false
+    let mut source_task: Option[Task[Result[SourceResult, m1.support.Error]]] = Some(take src)
+    if failed && variant != "cancel-send" {
+        let info = joined_source(option.unwrap(replace(mut source_task, None)))?
+        sent = info.sent
+        full = info.full
+    }
+    let _ = channel.try_send(start, ())
+    if !failed {
+        let _ = channel.try_send(sink_start, ())
+    }
+    if variant == "cancel" || variant == "cancel-receive" {
+        let _ = channel.receive(transform_ready_rx)
+        task.cancel(mut trans)
+        let _ = channel.receive(transform_cancel_rx)
+    }
+    let transformed = task.join(take trans)
+    let mut completed: u64 = 0
+    let mut outcome: Result[(), m1.support.Error] = Ok(())
+    let mut retained: Option[Receiver[Batch]] = None
+    match take transformed {
+        Ok(Ok(take stage)) => {
+            let TransformResult(completed: _, error: stage_error, retained: retained_input) = take stage
+            retained = retained_input
+            if let Some(take e) = stage_error {
+                outcome = Error(take e)
+            }
+        },
+        Ok(Error(take e)) => {
+            outcome = Error(take e)
+        },
+        Error(Cancelled(_)) => {
+            outcome = Error(m1.support.Error(code: 4, label: if variant == "cancel-receive" {
+                "Cancelled@transform.receive"
+            } else {
+                "Cancelled@transform.check"
+            }, capacity: None))
+        },
+        Error(_) => {
+            outcome = Error(m1.support.error("Transform@worker"))
+        },
+    }
+    completed = 0
+    while let Ok(()) = channel.receive(progress) {
+        completed += 1
+    }
+    if variant == "cancel-send" {
+        let mut h = option.unwrap(replace(mut source_task, None))
+        task.cancel(mut h)
+        let _ = channel.receive(source_cancel_rx)
+        let _ = task.join(take h)
+        sent = 8
+        full = true
+    }
+    let _ = replace(mut retained, None)
+    if failed {
+        let _ = channel.try_send(sink_start, ())
+    }
+    if let Some(take h) = replace(mut source_task, None) {
+        let info = joined_source(take h)?
+        sent = info.sent
+        full = info.full
+    }
+    let stats = match task.join(take snk) {
+        Ok(x) => x,
+        Error(_) => return Error(m1.support.error("Sink@worker"))
+    }
+    let mut released_ids: List[u64] = list.new()
+    while let Ok(id) = channel.receive(releases) {
+        m1.support.push(mut released_ids, id)?
+    }
+    let mut rendered = string.new()
+    if failed {
+        m1.support.add(mut rendered, "release-order=")?;
+        ids(mut rendered, released_ids)?
+    }
+    m1.support.add(mut rendered, "sent=")?
+    m1.support.num(mut rendered, sent)?
+    m1.support.add(mut rendered, " transformed=")?
+    m1.support.num(mut rendered, completed)?
+    m1.support.add(mut rendered, " sink-batches=")?
+    m1.support.num(mut rendered, stats.batches)?
+    m1.support.add(mut rendered, " rows=")?
+    m1.support.num(mut rendered, stats.rows)?
+    m1.support.add(mut rendered, " bytes=")?
+    m1.support.num(mut rendered, stats.size)?
+    m1.support.add(mut rendered, " sum=")?
+    m1.support.num(mut rendered, stats.checksum)?
+    m1.support.add(mut rendered, if full {
+        "\nbackpressure=true\nreleased="
+    } else {
+        "\nbackpressure=false\nreleased="
+    })?
+    list.sort(mut released_ids, fn(a: u64, b: u64) -> Order {
+        std.order.compare(a, b)
+    })
+    ids(mut rendered, released_ids)?
+    m1.support.put(out, rendered)?
+    let (tx, rx): (Sender[String], Receiver[String]) = m1.support.mem(channel.new(1))?
+    {
+        let closed = tx
+    }
+    m1.support.finish(out, take rx, take outcome)
+}

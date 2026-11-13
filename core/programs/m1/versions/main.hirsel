@@ -1,0 +1,138 @@
+type Node: shareable + send {
+    id: u64,
+    key: u64,
+    value: u64,
+    left: Option[Arc[Node]],
+    right: Option[Arc[Node]]
+}
+
+fn share(root: Option[Arc[Node]]) -> Option[Arc[Node]] {
+    match root {
+        Some(h) => Some(arc.share(h)),
+        None => None
+    }
+}
+
+fn node(key: u64, value: u64, take left: Option[Arc[Node]], take right: Option[Arc[Node]], mut serial: u64) -> Result[Option[Arc[Node]], m1.support.Error] {
+    serial += 1
+    let n = Node(id: serial, key: key, value: value, left: take left, right: take right)
+    Ok(Some(m1.support.mem(result.capacity_only(arc.new(take n)))?))
+}
+
+fn build(lo: u64, hi: u64, mut serial: u64) -> Result[Option[Arc[Node]], m1.support.Error] {
+    if lo == hi {
+        return Ok(None)
+    }
+    let k = lo + (hi - lo) / 2
+    let left = build(lo, k, mut serial)?
+    let right = build(k + 1, hi, mut serial)?
+    node(k, k, take left, take right, mut serial)
+}
+
+fn draft(root: Option[Arc[Node]], key: u64, value: u64, mut serial: u64, mut count: u64, variant: String) -> Result[Option[Arc[Node]], m1.support.Error] {
+    let Some(n) = view root else {
+        return Error(m1.support.error("InvalidKey"))
+    }
+    let (left, right) = if key < n.key {
+        (draft(n.left, key, value, mut serial, mut count, variant)?, share(n.right))
+    } else if key > n.key {
+        (share(n.left), draft(n.right, key, value, mut serial, mut count, variant)?)
+    } else {
+        (share(n.left), share(n.right))
+    }
+    count += 1
+    m1.support.admission(variant, m1.support.name("draft.node", count, "")?, 64)?
+    node(n.key, if key == n.key {
+        value
+    } else {
+        n.value
+    }, take left, take right, mut serial)
+}
+
+fn lookup(root: Option[Arc[Node]], key: u64) -> u64 {
+    let Some(n) = view root else {
+        fail("missing key")
+    }
+    if key == n.key {
+        n.value
+    } else if key < n.key {
+        lookup(n.left, key)
+    } else {
+        lookup(n.right, key)
+    }
+}
+
+fn sum(root: Option[Arc[Node]], count: u64) -> u64 {
+    let mut total: u64 = 0
+    let mut key: u64 = 0
+    while key < count {
+        total += lookup(root, key);
+        key += 1
+    }
+    total
+}
+
+fn mark(root: Option[Arc[Node]], mut seen: std.set.Set[u64]) -> Result[(), m1.support.Error] {
+    if let Some(n) = root {
+        let _ = m1.support.mem(result.capacity_only(std.set.insert(mut seen, n.id)))?
+        mark(n.left, mut seen)?
+        mark(n.right, mut seen)?
+    }
+    Ok(())
+}
+
+fn live(pin: Option[Arc[Node]], current: Option[Arc[Node]]) -> Result[u64, m1.support.Error] {
+    let mut seen: std.set.Set[u64] = std.set.new()
+    mark(pin, mut seen)?
+    mark(current, mut seen)?
+    Ok(std.set.len(seen))
+}
+
+fn updates(input: String, start: u64, n: u64, variant: String, mut root: Option[Arc[Node]], mut serial: u64, mut completed: u64) -> Result[(), m1.support.Error] {
+    let mut at = start
+    while at < string.byte_len(input) {
+        let row = m1.support.line(input, mut at)
+        let Some((a, b)) = string.split_once(row, " ") else {
+            return Error(m1.support.error("InvalidKey"))
+        }
+        let key = m1.support.number(a)?
+        if key >= n {
+            return Error(m1.support.error("InvalidKey"))
+        }
+        let mut count: u64 = 0
+        let next = draft(root, key, m1.support.number(b)?, mut serial, mut count, variant)?
+        let _ = replace(mut root, take next)
+        completed += 1
+    }
+    Ok(())
+}
+
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] waits {
+    let input = m1.support.input(d, argv)?
+    let mut at: u64 = 0
+    let n = m1.support.number(m1.support.line(input, mut at))?
+    let mut serial: u64 = 0
+    let mut current = build(0, n, mut serial)?
+    let mut pin = share(current)
+    let mut completed: u64 = 0
+    let outcome = updates(input, at, n, m1.support.case_variant(argv), mut current, mut serial, mut completed)
+    let mut rendered = m1.support.name("updates=", completed, " pinned=")?
+    m1.support.num(mut rendered, sum(pin, n))?
+    m1.support.add(mut rendered, " current=")?
+    m1.support.num(mut rendered, sum(current, n))?
+    m1.support.add(mut rendered, " live=")?
+    m1.support.num(mut rendered, live(pin, current)?)?
+    m1.support.add(mut rendered, "\nafter-unpin=")?
+    let _ = replace(mut pin, None)
+    m1.support.num(mut rendered, live(pin, current)?)?
+    m1.support.add(mut rendered, "\nafter-current=")?
+    let _ = replace(mut current, None)
+    m1.support.num(mut rendered, live(pin, current)?)?
+    m1.support.add(mut rendered, "\n")?
+    m1.support.put(out, rendered)?
+    let (tx, rx): (Sender[String], Receiver[String]) = m1.support.mem(channel.new(1))?
+    {
+        let closed = tx
+    }
+    m1.support.finish(out, take rx, take outcome)
+}

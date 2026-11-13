@@ -20,7 +20,7 @@ fn hash(s: String) -> u64 {
 
 fn tally(mut c: Counts, s: String) -> Result[(), m1.support.Error] {
     if (list.len(c.entries) + 1) * 2 >= list.len(c.buckets) {
-        let next = if list.len(c.buckets) < 8 {
+        let next: u64 = if list.len(c.buckets) < 8 {
             16
         } else {
             list.len(c.buckets) * 2

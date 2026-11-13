@@ -394,3 +394,200 @@ fn doubling() {
 
 #[path = "std_seed.rs"]
 mod std_seed;
+
+/// The M1 sources are executable specifications under construction. Parsing,
+/// resolution and formatter stability are gates now; checker gaps remain visible
+/// until the ownership and allocation slices can check these programs end to end.
+#[test]
+fn m1_program_manifest() {
+    use hirsel_core_resolve::CorpusManifest;
+    use hirsel_core_syntax::format;
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let path = workspace.join("core/programs/m1/manifest.json");
+    let manifest_bytes = std::fs::read(path).unwrap();
+    let config: serde_json::Value = serde_json::from_slice(&manifest_bytes).unwrap();
+    let require_checker = config["checker"] == "require";
+    let mut manifest: CorpusManifest = serde_json::from_slice(&manifest_bytes).unwrap();
+    for package in &mut manifest.packages {
+        for source in &mut package.sources {
+            source.file = workspace.join(&source.file);
+        }
+    }
+    let corpus = manifest.load().unwrap();
+    let parsed = corpus.parse();
+    let index = corpus.index(&parsed);
+    let report = corpus.analyze(&parsed, &index);
+    assert!(
+        !report.files.is_empty(),
+        "M1 manifest must contain source bodies"
+    );
+    let mechanical_ok = report
+        .files
+        .iter()
+        .all(|f| f.parsed && f.resolved && f.roundtrip && !f.resource_refusal);
+    for file in &report.files {
+        for diagnostic in &file.diagnostics {
+            println!(
+                "M1 mechanical refusal {}:{}:{} {}: {}",
+                file.file.display(),
+                diagnostic.line,
+                diagnostic.column,
+                diagnostic.refusal.rule,
+                diagnostic.refusal.message
+            );
+        }
+    }
+    let mut programs = 0;
+    for (source, parsed) in corpus.sources.iter().zip(&parsed) {
+        if source.mode != ParseMode::Source {
+            continue;
+        }
+        let once = format(parsed).expect("accepted source formats");
+        let again = parse(&once, ParseMode::Source);
+        assert!(
+            again.diagnostics.is_empty(),
+            "{}: {:?}",
+            source.file.display(),
+            again.diagnostics
+        );
+        assert_eq!(
+            format(&again).as_deref(),
+            Some(once.as_str()),
+            "{}",
+            source.file.display()
+        );
+        assert_eq!(
+            source.text,
+            once,
+            "format {} before committing",
+            source.file.display()
+        );
+        programs += 1;
+    }
+    let modules: Vec<_> = corpus
+        .sources
+        .iter()
+        .zip(parsed)
+        .map(|(source, parsed)| ModuleInput {
+            id: source.module.clone(),
+            syntax: parsed.syntax,
+        })
+        .collect();
+    for entry in modules
+        .iter()
+        .filter(|m| !matches!(m.id.package.name.as_str(), "core" | "std"))
+    {
+        let selected: Vec<_> = modules
+            .iter()
+            .filter(|m| {
+                matches!(m.id.package.name.as_str(), "core" | "std" | "m1")
+                    || m.id == entry.id
+                    || (entry.id.package.name == "files" && m.id.package == entry.id.package)
+            })
+            .map(|m| ModuleInput {
+                id: m.id.clone(),
+                syntax: m.syntax.clone(),
+            })
+            .collect();
+        let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let program = Program::declare(&index, &selected);
+            for refusal in &program.refusals {
+                println!(
+                    "M1 declaration refusal {} {} {:?}: {}",
+                    refusal.primary.module.package.name,
+                    line_col(&selected, &refusal.primary),
+                    refusal.rule,
+                    refusal.message
+                );
+            }
+            for gap in &program.gaps {
+                println!(
+                    "M1 declaration gap {} {}: {}",
+                    gap.site.module.package.name,
+                    line_col(&selected, &gap.site),
+                    gap.what
+                );
+            }
+            let mut emitter = Emitter::new();
+            let mut accepted = 0;
+            let mut bodies = 0;
+            let mut refused = 0;
+            let mut gaps = 0;
+            for (f, definition) in program.fns.iter().enumerate() {
+                if definition.body.is_none()
+                    || definition.path.0.package != entry.id.package
+                    || definition.path.0.modules != entry.id.modules
+                {
+                    continue;
+                }
+                bodies += 1;
+                let checked = program.check_lower(f, &mut emitter);
+                if checked.refusals.is_empty() && checked.gaps.is_empty() {
+                    accepted += 1;
+                }
+                refused += checked.refusals.len();
+                gaps += checked.gaps.len();
+                for refusal in &checked.refusals {
+                    println!(
+                        "M1 body refusal {}.{} {} {:?}: {}",
+                        definition.path.0.package.name,
+                        definition.path.0.name,
+                        line_col(&selected, &refusal.primary),
+                        refusal.rule,
+                        refusal.message
+                    );
+                }
+                for gap in &checked.gaps {
+                    println!(
+                        "M1 body gap {}.{} {}: {}",
+                        definition.path.0.package.name,
+                        definition.path.0.name,
+                        line_col(&selected, &gap.site),
+                        gap.what
+                    );
+                }
+            }
+            assert!(bodies > 0, "M1 acceptance must visit program bodies");
+            if require_checker {
+                assert!(program.refusals.is_empty() && program.gaps.is_empty());
+                assert_eq!(
+                    (refused, gaps),
+                    (0, 0),
+                    "M1 checker is required by the manifest"
+                );
+            }
+            println!(
+                "M1 checker {}.{}: {accepted}/{bodies} bodies accepted, {refused} refusals, {gaps} gaps; declarations {} refusals, {} gaps",
+                entry.id.package.name,
+                entry.id.modules.join("."),
+                program.refusals.len(),
+                program.gaps.len()
+            );
+        }));
+        if let Err(panic) = checked {
+            if require_checker {
+                std::panic::resume_unwind(panic);
+            }
+            let message = panic
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| panic.downcast_ref::<&str>().copied())
+                .unwrap_or("non-string panic");
+            println!(
+                "M1 checker CRASH {}.{}: {message}; no acceptance claimed",
+                entry.id.package.name,
+                entry.id.modules.join(".")
+            );
+        }
+    }
+    println!(
+        "M1 mechanical: {}/{} files parse/resolve; {programs} source files format idempotently; checker outcomes above are diagnostic",
+        report
+            .files
+            .iter()
+            .filter(|f| f.parsed && f.resolved)
+            .count(),
+        report.files.len()
+    );
+    assert!(mechanical_ok, "M1 parse/resolve refusals are listed above");
+}

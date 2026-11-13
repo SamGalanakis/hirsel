@@ -421,6 +421,42 @@
     },
     {
       "package": {
+        "name": "files",
+        "version": "1"
+      },
+      "sources": [
+        {
+          "file": "core/programs/m1/files/main.hirsel",
+          "modules": [
+            "main"
+          ],
+          "signatures": false
+        },
+        {
+          "file": "core/programs/m1/files/matched.hirsel",
+          "modules": [
+            "matched"
+          ],
+          "signatures": false
+        }
+      ],
+      "dependencies": [
+        {
+          "name": "core",
+          "version": "1"
+        },
+        {
+          "name": "std",
+          "version": "1"
+        },
+        {
+          "name": "m1",
+          "version": "1"
+        }
+      ]
+    },
+    {
+      "package": {
         "name": "json",
         "version": "1"
       },
@@ -429,6 +465,42 @@
           "file": "core/programs/m1/json/main.hirsel",
           "modules": [
             "main"
+          ],
+          "signatures": false
+        }
+      ],
+      "dependencies": [
+        {
+          "name": "core",
+          "version": "1"
+        },
+        {
+          "name": "std",
+          "version": "1"
+        },
+        {
+          "name": "m1",
+          "version": "1"
+        }
+      ]
+    },
+    {
+      "package": {
+        "name": "pipeline",
+        "version": "1"
+      },
+      "sources": [
+        {
+          "file": "core/programs/m1/pipeline/main.hirsel",
+          "modules": [
+            "main"
+          ],
+          "signatures": false
+        },
+        {
+          "file": "core/programs/m1/pipeline/matched.hirsel",
+          "modules": [
+            "matched"
           ],
           "signatures": false
         }
@@ -519,6 +591,42 @@
           "version": "1"
         }
       ]
+    },
+    {
+      "package": {
+        "name": "versions",
+        "version": "1"
+      },
+      "sources": [
+        {
+          "file": "core/programs/m1/versions/main.hirsel",
+          "modules": [
+            "main"
+          ],
+          "signatures": false
+        },
+        {
+          "file": "core/programs/m1/versions/matched.hirsel",
+          "modules": [
+            "matched"
+          ],
+          "signatures": false
+        }
+      ],
+      "dependencies": [
+        {
+          "name": "core",
+          "version": "1"
+        },
+        {
+          "name": "std",
+          "version": "1"
+        },
+        {
+          "name": "m1",
+          "version": "1"
+        }
+      ]
     }
   ],
   "charge_policy": "charge-v1",
@@ -586,6 +694,26 @@
       "function": "main"
     },
     {
+      "workload": "files",
+      "variant": "idiomatic",
+      "package": {
+        "name": "files",
+        "version": "1"
+      },
+      "module": "main",
+      "function": "main"
+    },
+    {
+      "workload": "files",
+      "variant": "matched",
+      "package": {
+        "name": "files",
+        "version": "1"
+      },
+      "module": "matched",
+      "function": "main"
+    },
+    {
       "workload": "json",
       "variant": "idiomatic",
       "package": {
@@ -593,6 +721,26 @@
         "version": "1"
       },
       "module": "main",
+      "function": "main"
+    },
+    {
+      "workload": "pipeline",
+      "variant": "idiomatic",
+      "package": {
+        "name": "pipeline",
+        "version": "1"
+      },
+      "module": "main",
+      "function": "main"
+    },
+    {
+      "workload": "pipeline",
+      "variant": "matched",
+      "package": {
+        "name": "pipeline",
+        "version": "1"
+      },
+      "module": "matched",
       "function": "main"
     },
     {
@@ -630,6 +778,26 @@
       "variant": "matched",
       "package": {
         "name": "rope",
+        "version": "1"
+      },
+      "module": "matched",
+      "function": "main"
+    },
+    {
+      "workload": "versions",
+      "variant": "idiomatic",
+      "package": {
+        "name": "versions",
+        "version": "1"
+      },
+      "module": "main",
+      "function": "main"
+    },
+    {
+      "workload": "versions",
+      "variant": "matched",
+      "package": {
+        "name": "versions",
         "version": "1"
       },
       "module": "matched",

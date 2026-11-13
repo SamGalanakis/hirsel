@@ -1,0 +1,188 @@
+type Node {
+    key: u32,
+    value: u64,
+    left: Option[u32],
+    right: Option[u32],
+    refs: u64
+}
+
+type Slot = Live(Node) | Free(Option[u32])
+
+type Store {
+    slots: List[Slot],
+    free: Option[u32],
+    live: u64
+}
+
+fn read(s: Store, h: u32) -> Node {
+    match s.slots[int.widen(h)] {
+        Live(n) => n,
+        Free(_) => fail("vacant node")
+    }
+}
+
+fn retain(mut s: Store, root: Option[u32]) -> Option[u32] {
+    if let Some(h) = root {
+        let mut n = read(s, h)
+        n.refs += 1
+        let _ = list.set(mut s.slots, int.widen(h), Live(n))
+    }
+    root
+}
+
+fn release(mut s: Store, root: Option[u32]) {
+    if let Some(h) = root {
+        let mut n = read(s, h)
+        n.refs -= 1
+        if n.refs > 0 {
+            let _ = list.set(mut s.slots, int.widen(h), Live(n));
+            return
+        }
+        let free = s.free
+        let _ = list.set(mut s.slots, int.widen(h), Free(free))
+        s.free = Some(h)
+        s.live -= 1
+        release(mut s, n.left)
+        release(mut s, n.right)
+    }
+}
+
+fn node(mut s: Store, key: u32, value: u64, left: Option[u32], right: Option[u32]) -> Result[Option[u32], m1.support.Error] {
+    let n = Node(key: key, value: value, left: left, right: right, refs: 1)
+    let h: u32 = if let Some(i) = s.free {
+        let next = match s.slots[int.widen(i)] {
+            Free(next) => next,
+            Live(_) => fail("occupied free node")
+        }
+        let _ = list.set(mut s.slots, int.widen(i), Live(n))
+        s.free = next
+        i
+    } else {
+        let i: u32 = int.narrow(list.len(s.slots))
+        if let Error((c, _)) = list.push(mut s.slots, Live(n)) {
+            release(mut s, left)
+            release(mut s, right)
+            return m1.support.mem(Error(c))
+        }
+        i
+    }
+    s.live += 1
+    Ok(Some(h))
+}
+
+fn build(mut s: Store, lo: u32, hi: u32) -> Result[Option[u32], m1.support.Error] {
+    if lo == hi {
+        return Ok(None)
+    }
+    let k = lo + (hi - lo) / 2
+    let left = build(mut s, lo, k)?
+    let right = match build(mut s, k + 1, hi) {
+        Ok(r) => r,
+        Error(take e) => {
+            release(mut s, left);
+            return Error(take e)
+        }
+    }
+    node(mut s, k, int.widen(k), left, right)
+}
+
+fn draft(mut s: Store, root: Option[u32], key: u32, value: u64, mut count: u64, variant: String) -> Result[Option[u32], m1.support.Error] {
+    let n = read(s, option.unwrap(root))
+    let (left, right) = if key < n.key {
+        let left = draft(mut s, n.left, key, value, mut count, variant)?
+        (left, retain(mut s, n.right))
+    } else if key > n.key {
+        let right = draft(mut s, n.right, key, value, mut count, variant)?
+        (retain(mut s, n.left), right)
+    } else {
+        (retain(mut s, n.left), retain(mut s, n.right))
+    }
+    count += 1
+    let admitted = match m1.support.name("draft.node", count, "") {
+        Ok(take site) => m1.support.admission(variant, site, 0),
+        Error(take e) => Error(take e),
+    }
+    if let Error(take e) = admitted {
+        release(mut s, left)
+        release(mut s, right)
+        return Error(take e)
+    }
+    node(mut s, n.key, if key == n.key {
+        value
+    } else {
+        n.value
+    }, left, right)
+}
+
+fn lookup(s: Store, root: Option[u32], key: u32) -> u64 {
+    let n = read(s, option.unwrap(root))
+    if key == n.key {
+        n.value
+    } else if key < n.key {
+        lookup(s, n.left, key)
+    } else {
+        lookup(s, n.right, key)
+    }
+}
+
+fn sum(s: Store, root: Option[u32], count: u32) -> u64 {
+    let mut total: u64 = 0
+    let mut key: u32 = 0
+    while key < count {
+        total += lookup(s, root, key);
+        key += 1
+    }
+    total
+}
+
+fn updates(input: String, start: u64, n: u32, variant: String, mut s: Store, mut current: Option[u32], mut completed: u64) -> Result[(), m1.support.Error] {
+    let mut at = start
+    while at < string.byte_len(input) {
+        let row = m1.support.line(input, mut at)
+        let Some((a, b)) = string.split_once(row, " ") else {
+            return Error(m1.support.error("InvalidKey"))
+        }
+        let wide = m1.support.number(a)?
+        if wide >= int.widen(n) {
+            return Error(m1.support.error("InvalidKey"))
+        }
+        let key: u32 = int.narrow(wide)
+        let mut count: u64 = 0
+        let next = draft(mut s, current, key, m1.support.number(b)?, mut count, variant)?
+        let old = current
+        current = next
+        release(mut s, old)
+        completed += 1
+    }
+    Ok(())
+}
+
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), m1.support.Error] waits {
+    let input = m1.support.input(d, argv)?
+    let mut at: u64 = 0
+    let n: u32 = int.narrow(m1.support.number(m1.support.line(input, mut at))?)
+    let mut s = Store(slots: list.new(), free: None, live: 0)
+    let mut current = build(mut s, 0, n)?
+    let pin = retain(mut s, current)
+    let mut completed: u64 = 0
+    let outcome = updates(input, at, n, m1.support.case_variant(argv), mut s, mut current, mut completed)
+    let mut rendered = m1.support.name("updates=", completed, " pinned=")?
+    m1.support.num(mut rendered, sum(s, pin, n))?
+    m1.support.add(mut rendered, " current=")?
+    m1.support.num(mut rendered, sum(s, current, n))?
+    m1.support.add(mut rendered, " live=")?
+    m1.support.num(mut rendered, s.live)?
+    m1.support.add(mut rendered, "\nafter-unpin=")?
+    release(mut s, pin)
+    m1.support.num(mut rendered, s.live)?
+    m1.support.add(mut rendered, "\nafter-current=")?
+    release(mut s, current)
+    m1.support.num(mut rendered, s.live)?
+    m1.support.add(mut rendered, "\n")?
+    m1.support.put(out, rendered)?
+    let (tx, rx): (Sender[String], Receiver[String]) = m1.support.mem(channel.new(1))?
+    {
+        let closed = tx
+    }
+    m1.support.finish(out, take rx, take outcome)
+}

@@ -49,3 +49,27 @@ python3 core/tools/verify.py --target-dir /tmp/core-twins --profile release
 The CI workflow runs these output comparisons in both profiles. It does not rely on
 Rust's empty unit-test harnesses. `MEASURE.md` defines the ratio protocol and the
 committed Rust numbers. `SPEC-COMPARISON.md` lists the gaps in the spec draft.
+
+To run the new-source acceptance gate once:
+
+```sh
+tools/test-filter //:hirsel-core-front-unittest -- tests::m1_program_manifest --exact --nocapture
+```
+
+It fails on a parse or resolve refusal, a formatter refusal or non-idempotence.
+It also visits the real declaration/body checker and prints every current refusal
+and implementation gap. Manifest `checker: "report"` makes that slice diagnostic;
+change it to `"require"` when those checker constructs are implemented. This is not
+native execution evidence. The manifest includes all seventeen available entries;
+JSON's matched blob entry awaits the compact-sequence rules and separate fixture change.
+`files` shares one implementation across its two entries, as its Rust twins do.
+The host outcome contract records the required mapping from `support.Error.code`
+to 2, 3 or 4. PROG-3 itself defines an error outcome and does not specify OS exit
+status or error rendering; that mapping still needs driver support.
+
+Matched rope and versions keep private slab indices and explicit edge counts in
+one owning store. No index escapes the store, and roots are explicitly released
+at the specified observation boundaries. Their fallible staging rolls back new
+edges. The idiomatic variants use Rc and Arc and count reachable identities for
+the same liveness observations. Every DERIVATION includes both representations'
+charges and the independent small expected output.

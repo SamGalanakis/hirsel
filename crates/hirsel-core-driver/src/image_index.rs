@@ -4,6 +4,24 @@ use super::*;
 use hirsel_core_ids::published::{Descriptor, Map, Publisher, Source, Table};
 use std::sync::Mutex;
 const BUCKET_LIMIT: usize = 32;
+const ROWS_PER_PAGE: usize = 16;
+const PAGE_HEADER: usize = (ROWS_PER_PAGE + 1) * 8;
+
+fn row_pages(store: &Store, rows: &[Vec<u8>]) -> io::Result<ContentHash> {
+    let mut pages = Vec::new();
+    for (i, chunk) in rows.chunks(ROWS_PER_PAGE).enumerate() {
+        let mut bytes = vec![0; PAGE_HEADER];
+        for (slot, row) in chunk.iter().enumerate() {
+            let start = bytes.len() as u64;
+            bytes[slot * 8..(slot + 1) * 8].copy_from_slice(&start.to_le_bytes());
+            bytes.extend_from_slice(row);
+        }
+        let end = bytes.len() as u64;
+        bytes[chunk.len() * 8..(chunk.len() + 1) * 8].copy_from_slice(&end.to_le_bytes());
+        pages.push((i as u32, store.put(&bytes)?));
+    }
+    array(store, &pages, 28)
+}
 #[derive(Serialize, Deserialize)]
 enum Node {
     Array(Box<[Option<ContentHash>; 16]>),
@@ -73,6 +91,7 @@ fn names(store: &Store, entries: &[(ContentHash, u32)]) -> io::Result<ContentHas
 pub(crate) struct DiskIndex {
     pub store: Store,
     nodes: Mutex<BTreeMap<ContentHash, Arc<Node>>>,
+    pages: Mutex<BTreeMap<ContentHash, Arc<Vec<u8>>>>,
     reads: std::sync::atomic::AtomicUsize,
     rows: std::sync::atomic::AtomicUsize,
 }
@@ -81,6 +100,7 @@ impl DiskIndex {
         Ok(Self {
             store: Store::new(path)?,
             nodes: Mutex::default(),
+            pages: Mutex::default(),
             reads: Default::default(),
             rows: Default::default(),
         })
@@ -120,8 +140,31 @@ impl DiskIndex {
 }
 impl Source for DiskIndex {
     fn row(&self, table: Descriptor, index: u32) -> io::Result<Vec<u8>> {
-        let hash = self.at(table.rows, index)?.ok_or_else(miss)?;
-        let bytes = self.store.get(hash)?.ok_or_else(miss)?;
+        if index >= table.len {
+            return Err(miss());
+        }
+        let hash = self
+            .at(table.rows, index / ROWS_PER_PAGE as u32)?
+            .ok_or_else(miss)?;
+        let cached = self.pages.lock().unwrap().get(&hash).cloned();
+        let page = if let Some(page) = cached {
+            page
+        } else {
+            let page = Arc::new(self.store.get(hash)?.ok_or_else(miss)?);
+            self.pages.lock().unwrap().insert(hash, Arc::clone(&page));
+            page
+        };
+        let slot = index as usize % ROWS_PER_PAGE;
+        let offset = |slot: usize| -> io::Result<usize> {
+            let bytes = page.get(slot * 8..(slot + 1) * 8).ok_or_else(miss)?;
+            usize::try_from(u64::from_le_bytes(bytes.try_into().unwrap())).map_err(|_| miss())
+        };
+        let start = offset(slot)?;
+        let end = offset(slot + 1)?;
+        if start < PAGE_HEADER || end < start {
+            return Err(miss());
+        }
+        let bytes = page.get(start..end).ok_or_else(miss)?.to_vec();
         self.rows.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(bytes)
     }
@@ -183,10 +226,10 @@ impl Publisher for Writer<'_> {
         table: &Table<T>,
     ) -> io::Result<Table<T>> {
         let mut rows = vec![];
-        for (i, row) in table.iter().enumerate() {
-            rows.push((i as u32, self.store.put(&encode(row)?)?));
+        for row in table.iter() {
+            rows.push(encode(row)?);
         }
-        let root = array(self.store, &rows, 28)?;
+        let root = row_pages(self.store, &rows)?;
         let empty = names(self.store, &[])?;
         Table::from_descriptor(self.descriptor(table.len(), root, empty))
     }
@@ -209,12 +252,37 @@ impl Publisher for Writer<'_> {
         let mut entries = map.iter().collect::<Vec<_>>();
         entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
         for (i, (key, value)) in entries.into_iter().enumerate() {
-            rows.push((i as u32, self.store.put(&encode(&(key, value))?)?));
+            rows.push(encode(&(key, value))?);
             keys.push((ContentHash::of_bytes(&encode(key)?), i as u32));
         }
         let len = rows.len();
-        let rows = array(self.store, &rows, 28)?;
+        let rows = row_pages(self.store, &rows)?;
         let keys = names(self.store, &keys)?;
         Map::from_descriptor(self.descriptor(len, rows, keys))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn malformed_record_page_offsets_are_external_cache_misses() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = DiskIndex::new(dir.path()).unwrap();
+        for (start, end) in [(0u64, 136u64), (140, 139), (136, 145)] {
+            let mut bytes = vec![0; PAGE_HEADER];
+            bytes[..8].copy_from_slice(&start.to_le_bytes());
+            bytes[8..16].copy_from_slice(&end.to_le_bytes());
+            let page = source.store.put(&bytes).unwrap();
+            let rows = array(&source.store, &[(0, page)], 28).unwrap();
+            let table = Descriptor {
+                namespace: ContentHash::default(),
+                table: 0,
+                len: 1,
+                rows,
+                lookup: ContentHash::default(),
+            };
+            assert!(Source::row(&source, table, 0).is_err());
+        }
     }
 }

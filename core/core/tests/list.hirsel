@@ -1,0 +1,75 @@
+// list.fill laws (core.md): fill appends n copies of x after the existing elements; on
+// Capacity xs is unchanged. Elements are compared one by one against the spec, not with ==.
+
+// n = 0 appends nothing: one element too many would show as a second element.
+// expect: run fill_none() = true
+fn fill_none() -> bool {
+    let mut xs: List[u64] = list.new()
+    result.unwrap(list.push(mut xs, 5))
+    result.unwrap(list.fill(mut xs, 0, 9))
+    list.len(xs) == 1 && xs[0] == 5
+}
+
+// n = 1 after a two-element prefix: [5, 6, 9].
+// expect: run fill_one() = true
+fn fill_one() -> bool {
+    let mut xs: List[u64] = list.new()
+    result.unwrap(list.push(mut xs, 5))
+    result.unwrap(list.push(mut xs, 6))
+    result.unwrap(list.fill(mut xs, 1, 9))
+    list.len(xs) == 3 && xs[0] == 5 && xs[1] == 6 && xs[2] == 9
+}
+
+// A non-empty xs whose growth is refused keeps its length and elements. xs is made inside
+// the scope so its growth is charged there (MEM-26): 24 of 32 bytes are used, and 3 + 5
+// elements need 64. Made outside, the growth would go to the outer limit and succeed.
+// expect: run fill_refused_keeps_prefix() = true
+fn fill_refused_keeps_prefix() -> bool {
+    let r = bound bytes 32 {
+        let mut xs: List[u64] = result.unwrap(list.with_capacity(3))
+        result.unwrap(list.push(mut xs, 1))
+        result.unwrap(list.push(mut xs, 2))
+        result.unwrap(list.push(mut xs, 3))
+        let refused = match list.fill(mut xs, 5, 7) {
+            Error(_) => true,
+            Ok(()) => false,
+        }
+        refused && list.len(xs) == 3 && xs[0] == 1 && xs[1] == 2 && xs[2] == 3
+    }
+    match r {
+        Ok(b) => b,
+        Error(_) => false,
+    }
+}
+
+// Every element after a one-element prefix equals x, for u8 and i32 (u64 is above), with
+// a general value and with zero and all-ones (the values a lowering may turn into memset).
+// Counts 37 and 13 cross the 16- and 32-byte store widths and leave tails; a stride or
+// count mistake in a store loop puts a wrong value or length here.
+// expect: run fill_each_width() = true
+fn fill_each_width() -> bool {
+    let mut b: Bytes = list.new()
+    result.unwrap(list.push(mut b, 3))
+    result.unwrap(list.fill(mut b, 37, 0xA5))
+    result.unwrap(list.fill(mut b, 37, 0))
+    result.unwrap(list.fill(mut b, 37, 0xFF))
+    let mut ok = list.len(b) == 112 && b[0] == 3
+    let mut i: u64 = 1
+    while i < 112 {
+        let want: u8 = if i < 38 { 0xA5 } else if i < 75 { 0 } else { 0xFF }
+        ok = ok && b[i] == want
+        i += 1
+    }
+    let mut w: List[i32] = list.new()
+    result.unwrap(list.push(mut w, 4))
+    result.unwrap(list.fill(mut w, 13, -7))
+    result.unwrap(list.fill(mut w, 13, -1))
+    ok = ok && list.len(w) == 27 && w[0] == 4
+    i = 1
+    while i < 27 {
+        let want: i32 = if i < 14 { -7 } else { -1 }
+        ok = ok && w[i] == want
+        i += 1
+    }
+    ok
+}

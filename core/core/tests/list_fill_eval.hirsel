@@ -1,0 +1,28 @@
+// test-of: core.list
+// test-backend: evaluator
+// test-reason: a fill store loop that writes past the reserved storage while setting the right length is invisible to native runs; the evaluator's storage model reports the write
+// Fill exactly to capacity, from an empty list and after a prefix: every store lands
+// inside the allocation and the elements read back are x.
+// expect: run fill_to_capacity() = true
+fn fill_to_capacity() -> bool {
+    let mut xs: List[u64] = result.unwrap(list.with_capacity(5))
+    let room = list.capacity(xs)
+    result.unwrap(list.fill(mut xs, room, 9))
+    let mut ok = list.len(xs) == room && list.capacity(xs) == room
+    let mut b: Bytes = result.unwrap(list.with_capacity(19))
+    result.unwrap(list.push(mut b, 1))
+    let rest = list.capacity(b) - 1
+    result.unwrap(list.fill(mut b, rest, 0xFF))
+    ok = ok && list.len(b) == rest + 1 && b[0] == 1
+    let mut i: u64 = 1
+    while i <= rest {
+        ok = ok && b[i] == 0xFF
+        i += 1
+    }
+    let mut k: u64 = 0
+    while k < room {
+        ok = ok && xs[k] == 9
+        k += 1
+    }
+    ok
+}

@@ -1,4 +1,5 @@
-// Matched twin of csv.hirsel. Review pending langs-numeric-920.
+// Reviewed-by: langs-numeric-920 2026-11-13; valid generated CSV uses same quoted-byte scanner, inline3 numeric fields, owned Point vector, LCG/fixed10 generation and fixed7 reductions; overflow checks required.
+// Matched twin of csv.hirsel. Reviewed below.
 // kostya/LangArena3c9f84d benchmarks/csv_parse.rs:30-115.
 // Same quoted field scanner, fixed10 generator and owned Point vector.
 mod text_support;

@@ -91,6 +91,7 @@ CORE_ACCEPTANCE = (
     '//:hirsel-core-layout-unittest', '//:hirsel-core-ir-unittest',
     '//:hirsel-core-rt-unittest',
     '//:hirsel-core-front-unittest', '//:hirsel-cranelift-unittest',
+    '//:hirsel-core-driver-unittest',
     '//:hirsel-llvm-lazy-unittest', '//:hirsel-llvm-unittest',
     '//:hirsel-cranelift-test-core_native',
 )

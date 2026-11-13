@@ -158,8 +158,8 @@ fn scalar_row(module: &Module, ty: TypeId) -> Option<Scalar> {
     }
 }
 
-/// A scalar predicate needs no generated call after substitution. Preserve its
-/// two typed loads and replace the call by the same scalar Compare as closed code.
+/// Scalar key operations need no generated call after substitution. Predicates
+/// retain their typed loads and Compare; a u64 hash retains the fixed FORM mix.
 pub(super) fn inline_ordered(module: &Module, body: &mut Body) {
     let old = std::mem::take(&mut body.insts);
     let anchors = std::mem::take(&mut body.inst_anchors);
@@ -182,18 +182,20 @@ pub(super) fn inline_ordered(module: &Module, body: &mut Body) {
                 if key.definition.0.package.name != "core" {
                     return None;
                 }
-                let op = if key.definition.0.modules == ["map"]
-                    && key.definition.0.name == "$key_equal"
-                {
-                    CompareOp::Eq
-                } else if key.definition.0.modules == ["order"] {
+                let op = if key.definition.0.modules == ["map"] {
                     match key.definition.0.name.as_str() {
+                        "$key_equal" => Some(CompareOp::Eq),
+                        "$key_hash" => None,
+                        _ => return None,
+                    }
+                } else if key.definition.0.modules == ["order"] {
+                    Some(match key.definition.0.name.as_str() {
                         "$lt" => CompareOp::Lt,
                         "$le" => CompareOp::Le,
                         "$gt" => CompareOp::Gt,
                         "$ge" => CompareOp::Ge,
                         _ => return None,
-                    }
+                    })
                 } else {
                     return None;
                 };
@@ -202,19 +204,25 @@ pub(super) fn inline_ordered(module: &Module, body: &mut Body) {
                 };
                 let scalar = scalar_row(module, ty)?;
                 let args = call.args.get(&body.pools.args).unwrap();
-                let [Arg::Address(a), Arg::Address(b)] = args else {
-                    return None;
+                let addresses = match (op, args) {
+                    (Some(_), [Arg::Address(a), Arg::Address(b)]) => [*a, *b],
+                    (None, [Arg::Address(a)]) if scalar == Scalar::U64 => [*a, *a],
+                    _ => return None,
                 };
                 Some((
                     op,
                     scalar,
-                    [*a, *b],
+                    addresses,
                     call.results.get(&body.pools.values).unwrap()[0],
                 ))
             })();
             if let Some((op, scalar, args, result)) = scalar_call {
                 let mut values = [ValueId(0); 2];
-                for (i, arg) in args.into_iter().enumerate() {
+                for (i, arg) in args
+                    .into_iter()
+                    .take(if op.is_some() { 2 } else { 1 })
+                    .enumerate()
+                {
                     let steps = PoolRange::push(&mut body.pools.steps, [Step::Field(0)]);
                     let address = AddressId(body.addresses.len() as u32);
                     body.addresses.push(AddressInfo {
@@ -238,13 +246,22 @@ pub(super) fn inline_ordered(module: &Module, body: &mut Body) {
                     body.inst_anchors.extend([anchors[index]; 2]);
                     values[i] = value;
                 }
-                body.insts.push(Inst::Compare {
-                    result,
-                    op,
-                    left: values[0],
-                    right: values[1],
-                });
-                body.inst_anchors.push(anchors[index]);
+                if let Some(op) = op {
+                    body.insts.push(Inst::Compare {
+                        result,
+                        op,
+                        left: values[0],
+                        right: values[1],
+                    });
+                    body.inst_anchors.push(anchors[index]);
+                } else {
+                    let start = body.insts.len();
+                    inline_word_hash(body, values[0], result);
+                    body.inst_anchors.extend(std::iter::repeat_n(
+                        anchors[index],
+                        body.insts.len() - start,
+                    ));
+                }
             } else {
                 body.insts.push(inst.clone());
                 body.inst_anchors.push(anchors[index]);
@@ -252,6 +269,67 @@ pub(super) fn inline_ordered(module: &Module, body: &mut Body) {
         }
         body.blocks[block].insts = PoolRange::new(start, body.insts.len() as u32 - start);
     }
+}
+
+/// The fixed FORM hash of one u64 key, in the caller's ordinary instruction stream.
+/// Keeping the load typed preserves the generic recipe and needs no runtime adapter.
+fn inline_word_hash(body: &mut Body, word: ValueId, result: ValueId) {
+    fn value(body: &mut Body, inst: impl FnOnce(ValueId) -> Inst) -> ValueId {
+        let id = ValueId(body.values.len() as u32);
+        body.values.push(Ty::Scalar(Scalar::U64));
+        body.insts.push(inst(id));
+        id
+    }
+    let factor = value(body, |result| Inst::Const {
+        result,
+        bits: 0x9e3779b97f4a7c15,
+    });
+    let product = value(body, |result| Inst::IntArith {
+        result,
+        flag: None,
+        op: ArithOp::Mul,
+        mode: ArithMode::Wrapping,
+        left: word,
+        right: factor,
+    });
+    let left = value(body, |result| Inst::Const { result, bits: 26 });
+    let right = value(body, |result| Inst::Const { result, bits: 38 });
+    let lo = value(body, |result| Inst::Binary {
+        result,
+        op: BinaryOp::Shl,
+        left: product,
+        right: left,
+        fail: None,
+    });
+    let hi = value(body, |result| Inst::Binary {
+        result,
+        op: BinaryOp::Shr,
+        left: product,
+        right,
+        fail: None,
+    });
+    let hash = value(body, |result| Inst::Binary {
+        result,
+        op: BinaryOp::BitOr,
+        left: lo,
+        right: hi,
+        fail: None,
+    });
+    let shift = value(body, |result| Inst::Const { result, bits: 32 });
+    let top = value(body, |result| Inst::Binary {
+        result,
+        op: BinaryOp::Shr,
+        left: hash,
+        right: shift,
+        fail: None,
+    });
+    body.insts.push(Inst::Binary {
+        result,
+        op: BinaryOp::BitXor,
+        left: hash,
+        right: top,
+        fail: None,
+    });
 }
 
 struct Derive<'a> {
@@ -1808,7 +1886,22 @@ mod tests {
                 hash.0,
                 sig.0
             );
-            let m = text::parse(&fixture).unwrap();
+            let mut m = text::parse(&fixture).unwrap();
+            if types == "type t0 = own \"word\" { n:u64 }" {
+                // A published scalar value row, as the front's u64 row. The source
+                // hash oracle is unchanged, but no helper call remains at its site.
+                m.types[0].carried = hirsel_core_layout::Carried::Value(Ty::Scalar(Scalar::U64));
+                let mut body = m.functions[f].body.take().unwrap();
+                inline_ordered(&m, &mut body);
+                assert_eq!(
+                    body.insts
+                        .iter()
+                        .filter(|i| matches!(i, Inst::Call { .. }))
+                        .count(),
+                    0
+                );
+                m.functions[f].body = Some(body);
+            }
             wf::module(&m).unwrap();
             let run = eval::run(&m, FuncId(f as u32), &[], 0);
             assert_eq!(run.outcome, eval::Outcome::Returned(vec![want]), "{types}");

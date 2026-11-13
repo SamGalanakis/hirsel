@@ -748,6 +748,7 @@ impl Emitter {
         t: &mut impl TyRead,
         mut ty: TyId,
     ) {
+        crate::cost_scope!("query", "generic type names");
         while let TyKind::Anchored(x, _) | TyKind::View(x) = *t.kind(ty) {
             ty = x;
         }

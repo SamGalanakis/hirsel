@@ -203,6 +203,12 @@ pub struct Local<'a> {
     pub base: &'a Types,
     kinds: Vec<TyKind>,
     map: HashMap<TyKind, TyId>,
+    layout_names: Option<LayoutNames<'a>>,
+}
+struct LayoutNames<'a> {
+    base: &'a Types,
+    decls: &'a crate::Rows<crate::decls::TypeDecl>,
+    values: std::cell::RefCell<HashMap<TyId, String>>,
 }
 impl<'a> Local<'a> {
     pub fn new(base: &'a Types) -> Self {
@@ -210,6 +216,20 @@ impl<'a> Local<'a> {
             base,
             kinds: vec![],
             map: HashMap::default(),
+            layout_names: None,
+        }
+    }
+    pub(crate) fn with_decls(
+        base: &'a Types,
+        decls: &'a crate::Rows<crate::decls::TypeDecl>,
+    ) -> Self {
+        Self {
+            layout_names: Some(LayoutNames {
+                base,
+                decls,
+                values: Default::default(),
+            }),
+            ..Self::new(base)
         }
     }
     pub fn intern(&mut self, k: TyKind) -> TyId {
@@ -238,6 +258,12 @@ impl<'a> Local<'a> {
 pub trait TyRead {
     fn kind(&self, t: TyId) -> &TyKind;
     fn mk(&mut self, k: TyKind) -> TyId;
+    fn layout_name(&self, decls: &crate::Rows<crate::decls::TypeDecl>, ty: TyId) -> String
+    where
+        Self: Sized,
+    {
+        crate::decls::uncached_layout_name(decls, self, ty)
+    }
 }
 impl TyRead for Types {
     #[inline(always)]
@@ -260,6 +286,19 @@ impl TyRead for Local<'_> {
     }
     fn mk(&mut self, k: TyKind) -> TyId {
         self.intern(k)
+    }
+    fn layout_name(&self, decls: &crate::Rows<crate::decls::TypeDecl>, ty: TyId) -> String {
+        let Some(cache) = self.layout_names.as_ref().filter(|cache| {
+            std::ptr::eq(cache.base, self.base) && std::ptr::eq(cache.decls, decls)
+        }) else {
+            return crate::decls::uncached_layout_name(decls, self, ty);
+        };
+        if let Some(name) = cache.values.borrow().get(&ty) {
+            return name.clone();
+        }
+        let name = crate::decls::uncached_layout_name(decls, self, ty);
+        cache.values.borrow_mut().insert(ty, name.clone());
+        name
     }
 }
 
@@ -343,6 +382,7 @@ pub fn reroot(t: &mut impl TyRead, ty: TyId, from: Root, to: TyId) -> TyId {
 
 /// Whether `ty` names a type parameter anywhere.
 pub fn has_hole(t: &impl TyRead, ty: TyId) -> bool {
+    crate::cost_scope!("query", "has hole");
     match t.kind(ty) {
         TyKind::Hole => true,
         TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs.iter().any(|&x| has_hole(t, x)),
@@ -353,6 +393,7 @@ pub fn has_hole(t: &impl TyRead, ty: TyId) -> bool {
     }
 }
 pub fn has_param(t: &impl TyRead, ty: TyId) -> bool {
+    crate::cost_scope!("query", "has parameter");
     match t.kind(ty) {
         TyKind::Param(_) | TyKind::Region(Root::Generic(_)) => true,
         TyKind::Anchored(x, r) => has_param(t, *x) || has_param(t, *r),
@@ -366,6 +407,56 @@ pub fn has_param(t: &impl TyRead, ty: TyId) -> bool {
 #[cfg(test)]
 mod interner_tests {
     use super::*;
+
+    #[test]
+    fn layout_names_are_local_to_the_arena_and_declarations() {
+        let (index, modules) = crate::tests::program_inputs("type Local { n: u64 }\n");
+        let p = crate::Program::declare(&index, &modules);
+        let d = p
+            .decls
+            .iter()
+            .position(|d| d.path.0.name == "Local")
+            .unwrap();
+        let mut renamed = p.decls.clone();
+        renamed[d].path.0.name = "Other".into();
+        let mut first = Local::with_decls(&p.types, &p.decls);
+        let nominal = first.intern(TyKind::Adt(DeclId(d as u32), vec![]));
+        let expected = p.decls[d].path.to_string();
+        assert_eq!(first.layout_name(&p.decls, nominal), expected);
+        assert_eq!(first.layout_name(&p.decls, nominal), expected);
+        assert_eq!(
+            first.layout_name(&renamed, nominal),
+            renamed[d].path.to_string()
+        );
+        assert_eq!(first.layout_name(&p.decls, nominal), expected);
+        let a = first.intern(TyKind::Array(nominal, 2));
+        let mut second = Local::with_decls(&p.types, &p.decls);
+        assert_eq!(
+            second.intern(TyKind::Adt(DeclId(d as u32), vec![])),
+            nominal
+        );
+        let b = second.intern(TyKind::Array(nominal, 3));
+        assert_eq!(a, b);
+        assert_eq!(
+            first.layout_name(&p.decls, a),
+            format!("Inline[{expected}, 2]")
+        );
+        assert_eq!(
+            second.layout_name(&p.decls, b),
+            format!("Inline[{expected}, 3]")
+        );
+        let anchor = first.intern(TyKind::Region(Root::Local(4)));
+        let anchored = first.intern(TyKind::Anchored(a, anchor));
+        assert_eq!(
+            first.layout_name(&p.decls, anchored),
+            first.layout_name(&p.decls, a)
+        );
+        let view = first.intern(TyKind::View(anchored));
+        assert_eq!(
+            first.layout_name(&p.decls, view),
+            format!("View[Inline[{expected}, 2]]")
+        );
+    }
 
     #[test]
     fn overlay_ids_do_not_grow_suffixes_or_escape_local_arenas() {

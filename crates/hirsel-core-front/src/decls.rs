@@ -2327,6 +2327,7 @@ fn join(a: Kind, b: Kind) -> Kind {
 /// The kind of a type (OWN-3). `params` are the bounds of the enclosing definition's
 /// type parameters.
 pub fn kind(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, params: &[u16]) -> Kind {
+    crate::cost_scope!("query", "kind computation");
     match t.kind(ty) {
         TyKind::Error | TyKind::Hole | TyKind::Never | TyKind::Unit | TyKind::Scalar(_) => {
             Kind::Plain
@@ -2513,6 +2514,7 @@ pub(crate) fn path_text(item: hirsel_core_syntax::Item<'_>, n: NodeId) -> String
 /// The canonical text of a source type, including its lifetime anchors.
 /// Layout rows and instance recipes use `layout_name` instead.
 pub fn canonical(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId) -> String {
+    crate::cost_scope!("query", "canonical type name");
     let mut s = String::new();
     write_canonical::<false>(decls, t, ty, &mut s);
     s
@@ -2520,6 +2522,14 @@ pub fn canonical(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId) -> St
 /// Layout identity erases lifetime anchors at every depth. Nested views remain
 /// distinct because they change the field's cleanup and scoped representation.
 pub(crate) fn layout_name(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId) -> String {
+    crate::cost_scope!("query", "layout type name");
+    t.layout_name(decls, ty)
+}
+pub(crate) fn uncached_layout_name(
+    decls: &crate::Rows<TypeDecl>,
+    t: &impl TyRead,
+    ty: TyId,
+) -> String {
     let mut s = String::new();
     write_canonical::<true>(decls, t, ty, &mut s);
     s

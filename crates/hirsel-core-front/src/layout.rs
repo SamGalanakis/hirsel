@@ -40,6 +40,7 @@ impl<T: TyRead> Shapes<'_, T> {
     /// The shape of a closed type held inline, or None when the layout crate has no
     /// field type for some part of it (recorded as a gap by the caller).
     pub fn shape(&mut self, ty: TyId) -> Option<TypeRef> {
+        crate::cost_scope!("query", "shape lookup");
         let name = crate::decls::layout_name(self.decls, &*self.types, ty);
         if let Some(&r) = self.of.get(&name) {
             return Some(r);

@@ -408,6 +408,7 @@ impl Emitter {
     /// The row of closed type `ty` in `module.types`, made with the rows it holds
     /// inline; None when some part has no field type yet.
     fn type_row(&mut self, p: &Program, t: &mut impl TyRead, ty: TyId) -> Option<TypeId> {
+        crate::cost_scope!("query", "type row");
         crate::cost_scope!("phase", "layout/drop recipes");
         let mark = self.module.types.len();
         let mut s = crate::layout::Shapes {
@@ -605,7 +606,7 @@ impl Emitter {
         f: usize,
     ) -> Result<(Signature, scalar_abi::SignatureAbi), &'static str> {
         let fd = &p.fns[f];
-        let mut t = Local::new(&p.types);
+        let mut t = Local::with_decls(&p.types, &p.decls);
         let arguments: Vec<_> = (0..fd.generics.len())
             .map(|i| t.mk(generic_arg(fd, i)))
             .collect();
@@ -1097,7 +1098,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             definition: f,
             header: item.root,
             params: fd.generics.iter().map(|g| g.bounds).collect(),
-            t: Local::new(&p.types),
+            t: Local::with_decls(&p.types, &p.decls),
             e,
             b: Body::default(),
             func: None,

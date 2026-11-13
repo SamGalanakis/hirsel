@@ -879,6 +879,26 @@ fn stream_fixed_span_cranelift() { stream_fixed_span(Backend::Cranelift); }
 #[test]
 #[ignore = "explicit native integration target"]
 fn stream_fixed_span_llvm() { stream_fixed_span(Backend::Llvm); }
+/// MEM-4: views of completed elements of an open writer, on each engine.
+fn stream_completed(backend: Backend) {
+    run_lines_native(backend, include_str!("../../../core/front/cases/stream-completed.hirsel"));
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn stream_completed_cranelift() { stream_completed(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn stream_completed_llvm() { stream_completed(Backend::Llvm); }
+/// LANG-6, MEM-4: an emitted Text operand's temporary is dropped only where it was made.
+fn stream_text_temp(backend: Backend) {
+    run_lines_native(backend, include_str!("../../../core/front/cases/stream-text-temp.hirsel"));
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn stream_text_temp_cranelift() { stream_text_temp(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn stream_text_temp_llvm() { stream_text_temp(Backend::Llvm); }
 
 fn uninitialized_take_names(backend: Backend) {
     let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

@@ -1,8 +1,9 @@
 //! MEM-4 streaming writers. `build_stream_in` admits one blob `{n @0, W @8, bytes @16}`
 //! and keeps the build's state in a slot `{blob @0, used @8, end @16, W @24, failed @32}`:
 //! `used` is the offset of the next byte, `end` is `16 + n`. A `Writer[U]` is a pointer
-//! to its frame `{state @0, start @8, count @16, done @24}`: where its value starts, the
-//! elements appended so far, and whether it completed. A `Text` or sequence writer
+//! to its frame `{state @0, start @8, count @16, done @24, last @32}`: where its value
+//! starts, the elements appended so far, whether it completed, and where the last
+//! appended element starts. A `Text` or sequence writer
 //! reserves its header (`W`, or `2W`) when it is made. A `Child[U]` is `{blob, start}`:
 //! the destination's identity is its blob's address, and a child a callback returns is
 //! accepted only from the completed frame handed to it. The first failed write marks
@@ -68,6 +69,37 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
     fn over(&mut self, sinks: &mut Sinks) -> BlockId {
         *sinks.over.get_or_insert_with(|| self.new_block(&[]))
+    }
+    /// An operand evaluated since `mark` made temporaries: until they end, a write
+    /// that does not fit leaves through a block that drops them first, so no drop
+    /// runs on a path where they were never made (LANG-6).
+    fn operand_over(&mut self, sinks: &mut Sinks, mark: usize) -> Option<(BlockId, BlockId)> {
+        if self.owner_mark() == mark || !self.live() {
+            return None;
+        }
+        let shared = self.over(sinks);
+        let mine = self.new_block(&[]);
+        sinks.over = Some(mine);
+        Some((mine, shared))
+    }
+    /// The operand's bytes are copied: its temporaries end here, and on its
+    /// overflow edge before the shared one.
+    fn end_operand(
+        &mut self,
+        sinks: &mut Sinks,
+        mark: usize,
+        over: Option<(BlockId, BlockId)>,
+        n: NodeId,
+    ) {
+        let Some((mine, shared)) = over else {
+            return;
+        };
+        sinks.over = Some(shared);
+        self.side(mine, |cx| {
+            cx.clean_temps(mark, n);
+            cx.jump(shared, &[], n);
+        });
+        self.end_owners(mark, None, true, n);
     }
     fn failed(&mut self, sinks: &mut Sinks) -> BlockId {
         *sinks
@@ -210,12 +242,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.reserve(state, zero, sinks, n)?
             }
         };
-        let f = self.words(4, n)?;
+        let f = self.words(5, n)?;
         let zero = self.u64k(0, n)?;
         self.put_word(AddressBase::Address(f), &[], 0, state, n)?;
         self.put_word(AddressBase::Address(f), &[], 8, start, n)?;
         self.put_word(AddressBase::Address(f), &[], 16, zero, n)?;
         self.put_word(AddressBase::Address(f), &[], 24, zero, n)?;
+        self.put_word(AddressBase::Address(f), &[], 32, zero, n)?;
         Some(self.pointer(f, n))
     }
 
@@ -560,7 +593,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         match self.shape(ty) {
             Shape::Text => {
+                let mark = self.owner_mark();
                 let s = self.string_view(a)?;
+                let over = self.operand_over(sinks, mark);
                 let w = self.state_word(state, 24, Ty::Scalar(Scalar::U64), a)?;
                 let len = self.get_word(AddressBase::Value(s), 8, Ty::Scalar(Scalar::U64), a)?;
                 let k = self.add(w, len, a);
@@ -568,7 +603,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let blob = self.state_word(state, 0, Ty::Ptr, a)?;
                 self.put_w(blob, at, w, len, a)?;
                 let data = self.add(at, w, a);
-                self.copy_string(blob, data, s, len, a)
+                self.copy_string(blob, data, s, len, a)?;
+                self.end_operand(sinks, mark, over, a);
+                Some(())
             }
             Shape::Seq | Shape::Indexed => {
                 let _ = self.expr(a, None);
@@ -596,17 +633,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// Write a `FixedSpan[T]` from a view of a `List[T]` (MEM-4, MEM-12): one fit check
     /// for the `W`-wide count and the elements at `T`'s packed stride, then the count and
     /// each element encoded in order.
-    fn write_span(
-        &mut self,
-        state: ValueId,
-        ty: TyId,
-        a: NodeId,
-        sinks: &mut Sinks,
-    ) -> Option<()> {
+    fn write_span(&mut self, state: ValueId, ty: TyId, a: NodeId, sinks: &mut Sinks) -> Option<()> {
         let u64t = Ty::Scalar(Scalar::U64);
         let elem = self.role_of(ty)?.1.first().copied()?;
         let list = self.p.core_decl("List")?;
         let list = self.t.mk(TyKind::Adt(list, vec![elem]));
+        let mark = self.owner_mark();
         let (t, v) = self.operand(a, expect(list));
         self.coerce(
             t,
@@ -623,6 +655,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return None;
         };
         let r = self.rep(elem).ok()?;
+        let over = self.operand_over(sinks, mark);
         let count = self.get_word(AddressBase::Value(xs), 8, u64t, a)?;
         let w = self.state_word(state, 24, u64t, a)?;
         let stride = self.u64k(packed, a)?;
@@ -684,6 +717,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let next = self.add(i, one, a);
         self.jump(head, &[next], a);
         self.start(done);
+        self.end_operand(sinks, mark, over, a);
         Some(())
     }
     /// Copy the `len` bytes of the `String` that `s` points at to `blob + at`.
@@ -796,8 +830,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let join = self.new_block(&[]);
         if shape == Shape::Text {
             // The header was reserved with the writer; the bytes follow it.
+            let mark = self.owner_mark();
             let s = self.string_view(x)?;
+            let over = self.operand_over(&mut sinks, mark);
             self.push_bytes(state, s, &mut sinks, n)?;
+            self.end_operand(&mut sinks, mark, over, n);
             self.close_text(frame, n)?;
         } else {
             self.write_operand(state, wty, ty, x, &mut sinks)?;
@@ -936,9 +973,24 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 Some(self.pointer(to, n))
             }
             ("writer", "close") => self.close(tys[0], vals[0]?, result, n),
-            ("writer", _) => {
-                self.gap(n, "views of completed elements in a writer are not built");
-                None
+            ("writer", op @ ("completed" | "last_completed")) => {
+                let shape = self.shape(tys[0]);
+                let elem = self.role_of(tys[0]).and_then(|r| r.1.first().copied());
+                if !matches!(shape, Shape::Seq | Shape::Indexed) || elem != Some(tys[1]) {
+                    self.refuse(
+                        "MEM-4",
+                        n,
+                        "`writer.completed` views an element of a sequence",
+                    );
+                    return None;
+                }
+                let index = if op == "completed" {
+                    Some(vals[1]?)
+                } else {
+                    None
+                };
+                let frame = self.read_writer(vals[0]?, n)?;
+                self.completed(frame, tys[1], index, result, n)
             }
             ("text", "len") => {
                 let (blob, at, w) = self.locator(vals[0]?, n)?;
@@ -952,7 +1004,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         }
     }
-    /// The frame a `mut` writer argument's place holds.
+    /// The frame a `mut` or viewed writer argument's place holds.
     fn read_writer(&mut self, place: ValueId, n: NodeId) -> Option<ValueId> {
         self.get_word(AddressBase::Value(place), 0, Ty::Ptr, n)
     }
@@ -1653,10 +1705,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let state = self.get_word(AddressBase::Value(frame), 0, Ty::Ptr, n)?;
         let mut sinks = Sinks::default();
         let join = self.new_block(&[]);
+        // The element starts at the build's next byte, where its writer is made.
+        let at = self.state_word(state, 8, u64t, n)?;
         self.run_callback(state, elem, fty, f, &mut sinks, n)?;
         let count = self.get_word(AddressBase::Value(frame), 16, u64t, n)?;
         let next = self.add_k(count, 1, n)?;
         self.put_word(AddressBase::Value(frame), &[], 16, next, n)?;
+        self.put_word(AddressBase::Value(frame), &[], 32, at, n)?;
         self.inst(
             Inst::SetCase {
                 address: to,
@@ -1969,6 +2024,30 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.branch(more, load, empty, n);
         self.start(load);
         let (blob, off, w) = self.packed_element_offset(header, elem, index, indexed, n)?;
+        self.some_element(to, blob, off, w, elem, n)?;
+        self.jump(done, &[], n);
+        self.start(empty);
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 0,
+            },
+            n,
+        );
+        self.jump(done, &[], n);
+        self.start(done);
+        Some(self.pointer(to, n))
+    }
+    /// `Some` of the packed element at `blob + off` into the option slot `to`.
+    fn some_element(
+        &mut self,
+        to: AddressId,
+        blob: ValueId,
+        off: ValueId,
+        w: ValueId,
+        elem: TyId,
+        n: NodeId,
+    ) -> Option<()> {
         let el = self.compact_value_at(blob, off, w, elem, n)?;
         self.inst(
             Inst::SetCase {
@@ -1991,6 +2070,65 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             };
             self.install(dest, er, Some(value), n);
         }
+        Some(())
+    }
+    /// `writer.completed(w, i)` and, with no `index`, `writer.last_completed(w)`
+    /// (MEM-4): `Some` view of complete element `i`, walked from the first, or of the
+    /// last one appended, which the frame keeps; `None` past the count.
+    fn completed(
+        &mut self,
+        frame: ValueId,
+        elem: TyId,
+        index: Option<ValueId>,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let u64t = Ty::Scalar(Scalar::U64);
+        let elem = self.bare(elem);
+        let rep = self.rep(result).ok()?;
+        let to = self.new_slot(rep.stored()?, n);
+        let count = self.get_word(AddressBase::Value(frame), 16, u64t, n)?;
+        let more = match index {
+            Some(i) => self.test(CompareOp::Lt, i, count, n),
+            None => {
+                let zero = self.u64k(0, n)?;
+                self.test(CompareOp::Ne, count, zero, n)
+            }
+        };
+        let (load, empty, done) = (
+            self.new_block(&[]),
+            self.new_block(&[]),
+            self.new_block(&[]),
+        );
+        self.branch(more, load, empty, n);
+        self.start(load);
+        let state = self.get_word(AddressBase::Value(frame), 0, Ty::Ptr, n)?;
+        let blob = self.state_word(state, 0, Ty::Ptr, n)?;
+        let w = self.state_word(state, 24, u64t, n)?;
+        let off = match index {
+            None => self.get_word(AddressBase::Value(frame), 32, u64t, n)?,
+            Some(index) => {
+                let start = self.get_word(AddressBase::Value(frame), 8, u64t, n)?;
+                let second = self.add(start, w, n);
+                let data = self.add(second, w, n);
+                let zero = self.u64k(0, n)?;
+                let lp = self.new_block(&[u64t, u64t]);
+                self.jump(lp, &[zero, data], n);
+                self.start(lp);
+                let p = self.block_params(lp);
+                let (i, el) = (p[0], p[1]);
+                let walk = self.test(CompareOp::Lt, i, index, n);
+                let (body, after) = (self.new_block(&[]), self.new_block(&[]));
+                self.branch(walk, body, after, n);
+                self.start(body);
+                let next = self.skip(blob, el, w, elem, n)?;
+                let i1 = self.add_k(i, 1, n)?;
+                self.jump(lp, &[i1, next], n);
+                self.start(after);
+                el
+            }
+        };
+        self.some_element(to, blob, off, w, elem, n)?;
         self.jump(done, &[], n);
         self.start(empty);
         self.inst(

@@ -25,6 +25,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let entry = self.map_entry(types[0], types[1], n)?;
                 Some(self.map_len(vals[0]?, entry, n))
             }
+            "swap_value" | "kill" => {
+                let collection = self.map_type(types)?;
+                let entry = self.map_entry_at(vals[0]?, collection, vals[1]?, n)?;
+                let value_ty = self.place_ty(types[1], n)?;
+                let value_at =
+                    self.address(AddressBase::Address(entry), &[Step::Field(3)], value_ty, n);
+                if name == "swap_value" {
+                    let pointer = self.pointer(value_at, n);
+                    Some(self.replace_value(types[1], Some(pointer), vals[2], n))
+                } else {
+                    Some(self.map_kill(vals[0]?, entry, value_at, types, n))
+                }
+            }
             "hash" => Some(self.key_operation(key_glue::KeyOp::Hash, types[0], &[vals[0]], n)),
             "slots" | "capacity" => Some(Some(self.read_sequence_word(
                 vals[0]?,
@@ -43,7 +56,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 };
                 let at = self.address(AddressBase::Address(entry), &[Step::Field(field)], ty, n);
                 Some(if name == "slot_key" || name == "slot_value" {
-                    Some(self.pointer(at, n))
+                    self.read_carried(at, types[usize::from(name == "slot_value")], n)
                 } else {
                     let value = self.read_bits(at, Ty::Scalar(Scalar::U64), n);
                     if name == "slot_live" {
@@ -75,6 +88,69 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
     }
 
+    fn map_kill(
+        &mut self,
+        header: ValueId,
+        entry: AddressId,
+        value_at: AddressId,
+        types: &[TyId],
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let rep = match self.rep(types[1]) {
+            Ok(rep) => rep,
+            Err(what) => {
+                self.gap(n, what);
+                return None;
+            }
+        };
+        let value = self.read_carried_rep(value_at, rep, n);
+        let saved = self.slot(types[1], value, n)?;
+        let value = self.read_carried_rep(saved, rep, n);
+        self.temp(types[1], value);
+        let u = Ty::Scalar(Scalar::U64);
+        let zero = self.konst(u, 0, n)?;
+        let state = self.address(
+            AddressBase::Address(entry),
+            &[Step::Field(1)],
+            PlaceTy::Value(u),
+            n,
+        );
+        self.inst(
+            Inst::Store {
+                address: state,
+                value: zero,
+            },
+            n,
+        );
+        let layout = self.map_entry(types[0], types[1], n)?;
+        let live_at = self.map_live_at(header, layout, n)?;
+        let live = self.read_bits(live_at, u, n);
+        let one = self.konst(u, 1, n)?;
+        let remaining = self.map_binary(BinaryOp::Sub, live, one, n);
+        self.inst(
+            Inst::Store {
+                address: live_at,
+                value: remaining,
+            },
+            n,
+        );
+        let key_ty = self.place_ty(types[0], n)?;
+        let key = self.address(AddressBase::Address(entry), &[Step::Field(2)], key_ty, n);
+        self.drop_at(key, types[0], n);
+        value
+    }
+    fn map_live_at(&mut self, header: ValueId, entry: MapEntry, n: NodeId) -> Option<AddressId> {
+        let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
+        let cap = self.read_sequence_word(header, 16, Ty::Scalar(Scalar::U64), n);
+        let stride = self.layout_size(entry.ty, false, n)?;
+        let (offset, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, cap, stride, n);
+        Some(self.address(
+            AddressBase::Value(data),
+            &[Step::Byte(offset)],
+            PlaceTy::Value(Ty::Scalar(Scalar::U64)),
+            n,
+        ))
+    }
     fn map_type(&mut self, types: &[TyId]) -> Option<TyId> {
         Some(self.map_entry(types[0], types[1], self.header)?.collection)
     }

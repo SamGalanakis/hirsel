@@ -141,6 +141,8 @@ operations! {
     ("list", "set", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "clear", Lane::Value, "A", "core-check-calls-910", false),
     ("list", "append", Lane::PendingCode, "A", "core-check-calls-910", false),
+    ("map", "swap_value", Lane::Value, "A", "core-check-callables-913", true),
+    ("map", "kill", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "hash", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "slots", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "capacity", Lane::Value, "A", "core-check-callables-913", true),

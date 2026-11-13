@@ -6,8 +6,12 @@ pub fn get[K: key, V](m: Map[K, V], k: K) -> Option[View[V]] in m {
   match find(m, k, hash(k)) { Some(i) => Some(slot_value(m, i)), None => None }
 }
 pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), (Capacity, K, V)]
-pub fn set[K: key, V](mut m: Map[K, V], k: K, take v: V) -> Result[V, V]
-pub fn remove[K: key, V](mut m: Map[K, V], k: K) -> Option[V]
+pub fn set[K: key, V](mut m: Map[K, V], k: K, take v: V) -> Result[V, V] {
+  match find(m, k, hash(k)) { Some(i) => Ok(swap_value(mut m, i, take v)), None => Error(take v) }
+}
+pub fn remove[K: key, V](mut m: Map[K, V], k: K) -> Option[V] {
+  match find(m, k, hash(k)) { Some(i) => Some(kill(mut m, i)), None => None }
+}
 
 // Only this module can access entries and its private lookup index.
 fn hash[K: key](k: K) -> u64
@@ -34,3 +38,6 @@ fn find[K: key, V](m: Map[K,V], k: K, h: u64) -> Option[u64] {
     j = int.wrapping_add(j, 1) & mask
   }
 }
+
+fn swap_value[K: key, V](mut m: Map[K,V], i: u64, take v: V) -> V
+fn kill[K: key, V](mut m: Map[K,V], i: u64) -> V

@@ -507,7 +507,11 @@ declared outside the loop in its entry state, and may not end a view or anchor t
 at the head: a slot moved in the body must be reassigned before the
 back edge. A refusal is reported at the `continue`, or at the closing `}` of the body, whose
 edge breaks this; the change it undoes is a secondary site
-([PROG-7](diagnostics.md#prog-7-one-rule-one-site)). A `while` condition's false edge and
+([PROG-7](diagnostics.md#prog-7-one-rule-one-site)). A scoped slot declared outside the
+loop reaches every back edge with the anchor set it had at the head, and a scoped callback
+with the same capture descriptor (OWN-21): the same captured places, each in the same
+mode. Reassigning it in the body to an equal set is accepted; a different set is refused
+at that edge. A `while` condition's false edge and
 each `break` merge into the loop's exit state by OWN-16. Nothing is iterated to a fixpoint.
 
 ```hirsel
@@ -521,6 +525,35 @@ fn drain(mut q: List[String]) {
 ```
 ```hirsel
 fn f(take s: String) { loop { let _ = string.into_bytes(take s) } }   // refused: OWN-17, at the body's }
+```
+```hirsel
+fn each(xs: List[u64], f: scoped fn(u64)) {}
+fn twice(xs: List[u64]) -> u64 {
+  let mut total: u64 = 0
+  let mut add = scoped fn(x: u64) { total += x }
+  let mut i: u64 = 0
+  while i < 2 {
+    each(xs, add)
+    add = scoped fn(x: u64) { total += 2 * x }
+    i += 1
+  }
+  total
+}
+```
+```hirsel
+fn each(xs: List[u64], f: scoped fn(u64)) {}
+fn split(xs: List[u64]) -> u64 {
+  let mut a: u64 = 0
+  let mut b: u64 = 0
+  let mut add = scoped fn(x: u64) { a += x }
+  let mut i: u64 = 0
+  while i < 2 {
+    each(xs, add)
+    add = scoped fn(x: u64) { b += x }
+    i += 1
+  }                                       // refused: OWN-17, add captures b, not a
+  a + b
+}
 ```
 
 ### OWN-18: Drop flags

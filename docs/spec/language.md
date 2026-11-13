@@ -484,6 +484,14 @@ installs the result ([OWN-12](ownership.md#own-12-assignment)).
 | unary `!`, `&&`, `\|\|` | `bool` | `bool` |
 | `== !=` | one `key` type ([SEM-7](semantics.md#sem-7-equality-and-order)) | `bool` |
 | `< <= > >=` | one `ordered` type (SEM-7) | `bool` |
+| index `a[i]` | `a` a `List[T]`, an `Inline[T, n]` or a `FixedSpan[T]`, or a view of one; `i` a `u64` | a place of type `T` |
+
+Indexing reads and assigns as [SEM-4](semantics.md#sem-4-lists),
+[SEM-9](semantics.md#sem-9-inline-arrays) and [MEM-12](memory.md#mem-12-stable-sequences)
+say. No other type is indexable: an index or index assignment on `String`, `Text`, `Map`,
+`SeqSpan`, `IndexedSpan` or any user type is refused here, at the index expression. A
+string is read through `string.as_bytes` or `string.next_scalar`, and a map through
+`map.get`, `map.set` and `map.insert`, whose results say what a missing key does.
 
 A **literal operand** is an unsuffixed number, or a unary `-` or `~`, a binary operator or
 parentheses applied only to literal operands; it synthesises no type. It is evaluated when
@@ -506,4 +514,9 @@ fn f(a: bool, b: bool) -> bool { a + b }                  // refused: LANG-21, +
 ```
 ```hirsel
 fn f(x: u8, y: u16) -> u16 { x + y }                      // refused: LANG-21, mixed widths
+```
+```hirsel
+fn first(s: String) -> u8 { s[0] }          // refused: LANG-21, use string.as_bytes or string.next_scalar
+fn find(m: Map[u64, u64]) -> u64 { m[0] }   // refused: LANG-21, use map.get(m, 0)
+fn put(mut m: Map[u64, u64]) { m[0] = 1 }   // refused: LANG-21, use map.set or map.insert
 ```

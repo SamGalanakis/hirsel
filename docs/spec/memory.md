@@ -354,7 +354,8 @@ length of a sequence holding it includes it. So an `IndexedSpan[T]` is read wher
 expected ([LANG-11](language.md#lang-11-typing-is-local)), and skipping any value costs work fixed by its type, never by its contents.
 `seq.len(s)` reads the count, `seq.nth(s, i)` walks `i` elements, `indexed.get(s, i)` makes
 one bounds test and one load, and `for` visits the elements in order
-([SEM-6](semantics.md#sem-6-iteration)); neither has `s[i]`. They are written only by the
+([SEM-6](semantics.md#sem-6-iteration)); neither is indexable
+([LANG-21](language.md#lang-21-operators)). They are written only by the
 writers of MEM-4. `seq.index_in(r, s)` builds a separate `SeqIndex` of `s` in `r`, read in
 constant time by `seq.get(x, i)`; it keeps `s`'s locator, and nothing makes one from
 offsets or pairs it with another sequence.
@@ -378,8 +379,10 @@ fn count(j: J) -> u64 { match j { Null => 1, Arr(xs) => { let mut n: u64 = 1; fo
 ```
 ```hirsel
 fn names(xs: FixedSpan[Text]) -> u64 { span.len(xs) }       // refused: MEM-12, Text has no fixed size
-fn first(xs: SeqSpan[u64]) -> u64 { xs[0] }                 // refused: MEM-12, no s[i]
 fn units(xs: SeqSpan[()]) -> u64 { seq.len(xs) }            // refused: MEM-12, () is not packed
+```
+```hirsel
+fn first(xs: SeqSpan[u64]) -> u64 { xs[0] }                 // refused: LANG-21, use seq.nth
 ```
 
 ## Own and counted data

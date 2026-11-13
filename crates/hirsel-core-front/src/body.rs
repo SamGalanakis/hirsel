@@ -16,7 +16,7 @@
 //! copying the table), and the freeze and reservation records (crate::own).
 
 use crate::decls::{
-    DeclBody, FnDecl, KEY, Kind, ORDERED, Repr, Role, copyable, has_bounds, is_core_prelude,
+    DeclBody, FnDecl, KEY, Kind, ORDERED, Repr, Role, copyable, has_bounds, is_core_prelude, kind,
 };
 use crate::own::{Act, Avail, Extent, Freeze, Hold, Origin, PStep, Place, breaks, join, overlap};
 use crate::types::*;
@@ -2345,7 +2345,7 @@ impl<'c, 'a> Cx<'c, 'a> {
             return self.expr(r, expect(t)).1;
         }
         let (rt, rv) = self.expr(r, None);
-        if rt != t && rt != NEVER && rt != ERROR {
+        if rt != t && ![NEVER, ERROR].contains(&rt) && t != ERROR {
             let (op, a, b) = (self.token_text(n), self.name(t), self.name(rt));
             self.refuse_at("LANG-21", self.op_span(n), format!("`{a}` {op} `{b}`"));
             return None;
@@ -2553,7 +2553,10 @@ impl<'c, 'a> Cx<'c, 'a> {
             }
         }
         let tys: Vec<TyId> = found.iter().map(|s| s.unwrap_or(ERROR)).collect();
-        if found.iter().any(Option::is_none) && !self.broken {
+        // An undetermined type argument is refused once; the call's type is then the
+        // refused type, so nothing built from it is refused again.
+        let undetermined = found.iter().any(Option::is_none);
+        if undetermined && !self.broken {
             self.refuse(
                 "LANG-11",
                 n,
@@ -2570,7 +2573,11 @@ impl<'c, 'a> Cx<'c, 'a> {
             Hold::CallMut(c) if c == call => None,
             h => Some(h),
         });
-        let result = subst(&mut self.t, g.result, &tys);
+        let result = if undetermined {
+            ERROR
+        } else {
+            subst(&mut self.t, g.result, &tys)
+        };
         if result == NEVER {
             self.dead = true;
         }
@@ -2898,48 +2905,120 @@ impl<'c, 'a> Cx<'c, 'a> {
                 let xs = c.iter().map(|&x| self.ty(x)).collect();
                 self.t.mk(TyKind::Tuple(xs))
             }
-            NodeKind::TypePath => match self.p.target(self.at, n).cloned() {
-                Some(Target::Builtin(name)) => match Scalar::from_name(&name) {
-                    Some(s) => scalar(s),
-                    None => ERROR,
-                },
-                Some(Target::Definition(p)) if is_core_prelude(&p, &["Never"]) => NEVER,
-                Some(Target::Definition(p)) => match self.p.by_path.get(&p) {
-                    Some(Def::Type(d)) if self.p.decls[d.index()].generics.is_empty() => {
-                        self.t.mk(TyKind::Adt(*d, vec![]))
+            NodeKind::TypePath => self.named_ty(n, &[]),
+            NodeKind::TypeArguments => {
+                let mut args = vec![];
+                for &a in &c[1..] {
+                    if self.kind(a) == NodeKind::Anchor {
+                        self.gap(a, "anchor arguments are not built");
+                        return ERROR;
                     }
-                    Some(Def::Type(_)) => {
-                        self.refuse("LANG-12", n, "this type takes type arguments");
-                        ERROR
-                    }
-                    _ => {
-                        self.refuse("LANG-7", n, format!("`{p}` is not a type"));
-                        ERROR
-                    }
-                },
-                Some(Target::Binder(b)) => {
-                    let name = &self.p.items[self.at.module as usize][self.at.item as usize]
-                        .resolution
-                        .binders[b as usize]
-                        .name;
-                    match self.fd.generics.iter().position(|g| &g.name == name) {
-                        Some(i) => self.t.mk(TyKind::Param(i as u32)),
-                        None => {
-                            self.gap(n, "this type parameter is not built");
-                            ERROR
-                        }
-                    }
+                    args.push((self.ty(a), a));
                 }
-                _ => {
-                    self.halt();
-                    ERROR
-                }
-            },
+                self.named_ty(c[0], &args)
+            }
             _ => {
                 self.gap(n, "this type form is not built in bodies");
                 ERROR
             }
         }
+    }
+}
+
+impl<'c, 'a> Cx<'c, 'a> {
+    /// A named type written in a body, with its arguments: an alias names its right side
+    /// (LANG-9), `View[T]` is the view type, and each argument has the bounds its
+    /// parameter declares (LANG-12, OWN-4 for Rc and Arc) and, for a generic other than
+    /// Option and Result, is not scoped (OWN-19), as in the declaration pass.
+    fn named_ty(&mut self, path: NodeId, args: &[(TyId, NodeId)]) -> TyId {
+        let p: &'c Program<'a> = self.p;
+        let d = match p.target(self.at, path).cloned() {
+            Some(Target::Builtin(name)) => match Scalar::from_name(&name) {
+                Some(s) if args.is_empty() => return scalar(s),
+                Some(_) => {
+                    self.refuse("LANG-12", path, "this type takes no type arguments");
+                    return ERROR;
+                }
+                None => {
+                    self.gap(path, "inline array types are not built");
+                    return ERROR;
+                }
+            },
+            Some(Target::Definition(q)) if is_core_prelude(&q, &["Never"]) => {
+                if !args.is_empty() {
+                    self.refuse("LANG-12", path, "this type takes no type arguments");
+                    return ERROR;
+                }
+                return NEVER;
+            }
+            Some(Target::Definition(q)) => match p.by_path.get(&q) {
+                Some(Def::Type(d)) => *d,
+                _ => {
+                    self.refuse("LANG-7", path, format!("`{q}` is not a type"));
+                    return ERROR;
+                }
+            },
+            Some(Target::Binder(b)) => {
+                let name = &p.items[self.at.module as usize][self.at.item as usize]
+                    .resolution
+                    .binders[b as usize]
+                    .name;
+                return match self.fd.generics.iter().position(|g| &g.name == name) {
+                    Some(_) if !args.is_empty() => {
+                        self.refuse("LANG-12", path, "a type parameter takes no type arguments");
+                        ERROR
+                    }
+                    Some(i) => self.t.mk(TyKind::Param(i as u32)),
+                    None => {
+                        self.gap(path, "this type parameter is not built");
+                        ERROR
+                    }
+                };
+            }
+            _ => {
+                self.halt();
+                return ERROR;
+            }
+        };
+        let decl = &p.decls[d.index()];
+        if args.len() != decl.generics.len() {
+            let (name, want) = (&decl.path.0.name, decl.generics.len());
+            self.refuse(
+                "LANG-12",
+                path,
+                format!(
+                    "`{name}` takes {want} type arguments, {} written",
+                    args.len()
+                ),
+            );
+            return ERROR;
+        }
+        let counted = matches!(decl.role, Some(Role::Rc | Role::Arc));
+        for (g, &(t, at)) in decl.generics.iter().zip(args) {
+            if !decl.structural && kind(&p.decls, &self.t, t, &self.params) == Kind::Scoped {
+                self.refuse(
+                    "OWN-19",
+                    at,
+                    "a scoped type is not a type argument of a generic other than Option and Result",
+                );
+                return ERROR;
+            }
+            let missing = g.bounds & !has_bounds(&p.decls, &self.t, t, &self.params);
+            if missing != 0 {
+                let rule = if counted { "OWN-4" } else { "LANG-12" };
+                let b = crate::decls::bound_names(missing);
+                self.refuse(rule, at, format!("type argument is not {b}"));
+                return ERROR;
+            }
+        }
+        let tys: Vec<TyId> = args.iter().map(|a| a.0).collect();
+        if decl.role == Some(Role::View) {
+            return self.t.mk(TyKind::View(tys[0]));
+        }
+        if let DeclBody::Alias(t) = decl.body {
+            return subst(&mut self.t, t, &tys);
+        }
+        self.t.mk(TyKind::Adt(d, tys))
     }
 }
 

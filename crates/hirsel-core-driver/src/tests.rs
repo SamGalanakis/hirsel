@@ -790,3 +790,134 @@ fn incomplete_source_is_not_an_emittable_instance() {
         Err(InstanceStop::Incomplete(_))
     ));
 }
+
+#[test]
+fn reachable_build_ignores_unreached_bodies_and_declarations_after_disk_reuse() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "fn helper() -> u8 { 7u8 }\nfn answer() -> u8 { helper() }\nfn unused[T](take x: T) -> T { x }\ntype Broken = Missing\n";
+    let entry = DefPath::from_full("app@1/main/answer").unwrap();
+    let product = Driver::default()
+        .check(request(source, dir.path()), &mut Meter::new(false))
+        .unwrap();
+    assert!(
+        !product.accepted(),
+        "whole-package check still rejects the input"
+    );
+    let reachable = product.reachable(&entry, 64).unwrap();
+    assert!(reachable.accepted(), "{:?}", reachable.instances);
+    assert_eq!(reachable.instances.as_ref().unwrap().len(), 2);
+    assert_eq!(reachable.bodies.len(), 2);
+    assert!(reachable.first_stops.is_empty());
+    let cached = Driver::default()
+        .check(request(source, dir.path()), &mut Meter::new(false))
+        .unwrap();
+    assert!(cached.rechecked.is_empty());
+    assert!(!cached.accepted());
+    assert!(cached.reachable(&entry, 64).unwrap().accepted());
+}
+
+#[test]
+fn reachable_build_refuses_and_censuses_the_incomplete_callee() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "fn answer() -> u8 { unfinished() }\nfn unfinished() -> u8 { match 1u8 { _ => 7u8 } }\nfn unused[T](take x: T) -> T { x }\n";
+    let entry = DefPath::from_full("app@1/main/answer").unwrap();
+    let product = Driver::default()
+        .check(request(source, dir.path()), &mut Meter::new(false))
+        .unwrap();
+    let reachable = product.reachable(&entry, 64).unwrap();
+    assert!(!reachable.accepted());
+    let stopped = reachable.require().unwrap_err().to_string();
+    assert!(stopped.contains("unfinished"), "{stopped}");
+    assert!(
+        reachable
+            .first_stops
+            .iter()
+            .any(|s| s.definition == "app@1/main/unfinished")
+    );
+    assert!(
+        !reachable
+            .first_stops
+            .iter()
+            .any(|s| s.definition == "app@1/main/unused")
+    );
+    assert_eq!(reachable.census().values().sum::<usize>(), 1);
+}
+
+#[test]
+fn reachable_build_keeps_refusals_in_named_signature_declarations() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "type Broken = Missing\nfn inspect(x: Broken) -> u8 { 7u8 }\nfn answer() -> u8 { inspect(7u8) }\n";
+    let entry = DefPath::from_full("app@1/main/answer").unwrap();
+    let product = Driver::default()
+        .check(request(source, dir.path()), &mut Meter::new(false))
+        .unwrap();
+    let reachable = product.reachable(&entry, 64).unwrap();
+    assert!(!reachable.accepted());
+    assert!(!reachable.diagnostics.is_empty());
+    assert!(
+        reachable
+            .declarations
+            .contains(&DefPath::from_full("app@1/main/Broken").unwrap())
+    );
+    assert!(
+        reachable
+            .first_stops
+            .iter()
+            .any(|s| s.definition == "app@1/main/Broken")
+    );
+}
+
+#[test]
+fn reachable_census_follows_names_beyond_an_incomplete_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "fn answer() -> u8 { match 1u8 { _ => 0u8 }; unfinished() }\nfn unfinished() -> u8 { match 2u8 { _ => 7u8 } }\n";
+    let product = Driver::default()
+        .check(request(source, dir.path()), &mut Meter::new(false))
+        .unwrap();
+    let reachable = product
+        .reachable(&DefPath::from_full("app@1/main/answer").unwrap(), 64)
+        .unwrap();
+    assert!(!reachable.accepted());
+    assert_eq!(reachable.bodies.len(), 2);
+    assert_eq!(reachable.first_stops.len(), 2);
+    assert_eq!(reachable.census().values().sum::<usize>(), 2);
+}
+
+#[test]
+fn reachable_census_retains_a_named_function_without_a_native_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut req = request("fn answer() -> u8 { external() }\n", dir.path());
+    let library = dir.path().join("core.hirsel");
+    std::fs::write(&library, "pub fn external() -> u8\n").unwrap();
+    req.inputs.packages[0].dependencies.push(package("core"));
+    req.inputs.packages.push(PackageManifest {
+        package: package("core"),
+        sources: vec![hirsel_core_resolve::ModuleSource {
+            file: library,
+            modules: vec!["core".into()],
+            signatures: true,
+        }],
+        dependencies: vec![],
+    });
+    let product = Driver::default()
+        .check(req, &mut Meter::new(false))
+        .unwrap();
+    let reachable = product
+        .reachable(&DefPath::from_full("app@1/main/answer").unwrap(), 64)
+        .unwrap();
+    assert!(!reachable.accepted());
+    assert!(
+        reachable
+            .first_stops
+            .iter()
+            .any(|s| s.definition == "core@1/core/external"
+                && s.construct == "native body is unavailable")
+    );
+    assert!(
+        reachable
+            .require()
+            .unwrap_err()
+            .to_string()
+            .contains("external")
+    );
+}

@@ -18,6 +18,14 @@ struct Output<'a> {
     image: Option<String>,
     native: Option<BuildProduct>,
     stopped: Option<String>,
+    reachable: Option<ReachableOutput<'a>>,
+}
+#[derive(Serialize)]
+struct ReachableOutput<'a> {
+    bodies: usize,
+    declarations: usize,
+    census: std::collections::BTreeMap<&'a str, usize>,
+    first_stops: &'a [hirsel_core_driver::GapStop],
 }
 fn hex(hash: hirsel_core_ids::ContentHash) -> String {
     hash.0.iter().map(|b| format!("{b:02x}")).collect()
@@ -132,8 +140,23 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
     } else {
         (driver.check(request, &mut meter)?, None)
     };
+    let reach = if native_command {
+        Some(
+            product.reachable(
+                selected_entry
+                    .as_ref()
+                    .ok_or("build/run requires an entry")?,
+                65_536,
+            )?,
+        )
+    } else {
+        None
+    };
+    let accepted = reach
+        .as_ref()
+        .map_or_else(|| product.accepted(), |r| r.accepted());
     let mut stopped = None;
-    let native = if native_command && product.accepted() {
+    let native = if native_command && accepted {
         let options = NativeOptions {
             backend: backend.unwrap_or(if release {
                 Backend::Llvm
@@ -150,10 +173,11 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
             root_limit,
             instance_limit: 65_536,
         };
-        match product.build(
+        match product.build_reachable(
             selected_entry
                 .as_ref()
                 .ok_or("build/run requires an entry")?,
+            reach.as_ref().unwrap(),
             &options,
         ) {
             Ok(native) => Some(native),
@@ -166,7 +190,7 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
         None
     };
     let output = Output {
-        accepted: product.accepted(),
+        accepted,
         root: if json {
             hex(product.root)
         } else {
@@ -175,11 +199,30 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
         files: product.files.len(),
         rechecked: product.rechecked.len(),
         source_bytes: product.bytes,
-        diagnostics: product.machine_diagnostics()?,
-        incomplete: product.machine_incomplete()?,
+        diagnostics: if let Some(r) = &reach {
+            product.diagnostics_for(r.diagnostics.iter().copied())?
+        } else {
+            product.machine_diagnostics()?
+        },
+        incomplete: if let Some(r) = &reach {
+            product.incomplete_for(r.incomplete.iter().copied())?
+        } else {
+            product.machine_incomplete()?
+        },
         image: image.map(|i| hex(i.identity)),
         native,
-        stopped,
+        stopped: stopped.or_else(|| {
+            reach
+                .as_ref()
+                .and_then(|r| r.instances.as_ref().err())
+                .map(|e| format!("instances: {e:?}"))
+        }),
+        reachable: reach.as_ref().map(|r| ReachableOutput {
+            bodies: r.bodies.len(),
+            declarations: r.declarations.len(),
+            census: r.census(),
+            first_stops: &r.first_stops,
+        }),
     };
     if json {
         println!("{}", serde_json::to_string(&output)?);
@@ -230,13 +273,16 @@ fn run() -> Result<i32, Box<dyn std::error::Error>> {
     };
     let exit = if let Some(code) = run_exit {
         code
-    } else if !product.incomplete.is_empty() || output.stopped.is_some() {
+    } else if !output.incomplete.is_empty() {
         2
+    } else if !output.diagnostics.is_empty() {
+        1
     } else {
-        i32::from(!product.diagnostics.is_empty())
+        i32::from(output.stopped.is_some()) * 2
     };
     drop(output);
     meter.finish("output/render");
+    drop(reach);
     drop(product);
     meter.finish("output/drop returned Arc");
     drop(driver);

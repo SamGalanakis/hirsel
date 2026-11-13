@@ -24,7 +24,7 @@ pub(crate) struct ImageDirectory {
     pub inputs: CorpusManifest,
     pub index: Arc<NameIndex>,
     pub files: Vec<ImageFile>,
-    pub headers: BTreeMap<DefPath, reuse::Header>,
+    pub headers: Arc<BTreeMap<DefPath, reuse::Header>>,
     pub archive: ContentHash,
     pub declarations: Record,
     pub definitions: BTreeMap<DefPath, Record>,

@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def inputs_for(manifest, entry, root):
-    """Select the entry module and its package dependency closure."""
+    """Supply the complete package dependency closure; the driver selects definitions."""
     packages = {(p['package']['name'], p['package']['version']): p for p in manifest['packages']}
     selected = (entry['package']['name'], entry['package']['version'])
     pending, reached = [selected], set()
@@ -26,10 +26,8 @@ def inputs_for(manifest, entry, root):
     inputs = {'core': manifest['core'], 'packages': []}
     for name in sorted(reached):
         package = copy.deepcopy(packages[name])
-        if name == selected:
-            package['sources'] = [s for s in package['sources'] if s['modules'] == entry['module'].split('/')]
-            if not package['sources']:
-                raise ValueError(f'entry module missing: {entry}')
+        if name == selected and not any(s['modules'] == entry['module'].split('/') for s in package['sources']):
+            raise ValueError(f'entry module missing: {entry}')
         for source in package['sources']:
             source['file'] = str((root / source['file']).resolve())
         inputs['packages'].append(package)
@@ -131,6 +129,10 @@ def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=No
                 row['diagnostics'] = product.get('diagnostics', [])
                 row['incomplete'] = product.get('incomplete', [])
                 row['checked'] = bool(product['accepted'])
+                row['census'] = product.get('reachable', {}).get('census', {})
+                row['first_stops'] = product.get('reachable', {}).get('first_stops', [])
+                row['reachable_bodies'] = product.get('reachable', {}).get('bodies')
+                row['reachable_declarations'] = product.get('reachable', {}).get('declarations')
                 if build.returncode or not product.get('native'):
                     row['stopped'] = first_stop(product, entry)
                     continue
@@ -146,7 +148,40 @@ def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=No
                             row['stopped'] = f'run {failure}'
                     else:
                         row['passed'] += 1
+        for engine in engines:
+            command = [str(compiler), 'image', '--libraries', str(root / 'core'), '--store',
+                       str(store / 'canonical-image'), '--json']
+            result = subprocess.run(command, cwd=root, capture_output=True)
+            row = dict(program='core + std fully checked; canonical image accepted', variant='libraries', engine=engine,
+                       checked=False, built=False, passed=0, cases=0, first_failure=None, stopped=None)
+            rows.append(row)
+            try:
+                product = json.loads(result.stdout)
+                row['checked'] = bool(product['accepted'])
+                row['built'] = result.returncode == 0 and bool(product.get('image'))
+                if not row['built']:
+                    row['stopped'] = first_stop(product, {'package': manifest['core']})
+            except (ValueError, UnicodeDecodeError):
+                row['stopped'] = f'image tool: exit {result.returncode}: {result.stderr.decode(errors="replace").strip()}'
     return rows
+
+
+def census_table(rows):
+    lines = ['| program | variant | engine | reachable bodies / declarations | first-stop construct | count |',
+             '|---|---|---|---|---|---|']
+    for row in rows:
+        if row['variant'] == 'libraries' or row['built']:
+            continue
+        counts = row.get('census', {})
+        for construct, count in sorted(counts.items()):
+            construct = construct.replace('|', r'\|').replace('\n', ' ')
+            lines.append(f"| {row['program']} | {row['variant']} | {row['engine']} | "
+                         f"{row.get('reachable_bodies', '?')} / {row.get('reachable_declarations', '?')} | {construct} | {count} |")
+    return '\n'.join(lines)
+
+
+def report(rows):
+    return table(rows) + '\n\nReachable closure census. Each definition contributes its first stop; completed bodies follow emitted calls, while incomplete bodies follow resolved source names. Later stops remain unknown.\n\n' + census_table(rows)
 
 
 def table(rows):
@@ -177,10 +212,10 @@ def main():
         rows = run(args.compiler.resolve(), args.runtime.resolve(), engines, args.manifest.resolve(),
                    args.root.resolve(), args.store.resolve() if args.store else Path(store),
                    args.cc.resolve() if args.cc else None, args.only)
-    print(table(rows))
+    print(report(rows))
     if args.report:
         args.report.write_text(json.dumps(rows, indent=2) + '\n')
-        args.report.with_suffix('.md').write_text(table(rows) + '\n')
+        args.report.with_suffix('.md').write_text(report(rows) + '\n')
     return int(any(not r['built'] or r['passed'] != r['cases'] for r in rows))
 
 

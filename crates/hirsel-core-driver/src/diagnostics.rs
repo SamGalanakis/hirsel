@@ -22,7 +22,7 @@ pub struct IncompleteDiagnostic<'a> {
     pub message: &'a str,
 }
 impl CheckProduct {
-    fn source_site(&self, site: &Site) -> io::Result<SourceSite> {
+    pub(crate) fn source_site(&self, site: &Site) -> io::Result<SourceSite> {
         let file = if let Some(file) = self.files.iter().find(|f| f.module == site.module) {
             Some(Arc::clone(file))
         } else if let Some(image) = &self.image {
@@ -55,8 +55,13 @@ impl CheckProduct {
         })
     }
     pub fn machine_diagnostics(&self) -> io::Result<Vec<Diagnostic<'_>>> {
-        self.diagnostics
-            .iter()
+        self.diagnostics_for(self.diagnostics.iter())
+    }
+    pub fn diagnostics_for<'a>(
+        &self,
+        rows: impl IntoIterator<Item = &'a Refusal>,
+    ) -> io::Result<Vec<Diagnostic<'a>>> {
+        rows.into_iter()
             .map(|r| {
                 Ok(Diagnostic {
                     rule: &r.rule,
@@ -74,8 +79,13 @@ impl CheckProduct {
             .collect()
     }
     pub fn machine_incomplete(&self) -> io::Result<Vec<IncompleteDiagnostic<'_>>> {
-        self.incomplete
-            .iter()
+        self.incomplete_for(self.incomplete.iter())
+    }
+    pub fn incomplete_for<'a>(
+        &self,
+        rows: impl IntoIterator<Item = &'a Incomplete>,
+    ) -> io::Result<Vec<IncompleteDiagnostic<'a>>> {
+        rows.into_iter()
             .map(|g| {
                 Ok(IncompleteDiagnostic {
                     primary: self.source_site(&g.primary)?,

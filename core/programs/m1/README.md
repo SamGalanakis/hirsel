@@ -13,8 +13,9 @@ and removes a private store. Buck targets `//:core-m1-cranelift` and
 `//:core-m1-llvm` each cover the complete manifest for one engine. These are
 explicit integration gates and fail until every row passes.
 
-The runner selects one entry module and its package dependency closure, builds
-it once per engine, then runs every applicable case from its workload's
+The runner supplies every source in the entry package and its package dependency
+closure. The driver builds the entry
+once per engine, then runs every applicable case from its workload's
 `core/corpus/m1/<workload>/cases.json`. Each case gets a fresh working directory
 with a copy of its input, the relative input path and variant as arguments, and
 any `env` entries over the host environment. Optional `inputs` entries copy
@@ -33,3 +34,15 @@ all checker diagnostics and the table is written beside them as Markdown.
 The native assembly fixture target `//:core-driver-native` is separate from M1.
 It exercises scalar checked bodies and a test-only C Result carrier. It does
 not establish source-language entry, capability or corpus acceptance.
+
+Build/run acceptance belongs to the driver and covers the entry's reachable
+instances and the declarations they name. Unreached library gaps do not block a
+program row. Package `check` and image production still check all inputs.
+Each engine also has a standing `core + std fully checked; canonical image
+accepted` row. That row stays red until the canonical image can be produced.
+
+The report includes a census for each stopped program row. Each reached body or
+declaration contributes its first stop. Completed bodies follow emitted calls and
+function references; incomplete bodies follow their resolved source names, so a
+gap at main does not conceal its callees. Counts rank current stops and do not
+estimate later work. JSON includes the first-stop definition, rule and byte span.

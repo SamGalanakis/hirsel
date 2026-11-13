@@ -31,6 +31,9 @@ class Milestone(unittest.TestCase):
         self.compiler.write_text('''#!/usr/bin/env python3
 import json, pathlib, sys
 args=sys.argv
+if args[1]=='image':
+    print(json.dumps({'accepted':True, 'image':'canonical'}))
+    raise SystemExit(0)
 output=pathlib.Path(args[args.index('-o')+1])
 pathlib.Path(__file__).with_suffix('.count').open('a').write('build\\n')
 output.write_text("#!/usr/bin/env python3\\nimport os,pathlib,sys\\nprint(pathlib.Path(sys.argv[1]).read_text().strip()+os.environ['M1_CASE'])\\npathlib.Path('result').write_bytes(b'done')\\nsys.exit(7)\\n")
@@ -58,6 +61,9 @@ print(json.dumps({'accepted':True, 'native':{'executable':str(output)}, 'diagnos
         rows = self.rows()
         self.assertEqual(rows[0]['passed'], 2)
         self.assertTrue(rows[0]['built'])
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[1]['variant'], 'libraries')
+        self.assertTrue(rows[1]['built'])
         self.assertEqual(self.compiler.with_suffix('.count').read_text(), 'build\n')
         # The oracle is independent fixture data, including status 7 and a file.
         # Each changed observation must turn the same accepted program red.
@@ -86,7 +92,7 @@ print(json.dumps({'accepted':True, 'native':{'executable':str(output)}, 'diagnos
             self.assertIn(reason, table([row]))
         selected = inputs_for(self.manifest, self.manifest['entries'][0], self.root)
         self.assertEqual([p['package']['name'] for p in selected['packages']], ['example'])
-        self.assertEqual([s['modules'] for s in selected['packages'][0]['sources']], [['main']])
+        self.assertEqual([s['modules'] for s in selected['packages'][0]['sources']], [['main'], ['matched']])
 
     def test_empty_selection_is_not_success(self):
         with self.assertRaisesRegex(ValueError, 'no entries'):

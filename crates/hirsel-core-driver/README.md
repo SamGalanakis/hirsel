@@ -70,3 +70,20 @@ checker has not supplied the necessary products. `//:core-driver-native` exercis
 scalar calls, Exit mapping and checked failure on both engines with a C fixture
 that supplies the still-missing Result carrier. This is partial native proof,
 not acceptance of source-language main or M1.
+
+`check` and `image` require every supplied body and declaration to check.
+`build` and `run` require the entry's reachable native instances and the types
+and signatures they name. Unreached body/declaration diagnostics remain visible
+to package check but do not block native assembly. Resolved signature/body reads
+are cached separately from invalidation reads, which also include shadowed and
+absent names. The driver reports reached diagnostics and a first-stop census in
+build/run JSON. Behind incomplete bodies the census follows resolved source
+names; completed bodies follow emitted calls/function references.
+
+FORM decision 44 gives each main capability/Args parameter one plain `u64`
+operand, filled from `Config.grants[i]` in declaration order. The generated thunk
+uses that convention. Standalone parameterized entry still needs the provider's
+C process/grant constructor and close exports; grants must outlive main cleanup
+and then close without admission or failure. Source Result destinations remain a
+checker dependency. The native fixture tests two ordered handle operands without
+claiming real OS grant construction.

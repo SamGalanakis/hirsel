@@ -37,7 +37,7 @@ pub struct NativeOptions {
 }
 #[derive(Debug)]
 pub enum NativeStop {
-    Check,
+    Check(String),
     Instances(InstanceStop),
     Entry(String),
     Emit {
@@ -50,7 +50,7 @@ pub enum NativeStop {
 impl fmt::Display for NativeStop {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Check => f.write_str("check: refused or incomplete source"),
+            Self::Check(s) => write!(f, "check: {s}"),
             Self::Instances(s) => write!(f, "instances: {s:?}"),
             Self::Entry(s) => write!(f, "entry: {s}"),
             Self::Emit {
@@ -106,22 +106,19 @@ impl CheckProduct {
         entry: &DefPath,
         options: &NativeOptions,
     ) -> Result<Vec<ObjectProduct>, NativeStop> {
-        if !self.accepted() {
-            return Err(NativeStop::Check);
-        }
+        let reached = self.reachable(entry, options.instance_limit)?;
+        self.emit_instances(reached.require()?, options)
+    }
+    fn emit_instances(
+        &self,
+        reached: &[InstanceKey],
+        options: &NativeOptions,
+    ) -> Result<Vec<ObjectProduct>, NativeStop> {
         if options.target != TARGET {
             return Err(NativeStop::Entry(format!(
                 "native engines currently target {TARGET}"
             )));
         }
-        let roots = [InstanceKey {
-            definition: entry.clone(),
-            types: vec![],
-            dictionaries: vec![],
-        }];
-        let reached = self
-            .instances(roots, options.instance_limit)
-            .map_err(NativeStop::Instances)?;
         let runtime = ContentHash::of_parts(
             "hirsel.core-runtime.v1",
             [&std::fs::read(&options.runtime)?[..]],
@@ -183,7 +180,7 @@ impl CheckProduct {
                 (publish(&store, object_key, &bytes)?, bytes, true)
             };
             objects.push(ObjectProduct {
-                instance,
+                instance: instance.clone(),
                 identity,
                 bytes,
                 compiled,
@@ -198,11 +195,18 @@ impl CheckProduct {
         entry: &DefPath,
         options: &NativeOptions,
     ) -> Result<BuildProduct, NativeStop> {
-        if !self.accepted() {
-            return Err(NativeStop::Check);
-        }
+        let reached = self.reachable(entry, options.instance_limit)?;
+        self.build_reachable(entry, &reached, options)
+    }
+    pub fn build_reachable(
+        &self,
+        entry: &DefPath,
+        reached: &Reachable<'_>,
+        options: &NativeOptions,
+    ) -> Result<BuildProduct, NativeStop> {
+        let instances = reached.require()?;
         let source = self.process_entry(entry, options.root_limit)?;
-        let objects = self.emit_reachable(entry, options)?;
+        let objects = self.emit_instances(instances, options)?;
         link(&source, &objects, options)
     }
     fn process_entry(&self, entry: &DefPath, limit: u64) -> Result<String, NativeStop> {
@@ -214,30 +218,43 @@ impl CheckProduct {
                 "build entry differs from checked entry".into(),
             ));
         }
-        let (recipe, exit_offset) = binding.as_ref().map_err(|e| NativeStop::Entry(e.clone()))?;
+        let EntryAbi {
+            recipe,
+            exit_offset,
+            parameters,
+        } = binding.as_ref().map_err(|e| NativeStop::Entry(e.clone()))?;
         let instance = InstanceKey {
             definition: entry.clone(),
             types: vec![],
             dictionaries: vec![],
         };
+        if !parameters.is_empty() {
+            return Err(NativeStop::Entry(
+                "provider grant creation and close C exports are not available yet".into(),
+            ));
+        }
         entry_source(
             &hirsel_cranelift::core::symbol(&instance),
             recipe,
             *exit_offset,
+            parameters.len(),
             limit,
         )
     }
 }
 // This is a driver product, captured while the checked declaration table is live.
 // It is cached with the check, so native builds never resolve/type-check again.
-pub(crate) type EntryBinding = (DefPath, Result<(Recipe, Option<u64>), String>);
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) struct EntryAbi {
+    recipe: Recipe,
+    exit_offset: Option<u64>,
+    parameters: Vec<String>,
+}
+pub(crate) type EntryBinding = (DefPath, Result<EntryAbi, String>);
 pub(crate) fn bind_entry(p: &Program<'_>, entry: &DefPath) -> EntryBinding {
     use hirsel_core_front::TyKind;
     let binding = (|| {
         let fd = p.function(entry).ok_or("entry declaration unavailable")?;
-        if !fd.params.is_empty() {
-            return Err("capability and Args operands need checker/provider entry bindings");
-        }
         let TyKind::Adt(result, args) = p.types.kind(fd.result) else {
             return Err("PROG-3 requires Result[(), E]");
         };
@@ -270,7 +287,21 @@ pub(crate) fn bind_entry(p: &Program<'_>, entry: &DefPath) -> EntryBinding {
             }
             _ => None,
         };
-        Ok((recipe, exit_offset))
+        let parameters = fd
+            .params
+            .iter()
+            .map(|param| {
+                let TyKind::Adt(d, _) = p.types.kind(param.ty) else {
+                    return Err("entry parameter has no provider handle type");
+                };
+                Ok(p.decls[d.index()].path.to_string())
+            })
+            .collect::<Result<Vec<_>, &str>>()?;
+        Ok(EntryAbi {
+            recipe,
+            exit_offset,
+            parameters,
+        })
     })()
     .map_err(str::to_owned);
     (entry.clone(), binding)
@@ -280,6 +311,7 @@ fn entry_source(
     symbol: &str,
     recipe: &Recipe,
     exit_offset: Option<u64>,
+    parameters: usize,
     limit: u64,
 ) -> Result<String, NativeStop> {
     let Layout::Fixed(layout) = &recipe.layout else {
@@ -299,16 +331,20 @@ fn entry_source(
     } else {
         "out->kind=1;".into()
     };
+    let parameter_types = ", uint64_t".repeat(parameters);
+    let grants = (0..parameters)
+        .map(|i| format!(",cfg->grants[{i}]"))
+        .collect::<String>();
     Ok(format!(
         r#"#include "hirsel_core_process.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-extern uint8_t {symbol}(HirselCoreContext *, void *);
+extern uint8_t {symbol}(HirselCoreContext *, void *{parameter_types});
 static uint8_t entry(HirselCoreContext *ctx, const HirselCoreProcessConfig *cfg, HirselCoreMainResult *out) {{
     (void)cfg;
     _Alignas({align}) uint8_t result[{size}];
-    uint8_t failed={symbol}(ctx,result);
+    uint8_t failed={symbol}(ctx,result{grants});
     if(failed) return failed;
     uint32_t tag=0; memcpy(&tag,result+{at},{width});
     if(tag==1) {{ {error} }}
@@ -456,7 +492,7 @@ mod tests {
             root_limit: 1_048_576,
             instance_limit: 64,
         };
-        let source = "fn answer() -> u8 { add(3u8, 4u8) }\nfn add(a: u8, b: u8) -> u8 { a + b }\n";
+        let source = "fn answer() -> u8 { add(3u8, 4u8) }\nfn add(a: u8, b: u8) -> u8 { a + b }\nfn unused[T](take x: T) -> T { x }\ntype Broken = Missing\n";
         let entry = DefPath::from_full("app@1/main/answer").unwrap();
         let mut driver = Driver::default();
         let product = driver
@@ -465,6 +501,11 @@ mod tests {
                 &mut Meter::new(false),
             )
             .unwrap();
+        assert!(
+            !product.accepted(),
+            "unreached library errors keep package check red"
+        );
+        assert!(product.reachable(&entry, 64).unwrap().accepted());
         let objects = product.emit_reachable(&entry, &options).unwrap();
         assert_eq!(objects.iter().filter(|o| o.compiled).count(), 2);
         let warm = product.emit_reachable(&entry, &options).unwrap();
@@ -490,8 +531,13 @@ mod tests {
             types: vec![],
             dictionaries: vec![],
         });
-        let mut c = entry_source("bridge", &recipe, Some(0), options.root_limit).unwrap();
-        c.push_str(&format!("\ntypedef struct {{ uint8_t value, failed; }} R;\nextern R {symbol}(void *);\nuint8_t bridge(HirselCoreContext *ctx, void *dest) {{ R r={symbol}(ctx); ((uint8_t *)dest)[0]=1; ((uint8_t *)dest)[1]=r.value; return r.failed; }}\n"));
+        let mut c = entry_source("bridge", &recipe, Some(0), 2, options.root_limit).unwrap();
+        c.push_str(&format!("\ntypedef struct {{ uint8_t value, failed; }} R;\nextern R {symbol}(void *);\nuint8_t bridge(HirselCoreContext *ctx, void *dest, uint64_t a, uint64_t b) {{ R r={symbol}(ctx); ((uint8_t *)dest)[0]=1; ((uint8_t *)dest)[1]=r.value+(a!=21 || b!=34); return r.failed; }}\n"));
+        // Provider handles are plain u64 operands in declaration order, FORM #44.
+        c = c.replace(
+            "cfg.root_limit=",
+            "uint64_t grants[]={21,34}; cfg.grants=grants; cfg.grants_len=2; cfg.root_limit=",
+        );
         let built = link(&c, &objects, &options).unwrap();
         assert!(built.linked);
         let result = Command::new(&built.executable).output().unwrap();

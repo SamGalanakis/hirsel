@@ -4,7 +4,9 @@ mod diagnostics;
 mod image;
 mod instances;
 mod native;
+mod reachability;
 pub use native::{Backend, BuildProduct, NativeOptions, NativeStop, ObjectProduct};
+pub use reachability::{GapStop, Reachable};
 mod meter;
 pub use diagnostics::{Diagnostic, IncompleteDiagnostic, SourceSite};
 pub use image::{CoreImage, LibraryInput};
@@ -144,6 +146,7 @@ pub struct CheckProduct {
     pub image: Option<Arc<CoreImage>>,
     pub(crate) library: Option<Arc<hirsel_core_front::Library>>,
     native_entry: Option<native::EntryBinding>,
+    headers: Arc<BTreeMap<DefPath, reuse::Header>>,
     records: Option<Root>,
 }
 impl CheckProduct {
@@ -161,6 +164,7 @@ impl CheckProduct {
             image: None,
             library: None,
             native_entry: None,
+            headers: Arc::default(),
             records: None,
         }
     }
@@ -226,7 +230,7 @@ struct Root {
     snapshot: ContentHash,
     bytes: usize,
     identities: Record,
-    headers: BTreeMap<DefPath, reuse::Header>,
+    headers: Arc<BTreeMap<DefPath, reuse::Header>>,
     declarations: Option<Record>,
     files: Vec<Record>,
     definitions: BTreeMap<DefPath, Record>,
@@ -265,6 +269,7 @@ impl Cache {
     fn product(&self, hash: ContentHash) -> Option<CheckProduct> {
         let mut result = CheckProduct {
             native_entry: self.root.native_entry.clone(),
+            headers: Arc::clone(&self.root.headers),
             diagnostics: self.root.diagnostics.clone(),
             incomplete: self.root.incomplete.clone(),
             root: hash,
@@ -523,7 +528,7 @@ impl Driver {
             &resolutions,
             &resolution_inputs,
             compiler_identity()?,
-            image.as_ref().map(|i| &i.directory.headers),
+            image.as_ref().map(|i| &*i.directory.headers),
             request.entry.as_ref(),
         )?;
         {
@@ -638,6 +643,7 @@ impl Driver {
             }));
         }
         meter.finish("publish/assemble products");
+        result.headers = Arc::new(std::mem::take(&mut keys.headers));
         result.root = store.archive(|writer| {
             let identities = writer.record(index.as_ref())?;
             let declarations = result
@@ -645,11 +651,7 @@ impl Driver {
                 .as_ref()
                 .map(|l| writer.record(l.as_ref()))
                 .transpose()?;
-            let headers = if declarations.is_some() {
-                std::mem::take(&mut keys.headers)
-            } else {
-                BTreeMap::new()
-            };
+            let headers = Arc::clone(&result.headers);
             let mut files = Vec::with_capacity(result.files.len());
             for file in &result.files {
                 files.push(writer.record(file.as_ref())?);

@@ -14,8 +14,12 @@ pub struct DefinitionKey {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Header {
     digest: ContentHash,
-    reads: Vec<DefPath>,
-    anchor: (ModuleId, u32),
+    pub(crate) reads: Vec<DefPath>,
+    pub(crate) body_reads: Vec<DefPath>,
+    pub(crate) has_body: bool,
+    pub(crate) header_end: u32,
+    pub(crate) site: Site,
+    pub(crate) anchor: (ModuleId, u32),
 }
 pub(crate) struct Keys {
     pub(crate) headers: BTreeMap<DefPath, Header>,
@@ -59,15 +63,24 @@ impl Keys {
                 let end = header_end(item);
                 let digest = ContentHash::of_bytes(&item.source_text().as_bytes()[..end]);
                 let mut reads = BTreeSet::new();
+                let mut body_reads = BTreeSet::new();
                 for name in &resolution.names {
                     if (item.tree.node(name.node).origin.span.start as usize) < end {
                         targets(index, &paths, m.id, name.target, &mut reads);
+                    } else {
+                        targets(index, &paths, m.id, name.target, &mut body_reads);
                     }
                 }
                 headers.insert(
                     path,
                     Header {
                         digest,
+                        has_body: end < item.source_text().len(),
+                        header_end: end as u32,
+                        site: index
+                            .get(index.definition(m.id, item.symbol(t)).unwrap())
+                            .site,
+                        body_reads: body_reads.into_iter().collect(),
                         reads: reads.into_iter().collect(),
                         anchor: (m.id, ordinal as u32),
                     },

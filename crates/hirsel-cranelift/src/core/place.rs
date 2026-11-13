@@ -68,6 +68,7 @@ impl Function<'_, '_, '_> {
     }
     fn next_at(&self, at: At, step: Step, ty: PlaceTy) -> Result<At> {
         Ok(match step {
+            Step::Byte(_) => return Err(unsupported("compact byte projection is the next slice")),
             Step::Deref => match at {
                 At::Pointer(t) => At::Declared(t),
                 At::Counted(t) => held(self.input, t),
@@ -119,6 +120,9 @@ impl Function<'_, '_, '_> {
         };
         for &step in a.steps.get(&self.body.pools.steps).unwrap() {
             ptr = match step {
+                Step::Byte(_) => {
+                    return Err(unsupported("compact byte projection is the next slice"));
+                }
                 Step::Deref => {
                     let p = self
                         .b

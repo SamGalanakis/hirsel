@@ -44,7 +44,7 @@ impl Function<'_, '_, '_> {
             } => {
                 let ctx = self.context;
                 let charge = self.get(charge);
-                let size = self.b.ins().iconst(types::I64, size as i64);
+                let size = self.get(size);
                 let align = self.b.ins().iconst(types::I64, align as i64);
                 let overflow = self.b.ins().iconst(types::I8, 0);
                 let (name, payer) = match place {

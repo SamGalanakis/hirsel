@@ -2,54 +2,68 @@
 use hirsel_core_front::{Emitter, ModuleInput, Program};
 use hirsel_core_ids::PackageId;
 use hirsel_core_ir::{FuncId, Module};
-use hirsel_core_resolve::{Environment, ModuleId, NameIndex, PackageManifest};
-use hirsel_core_syntax::{ParseMode, parse};
-use std::{collections::HashMap, path::Path};
+use hirsel_core_resolve::{ModuleSource, NameIndex, PackageManifest};
+use hirsel_core_syntax::{ParseMode, Symbols, parse};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 pub fn lower(root: &Path, source: &str) -> (Module, HashMap<String, FuncId>) {
-    let core = PackageId {
-        name: "core".into(),
+    let package = |name: &str| PackageId {
+        name: name.into(),
         version: "1".into(),
     };
-    let app = PackageId {
-        name: "app".into(),
-        version: "1".into(),
+    let core = PackageManifest::directory(&root.join("core"), package("core"), true).unwrap();
+    let app = PackageManifest {
+        package: package("app"),
+        sources: vec![ModuleSource {
+            file: PathBuf::from("input.hirsel"),
+            modules: vec!["main".into()],
+            signatures: false,
+        }],
+        dependencies: vec![package("core")],
     };
-    let mut modules = Vec::new();
-    for m in PackageManifest::directory(&root.join("core"), core.clone(), true)
+    let mut symbols = Symbols::default();
+    core.intern(&mut symbols);
+    app.intern(&mut symbols);
+    let mut syntax = core
+        .read(&mut symbols)
         .unwrap()
-        .read()
-        .unwrap()
-    {
-        assert!(m.parsed.diagnostics.is_empty());
-        modules.push(ModuleInput {
-            id: m.module,
-            syntax: m.parsed.syntax,
-        });
-    }
-    let id = ModuleId {
-        package: app.clone(),
-        modules: vec!["main".into()],
-    };
-    let parsed = parse(source, ParseMode::Source);
+        .into_iter()
+        .map(|m| {
+            assert!(m.parsed.diagnostics.is_empty());
+            m.parsed.syntax
+        })
+        .collect::<Vec<_>>();
+    let parsed = parse(source, ParseMode::Source, &mut symbols);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-    modules.push(ModuleInput {
-        id,
-        syntax: parsed.syntax,
-    });
-    let mut index = NameIndex::new(Environment::default());
+    syntax.push(parsed.syntax);
+    let mut index = NameIndex::new(Arc::new(symbols));
+    let modules = index
+        .add_manifests(&[core, app])
+        .into_iter()
+        .zip(syntax)
+        .map(|(id, syntax)| ModuleInput { id, syntax })
+        .collect::<Vec<_>>();
     for m in &modules {
-        index.add_module(&m.id);
-        for (i, item) in m.syntax.items.iter().enumerate() {
-            index.index_item(&m.id, i as u32, item);
+        for (i, item) in m.syntax.items().enumerate() {
+            index.index_item(m.id, i as u32, item);
         }
     }
+    let core = index
+        .package(
+            index.symbols.find("core").unwrap(),
+            index.symbols.find("1").unwrap(),
+        )
+        .unwrap();
     index.configure_core(core);
     let program = Program::declare(&index, &modules);
     assert!(program.refusals.is_empty(), "{:?}", program.refusals);
     let mut emitter = Emitter::new();
     let mut functions = HashMap::new();
     for (i, f) in program.fns.iter().enumerate() {
-        if f.path.0.package != app || f.body.is_none() {
+        if f.path.0.package != package("app") || f.body.is_none() {
             continue;
         }
         let checked = program.check_lower(i, &mut emitter);

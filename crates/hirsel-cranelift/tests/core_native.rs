@@ -433,12 +433,12 @@ fn f0 = n0 g0 {
   addr a1 = v7 : u64
 b0(v0: u64):
   v1: u64 = const 8
-  v2: ptr, v3: u64 = alloc own 8 align 8 charge v1
+  v2: ptr, v3: u64 = alloc own v1 align 8 charge v1
   address a0
   store a0, v0
   v4: u64 = const 16
   v5: bool, v6: u64 = limit_enter v4
-  v7: ptr, v8: u64 = alloc own 16 align 8 charge v4 like v2
+  v7: ptr, v8: u64 = alloc own v4 align 8 charge v4 like v2
   address a1
   copy a1, a0, v1
   free v2 charge v1
@@ -454,7 +454,7 @@ fn f1 = n1 g0 {
 b0(v0: u64):
   v1: ptr = region_open
   v2: u64 = const 8
-  v3: ptr, v4: u64 = alloc own 8 align 8 charge v2 in v1
+  v3: ptr, v4: u64 = alloc own v2 align 8 charge v2 in v1
   address a0
   store a0, v0
   v5: u64 = const 128
@@ -466,7 +466,8 @@ b0(v0: u64):
 fn f2 = n2 g1 {
 b0:
   v0: u64 = const 200
-  v1: ptr, v2: u64 = alloc own 8 align 8 charge v0
+  v5: u64 = const 8
+  v1: ptr, v2: u64 = alloc own v5 align 8 charge v0
   v3: ptr = const 0x0
   v4: bool = ne v1, v3
   return v4, v2

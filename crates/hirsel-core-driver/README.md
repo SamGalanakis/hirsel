@@ -90,3 +90,31 @@ external grants before calling the run boundary. The provider's C constructor
 and close exports are still needed to supply real grants; they must outlive main
 cleanup and close without admission or failure. Owned error results still need
 the checker's cleanup support.
+
+## Native compilation units
+
+Both dev and release currently emit one object for each reached definition's
+checked CoreIR module. A unit contains that definition's body, signature-only
+callee/function-reference rows, and its complete local type, static, signature,
+instance and source-anchor tables. `emit_unit` passes the module intact.
+Cranelift receives the recipes computed from `module.types`, including their
+drop recipes; LLVM's CoreIR entry computes the same recipes internally and uses
+them for layout and drop glue. Nonempty type tables are supported.
+
+LLVM's failure analysis can see the unit's one body, including self-recursion,
+but another source definition is an import even when it lives in the same
+package. Its failure status therefore remains unknown across that boundary.
+Function references and exported symbols retain the external status ABI.
+
+A package-sized or whole-reachable release unit would need a mechanical merger
+of the checked modules: deduplicate nominal types and instances, remap module
+function/type/signature/static/item references and finalizer references, then
+compute recipes for the merged table. Body-local values and CFG IDs stay local.
+The object key would include every member body. A body edit would recompile its
+package group or the whole reachable group, and LLVM would hold/optimize the
+larger IR at once. Package groups retain unknown cross-package calls; a reachable
+group exposes more direct bodies. Both may enable status elision/inlining and
+amortize emitter setup, but reduce codegen parallelism and incremental reuse.
+No compile-time, runtime or memory benefit is measured yet. Grouping must preserve
+reachable-only acceptance. Dev keeps its per-body granularity; no larger release
+unit policy is implemented here.

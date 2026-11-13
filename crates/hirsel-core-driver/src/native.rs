@@ -101,6 +101,32 @@ fn publish(store: &Store, key: ContentHash, bytes: &[u8]) -> io::Result<ContentH
 fn read_input(path: &Path) -> io::Result<Vec<u8>> {
     std::fs::read(path).map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
 }
+// A unit is the producer's complete module, including type shapes and finalizers.
+// The cache chooses its granularity; this boundary never strips type/drop inputs.
+fn emit_unit(module: &Module, options: &NativeOptions) -> Result<Vec<u8>, String> {
+    match options.backend {
+        Backend::Cranelift => hirsel_cranelift::core::emit_object_with_layouts(
+            module,
+            &hirsel_core_layout::compute(&module.types).expect("producer layouts"),
+            &hirsel_cranelift::core::Options {
+                target: &options.target,
+                optimize: options.optimize,
+            },
+        )
+        .map(|o| o.bytes)
+        .map_err(|e| e.to_string()),
+        Backend::Llvm => hirsel_llvm::core::emit_object(
+            module,
+            if options.optimize {
+                hirsel_llvm::core::Optimization::Speed
+            } else {
+                hirsel_llvm::core::Optimization::None
+            },
+        )
+        .map_err(|e| e.to_string()),
+    }
+}
+
 impl CheckProduct {
     /// Each checked body is already an emitter module, with signature-only imports.
     /// A callee implementation edit therefore recompiles its object alone.
@@ -143,37 +169,17 @@ impl CheckProduct {
                     &body.ir,
                 ),
             )?;
-            let (identity, bytes, compiled) =
-                if let Some((hash, bytes)) = cached(&store, object_key)? {
-                    (hash, bytes, false)
-                } else {
-                    let bytes = match options.backend {
-                        Backend::Cranelift => hirsel_cranelift::core::emit_object_with_layouts(
-                            &body.ir,
-                            &hirsel_core_layout::compute(&body.ir.types).expect("producer layouts"),
-                            &hirsel_cranelift::core::Options {
-                                target: &options.target,
-                                optimize: options.optimize,
-                            },
-                        )
-                        .map(|o| o.bytes)
-                        .map_err(|e| e.to_string()),
-                        Backend::Llvm => hirsel_llvm::core::emit_object(
-                            &body.ir,
-                            if options.optimize {
-                                hirsel_llvm::core::Optimization::Speed
-                            } else {
-                                hirsel_llvm::core::Optimization::None
-                            },
-                        )
-                        .map_err(|e| e.to_string()),
-                    }
-                    .map_err(|message| NativeStop::Emit {
-                        definition: instance.definition.clone(),
-                        message,
-                    })?;
-                    (publish(&store, object_key, &bytes)?, bytes, true)
-                };
+            let (identity, bytes, compiled) = if let Some((hash, bytes)) =
+                cached(&store, object_key)?
+            {
+                (hash, bytes, false)
+            } else {
+                let bytes = emit_unit(&body.ir, options).map_err(|message| NativeStop::Emit {
+                    definition: instance.definition.clone(),
+                    message,
+                })?;
+                (publish(&store, object_key, &bytes)?, bytes, true)
+            };
             objects.push(ObjectProduct {
                 instance: instance.clone(),
                 identity,
@@ -516,7 +522,7 @@ mod tests {
     fn exercise(backend: Backend) {
         let dir = tempfile::tempdir().unwrap();
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let options = NativeOptions {
+        let mut options = NativeOptions {
             backend,
             optimize: false,
             target: TARGET.into(),
@@ -620,6 +626,32 @@ mod tests {
         assert_eq!(result.status.code(), Some(2));
         assert!(result.stdout.is_empty());
         assert_eq!(result.stderr, b"missing entry grants\n");
+        // A declared record crosses result and view-argument ABIs between units.
+        // Its u64 field has padding before it, so reading it at byte 1 is wrong.
+        options.optimize = matches!(backend, Backend::Llvm);
+        let record = "type Pair { a: u8, b: u64 }\nfn make() -> Pair { Pair(a: 7u8, b: 300u64) }\nfn read(p: Pair) -> u8 { if p.b == 300u64 { p.a } else { 1u8 } }\npub fn main() -> Result[(), Exit] { let p = make(); Error(Exit(status: read(p))) }\n";
+        let product = driver
+            .check(source_request(record, dir.path()), &mut Meter::new(false))
+            .unwrap();
+        assert!(
+            product.accepted(),
+            "{}",
+            serde_json::to_string(&(
+                product.machine_diagnostics().unwrap(),
+                product.machine_incomplete().unwrap()
+            ))
+            .unwrap()
+        );
+        let built = product.build(&entry, &options).unwrap();
+        assert_eq!(built.compiled, 3);
+        run_clean(&built.executable, 7);
+        let edited = record.replace("b: 300u64", "b: 301u64");
+        let product = driver
+            .check(source_request(&edited, dir.path()), &mut Meter::new(false))
+            .unwrap();
+        let built = product.build(&entry, &options).unwrap();
+        assert_eq!(built.compiled, 1);
+        run_clean(&built.executable, 1);
         let source = "pub fn main() -> Result[(), Exit] { Ok(()) }\n";
         let product = driver
             .check(source_request(source, dir.path()), &mut Meter::new(false))

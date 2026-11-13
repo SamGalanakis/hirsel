@@ -2299,3 +2299,21 @@ fn generic_order_reads_typed_locator_recipes() {
     let failures = run_case(&root().join("cases/body/ordered-compact.hirsel"));
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+#[test]
+fn refused_pattern_binders_do_not_add_implementation_gaps() {
+    let failures = run_case(&root().join("cases/body/refused-pattern-use.hirsel"));
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
+fn loop_callback_rebinding_probe() {
+    let failures = run_case(&root().join("cases/body/loop-capture-entry-gap.hirsel"));
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
+fn uninitialized_take_names_use_the_normal_slot_transition() {
+    let failures = run_case(&root().join("cases/body/uninit-take-name.hirsel"));
+    assert!(failures.is_empty(), "{failures:#?}");
+}

@@ -718,3 +718,21 @@ fn ordered_stable_cranelift(){ordered_stable(Backend::Cranelift);}
 #[test]
 #[ignore="explicit native integration target"]
 fn ordered_stable_llvm(){ordered_stable(Backend::Llvm);}
+
+fn uninitialized_take_names(backend: Backend) {
+    let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir=tempfile::tempdir().unwrap();
+    let source=include_str!("../../../core/front/cases/body/uninit-take-name.hirsel");
+    let mut request=source_request(source,dir.path());
+    request.inputs.packages[1]=PackageManifest::directory(&root.join("core/core"),package("core"),true).unwrap();
+    let product=Driver::default().check(request,&mut Meter::new(false)).unwrap();
+    let entry=DefPath::from_full("app@1/main/main").unwrap();
+    let built=product.build(&entry,&native_options(backend,dir.path())).unwrap();
+    run_clean(&built.executable,0);
+}
+#[test]
+#[ignore="explicit native integration target"]
+fn uninitialized_take_names_cranelift(){uninitialized_take_names(Backend::Cranelift);}
+#[test]
+#[ignore="explicit native integration target"]
+fn uninitialized_take_names_llvm(){uninitialized_take_names(Backend::Llvm);}

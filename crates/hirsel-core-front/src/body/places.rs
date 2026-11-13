@@ -280,9 +280,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     return Ok(None);
                 };
                 self.capture_slot(b, n);
-                let Some(var) = self.vars[b as usize] else {
-                    self.gap(n, "this kind of name is not built");
-                    return Err(());
+                let var = match self.vars[b as usize] {
+                    Some(var) => var,
+                    // An earlier refused pattern or capture did not declare this binder.
+                    // Continue checking without manufacturing a second implementation gap.
+                    None if self.broken => return Err(()),
+                    None => {
+                        unreachable!("a resolved place binder is declared before a checked use")
+                    }
                 };
                 self.out.counts.places += 1;
                 let start = self.steps.len() as u32;

@@ -1,0 +1,5 @@
+// LANG-17: an alias is not a constructor pattern. Its binders are not declared;
+// checking the refused arm must not add the old "this kind of name" GAP.
+// expect: refuse LANG-17 at 5:28
+type A = (u64,u64)
+fn f(x:A)->u64 { match x { A(a,b)=>a } }

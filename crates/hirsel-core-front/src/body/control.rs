@@ -56,7 +56,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 NodeKind::Let | NodeKind::LetMut => diverged |= self.let_(s),
                 NodeKind::Assign => diverged |= self.assign(s),
                 NodeKind::Error => self.halt(),
-                _ => self.gap(s, "statement form is not built"),
+                _ => unreachable!("the parser produces only the handled statement kinds"),
             }
             // A temporary view ends with its statement (OWN-8), and so does every
             // temporary nothing took (LANG-6).
@@ -130,7 +130,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.own(b, pat);
                 self.scope_slots.push(b);
             }
-            _ => self.gap(pat, "patterns are not built"),
+            _ => unreachable!("non-name let patterns use destructure_let"),
         }
         t == NEVER
     }
@@ -140,9 +140,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.refuse("LANG-5", s, "a `let` without a value needs a type");
             return false;
         };
-        if self.kind(pat) != NodeKind::BindPattern {
-            self.gap(pat, "patterns are not built");
-            return false;
+        if !matches!(
+            self.kind(pat),
+            NodeKind::BindPattern | NodeKind::TakePattern
+        ) {
+            unreachable!("the parser requires a name pattern for an uninitialized slot");
         }
         if let Err(what) = self.rep(ty) {
             self.gap(pat, what);
@@ -602,9 +604,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
                 TyKind::Error => return (ERROR, None),
                 TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::Causes) => {
-                    let Some(cause) = self.p.core_decl("Cause") else {
-                        return self.gap_ty(source, "the core Cause declaration is not available");
-                    };
+                    let cause = self
+                        .p
+                        .core_decl("Cause")
+                        .expect("core declares Cause for Causes iteration");
                     causes = true;
                     (self.t.mk(TyKind::Adt(cause, vec![])), None)
                 }
@@ -989,7 +992,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
                 (ty, v)
             }
-            _ => self.gap_ty(e, "labelled form is not built"),
+            _ => unreachable!("the parser labels only blocks and loops"),
         }
     }
 

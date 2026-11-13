@@ -1,0 +1,14 @@
+// OWN-17 / OWN-21: both callbacks borrow the same outer slot mutably.
+// expect: gap loop-carried capture descriptors are not built
+fn f()->u64 {
+ let mut n=0u64
+ let mut cb=scoped fn() { n+=1u64 }
+ let mut i=0u64
+ while i<2u64 {
+  cb()
+  cb=scoped fn() { n+=2u64 }
+  i+=1u64
+ }
+ cb()
+ n
+}

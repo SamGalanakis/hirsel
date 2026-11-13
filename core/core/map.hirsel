@@ -2,7 +2,35 @@
 
 pub fn new[K: key, V]() -> Map[K, V]
 pub fn len[K: key, V](m: Map[K, V]) -> u64
-pub fn get[K: key, V](m: Map[K, V], k: K) -> Option[View[V]] in m
+pub fn get[K: key, V](m: Map[K, V], k: K) -> Option[View[V]] in m {
+  match find(m, k, hash(k)) { Some(i) => Some(slot_value(m, i)), None => None }
+}
 pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), (Capacity, K, V)]
 pub fn set[K: key, V](mut m: Map[K, V], k: K, take v: V) -> Result[V, V]
 pub fn remove[K: key, V](mut m: Map[K, V], k: K) -> Option[V]
+
+// Only this module can access entries and its private lookup index.
+fn hash[K: key](k: K) -> u64
+fn slots[K: key, V](m: Map[K,V]) -> u64
+fn capacity[K: key, V](m: Map[K,V]) -> u64
+fn slot_hash[K: key, V](m: Map[K,V], i: u64) -> u64
+fn slot_live[K: key, V](m: Map[K,V], i: u64) -> bool
+fn slot_key[K: key, V](m: Map[K,V], i: u64) -> View[K] in m
+fn slot_value[K: key, V](m: Map[K,V], i: u64) -> View[V] in m
+fn index_len[K: key, V](m: Map[K,V]) -> u64
+fn index_get[K: key, V](m: Map[K,V], j: u64) -> u64
+fn index_set[K: key, V](mut m: Map[K,V], j: u64, s: u64)
+
+fn find[K: key, V](m: Map[K,V], k: K, h: u64) -> Option[u64] {
+  let n = index_len(m)
+  if n == 0 { return None }
+  let mask = n - 1
+  let mut j = h & mask
+  loop {
+    let s = index_get(m, j)
+    if s == 0 { return None }
+    let i = s - 1
+    if slot_live(m, i) && slot_hash(m, i) == h && slot_key(m, i) == k { return Some(i) }
+    j = int.wrapping_add(j, 1) & mask
+  }
+}

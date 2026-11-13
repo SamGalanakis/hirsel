@@ -148,7 +148,10 @@ fn run_case(path: &Path) -> Vec<String> {
     let mut gaps = p.gaps.clone();
     let mut functions = HashMap::new();
     for (f, fd) in p.fns.iter().enumerate() {
-        if index.module_package(fd.site.module) != index.module_package(main) || fd.body.is_none() {
+        if fd.body.is_none()
+            || (index.module_package(fd.site.module) != index.module_package(main)
+                && !(fd.path.package_is("core", "1") && fd.path.0.modules == ["map"]))
+        {
             continue;
         }
         let c = p.check_lower(f, &mut emitter);
@@ -1022,6 +1025,31 @@ fn list_index_iteration_and_failure_cleanup() {
             eval::Outcome::Returned(vec![11]),
         ),
         (
+            "fn f(xs:Map[u64,u64])->u64 { match map.get(xs,7) { Some(v)=>v, None=>0 } }",
+            false,
+            eval::Outcome::Returned(vec![70]),
+        ),
+        (
+            "fn f(xs:Map[u64,u64])->u64 { match map.get(xs,13) { Some(v)=>v, None=>0 } }",
+            false,
+            eval::Outcome::Returned(vec![130]),
+        ),
+        (
+            "fn f(xs:Map[u64,u64])->u64 { match map.get(xs,11) { Some(v)=>v, None=>99 } }",
+            false,
+            eval::Outcome::Returned(vec![99]),
+        ),
+        (
+            "fn f(xs:Map[u64,u64])->u64 { match map.get(xs,2) { Some(v)=>v, None=>99 } }",
+            false,
+            eval::Outcome::Returned(vec![99]),
+        ),
+        (
+            "fn lookup[K:key,V](m:Map[K,V],k:K)->Option[View[V]] in m {map.get(m,k)}\nfn f(xs:Map[u64,u64])->u64 {match lookup(xs,7) {Some(v)=>v,None=>0}}",
+            false,
+            eval::Outcome::Returned(vec![70]),
+        ),
+        (
             "fn f(xs: Map[u64,u64]) -> u64 { map.len(xs) }",
             false,
             eval::Outcome::Returned(vec![2]),
@@ -1150,7 +1178,12 @@ fn list_index_iteration_and_failure_cleanup() {
         let mut emitter = Emitter::new();
         for (other, fd) in p.fns.iter().enumerate() {
             if other != f && fd.body.is_some() {
-                let _ = p.check_lower(other, &mut emitter);
+                let checked = p.check_lower(other, &mut emitter);
+                assert!(
+                    checked.refusals.is_empty() && checked.gaps.is_empty(),
+                    "{}: {checked:?}",
+                    fd.path
+                );
             }
         }
         let check = p.check_lower(f, &mut emitter);
@@ -1162,6 +1195,22 @@ fn list_index_iteration_and_failure_cleanup() {
         );
         let target = check.function.unwrap();
         emitter.materialize_instances().unwrap();
+        if source == "fn f(xs:Map[u64,u64])->u64 { match map.get(xs,7) { Some(v)=>v, None=>0 } }" {
+            for function in &emitter.module.functions {
+                let key = &emitter.module.instances[function.instance.index()];
+                if key.definition.0.modules == ["map"]
+                    && let Some(body) = &function.body
+                {
+                    eprintln!(
+                        "Map instance {} {:?}: {} instructions, {} terminators",
+                        key.definition,
+                        key.types,
+                        body.insts.len(),
+                        body.terminators.len()
+                    );
+                }
+            }
+        }
         let module = &emitter.module;
         let signature = module.functions[target.index()].signature;
         let Param::Address(TypeId(list)) = module.signatures[signature.index()].params[0] else {
@@ -1299,33 +1348,44 @@ fn f{entry} = n{instance} g{g} {{
             let mut addresses = String::new();
             let mut build = String::new();
             for (i, (offset, bits)) in [
+                (0, 0x49ec259204a234c2u64),
                 (8, 1),
                 (16, 7),
                 (24, 70),
+                (32, 0xe1e0cd537ed145b8),
                 (40, 0),
                 (48, 11),
                 (56, 110),
+                (64, 0xaddb2134e9f8658d),
                 (72, 1),
                 (80, 13),
                 (88, 130),
                 (96, 2), // live count differs from the three occupied slots
+                (104, 2),
+                (112, 0),
+                (120, 1),
+                (128, 0),
+                (136, 0),
+                (144, 3),
+                (152, 0),
+                (160, 0),
             ]
             .into_iter()
             .enumerate()
             {
                 let a = 7 + i;
-                let v = 11 + 2 * i;
+                let v = 12 + 2 * i;
                 addresses.push_str(&format!("addr a{a} = v4 byte v{v} : u64\n"));
                 build.push_str(&format!("v{v}: u64 = const {offset}\nv{}: u64 = const {bits}\naddress a{a}\nstore a{a}, v{}\n",v+1,v+1));
             }
             fixture
                 .replace(
                     "v0: u64 = const 24",
-                    "v0: u64 = const 96\n  v31: u64 = const 168",
+                    "v0: u64 = const 96\n  v11: u64 = const 168",
                 )
                 .replace(
                     "alloc own v0 align 8 charge v0",
-                    "alloc own v31 align 8 charge v0",
+                    "alloc own v11 align 8 charge v0",
                 )
                 .replace(" b0:", &format!("{addresses} b0:"))
                 .replace("store a4, v6\n  store a5, v7\n  store a6, v8", &build)

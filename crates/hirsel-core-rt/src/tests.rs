@@ -311,3 +311,17 @@ fn original_payer_growth_outlives_its_last_context_and_old_block() {
     drop(last);
     assert_eq!(receiver.available(), 0);
 }
+
+#[test]
+fn current_payer_free_refunds_without_a_header_lookup() {
+    let ctx = Context::new(64);
+    for align in [8, 16, 64] {
+        // SAFETY: no limit transition or handover occurs between this pair.
+        unsafe {
+            let block = inline_own_alloc(&ctx, Some(24), 24, align).unwrap();
+            assert_eq!(ctx.available(), 40);
+            inline_own_free_current(&ctx, block, 24, 24, align);
+        }
+        assert_eq!(ctx.available(), 64);
+    }
+}

@@ -348,3 +348,14 @@ pub(crate) unsafe fn free_in(
         crate::allocator::deallocate_raw(payload.as_ptr().sub(offset));
     }
 }
+
+/// # Safety
+/// Exclusive cleaned PLAIN payload with its exact original native operands.
+#[inline(always)]
+pub(crate) unsafe fn deallocate_plain(payload: NonNull<u8>, bytes: usize, align: usize) {
+    let (_, offset) = physical_layout(bytes, align, PLAIN);
+    // SAFETY: native operands identify the original allocation base.
+    unsafe {
+        crate::allocator::deallocate_raw(payload.as_ptr().sub(offset));
+    }
+}

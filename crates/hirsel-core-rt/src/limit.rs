@@ -283,8 +283,9 @@ impl Payer {
         let injected = payer.injected();
         #[cfg(not(any(test, feature = "testing")))]
         let injected = false;
-        // SAFETY: canonical live local record, accessed exclusively by its task.
-        let r = unsafe { &mut *payer.local() };
+        // SAFETY: admission takes a canonical, untagged live payer under the
+        // task's exclusive custody. Block words canonicalize before admission.
+        let r = unsafe { &mut *payer.0.as_ptr().cast::<LimitRecord>() };
         match bytes {
             Some(n) if !injected && n <= r.available => {
                 r.available = r.available.wrapping_sub(n);

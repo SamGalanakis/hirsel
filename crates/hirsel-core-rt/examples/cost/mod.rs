@@ -42,6 +42,132 @@ fn allocation<const N: usize>(runtime: bool) -> u64 {
     sum
 }
 
+// Both branches make exactly malloc(N+8)/free calls, align to 8 and zero N
+// payload bytes at base+8. Only the runtime branch admits, prefixes and refunds.
+#[inline(never)]
+fn matched_allocation<const N: usize, const RUNTIME: bool, const CURRENT: bool>() -> u64 {
+    let ctx = Context::new(u64::MAX);
+    let mut sum = 0;
+    for i in 0..COUNT {
+        // SAFETY: each branch owns the same N+8 native bytes, payload at offset8.
+        unsafe {
+            let block = if RUNTIME {
+                hirsel_core_rt::abi::inline_own_alloc(&ctx, Some(N as u64), N, 8)
+                    .unwrap()
+                    .as_ptr()
+            } else {
+                let base = super::native_allocate(N + 8);
+                if base.is_null() {
+                    std::alloc::handle_alloc_error(
+                        std::alloc::Layout::from_size_align(N + 8, 8).unwrap(),
+                    );
+                }
+                base.add(8)
+            };
+            block.write_bytes(0, N);
+            block.write(i as u8);
+            sum += black_box(block).read() as u64;
+            let block = black_box(block);
+            if RUNTIME && CURRENT {
+                hirsel_core_rt::abi::inline_own_free_current(
+                    &ctx,
+                    std::ptr::NonNull::new_unchecked(block),
+                    N as u64,
+                    N,
+                    8,
+                );
+            } else if RUNTIME {
+                hirsel_core_rt::abi::inline_own_free(
+                    &ctx,
+                    std::ptr::NonNull::new_unchecked(block),
+                    N as u64,
+                    N,
+                    8,
+                );
+            } else {
+                super::native_free(block.sub(8));
+            }
+        }
+    }
+    black_box(ctx.available());
+    sum
+}
+
+// Access fields only through the offsets an emitter includes from abi_layout.
+#[inline(always)]
+unsafe fn field<T>(base: *mut u8, offset: usize) -> *mut T {
+    // SAFETY: caller selects an aligned frozen field of a live task-owned object.
+    unsafe { base.add(offset).cast() }
+}
+#[inline(never)]
+fn emitted_region() -> u64 {
+    use hirsel_core_rt::abi_layout::*;
+    let ctx = Context::new(u64::MAX);
+    let mut region = Region::new(65536);
+    let mut sum = 0;
+    for i in 0..COUNT {
+        // SAFETY: this is the emitter's constant-size/stride u64 bump sequence.
+        // The task exclusively owns ctx/region; allocation never moves a chunk.
+        unsafe {
+            let limit = field::<*mut u8>(
+                (&ctx as *const Context).cast_mut().cast(),
+                CONTEXT_CURRENT_LIMIT,
+            )
+            .read();
+            let raw = (&mut region as *mut Region).cast::<u8>();
+            let p = if field::<*mut u8>(raw, REGION_PAYER).read() != limit
+                || field::<u64>(raw, REGION_CHARGE).read() == 0
+            {
+                let result = hirsel_core_rt::abi::hirsel_core_region_alloc(
+                    &ctx,
+                    &mut region,
+                    8,
+                    8,
+                    8,
+                    false,
+                );
+                assert!(!result.pointer.is_null());
+                result.pointer
+            } else {
+                let available = field::<u64>(limit, LIMIT_AVAILABLE);
+                assert!(available.read() >= 8);
+                available.write(available.read().wrapping_sub(8));
+                let outstanding = field::<u64>(limit, LIMIT_OUTSTANDING);
+                outstanding.write(outstanding.read().wrapping_add(8));
+                let charge = field::<u64>(raw, REGION_CHARGE);
+                charge.write(charge.read().wrapping_add(8));
+                let cursor = field::<*mut u8>(raw, REGION_CURSOR);
+                let next = cursor.read().wrapping_add(8);
+                if next.addr() <= field::<*mut u8>(raw, REGION_END).read().addr() {
+                    let p = cursor.read();
+                    cursor.write(next);
+                    p
+                } else {
+                    hirsel_core_rt::abi::hirsel_core_region_refill(&mut region, 8, 8)
+                }
+            };
+            p.cast::<u64>().write(i);
+            sum += black_box(p).cast::<u64>().read();
+        }
+    }
+    eprintln!(
+        "logical_region_bytes=8000000 physical_chunk_bytes={}",
+        region.physical_bytes()
+    );
+    drop(region);
+    assert_eq!(ctx.available(), u64::MAX);
+    sum
+}
+
+fn allocation_mode<const N: usize>(mode: &str) -> u64 {
+    match mode {
+        "matched" => matched_allocation::<N, false, false>(),
+        "inline" => matched_allocation::<N, true, false>(),
+        "current" => matched_allocation::<N, true, true>(),
+        _ => allocation::<N>(mode == "runtime"),
+    }
+}
+
 #[inline(never)]
 fn emitted_growth() -> u64 {
     let ctx = Context::new(u64::MAX);
@@ -348,11 +474,12 @@ pub fn main() {
     let mode = args.next().unwrap();
     let runtime = mode == "runtime";
     let checksum = match workload.as_str() {
-        "alloc16" => allocation::<16>(runtime),
-        "alloc64" => allocation::<64>(runtime),
-        "alloc256" => allocation::<256>(runtime),
-        "alloc4096" => allocation::<4096>(runtime),
+        "alloc16" => allocation_mode::<16>(&mode),
+        "alloc64" => allocation_mode::<64>(&mode),
+        "alloc256" => allocation_mode::<256>(&mode),
+        "alloc4096" => allocation_mode::<4096>(&mode),
         "growth" => growth(&mode),
+        "region" if mode == "inline" => emitted_region(),
         "region" => region(runtime),
         "rc" => counted(runtime),
         "limits" => limits(&mode),

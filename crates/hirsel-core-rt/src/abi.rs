@@ -744,3 +744,30 @@ pub unsafe extern "C" fn hirsel_core_test_inline_admission(context: *const Conte
     // SAFETY: the test object runs under the same task/payer discipline as alloc.
     unsafe { (&*context).payer(None).injected() }
 }
+
+/// Emitted free when lowering proves this block was admitted from the still
+/// current record. No scope switch, handover or finalizer may intervene.
+/// # Safety
+/// The exclusively owned PLAIN block was admitted from context's current payer;
+/// charge and native operands are exact and every payload field is clean.
+#[inline(always)]
+pub unsafe fn inline_own_free_current(
+    context: &Context,
+    pointer: NonNull<u8>,
+    charge: u64,
+    bytes: usize,
+    align: usize,
+) {
+    if charge == 0 {
+        // SAFETY: a zero-charge block still owns its native payer pin.
+        return unsafe { inline_own_free(context, pointer, charge, bytes, align) };
+    }
+    // SAFETY: lowering proves the current record paid these outstanding bytes.
+    unsafe {
+        (*context.limit_record()).available =
+            (*context.limit_record()).available.wrapping_add(charge);
+        (*context.limit_record()).outstanding =
+            (*context.limit_record()).outstanding.wrapping_sub(charge);
+        crate::block::deallocate_plain(pointer, bytes, align);
+    }
+}

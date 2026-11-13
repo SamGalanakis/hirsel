@@ -169,6 +169,33 @@ pub unsafe extern "C" fn hirsel_core_resource_free(resource: NonNull<u8>, storag
         causes::resource_free(resource, storage);
     }
 }
+/// Move a String into the current prepaid cause cell and record Fail. The
+/// carrier is copied into cell-owned native bookkeeping; no admission occurs.
+/// # Safety
+/// Context has an unused primary/resource cell. The live String buffer and its
+/// capacity transfer to that cell and must not be used or dropped by the caller.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_raise_string(
+    context: *mut Context,
+    site: u64,
+    data: *mut u8,
+    len: u64,
+    capacity: u64,
+) {
+    // SAFETY: the emitter transfers exactly this owned String and obligation.
+    unsafe {
+        causes::record_string(
+            &mut *context,
+            site,
+            causes::StringMessage {
+                data,
+                len,
+                capacity,
+            },
+        );
+    }
+}
+
 /// Record one cause in the current prepaid task/resource cell. Admits nothing.
 /// # Safety
 /// Transfers the cause's owned message. The obligation has an unused cell;

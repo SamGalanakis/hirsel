@@ -151,14 +151,11 @@ pub(super) fn emit(
                 f.b.ins().trap(ir::TrapCode::unwrap_user(1));
             }
             Terminator::Raise { cause, cleanup } => {
-                let kind = match cause {
-                    RaiseCause::Unwrap => 3,
-                    RaiseCause::Bounds => 1,
-                    RaiseCause::Fail(_) => {
-                        return Err(unsupported("owned failure-message carrier ABI"));
-                    }
-                };
-                f.record_failure(kind)?;
+                match cause {
+                    RaiseCause::Unwrap => f.record_failure(3)?,
+                    RaiseCause::Bounds => f.record_failure(1)?,
+                    RaiseCause::Fail(address) => f.record_string(*address)?,
+                }
                 f.fail_to(*cleanup);
             }
             Terminator::Propagate => f.fail_to(None),

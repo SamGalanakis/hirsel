@@ -244,7 +244,7 @@ fn execute_reports(
         expected.push(report.trace.len() as u64);
         expected.extend(&report.trace);
         expected.push(report.admissions as u64);
-        writeln!(source,"uint64_t used = UINT64_C({limit}) - hirsel_core_test_available(ctx); fwrite(&used,8,1,stdout); uint64_t nt=traces; fwrite(&nt,8,1,stdout); fwrite(trace,8,traces,stdout); uint64_t na=hirsel_core_test_attempts(ctx); fwrite(&na,8,1,stdout); hirsel_core_causes_drop(causes); hirsel_core_context_free(ctx);").unwrap();
+        writeln!(source,"uint64_t used = UINT64_C({limit}) - hirsel_core_test_available(ctx); fwrite(&used,8,1,stdout); uint64_t nt=traces; fwrite(&nt,8,1,stdout); fwrite(trace,8,traces,stdout); uint64_t na=hirsel_core_test_attempts(ctx); fwrite(&na,8,1,stdout); hirsel_core_causes_drop(causes); if(status && hirsel_core_test_available(ctx) != UINT64_C({limit})) return 9; hirsel_core_context_free(ctx);").unwrap();
         source.push_str("}\n");
     }
     source.push_str("return 0; }\n");
@@ -601,6 +601,9 @@ fn declared_places_variants_and_destination_calls_match_evaluator() {
     let source = r#"core v1
 type t0 = own "Row" { small: u8, large: u64 }
 type t1 = own "Maybe" | None { } | Some { x: u64 }
+type t2 = own "UnusedFile" { file: hostfile }
+type t3 = own "UnusedSequence" { bytes: seq u8 }
+type t4 = own "UnusedCounted" { data: rc t3 }
 sig g0 = (u64) -> (u8, u64, u32)
 sig g1 = (u64) -> () dest t0
 inst n0 = test@0/places/run [] []
@@ -789,4 +792,10 @@ fn owned_callable_captures_and_captureless_cleanup_use_function_row_abi() {
         },
     ];
     execute_reports(&module, &runs, false, 1000, None, Some(&reports));
+}
+
+#[test]
+fn failure_message_moves_its_carrier_out_of_the_native_frame() {
+    let module = text::parse(include_str!("support/message.core")).unwrap();
+    execute(&module, &[(FuncId(0), vec![])], false);
 }

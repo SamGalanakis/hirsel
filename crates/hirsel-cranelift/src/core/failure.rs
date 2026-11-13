@@ -54,6 +54,30 @@ impl Function<'_, '_, '_> {
         self.b.ins().call(func, &[self.context, addr]);
         Ok(())
     }
+    pub fn record_string(&mut self, address: AddressId) -> Result<()> {
+        let carrier = self.addr(address);
+        let data = self
+            .b
+            .ins()
+            .load(types::I64, MemFlagsData::new(), carrier, 0);
+        let len = self
+            .b
+            .ins()
+            .load(types::I64, MemFlagsData::new(), carrier, 8);
+        let capacity = self
+            .b
+            .ins()
+            .load(types::I64, MemFlagsData::new(), carrier, 16);
+        let site = self.b.ins().iconst(types::I64, 0);
+        let u = Ty::Scalar(Scalar::U64);
+        self.c_call(
+            "hirsel_core_raise_string",
+            &[Ty::Ptr, u, Ty::Ptr, u, u],
+            &[],
+            &[self.context, site, data, len, capacity],
+        )?;
+        Ok(())
+    }
     pub fn guard(&mut self, condition: Value, kind: u8, target: Option<BlockId>) -> Result<()> {
         let failed = self.b.create_block();
         let next = self.b.create_block();

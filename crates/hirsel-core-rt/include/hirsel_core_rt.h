@@ -48,6 +48,10 @@ typedef struct {
 } HirselCoreCause;
 typedef struct HirselCoreCauseCell HirselCoreCauseCell;
 void hirsel_core_raise(HirselCoreContext *, HirselCoreCause);
+/* Fail messages borrow this carrier from the delivered cause cell. */
+typedef struct { uint8_t *data; uint64_t len, capacity; } HirselCoreStringMessage;
+void hirsel_core_raise_string(HirselCoreContext *, uint64_t site,
+    uint8_t *data, uint64_t len, uint64_t capacity);
 HirselCoreCauseCell *hirsel_core_causes_take(HirselCoreContext *);
 void hirsel_core_causes_drop(HirselCoreCauseCell *);
 const HirselCoreCauseCell *hirsel_core_cause_next(const HirselCoreCauseCell *);

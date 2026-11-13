@@ -7,7 +7,10 @@ use crate::{
     limit::Funding,
 };
 use hirsel_core_layout::charge;
-use std::{mem::ManuallyDrop, ptr};
+use std::{
+    mem::{ManuallyDrop, MaybeUninit},
+    ptr,
+};
 
 pub const OVERFLOW: u8 = 0;
 pub const BOUNDS: u8 = 1;
@@ -27,11 +30,29 @@ pub struct Cause {
     pub drop_message: Option<unsafe extern "C" fn(*mut u8)>,
 }
 
+/// An owned String carrier retained in a prepaid cause cell. The buffer keeps
+/// its original payer until the delivered chain is consumed.
+#[repr(C)]
+pub struct StringMessage {
+    pub data: *mut u8,
+    pub len: u64,
+    pub capacity: u64,
+}
+unsafe extern "C" fn drop_string(pointer: *mut u8) {
+    // SAFETY: record_string points the callback at its cell-owned carrier.
+    let message = unsafe { &*pointer.cast::<StringMessage>() };
+    if let Some(data) = std::ptr::NonNull::new(message.data) {
+        // SAFETY: the cell owns the live String buffer and its original charge.
+        unsafe { block::free(data, charge::seq(message.capacity, 1).unwrap()) };
+    }
+}
+
 /// Opaque native ABI handle. Its physical size is not its logical charge of 32.
 pub struct Cell {
     funding: Funding,
     cause: Option<Cause>,
     next: *mut Cell,
+    string: MaybeUninit<StringMessage>,
 }
 impl Cell {
     fn prepaid(funding: Funding) -> Box<Self> {
@@ -39,6 +60,7 @@ impl Cell {
             funding,
             cause: None,
             next: ptr::null_mut(),
+            string: MaybeUninit::uninit(),
         })
     }
 }
@@ -130,13 +152,34 @@ pub fn task_start(context: &mut Context) -> Result<(), Capacity> {
 /// cell. The emitter abandons the failing body and never records into that
 /// obligation again. A non-finalizer failure requires a started task.
 pub unsafe fn record(context: &mut Context, cause: Cause) {
-    let mut cell = if context.active_resource.is_null() {
+    let mut cell = take_cell(context);
+    cell.cause = Some(cause);
+    context.causes.append(cell);
+}
+
+fn take_cell(context: &mut Context) -> Box<Cell> {
+    if context.active_resource.is_null() {
         context.primary.take().unwrap()
     } else {
         // SAFETY: active_resource is the live, exclusively running finalizer's state.
         unsafe { (*context.active_resource).cell.take().unwrap() }
-    };
-    cell.cause = Some(cause);
+    }
+}
+
+/// Retain a moved String without allocating after failure or keeping a frame
+/// address. Taking the prepaid cell is the same operation as primitive raise.
+/// # Safety
+/// The caller transfers a live String buffer, or null for an unreserved empty
+/// String. It owns the current task/resource's unused cause cell.
+pub unsafe fn record_string(context: &mut Context, site: u64, message: StringMessage) {
+    let mut cell = take_cell(context);
+    let carrier = cell.string.write(message) as *mut StringMessage;
+    cell.cause = Some(Cause {
+        kind: FAIL,
+        site,
+        message: carrier.cast(),
+        drop_message: Some(drop_string),
+    });
     context.causes.append(cell);
 }
 

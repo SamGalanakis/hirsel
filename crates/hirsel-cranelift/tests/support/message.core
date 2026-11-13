@@ -1,0 +1,31 @@
+; The frame's String carrier moves into the task's prepaid cell. Its buffer
+; stays charged while the caller holds the cause and is freed with the chain.
+core v1
+type t0 = own "String" { bytes: seq u8 }
+sig g0 = () -> ()
+inst n0 = test@0/message/run [] []
+fn f0 = n0 g0 {
+  slot s0 = t0
+  addr a0 = s0 field 0 : ptr
+  addr a1 = s0 field 0 byte v0 : u64
+  addr a2 = s0 field 0 byte v1 : u64
+  addr a3 = s0 : t0
+  addr a4 = v2 : u64
+b0:
+  live s0
+  v0: u64 = const 8
+  v1: u64 = const 16
+  v2: ptr, v3: u64 = alloc own v0 align 8 charge v0
+  address a0
+  address a1
+  address a2
+  address a3
+  address a4
+  v4: u64 = const 6513249
+  v5: u64 = const 3
+  store a4, v4
+  store a0, v2
+  store a1, v5
+  store a2, v0
+  raise fail a3
+}

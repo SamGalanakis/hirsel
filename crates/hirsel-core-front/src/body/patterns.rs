@@ -315,7 +315,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 ft
             };
         }
+        // A field under a view has the field's own type; the binding is a view of
+        // it because the pattern is viewed (`bind`), as for a viewed subject.
         let (d, arg_len) = match self.t.kind(ty) {
+            TyKind::View(inner) => return self.pattern_field_ty(*inner, case, i),
             TyKind::Tuple(ts) => return ts[i],
             TyKind::Adt(d, args) => (*d, args.len()),
             _ => return ERROR,

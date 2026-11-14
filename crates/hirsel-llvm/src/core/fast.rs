@@ -384,7 +384,12 @@ impl FunctionEmitter<'_> {
         // Exact raw equality with the canonical current pointer, optionally its
         // ordinary GRAPH tag, proves both local custody and the native layout.
         let tag = self.bin(Binary::Xor, &i64, &word_value, &current_word);
-        let ordinary = self.cmp(Predicate::Ule, &i64, &tag, &int(OWN_ORDINARY_MAX_TAG as u64));
+        let ordinary = self.cmp(
+            Predicate::Ule,
+            &i64,
+            &tag,
+            &int(OWN_ORDINARY_MAX_TAG as u64),
+        );
         let positive = self.cmp(Predicate::Ne, &i64, charge, &int(0));
         let fast = self.bin(Binary::And, &i1, &ordinary, &positive);
         let local = Label::new("free_local", n);
@@ -395,7 +400,12 @@ impl FunctionEmitter<'_> {
         self.likely(&fast, local, slow);
         self.block(local);
         self.refund(&current, charge);
-        let plain = self.cmp(Predicate::Eq, &i64, &tag, &int(OWN_ORDINARY_PLAIN_TAG as u64));
+        let plain = self.cmp(
+            Predicate::Eq,
+            &i64,
+            &tag,
+            &int(OWN_ORDINARY_PLAIN_TAG as u64),
+        );
         let offset = self.select(
             &i64,
             &plain,

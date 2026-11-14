@@ -355,19 +355,16 @@ fn emit_module(
         } else {
             format!("{name}.infallible")
         };
-        let destination = sig
-            .dest
-            .filter(|_| sig.results.is_empty())
-            .and_then(|t| {
-                use hirsel_core_layout::{Layout, Repr};
-                match (module.types[t.index()].repr, &recipes[t.index()].layout) {
-                    (Repr::Resource | Repr::Stable, _) | (_, Layout::Fixed(_)) => {
-                        let (bytes, _) = e.place_layout(PlaceTy::Declared(t));
-                        matches!(bytes, 1..=16).then_some(bytes)
-                    }
-                    _ => None,
+        let destination = sig.dest.filter(|_| sig.results.is_empty()).and_then(|t| {
+            use hirsel_core_layout::{Layout, Repr};
+            match (module.types[t.index()].repr, &recipes[t.index()].layout) {
+                (Repr::Resource | Repr::Stable, _) | (_, Layout::Fixed(_)) => {
+                    let (bytes, _) = e.place_layout(PlaceTy::Declared(t));
+                    matches!(bytes, 1..=16).then_some(bytes)
                 }
-            });
+                _ => None,
+            }
+        });
         let attrs = FnAttrs {
             linkage: if has_status {
                 Linkage::External
@@ -395,7 +392,8 @@ fn emit_module(
         }
         for (i, t) in body.slots.iter().enumerate() {
             let (bytes, align) = e.place_layout(*t);
-            e.sink.alloca(Local::Slot(i), &Type::bytes(bytes), align as u32);
+            e.sink
+                .alloca(Local::Slot(i), &Type::bytes(bytes), align as u32);
         }
         for i in 0..body.addresses.len() {
             if e.address_slots[i] {
@@ -463,24 +461,8 @@ fn emit_module(
             e.infallible_wrapper(&name, sig, facts, function_debug.and_then(|d| d.wrapper));
         }
     }
-    cleanup::drop_glue(
-        module,
-        target,
-        &recipes,
-        &failures,
-        facts,
-        sink,
-        &mut items,
-    )?;
-    task_entry::emit(
-        module,
-        target,
-        &recipes,
-        &failures,
-        facts,
-        sink,
-        &mut items,
-    )?;
+    cleanup::drop_glue(module, target, &recipes, &failures, facts, sink, &mut items)?;
+    task_entry::emit(module, target, &recipes, &failures, facts, sink, &mut items)?;
     items.emit(sink);
     Ok(())
 }
@@ -588,7 +570,11 @@ fn printed_oracle(
     let Some(line) = difference else {
         return Ok(());
     };
-    for (suffix, body) in [("ll", &text), ("native.ll", &native.to_owned()), ("parsed.ll", &parsed)] {
+    for (suffix, body) in [
+        ("ll", &text),
+        ("native.ll", &native.to_owned()),
+        ("parsed.ll", &parsed),
+    ] {
         std::fs::write(dir.join(format!("{digest}.{suffix}")), body).map_err(io)?;
     }
     Err(Error::Llvm(format!(
@@ -1005,7 +991,13 @@ impl FunctionEmitter<'_> {
     }
     /// An LLVM intrinsic or runtime function with plain parameters.
     fn intrinsic(&mut self, name: &str, result: Type, args: &[CArg]) -> Value {
-        self.call_declared(name, result, args, FnAttrs::default(), &CallAttrs::default())
+        self.call_declared(
+            name,
+            result,
+            args,
+            FnAttrs::default(),
+            &CallAttrs::default(),
+        )
     }
     fn canonical(&mut self, t: Ty, x: &Value) -> Value {
         if !t.is_float() {
@@ -1078,7 +1070,8 @@ impl FunctionEmitter<'_> {
         let word = memory_layout::cause_kind_word(kind) as i64;
         // Keep AArch64's relocated site in this object's constant bytes;
         // folding that field into an external pointer would select the GOT.
-        let initialized = fixed && self.relocatable_sites && self.abi.target == Target::Aarch64Linux;
+        let initialized =
+            fixed && self.relocatable_sites && self.abi.target == Target::Aarch64Linux;
         self.items.global(Global {
             name: name.clone().into(),
             linkage: Linkage::Private,

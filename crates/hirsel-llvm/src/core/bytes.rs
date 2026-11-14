@@ -104,24 +104,49 @@ pub(super) fn define_compare_bytes(sink: &mut dyn Sink, facts: bool) {
         };
         let cmp = emit(
             names[0],
-            Operation::Call(&memcmp, &callee, &[a.clone(), b.clone(), length.clone()], &CallAttrs::default()),
+            Operation::Call(
+                &memcmp,
+                &callee,
+                &[a.clone(), b.clone(), length.clone()],
+                &CallAttrs::default(),
+            ),
         );
-        let zero_cmp = emit(names[1], Operation::Compare(Predicate::Eq, &i32, &cmp, &zero));
-        let negative = emit(names[2], Operation::Compare(Predicate::Slt, &i32, &cmp, &zero));
+        let zero_cmp = emit(
+            names[1],
+            Operation::Compare(Predicate::Eq, &i32, &cmp, &zero),
+        );
+        let negative = emit(
+            names[2],
+            Operation::Compare(Predicate::Slt, &i32, &cmp, &zero),
+        );
         let sign = emit(names[3], Operation::Select(&i8, &negative, &minus, &one));
         let order = emit(names[4], Operation::Select(&i8, &zero_cmp, tie, &sign));
         sink.instruction(None, Operation::Return(Some((&i8, &order))), None);
     };
-    order(sink, ["cmp", "zero", "negative", "sign", "order"], &al, &zero);
+    order(
+        sink,
+        ["cmp", "zero", "negative", "sign", "order"],
+        &al,
+        &zero,
+    );
     sink.block(different_length);
     let mut emit = |name: &'static str, op: Operation<'_>| {
         sink.instruction(Some(Local::Named(name)), op, None);
         Value::Local(Local::Named(name))
     };
-    let shorter = emit("shorter", Operation::Compare(Predicate::Ult, &i64, &al, &bl));
+    let shorter = emit(
+        "shorter",
+        Operation::Compare(Predicate::Ult, &i64, &al, &bl),
+    );
     let common = emit("common", Operation::Select(&i64, &shorter, &al, &bl));
-    let length_order = emit("length_order", Operation::Select(&i8, &shorter, &minus, &one));
-    let no_prefix = emit("no_prefix", Operation::Compare(Predicate::Eq, &i64, &common, &zero));
+    let length_order = emit(
+        "length_order",
+        Operation::Select(&i8, &shorter, &minus, &one),
+    );
+    let no_prefix = emit(
+        "no_prefix",
+        Operation::Compare(Predicate::Eq, &i64, &common, &zero),
+    );
     drop(emit);
     terminate(
         sink,

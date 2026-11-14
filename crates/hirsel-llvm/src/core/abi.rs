@@ -205,19 +205,13 @@ impl FunctionEmitter<'_> {
     fn shadow_copy_in(&mut self, original: &Value) -> Value {
         let shadow = self.temp(Type::bytes(24));
         self.runtime_void("llvm.lifetime.start.p0", &[ptr(shadow.clone())]);
-        self.runtime_void(
-            "llvm.memcpy.p0.p0.i64",
-            &memcpy(&shadow, original, int(24)),
-        );
+        self.runtime_void("llvm.memcpy.p0.p0.i64", &memcpy(&shadow, original, int(24)));
         shadow
     }
     fn shadow_copy_back(&mut self, original: &Value, shadow: &Value) {
         // The callee may change the carrier even when it returns failure.
         // These word copies transfer no ownership, marks, drops or charges.
-        self.runtime_void(
-            "llvm.memcpy.p0.p0.i64",
-            &memcpy(original, shadow, int(24)),
-        );
+        self.runtime_void("llvm.memcpy.p0.p0.i64", &memcpy(original, shadow, int(24)));
         self.runtime_void("llvm.lifetime.end.p0", &[ptr(shadow.clone())]);
     }
     /// The arguments of a direct or indirect CoreIR call, after the context.
@@ -305,7 +299,10 @@ impl FunctionEmitter<'_> {
             return true;
         }
         if abi.indirect {
-            args.insert(0, (Parameter::sret(abi.storage.clone()), Local::SRET.into()));
+            args.insert(
+                0,
+                (Parameter::sret(abi.storage.clone()), Local::SRET.into()),
+            );
         }
         let fn_sig = abi.signature(args.iter().map(|(p, _)| p.clone()).collect());
         let values: Vec<_> = args.into_iter().map(|(_, v)| v).collect();
@@ -455,7 +452,12 @@ impl FunctionEmitter<'_> {
         }
         Ok(())
     }
-    pub(super) fn invoke(&mut self, abi: &Return, callee: &Value, mut args: Vec<CArg>) -> Vec<Value> {
+    pub(super) fn invoke(
+        &mut self,
+        abi: &Return,
+        callee: &Value,
+        mut args: Vec<CArg>,
+    ) -> Vec<Value> {
         let scratch = if abi.fields.len() > 1 {
             Some(self.temp(abi.storage.clone()))
         } else {

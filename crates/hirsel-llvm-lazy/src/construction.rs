@@ -49,9 +49,11 @@ pub(crate) struct Api {
     pub constant_bytes: unsafe extern "C" fn(Raw, *const u8, usize) -> Raw,
     pub global_ref: unsafe extern "C" fn(Raw, *const c_char, usize) -> Raw,
     pub global: unsafe extern "C" fn(Raw, *const c_char, usize, Raw, Raw, u32, u8, u8, u32, u8),
-    pub function: unsafe extern "C" fn(Raw, *const c_char, usize, Raw, *const Raw, usize, u32) -> Raw,
+    pub function:
+        unsafe extern "C" fn(Raw, *const c_char, usize, Raw, *const Raw, usize, u32) -> Raw,
     pub attribute: unsafe extern "C" fn(Raw, Raw, u32, u32, Raw, u64),
-    pub string_attribute: unsafe extern "C" fn(Raw, Raw, *const c_char, usize, *const c_char, usize),
+    pub string_attribute:
+        unsafe extern "C" fn(Raw, Raw, *const c_char, usize, *const c_char, usize),
     pub finish_declaration: unsafe extern "C" fn(Raw),
     pub subprogram: unsafe extern "C" fn(Raw, Raw),
     pub begin_body: unsafe extern "C" fn(Raw, Raw),

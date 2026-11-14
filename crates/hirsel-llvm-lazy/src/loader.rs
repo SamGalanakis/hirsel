@@ -67,10 +67,7 @@ pub(crate) struct RawLibrary {
 }
 pub(crate) enum ProgramUnit<'a> {
     Native(crate::construction::NativeModule),
-    Text {
-        ir: &'a str,
-        imported: bool,
-    },
+    Text { ir: &'a str, imported: bool },
     Import(&'a [u8]),
 }
 struct Backend {

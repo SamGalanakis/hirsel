@@ -125,7 +125,9 @@ impl FunctionEmitter<'_> {
             RtOp::IsolateEnter => {
                 self.native_call("hirsel_core_isolate_enter", &[B, U], &[ptr(CONTEXT)])
             }
-            RtOp::IsolateLeave => self.native_call("hirsel_core_isolate_leave", &[], &[ptr(CONTEXT)]),
+            RtOp::IsolateLeave => {
+                self.native_call("hirsel_core_isolate_leave", &[], &[ptr(CONTEXT)])
+            }
             RtOp::IsolateCatch => {
                 self.native_call("hirsel_core_isolate_catch", &[P, K], &[ptr(CONTEXT)])
             }

@@ -17,9 +17,7 @@ impl Ir<'_, '_> {
         self.values.len() - 1
     }
     fn op(&mut self, op: Binary, a: usize, b: usize) -> usize {
-        let value = self
-            .e
-            .bin(op, &self.ty, &self.values[a], &self.values[b]);
+        let value = self.e.bin(op, &self.ty, &self.values[a], &self.values[b]);
         self.put(value)
     }
 }

@@ -70,8 +70,12 @@ pub(super) fn step_signature() -> FnSig {
         ..FnSig::plain(Type::I1, [Type::Ptr, Type::Ptr, Type::Ptr, Type::Ptr])
     }
 }
-pub(super) const STEP_PARAMS: [Local; 4] =
-    [Local::CONTEXT, Local::PAYLOAD, Local::CURSOR, Local::WORKLIST];
+pub(super) const STEP_PARAMS: [Local; 4] = [
+    Local::CONTEXT,
+    Local::PAYLOAD,
+    Local::CURSOR,
+    Local::WORKLIST,
+];
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn drop_glue(
@@ -390,8 +394,12 @@ impl FunctionEmitter<'_> {
                     "hirsel_core_receiver_drop"
                 };
                 Some(
-                    self.native_call(name, &[Ty::Scalar(Scalar::U8)], &[ptr(CONTEXT), ptr(handle)])
-                        .remove(0),
+                    self.native_call(
+                        name,
+                        &[Ty::Scalar(Scalar::U8)],
+                        &[ptr(CONTEXT), ptr(handle)],
+                    )
+                    .remove(0),
                 )
             }
             FieldTy::Handle(hirsel_core_layout::Handle::Sender) => {
@@ -513,7 +521,12 @@ impl FunctionEmitter<'_> {
                     let arms: Vec<_> = (1..drop.fields.len())
                         .map(|row| (row as i128, row_label(row)))
                         .collect();
-                    self.effect(Operation::Switch(&Type::I32, &tagvalue, row_label(0), &arms));
+                    self.effect(Operation::Switch(
+                        &Type::I32,
+                        &tagvalue,
+                        row_label(0),
+                        &arms,
+                    ));
                 } else {
                     self.br(row_label(0));
                 }
@@ -631,7 +644,12 @@ fn counted_glue(
                 absolute_symbol: false,
             });
         }
-        sink.begin_function(&drop_name, &step_signature(), &STEP_PARAMS, &FnAttrs::private());
+        sink.begin_function(
+            &drop_name,
+            &step_signature(),
+            &STEP_PARAMS,
+            &FnAttrs::private(),
+        );
         let mut e = glue_emitter(
             module,
             recipes,

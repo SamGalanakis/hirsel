@@ -83,11 +83,7 @@ impl FunctionEmitter<'_> {
                 let (x, over) = self.overflow(t, op, a, b);
                 let (signed, w) = t.int().unwrap();
                 let limit = if !signed {
-                    if op == ArithOp::Sub {
-                        int(0)
-                    } else {
-                        int(-1)
-                    }
+                    if op == ArithOp::Sub { int(0) } else { int(-1) }
                 } else {
                     let negative = if op == ArithOp::Mul {
                         let n = self.bin(Binary::Xor, &tt, a, b);

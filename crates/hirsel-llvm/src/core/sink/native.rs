@@ -170,7 +170,12 @@ impl NativeSink {
                 }
                 Value::Struct { packed, fields } => {
                     let fields: Vec<_> = fields.iter().map(|(t, v)| self.value(v, t)).collect();
-                    (api.constant_struct)(self.unit, fields.as_ptr(), fields.len(), u8::from(*packed))
+                    (api.constant_struct)(
+                        self.unit,
+                        fields.as_ptr(),
+                        fields.len(),
+                        u8::from(*packed),
+                    )
                 }
                 Value::Bytes(bytes) => (api.constant_bytes)(self.unit, bytes.as_ptr(), bytes.len()),
                 Value::Metadata(ids) => {
@@ -353,13 +358,17 @@ impl Sink for NativeSink {
                         .iter()
                         .map(|item| match item {
                             MdItem::Node(id) => self.md(*id),
-                            MdItem::String(s) => (api.metadata_string)(u, s.as_ptr().cast(), s.len()),
+                            MdItem::String(s) => {
+                                (api.metadata_string)(u, s.as_ptr().cast(), s.len())
+                            }
                             MdItem::I32(n) => (api.metadata_integer)(u, 32, u64::from(*n)),
                         })
                         .collect();
                     (api.metadata_tuple)(u, items.as_ptr(), items.len(), u8::from(*distinct))
                 }
-                Metadata::File { filename } => (api.di_file)(u, filename.as_ptr().cast(), filename.len()),
+                Metadata::File { filename } => {
+                    (api.di_file)(u, filename.as_ptr().cast(), filename.len())
+                }
                 Metadata::CompileUnit { file } => {
                     let file = self.md(*file);
                     (api.di_compile_unit)(u, file)
@@ -436,7 +445,10 @@ impl Sink for NativeSink {
         );
         for (label, &block) in &self.blocks {
             // SAFETY: a block of this unit.
-            assert!(unsafe { (self.api.block_placed)(block) } != 0, "undefined block {label}");
+            assert!(
+                unsafe { (self.api.block_placed)(block) } != 0,
+                "undefined block {label}"
+            );
         }
     }
     fn block(&mut self, label: Label) {
@@ -501,7 +513,14 @@ impl Sink for NativeSink {
                     let t = self.ty(ty);
                     let base = self.value(base, &Type::Ptr);
                     let indices: Vec<_> = indices.iter().map(|(t, v)| self.value(v, t)).collect();
-                    (api.gep)(u, t, base, indices.as_ptr(), indices.len(), u8::from(inbounds))
+                    (api.gep)(
+                        u,
+                        t,
+                        base,
+                        indices.as_ptr(),
+                        indices.len(),
+                        u8::from(inbounds),
+                    )
                 }
                 Operation::Extract(ty, v, index) => {
                     let v = self.value(v, ty);
@@ -578,7 +597,14 @@ impl Sink for NativeSink {
                     let default = self.block_ref(default);
                     let values: Vec<_> = arms.iter().map(|(n, _)| self.integer(ty, *n)).collect();
                     let blocks: Vec<_> = arms.iter().map(|(_, l)| self.block_ref(*l)).collect();
-                    (api.switch_value)(u, v, default, values.as_ptr(), blocks.as_ptr(), values.len())
+                    (api.switch_value)(
+                        u,
+                        v,
+                        default,
+                        values.as_ptr(),
+                        blocks.as_ptr(),
+                        values.len(),
+                    )
                 }
                 Operation::Return(value) => {
                     let value = value.map_or(std::ptr::null_mut(), |(t, v)| self.value(v, t));

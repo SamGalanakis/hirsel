@@ -70,7 +70,7 @@ impl FunctionEmitter<'_> {
             .filter(|a| !self.module.items[a.item.index()].package_is("core", "1"))?;
         if !self.relocatable_sites {
             return Some(int(
-                ((u64::from(anchor.item.0) + 1) << 32) | u64::from(anchor.start),
+                ((u64::from(anchor.item.0) + 1) << 32) | u64::from(anchor.start)
             ));
         }
         let symbol = hirsel_core_ir::source::site_symbol(&self.module.items[anchor.item.index()]);

@@ -515,7 +515,21 @@ fn run_expect(
         Some(i) => (&want[..i], want.get(i + 1).copied()),
         None => (want, None),
     };
-    let report = eval::run(module, f, &args, u64::MAX);
+    // The evaluator stops (panics) on a malformed run; that is this run's failure, so
+    // the corpus names the case it stopped in and checks the rest.
+    let report = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        eval::run(module, f, &args, u64::MAX)
+    })) {
+        Ok(report) => report,
+        Err(stop) => {
+            let why = stop
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| stop.downcast_ref::<&str>().copied())
+                .unwrap_or("no message");
+            return Some(format!("run {call}: the evaluator stopped: {why}"));
+        }
+    };
     if let Some(trace) = trace {
         let t: Vec<u64> = trace.split(',').map(|x| x.parse().unwrap()).collect();
         if report.trace != t {

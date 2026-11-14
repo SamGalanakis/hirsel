@@ -1,5 +1,6 @@
 // Error propagation has no implicit conversion, even between integer widths.
-// expect: refuse LANG-18 at 5:11
+// expect: refuse LANG-18 at 6:11
+// expect: compared LANG-18 at 6:11 | core@1/core/Result[u64, u16] | core@1/core/Result[u64, u8]
 fn wrong() -> Result[u64, u16] { Error(7) }
 fn f() -> Result[u64, u8] {
   let n = wrong()?

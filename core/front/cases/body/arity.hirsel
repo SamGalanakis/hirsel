@@ -1,7 +1,9 @@
 // LANG-11: one argument per parameter (Q13): an extra one is refused at the first extra
 // argument (the spec's example), a missing one at the call's `)`.
-// expect: refuse LANG-11 at 6:21
-// expect: refuse LANG-11 at 7:18
+// expect: refuse LANG-11 at 8:21
+// expect: refuse LANG-11 at 9:18
+// expect: compared LANG-11 at 8:21 | 2 arguments | 1 argument
+// expect: compared LANG-11 at 9:18 | 0 arguments | 1 argument
 fn f(x: u8) -> u8 { x }
 fn g() -> u8 { f(1, 2) }
 fn h() -> u8 { f() }

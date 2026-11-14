@@ -1,4 +1,5 @@
 // CONC-2's exact refused declaration: Rc cannot cross tasks.
-// expect: refuse CONC-2 at 4:27
+// expect: refuse CONC-2 at 5:27
+// expect: compared CONC-2 at 5:27 | core@1/core/Rc[app@1/main/Node] | send
 type Node: shareable { label: String }
 type Job: send { id: u64, cache: Rc[Node] }

@@ -1237,6 +1237,24 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     fn name(&self, ty: TyId) -> String {
         crate::decls::canonical(&self.p.decls, &self.t, ty)
     }
+    /// `ty` as a refusal shows it, each region root by its source name (PROG-7).
+    fn shown(&self, ty: TyId) -> String {
+        let symbols = &self.p.index.symbols;
+        let binders = &self.p.items[self.at.module as usize][self.at.item as usize]
+            .resolution
+            .binders;
+        let root = |r: &Root, s: &mut String| {
+            let name = match *r {
+                Root::Parameter(i) => self.fd.params.get(i as usize).map(|q| q.name),
+                Root::Generic(i) => self.fd.generics.get(i as usize).map(|g| g.name),
+                Root::Local(b) => binders.get(b as usize).map(|b| b.name),
+                Root::Enclosing | Root::CallableParameter { .. } => None,
+            };
+            s.push_str("in ");
+            s.push_str(name.map_or("r", |n| symbols.text(n)));
+        };
+        crate::decls::shown(&self.p.decls, &self.t, ty, &root)
+    }
 
     // ---- outcomes
     fn refuse(&mut self, rule: &str, n: NodeId, message: impl Into<String>) {
@@ -1253,10 +1271,68 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         causal: Vec<hirsel_core_resolve::Site>,
         message: impl Into<String>,
     ) {
-        crate::cost_scope!("phase", "diagnostics/gaps");
-        let site = self.p.site_span(self.at, span);
-        let mut r = refusal(rule, site, message);
+        let mut r = refusal(rule, self.p.site_span(self.at, span), message);
         r.causal = causal;
+        self.push_refusal(r);
+    }
+    /// A refusal with its compared facts: what the program has at `n` and what the
+    /// rule requires there (PROG-7).
+    fn refuse_compared(
+        &mut self,
+        rule: &str,
+        n: NodeId,
+        declared: impl Into<String>,
+        required: impl Into<String>,
+        message: impl Into<String>,
+    ) {
+        self.refuse_compared_at(rule, self.span(n), declared, required, message);
+    }
+    fn refuse_compared_at(
+        &mut self,
+        rule: &str,
+        span: Span,
+        declared: impl Into<String>,
+        required: impl Into<String>,
+        message: impl Into<String>,
+    ) {
+        let site = self.p.site_span(self.at, span);
+        self.push_refusal(refusal(rule, site, message).with_comparison(declared, required));
+    }
+    /// LANG-11 for a call or construction with the wrong number of arguments.
+    fn refuse_arity_at(&mut self, span: Span, written: usize, want: usize, message: String) {
+        let count = |k| crate::decls::counted(k, "argument");
+        self.refuse_compared_at("LANG-11", span, count(written), count(want), message);
+    }
+    /// LANG-11 for an argument that determines a type parameter differently from an
+    /// earlier argument: the argument's type against the parameter type as the earlier
+    /// arguments determined it.
+    fn refuse_twice(&mut self, e: NodeId, found: TyId, before: TyId, message: &str) {
+        let (found, before) = (self.shown(found), self.shown(before));
+        self.refuse_compared("LANG-11", e, found, before, message);
+    }
+    /// LANG-12 for a type written with the wrong number of type arguments.
+    fn refuse_type_arguments(&mut self, n: NodeId, written: usize, want: usize, message: &str) {
+        let count = |k| crate::decls::counted(k, "type argument");
+        self.refuse_compared("LANG-12", n, count(written), count(want), message);
+    }
+    /// LANG-3 for a literal that its type does not take: the literal as written, with
+    /// the `-` it is directly under, against the type.
+    fn refuse_literal(&mut self, n: NodeId, negate: bool, ty: String, message: String) {
+        self.refuse_literal_as("LANG-3", n, negate, ty, message);
+    }
+    fn refuse_literal_as(
+        &mut self,
+        rule: &str,
+        n: NodeId,
+        negate: bool,
+        ty: String,
+        message: String,
+    ) {
+        let written = format!("{}{}", if negate { "-" } else { "" }, self.token_text(n));
+        self.refuse_compared(rule, n, written, ty, message);
+    }
+    fn push_refusal(&mut self, r: Refusal) {
+        crate::cost_scope!("phase", "diagnostics/gaps");
         self.out.refusals.push(r);
         self.halt();
     }
@@ -1371,8 +1447,9 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             && !mentions_error(&self.t, t)
             && !mentions_error(&self.t, w.ty)
         {
-            let (a, b) = (self.name(w.ty), self.name(t));
-            self.refuse("LANG-11", n, format!("expected `{a}`, found `{b}`"));
+            let (a, b) = (self.shown(w.ty), self.shown(t));
+            let message = format!("expected `{a}`, found `{b}`");
+            self.refuse_compared("LANG-11", n, b, a, message);
         }
     }
 

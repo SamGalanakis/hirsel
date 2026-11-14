@@ -1,5 +1,6 @@
 // LANG-11, LANG-15: a loop's breaks carry its one type.
-// expect: refuse LANG-11 at 6:11
+// expect: refuse LANG-11 at 7:11
+// expect: compared LANG-11 at 7:11 | u16 | u8
 fn f(c: bool) -> u8 {
   loop {
     if c { break 1u8 }

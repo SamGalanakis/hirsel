@@ -1,3 +1,4 @@
-// expect: refuse LANG-21 at 3:41
+// expect: refuse LANG-21 at 4:41
+// expect: compared LANG-21 at 4:41 | core@1/core/SeqSpan[u64] | an array, list or fixed span
 
 fn f(xs: SeqSpan[u64], i: u64) -> u64 { xs[i] }

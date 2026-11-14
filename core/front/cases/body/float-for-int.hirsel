@@ -1,3 +1,4 @@
 // LANG-3: a float token takes only a float type (Q20).
-// expect: refuse LANG-3 at 3:16
+// expect: refuse LANG-3 at 4:16
+// expect: compared LANG-3 at 4:16 | 1.5 | u8
 fn f() -> u8 { 1.5 }

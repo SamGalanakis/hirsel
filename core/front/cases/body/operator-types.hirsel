@@ -1,6 +1,8 @@
 // LANG-21: the spec's `+` on bool, and unary `-` on an unsigned type (Q11); each at its
 // operator.
-// expect: refuse LANG-21 at 5:36
-// expect: refuse LANG-21 at 6:24
+// expect: refuse LANG-21 at 7:36
+// expect: refuse LANG-21 at 8:24
+// expect: compared LANG-21 at 7:36 | bool | an operand type of `+`
+// expect: compared LANG-21 at 8:24 | u8 | an operand type of `-`
 fn f(a: bool, b: bool) -> bool { a + b }
 fn uneg(x: u8) -> u8 { -x }

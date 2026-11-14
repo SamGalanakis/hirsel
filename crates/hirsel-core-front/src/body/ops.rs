@@ -51,7 +51,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             "copy" => {
                 let (t, v) = self.expr(e, None);
                 if !copyable(&self.p.decls, &self.t, t, &self.params) {
-                    let a = self.name(t);
+                    let a = self.shown(t);
                     self.refuse("OWN-6", n, format!("`{a}` is not plain"));
                 }
                 (t, v)
@@ -117,11 +117,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if t == ERROR || t == NEVER {
             return (t, None);
         }
-        let (op, a) = (self.token_text(n), self.name(t));
-        self.refuse_at(
+        let (op, a) = (self.token_text(n), self.shown(t));
+        let message = format!("`{op}` does not apply to `{a}`");
+        self.refuse_compared_at(
             "LANG-21",
             self.op_span(n),
-            format!("`{op}` does not apply to `{a}`"),
+            a,
+            format!("an operand type of `{op}`"),
+            message,
         );
         (ERROR, None)
     }
@@ -211,9 +214,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     ORDERED
                 };
                 if !self.comparison_allowed(t, need == ORDERED) {
-                    let a = self.name(t);
+                    let a = self.shown(t);
                     let b = if need == KEY { "key" } else { "ordered" };
-                    self.refuse("LANG-21", n, format!("`{a}` is not {b}"));
+                    let message = format!("`{a}` is not {b}");
+                    self.refuse_compared("LANG-21", n, a, b, message);
                     return (BOOL, None);
                 }
                 let cop = match op {
@@ -381,8 +385,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // still the operator's refusal, so the right is not coerced to it.
         let (rt, rv) = self.operand(r, (t != ERROR).then(|| expect(t)).flatten());
         if rt != t && ![NEVER, ERROR].contains(&rt) && t != ERROR {
-            let (op, a, b) = (self.token_text(n), self.name(t), self.name(rt));
-            self.refuse_at("LANG-21", self.op_span(n), format!("`{a}` {op} `{b}`"));
+            let (op, a, b) = (self.token_text(n), self.shown(t), self.shown(rt));
+            let message = format!("`{a}` {op} `{b}`");
+            self.refuse_compared_at("LANG-21", self.op_span(n), b, a, message);
             return None;
         }
         rv

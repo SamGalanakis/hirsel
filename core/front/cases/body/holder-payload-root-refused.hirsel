@@ -1,4 +1,5 @@
 // A payload borrow preserves its region; stripping View never retags r as s.
-// expect: refuse LANG-11 at 4:68
+// expect: refuse LANG-11 at 5:68
+// expect: compared LANG-11 at 5:68 | core@1/core/Box[core@1/core/Text in r] | View[core@1/core/Text in s]
 fn accept[in s](root:Text in s,x:View[Text in s])->u64 { 0 }
 fn reject[in r,in s](x:Box[Text in r],y:Text in s)->u64 { accept(y,x) }

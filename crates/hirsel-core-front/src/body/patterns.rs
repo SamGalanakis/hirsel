@@ -378,8 +378,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     return 0;
                 }
                 let (digits, suffix) = int_suffix(text);
-                if suffix.is_some_and(|s| scalar(s) != ty) {
-                    self.refuse("LANG-11", n, "the pattern literal has a different type");
+                if let Some(s) = suffix.filter(|&s| scalar(s) != ty) {
+                    let (a, b) = (self.shown(scalar(s)), self.shown(ty));
+                    self.refuse_compared(
+                        "LANG-11",
+                        n,
+                        a,
+                        b,
+                        "the pattern literal has a different type",
+                    );
                     return 0;
                 }
                 int_magnitude(digits)
@@ -393,7 +400,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         };
         let Some(v) = number else {
-            self.refuse("LANG-3", n, "pattern literal does not fit its type");
+            let a = self.shown(ty);
+            self.refuse_literal(
+                n,
+                negative,
+                a,
+                "pattern literal does not fit its type".to_owned(),
+            );
             return 0;
         };
         match self.pattern_domain(ty) {
@@ -405,7 +418,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 v
             }
             _ => {
-                self.refuse("LANG-3", n, "pattern literal does not fit its type");
+                let a = self.shown(ty);
+                self.refuse_literal(
+                    n,
+                    negative,
+                    a,
+                    "pattern literal does not fit its type".to_owned(),
+                );
                 0
             }
         }
@@ -1640,7 +1659,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return (ERROR, None);
         }
         let Some((d, success, error)) = self.result_parts(subject.ty) else {
-            self.refuse("LANG-18", n, "`?` consumes a Result or Option");
+            let a = self.shown(subject.ty);
+            self.refuse_compared(
+                "LANG-18",
+                n,
+                a,
+                "Result or Option",
+                "`?` consumes a Result or Option",
+            );
             return (ERROR, None);
         };
         let bound = error.filter(|&e| matches!(self.t.kind(e), TyKind::Adt(d, _) if is_core_prelude(&self.p.decls[d.index()].path, &["Capacity"])))
@@ -1655,11 +1681,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return (ERROR, None);
             };
             if d != od || error != oe {
-                self.refuse(
-                    "LANG-18",
-                    n,
-                    "`?` propagates only the identical error type, or Option to Option",
-                );
+                let (a, b) = (self.shown(subject.ty), self.shown(self.fd.result));
+                let message = "`?` propagates only the identical error type, or Option to Option";
+                self.refuse_compared("LANG-18", n, a, b, message);
                 return (success, None);
             }
         }

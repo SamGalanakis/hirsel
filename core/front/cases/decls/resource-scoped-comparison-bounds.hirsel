@@ -1,8 +1,12 @@
 // SEM-7 and OWN-4: resources and scoped nominal types have neither comparison bound.
-// expect: refuse OWN-4 at 6:15
-// expect: refuse OWN-4 at 7:15
-// expect: refuse OWN-4 at 8:13
-// expect: refuse OWN-4 at 9:13
+// expect: refuse OWN-4 at 10:15
+// expect: refuse OWN-4 at 11:15
+// expect: refuse OWN-4 at 12:13
+// expect: refuse OWN-4 at 13:13
+// expect: compared OWN-4 at 10:15 | key | resource type without shareable + key + ordered
+// expect: compared OWN-4 at 11:15 | ordered | resource type without shareable + key + ordered
+// expect: compared OWN-4 at 12:13 | key | scoped type without shareable + send + key + ordered
+// expect: compared OWN-4 at 13:13 | ordered | scoped type without shareable + send + key + ordered
 resource type R:key { n:u64 }
 resource type O:ordered { n:u64 }
 scoped type S:key { n:u64 }

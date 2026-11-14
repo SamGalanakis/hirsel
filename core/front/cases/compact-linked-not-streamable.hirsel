@@ -1,4 +1,5 @@
-// expect: refuse LANG-12 at 5:37
+// expect: refuse LANG-12 at 6:37
+// expect: compared LANG-12 at 6:37 | core@1/core/SeqSpan[app@1/main/Linked] in r | streamable
 // MEM-12: a link behind a sequence header still prevents streaming.
 @compact(u32) stable type Linked = Leaf(u8) | Next(Link[Linked])
 type Stream[T: streamable] {}

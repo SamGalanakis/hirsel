@@ -1,4 +1,5 @@
-// expect: refuse MEM-12 at 4:41
+// expect: refuse MEM-12 at 5:41
+// expect: compared MEM-12 at 5:41 | app@1/main/Plain | packed
 // MEM-12: a plain record that holds a callable is not packed.
 type Plain { callback: fn() -> u64 }
 type Rejected[in r] { elements: SeqSpan[Plain] in r }

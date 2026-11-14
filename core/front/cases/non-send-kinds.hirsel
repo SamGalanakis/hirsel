@@ -1,5 +1,7 @@
-// expect: refuse OWN-4 at 4:13
-// expect: refuse OWN-4 at 5:13
+// expect: refuse OWN-4 at 6:13
+// expect: refuse OWN-4 at 7:13
+// expect: compared OWN-4 at 6:13 | send | stable type without shareable + send
+// expect: compared OWN-4 at 7:13 | send | scoped type without shareable + send + key + ordered
 // OWN-4/CONC-2: stable and scoped values cannot promise send, even with plain fields.
 stable type Stable: send { n: u64 }
 scoped type Scoped: send { n: u64 }

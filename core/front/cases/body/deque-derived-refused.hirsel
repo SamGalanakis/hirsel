@@ -1,7 +1,10 @@
 // Deque exposes no key or ordered bound, so no structural comparison is admitted.
-// expect: refuse LANG-21 at 5:50
-// expect: refuse LANG-21 at 6:50
-// expect: refuse LANG-12 at 7:18
+// expect: refuse LANG-21 at 8:50
+// expect: refuse LANG-21 at 9:50
+// expect: refuse LANG-12 at 10:18
+// expect: compared LANG-12 at 10:18 | core@1/deque/Deque[u64] | key
+// expect: compared LANG-21 at 8:50 | core@1/deque/Deque[u64] | key
+// expect: compared LANG-21 at 9:50 | core@1/deque/Deque[u64] | ordered
 fn equal(a: Deque[u64], b: Deque[u64]) -> bool { a == b }
 fn order(a: Deque[u64], b: Deque[u64]) -> bool { a < b }
 fn as_key(m: Map[Deque[u64], u64]) {}

@@ -50,6 +50,11 @@ pub fn bound_bit(name: &str) -> u16 {
         _ => ORDERED,
     }
 }
+/// A count with its unit as a compared fact (PROG-7): `1 type argument`, `2 arguments`.
+pub(crate) fn counted(k: usize, unit: &str) -> String {
+    format!("{k} {unit}{}", if k == 1 { "" } else { "s" })
+}
+
 pub fn bound_names(b: u16) -> String {
     let names = [
         "plain",
@@ -963,11 +968,17 @@ impl Program<'_> {
             NodeKind::TypeArguments if matches!(self.target(at, children[0]), Some(Target::Builtin(name)) if self.index.symbols.text(*name) == "Inline") =>
             {
                 if children.len() != 3 {
-                    self.refusals.push(refusal(
-                        "LANG-12",
-                        self.site(at, n),
-                        "Inline takes an element type and a literal length",
-                    ));
+                    self.refusals.push(
+                        refusal(
+                            "LANG-12",
+                            self.site(at, n),
+                            "Inline takes an element type and a literal length",
+                        )
+                        .with_comparison(
+                            counted(children.len() - 1, "type argument"),
+                            counted(2, "type argument"),
+                        ),
+                    );
                     return ERROR;
                 }
                 let element = self.lower_ty_result(at, children[1], generics, scoped_roots);
@@ -1156,15 +1167,21 @@ impl Program<'_> {
         };
         let generic_count = self.decls[decl.index()].generics.len();
         if args.len() != generic_count {
-            self.refusals.push(refusal(
-                "LANG-12",
-                site,
-                format!(
-                    "`{}` takes {generic_count} type arguments, {} written",
-                    self.decls[decl.index()].path.0.name,
-                    args.len()
+            self.refusals.push(
+                refusal(
+                    "LANG-12",
+                    site,
+                    format!(
+                        "`{}` takes {generic_count} type arguments, {} written",
+                        self.decls[decl.index()].path.0.name,
+                        args.len()
+                    ),
+                )
+                .with_comparison(
+                    counted(args.len(), "type argument"),
+                    counted(generic_count, "type argument"),
                 ),
-            ));
+            );
             return ERROR;
         }
         let arg_tys: Vec<TyId> = args.iter().map(|a| a.0).collect();
@@ -1186,11 +1203,10 @@ impl Program<'_> {
                     continue;
                 }
                 if matches!(self.types.kind(*t), TyKind::Region(_)) {
-                    self.refusals.push(refusal(
-                        "LANG-12",
-                        *s,
-                        "a type parameter takes a type, not a region",
-                    ));
+                    self.refusals.push(
+                        refusal("LANG-12", *s, "a type parameter takes a type, not a region")
+                            .with_comparison("region", "type"),
+                    );
                     continue;
                 }
                 let need = d.generics[i].bounds;
@@ -1264,8 +1280,12 @@ impl Program<'_> {
 
     fn no_args(&mut self, t: TyId, args: &[(TyId, Site)], site: &Site) -> TyId {
         if !args.is_empty() {
-            self.refusals
-                .push(refusal("LANG-12", *site, "this type takes no arguments"));
+            self.refusals.push(
+                refusal("LANG-12", *site, "this type takes no arguments").with_comparison(
+                    counted(args.len(), "type argument"),
+                    counted(0, "type argument"),
+                ),
+            );
             return ERROR;
         }
         t
@@ -1521,11 +1541,11 @@ impl Program<'_> {
                 } => {
                     let have = has_bounds(&self.decls, &self.types, ty, &params);
                     if have & bounds != bounds {
-                        self.refusals.push(refusal(
-                            rule,
-                            site,
-                            format!("type argument is not {}", bound_names(bounds & !have)),
-                        ));
+                        let b = bound_names(bounds & !have);
+                        self.refusals.push(
+                            refusal(rule, site, format!("type argument is not {b}"))
+                                .with_comparison(canonical(&self.decls, &self.types, ty), b),
+                        );
                     }
                 }
                 Pending::Root {
@@ -1948,14 +1968,21 @@ impl Program<'_> {
                     0
                 };
             if declared & forbidden != 0 {
-                out.push(refusal(
-                    "OWN-4",
-                    decl.site,
-                    format!(
-                        "this representation cannot be {}",
-                        bound_names(declared & forbidden)
-                    ),
-                ));
+                let b = bound_names(declared & forbidden);
+                let repr = match decl.repr {
+                    Repr::Own => "own",
+                    Repr::Stable => "stable",
+                    Repr::Resource => "resource",
+                    Repr::Scoped => "scoped",
+                };
+                out.push(
+                    refusal(
+                        "OWN-4",
+                        decl.site,
+                        format!("this representation cannot be {b}"),
+                    )
+                    .with_comparison(b, format!("{repr} type without {}", bound_names(forbidden))),
+                );
             }
             if decl.compact.is_some() && decl.repr != Repr::Stable {
                 out.push(refusal(
@@ -1996,15 +2023,19 @@ impl Program<'_> {
                 let have = has_bounds(&self.decls, &self.types, f.ty, &params);
                 let missing = declared & !have;
                 if missing != 0 {
-                    out.push(refusal(
-                        if missing & SEND != 0 {
-                            "CONC-2"
-                        } else {
-                            "OWN-4"
-                        },
-                        f.site,
-                        format!("field `{}` is not {}", f.name, bound_names(missing)),
-                    ));
+                    let b = bound_names(missing);
+                    out.push(
+                        refusal(
+                            if missing & SEND != 0 {
+                                "CONC-2"
+                            } else {
+                                "OWN-4"
+                            },
+                            f.site,
+                            format!("field `{}` is not {b}", f.name),
+                        )
+                        .with_comparison(canonical(&self.decls, &self.types, f.ty), b),
+                    );
                 }
             }
             self.refusals.extend(out);
@@ -2536,7 +2567,19 @@ pub(crate) fn path_text(item: hirsel_core_syntax::Item<'_>, n: NodeId) -> String
 pub fn canonical(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId) -> String {
     crate::cost_scope!("query", "canonical type name");
     let mut s = String::new();
-    write_canonical::<false>(decls, t, ty, &mut s);
+    write_canonical::<false>(decls, t, ty, None, &mut s);
+    s
+}
+/// A type as a diagnostic shows it: the canonical text with each region root named by
+/// `root` (`Doc in other`), since the canonical text writes every root as `in r`.
+pub(crate) fn shown(
+    decls: &crate::Rows<TypeDecl>,
+    t: &impl TyRead,
+    ty: TyId,
+    root: &dyn Fn(&Root, &mut String),
+) -> String {
+    let mut s = String::new();
+    write_canonical::<false>(decls, t, ty, Some(root), &mut s);
     s
 }
 /// Layout identity erases lifetime anchors at every depth. Nested views remain
@@ -2560,13 +2603,14 @@ pub(crate) fn uncached_layout_name(
     ty: TyId,
 ) -> String {
     let mut s = String::new();
-    write_canonical::<true>(decls, t, ty, &mut s);
+    write_canonical::<true>(decls, t, ty, None, &mut s);
     s
 }
 fn write_canonical<const LAYOUT: bool>(
     decls: &crate::Rows<TypeDecl>,
     t: &impl TyRead,
     ty: TyId,
+    root: Option<&dyn Fn(&Root, &mut String)>,
     s: &mut String,
 ) {
     use std::fmt::Write;
@@ -2575,7 +2619,7 @@ fn write_canonical<const LAYOUT: bool>(
             if i > 0 {
                 s.push_str(", ");
             }
-            write_canonical::<LAYOUT>(decls, t, x, s);
+            write_canonical::<LAYOUT>(decls, t, x, root, s);
         }
     };
     match t.kind(ty) {
@@ -2599,22 +2643,25 @@ fn write_canonical<const LAYOUT: bool>(
         }
         // A root is a checker fact: every root of a type shares its layout row and its
         // instances, so a caller's local region and a callee's parameter name one row.
-        TyKind::Region(_) => s.push_str("in r"),
+        TyKind::Region(r) => match root {
+            Some(name) => name(r, s),
+            None => s.push_str("in r"),
+        },
         TyKind::Anchored(x, r) => {
-            write_canonical::<LAYOUT>(decls, t, *x, s);
+            write_canonical::<LAYOUT>(decls, t, *x, root, s);
             if !LAYOUT {
                 s.push(' ');
-                write_canonical::<LAYOUT>(decls, t, *r, s);
+                write_canonical::<LAYOUT>(decls, t, *r, root, s);
             }
         }
         TyKind::Array(x, n) => {
             s.push_str("Inline[");
-            write_canonical::<LAYOUT>(decls, t, *x, s);
+            write_canonical::<LAYOUT>(decls, t, *x, root, s);
             let _ = write!(s, ", {n}]");
         }
         TyKind::View(x) => {
             s.push_str("View[");
-            write_canonical::<LAYOUT>(decls, t, *x, s);
+            write_canonical::<LAYOUT>(decls, t, *x, root, s);
             s.push(']');
         }
         TyKind::Param(i) => {
@@ -2637,10 +2684,10 @@ fn write_canonical<const LAYOUT: bool>(
                     Mode::Take => "take ",
                     Mode::Bytes => "bytes ",
                 });
-                write_canonical::<LAYOUT>(decls, t, *p, s);
+                write_canonical::<LAYOUT>(decls, t, *p, root, s);
             }
             s.push_str(") -> ");
-            write_canonical::<LAYOUT>(decls, t, *r, s);
+            write_canonical::<LAYOUT>(decls, t, *r, root, s);
             if *w {
                 s.push_str(" waits");
             }

@@ -1,6 +1,7 @@
 // MEM-12: FixedSpan[T] needs a plain T. A non-plain element is refused at its type, and
 // a body that iterates it stops there: no gap follows the refusal.
-// expect: refuse MEM-12 at 5:31
+// expect: refuse MEM-12 at 6:31
+// expect: compared MEM-12 at 6:31 | app@1/main/P | plain
 type P { s: String }
 fn f(r: Region, xs: FixedSpan[P] in r) -> u64 { for x in xs { let _ = x }
   0 }

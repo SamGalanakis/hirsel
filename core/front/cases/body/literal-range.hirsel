@@ -1,8 +1,11 @@
 // LANG-3: a literal that does not fit its type, whether expected or suffixed (Q12); a
 // signed MIN's magnitude only under negation.
-// expect: refuse LANG-3 at 6:16
-// expect: refuse LANG-3 at 7:16
 // expect: refuse LANG-3 at 9:16
+// expect: refuse LANG-3 at 10:16
+// expect: refuse LANG-3 at 12:16
+// expect: compared LANG-3 at 9:16 | 300 | u8
+// expect: compared LANG-3 at 10:16 | 300u8 | u8
+// expect: compared LANG-3 at 12:16 | 128 | i8
 fn f() -> u8 { 300 }
 fn g() -> u8 { 300u8 }
 fn h() -> i8 { -128 }

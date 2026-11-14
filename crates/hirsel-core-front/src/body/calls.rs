@@ -124,16 +124,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return (ERROR, None);
             }
             let k = g.params.len();
-            self.refuse_at(
-                "LANG-11",
-                self.close_brace(n),
-                format!("expected {k} arguments"),
-            );
+            let message = format!("expected {k} arguments");
+            self.refuse_arity_at(self.close_brace(n), args.len(), k, message);
             return (ERROR, None);
         }
         if args.len() > g.params.len() {
             let k = g.params.len();
-            self.refuse("LANG-11", args[k], format!("expected {k} arguments"));
+            let message = format!("expected {k} arguments");
+            self.refuse_arity_at(self.span(args[k]), args.len(), k, message);
             return (ERROR, None);
         }
         if g.waits {
@@ -270,14 +268,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         _ => at,
                     };
                     if !self.unify_rooted(pt, inferred, found, roots) {
-                        self.refuse(
-                            "LANG-11",
-                            e,
-                            if self.holder_payload(inferred).is_some()
-                                || self.result_parts(inferred).is_some_and(|(_,ok,_)|self.holder_payload(ok).is_some()) {
-                                "a type parameter is determined twice differently; bind the holder with `let` first"
-                            } else { "a type parameter is determined twice differently" },
-                        );
+                        let before = self.partial_rooted(pt, found, roots);
+                        let message = if self.holder_payload(inferred).is_some()
+                            || self
+                                .result_parts(inferred)
+                                .is_some_and(|(_, ok, _)| self.holder_payload(ok).is_some())
+                        {
+                            "a type parameter is determined twice differently; bind the holder with `let` first"
+                        } else {
+                            "a type parameter is determined twice differently"
+                        };
+                        self.refuse_twice(e, inferred, before, message);
                     } else if let Some(t) = self.known_rooted(pt, found, roots) {
                         let view = g.params[i].mode == Mode::View
                             && !matches!(self.t.kind(t), TyKind::View(_));
@@ -628,9 +629,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             None => {
                 if !self.unify_rooted(pt, at, found, roots) {
-                    self.refuse(
-                        "LANG-11",
+                    let before = self.partial_rooted(pt, found, roots);
+                    self.refuse_twice(
                         e,
+                        at,
+                        before,
                         "a type parameter is determined twice differently",
                     );
                 }
@@ -766,7 +769,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let g = &p.fns[f].generics[i];
             let missing = g.bounds & !has_bounds(&p.decls, &self.t, t, &self.params);
             if missing != 0 {
-                let (a, b) = (self.name(t), crate::decls::bound_names(missing));
+                let (a, b) = (self.shown(t), crate::decls::bound_names(missing));
                 let transfer = p.fns[f].path.package_is("core", "1")
                     && matches!(p.fns[f].path.0.modules.as_slice(), [module] if module == "task" || module == "channel");
                 let rule = if transfer && missing & crate::decls::SEND != 0 {
@@ -774,7 +777,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 } else {
                     "LANG-12"
                 };
-                self.refuse(rule, n, format!("`{a}` is not {b}"));
+                let message = format!("`{a}` is not {b}");
+                self.refuse_compared(rule, n, a, b, message);
                 return;
             }
         }
@@ -1253,7 +1257,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             "widen" => {
                 let (ts, b) = int_of(&self.t, target)?;
                 if !((signed == ts && width <= b) || (!signed && ts && width < b)) {
-                    let (x, y) = (self.name(input), self.name(target));
+                    let (x, y) = (self.shown(input), self.shown(target));
                     self.refuse("SEM-1", n, format!("not every `{x}` fits `{y}`"));
                     return None;
                 }
@@ -1261,7 +1265,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             "truncate" if int_of(&self.t, target)?.1 <= width => ConvertMode::Truncate,
             "truncate" => {
-                let (x, y) = (self.name(input), self.name(target));
+                let (x, y) = (self.shown(input), self.shown(target));
                 self.refuse("SEM-1", n, format!("`{y}` is wider than `{x}`"));
                 return None;
             }

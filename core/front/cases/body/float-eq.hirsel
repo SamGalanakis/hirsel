@@ -1,3 +1,4 @@
 // LANG-21 with SEM-2: floats are not key, so `==` on them is refused at the operator.
-// expect: refuse LANG-21 at 3:32
+// expect: refuse LANG-21 at 4:32
+// expect: compared LANG-21 at 4:32 | f64 | key
 fn e(x: f64, y: f64) -> bool { x == y }

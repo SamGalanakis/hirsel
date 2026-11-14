@@ -1,4 +1,5 @@
-// expect: refuse OWN-4 at 4:46
+// expect: refuse OWN-4 at 5:46
+// expect: compared OWN-4 at 5:46 | app@1/main/File | shareable
 // OWN-4's example, with a resource of this program: a resource field is not shareable.
 resource type File { fd: u64 }
 type Tree: shareable { kids: List[Rc[Tree]], log: File }

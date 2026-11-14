@@ -583,13 +583,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 };
                 // LANG-3: an integer token takes only an integer type; a suffix names it.
                 if suffix.is_none() && matches!(s, Scalar::F32 | Scalar::F64) {
-                    let a = self.name(scalar(s));
-                    self.refuse("LANG-3", n, format!("an integer literal is not `{a}`"));
+                    let a = self.shown(scalar(s));
+                    let message = format!("an integer literal is not `{a}`");
+                    self.refuse_literal(n, negate, a, message);
                     return (ERROR, None);
                 }
                 let Some(m) = int_magnitude(digits) else {
-                    let a = self.name(scalar(s));
-                    self.refuse("LANG-3", n, format!("the literal does not fit `{a}`"));
+                    let a = self.shown(scalar(s));
+                    let message = format!("the literal does not fit `{a}`");
+                    self.refuse_literal(n, negate, a, message);
                     return (ERROR, None);
                 };
                 if matches!(s, Scalar::F32 | Scalar::F64) {
@@ -603,8 +605,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         (1u128 << w) - 1
                     };
                     if m > limit {
-                        let a = self.name(scalar(s));
-                        self.refuse("LANG-3", n, format!("the literal does not fit `{a}`"));
+                        let a = self.shown(scalar(s));
+                        let message = format!("the literal does not fit `{a}`");
+                        self.refuse_literal(n, negate, a, message);
                         return (ERROR, None);
                     }
                     let v = if negate {
@@ -622,8 +625,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 };
                 if !matches!(s, Scalar::F32 | Scalar::F64) {
                     // LANG-3: a float token takes only a float type.
-                    let a = self.name(scalar(s));
-                    self.refuse("LANG-3", n, format!("a fractional literal is not `{a}`"));
+                    let a = self.shown(scalar(s));
+                    let message = format!("a fractional literal is not `{a}`");
+                    self.refuse_literal(n, negate, a, message);
                     return (ERROR, None);
                 }
                 let digits: String = digits.chars().filter(|&c| c != '_').collect();
@@ -681,13 +685,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         Num::Float(d.parse::<f64>().ok()?)
                     }
                     (Some(TokenKind::Integer), None) => {
-                        let a = self.name(scalar(s));
-                        self.refuse("LANG-3", n, format!("an integer literal is not `{a}`"));
+                        let a = self.shown(scalar(s));
+                        let message = format!("an integer literal is not `{a}`");
+                        self.refuse_literal(n, false, a, message);
                         return None;
                     }
                     _ => {
-                        let a = self.name(scalar(s));
-                        self.refuse("LANG-3", n, format!("a fractional literal is not `{a}`"));
+                        let a = self.shown(scalar(s));
+                        let message = format!("a fractional literal is not `{a}`");
+                        self.refuse_literal(n, false, a, message);
                         return None;
                     }
                 }
@@ -739,22 +745,35 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     }
                     (Num::Int(a), Num::Int(b)) => {
                         let (signed, w) = int.unwrap_or((false, 64));
-                        let bad = |cx: &mut Self, why: &str| {
-                            cx.refuse("LANG-3", n, why.to_owned());
+                        let bad = |cx: &mut Self, why: &str, found: String, required: String| {
+                            cx.refuse_compared("LANG-3", n, found, required, why.to_owned());
                             None
                         };
                         Num::Int(match op {
                             "+" => a.saturating_add(b),
                             "-" => a.saturating_sub(b),
                             "*" => a.saturating_mul(b),
-                            "/" | "%" if b == 0 => return bad(self, "division by zero"),
+                            "/" | "%" if b == 0 => {
+                                return bad(
+                                    self,
+                                    "division by zero",
+                                    "0".into(),
+                                    "a nonzero divisor".into(),
+                                );
+                            }
                             "/" => a / b,
                             "%" => a % b,
                             "&" => a & b,
                             "|" => a | b,
                             "^" => a ^ b,
                             _ if b < 0 || b >= i128::from(w) => {
-                                return bad(self, "shift count out of range");
+                                let required = format!("a shift count from 0 to {}", w - 1);
+                                return bad(
+                                    self,
+                                    "shift count out of range",
+                                    b.to_string(),
+                                    required,
+                                );
                             }
                             "<<" => wrap(a << b, signed, w),
                             _ => a >> b,
@@ -776,8 +795,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 (0, (1i128 << w) - 1)
             };
             if v < lo || v > hi {
-                let a = self.name(scalar(s));
-                self.refuse("LANG-3", n, format!("the value does not fit `{a}`"));
+                let a = self.shown(scalar(s));
+                let message = format!("the value does not fit `{a}`");
+                self.refuse_compared("LANG-3", n, v.to_string(), a, message);
                 return None;
             }
         }
@@ -791,8 +811,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         match want {
             Some(w) if w.ty == ERROR => {}
             Some(w) => {
-                let a = self.name(w.ty);
-                self.refuse("LANG-11", n, format!("expected `{a}`, found a number"));
+                let a = self.shown(w.ty);
+                let message = format!("expected `{a}`, found a number");
+                self.refuse_literal_as("LANG-11", n, false, a, message);
             }
             None => self.refuse("LANG-11", n, "an unsuffixed number needs an expected type"),
         }
@@ -943,8 +964,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let Some(d) = expected else {
             return match want.filter(|w| w.payload == 0) {
                 Some(w) if w.ty != HOLE && w.ty != ERROR => {
-                    let (a, b) = (self.name(w.ty), p.index.symbols.text(name));
-                    self.refuse("LANG-11", n, format!("expected `{a}`, found variant `{b}`"));
+                    let (a, b) = (self.shown(w.ty), p.index.symbols.text(name));
+                    let message = format!("expected `{a}`, found variant `{b}`");
+                    self.refuse_compared("LANG-11", n, b, a, message);
                     (ERROR, None)
                 }
                 Some(w) if w.ty == ERROR => {
@@ -1010,12 +1032,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             _ => None,
         };
         let Some((case, fields, labelled)) = found else {
-            let a = self.name(want.map_or(ERROR, |w| w.ty));
-            self.refuse(
-                "LANG-11",
-                n,
-                format!("expected `{a}`, found variant `{text}`"),
-            );
+            let a = self.shown(want.map_or(ERROR, |w| w.ty));
+            let message = format!("expected `{a}`, found variant `{text}`");
+            self.refuse_compared("LANG-11", n, text, a, message);
             return (ERROR, None);
         };
         self.construct(n, d, case, fields, labelled, args, want)
@@ -1075,15 +1094,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         let k = fields.len();
         if args.len() < k {
-            self.refuse_at(
-                "LANG-11",
-                self.close_brace(n),
-                format!("expected {k} arguments"),
-            );
+            let message = format!("expected {k} arguments");
+            self.refuse_arity_at(self.close_brace(n), args.len(), k, message);
             return (ERROR, None);
         }
         if args.len() > k {
-            self.refuse("LANG-11", args[k], format!("expected {k} arguments"));
+            let message = format!("expected {k} arguments");
+            self.refuse_arity_at(self.span(args[k]), args.len(), k, message);
             return (ERROR, None);
         }
         let mut found: Vec<Option<TyId>> = vec![None; decl.generics.len()];
@@ -1171,9 +1188,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         self.expr(e, None)
                     };
                     if !self.unify(ftys[i], at, &mut found) {
-                        self.refuse(
-                            "LANG-11",
+                        let before = self.partial_rooted(ftys[i], &found, &[]);
+                        self.refuse_twice(
                             e,
+                            at,
+                            before,
                             "a type parameter is determined twice differently",
                         );
                     } else if let Some(t) = self.known(ftys[i], &found) {

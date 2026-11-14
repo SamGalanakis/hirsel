@@ -1,4 +1,5 @@
 // CONC-1, CONC-2 (spec attack 4, W1): a Task handle is not send, so a send record
 // may not hold one; refused at the field.
-// expect: refuse CONC-2 at 4:23
+// expect: refuse CONC-2 at 5:23
+// expect: compared CONC-2 at 5:23 | core@1/core/Task[u64] | send
 type Transfer: send { handle: Task[u64] }

@@ -1,4 +1,5 @@
 // LANG-11: the spec's LANG-8 pair as it now is (Q22): the body's value is checked against
 // the declared unit result, refused at the innermost expression.
-// expect: refuse LANG-11 at 4:20
+// expect: refuse LANG-11 at 5:20
+// expect: compared LANG-11 at 5:20 | u64 | ()
 fn twice(x: u64) { x * 2 }

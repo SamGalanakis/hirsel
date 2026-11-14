@@ -192,18 +192,22 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         };
         if args.len() < scratch.params.len() {
-            self.refuse_at(
-                "LANG-11",
+            let message = "a callable needs one argument per parameter".to_owned();
+            self.refuse_arity_at(
                 self.close_brace(n),
-                "a callable needs one argument per parameter",
+                args.len(),
+                scratch.params.len(),
+                message,
             );
             return (ERROR, None);
         }
         if args.len() > scratch.params.len() {
-            self.refuse(
-                "LANG-11",
-                args[scratch.params.len()],
-                "extra callable argument",
+            let at = self.span(args[scratch.params.len()]);
+            self.refuse_arity_at(
+                at,
+                args.len(),
+                scratch.params.len(),
+                "extra callable argument".to_owned(),
             );
             return (ERROR, None);
         }

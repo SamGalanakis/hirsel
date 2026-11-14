@@ -1,6 +1,7 @@
 // A resource literal is `Result[R, (Capacity, F)]`, F its one field (T1.2, LANG-14):
 // it goes where that result is expected and is refused where the bare resource is.
-// expect: refuse LANG-11 at 6:18
+// expect: refuse LANG-11 at 7:18
+// expect: compared LANG-11 at 7:18 | core@1/core/Result[app@1/main/R, (core@1/core/Capacity, u64)] | app@1/main/R
 resource type R { id: u64 }
 fn hold(take r: Result[R, (Capacity, u64)]) -> u64 { 0 }
 fn bare() -> R { R(id: 1) }

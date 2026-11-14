@@ -1,3 +1,4 @@
 // LANG-21: `%` applies to one integer type only; refused at the operator (Q11).
-// expect: refuse LANG-21 at 3:33
+// expect: refuse LANG-21 at 4:33
+// expect: compared LANG-21 at 4:33 | f64 | an operand type of `%`
 fn r(x: f64, y: f64) -> f64 { x % y }

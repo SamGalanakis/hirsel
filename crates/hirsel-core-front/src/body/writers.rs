@@ -567,8 +567,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             };
             let k = fields.len();
             if args.len() != k {
-                let at = args.get(k).copied().unwrap_or(a);
-                self.refuse("LANG-11", at, format!("expected {k} arguments"));
+                let at = self.span(args.get(k).copied().unwrap_or(a));
+                self.refuse_arity_at(at, args.len(), k, format!("expected {k} arguments"));
                 return None;
             }
             let ftys = self.compact_fields(ty, case)?;
@@ -784,7 +784,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return (ERROR, None);
         }
         if args.len() != 2 {
-            self.refuse("LANG-11", n, "expected 2 arguments");
+            self.refuse_arity_at(
+                self.span(n),
+                args.len(),
+                2,
+                "expected 2 arguments".to_owned(),
+            );
             return (ERROR, None);
         }
         let mut found = vec![None; g.generics.len()];
@@ -1235,8 +1240,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) -> Option<Vec<NodeId>> {
         let k = fields.len();
         if args.len() != k {
-            let at = args.get(k).copied().unwrap_or(a);
-            self.refuse("LANG-11", at, format!("expected {k} arguments"));
+            let at = self.span(args.get(k).copied().unwrap_or(a));
+            self.refuse_arity_at(at, args.len(), k, format!("expected {k} arguments"));
             return None;
         }
         let mut out = Vec::with_capacity(k);
@@ -1396,7 +1401,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     ) -> (TyId, Option<ValueId>) {
         let g = &self.p.fns[f];
         if args.len() != 2 {
-            self.refuse("LANG-11", n, "expected 2 arguments");
+            self.refuse_arity_at(
+                self.span(n),
+                args.len(),
+                2,
+                "expected 2 arguments".to_owned(),
+            );
             return (ERROR, None);
         }
         let mut found = vec![None; g.generics.len()];

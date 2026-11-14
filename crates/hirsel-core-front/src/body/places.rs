@@ -743,7 +743,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             TyKind::Error => Err(()),
             _ => {
-                self.refuse("LANG-21", n, "this type has no index operation");
+                let a = self.shown(collection);
+                let required = "an array, list or fixed span";
+                self.refuse_compared(
+                    "LANG-21",
+                    n,
+                    a,
+                    required,
+                    "this type has no index operation",
+                );
                 Err(())
             }
         }
@@ -962,11 +970,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if let Some((_, _, required)) = expected
             && count != required
         {
-            self.refuse(
-                "LANG-11",
-                n,
-                "the array length differs from its expected type",
-            );
+            let elements = |k: u64| crate::decls::counted(k as usize, "element");
+            let message = "the array length differs from its expected type";
+            self.refuse_compared("LANG-11", n, elements(count), elements(required), message);
             return (ERROR, None);
         }
         if children.is_empty() && expected.is_none() {

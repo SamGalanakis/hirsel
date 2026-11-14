@@ -1,5 +1,6 @@
 // OWN-15 forbids take through a holder for plain and own payloads alike.
 // LANG-11: a view conversion never retries the nested call's type inference.
+// expect: compared LANG-11 at 9:37 | core@1/core/Result[core@1/core/Box[app@1/main/N], (core@1/core/Capacity, app@1/main/N)] | core@1/core/Result[app@1/main/N, _]
 
 fn plain(take b:Box[Option[u64]])->u64 { match b {Some(take x)=>x,None=>0} }
 fn k(take b:Box[Option[String]])->String { match b {Some(take s)=>s,None=>string.new()} }
@@ -9,11 +10,11 @@ fn nested()->i64 { ev(result.unwrap(box.new(Lit(6i64)))) }
 type P:shareable { n:u64 }
 fn bump(mut b:Box[Rc[P]]) { b.n=1u64 }
 fn rc_write(mut r:Rc[List[u64]]) { let _=list.push(mut r,1u64) }
-// expect: refuse OWN-15 at 4:56
-// expect: refuse OWN-15 at 5:58
-// expect: refuse LANG-11 at 8:37
-// expect: refuse OWN-12 at 10:29
-// expect: refuse OWN-8 at 11:52
+// expect: refuse OWN-15 at 5:56
+// expect: refuse OWN-15 at 6:58
+// expect: refuse LANG-11 at 9:37
+// expect: refuse OWN-12 at 11:29
+// expect: refuse OWN-8 at 12:52
 
 type TextP:shareable { s:String }
 fn held_field() {
@@ -23,5 +24,5 @@ fn held_field() {
  let _=rc.try_unwrap(take r)
  let _=v
 }
-// expect: refuse OWN-10 at 23:22
-// expect: cause OWN-10 at 23:22 from 22:8
+// expect: refuse OWN-10 at 24:22
+// expect: cause OWN-10 at 24:22 from 23:8

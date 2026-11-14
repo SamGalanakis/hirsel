@@ -1,10 +1,14 @@
 // SEM-7: resources and scoped types have neither `key` nor `ordered`; declaring one is
 // refused (OWN-4), and the declaration grants nothing: a field of such a type is not key,
 // and its values are not compared.
-// expect: refuse OWN-4 at 8:15
-// expect: refuse OWN-4 at 9:13
-// expect: refuse OWN-4 at 10:15
-// expect: refuse LANG-21 at 11:31
+// expect: refuse OWN-4 at 12:15
+// expect: refuse OWN-4 at 13:13
+// expect: refuse OWN-4 at 14:15
+// expect: refuse LANG-21 at 15:31
+// expect: compared LANG-21 at 15:31 | app@1/main/R | key
+// expect: compared OWN-4 at 14:15 | app@1/main/R | key
+// expect: compared OWN-4 at 12:15 | key | resource type without shareable + key + ordered
+// expect: compared OWN-4 at 13:13 | ordered | scoped type without shareable + send + key + ordered
 resource type R: key { n: u64 }
 scoped type S: ordered { n: u64 }
 type K: key { r: R }

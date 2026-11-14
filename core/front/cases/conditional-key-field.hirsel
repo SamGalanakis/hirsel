@@ -1,4 +1,5 @@
-// expect: refuse LANG-12 at 6:25
+// expect: refuse LANG-12 at 7:25
+// expect: compared LANG-12 at 7:25 | app@1/main/Item[app@1/main/Entry] | key
 // OWN-4: Item's field mentions T, so Item[Entry] is not key.
 type Entry { name: String }
 type Item[T]: key { item: T }

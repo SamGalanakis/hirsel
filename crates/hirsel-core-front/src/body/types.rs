@@ -185,11 +185,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             NodeKind::TypeArguments if matches!(self.p.target(self.at, c[0]), Some(Target::Builtin(name)) if self.p.index.symbols.text(*name) == "Inline") =>
             {
                 if c.len() != 3 {
-                    self.refuse(
-                        "LANG-12",
-                        n,
-                        "Inline takes an element type and a literal length",
-                    );
+                    let message = "Inline takes an element type and a literal length";
+                    self.refuse_type_arguments(n, c.len() - 1, 2, message);
                     return ERROR;
                 }
                 let element = self.ty_result(c[1], scoped_roots);
@@ -265,7 +262,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Some(Target::Builtin(name)) => match Scalar::from_name(p.index.symbols.text(name)) {
                 Some(s) if args.is_empty() => return scalar(s),
                 Some(_) => {
-                    self.refuse("LANG-12", path, "this type takes no type arguments");
+                    let message = "this type takes no type arguments";
+                    self.refuse_type_arguments(path, args.len(), 0, message);
                     return ERROR;
                 }
                 None => {
@@ -275,7 +273,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             },
             Some(Target::Definition(q)) if p.core_named(q, &["Never"]) => {
                 if !args.is_empty() {
-                    self.refuse("LANG-12", path, "this type takes no type arguments");
+                    let message = "this type takes no type arguments";
+                    self.refuse_type_arguments(path, args.len(), 0, message);
                     return ERROR;
                 }
                 return NEVER;
@@ -298,7 +297,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     .name;
                 return match self.fd.generics.iter().position(|g| &g.name == name) {
                     Some(_) if !args.is_empty() => {
-                        self.refuse("LANG-12", path, "a type parameter takes no type arguments");
+                        let message = "a type parameter takes no type arguments";
+                        self.refuse_type_arguments(path, args.len(), 0, message);
                         ERROR
                     }
                     Some(i) => self.t.mk(TyKind::Param(i as u32)),
@@ -316,14 +316,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let decl = &p.decls[d.index()];
         if args.len() != decl.generics.len() {
             let (name, want) = (&decl.path.0.name, decl.generics.len());
-            self.refuse(
-                "LANG-12",
-                path,
-                format!(
-                    "`{name}` takes {want} type arguments, {} written",
-                    args.len()
-                ),
+            let message = format!(
+                "`{name}` takes {want} type arguments, {} written",
+                args.len()
             );
+            self.refuse_type_arguments(path, args.len(), want, &message);
             return ERROR;
         }
         for (g, &(t, at)) in decl.generics.iter().zip(args) {
@@ -335,7 +332,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 continue;
             }
             if matches!(self.t.kind(t), TyKind::Region(_)) {
-                self.refuse("LANG-12", at, "a type parameter takes a type, not a region");
+                let message = "a type parameter takes a type, not a region";
+                self.refuse_compared("LANG-12", at, "region", "type", message);
                 return ERROR;
             }
             if !decl.structural && kind(&p.decls, &self.t, t, &self.params) == Kind::Scoped {
@@ -358,8 +356,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 } else {
                     "LANG-12"
                 };
-                let b = crate::decls::bound_names(missing);
-                self.refuse(rule, at, format!("type argument is not {b}"));
+                let (a, b) = (self.shown(t), crate::decls::bound_names(missing));
+                let message = format!("type argument is not {b}");
+                self.refuse_compared(rule, at, a, b, message);
                 return ERROR;
             }
         }

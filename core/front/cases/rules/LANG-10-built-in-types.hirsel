@@ -7,7 +7,8 @@
 // expect: run ret(4) = 4
 // expect: run inl() = 2
 // expect: run widths(1,2) = 3
-// expect: refuse LANG-11 at 14:28
+// expect: refuse LANG-11 at 15:28
+// expect: compared LANG-11 at 15:28 | u64 | Never
 fn ret(n: u64) -> u64 { let s: String = return n; 0 }
 fn from(x: Never) -> String { x }
 fn inl() -> u64 { let a: Inline[u64, 2] = [1, 2]; a[1] }

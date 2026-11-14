@@ -1,3 +1,4 @@
-// expect: refuse LANG-12 at 3:14
+// expect: refuse LANG-12 at 4:14
+// expect: compared LANG-12 at 4:14 | 2 type arguments | 1 type argument
 // LANG-12: a generic type takes exactly its parameters.
 type W { xs: List[u64, u64] }

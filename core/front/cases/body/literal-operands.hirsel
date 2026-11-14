@@ -2,10 +2,13 @@
 // with u8 from x. `1 < 2` alone has no type (LANG-11). A literal operand is evaluated
 // when checked, and one that fails is refused LANG-3 at the operation: 255 + 1 does not
 // fit u8, 1 / 0 divides by zero, and a u8 shift count of 8 is out of range.
-// expect: refuse LANG-11 at 10:18
-// expect: refuse LANG-3 at 11:27
-// expect: refuse LANG-3 at 12:16
-// expect: refuse LANG-3 at 13:17
+// expect: refuse LANG-11 at 13:18
+// expect: refuse LANG-3 at 14:27
+// expect: refuse LANG-3 at 15:16
+// expect: refuse LANG-3 at 16:17
+// expect: compared LANG-3 at 14:27 | 256 | u8
+// expect: compared LANG-3 at 15:16 | 0 | a nonzero divisor
+// expect: compared LANG-3 at 16:17 | 8 | a shift count from 0 to 7
 fn f(x: u8) -> bool { (1 + 2) < x && !(x == 7) }
 fn g() -> bool { 1 < 2 }
 fn over(x: u8) -> bool { (255 + 1) < x }

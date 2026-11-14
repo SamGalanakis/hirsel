@@ -1,10 +1,17 @@
-// expect: refuse LANG-21 at 8:29
-// expect: refuse LANG-21 at 9:33
-// expect: refuse LANG-21 at 10:38
-// expect: refuse LANG-21 at 11:21
-// expect: refuse LANG-21 at 12:33
-// expect: refuse LANG-21 at 13:41
-// expect: refuse LANG-21 at 14:24
+// expect: refuse LANG-21 at 15:29
+// expect: refuse LANG-21 at 16:33
+// expect: refuse LANG-21 at 17:38
+// expect: refuse LANG-21 at 18:21
+// expect: refuse LANG-21 at 19:33
+// expect: refuse LANG-21 at 20:41
+// expect: refuse LANG-21 at 21:24
+// expect: compared LANG-21 at 17:38 | core@1/core/Map[u64, u64] | an array, list or fixed span
+// expect: compared LANG-21 at 18:21 | core@1/core/String | an array, list or fixed span
+// expect: compared LANG-21 at 19:33 | core@1/core/SeqSpan[u64] | an array, list or fixed span
+// expect: compared LANG-21 at 20:41 | core@1/core/IndexedSpan[u64] | an array, list or fixed span
+// expect: compared LANG-21 at 21:24 | core@1/core/String | an array, list or fixed span
+// expect: compared LANG-21 at 15:29 | core@1/core/String | an array, list or fixed span
+// expect: compared LANG-21 at 16:33 | core@1/core/Map[u64, u64] | an array, list or fixed span
 fn string_read(s: String) { s[0] }
 fn map_read(m: Map[u64, u64]) { m[0] }
 fn map_write(mut m: Map[u64, u64]) { m[0] = 1 }

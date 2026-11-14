@@ -1,5 +1,6 @@
 // The result belongs to the supplied Region, not a same-position caller parameter.
-// expect: refuse LANG-11 at 7:3
+// expect: refuse LANG-11 at 8:3
+// expect: compared LANG-11 at 8:3 | core@1/core/Result[app@1/main/Doc in other, core@1/core/Capacity] | core@1/core/Result[app@1/main/Doc in r, core@1/core/Capacity]
 stable type Doc { value: u64 }
 fn parse(r: Region) -> Result[Doc in r, Capacity] { Error(Capacity(requested: 1, available: 0)) }
 fn wrong(r: Region, other: Region) -> Result[Doc in r, Capacity] {

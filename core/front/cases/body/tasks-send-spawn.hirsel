@@ -1,5 +1,6 @@
 // CONC-3's exact refused spawn. Expected result determines X before the arguments.
-// expect: refuse CONC-2 at 5:3
+// expect: refuse CONC-2 at 6:3
+// expect: compared CONC-2 at 6:3 | core@1/core/List[core@1/core/Rc[app@1/main/Node]] | send
 type Node: shareable { label: String }
 fn count(tasks: Tasks, take words: List[Rc[Node]]) -> Result[Task[u64], (Capacity, List[Rc[Node]])] {
   task.spawn(tasks, bytes 4096, take words, fn(take w: List[Rc[Node]]) -> u64 { list.len(w) })

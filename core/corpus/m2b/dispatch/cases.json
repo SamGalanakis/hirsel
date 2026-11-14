@@ -1,0 +1,7 @@
+[
+  {"name": "exchange", "value": 104, "server": "dispatch_server", "client": "dispatch_client", "server_value": 1},
+  {"name": "typed", "value": 106, "server": "dispatch_server", "client": "dispatch_client", "server_value": 1},
+  {"name": "nocode", "value": 1, "server": "dispatch_server", "client": "dispatch_client", "server_value": 1},
+  {"name": "bad", "value": 2, "server": "dispatch_server", "client": "dispatch_client", "server_value": 1},
+  {"name": "changed", "value": 1, "server": "dispatch_server_changed", "client": "dispatch_client", "client_args": ["typed"], "server_value": 1}
+]

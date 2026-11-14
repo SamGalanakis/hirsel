@@ -10,11 +10,21 @@ it with the case name, which prints the same value. A case may list engines unde
 the gap it records. A red entry {"cause": ..., "gives": N} also names the value the gap
 produces, which the engine must return exactly.
 
+A workload whose entry has `"dir": true` is built with `--dir` on one spool directory
+per engine, emptied before each case; `--host` runs exactly those workloads (they need
+the invoking host's openat2), and a run without it skips them. An entry with `"role":
+true` has no cases of its own: it is built for a `"pair"` workload, whose cases start
+a server role and a client role as two processes on that spool directory (arguments
+`server_args`, default `serve`, and `client_args`, default the case name); the client
+prints the case's value, the server its `server_value`. A manifest package may carry an
+`id`, and an entry may `use` it in place of the package of the same name.
+
 Example: m2b.py --compiler hirsel-core --evaluator hirsel-core-contract-eval --runtime libhirsel_core_rt.a
 """
 import argparse
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -34,16 +44,19 @@ def inputs(root, manifest, workload):
                          'sources': [{'file': str(p.resolve()), 'modules': [p.stem], 'signatures': True}
                                      for p in sorted((root / 'core' / name).glob('*.hirsel'))]})
     entry = next(e for e in manifest['entries'] if e['workload'] == workload)
-    by_name = {p['package']['name']: p for p in manifest['packages']}
+    by_name = {p.get('id', p['package']['name']): p for p in manifest['packages']}
+    use = entry.get('use', {})
     pending, reached = [entry['package']['name']], []
     while pending:
         name = pending.pop()
+        name = use.get(name, name)
         if name in reached or name not in by_name:
             continue
         reached.append(name)
         pending.extend(d['name'] for d in by_name[name]['dependencies'])
     for name in sorted(reached):
         package = json.loads(json.dumps(by_name[name]))
+        package.pop('id', None)
         for source in package['sources']:
             source['file'] = str((root / source['file']).resolve())
         packages.append(package)
@@ -69,7 +82,7 @@ def evaluate(evaluator, manifest_file, entry, case):
     return None
 
 
-def build(compiler, runtime, cc, manifest_file, entry, engine, scratch):
+def build(compiler, runtime, cc, manifest_file, entry, engine, scratch, spool=None):
     binary = scratch / f'program-{engine}'
     path = f"{entry['package']['name']}@{entry['package']['version']}/{entry['module']}/main"
     command = [str(compiler), 'build', '--inputs', str(manifest_file), '--entry', path, '--backend', engine,
@@ -77,6 +90,8 @@ def build(compiler, runtime, cc, manifest_file, entry, engine, scratch):
                '--json', '-o', str(binary)]
     for grant in entry.get('grants', []):
         command.extend(['--grant', grant])
+    if entry.get('dir'):
+        command.extend(['--dir', str(spool)])
     if engine == 'llvm':
         command.append('--release')
     if cc:
@@ -94,11 +109,33 @@ def build(compiler, runtime, cc, manifest_file, entry, engine, scratch):
     return binary, None
 
 
-def native(binary, case):
+def empty(spool):
+    if spool is not None:
+        shutil.rmtree(spool, ignore_errors=True)
+        spool.mkdir()
+
+
+def native(binary, case, spool=None):
+    empty(spool)
     run = subprocess.run([str(binary), case['name']], capture_output=True)
     want = f"{case['value']}\n".encode()
     if run.returncode or run.stdout != want or run.stderr:
         return f'exit {run.returncode}, stdout {run.stdout!r}, stderr {run.stderr[-300:]!r}; expected {want!r}'
+    return None
+
+
+def pair(server, client, case, spool):
+    """One request between two processes: the server starts first, the client's reply ends it."""
+    empty(spool)
+    serving = subprocess.Popen([str(server), *case.get('server_args', ['serve'])],
+                               stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    run = subprocess.run([str(client), *case.get('client_args', [case['name']])], capture_output=True)
+    out, err = serving.communicate()
+    want, served = f"{case['value']}\n".encode(), f"{case['server_value']}\n".encode()
+    if run.returncode or run.stdout != want or run.stderr:
+        return f'client exit {run.returncode}, stdout {run.stdout!r}, stderr {run.stderr[-300:]!r}; expected {want!r}'
+    if serving.returncode or out != served or err:
+        return f'server exit {serving.returncode}, stdout {out!r}, stderr {err[-300:]!r}; expected {served!r}'
     return None
 
 
@@ -111,6 +148,7 @@ def main():
                         if 'LLVM_SYS_231_PREFIX' in os.environ else None)
     parser.add_argument('--engine', choices=ENGINES, action='append')
     parser.add_argument('--only', nargs='+')
+    parser.add_argument('--host', action='store_true', help='run the workloads that need a real directory')
     parser.add_argument('--root', type=Path, default=ROOT)
     args = parser.parse_args()
     engines = args.engine or list(ENGINES)
@@ -119,26 +157,54 @@ def main():
     if set(engines) - {'evaluator'} and not (args.compiler and args.runtime):
         parser.error('--compiler and --runtime are required for native engines')
     manifest = json.loads((args.root / 'core/programs/m2b/manifest.json').read_text())
-    workloads = [e['workload'] for e in manifest['entries'] if not args.only or e['workload'] in args.only]
+    workloads = [e['workload'] for e in manifest['entries']
+                 if (not args.only or e['workload'] in args.only) and not e.get('role')
+                 and bool(e.get('dir') or e.get('pair')) == args.host]
     unexpected, passed, reds = [], 0, 0
     with tempfile.TemporaryDirectory(prefix='hirsel-m2b-') as temp:
+        spools = {engine: Path(temp) / f'spool-{engine}' for engine in engines}
+        for spool in spools.values():
+            spool.mkdir()
+        prepared, built = {}, {}
+
+        def prepare(workload):
+            if workload not in prepared:
+                scratch = Path(temp) / workload
+                scratch.mkdir()
+                entry, selected = inputs(args.root, manifest, workload)
+                manifest_file = scratch / 'inputs.json'
+                manifest_file.write_text(json.dumps(selected))
+                prepared[workload] = scratch, entry, manifest_file
+            return prepared[workload]
+
+        def binary_for(workload, engine):
+            if (workload, engine) not in built:
+                scratch, entry, manifest_file = prepare(workload)
+                built[workload, engine] = build(args.compiler, args.runtime, args.cc, manifest_file, entry,
+                                                engine, scratch, spools[engine])
+            return built[workload, engine]
+
         for workload in workloads:
-            scratch = Path(temp) / workload
-            scratch.mkdir()
-            entry, selected = inputs(args.root, manifest, workload)
-            manifest_file = scratch / 'inputs.json'
-            manifest_file.write_text(json.dumps(selected))
+            scratch, entry, manifest_file = prepare(workload)
             cases = json.loads((args.root / 'core/corpus/m2b' / workload / 'cases.json').read_text())
             for engine in engines:
-                binary, stop = (None, None) if engine == 'evaluator' else build(
-                    args.compiler, args.runtime, args.cc, manifest_file, entry, engine, scratch)
+                if entry.get('pair') and engine == 'evaluator':
+                    continue
+                spool = spools[engine] if entry.get('dir') or entry.get('pair') else None
+                binary, stop = (None, None) if engine == 'evaluator' or entry.get('pair') else binary_for(workload, engine)
                 for case in cases:
+                    if entry.get('pair'):
+                        (server, stop), (client, stop_client) = (binary_for(case['server'], engine),
+                                                                 binary_for(case['client'], engine))
+                        stop = stop or stop_client
                     if stop:
                         failure = stop
                     elif engine == 'evaluator':
                         failure = evaluate(args.evaluator, manifest_file, entry, case)
+                    elif entry.get('pair'):
+                        failure = pair(server, client, case, spool)
                     else:
-                        failure = native(binary, case)
+                        failure = native(binary, case, spool)
                     red = case.get('red', {}).get(engine)
                     label = f'{workload}/{case["name"]} {engine}'
                     if isinstance(red, dict) and stop:
@@ -149,7 +215,8 @@ def main():
                         # row turns when the gap closes or when something else breaks.
                         gives = dict(case, value=red['gives'], used=red.get('used', case['used']))
                         wrong = (evaluate(args.evaluator, manifest_file, entry, gives) if engine == 'evaluator'
-                                 else native(binary, gives))
+                                 else pair(server, client, gives, spool) if entry.get('pair')
+                                 else native(binary, gives, spool))
                         failure = None if wrong else f"gives {red['gives']} as the gap says"
                         if wrong:
                             unexpected.append(f"{label}: red row expects {red['gives']}: {wrong}")

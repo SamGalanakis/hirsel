@@ -52,6 +52,27 @@ pub fn case_static_key() -> u64 {
     same(code.describe(double), code.describe(double)) * 10 + same(code.describe(double), code.describe(other))
 }
 
+// A registry keyed by StaticFn (slice 4's alternative to identity bytes): insert double
+// under its descriptor, find it by a second describe, call it on "ab": 4 bytes.
+pub fn case_static_registry() -> u64 {
+    let mut m: Map[StaticFn[m2b.journal.Recorded], m2b.journal.Recorded] = map.new()
+    if let Error(_) = map.insert(mut m, code.describe(double), double) {
+        return 999
+    }
+    let Some(h) = map.get(m, code.describe(double)) else {
+        return 0
+    }
+    let f: m2b.journal.Recorded = h
+    let mut arg: Bytes = list.new()
+    if let Error(_) = list.append(mut arg, string.as_bytes("ab")) {
+        return 999
+    }
+    match f(arg) {
+        Ok(o) => list.len(o),
+        Error(_) => 998,
+    }
+}
+
 fn other(b: Bytes) -> Result[Bytes, Capacity] {
     Ok(list.new())
 }
@@ -61,6 +82,8 @@ fn select(name: String) -> Option[u64] {
         Some(case_static_call())
     } else if name == "static_key" {
         Some(case_static_key())
+    } else if name == "static_registry" {
+        Some(case_static_registry())
     } else {
         None
     }

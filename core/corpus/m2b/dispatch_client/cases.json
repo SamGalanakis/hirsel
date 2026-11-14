@@ -1,0 +1,5 @@
+[
+  {"name": "solo_reply", "value": 1104, "used": 0},
+  {"name": "poll_waits", "value": 1, "used": 0, "red": {"cranelift": {"cause": "native host.sleep_until does not wait: the OS provider moves its monotonic reading to the deadline and returns (crates/hirsel-core-rt/src/os.rs SLEEP_UNTIL, core-ops-914)", "gives": 0}, "llvm": {"cause": "native host.sleep_until does not wait: the OS provider moves its monotonic reading to the deadline and returns (crates/hirsel-core-rt/src/os.rs SLEEP_UNTIL, core-ops-914)", "gives": 0}}},
+  {"name": "replace", "value": 1, "used": 0, "red": {"evaluator": {"cause": "the evaluator's host.rename returns Exists for an existing target; core.md says it replaces a regular file (crates/hirsel-core-ir/src/eval.rs HostOp::Rename)", "gives": 0}}}
+]

@@ -44,20 +44,21 @@ pub fn fails() -> Result[u64, m2b.journal.Diverged] {
     m2b.journal.rewind(mut j)
     let b = failed(m2b.journal.call_isolated(mut j, code.identity(code.describe(divide)), divide, empty)?)
     m2b.journal.finish(j)?
-    let tag: u64 = match list.get(j.entries, 0) {
-        Some(e) => if list.len(e.outcome) == 1 {
-            int.widen(e.outcome[0])
+    let outcome: u64 = match list.get(j.entries, 0) {
+        Some(e) => if list.len(e.outcome) == 2 {
+            let tag: u64 = int.widen(e.outcome[0])
+            let kind: u64 = int.widen(e.outcome[1])
+            tag * 10 + kind
         } else {
-            9
+            99
         },
-        None => 9,
+        None => 99,
     }
-    Ok(list.len(j.entries) * 1000 + a * 100 + b * 10 + tag)
+    Ok(list.len(j.entries) * 10000 + a * 1000 + b * 100 + outcome)
 }
 
 // The same identity with a changed body (PROG-9: a body change keeps the identity),
-// which now fails with Overflow where Division was recorded. Replay should report
-// Outcome(0); the journal cannot see the cause, so it reports nothing.
+// which now fails with Overflow where Division was recorded: replay reports Outcome(0).
 pub fn cause_changed() -> Result[u64, m2b.journal.Diverged] {
     let mut j = m2b.journal.recording(65536)
     let empty: Bytes = list.new()

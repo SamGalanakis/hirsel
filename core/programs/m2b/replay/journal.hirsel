@@ -200,10 +200,33 @@ pub fn sleep(mut j: Journal, c: Clock, ns: u64) -> Result[(), Diverged] waits {
     record(mut j, code.identity(s), arg, list.new())
 }
 
+// A failure's outcome bytes: tag 2 and its primary cause's kind (FAIL-2 order, 1..7),
+// with the text of a `Fail`. `for` over a `Causes` yields the primary cause first (SEM-6).
+// The site is left out: it names an operation in this build, not a value to compare.
+fn failure_bytes(causes: Causes) -> Result[Bytes, Diverged] {
+    let mut b: Bytes = list.new()
+    put_u8(mut b, 2)?
+    for c in causes {
+        match c.kind {
+            Overflow => put_u8(mut b, 1)?,
+            Bounds => put_u8(mut b, 2)?,
+            Division => put_u8(mut b, 3)?,
+            Unwrap => put_u8(mut b, 4)?,
+            Fail(text) => {
+                put_u8(mut b, 5)?
+                full(list.append(mut b, string.as_bytes(text)))?
+            },
+            Cancelled => put_u8(mut b, 6)?,
+            Capacity => put_u8(mut b, 7)?,
+        }
+        break
+    }
+    Ok(b)
+}
+
 // `call` for a callee that may fail: the call runs inside `isolate` (FAIL-16), so a
-// failure is an outcome, recorded with tag 2 and compared like the others. `Causes`
-// has no reader, so the entry cannot say which failure it was (HOOK-FINDINGS R8): a
-// replay that fails differently is not detected. The caller gets the Causes.
+// failure is an outcome, recorded as its primary cause and compared like the others:
+// a replay that fails with another cause is Outcome. The caller gets the Causes.
 pub fn call_isolated(mut j: Journal, id: Bytes, f: Recorded, arg: Bytes) -> Result[Result[Result[Bytes, Capacity], Causes], Diverged] {
     let limit = j.limit
     let caught = match isolate(fn() -> Result[Result[Bytes, Capacity], Capacity] { bound bytes limit { f(arg) } }) {
@@ -218,11 +241,7 @@ pub fn call_isolated(mut j: Journal, id: Bytes, f: Recorded, arg: Bytes) -> Resu
     }
     let out = match r {
         Ok(x) => outcome_bytes(x)?,
-        Error(_) => {
-            let mut b: Bytes = list.new()
-            put_u8(mut b, 2)?
-            b
-        },
+        Error(causes) => failure_bytes(causes)?,
     }
     if j.replay {
         let i = expect(mut j, id, arg)?

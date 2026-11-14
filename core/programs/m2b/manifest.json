@@ -6,7 +6,8 @@
       "sources": [
         {"file": "core/programs/m2b/table/table.hirsel", "modules": ["table"], "signatures": false},
         {"file": "core/programs/m2b/tx/tx.hirsel", "modules": ["tx"], "signatures": false},
-        {"file": "core/programs/m2b/replay/journal.hirsel", "modules": ["journal"], "signatures": false}
+        {"file": "core/programs/m2b/replay/journal.hirsel", "modules": ["journal"], "signatures": false},
+        {"file": "core/programs/m2b/dispatch/spool.hirsel", "modules": ["spool"], "signatures": false}
       ]
     },
     {
@@ -43,6 +44,34 @@
       "sources": [
         {"file": "core/programs/m2b/replay/static.hirsel", "modules": ["main"], "signatures": false}
       ]
+    },
+    {
+      "package": {"name": "rpc", "version": "1"},
+      "dependencies": [{"name": "core", "version": "1"}, {"name": "std", "version": "1"}, {"name": "m2b", "version": "1"}],
+      "sources": [
+        {"file": "core/programs/m2b/dispatch/rpc.hirsel", "modules": ["handlers"], "signatures": false}
+      ]
+    },
+    {
+      "id": "rpc-changed", "package": {"name": "rpc", "version": "1"},
+      "dependencies": [{"name": "core", "version": "1"}, {"name": "std", "version": "1"}, {"name": "m2b", "version": "1"}],
+      "sources": [
+        {"file": "core/programs/m2b/dispatch/rpc_changed.hirsel", "modules": ["handlers"], "signatures": false}
+      ]
+    },
+    {
+      "package": {"name": "server", "version": "1"},
+      "dependencies": [{"name": "core", "version": "1"}, {"name": "std", "version": "1"}, {"name": "m2b", "version": "1"}, {"name": "rpc", "version": "1"}],
+      "sources": [
+        {"file": "core/programs/m2b/dispatch/server.hirsel", "modules": ["main"], "signatures": false}
+      ]
+    },
+    {
+      "package": {"name": "client", "version": "1"},
+      "dependencies": [{"name": "core", "version": "1"}, {"name": "std", "version": "1"}, {"name": "m2b", "version": "1"}, {"name": "rpc", "version": "1"}],
+      "sources": [
+        {"file": "core/programs/m2b/dispatch/client.hirsel", "modules": ["main"], "signatures": false}
+      ]
     }
   ],
   "entries": [
@@ -50,6 +79,10 @@
     {"workload": "tx", "package": {"name": "tx", "version": "1"}, "module": "main"},
     {"workload": "replay", "package": {"name": "app", "version": "1"}, "module": "main", "grants": ["Clock"]},
     {"workload": "replay_fail", "package": {"name": "failing", "version": "1"}, "module": "main"},
-    {"workload": "replay_static", "package": {"name": "static", "version": "1"}, "module": "main"}
+    {"workload": "replay_static", "package": {"name": "static", "version": "1"}, "module": "main"},
+    {"workload": "dispatch_server", "package": {"name": "server", "version": "1"}, "module": "main", "grants": ["Clock"], "dir": true},
+    {"workload": "dispatch_server_changed", "package": {"name": "server", "version": "1"}, "module": "main", "grants": ["Clock"], "dir": true, "use": {"rpc": "rpc-changed"}, "role": true},
+    {"workload": "dispatch_client", "package": {"name": "client", "version": "1"}, "module": "main", "grants": ["Clock"], "dir": true},
+    {"workload": "dispatch", "package": {"name": "client", "version": "1"}, "module": "main", "pair": true}
   ]
 }

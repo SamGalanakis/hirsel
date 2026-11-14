@@ -12,3 +12,8 @@ Value `entries × 1000 + length` = 1000 + 4.
 ## static_key = 10
 PROG-9: a `StaticFn` is a key, equal exactly when its identity bytes are. `describe(double)`
 equals itself (1); `describe(double)` and `describe(other)` differ (0). Value `1 × 10 + 0`.
+
+## static_registry = 4
+Slice 4's registry with `StaticFn` keys: `double` inserted under `code.describe(double)` in a
+`Map[StaticFn[Recorded], Recorded]`, found by a second `describe`, called on "ab": 4 bytes.
+Red: a `Map` with this key type is not built ("values of this type are not built").

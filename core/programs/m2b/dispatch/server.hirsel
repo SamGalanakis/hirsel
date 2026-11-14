@@ -1,0 +1,142 @@
+// M2b slice 4 server (package server). `main serve` answers request 0 and prints 1;
+// `main measure` answers requests 0..99 and prints the count, opens and sleeps. Built
+// against rpc.hirsel, or rpc_changed.hirsel for the changed-signature workload. The
+// solo cases run the server role alone against a spool the case fills itself
+// (core/corpus/m2b/dispatch_server/SPEC.md).
+const PERIOD_NS: u64 = 1000000
+const BUDGET_MS: u64 = 10000
+
+fn handlers() -> Result[m2b.spool.Registry, m2b.spool.Failure] {
+    let mut r = m2b.spool.registry(65536)
+    rpc.handlers.register(mut r)?
+    Ok(r)
+}
+
+fn reply_value(take r: Result[m2b.spool.Reply, m2b.spool.Failure]) -> u64 {
+    match take r {
+        Ok(Done(o)) => 100 + list.len(o),
+        Ok(NoCode) => 1,
+        Ok(Bad) => 2,
+        Ok(Refused(_)) => 3,
+        Error(Io(_)) => 901,
+        Error(Full(_)) => 902,
+        Error(Timeout(_)) => 903,
+        Error(Garbled) => 904,
+    }
+}
+
+fn text(s: String) -> Result[Bytes, m2b.spool.Failure] {
+    let mut b: Bytes = list.new()
+    match list.append(mut b, string.as_bytes(s)) {
+        Ok(()) => Ok(b),
+        Error(c) => Error(Full(c)),
+    }
+}
+
+// Publishes frame as request 0, serves it, and reads back reply 0.
+fn solo(d: Dir, c: Clock, frame: Bytes) -> Result[m2b.spool.Reply, m2b.spool.Failure] waits {
+    let mut s = m2b.spool.stats()
+    m2b.spool.publish(d, "q", 0, frame, mut s)?
+    let _ = m2b.spool.serve(d, c, handlers()?, 0, 1, PERIOD_NS, BUDGET_MS, mut s)?
+    let b = m2b.spool.take_file(d, c, "r", 0, PERIOD_NS, 0, mut s)?
+    m2b.spool.parse_reply(b)
+}
+
+fn exchange(d: Dir, c: Clock) -> Result[m2b.spool.Reply, m2b.spool.Failure] waits {
+    solo(d, c, m2b.spool.request(code.identity(code.describe(rpc.handlers.double)), text("ab")?)?)
+}
+
+fn unknown(b: Bytes) -> Result[Bytes, Capacity] {
+    Ok(list.new())
+}
+
+fn nocode(d: Dir, c: Clock) -> Result[m2b.spool.Reply, m2b.spool.Failure] waits {
+    solo(d, c, m2b.spool.request(code.identity(code.describe(unknown)), text("ab")?)?)
+}
+
+// "HQ", version 1, then an identity length of 1000 with three bytes after it.
+fn bad(d: Dir, c: Clock) -> Result[m2b.spool.Reply, m2b.spool.Failure] waits {
+    let frame = m2b.spool.request(text("abc")?, text("")?)?
+    let mut cut: Bytes = list.new()
+    let mut i: u64 = 0
+    while i < list.len(frame) {
+        let byte: u8 = if i == 3 {
+            232
+        } else if i == 4 {
+            3
+        } else {
+            frame[i]
+        }
+        match list.push(mut cut, byte) {
+            Ok(()) => {},
+            Error((cap, _)) => return Error(Full(cap)),
+        }
+        i += 1
+    }
+    solo(d, c, cut)
+}
+
+pub fn case_solo_exchange(d: Dir, c: Clock) -> u64 waits {
+    reply_value(exchange(d, c))
+}
+
+pub fn case_solo_nocode(d: Dir, c: Clock) -> u64 waits {
+    reply_value(nocode(d, c))
+}
+
+pub fn case_solo_bad(d: Dir, c: Clock) -> u64 waits {
+    reply_value(bad(d, c))
+}
+
+fn served(take r: Result[u64, m2b.spool.Failure]) -> u64 {
+    match take r {
+        Ok(n) => n,
+        Error(Io(_)) => 901,
+        Error(Full(_)) => 902,
+        Error(Timeout(_)) => 903,
+        Error(Garbled) => 904,
+    }
+}
+
+fn line(out: Stdout, v: u64) -> Result[(), Exit] waits {
+    let mut s = string.new()
+    if let Error(_) = string.push_u64(mut s, v) {
+        return Error(Exit(status: 3))
+    }
+    if let Error(_) = string.push(mut s, "\n") {
+        return Error(Exit(status: 3))
+    }
+    match stdout.write(out, s) {
+        Ok(()) => Ok(()),
+        Error(_) => Error(Exit(status: 2)),
+    }
+}
+
+fn serve(d: Dir, c: Clock, count: u64, mut s: m2b.spool.Stats) -> Result[u64, m2b.spool.Failure] waits {
+    m2b.spool.serve(d, c, handlers()?, 0, count, PERIOD_NS, BUDGET_MS, mut s)
+}
+
+pub fn main(out: Stdout, d: Dir, c: Clock, argv: Args) -> Result[(), Exit] waits {
+    let Some(name) = args.get(argv, 0) else {
+        return Error(Exit(status: 2))
+    }
+    let mut s = m2b.spool.stats()
+    if name == "serve" {
+        return line(out, served(serve(d, c, 1, mut s)))
+    }
+    if name == "measure" {
+        line(out, served(serve(d, c, 100, mut s)))?
+        line(out, s.opens)?
+        return line(out, s.sleeps)
+    }
+    let v = if name == "solo_exchange" {
+        case_solo_exchange(d, c)
+    } else if name == "solo_nocode" {
+        case_solo_nocode(d, c)
+    } else if name == "solo_bad" {
+        case_solo_bad(d, c)
+    } else {
+        return Error(Exit(status: 2))
+    }
+    line(out, v)
+}

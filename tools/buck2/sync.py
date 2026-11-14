@@ -1329,13 +1329,17 @@ def first_party(meta: dict) -> str:
                                 bin_exes={"hirsel-core": "//:hirsel-core-driver-bin-hirsel-core"},
                                 files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
                                 data=Raw('glob(["core/core/**", "core/std/**", "core/programs/m1/**", "core/corpus/m1/**", "crates/hirsel-core-rt/include/**"])')))
-    out.append("\n" + call("hirsel_script_test", name="core-m2b", script="core/tools/m2b.py", full=False,
-                            args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-m2b/hirsel-core",
-                                  "--evaluator", "buck-out/tmp/cargo-bin-exe/core-m2b/hirsel-core-contract-eval"],
-                            bin_exes={"hirsel-core": "//:hirsel-core-driver-bin-hirsel-core",
-                                      "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
-                            files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
-                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/m2b/**", "core/corpus/m2b/**", "crates/hirsel-core-rt/include/**"])')))
+    # core-m2b-host: the workloads with a spool directory (M2b slice 4), on the invoking host
+    # like land-core-native-capabilities: a real directory and a second process.
+    for name, host in (("core-m2b", False), ("core-m2b-host", True)):
+        out.append("\n" + call("hirsel_script_test", name=name, script="core/tools/m2b.py", full=False,
+                                **({"host": True} if host else {}),
+                                args=["--compiler", "buck-out/tmp/cargo-bin-exe/" + name + "/hirsel-core",
+                                      "--evaluator", "buck-out/tmp/cargo-bin-exe/" + name + "/hirsel-core-contract-eval"] + (["--host"] if host else []),
+                                bin_exes={"hirsel-core": "//:hirsel-core-driver-bin-hirsel-core",
+                                          "hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
+                                files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
+                                data=Raw('glob(["core/core/**", "core/std/**", "core/programs/m2b/**", "core/corpus/m2b/**", "crates/hirsel-core-rt/include/**"])')))
     out.append("\n" + call("hirsel_script_test", name="core-check-cost", script="crates/hirsel-core-front/check-cost.py", full=False, host=True, production=True,
                             args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-check-cost/hirsel-core", "--request-compiler", "buck-out/tmp/cargo-bin-exe/core-check-cost/hirsel-core-request-cost"],
                             bin_exes={"hirsel-core": "//:hirsel-core-driver-bin-hirsel-core", "hirsel-core-request-cost": "//:hirsel-core-driver-bin-hirsel-core-request-cost"},

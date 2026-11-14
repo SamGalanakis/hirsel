@@ -1,0 +1,37 @@
+// rpc.hirsel with one change: `repeat`'s count is a u32, so its identity differs and a
+// server built from this source refuses a request for the old `repeat` (NoCode).
+pub fn double(b: Bytes) -> Result[Bytes, Capacity] {
+    let mut out: Bytes = list.new()
+    list.append(mut out, b)?
+    list.append(mut out, b)?
+    Ok(out)
+}
+
+pub fn repeat(b: Bytes, k: u32) -> Result[Bytes, Capacity] {
+    let mut out: Bytes = list.new()
+    let n: u64 = int.widen(k)
+    let mut i: u64 = 0
+    while i < n {
+        list.append(mut out, b)?
+        i += 1
+    }
+    Ok(out)
+}
+
+// repeat's wire form: the count as 8 little-endian bytes, then the bytes to repeat.
+// A malformed argument gives the empty result.
+fn repeat_wire(a: Bytes) -> Result[Bytes, Capacity] {
+    let Some(k) = m2b.spool.get_u64(a, 0) else {
+        return Ok(list.new())
+    }
+    let narrowed: Option[u32] = int.try_narrow(k)
+    let Some(narrow) = narrowed else {
+        return Ok(list.new())
+    }
+    repeat(list.slice(a, 8, list.len(a)), narrow)
+}
+
+pub fn register(mut r: m2b.spool.Registry) -> Result[(), m2b.spool.Failure] {
+    m2b.spool.register(mut r, code.identity(code.describe(double)), double)?
+    m2b.spool.register(mut r, code.identity(code.describe(repeat)), repeat_wire)
+}

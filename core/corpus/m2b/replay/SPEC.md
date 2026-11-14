@@ -47,10 +47,14 @@ replayed. The value is 7, which no host reading here gives (the evaluator's seco
 is 1, a native wall clock is far above 7): replay read the journal, not the host.
 
 ## sleep = 11
-`sleep(200 ms)` recorded, then replayed, with `host.mono_ns` read around each. Recording
-waits at least 200 ms (10); replay waits less than 200 ms (1). Value 10 + 1. On the
-evaluator, recording moves the model clock to the deadline and replay only adds one reading.
-Catches: a replay that waits again, a record that does not wait.
+`sleep(200 ms)` recorded, then replayed, with `host.wall_ms` read around each. Recording
+waits at least 200 ms, so the wall reading moves by at least 199 (one millisecond lost to
+the readings' resolution) (10); replay moves it by less than 199 (1). Value 10 + 1. The
+wall clock, not `mono_ns`: a sleep that only pushes the monotonic reading forward would pass
+a `mono_ns` check without waiting. On the evaluator, recording moves the model clock to the
+deadline and replay only adds one reading. Red on Cranelift and LLVM, giving 1: native
+`sleep_until` does not wait yet (os.rs SLEEP_UNTIL, core-ops-914). Catches: a replay that
+waits again, a record that does not wait.
 
 ## refused = 10000065536
 `big` asks for a 100000-byte list inside the journal's `bound bytes 65536`; nothing else is

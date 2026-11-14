@@ -1,0 +1,272 @@
+// M2b slice 4: a call dispatched by code identity to a second process through a spool
+// directory. A request names its handler by the identity bytes of a `StaticFn` (PROG-9);
+// the server finds the handler in a registry keyed by those bytes, because nothing turns
+// bytes into a function. Publishing is a temporary file renamed into place (an `open` of
+// the name finds the whole file or nothing, core.md), so there is no marker file; the
+// waiting side polls with `host.sleep_until`, checking for cancellation between attempts.
+// Library code, never std.
+//
+// Request frame: "HQ", version 1, id length (u64 LE), id, argument length (u64 LE), argument.
+// Reply frame: "HR", version 1, then tag 0 and length and result bytes, tag 1 (no such
+// code), tag 2 (malformed request), or tag 3 and the refused Capacity's two figures.
+pub type Handler = fn(Bytes) -> Result[Bytes, Capacity]
+
+pub type Registry {
+    handlers: Map[Bytes, Handler],
+    limit: u64
+}
+
+pub type Reply = Done(Bytes) | NoCode | Bad | Refused(Capacity)
+
+pub type Failure = Io(IoError) | Full(Capacity) | Timeout(u64) | Garbled
+
+// Open and sleep counts of one side, for the measurement.
+pub type Stats {
+    opens: u64,
+    sleeps: u64
+}
+
+pub fn stats() -> Stats {
+    Stats(opens: 0, sleeps: 0)
+}
+
+// Each handler runs under `bound bytes limit`; a refusal is the reply Refused.
+pub fn registry(limit: u64) -> Registry {
+    Registry(handlers: map.new(), limit: limit)
+}
+
+fn full[T](take r: Result[T, Capacity]) -> Result[T, Failure] {
+    match take r {
+        Ok(take x) => Ok(take x),
+        Error(c) => Error(Full(c)),
+    }
+}
+
+fn io[T](take r: Result[T, IoError]) -> Result[T, Failure] {
+    match take r {
+        Ok(take x) => Ok(take x),
+        Error(e) => Error(Io(e)),
+    }
+}
+
+// The key is the identity's own bytes: a request carries bytes, and a lookup by bytes
+// needs no StaticFn, which a receiver could not make from them anyway.
+pub fn register(mut r: Registry, id: Bytes, h: Handler) -> Result[(), Failure] {
+    let mut key: Bytes = full(list.with_capacity(list.len(id)))?
+    full(list.append(mut key, id))?
+    match map.insert(mut r.handlers, take key, h) {
+        Ok(()) => Ok(()),
+        Error((c, _)) => Error(Full(c)),
+    }
+}
+
+fn put_u8(mut out: Bytes, x: u8) -> Result[(), Failure] {
+    match list.push(mut out, x) {
+        Ok(()) => Ok(()),
+        Error((c, _)) => Error(Full(c)),
+    }
+}
+
+fn put_u64(mut out: Bytes, x: u64) -> Result[(), Failure] {
+    let mut i: u64 = 0
+    while i < 8 {
+        put_u8(mut out, int.truncate(x >> (i * 8)))?
+        i += 1
+    }
+    Ok(())
+}
+
+pub fn get_u64(b: Bytes, at: u64) -> Option[u64] {
+    if at > list.len(b) || list.len(b) - at < 8 {
+        return None
+    }
+    let mut x: u64 = 0
+    let mut i: u64 = 0
+    while i < 8 {
+        let byte: u64 = int.widen(b[at + i])
+        x = x | (byte << (i * 8))
+        i += 1
+    }
+    Some(x)
+}
+
+fn header(mut out: Bytes, kind: u8) -> Result[(), Failure] {
+    put_u8(mut out, 72)?
+    put_u8(mut out, kind)?
+    put_u8(mut out, 1)
+}
+
+// "HQ" or "HR" and version 1 at the start of b.
+fn has_header(b: Bytes, kind: u8) -> bool {
+    list.len(b) >= 3 && b[0] == 72 && b[1] == kind && b[2] == 1
+}
+
+pub fn request(id: Bytes, arg: Bytes) -> Result[Bytes, Failure] {
+    let mut out: Bytes = list.new()
+    header(mut out, 81)?
+    put_u64(mut out, list.len(id))?
+    full(list.append(mut out, id))?
+    put_u64(mut out, list.len(arg))?
+    full(list.append(mut out, arg))?
+    Ok(out)
+}
+
+// A length-prefixed field at `at`: its start and end, or None when it does not fit.
+fn field(b: Bytes, at: u64) -> Option[(u64, u64)] {
+    let n = get_u64(b, at)?
+    let lo = at + 8
+    if n > list.len(b) - lo {
+        return None
+    }
+    Some((lo, lo + n))
+}
+
+// A request's identity and argument as positions in the frame, or None when malformed:
+// a wrong header, a field that runs past the end, or bytes left after the argument.
+fn parse(b: Bytes) -> Option[(u64, u64, u64, u64)] {
+    if !has_header(b, 81) {
+        return None
+    }
+    let (id_lo, id_hi) = field(b, 3)?
+    let (arg_lo, arg_hi) = field(b, id_hi)?
+    if arg_hi != list.len(b) {
+        return None
+    }
+    Some((id_lo, id_hi, arg_lo, arg_hi))
+}
+
+// The server's half of one request: parse, look the identity up, run the handler.
+pub fn dispatch(r: Registry, frame: Bytes) -> Result[Reply, Failure] {
+    let Some((id_lo, id_hi, arg_lo, arg_hi)) = parse(frame) else {
+        return Ok(Bad)
+    }
+    let id = list.slice(frame, id_lo, id_hi)
+    let arg = list.slice(frame, arg_lo, arg_hi)
+    let Some(h) = map.get(r.handlers, id) else {
+        return Ok(NoCode)
+    }
+    let f: Handler = h
+    match (bound bytes r.limit { f(arg) }) {
+        Ok(Ok(take o)) => Ok(Done(take o)),
+        Ok(Error(c)) => Ok(Refused(c)),
+        Error(c) => Ok(Refused(c)),
+    }
+}
+
+pub fn reply_bytes(r: Reply) -> Result[Bytes, Failure] {
+    let mut out: Bytes = list.new()
+    header(mut out, 82)?
+    match r {
+        Done(o) => {
+            put_u8(mut out, 0)?
+            put_u64(mut out, list.len(o))?
+            full(list.append(mut out, o))?
+        },
+        NoCode => put_u8(mut out, 1)?,
+        Bad => put_u8(mut out, 2)?,
+        Refused(c) => {
+            put_u8(mut out, 3)?
+            put_u64(mut out, c.requested)?
+            put_u64(mut out, c.available)?
+        },
+    }
+    Ok(out)
+}
+
+pub fn parse_reply(b: Bytes) -> Result[Reply, Failure] {
+    if !has_header(b, 82) || list.len(b) < 4 {
+        return Error(Garbled)
+    }
+    let tag = b[3]
+    if tag == 0 {
+        let Some((lo, hi)) = field(b, 4) else {
+            return Error(Garbled)
+        }
+        let mut o: Bytes = full(list.with_capacity(hi - lo))?
+        full(list.append(mut o, list.slice(b, lo, hi)))?
+        return Ok(Done(take o))
+    }
+    if tag == 1 && list.len(b) == 4 {
+        return Ok(NoCode)
+    }
+    if tag == 2 && list.len(b) == 4 {
+        return Ok(Bad)
+    }
+    if tag == 3 && list.len(b) == 20 {
+        match (get_u64(b, 4), get_u64(b, 12)) {
+            (Some(requested), Some(available)) => return Ok(Refused(Capacity(requested: requested, available: available))),
+            _ => return Error(Garbled),
+        }
+    }
+    Error(Garbled)
+}
+
+// "q<seq>" or "r<seq>", with ".tmp" for the name it is written under.
+fn name(kind: String, seq: u64, temporary: bool) -> Result[String, Failure] {
+    let mut s = string.new()
+    full(string.push(mut s, kind))?
+    full(string.push_u64(mut s, seq))?
+    if temporary {
+        full(string.push(mut s, ".tmp"))?
+    }
+    Ok(s)
+}
+
+// Writes data under a temporary name, then renames it into place.
+pub fn publish(d: Dir, kind: String, seq: u64, data: Bytes, mut s: Stats) -> Result[(), Failure] waits {
+    let tmp = name(kind, seq, true)?
+    let final = name(kind, seq, false)?
+    s.opens += 1
+    io(std.file.write(d, tmp, data))?
+    io(host.rename(d, tmp, final))
+}
+
+// Waits for kind<seq> to appear, reads it and removes it. Each attempt is one open;
+// between attempts the task checks for cancellation and sleeps `period_ns` with
+// `host.sleep_until`. It gives up after `budget_ms` of wall-clock time, not after a
+// count of attempts: a native sleep_until does not wait yet (HOOK-FINDINGS S6), so a
+// count would run out in microseconds. A budget of 0 tries once.
+pub fn take_file(d: Dir, c: Clock, kind: String, seq: u64, period_ns: u64, budget_ms: u64, mut s: Stats) -> Result[Bytes, Failure] waits {
+    let final = name(kind, seq, false)?
+    let start = host.wall_ms(c)
+    let mut n: u64 = 0
+    loop {
+        s.opens += 1
+        n += 1
+        match std.file.read(d, final) {
+            Ok(take b) => {
+                io(std.file.remove(d, final))?
+                return Ok(take b)
+            },
+            Error(Io(NotFound)) => {},
+            Error(Io(e)) => return Error(Io(e)),
+            Error(Capacity(cap)) => return Error(Full(cap)),
+            Error(NotUtf8) => return Error(Garbled),
+        }
+        if host.wall_ms(c) - start >= budget_ms {
+            return Error(Timeout(n))
+        }
+        task.check_cancel()
+        s.sleeps += 1
+        host.sleep_until(c, host.mono_ns(c) + period_ns)
+    }
+}
+
+// The server: answers requests first..first+count-1 in order.
+pub fn serve(d: Dir, c: Clock, r: Registry, first: u64, count: u64, period_ns: u64, budget_ms: u64, mut s: Stats) -> Result[u64, Failure] waits {
+    let mut seq = first
+    while seq < first + count {
+        let frame = take_file(d, c, "q", seq, period_ns, budget_ms, mut s)?
+        let reply = dispatch(r, frame)?
+        publish(d, "r", seq, reply_bytes(reply)?, mut s)?
+        seq += 1
+    }
+    Ok(count)
+}
+
+// The client: publishes one request frame and waits for its reply.
+pub fn call(d: Dir, c: Clock, seq: u64, frame: Bytes, period_ns: u64, budget_ms: u64, mut s: Stats) -> Result[Reply, Failure] waits {
+    publish(d, "q", seq, frame, mut s)?
+    let b = take_file(d, c, "r", seq, period_ns, budget_ms, mut s)?
+    parse_reply(b)
+}

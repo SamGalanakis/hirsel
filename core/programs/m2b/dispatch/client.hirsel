@@ -1,0 +1,203 @@
+// M2b slice 4 client (package client). `main <case>` sends request 0 and prints a value
+// for its reply (core/corpus/m2b/dispatch/SPEC.md); `main measure` sends requests 0..99
+// and prints the sum of their values, then its opens and sleeps. The solo cases run the
+// client role alone against a reply the case pre-fills (dispatch_client/SPEC.md).
+const PERIOD_NS: u64 = 1000000
+const BUDGET_MS: u64 = 10000
+
+fn reply_value(take r: Result[m2b.spool.Reply, m2b.spool.Failure]) -> u64 {
+    match take r {
+        Ok(Done(o)) => 100 + list.len(o),
+        Ok(NoCode) => 1,
+        Ok(Bad) => 2,
+        Ok(Refused(_)) => 3,
+        Error(Io(_)) => 901,
+        Error(Full(_)) => 902,
+        Error(Timeout(_)) => 903,
+        Error(Garbled) => 904,
+    }
+}
+
+fn text(s: String) -> Result[Bytes, m2b.spool.Failure] {
+    let mut b: Bytes = list.new()
+    match list.append(mut b, string.as_bytes(s)) {
+        Ok(()) => Ok(b),
+        Error(c) => Error(Full(c)),
+    }
+}
+
+fn push(mut b: Bytes, x: u8) -> Result[(), m2b.spool.Failure] {
+    match list.push(mut b, x) {
+        Ok(()) => Ok(()),
+        Error((cap, _)) => Error(Full(cap)),
+    }
+}
+
+// A function the server does not register.
+fn triple(b: Bytes) -> Result[Bytes, Capacity] {
+    Ok(list.new())
+}
+
+fn frame(name: String) -> Result[Option[Bytes], m2b.spool.Failure] {
+    if name == "exchange" {
+        return Ok(Some(m2b.spool.request(code.identity(code.describe(rpc.handlers.double)), text("ab")?)?))
+    }
+    if name == "typed" {
+        // repeat("ab", 3): the count as 8 little-endian bytes, then "ab".
+        let mut arg: Bytes = list.new()
+        push(mut arg, 3)?
+        let mut i: u64 = 1
+        while i < 8 {
+            push(mut arg, 0)?
+            i += 1
+        }
+        match list.append(mut arg, string.as_bytes("ab")) {
+            Ok(()) => {},
+            Error(c) => return Error(Full(c)),
+        }
+        return Ok(Some(m2b.spool.request(code.identity(code.describe(rpc.handlers.repeat)), arg)?))
+    }
+    if name == "nocode" {
+        return Ok(Some(m2b.spool.request(code.identity(code.describe(triple)), text("ab")?)?))
+    }
+    if name == "bad" {
+        // A request header and a version the server does not know.
+        let mut b: Bytes = list.new()
+        push(mut b, 72)?
+        push(mut b, 81)?
+        push(mut b, 2)?
+        return Ok(Some(b))
+    }
+    Ok(None)
+}
+
+fn send(d: Dir, c: Clock, seq: u64, name: String, mut s: m2b.spool.Stats) -> Result[Option[m2b.spool.Reply], m2b.spool.Failure] waits {
+    let Some(f) = frame(name)? else {
+        return Ok(None)
+    }
+    Ok(Some(m2b.spool.call(d, c, seq, f, PERIOD_NS, BUDGET_MS, mut s)?))
+}
+
+// The reply "abab" is already in the spool: the client publishes request 0, finds the
+// reply on its first attempt, and request 0 is left for a server, whole.
+fn prefilled(d: Dir, c: Clock) -> Result[u64, m2b.spool.Failure] waits {
+    let mut s = m2b.spool.stats()
+    m2b.spool.publish(d, "r", 0, m2b.spool.reply_bytes(Done(text("abab")?))?, mut s)?
+    let Some(r) = send(d, c, 0, "exchange", mut s)? else {
+        return Ok(0)
+    }
+    let v = reply_value(Ok(r))
+    let q = m2b.spool.take_file(d, c, "q", 0, PERIOD_NS, 0, mut s)?
+    let Some(want) = frame("exchange")? else {
+        return Ok(0)
+    }
+    let same: u64 = if q == want {
+        1000
+    } else {
+        0
+    }
+    Ok(same + v + s.sleeps * 10000)
+}
+
+pub fn case_solo_reply(d: Dir, c: Clock) -> u64 waits {
+    match prefilled(d, c) {
+        Ok(v) => v,
+        Error(_) => 900,
+    }
+}
+
+// Polls for a reply nobody writes, for 20 ms of wall-clock time. Each sleep_until waits
+// a 1 ms poll interval (core.md), so the sleeps fit in the time that passed: value 1 when
+// the poll timed out with elapsed + 1 >= sleeps (the + 1 for the millisecond reading).
+// A sleep that does not wait makes thousands of sleeps in 20 ms: value 0.
+pub fn case_poll_waits(d: Dir, c: Clock) -> u64 waits {
+    let mut s = m2b.spool.stats()
+    let start = host.wall_ms(c)
+    let r = m2b.spool.take_file(d, c, "r", 7, PERIOD_NS, 20, mut s)
+    let elapsed = host.wall_ms(c) - start
+    match r {
+        Error(Timeout(_)) => if elapsed + 1 >= s.sleeps {
+            1
+        } else {
+            0
+        },
+        _ => 900,
+    }
+}
+
+// core.md: rename replaces a regular file at `to`.
+pub fn case_replace(d: Dir) -> u64 waits {
+    let Ok(one) = text("1") else {
+        return 900
+    }
+    let Ok(two) = text("2") else {
+        return 900
+    }
+    if let Error(_) = std.file.write(d, "a", one) {
+        return 901
+    }
+    if let Error(_) = std.file.write(d, "b", two) {
+        return 902
+    }
+    if let Error(_) = host.rename(d, "a", "b") {
+        return 0
+    }
+    match std.file.read(d, "b") {
+        Ok(b) => if b == one {
+            1
+        } else {
+            3
+        },
+        Error(_) => 4,
+    }
+}
+
+fn line(out: Stdout, v: u64) -> Result[(), Exit] waits {
+    let mut s = string.new()
+    if let Error(_) = string.push_u64(mut s, v) {
+        return Error(Exit(status: 3))
+    }
+    if let Error(_) = string.push(mut s, "\n") {
+        return Error(Exit(status: 3))
+    }
+    match stdout.write(out, s) {
+        Ok(()) => Ok(()),
+        Error(_) => Error(Exit(status: 2)),
+    }
+}
+
+pub fn main(out: Stdout, d: Dir, c: Clock, argv: Args) -> Result[(), Exit] waits {
+    let Some(name) = args.get(argv, 0) else {
+        return Error(Exit(status: 2))
+    }
+    if name == "solo_reply" {
+        return line(out, case_solo_reply(d, c))
+    }
+    if name == "poll_waits" {
+        return line(out, case_poll_waits(d, c))
+    }
+    if name == "replace" {
+        return line(out, case_replace(d))
+    }
+    let mut s = m2b.spool.stats()
+    if name == "measure" {
+        let mut sum: u64 = 0
+        let mut seq: u64 = 0
+        while seq < 100 {
+            sum += match send(d, c, seq, "exchange", mut s) {
+                Ok(Some(r)) => reply_value(Ok(r)),
+                Ok(None) => 0,
+                Error(e) => reply_value(Error(e)),
+            }
+            seq += 1
+        }
+        line(out, sum)?
+        line(out, s.opens)?
+        return line(out, s.sleeps)
+    }
+    match send(d, c, 0, name, mut s) {
+        Ok(Some(r)) => line(out, reply_value(Ok(r))),
+        Ok(None) => Error(Exit(status: 2)),
+        Error(e) => line(out, reply_value(Error(e))),
+    }
+}

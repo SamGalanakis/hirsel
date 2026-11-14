@@ -1,0 +1,36 @@
+// The handlers a client and a server share, by source (package rpc@1). A client names a
+// handler by `code.describe(rpc.handlers.f)` and never calls it; the server registers it.
+// `double` has the registry's type and is registered as itself. `repeat` takes a typed
+// argument, so it is registered through a byte adapter under its own identity: the key
+// says which function the request means, the adapter decodes for it (HOOK-FINDINGS S1).
+// rpc_changed.hirsel is this file with `repeat`'s count narrowed to u32.
+pub fn double(b: Bytes) -> Result[Bytes, Capacity] {
+    let mut out: Bytes = list.new()
+    list.append(mut out, b)?
+    list.append(mut out, b)?
+    Ok(out)
+}
+
+pub fn repeat(b: Bytes, k: u64) -> Result[Bytes, Capacity] {
+    let mut out: Bytes = list.new()
+    let mut i: u64 = 0
+    while i < k {
+        list.append(mut out, b)?
+        i += 1
+    }
+    Ok(out)
+}
+
+// repeat's wire form: the count as 8 little-endian bytes, then the bytes to repeat.
+// A malformed argument gives the empty result.
+fn repeat_wire(a: Bytes) -> Result[Bytes, Capacity] {
+    let Some(k) = m2b.spool.get_u64(a, 0) else {
+        return Ok(list.new())
+    }
+    repeat(list.slice(a, 8, list.len(a)), k)
+}
+
+pub fn register(mut r: m2b.spool.Registry) -> Result[(), m2b.spool.Failure] {
+    m2b.spool.register(mut r, code.identity(code.describe(double)), double)?
+    m2b.spool.register(mut r, code.identity(code.describe(repeat)), repeat_wire)
+}

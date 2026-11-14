@@ -21,7 +21,7 @@
           "index": 510931,
           "resolve": 15073239,
           "input counts": 586539,
-          "declarations": 11907391,
+          "declarations": 11605546,
           "body keys/new": 5867751,
           "body keys/for_body": 24145029,
           "body keys": 30012780,
@@ -43,7 +43,7 @@
         "index": 7.530159647475259,
         "resolve": 222.13104095932962,
         "input counts": 8.644080040453659,
-        "declarations": 175.4764140720942,
+        "declarations": 171.02795636783935,
         "body keys/new": 86.47258542223507,
         "body keys/for_body": 355.8188253991187,
         "body keys": 442.289966047822,
@@ -68,7 +68,7 @@
           "index": 354803,
           "resolve": 7159533,
           "input counts": 304386,
-          "declarations": 8261923,
+          "declarations": 8068490,
           "body keys/new": 3662243,
           "body keys/for_body": 10660550,
           "body keys": 14322793,
@@ -90,7 +90,7 @@
         "index": 10.297046605588118,
         "resolve": 207.78466966368862,
         "input counts": 8.834575769646618,
-        "declarations": 239.77693051840893,
+        "declarations": 234.16320491663348,
         "body keys/new": 106.28521026574859,
         "body keys/for_body": 309.38940419962444,
         "body keys": 415.674614465373,
@@ -115,7 +115,7 @@
           "index": 600147,
           "resolve": 14743476,
           "input counts": 296471,
-          "declarations": 5102104,
+          "declarations": 5025695,
           "body keys/new": 3035232,
           "body keys/for_body": 17975173,
           "body keys": 21010405,
@@ -137,7 +137,7 @@
         "index": 17.146057975073518,
         "resolve": 421.18470802408626,
         "input counts": 8.472202772720907,
-        "declarations": 145.75549642907157,
+        "declarations": 143.57372916958408,
         "body keys/new": 86.71054474163283,
         "body keys/for_body": 513.5051113289455,
         "body keys": 600.2156560705783,
@@ -157,6 +157,30 @@
       "reason": "Initial exact front counters, 2% stage margin; no legacy ceilings or fixed 60000 budget changed.",
       "revision": "6ee84cb5fe1fad288211f7bd1aa486d8d99d6d2d",
       "worktree": "F metric counters; no source or completed-body change"
+    },
+    {
+      "reason": "Borrow immutable declaration type-child slices; construct generic-bound vectors only for a pending bound. Only declaration ceilings lowered. Same-binary suite pair excludes Keys::new; no semantic or source-count change.",
+      "commit_range": "253f42f1..ae47a32f",
+      "suite_before": 5110371,
+      "suite_after": 5025695,
+      "evidence": "/workspace/code/hirsel-briefs/core-check-callables-913/front-cost/counter-pair.log",
+      "declarations": {
+        "m1": {
+          "before_limit": 175.4764140720942,
+          "observed_instructions": 11605546,
+          "after_limit": 171.02795636783935
+        },
+        "std": {
+          "before_limit": 239.77693051840893,
+          "observed_instructions": 8068490,
+          "after_limit": 234.16320491663348
+        },
+        "suite-edit": {
+          "before_limit": 145.75549642907157,
+          "observed_instructions": 5025695,
+          "after_limit": 143.57372916958408
+        }
+      }
     }
   ],
   "compiler_sha256": "ec71ac29389906b8f2a086137627bcb326e15daca588a94228a2104454e32f12",

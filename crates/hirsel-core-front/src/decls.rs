@@ -974,7 +974,7 @@ impl Program<'_> {
     ) -> TyId {
         let item = self.item(at);
         let node = item.tree.node(n);
-        let children = item.tree.children(n).to_vec();
+        let children = item.tree.children(n);
         match node.kind {
             NodeKind::UnitType => UNIT,
             NodeKind::GroupType => self.lower_ty_result(at, children[0], generics, scoped_roots),
@@ -1081,7 +1081,7 @@ impl Program<'_> {
                 let mut params = vec![];
                 let mut result = UNIT;
                 let mut waits = false;
-                for &c in &children {
+                for &c in children {
                     match item.tree.node(c).kind {
                         NodeKind::Parameters => {
                             for &p in item.tree.children(c) {
@@ -1219,7 +1219,6 @@ impl Program<'_> {
             return ERROR;
         }
         let arg_tys: Vec<TyId> = args.iter().map(|a| a.0).collect();
-        let params: Vec<u16> = generics.iter().map(|g| g.bounds).collect();
         let d = &self.decls[decl.index()];
         let role = d.role;
         if !d.structural {
@@ -1248,7 +1247,7 @@ impl Program<'_> {
                     self.pending.push(Pending::Bound {
                         ty: *t,
                         bounds: need,
-                        params: params.clone(),
+                        params: generics.iter().map(|g| g.bounds).collect(),
                         site: *s,
                         // LANG-12: a written type argument lacking its parameter's bound
                         // (`Rc[HostFile]`) is refused at that argument.

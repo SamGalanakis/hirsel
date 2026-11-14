@@ -194,19 +194,20 @@ static void register_results(LLVMModuleRef module, LLVMContextRef context) {
     LLVMDisposeBuilder(builder);
 }
 
-// Imported view carriers can be promoted only while their bodies are local:
-// O3 discards available_externally bodies before our late argument promotion.
-// Keep one private implementation for direct calls. Address uses still name
-// the cached public entry, whose FORM convention and identity do not change.
-static void local_inputs(LLVMModuleRef module) {
+// An imported body is the program's own for its direct calls. As an
+// available_externally definition LLVM treats it as inexact: it infers no
+// attributes from it, grants no single-call inlining bonus, and O3 discards it
+// before our late argument promotion. Each import with an ordinary direct call
+// therefore gets one private implementation. Address uses still name the
+// cached public entry, whose FORM convention and identity do not change.
+static void local_imports(LLVMModuleRef module) {
     LLVMContextRef context = LLVMGetModuleContext(module);
     LLVMDIBuilderRef debug = NULL;
     unsigned always = LLVMGetEnumAttributeKindForName("alwaysinline", 12);
     LLVMValueRef last = LLVMGetLastFunction(module);
     for (LLVMValueRef f = LLVMGetFirstFunction(module); f;) {
         LLVMValueRef next = f == last ? NULL : LLVMGetNextFunction(f);
-        if (!LLVMCountBasicBlocks(f) || LLVMGetLinkage(f) != LLVMAvailableExternallyLinkage ||
-            !LLVMGetStringAttributeAtIndex(f, LLVMAttributeFunctionIndex, "hirsel-view-input", 17)) {
+        if (!LLVMCountBasicBlocks(f) || LLVMGetLinkage(f) != LLVMAvailableExternallyLinkage) {
             f = next; continue;
         }
         unsigned calls = 0, ordinary = 0;
@@ -244,8 +245,7 @@ static void local_inputs(LLVMModuleRef module) {
         free(label);
         LLVMSetFunctionCallConv(external, LLVMGetFunctionCallConv(f));
         // Preserve ABI and semantic attributes, including sret and narrow
-        // extensions. The marker selects candidates even with facts disabled;
-        // it does not assert readonly, nonnull or any additional memory fact.
+        // extensions.
         for (unsigned i = 0, count = LLVMCountParams(f); i <= count + 1; ++i) {
             unsigned index = i == count + 1 ? LLVMAttributeFunctionIndex : i;
             unsigned n = LLVMGetAttributeCountAtIndex(f, index);
@@ -427,7 +427,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
     if (speed && export_count) {
         bound_imports(module, import_limit);
         register_results(module, context);
-        local_inputs(module);
+        local_imports(module);
     }
     LLVMSetTarget(module, triple);
     LLVMTargetDataRef layout = LLVMCreateTargetDataLayout(machine);

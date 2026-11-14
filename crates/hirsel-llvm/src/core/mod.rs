@@ -378,7 +378,6 @@ fn emit_module(
                 _ => Inline::Default,
             },
             destination_size: destination,
-            view_input: abi::view_input(sig),
             subprogram: function_debug.map(|d| d.scope),
             ..FnAttrs::default()
         };

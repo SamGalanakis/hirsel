@@ -563,7 +563,6 @@ pub(super) struct FnAttrs {
     pub nounwind: bool,
     pub argmem_read: bool,
     pub destination_size: Option<u64>,
-    pub view_input: bool,
     pub subprogram: Option<usize>,
 }
 impl Default for FnAttrs {
@@ -574,7 +573,6 @@ impl Default for FnAttrs {
             nounwind: false,
             argmem_read: false,
             destination_size: None,
-            view_input: false,
             subprogram: None,
         }
     }
@@ -760,9 +758,6 @@ fn function_attrs(out: &mut String, attrs: &FnAttrs) {
     }
     if let Some(bytes) = attrs.destination_size {
         write!(out, " \"hirsel-destination-size\"=\"{bytes}\"").unwrap();
-    }
-    if attrs.view_input {
-        out.push_str(" \"hirsel-view-input\"");
     }
     if let Some(scope) = attrs.subprogram {
         write!(out, " !dbg !{scope}").unwrap();

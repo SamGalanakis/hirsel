@@ -4,18 +4,6 @@
 //! Only FORM's naturally aligned scalar fields occur.
 use super::*;
 
-pub(super) fn view_input(sig: &Signature) -> bool {
-    sig.params.iter().any(|p| {
-        matches!(
-            p,
-            Param::Address {
-                loan: Loan::View,
-                ..
-            }
-        )
-    })
-}
-
 pub(super) struct Return {
     pub target: hirsel_core_layout::Target,
     pub ty: Type,
@@ -511,7 +499,6 @@ impl FunctionEmitter<'_> {
         self.abi = Return::internal_on_target(self.abi.target, &sig.results);
         let (params, locals) = self.abi.parameters(sig, facts);
         let attrs = FnAttrs {
-            view_input: view_input(sig),
             subprogram: debug.map(|(scope, _)| scope),
             ..FnAttrs::default()
         };

@@ -3033,9 +3033,9 @@ fn release_imports_keep_transitive_bodies_in_either_unit_order() {
 }
 
 #[test]
-fn private_view_inputs_preserve_public_addresses_and_failure_destinations() {
+fn private_imports_preserve_public_addresses_and_failure_destinations() {
     let imported = r#"
-define zeroext i8 @view(ptr %ctx, ptr %out, ptr readonly %pair, i8 zeroext %fail) noinline "hirsel-view-input" {
+define zeroext i8 @view(ptr %ctx, ptr %out, ptr readonly %pair, i8 zeroext %fail) noinline {
 entry:
   %bad = icmp ne i8 %fail, 0
   br i1 %bad, label %failure, label %success
@@ -3062,7 +3062,10 @@ define zeroext i8 @direct(ptr %out, ptr %pair, i8 zeroext %fail) {
   ret i8 %status
 }
 "#;
-    let dir = std::env::temp_dir().join(format!("hirsel-core-view-inputs-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "hirsel-core-private-imports-{}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     let prefix = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
     std::fs::write(

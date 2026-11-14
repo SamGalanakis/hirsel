@@ -290,9 +290,6 @@ impl NativeSink {
         if let Some(bytes) = attrs.destination_size {
             string("hirsel-destination-size", &bytes.to_string());
         }
-        if attrs.view_input {
-            string("hirsel-view-input", "");
-        }
         if let Some(scope) = attrs.subprogram {
             let scope = self.md(scope);
             // SAFETY: a subprogram node of this unit.

@@ -325,7 +325,7 @@ fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkR
         args.insert(at, INPUT_MARKER.into());
     }
     let files = recipe_files(&linker, &args)?;
-    let identity = recipe_identity(target, &linker, &args, &files, &source_files)?;
+    let identity = recipe_identity(target, &driver_key, &linker, &args, &files, &source_files)?;
     let recipe = LinkRecipe {
         schema: LINK_RECIPE_SCHEMA,
         target: target.into(),
@@ -386,6 +386,7 @@ fn recipe_files(linker: &Path, args: &[String]) -> io::Result<Vec<(PathBuf, Cont
 
 fn recipe_identity(
     target: &str,
+    driver_key: &str,
     linker: &Path,
     args: &[String],
     files: &[(PathBuf, ContentHash)],
@@ -396,6 +397,7 @@ fn recipe_identity(
         [crate::encode(&(
             LINK_RECIPE_SCHEMA,
             target,
+            driver_key,
             linker,
             args,
             files,

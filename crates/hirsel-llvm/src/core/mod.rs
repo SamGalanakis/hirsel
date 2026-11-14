@@ -756,21 +756,26 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
     // Reinterpret from a float is the sole bit observer (FORM #97).
     fn numeric(&mut self, v: ValueId) -> String {
         if self.value_slots.get(v.index()).copied().unwrap_or(true) {
-            self.calc(format!("load {}, ptr %v{}", ty(self.vty(v)), v.0))
+            let name = sink::Local::Value(v.index());
+            let ty = ir_type(self.vty(v));
+            let ptr = sink::Value::Local(name);
+            self.typed(sink::Operation::Load(ty, &ptr, &sink::Memory::default()))
         } else {
             format!("%v{}", v.0)
         }
     }
-    fn put(&mut self, v: ValueId, x: &str) {
+    fn put_value(&mut self, v: ValueId, value: sink::Value) {
+        let ptr = sink::Value::Local(sink::Local::Value(v.index()));
+        let ty = ir_type(self.vty(v));
         if self.value_slots.get(v.index()).copied().unwrap_or(true) {
-            self.line(format!("store {} {x}, ptr %v{}", ty(self.vty(v)), v.0));
+            self.sink.instruction(None, sink::Operation::Store(ty, &value, &ptr, &sink::Memory::default()), self.debug_location);
         } else {
-            // LLVM has no scalar copy instruction. This identity also permits
-            // forward references when CoreIR blocks are not in dominance order.
-            // It preserves poison; no freeze or representation promise is added.
-            let t = ty(self.vty(v));
-            self.line(format!("%v{} = select i1 true, {t} {x}, {t} poison", v.0));
+            self.sink.instruction(Some(sink::Local::Value(v.index())), sink::Operation::Select(ty, &sink::Value::Boolean(true), &value, &sink::Value::Poison), self.debug_location);
         }
+    }
+    fn put(&mut self, v: ValueId, x: &str) {
+        let value = self.operand(x);
+        self.put_value(v, value);
     }
     fn access_facts(&self, addresses: &[AddressId]) -> String {
         self.aliases
@@ -779,7 +784,8 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
     }
     fn address(&mut self, a: AddressId) -> String {
         if self.address_slots.get(a.index()).copied().unwrap_or(true) {
-            self.calc(format!("load ptr, ptr %a{}", a.0))
+            let ptr = sink::Value::Local(sink::Local::Address(a.index()));
+            self.typed(sink::Operation::Load(sink::Type::Ptr, &ptr, &sink::Memory::default()))
         } else {
             format!("%a{}", a.0)
         }
@@ -906,17 +912,17 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
             Inst::Const { result, bits } => {
                 let t = self.vty(result);
                 let x = if t.is_float() {
-                    format!("bitcast ({} {bits} to {})", bits_ty(t), ty(t))
+                    sink::Value::Bitcast { from: sink::Type::Int((size(t) * 8) as u32), bits: bits as u128, to: ir_type(t) }
                 } else if t == Ty::Ptr {
-                    format!("inttoptr (i64 {bits} to ptr)")
+                    sink::Value::IntToPtr(bits)
                 } else {
-                    bits.to_string()
+                    sink::Value::Integer(bits as u128)
                 };
-                self.put(result, &x);
+                self.put_value(result, x);
             }
-            Inst::ReadStatic { result, data } => self.put(result, &format!("@s{}", data.0)),
+            Inst::ReadStatic { result, data } => self.put_value(result, sink::Value::Global(format!("s{}", data.0))),
             Inst::FunctionRef { result, function } => {
-                self.put(result, &format!("@{}", symbol(self.module, function)))
+                self.put_value(result, sink::Value::Global(symbol(self.module, function)))
             }
             Inst::Unary {
                 result,
@@ -927,9 +933,9 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                 let t = self.vty(operand);
                 let x = self.numeric(operand);
                 let r = match op {
-                    UnaryOp::Not => self.calc(format!("xor {} {x}, 1", ty(t))),
-                    UnaryOp::BitNot => self.calc(format!("xor {} {x}, -1", ty(t))),
-                    UnaryOp::Neg if t.is_float() => self.calc(format!("fneg {} {x}", ty(t))),
+                    UnaryOp::Not => self.typed_binary(sink::Binary::Xor,t,&x,"1"),
+                    UnaryOp::BitNot => self.typed_binary(sink::Binary::Xor,t,&x,"-1"),
+                    UnaryOp::Neg if t.is_float() => self.typed(sink::Operation::FNeg(ir_type(t), &self.operand(&x))),
                     UnaryOp::Neg => {
                         let (v, flag) = self.overflow(t, ArithOp::Sub, "0", &x);
                         self.fail_if(&flag, fail, 0)?;
@@ -959,35 +965,9 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                 let t = self.vty(left);
                 let a = self.numeric(left);
                 let b = self.numeric(right);
-                let pred = match op {
-                    CompareOp::Eq => "eq",
-                    CompareOp::Ne => "ne",
-                    CompareOp::Lt => "lt",
-                    CompareOp::Le => "le",
-                    CompareOp::Gt => "gt",
-                    CompareOp::Ge => "ge",
-                };
-                let cmp = if t.is_float() {
-                    format!(
-                        "fcmp {}{pred} {} {a}, {b}",
-                        if op == CompareOp::Ne { "u" } else { "o" },
-                        ty(t)
-                    )
-                } else {
-                    format!(
-                        "icmp {}{pred} {} {a}, {b}",
-                        if matches!(op, CompareOp::Eq | CompareOp::Ne) {
-                            ""
-                        } else if t.int().is_some_and(|x| x.0) {
-                            "s"
-                        } else {
-                            "u"
-                        },
-                        ty(t)
-                    )
-                };
-                let x = self.calc(cmp);
-                let x = self.calc(format!("zext i1 {x} to i8"));
+                let pred = if t.is_float() {match op {CompareOp::Eq=>sink::Predicate::OEq,CompareOp::Ne=>sink::Predicate::UNe,CompareOp::Lt=>sink::Predicate::OLt,CompareOp::Le=>sink::Predicate::OLe,CompareOp::Gt=>sink::Predicate::OGt,CompareOp::Ge=>sink::Predicate::OGe}} else {let signed=t.int().is_some_and(|x|x.0);match op {CompareOp::Eq=>sink::Predicate::Eq,CompareOp::Ne=>sink::Predicate::Ne,CompareOp::Lt if signed=>sink::Predicate::Slt,CompareOp::Le if signed=>sink::Predicate::Sle,CompareOp::Gt if signed=>sink::Predicate::Sgt,CompareOp::Ge if signed=>sink::Predicate::Sge,CompareOp::Lt=>sink::Predicate::Ult,CompareOp::Le=>sink::Predicate::Ule,CompareOp::Gt=>sink::Predicate::Ugt,CompareOp::Ge=>sink::Predicate::Uge}};
+                let x = self.typed_compare(pred,t,&a,&b);
+                let x = self.typed_cast(sink::Cast::ZExt,Ty::Scalar(Scalar::Bool),&x,Ty::Scalar(Scalar::U8));
                 self.put(result, &x);
             }
             Inst::IntArith {
@@ -1046,21 +1026,17 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                 result, address, ..
             } => {
                 let p = self.address(address);
-                let metadata = self.access_facts(&[address]);
-                let x = self.calc(format!(
-                    "load {}, ptr {p}, align 1{metadata}",
-                    ty(self.vty(result))
-                ));
-                self.put(result, &x);
+                let _metadata = self.access_facts(&[address]);
+                let pointer = self.operand(&p);
+                let value = self.typed(sink::Operation::Load(ir_type(self.vty(result)), &pointer, &sink::Memory { align: 1, ..Default::default() }));
+                self.put(result, &value);
             }
             Inst::Store { address, value } => {
                 let p = self.address(address);
                 let x = self.numeric(value);
-                let metadata = self.access_facts(&[address]);
-                self.line(format!(
-                    "store {} {x}, ptr {p}, align 1{metadata}",
-                    ty(self.vty(value))
-                ));
+                let _metadata = self.access_facts(&[address]);
+                let x = self.operand(&x); let p = self.operand(&p);
+                self.sink.instruction(None, sink::Operation::Store(ir_type(self.vty(value)), &x, &p, &sink::Memory { align: 1, ..Default::default() }), self.debug_location);
             }
             // FORM v1c: a mark is the evaluator's alone; no code.
             Inst::StorageLive { .. }
@@ -1080,10 +1056,7 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                 } else {
                     !(1u64 << field)
                 };
-                let x = self.calc(format!(
-                    "{} {t} {x}, {k}",
-                    if initialized { "or" } else { "and" }
-                ));
+                let x = self.typed_binary(if initialized {sink::Binary::Or}else{sink::Binary::And},self.vty(mask),&x,&k.to_string());
                 self.put(result, &x);
             }
             Inst::Call { call } => self.call(&self.body.calls[call.index()])?,

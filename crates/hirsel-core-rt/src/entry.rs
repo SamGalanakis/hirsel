@@ -417,15 +417,16 @@ unsafe fn run_with_sources_and_probe(
         Err(error) => {
             let mut line = b"not started: ".to_vec();
             match error {
-                StartupError::MissingGrant(index)
-                | StartupError::UnsupportedHostOpenat2(index, _) => {
+                StartupError::MissingGrant(index) => {
                     line.extend_from_slice(b"grant `");
                     // SAFETY: emitter supplies one valid UTF-8 name per main parameter.
                     line.extend_from_slice(unsafe { bytes(*names.add(index)) });
-                    line.extend_from_slice(match error {
-                        StartupError::MissingGrant(_) => b"` is not in the run's configuration\n",
-                        _ => b"`: this host does not permit openat2, which a Dir needs (Linux 5.6 or later, allowed by every sandbox in force)\n",
-                    });
+                    line.extend_from_slice(b"` is not in the run's configuration\n");
+                }
+                StartupError::UnsupportedHostOpenat2(_, _) => {
+                    line.extend_from_slice(
+                        b"Dir requires openat2 (Linux 5.6 or later, permitted by the sandbox)\n",
+                    );
                 }
                 StartupError::Io(error) => {
                     line.extend_from_slice(

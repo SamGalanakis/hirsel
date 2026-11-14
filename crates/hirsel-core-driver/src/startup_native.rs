@@ -95,7 +95,7 @@ fn startup_refusals(backend: Backend) {
             .arg(built.executable)
             .output()
             .unwrap(),
-        "not started: grant `files`: this host does not permit openat2, which a Dir needs (Linux 5.6 or later, allowed by every sandbox in force)\n",
+        "not started: Dir requires openat2 (Linux 5.6 or later, permitted by the sandbox)\n",
     );
     assert_eq!(std::fs::read_dir(&effects).unwrap().count(), 0);
 

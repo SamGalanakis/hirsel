@@ -120,7 +120,10 @@ fn unsupported_openat2_names_first_dir_and_refuses_before_main_without_effects()
         entered,
     );
     assert_eq!((status, probes.get()), (103, 1));
-    assert_eq!(fixture.stderr(), b"not started: grant `scratch`: this host does not permit openat2, which a Dir needs (Linux 5.6 or later, allowed by every sandbox in force)\n");
+    assert_eq!(
+        fixture.stderr(),
+        b"not started: Dir requires openat2 (Linux 5.6 or later, permitted by the sandbox)\n"
+    );
     assert!(!fixture.root.join("main-ran").exists());
     assert_eq!(std::fs::read_dir(&fixture.root).unwrap().count(), 1);
 }

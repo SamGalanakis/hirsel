@@ -188,7 +188,7 @@ static OPTIONS: &[OptionSpec] = &[
         ["--debug-lines"],
         Some("on|off"),
         ["build", "run", "test"],
-        "Emit native line tables; default on for dev, off for release. Failure positions stay enabled."
+        "Emit native line tables; default off on every profile. Failure positions stay enabled."
     ),
     option!(
         Backend,

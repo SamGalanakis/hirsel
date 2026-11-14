@@ -75,7 +75,7 @@ def main():
                 for engine in ['cranelift', 'llvm']:
                     for release in [False, True]:
                         seen = set()
-                        for choice, expected in [(None, not release), ('off', False), ('on', True)]:
+                        for choice, expected in [(None, False), ('off', False), ('on', True)]:
                             flags = ['--release'] if release else []
                             if choice is not None:
                                 flags += ['--debug-lines', choice]
@@ -96,7 +96,7 @@ def main():
                                        cwd=ROOT, capture_output=True, text=True)
             self.assertEqual(explained.returncode, 0, explained.stderr)
             policy = json.loads(explained.stdout)
-            self.assertEqual((policy['default_dev'], policy['default_release']), ('on', 'off'))
+            self.assertEqual((policy['default_dev'], policy['default_release']), ('off', 'off'))
             self.assertIn('always enabled', policy['statement'])
 
         def test_env_and_registered_products_work_away_from_the_checkout(self):

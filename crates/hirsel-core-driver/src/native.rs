@@ -886,7 +886,7 @@ b0:
         NativeOptions {
             backend,
             optimize: false,
-            debug_lines: true,
+            debug_lines: false,
             target: TARGET.into(),
             runtime: root
                 .join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),

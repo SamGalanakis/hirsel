@@ -134,7 +134,8 @@ do not invalidate a link whose tool content is unchanged. PATH selection is repe
 on each link request; a missing selected editor is a named link refusal. A warm build reads integrity-checked products
 and compiles/links nothing; an implementation edit rebuilds its object and relinks.
 `--debug-lines on|off` controls native line tables for build, run and test.
-Development defaults to on and release defaults to off, on both engines.
+Line tables default to off on every profile and both engines. Use
+`--debug-lines on` to opt in.
 `explain debug-lines` describes the same choice. Native object and link keys
 include the choice. With rows off no debug object is linked; failure-site symbols,
 source tables and exact failure reports stay enabled.

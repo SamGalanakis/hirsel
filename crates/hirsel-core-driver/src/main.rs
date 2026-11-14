@@ -418,7 +418,7 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
                 Backend::Cranelift
             }),
             optimize: release,
-            debug_lines: debug_lines.unwrap_or(!release),
+            debug_lines: debug_lines.unwrap_or(false),
             target,
             runtime: runtime.ok_or("build/run/test requires --runtime <core runtime archive>")?,
             include: headers.path().to_owned(),

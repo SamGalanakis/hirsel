@@ -78,3 +78,10 @@ fn failure_sites_cranelift_release_default() { failure_sites_rebind(Backend::Cra
 #[test]
 #[ignore = "explicit native integration target"]
 fn failure_sites_llvm_release_default() { failure_sites_rebind(Backend::Llvm, true, false); }
+
+#[test]
+#[ignore = "explicit native integration target"]
+fn failure_sites_cranelift_dev_default() { failure_sites_rebind(Backend::Cranelift, false, false); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn failure_sites_llvm_dev_default() { failure_sites_rebind(Backend::Llvm, false, false); }

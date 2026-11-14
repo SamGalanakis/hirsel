@@ -151,11 +151,11 @@ Line tables default to off on every profile and both engines. Use
 `explain debug-lines` describes the same choice. Native object and link keys
 include the choice. With rows off no debug object is linked; failure-site symbols,
 source tables and exact failure reports stay enabled.
-Native body objects with rows enabled contain code and source-independent DWARF rows: each file
-names its source item, and each line encodes the item-relative byte offset plus
-one. The object keys contain no absolute source position. One shared link-time
-writer resolves these rows, declaration positions and inline call sites against
-the current checked source snapshot. It writes one DWARF5 debug object from cached item-relative side products.
+Native body products contain clean ELF code and, when requested, a separate
+record of machine ranges, item-relative byte offsets and inline scopes. The
+object keys contain no absolute source position. One shared link-time writer
+resolves those records against the current checked source snapshot and writes
+one DWARF5 debug object.
 The engines publish clean ELF bytes and their optional rows together; link inputs
 are never rewritten. LLVM extracts rows once when it first produces an object;
 Cranelift publishes its machine rows directly. Default-off builds emit, decode
@@ -171,6 +171,9 @@ source descriptors. There is no generated C translation unit or C compilation
 step. The selected `--cc` runs only as a linker driver for CRT, sysroot and
 library selection. Runtime headers remain embedded ABI/cache inputs. Entry code
 generation runs only on a link-cache miss.
+The shipping runtime archive has its Rust debug metadata removed once at
+publication, preserving code, public symbols and unwind data. All profiles
+link that same archive; the linker performs no per-program debug stripping.
 
 The fresh entry object also defines the linked item ordinals and hands the
 borrowed current-source table to `hirsel_core_os_run_with_sources`. An exit101

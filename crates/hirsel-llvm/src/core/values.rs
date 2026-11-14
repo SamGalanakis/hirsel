@@ -18,16 +18,58 @@ pub(super) fn slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
                 | Inst::ReadStatic { result, .. }
                 | Inst::FunctionRef { result, .. }
                 | Inst::Pointer { result, .. }
-                | Inst::UpdateMask { result, .. } => Some(result),
+                | Inst::UpdateMask { result, .. }
+                | Inst::Case { result, .. }
+                | Inst::RegionOpen { result }
+                | Inst::TryUnwrap { result, .. } => Some(result),
                 _ => None,
             };
             if let Some(v) = result {
                 owners[v.index()] = Some((block, index));
             }
-            if let Inst::Convert { flag: Some(v), .. } | Inst::IntArith { flag: Some(v), .. } =
-                *inst
-            {
-                owners[v.index()] = Some((block, index));
+            // These producers join native fast/slow paths before publishing
+            // each result exactly once. Named failure edges leave before it.
+            let mut define = |v: ValueId| owners[v.index()] = Some((block, index));
+            match *inst {
+                Inst::Convert { flag: Some(v), .. } | Inst::IntArith { flag: Some(v), .. } => {
+                    define(v)
+                }
+                Inst::Alloc {
+                    result,
+                    available,
+                    region_entry,
+                    ..
+                } => {
+                    define(result);
+                    define(available);
+                    if let Some(v) = region_entry {
+                        define(v);
+                    }
+                }
+                Inst::Grow {
+                    result, available, ..
+                } => {
+                    define(result);
+                    define(available);
+                }
+                Inst::LimitEnter {
+                    admitted,
+                    available,
+                    ..
+                } => {
+                    define(admitted);
+                    define(available);
+                }
+                Inst::Call { call } => {
+                    for &result in body.calls[call.index()]
+                        .results
+                        .get(&body.pools.values)
+                        .unwrap()
+                    {
+                        define(result);
+                    }
+                }
+                _ => {}
             }
         }
     }

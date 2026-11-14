@@ -70,6 +70,28 @@ fn every_sample_is_well_formed() {
 /// Bug: well-formedness accepts a producer mistake an emitter would miscompile.
 /// Each case is a one-line edit of a correct body and the rule it breaks.
 #[test]
+fn direct_calls_agree_with_their_callee_by_signature_value() {
+    // Bug (m2b-table-tx-951): evaluator assembly demands one instance from two
+    // callers, so a call site may spell its callee's signature with another, equal
+    // row (rows are not interned); wf refused that program though the engines,
+    // which agree across units by the value alone, ran it. A call through a
+    // different signature is still refused: it would be an ABI disagreement.
+    let module = |site: &str| {
+        format!(
+            "core v1\nsig g0 = (u64) -> (u64)\nsig g1 = (u64) -> (u64)\nsig g2 = (u64) -> (u32)\n\
+             inst n0 = p@0/m/f [] []\ninst n1 = p@0/m/g [] []\n\
+             fn f0 = n0 g0 {{\nb0(v0: u64):\n  return v0\n}}\n\
+             fn f1 = n1 g0 {{\nb0(v0: u64):\n  v1: {site}\n  return v0\n}}\n"
+        )
+    };
+    wf::module(&parse(&module("u64 = call f0 g1 (v0)")).unwrap())
+        .expect("an equal signature row agrees");
+    let e = wf::module(&parse(&module("u32 = call f0 g2 (v0)")).unwrap())
+        .expect_err("a different signature disagrees");
+    assert!(e.contains("direct call through another signature"), "{e}");
+}
+
+#[test]
 fn well_formedness_rejects_producer_mistakes() {
     let head = "core v1\nsig g0 = (i32, i32) -> (i32)\nsig g1 = (u64) -> (ptr)\nsig g2 = (u64) -> never\nsig g3 = () -> (ptr)\ninst n0 = p@0/m/f [] []\ninst n1 = p@0/m/stop [] []\nfn f0 = n0 g0 {\n";
     let tail = "fn f1 = n1 g2 extern\n";

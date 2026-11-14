@@ -1,0 +1,41 @@
+// One instance `apply[u64, u64]` demanded twice: from the generic `via[R]`, whose
+// instance passes its fn parameter on, and from the non-generic `second`, which
+// passes a fn item. The two demands reach the same callee under two equal
+// signature rows; a direct call agrees with its callee by the signature itself,
+// not by the row that spells it (m2b-table-tx-951's generic_relay).
+//
+// Hand-derived: via(one) calls apply(1, one) = 1 and discards it, then
+// second() = apply(1, two) = two(1) = 1 + 1 = 2.
+// expect: run case_via() = 2
+fn apply[A, R](arg: A, body: fn(A) -> R) -> R {
+    body(arg)
+}
+
+fn one(arg: u64) -> u64 {
+    arg
+}
+
+fn two(arg: u64) -> u64 {
+    arg + 1
+}
+
+fn second() -> u64 {
+    apply(1u64, two)
+}
+
+fn via[R](body: fn(u64) -> R) -> u64 {
+    let _ = apply(1u64, body)
+    second()
+}
+
+pub fn case_via() -> u64 {
+    via(one)
+}
+
+pub fn main() -> Result[(), Exit] {
+    if case_via() == 2u64 {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
+}

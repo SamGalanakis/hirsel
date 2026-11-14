@@ -10,6 +10,18 @@ fn captured_formal_regions_cranelift(){captured_formal_regions(Backend::Cranelif
 #[ignore="explicit native integration target"]
 fn captured_formal_regions_llvm(){captured_formal_regions(Backend::Llvm);}
 
+// One generic instance demanded from a generic relay and from a plain caller
+// (m2b-table-tx-951's generic_relay): both engines agree with the evaluator.
+fn generic_relay(backend: Backend) {
+    ordered_case(backend, include_str!("../../../core/front/cases/body/generic-relay-one-instance.hirsel"));
+}
+#[test]
+#[ignore="explicit native integration target"]
+fn generic_relay_cranelift(){generic_relay(Backend::Cranelift);}
+#[test]
+#[ignore="explicit native integration target"]
+fn generic_relay_llvm(){generic_relay(Backend::Llvm);}
+
 fn map_churn(backend: Backend) {
     let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dir=tempfile::tempdir().unwrap();

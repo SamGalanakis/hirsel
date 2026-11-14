@@ -1043,10 +1043,15 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             )?;
             match site.callee {
                 Callee::Direct(f) => {
+                    // A direct call agrees with its callee by the signature itself:
+                    // signature rows are not interned, so two rows may spell one
+                    // signature, and across native units only the value can agree.
                     let f = c.m.functions.get(f.index()).ok_or("unknown callee")?;
-                    need(f.signature == site.signature, || {
-                        "direct call through another signature".into()
-                    })?;
+                    need(
+                        f.signature == site.signature
+                            || c.m.signatures.get(f.signature.index()) == Some(sig),
+                        || "direct call through another signature".into(),
+                    )?;
                 }
                 Callee::Indirect(v) => need(c.ty(v)? == Ty::Ptr, || {
                     "indirect callee is not a pointer".into()

@@ -219,20 +219,11 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         self.runtime_void_metadata(name, args, "");
     }
     fn runtime_void_metadata(&mut self, name: &str, args: &[(String, String)], metadata: &str) {
-        self.intrinsics.insert(format!(
-            "declare void @{name}({})",
-            args.iter()
-                .map(|(t, _)| self.c_argument(t))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-        self.line(format!(
-            "call void @{name}({}){metadata}",
-            args.iter()
-                .map(|(t, v)| format!("{} {v}", self.c_argument(t)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
+        let _ = metadata;
+        let params: Vec<_> = args.iter().map(|(t, _)| sink::Parameter::plain(super::ir_type_text(self.c_argument(t)))).collect();
+        let values: Vec<_> = args.iter().map(|(_, v)| self.operand(v)).collect();
+        let signature = sink::Signature { result: sink::Type::Void, extension: sink::Extension::None, params };
+        self.sink.instruction(None, sink::Operation::Call(&signature, &sink::Value::Global(name.to_owned()), &values, &sink::CallAttrs::default()), self.debug_location);
     }
     fn allocation(&mut self, name: &str, args: &[(String, String)]) -> (String, String) {
         self.allocation_call(name, args, "")

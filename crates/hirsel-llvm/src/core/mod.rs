@@ -624,6 +624,14 @@ fn ir_type(t: Ty) -> sink::Type {
         Ty::Scalar(s) => sink::Type::Int((s.size() * 8) as u32),
     }
 }
+fn ir_type_text(text: &str) -> sink::Type {
+    let text = text.trim().trim_end_matches(" zeroext").trim_end_matches(" signext");
+    if text == "ptr" { return sink::Type::Ptr; }
+    if text == "float" { return sink::Type::Float; }
+    if text == "double" { return sink::Type::Double; }
+    if let Some(bits) = text.strip_prefix('i').and_then(|s| s.parse().ok()) { return sink::Type::Int(bits); }
+    sink::Type::Ptr
+}
 fn bits_ty(t: Ty) -> String {
     format!("i{}", size(t) * 8)
 }

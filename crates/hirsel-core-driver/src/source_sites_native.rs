@@ -38,15 +38,15 @@ fn failure_sites_rebind(backend: Backend, optimize: bool) {
     assert!(!built.linked);
     run(&built, 2);
 
-    // Adds two lines, a new indexed definition and no reachable dependency.
-    let moved = format!("fn added() -> u64 {{ 0 }}\n\n{source}");
+    // Three lines owned by a new definition, with existing item text unchanged.
+    let moved = format!("fn added() -> u64 {{\n    0\n}}\n{source}");
     let product = check(&moved);
     assert!(!product.rechecked.contains(&entry));
     assert!(!product.rechecked.contains(&overflow));
     let built = product.build(&entry, &options).unwrap();
     assert_eq!(built.compiled, 0, "a line move must reuse every reached body object");
     assert!(built.linked, "current source belongs in the fresh link product");
-    run(&built, 4);
+    run(&built, 5);
 }
 
 #[test]

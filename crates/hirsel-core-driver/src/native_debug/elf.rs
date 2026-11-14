@@ -122,6 +122,19 @@ impl Addresses {
 
     pub fn strip(&self, bytes: &[u8]) -> Result<Vec<u8>, String> {
         let mut elf = object::build::elf::Builder::read(bytes).map_err(error)?;
+        // LLVM shares its symbol and section-name strings. Object's editor
+        // writes those tables separately, so provide the section-name table.
+        if !elf
+            .sections
+            .iter()
+            .any(|s| matches!(s.data, object::build::elf::SectionData::SectionString))
+        {
+            let strings = elf.sections.add();
+            strings.name = ".shstrtab".into();
+            strings.sh_type = object::elf::SHT_STRTAB;
+            strings.sh_addralign = 1;
+            strings.data = object::build::elf::SectionData::SectionString;
+        }
         let mut aliases = Vec::new();
         for section in &mut elf.sections {
             let name = section.name.as_slice();

@@ -3,6 +3,9 @@ use hirsel_core_ids::DefPath;
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
+mod native;
+pub use native::*;
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SourceMap {
     pub files: Vec<SourceFile>,

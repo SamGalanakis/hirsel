@@ -1,3 +1,4 @@
-// expect: refuse MEM-2 at 3:19
+// expect: refuse MEM-2 at 4:19
+// expect: compared MEM-2 at 4:19 | own | plain or stable
 // MEM-2: own storage is forbidden in a stable declaration.
 stable type Bad { value: String }

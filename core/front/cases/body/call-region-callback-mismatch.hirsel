@@ -1,4 +1,5 @@
 // A callback for a different local Region still does not fit (LANG-13).
-// expect: refuse LANG-13 at 4:45
+// expect: refuse LANG-13 at 5:45
+// expect: compared LANG-13 at 5:45 | scoped fn(core@1/core/Text in b) -> u64 | scoped fn(core@1/core/Text in a) -> u64
 fn invoke(r:Region, f:scoped fn(Text in r)->u64)->u64 {0}
 fn bad()->u64 {region a {region b {invoke(a,fn(t:Text in b)->u64{text.len(t)})}}}

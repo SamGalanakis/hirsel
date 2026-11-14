@@ -106,6 +106,21 @@ pub enum Kind {
     Generic,
 }
 
+impl Kind {
+    /// The kind as a compared fact of a kind refusal (PROG-7).
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Kind::Plain => "plain",
+            Kind::Own => "own",
+            Kind::Stable => "stable",
+            Kind::Resource => "resource",
+            Kind::Counted => "counted",
+            Kind::Scoped => "scoped",
+            Kind::Generic => "type parameter",
+        }
+    }
+}
+
 /// What a declaration's keyword says (OWN-1).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Repr {
@@ -1618,11 +1633,14 @@ impl Program<'_> {
                 }
                 Pending::NotScoped { ty, site } => {
                     if kind(&self.decls, &self.types, ty, &[]) == Kind::Scoped {
-                        self.refusals.push(refusal(
-                            "OWN-19",
-                            site,
-                            "a scoped type is not a type argument of a generic other than Option and Result",
-                        ));
+                        self.refusals.push(
+                            refusal(
+                                "OWN-19",
+                                site,
+                                "a scoped type is not a type argument of a generic other than Option and Result",
+                            )
+                            .with_comparison(canonical(&self.decls, &self.types, ty), "not scoped"),
+                        );
                     }
                 }
             }
@@ -1995,23 +2013,30 @@ impl Program<'_> {
                 if decl.repr == Repr::Stable
                     && !stable_field(&self.decls, &self.types, f.ty, &params)
                 {
-                    out.push(refusal(
-                        if decl.compact.is_some() {
-                            "MEM-9"
-                        } else {
-                            "MEM-2"
-                        },
-                        f.site,
-                        "a stable field is plain or stable",
-                    ));
+                    let found = kind(&self.decls, &self.types, f.ty, &params).keyword();
+                    out.push(
+                        refusal(
+                            if decl.compact.is_some() {
+                                "MEM-9"
+                            } else {
+                                "MEM-2"
+                            },
+                            f.site,
+                            "a stable field is plain or stable",
+                        )
+                        .with_comparison(found, "plain or stable"),
+                    );
                 } else if decl.repr != Repr::Scoped
                     && kind(&self.decls, &self.types, f.ty, &params) == Kind::Scoped
                 {
-                    out.push(refusal(
-                        "OWN-19",
-                        f.site,
-                        format!("field `{}` of a non-scoped type is scoped", f.name),
-                    ));
+                    out.push(
+                        refusal(
+                            "OWN-19",
+                            f.site,
+                            format!("field `{}` of a non-scoped type is scoped", f.name),
+                        )
+                        .with_comparison(canonical(&self.decls, &self.types, f.ty), "not scoped"),
+                    );
                 }
                 if decl.repr != Repr::Stable && unrooted_stable(&self.decls, &self.types, f.ty) {
                     out.push(refusal(
@@ -2090,8 +2115,10 @@ impl Program<'_> {
                 if p.mode == Mode::Mut
                     && kind(&self.decls, &self.types, p.ty, &params) == Kind::Stable
                 {
-                    self.refusals
-                        .push(refusal("MEM-5", p.site, "stable data cannot be mutated"));
+                    self.refusals.push(
+                        refusal("MEM-5", p.site, "stable data cannot be mutated")
+                            .with_comparison("mut", "view"),
+                    );
                 }
             }
             if kind(&self.decls, &self.types, fd.result, &params) == Kind::Scoped

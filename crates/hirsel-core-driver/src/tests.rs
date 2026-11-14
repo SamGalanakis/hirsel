@@ -539,7 +539,10 @@ fn refused_library_never_publishes_an_image() {
 #[test]
 fn prog7_machine_refusal_spans_point_into_current_file_bytes() {
     let dir = tempfile::tempdir().unwrap();
-    let source = "// leading comment\nfn good() -> u64 { 42 }\nfn bad() -> u64 { let n = 7; 0 }\n";
+    // The refused `n` is the found `u16` where the result's `u64` is expected (LANG-11):
+    // the machine form carries both facts, found as declared and expected as required.
+    let source =
+        "// leading comment\nfn good() -> u64 { 42 }\nfn bad() -> u64 { let n: u16 = 7; n }\n";
     let result = Driver::default()
         .check(request(source, dir.path()), &mut Meter::new(false))
         .unwrap();
@@ -547,11 +550,12 @@ fn prog7_machine_refusal_spans_point_into_current_file_bytes() {
     let refusal = diagnostics.iter().find(|d| d.rule == "LANG-11").unwrap();
     assert_eq!(refusal.primary.module, "app@1/main");
     let span = refusal.primary.span;
-    assert_eq!(&source[span.start as usize..span.end as usize], "7");
+    assert_eq!(span.start as usize, source.rfind('n').unwrap());
+    assert_eq!(&source[span.start as usize..span.end as usize], "n");
     let json = serde_json::to_value(refusal).unwrap();
-    for key in ["rule", "primary", "causal", "declared", "required"] {
-        assert!(json.get(key).is_some());
-    }
+    assert_eq!(json["declared"], "u16");
+    assert_eq!(json["required"], "u64");
+    assert_eq!(json["causal"], serde_json::json!([]));
 }
 #[test]
 fn instance_collection_is_finite_deduplicated_and_order_independent() {

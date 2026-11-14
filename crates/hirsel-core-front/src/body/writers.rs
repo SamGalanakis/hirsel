@@ -587,16 +587,20 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     }
                     (NodeKind::LabelledArgument, true) => {
                         let name = &f.name;
-                        self.refuse("LANG-9", e, format!("expected the field `{name}` here"));
+                        self.refuse_label(
+                            e,
+                            Some(name),
+                            format!("expected the field `{name}` here"),
+                        );
                         return None;
                     }
                     (NodeKind::LabelledArgument, false) => {
-                        self.refuse("LANG-9", e, "this payload is not labelled");
+                        self.refuse_label(e, None, "this payload is not labelled".to_owned());
                         return None;
                     }
                     (_, true) => {
                         let name = &f.name;
-                        self.refuse("LANG-9", e, format!("the field `{name}` is labelled"));
+                        self.refuse_label(e, Some(name), format!("the field `{name}` is labelled"));
                         return None;
                     }
                     (_, false) => e,
@@ -1252,16 +1256,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
                 (NodeKind::LabelledArgument, true) => {
                     let name = &f.name;
-                    self.refuse("LANG-9", e, format!("expected the field `{name}` here"));
+                    self.refuse_label(e, Some(name), format!("expected the field `{name}` here"));
                     return None;
                 }
                 (NodeKind::LabelledArgument, false) => {
-                    self.refuse("LANG-9", e, "this payload is not labelled");
+                    self.refuse_label(e, None, "this payload is not labelled".to_owned());
                     return None;
                 }
                 (_, true) => {
                     let name = &f.name;
-                    self.refuse("LANG-9", e, format!("the field `{name}` is labelled"));
+                    self.refuse_label(e, Some(name), format!("the field `{name}` is labelled"));
                     return None;
                 }
                 (_, false) => e,

@@ -1,3 +1,4 @@
-// expect: refuse OWN-19 at 3:13
+// expect: refuse OWN-19 at 4:13
+// expect: compared OWN-19 at 4:13 | View[core@1/core/String] | not scoped
 // OWN-19: a scoped value is not a field of an own type.
 type Keep { v: View[String] }

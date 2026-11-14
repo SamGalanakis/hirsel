@@ -1,3 +1,4 @@
 // OWN-7, the spec's example: an unmarked parameter of a moving type is a view and is never moved; refused at the move.
-// expect: refuse OWN-7 at 3:29
+// expect: refuse OWN-7 at 4:29
+// expect: compared OWN-7 at 4:29 | view | take
 fn f(s: String) -> String { s }

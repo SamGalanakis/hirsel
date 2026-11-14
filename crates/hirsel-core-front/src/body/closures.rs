@@ -187,7 +187,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             TyKind::Error => return (ERROR, None),
             _ => {
-                self.refuse("LANG-13", callee, "the value being called is not callable");
+                let a = self.shown(ty);
+                let message = "the value being called is not callable";
+                self.refuse_compared("LANG-13", callee, a, "a callable type", message);
                 return (ERROR, None);
             }
         };
@@ -227,11 +229,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if waits {
             self.waited = true;
             if !self.fd.waits && !self.entry {
-                self.refuse(
-                    "LANG-8",
-                    n,
-                    "invokes a waits callable but is not declared waits",
-                );
+                let message = "invokes a waits callable but is not declared waits";
+                self.refuse_compared("LANG-8", n, "not waits", "waits", message);
             }
         }
         let abi = self.value_call_abi(ty, result, n, scratch);
@@ -281,11 +280,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
                 (NodeKind::BytesArgument, true) => self.kids(arg)[0],
                 (NodeKind::BytesArgument, false) => {
-                    self.refuse("OWN-7", arg, "this parameter takes no `bytes` mark");
+                    let message = "this parameter takes no `bytes` mark";
+                    self.refuse_compared("OWN-7", arg, "bytes", mode.keyword(), message);
                     self.kids(arg)[0]
                 }
                 (_, true) => {
-                    self.refuse("OWN-7", arg, "this parameter needs a `bytes` argument");
+                    let message = "this parameter needs a `bytes` argument";
+                    self.refuse_compared("OWN-7", arg, self.written_mode(arg), "bytes", message);
                     arg
                 }
                 _ => arg,
@@ -853,7 +854,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return (ty, code);
         }
         if expected_kind == Some(Callable::Plain) {
-            self.refuse("LANG-13", n, "a plain callable captures nothing");
+            let message = "a plain callable captures nothing";
+            self.refuse_compared("LANG-13", n, "own fn", "fn", message);
             return (ERROR, None);
         }
         let kind = if frame.send {
@@ -862,7 +864,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Callable::Own
         };
         if expected_kind == Some(Callable::OwnSend) && !frame.send {
-            self.refuse("LANG-13", n, "own[send] requires send captures");
+            let message = "own[send] requires send captures";
+            self.refuse_compared("LANG-13", n, "own fn", "own[send] fn", message);
             return (ERROR, None);
         }
         let kind = if expected_kind == Some(Callable::Own) {

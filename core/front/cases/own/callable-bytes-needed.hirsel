@@ -1,3 +1,4 @@
 // OWN-7: the bytes mode survives a callable parameter.
-// expect: refuse OWN-7 at 3:36
+// expect: refuse OWN-7 at 4:36
+// expect: compared OWN-7 at 4:36 | unmarked | bytes
 fn f(h:fn(bytes u64)->u64)->u64 {h(7)}

@@ -518,21 +518,33 @@ impl ConstCx<'_, '_> {
                 if node.kind != NodeKind::LabelledArgument
                     || item.tree.token_text(item.text, node.token?) != field.name
                 {
-                    self.p.refusals.push(refusal(
-                        "LANG-9",
-                        self.p.site(self.at, arg),
-                        "constant fields are labelled in declaration order",
-                    ));
+                    let written = if node.kind == NodeKind::LabelledArgument {
+                        format!("{}:", item.tree.token_text(item.text, node.token?))
+                    } else {
+                        "positional".to_owned()
+                    };
+                    self.p.refusals.push(
+                        refusal(
+                            "LANG-9",
+                            self.p.site(self.at, arg),
+                            "constant fields are labelled in declaration order",
+                        )
+                        .with_comparison(written, format!("{}:", field.name)),
+                    );
                     return None;
                 }
                 item.tree.children(arg)[0]
             } else {
                 if node.kind == NodeKind::LabelledArgument {
-                    self.p.refusals.push(refusal(
-                        "LANG-9",
-                        self.p.site(self.at, arg),
-                        "constant payload is positional",
-                    ));
+                    let written = format!("{}:", item.tree.token_text(item.text, node.token?));
+                    self.p.refusals.push(
+                        refusal(
+                            "LANG-9",
+                            self.p.site(self.at, arg),
+                            "constant payload is positional",
+                        )
+                        .with_comparison(written, "positional"),
+                    );
                     return None;
                 }
                 arg

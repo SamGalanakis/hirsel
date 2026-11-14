@@ -1263,7 +1263,12 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 Root::Parameter(i) => self.fd.params.get(i as usize).map(|q| q.name),
                 Root::Generic(i) => self.fd.generics.get(i as usize).map(|g| g.name),
                 Root::Local(b) => binders.get(b as usize).map(|b| b.name),
-                Root::Enclosing | Root::CallableParameter { .. } => None,
+                // A callable type's parameters are unnamed: its root is a position.
+                Root::CallableParameter { index, .. } => {
+                    s.push_str(&format!("in callable parameter {}", index + 1));
+                    return;
+                }
+                Root::Enclosing => None,
             };
             s.push_str("in ");
             s.push_str(name.map_or("r", |n| symbols.text(n)));
@@ -1345,6 +1350,32 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     ) {
         let written = format!("{}{}", if negate { "-" } else { "" }, self.token_text(n));
         self.refuse_compared(rule, n, written, ty, message);
+    }
+    /// An argument's written mode mark as an OWN-7 fact: `mut`, `view`, `take`, `bytes`,
+    /// or `unmarked`.
+    fn written_mode(&self, a: NodeId) -> &'static str {
+        match self.kind(a) {
+            NodeKind::BytesArgument => "bytes",
+            NodeKind::Unary => match self.token_text(a) {
+                "mut" => "mut",
+                "view" => "view",
+                "take" => "take",
+                _ => "unmarked",
+            },
+            _ => "unmarked",
+        }
+    }
+    /// LANG-9 for a construction argument against its field: the argument as written
+    /// (`label: ` or positional) against the field's form, labelled `name:` when
+    /// `field` names it, positional otherwise.
+    fn refuse_label(&mut self, a: NodeId, field: Option<&str>, message: String) {
+        let written = if self.kind(a) == NodeKind::LabelledArgument {
+            format!("{}:", self.token_text(a))
+        } else {
+            "positional".to_owned()
+        };
+        let required = field.map_or("positional".to_owned(), |f| format!("{f}:"));
+        self.refuse_compared("LANG-9", a, written, required, message);
     }
     fn push_refusal(&mut self, r: Refusal) {
         crate::cost_scope!("phase", "diagnostics/gaps");
@@ -1438,11 +1469,9 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 (TyKind::Fn(..), TyKind::Fn(..))
             )
         {
-            self.refuse(
-                "LANG-13",
-                n,
-                "the callable does not fit the written callable type",
-            );
+            let (a, b) = (self.shown(t), self.shown(w.ty));
+            let message = "the callable does not fit the written callable type";
+            self.refuse_compared("LANG-13", n, a, b, message);
             return;
         }
         let sequence = matches!((self.t.kind(w.ty), self.t.kind(t)),
@@ -2048,7 +2077,8 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 .copied()
                 .find(|&c| self.kind(c) == NodeKind::Waits)
                 .unwrap_or(root);
-            self.refuse("LANG-8", w, "declared `waits` but calls nothing that waits");
+            let message = "declared `waits` but calls nothing that waits";
+            self.refuse_compared("LANG-8", w, "waits", "not waits", message);
         }
     }
     fn finish(mut self) -> CoreCheck {

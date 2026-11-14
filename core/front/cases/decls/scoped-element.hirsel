@@ -1,5 +1,7 @@
-// expect: refuse OWN-19 at 4:35
+// expect: refuse OWN-19 at 6:35
+// expect: compared OWN-19 at 6:35 | View[core@1/core/String] | not scoped
+// expect: compared OWN-19 at 6:51 | View[core@1/core/String] | not scoped
 // OWN-19's example: a scoped value is not an element of a collection. The body's
 // `list.new()` would make one too (T = View[String] in List[T]), refused at the call.
 fn keep(xs: List[String]) -> List[View[String]] { list.new() }
-// expect: refuse OWN-19 at 4:51
+// expect: refuse OWN-19 at 6:51

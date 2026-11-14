@@ -1,3 +1,4 @@
 // OWN-7: a plain callable parameter takes no bytes mark.
-// expect: refuse OWN-7 at 3:30
+// expect: refuse OWN-7 at 4:30
+// expect: compared OWN-7 at 4:30 | bytes | view
 fn f(h:fn(u64)->u64)->u64 {h(bytes 7)}

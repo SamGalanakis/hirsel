@@ -1150,21 +1150,22 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
                 (NodeKind::LabelledArgument, true) => {
                     let name = &f.name;
-                    self.refuse("LANG-9", a, format!("expected the field `{name}` here"));
+                    self.refuse_label(a, Some(name), format!("expected the field `{name}` here"));
                     return (ERROR, None);
                 }
                 (NodeKind::LabelledArgument, false) => {
-                    self.refuse("LANG-9", a, "this payload is not labelled");
+                    self.refuse_label(a, None, "this payload is not labelled".to_owned());
                     return (ERROR, None);
                 }
                 // A payload is a `take` parameter, never a `bytes` one (OWN-7).
                 (NodeKind::BytesArgument, _) => {
-                    self.refuse("OWN-7", a, "a payload takes no `bytes` mark");
+                    let message = "a payload takes no `bytes` mark";
+                    self.refuse_compared("OWN-7", a, "bytes", "take", message);
                     self.kids(a)[0]
                 }
                 (_, true) => {
                     let name = &f.name;
-                    self.refuse("LANG-9", a, format!("the field `{name}` is labelled"));
+                    self.refuse_label(a, Some(name), format!("the field `{name}` is labelled"));
                     return (ERROR, None);
                 }
                 (_, false) => a,

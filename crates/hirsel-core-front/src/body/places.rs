@@ -553,7 +553,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 match v.origin {
                     Origin::ViewParam => {
                         // OWN-7: a view parameter of a moving type is never moved.
-                        self.refuse("OWN-7", n, format!("`{name}` is a view parameter"));
+                        let message = format!("`{name}` is a view parameter");
+                        self.refuse_compared("OWN-7", n, "view", "take", message);
                         return;
                     }
                     Origin::MutParam => {

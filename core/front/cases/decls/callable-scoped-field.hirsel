@@ -1,3 +1,4 @@
 // OWN-19: a scoped callback cannot be stored in an own record.
-// expect: refuse OWN-19 at 3:15
+// expect: refuse OWN-19 at 4:15
+// expect: compared OWN-19 at 4:15 | scoped fn() -> () | not scoped
 type Stored { f: scoped fn() }

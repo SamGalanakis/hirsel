@@ -1,7 +1,8 @@
 // OWN-19: a core operation whose signature would make the scoped value an element of a
 // collection (`list.push`'s `List[T]` with T = View[String]) refuses the scoped argument.
-// expect: refuse OWN-19 at 7:29
-// expect: refuse LANG-12 at 6:16
+// expect: refuse OWN-19 at 8:29
+// expect: refuse LANG-12 at 7:16
+// expect: compared OWN-19 at 8:29 | View[core@1/core/String] | not scoped
 fn f(s: String) -> u64 {
   let mut xs = list.new()
   let _ = list.push(mut xs, view s)

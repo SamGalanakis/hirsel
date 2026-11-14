@@ -1,4 +1,5 @@
 // LANG-13: a bytes parameter cannot be erased from a function value's type.
-// expect: refuse LANG-13 at 4:28
+// expect: refuse LANG-13 at 5:28
+// expect: compared LANG-13 at 5:28 | fn(bytes u64) -> u64 | fn(u64) -> u64
 fn sized(bytes n:u64)->u64 {n}
 fn f() {let h:fn(u64)->u64=sized}

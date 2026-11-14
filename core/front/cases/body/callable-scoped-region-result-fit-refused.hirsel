@@ -1,5 +1,6 @@
 // A bound invocation Region is not the enclosing function's same-position Region.
-// expect: refuse LANG-13 at 6:47
+// expect: refuse LANG-13 at 7:47
+// expect: compared LANG-13 at 7:47 | fn(core@1/core/Region) -> scoped fn(u64) -> u64 in callable parameter 1 | fn(core@1/core/Region) -> scoped fn(u64) -> u64 in r
 fn plus(x:u64)->u64{x+1}
 fn make(r:Region)->(scoped fn(u64)->u64) in r {plus}
 fn wrong(r:Region) {

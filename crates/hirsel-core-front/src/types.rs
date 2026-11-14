@@ -35,6 +35,18 @@ pub enum Mode {
     Bytes,
 }
 
+impl Mode {
+    /// The mode as source writes it, a compared fact of a mode refusal (PROG-7).
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Mode::View => "view",
+            Mode::Mut => "mut",
+            Mode::Take => "take",
+            Mode::Bytes => "bytes",
+        }
+    }
+}
+
 /// A root in a published signature or a body. Identities are local to the definition.
 #[derive(
     Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, serde::Serialize, serde::Deserialize,

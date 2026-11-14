@@ -137,11 +137,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if g.waits {
             self.waited = true;
             if !self.fd.waits && !self.entry {
-                self.refuse(
-                    "LANG-8",
-                    n,
-                    "calls a `waits` function but is not declared `waits`",
-                );
+                let message = "calls a `waits` function but is not declared `waits`";
+                self.refuse_compared("LANG-8", n, "not waits", "waits", message);
             }
         }
         if g.has_region_parameters {
@@ -188,11 +185,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 // A missing or extra mark is refused at the argument (OWN-7); the
                 // argument is still typed against its parameter.
                 (NodeKind::BytesArgument, false) => {
-                    self.refuse("OWN-7", a, "this parameter takes no `bytes` mark");
+                    let mode = g.params[i].mode.keyword();
+                    let message = "this parameter takes no `bytes` mark";
+                    self.refuse_compared("OWN-7", a, "bytes", mode, message);
                     self.kids(a)[0]
                 }
                 (_, true) => {
-                    self.refuse("OWN-7", a, "this parameter needs a `bytes` argument");
+                    let message = "this parameter needs a `bytes` argument";
+                    self.refuse_compared("OWN-7", a, self.written_mode(a), "bytes", message);
                     a
                 }
                 _ => a,
@@ -443,7 +443,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     if !matches!(self.place(e), Ok(Some(_)) | Err(())) {
                         let _ = self.expr(e, None);
                     }
-                    self.refuse("OWN-7", e, "an argument for a `mut` parameter is `mut p`");
+                    let message = "an argument for a `mut` parameter is `mut p`";
+                    self.refuse_compared("OWN-7", e, self.written_mode(e), "mut", message);
                     return true;
                 }
                 let p = self.kids(e)[0];
@@ -496,7 +497,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             _ if unary == Some("mut") => {
                 let _ = self.expr(self.kids(e)[0], None);
-                self.refuse("OWN-7", e, "`mut` is written only for a `mut` parameter");
+                let message = "`mut` is written only for a `mut` parameter";
+                self.refuse_compared("OWN-7", e, "mut", mode.keyword(), message);
                 true
             }
             Mode::View if unary == Some("view") => {
@@ -564,11 +566,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     *val = self.emit_place(at, e);
                 } else if mode == Mode::Take {
                     let name = self.slot_name(at.place.slot);
-                    self.refuse(
-                        "OWN-7",
-                        e,
-                        format!("a moving place is passed as `take {name}`"),
-                    );
+                    let message = format!("a moving place is passed as `take {name}`");
+                    self.refuse_compared("OWN-7", e, "unmarked", "take", message);
                     return true;
                 } else {
                     // A bare place for an unmarked parameter is a view for the call.
@@ -762,7 +761,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         .chain([g.result])
                         .any(|ty| contained(&p.decls, &self.t, ty, i as u32, false))
                 {
-                    self.refuse("OWN-19", n, "a type parameter cannot be a scoped type");
+                    let a = self.shown(t);
+                    let message = "a type parameter cannot be a scoped type";
+                    self.refuse_compared("OWN-19", n, a, "not scoped", message);
                     return;
                 }
             }

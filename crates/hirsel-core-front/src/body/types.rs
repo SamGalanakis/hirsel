@@ -337,11 +337,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return ERROR;
             }
             if !decl.structural && kind(&p.decls, &self.t, t, &self.params) == Kind::Scoped {
-                self.refuse(
-                    "OWN-19",
-                    at,
-                    "a scoped type is not a type argument of a generic other than Option and Result",
-                );
+                let a = self.shown(t);
+                let message = "a scoped type is not a type argument of a generic other than Option and Result";
+                self.refuse_compared("OWN-19", at, a, "not scoped", message);
                 return ERROR;
             }
             let missing = g.bounds & !has_bounds(&p.decls, &self.t, t, &self.params);

@@ -1,6 +1,7 @@
 // OWN-19: a generic T cannot be a scoped View type, even for a copying argument.
 // A take parameter does not unwrap the view as an unmarked parameter does (OWN-7).
-// expect: refuse OWN-19 at 6:25
+// expect: refuse OWN-19 at 7:25
+// expect: compared OWN-19 at 7:25 | View[u8] | not scoped
 // Generic bodies are checked once and materialized.
 fn eat[T](take t: T) {}
 fn f(v: View[u8]) { eat(v) }

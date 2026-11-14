@@ -445,16 +445,30 @@ whatever value was last installed ([T2.5](#own-26-the-transition-table)).
 A value installed through a `mut` parameter, or into a place under it, reads only anchors
 the caller's place already has: the parameter itself, its parts and sub-views of them, as
 OWN-20 counts them, and the regions its type names. Anything else is refused here, at the
-assignment, so the caller's place keeps its anchor set (OWN-19) across the call.
+assignment, so the caller's place keeps its anchor set (OWN-19) across the call. A scoped
+callback installed so is therefore the parameter's own value or a part of it, or captures no
+slot of the callee, which every callback stored there would outlive (OWN-21), so the
+caller's place also keeps its capture descriptor across the call.
 
 ```hirsel
 fn reset(mut xs: List[u64]) { xs = list.new() }
 scoped type Cursor { input: View[Bytes], pos: u64 }
 fn skip(mut c: Cursor) { c = Cursor(input: c.input, pos: c.pos + 1) }
+fn reset_cb(mut dst: scoped fn(u64) -> u64) { dst = fn(x: u64) -> u64 { x } }
 ```
 ```hirsel
 fn put(mut out: Option[View[String]], t: String) {
   out = Some(view t)                                        // refused: OWN-11, t is not an anchor of out
+}
+```
+```hirsel
+fn replace_cb(mut dst: scoped fn(u64) -> u64, take next: scoped fn(u64) -> u64) {
+  dst = take next                                           // refused: OWN-11, next is not an anchor of dst
+}
+```
+```hirsel
+fn wrap_cb(mut dst: scoped fn(u64) -> u64) {
+  dst = scoped fn(x: u64) -> u64 { dst(x) + 1 }             // refused: OWN-21, dst does not outlive the callback
 }
 ```
 ```hirsel

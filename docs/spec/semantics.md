@@ -106,7 +106,7 @@ Views from `map.get` are anchored to the map and freeze it as list views do.
 fn count(m: Map[String, u64], k: String) -> u64 { match map.get(m, k) { Some(v) => v, None => 0 } }
 ```
 ```hirsel
-fn tally(mut m: Map[String, u64], take w: String) -> Result[(), (Capacity, String, u64)] {
+fn tally(mut m: Map[String, u64], take w: String) -> Result[(), (Capacity, (String, u64))] {
   match map.update(mut m, w, fn(mut n: u64) { n += 1 }) {
     Some(()) => Ok(()),
     None => map.insert(mut m, take w, 1),

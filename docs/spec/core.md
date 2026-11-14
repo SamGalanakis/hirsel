@@ -90,7 +90,10 @@ Each item gives the domain, result, length and capacity, custody and partial eff
 operations it names; nothing else about them may be inferred from an implementation.
 
 - **Errors.** An operation that fails with `Capacity` returns in its error every argument it
-  would have taken and leaves its other arguments unchanged. Only the failures named here or
+  would have taken and leaves its other arguments unchanged. Its error is `(Capacity, X)`,
+  `X` the one such argument or the tuple of them in parameter order, as an owning closure's
+  or a resource literal's error holds its captures or fields, and bare `Capacity` when it
+  takes none. Only the failures named here or
   by a rule occur: `Bounds`, `Overflow`, `Division` and `Unwrap` are failures
   ([FAIL-2](failure.md#fail-2-causes)), every other error is a `Result`. `fail(take msg)`
   takes custody of a message the program already holds and admits nothing, so raising `Fail`
@@ -161,7 +164,7 @@ operations it names; nothing else about them may be inferred from an implementat
   unspecified order. A heap compares with `<` on an `ordered` type, which never fails, so
   only `sort_stable` calls a caller's comparator. Both are core Hirsel code over private
   bodiless functions, as `Map` is; no library module provides a deque or a heap.
-- **Maps.** `map.insert` returns its key and value with `Capacity`. `map.set(mut m, k, take
+- **Maps.** `map.insert` returns its key and value with `Capacity`, as `(Capacity, (K, V))`. `map.set(mut m, k, take
   v)` returns `Ok(old)` when `k` is present, after installing `v` in place, and `Error(v)`
   when it is absent; it copies no key and admits nothing. `map.update(mut m, k, f)`, where
   `f: scoped fn(mut V) -> R`, runs `f` once on the value of `k` in place and returns

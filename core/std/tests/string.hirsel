@@ -586,32 +586,90 @@ fn from_utf8_rows_after_a_block() -> u64 {
 //   with its own second byte, F0 90..BF, F1..F3 80..BF, F4 80..8F (48 + 192 + 16): 2176.
 // 25280 in all, whatever the pad and rest: every overlong, surrogate, value above U+10FFFF,
 // lead without its continuations (cut by the end or by 'a') and continuation without a lead.
-fn pairs_accepted(pad: u64, rest: u64) -> u64 {
+// Only x in lo .. hi is tried, so the pairs can be split by lead byte.
+fn pairs_accepted(lo: u64, hi: u64, pad: u64, rest: u64) -> u64 {
     let mut accepted: u64 = 0
-    for x in 0u64 .. 256 {
-        for y in 0u64 .. 256 {
-            for k in 0u64 .. 3 {
-                let mut b = a_run(pad + 2 + k + rest, b"")
+    for k in 0u64 .. 3 {
+        // One buffer per k: only x and y change, so validation hands the bytes back.
+        let mut b = a_run(pad + 2 + k + rest, b"")
+        for c in 0u64 .. k {
+            let _ = list.set(mut b, pad + 2 + c, 0x80)
+        }
+        for x in lo .. hi {
+            for y in 0u64 .. 256 {
                 let bx: u8 = int.truncate(x)
                 let by: u8 = int.truncate(y)
                 let _ = list.set(mut b, pad, bx)
                 let _ = list.set(mut b, pad + 1, by)
-                for c in 0u64 .. k {
-                    let _ = list.set(mut b, pad + 2 + c, 0x80)
+                let checked = string.from_utf8(take b)
+                b = match checked {
+                    Ok(take s) => {
+                        accepted += 1
+                        result.unwrap(string.into_bytes(take s))
+                    },
+                    Error(take back) => back,
                 }
-                accepted += valid(take b)
             }
         }
     }
     accepted
 }
 
-// pairs_accepted at the end of the input from offset 0; at offset 13, inside the first
-// 16-byte block with the tail loop to reach it; and at offset 16, a word boundary after a
-// block, followed by 16 bytes of 'a' so the words that hold x, y are read by the block loop.
-// expect: run from_utf8_every_pair() = 252802528025280
-fn from_utf8_every_pair() -> u64 {
-    (pairs_accepted(0, 0) * 100000 + pairs_accepted(13, 0)) * 100000 + pairs_accepted(16, 16)
+// The lead bytes x are split into shards so each shard is a law of its own: shard i takes
+// x in pair_shard(i) .. pair_shard(i + 1).
+fn pair_shard(i: u64) -> u64 {
+    match i {
+        0 => 0,
+        1 => 64,
+        2 => 128,
+        3 => 192,
+        _ => 256,
+    }
+}
+
+// The shard bounds start at 0, rise strictly and end at 256 after the last shard, so the
+// shards cover every lead byte 0..=255 exactly once.
+// expect: run from_utf8_pair_shards_cover_every_byte() = true
+fn from_utf8_pair_shards_cover_every_byte() -> bool {
+    let mut ok = pair_shard(0) == 0 && pair_shard(4) == 256
+    for i in 0u64 .. 4 {
+        ok = ok && pair_shard(i) < pair_shard(i + 1)
+    }
+    ok
+}
+
+// pairs_accepted over shard i at the end of the input from offset 0; at offset 13, inside the
+// first 16-byte block with the tail loop to reach it; and at offset 16, a word boundary after
+// a block, followed by 16 bytes of 'a' so the words that hold x, y are read by the block loop.
+fn every_pair_shard(i: u64) -> u64 {
+    let lo = pair_shard(i)
+    let hi = pair_shard(i + 1)
+    (pairs_accepted(lo, hi, 0, 0) * 100000 + pairs_accepted(lo, hi, 13, 0)) * 100000 + pairs_accepted(lo, hi, 16, 16)
+}
+
+// By the table above, per shard, the same at each placement. x 00..3F and 40..7F: ASCII then
+// y ASCII (64 * 128), y C2..DF with k = 1 (64 * 30), or y E1..EF with k = 2 (64 * 15): 11072.
+// expect: run from_utf8_every_pair_00() = 110721107211072
+fn from_utf8_every_pair_00() -> u64 {
+    every_pair_shard(0)
+}
+
+// expect: run from_utf8_every_pair_40() = 110721107211072
+fn from_utf8_every_pair_40() -> u64 {
+    every_pair_shard(1)
+}
+
+// x 80..BF: continuation without a lead, never accepted.
+// expect: run from_utf8_every_pair_80() = 0
+fn from_utf8_every_pair_80() -> u64 {
+    every_pair_shard(2)
+}
+
+// x C0..FF: the two-byte leads (1920), the three-byte leads with their own second byte (960)
+// and the four-byte leads with theirs (256): 3136. Sum over shards: 25280.
+// expect: run from_utf8_every_pair_C0() = 31360313603136
+fn from_utf8_every_pair_C0() -> u64 {
+    every_pair_shard(3)
 }
 
 // pad bytes of 'a', a lead that takes 80..BF after it (C2, E1, F1, of widths 2, 3, 4), its

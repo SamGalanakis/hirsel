@@ -1,7 +1,7 @@
 //! Definition keys keep implementation edits separate from signature dependencies.
 use super::*;
 use hirsel_core_resolve::{DefinitionId, LookupResult, LookupScope, Target};
-use hirsel_core_syntax::{Item, NodeKind};
+use hirsel_core_syntax::{Item, NodeKind, TokenKind};
 use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -10,6 +10,55 @@ pub struct DefinitionKey {
     pub signatures: BTreeMap<Arc<DefPath>, ContentHash>,
     pub lookups: ContentHash,
     pub environment: ContentHash,
+}
+
+/// Hash the semantic token stream, without absolute offsets, whitespace or
+/// comments. Source positions are late-bound by the site/source-table writer;
+/// moving an item therefore keeps its native body product reusable.
+fn body_identity(item: Item<'_>) -> ContentHash {
+    let tokens = item
+        .tree
+        .tokens
+        .get(item.range.tokens.start as usize..item.range.tokens.end as usize)
+        .into_iter()
+        .flatten()
+        .filter(|token| !token.kind.is_trivia() && !matches!(token.kind, TokenKind::Eof))
+        .map(|token| {
+            let mut bytes = vec![token.kind as u8];
+            bytes.extend_from_slice(
+                &item.text[token.span.start as usize..token.span.end as usize].as_bytes(),
+            );
+            bytes
+        })
+        .collect::<Vec<_>>();
+    ContentHash::of_parts("hirsel.body-tokens.v2", tokens.iter().map(Vec::as_slice))
+}
+
+fn header_identity(item: Item<'_>) -> ContentHash {
+    let block_start = item.tree.children(item.root).iter().find_map(|&child| {
+        (item.tree.node(child).kind == NodeKind::Block)
+            .then_some(item.tree.node(child).origin.span.start)
+    });
+    let tokens = item
+        .tree
+        .tokens
+        .get(item.range.tokens.start as usize..item.range.tokens.end as usize)
+        .into_iter()
+        .flatten()
+        .filter(|token| {
+            block_start.is_none_or(|start| token.span.start < start)
+                && !token.kind.is_trivia()
+                && !matches!(token.kind, TokenKind::Eof)
+        })
+        .map(|token| {
+            let mut bytes = vec![token.kind as u8];
+            bytes.extend_from_slice(
+                &item.text[token.span.start as usize..token.span.end as usize].as_bytes(),
+            );
+            bytes
+        })
+        .collect::<Vec<_>>();
+    ContentHash::of_parts("hirsel.header-tokens.v2", tokens.iter().map(Vec::as_slice))
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Header {
@@ -141,7 +190,8 @@ impl Keys {
                 };
                 let path = index.definition_path(definition);
                 let end = header_end(item);
-                let digest = ContentHash::of_bytes(&item.source_text().as_bytes()[..end]);
+                let digest = header_identity(item);
+                let relative_end = end.saturating_sub(item.file_offset as usize);
                 let mut reads = BTreeSet::new();
                 let mut body_reads = BTreeSet::new();
                 for name in &resolution.names {
@@ -155,8 +205,8 @@ impl Keys {
                 headers.names.insert(path, definition);
                 headers.rows[definition.0 as usize] = Some(Header {
                     digest,
-                    has_body: end < item.source_text().len(),
-                    header_end: end as u32,
+                    has_body: relative_end < item.source_text().len(),
+                    header_end: relative_end as u32,
                     site: index.get(definition).site,
                     body_reads: body_reads.into_iter().collect(),
                     reads: reads.into_iter().collect(),
@@ -335,7 +385,7 @@ impl Keys {
                 .collect()
         };
         Ok(DefinitionKey {
-            body: ContentHash::of_bytes(item.source_text().as_bytes()),
+            body: body_identity(item),
             signatures,
             lookups: ContentHash::of_bytes(&encode(&lookups)?),
             environment: self.environment,
@@ -469,6 +519,34 @@ fn compiler_stream_identity(reader: &mut (impl io::Read + io::Seek)) -> io::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn body_identity_ignores_moved_lines_but_tracks_semantic_edits() {
+        let parse = |source: &str| {
+            hirsel_core_syntax::parse_bytes(
+                source.as_bytes(),
+                hirsel_core_syntax::ParseMode::Source,
+                &mut hirsel_core_syntax::Symbols::default(),
+            )
+            .syntax
+        };
+        let original = parse("fn main() -> u64 {\n    7u64\n}\n");
+        let moved = parse("// moved\n// again\nfn main() -> u64 {\n    7u64\n}\n");
+        let changed = parse("fn main() -> u64 {\n    8u64\n}\n");
+        assert_eq!(
+            header_identity(original.item(0)),
+            header_identity(moved.item(0))
+        );
+        assert_eq!(
+            body_identity(original.item(0)),
+            body_identity(moved.item(0))
+        );
+        assert_ne!(
+            body_identity(original.item(0)),
+            body_identity(changed.item(0))
+        );
+    }
+
     #[test]
     fn compiler_link_id_changes_identity_and_missing_notes_keep_full_hashing() {
         // Minimal ELF64 executable: one PT_NOTE at byte 120, a GNU build ID of

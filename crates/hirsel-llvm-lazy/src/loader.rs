@@ -200,7 +200,13 @@ pub(crate) fn program(
                 imported: u8::from(*imported),
                 bitcode: 0,
             }),
-            crate::Unit::Import { bitcode, summary } => summary.selected().then_some(Input {
+            // Apply the body-size bound after composition, just as for text.
+            // Skipping an entire unit also drops declarations/private helpers
+            // and changes function order and MergeFunctions representatives.
+            crate::Unit::Import {
+                bitcode,
+                summary: _,
+            } => Some(Input {
                 data: bitcode.as_ptr(),
                 len: bitcode.len(),
                 imported: 1,

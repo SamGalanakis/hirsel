@@ -43,7 +43,8 @@ pub struct ImportSummary {
     pub facts: Vec<hirsel_core_ir::roles::BodyFacts>,
 }
 impl ImportSummary {
-    /// Declaration-only units need neither their text nor their bitcode decoded.
+    /// Whether a public body is an inline candidate. Keep the unit itself: its
+    /// declarations and private helpers still determine composition order.
     pub fn selected(&self) -> bool {
         self.functions
             .iter()

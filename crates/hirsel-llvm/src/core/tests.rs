@@ -2302,6 +2302,71 @@ b0(v0: u64):
 }
 
 #[test]
+fn raw_imports_above_the_body_bound_keep_the_rest_of_the_module() {
+    let mut library = "@library_value = constant i64 17\ndefine i64 @large(i64 %x) {\n".to_owned();
+    let limit = hirsel_llvm_lazy::INLINE_IMPORT_INSTRUCTION_LIMIT;
+    for i in 0..limit {
+        let previous = if i == 0 {
+            "%x".into()
+        } else {
+            format!("%x{}", i - 1)
+        };
+        writeln!(library, "%x{i} = add i64 {previous}, 0").unwrap();
+    }
+    writeln!(library, "ret i64 %x{}\n}}", limit - 1).unwrap();
+    let caller = "@library_value = external constant i64\ndefine i64 @entry() {\n%x = load i64, ptr @library_value\nret i64 %x\n}";
+    let dir = std::env::temp_dir().join(format!("hirsel-raw-bound-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("library.ll"), &library).unwrap();
+    let prefix = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
+    output(
+        Command::new(prefix.join("bin/llvm-as"))
+            .arg(dir.join("library.ll"))
+            .arg("-o")
+            .arg(dir.join("library.bc")),
+    );
+    let bitcode = std::fs::read(dir.join("library.bc")).unwrap();
+    let summary = hirsel_llvm_lazy::ImportSummary {
+        functions: vec![hirsel_llvm_lazy::ImportFunction {
+            symbol: "large".into(),
+            instructions: limit + 1,
+        }],
+        facts: Vec::new(),
+    };
+    assert!(!summary.selected());
+    let text = hirsel_llvm_lazy::emit_program(
+        &[
+            hirsel_llvm_lazy::Unit::Text {
+                ir: &library,
+                imported: true,
+            },
+            hirsel_llvm_lazy::Unit::Text {
+                ir: caller,
+                imported: false,
+            },
+        ],
+        &["entry".into()],
+    )
+    .unwrap();
+    let decoded = hirsel_llvm_lazy::emit_program(
+        &[
+            hirsel_llvm_lazy::Unit::Import {
+                bitcode: &bitcode,
+                summary: &summary,
+            },
+            hirsel_llvm_lazy::Unit::Text {
+                ir: caller,
+                imported: false,
+            },
+        ],
+        &["entry".into()],
+    )
+    .unwrap();
+    assert_eq!(decoded, text, "the bound selects bodies, not whole modules");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn release_import_bound_keeps_small_bodies_and_uses_cached_large_entries() {
     fn body(name: &str, instructions: usize, linkage: &str) -> String {
         let mut text = format!("define {linkage}i64 @{name}(i64 %x) {{\n");

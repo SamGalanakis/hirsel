@@ -1347,10 +1347,10 @@ def hirsel_core_llvm_native_test(name, data, selection = None, runtime = "//:cor
     _rust_test(
         name = name,
         harness = "//:hirsel-llvm-unittest-harness",
-        data = data,
+        data = data + ["crates/hirsel-llvm/Cargo.toml"],
         files_env = {"HIRSEL_CORE_RT_ARCHIVE": runtime},
         args = selection if selection != None else ["core::", "context::probe_tests::"],
-        native_tools = native_tool_inputs() if selection != None else {},
+        native_tools = native_tool_inputs(),
         cwd = "crates/hirsel-llvm",
         test_binary = "hirsel-llvm-unittest",
         llvm = "root//tools/buck2/native-toolchain:llvm",

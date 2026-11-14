@@ -4,13 +4,40 @@ use hirsel_core_layout::Target;
 use std::path::PathBuf;
 use std::process::Command;
 
+fn native_input(name: &str) -> std::result::Result<PathBuf, String> {
+    let purpose = match name {
+        "HIRSEL_AARCH64_CC" => "the AArch64 C compiler executable",
+        "HIRSEL_QEMU_AARCH64" => "the QEMU AArch64 user executable",
+        "HIRSEL_AARCH64_SYSROOT" => "the AArch64 runtime sysroot directory",
+        "LLVM_SYS_231_PREFIX" => "the pinned LLVM installation directory",
+        _ => unreachable!("native test input name"),
+    };
+    let path = std::env::var_os(name).map(PathBuf::from).ok_or_else(|| {
+        format!("native test input unavailable: {name} is unset; set {name} to {purpose}. Buck native aliases declare these through native_tool_inputs().")
+    })?;
+    if !path
+        .try_exists()
+        .map_err(|e| format!("native test input {name}: {e}"))?
+    {
+        return Err(format!(
+            "native test input unavailable: {name}={} does not exist; set {name} to {purpose}",
+            path.display()
+        ));
+    }
+    Ok(path)
+}
+
 fn run(command: &mut Command) {
     let output = command.output().unwrap();
     assert!(output.status.success(), "{command:?}: {output:?}");
 }
 
 #[test]
-fn linux_c_results_execute_with_mixed_fields_padding_and_hfas() {
+fn linux_c_results_execute_with_mixed_fields_padding_and_hfas() -> std::result::Result<(), String> {
+    let arm_cc = native_input("HIRSEL_AARCH64_CC")?;
+    let qemu = native_input("HIRSEL_QEMU_AARCH64")?;
+    let sysroot = native_input("HIRSEL_AARCH64_SYSROOT")?;
+    let llvm_prefix = native_input("LLVM_SYS_231_PREFIX")?;
     use Scalar::*;
     let shapes: &[&[Scalar]] = &[
         &[Bool],
@@ -198,13 +225,8 @@ fn linux_c_results_execute_with_mixed_fields_padding_and_hfas() {
             for object in objects {
                 std::fs::write(dir.join("probe.o"), object).unwrap();
                 let compiler = match target {
-                    Target::X86_64Linux => {
-                        PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap())
-                            .join("bin/clang")
-                    }
-                    Target::Aarch64Linux => {
-                        PathBuf::from(std::env::var_os("HIRSEL_AARCH64_CC").unwrap())
-                    }
+                    Target::X86_64Linux => llvm_prefix.join("bin/clang"),
+                    Target::Aarch64Linux => arm_cc.clone(),
                 };
                 run(Command::new(compiler)
                     .arg(dir.join("probe.c"))
@@ -213,21 +235,25 @@ fn linux_c_results_execute_with_mixed_fields_padding_and_hfas() {
                     .arg(dir.join("probe")));
                 match target {
                     Target::X86_64Linux => run(&mut Command::new(dir.join("probe"))),
-                    Target::Aarch64Linux => run(Command::new(
-                        std::env::var_os("HIRSEL_QEMU_AARCH64").unwrap(),
-                    )
-                    .arg("-L")
-                    .arg(std::env::var_os("HIRSEL_AARCH64_SYSROOT").unwrap())
-                    .arg(dir.join("probe"))),
+                    Target::Aarch64Linux => run(Command::new(&qemu)
+                        .arg("-L")
+                        .arg(&sysroot)
+                        .arg(dir.join("probe"))),
                 }
             }
         }
     }
     std::fs::remove_dir_all(dir).unwrap();
+    Ok(())
 }
 
 #[test]
-fn checked_arithmetic_preserves_status_context_and_cause_copies() {
+fn checked_arithmetic_preserves_status_context_and_cause_copies() -> std::result::Result<(), String>
+{
+    let arm_cc = native_input("HIRSEL_AARCH64_CC")?;
+    let qemu = native_input("HIRSEL_QEMU_AARCH64")?;
+    let sysroot = native_input("HIRSEL_AARCH64_SYSROOT")?;
+    let llvm_prefix = native_input("LLVM_SYS_231_PREFIX")?;
     let module =
         hirsel_core_ir::text::parse(include_str!("../../../hirsel-core-ir/samples/arith.core"))
             .unwrap();
@@ -266,7 +292,7 @@ int main(void) {{
         std::env::temp_dir().join(format!("hirsel-core-target-failure-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("probe.c"), c).unwrap();
-    let prefix = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
+    let prefix = llvm_prefix;
     let include = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../hirsel-core-rt/include");
     for target in [Target::X86_64Linux, Target::Aarch64Linux] {
         for speed in [false, true] {
@@ -276,9 +302,7 @@ int main(void) {{
                 std::fs::write(dir.join("probe.o"), object).unwrap();
                 let compiler = match target {
                     Target::X86_64Linux => prefix.join("bin/clang"),
-                    Target::Aarch64Linux => {
-                        PathBuf::from(std::env::var_os("HIRSEL_AARCH64_CC").unwrap())
-                    }
+                    Target::Aarch64Linux => arm_cc.clone(),
                 };
                 run(Command::new(compiler)
                     .arg("-O0")
@@ -291,15 +315,14 @@ int main(void) {{
                     .arg(dir.join("probe")));
                 match target {
                     Target::X86_64Linux => run(&mut Command::new(dir.join("probe"))),
-                    Target::Aarch64Linux => run(Command::new(
-                        std::env::var_os("HIRSEL_QEMU_AARCH64").unwrap(),
-                    )
-                    .arg("-L")
-                    .arg(std::env::var_os("HIRSEL_AARCH64_SYSROOT").unwrap())
-                    .arg(dir.join("probe"))),
+                    Target::Aarch64Linux => run(Command::new(&qemu)
+                        .arg("-L")
+                        .arg(&sysroot)
+                        .arg(dir.join("probe"))),
                 }
             }
         }
     }
     std::fs::remove_dir_all(dir).unwrap();
+    Ok(())
 }

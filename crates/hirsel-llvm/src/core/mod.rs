@@ -45,6 +45,12 @@ pub enum Optimization {
     Speed,
 }
 
+#[derive(Clone, Copy)]
+struct SourceEmission {
+    relocatable_sites: bool,
+    debug_lines: bool,
+}
+
 /// An operation whose native contract has not been implemented yet, or a tool error.
 #[derive(Debug)]
 pub enum Error {
@@ -102,12 +108,30 @@ pub fn emit_ir_with_charge_observation(module: &Module, observe_charge: bool) ->
 
 /// Emit CoreIR with the requested Linux calling convention.
 pub fn emit_ir_for_target(module: &Module, target: Target, observe_charge: bool) -> Result<String> {
-    emit_ir_target_with_facts(module, target, observe_charge, facts_enabled(), false)
+    emit_ir_target_with_facts(
+        module,
+        target,
+        observe_charge,
+        facts_enabled(),
+        SourceEmission {
+            relocatable_sites: false,
+            debug_lines: false,
+        },
+    )
 }
 
 #[cfg(all(test, not(hirsel_lazy_core)))]
 fn emit_ir_with_facts(module: &Module, observe_charge: bool, facts: bool) -> Result<String> {
-    emit_ir_target_with_facts(module, Target::X86_64Linux, observe_charge, facts, false)
+    emit_ir_target_with_facts(
+        module,
+        Target::X86_64Linux,
+        observe_charge,
+        facts,
+        SourceEmission {
+            relocatable_sites: false,
+            debug_lines: false,
+        },
+    )
 }
 
 fn emit_ir_target_with_facts(
@@ -115,7 +139,7 @@ fn emit_ir_target_with_facts(
     target: Target,
     observe_charge: bool,
     facts: bool,
-    relocatable_sites: bool,
+    source: SourceEmission,
 ) -> Result<String> {
     let mut text = String::new();
     for (i, data) in module.statics.iter().enumerate() {
@@ -136,7 +160,11 @@ fn emit_ir_target_with_facts(
     let mut intrinsics = BTreeSet::new();
     let mut next_scope = 2;
     let failures = failure::Failures::new(module);
-    let debug = sites::debug_plan(module, &failures, &mut next_scope, &mut intrinsics);
+    let debug = if source.debug_lines {
+        sites::debug_plan(module, &failures, &mut next_scope, &mut intrinsics)
+    } else {
+        module.functions.iter().map(|_| None).collect()
+    };
     for (i, f) in module.functions.iter().enumerate() {
         let sig = &module.signatures[f.signature.index()];
         let has_status = failures.may_fail[i];
@@ -165,7 +193,7 @@ fn emit_ir_target_with_facts(
             caller_site: "%caller_site",
             debug_location: function_debug.map(|d| d.location(None)),
             anchor: None,
-            relocatable_sites,
+            relocatable_sites: source.relocatable_sites,
             private_float: private_float::addresses(body),
             value_slots: values::slots(body),
             aliases,
@@ -329,12 +357,23 @@ fn emit_ir_target_with_facts(
 }
 
 /// Emit source-independent IR whose failure sites bind to the fresh link table.
+/// `debug_lines` requests item-relative DWARF independently of cause-site emission.
 pub fn emit_ir_relocatable_for_target(
     module: &Module,
     target: Target,
     observe_charge: bool,
+    debug_lines: bool,
 ) -> Result<String> {
-    emit_ir_target_with_facts(module, target, observe_charge, facts_enabled(), true)
+    emit_ir_target_with_facts(
+        module,
+        target,
+        observe_charge,
+        facts_enabled(),
+        SourceEmission {
+            relocatable_sites: true,
+            debug_lines,
+        },
+    )
 }
 
 /// Compile CoreIR to an owned ELF object for x86-64 Linux. This uses the
@@ -360,10 +399,19 @@ pub fn emit_object_for_target(
     opt: Optimization,
     observe_charge: bool,
 ) -> Result<Vec<u8>> {
-    emit_object_site_binding(module, target, opt, observe_charge, false)
+    emit_object_site_binding(
+        module,
+        target,
+        opt,
+        observe_charge,
+        SourceEmission {
+            relocatable_sites: false,
+            debug_lines: false,
+        },
+    )
 }
 
-/// Compile a cached native unit with item relocation symbols and synthetic DWARF.
+/// Compile a cached native unit with item relocation symbols and optional synthetic DWARF.
 /// File identities and byte offsets are source-independent; the driver binds both
 /// cause words and debug rows against its current source table at the final link.
 pub fn emit_object_relocatable_for_target(
@@ -371,8 +419,18 @@ pub fn emit_object_relocatable_for_target(
     target: Target,
     opt: Optimization,
     observe_charge: bool,
+    debug_lines: bool,
 ) -> Result<Vec<u8>> {
-    emit_object_site_binding(module, target, opt, observe_charge, true)
+    emit_object_site_binding(
+        module,
+        target,
+        opt,
+        observe_charge,
+        SourceEmission {
+            relocatable_sites: true,
+            debug_lines,
+        },
+    )
 }
 
 fn emit_object_site_binding(
@@ -380,31 +438,17 @@ fn emit_object_site_binding(
     target: Target,
     opt: Optimization,
     observe_charge: bool,
-    relocatable_sites: bool,
+    source: SourceEmission,
 ) -> Result<Vec<u8>> {
     #[cfg(not(hirsel_lazy_core))]
     {
-        compile_observation(
-            module,
-            target,
-            opt,
-            observe_charge,
-            relocatable_sites,
-            |_| (),
-            |_| (),
-        )
-        .map(|(bytes, ())| bytes)
+        compile_observation(module, target, opt, observe_charge, source, |_| (), |_| ())
+            .map(|(bytes, ())| bytes)
     }
     #[cfg(hirsel_lazy_core)]
     {
         crate::loader::compile(
-            &emit_ir_target_with_facts(
-                module,
-                target,
-                observe_charge,
-                facts_enabled(),
-                relocatable_sites,
-            )?,
+            &emit_ir_target_with_facts(module, target, observe_charge, facts_enabled(), source)?,
             matches!(opt, Optimization::Speed),
             target,
         )
@@ -450,7 +494,10 @@ fn compile<R>(
         Target::X86_64Linux,
         opt,
         false,
-        false,
+        SourceEmission {
+            relocatable_sites: false,
+            debug_lines: false,
+        },
         inspect,
         observer,
     )
@@ -462,18 +509,12 @@ fn compile_observation<R>(
     target: Target,
     opt: Optimization,
     observe_charge: bool,
-    relocatable_sites: bool,
+    source: SourceEmission,
     inspect: impl FnOnce(&LlvmModule<'_>) -> R,
     mut observer: impl FnMut(CompilationStage),
 ) -> Result<(Vec<u8>, R)> {
     observer(CompilationStage::TextConstruction);
-    let ir = emit_ir_target_with_facts(
-        module,
-        target,
-        observe_charge,
-        facts_enabled(),
-        relocatable_sites,
-    )?;
+    let ir = emit_ir_target_with_facts(module, target, observe_charge, facts_enabled(), source)?;
     observer(CompilationStage::TargetSetup);
     let machine =
         TargetMachine::core(target, matches!(opt, Optimization::Speed)).map_err(Error::Llvm)?;

@@ -156,6 +156,7 @@ fn emit_unit(module: &Module, options: &NativeOptions) -> Result<Vec<u8>, String
                 hirsel_llvm_lazy::core::Optimization::None
             },
             options.logical_charge_report.is_some(),
+            options.debug_lines,
         )
         .map_err(|e| e.to_string()),
     }

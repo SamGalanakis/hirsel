@@ -125,6 +125,7 @@ impl CheckProduct {
                         hirsel_core_layout::Target::from_triple(&options.target)
                             .expect("supported native target"),
                         options.logical_charge_report.is_some(),
+                        options.debug_lines,
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()

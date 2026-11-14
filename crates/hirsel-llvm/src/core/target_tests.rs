@@ -301,7 +301,17 @@ int main(void) {{
     for target in [Target::X86_64Linux, Target::Aarch64Linux] {
         for speed in [false, true] {
             for facts in [false, true] {
-                let ir = emit_ir_target_with_facts(&module, target, false, facts, false).unwrap();
+                let ir = emit_ir_target_with_facts(
+                    &module,
+                    target,
+                    false,
+                    facts,
+                    SourceEmission {
+                        relocatable_sites: false,
+                        debug_lines: true,
+                    },
+                )
+                .unwrap();
                 let object = hirsel_llvm_lazy::compile_ir_for_target(&ir, speed, target).unwrap();
                 std::fs::write(dir.join("probe.o"), object).unwrap();
                 let compiler = match target {

@@ -2433,7 +2433,17 @@ fn aarch64_memory_custody_and_calls_match_the_evaluator() {
         assert!(!cases.is_empty());
         for speed in [false, true] {
             for facts in [false, true] {
-                let ir = emit_ir_target_with_facts(&module, target, false, facts, false).unwrap();
+                let ir = emit_ir_target_with_facts(
+                    &module,
+                    target,
+                    false,
+                    facts,
+                    SourceEmission {
+                        relocatable_sites: false,
+                        debug_lines: true,
+                    },
+                )
+                .unwrap();
                 let object = hirsel_llvm_lazy::compile_ir_for_target(&ir, speed, target).unwrap();
                 let got = execute_target_object(
                     &module,
@@ -2576,13 +2586,14 @@ fn site_fixture(target: Target) {
         )
         .unwrap();
     }
-    for (opt, composed) in [
-        (Optimization::None, false),
-        (Optimization::Speed, false),
-        (Optimization::Speed, true),
+    for (opt, composed, debug_lines) in [
+        (Optimization::None, false, true),
+        (Optimization::Speed, false, true),
+        (Optimization::Speed, true, true),
+        (Optimization::Speed, false, false),
     ] {
         let bytes = if composed {
-            let ir = emit_ir_relocatable_for_target(&module, target, false).unwrap();
+            let ir = emit_ir_relocatable_for_target(&module, target, false, true).unwrap();
             let exports = cases
                 .iter()
                 .map(|case| symbol(&module, case.function))
@@ -2596,141 +2607,156 @@ fn site_fixture(target: Target) {
                 target,
             )
             .unwrap()
+        } else if debug_lines {
+            emit_object_relocatable_for_target(&module, target, opt, false, true).unwrap()
         } else {
-            emit_object_relocatable_for_target(&module, target, opt, false).unwrap()
+            emit_object_for_target(&module, target, opt, false).unwrap()
         };
         let file = object::File::parse(bytes.as_slice()).unwrap();
-        for name in [".debug_info", ".debug_line"] {
+        if !debug_lines {
             assert!(
-                !file
-                    .section_by_name(name)
-                    .unwrap()
-                    .data()
-                    .unwrap()
-                    .is_empty(),
-                "{name}"
+                file.section_by_name(".debug_line").is_none(),
+                "default release object contains line rows"
+            );
+            assert!(
+                file.section_by_name(".debug_info").is_none(),
+                "default release object contains debug scopes"
             );
         }
-        assert_relative_debug_rows(&bytes, &module);
-        let debug_strings = file.section_by_name(".debug_str").unwrap().data().unwrap();
-        let debug_info = file.section_by_name(".debug_info").unwrap().data().unwrap();
-        let has_subprogram = |name: &str| {
-            let linkage = format!("{name}\0");
-            [debug_strings, debug_info]
-                .iter()
-                .any(|data| data.windows(linkage.len()).any(|s| s == linkage.as_bytes()))
-        };
-        let source_functions = module
-            .functions
-            .iter()
-            .enumerate()
-            .filter(|(_, f)| {
-                f.body.as_ref().is_some_and(|b| {
-                    b.inst_anchors.iter().any(Option::is_some)
-                        || b.blocks.iter().any(|b| b.anchor.is_some())
-                })
-            })
-            .map(|(i, _)| symbol(&module, FuncId(i as u32)))
-            .collect::<Vec<_>>();
-        for function in file
-            .symbols()
-            .filter(|s| s.kind() == object::SymbolKind::Text && s.size() != 0 && !s.is_undefined())
-        {
-            let name = function.name().unwrap();
-            if !source_functions
-                .iter()
-                .any(|prefix| name == prefix || name.starts_with(&format!("{prefix}.")))
-            {
-                continue;
-            }
-            let section = file
-                .section_by_index(function.section_index().unwrap())
-                .unwrap();
-            let code = &section.data().unwrap()
-                [function.address() as usize..(function.address() + function.size()) as usize];
-            // MergeFunctions retains public addresses through generated jump
-            // thunks. The destination's real source body owns their debug rows.
-            let branch = match target {
-                Target::X86_64Linux => code.len() == 5 && code[0] == 0xe9,
-                Target::Aarch64Linux => {
-                    code.len() == 4
-                        && u32::from_le_bytes(code.try_into().unwrap()) & 0xfc000000 == 0x14000000
-                }
-            };
-            let thunk = branch
-                && section.relocations().any(|(offset, r)| {
-                    if !(function.address()..function.address() + function.size()).contains(&offset)
-                    {
-                        return false;
-                    }
-                    let object::RelocationTarget::Symbol(target) = r.target() else {
-                        return false;
-                    };
-                    let destination = file.symbol_by_index(target).unwrap();
-                    destination
-                        .name()
-                        .is_ok_and(|destination| destination != name && has_subprogram(destination))
-                });
-            assert!(
-                has_subprogram(name) || thunk,
-                "source function has no actual-linkage subprogram: {name}, {opt:?}, composed={composed}"
-            );
-        }
-        if matches!(opt, Optimization::Speed) {
-            let strings = file.section_by_name(".debug_str").unwrap().data().unwrap();
-            let symbol = format!("{}\0", symbol(&module, names["debug_identity"]));
-            assert!(
-                strings
-                    .windows(symbol.len())
-                    .any(|bytes| bytes == symbol.as_bytes()),
-                "optimized infallible export has no subprogram: {opt:?} composed={composed}, anchors={:?}, strings={:?}",
-                module.functions[names["debug_identity"].index()]
-                    .body
-                    .as_ref()
-                    .unwrap()
-                    .inst_anchors,
-                strings
-                    .split(|b| *b == 0)
-                    .filter(|s| s.windows(14).any(|w| w == b"debug_identity"))
-                    .map(|s| String::from_utf8_lossy(s))
-                    .collect::<Vec<_>>()
-            );
-        }
-        if !composed {
-            // The eager unit harness includes drop-trace hooks. Compile exactly its
-            // IR on the lazy bridge so the parity check has identical producer inputs.
-            let ir = emit_ir_relocatable_for_target(&module, target, false).unwrap();
-            let lazy = hirsel_llvm_lazy::compile_ir_for_target(
-                &ir,
-                matches!(opt, Optimization::Speed),
-                target,
-            )
-            .unwrap();
-            let left = object::File::parse(bytes.as_slice()).unwrap();
-            let right = object::File::parse(lazy.as_slice()).unwrap();
-            let differences = left
-                .sections()
-                .filter_map(|section| {
-                    let name = section.name().unwrap();
-                    let a = section.data().unwrap();
-                    let b = right
+        if debug_lines {
+            for name in [".debug_info", ".debug_line"] {
+                assert!(
+                    !file
                         .section_by_name(name)
-                        .map(|s| s.data().unwrap())
-                        .unwrap_or(&[]);
-                    (a != b).then(|| {
-                        (
-                            name.to_owned(),
-                            a.len(),
-                            b.len(),
-                            a.iter().zip(b).position(|(a, b)| a != b),
-                        )
+                        .unwrap()
+                        .data()
+                        .unwrap()
+                        .is_empty(),
+                    "{name}"
+                );
+            }
+            assert_relative_debug_rows(&bytes, &module);
+            let debug_strings = file.section_by_name(".debug_str").unwrap().data().unwrap();
+            let debug_info = file.section_by_name(".debug_info").unwrap().data().unwrap();
+            let has_subprogram = |name: &str| {
+                let linkage = format!("{name}\0");
+                [debug_strings, debug_info]
+                    .iter()
+                    .any(|data| data.windows(linkage.len()).any(|s| s == linkage.as_bytes()))
+            };
+            let source_functions = module
+                .functions
+                .iter()
+                .enumerate()
+                .filter(|(_, f)| {
+                    f.body.as_ref().is_some_and(|b| {
+                        b.inst_anchors.iter().any(Option::is_some)
+                            || b.blocks.iter().any(|b| b.anchor.is_some())
                     })
                 })
+                .map(|(i, _)| symbol(&module, FuncId(i as u32)))
                 .collect::<Vec<_>>();
-            assert!(
-                bytes == lazy,
-                "eager/lazy {opt:?} object parity: {differences:?}"
-            );
+            for function in file.symbols().filter(|s| {
+                s.kind() == object::SymbolKind::Text && s.size() != 0 && !s.is_undefined()
+            }) {
+                let name = function.name().unwrap();
+                if !source_functions
+                    .iter()
+                    .any(|prefix| name == prefix || name.starts_with(&format!("{prefix}.")))
+                {
+                    continue;
+                }
+                let section = file
+                    .section_by_index(function.section_index().unwrap())
+                    .unwrap();
+                let code = &section.data().unwrap()
+                    [function.address() as usize..(function.address() + function.size()) as usize];
+                // MergeFunctions retains public addresses through generated jump
+                // thunks. The destination's real source body owns their debug rows.
+                let branch = match target {
+                    Target::X86_64Linux => code.len() == 5 && code[0] == 0xe9,
+                    Target::Aarch64Linux => {
+                        code.len() == 4
+                            && u32::from_le_bytes(code.try_into().unwrap()) & 0xfc000000
+                                == 0x14000000
+                    }
+                };
+                let thunk = branch
+                    && section.relocations().any(|(offset, r)| {
+                        if !(function.address()..function.address() + function.size())
+                            .contains(&offset)
+                        {
+                            return false;
+                        }
+                        let object::RelocationTarget::Symbol(target) = r.target() else {
+                            return false;
+                        };
+                        let destination = file.symbol_by_index(target).unwrap();
+                        destination.name().is_ok_and(|destination| {
+                            destination != name && has_subprogram(destination)
+                        })
+                    });
+                assert!(
+                    has_subprogram(name) || thunk,
+                    "source function has no actual-linkage subprogram: {name}, {opt:?}, composed={composed}"
+                );
+            }
+            if matches!(opt, Optimization::Speed) {
+                let strings = file.section_by_name(".debug_str").unwrap().data().unwrap();
+                let symbol = format!("{}\0", symbol(&module, names["debug_identity"]));
+                assert!(
+                    strings
+                        .windows(symbol.len())
+                        .any(|bytes| bytes == symbol.as_bytes()),
+                    "optimized infallible export has no subprogram: {opt:?} composed={composed}, anchors={:?}, strings={:?}",
+                    module.functions[names["debug_identity"].index()]
+                        .body
+                        .as_ref()
+                        .unwrap()
+                        .inst_anchors,
+                    strings
+                        .split(|b| *b == 0)
+                        .filter(|s| s.windows(14).any(|w| w == b"debug_identity"))
+                        .map(|s| String::from_utf8_lossy(s))
+                        .collect::<Vec<_>>()
+                );
+            }
+            if !composed {
+                // The eager unit harness includes drop-trace hooks. Compile exactly its
+                // IR on the lazy bridge so the parity check has identical producer inputs.
+                let ir = emit_ir_relocatable_for_target(&module, target, false, true).unwrap();
+                let lazy = hirsel_llvm_lazy::compile_ir_for_target(
+                    &ir,
+                    matches!(opt, Optimization::Speed),
+                    target,
+                )
+                .unwrap();
+                let left = object::File::parse(bytes.as_slice()).unwrap();
+                let right = object::File::parse(lazy.as_slice()).unwrap();
+                let differences = left
+                    .sections()
+                    .filter_map(|section| {
+                        let name = section.name().unwrap();
+                        let a = section.data().unwrap();
+                        let b = right
+                            .section_by_name(name)
+                            .map(|s| s.data().unwrap())
+                            .unwrap_or(&[]);
+                        (a != b).then(|| {
+                            (
+                                name.to_owned(),
+                                a.len(),
+                                b.len(),
+                                a.iter().zip(b).position(|(a, b)| a != b),
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                assert!(
+                    bytes == lazy,
+                    "eager/lazy {opt:?} object parity: {differences:?}"
+                );
+            }
         }
         let reports =
             execute_target_object(&module, &cases, &bindings, "", opt, Some(bytes), target);
@@ -2761,7 +2787,12 @@ fn site_fixture(target: Target) {
             );
         }
     }
-    println!("native failure-site observations: {}", cases.len() * 3);
+    println!(
+        "native failure-site observations: {} ({} with rows, {} default release without rows)",
+        cases.len() * 4,
+        cases.len() * 3,
+        cases.len()
+    );
 }
 
 #[test]

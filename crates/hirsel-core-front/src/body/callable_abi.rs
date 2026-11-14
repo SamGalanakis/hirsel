@@ -107,10 +107,26 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return None;
             }
         };
-        self.callable_adapter(raw, Some((item, types)), ty, n)
+        self.callable_adapter(raw, Some((item, types)), ty, n, false)
+    }
+    pub(super) fn item_adapter_closed(
+        &mut self,
+        item: usize,
+        types: &[TyId],
+        ty: TyId,
+        n: NodeId,
+    ) -> Option<FuncId> {
+        let (raw, _) = match self.instance_row(item, types) {
+            Ok(row) => row,
+            Err(what) => {
+                self.gap(n, what);
+                return None;
+            }
+        };
+        self.callable_adapter(raw, Some((item, types)), ty, n, true)
     }
     pub(super) fn row_adapter(&mut self, raw: FuncId, ty: TyId, n: NodeId) -> Option<FuncId> {
-        self.callable_adapter(raw, None, ty, n)
+        self.callable_adapter(raw, None, ty, n, false)
     }
     fn callable_adapter(
         &mut self,
@@ -118,6 +134,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         item: Option<(usize, &[TyId])>,
         ty: TyId,
         n: NodeId,
+        close_generics: bool,
     ) -> Option<FuncId> {
         if !self.live() {
             return None;
@@ -154,6 +171,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let mut child = Cx::new(self.p, self.definition, self.e);
         let mut fd = self.fd.as_ref().clone();
         fd.params.clear();
+        // An item adapter closes the source function's generic arguments. Keeping
+        // the enclosing generic declaration here leaves a body-less generic row;
+        // a FunctionRef emitted by open StaticFn identity then has no native body.
+        if close_generics {
+            fd.generics.clear();
+            fd.has_region_parameters = false;
+        }
         fd.result = result;
         fd.drop_of = None;
         fd.clone_of = None;

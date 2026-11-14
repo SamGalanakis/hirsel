@@ -1800,12 +1800,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 .map(|(i, _)| self.t.mk(TyKind::Region(Root::Generic(i as u32))))
                 .collect::<Vec<_>>();
             let candidate = subst(&mut self.t, self.p.fns[item].callable, &item_types);
-            let Some(function) = self.item_adapter(item, &item_types, candidate, n) else {
+            let Some(function) = self.item_adapter_closed(item, &item_types, candidate, n) else {
                 continue;
             };
             let Some(bytes) = self.code_identity_bytes(function) else {
                 continue;
             };
+            if open_static {
+                // The adapter was closed over the source item above. Do not carry
+                // its body template under the enclosing StaticFn[F] template: that
+                // would manufacture a fresh adapter row during specialization and
+                // break the caller's eight-byte FunctionRef identity.
+                self.nested.remove(&function);
+            }
             items.push((function, bytes));
         }
         if items.is_empty() {

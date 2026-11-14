@@ -98,7 +98,12 @@ impl FunctionEmitter<'_> {
         let allowed = self.admission_probe(charge);
         let available = self.load_native(payer, LIMIT_AVAILABLE, "i64");
         let fits = self.calc(format!("icmp ule i64 {charge}, {available}"));
-        (self.calc(format!("and i1 {fits}, {allowed}")), available)
+        let fits = if cfg!(test) {
+            self.calc(format!("and i1 {fits}, {allowed}"))
+        } else {
+            fits
+        };
+        (fits, available)
     }
     fn admit_balance(&mut self, payer: &str, charge: &str, available: &str) {
         let left = self.calc(format!("sub i64 {available}, {charge}"));
@@ -159,16 +164,24 @@ impl FunctionEmitter<'_> {
                 self.calc(format!("icmp ne i8 {flag}, 0"))
             },
         );
-        let exact = self.calc(format!("xor i1 {overflow}, true"));
         let sized = self.calc(format!("icmp ule i64 {bytes}, {maximum}"));
-        let eligible = self.calc(format!("and i1 {sized}, {exact}"));
+        let eligible = if overflow == "false" {
+            sized
+        } else {
+            let exact = self.calc(format!("xor i1 {overflow}, true"));
+            self.calc(format!("and i1 {sized}, {exact}"))
+        };
         self.likely(
             &eligible,
-            &format!("allocation_payer{n}"),
+            &if matches!(place, Payer::Like(_)) {
+                format!("allocation_payer{n}")
+            } else {
+                format!("admit{n}")
+            },
             &format!("allocation_slow{n}"),
         );
-        writeln!(self.code, "allocation_payer{n}:").unwrap();
         if matches!(place, Payer::Like(_)) {
+            writeln!(self.code, "allocation_payer{n}:").unwrap();
             let empty = self.calc(format!("icmp eq ptr {like}, null"));
             self.likely(
                 &empty,
@@ -184,8 +197,6 @@ impl FunctionEmitter<'_> {
             let current = self.calc(format!("ptrtoint ptr {payer} to i64"));
             let same = self.calc(format!("icmp eq i64 {original}, {current}"));
             self.likely(&same, &format!("admit{n}"), &format!("allocation_slow{n}"));
-        } else {
-            self.line(format!("br label %admit{n}"));
         }
         writeln!(self.code, "admit{n}:").unwrap();
         let available = self.load_native(&payer, LIMIT_AVAILABLE, "i64");
@@ -197,12 +208,20 @@ impl FunctionEmitter<'_> {
         // Probe only a fitting admission, so tests never count an attempt twice.
         self.likely(
             &fits,
-            &format!("allocation_probe{n}"),
+            &if cfg!(test) {
+                format!("allocation_probe{n}")
+            } else {
+                format!("allocate{n}")
+            },
             &format!("allocation_slow{n}"),
         );
-        writeln!(self.code, "allocation_probe{n}:").unwrap();
-        let allowed = self.admission_probe(charge);
-        self.likely(&allowed, &format!("allocate{n}"), &format!("refused{n}"));
+        // Refusal injection exists only in the test engine. Production needs
+        // neither its always-true branch nor its unreachable refusal join.
+        if cfg!(test) {
+            writeln!(self.code, "allocation_probe{n}:").unwrap();
+            let allowed = self.admission_probe(charge);
+            self.likely(&allowed, &format!("allocate{n}"), &format!("refused{n}"));
+        }
         writeln!(self.code, "allocate{n}:").unwrap();
         self.admit_balance(&payer, charge, &available);
         let zero = self.calc(format!("icmp eq i64 {bytes}, 0"));
@@ -238,8 +257,10 @@ impl FunctionEmitter<'_> {
         ));
         self.line(format!("store ptr {tagged}, ptr {header}, align 8"));
         self.line(format!("br label %allocation_done{n}"));
-        writeln!(self.code, "refused{n}:").unwrap();
-        self.line(format!("br label %allocation_done{n}"));
+        if cfg!(test) {
+            writeln!(self.code, "refused{n}:").unwrap();
+            self.line(format!("br label %allocation_done{n}"));
+        }
         writeln!(self.code, "allocation_slow{n}:").unwrap();
         let (slow, room) = self.allocation_cold(
             "hirsel_core_alloc",
@@ -255,11 +276,21 @@ impl FunctionEmitter<'_> {
         );
         self.line(format!("br label %allocation_done{n}"));
         writeln!(self.code, "allocation_done{n}:").unwrap();
+        let refused_pointer = if cfg!(test) {
+            format!(", [null, %refused{n}]")
+        } else {
+            String::new()
+        };
+        let refused_room = if cfg!(test) {
+            format!(", [{available}, %refused{n}]")
+        } else {
+            String::new()
+        };
         let pointer = self.calc(format!(
-            "phi ptr [{payload}, %allocate{n}], [null, %refused{n}], [{slow}, %allocation_slow{n}]"
+            "phi ptr [{payload}, %allocate{n}], [{slow}, %allocation_slow{n}]{refused_pointer}"
         ));
         let room = self.calc(format!(
-            "phi i64 [0, %allocate{n}], [{available}, %refused{n}], [{room}, %allocation_slow{n}]"
+            "phi i64 [0, %allocate{n}], [{room}, %allocation_slow{n}]{refused_room}"
         ));
         Some((pointer, room))
     }

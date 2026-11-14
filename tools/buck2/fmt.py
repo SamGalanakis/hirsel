@@ -23,7 +23,7 @@ RUSTFMT = ROOT / 'tools/buck2/toolchains/rust-files/bin/rustfmt'
 
 
 SOURCE_ROOTS = ('core/core', 'core/std', 'core/front/cases', 'core/programs/m1', 'core/langarena')
-FIXTURE_EXPECTATION = re.compile(r'^\s*//\s*expect:\s*(?:refuse|gap)\b', re.MULTILINE)
+FIXTURE_EXPECTATION = re.compile(r'^\s*//\s*expect:\s*(?:refuse|gap|resource)\b', re.MULTILINE)
 
 
 def is_refusal_fixture(path):

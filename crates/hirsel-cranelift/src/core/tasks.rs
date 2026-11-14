@@ -120,7 +120,9 @@ impl Function<'_, '_, '_> {
                     | HostOp::TryLock
                     | HostOp::Unlock
                     | HostOp::WallMs
-                    | HostOp::MonoNs => (null, no_mode),
+                    | HostOp::MonoNs
+                    | HostOp::Rename
+                    | HostOp::SleepUntil => (null, no_mode),
                 };
                 // The C outcome is always 32 bytes: value at 0, error.tag at 8,
                 // error.code at 12, written at 16, status at 24.

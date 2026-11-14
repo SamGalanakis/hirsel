@@ -114,6 +114,16 @@ uses the same checked request and collects reachable instances. Development emit
 one object per checked body; LLVM release composes request-owned bodies and
 published inline candidates into one unit. Both link the independently built core runtime. `run` builds and
 executes it, forwarding arguments after `--` and returning its process status.
+LLVM release publishes each canonical library unit as one native product: its
+public object, raw LLVM bitcode captured before any pass, and its import summary.
+The existing native selection and store digest cover all three atomically. A
+partial product or an older object-only product is a miss and is rebuilt. Warm
+application builds load bitcode directly and emit LLVM text only for their own
+units. The application key includes the imported product identities and
+summaries; every native key also includes the fact schema and the sealed and
+place-blind parameter facts its emitter consumed. The library and application
+use those same derived facts during emission. This changes the import transport,
+not the optimisation pipeline.
 `--backend cranelift|llvm` selects an engine. Development builds and runs default
 to Cranelift; `--release` defaults to LLVM with optimization. `--cc`, `--target`
 and `--limit` name the C linker driver, target and root logical limit. The current

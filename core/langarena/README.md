@@ -48,9 +48,10 @@ checksum, calls the dispatcher, and prints:
 A mismatch prints status=ERR with both values and returns exit status 1. Parse,
 input and unknown-task errors return nonzero. No missing task is a passing run.
 
-Build the compiler and runtime with the repository Buck targets
-hirsel-core-driver-bin-hirsel-core and hirsel-core-rt[staticlib], using
---show-json-output. Then run the bootstrap on Cranelift dev and LLVM release:
+Build or locate the release compiler and shipping runtime with
+`python3 core/tools/measurement_artifacts.py`. Use its `compiler` and `runtime`
+paths for correctness and measurement runs. Then run the bootstrap on Cranelift
+dev and LLVM release:
 
     python3 core/tools/langarena.py --compiler <compiler> --runtime <archive>         --config core/langarena/tests/base64-test.json         --module tests/bootstrap --task Base64::Encode --backend both         --report /tmp/base64-native.json
 
@@ -82,6 +83,9 @@ Its negative control uses `waiting-mismatch.json` and `--expect-mismatch 42`.
 That option requires the exact `checksum=42 expected=41 status=ERR` line and exit
 status 1; an arbitrary failure cannot pass the control. Ordinary runs continue to
 require the configured checksum, status OK and exit 0.
+
+The collection ports use core `Deque` / `deque`, `Heap` / `heap`, and
+`list.sort_stable`. Their former std declarations have moved to core.
 
 ## Measurement
 

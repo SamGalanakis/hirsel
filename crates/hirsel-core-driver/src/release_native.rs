@@ -54,13 +54,23 @@ impl CheckProduct {
             entry,
             options.instance_limit,
         )?;
+        let refs = modules.iter().map(|m| &**m).collect::<Vec<_>>();
+        let facts = hirsel_core_ir::roles::Facts::program(&refs, &[]);
+        let consumed = refs
+            .iter()
+            .zip(&facts)
+            .map(|(module, facts)| facts.consumed(module))
+            .collect::<Vec<_>>();
         let mut objects = Vec::new();
-        for ((instance, ir), imported) in reached.iter().zip(&modules).zip(&imported) {
+        let mut libraries = Vec::new();
+        for (i, ((instance, ir), imported)) in
+            reached.iter().zip(&modules).zip(&imported).enumerate()
+        {
             if !imported || !ir.functions.iter().any(|f| f.body.is_some()) {
                 continue;
             }
             let library_store = library_store.unwrap();
-            let object_key = key(
+            let object_key = crate::native_library::key(
                 "hirsel.core-object.v1",
                 &(
                     compiler_identity()?,
@@ -75,33 +85,78 @@ impl CheckProduct {
                     &materialized.get(instance).product.key,
                     &**ir,
                 ),
+                &[&consumed[i]],
             )?;
-            let (identity, bytes, compiled) =
-                if let Some((hash, bytes)) = cached(library_store, object_key)? {
-                    (hash, bytes, false)
-                } else {
-                    let bytes = emit_unit(ir, options).map_err(|message| NativeStop::Emit {
-                        definition: instance.definition.clone(),
-                        message,
-                    })?;
-                    (publish(library_store, object_key, &bytes)?, bytes, true)
-                };
+            let (identity, product, compiled) = if let Some((hash, product)) =
+                crate::native_library::load::<hirsel_llvm_lazy::ImportSummary>(
+                    library_store,
+                    object_key,
+                    hirsel_llvm_lazy::NATIVE_LIBRARY_SCHEMA,
+                )? {
+                (hash, product, false)
+            } else {
+                let native = hirsel_llvm_lazy::compile_library(
+                    ir,
+                    &facts[i],
+                    hirsel_core_layout::Target::from_triple(&options.target)
+                        .expect("supported native target"),
+                    options.logical_charge_report.is_some(),
+                    options.debug_lines,
+                )
+                .map_err(|message| NativeStop::Emit {
+                    definition: instance.definition.clone(),
+                    message,
+                })?;
+                let identity = crate::native_library::publish(
+                    library_store,
+                    object_key,
+                    hirsel_llvm_lazy::NATIVE_LIBRARY_SCHEMA,
+                    &native.object,
+                    &native.bitcode,
+                    &native.summary,
+                )?;
+                (
+                    identity,
+                    crate::native_library::Product {
+                        object: native.object,
+                        bitcode: native.bitcode,
+                        summary: native.summary,
+                    },
+                    true,
+                )
+            };
             objects.push(ObjectProduct {
                 private_variants: 0,
                 instance: instance.clone(),
                 identity,
-                bytes,
+                bytes: product.object,
                 compiled,
             });
+            libraries.push((identity, product.bitcode, product.summary));
         }
         let instance = reached
             .iter()
             .find(|i| &i.definition == entry)
             .expect("reached entry");
-        // Inline-body edits invalidate the consuming unit, including library
-        // bodies. Published semantic products are read without source checking.
-        let object_key = key(
-            "hirsel.core-release-unit.v1",
+        // Imported bodies and their facts are covered by the one atomic native
+        // product identity. Only application-owned CoreIR is encoded again.
+        let owned = modules
+            .iter()
+            .zip(&imported)
+            .enumerate()
+            .filter_map(|(i, (module, imported))| (!imported).then_some((i, &**module)))
+            .collect::<Vec<_>>();
+        let own_modules = owned.iter().map(|(_, module)| *module).collect::<Vec<_>>();
+        let own_facts = owned
+            .iter()
+            .map(|(i, _)| consumed[*i].as_slice())
+            .collect::<Vec<_>>();
+        let dependencies = libraries
+            .iter()
+            .map(|(identity, _, summary)| (identity, summary))
+            .collect::<Vec<_>>();
+        let object_key = crate::native_library::key(
+            "hirsel.core-release-unit.v2",
             &(
                 compiler_identity()?,
                 &options.target,
@@ -110,22 +165,24 @@ impl CheckProduct {
                 !hirsel_llvm_lazy::core::facts_enabled(),
                 runtime,
                 instance,
-                &modules,
-                &imported,
+                &own_modules,
+                &dependencies,
             ),
+            &own_facts,
         )?;
         let (identity, bytes, compiled) = if let Some((hash, bytes)) = cached(store, object_key)? {
             (hash, bytes, false)
         } else {
-            let text = modules
+            let text = owned
                 .iter()
-                .map(|ir| {
-                    hirsel_llvm_lazy::core::emit_ir_relocatable_for_target(
+                .map(|(i, ir)| {
+                    hirsel_llvm_lazy::core::emit_ir_relocatable_with_role_facts_for_target(
                         ir,
                         hirsel_core_layout::Target::from_triple(&options.target)
                             .expect("supported native target"),
                         options.logical_charge_report.is_some(),
                         options.debug_lines,
+                        &facts[*i],
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()
@@ -133,12 +190,25 @@ impl CheckProduct {
                     definition: entry.clone(),
                     message: e.to_string(),
                 })?;
-            let units = text
+            // Preserve the producer's unit order. Declaration-only imported
+            // modules need neither source emission nor a bitcode load.
+            let mut texts = text.iter();
+            let mut imports = libraries.iter();
+            let units = modules
                 .iter()
                 .zip(&imported)
-                .map(|(ir, imported)| hirsel_llvm_lazy::Unit::Text {
-                    ir,
-                    imported: *imported,
+                .filter_map(|(module, imported)| {
+                    if !imported {
+                        Some(hirsel_llvm_lazy::Unit::Text {
+                            ir: texts.next().unwrap(),
+                            imported: false,
+                        })
+                    } else if module.functions.iter().any(|f| f.body.is_some()) {
+                        let (_, bitcode, summary) = imports.next().unwrap();
+                        Some(hirsel_llvm_lazy::Unit::Import { bitcode, summary })
+                    } else {
+                        None
+                    }
                 })
                 .collect::<Vec<_>>();
             let exports = exports(

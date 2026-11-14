@@ -114,7 +114,7 @@ pub struct BuildProduct {
 pub(crate) fn key(domain: &str, value: &impl Serialize) -> io::Result<ContentHash> {
     Ok(ContentHash::of_parts(domain, [&encode(value)?[..]]))
 }
-fn selection(hash: ContentHash) -> String {
+pub(super) fn selection(hash: ContentHash) -> String {
     hash.0.iter().map(|b| format!("{b:02x}")).collect()
 }
 fn cached(store: &Store, key: ContentHash) -> io::Result<Option<(ContentHash, Vec<u8>)>> {
@@ -1009,6 +1009,46 @@ b0:
                 !own.bytes.windows(name.len()).any(|w| w == name.as_bytes()),
                 "the program must inline the published answer body, not reference its object"
             );
+            let store = Store::new(
+                &installed
+                    .image
+                    .as_ref()
+                    .unwrap()
+                    .store_root()
+                    .join("native"),
+            )
+            .unwrap();
+            for library in &core {
+                let archive = store.get(library.identity).unwrap().unwrap();
+                let product = crate::native_library::read::<hirsel_llvm_lazy::ImportSummary>(
+                    &archive,
+                    hirsel_llvm_lazy::NATIVE_LIBRARY_SCHEMA,
+                )
+                .expect("one complete native-library product");
+                assert_eq!(product.object, library.bytes);
+                assert!(
+                    product.bitcode.starts_with(b"BC\xc0\xde"),
+                    "raw LLVM bitcode"
+                );
+                assert!(!product.summary.functions.is_empty());
+                assert!(!product.summary.facts.is_empty());
+            }
+            // Missing bitcode/summary is a product miss. Rebuild that canonical
+            // object, preserving the unchanged application's cached object.
+            let path = store.path(answer.identity);
+            let bytes = std::fs::read(&path).unwrap();
+            std::fs::write(&path, &bytes[..bytes.len() / 2]).unwrap();
+            let repaired = installed.emit_reachable(&entry, &other_options).unwrap();
+            assert_eq!(repaired.iter().filter(|o| o.compiled).count(), 1);
+            let fixed = repaired
+                .iter()
+                .find(|o| o.instance == answer.instance)
+                .unwrap();
+            assert!(fixed.compiled);
+            assert_eq!(fixed.identity, answer.identity);
+            let rebuilt = installed.build(&entry, &other_options).unwrap();
+            assert_eq!(rebuilt.compiled, 0);
+            run_clean(&rebuilt.executable, 7);
         }
         assert_eq!(objects.iter().filter(|o| o.compiled).count(), 1);
         // A cached negative body is refused only when this entry reaches it.

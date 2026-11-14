@@ -1,0 +1,44 @@
+// Exact letters audit each owner once, in deque front-to-back cleanup order.
+resource type GrowthDrop { out: Stdout, id: u64 } drop(t) {
+    let letter = if t.id == 0 { "A" } else if t.id == 1 { "B" }
+        else if t.id == 2 { "C" } else if t.id == 3 { "D" } else { "E" }
+    let _ = stdout.write(t.out, letter)
+}
+fn owned_growth(out: Stdout, head: u64, front: bool) -> u64 {
+    let mut d: Deque[GrowthDrop] = deque.new()
+    for i in 0u64 .. 4 {
+        result.unwrap(deque.push_back(mut d, result.unwrap(GrowthDrop(out:out,id:i))))
+    }
+    for _ in 0u64 .. head {
+        let x = option.unwrap(deque.pop_front(mut d))
+        result.unwrap(deque.push_back(mut d, take x))
+    }
+    let x = result.unwrap(GrowthDrop(out:out,id:4))
+    if front { result.unwrap(deque.push_front(mut d, take x)) }
+    else { result.unwrap(deque.push_back(mut d, take x)) }
+    deque.len(d)
+}
+// expect: stdout "ABCDE"
+// expect: run owned_back_head0(out) = 5
+fn owned_back_head0(out:Stdout) -> u64 { owned_growth(out,0,false) }
+// expect: stdout "BCDAE"
+// expect: run owned_back_head1(out) = 5
+fn owned_back_head1(out:Stdout) -> u64 { owned_growth(out,1,false) }
+// expect: stdout "CDABE"
+// expect: run owned_back_head2(out) = 5
+fn owned_back_head2(out:Stdout) -> u64 { owned_growth(out,2,false) }
+// expect: stdout "DABCE"
+// expect: run owned_back_head3(out) = 5
+fn owned_back_head3(out:Stdout) -> u64 { owned_growth(out,3,false) }
+// expect: stdout "EABCD"
+// expect: run owned_front_head0(out) = 5
+fn owned_front_head0(out:Stdout) -> u64 { owned_growth(out,0,true) }
+// expect: stdout "EBCDA"
+// expect: run owned_front_head1(out) = 5
+fn owned_front_head1(out:Stdout) -> u64 { owned_growth(out,1,true) }
+// expect: stdout "ECDAB"
+// expect: run owned_front_head2(out) = 5
+fn owned_front_head2(out:Stdout) -> u64 { owned_growth(out,2,true) }
+// expect: stdout "EDABC"
+// expect: run owned_front_head3(out) = 5
+fn owned_front_head3(out:Stdout) -> u64 { owned_growth(out,3,true) }

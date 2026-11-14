@@ -1,0 +1,73 @@
+// Growth at every head for capacities1,2,4,8 and both push directions.
+// The list model is the rotation [head+1..cap,1..head], with99 at the chosen end.
+fn grow_at_head(cap: u64, head: u64, front: bool) -> bool {
+    let mut d: Deque[u64] = deque.new()
+    for i in 0u64 .. cap { result.unwrap(deque.push_back(mut d, i + 1)) }
+    for _ in 0u64 .. head {
+        let x = option.unwrap(deque.pop_front(mut d))
+        result.unwrap(deque.push_back(mut d, x))
+    }
+    if front { result.unwrap(deque.push_front(mut d, 99)) }
+    else { result.unwrap(deque.push_back(mut d, 99)) }
+    if deque.len(d) != cap + 1 { return false }
+    if front && option.unwrap(deque.pop_front(mut d)) != 99 { return false }
+    for i in 0u64 .. cap {
+        if option.unwrap(deque.pop_front(mut d)) != (head + i) % cap + 1 { return false }
+    }
+    if !front && option.unwrap(deque.pop_front(mut d)) != 99 { return false }
+    deque.len(d) == 0 && deque.pop_front(mut d) == None
+}
+// Missing the second run, reversing either run, or using cap-head as the live
+// count makes this oracle fail. Each head includes the full-ring growth case.
+// expect: run growth_every_head() = true
+fn growth_every_head() -> bool {
+    let mut cap: u64 = 1
+    while cap <= 8 {
+        for head in 0u64 .. cap {
+            if !grow_at_head(cap, head, false) || !grow_at_head(cap, head, true) { return false }
+        }
+        cap *= 2
+    }
+    true
+}
+
+fn label(i: u64) -> String {
+    result.unwrap(string.from(match i {
+        0 => "a", 1 => "b", 2 => "c", 3 => "d",
+        4 => "e", 5 => "f", 6 => "g", _ => "h"
+    }))
+}
+fn refuse_at_head(cap: u64, head: u64, front: bool) -> bool {
+    let mut d: Deque[String] = deque.new()
+    for i in 0u64 .. cap { result.unwrap(deque.push_back(mut d, label(i))) }
+    for _ in 0u64 .. head {
+        let x = option.unwrap(deque.pop_front(mut d))
+        result.unwrap(deque.push_back(mut d, take x))
+    }
+    let x = result.unwrap(string.from("refused"))
+    let attempt = bound bytes 0 {
+        if front { deque.push_front(mut d, take x) } else { deque.push_back(mut d, take x) }
+    }
+    let returned = match attempt {
+        Ok(Error((c, take value))) => c.requested == cap * 2 * 24 && value == "refused",
+        _ => false,
+    }
+    if !returned || deque.len(d) != cap { return false }
+    for i in 0u64 .. cap {
+        let value = option.unwrap(deque.pop_front(mut d))
+        if value != label((head + i) % cap) { return false }
+    }
+    deque.len(d) == 0
+}
+// Refusal must precede either transfer, preserving the head, values and owner.
+// expect: run refused_growth_every_head() = true
+fn refused_growth_every_head() -> bool {
+    let mut cap: u64 = 1
+    while cap <= 8 {
+        for head in 0u64 .. cap {
+            if !refuse_at_head(cap, head, false) || !refuse_at_head(cap, head, true) { return false }
+        }
+        cap *= 2
+    }
+    true
+}

@@ -101,6 +101,11 @@ def _release_codegen_units(name):
     # (action_sizes_from_log.py). Unmeasured targets keep Cargo's defaults.
     parts = name.split("-features-")
     name = parts[0] + parts[1][12:] if len(parts) == 2 else name
+    # Core request measurements favor one unit: all 18 product requests save
+    # 2.92-4.17K instructions/line; both all-source controls improve. This
+    # release-only exception retains the measured compile reservations.
+    if name in ["hirsel-core-front", "hirsel-core-driver", "hirsel-core-ir"]:
+        return ["-Ccodegen-units=1"]
     if name not in COMPILE_REQUESTS["release"] and not (PROBE_CPUS and name in COMPILE_CLASSES["release"]):
         return []
     return ["-Ccodegen-units={}".format(max(2, compile_request("release", name)[0]))]

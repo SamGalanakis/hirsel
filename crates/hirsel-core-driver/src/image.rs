@@ -32,6 +32,7 @@ pub(crate) struct ImageDirectory {
     pub definitions: Map<DefPath, ContentHash>,
     pub diagnostics: Table<Refusal>,
     pub incomplete: Table<Incomplete>,
+    pub resources: Table<ResourceRefusal>,
 }
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ImageRoot {
@@ -321,6 +322,7 @@ impl Driver {
             definitions: writer.map(&definitions)?,
             diagnostics: writer.table(&product.diagnostics.clone().into())?,
             incomplete: writer.table(&product.incomplete.clone().into())?,
+            resources: writer.table(&product.resources.clone().into())?,
         };
         let directory_hash = store.put(&encode(&directory)?)?;
         let identity = store.put(&encode(&ImageRoot {

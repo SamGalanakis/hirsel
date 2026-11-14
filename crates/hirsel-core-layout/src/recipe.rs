@@ -292,6 +292,13 @@ pub enum LayoutError {
     Empty { ty: String },
     /// A row whose published [`Carried`] contradicts its body.
     Carried { ty: String },
+    /// The native layout needs `bytes` at `field`, past the engine's 64-bit size range
+    /// (`u64::MAX` bytes): a resource refusal of the implementation (PROG-6), not a rule.
+    NativeRange {
+        ty: String,
+        field: String,
+        bytes: u128,
+    },
 }
 
 /// The smallest tag of u8/u16/u32 that holds `cases` ordinals.
@@ -307,6 +314,11 @@ pub fn tag_width(cases: usize) -> u64 {
 
 fn checked_align_up(n: u64, a: u64) -> Option<u64> {
     n.div_ceil(a).checked_mul(a)
+}
+
+/// `n` aligned up to `a`, where the result may pass `u64::MAX`.
+fn wide_align_up(n: u128, a: u64) -> u128 {
+    n.div_ceil(a.into()) * u128::from(a)
 }
 
 fn align_up(n: u64, a: u64) -> u64 {
@@ -569,12 +581,16 @@ fn place_row(
     let mut off = start;
     let mut offsets = Vec::with_capacity(m.len());
     for (&(size, a, _), f) in m.iter().zip(row.iter()) {
-        off = checked_align_up(off, a)
-            .ok_or_else(|| err(shape, f, "native layout exceeds the engine's size range"))?;
+        let range = |bytes| LayoutError::NativeRange {
+            ty: shape.name.clone(),
+            field: f.name.clone(),
+            bytes,
+        };
+        off = checked_align_up(off, a).ok_or_else(|| range(wide_align_up(off.into(), a)))?;
         offsets.push(off);
         off = off
             .checked_add(size)
-            .ok_or_else(|| err(shape, f, "native layout exceeds the engine's size range"))?;
+            .ok_or_else(|| range(u128::from(off) + u128::from(size)))?;
     }
     Ok((offsets, off))
 }
@@ -788,14 +804,14 @@ fn fixed(shapes: &[Shape], shape: &Shape, out: &Computed<'_>) -> Result<Recipe, 
         });
         (offsets, end, tag, niche, align)
     };
-    let size = checked_align_up(end, align).ok_or_else(|| LayoutError::Field {
+    let size = checked_align_up(end, align).ok_or_else(|| LayoutError::NativeRange {
         ty: shape.name.clone(),
         field: rows
             .iter()
             .flat_map(|r| r.iter())
             .last()
             .map_or_else(String::new, |f| f.name.clone()),
-        why: "native layout exceeds the engine's size range",
+        bytes: wide_align_up(end.into(), align),
     })?;
     let drop = drop_recipe(shapes, shape, &rows, &offsets, out);
     Ok(Recipe {

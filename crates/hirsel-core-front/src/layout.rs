@@ -641,6 +641,24 @@ pub(crate) fn recipes(p: &mut Program) {
                 p.decls[d].summary.recipe = Some(recipes[r.index()].clone());
             }
         }
+        Err(LayoutError::NativeRange { ty, field, bytes }) => {
+            // PROG-6: past the engine's 64-bit size range is the implementation's
+            // resource refusal, at the field that reaches it.
+            if let Some(decl) = s.decls.iter().find(|d| d.path.to_string() == ty) {
+                let site = decl
+                    .all_fields()
+                    .find(|f| f.name == field)
+                    .map_or(decl.site, |f| f.site);
+                p.resource_refusals.push(crate::ResourceRefusal {
+                    site,
+                    message: format!(
+                        "the native layout of `{ty}` needs {bytes} bytes at field `{field}`, \
+                         past the engine's size range of {} bytes",
+                        u64::MAX
+                    ),
+                });
+            }
+        }
         Err(error) => {
             let (name, field, why) = match &error {
                 LayoutError::Field { ty, field, why } => (ty, Some(field.as_str()), *why),
@@ -648,6 +666,7 @@ pub(crate) fn recipes(p: &mut Program) {
                 LayoutError::TooLarge { ty } => (ty, None, "compact extent exceeds its width"),
                 LayoutError::Empty { ty } => (ty, None, "compact encoding has zero size"),
                 LayoutError::Carried { ty } => (ty, None, "row carried unlike its body"),
+                LayoutError::NativeRange { .. } => unreachable!("matched above"),
             };
             let declaration = s.decls.iter().find(|d| {
                 let path = d.path.to_string();
@@ -660,9 +679,7 @@ pub(crate) fn recipes(p: &mut Program) {
                 if p.refusals.iter().any(|r| r.primary == site) {
                     return;
                 }
-                let rule = if why.contains("engine's size range") {
-                    "PROG-6"
-                } else if why.contains("overflow") || why.contains("2^64") {
+                let rule = if why.contains("overflow") || why.contains("2^64") {
                     "OWN-2"
                 } else if decl.compact.is_some() {
                     "MEM-9"

@@ -15,6 +15,7 @@ struct Output<'a> {
     source_bytes: usize,
     diagnostics: Vec<hirsel_core_driver::Diagnostic<'a>>,
     incomplete: Vec<hirsel_core_driver::IncompleteDiagnostic<'a>>,
+    resources: Vec<hirsel_core_driver::ResourceDiagnostic<'a>>,
     image: Option<String>,
     native: Option<BuildProduct>,
     stopped: Option<String>,
@@ -441,12 +442,18 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
         } else {
             product.machine_incomplete()?
         },
+        resources: if let Some(r) = &reach {
+            product.resources_for(&r.resources)?
+        } else {
+            product.machine_resources()?
+        },
         image: image.map(|i| hex(i.identity)),
         native,
         stopped: stopped.or_else(|| {
             reach
                 .as_ref()
                 .and_then(|r| r.instances.as_ref().err())
+                .filter(|e| !matches!(e, hirsel_core_driver::InstanceStop::Resource { .. }))
                 .map(|e| format!("instances: {e:?}"))
         }),
         reachable: reach.as_ref().map(|r| ReachableOutput {
@@ -469,6 +476,12 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
             eprintln!(
                 "incomplete {} {}..{}: {}",
                 g.primary.module, g.primary.span.start, g.primary.span.end, g.message
+            );
+        }
+        for r in &output.resources {
+            eprintln!(
+                "resource {} {}..{}: {}",
+                r.primary.module, r.primary.span.start, r.primary.span.end, r.message
             );
         }
         if let Some(stop) = &output.stopped {
@@ -506,7 +519,7 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     };
     let exit = if let Some(code) = run_exit {
         code
-    } else if !output.incomplete.is_empty() {
+    } else if !output.incomplete.is_empty() || !output.resources.is_empty() {
         2
     } else if !output.diagnostics.is_empty() {
         1

@@ -16,14 +16,21 @@ pub enum ParseMode {
 /// Incomplete compiler outcome, never a source-language diagnostic (ARCH front end).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ResourceRefusal {
-    SourceTooLarge,
-    ParserStack { at: Span, limit: usize },
+    /// A source of `bytes` bytes, past the u32-indexed byte capacity; its site is the
+    /// start of the file, since no u32 span reaches the byte past the capacity.
+    SourceTooLarge {
+        bytes: u64,
+    },
+    ParserStack {
+        at: Span,
+        limit: usize,
+    },
 }
 impl ResourceRefusal {
     /// File-relative byte site of the compiler's resource exhaustion.
     pub fn site(&self) -> Span {
         match self {
-            Self::SourceTooLarge => Span::default(),
+            Self::SourceTooLarge { .. } => Span::default(),
             Self::ParserStack { at, .. } => *at,
         }
     }
@@ -31,7 +38,11 @@ impl ResourceRefusal {
 impl std::fmt::Display for ResourceRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::SourceTooLarge => f.write_str("source exceeds the u32-indexed byte capacity"),
+            Self::SourceTooLarge { bytes } => write!(
+                f,
+                "source of {bytes} bytes exceeds the u32-indexed byte capacity of {} bytes",
+                u32::MAX
+            ),
             Self::ParserStack { at, limit } => write!(
                 f,
                 "parser nesting limit of {limit} active productions reached at bytes {}..{}",
@@ -56,7 +67,9 @@ pub fn parse_bytes(bytes: &[u8], mode: ParseMode, symbols: &mut Symbols) -> Pars
                 return ParseOutput {
                     syntax: SyntaxFile::default(),
                     diagnostics: vec![],
-                    resource_refusal: Some(ResourceRefusal::SourceTooLarge),
+                    resource_refusal: Some(ResourceRefusal::SourceTooLarge {
+                        bytes: bytes.len() as u64,
+                    }),
                 };
             }
             let start = error.valid_up_to();
@@ -82,7 +95,9 @@ pub fn parse(text: &str, mode: ParseMode, symbols: &mut Symbols) -> ParseOutput 
         return ParseOutput {
             syntax: SyntaxFile::default(),
             diagnostics: vec![],
-            resource_refusal: Some(ResourceRefusal::SourceTooLarge),
+            resource_refusal: Some(ResourceRefusal::SourceTooLarge {
+                bytes: text.len() as u64,
+            }),
         };
     }
     let output = lex(text, symbols);

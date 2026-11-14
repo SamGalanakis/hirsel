@@ -21,6 +21,12 @@ pub struct IncompleteDiagnostic<'a> {
     pub primary: SourceSite,
     pub message: &'a str,
 }
+/// A resource refusal (PROG-6) names no rule: only its site and the limit it passes.
+#[derive(Serialize)]
+pub struct ResourceDiagnostic<'a> {
+    pub primary: SourceSite,
+    pub message: &'a str,
+}
 impl CheckProduct {
     pub(crate) fn source_site(&self, site: &Site) -> io::Result<SourceSite> {
         hirsel_core_ids::published::catch_io(|| self.source_site_inner(site))
@@ -76,6 +82,22 @@ impl CheckProduct {
     }
     pub fn machine_incomplete(&self) -> io::Result<Vec<IncompleteDiagnostic<'_>>> {
         self.incomplete_for(self.incomplete.iter())
+    }
+    pub fn machine_resources(&self) -> io::Result<Vec<ResourceDiagnostic<'_>>> {
+        self.resources_for(self.resources.iter())
+    }
+    pub fn resources_for<'a>(
+        &self,
+        rows: impl IntoIterator<Item = &'a ResourceRefusal>,
+    ) -> io::Result<Vec<ResourceDiagnostic<'a>>> {
+        rows.into_iter()
+            .map(|r| {
+                Ok(ResourceDiagnostic {
+                    primary: self.source_site(&r.primary)?,
+                    message: &r.message,
+                })
+            })
+            .collect()
     }
     pub fn incomplete_for<'a>(
         &self,

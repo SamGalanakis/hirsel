@@ -58,6 +58,14 @@ impl Gap {
     }
 }
 
+/// The implementation's resource refusal (PROG-6): checking needs more than one of its
+/// limits allows. It names no rule; the message names the amount and the limit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResourceRefusal {
+    pub site: Site,
+    pub message: String,
+}
+
 pub(crate) fn refusal(rule: &str, primary: Site, message: impl Into<String>) -> Refusal {
     Refusal {
         rule: rule.into(),
@@ -93,6 +101,8 @@ pub struct Program<'a> {
     /// Refusals of declarations and signatures, and the resolver's.
     pub refusals: Vec<Refusal>,
     pub gaps: Vec<Gap>,
+    /// Declarations past an implementation limit (PROG-6): no rule, not a gap.
+    pub resource_refusals: Vec<ResourceRefusal>,
     /// The program's entry, as its manifest names it (PROG-3); `main` is always `waits`
     /// (LANG-8).
     pub entry: Option<DefPath>,
@@ -241,6 +251,7 @@ impl<'a> Program<'a> {
             }),
             refusals,
             gaps: vec![],
+            resource_refusals: vec![],
             entry: None,
             library_modules: 0,
             has_test_functions: library.is_some_and(|l| l.has_test_functions),

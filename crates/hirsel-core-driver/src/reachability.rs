@@ -18,13 +18,18 @@ pub struct Reachable<'a> {
     pub declarations: BTreeSet<DefPath>,
     pub diagnostics: Vec<&'a Refusal>,
     pub incomplete: Vec<&'a Incomplete>,
+    /// Resource refusals the build needs: the product's, and instance collection's.
+    pub resources: Vec<ResourceRefusal>,
     pub first_stops: Vec<GapStop>,
     pub instances: Result<Vec<InstanceKey>, InstanceStop>,
     pub(crate) materialized: crate::instances::InstanceSet,
 }
 impl Reachable<'_> {
     pub fn accepted(&self) -> bool {
-        self.diagnostics.is_empty() && self.incomplete.is_empty() && self.instances.is_ok()
+        self.diagnostics.is_empty()
+            && self.incomplete.is_empty()
+            && self.resources.is_empty()
+            && self.instances.is_ok()
     }
     pub(crate) fn require(&self) -> Result<&[InstanceKey], NativeStop> {
         if !self.diagnostics.is_empty() || !self.incomplete.is_empty() {
@@ -33,6 +38,9 @@ impl Reachable<'_> {
                 "{}: {} {}",
                 stop.definition, stop.rule, stop.construct
             )));
+        }
+        if let Some(r) = self.resources.first() {
+            return Err(NativeStop::Check(r.message.clone()));
         }
         self.instances
             .as_deref()
@@ -243,7 +251,27 @@ impl CheckProduct {
                 });
             }
         }
-        if let Err(stop) = &instances {
+        let mut resources: Vec<ResourceRefusal> = self
+            .resources
+            .iter()
+            .filter(|r| needed(&r.primary))
+            .cloned()
+            .collect();
+        if let Err(InstanceStop::Resource { limit, next }) = &instances
+            && let Some(h) = self.headers.get(&next.definition)
+        {
+            resources.push(ResourceRefusal {
+                primary: h.site,
+                message: format!(
+                    "instance collection resource refusal: `{}` needs instance {} past the limit of {limit}",
+                    next.definition,
+                    limit + 1
+                ),
+            });
+        }
+        if let Err(stop) = &instances
+            && !matches!(stop, InstanceStop::Resource { .. })
+        {
             let (path, construct) = match stop {
                 InstanceStop::Incomplete(p) => {
                     (p, "body has no complete native product".to_owned())
@@ -256,10 +284,7 @@ impl CheckProduct {
                     definition,
                     message,
                 } => (definition, message.clone()),
-                InstanceStop::Resource { next, .. } => (
-                    &next.definition,
-                    "instance collection resource refusal".to_owned(),
-                ),
+                InstanceStop::Resource { .. } => unreachable!("a resource refusal, above"),
             };
             if let Some(h) = self.headers.get(path)
                 && let std::collections::btree_map::Entry::Vacant(slot) =
@@ -278,6 +303,7 @@ impl CheckProduct {
             declarations,
             diagnostics,
             incomplete,
+            resources,
             first_stops: first_stops.into_values().collect(),
             instances,
             materialized,

@@ -1,6 +1,10 @@
 use crate::{index::path_tokens, *};
 use hirsel_core_syntax::{Item, NodeId, NodeKind, Span, Symbol, TokenId, sym};
 use rustc_hash::FxHashSet;
+
+/// Expression nesting the resolver walks before it refuses the item as a resource
+/// refusal (PROG-6).
+pub const RESOLVE_NESTING_LIMIT: u32 = 384;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum BinderKind {
     Local,
@@ -68,7 +72,8 @@ pub struct Resolution {
     pub binders: Vec<Binder>,
     pub reads: Vec<Lookup>,
     pub diagnostics: Vec<Refusal>,
-    pub resource_refusal: Option<Site>,
+    /// The node whose nesting reaches [`RESOLVE_NESTING_LIMIT`], and that limit.
+    pub resource_refusal: Option<(Site, u32)>,
 }
 pub(crate) fn builtin(n: Symbol) -> bool {
     matches!(
@@ -190,7 +195,7 @@ struct Resolver<'a> {
     numeric_declaration: bool,
     scope_id: u32,
     next_scope: u32,
-    depth: usize,
+    depth: u32,
     paths: [Option<((u32, Symbol, bool, bool), Target)>; 8],
     seen: FxHashSet<(LookupScope, Symbol, Namespace, bool)>,
     out: Resolution,
@@ -800,8 +805,8 @@ impl<'a> Resolver<'a> {
             NodeKind::TypePath => return self.use_path(n, true, false),
             _ => {}
         }
-        if self.depth >= 384 {
-            self.out.resource_refusal = Some(self.site(n));
+        if self.depth >= RESOLVE_NESTING_LIMIT {
+            self.out.resource_refusal = Some((self.site(n), RESOLVE_NESTING_LIMIT));
             return;
         }
         self.depth += 1;

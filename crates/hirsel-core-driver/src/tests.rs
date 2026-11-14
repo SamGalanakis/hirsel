@@ -844,6 +844,42 @@ fn reachable_build_ignores_unreached_bodies_and_declarations_after_disk_reuse() 
     assert!(cached.reachable(&entry, 64).unwrap().accepted());
 }
 
+/// Bug: a resource refusal stored with the product, so a build under a larger instance limit
+/// is still refused from the store (or a smaller limit is served an earlier acceptance).
+/// The instance limit belongs to the build, not to the stored product: the same stored
+/// product is refused at limit 1 (at the second instance's definition, with the amount
+/// and the limit) and accepted at 64.
+#[test]
+fn instance_limit_refusal_is_per_build_and_never_served_from_the_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = "fn helper() -> u8 { 7u8 }\nfn answer() -> u8 { helper() }\n";
+    let entry = DefPath::from_full("app@1/main/answer").unwrap();
+    let first = Driver::default()
+        .check(request(source, dir.path()), &mut Meter::new(false))
+        .unwrap();
+    assert!(first.resources.is_empty());
+    let tight = first.reachable(&entry, 1).unwrap();
+    assert!(!tight.accepted());
+    assert!(tight.incomplete.is_empty() && tight.first_stops.is_empty());
+    let [resource] = tight.resources.as_slice() else {
+        panic!("{:?}", tight.resources)
+    };
+    let at = resource.primary.span;
+    assert_eq!(&source[at.start as usize..at.end as usize], "helper");
+    assert!(
+        resource
+            .message
+            .contains("needs instance 2 past the limit of 1")
+    );
+    let stored = Driver::default()
+        .check(request(source, dir.path()), &mut Meter::new(false))
+        .unwrap();
+    assert!(stored.rechecked.is_empty());
+    assert!(stored.resources.is_empty());
+    assert!(stored.reachable(&entry, 64).unwrap().accepted());
+    assert!(!stored.reachable(&entry, 1).unwrap().resources.is_empty());
+}
+
 #[test]
 fn reachable_build_refuses_and_censuses_the_incomplete_callee() {
     let dir = tempfile::tempdir().unwrap();
@@ -1432,8 +1468,9 @@ fn parser_nesting_exhaustion_keeps_its_file_site_and_limit() {
         .unwrap();
     assert!(!product.accepted());
     assert!(product.diagnostics.is_empty());
+    assert!(product.incomplete.is_empty());
     let resource = product
-        .incomplete
+        .resources
         .iter()
         .find(|r| r.message.starts_with("parser resource refusal:"))
         .unwrap();

@@ -342,6 +342,7 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
     let mut want_causes = vec![];
     let mut want_compared = vec![];
     let mut want_gaps = vec![];
+    let mut want_resources = vec![];
     let mut failures = vec![];
     let mut expects = 0;
     if all_emitted && let Err(e) = wf::module(module) {
@@ -367,6 +368,7 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
                 _ => failures.push(format!("unreadable expectation `{e}`")),
             },
             ["gap", what @ ..] => want_gaps.push(what.join(" ")),
+            ["resource", "at", at] => want_resources.push(at.to_string()),
             ["kind", ty, k] | ["holds", ty, k] | ["size", ty, k] => {
                 let Some(d) = index
                     .symbols
@@ -525,6 +527,19 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
     if got_compared != want_compared {
         failures.push(format!(
             "compared: want {want_compared:?}, got {got_compared:?}"
+        ));
+    }
+    let mut got_resources: Vec<String> = p
+        .resource_refusals
+        .iter()
+        .map(|r| line_col(&modules, &r.site))
+        .collect();
+    got_resources.sort();
+    want_resources.sort();
+    if got_resources != want_resources {
+        let detail: Vec<_> = p.resource_refusals.iter().map(|r| &r.message).collect();
+        failures.push(format!(
+            "resources: want {want_resources:?}, got {got_resources:?} {detail:?}"
         ));
     }
     let mut got_gaps: Vec<String> = gaps.iter().map(|g| g.what.to_string()).collect();

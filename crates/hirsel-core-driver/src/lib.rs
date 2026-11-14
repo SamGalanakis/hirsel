@@ -14,7 +14,7 @@ pub use native::{Backend, BuildProduct, NativeOptions, NativeStop, ObjectProduct
 pub use reachability::{GapStop, Reachable};
 pub use test_run::{Runner, TestOutcome};
 mod meter;
-pub use diagnostics::{Diagnostic, IncompleteDiagnostic, SourceSite};
+pub use diagnostics::{Diagnostic, IncompleteDiagnostic, ResourceDiagnostic, SourceSite};
 pub use image::{CoreImage, LibraryInput};
 pub use instances::{InstanceStop, collect_instances};
 mod reuse;
@@ -163,6 +163,14 @@ pub struct Incomplete {
     pub primary: Site,
     pub message: String,
 }
+/// The implementation's resource refusal (PROG-6): a parser, resolver, layout or
+/// instance-collection limit is exceeded. It names no rule and is neither a rule
+/// refusal nor an unbuilt construct; the message names the amount and the limit.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResourceRefusal {
+    pub primary: Site,
+    pub message: String,
+}
 
 /// A body and its result are kept together: CoreIR ids refer only to this module.
 /// Callee rows are signature-only imports, so a callee-body edit does not alter it.
@@ -182,6 +190,7 @@ pub struct CheckProduct {
     pub definitions: BTreeMap<DefPath, Arc<DefinitionProduct>>,
     pub diagnostics: Vec<Refusal>,
     pub incomplete: Vec<Incomplete>,
+    pub resources: Vec<ResourceRefusal>,
     pub bytes: usize,
     pub rechecked: Vec<DefPath>,
     pub root: ContentHash,
@@ -201,6 +210,7 @@ impl CheckProduct {
             definitions: BTreeMap::new(),
             diagnostics: vec![],
             incomplete: vec![],
+            resources: vec![],
             bytes: 0,
             rechecked: vec![],
             root: ContentHash::default(),
@@ -214,7 +224,7 @@ impl CheckProduct {
         }
     }
     pub fn accepted(&self) -> bool {
-        self.diagnostics.is_empty() && self.incomplete.is_empty()
+        self.diagnostics.is_empty() && self.incomplete.is_empty() && self.resources.is_empty()
     }
     pub fn demand_body(&self, definition: &DefPath) -> io::Result<Arc<DefinitionProduct>> {
         if let Some(body) = self.definitions.get(definition) {
@@ -283,6 +293,7 @@ struct Root {
     definitions: BTreeMap<DefPath, Record>,
     diagnostics: Vec<Refusal>,
     incomplete: Vec<Incomplete>,
+    resources: Vec<ResourceRefusal>,
     native_entry: Option<native::EntryBinding>,
     test_entries: BTreeMap<DefPath, Result<native::EntryAbi, String>>,
 }
@@ -321,6 +332,7 @@ impl Cache {
             headers: Arc::clone(&self.root.headers),
             diagnostics: self.root.diagnostics.clone(),
             incomplete: self.root.incomplete.clone(),
+            resources: self.root.resources.clone(),
             root: hash,
             snapshot: self.root.snapshot,
             bytes: self.root.bytes,
@@ -467,7 +479,7 @@ impl Driver {
         }
         let mut modules = vec![];
         let mut syntax_diagnostics = vec![];
-        let mut syntax_incomplete = vec![];
+        let mut syntax_resources = vec![];
         for (path, _, signatures, bytes, _) in &sources {
             let output = parse_bytes(
                 bytes,
@@ -480,7 +492,7 @@ impl Driver {
             );
             syntax_diagnostics.extend(output.diagnostics.into_iter().map(|d| (path, d)));
             if let Some(r) = output.resource_refusal {
-                syntax_incomplete.push((path, r.site(), format!("parser resource refusal: {r}")));
+                syntax_resources.push((path, r.site(), format!("parser resource refusal: {r}")));
             }
             modules.push((path, output.syntax));
         }
@@ -525,6 +537,7 @@ impl Driver {
             result
                 .incomplete
                 .extend(directory.incomplete.iter().cloned());
+            result.resources.extend(directory.resources.iter().cloned());
         }
         result.snapshot = snapshot;
         for (path, d) in syntax_diagnostics {
@@ -532,8 +545,8 @@ impl Driver {
                 .diagnostics
                 .push(Refusal::syntax(index.module(path).unwrap(), &d));
         }
-        for (path, span, message) in syntax_incomplete {
-            result.incomplete.push(Incomplete {
+        for (path, span, message) in syntax_resources {
+            result.resources.push(ResourceRefusal {
                 primary: Site {
                     module: index.module(path).unwrap(),
                     item: u32::MAX,
@@ -555,10 +568,13 @@ impl Driver {
             .collect();
         for rows in &resolutions {
             for row in rows {
-                if let Some(site) = &row.resource_refusal {
-                    result.incomplete.push(Incomplete {
+                if let Some((site, depth)) = &row.resource_refusal {
+                    result.resources.push(ResourceRefusal {
                         primary: *site,
-                        message: "resolver resource refusal".into(),
+                        message: format!(
+                            "resolver resource refusal: expression nesting reaches depth {} past the limit of {depth}",
+                            depth + 1
+                        ),
                     });
                 }
             }
@@ -621,6 +637,12 @@ impl Driver {
                 primary: g.site,
                 message: g.what.into(),
             }));
+            result
+                .resources
+                .extend(p.resource_refusals.iter().map(|r| ResourceRefusal {
+                    primary: r.site,
+                    message: r.message.clone(),
+                }));
             meter.finish("declarations/layout");
             let declarations_accepted = result.accepted();
             for f in p.fns.base_len()..p.fns.len() {
@@ -788,6 +810,7 @@ impl Driver {
                 &definitions,
                 &result.diagnostics,
                 &result.incomplete,
+                &result.resources,
                 &result.native_entry,
                 &result.test_entries,
             );
@@ -805,6 +828,7 @@ impl Driver {
                     definitions,
                     diagnostics: vec![],
                     incomplete: vec![],
+                    resources: vec![],
                     native_entry: result.native_entry.clone(),
                     test_entries: result.test_entries.clone(),
                 });

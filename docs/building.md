@@ -495,8 +495,37 @@ artifact with the pinned qemu and a glibc for AArch64 (the cross sysroot here):
 productions**. It is an implementation resource ceiling, not a restriction on Hirsel
 programs. Exhaustion returns `ResourceRefusal::ParserStack` with that limit and the
 file-relative byte span of the token where the next production would start. The CLI
-and driver report an incomplete compiler outcome, never a source-language refusal or
+and driver report it as a resource refusal (below), never a source-language refusal or
 a successful parse. The formatter does not print an incomplete tree.
+
+### Resource refusals
+
+A resource refusal ([PROG-6](spec/programs.md)) is the implementation declining a
+program that passes one of its limits. It names no rule and is not a meaning of the
+program, so the driver keeps it apart from both rule refusals and incomplete (unbuilt)
+features: `CheckProduct.resources` and `Reachable.resources`, each a
+`ResourceRefusal { primary, message }` with no rule field. Four sources feed it, each
+with an exact primary site and a message carrying the measured amount and the limit:
+
+| Source | Limit | Primary site |
+| --- | --- | --- |
+| parser | `PARSER_NESTING_LIMIT` productions; u32-indexed source bytes | the token where the next production starts; the file start |
+| resolver | `RESOLVE_NESTING_LIMIT` expression depth | the expression past the limit |
+| front layout | the engine's 64-bit native size range | the field whose placement passes it |
+| instance collection | `NativeOptions.instance_limit` (65 536 in the CLI) | the definition of the instance past the limit |
+
+`check --json` and `build --json` carry them in a `resources` array of
+`{primary, message}`; stderr prints `resource <module> <start>..<end>: <message>`.
+The command exits **2**, as for an incomplete outcome; a rule refusal exits 1.
+"0 gaps" in census reports counts only unbuilt features: the instance limit is not a
+gap stop.
+
+Reuse: the parser, resolver and layout limits are compiler constants (layout recipes
+are identical on every supported target), so a stored product, keyed by compiler
+identity, is never served across a change to them. The instance limit belongs to the
+build: instance collection runs per build from the stored product and its refusal is
+never stored, so the same stored product is refused under a small limit and accepted
+under a large one.
 
 One shared guard runs before recursive expressions, compound expressions, types,
 patterns and blocks. Compound expressions include labels and `else if`; type recursion

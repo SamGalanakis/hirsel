@@ -1,0 +1,6 @@
+// PROG-6 (programs.md): a native layout past the engine's 64-bit size range is the
+// implementation's resource refusal, which names no rule. `b`'s logical size fits u64
+// (1 + 8 * (2^61 - 1) = 2^64 - 7 bytes), but aligning it to 8 puts it at 8, so the
+// native layout needs 8 + 2^64 - 8 = 2^64 bytes at `b`.
+// expect: resource at 6:20
+type Wide { a: u8, b: Inline[u64, 2305843009213693951] }

@@ -138,7 +138,7 @@ fn formatter_uses_syntax_roles_for_spacing() {
 fn formatter_refuses_invalid_or_incomplete_source() {
     assert!(format(&parse("fn f() { let = 1 }", ParseMode::Source)).is_none());
     let mut parsed = parse("fn f() {}", ParseMode::Source);
-    parsed.resource_refusal = Some(ResourceRefusal::SourceTooLarge);
+    parsed.resource_refusal = Some(ResourceRefusal::SourceTooLarge { bytes: 1 << 32 });
     assert!(format(&parsed).is_none());
 }
 fn good(text: &str) -> SyntaxFile {

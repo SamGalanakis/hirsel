@@ -31,13 +31,17 @@ pub(crate) fn program_inputs(source: &str) -> (NameIndex, Vec<ModuleInput>) {
 }
 
 fn inputs_with_core(source: &str, core_dir: &Path) -> (NameIndex, Vec<ModuleInput>) {
+    inputs_in(source, core_dir, "main")
+}
+
+fn inputs_in(source: &str, core_dir: &Path, module: &str) -> (NameIndex, Vec<ModuleInput>) {
     let mut symbols = Symbols::default();
     let core = PackageManifest::directory(core_dir, package("core"), true).unwrap();
     let app = PackageManifest {
         package: package("app"),
         sources: vec![ModuleSource {
             file: PathBuf::from("input.hirsel"),
-            modules: vec!["main".into()],
+            modules: vec![module.into()],
             signatures: false,
         }],
         dependencies: vec![package("core")],
@@ -3515,58 +3519,116 @@ fn isolate_and_code_describe_rules() {
     assert!(failures.is_empty(), "{failures:?}");
 }
 
+/// PROG-9 identity bytes, one case per clause of the S rules, each expected value
+/// derived by hand from programs.md (the first is the spec's own example, verbatim).
+/// Bugs: the default mode `view` written; spaces around `->` or after `,`; a missing
+/// result left out; `waits`, region parameters, anchors or outlives pairs dropped,
+/// unsorted or repeated; an unescaped byte in a definition identity component.
 #[test]
-fn code_describe_identity_static_bytes() {
-    let source = r#"
-fn named(a: u64) -> u64 { a }
-fn other(b: u64) -> u64 { b }
-fn run() -> u64 {
-    let _ = code.identity(code.describe(named));
-    let _ = code.identity(code.describe(other));
-    0
-}
-pub fn main() -> Result[(), Exit] { Ok(()) }
-"#;
-    let (index, modules) = program_inputs(source);
-    let program = Program::declare(&index, &modules);
-    assert!(program.refusals.is_empty() && program.gaps.is_empty());
-    let mut emitter = Emitter::new();
-    let mut refusals = vec![];
-    let mut gaps = vec![];
-    for (f, fd) in program.fns.iter().enumerate() {
-        if fd.body.is_none() || !fd.path.package_is("app", "1") {
+fn code_identity_bytes_follow_prog9() {
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "main",
+            "fn double(b: Bytes) -> Result[Bytes, Capacity] { let mut out: Bytes = list.new(); list.append(mut out, b)?; list.append(mut out, b)?; Ok(out) }",
+            "app@1/main/double(core@1/core/List[u8])->core@1/core/Result[core@1/core/List[u8],core@1/core/Capacity]",
+        ),
+        // Modes: `view` is the default and is not written; `mut` and `take` are words.
+        // A missing result and a written `()` are both `->()`.
+        (
+            "main",
+            "fn double(mut a: List[u8], take b: List[u8], c: u64) {}",
+            "app@1/main/double(mut core@1/core/List[u8],take core@1/core/List[u8],u64)->()",
+        ),
+        ("main", "fn double() -> () {}", "app@1/main/double()->()"),
+        // `waits` stays, as a word after the result.
+        (
+            "main",
+            "fn add_one(take x: u64) -> u64 { x + 1 }\nfn double(tasks: Tasks) waits { let h = result.unwrap(task.spawn(tasks, bytes 64, 41u64, add_one)); let _ = result.unwrap(task.join(take h)) }",
+            "app@1/main/double(core@1/core/Tasks)->()waits",
+        ),
+        // Region parameters by position `^i`, and roots named as `in ^i`.
+        (
+            "main",
+            "fn double[in s](root: Text in s, x: View[Text in s]) -> u64 { 0 }",
+            "app@1/main/double[in ^0](core@1/core/Text in ^0,core@1/core/View[core@1/core/Text in ^0])->u64",
+        ),
+        // A root that is a parameter names it by position.
+        (
+            "main",
+            "fn double(n: u64, r: Region, x: Text in r) -> u64 { n }",
+            "app@1/main/double(u64,core@1/core/Region,core@1/core/Text in #1)->u64",
+        ),
+        // Outlives pairs sorted by `i` then `j`, each once.
+        (
+            "main",
+            "fn double[in a, in b, in c](x: Text in a, y: Text in b, z: Text in c) -> u64 where c: b, a: b, a: b { 0 }",
+            "app@1/main/double[in ^0,in ^1,in ^2](core@1/core/Text in ^0,core@1/core/Text in ^1,core@1/core/Text in ^2)->u64 where ^0:^1,^2:^1",
+        ),
+        // A callable parameter: `own[send]`, its own modes and result, no names.
+        (
+            "main",
+            "fn double(take k: own[send] fn(u64) -> u64, g: fn(mut u64)) -> u64 { k(1) }",
+            "app@1/main/double(take own[send]fn(u64)->u64,fn(mut u64)->())->u64",
+        ),
+        // Every byte of a component other than a letter, digit or `_` is `%XX`, in the
+        // function's identity and in every type path's.
+        (
+            "net-io",
+            "type Doc { n: u64 }\nfn double(d: Doc) {}",
+            "app@1/net%2Dio/double(app@1/net%2Dio/Doc)->()",
+        ),
+    ];
+    let mut failures = vec![];
+    for &(module, header, expected) in cases {
+        let mut want = vec![1u8];
+        want.extend_from_slice(expected.as_bytes());
+        // The front cannot yet form a region-generic function value (913), so those
+        // headers check the one encoder directly; the rest go through code.describe.
+        let describable = !header.starts_with("fn double[");
+        let run = if describable {
+            "fn run() -> u64 {\n    let _ = code.identity(code.describe(double));\n    0\n}\n"
+        } else {
+            ""
+        };
+        let source = format!("{header}\n{run}pub fn main() -> Result[(), Exit] {{ Ok(()) }}\n");
+        let (index, modules) = inputs_in(&source, &core_dir(), module);
+        let program = Program::declare(&index, &modules);
+        if !program.refusals.is_empty() || !program.gaps.is_empty() {
+            failures.push(format!(
+                "{header}: {:?} {:?}",
+                program.refusals, program.gaps
+            ));
             continue;
         }
-        let check = program.check_lower(f, &mut emitter);
-        refusals.extend(check.refusals);
-        gaps.extend(check.gaps);
-        emitter.seal();
+        let double = program
+            .fns
+            .iter()
+            .find(|fd| fd.path.package_is("app", "1") && fd.path.0.name == "double")
+            .unwrap();
+        let direct = crate::identity::code_identity(&program.decls, &program.types, double);
+        if direct.as_deref() != Some(&want[..]) {
+            let got = direct.map(|b| String::from_utf8_lossy(&b[1..]).into_owned());
+            failures.push(format!("{header}:\n  want {expected}\n  got  {got:?}"));
+        }
+        if !describable {
+            continue;
+        }
+        let mut emitter = Emitter::new();
+        for (f, fd) in program.fns.iter().enumerate() {
+            if fd.body.is_none() || !fd.path.package_is("app", "1") {
+                continue;
+            }
+            let check = program.check_lower(f, &mut emitter);
+            if !check.refusals.is_empty() || !check.gaps.is_empty() {
+                failures.push(format!("{header}: {:?} {:?}", check.refusals, check.gaps));
+            }
+            emitter.seal();
+        }
+        if !emitter.module.statics.iter().any(|s| s.bytes == want) {
+            failures.push(format!("{header}: code.identity does not read these bytes"));
+        }
     }
-    assert!(
-        refusals.is_empty() && gaps.is_empty(),
-        "{refusals:?} {gaps:?}"
-    );
-    let identities: Vec<String> = emitter
-        .module
-        .statics
-        .iter()
-        .filter_map(|s| String::from_utf8(s.bytes.get(1..)?.to_vec()).ok())
-        .collect();
-    assert!(
-        identities
-            .iter()
-            .any(|s| s == "app@1/main/named(view u64) -> u64")
-    );
-    assert!(
-        identities
-            .iter()
-            .any(|s| s == "app@1/main/other(view u64) -> u64")
-    );
-    assert!(
-        identities
-            .iter()
-            .all(|s| !s.contains(" a: ") && !s.contains(" b: "))
-    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]

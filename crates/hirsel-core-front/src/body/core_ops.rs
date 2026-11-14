@@ -1732,30 +1732,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 && fd.path.0.name == source_name
         })?;
         let fd = &self.p.fns[f];
-        let mut text = format!(
-            "{}@{}/{}",
-            fd.path.0.package.name,
-            fd.path.0.package.version,
-            fd.path.0.modules.join("/")
-        );
-        if !fd.path.0.modules.is_empty() {
-            text.push('/');
-        }
-        text.push_str(&fd.path.0.name);
-        text.push('(');
-        for (i, param) in fd.params.iter().enumerate() {
-            if i > 0 {
-                text.push_str(", ");
-            }
-            text.push_str(param.mode.keyword());
-            text.push(' ');
-            text.push_str(&crate::decls::canonical(&self.p.decls, &self.t, param.ty));
-        }
-        text.push_str(") -> ");
-        text.push_str(&crate::decls::canonical(&self.p.decls, &self.t, fd.result));
-        let mut bytes = Vec::with_capacity(text.len() + 1);
-        bytes.push(1);
-        bytes.extend_from_slice(text.as_bytes());
+        let bytes = crate::identity::code_identity(&self.p.decls, &self.t, fd)?;
         let id = self.runtime_type(result, n)?;
         let to = self.new_slot(PlaceTy::Declared(id), n);
         let data = self.e.static_bytes(&bytes);

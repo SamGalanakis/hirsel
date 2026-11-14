@@ -4,15 +4,12 @@
 // taken, a double free). Every run returns with one cause cell still admitted: a caught
 // failure keeps the cell as the primary and a later catch refunds the earlier one
 // (FAIL-16, MEM-24), so each states `used 32`.
-// Cranelift keeps 64 after a second catch: the later catch does not refund the earlier
-// cell (core-cranelift-904; LLVM and the evaluator keep 32), so the two runs that catch
-// twice are held under the evaluator until it does.
-// expect: run case_fail_then_ok() = 20 used 32 evaluator-only:cranelift
+// expect: run case_fail_then_ok() = 20 used 32
 // expect: run case_unwrap_stops() = 2005 used 32
 // expect: run case_gives_up() = 1000 used 32
 // expect: run case_drop() = 1 used 32
 // expect: run case_read() = 1 used 32
-// expect: run case_twice() = 2 used 32 evaluator-only:cranelift
+// expect: run case_twice() = 2 used 32
 fn attempt(n: u64) -> u64 {
     if n < 2 {
         fail(result.unwrap(string.from("busy")))

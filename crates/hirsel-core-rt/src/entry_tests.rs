@@ -238,6 +238,53 @@ fn c_u64_capability_operands_feed_host_requests_and_ok_is_initialized() {
         hirsel_core_os_process_free(owner.process);
     }
 }
+
+#[test]
+fn product_start_double_isolate_catch_refunds_the_first_cause_cell() {
+    unsafe extern "C" fn entry(context: *mut Context, _: *const Config, _: *mut MainResult) -> u8 {
+        // SAFETY: the product entry owns its task context and each caught chain.
+        unsafe {
+            let before = (*context).available();
+            assert!(crate::isolate::hirsel_core_isolate_enter(context).entered);
+            crate::causes::record(
+                &mut *context,
+                crate::causes::Cause::new(crate::causes::UNWRAP, 1),
+            );
+            let first = crate::isolate::hirsel_core_isolate_catch(context);
+            drop(crate::causes::Causes::from_raw(first.causes));
+            assert!(crate::isolate::hirsel_core_isolate_enter(context).entered);
+            crate::causes::record(
+                &mut *context,
+                crate::causes::Cause::new(crate::causes::UNWRAP, 2),
+            );
+            let second = crate::isolate::hirsel_core_isolate_catch(context);
+            drop(crate::causes::Causes::from_raw(second.causes));
+            assert_eq!((*context).available(), before - 32);
+        }
+        0
+    }
+    unsafe extern "C" fn diagnostic(_: *mut u8, _: *const u8, _: usize) {
+        panic!("unexpected product diagnostic");
+    }
+    let config = Config {
+        root_limit: 1024,
+        args: ptr::null(),
+        args_len: 0,
+        grants: ptr::null(),
+        grants_len: 0,
+        provider: ptr::null(),
+        state: ptr::null_mut(),
+        diagnostic,
+        describe: None,
+        scheduler: crate::tasks::SchedulerProvider::default(),
+        stop_fd: 2,
+        capabilities: ptr::null(),
+        capabilities_len: 0,
+        close_grants: None,
+    };
+    // SAFETY: config and entry remain pinned for the synchronous product run.
+    assert_eq!(unsafe { hirsel_core_run(&config, entry) }, 0);
+}
 #[test]
 fn run_closes_grants_after_main_cleanup_and_before_reporting_status_without_admission() {
     struct State {

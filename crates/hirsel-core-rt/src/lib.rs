@@ -108,7 +108,7 @@ impl Context {
     }
 
     pub(crate) fn mark_startup_primary(&mut self) {
-        if let Some(primary) = self.primary.as_mut() {
+        if let Some(primary) = self.primary.as_mut().filter(|cell| !cell.reserved) {
             primary.startup = true;
         }
     }

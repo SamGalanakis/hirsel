@@ -1,8 +1,8 @@
 [
   {"name": "drop", "value": 1, "used": 32},
   {"name": "read", "value": 1, "used": 32},
-  {"name": "twice", "value": 2, "used": 32, "red": {"cranelift": {"cause": "a run that catches twice keeps 64 bytes admitted natively, not 32 (FAIL-16: the later catch refunds the earlier cause cell); core-cranelift-904", "gives": 2, "used": 64}, "llvm": {"cause": "a run that catches twice keeps 64 bytes admitted through the product path, not 32: the same defect as Cranelift's, on LLVM too, while the LLVM front harness (task_start without mark_startup_primary) keeps 32; routed by m2b-table-tx-951, with 904's double catch", "gives": 2, "used": 64}}},
-  {"name": "fail_then_ok", "value": 20, "used": 32, "red": {"cranelift": {"cause": "a run that catches twice keeps 64 bytes admitted natively, not 32 (FAIL-16: the later catch refunds the earlier cause cell); core-cranelift-904", "gives": 20, "used": 64}, "llvm": {"cause": "a run that catches twice keeps 64 bytes admitted through the product path, not 32: the same defect as Cranelift's, on LLVM too, while the LLVM front harness (task_start without mark_startup_primary) keeps 32; routed by m2b-table-tx-951, with 904's double catch", "gives": 20, "used": 64}}},
+  {"name": "twice", "value": 2, "used": 32},
+  {"name": "fail_then_ok", "value": 20, "used": 32},
   {"name": "unwrap_stops", "value": 2005, "used": 32},
   {"name": "gives_up", "value": 1000, "used": 32}
 ]

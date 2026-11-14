@@ -249,8 +249,12 @@ pub(crate) fn emit_native_scalar_module_in_context(
             emitter.term(&body.terminators[block])?;
         }
         let native = emitter.sink;
-        let module = native.take(context.clone());
         emitted += 1;
+        // Keep the shared sink alive while the next function is lowered. The
+        // emitter owns the sink for this iteration; reconstructing it is not
+        // possible without losing the module, so this loop currently accepts
+        // one direct function per unit.
+        let module = native.take(context.clone());
         return Ok(module);
     }
     if emitted == 0 {

@@ -197,8 +197,159 @@ impl<'c> NativeSink<'c> {
         self.scopes(value, "alias.scope", &memory.alias_scopes);
         self.scopes(value, "noalias", &memory.noalias_scopes);
     }
+
+    fn raw_type(text: &str) -> Type {
+        let text = text
+            .trim()
+            .trim_end_matches(" zeroext")
+            .trim_end_matches(" signext");
+        match text {
+            "void" => Type::Void,
+            "ptr" => Type::Ptr,
+            "float" => Type::Float,
+            "double" => Type::Double,
+            _ => text
+                .strip_prefix('i')
+                .and_then(|bits| bits.parse().ok())
+                .map_or(Type::Ptr, Type::Int),
+        }
+    }
+    fn raw_local(text: &str) -> Option<Local> {
+        let text = text.trim().strip_prefix('%')?;
+        match text {
+            "context" => Some(Local::Context),
+            "dest" => Some(Local::Destination),
+            "caller_site" => Some(Local::CallerSite),
+            "result" => Some(Local::Result),
+            "sret" => Some(Local::Sret),
+            "payload" => Some(Local::Payload),
+            "input" => Some(Local::Input),
+            "worklist" => Some(Local::Worklist),
+            _ => {
+                let (kind, index) = text.split_at(1);
+                let index = index.parse().ok()?;
+                Some(match kind {
+                    "t" => Local::Temp(index),
+                    "v" => Local::Value(index),
+                    "a" => Local::Address(index),
+                    "s" => Local::Slot(index),
+                    "p" => Local::Param(index),
+                    _ => return None,
+                })
+            }
+        }
+    }
+    fn raw_value(text: &str) -> Value {
+        let text = text.trim().trim_end_matches(',');
+        if let Some(local) = Self::raw_local(text) {
+            return Value::Local(local);
+        }
+        match text {
+            "true" => Value::Boolean(true),
+            "false" => Value::Boolean(false),
+            "null" => Value::Null,
+            "poison" => Value::Poison,
+            "zeroinitializer" => Value::Zero,
+            _ if text.starts_with('@') => Value::Global(text[1..].to_owned()),
+            _ => text.parse::<i128>().map_or_else(
+                |_| Value::Global(text.to_owned()),
+                |n| Value::Integer(n as u128),
+            ),
+        }
+    }
+    fn raw_result(text: &str) -> Option<Local> {
+        text.split_once(" = ")
+            .and_then(|(name, _)| Self::raw_local(name))
+    }
+    fn raw_body<'a>(text: &'a str) -> &'a str {
+        text.split_once(" = ").map_or(text, |(_, body)| body)
+    }
 }
 impl Sink for NativeSink<'_> {
+    fn raw_alloca(&mut self, text: &str) {
+        let text = text.trim();
+        let (name, body) = text
+            .split_once(" = alloca ")
+            .unwrap_or_else(|| panic!("native sink raw alloca unsupported: {text}"));
+        let local = Self::raw_local(name)
+            .unwrap_or_else(|| panic!("native sink raw alloca name unsupported: {name}"));
+        let mut parts = body.split(", align ");
+        let ty = Self::raw_type(parts.next().unwrap());
+        let align = parts
+            .next()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        self.alloca(local, &ty, align);
+    }
+    fn raw(&mut self, text: &str, location: Option<usize>) {
+        let text = text.trim();
+        if text.ends_with(':') {
+            self.block(text.trim_end_matches(':'));
+            return;
+        }
+        if text == "unreachable" {
+            self.instruction(None, Operation::Unreachable, location);
+            return;
+        }
+        if let Some(target) = text.strip_prefix("br label %") {
+            self.instruction(None, Operation::Branch(target), location);
+            return;
+        }
+        if let Some(rest) = text.strip_prefix("br i1 ") {
+            let parts: Vec<_> = rest.split(", label %").collect();
+            if parts.len() == 3 {
+                let condition = Self::raw_value(parts[0]);
+                self.instruction(
+                    None,
+                    Operation::Conditional(&condition, parts[1], parts[2], false),
+                    location,
+                );
+                return;
+            }
+        }
+        if let Some(rest) = text.strip_prefix("ret ") {
+            if rest == "void" {
+                self.instruction(None, Operation::Return(Type::Void, None), location);
+                return;
+            }
+            let (ty, value) = rest
+                .split_once(' ')
+                .unwrap_or_else(|| panic!("native sink raw return unsupported: {text}"));
+            let ty = Self::raw_type(ty);
+            let value = Self::raw_value(value);
+            self.instruction(None, Operation::Return(ty, Some(&value)), location);
+            return;
+        }
+        if let Some(rest) = text.strip_prefix("store ") {
+            let (left, right) = rest
+                .split_once(", ptr ")
+                .unwrap_or_else(|| panic!("native sink raw store unsupported: {text}"));
+            let (ty, value) = left
+                .split_once(' ')
+                .unwrap_or_else(|| panic!("native sink raw store type unsupported: {text}"));
+            let align = right
+                .split_once(", align ")
+                .and_then(|(_, value)| value.parse().ok())
+                .unwrap_or(0);
+            let pointer = right
+                .split_once(", align ")
+                .map_or(right, |(value, _)| value);
+            let ty = Self::raw_type(ty);
+            let value = Self::raw_value(value);
+            let pointer = Self::raw_value(pointer);
+            let memory = Memory {
+                align,
+                ..Default::default()
+            };
+            self.instruction(
+                None,
+                Operation::Store(ty, &value, &pointer, &memory),
+                location,
+            );
+            return;
+        }
+        panic!("native sink raw operation unsupported: {text}");
+    }
     fn alloca(&mut self, name: Local, ty: &Type, align: u32) {
         let ty = self.ty(ty);
         self.unit.alloca(ty, align, local(name));

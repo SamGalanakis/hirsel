@@ -936,8 +936,10 @@ mod tests {
             } else {
                 assert!(text.contains("ret i1 true"), "{text}");
             }
-            let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
-                .join(format!("unique-after-dup-{duplicated}"));
+            let root = std::env::temp_dir().join(format!(
+                "hirsel-llvm-unique-after-dup-{duplicated}-{}",
+                std::process::id()
+            ));
             std::fs::create_dir_all(&root).unwrap();
             let object = root.join("probe.o");
             std::fs::write(&object, module.emit_object(&machine).unwrap()).unwrap();

@@ -19,7 +19,11 @@ SUITES = (
     ('llvm-arm-std', 'core-llvm-aarch64-std', []),
     ('llvm-arm-m1', 'core-llvm-aarch64-m1', []),
     ('land', 'test-land', []),
+    ('laws-cranelift', 'core-native-laws-cranelift', []),
+    ('laws-llvm', 'core-native-laws-llvm', []),
 )
+# Python unittest harnesses: their bodies are unittest's count, not libtest lines.
+UNITTEST_SUITES = {'test-land', 'core-native-laws-cranelift', 'core-native-laws-llvm'}
 
 
 def bodies(details, python=False):
@@ -43,7 +47,7 @@ def summarize(records, expected):
         if name != expected and not name.startswith(expected + '-'):
             errors.append(f'unexpected target {target}')
         details = result.get('details', '')
-        count = bodies(details, python=expected == 'test-land')
+        count = bodies(details, python=expected in UNITTEST_SUITES)
         targets.append(dict(target=target, bodies=count, **result))
         if result.get('status') != 1:
             errors.append(f'{target}: test status {result.get("status")}')

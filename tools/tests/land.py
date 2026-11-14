@@ -1494,19 +1494,25 @@ class Units(unittest.TestCase):
         def run(command):
             calls.append(('query', command))
             return SimpleNamespace(returncode=0, stdout='root//:a', stderr='')
-        with patch.dict(full.__globals__, check=check, run=run, unchanged=lambda tree: True):
-            self.assertIsNone(full('tree', screened=True))
-        self.assertEqual(calls[0], ('check', [sys.executable, 'tools/buck2/sync.py', '--if-stale']))
-        self.assertEqual([kind for kind, _ in calls[:3]], ['check', 'query', 'query'])
-        core = calls[-1][1]
-        self.assertEqual(core[:3], [sys.executable, 'tools/buck2/event_logs.py', 'test'])
-        self.assertIn('//:hirsel-cranelift-test-core_native', core)
+        # The land tool's own suite joins exactly the lands that change the land tool.
+        for changed, land_suite in (({'core/std/list.hirsel'}, False), ({'tools/land-run'}, True),
+                                    ({'tools/tests/land.py'}, True)):
+            calls.clear()
+            with self.subTest(changed=changed), patch.dict(full.__globals__, check=check, run=run, unchanged=lambda tree: True,
+                                                           changed_paths=lambda base, tree: changed):
+                self.assertIsNone(full('tree', 'base', screened=True))
+                self.assertEqual(calls[0], ('check', [sys.executable, 'tools/buck2/sync.py', '--if-stale']))
+                self.assertEqual([kind for kind, _ in calls[:3]], ['check', 'query', 'query'])
+                core = calls[-1][1]
+                self.assertEqual(core[:3], [sys.executable, 'tools/buck2/event_logs.py', 'test'])
+                self.assertIn('//:hirsel-cranelift-test-core_native', core)
+                self.assertEqual('//:test-land' in core, land_suite)
 
     def test_empty_build_query_refuses_the_aggregate(self):
         full = runpy.run_path(str(ROOT / 'tools/land'))['full']
         with patch.dict(full.__globals__, check=lambda *args: None, unchanged=lambda tree: True,
                         run=lambda command: SimpleNamespace(returncode=0, stdout='', stderr='')):
-            self.assertEqual(full('tree', screened=True)[0], 'FAIL  the build set query')
+            self.assertEqual(full('tree', 'base', screened=True)[0], 'FAIL  the build set query')
 
     def test_clippy_rejects_error_diagnostics(self):
         module = runpy.run_path(str(ROOT / 'tools/buck2/clippy.py'))

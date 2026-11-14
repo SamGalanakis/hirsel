@@ -99,6 +99,7 @@ CORE_ACCEPTANCE = (
     '//:hirsel-llvm-lazy-unittest', '//:hirsel-llvm-unittest',
     '//:hirsel-cranelift-test-core_native', '//:hirsel-cranelift-test-core_aarch64',
     '//:core-aarch64-provider', '//:land-core-evaluator', '//:land-core-native-capabilities',
+    '//:core-m1-cranelift', '//:core-m1-llvm', '//:core-llvm-aarch64-m1',
     # The #[ignore] native::tests bodies that need the host's openat2, run one per
     # target on the invoking host; the pool half joins once its bodies all pass.
     '//:core-driver-native-openat2',
@@ -547,7 +548,7 @@ def fast(tree, base=None):
     return report
 
 
-def full(tree, screened=False):
+def full(tree, base, screened=False):
     """The gate on the checked-out tree: None or the first red check's report."""
     if not unchanged(tree):
         raise Refusal('the worktree changed before checks; refusing to push')
@@ -573,12 +574,18 @@ def full(tree, screened=False):
                                                 '--materializations', 'none', *targets])
                       or check('Clippy', [PY, 'tools/buck2/clippy.py'])
                       or check('Core suites', [PY, 'tools/buck2/event_logs.py', 'test', *CONFIG, '-c', 'hirsel.full=true', *CORE_ACCEPTANCE,
-                                                   '--', '--test-arg=--test-threads=1']))
+                                                   *land_tool_suite(base, tree), '--', '--test-arg=--test-threads=1']))
     # fast(tree) checked this exact tree's formatting (now or when screened);
     # fmt checks Rust plus the changed cases against the candidate formatter; no rerun.
     if not unchanged(tree):
         raise Refusal('the worktree changed during checks; refusing to push')
     return report
+
+
+def land_tool_suite(base, tree):
+    """//:test-land (97 s; the sweep runs it daily) joins only a land that changes the land tool."""
+    return (['//:test-land'] if any(path.startswith(('tools/land', 'tools/tests/land'))
+                                    for path in changed_paths(base, tree)) else [])
 
 
 def core_cost_report(base, tree):
@@ -905,7 +912,7 @@ class Batch:
             tickets = f' with {len(applied)} tickets: ' + ', '.join(str(member) for member, _ in applied)
         say(f'attempt {self.attempt}: checking {tree[:12]} on origin/main {base[:12]}' + tickets)
         tree_id = git('rev-parse', tree + '^{tree}')
-        report = full(tree, tree_id.returncode == 0 and tree_id.stdout.strip() in self.screened)
+        report = full(tree, base, tree_id.returncode == 0 and tree_id.stdout.strip() in self.screened)
         if report is None:
             core_cost_report(base, tree)
         return report

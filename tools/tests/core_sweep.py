@@ -64,7 +64,7 @@ class Sweep(unittest.TestCase):
             for suite in SWEEP['SUITES']:
                 _, target, _ = suite
                 logger = SimpleNamespace(NoTestHistory=lambda: None, test_results=lambda *a, **kw:
-                                         [(target, result(PYTHON if target == 'test-land' else RUST))])
+                                         [(target, result(PYTHON if target in SWEEP['UNITTEST_SUITES'] else RUST))])
                 row = execute(suite, Path(directory) / 'result', logger)
                 self.assertEqual(row['errors'], [])
                 self.assertEqual('--test-arg=--test-threads=1' in row['command'], target in ('core-driver-native', 'core-llvm-aarch64-runtime'))
@@ -88,9 +88,9 @@ class Sweep(unittest.TestCase):
                      contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                     self.assertEqual(main(), int(red))
                 report = json.loads(Path(path).read_text())
-                self.assertEqual({row['suite'] for row in report['suites']}, {'core-driver-native', 'core-llvm-aarch64-runtime', 'core-llvm-aarch64-front', 'core-llvm-aarch64-std', 'core-llvm-aarch64-m1', 'test-land'})
+                self.assertEqual({row['suite'] for row in report['suites']}, {target for _, target, _ in SWEEP['SUITES']})
                 self.assertEqual(report['status'], 'failed' if red else 'passed')
-                self.assertEqual(report['bodies'], 6)
+                self.assertEqual(report['bodies'], len(SWEEP['SUITES']))
                 self.assertEqual(report['source'], 'main')
 
 

@@ -1324,7 +1324,8 @@ def first_party(meta: dict) -> str:
                                        "HIRSEL_TOOLCHAIN_QEMU": "//tools/buck2/native-toolchain:qemu"},
                             data=Raw('glob(["core/core/**", "core/std/**", "docs/spec/**"])')))
     for engine in ("cranelift", "llvm"):
-        out.append("\n" + call("hirsel_script_test", name="core-m1-" + engine, script="core/tools/m1.py", full=False,
+        # host: the files program's cases open a Dir, which needs the host's openat2.
+        out.append("\n" + call("hirsel_script_test", name="core-m1-" + engine, script="core/tools/m1.py", full=False, host=True,
                                 args=["--backend", engine, "--compiler", "buck-out/tmp/cargo-bin-exe/core-m1-" + engine + "/hirsel-core"],
                                 bin_exes={"hirsel-core": "//:hirsel-core-driver-bin-hirsel-core"},
                                 files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
@@ -1468,11 +1469,15 @@ def first_party(meta: dict) -> str:
                             data=Raw('glob(["core/core/**", "core/std/**", "core/tools/std_native.py", "core/tools/std_native_owners.json"])')))
     # The laws land-core-evaluator reports native-only (an entry taking Dir, Stdout,
     # Stderr or Clock), on both engines; on the invoking host for the Dir laws' openat2.
-    out.append("\n" + call("hirsel_script_test", name="land-core-native-capabilities", script="core/tools/gate_native_capabilities.py", full=False,
-                            host=True, args=["--compiler", "buck-out/tmp/cargo-bin-exe/land-core-native-capabilities/hirsel-core"],
-                            bin_exes={"hirsel-core": "//:hirsel-core-driver-bin-hirsel-core"},
-                            files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
-                            data=Raw('glob(["core/core/**", "core/std/**", "crates/hirsel-core-rt/include/**"]) + ["core/tools/std_native.py", "core/tools/std_native_owners.json", "core/tools/std_host.c"]')))
+    # Land runs the capability laws on both engines; the sweep runs every law, one engine per target.
+    for name, selection in (("land-core-native-capabilities", ["--capabilities-only"]),
+                            ("core-native-laws-cranelift", ["--backend", "cranelift"]),
+                            ("core-native-laws-llvm", ["--backend", "llvm"])):
+        out.append("\n" + call("hirsel_script_test", name=name, script="core/tools/gate_native_laws.py", full=False,
+                                host=True, args=selection + ["--compiler", "buck-out/tmp/cargo-bin-exe/" + name + "/hirsel-core"],
+                                bin_exes={"hirsel-core": "//:hirsel-core-driver-bin-hirsel-core"},
+                                files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
+                                data=Raw('glob(["core/core/**", "core/std/**", "crates/hirsel-core-rt/include/**"]) + ["core/tools/std_native.py", "core/tools/std_native_owners.json", "core/tools/std_host.c"]')))
     out.append("\n" + call("hirsel_script_test", name="test-measurement-artifacts", script="tools/tests/measurement_artifacts.py", full=False,
                             data=["core/tools/measurement_artifacts.py", "core/tools/std_native.py"]))
     out.append("\n" + call("hirsel_script_test", name="test-core-sweep", script="tools/tests/core_sweep.py", full=False,

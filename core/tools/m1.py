@@ -379,6 +379,7 @@ def main():
     parser.add_argument('--target')
     parser.add_argument('--emulator', type=Path)
     parser.add_argument('--sysroot', type=Path)
+    parser.add_argument('--test-threads', type=int, choices=[1], default=1)
     parser.add_argument('--only', nargs='+')
     parser.add_argument('--programs-only', action='store_true')
     parser.add_argument('--debug-lines', choices=['on', 'off'], help='Override native line tables for every build.')

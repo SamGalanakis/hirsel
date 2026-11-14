@@ -860,6 +860,29 @@ fn float_unary_cranelift() { float_unary(Backend::Cranelift); }
 #[test]
 #[ignore = "explicit native integration target"]
 fn float_unary_llvm() { float_unary(Backend::Llvm); }
+/// FORM #97: a NaN reaches `to_bits` and `total_order` as the canonical NaN after each
+/// path that only moves bits (memory, growth, parameters, results, indirect calls,
+/// tasks, channels, clone_in, compact fields). The case's `main` checks every run
+/// line; its exit status names the first path that differs.
+fn float_nan_paths(backend: Backend) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let source = include_str!("../../../core/front/cases/body/float-nan-paths.hirsel");
+    let mut request = source_request(source, dir.path());
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
+    let mut options = native_options(backend, dir.path());
+    options.grant_mask = 1 << 9;
+    let built = product.build(&DefPath::from_full("app@1/main/main").unwrap(), &options).unwrap();
+    run_clean(&built.executable, 0);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn float_nan_paths_cranelift() { float_nan_paths(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn float_nan_paths_llvm() { float_nan_paths(Backend::Llvm); }
 /// MEM-4: build_in and dest.put, a put that overflows and a foreign child, on each engine.
 fn dest_put(backend: Backend) {
     run_lines_native(backend, include_str!("../../../core/front/cases/body/dest-put.hirsel"));

@@ -245,6 +245,9 @@ struct Machine<'m> {
     role_checks: u64,
     /// Whether each function inherits its caller's site (`source::inherits_site`).
     inherits: Vec<bool>,
+    /// [`Nans::Scrambled`]: the count of NaNs stored so far, which picks the next one's
+    /// pattern; None in the canonical placement.
+    scrambled: Option<u64>,
 }
 
 struct Footprint {
@@ -264,13 +267,26 @@ fn collect_arrays(ty: &FieldTy, out: &mut Vec<(FieldTy, u64)>) {
 pub fn run(m: &Module, f: FuncId, args: &[u64], limit: u64) -> Report {
     run_injected(m, f, args, limit, None)
 }
-/// A run, with what its oracle checks covered.
-pub fn run_checked(m: &Module, f: FuncId, args: &[u64], limit: u64) -> (Report, Checked) {
-    run_world(m, f, args, limit, None, &[])
+/// Where a run's NaNs take their one observable pattern (FORM #97: only a `reinterpret`
+/// from a float observes the pattern, and it gives the canonical one).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Nans {
+    /// Every operation's NaN result is canonical: the placement most runs use.
+    Canonical,
+    /// For conformance harnesses only. Each float `store` of a NaN writes a different
+    /// non-canonical quiet NaN: the sign and payload change from one store to the next.
+    /// A producer that reads float-holding bytes at another type, or any observer other
+    /// than `reinterpret`, then sees a pattern that a run in the canonical placement
+    /// does not, so a hand-derived run line catches it.
+    Scrambled,
+}
+/// A run whose NaNs follow `nans`, with what its oracle checks covered.
+pub fn run_nans(m: &Module, f: FuncId, args: &[u64], limit: u64, nans: Nans) -> (Report, Checked) {
+    run_world(m, f, args, limit, None, &[], nans)
 }
 /// A run whose `Args` table holds `argv`.
 pub fn run_args(m: &Module, f: FuncId, args: &[u64], limit: u64, argv: &[&str]) -> Report {
-    run_world(m, f, args, limit, None, argv).0
+    run_world(m, f, args, limit, None, argv, Nans::Canonical).0
 }
 /// Deterministic admission refusal for native/evaluator agreement fixtures.
 pub fn run_injected(
@@ -280,7 +296,7 @@ pub fn run_injected(
     limit: u64,
     injection: Option<(usize, bool)>,
 ) -> Report {
-    run_world(m, f, args, limit, injection, &[]).0
+    run_world(m, f, args, limit, injection, &[], Nans::Canonical).0
 }
 fn run_world(
     m: &Module,
@@ -289,6 +305,7 @@ fn run_world(
     limit: u64,
     injection: Option<(usize, bool)>,
     argv: &[&str],
+    nans: Nans,
 ) -> (Report, Checked) {
     let mut mach = Machine {
         m,
@@ -323,6 +340,7 @@ fn run_world(
             .iter()
             .map(|f| crate::source::inherits_site(&m.instances[f.instance.index()]))
             .collect(),
+        scrambled: (nans == Nans::Scrambled).then_some(0),
     };
     for s in &m.statics {
         let p = mach.block(s.bytes.len() as u64, None, 0, None);
@@ -1887,9 +1905,17 @@ impl Machine<'_> {
                 vals[result.index()] = self.load(places[address.index()].0, n);
             }
             Inst::Store { address, value } => {
-                let n = bytes_of(ty(value));
+                let (t, mut x) = (ty(value), vals[value.index()]);
+                if let Some(k) = self.scrambled.as_mut()
+                    && t.is_float()
+                    && float(t, x).is_nan()
+                {
+                    x = scrambled(t, *k);
+                    *k += 1;
+                }
+                let n = bytes_of(t);
                 self.touch(address, places[address.index()].0, n);
-                self.store(places[address.index()].0, n, vals[value.index()]);
+                self.store(places[address.index()].0, n, x);
             }
             Inst::StorageLive { .. } | Inst::StorageDead { .. } => {}
             Inst::UpdateMask {
@@ -2202,6 +2228,16 @@ fn range(t: Ty) -> (i128, i128) {
     }
 }
 
+/// What a harness reading `x` as a result of type `t` observes: a float as
+/// `reinterpret` gives its bits (a NaN as the canonical one, FORM #97), else `x`.
+pub fn observed(t: Ty, x: u64) -> u64 {
+    if t.is_float() {
+        bits(t, float(t, x))
+    } else {
+        x
+    }
+}
+
 /// A run-line literal of type `t`: decimal floats or the constant syntax.
 pub fn scalar(t: Ty, s: &str) -> u64 {
     if t.is_float() && !s.starts_with("0x") {
@@ -2259,6 +2295,16 @@ fn bits(t: Ty, f: f64) -> u64 {
         (true, false) => u64::from((f as f32).to_bits()),
         (false, true) => 0x7ff8_0000_0000_0000,
         (false, false) => f.to_bits(),
+    }
+}
+
+/// The `k`th NaN [`Nans::Scrambled`] stores: quiet, never canonical, its sign
+/// alternating and its payload counting up from 1.
+fn scrambled(t: Ty, k: u64) -> u64 {
+    if is_f32(t) {
+        0x7fc0_0000 | (k & 1) << 31 | (1 + k % ((1 << 22) - 1))
+    } else {
+        0x7ff8_0000_0000_0000 | (k & 1) << 63 | (1 + k % ((1 << 51) - 1))
     }
 }
 

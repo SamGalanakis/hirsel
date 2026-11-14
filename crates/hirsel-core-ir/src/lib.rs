@@ -623,6 +623,44 @@
 //! Layouts are the recipes': resources and boxes are pointers, counted nodes are
 //! count then payload.
 //!
+//! # Floats (FORM #97)
+//!
+//! A program sees a float's bits only through `reinterpret` from a float (`to_bits32`,
+//! `to_bits64`, and `total_order`, which the front lowers through it). That one
+//! observer canonicalises: every NaN reads as `0x7fc00000` (f32) or
+//! `0x7ff8000000000000` (f64) (SEM-2).
+//!
+//! Until that observer, a NaN may have any pattern, signalling included. Every other
+//! operation treats all NaN patterns alike:
+//! - Value operations: arithmetic, `mul_add`, the unary scalar operations,
+//!   `float_resize`, `float_to_int` and comparisons. `min_number`/`max_number`
+//!   follow IEEE 754-2019 minimumNumber, so a signalling NaN is a NaN.
+//! - Moves: `store`, `read` and `copy`, block and edge arguments, the arguments and
+//!   results of direct, indirect and library calls, and task inputs, join results
+//!   and channel items.
+//!
+//! An engine may keep any NaN pattern through these, or canonicalise them; either way
+//! the program cannot tell. A published object promises only this: no body relies
+//! on a float it receives, loads or is passed being canonical. So no emitter may skip
+//! the observer's map on the grounds that a value came from memory, a parameter or
+//! a call. `reinterpret` from an integer (`from_bits`) is a value operation like any
+//! other.
+//!
+//! Producers read float-holding bytes only at their float type. Key and byte
+//! glue excludes floats, and no niche is a float pattern. The conformance
+//! harnesses check this by running the evaluator with [`eval::Nans::Scrambled`].
+//!
+//! An API that exposes float-holding bytes outside the program is an observer too.
+//! That covers an FFI argument or result, a view of a compact blob or other non-`u8`
+//! storage as bytes, and a durable or exchange encoding. Such an API canonicalises
+//! every float it exposes, and the change that adds it must say so. v1 has none: host
+//! operations carry only integers, pointers and bytes. A harness that reads a float
+//! result is an observer as well ([`eval::observed`]).
+//!
+//! A float `const` that is a NaN is the canonical pattern (wf). A constant then has
+//! one spelling whatever host folded it, so products and their identities do not
+//! depend on the compiler's machine.
+//!
 //! # Values, slots and addresses
 //!
 //! A value is defined once, by a block parameter or an instruction result, and is

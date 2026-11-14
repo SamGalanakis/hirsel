@@ -30,11 +30,33 @@ fn rounding() -> u32 {
     float.to_bits32(ROUND)
 }
 
+// A folded NaN constant is the canonical pattern whichever host folds it (FORM #97, wf):
+// x86-64 gives 0.0 / 0.0 the sign bit and AArch64 does not, so one of NAN and NEG_NAN
+// is the host's other NaN on each, unless the front canonicalises. f32 folds in f32.
 // expect: run nan() = 9221120237041090560
+// expect: run nan_itself() = 9221120237041090560
+// expect: run nan32() = 2143289344
+// expect: run neg_nan32() = 2143289344
 const NAN: f64 = 0.0 / 0.0
 
 const NEG_NAN: f64 = -NAN
 
+const NAN32: f32 = 0.0 / 0.0
+
+const NEG_NAN32: f32 = -NAN32
+
 fn nan() -> u64 {
     float.to_bits64(NEG_NAN)
+}
+
+fn nan_itself() -> u64 {
+    float.to_bits64(NAN)
+}
+
+fn nan32() -> u32 {
+    float.to_bits32(NAN32)
+}
+
+fn neg_nan32() -> u32 {
+    float.to_bits32(NEG_NAN32)
 }

@@ -629,9 +629,11 @@ fn run_expect(
         None => (want, None),
     };
     // The evaluator stops (panics) on a malformed run; that is this run's failure, so
-    // the corpus names the case it stopped in and checks the rest.
+    // the corpus names the case it stopped in and checks the rest. Every stored NaN is
+    // scrambled, so a reader of float bytes other than `reinterpret` misses its run
+    // line (FORM #97).
     let report = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        eval::run(module, f, &args, u64::MAX)
+        eval::run_nans(module, f, &args, u64::MAX, eval::Nans::Scrambled).0
     })) {
         Ok(report) => report,
         Err(stop) => {
@@ -670,7 +672,17 @@ fn run_expect(
         let got = got.join(",");
         return (got != *causes).then(|| format!("run {call}: want fail {causes}, got fail {got}"));
     }
-    let got = report.outcome;
+    // Reading a float result observes it as `reinterpret` does.
+    let got = match report.outcome {
+        eval::Outcome::Returned(xs) => eval::Outcome::Returned(
+            sig.results
+                .iter()
+                .zip(xs)
+                .map(|(&t, x)| eval::observed(t, x))
+                .collect(),
+        ),
+        failed => failed,
+    };
     if matches!(got, eval::Outcome::Returned(_)) && report.used != 0 {
         return Some(format!("run {call}: {} bytes still admitted", report.used));
     }
@@ -685,7 +697,7 @@ fn run_expect(
                 sig.results
                     .iter()
                     .zip(&rs)
-                    .map(|(&t, r)| eval::scalar(t, r))
+                    .map(|(&t, r)| eval::observed(t, eval::scalar(t, r)))
                     .collect(),
             )
         }

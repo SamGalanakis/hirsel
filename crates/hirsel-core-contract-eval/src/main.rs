@@ -107,12 +107,25 @@ fn evaluate() -> Result<Value, String> {
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        eval::run_checked(&emitter.module, function, &[], u64::MAX)
+        // A conformance run: every stored NaN takes a non-canonical pattern (FORM #97).
+        eval::run_nans(
+            &emitter.module,
+            function,
+            &[],
+            u64::MAX,
+            eval::Nans::Scrambled,
+        )
     }));
     std::panic::set_hook(hook);
     Ok(match result {
         Ok((report, checked)) => json!({"outcome": match report.outcome {
-            eval::Outcome::Returned(values) => json!({"kind":"returned", "values":values}),
+            eval::Outcome::Returned(values) => {
+                let sig = &emitter.module.signatures
+                    [emitter.module.functions[function.index()].signature.index()];
+                let values: Vec<u64> =
+                    sig.results.iter().zip(values).map(|(&t, x)| eval::observed(t, x)).collect();
+                json!({"kind":"returned", "values":values})
+            }
             eval::Outcome::Failed(causes) => json!({"kind":"failed", "causes":causes}),
         }, "used":report.used, "stdout":report.stdout, "stderr":report.stderr,
             "checked": {"loans": checked.loans}}),

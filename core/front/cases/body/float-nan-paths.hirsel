@@ -1,0 +1,334 @@
+// FORM #97: only `to_bits` (and `total_order`, lowered through it) observes a float's
+// bits, and it gives the canonical NaN (SEM-2). Stores, reads, copies, call arguments
+// and results, task inputs, join results and channel items only move bits. An engine
+// may skip the NaN map on those moves, but never at the observer, whatever path the
+// value took to reach it.
+//
+// Each path below starts from `nan(b, neg)` with b = 0x7ff0000000000000 (+inf), passed
+// as an argument so that nothing folds. inf - inf is invalid, and `-` flips the sign.
+// One of the two is non-canonical on each target: on x86-64 the invalid result is
+// 0xfff8000000000000 and its negation is canonical; on AArch64 it is the other way
+// round. So each path runs once with neg = false and once with neg = true.
+//
+// Hand-derived from SEM-2, whatever the path:
+// - to_bits64 of a NaN is 0x7ff8000000000000 = 9221120237041090560;
+// - to_bits32 of a NaN is 0x7fc00000 = 2143289344;
+// - total_order(NaN, +inf) is Greater (2): the canonical NaN has the sign bit clear,
+//   and positive NaNs order above +inf.
+// The engines' tests run `main`, which checks every line below.
+//
+// expect: run listed(9218868437227405312,false) = 9221120237041090560
+// expect: run listed(9218868437227405312,true) = 9221120237041090560
+// expect: run grown(9218868437227405312,false) = 9221120237041090560
+// expect: run grown(9218868437227405312,true) = 9221120237041090560
+// expect: run field(9218868437227405312,false) = 9221120237041090560
+// expect: run field(9218868437227405312,true) = 9221120237041090560
+// expect: run boxed(9218868437227405312,false) = 9221120237041090560
+// expect: run boxed(9218868437227405312,true) = 9221120237041090560
+// expect: run param(9218868437227405312,false) = 9221120237041090560
+// expect: run param(9218868437227405312,true) = 9221120237041090560
+// expect: run returned(9218868437227405312,false) = 9221120237041090560
+// expect: run returned(9218868437227405312,true) = 9221120237041090560
+// expect: run indirect_param(9218868437227405312,false) = 9221120237041090560
+// expect: run indirect_param(9218868437227405312,true) = 9221120237041090560
+// expect: run indirect_result(9218868437227405312,false) = 9221120237041090560
+// expect: run indirect_result(9218868437227405312,true) = 9221120237041090560
+// expect: run task_input(1,9218868437227405312,false) = 9221120237041090560
+// expect: run task_input(1,9218868437227405312,true) = 9221120237041090560
+// expect: run task_result(1,9218868437227405312,false) = 9221120237041090560
+// expect: run task_result(1,9218868437227405312,true) = 9221120237041090560
+// expect: run channeled(9218868437227405312,false) = 9221120237041090560
+// expect: run channeled(9218868437227405312,true) = 9221120237041090560
+// expect: run cloned(9218868437227405312,false) = 9221120237041090560
+// expect: run cloned(9218868437227405312,true) = 9221120237041090560
+// expect: run compacted(9218868437227405312,false) = 9221120237041090560
+// expect: run compacted(9218868437227405312,true) = 9221120237041090560
+// expect: run ordered(9218868437227405312,false) = 2
+// expect: run ordered(9218868437227405312,true) = 2
+// expect: run ordered_returned(9218868437227405312,false) = 2
+// expect: run ordered_returned(9218868437227405312,true) = 2
+// expect: run narrowed(9218868437227405312,false) = 2143289344
+// expect: run narrowed(9218868437227405312,true) = 2143289344
+type Vec3 {
+    x: f64,
+    y: f64,
+    z: f64
+}
+
+type P {
+    v: f64,
+    k: u64
+}
+
+@twin(P)
+stable type PS {
+    v: f64,
+    k: u64
+}
+
+@compact(u32)
+stable type C {
+    v: f64,
+    k: u64
+}
+
+fn nan(b: u64, neg: bool) -> f64 {
+    let inf = float.from_bits64(b)
+    let n = inf - inf
+    if neg {
+        -n
+    } else {
+        n
+    }
+}
+
+// Memory: a List[f64] element.
+fn listed(b: u64, neg: bool) -> u64 {
+    let mut xs: List[f64] = list.new()
+    let _ = list.push(mut xs, nan(b, neg))
+    let x = option.unwrap(list.get(xs, 0))
+    float.to_bits64(x)
+}
+
+// Memory: the element moves when the list grows past its capacity.
+fn grown(b: u64, neg: bool) -> u64 {
+    let mut xs: List[f64] = result.unwrap(list.with_capacity(1))
+    let _ = list.push(mut xs, nan(b, neg))
+    for i in 0u64 .. 9 {
+        let _ = list.push(mut xs, 1.0f64)
+    }
+    let x = option.unwrap(list.get(xs, 0))
+    float.to_bits64(x)
+}
+
+// Memory: a record field inside a List[Vec3] element.
+fn field(b: u64, neg: bool) -> u64 {
+    let mut vs: List[Vec3] = list.new()
+    let _ = list.push(mut vs, Vec3(x: 1.0, y: nan(b, neg), z: 2.0))
+    let v = option.unwrap(list.get(vs, 0))
+    float.to_bits64(v.y)
+}
+
+// Memory: a Box payload.
+fn boxed(b: u64, neg: bool) -> u64 {
+    let Ok(p) = box.new(Vec3(x: 1.0, y: nan(b, neg), z: 2.0)) else {
+        return 0
+    }
+    let v = box.unbox(take p)
+    float.to_bits64(v.y)
+}
+
+fn deep_bits(x: f64, k: u64) -> u64 {
+    if k == 0 {
+        float.to_bits64(x)
+    } else {
+        deep_bits(x, k - 1)
+    }
+}
+
+fn deep(x: f64, k: u64) -> f64 {
+    if k == 0 {
+        x
+    } else {
+        deep(x, k - 1)
+    }
+}
+
+// A parameter: the observer is in a recursive callee.
+fn param(b: u64, neg: bool) -> u64 {
+    deep_bits(nan(b, neg), 3)
+}
+
+// A call result: the NaN comes back through a recursive callee's returns.
+fn returned(b: u64, neg: bool) -> u64 {
+    float.to_bits64(deep(nan(b, neg), 3))
+}
+
+fn bits_of(x: f64) -> u64 {
+    float.to_bits64(x)
+}
+
+fn zero_of(x: f64) -> u64 {
+    0
+}
+
+fn same(x: f64) -> f64 {
+    x
+}
+
+fn plus_one(x: f64) -> f64 {
+    x + 1.0
+}
+
+// A parameter of an indirect call.
+fn indirect_param(b: u64, neg: bool) -> u64 {
+    let f = if b == 0 {
+        zero_of
+    } else {
+        bits_of
+    }
+    f(nan(b, neg))
+}
+
+// The result of an indirect call.
+fn indirect_result(b: u64, neg: bool) -> u64 {
+    let f = if b == 0 {
+        plus_one
+    } else {
+        same
+    }
+    float.to_bits64(f(nan(b, neg)))
+}
+
+fn task_bits(take x: f64) -> u64 {
+    float.to_bits64(x)
+}
+
+fn task_same(take x: f64) -> f64 {
+    x
+}
+
+// A spawned task's input.
+fn task_input(tasks: Tasks, b: u64, neg: bool) -> u64 waits {
+    let h = result.unwrap(task.spawn(tasks, bytes 64, nan(b, neg), task_bits))
+    result.unwrap(task.join(take h))
+}
+
+// A joined task's result.
+fn task_result(tasks: Tasks, b: u64, neg: bool) -> u64 waits {
+    let h = result.unwrap(task.spawn(tasks, bytes 64, nan(b, neg), task_same))
+    float.to_bits64(result.unwrap(task.join(take h)))
+}
+
+// A channel item, sent and received.
+fn channeled(b: u64, neg: bool) -> u64 waits {
+    let made: Result[(Sender[f64], Receiver[f64]), Capacity] = channel.new(1)
+    let (tx, rx) = result.unwrap(take made)
+    let _ = channel.send(tx, nan(b, neg))
+    float.to_bits64(result.unwrap(channel.receive(rx)))
+}
+
+// A field of a stable twin made by clone_in.
+fn cloned(b: u64, neg: bool) -> u64 {
+    let x = P(v: nan(b, neg), k: 1)
+    region r {
+        let c: Result[PS in r, Capacity] = clone_in(r, x)
+        match c {
+            Ok(s) => float.to_bits64(s.v),
+            Error(_) => 0
+        }
+    }
+}
+
+fn build(r: Region, x: f64) -> Result[C in r, BuildError] {
+    let c = build_in(r, bytes 64, fn(mut d: Dest[C]) -> Result[Child[C], BuildError] {
+        dest.put(mut d, C(v: x, k: 1))
+    })?
+    Ok(finish(take c))
+}
+
+// A compact field: written as IEEE bytes into the blob and read back (MEM-9).
+fn compacted(b: u64, neg: bool) -> u64 {
+    region r {
+        match build(r, nan(b, neg)) {
+            Ok(c) => float.to_bits64(c.v),
+            Error(_) => 0
+        }
+    }
+}
+
+fn order_code(o: Order) -> u64 {
+    match o {
+        Less => 0,
+        Equal => 1,
+        Greater => 2
+    }
+}
+
+// total_order after memory.
+fn ordered(b: u64, neg: bool) -> u64 {
+    let mut xs: List[f64] = list.new()
+    let _ = list.push(mut xs, nan(b, neg))
+    let x = option.unwrap(list.get(xs, 0))
+    order_code(float.total_order(x, float.from_bits64(b)))
+}
+
+// total_order after a call result.
+fn ordered_returned(b: u64, neg: bool) -> u64 {
+    order_code(float.total_order(deep(nan(b, neg), 3), float.from_bits64(b)))
+}
+
+// f32: a narrowed NaN in memory.
+fn narrowed(b: u64, neg: bool) -> u32 {
+    let mut xs: List[f32] = list.new()
+    let _ = list.push(mut xs, float.narrow(nan(b, neg)))
+    let x = option.unwrap(list.get(xs, 0))
+    float.to_bits32(x)
+}
+
+fn each(tasks: Tasks, neg: bool) -> u8 waits {
+    let b = 9218868437227405312u64
+    let w = 9221120237041090560u64
+    if listed(b, neg) != w {
+        return 1
+    }
+    if grown(b, neg) != w {
+        return 2
+    }
+    if field(b, neg) != w {
+        return 3
+    }
+    if boxed(b, neg) != w {
+        return 4
+    }
+    if param(b, neg) != w {
+        return 5
+    }
+    if returned(b, neg) != w {
+        return 6
+    }
+    if indirect_param(b, neg) != w {
+        return 7
+    }
+    if indirect_result(b, neg) != w {
+        return 8
+    }
+    if task_input(tasks, b, neg) != w {
+        return 9
+    }
+    if task_result(tasks, b, neg) != w {
+        return 10
+    }
+    if channeled(b, neg) != w {
+        return 11
+    }
+    if cloned(b, neg) != w {
+        return 12
+    }
+    if compacted(b, neg) != w {
+        return 13
+    }
+    if ordered(b, neg) != 2 {
+        return 14
+    }
+    if ordered_returned(b, neg) != 2 {
+        return 15
+    }
+    if narrowed(b, neg) != 2143289344u32 {
+        return 16
+    }
+    0
+}
+
+// Exit status: the failing path's number, plus 16 when neg is true.
+pub fn main(tasks: Tasks) -> Result[(), Exit] waits {
+    let a = each(tasks, false)
+    if a != 0 {
+        return Error(Exit(status: a))
+    }
+    let c = each(tasks, true)
+    if c != 0 {
+        return Error(Exit(status: c + 16))
+    }
+    Ok(())
+}

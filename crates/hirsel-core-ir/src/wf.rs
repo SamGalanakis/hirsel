@@ -578,6 +578,19 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             };
             need(fits, || {
                 format!("const v{} does not fit its type", result.0)
+            })?;
+            // One spelling per constant, whatever NaN the producer's host computed (#97).
+            let other_nan = match c.ty(result)? {
+                Ty::Scalar(Scalar::F32) => {
+                    f32::from_bits(bits as u32).is_nan() && bits != 0x7fc0_0000
+                }
+                Ty::Scalar(Scalar::F64) => {
+                    f64::from_bits(bits).is_nan() && bits != 0x7ff8_0000_0000_0000
+                }
+                _ => false,
+            };
+            need(!other_nan, || {
+                format!("const v{} is a NaN other than the canonical one", result.0)
             })
         }
         Inst::ReadStatic { result, data } => {

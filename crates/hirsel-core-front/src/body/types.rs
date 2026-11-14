@@ -449,9 +449,13 @@ pub(crate) fn int_magnitude(digits: &str) -> Option<u128> {
     }
     any.then_some(value)
 }
+/// The bits of a constant float: a NaN is the canonical one, so a product's constants
+/// do not depend on the NaN the compiler's host gives `0.0 / 0.0` or `-` (FORM #97).
 pub(crate) fn float_bits(s: Scalar, x: f64) -> u64 {
-    match s {
-        Scalar::F32 => u64::from((x as f32).to_bits()),
-        _ => x.to_bits(),
+    match (s, x.is_nan()) {
+        (Scalar::F32, true) => 0x7fc0_0000,
+        (Scalar::F32, false) => u64::from((x as f32).to_bits()),
+        (_, true) => 0x7ff8_0000_0000_0000,
+        (_, false) => x.to_bits(),
     }
 }

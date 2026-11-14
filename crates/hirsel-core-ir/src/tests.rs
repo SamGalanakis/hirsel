@@ -693,23 +693,27 @@ fn loans_stop_producer_aliasing() {
     // the evaluator alone, as the oracle for what wf cannot see
     let eval_only = |text: &str| {
         let m = parse(text).unwrap();
-        std::panic::catch_unwind(|| eval::run_checked(&m, FuncId(0), &[], u64::MAX))
-            .map(|(_, checked)| checked.loans)
-            .map_err(|e| {
-                e.downcast::<String>()
-                    .map_or_else(|_| String::new(), |s| *s)
-            })
+        std::panic::catch_unwind(|| {
+            eval::run_nans(&m, FuncId(0), &[], u64::MAX, eval::Nans::Canonical)
+        })
+        .map(|(_, checked)| checked.loans)
+        .map_err(|e| {
+            e.downcast::<String>()
+                .map_or_else(|_| String::new(), |s| *s)
+        })
     };
     let wf_err = |text: &str| wf::module(&parse(text).unwrap()).expect_err(text);
     let run = |text: &str| {
         let m = parse(text).unwrap();
         wf::module(&m).unwrap();
-        std::panic::catch_unwind(|| eval::run_checked(&m, FuncId(0), &[], u64::MAX))
-            .map(|(_, checked)| checked.loans)
-            .map_err(|e| {
-                e.downcast::<String>()
-                    .map_or_else(|_| String::new(), |s| *s)
-            })
+        std::panic::catch_unwind(|| {
+            eval::run_nans(&m, FuncId(0), &[], u64::MAX, eval::Nans::Canonical)
+        })
+        .map(|(_, checked)| checked.loans)
+        .map_err(|e| {
+            e.downcast::<String>()
+                .map_or_else(|_| String::new(), |s| *s)
+        })
     };
     assert_eq!(
         run(&module("  call f1 g1 (&a0, &a1)\n", &mutate)),
@@ -765,7 +769,7 @@ fn loans_stop_producer_aliasing() {
     };
     let m = parse(&cell("&a0, &a1")).unwrap();
     wf::module(&m).unwrap();
-    let (report, checked) = eval::run_checked(&m, FuncId(0), &[], u64::MAX);
+    let (report, checked) = eval::run_nans(&m, FuncId(0), &[], u64::MAX, eval::Nans::Canonical);
     assert_eq!(
         (report.outcome, checked.loans),
         (eval::Outcome::Returned(vec![7]), 2)
@@ -1022,4 +1026,31 @@ fn a_frame_slot_ends_with_its_activation() {
     ))
     .unwrap_err();
     assert!(err.contains("use of a freed block"), "{err}");
+}
+
+/// FORM #97: the conformance harnesses run [`eval::Nans::Scrambled`] so that a producer
+/// reading float-holding bytes at another type misses its hand-derived run line. The
+/// bug this catches is a scramble that never reaches memory: such a pun would then
+/// read the canonical NaN, and every corpus would pass. f0 stores `inf - inf`, reads
+/// the slot back as a u64 through a pointer (the pun), then as an f64 through
+/// `reinterpret` (the one observer).
+#[test]
+fn scrambled_nans_reach_a_pun_but_not_reinterpret() {
+    let m = parse(
+        "core v1\nsig g0 = (u64) -> (u64, u64)\ninst n0 = p@0/m/pun [] []\nfn f0 = n0 g0 {\n  slot s0 = f64\n  addr a0 = s0 : f64\n  addr a1 = v3 : u64\nb0(v0: u64):\n  live s0\n  address a0\n  v1: f64 = reinterpret v0\n  v2: f64 = sub v1, v1\n  store a0, v2\n  v3: ptr = pointer a0\n  address a1\n  v4: u64 = read a1\n  v5: f64 = read a0\n  v6: u64 = reinterpret v5\n  dead s0\n  return v4, v6\n}\n",
+    )
+    .unwrap();
+    wf::module(&m).unwrap();
+    const CANONICAL: u64 = 0x7ff8_0000_0000_0000;
+    let run = |nans| match eval::run_nans(&m, FuncId(0), &[0x7ff0_0000_0000_0000], 0, nans)
+        .0
+        .outcome
+    {
+        eval::Outcome::Returned(xs) => (xs[0], xs[1]),
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(run(eval::Nans::Canonical), (CANONICAL, CANONICAL));
+    let (pun, observed) = run(eval::Nans::Scrambled);
+    assert!(f64::from_bits(pun).is_nan() && pun != CANONICAL, "{pun:#x}");
+    assert_eq!(observed, CANONICAL);
 }

@@ -395,3 +395,13 @@ fn e(x: u64) -> u64 {
 fn exp_specials() -> bool {
     e(0) == 0x3ff0000000000000 && e(0x8000000000000000) == 0x3ff0000000000000 && float.to_bits64(float.exp(709.8)) == 0x7ff0000000000000 && float.to_bits64(float.exp(-745.2)) == 0 && e(0xfff0000000000000) == 0 && e(0x7ff0000000000000) == 0x7ff0000000000000 && !float.is_finite(float.exp(float.from_bits64(0x7ff8000000000000)))
 }
+
+// FORM #97: a NaN that a library body returns reaches to_bits64 as the canonical NaN.
+// inf - inf from an argument cannot fold; it and its negation are the two NaNs either
+// target makes, and exp returns a NaN for each.
+// expect: run exp_nan(9218868437227405312) = true
+fn exp_nan(b: u64) -> bool {
+    let inf = float.from_bits64(b)
+    let n = inf - inf
+    float.to_bits64(float.exp(n)) == 0x7ff8000000000000 && float.to_bits64(float.exp(-n)) == 0x7ff8000000000000
+}

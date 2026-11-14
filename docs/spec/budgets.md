@@ -69,7 +69,7 @@ show that a function allocates nothing.
 fn grow(mut xs: List[u64]) -> Result[(), (Capacity, u64)] { list.push(mut xs, 1) }
 ```
 ```hirsel
-fn grow(mut xs: List[u64]) { list.push(mut xs, 1) }         // refused: LANG-18, unused Result
+fn grow(mut xs: List[u64]) { list.push(mut xs, 1); }        // refused: LANG-18, unused Result
 ```
 
 ### MEM-22: The Capacity value

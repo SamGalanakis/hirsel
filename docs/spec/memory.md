@@ -8,7 +8,10 @@
 The region's storage is charged to the current limit as it is allocated
 ([T5.2](ownership.md#own-26-the-transition-table)). `Region` is scoped
 ([OWN-19](ownership.md#own-19-scoped-values)) and anchored to itself: it can be passed as a
-parameter, never stored or returned. There is no ambient region.
+parameter, never stored or returned. There is no ambient region. A `Region` parameter may
+be marked `mut` or `take` as any scoped parameter may; a value installed through a `mut` one
+reads only that region, its one anchor ([OWN-11](ownership.md#own-11-call-arguments)), so
+no callee stores another region in its caller's slot.
 
 ```hirsel
 fn width(s: String) -> Result[u64, Capacity] {
@@ -17,6 +20,9 @@ fn width(s: String) -> Result[u64, Capacity] {
 ```
 ```hirsel
 fn leak(src: String) -> Region { region r { r } }          // refused: MEM-7
+```
+```hirsel
+fn swap(mut r: Region, s: Region) { r = s }                // refused: OWN-11, s is not an anchor of r
 ```
 
 ### MEM-2: Placement
@@ -445,8 +451,7 @@ fn cons(take l: String, take tail: Option[Rc[Node]]) -> Result[Rc[Node], (Capaci
 }
 ```
 ```hirsel
-fn wrap(take f: HostFile) -> Result[Rc[HostFile], (Capacity, HostFile)] { rc.new(take f) }
-                                                             // refused: OWN-4, not shareable
+fn wrap(take f: HostFile) { let _ = rc.new(take f) }       // refused: LANG-12, at take f: not shareable
 ```
 
 ### MEM-15: Arc

@@ -736,7 +736,13 @@ is checked as an argument of that call against the other arguments, active loans
 freezes (OWN-9 to OWN-12). Forwarding a received callback reborrows its loans and creates no
 second loan of the same place. An inactive descriptor grants no access, and every captured
 slot outlives the callback. A view of an owning callable used as a scoped callback freezes
-that owner for the scoped value's extent.
+that owner for the scoped value's extent. Every slot a body names is its function's own, its
+parameters included (a slot is a local binding, a parameter or a statement temporary), so a
+callback that captures never outlives the function that built it: a scoped callable that a
+function returns, or installs through a `mut` parameter (OWN-11), captures nothing, or is
+an argument, a part of one, or a call's result anchored to one (OWN-20), and keeps that
+argument's descriptor through the returned anchor. Within a body, a capturing callback may
+be stored in any slot its captured slots outlive.
 
 ```hirsel
 fn count_if(xs: List[String], keep: scoped fn(String) -> bool) -> u64 { 0 }
@@ -751,6 +757,13 @@ fn grab(xs: List[String]) -> u64 {
   each(xs, fn(s: String) { last = Some(view s) })     // refused: OWN-21, escapes the call
   0
 }
+```
+```hirsel
+fn zero(xs: List[u64]) -> (scoped fn() -> u64) in xs { fn() -> u64 { 0 } }
+```
+```hirsel
+fn make(a: u64) -> (scoped fn() -> u64) in a { scoped fn() -> u64 { a } }
+                                                          // refused: OWN-21, a does not outlive the callback
 ```
 ```hirsel
 fn direct(take src: String) {

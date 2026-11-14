@@ -37,3 +37,7 @@ version = "0.1.0"
 [[package]]
 name = "m1-versions"
 version = "0.1.0"
+
+[[package]]
+name = "m2b"
+version = "0.1.0"

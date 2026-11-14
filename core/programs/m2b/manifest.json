@@ -1,0 +1,21 @@
+{
+  "packages": [
+    {
+      "package": {"name": "m2b", "version": "1"},
+      "dependencies": [{"name": "core", "version": "1"}, {"name": "std", "version": "1"}],
+      "sources": [
+        {"file": "core/programs/m2b/table/table.hirsel", "modules": ["table"], "signatures": false}
+      ]
+    },
+    {
+      "package": {"name": "table", "version": "1"},
+      "dependencies": [{"name": "core", "version": "1"}, {"name": "std", "version": "1"}, {"name": "m2b", "version": "1"}],
+      "sources": [
+        {"file": "core/programs/m2b/table/main.hirsel", "modules": ["main"], "signatures": false}
+      ]
+    }
+  ],
+  "entries": [
+    {"workload": "table", "package": {"name": "table", "version": "1"}, "module": "main"}
+  ]
+}

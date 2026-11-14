@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["request-scratch", "json", "lru", "bfs", "pipeline", "versions", "rope", "files", "generics"]
+members = ["request-scratch", "json", "lru", "bfs", "pipeline", "versions", "rope", "files", "generics", "m2b"]
 
 [workspace.package]
 edition = "2024"

@@ -1,0 +1,238 @@
+// M2b slice 1 cases. Each case returns a hand-derived u64 (core/corpus/m2b/table/SPEC.md);
+// main runs the case named by its first argument and prints the value.
+fn account(id: u64, owner: String, balance: i64) -> Result[m2b.table.Account, Capacity] {
+    Ok(m2b.table.Account(id: id, owner: string.from(owner)?, balance: balance))
+}
+
+fn fill(mut t: m2b.table.Table[m2b.table.Account], take a: m2b.table.Account) -> Result[(), Capacity] {
+    let k = a.id
+    match m2b.table.put(mut t, k, take a) {
+        Ok(()) => Ok(()),
+        Error((c, _)) => Error(c),
+    }
+}
+
+fn same(a: m2b.table.Account, b: m2b.table.Account) -> bool {
+    a.id == b.id && a.balance == b.balance && a.owner == b.owner
+}
+
+// Three rows encoded into one buffer in key order, then decoded back in order.
+pub fn roundtrip() -> Result[u64, Capacity] {
+    let mut t = m2b.table.accounts()
+    fill(mut t, account(1, "ann", 10)?)?
+    fill(mut t, account(2, "bob", -5000000000)?)?
+    fill(mut t, account(3, "", 0)?)?
+    let mut out: Bytes = list.new()
+    let mut k: u64 = 1
+    while k <= 3 {
+        match m2b.table.get(t, k) {
+            Some(a) => m2b.table.encode(t, a, mut out)?,
+            None => return Ok(1),
+        }
+        k += 1
+    }
+    let mut at: u64 = 0
+    let mut matched: u64 = 0
+    k = 1
+    while k <= 3 {
+        let Some(back) = m2b.table.decode(t, out, mut at)? else {
+            return Ok(2)
+        }
+        match m2b.table.get(t, k) {
+            Some(a) => if same(a, back) {
+                matched += 1
+            },
+            None => return Ok(3),
+        }
+        k += 1
+    }
+    if at != list.len(out) {
+        return Ok(4)
+    }
+    Ok(matched * 1000 + list.len(out))
+}
+
+fn refused(t: m2b.table.Table[m2b.table.Account], b: Bytes) -> Result[u64, Capacity] {
+    let mut at: u64 = 0
+    match m2b.table.decode(t, b, mut at)? {
+        Some(_) => Ok(0),
+        None => if at == 0 {
+            Ok(1)
+        } else {
+            Ok(0)
+        },
+    }
+}
+
+// Five malformed encodings decode to None without moving `at`; the intact one decodes.
+pub fn malformed() -> Result[u64, Capacity] {
+    let t = m2b.table.accounts()
+    let mut good: Bytes = list.new()
+    m2b.table.encode(t, account(7, "ann", 10)?, mut good)?
+    let mut n: u64 = 0
+    let empty: Bytes = list.new()
+    n += refused(t, empty)?
+    n += refused(t, list.slice(good, 0, 26))?
+    n += refused(t, list.slice(good, 0, 23))?
+    let mut huge: Bytes = list.new()
+    list.append(mut huge, good)?
+    let mut i: u64 = 16
+    while i < 24 {
+        let _ = list.set(mut huge, i, 255u8)
+        i += 1
+    }
+    n += refused(t, huge)?
+    let mut utf: Bytes = list.new()
+    list.append(mut utf, good)?
+    let _ = list.set(mut utf, 25, 255u8)
+    n += refused(t, utf)?
+    let mut at: u64 = 0
+    let whole: u64 = match m2b.table.decode(t, good, mut at)? {
+        Some(a) => if a.id == 7 && a.owner == "ann" && a.balance == 10 && at == 27 {
+            1
+        } else {
+            0
+        },
+        None => 0,
+    }
+    Ok(n * 10 + whole)
+}
+
+// The table's first growth (4 rows, 4 x 64 = 256 bytes) is charged inside a 512-byte
+// bound; the fifth put needs 8 x 64 = 512 more and is refused with 256 available. The
+// table is unchanged and the row comes back; outside the bound the put succeeds.
+pub fn capacity() -> Result[u64, Capacity] {
+    let mut t = m2b.table.accounts()
+    let mut rows: List[m2b.table.Account] = list.new()
+    let mut k: u64 = 1
+    while k <= 4 {
+        match list.push(mut rows, account(k, "o", int.narrow(k * 10))?) {
+            Ok(()) => {},
+            Error((c, _)) => return Error(c),
+        }
+        k += 1
+    }
+    let fifth = account(5, "zed", 50)?
+    let r = bound bytes 512 {
+        for take a in rows {
+            fill(mut t, take a)?
+        }
+        m2b.table.put(mut t, 5, take fifth)
+    }
+    let (c, back) = match take r {
+        Ok(Error((c, take back))) => (c, back),
+        _ => return Ok(1),
+    }
+    if back.owner != "zed" || back.id != 5 {
+        return Ok(2)
+    }
+    if m2b.table.len(t) != 4 {
+        return Ok(3)
+    }
+    let mut sum: i64 = 0
+    k = 1
+    while k <= 4 {
+        match m2b.table.get(t, k) {
+            Some(a) => {
+                sum += a.balance
+            },
+            None => return Ok(4),
+        }
+        k += 1
+    }
+    if sum != 100 {
+        return Ok(5)
+    }
+    match m2b.table.get(t, 5) {
+        Some(_) => return Ok(6),
+        None => {},
+    }
+    fill(mut t, take back)?
+    if m2b.table.len(t) != 5 {
+        return Ok(7)
+    }
+    Ok(c.requested * 1000 + c.available)
+}
+
+// The measured workload: n rows put, each encoded into one buffer, all decoded back.
+pub fn bench(n: u64) -> Result[u64, Capacity] {
+    let mut t = m2b.table.accounts()
+    let mut k: u64 = 0
+    while k < n {
+        fill(mut t, account(k, "owner", int.narrow(k))?)?
+        k += 1
+    }
+    let mut out: Bytes = list.new()
+    k = 0
+    while k < n {
+        match m2b.table.get(t, k) {
+            Some(a) => m2b.table.encode(t, a, mut out)?,
+            None => return Ok(0),
+        }
+        k += 1
+    }
+    let mut at: u64 = 0
+    let mut sum: u64 = 0
+    while at < list.len(out) {
+        let Some(a) = m2b.table.decode(t, out, mut at)? else {
+            return Ok(0)
+        }
+        sum += a.id + string.byte_len(a.owner)
+    }
+    Ok(sum)
+}
+
+// A case's value; 999 stands for an unexpected Capacity, which no case expects.
+fn value(take r: Result[u64, Capacity]) -> u64 {
+    match take r {
+        Ok(v) => v,
+        Error(_) => 999,
+    }
+}
+
+// The entries the evaluator runs; main runs the same functions natively.
+pub fn case_roundtrip() -> u64 {
+    value(roundtrip())
+}
+
+pub fn case_malformed() -> u64 {
+    value(malformed())
+}
+
+pub fn case_capacity() -> u64 {
+    value(capacity())
+}
+
+fn select(name: String) -> Option[u64] {
+    if name == "roundtrip" {
+        Some(case_roundtrip())
+    } else if name == "malformed" {
+        Some(case_malformed())
+    } else if name == "capacity" {
+        Some(case_capacity())
+    } else if name == "bench" {
+        Some(value(bench(100000)))
+    } else {
+        None
+    }
+}
+
+pub fn main(out: Stdout, argv: Args) -> Result[(), Exit] waits {
+    let Some(name) = args.get(argv, 0) else {
+        return Error(Exit(status: 2))
+    }
+    let Some(v) = select(name) else {
+        return Error(Exit(status: 2))
+    }
+    let mut s = string.new()
+    if let Error(_) = string.push_u64(mut s, v) {
+        return Error(Exit(status: 3))
+    }
+    if let Error(_) = string.push(mut s, "\n") {
+        return Error(Exit(status: 3))
+    }
+    match stdout.write(out, s) {
+        Ok(()) => Ok(()),
+        Error(_) => Error(Exit(status: 2)),
+    }
+}

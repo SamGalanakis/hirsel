@@ -1,0 +1,5 @@
+[
+  {"name": "roundtrip", "value": 3078, "used": 0},
+  {"name": "malformed", "value": 51, "used": 0},
+  {"name": "capacity", "value": 512256, "used": 0}
+]

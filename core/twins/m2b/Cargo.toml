@@ -1,0 +1,9 @@
+[package]
+name = "m2b"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "m2b-table"
+path = "table.rs"

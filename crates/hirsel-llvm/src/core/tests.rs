@@ -2129,6 +2129,35 @@ fn task_custody_samples_and_admission_refusals_match_the_evaluator() {
 }
 
 #[test]
+fn isolate_sample_and_admission_refusals_match_the_evaluator() {
+    let source = include_str!("../../../hirsel-core-ir/samples/isolate.core");
+    let module = text::parse(source).unwrap();
+    wf::module(&module).unwrap();
+    let mut cases = Vec::new();
+    for case in sample_cases(&module, source) {
+        let baseline = eval::run(&module, case.function, &case.args, case.limit);
+        cases.push(Case {
+            function: case.function,
+            args: case.args.clone(),
+            limit: case.limit,
+            injection: None,
+        });
+        for nth in 1..=baseline.admissions {
+            for later in [false, true] {
+                cases.push(Case {
+                    function: case.function,
+                    args: case.args.clone(),
+                    limit: case.limit,
+                    injection: Some((nth, later)),
+                });
+            }
+        }
+    }
+    println!("isolate executions: {}", cases.len());
+    agree_cases(&module, &cases, true);
+}
+
+#[test]
 fn channel_fifo_clone_full_and_closed_match_the_evaluator() {
     let module = text::parse(include_str!("channel_tests.core")).unwrap();
     wf::module(&module).unwrap();
@@ -3064,6 +3093,7 @@ fn aarch64_memory_custody_and_calls_match_the_evaluator() {
         include_str!("../../../hirsel-core-ir/samples/failure.core"),
         include_str!("../../../hirsel-core-ir/samples/variants.core"),
         include_str!("../../../hirsel-core-ir/samples/custody.core"),
+        include_str!("../../../hirsel-core-ir/samples/isolate.core"),
     ] {
         let module = text::parse(source).unwrap();
         wf::module(&module).unwrap();

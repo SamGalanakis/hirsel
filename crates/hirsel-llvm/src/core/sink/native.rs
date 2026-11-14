@@ -10,6 +10,7 @@ pub(crate) struct NativeSink<'c> {
     blocks: HashMap<String, llvm::Block<'c>>,
     functions: HashMap<String, Signature>,
     globals: HashMap<String, Type>,
+    scratch: HashMap<(u8, usize), Local>,
     pending_switch: Option<(Type, Value, String, Vec<(u64, String)>)>,
 }
 fn local(name: Local) -> llvm::Local {
@@ -30,6 +31,15 @@ fn local(name: Local) -> llvm::Local {
     };
     llvm::Local { kind, index }
 }
+fn name_key(name: Local) -> Option<(u8, usize)> {
+    match name {
+        Local::Temp(i) => Some((0, i)),
+        Local::Value(i) => Some((1, i)),
+        Local::Address(i) => Some((2, i)),
+        Local::Slot(i) => Some((3, i)),
+        _ => None,
+    }
+}
 impl<'c> NativeSink<'c> {
     pub fn new(unit: llvm::Unit<'c>) -> Self {
         Self {
@@ -38,6 +48,7 @@ impl<'c> NativeSink<'c> {
             blocks: HashMap::new(),
             functions: HashMap::new(),
             globals: HashMap::new(),
+            scratch: HashMap::new(),
             pending_switch: None,
         }
     }
@@ -88,6 +99,22 @@ impl<'c> NativeSink<'c> {
     }
     pub fn register_global(&mut self, name: &str, ty: &Type) {
         self.globals.insert(name.into(), ty.clone());
+    }
+    pub fn register_static(&mut self, name: &str, bytes: &[u8], align: u32) {
+        let i8 = self.unit.integer_type(8);
+        let ty = self.unit.array_type(i8, bytes.len() as u64);
+        let values: Vec<_> = bytes
+            .iter()
+            .map(|byte| self.unit.integer(i8, u128::from(*byte)))
+            .collect();
+        let initializer = self.unit.constant_array(i8, &values);
+        let global = self.unit.global(name, ty);
+        self.unit
+            .initialize_global(global, Some(initializer), 2, true, false, align);
+        self.globals.insert(
+            name.into(),
+            Type::Array(bytes.len() as u64, Box::new(Type::I8)),
+        );
     }
     pub fn module_text(&mut self, text: &str) {
         let text = text.trim();
@@ -169,6 +196,7 @@ impl<'c> NativeSink<'c> {
         params: &[Local],
         internal: bool,
     ) {
+        self.functions.insert(name.into(), sig.clone());
         let f = self.function(name, sig);
         self.signature_attributes(f, sig);
         self.unit.define(f, internal);
@@ -181,7 +209,16 @@ impl<'c> NativeSink<'c> {
     fn value(&mut self, value: &Value, ty: &Type) -> llvm::Value<'c> {
         let raw = self.ty(ty);
         match value {
-            Value::Local(name) => self.unit.local(raw, local(*name)),
+            Value::Local(name) => {
+                let name = if matches!(ty, Type::Ptr) {
+                    name_key(*name)
+                        .and_then(|key| self.scratch.get(&key).copied())
+                        .unwrap_or(*name)
+                } else {
+                    *name
+                };
+                self.unit.local(raw, local(name))
+            }
             Value::Integer(bits) => self.unit.integer(raw, *bits),
             Value::Boolean(b) => self.unit.integer(raw, u128::from(*b)),
             Value::Null | Value::Zero => self.unit.zero(raw),
@@ -687,7 +724,15 @@ impl Sink for NativeSink<'_> {
     }
     fn alloca(&mut self, name: Local, ty: &Type, align: u32) {
         let ty = self.ty(ty);
-        self.unit.alloca(ty, align, local(name));
+        let actual = match name_key(name) {
+            Some((kind, i)) => {
+                let slot = Local::Slot(usize::MAX - (i.wrapping_mul(4) + usize::from(kind)));
+                self.scratch.insert((kind, i), slot);
+                slot
+            }
+            None => name,
+        };
+        self.unit.alloca(ty, align, local(actual));
     }
     fn block(&mut self, name: &str) {
         let block = self.block_ref(name);

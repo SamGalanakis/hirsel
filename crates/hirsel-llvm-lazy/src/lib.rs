@@ -14,7 +14,6 @@ mod loader;
 pub fn compile_ir(ir: &str, speed: bool) -> Result<Vec<u8>, String> {
     compile_ir_for_target(ir, speed, hirsel_core_layout::Target::X86_64Linux)
 }
-
 /// Compile LLVM text using the same target as its producer's calling convention.
 pub fn compile_ir_for_target(
     ir: &str,
@@ -214,4 +213,35 @@ b0(v0: u64):
         let object = crate::emit_program(&[unit], &[]).unwrap();
         assert!(!object.is_empty());
     }
+
+    #[test]
+    fn core_unit_direct_multiple_bodies_and_call() {
+        let module = hirsel_core_ir::text::parse(
+            r#"core v1
+sig g0 = (u64) -> (u64)
+inst n0 = tests@0/direct/multi [] []
+fn f0 = n0 g0 {
+b0(v0: u64):
+ return v0
+}
+inst n1 = tests@0/direct/multi_caller [] []
+fn f1 = n1 g0 {
+b0(v0: u64):
+ v1: u64 = call f0 g0 (v0)
+ return v1
+}
+"#,
+        )
+        .unwrap();
+        let facts = hirsel_core_ir::roles::Facts::new(&module);
+        let unit = crate::Unit::Core {
+            module: &module,
+            facts: &facts,
+            observe_charge: false,
+            debug_lines: false,
+        };
+        let object = crate::emit_program(&[unit], &[]).unwrap();
+        assert!(!object.is_empty());
+    }
+
 }

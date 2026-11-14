@@ -130,40 +130,30 @@ pub(crate) fn emit_native_scalar_module_in_context(
     let recipes =
         hirsel_core_layout::compute(&module.types).map_err(|e| Error::Llvm(format!("{e:?}")))?;
     let mut native = sink::native::NativeSink::new(context.unit());
+    for (i, data) in module.statics.iter().enumerate() {
+        native.register_static(&format!("s{i}"), &data.bytes, data.align as u32);
+    }
     let mut emitted = 0;
     for (index, function) in module.functions.iter().enumerate() {
         let Some(body) = &function.body else {
             continue;
         };
         let sig = &module.signatures[function.signature.index()];
-        if body.insts.iter().any(|inst| {
-            matches!(
-                inst,
-                Inst::Alloc { .. }
-                    | Inst::Grow { .. }
-                    | Inst::Drop { .. }
-                    | Inst::Release { .. }
-                    | Inst::Free { .. }
-                    | Inst::Copy { .. }
-                    | Inst::LimitEnter { .. }
-                    | Inst::LimitExit
-                    | Inst::RegionOpen { .. }
-                    | Inst::RegionClose { .. }
-                    | Inst::Share { .. }
-                    | Inst::TryUnwrap { .. }
-            )
-        }) {
-            return Err(Error::Unsupported(
-                "native scalar seam encountered memory/runtime instructions".into(),
-            ));
-        }
         let has_status = failures.may_fail[index];
         let abi = if has_status {
             abi::Return::internal_on_target(target, &sig.results)
         } else {
             abi::Return::on_target(target, &sig.results)
         };
-        let result = ir_type_text(&abi.return_type());
+        let return_type = abi.return_type();
+        let (extension, return_type) = if let Some(ty) = return_type.strip_prefix("zeroext ") {
+            (sink::Extension::Zero, ty)
+        } else if let Some(ty) = return_type.strip_prefix("signext ") {
+            (sink::Extension::Sign, ty)
+        } else {
+            (sink::Extension::None, return_type.as_str())
+        };
+        let result = ir_type_text(return_type);
         let mut params = Vec::new();
         let mut locals = Vec::new();
         for parameter in abi.parameters(sig, false) {
@@ -204,7 +194,7 @@ pub(crate) fn emit_native_scalar_module_in_context(
         }
         let signature = sink::Signature {
             result,
-            extension: sink::Extension::None,
+            extension,
             params,
         };
         let function_name = if has_status {
@@ -271,31 +261,23 @@ pub(crate) fn emit_native_scalar_module_in_context(
             }
             emitter.term(&body.terminators[block])?;
         }
-        let intrinsics = emitter.intrinsics.clone();
-        let mut native = emitter.sink;
+        let intrinsics = std::mem::take(emitter.intrinsics);
+        native = emitter.sink;
         for intrinsic in intrinsics {
             native.module_text(&intrinsic);
         }
         emitted += 1;
-        // Keep the shared sink alive while the next function is lowered. The
-        // emitter owns the sink for this iteration; reconstructing it is not
-        // possible without losing the module, so this loop currently accepts
-        // one direct function per unit.
-        let module = native.take(context.clone());
-        return Ok(module);
     }
     if emitted == 0 {
         return Err(Error::Unsupported(
             "native scalar seam received no function bodies".into(),
         ));
     }
-    unreachable!()
+    Ok(native.take(context.clone()))
 }
 
-/// Construct an owned unit in the shared session. Scalar-only units use the
-/// typed NoFolder sink; until the remaining operation families are ported, a
-/// whole-unit text parse keeps the product path executable and records the
-/// exact rejection at this boundary.
+/// Construct an owned unit in the shared session through the typed NoFolder
+/// sink. The text emitter remains an oracle and import fixture only.
 #[cfg(hirsel_lazy_core)]
 pub(crate) fn emit_native_module_in_context(
     module: &Module,
@@ -305,20 +287,8 @@ pub(crate) fn emit_native_module_in_context(
     observe_charge: bool,
     debug_lines: bool,
 ) -> Result<crate::construction::NativeModule> {
-    match emit_native_scalar_module_in_context(module, target, context.clone()) {
-        Ok(native) => Ok(native),
-        Err(Error::Unsupported(_)) => {
-            let ir = emit_ir_relocatable_with_role_facts_for_target(
-                module,
-                target,
-                observe_charge,
-                debug_lines,
-                facts,
-            )?;
-            context.parse_module(&ir).map_err(Error::Llvm)
-        }
-        Err(error) => Err(error),
-    }
+    let _ = (facts, observe_charge, debug_lines);
+    emit_native_scalar_module_in_context(module, target, context)
 }
 
 /// Optional diagnostic emission; timings of these objects are not performance samples.

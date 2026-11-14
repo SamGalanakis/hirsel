@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAGIC: &[u8; 8] = b"HCORE\0\0\0";
-const VERSION: u32 = 21;
+const VERSION: u32 = 22;
 const HEADER: usize = 12;
 const TRAILER: usize = 40;
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -90,6 +90,30 @@ impl Store {
     pub fn put(&self, bytes: &[u8]) -> io::Result<ContentHash> {
         self.archive(|writer| writer.write_all(bytes))
     }
+    /// Publish an ELF/object payload under its raw content hash. Unlike an
+    /// archive record, the file is passed directly to native linkers by path.
+    pub(crate) fn put_bare(&self, bytes: &[u8]) -> io::Result<ContentHash> {
+        let hash = ContentHash(sha2::Sha256::digest(bytes).into());
+        let path = self.path(hash);
+        if path.is_file() {
+            return Ok(hash);
+        }
+        let temporary = self.temporary();
+        let result = (|| {
+            let mut file = OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temporary)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            fs::rename(&temporary, &path)?;
+            File::open(&self.root)?.sync_all()
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temporary);
+        }
+        result.map(|()| hash)
+    }
     pub(crate) fn archive(
         &self,
         emit: impl FnOnce(&mut ArchiveWriter) -> io::Result<()>,
@@ -153,6 +177,18 @@ impl Store {
         }
         bytes.drain(..HEADER);
         bytes.truncate(end - HEADER);
+        Ok(Some(bytes))
+    }
+    pub(crate) fn get_bare(&self, key: ContentHash) -> io::Result<Option<Vec<u8>>> {
+        let path = self.path(key);
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        if ContentHash(sha2::Sha256::digest(&bytes).into()) != key {
+            return Ok(None);
+        }
         Ok(Some(bytes))
     }
     pub(crate) fn selection(&self, name: &str) -> io::Result<Option<ContentHash>> {

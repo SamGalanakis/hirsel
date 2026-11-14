@@ -98,6 +98,7 @@ pub struct ObjectProduct {
     pub private_variants: usize,
     pub instance: InstanceKey,
     pub identity: ContentHash,
+    pub path: PathBuf,
     pub bytes: Vec<u8>,
     pub debug: Option<hirsel_core_ir::source::NativeDebug>,
     pub compiled: bool,
@@ -290,6 +291,7 @@ impl CheckProduct {
                 private_variants: 0,
                 instance: instance.clone(),
                 identity,
+                path: crate::native_object::path(store, identity),
                 bytes: object.bytes,
                 debug: object.debug,
                 compiled,
@@ -369,6 +371,7 @@ impl CheckProduct {
                 private_variants: 0,
                 instance: module.instances.last().unwrap().clone(),
                 identity,
+                path: crate::native_object::path(&store, identity),
                 bytes: object.bytes,
                 debug: object.debug,
                 compiled,
@@ -632,10 +635,10 @@ fn link(
         } else {
             None
         };
-        for (i, object) in objects.iter().enumerate() {
-            let path = temp.path().join(format!("{i}.o"));
-            std::fs::write(&path, &object.bytes)?;
-            inputs.push(path);
+        for object in objects {
+            // Native objects are already content-addressed bare files. Pass
+            // those paths directly to ld.lld; load() verified their digest.
+            inputs.push(object.path.clone());
         }
         if let Some(debug) = debug {
             let debug_path = temp.path().join("debug.o");

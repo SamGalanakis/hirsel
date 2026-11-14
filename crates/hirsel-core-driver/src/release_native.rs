@@ -122,6 +122,7 @@ impl CheckProduct {
                 private_variants: 0,
                 instance: instance.clone(),
                 identity,
+                path: crate::native_object::path(store, identity),
                 bytes: product.object.bytes,
                 debug: product.object.debug,
                 compiled,
@@ -249,6 +250,7 @@ impl CheckProduct {
                 })
                 .sum(),
             instance: instance.clone(),
+            path: crate::native_object::path(store, identity),
             identity,
             bytes: object.bytes,
             debug: object.debug,

@@ -1,17 +1,16 @@
 //! Code and source-neutral rows share one native cache selection and envelope.
-use crate::store::Record;
-use crate::{Store, decode, native};
+use crate::{Store, decode, encode, native};
 use hirsel_core_ids::ContentHash;
 use hirsel_core_ir::source::NativeObject;
 use serde::{Deserialize, Serialize};
-use std::io::{self, Write};
+use std::io;
 
-pub(crate) const SCHEMA: u32 = 1;
+pub(crate) const SCHEMA: u32 = 2;
 #[derive(Serialize, Deserialize)]
 struct Root {
     schema: u32,
-    object: Record,
-    debug: Option<Record>,
+    object: ContentHash,
+    debug: Option<ContentHash>,
 }
 
 pub(crate) fn publish(
@@ -19,25 +18,23 @@ pub(crate) fn publish(
     key: ContentHash,
     object: &NativeObject,
 ) -> io::Result<ContentHash> {
-    let identity = store.archive(|writer| {
-        writer.write_all(&object.bytes)?;
-        let debug = object
-            .debug
-            .as_ref()
-            .map(|d| writer.record(d))
-            .transpose()?;
-        let root = writer.record(&Root {
-            schema: SCHEMA,
-            object: Record {
-                start: 0,
-                len: object.bytes.len() as u64,
-            },
-            debug,
-        })?;
-        writer.write_all(&root.len.to_le_bytes())
-    })?;
-    store.select(&native::selection(key), identity)?;
-    Ok(identity)
+    let object_identity = store.put_bare(&object.bytes)?;
+    let debug = object
+        .debug
+        .as_ref()
+        .map(|debug| encode(debug).and_then(|bytes| store.put(&bytes)))
+        .transpose()?;
+    let root = store.put(&encode(&Root {
+        schema: SCHEMA,
+        object: object_identity,
+        debug,
+    })?)?;
+    store.select(&native::selection(key), root)?;
+    Ok(object_identity)
+}
+
+pub(crate) fn path(store: &Store, identity: ContentHash) -> std::path::PathBuf {
+    store.path(identity)
 }
 
 pub(crate) fn load(
@@ -50,25 +47,28 @@ pub(crate) fn load(
     let Some(bytes) = store.get(identity)? else {
         return Ok(None);
     };
-    Ok(read(&bytes).map(|object| (identity, object)))
-}
-
-fn read(bytes: &[u8]) -> Option<NativeObject> {
-    let end = bytes.len().checked_sub(8)?;
-    let size = usize::try_from(u64::from_le_bytes(bytes[end..].try_into().ok()?)).ok()?;
-    let start = end.checked_sub(size)?;
-    let root: Root = decode(&bytes[start..end])?;
+    let Some(root) = decode::<Root>(&bytes) else {
+        return Ok(None);
+    };
     if root.schema != SCHEMA {
-        return None;
+        return Ok(None);
     }
-    let payload = &bytes[..start];
-    Some(NativeObject {
-        bytes: root.object.bytes(payload)?.to_vec(),
-        debug: match root.debug {
-            Some(d) => Some(decode(d.bytes(payload)?)?),
-            None => None,
-        },
-    })
+    let Some(bytes) = store.get_bare(root.object)? else {
+        return Ok(None);
+    };
+    let debug = match root.debug {
+        Some(identity) => {
+            let Some(bytes) = store.get(identity)? else {
+                return Ok(None);
+            };
+            let Some(debug) = decode(&bytes) else {
+                return Ok(None);
+            };
+            Some(debug)
+        }
+        None => None,
+    };
+    Ok(Some((root.object, NativeObject { bytes, debug })))
 }
 
 #[cfg(test)]
@@ -107,10 +107,8 @@ mod tests {
             let (loaded, warm) = load(&store, key).unwrap().unwrap();
             assert_eq!(identity, loaded);
             assert_eq!(object, warm);
-            let bytes = store.get(identity).unwrap().unwrap();
-            for end in 0..bytes.len() {
-                assert!(read(&bytes[..end]).is_none());
-            }
+            let bytes = store.get_bare(loaded).unwrap().unwrap();
+            assert_eq!(bytes, object.bytes);
             let old = store.put(&object.bytes).unwrap();
             store.select(&native::selection(key), old).unwrap();
             assert!(

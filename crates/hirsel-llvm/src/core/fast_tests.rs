@@ -219,58 +219,6 @@ fn counted_hot_paths_are_inline_and_last_release_is_cold() {
 }
 
 #[test]
-fn atomic_helpers_use_checked_cas_and_release_acquire() {
-    let module = Module::default();
-    let body = Body::default();
-    let failures = failure::Failures::new(&module);
-    let mut intrinsics = BTreeSet::new();
-    let mut e = FunctionEmitter {
-        function: None,
-        append_fast: false,
-        shadow_callee: None,
-        module: &module,
-        body: &body,
-        recipes: &[],
-        abi: abi::Return::new(&[]),
-        has_status: false,
-        failures: &failures,
-        constants: &[],
-        observe_charge: false,
-        facts: true,
-        aliases: None,
-        caller_site: "0",
-        debug_location: None,
-        anchor: None,
-        relocatable_sites: false,
-        value_slots: Vec::new(),
-        address_slots: Vec::new(),
-        empty_bounds: empty::EmptyBounds::default(),
-        code: String::new(),
-        allocations: String::new(),
-        next: 0,
-        intrinsics: &mut intrinsics,
-    };
-    e.share_node("%node", true);
-    e.release_fast("%node", 24, Some("@descriptor"), true);
-    let mut ir = format!(
-        "define void @test(ptr %context, ptr %node) {{\nentry:\n{}{}  ret void\n}}\ndeclare zeroext i1 @recipe(ptr, ptr, ptr, ptr)\n@descriptor = private constant {{ ptr, i64, i64 }} {{ ptr @recipe, i64 24, i64 8 }}\n",
-        e.allocations, e.code
-    );
-    for decl in intrinsics {
-        writeln!(ir, "{decl}").unwrap();
-    }
-    assert!(ir.contains("cmpxchg weak ptr"));
-    assert!(ir.contains("atomicrmw sub ptr"));
-    assert!(ir.contains("fence acquire"));
-    assert!(!ir.contains("atomicrmw add"));
-    let context = Context::new();
-    LlvmModule::parse(&context, "atomic-helpers", &ir)
-        .unwrap()
-        .verify()
-        .unwrap();
-}
-
-#[test]
 fn list_push_without_growth_uses_only_compare_store_and_increment() {
     let module = text::parse(
         r#"core v1

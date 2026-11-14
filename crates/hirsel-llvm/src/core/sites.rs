@@ -2,19 +2,19 @@
 use super::*;
 
 impl FunctionEmitter<'_> {
-    pub(super) fn call_site_word(&mut self, callee: Callee) -> String {
+    pub(super) fn call_site_word(&mut self, callee: Callee) -> Value {
         if let Callee::Direct(f) = callee {
             let function = &self.module.functions[f.index()];
             if !hirsel_core_ir::source::inherits_site(
                 &self.module.instances[function.instance.index()],
             ) {
-                return "poison".into();
+                return Value::Poison;
             }
         }
         self.site_word()
     }
 
-    pub(super) fn site_word(&mut self) -> String {
+    pub(super) fn site_word(&mut self) -> Value {
         let Some(word) = self.fixed_site_word() else {
             return if self.function.is_none_or(|f| {
                 let function = &self.module.functions[f.index()];
@@ -22,9 +22,9 @@ impl FunctionEmitter<'_> {
                     &self.module.instances[function.instance.index()],
                 )
             }) {
-                self.caller_site.into()
+                self.caller_site.clone()
             } else {
-                "0".into()
+                int(0)
             };
         };
         if self.relocatable_sites && self.abi.target == Target::Aarch64Linux {
@@ -35,23 +35,43 @@ impl FunctionEmitter<'_> {
             let symbol =
                 hirsel_core_ir::source::site_symbol(&self.module.items[anchor.item.index()]);
             let pool = format!("{symbol}.{}.word", anchor.start);
-            self.intrinsics.insert(format!(
-                "@{pool} = private externally_initialized constant i64 {word}, align 8"
-            ));
-            self.calc(format!("load i64, ptr @{pool}, align 8"))
+            self.items.global(Global {
+                name: pool.clone().into(),
+                linkage: Linkage::Private,
+                constant: true,
+                externally_initialized: true,
+                ty: Type::I64,
+                init: Some(word),
+                align: 8,
+                absolute_symbol: false,
+            });
+            self.load(&Type::I64, &Value::global(pool), 8)
         } else {
             word
         }
     }
 
-    pub(super) fn fixed_site_word(&mut self) -> Option<String> {
+    fn absolute_symbol(&mut self, name: String) {
+        self.items.global(Global {
+            name: name.into(),
+            linkage: Linkage::External,
+            constant: true,
+            externally_initialized: false,
+            ty: Type::I8,
+            init: None,
+            align: 0,
+            absolute_symbol: true,
+        });
+    }
+
+    pub(super) fn fixed_site_word(&mut self) -> Option<Value> {
         let anchor = self
             .anchor
             .filter(|a| !self.module.items[a.item.index()].package_is("core", "1"))?;
         if !self.relocatable_sites {
-            return Some(
-                (((u64::from(anchor.item.0) + 1) << 32) | u64::from(anchor.start)).to_string(),
-            );
+            return Some(int(
+                ((u64::from(anchor.item.0) + 1) << 32) | u64::from(anchor.start),
+            ));
         }
         let symbol = hirsel_core_ir::source::site_symbol(&self.module.items[anchor.item.index()]);
         Some(match self.abi.target {
@@ -61,22 +81,16 @@ impl FunctionEmitter<'_> {
                 // this temporary name disappears and ELF references only the
                 // canonical symbol with its original addend.
                 let alias = format!(".L{symbol}_{}", anchor.start);
-                self.intrinsics.insert(format!(
-                    "module asm \".set {alias}, {symbol}+{}\"",
-                    anchor.start
-                ));
-                self.intrinsics.insert(format!(
-                    "@{alias} = external constant i8, !absolute_symbol !{{i64 -1, i64 -1}}"
-                ));
-                format!("ptrtoint (ptr @{alias} to i64)")
+                self.items
+                    .asm(format!(".set {alias}, {symbol}+{}", anchor.start));
+                self.absolute_symbol(alias.clone());
+                Value::PtrToInt(alias.into())
             }
             Target::Aarch64Linux => {
-                self.intrinsics.insert(format!(
-                    "@{symbol} = external constant i8, !absolute_symbol !{{i64 -1, i64 -1}}"
-                ));
-                format!(
-                    "add (i64 ptrtoint (ptr @{symbol} to i64), i64 {})",
-                    anchor.start
+                self.absolute_symbol(symbol.clone());
+                Value::Add(
+                    Box::new(Value::PtrToInt(symbol.into())),
+                    i64::from(anchor.start),
                 )
             }
         })
@@ -97,18 +111,6 @@ impl DebugFunction {
     }
 }
 
-fn escaped(text: &str) -> String {
-    let mut out = String::new();
-    for byte in text.bytes() {
-        if byte == b'"' || byte == b'\\' || !(32..127).contains(&byte) {
-            write!(out, "\\{byte:02X}").unwrap();
-        } else {
-            out.push(byte as char);
-        }
-    }
-    out
-}
-
 /// Synthetic DWARF is only an intermediate machine-to-anchor map. Its file is
 /// the item's identity and its line is the item-relative byte offset plus one.
 /// The final link writer resolves these rows against the current SourceMap.
@@ -116,14 +118,14 @@ pub(super) fn debug_plan(
     module: &Module,
     failures: &failure::Failures,
     next: &mut usize,
-    declarations: &mut BTreeSet<String>,
+    sink: &mut dyn Sink,
 ) -> Vec<Option<DebugFunction>> {
-    fn node(next: &mut usize, declarations: &mut BTreeSet<String>, value: String) -> usize {
+    let mut node = |value: Metadata| {
         let id = *next;
         *next += 1;
-        declarations.insert(format!("!{id} = {value}"));
+        sink.metadata(id, &value);
         id
-    }
+    };
     let mut files = std::collections::BTreeMap::new();
     for body in module.functions.iter().filter_map(|f| f.body.as_ref()) {
         for anchor in body
@@ -133,68 +135,111 @@ pub(super) fn debug_plan(
             .chain(body.blocks.iter().filter_map(|b| b.anchor.as_ref()))
         {
             files.entry(anchor.item.0).or_insert_with(|| {
-                node(
-                    next,
-                    declarations,
-                    format!(
-                        "!DIFile(filename: \"{}\", directory: \"\")",
-                        escaped(&module.items[anchor.item.index()].to_string())
-                    ),
-                )
+                node(Metadata::File {
+                    filename: module.items[anchor.item.index()].to_string(),
+                })
             });
         }
     }
     let Some(&first_file) = files.values().next() else {
         return module.functions.iter().map(|_| None).collect();
     };
-    let unit = node(
-        next,
-        declarations,
-        format!(
-            "distinct !DICompileUnit(language: DW_LANG_Rust, file: !{first_file}, producer: \"Hirsel\", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug)"
-        ),
-    );
-    let dwarf_flag = node(
-        next,
-        declarations,
-        "!{i32 2, !\"Dwarf Version\", i32 4}".into(),
-    );
-    let debug_flag = node(
-        next,
-        declarations,
-        "!{i32 2, !\"Debug Info Version\", i32 3}".into(),
-    );
-    declarations.insert(format!("!llvm.dbg.cu = !{{!{unit}}}"));
-    declarations.insert(format!(
-        "!llvm.module.flags = !{{!{dwarf_flag}, !{debug_flag}}}"
-    ));
-    let types = node(next, declarations, "!{}".into());
-    let signature = node(
-        next,
-        declarations,
-        format!("!DISubroutineType(types: !{types})"),
-    );
-    module.functions.iter().enumerate().map(|(i, function)| {
-        let body = function.body.as_ref()?;
-        let first = body.inst_anchors.iter().flatten().next().copied()
-            .or_else(|| body.blocks.iter().find_map(|b| b.anchor))?;
-        let file = files[&first.item.0];
-        let linkage = format!("{}{}", symbol(module, FuncId(i as u32)), if failures.may_fail[i] { "" } else { ".infallible" });
-        let name = &module.instances[function.instance.index()].definition;
-        let scope = node(next, declarations, format!("distinct !DISubprogram(name: \"{}\", linkageName: \"{linkage}\", scope: !{file}, file: !{file}, line: 1, type: !{signature}, scopeLine: 1, spFlags: DISPFlagDefinition, unit: !{unit})", escaped(&name.to_string())));
-        let fallback = node(next, declarations, format!("!DILocation(line: 0, scope: !{scope})"));
-        let mut scopes = std::collections::BTreeMap::from([(first.item.0, scope)]);
-        let mut locations = std::collections::BTreeMap::new();
-        for anchor in body.inst_anchors.iter().flatten().chain(body.blocks.iter().filter_map(|b| b.anchor.as_ref())) {
-            let scope = *scopes.entry(anchor.item.0).or_insert_with(|| node(next, declarations, format!("!DILexicalBlockFile(scope: !{scope}, file: !{}, discriminator: 0)", files[&anchor.item.0])));
-            locations.entry((anchor.item.0, anchor.start)).or_insert_with(|| node(next, declarations, format!("!DILocation(line: {}, column: 1, scope: !{scope})", u64::from(anchor.start) + 1)));
-        }
-        let wrapper = if failures.may_fail[i] { None } else {
-            let linkage = symbol(module, FuncId(i as u32));
-            let wrapper = node(next, declarations, format!("distinct !DISubprogram(name: \"{}\", linkageName: \"{linkage}\", scope: !{file}, file: !{file}, line: 1, type: !{signature}, scopeLine: 1, spFlags: DISPFlagDefinition, unit: !{unit})", escaped(&name.to_string())));
-            let location = node(next, declarations, format!("!DILocation(line: 0, scope: !{wrapper})"));
-            Some((wrapper, location))
-        };
-        Some(DebugFunction { scope, wrapper, fallback, locations })
-    }).collect()
+    let unit = node(Metadata::CompileUnit { file: first_file });
+    let flag = |key: &str, value| Metadata::Tuple {
+        distinct: false,
+        items: vec![
+            MdItem::I32(2),
+            MdItem::String(key.into()),
+            MdItem::I32(value),
+        ],
+    };
+    let dwarf_flag = node(flag("Dwarf Version", 4));
+    let debug_flag = node(flag("Debug Info Version", 3));
+    let types = node(Metadata::Tuple {
+        distinct: false,
+        items: vec![],
+    });
+    let signature = node(Metadata::SubroutineType { types });
+    let plan = module
+        .functions
+        .iter()
+        .enumerate()
+        .map(|(i, function)| {
+            let body = function.body.as_ref()?;
+            let first = body
+                .inst_anchors
+                .iter()
+                .flatten()
+                .next()
+                .copied()
+                .or_else(|| body.blocks.iter().find_map(|b| b.anchor))?;
+            let file = files[&first.item.0];
+            let base = symbol(module, FuncId(i as u32));
+            let name = module.instances[function.instance.index()]
+                .definition
+                .to_string();
+            let subprogram = |linkage: String| Metadata::Subprogram {
+                name: name.clone(),
+                linkage,
+                file,
+                ty: signature,
+                unit,
+            };
+            let linkage = if failures.may_fail[i] {
+                base.clone()
+            } else {
+                format!("{base}.infallible")
+            };
+            let scope = node(subprogram(linkage));
+            let fallback = node(Metadata::Location {
+                line: 0,
+                column: 0,
+                scope,
+            });
+            let mut scopes = std::collections::BTreeMap::from([(first.item.0, scope)]);
+            let mut locations = std::collections::BTreeMap::new();
+            for anchor in body
+                .inst_anchors
+                .iter()
+                .flatten()
+                .chain(body.blocks.iter().filter_map(|b| b.anchor.as_ref()))
+            {
+                let scope = *scopes.entry(anchor.item.0).or_insert_with(|| {
+                    node(Metadata::LexicalBlockFile {
+                        scope,
+                        file: files[&anchor.item.0],
+                    })
+                });
+                locations
+                    .entry((anchor.item.0, anchor.start))
+                    .or_insert_with(|| {
+                        node(Metadata::Location {
+                            line: u64::from(anchor.start) + 1,
+                            column: 1,
+                            scope,
+                        })
+                    });
+            }
+            let wrapper = if failures.may_fail[i] {
+                None
+            } else {
+                let wrapper = node(subprogram(base));
+                let location = node(Metadata::Location {
+                    line: 0,
+                    column: 0,
+                    scope: wrapper,
+                });
+                Some((wrapper, location))
+            };
+            Some(DebugFunction {
+                scope,
+                wrapper,
+                fallback,
+                locations,
+            })
+        })
+        .collect();
+    sink.named_metadata("llvm.dbg.cu", &[unit]);
+    sink.named_metadata("llvm.module.flags", &[dwarf_flag, debug_flag]);
+    plan
 }

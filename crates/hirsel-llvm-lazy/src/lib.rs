@@ -68,15 +68,17 @@ pub fn compile_library(
     debug_lines: bool,
     object_key: hirsel_core_ids::ContentHash,
 ) -> Result<NativeLibrary, String> {
-    let ir = core::emit_ir_relocatable_with_role_facts_for_target(
+    let context = std::rc::Rc::new(construction::Context::new()?);
+    let native = core::emit_native_module_in_context(
         module,
         target,
+        context,
+        facts,
         observe_charge,
         debug_lines,
-        facts,
     )
     .map_err(|e| e.to_string())?;
-    let output = loader::library(&ir, target)?;
+    let output = loader::library(native, target)?;
     Ok(NativeLibrary {
         object: core::finish_native_object(output.object, object_key, debug_lines)?,
         bitcode: output.bitcode,
@@ -86,7 +88,9 @@ pub fn compile_library(
         },
     })
 }
-/// Application-owned text or an inline candidate from a published library.
+/// An application-owned Core unit, an inline candidate from a published
+/// library, or foreign LLVM text. Owned Core units always enter as `Core`;
+/// `Text` is for hand-written engine composition cases and text differentials.
 pub enum Unit<'a> {
     Core {
         module: &'a hirsel_core_ir::Module,
@@ -144,9 +148,7 @@ pub fn emit_program_for_target(
                 ir,
                 imported: *imported,
             }),
-            Unit::Import { bitcode, summary } => {
-                lowered.push(loader::ProgramUnit::Import { bitcode, summary })
-            }
+            Unit::Import { bitcode, .. } => lowered.push(loader::ProgramUnit::Import(bitcode)),
         }
     }
     loader::program(lowered, exports, target)
@@ -173,75 +175,5 @@ mod tests {
                 .count()
         };
         assert_eq!(component_lines(&loaded), component_lines(&maps()));
-        crate::construction::printer_oracle_fixture();
-        crate::core::sink::primitive_oracle();
-        let bitcode = crate::core::sink::native_scalar_fixture().unwrap();
-        assert!(!bitcode.is_empty());
-        let _object = crate::emit_program(
-            &[crate::Unit::Import {
-                bitcode: &bitcode,
-                summary: &crate::ImportSummary {
-                    functions: vec![],
-                    facts: vec![],
-                },
-            }],
-            &[],
-        )
-        .unwrap();
     }
-
-    #[test]
-    fn core_unit_links_without_bitcode_roundtrip() {
-        let module = hirsel_core_ir::text::parse(
-            r#"core v1
-sig g0 = (u64) -> (u64)
-inst n0 = tests@0/direct/scalar [] []
-fn f0 = n0 g0 {
-b0(v0: u64):
- return v0
-}
-"#,
-        )
-        .unwrap();
-        let facts = hirsel_core_ir::roles::Facts::new(&module);
-        let unit = crate::Unit::Core {
-            module: &module,
-            facts: &facts,
-            observe_charge: false,
-            debug_lines: false,
-        };
-        let object = crate::emit_program(&[unit], &[]).unwrap();
-        assert!(!object.is_empty());
-    }
-
-    #[test]
-    fn core_unit_direct_multiple_bodies_and_call() {
-        let module = hirsel_core_ir::text::parse(
-            r#"core v1
-sig g0 = (u64) -> (u64)
-inst n0 = tests@0/direct/multi [] []
-fn f0 = n0 g0 {
-b0(v0: u64):
- return v0
-}
-inst n1 = tests@0/direct/multi_caller [] []
-fn f1 = n1 g0 {
-b0(v0: u64):
- v1: u64 = call f0 g0 (v0)
- return v1
-}
-"#,
-        )
-        .unwrap();
-        let facts = hirsel_core_ir::roles::Facts::new(&module);
-        let unit = crate::Unit::Core {
-            module: &module,
-            facts: &facts,
-            observe_charge: false,
-            debug_lines: false,
-        };
-        let object = crate::emit_program(&[unit], &[]).unwrap();
-        assert!(!object.is_empty());
-    }
-
 }

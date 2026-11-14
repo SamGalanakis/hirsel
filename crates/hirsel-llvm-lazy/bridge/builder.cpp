@@ -2,7 +2,7 @@
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/StringMap.h>
 #include <llvm/AsmParser/Parser.h>
-#include <llvm/Bitcode/BitcodeWriter.h>
+#include <llvm/BinaryFormat/Dwarf.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/IRBuilder.h>
@@ -59,12 +59,6 @@ static LLVMModuleRef unit_take(HirselLlvmBuilder *u, HirselBuilderOutput *out) {
     auto *module = u->module.release(); delete u; output(out, ""); return wrap(module);
 }
 static void module_drop(LLVMModuleRef module) { delete unwrap(module); }
-static void unit_bitcode(HirselLlvmBuilder *u, HirselBuilderOutput *out) {
-    SmallVector<char, 0> bytes;
-    raw_svector_ostream stream(bytes);
-    WriteBitcodeToFile(*u->module, stream);
-    output(out, StringRef(bytes.data(), bytes.size()));
-}
 static void print(HirselLlvmBuilder *u, HirselBuilderOutput *out) {
     std::string text; raw_string_ostream stream(text); u->module->print(stream, nullptr); output(out, text);
 }
@@ -182,7 +176,7 @@ static void finish_declaration(LLVMValueRef value) {
     auto *f = cast<Function>(unwrap(value));
     if (Intrinsic::ID id = f->getIntrinsicID()) {
         SmallVector<Type *> overloads;
-        if (Intrinsic::getIntrinsicSignature(id, f->getFunctionType(), overloads))
+        if (Intrinsic::isSignatureValid(id, f->getFunctionType(), overloads))
             f->setAttributes(Intrinsic::getAttributes(f->getContext(), id, f->getFunctionType()));
     }
 }
@@ -314,7 +308,7 @@ static LLVMMetadataRef di_compile_unit(HirselLlvmBuilder *u, LLVMMetadataRef fil
     return wrap(DICompileUnit::getDistinct(
         u->context, DISourceLanguageName(dwarf::DW_LANG_Rust), unwrap(file), MDString::get(u->context, "Hirsel"), false, none, 0,
         none, DICompileUnit::FullDebug, nil, nil, nil, nil, nil, 0, true, false,
-        DICompileUnit::DebugNameTableKind::Default, false, none, none));
+        (unsigned)DICompileUnit::DebugNameTableKind::Default, false, none, none));
 }
 static LLVMMetadataRef di_subroutine_type(HirselLlvmBuilder *u, LLVMMetadataRef types) {
     return wrap(DISubroutineType::get(u->context, DINode::FlagZero, 0, unwrap(types)));
@@ -334,7 +328,7 @@ static LLVMMetadataRef di_lexical_block_file(HirselLlvmBuilder *u, LLVMMetadataR
 }
 extern "C" const HirselLlvmBuilderApi *hirsel_llvm_no_folder_api() {
     static const HirselLlvmBuilderApi api = {
-        context_new, context_drop, unit_new, unit_drop, unit_take, module_drop, unit_bitcode, print, print_text,
+        context_new, context_drop, unit_new, unit_drop, unit_take, module_drop, print, print_text,
         integer_type, float_type, pointer_type, void_type, metadata_type, array_type, vector_type, struct_type,
         integer, poison, zero, constant_cast, constant_add, constant_struct, constant_bytes,
         global_ref, global, function, attribute, string_attribute, finish_declaration, subprogram,

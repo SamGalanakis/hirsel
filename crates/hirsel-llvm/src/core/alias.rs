@@ -16,7 +16,8 @@ impl Scopes {
         id: FuncId,
         name: &str,
         next: &mut usize,
-        declarations: &mut BTreeSet<String>,
+        sink: &mut dyn Sink,
+        items: &mut Items,
     ) -> Option<Self> {
         let function = &module.functions[id.index()];
         let addresses = facts.roles(module, id);
@@ -65,17 +66,35 @@ impl Scopes {
         }
         let domain = *next;
         *next += 1;
-        declarations.insert(format!("!{domain} = distinct !{{!{domain}, !\"{name}\"}}"));
+        sink.metadata(
+            domain,
+            &Metadata::Tuple {
+                distinct: true,
+                items: vec![MdItem::Node(domain), MdItem::String(name.into())],
+            },
+        );
         let mut scopes = Vec::new();
         for role in unique {
             let scope = *next;
             *next += 1;
-            declarations.insert(format!(
-                "!{scope} = distinct !{{!{scope}, !{domain}, !\"{role:?}\"}}"
-            ));
+            sink.metadata(
+                scope,
+                &Metadata::Tuple {
+                    distinct: true,
+                    items: vec![
+                        MdItem::Node(scope),
+                        MdItem::Node(domain),
+                        MdItem::String(format!("{role:?}")),
+                    ],
+                },
+            );
             scopes.push(scope);
         }
-        declarations.insert("declare void @llvm.experimental.noalias.scope.decl(metadata)".into());
+        items.declare(
+            "llvm.experimental.noalias.scope.decl",
+            FnSig::plain(Type::Void, [Type::Metadata]),
+            FnAttrs::default(),
+        );
         Some(Self {
             addresses,
             scopes,
@@ -83,17 +102,11 @@ impl Scopes {
         })
     }
 
-    pub fn declaration(&self) -> String {
-        self.scopes
-            .iter()
-            .map(|scope| {
-                format!("call void @llvm.experimental.noalias.scope.decl(metadata !{{!{scope}}})")
-            })
-            .collect::<Vec<_>>()
-            .join("\n  ")
+    pub fn declared(&self) -> &[usize] {
+        &self.scopes
     }
 
-    pub fn access(&self, addresses: &[AddressId]) -> String {
+    pub fn access(&self, addresses: &[AddressId]) -> Option<Scoped> {
         // A memcpy touches both operands. An unclassified side could touch any
         // role, so it prevents an assertion about the instruction as a whole.
         let Some(roles) = addresses
@@ -101,7 +114,7 @@ impl Scopes {
             .map(|a| self.addresses[a.index()])
             .collect::<Option<Vec<_>>>()
         else {
-            return String::new();
+            return None;
         };
         let included: Vec<_> = self
             .scopes
@@ -117,26 +130,35 @@ impl Scopes {
             .filter(|(i, _)| !roles.contains(i))
             .map(|(_, scope)| *scope)
             .collect();
-        let mut result = format!(", !alias.scope !{{{}}}", list(included));
-        if !excluded.is_empty() {
-            write!(result, ", !noalias !{{{}}}", list(excluded)).unwrap();
-        }
-        result
+        Some(Scoped {
+            alias: included,
+            noalias: excluded,
+        })
     }
 
-    pub fn carrier(&self, address: AddressId) -> String {
+    pub fn carrier(&self, address: AddressId) -> Option<Scoped> {
         if self.whole_carriers[address.index()] {
             self.access(&[address])
         } else {
-            String::new()
+            None
         }
     }
 }
 
-fn list(scopes: impl IntoIterator<Item = usize>) -> String {
-    scopes
-        .into_iter()
-        .map(|id| format!("!{id}"))
-        .collect::<Vec<_>>()
-        .join(", ")
+impl FunctionEmitter<'_> {
+    /// Each scope's declaration lets the inliner clone this activation's domain.
+    pub(super) fn declare_scopes(&mut self, scopes: &[usize]) {
+        let sig = FnSig::plain(Type::Void, [Type::Metadata]);
+        let callee = Value::global("llvm.experimental.noalias.scope.decl");
+        for (i, scope) in scopes.iter().enumerate() {
+            // The text producer attached the location to its last line only.
+            let location = self.debug_location.filter(|_| i + 1 == scopes.len());
+            let args = [Value::Metadata(vec![*scope])];
+            self.sink.instruction(
+                None,
+                Operation::Call(&sig, &callee, &args, &CallAttrs::default()),
+                location,
+            );
+        }
+    }
 }

@@ -1,5 +1,6 @@
 //! Fixed runtime entries call ordinary CoreIR functions through their published
 //! concrete convention. The input buffer also retains the plain code pointer.
+use super::cleanup::{drop_signature, glue_emitter};
 use super::*;
 
 pub(super) fn input_offset(
@@ -21,8 +22,8 @@ pub(super) fn emit(
     recipes: &[hirsel_core_layout::Recipe],
     failures: &failure::Failures,
     facts: bool,
-    text: &mut String,
-    intrinsics: &mut BTreeSet<String>,
+    sink: &mut dyn Sink,
+    items: &mut Items,
 ) -> Result<()> {
     let pairs = module
         .functions
@@ -35,11 +36,46 @@ pub(super) fn emit(
         })
         .collect::<BTreeSet<_>>();
     let inputs = pairs.iter().map(|(x, _)| *x).collect::<BTreeSet<_>>();
+    let input = Value::Local(Local::INPUT);
     for x in inputs {
         let offset = input_offset(module, recipes, x);
-        writeln!(text,"define private i8 @core_task_input_drop_{}(ptr %context, ptr %input) {{\nentry:\n  %x = getelementptr i8, ptr %input, i64 {offset}\n  %status = call i8 @core_drop_{}(ptr %context, ptr %x, i64 0)\n  ret i8 %status\n}}",x.0,x.0).unwrap();
+        sink.begin_function(
+            &format!("core_task_input_drop_{}", x.0),
+            &FnSig::plain(Type::I8, [Type::Ptr, Type::Ptr]),
+            &[Local::CONTEXT, Local::INPUT],
+            &FnAttrs::private(),
+        );
+        let data = Local::Named("x");
+        let status = Local::Named("status");
+        sink.instruction(
+            Some(data),
+            Operation::Gep {
+                ty: &Type::I8,
+                base: &input,
+                indices: &[(Type::I64, int(offset))],
+                inbounds: false,
+            },
+            None,
+        );
+        sink.instruction(
+            Some(status),
+            Operation::Call(
+                &drop_signature(),
+                &Value::global(format!("core_drop_{}", x.0)),
+                &[CONTEXT, data.into(), int(0)],
+                &CallAttrs::default(),
+            ),
+            None,
+        );
+        sink.instruction(
+            None,
+            Operation::Return(Some((&Type::I8, &status.into()))),
+            None,
+        );
+        sink.end_function();
     }
     let body = Body::default();
+    let result = Value::Local(Local::RESULT);
     for (x, r) in pairs {
         let xc = module.types[x.index()].carried;
         let rc = module.types[r.index()].carried;
@@ -48,67 +84,58 @@ pub(super) fn emit(
             _ => vec![],
         };
         let abi = abi::Return::internal_on_target(target, &fields);
-        let mut e = FunctionEmitter {
-            function: None,
-            append_fast: false,
-            shadow_callee: None,
+        sink.begin_function(
+            &format!("core_task_entry_{}_{}", x.0, r.0),
+            &FnSig::plain(Type::I8, [Type::Ptr, Type::Ptr, Type::Ptr]),
+            &[Local::CONTEXT, Local::RESULT, Local::INPUT],
+            &FnAttrs::private(),
+        );
+        let mut e = glue_emitter(
             module,
-            body: &body,
             recipes,
-            abi: abi::Return::on_target(target, &[Ty::Scalar(Scalar::U8)]),
-            has_status: false,
             failures,
-            constants: &[],
-            observe_charge: false,
             facts,
-            aliases: None,
-            caller_site: "0",
-            debug_location: None,
-            anchor: None,
-            relocatable_sites: false,
-            value_slots: Vec::new(),
-            address_slots: Vec::new(),
-            empty_bounds: empty::EmptyBounds::new(&body, &[]),
-            code: String::new(),
-            allocations: String::new(),
-            next: 0,
-            intrinsics,
-        };
-        let code = e.calc("load ptr, ptr %input, align 8");
-        let data = e.calc(format!(
-            "getelementptr i8, ptr %input, i64 {}",
-            input_offset(module, recipes, x)
-        ));
-        let mut args = vec!["ptr %context".into()];
+            &body,
+            abi::Return::on_target(target, &[Ty::Scalar(Scalar::U8)]),
+            false,
+            int(0),
+            &mut *sink,
+            &mut *items,
+        );
+        let code = e.load(&Type::Ptr, &input, 8);
+        let data = e.offset(&input, input_offset(module, recipes, x));
+        let mut args = vec![ptr(CONTEXT)];
         if matches!(rc, Carried::Address) {
-            args.push("ptr %result".into())
+            args.push(ptr(result.clone()));
         }
-        args.push("ptr null".into());
+        args.push(ptr(Value::Null));
         match xc {
-            Carried::Address => args.push(format!("ptr {data}")),
+            Carried::Address => args.push(ptr(data)),
             Carried::Value(t) => {
-                let v = e.calc(format!("load {}, ptr {data}, align 1", ty(t)));
-                args.push(format!("{}{} {v}", ty(t), abi::extension(e.abi.target, t)))
+                let v = e.load(&ty(t), &data, 1);
+                args.push((
+                    Parameter::extended(ty(t), abi::extension(e.abi.target, t)),
+                    v,
+                ));
             }
             Carried::Nothing => {}
         }
-        args.push("i64 0".into());
+        args.push(word(int(0)));
         let values = e.invoke(&abi, &code, args);
-        let status = values.last().unwrap();
+        let status = values.last().unwrap().clone();
         if let Carried::Value(t) = rc {
-            let success = e.calc(format!("icmp eq i8 {status}, 0"));
-            e.line(format!("br i1 {success}, label %store_result, label %done"));
-            e.line("store_result:");
-            e.line(format!(
-                "store {} {}, ptr %result, align 1",
-                ty(t),
-                values[0]
-            ));
-            e.line("br label %done");
-            e.line("done:");
+            let success = e.cmp(Predicate::Eq, &Type::I8, &status, &int(0));
+            let store = Label::plain("store_result");
+            let done = Label::plain("done");
+            e.cond(&success, store, done);
+            e.block(store);
+            e.store(&ty(t), &values[0], &result, 1);
+            e.br(done);
+            e.block(done);
         }
-        e.line(format!("ret i8 {status}"));
-        writeln!(text,"define private i8 @core_task_entry_{}_{}(ptr %context, ptr %result, ptr %input) {{\nentry:\n{}{}\n}}",x.0,r.0,e.allocations,e.code).unwrap();
+        e.ret(&Type::I8, &status);
+        drop(e);
+        sink.end_function();
     }
     Ok(())
 }

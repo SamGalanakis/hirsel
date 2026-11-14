@@ -491,9 +491,9 @@ void hirsel_llvm_compile_v1(const uint8_t *ir, size_t len, uint8_t speed, const 
     emit_program(&unit, 1, NULL, 0, speed, triple, cpu, out, 0, NULL, NULL);
 }
 __attribute__((visibility("default")))
-void hirsel_llvm_library_v1(const uint8_t *ir, size_t len, const char *triple, const char *cpu,
+void hirsel_llvm_library_v2(LLVMModuleRef module, const char *triple, const char *cpu,
                           HirselLlvmOutput *out, HirselLlvmOutput *raw, HirselLlvmImports *summary) {
-    HirselLlvmUnit unit = { ir, len, 0, 0, NULL };
+    HirselLlvmUnit unit = { NULL, 0, 0, 0, module };
     emit_program(&unit, 1, NULL, 0, 1, triple, cpu, out, 0, raw, summary);
 }
 

@@ -3,20 +3,21 @@
 use super::*;
 
 impl FunctionEmitter<'_> {
-    pub(super) fn overflow(&mut self, t: Ty, op: ArithOp, a: &str, b: &str) -> (String, String) {
+    pub(super) fn overflow(&mut self, t: Ty, op: ArithOp, a: &Value, b: &Value) -> (Value, Value) {
+        let tt = ty(t);
         if op == ArithOp::Add && !t.int().unwrap().0 {
             // Keep the value and its overflow condition scalar. A PHI of the
             // intrinsic's aggregate can hide end = index + width from the late
             // constraint pass, even on the edge where overflow was ruled out.
             // Wrapping add is defined on both paths, including checked_add's
             // observable wrapped result. No no-wrap promise is needed here.
-            let value = self.calc(format!("add {} {a}, {b}", ty(t)));
-            let flag = self.calc(format!("icmp ult {} {value}, {a}", ty(t)));
+            let value = self.bin(Binary::Add, &tt, a, b);
+            let flag = self.cmp(Predicate::Ult, &tt, &value, a);
             return (value, flag);
         }
         if op == ArithOp::Sub && !t.int().unwrap().0 {
-            let value = self.calc(format!("sub {} {a}, {b}", ty(t)));
-            let flag = self.calc(format!("icmp ult {} {a}, {b}", ty(t)));
+            let value = self.bin(Binary::Sub, &tt, a, b);
+            let flag = self.cmp(Predicate::Ult, &tt, a, b);
             return (value, flag);
         }
         let op = match op {
@@ -26,84 +27,82 @@ impl FunctionEmitter<'_> {
             ArithOp::Div => unreachable!(),
         };
         let sign = if t.int().unwrap().0 { "s" } else { "u" };
-        let rt = format!("{{ {}, i1 }}", ty(t));
+        let rt = Type::structure([tt.clone(), Type::I1]);
         let x = self.intrinsic(
-            &format!("llvm.{sign}{op}.with.overflow.{}", ty(t)),
-            &rt,
-            &[(ty(t), a.into()), (ty(t), b.into())],
+            &format!("llvm.{sign}{op}.with.overflow.{tt}"),
+            rt.clone(),
+            &[arg(tt.clone(), a.clone()), arg(tt, b.clone())],
         );
-        let v = self.calc(format!("extractvalue {rt} {x}, 0"));
-        let flag = self.calc(format!("extractvalue {rt} {x}, 1"));
+        let v = self.extract(&rt, &x, 0);
+        let flag = self.extract(&rt, &x, 1);
         (v, flag)
     }
-    fn div_overflow(&mut self, t: Ty, a: &str, b: &str) -> String {
-        let zero = self.calc(format!("icmp eq {} {b}, 0", ty(t)));
+    fn div_overflow(&mut self, t: Ty, a: &Value, b: &Value) -> Value {
+        let tt = ty(t);
+        let zero = self.cmp(Predicate::Eq, &tt, b, &int(0));
         if !t.int().unwrap().0 {
             return zero;
         }
         let min = 1u64 << (size(t) * 8 - 1);
-        let x = self.calc(format!("icmp eq {} {a}, {min}", ty(t)));
-        let y = self.calc(format!("icmp eq {} {b}, -1", ty(t)));
-        let over = self.calc(format!("and i1 {x}, {y}"));
-        self.calc(format!("or i1 {zero}, {over}"))
+        let x = self.cmp(Predicate::Eq, &tt, a, &int(min));
+        let y = self.cmp(Predicate::Eq, &tt, b, &int(-1));
+        let over = self.bin(Binary::And, &Type::I1, &x, &y);
+        self.bin(Binary::Or, &Type::I1, &zero, &over)
     }
     pub(super) fn arith(
         &mut self,
         t: Ty,
         op: ArithOp,
         mode: ArithMode,
-        a: &str,
-        b: &str,
-    ) -> (String, String) {
+        a: &Value,
+        b: &Value,
+    ) -> (Value, Value) {
         let tt = ty(t);
         if op == ArithOp::Div {
             let over = self.div_overflow(t, a, b);
-            let safe = self.calc(format!("select i1 {over}, {tt} 1, {tt} {b}"));
-            let x = self.calc(format!(
-                "{}div {tt} {a}, {safe}",
-                if t.int().unwrap().0 { "s" } else { "u" }
-            ));
-            let x = self.calc(format!("select i1 {over}, {tt} 0, {tt} {x}"));
+            let safe = self.select(&tt, &over, &int(1), b);
+            let div = if t.int().unwrap().0 {
+                Binary::SDiv
+            } else {
+                Binary::UDiv
+            };
+            let x = self.bin(div, &tt, a, &safe);
+            let x = self.select(&tt, &over, &int(0), &x);
             return (x, over);
         }
-        let op_name = match op {
-            ArithOp::Add => "add",
-            ArithOp::Sub => "sub",
-            ArithOp::Mul => "mul",
+        let binary = match op {
+            ArithOp::Add => Binary::Add,
+            ArithOp::Sub => Binary::Sub,
+            ArithOp::Mul => Binary::Mul,
             _ => unreachable!(),
         };
         match mode {
             ArithMode::Checked => self.overflow(t, op, a, b),
-            ArithMode::Wrapping => (
-                self.calc(format!("{op_name} {tt} {a}, {b}")),
-                "false".into(),
-            ),
+            ArithMode::Wrapping => (self.bin(binary, &tt, a, b), FALSE),
             ArithMode::Saturating => {
                 let (x, over) = self.overflow(t, op, a, b);
                 let (signed, w) = t.int().unwrap();
                 let limit = if !signed {
                     if op == ArithOp::Sub {
-                        "0".into()
+                        int(0)
                     } else {
-                        "-1".into()
+                        int(-1)
                     }
                 } else {
                     let negative = if op == ArithOp::Mul {
-                        let n = self.calc(format!("xor {tt} {a}, {b}"));
-                        self.calc(format!("icmp slt {tt} {n}, 0"))
+                        let n = self.bin(Binary::Xor, &tt, a, b);
+                        self.cmp(Predicate::Slt, &tt, &n, &int(0))
                     } else {
-                        self.calc(format!("icmp slt {tt} {a}, 0"))
+                        self.cmp(Predicate::Slt, &tt, a, &int(0))
                     };
-                    self.calc(format!(
-                        "select i1 {negative}, {tt} {}, {tt} {}",
-                        1u64 << (w - 1),
-                        (1u64 << (w - 1)) - 1
-                    ))
+                    self.select(
+                        &tt,
+                        &negative,
+                        &int(1u64 << (w - 1)),
+                        &int((1u64 << (w - 1)) - 1),
+                    )
                 };
-                (
-                    self.calc(format!("select i1 {over}, {tt} {limit}, {tt} {x}")),
-                    over,
-                )
+                (self.select(&tt, &over, &limit, &x), over)
             }
         }
     }
@@ -111,22 +110,22 @@ impl FunctionEmitter<'_> {
         &mut self,
         t: Ty,
         op: BinaryOp,
-        a: &str,
+        a: &Value,
         right: ValueId,
         fail: Option<BlockId>,
-    ) -> Result<String> {
+    ) -> Result<Value> {
         let b = &self.numeric(right);
         let tt = ty(t);
         if t.is_float() {
-            let name = match op {
-                BinaryOp::Add => "fadd",
-                BinaryOp::Sub => "fsub",
-                BinaryOp::Mul => "fmul",
-                BinaryOp::Div => "fdiv",
-                _ => "",
+            let binary = match op {
+                BinaryOp::Add => Some(Binary::FAdd),
+                BinaryOp::Sub => Some(Binary::FSub),
+                BinaryOp::Mul => Some(Binary::FMul),
+                BinaryOp::Div => Some(Binary::FDiv),
+                _ => None,
             };
-            if !name.is_empty() {
-                return Ok(self.calc(format!("{name} {tt} {a}, {b}")));
+            if let Some(binary) = binary {
+                return Ok(self.bin(binary, &tt, a, b));
             }
             let name = match op {
                 BinaryOp::Min | BinaryOp::MinNumber => "minimum",
@@ -135,21 +134,20 @@ impl FunctionEmitter<'_> {
             };
             let ordered = self.intrinsic(
                 &format!("llvm.{name}.{}", if size(t) == 4 { "f32" } else { "f64" }),
-                &tt,
-                &[(tt.clone(), a.into()), (tt.clone(), b.into())],
+                tt.clone(),
+                &[arg(tt.clone(), a.clone()), arg(tt.clone(), b.clone())],
             );
             if matches!(op, BinaryOp::MinNumber | BinaryOp::MaxNumber) {
                 // Retain the existing engine's signed-zero behavior. Its minimumNumber
                 // intrinsic had a +0/-0 lowering defect at O0 on x86-64.
-                let left_nan = self.calc(format!("fcmp uno {tt} {a}, {a}"));
-                let right_nan = self.calc(format!("fcmp uno {tt} {b}, {b}"));
-                let number = self.calc(format!("select i1 {right_nan}, {tt} {a}, {tt} {ordered}"));
-                return Ok(self.calc(format!("select i1 {left_nan}, {tt} {b}, {tt} {number}")));
+                let left_nan = self.cmp(Predicate::Uno, &tt, a, a);
+                let right_nan = self.cmp(Predicate::Uno, &tt, b, b);
+                let number = self.select(&tt, &right_nan, a, &ordered);
+                return Ok(self.select(&tt, &left_nan, b, &number));
             }
             return Ok(ordered);
         }
         let (signed, w) = t.int().unwrap_or((false, (size(t) * 8) as u32));
-        let sign = if signed { "s" } else { "u" };
         Ok(match op {
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => {
                 let op = match op {
@@ -162,58 +160,61 @@ impl FunctionEmitter<'_> {
                 x
             }
             BinaryOp::Rem => {
-                let zero = self.calc(format!("icmp eq {tt} {b}, 0"));
+                let zero = self.cmp(Predicate::Eq, &tt, b, &int(0));
                 self.fail_if(&zero, fail, 2)?;
                 let safe = if signed {
-                    let minus_one = self.calc(format!("icmp eq {tt} {b}, -1"));
-                    self.calc(format!("select i1 {minus_one}, {tt} 1, {tt} {b}"))
+                    let minus_one = self.cmp(Predicate::Eq, &tt, b, &int(-1));
+                    self.select(&tt, &minus_one, &int(1), b)
                 } else {
-                    b.into()
+                    b.clone()
                 };
-                self.calc(format!("{sign}rem {tt} {a}, {safe}"))
+                let rem = if signed { Binary::SRem } else { Binary::URem };
+                self.bin(rem, &tt, a, &safe)
             }
             BinaryOp::Div => {
-                let zero = self.calc(format!("icmp eq {tt} {b}, 0"));
+                let zero = self.cmp(Predicate::Eq, &tt, b, &int(0));
                 self.fail_if(&zero, fail, 2)?;
                 let over = self.div_overflow(t, a, b);
                 self.fail_if(&over, fail, 0)?;
-                self.calc(format!("{sign}div {tt} {a}, {b}"))
+                let div = if signed { Binary::SDiv } else { Binary::UDiv };
+                self.bin(div, &tt, a, b)
             }
             BinaryOp::Shl | BinaryOp::Shr => {
                 if !failure::bounded_shift(t, self.constants[right.index()]) {
-                    let outside = self.calc(format!("icmp uge {tt} {b}, {w}"));
+                    let outside = self.cmp(Predicate::Uge, &tt, b, &int(w));
                     self.fail_if(&outside, fail, 0)?;
                 }
-                self.calc(format!(
-                    "{} {tt} {a}, {b}",
-                    if op == BinaryOp::Shl {
-                        "shl"
-                    } else if signed {
-                        "ashr"
-                    } else {
-                        "lshr"
-                    }
-                ))
+                let shift = if op == BinaryOp::Shl {
+                    Binary::Shl
+                } else if signed {
+                    Binary::AShr
+                } else {
+                    Binary::LShr
+                };
+                self.bin(shift, &tt, a, b)
             }
-            BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => self.calc(format!(
-                "{} {tt} {a}, {b}",
-                match op {
-                    BinaryOp::BitAnd => "and",
-                    BinaryOp::BitOr => "or",
-                    _ => "xor",
-                }
-            )),
+            BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
+                let bit = match op {
+                    BinaryOp::BitAnd => Binary::And,
+                    BinaryOp::BitOr => Binary::Or,
+                    _ => Binary::Xor,
+                };
+                self.bin(bit, &tt, a, b)
+            }
             BinaryOp::Min | BinaryOp::Max => {
-                let cmp = self.calc(format!(
-                    "icmp {sign}{} {tt} {a}, {b}",
-                    if op == BinaryOp::Min { "lt" } else { "gt" }
-                ));
-                self.calc(format!("select i1 {cmp}, {tt} {a}, {tt} {b}"))
+                let predicate = match (op == BinaryOp::Min, signed) {
+                    (true, true) => Predicate::Slt,
+                    (true, false) => Predicate::Ult,
+                    (false, true) => Predicate::Sgt,
+                    (false, false) => Predicate::Ugt,
+                };
+                let cmp = self.cmp(predicate, &tt, a, b);
+                self.select(&tt, &cmp, a, b)
             }
             _ => unreachable!(),
         })
     }
-    pub(super) fn scalar_unary(&mut self, t: Ty, op: ScalarUnaryOp, x: &str) -> String {
+    pub(super) fn scalar_unary(&mut self, t: Ty, op: ScalarUnaryOp, x: &Value) -> Value {
         let name = match op {
             ScalarUnaryOp::Sqrt => "sqrt",
             ScalarUnaryOp::Floor => "floor",
@@ -229,21 +230,22 @@ impl FunctionEmitter<'_> {
             ScalarUnaryOp::ReverseBits => "bitreverse",
         };
         if op == ScalarUnaryOp::SwapBytes && size(t) == 1 {
-            return x.into();
+            return x.clone();
         }
+        let tt = ty(t);
         let suffix = if t.is_float() {
             format!("f{}", size(t) * 8)
         } else {
-            ty(t)
+            tt.to_string()
         };
-        let mut args = vec![(ty(t), x.into())];
+        let mut args = vec![arg(tt.clone(), x.clone())];
         if matches!(
             op,
             ScalarUnaryOp::LeadingZeros | ScalarUnaryOp::TrailingZeros
         ) {
-            args.push(("i1".into(), "false".into()));
+            args.push(arg(Type::I1, FALSE));
         }
-        self.intrinsic(&format!("llvm.{name}.{suffix}"), &ty(t), &args)
+        self.intrinsic(&format!("llvm.{name}.{suffix}"), tt, &args)
     }
     pub(super) fn convert(
         &mut self,
@@ -263,62 +265,66 @@ impl FunctionEmitter<'_> {
         let ft = ty(from);
         let tt = ty(to);
         let signed = from.int().is_some_and(|x| x.0);
-        let cast = |op: &str| format!("{op} {ft} {x} to {tt}");
         let r = match mode {
             ConvertMode::Reinterpret => {
                 if from == to {
                     x.clone()
                 } else if from == Ty::Ptr {
-                    self.calc(cast("ptrtoint"))
+                    self.cast(Cast::PtrToInt, &ft, &x, &tt)
                 } else if to == Ty::Ptr {
-                    self.calc(cast("inttoptr"))
+                    self.cast(Cast::IntToPtr, &ft, &x, &tt)
                 } else {
-                    self.calc(cast("bitcast"))
+                    self.cast(Cast::Bitcast, &ft, &x, &tt)
                 }
             }
             ConvertMode::Widen => {
                 if size(from) == size(to) {
                     x.clone()
                 } else {
-                    self.calc(cast(if signed { "sext" } else { "zext" }))
+                    let op = if signed { Cast::SExt } else { Cast::ZExt };
+                    self.cast(op, &ft, &x, &tt)
                 }
             }
             ConvertMode::Truncate => {
                 if size(from) == size(to) {
                     x.clone()
                 } else {
-                    self.calc(cast("trunc"))
+                    self.cast(Cast::Trunc, &ft, &x, &tt)
                 }
             }
-            ConvertMode::IntToFloat => self.calc(cast(if signed { "sitofp" } else { "uitofp" })),
+            ConvertMode::IntToFloat => {
+                let op = if signed { Cast::SIToFP } else { Cast::UIToFP };
+                self.cast(op, &ft, &x, &tt)
+            }
             ConvertMode::FloatResize => {
                 if from == to {
                     x.clone()
                 } else {
-                    self.calc(cast(if size(from) < size(to) {
-                        "fpext"
+                    let op = if size(from) < size(to) {
+                        Cast::FPExt
                     } else {
-                        "fptrunc"
-                    }))
+                        Cast::FPTrunc
+                    };
+                    self.cast(op, &ft, &x, &tt)
                 }
             }
             ConvertMode::TryNarrow if to == Ty::Scalar(Scalar::Char) => {
                 // A Unicode scalar value, else 0: no invalid char exists.
-                let a = self.calc(format!("icmp ult i32 {x}, 55296"));
-                let b = self.calc(format!("icmp uge i32 {x}, 57344"));
-                let c = self.calc(format!("icmp ule i32 {x}, 1114111"));
-                let high = self.calc(format!("and i1 {b}, {c}"));
-                let ok = self.calc(format!("or i1 {a}, {high}"));
-                let status = self.calc(format!("zext i1 {ok} to i8"));
+                let i32 = Type::I32;
+                let a = self.cmp(Predicate::Ult, &i32, &x, &int(55296));
+                let b = self.cmp(Predicate::Uge, &i32, &x, &int(57344));
+                let c = self.cmp(Predicate::Ule, &i32, &x, &int(1114111));
+                let high = self.bin(Binary::And, &Type::I1, &b, &c);
+                let ok = self.bin(Binary::Or, &Type::I1, &a, &high);
+                let status = self.zext(&Type::I1, &ok, &Type::I8);
                 self.put(flag.unwrap(), &status);
-                self.calc(format!("select i1 {ok}, i32 {x}, i32 0"))
+                self.select(&i32, &ok, &x, &int(0))
             }
             ConvertMode::TryNarrow => {
                 // Extend to i128 before range comparisons, preserving signedness.
-                let wide = self.calc(format!(
-                    "{} {ft} {x} to i128",
-                    if signed { "sext" } else { "zext" }
-                ));
+                let i128 = Type::Int(128);
+                let op = if signed { Cast::SExt } else { Cast::ZExt };
+                let wide = self.cast(op, &ft, &x, &i128);
                 let (sign, w) = to.int().unwrap();
                 let lo = if sign { -(1i128 << (w - 1)) } else { 0 };
                 let hi = if sign {
@@ -326,20 +332,20 @@ impl FunctionEmitter<'_> {
                 } else {
                     (1i128 << w) - 1
                 };
-                let a = self.calc(format!("icmp sge i128 {wide}, {lo}"));
-                let b = self.calc(format!("icmp sle i128 {wide}, {hi}"));
-                let ok = self.calc(format!("and i1 {a}, {b}"));
-                let status = self.calc(format!("zext i1 {ok} to i8"));
+                let a = self.cmp(Predicate::Sge, &i128, &wide, &int(lo));
+                let b = self.cmp(Predicate::Sle, &i128, &wide, &int(hi));
+                let ok = self.bin(Binary::And, &Type::I1, &a, &b);
+                let status = self.zext(&Type::I1, &ok, &Type::I8);
                 self.put(flag.unwrap(), &status);
-                let raw = self.calc(format!("zext {ft} {x} to i128"));
-                self.calc(format!("trunc i128 {raw} to {tt}"))
+                let raw = self.zext(&ft, &x, &i128);
+                self.cast(Cast::Trunc, &i128, &raw, &tt)
             }
             ConvertMode::FloatToInt => {
                 let (sign, w) = to.int().unwrap();
                 let truncated = self.intrinsic(
                     &format!("llvm.trunc.f{}", size(from) * 8),
-                    &ft,
-                    &[(ft.clone(), x.clone())],
+                    ft.clone(),
+                    &[arg(ft.clone(), x.clone())],
                 );
                 let low = if sign {
                     -(2f64).powi(w as i32 - 1)
@@ -347,27 +353,31 @@ impl FunctionEmitter<'_> {
                     0.0
                 };
                 let high = (2f64).powi(w as i32 - i32::from(sign));
+                let single = size(from) == 4;
                 let constant = |f: f64| {
-                    if size(from) == 4 {
-                        format!("bitcast (i32 {} to float)", (f as f32).to_bits())
+                    if single {
+                        Value::Bitcast {
+                            from: Type::I32,
+                            bits: u64::from((f as f32).to_bits()),
+                            to: Type::Float,
+                        }
                     } else {
-                        format!("bitcast (i64 {} to double)", f.to_bits())
+                        Value::Bitcast {
+                            from: Type::I64,
+                            bits: f.to_bits(),
+                            to: Type::Double,
+                        }
                     }
                 };
-                let a = self.calc(format!("fcmp oge {ft} {truncated}, {}", constant(low)));
-                let b = self.calc(format!("fcmp olt {ft} {truncated}, {}", constant(high)));
-                let ok = self.calc(format!("and i1 {a}, {b}"));
-                let safe = self.calc(format!(
-                    "select i1 {ok}, {ft} {truncated}, {ft} {}",
-                    constant(0.0)
-                ));
-                let r = self.calc(format!(
-                    "{} {ft} {safe} to {tt}",
-                    if sign { "fptosi" } else { "fptoui" }
-                ));
-                let nan = self.calc(format!("fcmp uno {ft} {x}, {x}"));
-                let bad = self.calc(format!("select i1 {nan}, i8 1, i8 2"));
-                let status = self.calc(format!("select i1 {ok}, i8 0, i8 {bad}"));
+                let a = self.cmp(Predicate::OGe, &ft, &truncated, &constant(low));
+                let b = self.cmp(Predicate::OLt, &ft, &truncated, &constant(high));
+                let ok = self.bin(Binary::And, &Type::I1, &a, &b);
+                let safe = self.select(&ft, &ok, &truncated, &constant(0.0));
+                let op = if sign { Cast::FPToSI } else { Cast::FPToUI };
+                let r = self.cast(op, &ft, &safe, &tt);
+                let nan = self.cmp(Predicate::Uno, &ft, &x, &x);
+                let bad = self.select(&Type::I8, &nan, &int(1), &int(2));
+                let status = self.select(&Type::I8, &ok, &int(0), &bad);
                 self.put(flag.unwrap(), &status);
                 r
             }

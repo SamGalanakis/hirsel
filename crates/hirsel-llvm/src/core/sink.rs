@@ -115,7 +115,6 @@ pub(super) struct Label {
 }
 impl Label {
     const NONE: u32 = u32::MAX;
-    pub const ENTRY: Self = Self::plain("entry");
     pub const fn plain(name: &'static str) -> Self {
         Self {
             name,
@@ -220,9 +219,6 @@ impl Value {
     pub fn global(name: impl Into<Name>) -> Self {
         Self::Global(name.into())
     }
-    pub fn int(n: impl Into<i128>) -> Self {
-        Self::Int(n.into())
-    }
 }
 impl From<Local> for Value {
     fn from(local: Local) -> Self {
@@ -314,7 +310,6 @@ pub(super) enum Binary {
     FSub,
     FMul,
     FDiv,
-    FRem,
 }
 impl Binary {
     pub fn name(self) -> &'static str {
@@ -336,7 +331,6 @@ impl Binary {
             Self::FSub => "fsub",
             Self::FMul => "fmul",
             Self::FDiv => "fdiv",
-            Self::FRem => "frem",
         }
     }
 }
@@ -382,14 +376,7 @@ pub(super) enum Predicate {
     OGe = 3,
     OLt = 4,
     OLe = 5,
-    ONe = 6,
-    Ord = 7,
     Uno = 8,
-    UEq = 9,
-    UGt = 10,
-    UGe = 11,
-    ULt = 12,
-    ULe = 13,
     UNe = 14,
     Eq = 32,
     Ne = 33,
@@ -410,14 +397,7 @@ impl Predicate {
             Self::OGe => "oge",
             Self::OLt => "olt",
             Self::OLe => "ole",
-            Self::ONe => "one",
-            Self::Ord => "ord",
             Self::Uno => "uno",
-            Self::UEq => "ueq",
-            Self::UGt => "ugt",
-            Self::UGe => "uge",
-            Self::ULt => "ult",
-            Self::ULe => "ule",
             Self::UNe => "une",
             Self::Eq => "eq",
             Self::Ne => "ne",
@@ -441,14 +421,12 @@ impl Predicate {
 pub(super) enum Ordering {
     Monotonic = 2,
     Acquire = 4,
-    Release = 5,
 }
 impl Ordering {
     fn name(self) -> &'static str {
         match self {
             Self::Monotonic => "monotonic",
             Self::Acquire => "acquire",
-            Self::Release => "release",
         }
     }
 }
@@ -530,13 +508,13 @@ impl From<Type> for Parameter {
     }
 }
 #[derive(Clone, Debug)]
-pub(super) struct Signature {
+pub(super) struct FnSig {
     pub result: Type,
     pub extension: Extension,
     pub nonnull: bool,
     pub params: Vec<Parameter>,
 }
-impl Signature {
+impl FnSig {
     pub fn new(result: Type, params: Vec<Parameter>) -> Self {
         Self {
             result,
@@ -679,7 +657,7 @@ pub(super) enum Operation<'a> {
     Extract(&'a Type, &'a Value, u32),
     Insert(&'a Type, &'a Value, &'a Type, &'a Value, u32),
     Phi(&'a Type, &'a [(Value, Label)]),
-    Call(&'a Signature, &'a Value, &'a [Value], &'a CallAttrs),
+    Call(&'a FnSig, &'a Value, &'a [Value], &'a CallAttrs),
     /// `cmpxchg weak` with monotonic success and failure orderings.
     CompareExchange(&'a Value, &'a Type, &'a Value, &'a Value),
     /// `atomicrmw sub ... release, align 8`.
@@ -697,11 +675,11 @@ pub(super) enum Operation<'a> {
 /// before its first use; its identifiers are the producer's own.
 pub(super) trait Sink {
     fn global(&mut self, global: &Global);
-    fn declare(&mut self, name: &str, sig: &Signature, attrs: &FnAttrs);
+    fn declare(&mut self, name: &str, sig: &FnSig, attrs: &FnAttrs);
     fn module_asm(&mut self, text: &str);
     fn metadata(&mut self, id: usize, node: &Metadata);
     fn named_metadata(&mut self, name: &str, ids: &[usize]);
-    fn begin_function(&mut self, name: &str, sig: &Signature, params: &[Local], attrs: &FnAttrs);
+    fn begin_function(&mut self, name: &str, sig: &FnSig, params: &[Local], attrs: &FnAttrs);
     fn end_function(&mut self);
     fn block(&mut self, label: Label);
     fn alloca(&mut self, name: Local, ty: &Type, align: u32);
@@ -754,7 +732,7 @@ fn parameter(out: &mut String, p: &Parameter) {
         write!(out, " align {}", p.align).unwrap();
     }
 }
-fn result_type(out: &mut String, sig: &Signature) {
+pub(super) fn result_type(out: &mut String, sig: &FnSig) {
     out.push_str(sig.extension.text().trim_start());
     if sig.extension != Extension::None {
         out.push(' ');
@@ -835,7 +813,7 @@ impl Sink for TextSink {
         }
         out.push('\n');
     }
-    fn declare(&mut self, name: &str, sig: &Signature, attrs: &FnAttrs) {
+    fn declare(&mut self, name: &str, sig: &FnSig, attrs: &FnAttrs) {
         let out = &mut self.text;
         out.push_str("declare ");
         result_type(out, sig);
@@ -930,7 +908,7 @@ impl Sink for TextSink {
         list(&mut self.metadata, ids).unwrap();
         self.metadata.push_str("}\n");
     }
-    fn begin_function(&mut self, name: &str, sig: &Signature, params: &[Local], attrs: &FnAttrs) {
+    fn begin_function(&mut self, name: &str, sig: &FnSig, params: &[Local], attrs: &FnAttrs) {
         let out = &mut self.header;
         out.clear();
         write!(out, "define {}", attrs.linkage.text()).unwrap();

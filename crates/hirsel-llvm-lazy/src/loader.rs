@@ -53,8 +53,7 @@ struct Imports {
     len: usize,
 }
 type Library = unsafe extern "C" fn(
-    *const u8,
-    usize,
+    crate::construction::Raw,
     *const libc::c_char,
     *const libc::c_char,
     *mut Output,
@@ -72,10 +71,7 @@ pub(crate) enum ProgramUnit<'a> {
         ir: &'a str,
         imported: bool,
     },
-    Import {
-        bitcode: &'a [u8],
-        summary: &'a crate::ImportSummary,
-    },
+    Import(&'a [u8]),
 }
 struct Backend {
     compile: Compile,
@@ -142,7 +138,7 @@ fn load() -> Result<Backend, String> {
     let compile = unsafe { libc::dlsym(handle, c"hirsel_llvm_compile_v1".as_ptr()) };
     let free = unsafe { libc::dlsym(handle, c"hirsel_llvm_output_free_v1".as_ptr()) };
     let program = unsafe { libc::dlsym(handle, c"hirsel_llvm_program_v2".as_ptr()) };
-    let library = unsafe { libc::dlsym(handle, c"hirsel_llvm_library_v1".as_ptr()) };
+    let library = unsafe { libc::dlsym(handle, c"hirsel_llvm_library_v2".as_ptr()) };
     // SAFETY: the table getter is part of the same embedded component ABI.
     let construction = unsafe { libc::dlsym(handle, c"hirsel_llvm_builder_v1".as_ptr()) };
     if compile.is_null()
@@ -219,9 +215,27 @@ pub(crate) fn compile(
     }
 }
 
+/// Compile one natively constructed module standalone, keeping its order.
+pub(crate) fn compile_module(
+    module: crate::construction::NativeModule,
+    speed: bool,
+    target: hirsel_core_layout::Target,
+) -> Result<Vec<u8>, String> {
+    emit(vec![ProgramUnit::Native(module)], &[], speed, target)
+}
+
 pub(crate) fn program(
+    units: Vec<ProgramUnit<'_>>,
+    exports: &[String],
+    target: hirsel_core_layout::Target,
+) -> Result<Vec<u8>, String> {
+    emit(units, exports, true, target)
+}
+
+fn emit(
     mut units: Vec<ProgramUnit<'_>>,
     exports: &[String],
+    speed: bool,
     target: hirsel_core_layout::Target,
 ) -> Result<Vec<u8>, String> {
     let triple = CString::new(target.triple()).unwrap();
@@ -229,7 +243,7 @@ pub(crate) fn program(
     let backend = backend()?;
     let inputs: Vec<_> = units
         .iter_mut()
-        .filter_map(|u| match u {
+        .map(|u| match u {
             ProgramUnit::Native(module) => {
                 let input = Input {
                     data: std::ptr::null(),
@@ -239,28 +253,25 @@ pub(crate) fn program(
                     module: module.raw(),
                 };
                 module.consume();
-                Some(input)
+                input
             }
-            ProgramUnit::Text { ir, imported } => Some(Input {
+            ProgramUnit::Text { ir, imported } => Input {
                 data: ir.as_ptr(),
                 len: ir.len(),
                 imported: u8::from(*imported),
                 bitcode: 0,
                 module: std::ptr::null_mut(),
-            }),
+            },
             // Apply the body-size bound after composition, just as for text.
             // Skipping an entire unit also drops declarations/private helpers
             // and changes function order and MergeFunctions representatives.
-            ProgramUnit::Import {
-                bitcode,
-                summary: _,
-            } => Some(Input {
+            ProgramUnit::Import(bitcode) => Input {
                 data: bitcode.as_ptr(),
                 len: bitcode.len(),
                 imported: 1,
                 bitcode: 1,
                 module: std::ptr::null_mut(),
-            }),
+            },
         })
         .collect();
     let names: Vec<_> = exports
@@ -281,7 +292,7 @@ pub(crate) fn program(
             inputs.len(),
             pointers.as_ptr(),
             pointers.len(),
-            1,
+            u8::from(speed),
             triple.as_ptr(),
             cpu.as_ptr(),
             crate::INLINE_IMPORT_INSTRUCTION_LIMIT,
@@ -297,7 +308,10 @@ pub(crate) fn program(
     }
 }
 
-pub(crate) fn library(ir: &str, target: hirsel_core_layout::Target) -> Result<RawLibrary, String> {
+pub(crate) fn library(
+    module: crate::construction::NativeModule,
+    target: hirsel_core_layout::Target,
+) -> Result<RawLibrary, String> {
     let backend = backend()?;
     let triple = CString::new(target.triple()).unwrap();
     let cpu = CString::new(target.cpu()).unwrap();
@@ -315,9 +329,10 @@ pub(crate) fn library(ir: &str, target: hirsel_core_layout::Target) -> Result<Ra
     // SAFETY: input and target strings live through the synchronous call. Each
     // returned allocation belongs to this component and is freed with its API.
     unsafe {
+        let raw = module.raw();
+        module.consume();
         (backend.library)(
-            ir.as_ptr(),
-            ir.len(),
+            raw,
             triple.as_ptr(),
             cpu.as_ptr(),
             &mut object,

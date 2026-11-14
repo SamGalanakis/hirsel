@@ -156,14 +156,15 @@ fn scalar_growth_shadow_copies_back_before_success_failure_and_forwarded_return(
 fn storage_roles_keep_moved_buffers_in_one_scope() {
     let module = text::parse(include_str!("../../tests/core_runtime/roles.core")).unwrap();
     wf::module(&module).unwrap();
-    let mut declarations = BTreeSet::new();
+    let mut items = Items::default();
     let scopes = alias::Scopes::new(
         &module,
         &hirsel_core_ir::roles::Facts::new(&module),
         FuncId(0),
         "test",
         &mut 2,
-        &mut declarations,
+        &mut sink::TextSink::default(),
+        &mut items,
     )
     .unwrap();
     assert_eq!(

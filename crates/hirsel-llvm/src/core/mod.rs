@@ -22,6 +22,7 @@ mod flow;
 mod forward;
 mod growth;
 mod scalar;
+mod sink;
 mod sites;
 mod storage;
 #[cfg(all(test, not(hirsel_lazy_core)))]
@@ -34,6 +35,12 @@ mod values;
 
 use std::collections::BTreeSet;
 use std::fmt::{self, Write};
+
+use sink::{
+    Binary, CONTEXT, CallAttrs, Cast, Extension, FnAttrs, FnSig, Global, Inline, Label, Linkage,
+    Local, MdItem, Memory, Metadata, Operation, Ordering, Parameter, Predicate, Scoped, Sink, Type,
+    Value,
+};
 
 use hirsel_core_ir::failure;
 use hirsel_core_ir::*;
@@ -157,27 +164,115 @@ fn emit_ir_target_with_role_facts(
     source: SourceEmission,
     provided_roles: Option<&hirsel_core_ir::roles::Facts>,
 ) -> Result<String> {
-    let mut text = String::new();
+    let mut text = sink::TextSink::default();
+    emit_module(
+        module,
+        target,
+        observe_charge,
+        facts,
+        source,
+        provided_roles,
+        &mut text,
+    )?;
+    Ok(text.finish())
+}
+
+/// Deferred module items in the order of their LLVM text lines: globals, then
+/// declarations by result type and name, the shared byte order, module asm.
+#[derive(Default)]
+struct Items(std::collections::BTreeMap<String, Item>);
+enum Item {
+    Global(Global),
+    Declare(String, FnSig, FnAttrs),
+    CompareBytes(bool),
+    Asm(String),
+}
+impl Items {
+    fn insert(&mut self, key: String, item: Item) {
+        self.0.entry(key).or_insert(item);
+    }
+    pub fn global(&mut self, global: Global) {
+        let mut key = String::new();
+        sink::write_global(&mut key, &global.name).unwrap();
+        key.push(' ');
+        self.insert(key, Item::Global(global));
+    }
+    pub fn declare(&mut self, name: &str, sig: FnSig, attrs: FnAttrs) {
+        let mut key = String::from("declare ");
+        sink::result_type(&mut key, &sig);
+        key.push(' ');
+        sink::write_global(&mut key, name).unwrap();
+        key.push('(');
+        self.insert(key, Item::Declare(name.into(), sig, attrs));
+    }
+    pub fn compare_bytes(&mut self, facts: bool) {
+        self.insert(
+            "define private signext i8 @core_compare_bytes(".into(),
+            Item::CompareBytes(facts),
+        );
+    }
+    pub fn asm(&mut self, text: String) {
+        self.insert(format!("module asm \"{text}\""), Item::Asm(text));
+    }
+    fn emit(self, sink: &mut dyn Sink) {
+        for item in self.0.into_values() {
+            match item {
+                Item::Global(global) => sink.global(&global),
+                Item::Declare(name, sig, attrs) => sink.declare(&name, &sig, &attrs),
+                Item::CompareBytes(facts) => bytes::define_compare_bytes(sink, facts),
+                Item::Asm(text) => sink.module_asm(&text),
+            }
+        }
+    }
+}
+
+/// Lower one CoreIR module, item by item in module order, into `sink`.
+fn emit_module(
+    module: &Module,
+    target: Target,
+    observe_charge: bool,
+    facts: bool,
+    source: SourceEmission,
+    provided_roles: Option<&hirsel_core_ir::roles::Facts>,
+    sink: &mut dyn Sink,
+) -> Result<()> {
+    // Shared nodes: !0 weights a likely branch, !1 is the invariant.load list.
+    sink.metadata(
+        0,
+        &Metadata::Tuple {
+            distinct: false,
+            items: vec![
+                MdItem::String("branch_weights".into()),
+                MdItem::I32(2000),
+                MdItem::I32(1),
+            ],
+        },
+    );
+    sink.metadata(
+        1,
+        &Metadata::Tuple {
+            distinct: false,
+            items: vec![],
+        },
+    );
     for (i, data) in module.statics.iter().enumerate() {
-        let bytes = data
-            .bytes
-            .iter()
-            .map(|b| format!("\\{b:02X}"))
-            .collect::<String>();
-        writeln!(
-            text,
-            "@s{i} = private constant [{} x i8] c\"{bytes}\", align {}",
-            data.bytes.len(),
-            data.align
-        )
-        .unwrap();
+        sink.global(&Global {
+            name: format!("s{i}").into(),
+            linkage: Linkage::Private,
+            constant: true,
+            externally_initialized: false,
+            ty: Type::bytes(data.bytes.len() as u64),
+            init: Some(Value::Bytes(data.bytes.to_vec())),
+            align: data.align,
+            absolute_symbol: false,
+        });
     }
     let recipes = hirsel_core_layout::compute(&module.types).expect("producer layouts");
-    let mut intrinsics = BTreeSet::new();
+    let mut items = Items::default();
     let mut next_scope = 2;
     let failures = failure::Failures::new(module);
     let debug = if source.debug_lines {
-        sites::debug_plan(module, &failures, &mut next_scope, &mut intrinsics)
+        sites::debug_plan(module, &failures, &mut next_scope, sink)
     } else {
         module.functions.iter().map(|_| None).collect()
     };
@@ -193,15 +288,9 @@ fn emit_ir_target_with_role_facts(
             abi::Return::on_target(target, &sig.results)
         };
         let name = symbol(module, FuncId(i as u32));
-        let params = abi.parameters(sig, facts);
+        let (params, locals) = abi.parameters(sig, facts);
         let Some(body) = &f.body else {
-            writeln!(
-                text,
-                "declare {} @{name}({})",
-                abi.return_type(),
-                params.join(", ")
-            )
-            .unwrap();
+            sink.declare(&name, &abi.signature(params), &FnAttrs::default());
             continue;
         };
         let definition = module.instances[f.instance.index()].definition.to_string();
@@ -227,7 +316,8 @@ fn emit_ir_target_with_role_facts(
                 FuncId(i as u32),
                 &name,
                 &mut next_scope,
-                &mut intrinsics,
+                sink,
+                &mut items,
             )
         });
         let flow = flow::Flow::new(body);
@@ -235,7 +325,7 @@ fn emit_ir_target_with_role_facts(
             function: Some(FuncId(i as u32)),
             append_fast,
             shadow_callee,
-            caller_site: "%caller_site",
+            caller_site: Value::Local(Local::CALLER_SITE),
             debug_location: function_debug.map(|d| d.location(None)),
             anchor: None,
             relocatable_sites: source.relocatable_sites,
@@ -256,27 +346,60 @@ fn emit_ir_target_with_role_facts(
             } else {
                 empty::EmptyBounds::new(body, &failures.constants[i])
             },
-            code: String::new(),
-            allocations: String::new(),
+            sink: &mut *sink,
+            items: &mut items,
             next: 0,
-            intrinsics: &mut intrinsics,
         };
+        let body_name = if has_status {
+            name.clone()
+        } else {
+            format!("{name}.infallible")
+        };
+        let destination = sig
+            .dest
+            .filter(|_| sig.results.is_empty())
+            .and_then(|t| {
+                use hirsel_core_layout::{Layout, Repr};
+                match (module.types[t.index()].repr, &recipes[t.index()].layout) {
+                    (Repr::Resource | Repr::Stable, _) | (_, Layout::Fixed(_)) => {
+                        let (bytes, _) = e.place_layout(PlaceTy::Declared(t));
+                        matches!(bytes, 1..=16).then_some(bytes)
+                    }
+                    _ => None,
+                }
+            });
+        let attrs = FnAttrs {
+            linkage: if has_status {
+                Linkage::External
+            } else {
+                Linkage::Internal
+            },
+            // Inline the reserved ASCII append and share the UTF-8/growth body.
+            inline: match definition.as_str() {
+                "core@1/string/push_char" => Inline::Always,
+                "core@1/string/push_scalar" => Inline::Never,
+                _ => Inline::Default,
+            },
+            destination_size: destination,
+            view_input: abi::view_input(sig),
+            subprogram: function_debug.map(|d| d.scope),
+            ..FnAttrs::default()
+        };
+        let signature = e.abi.signature(params);
+        e.sink
+            .begin_function(&body_name, &signature, &locals, &attrs);
         for (i, t) in body.values.iter().enumerate() {
             if e.value_slots[i] {
-                writeln!(e.allocations, "  %v{i} = alloca {}", ty(*t)).unwrap();
+                e.sink.alloca(Local::Value(i), &ty(*t), 0);
             }
         }
         for (i, t) in body.slots.iter().enumerate() {
             let (bytes, align) = e.place_layout(*t);
-            writeln!(
-                e.allocations,
-                "  %s{i} = alloca [{bytes} x i8], align {align}"
-            )
-            .unwrap();
+            e.sink.alloca(Local::Slot(i), &Type::bytes(bytes), align as u32);
         }
         for i in 0..body.addresses.len() {
             if e.address_slots[i] {
-                writeln!(e.allocations, "  %a{i} = alloca ptr").unwrap();
+                e.sink.alloca(Local::Address(i), &Type::Ptr, 0);
             }
         }
         // Cleanup continuations may mention a branch-local constant even when
@@ -297,19 +420,19 @@ fn emit_ir_target_with_role_facts(
             .enumerate()
         {
             let parameter = if sig.dest.is_some() && i == 0 {
-                "%dest".into()
+                Local::DEST
             } else {
-                format!("%p{}", i - usize::from(sig.dest.is_some()))
+                Local::Param(i - usize::from(sig.dest.is_some()))
             };
-            e.put(*v, &parameter);
+            e.put(*v, &parameter.into());
         }
-        if let Some(aliases) = &e.aliases {
-            e.line(aliases.declaration());
+        if let Some(scopes) = e.aliases.as_ref().map(|a| a.declared().to_vec()) {
+            e.declare_scopes(&scopes);
         }
-        e.line("br label %b0");
+        e.br(Label::block(0u32));
         let mut forwarding = forward::Forwarding::new(body);
         for (i, b) in body.blocks.iter().enumerate() {
-            writeln!(e.code, "b{i}:").unwrap();
+            e.block(Label::block(i));
             let ending = forwarding.ending(module, &recipes, sig, e.constants, i);
             let mut returned = false;
             for (offset, inst) in b.insts.get(&body.insts).unwrap().iter().enumerate() {
@@ -335,54 +458,9 @@ fn emit_ir_target_with_role_facts(
                 e.term(&body.terminators[i])?;
             }
         }
-        let linkage = if has_status { "" } else { "internal " };
-        let body_name = if has_status {
-            name.clone()
-        } else {
-            format!("{name}.infallible")
-        };
-        // Inline the reserved ASCII append and share the UTF-8/growth body.
-        let append_inline = match definition.as_str() {
-            "core@1/string/push_char" => " alwaysinline",
-            "core@1/string/push_scalar" => " noinline",
-            _ => "",
-        };
-        let destination = sig
-            .dest
-            .filter(|_| sig.results.is_empty())
-            .and_then(|t| {
-                use hirsel_core_layout::{Layout, Repr};
-                match (module.types[t.index()].repr, &recipes[t.index()].layout) {
-                    (Repr::Resource | Repr::Stable, _) | (_, Layout::Fixed(_)) => {
-                        let (bytes, _) = e.place_layout(PlaceTy::Declared(t));
-                        matches!(bytes, 1..=16)
-                            .then(|| format!(" \"hirsel-destination-size\"=\"{bytes}\""))
-                    }
-                    _ => None,
-                }
-            })
-            .unwrap_or_default();
-        writeln!(
-            text,
-            "define {linkage}{} @{body_name}({}){append_inline}{destination}{}{} {{\nentry:\n{}{} }}",
-            e.abi.return_type(),
-            params.join(", "),
-            abi::view_input_marker(sig),
-            function_debug
-                .map(|d| format!(" !dbg !{}", d.scope))
-                .unwrap_or_default(),
-            e.allocations,
-            e.code
-        )
-        .unwrap();
+        e.sink.end_function();
         if !has_status {
-            e.infallible_wrapper(
-                &name,
-                sig,
-                facts,
-                &mut text,
-                function_debug.and_then(|d| d.wrapper),
-            );
+            e.infallible_wrapper(&name, sig, facts, function_debug.and_then(|d| d.wrapper));
         }
     }
     cleanup::drop_glue(
@@ -391,8 +469,8 @@ fn emit_ir_target_with_role_facts(
         &recipes,
         &failures,
         facts,
-        &mut text,
-        &mut intrinsics,
+        sink,
+        &mut items,
     )?;
     task_entry::emit(
         module,
@@ -400,13 +478,82 @@ fn emit_ir_target_with_role_facts(
         &recipes,
         &failures,
         facts,
-        &mut text,
-        &mut intrinsics,
+        sink,
+        &mut items,
     )?;
-    for decl in intrinsics {
-        writeln!(text, "{decl}").unwrap();
-    }
-    Ok(text)
+    items.emit(sink);
+    Ok(())
+}
+
+/// Lower one owned unit directly into a native module of `context`.
+#[cfg(hirsel_lazy_core)]
+pub(crate) fn emit_native_module_in_context(
+    module: &Module,
+    target: Target,
+    context: std::rc::Rc<crate::construction::Context>,
+    roles: &hirsel_core_ir::roles::Facts,
+    observe_charge: bool,
+    debug_lines: bool,
+) -> Result<crate::construction::NativeModule> {
+    native_module(
+        module,
+        target,
+        context,
+        observe_charge,
+        SourceEmission {
+            relocatable_sites: true,
+            debug_lines,
+        },
+        Some(roles),
+    )
+}
+
+#[cfg(hirsel_lazy_core)]
+fn native_module(
+    module: &Module,
+    target: Target,
+    context: std::rc::Rc<crate::construction::Context>,
+    observe_charge: bool,
+    source: SourceEmission,
+    roles: Option<&hirsel_core_ir::roles::Facts>,
+) -> Result<crate::construction::NativeModule> {
+    let mut native = sink::native::NativeSink::new(context);
+    emit_module(
+        module,
+        target,
+        observe_charge,
+        facts_enabled(),
+        source,
+        roles,
+        &mut native,
+    )?;
+    native.finish().map_err(Error::Llvm)
+}
+
+/// The printed-module oracle (ORACLE.md): the native module and the text
+/// producer's module parsed in a fresh context must print identically.
+/// Returns both prints, native first.
+#[cfg(hirsel_lazy_core)]
+pub fn printed_module_pair(
+    module: &Module,
+    target: Target,
+    roles: Option<&hirsel_core_ir::roles::Facts>,
+    relocatable_sites: bool,
+    debug_lines: bool,
+) -> Result<(String, String)> {
+    let source = SourceEmission {
+        relocatable_sites,
+        debug_lines,
+    };
+    let facts = facts_enabled();
+    let context = std::rc::Rc::new(crate::construction::Context::new().map_err(Error::Llvm)?);
+    let mut native = sink::native::NativeSink::new(context.clone());
+    emit_module(module, target, false, facts, source, roles, &mut native)?;
+    let native = native.print().map_err(Error::Llvm)?;
+    let mut text = sink::TextSink::default();
+    emit_module(module, target, false, facts, source, roles, &mut text)?;
+    let parsed = context.print_text(&text.finish()).map_err(Error::Llvm)?;
+    Ok((native, parsed))
 }
 
 /// Emit source-independent IR whose failure sites bind to the fresh link table.
@@ -522,12 +669,10 @@ fn emit_object_site_binding(
     }
     #[cfg(hirsel_lazy_core)]
     {
-        crate::loader::compile(
-            &emit_ir_target_with_facts(module, target, observe_charge, facts_enabled(), source)?,
-            matches!(opt, Optimization::Speed),
-            target,
-        )
-        .map_err(Error::Llvm)
+        let context = std::rc::Rc::new(crate::construction::Context::new().map_err(Error::Llvm)?);
+        let native = native_module(module, target, context, observe_charge, source, None)?;
+        crate::loader::compile_module(native, matches!(opt, Optimization::Speed), target)
+            .map_err(Error::Llvm)
     }
 }
 
@@ -608,16 +753,16 @@ fn compile_observation<R>(
     Ok((bytes, result))
 }
 
-fn ty(t: Ty) -> String {
+fn ty(t: Ty) -> Type {
     match t {
-        Ty::Ptr => "ptr".into(),
-        Ty::Scalar(Scalar::F32) => "float".into(),
-        Ty::Scalar(Scalar::F64) => "double".into(),
-        Ty::Scalar(s) => format!("i{}", s.size() * 8),
+        Ty::Ptr => Type::Ptr,
+        Ty::Scalar(Scalar::F32) => Type::Float,
+        Ty::Scalar(Scalar::F64) => Type::Double,
+        Ty::Scalar(s) => Type::Int(s.size() as u32 * 8),
     }
 }
-fn bits_ty(t: Ty) -> String {
-    format!("i{}", size(t) * 8)
+fn bits_ty(t: Ty) -> Type {
+    Type::Int(size(t) as u32 * 8)
 }
 fn size(t: Ty) -> u64 {
     match t {
@@ -625,6 +770,21 @@ fn size(t: Ty) -> u64 {
         Ty::Scalar(s) => s.size(),
     }
 }
+/// A typed call argument.
+type CArg = (Parameter, Value);
+fn arg(ty: Type, value: impl Into<Value>) -> CArg {
+    (Parameter::plain(ty), value.into())
+}
+fn ptr(value: impl Into<Value>) -> CArg {
+    arg(Type::Ptr, value)
+}
+fn word(value: impl Into<Value>) -> CArg {
+    arg(Type::I64, value)
+}
+fn int(n: impl Into<i128>) -> Value {
+    Value::Int(n.into())
+}
+const FALSE: Value = Value::Bool(false);
 
 struct FunctionEmitter<'a> {
     function: Option<FuncId>,
@@ -641,150 +801,214 @@ struct FunctionEmitter<'a> {
     observe_charge: bool,
     facts: bool,
     aliases: Option<alias::Scopes>,
-    caller_site: &'static str,
+    caller_site: Value,
     debug_location: Option<usize>,
     anchor: Option<Anchor>,
     relocatable_sites: bool,
     value_slots: Vec<bool>,
     address_slots: Vec<bool>,
-    code: String,
-    allocations: String,
+    sink: &'a mut dyn Sink,
+    items: &'a mut Items,
     next: usize,
-    intrinsics: &'a mut BTreeSet<String>,
 }
 impl FunctionEmitter<'_> {
-    fn c_argument<'a>(&self, t: &'a str) -> &'a str {
+    /// AAPCS64 leaves narrow C arguments' upper bits unspecified.
+    fn c_param(&self, mut p: Parameter) -> Parameter {
         if self.abi.target == Target::Aarch64Linux {
-            t.strip_suffix(" zeroext")
-                .or_else(|| t.strip_suffix(" signext"))
-                .unwrap_or(t)
-        } else {
-            t
+            p.extension = Extension::None;
         }
+        p
     }
-    fn line(&mut self, s: impl AsRef<str>) {
-        let s = s.as_ref();
-        let metadata = self.debug_location.filter(|_| {
-            !s.ends_with(':')
-                && !s.ends_with('[')
-                && !s.as_bytes().first().is_some_and(|c| {
-                    *c == b'i' && s.as_bytes().get(1).is_some_and(u8::is_ascii_digit)
-                })
-        });
-        if let Some(location) = metadata {
-            writeln!(self.code, "  {s}, !dbg !{location}").unwrap();
-        } else {
-            writeln!(self.code, "  {s}").unwrap();
-        }
-    }
-    fn fresh(&mut self) -> String {
+    fn counter(&mut self) -> usize {
         let n = self.next;
         self.next += 1;
-        format!("%t{n}")
+        n
     }
-    fn calc(&mut self, s: impl AsRef<str>) -> String {
-        let v = self.fresh();
-        self.line(format!("{v} = {}", s.as_ref()));
-        v
+    fn fresh(&mut self) -> Local {
+        Local::Temp(self.counter())
     }
-    fn temp(&mut self, t: &str) -> String {
+    fn emit(&mut self, op: Operation<'_>) -> Value {
+        let result = self.fresh();
+        self.sink.instruction(Some(result), op, self.debug_location);
+        result.into()
+    }
+    fn emit_to(&mut self, result: Local, op: Operation<'_>) {
+        self.sink.instruction(Some(result), op, self.debug_location);
+    }
+    fn effect(&mut self, op: Operation<'_>) {
+        self.sink.instruction(None, op, self.debug_location);
+    }
+    fn block(&mut self, label: Label) {
+        self.sink.block(label);
+    }
+    fn temp(&mut self, t: Type) -> Value {
         let p = self.fresh();
-        writeln!(self.allocations, "  {p} = alloca {t}, align 8").unwrap();
-        p
+        self.sink.alloca(p, &t, 8);
+        p.into()
+    }
+    fn bin(&mut self, op: Binary, t: &Type, a: &Value, b: &Value) -> Value {
+        self.emit(Operation::Binary(op, t, a, b))
+    }
+    fn cmp(&mut self, p: Predicate, t: &Type, a: &Value, b: &Value) -> Value {
+        self.emit(Operation::Compare(p, t, a, b))
+    }
+    fn cast(&mut self, op: Cast, from: &Type, v: &Value, to: &Type) -> Value {
+        self.emit(Operation::Cast(op, from, v, to))
+    }
+    fn zext(&mut self, from: &Type, v: &Value, to: &Type) -> Value {
+        self.cast(Cast::ZExt, from, v, to)
+    }
+    fn select(&mut self, t: &Type, c: &Value, yes: &Value, no: &Value) -> Value {
+        self.emit(Operation::Select(t, c, yes, no))
+    }
+    fn load(&mut self, t: &Type, p: &Value, align: u32) -> Value {
+        self.emit(Operation::Load(t, p, &Memory::aligned(align)))
+    }
+    fn load_with(&mut self, t: &Type, p: &Value, m: &Memory) -> Value {
+        self.emit(Operation::Load(t, p, m))
+    }
+    fn store(&mut self, t: &Type, v: &Value, p: &Value, align: u32) {
+        self.effect(Operation::Store(t, v, p, &Memory::aligned(align)));
+    }
+    fn store_with(&mut self, t: &Type, v: &Value, p: &Value, m: &Memory) {
+        self.effect(Operation::Store(t, v, p, m));
+    }
+    fn gep(&mut self, t: &Type, p: &Value, index: &Value, inbounds: bool) -> Value {
+        self.emit(Operation::Gep {
+            ty: t,
+            base: p,
+            indices: &[(Type::I64, index.clone())],
+            inbounds,
+        })
+    }
+    /// `getelementptr i8, ptr p, i64 n`.
+    fn offset(&mut self, p: &Value, n: impl Into<i128>) -> Value {
+        self.gep(&Type::I8, p, &int(n), false)
+    }
+    fn offset_by(&mut self, p: &Value, n: &Value) -> Value {
+        self.gep(&Type::I8, p, n, false)
+    }
+    fn extract(&mut self, t: &Type, v: &Value, index: u32) -> Value {
+        self.emit(Operation::Extract(t, v, index))
+    }
+    fn br(&mut self, to: Label) {
+        self.effect(Operation::Branch(to));
+    }
+    fn cond(&mut self, c: &Value, yes: Label, no: Label) {
+        self.effect(Operation::Conditional(c, yes, no, false));
+    }
+    fn ret(&mut self, t: &Type, v: &Value) {
+        self.effect(Operation::Return(Some((t, v))));
+    }
+    fn ret_void(&mut self) {
+        self.effect(Operation::Return(None));
+    }
+    fn call(&mut self, sig: &FnSig, callee: &Value, args: &[Value], attrs: &CallAttrs) -> Value {
+        let op = Operation::Call(sig, callee, args, attrs);
+        if sig.result.is_void() {
+            self.effect(op);
+            Value::Poison
+        } else {
+            self.emit(op)
+        }
+    }
+    /// Declare `name` once and call it with `args` and `attrs`.
+    fn call_declared(
+        &mut self,
+        name: &str,
+        result: Type,
+        args: &[CArg],
+        declared: FnAttrs,
+        attrs: &CallAttrs,
+    ) -> Value {
+        let sig = FnSig::new(result, args.iter().map(|(p, _)| p.clone()).collect());
+        self.items.declare(name, sig.clone(), declared);
+        let values: Vec<_> = args.iter().map(|(_, v)| v.clone()).collect();
+        self.call(&sig, &Value::global(name.to_owned()), &values, attrs)
     }
     fn vty(&self, v: ValueId) -> Ty {
         self.body.values[v.index()]
     }
     // Moves and numerical operations preserve arbitrary NaN representations.
     // Reinterpret from a float is the sole bit observer (FORM #97).
-    fn numeric(&mut self, v: ValueId) -> String {
+    fn numeric(&mut self, v: ValueId) -> Value {
         if self.value_slots.get(v.index()).copied().unwrap_or(true) {
-            self.calc(format!("load {}, ptr %v{}", ty(self.vty(v)), v.0))
+            self.load(&ty(self.vty(v)), &Local::Value(v.index()).into(), 0)
         } else {
-            format!("%v{}", v.0)
+            Local::Value(v.index()).into()
         }
     }
-    fn put(&mut self, v: ValueId, x: &str) {
+    fn put(&mut self, v: ValueId, x: &Value) {
+        let t = ty(self.vty(v));
         if self.value_slots.get(v.index()).copied().unwrap_or(true) {
-            self.line(format!("store {} {x}, ptr %v{}", ty(self.vty(v)), v.0));
+            self.store(&t, x, &Local::Value(v.index()).into(), 0);
         } else {
             // LLVM has no scalar copy instruction. This identity also permits
             // forward references when CoreIR blocks are not in dominance order.
             // It preserves poison; no freeze or representation promise is added.
-            let t = ty(self.vty(v));
-            self.line(format!("%v{} = select i1 true, {t} {x}, {t} poison", v.0));
+            self.emit_to(
+                Local::Value(v.index()),
+                Operation::Select(&t, &true.into(), x, &Value::Poison),
+            );
         }
     }
-    fn access_facts(&self, addresses: &[AddressId]) -> String {
-        self.aliases
-            .as_ref()
-            .map_or_else(String::new, |a| a.access(addresses))
+    fn access_facts(&self, addresses: &[AddressId]) -> Option<Scoped> {
+        self.aliases.as_ref().and_then(|a| a.access(addresses))
     }
-    fn address(&mut self, a: AddressId) -> String {
+    fn address(&mut self, a: AddressId) -> Value {
         if self.address_slots.get(a.index()).copied().unwrap_or(true) {
-            self.calc(format!("load ptr, ptr %a{}", a.0))
+            self.load(&Type::Ptr, &Local::Address(a.index()).into(), 0)
         } else {
-            format!("%a{}", a.0)
+            Local::Address(a.index()).into()
         }
     }
-    fn intrinsic(&mut self, name: &str, ret: &str, args: &[(String, String)]) -> String {
-        self.intrinsics.insert(format!(
-            "declare {ret} @{name}({})",
-            args.iter()
-                .map(|(t, _)| t.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-        self.calc(format!(
-            "call {ret} @{name}({})",
-            args.iter()
-                .map(|(t, v)| format!("{t} {v}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))
+    /// An LLVM intrinsic or runtime function with plain parameters.
+    fn intrinsic(&mut self, name: &str, result: Type, args: &[CArg]) -> Value {
+        self.call_declared(name, result, args, FnAttrs::default(), &CallAttrs::default())
     }
-    fn canonical(&mut self, t: Ty, x: &str) -> String {
+    fn canonical(&mut self, t: Ty, x: &Value) -> Value {
         if !t.is_float() {
-            return x.into();
+            return x.clone();
         }
-        let nan = self.calc(format!("fcmp uno {} {x}, {x}", ty(t)));
+        let lt = ty(t);
+        let nan = self.cmp(Predicate::Uno, &lt, x, x);
         let bits = if size(t) == 4 {
-            "2143289344"
+            2143289344
         } else {
-            "9221120237041090560"
+            9221120237041090560
         };
-        self.calc(format!(
-            "select i1 {nan}, {} bitcast ({} {bits} to {}), {} {x}",
-            ty(t),
-            bits_ty(t),
-            ty(t),
-            ty(t)
-        ))
+        let quiet = Value::Bitcast {
+            from: bits_ty(t),
+            bits,
+            to: lt.clone(),
+        };
+        self.select(&lt, &nan, &quiet, x)
     }
-    fn fail_if(&mut self, flag: &str, fail: Option<BlockId>, cause: u8) -> Result<()> {
+    fn fail_if(&mut self, flag: &Value, fail: Option<BlockId>, cause: u8) -> Result<()> {
         self.branch_failure(flag, fail, Some(cause));
         Ok(())
     }
-    fn branch_failure(&mut self, flag: &str, fail: Option<BlockId>, cause: Option<u8>) {
-        let n = self.next;
-        self.next += 1;
+    fn branch_failure(&mut self, flag: &Value, fail: Option<BlockId>, cause: Option<u8>) {
+        let n = self.counter();
+        let ok = Label::new("ok", n);
         if let (None, Some(fail)) = (cause, fail) {
             // The callee has already recorded its cause. This edge has no
             // arguments or cleanup to perform before the existing successor.
-            self.line(format!("br i1 {flag}, label %b{}, label %ok{n}", fail.0));
+            self.cond(flag, Label::block(fail.0), ok);
         } else {
-            self.line(format!("br i1 {flag}, label %bad{n}, label %ok{n}"));
-            writeln!(self.code, "bad{n}:").unwrap();
+            let bad = Label::new("bad", n);
+            self.cond(flag, bad, ok);
+            self.block(bad);
             if let Some(cause) = cause {
                 self.raise(cause);
             }
             self.propagate_to(fail);
         }
-        writeln!(self.code, "ok{n}:").unwrap();
+        self.block(ok);
     }
     fn propagate_to(&mut self, fail: Option<BlockId>) {
         if let Some(fail) = fail {
-            self.line(format!("br label %b{}", fail.0));
+            self.br(Label::block(fail.0));
         } else {
             self.return_failure();
         }
@@ -793,54 +1017,64 @@ impl FunctionEmitter<'_> {
         let fixed_site = self.fixed_site_word();
         let fixed = fixed_site.is_some();
         let site = fixed_site.unwrap_or_else(|| self.site_word());
-        let fixed = fixed || site == "0";
-        let shape = format!("[{} x i8]", memory_layout::CAUSE_BYTES);
+        let fixed = fixed || site == int(0);
+        let shape = Type::bytes(memory_layout::CAUSE_BYTES as u64);
         let argument = abi::composite_argument(self.abi.target, memory_layout::CAUSE_BYTES);
-        self.intrinsics
-            .insert(format!("declare void @hirsel_core_raise(ptr, {argument})"));
         // Built-in causes have fixed bytes. SysV byval supplies a caller copy;
         // AAPCS64 needs an explicit private copy before passing its pointer.
         // Neither convention lets the callee mutate the shared constant.
-        let suffix = if fixed && self.relocatable_sites && site != "0" {
+        let suffix = if fixed && self.relocatable_sites && site != int(0) {
             let anchor = self.anchor.unwrap();
             format!("{}_{}", anchor.item.0, anchor.start)
         } else {
-            site.parse::<u64>().unwrap_or(0).to_string()
+            match site {
+                Value::Int(n) => n.to_string(),
+                _ => "0".into(),
+            }
         };
         let name = format!("hirsel_cause_{kind}_{suffix}");
-        let prefix = memory_layout::CAUSE_KIND;
-        let layout = format!("<{{ [{prefix} x i8], i64, i64 }}>");
+        let prefix = Type::bytes(memory_layout::CAUSE_KIND as u64);
         let word = memory_layout::cause_kind_word(kind) as i64;
         // Keep AArch64's relocated site in this object's constant bytes;
         // folding that field into an external pointer would select the GOT.
-        let initialized =
-            if fixed && self.relocatable_sites && self.abi.target == Target::Aarch64Linux {
-                " externally_initialized"
-            } else {
-                ""
-            };
-        self.intrinsics.insert(format!(
-            "@{name} = private{initialized} constant {layout} <{{ [{prefix} x i8] zeroinitializer, i64 {word}, i64 {} }}>, align 8", if fixed { site.as_str() } else { "0" }
-        ));
+        let initialized = fixed && self.relocatable_sites && self.abi.target == Target::Aarch64Linux;
+        self.items.global(Global {
+            name: name.clone().into(),
+            linkage: Linkage::Private,
+            constant: true,
+            externally_initialized: initialized,
+            ty: Type::Struct(vec![prefix.clone(), Type::I64, Type::I64], true),
+            init: Some(Value::Struct {
+                packed: true,
+                fields: vec![
+                    (prefix, Value::Zero),
+                    (Type::I64, int(word)),
+                    (Type::I64, if fixed { site.clone() } else { int(0) }),
+                ],
+            }),
+            align: 8,
+            absolute_symbol: false,
+        });
         let pointer = if self.abi.target == Target::Aarch64Linux || !fixed {
-            let pointer = self.temp(&shape);
-            let words = format!("[{} x i64]", memory_layout::CAUSE_BYTES / 8);
-            let value = self.calc(format!("load {words}, ptr @{name}, align 8"));
-            self.line(format!("store {words} {value}, ptr {pointer}, align 8"));
+            let pointer = self.temp(shape);
+            let words = Type::words(memory_layout::CAUSE_BYTES as u64 / 8);
+            let value = self.load(&words, &Value::global(name), 8);
+            self.store(&words, &value, &pointer, 8);
             if !fixed {
-                let at = self.calc(format!(
-                    "getelementptr i8, ptr {pointer}, i64 {}",
-                    memory_layout::CAUSE_SITE
-                ));
-                self.line(format!("store i64 {site}, ptr {at}, align 8"));
+                let at = self.offset(&pointer, memory_layout::CAUSE_SITE as i128);
+                self.store(&Type::I64, &site, &at, 8);
             }
             pointer
         } else {
-            format!("@{name}")
+            Value::global(name)
         };
-        self.line(format!(
-            "call void @hirsel_core_raise(ptr %context, {argument} {pointer})"
-        ));
+        self.call_declared(
+            "hirsel_core_raise",
+            Type::Void,
+            &[ptr(CONTEXT), (argument, pointer)],
+            FnAttrs::default(),
+            &CallAttrs::default(),
+        );
     }
 
     fn inst(&mut self, inst: &Inst, index: usize) -> Result<()> {
@@ -849,17 +1083,23 @@ impl FunctionEmitter<'_> {
             Inst::Const { result, bits } => {
                 let t = self.vty(result);
                 let x = if t.is_float() {
-                    format!("bitcast ({} {bits} to {})", bits_ty(t), ty(t))
+                    Value::Bitcast {
+                        from: bits_ty(t),
+                        bits,
+                        to: ty(t),
+                    }
                 } else if t == Ty::Ptr {
-                    format!("inttoptr (i64 {bits} to ptr)")
+                    Value::IntToPtr(bits)
                 } else {
-                    bits.to_string()
+                    int(bits)
                 };
                 self.put(result, &x);
             }
-            Inst::ReadStatic { result, data } => self.put(result, &format!("@s{}", data.0)),
+            Inst::ReadStatic { result, data } => {
+                self.put(result, &Value::global(format!("s{}", data.0)))
+            }
             Inst::FunctionRef { result, function } => {
-                self.put(result, &format!("@{}", symbol(self.module, function)))
+                self.put(result, &Value::global(symbol(self.module, function)))
             }
             Inst::Unary {
                 result,
@@ -868,13 +1108,14 @@ impl FunctionEmitter<'_> {
                 fail,
             } => {
                 let t = self.vty(operand);
+                let lt = ty(t);
                 let x = self.numeric(operand);
                 let r = match op {
-                    UnaryOp::Not => self.calc(format!("xor {} {x}, 1", ty(t))),
-                    UnaryOp::BitNot => self.calc(format!("xor {} {x}, -1", ty(t))),
-                    UnaryOp::Neg if t.is_float() => self.calc(format!("fneg {} {x}", ty(t))),
+                    UnaryOp::Not => self.bin(Binary::Xor, &lt, &x, &int(1)),
+                    UnaryOp::BitNot => self.bin(Binary::Xor, &lt, &x, &int(-1)),
+                    UnaryOp::Neg if t.is_float() => self.emit(Operation::FNeg(&lt, &x)),
                     UnaryOp::Neg => {
-                        let (v, flag) = self.overflow(t, ArithOp::Sub, "0", &x);
+                        let (v, flag) = self.overflow(t, ArithOp::Sub, &int(0), &x);
                         self.fail_if(&flag, fail, 0)?;
                         v
                     }
@@ -902,35 +1143,27 @@ impl FunctionEmitter<'_> {
                 let t = self.vty(left);
                 let a = self.numeric(left);
                 let b = self.numeric(right);
-                let pred = match op {
-                    CompareOp::Eq => "eq",
-                    CompareOp::Ne => "ne",
-                    CompareOp::Lt => "lt",
-                    CompareOp::Le => "le",
-                    CompareOp::Gt => "gt",
-                    CompareOp::Ge => "ge",
+                let signed = t.int().is_some_and(|x| x.0);
+                let pred = match (t.is_float(), op) {
+                    (true, CompareOp::Eq) => Predicate::OEq,
+                    (true, CompareOp::Ne) => Predicate::UNe,
+                    (true, CompareOp::Lt) => Predicate::OLt,
+                    (true, CompareOp::Le) => Predicate::OLe,
+                    (true, CompareOp::Gt) => Predicate::OGt,
+                    (true, CompareOp::Ge) => Predicate::OGe,
+                    (false, CompareOp::Eq) => Predicate::Eq,
+                    (false, CompareOp::Ne) => Predicate::Ne,
+                    (false, CompareOp::Lt) if signed => Predicate::Slt,
+                    (false, CompareOp::Le) if signed => Predicate::Sle,
+                    (false, CompareOp::Gt) if signed => Predicate::Sgt,
+                    (false, CompareOp::Ge) if signed => Predicate::Sge,
+                    (false, CompareOp::Lt) => Predicate::Ult,
+                    (false, CompareOp::Le) => Predicate::Ule,
+                    (false, CompareOp::Gt) => Predicate::Ugt,
+                    (false, CompareOp::Ge) => Predicate::Uge,
                 };
-                let cmp = if t.is_float() {
-                    format!(
-                        "fcmp {}{pred} {} {a}, {b}",
-                        if op == CompareOp::Ne { "u" } else { "o" },
-                        ty(t)
-                    )
-                } else {
-                    format!(
-                        "icmp {}{pred} {} {a}, {b}",
-                        if matches!(op, CompareOp::Eq | CompareOp::Ne) {
-                            ""
-                        } else if t.int().is_some_and(|x| x.0) {
-                            "s"
-                        } else {
-                            "u"
-                        },
-                        ty(t)
-                    )
-                };
-                let x = self.calc(cmp);
-                let x = self.calc(format!("zext i1 {x} to i8"));
+                let x = self.cmp(pred, &ty(t), &a, &b);
+                let x = self.zext(&Type::I1, &x, &Type::I8);
                 self.put(result, &x);
             }
             Inst::IntArith {
@@ -947,7 +1180,7 @@ impl FunctionEmitter<'_> {
                 let (r, over) = self.arith(t, op, mode, &a, &b);
                 self.put(result, &r);
                 if let Some(flag) = flag {
-                    let over = self.calc(format!("zext i1 {over} to i8"));
+                    let over = self.zext(&Type::I1, &over, &Type::I8);
                     self.put(flag, &over);
                 }
             }
@@ -974,13 +1207,18 @@ impl FunctionEmitter<'_> {
                 addend,
             } => {
                 let t = self.vty(left);
+                let lt = ty(t);
                 let a = self.numeric(left);
                 let b = self.numeric(right);
                 let c = self.numeric(addend);
                 let x = self.intrinsic(
-                    &format!("llvm.fma.{}", if size(t) == 4 { "f32" } else { "f64" }),
-                    &ty(t),
-                    &[(ty(t), a), (ty(t), b), (ty(t), c)],
+                    if size(t) == 4 {
+                        "llvm.fma.f32"
+                    } else {
+                        "llvm.fma.f64"
+                    },
+                    lt.clone(),
+                    &[arg(lt.clone(), a), arg(lt.clone(), b), arg(lt, c)],
                 );
                 self.put(result, &x);
             }
@@ -989,21 +1227,23 @@ impl FunctionEmitter<'_> {
                 result, address, ..
             } => {
                 let p = self.address(address);
-                let metadata = self.access_facts(&[address]);
-                let x = self.calc(format!(
-                    "load {}, ptr {p}, align 1{metadata}",
-                    ty(self.vty(result))
-                ));
+                let memory = Memory {
+                    align: 1,
+                    scopes: self.access_facts(&[address]),
+                    ..Memory::default()
+                };
+                let x = self.load_with(&ty(self.vty(result)), &p, &memory);
                 self.put(result, &x);
             }
             Inst::Store { address, value } => {
                 let p = self.address(address);
                 let x = self.numeric(value);
-                let metadata = self.access_facts(&[address]);
-                self.line(format!(
-                    "store {} {x}, ptr {p}, align 1{metadata}",
-                    ty(self.vty(value))
-                ));
+                let memory = Memory {
+                    align: 1,
+                    scopes: self.access_facts(&[address]),
+                    ..Memory::default()
+                };
+                self.store_with(&ty(self.vty(value)), &x, &p, &memory);
             }
             // FORM v1c: a mark is the evaluator's alone; no code.
             Inst::StorageLive { .. }
@@ -1018,23 +1258,19 @@ impl FunctionEmitter<'_> {
             } => {
                 let t = ty(self.vty(mask));
                 let x = self.numeric(mask);
-                let k = if initialized {
-                    1u64 << field
+                let x = if initialized {
+                    self.bin(Binary::Or, &t, &x, &int(1u64 << field))
                 } else {
-                    !(1u64 << field)
+                    self.bin(Binary::And, &t, &x, &int(!(1u64 << field)))
                 };
-                let x = self.calc(format!(
-                    "{} {t} {x}, {k}",
-                    if initialized { "or" } else { "and" }
-                ));
                 self.put(result, &x);
             }
-            Inst::Call { call } => self.call(&self.body.calls[call.index()])?,
+            Inst::Call { call } => self.call_site(&self.body.calls[call.index()])?,
             _ => self.storage(inst, index)?,
         }
         Ok(())
     }
-    fn edge(&mut self, edge: EdgeId) -> String {
+    fn edge(&mut self, edge: EdgeId) -> Label {
         let e = &self.body.edges[edge.index()];
         let args = e.args.get(&self.body.pools.values).unwrap();
         // Read every source before writing any target: loop parameters can swap.
@@ -1048,41 +1284,40 @@ impl FunctionEmitter<'_> {
         {
             self.put(*v, &x);
         }
-        format!("b{}", e.target.0)
+        Label::block(e.target.0)
     }
-    fn edge_label(&mut self, edge: EdgeId) -> String {
+    fn edge_label(&mut self, edge: EdgeId) -> Label {
         let e = &self.body.edges[edge.index()];
         if e.args.len == 0 {
-            return format!("b{}", e.target.0);
+            return Label::block(e.target.0);
         }
-        let n = self.next;
-        self.next += 1;
         // Value transfers need separate blocks, including distinct switch arms
         // to the same target. Empty edges already name their final destination.
-        format!("e{n}_{}", edge.0)
+        let n = self.counter();
+        Label::edge(n, edge.0)
     }
-    fn emit_edge(&mut self, label: &str, edge: EdgeId) {
+    fn emit_edge(&mut self, label: Label, edge: EdgeId) {
         if self.body.edges[edge.index()].args.len == 0 {
             return;
         }
-        writeln!(self.code, "{label}:").unwrap();
+        self.block(label);
         let to = self.edge(edge);
-        self.line(format!("br label %{to}"));
+        self.br(to);
     }
     fn term(&mut self, term: &Terminator) -> Result<()> {
         match *term {
             Terminator::Jump(e) => {
                 let to = self.edge(e);
-                self.line(format!("br label %{to}"));
+                self.br(to);
             }
             Terminator::Branch { condition, yes, no } => {
                 let c = self.numeric(condition);
-                let c = self.calc(format!("icmp ne i8 {c}, 0"));
+                let c = self.cmp(Predicate::Ne, &Type::I8, &c, &int(0));
                 let y = self.edge_label(yes);
                 let n = self.edge_label(no);
-                self.line(format!("br i1 {c}, label %{y}, label %{n}"));
-                self.emit_edge(&y, yes);
-                self.emit_edge(&n, no);
+                self.cond(&c, y, n);
+                self.emit_edge(y, yes);
+                self.emit_edge(n, no);
             }
             Terminator::Switch {
                 value,
@@ -1098,14 +1333,14 @@ impl FunctionEmitter<'_> {
                     .iter()
                     .map(|a| (*a, self.edge_label(a.edge)))
                     .collect::<Vec<_>>();
-                self.line(format!("switch {t} {v}, label %{other} ["));
-                for (a, label) in &arms {
-                    self.line(format!("{t} {}, label %{label}", a.value));
-                }
-                self.line("]");
-                self.emit_edge(&other, otherwise);
+                let cases: Vec<_> = arms
+                    .iter()
+                    .map(|(a, label)| (i128::from(a.value), *label))
+                    .collect();
+                self.effect(Operation::Switch(&t, &v, other, &cases));
+                self.emit_edge(other, otherwise);
                 for (a, label) in arms {
-                    self.emit_edge(&label, a.edge);
+                    self.emit_edge(label, a.edge);
                 }
             }
             Terminator::Return(values) => {
@@ -1117,7 +1352,7 @@ impl FunctionEmitter<'_> {
                     .collect::<Vec<_>>();
                 self.return_values(&xs);
             }
-            Terminator::Unreachable => self.line("unreachable"),
+            Terminator::Unreachable => self.effect(Operation::Unreachable),
             Terminator::Propagate => self.return_failure(),
             Terminator::Raise { cause, cleanup } => {
                 match cause {
@@ -1125,17 +1360,23 @@ impl FunctionEmitter<'_> {
                     RaiseCause::Bounds => self.raise(1),
                     RaiseCause::Fail(address) => {
                         let at = self.address(address);
-                        let data = self.calc(format!("load ptr, ptr {at}, align 1"));
-                        let length = self.calc(format!("getelementptr i8, ptr {at}, i64 8"));
-                        let length = self.calc(format!("load i64, ptr {length}, align 1"));
-                        let capacity = self.calc(format!("getelementptr i8, ptr {at}, i64 16"));
-                        let capacity = self.calc(format!("load i64, ptr {capacity}, align 1"));
-                        self.intrinsics.insert(
-                            "declare void @hirsel_core_raise_string(ptr, i64, ptr, i64, i64)"
-                                .into(),
-                        );
+                        let data = self.load(&Type::Ptr, &at, 1);
+                        let length = self.offset(&at, 8);
+                        let length = self.load(&Type::I64, &length, 1);
+                        let capacity = self.offset(&at, 16);
+                        let capacity = self.load(&Type::I64, &capacity, 1);
                         let site = self.site_word();
-                        self.line(format!("call void @hirsel_core_raise_string(ptr %context, i64 {site}, ptr {data}, i64 {length}, i64 {capacity})"));
+                        self.intrinsic(
+                            "hirsel_core_raise_string",
+                            Type::Void,
+                            &[
+                                ptr(CONTEXT),
+                                word(site),
+                                ptr(data),
+                                word(length),
+                                word(capacity),
+                            ],
+                        );
                     }
                 }
                 self.propagate_to(cleanup);

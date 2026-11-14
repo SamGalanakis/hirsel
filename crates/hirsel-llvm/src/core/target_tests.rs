@@ -71,71 +71,71 @@ fn linux_c_results_execute_with_mixed_fields_padding_and_hfas() -> std::result::
     let dir = std::env::temp_dir().join(format!("hirsel-core-targets-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     for target in [Target::X86_64Linux, Target::Aarch64Linux] {
-        let mut ir = String::new();
-        let mut declarations = BTreeSet::new();
+        let mut text = sink::TextSink::default();
+        let mut items = Items::default();
         let mut c =
             String::from("#include <stdint.h>\n#include <stdbool.h>\n#include <assert.h>\n");
         let mut checks = String::new();
         for (i, shape) in shapes.iter().enumerate() {
             let fields = shape.iter().copied().map(Ty::Scalar).collect::<Vec<_>>();
-            let mut e = FunctionEmitter {
-                function: None,
-                append_fast: false,
-                shadow_callee: None,
-                module: &module,
-                body: &body,
-                recipes: &[],
-                abi: abi::Return::on_target(target, &fields),
-                has_status: false,
-                failures: &failures,
-                constants: &[],
-                empty_bounds: empty::EmptyBounds::default(),
-                observe_charge: false,
-                facts: false,
-                aliases: None,
-                caller_site: "0",
-                debug_location: None,
-                anchor: None,
-                relocatable_sites: false,
-                value_slots: vec![],
-                address_slots: vec![],
-                code: String::new(),
-                allocations: String::new(),
-                next: 0,
-                intrinsics: &mut declarations,
-            };
-            let incoming = e.native_call(
-                &format!("produce_{i}"),
-                &fields,
-                &[("ptr".into(), "%context".into())],
+            let abi = abi::Return::on_target(target, &fields);
+            let (mut params, mut locals) = (Vec::new(), Vec::new());
+            if abi.indirect {
+                params.push(Parameter::sret(abi.storage.clone()));
+                locals.push(Local::SRET);
+            }
+            params.push(Parameter::plain(Type::Ptr));
+            locals.push(Local::CONTEXT);
+            text.begin_function(
+                &format!("probe_{i}"),
+                &abi.signature(params),
+                &locals,
+                &FnAttrs::default(),
             );
+            let mut e = cleanup::glue_emitter(
+                &module,
+                &[],
+                &failures,
+                false,
+                &body,
+                abi,
+                false,
+                int(0),
+                &mut text,
+                &mut items,
+            );
+            let incoming = e.native_call(&format!("produce_{i}"), &fields, &[ptr(CONTEXT)]);
             let values = incoming
                 .iter()
                 .zip(&fields)
-                .map(|(x, &t)| {
-                    e.calc(if t == Ty::Scalar(Bool) {
-                        format!("xor {} {x}, 1", ty(t))
-                    } else if t.is_float() {
-                        format!("fadd {} {x}, 1.500000e+00", ty(t))
-                    } else {
-                        format!("add {} {x}, 3", ty(t))
-                    })
+                .map(|(x, &t)| match t {
+                    Ty::Scalar(Bool) => e.bin(Binary::Xor, &ty(t), x, &int(1)),
+                    Ty::Scalar(F32) => e.bin(
+                        Binary::FAdd,
+                        &ty(t),
+                        x,
+                        &Value::Bitcast {
+                            from: Type::I32,
+                            bits: u64::from(1.5f32.to_bits()),
+                            to: Type::Float,
+                        },
+                    ),
+                    Ty::Scalar(F64) => e.bin(
+                        Binary::FAdd,
+                        &ty(t),
+                        x,
+                        &Value::Bitcast {
+                            from: Type::I64,
+                            bits: 1.5f64.to_bits(),
+                            to: Type::Double,
+                        },
+                    ),
+                    _ => e.bin(Binary::Add, &ty(t), x, &int(3)),
                 })
                 .collect::<Vec<_>>();
             e.return_values(&values);
-            writeln!(
-                ir,
-                "define {} @probe_{i}({}) {{\nentry:\n{}{} }}",
-                e.abi.return_type(),
-                if e.abi.indirect {
-                    format!("ptr sret({}) %sret, ptr %context", e.abi.storage)
-                } else {
-                    "ptr %context".into()
-                },
-                e.allocations,
-                e.code
-            )
-            .unwrap();
+            drop(e);
+            text.end_function();
             let c_ty = |s: Scalar| match s {
                 Bool => "bool",
                 I8 => "int8_t",
@@ -195,9 +195,8 @@ fn linux_c_results_execute_with_mixed_fields_padding_and_hfas() -> std::result::
                 writeln!(checks, "assert({field} == {expected});").unwrap();
             }
         }
-        for declaration in declarations {
-            writeln!(ir, "{declaration}").unwrap();
-        }
+        items.emit(&mut text);
+        let ir = text.finish();
         writeln!(c, "int main(void) {{ {checks} return 0; }}").unwrap();
         std::fs::write(dir.join("probe.c"), c).unwrap();
         for speed in [false, true] {

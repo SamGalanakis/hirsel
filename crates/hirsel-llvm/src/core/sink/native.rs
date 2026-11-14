@@ -72,12 +72,6 @@ impl NativeSink {
         unsafe { (self.api.print)(self.unit, &mut out) };
         llvm::output(out)
     }
-    pub fn bitcode(&self) -> Vec<u8> {
-        let mut out = Output::default();
-        // SAFETY: the live unit owns its module through the synchronous write.
-        unsafe { (self.api.unit_bitcode)(self.unit, &mut out) };
-        llvm::output_bytes(out).0
-    }
     fn ty(&mut self, ty: &Type) -> Raw {
         if let Some(&t) = self.types.get(ty) {
             return t;
@@ -218,7 +212,7 @@ impl NativeSink {
             Extension::Sign => self.attribute(target, index, SEXT, None, 0),
         }
     }
-    fn signature_attributes(&mut self, target: Raw, sig: &Signature) {
+    fn signature_attributes(&mut self, target: Raw, sig: &FnSig) {
         self.extension(target, RETURN, sig.extension);
         if sig.nonnull {
             self.attribute(target, RETURN, NONNULL, None, 0);
@@ -243,7 +237,7 @@ impl NativeSink {
             }
         }
     }
-    fn function(&mut self, name: &str, sig: &Signature, attrs: &FnAttrs) -> Raw {
+    fn function(&mut self, name: &str, sig: &FnSig, attrs: &FnAttrs) -> Raw {
         let result = self.ty(&sig.result);
         let params: Vec<_> = sig.params.iter().map(|p| self.ty(&p.ty)).collect();
         // SAFETY: a new function of this unit; arrays outlive the call.
@@ -270,7 +264,7 @@ impl NativeSink {
         if attrs.argmem_read {
             self.attribute(f, FUNCTION, ARGMEM_READ, None, 0);
         }
-        let mut string = |key: &str, value: &str| {
+        let string = |key: &str, value: &str| {
             // SAFETY: strings are borrowed through the synchronous call.
             unsafe {
                 (self.api.string_attribute)(
@@ -340,7 +334,7 @@ impl Sink for NativeSink {
             )
         }
     }
-    fn declare(&mut self, name: &str, sig: &Signature, attrs: &FnAttrs) {
+    fn declare(&mut self, name: &str, sig: &FnSig, attrs: &FnAttrs) {
         let f = self.function(name, sig, attrs);
         // SAFETY: a function of this unit.
         unsafe { (self.api.finish_declaration)(f) }
@@ -423,7 +417,7 @@ impl Sink for NativeSink {
             )
         }
     }
-    fn begin_function(&mut self, name: &str, sig: &Signature, params: &[Local], attrs: &FnAttrs) {
+    fn begin_function(&mut self, name: &str, sig: &FnSig, params: &[Local], attrs: &FnAttrs) {
         let f = self.function(name, sig, attrs);
         self.locals.clear();
         self.blocks.clear();

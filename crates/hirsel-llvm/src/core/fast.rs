@@ -5,124 +5,122 @@
 // payer. Outstanding bytes pin the original slot across exit/re-entry. Native
 // tag bits may cause a safe slow-path false negative. No offset changes.
 use super::memory_layout::*;
-use super::storage::Payer;
+use super::storage::{Payer, zeroext};
 use super::*;
 
+/// The negated byte offset of a prefix field behind a payload.
+fn back(bytes: usize) -> i64 {
+    -(bytes as i64)
+}
+
 impl FunctionEmitter<'_> {
-    pub(super) fn field_pointer(&mut self, p: &str, offset: usize) -> String {
+    pub(super) fn field_pointer(&mut self, p: &Value, offset: usize) -> Value {
         if offset == 0 {
-            p.into()
+            p.clone()
         } else {
-            self.calc(format!("getelementptr i8, ptr {p}, i64 {offset}"))
+            self.offset(p, offset as u64)
         }
     }
-    pub(super) fn load_native(&mut self, p: &str, offset: usize, ty: &str) -> String {
+    pub(super) fn load_native(&mut self, p: &Value, offset: usize, ty: Type) -> Value {
         let at = self.field_pointer(p, offset);
-        self.calc(format!("load {ty}, ptr {at}, align 8"))
+        self.load(&ty, &at, 8)
     }
-    pub(super) fn store_native(&mut self, p: &str, offset: usize, ty: &str, value: &str) {
+    pub(super) fn store_native(&mut self, p: &Value, offset: usize, ty: Type, value: &Value) {
         let at = self.field_pointer(p, offset);
-        self.line(format!("store {ty} {value}, ptr {at}, align 8"));
+        self.store(&ty, value, &at, 8);
     }
-    fn current_payer(&mut self) -> String {
-        self.load_native("%context", CONTEXT_CURRENT_LIMIT, "ptr")
+    fn current_payer(&mut self) -> Value {
+        self.load_native(&CONTEXT, CONTEXT_CURRENT_LIMIT, Type::Ptr)
     }
-    pub(super) fn likely(&mut self, test: &str, hot: &str, cold: &str) {
-        self.intrinsics
-            .insert("!0 = !{!\"branch_weights\", i32 2000, i32 1}".into());
-        self.line(format!(
-            "br i1 {test}, label %{hot}, label %{cold}, !prof !0"
-        ));
+    pub(super) fn likely(&mut self, test: &Value, hot: Label, cold: Label) {
+        self.effect(Operation::Conditional(test, hot, cold, true));
     }
-    pub(super) fn cold_void(&mut self, name: &str, args: &[(String, String)]) {
-        self.intrinsics.insert(format!(
-            "declare void @{name}({})",
-            args.iter()
-                .map(|(t, _)| self.c_argument(t))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-        self.line(format!(
-            "call void @{name}({}) cold",
-            args.iter()
-                .map(|(t, v)| format!("{} {v}", self.c_argument(t)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
+    pub(super) fn cold_void(&mut self, name: &str, args: &[CArg]) {
+        let attrs = CallAttrs {
+            cold: true,
+            ..CallAttrs::default()
+        };
+        self.runtime(name, Type::Void, args, &attrs);
     }
     /// Every inline Arc operation has one immutable context gate. No sink pays
     /// one test; a recorded run calls the context-first hook on the cold branch.
-    pub(super) fn arc_event(&mut self, name: &str, arguments: &[(String, String)]) {
-        let n = self.next;
-        self.next += 1;
-        let at = self.field_pointer("%context", CONTEXT_EVENTS);
-        let invariant = if self.facts {
-            self.intrinsics.insert("!1 = !{}".into());
-            ", !invariant.load !1"
-        } else {
-            ""
+    pub(super) fn arc_event(&mut self, name: &str, arguments: &[CArg]) {
+        let n = self.counter();
+        let at = self.field_pointer(&CONTEXT, CONTEXT_EVENTS);
+        let memory = Memory {
+            invariant: self.facts,
+            ..Memory::aligned(8)
         };
-        let events = self.calc(format!("load i64, ptr {at}, align 8{invariant}"));
-        let empty = self.calc(format!("icmp eq i64 {events}, 0"));
-        self.likely(
-            &empty,
-            &format!("arc_event_done{n}"),
-            &format!("arc_event_call{n}"),
-        );
-        writeln!(self.code, "arc_event_call{n}:").unwrap();
-        let mut args = vec![("ptr".into(), "%context".into())];
+        let events = self.load_with(&Type::I64, &at, &memory);
+        let empty = self.cmp(Predicate::Eq, &Type::I64, &events, &int(0));
+        let done = Label::new("arc_event_done", n);
+        let call = Label::new("arc_event_call", n);
+        self.likely(&empty, done, call);
+        self.block(call);
+        let mut args = vec![ptr(CONTEXT)];
         args.extend_from_slice(arguments);
         self.cold_void(name, &args);
-        self.line(format!("br label %arc_event_done{n}"));
-        writeln!(self.code, "arc_event_done{n}:").unwrap();
+        self.br(done);
+        self.block(done);
     }
-    fn admission_probe(&mut self, charge: &str) -> String {
+    fn admission_probe(&mut self, charge: &Value) -> Value {
         #[cfg(test)]
         {
             self.intrinsic(
                 "hirsel_core_test_probe_admission",
-                "i1",
-                &[
-                    ("ptr".into(), "%context".into()),
-                    ("i64".into(), charge.into()),
-                ],
+                Type::I1,
+                &[ptr(CONTEXT), word(charge.clone())],
             )
         }
         #[cfg(not(test))]
         {
             let _ = charge;
-            "true".into()
+            true.into()
         }
     }
-    fn admission_test(&mut self, payer: &str, charge: &str) -> (String, String) {
+    fn admission_test(&mut self, payer: &Value, charge: &Value) -> (Value, Value) {
         let allowed = self.admission_probe(charge);
-        let available = self.load_native(payer, LIMIT_AVAILABLE, "i64");
-        let fits = self.calc(format!("icmp ule i64 {charge}, {available}"));
+        let available = self.load_native(payer, LIMIT_AVAILABLE, Type::I64);
+        let fits = self.cmp(Predicate::Ule, &Type::I64, charge, &available);
         let fits = if cfg!(test) {
-            self.calc(format!("and i1 {fits}, {allowed}"))
+            self.bin(Binary::And, &Type::I1, &fits, &allowed)
         } else {
             fits
         };
         (fits, available)
     }
-    fn admit_balance(&mut self, payer: &str, charge: &str, available: &str) {
-        let left = self.calc(format!("sub i64 {available}, {charge}"));
-        self.store_native(payer, LIMIT_AVAILABLE, "i64", &left);
-        let outstanding = self.load_native(payer, LIMIT_OUTSTANDING, "i64");
-        let used = self.calc(format!("add i64 {outstanding}, {charge}"));
-        self.store_native(payer, LIMIT_OUTSTANDING, "i64", &used);
+    fn admit_balance(&mut self, payer: &Value, charge: &Value, available: &Value) {
+        let left = self.bin(Binary::Sub, &Type::I64, available, charge);
+        self.store_native(payer, LIMIT_AVAILABLE, Type::I64, &left);
+        let outstanding = self.load_native(payer, LIMIT_OUTSTANDING, Type::I64);
+        let used = self.bin(Binary::Add, &Type::I64, &outstanding, charge);
+        self.store_native(payer, LIMIT_OUTSTANDING, Type::I64, &used);
         if self.observe_charge {
             self.cold_void("hirsel_core_observe_charge", &[]);
         }
     }
     /// Empty scopes have no admission or external observer between entry/exit.
     /// Their reservation and refund cancel; the source Capacity check remains.
-    pub(super) fn empty_bound(&mut self, charge: &str) -> (String, String) {
+    pub(super) fn empty_bound(&mut self, charge: &Value) -> (Value, Value) {
         let payer = self.current_payer();
         let (fits, available) = self.admission_test(&payer, charge);
-        let admitted = self.calc(format!("zext i1 {fits} to i8"));
-        let room = self.calc(format!("select i1 {fits}, i64 0, i64 {available}"));
+        let admitted = self.zext(&Type::I1, &fits, &Type::I8);
+        let room = self.select(&Type::I64, &fits, &int(0), &available);
         (admitted, room)
+    }
+    /// A native allocator entry: it returns a base or stops.
+    fn native_alloc(&mut self, name: &str, args: &[Value]) -> Value {
+        let sig = FnSig {
+            nonnull: self.facts,
+            ..FnSig::plain(Type::Ptr, args.iter().map(|_| Type::I64))
+        };
+        self.items.declare(name, sig.clone(), FnAttrs::default());
+        self.call(
+            &sig,
+            &Value::global(name.to_owned()),
+            args,
+            &CallAttrs::default(),
+        )
     }
     #[allow(clippy::too_many_arguments)]
     pub(super) fn fast_allocate(
@@ -130,12 +128,12 @@ impl FunctionEmitter<'_> {
         resource: bool,
         native_kind: u8,
         place: &Payer,
-        charge: &str,
-        bytes: &str,
+        charge: &Value,
+        bytes: &Value,
         align: u64,
         overflow: Option<ValueId>,
         owned_like: bool,
-    ) -> Option<(String, String)> {
+    ) -> Option<(Value, Value)> {
         if resource {
             return None;
         }
@@ -148,416 +146,380 @@ impl FunctionEmitter<'_> {
         if align > 512 {
             return None;
         }
+        let i64 = Type::I64;
         let prefix = own_prefix(native_kind) as u64;
         let alignment = align.max(8);
         let offset = prefix.next_multiple_of(alignment);
         let maximum = ((i64::MAX as u64) & !(alignment - 1)) - offset;
-        let n = self.next;
-        self.next += 1;
+        let n = self.counter();
         let payer = self.current_payer();
         let like = match place {
             Payer::Like(old) => old.clone(),
-            _ => "null".into(),
+            _ => Value::Null,
         };
-        let overflow = overflow.map_or_else(
-            || "false".into(),
-            |v| {
-                let flag = self.numeric(v);
-                self.calc(format!("icmp ne i8 {flag}, 0"))
-            },
-        );
-        let sized = self.calc(format!("icmp ule i64 {bytes}, {maximum}"));
-        let eligible = if overflow == "false" {
+        let overflow = overflow.map_or(FALSE, |v| {
+            let flag = self.numeric(v);
+            self.cmp(Predicate::Ne, &Type::I8, &flag, &int(0))
+        });
+        let sized = self.cmp(Predicate::Ule, &i64, bytes, &int(maximum));
+        let eligible = if overflow == FALSE {
             sized
         } else {
-            let exact = self.calc(format!("xor i1 {overflow}, true"));
-            self.calc(format!("and i1 {sized}, {exact}"))
+            let exact = self.bin(Binary::Xor, &Type::I1, &overflow, &true.into());
+            self.bin(Binary::And, &Type::I1, &sized, &exact)
         };
+        let admit = Label::new("admit", n);
+        let slow_label = Label::new("allocation_slow", n);
+        let payer_label = Label::new("allocation_payer", n);
         self.likely(
             &eligible,
-            &if matches!(place, Payer::Like(_)) {
-                format!("allocation_payer{n}")
+            if matches!(place, Payer::Like(_)) {
+                payer_label
             } else {
-                format!("admit{n}")
+                admit
             },
-            &format!("allocation_slow{n}"),
+            slow_label,
         );
         if matches!(place, Payer::Like(_)) {
-            writeln!(self.code, "allocation_payer{n}:").unwrap();
+            self.block(payer_label);
             if !owned_like {
-                let empty = self.calc(format!("icmp eq ptr {like}, null"));
-                self.likely(
-                    &empty,
-                    &format!("admit{n}"),
-                    &format!("allocation_header{n}"),
-                );
-                writeln!(self.code, "allocation_header{n}:").unwrap();
+                let empty = self.cmp(Predicate::Eq, &Type::Ptr, &like, &Value::Null);
+                let header = Label::new("allocation_header", n);
+                self.likely(&empty, admit, header);
+                self.block(header);
             }
-            let header = self.calc(format!(
-                "getelementptr i8, ptr {like}, i64 -{OWN_PAYER_BACK}"
-            ));
-            let raw = self.calc(format!("load i64, ptr {header}, align 8"));
-            let original = self.calc(format!("and i64 {raw}, {}", !(OWN_TAG_MASK as u64)));
-            let current = self.calc(format!("ptrtoint ptr {payer} to i64"));
-            let same = self.calc(format!("icmp eq i64 {original}, {current}"));
-            self.likely(&same, &format!("admit{n}"), &format!("allocation_slow{n}"));
+            let header = self.offset(&like, back(OWN_PAYER_BACK));
+            let raw = self.load(&i64, &header, 8);
+            let original = self.bin(Binary::And, &i64, &raw, &int(!(OWN_TAG_MASK as u64)));
+            let current = self.cast(Cast::PtrToInt, &Type::Ptr, &payer, &i64);
+            let same = self.cmp(Predicate::Eq, &i64, &original, &current);
+            self.likely(&same, admit, slow_label);
         }
-        writeln!(self.code, "admit{n}:").unwrap();
-        let available = self.load_native(&payer, LIMIT_AVAILABLE, "i64");
+        self.block(admit);
+        let available = self.load_native(&payer, LIMIT_AVAILABLE, Type::I64);
         // Unsigned charge-1 < room is exactly charge != 0 && charge <= room,
         // including room=MAX. Zero retains the runtime's payer pinning path.
-        let last = self.calc(format!("sub i64 {charge}, 1"));
-        let fits = self.calc(format!("icmp ult i64 {last}, {available}"));
+        let last = self.bin(Binary::Sub, &i64, charge, &int(1));
+        let fits = self.cmp(Predicate::Ult, &i64, &last, &available);
         // Real refusal uses the one runtime fallback, retaining Capacity events.
         // Probe only a fitting admission, so tests never count an attempt twice.
-        self.likely(
-            &fits,
-            &if cfg!(test) {
-                format!("allocation_probe{n}")
-            } else {
-                format!("allocate{n}")
-            },
-            &format!("allocation_slow{n}"),
-        );
+        let allocate = Label::new("allocate", n);
+        let probe = Label::new("allocation_probe", n);
+        let refused = Label::new("refused", n);
+        let done = Label::new("allocation_done", n);
+        self.likely(&fits, if cfg!(test) { probe } else { allocate }, slow_label);
         // Refusal injection exists only in the test engine. Production needs
         // neither its always-true branch nor its unreachable refusal join.
         if cfg!(test) {
-            writeln!(self.code, "allocation_probe{n}:").unwrap();
+            self.block(probe);
             let allowed = self.admission_probe(charge);
-            self.likely(&allowed, &format!("allocate{n}"), &format!("refused{n}"));
+            self.likely(&allowed, allocate, refused);
         }
-        writeln!(self.code, "allocate{n}:").unwrap();
+        self.block(allocate);
         self.admit_balance(&payer, charge, &available);
-        let zero = self.calc(format!("icmp eq i64 {bytes}, 0"));
-        let nonzero = self.calc(format!("select i1 {zero}, i64 1, i64 {bytes}"));
-        let native_bytes = self.calc(format!("add i64 {nonzero}, {offset}"));
-        let pointer_type = if self.facts { "nonnull ptr" } else { "ptr" };
+        let zero = self.cmp(Predicate::Eq, &i64, bytes, &int(0));
+        let nonzero = self.select(&i64, &zero, &int(1), bytes);
+        let native_bytes = self.bin(Binary::Add, &i64, &nonzero, &int(offset));
         let base = if alignment <= 16 {
-            self.intrinsic(
-                "hirsel_core_native_alloc_ordinary",
-                pointer_type,
-                &[("i64".into(), native_bytes)],
-            )
+            self.native_alloc("hirsel_core_native_alloc_ordinary", &[native_bytes])
         } else {
-            self.intrinsic(
-                "hirsel_core_native_alloc",
-                pointer_type,
-                &[
-                    ("i64".into(), native_bytes),
-                    ("i64".into(), alignment.to_string()),
-                ],
-            )
+            self.native_alloc("hirsel_core_native_alloc", &[native_bytes, int(alignment)])
         };
         // The native allocator returns a base or stops. The admitted native
         // extent contains this payload offset; it cannot yield a null payload.
-        let inbounds = if self.facts { " inbounds" } else { "" };
-        let payload = self.calc(format!(
-            "getelementptr{inbounds} i8, ptr {base}, i64 {offset}"
-        ));
+        let payload = self.gep(&Type::I8, &base, &int(offset), self.facts);
         let tag = ((alignment.trailing_zeros() - 3) << 2) | u32::from(native_kind);
-        let tagged = self.calc(format!("getelementptr i8, ptr {payer}, i64 {tag}"));
-        let header = self.calc(format!(
-            "getelementptr i8, ptr {payload}, i64 -{OWN_PAYER_BACK}"
-        ));
-        self.line(format!("store ptr {tagged}, ptr {header}, align 8"));
-        self.line(format!("br label %allocation_done{n}"));
+        let tagged = self.offset(&payer, tag);
+        let header = self.offset(&payload, back(OWN_PAYER_BACK));
+        self.store(&Type::Ptr, &tagged, &header, 8);
+        self.br(done);
         if cfg!(test) {
-            writeln!(self.code, "refused{n}:").unwrap();
-            self.line(format!("br label %allocation_done{n}"));
+            self.block(refused);
+            self.br(done);
         }
-        writeln!(self.code, "allocation_slow{n}:").unwrap();
+        self.block(slow_label);
         let (slow, room) = self.allocation_cold(
             "hirsel_core_alloc",
             &[
-                ("ptr".into(), "%context".into()),
-                ("ptr".into(), like),
-                ("i64".into(), bytes.into()),
-                ("i64".into(), align.to_string()),
-                ("i64".into(), charge.into()),
-                ("i1 zeroext".into(), overflow),
-                ("i8 zeroext".into(), native_kind.to_string()),
+                ptr(CONTEXT),
+                ptr(like),
+                word(bytes.clone()),
+                word(int(align)),
+                word(charge.clone()),
+                zeroext(Type::I1, overflow),
+                zeroext(Type::I8, int(native_kind)),
             ],
         );
-        self.line(format!("br label %allocation_done{n}"));
-        writeln!(self.code, "allocation_done{n}:").unwrap();
-        let refused_pointer = if cfg!(test) {
-            format!(", [null, %refused{n}]")
-        } else {
-            String::new()
-        };
-        let refused_room = if cfg!(test) {
-            format!(", [{available}, %refused{n}]")
-        } else {
-            String::new()
-        };
-        let pointer = self.calc(format!(
-            "phi ptr [{payload}, %allocate{n}], [{slow}, %allocation_slow{n}]{refused_pointer}"
-        ));
-        let room = self.calc(format!(
-            "phi i64 [0, %allocate{n}], [{room}, %allocation_slow{n}]{refused_room}"
-        ));
+        self.br(done);
+        self.block(done);
+        let mut pointers = vec![(payload, allocate), (slow, slow_label)];
+        let mut rooms = vec![(int(0), allocate), (room, slow_label)];
+        if cfg!(test) {
+            pointers.push((Value::Null, refused));
+            rooms.push((available, refused));
+        }
+        let pointer = self.emit(Operation::Phi(&Type::Ptr, &pointers));
+        let room = self.emit(Operation::Phi(&i64, &rooms));
         Some((pointer, room))
     }
     fn fast_region(
         &mut self,
-        region: &str,
-        charge: &str,
-        bytes: &str,
+        region: &Value,
+        charge: &Value,
+        bytes: &Value,
         align: u64,
-    ) -> (String, String) {
-        let n = self.next;
-        self.next += 1;
+    ) -> (Value, Value) {
+        let (i1, i64) = (Type::I1, Type::I64);
+        let n = self.counter();
         let payer = self.current_payer();
-        let saved = self.load_native(region, REGION_PAYER, "ptr");
-        let accumulated = self.load_native(region, REGION_CHARGE, "i64");
-        let same = self.calc(format!("icmp eq ptr {saved}, {payer}"));
+        let saved = self.load_native(region, REGION_PAYER, Type::Ptr);
+        let accumulated = self.load_native(region, REGION_CHARGE, Type::I64);
+        let same = self.cmp(Predicate::Eq, &Type::Ptr, &saved, &payer);
         // A fully trimmed entry no longer pins its payer. Pointer equality alone
         // would let a recycled slot masquerade as this run's live payer.
-        let live = self.calc(format!("icmp ne i64 {accumulated}, 0"));
-        let positive = self.calc(format!("icmp ne i64 {charge}, 0"));
-        let reusable = self.calc(format!("and i1 {same}, {live}"));
-        let reusable = self.calc(format!("and i1 {reusable}, {positive}"));
-        self.likely(
-            &reusable,
-            &format!("region_admit{n}"),
-            &format!("region_slow{n}"),
-        );
-        writeln!(self.code, "region_admit{n}:").unwrap();
+        let live = self.cmp(Predicate::Ne, &i64, &accumulated, &int(0));
+        let positive = self.cmp(Predicate::Ne, &i64, charge, &int(0));
+        let reusable = self.bin(Binary::And, &i1, &same, &live);
+        let reusable = self.bin(Binary::And, &i1, &reusable, &positive);
+        let admit = Label::new("region_admit", n);
+        let slow_label = Label::new("region_slow", n);
+        let bump = Label::new("region_bump", n);
+        let refused = Label::new("region_refused", n);
+        let store = Label::new("region_store", n);
+        let refill_label = Label::new("region_refill", n);
+        let done = Label::new("region_done", n);
+        self.likely(&reusable, admit, slow_label);
+        self.block(admit);
         let (fits, available) = self.admission_test(&payer, charge);
-        self.likely(
-            &fits,
-            &format!("region_bump{n}"),
-            &format!("region_refused{n}"),
-        );
-        writeln!(self.code, "region_bump{n}:").unwrap();
+        self.likely(&fits, bump, refused);
+        self.block(bump);
         self.admit_balance(&payer, charge, &available);
-        let total = self.calc(format!("add i64 {accumulated}, {charge}"));
-        self.store_native(region, REGION_CHARGE, "i64", &total);
-        let cursor = self.load_native(region, REGION_CURSOR, "ptr");
-        let end = self.load_native(region, REGION_END, "ptr");
-        let address = self.calc(format!("ptrtoint ptr {cursor} to i64"));
-        let rounded = self.calc(format!("add i64 {address}, {}", align - 1));
-        let start = self.calc(format!("and i64 {rounded}, -{align}"));
-        let offset = self.calc(format!("sub i64 {start}, {address}"));
-        let result = self.calc(format!("getelementptr i8, ptr {cursor}, i64 {offset}"));
-        let zero = self.calc(format!("icmp eq i64 {bytes}, 0"));
-        let size = self.calc(format!("select i1 {zero}, i64 1, i64 {bytes}"));
-        let next = self.calc(format!("add i64 {start}, {size}"));
-        let wrapped = self.calc(format!("icmp uge i64 {next}, {start}"));
-        let limit = self.calc(format!("ptrtoint ptr {end} to i64"));
-        let room = self.calc(format!("icmp ule i64 {next}, {limit}"));
-        let fits = self.calc(format!("and i1 {room}, {wrapped}"));
-        self.likely(
-            &fits,
-            &format!("region_store{n}"),
-            &format!("region_refill{n}"),
+        let total = self.bin(Binary::Add, &i64, &accumulated, charge);
+        self.store_native(region, REGION_CHARGE, Type::I64, &total);
+        let cursor = self.load_native(region, REGION_CURSOR, Type::Ptr);
+        let end = self.load_native(region, REGION_END, Type::Ptr);
+        let address = self.cast(Cast::PtrToInt, &Type::Ptr, &cursor, &i64);
+        let rounded = self.bin(Binary::Add, &i64, &address, &int(align - 1));
+        let start = self.bin(Binary::And, &i64, &rounded, &int(-i128::from(align)));
+        let offset = self.bin(Binary::Sub, &i64, &start, &address);
+        let result = self.offset_by(&cursor, &offset);
+        let zero = self.cmp(Predicate::Eq, &i64, bytes, &int(0));
+        let size = self.select(&i64, &zero, &int(1), bytes);
+        let next = self.bin(Binary::Add, &i64, &start, &size);
+        let wrapped = self.cmp(Predicate::Uge, &i64, &next, &start);
+        let limit = self.cast(Cast::PtrToInt, &Type::Ptr, &end, &i64);
+        let room = self.cmp(Predicate::Ule, &i64, &next, &limit);
+        let fits = self.bin(Binary::And, &i1, &room, &wrapped);
+        self.likely(&fits, store, refill_label);
+        self.block(store);
+        let next_pointer = self.offset_by(&result, &size);
+        self.store_native(region, REGION_CURSOR, Type::Ptr, &next_pointer);
+        self.br(done);
+        self.block(refill_label);
+        let refill = self.call_declared(
+            "hirsel_core_region_refill",
+            Type::Ptr,
+            &[ptr(region.clone()), word(bytes.clone()), word(int(align))],
+            FnAttrs::default(),
+            &CallAttrs {
+                cold: true,
+                ..CallAttrs::default()
+            },
         );
-        writeln!(self.code, "region_store{n}:").unwrap();
-        let next_pointer = self.calc(format!("getelementptr i8, ptr {result}, i64 {size}"));
-        self.store_native(region, REGION_CURSOR, "ptr", &next_pointer);
-        self.line(format!("br label %region_done{n}"));
-        writeln!(self.code, "region_refill{n}:").unwrap();
-        self.intrinsics
-            .insert("declare ptr @hirsel_core_region_refill(ptr, i64, i64)".into());
-        let refill = self.calc(format!(
-            "call ptr @hirsel_core_region_refill(ptr {region}, i64 {bytes}, i64 {align}) cold"
-        ));
-        self.line(format!("br label %region_done{n}"));
-        writeln!(self.code, "region_refused{n}:").unwrap();
-        self.line(format!("br label %region_done{n}"));
-        writeln!(self.code, "region_slow{n}:").unwrap();
+        self.br(done);
+        self.block(refused);
+        self.br(done);
+        self.block(slow_label);
         let (slow, slow_room) = self.allocation_cold(
             "hirsel_core_region_alloc",
             &[
-                ("ptr".into(), "%context".into()),
-                ("ptr".into(), region.into()),
-                ("i64".into(), bytes.into()),
-                ("i64".into(), align.to_string()),
-                ("i64".into(), charge.into()),
-                ("i1 zeroext".into(), "false".into()),
+                ptr(CONTEXT),
+                ptr(region.clone()),
+                word(bytes.clone()),
+                word(int(align)),
+                word(charge.clone()),
+                zeroext(Type::I1, FALSE),
             ],
         );
-        self.line(format!("br label %region_done{n}"));
-        writeln!(self.code, "region_done{n}:").unwrap();
-        let pointer = self.calc(format!("phi ptr [{result}, %region_store{n}], [{refill}, %region_refill{n}], [null, %region_refused{n}], [{slow}, %region_slow{n}]"));
-        let room = self.calc(format!("phi i64 [0, %region_store{n}], [0, %region_refill{n}], [{available}, %region_refused{n}], [{slow_room}, %region_slow{n}]"));
+        self.br(done);
+        self.block(done);
+        let pointer = self.emit(Operation::Phi(
+            &Type::Ptr,
+            &[
+                (result, store),
+                (refill, refill_label),
+                (Value::Null, refused),
+                (slow, slow_label),
+            ],
+        ));
+        let room = self.emit(Operation::Phi(
+            &i64,
+            &[
+                (int(0), store),
+                (int(0), refill_label),
+                (available, refused),
+                (slow_room, slow_label),
+            ],
+        ));
         (pointer, room)
     }
-    pub(super) fn free_block(&mut self, pointer: &str, charge: &str) {
-        let n = self.next;
-        self.next += 1;
-        let at = self.calc(format!(
-            "getelementptr i8, ptr {pointer}, i64 -{OWN_PAYER_BACK}"
-        ));
-        let tagged = self.calc(format!("load ptr, ptr {at}, align 8"));
-        let word = self.calc(format!("ptrtoint ptr {tagged} to i64"));
+    /// Return `charge` to the current payer's balance.
+    fn refund(&mut self, current: &Value, charge: &Value) {
+        let i64 = Type::I64;
+        let available = self.load_native(current, LIMIT_AVAILABLE, Type::I64);
+        let restored = self.bin(Binary::Add, &i64, &available, charge);
+        self.store_native(current, LIMIT_AVAILABLE, Type::I64, &restored);
+        let outstanding = self.load_native(current, LIMIT_OUTSTANDING, Type::I64);
+        let remaining = self.bin(Binary::Sub, &i64, &outstanding, charge);
+        self.store_native(current, LIMIT_OUTSTANDING, Type::I64, &remaining);
+    }
+    pub(super) fn free_block(&mut self, pointer: &Value, charge: &Value) {
+        let (i1, i64) = (Type::I1, Type::I64);
+        let n = self.counter();
+        let at = self.offset(pointer, back(OWN_PAYER_BACK));
+        let tagged = self.load(&Type::Ptr, &at, 8);
+        let word_value = self.cast(Cast::PtrToInt, &Type::Ptr, &tagged, &i64);
         let current = self.current_payer();
-        let current_word = self.calc(format!("ptrtoint ptr {current} to i64"));
+        let current_word = self.cast(Cast::PtrToInt, &Type::Ptr, &current, &i64);
         // Exact raw equality with the canonical current pointer, optionally its
         // ordinary GRAPH tag, proves both local custody and the native layout.
-        let tag = self.calc(format!("xor i64 {word}, {current_word}"));
-        let ordinary = self.calc(format!("icmp ule i64 {tag}, {OWN_ORDINARY_MAX_TAG}"));
-        let positive = self.calc(format!("icmp ne i64 {charge}, 0"));
-        let fast = self.calc(format!("and i1 {ordinary}, {positive}"));
-        self.likely(&fast, &format!("free_local{n}"), &format!("free_slow{n}"));
-        writeln!(self.code, "free_local{n}:").unwrap();
-        let available = self.load_native(&current, LIMIT_AVAILABLE, "i64");
-        let restored = self.calc(format!("add i64 {available}, {charge}"));
-        self.store_native(&current, LIMIT_AVAILABLE, "i64", &restored);
-        let outstanding = self.load_native(&current, LIMIT_OUTSTANDING, "i64");
-        let remaining = self.calc(format!("sub i64 {outstanding}, {charge}"));
-        self.store_native(&current, LIMIT_OUTSTANDING, "i64", &remaining);
-        let plain = self.calc(format!("icmp eq i64 {tag}, {OWN_ORDINARY_PLAIN_TAG}"));
-        let offset = self.calc(format!(
-            "select i1 {plain}, i64 {PLAIN_PREFIX_BYTES}, i64 {GRAPH_PREFIX_BYTES}"
-        ));
-        let neg = self.calc(format!("sub i64 0, {offset}"));
-        let base = self.calc(format!("getelementptr i8, ptr {pointer}, i64 {neg}"));
-        self.runtime_void("hirsel_core_native_free", &[("ptr".into(), base)]);
-        self.line(format!("br label %freed{n}"));
-        writeln!(self.code, "free_slow{n}:").unwrap();
-        let fixed = self.calc(format!("icmp eq i64 {tag}, {NATIVE_STATIC}"));
-        let fixed = self.calc(format!("and i1 {fixed}, {positive}"));
-        self.line(format!(
-            "br i1 {fixed}, label %free_static{n}, label %free_generic{n}"
-        ));
-        writeln!(self.code, "free_static{n}:").unwrap();
-        let available = self.load_native(&current, LIMIT_AVAILABLE, "i64");
-        let restored = self.calc(format!("add i64 {available}, {charge}"));
-        self.store_native(&current, LIMIT_AVAILABLE, "i64", &restored);
-        let outstanding = self.load_native(&current, LIMIT_OUTSTANDING, "i64");
-        let remaining = self.calc(format!("sub i64 {outstanding}, {charge}"));
-        self.store_native(&current, LIMIT_OUTSTANDING, "i64", &remaining);
-        let base = self.calc(format!(
-            "getelementptr i8, ptr {pointer}, i64 -{STATIC_PREFIX_BYTES}"
-        ));
-        self.runtime_void("hirsel_core_native_free", &[("ptr".into(), base)]);
-        self.line(format!("br label %freed{n}"));
-        writeln!(self.code, "free_generic{n}:").unwrap();
-
+        let tag = self.bin(Binary::Xor, &i64, &word_value, &current_word);
+        let ordinary = self.cmp(Predicate::Ule, &i64, &tag, &int(OWN_ORDINARY_MAX_TAG as u64));
+        let positive = self.cmp(Predicate::Ne, &i64, charge, &int(0));
+        let fast = self.bin(Binary::And, &i1, &ordinary, &positive);
+        let local = Label::new("free_local", n);
+        let slow = Label::new("free_slow", n);
+        let fixed_label = Label::new("free_static", n);
+        let generic = Label::new("free_generic", n);
+        let freed = Label::new("freed", n);
+        self.likely(&fast, local, slow);
+        self.block(local);
+        self.refund(&current, charge);
+        let plain = self.cmp(Predicate::Eq, &i64, &tag, &int(OWN_ORDINARY_PLAIN_TAG as u64));
+        let offset = self.select(
+            &i64,
+            &plain,
+            &int(PLAIN_PREFIX_BYTES as u64),
+            &int(GRAPH_PREFIX_BYTES as u64),
+        );
+        let neg = self.bin(Binary::Sub, &i64, &int(0), &offset);
+        let base = self.offset_by(pointer, &neg);
+        self.runtime_void("hirsel_core_native_free", &[ptr(base)]);
+        self.br(freed);
+        self.block(slow);
+        let fixed = self.cmp(Predicate::Eq, &i64, &tag, &int(NATIVE_STATIC));
+        let fixed = self.bin(Binary::And, &i1, &fixed, &positive);
+        self.cond(&fixed, fixed_label, generic);
+        self.block(fixed_label);
+        self.refund(&current, charge);
+        let base = self.offset(pointer, back(STATIC_PREFIX_BYTES));
+        self.runtime_void("hirsel_core_native_free", &[ptr(base)]);
+        self.br(freed);
+        self.block(generic);
         self.cold_void(
             "hirsel_core_free_value",
-            &[
-                ("ptr".into(), pointer.into()),
-                ("i64".into(), charge.into()),
-            ],
+            &[ptr(pointer.clone()), word(charge.clone())],
         );
-        self.line(format!("br label %freed{n}"));
-        writeln!(self.code, "freed{n}:").unwrap();
+        self.br(freed);
+        self.block(freed);
     }
-    pub(super) fn share_node(&mut self, node: &str, atomic: bool) {
-        let n = self.next;
-        self.next += 1;
-        self.line(format!("br label %retain{n}"));
-        writeln!(self.code, "retain{n}:").unwrap();
-        let count = self.calc(if atomic {
-            format!("load atomic i64, ptr {node} monotonic, align 8")
-        } else {
-            format!("load i64, ptr {node}, align 8")
-        });
-        let fits = self.calc(format!("icmp ne i64 {count}, -1"));
-        self.likely(
-            &fits,
-            &format!("retain_store{n}"),
-            &format!("count_stop{n}"),
-        );
-        writeln!(self.code, "count_stop{n}:").unwrap();
+    pub(super) fn share_node(&mut self, node: &Value, atomic: bool) {
+        let i64 = Type::I64;
+        let n = self.counter();
+        let retain = Label::new("retain", n);
+        let store = Label::new("retain_store", n);
+        let stop = Label::new("count_stop", n);
+        let retained = Label::new("retained", n);
+        self.br(retain);
+        self.block(retain);
+        let memory = Memory {
+            ordering: atomic.then_some(Ordering::Monotonic),
+            ..Memory::aligned(8)
+        };
+        let count = self.load_with(&i64, node, &memory);
+        let fits = self.cmp(Predicate::Ne, &i64, &count, &int(-1));
+        self.likely(&fits, store, stop);
+        self.block(stop);
         self.cold_void(
             "hirsel_core_share",
-            &[
-                ("ptr".into(), node.into()),
-                ("i1 zeroext".into(), atomic.to_string()),
-            ],
+            &[ptr(node.clone()), zeroext(Type::I1, atomic)],
         );
-        self.line("unreachable");
-        writeln!(self.code, "retain_store{n}:").unwrap();
-        let next = self.calc(format!("add i64 {count}, 1"));
+        self.effect(Operation::Unreachable);
+        self.block(store);
+        let next = self.bin(Binary::Add, &i64, &count, &int(1));
         if atomic {
-            let exchange = self.calc(format!(
-                "cmpxchg weak ptr {node}, i64 {count}, i64 {next} monotonic monotonic"
-            ));
-            let changed = self.calc(format!("extractvalue {{i64, i1}} {exchange}, 1"));
-            self.likely(&changed, &format!("retained{n}"), &format!("retain{n}"));
+            let exchange = self.emit(Operation::CompareExchange(node, &i64, &count, &next));
+            let changed = self.extract(&Type::structure([Type::I64, Type::I1]), &exchange, 1);
+            self.likely(&changed, retained, retain);
         } else {
-            self.line(format!("store i64 {next}, ptr {node}, align 8"));
-            self.line(format!("br label %retained{n}"));
+            self.store(&i64, &next, node, 8);
+            self.br(retained);
         }
-        writeln!(self.code, "retained{n}:").unwrap();
+        self.block(retained);
         if atomic {
-            self.arc_event("hirsel_core_arc_shared", &[("ptr".into(), node.into())]);
+            self.arc_event("hirsel_core_arc_shared", &[ptr(node.clone())]);
         }
     }
-    pub(super) fn unique_node(&mut self, node: &str, atomic: bool) -> String {
-        let count = self.calc(if atomic {
-            format!("load atomic i64, ptr {node} acquire, align 8")
-        } else {
-            format!("load i64, ptr {node}, align 8")
-        });
-        let unique = self.calc(format!("icmp eq i64 {count}, 1"));
+    pub(super) fn unique_node(&mut self, node: &Value, atomic: bool) -> Value {
+        let memory = Memory {
+            ordering: atomic.then_some(Ordering::Acquire),
+            ..Memory::aligned(8)
+        };
+        let count = self.load_with(&Type::I64, node, &memory);
+        let unique = self.cmp(Predicate::Eq, &Type::I64, &count, &int(1));
         if atomic {
             self.arc_event(
                 "hirsel_core_arc_unwrapped",
-                &[("i1 zeroext".into(), unique.clone())],
+                &[zeroext(Type::I1, unique.clone())],
             );
         }
         unique
     }
-    pub(super) fn decrement_node(&mut self, node: &str, atomic: bool) -> String {
+    pub(super) fn decrement_node(&mut self, node: &Value, atomic: bool) -> Value {
+        let i64 = Type::I64;
         if atomic {
-            let old = self.calc(format!("atomicrmw sub ptr {node}, i64 1 release, align 8"));
-            self.calc(format!("icmp eq i64 {old}, 1"))
+            let old = self.emit(Operation::AtomicSub(node, &i64, &int(1)));
+            self.cmp(Predicate::Eq, &i64, &old, &int(1))
         } else {
-            let old = self.load_native(node, NODE_COUNT, "i64");
-            let next = self.calc(format!("sub i64 {old}, 1"));
-            self.store_native(node, NODE_COUNT, "i64", &next);
-            self.calc(format!("icmp eq i64 {next}, 0"))
+            let old = self.load_native(node, NODE_COUNT, Type::I64);
+            let next = self.bin(Binary::Sub, &i64, &old, &int(1));
+            self.store_native(node, NODE_COUNT, Type::I64, &next);
+            self.cmp(Predicate::Eq, &i64, &next, &int(0))
         }
     }
     pub(super) fn release_fast(
         &mut self,
-        node: &str,
+        node: &Value,
         charge: u64,
-        recipe: Option<&str>,
+        recipe: Option<&Value>,
         atomic: bool,
     ) {
-        let n = self.next;
-        self.next += 1;
+        let n = self.counter();
         let last = self.decrement_node(node, atomic);
-        let retained = self.calc(format!("xor i1 {last}, true"));
-        self.likely(
-            &retained,
-            &format!("release_nonlast{n}"),
-            &format!("release_last{n}"),
-        );
-        writeln!(self.code, "release_nonlast{n}:").unwrap();
+        let retained = self.bin(Binary::Xor, &Type::I1, &last, &true.into());
+        let nonlast = Label::new("release_nonlast", n);
+        let last_label = Label::new("release_last", n);
+        let released = Label::new("released", n);
+        self.likely(&retained, nonlast, last_label);
+        self.block(nonlast);
         if atomic {
-            self.arc_event(
-                "hirsel_core_arc_released",
-                &[("i1 zeroext".into(), "false".into())],
-            );
+            self.arc_event("hirsel_core_arc_released", &[zeroext(Type::I1, false)]);
         }
-        self.line(format!("br label %released{n}"));
-        writeln!(self.code, "release_last{n}:").unwrap();
+        self.br(released);
+        self.block(last_label);
         if atomic {
-            self.line("fence acquire");
-            self.arc_event(
-                "hirsel_core_arc_released",
-                &[("i1 zeroext".into(), "true".into())],
-            );
+            self.effect(Operation::Fence(Ordering::Acquire));
+            self.arc_event("hirsel_core_arc_released", &[zeroext(Type::I1, true)]);
         }
         if let Some(recipe) = recipe {
             self.cold_void(
                 "hirsel_core_release_static_last",
-                &[
-                    ("ptr".into(), "%context".into()),
-                    ("ptr".into(), node.into()),
-                    ("ptr".into(), recipe.into()),
-                ],
+                &[ptr(CONTEXT), ptr(node.clone()), ptr(recipe.clone())],
             );
         } else {
-            self.free_block(node, &charge.to_string());
+            self.free_block(node, &int(charge));
         }
-        self.line(format!("br label %released{n}"));
-        writeln!(self.code, "released{n}:").unwrap();
+        self.br(released);
+        self.block(released);
     }
 }

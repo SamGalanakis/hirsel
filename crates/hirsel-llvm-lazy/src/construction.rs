@@ -30,7 +30,6 @@ pub(crate) struct Api {
     pub unit_drop: unsafe extern "C" fn(Raw),
     pub unit_take: unsafe extern "C" fn(Raw, *mut Output) -> Raw,
     pub module_drop: unsafe extern "C" fn(Raw),
-    pub unit_bitcode: unsafe extern "C" fn(Raw, *mut Output),
     pub print: unsafe extern "C" fn(Raw, *mut Output),
     pub print_text: unsafe extern "C" fn(*const c_char, usize, *mut Output),
     pub integer_type: unsafe extern "C" fn(Raw, u32) -> Raw,

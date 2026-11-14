@@ -1,5 +1,6 @@
 //! Shared sequence/map carrier cleanup. Counted buffers borrow the carrier
 //! from their suspended parent worklist frame, so cleanup stays constant-stack.
+use super::cleanup::{STEP_PARAMS, glue_emitter, step_signature};
 use super::*;
 use hirsel_core_layout::{FieldTy, field_size, map_entry};
 
@@ -37,8 +38,9 @@ impl<'a> Entries<'a> {
         }
     }
 }
+/// The step glue of one collection carrier type.
 pub(super) fn symbol(field: &FieldTy) -> String {
-    format!("@\"core_collection_drop_{field:?}\"")
+    format!("core_collection_drop_{field:?}")
 }
 
 pub(super) fn collect(field: &FieldTy, collections: &mut Vec<FieldTy>) {
@@ -61,92 +63,88 @@ pub(super) fn collect(field: &FieldTy, collections: &mut Vec<FieldTy>) {
     }
 }
 impl FunctionEmitter<'_> {
-    fn carrier_word(&mut self, carrier: &str, offset: u64) -> String {
-        let at = self.calc(format!("getelementptr i8, ptr {carrier}, i64 {offset}"));
-        self.calc(format!("load i64, ptr {at}, align 1"))
+    fn carrier_word(&mut self, carrier: &Value, offset: u64) -> Value {
+        let at = self.offset(carrier, offset);
+        self.load(&Type::I64, &at, 1)
     }
-    fn collection_charge(&mut self, capacity: &str, logical: u64) -> String {
-        let bytes = self.calc(format!("mul i64 {capacity}, {logical}"));
-        let rounded = self.calc(format!("add i64 {bytes}, 7"));
-        self.calc(format!("and i64 {rounded}, -8"))
+    fn collection_charge(&mut self, capacity: &Value, logical: u64) -> Value {
+        let i64 = Type::I64;
+        let bytes = self.bin(Binary::Mul, &i64, capacity, &int(logical));
+        let rounded = self.bin(Binary::Add, &i64, &bytes, &int(7));
+        self.bin(Binary::And, &i64, &rounded, &int(-8))
     }
     pub(super) fn clean_collection(
         &mut self,
         field: &FieldTy,
-        carrier: &str,
-        status: &str,
+        carrier: &Value,
+        status: &Value,
     ) -> Result<()> {
         // SEM-4: a List of a zero-sized element has no storage to clean.
         if hirsel_core_layout::storage_free(&self.module.types, field) {
             return Ok(());
         }
+        let i64 = Type::I64;
         let entries = Entries::new(self.module, self.recipes, field);
-        let block = self.calc(format!("load ptr, ptr {carrier}, align 1"));
+        let block = self.load(&Type::Ptr, carrier, 1);
         let length = self.carrier_word(carrier, 8);
         let capacity = self.carrier_word(carrier, 16);
-        let index = self.temp("i64");
-        self.line(format!("store i64 0, ptr {index}"));
-        let n = self.next;
-        self.next += 1;
-        let owned = self.calc(format!("icmp ne i64 {capacity}, 0"));
-        self.line(format!(
-            "br i1 {owned}, label %collection_head{n}, label %collection_done{n}"
-        ));
-        writeln!(self.code, "collection_head{n}:").unwrap();
-        let i = self.calc(format!("load i64, ptr {index}"));
-        let more = self.calc(format!("icmp ult i64 {i}, {length}"));
-        self.line(format!(
-            "br i1 {more}, label %collection_body{n}, label %collection_settle{n}"
-        ));
-        writeln!(self.code, "collection_body{n}:").unwrap();
-        let entry = self.calc(format!(
-            "getelementptr [{} x i8], ptr {block}, i64 {i}",
-            entries.stride
-        ));
+        let index = self.temp(Type::I64);
+        self.store(&i64, &int(0), &index, 0);
+        let n = self.counter();
+        let head = Label::new("collection_head", n);
+        let body = Label::new("collection_body", n);
+        let live = Label::new("collection_live", n);
+        let next_label = Label::new("collection_next", n);
+        let settle = Label::new("collection_settle", n);
+        let free = Label::new("collection_free", n);
+        let done = Label::new("collection_done", n);
+        let owned = self.cmp(Predicate::Ne, &i64, &capacity, &int(0));
+        self.cond(&owned, head, done);
+        self.block(head);
+        let i = self.load(&i64, &index, 0);
+        let more = self.cmp(Predicate::Ult, &i64, &i, &length);
+        self.cond(&more, body, settle);
+        self.block(body);
+        let entry = self.gep(&Type::bytes(entries.stride), &block, &i, false);
         if entries.map {
             let state = self.carrier_word(&entry, 8);
-            let live = self.calc(format!("icmp eq i64 {state}, 1"));
-            self.line(format!(
-                "br i1 {live}, label %collection_live{n}, label %collection_next{n}"
-            ));
-            writeln!(self.code, "collection_live{n}:").unwrap();
+            let is_live = self.cmp(Predicate::Eq, &i64, &state, &int(1));
+            self.cond(&is_live, live, next_label);
+            self.block(live);
         }
         for (offset, f) in entries.fields {
-            let at = self.calc(format!("getelementptr i8, ptr {entry}, i64 {offset}"));
+            let at = self.offset(&entry, offset);
             self.clean_field(f, &at, status)?;
         }
-        self.line(format!("br label %collection_next{n}"));
-        writeln!(self.code, "collection_next{n}:").unwrap();
-        let next = self.calc(format!("add i64 {i}, 1"));
-        self.line(format!("store i64 {next}, ptr {index}"));
-        self.line(format!("br label %collection_head{n}"));
-        writeln!(self.code, "collection_settle{n}:").unwrap();
-        let allocated = self.calc(format!("icmp ne i64 {capacity}, 0"));
-        self.line(format!(
-            "br i1 {allocated}, label %collection_free{n}, label %collection_done{n}"
-        ));
-        writeln!(self.code, "collection_free{n}:").unwrap();
+        self.br(next_label);
+        self.block(next_label);
+        let next = self.bin(Binary::Add, &i64, &i, &int(1));
+        self.store(&i64, &next, &index, 0);
+        self.br(head);
+        self.block(settle);
+        let allocated = self.cmp(Predicate::Ne, &i64, &capacity, &int(0));
+        self.cond(&allocated, free, done);
+        self.block(free);
         let charge = self.collection_charge(&capacity, entries.logical);
         self.free_block(&block, &charge);
-        self.line(format!("br label %collection_done{n}"));
-        writeln!(self.code, "collection_done{n}:").unwrap();
+        self.br(done);
+        self.block(done);
         Ok(())
     }
-    pub(super) fn enqueue_collection(&mut self, field: &FieldTy, carrier: &str) {
+    pub(super) fn enqueue_collection(&mut self, field: &FieldTy, carrier: &Value) {
         if hirsel_core_layout::storage_free(&self.module.types, field) {
-            self.line("ret i1 false");
+            self.ret(&Type::I1, &FALSE);
             return;
         }
         let entries = Entries::new(self.module, self.recipes, field);
-        let buffer = self.calc(format!("load ptr, ptr {carrier}, align 1"));
+        let buffer = self.load(&Type::Ptr, carrier, 1);
         let capacity = self.carrier_word(carrier, 16);
-        let allocated = self.calc(format!("icmp ne i64 {capacity}, 0"));
-        let n = self.next;
-        self.next += 1;
-        self.line(format!(
-            "br i1 {allocated}, label %buffer{n}, label %empty{n}"
-        ));
-        writeln!(self.code, "buffer{n}:").unwrap();
+        let allocated = self.cmp(Predicate::Ne, &Type::I64, &capacity, &int(0));
+        let n = self.counter();
+        let present = Label::new("buffer", n);
+        let empty = Label::new("empty", n);
+        self.cond(&allocated, present, empty);
+        self.block(present);
         let charge = self.collection_charge(&capacity, entries.logical);
         if hirsel_core_layout::terminal(&self.module.types, self.recipes, field) {
             self.free_block(&buffer, &charge);
@@ -154,20 +152,21 @@ impl FunctionEmitter<'_> {
             self.runtime_void(
                 "hirsel_core_release_buffer_enqueue",
                 &[
-                    ("ptr".into(), "%worklist".into()),
-                    ("ptr".into(), buffer),
-                    ("i64".into(), charge),
-                    ("ptr".into(), carrier.into()),
-                    ("ptr".into(), symbol(field)),
+                    ptr(Local::WORKLIST),
+                    ptr(buffer),
+                    word(charge),
+                    ptr(carrier.clone()),
+                    ptr(Value::global(symbol(field))),
                 ],
             );
         }
-        self.line("ret i1 false");
-        writeln!(self.code, "empty{n}:").unwrap();
-        self.line("ret i1 false");
+        self.ret(&Type::I1, &FALSE);
+        self.block(empty);
+        self.ret(&Type::I1, &FALSE);
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn glue(
     module: &Module,
     target: Target,
@@ -175,38 +174,31 @@ pub(super) fn glue(
     failures: &failure::Failures,
     facts: bool,
     collections: &[FieldTy],
-    text: &mut String,
-    intrinsics: &mut BTreeSet<String>,
+    sink: &mut dyn Sink,
+    items: &mut Items,
 ) -> Result<()> {
     let empty = Body::default();
+    let i64 = Type::I64;
     for field in collections {
         let entries = Entries::new(module, recipes, field);
-        let mut e = FunctionEmitter {
-            function: None,
-            append_fast: false,
-            shadow_callee: None,
+        sink.begin_function(
+            &symbol(field),
+            &step_signature(),
+            &STEP_PARAMS,
+            &FnAttrs::private(),
+        );
+        let mut e = glue_emitter(
             module,
-            body: &empty,
             recipes,
-            abi: abi::Return::on_target(target, &[]),
-            has_status: false,
             failures,
-            constants: &[],
-            observe_charge: false,
             facts,
-            aliases: None,
-            caller_site: "0",
-            debug_location: None,
-            anchor: None,
-            relocatable_sites: false,
-            value_slots: Vec::new(),
-            address_slots: Vec::new(),
-            empty_bounds: empty::EmptyBounds::default(),
-            code: String::new(),
-            allocations: String::new(),
-            next: 0,
-            intrinsics,
-        };
+            &empty,
+            abi::Return::on_target(target, &[]),
+            false,
+            int(0),
+            &mut *sink,
+            &mut *items,
+        );
         let per = entries
             .fields
             .iter()
@@ -214,39 +206,43 @@ pub(super) fn glue(
             .collect::<Result<Vec<_>>>()?;
         let count: u64 = per.iter().sum();
         if count != 0 {
-            let cursor = e.calc("load i64, ptr %cursor");
-            let length = e.carrier_word("%payload", 8);
-            let index = e.calc(format!("udiv i64 {cursor}, {count}"));
-            let more = e.calc(format!("icmp ult i64 {index}, {length}"));
-            e.line(format!("br i1 {more}, label %element, label %done"));
-            writeln!(e.code, "element:").unwrap();
-            let next = e.calc(format!("add i64 {cursor}, 1"));
-            e.line(format!("store i64 {next}, ptr %cursor"));
-            let buffer = e.calc("load ptr, ptr %payload, align 1");
-            let entry = e.calc(format!(
-                "getelementptr [{} x i8], ptr {buffer}, i64 {index}",
-                entries.stride
-            ));
+            let cursor_at = Value::Local(Local::CURSOR);
+            let payload = Value::Local(Local::PAYLOAD);
+            let element = Label::plain("element");
+            let done = Label::plain("done");
+            let cursor = e.load(&i64, &cursor_at, 0);
+            let length = e.carrier_word(&payload, 8);
+            let index = e.bin(Binary::UDiv, &i64, &cursor, &int(count));
+            let more = e.cmp(Predicate::Ult, &i64, &index, &length);
+            e.cond(&more, element, done);
+            e.block(element);
+            let next = e.bin(Binary::Add, &i64, &cursor, &int(1));
+            e.store(&i64, &next, &cursor_at, 0);
+            let buffer = e.load(&Type::Ptr, &payload, 1);
+            let entry = e.gep(&Type::bytes(entries.stride), &buffer, &index, false);
             if entries.map {
                 let state = e.carrier_word(&entry, 8);
-                let live = e.calc(format!("icmp eq i64 {state}, 1"));
-                e.line(format!("br i1 {live}, label %live, label %removed"));
-                writeln!(e.code, "removed:").unwrap();
-                e.line("ret i1 false");
-                writeln!(e.code, "live:").unwrap();
+                let live = e.cmp(Predicate::Eq, &i64, &state, &int(1));
+                let live_label = Label::plain("live");
+                let removed = Label::plain("removed");
+                e.cond(&live, live_label, removed);
+                e.block(removed);
+                e.ret(&Type::I1, &FALSE);
+                e.block(live_label);
             }
-            let inner = e.calc(format!("urem i64 {cursor}, {count}"));
+            let inner = e.bin(Binary::URem, &i64, &cursor, &int(count));
             let mut base = 0;
             for ((offset, f), steps) in entries.fields.iter().zip(per) {
-                let at = e.calc(format!("getelementptr i8, ptr {entry}, i64 {offset}"));
+                let at = e.offset(&entry, *offset);
                 e.mechanical_field(f, &at, &inner, base)?;
                 base += steps;
             }
-            e.line("ret i1 false");
-            writeln!(e.code, "done:").unwrap();
+            e.ret(&Type::I1, &FALSE);
+            e.block(done);
         }
-        e.line("ret i1 true");
-        writeln!(text, "define private zeroext i1 {}(ptr %context, ptr %payload, ptr %cursor, ptr %worklist) {{\nentry:\n{}{} }}", symbol(field), e.allocations, e.code).unwrap();
+        e.ret(&Type::I1, &true.into());
+        drop(e);
+        sink.end_function();
     }
     Ok(())
 }

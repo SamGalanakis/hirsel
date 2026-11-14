@@ -4,8 +4,8 @@
 //! Only FORM's naturally aligned scalar fields occur.
 use super::*;
 
-pub(super) fn view_input_marker(sig: &Signature) -> &'static str {
-    if sig.params.iter().any(|p| {
+pub(super) fn view_input(sig: &Signature) -> bool {
+    sig.params.iter().any(|p| {
         matches!(
             p,
             Param::Address {
@@ -13,34 +13,30 @@ pub(super) fn view_input_marker(sig: &Signature) -> &'static str {
                 ..
             }
         )
-    }) {
-        " \"hirsel-view-input\""
-    } else {
-        ""
-    }
+    })
 }
 
 pub(super) struct Return {
     pub target: hirsel_core_layout::Target,
-    pub ty: String,
-    pub storage: String,
+    pub ty: Type,
+    pub storage: Type,
     pub indirect: bool,
     pub fields: Vec<Ty>,
     pub offsets: Vec<u64>,
-    pub regs: Vec<String>,
+    pub regs: Vec<Type>,
     pub reg_stride: u64,
 }
-pub(super) fn extension(target: hirsel_core_layout::Target, t: Ty) -> &'static str {
+pub(super) fn extension(target: hirsel_core_layout::Target, t: Ty) -> Extension {
     if target == hirsel_core_layout::Target::Aarch64Linux
         || size(t) >= 4
         || t.is_float()
         || t == Ty::Ptr
     {
-        ""
+        Extension::None
     } else if t.int().is_some_and(|x| x.0) {
-        " signext"
+        Extension::Sign
     } else {
-        " zeroext"
+        Extension::Zero
     }
 }
 impl Return {
@@ -50,45 +46,55 @@ impl Return {
         Self::on_target(target, &fields)
     }
 
-    pub fn parameters(&self, sig: &Signature, facts: bool) -> Vec<String> {
-        let mut params = vec![];
-        if self.indirect {
-            params.push(format!("ptr sret({}) %sret", self.storage));
-        }
-        params.push("ptr %context".into());
-        if sig.dest.is_some() {
-            params.push(
-                if facts {
-                    "ptr noalias %dest"
-                } else {
-                    "ptr %dest"
-                }
-                .into(),
-            );
-        }
-        for (i, p) in sig.params.iter().enumerate() {
-            let t = match p {
-                Param::Value(t) => format!("{}{}", ty(*t), extension(self.target, *t)),
-                Param::Address { loan, .. } if facts => match loan {
-                    Loan::Mut | Loan::Take => "ptr noalias".into(),
-                    // Loan::View freezes the place for the whole call, including
-                    // cleanup. Shared read-only aliases may still overlap.
-                    Loan::View => "ptr noalias readonly".into(),
-                },
-                Param::Address { .. } => "ptr".into(),
-            };
-            params.push(format!("{t} %p{i}"));
-        }
-        params.push("i64 %caller_site".into());
-        params
+    /// A CoreIR value argument as caller and callee type it.
+    pub fn value_parameter(&self, t: Ty) -> Parameter {
+        Parameter::extended(ty(t), extension(self.target, t))
     }
 
-    pub fn return_type(&self) -> String {
-        match self.fields.as_slice() {
-            [t] if !extension(self.target, *t).is_empty() => {
-                format!("{} {}", extension(self.target, *t).trim(), self.ty)
-            }
-            _ => self.ty.clone(),
+    pub fn parameters(&self, sig: &Signature, facts: bool) -> (Vec<Parameter>, Vec<Local>) {
+        let mut params = vec![];
+        let mut locals = vec![];
+        if self.indirect {
+            params.push(Parameter::sret(self.storage.clone()));
+            locals.push(Local::SRET);
+        }
+        params.push(Type::Ptr.into());
+        locals.push(Local::CONTEXT);
+        if sig.dest.is_some() {
+            params.push(Parameter {
+                noalias: facts,
+                ..Parameter::plain(Type::Ptr)
+            });
+            locals.push(Local::DEST);
+        }
+        for (i, p) in sig.params.iter().enumerate() {
+            params.push(match p {
+                Param::Value(t) => self.value_parameter(*t),
+                Param::Address { loan, .. } if facts => Parameter {
+                    noalias: true,
+                    // Loan::View freezes the place for the whole call, including
+                    // cleanup. Shared read-only aliases may still overlap.
+                    readonly: *loan == Loan::View,
+                    ..Parameter::plain(Type::Ptr)
+                },
+                Param::Address { .. } => Type::Ptr.into(),
+            });
+            locals.push(Local::Param(i));
+        }
+        params.push(Type::I64.into());
+        locals.push(Local::CALLER_SITE);
+        (params, locals)
+    }
+
+    pub fn signature(&self, params: Vec<Parameter>) -> FnSig {
+        FnSig {
+            result: self.ty.clone(),
+            extension: match self.fields.as_slice() {
+                [t] => extension(self.target, *t),
+                _ => Extension::None,
+            },
+            nonnull: false,
+            params,
         }
     }
 
@@ -109,7 +115,7 @@ impl Return {
             end += n;
         }
         let extent = end.next_multiple_of(alignment);
-        let storage = format!("[{} x i8]", extent.max(16));
+        let storage = Type::bytes(extent.max(16));
         let homogeneous = target == hirsel_core_layout::Target::Aarch64Linux
             && (2..=4).contains(&fields.len())
             && fields[0].is_float()
@@ -123,9 +129,9 @@ impl Return {
             fields.iter().map(|t| ty(*t)).collect()
         } else if target == hirsel_core_layout::Target::Aarch64Linux {
             if extent <= 8 {
-                vec![format!("i{}", extent * 8)]
+                vec![Type::Int(extent as u32 * 8)]
             } else {
-                vec!["i64".into(), "i64".into()]
+                vec![Type::I64, Type::I64]
             }
         } else {
             (0..end.div_ceil(8))
@@ -136,21 +142,21 @@ impl Return {
                         .filter(|(_, off)| **off / 8 == chunk)
                         .collect::<Vec<_>>();
                     if fs.iter().any(|(t, _)| !t.is_float()) {
-                        format!("i{}", (end - chunk * 8).min(8) * 8)
+                        Type::Int((end - chunk * 8).min(8) as u32 * 8)
                     } else if fs.iter().any(|(t, _)| size(**t) == 8) {
-                        "double".into()
+                        Type::Double
                     } else if fs.len() == 2 {
-                        "<2 x float>".into()
+                        Type::Vector(2, Box::new(Type::Float))
                     } else {
-                        "float".into()
+                        Type::Float
                     }
                 })
                 .collect::<Vec<_>>()
         };
         let ty = match regs.as_slice() {
-            [] => "void".into(),
+            [] => Type::Void,
             [one] => one.clone(),
-            _ => format!("{{ {} }}", regs.join(", ")),
+            _ => Type::structure(regs.clone()),
         };
         let reg_stride = if homogeneous { size(fields[0]) } else { 8 };
         Self {
@@ -164,6 +170,15 @@ impl Return {
             reg_stride,
         }
     }
+}
+
+fn memcpy(to: &Value, from: &Value, bytes: Value) -> [CArg; 4] {
+    [
+        ptr(to.clone()),
+        ptr(from.clone()),
+        word(bytes),
+        arg(Type::I1, FALSE),
+    ]
 }
 
 impl FunctionEmitter<'_> {
@@ -187,33 +202,73 @@ impl FunctionEmitter<'_> {
         }
         Some(usize::from(sig.dest.is_some()))
     }
-    fn shadow_copy_in(&mut self, original: &str) -> String {
-        let shadow = self.temp("[24 x i8]");
-        self.runtime_void("llvm.lifetime.start.p0", &[("ptr".into(), shadow.clone())]);
+    fn shadow_copy_in(&mut self, original: &Value) -> Value {
+        let shadow = self.temp(Type::bytes(24));
+        self.runtime_void("llvm.lifetime.start.p0", &[ptr(shadow.clone())]);
         self.runtime_void(
             "llvm.memcpy.p0.p0.i64",
-            &[
-                ("ptr".into(), shadow.clone()),
-                ("ptr".into(), original.into()),
-                ("i64".into(), "24".into()),
-                ("i1".into(), "false".into()),
-            ],
+            &memcpy(&shadow, original, int(24)),
         );
         shadow
     }
-    fn shadow_copy_back(&mut self, original: &str, shadow: &str) {
+    fn shadow_copy_back(&mut self, original: &Value, shadow: &Value) {
         // The callee may change the carrier even when it returns failure.
         // These word copies transfer no ownership, marks, drops or charges.
         self.runtime_void(
             "llvm.memcpy.p0.p0.i64",
-            &[
-                ("ptr".into(), original.into()),
-                ("ptr".into(), shadow.into()),
-                ("i64".into(), "24".into()),
-                ("i1".into(), "false".into()),
-            ],
+            &memcpy(original, shadow, int(24)),
         );
-        self.runtime_void("llvm.lifetime.end.p0", &[("ptr".into(), shadow.into())]);
+        self.runtime_void("llvm.lifetime.end.p0", &[ptr(shadow.clone())]);
+    }
+    /// The arguments of a direct or indirect CoreIR call, after the context.
+    fn call_arguments(
+        &mut self,
+        site: &CallSite,
+        destination: bool,
+    ) -> (Vec<CArg>, Option<(Value, Value)>) {
+        let mut args = vec![ptr(CONTEXT)];
+        let shadow_index = self.shadow_argument(site);
+        let mut carrier_shadow = None;
+        for (i, a) in site
+            .args
+            .get(&self.body.pools.args)
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            args.push(if destination && i == 0 {
+                ptr(Local::DEST)
+            } else {
+                match *a {
+                    Arg::Address(a) => {
+                        let p = self.address(a);
+                        if shadow_index == Some(i) {
+                            let shadow = self.shadow_copy_in(&p);
+                            carrier_shadow = Some((p, shadow.clone()));
+                            ptr(shadow)
+                        } else {
+                            ptr(p)
+                        }
+                    }
+                    Arg::Value(v) => {
+                        let x = self.numeric(v);
+                        (self.abi.value_parameter(self.vty(v)), x)
+                    }
+                }
+            });
+        }
+        (args, carrier_shadow)
+    }
+    fn callee(&mut self, callee: Callee, has_status: bool) -> Value {
+        match callee {
+            Callee::Direct(f) => Value::global(format!(
+                "{}{}",
+                symbol(self.module, f),
+                if has_status { "" } else { ".infallible" }
+            )),
+            Callee::Indirect(v) => self.numeric(v),
+            Callee::Runtime(_) => unreachable!(),
+        }
     }
     pub(super) fn return_call(&mut self, site: &CallSite, ending: &super::forward::Ending) -> bool {
         let has_status = match site.callee {
@@ -230,51 +285,10 @@ impl FunctionEmitter<'_> {
         if has_status && !self.has_status {
             return false;
         }
-        let mut args = vec!["ptr %context".into()];
-        let shadow_index = self.shadow_argument(site);
-        let mut carrier_shadow = None;
-        for (i, arg) in site
-            .args
-            .get(&self.body.pools.args)
-            .unwrap()
-            .iter()
-            .enumerate()
-        {
-            args.push(if ending.destination && i == 0 {
-                "ptr %dest".into()
-            } else {
-                match *arg {
-                    Arg::Address(a) => {
-                        let p = self.address(a);
-                        if shadow_index == Some(i) {
-                            let shadow = self.shadow_copy_in(&p);
-                            carrier_shadow = Some((p, shadow.clone()));
-                            format!("ptr {shadow}")
-                        } else {
-                            format!("ptr {p}")
-                        }
-                    }
-                    Arg::Value(v) => {
-                        let x = self.numeric(v);
-                        format!(
-                            "{}{} {x}",
-                            ty(self.vty(v)),
-                            extension(self.abi.target, self.vty(v))
-                        )
-                    }
-                }
-            });
-        }
-        let callee = match site.callee {
-            Callee::Direct(f) => format!(
-                "@{}{}",
-                symbol(self.module, f),
-                if has_status { "" } else { ".infallible" }
-            ),
-            Callee::Indirect(v) => self.numeric(v),
-            Callee::Runtime(_) => unreachable!(),
-        };
-        args.push(format!("i64 {}", self.call_site_word(site.callee)));
+        let (mut args, carrier_shadow) = self.call_arguments(site, ending.destination);
+        let callee = self.callee(site.callee, has_status);
+        let site_word = self.call_site_word(site.callee);
+        args.push(word(site_word));
         if carrier_shadow.is_some() || abi.fields != self.abi.fields {
             // An infallible private callee has no status; the public caller
             // still returns its constant zero. Its destination can be forwarded
@@ -291,45 +305,41 @@ impl FunctionEmitter<'_> {
             return true;
         }
         if abi.indirect {
-            args.insert(0, format!("ptr sret({}) %sret", abi.storage));
+            args.insert(0, (Parameter::sret(abi.storage.clone()), Local::SRET.into()));
         }
-        let tail = if ending.frame_safe { "tail " } else { "" };
-        let call = format!(
-            "{tail}call {} {callee}({})",
-            abi.return_type(),
-            args.join(", ")
-        );
-        if abi.ty == "void" {
-            self.line(call);
-            self.line("ret void");
+        let fn_sig = abi.signature(args.iter().map(|(p, _)| p.clone()).collect());
+        let values: Vec<_> = args.into_iter().map(|(_, v)| v).collect();
+        let attrs = CallAttrs {
+            tail: ending.frame_safe,
+            ..CallAttrs::default()
+        };
+        let result = self.call(&fn_sig, &callee, &values, &attrs);
+        if abi.ty.is_void() {
+            self.ret_void();
         } else {
-            let result = self.calc(call);
-            self.line(format!("ret {} {result}", abi.ty));
+            self.ret(&abi.ty, &result);
         }
         true
     }
 
-    fn offset(&mut self, p: &str, n: u64) -> String {
-        self.calc(format!("getelementptr i8, ptr {p}, i64 {n}"))
-    }
-    pub(super) fn return_values(&mut self, values: &[String]) {
+    pub(super) fn return_values(&mut self, values: &[Value]) {
         let mut returned = values.to_vec();
         if self.has_status {
-            returned.push("0".into());
+            returned.push(int(0));
         }
         self.return_abi_values(&returned);
     }
     pub(super) fn return_failure(&mut self) {
+        let abi_ty = self.abi.ty.clone();
         if self.abi.fields.len() == 1 {
-            self.line(format!("ret {} 1", self.abi.ty));
+            self.ret(&abi_ty, &int(1));
         } else if self.abi.indirect {
-            self.line(format!(
-                "store {} zeroinitializer, ptr %sret, align 8",
-                self.abi.storage
-            ));
-            let at = self.offset("%sret", *self.abi.offsets.last().unwrap());
-            self.line(format!("store i8 1, ptr {at}, align 1"));
-            self.line("ret void");
+            let storage = self.abi.storage.clone();
+            let sret = Local::SRET.into();
+            self.store(&storage, &Value::Zero, &sret, 8);
+            let at = self.offset(&sret, *self.abi.offsets.last().unwrap());
+            self.store(&Type::I8, &int(1), &at, 1);
+            self.ret_void();
         } else {
             // The same little-endian ABI coercion as return_abi_values: every
             // result and padding byte is zero, except the final status byte.
@@ -340,51 +350,45 @@ impl FunctionEmitter<'_> {
                 .regs
                 .iter()
                 .enumerate()
-                .map(|(i, _)| {
+                .map(|(i, t)| {
                     let start = i as u64 * self.abi.reg_stride;
-                    if status >= start && status < start + self.abi.reg_stride {
-                        (1u64 << ((status - start) * 8)).to_string()
+                    let value = if status >= start && status < start + self.abi.reg_stride {
+                        int(1u64 << ((status - start) * 8))
                     } else {
-                        "zeroinitializer".into()
-                    }
+                        Value::Zero
+                    };
+                    (t.clone(), value)
                 })
                 .collect();
             let value = if values.len() == 1 {
-                values[0].clone()
+                values[0].1.clone()
             } else {
-                format!(
-                    "{{ {} }}",
-                    self.abi
-                        .regs
-                        .iter()
-                        .zip(values)
-                        .map(|(t, v)| format!("{t} {v}"))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                )
+                Value::Struct {
+                    packed: false,
+                    fields: values,
+                }
             };
-            self.line(format!("ret {} {value}", self.abi.ty));
+            self.ret(&abi_ty, &value);
         }
     }
-    fn return_abi_values(&mut self, values: &[String]) {
+    fn return_abi_values(&mut self, values: &[Value]) {
+        let abi_ty = self.abi.ty.clone();
         if self.abi.fields.len() <= 1 {
             if let Some(x) = values.first() {
-                self.line(format!("ret {} {x}", self.abi.ty));
+                self.ret(&abi_ty, x);
             } else {
-                self.line("ret void");
+                self.ret_void();
             }
             return;
         }
+        let storage = self.abi.storage.clone();
         let p = if self.abi.indirect {
-            "%sret".into()
+            Local::SRET.into()
         } else {
-            self.temp(&self.abi.storage.clone())
+            self.temp(storage.clone())
         };
         // Padding is defined, so register coercions never observe poison.
-        self.line(format!(
-            "store {} zeroinitializer, ptr {p}, align 8",
-            self.abi.storage
-        ));
+        self.store(&storage, &Value::Zero, &p, 8);
         for ((t, off), x) in self
             .abi
             .fields
@@ -394,25 +398,26 @@ impl FunctionEmitter<'_> {
             .zip(values)
         {
             let at = self.offset(&p, off);
-            self.line(format!("store {} {x}, ptr {at}, align 1", ty(*t)));
+            self.store(&ty(*t), x, &at, 1);
         }
         if self.abi.indirect {
-            self.line("ret void");
+            self.ret_void();
             return;
         }
-        let mut r = "poison".to_string();
-        for (i, t) in self.abi.regs.clone().iter().enumerate() {
+        let regs = self.abi.regs.clone();
+        let mut r = Value::Poison;
+        for (i, t) in regs.iter().enumerate() {
             let at = self.offset(&p, i as u64 * self.abi.reg_stride);
-            let x = self.calc(format!("load {t}, ptr {at}, align 1"));
-            r = if self.abi.regs.len() == 1 {
+            let x = self.load(t, &at, 1);
+            r = if regs.len() == 1 {
                 x
             } else {
-                self.calc(format!("insertvalue {} {r}, {t} {x}, {i}", self.abi.ty))
+                self.emit(Operation::Insert(&abi_ty, &r, t, &x, i as u32))
             };
         }
-        self.line(format!("ret {} {r}", self.abi.ty));
+        self.ret(&abi_ty, &r);
     }
-    pub(super) fn call(&mut self, site: &CallSite) -> Result<()> {
+    pub(super) fn call_site(&mut self, site: &CallSite) -> Result<()> {
         if let Callee::Runtime(op) = site.callee {
             return self.runtime_call(op, site);
         }
@@ -426,55 +431,17 @@ impl FunctionEmitter<'_> {
         } else {
             Return::on_target(self.abi.target, &sig.results)
         };
-        let mut args = vec![];
-        args.push("ptr %context".into());
-        let shadow_index = self.shadow_argument(site);
-        let mut carrier_shadow = None;
-        for (i, arg) in site
-            .args
-            .get(&self.body.pools.args)
-            .unwrap()
-            .iter()
-            .enumerate()
-        {
-            args.push(match *arg {
-                Arg::Value(v) => {
-                    let x = self.numeric(v);
-                    format!(
-                        "{}{} {x}",
-                        ty(self.vty(v)),
-                        extension(self.abi.target, self.vty(v))
-                    )
-                }
-                Arg::Address(a) => {
-                    let p = self.address(a);
-                    if shadow_index == Some(i) {
-                        let shadow = self.shadow_copy_in(&p);
-                        carrier_shadow = Some((p, shadow.clone()));
-                        format!("ptr {shadow}")
-                    } else {
-                        format!("ptr {p}")
-                    }
-                }
-            });
-        }
-        let callee = match site.callee {
-            Callee::Direct(f) => format!(
-                "@{}{}",
-                symbol(self.module, f),
-                if has_status { "" } else { ".infallible" }
-            ),
-            Callee::Indirect(v) => self.numeric(v),
-            Callee::Runtime(_) => unreachable!(),
-        };
-        args.push(format!("i64 {}", self.call_site_word(site.callee)));
+        let (mut args, carrier_shadow) = self.call_arguments(site, false);
+        let callee = self.callee(site.callee, has_status);
+        let site_word = self.call_site_word(site.callee);
+        args.push(word(site_word));
         let mut values = self.invoke(&abi, &callee, args);
         if let Some((original, shadow)) = carrier_shadow {
             self.shadow_copy_back(&original, &shadow);
         }
         if has_status {
             let status = values.pop().unwrap();
-            let failed = self.calc(format!("icmp ne i8 {status}, 0"));
+            let failed = self.cmp(Predicate::Ne, &Type::I8, &status, &int(0));
             self.branch_failure(&failed, site.fail, None);
         }
         for (v, x) in site
@@ -488,52 +455,42 @@ impl FunctionEmitter<'_> {
         }
         Ok(())
     }
-    pub(super) fn invoke(
-        &mut self,
-        abi: &Return,
-        callee: &str,
-        mut args: Vec<String>,
-    ) -> Vec<String> {
+    pub(super) fn invoke(&mut self, abi: &Return, callee: &Value, mut args: Vec<CArg>) -> Vec<Value> {
         let scratch = if abi.fields.len() > 1 {
-            Some(self.temp(&abi.storage))
+            Some(self.temp(abi.storage.clone()))
         } else {
             None
         };
         if abi.indirect {
             args.insert(
                 0,
-                format!("ptr sret({}) {}", abi.storage, scratch.as_ref().unwrap()),
+                (
+                    Parameter::sret(abi.storage.clone()),
+                    scratch.clone().unwrap(),
+                ),
             );
         }
-        let call = format!("call {} {callee}({})", abi.return_type(), args.join(", "));
-        let r = if abi.ty == "void" {
-            self.line(call);
-            None
-        } else {
-            Some(self.calc(call))
-        };
+        let fn_sig = abi.signature(args.iter().map(|(p, _)| p.clone()).collect());
+        let arguments: Vec<_> = args.into_iter().map(|(_, v)| v).collect();
+        let r = self.call(&fn_sig, callee, &arguments, &CallAttrs::default());
         let mut values = vec![];
         if abi.fields.len() == 1 {
-            values.push(r.unwrap());
+            values.push(r);
         } else if let Some(p) = scratch {
             if !abi.indirect {
                 for (i, t) in abi.regs.iter().enumerate() {
                     let x = if abi.regs.len() == 1 {
-                        r.as_ref().unwrap().clone()
+                        r.clone()
                     } else {
-                        self.calc(format!(
-                            "extractvalue {} {}, {i}",
-                            abi.ty,
-                            r.as_ref().unwrap()
-                        ))
+                        self.extract(&abi.ty, &r, i as u32)
                     };
                     let at = self.offset(&p, i as u64 * abi.reg_stride);
-                    self.line(format!("store {t} {x}, ptr {at}, align 1"));
+                    self.store(t, &x, &at, 1);
                 }
             }
             for (t, off) in abi.fields.iter().zip(&abi.offsets) {
                 let at = self.offset(&p, *off);
-                values.push(self.calc(format!("load {}, ptr {at}, align 1", ty(*t))));
+                values.push(self.load(&ty(*t), &at, 1));
             }
         }
         values
@@ -544,53 +501,50 @@ impl FunctionEmitter<'_> {
         name: &str,
         sig: &Signature,
         facts: bool,
-        text: &mut String,
         debug: Option<(usize, usize)>,
     ) {
-        self.code.clear();
         self.debug_location = debug.map(|(_, location)| location);
-        self.allocations.clear();
         self.next = 0;
         self.has_status = true;
         self.abi = Return::internal_on_target(self.abi.target, &sig.results);
-        let mut args = vec!["ptr %context".into()];
+        let (params, locals) = self.abi.parameters(sig, facts);
+        let attrs = FnAttrs {
+            view_input: view_input(sig),
+            subprogram: debug.map(|(scope, _)| scope),
+            ..FnAttrs::default()
+        };
+        let signature = self.abi.signature(params);
+        self.sink.begin_function(name, &signature, &locals, &attrs);
+        let mut args = vec![ptr(CONTEXT)];
         if sig.dest.is_some() {
-            args.push("ptr %dest".into());
+            args.push(ptr(Local::DEST));
         }
         for (i, p) in sig.params.iter().enumerate() {
             args.push(match p {
-                Param::Value(t) => format!("{}{} %p{i}", ty(*t), extension(self.abi.target, *t)),
-                Param::Address { .. } => format!("ptr %p{i}"),
+                Param::Value(t) => (self.abi.value_parameter(*t), Local::Param(i).into()),
+                Param::Address { .. } => ptr(Local::Param(i)),
             });
         }
-        args.push("i64 %caller_site".into());
+        args.push(word(Local::CALLER_SITE));
         let values = self.invoke(
             &Return::on_target(self.abi.target, &sig.results),
-            &format!("@{name}.infallible"),
+            &Value::global(format!("{name}.infallible")),
             args,
         );
         self.return_values(&values);
-        writeln!(
-            text,
-            "define {} @{name}({}){}{} {{\nentry:\n{}{} }}",
-            self.abi.return_type(),
-            self.abi.parameters(sig, facts).join(", "),
-            view_input_marker(sig),
-            debug
-                .map(|(scope, _)| format!(" !dbg !{scope}"))
-                .unwrap_or_default(),
-            self.allocations,
-            self.code
-        )
-        .unwrap();
+        self.sink.end_function();
     }
 }
 
 /// Large C composites are stack byval on SysV and caller-owned copies passed
 /// by pointer on AAPCS64. All runtime composites here are larger than16 bytes.
-pub(super) fn composite_argument(target: Target, bytes: usize) -> String {
+pub(super) fn composite_argument(target: Target, bytes: usize) -> Parameter {
     match target {
-        Target::X86_64Linux => format!("ptr byval([{bytes} x i8]) align 8"),
-        Target::Aarch64Linux => "ptr".into(),
+        Target::X86_64Linux => Parameter {
+            byval: Some(Type::bytes(bytes as u64)),
+            align: 8,
+            ..Parameter::plain(Type::Ptr)
+        },
+        Target::Aarch64Linux => Type::Ptr.into(),
     }
 }

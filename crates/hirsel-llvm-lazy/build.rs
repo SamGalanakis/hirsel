@@ -50,6 +50,33 @@ fn main() {
     );
     let bitcode = source.with_file_name("bitcode.cpp");
     println!("cargo:rerun-if-changed={}", bitcode.display());
+    let bitcode_object = out.join("bitcode.o");
+    assert!(
+        Command::new(prefix.join("bin/hirsel-clang++"))
+            .args([
+                "-std=c++17",
+                "-O2",
+                "-fPIC",
+                "-fvisibility=hidden",
+                "-fno-exceptions",
+                "-fno-rtti",
+                "-nostdinc++"
+            ])
+            .arg(format!("--sysroot={}", sysroot.display()))
+            .arg("-isystem")
+            .arg(sysroot.join("usr/include/c++/13"))
+            .arg("-isystem")
+            .arg(sysroot.join("usr/include/x86_64-linux-gnu/c++/13"))
+            .arg("-I")
+            .arg(prefix.join("include"))
+            .arg("-c")
+            .arg(&bitcode)
+            .arg("-o")
+            .arg(&bitcode_object)
+            .status()
+            .unwrap()
+            .success()
+    );
     let component = out.join("libhirsel_llvm_engine.so");
     assert!(
         Command::new(prefix.join("bin/hirsel-clang"))
@@ -66,7 +93,7 @@ fn main() {
             .arg(&shared)
             .arg(&source)
             .arg(&copy_object)
-            .arg(&bitcode)
+            .arg(&bitcode_object)
             .arg("-l:libstdc++.so.6")
             .arg("-L")
             .arg(prefix.join("lib"))

@@ -1,14 +1,31 @@
 cxx_library(
     name = "engine",
-    srcs = ["engine.c", "bitcode.cpp"],
+    srcs = ["engine.c"],
     headers = {
         "aggregate_phi.h": "//crates/hirsel-llvm/bridge:aggregate_phi.h",
     },
     header_namespace = "",
     compiler_flags = ["-O2", "-fvisibility=hidden"],
-    deps = ["toolchains//:libllvm", "//crates/hirsel-llvm/bridge:checked-copy-static"],
+    deps = ["toolchains//:libllvm", "//crates/hirsel-llvm/bridge:checked-copy-static", ":bitcode"],
     preferred_linkage = "shared",
     visibility = ["PUBLIC"],
+)
+
+cxx_library(
+    name = "bitcode",
+    srcs = ["bitcode.cpp"],
+    compiler_flags = [
+        "-std=c++17", "-O2", "-fvisibility=hidden",
+        "-fno-exceptions", "-fno-rtti", "-nostdinc++",
+        "--sysroot=tools/buck2/toolchains/llvm-files/sysroot",
+        "-isystem", "tools/buck2/toolchains/llvm-files/sysroot/usr/include/c++/13",
+        "-isystem", "tools/buck2/toolchains/llvm-files/sysroot/usr/include/x86_64-linux-gnu/c++/13",
+        "-isystem", "tools/buck2/toolchains/llvm-files/sysroot/usr/include",
+        "-isystem", "tools/buck2/toolchains/llvm-files/sysroot/usr/include/x86_64-linux-gnu",
+    ],
+    deps = ["toolchains//:libllvm"],
+    exported_linker_flags = ["-l:libstdc++.so.6"],
+    preferred_linkage = "static",
 )
 
 # Embed the actual shared artifact, with no link edge from the Rust compiler

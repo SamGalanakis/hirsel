@@ -110,13 +110,15 @@ Their sum is the independently read counter interval. External process-tree perf
 also counts startup and reporting outside that interval; report that residual.
 
 `hirsel-core build <package-dir> --runtime <libhirsel_core_rt.a> -o program`
-uses the same checked request, collects reachable instances, emits one object per
-checked body and links the independently built core runtime. `run` builds and
+uses the same checked request and collects reachable instances. Development emits
+one object per checked body; LLVM release composes request-owned bodies and
+published inline candidates into one unit. Both link the independently built core runtime. `run` builds and
 executes it, forwarding arguments after `--` and returning its process status.
 `--backend cranelift|llvm` selects an engine. Development builds and runs default
 to Cranelift; `--release` defaults to LLVM with optimization. `--cc`, `--target`
 and `--limit` name the C linker driver, target and root logical limit. The current
-native target is x86_64-unknown-linux-gnu. `--json` includes the executable,
+native targets are x86_64-unknown-linux-gnu and aarch64-unknown-linux-gnu;
+cross execution requires explicit --emulator and --sysroot inputs. `--json` includes the executable,
 compiled-object count, link count and explicit stage stop.
 
 Object keys include compiler, checked-body/read identity, emitted module, target,
@@ -131,6 +133,22 @@ refresh them even when version output is unchanged. Incidental metadata changes
 do not invalidate a link whose tool content is unchanged. PATH selection is repeated
 on each link request; a missing selected editor is a named link refusal. A warm build reads integrity-checked products
 and compiles/links nothing; an implementation edit rebuilds its object and relinks.
+Native body objects contain code and source-independent DWARF rows: each file
+names its source item, and each line encodes the item-relative byte offset plus
+one. The object keys contain no absolute source position. One shared link-time
+writer resolves these rows, declaration positions and inline call sites against
+the current checked source snapshot. It writes a separate debug object and
+strips synthetic rows from temporary code inputs. Moving an unchanged item
+therefore rechecks and compiles no existing body; only the link product changes.
+Published source text has its own indexed rows and never requires decoding a
+library AST or reopening source files. Installed products contain those bytes.
+
+The fresh entry object also defines the linked item ordinals and hands the
+borrowed current-source table to `hirsel_core_os_run_with_sources`. An exit101
+report resolves each cause's original raising operation to file:line:column;
+columns count Unicode scalars and a tab counts one. Core and generated code
+inherit the nearest non-core caller's site.
+
 The real `hirsel_core_run` boundary maps PROG-3 outcomes after cleanup. Entry
 binding reads the emitted main's `Signature.dest` and derives its instantiated
 layout from the emitted type table. Exit's status uses the result payload offset

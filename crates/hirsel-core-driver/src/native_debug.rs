@@ -3,7 +3,7 @@
 //! Gimli's conversion keeps ranges, scopes and inline origins intact; only
 //! source coordinates and code-address relocations change at this boundary.
 use gimli::write::{self, Address, AttributeValue, LineProgram, LineString};
-use gimli::{EndianSlice, LittleEndian, Reader};
+use gimli::{EndianSlice, LittleEndian};
 use hirsel_core_ids::DefPath;
 use hirsel_core_ir::source::SourceMap;
 use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
@@ -166,10 +166,10 @@ fn lines(
     Ok(items)
 }
 
-fn attributes(
-    unit: &mut write::ConvertUnit<'_, R<'_>>,
+fn attributes<'data>(
+    unit: &mut write::ConvertUnit<'_, R<'data>>,
     id: write::UnitEntryId,
-    entry: &write::ConvertUnitEntry<'_, R<'_>>,
+    entry: &write::ConvertUnitEntry<'_, R<'data>>,
     items: &[Option<DefPath>],
     sources: &SourceMap,
     addresses: &Addresses,

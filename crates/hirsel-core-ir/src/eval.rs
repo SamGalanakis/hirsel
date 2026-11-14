@@ -466,6 +466,10 @@ impl Machine<'_> {
         let error = |e: u64| vec![0, e, 0, 0];
         let file = |h: u64| (h - FILE_BASE) as usize;
         Ok(match op {
+            HostOp::SleepUntil => {
+                self.world.clock = self.world.clock.max(a[1]);
+                ok(0, 0)
+            }
             HostOp::WallMs | HostOp::MonoNs => {
                 self.world.clock += 1;
                 vec![self.world.clock - 1]
@@ -566,6 +570,19 @@ impl Machine<'_> {
                     return Ok(error(EXISTS));
                 }
                 self.world.nodes.insert(key, Node::Dir);
+                ok(0, 0)
+            }
+            HostOp::Rename => {
+                let from = (a[0], self.carrier(a[1]).0);
+                let to = (a[0], self.carrier(a[2]).0);
+                if !self.world.nodes.contains_key(&from) {
+                    return Ok(error(NOT_FOUND));
+                }
+                if self.world.nodes.contains_key(&to) {
+                    return Ok(error(EXISTS));
+                }
+                let node = self.world.nodes.remove(&from).unwrap();
+                self.world.nodes.insert(to, node);
                 ok(0, 0)
             }
             HostOp::Remove | HostOp::RemoveTree => {

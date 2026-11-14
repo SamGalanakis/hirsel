@@ -63,8 +63,8 @@ operations! {
     ("code", "describe", Lane::PendingCode, "A", "core-check-callables-913", false),
     ("code", "identity", Lane::PendingCode, "A", "core-ops-914", false),
     ("code", "callable", Lane::PendingCode, "A", "core-ops-914", false),
-    ("host", "rename", Lane::PendingCode, "B", "core-ops-914", false),
-    ("host", "sleep_until", Lane::PendingCode, "B", "core-ops-914", false),
+    ("host", "rename", Lane::Runtime(Kernel::Host(HostOp::Rename)), "B", "core-ops-914", false),
+    ("host", "sleep_until", Lane::Runtime(Kernel::Host(HostOp::SleepUntil)), "B", "core-ops-914", false),
     ("list", "sum", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("list", "fill", Lane::PendingCode, "A", "core-check-calls-910", false),
     ("string", "from", Lane::PendingCode, "C", "std-seed-api-889", false),
@@ -1724,6 +1724,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         };
         let mut args = [Arg::Value(handle); 3];
         let len = match op {
+            HostOp::Rename => {
+                args[1] = Arg::Value(vals[1]?);
+                args[2] = Arg::Value(vals[2]?);
+                3
+            }
+            HostOp::SleepUntil => {
+                args[1] = Arg::Value(vals[1]?);
+                2
+            }
             HostOp::Open => {
                 args[1] = Arg::Value(vals[1]?);
                 let ty = self.p.fns[f].params[2].ty;

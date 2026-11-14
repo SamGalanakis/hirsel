@@ -3,7 +3,7 @@
 #include "hirsel_core_rt.h"
 /* Provider operations: Open 0, Read 1, Write 2, Close 3, TryLock 4, Unlock 5,
    Mkdir 6, Mkdtemp 7, Remove 8, RemoveTree 9, WallMs 10, MonoNs 11,
-   Stdout 12, Stderr 13. Open modes: Read 0, Write 1, Append 2, CreateNew 3. */
+   Stdout 12, Stderr 13, Rename 14, SleepUntil 15. Open modes: Read 0, Write 1, Append 2, CreateNew 3. */
 typedef struct { uint8_t tag; uint32_t code; } HirselCoreIoError;
 /* IoError: 0 success, 1 NotFound, 2 Denied, 3 Exists, 4 Closed, 5 Other(code). */
 typedef struct { uint8_t *data; size_t len, capacity; } HirselCoreBuffer;
@@ -34,6 +34,8 @@ HirselCoreHostOutcome hirsel_core_host(HirselCoreContext *, const HirselCoreProv
    and capacity never change. Capacity 0 borrows storage (even if len > 0).
    No row admits or grows/frees carrier storage. Null operand for no operand. */
 HirselCoreHostOutcome hirsel_core_host_op(HirselCoreContext *, uint8_t op, uint64_t handle, HirselCoreBuffer *operand, uint8_t mode, uint64_t site);
+HirselCoreHostOutcome hirsel_core_host_rename(HirselCoreContext *, uint64_t handle, HirselCoreBuffer *from, HirselCoreBuffer *to, uint64_t site);
+HirselCoreHostOutcome hirsel_core_host_sleep_until(HirselCoreContext *, uint64_t handle, uint64_t deadline_ns, uint64_t site);
 /* HostFile (FORM #47): u64 provider handle; no cell, grant or charge.
    No public fields or inline offsets. OPEN returns it in
    Outcome.value; file operations use its retained issuing provider. CLOSE

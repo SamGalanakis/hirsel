@@ -189,7 +189,7 @@ fn stream_operations_llvm() { stream_operations(Backend::Llvm); }
 fn host_operations(backend: Backend) {
     crate::openat2_required::require();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for (name, expected_exit) in [("host-read",0), ("host",0), ("host-close-cancel",0), ("clocks",0), ("mkdtemp-bounds",101), ("mkdtemp",0), ("host-wait-cancel",0)] {
+    for (name, expected_exit) in [("host-read",0), ("host",0), ("host-close-cancel",0), ("clocks",0), ("mkdtemp-bounds",101), ("mkdtemp",0), ("host-wait-cancel",0), ("host-rename-sleep",0)] {
         let dir = tempfile::tempdir().unwrap();
         let grant = dir.path().join("grant");
         std::fs::create_dir(&grant).unwrap();

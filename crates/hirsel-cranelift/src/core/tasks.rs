@@ -123,15 +123,27 @@ impl Function<'_, '_, '_> {
                     | HostOp::MonoNs => (null, no_mode),
                 };
                 // The C outcome is always 32 bytes: value at 0, error.tag at 8,
-                // error.code at 12, written at 16, status at 24. Even clocks
-                // return that C struct; their FORM row exposes only value and
-                // has no failure status. Reuse the ordinary scalar-struct ABI.
-                let values = self.c_call(
-                    "hirsel_core_host_op",
-                    &[P, K, U, P, K, U],
-                    &[U, K, Ty::Scalar(Scalar::U32), U, K],
-                    &[self.context, code, args[0], operand, mode, site],
-                )?;
+                // error.code at 12, written at 16, status at 24.
+                let values = match op {
+                    HostOp::Rename => self.c_call(
+                        "hirsel_core_host_rename",
+                        &[P, U, P, P, U],
+                        &[U, K, Ty::Scalar(Scalar::U32), U, K],
+                        &[self.context, args[0], args[1], args[2], site],
+                    )?,
+                    HostOp::SleepUntil => self.c_call(
+                        "hirsel_core_host_sleep_until",
+                        &[P, U, U, U],
+                        &[U, K, Ty::Scalar(Scalar::U32), U, K],
+                        &[self.context, args[0], args[1], site],
+                    )?,
+                    _ => self.c_call(
+                        "hirsel_core_host_op",
+                        &[P, K, U, P, K, U],
+                        &[U, K, Ty::Scalar(Scalar::U32), U, K],
+                        &[self.context, code, args[0], operand, mode, site],
+                    )?,
+                };
                 if op.waits() {
                     self.call_failure(values[4], call.fail)?;
                 }

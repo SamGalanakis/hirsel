@@ -15,6 +15,8 @@ pub const WALL_MS: u8 = 10;
 pub const MONO_NS: u8 = 11;
 pub const STDOUT: u8 = 12;
 pub const STDERR: u8 = 13;
+pub const RENAME: u8 = 14;
+pub const SLEEP_UNTIL: u8 = 15;
 
 /// IoError tags. Other carries the host error number.
 #[repr(C)]

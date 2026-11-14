@@ -80,7 +80,10 @@ impl OsProvider {
         } else {
             unsafe { std::slice::from_raw_parts(request.path, request.path_len) }
         };
-        if matches!(request.operation, OPEN | MKDIR | REMOVE | REMOVE_TREE) {
+        if matches!(
+            request.operation,
+            OPEN | MKDIR | REMOVE | REMOVE_TREE | RENAME
+        ) {
             valid_path(path)?;
         }
         match request.operation {
@@ -148,6 +151,28 @@ impl OsProvider {
                     syscall(rc as isize)?;
                     out.value = 1;
                 }
+            }
+            RENAME => {
+                let raw = path;
+                let Some(split) = raw.iter().position(|b| *b == 0) else {
+                    return Err(io::Error::from_raw_os_error(libc::EACCES));
+                };
+                let from = &raw[..split];
+                let to = &raw[split + 1..];
+                valid_path(from)?;
+                valid_path(to)?;
+                let (from_parent, from_name) =
+                    parent(self.directories[&request.handle].as_raw_fd(), from)?;
+                let (to_parent, to_name) =
+                    parent(self.directories[&request.handle].as_raw_fd(), to)?;
+                syscall(unsafe {
+                    libc::renameat(
+                        from_parent.as_raw_fd(),
+                        from_name.as_ptr(),
+                        to_parent.as_raw_fd(),
+                        to_name.as_ptr(),
+                    )
+                } as isize)?;
             }
             MKDIR | REMOVE | REMOVE_TREE => {
                 let (parent, name) = parent(self.directories[&request.handle].as_raw_fd(), path)?;
@@ -242,6 +267,14 @@ impl OsProvider {
                     i128::from(now.tv_sec) * 1000 + i128::from(now.tv_nsec) / 1_000_000,
                 )
                 .unwrap_or_else(|_| crate::process::stop(b"Clock"));
+            }
+            SLEEP_UNTIL => {
+                let deadline = if request.buffer.len >= 8 {
+                    unsafe { *(request.buffer.data.cast::<u64>()) }
+                } else {
+                    0
+                };
+                self.last_mono = self.last_mono.max(deadline);
             }
             MONO_NS => {
                 let now = u64::try_from(self.clock.elapsed().as_nanos())

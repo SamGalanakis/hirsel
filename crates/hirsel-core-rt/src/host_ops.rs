@@ -41,6 +41,7 @@ pub unsafe extern "C" fn hirsel_core_host_op(
                 hirsel_core_host_file(context, handle, &mut request)
             }
             OPEN
+            | RENAME
             | MKDIR
             | MKDTEMP
             | REMOVE
@@ -73,5 +74,69 @@ pub unsafe extern "C" fn hirsel_core_host_op(
             (*operand).len = request.buffer.len;
         }
         outcome
+    }
+}
+
+/// Host rename uses two path carriers; the combined request is only an issue-time view.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_host_rename(
+    context: *mut Context,
+    handle: u64,
+    from: *mut Buffer,
+    to: *mut Buffer,
+    site: u64,
+) -> Outcome {
+    unsafe {
+        let a = *from;
+        let b = *to;
+        let mut path = Vec::with_capacity(a.len + 1 + b.len);
+        path.extend_from_slice(std::slice::from_raw_parts(a.data, a.len));
+        path.push(0);
+        path.extend_from_slice(std::slice::from_raw_parts(b.data, b.len));
+        let mut request = Request {
+            operation: RENAME,
+            mode: 0,
+            handle,
+            path: path.as_ptr(),
+            path_len: path.len(),
+            buffer: Buffer {
+                data: std::ptr::null_mut(),
+                len: 0,
+                capacity: 0,
+            },
+            site,
+        };
+        let provider = hirsel_core_capability_provider(context, handle);
+        request.handle = hirsel_core_capability_handle(context, handle);
+        crate::provider::hirsel_core_host(context, provider, &mut request)
+    }
+}
+
+/// Cancellable clock wait. The deadline is carried in a temporary issue buffer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_host_sleep_until(
+    context: *mut Context,
+    handle: u64,
+    deadline: u64,
+    site: u64,
+) -> Outcome {
+    unsafe {
+        let mut bytes = deadline.to_ne_bytes();
+        let mut request = Request {
+            operation: SLEEP_UNTIL,
+            mode: 0,
+            handle,
+            path: std::ptr::null(),
+            path_len: 0,
+            buffer: Buffer {
+                data: bytes.as_mut_ptr(),
+                len: 8,
+                capacity: 8,
+            },
+            site,
+        };
+        let provider = hirsel_core_capability_provider(context, handle);
+        request.handle = hirsel_core_capability_handle(context, handle);
+        crate::provider::hirsel_core_host(context, provider, &mut request)
     }
 }

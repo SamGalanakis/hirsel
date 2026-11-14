@@ -70,18 +70,41 @@ impl FunctionEmitter<'_> {
         let operand = args.get(1).map(String::as_str).unwrap_or("null");
         let mode = args.get(2).map(String::as_str).unwrap_or("0");
         let at = self.site_word();
-        let mut values = self.native_call(
-            "hirsel_core_host_op",
-            &[U, K, Ty::Scalar(Scalar::U32), U, K],
-            &[
-                ("ptr".into(), "%context".into()),
-                ("i8 zeroext".into(), op.code().to_string()),
-                ("i64".into(), args[0].clone()),
-                ("ptr".into(), operand.into()),
-                ("i8 zeroext".into(), mode.into()),
-                ("i64".into(), at),
-            ],
-        );
+        let mut values = match op {
+            HostOp::Rename => self.native_call(
+                "hirsel_core_host_rename",
+                &[U, K, Ty::Scalar(Scalar::U32), U, K],
+                &[
+                    ("ptr".into(), "%context".into()),
+                    ("i64".into(), args[0].clone()),
+                    ("ptr".into(), args[1].clone()),
+                    ("ptr".into(), args[2].clone()),
+                    ("i64".into(), at),
+                ],
+            ),
+            HostOp::SleepUntil => self.native_call(
+                "hirsel_core_host_sleep_until",
+                &[U, K, Ty::Scalar(Scalar::U32), U, K],
+                &[
+                    ("ptr".into(), "%context".into()),
+                    ("i64".into(), args[0].clone()),
+                    ("i64".into(), args[1].clone()),
+                    ("i64".into(), at),
+                ],
+            ),
+            _ => self.native_call(
+                "hirsel_core_host_op",
+                &[U, K, Ty::Scalar(Scalar::U32), U, K],
+                &[
+                    ("ptr".into(), "%context".into()),
+                    ("i8 zeroext".into(), op.code().to_string()),
+                    ("i64".into(), args[0].clone()),
+                    ("ptr".into(), operand.into()),
+                    ("i8 zeroext".into(), mode.into()),
+                    ("i64".into(), at),
+                ],
+            ),
+        };
         if !op.waits() {
             values.truncate(1);
         }

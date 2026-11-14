@@ -714,10 +714,12 @@ pub enum HostOp {
     MonoNs,
     Stdout,
     Stderr,
+    Rename,
+    SleepUntil,
 }
 
 impl HostOp {
-    pub const ALL: [HostOp; 14] = [
+    pub const ALL: [HostOp; 16] = [
         HostOp::Open,
         HostOp::Read,
         HostOp::Write,
@@ -732,6 +734,8 @@ impl HostOp {
         HostOp::MonoNs,
         HostOp::Stdout,
         HostOp::Stderr,
+        HostOp::Rename,
+        HostOp::SleepUntil,
     ];
     /// The run time's operation code (`hirsel_core_rt_host.h`).
     pub const fn code(self) -> u8 {
@@ -754,6 +758,8 @@ impl HostOp {
             HostOp::MonoNs => "host_mono_ns",
             HostOp::Stdout => "stdout_write",
             HostOp::Stderr => "stderr_write",
+            HostOp::Rename => "host_rename",
+            HostOp::SleepUntil => "host_sleep_until",
         }
     }
     /// Whether the operation waits (a cancellation point, so it can fail).
@@ -866,6 +872,8 @@ impl RtOp {
                 let outcome = vec![u64_, u8_, Ty::Scalar(Scalar::U32), u64_];
                 match op {
                     HostOp::Open => (vec![V(u64_), V(p), V(u8_)], outcome),
+                    HostOp::Rename => (vec![V(u64_), V(p), V(p)], outcome),
+                    HostOp::SleepUntil => (vec![V(u64_), V(u64_)], outcome),
                     HostOp::Close | HostOp::TryLock | HostOp::Unlock => (vec![V(u64_)], outcome),
                     HostOp::WallMs | HostOp::MonoNs => (vec![V(u64_)], vec![u64_]),
                     _ => (vec![V(u64_), V(p)], outcome),

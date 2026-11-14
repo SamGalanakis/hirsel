@@ -1,0 +1,15 @@
+// Host rename and replayable immediate sleep. The final path is never followed.
+pub fn main(d: Dir, clock: Clock) -> Result[(), Exit] waits {
+    let mut f = result.unwrap(host.open(d, "old", Write))
+    result.unwrap(host.write(mut f, string.as_bytes("ok")))
+    result.unwrap(host.close(take f))
+    result.unwrap(host.rename(d, "old", "new"))
+    let mut g = result.unwrap(host.open(d, "new", Read))
+    let mut b: Bytes = list.new()
+    if result.unwrap(host.read(mut g, mut b)) != 2u64 { return Error(Exit(status: 1)) }
+    result.unwrap(host.close(take g))
+    let now = host.mono_ns(clock)
+    result.unwrap(host.sleep_until(clock, now))
+    result.unwrap(host.remove(d, "new"))
+    Ok(())
+}

@@ -127,6 +127,11 @@ impl ProgramIndex {
             Row::Removed { .. } => None,
         }
     }
+    /// The published file record of each module.
+    #[cfg(test)]
+    pub fn files(&self) -> Vec<(ModuleKey, ContentHash)> {
+        self.files.iter().map(|(m, h)| (m.clone(), *h)).collect()
+    }
     pub fn rows(&self) -> impl Iterator<Item = (&DefPath, &Row)> {
         self.rows.iter()
     }
@@ -260,4 +265,37 @@ fn children(
         out.push((n, hash));
     }
     Ok(out)
+}
+/// Republish the selected root with its file references and one-level leaves
+/// edited: every record it writes is valid, only what references what changes.
+#[cfg(test)]
+pub(crate) fn forge(
+    store: &Store,
+    edit: impl FnOnce(&mut Vec<(ModuleKey, ContentHash)>, &mut Vec<(u8, Vec<(DefPath, Row)>)>),
+) {
+    let root = store.selection(SELECTION).unwrap().unwrap();
+    let mut node: RootNode = decode(&store.get(root).unwrap().unwrap()).unwrap();
+    let mut leaves: Vec<(u8, Vec<(DefPath, Row)>)> = node
+        .children
+        .iter()
+        .map(
+            |&(n, hash)| match decode(&store.get(hash).unwrap().unwrap()).unwrap() {
+                Node::Leaf(rows) => (n, rows),
+                Node::Inner(_) => panic!("a forged index has one level"),
+            },
+        )
+        .collect();
+    edit(&mut node.files, &mut leaves);
+    node.children = leaves
+        .into_iter()
+        .map(|(n, rows)| {
+            let (hash, bytes) = Store::frame(&encode(&Node::Leaf(rows)).unwrap());
+            store.write_framed(hash, &bytes).unwrap();
+            (n, hash)
+        })
+        .collect();
+    node.children.sort_unstable();
+    let (root, bytes) = Store::frame(&encode(&node).unwrap());
+    store.write_framed(root, &bytes).unwrap();
+    store.select(SELECTION, root).unwrap();
 }

@@ -127,6 +127,15 @@ fn prog8_unrelated_parse_failure_does_not_suppress_other_results() {
     );
 }
 
+/// The root a store publishes.
+fn published(store: &Path) -> ContentHash {
+    Store::new(store)
+        .unwrap()
+        .selection(check_index::SELECTION)
+        .unwrap()
+        .unwrap()
+}
+
 fn names(product: &CheckProduct) -> Vec<&str> {
     let mut names: Vec<_> = product
         .rechecked
@@ -277,7 +286,10 @@ fn prog1_prog6_transitive_type_reads_and_discovery_order_have_stable_results() {
     let reversed = Driver::default()
         .check(req, &mut Meter::new(false))
         .unwrap();
-    assert_eq!(edited.root, reversed.root);
+    assert_eq!(
+        published(&dir.path().join("store")),
+        published(&dir.path().join("reverse-store"))
+    );
     assert_eq!(
         encode(&edited.diagnostics).unwrap(),
         encode(&reversed.diagnostics).unwrap()
@@ -1715,7 +1727,6 @@ fn store_files(store: &Path) -> std::collections::BTreeSet<std::ffi::OsString> {
 /// never resolves by path, by name or by anchor. Oracle: the fresh build.
 #[test]
 fn edit_kinds_publish_the_fresh_build_and_tombstones_never_resolve() {
-    let mut report = vec![];
     for kind in [
         "body",
         "signature",
@@ -1735,14 +1746,12 @@ fn edit_kinds_publish_the_fresh_build_and_tombstones_never_resolve() {
                 &mut Meter::new(false),
             )
             .unwrap();
-        let before = store_files(&incremental);
+        let request = program_request(kind, dir.path(), &incremental);
+        store::WRITES.take();
         let built = Driver::default()
-            .check(
-                program_request(kind, dir.path(), &incremental),
-                &mut Meter::new(false),
-            )
+            .check(request, &mut Meter::new(false))
             .unwrap();
-        let written = store_files(&incremental).difference(&before).count();
+        let writes = store::WRITES.take();
         let fresh = Driver::default()
             .check(
                 program_request(kind, dir.path(), &dir.path().join("fresh")),
@@ -1801,19 +1810,50 @@ fn edit_kinds_publish_the_fresh_build_and_tombstones_never_resolve() {
                 assert!(anchored.is_none_or(|(p, _)| p != *path), "{kind}: {path:?}");
             }
         }
-        if kind == "body" {
-            // One body record, one file record, the changed leaf and the root;
-            // with the selection, one instance record and one object: at most 8.
-            assert!(written + 3 <= 8, "body edit wrote {written} records");
-        }
-        report.push(format!(
-            "{kind}: rechecked {} {:?}, records written {written}, tombstones {}",
-            built.rechecked.len(),
-            names(&built),
-            tombstones.len()
-        ));
+        // Hand-derived fan-out. A signature edit of `helper.config` rechecks
+        // config and its four readers; a comment or whitespace edit above
+        // `dispatch` is inside its item, so its body key moves (land 4's
+        // deviation). Changed file records: the edited modules.
+        let (rechecked, files): (&[&str], usize) = match kind {
+            "body" | "import" | "comment" | "whitespace" => (&["dispatch"], 1),
+            "signature" => (&["config", "dispatch", "main", "more", "other"], 3),
+            "add" => (&["extra_item"], 1),
+            "rename" => (&["main_renamed"], 1),
+            "remove" | "reorder" => (&[], 1),
+            _ => unreachable!(),
+        };
+        assert_eq!(names(&built), rechecked, "{kind}: rechecked");
+        assert_eq!(
+            tombstones.len(),
+            usize::from(matches!(kind, "remove" | "rename")),
+            "{kind}: tombstones"
+        );
+        // Every write the request made. With under 48 rows the trie is the
+        // root over one leaf per first nibble of H(path): each changed row
+        // rewrites its leaf. Records: the rechecked bodies, the changed file
+        // records, those leaves and the root; then one publication directory
+        // sync and the selection rename with its own directory sync.
+        let leaves: std::collections::BTreeSet<u8> = built
+            .rechecked
+            .iter()
+            .chain(&tombstones)
+            .map(|p| {
+                ContentHash::of_parts(
+                    "hirsel.program-index.path.v1",
+                    [&bincode::serialize(p).unwrap()[..]],
+                )
+                .0[0]
+                    >> 4
+            })
+            .collect();
+        let mut expected = vec![store::Durable::Record; rechecked.len() + files + leaves.len() + 1];
+        expected.extend([
+            store::Durable::DirectorySync,
+            store::Durable::Selection,
+            store::Durable::DirectorySync,
+        ]);
+        assert_eq!(writes, expected, "{kind}: writes");
     }
-    eprintln!("{}", report.join("\n"));
 }
 
 /// An envelope with `payload` and a correct length, but the trailer (the
@@ -1847,6 +1887,7 @@ fn damaged_and_foreign_records_rebuild_the_fresh_publication() {
         "swapped body records",
         "corrupted body payload, valid envelope",
         "another toolchain",
+        "body records under each other's rows",
     ] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
@@ -1917,6 +1958,32 @@ fn damaged_and_foreign_records_rebuild_the_fresh_publication() {
                 vec!["dispatch"]
             }
             "another toolchain" => names(&fresh),
+            // Valid body records referenced in each other's places: a body
+            // record must name the path and key of the row that cites it.
+            "body records under each other's rows" => {
+                check_index::forge(&store, |_, leaves| {
+                    let rows: Vec<_> = leaves.iter_mut().flat_map(|l| &mut l.1).collect();
+                    let (mut d, mut m) = (None, None);
+                    for r in rows {
+                        if r.0 == dispatch {
+                            d = Some(r);
+                        } else if r.0 == main {
+                            m = Some(r);
+                        }
+                    }
+                    // Each row keeps its own key; only the body records it
+                    // names trade places.
+                    let (
+                        check_index::Row::Live { body: d, .. },
+                        check_index::Row::Live { body: m, .. },
+                    ) = (&mut d.unwrap().1, &mut m.unwrap().1)
+                    else {
+                        panic!("both rows are live")
+                    };
+                    std::mem::swap(d, m);
+                });
+                vec!["dispatch", "main"]
+            }
             _ => unreachable!(),
         };
         let rebuilt = Driver::default()
@@ -1926,7 +1993,11 @@ fn damaged_and_foreign_records_rebuild_the_fresh_publication() {
             )
             .unwrap();
         assert_eq!(names(&rebuilt), expect, "{case}");
-        assert_eq!(rebuilt.root, fresh.root, "{case}");
+        assert_eq!(
+            published(&path),
+            published(&fresh_dir.path().join("store")),
+            "{case}"
+        );
         let again = Driver::default()
             .check(
                 program_request("base", dir.path(), &path),
@@ -1951,43 +2022,7 @@ fn every_reached_shape_name_has_one_closure() {
         .join("../..")
         .canonicalize()
         .unwrap();
-    let files = |dir: &Path, tests: bool| -> Vec<hirsel_core_resolve::ModuleSource> {
-        let mut paths = Vec::new();
-        let mut pending = vec![dir.to_path_buf()];
-        while let Some(d) = pending.pop() {
-            for e in std::fs::read_dir(&d).unwrap() {
-                let p = e.unwrap().path();
-                if p.is_dir() {
-                    pending.push(p);
-                } else if p.extension().is_some_and(|x| x == "hirsel") {
-                    paths.push(p);
-                }
-            }
-        }
-        paths.sort();
-        paths
-            .into_iter()
-            .filter_map(|p| {
-                let rel = p.strip_prefix(dir).unwrap().with_extension("");
-                let modules: Vec<String> = rel.iter().map(|m| m.to_string_lossy().into()).collect();
-                (tests || modules[0] != "tests").then_some(hirsel_core_resolve::ModuleSource {
-                    file: p,
-                    modules,
-                    signatures: dir.ends_with("core"),
-                })
-            })
-            .collect()
-    };
-    let core = PackageManifest {
-        package: package("core"),
-        sources: files(&root.join("core/core"), false),
-        dependencies: vec![],
-    };
-    let std = PackageManifest {
-        package: package("std"),
-        sources: files(&root.join("core/std"), false),
-        dependencies: vec![package("core")],
-    };
+    let files = corpus_files;
     let mut m1: CorpusManifest = serde_json::from_slice(
         &std::fs::read(root.join("core/programs/m1/manifest.json")).unwrap(),
     )
@@ -1995,18 +2030,7 @@ fn every_reached_shape_name_has_one_closure() {
     for s in m1.packages.iter_mut().flat_map(|p| &mut p.sources) {
         s.file = root.join(&s.file);
     }
-    let langarena = CorpusManifest {
-        core: package("core"),
-        packages: vec![
-            core,
-            std,
-            PackageManifest {
-                package: package("langarena"),
-                sources: files(&root.join("core/langarena"), true),
-                dependencies: vec![package("core"), package("std")],
-            },
-        ],
-    };
+    let langarena = langarena_inputs(&root, &root.join("core/langarena"));
     let dir = tempfile::tempdir().unwrap();
     let mut requests: Vec<(String, CheckRequest)> = [("langarena", langarena), ("m1", m1)]
         .into_iter()
@@ -2098,7 +2122,7 @@ fn modules_request(files: &[(&str, &str)], dir: &Path, store: &Path) -> CheckReq
 /// the resolver's refusals: its record kept the foreign type's old span.
 #[test]
 fn resolution_edges_rebuild_like_fresh() {
-    let cases: [(&str, &[(&str, &str)], &[(&str, &str)]); 2] = [
+    let cases: [(&str, &[(&str, &str)], &[(&str, &str)]); 3] = [
         (
             "a variant added elsewhere takes over a record construction",
             &[(
@@ -2122,6 +2146,19 @@ fn resolution_edges_rebuild_like_fresh() {
             &[
                 ("a", "fn f(x: b.Hidden) -> u64 { 0 }\n"),
                 ("b", "type     Hidden {}\n"),
+            ],
+        ),
+        (
+            "a file removed and a file added: the removed file's names leave",
+            &[
+                ("a", "pub fn f() -> u64 { 1 }\n"),
+                ("b", "fn g() -> u64 { a.f() }\n"),
+                ("c", "pub fn h() -> u64 { 2 }\n"),
+            ],
+            &[
+                ("b", "fn g() -> u64 { a.f() }\n"),
+                ("c", "pub fn h() -> u64 { 2 }\n"),
+                ("d", "pub fn f() -> u64 { 3 }\n"),
             ],
         ),
     ];
@@ -2158,6 +2195,299 @@ fn resolution_edges_rebuild_like_fresh() {
                 .collect()
         };
         assert_eq!(records(&built), records(&fresh), "{case}: products");
-        assert_eq!(built.root, fresh.root, "{case}: publication");
+        assert_eq!(
+            published(&incremental),
+            published(&dir.path().join("fresh")),
+            "{case}: publication"
+        );
     }
+}
+
+/// The `.hirsel` files under `dir` as modules named by their relative path;
+/// `tests/` modules only when `tests`. Core sources are signatures.
+fn corpus_files(dir: &Path, tests: bool) -> Vec<hirsel_core_resolve::ModuleSource> {
+    let mut paths = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(d) = pending.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                pending.push(p);
+            } else if p.extension().is_some_and(|x| x == "hirsel") {
+                paths.push(p);
+            }
+        }
+    }
+    paths.sort();
+    paths
+        .into_iter()
+        .filter_map(|p| {
+            let rel = p.strip_prefix(dir).unwrap().with_extension("");
+            let modules: Vec<String> = rel.iter().map(|m| m.to_string_lossy().into()).collect();
+            (tests || modules[0] != "tests").then_some(hirsel_core_resolve::ModuleSource {
+                file: p,
+                modules,
+                signatures: dir.ends_with("core"),
+            })
+        })
+        .collect()
+}
+
+/// The suite program: source core and std from `root`, langarena from
+/// `langarena`, tests included.
+fn langarena_inputs(root: &Path, langarena: &Path) -> CorpusManifest {
+    CorpusManifest {
+        core: package("core"),
+        packages: vec![
+            PackageManifest {
+                package: package("core"),
+                sources: corpus_files(&root.join("core/core"), false),
+                dependencies: vec![],
+            },
+            PackageManifest {
+                package: package("std"),
+                sources: corpus_files(&root.join("core/std"), false),
+                dependencies: vec![package("core")],
+            },
+            PackageManifest {
+                package: package("langarena"),
+                sources: corpus_files(langarena, true),
+                dependencies: vec![package("core"), package("std")],
+            },
+        ],
+    }
+}
+
+/// The edit-kind gate on the suite program. Law: after each edit, an
+/// incremental build reports the diagnostics, holds the products and
+/// publishes the fresh build's file records and live rows, tombstones the
+/// paths it took away, and rechecks the fan-out hand-derived from the
+/// source: an item's own text moves its body alone; a header moves every
+/// body that reads it (the direct callers of `helper.checksum_str`, found by
+/// reading the corpus); placement moves nothing. Attack 960's resolution cases run here suite-shaped, under the
+/// law alone.
+#[test]
+fn suite_edit_kinds_recheck_their_fan_out_and_publish_the_fresh_build() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let arena = dir.path().join("langarena");
+    let mut pending = vec![root.join("core/langarena")];
+    while let Some(d) = pending.pop() {
+        let to = arena.join(d.strip_prefix(root.join("core/langarena")).unwrap());
+        std::fs::create_dir_all(&to).unwrap();
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                pending.push(p);
+            } else {
+                std::fs::copy(&p, to.join(p.file_name().unwrap())).unwrap();
+            }
+        }
+    }
+    let helper = std::fs::read_to_string(arena.join("helper.hirsel")).unwrap();
+    let edited = |from: &str, to: &str| {
+        assert!(helper.contains(from), "{from}");
+        helper.replacen(from, to, 1)
+    };
+    let spare = format!("{helper}\npub fn spare() -> u32 {{ 0u32 }}\n");
+    let probe_a = "type R { x: u64 }\nfn make() -> R { R(x: 1u64) }\nconst K: R = R(x: 1u64)\n";
+    let hidden_a = "fn f(x: probe_hidden.Hidden) -> u64 { 0 }\n";
+    type Files = Vec<(&'static str, Option<String>)>;
+    let only = |text: String| -> Files { vec![("helper.hirsel", Some(text))] };
+    let cases: Vec<(&str, Files, Files, Option<Vec<&str>>)> = vec![
+        (
+            "body",
+            vec![],
+            only(edited(
+                "    checksum_bytes(string.as_bytes(s))\n",
+                "    int.wrapping_add(checksum_bytes(string.as_bytes(s)), 0u32)\n",
+            )),
+            Some(vec!["checksum_str"]),
+        ),
+        (
+            "signature",
+            vec![],
+            only(edited(
+                "pub fn checksum_str(s: String) -> u32 {\n    checksum_bytes(string.as_bytes(s))\n",
+                "pub fn checksum_str(t: String) -> u32 {\n    checksum_bytes(string.as_bytes(t))\n",
+            )),
+            Some(vec![
+                "checksum_f64",
+                "checksum_str",
+                "dispatch",
+                "dispatch",
+                "dispatch",
+                "dispatch",
+                "dispatch",
+                "helper_laws",
+                "tally",
+            ]),
+        ),
+        (
+            "comment",
+            vec![],
+            only(edited(
+                "    checksum_bytes(string.as_bytes(s))\n",
+                "    // the bytes' checksum\n    checksum_bytes(string.as_bytes(s))\n",
+            )),
+            Some(vec!["checksum_str"]),
+        ),
+        (
+            "whitespace",
+            vec![],
+            only(edited(
+                "checksum_bytes(string.as_bytes(s))",
+                "checksum_bytes( string.as_bytes(s) )",
+            )),
+            Some(vec!["checksum_str"]),
+        ),
+        ("add", vec![], only(spare.clone()), Some(vec!["spare"])),
+        (
+            "remove",
+            only(spare.clone()),
+            only(helper.clone()),
+            Some(vec![]),
+        ),
+        (
+            "rename",
+            only(spare.clone()),
+            only(spare.replacen("fn spare()", "fn spared()", 1)),
+            Some(vec!["spared"]),
+        ),
+        (
+            "reorder",
+            vec![],
+            only(edited(
+                "pub fn lcg() -> Lcg {\n    Lcg(state: 42)\n}\n\npub fn reset(mut g: Lcg) {\n    g.state = 42\n}\n",
+                "pub fn reset(mut g: Lcg) {\n    g.state = 42\n}\n\npub fn lcg() -> Lcg {\n    Lcg(state: 42)\n}\n",
+            )),
+            Some(vec![]),
+        ),
+        (
+            "a variant added elsewhere takes over a record construction",
+            vec![("probe_record.hirsel", Some(probe_a.into()))],
+            vec![
+                ("probe_record.hirsel", Some(probe_a.into())),
+                (
+                    "probe_variant.hirsel",
+                    Some("pub type V = probe_record.R(u64)\n".into()),
+                ),
+            ],
+            None,
+        ),
+        (
+            "whitespace moves a foreign private type a refusal names",
+            vec![
+                ("probe_user.hirsel", Some(hidden_a.into())),
+                ("probe_hidden.hirsel", Some("type Hidden {}\n".into())),
+            ],
+            vec![
+                ("probe_user.hirsel", Some(hidden_a.into())),
+                ("probe_hidden.hirsel", Some("type     Hidden {}\n".into())),
+            ],
+            None,
+        ),
+    ];
+    // Inputs are copied read-only: a write replaces the file.
+    let put = |path: &Path, text: &str| {
+        let _ = std::fs::remove_file(path);
+        std::fs::write(path, text).unwrap();
+    };
+    let set = |files: &Files| {
+        put(&arena.join("helper.hirsel"), &helper);
+        for probe in [
+            "probe_record",
+            "probe_variant",
+            "probe_user",
+            "probe_hidden",
+        ] {
+            let _ = std::fs::remove_file(arena.join(format!("{probe}.hirsel")));
+        }
+        for (name, text) in files {
+            if let Some(text) = text {
+                put(&arena.join(name), text);
+            }
+        }
+    };
+    let build = |store: &Path| {
+        Driver::default()
+            .check(
+                CheckRequest {
+                    inputs: langarena_inputs(&root, &arena),
+                    store: store.to_owned(),
+                    library: LibraryInput::Sources,
+                    entry: None,
+                },
+                &mut Meter::new(false),
+            )
+            .unwrap()
+    };
+    let records = |p: &CheckProduct| -> BTreeMap<DefPath, ContentHash> {
+        p.definitions
+            .iter()
+            .map(|(k, d)| (k.clone(), d.record))
+            .collect()
+    };
+    for (i, (case, base, edit, expect)) in cases.into_iter().enumerate() {
+        let incremental = dir.path().join(format!("incremental{i}"));
+        let fresh_store = dir.path().join(format!("fresh{i}"));
+        set(&base);
+        build(&incremental);
+        set(&edit);
+        let built = build(&incremental);
+        let fresh = build(&fresh_store);
+        assert_eq!(
+            encode(&built.diagnostics).unwrap(),
+            encode(&fresh.diagnostics).unwrap(),
+            "{case}: diagnostics"
+        );
+        assert_eq!(records(&built), records(&fresh), "{case}: products");
+        // The publication is the fresh one but for the tombstones of the
+        // paths the edit took away.
+        let rows = |store: &Path| {
+            let index = check_index::ProgramIndex::open(&Store::new(store).unwrap()).unwrap();
+            let mut live = BTreeMap::new();
+            let mut removed = vec![];
+            for (path, row) in index.rows() {
+                match row {
+                    check_index::Row::Live { .. } => drop(live.insert(path.clone(), *row)),
+                    check_index::Row::Removed { .. } => removed.push(path.0.name.clone()),
+                }
+            }
+            removed.sort();
+            (live, removed)
+        };
+        let files = |store: &Path| {
+            check_index::ProgramIndex::open(&Store::new(store).unwrap())
+                .unwrap()
+                .files()
+        };
+        let (live, removed) = rows(&incremental);
+        assert_eq!(
+            (live, files(&incremental)),
+            (rows(&fresh_store).0, files(&fresh_store)),
+            "{case}: publication"
+        );
+        let gone: &[&str] = if matches!(case, "remove" | "rename") {
+            &["spare"]
+        } else {
+            &[]
+        };
+        assert_eq!(removed, gone, "{case}: tombstones");
+        if let Some(expect) = expect {
+            assert_eq!(names(&built), expect, "{case}: rechecked");
+        }
+    }
+}
+
+fn answer_of(product: &CheckProduct) -> eval::Outcome {
+    let d = product
+        .definitions
+        .values()
+        .find(|d| d.definition.0.name == "answer")
+        .unwrap();
+    eval::run(&d.ir, d.check.function.unwrap(), &[], 1_000_000).outcome
 }

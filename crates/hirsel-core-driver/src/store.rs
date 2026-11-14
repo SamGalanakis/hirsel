@@ -12,6 +12,31 @@ const VERSION: u32 = 25;
 const HEADER: usize = 12;
 const TRAILER: usize = 40;
 static NEXT: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+thread_local! {
+    /// Every durable write this thread made: each is a create, write, file
+    /// sync and rename, or a directory sync.
+    pub(crate) static WRITES: std::cell::RefCell<Vec<Durable>> = const { std::cell::RefCell::new(vec![]) };
+}
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub(crate) enum Durable {
+    Record,
+    Bare,
+    Selection,
+    DirectorySync,
+}
+fn wrote(_what: &str) {
+    #[cfg(test)]
+    WRITES.with_borrow_mut(|w| {
+        w.push(match _what {
+            "record" => Durable::Record,
+            "bare" => Durable::Bare,
+            "selection" => Durable::Selection,
+            _ => Durable::DirectorySync,
+        })
+    });
+}
 
 /// Position in an archive payload, independent of its file envelope.
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
@@ -99,6 +124,8 @@ impl Store {
             file.write_all(bytes)?;
             file.sync_all()?;
             fs::rename(&temporary, &path)?;
+            wrote("bare");
+            wrote("directory");
             File::open(&self.root)?.sync_all()
         })();
         if result.is_err() {
@@ -141,6 +168,7 @@ impl Store {
                 .open(&temporary)?;
             file.write_all(bytes)?;
             file.sync_all()?;
+            wrote("record");
             fs::rename(&temporary, self.path(hash))
         })();
         if result.is_err() {
@@ -149,6 +177,7 @@ impl Store {
         result
     }
     pub(crate) fn sync_directory(&self) -> io::Result<()> {
+        wrote("directory");
         File::open(&self.root)?.sync_all()
     }
     pub fn get(&self, key: ContentHash) -> io::Result<Option<Vec<u8>>> {
@@ -228,6 +257,8 @@ impl Store {
             f.write_all(bytes)?;
             f.sync_all()?;
             fs::rename(&temporary, path)?;
+            wrote("selection");
+            wrote("directory");
             File::open(&self.root)?.sync_all()
         })();
         if result.is_err() {

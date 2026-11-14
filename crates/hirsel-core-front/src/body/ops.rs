@@ -330,6 +330,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.use_place(at, Use::Value, e);
                 let value = self.emit_place(at, e);
                 self.synth_ty = at.ty;
+                self.diverge_if_never(at.ty, e);
                 return match self.t.kind(at.ty) {
                     TyKind::View(x) => {
                         let x = *x;

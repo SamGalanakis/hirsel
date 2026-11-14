@@ -1444,7 +1444,7 @@ impl Machine<'_> {
                     }
                 }
                 Terminator::Propagate => break 'blocks,
-                Terminator::Unreachable => panic!("a never call returned"),
+                Terminator::Unreachable => panic!("an unreachable point was reached"),
             };
         }
         assert_eq!(t.limits.len(), depth, "a failure left a bound scope open");

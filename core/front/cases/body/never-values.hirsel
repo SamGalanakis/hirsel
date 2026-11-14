@@ -1,0 +1,28 @@
+// expect: run opt() = 4
+// expect: run res() = 8
+// expect: run both() = 3
+// LANG-10 / core.md built-in types: `Never` is plain, key and ordered, of size 0, with no
+// values. A binder of type Never (a parameter, a payload) cannot be bound, so a read of
+// it ends the path: `a == b`, `a < b`, `1 + a`, `let x: u64 = a` and a tail `a` lower
+// to an unreachable end (FORM #31a) instead of halting emission or returning no value.
+// A Never field takes no bytes, so Option[Never] and Result[u64, Never] hold only their
+// other arm. Hand-derived: opt's
+// None arm gives 4; res(Ok(7)) gives 7 + 1; both() is pick(None) = 1 plus take_res(Ok(1))
+// = 2. Functions taking a Never cannot be called, so they are checked and emitted only.
+fn eq(a: Never, b: Never) -> bool { a == b }
+fn lt(a: Never, b: Never) -> bool { a < b }
+fn add(a: Never) -> u64 { 1u64 + a }
+fn tail(a: Never) -> u64 { a }
+fn bind(a: Never) -> u64 {
+  let x: u64 = a
+  x
+}
+fn snd(p: (u64, Never)) -> u64 { p.1 }
+fn pick(o: Option[Never]) -> u64 { match o { Some(x) => if x == x { 10 } else { 20 }, None => 1 } }
+fn take_res(r: Result[u64, Never]) -> u64 { match r { Ok(v) => v + 1, Error(e) => e } }
+fn opt() -> u64 {
+  let o: Option[Never] = None
+  match o { Some(x) => x, None => 4 }
+}
+fn res() -> u64 { take_res(Ok(7)) }
+fn both() -> u64 { pick(None) + take_res(Ok(1)) }

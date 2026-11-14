@@ -749,8 +749,22 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         s: &mut [Option<TyId>],
         roots: &[Option<TyId>],
     ) -> bool {
+        // A diverging operand constrains nothing (LANG-11); a `Never` written inside a
+        // type, as in an expected `Option[Never]`, is a type like any other.
+        if at == NEVER {
+            return true;
+        }
+        self.unify_part(pt, at, s, roots)
+    }
+    fn unify_part(
+        &mut self,
+        pt: TyId,
+        at: TyId,
+        s: &mut [Option<TyId>],
+        roots: &[Option<TyId>],
+    ) -> bool {
         self.out.counts.types += 1;
-        if at == NEVER || at == ERROR || at == HOLE {
+        if at == ERROR || at == HOLE {
             return true;
         }
         match (self.t.kind(pt).clone(), self.t.kind(at).clone()) {
@@ -775,11 +789,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             (TyKind::Tuple(a), TyKind::Tuple(b)) if a.len() == b.len() => a
                 .iter()
                 .zip(&b)
-                .all(|(&x, &y)| self.unify_rooted(x, y, s, roots)),
+                .all(|(&x, &y)| self.unify_part(x, y, s, roots)),
             (TyKind::Adt(d, a), TyKind::Adt(e, b)) if d == e && a.len() == b.len() => a
                 .iter()
                 .zip(&b)
-                .all(|(&x, &y)| self.unify_rooted(x, y, s, roots)),
+                .all(|(&x, &y)| self.unify_part(x, y, s, roots)),
             (TyKind::Adt(d, a), TyKind::Adt(e, b))
                 if is_core_prelude(&self.p.decls[d.index()].path, &["SeqSpan"])
                     && is_core_prelude(&self.p.decls[e.index()].path, &["IndexedSpan"])
@@ -787,28 +801,24 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             {
                 a.iter()
                     .zip(&b)
-                    .all(|(&x, &y)| self.unify_rooted(x, y, s, roots))
+                    .all(|(&x, &y)| self.unify_part(x, y, s, roots))
             }
-            (TyKind::Array(a, n), TyKind::Array(b, m)) if n == m => {
-                self.unify_rooted(a, b, s, roots)
-            }
-            (TyKind::View(a), TyKind::View(b)) => self.unify_rooted(a, b, s, roots),
-            (TyKind::Array(a, n), TyKind::Array(b, m)) if n == m => {
-                self.unify_rooted(a, b, s, roots)
-            }
+            (TyKind::Array(a, n), TyKind::Array(b, m)) if n == m => self.unify_part(a, b, s, roots),
+            (TyKind::View(a), TyKind::View(b)) => self.unify_part(a, b, s, roots),
+            (TyKind::Array(a, n), TyKind::Array(b, m)) if n == m => self.unify_part(a, b, s, roots),
             (TyKind::Anchored(a, ar), TyKind::Anchored(b, br)) => {
-                self.unify_rooted(a, b, s, roots) && self.unify_rooted(ar, br, s, roots)
+                self.unify_part(a, b, s, roots) && self.unify_part(ar, br, s, roots)
             }
             (_, TyKind::Anchored(b, _)) if self.type_kind(b) == Kind::Stable => {
-                self.unify_rooted(pt, b, s, roots)
+                self.unify_part(pt, b, s, roots)
             }
             (TyKind::Fn(a, ar, aw, ak), TyKind::Fn(b, br, bw, bk))
                 if ak == bk && a.len() == b.len() && (!bw || aw) =>
             {
                 a.iter()
                     .zip(&b)
-                    .all(|(&(am, at), &(bm, bt))| am == bm && self.unify_rooted(at, bt, s, roots))
-                    && self.unify_rooted(ar, br, s, roots)
+                    .all(|(&(am, at), &(bm, bt))| am == bm && self.unify_part(at, bt, s, roots))
+                    && self.unify_part(ar, br, s, roots)
             }
             _ => pt == at || pt == ERROR || pt == HOLE,
         }

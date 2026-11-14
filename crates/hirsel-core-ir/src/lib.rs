@@ -19,7 +19,7 @@
 //! grant; Rc/Arc nodes (`alloc counted`, `share`, `release`, `try_unwrap`);
 //! failure successors (`fail bN` on the instructions that can fail, `raise`,
 //! `propagate`); `never` signatures, whose calls end their block before
-//! `unreachable`; logical admission and refund with bound scopes (`limit_enter`,
+//! `unreachable`, which also follows a read of a binder of type `Never`; logical admission and refund with bound scopes (`limit_enter`,
 //! `limit_exit`); task custody through runtime calls (`rt.spawn`, `rt.join`,
 //! `rt.cancel`, `rt.check_cancel`, `rt.channel_new`, `rt.channel_sender`,
 //! `rt.send`, `rt.try_send`, `rt.receive`). Rule texts: failure.md, budgets.md and

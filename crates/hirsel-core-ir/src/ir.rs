@@ -922,7 +922,8 @@ pub enum Terminator {
     /// The signature's results, in order.
     Return(PoolRange<ValueId>),
     /// FORM v1a: the point after a call whose signature is `never`, which is its
-    /// block's last instruction. Nothing reaches it: such a call only fails.
+    /// block's last instruction; such a call only fails. FORM #31a: also the point
+    /// after a read of a binder whose type has no values (`Never`). Nothing reaches it.
     Unreachable,
     /// Record a cause in the chain (FAIL-10), then continue at `cleanup`, or
     /// propagate when there is none.

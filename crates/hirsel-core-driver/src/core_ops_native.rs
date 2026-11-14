@@ -1160,6 +1160,18 @@ fn constructor_temporaries_cranelift() { constructor_temporaries(Backend::Cranel
 #[ignore = "explicit native integration target"]
 fn constructor_temporaries_llvm() { constructor_temporaries(Backend::Llvm); }
 
+/// LANG-10: a read of a `Never` binder ends its block with `unreachable` (FORM #31a) and
+/// a Never field takes no bytes, on each engine.
+fn never_values(backend: Backend) {
+    run_lines_native(backend, include_str!("../../../core/front/cases/body/never-values.hirsel"));
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn never_values_cranelift() { never_values(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn never_values_llvm() { never_values(Backend::Llvm); }
+
 fn packed_writer_reservation(backend: Backend) {
     run_lines_native(backend, include_str!("../../../core/front/cases/body/packed-writer-reservation.hirsel"));
 }

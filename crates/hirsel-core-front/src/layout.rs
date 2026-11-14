@@ -83,7 +83,8 @@ impl<T: TyRead> Shapes<'_, T> {
                 )]),
                 None,
             ),
-            TyKind::Unit => (LRepr::Own, Body::Record(vec![]), None),
+            // `Never` has size 0 (core.md, built-in types), as unit does.
+            TyKind::Unit | TyKind::Never => (LRepr::Own, Body::Record(vec![]), None),
             TyKind::Fn(_, _, _, callable) => (
                 if callable == Callable::Scoped {
                     LRepr::Scoped
@@ -501,7 +502,7 @@ impl<T: TyRead> Shapes<'_, T> {
                 }
                 FieldTy::Array(Box::new(self.field(x)?), n)
             }
-            TyKind::Tuple(_) | TyKind::Unit => FieldTy::Inline(self.shape(ty)?),
+            TyKind::Tuple(_) | TyKind::Unit | TyKind::Never => FieldTy::Inline(self.shape(ty)?),
             TyKind::Param(_) if self.module => FieldTy::Inline(self.shape(ty)?),
             TyKind::View(x) => view_field(self.field_in(x, compact)?),
             TyKind::Fn(_, _, _, callable) => match callable {

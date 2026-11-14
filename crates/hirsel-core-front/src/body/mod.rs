@@ -1336,6 +1336,13 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     }
 
     // ---- emission
+    /// `Never` has no values (core.md): an expression of it that has not already
+    /// diverged reads a binder no call can bind, so nothing follows it (FORM #31a).
+    fn diverge_if_never(&mut self, t: TyId, n: NodeId) {
+        if t == NEVER && self.live() {
+            self.end(Terminator::Unreachable, Some(n));
+        }
+    }
     fn live(&self) -> bool {
         self.cur.is_some()
     }
@@ -2061,6 +2068,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         }
         self.node = outer;
         self.synth_ty = t;
+        self.diverge_if_never(t, n);
         if v.is_none()
             && self.halted.is_none()
             && self.live()

@@ -395,7 +395,8 @@ pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
             inst_wf(&mut c, inst).map_err(|e| format!("b{bi}: {e}"))?;
         }
         // A call of a `never` signature is its block's last instruction, and only
-        // `unreachable` follows it.
+        // `unreachable` follows it. `unreachable` also ends a block the front proves
+        // unreached by a type: a read of a binder whose type has no values (FORM #31a).
         let insts = block.insts.get(&b.insts).unwrap_or_default();
         let never_at = insts.iter().position(|i| match i {
             Inst::Call { call } => b
@@ -407,7 +408,7 @@ pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
         });
         let unreachable = matches!(b.terminators[bi], Terminator::Unreachable);
         need(
-            never_at.map(|i| i + 1 == insts.len()) == unreachable.then_some(true),
+            never_at.is_none_or(|i| i + 1 == insts.len() && unreachable),
             || format!("b{bi}: a never call must end its block, before unreachable"),
         )?;
         match &b.terminators[bi] {

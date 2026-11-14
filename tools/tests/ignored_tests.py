@@ -35,6 +35,13 @@ NATIVE = [('crates/hirsel-llvm/src/',
 # is //:core-llvm-aarch64-runtime's exact selection in tools/buck2/sync.py.
 AARCH64_RUNTIME = set(re.findall(r'"core::tests::(aarch64_\w+)"', next(
     line for line in (ROOT / 'tools/buck2/sync.py').read_text().splitlines() if 'name="core-llvm-aarch64-runtime"' in line)))
+# //:core-driver-native (its pool and openat2 shards) runs every ignored body under
+# native::tests::, which is native.rs's tests module and the files it include!s.
+_DRIVER = ROOT / 'crates/hirsel-core-driver/src'
+_DRIVER_TESTS = (_DRIVER / 'native.rs').read_text().split('\nmod tests {', 1)[1]
+assert any('name="core-driver-native", data=' in line for line in (ROOT / 'tools/buck2/sync.py').read_text().splitlines())
+DRIVER_NATIVE = {'crates/hirsel-core-driver/src/native.rs'} | {
+    f'crates/hirsel-core-driver/src/{name}' for name in re.findall(r'include!\("(\w+\.rs)"\)', _DRIVER_TESTS)}
 DELEGATED = {('crates/hirsel-artifact-store/src/index/tests/races.rs', 'cooperating_child'): ('multiprocess_common_pin_publication_and_live_staging_gc_owner',
                                                                                   'child')}
 REPLAY_ACTIONS = set()
@@ -400,20 +407,49 @@ def native_covers(path, name, prefix, selection):
             and not any(s.split('::', 1)[-1] in qualified for s in skips))
 
 
+def arguments(text, start):
+    """The text between an opened macro delimiter at `start` and its matching close."""
+    depth = 1
+    for at in range(start, len(text)):
+        depth += (text[at] in '([{') - (text[at] in ')]}')
+        if depth == 0:
+            return text[start:at]
+    raise ValueError('unclosed macro invocation')
+
+
 def ignored_declarations(text):
     """Resolve simple fn-name macro templates to their actual invocation names."""
     for attribute in ATTRIBUTE.finditer(text):
         function = re.search(r'\bfn\s+(\$?\w+)', text[attribute.end():])
         name = function[1]
         if name.startswith('$') and attribute[1] is not None:
-            macro = re.findall(r'macro_rules!\s+(\w+)', text[:attribute.start()])[-1]
-            names = re.findall(r'\b' + re.escape(macro) + r'!\s*\(\s*(\w+)', text)
+            definition = list(re.finditer(r'macro_rules!\s+(\w+)\s*\{\s*\((.*?)\)\s*=>', text[:attribute.start()], re.S))[-1]
+            macro, matcher = definition[1], definition[2]
+            # The template's name is the k-th metavariable of the matcher. An invocation
+            # supplies it as its k-th argument, or as the k-th field of each `(...)` group
+            # when the matcher repeats `$((...)),+`.
+            k = re.findall(r'\$(\w+):\w+', matcher).index(name[1:])
+            grouped = matcher.lstrip().startswith('$((')
+            names = []
+            for invocation in re.finditer(r'\b' + re.escape(macro) + r'!\s*[(\[{]', text):
+                body = arguments(text, invocation.end())
+                for group in re.findall(r'\(([^()]*)\)', body) if grouped else [body]:
+                    fields = [field.strip() for field in group.split(',')]
+                    if len(fields) > k and re.fullmatch(r'\w+', fields[k]):
+                        names.append(fields[k])
             if not names:
                 raise ValueError(f'ignored macro has no registered invocations: {macro}')
             for name in names:
                 yield attribute, name
         else:
             yield attribute, name
+
+
+def spawned(sources, path, name):
+    """A subprocess child: another body of its crate runs it by its qualified libtest name."""
+    crate = path.split('/src/', 1)[0] + '/src/'
+    return any(re.search(r'"(?:\w+::)+' + re.escape(name) + '"', text)
+               for other, text in sources.items() if other.startswith(crate))
 
 
 def orphans(sources):
@@ -431,6 +467,10 @@ def orphans(sources):
             if (path, name) in DELEGATED:
                 continue
             if path == 'crates/hirsel-llvm/src/core/tests.rs' and name in AARCH64_RUNTIME:
+                continue
+            if path in DRIVER_NATIVE:
+                continue
+            if spawned(sources, path, name):
                 continue
             if (path, name) in REPLAY_ACTIONS:
                 continue

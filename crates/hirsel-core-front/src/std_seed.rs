@@ -2,11 +2,9 @@
 //! (`core/std/tests`), checked against the canonical core library `core/core`.
 //!
 //! `std_seed_parses_and_resolves` is the acceptance gate: any parse or name-resolution
-//! refusal in a std or contract-test file fails it. `std_seed_check_report` runs the
-//! front-end slices over every library body and contract test and prints the outcome per
-//! operation to the test log. It reports the checker's progress, so it asserts nothing,
-//! writes nothing to the tree, and is run by hand:
-//! `cargo test -p hirsel-core-front std_seed_check_report -- --ignored --nocapture`.
+//! refusal in a std or contract-test file fails it. `std_bodies_never_halt_silently` runs
+//! the front-end slices over every library body and contract test and fails on a body
+//! whose emission stopped without a refusal or a gap.
 
 use super::{line_col, package, run_expect};
 use crate::*;
@@ -188,12 +186,6 @@ fn std_seed_parses_and_resolves() {
         }
     }
     assert!(refusals.is_empty(), "{}", refusals.join("\n"));
-}
-
-#[test]
-#[ignore = "prints the checker's outcome per std body; run by hand with --nocapture"]
-fn std_seed_check_report() {
-    print!("{}", std_seed_check());
 }
 
 /// A std or core body whose emission stopped without a refusal or a gap would be counted

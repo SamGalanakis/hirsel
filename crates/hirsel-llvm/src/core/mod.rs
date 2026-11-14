@@ -136,7 +136,7 @@ pub(crate) fn emit_native_scalar_module_in_context(
             continue;
         };
         let sig = &module.signatures[function.signature.index()];
-        if sig.dest.is_some() || sig.results.len() > 1 || failures.may_fail[index] {
+        if sig.dest.is_some() || sig.results.len() > 1 {
             return Err(Error::Unsupported(
                 "native scalar seam requires infallible scalar functions".into(),
             ));
@@ -144,8 +144,7 @@ pub(crate) fn emit_native_scalar_module_in_context(
         if body.insts.iter().any(|inst| {
             matches!(
                 inst,
-                Inst::Call { .. }
-                    | Inst::Alloc { .. }
+                Inst::Alloc { .. }
                     | Inst::Grow { .. }
                     | Inst::Drop { .. }
                     | Inst::Release { .. }

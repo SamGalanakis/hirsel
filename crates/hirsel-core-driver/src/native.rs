@@ -194,7 +194,17 @@ impl CheckProduct {
         options: &NativeOptions,
     ) -> Result<Vec<ObjectProduct>, NativeStop> {
         let reached = self.reachable(entry, options.instance_limit)?;
-        self.emit_instances(entry, reached.require()?, &reached.materialized, options)
+        let runtime = ContentHash::of_parts(
+            "hirsel.core-runtime.v1",
+            [&read_input(&options.runtime)?[..]],
+        );
+        self.emit_instances(
+            entry,
+            reached.require()?,
+            &reached.materialized,
+            options,
+            runtime,
+        )
     }
     fn emit_instances(
         &self,
@@ -202,6 +212,7 @@ impl CheckProduct {
         reached: &[InstanceKey],
         materialized: &crate::instances::InstanceSet,
         options: &NativeOptions,
+        runtime: ContentHash,
     ) -> Result<Vec<ObjectProduct>, NativeStop> {
         if !options.backend.supports_target(&options.target) {
             return Err(NativeStop::Entry(format!(
@@ -209,10 +220,6 @@ impl CheckProduct {
                 options.backend, options.target
             )));
         }
-        let runtime = ContentHash::of_parts(
-            "hirsel.core-runtime.v1",
-            [&read_input(&options.runtime)?[..]],
-        );
         let store = Store::new(&options.store)?;
         let library_store = self
             .image
@@ -319,7 +326,10 @@ impl CheckProduct {
             .collect::<Vec<_>>();
         let sources = self.native_sources(&items)?;
         let entry_plan = self.process_entry(entry, options, &sources)?;
-        let mut objects = self.emit_instances(entry, instances, &reached.materialized, options)?;
+        let runtime_bytes = read_input(&options.runtime)?;
+        let runtime = ContentHash::of_parts("hirsel.core-runtime.v1", [&runtime_bytes[..]]);
+        let mut objects =
+            self.emit_instances(entry, instances, &reached.materialized, options, runtime)?;
         if let Some(module) = &self.entry_binding(entry)?.cleanup {
             let store = Store::new(&options.store)?;
             let object_key = key(
@@ -362,7 +372,7 @@ impl CheckProduct {
                 compiled,
             });
         }
-        link(&entry_plan, &objects, options, &sources)
+        link(&entry_plan, &objects, options, &sources, runtime)
     }
     fn entry_binding(&self, entry: &DefPath) -> Result<&EntryAbi, NativeStop> {
         let binding = self
@@ -517,8 +527,8 @@ fn link(
     objects: &[ObjectProduct],
     options: &NativeOptions,
     sources: &hirsel_core_ir::source::SourceMap,
+    runtime_identity: ContentHash,
 ) -> Result<BuildProduct, NativeStop> {
-    let runtime = read_input(&options.runtime)?;
     let headers = [
         "hirsel_core_rt.h",
         "hirsel_core_rt_host.h",
@@ -544,11 +554,11 @@ fn link(
             options.optimize,
             options.debug_lines,
             ContentHash::of_parts(
-                "hirsel.core-link-inputs.v1",
+                "hirsel.core-link-inputs.v2",
                 headers
                     .iter()
                     .map(Vec::as_slice)
-                    .chain([runtime.as_slice(), cc.as_slice()]),
+                    .chain([runtime_identity.0.as_slice(), cc.as_slice()]),
             ),
         ),
     )?;

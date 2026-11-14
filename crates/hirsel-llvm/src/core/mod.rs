@@ -13,7 +13,6 @@ mod case;
 mod cleanup;
 mod collections;
 mod empty;
-mod failure;
 mod fast;
 mod forward;
 mod private_float;
@@ -27,6 +26,7 @@ mod tests;
 use std::collections::BTreeSet;
 use std::fmt::{self, Write};
 
+use hirsel_core_ir::failure;
 use hirsel_core_ir::*;
 
 #[cfg(not(hirsel_lazy_core))]

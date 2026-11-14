@@ -28,6 +28,7 @@ fn refs_ok(f: &hirsel_core_layout::FieldTy, n: usize) -> bool {
 }
 
 pub fn module(m: &Module) -> R {
+    let mut failures = None;
     for (i, t) in m.types.iter().enumerate() {
         let fields = match &t.body {
             hirsel_core_layout::Body::Record(f) => f.iter().collect::<Vec<_>>(),
@@ -56,6 +57,17 @@ pub fn module(m: &Module) -> R {
                 t.repr == hirsel_core_layout::Repr::Resource || core_fn(m, f.0),
                 || format!("t{i}: only core declares a finalizer on a row that is not a resource"),
             )?;
+            // It only moves slots, so nothing in it, or in what it calls, can fail. A
+            // module that only names the row checks nothing here: the module holding the
+            // finalizer's body does.
+            if t.repr != hirsel_core_layout::Repr::Resource
+                && m.functions[f.0 as usize].body.is_some()
+            {
+                let failures = failures.get_or_insert_with(|| crate::failure::Failures::new(m));
+                need(!failures.may_fail[f.0 as usize], || {
+                    format!("t{i}: an own row's finalizer may fail; it must only move slots")
+                })?;
+            }
         }
         if let Some(f) = t.clone {
             // A core own row's clone body: (from, to) -> (requested, available).

@@ -1,9 +1,12 @@
-//! Within-unit failure reachability. Recursive components without a failure
-//! source remain infallible; unknown bodies and indirect calls are sources.
-use super::*;
+//! Within-module failure reachability (crate docs, "Failure"): which functions
+//! may fail. Recursive components without a failure source stay infallible;
+//! bodies defined elsewhere and indirect calls are sources.
+use crate::{BinaryOp, Callee, Inst, Module, Terminator, Ty};
 
-pub(super) struct Failures {
+pub struct Failures {
+    /// By function: whether a call of it may fail.
     pub may_fail: Vec<bool>,
+    /// By function, by value: the constant an `Inst::Const` defines.
     pub constants: Vec<Vec<Option<u64>>>,
 }
 impl Failures {
@@ -72,7 +75,8 @@ impl Failures {
         }
     }
 }
-pub(super) fn bounded_shift(ty: Ty, amount: Option<u64>) -> bool {
+/// A shift by a constant below its type's width, which cannot fail (SEM-1).
+pub fn bounded_shift(ty: Ty, amount: Option<u64>) -> bool {
     ty.int()
         .is_some_and(|(_, width)| amount.is_some_and(|n| n < u64::from(width)))
 }

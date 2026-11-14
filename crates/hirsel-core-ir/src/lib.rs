@@ -111,8 +111,12 @@
 //!   ()`, before its fields are cleaned (FAIL-8), under the current limit with no
 //!   grant and no cause cell. It only moves slots, to restore its fields' own
 //!   invariant (a `Deque` moves its live slots into the prefix `0..len` of its
-//!   `List`, front first), and must not fail: the evaluator stops a run whose
-//!   own-row finalizer fails. The fields' cleanup then drops the values, resuming
+//!   `List`, front first), and cannot fail: wf refuses a finalizer body from which
+//!   a failure is reachable ([`failure::Failures`]: a fallible instruction, `raise`
+//!   or `propagate`, an indirect call, a failing runtime call, or a call of such a
+//!   function or of one whose body the module does not hold). Arithmetic its
+//!   invariants bound is written wrapping. A module that only names the row holds no
+//!   body to check; the one that defines it does. The fields' cleanup then drops the values, resuming
 //!   past a failed drop as it always does (FAIL-12). In counted cleanup such a
 //!   value is one step (its finalizer and then its fields, whole); a counted
 //!   payload holds no resource, so it cannot fail there.
@@ -434,7 +438,8 @@
 //! (fields, boxes, counted releases, handles) never fails (FAIL-13). `Capacity` is
 //! a failure only inside a finalizer, against its grant (MEM-27); everywhere else a
 //! refused admission is a value: `alloc` yields null and the room left in the
-//! limit it tried (MEM-22 `available`).
+//! limit it tried (MEM-22 `available`). [`failure::Failures`] says which functions
+//! of a module may fail; wf and the LLVM emitter share it.
 //!
 //! # Storage and admission (FORM v1a)
 //!
@@ -645,6 +650,7 @@ hirsel_guard::install!();
 /// behaviour cases.
 #[cfg(any(test, feature = "eval"))]
 pub mod eval;
+pub mod failure;
 mod ir;
 pub mod roles;
 pub mod text;

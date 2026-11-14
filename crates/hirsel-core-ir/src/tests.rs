@@ -440,6 +440,19 @@ fn only_core_marks_slots_and_finalizes_own_rows() {
             ][..],
             "only core declares a finalizer",
         ),
+        // An own row's finalizer runs where nothing can resume a failure, so it may
+        // not fail itself (its step count checked) or through what it calls (reverse).
+        (
+            &[(
+                "v20: u64 = wrapping_add v15, v19",
+                "v20: u64 = add v15, v19",
+            )][..],
+            "an own row's finalizer may fail",
+        ),
+        (
+            &[("v6: u64 = wrapping_add v3, v5", "v6: u64 = add v3, v5")][..],
+            "an own row's finalizer may fail",
+        ),
     ] {
         let mut text = kernel.to_string();
         for (from, to) in edits {

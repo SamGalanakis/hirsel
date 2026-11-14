@@ -680,7 +680,7 @@ fn clone_kernel_hook_law() -> u64 {
         laws.push_str(include_str!(
             "../../../../core/front/fixtures/slots-needs-drop.hirsel"
         ));
-        laws.push_str("\ntype TestOwn { xs: List[u64] } drop(t) { list.swap(mut t.xs, 0, 1) }\n// expect: run slots_own_finalizer() = 9\nfn slots_own_finalizer() -> u64 { let mut xs: List[u64] = list.new(); result.unwrap(list.push(mut xs, 1)); result.unwrap(list.push(mut xs, 2)); let x = TestOwn(xs: take xs); let _ = take x; 9 }\n");
+        laws.push_str("\ntype TestOwn { xs: List[u64] } drop(t) { list.clear(mut t.xs) }\n// expect: run slots_own_finalizer() = 9\nfn slots_own_finalizer() -> u64 { let mut xs: List[u64] = list.new(); result.unwrap(list.push(mut xs, 1)); result.unwrap(list.push(mut xs, 2)); let x = TestOwn(xs: take xs); let _ = take x; 9 }\n");
         let (index, modules) = core_inputs(CLONE_PRELUDE, &laws);
         let p = Program::declare(&index, &modules);
         assert!(p.refusals.is_empty(), "{:?}", p.refusals);

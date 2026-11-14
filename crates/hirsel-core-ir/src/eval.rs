@@ -811,13 +811,10 @@ impl Machine<'_> {
             return self.drop_resource(t, blk, ty);
         }
         // An own row's core finalizer (crate docs, "Slot kernels") gets the value's
-        // address first, with no grant and no cause cell. It only moves slots, so it
-        // must not fail; the fields' cleanup does the dropping.
+        // address first, with no grant and no cause cell. wf refuses one that may fail,
+        // so it only moves slots; the fields' cleanup does the dropping.
         if let Some(f) = self.shape(ty).finalizer {
-            assert!(
-                self.call(t, FuncId(f.0), &[at]).is_ok(),
-                "an own row's finalizer failed: it must only move slots"
-            );
+            let _ = self.call(t, FuncId(f.0), &[at]);
         }
         self.drop_fields(t, at, ty)
     }

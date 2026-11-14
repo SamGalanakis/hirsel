@@ -417,9 +417,10 @@ impl FunctionEmitter<'_> {
         sig: &Signature,
         facts: bool,
         text: &mut String,
+        debug: Option<(usize, usize)>,
     ) {
         self.code.clear();
-        self.debug_location = None;
+        self.debug_location = debug.map(|(_, location)| location);
         self.allocations.clear();
         self.next = 0;
         self.has_status = true;
@@ -443,10 +444,13 @@ impl FunctionEmitter<'_> {
         self.return_values(&values);
         writeln!(
             text,
-            "define {} @{name}({}){} {{\nentry:\n{}{} }}",
+            "define {} @{name}({}){}{} {{\nentry:\n{}{} }}",
             self.abi.return_type(),
             self.abi.parameters(sig, facts).join(", "),
             view_input_marker(sig),
+            debug
+                .map(|(scope, _)| format!(" !dbg !{scope}"))
+                .unwrap_or_default(),
             self.allocations,
             self.code
         )

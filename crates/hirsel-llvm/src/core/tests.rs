@@ -2539,14 +2539,13 @@ fn assert_relative_debug_rows(bytes: &[u8], module: &Module) {
 }
 
 fn site_fixture(target: Target) {
-    use object::{Object as _, ObjectSection as _};
+    use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
     let core = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
-    let (module, names) = front::lower(
-        include_str!("../../../../core/front/cases/body/failure-sites.hirsel"),
-        &core,
-        "main",
-    )
-    .unwrap();
+    let source = format!(
+        "{}\nfn debug_identity(n: u64) -> u64 {{ n ^ 7 }}\nfn debug_resource(n: u64) -> R {{ match R(d: n) {{ Ok(take r) => take r, Error(_) => loop {{}} }} }}\nfn debug_resource_caller(n: u64) -> u64 {{ let r = debug_resource(n); r.d }}\n",
+        include_str!("../../../../core/front/cases/body/failure-sites.hirsel")
+    );
+    let (module, names) = front::lower(&source, &core, "main").unwrap();
     let cases = [
         ("add", u64::MAX),
         ("at", 3),
@@ -2557,6 +2556,9 @@ fn site_fixture(target: Target) {
         ("finalize", 0),
         ("both", 0),
         ("sites", 1),
+        ("debug_identity", 7),
+        ("debug_resource_caller", 0),
+        ("debug_resource_caller", 1),
     ]
     .map(|(name, arg)| Case {
         function: names[name],
@@ -2610,6 +2612,90 @@ fn site_fixture(target: Target) {
             );
         }
         assert_relative_debug_rows(&bytes, &module);
+        let debug_strings = file.section_by_name(".debug_str").unwrap().data().unwrap();
+        let debug_info = file.section_by_name(".debug_info").unwrap().data().unwrap();
+        let has_subprogram = |name: &str| {
+            let linkage = format!("{name}\0");
+            [debug_strings, debug_info]
+                .iter()
+                .any(|data| data.windows(linkage.len()).any(|s| s == linkage.as_bytes()))
+        };
+        let source_functions = module
+            .functions
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| {
+                f.body.as_ref().is_some_and(|b| {
+                    b.inst_anchors.iter().any(Option::is_some)
+                        || b.blocks.iter().any(|b| b.anchor.is_some())
+                })
+            })
+            .map(|(i, _)| symbol(&module, FuncId(i as u32)))
+            .collect::<Vec<_>>();
+        for function in file
+            .symbols()
+            .filter(|s| s.kind() == object::SymbolKind::Text && s.size() != 0 && !s.is_undefined())
+        {
+            let name = function.name().unwrap();
+            if !source_functions
+                .iter()
+                .any(|prefix| name == prefix || name.starts_with(&format!("{prefix}.")))
+            {
+                continue;
+            }
+            let section = file
+                .section_by_index(function.section_index().unwrap())
+                .unwrap();
+            let code = &section.data().unwrap()
+                [function.address() as usize..(function.address() + function.size()) as usize];
+            // MergeFunctions retains public addresses through generated jump
+            // thunks. The destination's real source body owns their debug rows.
+            let branch = match target {
+                Target::X86_64Linux => code.len() == 5 && code[0] == 0xe9,
+                Target::Aarch64Linux => {
+                    code.len() == 4
+                        && u32::from_le_bytes(code.try_into().unwrap()) & 0xfc000000 == 0x14000000
+                }
+            };
+            let thunk = branch
+                && section.relocations().any(|(offset, r)| {
+                    if !(function.address()..function.address() + function.size()).contains(&offset)
+                    {
+                        return false;
+                    }
+                    let object::RelocationTarget::Symbol(target) = r.target() else {
+                        return false;
+                    };
+                    let destination = file.symbol_by_index(target).unwrap();
+                    destination
+                        .name()
+                        .is_ok_and(|destination| destination != name && has_subprogram(destination))
+                });
+            assert!(
+                has_subprogram(name) || thunk,
+                "source function has no actual-linkage subprogram: {name}, {opt:?}, composed={composed}"
+            );
+        }
+        if matches!(opt, Optimization::Speed) {
+            let strings = file.section_by_name(".debug_str").unwrap().data().unwrap();
+            let symbol = format!("{}\0", symbol(&module, names["debug_identity"]));
+            assert!(
+                strings
+                    .windows(symbol.len())
+                    .any(|bytes| bytes == symbol.as_bytes()),
+                "optimized infallible export has no subprogram: {opt:?} composed={composed}, anchors={:?}, strings={:?}",
+                module.functions[names["debug_identity"].index()]
+                    .body
+                    .as_ref()
+                    .unwrap()
+                    .inst_anchors,
+                strings
+                    .split(|b| *b == 0)
+                    .filter(|s| s.windows(14).any(|w| w == b"debug_identity"))
+                    .map(|s| String::from_utf8_lossy(s))
+                    .collect::<Vec<_>>()
+            );
+        }
         if !composed {
             // The eager unit harness includes drop-trace hooks. Compile exactly its
             // IR on the lazy bridge so the parity check has identical producer inputs.

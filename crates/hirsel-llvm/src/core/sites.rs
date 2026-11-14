@@ -22,6 +22,7 @@ impl FunctionEmitter<'_> {
 
 pub(super) struct DebugFunction {
     pub scope: usize,
+    pub wrapper: Option<(usize, usize)>,
     fallback: usize,
     locations: std::collections::BTreeMap<(u32, u32), usize>,
 }
@@ -87,7 +88,7 @@ pub(super) fn debug_plan(
         next,
         declarations,
         format!(
-            "distinct !DICompileUnit(language: DW_LANG_Rust, file: !{first_file}, producer: \"Hirsel\", isOptimized: false, runtimeVersion: 0, emissionKind: LineTablesOnly)"
+            "distinct !DICompileUnit(language: DW_LANG_Rust, file: !{first_file}, producer: \"Hirsel\", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug)"
         ),
     );
     let dwarf_flag = node(
@@ -125,6 +126,12 @@ pub(super) fn debug_plan(
             let scope = *scopes.entry(anchor.item.0).or_insert_with(|| node(next, declarations, format!("!DILexicalBlockFile(scope: !{scope}, file: !{}, discriminator: 0)", files[&anchor.item.0])));
             locations.entry((anchor.item.0, anchor.start)).or_insert_with(|| node(next, declarations, format!("!DILocation(line: {}, column: 1, scope: !{scope})", u64::from(anchor.start) + 1)));
         }
-        Some(DebugFunction { scope, fallback, locations })
+        let wrapper = if failures.may_fail[i] { None } else {
+            let linkage = symbol(module, FuncId(i as u32));
+            let wrapper = node(next, declarations, format!("distinct !DISubprogram(name: \"{}\", linkageName: \"{linkage}\", scope: !{file}, file: !{file}, line: 1, type: !{signature}, scopeLine: 1, spFlags: DISPFlagDefinition, unit: !{unit})", escaped(&name.to_string())));
+            let location = node(next, declarations, format!("!DILocation(line: 0, scope: !{wrapper})"));
+            Some((wrapper, location))
+        };
+        Some(DebugFunction { scope, wrapper, fallback, locations })
     }).collect()
 }

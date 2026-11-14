@@ -295,7 +295,13 @@ fn emit_ir_target_with_facts(
         )
         .unwrap();
         if !has_status {
-            e.infallible_wrapper(&name, sig, facts, &mut text);
+            e.infallible_wrapper(
+                &name,
+                sig,
+                facts,
+                &mut text,
+                function_debug.and_then(|d| d.wrapper),
+            );
         }
     }
     cleanup::drop_glue(
@@ -680,8 +686,9 @@ impl FunctionEmitter<'_> {
         ));
         let pointer = if self.abi.target == Target::Aarch64Linux || fixed_site.is_none() {
             let pointer = self.temp(&shape);
-            let value = self.calc(format!("load {shape}, ptr @{name}, align 8"));
-            self.line(format!("store {shape} {value}, ptr {pointer}, align 8"));
+            let words = format!("[{} x i64]", memory_layout::CAUSE_BYTES / 8);
+            let value = self.calc(format!("load {words}, ptr @{name}, align 8"));
+            self.line(format!("store {words} {value}, ptr {pointer}, align 8"));
             if fixed_site.is_none() {
                 let at = self.calc(format!(
                     "getelementptr i8, ptr {pointer}, i64 {}",

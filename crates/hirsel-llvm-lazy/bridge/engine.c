@@ -1,6 +1,7 @@
 // The CoreIR object's LLVM phase, with the same target, pipeline and probe
 // settings as hirsel-llvm's direct Context/Module/TargetMachine path.
 #include <llvm-c/Core.h>
+#include <llvm-c/DebugInfo.h>
 #include <llvm-c/IRReader.h>
 #include <llvm-c/Linker.h>
 #include <llvm-c/Error.h>
@@ -32,9 +33,53 @@ static void error(HirselLlvmOutput *out, const char *message) {
 }
 __attribute__((visibility("default")))
 void hirsel_llvm_output_free_v1(uint8_t *data) { free(data); }
+
+// Private ABI workers still own source-independent debug scopes. Their callers
+// and inlined bodies keep ordinary LLVM locations; generated instructions use 0.
+static LLVMMetadataRef worker_scope(LLVMModuleRef module,
+                                   LLVMDIBuilderRef *debug, LLVMValueRef function,
+                                   LLVMMetadataRef original) {
+    if (!original) return NULL;
+    LLVMMetadataRef file = LLVMDIScopeGetFile(original);
+    if (!*debug) {
+        *debug = LLVMCreateDIBuilder(module);
+        LLVMDIBuilderCreateCompileUnit(*debug, LLVMDWARFSourceLanguageRust, file,
+            "Hirsel", 6, 1, "", 0, 0, "", 0, LLVMDWARFEmissionFull, 0, 1, 0, "", 0, "", 0);
+    }
+    unsigned name_len;
+    size_t linkage_len;
+    const char *name = LLVMDIFileGetFilename(file, &name_len);
+    const char *linkage = LLVMGetValueName2(function, &linkage_len);
+    unsigned line = LLVMDISubprogramGetLine(original);
+    LLVMMetadataRef type = LLVMDIBuilderCreateSubroutineType(*debug, file, NULL, 0, LLVMDIFlagZero);
+    LLVMMetadataRef scope = LLVMDIBuilderCreateFunction(*debug, file, name, name_len,
+        linkage, linkage_len, file, line, type, 1, 1, line, LLVMDIFlagZero, 1);
+    LLVMSetSubprogram(function, scope);
+    return scope;
+}
+
+static LLVMMetadataRef worker_location(LLVMDIBuilderRef debug, LLVMContextRef context,
+                                      LLVMMetadataRef location, LLVMMetadataRef scope) {
+    if (!location) return NULL;
+    LLVMMetadataRef at = LLVMDILocationGetInlinedAt(location);
+    LLVMMetadataRef source_scope = LLVMDILocationGetScope(location);
+    if (at) at = worker_location(debug, context, at, scope);
+    else {
+        LLVMMetadataRef file = LLVMDIScopeGetFile(source_scope);
+        source_scope = file == LLVMDIScopeGetFile(scope) ? scope
+            : LLVMDIBuilderCreateLexicalBlockFile(debug, scope, file, 0);
+    }
+    return LLVMDIBuilderCreateDebugLocation(context, LLVMDILocationGetLine(location),
+        LLVMDILocationGetColumn(location), source_scope, at);
+}
+
+static void finish_worker_debug(LLVMDIBuilderRef debug) {
+    if (debug) { LLVMDIBuilderFinalize(debug); LLVMDisposeDIBuilder(debug); }
+}
 // Private register-return adapter. The FORM destination ABI stays exported.
 static void register_results(LLVMModuleRef module, LLVMContextRef context) {
     LLVMBuilderRef builder = LLVMCreateBuilderInContext(context);
+    LLVMDIBuilderRef debug = NULL;
     LLVMValueRef last = LLVMGetLastFunction(module);
     for (LLVMValueRef f = LLVMGetFirstFunction(module); f;) {
         LLVMValueRef next = f == last ? NULL : LLVMGetNextFunction(f);
@@ -82,6 +127,9 @@ static void register_results(LLVMModuleRef module, LLVMContextRef context) {
         char *label = malloc(n+16); memcpy(label, name, n); strcpy(label+n, ".register");
         LLVMValueRef promoted = LLVMAddFunction(module, label, new_ty); free(label);
         LLVMSetLinkage(promoted, LLVMInternalLinkage); LLVMSetFunctionCallConv(promoted, LLVMFastCallConv);
+        LLVMMetadataRef scope = worker_scope(module, &debug, promoted, LLVMGetSubprogram(f));
+        LLVMSetCurrentDebugLocation2(builder, scope
+            ? LLVMDIBuilderCreateDebugLocation(context, 0, 0, scope, NULL) : NULL);
         LLVMBasicBlockRef entry = LLVMAppendBasicBlockInContext(context, promoted, "entry");
         LLVMPositionBuilderAtEnd(builder, entry);
         LLVMTypeRef storage = LLVMArrayType2(LLVMInt8TypeInContext(context), bytes);
@@ -117,6 +165,7 @@ static void register_results(LLVMModuleRef module, LLVMContextRef context) {
         for (unsigned k = 0; k < calls; ++k) {
             LLVMValueRef old_call = sites[k];
             LLVMPositionBuilderBefore(builder, old_call);
+            LLVMSetCurrentDebugLocation2(builder, LLVMInstructionGetDebugLoc(old_call));
             args[0] = LLVMGetArgOperand(old_call, 0);
             dest = LLVMGetArgOperand(old_call, 1);
             for (unsigned i = 2; i < count; ++i) args[i-1] = LLVMGetArgOperand(old_call, i);
@@ -133,6 +182,7 @@ static void register_results(LLVMModuleRef module, LLVMContextRef context) {
         }
         free(args); free(params); free(sites); f = next;
     }
+    finish_worker_debug(debug);
     LLVMDisposeBuilder(builder);
 }
 
@@ -141,6 +191,8 @@ static void register_results(LLVMModuleRef module, LLVMContextRef context) {
 // Keep one private implementation for direct calls. Address uses still name
 // the cached public entry, whose FORM convention and identity do not change.
 static void local_inputs(LLVMModuleRef module) {
+    LLVMContextRef context = LLVMGetModuleContext(module);
+    LLVMDIBuilderRef debug = NULL;
     unsigned always = LLVMGetEnumAttributeKindForName("alwaysinline", 12);
     LLVMValueRef last = LLVMGetLastFunction(module);
     for (LLVMValueRef f = LLVMGetFirstFunction(module); f;) {
@@ -173,6 +225,12 @@ static void local_inputs(LLVMModuleRef module) {
         char *label = malloc(len + 7);
         memcpy(label, name, len); strcpy(label + len, ".local");
         LLVMSetValueName2(f, label, len + 6);
+        LLVMMetadataRef scope = worker_scope(module, &debug, f, LLVMGetSubprogram(f));
+        if (scope) {
+            for (LLVMBasicBlockRef block = LLVMGetFirstBasicBlock(f); block; block = LLVMGetNextBasicBlock(block))
+                for (LLVMValueRef inst = LLVMGetFirstInstruction(block); inst; inst = LLVMGetNextInstruction(inst))
+                    LLVMInstructionSetDebugLoc(inst, worker_location(debug, context, LLVMInstructionGetDebugLoc(inst), scope));
+        }
         label[len] = 0;
         LLVMValueRef external = LLVMAddFunction(module, label, LLVMGlobalGetValueType(f));
         free(label);
@@ -196,6 +254,7 @@ static void local_inputs(LLVMModuleRef module) {
         LLVMSetLinkage(f, LLVMInternalLinkage);
         f = next;
     }
+    finish_worker_debug(debug);
 }
 
 __attribute__((visibility("default")))

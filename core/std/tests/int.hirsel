@@ -210,3 +210,20 @@ fn parse_i64_range_edges() -> bool {
     let one: Result[i64, ParseError] = int.parse("-1")
     signed_error(low) == 3 && signed_error(high) == 3 && result.unwrap(one) == -1
 }
+
+// The byte ASCII tests agree with the char ones (an independent body over the scalar) on
+// every byte, so an edge off by one at 0x2F/0x3A, 0x40/0x5B, 0x60/0x7B or a fold that
+// admits '@', '[', '`' or '{' gives the count of disagreeing bytes.
+// expect: run byte_ascii_matches_char() = 0
+fn byte_ascii_matches_char() -> u64 {
+    let mut bad: u64 = 0
+    for v in 0u32 .. 256u32 {
+        let b: u8 = int.narrow(v)
+        let c = option.unwrap(char.from_u32(v))
+        if int.is_ascii_digit(b) != char.is_ascii_digit(c) { bad += 1 }
+        if int.is_ascii_alpha(b) != char.is_ascii_alpha(c) { bad += 1 }
+        let l: u32 = int.widen(int.to_ascii_lower(b))
+        if l != char.to_u32(char.to_ascii_lower(c)) { bad += 1 }
+    }
+    bad
+}

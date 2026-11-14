@@ -486,3 +486,19 @@ fn search_by_unordered_record() -> u64 {
     result.unwrap(list.binary_search_by(xs, fn(x: Box[SearchNode]) -> Order { order.compare(x.frequency, 3) }))
 }
 type SearchNode { frequency: u64, name: bool }
+
+// get_or reads xs[i] inside the list and x from len on, including an empty list and the
+// largest index: [7, 8] gives 7, 8, then 5, 5; the empty list gives 5. Read as digits.
+// expect: run get_or_edges() = 78555
+fn get_or_edges() -> u64 {
+    let mut xs: List[u64] = list.new()
+    result.unwrap(list.push(mut xs, 7))
+    result.unwrap(list.push(mut xs, 8))
+    let none: List[u64] = list.new()
+    let a = list.get_or(xs, 0, 5)
+    let b = list.get_or(xs, 1, 5)
+    let c = list.get_or(xs, 2, 5)
+    let d = list.get_or(xs, 18446744073709551615, 5)
+    let e = list.get_or(none, 0, 5)
+    (((a * 10 + b) * 10 + c) * 10 + d) * 10 + e
+}

@@ -17,6 +17,15 @@ pub fn first[T](xs: List[T]) -> Option[View[T]] in xs {
     list.get(xs, 0)
 }
 
+/// xs[i] copied out, or x when i >= len, as map.get_or and pool.get_or. Cost: O(1).
+/// Ex: `let b = list.get_or(bytes, i, 0)`
+pub fn get_or[T: plain](xs: List[T], i: u64, x: T) -> T {
+    match list.get(xs, i) {
+        Some(v) => v,
+        None => x,
+    }
+}
+
 /// A view of the last element, or None when empty. View: anchored to xs; FREEZE xs.
 /// Cost: O(1). Ex: `if let Some(top) = list.last(stack) { .. }`
 pub fn last[T](xs: List[T]) -> Option[View[T]] in xs {

@@ -616,6 +616,21 @@ fn split_facts(module: &Module) -> Option<String> {
         .pop()
         .unwrap();
     let linked = Facts::program(&[&library, &application], &[]);
+    // A kept module's facts come back whole from its consumed rows, and never
+    // from its bodies' rows alone, which leave out its declarations.
+    if Facts::restore(module, &whole.consumed(module)).as_ref() != Some(&whole) {
+        return Some("facts restored from consumed rows differ".into());
+    }
+    if module.functions.iter().any(|f| f.body.is_none())
+        && Facts::restore(module, &whole.record(module)).is_some()
+    {
+        return Some("facts restored from body rows alone".into());
+    }
+    let mut reordered = whole.consumed(module);
+    reordered.reverse();
+    if reordered.len() > 1 && Facts::restore(module, &reordered).is_some() {
+        return Some("facts restored from rows in another function order".into());
+    }
     for (f, function) in module.functions.iter().enumerate() {
         let sig = &module.signatures[function.signature.index()];
         let split = if core(f) { &published } else { &reading };

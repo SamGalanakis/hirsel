@@ -165,7 +165,10 @@ pub struct BodyFacts {
 /// body's facts as [`BodyFacts`]. A parameter with a fact is a `mut` or `take`
 /// carrier parameter of a body whose entry block no edge re-enters; every other
 /// parameter has none. A function without a body has the facts of its known
-/// body ([`Facts::program`]), and none if it has none.
+/// body ([`Facts::program`]), and none if it has none. A product that keeps a
+/// module's facts keeps its [`Facts::consumed`] rows, and [`Facts::restore`]
+/// gives the facts back: the rows are their one encoding.
+#[derive(Debug, Eq, PartialEq)]
 pub struct Facts {
     /// Its carrier's buffer never changes hands within an activation.
     sealed: Vec<Vec<bool>>,
@@ -310,6 +313,30 @@ impl Facts {
     /// with equal rows read the same facts, so a key naming them is never stale.
     pub fn consumed(&self, m: &Module) -> Vec<BodyFacts> {
         self.rows(m, true)
+    }
+
+    /// `m`'s facts from its [`Facts::consumed`] rows, or `None` if the rows are
+    /// not one per function of `m`, in order, under its code identities.
+    pub fn restore(m: &Module, consumed: &[BodyFacts]) -> Option<Self> {
+        if consumed.len() != m.functions.len() {
+            return None;
+        }
+        let mut facts = Self {
+            sealed: Vec::with_capacity(consumed.len()),
+            blind: Vec::with_capacity(consumed.len()),
+        };
+        for (f, row) in consumed.iter().enumerate() {
+            if row.code != m.code_identity(FuncId(f as u32)) {
+                return None;
+            }
+            facts
+                .sealed
+                .push(row.params.iter().map(|p| p.sealed).collect());
+            facts
+                .blind
+                .push(row.params.iter().map(|p| p.place_blind).collect());
+        }
+        Some(facts)
     }
 
     fn rows(&self, m: &Module, declarations: bool) -> Vec<BodyFacts> {

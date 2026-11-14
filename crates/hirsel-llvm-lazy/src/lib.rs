@@ -137,5 +137,8 @@ mod tests {
         assert_eq!(component_lines(&loaded), component_lines(&maps()));
         crate::construction::printer_oracle_fixture();
         crate::core::sink::primitive_oracle();
+        let bitcode = crate::core::sink::native_scalar_fixture().unwrap();
+        assert!(!bitcode.is_empty());
+        let _object = crate::emit_program(&[crate::Unit::Import { bitcode: &bitcode, summary: &crate::ImportSummary { functions: vec![], facts: vec![] } }], &[]).unwrap();
     }
 }

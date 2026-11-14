@@ -353,3 +353,16 @@ pub(crate) fn primitive_oracle() {
     let text=format!("define i64 @fixture(i64 %p0) {{\n{} }}",text.code.replacen("entry:\n",&format!("entry:\n{}",text.allocations),1));
     assert_eq!(native.unit.print().unwrap(),context.print_text(&text).unwrap());
 }
+
+#[cfg(hirsel_lazy_core)]
+pub(crate) fn native_scalar_fixture() -> Result<Vec<u8>, String> {
+    let context = crate::construction::Context::new()?;
+    let mut native = native::NativeSink::new(context.unit());
+    let signature = Signature { result: Type::I64, extension: Extension::None, params: vec![Parameter::plain(Type::I64)] };
+    native.begin_function("hirsel_native_fixture", &signature, &[Local::Param(0)], false);
+    native.block("entry");
+    let one = Value::Integer(1);
+    native.instruction(Some(Local::Temp(0)), Operation::Binary(Binary::Add, Type::I64, &Value::Local(Local::Param(0)), &one), None);
+    native.instruction(None, Operation::Return(Type::I64, Some(&Value::Local(Local::Temp(0)))), None);
+    native.bitcode()
+}

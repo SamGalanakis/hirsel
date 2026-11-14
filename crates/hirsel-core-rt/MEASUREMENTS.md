@@ -1,5 +1,38 @@
 # Memory cost samples
 
+## M2 frozen memory rows
+
+Measured commit `e96338cf41d71efd2076a9902068048a37b742c8`. Compiler `2f1f30544428e06b3d89bef6ea21cde83d03db780949f339030307055aad9557`; shipping fat-LTO runtime `95dd816277b936c865ccba458657918917889d6cd86a109f8343c1f03f3c8bb7`. These equal the published M2 identities. Full commit/identities are repeated in every row of [M2-RESULTS.json](M2-RESULTS.json). The compiler itself is release; LLVM native code is release and Cranelift is the existing dev configuration.
+
+| LLVM kernel | Hirsel instructions/op | Reused Rust | H/R |
+|---|---:|---:|---:|
+|allocate-free 128B|200.001|174|1.149x|
+|allocate-free 65536B|447.002|421|1.062x|
+|clone 16B|224.000|205|1.093x|
+
+| Peak memory | Engine | Root MiB | RSS KiB, default | Charged B | Retained B | Slack B | End C/R/S |
+|---|---|---:|---:|---:|---:|---:|---|
+|Calculator::Ast|llvm|64|24744|12478016|20545513|58403|0/0/0|
+|Calculator::Ast|cranelift|64|25032|12478016|20545513|58403|0/0/0|
+|Calculator::Interpreter|llvm|64|45700|25850016|40629988|58403|0/0/0|
+|Calculator::Interpreter|cranelift|64|45976|25850016|40629988|58403|0/0/0|
+|Binarytrees::Obj|llvm|128|132864|83894520|117449091|58403|0/0/0|
+|Binarytrees::Obj|cranelift|128|132864|83894520|117449091|58403|0/0/0|
+|Etc::Words|llvm|64|5656|2802248|3875720|58403|0/0/0|
+|Etc::Words|cranelift|64|5672|2802248|3875720|58403|0/0/0|
+|lru|llvm|64|2304|786720|786883|0|0/0/0|
+|lru|cranelift|64|2560|786720|786883|0|0/0/0|
+|json|llvm|64|2048|393504|393667|0|0/0/0|
+|json|cranelift|64|2304|393504|393667|0|0/0/0|
+
+One sample per configuration, CPU16, existing shared measurement locks and unchanged harness/input bytes. The pair uses 905's counter loop (200,000 calls); clone16 uses 889's small-input counter with empty-loop subtraction (1,000,000 calls). The hot-loop object builder is built from this same frozen commit. Rust174/421/205 are the unchanged supplied samples, reused, not re-taken. Other memory ratios are left to the owning reviewed Rust task tables; none is estimated here.
+
+RSS comes from the default shipping runtime. Balance figures come from separate diagnostic observed runs of the same inputs. Observed code is never a timing sample. Charge is the MEM-19 root reservation including bound/task/grant/startup reservations. Retained is live native backing requests including prefixes/chunks, excluding allocator arenas/bookkeeping/stacks; slack is unassigned region tails. The three independent peaks are not additive or necessarily simultaneous. Every final balance is zero. The observer archive identity is recorded separately per row.
+
+All 12 default and 12 observed outputs match their expected outputs. Binarytrees Obj uses 128 MiB and preserves the exact 83,894,520 B logical peak; native Fixed32 changes physical requests only. Words has identical observed balances on both engines; the earlier single LLVM+3.4% page-count fluctuation is not a logical-charge increase.
+
+Evidence: `/workspace/code/hirsel-briefs/core-memory-900/m2/`; canonical `artifacts.json`, frozen copies/identities, counter logs, per-side RSS and observed reports. Earlier STEP2 measurements are not used as M2 rows because their artifact identities differ.
+
 ## Bounded channel and general-own follow-up
 
 One candidate, source c5d520e7 after the Arc gate landed. Same provider kernels, workload counts, CPU16/jobs1/2GiB/Rust1.99 checked opt3/no LTO; one native sample/configuration, all checksums pass. Callgrind uses100,000 items on each side for diagnostic attribution; native pipeline retains1,000,000.

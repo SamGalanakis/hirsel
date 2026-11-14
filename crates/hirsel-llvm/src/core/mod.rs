@@ -136,6 +136,33 @@ pub(crate) fn emit_native_scalar_module_in_context(
             continue;
         };
         let sig = &module.signatures[function.signature.index()];
+        if sig.dest.is_some() || sig.results.len() > 1 || failures.may_fail[index] {
+            return Err(Error::Unsupported(
+                "native scalar seam requires infallible scalar functions".into(),
+            ));
+        }
+        if body.insts.iter().any(|inst| {
+            matches!(
+                inst,
+                Inst::Call { .. }
+                    | Inst::Alloc { .. }
+                    | Inst::Grow { .. }
+                    | Inst::Drop { .. }
+                    | Inst::Release { .. }
+                    | Inst::Free { .. }
+                    | Inst::Copy { .. }
+                    | Inst::LimitEnter { .. }
+                    | Inst::LimitExit
+                    | Inst::RegionOpen { .. }
+                    | Inst::RegionClose { .. }
+                    | Inst::Share { .. }
+                    | Inst::TryUnwrap { .. }
+            )
+        }) {
+            return Err(Error::Unsupported(
+                "native scalar seam encountered memory/runtime instructions".into(),
+            ));
+        }
         let has_status = failures.may_fail[index];
         let abi = if has_status {
             abi::Return::internal_on_target(target, &sig.results)

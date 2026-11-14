@@ -53,18 +53,16 @@ fn io[T](take r: Result[T, IoError]) -> Result[T, Failure] {
 // request arrives as bytes and a receiver cannot make a StaticFn from them; the key is
 // computed here from the value, so the two cannot disagree.
 pub fn register(mut r: Registry, h: StaticFn[Handler]) -> Result[(), Failure] {
-    register_as(mut r, code.identity(h), h)
+    register_as(mut r, h, h)
 }
 
-// Registers the adapter `via` under `named`, the identity of a function of another type
+// Registers the adapter `via` under the identity of `named`, a function of another type
 // that `via` decodes for: the request names that function, so a change to its signature
-// changes the key and an old request is NoCode. Nothing checks that `via` calls it.
-// WORKAROUND (HOOK-FINDINGS S2): the intended signature takes `named: StaticFn[F]` for any
-// F; `code.identity` of a generic StaticFn parameter is not built (dispatch_generic row),
-// so the caller passes `code.identity(code.describe(f))`.
-pub fn register_as(mut r: Registry, named: Bytes, via: StaticFn[Handler]) -> Result[(), Failure] {
-    let mut key: Bytes = full(list.with_capacity(list.len(named)))?
-    full(list.append(mut key, named))?
+// changes the key and an old request is NoCode. Nothing checks that `via` calls `named`.
+pub fn register_as[F](mut r: Registry, named: StaticFn[F], via: StaticFn[Handler]) -> Result[(), Failure] {
+    let id = code.identity(named)
+    let mut key: Bytes = full(list.with_capacity(list.len(id)))?
+    full(list.append(mut key, id))?
     match map.insert(mut r.handlers, take key, via) {
         Ok(()) => Ok(()),
         Error((c, _)) => Error(Full(c)),
@@ -112,9 +110,9 @@ fn has_header(b: Bytes, kind: u8) -> bool {
     list.len(b) >= 3 && b[0] == 72 && b[1] == kind && b[2] == 1
 }
 
-// `id` is the identity of the function the request names, of any type (the same
-// WORKAROUND as register_as: the intended parameter is `named: StaticFn[F]`).
-pub fn request(id: Bytes, arg: Bytes) -> Result[Bytes, Failure] {
+// A request naming `named`, a function of any type, by its identity bytes.
+pub fn request[F](named: StaticFn[F], arg: Bytes) -> Result[Bytes, Failure] {
+    let id = code.identity(named)
     let mut out: Bytes = list.new()
     header(mut out, 81)?
     put_u64(mut out, list.len(id))?

@@ -33,5 +33,5 @@ fn repeat_wire(a: Bytes) -> Result[Bytes, Capacity] {
 
 pub fn register(mut r: m2b.spool.Registry) -> Result[(), m2b.spool.Failure] {
     m2b.spool.register(mut r, code.describe(double))?
-    m2b.spool.register_as(mut r, code.identity(code.describe(repeat)), code.describe(repeat_wire))
+    m2b.spool.register_as(mut r, code.describe(repeat), code.describe(repeat_wire))
 }

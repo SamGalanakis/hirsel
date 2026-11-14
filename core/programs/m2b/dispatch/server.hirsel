@@ -43,7 +43,7 @@ fn solo(d: Dir, c: Clock, frame: Bytes) -> Result[m2b.spool.Reply, m2b.spool.Fai
 }
 
 fn exchange(d: Dir, c: Clock) -> Result[m2b.spool.Reply, m2b.spool.Failure] waits {
-    solo(d, c, m2b.spool.request(code.identity(code.describe(rpc.handlers.double)), text("ab")?)?)
+    solo(d, c, m2b.spool.request(code.describe(rpc.handlers.double), text("ab")?)?)
 }
 
 fn unknown(b: Bytes) -> Result[Bytes, Capacity] {
@@ -51,13 +51,13 @@ fn unknown(b: Bytes) -> Result[Bytes, Capacity] {
 }
 
 fn nocode(d: Dir, c: Clock) -> Result[m2b.spool.Reply, m2b.spool.Failure] waits {
-    solo(d, c, m2b.spool.request(code.identity(code.describe(unknown)), text("ab")?)?)
+    solo(d, c, m2b.spool.request(code.describe(unknown), text("ab")?)?)
 }
 
 // A request for `unknown` with "ab", whose identity length is rewritten to 1000: the
 // field runs past the end of the frame.
 fn bad(d: Dir, c: Clock) -> Result[m2b.spool.Reply, m2b.spool.Failure] waits {
-    let frame = m2b.spool.request(code.identity(code.describe(unknown)), text("ab")?)?
+    let frame = m2b.spool.request(code.describe(unknown), text("ab")?)?
     let mut cut: Bytes = list.new()
     let mut i: u64 = 0
     while i < list.len(frame) {

@@ -40,7 +40,7 @@ fn triple(b: Bytes) -> Result[Bytes, Capacity] {
 
 fn frame(name: String) -> Result[Option[Bytes], m2b.spool.Failure] {
     if name == "exchange" {
-        return Ok(Some(m2b.spool.request(code.identity(code.describe(rpc.handlers.double)), text("ab")?)?))
+        return Ok(Some(m2b.spool.request(code.describe(rpc.handlers.double), text("ab")?)?))
     }
     if name == "typed" {
         // repeat("ab", 3): the count as 8 little-endian bytes, then "ab".
@@ -55,10 +55,10 @@ fn frame(name: String) -> Result[Option[Bytes], m2b.spool.Failure] {
             Ok(()) => {},
             Error(c) => return Error(Full(c)),
         }
-        return Ok(Some(m2b.spool.request(code.identity(code.describe(rpc.handlers.repeat)), arg)?))
+        return Ok(Some(m2b.spool.request(code.describe(rpc.handlers.repeat), arg)?))
     }
     if name == "nocode" {
-        return Ok(Some(m2b.spool.request(code.identity(code.describe(triple)), text("ab")?)?))
+        return Ok(Some(m2b.spool.request(code.describe(triple), text("ab")?)?))
     }
     if name == "bad" {
         // A request header and a version the server does not know.

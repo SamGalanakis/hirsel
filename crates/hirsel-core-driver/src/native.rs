@@ -1020,11 +1020,9 @@ b0:
             .unwrap();
             for library in &core {
                 let archive = store.get(library.identity).unwrap().unwrap();
-                let product = crate::native_library::read::<hirsel_llvm_lazy::ImportSummary>(
-                    &archive,
-                    hirsel_llvm_lazy::NATIVE_LIBRARY_SCHEMA,
-                )
-                .expect("one complete native-library product");
+                let product =
+                    crate::native_library::read(&archive, hirsel_llvm_lazy::NATIVE_LIBRARY_SCHEMA)
+                        .expect("one complete native-library product");
                 assert_eq!(product.object, library.bytes);
                 assert!(
                     product.bitcode.starts_with(b"BC\xc0\xde"),

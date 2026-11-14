@@ -88,7 +88,7 @@ impl CheckProduct {
                 &[&consumed[i]],
             )?;
             let (identity, product, compiled) = if let Some((hash, product)) =
-                crate::native_library::load::<hirsel_llvm_lazy::ImportSummary>(
+                crate::native_library::load(
                     library_store,
                     object_key,
                     hirsel_llvm_lazy::NATIVE_LIBRARY_SCHEMA,
@@ -111,19 +111,9 @@ impl CheckProduct {
                     library_store,
                     object_key,
                     hirsel_llvm_lazy::NATIVE_LIBRARY_SCHEMA,
-                    &native.object,
-                    &native.bitcode,
-                    &native.summary,
+                    &native,
                 )?;
-                (
-                    identity,
-                    crate::native_library::Product {
-                        object: native.object,
-                        bitcode: native.bitcode,
-                        summary: native.summary,
-                    },
-                    true,
-                )
+                (identity, native, true)
             };
             objects.push(ObjectProduct {
                 private_variants: 0,

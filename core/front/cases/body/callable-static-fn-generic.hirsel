@@ -54,5 +54,4 @@ pub fn generic_record_case() -> u64 {
     let entry = Entry(code: code.describe(double))
     entry_name(entry, code.identity(code.describe(double)))
 }
-
 // expect: run generic_record_case() = 1

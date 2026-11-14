@@ -203,7 +203,8 @@ impl Function<'_, '_, '_> {
                 if let Some(glue) = self.glues.drops[ty.index()] {
                     let at = self.addr(address);
                     let glue = self.calls.reference(self.object, &mut self.b, glue);
-                    let call = self.b.ins().call(glue, &[self.context, at]);
+                    let site = self.site()?;
+                    let call = self.b.ins().call(glue, &[self.context, at, site]);
                     let status = self.b.inst_results(call)[0];
                     self.call_failure(status, fail)?;
                 }

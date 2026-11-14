@@ -84,6 +84,11 @@ impl Signature {
                 Param::Address { .. } => types::I64,
             })
         }));
+        if context {
+            // FORM#91: activation fallback, after every source parameter.
+            // The process/task C callbacks keep their published signatures.
+            clif.params.push(AbiParam::new(types::I64));
+        }
         if !indirect {
             if !aggregate || homogeneous {
                 clif.returns

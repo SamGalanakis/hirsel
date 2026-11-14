@@ -66,7 +66,8 @@ impl Glues {
             let offset = input_offset(tables.input, tables.layouts, x)?;
             let data = b.ins().iadd_imm(ps[1], offset as i64);
             let drop = object.declare_func_in_func(tables.glues.drops[x.index()].unwrap(), b.func);
-            let call = b.ins().call(drop, &[ps[0], data]);
+            let zero = b.ins().iconst(types::I64, 0);
+            let call = b.ins().call(drop, &[ps[0], data, zero]);
             let status = b.inst_results(call)[0];
             b.ins().return_(&[status]);
             b.seal_all_blocks();
@@ -124,6 +125,7 @@ impl Glues {
                 }
                 Carried::Nothing => {}
             }
+            args.push(b.ins().iconst(types::I64, 0));
             let call = b.ins().call_indirect(signature, code, &args);
             let physical = b.inst_results(call).to_vec();
             let mut values = [Value::from_u32(0); 2];

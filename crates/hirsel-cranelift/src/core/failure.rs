@@ -23,8 +23,11 @@ impl Function<'_, '_, '_> {
         self.b.ins().jump(block, &[]);
     }
     pub fn emit_failure_blocks(&mut self) -> Result<()> {
-        while let Some((kind, target, block)) = self.raise_blocks.pop() {
+        while let Some((kind, target, anchor, srcloc, block)) = self.raise_blocks.pop() {
             self.b.switch_to_block(block);
+            self.anchor = anchor;
+            self.srcloc = srcloc;
+            self.b.set_srcloc(srcloc);
             self.record_failure(kind)?;
             self.fail_to(target);
         }
@@ -49,8 +52,8 @@ impl Function<'_, '_, '_> {
     }
     pub fn record_failure(&mut self, kind: u8) -> Result<()> {
         // HirselCoreCause in the runtime header, passed by value under the C ABI.
-        // Its pointer fields are empty for primitive causes. Source-site table
-        // rebinding is reserved for the driver/debug integration.
+        // Its pointer fields are empty for primitive causes. The site symbol
+        // is resolved by the fresh link, so a cached body can move in its file.
         let slot = if let Some(slot) = self.cause_slot {
             slot
         } else {
@@ -78,6 +81,8 @@ impl Function<'_, '_, '_> {
             addr,
             super::memory_layout::CAUSE_KIND as i32,
         );
+        let site = self.site()?;
+        self.b.ins().store(MemFlagsData::trusted(), site, addr, super::memory_layout::CAUSE_SITE as i32);
         self.calls
             .raise(self.object, &mut self.b, self.context, addr)
     }
@@ -95,7 +100,7 @@ impl Function<'_, '_, '_> {
             .b
             .ins()
             .load(types::I64, MemFlagsData::new(), carrier, 16);
-        let site = self.b.ins().iconst(types::I64, 0);
+        let site = self.site()?;
         let u = Ty::Scalar(Scalar::U64);
         self.c_call(
             "hirsel_core_raise_string",
@@ -106,16 +111,16 @@ impl Function<'_, '_, '_> {
         Ok(())
     }
     pub fn guard(&mut self, condition: Value, kind: u8, target: Option<BlockId>) -> Result<()> {
-        let failed = if let Some((_, _, block)) = self
+        let failed = if let Some((_, _, _, _, block)) = self
             .raise_blocks
             .iter()
-            .find(|(k, t, _)| *k == kind && *t == target)
+            .find(|(k, t, anchor, _, _)| *k == kind && *t == target && *anchor == self.anchor)
         {
             *block
         } else {
             let block = self.b.create_block();
             self.b.set_cold_block(block);
-            self.raise_blocks.push((kind, target, block));
+            self.raise_blocks.push((kind, target, self.anchor, self.srcloc, block));
             block
         };
         let next = self.b.create_block();

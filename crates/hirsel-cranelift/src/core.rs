@@ -28,6 +28,7 @@ mod memory;
 mod place;
 pub mod profile;
 mod scalar;
+mod sites;
 mod task_entry;
 mod tasks;
 
@@ -111,6 +112,8 @@ pub(super) struct Tables<'a> {
     allocators: &'a [fast::Allocator],
     trace_drops: bool,
     observe_charge: bool,
+    debug: bool,
+    site_symbols: std::cell::RefCell<std::collections::HashMap<ItemId, cranelift_module::DataId>>,
     runtimes: std::cell::RefCell<calls::Imports>,
 }
 
@@ -288,6 +291,8 @@ fn emit(
         allocators: &allocators,
         trace_drops,
         observe_charge,
+        debug: false,
+        site_symbols: Default::default(),
         runtimes: Default::default(),
     };
     drop(setup);

@@ -9,6 +9,7 @@ use resume::plan_type;
 
 pub(super) struct Glues {
     pub drops: Vec<Option<cranelift_module::FuncId>>,
+    pub callbacks: Vec<Option<cranelift_module::FuncId>>,
     pub resumes: Vec<Option<cranelift_module::FuncId>>,
     pub fixed: Vec<Option<[cranelift_module::DataId; 2]>>,
     pub buffers: Vec<(FieldTy, cranelift_module::FuncId)>,
@@ -170,6 +171,7 @@ impl Glues {
             }
         }
         let mut drops = vec![None; layouts.len()];
+        let mut callbacks = vec![None; layouts.len()];
         let mut resumes = vec![None; layouts.len()];
         for (i, recipe) in layouts.iter().enumerate() {
             if (recipe.drop.is_some() || descriptors.contains(&i)) && needed.contains(&i) {
@@ -178,10 +180,15 @@ impl Glues {
                         .declare_function(
                             &format!("hirsel.core.drop.{i}"),
                             Linkage::Local,
-                            &abi::Signature::c(object, &[P, P], &[B]).clif,
+                            &abi::Signature::c(object, &[P, P, U], &[B]).clif,
                         )
                         .map_err(error)?,
                 );
+            }
+            if descriptors.contains(&i) {
+                callbacks[i] = Some(object.declare_function(
+                    &format!("hirsel.core.drop.callback.{i}"), Linkage::Local,
+                    &abi::Signature::c(object, &[P, P], &[B]).clif).map_err(error)?);
             }
             if roots.contains(&i) {
                 resumes[i] = Some(
@@ -283,6 +290,7 @@ impl Glues {
         }
         Ok(Self {
             drops,
+            callbacks,
             resumes,
             fixed,
             buffers,
@@ -298,6 +306,9 @@ impl Glues {
         for (i, &function) in self.drops.iter().enumerate() {
             if let Some(function) = function {
                 self.emit_one(object, tables, (i, function, false), observer, scratch)?;
+                if let Some(callback) = self.callbacks[i] {
+                    self.emit_callback(object, callback, function, observer, scratch)?;
+                }
             }
         }
         for (i, &function) in self.resumes.iter().enumerate() {
@@ -309,6 +320,25 @@ impl Glues {
             self.emit_buffer(object, tables, ty, *function, observer, scratch)?;
         }
         Ok(())
+    }
+    fn emit_callback(&self, object: &mut ObjectModule, callback: cranelift_module::FuncId,
+        target: cranelift_module::FuncId, observer: &impl profile::Observer, scratch: &mut Compilation) -> Result<()> {
+        let context = &mut scratch.codegen;
+        object.clear_context(context);
+        context.func.signature = abi::Signature::c(object, &[P, P], &[B]).clif;
+        let mut b = FunctionBuilder::new(&mut context.func, &mut scratch.frontend);
+        let entry = b.create_block();
+        b.append_block_params_for_function_params(entry);
+        b.switch_to_block(entry);
+        let args = b.block_params(entry).to_vec();
+        let zero = b.ins().iconst(types::I64, 0);
+        let f = object.declare_func_in_func(target, b.func);
+        let call = b.ins().call(f, &[args[0], args[1], zero]);
+        let result = b.inst_results(call)[0];
+        b.ins().return_(&[result]);
+        b.seal_all_blocks();
+        b.finalize(object.target_config());
+        observer.define(object, callback, context).map_err(error)
     }
     fn emit_buffer(
         &self,
@@ -329,12 +359,14 @@ impl Glues {
         b.switch_to_block(entry);
         let args = b.block_params(entry).to_vec();
         let failed = b.ins().iconst(types::I8, 0);
+        let caller_site = b.ins().iconst(types::I64, 0);
         let mut g = Glue {
             b,
             object,
             tables,
             glues: self,
             ctx: args[0],
+            caller_site,
             failed,
             calls: calls::Calls::new(&tables.runtimes, tables.signatures, 0),
         };
@@ -359,19 +391,21 @@ impl Glues {
         let context = &mut scratch.codegen;
         object.clear_context(context);
         context.func.signature =
-            abi::Signature::c(object, if resume { &[P, P, P, P] } else { &[P, P] }, &[B]).clif;
+            abi::Signature::c(object, if resume { &[P, P, P, P] } else { &[P, P, U] }, &[B]).clif;
         let mut b = FunctionBuilder::new(&mut context.func, &mut scratch.frontend);
         let entry = b.create_block();
         b.append_block_params_for_function_params(entry);
         b.switch_to_block(entry);
         let args = b.block_params(entry).to_vec();
         let failed = b.ins().iconst(types::I8, 0);
+        let caller_site = if resume { b.ins().iconst(types::I64, 0) } else { args[2] };
         let mut g = Glue {
             b,
             object,
             tables,
             glues: self,
             ctx: args[0],
+            caller_site,
             failed,
             calls: calls::Calls::new(&tables.runtimes, tables.signatures, 0),
         };
@@ -415,7 +449,7 @@ impl Glues {
                     g.call("hirsel_core_finalizer_begin", &[P, P], &[], &[g.ctx, base])?;
                 }
                 let f = tables.functions[finalizer.0 as usize];
-                let status = g.direct(f, &[g.ctx, base]);
+                let status = g.direct(f, &[g.ctx, base, g.caller_site]);
                 g.merge(status);
                 if resource {
                     g.call("hirsel_core_finalizer_end", &[P, P], &[], &[g.ctx, base])?;
@@ -442,6 +476,7 @@ struct Glue<'a, 'b, 'c> {
     tables: &'c Tables<'c>,
     glues: &'c Glues,
     ctx: Value,
+    caller_site: Value,
     failed: Value,
     calls: calls::Calls<'c>,
 }
@@ -477,7 +512,7 @@ impl Glue<'_, '_, '_> {
     }
     fn drop_type(&mut self, at: Value, t: TypeRef) {
         if let Some(f) = self.glues.drops[t.index()] {
-            let status = self.direct(f, &[self.ctx, at]);
+            let status = self.direct(f, &[self.ctx, at, self.caller_site]);
             self.merge(status);
         }
     }

@@ -25,10 +25,15 @@ pub(super) struct Function<'a, 'b, 'c> {
     pub glues: &'c drop::Glues,
     pub task_entries: &'c task_entry::Glues,
     pub context: Value,
+    pub caller_site: Value,
+    pub anchor: Option<Anchor>,
+    pub srcloc: ir::SourceLoc,
+    pub site_symbols: &'c std::cell::RefCell<std::collections::HashMap<ItemId, cranelift_module::DataId>>,
+    pub debug: bool,
     pub allocators: &'c [fast::Allocator],
     pub signature: &'c abi::Signature,
     pub result_storage: Option<Value>,
-    pub raise_blocks: Vec<(u8, Option<BlockId>, ir::Block)>,
+    pub raise_blocks: Vec<(u8, Option<BlockId>, Option<Anchor>, ir::SourceLoc, ir::Block)>,
     pub propagation: Option<ir::Block>,
     pub cause_slot: Option<ir::StackSlot>,
     pub calls: calls::Calls<'c>,
@@ -168,6 +173,7 @@ pub(super) fn emit(
     let params = b.block_params(blocks[0]);
     let context = params[usize::from(signature.indirect)];
     let result_storage = signature.indirect.then(|| params[0]);
+    let caller_site = *params.last().unwrap();
     let mut f = Function {
         b,
         object,
@@ -182,6 +188,11 @@ pub(super) fn emit(
         statics,
         signatures,
         context,
+        caller_site,
+        anchor: None,
+        srcloc: ir::SourceLoc::default(),
+        site_symbols: &tables.site_symbols,
+        debug: tables.debug,
         allocators: tables.allocators,
         glues: tables.glues,
         task_entries: tables.task_entries,
@@ -230,7 +241,9 @@ pub(super) fn emit(
         } else {
             None
         };
-        for inst in block.insts.get(&body.insts).unwrap() {
+        for (offset, inst) in block.insts.get(&body.insts).unwrap().iter().enumerate() {
+            let index = block.insts.start as usize + offset;
+            f.at_anchor(body.inst_anchors.get(index).copied().flatten(), index as u32 + 1);
             if !matches!((fill, inst), (Some(fill), Inst::Store { address, .. }) if fill.store == *address)
             {
                 f.instruction(inst)?;
@@ -239,6 +252,7 @@ pub(super) fn emit(
         if let (Some(fill), Some(index)) = (fill, original_index) {
             f.set(fill.index, index);
         }
+        f.at_anchor(block.anchor, body.insts.len() as u32 + i as u32 + 1);
         match &body.terminators[i] {
             Terminator::Return(range) => {
                 let mut results = std::mem::take(&mut f.calls.results);
@@ -548,6 +562,7 @@ impl Function<'_, '_, '_> {
                         Arg::Address(a) => self.addr(a),
                     });
                 }
+                args.push(self.site()?);
                 let inst = match call.callee {
                     Callee::Direct(f) => {
                         let f = self.calls.reference(

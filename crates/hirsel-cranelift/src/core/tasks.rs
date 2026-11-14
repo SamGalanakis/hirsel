@@ -40,7 +40,7 @@ impl Function<'_, '_, '_> {
                 if task_input && i == 0 {
                     self.task_entries.inputs[&t]
                 } else {
-                    self.glues.drops[t.index()].unwrap()
+                    self.glues.callbacks[t.index()].unwrap()
                 },
             );
             let drop = self.b.ins().func_addr(types::I64, function);
@@ -65,7 +65,11 @@ impl Function<'_, '_, '_> {
             };
         }
         let mut outputs = [Value::from_u32(0); 4];
-        let site = self.b.ins().iconst(types::I64, 0);
+        let site = match op {
+            RtOp::Host(_) | RtOp::CheckCancel | RtOp::Join { .. } | RtOp::ChannelNew { .. }
+            | RtOp::Send { .. } | RtOp::Receive { .. } => self.site()?,
+            _ => self.b.ins().iconst(types::I64, 0),
+        };
         let n = match op {
             RtOp::DestId => {
                 outputs[0] = self.c_call("hirsel_core_dest_id", &[], &[U], &[])?[0];

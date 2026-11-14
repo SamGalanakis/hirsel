@@ -3,6 +3,20 @@
 use super::*;
 
 impl FunctionEmitter<'_> {
+    pub(super) fn hash_bytes(&mut self, data: &str, len: &str) -> String {
+        let facts = if self.facts {
+            " nounwind memory(argmem: read)"
+        } else {
+            ""
+        };
+        self.intrinsics.insert(format!(
+            "declare i64 @hirsel_core_hash_bytes(ptr, i64){facts}"
+        ));
+        self.calc(format!(
+            "call i64 @hirsel_core_hash_bytes(ptr {data}, i64 {len})"
+        ))
+    }
+
     pub(super) fn compare_bytes(&mut self, arguments: &[(String, String)]) -> String {
         let facts = if self.facts {
             " nounwind memory(argmem: read)"

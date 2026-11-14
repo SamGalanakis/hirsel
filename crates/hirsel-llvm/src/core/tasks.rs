@@ -113,7 +113,7 @@ impl FunctionEmitter<'_> {
             RtOp::CauseNext => self.native_call("hirsel_core_cause_next", &[P], &[p(&args[0])]),
             RtOp::CauseValue => self.native_call("hirsel_core_cause_value", &[P], &[p(&args[0])]),
             RtOp::HashBytes => {
-                self.native_call("hirsel_core_hash_bytes", &[U], &[p(&args[0]), u(&args[1])])
+                vec![self.hash_bytes(&args[0], &args[1])]
             }
             RtOp::CompareBytes => {
                 vec![self.compare_bytes(&[p(&args[0]), u(&args[1]), p(&args[2]), u(&args[3])])]

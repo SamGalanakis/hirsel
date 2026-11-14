@@ -1584,6 +1584,31 @@ fn static_capacity_zero_carriers_drop_and_grow_through_runtime_cleanup() {
 }
 
 #[test]
+fn hash_read_facts_observe_intervening_writes() {
+    let module = text::parse(include_str!("../../tests/core_runtime/hash-writes.core")).unwrap();
+    wf::module(&module).unwrap();
+    let cases = [(0, 1), (1, 0), (u64::MAX, 0), (1 << 63, u64::MAX)].map(|(a, b)| Case {
+        function: FuncId(0),
+        args: vec![a, b],
+        limit: 0,
+        injection: None,
+    });
+    for facts in [false, true] {
+        let ir = emit_ir_with_facts(&module, false, facts).unwrap();
+        for speed in [false, true] {
+            let object = hirsel_llvm_lazy::compile_ir(&ir, speed).unwrap();
+            let got = execute_object(&module, &cases, "", "", Optimization::None, Some(object));
+            for (case, actual) in cases.iter().zip(got) {
+                let expected = eval::run(&module, case.function, &case.args, case.limit);
+                assert_eq!(actual.outcome, expected.outcome);
+                assert_eq!(actual.used, 0);
+                assert_eq!(actual.admissions, 0);
+            }
+        }
+    }
+}
+
+#[test]
 fn string_literals_growth_and_byte_order_match_the_evaluator() {
     let source = include_str!("../../../hirsel-core-ir/samples/strings.core");
     let module = text::parse(source).unwrap();

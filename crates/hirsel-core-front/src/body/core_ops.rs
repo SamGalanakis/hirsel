@@ -622,7 +622,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Kernel::LogNew => self.runtime_log_new(types[0], result, n),
             Kernel::LogAppend => self.runtime_log_append(types[0], vals[0]?, vals[1], result, n),
             Kernel::LogFinish => self.runtime_log_finish(types[0], vals[0]?, result, n),
-            Kernel::CodeIdentity => self.runtime_code_identity(vals[0]?, types, result, n),
+            Kernel::CodeIdentity => self.runtime_code_identity(f, vals[0]?, types, result, n),
             Kernel::CodeCallable => self.runtime_code_callable(vals[0]?, result, n),
             Kernel::CodeDescribe => self.runtime_code_describe(vals[0]?, result, n),
         }
@@ -1723,13 +1723,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
     fn runtime_code_identity(
         &mut self,
+        f: usize,
         value: ValueId,
         types: &[TyId],
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
-        let pointer = match self.static_fn_pointer(value, n) {
-            Some(pointer) => pointer,
+        let word = match self.static_fn_word(value, n) {
+            Some(word) => word,
             None => {
                 self.gap(n, "StaticFn callable carriage is not built");
                 return None;
@@ -1752,25 +1753,63 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // operation. Its eight-byte payload is still the ordinary FunctionRef code
         // pointer, so recover the identity with a finite pointer dispatch over the
         // non-generic function items that can produce this StaticFn type.
-        let Some(callable) = types.first().copied() else {
+        let callable = self.p.fns[f]
+            .params
+            .first()
+            .map(|param| subst(&mut self.t, param.ty, types))
+            .and_then(|ty| match self.t.kind(self.bare(ty)) {
+                TyKind::Adt(d, args)
+                    if self.p.decls[d.index()].role == Some(crate::decls::Role::StaticFn) =>
+                {
+                    args.first().copied()
+                }
+                _ => None,
+            })
+            .or_else(|| types.first().copied());
+        let Some(callable) = callable else {
             self.gap(n, "StaticFn identity type is not built");
             return None;
         };
+        // A generic `code.identity[F](s: StaticFn[F])` body keeps F open while
+        // its CoreIR row is emitted.  The StaticFn word itself is still a code
+        // pointer, so dispatch over the finite set of callable function items;
+        // F does not constrain which item supplied that word.  A closed StaticFn
+        // keeps the narrower callable-type filter used by ordinary bodies.
+        let open_static = has_param(&self.t, callable) || has_hole(&self.t, callable);
         let indices = self
             .p
             .fns
             .iter()
             .enumerate()
-            .filter_map(|(i, fd)| (fd.generics.is_empty() && fd.callable == callable).then_some(i))
+            .filter_map(|(i, fd)| {
+                let region_only = fd.generics.iter().all(|generic| generic.region);
+                (fd.body.is_some() && region_only && (open_static || fd.callable == callable))
+                    .then_some(i)
+            })
             .collect::<Vec<_>>();
         let mut items = Vec::with_capacity(indices.len());
         for item in indices {
-            let Some(function) = self.item_adapter(item, &[], callable, n) else {
+            let item_types = self.p.fns[item]
+                .generics
+                .iter()
+                .enumerate()
+                .map(|(i, _)| self.t.mk(TyKind::Region(Root::Generic(i as u32))))
+                .collect::<Vec<_>>();
+            let candidate = subst(&mut self.t, self.p.fns[item].callable, &item_types);
+            let Some(function) = self.item_adapter(item, &item_types, candidate, n) else {
                 continue;
             };
             let Some(bytes) = self.code_identity_bytes(function) else {
                 continue;
             };
+            if open_static {
+                // This adapter is already closed over the source item and its
+                // callable signature. Keeping its template under the enclosing
+                // StaticFn[F] template would manufacture a fresh adapter row
+                // during substitution, so code.describe's pointer would no
+                // longer match this candidate.
+                self.nested.remove(&function);
+            }
             items.push((function, bytes));
         }
         if items.is_empty() {
@@ -1790,12 +1829,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 },
                 n,
             );
+            let candidate = self.reinterpret(candidate, Ty::Ptr, Ty::Scalar(Scalar::U64), n)?;
             let equal = self.value(Ty::Scalar(Scalar::Bool));
             self.inst(
                 Inst::Compare {
                     result: equal,
                     op: CompareOp::Eq,
-                    left: pointer,
+                    left: word,
                     right: candidate,
                 },
                 n,
@@ -1846,7 +1886,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
 
     fn identity_carrier(&mut self, bytes: &[u8], result: TyId, n: NodeId) -> Option<ValueId> {
-        let id = self.runtime_type(result, n)?;
+        // A generic `identity[F]` result keeps its anchor on the StaticFn
+        // parameter.  The carrier layout is still the ordinary Bytes row, so
+        // erase only that semantic anchor when asking the emitter for storage.
+        let bare = self.bare(result);
+        let id = self
+            .e
+            .type_row(self.p, &mut self.t, result)
+            .or_else(|| self.e.type_row(self.p, &mut self.t, bare));
+        let Some(id) = id else {
+            self.gap(n, "runtime operand layout is not built");
+            return None;
+        };
         let to = self.new_slot(PlaceTy::Declared(id), n);
         let data = self.e.static_bytes(bytes);
         let ptr = self.value(Ty::Ptr);
@@ -1867,20 +1918,26 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
     ) -> Option<ValueId> {
         let pointer = match self.static_fn_pointer(value, n) {
-            Some(pointer) => Some(pointer),
+            Some(pointer) => pointer,
             None => {
                 self.gap(n, "StaticFn callable carriage is not built");
-                None
+                return None;
             }
         };
-        self.temp(result, pointer);
-        pointer
+        self.temp(result, Some(pointer));
+        Some(pointer)
     }
 
     fn static_fn_pointer(&mut self, value: ValueId, n: NodeId) -> Option<ValueId> {
         (self.b.values.get(value.index()) == Some(&Ty::Ptr))
             .then_some(value)
             .or_else(|| self.reinterpret(value, Ty::Scalar(Scalar::U64), Ty::Ptr, n))
+    }
+
+    fn static_fn_word(&mut self, value: ValueId, n: NodeId) -> Option<ValueId> {
+        (self.b.values.get(value.index()) == Some(&Ty::Scalar(Scalar::U64)))
+            .then_some(value)
+            .or_else(|| self.reinterpret(value, Ty::Ptr, Ty::Scalar(Scalar::U64), n))
     }
 
     fn reinterpret(&mut self, value: ValueId, from: Ty, to: Ty, n: NodeId) -> Option<ValueId> {

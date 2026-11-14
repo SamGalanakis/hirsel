@@ -1,0 +1,54 @@
+// Generic StaticFn transport keeps the eight-byte identity independent of F.
+fn double(b: u64) -> u64 {
+    b * 2
+}
+
+fn names[F](s: StaticFn[F], want: Bytes) -> u64 {
+    if code.identity(s) == want {
+        1
+    } else {
+        0
+    }
+}
+
+fn same[F](s: StaticFn[F], t: StaticFn[F]) -> u64 {
+    if s == t {
+        1
+    } else {
+        0
+    }
+}
+
+fn callable_only[F](s: StaticFn[F]) -> F {
+    code.callable(s)
+}
+
+pub fn generic_function_case() -> u64 {
+    let s = code.describe(double)
+    names(s, code.identity(s))
+}
+
+// expect: run generic_function_case() = 1
+pub fn generic_equality_case() -> u64 {
+    same(code.describe(double), code.describe(double))
+}
+
+// expect: run generic_equality_case() = 1
+type Entry[F] {
+    code: StaticFn[F]
+}
+
+fn entry_name[F](entry: Entry[F], want: Bytes) -> u64 {
+    if code.identity(entry.code) == want {
+        1
+    } else {
+        0
+    }
+}
+
+pub fn generic_record_case() -> u64 {
+    let entry = Entry(code: code.describe(double))
+    entry_name(entry, code.identity(code.describe(double)))
+}
+
+// expect: run generic_record_case() = 1

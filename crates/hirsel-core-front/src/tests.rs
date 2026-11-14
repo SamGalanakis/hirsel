@@ -3530,6 +3530,9 @@ fn isolate_and_code_describe_rules() {
     failures.extend(run_case(
         &root().join("cases/body/callable-static-fn-m2b.hirsel"),
     ));
+    failures.extend(run_case(
+        &root().join("cases/body/callable-static-fn-generic.hirsel"),
+    ));
     assert!(failures.is_empty(), "{failures:?}");
 }
 

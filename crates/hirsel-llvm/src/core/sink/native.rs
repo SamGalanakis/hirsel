@@ -10,6 +10,7 @@ pub(crate) struct NativeSink<'c> {
     blocks: HashMap<String, llvm::Block<'c>>,
     functions: HashMap<String, Signature>,
     globals: HashMap<String, Type>,
+    pending_switch: Option<(Type, Value, String, Vec<(u64, String)>)>,
 }
 fn local(name: Local) -> llvm::Local {
     let (kind, index) = match name {
@@ -37,6 +38,7 @@ impl<'c> NativeSink<'c> {
             blocks: HashMap::new(),
             functions: HashMap::new(),
             globals: HashMap::new(),
+            pending_switch: None,
         }
     }
     pub fn print(&self) -> Result<String, String> {
@@ -283,6 +285,250 @@ impl Sink for NativeSink<'_> {
     }
     fn raw(&mut self, text: &str, location: Option<usize>) {
         let text = text.trim();
+        if let Some((ty, value, default, arms)) = self.pending_switch.as_mut() {
+            if text == "]" {
+                let ty = ty.clone();
+                let value = value.clone();
+                let default = default.clone();
+                let arms = std::mem::take(arms);
+                self.pending_switch = None;
+                self.instruction(
+                    None,
+                    Operation::Switch(ty, &value, &default, &arms),
+                    location,
+                );
+                return;
+            }
+            if let Some((constant, block)) = text.split_once(", label %") {
+                let constant = constant
+                    .split_whitespace()
+                    .last()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0);
+                arms.push((constant, block.to_owned()));
+                return;
+            }
+        }
+        let result = Self::raw_result(text);
+        let body = Self::raw_body(text);
+        if let Some(rest) = body.strip_prefix("select i1 ") {
+            let parts: Vec<_> = rest.split(", ").collect();
+            if parts.len() == 3 {
+                let (ty, yes) = parts[1].split_once(' ').unwrap();
+                let (_, no) = parts[2].split_once(' ').unwrap();
+                let condition = Self::raw_value(parts[0]);
+                let yes = Self::raw_value(yes);
+                let no = Self::raw_value(no);
+                self.instruction(
+                    result,
+                    Operation::Select(Self::raw_type(ty), &condition, &yes, &no),
+                    location,
+                );
+                return;
+            }
+        }
+        if let Some(rest) = body.strip_prefix("load ") {
+            let (ty, pointer) = rest
+                .split_once(", ptr ")
+                .unwrap_or_else(|| panic!("native sink raw load unsupported: {text}"));
+            let pointer = pointer
+                .split_once(", align ")
+                .map_or(pointer, |(value, _)| value);
+            let pointer = Self::raw_value(pointer);
+            self.instruction(
+                result,
+                Operation::Load(Self::raw_type(ty), &pointer, &Memory::default()),
+                location,
+            );
+            return;
+        }
+        if let Some(rest) = body.strip_prefix("getelementptr ") {
+            let parts: Vec<_> = rest.split(", ").collect();
+            if parts.len() >= 2 {
+                let element = Self::raw_type(parts[0]);
+                let (_, pointer) = parts[1].split_once(' ').unwrap();
+                let pointer = Self::raw_value(pointer);
+                let indices = parts[2..]
+                    .iter()
+                    .map(|part| {
+                        let (ty, value) = part.split_once(' ').unwrap();
+                        (Self::raw_type(ty), Self::raw_value(value))
+                    })
+                    .collect::<Vec<_>>();
+                self.instruction(
+                    result,
+                    Operation::Gep(element, &pointer, &indices),
+                    location,
+                );
+                return;
+            }
+        }
+        if let Some(rest) = body.strip_prefix("phi ") {
+            let (ty, incoming) = rest.split_once(' ').unwrap();
+            let incoming = incoming
+                .split("], [")
+                .map(|part| part.trim_matches(['[', ']']))
+                .map(|part| {
+                    let (value, block) = part.split_once(", %").unwrap();
+                    (Self::raw_value(value), block.to_owned())
+                })
+                .collect::<Vec<_>>();
+            self.instruction(
+                result,
+                Operation::Phi(Self::raw_type(ty), &incoming),
+                location,
+            );
+            return;
+        }
+        if let Some(rest) = body.strip_prefix("extractvalue ") {
+            let (ty, rest) = rest.split_once(' ').unwrap();
+            let (value, index) = rest.rsplit_once(", ").unwrap();
+            let index = index.parse().unwrap_or(0);
+            self.instruction(result, Operation::Extract(Self::raw_type(ty), &Self::raw_value(value), index), location);
+            return;
+        }
+        if let Some(rest) = body.strip_prefix("insertvalue ") {
+            let (ty, rest) = rest.split_once(' ').unwrap();
+            let (aggregate, rest) = rest.split_once(", ").unwrap();
+            let (field, index) = rest.rsplit_once(", ").unwrap();
+            let (field_ty, field) = field.split_once(' ').unwrap();
+            let index = index.parse().unwrap_or(0);
+            let aggregate = Self::raw_value(aggregate);
+            let field = Self::raw_value(field);
+            self.instruction(result, Operation::Insert(Self::raw_type(ty), &aggregate, Self::raw_type(field_ty), &field, index), location);
+            return;
+        }
+        if let Some(value) = body.strip_prefix("fneg ") {
+            let (ty, value) = value.split_once(' ').unwrap();
+            self.instruction(result, Operation::FNeg(Self::raw_type(ty), &Self::raw_value(value)), location);
+            return;
+        }
+        for (name, op) in [
+            ("add", Binary::Add),
+            ("sub", Binary::Sub),
+            ("mul", Binary::Mul),
+            ("udiv", Binary::UDiv),
+            ("sdiv", Binary::SDiv),
+            ("and", Binary::And),
+            ("or", Binary::Or),
+            ("xor", Binary::Xor),
+        ] {
+            if let Some(rest) = body.strip_prefix(&format!("{name} ")) {
+                let (ty, values) = rest.split_once(' ').unwrap();
+                let parts: Vec<_> = values.split(", ").collect();
+                if parts.len() == 2 {
+                    let left = Self::raw_value(parts[0]);
+                    let right = Self::raw_value(parts[1]);
+                    self.instruction(
+                        result,
+                        Operation::Binary(op, Self::raw_type(ty), &left, &right),
+                        location,
+                    );
+                    return;
+                }
+            }
+        }
+        for (name, op) in [
+            ("eq", Predicate::Eq),
+            ("ne", Predicate::Ne),
+            ("ult", Predicate::Ult),
+            ("ule", Predicate::Ule),
+            ("ugt", Predicate::Ugt),
+            ("uge", Predicate::Uge),
+            ("slt", Predicate::Slt),
+            ("sle", Predicate::Sle),
+            ("sgt", Predicate::Sgt),
+            ("sge", Predicate::Sge),
+        ] {
+            for prefix in ["icmp", "fcmp"] {
+                let marker = format!("{prefix} {name} ");
+                if let Some(rest) = body.strip_prefix(&marker) {
+                    let (ty, values) = rest.split_once(' ').unwrap();
+                    let parts: Vec<_> = values.split(", ").collect();
+                    if parts.len() == 2 {
+                        let left = Self::raw_value(parts[0]);
+                        let right = Self::raw_value(parts[1]);
+                        self.instruction(
+                            result,
+                            Operation::Compare(op, Self::raw_type(ty), &left, &right),
+                            location,
+                        );
+                        return;
+                    }
+                }
+            }
+        }
+        for (name, op) in [
+            ("zext", Cast::ZExt),
+            ("sext", Cast::SExt),
+            ("trunc", Cast::Trunc),
+            ("bitcast", Cast::Bitcast),
+            ("ptrtoint", Cast::PtrToInt),
+            ("inttoptr", Cast::IntToPtr),
+        ] {
+            let marker = format!("{name} ");
+            if let Some(rest) = body.strip_prefix(&marker) {
+                if let Some((source, to)) = rest.split_once(" to ") {
+                    let (from, value) = source.split_once(' ').unwrap();
+                    let value = Self::raw_value(value);
+                    self.instruction(
+                        result,
+                        Operation::Cast(op, Self::raw_type(from), &value, Self::raw_type(to)),
+                        location,
+                    );
+                    return;
+                }
+            }
+        }
+        if let Some(rest) = body
+            .strip_prefix("call ")
+            .or_else(|| body.strip_prefix("tail call "))
+        {
+            let is_cold = rest.ends_with(" cold");
+            let rest = rest.trim_end_matches(" cold");
+            let (result_ty, callee_and_args) = rest.split_once(' ').unwrap();
+            let at = callee_and_args.find('@').unwrap();
+            let open = callee_and_args[at..].find('(').unwrap() + at;
+            let name = &callee_and_args[at + 1..open];
+            let args_text = callee_and_args[open + 1..].trim_end_matches(')');
+            let mut params = Vec::new();
+            let mut args = Vec::new();
+            if !args_text.is_empty() {
+                for argument in args_text.split(", ") {
+                    let (ty, value) = argument.rsplit_once(' ').unwrap();
+                    params.push(Parameter::plain(Self::raw_type(ty)));
+                    args.push(Self::raw_value(value));
+                }
+            }
+            let signature = Signature {
+                result: Self::raw_type(result_ty),
+                extension: Extension::None,
+                params,
+            };
+            let callee = Value::Global(name.to_owned());
+            let attrs = CallAttrs {
+                cold: is_cold,
+                ..Default::default()
+            };
+            self.instruction(
+                result,
+                Operation::Call(&signature, &callee, &args, &attrs),
+                location,
+            );
+            return;
+        }
+        if let Some(rest) = text.strip_prefix("switch ") {
+            let head = rest.split_once(" [").map_or(rest, |(head, _)| head);
+            let (ty, rest) = head.split_once(' ').unwrap();
+            let (value, default) = rest.split_once(", label %").unwrap();
+            self.pending_switch = Some((
+                Self::raw_type(ty),
+                Self::raw_value(value),
+                default.to_owned(),
+                Vec::new(),
+            ));
+            return;
+        }
         if text.ends_with(':') {
             self.block(text.trim_end_matches(':'));
             return;

@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """One serial sample per I/O side/profile with exact parity and mandatory M2 flags."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
-import re
 import subprocess
 import sys
+import tempfile
 from langarena import inputs
+from measurement_artifacts import identity
 from std_native import wait_load
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -23,15 +25,54 @@ def checked(command, **kwargs):
     return result
 
 
+def reused_reference(rows, key, size, opt):
+    row = rows.get(key, {})
+    if row.get('input_bytes') != size or row.get('rust_opt_level') != int(opt):
+        raise ValueError(f'{key}: reused Rust input size/profile differs')
+    count = row.get('instructions')
+    if type(count) is not int or count <= 0:
+        raise ValueError(f'{key}: reused Rust sample has no instruction count')
+    return row | dict(instructions_per_byte=count / size)
+
+
+def observe_output(output, operation, write_lines):
+    output.seek(0)
+    digest = hashlib.sha256()
+    if operation == 'read':
+        data = output.read()
+        if data != b'65536 4128768\n':
+            raise ValueError(f'wrong read output: {data[:256]!r}; no ratio')
+        digest.update(data)
+        return dict(output_bytes=len(data), output_sha256=digest.hexdigest())
+    block = LINE * 16384
+    total = 0
+    while chunk := output.read(len(block)):
+        if chunk != block[:len(chunk)]:
+            raise ValueError('wrong write output; no ratio')
+        total += len(chunk)
+        digest.update(chunk)
+    if total != len(LINE) * write_lines:
+        raise ValueError(f'write output has {total} bytes; no ratio')
+    return dict(output_bytes=total, output_sha256=digest.hexdigest())
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--compiler', type=Path, required=True)
     parser.add_argument('--runtime', type=Path, required=True)
     parser.add_argument('--rustc', type=Path, required=True)
     parser.add_argument('--out', type=Path, required=True)
+    parser.add_argument('--write-lines', type=int, default=65536,
+                        help='extend only the approved write loop on both sides')
+    parser.add_argument('--reuse-rust', type=Path,
+                        help='prior engine/operation/rust rows with matching input_bytes and rust_opt_level')
     parser.add_argument('--profile', choices=['m2'], default='m2',
                         help='only M2 profiles are admitted; flags cannot be overridden')
     args = parser.parse_args()
+    if args.write_lines <= 0:
+        parser.error('--write-lines must be positive')
+    artifacts = identity(args.compiler, args.runtime, 'release')
+    reused = json.loads(args.reuse_rust.read_text()) if args.reuse_rust else None
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=False)
     rustc = args.rustc.resolve()
@@ -44,18 +85,31 @@ def main():
     host.mkdir()
     (host / 'input').write_bytes(LINE * 65536)
     (host / 'parity').write_bytes((ROOT / 'core/langarena/tests/io/parity.txt').read_bytes())
-    outputs = {}
+    outputs = {'artifacts': artifacts, 'revision': subprocess.check_output(
+        ['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
+        'rust_reused_from': str(args.reuse_rust) if args.reuse_rust else None}
+    (out / 'identity.json').write_text(json.dumps(outputs, indent=2) + '\n')
+    rust_source = out / 'rust.rs'
+    rust_source.write_text((ROOT / 'core/langarena/tests/io/rust.rs').read_text().replace(
+        '0..65536', '0..' + str(args.write_lines)))
+    write_source = out / 'write.hirsel'
+    write_source.write_text((ROOT / 'core/langarena/tests/io/write.hirsel').read_text().replace(
+        '65536u64', str(args.write_lines) + 'u64'))
     for engine, opt in [('cranelift', '0'), ('llvm', '3')]:
         rust = out / f'rust-{engine}'
-        checked([str(rustc), '--edition=2024', '--target=x86_64-unknown-linux-gnu',
-                 '-C', 'opt-level=' + opt, '-C', 'overflow-checks=yes',
-                 '-C', 'codegen-units=1', '-C', 'lto=off', '-C', 'debuginfo=0',
-                 '-C', 'target-cpu=x86-64', str(ROOT / 'core/langarena/tests/io/rust.rs'),
-                 '-o', str(rust)])
+        if reused is None:
+            checked([str(rustc), '--edition=2024', '--target=x86_64-unknown-linux-gnu',
+                     '-C', 'opt-level=' + opt, '-C', 'overflow-checks=yes',
+                     '-C', 'codegen-units=1', '-C', 'lto=off', '-C', 'debuginfo=0',
+                     '-C', 'target-cpu=x86-64', str(rust_source), '-o', str(rust)])
         for operation in ['read', 'write']:
+            size = SIZE if operation == 'read' else len(LINE) * args.write_lines
+            if reused is not None:
+                key = f'{engine}/{operation}/rust'
+                outputs[key] = reused_reference(reused, key, size, opt)
             module = 'tests/io/' + operation
             manifest = out / f'{operation}.inputs.json'
-            manifest.write_text(json.dumps(inputs(ROOT, module)))
+            manifest.write_text(json.dumps(inputs(ROOT, module, write_source if operation == 'write' else None)))
             binary = out / f'hirsel-{engine}-{operation}'
             command = [str(args.compiler.resolve()), 'build', '--inputs', str(manifest),
                        '--entry', f'langarena@1/{module}/main', '--backend', engine,
@@ -68,11 +122,15 @@ def main():
             if operation == 'read':
                 expected = (ROOT / 'core/langarena/tests/io/parity.expected').read_bytes()
                 for side, executable in [('rust', rust), ('hirsel', binary)]:
+                    if side == 'rust' and reused is not None:
+                        continue
                     run = checked([str(executable), str(host / 'parity') if side == 'rust' else 'parity'])
                     if run.stdout != expected or run.stderr:
                         raise ValueError(f'{side}/{engine} parity: {run.stdout!r}/{run.stderr!r}, expected {expected!r}')
-                outputs[engine + '/parity'] = '5 lines / 12 UTF8 bytes; both sides pass'
+                outputs[engine + '/parity'] = '5 lines / 12 UTF8 bytes; Hirsel passes, Rust reused' if reused is not None else '5 lines / 12 UTF8 bytes; both sides pass'
             for side, executable in [('rust', rust), ('hirsel', binary)]:
+                if side == 'rust' and reused is not None:
+                    continue
                 stem = out / f'{engine}-{operation}-{side}'
                 arguments = [str(host / 'input') if side == 'rust' else 'input'] if operation == 'read' else []
                 command = ['taskset', '-c', '16', str(ROOT / 'tools/capped'),
@@ -80,14 +138,12 @@ def main():
                            '-o', str(stem) + '.perf', '--', '/usr/bin/time',
                            '-f', '%M', '-o', str(stem) + '.rss', str(executable), *arguments]
                 wait_load()
-                with Path(str(stem) + '.stdout').open('wb') as stdout, Path(str(stem) + '.stderr').open('wb') as stderr:
+                with tempfile.TemporaryFile() as stdout, Path(str(stem) + '.stderr').open('wb') as stderr:
                     run = subprocess.run(command, stdout=stdout, stderr=stderr,
                                          env=os.environ | {'HIRSEL_MEMORY_LIMIT': '2G', 'HIRSEL_JOBS': '1'})
-                if run.returncode:
-                    raise ValueError(f'{side}/{engine}/{operation}: exit {run.returncode}; no ratio')
-                expected = b'65536 4128768\n' if operation == 'read' else LINE * 65536
-                if Path(str(stem) + '.stdout').read_bytes() != expected:
-                    raise ValueError(f'{side}/{engine}/{operation}: wrong output; no ratio')
+                    if run.returncode:
+                        raise ValueError(f'{side}/{engine}/{operation}: exit {run.returncode}; no ratio')
+                    observed = observe_output(stdout, operation, args.write_lines)
                 perf = Path(str(stem) + '.perf').read_text()
                 counts = [line.split(';')[0].strip() for line in perf.splitlines()
                           if ';instructions:u;' in line]
@@ -96,8 +152,9 @@ def main():
                 instructions = int(counts[0])
                 rss = int(Path(str(stem) + '.rss').read_text())
                 outputs[f'{engine}/{operation}/{side}'] = dict(
-                    instructions=instructions, input_bytes=SIZE, instructions_per_byte=instructions / SIZE,
-                    peak_rss_kib=rss)
+                    instructions=instructions, input_bytes=size, instructions_per_byte=instructions / size,
+                    peak_rss_kib=rss, **observed,
+                    **(artifacts if side == 'hirsel' else {'rust_opt_level': int(opt)}))
                 print(engine, operation, side, outputs[f'{engine}/{operation}/{side}'], flush=True)
                 (out / 'results.json').write_text(json.dumps(outputs, indent=2) + '\n')
             lhs = outputs[f'{engine}/{operation}/hirsel']['instructions']

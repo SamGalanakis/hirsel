@@ -141,3 +141,7 @@ and the diagnostic compiler/runtime identities. MEM-19 reservation includes
 bounds, task reservations, finalizer grants and startup; it excludes physical
 chunk slack and engine bookkeeping. It is distinct from peak RSS. Observed
 execution counters and timings never enter performance ratios or geomeans.
+
+I/O samples use `python3 core/tools/io_measure.py --compiler COMPILER --runtime RUNTIME --rustc RUSTC --out NEW_DIRECTORY`, with artifacts from `measurement_artifacts.py` and the pinned Rust 1.99 toolchain. Only the M2 profile is accepted. `--write-lines 16777216` extends the approved twin's write loop to 1 GiB without changing its body or buffer. Output is checked in bounded chunks, including its exact length.
+
+To reuse completed Rust samples, pass `--reuse-rust REFERENCES.json`. The object has keys `cranelift/read/rust`, `llvm/read/rust`, `cranelift/write/rust` and `llvm/write/rust`. Each row must contain positive integer `instructions`, matching `input_bytes` and `rust_opt_level` (0 for Cranelift, 3 for LLVM); retain the original source/profile/parity provenance beside it. This option measures only Hirsel and records the reuse explicitly. Read parity still runs on both Hirsel engines. Each result records the release compiler and shipping runtime identities.

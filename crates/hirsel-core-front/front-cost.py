@@ -138,6 +138,7 @@ def main():
     parser.add_argument('--out', type=Path)
     parser.add_argument('--ceilings', type=Path, default=Path(__file__).with_name('front-cost-ceilings.json'))
     parser.add_argument('--record', action='store_true', help='initial same-binary baseline; later updates must only lower saved stage limits')
+    parser.add_argument('--test-threads', type=int, help=argparse.SUPPRESS)
     args = parser.parse_args()
     runtime = args.runtime
     if runtime is None:

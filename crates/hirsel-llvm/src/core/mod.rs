@@ -15,6 +15,8 @@ mod collections;
 mod empty;
 mod fast;
 mod forward;
+#[cfg(all(test, not(hirsel_lazy_core)))]
+mod nan_tests;
 mod private_float;
 mod scalar;
 mod sites;

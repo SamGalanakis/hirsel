@@ -14,6 +14,7 @@ fn main() {
         prefix.join("lib/libLLVM.so.23.1").display()
     );
     println!("cargo:rerun-if-env-changed=LLVM_SYS_231_PREFIX");
+    println!("cargo:rerun-if-changed={}", shared.join("numeric_nan.h").display());
     let component = out.join("libhirsel_llvm_engine.so");
     assert!(
         Command::new(prefix.join("bin/hirsel-clang"))

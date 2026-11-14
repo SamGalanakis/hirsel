@@ -9,6 +9,7 @@ fn main() {
         "cargo:rerun-if-changed={}",
         manifest.join("bridge/aggregate_phi.h").display()
     );
+    println!("cargo:rerun-if-changed={}", manifest.join("bridge/numeric_nan.h").display());
     let sysroot = prefix.join("sysroot");
     assert!(
         sysroot.join("usr/include/c++/13/vector").is_file(),

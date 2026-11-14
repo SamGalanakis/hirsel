@@ -1,7 +1,10 @@
 cxx_library(
     name = "engine",
     srcs = ["engine.c"],
-    headers = {"aggregate_phi.h": "//crates/hirsel-llvm/bridge:aggregate_phi.h"},
+    headers = {
+        "aggregate_phi.h": "//crates/hirsel-llvm/bridge:aggregate_phi.h",
+        "numeric_nan.h": "//crates/hirsel-llvm/bridge:numeric_nan.h",
+    },
     header_namespace = "",
     compiler_flags = ["-O2", "-fvisibility=hidden"],
     deps = ["toolchains//:libllvm"],

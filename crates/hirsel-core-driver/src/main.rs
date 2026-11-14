@@ -84,6 +84,7 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     }
     let dir = invocation.positional.map(PathBuf::from);
     let mut libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
+    let mut libraries_explicit = false;
     let mut store = None;
     let mut manifest = None;
     let mut metrics = None;
@@ -179,7 +180,10 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
                 entry =
                     Some(hirsel_core_ids::DefPath::from_full(&value).ok_or("invalid entry path")?)
             }
-            Opt::Libraries => libraries = PathBuf::from(value),
+            Opt::Libraries => {
+                libraries_explicit = true;
+                libraries = PathBuf::from(value)
+            }
             Opt::Store => store = Some(PathBuf::from(value)),
             Opt::Inputs => manifest = Some(PathBuf::from(value)),
             Opt::Metrics => metrics = Some(PathBuf::from(value)),
@@ -254,6 +258,23 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
         return Err("product --runtime/--target require --install".into());
     }
     let mut meter = Meter::new(metrics.is_some());
+    let installed_std = if installed.is_some() && !libraries_explicit && !source_std && !source_core
+    {
+        installed.as_ref().unwrap().product("std")?
+    } else {
+        None
+    };
+    if image_path.is_some() {
+        meter.result.image_selection = Some("image used: explicit image".into());
+    } else if installed_std.is_some() {
+        meter.result.image_selection = Some("image used: installed std product".into());
+    } else if source_std || libraries_explicit {
+        meter.result.image_selection = Some("source checked: explicit library source".into());
+    } else if installed.is_some() {
+        meter.result.image_selection = Some("source checked: no registered std product".into());
+    } else {
+        meter.result.image_selection = Some("source checked: no installed image".into());
+    }
     // Directory checks and source comparisons use checkout sources when Buck's
     // build-time package path is relative to its action directory.
     if manifest.is_none()
@@ -335,6 +356,8 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     } else if command == "image" {
         CheckRequest::libraries(dir.as_deref().unwrap_or(&libraries), &store)?
     } else if let Some(image) = image {
+        CheckRequest::with_image(&dir.ok_or("missing package directory")?, &store, image)?
+    } else if let Some(image) = installed_std {
         CheckRequest::with_image(&dir.ok_or("missing package directory")?, &store, image)?
     } else if native_command || installed.is_some() {
         CheckRequest::program(&dir.ok_or("missing package directory")?, &libraries, &store)?

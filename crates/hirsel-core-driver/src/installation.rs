@@ -54,6 +54,33 @@ impl Installed {
             .get(target)
             .map(|path| self.root.join(path))
     }
+    /// Open a registered library product by its package identity. A registered
+    /// path that is missing or damaged is an installation error; callers must
+    /// not silently fall back to source for a named installed product.
+    pub fn product(&self, name: &str) -> io::Result<Option<std::sync::Arc<CoreImage>>> {
+        let Some(path) = self.registration.products.get(name) else {
+            return Ok(None);
+        };
+        let directory = self.root.join(path);
+        let image = CoreImage::open(&directory)?.ok_or_else(|| {
+            io::Error::other(format!(
+                "installed {name} product is missing or damaged: {}",
+                directory.display()
+            ))
+        })?;
+        let has_package = image
+            .directory()?
+            .inputs
+            .packages
+            .iter()
+            .any(|package| package.package == crate::package(name));
+        if !has_package {
+            return Err(io::Error::other(format!(
+                "installed {name} product has the wrong package identity"
+            )));
+        }
+        Ok(Some(image))
+    }
 }
 /// Publish the produced image and optional runtime selection, not a second
 /// representation of the image. A failed publication leaves the old selection.

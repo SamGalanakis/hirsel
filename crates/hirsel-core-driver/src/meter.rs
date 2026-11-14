@@ -14,6 +14,9 @@ pub struct Measurements {
     pub stages: Vec<Stage>,
     pub instructions: Option<u64>,
     pub counter_refusal: Option<String>,
+    /// Library selection for this request: an installed image or source check,
+    /// including the reason the selector made that choice.
+    pub image_selection: Option<String>,
 }
 
 pub struct Meter {

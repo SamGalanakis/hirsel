@@ -377,11 +377,21 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     command.extend(['--grant', 'Clock'])
                 linker = cc
                 if case.first_write is not None:
-                    linker = scratch / 'scripted-cc'
+                    # The scripted host is a prebuilt object: a link recipe keeps an
+                    # existing support object as an input, never a source compiled to
+                    # a temporary one. The driver sits in its own bin/ so the recipe
+                    # it records (beside the driver's root) is this case's alone.
+                    (scratch / 'bin').mkdir()
+                    linker = scratch / 'bin/scripted-cc'
                     actual = str(cc or Path(shutil.which('cc')))
-                    source = root / 'core/tools/std_host.c'
-                    include = root / 'crates/hirsel-core-rt/include'
-                    linker.write_text('#!/bin/sh\nexec ' + shlex.quote(actual) + ' \"$@\" ' + shlex.quote(str(source)) + ' -I' + shlex.quote(str(include)) + f' -DFIRST={case.first_write} -DFIRST_OP={case.host_op} -Wl,--wrap=hirsel_core_host_op\n')
+                    support = scratch / 'std_host.o'
+                    built = subprocess.run([actual, '-c', '-fPIC', str(root / 'core/tools/std_host.c'),
+                                            '-I' + str(root / 'crates/hirsel-core-rt/include'),
+                                            f'-DFIRST={case.first_write}', f'-DFIRST_OP={case.host_op}',
+                                            '-o', str(support)], capture_output=True)
+                    if built.returncode:
+                        raise RuntimeError(f'std_host.c: {built.stderr.decode()}')
+                    linker.write_text('#!/bin/sh\nexec ' + shlex.quote(actual) + ' \"$@\" ' + shlex.quote(str(support)) + ' -Wl,--wrap=hirsel_core_host_op\n')
                     linker.chmod(0o755)
                 if linker:
                     command.extend(['--cc', str(linker)])

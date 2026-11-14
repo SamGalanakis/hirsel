@@ -1456,6 +1456,13 @@ def first_party(meta: dict) -> str:
                             production=True, bin_exes={"hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
                             args=["--evaluator", "buck-out/tmp/cargo-bin-exe/land-core-evaluator/hirsel-core-contract-eval"],
                             data=Raw('glob(["core/core/**", "core/std/**", "core/tools/std_native.py", "core/tools/std_native_owners.json"])')))
+    # The laws land-core-evaluator reports native-only (an entry taking Dir, Stdout,
+    # Stderr or Clock), on both engines; on the invoking host for the Dir laws' openat2.
+    out.append("\n" + call("hirsel_script_test", name="land-core-native-capabilities", script="core/tools/gate_native_capabilities.py", full=False,
+                            host=True, args=["--compiler", "buck-out/tmp/cargo-bin-exe/land-core-native-capabilities/hirsel-core"],
+                            bin_exes={"hirsel-core": "//:hirsel-core-driver-bin-hirsel-core"},
+                            files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
+                            data=Raw('glob(["core/core/**", "core/std/**", "crates/hirsel-core-rt/include/**"]) + ["core/tools/std_native.py", "core/tools/std_native_owners.json", "core/tools/std_host.c"]')))
     out.append("\n" + call("hirsel_script_test", name="test-measurement-artifacts", script="tools/tests/measurement_artifacts.py", full=False,
                             data=["core/tools/measurement_artifacts.py", "core/tools/std_native.py"]))
     out.append("\n" + call("hirsel_script_test", name="test-core-sweep", script="tools/tests/core_sweep.py", full=False,

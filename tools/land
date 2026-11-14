@@ -95,7 +95,7 @@ CORE_ACCEPTANCE = (
     '//:land-core-library-modes', '//:land-core-llvm-aarch64',
     '//:hirsel-llvm-lazy-unittest', '//:hirsel-llvm-unittest',
     '//:hirsel-cranelift-test-core_native', '//:hirsel-cranelift-test-core_aarch64',
-    '//:core-aarch64-provider', '//:land-core-evaluator',
+    '//:core-aarch64-provider', '//:land-core-evaluator', '//:land-core-native-capabilities',
 )
 # A target literal in a tools/land: the tool on main checks every batch this
 # tree joins, so each one it names must exist in the tree submitted.

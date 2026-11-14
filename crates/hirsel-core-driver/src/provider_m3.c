@@ -106,8 +106,8 @@ static HirselCoreHostOutcome deliver(void *state,HirselCoreHostRequest *r,Hirsel
 static void diagnostic(void *state,const uint8_t *data,size_t len) {(void)state;CHECK(write(2,data,len)==(ssize_t)len);}
 static void event(void *state,HirselCoreEvent e) {(void)state;if(e.kind==3)s.cancels++;}
 static uint8_t entry(HirselCoreContext *ctx,const HirselCoreProcessConfig *cfg,HirselCoreMainResult *out) {s.root=ctx;return s.entry(ctx,cfg,out);}
-uint8_t __wrap_hirsel_core_os_run(const HirselCoreOsConfig *input,const HirselCoreView *names,HirselCoreEntry main) {
-    (void)names;CHECK(input->args_len==1 && input->parameters_len==3);
+uint8_t __wrap_hirsel_core_os_run_with_sources(const HirselCoreOsConfig *input,const HirselCoreView *names,const HirselCoreSourceTable *sources,HirselCoreEntry main) {
+    (void)names;(void)sources;CHECK(input->args_len==1 && input->parameters_len==3);
     CHECK(input->args[0].len<sizeof s.mode);memcpy(s.mode,input->args[0].data,input->args[0].len);
     s.entry=main;memcpy(s.file,is("read")?"abc":"old",3);s.length=3;
     HirselCoreProvider provider={&s,issue,deliver};

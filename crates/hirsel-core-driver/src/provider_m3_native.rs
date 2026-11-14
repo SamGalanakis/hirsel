@@ -59,7 +59,7 @@ mod provider_m3 {
         let mut script = std::fs::File::create(&linker).unwrap();
         // Paths are our generated scratch/toolchain paths, with POSIX single-quote escaping.
         let quote = |p: &Path| format!("'{}'", p.to_str().unwrap().replace('\'', "'\\''"));
-        writeln!(script, "#!/bin/sh\nexec {} \"$@\" {} -Wl,--wrap=hirsel_core_os_run -Wl,--wrap=hirsel_core_spawn -Wl,--wrap=hirsel_core_receive -Wl,--wrap=hirsel_core_send -Wl,--wrap=hirsel_core_cancel -Wl,--wrap=hirsel_core_host_op", quote(&cc), quote(&object)).unwrap();
+        writeln!(script, "#!/bin/sh\nexec {} \"$@\" {} -Wl,--wrap=hirsel_core_os_run_with_sources -Wl,--wrap=hirsel_core_spawn -Wl,--wrap=hirsel_core_receive -Wl,--wrap=hirsel_core_send -Wl,--wrap=hirsel_core_cancel -Wl,--wrap=hirsel_core_host_op", quote(&cc), quote(&object)).unwrap();
         drop(script);
         std::fs::set_permissions(&linker, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut options = native_options(backend, dir.path());

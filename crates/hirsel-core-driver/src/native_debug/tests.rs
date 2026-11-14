@@ -3,6 +3,12 @@ use hirsel_core_ir::source::{ItemSource, SourceFile};
 
 #[test]
 fn link_rebinds_rows_and_inline_calls_without_changing_native_code() {
+    for version in [4, 5] {
+        binding_case(version);
+    }
+}
+
+fn binding_case(version: u16) {
     let item = DefPath::from_full("app@1/main/f").unwrap();
     let mut raw = object::write::Object::new(
         object::BinaryFormat::Elf,
@@ -23,11 +29,29 @@ fn link_rebinds_rows_and_inline_calls_without_changing_native_code() {
     });
     let encoding = gimli::Encoding {
         format: gimli::Format::Dwarf32,
-        version: 5,
+        version,
         address_size: 8,
     };
     let mut dwarf = write::DwarfUnit::new(encoding);
     let root = dwarf.unit.root();
+    dwarf.unit.get_mut(root).set(
+        gimli::DW_AT_low_pc,
+        AttributeValue::Address(Address::Symbol {
+            symbol: 0,
+            addend: 0,
+        }),
+    );
+    let ranges = dwarf
+        .unit
+        .ranges
+        .add(write::RangeList(vec![write::Range::OffsetPair {
+            begin: 0,
+            end: 2,
+        }]));
+    dwarf
+        .unit
+        .get_mut(root)
+        .set(gimli::DW_AT_ranges, AttributeValue::RangeListRef(ranges));
     let mut lines = LineProgram::new(
         encoding,
         gimli::LineEncoding::default(),

@@ -36,7 +36,15 @@ impl Addresses {
             write!(hash, "{byte:02x}").unwrap();
         }
         let mut sections = BTreeMap::new();
-        let mut base = 1u64;
+        // Raw DWARF2-4 range/location offsets share read_address with relocated
+        // addresses. Keep relocation identities above every real section offset.
+        let mut base = file
+            .sections()
+            .map(|s| s.size())
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or("native debug address space exhausted")?;
         for section in file.sections() {
             if debug(section.name().map_err(error)?)
                 || section.kind() == object::SectionKind::Metadata
@@ -85,6 +93,7 @@ impl Addresses {
                 symbol: s.symbol,
                 addend: (value - s.base) as i64,
             })
+            .or(Some(Address::Constant(value)))
     }
 
     pub fn section(&self, file: &object::File<'_>, name: &str) -> Result<Vec<u8>, String> {

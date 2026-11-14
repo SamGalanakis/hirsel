@@ -116,4 +116,5 @@ const HirselCoreProcessConfig *hirsel_core_os_process_config(const HirselCoreOsP
 /* Run closes grants after main cleanup, without admission/failure. After run
    and every borrowed view ends, free releases argv/metadata and unused setup. */
 void hirsel_core_os_process_free(HirselCoreOsProcess *);
+#include "hirsel_core_rt_sites.h"
 #endif

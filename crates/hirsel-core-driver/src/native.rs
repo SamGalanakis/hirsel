@@ -660,6 +660,7 @@ fn link(
         "hirsel_core_rt.h",
         "hirsel_core_rt_host.h",
         "hirsel_core_rt_tasks.h",
+        "hirsel_core_rt_sites.h",
     ]
     .map(|n| read_input(&options.include.join(n)))
     .into_iter()

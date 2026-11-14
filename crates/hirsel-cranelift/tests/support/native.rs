@@ -523,6 +523,10 @@ fn link_program(scratch: &Scratch, source: &str) -> PathBuf {
             include_str!("../../../hirsel-core-rt/include/hirsel_core_rt_host.h"),
         ),
         (
+            "hirsel_core_rt_sites.h",
+            include_str!("../../../hirsel-core-rt/include/hirsel_core_rt_sites.h"),
+        ),
+        (
             "hirsel_core_rt_tasks.h",
             include_str!("../../../hirsel-core-rt/include/hirsel_core_rt_tasks.h"),
         ),

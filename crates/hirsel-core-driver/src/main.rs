@@ -391,6 +391,10 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
             include_bytes!("../../hirsel-core-rt/include/hirsel_core_rt_host.h"),
         )?;
         std::fs::write(
+            headers.path().join("hirsel_core_rt_sites.h"),
+            include_bytes!("../../hirsel-core-rt/include/hirsel_core_rt_sites.h"),
+        )?;
+        std::fs::write(
             headers.path().join("hirsel_core_rt_tasks.h"),
             include_bytes!("../../hirsel-core-rt/include/hirsel_core_rt_tasks.h"),
         )?;

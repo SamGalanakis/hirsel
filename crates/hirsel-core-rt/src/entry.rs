@@ -130,6 +130,7 @@ pub struct OsConfig {
     pub parameters_len: usize,
 }
 pub struct OsProcess {
+    pub(crate) sources: *const crate::abi_sites::SourceTable,
     os: Option<Box<OsProvider>>,
     _provider: Box<Provider>,
     _args: Vec<Vec<u8>>,
@@ -257,6 +258,7 @@ impl OsProcess {
                 close_grants: Some(close_grants),
             };
             let mut process = Box::new(Self {
+                sources: std::ptr::null(),
                 os: Some(os),
                 _provider: provider,
                 _args: args,
@@ -344,7 +346,7 @@ unsafe extern "C" fn describe(state: *mut u8, cause: *const crate::causes::Cause
     // SAFETY: run pins its cause and diagnostic buffer until the next describe.
     unsafe {
         let process = &mut *state.cast::<OsProcess>();
-        process.diagnostic = crate::abi_host::format_cause(&*cause).into_bytes();
+        process.diagnostic = crate::abi_sites::format_cause(&*cause, process.sources).into_bytes();
         View {
             data: process.diagnostic.as_ptr(),
             len: process.diagnostic.len(),
@@ -365,15 +367,50 @@ pub unsafe extern "C" fn hirsel_core_os_run(
     // SAFETY: constructor copies all configuration; entry and names are pinned by caller.
     unsafe { run_with_probe(&*input, parameter_names, entry, OsProvider::probe_directory) }
 }
+/// Named OS entry with a borrowed current-source table (FORM #91).
+/// # Safety
+/// Input/name/entry contracts are os_run's; sources follows
+/// abi_sites::hirsel_core_os_process_set_sources through reporting.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_os_run_with_sources(
+    input: *const OsConfig,
+    parameter_names: *const View,
+    sources: *const crate::abi_sites::SourceTable,
+    entry: crate::process::Entry,
+) -> u8 {
+    // SAFETY: all configuration and source storage is pinned by the caller.
+    unsafe {
+        run_with_sources_and_probe(
+            &*input,
+            parameter_names,
+            sources,
+            entry,
+            OsProvider::probe_directory,
+        )
+    }
+}
+
 unsafe fn run_with_probe(
     input: &OsConfig,
     names: *const View,
     entry: crate::process::Entry,
     probe: impl FnOnce(&OsProvider, u64) -> io::Result<()>,
 ) -> u8 {
+    // SAFETY: original entry supplies no source table.
+    unsafe { run_with_sources_and_probe(input, names, std::ptr::null(), entry, probe) }
+}
+unsafe fn run_with_sources_and_probe(
+    input: &OsConfig,
+    names: *const View,
+    sources: *const crate::abi_sites::SourceTable,
+    entry: crate::process::Entry,
+    probe: impl FnOnce(&OsProvider, u64) -> io::Result<()>,
+) -> u8 {
     // SAFETY: input tables are borrowed from the OS entry's configuration.
     match unsafe { OsProcess::new(input, probe) } {
-        Ok(process) => {
+        Ok(mut process) => {
+            // SAFETY: table is borrowed until this call completes reporting.
+            unsafe { crate::abi_sites::hirsel_core_os_process_set_sources(&mut *process, sources) };
             // SAFETY: the Box pins Config and all grants through run and cleanup.
             unsafe { crate::process::hirsel_core_run(&process.config, entry) }
         }

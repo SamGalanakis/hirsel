@@ -53,6 +53,16 @@ pub use crate::host_file::{
 /// The live cause owns/pins its message; a nonnull Fail message uses the FORM
 /// StringMessage carrier. String bytes are already UTF-8 by source typing.
 pub(crate) unsafe fn format_cause(cause: &crate::causes::Cause) -> String {
+    // SAFETY: same pinned Cause contract; numeric fallback needs no source.
+    unsafe { format_cause_at(cause, cause.site) }
+}
+
+/// # Safety
+/// Same pinned Cause/message contract as format_cause.
+pub(crate) unsafe fn format_cause_at(
+    cause: &crate::causes::Cause,
+    site: impl std::fmt::Display,
+) -> String {
     let name = [
         "Overflow",
         "Bounds",
@@ -73,10 +83,10 @@ pub(crate) unsafe fn format_cause(cause: &crate::causes::Cause) -> String {
             format!(
                 "{name}({:?}) at {}",
                 std::str::from_utf8_unchecked(data),
-                cause.site
+                site
             )
         } else {
-            format!("{name} at {}", cause.site)
+            format!("{name} at {site}")
         }
     }
 }

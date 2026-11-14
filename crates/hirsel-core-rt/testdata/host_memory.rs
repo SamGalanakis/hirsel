@@ -35,6 +35,10 @@ pub fn check(emit: impl FnOnce(&Module) -> Vec<u8>, symbol: impl Fn(&Module, Fun
             include_str!("../include/hirsel_core_rt_host.h"),
         ),
         (
+            "hirsel_core_rt_sites.h",
+            include_str!("../include/hirsel_core_rt_sites.h"),
+        ),
+        (
             "hirsel_core_rt_tasks.h",
             include_str!("../include/hirsel_core_rt_tasks.h"),
         ),

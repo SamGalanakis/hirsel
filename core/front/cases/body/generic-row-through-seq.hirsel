@@ -1,0 +1,39 @@
+// FORM #56: `Pool[T].slots` is a List, a Seq field with no row of its own, so `release`,
+// which names `Pool[T]` and never `Slot[T]`, reaches `Slot[T]` only through it. Its
+// instance must hold `Slot[u64]` (24 bytes), not the rigid `Slot[$0]` (std pool.check),
+// whose 40-byte stride and Seq payload would drop each u64 as a buffer. Dropping the
+// pool frees its one buffer, so the bound gets back all 256 bytes.
+// expect: accept
+// expect: run kept() = 256
+type Slot[T] = Full(u64, T) | Vacant(u64)
+
+type Pool[T] {
+    slots: List[Slot[T]],
+    live: u64
+}
+
+fn release[T](take p: Pool[T]) -> u64 {
+    p.live
+}
+
+fn available() -> u64 {
+    let p: Result[List[u8], Capacity] = list.with_capacity(1000)
+    match p {
+        Error(c) => c.available,
+        Ok(_) => 0
+    }
+}
+
+fn kept() -> u64 {
+    let got = bound bytes 256 {
+        let mut p: Pool[u64] = Pool(slots: list.new(), live: 1)
+        let _ = list.push(mut p.slots, Full(7, 5u64))
+        let _ = list.push(mut p.slots, Full(8, 6u64))
+        let _ = release(take p)
+        available()
+    }
+    match got {
+        Ok(v) => v,
+        Error(_) => 0
+    }
+}

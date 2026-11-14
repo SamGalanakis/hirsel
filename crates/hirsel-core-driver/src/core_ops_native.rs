@@ -994,6 +994,16 @@ fn span_rigid_cranelift() { span_rigid(Backend::Cranelift); }
 #[ignore = "explicit native integration target"]
 fn span_rigid_llvm() { span_rigid(Backend::Llvm); }
 
+fn generic_row_through_seq(backend: Backend) {
+    run_lines_native(backend, include_str!("../../../core/front/cases/body/generic-row-through-seq.hirsel"));
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn generic_row_through_seq_cranelift() { generic_row_through_seq(Backend::Cranelift); }
+#[test]
+#[ignore = "explicit native integration target"]
+fn generic_row_through_seq_llvm() { generic_row_through_seq(Backend::Llvm); }
+
 fn uninitialized_take_names(backend: Backend) {
     let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dir=tempfile::tempdir().unwrap();

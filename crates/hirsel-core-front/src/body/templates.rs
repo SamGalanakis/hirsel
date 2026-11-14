@@ -767,6 +767,17 @@ impl Emitter {
         }
         let canonical = crate::decls::layout_name(&p.decls, t, ty);
         let Some(&row) = self.types.get(&canonical) else {
+            // A type with no row of its own (a `List[Slot[T]]` is a Seq field) still
+            // names rows through its arguments: without their recipes, substitution
+            // leaves them rigid under a concrete row (`Pool[A].slots` at `Slot[$0]`).
+            let arguments = match t.kind(ty).clone() {
+                TyKind::Tuple(xs) | TyKind::Adt(_, xs) => xs,
+                TyKind::Array(x, _) => vec![x],
+                _ => vec![],
+            };
+            for x in arguments {
+                self.remember_generic_types(p, t, x);
+            }
             return;
         };
         let row = TypeId(row.0);

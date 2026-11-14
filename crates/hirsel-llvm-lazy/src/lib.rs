@@ -6,6 +6,7 @@ hirsel_guard::install!();
 
 #[path = "../../hirsel-llvm/src/core/mod.rs"]
 pub mod core;
+mod construction;
 mod loader;
 
 /// Compile compiler-produced LLVM text through the same once-loaded component.
@@ -134,5 +135,7 @@ mod tests {
                 .count()
         };
         assert_eq!(component_lines(&loaded), component_lines(&maps()));
+        crate::construction::printer_oracle_fixture();
+        crate::core::sink::primitive_oracle();
     }
 }

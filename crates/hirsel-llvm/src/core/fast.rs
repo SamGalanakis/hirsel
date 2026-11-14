@@ -8,7 +8,7 @@ use super::memory_layout::*;
 use super::storage::Payer;
 use super::*;
 
-impl FunctionEmitter<'_> {
+impl<S: sink::Sink> FunctionEmitter<'_, S> {
     pub(super) fn field_pointer(&mut self, p: &str, offset: usize) -> String {
         if offset == 0 {
             p.into()
@@ -69,12 +69,12 @@ impl FunctionEmitter<'_> {
             &format!("arc_event_done{n}"),
             &format!("arc_event_call{n}"),
         );
-        writeln!(self.code, "arc_event_call{n}:").unwrap();
+        self.sink.block(&format!("arc_event_call{n}:").trim_end_matches(':'));
         let mut args = vec![("ptr".into(), "%context".into())];
         args.extend_from_slice(arguments);
         self.cold_void(name, &args);
         self.line(format!("br label %arc_event_done{n}"));
-        writeln!(self.code, "arc_event_done{n}:").unwrap();
+        self.sink.block(&format!("arc_event_done{n}:").trim_end_matches(':'));
     }
     fn admission_probe(&mut self, charge: &str) -> String {
         #[cfg(test)]
@@ -183,7 +183,7 @@ impl FunctionEmitter<'_> {
             &format!("allocation_slow{n}"),
         );
         if matches!(place, Payer::Like(_)) {
-            writeln!(self.code, "allocation_payer{n}:").unwrap();
+            self.sink.block(&format!("allocation_payer{n}:").trim_end_matches(':'));
             if !owned_like {
                 let empty = self.calc(format!("icmp eq ptr {like}, null"));
                 self.likely(
@@ -191,7 +191,7 @@ impl FunctionEmitter<'_> {
                     &format!("admit{n}"),
                     &format!("allocation_header{n}"),
                 );
-                writeln!(self.code, "allocation_header{n}:").unwrap();
+                self.sink.block(&format!("allocation_header{n}:").trim_end_matches(':'));
             }
             let header = self.calc(format!(
                 "getelementptr i8, ptr {like}, i64 -{OWN_PAYER_BACK}"
@@ -202,7 +202,7 @@ impl FunctionEmitter<'_> {
             let same = self.calc(format!("icmp eq i64 {original}, {current}"));
             self.likely(&same, &format!("admit{n}"), &format!("allocation_slow{n}"));
         }
-        writeln!(self.code, "admit{n}:").unwrap();
+        self.sink.block(&format!("admit{n}:").trim_end_matches(':'));
         let available = self.load_native(&payer, LIMIT_AVAILABLE, "i64");
         // Unsigned charge-1 < room is exactly charge != 0 && charge <= room,
         // including room=MAX. Zero retains the runtime's payer pinning path.
@@ -222,11 +222,11 @@ impl FunctionEmitter<'_> {
         // Refusal injection exists only in the test engine. Production needs
         // neither its always-true branch nor its unreachable refusal join.
         if cfg!(test) {
-            writeln!(self.code, "allocation_probe{n}:").unwrap();
+            self.sink.block(&format!("allocation_probe{n}:").trim_end_matches(':'));
             let allowed = self.admission_probe(charge);
             self.likely(&allowed, &format!("allocate{n}"), &format!("refused{n}"));
         }
-        writeln!(self.code, "allocate{n}:").unwrap();
+        self.sink.block(&format!("allocate{n}:").trim_end_matches(':'));
         self.admit_balance(&payer, charge, &available);
         let zero = self.calc(format!("icmp eq i64 {bytes}, 0"));
         let nonzero = self.calc(format!("select i1 {zero}, i64 1, i64 {bytes}"));
@@ -262,10 +262,10 @@ impl FunctionEmitter<'_> {
         self.line(format!("store ptr {tagged}, ptr {header}, align 8"));
         self.line(format!("br label %allocation_done{n}"));
         if cfg!(test) {
-            writeln!(self.code, "refused{n}:").unwrap();
+            self.sink.block(&format!("refused{n}:").trim_end_matches(':'));
             self.line(format!("br label %allocation_done{n}"));
         }
-        writeln!(self.code, "allocation_slow{n}:").unwrap();
+        self.sink.block(&format!("allocation_slow{n}:").trim_end_matches(':'));
         let (slow, room) = self.allocation_cold(
             "hirsel_core_alloc",
             &[
@@ -279,7 +279,7 @@ impl FunctionEmitter<'_> {
             ],
         );
         self.line(format!("br label %allocation_done{n}"));
-        writeln!(self.code, "allocation_done{n}:").unwrap();
+        self.sink.block(&format!("allocation_done{n}:").trim_end_matches(':'));
         let refused_pointer = if cfg!(test) {
             format!(", [null, %refused{n}]")
         } else {
@@ -322,14 +322,14 @@ impl FunctionEmitter<'_> {
             &format!("region_admit{n}"),
             &format!("region_slow{n}"),
         );
-        writeln!(self.code, "region_admit{n}:").unwrap();
+        self.sink.block(&format!("region_admit{n}:").trim_end_matches(':'));
         let (fits, available) = self.admission_test(&payer, charge);
         self.likely(
             &fits,
             &format!("region_bump{n}"),
             &format!("region_refused{n}"),
         );
-        writeln!(self.code, "region_bump{n}:").unwrap();
+        self.sink.block(&format!("region_bump{n}:").trim_end_matches(':'));
         self.admit_balance(&payer, charge, &available);
         let total = self.calc(format!("add i64 {accumulated}, {charge}"));
         self.store_native(region, REGION_CHARGE, "i64", &total);
@@ -352,20 +352,20 @@ impl FunctionEmitter<'_> {
             &format!("region_store{n}"),
             &format!("region_refill{n}"),
         );
-        writeln!(self.code, "region_store{n}:").unwrap();
+        self.sink.block(&format!("region_store{n}:").trim_end_matches(':'));
         let next_pointer = self.calc(format!("getelementptr i8, ptr {result}, i64 {size}"));
         self.store_native(region, REGION_CURSOR, "ptr", &next_pointer);
         self.line(format!("br label %region_done{n}"));
-        writeln!(self.code, "region_refill{n}:").unwrap();
+        self.sink.block(&format!("region_refill{n}:").trim_end_matches(':'));
         self.intrinsics
             .insert("declare ptr @hirsel_core_region_refill(ptr, i64, i64)".into());
         let refill = self.calc(format!(
             "call ptr @hirsel_core_region_refill(ptr {region}, i64 {bytes}, i64 {align}) cold"
         ));
         self.line(format!("br label %region_done{n}"));
-        writeln!(self.code, "region_refused{n}:").unwrap();
+        self.sink.block(&format!("region_refused{n}:").trim_end_matches(':'));
         self.line(format!("br label %region_done{n}"));
-        writeln!(self.code, "region_slow{n}:").unwrap();
+        self.sink.block(&format!("region_slow{n}:").trim_end_matches(':'));
         let (slow, slow_room) = self.allocation_cold(
             "hirsel_core_region_alloc",
             &[
@@ -378,7 +378,7 @@ impl FunctionEmitter<'_> {
             ],
         );
         self.line(format!("br label %region_done{n}"));
-        writeln!(self.code, "region_done{n}:").unwrap();
+        self.sink.block(&format!("region_done{n}:").trim_end_matches(':'));
         let pointer = self.calc(format!("phi ptr [{result}, %region_store{n}], [{refill}, %region_refill{n}], [null, %region_refused{n}], [{slow}, %region_slow{n}]"));
         let room = self.calc(format!("phi i64 [0, %region_store{n}], [0, %region_refill{n}], [{available}, %region_refused{n}], [{slow_room}, %region_slow{n}]"));
         (pointer, room)
@@ -400,7 +400,7 @@ impl FunctionEmitter<'_> {
         let positive = self.calc(format!("icmp ne i64 {charge}, 0"));
         let fast = self.calc(format!("and i1 {ordinary}, {positive}"));
         self.likely(&fast, &format!("free_local{n}"), &format!("free_slow{n}"));
-        writeln!(self.code, "free_local{n}:").unwrap();
+        self.sink.block(&format!("free_local{n}:").trim_end_matches(':'));
         let available = self.load_native(&current, LIMIT_AVAILABLE, "i64");
         let restored = self.calc(format!("add i64 {available}, {charge}"));
         self.store_native(&current, LIMIT_AVAILABLE, "i64", &restored);
@@ -415,13 +415,13 @@ impl FunctionEmitter<'_> {
         let base = self.calc(format!("getelementptr i8, ptr {pointer}, i64 {neg}"));
         self.runtime_void("hirsel_core_native_free", &[("ptr".into(), base)]);
         self.line(format!("br label %freed{n}"));
-        writeln!(self.code, "free_slow{n}:").unwrap();
+        self.sink.block(&format!("free_slow{n}:").trim_end_matches(':'));
         let fixed = self.calc(format!("icmp eq i64 {tag}, {NATIVE_STATIC}"));
         let fixed = self.calc(format!("and i1 {fixed}, {positive}"));
         self.line(format!(
             "br i1 {fixed}, label %free_static{n}, label %free_generic{n}"
         ));
-        writeln!(self.code, "free_static{n}:").unwrap();
+        self.sink.block(&format!("free_static{n}:").trim_end_matches(':'));
         let available = self.load_native(&current, LIMIT_AVAILABLE, "i64");
         let restored = self.calc(format!("add i64 {available}, {charge}"));
         self.store_native(&current, LIMIT_AVAILABLE, "i64", &restored);
@@ -433,7 +433,7 @@ impl FunctionEmitter<'_> {
         ));
         self.runtime_void("hirsel_core_native_free", &[("ptr".into(), base)]);
         self.line(format!("br label %freed{n}"));
-        writeln!(self.code, "free_generic{n}:").unwrap();
+        self.sink.block(&format!("free_generic{n}:").trim_end_matches(':'));
 
         self.cold_void(
             "hirsel_core_free_value",
@@ -443,13 +443,13 @@ impl FunctionEmitter<'_> {
             ],
         );
         self.line(format!("br label %freed{n}"));
-        writeln!(self.code, "freed{n}:").unwrap();
+        self.sink.block(&format!("freed{n}:").trim_end_matches(':'));
     }
     pub(super) fn share_node(&mut self, node: &str, atomic: bool) {
         let n = self.next;
         self.next += 1;
         self.line(format!("br label %retain{n}"));
-        writeln!(self.code, "retain{n}:").unwrap();
+        self.sink.block(&format!("retain{n}:").trim_end_matches(':'));
         let count = self.calc(if atomic {
             format!("load atomic i64, ptr {node} monotonic, align 8")
         } else {
@@ -461,7 +461,7 @@ impl FunctionEmitter<'_> {
             &format!("retain_store{n}"),
             &format!("count_stop{n}"),
         );
-        writeln!(self.code, "count_stop{n}:").unwrap();
+        self.sink.block(&format!("count_stop{n}:").trim_end_matches(':'));
         self.cold_void(
             "hirsel_core_share",
             &[
@@ -470,7 +470,7 @@ impl FunctionEmitter<'_> {
             ],
         );
         self.line("unreachable");
-        writeln!(self.code, "retain_store{n}:").unwrap();
+        self.sink.block(&format!("retain_store{n}:").trim_end_matches(':'));
         let next = self.calc(format!("add i64 {count}, 1"));
         if atomic {
             let exchange = self.calc(format!(
@@ -482,7 +482,7 @@ impl FunctionEmitter<'_> {
             self.line(format!("store i64 {next}, ptr {node}, align 8"));
             self.line(format!("br label %retained{n}"));
         }
-        writeln!(self.code, "retained{n}:").unwrap();
+        self.sink.block(&format!("retained{n}:").trim_end_matches(':'));
         if atomic {
             self.arc_event("hirsel_core_arc_shared", &[("ptr".into(), node.into())]);
         }
@@ -529,7 +529,7 @@ impl FunctionEmitter<'_> {
             &format!("release_nonlast{n}"),
             &format!("release_last{n}"),
         );
-        writeln!(self.code, "release_nonlast{n}:").unwrap();
+        self.sink.block(&format!("release_nonlast{n}:").trim_end_matches(':'));
         if atomic {
             self.arc_event(
                 "hirsel_core_arc_released",
@@ -537,7 +537,7 @@ impl FunctionEmitter<'_> {
             );
         }
         self.line(format!("br label %released{n}"));
-        writeln!(self.code, "release_last{n}:").unwrap();
+        self.sink.block(&format!("release_last{n}:").trim_end_matches(':'));
         if atomic {
             self.line("fence acquire");
             self.arc_event(
@@ -558,6 +558,6 @@ impl FunctionEmitter<'_> {
             self.free_block(node, &charge.to_string());
         }
         self.line(format!("br label %released{n}"));
-        writeln!(self.code, "released{n}:").unwrap();
+        self.sink.block(&format!("released{n}:").trim_end_matches(':'));
     }
 }

@@ -485,3 +485,7 @@ void hirsel_llvm_library_v1(const uint8_t *ir, size_t len, const char *triple, c
     HirselLlvmUnit unit = { ir, len, 0, 0 };
     emit_program(&unit, 1, NULL, 0, 1, triple, cpu, out, 0, raw, summary);
 }
+
+extern const void *hirsel_llvm_no_folder_api(void);
+__attribute__((visibility("default")))
+const void *hirsel_llvm_builder_v1(void) { return hirsel_llvm_no_folder_api(); }

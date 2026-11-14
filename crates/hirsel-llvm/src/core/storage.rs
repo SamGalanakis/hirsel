@@ -18,7 +18,7 @@ pub(super) enum At {
     Array(Box<FieldTy>, u64),
     Other,
 }
-impl FunctionEmitter<'_> {
+impl<S: sink::Sink> FunctionEmitter<'_, S> {
     pub(super) fn fixed(&self, t: TypeId) -> &hirsel_core_layout::Fixed {
         let Layout::Fixed(f) = &self.recipes[t.index()].layout else {
             panic!("compact projection requires its extent recipe")
@@ -390,7 +390,7 @@ impl FunctionEmitter<'_> {
             &format!("allocation_success{n}"),
             &format!("allocation_status{n}"),
         );
-        writeln!(self.code, "allocation_status{n}:").unwrap();
+        self.sink.block(&format!("allocation_status{n}:").trim_end_matches(':'));
         self.intrinsics
             .insert("declare i8 @hirsel_core_allocation_status(ptr, ptr)".into());
         let status = self.calc(format!(
@@ -399,7 +399,7 @@ impl FunctionEmitter<'_> {
         let failed = self.calc(format!("icmp ne i8 {status}, 0"));
         self.branch_failure(&failed, fail, Some(6));
         self.line(format!("br label %allocation_success{n}"));
-        writeln!(self.code, "allocation_success{n}:").unwrap();
+        self.sink.block(&format!("allocation_success{n}:").trim_end_matches(':'));
     }
     pub(super) fn storage(&mut self, inst: &Inst, index: usize) -> Result<()> {
         let ptr = |s: &str| ("ptr".into(), s.to_string());
@@ -445,7 +445,7 @@ impl FunctionEmitter<'_> {
                     self.line(format!(
                         "br i1 {missing}, label %allocated{n}, label %counted{n}"
                     ));
-                    writeln!(self.code, "counted{n}:").unwrap();
+                    self.sink.block(&format!("counted{n}:").trim_end_matches(':'));
                     if counted == Counted::Arc {
                         self.line(format!(
                             "store atomic i64 1, ptr {block} monotonic, align 8"
@@ -455,7 +455,7 @@ impl FunctionEmitter<'_> {
                         self.line(format!("store i64 1, ptr {block}, align 8"));
                     }
                     self.line(format!("br label %allocated{n}"));
-                    writeln!(self.code, "allocated{n}:").unwrap();
+                    self.sink.block(&format!("allocated{n}:").trim_end_matches(':'));
                 }
             }
             // Full-new admission and install-before-refund are unchanged.
@@ -600,7 +600,7 @@ impl FunctionEmitter<'_> {
                     self.line(format!(
                         "br i1 {owned}, label %carrier_drop{n}, label %carrier_done{n}"
                     ));
-                    writeln!(self.code, "carrier_drop{n}:").unwrap();
+                    self.sink.block(&format!("carrier_drop{n}:").trim_end_matches(':'));
                     Some(n)
                 } else {
                     None
@@ -624,7 +624,7 @@ impl FunctionEmitter<'_> {
                 self.branch_failure(&failed, fail, None);
                 if let Some(n) = guard {
                     self.line(format!("br label %carrier_done{n}"));
-                    writeln!(self.code, "carrier_done{n}:").unwrap();
+                    self.sink.block(&format!("carrier_done{n}:").trim_end_matches(':'));
                 }
             }
             Inst::Share { node, kind } => {

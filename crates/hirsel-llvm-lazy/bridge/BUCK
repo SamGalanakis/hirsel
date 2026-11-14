@@ -13,7 +13,9 @@ cxx_library(
 
 cxx_library(
     name = "bitcode",
-    srcs = ["bitcode.cpp"],
+    srcs = ["bitcode.cpp", "builder.cpp"],
+    headers = {"builder.h": "builder.h"},
+    header_namespace = "",
     compiler_flags = [
         "-std=c++17", "-O2", "-fvisibility=hidden",
         "-fno-exceptions", "-fno-rtti", "-nostdinc++",

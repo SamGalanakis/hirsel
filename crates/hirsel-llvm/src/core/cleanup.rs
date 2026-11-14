@@ -95,8 +95,7 @@ pub(super) fn drop_glue(
             value_slots: Vec::new(),
             address_slots: Vec::new(),
             empty_bounds: empty::EmptyBounds::default(),
-            code: String::new(),
-            allocations: String::new(),
+            sink: sink::TextSink::default(),
             next: 0,
             intrinsics,
         };
@@ -168,7 +167,7 @@ pub(super) fn drop_glue(
                 e.line("br label %case0");
             }
             for (row, fields) in drop.fields.iter().enumerate() {
-                writeln!(e.code, "case{row}:").unwrap();
+                writeln!(e.sink.code, "case{row}:").unwrap();
                 for field in fields {
                     let p = e.calc(format!(
                         "getelementptr i8, ptr {base}, i64 {}",
@@ -178,7 +177,7 @@ pub(super) fn drop_glue(
                 }
                 e.line("br label %settle");
             }
-            writeln!(e.code, "settle:").unwrap();
+            writeln!(e.sink.code, "settle:").unwrap();
         }
         if resource {
             let storage = recipes[t].logical_size.expect("resource storage");
@@ -192,7 +191,7 @@ pub(super) fn drop_glue(
         writeln!(
             text,
             "define private i8 @core_drop_{t}(ptr %context, ptr %payload, i64 %caller_site) {{\nentry:\n{}{} }}",
-            e.allocations, e.code
+            e.sink.allocations, e.sink.code
         )
         .unwrap();
         if callbacks.contains(&t) {
@@ -216,7 +215,7 @@ pub(super) fn drop_glue(
     Ok(())
 }
 
-impl FunctionEmitter<'_> {
+impl<S: sink::Sink> FunctionEmitter<'_, S> {
     pub(super) fn clean_field(&mut self, field: &FieldTy, p: &str, status: &str) -> Result<()> {
         let ptr = |s: &str| ("ptr".into(), s.to_string());
         let site = self.site_word();
@@ -247,20 +246,20 @@ impl FunctionEmitter<'_> {
                 let label = self.next;
                 self.next += 1;
                 self.line(format!("br label %array_head{label}"));
-                writeln!(self.code, "array_head{label}:").unwrap();
+                self.sink.block(&format!("array_head{label}:").trim_end_matches(':'));
                 let i = self.calc(format!("load i64, ptr {index}"));
                 let more = self.calc(format!("icmp ult i64 {i}, {n}"));
                 self.line(format!(
                     "br i1 {more}, label %array_body{label}, label %array_done{label}"
                 ));
-                writeln!(self.code, "array_body{label}:").unwrap();
+                self.sink.block(&format!("array_body{label}:").trim_end_matches(':'));
                 let off = self.calc(format!("mul i64 {i}, {stride}"));
                 let element = self.calc(format!("getelementptr i8, ptr {p}, i64 {off}"));
                 self.clean_field(e, &element, status)?;
                 let next = self.calc(format!("add i64 {i}, 1"));
                 self.line(format!("store i64 {next}, ptr {index}"));
                 self.line(format!("br label %array_head{label}"));
-                writeln!(self.code, "array_done{label}:").unwrap();
+                self.sink.block(&format!("array_done{label}:").trim_end_matches(':'));
                 None
             }
             FieldTy::Seq(_) | FieldTy::Map(_, _) => {
@@ -276,13 +275,13 @@ impl FunctionEmitter<'_> {
                 self.line(format!(
                     "br i1 {allocated}, label %closure_drop{label}, label %closure_done{label}"
                 ));
-                writeln!(self.code, "closure_drop{label}:").unwrap();
+                self.sink.block(&format!("closure_drop{label}:").trim_end_matches(':'));
                 let glue = self.calc(format!("load ptr, ptr {environment}, align 1"));
                 self.line(format!(
                     "call i8 {glue}(ptr %context, ptr {environment}, i64 {site})"
                 ));
                 self.line(format!("br label %closure_done{label}"));
-                writeln!(self.code, "closure_done{label}:").unwrap();
+                self.sink.block(&format!("closure_done{label}:").trim_end_matches(':'));
                 None
             }
             FieldTy::Rc(t) | FieldTy::Arc(t) => {
@@ -395,7 +394,7 @@ pub(super) fn mechanical_count(
         }
     })
 }
-impl FunctionEmitter<'_> {
+impl<S: sink::Sink> FunctionEmitter<'_, S> {
     pub(super) fn mechanical_field(
         &mut self,
         field: &FieldTy,
@@ -413,7 +412,7 @@ impl FunctionEmitter<'_> {
         let n = self.next;
         self.next += 1;
         self.line(format!("br i1 {here}, label %clean{n}, label %skip{n}"));
-        writeln!(self.code, "clean{n}:").unwrap();
+        self.sink.block(&format!("clean{n}:").trim_end_matches(':'));
         match field {
             // Its ordinary glue: the finalizer, then the fields. A counted payload
             // holds no resource, so this cannot fail.
@@ -443,7 +442,7 @@ impl FunctionEmitter<'_> {
                     self.line(format!("br label %row{n}_0"));
                 }
                 for (row, fields) in drop.fields.iter().enumerate() {
-                    writeln!(self.code, "row{n}_{row}:").unwrap();
+                    self.sink.block(&format!("row{n}_{row}:").trim_end_matches(':'));
                     let mut offset = 0;
                     for f in fields {
                         let at = self.calc(format!("getelementptr i8, ptr {p}, i64 {}", f.offset));
@@ -485,7 +484,7 @@ impl FunctionEmitter<'_> {
                         self.release_node(&node, *t, matches!(field, FieldTy::Arc(_)))?;
                     }
                     self.line("ret i1 false");
-                    writeln!(self.code, "skip{n}:").unwrap();
+                    self.sink.block(&format!("skip{n}:").trim_end_matches(':'));
                     return Ok(());
                 }
                 let mut args = vec![("ptr".into(), "%worklist".into()), ("ptr".into(), node)];
@@ -506,7 +505,7 @@ impl FunctionEmitter<'_> {
             }
             _ => unreachable!(),
         }
-        writeln!(self.code, "skip{n}:").unwrap();
+        self.sink.block(&format!("skip{n}:").trim_end_matches(':'));
         Ok(())
     }
 }
@@ -546,8 +545,7 @@ fn counted_glue(
             value_slots: Vec::new(),
             address_slots: Vec::new(),
             empty_bounds: empty::EmptyBounds::default(),
-            code: String::new(),
-            allocations: String::new(),
+            sink: sink::TextSink::default(),
             next: 0,
             intrinsics,
         };
@@ -572,7 +570,7 @@ fn counted_glue(
         e.line(format!("store i64 {next}, ptr %cursor"));
         e.mechanical_field(&field, "%payload", &cursor, 0)?;
         e.line("ret i1 true");
-        writeln!(text,"define private zeroext i1 @core_counted_drop_{t}(ptr %context, ptr %payload, ptr %cursor, ptr %worklist) {{\nentry:\n{}{} }}",e.allocations,e.code).unwrap();
+        writeln!(text,"define private zeroext i1 @core_counted_drop_{t}(ptr %context, ptr %payload, ptr %cursor, ptr %worklist) {{\nentry:\n{}{} }}",e.sink.allocations,e.sink.code).unwrap();
     }
     Ok(())
 }

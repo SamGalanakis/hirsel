@@ -6,7 +6,7 @@ const U: Ty = Ty::Scalar(Scalar::U64);
 const K: Ty = Ty::Scalar(Scalar::U8);
 const B: Ty = Ty::Scalar(Scalar::Bool);
 
-impl FunctionEmitter<'_> {
+impl<S: sink::Sink> FunctionEmitter<'_, S> {
     fn value_descriptors(&mut self, types: &[TypeId], task_input: bool) -> String {
         let buffer = self.temp(&format!("[{} x i8]", 32 * types.len()));
         for (i, &t) in types.iter().enumerate() {

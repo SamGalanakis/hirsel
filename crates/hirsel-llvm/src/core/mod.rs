@@ -23,6 +23,7 @@ mod forward;
 mod growth;
 mod scalar;
 mod sites;
+pub(crate) mod sink;
 mod storage;
 #[cfg(all(test, not(hirsel_lazy_core)))]
 mod target_tests;
@@ -256,27 +257,26 @@ fn emit_ir_target_with_role_facts(
             } else {
                 empty::EmptyBounds::new(body, &failures.constants[i])
             },
-            code: String::new(),
-            allocations: String::new(),
+            sink: sink::TextSink::default(),
             next: 0,
             intrinsics: &mut intrinsics,
         };
         for (i, t) in body.values.iter().enumerate() {
             if e.value_slots[i] {
-                writeln!(e.allocations, "  %v{i} = alloca {}", ty(*t)).unwrap();
+                writeln!(e.sink.allocations, "  %v{i} = alloca {}", ty(*t)).unwrap();
             }
         }
         for (i, t) in body.slots.iter().enumerate() {
             let (bytes, align) = e.place_layout(*t);
             writeln!(
-                e.allocations,
+                e.sink.allocations,
                 "  %s{i} = alloca [{bytes} x i8], align {align}"
             )
             .unwrap();
         }
         for i in 0..body.addresses.len() {
             if e.address_slots[i] {
-                writeln!(e.allocations, "  %a{i} = alloca ptr").unwrap();
+                writeln!(e.sink.allocations, "  %a{i} = alloca ptr").unwrap();
             }
         }
         // Cleanup continuations may mention a branch-local constant even when
@@ -309,7 +309,7 @@ fn emit_ir_target_with_role_facts(
         e.line("br label %b0");
         let mut forwarding = forward::Forwarding::new(body);
         for (i, b) in body.blocks.iter().enumerate() {
-            writeln!(e.code, "b{i}:").unwrap();
+            writeln!(e.sink.code, "b{i}:").unwrap();
             let ending = forwarding.ending(module, &recipes, sig, e.constants, i);
             let mut returned = false;
             for (offset, inst) in b.insts.get(&body.insts).unwrap().iter().enumerate() {
@@ -371,8 +371,8 @@ fn emit_ir_target_with_role_facts(
             function_debug
                 .map(|d| format!(" !dbg !{}", d.scope))
                 .unwrap_or_default(),
-            e.allocations,
-            e.code
+            e.sink.allocations,
+            e.sink.code
         )
         .unwrap();
         if !has_status {
@@ -626,7 +626,7 @@ fn size(t: Ty) -> u64 {
     }
 }
 
-struct FunctionEmitter<'a> {
+struct FunctionEmitter<'a, S: sink::Sink = sink::TextSink> {
     function: Option<FuncId>,
     module: &'a Module,
     body: &'a Body,
@@ -647,12 +647,11 @@ struct FunctionEmitter<'a> {
     relocatable_sites: bool,
     value_slots: Vec<bool>,
     address_slots: Vec<bool>,
-    code: String,
-    allocations: String,
+    sink: S,
     next: usize,
     intrinsics: &'a mut BTreeSet<String>,
 }
-impl FunctionEmitter<'_> {
+impl<S: sink::Sink> FunctionEmitter<'_, S> {
     fn c_argument<'a>(&self, t: &'a str) -> &'a str {
         if self.abi.target == Target::Aarch64Linux {
             t.strip_suffix(" zeroext")
@@ -663,19 +662,7 @@ impl FunctionEmitter<'_> {
         }
     }
     fn line(&mut self, s: impl AsRef<str>) {
-        let s = s.as_ref();
-        let metadata = self.debug_location.filter(|_| {
-            !s.ends_with(':')
-                && !s.ends_with('[')
-                && !s.as_bytes().first().is_some_and(|c| {
-                    *c == b'i' && s.as_bytes().get(1).is_some_and(u8::is_ascii_digit)
-                })
-        });
-        if let Some(location) = metadata {
-            writeln!(self.code, "  {s}, !dbg !{location}").unwrap();
-        } else {
-            writeln!(self.code, "  {s}").unwrap();
-        }
+        self.sink.raw(s.as_ref(), self.debug_location);
     }
     fn fresh(&mut self) -> String {
         let n = self.next;
@@ -689,7 +676,7 @@ impl FunctionEmitter<'_> {
     }
     fn temp(&mut self, t: &str) -> String {
         let p = self.fresh();
-        writeln!(self.allocations, "  {p} = alloca {t}, align 8").unwrap();
+        self.sink.raw_alloca(&format!("  {p} = alloca {t}, align 8\n"));
         p
     }
     fn vty(&self, v: ValueId) -> Ty {
@@ -774,13 +761,13 @@ impl FunctionEmitter<'_> {
             self.line(format!("br i1 {flag}, label %b{}, label %ok{n}", fail.0));
         } else {
             self.line(format!("br i1 {flag}, label %bad{n}, label %ok{n}"));
-            writeln!(self.code, "bad{n}:").unwrap();
+            self.sink.block(&format!("bad{n}:").trim_end_matches(':'));
             if let Some(cause) = cause {
                 self.raise(cause);
             }
             self.propagate_to(fail);
         }
-        writeln!(self.code, "ok{n}:").unwrap();
+        self.sink.block(&format!("ok{n}:").trim_end_matches(':'));
     }
     fn propagate_to(&mut self, fail: Option<BlockId>) {
         if let Some(fail) = fail {
@@ -1065,7 +1052,7 @@ impl FunctionEmitter<'_> {
         if self.body.edges[edge.index()].args.len == 0 {
             return;
         }
-        writeln!(self.code, "{label}:").unwrap();
+        self.sink.block(&format!("{label}:").trim_end_matches(':'));
         let to = self.edge(edge);
         self.line(format!("br label %{to}"));
     }

@@ -2,7 +2,7 @@
 //! backend, with CoreIR types and explicit failure successors.
 use super::*;
 
-impl FunctionEmitter<'_> {
+impl<S: sink::Sink> FunctionEmitter<'_, S> {
     pub(super) fn overflow(&mut self, t: Ty, op: ArithOp, a: &str, b: &str) -> (String, String) {
         if op == ArithOp::Add && !t.int().unwrap().0 {
             // Keep the value and its overflow condition scalar. A PHI of the

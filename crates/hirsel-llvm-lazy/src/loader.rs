@@ -70,6 +70,7 @@ struct Backend {
     program: Program,
     library: Library,
     free: Free,
+    construction: &'static crate::construction::Api,
     _image: File,
 }
 fn dl_error() -> String {
@@ -130,7 +131,9 @@ fn load() -> Result<Backend, String> {
     let free = unsafe { libc::dlsym(handle, c"hirsel_llvm_output_free_v1".as_ptr()) };
     let program = unsafe { libc::dlsym(handle, c"hirsel_llvm_program_v2".as_ptr()) };
     let library = unsafe { libc::dlsym(handle, c"hirsel_llvm_library_v1".as_ptr()) };
-    if compile.is_null() || free.is_null() || program.is_null() || library.is_null() {
+    // SAFETY: the table getter is part of the same embedded component ABI.
+    let construction = unsafe { libc::dlsym(handle, c"hirsel_llvm_builder_v1".as_ptr()) };
+    if compile.is_null() || free.is_null() || program.is_null() || library.is_null() || construction.is_null() {
         return Err(dl_error());
     }
     Ok(Backend {
@@ -142,12 +145,25 @@ fn load() -> Result<Backend, String> {
         free: unsafe { std::mem::transmute::<*mut libc::c_void, Free>(free) },
         // SAFETY: the same embedded component produces all library fields.
         library: unsafe { std::mem::transmute::<*mut libc::c_void, Library>(library) },
+        // SAFETY: the table is static, its types match construction.rs, and the
+        // component stays mapped for the process lifetime.
+        construction: unsafe {
+            let getter = std::mem::transmute::<*mut libc::c_void, unsafe extern "C" fn() -> *const crate::construction::Api>(construction);
+            &*getter()
+        },
         _image: image,
     })
 }
 fn backend() -> Result<&'static Backend, String> {
     static BACKEND: OnceLock<Result<Backend, String>> = OnceLock::new();
     BACKEND.get_or_init(load).as_ref().map_err(Clone::clone)
+}
+pub(crate) fn construction_api() -> Result<&'static crate::construction::Api, String> {
+    Ok(backend()?.construction)
+}
+pub(crate) unsafe fn free_construction_output(data: *mut u8) {
+    // SAFETY: callers pass exactly one buffer returned by this loaded component.
+    unsafe { (backend().expect("construction already loaded").free)(data) }
 }
 pub(crate) fn compile(
     ir: &str,

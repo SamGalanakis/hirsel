@@ -166,7 +166,7 @@ impl Return {
     }
 }
 
-impl FunctionEmitter<'_> {
+impl<S: sink::Sink> FunctionEmitter<'_, S> {
     fn shadow_argument(&self, site: &CallSite) -> Option<usize> {
         let Callee::Direct(f) = site.callee else {
             return None;
@@ -539,6 +539,9 @@ impl FunctionEmitter<'_> {
         values
     }
 
+}
+
+impl FunctionEmitter<'_, sink::TextSink> {
     pub(super) fn infallible_wrapper(
         &mut self,
         name: &str,
@@ -547,9 +550,9 @@ impl FunctionEmitter<'_> {
         text: &mut String,
         debug: Option<(usize, usize)>,
     ) {
-        self.code.clear();
+        self.sink.code.clear();
         self.debug_location = debug.map(|(_, location)| location);
-        self.allocations.clear();
+        self.sink.allocations.clear();
         self.next = 0;
         self.has_status = true;
         self.abi = Return::internal_on_target(self.abi.target, &sig.results);
@@ -579,8 +582,8 @@ impl FunctionEmitter<'_> {
             debug
                 .map(|(scope, _)| format!(" !dbg !{scope}"))
                 .unwrap_or_default(),
-            self.allocations,
-            self.code
+            self.sink.allocations,
+            self.sink.code
         )
         .unwrap();
     }

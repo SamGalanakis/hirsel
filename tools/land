@@ -100,9 +100,9 @@ CORE_ACCEPTANCE = (
     '//:hirsel-cranelift-test-core_native', '//:hirsel-cranelift-test-core_aarch64',
     '//:core-aarch64-provider', '//:land-core-evaluator', '//:land-core-native-capabilities',
     '//:core-m1-cranelift', '//:core-m1-llvm', '//:core-llvm-aarch64-m1',
-    # The #[ignore] native::tests bodies that need the host's openat2, run one per
-    # target on the invoking host; the pool half joins once its bodies all pass.
-    '//:core-driver-native-openat2',
+    # native::tests in two halves: the #[ignore] bodies that need the host's
+    # openat2, run one per target on the invoking host, and the pool of the rest.
+    '//:core-driver-native-openat2', '//:core-driver-native-pool',
 )
 # A target literal in a tools/land: the tool on main checks every batch this
 # tree joins, so each one it names must exist in the tree submitted.

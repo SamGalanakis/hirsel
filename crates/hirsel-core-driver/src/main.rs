@@ -406,6 +406,10 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
             headers.path().join("hirsel_core_rt_tasks.h"),
             include_bytes!("../../hirsel-core-rt/include/hirsel_core_rt_tasks.h"),
         )?;
+        std::fs::write(
+            headers.path().join("hirsel_core_rt_isolate.h"),
+            include_bytes!("../../hirsel-core-rt/include/hirsel_core_rt_isolate.h"),
+        )?;
         let default_output = if test_command {
             native_store.join("tests")
         } else {

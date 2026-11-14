@@ -176,4 +176,5 @@ void hirsel_core_free_value(void *, uint64_t);
 void hirsel_core_release_buffer_enqueue(HirselCoreWorklist *, void *buffer, uint64_t charge, void *payload, HirselCoreDropRecipe);
 #include "hirsel_core_rt_host.h"
 #include "hirsel_core_rt_tasks.h"
+#include "hirsel_core_rt_isolate.h"
 #endif

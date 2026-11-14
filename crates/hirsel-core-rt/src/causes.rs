@@ -81,11 +81,13 @@ pub struct Cell {
     pub(crate) cause: Cause,
     pub(crate) next: *mut Cell,
     funding: Payer,
+    pub(crate) reserved: bool,
 }
 impl Cell {
     pub(crate) fn prepaid(funding: Payer) -> Box<Self> {
         let cell = Box::new(Self {
             funding,
+            reserved: false,
             cause: Cause::default(),
             next: ptr::null_mut(),
         });
@@ -93,12 +95,27 @@ impl Cell {
         crate::peak::allocated((&*cell as *const Self).cast(), size_of::<Self>());
         cell
     }
+
+    /// A reservation has already moved its 32-byte charge into this payer's
+    /// outstanding balance. It therefore must not call `prepaid`, which creates
+    /// a child scope and transfers a parent charge.
+    pub(crate) fn reserved(funding: Payer) -> Box<Self> {
+        Box::new(Self {
+            funding,
+            reserved: true,
+            cause: Cause::default(),
+            next: ptr::null_mut(),
+        })
+    }
 }
 impl Drop for Cell {
     fn drop(&mut self) {
         // SAFETY: this cell owns its inline String; unused cells have capacity zero.
         unsafe { drop_string(&self.cause.message) };
         self.funding.refund(charge::CAUSE_CELL);
+        if self.reserved {
+            self.funding.finish_reserved();
+        }
         #[cfg(any(test, feature = "charge-observation"))]
         crate::peak::deallocated((self as *const Self).cast());
     }
@@ -136,6 +153,23 @@ impl Causes {
     }
     pub fn into_raw(self) -> *mut Cell {
         ManuallyDrop::new(self).head
+    }
+
+    pub(crate) fn append_chain(&mut self, other: Causes) {
+        let mut other = ManuallyDrop::new(other);
+        if other.head.is_null() {
+            return;
+        }
+        if self.head.is_null() {
+            self.head = other.head;
+            self.tail = other.tail;
+        } else {
+            // SAFETY: both lists are exclusively owned and their tails are live.
+            unsafe { (*self.tail).next = other.head };
+            self.tail = other.tail;
+        }
+        other.head = ptr::null_mut();
+        other.tail = ptr::null_mut();
     }
     /// # Safety
     /// The caller transfers an entire exclusively owned chain from into_raw.
@@ -204,7 +238,7 @@ pub unsafe fn record_string(context: &mut Context, site: u64, message: StringMes
 }
 
 pub(crate) struct Resource {
-    cell: Option<Box<Cell>>,
+    pub(crate) cell: Option<Box<Cell>>,
     grant: Option<Funding>,
     previous: Option<Funding>,
     previous_resource: *mut Resource,

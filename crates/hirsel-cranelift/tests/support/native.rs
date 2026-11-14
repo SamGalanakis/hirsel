@@ -610,6 +610,10 @@ fn link_program_checked(scratch: &Scratch, source: &str, memcheck: bool) -> Path
             "hirsel_core_rt_tasks.h",
             include_str!("../../../hirsel-core-rt/include/hirsel_core_rt_tasks.h"),
         ),
+        (
+            "hirsel_core_rt_isolate.h",
+            include_str!("../../../hirsel-core-rt/include/hirsel_core_rt_isolate.h"),
+        ),
     ] {
         fs::write(scratch.0.join(name), text).unwrap();
     }

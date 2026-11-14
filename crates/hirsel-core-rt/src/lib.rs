@@ -19,6 +19,7 @@ mod fiber;
 mod growth;
 pub mod host_file;
 pub mod host_ops;
+pub mod isolate;
 pub mod limit;
 pub mod os;
 #[cfg(any(test, feature = "charge-observation"))]
@@ -63,6 +64,7 @@ pub struct Context {
     pub(crate) task_record: Option<block::Block>,
     pub(crate) active_resource: *mut causes::Resource,
     pub(crate) host_files: *mut host_file::Files,
+    pub(crate) isolates: Vec<crate::isolate::Reservation>,
 }
 
 impl Context {
@@ -88,6 +90,7 @@ impl Context {
             task_record: None,
             active_resource: std::ptr::null_mut(),
             host_files: std::ptr::null_mut(),
+            isolates: Vec::new(),
         }
     }
 
@@ -203,6 +206,9 @@ mod openat2_required;
 
 #[cfg(test)]
 mod test_process;
+
+#[cfg(test)]
+mod isolate_tests;
 
 pub mod abi_sites;
 

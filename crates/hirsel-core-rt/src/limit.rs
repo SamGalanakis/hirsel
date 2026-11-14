@@ -159,6 +159,9 @@ impl Forest {
         // SAFETY: the free list transfers its sole pin; charge and union rank are zero.
         let r = unsafe { &mut *slot.as_ref().local.get() };
         r.available = live.capacity;
+        r.parent = None;
+        r.rank = 0;
+        r.next_free = None;
         // SAFETY: the domain-owned inbox is pinned by the parent/task creating this record.
         unsafe { live.inbox.as_ref().retain() };
         r.live = live;
@@ -433,13 +436,36 @@ impl Payer {
             payer: Self(NonNull::from(f.slot(id))),
         }
     }
+
+    pub(crate) fn finish_reserved(self) {
+        let funding = Funding { payer: self };
+        funding.end_id();
+        std::mem::forget(funding);
+    }
 }
 /// Safe task-local scope handle. Allocations retain bytes, never these handles.
+
 #[repr(C)]
 pub struct Funding {
     pub(crate) payer: Payer,
 }
 impl Funding {
+    /// Reserve an isolate cell without replacing the context's current scope.
+    /// The returned payer is a child record whose charge is later installed in
+    /// an obligation or refunded and merged back into this scope.
+    pub(crate) fn isolate_reserve(&mut self, bytes: u64) -> Result<Payer, Capacity> {
+        let live = self.reserve_scope(bytes)?;
+        let domain = unsafe { self.payer.0.as_ref().domain };
+        let forest = unsafe { &mut *domain.as_ref().forest.get() };
+        let payer = forest.take(domain, live);
+        unsafe {
+            let record = &mut *payer.local();
+            record.available = 0;
+            record.outstanding = bytes;
+        }
+        Ok(payer)
+    }
+
     pub fn root(capacity: u64) -> Self {
         let owner = crate::tasks::current_id();
         let mut remote = Remote::new();
@@ -630,6 +656,7 @@ impl Funding {
             remote.reroute(old.inbox);
         }
     }
+
     pub fn end(&self) {
         self.end_id();
     }

@@ -1,0 +1,8 @@
+// MEM-7: a region opened in the callee cannot escape through its mut parameter.
+// expect: refuse MEM-7 at 5:3
+fn replace(mut r:Region) {
+ region local {
+  r=local
+ }
+}
+// expect: cause MEM-7 at 5:3 from 4:2

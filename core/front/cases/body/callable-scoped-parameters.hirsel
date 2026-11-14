@@ -1,0 +1,88 @@
+// #88: marked scoped parameters keep one carriage and one loan discipline.
+// expect: run regions() = 27
+// expect: run callbacks() = 16
+// expect: run region_callbacks() = 42
+// expect: run generic_scalar() = 38
+stable type Stamp {
+    n: u64
+}
+
+fn mut_region(mut r: Region) -> u64 {
+    r = r;
+    let s = result.unwrap(Stamp(n: 5) in r);
+    s.n
+}
+
+fn take_region(take r: Region) -> u64 {
+    let s = result.unwrap(Stamp(n: 11) in r);
+    s.n
+}
+
+fn regions() -> u64 {
+    region r {
+        let mut alias = r
+        mut_region(mut alias) + take_region(take alias) + take_region(take alias)
+    }
+}
+
+fn mut_callback(mut f: scoped fn(u64) -> u64) -> u64 {
+    f(2)
+}
+
+fn take_callback(take f: scoped fn(u64) -> u64) -> u64 {
+    f(3)
+}
+
+fn callbacks() -> u64 {
+    let mut n: u64 = 1
+    let mut cb = scoped fn(x: u64) -> u64 {
+        n += x;
+        n
+    }
+    let first = mut_callback(mut cb)
+    let second = take_callback(take cb)
+    first + second + n + 1
+}
+
+fn mut_region_callback(mut f: scoped fn(mut Region) -> u64, mut r: Region) -> u64 {
+    f(mut r)
+}
+
+fn take_region_callback(take f: scoped fn(take Region) -> u64, take r: Region) -> u64 {
+    f(take r)
+}
+
+fn region_callbacks() -> u64 {
+    let bias: u64 = 7
+    region r {
+        let mut alias = r
+        let mut f = scoped fn(mut target: Region) -> u64 {
+            let s = result.unwrap(Stamp(n: 13) in target);
+            s.n + bias
+        }
+        let first = mut_region_callback(mut f, mut alias)
+        let g = scoped fn(take target: Region) -> u64 {
+            let s = result.unwrap(Stamp(n: 15) in target);
+            s.n + bias
+        }
+        first + take_region_callback(take g, take alias)
+    }
+}
+
+fn generic_mut[T: plain](mut x: T, next: T) -> T {
+    x = next;
+    x
+}
+
+fn generic_scalar() -> u64 {
+    let mut n: u64 = 17;
+    generic_mut(mut n, 19u64) + n
+}
+
+pub fn main() -> Result[(), Exit] {
+    if regions() + callbacks() + region_callbacks() + generic_scalar() == 123u64 {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
+}

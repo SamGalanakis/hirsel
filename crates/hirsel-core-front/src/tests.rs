@@ -3406,3 +3406,20 @@ fn captured_callbacks_use_current_descriptors() {
     ));
     assert!(failures.is_empty(), "{failures:?}");
 }
+
+#[test]
+fn marked_scoped_parameters_use_value_and_declared_places() {
+    let mut failures = vec![];
+    for case in [
+        "callable-region-mut",
+        "callable-scoped-parameters",
+        "callable-region-store-refused",
+        "callable-region-local-store-refused",
+        "callable-region-take-result-gap",
+    ] {
+        failures.extend(run_case(
+            &root().join("cases/body").join(format!("{case}.hirsel")),
+        ));
+    }
+    assert!(failures.is_empty(), "{failures:?}");
+}

@@ -261,3 +261,29 @@ fn current_callback_descriptors_cranelift(){current_callback_descriptors(Backend
 #[test]
 #[ignore="explicit native integration target"]
 fn current_callback_descriptors_llvm(){current_callback_descriptors(Backend::Llvm);}
+
+fn marked_scoped_parameters(backend: Backend) {
+    ordered_case(backend,include_str!("../../../core/front/cases/body/callable-region-mut.hirsel"));
+    ordered_case(backend,include_str!("../../../core/front/cases/body/callable-scoped-parameters.hirsel"));
+    let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (source,rule,call) in [
+        (include_str!("../../../core/front/cases/body/callable-region-store-refused.hirsel"),"OWN-11","swap(mut alias,r)"),
+        (include_str!("../../../core/front/cases/body/callable-region-local-store-refused.hirsel"),"MEM-7","replace(mut alias)"),
+    ] {
+        let dir=tempfile::tempdir().unwrap();
+        let source=format!("{source}\npub fn main()->Result[(),Exit] {{region r {{let mut alias=r;{call};Ok(())}}}}\n");
+        let mut request=source_request(&source,dir.path());
+        request.inputs.packages[1]=PackageManifest::directory(&root.join("core/core"),package("core"),true).unwrap();
+        let product=Driver::default().check(request,&mut Meter::new(false)).unwrap();
+        assert_eq!(product.diagnostics.iter().map(|d|d.rule.as_str()).collect::<Vec<_>>(),[rule]);
+        assert!(product.incomplete.is_empty());
+        let entry=DefPath::from_full("app@1/main/main").unwrap();
+        assert!(matches!(product.build(&entry,&native_options(backend,dir.path())),Err(NativeStop::Check(message)) if message.contains(rule)));
+    }
+}
+#[test]
+#[ignore="explicit native integration target"]
+fn marked_scoped_parameters_cranelift(){marked_scoped_parameters(Backend::Cranelift);}
+#[test]
+#[ignore="explicit native integration target"]
+fn marked_scoped_parameters_llvm(){marked_scoped_parameters(Backend::Llvm);}

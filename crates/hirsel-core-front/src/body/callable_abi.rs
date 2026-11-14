@@ -280,6 +280,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let mut args = Vec::with_capacity(params.len() + 2);
         args.extend(dest.map(Arg::Address));
         args.extend(env.map(Arg::Value));
+        let mut parameter = usize::from(env.is_some());
         for (i, &(mode, ty)) in params.iter().enumerate() {
             let rep = match self.rep(ty) {
                 Ok(rep) => rep,
@@ -288,19 +289,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     return None;
                 }
             };
-            if mode == Mode::Mut || matches!(rep, Rep::Place(_)) {
-                let Some(id) = self.e.type_row(self.p, &mut self.t, ty) else {
-                    self.gap(n, "callable payload layouts are not built");
-                    return None;
-                };
-                args.push(Arg::Address(self.address(
+            if rep == Rep::None && mode != Mode::Mut {
+                continue;
+            }
+            // #88: the callee signature already names the borrowed place, including
+            // scalar and Region value places. No declared payload row is derived here.
+            let param = self.e.module.signatures[signature.index()].params[parameter];
+            parameter += 1;
+            match param {
+                Param::Address { place, .. } => args.push(Arg::Address(self.address(
                     AddressBase::Value(values[i]?),
                     &[],
-                    PlaceTy::Declared(id),
+                    place,
                     n,
-                )));
-            } else if let Some(value) = values[i] {
-                args.push(Arg::Value(value));
+                ))),
+                Param::Value(_) => args.extend(values[i].map(Arg::Value)),
             }
         }
         let args = PoolRange::push(&mut self.b.pools.args, args);

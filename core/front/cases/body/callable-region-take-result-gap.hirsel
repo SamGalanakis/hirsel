@@ -1,0 +1,12 @@
+// C13, owned by 910: a take expression is a Region copy, but result rooting still
+// requires a binder at the argument. Keep the remaining stop explicit.
+// expect: gap a call result rooted in a Region expression is not built
+stable type Stamp { n:u64 }
+fn make(take r:Region)->Result[Stamp in r,Capacity] {Stamp(n:1) in r}
+fn witness()->u64 {
+ region r {
+  let f=make
+  let s=result.unwrap(f(take r))
+  s.n
+ }
+}

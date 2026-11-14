@@ -1840,11 +1840,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let (scope, holds) = (self.scope_slots.len(), self.freezes.len());
         if let Some(b) = self.binder(n) {
             self.declare(b, ty, Binding::Value(region), Origin::Let, n);
+            self.opened_region_anchors(b);
             self.scope_slots.push(b);
         }
         let body = self.kids(n)[0];
         let (t, v) = self.expr(body, want);
-        self.region_result_anchors(scope, body, t);
+        if !self.contains_region_value(t) {
+            self.region_result_anchors(scope, body, t)
+        }
         // Region values cannot leave their scope. Rooted stable/scoped values need
         // the declaration lane's body-root relation before emission is possible.
         if self.contains_region_value(t) {

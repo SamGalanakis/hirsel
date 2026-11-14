@@ -8,3 +8,33 @@ fn invoke(cb: fn(mut Region) -> u64) -> u64 {
         cb(mut alias)
     }
 }
+
+// expect: run item() = 7
+// expect: run literal() = 11
+stable type Stamp {
+    n: u64
+}
+
+fn read(mut r: Region) -> u64 {
+    let s = result.unwrap(Stamp(n: 7) in r);
+    s.n
+}
+
+fn item() -> u64 {
+    invoke(read)
+}
+
+fn literal() -> u64 {
+    invoke(fn(mut r: Region) -> u64 {
+        let s = result.unwrap(Stamp(n: 11) in r);
+        s.n
+    })
+}
+
+pub fn main() -> Result[(), Exit] {
+    if item() + literal() == 18u64 {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
+}

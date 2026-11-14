@@ -1,0 +1,6 @@
+// MEM-1 / OWN-11: refuse the assignment, never the Region parameter.
+// expect: refuse OWN-11 at 4:2
+fn swap(mut r:Region,s:Region) {
+ r=s
+}
+// expect: cause OWN-11 at 4:2 from 3:9

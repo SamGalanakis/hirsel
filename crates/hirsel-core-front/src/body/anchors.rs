@@ -479,6 +479,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.vars[slot as usize].as_mut().unwrap().mut_anchor = true;
         }
     }
+    pub(super) fn opened_region_anchors(&mut self, slot: u32) {
+        let fact = self
+            .anchors
+            .node(Node::Root(Root::Region(crate::types::Root::Local(slot))));
+        self.replace_slot_anchors(slot, fact);
+    }
     pub(super) fn slot_anchors(&self, slot: u32) -> Fact {
         self.vars[slot as usize].map_or(0, |v| v.anchors)
     }
@@ -645,6 +651,31 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             0
         };
         let actual = self.anchors.union(new, captures);
+        if self.region_handle(at.ty) {
+            let mut roots = std::mem::take(&mut self.anchors.left);
+            roots.clear();
+            self.anchors.collect(actual, &mut roots);
+            let target = self.var(at.place.slot);
+            let escaping = roots.iter().find_map(|root| match root {
+                Root::Region(crate::types::Root::Local(slot)) => {
+                    let source = self.var(*slot);
+                    ((source.frame_level, source.depth) > (target.frame_level, target.depth))
+                        .then_some(*slot)
+                }
+                _ => None,
+            });
+            self.anchors.left = roots;
+            if let Some(slot) = escaping {
+                let cause = self.declared_at(slot);
+                self.refuse_from(
+                    "MEM-7",
+                    self.span(site),
+                    vec![cause],
+                    "a Region opened in the callee cannot be stored in its caller's place",
+                );
+                return;
+            }
+        }
         if let Some(&allowed) = self.anchors.mut_params.get(&at.place.slot) {
             if !self.anchors.permits(allowed, actual, &self.steps) {
                 let cause = self.declared_at(at.place.slot);

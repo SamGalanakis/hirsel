@@ -535,7 +535,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Use::Value | Use::Take => {
                 let copy = match how {
                     Use::Value => self.copies(at.ty),
-                    _ => at.place.len > 0 && self.copies(at.ty),
+                    // MEM-1: taking a Region copies its identity. A true mut
+                    // formal still cannot be taken under OWN-11.
+                    _ => {
+                        (self.region_handle(at.ty) && !v.mut_anchor)
+                            || at.place.len > 0 && self.copies(at.ty)
+                    }
                 };
                 if copy {
                     self.need_live(s, n);

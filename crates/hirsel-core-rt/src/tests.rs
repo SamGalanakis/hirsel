@@ -27,6 +27,31 @@ fn limits_reserve_then_handover_survivors_and_reclaim_records() {
 }
 
 #[test]
+fn one_survivor_misses_the_empty_scope_fast_path_and_keeps_the_refund() {
+    let mut ctx = Context::new(128);
+    ctx.limit_enter(64).unwrap();
+    let survivor = Block::new(&ctx, Some(8), 8, 8).unwrap();
+    assert_eq!(ctx.available(), 56);
+    ctx.limit_exit();
+    assert_eq!(ctx.available(), 120);
+    assert_eq!(ctx.current.scope_debug(), (2, 2, 1, 1, 8));
+    drop(survivor);
+    assert_eq!(ctx.available(), 128);
+}
+
+#[test]
+fn empty_scope_fast_path_refunds_unused_bytes() {
+    let mut ctx = Context::new(128);
+    for _ in 0..64 {
+        ctx.limit_enter(64).unwrap();
+        assert_eq!(ctx.available(), 64);
+        ctx.limit_exit();
+        assert_eq!(ctx.available(), 128);
+    }
+    assert_eq!(ctx.current.records(), 1);
+}
+
+#[test]
 fn ended_parent_with_live_child_forwards_reservations_and_compresses() {
     let root = Funding::root(1024);
     let outer = root.reserve(800).unwrap();

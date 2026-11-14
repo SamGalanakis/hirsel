@@ -822,7 +822,9 @@ impl Funding {
             let r = &mut *self.raw_local();
             let unused = r.available;
             let f = &mut *old.0.as_ref().domain.as_ref().forest.get();
-            r.rank = 0;
+            // `Forest::initialize` resets rank before the slot can be observed
+            // again. Keeping this free-list path from writing it avoids one
+            // redundant store on every empty-scope exit.
             r.live
                 .inbox
                 .as_ref()
@@ -872,6 +874,28 @@ impl Funding {
     pub(crate) fn records(&self) -> usize {
         let f = self.payer.forest();
         (0..f.length).filter(|&id| f.record(id).occupied).count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scope_debug(&self) -> (usize, usize, usize, usize, u64) {
+        let f = self.payer.forest();
+        let mut occupied = 0;
+        let mut forwarding = 0;
+        let mut charged_slots = 0;
+        let mut charged_bytes = 0u64;
+        for id in 0..f.length {
+            let record = f.record(id);
+            if !record.occupied {
+                continue;
+            }
+            occupied += 1;
+            forwarding += usize::from(record.parent.is_some());
+            if record.outstanding != 0 {
+                charged_slots += 1;
+                charged_bytes += record.outstanding;
+            }
+        }
+        (f.length, occupied, forwarding, charged_slots, charged_bytes)
     }
 }
 impl Clone for Funding {

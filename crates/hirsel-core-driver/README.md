@@ -125,6 +125,10 @@ summaries; every native key also includes the fact schema and the sealed and
 place-blind parameter facts its emitter consumed. The library and application
 use those same derived facts during emission. This changes the import transport,
 not the optimisation pipeline.
+Release builds cache the program-wide role facts by their complete content
+inputs. An unchanged build restores the same consumed rows; an edit in the
+fixpoint's input set derives them again. Native object keys retain the exact
+facts read by their emitter.
 
 `--backend cranelift|llvm` selects an engine. Development builds and runs default
 to Cranelift; `--release` defaults to LLVM with optimization. `--cc`, `--target`

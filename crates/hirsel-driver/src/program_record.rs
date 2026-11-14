@@ -78,6 +78,7 @@ const VARIABLES: &[(&str, Class)] = &[
     ("HIRSEL_VALGRIND", Class::Launch),
     ("HIRSEL_VALGRIND_RUNTIME", Class::Launch),
     ("HIRSEL_LLVM_NO_FACTS", Class::Native),
+    ("HIRSEL_LLVM_PRINTED_ORACLE", Class::Bypass),
     ("LLVM_SYS_231_PREFIX", Class::Native),
     ("VALGRIND_LIB", Class::Launch),
     ("PATH", Class::Key),

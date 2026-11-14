@@ -337,12 +337,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // Preserve their generic roots for the signature while refusing only open
         // type generics (LANG-12).
         tys.extend(found.iter().enumerate().map(|(i, s)| {
-            s.or_else(|| {
-                g.generics[i]
-                    .region
-                    .then(|| self.t.mk(generic_arg(g, i)))
-            })
-            .unwrap_or(ERROR)
+            s.or_else(|| g.generics[i].region.then(|| self.t.mk(generic_arg(g, i))))
+                .unwrap_or(ERROR)
         }));
         // An undetermined type argument is refused once; the call's type is then the
         // refused type, so nothing built from it is refused again. Unfixed region

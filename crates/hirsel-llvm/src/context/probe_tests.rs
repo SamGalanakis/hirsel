@@ -125,8 +125,16 @@ fn f1 = n1 g1 extern
     direct_module.run_core_passes(&machine).unwrap();
     let direct = direct_module.emit_object(&machine).unwrap();
     assert_probes(&direct_module.text(), "published CoreIR", 1);
-    let library = hirsel_llvm_lazy::compile_library(&wide, &facts, target, false, false).unwrap();
-    assert_eq!(library.object, direct, "publication probe interval");
+    let library = hirsel_llvm_lazy::compile_library(
+        &wide,
+        &facts,
+        target,
+        false,
+        false,
+        hirsel_core_ids::ContentHash::of_bytes(b"publication probe fixture"),
+    )
+    .unwrap();
+    assert_eq!(library.object.bytes, direct, "publication probe interval");
     let exported = crate::core::symbol(&wide, hirsel_core_ir::FuncId(0));
     // Keep the imported definition in the owned wrapper even if the inliner
     // chooses to retain its large frame as an out-of-line call.

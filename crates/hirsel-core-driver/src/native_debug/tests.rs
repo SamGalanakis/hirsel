@@ -140,6 +140,11 @@ fn binding_case(version: u16) {
             },
         )]),
     };
+    let stripped = code_only(std::slice::from_ref(&object)).unwrap();
+    let stripped = object::File::parse(stripped[0].as_slice()).unwrap();
+    assert!(stripped.section_by_name(".debug_line").is_none());
+    assert!(stripped.section_by_name(".debug_info").is_none());
+    assert_eq!(stripped.section_by_name(".text").unwrap().data().unwrap(), &[0x90, 0xc3]);
     let (code, debug) = bind(
         std::slice::from_ref(&object),
         &sources,

@@ -16,6 +16,19 @@ mod tests;
 
 type R<'a> = EndianSlice<'a, LittleEndian>;
 
+/// Engines may still include rows while their policy seam is being consumed.
+/// Off means no debug object and no synthetic coordinates in the executable.
+pub(crate) fn code_only(objects: &[super::ObjectProduct]) -> Result<Vec<Vec<u8>>, String> {
+    objects.iter().map(|object| {
+        let file = object::File::parse(&*object.bytes).map_err(error)?;
+        if file.section_by_name(".debug_info").is_some() {
+            Addresses::default().strip(&object.bytes)
+        } else {
+            Ok(object.bytes.clone())
+        }
+    }).collect()
+}
+
 pub(crate) fn bind(
     objects: &[super::ObjectProduct],
     sources: &SourceMap,

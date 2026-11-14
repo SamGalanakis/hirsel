@@ -19,6 +19,7 @@ struct Location {
     symbol: usize,
     alias: String,
 }
+#[derive(Default)]
 pub(super) struct Addresses {
     sections: BTreeMap<usize, Location>,
 }

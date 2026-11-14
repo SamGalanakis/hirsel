@@ -133,7 +133,12 @@ refresh them even when version output is unchanged. Incidental metadata changes
 do not invalidate a link whose tool content is unchanged. PATH selection is repeated
 on each link request; a missing selected editor is a named link refusal. A warm build reads integrity-checked products
 and compiles/links nothing; an implementation edit rebuilds its object and relinks.
-Native body objects contain code and source-independent DWARF rows: each file
+`--debug-lines on|off` controls native line tables for build, run and test.
+Development defaults to on and release defaults to off, on both engines.
+`explain debug-lines` describes the same choice. Native object and link keys
+include the choice. With rows off no debug object is linked; failure-site symbols,
+source tables and exact failure reports stay enabled.
+Native body objects with rows enabled contain code and source-independent DWARF rows: each file
 names its source item, and each line encodes the item-relative byte offset plus
 one. The object keys contain no absolute source position. One shared link-time
 writer resolves these rows, declaration positions and inline call sites against
@@ -186,36 +191,19 @@ parameter and the required --grant or --dir option. Declaring a capability
 parameter does not configure its grant. For example, a main with Stdout needs
 `--grant Stdout`; omitting it is a CAP-4 configuration refusal. The runtime closes grants
 after main cleanup and diagnostics, then the bootstrap frees process metadata.
-All three runtime headers are embedded and included in link keys. Owned error
-results still need the checker's cleanup support.
+All four runtime headers are embedded and included in link keys. Owned error
+results are cleaned before the outcome is reported.
 
 ## Native compilation units
 
-Both dev and release currently emit one object for each reached definition's
-checked CoreIR module. A unit contains that definition's body, signature-only
-callee/function-reference rows, and its complete local type, static, signature,
-instance and source-anchor tables. `emit_unit` passes the module intact.
-Cranelift receives the recipes computed from `module.types`, including their
-drop recipes; LLVM's CoreIR entry computes the same recipes internally and uses
-them for layout and drop glue. Nonempty type tables are supported.
-
-LLVM's failure analysis can see the unit's one body, including self-recursion,
-but another source definition is an import even when it lives in the same
-package. Its failure status therefore remains unknown across that boundary.
-Function references and exported symbols retain the external status ABI.
-
-A package-sized or whole-reachable release unit would need a mechanical merger
-of the checked modules: deduplicate nominal types and instances, remap module
-function/type/signature/static/item references and finalizer references, then
-compute recipes for the merged table. Body-local values and CFG IDs stay local.
-The object key would include every member body. A body edit would recompile its
-package group or the whole reachable group, and LLVM would hold/optimize the
-larger IR at once. Package groups retain unknown cross-package calls; a reachable
-group exposes more direct bodies. Both may enable status elision/inlining and
-amortize emitter setup, but reduce codegen parallelism and incremental reuse.
-No compile-time, runtime or memory benefit is measured yet. Grouping must preserve
-reachable-only acceptance. Dev keeps its per-body granularity; no larger release
-unit policy is implemented here.
+Development emits one object per reached checked definition. LLVM release
+composes request-owned bodies and published inline candidates into one unit;
+separate installed objects retain public entries. Units carry complete local
+type, static, signature, instance and source-anchor tables. Cranelift receives
+recipes computed from `module.types`; LLVM computes the same recipes internally.
+Both retain finalizer and drop inputs. Release exposes direct bodies for inlining
+and failure analysis; dev keeps body-sized rebuilds. Function references and
+exported symbols retain the external status ABI.
 
 A unit's type finalizers are native dependencies alongside calls and function
 references. The same dependency walker serves instance collection and diagnostic
@@ -226,9 +214,8 @@ List and Box recipes visible without source calls to the drop block.
 The package format and producer also accept core+std together, including existing
 module extensions and checked constants/templates. A combined-image regression
 adds an application extension and reaches the core, std and application bodies.
-Automatic std-package selection is the remaining driver integration step; std's
-constant/declaration acceptance and all body completion are still required for
-the standing canonical-image rows to turn green.
+Builds select the published std product automatically; source mode remains
+available for agreement controls. Both canonical-image rows are accepted.
 
 `build` and `run --logical-charge-report <file.json>` create a diagnostic build.
 The version-2 JSON keeps `observation_mode:true` and `peak_root_reserved_bytes`.

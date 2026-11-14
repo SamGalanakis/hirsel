@@ -67,6 +67,7 @@ impl CheckProduct {
                     &options.target,
                     options.backend,
                     options.optimize,
+                    options.debug_lines,
                     options.logical_charge_report.is_some(),
                     !hirsel_llvm_lazy::core::facts_enabled(),
                     runtime,
@@ -104,6 +105,7 @@ impl CheckProduct {
             &(
                 compiler_identity()?,
                 &options.target,
+                options.debug_lines,
                 options.logical_charge_report.is_some(),
                 !hirsel_llvm_lazy::core::facts_enabled(),
                 runtime,

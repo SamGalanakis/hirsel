@@ -25,7 +25,7 @@ fn core_operations(backend: Backend) {
         let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
         let entry = DefPath::from_full("app@1/main/main").unwrap();
         let options = NativeOptions {
-            backend, optimize:false, target:TARGET.into(),
+            backend, optimize:false, debug_lines:true, target:TARGET.into(),
             runtime:root.join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
             include:root.join("crates/hirsel-core-rt/include"),
             cc:PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
@@ -77,7 +77,7 @@ fn counted_operations(backend: Backend) {
         request.inputs.packages[1] = PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
         let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
         let entry = DefPath::from_full("app@1/main/main").unwrap();
-        let options = NativeOptions { backend, optimize:false, target:TARGET.into(),
+        let options = NativeOptions { backend, optimize:false, debug_lines:true, target:TARGET.into(),
             runtime:root.join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
             include:root.join("crates/hirsel-core-rt/include"),
             cc:PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
@@ -112,7 +112,7 @@ fn args_operations(backend: Backend, len_only: bool) {
         request.inputs.packages[1] = PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
         let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
         let entry = DefPath::from_full("app@1/main/main").unwrap();
-        let options = NativeOptions { backend, optimize:false, target:TARGET.into(),
+        let options = NativeOptions { backend, optimize:false, debug_lines:true, target:TARGET.into(),
             runtime:root.join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
             include:root.join("crates/hirsel-core-rt/include"),
             cc:PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
@@ -156,7 +156,7 @@ fn stream_operations(backend: Backend) {
         request.inputs.packages[1] = PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
         let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
         let entry = DefPath::from_full("app@1/main/main").unwrap();
-        let options = NativeOptions { backend, optimize:false, target:TARGET.into(),
+        let options = NativeOptions { backend, optimize:false, debug_lines:true, target:TARGET.into(),
             runtime:root.join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
             include:root.join("crates/hirsel-core-rt/include"),
             cc:PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
@@ -206,7 +206,7 @@ fn host_operations(backend: Backend) {
         }
         let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
         let entry = DefPath::from_full("app@1/main/main").unwrap();
-        let options = NativeOptions { backend, optimize:false, target:TARGET.into(),
+        let options = NativeOptions { backend, optimize:false, debug_lines:true, target:TARGET.into(),
             runtime:root.join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
             include:root.join("crates/hirsel-core-rt/include"),
             cc:PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),
@@ -259,7 +259,7 @@ pub fn proof_clone_run() -> u64 {
     std::fs::write(&module.file, text).unwrap();
     let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
     let entry = DefPath::from_full("app@1/main/main").unwrap();
-    let options = NativeOptions { backend, optimize:false, target:TARGET.into(),
+    let options = NativeOptions { backend, optimize:false, debug_lines:true, target:TARGET.into(),
         runtime:root.join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),
         include:root.join("crates/hirsel-core-rt/include"),
         cc:PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang"),

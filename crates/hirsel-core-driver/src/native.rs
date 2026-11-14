@@ -42,6 +42,8 @@ impl std::str::FromStr for Backend {
 pub struct NativeOptions {
     pub backend: Backend,
     pub optimize: bool,
+    /// Source-neutral native line rows; failure positions are always enabled.
+    pub debug_lines: bool,
     pub target: String,
     pub runtime: PathBuf,
     pub include: PathBuf,
@@ -107,6 +109,7 @@ pub struct BuildProduct {
     pub linked: bool,
     /// True means diagnostic instrumentation; timings are not performance samples.
     pub observation_mode: bool,
+    pub debug_lines: bool,
 }
 pub(crate) fn key(domain: &str, value: &impl Serialize) -> io::Result<ContentHash> {
     Ok(ContentHash::of_parts(domain, [&encode(value)?[..]]))
@@ -237,6 +240,7 @@ impl CheckProduct {
                     &options.target,
                     options.backend,
                     options.optimize,
+                    options.debug_lines,
                     options.logical_charge_report.is_some(),
                     matches!(options.backend, Backend::Llvm)
                         && !hirsel_llvm_lazy::core::facts_enabled(),
@@ -307,6 +311,7 @@ impl CheckProduct {
                     &options.target,
                     options.backend,
                     options.optimize,
+                    options.debug_lines,
                     options.logical_charge_report.is_some(),
                     matches!(options.backend, Backend::Llvm)
                         && !hirsel_llvm_lazy::core::facts_enabled(),
@@ -700,6 +705,7 @@ fn link(
             &options.target,
             options.backend,
             options.optimize,
+            options.debug_lines,
             ContentHash::of_parts(
                 "hirsel.core-link-inputs.v1",
                 headers
@@ -727,16 +733,25 @@ fn link(
         ])
         .arg(&options.include)
         .arg(&entry);
-        let (code, debug) = crate::native_debug::bind(objects, sources, &options.target)
-            .map_err(|error| NativeStop::Link(format!("native debug binding: {error}")))?;
+        let (code, debug) = if options.debug_lines {
+            let (code, debug) = crate::native_debug::bind(objects, sources, &options.target)
+                .map_err(|error| NativeStop::Link(format!("native debug binding: {error}")))?;
+            (code, Some(debug))
+        } else {
+            let code = crate::native_debug::code_only(objects)
+                .map_err(|error| NativeStop::Link(format!("native debug stripping: {error}")))?;
+            (code, None)
+        };
         for (i, object) in code.iter().enumerate() {
             let path = temp.path().join(format!("{i}.o"));
             std::fs::write(&path, object)?;
             cc.arg(path);
         }
-        let debug_path = temp.path().join("debug.o");
-        std::fs::write(&debug_path, debug)?;
-        cc.arg(debug_path);
+        if let Some(debug) = debug {
+            let debug_path = temp.path().join("debug.o");
+            std::fs::write(&debug_path, debug)?;
+            cc.arg(debug_path);
+        }
         cc.arg(&options.runtime)
             .args([
                 "-lgcc_s",
@@ -780,6 +795,7 @@ fn link(
         compiled: objects.iter().filter(|o| o.compiled).count(),
         linked,
         observation_mode: options.logical_charge_report.is_some(),
+        debug_lines: options.debug_lines,
     })
 }
 
@@ -865,6 +881,7 @@ b0:
         NativeOptions {
             backend,
             optimize: false,
+            debug_lines: true,
             target: TARGET.into(),
             runtime: root
                 .join(std::env::var_os("HIRSEL_CORE_RT_ARCHIVE").expect("native runtime archive")),

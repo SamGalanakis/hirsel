@@ -54,6 +54,15 @@ pub fn explain(
     list: bool,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if rule == Some("debug-lines") && !list {
+        let statement = "--debug-lines on|off controls native line tables for build, run and test. Development defaults to on; release defaults to off on both engines. It changes native object and link cache identities. Failure-site symbols, current source tables and file:line:column failure reports are always enabled. A line-only edit recompiles no existing native object; with rows on, the link-time writer rebinds current debug coordinates.";
+        if json {
+            println!("{}", serde_json::json!({"option":"--debug-lines","default_dev":"on","default_release":"off","statement":statement}));
+        } else {
+            println!("{statement}");
+        }
+        return Ok(());
+    }
     if list {
         if rule.is_some() {
             return Err("explain --list takes no rule".into());

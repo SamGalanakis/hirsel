@@ -43,6 +43,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let options = NativeOptions {
             backend: Backend::Llvm,
             optimize: true,
+            debug_lines: false,
             target: "x86_64-unknown-linux-gnu".into(),
             runtime: PathBuf::from(&args[2]),
             include: PathBuf::from(&args[3]),

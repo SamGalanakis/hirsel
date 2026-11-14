@@ -65,6 +65,40 @@ def main():
                     self.assertEqual(again.returncode, 2)
                     self.assertEqual((app / 'main.hirsel').read_bytes(), original)
 
+        def test_debug_lines_defaults_overrides_and_cache_identity(self):
+            runtime = Path(os.environ['HIRSEL_CORE_RT_ARCHIVE']).resolve()
+            with tempfile.TemporaryDirectory(prefix='hirsel-lines-') as temporary:
+                work = Path(temporary)
+                app = work / 'app'
+                created = subprocess.run([str(compiler), 'new', str(app)], cwd=ROOT, capture_output=True)
+                self.assertEqual(created.returncode, 0)
+                for engine in ['cranelift', 'llvm']:
+                    for release in [False, True]:
+                        seen = set()
+                        for choice, expected in [(None, not release), ('off', False), ('on', True)]:
+                            flags = ['--release'] if release else []
+                            if choice is not None:
+                                flags += ['--debug-lines', choice]
+                            result = subprocess.run([str(compiler), 'build', str(app), '--runtime', str(runtime),
+                                                     '--backend', engine, '--store', str(work / 'store'),
+                                                     '-o', str(work / 'program'), '--json', *flags],
+                                                    cwd=ROOT, capture_output=True, text=True)
+                            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                            native = json.loads(result.stdout)['native']
+                            self.assertEqual(native['debug_lines'], expected)
+                            self.assertEqual(native['compiled'] == 0, expected in seen)
+                            seen.add(expected)
+                refused = subprocess.run([str(compiler), 'build', str(app), '--debug-lines', 'maybe'],
+                                         cwd=ROOT, capture_output=True, text=True)
+                self.assertEqual(refused.returncode, 2)
+                self.assertIn('--debug-lines expects on or off', refused.stderr)
+            explained = subprocess.run([str(compiler), 'explain', 'debug-lines', '--json'],
+                                       cwd=ROOT, capture_output=True, text=True)
+            self.assertEqual(explained.returncode, 0, explained.stderr)
+            policy = json.loads(explained.stdout)
+            self.assertEqual((policy['default_dev'], policy['default_release']), ('on', 'off'))
+            self.assertIn('always enabled', policy['statement'])
+
         def test_env_and_registered_products_work_away_from_the_checkout(self):
             runtime = Path(os.environ['HIRSEL_CORE_RT_ARCHIVE']).resolve()
             with tempfile.TemporaryDirectory(prefix='hirsel-installed-') as temporary:

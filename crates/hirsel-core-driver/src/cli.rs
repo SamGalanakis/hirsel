@@ -13,6 +13,7 @@ pub enum OptionId {
     Filter,
     TestTimeout,
     Release,
+    DebugLines,
     Backend,
     Runtime,
     LogicalChargeReport,
@@ -65,7 +66,7 @@ commands! {
     "new", "new <package-dir> [--lib]", "Create a runnable application or library with an example main.";
     "env", "env [--json] [options]", "Report the compiler and selected installation, products and runtime.";
     "fmt", "fmt [--check] <package-dir>", "Format all new source files; refuse malformed input without partial edits.";
-    "explain", "explain RULE | explain --list [--json]", "Explain current specification rules.";
+    "explain", "explain RULE | explain --list [--json]", "Explain current specification rules or the debug-lines build option.";
 }
 macro_rules! option {
     ($id:ident, [$($name:literal),+], $value:expr, [$($command:literal),*], $description:literal) => {
@@ -181,6 +182,13 @@ static OPTIONS: &[OptionSpec] = &[
         None,
         ["build", "run", "test"],
         "Optimize native code; defaults to LLVM."
+    ),
+    option!(
+        DebugLines,
+        ["--debug-lines"],
+        Some("on|off"),
+        ["build", "run", "test"],
+        "Emit native line tables; default on for dev, off for release. Failure positions stay enabled."
     ),
     option!(
         Backend,

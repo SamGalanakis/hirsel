@@ -1380,12 +1380,21 @@ fn sample_cases(module: &Module, source: &str) -> Vec<Case> {
         .lines()
         .filter_map(|line| {
             let line = line.trim().strip_prefix(';')?.trim().strip_prefix("run")?;
-            let (limit, rest) = line.split_once(':')?;
-            let limit = limit
-                .trim()
-                .strip_prefix("limit ")
-                .map(|n| n.parse().unwrap())
-                .unwrap_or(u64::MAX);
+            let (header, rest) = line.split_once(':')?;
+            let mut injection = None;
+            let mut header = header.trim();
+            let limit = if let Some(value) = header.strip_prefix("limit ") {
+                let (value, suffix) = value.split_once(' ').unwrap_or((value, ""));
+                header = suffix.trim();
+                if let Some(value) = header.strip_prefix("refuse ") {
+                    let later = value.ends_with('+');
+                    let value = value.trim_end_matches('+');
+                    injection = Some((value.parse().unwrap(), later));
+                }
+                value.parse().unwrap()
+            } else {
+                u64::MAX
+            };
             let (f, args) = rest.trim().strip_prefix('f')?.split_once('(')?;
             let (args, _) = args.split_once(')')?;
             let function = FuncId(f.parse().unwrap());
@@ -1405,7 +1414,7 @@ fn sample_cases(module: &Module, source: &str) -> Vec<Case> {
                 function,
                 args,
                 limit,
-                injection: None,
+                injection,
             })
         })
         .collect()
@@ -2157,7 +2166,7 @@ fn isolate_sample_and_admission_refusals_match_the_evaluator() {
             function: case.function,
             args: case.args.clone(),
             limit,
-            injection: None,
+            injection: case.injection,
         });
         for nth in 1..=baseline.admissions {
             for later in [false, true] {

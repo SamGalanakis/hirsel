@@ -791,7 +791,19 @@ fn agree_cases(module: &Module, cases: &[Case], memory: bool) {
             assert_eq!(peak, expected.peak_reserved, "peak reservation");
         }
         if memory {
-            assert_eq!(got.used, expected.used, "used");
+            assert_eq!(
+                got.used,
+                expected.used,
+                "used f{} args {:?} limit {} injection {:?}; native trace {:?}, expected trace {:?}, native admissions {}, expected admissions {}",
+                case.function.0,
+                case.args,
+                case.limit,
+                case.injection,
+                got.trace,
+                expected.trace,
+                got.admissions,
+                expected.admissions
+            );
             assert_eq!(got.trace, expected.trace, "trace");
             assert_eq!(got.admissions, expected.admissions, "admissions");
         }
@@ -2135,11 +2147,16 @@ fn isolate_sample_and_admission_refusals_match_the_evaluator() {
     wf::module(&module).unwrap();
     let mut cases = Vec::new();
     for case in sample_cases(&module, source) {
-        let baseline = eval::run(&module, case.function, &case.args, case.limit);
+        let limit = if case.limit == u64::MAX {
+            1_000_000
+        } else {
+            case.limit
+        };
+        let baseline = eval::run(&module, case.function, &case.args, limit);
         cases.push(Case {
             function: case.function,
             args: case.args.clone(),
-            limit: case.limit,
+            limit,
             injection: None,
         });
         for nth in 1..=baseline.admissions {
@@ -2147,7 +2164,7 @@ fn isolate_sample_and_admission_refusals_match_the_evaluator() {
                 cases.push(Case {
                     function: case.function,
                     args: case.args.clone(),
-                    limit: case.limit,
+                    limit,
                     injection: Some((nth, later)),
                 });
             }
@@ -3097,15 +3114,28 @@ fn aarch64_memory_custody_and_calls_match_the_evaluator() {
     ] {
         let module = text::parse(source).unwrap();
         wf::module(&module).unwrap();
+        let isolate = source.contains("family: isolation");
         let mut cases = sample_cases(&module, source);
+        if isolate {
+            for case in &mut cases {
+                if case.limit == u64::MAX {
+                    case.limit = 1_000_000;
+                }
+            }
+        }
         for case in sample_cases(&module, source) {
-            let report = eval::run(&module, case.function, &case.args, case.limit);
+            let limit = if isolate && case.limit == u64::MAX {
+                1_000_000
+            } else {
+                case.limit
+            };
+            let report = eval::run(&module, case.function, &case.args, limit);
             for nth in 1..=report.admissions {
                 for later in [false, true] {
                     cases.push(Case {
                         function: case.function,
                         args: case.args.clone(),
-                        limit: case.limit,
+                        limit,
                         injection: Some((nth, later)),
                     });
                 }

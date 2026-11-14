@@ -155,7 +155,7 @@ impl FunctionEmitter<'_> {
         let overflow = overflow.map_or_else(
             || "false".into(),
             |v| {
-                let flag = self.get(v);
+                let flag = self.numeric(v);
                 self.calc(format!("icmp ne i8 {flag}, 0"))
             },
         );

@@ -565,7 +565,6 @@ impl<'context> Module<'context> {
             }
             LLVMDisposePassBuilderOptions(options);
             if error.is_null() {
-                self.defer_numerical_nan_maps();
                 return Ok(());
             }
             let message = LLVMGetErrorMessage(error);
@@ -573,15 +572,6 @@ impl<'context> Module<'context> {
             LLVMDisposeErrorMessage(message);
             Err(text)
         }
-    }
-
-    pub(crate) fn defer_numerical_nan_maps(&self) {
-        unsafe extern "C" {
-            fn hirsel_llvm_defer_numerical_nan_maps(module: LLVMModuleRef, context: LLVMContextRef);
-        }
-        // SAFETY: both handles are live in this Module's borrowed Context. The
-        // helper rewrites SSA uses and disposes only the instructions it erases.
-        unsafe { hirsel_llvm_defer_numerical_nan_maps(self.raw, self.context.raw) };
     }
 
     /// Generates an object file and copies its bytes out of LLVM.

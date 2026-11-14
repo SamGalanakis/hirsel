@@ -241,7 +241,6 @@ fn atomic_helpers_use_checked_cas_and_release_acquire() {
         debug_location: None,
         anchor: None,
         relocatable_sites: false,
-        private_float: Vec::new(),
         value_slots: Vec::new(),
         empty_bounds: empty::EmptyBounds::default(),
         code: String::new(),

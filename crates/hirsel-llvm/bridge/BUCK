@@ -1,7 +1,7 @@
 cxx_library(
     name = "bridge",
     srcs = ["stack_size.cpp", "count_loops.cpp"],
-    headers = ["aggregate_phi.h", "numeric_nan.h"],
+    headers = ["aggregate_phi.h"],
     header_namespace = "",
     compiler_flags = [
         "-std=c++17", "-fno-exceptions", "-fno-rtti", "-nostdinc++",
@@ -19,5 +19,3 @@ cxx_library(
 export_file(name = "count_loops.cpp", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "stack_size.cpp", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "aggregate_phi.h", mode = "reference", visibility = ["PUBLIC"])
-
-export_file(name = "numeric_nan.h", mode = "reference", visibility = ["PUBLIC"])

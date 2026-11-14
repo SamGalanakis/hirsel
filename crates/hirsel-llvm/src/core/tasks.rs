@@ -94,7 +94,7 @@ impl FunctionEmitter<'_> {
             .unwrap()
             .iter()
             .map(|arg| match *arg {
-                Arg::Value(v) => self.get(v),
+                Arg::Value(v) => self.numeric(v),
                 Arg::Address(a) => self.address(a),
             })
             .collect::<Vec<_>>();

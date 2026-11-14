@@ -523,13 +523,22 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
     };
     output(&mut executable)
         .lines()
-        .map(|line| {
+        .enumerate()
+        .map(|(i, line)| {
+            let case = &cases[i];
             let mut parts = line.split('|');
             let peak_reserved = observing.then(|| parts.next().unwrap().parse().unwrap());
             let mut values = parts.next().unwrap().split_whitespace();
             let status = values.next().unwrap();
             let outcome = if status == "R" {
-                eval::Outcome::Returned(values.map(|v| v.parse().unwrap()).collect())
+                let signature =
+                    &module.signatures[module.functions[case.function.index()].signature.index()];
+                eval::Outcome::Returned(
+                    values
+                        .enumerate()
+                        .map(|(i, v)| eval::observed(signature.results[i], v.parse().unwrap()))
+                        .collect(),
+                )
             } else {
                 eval::Outcome::Failed(values.map(str::to_string).collect())
             };
@@ -928,7 +937,7 @@ fn numerical_returns_keep_failure_status_and_canonical_bits() {
 }
 
 #[test]
-fn numerical_chains_canonicalize_at_memory_bits_calls_and_returns() {
+fn numerical_chains_observe_bits_after_memory_copies_and_calls() {
     let mut source = String::from("core v1\n");
     let mut cases = Vec::new();
     for (kind, word, inputs) in [
@@ -981,11 +990,9 @@ fn numerical_chains_canonicalize_at_memory_bits_calls_and_returns() {
             "max_number",
         ] {
             let i = source.matches("\nfn ").count();
-            // A raw integer read observes the actual float store, independently
-            // of reinterpret's normalization. Separate private and byte-copied
-            // float slots distinguish unobserved storage from memory observers.
-            // The edge and pure operations may carry noncanonical NaNs.
-            writeln!(source, "sig g{i} = ({kind}, {kind}) -> ({kind}, {word}, {word}, {word}, {word})\ninst n{i} = tests@0/numeric/{kind}_{op} [] []\nfn f{i} = n{i} g{i} {{\n slot s0 = {kind}\n slot s1 = {kind}\n slot s2 = {kind}\n slot s3 = {word}\n addr a0 = s0 : {kind}\n addr a1 = v9 index v8 : {word}\n addr a2 = s1 : {kind}\n addr a3 = s2 : {kind}\n addr a4 = s3 : {word}\nb0(v0: {kind}, v1: {kind}):\n v2: {kind} = {op} v0, v1\n jump b1(v2)\nb1(v3: {kind}):\n v4: {kind} = neg v3\n v5: {kind} = abs v4\n v6: {kind} = sqrt v5\n v7: {kind} = mul_add v6, v6, v3\n live s0\n address a0\n store a0, v7\n live s1\n live s2\n live s3\n address a2\n address a3\n address a4\n store a2, v7\n store a3, v7\n v13: u64 = const {bytes}\n copy a4, a3, v13\n v14: {kind} = read a2\n v15: {word} = reinterpret v14\n v16: {word} = read a4\n v8: u64 = const 0\n v9: ptr = pointer a0\n address a1\n v10: {word} = read a1\n v11: {word} = reinterpret v7\n v12: {kind} = call f{identity} g{identity} (v7)\n dead s3\n dead s2\n dead s1\n dead s0\n return v12, v10, v11, v15, v16\n}}").unwrap();
+            // Memory, byte copies, edges and calls carry floats transparently.
+            // Typed float reads followed by reinterpret observe their bits.
+            writeln!(source, "sig g{i} = ({kind}, {kind}) -> ({kind}, {word}, {word}, {word}, {word})\ninst n{i} = tests@0/numeric/{kind}_{op} [] []\nfn f{i} = n{i} g{i} {{\n slot s0 = {kind}\n slot s1 = {kind}\n slot s2 = {kind}\n slot s3 = {kind}\n addr a0 = s0 : {kind}\n addr a1 = v9 index v8 : {kind}\n addr a2 = s1 : {kind}\n addr a3 = s2 : {kind}\n addr a4 = s3 : {kind}\nb0(v0: {kind}, v1: {kind}):\n v2: {kind} = {op} v0, v1\n jump b1(v2)\nb1(v3: {kind}):\n v4: {kind} = neg v3\n v5: {kind} = abs v4\n v6: {kind} = sqrt v5\n v7: {kind} = mul_add v6, v6, v3\n live s0\n address a0\n store a0, v7\n live s1\n live s2\n live s3\n address a2\n address a3\n address a4\n store a2, v7\n store a3, v7\n v13: u64 = const {bytes}\n copy a4, a3, v13\n v14: {kind} = read a2\n v15: {word} = reinterpret v14\n v16: {kind} = read a4\n v17: {word} = reinterpret v16\n v8: u64 = const 0\n v9: ptr = pointer a0\n address a1\n v10: {kind} = read a1\n v18: {word} = reinterpret v10\n v11: {word} = reinterpret v7\n v12: {kind} = call f{identity} g{identity} (v7)\n dead s3\n dead s2\n dead s1\n dead s0\n return v12, v18, v11, v15, v17\n}}").unwrap();
             for &a in &inputs {
                 for &b in &inputs {
                     cases.push(Case {

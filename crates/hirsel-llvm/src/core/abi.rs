@@ -196,7 +196,7 @@ impl FunctionEmitter<'_> {
                 match *arg {
                     Arg::Address(a) => format!("ptr {}", self.address(a)),
                     Arg::Value(v) => {
-                        let x = self.get(v);
+                        let x = self.numeric(v);
                         format!(
                             "{}{} {x}",
                             ty(self.vty(v)),
@@ -212,7 +212,7 @@ impl FunctionEmitter<'_> {
                 symbol(self.module, f),
                 if has_status { "" } else { ".infallible" }
             ),
-            Callee::Indirect(v) => self.get(v),
+            Callee::Indirect(v) => self.numeric(v),
             Callee::Runtime(_) => unreachable!(),
         };
         args.push(format!("i64 {}", self.call_site_word(site.callee)));
@@ -365,7 +365,7 @@ impl FunctionEmitter<'_> {
         for arg in site.args.get(&self.body.pools.args).unwrap() {
             args.push(match *arg {
                 Arg::Value(v) => {
-                    let x = self.get(v);
+                    let x = self.numeric(v);
                     format!(
                         "{}{} {x}",
                         ty(self.vty(v)),
@@ -381,7 +381,7 @@ impl FunctionEmitter<'_> {
                 symbol(self.module, f),
                 if has_status { "" } else { ".infallible" }
             ),
-            Callee::Indirect(v) => self.get(v),
+            Callee::Indirect(v) => self.numeric(v),
             Callee::Runtime(_) => unreachable!(),
         };
         args.push(format!("i64 {}", self.call_site_word(site.callee)));

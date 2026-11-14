@@ -15,9 +15,6 @@ mod collections;
 mod empty;
 mod fast;
 mod forward;
-#[cfg(all(test, not(hirsel_lazy_core)))]
-mod nan_tests;
-mod private_float;
 mod scalar;
 mod sites;
 mod storage;
@@ -208,7 +205,6 @@ fn emit_ir_target_with_facts(
             debug_location: function_debug.map(|d| d.location(None)),
             anchor: None,
             relocatable_sites: source.relocatable_sites,
-            private_float: private_float::addresses(body),
             value_slots: values::slots(body),
             aliases,
             module,
@@ -589,7 +585,6 @@ struct FunctionEmitter<'a> {
     debug_location: Option<usize>,
     anchor: Option<Anchor>,
     relocatable_sites: bool,
-    private_float: Vec<bool>,
     value_slots: Vec<bool>,
     code: String,
     allocations: String,
@@ -639,15 +634,8 @@ impl FunctionEmitter<'_> {
     fn vty(&self, v: ValueId) -> Ty {
         self.body.values[v.index()]
     }
-    fn get(&mut self, v: ValueId) -> String {
-        let t = self.vty(v);
-        let x = self.numeric(v);
-        self.canonical(t, &x)
-    }
-    // Numerical operations cannot distinguish NaN signs or payloads. Keep their
-    // internal representation until an observer uses get(): typed memory,
-    // calls, returns and conversions (including reinterpret) still canonicalize.
-    // No fast-math flags, reassociation or change to the operation's rounding.
+    // Moves and numerical operations preserve arbitrary NaN representations.
+    // Reinterpret from a float is the sole bit observer (FORM #97).
     fn numeric(&mut self, v: ValueId) -> String {
         if self.value_slots.get(v.index()).copied().unwrap_or(true) {
             self.calc(format!("load {}, ptr %v{}", ty(self.vty(v)), v.0))
@@ -873,8 +861,8 @@ impl FunctionEmitter<'_> {
                 right,
             } => {
                 let t = self.vty(left);
-                let a = self.get(left);
-                let b = self.get(right);
+                let a = self.numeric(left);
+                let b = self.numeric(right);
                 let (r, over) = self.arith(t, op, mode, &a, &b);
                 self.put(result, &r);
                 if let Some(flag) = flag {
@@ -929,16 +917,7 @@ impl FunctionEmitter<'_> {
             }
             Inst::Store { address, value } => {
                 let p = self.address(address);
-                let x = if self
-                    .private_float
-                    .get(address.index())
-                    .copied()
-                    .unwrap_or(false)
-                {
-                    self.numeric(value)
-                } else {
-                    self.get(value)
-                };
+                let x = self.numeric(value);
                 let metadata = self.access_facts(&[address]);
                 self.line(format!(
                     "store {} {x}, ptr {p}, align 1{metadata}",
@@ -957,7 +936,7 @@ impl FunctionEmitter<'_> {
                 initialized,
             } => {
                 let t = ty(self.vty(mask));
-                let x = self.get(mask);
+                let x = self.numeric(mask);
                 let k = if initialized {
                     1u64 << field
                 } else {
@@ -1016,7 +995,7 @@ impl FunctionEmitter<'_> {
                 self.line(format!("br label %{to}"));
             }
             Terminator::Branch { condition, yes, no } => {
-                let c = self.get(condition);
+                let c = self.numeric(condition);
                 let c = self.calc(format!("icmp ne i8 {c}, 0"));
                 let y = self.edge_label(yes);
                 let n = self.edge_label(no);
@@ -1029,7 +1008,7 @@ impl FunctionEmitter<'_> {
                 arms,
                 otherwise,
             } => {
-                let v = self.get(value);
+                let v = self.numeric(value);
                 let t = ty(self.vty(value));
                 let other = self.edge_label(otherwise);
                 let arms = arms
@@ -1053,7 +1032,7 @@ impl FunctionEmitter<'_> {
                     .get(&self.body.pools.values)
                     .unwrap()
                     .iter()
-                    .map(|v| self.get(*v))
+                    .map(|v| self.numeric(*v))
                     .collect::<Vec<_>>();
                 self.return_values(&xs);
             }

@@ -13,7 +13,6 @@
 #include <string.h>
 #include <pthread.h>
 #include "aggregate_phi.h"
-#include "numeric_nan.h"
 
 typedef struct { uint8_t *data; size_t len; uint8_t failed; } HirselLlvmOutput;
 typedef struct { const uint8_t *data; size_t len; uint8_t imported; } HirselLlvmUnit;
@@ -407,7 +406,6 @@ void hirsel_llvm_program_v1(const HirselLlvmUnit *units, size_t count,
                 machine, options);
         }
         if (!e)
-            hirsel_defer_numerical_nan_maps(module, context);
         LLVMDisposePassBuilderOptions(options);
         if (e) {
             char *text = LLVMGetErrorMessage(e); error(out, text);

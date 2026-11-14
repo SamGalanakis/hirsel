@@ -254,7 +254,12 @@ impl FunctionEmitter<'_> {
     ) {
         let from = self.vty(operand);
         let to = self.vty(result);
-        let x = self.get(operand);
+        let x = self.numeric(operand);
+        let x = if mode == ConvertMode::Reinterpret {
+            self.canonical(from, &x)
+        } else {
+            x
+        };
         let ft = ty(from);
         let tt = ty(to);
         let signed = from.int().is_some_and(|x| x.0);

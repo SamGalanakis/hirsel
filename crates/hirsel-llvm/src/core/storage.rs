@@ -125,7 +125,7 @@ impl FunctionEmitter<'_> {
                 },
             ),
             AddressBase::Value(v) => (
-                self.get(v),
+                self.numeric(v),
                 match info.ty {
                     PlaceTy::Declared(t) if info.steps.len == 0 => At::Declared(t),
                     _ => At::Other,
@@ -147,7 +147,7 @@ impl FunctionEmitter<'_> {
                     };
                 }
                 Step::Byte(v) => {
-                    let offset = self.get(v);
+                    let offset = self.numeric(v);
                     p = self.calc(format!("getelementptr i8, ptr {p}, i64 {offset}"));
                     at = match info.ty {
                         PlaceTy::Declared(t) => self.kind_of(t),
@@ -156,7 +156,7 @@ impl FunctionEmitter<'_> {
                 }
                 Step::Index(v) => {
                     let stride = self.place_layout(info.ty).0;
-                    let i = self.get(v);
+                    let i = self.numeric(v);
                     let i = if size(self.vty(v)) < 8 {
                         self.calc(format!("zext {} {i} to i64", ty(self.vty(v))))
                     } else {
@@ -172,7 +172,7 @@ impl FunctionEmitter<'_> {
                     let At::Array(e, n) = at else {
                         panic!("producer array projection")
                     };
-                    let i = self.get(v);
+                    let i = self.numeric(v);
                     let outside = self.calc(format!("icmp uge {} {i}, {n}", ty(self.vty(v))));
                     self.fail_if(&outside, fail, 1)?;
                     let i = if size(self.vty(v)) < 8 {
@@ -339,7 +339,7 @@ impl FunctionEmitter<'_> {
                 let overflow = overflow.map_or_else(
                     || "false".into(),
                     |v| {
-                        let value = self.get(v);
+                        let value = self.numeric(v);
                         self.calc(format!("icmp ne i8 {value}, 0"))
                     },
                 );
@@ -389,10 +389,10 @@ impl FunctionEmitter<'_> {
             } => {
                 let payer = match place {
                     AllocPlace::Current => Payer::Current,
-                    AllocPlace::Like(v) => Payer::Like(self.get(v)),
-                    AllocPlace::Region(r) => Payer::Region(self.get(r)),
+                    AllocPlace::Like(v) => Payer::Like(self.numeric(v)),
+                    AllocPlace::Region(r) => Payer::Region(self.numeric(r)),
                 };
-                let (charge, size) = (self.get(charge), self.get(size));
+                let (charge, size) = (self.numeric(charge), self.numeric(size));
                 let (block, room) =
                     self.allocate(kind, &payer, &charge, &size, align, overflow, fail);
                 if let Some(token) = region_entry {
@@ -452,7 +452,7 @@ impl FunctionEmitter<'_> {
                 .clone();
                 let at = self.address(carrier);
                 let old = self.calc(format!("load ptr, ptr {at}, align 8"));
-                let (charge, size) = (self.get(charge), self.get(size));
+                let (charge, size) = (self.numeric(charge), self.numeric(size));
                 let (block, room) = self.allocate(
                     &AllocKind::Own { edge },
                     &Payer::Like(old.clone()),
@@ -464,8 +464,11 @@ impl FunctionEmitter<'_> {
                 );
                 self.put(result, &block);
                 self.put(available, &room);
-                let (moved, capacity, refund) =
-                    (self.get(moved), self.get(capacity), self.get(refund));
+                let (moved, capacity, refund) = (
+                    self.numeric(moved),
+                    self.numeric(capacity),
+                    self.numeric(refund),
+                );
                 let present = self.calc(format!("icmp ne ptr {block}, null"));
                 let n = self.next;
                 self.next += 1;
@@ -500,25 +503,25 @@ impl FunctionEmitter<'_> {
                 charge,
                 ..
             } => {
-                let region = self.get(region);
-                let entry = self.get(entry);
-                let previous = self.get(previous);
-                let charge = self.get(charge);
+                let region = self.numeric(region);
+                let entry = self.numeric(entry);
+                let previous = self.numeric(previous);
+                let charge = self.numeric(charge);
                 self.runtime_void(
                     "hirsel_core_region_lower_charge",
                     &[ptr(&region), word(entry), word(previous), word(charge)],
                 );
             }
             Inst::Free { block, charge } => {
-                let p = self.get(block);
-                let n = self.get(charge);
+                let p = self.numeric(block);
+                let n = self.numeric(charge);
                 self.free_block(&p, &n);
             }
             Inst::Copy { to, from, bytes } => {
                 let metadata = self.access_facts(&[to, from]);
                 let to = self.address(to);
                 let from = self.address(from);
-                let n = self.get(bytes);
+                let n = self.numeric(bytes);
                 self.runtime_void_metadata(
                     "llvm.memcpy.p0.p0.i64",
                     &[ptr(&to), ptr(&from), word(n), ("i1".into(), "false".into())],
@@ -530,7 +533,7 @@ impl FunctionEmitter<'_> {
                 available,
                 bytes,
             } => {
-                let n = self.get(bytes);
+                let n = self.numeric(bytes);
                 let (yes, room) = if self.empty_bounds.enters.contains(&admitted) {
                     self.empty_bound(&n)
                 } else {
@@ -552,7 +555,7 @@ impl FunctionEmitter<'_> {
                 self.put(result, &p);
             }
             Inst::RegionClose { region } => {
-                let r = self.get(region);
+                let r = self.numeric(region);
                 self.runtime_void("hirsel_core_region_close", &[ptr(&r)]);
             }
             Inst::Case { result, address } => {
@@ -622,17 +625,17 @@ impl FunctionEmitter<'_> {
                 }
             }
             Inst::Share { node, kind } => {
-                let p = self.get(node);
+                let p = self.numeric(node);
                 self.share_node(&p, kind == Counted::Arc);
             }
             Inst::TryUnwrap { result, node, kind } => {
-                let p = self.get(node);
+                let p = self.numeric(node);
                 let yes = self.unique_node(&p, kind == Counted::Arc);
                 let yes = self.calc(format!("zext i1 {yes} to i8"));
                 self.put(result, &yes);
             }
             Inst::Release { node, kind, ty } => {
-                let p = self.get(node);
+                let p = self.numeric(node);
                 self.release_node(&p, TypeRef(ty.0), kind == Counted::Arc)?;
             }
             _ => return Err(Error::Unsupported("task operations".into())),

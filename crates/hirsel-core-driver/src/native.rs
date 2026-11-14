@@ -15,6 +15,8 @@ mod release;
 use cleanup::result_cleanup;
 
 pub const TARGET: &str = "x86_64-unknown-linux-gnu";
+const DIRECT_LINK_SUPPORT_LIBS: &[&str] =
+    &["-lgcc_s", "-lpthread", "-ldl", "-lm", "-lrt", "-lutil"];
 #[derive(Clone, Copy, Debug, Serialize)]
 pub enum Backend {
     Cranelift,
@@ -526,6 +528,7 @@ fn command(command: &mut Command) -> Result<Vec<u8>, NativeStop> {
 fn direct_link(
     recipe: &crate::tool_inputs::LinkRecipe,
     inputs: &[PathBuf],
+    support_libs: &[&str],
     output: &Path,
     optimize: bool,
 ) -> Result<(), NativeStop> {
@@ -535,6 +538,9 @@ fn direct_link(
         if argument == crate::tool_inputs::INPUT_MARKER {
             for input in inputs {
                 process.arg(input);
+            }
+            for library in support_libs {
+                process.arg(library);
             }
             inserted = true;
         } else {
@@ -585,6 +591,7 @@ fn link(
         &(
             compiler_identity()?,
             recipe.identity,
+            DIRECT_LINK_SUPPORT_LIBS,
             entry_plan,
             &identities,
             &options.target,
@@ -653,7 +660,13 @@ fn link(
                     .join(", ")
             )));
         }
-        if let Err(first) = direct_link(&recipe, &inputs, &output, options.optimize) {
+        if let Err(first) = direct_link(
+            &recipe,
+            &inputs,
+            DIRECT_LINK_SUPPORT_LIBS,
+            &output,
+            options.optimize,
+        ) {
             let missing = crate::tool_inputs::missing_recipe_inputs(&recipe);
             if missing.is_empty() {
                 return Err(first);
@@ -671,7 +684,13 @@ fn link(
                         .join(", ")
                 )));
             }
-            direct_link(&refreshed, &inputs, &output, options.optimize)?;
+            direct_link(
+                &refreshed,
+                &inputs,
+                DIRECT_LINK_SUPPORT_LIBS,
+                &output,
+                options.optimize,
+            )?;
         }
         let bytes = std::fs::read(output)?;
         crate::native_entry::check_linked_sites(&bytes).map_err(NativeStop::Link)?;

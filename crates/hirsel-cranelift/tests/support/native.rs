@@ -189,6 +189,7 @@ fn execute_cases(module: &c::Module, optimize: bool, cases: &[NativeCase<'_>]) {
         &Options {
             target: NATIVE_TARGET,
             optimize,
+            debug_lines: false,
         },
         observing,
     )
@@ -983,10 +984,27 @@ b0(v0: u64):
             &Options {
                 target: NATIVE_TARGET,
                 optimize,
+                debug_lines: true,
             },
         )
         .unwrap();
         let file = cranelift_object::object::File::parse(&*object.bytes).unwrap();
+        let without_rows = emit_object(
+            &module,
+            &Options {
+                target: NATIVE_TARGET,
+                optimize,
+                debug_lines: false,
+            },
+        )
+        .unwrap();
+        let plain = cranelift_object::object::File::parse(&*without_rows.bytes).unwrap();
+        assert!(plain.section_by_name(".debug_line").is_none());
+        assert!(plain.section_by_name(".debug_info").is_none());
+        // Row collection is a side product; the same code still reports sites.
+        for section in file.sections().filter(|s| s.kind() == cranelift_object::object::SectionKind::Text) {
+            assert_eq!(section.data().unwrap(), plain.section_by_name(section.name().unwrap()).unwrap().data().unwrap());
+        }
         let dwarf = gimli::Dwarf::load(|id| -> Result<_, gimli::Error> {
             Ok(gimli::EndianSlice::new(
                 file.section_by_name(id.name())

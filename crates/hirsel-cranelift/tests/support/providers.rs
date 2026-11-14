@@ -42,6 +42,7 @@ fn execute_runs(module: &c::Module, runs: &[Run], optimize: bool) {
         &Options {
             target: NATIVE_TARGET,
             optimize,
+            debug_lines: false,
         },
     )
     .unwrap();

@@ -1072,6 +1072,7 @@ fn generic_templates_survive_disk_reuse_and_materialize_the_call_closure() {
             &hirsel_cranelift::core::Options {
                 target: native::TARGET,
                 optimize: false,
+                debug_lines: false,
             },
         )
         .unwrap();

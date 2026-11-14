@@ -1421,6 +1421,7 @@ mod probe_tests {
                 let core = crate::core::isa(&crate::core::Options {
                     target: &target.triple,
                     optimize: opt != OptLevel::None,
+                    debug_lines: false,
                 })
                 .unwrap();
                 for isa in [old, core] {

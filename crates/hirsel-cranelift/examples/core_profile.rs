@@ -222,6 +222,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &Options {
             target: "x86_64-unknown-linux-gnu",
             optimize: args.iter().any(|a| a == "--speed"),
+            debug_lines: false,
         },
         &measure,
     )?;

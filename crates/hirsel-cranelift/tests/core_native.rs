@@ -13,6 +13,7 @@ fn native_allocator_refusals_are_reported_run_stops() {
                 &Options {
                     target: "x86_64-unknown-linux-gnu",
                     optimize: false,
+                    debug_lines: false,
                 },
             )
             .unwrap()
@@ -282,6 +283,7 @@ fn slot_kernels_match_evaluator_and_marks_emit_nothing() {
                 &Options {
                     target: "x86_64-unknown-linux-gnu",
                     optimize,
+                    debug_lines: false,
                 },
             )
             .unwrap()
@@ -669,6 +671,7 @@ b0(v0: ptr):
         &Options {
             target: "x86_64-unknown-linux-gnu",
             optimize: false,
+            debug_lines: false,
         },
     )
     .unwrap();
@@ -766,6 +769,7 @@ b0:
         &Options {
             target: "x86_64-unknown-linux-gnu",
             optimize: false,
+            debug_lines: false,
         },
     )
     .unwrap();
@@ -899,6 +903,7 @@ fn inlined_arc_updates_keep_the_provider_event_order() {
         &Options {
             target: "x86_64-unknown-linux-gnu",
             optimize: false,
+            debug_lines: false,
         },
     )
     .unwrap();
@@ -942,6 +947,7 @@ fn inlined_count_increment_overflow_is_the_runtime_stop() {
             &Options {
                 target: "x86_64-unknown-linux-gnu",
                 optimize: false,
+                debug_lines: false,
             },
         )
         .unwrap();

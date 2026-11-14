@@ -141,6 +141,7 @@ fn emit_unit(module: &Module, options: &NativeOptions) -> Result<Vec<u8>, String
             &hirsel_cranelift::core::Options {
                 target: &options.target,
                 optimize: options.optimize,
+                debug_lines: options.debug_lines,
             },
             options.logical_charge_report.is_some(),
         )

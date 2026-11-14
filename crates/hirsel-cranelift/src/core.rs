@@ -59,6 +59,8 @@ pub fn supports_target(triple: &str) -> bool {
 pub struct Options<'a> {
     pub target: &'a str,
     pub optimize: bool,
+    /// Emit source-independent line and subprogram rows for link-time binding.
+    pub debug_lines: bool,
 }
 
 /// A relocatable object. Its symbols use CoreIR instance identities.
@@ -292,7 +294,7 @@ fn emit(
         allocators: &allocators,
         trace_drops,
         observe_charge,
-        debug: true,
+        debug: options.debug_lines,
         site_symbols: Default::default(),
         runtimes: Default::default(),
     };
@@ -316,7 +318,9 @@ fn emit(
         observer
             .define(&mut object, functions[index], context)
             .map_err(error)?;
-        if let Some(function) = debug::function(input, f, context.compiled_code().unwrap()) {
+        if options.debug_lines
+            && let Some(function) = debug::function(input, f, context.compiled_code().unwrap())
+        {
             debug_functions.push(function);
         }
     }
@@ -327,7 +331,9 @@ fn emit(
     }
     let _write = observer.enter("object_write");
     let mut product = object.finish();
-    crate::native_dwarf::append(&mut product.object, &debug_functions, "").map_err(error)?;
+    if options.debug_lines {
+        crate::native_dwarf::append(&mut product.object, &debug_functions, "").map_err(error)?;
+    }
     Ok(Object {
         bytes: crate::object::finish(product).map_err(error)?,
     })

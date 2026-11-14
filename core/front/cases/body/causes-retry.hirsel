@@ -1,0 +1,82 @@
+// expect: accept
+// A retry policy over isolate's Causes: retry while the primary cause is Fail, stop on any
+// other. Run lines wait: a caught failure leaves the replacement cell charged (FAIL-16,
+// MEM-24), and the harness refuses a run that returns with bytes admitted; the evaluator
+// also faults on cleaning a caught Fail whose message is a heap String (core-form-883).
+// hand-derived run: case_fail_then_ok() = 20 | used 32
+// hand-derived run: case_unwrap_stops() = 2005 | used 32
+// hand-derived run: case_gives_up() = 1000 | used 32
+fn attempt(n: u64) -> u64 {
+    if n < 2 {
+        fail(result.unwrap(string.from("busy")))
+    }
+    if n == 5 {
+        let none: Option[u64] = None
+        return option.unwrap(none)
+    }
+    n * 10
+}
+
+fn retryable(cs: Causes) -> bool {
+    for c in cs {
+        return match c.kind {
+            Fail(_) => true,
+            _ => false,
+        }
+    }
+    false
+}
+
+pub type Outcome = Done(u64) | GaveUp(u64) | Stopped(u64) | NoRoom
+
+fn with_retry(start: u64, limit: u64) -> Outcome {
+    let mut n = start
+    loop {
+        let caught = isolate(fn() -> u64 {
+            attempt(n)
+        })
+        match take caught {
+            Error(_) => return NoRoom,
+            Ok(Ok(v)) => return Done(v),
+            Ok(Error(take cs)) => {
+                if !retryable(cs) {
+                    return Stopped(n)
+                }
+                if n - start + 1 >= limit {
+                    return GaveUp(n)
+                }
+                n += 1
+            },
+        }
+    }
+}
+
+// retries 0 and 1 (Fail), then returns 20
+pub fn case_fail_then_ok() -> u64 {
+    match with_retry(0, 5) {
+        Done(v) => v,
+        GaveUp(n) => 1000 + n,
+        Stopped(n) => 2000 + n,
+        NoRoom => 9999
+    }
+}
+
+// 5 fails with Unwrap: not retried
+pub fn case_unwrap_stops() -> u64 {
+    match with_retry(5, 5) {
+        Done(v) => v,
+        GaveUp(n) => 1000 + n,
+        Stopped(n) => 2000 + n,
+        NoRoom => 9999
+    }
+}
+
+// limit 1: one Fail, then gives up
+pub fn case_gives_up() -> u64 {
+    match with_retry(0, 1) {
+        Done(v) => v,
+        GaveUp(n) => 1000 + n,
+        Stopped(n) => 2000 + n,
+        NoRoom => 9999
+    }
+}

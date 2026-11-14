@@ -82,7 +82,9 @@ an environment (OWN-19), so it has no heap size; a scoped type's own fields
 `Args` designates the entry arguments, which are host memory outside every limit, immutable
 and live for the run; `args.get` returns a view of one. `Causes` owns its chain's cause
 cells, which were charged when each cause was raised
-([FAIL-10](failure.md#fail-10-cause-chain)); dropping it refunds them. The core declarations
+([FAIL-10](failure.md#fail-10-cause-chain)); dropping it refunds them. It is iterated by `for`
+([SEM-6](semantics.md#sem-6-iteration)), primary cause first, binding a view of each cause as
+a `Cause`, whose `kind` is a `CauseKind`. The core declarations
 that have bodies (`Option`, `Result`, `Capacity`, the error types) have the summaries OWN-2
 computes, with `Option` and `Result` taking bounds as tuples do. `Task[R]` is never `send`
 ([CONC-2](tasks.md#conc-2-the-send-bound)); its parameter's `R: send` constrains the
@@ -273,7 +275,7 @@ operations it names; nothing else about them may be inferred from an implementat
   ([MEM-24](budgets.md#mem-24-logical-charges)): its finalizer closes it and ignores the
   outcome. `Net`, `Random`, `Stdin`, `Env` and `Process` have no operations in v1.
 - **Other results.** `box.unbox` returns the payload and refunds the node. `ParseError`'s
-  `Invalid` holds a byte position. `Causes` is iterated by `for`, primary cause first. A
+  `Invalid` holds a byte position. A
   `Box`, `Rc` or `Arc` is read through its payload where its own type does not fit
   ([OWN-8](ownership.md#own-8-views)).
   `task.check_cancel()` fails with `Cancelled` when a request is pending, and

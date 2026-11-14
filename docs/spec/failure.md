@@ -247,7 +247,7 @@ recovery boundary and undoes nothing:
 - If `body` fails, the failure is cleaned as on every exit edge (FAIL-8) up to `isolate`:
   the owners, loans, captures and pending results of `body` are cleaned, and every cause
   that cleanup adds joins the chain (FAIL-10). `isolate` then returns `Ok(Error(causes))`
-  holding every cause raised since its entry, and the chain set aside is restored as it
+  holding every cause raised since its entry (read by `for`, [core](core.md)), and the chain set aside is restored as it
   was. When the caught failure used the current obligation's cell, the reserved cell takes
   its place, so the code after `isolate` has an unused cell to fail into; when it did not,
   every caught cause having gone into resources' cells, the reserved cell is refunded. A

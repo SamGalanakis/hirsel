@@ -89,7 +89,8 @@ fn pump(tx: Sender[Job], take jobs: List[Job]) -> Result[(), Closed[Job]] waits 
 ### CONC-6: join
 
 `task.join(take h: Task[R]) -> Result[R, JoinError] waits` waits for the child to end, where
-`type JoinError = Failed(Causes) | Cancelled(Causes)`. The child
+`type JoinError = Failed(Causes) | Cancelled(Causes)`, a `Causes` being read by `for`
+([core](core.md)). The child
 cleans its own state before it ends. `Ok(r)` moves the result to the joiner; `Failed(causes)`
 delivers the child's cause chain ([FAIL-10](failure.md#fail-10-cause-chain)) as a value the
 joiner owns, made of the child's cells, so the joiner's own primary cell is untouched and

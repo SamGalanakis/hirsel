@@ -193,6 +193,7 @@ TEST_DATA = {
     "hirsel-core-front-unittest": ["core/front/**", "core/core/**", "core/std/**", "core/programs/m1/**"],
     "hirsel-core-driver-unittest": ["core/core/**", "core/front/**", "core/std/**", "core/programs/m1/**"],
     "hirsel-cranelift-test-core_native": ["core/front/**", "core/core/**"],
+    "hirsel-cranelift-test-core_aarch64": ["core/front/**", "core/core/**"],
     "hirsel-cli-test-cli": ["tools/capped", "conformance/old-spec/core-library.md", "conformance/old-spec/std-library.md", "docs/dependency-card.schema.json"],
     "hirsel-driver-test-it": ["crates/hirsel-driver/tests/fixtures/**", "crates/hirsel-rt/include/**"],
     "hirsel-llvm-test-it": ["crates/hirsel-llvm/tests/native/**"],
@@ -1218,8 +1219,11 @@ def first_party(meta: dict) -> str:
             # Request-lifecycle fixtures and the request-mode law compile
             # temporary files against std, without corpus or native runtime.
             requests_only = binary == "hirsel-driver-test-it-resident"
-            core_native = binary == "hirsel-cranelift-test-core_native"
-            files_env = ({"HIRSEL_CORE_RUNTIME_ARCHIVE": "//:core-llvm-runtime-fixture[staticlib]"} if core_native
+            core_native = binary in ("hirsel-cranelift-test-core_native", "hirsel-cranelift-test-core_aarch64")
+            files_env = ({"HIRSEL_CORE_RUNTIME_ARCHIVE": "//:core-cranelift-runtime-fixtures[aarch64]",
+                          "HIRSEL_TOOLCHAIN_ARM": "//tools/buck2/native-toolchain:arm",
+                          "HIRSEL_TOOLCHAIN_QEMU": "//tools/buck2/native-toolchain:qemu"} if binary == "hirsel-cranelift-test-core_aarch64" else
+                         {"HIRSEL_CORE_RUNTIME_ARCHIVE": "//:core-llvm-runtime-fixture[staticlib]"} if core_native
                          else {"HIRSEL_CORE_RT_ARCHIVE": "//:core-llvm-runtime-fixture[staticlib]"} if binary == "hirsel-llvm-unittest" else None)
             return dict(data=Raw(f'glob({starlark(["stdlib/**", relative(package_dir / "Cargo.toml")], 4)})') if requests_only else test_data(binary, name, package_dir, src),
                         runtime_archives=runtime_views(binary) if name in NATIVE_TESTS and not requests_only and not core_native and binary != "hirsel-rt-unittest" else None,
@@ -1357,6 +1361,7 @@ def first_party(meta: dict) -> str:
         crate="core_llvm_runtime_fixture", crate_root="crates/hirsel-llvm/tests/core_runtime/lib.rs",
         srcs=["crates/hirsel-llvm/tests/core_runtime/lib.rs"], features=[], deps=["//:hirsel-core-rt-native-fixture"],
         manifest_dir="crates/hirsel-llvm", package_name="hirsel-llvm", version="0.1.0", edition="2024"))
+    out.append("\n" + call("hirsel_core_runtime_archives", name="core-cranelift-runtime-fixtures", library=":core-llvm-runtime-fixture", archive_name="libcore_cranelift_fixture.a"))
     out.append("\n" + call("hirsel_core_cranelift_test", name="land-core-cranelift-custody",
         case="every_custody_sample_and_injected_admission_matches_evaluator",
         data=["crates/hirsel-cranelift/Cargo.toml"]))

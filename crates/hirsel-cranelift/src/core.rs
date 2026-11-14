@@ -213,7 +213,7 @@ fn emit(
     let refuse = |message: String| Error::Target(format!("{}: {message}", options.target));
     if !supports_target(options.target) {
         return Err(refuse(
-            "CoreIR entry currently implements the x86-64 Linux C ABI".into(),
+            "CoreIR entry implements x86-64 and AArch64 Linux C ABIs".into(),
         ));
     }
     let isa = {
@@ -234,7 +234,7 @@ fn emit(
         input
             .signatures
             .iter()
-            .map(abi::Signature::new)
+            .map(|s| abi::Signature::new(s, &object))
             .collect::<Vec<_>>()
     };
     let declarations = observer.enter("declarations");

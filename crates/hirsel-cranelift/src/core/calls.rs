@@ -24,6 +24,7 @@ pub(super) struct Calls<'a> {
     pub results: Vec<Value>,
     pub edges: [Vec<BlockArg>; 2],
     slot: Option<StackSlot>,
+    by_value: Option<StackSlot>,
 }
 impl<'a> Calls<'a> {
     pub fn new(
@@ -50,6 +51,7 @@ impl<'a> Calls<'a> {
             results: Vec::with_capacity(results),
             edges: std::array::from_fn(|_| Vec::with_capacity(edge_arity)),
             slot: None,
+            by_value: None,
         }
     }
     pub fn reference(
@@ -74,10 +76,10 @@ impl<'a> Calls<'a> {
             .entry(key)
             .or_insert_with(|| b.import_signature(signature.clone()))
     }
-    pub fn own_fn_cleanup(&mut self, b: &mut FunctionBuilder<'_>) -> SigRef {
+    pub fn own_fn_cleanup(&mut self, object: &ObjectModule, b: &mut FunctionBuilder<'_>) -> SigRef {
         *self.indirect.entry(usize::MAX).or_insert_with(|| {
             b.import_signature(
-                abi::Signature::c(&[Ty::Ptr, Ty::Ptr], &[Ty::Scalar(Scalar::Bool)]).clif,
+                abi::Signature::c(object, &[Ty::Ptr, Ty::Ptr], &[Ty::Scalar(Scalar::Bool)]).clif,
             )
         })
     }
@@ -103,18 +105,17 @@ impl<'a> Calls<'a> {
         results: &[Ty],
         args: &[Value],
     ) -> Result<NativeValues> {
+        let arm = abi::aarch64(object);
+        let structure = match name {
+            "hirsel_core_spawn" => Some((4, 64)),
+            "hirsel_core_channel_new" => Some((2, 32)),
+            _ => None,
+        };
         let imports = self.imports;
         let mut imports = imports.borrow_mut();
         if !imports.functions.contains_key(name) {
-            let mut signature = abi::Signature::c(params, results);
-            // These C rows take their closed layout descriptor by value. System V
-            // passes the memory-class aggregate on the outgoing argument stack.
-            let structure = match name {
-                "hirsel_core_spawn" => Some((4, 64)),
-                "hirsel_core_channel_new" => Some((2, 32)),
-                _ => None,
-            };
-            if let Some((index, bytes)) = structure {
+            let mut signature = abi::Signature::c(object, params, results);
+            if let Some((index, bytes)) = structure.filter(|_| !arm) {
                 signature.clif.params[index + usize::from(signature.indirect)] =
                     AbiParam::special(types::I64, ArgumentPurpose::StructArgument(bytes));
             }
@@ -138,10 +139,40 @@ impl<'a> Calls<'a> {
             actual.push(storage);
         }
         actual.extend_from_slice(args);
+        if let Some((index, bytes)) = structure.filter(|_| arm) {
+            // AAPCS64 passes a caller-owned copy by pointer. The descriptor
+            // source may share ABI scratch with the result, so keep this copy
+            // separate from the return buffer and from its original storage.
+            let slot = if let Some(slot) = self.by_value {
+                b.func.sized_stack_slots[slot].size =
+                    b.func.sized_stack_slots[slot].size.max(bytes);
+                slot
+            } else {
+                let slot = b.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    bytes,
+                    3,
+                ));
+                self.by_value = Some(slot);
+                slot
+            };
+            let copy = b.ins().stack_addr(types::I64, slot, 0);
+            b.emit_small_memory_copy(
+                object.target_config(),
+                copy,
+                args[index],
+                u64::from(bytes),
+                8,
+                8,
+                true,
+                ir::MemFlagsData::trusted(),
+            );
+            actual[index + usize::from(signature.indirect)] = copy;
+        }
         let function = self.reference(object, b, imported.function);
         let inst = b.ins().call(function, &actual);
         self.args = actual;
-        let mut returned = [Value::from_u32(0); 2];
+        let mut returned = [Value::from_u32(0); 4];
         let len = b.inst_results(inst).len();
         returned[..len].copy_from_slice(b.inst_results(inst));
         let mut out = NativeValues {
@@ -168,10 +199,14 @@ impl<'a> Calls<'a> {
         } else {
             let mut signature = object.make_signature();
             signature.params.push(AbiParam::new(types::I64));
-            signature.params.push(AbiParam::special(
-                types::I64,
-                ArgumentPurpose::StructArgument(super::memory_layout::CAUSE_BYTES as u32),
-            ));
+            signature.params.push(if abi::aarch64(object) {
+                AbiParam::new(types::I64)
+            } else {
+                AbiParam::special(
+                    types::I64,
+                    ArgumentPurpose::StructArgument(super::memory_layout::CAUSE_BYTES as u32),
+                )
+            });
             let function = object
                 .declare_function("hirsel_core_raise", Linkage::Import, &signature)
                 .map_err(error)?;

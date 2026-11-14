@@ -177,7 +177,7 @@ impl Glues {
                         .declare_function(
                             &format!("hirsel.core.drop.{i}"),
                             Linkage::Local,
-                            &abi::Signature::c(&[P, P], &[B]).clif,
+                            &abi::Signature::c(object, &[P, P], &[B]).clif,
                         )
                         .map_err(error)?,
                 );
@@ -188,7 +188,7 @@ impl Glues {
                         .declare_function(
                             &format!("hirsel.core.resume.{i}"),
                             Linkage::Local,
-                            &abi::Signature::c(&[P, P, P, P], &[B]).clif,
+                            &abi::Signature::c(object, &[P, P, P, P], &[B]).clif,
                         )
                         .map_err(error)?,
                 );
@@ -230,7 +230,7 @@ impl Glues {
                 .declare_function(
                     &format!("hirsel.core.buffer.{i}"),
                     Linkage::Local,
-                    &abi::Signature::c(&[P, P, P, P], &[B]).clif,
+                    &abi::Signature::c(object, &[P, P, P, P], &[B]).clif,
                 )
                 .map_err(error)?;
             buffers.push((t, function));
@@ -275,7 +275,7 @@ impl Glues {
         let build = observer.enter("build_glue");
         let context = &mut scratch.codegen;
         object.clear_context(context);
-        context.func.signature = abi::Signature::c(&[P, P, P, P], &[B]).clif;
+        context.func.signature = abi::Signature::c(object, &[P, P, P, P], &[B]).clif;
         let mut b = FunctionBuilder::new(&mut context.func, &mut scratch.frontend);
         let entry = b.create_block();
         b.append_block_params_for_function_params(entry);
@@ -312,7 +312,7 @@ impl Glues {
         let context = &mut scratch.codegen;
         object.clear_context(context);
         context.func.signature =
-            abi::Signature::c(if resume { &[P, P, P, P] } else { &[P, P] }, &[B]).clif;
+            abi::Signature::c(object, if resume { &[P, P, P, P] } else { &[P, P] }, &[B]).clif;
         let mut b = FunctionBuilder::new(&mut context.func, &mut scratch.frontend);
         let entry = b.create_block();
         b.append_block_params_for_function_params(entry);
@@ -574,7 +574,7 @@ impl Glue<'_, '_, '_> {
                 self.b.ins().brif(present, yes, &[], done, &[]);
                 self.b.switch_to_block(yes);
                 let code = self.load(env, 0);
-                let sig = self.calls.own_fn_cleanup(&mut self.b);
+                let sig = self.calls.own_fn_cleanup(self.object, &mut self.b);
                 self.b.ins().call_indirect(sig, code, &[self.ctx, env]);
                 self.b.ins().jump(done, &[]);
                 self.b.switch_to_block(done);

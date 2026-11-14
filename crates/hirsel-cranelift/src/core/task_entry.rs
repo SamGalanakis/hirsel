@@ -29,7 +29,7 @@ impl Glues {
                 .declare_function(
                     &format!("hirsel.task.entry.{}.{}", x.0, r.0),
                     Linkage::Local,
-                    &abi::Signature::c(&[Ty::Ptr; 3], &[Ty::Scalar(Scalar::U8)]).clif,
+                    &abi::Signature::c(object, &[Ty::Ptr; 3], &[Ty::Scalar(Scalar::U8)]).clif,
                 )
                 .map_err(error)?;
             out.entries.insert((x, r), f);
@@ -38,7 +38,7 @@ impl Glues {
                     .declare_function(
                         &format!("hirsel.task.input.{}", x.0),
                         Linkage::Local,
-                        &abi::Signature::c(&[Ty::Ptr; 2], &[Ty::Scalar(Scalar::U8)]).clif,
+                        &abi::Signature::c(object, &[Ty::Ptr; 2], &[Ty::Scalar(Scalar::U8)]).clif,
                     )
                     .map_err(error)?;
                 e.insert(f);
@@ -57,7 +57,7 @@ impl Glues {
             let context = &mut scratch.codegen;
             object.clear_context(context);
             context.func.signature =
-                abi::Signature::c(&[Ty::Ptr; 2], &[Ty::Scalar(Scalar::U8)]).clif;
+                abi::Signature::c(object, &[Ty::Ptr; 2], &[Ty::Scalar(Scalar::U8)]).clif;
             let mut b = FunctionBuilder::new(&mut context.func, &mut scratch.frontend);
             let entry = b.create_block();
             b.append_block_params_for_function_params(entry);
@@ -77,7 +77,7 @@ impl Glues {
             let context = &mut scratch.codegen;
             object.clear_context(context);
             context.func.signature =
-                abi::Signature::c(&[Ty::Ptr; 3], &[Ty::Scalar(Scalar::U8)]).clif;
+                abi::Signature::c(object, &[Ty::Ptr; 3], &[Ty::Scalar(Scalar::U8)]).clif;
             let mut b = FunctionBuilder::new(&mut context.func, &mut scratch.frontend);
             let entry = b.create_block();
             b.append_block_params_for_function_params(entry);
@@ -107,7 +107,7 @@ impl Glues {
                 never: false,
             };
             sig.params.insert(0, Param::Value(Ty::Ptr));
-            let abi = abi::Signature::new(&sig);
+            let abi = abi::Signature::new(&sig, object);
             let signature = b.import_signature(abi.clif.clone());
             let mut args = Vec::with_capacity(4);
             args.push(ps[0]);

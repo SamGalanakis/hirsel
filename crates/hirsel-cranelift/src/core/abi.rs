@@ -1,4 +1,4 @@
-//! System V scalar-struct returns. Like rustc_codegen_cranelift's ABI lowering,
+//! Linux System V / AAPCS64 scalar-struct returns. Like rustc_codegen_cranelift,
 //! physical register carriers follow aggregate classification, not source arity.
 use super::*;
 use cranelift_codegen::ir::{ArgumentPurpose, MemFlagsData as MemFlags, Value};
@@ -11,12 +11,13 @@ pub(super) struct Signature {
     pub size: u32,
     pub indirect: bool,
     pub aggregate: bool,
+    homogeneous: bool,
 }
 impl Signature {
-    pub fn new(s: &c::Signature) -> Self {
-        Self::build(s, true)
+    pub fn new(s: &c::Signature, object: &ObjectModule) -> Self {
+        Self::build(s, true, aarch64(object))
     }
-    pub fn c(params: &[Ty], results: &[Ty]) -> Self {
+    pub fn c(object: &ObjectModule, params: &[Ty], results: &[Ty]) -> Self {
         let mut signature = Self::build(
             &c::Signature {
                 params: params.iter().copied().map(Param::Value).collect(),
@@ -25,6 +26,7 @@ impl Signature {
                 never: false,
             },
             false,
+            aarch64(object),
         );
         // C bool parameters carry zero-extension in Rust/LLVM's ABI. Without
         // it, upper register bits can leak into an event's u64 boolean value.
@@ -36,7 +38,7 @@ impl Signature {
         }
         signature
     }
-    fn build(s: &c::Signature, context: bool) -> Self {
+    fn build(s: &c::Signature, context: bool, arm: bool) -> Self {
         let mut results = Vec::with_capacity(s.results.len() + usize::from(context));
         results.extend_from_slice(&s.results);
         if context {
@@ -54,7 +56,15 @@ impl Signature {
             size += n;
         }
         size = size.next_multiple_of(align);
-        let indirect = size > 16;
+        // AAPCS64 homogeneous float aggregates use one vector register per
+        // member, including four f64s. All other composites up to16bytes use
+        // x0/x1, even a float-only eightbyte within a mixed aggregate.
+        let homogeneous = arm
+            && !results.is_empty()
+            && results.len() <= 4
+            && results[0].is_float()
+            && results.iter().all(|r| *r == results[0]);
+        let indirect = size > 16 && !homogeneous;
         let aggregate = results.len() > 1;
         if indirect {
             clif.params
@@ -75,7 +85,7 @@ impl Signature {
             })
         }));
         if !indirect {
-            if !aggregate {
+            if !aggregate || homogeneous {
                 clif.returns
                     .extend(results.iter().map(|&r| AbiParam::new(ty(r))));
             } else {
@@ -88,7 +98,7 @@ impl Signature {
                             f64_ |= ty(r) == types::F64;
                         }
                     }
-                    let carrier = if integer {
+                    let carrier = if arm || integer {
                         types::I64
                     } else if f64_ || size - chunk * 8 > 4 {
                         types::F64
@@ -106,6 +116,7 @@ impl Signature {
             size,
             indirect,
             aggregate,
+            homogeneous,
         }
     }
     pub fn unpack(
@@ -115,7 +126,7 @@ impl Signature {
         storage: Option<Value>,
         mut push: impl FnMut(Value),
     ) {
-        if !self.aggregate {
+        if !self.aggregate || self.homogeneous {
             for &value in values {
                 push(value);
             }
@@ -168,7 +179,7 @@ impl Signature {
         }
     }
     pub fn return_(&self, b: &mut FunctionBuilder<'_>, values: &[Value], storage: Option<Value>) {
-        if !self.aggregate {
+        if !self.aggregate || self.homogeneous {
             b.ins().return_(values);
             return;
         }
@@ -240,4 +251,9 @@ impl Signature {
         }
         b.ins().return_(&registers[..self.clif.returns.len()]);
     }
+}
+
+/// The module owns one target; every imported/generated C signature uses it.
+pub(super) fn aarch64(object: &ObjectModule) -> bool {
+    object.isa().name() == "aarch64"
 }

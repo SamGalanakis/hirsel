@@ -1,0 +1,69 @@
+// FORM #99: `grow` reads and writes only its carrier's words (data at +0, capacity
+// at +16), so an engine may hand its out-of-line growth helper a call-lifetime
+// copy of the carrier and copy the words back afterwards. These runs catch a wrong
+// copy-back. Each list starts at 512 u64s, a 4096-byte block, above the native
+// helper's 2048-byte threshold, so the 513th push grows through the helper.
+//
+// Hand-derived:
+// - grown: 0 + 1 + ... + 512 = 512 * 513 / 2 = 131328, and the capacity holds
+//   the length. A stale data word loses element 512 or reads the freed block; a
+//   stale capacity word leaves capacity 512 under length 513.
+// - refused: inside `bound bytes 5000` the 4096-byte block leaves 904 bytes, and
+//   any growth needs more, so reserving room for a 513th is refused. The list keeps 512
+//   elements summing to 511 * 512 / 2 = 130816 and capacity 512, and the refusal
+//   reports room 904: 130816 * 1000000 + 512 * 1000 + 904 = 130816512904.
+//   A copy-back of words the helper never wrote breaks the sum or the capacity.
+// - regrown: a second growth after the first reads the copied-back words: 1024
+//   pushes sum to 1023 * 1024 / 2 = 523776.
+// expect: run grown() = 131328
+// expect: run refused() = 130816512904
+// expect: run regrown() = 523776
+fn sum(xs: List[u64]) -> u64 {
+    let mut s: u64 = 0
+    for x in xs {
+        s += x
+    }
+    s
+}
+
+fn filled(n: u64) -> Result[List[u64], Capacity] {
+    let mut xs: List[u64] = list.with_capacity(512)?
+    for i in 0u64 .. n {
+        match list.push(mut xs, i) {
+            Ok(_) => {},
+            Error((e, _)) => return Error(e)
+        }
+    }
+    Ok(take xs)
+}
+
+fn grown() -> u64 {
+    let xs = result.unwrap(filled(513))
+    if list.capacity(xs) < list.len(xs) {
+        return 0
+    }
+    sum(xs)
+}
+
+fn refused() -> u64 {
+    let r: Result[u64, Capacity] = bound bytes 5000 {
+        let mut xs = filled(512)?
+        let room = match list.reserve(mut xs, 1) {
+            Ok(_) => 0u64,
+            Error(e) => e.available
+        }
+        sum(xs) * 1000000 + list.capacity(xs) * 1000 + room
+    }
+    match r {
+        Ok(n) => n,
+        Error(_) => 0
+    }
+}
+
+fn regrown() -> u64 {
+    let xs = result.unwrap(filled(1024))
+    if list.capacity(xs) < list.len(xs) {
+        return 0
+    }
+    sum(xs)
+}

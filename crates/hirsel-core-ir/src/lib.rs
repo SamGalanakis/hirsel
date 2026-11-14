@@ -533,6 +533,15 @@
 //! - **Engines** may lower it as `alloc .. like`, a copy, two stores and a `free`,
 //!   or resize the old block in place (`realloc`); a run observes the same bytes,
 //!   charges and refunds either way, apart from the address.
+//! - **The carrier is bytes, not an address** (#99). `grow` reads the carrier's
+//!   data, length and capacity words and writes its data and capacity words. It
+//!   never uses the place's address as a value, so it leaves the carrier
+//!   place-blind and sealed (Roles). An engine may therefore run it on a
+//!   call-lifetime copy of the 24 bytes and copy the data and capacity words back
+//!   before any other access to the place, on success and refusal alike and
+//!   before a `fail` edge. Installing into the copy before the refund keeps the
+//!   order above: only this activation reaches a written place, and a refund
+//!   runs no code.
 //!
 //! The evaluator stops on a capacity-0 carrier, a carrier whose data is not an
 //! owned block of its edge, a `moved` other than length × stride, a `refund` other

@@ -305,6 +305,11 @@ fn capture_link_recipe(
         let linker = PathBuf::from(argv.remove(0));
         if linker.is_file() {
             linker
+        } else if linker.is_absolute() || linker.components().count() > 1 {
+            return Err(io::Error::other(format!(
+                "missing link editor input: {}",
+                linker.display()
+            )));
         } else {
             link_tools(cc)?.1.path
         }

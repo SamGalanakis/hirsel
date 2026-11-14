@@ -4,7 +4,6 @@
 #include <llvm-c/DebugInfo.h>
 #include <llvm-c/IRReader.h>
 #include <llvm-c/BitReader.h>
-#include <llvm-c/Linker.h>
 #include <llvm-c/Error.h>
 #include <llvm-c/Target.h>
 #include <llvm-c/TargetMachine.h>
@@ -21,6 +20,9 @@ typedef struct { const uint8_t *data; size_t len; uint8_t imported, bitcode; LLV
 typedef struct { uint8_t *symbol; size_t len; uint64_t instructions; } HirselLlvmImport;
 typedef struct { HirselLlvmImport *data; size_t len; } HirselLlvmImports;
 extern LLVMMemoryBufferRef hirsel_llvm_raw_bitcode(LLVMModuleRef module);
+extern void *hirsel_llvm_composer(LLVMModuleRef module);
+extern int hirsel_llvm_compose(void *composer, LLVMModuleRef unit);
+extern void hirsel_llvm_composer_free(void *composer);
 static pthread_once_t initialized = PTHREAD_ONCE_INIT;
 static void initialize(void) {
     LLVMInitializeX86TargetInfo(); LLVMInitializeX86Target();
@@ -329,6 +331,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
     // Release composition goes through the linker, which may reorder globals.
     int standalone = count == 1 && !export_count;
     LLVMModuleRef module = standalone ? NULL : LLVMModuleCreateWithNameInContext("hirsel-core", context);
+    void *composer = standalone ? NULL : hirsel_llvm_composer(module);
     LLVMMemoryBufferRef buffer = NULL;
     int failed;
     char **imports = NULL;
@@ -401,8 +404,10 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
         // The linker resolves each unit's instance-named declarations and
         // renames its private statics/helpers. It consumes the source module.
         if (standalone) module = unit;
-        else if (LLVMLinkModules2(module, unit)) { error(out, "LLVM module composition failed"); goto done; }
+        else if (hirsel_llvm_compose(composer, unit)) { error(out, "LLVM module composition failed"); goto done; }
     }
+    hirsel_llvm_composer_free(composer);
+    composer = NULL;
     // IRLinker may discard an unreferenced available_externally definition
     // before a later unit supplies its callers. Keep definitions until every
     // unit is linked, then restore their non-emitting inline-import linkage.
@@ -473,6 +478,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
     else { copy(out, LLVMGetBufferStart(buffer), LLVMGetBufferSize(buffer), 0); LLVMDisposeMemoryBuffer(buffer); }
     if (message) LLVMDisposeMessage(message);
 done:
+    if (composer) hirsel_llvm_composer_free(composer);
     for (size_t i = 0; i < imports_len; ++i) free(imports[i]);
     free(imports);
     if (module) LLVMDisposeModule(module);

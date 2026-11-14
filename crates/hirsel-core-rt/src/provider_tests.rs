@@ -182,6 +182,33 @@ fn paths_cannot_escape_grants_and_tree_drop_never_follows_links() {
         IoError::OK
     );
 }
+
+#[test]
+fn rename_rejects_empty_and_nul_components_before_any_effect() {
+    crate::openat2_required::require();
+    let mut f = Fixture::new();
+    std::fs::write(f.root.join("source"), b"source").unwrap();
+    std::fs::write(f.root.join("victim"), b"victim").unwrap();
+    for (from, to) in [
+        (b"".as_slice(), b"dest".as_slice()),
+        (b"source".as_slice(), b"".as_slice()),
+        (b"bad\0name".as_slice(), b"dest".as_slice()),
+        (b"source".as_slice(), b"bad\0name".as_slice()),
+        // The suffix names an existing file, proving the first delimiter is
+        // not caller-shiftable into a valid second path.
+        (b"source".as_slice(), b"dest\0victim".as_slice()),
+    ] {
+        let mut joined = Vec::with_capacity(from.len() + to.len() + 1);
+        joined.extend_from_slice(from);
+        joined.push(0);
+        joined.extend_from_slice(to);
+        assert_eq!(f.simple(RENAME, f.dir, &joined, 0).error.tag, 2);
+        assert_eq!(std::fs::read(f.root.join("source")).unwrap(), b"source");
+        assert_eq!(std::fs::read(f.root.join("victim")).unwrap(), b"victim");
+        assert!(!f.root.join("dest").exists());
+        assert!(!f.root.join("bad").exists());
+    }
+}
 #[test]
 fn invalid_host_paths_are_denied_before_any_effect() {
     for operation in [OPEN, MKDIR, REMOVE, REMOVE_TREE] {

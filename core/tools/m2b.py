@@ -8,7 +8,8 @@ hirsel-core-contract-eval; a native engine builds the workload's `main` once and
 it with the case name, which prints the same value. A case may list engines under
 `red` with a cause: on those engines it must still disagree, so the row cannot outlive
 the gap it records. A red entry {"cause": ..., "gives": N} also names the value the gap
-produces, which the engine must return exactly.
+produces, which the engine must return exactly; it may add
+"used" when the gap keeps a different number of bytes admitted.
 
 A workload whose entry has `"dir": true` is built with `--dir` on one spool directory
 per engine, emptied before each case; `--host` runs exactly those workloads (they need
@@ -19,11 +20,19 @@ a server role and a client role as two processes on that spool directory (argume
 prints the case's value, the server its `server_value`. A manifest package may carry an
 `id`, and an entry may `use` it in place of the package of the same name.
 
+A native engine checks `used` too. The shipping runtime has no test hook that reads
+the root's admitted bytes, so the runner builds a probe entry instead (`probe_source`). It has
+the workload main's signature and calls `case_<name>` between two refused requests
+whose `Capacity.available` it prints; `used` is the difference. Any other argument
+goes to the workload's own `main`, so the probe also serves as a pair role. Pair
+cases have no case function and no `used`; they compare stdout only.
+
 Example: m2b.py --compiler hirsel-core --evaluator hirsel-core-contract-eval --runtime libhirsel_core_rt.a
 """
 import argparse
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 import subprocess
@@ -63,6 +72,38 @@ def inputs(root, manifest, workload):
     return entry, {'core': core, 'packages': packages}
 
 
+PROBE = 'm2bprobe'
+
+
+def probe_source(main_source, package, names):
+    """A main that runs each case_<name> between two reads of the root's available bytes."""
+    signature = re.search(r'pub fn main\(([^)]*)\)', main_source).group(1)
+    params = [tuple(x.strip() for x in p.split(':')) for p in signature.split(',')]
+    by_type = {t: n for n, t in params}
+    lines = ['fn available() -> u64 {',
+             '    let huge: u64 = 18446744073709551615',
+             '    let r: Result[Bytes, Capacity] = list.with_capacity(huge)',
+             '    match r {', '        Ok(_) => 0,', '        Error(c) => c.available,', '    }', '}', '',
+             'fn report(out: Stdout, v: u64, before: u64, after: u64) -> Result[(), Exit] waits {',
+             '    let mut s = string.new()']
+    for part, sep in (('v', ' '), ('before', ' '), ('after', '\\n')):
+        lines += [f'    if let Error(_) = string.push_u64(mut s, {part}) {{', '        return Error(Exit(status: 3))', '    }',
+                  f'    if let Error(_) = string.push(mut s, "{sep}") {{', '        return Error(Exit(status: 3))', '    }']
+    lines += ['    match stdout.write(out, s) {', '        Ok(()) => Ok(()),', '        Error(_) => Error(Exit(status: 2)),',
+              '    }', '}', '', f'pub fn main({signature}) -> Result[(), Exit] waits {{',
+              f'    let Some(name) = args.get({by_type["Args"]}, 0) else {{', '        return Error(Exit(status: 2))', '    }']
+    for name in names:
+        found = re.search(rf'pub fn case_{name}\(([^)]*)\)', main_source)
+        if not found:
+            continue
+        passed = ', '.join(by_type[p.split(':')[1].strip()] for p in found.group(1).split(',') if p.strip())
+        lines += [f'    if name == "{name}" {{', '        let before = available()',
+                  f'        let v = {package}.main.case_{name}({passed})', '        let after = available()',
+                  f'        return report({by_type["Stdout"]}, v, before, after)', '    }']
+    lines += [f'    {package}.main.main({", ".join(n for n, _ in params)})', '}', '']
+    return '\n'.join(lines)
+
+
 def evaluate(evaluator, manifest_file, entry, case):
     path = f"{entry['package']['name']}@{entry['package']['version']}/{entry['module']}/case_{case['name']}"
     run = subprocess.run([str(evaluator), str(manifest_file), path], capture_output=True)
@@ -84,7 +125,7 @@ def evaluate(evaluator, manifest_file, entry, case):
 
 def build(compiler, runtime, cc, manifest_file, entry, engine, scratch, spool=None):
     binary = scratch / f'program-{engine}'
-    path = f"{entry['package']['name']}@{entry['package']['version']}/{entry['module']}/main"
+    path = f"{PROBE}@1/main/main"
     command = [str(compiler), 'build', '--inputs', str(manifest_file), '--entry', path, '--backend', engine,
                '--runtime', str(runtime), '--grant', 'Stdout', '--store', str(scratch / f'store-{engine}'),
                '--json', '-o', str(binary)]
@@ -118,9 +159,14 @@ def empty(spool):
 def native(binary, case, spool=None):
     empty(spool)
     run = subprocess.run([str(binary), case['name']], capture_output=True)
-    want = f"{case['value']}\n".encode()
-    if run.returncode or run.stdout != want or run.stderr:
-        return f'exit {run.returncode}, stdout {run.stdout!r}, stderr {run.stderr[-300:]!r}; expected {want!r}'
+    words = run.stdout.decode(errors='replace').split()
+    if run.returncode or run.stderr or len(words) != 3 or not all(w.isdigit() for w in words):
+        return f"exit {run.returncode}, stdout {run.stdout!r}, stderr {run.stderr[-300:]!r}; expected {case['value']} and used"
+    value, used = int(words[0]), int(words[1]) - int(words[2])
+    if value != case['value']:
+        return f"returned {value}, expected {case['value']}"
+    if used != case['used']:
+        return f"used {used} bytes after return, expected {case['used']}"
     return None
 
 
@@ -173,6 +219,16 @@ def main():
                 scratch = Path(temp) / workload
                 scratch.mkdir()
                 entry, selected = inputs(args.root, manifest, workload)
+                main_file = next(Path(s['file']) for p in selected['packages']
+                                 if p['package'] == entry['package'] for s in p['sources']
+                                 if entry['module'] in s['modules'])
+                case_file = args.root / 'core/corpus/m2b' / workload / 'cases.json'
+                names = [c['name'] for c in json.loads(case_file.read_text())] if case_file.exists() else []
+                probe = scratch / 'probe.hirsel'
+                probe.write_text(probe_source(main_file.read_text(), entry['package']['name'], names))
+                deps = [{'name': 'core', 'version': '1'}, {'name': 'std', 'version': '1'}, entry['package']]
+                selected['packages'].append({'package': {'name': PROBE, 'version': '1'}, 'dependencies': deps,
+                                             'sources': [{'file': str(probe), 'modules': ['main'], 'signatures': False}]})
                 manifest_file = scratch / 'inputs.json'
                 manifest_file.write_text(json.dumps(selected))
                 prepared[workload] = scratch, entry, manifest_file

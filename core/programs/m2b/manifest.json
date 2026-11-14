@@ -5,7 +5,8 @@
       "dependencies": [{"name": "core", "version": "1"}, {"name": "std", "version": "1"}],
       "sources": [
         {"file": "core/programs/m2b/table/table.hirsel", "modules": ["table"], "signatures": false},
-        {"file": "core/programs/m2b/tx/tx.hirsel", "modules": ["tx"], "signatures": false}
+        {"file": "core/programs/m2b/tx/tx.hirsel", "modules": ["tx"], "signatures": false},
+        {"file": "core/programs/m2b/replay/journal.hirsel", "modules": ["journal"], "signatures": false}
       ]
     },
     {
@@ -21,10 +22,34 @@
       "sources": [
         {"file": "core/programs/m2b/tx/main.hirsel", "modules": ["main"], "signatures": false}
       ]
+    },
+    {
+      "package": {"name": "app", "version": "1"},
+      "dependencies": [{"name": "core", "version": "1"}, {"name": "std", "version": "1"}, {"name": "m2b", "version": "1"}],
+      "sources": [
+        {"file": "core/programs/m2b/replay/main.hirsel", "modules": ["main"], "signatures": false}
+      ]
+    },
+    {
+      "package": {"name": "failing", "version": "1"},
+      "dependencies": [{"name": "core", "version": "1"}, {"name": "std", "version": "1"}, {"name": "m2b", "version": "1"}],
+      "sources": [
+        {"file": "core/programs/m2b/replay/failing.hirsel", "modules": ["main"], "signatures": false}
+      ]
+    },
+    {
+      "package": {"name": "static", "version": "1"},
+      "dependencies": [{"name": "core", "version": "1"}, {"name": "std", "version": "1"}, {"name": "m2b", "version": "1"}],
+      "sources": [
+        {"file": "core/programs/m2b/replay/static.hirsel", "modules": ["main"], "signatures": false}
+      ]
     }
   ],
   "entries": [
     {"workload": "table", "package": {"name": "table", "version": "1"}, "module": "main"},
-    {"workload": "tx", "package": {"name": "tx", "version": "1"}, "module": "main"}
+    {"workload": "tx", "package": {"name": "tx", "version": "1"}, "module": "main"},
+    {"workload": "replay", "package": {"name": "app", "version": "1"}, "module": "main", "grants": ["Clock"]},
+    {"workload": "replay_fail", "package": {"name": "failing", "version": "1"}, "module": "main"},
+    {"workload": "replay_static", "package": {"name": "static", "version": "1"}, "module": "main"}
   ]
 }

@@ -7,7 +7,8 @@ admitted when it returns (`used`). The evaluator runs `case_<name>` directly thr
 hirsel-core-contract-eval; a native engine builds the workload's `main` once and runs
 it with the case name, which prints the same value. A case may list engines under
 `red` with a cause: on those engines it must still disagree, so the row cannot outlive
-the gap it records.
+the gap it records. A red entry {"cause": ..., "gives": N} also names the value the gap
+produces, which the engine must return exactly.
 
 Example: m2b.py --compiler hirsel-core --evaluator hirsel-core-contract-eval --runtime libhirsel_core_rt.a
 """
@@ -74,6 +75,8 @@ def build(compiler, runtime, cc, manifest_file, entry, engine, scratch):
     command = [str(compiler), 'build', '--inputs', str(manifest_file), '--entry', path, '--backend', engine,
                '--runtime', str(runtime), '--grant', 'Stdout', '--store', str(scratch / f'store-{engine}'),
                '--json', '-o', str(binary)]
+    for grant in entry.get('grants', []):
+        command.extend(['--grant', grant])
     if engine == 'llvm':
         command.append('--release')
     if cc:
@@ -138,6 +141,20 @@ def main():
                         failure = native(binary, case)
                     red = case.get('red', {}).get(engine)
                     label = f'{workload}/{case["name"]} {engine}'
+                    if isinstance(red, dict) and stop:
+                        unexpected.append(f"{label}: red row expects {red['gives']}: {stop}")
+                        continue
+                    if isinstance(red, dict):
+                        # The gap's own value: the engine must give exactly it, so the
+                        # row turns when the gap closes or when something else breaks.
+                        gives = dict(case, value=red['gives'], used=red.get('used', case['used']))
+                        wrong = (evaluate(args.evaluator, manifest_file, entry, gives) if engine == 'evaluator'
+                                 else native(binary, gives))
+                        failure = None if wrong else f"gives {red['gives']} as the gap says"
+                        if wrong:
+                            unexpected.append(f"{label}: red row expects {red['gives']}: {wrong}")
+                            continue
+                        red = red['cause']
                     if red and failure:
                         reds += 1
                         print(f'red (expected: {red}) {label}: {failure}')

@@ -1,0 +1,106 @@
+// M2b slice 3 cases for a recorded call that fails, run inside `isolate` (FAIL-16).
+// Each case returns a hand-derived u64 (core/corpus/m2b/replay_fail/SPEC.md).
+fn divide(b: Bytes) -> Result[Bytes, Capacity] {
+    let _ = 1 / list.len(b)
+    Ok(list.new())
+}
+
+fn overflow(b: Bytes) -> Result[Bytes, Capacity] {
+    let top: u64 = 18446744073709551615
+    let _ = top + 1 + list.len(b)
+    Ok(list.new())
+}
+
+fn code_of(take d: m2b.journal.Diverged) -> u64 {
+    match take d {
+        Missing(i) => 100 + i,
+        Code(i) => 200 + i,
+        Arg(i) => 300 + i,
+        Outcome(i) => 400 + i,
+        Extra(i) => 500 + i,
+        Full(_) => 999,
+    }
+}
+
+fn value(take r: Result[u64, m2b.journal.Diverged]) -> u64 {
+    match take r {
+        Ok(v) => v,
+        Error(take d) => code_of(take d),
+    }
+}
+
+fn failed(take r: Result[Result[Bytes, Capacity], Causes]) -> u64 {
+    match take r {
+        Error(_) => 1,
+        Ok(_) => 0,
+    }
+}
+
+// A call that fails with Division is recorded as a failure, and replay fails the same way.
+pub fn fails() -> Result[u64, m2b.journal.Diverged] {
+    let mut j = m2b.journal.recording(65536)
+    let empty: Bytes = list.new()
+    let a = failed(m2b.journal.call_isolated(mut j, code.identity(code.describe(divide)), divide, empty)?)
+    m2b.journal.rewind(mut j)
+    let b = failed(m2b.journal.call_isolated(mut j, code.identity(code.describe(divide)), divide, empty)?)
+    m2b.journal.finish(j)?
+    let tag: u64 = match list.get(j.entries, 0) {
+        Some(e) => if list.len(e.outcome) == 1 {
+            int.widen(e.outcome[0])
+        } else {
+            9
+        },
+        None => 9,
+    }
+    Ok(list.len(j.entries) * 1000 + a * 100 + b * 10 + tag)
+}
+
+// The same identity with a changed body (PROG-9: a body change keeps the identity),
+// which now fails with Overflow where Division was recorded. Replay should report
+// Outcome(0); the journal cannot see the cause, so it reports nothing.
+pub fn cause_changed() -> Result[u64, m2b.journal.Diverged] {
+    let mut j = m2b.journal.recording(65536)
+    let empty: Bytes = list.new()
+    let _ = m2b.journal.call_isolated(mut j, code.identity(code.describe(divide)), divide, empty)?
+    m2b.journal.rewind(mut j)
+    let _ = m2b.journal.call_isolated(mut j, code.identity(code.describe(divide)), overflow, empty)?
+    Ok(1)
+}
+
+pub fn case_fails() -> u64 {
+    value(fails())
+}
+
+pub fn case_cause_changed() -> u64 {
+    value(cause_changed())
+}
+
+fn select(name: String) -> Option[u64] {
+    if name == "fails" {
+        Some(case_fails())
+    } else if name == "cause_changed" {
+        Some(case_cause_changed())
+    } else {
+        None
+    }
+}
+
+pub fn main(out: Stdout, argv: Args) -> Result[(), Exit] waits {
+    let Some(name) = args.get(argv, 0) else {
+        return Error(Exit(status: 2))
+    }
+    let Some(v) = select(name) else {
+        return Error(Exit(status: 2))
+    }
+    let mut s = string.new()
+    if let Error(_) = string.push_u64(mut s, v) {
+        return Error(Exit(status: 3))
+    }
+    if let Error(_) = string.push(mut s, "\n") {
+        return Error(Exit(status: 3))
+    }
+    match stdout.write(out, s) {
+        Ok(()) => Ok(()),
+        Error(_) => Error(Exit(status: 2)),
+    }
+}

@@ -1,0 +1,239 @@
+// M2b slice 3: a journal of recorded calls, replayed by re-execution.
+// Record mode runs each call and appends an entry; replay mode runs it again and
+// compares it with the entry at the cursor (Temporal's replay check). A provider
+// read (the clock) is the exception: replay returns the recorded value and asks
+// the host nothing. An entry names its function by the identity bytes of a
+// `StaticFn` (PROG-9), never by a typed-in string. Library code, never std.
+pub type Entry {
+    code: Bytes,
+    arg: Bytes,
+    outcome: Bytes
+}
+
+pub type Journal {
+    entries: List[Entry],
+    replay: bool,
+    at: u64,
+    limit: u64
+}
+
+// Where replay left the record: the entry index, or the allocation that was refused.
+pub type Diverged = Missing(u64) | Code(u64) | Arg(u64) | Outcome(u64) | Extra(u64) | Full(Capacity)
+
+// The callable a journal records: plain, so it captures nothing, and without
+// capabilities its outcome depends only on its argument (CAP-6).
+pub type Recorded = fn(Bytes) -> Result[Bytes, Capacity]
+
+// A journal in record mode; each recorded call runs under `bound bytes limit`.
+pub fn recording(limit: u64) -> Journal {
+    Journal(entries: list.new(), replay: false, at: 0, limit: limit)
+}
+
+// Switches to replay from the first entry.
+pub fn rewind(mut j: Journal) {
+    j.replay = true
+    j.at = 0
+}
+
+// Replay must consume every entry: a shorter run is Extra at the first one left.
+pub fn finish(j: Journal) -> Result[(), Diverged] {
+    if j.replay && j.at < list.len(j.entries) {
+        return Error(Extra(j.at))
+    }
+    Ok(())
+}
+
+fn full[T](take r: Result[T, Capacity]) -> Result[T, Diverged] {
+    match take r {
+        Ok(take x) => Ok(take x),
+        Error(c) => Error(Full(c)),
+    }
+}
+
+fn owned(b: Bytes) -> Result[Bytes, Diverged] {
+    let mut out: Bytes = full(list.with_capacity(list.len(b)))?
+    full(list.append(mut out, b))?
+    Ok(out)
+}
+
+fn put_u8(mut out: Bytes, x: u8) -> Result[(), Diverged] {
+    match list.push(mut out, x) {
+        Ok(()) => Ok(()),
+        Error((c, _)) => Error(Full(c)),
+    }
+}
+
+fn put_u64(mut out: Bytes, x: u64) -> Result[(), Diverged] {
+    let mut i: u64 = 0
+    while i < 8 {
+        let byte: u8 = int.truncate(x >> (i * 8))
+        match list.push(mut out, byte) {
+            Ok(()) => {},
+            Error((c, _)) => return Error(Full(c)),
+        }
+        i += 1
+    }
+    Ok(())
+}
+
+fn get_u64(b: Bytes, at: u64) -> Option[u64] {
+    if at > list.len(b) || list.len(b) - at < 8 {
+        return None
+    }
+    let mut x: u64 = 0
+    let mut i: u64 = 0
+    while i < 8 {
+        let byte: u64 = int.widen(b[at + i])
+        x = x | (byte << (i * 8))
+        i += 1
+    }
+    Some(x)
+}
+
+fn u64_bytes(x: u64) -> Result[Bytes, Diverged] {
+    let mut b: Bytes = full(list.with_capacity(8))?
+    put_u64(mut b, x)?
+    Ok(b)
+}
+
+// Outcome bytes: tag 0 and the result's bytes, or tag 1 and the refused Capacity.
+fn outcome_bytes(r: Result[Bytes, Capacity]) -> Result[Bytes, Diverged] {
+    let mut b: Bytes = list.new()
+    match r {
+        Ok(o) => {
+            put_u8(mut b, 0)?
+            full(list.append(mut b, o))?
+        },
+        Error(c) => {
+            put_u8(mut b, 1)?
+            put_u64(mut b, c.requested)?
+            put_u64(mut b, c.available)?
+        },
+    }
+    Ok(b)
+}
+
+fn record(mut j: Journal, code: Bytes, arg: Bytes, take outcome: Bytes) -> Result[(), Diverged] {
+    let e = Entry(code: owned(code)?, arg: owned(arg)?, outcome: take outcome)
+    match list.push(mut j.entries, take e) {
+        Ok(()) => Ok(()),
+        Error((c, _)) => Error(Full(c)),
+    }
+}
+
+// The replay check common to every recorded operation: the entry at the cursor
+// must exist and name the same code and argument. Returns its index and advances.
+fn expect(mut j: Journal, code: Bytes, arg: Bytes) -> Result[u64, Diverged] {
+    let i = j.at
+    match list.get(j.entries, i) {
+        None => return Error(Missing(i)),
+        Some(e) => {
+            if e.code != code {
+                return Error(Code(i))
+            }
+            if e.arg != arg {
+                return Error(Arg(i))
+            }
+        },
+    }
+    j.at = i + 1
+    Ok(i)
+}
+
+// Runs the call under the journal's bound. A refused allocation is an outcome,
+// recorded and compared like a result; only a mismatch is Diverged.
+// WORKAROUND (HOOK-FINDINGS R5): the intended signature takes one `s: StaticFn[Recorded]`
+// and uses `code.identity(s)` and `code.callable(s)`; neither is built for a StaticFn
+// that is a parameter, so the caller passes `code.identity(code.describe(f))` and `f`,
+// and nothing checks that the two name the same function.
+pub fn call(mut j: Journal, id: Bytes, f: Recorded, arg: Bytes) -> Result[Result[Bytes, Capacity], Diverged] {
+    let r: Result[Bytes, Capacity] = match (bound bytes j.limit { f(arg) }) {
+        Ok(Ok(take o)) => Ok(take o),
+        Ok(Error(c)) => Error(c),
+        Error(c) => Error(c),
+    }
+    let out = outcome_bytes(r)?
+    if j.replay {
+        let i = expect(mut j, id, arg)?
+        match list.get(j.entries, i) {
+            Some(e) => if e.outcome != out {
+                return Error(Outcome(i))
+            },
+            None => return Error(Missing(i)),
+        }
+    } else {
+        record(mut j, id, arg, take out)?
+    }
+    Ok(r)
+}
+
+// A recorded clock read. Replay returns the recorded value and asks the host nothing.
+pub fn now(mut j: Journal, c: Clock) -> Result[u64, Diverged] {
+    let s = code.describe(host.wall_ms)
+    let empty: Bytes = list.new()
+    if j.replay {
+        let i = expect(mut j, code.identity(s), empty)?
+        let stored = match list.get(j.entries, i) {
+            Some(e) => get_u64(e.outcome, 0),
+            None => None,
+        }
+        return match stored {
+            Some(t) => Ok(t),
+            None => Error(Outcome(i)),
+        }
+    }
+    let t = host.wall_ms(c)
+    record(mut j, code.identity(s), empty, u64_bytes(t)?)?
+    Ok(t)
+}
+
+// A recorded relative sleep. Replay checks the duration and does not wait (CAP-8 at
+// library level: the completion is the record).
+pub fn sleep(mut j: Journal, c: Clock, ns: u64) -> Result[(), Diverged] waits {
+    let s = code.describe(std.clock.sleep_ns)
+    let arg = u64_bytes(ns)?
+    if j.replay {
+        let _ = expect(mut j, code.identity(s), arg)?
+        return Ok(())
+    }
+    std.clock.sleep_ns(c, ns)
+    record(mut j, code.identity(s), arg, list.new())
+}
+
+// `call` for a callee that may fail: the call runs inside `isolate` (FAIL-16), so a
+// failure is an outcome, recorded with tag 2 and compared like the others. `Causes`
+// has no reader, so the entry cannot say which failure it was (HOOK-FINDINGS R8): a
+// replay that fails differently is not detected. The caller gets the Causes.
+pub fn call_isolated(mut j: Journal, id: Bytes, f: Recorded, arg: Bytes) -> Result[Result[Result[Bytes, Capacity], Causes], Diverged] {
+    let limit = j.limit
+    let caught = match isolate(fn() -> Result[Result[Bytes, Capacity], Capacity] { bound bytes limit { f(arg) } }) {
+        Ok(take x) => x,
+        Error(c) => return Error(Full(c)),
+    }
+    let r: Result[Result[Bytes, Capacity], Causes] = match take caught {
+        Ok(Ok(Ok(take o))) => Ok(Ok(take o)),
+        Ok(Ok(Error(c))) => Ok(Error(c)),
+        Ok(Error(c)) => Ok(Error(c)),
+        Error(take causes) => Error(take causes),
+    }
+    let out = match r {
+        Ok(x) => outcome_bytes(x)?,
+        Error(_) => {
+            let mut b: Bytes = list.new()
+            put_u8(mut b, 2)?
+            b
+        },
+    }
+    if j.replay {
+        let i = expect(mut j, id, arg)?
+        match list.get(j.entries, i) {
+            Some(e) => if e.outcome != out {
+                return Error(Outcome(i))
+            },
+            None => return Error(Missing(i)),
+        }
+    } else {
+        record(mut j, id, arg, take out)?
+    }
+    Ok(take r)
+}

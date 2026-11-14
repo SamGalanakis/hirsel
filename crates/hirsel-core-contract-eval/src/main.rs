@@ -104,6 +104,15 @@ fn evaluate() -> Result<Value, String> {
     }
     let function = function.ok_or("entry body is unavailable")?;
     hirsel_core_ir::wf::module(&emitter.module).map_err(|e| format!("not well formed: {e}"))?;
+    // An entry's parameters are host capabilities (Dir, Clock, Stdout, ..): each gets
+    // handle 0 of the evaluator's model world, which starts empty with its clock at 0.
+    let handles = vec![
+        0;
+        emitter.module.signatures
+            [emitter.module.functions[function.index()].signature.index()]
+        .params
+        .len()
+    ];
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -111,7 +120,7 @@ fn evaluate() -> Result<Value, String> {
         eval::run_nans(
             &emitter.module,
             function,
-            &[],
+            &handles,
             u64::MAX,
             eval::Nans::Scrambled,
         )

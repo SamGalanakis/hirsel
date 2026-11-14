@@ -1,0 +1,87 @@
+// M2b slice 3, the intended journal API: one `StaticFn` names the function, and the
+// journal takes both its identity and its callable from it (PROG-9). Expected red until
+// a StaticFn parameter or field lowers (core-check-callables-913); then this becomes
+// `m2b.journal.call` and the workaround's separate identity argument goes.
+fn double(b: Bytes) -> Result[Bytes, Capacity] {
+    let mut out: Bytes = list.new()
+    list.append(mut out, b)?
+    list.append(mut out, b)?
+    Ok(out)
+}
+
+fn call(mut j: m2b.journal.Journal, s: StaticFn[m2b.journal.Recorded], arg: Bytes) -> Result[Result[Bytes, Capacity], m2b.journal.Diverged] {
+    m2b.journal.call(mut j, code.identity(s), code.callable(s), arg)
+}
+
+fn length(take r: Result[Result[Bytes, Capacity], m2b.journal.Diverged]) -> u64 {
+    match take r {
+        Ok(Ok(o)) => list.len(o),
+        _ => 0,
+    }
+}
+
+// Record and replay one call through the StaticFn: one entry, "abab".
+pub fn case_static_call() -> u64 {
+    let mut j = m2b.journal.recording(65536)
+    let mut arg: Bytes = list.new()
+    if let Error(_) = list.append(mut arg, string.as_bytes("ab")) {
+        return 999
+    }
+    let n0 = length(call(mut j, code.describe(double), arg))
+    m2b.journal.rewind(mut j)
+    let n1 = length(call(mut j, code.describe(double), arg))
+    if n0 != n1 {
+        return 1
+    }
+    match m2b.journal.finish(j) {
+        Ok(()) => list.len(j.entries) * 1000 + n1,
+        Error(_) => 2,
+    }
+}
+
+fn same(a: StaticFn[m2b.journal.Recorded], b: StaticFn[m2b.journal.Recorded]) -> u64 {
+    if a == b {
+        1
+    } else {
+        0
+    }
+}
+
+// StaticFn as a key (PROG-9: plain, key, equal exactly when the identity bytes are).
+pub fn case_static_key() -> u64 {
+    same(code.describe(double), code.describe(double)) * 10 + same(code.describe(double), code.describe(other))
+}
+
+fn other(b: Bytes) -> Result[Bytes, Capacity] {
+    Ok(list.new())
+}
+
+fn select(name: String) -> Option[u64] {
+    if name == "static_call" {
+        Some(case_static_call())
+    } else if name == "static_key" {
+        Some(case_static_key())
+    } else {
+        None
+    }
+}
+
+pub fn main(out: Stdout, argv: Args) -> Result[(), Exit] waits {
+    let Some(name) = args.get(argv, 0) else {
+        return Error(Exit(status: 2))
+    }
+    let Some(v) = select(name) else {
+        return Error(Exit(status: 2))
+    }
+    let mut s = string.new()
+    if let Error(_) = string.push_u64(mut s, v) {
+        return Error(Exit(status: 3))
+    }
+    if let Error(_) = string.push(mut s, "\n") {
+        return Error(Exit(status: 3))
+    }
+    match stdout.write(out, s) {
+        Ok(()) => Ok(()),
+        Error(_) => Error(Exit(status: 2)),
+    }
+}

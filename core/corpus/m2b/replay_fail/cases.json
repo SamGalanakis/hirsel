@@ -1,0 +1,4 @@
+[
+  {"name": "fails", "value": 1112, "used": 32, "red": {"cranelift": "isolate is not lowered on Cranelift: \"isolate's runtime rows (crate docs, \\\"Isolation\\\") are not lowered yet\" (core-cranelift-904)"}},
+  {"name": "cause_changed", "value": 400, "used": 32, "red": {"evaluator": {"cause": "Causes has no reader (FAIL-16 returns an opaque Causes), so a journal records a failure without its cause and cannot see a changed one", "gives": 1}, "cranelift": "isolate is not lowered on Cranelift: \"isolate's runtime rows (crate docs, \\\"Isolation\\\") are not lowered yet\" (core-cranelift-904)", "llvm": {"cause": "Causes has no reader (FAIL-16 returns an opaque Causes), so a journal records a failure without its cause and cannot see a changed one", "gives": 1}}}
+]

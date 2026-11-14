@@ -1,0 +1,363 @@
+// M2b slice 3 cases. Each case returns a hand-derived u64 (core/corpus/m2b/replay/SPEC.md);
+// main runs the case named by its first argument and prints the value.
+// A divergence is reported as kind * 100 + entry index: Missing 1, Code 2, Arg 3,
+// Outcome 4, Extra 5; Full (an unexpected Capacity) is 999.
+fn double(b: Bytes) -> Result[Bytes, Capacity] {
+    let mut out: Bytes = list.new()
+    list.append(mut out, b)?
+    list.append(mut out, b)?
+    Ok(out)
+}
+
+fn triple(b: Bytes) -> Result[Bytes, Capacity] {
+    let mut out = double(b)?
+    list.append(mut out, b)?
+    Ok(out)
+}
+
+// Asks for more than any journal bound in these cases admits.
+fn big(b: Bytes) -> Result[Bytes, Capacity] {
+    let mut out: Bytes = list.with_capacity(100000)?
+    list.append(mut out, b)?
+    Ok(out)
+}
+
+fn code_of(take d: m2b.journal.Diverged) -> u64 {
+    match take d {
+        Missing(i) => 100 + i,
+        Code(i) => 200 + i,
+        Arg(i) => 300 + i,
+        Outcome(i) => 400 + i,
+        Extra(i) => 500 + i,
+        Full(_) => 999,
+    }
+}
+
+fn value(take r: Result[u64, m2b.journal.Diverged]) -> u64 {
+    match take r {
+        Ok(v) => v,
+        Error(take d) => code_of(take d),
+    }
+}
+
+fn text(s: String) -> Result[Bytes, m2b.journal.Diverged] {
+    let mut b: Bytes = list.new()
+    match list.append(mut b, string.as_bytes(s)) {
+        Ok(()) => Ok(b),
+        Error(c) => Error(Full(c)),
+    }
+}
+
+fn ok(take r: Result[Bytes, Capacity]) -> Result[Bytes, m2b.journal.Diverged] {
+    match take r {
+        Ok(take b) => Ok(take b),
+        Error(c) => Error(Full(c)),
+    }
+}
+
+// Two recorded calls, a recorded clock read and a recorded sleep. Returns the
+// second call's length and the clock reading.
+fn session(mut j: m2b.journal.Journal, c: Clock, a: String, second_id: Bytes, second: m2b.journal.Recorded) -> Result[(u64, u64), m2b.journal.Diverged] waits {
+    let arg = text(a)?
+    let o1 = ok(m2b.journal.call(mut j, code.identity(code.describe(double)), double, arg)?)?
+    let o2 = ok(m2b.journal.call(mut j, second_id, second, o1)?)?
+    let t = m2b.journal.now(mut j, c)?
+    m2b.journal.sleep(mut j, c, 1000)?
+    Ok((list.len(o2), t))
+}
+
+fn recorded(c: Clock) -> Result[m2b.journal.Journal, m2b.journal.Diverged] waits {
+    let mut j = m2b.journal.recording(65536)
+    let _ = session(mut j, c, "ab", code.identity(code.describe(double)), double)?
+    m2b.journal.rewind(mut j)
+    Ok(j)
+}
+
+// Record, then replay the same session: same outcomes, same clock reading, all consumed.
+pub fn roundtrip(c: Clock) -> Result[u64, m2b.journal.Diverged] waits {
+    let mut j = m2b.journal.recording(65536)
+    let (n0, t0) = session(mut j, c, "ab", code.identity(code.describe(double)), double)?
+    m2b.journal.rewind(mut j)
+    let (n1, t1) = session(mut j, c, "ab", code.identity(code.describe(double)), double)?
+    m2b.journal.finish(j)?
+    if n0 != n1 || t0 != t1 {
+        return Ok(1)
+    }
+    Ok(list.len(j.entries) * 1000 + n1)
+}
+
+// Entry 1's outcome altered in the journal: replay re-runs double and disagrees.
+pub fn outcome(c: Clock) -> Result[u64, m2b.journal.Diverged] waits {
+    let mut j = recorded(c)?
+    let (code1, arg1) = match list.get(j.entries, 1) {
+        Some(e) => (copy_bytes(e.code)?, copy_bytes(e.arg)?),
+        None => return Ok(1),
+    }
+    let mut changed: Bytes = list.new()
+    match list.push(mut changed, 0u8) {
+        Ok(()) => {},
+        Error((cap, _)) => return Error(Full(cap)),
+    }
+    let _ = list.set(mut j.entries, 1, m2b.journal.Entry(code: take code1, arg: take arg1, outcome: take changed))
+    let _ = session(mut j, c, "ab", code.identity(code.describe(double)), double)?
+    Ok(0)
+}
+
+fn copy_bytes(b: Bytes) -> Result[Bytes, m2b.journal.Diverged] {
+    let mut out: Bytes = list.new()
+    match list.append(mut out, b) {
+        Ok(()) => Ok(out),
+        Error(c) => Error(Full(c)),
+    }
+}
+
+// Replay calls triple where double was recorded: a different identity at entry 1.
+pub fn changed_code(c: Clock) -> Result[u64, m2b.journal.Diverged] waits {
+    let mut j = recorded(c)?
+    let _ = session(mut j, c, "ab", code.identity(code.describe(triple)), triple)?
+    Ok(0)
+}
+
+// Replay with another argument for entry 0.
+pub fn changed_arg(c: Clock) -> Result[u64, m2b.journal.Diverged] waits {
+    let mut j = recorded(c)?
+    let _ = session(mut j, c, "xy", code.identity(code.describe(double)), double)?
+    Ok(0)
+}
+
+// Replay stops after one call: entry 1 is left over.
+pub fn extra(c: Clock) -> Result[u64, m2b.journal.Diverged] waits {
+    let mut j = recorded(c)?
+    let arg = text("ab")?
+    let _ = m2b.journal.call(mut j, code.identity(code.describe(double)), double, arg)?
+    m2b.journal.finish(j)?
+    Ok(0)
+}
+
+// Replay goes one call past the four recorded entries.
+pub fn missing(c: Clock) -> Result[u64, m2b.journal.Diverged] waits {
+    let mut j = recorded(c)?
+    let _ = session(mut j, c, "ab", code.identity(code.describe(double)), double)?
+    let arg = text("ab")?
+    let _ = m2b.journal.call(mut j, code.identity(code.describe(double)), double, arg)?
+    Ok(0)
+}
+
+// The recorded clock value is set to 7, which no host reading here gives: replay
+// returns 7, so it read the journal and not the host.
+pub fn clock(c: Clock) -> Result[u64, m2b.journal.Diverged] {
+    let mut j = m2b.journal.recording(65536)
+    let _ = m2b.journal.now(mut j, c)?
+    let code0 = match list.get(j.entries, 0) {
+        Some(e) => copy_bytes(e.code)?,
+        None => return Ok(1),
+    }
+    let mut seven: Bytes = list.new()
+    let mut i: u64 = 0
+    while i < 8 {
+        let byte: u8 = if i == 0 {
+            7
+        } else {
+            0
+        }
+        match list.push(mut seven, byte) {
+            Ok(()) => {},
+            Error((cap, _)) => return Error(Full(cap)),
+        }
+        i += 1
+    }
+    let _ = list.set(mut j.entries, 0, m2b.journal.Entry(code: take code0, arg: list.new(), outcome: take seven))
+    m2b.journal.rewind(mut j)
+    let t = m2b.journal.now(mut j, c)?
+    m2b.journal.finish(j)?
+    Ok(t)
+}
+
+// A 200 ms sleep is waited when recorded and not when replayed.
+pub fn sleep(c: Clock) -> Result[u64, m2b.journal.Diverged] waits {
+    let wait: u64 = 200000000
+    let mut j = m2b.journal.recording(65536)
+    let a = host.mono_ns(c)
+    m2b.journal.sleep(mut j, c, wait)?
+    let b = host.mono_ns(c)
+    m2b.journal.rewind(mut j)
+    m2b.journal.sleep(mut j, c, wait)?
+    let d = host.mono_ns(c)
+    m2b.journal.finish(j)?
+    let waited: u64 = if b - a >= wait {
+        10
+    } else {
+        0
+    }
+    let skipped: u64 = if d - b < wait {
+        1
+    } else {
+        0
+    }
+    Ok(waited + skipped)
+}
+
+// A call refused by the journal's bound is recorded as that Capacity, and replay
+// meets the same refusal.
+pub fn refused() -> Result[u64, m2b.journal.Diverged] {
+    let mut j = m2b.journal.recording(65536)
+    let arg = text("ab")?
+    let first = m2b.journal.call(mut j, code.identity(code.describe(big)), big, arg)?
+    m2b.journal.rewind(mut j)
+    let again = m2b.journal.call(mut j, code.identity(code.describe(big)), big, arg)?
+    m2b.journal.finish(j)?
+    match (first, again) {
+        (Error(x), Error(y)) => if x.requested == y.requested && x.available == y.available {
+            Ok(x.requested * 100000 + x.available)
+        } else {
+            Ok(2)
+        },
+        _ => Ok(1),
+    }
+}
+
+// PROG-9's own example bytes for double, compared through code.identity.
+pub fn identity() -> Result[u64, m2b.journal.Diverged] {
+    let mut want: Bytes = list.new()
+    match list.push(mut want, 1u8) {
+        Ok(()) => {},
+        Error((cap, _)) => return Error(Full(cap)),
+    }
+    match list.append(mut want, string.as_bytes("app@1/main/double(core@1/core/List[u8])->core@1/core/Result[core@1/core/List[u8],core@1/core/Capacity]")) {
+        Ok(()) => {},
+        Error(c) => return Error(Full(c)),
+    }
+    let s: StaticFn[m2b.journal.Recorded] = code.describe(double)
+    if code.identity(s) == want {
+        Ok(1)
+    } else {
+        Ok(0)
+    }
+}
+
+fn le(x: u64) -> Result[Bytes, m2b.journal.Diverged] {
+    let mut b: Bytes = list.new()
+    let mut i: u64 = 0
+    while i < 8 {
+        let byte: u8 = int.truncate(x >> (i * 8))
+        match list.push(mut b, byte) {
+            Ok(()) => {},
+            Error((cap, _)) => return Error(Full(cap)),
+        }
+        i += 1
+    }
+    Ok(b)
+}
+
+// The measured workload: n calls of double on k's 8 little-endian bytes recorded,
+// then all replayed. Returns the entry count plus the first outcome byte of each
+// replayed call (k mod 256).
+pub fn bench(n: u64) -> Result[u64, m2b.journal.Diverged] {
+    let id = code.identity(code.describe(double))
+    let mut j = m2b.journal.recording(65536)
+    let mut k: u64 = 0
+    while k < n {
+        let arg = le(k)?
+        let _ = m2b.journal.call(mut j, id, double, arg)?
+        k += 1
+    }
+    m2b.journal.rewind(mut j)
+    let mut sum: u64 = list.len(j.entries)
+    k = 0
+    while k < n {
+        let arg = le(k)?
+        let o = ok(m2b.journal.call(mut j, id, double, arg)?)?
+        sum += int.widen(o[0])
+        k += 1
+    }
+    m2b.journal.finish(j)?
+    Ok(sum)
+}
+
+pub fn case_roundtrip(c: Clock) -> u64 waits {
+    value(roundtrip(c))
+}
+
+pub fn case_outcome(c: Clock) -> u64 waits {
+    value(outcome(c))
+}
+
+pub fn case_changed_code(c: Clock) -> u64 waits {
+    value(changed_code(c))
+}
+
+pub fn case_changed_arg(c: Clock) -> u64 waits {
+    value(changed_arg(c))
+}
+
+pub fn case_extra(c: Clock) -> u64 waits {
+    value(extra(c))
+}
+
+pub fn case_missing(c: Clock) -> u64 waits {
+    value(missing(c))
+}
+
+pub fn case_clock(c: Clock) -> u64 {
+    value(clock(c))
+}
+
+pub fn case_sleep(c: Clock) -> u64 waits {
+    value(sleep(c))
+}
+
+pub fn case_refused() -> u64 {
+    value(refused())
+}
+
+pub fn case_identity() -> u64 {
+    value(identity())
+}
+
+fn select(name: String, c: Clock) -> Option[u64] waits {
+    if name == "roundtrip" {
+        Some(case_roundtrip(c))
+    } else if name == "outcome" {
+        Some(case_outcome(c))
+    } else if name == "changed_code" {
+        Some(case_changed_code(c))
+    } else if name == "changed_arg" {
+        Some(case_changed_arg(c))
+    } else if name == "extra" {
+        Some(case_extra(c))
+    } else if name == "missing" {
+        Some(case_missing(c))
+    } else if name == "clock" {
+        Some(case_clock(c))
+    } else if name == "sleep" {
+        Some(case_sleep(c))
+    } else if name == "refused" {
+        Some(case_refused())
+    } else if name == "identity" {
+        Some(case_identity())
+    } else if name == "bench" {
+        Some(value(bench(100000)))
+    } else {
+        None
+    }
+}
+
+pub fn main(out: Stdout, c: Clock, argv: Args) -> Result[(), Exit] waits {
+    let Some(name) = args.get(argv, 0) else {
+        return Error(Exit(status: 2))
+    }
+    let Some(v) = select(name, c) else {
+        return Error(Exit(status: 2))
+    }
+    let mut s = string.new()
+    if let Error(_) = string.push_u64(mut s, v) {
+        return Error(Exit(status: 3))
+    }
+    if let Error(_) = string.push(mut s, "\n") {
+        return Error(Exit(status: 3))
+    }
+    match stdout.write(out, s) {
+        Ok(()) => Ok(()),
+        Error(_) => Error(Exit(status: 2)),
+    }
+}

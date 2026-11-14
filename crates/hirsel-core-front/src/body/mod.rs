@@ -1399,6 +1399,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         self.b.values.push(t);
         ValueId(self.b.values.len() as u32 - 1)
     }
+    #[inline(always)]
     fn inst(&mut self, i: Inst, n: NodeId) {
         crate::cost_scope!("phase", "CoreIR emission");
         if self.live() {
@@ -1705,7 +1706,8 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     fn end(&mut self, term: Terminator, n: Option<NodeId>) {
         crate::cost_scope!("phase", "CoreIR emission");
         let Some(c) = self.cur.take() else { return };
-        let insts = PoolRange::push(&mut self.b.insts, self.open.drain(..));
+        let insts = PoolRange::new(self.b.insts.len() as u32, self.open.len() as u32);
+        self.b.insts.append(&mut self.open);
         self.b.inst_anchors.append(&mut self.open_anchors);
         let anchor = n.map(|n| self.anchor(n));
         let blk = &mut self.b.blocks[c.index()];

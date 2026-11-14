@@ -78,10 +78,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(ref error) = profile.counter_refusal {
         return Err(error.clone().into());
     }
+    let definitions_by_path: std::collections::BTreeMap<_, _> = product
+        .index
+        .definitions()
+        .map(|(id, definition)| (product.index.definition_path(id), definition))
+        .collect();
     let definitions: Vec<_> = product.definitions.values().map(|d| {
-        let index = &product.index;
-        let module = index.module(&hirsel_core_resolve::ModulePath { package: d.definition.0.package.clone(), modules: d.definition.0.modules.clone() }).unwrap();
-        let definition = index.get(index.definition(module, index.symbols.find(&d.definition.0.name).unwrap()).unwrap());
+        let definition = definitions_by_path[&d.definition];
         let file = product.files.iter().find(|f| f.module == definition.site.module).unwrap();
         let item = file.syntax.item(definition.site.item as usize);
         let mut instance_refs = Vec::new();
@@ -108,6 +111,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "types": d.check.counts.types,
             "ir_bytes": d.check.counts.bytes,
             "publication_payload_bytes": bincode::serialized_size(&(&d.ir, &d.check.template)).unwrap(),
+            "publication_payload_hash": format!("{:?}", hirsel_core_ids::ContentHash::of_bytes(&bincode::serialize(&(&d.ir, &d.check.template)).unwrap())),
             "template": d.check.template.is_some(),
             "key": {
                 "body":d.key.body, "lookups":d.key.lookups,

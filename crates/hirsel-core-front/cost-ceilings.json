@@ -3,16 +3,16 @@
   "basis": "Qualified frozen/source-growth audit43d46518..4fcdeb12. Fixed-manifest population7082/3691->7263/3872lines,351/173->365/187complete bodies. Deque9+1, split cursors2, Mapclone2 new bodies each corpus; changed JSON source adds20lines. All named body-free increments are excluded from growth. Retain all concurrent growth/census histories. Fixed named anchor residual reduced for542fd0f2; raw60000andproduct rules unchanged.",
   "corpora": {
     "m1": {
-      "code_lines": 7459,
-      "check_lower_per_line": 18000,
-      "whole_request_per_line": 34500,
-      "whole_process_per_line": 34600
+      "code_lines": 7745,
+      "check_lower_per_line": 17200,
+      "whole_request_per_line": 33300,
+      "whole_process_per_line": 33400
     },
     "std": {
-      "code_lines": 4071,
-      "check_lower_per_line": 12200,
-      "whole_request_per_line": 27300,
-      "whole_process_per_line": 27500
+      "code_lines": 4357,
+      "check_lower_per_line": 11500,
+      "whole_request_per_line": 25900,
+      "whole_process_per_line": 26100
     },
     "product": {
       "measurement": "One ordinary release check/lower request per M1 entry, core and exact supplied std subset preproduced; fresh private request stores; perf instructions:u including GNU time and process exit. Fixed is empty main with std or core only. Marginal is (process-fixed std)/own checked source lines, excluding prechecked library source lines. Instances are collected after this boundary and reported separately.",
@@ -53,19 +53,19 @@
         },
         "json-idiomatic": {
           "own_lines": 740,
-          "marginal_per_line": 49700
+          "marginal_per_line": 49600
         },
         "json-matched": {
           "own_lines": 740,
-          "marginal_per_line": 49700
+          "marginal_per_line": 49600
         },
         "pipeline-idiomatic": {
           "own_lines": 845,
-          "marginal_per_line": 58600
+          "marginal_per_line": 58300
         },
         "pipeline-matched": {
           "own_lines": 845,
-          "marginal_per_line": 58600
+          "marginal_per_line": 58300
         },
         "request-scratch-idiomatic": {
           "own_lines": 404,
@@ -96,23 +96,23 @@
   },
   "margin": "M1 growth observation+2%, std+5%, rounded up to100. Growth baseline is pre-anchor frozen work plus current compiler own-source minus frozen-source work. Named anchor residual is a fixed absolute instruction count, never part of the60000budget. Other body-free regressions remain red.",
   "finished_budget_per_line": 60000,
-  "forecast_revision": "915 slice42 9f727f6bbase;375/197complete7459/4071lines",
+  "forecast_revision": "b51a3ea6 + owning transfer;377/199 complete,7745/4357code lines",
   "completion_forecast": {
     "m1": {
-      "complete_bodies": 375,
-      "bodies": 375,
+      "complete_bodies": 377,
+      "bodies": 377,
       "missing_check_lower_per_line": 0,
       "additional_publication_per_line": 0,
-      "measured_process_per_line": 34472.201501541764,
-      "finished_process_per_line": 34472.201501541764
+      "measured_process_per_line": 33130.13298902518,
+      "finished_process_per_line": 33130.13298902518
     },
     "std": {
-      "complete_bodies": 197,
-      "bodies": 197,
+      "complete_bodies": 199,
+      "bodies": 199,
       "missing_check_lower_per_line": 0,
       "additional_publication_per_line": 0,
-      "measured_process_per_line": 27336.69245885532,
-      "finished_process_per_line": 27336.69245885532
+      "measured_process_per_line": 25794.447326141842,
+      "finished_process_per_line": 25794.447326141842
     }
   },
   "forecast_method": "Current process instructions plus recorded missing checker/emission and publication per line. Live construct self costs project the written population and calibrate to native check/lower less driver keys. Completed IR/template bytes per completed definition line are charged for every unfinished line, retaining partial IR, at measured definition-encoding and archive write/hash rates. Refresh projection/counts when support changes.",
@@ -5551,6 +5551,186 @@
         }
       },
       "canonical_fixed_reference": "lands40/41EXIT0 5685ad733dc7;std2590475/core2336959,shorterlandpath"
+    },
+    {
+      "from_revision": "9e428e86",
+      "to_revision": "85735ef3",
+      "reason": "Authorized canonical-format denominator-only rebase. Existing ceilings scaled once by old_lines/new_lines, rounded upward to100 with no added margin; no product ceiling or instruction-cost waiver. Later8 library code lines at M2 remain ordinary source growth; not part of this ratio.",
+      "old_code_lines": {
+        "m1": 7502,
+        "std": 4114
+      },
+      "new_code_lines": {
+        "m1": 7737,
+        "std": 4349
+      },
+      "previous_ceilings": {
+        "m1": {
+          "code_lines": 7459,
+          "check_lower_per_line": 18000,
+          "whole_request_per_line": 34500,
+          "whole_process_per_line": 34600
+        },
+        "std": {
+          "code_lines": 4071,
+          "check_lower_per_line": 12200,
+          "whole_request_per_line": 27300,
+          "whole_process_per_line": 27500
+        }
+      },
+      "rebased_ceilings": {
+        "m1": {
+          "code_lines": 7737,
+          "check_lower_per_line": 17500,
+          "whole_request_per_line": 33500,
+          "whole_process_per_line": 33600
+        },
+        "std": {
+          "code_lines": 4349,
+          "check_lower_per_line": 11600,
+          "whole_request_per_line": 25900,
+          "whole_process_per_line": 26100
+        }
+      }
+    },
+    {
+      "from_revision": "e96338cf41d71efd2076a9902068048a37b742c8",
+      "to_revision": "b51a3ea6 + owning-transfer.patch",
+      "reason": "Lower ceilings after recovering owning-edge transfer overhead: Cx::inst inline and Cx::end bulk append. Observation plus2% rounded upward100, keep existing stricter cells. Exact same7745/4357lines,377/199complete bodies. Fixed std+526/core+877 stay RED against existing stricter ceilings; not waived. Raw60K unchanged.",
+      "previous_ceilings": {
+        "m1": {
+          "code_lines": 7737,
+          "check_lower_per_line": 17500,
+          "whole_request_per_line": 33500,
+          "whole_process_per_line": 33600
+        },
+        "std": {
+          "code_lines": 4349,
+          "check_lower_per_line": 11600,
+          "whole_request_per_line": 25900,
+          "whole_process_per_line": 26100
+        },
+        "product": {
+          "measurement": "One ordinary release check/lower request per M1 entry, core and exact supplied std subset preproduced; fresh private request stores; perf instructions:u including GNU time and process exit. Fixed is empty main with std or core only. Marginal is (process-fixed std)/own checked source lines, excluding prechecked library source lines. Instances are collected after this boundary and reported separately.",
+          "fixed_std_instructions": 2642000,
+          "fixed_core_instructions": 2383700,
+          "entries": {
+            "bfs-idiomatic": {
+              "own_lines": 370,
+              "marginal_per_line": 59300
+            },
+            "bfs-matched": {
+              "own_lines": 370,
+              "marginal_per_line": 59300
+            },
+            "generics-idiomatic": {
+              "own_lines": 343,
+              "marginal_per_line": 65200
+            },
+            "generics-matched": {
+              "own_lines": 343,
+              "marginal_per_line": 65200
+            },
+            "lru-idiomatic": {
+              "own_lines": 493,
+              "marginal_per_line": 56700
+            },
+            "lru-matched": {
+              "own_lines": 493,
+              "marginal_per_line": 56700
+            },
+            "files-idiomatic": {
+              "own_lines": 348,
+              "marginal_per_line": 71200
+            },
+            "files-matched": {
+              "own_lines": 348,
+              "marginal_per_line": 71100
+            },
+            "json-idiomatic": {
+              "own_lines": 740,
+              "marginal_per_line": 49700
+            },
+            "json-matched": {
+              "own_lines": 740,
+              "marginal_per_line": 49700
+            },
+            "pipeline-idiomatic": {
+              "own_lines": 845,
+              "marginal_per_line": 58600
+            },
+            "pipeline-matched": {
+              "own_lines": 845,
+              "marginal_per_line": 58600
+            },
+            "request-scratch-idiomatic": {
+              "own_lines": 404,
+              "marginal_per_line": 62500
+            },
+            "request-scratch-matched": {
+              "own_lines": 404,
+              "marginal_per_line": 62500
+            },
+            "rope-idiomatic": {
+              "own_lines": 487,
+              "marginal_per_line": 59200
+            },
+            "rope-matched": {
+              "own_lines": 487,
+              "marginal_per_line": 59200
+            },
+            "versions-idiomatic": {
+              "own_lines": 446,
+              "marginal_per_line": 58100
+            },
+            "versions-matched": {
+              "own_lines": 446,
+              "marginal_per_line": 58100
+            }
+          }
+        }
+      },
+      "measured_all_source_minus_named_anchor": {
+        "m1": {
+          "check_lower_per_line": 16856.419109102648,
+          "whole_request_per_line": 32583.746804389928,
+          "whole_process_per_line": 32694.86417043254
+        },
+        "std": {
+          "check_lower_per_line": 11256.706678907505,
+          "whole_request_per_line": 25391.670185907733,
+          "whole_process_per_line": 25571.00963966032
+        }
+      },
+      "measured_product_marginal": {
+        "bfs-idiomatic": 58172.66216216216,
+        "bfs-matched": 58180.281081081084,
+        "generics-idiomatic": 63879.45481049563,
+        "generics-matched": 63879.96501457726,
+        "lru-idiomatic": 55504.46247464503,
+        "lru-matched": 55510.052738336715,
+        "files-idiomatic": 69809.37068965517,
+        "files-matched": 69772.16379310345,
+        "json-idiomatic": 48548.84189189189,
+        "json-matched": 48555.24054054054,
+        "pipeline-idiomatic": 57127.49940828402,
+        "pipeline-matched": 57131.62721893491,
+        "request-scratch-idiomatic": 61190.482673267325,
+        "request-scratch-matched": 61190.89356435643,
+        "rope-idiomatic": 58012.926078028744,
+        "rope-matched": 58024.829568788504,
+        "versions-idiomatic": 56875.107623318385,
+        "versions-matched": 56877.68609865471
+      },
+      "completed_bodies_before": {
+        "m1": 377,
+        "std": 199
+      },
+      "completed_bodies_after": {
+        "m1": 377,
+        "std": 199
+      },
+      "margin": "2%; ceiling=min(existing, ceil(observation*1.02/100)*100)"
     }
   ],
   "denominator_policy": "Fixed M1/core-std manifest closure, deterministic actual code lines. Print baseline and current counts when different. Source-line movement alone is expected source development, not a regression; empty corpus, missing counters, every numeric ceiling and the fixed finished-process budget still fail. Refresh recorded reference and forecast when supported work changes.",

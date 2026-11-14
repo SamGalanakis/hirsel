@@ -652,12 +652,18 @@ impl FunctionEmitter<'_> {
     fn branch_failure(&mut self, flag: &str, fail: Option<BlockId>, cause: Option<u8>) {
         let n = self.next;
         self.next += 1;
-        self.line(format!("br i1 {flag}, label %bad{n}, label %ok{n}"));
-        writeln!(self.code, "bad{n}:").unwrap();
-        if let Some(cause) = cause {
-            self.raise(cause);
+        if let (None, Some(fail)) = (cause, fail) {
+            // The callee has already recorded its cause. This edge has no
+            // arguments or cleanup to perform before the existing successor.
+            self.line(format!("br i1 {flag}, label %b{}, label %ok{n}", fail.0));
+        } else {
+            self.line(format!("br i1 {flag}, label %bad{n}, label %ok{n}"));
+            writeln!(self.code, "bad{n}:").unwrap();
+            if let Some(cause) = cause {
+                self.raise(cause);
+            }
+            self.propagate_to(fail);
         }
-        self.propagate_to(fail);
         writeln!(self.code, "ok{n}:").unwrap();
     }
     fn propagate_to(&mut self, fail: Option<BlockId>) {

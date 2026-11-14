@@ -254,9 +254,51 @@ impl FunctionEmitter<'_> {
         self.return_abi_values(&returned);
     }
     pub(super) fn return_failure(&mut self) {
-        let mut values = vec!["zeroinitializer".into(); self.abi.fields.len()];
-        *values.last_mut().unwrap() = "1".into();
-        self.return_abi_values(&values);
+        if self.abi.fields.len() == 1 {
+            self.line(format!("ret {} 1", self.abi.ty));
+        } else if self.abi.indirect {
+            self.line(format!(
+                "store {} zeroinitializer, ptr %sret, align 8",
+                self.abi.storage
+            ));
+            let at = self.offset("%sret", *self.abi.offsets.last().unwrap());
+            self.line(format!("store i8 1, ptr {at}, align 1"));
+            self.line("ret void");
+        } else {
+            // The same little-endian ABI coercion as return_abi_values: every
+            // result and padding byte is zero, except the final status byte.
+            // Its integer class determines the register containing the one.
+            let status = *self.abi.offsets.last().unwrap();
+            let values: Vec<_> = self
+                .abi
+                .regs
+                .iter()
+                .enumerate()
+                .map(|(i, _)| {
+                    let start = i as u64 * self.abi.reg_stride;
+                    if status >= start && status < start + self.abi.reg_stride {
+                        (1u64 << ((status - start) * 8)).to_string()
+                    } else {
+                        "zeroinitializer".into()
+                    }
+                })
+                .collect();
+            let value = if values.len() == 1 {
+                values[0].clone()
+            } else {
+                format!(
+                    "{{ {} }}",
+                    self.abi
+                        .regs
+                        .iter()
+                        .zip(values)
+                        .map(|(t, v)| format!("{t} {v}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            self.line(format!("ret {} {value}", self.abi.ty));
+        }
     }
     fn return_abi_values(&mut self, values: &[String]) {
         if self.abi.fields.len() <= 1 {

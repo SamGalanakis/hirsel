@@ -1,0 +1,15 @@
+// Module `clock`: waiting on a Clock's monotonic time (core.md, "Host"). Clock is a core
+// capability type; a run's Clock comes from `main`'s granted parameters (CAP-4). Core has
+// one waiting clock operation, `host.sleep_until`, on an absolute deadline in
+// `host.mono_ns` nanoseconds; a relative wait is library code over it, here. Field
+// legend: API.md. Nothing here admits anything (core.md, "Host").
+/// Waits until `host.mono_ns(c)` has advanced by at least ns from its reading at entry:
+/// one `host.mono_ns` reading plus ns is the deadline given to `host.sleep_until`, so it
+/// returns at once when ns is 0 (WASI monotonic-clock subscribe-duration, Go time.Sleep).
+/// A cancellation point at entry and while it waits (CONC-7); replay delivers the reading
+/// and the completion without waiting (CAP-8).
+/// Fails: Overflow (failure), before waiting, when the reading plus ns exceeds 2^64 - 1.
+/// Ex: `std.clock.sleep_ns(c, 5_000_000)`
+pub fn sleep_ns(c: Clock, ns: u64) waits {
+    host.sleep_until(c, host.mono_ns(c) + ns)
+}

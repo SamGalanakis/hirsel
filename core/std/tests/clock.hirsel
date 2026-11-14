@@ -1,0 +1,19 @@
+// Contract tests for `clock` (core/std/clock.hirsel), written to run once an engine runs
+// `host.sleep_until`. Each test takes `clock`, the run's granted Clock, and returns a
+// scalar; the line `// expect: run f(clock) = R` above it gives the result derived by hand
+// from the contract, or `fail Cause` for the failure the contract names.
+// The deadline is the entry reading plus ns: the clock has moved by at least ns when it
+// returns.
+// expect: run waits_the_duration(clock) = true
+fn waits_the_duration(c: Clock) -> bool waits {
+    let before = host.mono_ns(c)
+    clock.sleep_ns(c, 2_000_000)
+    host.mono_ns(c) - before >= 2_000_000
+}
+
+// A deadline past 2^64 - 1 is refused before waiting, never wrapped into the past.
+// expect: run overflowing_deadline(clock) = fail Overflow
+fn overflowing_deadline(c: Clock) -> bool waits {
+    clock.sleep_ns(c, int.wrapping_sub(0u64, 1))
+    true
+}

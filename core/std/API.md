@@ -56,6 +56,7 @@ the seed's, read through one name. No extension declares a core member's name.
 |---|---|---|---|
 | arena |  | 3 | batch, copy_span, collect_span |
 | char | yes | 7 | utf8_len, to_ascii_upper, to_ascii_lower, is_ascii_digit, is_ascii_alpha, is_ascii_whitespace, digit |
+| clock |  | 1 | sleep_ns |
 | dir |  | 3 | create_dir, remove_all, create_temp |
 | file |  | 10 | open, read_into, write_all, close, read, read_string, write, remove, try_lock, unlock |
 | float | yes | 7 | parse64, parse32, is_finite, push_f64, push_fixed64, shortest64, exp |
@@ -69,7 +70,7 @@ the seed's, read through one name. No extension declares a core member's name.
 | result | yes | 2 | map_err, capacity_only |
 | set |  | 6 | new, len, contains, insert, remove, entries |
 | string | yes | 15 | with_capacity, is_boundary, push_i64, push_uint, repeat, clear, find, starts_with, ends_with, split_once, next_split, next_line, strip_prefix, strip_suffix, trim_ascii |
-| **total** | **7 of 15** | **105** | |
+| **total** | **7 of 16** | **106** | |
 
 **Known cost.** float's push_fixed64 and its push_ascii helper build their digits as Bytes
 and pass them through `string.from_utf8`, revalidating about 20 ASCII bytes per number that

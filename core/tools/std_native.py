@@ -152,7 +152,7 @@ def discover(root, filters):
 
 
 def host_parameter(case):
-    for argument, kind in [('dir', 'Dir'), ('out', 'Stdout'), ('err', 'Stderr')]:
+    for argument, kind in [('dir', 'Dir'), ('out', 'Stdout'), ('err', 'Stderr'), ('clock', 'Clock')]:
         if '(' + argument + ')' in case.call:
             name = 'native_' + argument
             return name + ':' + kind, name
@@ -161,7 +161,7 @@ def host_parameter(case):
 
 def wrapper(case, evaluator=False):
     # The adapter lives in the original module, so private helpers remain private.
-    call = case.call.replace('(dir)', '(native_dir)').replace('(out)', '(native_out)').replace('(err)', '(native_err)')
+    call = case.call.replace('(dir)', '(native_dir)').replace('(out)', '(native_out)').replace('(err)', '(native_err)').replace('(clock)', '(native_clock)')
     parameters, _ = host_parameter(case)
     effect = ' waits' if case.waits else ''
     success = '1u64' if evaluator else 'Ok(())'
@@ -373,6 +373,8 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     command.extend(['--grant', 'Stdout'])
                 if '(err)' in case.call:
                     command.extend(['--grant', 'Stderr'])
+                if '(clock)' in case.call:
+                    command.extend(['--grant', 'Clock'])
                 linker = cc
                 if case.first_write is not None:
                     linker = scratch / 'scripted-cc'

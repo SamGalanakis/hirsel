@@ -118,13 +118,13 @@ pub fn sort_stable[T](mut xs: List[T], before: scoped fn(T, T) -> Order) -> Resu
                         g.state.a = int.wrapping_add(g.state.a, 1)
                     }
                 }
-                while g.state.a < g.state.mid {
-                    slots_from_list(g.xs, g.state.a, mut g.scratch, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)), 1)
-                    g.state.a = int.wrapping_add(g.state.a, 1)
+                if g.state.a < g.state.mid {
+                    slots_from_list(g.xs, g.state.a, mut g.scratch, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)), int.wrapping_sub(g.state.mid, g.state.a))
+                    g.state.a = g.state.mid
                 }
-                while g.state.b < g.state.end {
-                    slots_from_list(g.xs, g.state.b, mut g.scratch, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)), 1)
-                    g.state.b = int.wrapping_add(g.state.b, 1)
+                if g.state.b < g.state.end {
+                    slots_from_list(g.xs, g.state.b, mut g.scratch, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)), int.wrapping_sub(g.state.end, g.state.b))
+                    g.state.b = g.state.end
                 }
             } else {
                 while g.state.a < g.state.mid && g.state.b < g.state.end {
@@ -140,13 +140,13 @@ pub fn sort_stable[T](mut xs: List[T], before: scoped fn(T, T) -> Order) -> Resu
                         g.state.a = int.wrapping_add(g.state.a, 1)
                     }
                 }
-                while g.state.a < g.state.mid {
-                    slots_to_list(mut g.scratch, g.state.a, g.xs, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)), 1)
-                    g.state.a = int.wrapping_add(g.state.a, 1)
+                if g.state.a < g.state.mid {
+                    slots_to_list(mut g.scratch, g.state.a, g.xs, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)), int.wrapping_sub(g.state.mid, g.state.a))
+                    g.state.a = g.state.mid
                 }
-                while g.state.b < g.state.end {
-                    slots_to_list(mut g.scratch, g.state.b, g.xs, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)), 1)
-                    g.state.b = int.wrapping_add(g.state.b, 1)
+                if g.state.b < g.state.end {
+                    slots_to_list(mut g.scratch, g.state.b, g.xs, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)), int.wrapping_sub(g.state.end, g.state.b))
+                    g.state.b = g.state.end
                 }
             }
             lo = g.state.end

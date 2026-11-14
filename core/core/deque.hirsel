@@ -102,13 +102,14 @@ fn grow[T](mut d: Deque[T]) -> Result[(), Capacity] {
         cap * 2
     }
     let mut ring: Slots[T] = slots_new(next)?
-    let mut i: u64 = 0
-    while i < count {
-        // grow admits only cap <= MAX/2; head < cap and i < count <= cap.
-        let at = int.wrapping_add(d.head, i) & int.wrapping_sub(cap, 1)
-        slots_move(mut d.ring, at, mut ring, i, 1)
-        i = int.wrapping_add(i, 1)
-    }
+    // The live interval is at most two runs. Relocate each run once, with
+    // admission complete before either move and no fallible step between them.
+    let head = d.head
+    let tail = int.wrapping_sub(cap, head)
+    let first = if count < tail { count } else { tail }
+    let second = int.wrapping_sub(count, first)
+    slots_move(mut d.ring, head, mut ring, 0, first)
+    slots_move(mut d.ring, 0, mut ring, first, second)
     let old = replace(mut d.ring, take ring)
     slots_free(take old)
     d.head = 0

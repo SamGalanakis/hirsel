@@ -1,8 +1,8 @@
 {
   "compiler_build_profile": "release",
-  "compiler_sha256": "cf14072791ca6cfd0e041a618fb22079e84e1542ca1ce5c0d739ac94918bff2f",
+  "compiler_sha256": "2f1f30544428e06b3d89bef6ea21cde83d03db780949f339030307055aad9557",
   "runtime_archive_profile": "shipping-release-fat-lto",
-  "runtime_archive_sha256": "626ce1bd419541c3e8d8f0054eb0795c9e83543ff20e8412e7e03c2e9602ed3a",
+  "runtime_archive_sha256": "95dd816277b936c865ccba458657918917889d6cd86a109f8343c1f03f3c8bb7",
   "diagnostic": false,
   "compiler": "/home/sam/.t3/worktrees/hirsellang/t3-98922f73-0f7a3d6f71c5b35f/buck-out/v2/art/root/967aa399796c0942/__hirsel-core-driver-bin-hirsel-core__/hirsel_core",
   "runtime": "/home/sam/.t3/worktrees/hirsellang/t3-98922f73-0f7a3d6f71c5b35f/buck-out/v2/art/root/967aa399796c0942/__hirsel-core-rt-archives__/hirsel-core-rt-archives/x86_64-unknown-linux-gnu/libhirsel_core_rt.a",
@@ -11,7 +11,7 @@
   "target": "x86_64-unknown-linux-gnu",
   "rustc_vv": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1\n",
   "rustc_sha256": "f3834d26669b03f6855fa54bd2381443123e860167bc0c7a8dd137e5cf6e5e4f",
-  "source_base": "977941933cf3986bf93e1d985a3760b468af3aee",
+  "source_base": "ae00f54963914e957eab8816dbcf6e6a16611741",
   "cpu": 16,
   "uname": [
     "Linux",
@@ -20,5 +20,19 @@
     "#137-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 17 20:28:23 UTC 2026",
     "x86_64"
   ],
-  "policy": "one sample per case/profile/cold-or-warm; unchanged EXPECTED; shared OS pages, no flush; Rust only, Hirsel pairing deferred"
+  "policy": "one sample per case/profile/cold-or-warm; unchanged EXPECTED; shared OS pages, no flush; Rust only, Hirsel pairing deferred",
+  "reference_hirsel_commit": "e96338cf41d71efd2076a9902068048a37b742c8",
+  "source_sha256": {
+    "bfs": "4ff3bfc6dbe64d66dd22ab0087a92055c10d5d61836ab5dd619754460fbb0d0e",
+    "generics": "5e42ecf8b44f601968744773e95f772ba78d296e215ed32c25b03ccbdbe8bf81",
+    "lru": "2634901f2d1a1bc54eaf0f0971f51d8f9d7188c3c438b86f8bf37236cbc1b549",
+    "files": "bfc9616d1c1202ce9785fe983fa0e40487fcbd8377660134e6527ec27cb57ac0",
+    "json": "7cc22504e8c5ce523d27dc1a2cbf29ac8138e5011f3247bf8e8dea4d8d074801",
+    "pipeline": "056f74023781982cbde6afb44109583e3941caf41b483749d3458a544b7b8ddd",
+    "request-scratch": "0128771f88f42a8c075c7a322407d1fece9286dbfae595dab115c433811ee200",
+    "rope": "5c41b14d0500e0def965b7bd3d3397887653072d2773e44124c1c8f9abd2c894",
+    "versions": "ca6359f23451913681402be67f0800fcc24f9c9211f63153356f882175efcaac"
+  },
+  "source_state": "qualified source closure identified by source_sha256, committed with this table; source_base plus forward delta",
+  "review": "930 NOT YET APPROVED at 76d9b6ce; findings corrected; final delta review pending"
 }

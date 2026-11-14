@@ -67,7 +67,9 @@ impl<V: Default> Map<V> {
             let cap = if cap == 0 { 4 } else { cap * 2 };
             let mut entries = Vec::with_capacity(cap);
             for entry in std::mem::take(&mut self.entries) {
-                entries.push(entry)
+                if entry.live != 0 {
+                    entries.push(entry)
+                }
             }
             self.entries = entries;
             let last = (cap as u64).wrapping_mul(2) - 1;
@@ -122,6 +124,12 @@ impl<V: Default> Map<V> {
     }
 }
 fn hash(bytes: &[u8]) -> u64 {
+    let h = byte_hash(bytes)
+        .wrapping_mul(0x9e3779b97f4a7c15)
+        .rotate_left(26);
+    h ^ (h >> 32)
+}
+fn byte_hash(bytes: &[u8]) -> u64 {
     let mix = |h: u64, w: u64| ((h ^ w).wrapping_mul(0x9e3779b97f4a7c15)).rotate_left(26);
     let mut h = bytes.len() as u64;
     let (words, tail) = bytes.as_chunks::<8>();
@@ -155,5 +163,32 @@ mod tests {
             assert_eq!(m.get("/beta"), Some(&8));
             assert!(m.entries.capacity() <= 4)
         }
+    }
+}
+
+#[cfg(test)]
+mod hash_growth_tests {
+    use super::*;
+    #[test]
+    fn string_fold_and_live_regrowth() {
+        assert_eq!(byte_hash(b"abc"), 0x2ce88a28076acd7e);
+        assert_eq!(hash(b"abc"), 0xfcfedf8da784a013);
+        assert_eq!(hash(b"/alpha") & 7, 7);
+        assert_eq!(hash(b"/beta") & 7, 0);
+        let mut m = Map::new();
+        for i in 0..64 {
+            m.insert(String::copy(format!("k{i}")), i)
+        }
+        assert_eq!(m.remove("k0"), Some(0));
+        m.insert(String::literal("k64"), 64);
+        assert_eq!(m.entries.capacity(), 128);
+        assert_eq!(m.entries.len(), 64);
+        assert_eq!(m.get("k0"), None);
+        assert_eq!(m.get("k64"), Some(&64));
+        assert!(
+            m.index
+                .iter()
+                .all(|s| *s == 0 || m.entries[(*s - 1) as usize].live != 0)
+        );
     }
 }

@@ -5,8 +5,8 @@ use support::*;
 fn run(input: View<'_>, variant: &str, trace: &Trace) -> Result<()> {
     let mut at = 0;
     let header = line(input, &mut at);
-    let (ns, rest) = header.split_once(' ').ok_or("Parse@graph")?;
-    let (fs, ts) = rest.split_once(' ').ok_or("Parse@graph")?;
+    let (ns, rest) = header.split_once(" ").ok_or("Parse@graph")?;
+    let (fs, ts) = rest.split_once(" ").ok_or("Parse@graph")?;
     let n = number(ns)?;
     let from = number(fs)?;
     let to = number(ts)?;
@@ -16,7 +16,7 @@ fn run(input: View<'_>, variant: &str, trace: &Trace) -> Result<()> {
     }
     let start = at;
     while at < input.len() {
-        let (a, b) = line(input, &mut at).split_once(' ').ok_or("Parse@edge")?;
+        let (a, b) = line(input, &mut at).split_once(" ").ok_or("Parse@edge")?;
         if number(a)? >= n || number(b)? >= n {
             return Err("InvalidVertex".into());
         }
@@ -26,7 +26,7 @@ fn run(input: View<'_>, variant: &str, trace: &Trace) -> Result<()> {
     let mut edge_count = 0usize;
     at = start;
     while at < input.len() {
-        let (a, _) = line(input, &mut at).split_once(' ').ok_or("Parse@edge")?;
+        let (a, _) = line(input, &mut at).split_once(" ").ok_or("Parse@edge")?;
         let u = number(a)? + 1;
         offsets[index(u)] += 1;
         edge_count += 1;
@@ -44,7 +44,7 @@ fn run(input: View<'_>, variant: &str, trace: &Trace) -> Result<()> {
     neighbours.resize(edge_count, 0u32);
     at = start;
     while at < input.len() {
-        let (a, b) = line(input, &mut at).split_once(' ').ok_or("Parse@edge")?;
+        let (a, b) = line(input, &mut at).split_once(" ").ok_or("Parse@edge")?;
         let u = index(number(a)?);
         let pos = positions[u] as usize;
         neighbours[pos] = u32::try_from(number(b)?).unwrap();

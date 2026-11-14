@@ -19,7 +19,11 @@ struct Header {
 }
 fn header_value<'a>(s: &'a String, hs: &[Header], key: &str) -> Option<View<'a>> {
     for h in hs {
-        if &s[h.name_lo as usize..h.name_hi as usize] == key.as_bytes() {
+        if s.view()
+            .slice(h.name_lo as usize, h.name_hi as usize)
+            .as_bytes()
+            == key.as_bytes()
+        {
             return Some(s.view().slice(h.value_lo as usize, h.value_hi as usize));
         }
     }
@@ -56,9 +60,9 @@ fn request(
         admission(variant, &site, 0)?;
         let colon = row.find(": ").ok_or("Parse@header")?;
         let name_lo = narrow(arena.len());
-        arena.push_str(&row[..colon]);
+        arena.push_str(row.slice(0, colon));
         let name_hi = narrow(arena.len());
-        arena.push_str(&row[colon + 2..]);
+        arena.push_str(row.slice(colon + 2, row.len()));
         let value_hi = narrow(arena.len());
         headers.push(Header {
             name_lo,

@@ -13,13 +13,19 @@ fn put_bytes(s: &[u8]) -> Result<()> {
         .write_all(s)
         .map_err(|_| "Io@stdout".into())
 }
-fn problem(e: Error, n: u64) -> Error {
-    let prefix = if e.label == "Syntax" {
-        "Syntax@document"
-    } else if e.label == "InvalidNumber" {
-        "InvalidNumber@document"
-    } else {
-        "Build@document"
+fn problem(e: matched_json::JsonError, n: u64) -> Error {
+    use matched_json::{BuildError, JsonError};
+    let prefix = match e {
+        JsonError::Syntax(_) => "Syntax@document",
+        JsonError::NotFinite(_) => "InvalidNumber@document",
+        JsonError::Build(BuildError::Overflow) => "Build@document",
+        JsonError::Build(BuildError::Capacity(requested, available)) => {
+            return Error {
+                exit: 3,
+                label: String::literal("Capacity@ambient"),
+                capacity: Some((requested, available)),
+            };
+        }
     };
     name(prefix, n, "").into()
 }
@@ -31,9 +37,9 @@ fn document(
     trace: &Trace,
 ) -> Result<(usize, u64)> {
     let _owner = trace.marker(&name("document", number, ""));
-    if let Some(site) = variant.strip_prefix("capacity:") {
+    if let Some(site) = View::from(variant).strip_prefix("capacity:") {
         let reservation = name("document", number, ".blob");
-        if reservation == View::from(site) {
+        if reservation == site {
             let requested = matched_json::size(source).map_err(|e| problem(e, number))?;
             admission(variant, &reservation, requested as u64)?;
         }

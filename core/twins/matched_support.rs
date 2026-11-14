@@ -1,7 +1,9 @@
 //! Source-matched M1 helpers. Library routines port core/std bodies, not std algorithms.
 #![allow(dead_code)]
 mod matched_storage;
-pub use matched_storage::{List as Vec, Text as String, View, encode_bytes, find, hex4, utf8};
+pub use matched_storage::{
+    List as Vec, Text as String, View, encode_bytes, find, hex4, next_scalar, utf8, word,
+};
 use std::io::{Read, Write};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 #[derive(Debug, PartialEq, Eq)]
@@ -12,14 +14,8 @@ pub struct Error {
 }
 impl From<&'static str> for Error {
     fn from(label: &'static str) -> Self {
-        let exit = match label {
-            "Cancelled@source.send"
-            | "Cancelled@transform.check"
-            | "Cancelled@transform.receive" => 4,
-            _ => 2,
-        };
         Self {
-            exit,
+            exit: 2,
             label: String::literal(label),
             capacity: None,
         }
@@ -32,6 +28,13 @@ impl From<String> for Error {
             label,
             capacity: None,
         }
+    }
+}
+pub fn cancelled(label: &'static str) -> Error {
+    Error {
+        exit: 4,
+        label: String::literal(label),
+        capacity: None,
     }
 }
 pub type Result<T> = std::result::Result<T, Error>;
@@ -274,6 +277,8 @@ mod tests {
         let s = String::literal("static");
         assert_eq!(s.capacity(), 0);
         assert_eq!(s.clone().capacity(), 0);
+        assert_eq!(Error::from("Cancelled@source.send").exit, 2);
+        assert_eq!(cancelled("Cancelled@source.send").exit, 4);
         let e = Error::from("Parse@number");
         assert_eq!(e.label.capacity(), 0);
         assert_eq!(e.exit, 2);
@@ -284,7 +289,25 @@ mod tests {
         assert_eq!(xs.capacity(), 16);
         assert_eq!(&*xs, &[0, 1, 2, 3, 4, 5, 6, 7, 8]);
         assert!(utf8("ab𝄞z".as_bytes()));
+        assert!(utf8("é中".as_bytes()));
+        assert!(!utf8(&[0xc1, 0xbf]));
+        assert!(!utf8(&[0xe0, 0x80, 0x80]));
         assert!(!utf8(&[0xf4, 0x90, 0x80, 0x80]));
         assert!(!utf8(&[0xed, 0xa0, 0x80]));
+    }
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+    #[test]
+    fn slice_and_scalar_boundaries() {
+        let s = View::from("a𝄞b");
+        assert_eq!(s.slice(1, 5).as_bytes(), "𝄞".as_bytes());
+        assert!(std::panic::catch_unwind(|| s.slice(2, 5)).is_err());
+        assert!(std::panic::catch_unwind(|| s.slice(1, 4)).is_err());
+        assert_eq!(next_scalar(s.as_bytes(), 1), Some(('𝄞', 5)));
+        assert!(std::panic::catch_unwind(|| next_scalar(s.as_bytes(), 2)).is_err());
+        assert_eq!(next_scalar(s.as_bytes(), 6), None);
     }
 }

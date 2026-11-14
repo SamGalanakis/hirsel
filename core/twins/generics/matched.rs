@@ -31,8 +31,12 @@ impl Counts {
             buckets.resize(next, 0u64);
             let mut i = 0u64;
             for e in &self.entries {
-                let mut slot =
-                    hash_bytes(&self.storage[e.lo as usize..e.hi as usize]) % next as u64;
+                let mut slot = hash_bytes(
+                    self.storage
+                        .view()
+                        .slice(e.lo as usize, e.hi as usize)
+                        .as_bytes(),
+                ) % next as u64;
                 while buckets[index(slot)] != 0 {
                     slot = (slot + 1) % next as u64;
                 }
@@ -45,7 +49,13 @@ impl Counts {
         while self.buckets[index(slot)] != 0 {
             let i = index(self.buckets[index(slot)] - 1);
             let e = self.entries[i];
-            if &self.storage[e.lo as usize..e.hi as usize] == s.as_bytes() {
+            if self
+                .storage
+                .view()
+                .slice(e.lo as usize, e.hi as usize)
+                .as_bytes()
+                == s.as_bytes()
+            {
                 self.entries[i].count += 1;
                 return;
             }
@@ -130,7 +140,7 @@ fn run(input: View<'_>, variant: &str, trace: &Trace) -> Result<()> {
     num(&mut out, total);
     out.push('\n');
     for e in &counts.entries {
-        out.push_str(&counts.storage[e.lo as usize..e.hi as usize]);
+        out.push_str(counts.storage.view().slice(e.lo as usize, e.hi as usize));
         out.push('=');
         num(&mut out, e.count);
         out.push('\n');

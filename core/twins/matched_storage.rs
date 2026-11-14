@@ -126,27 +126,32 @@ impl<'a> View<'a> {
         self.0.iter().copied()
     }
     pub fn slice(self, lo: usize, hi: usize) -> Self {
-        Self(&self.0[lo..hi])
+        let v = &self.0[lo..hi];
+        let n = self.len();
+        assert!(
+            !((lo < n && (self.0[lo] & 0xc0) == 0x80) || (hi < n && (self.0[hi] & 0xc0) == 0x80)),
+            "inside a UTF-8 scalar"
+        );
+        Self(v)
     }
-    pub fn find(self, pattern: impl Pattern) -> Option<usize> {
-        pattern.with_bytes(|p| find(self.0, 0, p))
+    pub fn find(self, pattern: &str) -> Option<usize> {
+        find(self.0, 0, pattern.as_bytes())
     }
-    pub fn starts_with(self, p: impl Pattern) -> bool {
-        p.with_bytes(|p| p.len() <= self.len() && self.0[..p.len()] == *p)
+    pub fn starts_with(self, p: &str) -> bool {
+        let p = p.as_bytes();
+        p.len() <= self.len() && self.0[..p.len()] == *p
     }
-    pub fn strip_prefix(self, p: impl Pattern) -> Option<Self> {
-        p.with_bytes(|p| {
-            if p.len() <= self.len() && self.0[..p.len()] == *p {
-                Some(self.slice(p.len(), self.len()))
-            } else {
-                None
-            }
-        })
+    pub fn strip_prefix(self, p: &str) -> Option<Self> {
+        let p = p.as_bytes();
+        if p.len() <= self.len() && self.0[..p.len()] == *p {
+            Some(self.slice(p.len(), self.len()))
+        } else {
+            None
+        }
     }
-    pub fn split_once(self, p: impl Pattern) -> Option<(Self, Self)> {
-        p.with_bytes(|p| {
-            find(self.0, 0, p).map(|i| (self.slice(0, i), self.slice(i + p.len(), self.len())))
-        })
+    pub fn split_once(self, p: &str) -> Option<(Self, Self)> {
+        let p = p.as_bytes();
+        find(self.0, 0, p).map(|i| (self.slice(0, i), self.slice(i + p.len(), self.len())))
     }
     pub fn to_owned(self) -> Text {
         Text::copy(self)
@@ -181,20 +186,6 @@ impl PartialEq<View<'_>> for &[u8] {
 impl PartialEq<View<'_>> for Text {
     fn eq(&self, x: &View<'_>) -> bool {
         self.as_bytes() == x.0
-    }
-}
-pub trait Pattern {
-    fn with_bytes<R>(self, f: impl FnOnce(&[u8]) -> R) -> R;
-}
-impl Pattern for &str {
-    fn with_bytes<R>(self, f: impl FnOnce(&[u8]) -> R) -> R {
-        f(self.as_bytes())
-    }
-}
-impl Pattern for char {
-    fn with_bytes<R>(self, f: impl FnOnce(&[u8]) -> R) -> R {
-        let mut b = [0; 4];
-        f(self.encode_utf8(&mut b).as_bytes())
     }
 }
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -386,28 +377,46 @@ pub fn utf8(s: &[u8]) -> bool {
             }
             continue;
         }
-        let (w, mut lo, mut hi) = match x {
-            0xc2..=0xdf => (2, 0x80, 0xbf),
-            0xe0 => (3, 0xa0, 0xbf),
-            0xed => (3, 0x80, 0x9f),
-            0xe1..=0xef => (3, 0x80, 0xbf),
-            0xf0 => (4, 0x90, 0xbf),
-            0xf4 => (4, 0x80, 0x8f),
-            0xf1..=0xf3 => (4, 0x80, 0xbf),
-            _ => return false,
-        };
-        if n - i < w {
-            return false;
-        }
-        for k in 1..w {
-            let y = s[i + k];
-            if y < lo || y > hi {
+        if x < 0xe0 {
+            if x < 0xc2 || n - i < 2 || s[i + 1] & 0xc0 != 0x80 {
                 return false;
             }
-            lo = 0x80;
-            hi = 0xbf
+            i += 2;
+        } else if x < 0xf0 {
+            if n - i < 3 {
+                return false;
+            }
+            let y = s[i + 1];
+            let mut lo = 0x80;
+            if x == 0xe0 {
+                lo = 0xa0
+            }
+            let mut hi = 0xbf;
+            if x == 0xed {
+                hi = 0x9f
+            }
+            if y < lo || y > hi || s[i + 2] & 0xc0 != 0x80 {
+                return false;
+            }
+            i += 3;
+        } else {
+            if x > 0xf4 || n - i < 4 {
+                return false;
+            }
+            let y = s[i + 1];
+            let mut lo = 0x80;
+            if x == 0xf0 {
+                lo = 0x90
+            }
+            let mut hi = 0xbf;
+            if x == 0xf4 {
+                hi = 0x8f
+            }
+            if y < lo || y > hi || s[i + 2] & 0xc0 != 0x80 || s[i + 3] & 0xc0 != 0x80 {
+                return false;
+            }
+            i += 4;
         }
-        i += w
     }
     true
 }
@@ -624,4 +633,34 @@ pub fn hex4(out: &mut List<u8>, n: u64) {
         count -= 1;
         encode_bytes(out, u32::from(digits[count]))
     }
+}
+
+pub fn next_scalar(s: &[u8], at: usize) -> Option<(char, usize)> {
+    let n = s.len();
+    if at == n {
+        return None;
+    }
+    let x = s[at];
+    assert!(x & 0xc0 != 0x80, "inside a UTF-8 scalar");
+    let w = if x < 0x80 {
+        1
+    } else if x < 0xe0 {
+        2
+    } else if x < 0xf0 {
+        3
+    } else {
+        4
+    };
+    let lead = match w {
+        1 => x,
+        2 => x & 0x1f,
+        3 => x & 0x0f,
+        _ => x & 7,
+    };
+    let mut v = u32::from(lead);
+    for k in 1..w {
+        let y = u32::from(s[at + k] & 0x3f);
+        v = (v << 6) | y
+    }
+    Some((char::from_u32(v).unwrap(), at + w))
 }

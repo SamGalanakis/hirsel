@@ -2,6 +2,18 @@
 use crate::matched_sort::{Compare, library_sort};
 use crate::support::*;
 use std::cmp::Ordering;
+#[derive(Debug, PartialEq, Eq)]
+pub enum BuildError {
+    Capacity(u64, u64),
+    Overflow,
+}
+#[derive(Debug, PartialEq, Eq)]
+pub enum JsonError {
+    Syntax(usize),
+    NotFinite(usize),
+    Build(BuildError),
+}
+type JsonResult<T> = std::result::Result<T, JsonError>;
 struct Parser<'a> {
     s: &'a [u8],
     i: usize,
@@ -15,7 +27,7 @@ impl Parser<'_> {
             self.i += 1;
         }
     }
-    fn hex(&mut self) -> Result<u32> {
+    fn hex(&mut self) -> JsonResult<u32> {
         let mut n = 0u32;
         for _ in 0..4 {
             let c = self.at();
@@ -23,32 +35,34 @@ impl Parser<'_> {
                 b'0'..=b'9' => c - b'0',
                 b'a'..=b'f' => c - b'a' + 10,
                 b'A'..=b'F' => c - b'A' + 10,
-                _ => return Err("Syntax".into()),
+                _ => return Err(JsonError::Syntax(self.i)),
             };
             n = n * 16 + u32::from(d);
             self.i += 1;
         }
         Ok(n)
     }
-    fn unicode(&mut self) -> Result<char> {
+    fn unicode(&mut self) -> JsonResult<char> {
+        let start = self.i;
         self.i += 2;
         let a = self.hex()?;
         let cp = if (0xd800..=0xdbff).contains(&a) {
             if self.at() != b'\\' || self.s.get(self.i + 1) != Some(&b'u') {
-                return Err("Syntax".into());
+                return Err(JsonError::Syntax(self.i));
             }
+            let pair = self.i;
             self.i += 2;
             let b = self.hex()?;
             if !(0xdc00..=0xdfff).contains(&b) {
-                return Err("Syntax".into());
+                return Err(JsonError::Syntax(pair));
             }
             0x10000 + ((a - 0xd800) << 10) + (b - 0xdc00)
         } else {
             a
         };
-        char::from_u32(cp).ok_or_else(|| "Syntax".into())
+        char::from_u32(cp).ok_or_else(|| JsonError::Syntax(start))
     }
-    fn string_size(&mut self) -> Result<usize> {
+    fn string_size(&mut self) -> JsonResult<usize> {
         self.i += 1;
         let mut n = 0usize;
         loop {
@@ -58,7 +72,7 @@ impl Parser<'_> {
                 return Ok(n);
             }
             if c < 0x20 {
-                return Err("Syntax".into());
+                return Err(JsonError::Syntax(self.i));
             }
             if c != b'\\' {
                 if self.i + 8 <= self.s.len() {
@@ -88,11 +102,11 @@ impl Parser<'_> {
                 n += 1;
                 self.i += 2;
             } else {
-                return Err("Syntax".into());
+                return Err(JsonError::Syntax(self.i));
             }
         }
     }
-    fn number_size(&mut self) -> Result<usize> {
+    fn number_size(&mut self) -> JsonResult<usize> {
         let start = self.i;
         loop {
             if self.i + 8 <= self.s.len() {
@@ -111,7 +125,16 @@ impl Parser<'_> {
             }
             self.i += 1;
         }
-        crate::matched_float::parse(&self.s[start..self.i])?;
+        match crate::matched_float::parse(View(self.s).slice(start, self.i).as_bytes()) {
+            Ok(_) => {}
+            Err(crate::matched_float::ParseError::Empty) => return Err(JsonError::Syntax(start)),
+            Err(crate::matched_float::ParseError::Invalid(p)) => {
+                return Err(JsonError::Syntax(start + p));
+            }
+            Err(crate::matched_float::ParseError::OutOfRange) => {
+                return Err(JsonError::NotFinite(start));
+            }
+        }
         Ok(self.i - start)
     }
     fn ends(&mut self, end: u8) -> bool {
@@ -123,7 +146,7 @@ impl Parser<'_> {
             false
         }
     }
-    fn after(&mut self, end: u8) -> Result<bool> {
+    fn after(&mut self, end: u8) -> JsonResult<bool> {
         self.skip();
         if self.at() == end {
             self.i += 1;
@@ -132,10 +155,10 @@ impl Parser<'_> {
             self.i += 1;
             Ok(false)
         } else {
-            Err("Syntax".into())
+            Err(JsonError::Syntax(self.i))
         }
     }
-    fn size_value(&mut self) -> Result<usize> {
+    fn size_value(&mut self) -> JsonResult<usize> {
         self.skip();
         match self.at() {
             b'n' | b't' | b'f' => {
@@ -145,7 +168,7 @@ impl Parser<'_> {
                     _ => "false",
                 };
                 if !self.s[self.i..].starts_with(word.as_bytes()) {
-                    return Err("Syntax".into());
+                    return Err(JsonError::Syntax(self.i));
                 }
                 self.i += word.len();
                 Ok(1)
@@ -174,12 +197,12 @@ impl Parser<'_> {
                 loop {
                     self.skip();
                     if self.at() != b'"' {
-                        return Err("Syntax".into());
+                        return Err(JsonError::Syntax(self.i));
                     }
                     let k = self.string_size()?;
                     self.skip();
                     if self.at() != b':' {
-                        return Err("Syntax".into());
+                        return Err(JsonError::Syntax(self.i));
                     }
                     self.i += 1;
                     n += 4 + k + self.size_value()? + 4;
@@ -188,7 +211,7 @@ impl Parser<'_> {
                     }
                 }
             }
-            _ => Err("Syntax".into()),
+            _ => Err(JsonError::Syntax(self.i)),
         }
     }
     fn write_text(&mut self, blob: &mut Blob) {
@@ -202,7 +225,8 @@ impl Parser<'_> {
                 while self.at() != b'"' && self.at() != b'\\' {
                     self.i += 1;
                 }
-                blob.bytes.extend_from_slice(&self.s[lo..self.i]);
+                blob.bytes
+                    .extend_from_slice(View(self.s).slice(lo, self.i).as_bytes());
             } else if self.s[self.i + 1] == b'u' {
                 let c = self.unicode().unwrap();
                 let mut b = [0u8; 4];
@@ -291,18 +315,19 @@ impl Parser<'_> {
                 }
                 blob.bytes.push(3);
                 blob.word(narrow(self.i - lo));
-                blob.bytes.extend_from_slice(&self.s[lo..self.i]);
+                blob.bytes
+                    .extend_from_slice(View(self.s).slice(lo, self.i).as_bytes());
             }
         }
     }
 }
-pub fn size(s: impl AsRef<[u8]>) -> Result<usize> {
+pub fn size(s: impl AsRef<[u8]>) -> JsonResult<usize> {
     let s = s.as_ref();
     let mut p = Parser { s, i: 0 };
     let n = p.size_value()?;
     p.skip();
     if p.i != s.len() {
-        return Err("Syntax".into());
+        return Err(JsonError::Syntax(p.i));
     }
     Ok(n)
 }
@@ -326,10 +351,10 @@ fn by_key(e: &KeyEnv<'_>, x: u32, y: u32) -> Ordering {
     }
 }
 impl Blob {
-    pub fn parse(s: impl AsRef<[u8]>) -> Result<Self> {
+    pub fn parse(s: impl AsRef<[u8]>) -> JsonResult<Self> {
         let s = s.as_ref();
         let n = size(s)?;
-        u32::try_from(n).map_err(|_| "Build")?;
+        u32::try_from(n).map_err(|_| JsonError::Build(BuildError::Overflow))?;
         let mut b = Self {
             bytes: Vec::with_capacity(n),
         };
@@ -480,7 +505,7 @@ impl Blob {
         }
         let end = path
             .slice(at, path.len())
-            .find('/')
+            .find("/")
             .map_or(path.len(), |i| at + i);
         let step = path.slice(at, end);
         match self.bytes[p] {
@@ -517,26 +542,9 @@ fn indent(out: &mut Vec<u8>, depth: usize) {
 fn quote(out: &mut Vec<u8>, s: &[u8]) {
     out.push(b'"');
     let mut at = 0;
-    while at < s.len() {
-        let b = s[at];
-        at += 1;
-        let c = if b < 128 {
-            u32::from(b)
-        } else {
-            let count = if b < 0xe0 {
-                2
-            } else if b < 0xf0 {
-                3
-            } else {
-                4
-            };
-            let mut cp = u32::from(b & ((1 << (7 - count)) - 1));
-            for _ in 1..count {
-                cp = (cp << 6) | u32::from(s[at] & 63);
-                at += 1;
-            }
-            cp
-        };
+    while let Some((scalar, next)) = next_scalar(s, at) {
+        at = next;
+        let c = scalar as u32;
         match c {
             34 => out.extend_from_slice(b"\\\""),
             92 => out.extend_from_slice(b"\\\\"),
@@ -575,7 +583,7 @@ mod tests {
         out.clear();
         blob.render(&mut out, 0, 0, true);
         assert_eq!(out, "\"𝄞\"".as_bytes());
-        assert_eq!(size("[1,]"), Err("Syntax".into()));
-        assert_eq!(size("1e999"), Err("InvalidNumber".into()));
+        assert_eq!(size("[1,]"), Err(JsonError::Syntax(3)));
+        assert_eq!(size("1e999"), Err(JsonError::NotFinite(0)));
     }
 }

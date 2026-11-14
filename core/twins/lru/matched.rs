@@ -136,7 +136,7 @@ fn operations(
     while at < input.len() {
         let row = line(input, &mut at);
         if let Some(rest) = row.strip_prefix("P ") {
-            let (name, value) = rest.split_once(' ').ok_or("Parse@cache-op")?;
+            let (name, value) = rest.split_once(" ").ok_or("Parse@cache-op")?;
             puts += 1;
             admission(variant, &name_site(puts), 0)?;
             if c.put(name, value)? {

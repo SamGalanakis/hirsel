@@ -1,6 +1,12 @@
 //! std.float::parse64: grammar/mantissa scan, exact fast path, Eisel-Lemire, big decimal.
 //! Ported directly from core/std/float.hirsel, itself adapted from Rust dec2flt and Go strconv.
-use crate::support::{Error, Result};
+#[derive(Debug, PartialEq, Eq)]
+pub enum ParseError {
+    Empty,
+    Invalid(usize),
+    OutOfRange,
+}
+type Result<T> = std::result::Result<T, ParseError>;
 #[derive(Clone, Copy)]
 struct Scanned {
     negative: bool,
@@ -12,65 +18,40 @@ struct Scanned {
 fn digit(x: u8) -> bool {
     x.is_ascii_digit()
 }
-fn significant(s: &mut Scanned, taken: u64, x: u8, fraction: bool) -> u64 {
-    if s.mantissa == 0 && x == 0 {
-        if fraction {
-            s.exponent -= 1
-        }
-        return taken;
-    }
-    if taken < 19 {
-        s.mantissa = s.mantissa * 10 + u64::from(x);
-        if fraction {
-            s.exponent -= 1
-        }
-        return taken + 1;
-    }
-    if x != 0 {
-        s.many = true
-    }
-    if !fraction {
-        s.exponent += 1
-    }
-    taken
-}
 fn scan(b: &[u8]) -> Result<Scanned> {
     let n = b.len();
     if n == 0 {
-        return Err("Syntax".into());
+        return Err(ParseError::Empty);
     }
     let negative = b[0] == b'-';
     let at = usize::from(negative);
     let mut i = at;
     if i >= n || !digit(b[i]) {
-        return Err("Syntax".into());
+        return Err(ParseError::Invalid(i));
     }
-    let mut s = Scanned {
-        negative,
-        mantissa: 0,
-        exponent: 0,
-        many: false,
-        at,
-    };
-    let mut taken = 0;
+    let mut mantissa = 0;
     if b[i] == b'0' {
         i += 1
     } else {
-        while i < n && digit(b[i]) {
-            taken = significant(&mut s, taken, b[i] - b'0', false);
-            i += 1
-        }
+        let (end, x) = accumulate(b, i, 0);
+        i = end;
+        mantissa = x
     }
+    let mut count = i - at;
+    let mut exponent = 0i64;
     if i < n && b[i] == b'.' {
         i += 1;
-        if i >= n || !digit(b[i]) {
-            return Err("Syntax".into());
+        let first = i;
+        let (end, x) = accumulate(b, i, mantissa);
+        i = end;
+        mantissa = x;
+        if i == first {
+            return Err(ParseError::Invalid(i));
         }
-        while i < n && digit(b[i]) {
-            taken = significant(&mut s, taken, b[i] - b'0', true);
-            i += 1
-        }
+        count += i - first;
+        exponent = -i64::try_from(i - first).unwrap()
     }
+    let mut written = 0i64;
     if i < n && (b[i] == b'e' || b[i] == b'E') {
         i += 1;
         let minus = i < n && b[i] == b'-';
@@ -78,23 +59,127 @@ fn scan(b: &[u8]) -> Result<Scanned> {
             i += 1
         }
         if i >= n || !digit(b[i]) {
-            return Err("Syntax".into());
+            return Err(ParseError::Invalid(i));
         }
-        let mut written = 0i64;
         while i < n && digit(b[i]) {
             if written < 65536 {
                 written = 10 * written + i64::from(b[i] - b'0')
             }
             i += 1
         }
-        s.exponent += if minus { -written } else { written }
+        if minus {
+            written = -written
+        }
     }
     if i < n {
-        return Err("Syntax".into());
+        return Err(ParseError::Invalid(i));
     }
-    Ok(s)
+    if count > 19 {
+        let mut j = at;
+        while j < n && (b[j] == b'0' || b[j] == b'.') {
+            if b[j] == b'0' {
+                count -= 1
+            }
+            j += 1
+        }
+        if count > 19 {
+            return Ok(long(b, negative, at, written));
+        }
+    }
+    Ok(Scanned {
+        negative,
+        mantissa,
+        exponent: exponent + written,
+        many: false,
+        at,
+    })
+}
+fn accumulate(b: &[u8], i: usize, from: u64) -> (usize, u64) {
+    let n = b.len();
+    let mut x = from;
+    let mut k = i;
+    while k + 8 <= n {
+        let w = crate::support::word(b, k);
+        if (w.wrapping_add(0x4646464646464646) | w.wrapping_sub(0x3030303030303030))
+            & 0x8080808080808080
+            != 0
+        {
+            break;
+        }
+        x = x.wrapping_mul(100000000).wrapping_add(eight(w));
+        k += 8
+    }
+    while k < n {
+        let d = b[k].wrapping_sub(b'0');
+        if d >= 10 {
+            break;
+        }
+        x = x.wrapping_mul(10).wrapping_add(u64::from(d));
+        k += 1
+    }
+    (k, x)
+}
+fn eight(w: u64) -> u64 {
+    let v = w - 0x3030303030303030;
+    let pairs = v.wrapping_mul(10) + (v >> 8);
+    let low = (pairs & 0x000000ff000000ff).wrapping_mul(0x000f424000000064);
+    let high = ((pairs >> 16) & 0x000000ff000000ff).wrapping_mul(0x0000271000000001);
+    (low.wrapping_add(high) >> 32) & 0xffffffff
+}
+fn long(b: &[u8], negative: bool, at: usize, written: i64) -> Scanned {
+    let n = b.len();
+    let mut x = 0;
+    let mut i = at;
+    while i < n && digit(b[i]) && x < 1000000000000000000 {
+        x = x * 10 + u64::from(b[i] - b'0');
+        i += 1
+    }
+    let exponent;
+    if x >= 1000000000000000000 {
+        let mut j = i;
+        while j < n && digit(b[j]) {
+            j += 1
+        }
+        exponent = i64::try_from(j - i).unwrap()
+    } else {
+        i += 1;
+        let first = i;
+        while i < n && digit(b[i]) && x < 1000000000000000000 {
+            x = x * 10 + u64::from(b[i] - b'0');
+            i += 1
+        }
+        exponent = -i64::try_from(i - first).unwrap()
+    }
+    Scanned {
+        negative,
+        mantissa: x,
+        exponent: exponent + written,
+        many: true,
+        at,
+    }
+}
+struct Format {
+    bits: u64,
+    min_exp: i64,
+    inf: i64,
+    smallest10: i64,
+    largest10: i64,
+    even_lo: i64,
+    even_hi: i64,
+}
+fn format64() -> Format {
+    Format {
+        bits: 52,
+        min_exp: -1023,
+        inf: 2047,
+        smallest10: -342,
+        largest10: 308,
+        even_lo: -4,
+        even_hi: 23,
+    }
 }
 pub fn parse(b: &[u8]) -> Result<f64> {
+    let fmt = format64();
     let n = scan(b)?;
     if !n.many && n.exponent >= -22 && n.exponent <= 22 && n.mantissa <= 9007199254740992 {
         let mut v = n.mantissa as f64;
@@ -105,52 +190,47 @@ pub fn parse(b: &[u8]) -> Result<f64> {
         }
         return Ok(if n.negative { -v } else { v });
     }
-    let (m, e) = decide(b, n);
-    if e == 2047 {
-        return Err(Error::from("InvalidNumber"));
+    let (m, e) = decide(&fmt, b, &n);
+    if e == fmt.inf {
+        return Err(ParseError::OutOfRange);
     }
     let e = u64::try_from(e).unwrap();
     Ok(f64::from_bits(
         m | (e << 52) | (u64::from(n.negative) << 63),
     ))
 }
-fn decide(b: &[u8], n: Scanned) -> (u64, i64) {
-    let (m, e) = lemire(n.exponent, n.mantissa);
+fn decide(fmt: &Format, b: &[u8], n: &Scanned) -> (u64, i64) {
+    let (m, e) = lemire(fmt, n.exponent, n.mantissa);
     if e >= 0 {
         if !n.many {
             return (m, e);
         }
-        let (m1, e1) = lemire(n.exponent, n.mantissa + 1);
+        let (m1, e1) = lemire(fmt, n.exponent, n.mantissa + 1);
         if m == m1 && e == e1 {
             return (m, e);
         }
     }
-    slow(b, n.at)
+    slow(fmt, b, n.at)
 }
-fn lemire(q: i64, w: u64) -> (u64, i64) {
-    if w == 0 || q < -342 {
+fn lemire(fmt: &Format, q: i64, w: u64) -> (u64, i64) {
+    if w == 0 || q < fmt.smallest10 {
         return (0, 0);
     }
-    if q > 308 {
-        return (0, 2047);
+    if q > fmt.largest10 {
+        return (0, fmt.inf);
     }
-    let mut y = w;
-    let mut lz = 0u64;
-    while y < 0x8000000000000000 {
-        y <<= 1;
-        lz += 1
-    }
-    let (lo, hi) = product(q, w << lz, 55);
+    let lz = u64::from(w.leading_zeros());
+    let (lo, hi) = product(q, w << lz, fmt.bits + 3);
     if lo == u64::MAX && (q < -27 || q > 55) {
         return (0, -1);
     }
     let upper = hi >> 63;
-    let s = upper + 64 - 52 - 3;
+    let s = upper + 64 - fmt.bits - 3;
     let mut m = hi >> s;
     let mut p2 = (q.wrapping_mul(217706) >> 16) + 63 + i64::try_from(upper).unwrap()
         - i64::try_from(lz).unwrap()
-        + 1023;
-    let hidden = 1u64 << 52;
+        - fmt.min_exp;
+    let hidden = 1u64 << fmt.bits;
     if p2 <= 0 {
         if 1 - p2 >= 64 {
             return (0, 0);
@@ -160,7 +240,7 @@ fn lemire(q: i64, w: u64) -> (u64, i64) {
         m >>= 1;
         return (m, if m >= hidden { 1 } else { 0 });
     }
-    if lo <= 1 && q >= -4 && q <= 23 && m & 3 == 1 && m << s == hi {
+    if lo <= 1 && q >= fmt.even_lo && q <= fmt.even_hi && m & 3 == 1 && m << s == hi {
         m &= !1
     }
     m += m & 1;
@@ -172,8 +252,8 @@ fn lemire(q: i64, w: u64) -> (u64, i64) {
     if m >= hidden {
         m -= hidden
     }
-    if p2 >= 2047 {
-        return (0, 2047);
+    if p2 >= fmt.inf {
+        return (0, fmt.inf);
     }
     (m, p2)
 }
@@ -209,13 +289,13 @@ fn shift_for(n: i64) -> u64 {
         60
     }
 }
-fn slow(b: &[u8], at: usize) -> (u64, i64) {
+fn slow(fmt: &Format, b: &[u8], at: usize) -> (u64, i64) {
     let mut d = decimal(b, at);
     if d.count == 0 || d.point < -324 {
         return (0, 0);
     }
     if d.point >= 310 {
-        return (0, 2047);
+        return (0, fmt.inf);
     }
     let mut e2 = 0i64;
     while d.point > 0 {
@@ -237,34 +317,34 @@ fn slow(b: &[u8], at: usize) -> (u64, i64) {
         };
         shift_left(&mut d, k);
         if d.point > 2047 {
-            return (0, 2047);
+            return (0, fmt.inf);
         }
         e2 -= i64::try_from(k).unwrap()
     }
     e2 -= 1;
-    while -1022 > e2 {
-        let mut k = -1022 - e2;
+    while fmt.min_exp + 1 > e2 {
+        let mut k = fmt.min_exp + 1 - e2;
         if k > 60 {
             k = 60
         }
         shift_right(&mut d, u64::try_from(k).unwrap());
         e2 += k
     }
-    if e2 + 1023 >= 2047 {
-        return (0, 2047);
+    if e2 - fmt.min_exp >= fmt.inf {
+        return (0, fmt.inf);
     }
-    shift_left(&mut d, 53);
+    shift_left(&mut d, fmt.bits + 1);
     let mut m = round(&d);
-    if m >= 1u64 << 53 {
+    if m >= 1u64 << (fmt.bits + 1) {
         shift_right(&mut d, 1);
         e2 += 1;
         m = round(&d);
-        if e2 + 1023 >= 2047 {
-            return (0, 2047);
+        if e2 - fmt.min_exp >= fmt.inf {
+            return (0, fmt.inf);
         }
     }
-    let mut p2 = e2 + 1023;
-    let hidden = 1u64 << 52;
+    let mut p2 = e2 - fmt.min_exp;
+    let hidden = 1u64 << fmt.bits;
     if m < hidden {
         p2 -= 1
     }
@@ -1172,6 +1252,9 @@ mod tests {
                 "{s}"
             )
         }
+        assert!(scan(b"12345678901234567890").unwrap().many);
+        assert!(!scan(b"0.000000000000000000000000000000123").unwrap().many);
+        assert_eq!(accumulate(b"123456789xyz", 0, 0), (9, 123456789));
         assert!(parse(b"01").is_err());
         assert!(parse(b"1.").is_err());
         assert!(parse(b"1e999").is_err());

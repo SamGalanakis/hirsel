@@ -140,7 +140,7 @@ fn transform(t: Transform) -> TransformResult {
         }
         return TransformResult {
             completed: 0,
-            error: Some("Cancelled@source.send".into()),
+            error: Some(cancelled("Cancelled@source.send")),
             retained: Some(t.input),
         };
     }
@@ -152,7 +152,7 @@ fn transform(t: Transform) -> TransformResult {
                 wait_cancel_gate(&t.cancel_gate);
                 return TransformResult {
                     completed,
-                    error: Some("Cancelled@transform.check".into()),
+                    error: Some(cancelled("Cancelled@transform.check")),
                     retained: None,
                 };
             }
@@ -178,7 +178,7 @@ fn transform(t: Transform) -> TransformResult {
             wait_cancel_gate(&t.cancel_gate);
             return TransformResult {
                 completed,
-                error: Some("Cancelled@transform.receive".into()),
+                error: Some(cancelled("Cancelled@transform.receive")),
                 retained: None,
             };
         }

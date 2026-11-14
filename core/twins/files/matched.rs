@@ -18,6 +18,12 @@ impl Drop for Directory {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
+struct Held(File);
+impl Drop for Held {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
 fn event(tx: &SyncSender<Event>, prefix: &str, name: impl AsRef<[u8]>) {
     let mut line = String::copy(prefix);
     line.push_str(name);
@@ -73,12 +79,10 @@ impl Drop for Owned {
     }
 }
 fn open(path: &Path) -> std::io::Result<File> {
-    OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
+    OpenOptions::new().append(true).create(true).open(path)
+}
+fn io<T>(r: std::io::Result<T>, label: &'static str) -> Result<T> {
+    r.map_err(|_| Error::from(String::copy(label)))
 }
 fn copy_files(dir: &Path, variant: &str, tx: &SyncSender<Event>) -> Result<()> {
     let source_path = if variant == "error-first" {
@@ -86,15 +90,17 @@ fn copy_files(dir: &Path, variant: &str, tx: &SyncSender<Event>) -> Result<()> {
     } else {
         "source.txt"
     };
-    let file = File::open(dir.join(source_path)).map_err(|_| "Io@open-source")?;
+    let file = io(File::open(dir.join(source_path)), "Io@open-source")?;
     let mut source = Owned::new(Some(file), None, "source", variant, tx);
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(dir.join("destination.txt"))
-        .map_err(|_| "Io@create-destination")?;
+    let file = io(
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(dir.join("destination.txt")),
+        "Io@create-destination",
+    )?;
     let mut destination = Owned::new(Some(file), None, "destination", variant, tx);
-    let locked = open(&dir.join("lock.txt")).map_err(|_| "Lock@acquire")?;
+    let locked = io(open(&dir.join("lock.txt")), "Lock@acquire")?;
     locked.try_lock().map_err(|_| "Lock@acquire")?;
     let _lock = Owned::new(None, Some(locked), "lock", variant, tx);
     admission(variant, "copy.buffer", 4096)?;
@@ -104,7 +110,7 @@ fn copy_files(dir: &Path, variant: &str, tx: &SyncSender<Event>) -> Result<()> {
         let mut src = source.handle.take().unwrap();
         let read = src.read(&mut buffer);
         source.handle = Some(src);
-        let n = read.map_err(|_| "Io@read")?;
+        let n = io(read, "Io@read")?;
         if n == 0 {
             break;
         }
@@ -127,32 +133,42 @@ fn run(input: View<'_>, variant: &str) -> Result<()> {
     let mut folder = String::with_capacity(32);
     folder.push_str(".m1-files-");
     num(&mut folder, std::process::id());
-    std::fs::create_dir({
-        use std::os::unix::ffi::OsStrExt;
-        std::ffi::OsStr::from_bytes(folder.as_bytes())
-    })
-    .map_err(|_| "Io@temp")?;
+    io(
+        std::fs::create_dir({
+            use std::os::unix::ffi::OsStrExt;
+            std::ffi::OsStr::from_bytes(folder.as_bytes())
+        }),
+        "Io@temp",
+    )?;
     let directory = Directory({
         use std::os::unix::ffi::OsStrExt;
         PathBuf::from(std::ffi::OsStr::from_bytes(folder.as_bytes()))
     });
     let dir = &directory.0;
-    std::fs::write(dir.join("source.txt"), input.as_bytes()).map_err(|_| "Io@setup")?;
+    io(
+        std::fs::write(dir.join("source.txt"), input.as_bytes()),
+        "Io@setup",
+    )?;
     if variant == "error-second" {
-        std::fs::write(dir.join("destination.txt"), b"existing").map_err(|_| "Io@setup")?;
+        let mut existing = Vec::with_capacity(8);
+        existing.extend_from_slice(b"existing");
+        io(
+            std::fs::write(dir.join("destination.txt"), &existing),
+            "Io@setup",
+        )?;
     }
     let mut holder = None;
     if variant == "error-lock" {
-        let f = open(&dir.join("lock.txt")).map_err(|_| "Io@setup")?;
+        let f = io(open(&dir.join("lock.txt")), "Io@setup")?;
         f.try_lock().map_err(|_| "Lock@setup")?;
-        holder = Some(f);
+        holder = Some(Held(f));
     }
     let outcome = copy_files(dir, variant, &tx);
     drop(holder.take());
-    let probe = open(&dir.join("lock.txt")).map_err(|_| "Io@probe")?;
+    let probe = io(open(&dir.join("lock.txt")), "Io@probe")?;
     let free = probe.try_lock().is_ok();
     if free {
-        probe.unlock().map_err(|_| "Io@probe")?;
+        let _ = probe.unlock();
     }
     drop(probe);
     let data = match read_bytes(dir.join("destination.txt")) {
@@ -199,4 +215,17 @@ fn main() {
         Err(_) => std::process::exit(2),
     };
     exit_status(run(input.view(), &variant));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn io_label_ownership() {
+        let e = io::<()>(Err(std::io::ErrorKind::NotFound.into()), "Io@test").unwrap_err();
+        assert_eq!(e.label.capacity(), 7);
+        assert_eq!(e.exit, 2);
+        let direct = Error::from("Io@write");
+        assert_eq!(direct.label.capacity(), 0)
+    }
 }

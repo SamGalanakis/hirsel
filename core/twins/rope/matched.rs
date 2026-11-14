@@ -168,8 +168,8 @@ fn run(input: View<'_>, variant: &str) -> Result<()> {
                 let displaced = std::mem::replace(&mut current, old);
                 s.release(displaced);
             } else {
-                let (a, rest) = row.split_once(' ').ok_or("InvalidPosition")?;
-                let (b, replacement) = rest.split_once(' ').ok_or("InvalidPosition")?;
+                let (a, rest) = row.split_once(" ").ok_or("InvalidPosition")?;
+                let (b, replacement) = rest.split_once(" ").ok_or("InvalidPosition")?;
                 history.reserve(history.len() + 1);
                 let next = s.edit(
                     &current,

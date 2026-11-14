@@ -147,7 +147,7 @@ fn run(input: View<'_>, variant: &str) -> Result<()> {
     let mut completed = 0u64;
     let outcome = (|| {
         while at < input.len() {
-            let (a, b) = line(input, &mut at).split_once(' ').ok_or("InvalidKey")?;
+            let (a, b) = line(input, &mut at).split_once(" ").ok_or("InvalidKey")?;
             let wide = number(a)?;
             if wide >= u64::from(n) {
                 return Err("InvalidKey".into());

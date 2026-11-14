@@ -295,7 +295,12 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
             Outcome::Returned(values) => {
                 expected.push(0);
                 expected.push(values.len() as u64);
-                expected.extend(values);
+                expected.extend(
+                    values
+                        .iter()
+                        .zip(&s.results)
+                        .map(|(&word, &ty)| eval::observed(ty, word)),
+                );
             }
             Outcome::Failed(causes) => {
                 expected.push(1);
@@ -459,6 +464,12 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
             // Values are raw low bits, even when the language type is signed.
             if t.is_float() {
                 writeln!(source, "memcpy(&out{i}_{j}, &{expr}, sizeof({expr}));").unwrap();
+                let (exponent, fraction, canonical) = if *t == Ty::Scalar(Scalar::F32) {
+                    (0x7f800000u64, 0x007fffffu64, 0x7fc00000u64)
+                } else {
+                    (0x7ff0000000000000, 0x000fffffffffffff, 0x7ff8000000000000)
+                };
+                writeln!(source, "if ((out{i}_{j} & UINT64_C({exponent})) == UINT64_C({exponent}) && (out{i}_{j} & UINT64_C({fraction}))) out{i}_{j} = UINT64_C({canonical});").unwrap();
             } else {
                 writeln!(
                     source,
@@ -912,11 +923,12 @@ b0(v0: f32, v1: f32):
     execute(&m, &runs, true);
 }
 
-fn check_failure_sites() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/front");
-    let source = fs::read_to_string(root.join("cases/body/failure-sites.hirsel")).unwrap();
-    let (module, functions) = front::lower(&root, &source);
-    let runs: Vec<_> = source
+fn front_runs(
+    module: &c::Module,
+    functions: &std::collections::HashMap<String, FuncId>,
+    source: &str,
+) -> Vec<(FuncId, Vec<u64>)> {
+    source
         .lines()
         .filter_map(|line| line.strip_prefix("// expect: run "))
         .map(|line| {
@@ -938,7 +950,14 @@ fn check_failure_sites() {
                 .collect();
             (function, args)
         })
-        .collect();
+        .collect()
+}
+
+fn check_failure_sites() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/front");
+    let source = fs::read_to_string(root.join("cases/body/failure-sites.hirsel")).unwrap();
+    let (module, functions) = front::lower(&root, &source);
+    let runs = front_runs(&module, &functions, &source);
     assert_eq!(runs.len(), 9);
     for optimize in [false, true] {
         execute(&module, &runs, optimize);
@@ -1000,6 +1019,17 @@ b0(v0: u64):
     let runs = [0, 1, 3, 5, 6].map(|f| (FuncId(f), vec![u64::MAX]));
     for optimize in [false, true] {
         execute(&inheritance, &runs, optimize);
+    }
+}
+
+fn check_float_nan_paths() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/front");
+    let source = fs::read_to_string(root.join("cases/body/float-nan-paths.hirsel")).unwrap();
+    let (module, functions) = front::lower(&root, &source);
+    let runs = front_runs(&module, &functions, &source);
+    assert_eq!(runs.len(), 32);
+    for optimize in [false, true] {
+        execute(&module, &runs, optimize);
     }
 }
 

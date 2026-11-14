@@ -360,11 +360,6 @@ impl Function<'_, '_, '_> {
         self.values[v.index()]
     }
     pub fn set(&mut self, v: ValueId, value: Value) {
-        let value = if self.body.values[v.index()].is_float() {
-            self.canonical(value)
-        } else {
-            value
-        };
         self.values[v.index()] = value;
     }
     pub fn addr(&mut self, a: AddressId) -> Value {

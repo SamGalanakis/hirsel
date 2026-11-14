@@ -1384,3 +1384,8 @@ fn failure_sites_in_dev_and_speed() {
 fn relative_debug_rows_and_distinct_cold_sites() {
     check_relative_debug_rows();
 }
+
+#[test]
+fn float_nan_paths_in_dev_and_speed() {
+    check_float_nan_paths();
+}

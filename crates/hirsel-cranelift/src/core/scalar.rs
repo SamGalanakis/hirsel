@@ -308,7 +308,7 @@ impl Function<'_, '_, '_> {
                     v
                 };
                 let v = self.b.ins().bitcast(target, MemFlags::trusted(), v);
-                (if to.is_float() { self.canonical(v) } else { v }, None)
+                (v, None)
             }
             ConvertMode::FloatToInt => {
                 let (signed, width) = to.int().unwrap();

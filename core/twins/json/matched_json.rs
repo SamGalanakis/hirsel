@@ -102,7 +102,7 @@ impl Parser<'_> {
                 n += 1;
                 self.i += 2;
             } else {
-                return Err(JsonError::Syntax(self.i));
+                return Err(JsonError::Syntax(self.i + 1));
             }
         }
     }
@@ -585,5 +585,7 @@ mod tests {
         assert_eq!(out, "\"𝄞\"".as_bytes());
         assert_eq!(size("[1,]"), Err(JsonError::Syntax(3)));
         assert_eq!(size("1e999"), Err(JsonError::NotFinite(0)));
+        assert_eq!(size(r#""\q""#), Err(JsonError::Syntax(2)));
+        assert_eq!(size("\"\\"), Err(JsonError::Syntax(2)));
     }
 }

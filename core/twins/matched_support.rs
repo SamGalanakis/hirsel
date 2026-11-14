@@ -38,6 +38,14 @@ pub fn cancelled(label: &'static str) -> Error {
     }
 }
 pub type Result<T> = std::result::Result<T, Error>;
+static READ_ZEROES: [u8; 4096] = [0; 4096];
+pub fn initialize_read_capacity(bytes: &mut Vec<u8>) {
+    let capacity = bytes.capacity();
+    while bytes.len() < capacity {
+        let count = (capacity - bytes.len()).min(READ_ZEROES.len());
+        bytes.extend_from_slice(&READ_ZEROES[..count]);
+    }
+}
 pub fn read_bytes(path: impl AsRef<std::path::Path>) -> std::io::Result<Vec<u8>> {
     let mut file = std::fs::File::open(path)?;
     let mut bytes = Vec::new();
@@ -50,7 +58,7 @@ pub fn read_bytes(path: impl AsRef<std::path::Path>) -> std::io::Result<Vec<u8>>
                 bytes.capacity()
             };
             bytes.reserve(more);
-            bytes.resize(bytes.capacity(), 0)
+            initialize_read_capacity(&mut bytes)
         }
         let cap = bytes.capacity();
         let got = file.read(&mut bytes[n..cap])?;

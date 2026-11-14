@@ -11,7 +11,7 @@
   "target": "x86_64-unknown-linux-gnu",
   "rustc_vv": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1\n",
   "rustc_sha256": "f3834d26669b03f6855fa54bd2381443123e860167bc0c7a8dd137e5cf6e5e4f",
-  "source_base": "ae00f54963914e957eab8816dbcf6e6a16611741",
+  "source_base": "3d3ceedb46b0adef4e7ed72dbd6acbd141d6cf42",
   "cpu": 16,
   "uname": [
     "Linux",
@@ -23,16 +23,26 @@
   "policy": "one sample per case/profile/cold-or-warm; unchanged EXPECTED; shared OS pages, no flush; Rust only, Hirsel pairing deferred",
   "reference_hirsel_commit": "e96338cf41d71efd2076a9902068048a37b742c8",
   "source_sha256": {
-    "bfs": "4ff3bfc6dbe64d66dd22ab0087a92055c10d5d61836ab5dd619754460fbb0d0e",
-    "generics": "5e42ecf8b44f601968744773e95f772ba78d296e215ed32c25b03ccbdbe8bf81",
-    "lru": "2634901f2d1a1bc54eaf0f0971f51d8f9d7188c3c438b86f8bf37236cbc1b549",
-    "files": "bfc9616d1c1202ce9785fe983fa0e40487fcbd8377660134e6527ec27cb57ac0",
-    "json": "7cc22504e8c5ce523d27dc1a2cbf29ac8138e5011f3247bf8e8dea4d8d074801",
-    "pipeline": "056f74023781982cbde6afb44109583e3941caf41b483749d3458a544b7b8ddd",
-    "request-scratch": "0128771f88f42a8c075c7a322407d1fece9286dbfae595dab115c433811ee200",
-    "rope": "5c41b14d0500e0def965b7bd3d3397887653072d2773e44124c1c8f9abd2c894",
-    "versions": "ca6359f23451913681402be67f0800fcc24f9c9211f63153356f882175efcaac"
+    "bfs": "03ee632ee35946669291a939df63c51cf628da412788f1915d942af786c53114",
+    "generics": "e5177f5aca61f114712a30dadc1d15e7ed348aca98cc666e4ebdce7fa53f4f64",
+    "lru": "fca0ea052a2e3598d6c725bc212cc670cf88f0760de60098b0edb9350b119327",
+    "files": "0ab22f2ce76a0d842804ebc473c1a8277e1037cd0a122a74b48c7265b0ded974",
+    "json": "ecfecd0af69153eaf018d89bbe46d57e6d386adba726609c0ecc43ed8dbfe903",
+    "pipeline": "c28e1a57ff3fc63479d82956b2968ab2e3361f1d9e0f265f21fea86342755ebf",
+    "request-scratch": "6dbd71c918cec535f7132a4c85b81f790f80fe9985f0826aa49b120fd0a1bfed",
+    "rope": "8157655d1e0e9bd135001988f335c1465fa48ee3865e50be72aaa120bc1cf9af",
+    "versions": "6b3dd1c35ee0d78dca8bdffda5995dbe5077cf6ab154e63e77201d3672aa5bdd"
   },
-  "source_state": "qualified source closure identified by source_sha256, committed with this table; source_base plus forward delta",
-  "review": "930 NOT YET APPROVED at 76d9b6ce; findings corrected; final delta review pending"
+  "source_state": "qualified source closure identified by source_sha256, committed with this table; source_base plus D1/D2/R1 forward delta",
+  "review": {
+    "bfs": "932 APPROVED WITH LIMITS at3d3ceedb; R1 corrected; orchestrator approval of this delta pending",
+    "generics": "932 APPROVED WITH LIMITS at3d3ceedb; R1 corrected; orchestrator approval of this delta pending",
+    "lru": "932 APPROVED WITH LIMITS at3d3ceedb; R1 corrected; orchestrator approval of this delta pending",
+    "files": "932 APPROVED WITH LIMITS at3d3ceedb; R1 corrected; orchestrator approval of this delta pending",
+    "json": "932 NOT YET APPROVED at3d3ceedb; D1/D2 fixed; R1 corrected; orchestrator approval of this delta pending",
+    "pipeline": "932 APPROVED WITH LIMITS at3d3ceedb; R1 corrected; orchestrator approval of this delta pending",
+    "request-scratch": "932 APPROVED WITH LIMITS at3d3ceedb; R1 corrected; orchestrator approval of this delta pending",
+    "rope": "932 APPROVED WITH LIMITS at3d3ceedb; R1 corrected; orchestrator approval of this delta pending",
+    "versions": "932 APPROVED WITH LIMITS at3d3ceedb; R1 corrected; orchestrator approval of this delta pending"
+  }
 }

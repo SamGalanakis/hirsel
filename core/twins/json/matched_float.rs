@@ -179,7 +179,6 @@ fn format64() -> Format {
     }
 }
 pub fn parse(b: &[u8]) -> Result<f64> {
-    let fmt = format64();
     let n = scan(b)?;
     if !n.many && n.exponent >= -22 && n.exponent <= 22 && n.mantissa <= 9007199254740992 {
         let mut v = n.mantissa as f64;
@@ -190,6 +189,7 @@ pub fn parse(b: &[u8]) -> Result<f64> {
         }
         return Ok(if n.negative { -v } else { v });
     }
+    let fmt = format64();
     let (m, e) = decide(&fmt, b, &n);
     if e == fmt.inf {
         return Err(ParseError::OutOfRange);

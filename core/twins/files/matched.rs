@@ -104,7 +104,8 @@ fn copy_files(dir: &Path, variant: &str, tx: &SyncSender<Event>) -> Result<()> {
     locked.try_lock().map_err(|_| "Lock@acquire")?;
     let _lock = Owned::new(None, Some(locked), "lock", variant, tx);
     admission(variant, "copy.buffer", 4096)?;
-    let mut buffer = vec![0u8; 4096];
+    let mut buffer = Vec::with_capacity(4096);
+    initialize_read_capacity(&mut buffer);
     let mut copied = 0u64;
     loop {
         let mut src = source.handle.take().unwrap();

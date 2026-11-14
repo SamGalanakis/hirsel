@@ -19,7 +19,6 @@ def main():
     parser.add_argument('--evaluator', type=Path)
     parser.add_argument('--phase', choices=['front', 'std', 'm1'], required=True)
     parser.add_argument('--facts', choices=['both', 'on', 'off'], default='both')
-    parser.add_argument('--small', action='store_true')
     parser.add_argument('--test-threads', type=int, choices=[1], default=1)
     args = parser.parse_args()
     compiler = args.compiler.resolve()
@@ -38,8 +37,7 @@ def main():
             else:
                 os.environ.pop('HIRSEL_LLVM_NO_FACTS', None)
             if args.phase == 'front':
-                only = ['args-empty', 'stdout-cancel', 'string-growth-refusal', 'host-read'] if args.small else None
-                rows = front_native.run(compiler, runtime, ROOT, cc, target, emulator, sysroot, only)
+                rows = front_native.run(compiler, runtime, ROOT, cc, target, emulator, sysroot)
                 executed += sum(r['ran'] for r in rows)
                 passed &= all(r['passed'] for r in rows)
             elif args.phase == 'std':

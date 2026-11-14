@@ -25,12 +25,16 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 # Sources whose ignored cases tools/check-native.sh runs, with the stage's selection.
 NATIVE = [('crates/hirsel-llvm/src/',
-  '//:hirsel-llvm-unittest //:hirsel-llvm-test-it -- $(libtest --include-ignored)'),
+  '//:hirsel-llvm-unittest //:hirsel-llvm-test-it -- $(libtest --include-ignored --skip core::tests::aarch64_)'),
  ('crates/hirsel-llvm/tests/it/',
-  '//:hirsel-llvm-unittest //:hirsel-llvm-test-it -- $(libtest --include-ignored)'),
+  '//:hirsel-llvm-unittest //:hirsel-llvm-test-it -- $(libtest --include-ignored --skip core::tests::aarch64_)'),
  ('crates/hirsel-lir/tests/it/layout.rs',
   '//:hirsel-lir-test-it -- layout::c_probes_agree_on_both_targets --exact --include-ignored')]
 # These workers require parent-supplied input and cannot run alone in a gate.
+# The aarch64 core::tests bodies need the aarch64 runtime archive; their one home
+# is //:core-llvm-aarch64-runtime's exact selection in tools/buck2/sync.py.
+AARCH64_RUNTIME = set(re.findall(r'"core::tests::(aarch64_\w+)"', next(
+    line for line in (ROOT / 'tools/buck2/sync.py').read_text().splitlines() if 'name="core-llvm-aarch64-runtime"' in line)))
 DELEGATED = {('crates/hirsel-artifact-store/src/index/tests/races.rs', 'cooperating_child'): ('multiprocess_common_pin_publication_and_live_staging_gc_owner',
                                                                                   'child')}
 REPLAY_ACTIONS = set()
@@ -389,9 +393,11 @@ def native_covers(path, name, prefix, selection):
     """The source home must also select this libtest name, not just its file."""
     arguments = shlex.split(selection.split('$(libtest ', 1)[1].split(')', 1)[0] if '$(libtest ' in selection
                             else selection.split(' -- ', 1)[-1])
-    filters = [argument for argument in arguments if not argument.startswith('--')]
+    skips = [value for flag, value in zip(arguments, arguments[1:]) if flag == '--skip']
+    filters = [argument for argument in arguments if not argument.startswith('--') and argument not in skips]
     qualified = f'{Path(path).stem}::{name}'
-    return path.startswith(prefix) and (not filters or any(f in qualified for f in filters))
+    return (path.startswith(prefix) and (not filters or any(f in qualified for f in filters))
+            and not any(s.split('::', 1)[-1] in qualified for s in skips))
 
 
 def ignored_declarations(text):
@@ -423,6 +429,8 @@ def orphans(sources):
             if (path, name) in RETAINED:
                 continue
             if (path, name) in DELEGATED:
+                continue
+            if path == 'crates/hirsel-llvm/src/core/tests.rs' and name in AARCH64_RUNTIME:
                 continue
             if (path, name) in REPLAY_ACTIONS:
                 continue

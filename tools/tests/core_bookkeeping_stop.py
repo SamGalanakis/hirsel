@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """FAIL-15 standalone archive: bookkeeping OOM never enters Rust's abort handler."""
+import argparse
 import os
 from pathlib import Path
 import subprocess
@@ -27,4 +28,7 @@ class StandaloneBookkeeping(unittest.TestCase):
 
 
 if __name__ == '__main__':
-    unittest.main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--test-threads', type=int, choices=[1], default=1)
+    parser.parse_args()
+    unittest.main(argv=[__file__], verbosity=2)

@@ -56,7 +56,8 @@ run_stage "library C probes" buck2 test //:gate-native-library-c --
 run_stage "layout C probes" filtered //:hirsel-lir-test-it -- layout::c_probes_agree_on_both_targets --exact --include-ignored
 run_stage "LLVM toolchain pin" buck2 test //:gate-native-toolchain-pin --
 # They link AArch64 programs with the cross gcc and run them under qemu-user.
-run_stage "LLVM backend tests" buck2 test //:hirsel-llvm-unittest //:hirsel-llvm-test-it -- $(libtest --include-ignored)
+# The aarch64 core::tests bodies need the aarch64 runtime; //:core-llvm-aarch64-runtime runs them.
+run_stage "LLVM backend tests" buck2 test //:hirsel-llvm-unittest //:hirsel-llvm-test-it -- $(libtest --include-ignored --skip core::tests::aarch64_)
 run_stage "TLA+ ordered-mode model" proofs/ordered/check.sh
 run_stage "free-mode GenMC models" buck2 test //:gate-free-genmc --
 if (( ${#failed_stages[@]} > 0 )); then

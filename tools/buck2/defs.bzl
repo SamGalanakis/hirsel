@@ -781,6 +781,10 @@ _test_suite = rule(impl = _test_suite_impl, attrs = {
 def _suite(name, tests, **kwargs):
     _test_suite(name = name, tests = tests, inputs = [test + "[inputs]" for test in tests], **kwargs)
 
+def hirsel_test_suite(name, tests):
+    """A name that runs exactly `tests`: a target name main's tools/land still lists."""
+    _suite(name = name, tests = tests, visibility = ["PUBLIC"])
+
 def hirsel_script_test(name, script, data, runtime_archives = [], full = True, args = [], bin_exes = {}, products = None, production = False, files_env = {}, sanitizer = None, host = False, shards = 1, native_tools = False):
     """A script harness with the same hermetic inputs as native Rust tests.
     `files_env` names further input files as environment variables. `host`

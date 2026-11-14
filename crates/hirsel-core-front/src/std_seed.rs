@@ -361,7 +361,6 @@ fn check_corpus(corpus: hirsel_core_resolve::Corpus) -> String {
 }
 
 #[test]
-#[ignore = "explicit std constant-table inspection"]
 fn float_constant_tables_are_read_only_data() {
     use hirsel_core_ir::{Inst, Step};
     let corpus = manifest().load().unwrap();

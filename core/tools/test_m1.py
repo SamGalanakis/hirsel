@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Behavioral fixtures for milestone stage and exact-observation reporting."""
+import argparse
 import json
 from pathlib import Path
 import tempfile
@@ -243,4 +244,7 @@ print(json.dumps({'accepted':True, 'native':{'executable':str(output)}, 'diagnos
 
 
 if __name__ == '__main__':
-    unittest.main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--test-threads', type=int, choices=[1], default=1)
+    parser.parse_args()
+    unittest.main(argv=[__file__], verbosity=2)

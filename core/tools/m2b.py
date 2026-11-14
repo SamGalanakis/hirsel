@@ -150,6 +150,7 @@ def main():
     parser.add_argument('--only', nargs='+')
     parser.add_argument('--host', action='store_true', help='run the workloads that need a real directory')
     parser.add_argument('--root', type=Path, default=ROOT)
+    parser.add_argument('--test-threads', type=int, choices=[1], default=1)
     args = parser.parse_args()
     engines = args.engine or list(ENGINES)
     if 'evaluator' in engines and not args.evaluator:

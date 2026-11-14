@@ -1,36 +1,117 @@
-mod program;
-#[path = "../support.rs"]
+// Matched to core/programs/m1/bfs/matched.hirsel. Independent review pending.
+#[path = "../matched_support.rs"]
 mod support;
-struct Graph {
-    offsets: Vec<u32>,
-    edges: Vec<u32>,
-}
-impl program::Graph for Graph {
-    fn build(n: usize, edges: &[(usize, usize)]) -> Self {
-        let mut offsets = vec![0u32; n + 1];
-        for &(a, _) in edges {
-            offsets[a + 1] += 1;
-        }
-        for i in 1..=n {
-            offsets[i] += offsets[i - 1];
-        }
-        let mut cursor = offsets.clone();
-        let mut out = vec![0; edges.len()];
-        for &(a, b) in edges {
-            out[cursor[a] as usize] = u32::try_from(b).unwrap();
-            cursor[a] += 1;
-        }
-        Self {
-            offsets,
-            edges: out,
+use support::*;
+fn run(input: &str, variant: &str, trace: &Trace) -> Result<()> {
+    let mut at = 0;
+    let header = line(input, &mut at);
+    let (ns, rest) = header.split_once(' ').ok_or("Parse@graph")?;
+    let (fs, ts) = rest.split_once(' ').ok_or("Parse@graph")?;
+    let n = number(ns)?;
+    let from = number(fs)?;
+    let to = number(ts)?;
+    let _graph = trace.marker("graph");
+    if from >= n || to >= n {
+        return Err("InvalidVertex".into());
+    }
+    let start = at;
+    while at < input.len() {
+        let (a, b) = line(input, &mut at).split_once(' ').ok_or("Parse@edge")?;
+        if number(a)? >= n || number(b)? >= n {
+            return Err("InvalidVertex".into());
         }
     }
-    fn visit(&self, v: usize, mut f: impl FnMut(usize)) {
-        for &u in &self.edges[self.offsets[v] as usize..self.offsets[v + 1] as usize] {
-            f(u as usize);
+    let mut offsets = Vec::with_capacity(index(n + 1));
+    offsets.resize(index(n + 1), 0u32);
+    let mut edge_count = 0usize;
+    at = start;
+    while at < input.len() {
+        let (a, _) = line(input, &mut at).split_once(' ').ok_or("Parse@edge")?;
+        let u = number(a)? + 1;
+        offsets[index(u)] += 1;
+        edge_count += 1;
+    }
+    let mut i = 1usize;
+    while i <= index(n) {
+        offsets[i] += offsets[i - 1];
+        i += 1;
+    }
+    let mut positions = Vec::with_capacity(index(n));
+    for i in 0..index(n) {
+        positions.push(offsets[i]);
+    }
+    let mut neighbours = Vec::with_capacity(edge_count);
+    neighbours.resize(edge_count, 0u32);
+    at = start;
+    while at < input.len() {
+        let (a, b) = line(input, &mut at).split_once(' ').ok_or("Parse@edge")?;
+        let u = index(number(a)?);
+        let pos = positions[u] as usize;
+        neighbours[pos] = u32::try_from(number(b)?).unwrap();
+        positions[u] += 1;
+    }
+    admission(variant, "search.parent")?;
+    let _parent = trace.marker("parent");
+    let mut parent = Vec::with_capacity(index(n));
+    parent.resize(index(n), n);
+    admission(variant, "search.queue")?;
+    let _queue = trace.marker("queue");
+    let mut queue = Vec::with_capacity(index(n));
+    queue.push(from);
+    parent[index(from)] = from;
+    let mut head = 0usize;
+    while head < queue.len() {
+        let here = index(queue[head]);
+        head += 1;
+        let mut lo = offsets[here] as usize;
+        let hi = offsets[here + 1] as usize;
+        while lo < hi {
+            let next = u64::from(neighbours[lo]);
+            if parent[index(next)] == n {
+                parent[index(next)] = here as u64;
+                queue.push(next);
+            }
+            lo += 1;
         }
     }
+    if parent[index(to)] == n {
+        return Err("NoPath".into());
+    }
+    let mut length = 1usize;
+    let mut cursor = to;
+    while cursor != from {
+        cursor = parent[index(cursor)];
+        length += 1;
+    }
+    admission(variant, "result.path")?;
+    let mut path = Vec::with_capacity(length);
+    cursor = to;
+    path.push(cursor);
+    while cursor != from {
+        cursor = parent[index(cursor)];
+        path.push(cursor);
+    }
+    path.reverse();
+    let mut out = "path=".to_owned();
+    let mut first = true;
+    for node in path.iter() {
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        num(&mut out, node);
+    }
+    out.push_str("\nvisited=");
+    num(&mut out, queue.len());
+    out.push('\n');
+    put(&out)
 }
 fn main() {
-    program::run::<Graph>();
+    let (input, variant) = match input() {
+        Ok(x) => x,
+        Err(_) => std::process::exit(2),
+    };
+    let trace = Trace::new(6);
+    let result = run(&input, &variant, &trace);
+    trace.finish(result);
 }

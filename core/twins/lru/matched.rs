@@ -1,16 +1,29 @@
-mod program;
-#[path = "../support.rs"]
+// Matched to lru/matched.hirsel: staged inline slots, checked narrowing and streaming operations.
+// Independent review pending.
+#[path = "../matched_support.rs"]
 mod support;
 use std::collections::HashMap;
+use support::*;
 const NONE: u32 = u32::MAX;
 struct Slot {
     key: [u8; 32],
     key_len: u32,
-    value: [u8; 128],
+    payload: [u8; 128],
     len: u32,
     prev: u32,
     next: u32,
     generation: u64,
+}
+fn empty() -> Slot {
+    Slot {
+        key: [0; 32],
+        key_len: 0,
+        payload: [0; 128],
+        len: 0,
+        prev: NONE,
+        next: NONE,
+        generation: 0,
+    }
 }
 struct Cache {
     slots: Vec<Slot>,
@@ -19,108 +32,182 @@ struct Cache {
     tail: u32,
     first: Option<(u32, u64)>,
 }
-impl Default for Cache {
-    fn default() -> Self {
-        Self {
-            slots: Vec::with_capacity(64),
-            index: HashMap::new(),
-            head: NONE,
-            tail: NONE,
-            first: None,
-        }
-    }
-}
 impl Cache {
-    fn touch(&mut self, i: u32) {
-        if self.head == i {
+    fn key(&self, h: u32) -> String {
+        let s = &self.slots[h as usize];
+        let mut bytes = Vec::with_capacity(s.key_len as usize);
+        let mut j = 0;
+        while j < s.key_len as usize {
+            bytes.push(s.key[j]);
+            j += 1;
+        }
+        String::from_utf8(bytes).unwrap()
+    }
+    fn touch(&mut self, h: u32) {
+        if self.head == h {
             return;
         }
-        let (p, n) = (self.slots[i as usize].prev, self.slots[i as usize].next);
+        let i = h as usize;
+        let p = self.slots[i].prev;
+        let n = self.slots[i].next;
         if p != NONE {
             self.slots[p as usize].next = n;
         }
         if n != NONE {
             self.slots[n as usize].prev = p;
         }
-        if self.tail == i {
+        if self.tail == h {
             self.tail = p;
         }
-        self.slots[i as usize].prev = NONE;
-        self.slots[i as usize].next = self.head;
+        self.slots[i].prev = NONE;
+        self.slots[i].next = self.head;
         if self.head != NONE {
-            self.slots[self.head as usize].prev = i;
+            self.slots[self.head as usize].prev = h;
         }
-        self.head = i;
+        self.head = h;
         if self.tail == NONE {
-            self.tail = i;
+            self.tail = h;
         }
     }
-    fn key(&self, i: u32) -> String {
-        let s = &self.slots[i as usize];
-        String::from_utf8(s.key[..s.key_len as usize].into()).unwrap()
+    fn put(&mut self, name: &str, value: &str) -> Result<bool> {
+        if name.len() > 32 || value.len() > 128 {
+            return Err("Parse@cache-op".into());
+        }
+        let mut staged = empty();
+        let mut j = 0;
+        for b in name.bytes() {
+            staged.key[j] = b;
+            j += 1;
+        }
+        staged.key_len = narrow(j);
+        j = 0;
+        for b in value.bytes() {
+            staged.payload[j] = b;
+            j += 1;
+        }
+        staged.len = narrow(j);
+        if let Some(&h) = self.index.get(name) {
+            let i = h as usize;
+            self.slots[i].payload = staged.payload;
+            self.slots[i].len = staged.len;
+            self.touch(h);
+            return Ok(false);
+        }
+        let owned = name.to_owned();
+        let evicted = self.slots.len() == 64;
+        let h = if evicted {
+            let h = self.tail;
+            let old_key = self.key(h);
+            self.index.remove(&old_key);
+            let i = h as usize;
+            staged.prev = self.slots[i].prev;
+            staged.next = self.slots[i].next;
+            staged.generation = self.slots[i].generation + 1;
+            self.slots[i] = staged;
+            h
+        } else {
+            let h = narrow(self.slots.len());
+            self.slots.push(staged);
+            h
+        };
+        self.index.insert(owned, h);
+        self.touch(h);
+        if self.first.is_none() {
+            self.first = Some((h, self.slots[h as usize].generation));
+        }
+        Ok(evicted)
     }
 }
-impl program::Cache for Cache {
-    fn put(&mut self, key: &str, value: &str) -> bool {
-        assert!(key.len() <= 32 && value.len() <= 128);
-        if let Some(&i) = self.index.get(key) {
-            let s = &mut self.slots[i as usize];
-            s.value[..value.len()].copy_from_slice(value.as_bytes());
-            s.len = value.len() as u32;
-            self.touch(i);
-            return false;
-        }
-        let evicted = self.slots.len() == 64;
-        let i = if evicted {
-            let i = self.tail;
-            self.index.remove(&self.key(i));
-            self.slots[i as usize].generation += 1;
-            i
+fn operations(
+    c: &mut Cache,
+    input: &str,
+    variant: &str,
+    hits: &mut u64,
+    checksum: &mut u64,
+    evictions: &mut u64,
+) -> Result<()> {
+    let mut at = 0;
+    let mut puts = 0u64;
+    while at < input.len() {
+        let row = line(input, &mut at);
+        if let Some(rest) = row.strip_prefix("P ") {
+            let (name, value) = rest.split_once(' ').ok_or("Parse@cache-op")?;
+            puts += 1;
+            admission(variant, &name_site(puts))?;
+            if c.put(name, value)? {
+                *evictions += 1;
+            }
+        } else if let Some(name) = row.strip_prefix("G ") {
+            if let Some(&h) = c.index.get(name) {
+                let i = h as usize;
+                let mut value = Vec::with_capacity(c.slots[i].len as usize);
+                let mut j = 0;
+                while j < c.slots[i].len as usize {
+                    value.push(c.slots[i].payload[j]);
+                    j += 1;
+                }
+                c.touch(h);
+                *hits += 1;
+                *checksum += sum(&value);
+            }
+        } else if row == "S" {
+            if let Some((h, generation)) = c.first {
+                if c.slots[h as usize].generation != generation {
+                    return Err("StaleHandle@first-entry".into());
+                }
+            }
         } else {
-            let i = self.slots.len() as u32;
-            self.slots.push(Slot {
-                key: [0; 32],
-                key_len: 0,
-                value: [0; 128],
-                len: 0,
-                prev: NONE,
-                next: NONE,
-                generation: 0,
-            });
-            i
-        };
-        let s = &mut self.slots[i as usize];
-        s.key[..key.len()].copy_from_slice(key.as_bytes());
-        s.key_len = key.len() as u32;
-        s.value[..value.len()].copy_from_slice(value.as_bytes());
-        s.len = value.len() as u32;
-        self.index.insert(key.into(), i);
-        self.touch(i);
-        if self.first.is_none() {
-            self.first = Some((i, self.slots[i as usize].generation));
+            return Err("Parse@cache-op".into());
         }
-        evicted
     }
-    fn get(&mut self, key: &str) -> Option<Vec<u8>> {
-        let i = *self.index.get(key)?;
-        self.touch(i);
-        let s = &self.slots[i as usize];
-        Some(s.value[..s.len as usize].into())
-    }
-    fn order(&self) -> Vec<String> {
-        let mut out = Vec::new();
-        let mut p = self.head;
-        while p != NONE {
-            out.push(self.key(p));
-            p = self.slots[p as usize].next;
+    Ok(())
+}
+fn name_site(puts: u64) -> String {
+    name("put", puts, ".payload")
+}
+fn run(input: &str, variant: &str, trace: &Trace) -> Result<()> {
+    let _owner = trace.marker("cache");
+    let mut c = Cache {
+        slots: Vec::with_capacity(64),
+        index: HashMap::new(),
+        head: NONE,
+        tail: NONE,
+        first: None,
+    };
+    let (mut hits, mut checksum, mut evictions) = (0, 0, 0);
+    let result = operations(
+        &mut c,
+        input,
+        variant,
+        &mut hits,
+        &mut checksum,
+        &mut evictions,
+    );
+    let mut out = name("hits=", hits, " sum=");
+    num(&mut out, checksum);
+    out.push_str(" evictions=");
+    num(&mut out, evictions);
+    out.push_str("\norder=");
+    let mut p = c.head;
+    let mut first = true;
+    while p != NONE {
+        if !first {
+            out.push(',');
         }
-        out
+        first = false;
+        out.push_str(&c.key(p));
+        p = c.slots[p as usize].next;
     }
-    fn first_is_stale(&self) -> bool {
-        self.first
-            .is_some_and(|(i, g)| self.slots[i as usize].generation != g)
-    }
+    out.push('\n');
+    put(&out)?;
+    result
 }
 fn main() {
-    program::run::<Cache>();
+    let (input, variant) = match input() {
+        Ok(x) => x,
+        Err(_) => std::process::exit(2),
+    };
+    let trace = Trace::new(2);
+    let result = run(&input, &variant, &trace);
+    trace.finish(result);
 }

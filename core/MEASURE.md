@@ -72,9 +72,10 @@ these rustc numbers and must not be included on only the Hirsel side of a ratio.
 `tools/measure.py:source_lines` counts physical Rust lines containing a nonwhitespace,
 noncomment token. It lexes line comments, nested block comments, quoted/character/raw
 strings and lifetimes. A line containing code and a trailing comment counts once.
-Braces and attribute-only lines count. Blank and comment-only lines do not. Count the
-binary root, its workload's `program.rs` and shared `support.rs`, once each. These are
-exactly the first-party modules that rustc compiles for that binary. No Cargo manifests,
+Braces and attribute-only lines count. Blank and comment-only lines do not. Count the binary root and its first-party modules once each. Idiomatic roots include
+the workload's `program.rs` and shared `support.rs`. Matched roots include
+`matched_support.rs`, plus JSON's `matched_json.rs` and `matched_sort.rs`, or
+pipeline's `matched_sort.rs`. `tools/measure.py:sources` names these source sets. No Cargo manifests,
 fixtures, Python, generated code, prebuilt std or other twin's implementation enters
 the denominator. Shared driver/trace code is included, so these small compile totals
 include a substantial harness/startup floor. Keep source sets and formatting fixed in

@@ -1,5 +1,6 @@
 // OWN-11 keeps the caller descriptor by refusing foreign roots at the assignment.
-// expect: refuse OWN-11 at 3:74
+// expect: refuse OWN-11 at 4:74
+// expect: cause OWN-11 at 4:74 from 4:15
 fn replace_cb(mut cb:scoped fn(u64)->u64,take next:scoped fn(u64)->u64) {cb=take next}
 fn f()->u64 {
  let mut n:u64=1

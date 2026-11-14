@@ -1550,15 +1550,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return;
         };
         let range = self.descriptors.ranges[id as usize];
-        if range
+        if let Some(c) = range
             .get(&self.descriptors.captures)
             .unwrap()
             .iter()
-            .any(|c| self.scope_slots[scope..].contains(&c.slot))
+            .find(|c| self.scope_slots[scope..].contains(&c.slot))
         {
-            self.refuse_at(
+            let cause = self.declared_at(c.slot);
+            self.refuse_from(
                 "OWN-21",
                 self.close_brace(n),
+                vec![cause],
                 "a captured slot must outlive its scoped callback",
             );
         }
@@ -1647,11 +1649,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if self.var(at.place.slot).origin == Origin::MutParam {
             if let Some(id) = self.descriptors.of(value) {
                 let range = self.descriptors.ranges[id as usize];
-                if range
+                if let Some(c) = range
                     .get(&self.descriptors.captures)
                     .unwrap()
                     .iter()
-                    .any(|c| {
+                    .find(|c| {
                         c.slot == at.place.slot
                             || self
                                 .capture_frame
@@ -1659,9 +1661,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                                 .is_none_or(|f| f.outer[c.slot as usize].is_none())
                     })
                 {
-                    self.refuse(
+                    let cause = self.declared_at(c.slot);
+                    self.refuse_from(
                         "OWN-21",
-                        n,
+                        self.span(n),
+                        vec![cause],
                         "a stored callback cannot capture a callee slot",
                     );
                     return false;
@@ -1674,15 +1678,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if let Some(id) = self.descriptors.of(value) {
             let target = self.var(at.place.slot).depth;
             let range = self.descriptors.ranges[id as usize];
-            if range
+            if let Some(c) = range
                 .get(&self.descriptors.captures)
                 .unwrap()
                 .iter()
-                .any(|c| self.var(c.slot).depth > target)
+                .find(|c| self.var(c.slot).depth > target)
             {
-                self.refuse(
+                let cause = self.declared_at(c.slot);
+                self.refuse_from(
                     "OWN-21",
-                    n,
+                    self.span(n),
+                    vec![cause],
                     "a scoped callback cannot outlive a captured slot",
                 );
                 return false;
@@ -1726,14 +1732,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return;
         }
         if kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Scoped
-            && self.freezes.iter().any(|f| {
+            && let Some(f) = self.freezes.iter().find(|f| {
                 frame.outer[f.place.slot as usize].is_none()
                     && self.var(f.place.slot).origin == Origin::ViewParam
             })
         {
-            self.refuse(
+            let cause = self.cause(f.site);
+            self.refuse_from(
                 "OWN-21",
-                n,
+                self.span(n),
+                vec![cause],
                 "a callback invocation parameter cannot escape into a capture",
             );
         }

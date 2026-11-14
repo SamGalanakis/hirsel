@@ -1,5 +1,6 @@
 // A region handle cannot be the value of its own region expression.
-// expect: refuse MEM-7 at 4:26
+// expect: refuse MEM-7 at 5:26
+// expect: cause MEM-7 at 5:26 from 5:18
 fn f() {
   let _ = region scratch { scratch }
 }

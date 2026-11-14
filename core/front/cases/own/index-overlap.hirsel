@@ -1,5 +1,6 @@
 // OWN-9, the spec's example: `xs[i]` is lent mut, then the next argument views `xs[j]`, which may be the same element; refused at that argument.
-// expect: refuse OWN-9 at 7:34
+// expect: refuse OWN-9 at 8:34
+// expect: cause OWN-9 at 8:34 from 8:23
 
 
 

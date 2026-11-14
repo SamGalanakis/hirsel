@@ -1,4 +1,5 @@
-// expect: refuse OWN-10 at 5:5
+// expect: refuse OWN-10 at 6:5
+// expect: cause OWN-10 at 6:5 from 5:12
 fn f() {
   let mut xs = [7u64, 11u64]
   for _ in xs {

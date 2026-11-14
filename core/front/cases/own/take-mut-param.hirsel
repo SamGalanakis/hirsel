@@ -1,3 +1,4 @@
 // OWN-11, the spec's example: `take` of a `mut` parameter.
-// expect: refuse OWN-11 at 3:44
+// expect: refuse OWN-11 at 4:44
+// expect: cause OWN-11 at 4:44 from 4:10
 fn steal(mut xs: List[u64]) -> List[u64] { take xs }

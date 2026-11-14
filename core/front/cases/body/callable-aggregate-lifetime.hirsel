@@ -1,5 +1,6 @@
 // An aggregate cannot outlive a callback's captured local slot.
-// expect: refuse OWN-21 at 7:2
+// expect: refuse OWN-21 at 8:2
+// expect: cause OWN-21 at 8:2 from 6:7
 fn f() {
  let p={
   let n:u64=1

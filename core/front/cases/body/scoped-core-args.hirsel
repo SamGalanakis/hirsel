@@ -4,7 +4,8 @@
 // keeps its anchor frozen: clearing the list it views is refused (OWN-10).
 // expect: run unwrapped(7) = 7
 // expect: run swapped(4) = 4
-// expect: refuse OWN-10 at 22:14
+// expect: refuse OWN-10 at 23:14
+// expect: cause OWN-10 at 23:14 from 22:30
 type P { a: u64, b: u64, c: u64 }
 fn unwrapped(x: u64) -> u64 {
   let p = P(a: 1, b: x, c: 3)

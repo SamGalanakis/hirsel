@@ -10,3 +10,5 @@ fn repro()->u64 {
 }
 // expect: refuse OWN-11 at 2:48
 // expect: refuse OWN-11 at 4:34
+// expect: cause OWN-11 at 2:48 from 2:8
+// expect: cause OWN-11 at 4:34 from 4:10

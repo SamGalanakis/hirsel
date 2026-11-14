@@ -2,7 +2,8 @@
 // `T` moves whatever `T` is later instantiated with (ownership.md's examples). Hand-
 // derived: use_id(7) passes 7 through `id` at T = u64.
 // expect: run use_id(7) = 7
-// expect: refuse OWN-5 at 8:38
+// expect: refuse OWN-5 at 9:38
+// expect: cause OWN-5 at 9:38 from 9:35
 fn id[T](take x: T) -> T { let y = x; y }
 fn use_id(n: u64) -> u64 { id(n) }
 fn two[T](take x: T) -> (T, T) { (x, x) }

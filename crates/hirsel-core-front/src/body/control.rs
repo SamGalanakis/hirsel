@@ -116,7 +116,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.hold_reached(self.anchor_expression(value));
             let fact = self.anchor_expression(value);
             if anchors.is_none() {
-                self.freeze_anchors(fact, self.depth);
+                self.freeze_anchors(fact, self.depth, value);
             }
             let d = self.depth;
             self.unfreeze(freezes, |h| {
@@ -153,7 +153,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         let captures = self.capture_anchors(v);
                         initial = self.anchors.union(initial, captures);
                     }
-                    self.declare_anchors(b, anchors, initial, value);
+                    self.declare_anchors(b, anchors, initial, value, written.unwrap_or(value));
                 }
                 self.own(b, pat);
                 self.scope_slots.push(b);
@@ -195,7 +195,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 .copied()
                 .find(|&n| is_type_node(self.kind(n)));
             let anchors = written.and_then(|n| self.written_anchors(n));
-            self.declare_anchors(b, anchors, 0, pat);
+            self.declare_anchors(b, anchors, 0, pat, written.unwrap_or(pat));
         }
         self.set(b, Avail::Uninit, pat);
         self.own(b, pat);
@@ -287,7 +287,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.need_live(q, place);
         }
         let reserved = self.freezes.len();
-        self.freeze(at.place, Hold::Assign);
+        self.freeze(at.place, Hold::Assign, place);
         let (address, emitted) = match var.binding {
             Binding::Slot(a) if at.place.len == 0 => (a, true),
             _ => match self.field_address(at, place) {
@@ -680,7 +680,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return (ERROR, None);
             }
             if !consuming && let Some(at) = at {
-                self.freeze(at.place, Hold::View(Extent::Block(self.depth + 1)));
+                self.freeze(at.place, Hold::View(Extent::Block(self.depth + 1)), source);
             }
             let start = if causes {
                 value

@@ -1,4 +1,5 @@
-// expect: refuse OWN-17 at 4:3
+// expect: refuse OWN-17 at 5:3
+// expect: cause OWN-17 at 5:3 from 4:37
 fn f(take xs: List[u8]) {
   for _ in 0u8..3 { let _ = consume(take xs)
   }

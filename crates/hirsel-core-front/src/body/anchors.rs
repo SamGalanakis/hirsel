@@ -268,6 +268,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         declared: Option<Fact>,
         initial: Fact,
         n: NodeId,
+        written: NodeId,
     ) {
         if let Some(declared) = declared {
             self.anchors.declared.insert(slot, declared);
@@ -281,7 +282,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 );
             }
             self.set_slot_anchors(slot, allowed);
-            self.freeze_anchors(allowed, self.depth);
+            self.freeze_anchors(allowed, self.depth, written);
         } else {
             self.set_slot_anchors(slot, initial);
         }
@@ -602,13 +603,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.anchor_root(at.place)
         }
     }
-    pub(super) fn freeze_anchors(&mut self, fact: Fact, depth: u32) {
+    pub(super) fn freeze_anchors(&mut self, fact: Fact, depth: u32, site: NodeId) {
         let mut roots = std::mem::take(&mut self.anchors.left);
         roots.clear();
         self.anchors.collect(fact, &mut roots);
         for &root in &roots {
             if let Root::Place(place) = root {
-                self.freeze(place, Hold::View(Extent::Block(depth)));
+                self.freeze(place, Hold::View(Extent::Block(depth)), site);
             }
         }
         self.anchors.left = roots;
@@ -646,9 +647,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let actual = self.anchors.union(new, captures);
         if let Some(&allowed) = self.anchors.mut_params.get(&at.place.slot) {
             if !self.anchors.permits(allowed, actual, &self.steps) {
-                self.refuse(
+                let cause = self.declared_at(at.place.slot);
+                self.refuse_from(
                     "OWN-11",
-                    site,
+                    self.span(site),
+                    vec![cause],
                     "a value stored through a `mut` parameter may read only its original anchors",
                 );
             }
@@ -665,7 +668,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return;
         }
         if new != 0 {
-            self.freeze_anchors(new, self.var(at.place.slot).depth);
+            self.freeze_anchors(new, self.var(at.place.slot).depth, site);
         }
         if at.place.len == 0 {
             self.set_slot_anchors(at.place.slot, new);

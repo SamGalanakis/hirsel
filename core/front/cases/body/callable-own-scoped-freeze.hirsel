@@ -1,5 +1,6 @@
 // The scoped value borrows its owner for its whole extent, not just invocation.
-// expect: refuse OWN-10 at 7:2
+// expect: refuse OWN-10 at 8:2
+// expect: cause OWN-10 at 8:2 from 7:29
 fn plus(x:u64)->u64 {x+1}
 fn f()->u64 {
  let mut owner:own fn(u64)->u64=plus

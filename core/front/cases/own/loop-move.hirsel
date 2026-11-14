@@ -1,5 +1,6 @@
 // OWN-17, the spec's pair and proto-872 `loop`: a loop body that moves an outer slot without reassigning it before the back edge; refused at the body's closing `}`, the edge that repeats it. Reassigning first is accepted.
-// expect: refuse OWN-17 at 10:67
+// expect: refuse OWN-17 at 11:67
+// expect: cause OWN-17 at 11:67 from 11:59
 fn ok(c: bool) {
   let mut cur = string.new()
   while c {

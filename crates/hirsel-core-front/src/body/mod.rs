@@ -913,6 +913,8 @@ enum Use {
 #[derive(Clone, Copy)]
 struct Acc {
     avail: Avail,
+    /// An edge's site for a slot unavailable on it (its `Var.at`): a join keeps it.
+    at: Option<NodeId>,
     count: u32,
     merge: u32,
     edge: u32,
@@ -999,7 +1001,7 @@ struct Cx<'c, 'a, 'e> {
     /// Availability changes, undone to a mark when a branch ends: (slot, old, old site).
     log: Vec<(u32, Avail, NodeId, Option<u32>, u32)>,
     /// Join inputs: the slots one incoming edge changed and their states.
-    diffs: Vec<(u32, Avail, Option<u32>, u32)>,
+    diffs: Vec<(u32, Avail, NodeId, Option<u32>, u32)>,
     /// Edges to open frames' exits: (frame, start, len) in `diffs`.
     exits: Vec<(usize, u32, u32)>,
     edge_buf: Vec<(u32, u32)>,
@@ -1134,6 +1136,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             acc: vec![
                 Acc {
                     avail: Avail::Live,
+                    at: None,
                     count: 0,
                     merge: 0,
                     edge: 0,
@@ -1236,10 +1239,33 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         self.refuse_at(rule, self.span(n), message);
     }
     fn refuse_at(&mut self, rule: &str, span: Span, message: impl Into<String>) {
+        self.refuse_from(rule, span, vec![], message);
+    }
+    /// A refusal with its causal sites: the earlier constructs it depends on (PROG-7).
+    fn refuse_from(
+        &mut self,
+        rule: &str,
+        span: Span,
+        causal: Vec<hirsel_core_resolve::Site>,
+        message: impl Into<String>,
+    ) {
         crate::cost_scope!("phase", "diagnostics/gaps");
         let site = self.p.site_span(self.at, span);
-        self.out.refusals.push(refusal(rule, site, message));
+        let mut r = refusal(rule, site, message);
+        r.causal = causal;
+        self.out.refusals.push(r);
         self.halt();
+    }
+    /// Node `n` of this body as a causal site.
+    fn cause(&self, n: NodeId) -> hirsel_core_resolve::Site {
+        self.p.site_span(self.at, self.span(n))
+    }
+    /// Binder `s`'s declaration as a causal site.
+    fn declared_at(&self, s: u32) -> hirsel_core_resolve::Site {
+        self.p.items[self.at.module as usize][self.at.item as usize]
+            .resolution
+            .binders[s as usize]
+            .site
     }
     fn span(&self, n: NodeId) -> Span {
         self.item.tree.node(n).origin.span

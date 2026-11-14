@@ -1,5 +1,6 @@
 // OWN-10 and proto-872 `freeze`: moving `q` while `v` views it.
-// expect: refuse OWN-10 at 5:3
+// expect: refuse OWN-10 at 6:3
+// expect: cause OWN-10 at 6:3 from 5:11
 fn f(take q: String) -> String {
   let v = view q
   q

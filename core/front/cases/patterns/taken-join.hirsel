@@ -1,5 +1,6 @@
 // Only the chosen taking arm consumes o. At the join it is maybe, not live.
-// expect: refuse OWN-16 at 6:11
+// expect: refuse OWN-16 at 7:11
+// expect: cause OWN-16 at 7:11 from 6:26
 type Payload { items: List[u64] }
 fn f(take o: Option[Payload]) {
   let _: u64 = match o { Some(take x) => { let _ = take x; 1 }, None => 0 }

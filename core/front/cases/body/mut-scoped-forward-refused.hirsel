@@ -8,3 +8,5 @@ fn captured(mut out:Option[View[String]],t:String) {
  action()
 }
 // expect: refuse OWN-11 at 7:26
+// expect: cause OWN-11 at 3:50 from 3:10
+// expect: cause OWN-11 at 7:26 from 6:13

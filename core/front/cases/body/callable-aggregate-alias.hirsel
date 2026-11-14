@@ -1,5 +1,6 @@
 // The selected tuple callback mutably captures n.
-// expect: refuse OWN-9 at 7:6
+// expect: refuse OWN-9 at 8:6
+// expect: cause OWN-9 at 8:6 from 8:2
 fn f()->u64 {
  let mut n:u64=1
  let p=(scoped fn(x:u64)->u64 {n+=x;n},2u64)

@@ -114,6 +114,8 @@ pub(crate) enum Hold {
 pub(crate) struct Freeze {
     pub place: Place,
     pub hold: Hold,
+    /// The construct that froze it: an operation crossing the hold cites it (PROG-7).
+    pub site: hirsel_core_syntax::NodeId,
 }
 
 /// What an operation does to a place, for the holds it may not cross.

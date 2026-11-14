@@ -1,5 +1,6 @@
 // A captured mutable place follows the same no-wrapper rule as a mut formal.
-// expect: refuse OWN-21 at 6:26
+// expect: refuse OWN-21 at 7:26
+// expect: cause OWN-21 at 7:26 from 6:10
 fn f()->u64 {
  let mut n:u64=1
  let mut cb=scoped fn(x:u64)->u64{n+=x;n}

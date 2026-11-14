@@ -1,5 +1,6 @@
 // OWN-21 activates captures at invocation, respecting a view created after the callback.
-// expect: refuse OWN-10 at 8:3
+// expect: refuse OWN-10 at 9:3
+// expect: cause OWN-10 at 9:3 from 7:14
 fn f() {
   let mut src: u64 = 1
   let cb = scoped fn() { src += 1 }

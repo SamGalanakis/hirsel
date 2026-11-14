@@ -1,6 +1,8 @@
 // OWN-9/OWN-11: within one call, a place lent mut is not viewed by a later argument, and a place an earlier argument views is not lent mut.
-// expect: refuse OWN-9 at 9:13
-// expect: refuse OWN-9 at 10:9
+// expect: refuse OWN-9 at 11:13
+// expect: refuse OWN-9 at 12:9
+// expect: cause OWN-9 at 12:9 from 12:5
+// expect: cause OWN-9 at 11:13 from 11:5
 
 
 fn g(mut a: List[u8], b: List[u8]) {}

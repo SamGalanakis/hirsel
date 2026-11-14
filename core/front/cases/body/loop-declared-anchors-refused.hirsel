@@ -18,4 +18,5 @@ fn wrong_initial(xs:List[String],t:String) {
 // expect: refuse OWN-19 at 5:3
 // expect: refuse OWN-10 at 11:13
 // expect: refuse OWN-19 at 15:39
+// expect: cause OWN-10 at 11:13 from 10:16
 

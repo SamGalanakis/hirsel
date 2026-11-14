@@ -36,3 +36,4 @@ fn parameter(a:View[String],b:View[String]) {
 // expect: refuse OWN-10 at 22:13
 // expect: refuse OWN-17 at 28:20
 // expect: refuse OWN-17 at 32:14
+// expect: cause OWN-10 at 22:13 from 21:42

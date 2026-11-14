@@ -1,3 +1,4 @@
 // The borrowed source cannot overlap the destination's mutable loan.
-// expect: refuse OWN-9 at 3:59
+// expect: refuse OWN-9 at 4:59
+// expect: cause OWN-9 at 4:59 from 4:51
 fn alias(mut xs: List[u64]) { let _ = list.append(mut xs, xs) }

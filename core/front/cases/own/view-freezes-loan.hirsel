@@ -1,5 +1,6 @@
 // OWN-8/OWN-10, the spec's pair: a let-bound view of `m.items` lasts to the block end, so lending `m.items` mut in that block is refused at the loan; ending the view in an inner block first is accepted.
-// expect: refuse OWN-10 at 14:14
+// expect: refuse OWN-10 at 15:14
+// expect: cause OWN-10 at 15:14 from 14:15
 
 
 

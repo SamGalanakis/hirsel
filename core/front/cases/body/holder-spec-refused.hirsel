@@ -24,3 +24,4 @@ fn held_field() {
  let _=v
 }
 // expect: refuse OWN-10 at 23:22
+// expect: cause OWN-10 at 23:22 from 22:8

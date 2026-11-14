@@ -1,5 +1,6 @@
 // A captured callback's mutable List root overlaps a viewed argument inside g.
-// expect: refuse OWN-9 at 6:24
+// expect: refuse OWN-9 at 7:24
+// expect: cause OWN-9 at 7:24 from 7:21
 fn f() {
  let mut xs:List[u64]=list.new()
  let cb=scoped fn(other:List[u64]) {let n=list.len(other);result.unwrap(list.push(mut xs,n))}

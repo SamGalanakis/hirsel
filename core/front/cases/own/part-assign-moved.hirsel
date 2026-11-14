@@ -1,5 +1,6 @@
 // OWN-5, the spec's example with a moving field (the spec's all-u64 P is copyable, so `let q = p` copies): assigning a field needs the slot live; only a whole slot is assigned while it is not.
-// expect: refuse OWN-5 at 5:32
+// expect: refuse OWN-5 at 6:32
+// expect: cause OWN-5 at 6:32 from 6:29
 type P { a: u64, b: String }
 fn ok(take p: P) -> P { let q = p; p = q; p.a = 1; p }
 fn bad(take p: P) { let q = p; p.a = 1 }

@@ -1,5 +1,6 @@
 // The captured callback and its transitive roots must outlive the result.
-// expect: refuse OWN-21 at 9:2
+// expect: refuse OWN-21 at 10:2
+// expect: cause OWN-21 at 10:2 from 7:7
 fn f()->u64 {
  let g={
   let mut n:u64=1

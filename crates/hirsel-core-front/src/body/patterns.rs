@@ -32,7 +32,8 @@ pub(super) struct Patterns {
     escaping: Vec<Freeze>,
     pub(super) guard: bool,
     rebind: bool,
-    declared_anchors: Option<(anchors::Fact, NodeId)>,
+    /// A written anchor set, the value it checks and the written type (the freeze site).
+    declared_anchors: Option<(anchors::Fact, NodeId, NodeId)>,
     scopes: Vec<Scope>,
 }
 #[derive(Clone, Copy)]
@@ -773,7 +774,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     pat.ty
                 };
                 if borrowed && let Some(at) = subject.place {
-                    self.freeze(at.place, Hold::View(Extent::Block(self.depth)));
+                    self.freeze(at.place, Hold::View(Extent::Block(self.depth)), pat.site);
                 }
                 if let Err(what) = self.rep(ty) {
                     self.gap(pat.site, what);
@@ -817,13 +818,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     {
                         subject.anchors = self.anchor_read(at);
                     }
-                    if let Some((allowed, site)) = self.patterns.declared_anchors {
-                        self.declare_anchors(b, Some(allowed), subject.anchors, site);
+                    if let Some((allowed, site, written)) = self.patterns.declared_anchors {
+                        self.declare_anchors(b, Some(allowed), subject.anchors, site, written);
                     } else {
                         self.set_slot_anchors(b, subject.anchors);
                     }
                     if self.type_kind(ty) == Kind::Scoped {
-                        self.freeze_anchors(subject.anchors, self.depth);
+                        self.freeze_anchors(subject.anchors, self.depth, pat.site);
                     }
                 }
                 if self.type_kind(ty) == Kind::Scoped {
@@ -839,9 +840,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     if decl.repr == Repr::Resource
                         && decl.site.module != self.p.modules[self.at.module as usize].id
                     {
-                        self.refuse(
+                        let cause = decl.site;
+                        self.refuse_from(
                             "OWN-14",
-                            pat.site,
+                            self.span(pat.site),
+                            vec![cause],
                             "a resource is destructured only in its defining module",
                         );
                     }
@@ -989,9 +992,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             .iter()
             .copied()
             .find(|&n| is_type_node(self.kind(n)));
-        let declared = written
-            .and_then(|n| self.written_anchors(n))
-            .map(|f| (f, value));
+        let declared = written.and_then(|n| Some((self.written_anchors(n)?, value, n)));
         let saved = std::mem::replace(&mut self.patterns.declared_anchors, declared);
         self.bind_pattern(id, subject, self.kind(s) == NodeKind::LetMut);
         self.patterns.declared_anchors = saved;
@@ -1389,7 +1390,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     fn pattern_escapes(&mut self, mark: usize) {
         for i in mark..self.patterns.escaping.len() {
             let f = self.patterns.escaping[i];
-            self.freeze(f.place, f.hold);
+            self.refreeze(f);
         }
         self.patterns.escaping.truncate(mark);
     }
@@ -1823,9 +1824,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // Region values cannot leave their scope. Rooted stable/scoped values need
         // the declaration lane's body-root relation before emission is possible.
         if self.contains_region_value(t) {
-            self.refuse(
+            // The cause is the region's name, when the scope names one.
+            let cause = self
+                .item
+                .tree
+                .node(n)
+                .token
+                .map(|t| self.p.site_span(self.at, self.item.token_span(t)));
+            self.refuse_from(
                 "MEM-7",
-                body,
+                self.span(body),
+                cause.into_iter().collect(),
                 "a Region value cannot leave its region scope",
             );
         }

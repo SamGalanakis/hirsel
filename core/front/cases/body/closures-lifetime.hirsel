@@ -1,5 +1,6 @@
 // A callback cannot take its local capture outside the capture's block.
-// expect: refuse OWN-21 at 7:3
+// expect: refuse OWN-21 at 8:3
+// expect: cause OWN-21 at 8:3 from 6:9
 fn f() {
   let cb = {
     let n: u64 = 1

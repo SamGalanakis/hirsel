@@ -73,10 +73,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let start = self.diffs.len() as u32;
         for i in mark..self.log.len() {
             let s = self.log[i].0;
-            let a = self.var(s).avail;
+            let (a, at) = (self.var(s).avail, self.var(s).at);
             self.diffs.push((
                 s,
                 a,
+                at,
                 self.descriptors.slots.get(&s).copied(),
                 self.slot_anchors(s),
             ));
@@ -97,7 +98,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.edges_seen += 1;
             let e = self.edges_seen;
             for k in start..start + len {
-                let (s, a, descriptor, anchors) = self.diffs[k as usize];
+                let (s, a, at, descriptor, anchors) = self.diffs[k as usize];
+                let at = (a != Avail::Live).then_some(at);
                 let previous = self.acc[s as usize];
                 let descriptor = if previous.merge == m && previous.edge != e {
                     self.union_descriptor(previous.descriptor, descriptor)
@@ -117,6 +119,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 if x.merge != m {
                     *x = Acc {
                         avail: a,
+                        at,
                         count: 1,
                         merge: m,
                         edge: e,
@@ -126,6 +129,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     touched.push(s);
                 } else {
                     x.avail = join(x.avail, a);
+                    x.at = x.at.or(at);
                     x.count += 1;
                     x.descriptor = descriptor;
                     x.anchors = anchors;
@@ -134,11 +138,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         for &s in &touched {
             let x = self.acc[s as usize];
-            let base = self.var(s).avail;
-            let a = if (x.count as usize) < edges.len() {
-                join(x.avail, base)
+            let (base, base_at) = (self.var(s).avail, self.var(s).at);
+            let (a, at) = if (x.count as usize) < edges.len() {
+                (
+                    join(x.avail, base),
+                    x.at.or((base != Avail::Live).then_some(base_at)),
+                )
             } else {
-                x.avail
+                (x.avail, x.at)
             };
             if a == Avail::Maybe {
                 self.vars[s as usize].as_mut().unwrap().flagged = true;
@@ -155,7 +162,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             };
             self.set_slot_anchors(s, anchors);
             self.set_slot_descriptor(s, descriptor);
-            self.set(s, a, n);
+            // A slot unavailable after the join keeps where that came from (OWN-16).
+            self.set(s, a, at.unwrap_or(n));
         }
         self.touched = touched;
     }
@@ -206,9 +214,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             if v.born < born && v.avail != entry {
                 let name = self.slot_name(s);
-                self.refuse_at(
+                let cause = self.cause(v.at);
+                self.refuse_from(
                     "OWN-17",
                     site,
+                    vec![cause],
                     format!("`{name}` is not in its loop-entry state when the loop repeats"),
                 );
             }
@@ -242,14 +252,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     pub(super) fn need_live(&mut self, s: u32, n: NodeId) {
         let v = self.var(s);
         let name = self.slot_name(s);
-        match v.avail {
+        // The cause is where the slot became unavailable: the move, the declaration,
+        // or a move on a path into the join.
+        let (rule, message) = match v.avail {
             Avail::Live => return,
-            Avail::Maybe => {
-                self.refuse("OWN-16", n, format!("`{name}` may have been moved"));
-            }
-            Avail::Moved => self.refuse("OWN-5", n, format!("`{name}` was moved")),
-            Avail::Uninit => self.refuse("OWN-5", n, format!("`{name}` is not initialised")),
-        }
+            Avail::Maybe => ("OWN-16", format!("`{name}` may have been moved")),
+            Avail::Moved => ("OWN-5", format!("`{name}` was moved")),
+            Avail::Uninit => ("OWN-5", format!("`{name}` is not initialised")),
+        };
+        let cause = self.cause(v.at);
+        self.refuse_from(rule, self.span(n), vec![cause], message);
         // Refused once; later uses are not refused again for it.
         self.set(s, Avail::Live, n);
     }
@@ -277,7 +289,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     Hold::CallMut(_) => "is lent `mut` to this call",
                     Hold::Assign => "is reserved by an assignment",
                 };
-                self.refuse_at(rule, site, format!("a place of `{name}` {why}"));
+                let cause = self.cause(f.site);
+                self.refuse_from(
+                    rule,
+                    site,
+                    vec![cause],
+                    format!("a place of `{name}` {why}"),
+                );
                 return false;
             }
         }
@@ -287,10 +305,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let x = self.freezes.remove(i);
         self.vars[x.place.slot as usize].as_mut().unwrap().holds -= 1;
     }
-    pub(super) fn freeze(&mut self, place: Place, hold: Hold) {
+    /// Freeze `place` for `hold`, by the construct at `site`.
+    pub(super) fn freeze(&mut self, place: Place, hold: Hold, site: NodeId) {
+        self.refreeze(Freeze { place, hold, site });
+    }
+    pub(super) fn refreeze(&mut self, f: Freeze) {
         crate::cost_scope!("phase", "ownership state");
-        self.vars[place.slot as usize].as_mut().unwrap().holds += 1;
-        self.freezes.push(Freeze { place, hold });
+        self.vars[f.place.slot as usize].as_mut().unwrap().holds += 1;
+        self.freezes.push(f);
     }
     /// Rewrite or end the records from `from` on: `f` gives a record's new hold, or
     /// None when it ends.
@@ -534,7 +556,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         return;
                     }
                     Origin::MutParam => {
-                        self.refuse("OWN-11", n, format!("`{name}` is a `mut` parameter"));
+                        let cause = self.declared_at(s);
+                        self.refuse_from(
+                            "OWN-11",
+                            self.span(n),
+                            vec![cause],
+                            format!("`{name}` is a `mut` parameter"),
+                        );
                         return;
                     }
                     _ => {}
@@ -548,17 +576,23 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Use::View(hold) => {
                 self.need_live(s, n);
                 if self.check_holds(at.place, Act::Read, n) {
-                    self.freeze(at.place, hold);
+                    self.freeze(at.place, hold, n);
                 }
             }
             Use::Mut(hold) => {
                 if !v.origin.writable() {
-                    self.refuse("OWN-5", n, format!("`{name}` is not writable"));
+                    let cause = self.declared_at(s);
+                    self.refuse_from(
+                        "OWN-5",
+                        self.span(n),
+                        vec![cause],
+                        format!("`{name}` is not writable"),
+                    );
                     return;
                 }
                 self.need_live(s, n);
                 if self.check_holds(at.place, Act::Write, n) {
-                    self.freeze(at.place, hold);
+                    self.freeze(at.place, hold, n);
                 }
             }
         }

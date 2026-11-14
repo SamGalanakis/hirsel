@@ -1,5 +1,6 @@
 // A callback assigned in either branch keeps both descriptors at the join.
-// expect: refuse OWN-10 at 13:3
+// expect: refuse OWN-10 at 14:3
+// expect: cause OWN-10 at 14:3 from 13:14
 fn f(c: bool) {
   let mut x: u64 = 1
   let mut y: u64 = 2

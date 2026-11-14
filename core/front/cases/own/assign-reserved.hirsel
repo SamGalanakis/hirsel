@@ -1,5 +1,6 @@
 // OWN-12, the spec's example: `xs[0]` is reserved while its right side runs, which assigns `xs`, a prefix; refused at that inner place.
-// expect: refuse OWN-12 at 6:37
+// expect: refuse OWN-12 at 7:37
+// expect: cause OWN-12 at 7:37 from 7:27
 
 
 

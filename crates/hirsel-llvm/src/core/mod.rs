@@ -203,6 +203,19 @@ fn emit_ir_target_with_role_facts(
         };
         let definition = module.instances[f.instance.index()].definition.to_string();
         let append_fast = definition == "core@1/string/push_char";
+        let shadow_callee = append_fast
+            .then(|| {
+                module.functions.iter().enumerate().find_map(|(i, callee)| {
+                    let id = FuncId(i as u32);
+                    (module.instances[callee.instance.index()]
+                        .definition
+                        .to_string()
+                        == "core@1/string/push_scalar"
+                        && role_facts.is_some_and(|r| r.place_blind(id, 0)))
+                    .then_some(id)
+                })
+            })
+            .flatten();
         let function_debug = debug[i].as_ref();
         let aliases = role_facts.as_ref().and_then(|r| {
             alias::Scopes::new(
@@ -217,6 +230,7 @@ fn emit_ir_target_with_role_facts(
         let mut e = FunctionEmitter {
             function: Some(FuncId(i as u32)),
             append_fast,
+            shadow_callee,
             caller_site: "%caller_site",
             debug_location: function_debug.map(|d| d.location(None)),
             anchor: None,
@@ -616,6 +630,7 @@ struct FunctionEmitter<'a> {
     abi: abi::Return,
     has_status: bool,
     append_fast: bool,
+    shadow_callee: Option<FuncId>,
     failures: &'a failure::Failures,
     constants: &'a [Option<u64>],
     empty_bounds: empty::EmptyBounds,

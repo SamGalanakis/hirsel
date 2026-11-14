@@ -184,6 +184,7 @@ pub(super) fn glue(
         let mut e = FunctionEmitter {
             function: None,
             append_fast: false,
+            shadow_callee: None,
             module,
             body: &empty,
             recipes,

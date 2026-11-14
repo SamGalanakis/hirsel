@@ -167,6 +167,54 @@ impl Return {
 }
 
 impl FunctionEmitter<'_> {
+    fn shadow_argument(&self, site: &CallSite) -> Option<usize> {
+        let Callee::Direct(f) = site.callee else {
+            return None;
+        };
+        if self.shadow_callee != Some(f) {
+            return None;
+        }
+        let sig = &self.module.signatures[site.signature.index()];
+        let Some(Param::Address {
+            place: PlaceTy::Declared(t),
+            loan: Loan::Mut,
+        }) = sig.params.first()
+        else {
+            return None;
+        };
+        if !hirsel_core_ir::roles::carrier(self.module, *t) || self.fixed(*t).size != 24 {
+            return None;
+        }
+        Some(usize::from(sig.dest.is_some()))
+    }
+    fn shadow_copy_in(&mut self, original: &str) -> String {
+        let shadow = self.temp("[24 x i8]");
+        self.runtime_void("llvm.lifetime.start.p0", &[("ptr".into(), shadow.clone())]);
+        self.runtime_void(
+            "llvm.memcpy.p0.p0.i64",
+            &[
+                ("ptr".into(), shadow.clone()),
+                ("ptr".into(), original.into()),
+                ("i64".into(), "24".into()),
+                ("i1".into(), "false".into()),
+            ],
+        );
+        shadow
+    }
+    fn shadow_copy_back(&mut self, original: &str, shadow: &str) {
+        // The callee may change the carrier even when it returns failure.
+        // These word copies transfer no ownership, marks, drops or charges.
+        self.runtime_void(
+            "llvm.memcpy.p0.p0.i64",
+            &[
+                ("ptr".into(), original.into()),
+                ("ptr".into(), shadow.into()),
+                ("i64".into(), "24".into()),
+                ("i1".into(), "false".into()),
+            ],
+        );
+        self.runtime_void("llvm.lifetime.end.p0", &[("ptr".into(), shadow.into())]);
+    }
     pub(super) fn return_call(&mut self, site: &CallSite, ending: &super::forward::Ending) -> bool {
         let has_status = match site.callee {
             Callee::Direct(f) => self.failures.may_fail[f.index()],
@@ -183,6 +231,8 @@ impl FunctionEmitter<'_> {
             return false;
         }
         let mut args = vec!["ptr %context".into()];
+        let shadow_index = self.shadow_argument(site);
+        let mut carrier_shadow = None;
         for (i, arg) in site
             .args
             .get(&self.body.pools.args)
@@ -194,7 +244,16 @@ impl FunctionEmitter<'_> {
                 "ptr %dest".into()
             } else {
                 match *arg {
-                    Arg::Address(a) => format!("ptr {}", self.address(a)),
+                    Arg::Address(a) => {
+                        let p = self.address(a);
+                        if shadow_index == Some(i) {
+                            let shadow = self.shadow_copy_in(&p);
+                            carrier_shadow = Some((p, shadow.clone()));
+                            format!("ptr {shadow}")
+                        } else {
+                            format!("ptr {p}")
+                        }
+                    }
                     Arg::Value(v) => {
                         let x = self.numeric(v);
                         format!(
@@ -216,12 +275,19 @@ impl FunctionEmitter<'_> {
             Callee::Runtime(_) => unreachable!(),
         };
         args.push(format!("i64 {}", self.call_site_word(site.callee)));
-        if abi.fields != self.abi.fields {
+        if carrier_shadow.is_some() || abi.fields != self.abi.fields {
             // An infallible private callee has no status; the public caller
             // still returns its constant zero. Its destination can be forwarded
             // even though that return convention prevents a tail jump.
             let values = self.invoke(&abi, &callee, args);
-            self.return_values(&values);
+            if let Some((original, shadow)) = carrier_shadow {
+                self.shadow_copy_back(&original, &shadow);
+            }
+            if abi.fields != self.abi.fields {
+                self.return_values(&values);
+            } else {
+                self.return_abi_values(&values);
+            }
             return true;
         }
         if abi.indirect {
@@ -362,7 +428,15 @@ impl FunctionEmitter<'_> {
         };
         let mut args = vec![];
         args.push("ptr %context".into());
-        for arg in site.args.get(&self.body.pools.args).unwrap() {
+        let shadow_index = self.shadow_argument(site);
+        let mut carrier_shadow = None;
+        for (i, arg) in site
+            .args
+            .get(&self.body.pools.args)
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
             args.push(match *arg {
                 Arg::Value(v) => {
                     let x = self.numeric(v);
@@ -372,7 +446,16 @@ impl FunctionEmitter<'_> {
                         extension(self.abi.target, self.vty(v))
                     )
                 }
-                Arg::Address(a) => format!("ptr {}", self.address(a)),
+                Arg::Address(a) => {
+                    let p = self.address(a);
+                    if shadow_index == Some(i) {
+                        let shadow = self.shadow_copy_in(&p);
+                        carrier_shadow = Some((p, shadow.clone()));
+                        format!("ptr {shadow}")
+                    } else {
+                        format!("ptr {p}")
+                    }
+                }
             });
         }
         let callee = match site.callee {
@@ -386,6 +469,9 @@ impl FunctionEmitter<'_> {
         };
         args.push(format!("i64 {}", self.call_site_word(site.callee)));
         let mut values = self.invoke(&abi, &callee, args);
+        if let Some((original, shadow)) = carrier_shadow {
+            self.shadow_copy_back(&original, &shadow);
+        }
         if has_status {
             let status = values.pop().unwrap();
             let failed = self.calc(format!("icmp ne i8 {status}, 0"));

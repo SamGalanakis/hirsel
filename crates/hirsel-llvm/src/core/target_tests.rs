@@ -81,6 +81,7 @@ fn linux_c_results_execute_with_mixed_fields_padding_and_hfas() -> std::result::
             let mut e = FunctionEmitter {
                 function: None,
                 append_fast: false,
+                shadow_callee: None,
                 module: &module,
                 body: &body,
                 recipes: &[],

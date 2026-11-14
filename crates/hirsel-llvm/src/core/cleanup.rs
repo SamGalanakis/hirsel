@@ -77,6 +77,7 @@ pub(super) fn drop_glue(
         let mut e = FunctionEmitter {
             function: None,
             append_fast: false,
+            shadow_callee: None,
             module,
             body: &empty,
             recipes,
@@ -527,6 +528,7 @@ fn counted_glue(
         let mut e = FunctionEmitter {
             function: None,
             append_fast: false,
+            shadow_callee: None,
             module,
             body: &empty,
             recipes,

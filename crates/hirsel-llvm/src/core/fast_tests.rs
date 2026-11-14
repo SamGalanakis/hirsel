@@ -227,6 +227,7 @@ fn atomic_helpers_use_checked_cas_and_release_acquire() {
     let mut e = FunctionEmitter {
         function: None,
         append_fast: false,
+        shadow_callee: None,
         module: &module,
         body: &body,
         recipes: &[],

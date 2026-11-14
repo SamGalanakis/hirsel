@@ -51,6 +51,7 @@ pub(super) fn emit(
         let mut e = FunctionEmitter {
             function: None,
             append_fast: false,
+            shadow_callee: None,
             module,
             body: &body,
             recipes,

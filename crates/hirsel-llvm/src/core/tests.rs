@@ -57,6 +57,102 @@ fn cleared_scalar_carriers_do_not_drop_saved_storage_but_keep_finalizers() {
 }
 
 #[test]
+fn scalar_growth_shadow_copies_back_before_success_failure_and_forwarded_return() {
+    let source = include_str!("../../tests/core_runtime/carrier-shadow.core");
+    let nonterminal = " v2: u64 = const 8\n address a1\n v3: u64 = read a1\n store a1, v3\n";
+    for terminal in [false, true] {
+        let source = if terminal {
+            source.replace(nonterminal, " v2: u64 = const 8\n")
+        } else {
+            source.into()
+        };
+        for blind in [true, false] {
+            let source = if blind {
+                source.clone()
+            } else {
+                source.replace(
+                    " v5: u32 = const 0",
+                    " v13: bool = eq v0, v0\n v5: u32 = const 0",
+                )
+            };
+            let module = text::parse(&source).unwrap();
+            wf::module(&module).unwrap();
+            let facts = hirsel_core_ir::roles::Facts::new(&module);
+            assert_eq!(facts.place_blind(FuncId(1), 0), blind);
+            assert!(
+                !facts.sealed(FuncId(1), 0),
+                "the carrier really copies between slots"
+            );
+            let records = facts.record(&module);
+            let mut declaration = module.clone();
+            declaration.functions[1].body = None;
+            let no_record =
+                emit_ir_relocatable_for_target(&declaration, Target::X86_64Linux, false, false)
+                    .unwrap();
+            assert!(!no_record.contains("call void @llvm.lifetime.start.p0"));
+            let installed = hirsel_core_ir::roles::Facts::program(&[&declaration], &records)
+                .pop()
+                .unwrap();
+            let restored = emit_ir_relocatable_with_role_facts_for_target(
+                &declaration,
+                Target::X86_64Linux,
+                false,
+                false,
+                &installed,
+            )
+            .unwrap();
+            assert_eq!(
+                restored.contains("call void @llvm.lifetime.start.p0"),
+                blind
+            );
+            let ir = emit_ir_with_facts(&module, false, true).unwrap();
+            assert_eq!(
+                ir.contains("call void @llvm.lifetime.start.p0"),
+                blind,
+                "{ir}"
+            );
+            let off = emit_ir_with_facts(&module, false, false).unwrap();
+            assert!(!off.contains("call void @llvm.lifetime.start.p0"));
+            let cases = [0, 1].map(|mode| Case {
+                function: FuncId(2),
+                args: vec![mode],
+                limit: u64::MAX,
+                injection: None,
+            });
+            for opt in [Optimization::None, Optimization::Speed] {
+                let reports = execute_optimized(&module, &cases, "", "", opt);
+                for (case, report) in cases.iter().zip(reports) {
+                    assert_eq!(
+                        report.outcome,
+                        eval::run(&module, case.function, &case.args, case.limit).outcome
+                    );
+                    if case.args[0] == 0 {
+                        assert_eq!(report.outcome, eval::Outcome::Returned(vec![7, 0]));
+                    }
+                    assert_eq!(report.used, 0);
+                }
+                let context = crate::context::Context::new();
+                let direct = crate::context::Module::parse(&context, "hirsel-core", &ir).unwrap();
+                let machine = crate::context::TargetMachine::new(
+                    &hirsel_lir::layout_types::TargetSpec::x86_64_unknown_linux_gnu(),
+                    matches!(opt, Optimization::Speed),
+                )
+                .unwrap();
+                direct.set_target(&machine);
+                if matches!(opt, Optimization::Speed) {
+                    direct.run_core_passes(&machine).unwrap();
+                }
+                direct.verify().unwrap();
+                assert_eq!(
+                    direct.emit_object(&machine).unwrap(),
+                    hirsel_llvm_lazy::compile_ir(&ir, matches!(opt, Optimization::Speed)).unwrap()
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn storage_roles_keep_moved_buffers_in_one_scope() {
     let module = text::parse(include_str!("../../tests/core_runtime/roles.core")).unwrap();
     wf::module(&module).unwrap();

@@ -21,9 +21,9 @@ static struct world world;
 static uint8_t operand_bytes[64]="abc";
 static int is_file(uint8_t op) { return op>=1 && op<=5; }
 static int has_operand(uint8_t op) {
-    return op==0 || op==1 || op==2 || (op>=6 && op<=9) || op>=12;
+    return op==0 || op==1 || op==2 || (op>=6 && op<=9) || (op>=12 && op<14);
 }
-static int has_path(uint8_t op) { return op==0 || op==6 || op==8 || op==9; }
+static int has_path(uint8_t op) { return op==0 || op==6 || op==8 || op==9 || op==14; }
 static void require(int condition) { if(!condition) abort(); }
 static int path_is(HirselCoreHostRequest *r,const char *s) {
     return r->path_len==strlen(s) && !memcmp(r->path,s,r->path_len);
@@ -38,11 +38,19 @@ static HirselCoreHostOutcome issue(void *state,HirselCoreHostRequest *r) {
         require(op==w->operation && r->site==0);
         require(r->mode==(op==0 ? 3 : 0));
         require(r->handle==(is_file(op) ? 111 : 7));
-        require(r->buffer.data==(has_operand(op) ? operand_bytes : NULL));
-        require(r->buffer.len==(has_operand(op) ? 3 : 0));
-        require(r->buffer.capacity==(has_operand(op) ? 64 : 0));
-        require(r->path==(has_path(op) ? operand_bytes : NULL));
-        require(r->path_len==(has_path(op) ? 3 : 0));
+        if(op==14) {
+            require(r->buffer.data==NULL && r->buffer.len==0 && r->buffer.capacity==0);
+            require(r->path!=NULL && r->path_len==7);
+        } else if(op==15) {
+            require(r->buffer.data!=NULL && r->buffer.len==8 && r->buffer.capacity==8);
+            require(r->path==NULL && r->path_len==0);
+        } else {
+            require(r->buffer.data==(has_operand(op) ? operand_bytes : NULL));
+            require(r->buffer.len==(has_operand(op) ? 3 : 0));
+            require(r->buffer.capacity==(has_operand(op) ? 64 : 0));
+            require(r->path==(has_path(op) ? operand_bytes : NULL));
+            require(r->path_len==(has_path(op) ? 3 : 0));
+        }
         if(op==1 || op==7) {
             r->buffer.data[r->buffer.len++]='X';
         }

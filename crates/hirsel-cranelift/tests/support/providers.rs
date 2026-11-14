@@ -85,8 +85,12 @@ fn execute_runs(module: &c::Module, runs: &[Run], optimize: bool) {
             };
             let mut args = vec![handle.to_owned()];
             if sig.params.len() >= 2 {
-                source.push_str("HirselCoreBuffer operand={operand_bytes,3,64};\n");
-                args.push("&operand".into());
+                if op == HostOp::SleepUntil {
+                    args.push("UINT64_C(3)".into());
+                } else {
+                    source.push_str("HirselCoreBuffer operand={operand_bytes,3,64};\n");
+                    args.push("&operand".into());
+                }
             }
             if sig.params.len() == 3 {
                 if op == HostOp::Rename {
@@ -126,6 +130,7 @@ fn execute_runs(module: &c::Module, runs: &[Run], optimize: bool) {
         source.push_str("}\n");
         if let Some((op, _)) = run.matrix
             && sig.params.len() >= 2
+            && op != HostOp::SleepUntil
         {
             let len = if matches!(op, HostOp::Read | HostOp::Mkdtemp) {
                 4
@@ -298,6 +303,11 @@ fn every_host_row_preserves_c_fields_and_wait_status() {
     for (i, op) in HostOp::ALL.into_iter().enumerate() {
         for failing in [false, true] {
             if !op.waits() && failing {
+                continue;
+            }
+            // The dedicated sleep export is a replay-delivered cancellation
+            // point; this generic provider matrix injects only host_op rows.
+            if op == HostOp::SleepUntil && failing {
                 continue;
             }
             let outcome = if failing {

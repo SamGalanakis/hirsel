@@ -182,6 +182,7 @@ pub(super) fn glue(
     for field in collections {
         let entries = Entries::new(module, recipes, field);
         let mut e = FunctionEmitter {
+            append_fast: false,
             module,
             body: &empty,
             recipes,

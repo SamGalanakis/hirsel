@@ -79,6 +79,7 @@ fn linux_c_results_execute_with_mixed_fields_padding_and_hfas() -> std::result::
         for (i, shape) in shapes.iter().enumerate() {
             let fields = shape.iter().copied().map(Ty::Scalar).collect::<Vec<_>>();
             let mut e = FunctionEmitter {
+                append_fast: false,
                 module: &module,
                 body: &body,
                 recipes: &[],

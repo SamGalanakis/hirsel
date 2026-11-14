@@ -75,6 +75,7 @@ pub(super) fn drop_glue(
     let empty = Body::default();
     for t in normal {
         let mut e = FunctionEmitter {
+            append_fast: false,
             module,
             body: &empty,
             recipes,
@@ -522,6 +523,7 @@ fn counted_glue(
             continue;
         }
         let mut e = FunctionEmitter {
+            append_fast: false,
             module,
             body: &empty,
             recipes,

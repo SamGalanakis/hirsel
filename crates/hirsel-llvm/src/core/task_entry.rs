@@ -49,6 +49,7 @@ pub(super) fn emit(
         };
         let abi = abi::Return::internal_on_target(target, &fields);
         let mut e = FunctionEmitter {
+            append_fast: false,
             module,
             body: &body,
             recipes,

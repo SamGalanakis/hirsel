@@ -185,11 +185,14 @@ fn emit_ir_target_with_facts(
             .unwrap();
             continue;
         };
+        let definition = module.instances[f.instance.index()].definition.to_string();
+        let append_fast = definition == "core@1/string/push_char";
         let function_debug = debug[i].as_ref();
         let aliases = facts
             .then(|| alias::Scopes::new(module, f, &name, &mut next_scope, &mut intrinsics))
             .flatten();
         let mut e = FunctionEmitter {
+            append_fast,
             caller_site: "%caller_site",
             debug_location: function_debug.map(|d| d.location(None)),
             anchor: None,
@@ -294,6 +297,12 @@ fn emit_ir_target_with_facts(
         } else {
             format!("{name}.infallible")
         };
+        // Inline the reserved ASCII append and share the UTF-8/growth body.
+        let append_inline = match definition.as_str() {
+            "core@1/string/push_char" => " alwaysinline",
+            "core@1/string/push_scalar" => " noinline",
+            _ => "",
+        };
         let destination = sig
             .dest
             .filter(|_| sig.results.is_empty())
@@ -311,7 +320,7 @@ fn emit_ir_target_with_facts(
             .unwrap_or_default();
         writeln!(
             text,
-            "define {linkage}{} @{body_name}({}){destination}{}{} {{\nentry:\n{}{} }}",
+            "define {linkage}{} @{body_name}({}){append_inline}{destination}{}{} {{\nentry:\n{}{} }}",
             e.abi.return_type(),
             params.join(", "),
             abi::view_input_marker(sig),
@@ -557,6 +566,7 @@ struct FunctionEmitter<'a> {
     recipes: &'a [hirsel_core_layout::Recipe],
     abi: abi::Return,
     has_status: bool,
+    append_fast: bool,
     failures: &'a failure::Failures,
     constants: &'a [Option<u64>],
     empty_bounds: empty::EmptyBounds,

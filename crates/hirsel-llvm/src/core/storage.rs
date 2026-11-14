@@ -600,8 +600,18 @@ impl FunctionEmitter<'_> {
                     None
                 };
                 let site = self.site_word();
+                // Only the named String append body needs its empty scalar
+                // temporaries exposed before the ordinary inliner sees it.
+                let inline = if self.append_fast
+                    && hirsel_core_ir::roles::carrier(self.module, ty)
+                    && self.module.types[ty.index()].finalizer.is_none()
+                {
+                    " alwaysinline"
+                } else {
+                    ""
+                };
                 let failed = self.calc(format!(
-                    "call i8 @core_drop_{}(ptr %context, ptr {p}, i64 {site})",
+                    "call i8 @core_drop_{}(ptr %context, ptr {p}, i64 {site}){inline}",
                     ty.0
                 ));
                 let failed = self.calc(format!("icmp ne i8 {failed}, 0"));

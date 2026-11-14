@@ -541,6 +541,13 @@ fn link(
     let tools = crate::tool_inputs::link_tools(&options.cc)
         .map_err(|error| NativeStop::Link(format!("tool selection: {error}")))?;
     let cc_version = command(Command::new(&tools.0.path).arg("--version"))?;
+    // Development links use lld's cheap string-merging mode. Release keeps
+    // the linker default; this spelling is part of the executable key below.
+    let link_mode = if options.optimize {
+        "release-link-defaults"
+    } else {
+        "development-link-O0"
+    };
     let identities: Vec<_> = objects.iter().map(|o| o.identity).collect();
     let link_key = key(
         "hirsel.core-executable.v2",
@@ -553,6 +560,7 @@ fn link(
             options.backend,
             options.optimize,
             options.debug_lines,
+            link_mode,
             ContentHash::of_parts(
                 "hirsel.core-link-inputs.v2",
                 headers
@@ -587,6 +595,9 @@ fn link(
             cc.arg("-fuse-ld=lld");
         }
         cc.arg(format!("-B{}/", linker_dir.display()));
+        if !options.optimize {
+            cc.arg("-Wl,-O0");
+        }
         cc.arg("-pie").arg(&entry);
         let debug = if options.debug_lines {
             let debug = crate::native_debug::bind_side_products(

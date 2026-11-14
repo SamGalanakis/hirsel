@@ -14,12 +14,13 @@ struct Counts {
     entries: Vec<Count>,
     buckets: Vec<u64>,
 }
-fn hash(s: &str) -> u64 {
-    s.bytes()
+fn hash_bytes(s: &[u8]) -> u64 {
+    s.iter()
+        .copied()
         .fold(0u64, |h, b| h.wrapping_mul(31).wrapping_add(u64::from(b)))
 }
 impl Counts {
-    fn tally(&mut self, s: &str) {
+    fn tally(&mut self, s: &String) {
         if (self.entries.len() + 1) * 2 >= self.buckets.len() {
             let next = if self.buckets.len() < 8 {
                 16
@@ -30,7 +31,8 @@ impl Counts {
             buckets.resize(next, 0u64);
             let mut i = 0u64;
             for e in &self.entries {
-                let mut slot = hash(&self.storage[e.lo as usize..e.hi as usize]) % next as u64;
+                let mut slot =
+                    hash_bytes(&self.storage[e.lo as usize..e.hi as usize]) % next as u64;
                 while buckets[index(slot)] != 0 {
                     slot = (slot + 1) % next as u64;
                 }
@@ -39,11 +41,11 @@ impl Counts {
             }
             self.buckets = buckets;
         }
-        let mut slot = hash(s) % self.buckets.len() as u64;
+        let mut slot = hash_bytes(s.as_bytes()) % self.buckets.len() as u64;
         while self.buckets[index(slot)] != 0 {
             let i = index(self.buckets[index(slot)] - 1);
             let e = self.entries[i];
-            if &self.storage[e.lo as usize..e.hi as usize] == s {
+            if &self.storage[e.lo as usize..e.hi as usize] == s.as_bytes() {
                 self.entries[i].count += 1;
                 return;
             }
@@ -61,7 +63,7 @@ struct Environment<'a> {
     variant: &'a str,
 }
 struct Callback<'a, 'b> {
-    call: fn(&mut Environment<'b>, &str) -> Result<String>,
+    call: fn(&mut Environment<'b>, &String) -> Result<String>,
     environment: &'a mut Environment<'b>,
 }
 fn map(xs: &[String], f: Callback<'_, '_>) -> Result<Vec<String>> {
@@ -71,18 +73,18 @@ fn map(xs: &[String], f: Callback<'_, '_>) -> Result<Vec<String>> {
     }
     Ok(ys)
 }
-fn mapped(env: &mut Environment<'_>, s: &str) -> Result<String> {
+fn mapped(env: &mut Environment<'_>, s: &String) -> Result<String> {
     env.position += 1;
     let site = name("callback", env.position, ".string");
-    admission(env.variant, &site)?;
+    admission(env.variant, &site, (s.len() as u64) + 1)?;
     if s == "!error" {
-        return Err(name("Callback@", env.position, ""));
+        return Err(name("Callback@", env.position, "").into());
     }
-    let mut t = s.to_owned();
+    let mut t = String::copy(s);
     t.push('!');
     Ok(t)
 }
-fn count_if(xs: &[String], call: fn(&(), &str) -> bool, env: &()) -> u64 {
+fn count_if(xs: &[String], call: fn(&(), &String) -> bool, env: &()) -> u64 {
     let mut count = 0;
     for x in xs {
         if call(env, x) {
@@ -91,7 +93,7 @@ fn count_if(xs: &[String], call: fn(&(), &str) -> bool, env: &()) -> u64 {
     }
     count
 }
-fn run(input: &str, variant: &str, trace: &Trace) -> Result<()> {
+fn run(input: View<'_>, variant: &str, trace: &Trace) -> Result<()> {
     let _list = trace.marker("list");
     let mut xs = Vec::new();
     let mut at = 0;
@@ -118,10 +120,11 @@ fn run(input: &str, variant: &str, trace: &Trace) -> Result<()> {
         i += 1;
         total += s.len();
         let site = name("tally", i, ".key");
-        admission(variant, &site)?;
+        admission(variant, &site, s.len() as u64)?;
         counts.tally(s);
     }
-    let mut out = "long=".to_owned();
+    let mut out = String::new();
+    out.push_str("long=");
     num(&mut out, count_if(&ys, |_, s| s.len() >= 6, &()));
     out.push_str(" bytes=");
     num(&mut out, total);
@@ -140,6 +143,6 @@ fn main() {
         Err(_) => std::process::exit(2),
     };
     let trace = Trace::new(6);
-    let result = run(&input, &variant, &trace);
+    let result = run(input.view(), &variant, &trace);
     trace.finish(result);
 }

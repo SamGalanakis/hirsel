@@ -1,12 +1,14 @@
 // Matched to request-scratch/matched.hirsel: counted fixed header span and owned byte arena.
 // Independent review pending.
+#[path = "../matched_map.rs"]
+mod matched_map;
 #[path = "../matched_support.rs"]
 mod support;
-use std::collections::HashMap;
+use matched_map::Map;
 use std::sync::Arc;
 use support::*;
 struct Config {
-    routes: HashMap<String, String>,
+    routes: Map<String>,
 }
 #[derive(Clone, Copy)]
 struct Header {
@@ -15,16 +17,16 @@ struct Header {
     value_lo: u32,
     value_hi: u32,
 }
-fn header_value<'a>(s: &'a str, hs: &[Header], key: &str) -> Option<&'a str> {
+fn header_value<'a>(s: &'a String, hs: &[Header], key: &str) -> Option<View<'a>> {
     for h in hs {
-        if &s[h.name_lo as usize..h.name_hi as usize] == key {
-            return Some(&s[h.value_lo as usize..h.value_hi as usize]);
+        if &s[h.name_lo as usize..h.name_hi as usize] == key.as_bytes() {
+            return Some(s.view().slice(h.value_lo as usize, h.value_hi as usize));
         }
     }
     None
 }
 fn request(
-    block: &str,
+    block: View<'_>,
     variant: &str,
     number: u64,
     config: Arc<Config>,
@@ -51,7 +53,7 @@ fn request(
         h += 1;
         let mut site = name("request", number, ".header");
         num(&mut site, h);
-        admission(variant, &site)?;
+        admission(variant, &site, 0)?;
         let colon = row.find(": ").ok_or("Parse@header")?;
         let name_lo = narrow(arena.len());
         arena.push_str(&row[..colon]);
@@ -69,7 +71,7 @@ fn request(
     let id = header_value(&arena, &headers, "X-Id").ok_or("Parse@id")?;
     let content = header_value(&arena, &headers, "Content").ok_or("Parse@content")?;
     let size = banner.len() + id.len() + content.len() + 2;
-    admission(variant, &name("request", number, ".reply"))?;
+    admission(variant, &name("request", number, ".reply"), size as u64)?;
     let mut reply = String::with_capacity(size);
     reply.push_str(banner);
     reply.push(':');
@@ -81,10 +83,10 @@ fn request(
     }
     Ok((reply.len(), sum(reply.as_bytes())))
 }
-fn run(input: &str, variant: &str, trace: &Trace) -> Result<()> {
-    let mut routes = HashMap::new();
-    routes.insert("/alpha".to_owned(), "welcome".to_owned());
-    routes.insert("/beta".to_owned(), "ready".to_owned());
+fn run(input: View<'_>, variant: &str, trace: &Trace) -> Result<()> {
+    let mut routes = Map::new();
+    routes.insert(String::literal("/alpha"), String::literal("welcome"));
+    routes.insert(String::literal("/beta"), String::literal("ready"));
     let config = Arc::new(Config { routes });
     let mut requests = 0u64;
     let mut bytes = 0usize;
@@ -92,10 +94,13 @@ fn run(input: &str, variant: &str, trace: &Trace) -> Result<()> {
     let mut at = 0;
     let result = (|| {
         while at < input.len() {
-            let end = input[at..].find("\n\n").map_or(input.len(), |p| at + p);
+            let end = input
+                .slice(at, input.len())
+                .find("\n\n")
+                .map_or(input.len(), |p| at + p);
             if end > at {
                 let (n, s) = request(
-                    &input[at..end],
+                    input.slice(at, end),
                     variant,
                     requests + 1,
                     config.clone(),
@@ -130,6 +135,6 @@ fn main() {
         }
     }
     let trace = Trace::new(events);
-    let result = run(&input, &variant, &trace);
+    let result = run(input.view(), &variant, &trace);
     trace.finish(result);
 }

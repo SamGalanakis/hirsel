@@ -95,11 +95,11 @@ fn source(s: Source) -> Result<(u64, bool)> {
     if s.variant == "cancel-send" {
         for id in 3..=8 {
             let mut rows = Vec::new();
-            rows.push("cancel".to_owned());
+            rows.push(String::literal("cancel"));
             let _ = s.output.send(batch(id, rows, &s.released));
         }
         let mut rows = Vec::new();
-        rows.push("cancel".to_owned());
+        rows.push(String::literal("cancel"));
         let ninth = batch(9, rows, &s.released);
         let pending = match s.output.try_send(ninth) {
             Err(TrySendError::Full(b)) => b,
@@ -126,37 +126,44 @@ struct Transform {
     cancel_gate: SyncSender<()>,
 }
 struct TransformResult {
-    error: Option<String>,
+    completed: u64,
+    error: Option<Error>,
     retained: Option<Receiver<Batch>>,
 }
 fn transform(t: Transform) -> TransformResult {
     let _ = t.start.recv();
     if t.variant == "cancel-send" {
-        for _ in 0..8 {
+        let mut count = 0u64;
+        while count < 8 {
             let _ = t.input.recv();
+            count += 1;
         }
         return TransformResult {
+            completed: 0,
             error: Some("Cancelled@source.send".into()),
             retained: Some(t.input),
         };
     }
+    let mut completed = 0u64;
     while let Ok(mut current) = t.input.recv() {
         if current.id == 2 && t.variant != "normal" {
             if t.variant == "cancel" {
                 let _ = t.ready.try_send(());
                 wait_cancel_gate(&t.cancel_gate);
                 return TransformResult {
+                    completed,
                     error: Some("Cancelled@transform.check".into()),
                     retained: None,
                 };
             }
-            let error = if t.variant == "capacity:batch2.output" {
-                "Capacity@batch2.output"
-            } else {
-                "Transform@batch2"
+            let size = (((current.data.len() as u64) + 7) / 8) * 8;
+            let error = match admission(&t.variant, "batch2.output", size) {
+                Err(e) => e,
+                Ok(()) => Error::from("Transform@batch2"),
             };
             return TransformResult {
-                error: Some(error.into()),
+                completed,
+                error: Some(error),
                 retained: None,
             };
         }
@@ -164,17 +171,20 @@ fn transform(t: Transform) -> TransformResult {
         if t.output.send(current).is_err() {
             break;
         }
+        completed += 1;
         let _ = t.forwarded.try_send(());
         if t.variant == "cancel-receive" {
             let _ = t.ready.try_send(());
             wait_cancel_gate(&t.cancel_gate);
             return TransformResult {
+                completed,
                 error: Some("Cancelled@transform.receive".into()),
                 retained: None,
             };
         }
     }
     TransformResult {
+        completed,
         error: None,
         retained: None,
     }
@@ -204,7 +214,7 @@ fn ids(out: &mut String, xs: &[u64]) {
             out.push(',');
         }
         first = false;
-        num(out, id);
+        num(out, *id);
     }
     out.push('\n');
 }
@@ -235,7 +245,7 @@ fn run(input: String, variant: &str) -> Result<()> {
     let _ = transform_cancel.try_send(());
     let s = Source {
         input,
-        variant: variant.to_owned(),
+        variant: String::copy(variant),
         output: q1,
         released,
         ready,
@@ -249,7 +259,7 @@ fn run(input: String, variant: &str) -> Result<()> {
     );
     let (forwarded, progress) = mpsc::sync_channel(batches);
     let t = Transform {
-        variant: variant.to_owned(),
+        variant: String::copy(variant),
         input: r1,
         output: q2,
         start: started,

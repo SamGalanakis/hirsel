@@ -1,5 +1,6 @@
 // Matched to json/matched.hirsel and std.json: exact preorder indexed blob, sizing/write passes.
 // Independent review pending.
+mod matched_float;
 mod matched_json;
 mod matched_sort;
 #[path = "../matched_support.rs"]
@@ -12,19 +13,32 @@ fn put_bytes(s: &[u8]) -> Result<()> {
         .write_all(s)
         .map_err(|_| "Io@stdout".into())
 }
+fn problem(e: Error, n: u64) -> Error {
+    let prefix = if e.label == "Syntax" {
+        "Syntax@document"
+    } else if e.label == "InvalidNumber" {
+        "InvalidNumber@document"
+    } else {
+        "Build@document"
+    };
+    name(prefix, n, "").into()
+}
 fn document(
-    source: &str,
-    path: &str,
+    source: View<'_>,
+    path: View<'_>,
     variant: &str,
     number: u64,
     trace: &Trace,
 ) -> Result<(usize, u64)> {
     let _owner = trace.marker(&name("document", number, ""));
-    if variant.strip_prefix("capacity:") == Some(name("document", number, ".blob").as_str()) {
-        matched_json::size(source).map_err(|e| name(&format!("{e}@document"), number, ""))?;
-        admission(variant, &name("document", number, ".blob"))?;
+    if let Some(site) = variant.strip_prefix("capacity:") {
+        let reservation = name("document", number, ".blob");
+        if reservation == View::from(site) {
+            let requested = matched_json::size(source).map_err(|e| problem(e, number))?;
+            admission(variant, &reservation, requested as u64)?;
+        }
     }
-    let blob = Blob::parse(source).map_err(|e| name(&format!("{e}@document"), number, ""))?;
+    let blob = Blob::parse(source).map_err(|e| problem(e, number))?;
     let mut pretty = Vec::new();
     blob.render(&mut pretty, 0, 0, true);
     let mut answer = name("query", number, "=").into_bytes();
@@ -37,7 +51,7 @@ fn document(
     }
     Ok((pretty.len(), sum(&pretty)))
 }
-fn run(input: &str, variant: &str, trace: &Trace) -> Result<()> {
+fn run(input: View<'_>, variant: &str, trace: &Trace) -> Result<()> {
     let mut at = 0;
     let path = line(input, &mut at);
     let (mut count, mut total, mut checksum) = (0u64, 0usize, 0u64);
@@ -70,6 +84,6 @@ fn main() {
         events += 2;
     }
     let trace = Trace::new(events);
-    let result = run(&input, &variant, &trace);
+    let result = run(input.view(), &variant, &trace);
     trace.finish(result);
 }

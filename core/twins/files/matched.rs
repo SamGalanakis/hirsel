@@ -18,8 +18,8 @@ impl Drop for Directory {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
-fn event(tx: &SyncSender<Event>, prefix: &str, name: &str) {
-    let mut line = prefix.to_owned();
+fn event(tx: &SyncSender<Event>, prefix: &str, name: impl AsRef<[u8]>) {
+    let mut line = String::copy(prefix);
     line.push_str(name);
     tx.try_send(Event::Line(line)).unwrap();
 }
@@ -38,15 +38,15 @@ impl Owned {
         variant: &str,
         tx: &SyncSender<Event>,
     ) -> Self {
-        let mut failure = "error-release-".to_owned();
+        let mut failure = String::copy("error-release-");
         failure.push_str(name);
-        let mut line = "acquire=".to_owned();
+        let mut line = String::copy("acquire=");
         line.push_str(name);
         let owner = Self {
             handle,
             lock,
-            name: name.to_owned(),
-            injected: variant == failure || variant == "error-cleanup-all",
+            name: String::copy(name),
+            injected: failure == variant || variant == "error-cleanup-all",
             tx: tx.clone(),
         };
         tx.try_send(Event::Line(line)).unwrap();
@@ -66,7 +66,7 @@ impl Drop for Owned {
         event(&self.tx, "release=", &self.name);
         if failed || self.injected {
             event(&self.tx, "cleanup-error=Io@release-", &self.name);
-            let mut label = "Io@release-".to_owned();
+            let mut label = String::copy("Io@release-");
             label.push_str(&self.name);
             let _ = self.tx.try_send(Event::Cleanup(label));
         }
@@ -97,7 +97,7 @@ fn copy_files(dir: &Path, variant: &str, tx: &SyncSender<Event>) -> Result<()> {
     let locked = open(&dir.join("lock.txt")).map_err(|_| "Lock@acquire")?;
     locked.try_lock().map_err(|_| "Lock@acquire")?;
     let _lock = Owned::new(None, Some(locked), "lock", variant, tx);
-    admission(variant, "copy.buffer")?;
+    admission(variant, "copy.buffer", 4096)?;
     let mut buffer = vec![0u8; 4096];
     let mut copied = 0u64;
     loop {
@@ -122,13 +122,20 @@ fn copy_files(dir: &Path, variant: &str, tx: &SyncSender<Event>) -> Result<()> {
     event(tx, "copied=", &name("", copied, ""));
     Ok(())
 }
-fn run(input: &str, variant: &str) -> Result<()> {
+fn run(input: View<'_>, variant: &str) -> Result<()> {
     let (tx, rx) = mpsc::sync_channel(16);
     let mut folder = String::with_capacity(32);
     folder.push_str(".m1-files-");
     num(&mut folder, std::process::id());
-    std::fs::create_dir(&folder).map_err(|_| "Io@temp")?;
-    let directory = Directory(PathBuf::from(folder));
+    std::fs::create_dir({
+        use std::os::unix::ffi::OsStrExt;
+        std::ffi::OsStr::from_bytes(folder.as_bytes())
+    })
+    .map_err(|_| "Io@temp")?;
+    let directory = Directory({
+        use std::os::unix::ffi::OsStrExt;
+        PathBuf::from(std::ffi::OsStr::from_bytes(folder.as_bytes()))
+    });
     let dir = &directory.0;
     std::fs::write(dir.join("source.txt"), input.as_bytes()).map_err(|_| "Io@setup")?;
     if variant == "error-second" {
@@ -148,7 +155,7 @@ fn run(input: &str, variant: &str) -> Result<()> {
         probe.unlock().map_err(|_| "Io@probe")?;
     }
     drop(probe);
-    let data = match std::fs::read(dir.join("destination.txt")) {
+    let data = match read_bytes(dir.join("destination.txt")) {
         Ok(d) => d,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(_) => return Err("Io@read-destination".into()),
@@ -174,12 +181,15 @@ fn run(input: &str, variant: &str) -> Result<()> {
     put(&rendered)?;
     let mut primary = outcome;
     if primary.is_ok() && !cleanups.is_empty() {
-        primary = Err(cleanups.remove(0));
+        primary = Err(cleanups.remove(0).into());
     }
     for cause in cleanups {
         put("suppressed=")?;
         put(&cause)?;
         put("\n")?;
+    }
+    if let Err(e) = &primary {
+        print_error(e)?
     }
     primary
 }
@@ -188,5 +198,5 @@ fn main() {
         Ok(x) => x,
         Err(_) => std::process::exit(2),
     };
-    exit(run(&input, &variant));
+    exit_status(run(input.view(), &variant));
 }

@@ -3,12 +3,12 @@ use crate::matched_sort::{Compare, library_sort};
 use crate::support::*;
 use std::cmp::Ordering;
 struct Parser<'a> {
-    s: &'a str,
+    s: &'a [u8],
     i: usize,
 }
 impl Parser<'_> {
     fn at(&self) -> u8 {
-        self.s.as_bytes().get(self.i).copied().unwrap_or(0)
+        self.s.get(self.i).copied().unwrap_or(0)
     }
     fn skip(&mut self) {
         while matches!(self.at(), b' ' | b'\t' | b'\r' | b'\n') {
@@ -34,7 +34,7 @@ impl Parser<'_> {
         self.i += 2;
         let a = self.hex()?;
         let cp = if (0xd800..=0xdbff).contains(&a) {
-            if self.at() != b'\\' || self.s.as_bytes().get(self.i + 1) != Some(&b'u') {
+            if self.at() != b'\\' || self.s.get(self.i + 1) != Some(&b'u') {
                 return Err("Syntax".into());
             }
             self.i += 2;
@@ -62,9 +62,7 @@ impl Parser<'_> {
             }
             if c != b'\\' {
                 if self.i + 8 <= self.s.len() {
-                    let v = u64::from_le_bytes(
-                        self.s.as_bytes()[self.i..self.i + 8].try_into().unwrap(),
-                    );
+                    let v = u64::from_le_bytes(self.s[self.i..self.i + 8].try_into().unwrap());
                     let q = v ^ 0x2222222222222222;
                     let slash = v ^ 0x5c5c5c5c5c5c5c5c;
                     let mark = ((v.wrapping_sub(0x2020202020202020) & !v)
@@ -82,9 +80,9 @@ impl Parser<'_> {
                 }
                 n += 1;
                 self.i += 1;
-            } else if self.s.as_bytes().get(self.i + 1) == Some(&b'u') {
+            } else if self.s.get(self.i + 1) == Some(&b'u') {
                 n += self.unicode()?.len_utf8();
-            } else if self.s.as_bytes().get(self.i + 1).is_some_and(|e| {
+            } else if self.s.get(self.i + 1).is_some_and(|e| {
                 matches!(e, b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't')
             }) {
                 n += 1;
@@ -98,8 +96,7 @@ impl Parser<'_> {
         let start = self.i;
         loop {
             if self.i + 8 <= self.s.len() {
-                let v =
-                    u64::from_le_bytes(self.s.as_bytes()[self.i..self.i + 8].try_into().unwrap());
+                let v = u64::from_le_bytes(self.s[self.i..self.i + 8].try_into().unwrap());
                 let mark = (v.wrapping_add(0x4646464646464646)
                     | v.wrapping_sub(0x3030303030303030))
                     & 0x8080808080808080;
@@ -114,49 +111,7 @@ impl Parser<'_> {
             }
             self.i += 1;
         }
-        let s = &self.s[start..self.i];
-        let b = s.as_bytes();
-        let mut i = usize::from(b.first() == Some(&b'-'));
-        if b.get(i) == Some(&b'0') {
-            i += 1;
-        } else {
-            if !b.get(i).is_some_and(|c| matches!(c, b'1'..=b'9')) {
-                return Err("Syntax".into());
-            }
-            while b.get(i).is_some_and(u8::is_ascii_digit) {
-                i += 1;
-            }
-        }
-        if b.get(i) == Some(&b'.') {
-            i += 1;
-            let first = i;
-            while b.get(i).is_some_and(u8::is_ascii_digit) {
-                i += 1;
-            }
-            if i == first {
-                return Err("Syntax".into());
-            }
-        }
-        if b.get(i).is_some_and(|c| matches!(c, b'e' | b'E')) {
-            i += 1;
-            if b.get(i).is_some_and(|c| matches!(c, b'+' | b'-')) {
-                i += 1;
-            }
-            let first = i;
-            while b.get(i).is_some_and(u8::is_ascii_digit) {
-                i += 1;
-            }
-            if i == first {
-                return Err("Syntax".into());
-            }
-        }
-        if i != b.len() {
-            return Err("Syntax".into());
-        }
-        let f = s.parse::<f64>().map_err(|_| "Syntax")?;
-        if !f.is_finite() {
-            return Err("InvalidNumber".into());
-        }
+        crate::matched_float::parse(&self.s[start..self.i])?;
         Ok(self.i - start)
     }
     fn ends(&mut self, end: u8) -> bool {
@@ -189,7 +144,7 @@ impl Parser<'_> {
                     b't' => "true",
                     _ => "false",
                 };
-                if !self.s[self.i..].starts_with(word) {
+                if !self.s[self.i..].starts_with(word.as_bytes()) {
                     return Err("Syntax".into());
                 }
                 self.i += word.len();
@@ -247,14 +202,14 @@ impl Parser<'_> {
                 while self.at() != b'"' && self.at() != b'\\' {
                     self.i += 1;
                 }
-                blob.bytes.extend_from_slice(&self.s.as_bytes()[lo..self.i]);
-            } else if self.s.as_bytes()[self.i + 1] == b'u' {
+                blob.bytes.extend_from_slice(&self.s[lo..self.i]);
+            } else if self.s[self.i + 1] == b'u' {
                 let c = self.unicode().unwrap();
                 let mut b = [0u8; 4];
                 blob.bytes
                     .extend_from_slice(c.encode_utf8(&mut b).as_bytes());
             } else {
-                let c = match self.s.as_bytes()[self.i + 1] {
+                let c = match self.s[self.i + 1] {
                     b'n' => b'\n',
                     b'r' => b'\r',
                     b't' => b'\t',
@@ -336,12 +291,13 @@ impl Parser<'_> {
                 }
                 blob.bytes.push(3);
                 blob.word(narrow(self.i - lo));
-                blob.bytes.extend_from_slice(&self.s.as_bytes()[lo..self.i]);
+                blob.bytes.extend_from_slice(&self.s[lo..self.i]);
             }
         }
     }
 }
-pub fn size(s: &str) -> Result<usize> {
+pub fn size(s: impl AsRef<[u8]>) -> Result<usize> {
+    let s = s.as_ref();
     let mut p = Parser { s, i: 0 };
     let n = p.size_value()?;
     p.skip();
@@ -370,7 +326,8 @@ fn by_key(e: &KeyEnv<'_>, x: u32, y: u32) -> Ordering {
     }
 }
 impl Blob {
-    pub fn parse(s: &str) -> Result<Self> {
+    pub fn parse(s: impl AsRef<[u8]>) -> Result<Self> {
+        let s = s.as_ref();
         let n = size(s)?;
         u32::try_from(n).map_err(|_| "Build")?;
         let mut b = Self {
@@ -407,6 +364,7 @@ impl Blob {
         data + self.read(table + 4 * i as usize) as usize
     }
     fn member(&self, p: usize, i: u32) -> (&[u8], usize) {
+        assert!(i < self.read(p + 1), "json ordinal past count");
         self.text(self.child(p, i))
     }
     fn index(&self, p: usize) -> Vec<u32> {
@@ -515,13 +473,16 @@ impl Blob {
             _ => unreachable!(),
         }
     }
-    pub fn query(&self, out: &mut Vec<u8>, p: usize, path: &str, at: usize) -> Result<()> {
+    pub fn query(&self, out: &mut Vec<u8>, p: usize, path: View<'_>, at: usize) -> Result<()> {
         if at > path.len() {
             self.render(out, p, 0, true);
             return Ok(());
         }
-        let end = path[at..].find('/').map_or(path.len(), |i| at + i);
-        let step = &path[at..end];
+        let end = path
+            .slice(at, path.len())
+            .find('/')
+            .map_or(path.len(), |i| at + i);
+        let step = path.slice(at, end);
         match self.bytes[p] {
             6 => {
                 let ord = self.index(p);
@@ -557,7 +518,6 @@ fn quote(out: &mut Vec<u8>, s: &[u8]) {
     out.push(b'"');
     let mut at = 0;
     while at < s.len() {
-        let lo = at;
         let b = s[at];
         at += 1;
         let c = if b < 128 {
@@ -586,10 +546,10 @@ fn quote(out: &mut Vec<u8>, s: &[u8]) {
             8 => out.extend_from_slice(b"\\b"),
             12 => out.extend_from_slice(b"\\f"),
             c if c < 32 => {
-                use std::io::Write;
-                write!(out, "\\u{c:04x}").unwrap();
+                out.extend_from_slice(b"\\u");
+                hex4(out, u64::from(c));
             }
-            _ => out.extend_from_slice(&s[lo..at]),
+            _ => encode_bytes(out, c),
         }
     }
     out.push(b'"');
@@ -607,7 +567,7 @@ mod tests {
         blob.render(&mut out, 0, 0, true);
         assert_eq!(out, b"{\n  \"z\": 3,\n  \"a\": 2\n}");
         out.clear();
-        blob.query(&mut out, 0, "/z", 1).unwrap();
+        blob.query(&mut out, 0, View::from("/z"), 1).unwrap();
         assert_eq!(out, b"3");
         let s = r#""\ud834\udd1e""#;
         let blob = Blob::parse(s).unwrap();

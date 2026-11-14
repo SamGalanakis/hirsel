@@ -85,9 +85,10 @@ def source_lines(path):
 def sources(name, layout):
     base = ROOT/'twins'
     if layout == 'matched':
-        modules = {'json': ['matched_json.rs', 'matched_sort.rs'],
+        modules = {'json': ['matched_json.rs', 'matched_float.rs', 'matched_sort.rs'],
                    'pipeline': ['matched_sort.rs']}
-        return [base/name/'matched.rs', base/'matched_support.rs',
+        return [base/name/'matched.rs', base/'matched_support.rs', base/'matched_storage.rs',
+                *([base/'matched_map.rs'] if name in ['lru', 'request-scratch'] else []),
                 *(base/name/module for module in modules.get(name, []))]
     return [base/name/(layout+'.rs'), base/name/'program.rs', base/'support.rs']
 

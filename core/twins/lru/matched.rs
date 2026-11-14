@@ -1,8 +1,10 @@
 // Matched to lru/matched.hirsel: staged inline slots, checked narrowing and streaming operations.
 // Independent review pending.
+#[path = "../matched_map.rs"]
+mod matched_map;
 #[path = "../matched_support.rs"]
 mod support;
-use std::collections::HashMap;
+use matched_map::Map;
 use support::*;
 const NONE: u32 = u32::MAX;
 struct Slot {
@@ -27,7 +29,7 @@ fn empty() -> Slot {
 }
 struct Cache {
     slots: Vec<Slot>,
-    index: HashMap<String, u32>,
+    index: Map<u32>,
     head: u32,
     tail: u32,
     first: Option<(u32, u64)>,
@@ -41,7 +43,10 @@ impl Cache {
             bytes.push(s.key[j]);
             j += 1;
         }
-        String::from_utf8(bytes).unwrap()
+        {
+            assert!(utf8(&bytes));
+            String::from_bytes(bytes)
+        }
     }
     fn touch(&mut self, h: u32) {
         if self.head == h {
@@ -69,7 +74,7 @@ impl Cache {
             self.tail = h;
         }
     }
-    fn put(&mut self, name: &str, value: &str) -> Result<bool> {
+    fn put(&mut self, name: View<'_>, value: View<'_>) -> Result<bool> {
         if name.len() > 32 || value.len() > 128 {
             return Err("Parse@cache-op".into());
         }
@@ -120,7 +125,7 @@ impl Cache {
 }
 fn operations(
     c: &mut Cache,
-    input: &str,
+    input: View<'_>,
     variant: &str,
     hits: &mut u64,
     checksum: &mut u64,
@@ -133,7 +138,7 @@ fn operations(
         if let Some(rest) = row.strip_prefix("P ") {
             let (name, value) = rest.split_once(' ').ok_or("Parse@cache-op")?;
             puts += 1;
-            admission(variant, &name_site(puts))?;
+            admission(variant, &name_site(puts), 0)?;
             if c.put(name, value)? {
                 *evictions += 1;
             }
@@ -165,11 +170,11 @@ fn operations(
 fn name_site(puts: u64) -> String {
     name("put", puts, ".payload")
 }
-fn run(input: &str, variant: &str, trace: &Trace) -> Result<()> {
+fn run(input: View<'_>, variant: &str, trace: &Trace) -> Result<()> {
     let _owner = trace.marker("cache");
     let mut c = Cache {
         slots: Vec::with_capacity(64),
-        index: HashMap::new(),
+        index: Map::new(),
         head: NONE,
         tail: NONE,
         first: None,
@@ -208,6 +213,6 @@ fn main() {
         Err(_) => std::process::exit(2),
     };
     let trace = Trace::new(2);
-    let result = run(&input, &variant, &trace);
+    let result = run(input.view(), &variant, &trace);
     trace.finish(result);
 }

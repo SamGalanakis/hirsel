@@ -2,7 +2,7 @@
 #[path = "../matched_support.rs"]
 mod support;
 use support::*;
-fn run(input: &str, variant: &str, trace: &Trace) -> Result<()> {
+fn run(input: View<'_>, variant: &str, trace: &Trace) -> Result<()> {
     let mut at = 0;
     let header = line(input, &mut at);
     let (ns, rest) = header.split_once(' ').ok_or("Parse@graph")?;
@@ -50,11 +50,11 @@ fn run(input: &str, variant: &str, trace: &Trace) -> Result<()> {
         neighbours[pos] = u32::try_from(number(b)?).unwrap();
         positions[u] += 1;
     }
-    admission(variant, "search.parent")?;
+    admission(variant, "search.parent", 8 * n)?;
     let _parent = trace.marker("parent");
     let mut parent = Vec::with_capacity(index(n));
     parent.resize(index(n), n);
-    admission(variant, "search.queue")?;
+    admission(variant, "search.queue", 8 * n)?;
     let _queue = trace.marker("queue");
     let mut queue = Vec::with_capacity(index(n));
     queue.push(from);
@@ -83,7 +83,7 @@ fn run(input: &str, variant: &str, trace: &Trace) -> Result<()> {
         cursor = parent[index(cursor)];
         length += 1;
     }
-    admission(variant, "result.path")?;
+    admission(variant, "result.path", (length as u64) * 8)?;
     let mut path = Vec::with_capacity(length);
     cursor = to;
     path.push(cursor);
@@ -92,14 +92,15 @@ fn run(input: &str, variant: &str, trace: &Trace) -> Result<()> {
         path.push(cursor);
     }
     path.reverse();
-    let mut out = "path=".to_owned();
+    let mut out = String::new();
+    out.push_str("path=");
     let mut first = true;
     for node in path.iter() {
         if !first {
             out.push(',');
         }
         first = false;
-        num(&mut out, node);
+        num(&mut out, *node);
     }
     out.push_str("\nvisited=");
     num(&mut out, queue.len());
@@ -112,6 +113,6 @@ fn main() {
         Err(_) => std::process::exit(2),
     };
     let trace = Trace::new(6);
-    let result = run(&input, &variant, &trace);
+    let result = run(input.view(), &variant, &trace);
     trace.finish(result);
 }

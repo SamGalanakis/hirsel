@@ -59,7 +59,7 @@ impl Store {
             self.release_piece(*p);
         }
     }
-    fn piece(&mut self, value: &str) -> Piece {
+    fn piece(&mut self, value: View<'_>) -> Piece {
         let hi = narrow(value.len());
         let c = Chunk {
             value: value.to_owned(),
@@ -124,7 +124,7 @@ impl Store {
         r: &Root,
         pos: usize,
         len: usize,
-        replacement: &str,
+        replacement: View<'_>,
         variant: &str,
         number: u64,
     ) -> Result<Root> {
@@ -133,7 +133,11 @@ impl Store {
             return Err("InvalidPosition".into());
         }
         let cap = r.len() + 2;
-        admission(variant, &name("edit", number, ".piece"))?;
+        admission(
+            variant,
+            &name("edit", number, ".piece"),
+            (((cap as u64) * 12 + 7) / 8) * 8,
+        )?;
         let mut out = Vec::with_capacity(cap);
         let inserted = if !replacement.is_empty() {
             Some(self.piece(replacement))
@@ -148,7 +152,7 @@ impl Store {
         Ok(out)
     }
 }
-fn run(input: &str, variant: &str) -> Result<()> {
+fn run(input: View<'_>, variant: &str) -> Result<()> {
     let mut at = 0;
     let initial = line(input, &mut at);
     let mut s = Store::default();
@@ -166,10 +170,7 @@ fn run(input: &str, variant: &str) -> Result<()> {
             } else {
                 let (a, rest) = row.split_once(' ').ok_or("InvalidPosition")?;
                 let (b, replacement) = rest.split_once(' ').ok_or("InvalidPosition")?;
-                let needed = history.len() + 1;
-                if needed > history.capacity() {
-                    history.reserve(needed - history.len());
-                }
+                history.reserve(history.len() + 1);
                 let next = s.edit(
                     &current,
                     index(number(a)?),
@@ -216,6 +217,6 @@ fn main() {
         Ok(x) => x,
         Err(_) => std::process::exit(2),
     };
-    let result = run(&input, &variant);
+    let result = run(input.view(), &variant);
     Trace::new(1).finish(result);
 }

@@ -106,7 +106,7 @@ impl Store {
         };
         *count += 1;
         let site = name("draft.node", *count, "");
-        if let Err(e) = admission(variant, &site) {
+        if let Err(e) = admission(variant, &site, 0) {
             self.release(left);
             self.release(right);
             return Err(e);
@@ -138,7 +138,7 @@ impl Store {
         total
     }
 }
-fn run(input: &str, variant: &str) -> Result<()> {
+fn run(input: View<'_>, variant: &str) -> Result<()> {
     let mut at = 0;
     let n = u32::try_from(number(line(input, &mut at))?).unwrap();
     let mut s = Store::default();
@@ -183,6 +183,6 @@ fn main() {
         Ok(x) => x,
         Err(_) => std::process::exit(2),
     };
-    let result = run(&input, &variant);
+    let result = run(input.view(), &variant);
     Trace::new(1).finish(result);
 }

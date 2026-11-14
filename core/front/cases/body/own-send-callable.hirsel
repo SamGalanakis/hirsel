@@ -1,3 +1,5 @@
 // LANG-13's accepted example. Calling borrows the environment, never consumes f.
 // expect: accept
-fn run(take f: own[send] fn() -> u64) -> u64 { f() }
+fn run(take f: own[send] fn() -> u64) -> u64 {
+    f()
+}

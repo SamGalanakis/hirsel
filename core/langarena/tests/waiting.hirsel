@@ -1,17 +1,25 @@
 // One child returns warmups + iterations + 1: 1 + 40 + 1 = 42.
-fn child(take n:u32)->u32 {n+1}
-fn dispatch(tasks:Tasks,config:String,name:String,warmup:u64,iterations:u64)->Result[u32,helper.Error] waits {
-    if name!="Task::Join" {return Error(UnknownTask)}
-    let input:u32=int.narrow(warmup+iterations)
-    let handle=match task.spawn(tasks,bytes 4096,input,child) {
-        Ok(take h)=>take h,
-        Error(_)=>return Error(Config),
-    }
-    match task.join(take handle) {Ok(n)=>Ok(n),Error(_)=>Error(Config)}
+fn child(take n: u32) -> u32 {
+    n + 1
 }
-pub fn main(tasks:Tasks,out:Stdout,d:Dir,argv:Args)->Result[(),Exit] waits {
-    harness.main_wait(out,d,argv,
-        fn(c:String,n:String,w:u64,i:u64)->Result[u32,helper.Error] waits {
-            dispatch(tasks,c,n,w,i)
-        })
+
+fn dispatch(tasks: Tasks, config: String, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] waits {
+    if name != "Task::Join" {
+        return Error(UnknownTask)
+    }
+    let input: u32 = int.narrow(warmup + iterations)
+    let handle = match task.spawn(tasks, bytes 4096, input, child) {
+        Ok(take h) => take h,
+        Error(_) => return Error(Config),
+    }
+    match task.join(take handle) {
+        Ok(n) => Ok(n),
+        Error(_) => Error(Config)
+    }
+}
+
+pub fn main(tasks: Tasks, out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
+    harness.main_wait(out, d, argv, fn(c: String, n: String, w: u64, i: u64) -> Result[u32, helper.Error] waits {
+        dispatch(tasks, c, n, w, i)
+    })
 }

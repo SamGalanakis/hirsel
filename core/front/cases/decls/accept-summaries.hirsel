@@ -20,18 +20,56 @@
 // only through List. A resource counts 8 in its holder (MEM-24), so Wraps is 8. G1 and
 // G2 name each other through Box and Option, so they form one holds group and both hold
 // the resource G2's list holds.
-type Point { x: i64, y: i64 }
-type Mixed { a: u64, b: u8 }
-type Named { s: String, m: Mixed }
-type Tree { label: String, kids: List[Tree] }
-resource type Handle { fd: u64 }
-type Wraps { h: Handle }
-type G1 { next: Box[G2] }
-type G2 { hs: List[Handle], back: Option[Box[G1]] }
-type Pick = Two(u32, bool) | Zero
-type Leaf: shareable + send { n: List[u64] }
-type Ids = List[u64]
-type Rec: shareable { kids: List[Rc[Rec]] }
-fn first(xs: List[String]) -> Option[View[String]] in xs { list.get(xs, 0) }
+type Point {
+    x: i64,
+    y: i64
+}
 
+type Mixed {
+    a: u64,
+    b: u8
+}
+
+type Named {
+    s: String,
+    m: Mixed
+}
+
+type Tree {
+    label: String,
+    kids: List[Tree]
+}
+
+resource type Handle {
+    fd: u64
+}
+
+type Wraps {
+    h: Handle
+}
+
+type G1 {
+    next: Box[G2]
+}
+
+type G2 {
+    hs: List[Handle],
+    back: Option[Box[G1]]
+}
+
+type Pick = Two(u32, bool) | Zero
+
+type Leaf: shareable + send {
+    n: List[u64]
+}
+
+type Ids = List[u64]
+
+type Rec: shareable {
+    kids: List[Rc[Rec]]
+}
+
+fn first(xs: List[String]) -> Option[View[String]] in xs {
+    list.get(xs, 0)
+}
 // List.get is now built; the rule and summary expectations still apply.

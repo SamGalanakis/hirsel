@@ -2,7 +2,16 @@
 // expect: run f(true) = 6
 // expect: run f(false) = 6
 fn f(c: bool) -> u64 {
-  let mut n: u64 = 3
-  let cb = if c { scoped fn() -> u64 { n += 3; n } } else { scoped fn() -> u64 { n * 2 } }
-  cb()
+    let mut n: u64 = 3
+    let cb = if c {
+        scoped fn() -> u64 {
+            n += 3;
+            n
+        }
+    } else {
+        scoped fn() -> u64 {
+            n * 2
+        }
+    }
+    cb()
 }

@@ -11,120 +11,242 @@
 // expect: run temporary() = 6
 // expect: run matched() = 123
 // expect: run tupled() = 42
-type N:shareable+send = Lit(i64) | Add(Box[N],Box[N])
-fn ev(n:N)->i64 { match n { Lit(x)=>x, Add(l,r)=>ev(l)+ev(r) } }
-fn calculator()->i64 {
- let a=result.unwrap(box.new(Lit(3i64)))
- let b=result.unwrap(box.new(Lit(7i64)))
- let tree=result.unwrap(box.new(Add(take a,take b)))
- ev(tree)
-}
-fn counted()->i64 {
- let a=result.unwrap(rc.new(Lit(5i64)))
- let b=result.unwrap(arc.new(Lit(7i64)))
- ev(a)+ev(b)+ev(a)+ev(b)
-}
-fn nested()->i64 {
- let a=result.unwrap(box.new(result.unwrap(box.new(Lit(9i64)))))
- ev(a)
-}
-type P:shareable+send { n:u64 }
-fn fields()->u64 {
- let a=result.unwrap(box.new(P(n:4u64)))
- let b=result.unwrap(rc.new(P(n:5u64)))
- let c=result.unwrap(arc.new(P(n:6u64)))
- a.n*100u64+b.n*10u64+c.n
-}
-fn len(x:View[String])->u64 { string.byte_len(x) }
-fn explicit()->u64 { let b=result.unwrap(box.new("abc")); len(b) }
+type N: shareable + send = Lit(i64) | Add(Box[N], Box[N])
 
-fn borrow(b:Box[P])->View[P] in b { b }
-fn borrowed()->u64 {
- let b=result.unwrap(box.new(P(n:4u64)))
- let p:View[P]=b
- let q=borrow(b)
- p.n+q.n
+fn ev(n: N) -> i64 {
+    match n {
+        Lit(x) => x,
+        Add(l, r) => ev(l) + ev(r)
+    }
 }
-fn make()->Box[N] { result.unwrap(box.new(Lit(6i64))) }
-fn temporary()->i64 { ev(make()) }
 
-fn matched()->u64 {
- let a=result.unwrap(box.new(Some(1u64)))
- let b=result.unwrap(rc.new(Some(2u64)))
- let c=result.unwrap(arc.new(Some(3u64)))
- let xa=match a { Some(ax)=>ax,None=>0u64 }
- let yb=match b { Some(by)=>by,None=>0u64 }
- let zc=match c { Some(cz)=>cz,None=>0u64 }
- xa*100u64+yb*10u64+zc
+fn calculator() -> i64 {
+    let a = result.unwrap(box.new(Lit(3i64)))
+    let b = result.unwrap(box.new(Lit(7i64)))
+    let tree = result.unwrap(box.new(Add(take a, take b)))
+    ev(tree)
 }
-fn tupled()->u64 { let b=result.unwrap(box.new((4u64,2u64)));match b { (a,c)=>a*10u64+c } }
+
+fn counted() -> i64 {
+    let a = result.unwrap(rc.new(Lit(5i64)))
+    let b = result.unwrap(arc.new(Lit(7i64)))
+    ev(a) + ev(b) + ev(a) + ev(b)
+}
+
+fn nested() -> i64 {
+    let a = result.unwrap(box.new(result.unwrap(box.new(Lit(9i64)))))
+    ev(a)
+}
+
+type P: shareable + send {
+    n: u64
+}
+
+fn fields() -> u64 {
+    let a = result.unwrap(box.new(P(n: 4u64)))
+    let b = result.unwrap(rc.new(P(n: 5u64)))
+    let c = result.unwrap(arc.new(P(n: 6u64)))
+    a.n * 100u64 + b.n * 10u64 + c.n
+}
+
+fn len(x: View[String]) -> u64 {
+    string.byte_len(x)
+}
+
+fn explicit() -> u64 {
+    let b = result.unwrap(box.new("abc"));
+    len(b)
+}
+
+fn borrow(b: Box[P]) -> View[P] in b {
+    b
+}
+
+fn borrowed() -> u64 {
+    let b = result.unwrap(box.new(P(n: 4u64)))
+    let p: View[P] = b
+    let q = borrow(b)
+    p.n + q.n
+}
+
+fn make() -> Box[N] {
+    result.unwrap(box.new(Lit(6i64)))
+}
+
+fn temporary() -> i64 {
+    ev(make())
+}
+
+fn matched() -> u64 {
+    let a = result.unwrap(box.new(Some(1u64)))
+    let b = result.unwrap(rc.new(Some(2u64)))
+    let c = result.unwrap(arc.new(Some(3u64)))
+    let xa = match a {
+        Some(ax) => ax,
+        None => 0u64
+    }
+    let yb = match b {
+        Some(by) => by,
+        None => 0u64
+    }
+    let zc = match c {
+        Some(cz) => cz,
+        None => 0u64
+    }
+    xa * 100u64 + yb * 10u64 + zc
+}
+
+fn tupled() -> u64 {
+    let b = result.unwrap(box.new((4u64, 2u64)));
+    match b {
+        (a, c) => a * 10u64 + c
+    }
+}
+
 // A payload read leaves its resource finalizer owned by the Box, exactly once.
 // expect: run resource_read() = 18 trace 9
-resource type Mark { n:u64 } drop(m) { let _=m.n }
-fn mark(m:Mark)->u64 { m.n }
-fn resource_read()->u64 {
- let m=result.unwrap(Mark(n:9u64))
- let b=result.unwrap(box.new(take m))
- mark(b)+mark(b)
-}
-fn positive()->bool {
- deep_grow()==12u64 && counted_field()==6u64 && temporary_field()==8u64 && temporary_index()==2u64 && deep_run()==5i64 && mixed_run()==7i64 && set_run()==1u64 && f()==6i64 && g_run()==7u64 && h_run()==11u64 && grow_run()==19u64 && go()==3i64 && calculator()==10i64 && counted()==24i64 && nested()==9i64 && fields()==456u64 && explicit()==3u64 && borrowed()==8u64 && temporary()==6i64 && matched()==123u64 && tupled()==42u64 && resource_read()==18u64
+resource type Mark {
+    n: u64
+} drop(m) {
+    let _ = m.n
 }
 
-fn go()->i64 { let b=result.unwrap(box.new(Lit(3i64))); ev(b) }
+fn mark(m: Mark) -> u64 {
+    m.n
+}
+
+fn resource_read() -> u64 {
+    let m = result.unwrap(Mark(n: 9u64))
+    let b = result.unwrap(box.new(take m))
+    mark(b) + mark(b)
+}
+
+fn positive() -> bool {
+    deep_grow() == 12u64 && counted_field() == 6u64 && temporary_field() == 8u64 && temporary_index() == 2u64 && deep_run() == 5i64 && mixed_run() == 7i64 && set_run() == 1u64 && f() == 6i64 && g_run() == 7u64 && h_run() == 11u64 && grow_run() == 19u64 && go() == 3i64 && calculator() == 10i64 && counted() == 24i64 && nested() == 9i64 && fields() == 456u64 && explicit() == 3u64 && borrowed() == 8u64 && temporary() == 6i64 && matched() == 123u64 && tupled() == 42u64 && resource_read() == 18u64
+}
+
+fn go() -> i64 {
+    let b = result.unwrap(box.new(Lit(3i64)));
+    ev(b)
+}
+
 // Exact spec fences f/g/h/grow (417222df), alongside the recursive Calculator.
 // expect: run f() = 6
 // expect: run g_run() = 7
 // expect: run h_run() = 11
 // expect: run grow_run() = 19
-fn f()->i64 { let b=result.unwrap(box.new(Lit(6i64))); ev(b) }
-fn g(b:Box[Option[u64]])->u64 { match b { Some(x)=>x,None=>0 } }
-fn h(b:Box[u64])->u64 { match b { x=>x } }
-fn grow(mut b:Box[List[u64]])->Result[(),(Capacity,u64)] { list.push(mut b,1) }
-fn g_run()->u64 { let b=result.unwrap(box.new(Some(7u64)));g(b) }
-fn h_run()->u64 { let b=result.unwrap(box.new(11u64));h(b) }
-fn grow_run()->u64 {
- let xs:List[u64]=list.new()
- let mut b=result.unwrap(box.new(take xs))
- result.unwrap(grow(mut b))
- b[0]=9u64
- b[0]+list.len(b)*10u64
+fn f() -> i64 {
+    let b = result.unwrap(box.new(Lit(6i64)));
+    ev(b)
+}
+
+fn g(b: Box[Option[u64]]) -> u64 {
+    match b {
+        Some(x) => x,
+        None => 0
+    }
+}
+
+fn h(b: Box[u64]) -> u64 {
+    match b {
+        x => x
+    }
+}
+
+fn grow(mut b: Box[List[u64]]) -> Result[(), (Capacity, u64)] {
+    list.push(mut b, 1)
+}
+
+fn g_run() -> u64 {
+    let b = result.unwrap(box.new(Some(7u64)));
+    g(b)
+}
+
+fn h_run() -> u64 {
+    let b = result.unwrap(box.new(11u64));
+    h(b)
+}
+
+fn grow_run() -> u64 {
+    let xs: List[u64] = list.new()
+    let mut b = result.unwrap(box.new(take xs))
+    result.unwrap(grow(mut b))
+    b[0] = 9u64
+    b[0] + list.len(b) * 10u64
 }
 
 // Spec534d556c: read outward to the first fitting payload; any Rc/Arc keeps it read-only.
 // expect: run deep_run() = 5
 // expect: run mixed_run() = 7
 // expect: run set_run() = 1
-fn deep(b:Box[Box[N]])->i64 { ev(b) }
-fn mixed(b:Box[Rc[N]])->i64 { ev(b) }
-fn set(mut b:Box[Box[P]]) { b.n=1u64 }
-fn deep_run()->i64 {let p=result.unwrap(box.new(Lit(5i64)));let b=result.unwrap(box.new(take p));deep(b)}
-fn mixed_run()->i64 {let p=result.unwrap(rc.new(Lit(7i64)));let b=result.unwrap(box.new(take p));mixed(b)}
-fn set_run()->u64 {let p=result.unwrap(box.new(P(n:2u64)));let mut b=result.unwrap(box.new(take p));set(mut b);b.n}
+fn deep(b: Box[Box[N]]) -> i64 {
+    ev(b)
+}
+
+fn mixed(b: Box[Rc[N]]) -> i64 {
+    ev(b)
+}
+
+fn set(mut b: Box[Box[P]]) {
+    b.n = 1u64
+}
+
+fn deep_run() -> i64 {
+    let p = result.unwrap(box.new(Lit(5i64)));
+    let b = result.unwrap(box.new(take p));
+    deep(b)
+}
+
+fn mixed_run() -> i64 {
+    let p = result.unwrap(rc.new(Lit(7i64)));
+    let b = result.unwrap(box.new(take p));
+    mixed(b)
+}
+
+fn set_run() -> u64 {
+    let p = result.unwrap(box.new(P(n: 2u64)));
+    let mut b = result.unwrap(box.new(take p));
+    set(mut b);
+    b.n
+}
+
 // expect: run counted_field() = 6
 // expect: run temporary_field() = 8
 // expect: run temporary_index() = 2
-type TextP:shareable { s:String }
-fn counted_field()->u64 {
- let p=TextP(s:"abc")
- let r=result.unwrap(rc.new(take p))
- let v=r.s
- string.byte_len(v)+string.byte_len(r.s)
+type TextP: shareable {
+    s: String
 }
-fn make_p()->Box[P] { result.unwrap(box.new(P(n:8u64))) }
-fn temporary_field()->u64 { make_p().n }
-fn make_list()->Box[Box[List[u64]]] {
- let mut xs:List[u64]=list.new()
- result.unwrap(list.push(mut xs,2u64))
- let b=result.unwrap(box.new(take xs))
- result.unwrap(box.new(take b))
+
+fn counted_field() -> u64 {
+    let p = TextP(s: "abc")
+    let r = result.unwrap(rc.new(take p))
+    let v = r.s
+    string.byte_len(v) + string.byte_len(r.s)
 }
-fn temporary_index()->u64 {make_list()[0]}
+
+fn make_p() -> Box[P] {
+    result.unwrap(box.new(P(n: 8u64)))
+}
+
+fn temporary_field() -> u64 {
+    make_p().n
+}
+
+fn make_list() -> Box[Box[List[u64]]] {
+    let mut xs: List[u64] = list.new()
+    result.unwrap(list.push(mut xs, 2u64))
+    let b = result.unwrap(box.new(take xs))
+    result.unwrap(box.new(take b))
+}
+
+fn temporary_index() -> u64 {
+    make_list()[0]
+}
 
 // A fixed generic head reads through every holder before inferring its element.
 // expect: run deep_grow() = 12
-fn deep_grow()->u64 {
- let mut b=make_list()
- result.unwrap(list.push(mut b,12u64))
- b[1]
+fn deep_grow() -> u64 {
+    let mut b = make_list()
+    result.unwrap(list.push(mut b, 12u64))
+    b[1]
 }

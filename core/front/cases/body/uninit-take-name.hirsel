@@ -3,7 +3,29 @@
 // expect: run number() = 7
 // expect: run own() = 3
 // expect: run mutable() = 3
-fn number()->u64 { let take x:u64; x=7u64; x }
-fn own()->u64 { let take s:String; s="abc"; string.byte_len(s) }
-fn mutable()->u64 { let mut take x:u64; x=1u64; x+=2u64; x }
-pub fn main()->Result[(),Exit] { if number()==7u64 && own()==3u64 && mutable()==3u64 { Ok(()) } else { Error(Exit(status:1)) } }
+fn number() -> u64 {
+    let take x: u64;
+    x = 7u64;
+    x
+}
+
+fn own() -> u64 {
+    let take s: String;
+    s = "abc";
+    string.byte_len(s)
+}
+
+fn mutable() -> u64 {
+    let mut take x: u64;
+    x = 1u64;
+    x += 2u64;
+    x
+}
+
+pub fn main() -> Result[(), Exit] {
+    if number() == 7u64 && own() == 3u64 && mutable() == 3u64 {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
+}

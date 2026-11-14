@@ -1,4 +1,9 @@
 // expect: accept
 // std.json.index: a bare stable parameter reads a rooted indexed span as a SeqSpan.
-fn len[T: packed](xs: SeqSpan[T]) -> u64 { 0 }
-fn index[in a](ms: IndexedSpan[u64] in a) -> u64 { len(ms) }
+fn len[T: packed](xs: SeqSpan[T]) -> u64 {
+    0
+}
+
+fn index[in a](ms: IndexedSpan[u64] in a) -> u64 {
+    len(ms)
+}

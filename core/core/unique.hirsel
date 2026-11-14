@@ -1,3 +1,2 @@
 // Module `unique` (MEM-18).
-
 pub fn new() -> Unique

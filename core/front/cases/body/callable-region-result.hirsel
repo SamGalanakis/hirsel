@@ -1,8 +1,14 @@
 // A Region parameter and an anchored result belong to the callable's signature,
 // not its captures. Forming the function value must not require a stored Region.
 // expect: accept
-stable type Doc { value: u64 }
-fn parse(r: Region, s: String) -> Result[Doc in r, Capacity] {
-  Error(Capacity(requested: 1, available: 0))
+stable type Doc {
+    value: u64
 }
-fn value() { let cb = parse }
+
+fn parse(r: Region, s: String) -> Result[Doc in r, Capacity] {
+    Error(Capacity(requested: 1, available: 0))
+}
+
+fn value() {
+    let cb = parse
+}

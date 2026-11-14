@@ -2,8 +2,14 @@
 // expect: run empty_pops() = true
 fn empty_pops() -> bool {
     let mut d: Deque[u64] = deque.new()
-    let a = match deque.pop_front(mut d) { None => true, _ => false }
-    let b = match deque.pop_back(mut d) { None => true, _ => false }
+    let a = match deque.pop_front(mut d) {
+        None => true,
+        _ => false
+    }
+    let b = match deque.pop_back(mut d) {
+        None => true,
+        _ => false
+    }
     a && b && deque.len(d) == 0
 }
 
@@ -26,7 +32,10 @@ fn every_head() -> bool {
         while head < cap {
             let mut d: Deque[u64] = deque.new()
             let mut i: u64 = 0
-            while i < cap { result.unwrap(deque.push_back(mut d, i + 1)); i += 1 }
+            while i < cap {
+                result.unwrap(deque.push_back(mut d, i + 1));
+                i += 1
+            }
             i = 0
             while i < head {
                 let x = option.unwrap(deque.pop_front(mut d))
@@ -35,15 +44,22 @@ fn every_head() -> bool {
             }
             i = 0
             while i < cap {
-                if option.unwrap(deque.pop_front(mut d)) != (head + i) % cap + 1 { return false }
+                if option.unwrap(deque.pop_front(mut d)) != (head + i) % cap + 1 {
+                    return false
+                }
                 i += 1
             }
             // Start at the same head, then test push_front/pop_back.
             i = 0
-            while i < cap { result.unwrap(deque.push_front(mut d, i + 1)); i += 1 }
+            while i < cap {
+                result.unwrap(deque.push_front(mut d, i + 1));
+                i += 1
+            }
             i = 0
             while i < cap {
-                if option.unwrap(deque.pop_back(mut d)) != i + 1 { return false }
+                if option.unwrap(deque.pop_back(mut d)) != i + 1 {
+                    return false
+                }
                 i += 1
             }
             head += 1
@@ -57,14 +73,18 @@ fn every_head() -> bool {
 // expect: run wrapped_growth() = 34567
 fn wrapped_growth() -> u64 {
     let mut d: Deque[u64] = deque.new()
-    for i in 1u64 .. 5 { result.unwrap(deque.push_back(mut d, i)) }
+    for i in 1u64 .. 5 {
+        result.unwrap(deque.push_back(mut d, i))
+    }
     let _ = deque.pop_front(mut d)
     let _ = deque.pop_front(mut d)
     result.unwrap(deque.push_back(mut d, 5))
     result.unwrap(deque.push_back(mut d, 6))
     result.unwrap(deque.push_back(mut d, 7))
     let mut n: u64 = 0
-    while deque.len(d) > 0 { n = n * 10 + option.unwrap(deque.pop_front(mut d)) }
+    while deque.len(d) > 0 {
+        n = n * 10 + option.unwrap(deque.pop_front(mut d))
+    }
     n
 }
 
@@ -72,7 +92,9 @@ fn wrapped_growth() -> u64 {
 // expect: run alternating_ends() = 162534
 fn alternating_ends() -> u64 {
     let mut d: Deque[u64] = deque.new()
-    for i in 1u64 .. 7 { result.unwrap(deque.push_back(mut d, i)) }
+    for i in 1u64 .. 7 {
+        result.unwrap(deque.push_back(mut d, i))
+    }
     let mut n: u64 = 0
     while deque.len(d) > 0 {
         n = n * 10 + option.unwrap(deque.pop_front(mut d))
@@ -86,16 +108,34 @@ fn alternating_ends() -> u64 {
 fn capacity_back() -> u64 {
     let mut d: Deque[String] = deque.new()
     let s = result.unwrap(string.from("abc"))
-    let r = bound bytes 0 { deque.push_back(mut d, take s) }
-    match r { Ok(Error((_, take x))) => if x == "abc" { list.len(string.as_bytes(x)) + deque.len(d) } else { 99 }, _ => 99 }
+    let r = bound bytes 0 {
+        deque.push_back(mut d, take s)
+    }
+    match r {
+        Ok(Error((_, take x))) => if x == "abc" {
+            list.len(string.as_bytes(x)) + deque.len(d)
+        } else {
+            99
+        },
+        _ => 99
+    }
 }
 
 // expect: run capacity_front() = 3
 fn capacity_front() -> u64 {
     let mut d: Deque[String] = deque.new()
     let s = result.unwrap(string.from("abc"))
-    let r = bound bytes 0 { deque.push_front(mut d, take s) }
-    match r { Ok(Error((_, take x))) => if x == "abc" { list.len(string.as_bytes(x)) + deque.len(d) } else { 99 }, _ => 99 }
+    let r = bound bytes 0 {
+        deque.push_front(mut d, take s)
+    }
+    match r {
+        Ok(Error((_, take x))) => if x == "abc" {
+            list.len(string.as_bytes(x)) + deque.len(d)
+        } else {
+            99
+        },
+        _ => 99
+    }
 }
 
 // No admission on pop even after wraparound.
@@ -122,11 +162,22 @@ fn capacity_wrapped_growth() -> u64 {
     let c = result.unwrap(string.from("ccc"))
     result.unwrap(deque.push_back(mut d, take c))
     let x = result.unwrap(string.from("xyz"))
-    let r = bound bytes 0 { deque.push_front(mut d, take x) }
-    let returned: u64 = match r { Ok(Error((_, take value))) => if value == "xyz" { list.len(string.as_bytes(value)) } else { 99 }, _ => 99 }
+    let r = bound bytes 0 {
+        deque.push_front(mut d, take x)
+    }
+    let returned: u64 = match r {
+        Ok(Error((_, take value))) => if value == "xyz" {
+            list.len(string.as_bytes(value))
+        } else {
+            99
+        },
+        _ => 99
+    }
     let first = option.unwrap(deque.pop_front(mut d))
     let last = option.unwrap(deque.pop_back(mut d))
-    if first != "bb" || last != "ccc" { return 99 }
+    if first != "bb" || last != "ccc" {
+        return 99
+    }
     returned * 100 + list.len(string.as_bytes(first)) * 10 + list.len(string.as_bytes(last))
 }
 
@@ -134,12 +185,16 @@ fn capacity_wrapped_growth() -> u64 {
 // expect: run wrapped_front_growth() = 36542
 fn wrapped_front_growth() -> u64 {
     let mut d: Deque[u64] = deque.new()
-    for i in 3u64 .. 7 { result.unwrap(deque.push_back(mut d, i)) }
+    for i in 3u64 .. 7 {
+        result.unwrap(deque.push_back(mut d, i))
+    }
     let x = option.unwrap(deque.pop_front(mut d))
     result.unwrap(deque.push_back(mut d, x))
     result.unwrap(deque.push_front(mut d, 2))
     let mut n: u64 = 0
-    while deque.len(d) > 0 { n = n * 10 + option.unwrap(deque.pop_back(mut d)) }
+    while deque.len(d) > 0 {
+        n = n * 10 + option.unwrap(deque.pop_back(mut d))
+    }
     n
 }
 
@@ -147,30 +202,59 @@ fn wrapped_front_growth() -> u64 {
 // expect: run slot_bytes_u64() = 8
 fn slot_bytes_u64() -> u64 {
     let mut d: Deque[u64] = deque.new()
-    let r = bound bytes 0 { deque.push_back(mut d, 7) }
-    match r { Ok(Error((c, _))) => c.requested, _ => 99 }
+    let r = bound bytes 0 {
+        deque.push_back(mut d, 7)
+    }
+    match r {
+        Ok(Error((c, _))) => c.requested,
+        _ => 99
+    }
 }
+
 // expect: run slot_bytes_string() = 24
 fn slot_bytes_string() -> u64 {
     let mut d: Deque[String] = deque.new()
     let x = result.unwrap(string.from("abc"))
-    let r = bound bytes 0 { deque.push_back(mut d, take x) }
-    match r { Ok(Error((c, _))) => c.requested, _ => 99 }
+    let r = bound bytes 0 {
+        deque.push_back(mut d, take x)
+    }
+    match r {
+        Ok(Error((c, _))) => c.requested,
+        _ => 99
+    }
 }
-type Triple { a: u64, b: u64, c: u64 }
+
+type Triple {
+    a: u64,
+    b: u64,
+    c: u64
+}
+
 // expect: run slot_bytes_record24() = 24
 fn slot_bytes_record24() -> u64 {
     let mut d: Deque[Triple] = deque.new()
-    let r = bound bytes 0 { deque.push_back(mut d, Triple(a:1,b:2,c:3)) }
-    match r { Ok(Error((c, _))) => c.requested, _ => 99 }
+    let r = bound bytes 0 {
+        deque.push_back(mut d, Triple(a: 1, b: 2, c: 3))
+    }
+    match r {
+        Ok(Error((c, _))) => c.requested,
+        _ => 99
+    }
 }
+
 // expect: run zero_sized_ring() = true
 fn zero_sized_ring() -> bool {
     let r = bound bytes 0 {
         let mut d: Deque[()] = deque.new()
-        for _ in 0u64 .. 9 { result.unwrap(deque.push_front(mut d, ())) }
-        for _ in 0u64 .. 5 { let _ = option.unwrap(deque.pop_back(mut d)) }
-        for _ in 0u64 .. 4 { result.unwrap(deque.push_back(mut d, ())) }
+        for _ in 0u64 .. 9 {
+            result.unwrap(deque.push_front(mut d, ()))
+        }
+        for _ in 0u64 .. 5 {
+            let _ = option.unwrap(deque.pop_back(mut d))
+        }
+        for _ in 0u64 .. 4 {
+            result.unwrap(deque.push_back(mut d, ()))
+        }
         deque.len(d) == 8
     }
     result.unwrap(r)
@@ -179,33 +263,49 @@ fn zero_sized_ring() -> bool {
 // The carrier occupies32 bytes independently of its element type.
 // expect: run carrier_bytes() = 32
 fn carrier_bytes() -> u64 {
-    let r = bound bytes 0 { let n: Result[List[Deque[u64]], Capacity] = list.with_capacity(1); n }
-    match r { Ok(Error(c)) => c.requested, _ => 99 }
+    let r = bound bytes 0 {
+        let n: Result[List[Deque[u64]], Capacity] = list.with_capacity(1);
+        n
+    }
+    match r {
+        Ok(Error(c)) => c.requested,
+        _ => 99
+    }
 }
+
 // Sharing copies only the counted holder, preserving a wrapped live interval.
 // expect: run rc_share_unwrap() = 123
 fn rc_share_unwrap() -> u64 {
     let mut d: Deque[u64] = deque.new()
-    for i in 0u64 .. 4 { result.unwrap(deque.push_back(mut d, i)) }
+    for i in 0u64 .. 4 {
+        result.unwrap(deque.push_back(mut d, i))
+    }
     let _ = deque.pop_front(mut d)
     let shared = result.unwrap(rc.new(take d))
     let second = rc.share(shared)
     let _ = take second
     let mut recovered = result.unwrap(rc.try_unwrap(take shared))
     let mut n: u64 = 0
-    while deque.len(recovered) > 0 { n = n * 10 + option.unwrap(deque.pop_front(mut recovered)) }
+    while deque.len(recovered) > 0 {
+        n = n * 10 + option.unwrap(deque.pop_front(mut recovered))
+    }
     n
 }
+
 // expect: run arc_share_unwrap() = 123
 fn arc_share_unwrap() -> u64 {
     let mut d: Deque[u64] = deque.new()
-    for i in 0u64 .. 4 { result.unwrap(deque.push_back(mut d, i)) }
+    for i in 0u64 .. 4 {
+        result.unwrap(deque.push_back(mut d, i))
+    }
     let _ = deque.pop_front(mut d)
     let shared = result.unwrap(arc.new(take d))
     let second = arc.share(shared)
     let _ = take second
     let mut recovered = result.unwrap(arc.try_unwrap(take shared))
     let mut n: u64 = 0
-    while deque.len(recovered) > 0 { n = n * 10 + option.unwrap(deque.pop_front(mut recovered)) }
+    while deque.len(recovered) > 0 {
+        n = n * 10 + option.unwrap(deque.pop_front(mut recovered))
+    }
     n
 }

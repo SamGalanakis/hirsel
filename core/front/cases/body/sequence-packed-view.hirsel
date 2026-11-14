@@ -1,4 +1,4 @@
 // expect: accept
 fn read(xs: SeqSpan[(u8, u64)], i: u64) -> Option[View[(u8, u64)]] in xs {
-  seq.nth(xs, i)
+    seq.nth(xs, i)
 }

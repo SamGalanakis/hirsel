@@ -13,29 +13,50 @@
 // expect: run empty(3) = 1
 // expect: run poisoned(9) = 91
 // expect: run poisoned(10) = 2
-@compact(u16) stable type Packet { flag: bool, text: Text }
+@compact(u16)
+stable type Packet {
+    flag: bool,
+    text: Text
+}
+
 fn packet(n: u64) -> u64 {
     region r {
         match build_stream_in(r, bytes n, fn(take w: Writer[Packet, in r]) -> Result[Child[Packet], BuildError] {
             emit(take w, Packet(flag: true, text: "abc"))
         }) {
-            Ok(take b) => { let p = finish(take b); text.len(p.text) * 10 + if p.flag { 1 } else { 0 } },
+            Ok(take b) => {
+                let p = finish(take b);
+                text.len(p.text) * 10 + if p.flag {
+                    1
+                } else {
+                    0
+                }
+            },
             Error(Overflow) => 91,
             Error(_) => 92,
         }
     }
 }
+
 fn empty(n: u64) -> u64 {
     region r {
         match build_stream_in(r, bytes n, fn(take w: Writer[Packet, in r]) -> Result[Child[Packet], BuildError] {
             emit(take w, Packet(flag: true, text: ""))
         }) {
-            Ok(take b) => { let p = finish(take b); text.len(p.text) + if p.flag { 1 } else { 0 } },
+            Ok(take b) => {
+                let p = finish(take b);
+                text.len(p.text) + if p.flag {
+                    1
+                } else {
+                    0
+                }
+            },
             Error(Overflow) => 91,
             Error(_) => 92,
         }
     }
 }
+
 fn poisoned(n: u64) -> u64 {
     region r {
         match build_stream_in(r, bytes n, fn(take w: Writer[Text, in r]) -> Result[Child[Text], BuildError] {

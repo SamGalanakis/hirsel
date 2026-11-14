@@ -36,3 +36,25 @@ No reparse or validation of our own output runs in the product.
 
 `hirsel-core-syntax FILE [--signatures]` writes canonical text to stdout. Invalid source
 prints located rule diagnostics and exits unsuccessfully without formatted output.
+
+`format_package(root, mode, FormatAction::{Check, Write})` discovers all `.hirsel`
+files recursively; symlink directories are not followed. `format_files` takes explicit
+`(PathBuf, ParseMode)` inputs. Both return `FormatReport { files, differing, refused }`
+in sorted path order. A `FormatRefusal` contains its path, syntax diagnostics and
+optional resource refusal. Check never writes. Write prepares every input first and
+writes nothing when any source refuses or a read fails. A write-time I/O failure is
+returned as an error and may leave earlier files formatted.
+
+The internal binary accepts `--check FILE...` or `--write FILE...`, optionally with
+`--signatures`. Check prints differing paths and fails on differences or refusals;
+write fails on refusals. The driver's user command calls the library directly.
+The gate checks changed sources under core/core, core/std, core/front/cases,
+core/programs/m1 and core/langarena. Explicit `// expect: refuse` or `// expect: gap`
+fixtures are excluded, since their original coordinates are the diagnostic oracle.
+Parser-input fixtures are not case/program sources and are not gate targets. Accepted
+cases have no primary-site refusal oracle and receive canonical formatting normally.
+
+Package preparation adapts Go's gofmt file-list reporting and Rust's cargo fmt check
+mode. Unlike gofmt's independent writes, a parse refusal here prevents all writes in
+one operation. Unlike cargo fmt's external process coordination, the driver uses one
+library call. No second parse or checker runs in the formatter.

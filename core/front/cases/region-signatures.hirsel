@@ -1,6 +1,17 @@
 // expect: accept
 // OWN-20 and MEM-6: a result may be anchored to a Region or a region generic.
-scoped type Borrowed { value: View[u64] }
-fn scoped_result(r: Region) -> Borrowed in r { loop {} }
-fn generic[in r](v: Borrowed in r) -> Borrowed in r { loop {} }
-fn nested(r: Region) -> Option[Borrowed in r] { loop {} }
+scoped type Borrowed {
+    value: View[u64]
+}
+
+fn scoped_result(r: Region) -> Borrowed in r {
+    loop {}
+}
+
+fn generic[in r](v: Borrowed in r) -> Borrowed in r {
+    loop {}
+}
+
+fn nested(r: Region) -> Option[Borrowed in r] {
+    loop {}
+}

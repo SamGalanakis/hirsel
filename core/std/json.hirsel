@@ -88,7 +88,9 @@ pub fn push_json(mut s: String, x: Json) -> Result[(), Capacity] {
             string.push(mut s, "[")?
             let mut first = true
             for v in xs {
-                if !first { string.push(mut s, ",")? }
+                if !first {
+                    string.push(mut s, ",")?
+                }
                 push_json(mut s, v)?
                 first = false
             }
@@ -98,7 +100,9 @@ pub fn push_json(mut s: String, x: Json) -> Result[(), Capacity] {
             string.push(mut s, "{")?
             let mut first = true
             for m in ms {
-                if !first { string.push(mut s, ",")? }
+                if !first {
+                    string.push(mut s, ",")?
+                }
                 push_quoted(mut s, text.as_string(m.key))?
                 string.push(mut s, ":")?
                 push_json(mut s, m.value)?
@@ -119,14 +123,21 @@ fn push_quoted(mut s: String, value: String) -> Result[(), Capacity] {
         let c = b[i]
         if c < 0x20 || c == b'"' || c == b'\\' {
             string.push(mut s, string.slice(value, start, i))?
-            if c == b'"' { string.push(mut s, "\\\"")? }
-            else if c == b'\\' { string.push(mut s, "\\\\")? }
-            else if c == 8 { string.push(mut s, "\\b")? }
-            else if c == 9 { string.push(mut s, "\\t")? }
-            else if c == 10 { string.push(mut s, "\\n")? }
-            else if c == 12 { string.push(mut s, "\\f")? }
-            else if c == 13 { string.push(mut s, "\\r")? }
-            else {
+            if c == b'"' {
+                string.push(mut s, "\\\"")?
+            } else if c == b'\\' {
+                string.push(mut s, "\\\\")?
+            } else if c == 8 {
+                string.push(mut s, "\\b")?
+            } else if c == 9 {
+                string.push(mut s, "\\t")?
+            } else if c == 10 {
+                string.push(mut s, "\\n")?
+            } else if c == 12 {
+                string.push(mut s, "\\f")?
+            } else if c == 13 {
+                string.push(mut s, "\\r")?
+            } else {
                 // Commit the whole six-byte escape in one append.
                 let hex = "0123456789abcdef"
                 let hi: u64 = int.widen(c / 16)
@@ -270,15 +281,21 @@ fn value_size(s: String, mut i: u64) -> Result[u64, Error] {
     skip(s, mut i)
     let c = at(s, i)
     if c == b'n' {
-        if !is(s, i, "null") { return Error(Syntax(i)) }
+        if !is(s, i, "null") {
+            return Error(Syntax(i))
+        }
         i += 4
         Ok(1)
     } else if c == b't' {
-        if !is(s, i, "true") { return Error(Syntax(i)) }
+        if !is(s, i, "true") {
+            return Error(Syntax(i))
+        }
         i += 4
         Ok(1)
     } else if c == b'f' {
-        if !is(s, i, "false") { return Error(Syntax(i)) }
+        if !is(s, i, "false") {
+            return Error(Syntax(i))
+        }
         i += 5
         Ok(1)
     } else if c == b'"' {
@@ -396,7 +413,9 @@ fn number_size(s: String, mut i: u64) -> Result[u64, Error] {
             let bit: u64 = int.widen(int.trailing_zeros(mark))
             i += bit >> 3
         }
-        if !is_number_byte(at(s, i)) { break }
+        if !is_number_byte(at(s, i)) {
+            break
+        }
         i += 1
     }
     match float.parse64(string.slice(s, start, i)) {
@@ -608,9 +627,13 @@ fn is(s: String, i: u64, w: String) -> bool {
     let b = string.as_bytes(s)
     let word = string.as_bytes(w)
     let n = list.len(word)
-    if i + n > list.len(b) { return false }
+    if i + n > list.len(b) {
+        return false
+    }
     for j in 0 .. n {
-        if b[i + j] != word[j] { return false }
+        if b[i + j] != word[j] {
+            return false
+        }
     }
     true
 }

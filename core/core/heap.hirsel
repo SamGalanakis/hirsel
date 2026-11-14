@@ -1,35 +1,58 @@
 // BinaryHeap's one-move-per-level hole sift, with minimum-first ordering.
-pub opaque type Heap[T: ordered]: shareable + send { items: List[T] }
-pub fn new[T: ordered]() -> Heap[T] { Heap(items: list.new()) }
-pub fn len[T: ordered](h: Heap[T]) -> u64 { list.len(h.items) }
-pub fn peek[T: ordered](h: Heap[T]) -> Option[View[T]] in h { list.get(h.items, 0) }
+pub opaque type Heap[T: ordered]: shareable + send {
+    items: List[T]
+}
+
+pub fn new[T: ordered]() -> Heap[T] {
+    Heap(items: list.new())
+}
+
+pub fn len[T: ordered](h: Heap[T]) -> u64 {
+    list.len(h.items)
+}
+
+pub fn peek[T: ordered](h: Heap[T]) -> Option[View[T]] in h {
+    list.get(h.items, 0)
+}
+
 pub fn push[T: ordered](mut h: Heap[T], take x: T) -> Result[(), (Capacity, T)] {
     let count = list.len(h.items)
     if count == list.capacity(h.items) {
-        if let Error(c) = grow(mut h) { return Error((c, take x)) }
+        if let Error(c) = grow(mut h) {
+            return Error((c, take x))
+        }
     }
     let mut hole = count
     while hole > 0 {
         let parent = (hole - 1) / 2
-        if !(x < slots_view(h.items, parent)) { break }
+        if !(x < slots_view(h.items, parent)) {
+            break
+        }
         slots_shift(mut h.items, parent, hole)
         hole = parent
     }
     slots_put(mut h.items, hole, take x)
     Ok(())
 }
+
 pub fn pop[T: ordered](mut h: Heap[T]) -> Option[T] {
     let count = list.len(h.items)
-    if count == 0 { return None }
+    if count == 0 {
+        return None
+    }
     let end = count - 1
     let last = slots_take(mut h.items, end)
-    if end == 0 { return Some(take last) }
+    if end == 0 {
+        return Some(take last)
+    }
     let removed = slots_take(mut h.items, 0)
     let mut hole: u64 = 0
     // Move the smaller child up at each level, then sift last back up.
     while hole < (end - 1) / 2 {
         let mut child = hole * 2 + 1
-        if slots_view(h.items, child + 1) < slots_view(h.items, child) { child += 1 }
+        if slots_view(h.items, child + 1) < slots_view(h.items, child) {
+            child += 1
+        }
         slots_shift(mut h.items, child, hole)
         hole = child
     }
@@ -41,7 +64,9 @@ pub fn pop[T: ordered](mut h: Heap[T]) -> Option[T] {
     }
     while hole > 0 {
         let parent = (hole - 1) / 2
-        if !(last < slots_view(h.items, parent)) { break }
+        if !(last < slots_view(h.items, parent)) {
+            break
+        }
         slots_shift(mut h.items, parent, hole)
         hole = parent
     }
@@ -52,8 +77,11 @@ pub fn pop[T: ordered](mut h: Heap[T]) -> Option[T] {
 // These operate on List's allocation while its live set contains a hole.
 // Views, clones and cleanup see an inhabited prefix at every public boundary.
 fn slots_put[T](mut xs: List[T], i: u64, take x: T)
+
 fn slots_take[T](mut xs: List[T], i: u64) -> T
+
 fn slots_view[T](xs: List[T], i: u64) -> View[T] in xs
+
 fn slots_shift[T](mut xs: List[T], i: u64, j: u64)
 
 // Growth is a move of the live prefix. Staying within the slot kernel also
@@ -63,9 +91,16 @@ fn grow[T: ordered](mut h: Heap[T]) -> Result[(), Capacity] {
     let count = list.len(h.items)
     // At the count limit, reuse List's declined overflow admission. It cannot
     // move storage because grow is called only for a full heap.
-    if cap == 18446744073709551615 { return list.reserve(mut h.items, 1) }
-    let next: u64 = if cap == 0 { 4 } else {
-        match int.checked_mul(cap, 2) { Some(n) => n, None => 18446744073709551615 }
+    if cap == 18446744073709551615 {
+        return list.reserve(mut h.items, 1)
+    }
+    let next: u64 = if cap == 0 {
+        4
+    } else {
+        match int.checked_mul(cap, 2) {
+            Some(n) => n,
+            None => 18446744073709551615
+        }
     }
     let mut items: List[T] = slots_new(next)?
     let mut i: u64 = 0
@@ -77,6 +112,9 @@ fn grow[T: ordered](mut h: Heap[T]) -> Result[(), Capacity] {
     slots_free(take old)
     Ok(())
 }
+
 fn slots_new[T](n: u64) -> Result[List[T], Capacity]
+
 fn slots_move[T](mut src: List[T], i: u64, mut dst: List[T], j: u64)
+
 fn slots_free[T](take xs: List[T])

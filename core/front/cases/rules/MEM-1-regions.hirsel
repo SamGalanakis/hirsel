@@ -6,11 +6,29 @@
 // expect: run three() = 3
 // expect: run measure() = 2
 fn width(s: String) -> Result[u64, Capacity] {
-  region r { let t = text.copy_in(r, s)?; Ok(text.len(t)) }
+    region r {
+        let t = text.copy_in(r, s)?;
+        Ok(text.len(t))
+    }
 }
-fn three() -> u64 { match width("abc") { Ok(n) => n, Error(_) => 0 } }
+
+fn three() -> u64 {
+    match width("abc") {
+        Ok(n) => n,
+        Error(_) => 0
+    }
+}
+
 fn copy_len(r: Region, s: String) -> Result[u64, Capacity] {
-  let t = text.copy_in(r, s)?
-  Ok(text.len(t))
+    let t = text.copy_in(r, s)?
+    Ok(text.len(t))
 }
-fn measure() -> u64 { region r { match copy_len(r, "ab") { Ok(n) => n, Error(_) => 0 } } }
+
+fn measure() -> u64 {
+    region r {
+        match copy_len(r, "ab") {
+            Ok(n) => n,
+            Error(_) => 0
+        }
+    }
+}

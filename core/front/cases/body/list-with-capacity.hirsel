@@ -7,31 +7,61 @@
 // expect: run short_limit() = 3231
 // expect: run empty_limit() = 0
 // expect: run zero_sized() = 18446744073709551615
-type Padded { a: u8, b: u64 }
-fn make[T](n: u64) -> Result[List[T], Capacity] { list.with_capacity(n) }
-fn exact(n: u64) -> u64 { let xs: List[u64] = result.unwrap(make(n)); list.capacity(xs) }
+type Padded {
+    a: u8,
+    b: u64
+}
+
+fn make[T](n: u64) -> Result[List[T], Capacity] {
+    list.with_capacity(n)
+}
+
+fn exact(n: u64) -> u64 {
+    let xs: List[u64] = result.unwrap(make(n));
+    list.capacity(xs)
+}
+
 fn overflow() -> u64 {
     let r: Result[List[u64], Capacity] = make(18446744073709551615u64)
-    match r { Ok(take xs) => list.capacity(xs), Error(e) => e.requested }
+    match r {
+        Ok(take xs) => list.capacity(xs),
+        Error(e) => e.requested
+    }
 }
+
 fn padding() -> u64 {
     let r = bound bytes 32 {
         let xs: List[Padded] = make(3)?
         list.capacity(xs)
     }
-    match r { Ok(n) => n, Error(e) => e.requested }
+    match r {
+        Ok(n) => n,
+        Error(e) => e.requested
+    }
 }
+
 fn short_limit() -> u64 {
     let r = bound bytes 31 {
         let xs: List[Padded] = make(3)?
         list.capacity(xs)
     }
-    match r { Ok(n) => n, Error(e) => e.requested * 100 + e.available }
+    match r {
+        Ok(n) => n,
+        Error(e) => e.requested * 100 + e.available
+    }
 }
+
 fn empty_limit() -> u64 {
-    let r = bound bytes 0 { let xs: List[u8] = make(0)?; list.capacity(xs) }
-    match r { Ok(n) => n, Error(e) => e.requested + 1 }
+    let r = bound bytes 0 {
+        let xs: List[u8] = make(0)?;
+        list.capacity(xs)
+    }
+    match r {
+        Ok(n) => n,
+        Error(e) => e.requested + 1
+    }
 }
+
 fn zero_sized() -> u64 {
     let xs: List[()] = result.unwrap(make(18446744073709551615u64))
     list.capacity(xs)

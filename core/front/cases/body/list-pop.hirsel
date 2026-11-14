@@ -4,7 +4,10 @@
 // expect: run empty() = 0
 // expect: run static_value() = 990203
 // expect: run resource_value() = 7 trace 7
-fn pop[T](mut xs: List[T]) -> Option[T] { list.pop(mut xs) }
+fn pop[T](mut xs: List[T]) -> Option[T] {
+    list.pop(mut xs)
+}
+
 fn values() -> u64 {
     let mut xs: List[u64] = list.new()
     result.unwrap(list.push(mut xs, 7u64))
@@ -13,19 +16,30 @@ fn values() -> u64 {
     let a = option.unwrap(pop(mut xs))
     b * 10000 + a * 100 + list.capacity(xs)
 }
+
 fn empty() -> u64 {
     let mut xs: List[u64] = list.new()
-    match pop(mut xs) { None => list.capacity(xs), Some(_) => 999 }
+    match pop(mut xs) {
+        None => list.capacity(xs),
+        Some(_) => 999
+    }
 }
+
 fn static_value() -> u64 {
     let mut xs = result.unwrap(b"abc")
     let last: u64 = int.widen(option.unwrap(pop(mut xs)))
     last * 10000 + list.len(xs) * 100 + list.capacity(xs)
 }
-resource type Mark { id: u64 } drop(m) { let _ = m.id }
+
+resource type Mark {
+    id: u64
+} drop(m) {
+    let _ = m.id
+}
+
 fn resource_value() -> u64 {
     let mut xs: List[Mark] = list.new()
-    result.unwrap(list.push(mut xs, result.unwrap(Mark(id:7))))
+    result.unwrap(list.push(mut xs, result.unwrap(Mark(id: 7))))
     let x = option.unwrap(list.pop(mut xs))
     x.id + list.len(xs)
 }

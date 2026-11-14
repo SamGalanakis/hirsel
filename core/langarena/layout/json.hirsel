@@ -3,36 +3,66 @@
 // print retains one parsed document and creates/discards one output String per iteration.
 fn show(out: Stdout, n: u64) -> Result[(), Exit] waits {
     let mut s = string.new()
-    if let Error(_) = string.push_u64(mut s, n) { return Error(Exit(status: 2)) }
-    if let Error(_) = string.push(mut s, "\n") { return Error(Exit(status: 2)) }
-    match stdout.write(out, s) { Ok(()) => Ok(()), Error(_) => Error(Exit(status: 3)) }
+    if let Error(_) = string.push_u64(mut s, n) {
+        return Error(Exit(status: 2))
+    }
+    if let Error(_) = string.push(mut s, "\n") {
+        return Error(Exit(status: 2))
+    }
+    match stdout.write(out, s) {
+        Ok(()) => Ok(()),
+        Error(_) => Error(Exit(status: 3))
+    }
 }
+
 pub fn json_parse_main(out: Stdout, d: Dir) -> Result[(), Exit] waits {
-    let input = match std.file.read_string(d, "documents.json") { Ok(take s) => take s, Error(_) => return Error(Exit(status: 2)) }
+    let input = match std.file.read_string(d, "documents.json") {
+        Ok(take s) => take s,
+        Error(_) => return Error(Exit(status: 2))
+    }
     let mut sum: u64 = 0
     for _ in 0u64 .. 32 {
         region r {
-            let doc = match std.json.parse(r, input) { Ok(j) => j, Error(_) => return Error(Exit(status: 2)) }
-            sum += match doc { Arr(xs) => seq.len(xs), _ => 0 }
+            let doc = match std.json.parse(r, input) {
+                Ok(j) => j,
+                Error(_) => return Error(Exit(status: 2))
+            }
+            sum += match doc {
+                Arr(xs) => seq.len(xs),
+                _ => 0
+            }
         }
     }
     show(out, sum)
 }
+
 pub fn json_print_main(out: Stdout, d: Dir) -> Result[(), Exit] waits {
-    let input = match std.file.read_string(d, "documents.json") { Ok(take s) => take s, Error(_) => return Error(Exit(status: 2)) }
+    let input = match std.file.read_string(d, "documents.json") {
+        Ok(take s) => take s,
+        Error(_) => return Error(Exit(status: 2))
+    }
     region r {
-        let doc = match std.json.parse(r, input) { Ok(j) => j, Error(_) => return Error(Exit(status: 2)) }
+        let doc = match std.json.parse(r, input) {
+            Ok(j) => j,
+            Error(_) => return Error(Exit(status: 2))
+        }
         let mut sum: u64 = 0
         for _ in 0u64 .. 32 {
             let mut output = string.new()
-            if let Error(_) = std.json.push_json(mut output, doc) { return Error(Exit(status: 2)) }
+            if let Error(_) = std.json.push_json(mut output, doc) {
+                return Error(Exit(status: 2))
+            }
             sum += list.sum_bytes(string.as_bytes(output))
         }
         show(out, sum)
     }
 }
+
 pub fn json_reject_main(out: Stdout, d: Dir) -> Result[(), Exit] waits {
-    let input = match std.file.read_string(d, "malformed.json") { Ok(take s) => take s, Error(_) => return Error(Exit(status: 2)) }
+    let input = match std.file.read_string(d, "malformed.json") {
+        Ok(take s) => take s,
+        Error(_) => return Error(Exit(status: 2))
+    }
     region r {
         match std.json.parse(r, input) {
             Error(Syntax(i)) => show(out, i),
@@ -40,12 +70,20 @@ pub fn json_reject_main(out: Stdout, d: Dir) -> Result[(), Exit] waits {
         }
     }
 }
+
 pub fn json_capacity_main(out: Stdout, d: Dir) -> Result[(), Exit] waits {
-    let input = match std.file.read_string(d, "documents.json") { Ok(take s) => take s, Error(_) => return Error(Exit(status: 2)) }
+    let input = match std.file.read_string(d, "documents.json") {
+        Ok(take s) => take s,
+        Error(_) => return Error(Exit(status: 2))
+    }
     let refused: u64 = result.unwrap(bound bytes 0 {
         region r {
             match std.json.parse(r, input) {
-                Error(Build(Capacity(c))) => if c.available == 0 { c.requested } else { 0 },
+                Error(Build(Capacity(c))) => if c.available == 0 {
+                    c.requested
+                } else {
+                    0
+                },
                 _ => 0,
             }
         }

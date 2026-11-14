@@ -5,7 +5,22 @@
 // `noalias`) reads 5 through `v` and returns 55.
 // expect: accept
 // expect: run lend() = 15
-type P { a: u64, b: u64, c: u64, d: u64 }
-fn pair(v: P, take p: P) -> u64 { p.a = 5u64; p.a + v.a * 10u64 }
-fn via(v: P) -> u64 { pair(v, v) }
-fn lend() -> u64 { via(P(a: 1u64, b: 2u64, c: 3u64, d: 4u64)) }
+type P {
+    a: u64,
+    b: u64,
+    c: u64,
+    d: u64
+}
+
+fn pair(v: P, take p: P) -> u64 {
+    p.a = 5u64;
+    p.a + v.a * 10u64
+}
+
+fn via(v: P) -> u64 {
+    pair(v, v)
+}
+
+fn lend() -> u64 {
+    via(P(a: 1u64, b: 2u64, c: 3u64, d: 4u64))
+}

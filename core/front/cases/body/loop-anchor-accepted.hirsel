@@ -2,63 +2,91 @@
 // expect: run total_run() = 6
 // expect: run same() = 12
 // expect: run fields() = 4
-fn total(mut xs:List[String])->u64 {
- let mut n:u64=0
- let mut i:u64=0
- while let Some(s)=list.get(xs,i) {n+=string.byte_len(s);i+=1}
- list.clear(mut xs)
- n
+fn total(mut xs: List[String]) -> u64 {
+    let mut n: u64 = 0
+    let mut i: u64 = 0
+    while let Some(s) = list.get(xs, i) {
+        n += string.byte_len(s);
+        i += 1
+    }
+    list.clear(mut xs)
+    n
 }
-fn total_run()->u64 {
- let mut xs:List[String]=list.new()
- result.unwrap(list.push(mut xs,"abc"))
- result.unwrap(list.push(mut xs,"def"))
- total(mut xs)
+
+fn total_run() -> u64 {
+    let mut xs: List[String] = list.new()
+    result.unwrap(list.push(mut xs, "abc"))
+    result.unwrap(list.push(mut xs, "def"))
+    total(mut xs)
 }
-fn same()->u64 {
- let a="abcdef"
- let mut v=view a
- let mut i:u64=0
- while i<2 {
-  let alias=v
-  v=if i==0 {view a} else {alias}
-  i+=1
- }
- string.byte_len(v)*i
+
+fn same() -> u64 {
+    let a = "abcdef"
+    let mut v = view a
+    let mut i: u64 = 0
+    while i < 2 {
+        let alias = v
+        v = if i == 0 {
+            view a
+        } else {
+            alias
+        }
+        i += 1
+    }
+    string.byte_len(v) * i
 }
-scoped type Holder { first:View[String],second:View[String] }
-fn fields()->u64 {
- let a="a"
- let b="bbb"
- let mut h=Holder(first:view a,second:view b)
- let mut i:u64=0
- while i<2 {
-  let pair=(h.first,h.second)
-  h.first=pair.0
-  h.second=pair.1
-  i+=1
- }
- string.byte_len(h.first)+string.byte_len(h.second)
+
+scoped type Holder {
+    first: View[String],
+    second: View[String]
 }
+
+fn fields() -> u64 {
+    let a = "a"
+    let b = "bbb"
+    let mut h = Holder(first: view a, second: view b)
+    let mut i: u64 = 0
+    while i < 2 {
+        let pair = (h.first, h.second)
+        h.first = pair.0
+        h.second = pair.1
+        i += 1
+    }
+    string.byte_len(h.first) + string.byte_len(h.second)
+}
+
 // A copied stored view retains its carrier while the source slot is reassigned.
 // expect: run copy_field() = 3
-fn copy_field()->u64 {
- let a="a"
- let b="bbb"
- let mut h=Holder(first:view b,second:view a)
- let v=h.first
- h.first=view a
- string.byte_len(v)
+fn copy_field() -> u64 {
+    let a = "a"
+    let b = "bbb"
+    let mut h = Holder(first: view b, second: view a)
+    let v = h.first
+    h.first = view a
+    string.byte_len(v)
 }
+
 // expect: run option_alias() = 4
-fn option_alias()->u64 {
- let a="abcd"
- let mut v:Option[View[String]]=Some(view a)
- let mut i:u64=0
- while i<2 {
-  match v {Some(s)=>{let alias=s;v=Some(alias)},None=>{}}
-  i+=1
- }
- match v {Some(s)=>string.byte_len(s),None=>0}
+fn option_alias() -> u64 {
+    let a = "abcd"
+    let mut v: Option[View[String]] = Some(view a)
+    let mut i: u64 = 0
+    while i < 2 {
+        match v {
+            Some(s) => {
+                let alias = s;
+                v = Some(alias)
+            },
+            None => {}
+        }
+        i += 1
+    }
+    match v {
+        Some(s) => string.byte_len(s),
+        None => 0
+    }
 }
-fn positive()->bool {total_run()==6u64 && same()==12u64 && fields()==4u64 && copy_field()==3u64 && option_alias()==4u64}
+
+fn positive() -> bool {
+    total_run() == 6u64 && same() == 12u64 && fields() == 4u64 && copy_field() == 3u64 && option_alias() == 4u64
+}

@@ -4,10 +4,20 @@
 // because a declaration refusal stops the native run walkers). Hand-derived: a Cursor
 // over `b` at position 0, advanced by 2, reads position 2.
 // expect: run moved() = 2
-scoped type Cursor { input: View[Bytes], pos: u64 }
-fn start(b: Bytes) -> Cursor in b { Cursor(input: view b, pos: 0) }
-fn advance(b: Bytes) -> u64 {
-  let c = start(b)
-  c.pos + 2
+scoped type Cursor {
+    input: View[Bytes],
+    pos: u64
 }
-fn moved() -> u64 { advance(list.new()) }
+
+fn start(b: Bytes) -> Cursor in b {
+    Cursor(input: view b, pos: 0)
+}
+
+fn advance(b: Bytes) -> u64 {
+    let c = start(b)
+    c.pos + 2
+}
+
+fn moved() -> u64 {
+    advance(list.new())
+}

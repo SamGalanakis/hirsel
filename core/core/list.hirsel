@@ -1,18 +1,30 @@
 // Module `list` (SEM-4). Bytes is List[u8].
-
 pub fn new[T]() -> List[T]
+
 pub fn with_capacity[T](n: u64) -> Result[List[T], Capacity]
+
 pub fn len[T](xs: List[T]) -> u64
+
 pub fn capacity[T](xs: List[T]) -> u64
+
 pub fn reserve[T](mut xs: List[T], n: u64) -> Result[(), Capacity]
+
 pub fn get[T](xs: List[T], i: u64) -> Option[View[T]] in xs
+
 pub fn slice[T](xs: List[T], lo: u64, hi: u64) -> View[List[T]] in xs
+
 pub fn word_le(b: Bytes, at: u64) -> u64
+
 pub fn push[T](mut xs: List[T], take x: T) -> Result[(), (Capacity, T)]
+
 pub fn pop[T](mut xs: List[T]) -> Option[T]
+
 pub fn set[T](mut xs: List[T], i: u64, take x: T) -> T
+
 pub fn swap[T](mut xs: List[T], i: u64, j: u64)
+
 pub fn clear[T](mut xs: List[T])
+
 pub fn fill[T: plain](mut xs: List[T], n: u64, x: T) -> Result[(), Capacity]
 
 pub fn append[T: plain](mut xs: List[T], ys: List[T]) -> Result[(), Capacity]
@@ -38,16 +50,26 @@ pub fn sum[T: integer](xs: List[T]) -> T {
 // Private uninhabited storage. len is the number of live slots, not a prefix.
 // Callers must empty it before free or normalize it before ordinary cleanup.
 // Sort aliases keep len0 on scratch; Hole alone tracks and restores its live set.
-type Slots[T] { raw: List[T] }
+type Slots[T] {
+    raw: List[T]
+}
+
 fn slots_empty[T]() -> Slots[T]
+
 fn slots_new[T](n: u64) -> Result[Slots[T], Capacity]
+
 fn slots_put[T](mut s: Slots[T], i: u64, take x: T)
+
 fn slots_take[T](mut s: Slots[T], i: u64) -> T
+
 fn slots_view[T](s: Slots[T], i: u64) -> View[T] in s
+
 // Distinct mutable carriers. Updates both live counts.
 fn slots_move[T](mut src: Slots[T], i: u64, mut dst: Slots[T], j: u64)
+
 // Same carrier, including i == j. Keeps its live count.
 fn slots_shift[T](mut s: Slots[T], i: u64, j: u64)
+
 fn slots_free[T](take s: Slots[T])
 
 // Discard only a no-drop element ring; preserves evaluator liveness.
@@ -57,26 +79,37 @@ fn slots_forget_ring[T](mut s: Slots[T], head: u64)
 // Cursor arithmetic is bounded by n; width doubles only below n - width.
 pub fn sort_stable[T](mut xs: List[T], before: scoped fn(T, T) -> Order) -> Result[(), Capacity] {
     let n = list.len(xs)
-    if n < 2 { return Ok(()) }
+    if n < 2 {
+        return Ok(())
+    }
     let scratch: Slots[T] = slots_new(n)?
-    let mut g = Hole(xs: view xs, scratch: take scratch,
-        state: MergeState(source_is_xs: true, a: 0, mid: 0, b: 0, end: 0, n: n))
+    let mut g = Hole(xs: view xs, scratch: take scratch, state: MergeState(source_is_xs: true, a: 0, mid: 0, b: 0, end: 0, n: n))
     let mut width: u64 = 1
     while width < n {
         let mut lo: u64 = 0
         while lo < n {
             let left = int.wrapping_sub(n, lo)
-            let mid = int.wrapping_add(lo, if width < left { width } else { left })
+            let mid = int.wrapping_add(lo, if width < left {
+                width
+            } else {
+                left
+            })
             let room = int.wrapping_sub(n, mid)
-            let end = int.wrapping_add(mid, if width < room { width } else { room })
+            let end = int.wrapping_add(mid, if width < room {
+                width
+            } else {
+                room
+            })
             // Publish the entire pair at once. RHS evaluation precedes the store;
             // every earlier or later failure sees a complete restoration state.
-            g.state = MergeState(source_is_xs: g.state.source_is_xs,
-                a: lo, mid: mid, b: mid, end: end, n: n)
+            g.state = MergeState(source_is_xs: g.state.source_is_xs, a: lo, mid: mid, b: mid, end: end, n: n)
             // Destination prefix is a + (b - mid), including completed pairs.
             if g.state.source_is_xs {
                 while g.state.a < g.state.mid && g.state.b < g.state.end {
-                    let right = match before(slots_list_view(g.xs, g.state.b), slots_list_view(g.xs, g.state.a)) { Less => true, _ => false }
+                    let right = match before(slots_list_view(g.xs, g.state.b), slots_list_view(g.xs, g.state.a)) {
+                        Less => true,
+                        _ => false
+                    }
                     if right {
                         slots_from_list(g.xs, g.state.b, mut g.scratch, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)))
                         g.state.b = int.wrapping_add(g.state.b, 1)
@@ -95,7 +128,10 @@ pub fn sort_stable[T](mut xs: List[T], before: scoped fn(T, T) -> Order) -> Resu
                 }
             } else {
                 while g.state.a < g.state.mid && g.state.b < g.state.end {
-                    let right = match before(slots_view(g.scratch, g.state.b), slots_view(g.scratch, g.state.a)) { Less => true, _ => false }
+                    let right = match before(slots_view(g.scratch, g.state.b), slots_view(g.scratch, g.state.a)) {
+                        Less => true,
+                        _ => false
+                    }
                     if right {
                         slots_to_list(mut g.scratch, g.state.b, g.xs, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)))
                         g.state.b = int.wrapping_add(g.state.b, 1)
@@ -116,9 +152,12 @@ pub fn sort_stable[T](mut xs: List[T], before: scoped fn(T, T) -> Order) -> Resu
             lo = g.state.end
         }
         // Flip the buffers and reset every restoration range in one store.
-        g.state = MergeState(source_is_xs: !g.state.source_is_xs,
-            a: 0, mid: 0, b: 0, end: 0, n: n)
-        if width >= int.wrapping_sub(n, width) { width = n } else { width = int.wrapping_mul(width, 2) }
+        g.state = MergeState(source_is_xs: !g.state.source_is_xs, a: 0, mid: 0, b: 0, end: 0, n: n)
+        if width >= int.wrapping_sub(n, width) {
+            width = n
+        } else {
+            width = int.wrapping_mul(width, 2)
+        }
     }
     // Its infallible finalizer restores xs on both success and failure. It also
     // performs the final copy back when the sorted source is scratch.
@@ -130,7 +169,15 @@ pub fn sort_stable[T](mut xs: List[T], before: scoped fn(T, T) -> Order) -> Resu
 // Every state STORE publishes a complete restoration state. Each element
 // transfer moves the value, then advances one source cursor. Between those
 // statements the state is incomplete: nothing between them may fail.
-type MergeState { source_is_xs: bool, a: u64, mid: u64, b: u64, end: u64, n: u64 }
+type MergeState {
+    source_is_xs: bool,
+    a: u64,
+    mid: u64,
+    b: u64,
+    end: u64,
+    n: u64
+}
+
 scoped type Hole[T] {
     xs: View[List[T]],
     scratch: Slots[T],
@@ -173,11 +220,14 @@ scoped type Hole[T] {
     }
     slots_finish_list(g.xs)
 }
+
 // Header access is trusted and private. xs stays frozen by Hole's view while
 // its live set is temporarily holed. Both headers stay fixed: xs retains n,
 // scratch retains0, and Hole restores every original slot before field cleanup.
 fn slots_list_view[T](xs: View[List[T]], i: u64) -> View[T] in xs
+
 fn slots_from_list[T](src: View[List[T]], i: u64, mut dst: Slots[T], j: u64)
+
 fn slots_to_list[T](mut src: Slots[T], i: u64, dst: View[List[T]], j: u64)
 
 // Sort touches only the original prefix and restores it before handing back.

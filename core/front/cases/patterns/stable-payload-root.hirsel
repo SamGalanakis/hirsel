@@ -1,12 +1,30 @@
 // A borrowed stable field retains its source view's root. It can determine a
 // callee's region generic without inventing or losing the region argument.
 // expect: accept
-stable type Leaf { n: u64 }
+stable type Leaf {
+    n: u64
+}
+
 stable type Tree = One(Leaf)
-fn inspect[in a](x: Leaf in a) -> u64 { 0 }
-fn f(tree: Tree) -> u64 { match tree { One(x) => inspect(x) } }
+
+fn inspect[in a](x: Leaf in a) -> u64 {
+    0
+}
+
+fn f(tree: Tree) -> u64 {
+    match tree {
+        One(x) => inspect(x)
+    }
+}
+
 // An explicitly older field region stays older; it is not replaced by the tree's.
 stable type OlderTree[in a] = Older(Leaf in a)
+
 fn older[in a, in b](tree: OlderTree[in a] in b) -> u64 where a: b {
-  match tree { Older(x) => { let _: Leaf in a = x; 0 } }
+    match tree {
+        Older(x) => {
+            let _: Leaf in a = x;
+            0
+        }
+    }
 }

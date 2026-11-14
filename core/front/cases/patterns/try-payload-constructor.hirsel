@@ -2,15 +2,31 @@
 // expect: accept
 // expect: run f() = 7
 fn some() -> Option[u8] {
-  let n: u8 = (if true { Some(7) } else { None })?
-  Some(n)
+    let n: u8 = (if true {
+        Some(7)
+    } else {
+        None
+    })?
+    Some(n)
 }
-fn f() -> u8 { match some() { Some(n) => n, None => 0 } }
+
+fn f() -> u8 {
+    match some() {
+        Some(n) => n,
+        None => 0
+    }
+}
 
 // Nested success expectations still leave both Option shapes to the constructors.
 // expect: run nested() = 9
 fn twice() -> Option[u8] {
-  let n: u8 = Some(Some(9))??
-  Some(n)
+    let n: u8 = Some(Some(9))??
+    Some(n)
 }
-fn nested() -> u8 { match twice() { Some(n) => n, None => 0 } }
+
+fn nested() -> u8 {
+    match twice() {
+        Some(n) => n,
+        None => 0
+    }
+}

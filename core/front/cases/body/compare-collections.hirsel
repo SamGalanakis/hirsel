@@ -7,36 +7,126 @@
 // expect: run tuples() = 412652
 // expect: run variants() = 412652
 // expect: run pointers() = 412652
-fn flags(l:bool,e:bool,g:bool,le:bool,ge:bool,ne:bool)->u64 {
- (if l {1u64} else {0}) + (if e {2u64} else {0}) + (if g {4u64} else {0}) + (if le {8u64} else {0}) + (if ge {16u64} else {0}) + (if ne {32u64} else {0})
+fn flags(l: bool, e: bool, g: bool, le: bool, ge: bool, ne: bool) -> u64 {
+    (if l {
+        1u64
+    } else {
+        0
+    }) + (if e {
+        2u64
+    } else {
+        0
+    }) + (if g {
+        4u64
+    } else {
+        0
+    }) + (if le {
+        8u64
+    } else {
+        0
+    }) + (if ge {
+        16u64
+    } else {
+        0
+    }) + (if ne {
+        32u64
+    } else {
+        0
+    })
 }
-fn ints(x:i16, extra:bool)->List[i16] {
- let mut xs:List[i16]=list.new()
- let _=list.push(mut xs,x)
- if extra { let _=list.push(mut xs,7i16) }
- xs
+
+fn ints(x: i16, extra: bool) -> List[i16] {
+    let mut xs: List[i16] = list.new()
+    let _ = list.push(mut xs, x)
+    if extra {
+        let _ = list.push(mut xs, 7i16)
+    }
+    xs
 }
-fn array_flags(a:Inline[i16,2],b:Inline[i16,2])->u64 { flags(a<b,a==b,a>b,a<=b,a>=b,a!=b) }
-fn arrays()->u64 { let a=[-2i16,9i16]; let b=[-1i16,0i16]; array_flags(a,b)*10000+array_flags(a,a)*100+array_flags(b,a) }
-fn list_flags(a:List[i16],b:List[i16])->u64 { flags(a<b,a==b,a>b,a<=b,a>=b,a!=b) }
-fn lists()->u64 { let a=ints(-2,false); let b=ints(-2,true); list_flags(a,b)*10000+list_flags(a,a)*100+list_flags(b,a) }
-type Record:key+ordered { ns:List[i16], tag:u8 }
-fn record_flags(a:Record,b:Record)->u64 { flags(a<b,a==b,a>b,a<=b,a>=b,a!=b) }
-fn records()->u64 { let a=Record(ns:ints(-2,false),tag:99u8); let b=Record(ns:ints(-1,false),tag:0u8); record_flags(a,b)*10000+record_flags(a,a)*100+record_flags(b,a) }
-fn tuple_flags(a:(List[i16],u8),b:(List[i16],u8))->u64 { flags(a<b,a==b,a>b,a<=b,a>=b,a!=b) }
-fn tuples()->u64 { let a=(ints(-2,false),99u8); let b=(ints(-1,false),0u8); tuple_flags(a,b)*10000+tuple_flags(a,a)*100+tuple_flags(b,a) }
-type Choice:key+ordered = Small(List[i16]) | Large(List[i16])
-fn variant_flags(a:Choice,b:Choice)->u64 { flags(a<b,a==b,a>b,a<=b,a>=b,a!=b) }
-fn variants()->u64 { let a:Choice=Small(ints(99,false)); let b:Choice=Large(ints(-99,false)); variant_flags(a,b)*10000+variant_flags(a,a)*100+variant_flags(b,a) }
-fn box_flags(a:Box[u64],b:Box[u64])->u64 { flags(a<b,a==b,a>b,a<=b,a>=b,a!=b) }
-fn rc_flags(a:Rc[u64],b:Rc[u64])->u64 { flags(a<b,a==b,a>b,a<=b,a>=b,a!=b) }
-fn arc_flags(a:Arc[u64],b:Arc[u64])->u64 { flags(a<b,a==b,a>b,a<=b,a>=b,a!=b) }
-fn pointers()->u64 {
- let a=result.unwrap(box.new(1u64)); let b=result.unwrap(box.new(2u64))
- let c=result.unwrap(rc.new(3u64)); let d=result.unwrap(rc.new(3u64))
- let e=result.unwrap(arc.new(5u64)); let f=result.unwrap(arc.new(4u64))
- box_flags(a,b)*10000+rc_flags(c,d)*100+arc_flags(e,f)
+
+fn array_flags(a: Inline[i16, 2], b: Inline[i16, 2]) -> u64 {
+    flags(a < b, a == b, a > b, a <= b, a >= b, a != b)
 }
-pub fn main()->Result[(),Exit] {
- if arrays()==412652u64 && lists()==412652u64 && records()==412652u64 && tuples()==412652u64 && variants()==412652u64 && pointers()==412652u64 { Ok(()) } else { Error(Exit(status:1)) }
+
+fn arrays() -> u64 {
+    let a =[-2i16, 9i16];
+    let b =[-1i16, 0i16];
+    array_flags(a, b) * 10000 + array_flags(a, a) * 100 + array_flags(b, a)
+}
+
+fn list_flags(a: List[i16], b: List[i16]) -> u64 {
+    flags(a < b, a == b, a > b, a <= b, a >= b, a != b)
+}
+
+fn lists() -> u64 {
+    let a = ints(-2, false);
+    let b = ints(-2, true);
+    list_flags(a, b) * 10000 + list_flags(a, a) * 100 + list_flags(b, a)
+}
+
+type Record: key + ordered {
+    ns: List[i16],
+    tag: u8
+}
+
+fn record_flags(a: Record, b: Record) -> u64 {
+    flags(a < b, a == b, a > b, a <= b, a >= b, a != b)
+}
+
+fn records() -> u64 {
+    let a = Record(ns: ints(-2, false), tag: 99u8);
+    let b = Record(ns: ints(-1, false), tag: 0u8);
+    record_flags(a, b) * 10000 + record_flags(a, a) * 100 + record_flags(b, a)
+}
+
+fn tuple_flags(a: (List[i16], u8), b: (List[i16], u8)) -> u64 {
+    flags(a < b, a == b, a > b, a <= b, a >= b, a != b)
+}
+
+fn tuples() -> u64 {
+    let a = (ints(-2, false), 99u8);
+    let b = (ints(-1, false), 0u8);
+    tuple_flags(a, b) * 10000 + tuple_flags(a, a) * 100 + tuple_flags(b, a)
+}
+
+type Choice: key + ordered = Small(List[i16]) | Large(List[i16])
+
+fn variant_flags(a: Choice, b: Choice) -> u64 {
+    flags(a < b, a == b, a > b, a <= b, a >= b, a != b)
+}
+
+fn variants() -> u64 {
+    let a: Choice = Small(ints(99, false));
+    let b: Choice = Large(ints(-99, false));
+    variant_flags(a, b) * 10000 + variant_flags(a, a) * 100 + variant_flags(b, a)
+}
+
+fn box_flags(a: Box[u64], b: Box[u64]) -> u64 {
+    flags(a < b, a == b, a > b, a <= b, a >= b, a != b)
+}
+
+fn rc_flags(a: Rc[u64], b: Rc[u64]) -> u64 {
+    flags(a < b, a == b, a > b, a <= b, a >= b, a != b)
+}
+
+fn arc_flags(a: Arc[u64], b: Arc[u64]) -> u64 {
+    flags(a < b, a == b, a > b, a <= b, a >= b, a != b)
+}
+
+fn pointers() -> u64 {
+    let a = result.unwrap(box.new(1u64));
+    let b = result.unwrap(box.new(2u64))
+    let c = result.unwrap(rc.new(3u64));
+    let d = result.unwrap(rc.new(3u64))
+    let e = result.unwrap(arc.new(5u64));
+    let f = result.unwrap(arc.new(4u64))
+    box_flags(a, b) * 10000 + rc_flags(c, d) * 100 + arc_flags(e, f)
+}
+
+pub fn main() -> Result[(), Exit] {
+    if arrays() == 412652u64 && lists() == 412652u64 && records() == 412652u64 && tuples() == 412652u64 && variants() == 412652u64 && pointers() == 412652u64 {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
 }

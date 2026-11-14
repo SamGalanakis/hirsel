@@ -12,86 +12,160 @@
 // expect: run boxed() = 53
 // expect: run again() = 15
 // expect: run refused() = 1606
-type Row { name: String, n: u64 }
-@twin(Row) stable type RowS { name: Text, n: u64 }
-type Bag { xs: List[u64] }
-@twin(Bag) stable type BagS { xs: FixedSpan[u64] }
-type Inner { s: String }
-@twin(Inner) stable type InnerS { s: Text }
-type Outer { a: Box[Inner], b: Inner, k: u64 }
-@twin(Outer) stable type OuterS { a: InnerS, b: InnerS, k: u64 }
+type Row {
+    name: String,
+    n: u64
+}
+
+@twin(Row)
+stable type RowS {
+    name: Text,
+    n: u64
+}
+
+type Bag {
+    xs: List[u64]
+}
+
+@twin(Bag)
+stable type BagS {
+    xs: FixedSpan[u64]
+}
+
+type Inner {
+    s: String
+}
+
+@twin(Inner)
+stable type InnerS {
+    s: Text
+}
+
+type Outer {
+    a: Box[Inner],
+    b: Inner,
+    k: u64
+}
+
+@twin(Outer)
+stable type OuterS {
+    a: InnerS,
+    b: InnerS,
+    k: u64
+}
+
 type Shape = Dot | Word(String)
-@twin(Shape) stable type ShapeS = Dot | Word(Text)
-stable type Span2 { start: u64, end: u64 }
+
+@twin(Shape)
+stable type ShapeS = Dot | Word(Text)
+
+stable type Span2 {
+    start: u64,
+    end: u64
+}
+
 fn own(x: String) -> String {
-  let mut s = string.new()
-  let _ = string.push(mut s, x)
-  s
+    let mut s = string.new()
+    let _ = string.push(mut s, x)
+    s
 }
+
 fn freeze() -> u64 {
-  let x = Row(name: own("hello"), n: 3)
-  region r {
-    let c: Result[RowS in r, Capacity] = clone_in(r, x)
-    match c { Ok(s) => text.len(s.name) * 10 + s.n, Error(_) => 999 }
-  }
-}
-fn spans() -> u64 {
-  let mut xs: List[u64] = list.new()
-  let _ = list.push(mut xs, 4)
-  let _ = list.push(mut xs, 6)
-  let _ = list.push(mut xs, 8)
-  let b = Bag(xs: take xs)
-  region r {
-    let c: Result[BagS in r, Capacity] = clone_in(r, b)
-    match c {
-      Ok(s) => match span.get(s.xs, 1) { Some(k) => span.len(s.xs) * 100 + k, None => 998 },
-      Error(_) => 999,
-    }
-  }
-}
-fn nested() -> u64 {
-  let Ok(a) = box.new(Inner(s: own("abc"))) else { return 997 }
-  let o = Outer(a: take a, b: Inner(s: own("de")), k: 7)
-  region r {
-    let c: Result[OuterS in r, Capacity] = clone_in(r, o)
-    match c {
-      Ok(s) => text.len(s.a.s) + text.len(s.b.s) * 10 + s.k * 100,
-      Error(_) => 999,
-    }
-  }
-}
-fn shapes() -> u64 {
-  let x: Shape = Word(own("abcd"))
-  region r {
-    let c: Result[ShapeS in r, Capacity] = clone_in(r, x)
-    match c { Ok(Word(t)) => text.len(t), Ok(Dot) => 998, Error(_) => 999 }
-  }
-}
-fn boxed() -> u64 {
-  let Ok(b) = box.new(Row(name: own("hello"), n: 3)) else { return 997 }
-  region r {
-    let c: Result[RowS in r, Capacity] = clone_in(r, b)
-    match c { Ok(s) => text.len(s.name) * 10 + s.n, Error(_) => 999 }
-  }
-}
-fn again() -> u64 {
-  region r {
-    match Span2(start: 5, end: 10) in r {
-      Ok(s) => region q {
-        let c: Result[Span2 in q, Capacity] = clone_in(q, s)
-        match c { Ok(t) => t.start + t.end, Error(_) => 999 }
-      },
-      Error(_) => 998,
-    }
-  }
-}
-fn refused() -> u64 {
-  let x = Row(name: own("abc"), n: 3)
-  let got = bound bytes 30 {
+    let x = Row(name: own("hello"), n: 3)
     region r {
-      let c: Result[RowS in r, Capacity] = clone_in(r, x)
-      match c { Ok(_) => 1u64, Error(e) => e.requested * 100 + e.available }
+        let c: Result[RowS in r, Capacity] = clone_in(r, x)
+        match c {
+            Ok(s) => text.len(s.name) * 10 + s.n,
+            Error(_) => 999
+        }
     }
-  }
-  match got { Ok(k) => k, Error(_) => 2 }
+}
+
+fn spans() -> u64 {
+    let mut xs: List[u64] = list.new()
+    let _ = list.push(mut xs, 4)
+    let _ = list.push(mut xs, 6)
+    let _ = list.push(mut xs, 8)
+    let b = Bag(xs: take xs)
+    region r {
+        let c: Result[BagS in r, Capacity] = clone_in(r, b)
+        match c {
+            Ok(s) => match span.get(s.xs, 1) {
+                Some(k) => span.len(s.xs) * 100 + k,
+                None => 998
+            },
+            Error(_) => 999,
+        }
+    }
+}
+
+fn nested() -> u64 {
+    let Ok(a) = box.new(Inner(s: own("abc"))) else {
+        return 997
+    }
+    let o = Outer(a: take a, b: Inner(s: own("de")), k: 7)
+    region r {
+        let c: Result[OuterS in r, Capacity] = clone_in(r, o)
+        match c {
+            Ok(s) => text.len(s.a.s) + text.len(s.b.s) * 10 + s.k * 100,
+            Error(_) => 999,
+        }
+    }
+}
+
+fn shapes() -> u64 {
+    let x: Shape = Word(own("abcd"))
+    region r {
+        let c: Result[ShapeS in r, Capacity] = clone_in(r, x)
+        match c {
+            Ok(Word(t)) => text.len(t),
+            Ok(Dot) => 998,
+            Error(_) => 999
+        }
+    }
+}
+
+fn boxed() -> u64 {
+    let Ok(b) = box.new(Row(name: own("hello"), n: 3)) else {
+        return 997
+    }
+    region r {
+        let c: Result[RowS in r, Capacity] = clone_in(r, b)
+        match c {
+            Ok(s) => text.len(s.name) * 10 + s.n,
+            Error(_) => 999
+        }
+    }
+}
+
+fn again() -> u64 {
+    region r {
+        match Span2(start: 5, end: 10) in r {
+            Ok(s) => region q {
+                let c: Result[Span2 in q, Capacity] = clone_in(q, s)
+                match c {
+                    Ok(t) => t.start + t.end,
+                    Error(_) => 999
+                }
+            },
+            Error(_) => 998,
+        }
+    }
+}
+
+fn refused() -> u64 {
+    let x = Row(name: own("abc"), n: 3)
+    let got = bound bytes 30 {
+        region r {
+            let c: Result[RowS in r, Capacity] = clone_in(r, x)
+            match c {
+                Ok(_) => 1u64,
+                Error(e) => e.requested * 100 + e.available
+            }
+        }
+    }
+    match got {
+        Ok(k) => k,
+        Error(_) => 2
+    }
 }

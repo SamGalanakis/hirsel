@@ -2,10 +2,20 @@
 // block's, ends at that block's exit before its locals are cleaned, unless the block's
 // value reaches it; the view `list.get` returns does not outlive `xs`, since the value is
 // a `u64`. (The value reaching it is the Q28 case, own/drop-frozen.)
-
 // expect: accept
-fn present(o: Option[View[u64]]) -> u64 { 0 }
-fn f() -> u64 { let xs: List[u64] = list.new(); present(list.get(xs, 0)) }
+fn present(o: Option[View[u64]]) -> u64 {
+    0
+}
+
+fn f() -> u64 {
+    let xs: List[u64] = list.new();
+    present(list.get(xs, 0))
+}
+
 fn g() -> u64 {
-    let b = { let xs: List[u64] = list.new(); present(list.get(xs, 0)) }; b
+    let b = {
+        let xs: List[u64] = list.new();
+        present(list.get(xs, 0))
+    };
+    b
 }

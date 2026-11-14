@@ -1,78 +1,129 @@
 // LAYOUT family3: checked u64 stencil, indexed gather, then checked reduction.
 // Goose docs/design/soa.md supplies the layout comparison; ordinary Rust slices
 // supply the same safe indexed loops. No contraction or ISA-specific kernel.
-type Cell {value:u64,index:u64}
-fn fixed(seed:u64)->u64 {
-    let mut values:Inline[u64,64]=[0u64;64]
-    let mut indices:Inline[u64,64]=[0u64;64]
-    let mut stencil:Inline[u64,64]=[0u64;64]
-    for i in 0u64 .. 64u64 {values[i]=(i*37+seed)%1000;indices[i]=(i*17+3)%64}
-    for i in 0u64 .. 64u64 {stencil[i]=values[(i+63)%64]+values[i]+values[(i+1)%64]}
-    let mut total:u64=0
-    for i in 0u64 .. 64u64 {total+=stencil[indices[i]]}
+type Cell {
+    value: u64,
+    index: u64
+}
+
+fn fixed(seed: u64) -> u64 {
+    let mut values: Inline[u64, 64] =[0u64; 64]
+    let mut indices: Inline[u64, 64] =[0u64; 64]
+    let mut stencil: Inline[u64, 64] =[0u64; 64]
+    for i in 0u64 .. 64u64 {
+        values[i] = (i * 37 + seed) % 1000;
+        indices[i] = (i * 17 + 3) % 64
+    }
+    for i in 0u64 .. 64u64 {
+        stencil[i] = values[(i + 63) % 64] + values[i] + values[(i + 1) % 64]
+    }
+    let mut total: u64 = 0
+    for i in 0u64 .. 64u64 {
+        total += stencil[indices[i]]
+    }
     total
 }
-fn soa(n:u64,seed:u64)->Result[u64,helper.Error] {
-    let mut values:List[u64]=list.new()
-    let mut indices:List[u64]=list.new()
-    let mut stencil:List[u64]=list.new()
-    helper.mem(list.fill(mut values,n,0))?
-    helper.mem(list.fill(mut indices,n,0))?
-    helper.mem(list.fill(mut stencil,n,0))?
-    for i in 0 .. n {values[i]=(i*37+seed)%1000;indices[i]=(i*17+3)%n}
-    for i in 0 .. n {stencil[i]=values[(i+n-1)%n]+values[i]+values[(i+1)%n]}
-    let mut total:u64=0
-    for i in 0 .. n {total+=stencil[indices[i]]}
-    Ok(total)
-}
-fn aos(n:u64,seed:u64)->Result[u64,helper.Error] {
-    let mut values:List[Cell]=helper.mem(list.with_capacity(n))?
+
+fn soa(n: u64, seed: u64) -> Result[u64, helper.Error] {
+    let mut values: List[u64] = list.new()
+    let mut indices: List[u64] = list.new()
+    let mut stencil: List[u64] = list.new()
+    helper.mem(list.fill(mut values, n, 0))?
+    helper.mem(list.fill(mut indices, n, 0))?
+    helper.mem(list.fill(mut stencil, n, 0))?
     for i in 0 .. n {
-        let _=list.push(mut values,Cell(value:(i*37+seed)%1000,index:(i*17+3)%n))
+        values[i] = (i * 37 + seed) % 1000;
+        indices[i] = (i * 17 + 3) % n
     }
-    let mut stencil:List[u64]=list.new()
-    helper.mem(list.fill(mut stencil,n,0))?
-    for i in 0 .. n {stencil[i]=values[(i+n-1)%n].value+values[i].value+values[(i+1)%n].value}
-    let mut total:u64=0
-    for i in 0 .. n {total+=stencil[values[i].index]}
+    for i in 0 .. n {
+        stencil[i] = values[(i + n - 1) % n] + values[i] + values[(i + 1) % n]
+    }
+    let mut total: u64 = 0
+    for i in 0 .. n {
+        total += stencil[indices[i]]
+    }
     Ok(total)
 }
-pub fn dispatch(config:String,name:String,warmup:u64,iterations:u64)->Result[u32,helper.Error] {
-    let ni=helper.config_i64(config,name,"n")?
-    let si=helper.config_i64(config,name,"seed")?
-    if ni<2 || si<0 {return Error(Config)}
-    let n:u64=int.narrow(ni)
-    let seed:u64=int.narrow(si)
-    let mut total:u32=0
-    for _ in 0 .. warmup+iterations {
-        let value=if name=="Layout::Numeric::Fixed" {
-            if n!=64 {return Error(Config)}
+
+fn aos(n: u64, seed: u64) -> Result[u64, helper.Error] {
+    let mut values: List[Cell] = helper.mem(list.with_capacity(n))?
+    for i in 0 .. n {
+        let _ = list.push(mut values, Cell(value: (i * 37 + seed) % 1000, index: (i * 17 + 3) % n))
+    }
+    let mut stencil: List[u64] = list.new()
+    helper.mem(list.fill(mut stencil, n, 0))?
+    for i in 0 .. n {
+        stencil[i] = values[(i + n - 1) % n].value + values[i].value + values[(i + 1) % n].value
+    }
+    let mut total: u64 = 0
+    for i in 0 .. n {
+        total += stencil[values[i].index]
+    }
+    Ok(total)
+}
+
+pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
+    let ni = helper.config_i64(config, name, "n")?
+    let si = helper.config_i64(config, name, "seed")?
+    if ni < 2 || si < 0 {
+        return Error(Config)
+    }
+    let n: u64 = int.narrow(ni)
+    let seed: u64 = int.narrow(si)
+    let mut total: u32 = 0
+    for _ in 0 .. warmup + iterations {
+        let value = if name == "Layout::Numeric::Fixed" {
+            if n != 64 {
+                return Error(Config)
+            }
             fixed(seed)
-        } else if name=="Layout::Numeric::AoS" {aos(n,seed)?}
-        else if name=="Layout::Numeric::SoA" {soa(n,seed)?}
-        else {return Error(UnknownTask)}
-        total=int.wrapping_add(total,int.truncate(value))
+        } else if name == "Layout::Numeric::AoS" {
+            aos(n, seed)?
+        } else if name == "Layout::Numeric::SoA" {
+            soa(n, seed)?
+        } else {
+            return Error(UnknownTask)
+        }
+        total = int.wrapping_add(total, int.truncate(value))
     }
     Ok(total)
 }
-pub fn main(out:Stdout,d:Dir,argv:Args)->Result[(),Exit] waits {
-    harness.main(out,d,argv,fn(c:String,n:String,w:u64,i:u64)->Result[u32,helper.Error] {dispatch(c,n,w,i)})
+
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
+    harness.main(out, d, argv, fn(c: String, n: String, w: u64, i: u64) -> Result[u32, helper.Error] {
+        dispatch(c, n, w, i)
+    })
 }
-fn capacity_prefix()->u64 {
-    let result=bound bytes 16 {
-        let mut values:List[u64]=list.with_capacity(2)?
-        let _=list.push(mut values,1u64)
-        let _=list.push(mut values,2u64)
-        match list.reserve(mut values,1) {
-            Error(c)=>if c.available==0 {list.len(values)*10000+(values[0]+values[1])*100+c.requested} else {0},
-            Ok(())=>0,
+
+fn capacity_prefix() -> u64 {
+    let result = bound bytes 16 {
+        let mut values: List[u64] = list.with_capacity(2)?
+        let _ = list.push(mut values, 1u64)
+        let _ = list.push(mut values, 2u64)
+        match list.reserve(mut values, 1) {
+            Error(c) => if c.available == 0 {
+                list.len(values) * 10000 + (values[0] + values[1]) * 100 + c.requested
+            } else {
+                0
+            },
+            Ok(()) => 0,
         }
     }
-    match result {Ok(v)=>v,Error(_)=>0}
+    match result {
+        Ok(v) => v,
+        Error(_) => 0
+    }
 }
-pub fn helper_laws()->bool {
-    let refused=bound bytes 0 {let data:List[u64]=list.with_capacity(1)?;list.len(data)}
-    let charge=match refused {Error(c)=>c.requested,Ok(_)=>0}
-    let overflow:Option[u64]=int.checked_add(18446744073709551615u64,1u64)
-    capacity_prefix()==20332 && charge==8 && overflow==None && fixed(42)==result.unwrap(soa(64,42)) && fixed(42)==result.unwrap(aos(64,42))
+
+pub fn helper_laws() -> bool {
+    let refused = bound bytes 0 {
+        let data: List[u64] = list.with_capacity(1)?;
+        list.len(data)
+    }
+    let charge = match refused {
+        Error(c) => c.requested,
+        Ok(_) => 0
+    }
+    let overflow: Option[u64] = int.checked_add(18446744073709551615u64, 1u64)
+    capacity_prefix() == 20332 && charge == 8 && overflow == None && fixed(42) == result.unwrap(soa(64, 42)) && fixed(42) == result.unwrap(aos(64, 42))
 }

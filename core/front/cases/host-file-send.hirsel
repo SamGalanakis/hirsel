@@ -1,5 +1,7 @@
 // expect: accept
 // core.md: HostFile is a mechanical resource with send, so a lock may own it.
-resource type Lock: send { f: HostFile }
+resource type Lock: send {
+    f: HostFile
+}
 // expect: kind Lock resource
 // expect: holds Lock resource

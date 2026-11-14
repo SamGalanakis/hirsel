@@ -3,14 +3,27 @@
 // expect: run immediate() = 3
 // expect: run let_bound() = 3
 // expect: run nested() = 3
-fn mk()->List[String] {
- let mut xs:List[String]=list.new()
- let _=list.push(mut xs,"abc")
- xs
+fn mk() -> List[String] {
+    let mut xs: List[String] = list.new()
+    let _ = list.push(mut xs, "abc")
+    xs
 }
-fn immediate()->u64 { string.byte_len(mk()[0]) }
-fn let_bound()->u64 { let v=mk()[0]; string.byte_len(v) }
-fn nested()->u64 { let v={mk()[0]}; string.byte_len(v) }
+
+fn immediate() -> u64 {
+    string.byte_len(mk()[0])
+}
+
+fn let_bound() -> u64 {
+    let v = mk()[0];
+    string.byte_len(v)
+}
+
+fn nested() -> u64 {
+    let v = {
+        mk()[0]
+    };
+    string.byte_len(v)
+}
 
 // Block-tail views and conditional bindings retain exactly their reached owners.
 // expect: run if_tail(true) = 3
@@ -23,40 +36,133 @@ fn nested()->u64 { let v={mk()[0]}; string.byte_len(v) }
 // expect: run chosen() = 3 trace 1,2
 // expect: run failed_tail() = fail Unwrap trace 1,2
 // expect: run repeated() = 9
-fn if_tail(flag:bool)->u64 {
- let v=if flag {mk()[0]} else {mk()[0]}
- string.byte_len(v)
+fn if_tail(flag: bool) -> u64 {
+    let v = if flag {
+        mk()[0]
+    } else {
+        mk()[0]
+    }
+    string.byte_len(v)
 }
-fn match_tail(flag:bool)->u64 {
- let v=match flag {true=>{mk()[0]},false=>{mk()[0]}}
- string.byte_len(v)
+
+fn match_tail(flag: bool) -> u64 {
+    let v = match flag {
+        true => {
+            mk()[0]
+        },
+        false => {
+            mk()[0]
+        }
+    }
+    string.byte_len(v)
 }
-fn if_let()->u64 {if let Some(v)={Some(mk()[0])} {string.byte_len(v)} else {0}}
-fn if_let_tail()->u64 {
- let v=if let Some(x)=Some(true) {{mk()[0]}} else {{mk()[0]}}
- string.byte_len(v)
+
+fn if_let() -> u64 {
+    if let Some(v) = {
+        Some(mk()[0])
+    } {
+        string.byte_len(v)
+    } else {
+        0
+    }
 }
-fn copy_len(s:String)->u64 {if let Ok(t)=string.from(s) {string.byte_len(t)} else {0}}
-fn copy_fence()->u64 {copy_len("abc")}
-resource type R {id:u64,s:String} drop(r) {}
-resource type F {id:u64,s:String} drop(f) {let no:Option[u64]=None;let _=option.unwrap(no)}
-fn make_tag(id:u64)->R {result.unwrap(R(id:id,s:"abc"))}
-fn make_fail()->F {result.unwrap(F(id:1u64,s:"abc"))}
-fn select(a:View[String],b:View[String])->View[String] in b {b}
-fn chosen()->u64 {let v={select(make_tag(1).s,make_tag(2).s)};string.byte_len(v)}
-fn failed_tail()->u64 {let v={select(make_fail().s,make_tag(2).s)};string.byte_len(v)}
-fn repeated()->u64 {
- let mut n:u64=0
- for i in 0u64..3 {
-  let v=if i%2==0 {mk()[0]} else {mk()[0]}
-  n+=string.byte_len(v)
- }
- n
+
+fn if_let_tail() -> u64 {
+    let v = if let Some(x) = Some(true) {
+        {
+            mk()[0]
+        }
+    } else {
+        {
+            mk()[0]
+        }
+    }
+    string.byte_len(v)
 }
-fn positive()->bool {immediate()==3u64 && let_bound()==3u64 && nested()==3u64 && if_tail(true)==3u64 && if_tail(false)==3u64 && match_tail(true)==3u64 && match_tail(false)==3u64 && if_let()==3u64 && if_let_tail()==3u64 && copy_fence()==3u64 && chosen()==3u64 && repeated()==9u64 && owner_block()==3u64 && owner_group()==3u64}
+
+fn copy_len(s: String) -> u64 {
+    if let Ok(t) = string.from(s) {
+        string.byte_len(t)
+    } else {
+        0
+    }
+}
+
+fn copy_fence() -> u64 {
+    copy_len("abc")
+}
+
+resource type R {
+    id: u64,
+    s: String
+} drop(r) {}
+
+resource type F {
+    id: u64,
+    s: String
+} drop(f) {
+    let no: Option[u64] = None;
+    let _ = option.unwrap(no)
+}
+
+fn make_tag(id: u64) -> R {
+    result.unwrap(R(id: id, s: "abc"))
+}
+
+fn make_fail() -> F {
+    result.unwrap(F(id: 1u64, s: "abc"))
+}
+
+fn select(a: View[String], b: View[String]) -> View[String] in b {
+    b
+}
+
+fn chosen() -> u64 {
+    let v = {
+        select(make_tag(1).s, make_tag(2).s)
+    };
+    string.byte_len(v)
+}
+
+fn failed_tail() -> u64 {
+    let v = {
+        select(make_fail().s, make_tag(2).s)
+    };
+    string.byte_len(v)
+}
+
+fn repeated() -> u64 {
+    let mut n: u64 = 0
+    for i in 0u64 .. 3 {
+        let v = if i % 2 == 0 {
+            mk()[0]
+        } else {
+            mk()[0]
+        }
+        n += string.byte_len(v)
+    }
+    n
+}
+
+fn positive() -> bool {
+    immediate() == 3u64 && let_bound() == 3u64 && nested() == 3u64 && if_tail(true) == 3u64 && if_tail(false) == 3u64 && match_tail(true) == 3u64 && match_tail(false) == 3u64 && if_let() == 3u64 && if_let_tail() == 3u64 && copy_fence() == 3u64 && chosen() == 3u64 && repeated() == 9u64 && owner_block() == 3u64 && owner_group() == 3u64
+}
 
 // Wrappers around the owner preserve its identity without scanning plain expressions.
 // expect: run owner_block() = 3
 // expect: run owner_group() = 3
-fn owner_block()->u64 {let v={{mk()}[0]};string.byte_len(v)}
-fn owner_group()->u64 {let v={(mk())[0]};string.byte_len(v)}
+fn owner_block() -> u64 {
+    let v = {
+        {
+            mk()
+        }[0]
+    };
+    string.byte_len(v)
+}
+
+fn owner_group() -> u64 {
+    let v = {
+        (mk())[0]
+    };
+    string.byte_len(v)
+}

@@ -1,12 +1,18 @@
 // A direct provider handle travels as one u64 through the adapter payload.
 // expect: run checked(17) = 17
 // expect: run captured(23) = 23
-fn identity(d: Dir) -> Dir { d }
-fn checked(d: Dir) -> Dir {
-  let f: fn(Dir) -> Dir = identity
-  f(d)
+fn identity(d: Dir) -> Dir {
+    d
 }
+
+fn checked(d: Dir) -> Dir {
+    let f: fn(Dir) -> Dir = identity
+    f(d)
+}
+
 fn captured(d: Dir) -> Dir {
-  let f = scoped fn() -> Dir { d }
-  f()
+    let f = scoped fn() -> Dir {
+        d
+    }
+    f()
 }

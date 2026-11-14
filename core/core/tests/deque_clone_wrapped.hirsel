@@ -3,13 +3,19 @@
 // expect: run clone_wrapped_partial() = 123123
 fn clone_wrapped_partial() -> u64 {
     let mut d: Deque[u64] = deque.new()
-    for i in 0u64 .. 4 { result.unwrap(deque.push_back(mut d, i)) }
+    for i in 0u64 .. 4 {
+        result.unwrap(deque.push_back(mut d, i))
+    }
     let _ = deque.pop_front(mut d)
     let mut cloned: Deque[u64] = result.unwrap(clone(d))
     let mut a: u64 = 0
     let mut b: u64 = 0
-    while deque.len(cloned) > 0 { a = a * 10 + option.unwrap(deque.pop_front(mut cloned)) }
-    while deque.len(d) > 0 { b = b * 10 + option.unwrap(deque.pop_front(mut d)) }
+    while deque.len(cloned) > 0 {
+        a = a * 10 + option.unwrap(deque.pop_front(mut cloned))
+    }
+    while deque.len(d) > 0 {
+        b = b * 10 + option.unwrap(deque.pop_front(mut d))
+    }
     a * 1000 + b
 }
 
@@ -17,7 +23,9 @@ fn clone_wrapped_partial() -> u64 {
 // expect: run clone_nested_live_range() = 123123
 fn clone_nested_live_range() -> u64 {
     let mut d: Deque[u64] = deque.new()
-    for i in 0u64 .. 4 { result.unwrap(deque.push_back(mut d, i)) }
+    for i in 0u64 .. 4 {
+        result.unwrap(deque.push_back(mut d, i))
+    }
     let _ = deque.pop_front(mut d)
     let mut xs: List[Deque[u64]] = list.new()
     result.unwrap(list.push(mut xs, take d))
@@ -26,7 +34,11 @@ fn clone_nested_live_range() -> u64 {
     let mut right = option.unwrap(list.pop(mut copied))
     let mut a: u64 = 0
     let mut b: u64 = 0
-    while deque.len(left) > 0 { a = a * 10 + option.unwrap(deque.pop_front(mut left)) }
-    while deque.len(right) > 0 { b = b * 10 + option.unwrap(deque.pop_front(mut right)) }
+    while deque.len(left) > 0 {
+        a = a * 10 + option.unwrap(deque.pop_front(mut left))
+    }
+    while deque.len(right) > 0 {
+        b = b * 10 + option.unwrap(deque.pop_front(mut right))
+    }
     a * 1000 + b
 }

@@ -7,55 +7,82 @@
 // expect: run assigned_resource() = 11 trace 7,11
 // expect: run failed_set() = fail Bounds trace 11,7
 // expect: run failed_assign_drop() = fail Unwrap trace 7,11
-fn unknown[T](mut xs: List[T], take x: T) -> T { list.set(mut xs, 0, take x) }
-fn assign[T](mut xs: List[T], take x: T) { xs[0] = take x }
+fn unknown[T](mut xs: List[T], take x: T) -> T {
+    list.set(mut xs, 0, take x)
+}
+
+fn assign[T](mut xs: List[T], take x: T) {
+    xs[0] = take x
+}
+
 fn literal() -> u64 {
     let mut xs = result.unwrap(b"ab")
-    let old:u64 = int.widen(list.set(mut xs,0,99u8))
+    let old: u64 = int.widen(list.set(mut xs, 0, 99u8))
     xs[1] = 100u8
-    let a:u64 = int.widen(xs[0])
-    let b:u64 = int.widen(xs[1])
-    old*1000000 + a*1000 + b
+    let a: u64 = int.widen(xs[0])
+    let b: u64 = int.widen(xs[1])
+    old * 1000000 + a * 1000 + b
 }
+
 fn generic_byte() -> u64 {
-    let mut xs:List[u8] = list.new()
-    result.unwrap(list.push(mut xs,7u8))
-    let old:u64 = int.widen(unknown(mut xs,9u8))
-    let new:u64 = int.widen(xs[0])
-    old*100 + new
+    let mut xs: List[u8] = list.new()
+    result.unwrap(list.push(mut xs, 7u8))
+    let old: u64 = int.widen(unknown(mut xs, 9u8))
+    let new: u64 = int.widen(xs[0])
+    old * 100 + new
 }
+
 fn generic_word() -> u64 {
-    let mut xs:List[u64] = list.new()
-    result.unwrap(list.push(mut xs,72623859790382856u64))
-    let old = unknown(mut xs,9u64)
-    if xs[0]==9u64 { old } else { 0 }
+    let mut xs: List[u64] = list.new()
+    result.unwrap(list.push(mut xs, 72623859790382856u64))
+    let old = unknown(mut xs, 9u64)
+    if xs[0] == 9u64 {
+        old
+    } else {
+        0
+    }
 }
-resource type Mark { id:u64 } drop(m) { let _ = m.id }
+
+resource type Mark {
+    id: u64
+} drop(m) {
+    let _ = m.id
+}
+
 fn resources() -> u64 {
-    let mut xs:List[Mark] = list.new()
-    result.unwrap(list.push(mut xs,result.unwrap(Mark(id:7))))
-    let old = unknown(mut xs,result.unwrap(Mark(id:11)))
-    old.id*100 + xs[0].id
+    let mut xs: List[Mark] = list.new()
+    result.unwrap(list.push(mut xs, result.unwrap(Mark(id: 7))))
+    let old = unknown(mut xs, result.unwrap(Mark(id: 11)))
+    old.id * 100 + xs[0].id
 }
+
 fn assigned_resource() -> u64 {
-    let mut xs:List[Mark] = list.new()
-    result.unwrap(list.push(mut xs,result.unwrap(Mark(id:7))))
-    assign(mut xs,result.unwrap(Mark(id:11)))
+    let mut xs: List[Mark] = list.new()
+    result.unwrap(list.push(mut xs, result.unwrap(Mark(id: 7))))
+    assign(mut xs, result.unwrap(Mark(id: 11)))
     xs[0].id
 }
+
 fn failed_set() -> u64 {
-    let mut xs:List[Mark] = list.new()
-    result.unwrap(list.push(mut xs,result.unwrap(Mark(id:7))))
-    let _ = list.set(mut xs,18446744073709551615u64,result.unwrap(Mark(id:11)))
+    let mut xs: List[Mark] = list.new()
+    result.unwrap(list.push(mut xs, result.unwrap(Mark(id: 7))))
+    let _ = list.set(mut xs, 18446744073709551615u64, result.unwrap(Mark(id: 11)))
     999
 }
-resource type Broken { id:u64 } drop(m) {
+
+resource type Broken {
+    id: u64
+} drop(m) {
     let _ = m.id
-    if m.id==7 { let n:Option[u64]=None; let _ = option.unwrap(n) }
+    if m.id == 7 {
+        let n: Option[u64] = None;
+        let _ = option.unwrap(n)
+    }
 }
+
 fn failed_assign_drop() -> u64 {
-    let mut xs:List[Broken] = list.new()
-    result.unwrap(list.push(mut xs,result.unwrap(Broken(id:7))))
-    assign(mut xs,result.unwrap(Broken(id:11)))
+    let mut xs: List[Broken] = list.new()
+    result.unwrap(list.push(mut xs, result.unwrap(Broken(id: 7))))
+    assign(mut xs, result.unwrap(Broken(id: 11)))
     999
 }

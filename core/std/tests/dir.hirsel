@@ -65,14 +65,20 @@ fn create_temp_small_name(d: Dir) -> bool waits {
 // The scripted provider removes only tree/a, then EIO. tree/b is a surviving prefix.
 // host: remove_tree_prefix a
 // expect: run remove_tree_keeps_completed_prefix(dir) = true
-fn remove_tree_keeps_completed_prefix(d:Dir)->bool waits {
-    result.unwrap(dir.create_dir(d,"tree"))
-    result.unwrap(file.write(d,"tree/a",string.as_bytes("a")))
-    result.unwrap(file.write(d,"tree/b",string.as_bytes("b")))
-    match dir.remove_all(d,"tree") {Error(Other(5))=>{},_=>return false}
-    match file.open(d,"tree/a",Read) {Error(NotFound)=>{},_=>return false}
-    let b=result.unwrap(file.read(d,"tree/b"))
-    let kept=list.len(b)==1 && b[0]==b'b'
-    result.unwrap(dir.remove_all(d,"tree"))
+fn remove_tree_keeps_completed_prefix(d: Dir) -> bool waits {
+    result.unwrap(dir.create_dir(d, "tree"))
+    result.unwrap(file.write(d, "tree/a", string.as_bytes("a")))
+    result.unwrap(file.write(d, "tree/b", string.as_bytes("b")))
+    match dir.remove_all(d, "tree") {
+        Error(Other(5)) => {},
+        _ => return false
+    }
+    match file.open(d, "tree/a", Read) {
+        Error(NotFound) => {},
+        _ => return false
+    }
+    let b = result.unwrap(file.read(d, "tree/b"))
+    let kept = list.len(b) == 1 && b[0] == b'b'
+    result.unwrap(dir.remove_all(d, "tree"))
     kept
 }

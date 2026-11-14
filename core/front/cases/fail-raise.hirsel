@@ -3,8 +3,13 @@
 // core.fail raises a Fail cause with the String it takes; the call is not a link to
 // an external function, and nothing after it runs.
 fn check(n: u64) -> u64 {
-  let msg: String = "too big"
-  if n > 2 { fail(take msg) }
-  n
+    let msg: String = "too big"
+    if n > 2 {
+        fail(take msg)
+    }
+    n
 }
-fn go(n: u64) -> u64 { check(n) }
+
+fn go(n: u64) -> u64 {
+    check(n)
+}

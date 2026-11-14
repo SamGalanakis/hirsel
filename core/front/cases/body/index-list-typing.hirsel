@@ -1,6 +1,21 @@
 // expect: accept
-fn read(xs: List[u64], i: u64) -> u64 { xs[i] }
-fn view_read(xs: View[List[u64]], i: u64) -> u64 { xs[i] }
-fn write(mut xs: List[u64], i: u64) { xs[i] = 11 }
-fn nested(xs: List[List[u64]], i: u64) -> u64 { xs[i][0] }
-fn row_read(xs: List[List[u64]], i: u64) -> u64 { let row = xs[i]; row[0] }
+fn read(xs: List[u64], i: u64) -> u64 {
+    xs[i]
+}
+
+fn view_read(xs: View[List[u64]], i: u64) -> u64 {
+    xs[i]
+}
+
+fn write(mut xs: List[u64], i: u64) {
+    xs[i] = 11
+}
+
+fn nested(xs: List[List[u64]], i: u64) -> u64 {
+    xs[i][0]
+}
+
+fn row_read(xs: List[List[u64]], i: u64) -> u64 {
+    let row = xs[i];
+    row[0]
+}

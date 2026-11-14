@@ -4,21 +4,30 @@
 // expect: run appended() = 606
 // expect: run unchanged() = 0
 // expect: run rejected() = 404009
-fn append[T: plain](mut xs: List[T], ys: List[T]) -> Result[(), Capacity] { list.append(mut xs, ys) }
+fn append[T: plain](mut xs: List[T], ys: List[T]) -> Result[(), Capacity] {
+    list.append(mut xs, ys)
+}
+
 fn appended() -> u64 {
     let mut xs = result.unwrap(b"ab")
     let ys = result.unwrap(b"cdef")
     result.unwrap(append(mut xs, ys))
     let a: u64 = int.widen(xs[0])
     let z: u64 = int.widen(xs[5])
-    if a == 97 && z == 102 { list.len(xs) * 100 + list.capacity(xs) } else { 0 }
+    if a == 97 && z == 102 {
+        list.len(xs) * 100 + list.capacity(xs)
+    } else {
+        0
+    }
 }
+
 fn unchanged() -> u64 {
     let mut xs: List[u8] = list.new()
     let ys = result.unwrap(b"")
     result.unwrap(append(mut xs, ys))
     list.capacity(xs)
 }
+
 fn rejected() -> u64 {
     let ys = result.unwrap(b"01234567890123456789012345678901")
     let r = bound bytes 17 {
@@ -28,5 +37,8 @@ fn rejected() -> u64 {
             Error(e) => list.len(xs) * 100000 + e.requested * 100 + e.available,
         }
     }
-    match r { Ok(n) => n, Error(_) => 0 }
+    match r {
+        Ok(n) => n,
+        Error(_) => 0
+    }
 }

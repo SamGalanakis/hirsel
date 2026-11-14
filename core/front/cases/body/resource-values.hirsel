@@ -4,19 +4,24 @@
 // sum(5) reads 5 + 2 back from the block, first(9) reads the first field.
 // expect: run sum(5) = 7
 // expect: run first(9) = 9
-resource type R { id: u64, k: u64 }
-fn sum(x: u64) -> u64 {
-  match R(id: x, k: 2) {
-    Ok(r) => {
-      let R(id: a, k: b) = take r
-      a + b
-    },
-    Error(_) => 0
-  }
+resource type R {
+    id: u64,
+    k: u64
 }
+
+fn sum(x: u64) -> u64 {
+    match R(id: x, k: 2) {
+        Ok(r) => {
+            let R(id: a, k: b) = take r
+            a + b
+        },
+        Error(_) => 0
+    }
+}
+
 fn first(x: u64) -> u64 {
-  match R(id: x, k: 1) {
-    Ok(r) => r.id,
-    Error(_) => 0
-  }
+    match R(id: x, k: 1) {
+        Ok(r) => r.id,
+        Error(_) => 0
+    }
 }

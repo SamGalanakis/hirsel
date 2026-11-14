@@ -1,4 +1,4 @@
 // Module `stderr`: a provider operation (CAP-5).
-
 pub fn write(err: Stderr, s: String) -> Result[(), WriteError] waits
+
 pub fn write_bytes(err: Stderr, b: Bytes) -> Result[(), WriteError] waits

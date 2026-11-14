@@ -11,26 +11,29 @@
 // expect: run raw(1) = 34
 // expect: run empty(0) = 0
 fn at(i: u64) -> u64 {
-  match b"a\x00\xff\n" {
-    Ok(xs) => int.widen(xs[i]),
-    Error(_) => 1000
-  }
+    match b"a\x00\xff\n" {
+        Ok(xs) => int.widen(xs[i]),
+        Error(_) => 1000
+    }
 }
+
 fn count(x: u64) -> u64 {
-  match b"a\x00\xff\n" {
-    Ok(xs) => list.len(xs) + x,
-    Error(_) => 1000
-  }
+    match b"a\x00\xff\n" {
+        Ok(xs) => list.len(xs) + x,
+        Error(_) => 1000
+    }
 }
+
 fn raw(i: u64) -> u64 {
-  match br#"x"y"# {
-    Ok(xs) => int.widen(xs[i]),
-    Error(_) => 1000
-  }
+    match br#"x"y"# {
+        Ok(xs) => int.widen(xs[i]),
+        Error(_) => 1000
+    }
 }
+
 fn empty(x: u64) -> u64 {
-  match b"" {
-    Ok(xs) => list.len(xs) + x,
-    Error(_) => 1000
-  }
+    match b"" {
+        Ok(xs) => list.len(xs) + x,
+        Error(_) => 1000
+    }
 }

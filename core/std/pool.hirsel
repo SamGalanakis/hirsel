@@ -186,7 +186,9 @@ pub fn clear[T](mut p: Pool[T]) {
             Vacant(g, _) => g,
         }
         let _ = list.set(mut p.slots, i, Vacant(generation, p.free))
-        if generation != NONE { p.free = i }
+        if generation != NONE {
+            p.free = i
+        }
     }
     p.live = 0
 }

@@ -5,17 +5,55 @@
 // expect: run result(true) = 9
 // expect: run option(false) = 3
 // expect: run option(true) = 77
-type Wide { a: u64, b: u64, c: u64, d: u64 }
+type Wide {
+    a: u64,
+    b: u64,
+    c: u64,
+    d: u64
+}
+
 fn input(bad: bool) -> Result[Wide, u8] {
-  if bad { Error(9) } else { Ok(Wide(a: 1, b: 2, c: 3, d: 4)) }
+    if bad {
+        Error(9)
+    } else {
+        Ok(Wide(a: 1, b: 2, c: 3, d: 4))
+    }
 }
+
 fn step(bad: bool) -> Result[u8, u8] {
-  let Wide(a: a, b: _, c: _, d: _) = input(bad)?
-  let divisor: u8 = if a == 1 { 1 } else { 0 }
-  let n: u8 = 8
-  Ok(n / divisor)
+    let Wide(a: a, b: _, c: _, d: _) = input(bad)?
+    let divisor: u8 = if a == 1 {
+        1
+    } else {
+        0
+    }
+    let n: u8 = 8
+    Ok(n / divisor)
 }
-fn result(bad: bool) -> u8 { match step(bad) { Ok(n) => n, Error(e) => e } }
-fn opt_input(bad: bool) -> Option[u64] { if bad { None } else { Some(3) } }
-fn opt_step(bad: bool) -> Option[u64] { let x = opt_input(bad)?; Some(x) }
-fn option(bad: bool) -> u64 { match opt_step(bad) { Some(n) => n, None => 77 } }
+
+fn result(bad: bool) -> u8 {
+    match step(bad) {
+        Ok(n) => n,
+        Error(e) => e
+    }
+}
+
+fn opt_input(bad: bool) -> Option[u64] {
+    if bad {
+        None
+    } else {
+        Some(3)
+    }
+}
+
+fn opt_step(bad: bool) -> Option[u64] {
+    let x = opt_input(bad)?;
+    Some(x)
+}
+
+fn option(bad: bool) -> u64 {
+    match opt_step(bad) {
+        Some(n) => n,
+        None => 77
+    }
+}

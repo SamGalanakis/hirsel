@@ -1,5 +1,4 @@
 // Module `string` (SEM-3).
-
 pub fn new() -> String
 
 pub fn from(s: String) -> Result[String, Capacity] {
@@ -89,6 +88,7 @@ pub fn into_bytes(take s: String) -> Result[Bytes, (Capacity, String)] {
 }
 
 pub fn as_bytes(s: String) -> View[Bytes] in s
+
 pub fn slice(s: String, lo: u64, hi: u64) -> View[String] in s {
     let b = string.as_bytes(s)
     // Bounds when lo > hi or hi is past the length.
@@ -141,6 +141,7 @@ pub fn next_scalar(s: String, at: u64) -> Option[(char, u64)] {
 }
 
 pub fn byte_len(s: String) -> u64
+
 pub fn push(mut s: String, t: String) -> Result[(), Capacity]
 
 pub fn push_char(mut s: String, c: char) -> Result[(), Capacity] {
@@ -356,7 +357,11 @@ pub fn make_ascii_upper(mut s: String) -> Result[(), Capacity] {
         let x = b[i]
         // One comparison: below b'a' wraps past 25. Every byte is stored, changed or not, so
         // the loop has no branch and vectorizes. Only a-z change, so b stays UTF-8.
-        b[i] = if int.wrapping_sub(x, b'a') < 26 { int.wrapping_sub(x, 32) } else { x }
+        b[i] = if int.wrapping_sub(x, b'a') < 26 {
+            int.wrapping_sub(x, 32)
+        } else {
+            x
+        }
     }
     s = of_bytes(take b)
     Ok(())
@@ -382,7 +387,11 @@ pub fn make_ascii_lower(mut s: String) -> Result[(), Capacity] {
     for i in 0 .. list.len(b) {
         let x = b[i]
         // As make_ascii_upper: only A-Z change, so b stays UTF-8.
-        b[i] = if int.wrapping_sub(x, b'A') < 26 { int.wrapping_add(x, 32) } else { x }
+        b[i] = if int.wrapping_sub(x, b'A') < 26 {
+            int.wrapping_add(x, 32)
+        } else {
+            x
+        }
     }
     s = of_bytes(take b)
     Ok(())
@@ -391,13 +400,15 @@ pub fn make_ascii_lower(mut s: String) -> Result[(), Capacity] {
 // The kernel, the only unchecked code in core. The String and Bytes carriers are one layout,
 // {data, length, capacity}; these rewrite or reinterpret a carrier and check nothing, so each
 // caller establishes the precondition stated on it.
-
 // b is UTF-8. (As a List, b already owns its storage or is empty.)
 fn of_bytes(take b: Bytes) -> String
+
 // s owns its storage or is empty: capacity(as_bytes(s)) > 0 or byte_len(s) == 0. A static String
 // with bytes never becomes a List, which would write in place; copy it or reserve first.
 fn to_bytes(take s: String) -> Bytes
+
 // b is UTF-8 cut at scalar boundaries at both ends.
 fn view_string(b: Bytes) -> View[String] in b
+
 // n <= byte_len(s), at a scalar boundary. Only the length changes: data and capacity stay.
 fn shorten(mut s: String, n: u64)

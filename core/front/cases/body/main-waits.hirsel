@@ -1,4 +1,6 @@
 // expect: accept
 // LANG-8, PROG-3: `main` is always `waits`, so declaring it `waits` with no waiting
 // call is not refused (any other function would be).
-pub fn main() -> Result[(), ()] waits { loop {} }
+pub fn main() -> Result[(), ()] waits {
+    loop {}
+}

@@ -10,9 +10,42 @@
 // expect: run narrow(255) = 255
 // expect: run try_narrow(-1) = 77
 // expect: run try_narrow(255) = 255
-fn add(a: u8, b: u8) -> u8 { match int.checked_add(a, b) { Some(x) => x, None => 99 } }
-fn sub(a: u8, b: u8) -> u8 { match int.checked_sub(a, b) { Some(x) => x, None => 99 } }
-fn mul(a: u8, b: u8) -> u8 { match int.checked_mul(a, b) { Some(x) => x, None => 99 } }
-fn div(a: i8, b: i8) -> i8 { match int.checked_div(a, b) { Some(x) => x, None => 99 } }
-fn narrow(a: u64) -> u8 { int.narrow(a) }
-fn try_narrow(a: i64) -> u8 { let v: Option[u8] = int.try_narrow(a); match v { Some(x) => x, None => 77 } }
+fn add(a: u8, b: u8) -> u8 {
+    match int.checked_add(a, b) {
+        Some(x) => x,
+        None => 99
+    }
+}
+
+fn sub(a: u8, b: u8) -> u8 {
+    match int.checked_sub(a, b) {
+        Some(x) => x,
+        None => 99
+    }
+}
+
+fn mul(a: u8, b: u8) -> u8 {
+    match int.checked_mul(a, b) {
+        Some(x) => x,
+        None => 99
+    }
+}
+
+fn div(a: i8, b: i8) -> i8 {
+    match int.checked_div(a, b) {
+        Some(x) => x,
+        None => 99
+    }
+}
+
+fn narrow(a: u64) -> u8 {
+    int.narrow(a)
+}
+
+fn try_narrow(a: i64) -> u8 {
+    let v: Option[u8] = int.try_narrow(a);
+    match v {
+        Some(x) => x,
+        None => 77
+    }
+}

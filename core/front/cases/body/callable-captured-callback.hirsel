@@ -2,19 +2,39 @@
 // formal: base 1 -> 4 -> 6, sum 10. h: 6 -> 8 -> 9, sum 17.
 // view_then_mut reads 9 then changes base to 10, sum 19. Total 10+17+19+10=56.
 // expect: run checked() = 56
-fn formal(cb:scoped fn(u64)->u64,x:u64)->u64 {
- let g=scoped fn(y:u64)->u64 {cb(y)}
- g(x)+g(2)
+fn formal(cb: scoped fn(u64) -> u64, x: u64) -> u64 {
+    let g = scoped fn(y: u64) -> u64 {
+        cb(y)
+    }
+    g(x) + g(2)
 }
-fn checked()->u64 {
- let mut base:u64=1
- let cb=scoped fn(x:u64)->u64 {base+=x;base}
- let first=formal(cb,3)
- let g=scoped fn(x:u64)->u64 {cb(x)}
- let h=scoped fn(x:u64)->u64 {g(x)+g(1)}
- let second=h(2)
- let view_then_mut=scoped fn()->u64 {let before=base;cb(1)+before}
- let third=view_then_mut()
- first+second+third+base
+
+fn checked() -> u64 {
+    let mut base: u64 = 1
+    let cb = scoped fn(x: u64) -> u64 {
+        base += x;
+        base
+    }
+    let first = formal(cb, 3)
+    let g = scoped fn(x: u64) -> u64 {
+        cb(x)
+    }
+    let h = scoped fn(x: u64) -> u64 {
+        g(x) + g(1)
+    }
+    let second = h(2)
+    let view_then_mut = scoped fn() -> u64 {
+        let before = base;
+        cb(1) + before
+    }
+    let third = view_then_mut()
+    first + second + third + base
 }
-pub fn main()->Result[(),Exit] {if checked()==56 {Ok(())}else{Error(Exit(status:1))}}
+
+pub fn main() -> Result[(), Exit] {
+    if checked() == 56 {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
+}

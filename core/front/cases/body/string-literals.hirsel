@@ -19,18 +19,60 @@
 // expect: run escapes(0) = true
 // expect: run viewed(0) = true
 // expect: run viewed(1) = false
-type N: key + ordered { name: String, k: u64 }
-fn pick(k: u64) -> String {
-  if k == 0 { "ab" } else if k == 1 { "abc" } else if k == 2 { "abd" } else if k == 3 { "" } else if k == 4 { "\x7f" } else { "\u{80}" }
+type N: key + ordered {
+    name: String,
+    k: u64
 }
-fn escapes(x: u64) -> bool { "\u{1f40f}" > "\u{80}" && "\x41" == "A" && "a\tb" != "a\\tb" }
-fn lt(a: u64, b: u64) -> bool { pick(a) < pick(b) }
-fn le(a: u64, b: u64) -> bool { pick(a) <= pick(b) }
-fn eq(a: u64, b: u64) -> bool { pick(a) == pick(b) }
-fn rec_lt(a: u64, b: u64) -> bool { N(name: "ab", k: a) < N(name: "ab", k: b) }
-fn rec_gt(x: u64) -> bool { N(name: "b", k: x) > N(name: "ab", k: 9) }
-fn bytes_lt(x: u64) -> bool { result.unwrap(b"ab") < result.unwrap(b"abc") && result.unwrap(b"\xff") > result.unwrap(b"\x7f\xff") }
+
+fn pick(k: u64) -> String {
+    if k == 0 {
+        "ab"
+    } else if k == 1 {
+        "abc"
+    } else if k == 2 {
+        "abd"
+    } else if k == 3 {
+        ""
+    } else if k == 4 {
+        "\x7f"
+    } else {
+        "\u{80}"
+    }
+}
+
+fn escapes(x: u64) -> bool {
+    "\u{1f40f}" > "\u{80}" && "\x41" == "A" && "a\tb" != "a\\tb"
+}
+
+fn lt(a: u64, b: u64) -> bool {
+    pick(a) < pick(b)
+}
+
+fn le(a: u64, b: u64) -> bool {
+    pick(a) <= pick(b)
+}
+
+fn eq(a: u64, b: u64) -> bool {
+    pick(a) == pick(b)
+}
+
+fn rec_lt(a: u64, b: u64) -> bool {
+    N(name: "ab", k: a) < N(name: "ab", k: b)
+}
+
+fn rec_gt(x: u64) -> bool {
+    N(name: "b", k: x) > N(name: "ab", k: 9)
+}
+
+fn bytes_lt(x: u64) -> bool {
+    result.unwrap(b"ab") < result.unwrap(b"abc") && result.unwrap(b"\xff") > result.unwrap(b"\x7f\xff")
+}
+
 fn viewed(x: u64) -> bool {
-  let s: View[String] = "ab"
-  if x == 0 { s < "abc" } else { s > "abc" }
+    let s: View[String] = "ab"
+    if x == 0 {
+        s < "abc"
+    } else {
+        s > "abc"
+    }
 }

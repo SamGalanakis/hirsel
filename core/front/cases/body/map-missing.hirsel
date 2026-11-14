@@ -1,12 +1,22 @@
 // Missing set returns the incoming value, remove returns None; neither admits.
 // expect: run checked() = 19
 // expect: run own_value() = 4
-fn checked()->u64 {
-  let mut m:Map[u64,u64]=map.new()
-  let n:u64=match map.set(mut m,7,19) {Ok(_)=>0,Error(v)=>v}
-  match map.remove(mut m,7) {Some(_)=>0,None=>n+map.len(m)}
+fn checked() -> u64 {
+    let mut m: Map[u64, u64] = map.new()
+    let n: u64 = match map.set(mut m, 7, 19) {
+        Ok(_) => 0,
+        Error(v) => v
+    }
+    match map.remove(mut m, 7) {
+        Some(_) => 0,
+        None => n + map.len(m)
+    }
 }
-fn own_value()->u64 {
-  let mut m:Map[u64,String]=map.new()
-  match map.set(mut m,7,"back") {Ok(take v)=>0,Error(take v)=>string.byte_len(v)}
+
+fn own_value() -> u64 {
+    let mut m: Map[u64, String] = map.new()
+    match map.set(mut m, 7, "back") {
+        Ok(take v) => 0,
+        Error(take v) => string.byte_len(v)
+    }
 }

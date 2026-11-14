@@ -1,172 +1,233 @@
 // Module `map` (SEM-5).
-
 pub fn new[K: key, V]() -> Map[K, V]
+
 pub fn len[K: key, V](m: Map[K, V]) -> u64
+
 pub fn get[K: key, V](m: Map[K, V], k: K) -> Option[View[V]] in m {
-  if capacity(m) == 0 { return None }
-  let h = hash(k)
-  // Hashing reads only the key. Load the private index metadata afterwards so
-  // the byte-hash call does not keep the index mask alive across that call.
-  let mask = int.wrapping_sub(index_len(m), 1)
-  let mut j = h & mask
-  loop {
-    let s = index_get(m, j)
-    if s == 0 { return None }
-    let i = s - 1
-    if slot_hash(m, i) == h && slot_live(m, i) && slot_key(m, i) == k {
-      return Some(slot_value(m, i))
+    if capacity(m) == 0 {
+        return None
     }
-    j = int.wrapping_add(j, 1) & mask
-  }
-}
-pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), (Capacity, (K, V))] {
-  let h = hash(k)
-  // The first empty index word is the insertion position unless growth moves it.
-  let mut j: u64 = 0
-  let n = index_len(m)
-  if n != 0 {
-    let mask = int.wrapping_sub(n, 1)
-    j = h & mask
-    loop {
-      let s = index_get(m, j)
-      if s == 0 { break }
-      let i = int.wrapping_sub(s, 1)
-      if slot_hash(m, i) == h && slot_live(m, i) && slot_key(m, i) == k {
-        let _ = swap_value(mut m, i, take v)
-        let _ = take k
-        return Ok(())
-      }
-      j = int.wrapping_add(j, 1) & mask
-    }
-  }
-  let cap = capacity(m)
-  if slots(m) == cap {
-    match make_room(mut m) {
-      Error(c) => return Error((c, (take k, take v))),
-      Ok(()) => {}
-    }
+    let h = hash(k)
+    // Hashing reads only the key. Load the private index metadata afterwards so
+    // the byte-hash call does not keep the index mask alive across that call.
     let mask = int.wrapping_sub(index_len(m), 1)
-    j = h & mask
-    while index_get(m, j) != 0 { j = int.wrapping_add(j, 1) & mask }
-  }
-  // Slots fit the admitted entry capacity (at least16 logical bytes each), so
-  // adding the one-based index cannot overflow. Nonzero index words and lengths
-  // similarly justify the wrapping subtractions above.
-  let s = int.wrapping_add(slots(m), 1)
-  push_entry(mut m, h, take k, take v)
-  index_set(mut m, j, s)
-  Ok(())
+    let mut j = h & mask
+    loop {
+        let s = index_get(m, j)
+        if s == 0 {
+            return None
+        }
+        let i = s - 1
+        if slot_hash(m, i) == h && slot_live(m, i) && slot_key(m, i) == k {
+            return Some(slot_value(m, i))
+        }
+        j = int.wrapping_add(j, 1) & mask
+    }
 }
+
+pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), (Capacity, (K, V))] {
+    let h = hash(k)
+    // The first empty index word is the insertion position unless growth moves it.
+    let mut j: u64 = 0
+    let n = index_len(m)
+    if n != 0 {
+        let mask = int.wrapping_sub(n, 1)
+        j = h & mask
+        loop {
+            let s = index_get(m, j)
+            if s == 0 {
+                break
+            }
+            let i = int.wrapping_sub(s, 1)
+            if slot_hash(m, i) == h && slot_live(m, i) && slot_key(m, i) == k {
+                let _ = swap_value(mut m, i, take v)
+                let _ = take k
+                return Ok(())
+            }
+            j = int.wrapping_add(j, 1) & mask
+        }
+    }
+    let cap = capacity(m)
+    if slots(m) == cap {
+        match make_room(mut m) {
+            Error(c) => return Error((c, (take k, take v))),
+            Ok(()) => {}
+        }
+        let mask = int.wrapping_sub(index_len(m), 1)
+        j = h & mask
+        while index_get(m, j) != 0 {
+            j = int.wrapping_add(j, 1) & mask
+        }
+    }
+    // Slots fit the admitted entry capacity (at least16 logical bytes each), so
+    // adding the one-based index cannot overflow. Nonzero index words and lengths
+    // similarly justify the wrapping subtractions above.
+    let s = int.wrapping_add(slots(m), 1)
+    push_entry(mut m, h, take k, take v)
+    index_set(mut m, j, s)
+    Ok(())
+}
+
 pub fn set[K: key, V](mut m: Map[K, V], k: K, take v: V) -> Result[V, V] {
-  match find(m, k, hash(k)) { Some(i) => Ok(swap_value(mut m, i, take v)), None => Error(take v) }
+    match find(m, k, hash(k)) {
+        Some(i) => Ok(swap_value(mut m, i, take v)),
+        None => Error(take v)
+    }
 }
+
 pub fn update[K: key, V, R](mut m: Map[K, V], k: K, f: scoped fn(mut V) -> R) -> Option[R] {
-  match find(m, k, hash(k)) { Some(i) => Some(with_value(mut m, i, f)), None => None }
+    match find(m, k, hash(k)) {
+        Some(i) => Some(with_value(mut m, i, f)),
+        None => None
+    }
 }
+
 pub fn remove[K: key, V](mut m: Map[K, V], k: K) -> Option[V] {
-  match find(m, k, hash(k)) { Some(i) => Some(kill(mut m, i)), None => None }
+    match find(m, k, hash(k)) {
+        Some(i) => Some(kill(mut m, i)),
+        None => None
+    }
 }
 
 // Only this module can access entries and its private lookup index.
 fn hash[K: key](k: K) -> u64
-fn slots[K: key, V](m: Map[K,V]) -> u64
-fn capacity[K: key, V](m: Map[K,V]) -> u64
-fn slot_hash[K: key, V](m: Map[K,V], i: u64) -> u64
-fn slot_live[K: key, V](m: Map[K,V], i: u64) -> bool
-fn slot_key[K: key, V](m: Map[K,V], i: u64) -> View[K] in m
-fn slot_value[K: key, V](m: Map[K,V], i: u64) -> View[V] in m
-fn with_value[K: key, V, R](mut m: Map[K,V], i: u64, f: scoped fn(mut V) -> R) -> R
-fn index_len[K: key, V](m: Map[K,V]) -> u64
-fn index_get[K: key, V](m: Map[K,V], j: u64) -> u64
-fn index_set[K: key, V](mut m: Map[K,V], j: u64, s: u64)
 
-fn find[K: key, V](m: Map[K,V], k: K, h: u64) -> Option[u64] {
-  let n = index_len(m)
-  if n == 0 { return None }
-  let mask = n - 1
-  let mut j = h & mask
-  loop {
-    let s = index_get(m, j)
-    if s == 0 { return None }
-    let i = s - 1
-    if slot_hash(m, i) == h && slot_live(m, i) && slot_key(m, i) == k { return Some(i) }
-    j = int.wrapping_add(j, 1) & mask
-  }
+fn slots[K: key, V](m: Map[K, V]) -> u64
+
+fn capacity[K: key, V](m: Map[K, V]) -> u64
+
+fn slot_hash[K: key, V](m: Map[K, V], i: u64) -> u64
+
+fn slot_live[K: key, V](m: Map[K, V], i: u64) -> bool
+
+fn slot_key[K: key, V](m: Map[K, V], i: u64) -> View[K] in m
+
+fn slot_value[K: key, V](m: Map[K, V], i: u64) -> View[V] in m
+
+fn with_value[K: key, V, R](mut m: Map[K, V], i: u64, f: scoped fn(mut V) -> R) -> R
+
+fn index_len[K: key, V](m: Map[K, V]) -> u64
+
+fn index_get[K: key, V](m: Map[K, V], j: u64) -> u64
+
+fn index_set[K: key, V](mut m: Map[K, V], j: u64, s: u64)
+
+fn find[K: key, V](m: Map[K, V], k: K, h: u64) -> Option[u64] {
+    let n = index_len(m)
+    if n == 0 {
+        return None
+    }
+    let mask = n - 1
+    let mut j = h & mask
+    loop {
+        let s = index_get(m, j)
+        if s == 0 {
+            return None
+        }
+        let i = s - 1
+        if slot_hash(m, i) == h && slot_live(m, i) && slot_key(m, i) == k {
+            return Some(i)
+        }
+        j = int.wrapping_add(j, 1) & mask
+    }
 }
 
-fn swap_value[K: key, V](mut m: Map[K,V], i: u64, take v: V) -> V
-fn kill[K: key, V](mut m: Map[K,V], i: u64) -> V
+fn swap_value[K: key, V](mut m: Map[K, V], i: u64, take v: V) -> V
 
-fn push_entry[K: key, V](mut m: Map[K,V], h: u64, take k: K, take v: V)
+fn kill[K: key, V](mut m: Map[K, V], i: u64) -> V
+
+fn push_entry[K: key, V](mut m: Map[K, V], h: u64, take k: K, take v: V)
+
 // Capacity is at most max(4, 4 * peak live entries). Removals do not shrink.
 // At full slots and at least capacity/2 dead entries, compact in place without
 // allocation or admission, preserving live insertion order; rebuild the index.
 fn compact[K: key, V](mut m: Map[K, V])
-fn regrow[K: key, V](mut m: Map[K,V], cap: u64) -> Result[(), Capacity]
+
+fn regrow[K: key, V](mut m: Map[K, V], cap: u64) -> Result[(), Capacity]
 
 // Keep rebuilding and admission on the full-table path, outside the ordinary
 // insertion probe. The caller still owns its key and value if admission fails.
-fn make_room[K:key,V](mut m:Map[K,V])->Result[(),Capacity] {
-  let cap = capacity(m)
-  if cap != 0 && len(m) <= cap / 2 {
-    compact(mut m)
-  } else {
-    let new_cap:u64 = if cap == 0 {4} else {cap * 2}
-    regrow(mut m,new_cap)?
-  }
-  // Reindexing changes only index words, never the entry count or index length.
-  let count = slots(m)
-  let mask = int.wrapping_sub(index_len(m), 1)
-  let mut i:u64 = 0
-  while i < count {
-    let stored_hash=slot_hash(m,i)
-    let mut j = stored_hash & mask
-    while index_get(m,j) != 0 {j=int.wrapping_add(j,1)&mask}
-    let s=int.wrapping_add(i,1)
-    index_set(mut m,j,s)
-    i=s
-  }
-  Ok(())
+fn make_room[K: key, V](mut m: Map[K, V]) -> Result[(), Capacity] {
+    let cap = capacity(m)
+    if cap != 0 && len(m) <= cap / 2 {
+        compact(mut m)
+    } else {
+        let new_cap: u64 = if cap == 0 {
+            4
+        } else {
+            cap * 2
+        }
+        regrow(mut m, new_cap)?
+    }
+    // Reindexing changes only index words, never the entry count or index length.
+    let count = slots(m)
+    let mask = int.wrapping_sub(index_len(m), 1)
+    let mut i: u64 = 0
+    while i < count {
+        let stored_hash = slot_hash(m, i)
+        let mut j = stored_hash & mask
+        while index_get(m, j) != 0 {
+            j = int.wrapping_add(j, 1) & mask
+        }
+        let s = int.wrapping_add(i, 1)
+        index_set(mut m, j, s)
+        i = s
+    }
+    Ok(())
 }
 
-fn install_index[K: key, V](mut m: Map[K,V], h: u64, s: u64) {
-  let mask = index_len(m) - 1
-  let mut j = h & mask
-  while index_get(m, j) != 0 { j = int.wrapping_add(j, 1) & mask }
-  index_set(mut m, j, s)
+fn install_index[K: key, V](mut m: Map[K, V], h: u64, s: u64) {
+    let mask = index_len(m) - 1
+    let mut j = h & mask
+    while index_get(m, j) != 0 {
+        j = int.wrapping_add(j, 1) & mask
+    }
+    index_set(mut m, j, s)
 }
 
 // Core-private clone item in core.map; declaration-only MEM-17 eligibility.
-clone[K:key,V](x:Map[K,V]) {
-  let mut copied: Map[K,V] = new()
-  let count = len(x)
-  if count == 0 { return Ok(take copied) }
-  regrow(mut copied,count)?
-  let mut i: u64 = 0
-  while i < slots(x) {
-    if slot_live(x,i) {
-      let key_result:Result[K,Capacity]=clone(slot_key(x,i))
-      let key:K = match take key_result {
-        Ok(key) => take key,
-        Error(c) => {undo_clone(mut copied);return Error(c)}
-      }
-      let value_result:Result[V,Capacity]=clone(slot_value(x,i))
-      let value:V = match take value_result {
-        Ok(value) => take value,
-        Error(c) => {let _=take key;undo_clone(mut copied);return Error(c)}
-      }
-      let h=slot_hash(x,i)
-      let s=slots(copied)+1
-      push_entry(mut copied,h,take key,take value)
-      install_index(mut copied,h,s)
+clone[K: key, V](x: Map[K, V]) {
+    let mut copied: Map[K, V] = new()
+    let count = len(x)
+    if count == 0 {
+        return Ok(take copied)
     }
-    i+=1
-  }
-  Ok(take copied)
+    regrow(mut copied, count)?
+    let mut i: u64 = 0
+    while i < slots(x) {
+        if slot_live(x, i) {
+            let key_result: Result[K, Capacity] = clone(slot_key(x, i))
+            let key: K = match take key_result {
+                Ok(key) => take key,
+                Error(c) => {
+                    undo_clone(mut copied);
+                    return Error(c)
+                }
+            }
+            let value_result: Result[V, Capacity] = clone(slot_value(x, i))
+            let value: V = match take value_result {
+                Ok(value) => take value,
+                Error(c) => {
+                    let _ = take key;
+                    undo_clone(mut copied);
+                    return Error(c)
+                }
+            }
+            let h = slot_hash(x, i)
+            let s = slots(copied) + 1
+            push_entry(mut copied, h, take key, take value)
+            install_index(mut copied, h, s)
+        }
+        i += 1
+    }
+    Ok(take copied)
 }
 
 // Only clone rollback consumes the new contiguous live prefix in reverse.
-fn pop_entry[K:key,V](mut m:Map[K,V])->(K,V)
-fn undo_clone[K:key,V](mut m:Map[K,V]) {
-  while slots(m) != 0 {let _=pop_entry(mut m)}
+fn pop_entry[K: key, V](mut m: Map[K, V]) -> (K, V)
+
+fn undo_clone[K: key, V](mut m: Map[K, V]) {
+    while slots(m) != 0 {
+        let _ = pop_entry(mut m)
+    }
 }

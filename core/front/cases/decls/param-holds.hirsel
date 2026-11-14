@@ -3,6 +3,14 @@
 // expect: holds Wrap capability
 // expect: holds Any resource,capability,scoped,stable,opaque
 // expect: holds Bare -
-type Wrap[T: plain] { item: T }
-type Any[T] { item: T }
-type Bare[T: plain] { n: u64 }
+type Wrap[T: plain] {
+    item: T
+}
+
+type Any[T] {
+    item: T
+}
+
+type Bare[T: plain] {
+    n: u64
+}

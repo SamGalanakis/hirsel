@@ -153,7 +153,9 @@ pub fn sum_bytes(b: Bytes) -> u64 {
         total
     } else {
         let mut total: u64 = 0
-        for x in b { total += int.widen(x) }
+        for x in b {
+            total += int.widen(x)
+        }
         total
     }
 }
@@ -279,7 +281,11 @@ fn sift_down[T](mut xs: List[T], base: u64, root: u64, n: u64, before: scoped fn
 
 /// Whether x occurs, using structural equality. Alloc: nothing. Cost: O(len).
 pub fn contains[T: key](xs: List[T], x: T) -> bool {
-    for y in xs { if y == x { return true } }
+    for y in xs {
+        if y == x {
+            return true
+        }
+    }
     false
 }
 
@@ -290,16 +296,26 @@ pub fn binary_search[T: ordered](xs: List[T], x: T) -> Result[u64, u64] {
     let mut hi = list.len(xs)
     while lo < hi {
         let mid = lo + (hi - lo) / 2
-        if xs[mid] < x { lo = mid + 1 } else { hi = mid }
+        if xs[mid] < x {
+            lo = mid + 1
+        } else {
+            hi = mid
+        }
     }
-    if lo < list.len(xs) && !(x < xs[lo]) { Ok(lo) } else { Error(lo) }
+    if lo < list.len(xs) && !(x < xs[lo]) {
+        Ok(lo)
+    } else {
+        Error(lo)
+    }
 }
 
 /// Keeps the first of each consecutive run of equal elements, preserving order.
 /// Alloc: nothing. Cost: O(len) comparisons and moves; removed values are cleaned.
 pub fn dedup[T: key](mut xs: List[T]) {
     let n = list.len(xs)
-    if n < 2 { return }
+    if n < 2 {
+        return
+    }
     let mut write: u64 = 1
     let mut read: u64 = 1
     while read < n {
@@ -319,7 +335,6 @@ pub fn extend[T: plain](mut xs: List[T], ys: List[T]) -> Result[(), Capacity] {
 }
 
 // sort_stable is core.list, with one uninhabited scratch block.
-
 /// First equal index, or Error(insertion index), in a list sorted by compare.
 /// compare(element) orders that element relative to the sought key, as Rust's
 /// slice::binary_search_by. Equal keys use the first index, including duplicates.
@@ -332,10 +347,21 @@ pub fn binary_search_by[T](xs: List[T], compare: scoped fn(T) -> Order) -> Resul
     while lo < hi {
         let mid = lo + (hi - lo) / 2
         match compare(xs[mid]) {
-            Less => { lo = mid + 1 },
-            Equal => { found = true; hi = mid },
-            Greater => { hi = mid },
+            Less => {
+                lo = mid + 1
+            },
+            Equal => {
+                found = true;
+                hi = mid
+            },
+            Greater => {
+                hi = mid
+            },
         }
     }
-    if found { Ok(lo) } else { Error(lo) }
+    if found {
+        Ok(lo)
+    } else {
+        Error(lo)
+    }
 }

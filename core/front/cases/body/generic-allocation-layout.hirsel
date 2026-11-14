@@ -10,66 +10,180 @@
 // expect: run variant32() = true
 // expect: run boxed32() = true
 // expect: run boxed_large() = true
-resource type R[T] { id:u64, value:T } drop(r) { let _=r.id }
-type Record[T:plain] { byte:u8, value:T }
-type Variant[T:plain] = Empty | Data(T)
-type Big { a:u64,b:u64,c:u64,d:u64,e:u64,f:u64,g:u64,h:u64 }
-fn big()->Big {Big(a:1,b:2,c:3,d:4,e:5,f:6,g:7,h:8)}
-fn available()->u64 {
-    let p:Result[List[u8],Capacity]=list.with_capacity(1000)
-    match p {Error(c)=>c.available,Ok(_)=>0}
+resource type R[T] {
+    id: u64,
+    value: T
+} drop(r) {
+    let _ = r.id
 }
-fn hold[T](take v:T)->u64 {
-    let r=result.unwrap(R(id:9,value:take v))
-    let left=available()
-    let _=r.id
+
+type Record[T: plain] {
+    byte: u8,
+    value: T
+}
+
+type Variant[T: plain] = Empty | Data(T)
+
+type Big {
+    a: u64,
+    b: u64,
+    c: u64,
+    d: u64,
+    e: u64,
+    f: u64,
+    g: u64,
+    h: u64
+}
+
+fn big() -> Big {
+    Big(a: 1, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: 8)
+}
+
+fn available() -> u64 {
+    let p: Result[List[u8], Capacity] = list.with_capacity(1000)
+    match p {
+        Error(c) => c.available,
+        Ok(_) => 0
+    }
+}
+
+fn hold[T](take v: T) -> u64 {
+    let r = result.unwrap(R(id: 9, value: take v))
+    let left = available()
+    let _ = r.id
     left
 }
-fn resource32()->bool {
-    let got=bound bytes 128 {let left=hold(3u32);left==84u64 && available()==128u64}
-    match got {Ok(v)=>v,Error(_)=>false}
+
+fn resource32() -> bool {
+    let got = bound bytes 128 {
+        let left = hold(3u32);
+        left == 84u64 && available() == 128u64
+    }
+    match got {
+        Ok(v) => v,
+        Error(_) => false
+    }
 }
-fn resource_unit()->bool {
-    let got=bound bytes 128 {let left=hold(());left==88u64 && available()==128u64}
-    match got {Ok(v)=>v,Error(_)=>false}
+
+fn resource_unit() -> bool {
+    let got = bound bytes 128 {
+        let left = hold(());
+        left == 88u64 && available() == 128u64
+    }
+    match got {
+        Ok(v) => v,
+        Error(_) => false
+    }
 }
-resource type Only[T] {value:T} drop(r) {}
-fn hold_only[T](take v:T)->u64 {let r=result.unwrap(Only(value:take v));let left=available();let _=take r;left}
-fn resource_align32()->bool {
-    let got=bound bytes 128 {let left=hold_only(3u32);left==92u64 && available()==128u64}
-    match got {Ok(v)=>v,Error(_)=>false}
+
+resource type Only[T] {
+    value: T
+} drop(r) {}
+
+fn hold_only[T](take v: T) -> u64 {
+    let r = result.unwrap(Only(value: take v));
+    let left = available();
+    let _ = take r;
+    left
 }
-fn resource_large()->bool {
-    let got=bound bytes 128 {let left=hold(big());left==24u64 && available()==128u64}
-    match got {Ok(v)=>v,Error(_)=>false}
+
+fn resource_align32() -> bool {
+    let got = bound bytes 128 {
+        let left = hold_only(3u32);
+        left == 92u64 && available() == 128u64
+    }
+    match got {
+        Ok(v) => v,
+        Error(_) => false
+    }
 }
-fn record[T:plain](v:T)->u64 {
-    boxed(Record(byte:1,value:v))
+
+fn resource_large() -> bool {
+    let got = bound bytes 128 {
+        let left = hold(big());
+        left == 24u64 && available() == 128u64
+    }
+    match got {
+        Ok(v) => v,
+        Error(_) => false
+    }
 }
-fn variant[T:plain](v:T)->u64 {
-    let p:Variant[T]=Data(v);boxed(take p)
+
+fn record[T: plain](v: T) -> u64 {
+    boxed(Record(byte: 1, value: v))
 }
-fn record32()->bool {
-    let got=bound bytes 128 {let left=record(3u32);left==120u64 && available()==128u64}
-    match got {Ok(v)=>v,Error(_)=>false}
+
+fn variant[T: plain](v: T) -> u64 {
+    let p: Variant[T] = Data(v);
+    boxed(take p)
 }
-fn variant32()->bool {
-    let got=bound bytes 128 {let left=variant(3u32);left==112u64 && available()==128u64}
-    match got {Ok(v)=>v,Error(_)=>false}
+
+fn record32() -> bool {
+    let got = bound bytes 128 {
+        let left = record(3u32);
+        left == 120u64 && available() == 128u64
+    }
+    match got {
+        Ok(v) => v,
+        Error(_) => false
+    }
 }
-fn boxed[T](take v:T)->u64 {let p=result.unwrap(box.new(take v));let left=available();let _=take p;left}
-fn boxed32()->bool {
-    let got=bound bytes 128 {let left=boxed(3u32);left==120u64 && available()==128u64}
-    match got {Ok(v)=>v,Error(_)=>false}
+
+fn variant32() -> bool {
+    let got = bound bytes 128 {
+        let left = variant(3u32);
+        left == 112u64 && available() == 128u64
+    }
+    match got {
+        Ok(v) => v,
+        Error(_) => false
+    }
 }
-fn boxed_large()->bool {
-    let got=bound bytes 128 {let left=boxed(big());left==64u64 && available()==128u64}
-    match got {Ok(v)=>v,Error(_)=>false}
+
+fn boxed[T](take v: T) -> u64 {
+    let p = result.unwrap(box.new(take v));
+    let left = available();
+    let _ = take p;
+    left
 }
-fn boxed_unit()->bool {
-    let got=bound bytes 128 {let left=boxed(());left==128u64 && available()==128u64}
-    match got {Ok(v)=>v,Error(_)=>false}
+
+fn boxed32() -> bool {
+    let got = bound bytes 128 {
+        let left = boxed(3u32);
+        left == 120u64 && available() == 128u64
+    }
+    match got {
+        Ok(v) => v,
+        Error(_) => false
+    }
 }
-pub fn main()->Result[(),Exit] {
-    if resource32() && resource_align32() && boxed_unit() && resource_unit() && resource_large() && record32() && variant32() && boxed32() && boxed_large() {Ok(())} else {Error(Exit(status:1))}
+
+fn boxed_large() -> bool {
+    let got = bound bytes 128 {
+        let left = boxed(big());
+        left == 64u64 && available() == 128u64
+    }
+    match got {
+        Ok(v) => v,
+        Error(_) => false
+    }
+}
+
+fn boxed_unit() -> bool {
+    let got = bound bytes 128 {
+        let left = boxed(());
+        left == 128u64 && available() == 128u64
+    }
+    match got {
+        Ok(v) => v,
+        Error(_) => false
+    }
+}
+
+pub fn main() -> Result[(), Exit] {
+    if resource32() && resource_align32() && boxed_unit() && resource_unit() && resource_large() && record32() && variant32() && boxed32() && boxed_large() {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
 }

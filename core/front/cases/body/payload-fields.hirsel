@@ -6,40 +6,104 @@
 // lone(0) = 10; the counted kernels are runtime rows the evaluator does not run, so
 // those values were checked natively (cranelift).
 // expect: accept
-type I: shareable + send { v: u64 }
-type C: shareable + send { a: u64, b: u64, i: I }
-fn sum_box(c: Box[C]) -> u64 { c.a + c.b + c.i.v }
-fn sum_rc(c: Rc[C]) -> u64 { c.a + c.b + c.i.v }
-fn sum_arc(c: Arc[C]) -> u64 { c.a + c.b + c.i.v }
+type I: shareable + send {
+    v: u64
+}
+
+type C: shareable + send {
+    a: u64,
+    b: u64,
+    i: I
+}
+
+fn sum_box(c: Box[C]) -> u64 {
+    c.a + c.b + c.i.v
+}
+
+fn sum_rc(c: Rc[C]) -> u64 {
+    c.a + c.b + c.i.v
+}
+
+fn sum_arc(c: Arc[C]) -> u64 {
+    c.a + c.b + c.i.v
+}
+
 fn boxed(k: u64) -> u64 {
-  match box.new(C(a: k, b: 7, i: I(v: 40))) { Ok(h) => sum_box(h), Error(_) => 999 }
+    match box.new(C(a: k, b: 7, i: I(v: 40))) {
+        Ok(h) => sum_box(h),
+        Error(_) => 999
+    }
 }
+
 fn counted(k: u64) -> u64 {
-  match rc.new(C(a: k, b: 7, i: I(v: 40))) { Ok(h) => sum_rc(h), Error(_) => 999 }
+    match rc.new(C(a: k, b: 7, i: I(v: 40))) {
+        Ok(h) => sum_rc(h),
+        Error(_) => 999
+    }
 }
+
 fn shared(k: u64) -> u64 {
-  match arc.new(C(a: k, b: 7, i: I(v: 40))) { Ok(h) => sum_arc(h), Error(_) => 999 }
+    match arc.new(C(a: k, b: 7, i: I(v: 40))) {
+        Ok(h) => sum_arc(h),
+        Error(_) => 999
+    }
 }
+
 // rope's `p.chunk.value`: a counted field of a record, its String read as a view.
-type Chunk: shareable { id: u64, value: String }
-type Piece { chunk: Rc[Chunk], lo: u64 }
-fn chunk_len(p: Piece) -> u64 { if p.chunk.value == "abc" { p.lo + 3 } else { 0 } }
+type Chunk: shareable {
+    id: u64,
+    value: String
+}
+
+type Piece {
+    chunk: Rc[Chunk],
+    lo: u64
+}
+
+fn chunk_len(p: Piece) -> u64 {
+    if p.chunk.value == "abc" {
+        p.lo + 3
+    } else {
+        0
+    }
+}
+
 // versions' `n.key`: a view of an Arc bound from a viewed Option.
-type Node: shareable + send { key: u64, left: Option[Arc[Node]] }
+type Node: shareable + send {
+    key: u64,
+    left: Option[Arc[Node]]
+}
+
 fn left_key(root: Option[Arc[Node]]) -> u64 {
-  let Some(n) = view root else { return 0 }
-  let Some(l) = view n.left else { return n.key }
-  n.key + l.key
+    let Some(n) = view root else {
+        return 0
+    }
+    let Some(l) = view n.left else {
+        return n.key
+    }
+    n.key + l.key
 }
+
 fn piece(x: u64) -> u64 {
-  match rc.new(Chunk(id: x, value: "abc")) { Ok(c) => chunk_len(Piece(chunk: take c, lo: 4)), Error(_) => 999 }
+    match rc.new(Chunk(id: x, value: "abc")) {
+        Ok(c) => chunk_len(Piece(chunk: take c, lo: 4)),
+        Error(_) => 999
+    }
 }
+
 fn tree(k: u64) -> u64 {
-  let Ok(l) = arc.new(Node(key: k, left: None)) else { return 999 }
-  let Ok(r) = arc.new(Node(key: 10, left: Some(take l))) else { return 998 }
-  left_key(Some(take r))
+    let Ok(l) = arc.new(Node(key: k, left: None)) else {
+        return 999
+    }
+    let Ok(r) = arc.new(Node(key: 10, left: Some(take l))) else {
+        return 998
+    }
+    left_key(Some(take r))
 }
+
 fn lone(x: u64) -> u64 {
-  let Ok(r) = arc.new(Node(key: 10, left: None)) else { return 998 }
-  left_key(Some(take r))
+    let Ok(r) = arc.new(Node(key: 10, left: None)) else {
+        return 998
+    }
+    left_key(Some(take r))
 }

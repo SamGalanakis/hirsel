@@ -1,6 +1,11 @@
 // expect: accept
 // MEM-10/12: links make a compact type packed but do not make it streamable.
-@compact(u32) stable type Linked = Leaf(u8) | Next(Link[Linked])
+@compact(u32)
+stable type Linked = Leaf(u8) | Next(Link[Linked])
+
 type Packed[T: packed] {}
-type Accepted[in r] { value: Packed[SeqSpan[Linked] in r] }
+
+type Accepted[in r] {
+    value: Packed[SeqSpan[Linked] in r]
+}
 // expect: kind Linked stable

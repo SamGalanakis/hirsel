@@ -20,34 +20,102 @@
 // expect: run second(false) = 46
 // expect: run second(true) = 0
 fn nested_of(k: u64) -> Option[Option[Box[u64]]] {
-  if k == 0 { None } else if k == 1 { Some(None) } else { Some(Some(result.unwrap(box.new(7u64)))) }
+    if k == 0 {
+        None
+    } else if k == 1 {
+        Some(None)
+    } else {
+        Some(Some(result.unwrap(box.new(7u64))))
+    }
 }
+
 fn nested(k: u64) -> u64 {
-  match nested_of(k) { None => 0, Some(None) => 1, Some(Some(b)) => b }
+    match nested_of(k) {
+        None => 0,
+        Some(None) => 1,
+        Some(Some(b)) => b
+    }
 }
+
 fn text_of(k: u64) -> Option[String] {
-  if k == 0 { None } else if k == 1 { Some("") } else { Some("abc") }
+    if k == 0 {
+        None
+    } else if k == 1 {
+        Some("")
+    } else {
+        Some("abc")
+    }
 }
+
 fn text(k: u64) -> u64 {
-  match text_of(k) { None => 100, Some(s) => string.byte_len(s) }
+    match text_of(k) {
+        None => 100,
+        Some(s) => string.byte_len(s)
+    }
 }
+
 // SEM-4: a zero-sized element's list holds capacity 2^64 - 1, above the String niche.
 fn unit_list(empty: bool) -> u64 {
-  let o: Option[List[()]] = if empty { None } else { Some(list.new()) }
-  match o { None => 0, Some(xs) => list.capacity(xs) }
+    let o: Option[List[()]] = if empty {
+        None
+    } else {
+        Some(list.new())
+    }
+    match o {
+        None => 0,
+        Some(xs) => list.capacity(xs)
+    }
 }
+
 fn flags(k: u64) -> u64 {
-  let o: Option[bool] = if k == 0 { None } else if k == 1 { Some(false) } else { Some(true) }
-  match o { None => 2, Some(false) => 0, Some(true) => 1 }
+    let o: Option[bool] = if k == 0 {
+        None
+    } else if k == 1 {
+        Some(false)
+    } else {
+        Some(true)
+    }
+    match o {
+        None => 2,
+        Some(false) => 0,
+        Some(true) => 1
+    }
 }
+
 fn code(k: u64) -> u32 {
-  let o: Option[char] = if k == 0 { None } else if k == 1 { char.from_u32(1114111) } else { char.from_u32(0) }
-  match o { None => 1114112, Some(c) => char.to_u32(c) }
+    let o: Option[char] = if k == 0 {
+        None
+    } else if k == 1 {
+        char.from_u32(1114111)
+    } else {
+        char.from_u32(0)
+    }
+    match o {
+        None => 1114112,
+        Some(c) => char.to_u32(c)
+    }
 }
+
 // The record's only spare value is its second field's null pointer, at 8.
-type Pair { n: u64, b: Box[u64] }
-fn unbox(b: View[Box[u64]]) -> u64 { match b { x => x } }
+type Pair {
+    n: u64,
+    b: Box[u64]
+}
+
+fn unbox(b: View[Box[u64]]) -> u64 {
+    match b {
+        x => x
+    }
+}
+
 fn second(empty: bool) -> u64 {
-  let o: Option[Pair] = if empty { None } else { Some(Pair(n: 4u64, b: result.unwrap(box.new(6u64)))) }
-  match o { None => 0, Some(p) => p.n * 10u64 + unbox(p.b) }
+    let o: Option[Pair] = if empty {
+        None
+    } else {
+        Some(Pair(n: 4u64, b: result.unwrap(box.new(6u64))))
+    }
+    match o {
+        None => 0,
+        Some(p) => p.n * 10u64 + unbox(p.b)
+    }
 }

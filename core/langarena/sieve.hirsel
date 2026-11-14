@@ -1,35 +1,48 @@
 // kostya/LangArena 3c9f84d benchmarks/sieve.rs.
-pub fn dispatch(config:String,name:String,warmup:u64,iterations:u64)->Result[u32,helper.Error] {
-    if name!="Etc::Sieve" {return Error(UnknownTask)}
-    let size=helper.config_i64(config,name,"limit")?
-    if size<2 {return Error(Config)}
-    let n:u64=int.narrow(size)
-    let mut total:u32=0
-    for _ in 0 .. warmup+iterations {
-        let mut primes:Bytes=list.new()
-        helper.mem(list.fill(mut primes,n+1,1))?
-        primes[0]=0
-        primes[1]=0
-        let fn64:f64=float.from_int(n)
-        let sqrt_n=float.sqrt(fn64)
-        let converted:Result[u64,FloatError]=float.to_int(sqrt_n)
-        for p in 2u64 .. result.unwrap(converted)+1 {
-            if primes[p]==1 {
-                let mut multiple=p*p
-                while multiple<=n {primes[multiple]=0;multiple+=p}
+pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
+    if name != "Etc::Sieve" {
+        return Error(UnknownTask)
+    }
+    let size = helper.config_i64(config, name, "limit")?
+    if size < 2 {
+        return Error(Config)
+    }
+    let n: u64 = int.narrow(size)
+    let mut total: u32 = 0
+    for _ in 0 .. warmup + iterations {
+        let mut primes: Bytes = list.new()
+        helper.mem(list.fill(mut primes, n + 1, 1))?
+        primes[0] = 0
+        primes[1] = 0
+        let fn64: f64 = float.from_int(n)
+        let sqrt_n = float.sqrt(fn64)
+        let converted: Result[u64, FloatError] = float.to_int(sqrt_n)
+        for p in 2u64 .. result.unwrap(converted) + 1 {
+            if primes[p] == 1 {
+                let mut multiple = p * p
+                while multiple <= n {
+                    primes[multiple] = 0;
+                    multiple += p
+                }
             }
         }
-        let mut last:u64=2
-        let mut count:u64=1
-        let mut k:u64=3
-        while k<=n {
-            if primes[k]==1 {last=k;count+=1}
-            k+=2
+        let mut last: u64 = 2
+        let mut count: u64 = 1
+        let mut k: u64 = 3
+        while k <= n {
+            if primes[k] == 1 {
+                last = k;
+                count += 1
+            }
+            k += 2
         }
-        total=int.wrapping_add(total,int.truncate(last+count))
+        total = int.wrapping_add(total, int.truncate(last + count))
     }
     Ok(total)
 }
-pub fn main(out:Stdout,d:Dir,argv:Args)->Result[(),Exit] waits {
-    harness.main(out,d,argv,fn(c:String,n:String,w:u64,i:u64)->Result[u32,helper.Error] {dispatch(c,n,w,i)})
+
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
+    harness.main(out, d, argv, fn(c: String, n: String, w: u64, i: u64) -> Result[u32, helper.Error] {
+        dispatch(c, n, w, i)
+    })
 }

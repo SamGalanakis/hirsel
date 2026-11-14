@@ -3,6 +3,10 @@
 // expect: run f(true,9) = 9
 // expect: run f(false,9) = 3
 fn f(yes: bool, x: u64) -> u64 {
-  let o: Option[u64] = Some(x)
-  match o { Some(n) if yes => n, Some(_) => 3, None => 4 }
+    let o: Option[u64] = Some(x)
+    match o {
+        Some(n) if yes => n,
+        Some(_) => 3,
+        None => 4
+    }
 }

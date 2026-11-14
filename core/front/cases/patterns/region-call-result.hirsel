@@ -1,6 +1,16 @@
 // MEM-6: a result rooted in the callee's Region parameter is rooted in the region its
 // argument names, here the local region, so binding it as `S in local` is accepted.
 // expect: accept
-stable type S { n: u64 }
-fn create(r: Region) -> S in r { loop {} }
-fn f() { region local { let _: S in local = create(local) } }
+stable type S {
+    n: u64
+}
+
+fn create(r: Region) -> S in r {
+    loop {}
+}
+
+fn f() {
+    region local {
+        let _: S in local = create(local)
+    }
+}

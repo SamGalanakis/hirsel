@@ -1,2 +1,8 @@
 // expect: run three() = 3
-fn three() -> u64 { let mut n: u64 = 0; for _ in 0u64..3 { n += 1 }; n }
+fn three() -> u64 {
+    let mut n: u64 = 0;
+    for _ in 0u64 .. 3 {
+        n += 1
+    };
+    n
+}

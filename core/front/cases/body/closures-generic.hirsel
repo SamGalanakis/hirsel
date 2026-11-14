@@ -5,18 +5,34 @@
 // expect: run pair() = 13
 // expect: run plain() = 23
 fn select[T: plain](x: T) -> T {
-  let cb = scoped fn() -> T { copy x }
-  cb()
+    let cb = scoped fn() -> T {
+        copy x
+    }
+    cb()
 }
+
 fn pass[T: plain](x: T) -> T {
-  let cb: fn(T) -> T = fn(y: T) -> T { copy y }
-  cb(x)
+    let cb: fn(T) -> T = fn(y: T) -> T {
+        copy y
+    }
+    cb(x)
 }
-fn scalar() -> u64 { select(7) }
-fn unit() -> u64 { select(()); 9 }
+
+fn scalar() -> u64 {
+    select(7)
+}
+
+fn unit() -> u64 {
+    select(());
+    9
+}
+
 fn pair() -> u64 {
-  let x: (u64, u64) = (5, 8)
-  let (a, b) = select(x)
-  a + b
+    let x: (u64, u64) = (5, 8)
+    let (a, b) = select(x)
+    a + b
 }
-fn plain() -> u64 { pass(23) }
+
+fn plain() -> u64 {
+    pass(23)
+}

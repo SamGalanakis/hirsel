@@ -1,4 +1,4 @@
 // MEM-6: a declared edge may name Region parameters and generic region parameters.
-fn edges[in a](r: Region, s: Region) where a: r, r: s { }
+fn edges[in a](r: Region, s: Region) where a: r, r: s {}
 // expect: outlives edges a s
 // expect: outlives edges s s

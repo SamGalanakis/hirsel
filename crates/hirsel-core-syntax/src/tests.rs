@@ -779,3 +779,47 @@ fn prog_7_expected_tokens_and_names_include_the_compared_facts() {
         "source validity compares no declaration"
     );
 }
+
+#[test]
+fn formatter_preserves_tokens_and_ast_across_the_live_source_corpus() {
+    use std::{fs, path::Path};
+    fn visit(dir: &Path, mode: ParseMode, count: &mut usize) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if entry.file_type().unwrap().is_dir() {
+                visit(&path, mode, count);
+            } else if path.extension().is_some_and(|e| e == "hirsel") {
+                let bytes = fs::read(&path).unwrap();
+                let text = String::from_utf8_lossy(&bytes);
+                let fixture = text.lines().any(|line| {
+                    line.trim_start()
+                        .strip_prefix("//")
+                        .and_then(|s| s.trim_start().strip_prefix("expect:"))
+                        .is_some_and(|s| {
+                            matches!(s.split_whitespace().next(), Some("refuse" | "gap"))
+                        })
+                });
+                if fixture {
+                    continue;
+                }
+                eprintln!("format round trip: {}", path.display());
+                formatted(std::str::from_utf8(&bytes).unwrap(), mode);
+                *count += 1;
+            }
+        }
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut count = 0;
+    for (dir, mode) in [
+        ("core/core", ParseMode::Signatures),
+        ("core/std", ParseMode::Source),
+        ("core/front/cases", ParseMode::Source),
+        ("core/programs/m1", ParseMode::Source),
+        ("core/langarena", ParseMode::Source),
+    ] {
+        visit(&root.join(dir), mode, &mut count);
+    }
+    assert!(count > 0);
+    eprintln!("{count} source files preserve tokens, AST shape and canonical idempotence");
+}

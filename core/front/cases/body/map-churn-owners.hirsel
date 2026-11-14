@@ -1,12 +1,26 @@
 // Compaction moves each surviving owner without dropping it or stale trailing bytes.
 // expect: run compacted() = 3 trace 0,2,1,3,4
-resource type Mark {id:u64} drop(m) {let _=m.id}
-fn compacted()->u64 {
-  let mut m:Map[u64,Mark]=map.new()
-  for i in 0u64..4u64 {result.unwrap(map.insert(mut m,i,result.unwrap(Mark(id:i))))}
-  let _=map.remove(mut m,0)
-  let _=map.remove(mut m,2)
-  result.unwrap(map.insert(mut m,4,result.unwrap(Mark(id:4))))
-  map.len(m)
+resource type Mark {
+    id: u64
+} drop(m) {
+    let _ = m.id
 }
-pub fn main()->Result[(),Exit] {if compacted()==3 {Ok(())}else{Error(Exit(status:1))}}
+
+fn compacted() -> u64 {
+    let mut m: Map[u64, Mark] = map.new()
+    for i in 0u64 .. 4u64 {
+        result.unwrap(map.insert(mut m, i, result.unwrap(Mark(id: i))))
+    }
+    let _ = map.remove(mut m, 0)
+    let _ = map.remove(mut m, 2)
+    result.unwrap(map.insert(mut m, 4, result.unwrap(Mark(id: 4))))
+    map.len(m)
+}
+
+pub fn main() -> Result[(), Exit] {
+    if compacted() == 3 {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
+}

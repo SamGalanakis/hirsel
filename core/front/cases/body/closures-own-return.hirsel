@@ -1,11 +1,14 @@
 // Owning environments survive their source stack frame and each call only views them.
 // expect: run f() = 24
 fn make(n: u64) -> Result[own[send] fn(u64) -> u64, (Capacity, u64)] {
-  fn(x: u64) -> u64 { n + x }
+    fn(x: u64) -> u64 {
+        n + x
+    }
 }
+
 fn f() -> u64 {
-  match make(7) {
-    Ok(take cb) => cb(3) + cb(7),
-    Error(_) => 0,
-  }
+    match make(7) {
+        Ok(take cb) => cb(3) + cb(7),
+        Error(_) => 0,
+    }
 }

@@ -1,6 +1,15 @@
 // SEM-7, core.md "Core types": `Unique` is a `key` of one u64 word, so a record or an
 // Option holding one compares for equality (lru's `c.head != Some(h)` over pool ids).
 // expect: accept
-type K: key { u: Unique, n: u64 }
-fn same(a: K, b: K) -> bool { a == b }
-fn other(a: Option[Unique], b: Unique) -> bool { a != Some(b) }
+type K: key {
+    u: Unique,
+    n: u64
+}
+
+fn same(a: K, b: K) -> bool {
+    a == b
+}
+
+fn other(a: Option[Unique], b: Unique) -> bool {
+    a != Some(b)
+}

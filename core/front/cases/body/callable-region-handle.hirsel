@@ -1,8 +1,13 @@
 // Region is a lexical handle argument, not a stored callable payload field.
 // The indirect adapter preserves the RegionOpen pointer and closes it on return.
 // expect: run run() = 7
-fn leaf(r: Region, n: u64) -> u64 { n + 3 }
+fn leaf(r: Region, n: u64) -> u64 {
+    n + 3
+}
+
 fn run() -> u64 {
-  let cb = leaf
-  region r { cb(r, 4) }
+    let cb = leaf
+    region r {
+        cb(r, 4)
+    }
 }

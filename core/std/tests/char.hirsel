@@ -63,7 +63,11 @@ fn probes() -> String {
 }
 
 fn mark(mut out: String, yes: bool) {
-    result.unwrap(string.push(mut out, if yes { "1" } else { "0" }))
+    result.unwrap(string.push(mut out, if yes {
+        "1"
+    } else {
+        "0"
+    }))
 }
 
 // Only '0' and '9' (probes 8 and 9).

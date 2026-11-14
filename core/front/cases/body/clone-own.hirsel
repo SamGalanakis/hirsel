@@ -14,97 +14,162 @@
 // expect: run two_refused() = 80401
 // expect: run box_refused() = 80404
 // expect: run generic() = 2005
-type Cell { s: String, n: u64 }
-type Two { a: String, b: String }
-type Tree { v: u64, kids: List[Tree] }
+type Cell {
+    s: String,
+    n: u64
+}
+
+type Two {
+    a: String,
+    b: String
+}
+
+type Tree {
+    v: u64,
+    kids: List[Tree]
+}
+
 fn own(x: String) -> String {
-  let mut s = string.new()
-  let _ = string.push(mut s, x)
-  s
+    let mut s = string.new()
+    let _ = string.push(mut s, x)
+    s
 }
+
 fn strings() -> List[String] {
-  let mut xs: List[String] = list.new()
-  let _ = list.push(mut xs, own("ab"))
-  let _ = list.push(mut xs, own("cde"))
-  xs
+    let mut xs: List[String] = list.new()
+    let _ = list.push(mut xs, own("ab"))
+    let _ = list.push(mut xs, own("cde"))
+    xs
 }
+
 fn apart() -> u64 {
-  let mut xs = strings()
-  let c: Result[List[String], Capacity] = clone(xs)
-  let Ok(ys) = c else { return 999 }
-  list.clear(mut xs)
-  let mut n = list.len(ys) * 1000
-  for y in ys { n = n + string.byte_len(y) }
-  n
-}
-fn sum(t: Tree) -> u64 {
-  let mut s = t.v
-  for k in t.kids { s = s + sum(k) }
-  s
-}
-fn leaf(v: u64) -> Tree { Tree(v: v, kids: list.new()) }
-fn tree() -> u64 {
-  let mut deep: List[Tree] = list.new()
-  let _ = list.push(mut deep, leaf(4))
-  let mut kids: List[Tree] = list.new()
-  let _ = list.push(mut kids, leaf(2))
-  let _ = list.push(mut kids, Tree(v: 3, kids: take deep))
-  let mut t = Tree(v: 1, kids: take kids)
-  let c: Result[Tree, Capacity] = clone(t)
-  let Ok(u) = c else { return 999 }
-  list.clear(mut t.kids)
-  sum(u)
-}
-fn boxed() -> u64 {
-  let Ok(b) = box.new(Cell(s: own("hello"), n: 2)) else { return 999 }
-  let c: Result[Box[Cell], Capacity] = clone(b)
-  let Ok(d) = c else { return 998 }
-  let _ = box.unbox(take b)
-  string.byte_len(d.s) + d.n
-}
-fn selected() -> u64 {
-  let Ok(b) = box.new(Cell(s: own("hello"), n: 2)) else { return 999 }
-  let c: Result[Cell, Capacity] = clone(b)
-  let Ok(d) = c else { return 998 }
-  let _ = box.unbox(take b)
-  string.byte_len(d.s)
-}
-fn refused() -> u64 {
-  let xs = strings()
-  let r = bound bytes 60 {
+    let mut xs = strings()
     let c: Result[List[String], Capacity] = clone(xs)
-    let Error(e) = c else { return 1 }
-    let after: List[u64] = list.with_capacity(7)?
-    e.requested * 10000 + e.available * 100 + list.capacity(after)
-  }
-  match r { Ok(n) => n + list.len(xs) - 2, Error(_) => 2 }
+    let Ok(ys) = c else {
+        return 999
+    }
+    list.clear(mut xs)
+    let mut n = list.len(ys) * 1000
+    for y in ys {
+        n = n + string.byte_len(y)
+    }
+    n
 }
-fn two_refused() -> u64 {
-  let x = Two(a: own("ab"), b: own("cde"))
-  let r = bound bytes 12 {
-    let c: Result[Two, Capacity] = clone(x)
-    let Error(e) = c else { return 1 }
-    let after: List[u64] = list.with_capacity(1)?
-    e.requested * 10000 + e.available * 100 + list.capacity(after)
-  }
-  match r { Ok(n) => n, Error(_) => 2 }
+
+fn sum(t: Tree) -> u64 {
+    let mut s = t.v
+    for k in t.kids {
+        s = s + sum(k)
+    }
+    s
 }
-fn box_refused() -> u64 {
-  let Ok(b) = box.new(Cell(s: own("hello"), n: 2)) else { return 999 }
-  let r = bound bytes 36 {
+
+fn leaf(v: u64) -> Tree {
+    Tree(v: v, kids: list.new())
+}
+
+fn tree() -> u64 {
+    let mut deep: List[Tree] = list.new()
+    let _ = list.push(mut deep, leaf(4))
+    let mut kids: List[Tree] = list.new()
+    let _ = list.push(mut kids, leaf(2))
+    let _ = list.push(mut kids, Tree(v: 3, kids: take deep))
+    let mut t = Tree(v: 1, kids: take kids)
+    let c: Result[Tree, Capacity] = clone(t)
+    let Ok(u) = c else {
+        return 999
+    }
+    list.clear(mut t.kids)
+    sum(u)
+}
+
+fn boxed() -> u64 {
+    let Ok(b) = box.new(Cell(s: own("hello"), n: 2)) else {
+        return 999
+    }
     let c: Result[Box[Cell], Capacity] = clone(b)
-    let Error(e) = c else { return 1 }
-    let after: List[u64] = list.with_capacity(4)?
-    e.requested * 10000 + e.available * 100 + list.capacity(after)
-  }
-  match r { Ok(n) => n, Error(_) => 2 }
+    let Ok(d) = c else {
+        return 998
+    }
+    let _ = box.unbox(take b)
+    string.byte_len(d.s) + d.n
 }
-fn dup[T: shareable](x: T) -> Result[T, Capacity] { clone(x) }
+
+fn selected() -> u64 {
+    let Ok(b) = box.new(Cell(s: own("hello"), n: 2)) else {
+        return 999
+    }
+    let c: Result[Cell, Capacity] = clone(b)
+    let Ok(d) = c else {
+        return 998
+    }
+    let _ = box.unbox(take b)
+    string.byte_len(d.s)
+}
+
+fn refused() -> u64 {
+    let xs = strings()
+    let r = bound bytes 60 {
+        let c: Result[List[String], Capacity] = clone(xs)
+        let Error(e) = c else {
+            return 1
+        }
+        let after: List[u64] = list.with_capacity(7)?
+        e.requested * 10000 + e.available * 100 + list.capacity(after)
+    }
+    match r {
+        Ok(n) => n + list.len(xs) - 2,
+        Error(_) => 2
+    }
+}
+
+fn two_refused() -> u64 {
+    let x = Two(a: own("ab"), b: own("cde"))
+    let r = bound bytes 12 {
+        let c: Result[Two, Capacity] = clone(x)
+        let Error(e) = c else {
+            return 1
+        }
+        let after: List[u64] = list.with_capacity(1)?
+        e.requested * 10000 + e.available * 100 + list.capacity(after)
+    }
+    match r {
+        Ok(n) => n,
+        Error(_) => 2
+    }
+}
+
+fn box_refused() -> u64 {
+    let Ok(b) = box.new(Cell(s: own("hello"), n: 2)) else {
+        return 999
+    }
+    let r = bound bytes 36 {
+        let c: Result[Box[Cell], Capacity] = clone(b)
+        let Error(e) = c else {
+            return 1
+        }
+        let after: List[u64] = list.with_capacity(4)?
+        e.requested * 10000 + e.available * 100 + list.capacity(after)
+    }
+    match r {
+        Ok(n) => n,
+        Error(_) => 2
+    }
+}
+
+fn dup[T: shareable](x: T) -> Result[T, Capacity] {
+    clone(x)
+}
+
 fn generic() -> u64 {
-  let mut xs = strings()
-  let Ok(ys) = dup(xs) else { return 999 }
-  list.clear(mut xs)
-  let mut n = list.len(ys) * 1000
-  for y in ys { n = n + string.byte_len(y) }
-  n
+    let mut xs = strings()
+    let Ok(ys) = dup(xs) else {
+        return 999
+    }
+    list.clear(mut xs)
+    let mut n = list.len(ys) * 1000
+    for y in ys {
+        n = n + string.byte_len(y)
+    }
+    n
 }

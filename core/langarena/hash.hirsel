@@ -1,49 +1,72 @@
 // kostya/LangArena 3c9f84d benchmarks/buffer_hash_{benchmark,crc32,sha256}.rs.
 // SHA256 deliberately preserves upstream's SimpleSHA256 rolling hash.
-fn crc32(data:Bytes)->u32 {
-    let mut crc:u32=0xffffffff
+fn crc32(data: Bytes) -> u32 {
+    let mut crc: u32 = 0xffffffff
     for b in data {
-        crc=crc^int.widen(b)
-        for _ in 0u32 .. 8u32 {crc=if crc&1u32!=0u32 {(crc>>1u32)^0xedb88320u32} else {crc>>1u32}}
+        crc = crc ^ int.widen(b)
+        for _ in 0u32 .. 8u32 {
+            crc = if crc & 1u32 != 0u32 {
+                (crc >> 1u32) ^ 0xedb88320u32
+            } else {
+                crc >> 1u32
+            }
+        }
     }
-    crc^0xffffffffu32
+    crc ^ 0xffffffffu32
 }
-fn sha256(data:Bytes)->u32 {
-    let mut hashes:Inline[u32,8]=[0x6a09e667u32,0xbb67ae85u32,0x3c6ef372u32,0xa54ff53au32,0x510e527fu32,0x9b05688cu32,0x1f83d9abu32,0x5be0cd19u32]
-    let mut at:u64=0
+
+fn sha256(data: Bytes) -> u32 {
+    let mut hashes: Inline[u32, 8] =[0x6a09e667u32, 0xbb67ae85u32, 0x3c6ef372u32, 0xa54ff53au32, 0x510e527fu32, 0x9b05688cu32, 0x1f83d9abu32, 0x5be0cd19u32]
+    let mut at: u64 = 0
     for b in data {
-        let mut h=hashes[at%8]
-        h=int.wrapping_add(int.wrapping_add(h<<5u32,h),int.widen(b))
-        hashes[at%8]=int.wrapping_add(h,h<<10u32)^(h>>6u32)
-        at+=1
+        let mut h = hashes[at % 8]
+        h = int.wrapping_add(int.wrapping_add(h << 5u32, h), int.widen(b))
+        hashes[at % 8] = int.wrapping_add(h, h << 10u32) ^ (h >> 6u32)
+        at += 1
     }
-    let mut digest:Inline[u8,32]=[0u8;32]
+    let mut digest: Inline[u8, 32] =[0u8; 32]
     for i in 0u64 .. 8u64 {
-        let h=hashes[i]
-        digest[i*4]=int.truncate(h>>24u32)
-        digest[i*4+1]=int.truncate(h>>16u32)
-        digest[i*4+2]=int.truncate(h>>8u32)
-        digest[i*4+3]=int.truncate(h)
+        let h = hashes[i]
+        digest[i * 4] = int.truncate(h >> 24u32)
+        digest[i * 4 + 1] = int.truncate(h >> 16u32)
+        digest[i * 4 + 2] = int.truncate(h >> 8u32)
+        digest[i * 4 + 3] = int.truncate(h)
     }
-    let a:u32=int.widen(digest[0])
-    let b:u32=int.widen(digest[1])
-    let c:u32=int.widen(digest[2])
-    let d:u32=int.widen(digest[3])
-    a|(b<<8u32)|(c<<16u32)|(d<<24u32)
+    let a: u32 = int.widen(digest[0])
+    let b: u32 = int.widen(digest[1])
+    let c: u32 = int.widen(digest[2])
+    let d: u32 = int.widen(digest[3])
+    a | (b << 8u32) | (c << 16u32) | (d << 24u32)
 }
-pub fn dispatch(config:String,name:String,warmup:u64,iterations:u64)->Result[u32,helper.Error] {
-    let sha=name=="Hash::SHA256"
-    if !sha && name!="Hash::CRC32" {return Error(UnknownTask)}
-    let n=helper.config_i64(config,name,"size")?
-    if n<0 {return Error(Config)}
-    let mut data:Bytes=list.new()
-    helper.mem(list.fill(mut data,int.narrow(n),0))?
-    let mut g=helper.lcg()
-    for i in 0u64 .. list.len(data) {data[i]=int.narrow(helper.next_int(mut g,256))}
-    let mut total:u32=0
-    for _ in 0 .. warmup+iterations {total=int.wrapping_add(total,if sha {sha256(data)} else {crc32(data)})}
+
+pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
+    let sha = name == "Hash::SHA256"
+    if !sha && name != "Hash::CRC32" {
+        return Error(UnknownTask)
+    }
+    let n = helper.config_i64(config, name, "size")?
+    if n < 0 {
+        return Error(Config)
+    }
+    let mut data: Bytes = list.new()
+    helper.mem(list.fill(mut data, int.narrow(n), 0))?
+    let mut g = helper.lcg()
+    for i in 0u64 .. list.len(data) {
+        data[i] = int.narrow(helper.next_int(mut g, 256))
+    }
+    let mut total: u32 = 0
+    for _ in 0 .. warmup + iterations {
+        total = int.wrapping_add(total, if sha {
+            sha256(data)
+        } else {
+            crc32(data)
+        })
+    }
     Ok(total)
 }
-pub fn main(out:Stdout,d:Dir,argv:Args)->Result[(),Exit] waits {
-    harness.main(out,d,argv,fn(c:String,n:String,w:u64,i:u64)->Result[u32,helper.Error] {dispatch(c,n,w,i)})
+
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
+    harness.main(out, d, argv, fn(c: String, n: String, w: u64, i: u64) -> Result[u32, helper.Error] {
+        dispatch(c, n, w, i)
+    })
 }

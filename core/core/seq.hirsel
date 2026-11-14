@@ -1,6 +1,8 @@
 // Module `seq` (MEM-12). An IndexedSpan[T] is read where a SeqSpan[T] is expected.
-
 pub fn len[T: packed](s: SeqSpan[T]) -> u64
+
 pub fn nth[T: packed](s: SeqSpan[T], i: u64) -> Option[View[T]] in s
+
 pub fn index_in[T: packed, in a](r: Region, s: SeqSpan[T] in a) -> Result[SeqIndex[T, in a] in r, Capacity] where a: r
+
 pub fn get[T: packed, in a](x: SeqIndex[T, in a], i: u64) -> Option[View[T]] in x

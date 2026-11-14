@@ -1,24 +1,28 @@
 // Same committed 4MiB input. The exact-size baseline trusts the fixture's known length;
 // it is not a public file API and does not infer EOF from a no-spare-capacity read.
-pub fn main(out:Stdout,d:Dir,argv:Args)->Result[(),Exit] waits {
-    let Some(mode)=args.get(argv,0) else {return Error(Exit(status:1))}
-    let value=if mode=="growth" {
-        result.unwrap(std.file.read_string(d,"input"))
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
+    let Some(mode) = args.get(argv, 0) else {
+        return Error(Exit(status: 1))
+    }
+    let value = if mode == "growth" {
+        result.unwrap(std.file.read_string(d, "input"))
     } else {
-        let mut f=result.unwrap(std.file.open(d,"input",Read))
-        let mut b:Bytes=result.unwrap(list.with_capacity(4194304))
-        while list.len(b)<4194304 {
-            let n=result.unwrap(std.file.read_into(mut f,mut b))
-            if n==0 {return Error(Exit(status:2))}
+        let mut f = result.unwrap(std.file.open(d, "input", Read))
+        let mut b: Bytes = result.unwrap(list.with_capacity(4194304))
+        while list.len(b) < 4194304 {
+            let n = result.unwrap(std.file.read_into(mut f, mut b))
+            if n == 0 {
+                return Error(Exit(status: 2))
+            }
         }
         result.unwrap(std.file.close(take f))
         result.unwrap(string.from_utf8(take b))
     }
-    let mut message=string.new()
-    result.unwrap(string.push_u64(mut message,string.byte_len(value)))
-    result.unwrap(string.push(mut message," "))
-    result.unwrap(string.push_u64(mut message,list.capacity(string.as_bytes(value))))
-    result.unwrap(string.push(mut message,"\n"))
-    result.unwrap(stdout.write(out,message))
+    let mut message = string.new()
+    result.unwrap(string.push_u64(mut message, string.byte_len(value)))
+    result.unwrap(string.push(mut message, " "))
+    result.unwrap(string.push_u64(mut message, list.capacity(string.as_bytes(value))))
+    result.unwrap(string.push(mut message, "\n"))
+    result.unwrap(stdout.write(out, message))
     Ok(())
 }

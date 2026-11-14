@@ -3,7 +3,10 @@
 // `Result[(), Exit]` goes through its destination. Checked here as well formed; the
 // M1 runner runs the exit status natively.
 // expect: accept
-pub fn main() -> Result[(), Exit] { pick(false) }
+pub fn main() -> Result[(), Exit] {
+    pick(false)
+}
+
 fn pick(c: bool) -> Result[(), Exit] {
     if c {
         Ok(())
@@ -11,6 +14,7 @@ fn pick(c: bool) -> Result[(), Exit] {
         Error(Exit(status: 7))
     }
 }
+
 fn maybe(c: bool) -> Option[u64] {
     if c {
         Some(3)

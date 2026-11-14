@@ -5,6 +5,26 @@
 // expect: run even(10) = 1
 // expect: run even(7) = 0
 // expect: run fact(5) = 120
-fn even(n: u64) -> u64 { if n == 0 { 1 } else { odd(n - 1) } }
-fn odd(n: u64) -> u64 { if n == 0 { 0 } else { even(n - 1) } }
-fn fact(n: u64) -> u64 { if n == 0 { 1 } else { n * fact(n - 1) } }
+fn even(n: u64) -> u64 {
+    if n == 0 {
+        1
+    } else {
+        odd(n - 1)
+    }
+}
+
+fn odd(n: u64) -> u64 {
+    if n == 0 {
+        0
+    } else {
+        even(n - 1)
+    }
+}
+
+fn fact(n: u64) -> u64 {
+    if n == 0 {
+        1
+    } else {
+        n * fact(n - 1)
+    }
+}

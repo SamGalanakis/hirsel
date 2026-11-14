@@ -28,9 +28,9 @@ class ChangedCases(unittest.TestCase):
         self.git('config', 'user.email', 'test@example.invalid')
         self.write('.gitignore', '.buck2/\n')
         self.write('src/lib.rs', '')
-        self.write('conformance/LANG/case.hir', 'fn f() -> u8 {\n  1u8\n}\n')
-        self.write('conformance/LANG/deleted.hir', 'fn f() {}\n')
-        self.write('conformance/LANG/legacy.hir', 'fn old(){1u8}')
+        self.write('core/front/cases/case.hirsel', 'fn f() -> u64 {\n    1\n}\n')
+        self.write('core/front/cases/deleted.hirsel', 'fn f() {}\n')
+        self.write('core/front/cases/legacy.hirsel', 'fn old(){1}')
         self.git('add', '.')
         self.git('commit', '-qm', 'base')
         self.base = self.git('rev-parse', 'HEAD').strip()
@@ -41,7 +41,7 @@ import json, sys
 if sys.argv[1] == 'uquery':
  print(json.dumps({'root//:test': {'crate_root': 'src/lib.rs', 'edition': '2024'}}))
 else:
- print(json.dumps({'root//:hirsel-conformance-bin-hirsel-conformance': FORMATTER}))
+ print(json.dumps({'root//:hirsel-core-syntax-bin-hirsel-core-syntax': FORMATTER}))
 '''.replace('FORMATTER', repr(formatter)))
         self.write('tools/buck2/sync.py', '')
         rustfmt = self.write('.buck2/bin/rustfmt', '#!/bin/sh\nexit 0\n')
@@ -66,7 +66,7 @@ else:
             return fmt.main()
 
     def test_noncanonical_changed_case_fails_both_lane_and_land_check_modes(self):
-        case = self.write('conformance/LANG/case.hir', 'fn f(){1u8}')
+        case = self.write('core/front/cases/case.hirsel', 'fn f(){1}')
         before = case.read_bytes()
         for args in [[], ['--check', '--base', self.base]]:
             with self.subTest(args=args):
@@ -74,40 +74,53 @@ else:
                 self.assertEqual(case.read_bytes(), before, 'case diagnostics must not move during a check')
 
     def test_changed_canonical_case_does_not_check_unchanged_noncanonical_neighbor(self):
-        self.write('conformance/LANG/case.hir', 'fn g() -> u8 {\n  1u8\n}\n')
+        self.write('core/front/cases/case.hirsel', 'fn g() -> u64 {\n    1\n}\n')
         self.assertEqual(self.run_fmt('--check'), 0)
-        self.assertEqual((self.root / 'conformance/LANG/legacy.hir').read_text(), 'fn old(){1u8}')
+        self.assertEqual((self.root / 'core/front/cases/legacy.hirsel').read_text(), 'fn old(){1}')
 
     def test_selection_includes_branch_index_worktree_and_untracked_cases_only(self):
-        self.write('conformance/LANG/branch.hir', 'fn f(){1u8}')
-        self.git('add', 'conformance/LANG/branch.hir')
+        self.write('core/front/cases/branch.hirsel', 'fn f(){1}')
+        self.git('add', 'core/front/cases/branch.hirsel')
         self.git('commit', '-qm', 'branch case')
         self.write('src/lib.rs', '// later unrelated commit\n')
         self.git('add', 'src/lib.rs')
         self.git('commit', '-qm', 'later unrelated commit')
-        self.write('conformance/LANG/case.hir', 'fn f(){2u8}')
-        self.write('conformance/LANG/staged.hir', 'fn f(){3u8}')
-        self.git('add', 'conformance/LANG/staged.hir')
-        self.write('conformance/LANG/untracked.hir', 'fn f(){4u8}')
-        (self.root / 'conformance/LANG/deleted.hir').unlink()
-        for file in ['conformance/LANG/reports/old.hir', 'stdlib/std@1/string.hir',
-                     'native-tests/library/format-fixture.hir']:
-            self.write(file, 'fn old(){1u8}')
+        self.write('core/front/cases/case.hirsel', 'fn f(){2}')
+        self.write('core/front/cases/staged.hirsel', 'fn f(){3}')
+        self.git('add', 'core/front/cases/staged.hirsel')
+        self.write('core/front/cases/untracked.hirsel', 'fn f(){4}')
+        (self.root / 'core/front/cases/deleted.hirsel').unlink()
+        for file in ['core/front/cases/reports/old.hirsel', 'stdlib/std@1/string.hir',
+                     'native-tests/library/format-fixture.hirsel']:
+            self.write(file, 'fn old(){1}')
         self.assertEqual(fmt.changed_cases(), [
-            'conformance/LANG/branch.hir', 'conformance/LANG/case.hir',
-            'conformance/LANG/staged.hir', 'conformance/LANG/untracked.hir'])
+            'core/front/cases/branch.hirsel', 'core/front/cases/case.hirsel',
+            'core/front/cases/staged.hirsel', 'core/front/cases/untracked.hirsel'])
 
     def test_no_changed_cases_do_not_build_a_formatter(self):
         self.assertEqual(self.run_fmt('--check'), 0)
 
-    def test_exact_expected_syntax_rejection_remains_exempt(self):
-        self.write('conformance/old-spec/language.md', '### LANG-1: Syntax\n\n### LANG-7: Types\n')
-        self.write('conformance/LANG/case.hir',
-                   '// rule: LANG-1\n// expect: reject LANG-1 at line 3\nfn f<T>() {}\n')
-        self.assertEqual(self.run_fmt('--check'), 0)
-        self.write('conformance/LANG/case.hir',
-                   '// rule: LANG-1\n// expect: reject LANG-7 at line 3\nfn f<T>() {}\n')
+    def test_refusal_fixtures_are_preserved_even_when_their_syntax_parses(self):
+        for text in ['// expect: refuse LANG-5 at 2:7\nfn f(\n',
+                     '// expect: refuse LANG-15 at 2:16\nfn f(){continue}\n',
+                     '// expect: gap OWN-1 at 2:7\nfn f(){}\n']:
+            with self.subTest(text=text):
+                path = self.write('core/front/cases/case.hirsel', text)
+                self.assertEqual(self.run_fmt('--check'), 0)
+                self.assertEqual(path.read_text(), text)
+
+    def test_unmarked_syntax_error_is_refused_without_modification(self):
+        path = self.write('core/std/broken.hirsel', 'fn broken(')
         self.assertEqual(self.run_fmt('--check'), 1)
+        self.assertEqual(path.read_text(), 'fn broken(')
+
+    def test_core_headers_use_signature_mode_and_all_new_source_families_are_selected(self):
+        paths = ['core/core/int.hirsel', 'core/std/int.hirsel',
+                 'core/programs/m1/files/main.hirsel', 'core/langarena/sort.hirsel']
+        for path in paths:
+            self.write(path, 'pub fn f(x: u64) -> u64\n' if path.startswith('core/core/') else 'fn f() {}\n')
+        self.assertEqual(fmt.changed_cases(), sorted(paths))
+        self.assertEqual(self.run_fmt('--check'), 0)
 
 
 if __name__ == '__main__':

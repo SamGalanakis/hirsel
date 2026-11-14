@@ -1,11 +1,30 @@
 // Capturing the whole tuple keeps field descriptors distinct: g calls only p.0.
 // expect: run checked() = 22
-fn receive(cb:scoped fn()->u64,mut other:u64)->u64 {other+=1;cb()+other}
-fn checked()->u64 {
- let mut a:u64=1
- let mut b:u64=10
- let p=(scoped fn()->u64 {a+=1;a},scoped fn()->u64 {b+=1;b})
- let g=scoped fn()->u64 {p.0()}
- receive(g,mut b)+a+b-4
+fn receive(cb: scoped fn() -> u64, mut other: u64) -> u64 {
+    other += 1;
+    cb() + other
 }
-pub fn main()->Result[(),Exit] {if checked()==22 {Ok(())}else{Error(Exit(status:1))}}
+
+fn checked() -> u64 {
+    let mut a: u64 = 1
+    let mut b: u64 = 10
+    let p = (scoped fn() -> u64 {
+        a += 1;
+        a
+    }, scoped fn() -> u64 {
+        b += 1;
+        b
+    })
+    let g = scoped fn() -> u64 {
+        p.0()
+    }
+    receive(g, mut b) + a + b - 4
+}
+
+pub fn main() -> Result[(), Exit] {
+    if checked() == 22 {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
+}

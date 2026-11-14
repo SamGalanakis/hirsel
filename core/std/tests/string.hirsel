@@ -198,10 +198,19 @@ fn find_every_offset() -> u64 {
     for k in 0u64 .. 16 {
         let mut s = string.new()
         for i in 0u64 .. 16 {
-            if i == k { result.unwrap(string.push(mut s, "éy")) }
-            if i < 15 { result.unwrap(string.push(mut s, "x")) }
+            if i == k {
+                result.unwrap(string.push(mut s, "éy"))
+            }
+            if i < 15 {
+                result.unwrap(string.push(mut s, "x"))
+            }
         }
-        match string.find(s, 0, "éz") { Some(_) => { return 999 }, None => {} }
+        match string.find(s, 0, "éz") {
+            Some(_) => {
+                return 999
+            },
+            None => {}
+        }
         total += found(string.find(s, 0, "éy"))
     }
     total

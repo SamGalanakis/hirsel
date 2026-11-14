@@ -1,6 +1,19 @@
 // The expected success type fixes T, while the argument alone fixes E.
 // expect: accept
-fn receipt[T, E](e: E) -> Result[T, E] { loop {} }
-fn maybe[T]() -> Option[T] { loop {} }
-fn result() -> Result[u64, u8] { let n: u64 = receipt(3u8)?; Ok(n) }
-fn option() -> Option[u64] { let n: u64 = maybe()?; Some(n) }
+fn receipt[T, E](e: E) -> Result[T, E] {
+    loop {}
+}
+
+fn maybe[T]() -> Option[T] {
+    loop {}
+}
+
+fn result() -> Result[u64, u8] {
+    let n: u64 = receipt(3u8)?;
+    Ok(n)
+}
+
+fn option() -> Option[u64] {
+    let n: u64 = maybe()?;
+    Some(n)
+}

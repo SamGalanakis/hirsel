@@ -1,92 +1,145 @@
 // Upstream kostya/LangArena 3c9f84d helper.rs. State is explicit, per benchmark.
-pub type Error = Capacity(Capacity) | Io(IoError) | Config | UnknownTask | Checksum(u32,u32)
-pub type Lcg { state:i32 }
+pub type Error = Capacity(Capacity) | Io(IoError) | Config | UnknownTask | Checksum(u32, u32)
 
-pub fn lcg()->Lcg { Lcg(state:42) }
-pub fn reset(mut g:Lcg) { g.state=42 }
-pub fn next_int(mut g:Lcg,max:i32)->i32 {
-    g.state=int.wrapping_add(int.wrapping_mul(g.state,3877),29573)%139968
-    let state:f64=float.from_int(g.state)
-    let scale:f64=float.from_int(max)
-    let n=state/139968.0*scale
-    let converted:Result[i32,FloatError]=float.to_int(n)
+pub type Lcg {
+    state: i32
+}
+
+pub fn lcg() -> Lcg {
+    Lcg(state: 42)
+}
+
+pub fn reset(mut g: Lcg) {
+    g.state = 42
+}
+
+pub fn next_int(mut g: Lcg, max: i32) -> i32 {
+    g.state = int.wrapping_add(int.wrapping_mul(g.state, 3877), 29573) % 139968
+    let state: f64 = float.from_int(g.state)
+    let scale: f64 = float.from_int(max)
+    let n = state / 139968.0 * scale
+    let converted: Result[i32, FloatError] = float.to_int(n)
     result.unwrap(converted)
 }
-pub fn next_float(mut g:Lcg,max:f64)->f64 {
-    g.state=int.wrapping_add(int.wrapping_mul(g.state,3877),29573)%139968
-    let state:f64=float.from_int(g.state)
-    max*state/139968.0
-}
-pub fn checksum_bytes(b:Bytes)->u32 {
-    let mut h:u32=5381
-    for x in b { h=int.wrapping_add(int.wrapping_add(h<<5,h),int.widen(x)) }
-    h
-}
-pub fn checksum_str(s:String)->u32 { checksum_bytes(string.as_bytes(s)) }
-pub fn mem[T](take r:Result[T,Capacity])->Result[T,Error] {
-    match take r {Ok(take x)=>Ok(take x),Error(c)=>Error(Capacity(c))}
+
+pub fn next_float(mut g: Lcg, max: f64) -> f64 {
+    g.state = int.wrapping_add(int.wrapping_mul(g.state, 3877), 29573) % 139968
+    let state: f64 = float.from_int(g.state)
+    max * state / 139968.0
 }
 
-fn named[in a](ms:IndexedSpan[std.json.Member] in a,name:String)->bool {
+pub fn checksum_bytes(b: Bytes) -> u32 {
+    let mut h: u32 = 5381
+    for x in b {
+        h = int.wrapping_add(int.wrapping_add(h << 5, h), int.widen(x))
+    }
+    h
+}
+
+pub fn checksum_str(s: String) -> u32 {
+    checksum_bytes(string.as_bytes(s))
+}
+
+pub fn mem[T](take r: Result[T, Capacity]) -> Result[T, Error] {
+    match take r {
+        Ok(take x) => Ok(take x),
+        Error(c) => Error(Capacity(c))
+    }
+}
+
+fn named[in a](ms: IndexedSpan[std.json.Member] in a, name: String) -> bool {
     for m in ms {
-        if text.as_string(m.key)=="name" {
-            match m.value { Str(t)=>return text.as_string(t)==name,_=>return false }
+        if text.as_string(m.key) == "name" {
+            match m.value {
+                Str(t) => return text.as_string(t) == name,
+                _ => return false
+            }
         }
     }
     false
 }
-fn field[in a](ms:IndexedSpan[std.json.Member] in a,key:String)->Option[View[std.json.Json]] in ms {
+
+fn field[in a](ms: IndexedSpan[std.json.Member] in a, key: String) -> Option[View[std.json.Json]] in ms {
     // JSON's last-value rule for repeated fields.
-    let mut found:Option[View[std.json.Json]] in ms=None
-    for m in ms { if text.as_string(m.key)==key { found=Some(m.value) } }
+    let mut found: Option[View[std.json.Json]] in ms = None
+    for m in ms {
+        if text.as_string(m.key) == key {
+            found = Some(m.value)
+        }
+    }
     found
 }
-fn setting[in a](j:std.json.Json in a,name:String,key:String)->Option[View[std.json.Json]] in j {
+
+fn setting[in a](j: std.json.Json in a, name: String, key: String) -> Option[View[std.json.Json]] in j {
     match j {
-        Arr(items)=>{
+        Arr(items) => {
             for item in items {
-                if let Obj(ms)=item { if named(ms,name) { return field(ms,key) } }
-            }
-            None
-        },
-        Obj(ms)=>{
-            for m in ms {
-                if text.as_string(m.key)==name {
-                    if let Obj(fields)=m.value { return field(fields,key) }
+                if let Obj(ms) = item {
+                    if named(ms, name) {
+                        return field(ms, key)
+                    }
                 }
             }
             None
         },
-        _=>None,
+        Obj(ms) => {
+            for m in ms {
+                if text.as_string(m.key) == name {
+                    if let Obj(fields) = m.value {
+                        return field(fields, key)
+                    }
+                }
+            }
+            None
+        },
+        _ => None,
     }
 }
+
 /// Reads one signed integer from the unchanged upstream array or object config.
-pub fn config_i64(config:String,name:String,key:String)->Result[i64,Error] {
+pub fn config_i64(config: String, name: String, key: String) -> Result[i64, Error] {
     region r {
-        let j=match std.json.parse(r,config) {Ok(x)=>x,Error(_)=>return Error(Config)}
-        let Some(value)=setting(j,name,key) else {return Error(Config)}
+        let j = match std.json.parse(r, config) {
+            Ok(x) => x,
+            Error(_) => return Error(Config)
+        }
+        let Some(value) = setting(j, name, key) else {
+            return Error(Config)
+        }
         match value {
-            Num(t)=>{
-                let parsed:Result[i64,ParseError]=int.parse(text.as_string(t))
-                match parsed {Ok(n)=>Ok(n),Error(_)=>Error(Config)}
+            Num(t) => {
+                let parsed: Result[i64, ParseError] = int.parse(text.as_string(t))
+                match parsed {
+                    Ok(n) => Ok(n),
+                    Error(_) => Error(Config)
+                }
             },
-            _=>Error(Config),
+            _ => Error(Config),
         }
     }
 }
+
 /// Returns an owned configuration string; it outlives the temporary JSON region.
-pub fn config_s(config:String,name:String,key:String)->Result[String,Error] {
+pub fn config_s(config: String, name: String, key: String) -> Result[String, Error] {
     region r {
-        let j=match std.json.parse(r,config) {Ok(x)=>x,Error(_)=>return Error(Config)}
-        let Some(value)=setting(j,name,key) else {return Error(Config)}
-        match value {Str(t)=>mem(string.from(text.as_string(t))),_=>Error(Config)}
+        let j = match std.json.parse(r, config) {
+            Ok(x) => x,
+            Error(_) => return Error(Config)
+        }
+        let Some(value) = setting(j, name, key) else {
+            return Error(Config)
+        }
+        match value {
+            Str(t) => mem(string.from(text.as_string(t))),
+            _ => Error(Config)
+        }
     }
 }
 
 /// Upstream checksum_str(format!("{:.7}",x)), using the shared exact fixed formatter.
 /// Fails: Capacity, propagated from formatting. No private formatting implementation.
-pub fn checksum_f64(x:f64)->Result[u32,Error] {
-    let mut s=string.new()
-    mem(float.push_fixed64(mut s,x,7))?
+pub fn checksum_f64(x: f64) -> Result[u32, Error] {
+    let mut s = string.new()
+    mem(float.push_fixed64(mut s, x, 7))?
     Ok(checksum_str(s))
 }

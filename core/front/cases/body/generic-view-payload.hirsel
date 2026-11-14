@@ -8,18 +8,34 @@
 // rigid one). Hand-derived: a Holder always has its value, so inner() is 1.
 // expect: accept
 // expect: run inner() = 1
-type Holder[T] { v: T }
-fn peek[T](h: Holder[T]) -> Option[View[T]] in h { Some(view h.v) }
+type Holder[T] {
+    v: T
+}
+
+fn peek[T](h: Holder[T]) -> Option[View[T]] in h {
+    Some(view h.v)
+}
+
 fn has_some[T](h: Holder[T]) -> bool {
-  match peek(h) {
-    Some(_) => true,
-    None => false,
-  }
+    match peek(h) {
+        Some(_) => true,
+        None => false,
+    }
 }
+
 fn inner() -> u64 {
-  let h = Holder(v: 7u64)
-  if has_some(h) { 1 } else { 0 }
+    let h = Holder(v: 7u64)
+    if has_some(h) {
+        1
+    } else {
+        0
+    }
 }
+
 pub fn main() -> Result[(), Exit] {
-  if inner() == 1 { Ok(()) } else { Error(Exit(status: 3)) }
+    if inner() == 1 {
+        Ok(())
+    } else {
+        Error(Exit(status: 3))
+    }
 }

@@ -22,16 +22,47 @@
 // expect: run shr(128,7) = 1
 // expect: run bits(12,10) = 6
 // expect: run flip(0) = 255
+fn add(x: u8, y: u8) -> u8 {
+    x + y
+}
 
-fn add(x: u8, y: u8) -> u8 { x + y }
-fn sub(x: u8, y: u8) -> u8 { x - y }
-fn mul(x: u8, y: u8) -> u8 { x * y }
-fn quot(x: i8, y: i8) -> i8 { x / y }
-fn rem(x: i8, y: i8) -> i8 { x % y }
-fn neg(x: i8) -> i8 { -x }
-fn shl(x: u8, n: u8) -> u8 { x << n }
-fn sar(x: i8, n: i8) -> i8 { x >> n }
-fn shr(x: u8, n: u8) -> u8 { x >> n }
+fn sub(x: u8, y: u8) -> u8 {
+    x - y
+}
+
+fn mul(x: u8, y: u8) -> u8 {
+    x * y
+}
+
+fn quot(x: i8, y: i8) -> i8 {
+    x / y
+}
+
+fn rem(x: i8, y: i8) -> i8 {
+    x % y
+}
+
+fn neg(x: i8) -> i8 {
+    -x
+}
+
+fn shl(x: u8, n: u8) -> u8 {
+    x << n
+}
+
+fn sar(x: i8, n: i8) -> i8 {
+    x >> n
+}
+
+fn shr(x: u8, n: u8) -> u8 {
+    x >> n
+}
+
 // (12 & 10) | (12 ^ 10) = 8 | 6 = 14; then & ~8 = 6
-fn bits(x: u8, y: u8) -> u8 { ((x & y) | (x ^ y)) & ~8 }
-fn flip(x: u8) -> u8 { ~x }
+fn bits(x: u8, y: u8) -> u8 {
+    ((x & y) | (x ^ y)) & ~8
+}
+
+fn flip(x: u8) -> u8 {
+    ~x
+}

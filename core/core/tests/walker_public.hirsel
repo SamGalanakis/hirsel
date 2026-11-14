@@ -1,7 +1,7 @@
 // Public-only control: core tests have no access to a library module's private names.
 // expect: run owned_bytes() = true
-fn owned_bytes()->bool {
-    let mut xs:List[u64]=list.new()
-    let _=result.unwrap(list.push(mut xs,7))
-    list.len(xs)==1 && xs[0]==7
+fn owned_bytes() -> bool {
+    let mut xs: List[u64] = list.new()
+    let _ = result.unwrap(list.push(mut xs, 7))
+    list.len(xs) == 1 && xs[0] == 7
 }

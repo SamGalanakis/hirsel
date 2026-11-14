@@ -6,23 +6,49 @@
 // ends once its bytes are copied, and is dropped exactly when it was made: Str is a
 // 1-byte tag then a W = 2 count and 3 bytes, so 3 bytes overflow on the Text after the
 // temporary exists and 0 bytes overflow on the tag before it does.
-@compact(u16) stable type J = Null | Str(Text)
+@compact(u16)
+stable type J = Null | Str(Text)
+
 fn own(x: String) -> String {
-  let mut s = string.new()
-  let _ = string.push(mut s, x)
-  s
+    let mut s = string.new()
+    let _ = string.push(mut s, x)
+    s
 }
+
 fn make_lit(r: Region, n: u64) -> Result[J in r, BuildError] {
-  match build_stream_in(r, bytes n, fn(take w: Writer[J, in r]) -> Result[Child[J], BuildError] { emit(take w, Str("abc")) }) {
-    Ok(take b) => Ok(finish(take b)),
-    Error(e) => Error(e),
-  }
+    match build_stream_in(r, bytes n, fn(take w: Writer[J, in r]) -> Result[Child[J], BuildError] {
+        emit(take w, Str("abc"))
+    }) {
+        Ok(take b) => Ok(finish(take b)),
+        Error(e) => Error(e),
+    }
 }
+
 fn make_owned(r: Region, n: u64) -> Result[J in r, BuildError] {
-  match build_stream_in(r, bytes n, fn(take w: Writer[J, in r]) -> Result[Child[J], BuildError] { emit(take w, Str(own("abc"))) }) {
-    Ok(take b) => Ok(finish(take b)),
-    Error(e) => Error(e),
-  }
+    match build_stream_in(r, bytes n, fn(take w: Writer[J, in r]) -> Result[Child[J], BuildError] {
+        emit(take w, Str(own("abc")))
+    }) {
+        Ok(take b) => Ok(finish(take b)),
+        Error(e) => Error(e),
+    }
 }
-fn lit(n: u64) -> u64 { region r { match make_lit(r, n) { Ok(Str(t)) => text.len(t), Ok(_) => 98, Error(_) => 99 } } }
-fn owned(n: u64) -> u64 { region r { match make_owned(r, n) { Ok(Str(t)) => text.len(t), Ok(_) => 98, Error(_) => 99 } } }
+
+fn lit(n: u64) -> u64 {
+    region r {
+        match make_lit(r, n) {
+            Ok(Str(t)) => text.len(t),
+            Ok(_) => 98,
+            Error(_) => 99
+        }
+    }
+}
+
+fn owned(n: u64) -> u64 {
+    region r {
+        match make_owned(r, n) {
+            Ok(Str(t)) => text.len(t),
+            Ok(_) => 98,
+            Error(_) => 99
+        }
+    }
+}

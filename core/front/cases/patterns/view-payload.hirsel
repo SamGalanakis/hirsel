@@ -1,9 +1,16 @@
 // A declared view payload remains a view, and a view of plain u64 reads as u64.
 // expect: accept
 fn text(v: View[String]) -> View[String] in v {
-  let o: Option[View[String]] = Some(v)
-  match o { Some(s) => s, None => v }
+    let o: Option[View[String]] = Some(v)
+    match o {
+        Some(s) => s,
+        None => v
+    }
 }
+
 fn number(o: Option[View[u64]]) -> u64 {
-  match o { Some(n) => n, None => 99 }
+    match o {
+        Some(n) => n,
+        None => 99
+    }
 }

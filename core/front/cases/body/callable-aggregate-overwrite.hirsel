@@ -1,10 +1,26 @@
 // Overwriting a tuple field removes that callback's former root.
 // expect: run checked() = 12
-fn checked()->u64 {
- let mut a:u64=1
- let mut b:u64=10
- let mut p=(scoped fn(x:u64)->u64 {a+=x;a},scoped fn(x:u64)->u64 {b+=x;b})
- p.0=scoped fn(x:u64)->u64 {b+=x;b}
- p.0(a)+a
+fn checked() -> u64 {
+    let mut a: u64 = 1
+    let mut b: u64 = 10
+    let mut p = (scoped fn(x: u64) -> u64 {
+        a += x;
+        a
+    }, scoped fn(x: u64) -> u64 {
+        b += x;
+        b
+    })
+    p.0 = scoped fn(x: u64) -> u64 {
+        b += x;
+        b
+    }
+    p.0(a) + a
 }
-pub fn main()->Result[(),Exit] {if checked()==12 {Ok(())}else{Error(Exit(status:1))}}
+
+pub fn main() -> Result[(), Exit] {
+    if checked() == 12 {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
+}

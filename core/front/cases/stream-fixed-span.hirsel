@@ -6,57 +6,78 @@
 // a W-wide count, then each element packed at its logical size. E is u16 id (2 bytes),
 // count (W = 4) and three u32s (12): 18 bytes fit in 18 and overflow 17. P is u8 + u32,
 // 5 bytes packed (8 in a List), so F is count 4 + 2 * 5 + k 1 = 15 bytes.
-@compact(u32) stable type E { id: u16, xs: FixedSpan[u32] }
-type P { a: u8, b: u32 }
-@compact(u32) stable type F { ps: FixedSpan[P], k: u8 }
+@compact(u32)
+stable type E {
+    id: u16,
+    xs: FixedSpan[u32]
+}
+
+type P {
+    a: u8,
+    b: u32
+}
+
+@compact(u32)
+stable type F {
+    ps: FixedSpan[P],
+    k: u8
+}
+
 fn make_e(r: Region, n: u64, xs: List[u32]) -> Result[E in r, BuildError] {
-  match build_stream_in(r, bytes n, fn(take w: Writer[E, in r]) -> Result[Child[E], BuildError] { emit(take w, E(id: 7, xs: xs)) }) {
-    Ok(take b) => Ok(finish(take b)),
-    Error(e) => Error(e),
-  }
+    match build_stream_in(r, bytes n, fn(take w: Writer[E, in r]) -> Result[Child[E], BuildError] {
+        emit(take w, E(id: 7, xs: xs))
+    }) {
+        Ok(take b) => Ok(finish(take b)),
+        Error(e) => Error(e),
+    }
 }
+
 fn plain(n: u64) -> u64 {
-  let mut xs: List[u32] = list.new()
-  let _ = list.push(mut xs, 4)
-  let _ = list.push(mut xs, 6)
-  let _ = list.push(mut xs, 9)
-  region r {
-    match make_e(r, n, xs) {
-      Ok(e) => match span.get(e.xs, 2) {
-        Some(k) => {
-          let id: u64 = int.widen(e.id)
-          let x: u64 = int.widen(k)
-          id * 1000 + span.len(e.xs) * 100 + x
-        },
-        None => 98,
-      },
-      Error(_) => 99,
+    let mut xs: List[u32] = list.new()
+    let _ = list.push(mut xs, 4)
+    let _ = list.push(mut xs, 6)
+    let _ = list.push(mut xs, 9)
+    region r {
+        match make_e(r, n, xs) {
+            Ok(e) => match span.get(e.xs, 2) {
+                Some(k) => {
+                    let id: u64 = int.widen(e.id)
+                    let x: u64 = int.widen(k)
+                    id * 1000 + span.len(e.xs) * 100 + x
+                },
+                None => 98,
+            },
+            Error(_) => 99,
+        }
     }
-  }
 }
+
 fn make_f(r: Region, n: u64, ps: List[P]) -> Result[F in r, BuildError] {
-  match build_stream_in(r, bytes n, fn(take w: Writer[F, in r]) -> Result[Child[F], BuildError] { emit(take w, F(ps: ps, k: 3)) }) {
-    Ok(take b) => Ok(finish(take b)),
-    Error(e) => Error(e),
-  }
-}
-fn records(n: u64) -> u64 {
-  let mut ps: List[P] = list.new()
-  let _ = list.push(mut ps, P(a: 1, b: 300))
-  let _ = list.push(mut ps, P(a: 2, b: 5))
-  region r {
-    match make_f(r, n, ps) {
-      Ok(f) => match (span.get(f.ps, 0), span.get(f.ps, 1)) {
-        (Some(p), Some(q)) => {
-          let pb: u64 = int.widen(p.b)
-          let qa: u64 = int.widen(q.a)
-          let qb: u64 = int.widen(q.b)
-          let k: u64 = int.widen(f.k)
-          pb + qa * 1000 + qb * 10 + k * 10000
-        },
-        _ => 98,
-      },
-      Error(_) => 99,
+    match build_stream_in(r, bytes n, fn(take w: Writer[F, in r]) -> Result[Child[F], BuildError] {
+        emit(take w, F(ps: ps, k: 3))
+    }) {
+        Ok(take b) => Ok(finish(take b)),
+        Error(e) => Error(e),
     }
-  }
+}
+
+fn records(n: u64) -> u64 {
+    let mut ps: List[P] = list.new()
+    let _ = list.push(mut ps, P(a: 1, b: 300))
+    let _ = list.push(mut ps, P(a: 2, b: 5))
+    region r {
+        match make_f(r, n, ps) {
+            Ok(f) => match (span.get(f.ps, 0), span.get(f.ps, 1)) {
+                (Some(p), Some(q)) => {
+                    let pb: u64 = int.widen(p.b)
+                    let qa: u64 = int.widen(q.a)
+                    let qb: u64 = int.widen(q.b)
+                    let k: u64 = int.widen(f.k)
+                    pb + qa * 1000 + qb * 10 + k * 10000
+                },
+                _ => 98,
+            },
+            Error(_) => 99,
+        }
+    }
 }

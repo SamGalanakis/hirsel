@@ -18,23 +18,58 @@
 // expect: run opt_ne(false,3) = true
 // expect: run view_lt(1,2) = true
 // expect: run view_lt(2,1) = false
-type P: key + ordered { x: i64, y: u8 }
+type P: key + ordered {
+    x: i64,
+    y: u8
+}
+
 type S: key + ordered = Zero | One(u64) | Two(u64, bool)
-fn p(x: i64, y: u8) -> P { P(x: x - 2, y: y) }
-fn rec_lt(ax: i64, ay: u8, bx: i64, by: u8) -> bool { p(ax, ay) < p(bx, by) }
-fn rec_le(ax: i64, ay: u8, bx: i64, by: u8) -> bool { p(ax, ay) <= p(bx, by) }
-fn rec_gt(ax: i64, ay: u8, bx: i64, by: u8) -> bool { p(ax, ay) > p(bx, by) }
+
+fn p(x: i64, y: u8) -> P {
+    P(x: x - 2, y: y)
+}
+
+fn rec_lt(ax: i64, ay: u8, bx: i64, by: u8) -> bool {
+    p(ax, ay) < p(bx, by)
+}
+
+fn rec_le(ax: i64, ay: u8, bx: i64, by: u8) -> bool {
+    p(ax, ay) <= p(bx, by)
+}
+
+fn rec_gt(ax: i64, ay: u8, bx: i64, by: u8) -> bool {
+    p(ax, ay) > p(bx, by)
+}
+
 fn mk(k: u64, v: u64) -> S {
-  if k == 0 { Zero } else if k == 1 { One(v) } else { Two(v, true) }
+    if k == 0 {
+        Zero
+    } else if k == 1 {
+        One(v)
+    } else {
+        Two(v, true)
+    }
 }
-fn var_lt(ka: u64, va: u64, kb: u64, vb: u64) -> bool { mk(ka, va) < mk(kb, vb) }
-fn var_eq(ka: u64, va: u64, kb: u64, vb: u64) -> bool { mk(ka, va) == mk(kb, vb) }
+
+fn var_lt(ka: u64, va: u64, kb: u64, vb: u64) -> bool {
+    mk(ka, va) < mk(kb, vb)
+}
+
+fn var_eq(ka: u64, va: u64, kb: u64, vb: u64) -> bool {
+    mk(ka, va) == mk(kb, vb)
+}
+
 fn opt_ne(c: bool, x: i64) -> bool {
-  let a: Option[P] = if c { Some(p(x, 1)) } else { None }
-  a != Some(p(3, 1))
+    let a: Option[P] = if c {
+        Some(p(x, 1))
+    } else {
+        None
+    }
+    a != Some(p(3, 1))
 }
+
 fn view_lt(a: i64, b: i64) -> bool {
-  let l = p(a, 0)
-  let r = p(b, 0)
-  view l < view r
+    let l = p(a, 0)
+    let r = p(b, 0)
+    view l < view r
 }

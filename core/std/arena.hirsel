@@ -1,7 +1,6 @@
 // Module `arena`: explicit region construction, with no ambient region or hidden sizing
 // pass. Goose's receiving destination and Rust's Vec::with_capacity supply the shape;
 // MEM-4 adds recoverable admission and preserves every admitted region prefix.
-
 /// Streams a batch whose element is streamable, using at most n bytes. Unlike a bare
 /// type parameter, SeqSpan[T] is a stable root under MEM-4. The producer runs once;
 /// finish_trim publishes and refunds the unused rounded tail without moving bytes.
@@ -15,7 +14,6 @@ pub fn batch[T: streamable](r: Region, n: u64, f: scoped fn(take Writer[SeqSpan[
 
 // Sized documents use core's build_in + finish at the caller's concrete compact type;
 // a generic T cannot be a compact or streaming root (MEM-4, OWN-23).
-
 /// Copies a known-size plain sequence into one span allocation. No growth or abandoned
 /// backing blocks. Fails: Error(Capacity), no span published. Prefix: the reservation,
 /// if admitted, stays in r. Alloc: round8(8 + len(xs) * size(T)); none for an empty list.
@@ -41,7 +39,9 @@ pub fn collect_span[T: plain](r: Region, next_item: scoped fn() -> Option[T]) ->
     let mut b: SpanBuilder[T, in r] = span.builder(r)
     loop {
         match next_item() {
-            Some(x) => { span.push(mut b, x)? }
+            Some(x) => {
+                span.push(mut b, x)?
+            }
             None => break,
         }
     }

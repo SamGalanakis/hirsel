@@ -1,110 +1,170 @@
 // kostya/LangArena 3c9f84d benchmarks/graph_path.rs:11-316.
 // Adjacency lists, FIFO BFS, LIFO DFS, and lexicographic minimum (f,vertex) A*.
-fn append[T](mut xs:List[T],take x:T)->Result[(),helper.Error] {
-    match list.push(mut xs,take x) {Ok(())=>Ok(()),Error((c,_))=>Error(Capacity(c))}
+fn append[T](mut xs: List[T], take x: T) -> Result[(), helper.Error] {
+    match list.push(mut xs, take x) {
+        Ok(()) => Ok(()),
+        Error((c, _)) => Error(Capacity(c))
+    }
 }
-fn edge(mut adj:List[List[i32]],u:i32,v:i32)->Result[(),helper.Error] {
-    append(mut adj[int.narrow(u)],v)?
-    append(mut adj[int.narrow(v)],u)
+
+fn edge(mut adj: List[List[i32]], u: i32, v: i32) -> Result[(), helper.Error] {
+    append(mut adj[int.narrow(u)], v)?
+    append(mut adj[int.narrow(v)], u)
 }
-fn bfs(adj:List[List[i32]])->Result[i32,helper.Error] {
-    let n=list.len(adj)
-    if n==1 {return Ok(0)}
-    let target:i32=int.narrow(n-1)
-    let mut seen:List[bool]=list.new()
-    helper.mem(list.fill(mut seen,n,false))?
-    seen[0]=true
-    let mut q:Deque[(i32,i32)]=deque.new()
-    match deque.push_back(mut q,(0,0)) {Ok(())=>{},Error((c,_))=>return Error(Capacity(c))}
-    while let Some((v,d))=deque.pop_front(mut q) {
+
+fn bfs(adj: List[List[i32]]) -> Result[i32, helper.Error] {
+    let n = list.len(adj)
+    if n == 1 {
+        return Ok(0)
+    }
+    let target: i32 = int.narrow(n - 1)
+    let mut seen: List[bool] = list.new()
+    helper.mem(list.fill(mut seen, n, false))?
+    seen[0] = true
+    let mut q: Deque[(i32, i32)] = deque.new()
+    match deque.push_back(mut q, (0, 0)) {
+        Ok(()) => {},
+        Error((c, _)) => return Error(Capacity(c))
+    }
+    while let Some((v, d)) = deque.pop_front(mut q) {
         for neighbor in adj[int.narrow(v)] {
-            if neighbor==target {return Ok(d+1)}
-            let at:u64=int.narrow(neighbor)
-            if !seen[at] {
-                seen[at]=true
-                match deque.push_back(mut q,(neighbor,d+1)) {Ok(())=>{},Error((c,_))=>return Error(Capacity(c))}
+            if neighbor == target {
+                return Ok(d + 1)
             }
-        }
-    }
-    Ok(-1)
-}
-fn dfs(adj:List[List[i32]])->Result[i32,helper.Error] {
-    let n=list.len(adj)
-    if n==1 {return Ok(0)}
-    let target:i32=int.narrow(n-1)
-    let mut seen:List[bool]=list.new()
-    helper.mem(list.fill(mut seen,n,false))?
-    let mut stack:List[(i32,i32)]=list.new()
-    append(mut stack,(0i32,0i32))?
-    let mut best:i32=2147483647
-    while let Some((v,d))=list.pop(mut stack) {
-        let vi:u64=int.narrow(v)
-        if seen[vi] || d>=best {continue}
-        seen[vi]=true
-        for neighbor in adj[vi] {
-            if neighbor==target {if d+1<best {best=d+1}}
-            else if !seen[int.narrow(neighbor)] {append(mut stack,(neighbor,d+1))?}
-        }
-    }
-    Ok(if best==2147483647 {-1} else {best})
-}
-fn astar(adj:List[List[i32]])->Result[i32,helper.Error] {
-    let n=list.len(adj)
-    if n==1 {return Ok(0)}
-    let target:i32=int.narrow(n-1)
-    let mut scores:List[i32]=list.new()
-    let mut best:List[i32]=list.new()
-    helper.mem(list.fill(mut scores,n,2147483647))?
-    helper.mem(list.fill(mut best,n,2147483647))?
-    scores[0]=0
-    best[0]=target
-    let mut open:Heap[(i32,i32)]=heap.new()
-    match heap.push(mut open,(target,0)) {Ok(())=>{},Error((c,_))=>return Error(Capacity(c))}
-    while let Some((_,v))=heap.pop(mut open) {
-        let vi:u64=int.narrow(v)
-        if v==target {return Ok(scores[vi])}
-        for neighbor in adj[vi] {
-            let ni:u64=int.narrow(neighbor)
-            let candidate=scores[vi]+1
-            if candidate<scores[ni] {
-                scores[ni]=candidate
-                let f=candidate+target-neighbor
-                if f<best[ni] {
-                    best[ni]=f
-                    match heap.push(mut open,(f,neighbor)) {Ok(())=>{},Error((c,_))=>return Error(Capacity(c))}
+            let at: u64 = int.narrow(neighbor)
+            if !seen[at] {
+                seen[at] = true
+                match deque.push_back(mut q, (neighbor, d + 1)) {
+                    Ok(()) => {},
+                    Error((c, _)) => return Error(Capacity(c))
                 }
             }
         }
     }
     Ok(-1)
 }
-pub fn dispatch(config:String,name:String,warmup:u64,iterations:u64)->Result[u32,helper.Error] {
-    if name!="Graph::BFS" && name!="Graph::DFS" && name!="Graph::AStar" {return Error(UnknownTask)}
-    let vertices=helper.config_i64(config,name,"vertices")?
-    let jumps=helper.config_i64(config,name,"jumps")?
-    let jump_len=helper.config_i64(config,name,"jump_len")?
-    if vertices<=0 || vertices>1073741823 || jumps<0 || jumps>2147483647 || jump_len<0 || jump_len>1073741823 {return Error(Config)}
-    let count:i32=int.narrow(vertices)
-    let span:i32=int.narrow(jump_len)
-    let mut adj:List[List[i32]]=helper.mem(list.with_capacity(int.narrow(vertices)))?
-    for _ in 0 .. count {append(mut adj,list.new())?}
-    for i in 1 .. count {edge(mut adj,i,i-1)?}
-    let mut g=helper.lcg()
-    for v in 0 .. count {
-        let number=helper.next_int(mut g,int.narrow(jumps))
-        for _ in 0 .. number {
-            let offset=helper.next_int(mut g,span)-span/2
-            let u=v+offset
-            if u>=0 && u<count && u!=v {edge(mut adj,v,u)?}
+
+fn dfs(adj: List[List[i32]]) -> Result[i32, helper.Error] {
+    let n = list.len(adj)
+    if n == 1 {
+        return Ok(0)
+    }
+    let target: i32 = int.narrow(n - 1)
+    let mut seen: List[bool] = list.new()
+    helper.mem(list.fill(mut seen, n, false))?
+    let mut stack: List[(i32, i32)] = list.new()
+    append(mut stack, (0i32, 0i32))?
+    let mut best: i32 = 2147483647
+    while let Some((v, d)) = list.pop(mut stack) {
+        let vi: u64 = int.narrow(v)
+        if seen[vi] || d >= best {
+            continue
+        }
+        seen[vi] = true
+        for neighbor in adj[vi] {
+            if neighbor == target {
+                if d + 1 < best {
+                    best = d + 1
+                }
+            } else if !seen[int.narrow(neighbor)] {
+                append(mut stack, (neighbor, d + 1))?
+            }
         }
     }
-    let mut checksum:u32=0
-    for _ in 0 .. warmup+iterations {
-        let distance=if name=="Graph::BFS" {bfs(adj)?} else if name=="Graph::DFS" {dfs(adj)?} else {astar(adj)?}
-        checksum=int.wrapping_add(checksum,int.truncate(distance))
+    Ok(if best == 2147483647 {
+        -1
+    } else {
+        best
+    })
+}
+
+fn astar(adj: List[List[i32]]) -> Result[i32, helper.Error] {
+    let n = list.len(adj)
+    if n == 1 {
+        return Ok(0)
+    }
+    let target: i32 = int.narrow(n - 1)
+    let mut scores: List[i32] = list.new()
+    let mut best: List[i32] = list.new()
+    helper.mem(list.fill(mut scores, n, 2147483647))?
+    helper.mem(list.fill(mut best, n, 2147483647))?
+    scores[0] = 0
+    best[0] = target
+    let mut open: Heap[(i32, i32)] = heap.new()
+    match heap.push(mut open, (target, 0)) {
+        Ok(()) => {},
+        Error((c, _)) => return Error(Capacity(c))
+    }
+    while let Some((_, v)) = heap.pop(mut open) {
+        let vi: u64 = int.narrow(v)
+        if v == target {
+            return Ok(scores[vi])
+        }
+        for neighbor in adj[vi] {
+            let ni: u64 = int.narrow(neighbor)
+            let candidate = scores[vi] + 1
+            if candidate < scores[ni] {
+                scores[ni] = candidate
+                let f = candidate + target - neighbor
+                if f < best[ni] {
+                    best[ni] = f
+                    match heap.push(mut open, (f, neighbor)) {
+                        Ok(()) => {},
+                        Error((c, _)) => return Error(Capacity(c))
+                    }
+                }
+            }
+        }
+    }
+    Ok(-1)
+}
+
+pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
+    if name != "Graph::BFS" && name != "Graph::DFS" && name != "Graph::AStar" {
+        return Error(UnknownTask)
+    }
+    let vertices = helper.config_i64(config, name, "vertices")?
+    let jumps = helper.config_i64(config, name, "jumps")?
+    let jump_len = helper.config_i64(config, name, "jump_len")?
+    if vertices <= 0 || vertices > 1073741823 || jumps < 0 || jumps > 2147483647 || jump_len < 0 || jump_len > 1073741823 {
+        return Error(Config)
+    }
+    let count: i32 = int.narrow(vertices)
+    let span: i32 = int.narrow(jump_len)
+    let mut adj: List[List[i32]] = helper.mem(list.with_capacity(int.narrow(vertices)))?
+    for _ in 0 .. count {
+        append(mut adj, list.new())?
+    }
+    for i in 1 .. count {
+        edge(mut adj, i, i - 1)?
+    }
+    let mut g = helper.lcg()
+    for v in 0 .. count {
+        let number = helper.next_int(mut g, int.narrow(jumps))
+        for _ in 0 .. number {
+            let offset = helper.next_int(mut g, span) - span / 2
+            let u = v + offset
+            if u >= 0 && u < count && u != v {
+                edge(mut adj, v, u)?
+            }
+        }
+    }
+    let mut checksum: u32 = 0
+    for _ in 0 .. warmup + iterations {
+        let distance = if name == "Graph::BFS" {
+            bfs(adj)?
+        } else if name == "Graph::DFS" {
+            dfs(adj)?
+        } else {
+            astar(adj)?
+        }
+        checksum = int.wrapping_add(checksum, int.truncate(distance))
     }
     Ok(checksum)
 }
-pub fn main(out:Stdout,d:Dir,argv:Args)->Result[(),Exit] waits {
-    harness.main(out,d,argv,fn(c:String,n:String,w:u64,i:u64)->Result[u32,helper.Error] {dispatch(c,n,w,i)})
+
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
+    harness.main(out, d, argv, fn(c: String, n: String, w: u64, i: u64) -> Result[u32, helper.Error] {
+        dispatch(c, n, w, i)
+    })
 }

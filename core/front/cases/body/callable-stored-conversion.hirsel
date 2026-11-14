@@ -1,6 +1,6 @@
 // A dynamic plain code pointer fits an owning carrier with a null environment.
 // expect: accept
-fn f(code:fn(u64)->u64)->u64 {
- let owned:own fn(u64)->u64=code
- owned(1)
+fn f(code: fn(u64) -> u64) -> u64 {
+    let owned: own fn(u64) -> u64 = code
+    owned(1)
 }

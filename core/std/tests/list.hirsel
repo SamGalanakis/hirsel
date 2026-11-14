@@ -331,9 +331,18 @@ fn contains_cases() -> bool {
 fn search_positions() -> u64 {
     let xs = five(1, 2, 2, 4, 5)
     let a = result.unwrap(list.binary_search(xs, 2))
-    let b = match list.binary_search(xs, 3) { Error(i) => i, _ => 99 }
-    let c = match list.binary_search(xs, 0) { Error(i) => i, _ => 99 }
-    let d = match list.binary_search(xs, 6) { Error(i) => i, _ => 99 }
+    let b = match list.binary_search(xs, 3) {
+        Error(i) => i,
+        _ => 99
+    }
+    let c = match list.binary_search(xs, 0) {
+        Error(i) => i,
+        _ => 99
+    }
+    let d = match list.binary_search(xs, 6) {
+        Error(i) => i,
+        _ => 99
+    }
     a * 1000 + b * 100 + c * 10 + d
 }
 
@@ -359,7 +368,9 @@ fn extend_copies() -> u64 {
     let mut xs: List[u64] = list.new()
     let ys = five(1, 2, 3, 4, 5)
     result.unwrap(list.extend(mut xs, ys))
-    if digits(ys) != 12345 { return 99 }
+    if digits(ys) != 12345 {
+        return 99
+    }
     digits(xs)
 }
 
@@ -367,27 +378,28 @@ fn extend_copies() -> u64 {
 fn extend_capacity() -> u64 {
     let mut xs: List[u64] = list.new()
     let ys = five(6, 7, 8, 9, 0)
-    let r = bound bytes 0 { list.extend(mut xs, ys) }
-    match r { Ok(Error(_)) => list.len(xs), _ => 99 }
+    let r = bound bytes 0 {
+        list.extend(mut xs, ys)
+    }
+    match r {
+        Ok(Error(_)) => list.len(xs),
+        _ => 99
+    }
 }
 
-fn by_tens(a: u64, b: u64) -> Order { order.compare(a / 10, b / 10) }
-
-
-
-
-
-
+fn by_tens(a: u64, b: u64) -> Order {
+    order.compare(a / 10, b / 10)
+}
 
 // Four accumulators and all tail lengths. 0 + 1 + ... + 6 = 21.
 // expect: run sum_bytes_tails() = 21
 fn sum_bytes_tails() -> u64 {
     let mut xs: Bytes = list.new()
-    for i in 0u8 .. 7 { result.unwrap(list.push(mut xs, i)) }
+    for i in 0u8 .. 7 {
+        result.unwrap(list.push(mut xs, i))
+    }
     list.sum_bytes(list.slice(xs, 0, 4)) + list.sum_bytes(list.slice(xs, 4, 7))
 }
-
-
 
 // All four accumulator tails, including empty input.
 // expect: run sum_bytes_tail_lengths() = true
@@ -396,13 +408,13 @@ fn sum_bytes_tail_lengths() -> bool {
     result.unwrap(list.fill(mut xs, 7, 255))
     let mut n: u64 = 0
     while n <= 7 {
-        if list.sum_bytes(list.slice(xs, 0, n)) != 255 * n { return false }
+        if list.sum_bytes(list.slice(xs, 0, n)) != 255 * n {
+            return false
+        }
         n += 1
     }
     true
 }
-
-
 
 // Both indices are checked even when equal; the same-index fast path must not
 // turn an out-of-range access into a successful no-op.
@@ -444,7 +456,9 @@ fn swap_zero_sized() -> u64 {
 // expect: run search_by_key() = 1
 fn search_by_key() -> u64 {
     let xs = five(10, 21, 22, 24, 30)
-    result.unwrap(list.binary_search_by(xs, fn(x: u64) -> Order { order.compare(x / 10, 2) }))
+    result.unwrap(list.binary_search_by(xs, fn(x: u64) -> Order {
+        order.compare(x / 10, 2)
+    }))
 }
 
 // Exact insertion indices before, between and after keys; a callback using the
@@ -452,9 +466,24 @@ fn search_by_key() -> u64 {
 // expect: run search_by_insertions() = 35
 fn search_by_insertions() -> u64 {
     let xs = five(10, 20, 30, 40, 50)
-    let a = match list.binary_search_by(xs, fn(x: u64) -> Order { order.compare(x, 5) }) { Error(i) => i, _ => 99 }
-    let b = match list.binary_search_by(xs, fn(x: u64) -> Order { order.compare(x, 35) }) { Error(i) => i, _ => 99 }
-    let c = match list.binary_search_by(xs, fn(x: u64) -> Order { order.compare(x, 55) }) { Error(i) => i, _ => 99 }
+    let a = match list.binary_search_by(xs, fn(x: u64) -> Order {
+        order.compare(x, 5)
+    }) {
+        Error(i) => i,
+        _ => 99
+    }
+    let b = match list.binary_search_by(xs, fn(x: u64) -> Order {
+        order.compare(x, 35)
+    }) {
+        Error(i) => i,
+        _ => 99
+    }
+    let c = match list.binary_search_by(xs, fn(x: u64) -> Order {
+        order.compare(x, 55)
+    }) {
+        Error(i) => i,
+        _ => 99
+    }
     a * 100 + b * 10 + c
 }
 
@@ -462,7 +491,9 @@ fn search_by_insertions() -> u64 {
 // expect: run search_by_empty() = 0
 fn search_by_empty() -> u64 {
     let xs: List[u64] = list.new()
-    match list.binary_search_by(xs, fn(x: u64) -> Order { fail("empty comparator") }) {
+    match list.binary_search_by(xs, fn(x: u64) -> Order {
+        fail("empty comparator")
+    }) {
         Error(i) => i,
         _ => 99,
     }
@@ -473,7 +504,9 @@ fn search_by_empty() -> u64 {
 fn search_by_capture() -> u64 {
     let xs = five(7, 7, 7, 7, 7)
     let key: u64 = 7
-    result.unwrap(list.binary_search_by(xs, fn(x: u64) -> Order { order.compare(x, key) }))
+    result.unwrap(list.binary_search_by(xs, fn(x: u64) -> Order {
+        order.compare(x, key)
+    }))
 }
 
 // Huffman nodes need not be ordered: the callback reads frequency alone.
@@ -483,9 +516,15 @@ fn search_by_unordered_record() -> u64 {
     result.unwrap(list.push(mut xs, result.unwrap(box.new(SearchNode(frequency: 1, name: true)))))
     result.unwrap(list.push(mut xs, result.unwrap(box.new(SearchNode(frequency: 3, name: false)))))
     result.unwrap(list.push(mut xs, result.unwrap(box.new(SearchNode(frequency: 3, name: true)))))
-    result.unwrap(list.binary_search_by(xs, fn(x: Box[SearchNode]) -> Order { order.compare(x.frequency, 3) }))
+    result.unwrap(list.binary_search_by(xs, fn(x: Box[SearchNode]) -> Order {
+        order.compare(x.frequency, 3)
+    }))
 }
-type SearchNode { frequency: u64, name: bool }
+
+type SearchNode {
+    frequency: u64,
+    name: bool
+}
 
 // get_or reads xs[i] inside the list and x from len on, including an empty list and the
 // largest index: [7, 8] gives 7, 8, then 5, 5; the empty list gives 5. Read as digits.

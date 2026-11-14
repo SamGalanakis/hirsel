@@ -1,22 +1,27 @@
 // test-of: std.io
 // test-reason: the bounded raw-byte LF scanner must ignore a newline outside its private input view.
-
 // Every prefix length and LF lane, with misaligned input and invalid UTF-8.
 // expect: run scan_prefix_bounds() = true
-fn scan_prefix_bounds()->bool {
-    let mut b:Bytes=result.unwrap(list.with_capacity(96))
-    for _ in 0u64 .. 96 {result.unwrap(list.push(mut b,255u8))}
+fn scan_prefix_bounds() -> bool {
+    let mut b: Bytes = result.unwrap(list.with_capacity(96))
+    for _ in 0u64 .. 96 {
+        result.unwrap(list.push(mut b, 255u8))
+    }
     for base in 0u64 .. 8 {
         for n in 0u64 .. 35 {
-            b[base+n]=10
-            if scan_newline(list.slice(b,base,base+n))!=n {return false}
-            for at in 0u64 .. n {
-                b[base+at]=10
-                let found=scan_newline(list.slice(b,base,base+n))
-                b[base+at]=255
-                if found!=at {return false}
+            b[base + n] = 10
+            if scan_newline(list.slice(b, base, base + n)) != n {
+                return false
             }
-            b[base+n]=255
+            for at in 0u64 .. n {
+                b[base + at] = 10
+                let found = scan_newline(list.slice(b, base, base + n))
+                b[base + at] = 255
+                if found != at {
+                    return false
+                }
+            }
+            b[base + n] = 255
         }
     }
     true

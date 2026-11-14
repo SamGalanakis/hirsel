@@ -1315,22 +1315,22 @@ if not marker.exists():
         # Keep the other gates deterministic while running the actual formatter
         # checker on a real case, through the real merge-train screen.
         buck = self.lane / '.buck2/bin/buck2'
-        buck.write_text("#!/usr/bin/env python3\nimport json, os, sys\nif '--output-attribute' in sys.argv:\n print(json.dumps({'root//:a': {'crate_root': 'source.rs', 'edition': '2024'}}))\nelif '--show-json-output' in sys.argv:\n print(json.dumps({'root//:hirsel-conformance-bin-hirsel-conformance': os.environ['FAKE_CASE_FORMATTER']}))\nelse:\n print('root//:a')\n")
+        buck.write_text("#!/usr/bin/env python3\nimport json, os, sys\nif '--output-attribute' in sys.argv:\n print(json.dumps({'root//:a': {'crate_root': 'source.rs', 'edition': '2024'}}))\nelif '--show-json-output' in sys.argv:\n print(json.dumps({'root//:hirsel-core-syntax-bin-hirsel-core-syntax': os.environ['FAKE_CASE_FORMATTER']}))\nelse:\n print('root//:a')\n")
         (self.lane / 'tools/buck2/prepare.py').write_text('')
         rustfmt = self.lane / 'tools/buck2/toolchains/rust-files/bin/rustfmt'
         rustfmt.parent.mkdir(parents=True)
         rustfmt.write_text('#!/bin/sh\nexit 0\n')
         rustfmt.chmod(0o755)
-        case = self.lane / 'conformance/LANG/not-canonical.hir'
+        case = self.lane / 'core/front/cases/not-canonical.hirsel'
         case.parent.mkdir(parents=True)
-        case.write_text('fn f(){1u8}')
+        case.write_text('fn f(){1}')
         self.git(self.lane, 'add', '.')
         self.git(self.lane, 'add', '-f', '.buck2/bin/buck2')
         self.git(self.lane, 'commit', '-qm', 'noncanonical changed case')
         refused = self.land(FAKE_CASE_FORMATTER=formatter)
         self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
         self.assertIn('FAIL  screen: formatting', refused.stdout, refused.stdout + refused.stderr)
-        self.assertIn('not-canonical.hir: corpus source is not formatter-canonical', refused.stdout)
+        self.assertIn('core/front/cases/not-canonical.hirsel', refused.stdout)
         self.assertNotIn('pass  workspace build', refused.stdout)
         self.assertEqual(self.main_log(), ['base'])
 

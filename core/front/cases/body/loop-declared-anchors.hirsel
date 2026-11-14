@@ -1,24 +1,40 @@
 // OWN-19: the declared anchor set applies even while the slot holds None.
 // expect: run accepted() = 3
-fn last(xs:List[String],n:u64)->Option[View[String]] in xs {
- let mut found:Option[View[String]] in xs=None
- for s in xs {if string.byte_len(s)==n {found=Some(s)}}
- found
+fn last(xs: List[String], n: u64) -> Option[View[String]] in xs {
+    let mut found: Option[View[String]] in xs = None
+    for s in xs {
+        if string.byte_len(s) == n {
+            found = Some(s)
+        }
+    }
+    found
 }
-fn accepted()->u64 {
- let mut xs:List[String]=list.new()
- result.unwrap(list.push(mut xs,"a"))
- result.unwrap(list.push(mut xs,"abc"))
- match last(xs,3) {Some(s)=>string.byte_len(s),None=>0}
+
+fn accepted() -> u64 {
+    let mut xs: List[String] = list.new()
+    result.unwrap(list.push(mut xs, "a"))
+    result.unwrap(list.push(mut xs, "abc"))
+    match last(xs, 3) {
+        Some(s) => string.byte_len(s),
+        None => 0
+    }
 }
-fn positive()->bool {accepted()==3u64 && part()==2u64}
+
+fn positive() -> bool {
+    accepted() == 3u64 && part() == 2u64
+}
 
 // A part of a declared owner is allowed; the slot's set stays the whole owner.
 // expect: run part() = 2
-type P {s:String}
-fn part()->u64 {
- let p=P(s:"ab")
- let mut v:View[String] in p=view p.s
- for _ in 0u64..2 {v=view p.s}
- string.byte_len(v)
+type P {
+    s: String
+}
+
+fn part() -> u64 {
+    let p = P(s: "ab")
+    let mut v: View[String] in p = view p.s
+    for _ in 0u64 .. 2 {
+        v = view p.s
+    }
+    string.byte_len(v)
 }

@@ -11,8 +11,8 @@ mod symbols;
 mod token;
 pub use format::format;
 pub use lexer::{LexOutput, lex};
-pub use package_format::{FormatAction, FormatRefusal, FormatReport, format_files, format_package};
 pub use literals::{byte_value, character_value};
+pub use package_format::{FormatAction, FormatRefusal, FormatReport, format_files, format_package};
 pub use parser::{
     PARSER_NESTING_LIMIT, ParseMode, ParseOutput, ResourceRefusal, parse, parse_bytes,
 };

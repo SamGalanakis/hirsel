@@ -9,14 +9,42 @@
 // expect: run x_of(300,7) = 300
 // expect: run nested(300,7) = 7
 // expect: run snapshot(300) = 300
-type P { x: u64, y: u8 }
-type Q { z: u64, p: P }
-fn make(a: u64, b: u8) -> P { P(x: a, y: b) }
-fn first(p: P) -> u64 { p.x }
-fn second(p: P) -> u8 { p.y }
-fn y_of(a: u64, b: u8) -> u8 { second(make(a, b)) }
-fn x_of(a: u64, b: u8) -> u64 { let p = make(a, b); first(p) }
-fn nested(a: u64, b: u8) -> u8 { let q = Q(z: 9, p: make(a, b)); q.p.y }
+type P {
+    x: u64,
+    y: u8
+}
+
+type Q {
+    z: u64,
+    p: P
+}
+
+fn make(a: u64, b: u8) -> P {
+    P(x: a, y: b)
+}
+
+fn first(p: P) -> u64 {
+    p.x
+}
+
+fn second(p: P) -> u8 {
+    p.y
+}
+
+fn y_of(a: u64, b: u8) -> u8 {
+    second(make(a, b))
+}
+
+fn x_of(a: u64, b: u8) -> u64 {
+    let p = make(a, b);
+    first(p)
+}
+
+fn nested(a: u64, b: u8) -> u8 {
+    let q = Q(z: 9, p: make(a, b));
+    q.p.y
+}
+
 fn snapshot(a: u64) -> u64 {
     let mut p = make(a, 1)
     let q = p

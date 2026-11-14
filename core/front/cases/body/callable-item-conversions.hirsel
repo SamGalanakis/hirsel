@@ -2,25 +2,51 @@
 // The owned carrier has a null environment; send erasure keeps its carrier.
 // expect: run checked() = 52
 // expect: run returned_item() = 8
-fn plus(x:u64)->u64 {x+1}
-fn identity[T:plain](x:T)->T {x}
-fn owned(f:own fn(u64)->u64)->u64 {f(7)}
-fn call_scoped(f:scoped fn(u64)->u64)->u64 {f(9)}
-fn erase(take f:own[send] fn(u64)->u64)->own fn(u64)->u64 {take f}
-fn returned(anchor:u64)->(scoped fn(u64)->u64) in anchor {plus}
-fn returned_item()->u64 {
- let anchor:u64=0
- let f=returned(anchor)
- f(7)
+fn plus(x: u64) -> u64 {
+    x + 1
 }
-fn checked()->u64 {
-  let r:Result[u64,Capacity]=bound bytes 0 {
-    let f:own fn(u64)->u64=plus
-    let g:own[send] fn(u64)->u64=identity
-    let h=erase(take g)
-    let s:scoped fn(u64)->u64=plus
-    owned(f)+owned(plus)+h(11)+s(12)+call_scoped(plus)+2
-  }
-  result.unwrap(r)
+
+fn identity[T: plain](x: T) -> T {
+    x
 }
-pub fn main()->Result[(),Exit] {if checked()==52 && returned_item()==8 {Ok(())}else{Error(Exit(status:1))}}
+
+fn owned(f: own fn(u64) -> u64) -> u64 {
+    f(7)
+}
+
+fn call_scoped(f: scoped fn(u64) -> u64) -> u64 {
+    f(9)
+}
+
+fn erase(take f: own[send] fn(u64) -> u64) -> own fn(u64) -> u64 {
+    take f
+}
+
+fn returned(anchor: u64) -> (scoped fn(u64) -> u64) in anchor {
+    plus
+}
+
+fn returned_item() -> u64 {
+    let anchor: u64 = 0
+    let f = returned(anchor)
+    f(7)
+}
+
+fn checked() -> u64 {
+    let r: Result[u64, Capacity] = bound bytes 0 {
+        let f: own fn(u64) -> u64 = plus
+        let g: own[send] fn(u64) -> u64 = identity
+        let h = erase(take g)
+        let s: scoped fn(u64) -> u64 = plus
+        owned(f) + owned(plus) + h(11) + s(12) + call_scoped(plus) + 2
+    }
+    result.unwrap(r)
+}
+
+pub fn main() -> Result[(), Exit] {
+    if checked() == 52 && returned_item() == 8 {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
+}

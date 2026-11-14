@@ -2,8 +2,15 @@
 // operand type for `==` and `<` (LANG-21).
 // expect: run go(0) = true
 // expect: run go(1) = false
-fn same(v: View[String], s: String) -> bool { v == s }
+fn same(v: View[String], s: String) -> bool {
+    v == s
+}
+
 fn go(x: u64) -> bool {
-  let s = "ab"
-  if x == 0 { same(view s, "ab") } else { same(view s, "ac") }
+    let s = "ab"
+    if x == 0 {
+        same(view s, "ab")
+    } else {
+        same(view s, "ac")
+    }
 }

@@ -3,11 +3,18 @@
 // leaves `s` live for the move after it.
 // expect: run go(0) = true
 // expect: run go(1) = false
-fn same(a: String, b: String) -> bool { a == b }
+fn same(a: String, b: String) -> bool {
+    a == b
+}
+
 fn eat(take s: String) {}
+
 fn both(take s: String) -> bool {
     let t = s == s
     eat(take s)
     t
 }
-fn go(x: u64) -> bool { both("ab") && (x == 0 || same("ab", "abc")) }
+
+fn go(x: u64) -> bool {
+    both("ab") && (x == 0 || same("ab", "abc"))
+}

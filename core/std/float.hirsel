@@ -1406,7 +1406,6 @@ const POW5: Inline[(u64, u64), 651] =[(0xeef453d6923bd65a, 0x113faa2906a13b3f), 
 // Formatting, after Rust's core::fmt::float and core::num::flt2dec (Dragon4 shortest and
 // exact modes). The finite value m x 2^e is made exact as a Decimal by `exact`: an f64 has
 // at most 767 significant decimal digits, so the 768 digits never truncate.
-
 /// Appends x as Rust's `{}` prints an f64: the shortest decimal that parses back to x
 /// (`shortest64`), never in exponent form: "0.1", "1", "-0", "1000000000000000000000",
 /// "0.000001"; "NaN", "inf", "-inf". Fails: Error(c); s then holds a prefix of the text.
@@ -1485,7 +1484,11 @@ pub fn push_fixed64(mut s: String, x: f64, digits: u64) -> Result[(), Capacity] 
         None => fail("float.push_fixed64: text length overflows u64"),
     }
     // o = a spare byte for a carry, the whole digits, then '.' and the places.
-    let n = match int.checked_add(total, if digits > 0 { 2 } else { 1 }) {
+    let n = match int.checked_add(total, if digits > 0 {
+        2
+    } else {
+        1
+    }) {
         Some(t) => t,
         None => fail("float.push_fixed64: text length overflows u64"),
     }
@@ -1498,8 +1501,16 @@ pub fn push_fixed64(mut s: String, x: f64, digits: u64) -> Result[(), Capacity] 
     let lp: i64 = int.narrow(whole)
     let base = d.point - lp
     let count: i64 = int.narrow(d.count)
-    let mut i: i64 = if base < 0 { 0 } else { base }
-    let end: i64 = if base + int.narrow(total) < count { base + int.narrow(total) } else { count }
+    let mut i: i64 = if base < 0 {
+        0
+    } else {
+        base
+    }
+    let end: i64 = if base + int.narrow(total) < count {
+        base + int.narrow(total)
+    } else {
+        count
+    }
     while i < end {
         let q: u64 = int.narrow(i - base)
         let iu: u64 = int.narrow(i)
@@ -1582,7 +1593,11 @@ pub fn shortest64(x: f64) -> (u64, i64) {
         if f_in && c_in {
             // No tie is possible here: the nearer one by the first dropped digit.
             let next: u64 = int.narrow(len)
-            return strip(if v.digits[next] >= 5 { c } else { f }, p)
+            return strip(if v.digits[next] >= 5 {
+                c
+            } else {
+                f
+            }, p)
         }
         if f_in {
             return strip(f, p)
@@ -1632,12 +1647,20 @@ fn exact(m: u64, e: i64) -> Decimal {
     trim(mut d)
     let mut k = e
     while k > 0 {
-        let step: i64 = if k > 60 { 60 } else { k }
+        let step: i64 = if k > 60 {
+            60
+        } else {
+            k
+        }
         shift_left(mut d, int.narrow(step))
         k -= step
     }
     while k < 0 {
-        let step: i64 = if k < -60 { 60 } else { -k }
+        let step: i64 = if k < -60 {
+            60
+        } else {
+            -k
+        }
         shift_right(mut d, int.narrow(step))
         k += step
     }
@@ -1678,7 +1701,11 @@ fn prefix(d: Decimal, p: i64) -> (u64, bool) {
         }
         i += 1
     }
-    (v, if n < 0 { count > 0 } else { n < count })
+    (v, if n < 0 {
+        count > 0
+    } else {
+        n < count
+    })
 }
 
 /// (c, p) with c's trailing zeros moved into p.
@@ -1711,12 +1738,19 @@ fn push_ascii(mut s: String, take o: Bytes) -> Result[(), Capacity] {
 
 // fdlibm constants: ln2 split into high/low parts, its inverse, and Remez coefficients.
 const EXP_LN2_HI: f64 = 6.93147180369123816490e-01 // 0x3fe62e42fee00000
+
 const EXP_LN2_LO: f64 = 1.90821492927058770002e-10 // 0x3dea39ef35793c76
+
 const EXP_INVLN2: f64 = 1.44269504088896338700e+00 // 0x3ff71547652b82fe
+
 const EXP_P1: f64 = 1.66666666666666019037e-01 // 0x3FC555555555553E
+
 const EXP_P2: f64 = -2.77777777770155933842e-03 // 0xBF66C16C16BEBD93
+
 const EXP_P3: f64 = 6.61375632143793436117e-05 // 0x3F11566AAF25DE2C
+
 const EXP_P4: f64 = -1.65339022054652515390e-06 // 0xBEBBBD41C5D26BF1
+
 const EXP_P5: f64 = 4.13813679705723846039e-08 // 0x3E66376972BEA4D0
 
 /// e^x within 1 ulp, after fdlibm's e_exp.c (Sun, 1993; FreeBSD's msun and Rust's libm
@@ -1804,4 +1838,3 @@ pub fn exp(x: f64) -> f64 {
         float.from_bits64(int.wrapping_add(float.to_bits64(y), shift)) * float.from_bits64(0x0170000000000000)
     }
 }
-

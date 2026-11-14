@@ -1,94 +1,152 @@
 // kostya/LangArena 3c9f84d benchmarks/cache_simulation.rs:5-207.
 // Indexed doubly linked nodes and a LIFO free list, as in the upstream Rust.
-type Node { key:String, value:String, prev:Option[u64], next:Option[u64] }
+type Node {
+    key: String,
+    value: String,
+    prev: Option[u64],
+    next: Option[u64]
+}
+
 type Cache {
-    capacity:u64, entries:Map[String,u64], nodes:List[Node], free:List[u64],
-    head:Option[u64], tail:Option[u64], size:u64
+    capacity: u64,
+    entries: Map[String, u64],
+    nodes: List[Node],
+    free: List[u64],
+    head: Option[u64],
+    tail: Option[u64],
+    size: u64
 }
-fn front(mut c:Cache,node:u64) {
-    c.nodes[node].prev=None
-    c.nodes[node].next=c.head
-    if let Some(h)=c.head {c.nodes[h].prev=Some(node)}
-    c.head=Some(node)
-    if c.tail==None {c.tail=Some(node)}
+
+fn front(mut c: Cache, node: u64) {
+    c.nodes[node].prev = None
+    c.nodes[node].next = c.head
+    if let Some(h) = c.head {
+        c.nodes[h].prev = Some(node)
+    }
+    c.head = Some(node)
+    if c.tail == None {
+        c.tail = Some(node)
+    }
 }
-fn touch(mut c:Cache,node:u64) {
-    if c.head==Some(node) {return}
-    let prev=c.nodes[node].prev
-    let next=c.nodes[node].next
-    if let Some(p)=prev {c.nodes[p].next=next}
-    if let Some(n)=next {c.nodes[n].prev=prev}
-    if c.tail==Some(node) {c.tail=prev}
-    front(mut c,node)
+
+fn touch(mut c: Cache, node: u64) {
+    if c.head == Some(node) {
+        return
+    }
+    let prev = c.nodes[node].prev
+    let next = c.nodes[node].next
+    if let Some(p) = prev {
+        c.nodes[p].next = next
+    }
+    if let Some(n) = next {
+        c.nodes[n].prev = prev
+    }
+    if c.tail == Some(node) {
+        c.tail = prev
+    }
+    front(mut c, node)
 }
-fn put(mut c:Cache,take key:String,take value:String)->Result[(),helper.Error] {
-    let found:Option[u64]=match map.get(c.entries,key) {Some(n)=>Some(n),None=>None}
-    if let Some(node)=found {
-        c.nodes[node].value=take value
-        touch(mut c,node)
+
+fn put(mut c: Cache, take key: String, take value: String) -> Result[(), helper.Error] {
+    let found: Option[u64] = match map.get(c.entries, key) {
+        Some(n) => Some(n),
+        None => None
+    }
+    if let Some(node) = found {
+        c.nodes[node].value = take value
+        touch(mut c, node)
         return Ok(())
     }
-    if c.size>=c.capacity {
-        if let Some(old)=c.tail {
-            let _=map.remove(mut c.entries,c.nodes[old].key)
-            let prev=c.nodes[old].prev
-            if let Some(p)=prev {c.nodes[p].next=None}
-            c.tail=prev
-            if c.head==Some(old) {c.head=None}
-            match list.push(mut c.free,old) {Ok(())=>{},Error((e,_))=>return Error(Capacity(e))}
-            c.size-=1
+    if c.size >= c.capacity {
+        if let Some(old) = c.tail {
+            let _ = map.remove(mut c.entries, c.nodes[old].key)
+            let prev = c.nodes[old].prev
+            if let Some(p) = prev {
+                c.nodes[p].next = None
+            }
+            c.tail = prev
+            if c.head == Some(old) {
+                c.head = None
+            }
+            match list.push(mut c.free, old) {
+                Ok(()) => {},
+                Error((e, _)) => return Error(Capacity(e))
+            }
+            c.size -= 1
         }
     }
-    let node_key=helper.mem(string.from(key))?
-    let entry=Node(key:take node_key,value:take value,prev:None,next:None)
-    let node=match list.pop(mut c.free) {
-        Some(slot)=>{let _=list.set(mut c.nodes,slot,take entry);slot},
-        None=>{
-            let slot=list.len(c.nodes)
-            match list.push(mut c.nodes,take entry) {Ok(())=>{},Error((e,_))=>return Error(Capacity(e))}
+    let node_key = helper.mem(string.from(key))?
+    let entry = Node(key: take node_key, value: take value, prev: None, next: None)
+    let node = match list.pop(mut c.free) {
+        Some(slot) => {
+            let _ = list.set(mut c.nodes, slot, take entry);
+            slot
+        },
+        None => {
+            let slot = list.len(c.nodes)
+            match list.push(mut c.nodes, take entry) {
+                Ok(()) => {},
+                Error((e, _)) => return Error(Capacity(e))
+            }
             slot
         },
     }
-    helper.mem(result.capacity_only(map.insert(mut c.entries,take key,node)))?
-    front(mut c,node)
-    c.size+=1
+    helper.mem(result.capacity_only(map.insert(mut c.entries, take key, node)))?
+    front(mut c, node)
+    c.size += 1
     Ok(())
 }
-fn step(mut c:Cache,mut g:helper.Lcg,iteration:u64,values:i32,mut hits:u32,mut misses:u32)->Result[(),helper.Error] {
+
+fn step(mut c: Cache, mut g: helper.Lcg, iteration: u64, values: i32, mut hits: u32, mut misses: u32) -> Result[(), helper.Error] {
     for _ in 0u64 .. 1000u64 {
-        let mut key=helper.mem(string.from("item_"))?
-        helper.mem(string.push_i64(mut key,int.widen(helper.next_int(mut g,values))))?
-        let found:Option[u64]=match map.get(c.entries,key) {Some(n)=>Some(n),None=>None}
-        let mut value=string.new()
-        if let Some(node)=found {
-            touch(mut c,node)
-            hits+=1
-            helper.mem(string.push(mut value,"updated_"))?
-        } else {
-            misses+=1
-            helper.mem(string.push(mut value,"new_"))?
+        let mut key = helper.mem(string.from("item_"))?
+        helper.mem(string.push_i64(mut key, int.widen(helper.next_int(mut g, values))))?
+        let found: Option[u64] = match map.get(c.entries, key) {
+            Some(n) => Some(n),
+            None => None
         }
-        helper.mem(string.push_u64(mut value,iteration))?
-        put(mut c,take key,take value)?
+        let mut value = string.new()
+        if let Some(node) = found {
+            touch(mut c, node)
+            hits += 1
+            helper.mem(string.push(mut value, "updated_"))?
+        } else {
+            misses += 1
+            helper.mem(string.push(mut value, "new_"))?
+        }
+        helper.mem(string.push_u64(mut value, iteration))?
+        put(mut c, take key, take value)?
     }
     Ok(())
 }
-pub fn dispatch(config:String,name:String,warmup:u64,iterations:u64)->Result[u32,helper.Error] {
-    if name!="Etc::CacheSimulation" {return Error(UnknownTask)}
-    let values=helper.config_i64(config,name,"values")?
-    let capacity=helper.config_i64(config,name,"size")?
-    if values<=0 || values>2147483647 || capacity<0 {return Error(Config)}
-    let mut c=Cache(capacity:int.narrow(capacity),entries:map.new(),nodes:list.new(),free:list.new(),head:None,tail:None,size:0)
-    let mut g=helper.lcg()
-    let mut hits:u32=0
-    let mut misses:u32=0
-    for i in 0 .. warmup {step(mut c,mut g,i,int.narrow(values),mut hits,mut misses)?}
+
+pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
+    if name != "Etc::CacheSimulation" {
+        return Error(UnknownTask)
+    }
+    let values = helper.config_i64(config, name, "values")?
+    let capacity = helper.config_i64(config, name, "size")?
+    if values <= 0 || values > 2147483647 || capacity < 0 {
+        return Error(Config)
+    }
+    let mut c = Cache(capacity: int.narrow(capacity), entries: map.new(), nodes: list.new(), free: list.new(), head: None, tail: None, size: 0)
+    let mut g = helper.lcg()
+    let mut hits: u32 = 0
+    let mut misses: u32 = 0
+    for i in 0 .. warmup {
+        step(mut c, mut g, i, int.narrow(values), mut hits, mut misses)?
+    }
     helper.reset(mut g)
-    for i in 0 .. iterations {step(mut c,mut g,i,int.narrow(values),mut hits,mut misses)?}
-    let a=int.wrapping_add(5432u32<<5u32,hits)
-    let b=int.wrapping_add(a<<5u32,misses)
-    Ok(int.wrapping_add(b<<5u32,int.narrow(c.size)))
+    for i in 0 .. iterations {
+        step(mut c, mut g, i, int.narrow(values), mut hits, mut misses)?
+    }
+    let a = int.wrapping_add(5432u32 << 5u32, hits)
+    let b = int.wrapping_add(a << 5u32, misses)
+    Ok(int.wrapping_add(b << 5u32, int.narrow(c.size)))
 }
-pub fn main(out:Stdout,d:Dir,argv:Args)->Result[(),Exit] waits {
-    harness.main(out,d,argv,fn(c:String,n:String,w:u64,i:u64)->Result[u32,helper.Error] {dispatch(c,n,w,i)})
+
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
+    harness.main(out, d, argv, fn(c: String, n: String, w: u64, i: u64) -> Result[u32, helper.Error] {
+        dispatch(c, n, w, i)
+    })
 }

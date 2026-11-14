@@ -5,16 +5,36 @@
 // expect: run short() = false
 // expect: run rounding() = 0
 const MIN: i8 = -128
+
 const HALF: i8 = MIN >> 1
+
 const MASK: u8 = ~0
+
 const SHORT: bool = false && (1u8 / 0 == 0)
+
 const ROUND: f32 = (16777216.0 + 1.0) - 16777216.0
-fn shifted() -> i8 { HALF }
-fn byte() -> u8 { MASK }
-fn short() -> bool { SHORT }
-fn rounding() -> u32 { float.to_bits32(ROUND) }
+
+fn shifted() -> i8 {
+    HALF
+}
+
+fn byte() -> u8 {
+    MASK
+}
+
+fn short() -> bool {
+    SHORT
+}
+
+fn rounding() -> u32 {
+    float.to_bits32(ROUND)
+}
 
 // expect: run nan() = 9221120237041090560
 const NAN: f64 = 0.0 / 0.0
+
 const NEG_NAN: f64 = -NAN
-fn nan() -> u64 { float.to_bits64(NEG_NAN) }
+
+fn nan() -> u64 {
+    float.to_bits64(NEG_NAN)
+}

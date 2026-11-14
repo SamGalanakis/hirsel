@@ -8,26 +8,68 @@
 // expect: run third_fails() = 5 trace 11,7
 // expect: run second_fails() = 5 trace 7
 // expect: run admission_fails() = 703 trace 7
-resource type Mark { id: u64 } drop(m) { let _ = m.id }
-type Three { a: Mark, b: Mark, c: Mark }
-resource type Held { m: Mark, k: u64 }
-fn mark(id: u64) -> Result[Mark, Capacity] {
-  match Mark(id: id) { Ok(take m) => Ok(take m), Error((e, _)) => Error(e) }
+resource type Mark {
+    id: u64
+} drop(m) {
+    let _ = m.id
 }
-fn missing() -> Result[Mark, Capacity] { Error(Capacity(requested: 5, available: 0)) }
-fn third() -> Result[Three, Capacity] { Ok(Three(a: mark(7)?, b: mark(11)?, c: missing()?)) }
-fn second() -> Result[Three, Capacity] { Ok(Three(a: mark(7)?, b: missing()?, c: mark(13)?)) }
-fn third_fails() -> u64 { match third() { Ok(_) => 1, Error(e) => e.requested } }
-fn second_fails() -> u64 { match second() { Ok(_) => 1, Error(e) => e.requested } }
-fn admission_fails() -> u64 {
-  let got = bound bytes 60 {
-    match mark(7) {
-      Ok(take m) => match Held(m: take m, k: 3) {
-        Ok(_) => 1u64,
-        Error((_, (take back, k))) => back.id * 100 + k,
-      },
-      Error(_) => 2u64,
+
+type Three {
+    a: Mark,
+    b: Mark,
+    c: Mark
+}
+
+resource type Held {
+    m: Mark,
+    k: u64
+}
+
+fn mark(id: u64) -> Result[Mark, Capacity] {
+    match Mark(id: id) {
+        Ok(take m) => Ok(take m),
+        Error((e, _)) => Error(e)
     }
-  }
-  match got { Ok(v) => v, Error(_) => 9u64 }
+}
+
+fn missing() -> Result[Mark, Capacity] {
+    Error(Capacity(requested: 5, available: 0))
+}
+
+fn third() -> Result[Three, Capacity] {
+    Ok(Three(a: mark(7)?, b: mark(11)?, c: missing()?))
+}
+
+fn second() -> Result[Three, Capacity] {
+    Ok(Three(a: mark(7)?, b: missing()?, c: mark(13)?))
+}
+
+fn third_fails() -> u64 {
+    match third() {
+        Ok(_) => 1,
+        Error(e) => e.requested
+    }
+}
+
+fn second_fails() -> u64 {
+    match second() {
+        Ok(_) => 1,
+        Error(e) => e.requested
+    }
+}
+
+fn admission_fails() -> u64 {
+    let got = bound bytes 60 {
+        match mark(7) {
+            Ok(take m) => match Held(m: take m, k: 3) {
+                Ok(_) => 1u64,
+                Error((_, (take back, k))) => back.id * 100 + k,
+            },
+            Error(_) => 2u64,
+        }
+    }
+    match got {
+        Ok(v) => v,
+        Error(_) => 9u64
+    }
 }

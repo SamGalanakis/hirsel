@@ -2,4 +2,9 @@
 // the view `s == s` reads does not outlive the condition and the branch may move `s`.
 // expect: accept
 fn eat(take s: String) {}
-fn f(take s: String) { if s == s { eat(take s) } }
+
+fn f(take s: String) {
+    if s == s {
+        eat(take s)
+    }
+}

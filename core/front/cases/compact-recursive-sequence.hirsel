@@ -1,6 +1,11 @@
 // expect: accept
 // MEM-12: the sequence header ends inline containment; J is packed and streamable.
-@compact(u32) stable type J = Null | Arr(SeqSpan[J])
+@compact(u32)
+stable type J = Null | Arr(SeqSpan[J])
+
 type Stream[T: streamable] {}
-type Accepted[in r] { value: Stream[J in r] }
+
+type Accepted[in r] {
+    value: Stream[J in r]
+}
 // expect: kind J stable

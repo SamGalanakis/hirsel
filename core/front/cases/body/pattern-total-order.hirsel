@@ -1,4 +1,9 @@
 // expect: run f(0.0) = 1
 // expect: run f(-0.0) = 2
 // expect: run f(1.0) = 2
-fn f(x: f64) -> u8 { match float.total_order(x, 0.0) { Equal => 1, _ => 2 } }
+fn f(x: f64) -> u8 {
+    match float.total_order(x, 0.0) {
+        Equal => 1,
+        _ => 2
+    }
+}

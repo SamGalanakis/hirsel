@@ -1,25 +1,45 @@
 // Instantiated cleanup edges choose native prefixes; logical charges stay fixed.
-fn wrap[T](take x:T)->Box[T] {result.unwrap(box.new(take x))}
-fn buffered[T](take x:T)->u64 {
-    let mut xs:List[T]=result.unwrap(list.with_capacity(1))
-    result.unwrap(list.push(mut xs,take x))
-    result.unwrap(list.reserve(mut xs,9))
+fn wrap[T](take x: T) -> Box[T] {
+    result.unwrap(box.new(take x))
+}
+
+fn buffered[T](take x: T) -> u64 {
+    let mut xs: List[T] = result.unwrap(list.with_capacity(1))
+    result.unwrap(list.push(mut xs, take x))
+    result.unwrap(list.reserve(mut xs, 9))
     list.len(xs)
 }
+
 // expect: run leaf_box() = 17
-fn leaf_box()->u64 {box.unbox(wrap(17u64))}
+fn leaf_box() -> u64 {
+    box.unbox(wrap(17u64))
+}
+
 // expect: run child_box() = 3
-fn child_box()->u64 {let s=box.unbox(wrap(result.unwrap(string.from("abc"))));string.byte_len(s)}
+fn child_box() -> u64 {
+    let s = box.unbox(wrap(result.unwrap(string.from("abc"))));
+    string.byte_len(s)
+}
+
 // expect: run leaf_growth() = 1
-fn leaf_growth()->u64 {buffered(7u64)}
+fn leaf_growth() -> u64 {
+    buffered(7u64)
+}
+
 // expect: run child_growth() = 1
-fn child_growth()->u64 {buffered(result.unwrap(string.from("abc")))}
-fn number(x:u64)->u64 {x}
+fn child_growth() -> u64 {
+    buffered(result.unwrap(string.from("abc")))
+}
+
+fn number(x: u64) -> u64 {
+    x
+}
+
 // expect: run leaf_counted() = 23
-fn leaf_counted()->u64 {
-    let r=result.unwrap(rc.new(11u64))
-    let a=result.unwrap(arc.new(12u64))
-    let r2=rc.share(r)
-    let a2=arc.share(a)
-    number(r2)+number(a2)
+fn leaf_counted() -> u64 {
+    let r = result.unwrap(rc.new(11u64))
+    let a = result.unwrap(arc.new(12u64))
+    let r2 = rc.share(r)
+    let a2 = arc.share(a)
+    number(r2) + number(a2)
 }

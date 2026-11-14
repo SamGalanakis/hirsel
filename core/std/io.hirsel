@@ -17,26 +17,28 @@ pub opaque type Lines {
 /// Fails: Error((c,f)), f is still open at its original position. Alloc: cap + max(cap,1),
 /// each rounded to 8, current limit. Ex: let l = io.lines(take f,4096)?
 pub fn lines(take f: HostFile, cap: u64) -> Result[Lines, (Capacity, HostFile)] {
-    let input_cap: u64 = if cap == 0 { 1 } else { cap }
-    let allocated_input: Result[Bytes,Capacity] = list.with_capacity(input_cap)
+    let input_cap: u64 = if cap == 0 {
+        1
+    } else {
+        cap
+    }
+    let allocated_input: Result[Bytes, Capacity] = list.with_capacity(input_cap)
     let buffer = match take allocated_input {
         Ok(take b) => take b,
-        Error(c) => return Error((c,take f)),
+        Error(c) => return Error((c, take f)),
     }
-    let allocated_line: Result[Bytes,Capacity] = list.with_capacity(cap)
+    let allocated_line: Result[Bytes, Capacity] = list.with_capacity(cap)
     let accumulated = match take allocated_line {
         Ok(take b) => take b,
-        Error(c) => return Error((c,take f)),
+        Error(c) => return Error((c, take f)),
     }
-    Ok(Lines(file:take f,buffer:take buffer,at:0,pending:take accumulated,
-        cap:cap,eof:false,completed:false))
+    Ok(Lines(file: take f, buffer: take buffer, at: 0, pending: take accumulated, cap: cap, eof: false, completed: false))
 }
-
 
 /// Raw bytes accumulated for the current line, including any trailing partial scalar.
 /// Retained after Capacity/NotUtf8. Alloc: nothing; the returned view freezes l.
-pub fn prefix(l:Lines)->View[Bytes] in l {
-    list.slice(l.pending,0,list.len(l.pending))
+pub fn prefix(l: Lines) -> View[Bytes] in l {
+    list.slice(l.pending, 0, list.len(l.pending))
 }
 
 /// Clears line and copies one UTF-8 line into its reusable storage, excluding LF/CRLF.
@@ -48,54 +50,69 @@ pub fn prefix(l:Lines)->View[Bytes] in l {
 /// the last complete UTF-8 scalar. Invalid UTF-8 returns NotUtf8 with the raw prefix kept.
 /// Alloc: line's growth (reserve cap before reading), then none while capacity is enough.
 /// Ex: while io.read_line(mut l,mut line)? { .. }
-pub fn read_line(mut l:Lines,mut line:String)->Result[bool,Error] waits {
-    string.truncate(mut line,0)
-    let available=list.capacity(string.as_bytes(line))
-    if available<l.cap {
-        if let Error(c)=string.reserve(mut line,l.cap) {return Error(Capacity(c))}
+pub fn read_line(mut l: Lines, mut line: String) -> Result[bool, Error] waits {
+    string.truncate(mut line, 0)
+    let available = list.capacity(string.as_bytes(line))
+    if available < l.cap {
+        if let Error(c) = string.reserve(mut line, l.cap) {
+            return Error(Capacity(c))
+        }
     }
     // A completed line is consumed. An oversized/invalid prefix stays for inspection.
     if l.completed {
-        l.completed=false
+        l.completed = false
         list.clear(mut l.pending)
     }
     loop {
-        if l.at==list.len(l.buffer) {
+        if l.at == list.len(l.buffer) {
             if l.eof {
-                if list.len(l.pending)==0 {return Ok(false)}
-                l.completed=true
-                copy_prefix(mut l,mut line,false)?
+                if list.len(l.pending) == 0 {
+                    return Ok(false)
+                }
+                l.completed = true
+                copy_prefix(mut l, mut line, false)?
                 return Ok(true)
             }
             list.clear(mut l.buffer)
-            l.at=0
-            match file.read_into(mut l.file,mut l.buffer) {
-                Ok(0)=>{l.eof=true;continue},
-                Ok(_)=>{},
-                Error(e)=>return Error(Io(e)),
+            l.at = 0
+            match file.read_into(mut l.file, mut l.buffer) {
+                Ok(0) => {
+                    l.eof = true;
+                    continue
+                },
+                Ok(_) => {},
+                Error(e) => return Error(Io(e)),
             }
         }
-        let start=l.at
-        let remaining=l.cap-list.len(l.pending)
-        let buffered=list.len(l.buffer)-start
-        let count=if remaining<buffered {remaining} else {buffered}
-        let end=start+scan_newline(list.slice(l.buffer,start,start+count))
-        let _=list.append(mut l.pending,list.slice(l.buffer,start,end))
-        l.at=end
-        if end<list.len(l.buffer) {
-            if l.buffer[end]==10 {
-                l.at+=1
-                let n=list.len(l.pending)
-                if n>0 && l.pending[n-1]==13 {let _=list.pop(mut l.pending)}
-                l.completed=true
-                copy_prefix(mut l,mut line,false)?
+        let start = l.at
+        let remaining = l.cap - list.len(l.pending)
+        let buffered = list.len(l.buffer) - start
+        let count = if remaining < buffered {
+            remaining
+        } else {
+            buffered
+        }
+        let end = start + scan_newline(list.slice(l.buffer, start, start + count))
+        let _ = list.append(mut l.pending, list.slice(l.buffer, start, end))
+        l.at = end
+        if end < list.len(l.buffer) {
+            if l.buffer[end] == 10 {
+                l.at += 1
+                let n = list.len(l.pending)
+                if n > 0 && l.pending[n - 1] == 13 {
+                    let _ = list.pop(mut l.pending)
+                }
+                l.completed = true
+                copy_prefix(mut l, mut line, false)?
                 return Ok(true)
             }
-            copy_prefix(mut l,mut line,true)?
-            let requested:u64=if l.cap>18446744073709551607 {
+            copy_prefix(mut l, mut line, true)?
+            let requested: u64 = if l.cap > 18446744073709551607 {
                 18446744073709551615
-            } else {((l.cap+1+7)/8)*8}
-            return Error(Capacity(Capacity(requested:requested,available:l.cap)))
+            } else {
+                ((l.cap + 1 + 7) / 8) * 8
+            }
+            return Error(Capacity(Capacity(requested: requested, available: l.cap)))
         }
     }
 }
@@ -104,116 +121,173 @@ pub fn read_line(mut l:Lines,mut line:String)->Result[bool,Error] waits {
 // As in string.find, the lowest zero-byte mark is exact even if subtraction's
 // borrow sets a later mark. b is only the admitted prefix; the next byte remains
 // for read_line's LF/Capacity decision. Relative offsets use that carrier's bound.
-fn scan_newline(b:Bytes)->u64 {
-    let n=list.len(b)
-    let mut at:u64=0
-    if n>=16 {
-        let last=n-16
-        while at<=last {
-            let low=list.word_le(b,at)^0x0A0A0A0A0A0A0A0A
-            let high=list.word_le(b,at+8)^0x0A0A0A0A0A0A0A0A
-            let z0=int.wrapping_sub(low,0x0101010101010101)&~low&0x8080808080808080
-            let z1=int.wrapping_sub(high,0x0101010101010101)&~high&0x8080808080808080
-            if z0|z1!=0 {
-                let first:u64=int.widen(int.trailing_zeros(z0))
-                let second:u64=int.widen(int.trailing_zeros(z1))
-                return if z0!=0 {at+(first>>3)} else {at+8+(second>>3)}
+fn scan_newline(b: Bytes) -> u64 {
+    let n = list.len(b)
+    let mut at: u64 = 0
+    if n >= 16 {
+        let last = n - 16
+        while at <= last {
+            let low = list.word_le(b, at) ^ 0x0A0A0A0A0A0A0A0A
+            let high = list.word_le(b, at + 8) ^ 0x0A0A0A0A0A0A0A0A
+            let z0 = int.wrapping_sub(low, 0x0101010101010101) & ~low & 0x8080808080808080
+            let z1 = int.wrapping_sub(high, 0x0101010101010101) & ~high & 0x8080808080808080
+            if z0 | z1 != 0 {
+                let first: u64 = int.widen(int.trailing_zeros(z0))
+                let second: u64 = int.widen(int.trailing_zeros(z1))
+                return if z0 != 0 {
+                    at + (first >> 3)
+                } else {
+                    at + 8 + (second >> 3)
+                }
             }
-            at+=16
+            at += 16
         }
     }
-    if n-at>=8 {
-        let word=list.word_le(b,at)^0x0A0A0A0A0A0A0A0A
-        let found=int.wrapping_sub(word,0x0101010101010101)&~word&0x8080808080808080
-        if found!=0 {
-            let bit:u64=int.widen(int.trailing_zeros(found))
-            return at+(bit>>3)
+    if n - at >= 8 {
+        let word = list.word_le(b, at) ^ 0x0A0A0A0A0A0A0A0A
+        let found = int.wrapping_sub(word, 0x0101010101010101) & ~word & 0x8080808080808080
+        if found != 0 {
+            let bit: u64 = int.widen(int.trailing_zeros(found))
+            return at + (bit >> 3)
         }
-        at+=8
+        at += 8
     }
-    while at<n && b[at]!=10 {at+=1}
+    while at < n && b[at] != 10 {
+        at += 1
+    }
     at
 }
 
-fn copy_prefix(mut l:Lines,mut line:String,partial:bool)->Result[(),Error] {
-    let mut end=list.len(l.pending)
-    if partial && end>0 {
+fn copy_prefix(mut l: Lines, mut line: String, partial: bool) -> Result[(), Error] {
+    let mut end = list.len(l.pending)
+    if partial && end > 0 {
         // Find the last lead byte; only a scalar cut by the cap is left pending.
-        let mut lead=end-1
-        while lead>0 && (l.pending[lead]&0xC0)==0x80 {lead-=1}
-        let x=l.pending[lead]
-        let width:u64=if x<0x80 {1} else if x<0xE0 {2} else if x<0xF0 {3} else {4}
-        let valid_lead=x>=0xC2 && x<=0xF4
-        let second_ok=if end-lead<2 {true} else if x==0xE0 {l.pending[lead+1]>=0xA0} else if x==0xED {l.pending[lead+1]<0xA0} else if x==0xF0 {l.pending[lead+1]>=0x90} else if x==0xF4 {l.pending[lead+1]<0x90} else {true}
-        if valid_lead && second_ok && end-lead<width {end=lead}
+        let mut lead = end - 1
+        while lead > 0 && (l.pending[lead] & 0xC0) == 0x80 {
+            lead -= 1
+        }
+        let x = l.pending[lead]
+        let width: u64 = if x < 0x80 {
+            1
+        } else if x < 0xE0 {
+            2
+        } else if x < 0xF0 {
+            3
+        } else {
+            4
+        }
+        let valid_lead = x >= 0xC2 && x <= 0xF4
+        let second_ok = if end - lead < 2 {
+            true
+        } else if x == 0xE0 {
+            l.pending[lead + 1] >= 0xA0
+        } else if x == 0xED {
+            l.pending[lead + 1] < 0xA0
+        } else if x == 0xF0 {
+            l.pending[lead + 1] >= 0x90
+        } else if x == 0xF4 {
+            l.pending[lead + 1] < 0x90
+        } else {
+            true
+        }
+        if valid_lead && second_ok && end - lead < width {
+            end = lead
+        }
     }
     // Validate with the ordinary public UTF-8 constructor, retaining raw input.
     // The copy is exactly one line and reuses the caller's admitted storage.
-    let mut raw=match string.into_bytes(replace(mut line,string.new())) {
-        Ok(take b)=>take b,
-        Error(_)=>fail("io: reserved output owns its storage"),
+    let mut raw = match string.into_bytes(replace(mut line, string.new())) {
+        Ok(take b) => take b,
+        Error(_) => fail("io: reserved output owns its storage"),
     }
-    let _=list.append(mut raw,list.slice(l.pending,0,end))
+    let _ = list.append(mut raw, list.slice(l.pending, 0, end))
     match string.from_utf8(take raw) {
-        Ok(take s)=>{line=s;Ok(())},
-        Error(take b)=>{
+        Ok(take s) => {
+            line = s;
+            Ok(())
+        },
+        Error(take b) => {
             // Keep line valid, with its capacity, even when source bytes are invalid.
-            let mut empty=b
+            let mut empty = b
             list.clear(mut empty)
-            line=result.unwrap(string.from_utf8(take empty))
+            line = result.unwrap(string.from_utf8(take empty))
             Error(NotUtf8)
         },
     }
 }
 
 /// Explicitly flushed stdout buffer. Drop only releases memory; it never hides I/O errors.
-pub opaque type Out { output:Stdout,buffer:Bytes }
+pub opaque type Out {
+    output: Stdout,
+    buffer: Bytes
+}
 
 /// Reserves exactly cap bytes of buffering, current limit. Error leaves stdout untouched.
-pub fn out(o:Stdout,cap:u64)->Result[Out,Capacity] {
-    let b:Bytes=list.with_capacity(cap)?
-    Ok(Out(output:o,buffer:take b))
+pub fn out(o: Stdout, cap: u64) -> Result[Out, Capacity] {
+    let b: Bytes = list.with_capacity(cap)?
+    Ok(Out(output: o, buffer: take b))
 }
+
 /// The retained suffix awaiting flush; freezes w. Alloc: none.
-pub fn pending(w:Out)->View[Bytes] in w {list.slice(w.buffer,0,list.len(w.buffer))}
+pub fn pending(w: Out) -> View[Bytes] in w {
+    list.slice(w.buffer, 0, list.len(w.buffer))
+}
 
 /// Writes the whole buffer. Success empties it; failure removes only the committed prefix.
 /// Error.written counts bytes of THIS flushed buffer, including a partial UTF8 scalar.
 /// The remaining arbitrary bytes are retained and retry writes them exactly once.
 /// Alloc: none. Cancellation at issue keeps the buffer. Flush explicitly before drop.
-pub fn flush(mut w:Out)->Result[(),WriteError] waits {
-    if list.len(w.buffer)==0 {return Ok(())}
-    match stdout.write_bytes(w.output,w.buffer) {
-        Ok(())=>{list.clear(mut w.buffer);Ok(())},
-        Error(e)=>{
-            let n=list.len(w.buffer)
-            for i in e.written .. n {w.buffer[i-e.written]=w.buffer[i]}
-            for _ in 0 .. e.written {let _=list.pop(mut w.buffer)}
+pub fn flush(mut w: Out) -> Result[(), WriteError] waits {
+    if list.len(w.buffer) == 0 {
+        return Ok(())
+    }
+    match stdout.write_bytes(w.output, w.buffer) {
+        Ok(()) => {
+            list.clear(mut w.buffer);
+            Ok(())
+        },
+        Error(e) => {
+            let n = list.len(w.buffer)
+            for i in e.written .. n {
+                w.buffer[i - e.written] = w.buffer[i]
+            }
+            for _ in 0 .. e.written {
+                let _ = list.pop(mut w.buffer)
+            }
             Error(e)
         },
     }
 }
+
 /// Buffers s; flushes full buffers before accepting further bytes. No allocation.
 /// On flush error, written counts that flushed buffer, not s; its suffix remains pending.
 /// Earlier flush prefixes stay on stdout. Bytes not yet appended from s are unaccepted.
 /// cap=0 is direct unbuffered byte output. Ex: io.write(mut out,"hello\n")?
-pub fn write(mut w:Out,s:String)->Result[(),WriteError] waits {
-    let b=string.as_bytes(s)
-    let cap=list.capacity(w.buffer)
-    if cap==0 {return stdout.write_bytes(w.output,b)}
+pub fn write(mut w: Out, s: String) -> Result[(), WriteError] waits {
+    let b = string.as_bytes(s)
+    let cap = list.capacity(w.buffer)
+    if cap == 0 {
+        return stdout.write_bytes(w.output, b)
+    }
     // Keep the common whole-input copy outside the split/refill loop. Passing
     // the original view also preserves a caller's known copy length.
-    if list.len(b)<=cap-list.len(w.buffer) {
-        let _=list.append(mut w.buffer,b)
+    if list.len(b) <= cap - list.len(w.buffer) {
+        let _ = list.append(mut w.buffer, b)
         return Ok(())
     }
-    let mut at:u64=0
-    while at<list.len(b) {
-        if list.len(w.buffer)==cap {flush(mut w)?}
-        let spare=cap-list.len(w.buffer)
-        let count=if list.len(b)-at<spare {list.len(b)-at} else {spare}
-        let _=list.append(mut w.buffer,list.slice(b,at,at+count))
-        at+=count
+    let mut at: u64 = 0
+    while at < list.len(b) {
+        if list.len(w.buffer) == cap {
+            flush(mut w)?
+        }
+        let spare = cap - list.len(w.buffer)
+        let count = if list.len(b) - at < spare {
+            list.len(b) - at
+        } else {
+            spare
+        }
+        let _ = list.append(mut w.buffer, list.slice(b, at, at + count))
+        at += count
     }
     Ok(())
 }

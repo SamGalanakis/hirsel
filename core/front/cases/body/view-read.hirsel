@@ -6,13 +6,42 @@
 // expect: run payload(true,9) = 9
 // expect: run payload(false,9) = 0
 // expect: run returned(5) = 5
-type P { a: u64, b: u64, c: u64 }
-fn second(v: View[P]) -> u64 { v.b }
-fn same(v: View[P]) -> View[P] in v { v }
-fn pick(o: Option[View[P]]) -> u64 { match o { Some(v) => v.b, None => 0 } }
-fn direct(x: u64) -> u64 { let p = P(a: 1, b: x, c: 3); second(view p) }
-fn payload(c: bool, x: u64) -> u64 {
-  let p = P(a: 1, b: x, c: 3)
-  if c { pick(Some(view p)) } else { pick(None) }
+type P {
+    a: u64,
+    b: u64,
+    c: u64
 }
-fn returned(x: u64) -> u64 { let p = P(a: 1, b: x, c: 3); second(same(view p)) }
+
+fn second(v: View[P]) -> u64 {
+    v.b
+}
+
+fn same(v: View[P]) -> View[P] in v {
+    v
+}
+
+fn pick(o: Option[View[P]]) -> u64 {
+    match o {
+        Some(v) => v.b,
+        None => 0
+    }
+}
+
+fn direct(x: u64) -> u64 {
+    let p = P(a: 1, b: x, c: 3);
+    second(view p)
+}
+
+fn payload(c: bool, x: u64) -> u64 {
+    let p = P(a: 1, b: x, c: 3)
+    if c {
+        pick(Some(view p))
+    } else {
+        pick(None)
+    }
+}
+
+fn returned(x: u64) -> u64 {
+    let p = P(a: 1, b: x, c: 3);
+    second(same(view p))
+}

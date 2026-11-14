@@ -1,2 +1,4 @@
 // expect: accept
-fn f(cs: Causes) { for c in cs {} }
+fn f(cs: Causes) {
+    for c in cs {}
+}

@@ -4,37 +4,71 @@
 // is: before the first append and at the count. Elements are Num(4) and Str("abc"), so
 // last = 100 * 3 = 300, completed 0 = 4 and completed 1 (walked past the 9-byte Num) =
 // 300; the third element is 300 * 10 + 4 + 300 * 100 = 33004, read back after 3 * 100000.
-@compact(u16) stable type J = Null | Num(u64) | Str(Text) | Arr(IndexedSpan[J])
-fn num(j: J) -> u64 { match j { Num(n) => n, Str(t) => 100 * text.len(t), _ => 0 } }
-fn seen(o: Option[View[J]]) -> u64 { match o { Some(j) => num(j), None => 0 } }
-fn w_val[in r](take w: Writer[J, in r]) -> Result[Child[J], BuildError] {
-  emit(take w, Arr(emit(fn(take xs: Writer[IndexedSpan[J], in r]) -> Result[Child[IndexedSpan[J]], BuildError] {
-    let before: Option[View[J]] = writer.last_completed(xs)
-    let b: u64 = match before { Some(_) => 50000, None => 0 }
-    writer.append(mut xs, fn(take x: Writer[J, in r]) -> Result[Child[J], BuildError] { emit(take x, Num(4)) })?
-    writer.append(mut xs, fn(take x: Writer[J, in r]) -> Result[Child[J], BuildError] { emit(take x, Str("abc")) })?
-    let last: Option[View[J]] = writer.last_completed(xs)
-    let first: Option[View[J]] = writer.completed(xs, 0)
-    let second: Option[View[J]] = writer.completed(xs, 1)
-    let past: Option[View[J]] = writer.completed(xs, 2)
-    let p: u64 = match past { Some(_) => 70000, None => 0 }
-    let v = b + p + seen(last) * 10 + seen(first) + seen(second) * 100
-    writer.append(mut xs, fn(take x: Writer[J, in r]) -> Result[Child[J], BuildError] { emit(take x, Num(v)) })?
-    writer.close(take xs)
-  })))
-}
-fn make(r: Region) -> Result[J in r, BuildError] {
-  match build_stream_in(r, bytes 200, fn(take w: Writer[J, in r]) -> Result[Child[J], BuildError] { w_val(take w) }) {
-    Ok(take b) => Ok(finish(take b)),
-    Error(e) => Error(e),
-  }
-}
-fn go() -> u64 {
-  region r {
-    match make(r) {
-      Ok(Arr(xs)) => match indexed.get(xs, 2) { Some(z) => seq.len(xs) * 100000 + num(z), None => 98 },
-      Ok(_) => 97,
-      Error(_) => 99,
+@compact(u16)
+stable type J = Null | Num(u64) | Str(Text) | Arr(IndexedSpan[J])
+
+fn num(j: J) -> u64 {
+    match j {
+        Num(n) => n,
+        Str(t) => 100 * text.len(t),
+        _ => 0
     }
-  }
+}
+
+fn seen(o: Option[View[J]]) -> u64 {
+    match o {
+        Some(j) => num(j),
+        None => 0
+    }
+}
+
+fn w_val[in r](take w: Writer[J, in r]) -> Result[Child[J], BuildError] {
+    emit(take w, Arr(emit(fn(take xs: Writer[IndexedSpan[J], in r]) -> Result[Child[IndexedSpan[J]], BuildError] {
+        let before: Option[View[J]] = writer.last_completed(xs)
+        let b: u64 = match before {
+            Some(_) => 50000,
+            None => 0
+        }
+        writer.append(mut xs, fn(take x: Writer[J, in r]) -> Result[Child[J], BuildError] {
+            emit(take x, Num(4))
+        })?
+        writer.append(mut xs, fn(take x: Writer[J, in r]) -> Result[Child[J], BuildError] {
+            emit(take x, Str("abc"))
+        })?
+        let last: Option[View[J]] = writer.last_completed(xs)
+        let first: Option[View[J]] = writer.completed(xs, 0)
+        let second: Option[View[J]] = writer.completed(xs, 1)
+        let past: Option[View[J]] = writer.completed(xs, 2)
+        let p: u64 = match past {
+            Some(_) => 70000,
+            None => 0
+        }
+        let v = b + p + seen(last) * 10 + seen(first) + seen(second) * 100
+        writer.append(mut xs, fn(take x: Writer[J, in r]) -> Result[Child[J], BuildError] {
+            emit(take x, Num(v))
+        })?
+        writer.close(take xs)
+    })))
+}
+
+fn make(r: Region) -> Result[J in r, BuildError] {
+    match build_stream_in(r, bytes 200, fn(take w: Writer[J, in r]) -> Result[Child[J], BuildError] {
+        w_val(take w)
+    }) {
+        Ok(take b) => Ok(finish(take b)),
+        Error(e) => Error(e),
+    }
+}
+
+fn go() -> u64 {
+    region r {
+        match make(r) {
+            Ok(Arr(xs)) => match indexed.get(xs, 2) {
+                Some(z) => seq.len(xs) * 100000 + num(z),
+                None => 98
+            },
+            Ok(_) => 97,
+            Error(_) => 99,
+        }
+    }
 }

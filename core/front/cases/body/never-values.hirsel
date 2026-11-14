@@ -9,20 +9,61 @@
 // other arm. Hand-derived: opt's
 // None arm gives 4; res(Ok(7)) gives 7 + 1; both() is pick(None) = 1 plus take_res(Ok(1))
 // = 2. Functions taking a Never cannot be called, so they are checked and emitted only.
-fn eq(a: Never, b: Never) -> bool { a == b }
-fn lt(a: Never, b: Never) -> bool { a < b }
-fn add(a: Never) -> u64 { 1u64 + a }
-fn tail(a: Never) -> u64 { a }
+fn eq(a: Never, b: Never) -> bool {
+    a == b
+}
+
+fn lt(a: Never, b: Never) -> bool {
+    a < b
+}
+
+fn add(a: Never) -> u64 {
+    1u64 + a
+}
+
+fn tail(a: Never) -> u64 {
+    a
+}
+
 fn bind(a: Never) -> u64 {
-  let x: u64 = a
-  x
+    let x: u64 = a
+    x
 }
-fn snd(p: (u64, Never)) -> u64 { p.1 }
-fn pick(o: Option[Never]) -> u64 { match o { Some(x) => if x == x { 10 } else { 20 }, None => 1 } }
-fn take_res(r: Result[u64, Never]) -> u64 { match r { Ok(v) => v + 1, Error(e) => e } }
+
+fn snd(p: (u64, Never)) -> u64 {
+    p.1
+}
+
+fn pick(o: Option[Never]) -> u64 {
+    match o {
+        Some(x) => if x == x {
+            10
+        } else {
+            20
+        },
+        None => 1
+    }
+}
+
+fn take_res(r: Result[u64, Never]) -> u64 {
+    match r {
+        Ok(v) => v + 1,
+        Error(e) => e
+    }
+}
+
 fn opt() -> u64 {
-  let o: Option[Never] = None
-  match o { Some(x) => x, None => 4 }
+    let o: Option[Never] = None
+    match o {
+        Some(x) => x,
+        None => 4
+    }
 }
-fn res() -> u64 { take_res(Ok(7)) }
-fn both() -> u64 { pick(None) + take_res(Ok(1)) }
+
+fn res() -> u64 {
+    take_res(Ok(7))
+}
+
+fn both() -> u64 {
+    pick(None) + take_res(Ok(1))
+}

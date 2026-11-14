@@ -15,9 +15,26 @@
 // expect: holds Phantom -
 // expect: size Concrete 8
 // expect: holds Concrete -
-type Plain { f: fn(String) -> HostFile waits }
-type Owned { f: own fn(mut String, take String) -> u64 }
-type Sending: send { f: own[send] fn(u64) -> u64 }
-scoped type Borrowed { f: scoped fn(u64) -> u64 }
-type Phantom[T] { f: fn(T) -> T }
-type Concrete { p: Phantom[HostFile] }
+type Plain {
+    f: fn(String) -> HostFile waits
+}
+
+type Owned {
+    f: own fn(mut String, take String) -> u64
+}
+
+type Sending: send {
+    f: own[send] fn(u64) -> u64
+}
+
+scoped type Borrowed {
+    f: scoped fn(u64) -> u64
+}
+
+type Phantom[T] {
+    f: fn(T) -> T
+}
+
+type Concrete {
+    p: Phantom[HostFile]
+}

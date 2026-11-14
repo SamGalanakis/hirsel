@@ -1,7 +1,6 @@
 // test-of: core.list
 // test-backend: evaluator
 // test-reason: misuse of trusted core storage is checked by evaluator marks only
-
 // expect: run slots_double_put() = fault "put over the live slot at +0"
 fn slots_double_put() {
     let mut s: Slots[u64] = result.unwrap(slots_new(4))
@@ -40,4 +39,3 @@ fn slots_move_over_live() {
     slots_put(mut s, 1, 2)
     slots_shift(mut s, 0, 1)
 }
-

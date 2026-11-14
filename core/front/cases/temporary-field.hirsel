@@ -3,10 +3,26 @@
 // OWN-8: a field of a call result is read in place, through the view the call returns.
 // pick(h, 1) views {a: 300, b: 4}, so a + b through two call results is 304; pick(h, 0)
 // views {a: 1, b: 6}, 7.
-type P { a: u64, b: u64, name: String }
-type H { x: P, y: P }
-fn pick(h: H, i: u64) -> View[P] in h { if i == 1 { view h.y } else { view h.x } }
+type P {
+    a: u64,
+    b: u64,
+    name: String
+}
+
+type H {
+    x: P,
+    y: P
+}
+
+fn pick(h: H, i: u64) -> View[P] in h {
+    if i == 1 {
+        view h.y
+    } else {
+        view h.x
+    }
+}
+
 fn go(i: u64) -> u64 {
-  let h = H(x: P(a: 1, b: 6, name: "x"), y: P(a: 300, b: 4, name: "y"))
-  pick(h, i).a + pick(h, i).b
+    let h = H(x: P(a: 1, b: 6, name: "x"), y: P(a: 300, b: 4, name: "y"))
+    pick(h, i).a + pick(h, i).b
 }

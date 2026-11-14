@@ -1,16 +1,22 @@
 // The late leaf[u64] instance appears after leaf[u8] was already specialized.
 // Source templates must remain available until the whole closure is assembled.
-fn leaf[T](take x:T)->T {take x}
-fn middle[T](take x:T)->u64 {
-    let _=take x
+fn leaf[T](take x: T) -> T {
+    take x
+}
+
+fn middle[T](take x: T) -> u64 {
+    let _ = take x
     leaf(7u64)
 }
-fn outer[T](take x:T)->u64 {middle(take x)}
+
+fn outer[T](take x: T) -> u64 {
+    middle(take x)
+}
 
 // expect: run late_instance_reuses_template() = 37
-fn late_instance_reuses_template()->u64 {
-    let early=leaf(3u8)
-    let late=outer(5u32)
-    let widened:u64=int.widen(early)
-    widened*10+late
+fn late_instance_reuses_template() -> u64 {
+    let early = leaf(3u8)
+    let late = outer(5u32)
+    let widened: u64 = int.widen(early)
+    widened * 10 + late
 }

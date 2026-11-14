@@ -8,53 +8,89 @@
 // refused(): the bound leaves room for the built value but not the block, round8(24 +
 // 8 * 3) = 48 bytes, so index_in returns Capacity requested 48; it charges nothing,
 // so a second attempt sees the same available (+1).
-@compact(u16) stable type J = Num(u64) | Str(Text) | Arr(SeqSpan[J])
-fn num(j: J) -> u64 { match j { Num(n) => n, Str(t) => 100 * text.len(t), _ => 0 } }
+@compact(u16)
+stable type J = Num(u64) | Str(Text) | Arr(SeqSpan[J])
+
+fn num(j: J) -> u64 {
+    match j {
+        Num(n) => n,
+        Str(t) => 100 * text.len(t),
+        _ => 0
+    }
+}
+
 fn w_val[in r](take w: Writer[J, in r]) -> Result[Child[J], BuildError] {
-  emit(take w, Arr(emit(fn(take xs: Writer[SeqSpan[J], in r]) -> Result[Child[SeqSpan[J]], BuildError] {
-    writer.append(mut xs, fn(take x: Writer[J, in r]) -> Result[Child[J], BuildError] { emit(take x, Num(4)) })?
-    writer.append(mut xs, fn(take x: Writer[J, in r]) -> Result[Child[J], BuildError] { emit(take x, Str("abc")) })?
-    writer.append(mut xs, fn(take x: Writer[J, in r]) -> Result[Child[J], BuildError] { emit(take x, Num(7)) })?
-    writer.close(take xs)
-  })))
+    emit(take w, Arr(emit(fn(take xs: Writer[SeqSpan[J], in r]) -> Result[Child[SeqSpan[J]], BuildError] {
+        writer.append(mut xs, fn(take x: Writer[J, in r]) -> Result[Child[J], BuildError] {
+            emit(take x, Num(4))
+        })?
+        writer.append(mut xs, fn(take x: Writer[J, in r]) -> Result[Child[J], BuildError] {
+            emit(take x, Str("abc"))
+        })?
+        writer.append(mut xs, fn(take x: Writer[J, in r]) -> Result[Child[J], BuildError] {
+            emit(take x, Num(7))
+        })?
+        writer.close(take xs)
+    })))
 }
+
 fn make(r: Region) -> Result[J in r, BuildError] {
-  match build_stream_in(r, bytes 200, fn(take w: Writer[J, in r]) -> Result[Child[J], BuildError] { w_val(take w) }) {
-    Ok(take b) => Ok(finish(take b)),
-    Error(e) => Error(e),
-  }
+    match build_stream_in(r, bytes 200, fn(take w: Writer[J, in r]) -> Result[Child[J], BuildError] {
+        w_val(take w)
+    }) {
+        Ok(take b) => Ok(finish(take b)),
+        Error(e) => Error(e),
+    }
 }
+
 fn go() -> u64 {
-  region r {
-    match make(r) {
-      Ok(Arr(xs)) => match seq.index_in(r, xs) {
-        Ok(ix) => {
-          let two: u64 = match seq.get(ix, 2) { Some(z) => 100000 * num(z), None => 1 }
-          let one: u64 = match seq.get(ix, 1) { Some(y) => num(y), None => 2 }
-          let past: u64 = match seq.get(ix, 3) { Some(_) => 50, None => 0 }
-          seq.len(xs) * 1000000 + two + one + past
-        },
-        Error(_) => 96,
-      },
-      Ok(_) => 97,
-      Error(_) => 99,
-    }
-  }
-}
-fn refused() -> u64 {
-  let got = bound bytes 216 {
     region r {
-      match make(r) {
-        Ok(Arr(xs)) => match seq.index_in(r, xs) {
-          Ok(_) => 1u64,
-          Error(e) => match seq.index_in(r, xs) {
-            Ok(_) => 2u64,
-            Error(f) => if e.available == f.available { e.requested * 1000 + 1 } else { 3u64 },
-          },
-        },
-        _ => 4u64,
-      }
+        match make(r) {
+            Ok(Arr(xs)) => match seq.index_in(r, xs) {
+                Ok(ix) => {
+                    let two: u64 = match seq.get(ix, 2) {
+                        Some(z) => 100000 * num(z),
+                        None => 1
+                    }
+                    let one: u64 = match seq.get(ix, 1) {
+                        Some(y) => num(y),
+                        None => 2
+                    }
+                    let past: u64 = match seq.get(ix, 3) {
+                        Some(_) => 50,
+                        None => 0
+                    }
+                    seq.len(xs) * 1000000 + two + one + past
+                },
+                Error(_) => 96,
+            },
+            Ok(_) => 97,
+            Error(_) => 99,
+        }
     }
-  }
-  match got { Ok(k) => k, Error(_) => 5u64 }
+}
+
+fn refused() -> u64 {
+    let got = bound bytes 216 {
+        region r {
+            match make(r) {
+                Ok(Arr(xs)) => match seq.index_in(r, xs) {
+                    Ok(_) => 1u64,
+                    Error(e) => match seq.index_in(r, xs) {
+                        Ok(_) => 2u64,
+                        Error(f) => if e.available == f.available {
+                            e.requested * 1000 + 1
+                        } else {
+                            3u64
+                        },
+                    },
+                },
+                _ => 4u64,
+            }
+        }
+    }
+    match got {
+        Ok(k) => k,
+        Error(_) => 5u64
+    }
 }

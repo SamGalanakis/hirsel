@@ -4,54 +4,126 @@
 // expect: run docs() = 31210
 // expect: run tags() = 31210
 // expect: run keyed() = 101
-fn code[T:ordered](a:T,b:T)->u64 {
- let l=if a<b {1u64} else {0}
- let le=if a<=b {2u64} else {0}
- let g=if a>b {4u64} else {0}
- let ge=if a>=b {8u64} else {0}
- l+le+g+ge
+fn code[T: ordered](a: T, b: T) -> u64 {
+    let l = if a < b {
+        1u64
+    } else {
+        0
+    }
+    let le = if a <= b {
+        2u64
+    } else {
+        0
+    }
+    let g = if a > b {
+        4u64
+    } else {
+        0
+    }
+    let ge = if a >= b {
+        8u64
+    } else {
+        0
+    }
+    l + le + g + ge
 }
-@compact(u16) stable type Doc: key + ordered { text:Text }
-@compact(u16) stable type Tag:ordered = Low(u64) | High(u8)
-fn write_doc[in r](take w:Writer[Doc,in r],s:String)->Result[Child[Doc],BuildError] {
- emit(take w,Doc(text:emit(fn(take t:Writer[Text,in r])->Result[Child[Text],BuildError] {
-  writer.push(mut t,s)?
-  writer.close(take t)
- })))
+
+@compact(u16)
+stable type Doc: key + ordered {
+    text: Text
 }
-fn make_doc(r:Region,s:String)->Doc in r {
- let b=result.unwrap(build_stream_in(r,bytes 128,fn(take w:Writer[Doc,in r])->Result[Child[Doc],BuildError] { write_doc(take w,s) }))
- finish(take b)
+
+@compact(u16)
+stable type Tag: ordered = Low(u64) | High(u8)
+
+fn write_doc[in r](take w: Writer[Doc, in r], s: String) -> Result[Child[Doc], BuildError] {
+    emit(take w, Doc(text: emit(fn(take t: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
+        writer.push(mut t, s)?
+        writer.close(take t)
+    })))
 }
-fn write_tag[in r](take w:Writer[Tag,in r],high:bool,x:u8)->Result[Child[Tag],BuildError] {
- if high { emit(take w,High(x)) } else { emit(take w,Low(int.widen(x))) }
+
+fn make_doc(r: Region, s: String) -> Doc in r {
+    let b = result.unwrap(build_stream_in(r, bytes 128, fn(take w: Writer[Doc, in r]) -> Result[Child[Doc], BuildError] {
+        write_doc(take w, s)
+    }))
+    finish(take b)
 }
-fn make_tag(r:Region,high:bool,x:u8)->Tag in r {
- let b=result.unwrap(build_stream_in(r,bytes 64,fn(take w:Writer[Tag,in r])->Result[Child[Tag],BuildError] { write_tag(take w,high,x) }))
- finish(take b)
+
+fn write_tag[in r](take w: Writer[Tag, in r], high: bool, x: u8) -> Result[Child[Tag], BuildError] {
+    if high {
+        emit(take w, High(x))
+    } else {
+        emit(take w, Low(int.widen(x)))
+    }
 }
-fn doc_code(a:Doc,b:Doc)->u64 { code(a,b) }
-fn tag_code(a:Tag,b:Tag)->u64 { code(a,b) }
-fn docs()->u64 { region r {
- let a=make_doc(r,"a")
- let b=make_doc(r,"aa")
- doc_code(a,b)*10000+doc_code(b,a)*100+doc_code(a,a)
-} }
+
+fn make_tag(r: Region, high: bool, x: u8) -> Tag in r {
+    let b = result.unwrap(build_stream_in(r, bytes 64, fn(take w: Writer[Tag, in r]) -> Result[Child[Tag], BuildError] {
+        write_tag(take w, high, x)
+    }))
+    finish(take b)
+}
+
+fn doc_code(a: Doc, b: Doc) -> u64 {
+    code(a, b)
+}
+
+fn tag_code(a: Tag, b: Tag) -> u64 {
+    code(a, b)
+}
+
+fn docs() -> u64 {
+    region r {
+        let a = make_doc(r, "a")
+        let b = make_doc(r, "aa")
+        doc_code(a, b) * 10000 + doc_code(b, a) * 100 + doc_code(a, a)
+    }
+}
+
 // Low(200) < High(1): the ordinal decides before the payload.
-fn tags()->u64 { region r {
- let a=make_tag(r,false,200u8)
- let b=make_tag(r,true,1u8)
- tag_code(a,b)*10000+tag_code(b,a)*100+tag_code(a,a)
-} }
+fn tags() -> u64 {
+    region r {
+        let a = make_tag(r, false, 200u8)
+        let b = make_tag(r, true, 1u8)
+        tag_code(a, b) * 10000 + tag_code(b, a) * 100 + tag_code(a, a)
+    }
+}
+
 // Equal Docs in two blobs at different offsets compare equal; a prefix does not.
-fn same[T:key](a:T,b:T)->u64 { if a==b {1u64} else {0} }
-fn doc_same(a:Doc,b:Doc)->u64 { same(a,b) }
-fn keyed()->u64 { region r {
- let pad=make_doc(r,"padding")
- let a=make_doc(r,"key")
- let b=make_doc(r,"key")
- doc_same(a,b)*100+doc_same(a,make_doc(r,"ke"))*10+doc_same(pad,pad)
-} }
+fn same[T: key](a: T, b: T) -> u64 {
+    if a == b {
+        1u64
+    } else {
+        0
+    }
+}
+
+fn doc_same(a: Doc, b: Doc) -> u64 {
+    same(a, b)
+}
+
+fn keyed() -> u64 {
+    region r {
+        let pad = make_doc(r, "padding")
+        let a = make_doc(r, "key")
+        let b = make_doc(r, "key")
+        doc_same(a, b) * 100 + doc_same(a, make_doc(r, "ke")) * 10 + doc_same(pad, pad)
+    }
+}
+
 // M21: a closed Map[Doc, V] materializes its key glue over the value row's locator.
-fn lookup(m:Map[Doc,u64],k:Doc)->u64 { match map.get(m,k) {Some(v)=>v,None=>0} }
-pub fn main()->Result[(),Exit] { if docs()==31210u64 && tags()==31210u64 && keyed()==101u64 { Ok(()) } else { Error(Exit(status:1)) } }
+fn lookup(m: Map[Doc, u64], k: Doc) -> u64 {
+    match map.get(m, k) {
+        Some(v) => v,
+        None => 0
+    }
+}
+
+pub fn main() -> Result[(), Exit] {
+    if docs() == 31210u64 && tags() == 31210u64 && keyed() == 101u64 {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
+}

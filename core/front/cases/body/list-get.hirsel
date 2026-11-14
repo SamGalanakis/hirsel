@@ -7,12 +7,23 @@
 // expect: run generic() = 1
 fn byte_at(i: u64) -> u8 {
     let xs = result.unwrap(b"abcd")
-    match list.get(xs, i) { Some(x) => x, None => 255 }
+    match list.get(xs, i) {
+        Some(x) => x,
+        None => 255
+    }
 }
+
 fn present[T](xs: List[T]) -> u64 {
-    match list.get(xs, 0) { Some(_) => 1, None => 0 }
+    match list.get(xs, 0) {
+        Some(_) => 1,
+        None => 0
+    }
 }
-fn generic() -> u64 { let xs = result.unwrap(b"abcd"); present(xs) }
+
+fn generic() -> u64 {
+    let xs = result.unwrap(b"abcd");
+    present(xs)
+}
 
 // A nonzero generic index verifies the substituted element stride and value ABI.
 // expect: run generic_value() = 99
@@ -20,4 +31,8 @@ fn second[T: plain](xs: List[T]) -> T {
     let v = option.unwrap(list.get(xs, 2))
     v
 }
-fn generic_value() -> u8 { let xs = result.unwrap(b"abcd"); second(xs) }
+
+fn generic_value() -> u8 {
+    let xs = result.unwrap(b"abcd");
+    second(xs)
+}

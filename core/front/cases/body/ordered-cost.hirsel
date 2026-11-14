@@ -2,17 +2,54 @@
 // expect: run scalar_less() = 1
 // expect: run scalar_min() = 7
 // expect: run text_min() = 1
-fn less[T:ordered](a:View[T],b:View[T])->bool { a<b }
-fn closed_less(a:View[u64],b:View[u64])->bool { a<b }
-fn min[T:ordered](p:View[(T,T)])->View[T] in p {
- if p.1<p.0 { view p.1 } else { view p.0 }
+fn less[T: ordered](a: View[T], b: View[T]) -> bool {
+    a < b
 }
-fn closed_scalar(p:View[(u64,u64)])->View[u64] in p {
- if p.1<p.0 { view p.1 } else { view p.0 }
+
+fn closed_less(a: View[u64], b: View[u64]) -> bool {
+    a < b
 }
-fn closed_text(p:View[(String,String)])->View[String] in p {
- if p.1<p.0 { view p.1 } else { view p.0 }
+
+fn min[T: ordered](p: View[(T, T)]) -> View[T] in p {
+    if p.1 < p.0 {
+        view p.1
+    } else {
+        view p.0
+    }
 }
-fn scalar_less()->u64 { let a=7u64; let b=9u64; if less(view a,view b) {1u64} else {0} }
-fn scalar_min()->u64 { let p=(7u64,9u64); min(view p) }
-fn text_min()->u64 { let p=("z","a"); string.byte_len(min(view p)) }
+
+fn closed_scalar(p: View[(u64, u64)]) -> View[u64] in p {
+    if p.1 < p.0 {
+        view p.1
+    } else {
+        view p.0
+    }
+}
+
+fn closed_text(p: View[(String, String)]) -> View[String] in p {
+    if p.1 < p.0 {
+        view p.1
+    } else {
+        view p.0
+    }
+}
+
+fn scalar_less() -> u64 {
+    let a = 7u64;
+    let b = 9u64;
+    if less(view a, view b) {
+        1u64
+    } else {
+        0
+    }
+}
+
+fn scalar_min() -> u64 {
+    let p = (7u64, 9u64);
+    min(view p)
+}
+
+fn text_min() -> u64 {
+    let p = ("z", "a");
+    string.byte_len(min(view p))
+}

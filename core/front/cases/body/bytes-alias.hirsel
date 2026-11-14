@@ -1,9 +1,11 @@
 // LANG-9: an alias names its right side, so `Bytes` and `List[u8]` are one type: a
 // `List[T]` result fixes T = u8 against an expected `Bytes`, and a `Bytes` passes where
 // `List[u8]` is expected.
-
 // expect: accept
-fn take_list(xs: List[u8]) -> u64 { list.len(xs) }
+fn take_list(xs: List[u8]) -> u64 {
+    list.len(xs)
+}
+
 fn f() -> u64 {
     let buf: Bytes = list.new()
     take_list(buf)

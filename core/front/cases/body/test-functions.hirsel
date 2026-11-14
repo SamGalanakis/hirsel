@@ -2,27 +2,41 @@
 // expect: accept
 // expect: run called_failure() = fail Fail
 @test
-fn success() -> Result[(), ()] { Ok(()) }
+fn success() -> Result[(), ()] {
+    Ok(())
+}
+
 @test
-fn capabilities(out: Stdout, input: Stdin, errors: Stderr, d: Dir, net: Net,
-            clock: Clock, random: Random, env: Env, process: Process, tasks: Tasks) -> Result[(), ()] {
+fn capabilities(out: Stdout, input: Stdin, errors: Stderr, d: Dir, net: Net, clock: Clock, random: Random, env: Env, process: Process, tasks: Tasks) -> Result[(), ()] {
     let cb: fn() -> Result[(), ()] = success
     let _ = cb()
     success()
 }
+
 @test
 fn accepted() -> Result[(), ()] {
     let cb: fn() -> Result[(), ()] = success
     let _ = cb()
     invoke(success)
 }
-fn invoke(f: fn() -> Result[(), ()]) -> Result[(), ()] { f() }
+
+fn invoke(f: fn() -> Result[(), ()]) -> Result[(), ()] {
+    f()
+}
+
 @test
-fn failure() -> Result[(), ()] { fail("test failure") }
+fn failure() -> Result[(), ()] {
+    fail("test failure")
+}
+
 @test
-fn called_failure() -> Result[(), ()] { failure() }
+fn called_failure() -> Result[(), ()] {
+    failure()
+}
 
 // A taken test value is an ordinary callback; the helper need not be a test.
 // expect: run callback_failure() = fail Fail
 @test
-fn callback_failure() -> Result[(), ()] { invoke(failure) }
+fn callback_failure() -> Result[(), ()] {
+    invoke(failure)
+}

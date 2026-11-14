@@ -1,3 +1,2 @@
 // Module `option` (FAIL-2).
-
 pub fn unwrap[T](take x: Option[T]) -> T

@@ -5,19 +5,41 @@
 // expect: accept
 // native: run shared() = 7
 // native: run inside() = 11
-type Chunk: shareable { id: u64 }
-type Piece { chunk: Rc[Chunk], lo: u64 }
-fn shared() -> u64 {
-  let Ok(c) = rc.new(Chunk(id: 7)) else { return 999 }
-  let q: Result[Rc[Chunk], Capacity] = clone(c)
-  let Ok(_q) = q else { return 998 }
-  match rc.try_unwrap(take c) { Ok(_) => 0, Error(h) => h.id }
+type Chunk: shareable {
+    id: u64
 }
+
+type Piece {
+    chunk: Rc[Chunk],
+    lo: u64
+}
+
+fn shared() -> u64 {
+    let Ok(c) = rc.new(Chunk(id: 7)) else {
+        return 999
+    }
+    let q: Result[Rc[Chunk], Capacity] = clone(c)
+    let Ok(_q) = q else {
+        return 998
+    }
+    match rc.try_unwrap(take c) {
+        Ok(_) => 0,
+        Error(h) => h.id
+    }
+}
+
 fn inside() -> u64 {
-  let Ok(c) = rc.new(Chunk(id: 7)) else { return 999 }
-  let p = Piece(chunk: take c, lo: 4)
-  let r: Result[Piece, Capacity] = clone(p)
-  let Ok(q) = r else { return 998 }
-  let Piece(chunk: h, lo: _) = take p
-  match rc.try_unwrap(take h) { Ok(_) => 0, Error(back) => back.id + q.lo }
+    let Ok(c) = rc.new(Chunk(id: 7)) else {
+        return 999
+    }
+    let p = Piece(chunk: take c, lo: 4)
+    let r: Result[Piece, Capacity] = clone(p)
+    let Ok(q) = r else {
+        return 998
+    }
+    let Piece(chunk: h, lo: _) = take p
+    match rc.try_unwrap(take h) {
+        Ok(_) => 0,
+        Error(back) => back.id + q.lo
+    }
 }

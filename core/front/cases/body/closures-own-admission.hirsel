@@ -3,24 +3,39 @@
 // expect: run failed() = 35
 // expect: run success() = 19
 fn failed() -> u64 {
-  let a: u64 = 7
-  let b: u8 = 3
-  let outer: Result[u64, Capacity] = bound bytes 0 {
+    let a: u64 = 7
+    let b: u8 = 3
+    let outer: Result[u64, Capacity] = bound bytes 0 {
+        let result: Result[own[send] fn() -> u64, (Capacity, (u8, u64))] = fn() -> u64 {
+            if b == 3 {
+                a + 12
+            } else {
+                0
+            }
+        }
+        match result {
+            Error((c, (first, second))) => c.requested + c.available + second + int.widen(first) + 9,
+            Ok(take cb) => cb(),
+        }
+    }
+    match outer {
+        Ok(n) => n,
+        Error(_) => 0
+    }
+}
+
+fn success() -> u64 {
+    let a: u64 = 7
+    let b: u8 = 3
     let result: Result[own[send] fn() -> u64, (Capacity, (u8, u64))] = fn() -> u64 {
-      if b == 3 { a + 12 } else { 0 }
+        if b == 3 {
+            a + 12
+        } else {
+            0
+        }
     }
     match result {
-      Error((c, (first, second))) => c.requested + c.available + second + int.widen(first) + 9,
-      Ok(take cb) => cb(),
+        Ok(take cb) => cb(),
+        Error(_) => 0
     }
-  }
-  match outer { Ok(n) => n, Error(_) => 0 }
-}
-fn success() -> u64 {
-  let a: u64 = 7
-  let b: u8 = 3
-  let result: Result[own[send] fn() -> u64, (Capacity, (u8, u64))] = fn() -> u64 {
-    if b == 3 { a + 12 } else { 0 }
-  }
-  match result { Ok(take cb) => cb(), Error(_) => 0 }
 }

@@ -1,7 +1,12 @@
 // expect: accept
 // SEM-9 and MEM-24: arrays multiply the element size, without a header or a block.
-type Bytes4: key { data: Inline[u8, 4u8] }
-type Nothing { data: Inline[u64, 0] }
+type Bytes4: key {
+    data: Inline[u8, 4u8]
+}
+
+type Nothing {
+    data: Inline[u64, 0]
+}
 // expect: kind Bytes4 plain
 // expect: size Bytes4 4
 // expect: size Nothing 0

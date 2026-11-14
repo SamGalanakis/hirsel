@@ -1,4 +1,10 @@
 // OWN-25: a stable value is read where a view of its type is expected, with no `view`.
 // expect: accept
-stable type S { x: u64 }
-fn f(s: S) -> u64 { let v: View[S] = s; 0 }
+stable type S {
+    x: u64
+}
+
+fn f(s: S) -> u64 {
+    let v: View[S] = s;
+    0
+}

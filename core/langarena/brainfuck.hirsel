@@ -1,99 +1,189 @@
 // kostya/LangArena 3c9f84d benchmarks/brainfuck_{array,recursion}.rs.
 type Op = Dec | Inc | Prev | Next | Print | Loop(List[Op])
-type Tape {data:Bytes,pos:u64}
-fn push_byte(mut b:Bytes,x:u8)->Result[(),helper.Error] {
-    match list.push(mut b,x) {Ok(())=>Ok(()),Error((c,_))=>Error(Capacity(c))}
+
+type Tape {
+    data: Bytes,
+    pos: u64
 }
-fn advance(mut t:Tape)->Result[(),helper.Error] {
-    t.pos+=1
-    if t.pos==list.len(t.data) {push_byte(mut t.data,0)?}
+
+fn push_byte(mut b: Bytes, x: u8) -> Result[(), helper.Error] {
+    match list.push(mut b, x) {
+        Ok(()) => Ok(()),
+        Error((c, _)) => Error(Capacity(c))
+    }
+}
+
+fn advance(mut t: Tape) -> Result[(), helper.Error] {
+    t.pos += 1
+    if t.pos == list.len(t.data) {
+        push_byte(mut t.data, 0)?
+    }
     Ok(())
 }
-fn array_run(source:String)->Result[u32,helper.Error] {
-    let mut code:Bytes=list.new()
+
+fn array_run(source: String) -> Result[u32, helper.Error] {
+    let mut code: Bytes = list.new()
     for c in string.as_bytes(source) {
-        if c==b'+' || c==b'-' || c==b'<' || c==b'>' || c==b'[' || c==b']' || c==b'.' || c==b',' {push_byte(mut code,c)?}
-    }
-    if list.len(code)==0 {return Ok(0)}
-    let mut jumps:List[u64]=list.new()
-    helper.mem(list.fill(mut jumps,list.len(code),0))?
-    let mut stack:List[u64]=list.new()
-    for i in 0 .. list.len(code) {
-        if code[i]==b'[' {
-            match list.push(mut stack,i) {Ok(())=>{},Error((c,_))=>return Error(Capacity(c))}
-        } else if code[i]==b']' {
-            let Some(start)=list.pop(mut stack) else {return Ok(0)}
-            jumps[start]=i
-            jumps[i]=start
+        if c == b'+' || c == b'-' || c == b'<' || c == b'>' || c == b'[' || c == b']' || c == b'.' || c == b',' {
+            push_byte(mut code, c)?
         }
     }
-    if list.len(stack)!=0 {return Ok(0)}
-    let mut t=Tape(data:list.new(),pos:0)
-    helper.mem(list.fill(mut t.data,30000,0))?
-    let mut pc:u64=0
-    let mut result:u32=0
-    while pc<list.len(code) {
-        let c=code[pc]
-        if c==b'+' {t.data[t.pos]=int.wrapping_add(t.data[t.pos],1)}
-        else if c==b'-' {t.data[t.pos]=int.wrapping_sub(t.data[t.pos],1)}
-        else if c==b'>' {advance(mut t)?}
-        else if c==b'<' {if t.pos>0 {t.pos-=1}}
-        else if c==b'[' {if t.data[t.pos]==0 {pc=jumps[pc]}}
-        else if c==b']' {if t.data[t.pos]!=0 {pc=jumps[pc]}}
-        else if c==b'.' {result=int.wrapping_add(result<<2u32,int.widen(t.data[t.pos]))}
-        else {return Ok(0)}
-        pc+=1
+    if list.len(code) == 0 {
+        return Ok(0)
+    }
+    let mut jumps: List[u64] = list.new()
+    helper.mem(list.fill(mut jumps, list.len(code), 0))?
+    let mut stack: List[u64] = list.new()
+    for i in 0 .. list.len(code) {
+        if code[i] == b'[' {
+            match list.push(mut stack, i) {
+                Ok(()) => {},
+                Error((c, _)) => return Error(Capacity(c))
+            }
+        } else if code[i] == b']' {
+            let Some(start) = list.pop(mut stack) else {
+                return Ok(0)
+            }
+            jumps[start] = i
+            jumps[i] = start
+        }
+    }
+    if list.len(stack) != 0 {
+        return Ok(0)
+    }
+    let mut t = Tape(data: list.new(), pos: 0)
+    helper.mem(list.fill(mut t.data, 30000, 0))?
+    let mut pc: u64 = 0
+    let mut result: u32 = 0
+    while pc < list.len(code) {
+        let c = code[pc]
+        if c == b'+' {
+            t.data[t.pos] = int.wrapping_add(t.data[t.pos], 1)
+        } else if c == b'-' {
+            t.data[t.pos] = int.wrapping_sub(t.data[t.pos], 1)
+        } else if c == b'>' {
+            advance(mut t)?
+        } else if c == b'<' {
+            if t.pos > 0 {
+                t.pos -= 1
+            }
+        } else if c == b'[' {
+            if t.data[t.pos] == 0 {
+                pc = jumps[pc]
+            }
+        } else if c == b']' {
+            if t.data[t.pos] != 0 {
+                pc = jumps[pc]
+            }
+        } else if c == b'.' {
+            result = int.wrapping_add(result << 2u32, int.widen(t.data[t.pos]))
+        } else {
+            return Ok(0)
+        }
+        pc += 1
     }
     Ok(result)
 }
-fn parse(b:Bytes,mut at:u64)->Result[List[Op],helper.Error] {
-    let mut ops:List[Op]=list.new()
-    while at<list.len(b) {
-        let c=b[at]
-        at+=1
-        if c==b']' {break}
-        let op=if c==b'-' {Dec} else if c==b'+' {Inc} else if c==b'<' {Prev}
-            else if c==b'>' {Next} else if c==b'.' {Print}
-            else if c==b'[' {Loop(parse(b,mut at)?)} else {continue}
-        match list.push(mut ops,take op) {Ok(())=>{},Error((cap,take unused))=>return Error(Capacity(cap))}
+
+fn parse(b: Bytes, mut at: u64) -> Result[List[Op], helper.Error] {
+    let mut ops: List[Op] = list.new()
+    while at < list.len(b) {
+        let c = b[at]
+        at += 1
+        if c == b']' {
+            break
+        }
+        let op = if c == b'-' {
+            Dec
+        } else if c == b'+' {
+            Inc
+        } else if c == b'<' {
+            Prev
+        } else if c == b'>' {
+            Next
+        } else if c == b'.' {
+            Print
+        } else if c == b'[' {
+            Loop(parse(b, mut at)?)
+        } else {
+            continue
+        }
+        match list.push(mut ops, take op) {
+            Ok(()) => {},
+            Error((cap, take unused)) => return Error(Capacity(cap))
+        }
     }
     Ok(take ops)
 }
-fn execute(ops:List[Op],mut t:Tape,mut result:i64)->Result[(),helper.Error] {
+
+fn execute(ops: List[Op], mut t: Tape, mut result: i64) -> Result[(), helper.Error] {
     for op in ops {
         match op {
-            Dec=>{t.data[t.pos]=int.wrapping_sub(t.data[t.pos],1)},
-            Inc=>{t.data[t.pos]=int.wrapping_add(t.data[t.pos],1)},
-            Prev=>{if t.pos>0 {t.pos-=1}},
-            Next=>{advance(mut t)?},
-            Print=>{result=int.wrapping_add(result<<2i64,int.widen(t.data[t.pos]))},
-            Loop(inner)=>{while t.data[t.pos]!=0 {execute(inner,mut t,mut result)?}},
+            Dec => {
+                t.data[t.pos] = int.wrapping_sub(t.data[t.pos], 1)
+            },
+            Inc => {
+                t.data[t.pos] = int.wrapping_add(t.data[t.pos], 1)
+            },
+            Prev => {
+                if t.pos > 0 {
+                    t.pos -= 1
+                }
+            },
+            Next => {
+                advance(mut t)?
+            },
+            Print => {
+                result = int.wrapping_add(result << 2i64, int.widen(t.data[t.pos]))
+            },
+            Loop(inner) => {
+                while t.data[t.pos] != 0 {
+                    execute(inner, mut t, mut result)?
+                }
+            },
         }
     }
     Ok(())
 }
-fn recursive_run(source:String)->Result[u32,helper.Error] {
-    let mut at:u64=0
-    let ops=parse(string.as_bytes(source),mut at)?
-    let mut t=Tape(data:list.new(),pos:0)
-    helper.mem(list.fill(mut t.data,1,0))?
-    let mut result:i64=0
-    execute(ops,mut t,mut result)?
+
+fn recursive_run(source: String) -> Result[u32, helper.Error] {
+    let mut at: u64 = 0
+    let ops = parse(string.as_bytes(source), mut at)?
+    let mut t = Tape(data: list.new(), pos: 0)
+    helper.mem(list.fill(mut t.data, 1, 0))?
+    let mut result: i64 = 0
+    execute(ops, mut t, mut result)?
     Ok(int.truncate(result))
 }
-pub fn dispatch(config:String,name:String,warmup:u64,iterations:u64)->Result[u32,helper.Error] {
-    let recursive=name=="Brainfuck::Recursion"
-    if !recursive && name!="Brainfuck::Array" {return Error(UnknownTask)}
-    let program=helper.config_s(config,name,"program")?
-    let warmup_program=helper.config_s(config,name,"warmup_program")?
-    for _ in 0 .. warmup {let _=if recursive {recursive_run(warmup_program)?} else {array_run(warmup_program)?}}
-    let mut total:u32=0
+
+pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
+    let recursive = name == "Brainfuck::Recursion"
+    if !recursive && name != "Brainfuck::Array" {
+        return Error(UnknownTask)
+    }
+    let program = helper.config_s(config, name, "program")?
+    let warmup_program = helper.config_s(config, name, "warmup_program")?
+    for _ in 0 .. warmup {
+        let _ = if recursive {
+            recursive_run(warmup_program)?
+        } else {
+            array_run(warmup_program)?
+        }
+    }
+    let mut total: u32 = 0
     for _ in 0 .. iterations {
-        let result=if recursive {recursive_run(program)?} else {array_run(program)?}
-        total=int.wrapping_add(total,result)
+        let result = if recursive {
+            recursive_run(program)?
+        } else {
+            array_run(program)?
+        }
+        total = int.wrapping_add(total, result)
     }
     Ok(total)
 }
-pub fn main(out:Stdout,d:Dir,argv:Args)->Result[(),Exit] waits {
-    harness.main(out,d,argv,fn(c:String,n:String,w:u64,i:u64)->Result[u32,helper.Error] {dispatch(c,n,w,i)})
+
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
+    harness.main(out, d, argv, fn(c: String, n: String, w: u64, i: u64) -> Result[u32, helper.Error] {
+        dispatch(c, n, w, i)
+    })
 }

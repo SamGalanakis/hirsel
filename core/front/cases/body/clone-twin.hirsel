@@ -11,89 +11,169 @@
 // expect: run shape() = 4
 // expect: run empty() = 3
 // expect: run refused() = 80404
-type Row { name: String, n: u64 }
-@twin(Row) stable type RowS { name: Text, n: u64 }
-type Bag { xs: List[u64] }
-@twin(Bag) stable type BagS { xs: FixedSpan[u64] }
-type Inner { s: String }
-@twin(Inner) stable type InnerS { s: Text }
-type Outer { a: Box[Inner], b: Inner, k: u64 }
-@twin(Outer) stable type OuterS { a: InnerS, b: InnerS, k: u64 }
+type Row {
+    name: String,
+    n: u64
+}
+
+@twin(Row)
+stable type RowS {
+    name: Text,
+    n: u64
+}
+
+type Bag {
+    xs: List[u64]
+}
+
+@twin(Bag)
+stable type BagS {
+    xs: FixedSpan[u64]
+}
+
+type Inner {
+    s: String
+}
+
+@twin(Inner)
+stable type InnerS {
+    s: Text
+}
+
+type Outer {
+    a: Box[Inner],
+    b: Inner,
+    k: u64
+}
+
+@twin(Outer)
+stable type OuterS {
+    a: InnerS,
+    b: InnerS,
+    k: u64
+}
+
 type Shape = Dot | Word(String)
-@twin(Shape) stable type ShapeS = Dot | Word(Text)
+
+@twin(Shape)
+stable type ShapeS = Dot | Word(Text)
+
 fn own(x: String) -> String {
-  let mut s = string.new()
-  let _ = string.push(mut s, x)
-  s
+    let mut s = string.new()
+    let _ = string.push(mut s, x)
+    s
 }
+
 fn back() -> u64 {
-  let x = Row(name: own("hello"), n: 3)
-  region r {
-    let made: Result[RowS in r, Capacity] = clone_in(r, x)
-    let Ok(s) = made else { return 998 }
-    let c: Result[Row, Capacity] = clone(s)
-    match c { Ok(y) => string.byte_len(y.name) * 10 + y.n, Error(_) => 999 }
-  }
+    let x = Row(name: own("hello"), n: 3)
+    region r {
+        let made: Result[RowS in r, Capacity] = clone_in(r, x)
+        let Ok(s) = made else {
+            return 998
+        }
+        let c: Result[Row, Capacity] = clone(s)
+        match c {
+            Ok(y) => string.byte_len(y.name) * 10 + y.n,
+            Error(_) => 999
+        }
+    }
 }
+
 fn bag() -> u64 {
-  let mut xs: List[u64] = list.new()
-  let _ = list.push(mut xs, 4)
-  let _ = list.push(mut xs, 6)
-  let _ = list.push(mut xs, 8)
-  let b = Bag(xs: take xs)
-  region r {
-    let made: Result[BagS in r, Capacity] = clone_in(r, b)
-    let Ok(s) = made else { return 998 }
-    let c: Result[Bag, Capacity] = clone(s)
-    match c { Ok(y) => list.len(y.xs) * 100 + y.xs[1], Error(_) => 999 }
-  }
+    let mut xs: List[u64] = list.new()
+    let _ = list.push(mut xs, 4)
+    let _ = list.push(mut xs, 6)
+    let _ = list.push(mut xs, 8)
+    let b = Bag(xs: take xs)
+    region r {
+        let made: Result[BagS in r, Capacity] = clone_in(r, b)
+        let Ok(s) = made else {
+            return 998
+        }
+        let c: Result[Bag, Capacity] = clone(s)
+        match c {
+            Ok(y) => list.len(y.xs) * 100 + y.xs[1],
+            Error(_) => 999
+        }
+    }
 }
+
 fn outer() -> u64 {
-  let Ok(a) = box.new(Inner(s: own("abc"))) else { return 997 }
-  let o = Outer(a: take a, b: Inner(s: own("de")), k: 7)
-  region r {
-    let made: Result[OuterS in r, Capacity] = clone_in(r, o)
-    let Ok(s) = made else { return 998 }
-    let c: Result[Outer, Capacity] = clone(s)
-    match c {
-      Ok(y) => string.byte_len(y.a.s) + string.byte_len(y.b.s) * 10 + y.k * 100,
-      Error(_) => 999,
+    let Ok(a) = box.new(Inner(s: own("abc"))) else {
+        return 997
     }
-  }
+    let o = Outer(a: take a, b: Inner(s: own("de")), k: 7)
+    region r {
+        let made: Result[OuterS in r, Capacity] = clone_in(r, o)
+        let Ok(s) = made else {
+            return 998
+        }
+        let c: Result[Outer, Capacity] = clone(s)
+        match c {
+            Ok(y) => string.byte_len(y.a.s) + string.byte_len(y.b.s) * 10 + y.k * 100,
+            Error(_) => 999,
+        }
+    }
 }
+
 fn shape() -> u64 {
-  let x: Shape = Word(own("abcd"))
-  region r {
-    let made: Result[ShapeS in r, Capacity] = clone_in(r, x)
-    let Ok(s) = made else { return 998 }
-    let c: Result[Shape, Capacity] = clone(s)
-    match c { Ok(Word(t)) => string.byte_len(t), Ok(Dot) => 997, Error(_) => 999 }
-  }
+    let x: Shape = Word(own("abcd"))
+    region r {
+        let made: Result[ShapeS in r, Capacity] = clone_in(r, x)
+        let Ok(s) = made else {
+            return 998
+        }
+        let c: Result[Shape, Capacity] = clone(s)
+        match c {
+            Ok(Word(t)) => string.byte_len(t),
+            Ok(Dot) => 997,
+            Error(_) => 999
+        }
+    }
 }
+
 fn empty() -> u64 {
-  let x = Row(name: string.new(), n: 3)
-  region r {
-    let made: Result[RowS in r, Capacity] = clone_in(r, x)
-    let Ok(s) = made else { return 998 }
-    let got = bound bytes 0 {
-      let c: Result[Row, Capacity] = clone(s)
-      match c { Ok(y) => string.byte_len(y.name) + y.n, Error(_) => 999 }
+    let x = Row(name: string.new(), n: 3)
+    region r {
+        let made: Result[RowS in r, Capacity] = clone_in(r, x)
+        let Ok(s) = made else {
+            return 998
+        }
+        let got = bound bytes 0 {
+            let c: Result[Row, Capacity] = clone(s)
+            match c {
+                Ok(y) => string.byte_len(y.name) + y.n,
+                Error(_) => 999
+            }
+        }
+        match got {
+            Ok(k) => k,
+            Error(_) => 2
+        }
     }
-    match got { Ok(k) => k, Error(_) => 2 }
-  }
 }
+
 fn refused() -> u64 {
-  let Ok(a) = box.new(Inner(s: own("abc"))) else { return 997 }
-  let o = Outer(a: take a, b: Inner(s: own("de")), k: 7)
-  region r {
-    let made: Result[OuterS in r, Capacity] = clone_in(r, o)
-    let Ok(s) = made else { return 998 }
-    let got = bound bytes 36 {
-      let c: Result[Outer, Capacity] = clone(s)
-      let Error(e) = c else { return 1 }
-      let after: List[u64] = list.with_capacity(4)?
-      e.requested * 10000 + e.available * 100 + list.capacity(after)
+    let Ok(a) = box.new(Inner(s: own("abc"))) else {
+        return 997
     }
-    match got { Ok(k) => k, Error(_) => 2 }
-  }
+    let o = Outer(a: take a, b: Inner(s: own("de")), k: 7)
+    region r {
+        let made: Result[OuterS in r, Capacity] = clone_in(r, o)
+        let Ok(s) = made else {
+            return 998
+        }
+        let got = bound bytes 36 {
+            let c: Result[Outer, Capacity] = clone(s)
+            let Error(e) = c else {
+                return 1
+            }
+            let after: List[u64] = list.with_capacity(4)?
+            e.requested * 10000 + e.available * 100 + list.capacity(after)
+        }
+        match got {
+            Ok(k) => k,
+            Error(_) => 2
+        }
+    }
 }

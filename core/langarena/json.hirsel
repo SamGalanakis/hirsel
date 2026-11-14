@@ -1,134 +1,195 @@
 // kostya/LangArena3c9f84d benchmarks/json_{generate,parse_dom,parse_mapping}.rs.
 // Current std.json document API; Mapping materializes typed Coordinate records.
-type Coordinate { x:f64, y:f64, z:f64 }
+type Coordinate {
+    x: f64,
+    y: f64,
+    z: f64
+}
+
 // serde_json's ryu spelling, from the public shortest digits/exponent API.
 // Generated coordinates are finite and non-negative; names use fixed7 separately.
-fn number(mut out:String,value:f64)->Result[(),helper.Error] {
-    let (coefficient,power)=float.shortest64(value)
-    if coefficient==0 {helper.mem(string.push(mut out,"0.0"))?;return Ok(())}
-    let mut digits=string.new()
-    helper.mem(string.push_u64(mut digits,coefficient))?
-    let size=string.byte_len(digits)
-    let width:i64=int.narrow(size)
-    let point=width+power
-    if point<= -5i64 || point>16 {
-        helper.mem(string.push(mut out,string.slice(digits,0,1)))?
-        if size>1 {
-            helper.mem(string.push(mut out,"."))?
-            helper.mem(string.push(mut out,string.slice(digits,1,size)))?
+fn number(mut out: String, value: f64) -> Result[(), helper.Error] {
+    let (coefficient, power) = float.shortest64(value)
+    if coefficient == 0 {
+        helper.mem(string.push(mut out, "0.0"))?;
+        return Ok(())
+    }
+    let mut digits = string.new()
+    helper.mem(string.push_u64(mut digits, coefficient))?
+    let size = string.byte_len(digits)
+    let width: i64 = int.narrow(size)
+    let point = width + power
+    if point <= -5i64 || point > 16 {
+        helper.mem(string.push(mut out, string.slice(digits, 0, 1)))?
+        if size > 1 {
+            helper.mem(string.push(mut out, "."))?
+            helper.mem(string.push(mut out, string.slice(digits, 1, size)))?
         }
-        helper.mem(string.push(mut out,"e"))?
-        helper.mem(string.push_i64(mut out,point-1))?
-    } else if power>=0 {
-        helper.mem(string.push(mut out,digits))?
-        for _ in 0 .. power {helper.mem(string.push(mut out,"0"))?}
-        helper.mem(string.push(mut out,".0"))?
-    } else if point>0 {
-        let cut:u64=int.narrow(point)
-        helper.mem(string.push(mut out,string.slice(digits,0,cut)))?
-        helper.mem(string.push(mut out,"."))?
-        helper.mem(string.push(mut out,string.slice(digits,cut,size)))?
+        helper.mem(string.push(mut out, "e"))?
+        helper.mem(string.push_i64(mut out, point - 1))?
+    } else if power >= 0 {
+        helper.mem(string.push(mut out, digits))?
+        for _ in 0 .. power {
+            helper.mem(string.push(mut out, "0"))?
+        }
+        helper.mem(string.push(mut out, ".0"))?
+    } else if point > 0 {
+        let cut: u64 = int.narrow(point)
+        helper.mem(string.push(mut out, string.slice(digits, 0, cut)))?
+        helper.mem(string.push(mut out, "."))?
+        helper.mem(string.push(mut out, string.slice(digits, cut, size)))?
     } else {
-        helper.mem(string.push(mut out,"0."))?
-        for _ in 0 .. -point {helper.mem(string.push(mut out,"0"))?}
-        helper.mem(string.push(mut out,digits))?
+        helper.mem(string.push(mut out, "0."))?
+        for _ in 0 .. -point {
+            helper.mem(string.push(mut out, "0"))?
+        }
+        helper.mem(string.push(mut out, digits))?
     }
     Ok(())
 }
-fn generate(n:u64)->Result[String,helper.Error] {
-    let mut out=helper.mem(string.from("{\"coordinates\":["))?
-    let mut g=helper.lcg()
+
+fn generate(n: u64) -> Result[String, helper.Error] {
+    let mut out = helper.mem(string.from("{\"coordinates\":["))?
+    let mut g = helper.lcg()
     for i in 0 .. n {
-        let x=float.round(helper.next_float(mut g,1.0)*100000000.0)/100000000.0
-        let y=float.round(helper.next_float(mut g,1.0)*100000000.0)/100000000.0
-        let z=float.round(helper.next_float(mut g,1.0)*100000000.0)/100000000.0
-        if i>0 {helper.mem(string.push(mut out,","))?}
-        helper.mem(string.push(mut out,"{\"x\":"))?
-        number(mut out,x)?
-        helper.mem(string.push(mut out,",\"y\":"))?
-        number(mut out,y)?
-        helper.mem(string.push(mut out,",\"z\":"))?
-        number(mut out,z)?
-        helper.mem(string.push(mut out,",\"name\":\""))?
-        helper.mem(float.push_fixed64(mut out,helper.next_float(mut g,1.0),7))?
-        helper.mem(string.push(mut out," "))?
-        helper.mem(string.push_i64(mut out,int.widen(helper.next_int(mut g,10000))))?
-        helper.mem(string.push(mut out,"\",\"opts\":{\"1\":[1,true]}}"))?
+        let x = float.round(helper.next_float(mut g, 1.0) * 100000000.0) / 100000000.0
+        let y = float.round(helper.next_float(mut g, 1.0) * 100000000.0) / 100000000.0
+        let z = float.round(helper.next_float(mut g, 1.0) * 100000000.0) / 100000000.0
+        if i > 0 {
+            helper.mem(string.push(mut out, ","))?
+        }
+        helper.mem(string.push(mut out, "{\"x\":"))?
+        number(mut out, x)?
+        helper.mem(string.push(mut out, ",\"y\":"))?
+        number(mut out, y)?
+        helper.mem(string.push(mut out, ",\"z\":"))?
+        number(mut out, z)?
+        helper.mem(string.push(mut out, ",\"name\":\""))?
+        helper.mem(float.push_fixed64(mut out, helper.next_float(mut g, 1.0), 7))?
+        helper.mem(string.push(mut out, " "))?
+        helper.mem(string.push_i64(mut out, int.widen(helper.next_int(mut g, 10000))))?
+        helper.mem(string.push(mut out, "\",\"opts\":{\"1\":[1,true]}}"))?
     }
-    helper.mem(string.push(mut out,"],\"info\":\"some info\"}"))?
+    helper.mem(string.push(mut out, "],\"info\":\"some info\"}"))?
     Ok(take out)
 }
-fn coordinate(j:std.json.Json)->Result[Coordinate,helper.Error] {
-    let mut x:f64=0.0
-    let mut y:f64=0.0
-    let mut z:f64=0.0
-    if let Obj(members)=j {
+
+fn coordinate(j: std.json.Json) -> Result[Coordinate, helper.Error] {
+    let mut x: f64 = 0.0
+    let mut y: f64 = 0.0
+    let mut z: f64 = 0.0
+    if let Obj(members) = j {
         for member in members {
-            let key=text.as_string(member.key)
-            if key=="x" || key=="y" || key=="z" {
-                let Num(spelling)=member.value else {return Error(Config)}
-                let value=match float.parse64(text.as_string(spelling)) {Ok(v)=>v,Error(_)=>return Error(Config)}
-                if key=="x" {x=value} else if key=="y" {y=value} else {z=value}
+            let key = text.as_string(member.key)
+            if key == "x" || key == "y" || key == "z" {
+                let Num(spelling) = member.value else {
+                    return Error(Config)
+                }
+                let value = match float.parse64(text.as_string(spelling)) {
+                    Ok(v) => v,
+                    Error(_) => return Error(Config)
+                }
+                if key == "x" {
+                    x = value
+                } else if key == "y" {
+                    y = value
+                } else {
+                    z = value
+                }
             }
         }
-        Ok(Coordinate(x:x,y:y,z:z))
-    } else {Error(Config)}
+        Ok(Coordinate(x: x, y: y, z: z))
+    } else {
+        Error(Config)
+    }
 }
-fn average(j:std.json.Json,mapping:bool)->Result[Coordinate,helper.Error] {
-    if let Obj(members)=j {
+
+fn average(j: std.json.Json, mapping: bool) -> Result[Coordinate, helper.Error] {
+    if let Obj(members) = j {
         for member in members {
-            if text.as_string(member.key)=="coordinates" {
-                let Arr(items)=member.value else {return Error(Config)}
-                let mut x:f64=0.0
-                let mut y:f64=0.0
-                let mut z:f64=0.0
-                let mut count:u64=0
-                let mut mapped:List[Coordinate]=list.new()
-                for item in items {
-                    let c=coordinate(item)?
-                    if mapping {
-                        match list.push(mut mapped,c) {Ok(())=>{},Error((e,_))=>return Error(Capacity(e))}
-                    } else {x+=c.x;y+=c.y;z+=c.z}
-                    count+=1
+            if text.as_string(member.key) == "coordinates" {
+                let Arr(items) = member.value else {
+                    return Error(Config)
                 }
-                if mapping {for c in mapped {x+=c.x;y+=c.y;z+=c.z}}
-                let divisor:f64=float.from_int(count)
-                return Ok(Coordinate(x:x/divisor,y:y/divisor,z:z/divisor))
+                let mut x: f64 = 0.0
+                let mut y: f64 = 0.0
+                let mut z: f64 = 0.0
+                let mut count: u64 = 0
+                let mut mapped: List[Coordinate] = list.new()
+                for item in items {
+                    let c = coordinate(item)?
+                    if mapping {
+                        match list.push(mut mapped, c) {
+                            Ok(()) => {},
+                            Error((e, _)) => return Error(Capacity(e))
+                        }
+                    } else {
+                        x += c.x;
+                        y += c.y;
+                        z += c.z
+                    }
+                    count += 1
+                }
+                if mapping {
+                    for c in mapped {
+                        x += c.x;
+                        y += c.y;
+                        z += c.z
+                    }
+                }
+                let divisor: f64 = float.from_int(count)
+                return Ok(Coordinate(x: x / divisor, y: y / divisor, z: z / divisor))
             }
         }
     }
     Error(Config)
 }
-pub fn dispatch(config:String,name:String,warmup:u64,iterations:u64)->Result[u32,helper.Error] {
-    if name!="Json::Generate" && name!="Json::ParseDom" && name!="Json::ParseMapping" {return Error(UnknownTask)}
-    let n=helper.config_i64(config,name,"coords")?
-    if n<0 {return Error(Config)}
-    let source=generate(int.narrow(n))?
-    let mut checksum:u32=0
-    if name=="Json::Generate" {
+
+pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
+    if name != "Json::Generate" && name != "Json::ParseDom" && name != "Json::ParseMapping" {
+        return Error(UnknownTask)
+    }
+    let n = helper.config_i64(config, name, "coords")?
+    if n < 0 {
+        return Error(Config)
+    }
+    let source = generate(int.narrow(n))?
+    let mut checksum: u32 = 0
+    if name == "Json::Generate" {
         region r {
-            let j=match std.json.parse(r,source) {Ok(v)=>v,Error(_)=>return Error(Config)}
-            let mut rendered=string.new()
-            for _ in 0 .. warmup+iterations {
-                rendered=string.new()
-                helper.mem(std.json.push_json(mut rendered,j))?
-                if string.starts_with(rendered,"{\"coordinates\":") {checksum+=1}
+            let j = match std.json.parse(r, source) {
+                Ok(v) => v,
+                Error(_) => return Error(Config)
+            }
+            let mut rendered = string.new()
+            for _ in 0 .. warmup + iterations {
+                rendered = string.new()
+                helper.mem(std.json.push_json(mut rendered, j))?
+                if string.starts_with(rendered, "{\"coordinates\":") {
+                    checksum += 1
+                }
             }
         }
     } else {
-        for _ in 0 .. warmup+iterations {
+        for _ in 0 .. warmup + iterations {
             region r {
-                let j=match std.json.parse(r,source) {Ok(v)=>v,Error(_)=>return Error(Config)}
-                let c=average(j,name=="Json::ParseMapping")?
-                let a=helper.checksum_f64(c.x)?
-                let b=helper.checksum_f64(c.y)?
-                let d=helper.checksum_f64(c.z)?
-                checksum=int.wrapping_add(checksum,int.wrapping_add(int.wrapping_add(a,b),d))
+                let j = match std.json.parse(r, source) {
+                    Ok(v) => v,
+                    Error(_) => return Error(Config)
+                }
+                let c = average(j, name == "Json::ParseMapping")?
+                let a = helper.checksum_f64(c.x)?
+                let b = helper.checksum_f64(c.y)?
+                let d = helper.checksum_f64(c.z)?
+                checksum = int.wrapping_add(checksum, int.wrapping_add(int.wrapping_add(a, b), d))
             }
         }
     }
     Ok(checksum)
 }
-pub fn main(out:Stdout,d:Dir,argv:Args)->Result[(),Exit] waits {
-    harness.main(out,d,argv,fn(c:String,n:String,w:u64,i:u64)->Result[u32,helper.Error] {dispatch(c,n,w,i)})
+
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
+    harness.main(out, d, argv, fn(c: String, n: String, w: u64, i: u64) -> Result[u32, helper.Error] {
+        dispatch(c, n, w, i)
+    })
 }

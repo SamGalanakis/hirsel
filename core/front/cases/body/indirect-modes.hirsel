@@ -2,16 +2,33 @@
 // Hand derivation: mutate 5 to 8, then return (8,9), selecting b gives 9.
 // expect: run f() = 9
 // expect: run overflow(255) = fail Overflow
-fn bump(mut x: u64) { x += 3 }
-type Pair { a: u64, b: u64 }
-fn pair(x: u64) -> Pair { Pair(a: x, b: x + 1) }
-fn f() -> u64 {
-  let mut x: u64 = 5
-  let m: fn(mut u64) = bump
-  m(mut x)
-  let p: fn(u64) -> Pair = pair
-  let r = p(x)
-  r.b
+fn bump(mut x: u64) {
+    x += 3
 }
-fn inc8(x: u8) -> u8 { x + 1 }
-fn overflow(x: u8) -> u8 { let cb: fn(u8) -> u8 = inc8; cb(x) }
+
+type Pair {
+    a: u64,
+    b: u64
+}
+
+fn pair(x: u64) -> Pair {
+    Pair(a: x, b: x + 1)
+}
+
+fn f() -> u64 {
+    let mut x: u64 = 5
+    let m: fn(mut u64) = bump
+    m(mut x)
+    let p: fn(u64) -> Pair = pair
+    let r = p(x)
+    r.b
+}
+
+fn inc8(x: u8) -> u8 {
+    x + 1
+}
+
+fn overflow(x: u8) -> u8 {
+    let cb: fn(u8) -> u8 = inc8;
+    cb(x)
+}

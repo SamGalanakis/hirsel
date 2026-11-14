@@ -1,5 +1,11 @@
 // expect: accept
 // std.json.write_value: the callee's r is generic 1, the caller's is generic 0.
-type Json { n: u64 }
-fn emit_value[T, in r](take w: Writer[T, in r], x: T) { }
-fn write_value[in r](take w: Writer[Json, in r], x: Json) { emit_value(take w, x) }
+type Json {
+    n: u64
+}
+
+fn emit_value[T, in r](take w: Writer[T, in r], x: T) {}
+
+fn write_value[in r](take w: Writer[Json, in r], x: Json) {
+    emit_value(take w, x)
+}

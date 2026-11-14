@@ -5,17 +5,68 @@
 // expect: run backwards(0) = 0
 // expect: run evaluated(0) = 1
 // expect: run labelled(0) = 2
-fn half(x: u64) -> u64 { let mut s = x; for i in 0u64..5 { s += i }; s }
-fn closed(x: u64) -> u64 { let mut s = x; for i in 0u64..=5 { s += i }; s }
-fn max(x: u64) -> u64 { let mut s = x; for _ in 253u8..=255 { s += 1; continue }; s }
-fn signed(x: i64) -> i64 { let mut s = x; for i in -3i64..3 { s += i }; s }
-fn backwards(x: u64) -> u64 { let mut s = x; for i in 5u8..=3 { s += 1 }; s }
-fn next(mut n: u64) -> u64 { let old = n; n += 1; old }
-fn evaluated(x: u64) -> u64 { let mut n = x; for _ in next(mut n)..3 { }; n }
+fn half(x: u64) -> u64 {
+    let mut s = x;
+    for i in 0u64 .. 5 {
+        s += i
+    };
+    s
+}
+
+fn closed(x: u64) -> u64 {
+    let mut s = x;
+    for i in 0u64 ..= 5 {
+        s += i
+    };
+    s
+}
+
+fn max(x: u64) -> u64 {
+    let mut s = x;
+    for _ in 253u8 ..= 255 {
+        s += 1;
+        continue
+    };
+    s
+}
+
+fn signed(x: i64) -> i64 {
+    let mut s = x;
+    for i in -3i64 .. 3 {
+        s += i
+    };
+    s
+}
+
+fn backwards(x: u64) -> u64 {
+    let mut s = x;
+    for i in 5u8 ..= 3 {
+        s += 1
+    };
+    s
+}
+
+fn next(mut n: u64) -> u64 {
+    let old = n;
+    n += 1;
+    old
+}
+
+fn evaluated(x: u64) -> u64 {
+    let mut n = x;
+    for _ in next(mut n) .. 3 {};
+    n
+}
+
 fn labelled(x: u64) -> u64 {
-  let mut s = x
-  'outer: for a in 0u8..3 {
-    for b in 0u8..3 { s += 1; if s == 2 { break 'outer } }
-  }
-  s
+    let mut s = x
+    'outer: for a in 0u8 .. 3 {
+        for b in 0u8 .. 3 {
+            s += 1;
+            if s == 2 {
+                break 'outer
+            }
+        }
+    }
+    s
 }

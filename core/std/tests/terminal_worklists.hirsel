@@ -1,20 +1,22 @@
 // A resumable counted parent must free each terminal buffer without a frame.
 // expect: run counted_string_buffer() = 3
-fn counted_string_buffer()->u64 {
-    let r=result.unwrap(rc.new(result.unwrap(string.from("abc"))))
+fn counted_string_buffer() -> u64 {
+    let r = result.unwrap(rc.new(result.unwrap(string.from("abc"))))
     string.byte_len(r)
 }
+
 // expect: run counted_list_buffers() = 1
-fn counted_list_buffers()->u64 {
-    let mut xs:List[String]=result.unwrap(list.with_capacity(1))
-    result.unwrap(list.push(mut xs,result.unwrap(string.from("abc"))))
-    let r=result.unwrap(rc.new(take xs))
+fn counted_list_buffers() -> u64 {
+    let mut xs: List[String] = result.unwrap(list.with_capacity(1))
+    result.unwrap(list.push(mut xs, result.unwrap(string.from("abc"))))
+    let r = result.unwrap(rc.new(take xs))
     list.len(r)
 }
+
 // expect: run counted_map_buffers() = 1
-fn counted_map_buffers()->u64 {
-    let mut m:Map[u64,String]=map.new()
-    result.unwrap(map.insert(mut m,7u64,result.unwrap(string.from("abc"))))
-    let a=result.unwrap(arc.new(take m))
+fn counted_map_buffers() -> u64 {
+    let mut m: Map[u64, String] = map.new()
+    result.unwrap(map.insert(mut m, 7u64, result.unwrap(string.from("abc"))))
+    let a = result.unwrap(arc.new(take m))
     map.len(a)
 }

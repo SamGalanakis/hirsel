@@ -57,7 +57,9 @@ fn sizing_words_stop_at_special_bytes() -> bool {
         }
         result.unwrap(string.push(mut good, "🙂\\n\\\"\""))
         result.unwrap(string.push(mut bad, "\n\""))
-        if size_of(good) != n + 11 || syntax_at(bad) != n + 1 { return false }
+        if size_of(good) != n + 11 || syntax_at(bad) != n + 1 {
+            return false
+        }
     }
     true
 }
@@ -108,21 +110,26 @@ fn leading_zero() -> u64 {
 fn number_words_keep_grammar_and_range() -> bool {
     for n in 0u64 .. 24 {
         let mut s = result.unwrap(string.from("0."))
-        for _ in 0u64 .. n { result.unwrap(string.push(mut s, "0")) }
+        for _ in 0u64 .. n {
+            result.unwrap(string.push(mut s, "0"))
+        }
         result.unwrap(string.push(mut s, "125"))
-        if size_of(s) != n + 10 { return false }
+        if size_of(s) != n + 10 {
+            return false
+        }
         let mut bad = result.unwrap(string.from(s))
         result.unwrap(string.push(mut bad, "x"))
-        if syntax_at(bad) != n + 5 { return false }
+        if syntax_at(bad) != n + 5 {
+            return false
+        }
         result.unwrap(string.push(mut s, "e999"))
-        if not_finite_at(s) != 0 { return false }
+        if not_finite_at(s) != 0 {
+            return false
+        }
     }
     // Array: 9 header +10 and13 Num bytes +8 offset bytes =40. Skipping a
     // non-digit word would swallow the comma or close instead of ending a token.
-    size_of("[0.125,12345678]") == 40 &&
-    not_finite_at("[12345678e999x,0]") == 1 &&
-    size_of("-12345678.125e+2") == 21 && syntax_at("12345678+1") == 8 &&
-    syntax_at("000000000000000000001") == 1
+    size_of("[0.125,12345678]") == 40 && not_finite_at("[12345678e999x,0]") == 1 && size_of("-12345678.125e+2") == 21 && syntax_at("12345678+1") == 8 && syntax_at("000000000000000000001") == 1
 }
 
 // expect: run lone_low_surrogate() = 1
@@ -168,11 +175,7 @@ fn truncated_literal() -> u64 {
 // first-byte branch breaks the unknown non-ASCII head instead of returning Syntax.
 // expect: run keyword_dispatch_and_bad_heads() = true
 fn keyword_dispatch_and_bad_heads() -> bool {
-    size_of("[null,true,false]") == 24 &&
-    syntax_at("nxll") == 0 && syntax_at("truX") == 0 && syntax_at("falsX") == 0 &&
-    syntax_at("n") == 0 && syntax_at("tru") == 0 && syntax_at("fals") == 0 &&
-    syntax_at("truex") == 4 && syntax_at("1x") == 1 &&
-    not_finite_at("1e999x") == 0 && syntax_at("€€") == 0 && syntax_at(" [€€]") == 2
+    size_of("[null,true,false]") == 24 && syntax_at("nxll") == 0 && syntax_at("truX") == 0 && syntax_at("falsX") == 0 && syntax_at("n") == 0 && syntax_at("tru") == 0 && syntax_at("fals") == 0 && syntax_at("truex") == 4 && syntax_at("1x") == 1 && not_finite_at("1e999x") == 0 && syntax_at("€€") == 0 && syntax_at(" [€€]") == 2
 }
 
 // JSON keywords are ASCII byte sequences. A malformed UTF-8-containing token is
@@ -180,9 +183,7 @@ fn keyword_dispatch_and_bad_heads() -> bool {
 // A String-slice prefix probe faults instead; accepting just n/t/f also fails these.
 // expect: run literal_keywords_compare_bytes() = true
 fn literal_keywords_compare_bytes() -> bool {
-    syntax_at("nu€") == 0 && syntax_at("tr€") == 0 && syntax_at("fal€") == 0 &&
-    syntax_at("n🙂") == 0 && syntax_at("[tr€]") == 1 && syntax_at("falset") == 5 &&
-    size_of("null") == 1 && size_of("true") == 1 && size_of("false") == 1
+    syntax_at("nu€") == 0 && syntax_at("tr€") == 0 && syntax_at("fal€") == 0 && syntax_at("n🙂") == 0 && syntax_at("[tr€]") == 1 && syntax_at("falset") == 5 && size_of("null") == 1 && size_of("true") == 1 && size_of("false") == 1
 }
 
 /// Whether v is a number spelled w.
@@ -332,8 +333,14 @@ fn print_escapes_round_trip() -> bool {
 fn parse_admission_order() -> bool {
     result.unwrap(bound bytes 0 {
         region r {
-            let bad = match json.parse(r, "[1,]") { Error(Syntax(3)) => true, _ => false }
-            let good = match json.parse(r, "null") { Error(Build(Capacity(c))) => c.requested == 8 && c.available == 0, _ => false }
+            let bad = match json.parse(r, "[1,]") {
+                Error(Syntax(3)) => true,
+                _ => false
+            }
+            let good = match json.parse(r, "null") {
+                Error(Build(Capacity(c))) => c.requested == 8 && c.available == 0,
+                _ => false
+            }
             bad && good
         }
     })
@@ -346,8 +353,14 @@ fn parse_retains_admitted_prefix() -> bool {
         region r {
             let a = result.unwrap(json.parse(r, "null"))
             let b = result.unwrap(json.parse(r, "true"))
-            let refused = match json.parse(r, "false") { Error(Build(Capacity(c))) => c.requested == 8 && c.available == 0, _ => false }
-            refused && match (a, b) { (Null, True) => true, _ => false }
+            let refused = match json.parse(r, "false") {
+                Error(Build(Capacity(c))) => c.requested == 8 && c.available == 0,
+                _ => false
+            }
+            refused && match (a, b) {
+                (Null, True) => true,
+                _ => false
+            }
         }
     })
 }
@@ -363,17 +376,26 @@ fn print_capacity_prefixes() -> bool {
         let hex = result.unwrap(json.parse(r, "\"abc\\u0000\""))
         let zero = result.unwrap(bound bytes 0 {
             let mut s = string.new()
-            let refused = match json.push_json(mut s, line) { Error(c) => c.requested == 8 && c.available == 0, _ => false }
+            let refused = match json.push_json(mut s, line) {
+                Error(c) => c.requested == 8 && c.available == 0,
+                _ => false
+            }
             refused && s == ""
         })
         let run = result.unwrap(bound bytes 8 {
             let mut s = string.new()
-            let refused = match json.push_json(mut s, line) { Error(c) => c.requested == 8 && c.available == 0, _ => false }
+            let refused = match json.push_json(mut s, line) {
+                Error(c) => c.requested == 8 && c.available == 0,
+                _ => false
+            }
             refused && s == "\"a\\n"
         })
         let atomic_hex = result.unwrap(bound bytes 16 {
             let mut s = string.new()
-            let refused = match json.push_json(mut s, hex) { Error(c) => c.requested == 16 && c.available == 8, _ => false }
+            let refused = match json.push_json(mut s, hex) {
+                Error(c) => c.requested == 16 && c.available == 8,
+                _ => false
+            }
             refused && s == "\"abc"
         })
         zero && run && atomic_hex

@@ -6,24 +6,34 @@
 // expect: run one() = 7 trace 7
 // expect: run two() = 11 trace 6,5
 // expect: run held() = 9 trace 9
-resource type R[T] { id: u64, value: T }
-  drop(t) { let _ = t.id }
+resource type R[T] {
+    id: u64,
+    value: T
+} drop(t) {
+    let _ = t.id
+}
 
 fn one() -> u64 {
-  let r: R[u64] = result.unwrap(R(id: 7, value: 7u64))
-  r.id
+    let r: R[u64] = result.unwrap(R(id: 7, value: 7u64))
+    r.id
 }
+
 fn two() -> u64 {
-  let a: R[u8] = result.unwrap(R(id: 5, value: 1u8))
-  let b: R[String] = result.unwrap(R(id: 6, value: "s"))
-  a.id + b.id
+    let a: R[u8] = result.unwrap(R(id: 5, value: 1u8))
+    let b: R[String] = result.unwrap(R(id: 6, value: "s"))
+    a.id + b.id
 }
+
 fn hold[T](take v: T) -> u64 {
-  let r = result.unwrap(R(id: 9, value: v))
-  r.id
+    let r = result.unwrap(R(id: 9, value: v))
+    r.id
 }
-fn held() -> u64 { hold(3u32) }
+
+fn held() -> u64 {
+    hold(3u32)
+}
+
 pub fn main() -> Result[(), Exit] {
-  let r: R[u64] = result.unwrap(R(id: 1, value: 7u64))
-  Ok(())
+    let r: R[u64] = result.unwrap(R(id: 1, value: 7u64))
+    Ok(())
 }

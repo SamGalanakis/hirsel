@@ -151,7 +151,9 @@ fn iteration_is_slot_order() -> u64 {
     loop {
         match pool.next(p, at) {
             Some((h, v, cursor)) => {
-                if pool.get_or(p, h, 0) != v { return 999 }
+                if pool.get_or(p, h, 0) != v {
+                    return 999
+                }
                 answer = answer * 100 + v
                 at = cursor
             }
@@ -164,11 +166,20 @@ fn iteration_is_slot_order() -> u64 {
 // expect: run iteration_empty_and_past_end() = true
 fn iteration_empty_and_past_end() -> bool {
     let mut p: pool.Pool[u64] = pool.new()
-    let empty = match pool.next(p, 0) { None => true, _ => false }
+    let empty = match pool.next(p, 0) {
+        None => true,
+        _ => false
+    }
     let _ = handle(pool.insert(mut p, 7))
-    let past = match pool.next(p, 18446744073709551615) { None => true, _ => false }
+    let past = match pool.next(p, 18446744073709551615) {
+        None => true,
+        _ => false
+    }
     pool.clear(mut p)
-    empty && past && match pool.next(p, 0) { None => true, _ => false }
+    empty && past && match pool.next(p, 0) {
+        None => true,
+        _ => false
+    }
 }
 
 // Admission refusal returns the taken owner and leaves the pool empty.
@@ -176,7 +187,9 @@ fn iteration_empty_and_past_end() -> bool {
 fn capacity_returns_value() -> bool {
     let mut p: pool.Pool[String] = pool.new()
     let x = result.unwrap(string.from("kept"))
-    let attempt = result.unwrap(bound bytes 0 { pool.insert(mut p, take x) })
+    let attempt = result.unwrap(bound bytes 0 {
+        pool.insert(mut p, take x)
+    })
     match attempt {
         Error((c, take back)) => c.requested > 0 && c.available == 0 && back == "kept" && pool.len(p) == 0,
         Ok(_) => false,

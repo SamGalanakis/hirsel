@@ -1,90 +1,142 @@
 // kostya/LangArena3c9f84d benchmarks/csv_parse.rs:30-115.
 // Quoted CSV state machine, numeric fields1/3/5, owned Point list.
-type Point { x:f64, y:f64, z:f64 }
-fn generate(rows:u64)->Result[String,helper.Error] {
-    let mut out=string.new()
-    let mut g=helper.lcg()
+type Point {
+    x: f64,
+    y: f64,
+    z: f64
+}
+
+fn generate(rows: u64) -> Result[String, helper.Error] {
+    let mut out = string.new()
+    let mut g = helper.lcg()
     for i in 0 .. rows {
-        let digit:u32=int.narrow(i%26)
-        let code:u32=65+digit
-        let c=option.unwrap(char.from_u32(code))
-        let x=helper.next_float(mut g,1.0)
-        let z=helper.next_float(mut g,1.0)
-        let y=helper.next_float(mut g,1.0)
-        helper.mem(string.push(mut out,"\"point "))?
-        helper.mem(string.push_char(mut out,c))?
-        helper.mem(string.push(mut out,"\\n, \"\""))?
-        helper.mem(string.push_u64(mut out,i%100))?
-        helper.mem(string.push(mut out,"\"\"\","))?
-        helper.mem(float.push_fixed64(mut out,x,10))?
-        helper.mem(string.push(mut out,",,"))?
-        helper.mem(float.push_fixed64(mut out,z,10))?
-        helper.mem(string.push(mut out,",\"["))?
-        helper.mem(string.push(mut out,if i%2==0 {"true"} else {"false"}))?
-        helper.mem(string.push(mut out,"\\n, "))?
-        helper.mem(string.push_u64(mut out,i%100))?
-        helper.mem(string.push(mut out,"]\","))?
-        helper.mem(float.push_fixed64(mut out,y,10))?
-        helper.mem(string.push(mut out,"\n"))?
+        let digit: u32 = int.narrow(i % 26)
+        let code: u32 = 65 + digit
+        let c = option.unwrap(char.from_u32(code))
+        let x = helper.next_float(mut g, 1.0)
+        let z = helper.next_float(mut g, 1.0)
+        let y = helper.next_float(mut g, 1.0)
+        helper.mem(string.push(mut out, "\"point "))?
+        helper.mem(string.push_char(mut out, c))?
+        helper.mem(string.push(mut out, "\\n, \"\""))?
+        helper.mem(string.push_u64(mut out, i % 100))?
+        helper.mem(string.push(mut out, "\"\"\","))?
+        helper.mem(float.push_fixed64(mut out, x, 10))?
+        helper.mem(string.push(mut out, ",,"))?
+        helper.mem(float.push_fixed64(mut out, z, 10))?
+        helper.mem(string.push(mut out, ",\"["))?
+        helper.mem(string.push(mut out, if i % 2 == 0 {
+            "true"
+        } else {
+            "false"
+        }))?
+        helper.mem(string.push(mut out, "\\n, "))?
+        helper.mem(string.push_u64(mut out, i % 100))?
+        helper.mem(string.push(mut out, "]\","))?
+        helper.mem(float.push_fixed64(mut out, y, 10))?
+        helper.mem(string.push(mut out, "\n"))?
     }
     Ok(take out)
 }
-fn parse(source:String)->Result[List[Point],helper.Error] {
-    let b=string.as_bytes(source)
-    let n=list.len(b)
-    let mut points:List[Point]=list.new()
-    let mut i:u64=0
-    let mut field:u64=0
-    let mut values:Inline[f64,3]=[0.0;3]
-    while i<n {
-        let quoted=b[i]==b'"'
+
+fn parse(source: String) -> Result[List[Point], helper.Error] {
+    let b = string.as_bytes(source)
+    let n = list.len(b)
+    let mut points: List[Point] = list.new()
+    let mut i: u64 = 0
+    let mut field: u64 = 0
+    let mut values: Inline[f64, 3] =[0.0; 3]
+    while i < n {
+        let quoted = b[i] == b'"'
         if quoted {
-            i+=1
+            i += 1
             loop {
-                if i>=n {return Error(Config)}
-                if b[i]==b'"' {
-                    i+=1
-                    if i<n && b[i]==b'"' {i+=1} else {break}
-                } else {i+=1}
+                if i >= n {
+                    return Error(Config)
+                }
+                if b[i] == b'"' {
+                    i += 1
+                    if i < n && b[i] == b'"' {
+                        i += 1
+                    } else {
+                        break
+                    }
+                } else {
+                    i += 1
+                }
             }
         } else {
-            let start=i
-            while i<n && b[i]!=b',' && b[i]!=b'\n' {i+=1}
-            if field==1 || field==3 || field==5 {
-                let number=match float.parse64(string.slice(source,start,i)) {Ok(v)=>v,Error(_)=>return Error(Config)}
-                let slot=if field==1 {0u64} else if field==3 {2u64} else {1u64}
-                values[slot]=number
+            let start = i
+            while i < n && b[i] != b',' && b[i] != b'\n' {
+                i += 1
+            }
+            if field == 1 || field == 3 || field == 5 {
+                let number = match float.parse64(string.slice(source, start, i)) {
+                    Ok(v) => v,
+                    Error(_) => return Error(Config)
+                }
+                let slot = if field == 1 {
+                    0u64
+                } else if field == 3 {
+                    2u64
+                } else {
+                    1u64
+                }
+                values[slot] = number
             }
         }
-        if i==n || b[i]==b'\n' {
-            if field!=5 {return Error(Config)}
-            match list.push(mut points,Point(x:values[0],y:values[1],z:values[2])) {Ok(())=>{},Error((c,_))=>return Error(Capacity(c))}
-            field=0
-        } else if b[i]==b',' {field+=1} else {return Error(Config)}
-        i+=1
+        if i == n || b[i] == b'\n' {
+            if field != 5 {
+                return Error(Config)
+            }
+            match list.push(mut points, Point(x: values[0], y: values[1], z: values[2])) {
+                Ok(()) => {},
+                Error((c, _)) => return Error(Capacity(c))
+            }
+            field = 0
+        } else if b[i] == b',' {
+            field += 1
+        } else {
+            return Error(Config)
+        }
+        i += 1
     }
     Ok(take points)
 }
-pub fn dispatch(config:String,name:String,warmup:u64,iterations:u64)->Result[u32,helper.Error] {
-    if name!="CSV::Parse" {return Error(UnknownTask)}
-    let rows=helper.config_i64(config,name,"rows")?
-    if rows<0 {return Error(Config)}
-    let source=generate(int.narrow(rows))?
-    let mut checksum:u32=0
-    for _ in 0 .. warmup+iterations {
-        let points=parse(source)?
-        if list.len(points)==0 {continue}
-        let mut x:f64=0.0
-        let mut y:f64=0.0
-        let mut z:f64=0.0
-        for p in points {x+=p.x;y+=p.y;z+=p.z}
-        let count:f64=float.from_int(list.len(points))
-        checksum=int.wrapping_add(checksum,helper.checksum_f64(x/count)?)
-        checksum=int.wrapping_add(checksum,helper.checksum_f64(y/count)?)
-        checksum=int.wrapping_add(checksum,helper.checksum_f64(z/count)?)
+
+pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
+    if name != "CSV::Parse" {
+        return Error(UnknownTask)
     }
-    Ok(int.wrapping_add(checksum,helper.checksum_str(source)))
+    let rows = helper.config_i64(config, name, "rows")?
+    if rows < 0 {
+        return Error(Config)
+    }
+    let source = generate(int.narrow(rows))?
+    let mut checksum: u32 = 0
+    for _ in 0 .. warmup + iterations {
+        let points = parse(source)?
+        if list.len(points) == 0 {
+            continue
+        }
+        let mut x: f64 = 0.0
+        let mut y: f64 = 0.0
+        let mut z: f64 = 0.0
+        for p in points {
+            x += p.x;
+            y += p.y;
+            z += p.z
+        }
+        let count: f64 = float.from_int(list.len(points))
+        checksum = int.wrapping_add(checksum, helper.checksum_f64(x / count)?)
+        checksum = int.wrapping_add(checksum, helper.checksum_f64(y / count)?)
+        checksum = int.wrapping_add(checksum, helper.checksum_f64(z / count)?)
+    }
+    Ok(int.wrapping_add(checksum, helper.checksum_str(source)))
 }
-pub fn main(out:Stdout,d:Dir,argv:Args)->Result[(),Exit] waits {
-    harness.main(out,d,argv,fn(c:String,n:String,w:u64,i:u64)->Result[u32,helper.Error] {dispatch(c,n,w,i)})
+
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
+    harness.main(out, d, argv, fn(c: String, n: String, w: u64, i: u64) -> Result[u32, helper.Error] {
+        dispatch(c, n, w, i)
+    })
 }

@@ -8,22 +8,48 @@
 // expect: run go(0) = 2
 // expect: run go(1) = 1
 // expect: run go(2) = 3
-@compact(u32) stable type P { a: Text, b: Text }
+@compact(u32)
+stable type P {
+    a: Text,
+    b: Text
+}
+
 fn pair[in r](take w: Writer[P, in r], x: String, y: String) -> Result[Child[P], BuildError] {
-  emit(take w, P(a: x, b: y))
+    emit(take w, P(a: x, b: y))
 }
+
 fn make(r: Region, x: String, y: String) -> Result[P in r, BuildError] {
-  match build_stream_in(r, bytes 64, fn(take w: Writer[P, in r]) -> Result[Child[P], BuildError] { pair(take w, x, y) }) {
-    Ok(take b) => Ok(finish(take b)),
-    Error(e) => Error(e),
-  }
-}
-fn first(p: P) -> View[String] in p { text.as_string(p.a) }
-fn go(k: u64) -> u64 {
-  region r {
-    match make(r, "abc", "xy") {
-      Ok(p) => if k == 0 { if first(p) > "abb" && first(p) < "abd" { 2 } else { 0 } } else if k == 1 { if first(p) == "abc" { 1 } else { 0 } } else { list.capacity(string.as_bytes(first(p))) },
-      Error(_) => 99,
+    match build_stream_in(r, bytes 64, fn(take w: Writer[P, in r]) -> Result[Child[P], BuildError] {
+        pair(take w, x, y)
+    }) {
+        Ok(take b) => Ok(finish(take b)),
+        Error(e) => Error(e),
     }
-  }
+}
+
+fn first(p: P) -> View[String] in p {
+    text.as_string(p.a)
+}
+
+fn go(k: u64) -> u64 {
+    region r {
+        match make(r, "abc", "xy") {
+            Ok(p) => if k == 0 {
+                if first(p) > "abb" && first(p) < "abd" {
+                    2
+                } else {
+                    0
+                }
+            } else if k == 1 {
+                if first(p) == "abc" {
+                    1
+                } else {
+                    0
+                }
+            } else {
+                list.capacity(string.as_bytes(first(p)))
+            },
+            Error(_) => 99,
+        }
+    }
 }

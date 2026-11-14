@@ -50,7 +50,9 @@ fn insertion_order() -> u64 {
     let _ = set.remove(mut s, 2)
     let _ = added(set.insert(mut s, 2))
     let mut n: u64 = 0
-    for (k, _) in set.entries(s) { n = n * 10 + k }
+    for (k, _) in set.entries(s) {
+        n = n * 10 + k
+    }
     n
 }
 
@@ -58,7 +60,9 @@ fn insertion_order() -> u64 {
 fn empty_iteration() -> u64 {
     let s: set.Set[u64] = set.new()
     let mut n: u64 = 0
-    for (_, _) in set.entries(s) { n += 1 }
+    for (_, _) in set.entries(s) {
+        n += 1
+    }
     n
 }
 
@@ -66,14 +70,28 @@ fn empty_iteration() -> u64 {
 fn capacity_returns_key() -> u64 {
     let mut s: set.Set[String] = set.new()
     let k = result.unwrap(string.from("abc"))
-    let r = bound bytes 0 { set.insert(mut s, take k) }
-    match r { Ok(Error((_, take original))) => if original == "abc" { list.len(string.as_bytes(original)) + set.len(s) } else { 99 }, _ => 99 }
+    let r = bound bytes 0 {
+        set.insert(mut s, take k)
+    }
+    match r {
+        Ok(Error((_, take original))) => if original == "abc" {
+            list.len(string.as_bytes(original)) + set.len(s)
+        } else {
+            99
+        },
+        _ => 99
+    }
 }
 
 // expect: run duplicate_under_bound() = true
 fn duplicate_under_bound() -> bool {
     let mut s: set.Set[u64] = set.new()
     let _ = added(set.insert(mut s, 5))
-    let r = bound bytes 0 { set.insert(mut s, 5) }
-    match r { Ok(Ok(false)) => set.len(s) == 1, _ => false }
+    let r = bound bytes 0 {
+        set.insert(mut s, 5)
+    }
+    match r {
+        Ok(Ok(false)) => set.len(s) == 1,
+        _ => false
+    }
 }

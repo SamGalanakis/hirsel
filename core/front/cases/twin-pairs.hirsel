@@ -3,11 +3,42 @@
 // or tuples component by component; variant types pair arm by arm. A pairing check that
 // misses any of these refuses a valid pair.
 // expect: accept
-type Row { name: String, n: u64 }
-@twin(Row) stable type RowS { name: Text, n: u64 }
-type Wrap { inner: Box[Row], row: Row, tag: Option[String] }
-@twin(Wrap) stable type WrapS { inner: RowS, row: RowS, tag: Option[Text] }
+type Row {
+    name: String,
+    n: u64
+}
+
+@twin(Row)
+stable type RowS {
+    name: Text,
+    n: u64
+}
+
+type Wrap {
+    inner: Box[Row],
+    row: Row,
+    tag: Option[String]
+}
+
+@twin(Wrap)
+stable type WrapS {
+    inner: RowS,
+    row: RowS,
+    tag: Option[Text]
+}
+
 type Shape = Dot(u64) | Name(String)
-@twin(Shape) stable type ShapeS = Dot(u64) | Name(Text)
-type Bag { xs: List[u64], pair: (String, u8) }
-@twin(Bag) stable type BagS { xs: FixedSpan[u64], pair: (Text, u8) }
+
+@twin(Shape)
+stable type ShapeS = Dot(u64) | Name(Text)
+
+type Bag {
+    xs: List[u64],
+    pair: (String, u8)
+}
+
+@twin(Bag)
+stable type BagS {
+    xs: FixedSpan[u64],
+    pair: (Text, u8)
+}

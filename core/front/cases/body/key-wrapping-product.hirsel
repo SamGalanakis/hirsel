@@ -3,6 +3,17 @@
 // expect: run product() = 1
 // expect: run checked() = true
 // expect: run saturated() = 18446744073709551615
-fn product() -> u64 { int.wrapping_mul(18446744073709551615u64, 18446744073709551615u64) }
-fn checked() -> bool { match int.checked_mul(18446744073709551615u64,18446744073709551615u64) { None => true, Some(_) => false } }
-fn saturated() -> u64 { int.saturating_mul(18446744073709551615u64,18446744073709551615u64) }
+fn product() -> u64 {
+    int.wrapping_mul(18446744073709551615u64, 18446744073709551615u64)
+}
+
+fn checked() -> bool {
+    match int.checked_mul(18446744073709551615u64, 18446744073709551615u64) {
+        None => true,
+        Some(_) => false
+    }
+}
+
+fn saturated() -> u64 {
+    int.saturating_mul(18446744073709551615u64, 18446744073709551615u64)
+}

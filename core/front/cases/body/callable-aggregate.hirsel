@@ -4,28 +4,62 @@
 // expect: run checked() = 304
 // expect: run joined(true) = 27
 // expect: run joined(false) = 47
-scoped type Callbacks {left:scoped fn(u64)->u64,right:scoped fn(u64)->u64}
-fn checked()->u64 {
- let mut a:u64=1
- let mut b:u64=10
- let p=(scoped fn(x:u64)->u64 {a+=x;a},scoped fn(x:u64)->u64 {b+=x;b})
- let first=p.0(b)
- let second=p.1(a)
- let (left,right)=take p
- let third=left(2)
- let fourth=right(3)
- let record=Callbacks(left:take left,right:take right)
- let fifth=record.left(b)
- let sixth=record.right(a)
- let maybe:Option[scoped fn(u64)->u64]=Some(scoped fn(x:u64)->u64 {a+=x;a})
- let seventh:u64=match take maybe {Some(take cb)=>cb(1),None=>0}
- first+second+third+fourth+fifth+sixth+seventh+a+b
+scoped type Callbacks {
+    left: scoped fn(u64) -> u64,
+    right: scoped fn(u64) -> u64
 }
-fn joined(choose:bool)->u64 {
- let mut a:u64=1
- let mut b:u64=10
- let p=if choose {(scoped fn(x:u64)->u64 {a+=x;a},11u64)}else{(scoped fn(x:u64)->u64 {b+=x;b},22u64)}
- let result=p.0(2)
- result+a+b+p.1
+
+fn checked() -> u64 {
+    let mut a: u64 = 1
+    let mut b: u64 = 10
+    let p = (scoped fn(x: u64) -> u64 {
+        a += x;
+        a
+    }, scoped fn(x: u64) -> u64 {
+        b += x;
+        b
+    })
+    let first = p.0(b)
+    let second = p.1(a)
+    let (left, right) = take p
+    let third = left(2)
+    let fourth = right(3)
+    let record = Callbacks(left: take left, right: take right)
+    let fifth = record.left(b)
+    let sixth = record.right(a)
+    let maybe: Option[scoped fn(u64) -> u64] = Some(scoped fn(x: u64) -> u64 {
+        a += x;
+        a
+    })
+    let seventh: u64 = match take maybe {
+        Some(take cb) => cb(1),
+        None => 0
+    }
+    first + second + third + fourth + fifth + sixth + seventh + a + b
 }
-pub fn main()->Result[(),Exit] {if checked()==304 && joined(true)==27 && joined(false)==47 {Ok(())}else{Error(Exit(status:1))}}
+
+fn joined(choose: bool) -> u64 {
+    let mut a: u64 = 1
+    let mut b: u64 = 10
+    let p = if choose {
+        (scoped fn(x: u64) -> u64 {
+            a += x;
+            a
+        }, 11u64)
+    } else {
+        (scoped fn(x: u64) -> u64 {
+            b += x;
+            b
+        }, 22u64)
+    }
+    let result = p.0(2)
+    result + a + b + p.1
+}
+
+pub fn main() -> Result[(), Exit] {
+    if checked() == 304 && joined(true) == 27 && joined(false) == 47 {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
+}

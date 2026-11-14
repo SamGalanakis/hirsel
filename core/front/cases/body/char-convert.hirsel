@@ -14,6 +14,7 @@ fn round(n: u32) -> u32 {
         None => 0,
     }
 }
+
 fn go(k: u64) -> u32 {
     if k == 0 {
         char.to_u32('é')

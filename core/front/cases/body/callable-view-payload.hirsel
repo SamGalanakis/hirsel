@@ -3,7 +3,10 @@
 // covered by callable-region-mut-gap.
 // expect: accept
 // expect: run call(9) = 10
-fn next(v: View[u64]) -> u64 { v + 1 }
+fn next(v: View[u64]) -> u64 {
+    v + 1
+}
+
 fn call(x: u64) -> u64 {
     let f: fn(View[u64]) -> u64 = next
     f(view x)

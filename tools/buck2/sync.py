@@ -187,6 +187,7 @@ RUNTIME_DATA = {
 # invalidate another binary's passing verdicts. A source change still reruns
 # every test whose harness it changes.
 TEST_DATA = {
+    "hirsel-core-syntax-unittest": ["core/core/**", "core/std/**", "core/front/cases/**", "core/programs/m1/**", "core/langarena/**/*.hirsel"],
     "hirsel-core-diag-unittest": ["docs/spec/**", "crates/hirsel-core-syntax/src/**", "crates/hirsel-core-resolve/src/**", "crates/hirsel-core-front/src/**"],
     "hirsel-core-resolve-unittest": ["docs/spec/**", "core/core/**"],
     "hirsel-core-front-unittest": ["core/front/**", "core/core/**", "core/std/**", "core/programs/m1/**"],
@@ -1170,7 +1171,7 @@ def first_party(meta: dict) -> str:
                             files_env={"HIRSEL_STARTUP_DRIVER_TESTS": "//:hirsel-driver-unittest-harness", "HIRSEL_STARTUP_NATIVE_TESTS": "//:hirsel-native-unittest-harness"}))
     out.append("\n" + call("hirsel_script_test", name="test-fmt", script="tools/tests/fmt.py", full=False, host=True,
                            data=["//tools/buck2:fmt.py"],
-                           files_env={"HIRSEL_TEST_CASE_FORMATTER": "//:hirsel-conformance-bin-hirsel-conformance"}))
+                           files_env={"HIRSEL_TEST_CASE_FORMATTER": "//:hirsel-core-syntax-bin-hirsel-core-syntax"}))
     out.append("\n" + call("hirsel_script_test", name="test-buck2-client", script="tools/tests/buck2_client.py", full=False,
                            data=["//tools/buck2:bootstrap.py", "//tools/buck2:bootstrap_store.py", "//tools/buck2:bootstrap_llvm.py",
                                  "//tools/buck2:client.py", "//tools/buck2:generated.py", "//tools/buck2:merging.py",
@@ -1412,7 +1413,7 @@ def first_party(meta: dict) -> str:
                                   "//tools/buck2:merging.py", "//tools/buck2:clippy.py", "//tools/buck2:fmt.py",
                                   "//tools/buck2:event_logs.py", "//tools/buck2:conformance.py", "//tools/buck2:rust_environment.py",
                                   "//tools/buck2:priorities.bzl"],
-                            files_env={"HIRSEL_TEST_CASE_FORMATTER": "//:hirsel-conformance-bin-hirsel-conformance"}))
+                            files_env={"HIRSEL_TEST_CASE_FORMATTER": "//:hirsel-core-syntax-bin-hirsel-core-syntax"}))
     out.append("\n" + call("hirsel_script_test", name="land-core-evaluator", script="core/tools/gate_evaluator.py", full=False,
                             production=True, bin_exes={"hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
                             args=["--evaluator", "buck-out/tmp/cargo-bin-exe/land-core-evaluator/hirsel-core-contract-eval"],

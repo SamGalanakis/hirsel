@@ -7,19 +7,43 @@
 // expect: run nested(true,false) = 2
 // expect: run pair(true,false) = 2
 // expect: run pair(false,true) = 3
-fn pick(empty: bool, x: u64) -> Option[u64] { if empty { None } else { Some(x) } }
+fn pick(empty: bool, x: u64) -> Option[u64] {
+    if empty {
+        None
+    } else {
+        Some(x)
+    }
+}
+
 fn option(empty: bool, x: u64) -> u64 {
-  match pick(empty, x) { Some(n) => n, None => 99 }
+    match pick(empty, x) {
+        Some(n) => n,
+        None => 99
+    }
 }
+
 fn nested(empty: bool, x: bool) -> u64 {
-  let o: Option[bool] = if empty { None } else { Some(x) }
-  match o { Some(false) => 1, None => 2, Some(true) => 3 }
+    let o: Option[bool] = if empty {
+        None
+    } else {
+        Some(x)
+    }
+    match o {
+        Some(false) => 1,
+        None => 2,
+        Some(true) => 3
+    }
 }
-type Pair { a: bool, b: bool }
+
+type Pair {
+    a: bool,
+    b: bool
+}
+
 fn pair(a: bool, b: bool) -> u64 {
-  match Pair(a: a, b: b) {
-    Pair(a: true, b: true) => 1,
-    Pair(a: true, b: false) => 2,
-    Pair(a: false, b: _) => 3,
-  }
+    match Pair(a: a, b: b) {
+        Pair(a: true, b: true) => 1,
+        Pair(a: true, b: false) => 2,
+        Pair(a: false, b: _) => 3,
+    }
 }

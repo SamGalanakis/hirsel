@@ -1,6 +1,9 @@
 //! Package formatting is prepare-then-write: source refusals never leave a partial reformat.
 use crate::{Diagnostic, ParseMode, ResourceRefusal, Symbols, format, parse_bytes};
-use std::{fs, io, path::{Path, PathBuf}};
+use std::{
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FormatAction {
@@ -26,8 +29,16 @@ pub struct FormatReport {
 /// File symlinks are sources; directory symlinks are not followed.
 /// `mode` selects ordinary packages or core declarations. Diagnostic fixtures are
 /// sources too: any exemptions belong to the caller, not the package formatter.
-pub fn format_package(root: &Path, mode: ParseMode, action: FormatAction) -> io::Result<FormatReport> {
-    fn discover(root: &Path, mode: ParseMode, out: &mut Vec<(PathBuf, ParseMode)>) -> io::Result<()> {
+pub fn format_package(
+    root: &Path,
+    mode: ParseMode,
+    action: FormatAction,
+) -> io::Result<FormatReport> {
+    fn discover(
+        root: &Path,
+        mode: ParseMode,
+        out: &mut Vec<(PathBuf, ParseMode)>,
+    ) -> io::Result<()> {
         for entry in fs::read_dir(root)? {
             let entry = entry?;
             let path = entry.path();
@@ -49,15 +60,21 @@ pub fn format_package(root: &Path, mode: ParseMode, action: FormatAction) -> io:
 /// A parse/resource refusal returns a report and writes nothing; an I/O failure
 /// returns Err. Write-time I/O errors may leave earlier successfully written files.
 /// Repeated paths are formatted once; giving two modes for one path is invalid.
-pub fn format_files(inputs: &[(PathBuf, ParseMode)], action: FormatAction) -> io::Result<FormatReport> {
+pub fn format_files(
+    inputs: &[(PathBuf, ParseMode)],
+    action: FormatAction,
+) -> io::Result<FormatReport> {
     let mut inputs = inputs.to_vec();
-    inputs.sort_by(|a,b| a.0.cmp(&b.0));
+    inputs.sort_by(|a, b| a.0.cmp(&b.0));
     for pair in inputs.windows(2) {
         if pair[0].0 == pair[1].0 && pair[0].1 != pair[1].1 {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "conflicting parse modes for one source"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "conflicting parse modes for one source",
+            ));
         }
     }
-    inputs.dedup_by(|a,b| a.0 == b.0);
+    inputs.dedup_by(|a, b| a.0 == b.0);
     let mut report = FormatReport::default();
     let mut prepared = vec![];
     let mut symbols = Symbols::default();
@@ -94,7 +111,11 @@ mod tests {
     struct Directory(PathBuf);
     impl Directory {
         fn new() -> Self {
-            let root = std::env::temp_dir().join(format!("hirsel-format-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+            let root = std::env::temp_dir().join(format!(
+                "hirsel-format-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
             fs::create_dir_all(root.join("nested")).unwrap();
             Self(root)
         }
@@ -105,7 +126,9 @@ mod tests {
         }
     }
     impl Drop for Directory {
-        fn drop(&mut self) { fs::remove_dir_all(&self.0).unwrap(); }
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.0).unwrap();
+        }
     }
     #[test]
     fn package_check_lists_differences_and_write_is_canonical() {
@@ -114,8 +137,8 @@ mod tests {
         let b = dir.write("nested/b.hirsel", b"fn b(){}\n");
         dir.write("ignored.txt", b"not source");
         let report = format_package(&dir.0, ParseMode::Source, FormatAction::Check).unwrap();
-        assert_eq!(report.files, [a.clone(),b.clone()]);
-        assert_eq!(report.differing, [a.clone(),b.clone()]);
+        assert_eq!(report.files, [a.clone(), b.clone()]);
+        assert_eq!(report.differing, [a.clone(), b.clone()]);
         assert!(report.refused.is_empty());
         assert_eq!(fs::read(&a).unwrap(), b"fn a(){1}");
         let written = format_package(&dir.0, ParseMode::Source, FormatAction::Write).unwrap();
@@ -144,12 +167,38 @@ mod tests {
     fn core_signature_mode_and_io_errors_are_explicit() {
         let dir = Directory::new();
         let a = dir.write("a.hirsel", b"pub fn f(x:u64)->u64");
-        assert_eq!(format_package(&dir.0, ParseMode::Source, FormatAction::Write).unwrap().refused.len(), 1);
-        assert!(format_package(&dir.0, ParseMode::Signatures, FormatAction::Write).unwrap().refused.is_empty());
+        assert_eq!(
+            format_package(&dir.0, ParseMode::Source, FormatAction::Write)
+                .unwrap()
+                .refused
+                .len(),
+            1
+        );
+        assert!(
+            format_package(&dir.0, ParseMode::Signatures, FormatAction::Write)
+                .unwrap()
+                .refused
+                .is_empty()
+        );
         assert_eq!(fs::read_to_string(&a).unwrap(), "pub fn f(x: u64) -> u64\n");
-        assert!(format_files(&[(a.clone(),ParseMode::Source),(a,ParseMode::Signatures)],FormatAction::Write).is_err());
+        assert!(
+            format_files(
+                &[(a.clone(), ParseMode::Source), (a, ParseMode::Signatures)],
+                FormatAction::Write
+            )
+            .is_err()
+        );
         let a = dir.write("a.hirsel", b"fn a(){1}");
-        assert!(format_files(&[(a.clone(),ParseMode::Source),(dir.0.join("z.hirsel"),ParseMode::Source)],FormatAction::Write).is_err());
+        assert!(
+            format_files(
+                &[
+                    (a.clone(), ParseMode::Source),
+                    (dir.0.join("z.hirsel"), ParseMode::Source)
+                ],
+                FormatAction::Write
+            )
+            .is_err()
+        );
         assert_eq!(fs::read(a).unwrap(), b"fn a(){1}");
     }
     #[cfg(unix)]
@@ -158,10 +207,10 @@ mod tests {
         use std::os::unix::fs::symlink;
         let dir = Directory::new();
         let file = dir.write("a.hirsel", b"fn a(){1}");
-        symlink(&dir.0,dir.0.join("nested/cycle")).unwrap();
+        symlink(&dir.0, dir.0.join("nested/cycle")).unwrap();
         let link = dir.0.join("b.hirsel");
-        symlink(&file,&link).unwrap();
-        let report = format_package(&dir.0,ParseMode::Source,FormatAction::Check).unwrap();
-        assert_eq!(report.files,[file,link]);
+        symlink(&file, &link).unwrap();
+        let report = format_package(&dir.0, ParseMode::Source, FormatAction::Check).unwrap();
+        assert_eq!(report.files, [file, link]);
     }
 }

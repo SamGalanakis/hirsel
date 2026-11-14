@@ -6,25 +6,36 @@
 // finish_trim keeps 16 and refunds 48, and a List[u64] of capacity 8 (64 bytes) then
 // fits in exactly 16 + 48. After finish it is refused. The text reads back as 5 bytes.
 fn make(r: Region, trim: u64) -> Result[Text in r, BuildError] {
-  match build_stream_in(r, bytes 64, fn(take t: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
-    writer.push(mut t, "hello")?
-    writer.close(take t)
-  }) {
-    Ok(take b) => if trim == 1 { Ok(finish_trim(take b)) } else { Ok(finish(take b)) },
-    Error(e) => Error(e),
-  }
-}
-fn go(trim: u64) -> u64 {
-  let got = bound bytes 80 {
-    region r {
-      match make(r, trim) {
-        Ok(t) => {
-          let after: Result[List[u64], Capacity] = list.with_capacity(8)
-          match after { Ok(xs) => text.len(t) * 100 + list.capacity(xs), Error(_) => text.len(t) * 100 + 90 }
+    match build_stream_in(r, bytes 64, fn(take t: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
+        writer.push(mut t, "hello")?
+        writer.close(take t)
+    }) {
+        Ok(take b) => if trim == 1 {
+            Ok(finish_trim(take b))
+        } else {
+            Ok(finish(take b))
         },
-        Error(_) => 99,
-      }
+        Error(e) => Error(e),
     }
-  }
-  match got { Ok(k) => k, Error(_) => 2 }
+}
+
+fn go(trim: u64) -> u64 {
+    let got = bound bytes 80 {
+        region r {
+            match make(r, trim) {
+                Ok(t) => {
+                    let after: Result[List[u64], Capacity] = list.with_capacity(8)
+                    match after {
+                        Ok(xs) => text.len(t) * 100 + list.capacity(xs),
+                        Error(_) => text.len(t) * 100 + 90
+                    }
+                },
+                Error(_) => 99,
+            }
+        }
+    }
+    match got {
+        Ok(k) => k,
+        Error(_) => 2
+    }
 }

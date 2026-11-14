@@ -1,20 +1,22 @@
 // Matched buffered-line measurement; lines contain 63 ASCII bytes and one LF.
-pub fn main(out:Stdout,d:Dir,argv:Args)->Result[(),Exit] waits {
-    let Some(path)=args.get(argv,0) else {return Error(Exit(status:1))}
-    let file=result.unwrap(std.file.open(d,path,Read))
-    let mut reader=result.unwrap(std.io.lines(take file,4096))
-    let mut line=result.unwrap(string.with_capacity(4096))
-    let mut count:u64=0
-    let mut length:u64=0
-    while result.unwrap(std.io.read_line(mut reader,mut line)) {
-        count+=1
-        length+=string.byte_len(line)
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
+    let Some(path) = args.get(argv, 0) else {
+        return Error(Exit(status: 1))
     }
-    let mut rendered=string.new()
-    result.unwrap(string.push_u64(mut rendered,count))
-    result.unwrap(string.push(mut rendered," "))
-    result.unwrap(string.push_u64(mut rendered,length))
-    result.unwrap(string.push(mut rendered,"\n"))
-    result.unwrap(stdout.write(out,rendered))
+    let file = result.unwrap(std.file.open(d, path, Read))
+    let mut reader = result.unwrap(std.io.lines(take file, 4096))
+    let mut line = result.unwrap(string.with_capacity(4096))
+    let mut count: u64 = 0
+    let mut length: u64 = 0
+    while result.unwrap(std.io.read_line(mut reader, mut line)) {
+        count += 1
+        length += string.byte_len(line)
+    }
+    let mut rendered = string.new()
+    result.unwrap(string.push_u64(mut rendered, count))
+    result.unwrap(string.push(mut rendered, " "))
+    result.unwrap(string.push_u64(mut rendered, length))
+    result.unwrap(string.push(mut rendered, "\n"))
+    result.unwrap(stdout.write(out, rendered))
     Ok(())
 }

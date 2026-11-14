@@ -9,12 +9,16 @@ fn plain_drop_every_interval() -> bool {
             for head in 0u64 .. cap {
                 for count in 0u64 .. cap + 1 {
                     let mut d: Deque[u64] = deque.new()
-                    for i in 0u64 .. cap { result.unwrap(deque.push_back(mut d, i)) }
+                    for i in 0u64 .. cap {
+                        result.unwrap(deque.push_back(mut d, i))
+                    }
                     for _ in 0u64 .. head {
                         let x = option.unwrap(deque.pop_front(mut d))
                         result.unwrap(deque.push_back(mut d, x))
                     }
-                    for _ in count .. cap { let _ = deque.pop_back(mut d) }
+                    for _ in count .. cap {
+                        let _ = deque.pop_back(mut d)
+                    }
                 }
             }
             cap *= 2
@@ -22,5 +26,8 @@ fn plain_drop_every_interval() -> bool {
         let xs: List[u64] = result.unwrap(list.with_capacity(6))
         list.capacity(xs) == 6
     }
-    match r { Ok(v) => v, _ => false }
+    match r {
+        Ok(v) => v,
+        _ => false
+    }
 }

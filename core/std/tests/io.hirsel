@@ -1,90 +1,137 @@
-fn input(d:Dir,s:String,cap:u64)->io.Lines waits {
-    result.unwrap(file.write(d,"input",string.as_bytes(s)))
-    let f=result.unwrap(file.open(d,"input",Read))
-    result.unwrap(io.lines(take f,cap))
+fn input(d: Dir, s: String, cap: u64) -> io.Lines waits {
+    result.unwrap(file.write(d, "input", string.as_bytes(s)))
+    let f = result.unwrap(file.open(d, "input", Read))
+    result.unwrap(io.lines(take f, cap))
 }
+
 // cap4: first read abLFc, second defLF, final gh without terminator.
 // expect: run refill_and_last(dir) = true
-fn refill_and_last(d:Dir)->bool waits {
-    let mut l=input(d,"ab\ncdef\ngh",4)
-    let mut line=string.new()
-    if !result.unwrap(io.read_line(mut l,mut line)) || line!="ab" {return false}
-    if !result.unwrap(io.read_line(mut l,mut line)) || line!="cdef" {return false}
-    if !result.unwrap(io.read_line(mut l,mut line)) || line!="gh" {return false}
-    !result.unwrap(io.read_line(mut l,mut line)) && string.byte_len(line)==0
+fn refill_and_last(d: Dir) -> bool waits {
+    let mut l = input(d, "ab\ncdef\ngh", 4)
+    let mut line = string.new()
+    if !result.unwrap(io.read_line(mut l, mut line)) || line != "ab" {
+        return false
+    }
+    if !result.unwrap(io.read_line(mut l, mut line)) || line != "cdef" {
+        return false
+    }
+    if !result.unwrap(io.read_line(mut l, mut line)) || line != "gh" {
+        return false
+    }
+    !result.unwrap(io.read_line(mut l, mut line)) && string.byte_len(line) == 0
 }
+
 // CRLF spans a refill; empty lines and terminal LF have no phantom final line.
 // expect: run empty_and_crlf(dir) = true
-fn empty_and_crlf(d:Dir)->bool waits {
-    let mut l=input(d,"\na\r\n\n",2)
-    let mut line=string.new()
-    if !result.unwrap(io.read_line(mut l,mut line)) || line!="" {return false}
-    if !result.unwrap(io.read_line(mut l,mut line)) || line!="a" {return false}
-    if !result.unwrap(io.read_line(mut l,mut line)) || line!="" {return false}
-    !result.unwrap(io.read_line(mut l,mut line))
+fn empty_and_crlf(d: Dir) -> bool waits {
+    let mut l = input(d, "\na\r\n\n", 2)
+    let mut line = string.new()
+    if !result.unwrap(io.read_line(mut l, mut line)) || line != "" {
+        return false
+    }
+    if !result.unwrap(io.read_line(mut l, mut line)) || line != "a" {
+        return false
+    }
+    if !result.unwrap(io.read_line(mut l, mut line)) || line != "" {
+        return false
+    }
+    !result.unwrap(io.read_line(mut l, mut line))
 }
+
 // cap3 reads aLF C3, then A9 LF: UTF8 scalar crosses the input refill.
 // expect: run utf8_refill(dir) = true
-fn utf8_refill(d:Dir)->bool waits {
-    let mut l=input(d,"a\né\n",3)
-    let mut line=string.new()
-    if !result.unwrap(io.read_line(mut l,mut line)) || line!="a" {return false}
-    if !result.unwrap(io.read_line(mut l,mut line)) || line!="é" {return false}
-    !result.unwrap(io.read_line(mut l,mut line))
+fn utf8_refill(d: Dir) -> bool waits {
+    let mut l = input(d, "a\né\n", 3)
+    let mut line = string.new()
+    if !result.unwrap(io.read_line(mut l, mut line)) || line != "a" {
+        return false
+    }
+    if !result.unwrap(io.read_line(mut l, mut line)) || line != "é" {
+        return false
+    }
+    !result.unwrap(io.read_line(mut l, mut line))
 }
+
 // cap3 retains abc and next byte d is not consumed. Repeating has identical error/prefix.
 // expect: run too_long_keeps_prefix(dir) = true
-fn too_long_keeps_prefix(d:Dir)->bool waits {
-    let mut l=input(d,"abcdef\n",3)
-    let mut line=string.new()
+fn too_long_keeps_prefix(d: Dir) -> bool waits {
+    let mut l = input(d, "abcdef\n", 3)
+    let mut line = string.new()
     for _ in 0u64 .. 2u64 {
-        match io.read_line(mut l,mut line) {
-            Error(Capacity(c))=>if c.requested!=8 || c.available!=3 {return false},
-            _=>return false,
+        match io.read_line(mut l, mut line) {
+            Error(Capacity(c)) => if c.requested != 8 || c.available != 3 {
+                return false
+            },
+            _ => return false,
         }
-        if line!="abc" {return false}
-        let p=io.prefix(l)
-        if list.len(p)!=3 || p[0]!=b'a' || p[2]!=b'c' {return false}
+        if line != "abc" {
+            return false
+        }
+        let p = io.prefix(l)
+        if list.len(p) != 3 || p[0] != b'a' || p[2] != b'c' {
+            return false
+        }
     }
     true
 }
+
 // cap2 keeps raw a C3; line keeps valid "a" and raw prefix retains the partial scalar.
 // expect: run capacity_inside_utf8(dir) = true
-fn capacity_inside_utf8(d:Dir)->bool waits {
-    let mut l=input(d,"aéz",2)
-    let mut line=string.new()
-    match io.read_line(mut l,mut line) {Error(Capacity(_))=>{},_=>return false}
-    let p=io.prefix(l)
-    line=="a" && list.len(p)==2 && p[1]==0xC3u8
+fn capacity_inside_utf8(d: Dir) -> bool waits {
+    let mut l = input(d, "aéz", 2)
+    let mut line = string.new()
+    match io.read_line(mut l, mut line) {
+        Error(Capacity(_)) => {},
+        _ => return false
+    }
+    let p = io.prefix(l)
+    line == "a" && list.len(p) == 2 && p[1] == 0xC3u8
 }
+
 // A pre-admitted reusable caller buffer allocates no storage in read_line.
 // expect: run reuse_without_allocation(dir) = true
-fn reuse_without_allocation(d:Dir)->bool waits {
-    let mut l=input(d,"ab\ncd\n",4)
-    let mut line=result.unwrap(string.with_capacity(4))
-    let r=bound bytes 0 {
-        if !result.unwrap(io.read_line(mut l,mut line)) || line!="ab" {return false}
-        if !result.unwrap(io.read_line(mut l,mut line)) || line!="cd" {return false}
+fn reuse_without_allocation(d: Dir) -> bool waits {
+    let mut l = input(d, "ab\ncd\n", 4)
+    let mut line = result.unwrap(string.with_capacity(4))
+    let r = bound bytes 0 {
+        if !result.unwrap(io.read_line(mut l, mut line)) || line != "ab" {
+            return false
+        }
+        if !result.unwrap(io.read_line(mut l, mut line)) || line != "cd" {
+            return false
+        }
     }
     result.unwrap(r)
     true
 }
+
 // expect: run zero_cap(dir) = true
-fn zero_cap(d:Dir)->bool waits {
-    let mut l=input(d,"\nx",0)
-    let mut line=string.new()
-    if !result.unwrap(io.read_line(mut l,mut line)) || line!="" {return false}
-    match io.read_line(mut l,mut line) {Error(Capacity(c))=>c.requested==8 && c.available==0,_=>false}
+fn zero_cap(d: Dir) -> bool waits {
+    let mut l = input(d, "\nx", 0)
+    let mut line = string.new()
+    if !result.unwrap(io.read_line(mut l, mut line)) || line != "" {
+        return false
+    }
+    match io.read_line(mut l, mut line) {
+        Error(Capacity(c)) => c.requested == 8 && c.available == 0,
+        _ => false
+    }
 }
+
 // Refused constructor hands the unchanged open file back, before reading.
 // expect: run lines_capacity_hands_back(dir) = true
-fn lines_capacity_hands_back(d:Dir)->bool waits {
-    result.unwrap(file.write(d,"input",string.as_bytes("abc")))
-    let f=result.unwrap(file.open(d,"input",Read))
-    let r=bound bytes 0 {io.lines(take f,3)}
-    let mut back=match take r {Ok(Error((_,take returned)))=>take returned,_=>return false}
-    let mut b:Bytes=result.unwrap(list.with_capacity(3))
-    result.unwrap(file.read_into(mut back,mut b))==3 && b[0]==b'a'
+fn lines_capacity_hands_back(d: Dir) -> bool waits {
+    result.unwrap(file.write(d, "input", string.as_bytes("abc")))
+    let f = result.unwrap(file.open(d, "input", Read))
+    let r = bound bytes 0 {
+        io.lines(take f, 3)
+    }
+    let mut back = match take r {
+        Ok(Error((_, take returned))) => take returned,
+        _ => return false
+    }
+    let mut b: Bytes = result.unwrap(list.with_capacity(3))
+    result.unwrap(file.read_into(mut back, mut b)) == 3 && b[0] == b'a'
 }
 
 // Each failure retains arbitrary bytes, including a UTF8 continuation. Host takes C3,
@@ -92,41 +139,58 @@ fn lines_capacity_hands_back(d:Dir)->bool waits {
 // host: first_write 1
 // expect: stdout "éx"
 // expect: run flush_keeps_utf8_suffix(out) = true
-fn flush_keeps_utf8_suffix(o:Stdout)->bool waits {
-    let mut w=result.unwrap(io.out(o,3))
-    result.unwrap(io.write(mut w,"éx"))
+fn flush_keeps_utf8_suffix(o: Stdout) -> bool waits {
+    let mut w = result.unwrap(io.out(o, 3))
+    result.unwrap(io.write(mut w, "éx"))
     match io.flush(mut w) {
-        Error(e)=>{if e.written!=1 {return false}; match e.error {Other(5)=>{},_=>return false}},
-        _=>return false,
+        Error(e) => {
+            if e.written != 1 {
+                return false
+            };
+            match e.error {
+                Other(5) => {},
+                _ => return false
+            }
+        },
+        _ => return false,
     }
     {
-        let p=io.pending(w)
-        if list.len(p)!=2 || p[0]!=0xA9u8 || p[1]!=b'x' {return false}
+        let p = io.pending(w)
+        if list.len(p) != 2 || p[0] != 0xA9u8 || p[1] != b'x' {
+            return false
+        }
     }
     result.unwrap(io.flush(mut w))
-    list.len(io.pending(w))==0
+    list.len(io.pending(w)) == 0
 }
 
 // Buffered concatenation, a flush on fullness, explicit final flush; drop adds no output.
 // expect: stdout "abcdef"
 // expect: run out_spans_buffers(out) = true
-fn out_spans_buffers(o:Stdout)->bool waits {
-    let mut w=result.unwrap(io.out(o,3))
-    result.unwrap(io.write(mut w,"ab"))
-    result.unwrap(io.write(mut w,"cdef"))
+fn out_spans_buffers(o: Stdout) -> bool waits {
+    let mut w = result.unwrap(io.out(o, 3))
+    result.unwrap(io.write(mut w, "ab"))
+    result.unwrap(io.write(mut w, "cdef"))
     result.unwrap(io.flush(mut w))
-    list.len(io.pending(w))==0
+    list.len(io.pending(w)) == 0
 }
 
 // A zero-progress error retains the entire buffer; retry must not lose or duplicate it.
 // host: first_write 0
 // expect: stdout "abc"
 // expect: run flush_zero_progress(out) = true
-fn flush_zero_progress(o:Stdout)->bool waits {
-    let mut w=result.unwrap(io.out(o,3))
-    result.unwrap(io.write(mut w,"abc"))
-    match io.flush(mut w) {Error(e)=>if e.written!=0 {return false},_=>return false}
-    if list.len(io.pending(w))!=3 {return false}
+fn flush_zero_progress(o: Stdout) -> bool waits {
+    let mut w = result.unwrap(io.out(o, 3))
+    result.unwrap(io.write(mut w, "abc"))
+    match io.flush(mut w) {
+        Error(e) => if e.written != 0 {
+            return false
+        },
+        _ => return false
+    }
+    if list.len(io.pending(w)) != 3 {
+        return false
+    }
     result.unwrap(io.flush(mut w))
     true
 }
@@ -136,94 +200,144 @@ fn flush_zero_progress(o:Stdout)->bool waits {
 // host: first_write 1
 // expect: stderr "éx"
 // expect: run stderr_bytes_prefix(err) = true
-fn stderr_bytes_prefix(e:Stderr)->bool waits {
-    let s="éx"
-    let b=string.as_bytes(s)
-    let n=match stderr.write_bytes(e,b) {Error(error)=>error.written,_=>return false}
-    if n!=1 {return false}
-    result.unwrap(stderr.write_bytes(e,list.slice(b,n,list.len(b))))
+fn stderr_bytes_prefix(e: Stderr) -> bool waits {
+    let s = "éx"
+    let b = string.as_bytes(s)
+    let n = match stderr.write_bytes(e, b) {
+        Error(error) => error.written,
+        _ => return false
+    }
+    if n != 1 {
+        return false
+    }
+    result.unwrap(stderr.write_bytes(e, list.slice(b, n, list.len(b))))
     true
 }
 
-
 // cap3 input admits8, pending admission refuses at8; original file returned without read.
 // expect: run lines_second_capacity_hands_back(dir) = true
-fn lines_second_capacity_hands_back(d:Dir)->bool waits {
-    result.unwrap(file.write(d,"input",string.as_bytes("abc")))
-    let f=result.unwrap(file.open(d,"input",Read))
-    let r=bound bytes 8 {io.lines(take f,3)}
-    let mut back=match take r {Ok(Error((c,take returned)))=>{
-        if c.requested!=8 || c.available!=0 {return false}
-        take returned
-    },_=>return false}
-    let mut b:Bytes=result.unwrap(list.with_capacity(3))
-    result.unwrap(file.read_into(mut back,mut b))==3 && b[0]==b'a'
+fn lines_second_capacity_hands_back(d: Dir) -> bool waits {
+    result.unwrap(file.write(d, "input", string.as_bytes("abc")))
+    let f = result.unwrap(file.open(d, "input", Read))
+    let r = bound bytes 8 {
+        io.lines(take f, 3)
+    }
+    let mut back = match take r {
+        Ok(Error((c, take returned))) => {
+            if c.requested != 8 || c.available != 0 {
+                return false
+            }
+            take returned
+        },
+        _ => return false
+    }
+    let mut b: Bytes = result.unwrap(list.with_capacity(3))
+    result.unwrap(file.read_into(mut back, mut b)) == 3 && b[0] == b'a'
 }
 
 // Invalid UTF8 remains inspectable but consumes its line; the next valid line is readable.
 // expect: run invalid_utf8_then_next(dir) = true
-fn invalid_utf8_then_next(d:Dir)->bool waits {
-    let mut raw:Bytes=list.new()
-    result.unwrap(list.fill(mut raw,1,255u8))
-    result.unwrap(list.append(mut raw,string.as_bytes("\nok\n")))
-    result.unwrap(file.write(d,"input",raw))
-    let f=result.unwrap(file.open(d,"input",Read))
-    let mut l=result.unwrap(io.lines(take f,4))
-    let mut line=string.new()
-    match io.read_line(mut l,mut line) {Error(NotUtf8)=>{},_=>return false}
-    {
-        let p=io.prefix(l)
-        if list.len(p)!=1 || p[0]!=255u8 || line!="" {return false}
+fn invalid_utf8_then_next(d: Dir) -> bool waits {
+    let mut raw: Bytes = list.new()
+    result.unwrap(list.fill(mut raw, 1, 255u8))
+    result.unwrap(list.append(mut raw, string.as_bytes("\nok\n")))
+    result.unwrap(file.write(d, "input", raw))
+    let f = result.unwrap(file.open(d, "input", Read))
+    let mut l = result.unwrap(io.lines(take f, 4))
+    let mut line = string.new()
+    match io.read_line(mut l, mut line) {
+        Error(NotUtf8) => {},
+        _ => return false
     }
-    result.unwrap(io.read_line(mut l,mut line)) && line=="ok"
+    {
+        let p = io.prefix(l)
+        if list.len(p) != 1 || p[0] != 255u8 || line != "" {
+            return false
+        }
+    }
+    result.unwrap(io.read_line(mut l, mut line)) && line == "ok"
 }
 
 // Out allocation refuses before the host sees a write.
 // expect: run out_capacity_returns_before_issue(out) = true
-fn out_capacity_returns_before_issue(o:Stdout)->bool {
-    let res=bound bytes 0 {io.out(o,3)}
-    match take res {Ok(Error(c))=>c.requested==8 && c.available==0,_=>false}
+fn out_capacity_returns_before_issue(o: Stdout) -> bool {
+    let res = bound bytes 0 {
+        io.out(o, 3)
+    }
+    match take res {
+        Ok(Error(c)) => c.requested == 8 && c.available == 0,
+        _ => false
+    }
 }
 
 // LF at every byte lane and on both sides of word/refill boundaries. The 0x0B
 // after LF can receive a borrow mark; the first LF must still be chosen exactly.
 // expect: run newline_word_positions(dir) = true
-fn newline_word_positions(d:Dir)->bool waits {
+fn newline_word_positions(d: Dir) -> bool waits {
     for n in 0u64 .. 34u64 {
-        let mut text=string.new()
-        for _ in 0u64 .. n {result.unwrap(string.push(mut text,"x"))}
-        result.unwrap(string.push(mut text,"\n\u{b}q\nabcdefghijklmnop\n"))
-        let cap:u64=if n<16 {16} else {n}
-        let mut l=input(d,text,cap)
-        let mut line=result.unwrap(string.with_capacity(40))
-        if !result.unwrap(io.read_line(mut l,mut line)) || string.byte_len(line)!=n {return false}
-        if !result.unwrap(io.read_line(mut l,mut line)) || line!="\u{b}q" {return false}
-        if !result.unwrap(io.read_line(mut l,mut line)) || line!="abcdefghijklmnop" {return false}
-        if result.unwrap(io.read_line(mut l,mut line)) {return false}
+        let mut text = string.new()
+        for _ in 0u64 .. n {
+            result.unwrap(string.push(mut text, "x"))
+        }
+        result.unwrap(string.push(mut text, "\n\u{b}q\nabcdefghijklmnop\n"))
+        let cap: u64 = if n < 16 {
+            16
+        } else {
+            n
+        }
+        let mut l = input(d, text, cap)
+        let mut line = result.unwrap(string.with_capacity(40))
+        if !result.unwrap(io.read_line(mut l, mut line)) || string.byte_len(line) != n {
+            return false
+        }
+        if !result.unwrap(io.read_line(mut l, mut line)) || line != "\u{b}q" {
+            return false
+        }
+        if !result.unwrap(io.read_line(mut l, mut line)) || line != "abcdefghijklmnop" {
+            return false
+        }
+        if result.unwrap(io.read_line(mut l, mut line)) {
+            return false
+        }
     }
     true
 }
+
 // A word-sized Capacity boundary keeps exactly that prefix, including high bytes;
 // the delimiter following the cap is accepted, while an ordinary next byte stays.
 // expect: run word_capacity_boundary(dir) = true
-fn word_capacity_boundary(d:Dir)->bool waits {
-    let mut exact=input(d,"1234567é\n",9)
-    let mut line=string.new()
-    if !result.unwrap(io.read_line(mut exact,mut line)) || line!="1234567é" {return false}
-    let mut oversized=input(d,"1234567éz\n",9)
-    match io.read_line(mut oversized,mut line) {Error(Capacity(_))=>{},_=>return false}
-    if line!="1234567é" || list.len(io.prefix(oversized))!=9 {return false}
-    match io.read_line(mut oversized,mut line) {Error(Capacity(_))=>line=="1234567é",_=>false}
+fn word_capacity_boundary(d: Dir) -> bool waits {
+    let mut exact = input(d, "1234567é\n", 9)
+    let mut line = string.new()
+    if !result.unwrap(io.read_line(mut exact, mut line)) || line != "1234567é" {
+        return false
+    }
+    let mut oversized = input(d, "1234567éz\n", 9)
+    match io.read_line(mut oversized, mut line) {
+        Error(Capacity(_)) => {},
+        _ => return false
+    }
+    if line != "1234567é" || list.len(io.prefix(oversized)) != 9 {
+        return false
+    }
+    match io.read_line(mut oversized, mut line) {
+        Error(Capacity(_)) => line == "1234567é",
+        _ => false
+    }
 }
 
 // The word path and a refill reuse the pre-admitted caller buffer at zero budget.
 // expect: run word_reuse_without_allocation(dir) = true
-fn word_reuse_without_allocation(d:Dir)->bool waits {
-    let mut l=input(d,"abcdefghijklmnop\nqrstuvwxyz012345\n",32)
-    let mut line=result.unwrap(string.with_capacity(32))
-    let r=bound bytes 0 {
-        if !result.unwrap(io.read_line(mut l,mut line)) || line!="abcdefghijklmnop" {return false}
-        if !result.unwrap(io.read_line(mut l,mut line)) || line!="qrstuvwxyz012345" {return false}
+fn word_reuse_without_allocation(d: Dir) -> bool waits {
+    let mut l = input(d, "abcdefghijklmnop\nqrstuvwxyz012345\n", 32)
+    let mut line = result.unwrap(string.with_capacity(32))
+    let r = bound bytes 0 {
+        if !result.unwrap(io.read_line(mut l, mut line)) || line != "abcdefghijklmnop" {
+            return false
+        }
+        if !result.unwrap(io.read_line(mut l, mut line)) || line != "qrstuvwxyz012345" {
+            return false
+        }
     }
     result.unwrap(r)
     true
@@ -232,25 +346,30 @@ fn word_reuse_without_allocation(d:Dir)->bool waits {
 // The caller's static literal needs only the 16-byte output reservation. Clearing
 // it must not first copy its seven bytes into a separate transient allocation.
 // expect: run static_caller_needs_only_output_capacity(dir) = true
-fn static_caller_needs_only_output_capacity(d:Dir)->bool waits {
-    let mut l=input(d,"ab\n",16)
-    let mut line="keep me"
-    let r=bound bytes 16 {io.read_line(mut l,mut line)}
-    match r {Ok(Ok(true))=>line=="ab" && list.capacity(string.as_bytes(line))==16,_=>false}
+fn static_caller_needs_only_output_capacity(d: Dir) -> bool waits {
+    let mut l = input(d, "ab\n", 16)
+    let mut line = "keep me"
+    let r = bound bytes 16 {
+        io.read_line(mut l, mut line)
+    }
+    match r {
+        Ok(Ok(true)) => line == "ab" && list.capacity(string.as_bytes(line)) == 16,
+        _ => false
+    }
 }
 
 // A whole input may exactly fill the buffer. Empty input must not flush it;
 // the next nonempty input flushes that prefix and then buffers its own bytes.
 // expect: stdout "abcdef"
 // expect: run whole_input_and_empty_at_full(out) = true
-fn whole_input_and_empty_at_full(out:Stdout)->bool waits {
-    let mut w=result.unwrap(io.out(out,4))
-    result.unwrap(io.write(mut w,"ab"))
-    result.unwrap(io.write(mut w,"cd"))
-    result.unwrap(io.write(mut w,""))
-    let full=list.len(io.pending(w))==4 && io.pending(w)[0]==97 && io.pending(w)[3]==100
-    result.unwrap(io.write(mut w,"ef"))
-    let suffix=list.len(io.pending(w))==2 && io.pending(w)[0]==101 && io.pending(w)[1]==102
+fn whole_input_and_empty_at_full(out: Stdout) -> bool waits {
+    let mut w = result.unwrap(io.out(out, 4))
+    result.unwrap(io.write(mut w, "ab"))
+    result.unwrap(io.write(mut w, "cd"))
+    result.unwrap(io.write(mut w, ""))
+    let full = list.len(io.pending(w)) == 4 && io.pending(w)[0] == 97 && io.pending(w)[3] == 100
+    result.unwrap(io.write(mut w, "ef"))
+    let suffix = list.len(io.pending(w)) == 2 && io.pending(w)[0] == 101 && io.pending(w)[1] == 102
     result.unwrap(io.flush(mut w))
     full && suffix
 }

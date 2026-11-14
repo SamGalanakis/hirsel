@@ -8,56 +8,109 @@
 // expect: run refused() = 16
 // expect: run listed() = 41
 // expect: run widened() = 64
-stable type Span2 { start: u64, end: u64 }
+stable type Span2 {
+    start: u64,
+    end: u64
+}
+
 stable type Leaf = Zero | Seven(u64)
-stable type Span3 { a: u64, b: u64, c: u64 }
-stable type Pair { a: Span2, b: u64 }
-fn mk(r: Region) -> Result[Span2 in r, Capacity] { Span2(start: 5, end: 10) in r }
-fn total(s: Span2) -> u64 { s.start + s.end }
-fn sum() -> u64 { region r { match mk(r) { Ok(s) => total(s), Error(_) => 0 } } }
+
+stable type Span3 {
+    a: u64,
+    b: u64,
+    c: u64
+}
+
+stable type Pair {
+    a: Span2,
+    b: u64
+}
+
+fn mk(r: Region) -> Result[Span2 in r, Capacity] {
+    Span2(start: 5, end: 10) in r
+}
+
+fn total(s: Span2) -> u64 {
+    s.start + s.end
+}
+
+fn sum() -> u64 {
+    region r {
+        match mk(r) {
+            Ok(s) => total(s),
+            Error(_) => 0
+        }
+    }
+}
+
 fn picked() -> u64 {
-  region r {
-    let z: Result[Leaf in r, Capacity] = Zero in r
-    let s: Result[Leaf in r, Capacity] = Seven(7) in r
-    match (z, s) { (Ok(Zero), Ok(Seven(k))) => k, _ => 0 }
-  }
+    region r {
+        let z: Result[Leaf in r, Capacity] = Zero in r
+        let s: Result[Leaf in r, Capacity] = Seven(7) in r
+        match (z, s) {
+            (Ok(Zero), Ok(Seven(k))) => k,
+            _ => 0
+        }
+    }
 }
+
 fn nested() -> u64 {
-  region r {
-    match mk(r) {
-      Ok(s) => match (Pair(a: s, b: 2) in r) { Ok(p) => p.a.end + p.b, Error(_) => 0 },
-      Error(_) => 0,
+    region r {
+        match mk(r) {
+            Ok(s) => match (Pair(a: s, b: 2) in r) {
+                Ok(p) => p.a.end + p.b,
+                Error(_) => 0
+            },
+            Error(_) => 0,
+        }
     }
-  }
 }
+
 fn refused() -> u64 {
-  let got = bound bytes 8 { region r { match mk(r) { Ok(_) => 0u64, Error(e) => e.requested } } }
-  match got { Ok(k) => k, Error(_) => 1 }
-}
-fn listed() -> u64 {
-  region r {
-    let mut xs: List[Span2 in r] = list.new()
-    match (Span2(start: 1, end: 2) in r, Span2(start: 3, end: 4) in r) {
-      (Ok(a), Ok(b)) => {
-        result.unwrap(list.push(mut xs, a))
-        result.unwrap(list.push(mut xs, b))
-        xs[1].end * 10 + xs[0].start
-      }
-      _ => 0,
+    let got = bound bytes 8 {
+        region r {
+            match mk(r) {
+                Ok(_) => 0u64,
+                Error(e) => e.requested
+            }
+        }
     }
-  }
+    match got {
+        Ok(k) => k,
+        Error(_) => 1
+    }
 }
+
+fn listed() -> u64 {
+    region r {
+        let mut xs: List[Span2 in r] = list.new()
+        match (Span2(start: 1, end: 2) in r, Span2(start: 3, end: 4) in r) {
+            (Ok(a), Ok(b)) => {
+                result.unwrap(list.push(mut xs, a))
+                result.unwrap(list.push(mut xs, b))
+                xs[1].end * 10 + xs[0].start
+            }
+            _ => 0,
+        }
+    }
+}
+
 // budgets.md: a reference to a stable value counts 16, and a first push grows to
 // capacity 4, so a list of 24-byte stable values requests 4 * 16 bytes.
 fn widened() -> u64 {
-  region r {
-    let mut xs: List[Span3 in r] = list.new()
-    match Span3(a: 1, b: 2, c: 3) in r {
-      Ok(s) => {
-        let got = bound bytes 0 { list.push(mut xs, s) }
-        match got { Ok(Error((e, _))) => e.requested, _ => 0 }
-      }
-      Error(_) => 1,
+    region r {
+        let mut xs: List[Span3 in r] = list.new()
+        match Span3(a: 1, b: 2, c: 3) in r {
+            Ok(s) => {
+                let got = bound bytes 0 {
+                    list.push(mut xs, s)
+                }
+                match got {
+                    Ok(Error((e, _))) => e.requested,
+                    _ => 0
+                }
+            }
+            Error(_) => 1,
+        }
     }
-  }
 }

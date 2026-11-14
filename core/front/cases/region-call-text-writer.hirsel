@@ -1,4 +1,7 @@
 // expect: accept
 // std.json.write_string: root substitution also applies when T is already Text.
-fn emit_text[T, in r](take w: Writer[T, in r], x: T) { }
-fn write_string[in r](take w: Writer[Text, in r], t: Text) { emit_text(take w, t) }
+fn emit_text[T, in r](take w: Writer[T, in r], x: T) {}
+
+fn write_string[in r](take w: Writer[Text, in r], t: Text) {
+    emit_text(take w, t)
+}

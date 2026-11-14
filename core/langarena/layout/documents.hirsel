@@ -3,13 +3,18 @@
 // both ordinary and compact paths copy it, and unknown-size construction runs once.
 @compact(u32)
 stable type Item = Flag(bool) | Name(Text) | Scores(FixedSpan[u64])
+
 @compact(u32)
-stable type Batch { items: IndexedSpan[Item] }
+stable type Batch {
+    items: IndexedSpan[Item]
+}
+
 type OwnedItem = Flag(bool) | Name(String) | Scores(List[u64])
 
 fn label(source: String, i: u64) -> View[String] in source {
     string.slice(source, 0, i % 24)
 }
+
 fn scores(i: u64) -> Result[List[u64], Capacity] {
     let mut xs: List[u64] = list.with_capacity(3)?
     let _ = list.push(mut xs, i)
@@ -17,43 +22,65 @@ fn scores(i: u64) -> Result[List[u64], Capacity] {
     let _ = list.push(mut xs, i + 2)
     Ok(take xs)
 }
+
 fn ordinary(n: u64) -> Result[u64, Capacity] {
     let mut items: List[OwnedItem] = list.with_capacity(n)?
     for i in 0 .. n {
-        let item: OwnedItem = if i % 3 == 0 { Flag(i % 2 == 0) }
-            else if i % 3 == 1 { Name(string.from(label("abcdefghijklmnopqrstuvw", i))?) }
-            else { Scores(scores(i)?) }
+        let item: OwnedItem = if i % 3 == 0 {
+            Flag(i % 2 == 0)
+        } else if i % 3 == 1 {
+            Name(string.from(label("abcdefghijklmnopqrstuvw", i))?)
+        } else {
+            Scores(scores(i)?)
+        }
         let _ = list.push(mut items, take item)
     }
     let mut sum: u64 = 0
     for item in items {
         sum += match item {
-            Flag(x) => if x { 1 } else { 0 },
+            Flag(x) => if x {
+                1
+            } else {
+                0
+            },
             Name(s) => string.byte_len(s),
             Scores(xs) => xs[0] + xs[1] + xs[2],
         }
     }
     Ok(sum)
 }
+
 fn encoded_size(n: u64) -> u64 {
     let mut size: u64 = 8
     for i in 0 .. n {
-        size += 4u64 + if i % 3 == 0 { 2 } else if i % 3 == 1 { 5 + i % 24 } else { 29 }
+        size += 4u64 + if i % 3 == 0 {
+            2
+        } else if i % 3 == 1 {
+            5 + i % 24
+        } else {
+            29
+        }
     }
     size
 }
+
 fn write_batch[in r](n: u64, take w: Writer[Batch, in r]) -> Result[Child[Batch], BuildError] {
     emit(take w, Batch(items: emit(fn(take xs: Writer[IndexedSpan[Item], in r]) -> Result[Child[IndexedSpan[Item]], BuildError] {
         for i in 0 .. n {
             writer.append(mut xs, fn(take item: Writer[Item, in r]) -> Result[Child[Item], BuildError] {
-                if i % 3 == 0 { emit(take item, Flag(i % 2 == 0)) }
-                else if i % 3 == 1 { emit(take item, Name(label("abcdefghijklmnopqrstuvw", i))) }
-                else {
+                if i % 3 == 0 {
+                    emit(take item, Flag(i % 2 == 0))
+                } else if i % 3 == 1 {
+                    emit(take item, Name(label("abcdefghijklmnopqrstuvw", i)))
+                } else {
                     // Three fixed-stride values; the same source schedule as ordinary.
                     emit(take item, Scores(emit(fn(take values: Writer[FixedSpan[u64], in r]) -> Result[Child[FixedSpan[u64]], BuildError] {
                         // The plain list is the core FixedSpan emit source, explicit scratch.
                         let admission: Result[List[u64], Capacity] = list.with_capacity(3)
-                        let mut source: List[u64] = match take admission { Ok(take s) => take s, Error(c) => return Error(Capacity(c)) }
+                        let mut source: List[u64] = match take admission {
+                            Ok(take s) => take s,
+                            Error(c) => return Error(Capacity(c))
+                        }
                         let _ = list.push(mut source, i)
                         let _ = list.push(mut source, i + 1)
                         let _ = list.push(mut source, i + 2)
@@ -65,55 +92,90 @@ fn write_batch[in r](n: u64, take w: Writer[Batch, in r]) -> Result[Child[Batch]
         writer.close(take xs)
     })))
 }
+
 fn build_batch(r: Region, n: u64, reserve: u64) -> Result[Builder[Batch, in r], BuildError] {
     build_stream_in(r, bytes reserve, fn(take w: Writer[Batch, in r]) -> Result[Child[Batch], BuildError] {
         write_batch(n, take w)
     })
 }
+
 fn scan(doc: Batch) -> u64 {
     let mut sum: u64 = 0
     for item in doc.items {
         sum += match item {
-            Flag(x) => if x { 1 } else { 0 },
+            Flag(x) => if x {
+                1
+            } else {
+                0
+            },
             Name(t) => text.len(t),
             Scores(xs) => xs[0] + xs[1] + xs[2],
         }
     }
     sum
 }
+
 fn compact_sized(n: u64) -> Result[u64, BuildError] {
     region r {
         let b = build_batch(r, n, encoded_size(n))?
         Ok(scan(finish(take b)))
     }
 }
+
 fn compact_streaming(n: u64) -> Result[u64, BuildError] {
     region r {
         let b = build_batch(r, n, 64 * n + 8)?
         Ok(scan(finish_trim(take b)))
     }
 }
+
 fn show(out: Stdout, n: u64) -> Result[(), Exit] waits {
     let mut s = string.new()
-    if let Error(_) = string.push_u64(mut s, n) { return Error(Exit(status: 2)) }
-    if let Error(_) = string.push(mut s, "\n") { return Error(Exit(status: 2)) }
-    match stdout.write(out, s) { Ok(()) => Ok(()), Error(_) => Error(Exit(status: 3)) }
+    if let Error(_) = string.push_u64(mut s, n) {
+        return Error(Exit(status: 2))
+    }
+    if let Error(_) = string.push(mut s, "\n") {
+        return Error(Exit(status: 2))
+    }
+    match stdout.write(out, s) {
+        Ok(()) => Ok(()),
+        Error(_) => Error(Exit(status: 3))
+    }
 }
+
 pub fn ordinary_main(out: Stdout) -> Result[(), Exit] waits {
     let mut sum: u64 = 0
-    for _ in 0u64 .. 64 { sum += match ordinary(8192) { Ok(n) => n, Error(_) => return Error(Exit(status: 2)) } }
+    for _ in 0u64 .. 64 {
+        sum += match ordinary(8192) {
+            Ok(n) => n,
+            Error(_) => return Error(Exit(status: 2))
+        }
+    }
     show(out, sum)
 }
+
 pub fn sized_main(out: Stdout) -> Result[(), Exit] waits {
     let mut sum: u64 = 0
-    for _ in 0u64 .. 64 { sum += match compact_sized(8192) { Ok(n) => n, Error(_) => return Error(Exit(status: 2)) } }
+    for _ in 0u64 .. 64 {
+        sum += match compact_sized(8192) {
+            Ok(n) => n,
+            Error(_) => return Error(Exit(status: 2))
+        }
+    }
     show(out, sum)
 }
+
 pub fn streaming_main(out: Stdout) -> Result[(), Exit] waits {
     let mut sum: u64 = 0
-    for _ in 0u64 .. 64 { sum += match compact_streaming(8192) { Ok(n) => n, Error(_) => return Error(Exit(status: 2)) } }
+    for _ in 0u64 .. 64 {
+        sum += match compact_streaming(8192) {
+            Ok(n) => n,
+            Error(_) => return Error(Exit(status: 2))
+        }
+    }
     show(out, sum)
 }
+
 pub fn small_law() -> bool {
     result.unwrap(ordinary(6)) == 33 && result.unwrap(compact_sized(6)) == 33
 }
@@ -121,23 +183,43 @@ pub fn small_law() -> bool {
 // expect: run ordinary_refusal() = true
 pub fn ordinary_refusal() -> bool {
     // Six32-byte carriers +two rounded texts of8 +two24-byte score lists =256.
-    let exact = match (bound bytes 256 { ordinary(6) }) { Ok(Ok(33)) => true, _ => false }
+    let exact = match (bound bytes 256 {
+        ordinary(6)
+    }) {
+        Ok(Ok(33)) => true,
+        _ => false
+    }
     let short = result.unwrap(bound bytes 255 {
-        let denied = match ordinary(6) { Error(c) => c.requested == 24 && c.available == 23, _ => false }
+        let denied = match ordinary(6) {
+            Error(c) => c.requested == 24 && c.available == 23,
+            _ => false
+        }
         let xs: List[u64] = result.unwrap(list.with_capacity(31))
         denied && list.len(xs) == 0
     })
     exact && short
 }
+
 // expect: run sized_refusal_prefix() = true
 pub fn sized_refusal_prefix() -> bool {
     // The109-byte blob is rounded112; FixedSpan construction needs24 scratch.
-    let exact = match (bound bytes 136 { compact_sized(6) }) { Ok(Ok(33)) => true, _ => false }
+    let exact = match (bound bytes 136 {
+        compact_sized(6)
+    }) {
+        Ok(Ok(33)) => true,
+        _ => false
+    }
     let prefix = result.unwrap(bound bytes 135 {
         let kept = region r {
-            let denied = match build_batch(r, 6, encoded_size(6)) { Error(Capacity(c)) => c.requested == 24 && c.available == 23, _ => false }
+            let denied = match build_batch(r, 6, encoded_size(6)) {
+                Error(Capacity(c)) => c.requested == 24 && c.available == 23,
+                _ => false
+            }
             let probe: Result[List[u64], Capacity] = list.with_capacity(3)
-            denied && match take probe { Error(c) => c.requested == 24 && c.available == 23, _ => false }
+            denied && match take probe {
+                Error(c) => c.requested == 24 && c.available == 23,
+                _ => false
+            }
         }
         // Closing the failed region refunds its admitted blob reservation.
         let xs: List[u64] = result.unwrap(list.with_capacity(16))
@@ -145,63 +227,142 @@ pub fn sized_refusal_prefix() -> bool {
     })
     exact && prefix
 }
+
 // expect: run streaming_refusal_prefix() = true
 pub fn streaming_refusal_prefix() -> bool {
     // Maximum392 +scratch24. No staging/replayed producer is introduced.
-    let exact = match (bound bytes 416 { compact_streaming(6) }) { Ok(Ok(33)) => true, _ => false }
+    let exact = match (bound bytes 416 {
+        compact_streaming(6)
+    }) {
+        Ok(Ok(33)) => true,
+        _ => false
+    }
     let prefix = result.unwrap(bound bytes 415 {
         let kept = region r {
-            let denied = match build_batch(r, 6, 392) { Error(Capacity(c)) => c.requested == 24 && c.available == 23, _ => false }
+            let denied = match build_batch(r, 6, 392) {
+                Error(Capacity(c)) => c.requested == 24 && c.available == 23,
+                _ => false
+            }
             let probe: Result[List[u64], Capacity] = list.with_capacity(3)
-            denied && match take probe { Error(c) => c.requested == 24 && c.available == 23, _ => false }
+            denied && match take probe {
+                Error(c) => c.requested == 24 && c.available == 23,
+                _ => false
+            }
         }
         let xs: List[u64] = result.unwrap(list.with_capacity(51))
         kept && list.len(xs) == 0
     })
     exact && prefix
 }
+
 // expect: run malformed_document_input() = true
 pub fn malformed_document_input() -> bool {
-    let comma = match std.json.size("[1,]") { Error(Syntax(3)) => true, _ => false }
-    let escape = match std.json.size("\"\\x\"") { Error(Syntax(2)) => true, _ => false }
+    let comma = match std.json.size("[1,]") {
+        Error(Syntax(3)) => true,
+        _ => false
+    }
+    let escape = match std.json.size("\"\\x\"") {
+        Error(Syntax(2)) => true,
+        _ => false
+    }
     comma && escape
 }
+
 // expect: run small_law() = true
 pub fn document_capacity_main(out: Stdout) -> Result[(), Exit] waits {
-    show(out, (if ordinary_refusal() { 1u64 } else { 0 }) +
-        (if sized_refusal_prefix() { 2u64 } else { 0 }) +
-        (if streaming_refusal_prefix() { 4u64 } else { 0 }))
+    show(out, (if ordinary_refusal() {
+        1u64
+    } else {
+        0
+    }) + (if sized_refusal_prefix() {
+        2u64
+    } else {
+        0
+    }) + (if streaming_refusal_prefix() {
+        4u64
+    } else {
+        0
+    }))
 }
+
 pub fn document_malformed_main(out: Stdout) -> Result[(), Exit] waits {
-    show(out, if malformed_document_input() { 3 } else { 0 })
+    show(out, if malformed_document_input() {
+        3
+    } else {
+        0
+    })
 }
 
-pub fn ordinary_capacity_main(out: Stdout) -> Result[(), Exit] waits { show(out, if ordinary_refusal() { 1 } else { 0 }) }
+pub fn ordinary_capacity_main(out: Stdout) -> Result[(), Exit] waits {
+    show(out, if ordinary_refusal() {
+        1
+    } else {
+        0
+    })
+}
 
-pub fn sized_capacity_main(out: Stdout) -> Result[(), Exit] waits { show(out, if sized_refusal_prefix() { 1 } else { 0 }) }
+pub fn sized_capacity_main(out: Stdout) -> Result[(), Exit] waits {
+    show(out, if sized_refusal_prefix() {
+        1
+    } else {
+        0
+    })
+}
 
-pub fn streaming_capacity_main(out: Stdout) -> Result[(), Exit] waits { show(out, if streaming_refusal_prefix() { 1 } else { 0 }) }
+pub fn streaming_capacity_main(out: Stdout) -> Result[(), Exit] waits {
+    show(out, if streaming_refusal_prefix() {
+        1
+    } else {
+        0
+    })
+}
 
 // Six ordinary carriers charge192; text and score admissions are8,24,8,24.
 // All256 sub-budgets must refuse at that exact next admission.
 // expect: run ordinary_admission_prefixes() = true
 pub fn ordinary_admission_prefixes() -> bool {
     for cap in 0u64 .. 256 {
-        let requested: u64 = if cap < 192 { 192 } else if cap < 200 { 8 }
-            else if cap < 224 { 24 } else if cap < 232 { 8 } else { 24 }
-        let base: u64 = if cap < 192 { 0 } else if cap < 200 { 192 }
-            else if cap < 224 { 200 } else if cap < 232 { 224 } else { 232 }
-        let denied = match (bound bytes cap { ordinary(6) }) {
+        let requested: u64 = if cap < 192 {
+            192
+        } else if cap < 200 {
+            8
+        } else if cap < 224 {
+            24
+        } else if cap < 232 {
+            8
+        } else {
+            24
+        }
+        let base: u64 = if cap < 192 {
+            0
+        } else if cap < 200 {
+            192
+        } else if cap < 224 {
+            200
+        } else if cap < 232 {
+            224
+        } else {
+            232
+        }
+        let denied = match (bound bytes cap {
+            ordinary(6)
+        }) {
             Ok(Error(c)) => c.requested == requested && c.available == cap - base,
             _ => false,
         }
-        if !denied { return false }
+        if !denied {
+            return false
+        }
     }
-    let sized = match (bound bytes 111 { compact_sized(6) }) {
+    let sized = match (bound bytes 111 {
+        compact_sized(6)
+    }) {
         Ok(Error(Capacity(c))) => c.requested == 112 && c.available == 111,
         _ => false,
     }
-    let streaming = match (bound bytes 391 { compact_streaming(6) }) {
+    let streaming = match (bound bytes 391 {
+        compact_streaming(6)
+    }) {
         Ok(Error(Capacity(c))) => c.requested == 392 && c.available == 391,
         _ => false,
     }

@@ -1,181 +1,245 @@
 // kostya/LangArena3c9f84d benchmarks/calculator_ast.rs:30-320,
 // calculator_interpreter.rs:6-110. Recursive descent and owned boxed syntax tree.
-type Node = Number(i64) | Variable(String) | Binary(u8,Box[Node],Box[Node]) | Assignment(String,Box[Node])
-fn boxed(take n:Node)->Result[Box[Node],helper.Error] {
-    match box.new(take n) {Ok(take b)=>Ok(take b),Error((c,_))=>Error(Capacity(c))}
+type Node = Number(i64) | Variable(String) | Binary(u8, Box[Node], Box[Node]) | Assignment(String, Box[Node])
+
+fn boxed(take n: Node) -> Result[Box[Node], helper.Error] {
+    match box.new(take n) {
+        Ok(take b) => Ok(take b),
+        Error((c, _)) => Error(Capacity(c))
+    }
 }
-fn push[T](mut xs:List[T],take x:T)->Result[(),helper.Error] {
-    match list.push(mut xs,take x) {Ok(())=>Ok(()),Error((c,_))=>Error(Capacity(c))}
+
+fn push[T](mut xs: List[T], take x: T) -> Result[(), helper.Error] {
+    match list.push(mut xs, take x) {
+        Ok(()) => Ok(()),
+        Error((c, _)) => Error(Capacity(c))
+    }
 }
-fn snippet(mut out:String,pattern:String,values:Inline[i64,10])->Result[(),helper.Error] {
-    let b=string.as_bytes(pattern)
-    let mut i:u64=0
-    while i<list.len(b) {
-        if b[i]==b'#' {
-            let index:u64=int.widen(b[i+1]-b'0')
-            helper.mem(string.push_i64(mut out,values[index]))?
-            i+=2
+
+fn snippet(mut out: String, pattern: String, values: Inline[i64, 10]) -> Result[(), helper.Error] {
+    let b = string.as_bytes(pattern)
+    let mut i: u64 = 0
+    while i < list.len(b) {
+        if b[i] == b'#' {
+            let index: u64 = int.widen(b[i + 1] - b'0')
+            helper.mem(string.push_i64(mut out, values[index]))?
+            i += 2
         } else {
-            helper.mem(string.push_char(mut out,option.unwrap(char.from_u32(int.widen(b[i])))))?
-            i+=1
+            helper.mem(string.push_char(mut out, option.unwrap(char.from_u32(int.widen(b[i])))))?
+            i += 1
         }
     }
     Ok(())
 }
-fn generate(n:i64)->Result[String,helper.Error] {
-    let mut out=helper.mem(string.from("v0 = 1\n"))?
+
+fn generate(n: i64) -> Result[String, helper.Error] {
+    let mut out = helper.mem(string.from("v0 = 1\n"))?
     for i in 1i64 .. 11i64 {
-        helper.mem(string.push(mut out,"v"))?
-        helper.mem(string.push_i64(mut out,i))?
-        helper.mem(string.push(mut out," = v"))?
-        helper.mem(string.push_i64(mut out,i-1))?
-        helper.mem(string.push(mut out," + "))?
-        helper.mem(string.push_i64(mut out,i))?
-        helper.mem(string.push(mut out,"\n"))?
+        helper.mem(string.push(mut out, "v"))?
+        helper.mem(string.push_i64(mut out, i))?
+        helper.mem(string.push(mut out, " = v"))?
+        helper.mem(string.push_i64(mut out, i - 1))?
+        helper.mem(string.push(mut out, " + "))?
+        helper.mem(string.push_i64(mut out, i))?
+        helper.mem(string.push(mut out, "\n"))?
     }
-    let templates:Inline[String,10]=[
-        "(v#0 / 3) * 4 - #9 / (3 + (18 - v#1)) % v#2 + 2 * ((9 - v#5) * (v#4 + 7))",
-        "v#0 + (v#1 + v#2) * v#3 - (v#4 / v#5)",
-        "(3789 - (((v#6)))) + 1", "4/2 * (1-3) + v#8/v#4",
-        "1+2+3+4+5+6+v#0", "(99999 / v#2)", "0 + 0 - v#7",
-        "((((((((((v#5)))))))))) * 2", "#9 * (v#0%6)%7", "(1)/(0-v#4) + (v#6)"
-    ]
-    let mut g=helper.lcg()
+    let templates: Inline[String, 10] =["(v#0 / 3) * 4 - #9 / (3 + (18 - v#1)) % v#2 + 2 * ((9 - v#5) * (v#4 + 7))", "v#0 + (v#1 + v#2) * v#3 - (v#4 / v#5)", "(3789 - (((v#6)))) + 1", "4/2 * (1-3) + v#8/v#4", "1+2+3+4+5+6+v#0", "(99999 / v#2)", "0 + 0 - v#7", "((((((((((v#5)))))))))) * 2", "#9 * (v#0%6)%7", "(1)/(0-v#4) + (v#6)"]
+    let mut g = helper.lcg()
     for i in 0 .. n {
-        let v=i+10
-        helper.mem(string.push(mut out,"v"))?
-        helper.mem(string.push_i64(mut out,v))?
-        helper.mem(string.push(mut out," = v"))?
-        helper.mem(string.push_i64(mut out,v-1))?
-        helper.mem(string.push(mut out," + "))?
-        let choice:u64=int.narrow(helper.next_int(mut g,10))
-        let values:Inline[i64,10]=[v-1,v-2,v-3,v-4,v-5,v-6,v-7,v-8,v-9,i]
-        snippet(mut out,templates[choice],values)?
-        helper.mem(string.push(mut out,"\n"))?
+        let v = i + 10
+        helper.mem(string.push(mut out, "v"))?
+        helper.mem(string.push_i64(mut out, v))?
+        helper.mem(string.push(mut out, " = v"))?
+        helper.mem(string.push_i64(mut out, v - 1))?
+        helper.mem(string.push(mut out, " + "))?
+        let choice: u64 = int.narrow(helper.next_int(mut g, 10))
+        let values: Inline[i64, 10] =[v - 1, v - 2, v - 3, v - 4, v - 5, v - 6, v - 7, v - 8, v - 9, i]
+        snippet(mut out, templates[choice], values)?
+        helper.mem(string.push(mut out, "\n"))?
     }
     Ok(take out)
 }
-fn at(source:String,pos:u64)->u8 {
-    if pos<string.byte_len(source) {string.as_bytes(source)[pos]} else {0}
-}
-fn skip(source:String,mut pos:u64) {
-    loop {
-        let b=at(source,pos)
-        if b!=b' ' && b!=b'\t' && b!=b'\n' && b!=b'\r' {break}
-        pos+=1
+
+fn at(source: String, pos: u64) -> u8 {
+    if pos < string.byte_len(source) {
+        string.as_bytes(source)[pos]
+    } else {
+        0
     }
 }
-fn digit(b:u8)->bool {b>=b'0' && b<=b'9'}
-fn letter(b:u8)->bool {b>=b'a' && b<=b'z' || b>=b'A' && b<=b'Z'}
-fn factor(source:String,mut pos:u64)->Result[Node,helper.Error] {
-    skip(source,mut pos)
-    let b=at(source,pos)
+
+fn skip(source: String, mut pos: u64) {
+    loop {
+        let b = at(source, pos)
+        if b != b' ' && b != b'\t' && b != b'\n' && b != b'\r' {
+            break
+        }
+        pos += 1
+    }
+}
+
+fn digit(b: u8) -> bool {
+    b >= b'0' && b <= b'9'
+}
+
+fn letter(b: u8) -> bool {
+    b >= b'a' && b <= b'z' || b >= b'A' && b <= b'Z'
+}
+
+fn factor(source: String, mut pos: u64) -> Result[Node, helper.Error] {
+    skip(source, mut pos)
+    let b = at(source, pos)
     if digit(b) {
-        let start=pos
-        while digit(at(source,pos)) {pos+=1}
-        let parsed:Result[i64,ParseError]=int.parse(string.slice(source,start,pos))
-        return Ok(Number(match parsed {Ok(n)=>n,Error(_)=>0}))
+        let start = pos
+        while digit(at(source, pos)) {
+            pos += 1
+        }
+        let parsed: Result[i64, ParseError] = int.parse(string.slice(source, start, pos))
+        return Ok(Number(match parsed {
+            Ok(n) => n,
+            Error(_) => 0
+        }))
     }
     if letter(b) {
-        let start=pos
-        while letter(at(source,pos)) || digit(at(source,pos)) {pos+=1}
-        let name=helper.mem(string.from(string.slice(source,start,pos)))?
-        skip(source,mut pos)
-        if at(source,pos)==b'=' {
-            pos+=1
-            let child=expression(source,mut pos)?
-            return Ok(Assignment(take name,boxed(take child)?))
+        let start = pos
+        while letter(at(source, pos)) || digit(at(source, pos)) {
+            pos += 1
+        }
+        let name = helper.mem(string.from(string.slice(source, start, pos)))?
+        skip(source, mut pos)
+        if at(source, pos) == b'=' {
+            pos += 1
+            let child = expression(source, mut pos)?
+            return Ok(Assignment(take name, boxed(take child)?))
         }
         return Ok(Variable(take name))
     }
-    if b==b'(' {
-        pos+=1
-        let n=expression(source,mut pos)?
-        skip(source,mut pos)
-        if at(source,pos)==b')' {pos+=1}
+    if b == b'(' {
+        pos += 1
+        let n = expression(source, mut pos)?
+        skip(source, mut pos)
+        if at(source, pos) == b')' {
+            pos += 1
+        }
         return Ok(take n)
     }
-    pos+=1
+    pos += 1
     Ok(Number(0))
 }
-fn term(source:String,mut pos:u64)->Result[Node,helper.Error] {
-    let mut left=factor(source,mut pos)?
+
+fn term(source: String, mut pos: u64) -> Result[Node, helper.Error] {
+    let mut left = factor(source, mut pos)?
     loop {
-        skip(source,mut pos)
-        let op=at(source,pos)
-        if op!=b'*' && op!=b'/' && op!=b'%' {break}
-        pos+=1
-        let right=factor(source,mut pos)?
-        let previous=replace(mut left,Number(0))
-        left=Binary(op,boxed(take previous)?,boxed(take right)?)
+        skip(source, mut pos)
+        let op = at(source, pos)
+        if op != b'*' && op != b'/' && op != b'%' {
+            break
+        }
+        pos += 1
+        let right = factor(source, mut pos)?
+        let previous = replace(mut left, Number(0))
+        left = Binary(op, boxed(take previous)?, boxed(take right)?)
     }
     Ok(take left)
 }
-fn expression(source:String,mut pos:u64)->Result[Node,helper.Error] {
-    let mut left=term(source,mut pos)?
+
+fn expression(source: String, mut pos: u64) -> Result[Node, helper.Error] {
+    let mut left = term(source, mut pos)?
     loop {
-        skip(source,mut pos)
-        let op=at(source,pos)
-        if op!=b'+' && op!=b'-' {break}
-        pos+=1
-        let right=term(source,mut pos)?
-        let previous=replace(mut left,Number(0))
-        left=Binary(op,boxed(take previous)?,boxed(take right)?)
+        skip(source, mut pos)
+        let op = at(source, pos)
+        if op != b'+' && op != b'-' {
+            break
+        }
+        pos += 1
+        let right = term(source, mut pos)?
+        let previous = replace(mut left, Number(0))
+        left = Binary(op, boxed(take previous)?, boxed(take right)?)
     }
     Ok(take left)
 }
-fn parse(source:String)->Result[List[Node],helper.Error] {
-    let mut expressions:List[Node]=list.new()
-    let mut pos:u64=0
-    while at(source,pos)!=0 {
-        skip(source,mut pos)
-        if at(source,pos)==0 {break}
-        push(mut expressions,expression(source,mut pos)?)?
-        skip(source,mut pos)
+
+fn parse(source: String) -> Result[List[Node], helper.Error] {
+    let mut expressions: List[Node] = list.new()
+    let mut pos: u64 = 0
+    while at(source, pos) != 0 {
+        skip(source, mut pos)
+        if at(source, pos) == 0 {
+            break
+        }
+        push(mut expressions, expression(source, mut pos)?)?
+        skip(source, mut pos)
     }
     Ok(take expressions)
 }
-fn evaluate(node:Node,mut variables:Map[String,i64])->Result[i64,helper.Error] {
+
+fn evaluate(node: Node, mut variables: Map[String, i64]) -> Result[i64, helper.Error] {
     match node {
-        Number(n)=>Ok(n),
-        Variable(name)=>Ok(map.get_or(variables,name,0i64)),
-        Binary(op,left,right)=>{
-            let a=evaluate(left,mut variables)?
-            let b=evaluate(right,mut variables)?
-            Ok(if op==b'+' {int.wrapping_add(a,b)} else if op==b'-' {int.wrapping_sub(a,b)}
-                else if op==b'*' {int.wrapping_mul(a,b)} else if b==0 {0}
-                else if op==b'/' {a/b} else if op==b'%' {a-(a/b)*b} else {0})
+        Number(n) => Ok(n),
+        Variable(name) => Ok(map.get_or(variables, name, 0i64)),
+        Binary(op, left, right) => {
+            let a = evaluate(left, mut variables)?
+            let b = evaluate(right, mut variables)?
+            Ok(if op == b'+' {
+                int.wrapping_add(a, b)
+            } else if op == b'-' {
+                int.wrapping_sub(a, b)
+            } else if op == b'*' {
+                int.wrapping_mul(a, b)
+            } else if b == 0 {
+                0
+            } else if op == b'/' {
+                a / b
+            } else if op == b'%' {
+                a - (a / b) * b
+            } else {
+                0
+            })
         },
-        Assignment(name,child)=>{
-            let value=evaluate(child,mut variables)?
-            let key=helper.mem(string.from(name))?
-            helper.mem(result.capacity_only(map.insert(mut variables,take key,value)))?
+        Assignment(name, child) => {
+            let value = evaluate(child, mut variables)?
+            let key = helper.mem(string.from(name))?
+            helper.mem(result.capacity_only(map.insert(mut variables, take key, value)))?
             Ok(value)
         },
     }
 }
-pub fn dispatch(config:String,name:String,warmup:u64,iterations:u64)->Result[u32,helper.Error] {
-    if name!="Calculator::Ast" && name!="Calculator::Interpreter" {return Error(UnknownTask)}
-    let n=helper.config_i64(config,name,"operations")?
-    if n<0 {return Error(Config)}
-    let source=generate(n)?
-    let mut ast:List[Node]=list.new()
-    if name=="Calculator::Interpreter" {ast=parse(source)?}
-    let mut checksum:u32=0
-    for _ in 0 .. warmup+iterations {
-        if name=="Calculator::Ast" {
-            ast=parse(source)?
-            checksum=int.wrapping_add(checksum,int.narrow(list.len(ast)))
-            if let Some(Assignment(last,_))=list.last(ast) {checksum=int.wrapping_add(checksum,helper.checksum_str(last))}
+
+pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
+    if name != "Calculator::Ast" && name != "Calculator::Interpreter" {
+        return Error(UnknownTask)
+    }
+    let n = helper.config_i64(config, name, "operations")?
+    if n < 0 {
+        return Error(Config)
+    }
+    let source = generate(n)?
+    let mut ast: List[Node] = list.new()
+    if name == "Calculator::Interpreter" {
+        ast = parse(source)?
+    }
+    let mut checksum: u32 = 0
+    for _ in 0 .. warmup + iterations {
+        if name == "Calculator::Ast" {
+            ast = parse(source)?
+            checksum = int.wrapping_add(checksum, int.narrow(list.len(ast)))
+            if let Some(Assignment(last, _)) = list.last(ast) {
+                checksum = int.wrapping_add(checksum, helper.checksum_str(last))
+            }
         } else {
-            let mut variables:Map[String,i64]=map.new()
-            let mut value:i64=0
-            for node in ast {value=evaluate(node,mut variables)?}
-            checksum=int.wrapping_add(checksum,int.truncate(value))
+            let mut variables: Map[String, i64] = map.new()
+            let mut value: i64 = 0
+            for node in ast {
+                value = evaluate(node, mut variables)?
+            }
+            checksum = int.wrapping_add(checksum, int.truncate(value))
         }
     }
     Ok(checksum)
 }
-pub fn main(out:Stdout,d:Dir,argv:Args)->Result[(),Exit] waits {
-    harness.main(out,d,argv,fn(c:String,n:String,w:u64,i:u64)->Result[u32,helper.Error] {dispatch(c,n,w,i)})
+
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
+    harness.main(out, d, argv, fn(c: String, n: String, w: u64, i: u64) -> Result[u32, helper.Error] {
+        dispatch(c, n, w, i)
+    })
 }

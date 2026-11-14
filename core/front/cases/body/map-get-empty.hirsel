@@ -1,7 +1,13 @@
 // Empty maps have no lookup index and do not read their null entries pointer.
 // expect: run checked() = 17
-fn lookup[K:key,V](m:Map[K,V],k:K)->Option[View[V]] in m { map.get(m,k) }
-fn checked()->u64 {
-  let m:Map[u64,u64]=map.new()
-  match lookup(m,7) {Some(v)=>v,None=>17}
+fn lookup[K: key, V](m: Map[K, V], k: K) -> Option[View[V]] in m {
+    map.get(m, k)
+}
+
+fn checked() -> u64 {
+    let m: Map[u64, u64] = map.new()
+    match lookup(m, 7) {
+        Some(v) => v,
+        None => 17
+    }
 }

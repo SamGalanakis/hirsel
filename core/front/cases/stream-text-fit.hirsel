@@ -4,19 +4,43 @@
 // MEM-4: a streamed build fits each write into its n bytes. J has four cases, so its
 // tag is one byte; the Text header is W = 4 bytes and 'é' is two UTF-8 bytes: 7 bytes
 // fit in 7 and overflow 6. The text's length reads back as its byte count, 2.
-@compact(u32) stable type J = Null | Num(u64) | Str(Text) | Arr(IndexedSpan[J])
+@compact(u32)
+stable type J = Null | Num(u64) | Str(Text) | Arr(IndexedSpan[J])
+
 fn w_text[in r](take t: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
-  writer.scalar(mut t, 'é')?
-  writer.close(take t)
+    writer.scalar(mut t, 'é')?
+    writer.close(take t)
 }
+
 fn w_val[in r](take w: Writer[J, in r]) -> Result[Child[J], BuildError] {
-  emit(take w, Str(emit(fn(take t: Writer[Text, in r]) -> Result[Child[Text], BuildError] { w_text(take t) })))
+    emit(take w, Str(emit(fn(take t: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
+        w_text(take t)
+    })))
 }
+
 fn make(r: Region, n: u64) -> Result[J in r, BuildError] {
-  match build_stream_in(r, bytes n, fn(take w: Writer[J, in r]) -> Result[Child[J], BuildError] { w_val(take w) }) {
-    Ok(take b) => Ok(finish(take b)),
-    Error(e) => Error(e),
-  }
+    match build_stream_in(r, bytes n, fn(take w: Writer[J, in r]) -> Result[Child[J], BuildError] {
+        w_val(take w)
+    }) {
+        Ok(take b) => Ok(finish(take b)),
+        Error(e) => Error(e),
+    }
 }
-fn tag(j: J) -> u64 { match j { Null => 0, Num(n) => n, Str(t) => text.len(t), Arr(xs) => seq.len(xs) } }
-fn go(n: u64) -> u64 { region r { match make(r, n) { Ok(j) => tag(j), Error(_) => 99 } } }
+
+fn tag(j: J) -> u64 {
+    match j {
+        Null => 0,
+        Num(n) => n,
+        Str(t) => text.len(t),
+        Arr(xs) => seq.len(xs)
+    }
+}
+
+fn go(n: u64) -> u64 {
+    region r {
+        match make(r, n) {
+            Ok(j) => tag(j),
+            Error(_) => 99
+        }
+    }
+}

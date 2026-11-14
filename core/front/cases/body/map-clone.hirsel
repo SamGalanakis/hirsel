@@ -3,117 +3,162 @@
 // expect: run compacted() = 678
 // expect: run strings() = true
 // expect: run admission_indices() = true
-fn empty()->bool {
- let m:Map[u64,u64]=map.new()
- let attempt:Result[bool,Capacity]=bound bytes 0 {
-  let duplicated:Map[u64,u64]=result.unwrap(clone(m))
-  map.len(duplicated)==0
- }
- result.unwrap(attempt)
+fn empty() -> bool {
+    let m: Map[u64, u64] = map.new()
+    let attempt: Result[bool, Capacity] = bound bytes 0 {
+        let duplicated: Map[u64, u64] = result.unwrap(clone(m))
+        map.len(duplicated) == 0
+    }
+    result.unwrap(attempt)
 }
-fn compacted()->u64 {
- let mut m:Map[u64,u64]=map.new()
- for i in 0u64..8u64 {result.unwrap(map.insert(mut m,i,i+10))}
- for i in 0u64..6u64 {let _=map.remove(mut m,i)}
- result.unwrap(map.insert(mut m,8,18))
- let duplicated:Map[u64,u64]=result.unwrap(clone(m))
- let mut order:u64=0
- for (k,_) in duplicated {order=order*10+k}
- order
+
+fn compacted() -> u64 {
+    let mut m: Map[u64, u64] = map.new()
+    for i in 0u64 .. 8u64 {
+        result.unwrap(map.insert(mut m, i, i + 10))
+    }
+    for i in 0u64 .. 6u64 {
+        let _ = map.remove(mut m, i)
+    }
+    result.unwrap(map.insert(mut m, 8, 18))
+    let duplicated: Map[u64, u64] = result.unwrap(clone(m))
+    let mut order: u64 = 0
+    for (k, _) in duplicated {
+        order = order * 10 + k
+    }
+    order
 }
+
 // A tombstone is skipped even when no compaction has run; a full removal clones empty.
 // expect: run removed() = true
-fn removed()->bool {
- let mut m:Map[u64,u64]=map.new()
- for i in 1u64..5u64 {result.unwrap(map.insert(mut m,i,i))}
- let _=map.remove(mut m,2)
- let checked:Result[u64,Capacity]=bound bytes 96 {
-  let duplicated:Map[u64,u64]=result.unwrap(clone(m))
-  let mut order:u64=0
-  for (k,_) in duplicated {order=order*10+k}
-  order
- }
- for i in 1u64..5u64 {let _=map.remove(mut m,i)}
- let empty_copy:Result[bool,Capacity]=bound bytes 0 {
-  let duplicated:Map[u64,u64]=result.unwrap(clone(m))
-  map.len(duplicated)==0
- }
- result.unwrap(checked)==134 && result.unwrap(empty_copy)
+fn removed() -> bool {
+    let mut m: Map[u64, u64] = map.new()
+    for i in 1u64 .. 5u64 {
+        result.unwrap(map.insert(mut m, i, i))
+    }
+    let _ = map.remove(mut m, 2)
+    let checked: Result[u64, Capacity] = bound bytes 96 {
+        let duplicated: Map[u64, u64] = result.unwrap(clone(m))
+        let mut order: u64 = 0
+        for (k, _) in duplicated {
+            order = order * 10 + k
+        }
+        order
+    }
+    for i in 1u64 .. 5u64 {
+        let _ = map.remove(mut m, i)
+    }
+    let empty_copy: Result[bool, Capacity] = bound bytes 0 {
+        let duplicated: Map[u64, u64] = result.unwrap(clone(m))
+        map.len(duplicated) == 0
+    }
+    result.unwrap(checked) == 134 && result.unwrap(empty_copy)
 }
-fn seed()->Map[String,String] {
- let mut m:Map[String,String]=map.new()
- result.unwrap(map.insert(mut m,result.unwrap(string.from("a")),result.unwrap(string.from("one"))))
- result.unwrap(map.insert(mut m,result.unwrap(string.from("b")),result.unwrap(string.from("two"))))
- take m
+
+fn seed() -> Map[String, String] {
+    let mut m: Map[String, String] = map.new()
+    result.unwrap(map.insert(mut m, result.unwrap(string.from("a")), result.unwrap(string.from("one"))))
+    result.unwrap(map.insert(mut m, result.unwrap(string.from("b")), result.unwrap(string.from("two"))))
+    take m
 }
-fn strings()->bool {
- let m=seed()
- let mut duplicated:Map[String,String]=result.unwrap(clone(m))
- let _=result.unwrap(map.set(mut duplicated,"a",result.unwrap(string.from("new"))))
- let _=map.remove(mut duplicated,"b")
- option.unwrap(map.get(m,"a"))=="one" && option.unwrap(map.get(m,"b"))=="two" &&
- option.unwrap(map.get(duplicated,"a"))=="new" && map.len(duplicated)==1
+
+fn strings() -> bool {
+    let m = seed()
+    let mut duplicated: Map[String, String] = result.unwrap(clone(m))
+    let _ = result.unwrap(map.set(mut duplicated, "a", result.unwrap(string.from("new"))))
+    let _ = map.remove(mut duplicated, "b")
+    option.unwrap(map.get(m, "a")) == "one" && option.unwrap(map.get(m, "b")) == "two" && option.unwrap(map.get(duplicated, "a")) == "new" && map.len(duplicated) == 1
 }
-fn refused(m:Map[String,String],budget:u64,request:u64)->bool {
- let checked:Result[bool,Capacity]=bound bytes budget {
-  let attempt:Result[Map[String,String],Capacity]=clone(m)
-  let good=match take attempt {Ok(_)=>false,Error(c)=>c.requested==request && c.available==0}
-  // All failed prefixes, including the carrier, must have refunded their charge.
-  let probe:Bytes=result.unwrap(list.with_capacity(budget))
-  good && list.len(probe)==0 && option.unwrap(map.get(m,"b"))=="two"
- }
- result.unwrap(checked)
+
+fn refused(m: Map[String, String], budget: u64, request: u64) -> bool {
+    let checked: Result[bool, Capacity] = bound bytes budget {
+        let attempt: Result[Map[String, String], Capacity] = clone(m)
+        let good = match take attempt {
+            Ok(_) => false,
+            Error(c) => c.requested == request && c.available == 0
+        }
+        // All failed prefixes, including the carrier, must have refunded their charge.
+        let probe: Bytes = result.unwrap(list.with_capacity(budget))
+        good && list.len(probe) == 0 && option.unwrap(map.get(m, "b")) == "two"
+    }
+    result.unwrap(checked)
 }
-fn seed_four()->Map[String,String] {
- let mut m=seed()
- result.unwrap(map.insert(mut m,result.unwrap(string.from("c")),result.unwrap(string.from("three"))))
- result.unwrap(map.insert(mut m,result.unwrap(string.from("d")),result.unwrap(string.from("four"))))
- take m
+
+fn seed_four() -> Map[String, String] {
+    let mut m = seed()
+    result.unwrap(map.insert(mut m, result.unwrap(string.from("c")), result.unwrap(string.from("three"))))
+    result.unwrap(map.insert(mut m, result.unwrap(string.from("d")), result.unwrap(string.from("four"))))
+    take m
 }
-fn full_charge(m:Map[String,String],fresh:bool)->bool {
- let checked:Result[bool,Capacity]=bound bytes 320 {
-  let duplicated:Map[String,String]=if fresh {seed_four()}else{result.unwrap(clone(m))}
-  let probe:Result[Bytes,Capacity]=list.with_capacity(1)
-  let full=match take probe {Ok(_)=>false,Error(c)=>c.requested==8 && c.available==0}
-  full && map.len(duplicated)==4
- }
- result.unwrap(checked)
+
+fn full_charge(m: Map[String, String], fresh: bool) -> bool {
+    let checked: Result[bool, Capacity] = bound bytes 320 {
+        let duplicated: Map[String, String] = if fresh {
+            seed_four()
+        } else {
+            result.unwrap(clone(m))
+        }
+        let probe: Result[Bytes, Capacity] = list.with_capacity(1)
+        let full = match take probe {
+            Ok(_) => false,
+            Error(c) => c.requested == 8 && c.available == 0
+        }
+        full && map.len(duplicated) == 4
+    }
+    result.unwrap(checked)
 }
-fn exact_charge(m:Map[String,String])->bool {
- let checked:Result[bool,Capacity]=bound bytes 160 {
-  let duplicated:Map[String,String]=result.unwrap(clone(m))
-  let probe:Result[Bytes,Capacity]=list.with_capacity(1)
-  match take probe {Ok(_)=>false,Error(c)=>c.requested==8 && c.available==0 && map.len(duplicated)==2}
- }
- result.unwrap(checked)
+
+fn exact_charge(m: Map[String, String]) -> bool {
+    let checked: Result[bool, Capacity] = bound bytes 160 {
+        let duplicated: Map[String, String] = result.unwrap(clone(m))
+        let probe: Result[Bytes, Capacity] = list.with_capacity(1)
+        match take probe {
+            Ok(_) => false,
+            Error(c) => c.requested == 8 && c.available == 0 && map.len(duplicated) == 2
+        }
+    }
+    result.unwrap(checked)
 }
-fn admission_indices()->bool {
- let m=seed()
- let four=seed_four()
- refused(m,0,128) && refused(m,128,8) && refused(m,136,8) && refused(m,144,8) && refused(m,152,8) &&
- exact_charge(m) && full_charge(four,false) && full_charge(four,true)
+
+fn admission_indices() -> bool {
+    let m = seed()
+    let four = seed_four()
+    refused(m, 0, 128) && refused(m, 128, 8) && refused(m, 136, 8) && refused(m, 144, 8) && refused(m, 152, 8) && exact_charge(m) && full_charge(four, false) && full_charge(four, true)
 }
-type Wrapped { m:Map[String,String] }
+
+type Wrapped {
+    m: Map[String, String]
+}
+
 // expect: run nested() = true
-fn nested()->bool {
- let original=Wrapped(m:seed())
- let duplicated:Wrapped=result.unwrap(clone(original))
- let mut outer:Map[u64,Map[String,String]]=map.new()
- let Wrapped(m:inner)=take duplicated
- result.unwrap(map.insert(mut outer,7,take inner))
- let outer_copy:Map[u64,Map[String,String]]=result.unwrap(clone(outer))
- option.unwrap(map.get(option.unwrap(map.get(outer_copy,7)),"a"))=="one"
+fn nested() -> bool {
+    let original = Wrapped(m: seed())
+    let duplicated: Wrapped = result.unwrap(clone(original))
+    let mut outer: Map[u64, Map[String, String]] = map.new()
+    let Wrapped(m: inner) = take duplicated
+    result.unwrap(map.insert(mut outer, 7, take inner))
+    let outer_copy: Map[u64, Map[String, String]] = result.unwrap(clone(outer))
+    option.unwrap(map.get(option.unwrap(map.get(outer_copy, 7)), "a")) == "one"
 }
-fn nine()->u64 {9}
+
+fn nine() -> u64 {
+    9
+}
+
 // Holding a noncloneable element must not demand the Map clone body.
 // expect: run noncloneable_value() = 9
-fn noncloneable_value()->u64 {
- let mut m:Map[u64,own fn()->u64]=map.new()
- let f:own fn()->u64=nine
- result.unwrap(map.insert(mut m,1,take f))
- let g=option.unwrap(map.get(m,1))
- g()
+fn noncloneable_value() -> u64 {
+    let mut m: Map[u64, own fn() -> u64] = map.new()
+    let f: own fn() -> u64 = nine
+    result.unwrap(map.insert(mut m, 1, take f))
+    let g = option.unwrap(map.get(m, 1))
+    g()
 }
-pub fn main()->Result[(),Exit] {
- if empty() && removed() && compacted()==678 && strings() && admission_indices() && nested() && noncloneable_value()==9 {Ok(())}else{Error(Exit(status:1))}
+
+pub fn main() -> Result[(), Exit] {
+    if empty() && removed() && compacted() == 678 && strings() && admission_indices() && nested() && noncloneable_value() == 9 {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
 }

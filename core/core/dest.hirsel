@@ -1,4 +1,3 @@
 // Module `dest` (MEM-4). `put` is a built-in form: its argument x must be a construction
 // literal of a compact type U, which it writes at the destination's next byte.
-
 pub fn put[T, U](mut d: Dest[T], x: U) -> Result[Child[U], BuildError]

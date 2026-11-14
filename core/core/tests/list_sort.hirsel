@@ -1,4 +1,13 @@
-fn compare(a:u64,b:u64)->Order { if a < b { Less } else if a > b { Greater } else { Equal } }
+fn compare(a: u64, b: u64) -> Order {
+    if a < b {
+        Less
+    } else if a > b {
+        Greater
+    } else {
+        Equal
+    }
+}
+
 fn five(a: u64, b: u64, c: u64, d: u64, e: u64) -> List[u64] {
     let mut xs: List[u64] = result.unwrap(list.with_capacity(5))
     result.unwrap(list.push(mut xs, a))
@@ -23,24 +32,37 @@ fn digits(xs: List[u64]) -> u64 {
 // expect: run stable_equal_keys() = true
 fn stable_equal_keys() -> bool {
     let mut xs = five(21, 11, 22, 12, 23)
-    result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order { compare(a / 10, b / 10) }))
+    result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
+        compare(a / 10, b / 10)
+    }))
     xs[0] == 11 && xs[1] == 12 && xs[2] == 21 && xs[3] == 22 && xs[4] == 23
 }
 
 // expect: run stable_empty_singleton() = 7
 fn stable_empty_singleton() -> u64 {
     let mut xs: List[u64] = list.new()
-    result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order { compare(a / 10, b / 10) }))
+    result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
+        compare(a / 10, b / 10)
+    }))
     result.unwrap(list.push(mut xs, 7))
-    result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order { compare(a / 10, b / 10) }))
+    result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
+        compare(a / 10, b / 10)
+    }))
     digits(xs)
 }
 
 // expect: run stable_capacity_unchanged() = 54321
 fn stable_capacity_unchanged() -> u64 {
     let mut xs = five(5, 4, 3, 2, 1)
-    let r = bound bytes 0 { list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order { compare(a, b) }) }
-    match r { Ok(Error(_)) => digits(xs), _ => 99 }
+    let r = bound bytes 0 {
+        list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
+            compare(a, b)
+        })
+    }
+    match r {
+        Ok(Error(_)) => digits(xs),
+        _ => 99
+    }
 }
 
 // Owned elements remain a permutation and ties keep their original order.
@@ -60,8 +82,15 @@ fn stable_owned_strings() -> bool {
 // expect: run stable_one_allocation() = 12345
 fn stable_one_allocation() -> u64 {
     let mut xs = five(5, 4, 3, 2, 1)
-    let r = bound bytes 40 { list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order { compare(a, b) }) }
-    match r { Ok(Ok(())) => digits(xs), _ => 99 }
+    let r = bound bytes 40 {
+        list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
+            compare(a, b)
+        })
+    }
+    match r {
+        Ok(Ok(())) => digits(xs),
+        _ => 99
+    }
 }
 
 // Each encoded value carries its input index. Sizes0..17 cover odd trailing
@@ -76,18 +105,30 @@ fn model_all_small_sizes() -> bool {
             expected_mask |= 1u64 << i
         }
         let cap = list.capacity(xs)
-        result.unwrap(list.sort_stable(mut xs, fn(a:u64,b:u64)->Order { compare(a / 100,b / 100) }))
-        if list.len(xs) != n || list.capacity(xs) != cap { return false }
+        result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
+            compare(a / 100, b / 100)
+        }))
+        if list.len(xs) != n || list.capacity(xs) != cap {
+            return false
+        }
         let mut mask: u64 = 0
         for i in 0u64 .. n {
             let id = xs[i] % 100
-            if id >= n || xs[i] / 100 != (id * 7 + 3) % 5 { return false }
+            if id >= n || xs[i] / 100 != (id * 7 + 3) % 5 {
+                return false
+            }
             let bit = 1u64 << id
-            if (mask & bit) != 0 { return false }
+            if (mask & bit) != 0 {
+                return false
+            }
             mask |= bit
-            if i > 0 && (xs[i - 1] / 100 > xs[i] / 100 || (xs[i - 1] / 100 == xs[i] / 100 && xs[i - 1] % 100 > id)) { return false }
+            if i > 0 && (xs[i - 1] / 100 > xs[i] / 100 || (xs[i - 1] / 100 == xs[i] / 100 && xs[i - 1] % 100 > id)) {
+                return false
+            }
         }
-        if mask != expected_mask { return false }
+        if mask != expected_mask {
+            return false
+        }
     }
     true
 }
@@ -96,10 +137,14 @@ fn model_all_small_sizes() -> bool {
 // expect: run bad_comparator_permutation() = true
 fn bad_comparator_permutation() -> bool {
     let mut xs = five(3, 1, 4, 0, 2)
-    result.unwrap(list.sort_stable(mut xs, fn(a:u64,b:u64)->Order { Less }))
+    result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
+        Less
+    }))
     let mut mask: u64 = 0
     for x in xs {
-        if x >= 5 { return false }
+        if x >= 5 {
+            return false
+        }
         mask |= 1u64 << x
     }
     mask == 31 && list.len(xs) == 5
@@ -110,7 +155,9 @@ fn bad_comparator_permutation() -> bool {
 // expect: run ordinary_list_after_sort() = 597
 fn ordinary_list_after_sort() -> u64 {
     let mut xs = five(5, 4, 3, 2, 1)
-    result.unwrap(list.sort_stable(mut xs, fn(a:u64,b:u64)->Order { compare(a,b) }))
+    result.unwrap(list.sort_stable(mut xs, fn(a: u64, b: u64) -> Order {
+        compare(a, b)
+    }))
     let a = option.unwrap(list.pop(mut xs))
     result.unwrap(list.push(mut xs, 9))
     let b = option.unwrap(list.pop(mut xs))
@@ -126,11 +173,20 @@ fn ordinary_list_after_sort() -> u64 {
 fn zero_size_sort() -> u64 {
     let r = bound bytes 0 {
         let mut xs: List[()] = list.new()
-        for _ in 0u64 .. 5 { result.unwrap(list.push(mut xs, ())) }
+        for _ in 0u64 .. 5 {
+            result.unwrap(list.push(mut xs, ()))
+        }
         let cap = list.capacity(xs)
         let mut calls: u64 = 0
-        result.unwrap(list.sort_stable(mut xs, fn(a:(),b:())->Order { calls += 1; Equal }))
-        if list.capacity(xs) != cap { 99u64 } else { list.len(xs) * 10 + calls }
+        result.unwrap(list.sort_stable(mut xs, fn(a: (), b: ()) -> Order {
+            calls += 1;
+            Equal
+        }))
+        if list.capacity(xs) != cap {
+            99u64
+        } else {
+            list.len(xs) * 10 + calls
+        }
     }
     result.unwrap(r)
 }

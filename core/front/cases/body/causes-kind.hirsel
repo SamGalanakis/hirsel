@@ -1,31 +1,48 @@
 // expect: accept
 // The same failing statement has one Site even when the message bytes and lengths differ.
-fn child(take message: String) -> u64 { fail(take message) }
-fn inspect(cs: Causes, expected: String) -> Option[Site] {
-  let mut n: u64 = 0
-  let mut site: Option[Site] = None
-  for c in cs {
-    match c.kind {
-      Fail(m) => { if m != expected { return None }; site = Some(c.site) },
-      _ => return None
-    }
-    n += 1
-  }
-  if n == 1 { site } else { None }
+fn child(take message: String) -> u64 {
+    fail(take message)
 }
+
+fn inspect(cs: Causes, expected: String) -> Option[Site] {
+    let mut n: u64 = 0
+    let mut site: Option[Site] = None
+    for c in cs {
+        match c.kind {
+            Fail(m) => {
+                if m != expected {
+                    return None
+                };
+                site = Some(c.site)
+            },
+            _ => return None
+        }
+        n += 1
+    }
+    if n == 1 {
+        site
+    } else {
+        None
+    }
+}
+
 pub fn main(tasks: Tasks) -> Result[(), Exit] {
-  let a = result.unwrap(task.spawn(tasks, bytes 64, "data", child))
-  let b = result.unwrap(task.spawn(tasks, bytes 64, "tail-message", child))
-  let one: Option[Site] = match task.join(take a) {
-    Error(Failed(take cs)) => inspect(cs, "data"),
-    _ => None
-  }
-  let two: Option[Site] = match task.join(take b) {
-    Error(Failed(take cs)) => inspect(cs, "tail-message"),
-    _ => None
-  }
-  match (one, two) {
-    (Some(x), Some(y)) => if x == y { Ok(()) } else { Error(Exit(status: 1)) },
-    _ => Error(Exit(status: 2))
-  }
+    let a = result.unwrap(task.spawn(tasks, bytes 64, "data", child))
+    let b = result.unwrap(task.spawn(tasks, bytes 64, "tail-message", child))
+    let one: Option[Site] = match task.join(take a) {
+        Error(Failed(take cs)) => inspect(cs, "data"),
+        _ => None
+    }
+    let two: Option[Site] = match task.join(take b) {
+        Error(Failed(take cs)) => inspect(cs, "tail-message"),
+        _ => None
+    }
+    match (one, two) {
+        (Some(x), Some(y)) => if x == y {
+            Ok(())
+        } else {
+            Error(Exit(status: 1))
+        },
+        _ => Error(Exit(status: 2))
+    }
 }

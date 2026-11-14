@@ -2,14 +2,23 @@
 // Hand derivation: change base 4 to 6 while cb is inactive; two calls add 3 and 2 -> 11.
 // expect: run f() = 11
 // expect: run view_only(4) = 7
-fn invoke(cb: scoped fn(u64) -> u64, n: u64) -> u64 { cb(n) }
-fn f() -> u64 {
-  let mut base: u64 = 4
-  let cb = scoped fn(n: u64) -> u64 { base += n; base }
-  base = 6
-  let a = invoke(cb, 3)
-  cb(2)
+fn invoke(cb: scoped fn(u64) -> u64, n: u64) -> u64 {
+    cb(n)
 }
+
+fn f() -> u64 {
+    let mut base: u64 = 4
+    let cb = scoped fn(n: u64) -> u64 {
+        base += n;
+        base
+    }
+    base = 6
+    let a = invoke(cb, 3)
+    cb(2)
+}
+
 fn view_only(base: u64) -> u64 {
-  invoke(fn(n: u64) -> u64 { base + n }, 3)
+    invoke(fn(n: u64) -> u64 {
+        base + n
+    }, 3)
 }

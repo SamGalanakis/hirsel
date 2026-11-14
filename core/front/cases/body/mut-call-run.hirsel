@@ -6,16 +6,59 @@
 // expect: run record() = 3
 // expect: run zero() = 17
 // expect: run owned() = 9
-fn add(mut n: u64) { n += 2 }
-fn forward(mut n: u64) { add(mut n); n = n + 3 }
-fn f() -> u64 { let mut n: u64 = 4; forward(mut n); n }
-type Pair { a: u64, b: u64 }
-fn field() -> u64 { let mut p = Pair(a: 2, b: 5); add(mut p.a); p.a + p.b }
-fn reset(mut p: Pair) { p = Pair(a: 1, b: 2) }
-fn record() -> u64 { let mut p = Pair(a: 7, b: 8); reset(mut p); p.a + p.b }
+fn add(mut n: u64) {
+    n += 2
+}
+
+fn forward(mut n: u64) {
+    add(mut n);
+    n = n + 3
+}
+
+fn f() -> u64 {
+    let mut n: u64 = 4;
+    forward(mut n);
+    n
+}
+
+type Pair {
+    a: u64,
+    b: u64
+}
+
+fn field() -> u64 {
+    let mut p = Pair(a: 2, b: 5);
+    add(mut p.a);
+    p.a + p.b
+}
+
+fn reset(mut p: Pair) {
+    p = Pair(a: 1, b: 2)
+}
+
+fn record() -> u64 {
+    let mut p = Pair(a: 7, b: 8);
+    reset(mut p);
+    p.a + p.b
+}
 
 fn touch(mut a: ()) {}
-fn unit(mut a: (), x: u64) -> u64 { touch(mut a); x }
-fn zero() -> u64 { let mut a = (); unit(mut a, 17) }
-fn by_take(take n: u64) -> u64 { forward(mut n); n }
-fn owned() -> u64 { by_take(4) }
+
+fn unit(mut a: (), x: u64) -> u64 {
+    touch(mut a);
+    x
+}
+
+fn zero() -> u64 {
+    let mut a = ();
+    unit(mut a, 17)
+}
+
+fn by_take(take n: u64) -> u64 {
+    forward(mut n);
+    n
+}
+
+fn owned() -> u64 {
+    by_take(4)
+}

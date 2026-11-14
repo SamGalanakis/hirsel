@@ -1,99 +1,140 @@
 // kostya/LangArena 3c9f84d benchmarks/neural_net.rs: 2/10/1 XOR network.
-type Synapse:shareable {weight:f64,prev_weight:f64,source:u64,dest:u64}
-type Neuron:shareable {threshold:f64,prev_threshold:f64,output:f64,error:f64,incoming:List[u64],outgoing:List[u64]}
-type Network:shareable {input:List[Neuron],hidden:List[Neuron],output:List[Neuron],synapses:List[Synapse]}
-fn push[T](mut xs:List[T],take x:T)->Result[(),helper.Error] {
-    match list.push(mut xs,take x) {Ok(())=>Ok(()),Error((c,take unused))=>Error(Capacity(c))}
+type Synapse: shareable {
+    weight: f64,
+    prev_weight: f64,
+    source: u64,
+    dest: u64
 }
-fn neurons(n:u64,mut g:helper.Lcg)->Result[List[Neuron],helper.Error] {
-    let mut ns:List[Neuron]=helper.mem(list.with_capacity(n))?
+
+type Neuron: shareable {
+    threshold: f64,
+    prev_threshold: f64,
+    output: f64,
+    error: f64,
+    incoming: List[u64],
+    outgoing: List[u64]
+}
+
+type Network: shareable {
+    input: List[Neuron],
+    hidden: List[Neuron],
+    output: List[Neuron],
+    synapses: List[Synapse]
+}
+
+fn push[T](mut xs: List[T], take x: T) -> Result[(), helper.Error] {
+    match list.push(mut xs, take x) {
+        Ok(()) => Ok(()),
+        Error((c, take unused)) => Error(Capacity(c))
+    }
+}
+
+fn neurons(n: u64, mut g: helper.Lcg) -> Result[List[Neuron], helper.Error] {
+    let mut ns: List[Neuron] = helper.mem(list.with_capacity(n))?
     for _ in 0 .. n {
-        let t=helper.next_float(mut g,1.0)*2.0-1.0
-        push(mut ns,Neuron(threshold:t,prev_threshold:t,output:0.0,error:0.0,incoming:list.new(),outgoing:list.new()))?
+        let t = helper.next_float(mut g, 1.0) * 2.0 - 1.0
+        push(mut ns, Neuron(threshold: t, prev_threshold: t, output: 0.0, error: 0.0, incoming: list.new(), outgoing: list.new()))?
     }
     Ok(take ns)
 }
-fn connect(mut sources:List[Neuron],mut dests:List[Neuron],mut ss:List[Synapse],mut g:helper.Lcg)->Result[(),helper.Error] {
+
+fn connect(mut sources: List[Neuron], mut dests: List[Neuron], mut ss: List[Synapse], mut g: helper.Lcg) -> Result[(), helper.Error] {
     for i in 0 .. list.len(sources) {
         for j in 0 .. list.len(dests) {
-            let at=list.len(ss)
-            let w=helper.next_float(mut g,1.0)*2.0-1.0
-            push(mut ss,Synapse(weight:w,prev_weight:w,source:i,dest:j))?
-            push(mut sources[i].outgoing,at)?
-            push(mut dests[j].incoming,at)?
+            let at = list.len(ss)
+            let w = helper.next_float(mut g, 1.0) * 2.0 - 1.0
+            push(mut ss, Synapse(weight: w, prev_weight: w, source: i, dest: j))?
+            push(mut sources[i].outgoing, at)?
+            push(mut dests[j].incoming, at)?
         }
     }
     Ok(())
 }
-fn output(mut layer:List[Neuron],sources:List[Neuron],ss:List[Synapse]) {
+
+fn output(mut layer: List[Neuron], sources: List[Neuron], ss: List[Synapse]) {
     for i in 0 .. list.len(layer) {
-        let mut activation:f64=0.0
-        for at in layer[i].incoming {activation+=ss[at].weight*sources[ss[at].source].output}
-        activation-=layer[i].threshold
-        layer[i].output=1.0/(1.0+float.exp(-activation))
+        let mut activation: f64 = 0.0
+        for at in layer[i].incoming {
+            activation += ss[at].weight * sources[ss[at].source].output
+        }
+        activation -= layer[i].threshold
+        layer[i].output = 1.0 / (1.0 + float.exp(-activation))
     }
 }
-fn feed(mut n:Network,a:f64,b:f64) {
-    n.input[0].output=a
-    n.input[1].output=b
-    output(mut n.hidden,n.input,n.synapses)
-    output(mut n.output,n.hidden,n.synapses)
+
+fn feed(mut n: Network, a: f64, b: f64) {
+    n.input[0].output = a
+    n.input[1].output = b
+    output(mut n.hidden, n.input, n.synapses)
+    output(mut n.output, n.hidden, n.synapses)
 }
-fn update(mut layer:List[Neuron],i:u64,sources:List[Neuron],mut ss:List[Synapse]) {
+
+fn update(mut layer: List[Neuron], i: u64, sources: List[Neuron], mut ss: List[Synapse]) {
     for at in layer[i].incoming {
-        let source_output=sources[ss[at].source].output
-        let previous=ss[at].weight
-        ss[at].weight+=(0.3*1.0*layer[i].error*source_output)+(0.3*(ss[at].weight-ss[at].prev_weight))
-        ss[at].prev_weight=previous
+        let source_output = sources[ss[at].source].output
+        let previous = ss[at].weight
+        ss[at].weight += (0.3 * 1.0 * layer[i].error * source_output) + (0.3 * (ss[at].weight - ss[at].prev_weight))
+        ss[at].prev_weight = previous
     }
-    let previous=layer[i].threshold
-    layer[i].threshold+=(0.3*1.0*layer[i].error* -1.0)+(0.3*(layer[i].threshold-layer[i].prev_threshold))
-    layer[i].prev_threshold=previous
+    let previous = layer[i].threshold
+    layer[i].threshold += (0.3 * 1.0 * layer[i].error * -1.0) + (0.3 * (layer[i].threshold - layer[i].prev_threshold))
+    layer[i].prev_threshold = previous
 }
-fn train(mut n:Network,a:f64,b:f64,target:f64) {
-    feed(mut n,a,b)
+
+fn train(mut n: Network, a: f64, b: f64, target: f64) {
+    feed(mut n, a, b)
     for i in 0 .. list.len(n.output) {
-        let out=n.output[i].output
-        n.output[i].error=(target-out)*(out*(1.0-out))
-        update(mut n.output,i,n.hidden,mut n.synapses)
+        let out = n.output[i].output
+        n.output[i].error = (target - out) * (out * (1.0 - out))
+        update(mut n.output, i, n.hidden, mut n.synapses)
     }
     for i in 0 .. list.len(n.hidden) {
-        let mut sum:f64=0.0
-        for at in n.hidden[i].outgoing {sum+=n.synapses[at].prev_weight*n.output[n.synapses[at].dest].error}
-        let out=n.hidden[i].output
-        n.hidden[i].error=sum*(out*(1.0-out))
-        update(mut n.hidden,i,n.input,mut n.synapses)
+        let mut sum: f64 = 0.0
+        for at in n.hidden[i].outgoing {
+            sum += n.synapses[at].prev_weight * n.output[n.synapses[at].dest].error
+        }
+        let out = n.hidden[i].output
+        n.hidden[i].error = sum * (out * (1.0 - out))
+        update(mut n.hidden, i, n.input, mut n.synapses)
     }
 }
-pub fn dispatch(config:String,name:String,warmup:u64,iterations:u64)->Result[u32,helper.Error] {
-    if name!="Etc::NeuralNet" {return Error(UnknownTask)}
-    let mut g=helper.lcg()
-    let mut n=Network(input:neurons(2,mut g)?,hidden:neurons(10,mut g)?,output:neurons(1,mut g)?,synapses:list.new())
-    connect(mut n.input,mut n.hidden,mut n.synapses,mut g)?
-    connect(mut n.hidden,mut n.output,mut n.synapses,mut g)?
-    for _ in 0 .. warmup+iterations {
+
+pub fn dispatch(config: String, name: String, warmup: u64, iterations: u64) -> Result[u32, helper.Error] {
+    if name != "Etc::NeuralNet" {
+        return Error(UnknownTask)
+    }
+    let mut g = helper.lcg()
+    let mut n = Network(input: neurons(2, mut g)?, hidden: neurons(10, mut g)?, output: neurons(1, mut g)?, synapses: list.new())
+    connect(mut n.input, mut n.hidden, mut n.synapses, mut g)?
+    connect(mut n.hidden, mut n.output, mut n.synapses, mut g)?
+    for _ in 0 .. warmup + iterations {
         for _ in 0u64 .. 1000u64 {
-            train(mut n,0.0,0.0,0.0)
-            train(mut n,1.0,0.0,1.0)
-            train(mut n,0.0,1.0,1.0)
-            train(mut n,1.0,1.0,0.0)
+            train(mut n, 0.0, 0.0, 0.0)
+            train(mut n, 1.0, 0.0, 1.0)
+            train(mut n, 0.0, 1.0, 1.0)
+            train(mut n, 1.0, 1.0, 0.0)
         }
     }
     // Preserve upstream checksum evaluation on a deep copy of the trained state.
-    let mut net_copy:Network=helper.mem(clone(n))?
-    let mut values:List[f64]=list.new()
-    feed(mut net_copy,0.0,0.0)
-    push(mut values,net_copy.output[0].output)?
-    feed(mut net_copy,0.0,1.0)
-    push(mut values,net_copy.output[0].output)?
-    feed(mut net_copy,1.0,0.0)
-    push(mut values,net_copy.output[0].output)?
-    feed(mut net_copy,1.0,1.0)
-    push(mut values,net_copy.output[0].output)?
-    let mut sum:f64=0.0
-    for x in values {sum+=x}
+    let mut net_copy: Network = helper.mem(clone(n))?
+    let mut values: List[f64] = list.new()
+    feed(mut net_copy, 0.0, 0.0)
+    push(mut values, net_copy.output[0].output)?
+    feed(mut net_copy, 0.0, 1.0)
+    push(mut values, net_copy.output[0].output)?
+    feed(mut net_copy, 1.0, 0.0)
+    push(mut values, net_copy.output[0].output)?
+    feed(mut net_copy, 1.0, 1.0)
+    push(mut values, net_copy.output[0].output)?
+    let mut sum: f64 = 0.0
+    for x in values {
+        sum += x
+    }
     helper.checksum_f64(sum)
 }
-pub fn main(out:Stdout,d:Dir,argv:Args)->Result[(),Exit] waits {
-    harness.main(out,d,argv,fn(c:String,n:String,w:u64,i:u64)->Result[u32,helper.Error] {dispatch(c,n,w,i)})
+
+pub fn main(out: Stdout, d: Dir, argv: Args) -> Result[(), Exit] waits {
+    harness.main(out, d, argv, fn(c: String, n: String, w: u64, i: u64) -> Result[u32, helper.Error] {
+        dispatch(c, n, w, i)
+    })
 }

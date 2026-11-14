@@ -12,70 +12,149 @@
 // expect: run other_error() = 4
 // expect: run region_value(9) = 10
 fn denied() -> u64 {
-  let r: Result[Result[u64, Capacity], Capacity] = bound bytes 0 {
-    bound bytes 1 { let zero: u64 = 0; 1u64 / zero }
-  }
-  match r { Ok(Error(c)) => c.requested, _ => 99 }
+    let r: Result[Result[u64, Capacity], Capacity] = bound bytes 0 {
+        bound bytes 1 {
+            let zero: u64 = 0;
+            1u64 / zero
+        }
+    }
+    match r {
+        Ok(Error(c)) => c.requested,
+        _ => 99
+    }
 }
+
 fn return_inside() -> u64 {
-  let _: Result[(), Capacity] = bound bytes 0 { return 7 }
-  99
+    let _: Result[(), Capacity] = bound bytes 0 {
+        return 7
+    }
+    99
 }
+
 fn returned() -> u64 {
-  let n = return_inside()
-  let probe: Result[(), Capacity] = bound bytes 1 {}
-  match probe { Ok(()) => n, Error(_) => 0 }
+    let n = return_inside()
+    let probe: Result[(), Capacity] = bound bytes 1 {}
+    match probe {
+        Ok(()) => n,
+        Error(_) => 0
+    }
 }
+
 fn broken() -> u64 {
-  let n: u64 = 'out: loop {
-    let _: Result[(), Capacity] = bound bytes 0 { break 'out 8 }
-    break 99
-  }
-  let probe: Result[(), Capacity] = bound bytes 1 {}
-  match probe { Ok(()) => n, Error(_) => 0 }
+    let n: u64 = 'out: loop {
+        let _: Result[(), Capacity] = bound bytes 0 {
+            break 'out 8
+        }
+        break 99
+    }
+    let probe: Result[(), Capacity] = bound bytes 1 {}
+    match probe {
+        Ok(()) => n,
+        Error(_) => 0
+    }
 }
+
 fn continued() -> u64 {
-  let mut n: u64 = 0
-  while n < 3 {
-    n += 1
-    let _: Result[(), Capacity] = bound bytes 0 { continue }
-  }
-  let probe: Result[(), Capacity] = bound bytes 1 {}
-  match probe { Ok(()) => n, Error(_) => 0 }
+    let mut n: u64 = 0
+    while n < 3 {
+        n += 1
+        let _: Result[(), Capacity] = bound bytes 0 {
+            continue
+        }
+    }
+    let probe: Result[(), Capacity] = bound bytes 1 {}
+    match probe {
+        Ok(()) => n,
+        Error(_) => 0
+    }
 }
+
 fn operation(bad: bool) -> Result[u64, Capacity] {
-  if bad { Error(Capacity(requested: 5, available: 0)) } else { Ok(3) }
+    if bad {
+        Error(Capacity(requested: 5, available: 0))
+    } else {
+        Ok(3)
+    }
 }
+
 fn capacity(bad: bool) -> u64 {
-  let r: Result[u64, Capacity] = bound bytes 0 {
-    let n = operation(bad)?
-    let divisor: u64 = if bad { 0 } else { 1 }
-    n / divisor
-  }
-  match r { Ok(n) => n, Error(c) => c.requested }
+    let r: Result[u64, Capacity] = bound bytes 0 {
+        let n = operation(bad)?
+        let divisor: u64 = if bad {
+            0
+        } else {
+            1
+        }
+        n / divisor
+    }
+    match r {
+        Ok(n) => n,
+        Error(c) => c.requested
+    }
 }
+
 fn nested() -> u64 {
-  let r: Result[u64, Capacity] = bound bytes 0 {
-    let inner: Result[u64, Capacity] = bound bytes 0 { let n = operation(true)?; n }
-    match inner { Ok(n) => n, Error(c) => c.requested + 1 }
-  }
-  match r { Ok(n) => n, Error(_) => 99 }
+    let r: Result[u64, Capacity] = bound bytes 0 {
+        let inner: Result[u64, Capacity] = bound bytes 0 {
+            let n = operation(true)?;
+            n
+        }
+        match inner {
+            Ok(n) => n,
+            Error(c) => c.requested + 1
+        }
+    }
+    match r {
+        Ok(n) => n,
+        Error(_) => 99
+    }
 }
-fn wrong() -> Result[u64, u8] { Error(4) }
+
+fn wrong() -> Result[u64, u8] {
+    Error(4)
+}
+
 fn other() -> Result[u64, u8] {
-  let _: Result[(), Capacity] = bound bytes 0 { let _ = wrong()? }
-  Ok(99)
+    let _: Result[(), Capacity] = bound bytes 0 {
+        let _ = wrong()?
+    }
+    Ok(99)
 }
+
 fn other_error() -> u8 {
-  let n: u8 = match other() { Ok(_) => 99, Error(e) => e }
-  let probe: Result[(), Capacity] = bound bytes 1 {}
-  match probe { Ok(()) => n, Error(_) => 0 }
+    let n: u8 = match other() {
+        Ok(_) => 99,
+        Error(e) => e
+    }
+    let probe: Result[(), Capacity] = bound bytes 1 {}
+    match probe {
+        Ok(()) => n,
+        Error(_) => 0
+    }
 }
-fn region_value(n: u64) -> u64 { region scratch { n + 1 } }
+
+fn region_value(n: u64) -> u64 {
+    region scratch {
+        n + 1
+    }
+}
+
 // The typed success context must not turn Capacity into the function's u8 error.
 // expect: run different_error_context() = 5
 fn different_error() -> Result[u64, u8] {
-  let r: Result[u64, Capacity] = bound bytes 0 { let n: u64 = operation(true)?; n }
-  Ok(match r { Ok(n) => n, Error(c) => c.requested })
+    let r: Result[u64, Capacity] = bound bytes 0 {
+        let n: u64 = operation(true)?;
+        n
+    }
+    Ok(match r {
+        Ok(n) => n,
+        Error(c) => c.requested
+    })
 }
-fn different_error_context() -> u64 { match different_error() { Ok(n) => n, Error(_) => 99 } }
+
+fn different_error_context() -> u64 {
+    match different_error() {
+        Ok(n) => n,
+        Error(_) => 99
+    }
+}

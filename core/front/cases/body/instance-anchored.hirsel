@@ -1,18 +1,30 @@
 // Region anchors constrain lifetime; an instance key names its published layout row.
 // expect: run texts() = 70707
 // Reduced from ordered-stable's code[T] so ordering support is independent.
-fn code[T:ordered](a:T,b:T)->u64 { 7 }
-fn make_text(r:Region,s:String)->Text in r {
- let b=result.unwrap(build_stream_in(r,bytes 128,fn(take w:Writer[Text,in r])->Result[Child[Text],BuildError] {
-  writer.push(mut w,s)?
-  writer.close(take w)
- }))
- finish(take b)
+fn code[T: ordered](a: T, b: T) -> u64 {
+    7
 }
-fn texts()->u64 { region r {
- let a=make_text(r,"a")
- let b=make_text(r,"aa")
- code(a,b)*10000+code(b,a)*100+code(a,a)
-} }
 
-pub fn main()->Result[(),Exit] { if texts()==70707u64 { Ok(()) } else { Error(Exit(status:1)) } }
+fn make_text(r: Region, s: String) -> Text in r {
+    let b = result.unwrap(build_stream_in(r, bytes 128, fn(take w: Writer[Text, in r]) -> Result[Child[Text], BuildError] {
+        writer.push(mut w, s)?
+        writer.close(take w)
+    }))
+    finish(take b)
+}
+
+fn texts() -> u64 {
+    region r {
+        let a = make_text(r, "a")
+        let b = make_text(r, "aa")
+        code(a, b) * 10000 + code(b, a) * 100 + code(a, a)
+    }
+}
+
+pub fn main() -> Result[(), Exit] {
+    if texts() == 70707u64 {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
+}

@@ -50,11 +50,34 @@
 //   floor(0x7ff8000000000001) = 0x7ff8000000000000: a NaN operand: canonical NaN
 //   sqrt32(0x40000000) = 0x3fb504f3: nearest f32 to sqrt 2 (arith.core)
 //   sqrt32(0xc0000000) = 0x7fc00000: the f32 canonical NaN
-fn sqrt(b: u64) -> u64 { float.to_bits64(float.sqrt(float.from_bits64(b))) }
-fn abs(b: u64) -> u64 { float.to_bits64(float.abs(float.from_bits64(b))) }
-fn floor(b: u64) -> u64 { float.to_bits64(float.floor(float.from_bits64(b))) }
-fn ceil(b: u64) -> u64 { float.to_bits64(float.ceil(float.from_bits64(b))) }
-fn trunc(b: u64) -> u64 { float.to_bits64(float.trunc(float.from_bits64(b))) }
-fn round(b: u64) -> u64 { float.to_bits64(float.round(float.from_bits64(b))) }
-fn round_even(b: u64) -> u64 { float.to_bits64(float.round_even(float.from_bits64(b))) }
-fn sqrt32(b: u32) -> u32 { float.to_bits32(float.sqrt(float.from_bits32(b))) }
+fn sqrt(b: u64) -> u64 {
+    float.to_bits64(float.sqrt(float.from_bits64(b)))
+}
+
+fn abs(b: u64) -> u64 {
+    float.to_bits64(float.abs(float.from_bits64(b)))
+}
+
+fn floor(b: u64) -> u64 {
+    float.to_bits64(float.floor(float.from_bits64(b)))
+}
+
+fn ceil(b: u64) -> u64 {
+    float.to_bits64(float.ceil(float.from_bits64(b)))
+}
+
+fn trunc(b: u64) -> u64 {
+    float.to_bits64(float.trunc(float.from_bits64(b)))
+}
+
+fn round(b: u64) -> u64 {
+    float.to_bits64(float.round(float.from_bits64(b)))
+}
+
+fn round_even(b: u64) -> u64 {
+    float.to_bits64(float.round_even(float.from_bits64(b)))
+}
+
+fn sqrt32(b: u32) -> u32 {
+    float.to_bits32(float.sqrt(float.from_bits32(b)))
+}

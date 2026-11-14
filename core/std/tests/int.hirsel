@@ -220,10 +220,16 @@ fn byte_ascii_matches_char() -> u64 {
     for v in 0u32 .. 256u32 {
         let b: u8 = int.narrow(v)
         let c = option.unwrap(char.from_u32(v))
-        if int.is_ascii_digit(b) != char.is_ascii_digit(c) { bad += 1 }
-        if int.is_ascii_alpha(b) != char.is_ascii_alpha(c) { bad += 1 }
+        if int.is_ascii_digit(b) != char.is_ascii_digit(c) {
+            bad += 1
+        }
+        if int.is_ascii_alpha(b) != char.is_ascii_alpha(c) {
+            bad += 1
+        }
         let l: u32 = int.widen(int.to_ascii_lower(b))
-        if l != char.to_u32(char.to_ascii_lower(c)) { bad += 1 }
+        if l != char.to_u32(char.to_ascii_lower(c)) {
+            bad += 1
+        }
     }
     bad
 }

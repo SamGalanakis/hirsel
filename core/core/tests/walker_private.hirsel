@@ -1,9 +1,9 @@
 // test-of: core.string
 // test-reason: public APIs cannot call the private carrier reinterpretations.
 // expect: run carrier_round_trip() = 3
-fn carrier_round_trip()->u64 {
-    let s=result.unwrap(from("abc"))
-    let b=to_bytes(take s)
-    let again=of_bytes(take b)
+fn carrier_round_trip() -> u64 {
+    let s = result.unwrap(from("abc"))
+    let b = to_bytes(take s)
+    let again = of_bytes(take b)
     string.byte_len(again)
 }

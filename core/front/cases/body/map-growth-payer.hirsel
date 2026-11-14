@@ -2,17 +2,25 @@
 // expect: run existing_payer() = 5
 // A cap0 Map's first allocation uses the current empty bound and returns128/0.
 // expect: run first_payer() = 12800
-fn existing_payer()->u64 {
-  let mut m:Map[u64,u64]=map.new()
-  for i in 0u64..4u64 { result.unwrap(map.insert(mut m,i,i)) }
-  let r:Result[(),Capacity]=bound bytes 0 { result.unwrap(map.insert(mut m,4,4)) }
-  result.unwrap(r)
-  map.len(m)
+fn existing_payer() -> u64 {
+    let mut m: Map[u64, u64] = map.new()
+    for i in 0u64 .. 4u64 {
+        result.unwrap(map.insert(mut m, i, i))
+    }
+    let r: Result[(), Capacity] = bound bytes 0 {
+        result.unwrap(map.insert(mut m, 4, 4))
+    }
+    result.unwrap(r)
+    map.len(m)
 }
-fn first_payer()->u64 {
-  let mut m:Map[u64,u64]=map.new()
-  let r:Result[u64,Capacity]=bound bytes 0 {
-    match map.insert(mut m,7,11) {Error((c,_))=>c.requested*100+c.available,Ok(())=>0}
-  }
-  result.unwrap(r)+map.len(m)
+
+fn first_payer() -> u64 {
+    let mut m: Map[u64, u64] = map.new()
+    let r: Result[u64, Capacity] = bound bytes 0 {
+        match map.insert(mut m, 7, 11) {
+            Error((c, _)) => c.requested * 100 + c.available,
+            Ok(()) => 0
+        }
+    }
+    result.unwrap(r) + map.len(m)
 }

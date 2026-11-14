@@ -12,17 +12,30 @@
 // expect: run raw(4) = 101
 // expect: run raw(5) = fail Bounds
 fn prefix(b: Bytes, i: u64, p: Bytes) -> bool {
-    if list.len(p) > list.len(b) - i { return false }
+    if list.len(p) > list.len(b) - i {
+        return false
+    }
     for k in 0u64 .. list.len(p) {
-        if b[i + k] != p[k] { return false }
+        if b[i + k] != p[k] {
+            return false
+        }
     }
     true
 }
+
 fn go(i: u64, which: u64) -> bool {
-    let p = if which == 0 { "ab" } else if which == 1 { "de" }
-        else if which == 2 { "df" } else { "" }
+    let p = if which == 0 {
+        "ab"
+    } else if which == 1 {
+        "de"
+    } else if which == 2 {
+        "df"
+    } else {
+        ""
+    }
     prefix(string.as_bytes("abcde"), i, string.as_bytes(p))
 }
+
 fn raw(i: u64) -> u64 {
     let b = string.as_bytes("abcde")
     int.widen(b[i])

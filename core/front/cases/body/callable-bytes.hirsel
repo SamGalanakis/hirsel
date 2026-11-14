@@ -1,24 +1,54 @@
 // LANG-13 / OWN-7: bytes is part of the callable's parameter mode and uses the
 // existing u64 payload ABI. Item, inferred generic item and literal calls agree.
 // expect: run checked() = 67
-fn sized(bytes n:u64)->u64 {n}
-fn generic[T:plain](bytes n:u64,x:T)->T {x}
-fn run(h:fn(bytes u64)->u64)->u64 {h(bytes 7)}
-fn run_scoped(h:scoped fn(bytes u64)->u64)->u64 {h(bytes 9)}
-fn guarded(h:fn(bytes u64)->u64)->u64 {
- match 7u64 {x if h(bytes x)==7 => 10, _ => 0}
+fn sized(bytes n: u64) -> u64 {
+    n
 }
-fn owning()->u64 {
- let delta:u64=4
- let made:Result[own[send] fn(bytes u64)->u64,(Capacity,u64)] = fn(bytes n:u64)->u64 {n+delta}
- let h=result.unwrap(take made)
- h(bytes 5)
+
+fn generic[T: plain](bytes n: u64, x: T) -> T {
+    x
 }
-fn checked()->u64 {
- let h:fn(bytes u64)->u64=sized
- let inferred=sized
- let g:fn(bytes u64,u64)->u64=generic
- let c=fn(bytes n:u64)->u64 {n+1}
- h(bytes 1)+inferred(bytes 2)+run(h)+g(bytes 3,5u64)+c(bytes 6)+run_scoped(fn(bytes n:u64)->u64 {n+17})+guarded(h)+owning()
+
+fn run(h: fn(bytes u64) -> u64) -> u64 {
+    h(bytes 7)
 }
-pub fn main()->Result[(),Exit] {if checked()==67u64 {Ok(())}else{Error(Exit(status:1))}}
+
+fn run_scoped(h: scoped fn(bytes u64) -> u64) -> u64 {
+    h(bytes 9)
+}
+
+fn guarded(h: fn(bytes u64) -> u64) -> u64 {
+    match 7u64 {
+        x if h(bytes x) == 7 => 10,
+        _ => 0
+    }
+}
+
+fn owning() -> u64 {
+    let delta: u64 = 4
+    let made: Result[own[send] fn(bytes u64) -> u64, (Capacity, u64)] = fn(bytes n: u64) -> u64 {
+        n + delta
+    }
+    let h = result.unwrap(take made)
+    h(bytes 5)
+}
+
+fn checked() -> u64 {
+    let h: fn(bytes u64) -> u64 = sized
+    let inferred = sized
+    let g: fn(bytes u64, u64) -> u64 = generic
+    let c = fn(bytes n: u64) -> u64 {
+        n + 1
+    }
+    h(bytes 1) + inferred(bytes 2) + run(h) + g(bytes 3, 5u64) + c(bytes 6) + run_scoped(fn(bytes n: u64) -> u64 {
+        n + 17
+    }) + guarded(h) + owning()
+}
+
+pub fn main() -> Result[(), Exit] {
+    if checked() == 67u64 {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
+}

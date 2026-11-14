@@ -1,35 +1,64 @@
 // OWN-11: a mutable scoped parameter retains exactly its original anchors.
 // expect: run skip_run() = 303
 // expect: run forward_run() = 203
-scoped type Cursor {input:View[Bytes],pos:u64}
-fn skip(mut c:Cursor) {c=Cursor(input:c.input,pos:c.pos+1)}
-fn forward(mut c:Cursor) {skip(mut c)}
-fn skip_run()->u64 {
- let buf:Bytes=result.unwrap(b"abc")
- let mut c=Cursor(input:view buf,pos:0u64)
- for _ in 0u64..3 {skip(mut c)}
- c.pos*100+list.len(c.input)
+scoped type Cursor {
+    input: View[Bytes],
+    pos: u64
 }
-fn forward_run()->u64 {
- let buf:Bytes=result.unwrap(b"abc")
- let mut c=Cursor(input:view buf,pos:0u64)
- forward(mut c)
- forward(mut c)
- c.pos*100+list.len(c.input)
+
+fn skip(mut c: Cursor) {
+    c = Cursor(input: c.input, pos: c.pos + 1)
 }
-fn positive()->bool {skip_run()==303u64 && forward_run()==203u64 && regions()==3u64}
+
+fn forward(mut c: Cursor) {
+    skip(mut c)
+}
+
+fn skip_run() -> u64 {
+    let buf: Bytes = result.unwrap(b"abc")
+    let mut c = Cursor(input: view buf, pos: 0u64)
+    for _ in 0u64 .. 3 {
+        skip(mut c)
+    }
+    c.pos * 100 + list.len(c.input)
+}
+
+fn forward_run() -> u64 {
+    let buf: Bytes = result.unwrap(b"abc")
+    let mut c = Cursor(input: view buf, pos: 0u64)
+    forward(mut c)
+    forward(mut c)
+    c.pos * 100 + list.len(c.input)
+}
+
+fn positive() -> bool {
+    skip_run() == 303u64 && forward_run() == 203u64 && regions() == 3u64
+}
 
 // Named regions are part of the caller's already-declared anchor set.
 // expect: run regions() = 3
-scoped type RegionCursor[in r] {input:View[Text in r] in r}
-fn within[in r](mut c:RegionCursor[in r],t:Text in r) {c=RegionCursor(input:view t)}
-fn regions()->u64 {
- region r {
-  let a=result.unwrap(text.copy_in(r,"a"))
-  let b=result.unwrap(text.copy_in(r,"abc"))
-  let mut c:RegionCursor[in r]=RegionCursor(input:view a)
-  within(mut c,b)
-  string.byte_len(text.as_string(c.input))
- }
+scoped type RegionCursor[in r] {
+    input: View[Text in r] in r
 }
-pub fn main()->Result[(),Exit] {if positive() {Ok(())}else{Error(Exit(status:1))}}
+
+fn within[in r](mut c: RegionCursor[in r], t: Text in r) {
+    c = RegionCursor(input: view t)
+}
+
+fn regions() -> u64 {
+    region r {
+        let a = result.unwrap(text.copy_in(r, "a"))
+        let b = result.unwrap(text.copy_in(r, "abc"))
+        let mut c: RegionCursor[in r] = RegionCursor(input: view a)
+        within(mut c, b)
+        string.byte_len(text.as_string(c.input))
+    }
+}
+
+pub fn main() -> Result[(), Exit] {
+    if positive() {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
+}

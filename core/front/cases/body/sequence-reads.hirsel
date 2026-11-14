@@ -1,13 +1,26 @@
 // expect: accept
-fn len(xs: SeqSpan[u64]) -> u64 { seq.len(xs) }
+fn len(xs: SeqSpan[u64]) -> u64 {
+    seq.len(xs)
+}
+
 fn read(xs: SeqSpan[u64], i: u64) -> u64 {
-  match seq.nth(xs, i) { Some(x) => x + 0u64, None => 0 }
+    match seq.nth(xs, i) {
+        Some(x) => x + 0u64,
+        None => 0
+    }
 }
+
 fn indexed(xs: IndexedSpan[u64], i: u64) -> u64 {
-  match indexed.get(xs, i) { Some(x) => x + 0u64, None => 0 }
+    match indexed.get(xs, i) {
+        Some(x) => x + 0u64,
+        None => 0
+    }
 }
+
 fn sum(xs: SeqSpan[(u8, u64)]) -> u64 {
-  let mut s: u64 = 0
-  for (a, b) in xs { s += b }
-  s
+    let mut s: u64 = 0
+    for (a, b) in xs {
+        s += b
+    }
+    s
 }

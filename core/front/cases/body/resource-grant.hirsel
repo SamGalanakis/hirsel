@@ -5,25 +5,35 @@
 // expect: accept
 // expect: run one() = 7 trace 7
 // expect: run two() = 5 trace 5
-resource type Marker grant bytes 256 { id: u64 }
-  drop(m) {
+resource type Marker grant bytes 256 {
+    id: u64
+} drop(m) {
     let s = result.unwrap(b"release")
     let _ = m.id
-  }
-resource type Held[T] grant bytes 64 { id: u64, value: T }
-  drop(h) {
+}
+
+resource type Held[T] grant bytes 64 {
+    id: u64,
+    value: T
+} drop(h) {
     let s = result.unwrap(b"x")
     let _ = h.id
-  }
+}
 
 fn one() -> u64 {
-  let m = result.unwrap(Marker(id: 7))
-  m.id
+    let m = result.unwrap(Marker(id: 7))
+    m.id
 }
+
 fn two() -> u64 {
-  let h: Held[u8] = result.unwrap(Held(id: 5, value: 1u8))
-  h.id
+    let h: Held[u8] = result.unwrap(Held(id: 5, value: 1u8))
+    h.id
 }
+
 pub fn main() -> Result[(), Exit] {
-  if one() + two() == 12 { Ok(()) } else { Error(Exit(status: 3)) }
+    if one() + two() == 12 {
+        Ok(())
+    } else {
+        Error(Exit(status: 3))
+    }
 }

@@ -1,5 +1,15 @@
 // expect: accept
 // OWN-25: reading a stable field yields a view while keeping the holder's region.
-@compact(u32) stable type Value { n: u8 }
-@compact(u32) stable type Member { value: Value }
-fn read(m: Member) -> View[Value] in m { m.value }
+@compact(u32)
+stable type Value {
+    n: u8
+}
+
+@compact(u32)
+stable type Member {
+    value: Value
+}
+
+fn read(m: Member) -> View[Value] in m {
+    m.value
+}

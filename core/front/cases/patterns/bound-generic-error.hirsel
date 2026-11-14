@@ -2,12 +2,18 @@
 // Generic code emission is B's gap; checking this valid program must not refuse.
 // expect: accept
 // The result and its tuple payload now have concrete layouts.
-fn receipt[E: plain](e: E) -> Result[u64, E] { Error(e) }
+fn receipt[E: plain](e: E) -> Result[u64, E] {
+    Error(e)
+}
+
 fn f() -> Result[u64, u8] {
-  let r: Result[u64, Capacity] = bound bytes 0 {
-    let c: Capacity = Capacity(requested: 5, available: 0)
-    let n: u64 = receipt(c)?
-    n
-  }
-  Ok(match r { Ok(n) => n, Error(c) => c.requested })
+    let r: Result[u64, Capacity] = bound bytes 0 {
+        let c: Capacity = Capacity(requested: 5, available: 0)
+        let n: u64 = receipt(c)?
+        n
+    }
+    Ok(match r {
+        Ok(n) => n,
+        Error(c) => c.requested
+    })
 }

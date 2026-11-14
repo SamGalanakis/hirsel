@@ -1,11 +1,20 @@
 // OWN-9: different fields of one record do not overlap (the spec's swap_halves; proto-872's safe program views p.a while assigning p.b).
 // expect: accept
+type Pair {
+    left: List[u8],
+    right: List[u8]
+}
 
+type P {
+    a: u64,
+    b: List[u8]
+}
 
-type Pair { left: List[u8], right: List[u8] }
-type P { a: u64, b: List[u8] }
-fn swap_halves(mut p: Pair) { let _ = list.append(mut p.left, p.right) }
+fn swap_halves(mut p: Pair) {
+    let _ = list.append(mut p.left, p.right)
+}
+
 fn safe(mut p: P) {
-  let v = view p.b
-  p.a = 3
+    let v = view p.b
+    p.a = 3
 }

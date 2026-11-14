@@ -160,7 +160,7 @@ pub(crate) struct DiskIndex {
 impl DiskIndex {
     pub fn new(path: &Path) -> io::Result<Self> {
         Ok(Self {
-            store: Store::new(path)?,
+            store: Store::image(path)?,
             nodes: Mutex::default(),
             pages: Mutex::default(),
             reads: Default::default(),

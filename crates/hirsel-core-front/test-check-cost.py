@@ -8,6 +8,49 @@ import unittest
 
 GUARD = runpy.run_path(str(Path(__file__).with_name('check-cost.py')))
 
+FRONT = runpy.run_path(str(Path(__file__).with_name('front-cost.py')))
+
+
+class FrontStageCeiling(unittest.TestCase):
+    def row(self):
+        return dict(source_bytes=500, tokens=100,
+                    costs={name: 10000 for name in FRONT['STAGES']},
+                    image_access={name: 10 for name in FRONT['COUNTS']})
+
+    def test_one_stage_overrun_cannot_hide_in_another_stage_saving(self):
+        row = self.row()
+        ceiling = FRONT['baseline'](row)
+        self.assertEqual(FRONT['compare'](row, ceiling), [])
+        row['costs']['parse'] = 10201
+        row['costs']['resolve'] = 1
+        failures = FRONT['compare'](row, ceiling)
+        self.assertEqual(len(failures), 1)
+        self.assertIn('parse', failures[0])
+
+    def test_image_work_zero_is_enforced_and_nested_costs_are_not_added(self):
+        row = self.row()
+        row['image_access'] = {name: 0 for name in FRONT['COUNTS']}
+        ceiling = FRONT['baseline'](row)
+        row['image_access']['bytes_read'] = 1
+        self.assertIn('image bytes_read', FRONT['compare'](row, ceiling)[0])
+        metrics = dict(source_bytes=500, tokens=100, counter_refusal=None,
+                       stages=[dict(name=name, instructions=10000) for name in
+                               ('parse','front/input counts','index','resolve','declarations/layout')],
+                       substages=[dict(name='body keys/new', instructions=1000),
+                                  dict(name='body keys/for_body', instructions=2000)],
+                       front_image_access=dict(records_opened=1, bytes_read=100,
+                                               digests=1, digest_bytes=68,
+                                               read_instructions=500,
+                                               digest_instructions=100,
+                                               counter_refusal=None))
+        observed = FRONT['front'](metrics)
+        self.assertEqual(observed['costs']['declarations'], 9000)
+        self.assertEqual(observed['costs']['body keys'], 3000)
+        self.assertEqual(observed['costs']['parse'], 10000)
+        del metrics['substages'][1]
+        with self.assertRaisesRegex(ValueError, 'missing body key'):
+            FRONT['front'](metrics)
+
 
 class ProcessCeiling(unittest.TestCase):
     def test_startup_regression_fails_when_driver_cost_is_unchanged(self):

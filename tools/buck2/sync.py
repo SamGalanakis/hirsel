@@ -1345,8 +1345,13 @@ def first_party(meta: dict) -> str:
                             args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-check-cost/hirsel-core", "--request-compiler", "buck-out/tmp/cargo-bin-exe/core-check-cost/hirsel-core-request-cost"],
                             bin_exes={"hirsel-core": "//:hirsel-core-driver-bin-hirsel-core", "hirsel-core-request-cost": "//:hirsel-core-driver-bin-hirsel-core-request-cost"},
                             data=Raw('glob(["core/core/**", "core/std/**", "core/programs/m1/**"]) + ["core/tools/measure.py", "core/tools/m1.py", "tools/capped", "crates/hirsel-core-front/cost-ceilings.json"]')))
+    out.append("\n" + call("hirsel_script_test", name="core-front-cost", script="crates/hirsel-core-front/front-cost.py", full=False, host=True, production=True, native_tools=True,
+                            args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-front-cost/hirsel-core"],
+                            bin_exes={"hirsel-core": "//:hirsel-core-driver-bin-hirsel-core"},
+                            files_env={"HIRSEL_CORE_RT_ARCHIVES": "//:hirsel-core-rt-archives"},
+                            data=Raw('glob(["core/core/**", "core/std/**", "core/programs/m1/**", "core/langarena/**"]) + ["core/tools/request_cost.py", "core/tools/langarena.py", "core/tools/std_native.py", "core/tools/m1.py", "core/tools/measure.py", "tools/capped", "crates/hirsel-core-front/check-cost.py", "crates/hirsel-core-front/front-cost-ceilings.json"]')))
     out.append("\n" + call("hirsel_script_test", name="core-check-cost-unit", script="crates/hirsel-core-front/test-check-cost.py", full=False, host=True,
-                            data=["crates/hirsel-core-front/test-check-cost.py", "crates/hirsel-core-front/check-cost.py", "core/tools/measure.py"]))
+                            data=["crates/hirsel-core-front/test-check-cost.py", "crates/hirsel-core-front/check-cost.py", "crates/hirsel-core-front/front-cost.py", "core/tools/request_cost.py", "core/tools/measure.py"]))
     out.append("\n" + call("hirsel_core_driver_native_test", name="core-driver-native", data=Raw('glob(["crates/hirsel-core-rt/include/**", "crates/hirsel-core-driver/Cargo.toml", "core/core/**", "core/std/**", "core/front/runtime/**"])')))
     out.append("\n" + call("hirsel_core_driver_native_test", name="core-driver-sites", case_filter="native::tests::failure_sites_",
                            data=Raw('glob(["crates/hirsel-core-rt/include/**", "crates/hirsel-core-driver/Cargo.toml", "core/core/**"])')))

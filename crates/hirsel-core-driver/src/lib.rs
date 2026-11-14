@@ -475,6 +475,24 @@ impl Driver {
             modules.push((path, output.syntax));
         }
         meter.finish("parse");
+        if meter.enabled() {
+            meter.result.source_bytes += bytes_total as u64;
+            meter.result.tokens += modules
+                .iter()
+                .map(|(_, syntax)| {
+                    syntax
+                        .tree
+                        .tokens
+                        .iter()
+                        .filter(|token| {
+                            !token.kind.is_trivia()
+                                && token.kind != hirsel_core_syntax::TokenKind::Eof
+                        })
+                        .count() as u64
+                })
+                .sum::<u64>();
+            meter.finish("front/input counts");
+        }
         let symbols = Arc::new(symbols);
         let mut index = image_directory.as_ref().map_or_else(
             || NameIndex::new(Arc::clone(&symbols)),
@@ -592,15 +610,17 @@ impl Driver {
             None
         };
         meter.finish("package declarations demand");
-        let mut keys = Keys::new(
-            &index,
-            &modules,
-            &resolutions,
-            &resolution_inputs,
-            compiler_identity()?,
-            image_directory.as_ref().map(|i| &*i.headers),
-            image_directory.as_ref().map(|i| &i.anchors),
-        )?;
+        let mut keys = meter.measure("body keys/new", || {
+            Keys::new(
+                &index,
+                &modules,
+                &resolutions,
+                &resolution_inputs,
+                compiler_identity()?,
+                image_directory.as_ref().map(|i| &*i.headers),
+                image_directory.as_ref().map(|i| &i.anchors),
+            )
+        })?;
         {
             let mut p = Program::declare_with_library(
                 &index,
@@ -633,14 +653,16 @@ impl Driver {
                 let item = modules[fd.at.module as usize]
                     .syntax
                     .item(fd.at.item as usize);
-                let mut key = keys.for_body(
-                    &index,
-                    &fd.path,
-                    modules[fd.at.module as usize].id,
-                    fd.at.item,
-                    item,
-                    &resolution,
-                )?;
+                let mut key = meter.measure("body keys/for_body", || {
+                    keys.for_body(
+                        &index,
+                        &fd.path,
+                        modules[fd.at.module as usize].id,
+                        fd.at.item,
+                        item,
+                        &resolution,
+                    )
+                })?;
                 // Entry policy is a read of the selected body only. Keep it
                 // out of the shared environment key so another program does
                 // not recheck the library closure, while separating the
@@ -730,6 +752,7 @@ impl Driver {
                 result.definitions.insert(fd.path.clone(), product);
             }
             meter.finish("check/lower");
+            meter.finish_front();
             for (path, key_hash) in fresh {
                 let product = result
                     .definitions

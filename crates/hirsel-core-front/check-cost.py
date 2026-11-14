@@ -73,13 +73,12 @@ def finished_forecast(process, lines, projection, budget):
     return forecast, failures
 
 
-def run(compiler, output, ceilings, request_compiler=None):
+def sample_sources(compiler, output):
     manifest = json.loads((ROOT / 'core/programs/m1/manifest.json').read_text())
     manifest.pop('entries', None)
     for package in manifest['packages']:
         for source in package['sources']:
             source['file'] = str((ROOT / source['file']).resolve())
-    failures = []
     for name in ['m1', 'std']:
         inputs = copy.deepcopy(manifest)
         if name == 'std':
@@ -108,6 +107,12 @@ def run(compiler, output, ceilings, request_compiler=None):
             raise ValueError(f'{name}: driver did not return a check result')
         metrics = json.loads((directory / 'metrics.json').read_text())
         process = process_instructions(directory / 'process-perf.txt')
+        yield name, lines, product, metrics, process
+
+
+def run(compiler, output, ceilings, request_compiler=None):
+    failures = []
+    for name, lines, product, metrics, process in sample_sources(compiler, output):
         ceiling = ceilings['corpora'][name]
         if lines != ceiling['code_lines']:
             print(f"{name}: baseline {ceiling['code_lines']} code lines; current {lines}; "

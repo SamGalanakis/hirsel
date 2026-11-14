@@ -54,13 +54,20 @@ impl ArchiveWriter {
 
 pub struct Store {
     root: PathBuf,
+    image: bool,
 }
 impl Store {
     pub fn new(root: &Path) -> io::Result<Self> {
         fs::create_dir_all(root)?;
         Ok(Self {
             root: root.to_owned(),
+            image: false,
         })
+    }
+    pub(crate) fn image(root: &Path) -> io::Result<Self> {
+        let mut store = Self::new(root)?;
+        store.image = true;
+        Ok(store)
     }
     pub fn path(&self, key: ContentHash) -> PathBuf {
         const HEX: &[u8; 16] = b"0123456789abcdef";
@@ -145,11 +152,15 @@ impl Store {
         File::open(&self.root)?.sync_all()
     }
     pub fn get(&self, key: ContentHash) -> io::Result<Option<Vec<u8>>> {
+        let image = crate::meter::ImageRead::start(self.image);
         let mut file = match File::open(self.path(key)) {
             Ok(f) => f,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
         };
+        if let Some(image) = &image {
+            image.opened();
+        }
         let size = usize::try_from(file.metadata()?.len()).map_err(io::Error::other)?;
         if size < HEADER + TRAILER {
             return Ok(None);
@@ -157,13 +168,20 @@ impl Store {
         let mut bytes = Vec::new();
         bytes.try_reserve_exact(size).map_err(io::Error::other)?;
         file.read_to_end(&mut bytes)?;
+        if let Some(image) = &image {
+            image.bytes(bytes.len());
+        }
         if bytes.len() != size || &bytes[..8] != MAGIC || bytes[8..12] != VERSION.to_le_bytes() {
             return Ok(None);
         }
         let end = size - TRAILER;
         if u64::from_le_bytes(bytes[end..end + 8].try_into().unwrap()) != (end - HEADER) as u64
             || bytes[end + 8..] != key.0
-            || Sha256::digest(&bytes[..end + 8])[..] != key.0
+            || image.as_ref().map_or_else(
+                || Sha256::digest(&bytes[..end + 8]),
+                |image| image.digest(end + 8, || Sha256::digest(&bytes[..end + 8])),
+            )[..]
+                != key.0
         {
             return Ok(None);
         }

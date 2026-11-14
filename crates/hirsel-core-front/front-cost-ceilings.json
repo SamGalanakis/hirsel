@@ -1,0 +1,164 @@
+{
+  "revision": "6ee84cb5fe1fad288211f7bd1aa486d8d99d6d2d",
+  "policy": "Each F land lowers only its measured stage. Initial margin 2%, rounded up to 100 instructions. Budget targets remain separate. M1 legacy check/lower unchanged.",
+  "nested": "Body keys remain in legacy declarations/check stages; image read includes digest and overlaps the consuming phase. Do not sum nested rows.",
+  "suite_targets_instructions": {
+    "parse": 8000000,
+    "resolve": 7000000,
+    "declarations": 5000000,
+    "index": 600000,
+    "body keys": 8000000
+  },
+  "corpora": {
+    "m1": {
+      "source_bytes": 332990,
+      "tokens": 69215,
+      "observation": {
+        "source_bytes": 332990,
+        "tokens": 69215,
+        "costs": {
+          "parse": 35391479,
+          "index": 510931,
+          "resolve": 15073239,
+          "input counts": 586539,
+          "declarations": 11907391,
+          "body keys/new": 5867751,
+          "body keys/for_body": 24145029,
+          "body keys": 30012780,
+          "image read": 0,
+          "image digest": 0
+        },
+        "image_access": {
+          "records_opened": 0,
+          "bytes_read": 0,
+          "digests": 0,
+          "digest_bytes": 0,
+          "read_instructions": 0,
+          "digest_instructions": 0,
+          "counter_refusal": null
+        }
+      },
+      "instructions_per_token": {
+        "parse": 521.5545763201618,
+        "index": 7.530159647475259,
+        "resolve": 222.13104095932962,
+        "input counts": 8.644080040453659,
+        "declarations": 175.4764140720942,
+        "body keys/new": 86.47258542223507,
+        "body keys/for_body": 355.8188253991187,
+        "body keys": 442.289966047822,
+        "image read": 0.0,
+        "image digest": 0.0
+      },
+      "image_per_token": {
+        "records_opened": 0.0,
+        "bytes_read": 0.0,
+        "digests": 0.0,
+        "digest_bytes": 0.0
+      }
+    },
+    "std": {
+      "source_bytes": 206367,
+      "tokens": 35146,
+      "observation": {
+        "source_bytes": 206367,
+        "tokens": 35146,
+        "costs": {
+          "parse": 21501422,
+          "index": 354803,
+          "resolve": 7159533,
+          "input counts": 304386,
+          "declarations": 8261923,
+          "body keys/new": 3662243,
+          "body keys/for_body": 10660550,
+          "body keys": 14322793,
+          "image read": 0,
+          "image digest": 0
+        },
+        "image_access": {
+          "records_opened": 0,
+          "bytes_read": 0,
+          "digests": 0,
+          "digest_bytes": 0,
+          "read_instructions": 0,
+          "digest_instructions": 0,
+          "counter_refusal": null
+        }
+      },
+      "instructions_per_token": {
+        "parse": 624.0112672850396,
+        "index": 10.297046605588118,
+        "resolve": 207.78466966368862,
+        "input counts": 8.834575769646618,
+        "declarations": 239.77693051840893,
+        "body keys/new": 106.28521026574859,
+        "body keys/for_body": 309.38940419962444,
+        "body keys": 415.674614465373,
+        "image read": 0.0,
+        "image digest": 0.0
+      },
+      "image_per_token": {
+        "records_opened": 0.0,
+        "bytes_read": 0.0,
+        "digests": 0.0,
+        "digest_bytes": 0.0
+      }
+    },
+    "suite-edit": {
+      "source_bytes": 140130,
+      "tokens": 35705,
+      "observation": {
+        "source_bytes": 140130,
+        "tokens": 35705,
+        "costs": {
+          "parse": 17140046,
+          "index": 600147,
+          "resolve": 14743476,
+          "input counts": 296471,
+          "declarations": 5102104,
+          "body keys/new": 3035232,
+          "body keys/for_body": 17975173,
+          "body keys": 21010405,
+          "image read": 2314911,
+          "image digest": 939901
+        },
+        "image_access": {
+          "records_opened": 549,
+          "bytes_read": 306066,
+          "digests": 549,
+          "digest_bytes": 288498,
+          "read_instructions": 2314911,
+          "digest_instructions": 939901,
+          "counter_refusal": null
+        }
+      },
+      "instructions_per_token": {
+        "parse": 489.6485086122392,
+        "index": 17.146057975073518,
+        "resolve": 421.18470802408626,
+        "input counts": 8.472202772720907,
+        "declarations": 145.75549642907157,
+        "body keys/new": 86.71054474163283,
+        "body keys/for_body": 513.5051113289455,
+        "body keys": 600.2156560705783,
+        "image read": 66.133594734631,
+        "image digest": 26.850581151099284
+      },
+      "image_per_token": {
+        "records_opened": 0.015684077860243662,
+        "bytes_read": 8.743537319703123,
+        "digests": 0.015684077860243662,
+        "digest_bytes": 8.241646828175325
+      }
+    }
+  },
+  "history": [
+    {
+      "reason": "Initial exact front counters, 2% stage margin; no legacy ceilings or fixed 60000 budget changed.",
+      "revision": "6ee84cb5fe1fad288211f7bd1aa486d8d99d6d2d",
+      "worktree": "F metric counters; no source or completed-body change"
+    }
+  ],
+  "compiler_sha256": "ec71ac29389906b8f2a086137627bcb326e15daca588a94228a2104454e32f12",
+  "runtime_sha256": "7e3eaba8eb4cca263e93ab8e5fe3906b066094a12b187c715bcbdf567e1b1109"
+}

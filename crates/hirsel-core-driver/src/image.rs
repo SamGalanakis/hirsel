@@ -63,7 +63,7 @@ impl CoreImage {
     }
     /// O(1) in the package size: one selection and a fixed-size compiler/directory root.
     pub fn open(path: &Path) -> io::Result<Option<Arc<Self>>> {
-        let store = Store::new(path)?;
+        let store = Store::image(path)?;
         let Some(identity) = store.selection("image-root")? else {
             return Ok(None);
         };

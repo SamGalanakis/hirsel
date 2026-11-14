@@ -28,6 +28,7 @@ struct Input {
     len: usize,
     imported: u8,
     bitcode: u8,
+    module: *mut libc::c_void,
 }
 type Program = unsafe extern "C" fn(
     *const Input,
@@ -216,6 +217,7 @@ pub(crate) fn program(
                 len: ir.len(),
                 imported: u8::from(*imported),
                 bitcode: 0,
+                module: std::ptr::null_mut(),
             }),
             // Apply the body-size bound after composition, just as for text.
             // Skipping an entire unit also drops declarations/private helpers
@@ -228,6 +230,7 @@ pub(crate) fn program(
                 len: bitcode.len(),
                 imported: 1,
                 bitcode: 1,
+                module: std::ptr::null_mut(),
             }),
         })
         .collect();

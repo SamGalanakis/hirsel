@@ -17,7 +17,7 @@
 extern void hirsel_llvm_guard_copy_loops(void *module, void *machine);
 
 typedef struct { uint8_t *data; size_t len; uint8_t failed; } HirselLlvmOutput;
-typedef struct { const uint8_t *data; size_t len; uint8_t imported, bitcode; } HirselLlvmUnit;
+typedef struct { const uint8_t *data; size_t len; uint8_t imported, bitcode; LLVMModuleRef module; } HirselLlvmUnit;
 typedef struct { uint8_t *symbol; size_t len; uint64_t instructions; } HirselLlvmImport;
 typedef struct { HirselLlvmImport *data; size_t len; } HirselLlvmImports;
 extern LLVMMemoryBufferRef hirsel_llvm_raw_bitcode(LLVMModuleRef module);
@@ -321,7 +321,10 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
     LLVMTargetMachineRef machine = LLVMCreateTargetMachine(target, triple, cpu, "",
         speed ? LLVMCodeGenLevelAggressive : LLVMCodeGenLevelNone, LLVMRelocPIC, LLVMCodeModelDefault);
     if (!machine) { error(out, "LLVM could not create the target machine"); return; }
-    LLVMContextRef context = LLVMContextCreate();
+    LLVMContextRef context = NULL;
+    int own_context = 1;
+    for (size_t i = 0; i < count; ++i) if (units[i].module) { context = LLVMGetModuleContext(units[i].module); own_context = 0; break; }
+    if (!context) context = LLVMContextCreate();
     // Standalone emission keeps the original module and symbol order exactly.
     // Release composition goes through the linker, which may reorder globals.
     int standalone = count == 1 && !export_count;
@@ -331,7 +334,10 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
     char **imports = NULL;
     size_t imports_len = 0, imports_capacity = 0;
     for (size_t i = 0; i < count; ++i) {
-        LLVMModuleRef unit = NULL;
+        LLVMModuleRef unit = units[i].module;
+        if (unit) {
+            failed = 0;
+        } else {
         buffer = LLVMCreateMemoryBufferWithMemoryRangeCopy((const char*)units[i].data, units[i].len, "hirsel-core");
         if (units[i].bitcode) {
             failed = LLVMParseBitcodeInContext2(context, buffer, &unit);
@@ -340,6 +346,7 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
             failed = LLVMParseIRInContext2(context, buffer, &unit, &message);
         }
         LLVMDisposeMemoryBuffer(buffer);
+        }
         if (failed || !unit) { error(out, message); LLVMDisposeMessage(message); goto done; }
         if (raw) {
             // Snapshot exactly the parsed emitter module, before any target,
@@ -465,7 +472,7 @@ done:
     for (size_t i = 0; i < imports_len; ++i) free(imports[i]);
     free(imports);
     if (module) LLVMDisposeModule(module);
-    LLVMContextDispose(context); LLVMDisposeTargetMachine(machine);
+    if (own_context) LLVMContextDispose(context); LLVMDisposeTargetMachine(machine);
 }
 __attribute__((visibility("default")))
 void hirsel_llvm_program_v2(const HirselLlvmUnit *units, size_t count,
@@ -476,13 +483,13 @@ void hirsel_llvm_program_v2(const HirselLlvmUnit *units, size_t count,
 }
 __attribute__((visibility("default")))
 void hirsel_llvm_compile_v1(const uint8_t *ir, size_t len, uint8_t speed, const char *triple, const char *cpu, HirselLlvmOutput *out) {
-    HirselLlvmUnit unit = { ir, len, 0, 0 };
+    HirselLlvmUnit unit = { ir, len, 0, 0, NULL };
     emit_program(&unit, 1, NULL, 0, speed, triple, cpu, out, 0, NULL, NULL);
 }
 __attribute__((visibility("default")))
 void hirsel_llvm_library_v1(const uint8_t *ir, size_t len, const char *triple, const char *cpu,
                           HirselLlvmOutput *out, HirselLlvmOutput *raw, HirselLlvmImports *summary) {
-    HirselLlvmUnit unit = { ir, len, 0, 0 };
+    HirselLlvmUnit unit = { ir, len, 0, 0, NULL };
     emit_program(&unit, 1, NULL, 0, 1, triple, cpu, out, 0, raw, summary);
 }
 

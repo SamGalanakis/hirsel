@@ -407,6 +407,32 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         } else {
             self.temp(&self.abi.storage.clone())
         };
+        if !self.abi.indirect {
+            let storage = super::ir_type_text(&self.abi.storage);
+            let pointer = self.operand(&p);
+            let zero = sink::Value::Zero;
+            self.sink.instruction(None, sink::Operation::Store(storage.clone(), &zero, &pointer, &sink::Memory { align: 8, ..Default::default() }), self.debug_location);
+            let fields = self.abi.fields.clone(); let offsets = self.abi.offsets.clone();
+            for ((field, offset), value) in fields.iter().zip(&offsets).zip(values) {
+                let at = self.typed(sink::Operation::Gep(sink::Type::I8, &pointer, &[(sink::Type::I64, sink::Value::Integer(*offset as u128))]));
+                let field_value = self.operand(value);
+                self.sink.instruction(None, sink::Operation::Store(super::ir_type(*field), &field_value, &self.operand(&at), &sink::Memory { align: 1, ..Default::default() }), self.debug_location);
+            }
+            let mut aggregate = sink::Value::Poison;
+            let regs = self.abi.regs.clone();
+            for (index, reg) in regs.iter().enumerate() {
+                let at = self.typed(sink::Operation::Gep(sink::Type::I8, &pointer, &[(sink::Type::I64, sink::Value::Integer((index as u64 * self.abi.reg_stride) as u128))]));
+                let loaded = self.typed(sink::Operation::Load(super::ir_type_text(reg), &self.operand(&at), &sink::Memory { align: 1, ..Default::default() }));
+                let loaded_value = self.operand(&loaded);
+                aggregate = if index == 0 { loaded_value } else {
+                    let aggregate_type = super::ir_type_text(&self.abi.ty);
+                    let inserted = self.typed(sink::Operation::Insert(aggregate_type, &aggregate, super::ir_type_text(reg), &loaded_value, index as u32));
+                    self.operand(&inserted)
+                };
+            }
+            self.sink.instruction(None, sink::Operation::Return(super::ir_type_text(&self.abi.ty), Some(&aggregate)), self.debug_location);
+            return;
+        }
         // Padding is defined, so register coercions never observe poison.
         self.line(format!(
             "store {} zeroinitializer, ptr {p}, align 8",

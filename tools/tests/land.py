@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """tools/land against a scratch origin with fake Buck2 checks: a push rejected
 because main moved goes back to the rebase, and a red check refuses the push."""
+import argparse
 import ast
 import csv
 import fcntl
@@ -1561,4 +1562,8 @@ class CoreCostGuard(unittest.TestCase):
             self.assertEqual(commands, [])
 
 if __name__ == '__main__':
-    unittest.main()
+    # Land's Core suites pass --test-threads=1 to every suite; these tests already run one at a time.
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--test-threads', type=int, choices=[1], default=1)
+    parser.parse_args()
+    unittest.main(argv=[__file__])

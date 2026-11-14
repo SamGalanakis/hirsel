@@ -3508,7 +3508,10 @@ fn marked_scoped_parameters_use_value_and_declared_places() {
 
 #[test]
 fn isolate_and_code_describe_rules() {
-    let failures = run_case(&root().join("cases/body/callable-isolate-code.hirsel"));
+    let mut failures = run_case(&root().join("cases/body/callable-isolate-code.hirsel"));
+    failures.extend(run_case(
+        &root().join("cases/body/callable-code-describe.hirsel"),
+    ));
     assert!(failures.is_empty(), "{failures:?}");
 }
 

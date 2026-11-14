@@ -1,0 +1,24 @@
+// PROG-9 accepts only a top-level non-generic function name and preserves the
+// FunctionRef through the StaticFn value. The identity includes the full
+// signature but excludes parameter names.
+// expect: run describe_named() = 0
+fn named(a: u64)->u64 {a}
+fn other(b: u64)->u64 {b}
+fn describe_named()->u64 {
+ let s = code.describe(named)
+ let _ = code.identity(s)
+ let _ = code.identity(code.describe(other))
+ 0
+}
+// expect: refuse PROG-9 at 16:16
+fn describe_local()->u64 {
+ let local=fn()->u64{1}
+ code.describe(local)
+ 0
+}
+// expect: refuse PROG-9 at 21:44
+fn generic[T]()->u64 {0}
+fn describe_generic()->u64 { code.describe(generic); 0 }
+// expect: refuse PROG-9 at 23:57
+fn describe_parameter(f:fn()->u64)->u64 { code.describe(f); 0 }
+pub fn main()->Result[(),Exit] {Ok(())}

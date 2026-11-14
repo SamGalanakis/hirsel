@@ -843,7 +843,9 @@ impl Driver {
 }
 fn encode<T: Serialize>(value: &T) -> io::Result<Vec<u8>> {
     hirsel_core_front::cost_scope!("encoding", "canonical key encoding");
-    bincode::serialize(value).map_err(io::Error::other)
+    let mut bytes = Vec::with_capacity(64);
+    bincode::serialize_into(&mut bytes, value).map_err(io::Error::other)?;
+    Ok(bytes)
 }
 
 fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {

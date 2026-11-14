@@ -1539,3 +1539,31 @@ fn prog4_source_std_excludes_only_first_line_marked_contracts() {
             && product.index.module_path(r.primary.module).modules == ["probe"])
     );
 }
+
+#[test]
+fn canonical_driver_encoding_visits_the_value_once() {
+    struct Counted<'a>(&'a std::cell::Cell<usize>, &'a DefPath);
+    impl Serialize for Counted<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            self.0.set(self.0.get() + 1);
+            self.1.serialize(serializer)
+        }
+    }
+    let path = DefPath(hirsel_core_ids::ItemPath {
+        package: hirsel_core_ids::PackageId {
+            name: "package".repeat(20),
+            version: "1".into(),
+        },
+        modules: vec!["nested".repeat(20), "é\0".into()],
+        name: "value".repeat(20),
+    });
+    let visits = std::cell::Cell::new(0);
+    let encoded = encode(&Counted(&visits, &path)).unwrap();
+    assert_eq!(encoded, bincode::serialize(&path).unwrap());
+    assert_eq!(decode::<DefPath>(&encoded), Some(path));
+    assert_eq!(
+        visits.get(),
+        1,
+        "canonical encoding made a sizing traversal"
+    );
+}

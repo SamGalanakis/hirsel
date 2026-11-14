@@ -1,0 +1,121 @@
+// isolate catching a Fail(String) cause (spec-v1-880 m2b-findings v.hirsel, retry.hirsel).
+// Values and used bytes are derived in core/corpus/m2b/causes/SPEC.md.
+fn boom() -> u64 { fail(result.unwrap(string.from("busy"))) }
+fn first_is_fail(cs: Causes) -> bool {
+    for c in cs { return match c.kind { Fail(_) => true, _ => false } }
+    false
+}
+// drop the Causes without reading it
+pub fn case_drop() -> u64 {
+    match isolate(fn() -> u64 { boom() }) { Error(_) => 9, Ok(Ok(v)) => v, Ok(Error(_)) => 1 }
+}
+// read it once
+pub fn case_read() -> u64 {
+    match isolate(fn() -> u64 { boom() }) {
+        Error(_) => 9, Ok(Ok(v)) => v,
+        Ok(Error(take cs)) => if first_is_fail(cs) { 1 } else { 2 },
+    }
+}
+// two isolates in a row, dropping each
+pub fn case_twice() -> u64 {
+    let a = case_drop()
+    let b = case_drop()
+    a + b
+}
+
+// A retry policy over isolate's Causes: retry while the primary cause is Fail, stop on any other.
+fn attempt(n: u64) -> u64 {
+    if n < 2 {
+        fail(result.unwrap(string.from("busy")))
+    }
+    if n == 5 {
+        let none: Option[u64] = None
+        return option.unwrap(none)
+    }
+    n * 10
+}
+
+fn retryable(cs: Causes) -> bool {
+    for c in cs {
+        return match c.kind {
+            Fail(_) => true,
+            _ => false,
+        }
+    }
+    false
+}
+
+pub type Outcome = Done(u64) | GaveUp(u64) | Stopped(u64) | NoRoom
+
+fn with_retry(start: u64, limit: u64) -> Outcome {
+    let mut n = start
+    loop {
+        let caught = isolate(fn() -> u64 { attempt(n) })
+        match take caught {
+            Error(_) => return NoRoom,
+            Ok(Ok(v)) => return Done(v),
+            Ok(Error(take cs)) => {
+                if !retryable(cs) {
+                    return Stopped(n)
+                }
+                if n - start + 1 >= limit {
+                    return GaveUp(n)
+                }
+                n += 1
+            },
+        }
+    }
+}
+
+// retries 0 and 1 (Fail), then returns 20
+pub fn case_fail_then_ok() -> u64 {
+    match with_retry(0, 5) { Done(v) => v, GaveUp(n) => 1000 + n, Stopped(n) => 2000 + n, NoRoom => 9999 }
+}
+
+// 5 fails with Unwrap: not retried
+pub fn case_unwrap_stops() -> u64 {
+    match with_retry(5, 5) { Done(v) => v, GaveUp(n) => 1000 + n, Stopped(n) => 2000 + n, NoRoom => 9999 }
+}
+
+// limit 1: one Fail, then gives up
+pub fn case_gives_up() -> u64 {
+    match with_retry(0, 1) { Done(v) => v, GaveUp(n) => 1000 + n, Stopped(n) => 2000 + n, NoRoom => 9999 }
+}
+
+fn select(name: String) -> Option[u64] {
+    if name == "drop" {
+        Some(case_drop())
+    } else if name == "read" {
+        Some(case_read())
+    } else if name == "twice" {
+        Some(case_twice())
+    } else if name == "fail_then_ok" {
+        Some(case_fail_then_ok())
+    } else if name == "unwrap_stops" {
+        Some(case_unwrap_stops())
+    } else if name == "gives_up" {
+        Some(case_gives_up())
+    } else {
+        None
+    }
+}
+
+pub fn main(out: Stdout, argv: Args) -> Result[(), Exit] waits {
+    let Some(name) = args.get(argv, 0) else {
+        return Error(Exit(status: 2))
+    }
+    let Some(v) = select(name) else {
+        return Error(Exit(status: 2))
+    }
+    let mut s = string.new()
+    if let Error(_) = string.push_u64(mut s, v) {
+        return Error(Exit(status: 3))
+    }
+    if let Error(_) = string.push(mut s, "\n") {
+        return Error(Exit(status: 3))
+    }
+    match stdout.write(out, s) {
+        Ok(()) => Ok(()),
+        Error(_) => Error(Exit(status: 2)),
+    }
+}

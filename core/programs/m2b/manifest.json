@@ -32,6 +32,13 @@
       ]
     },
     {
+      "package": {"name": "causes", "version": "1"},
+      "dependencies": [{"name": "core", "version": "1"}, {"name": "std", "version": "1"}],
+      "sources": [
+        {"file": "core/programs/m2b/causes/main.hirsel", "modules": ["main"], "signatures": false}
+      ]
+    },
+    {
       "package": {"name": "failing", "version": "1"},
       "dependencies": [{"name": "core", "version": "1"}, {"name": "std", "version": "1"}, {"name": "m2b", "version": "1"}],
       "sources": [
@@ -79,6 +86,7 @@
     {"workload": "tx", "package": {"name": "tx", "version": "1"}, "module": "main"},
     {"workload": "replay", "package": {"name": "app", "version": "1"}, "module": "main", "grants": ["Clock"]},
     {"workload": "replay_fail", "package": {"name": "failing", "version": "1"}, "module": "main"},
+    {"workload": "causes", "package": {"name": "causes", "version": "1"}, "module": "main"},
     {"workload": "replay_static", "package": {"name": "static", "version": "1"}, "module": "main"},
     {"workload": "dispatch_server", "package": {"name": "server", "version": "1"}, "module": "main", "grants": ["Clock"], "dir": true},
     {"workload": "dispatch_server_changed", "package": {"name": "server", "version": "1"}, "module": "main", "grants": ["Clock"], "dir": true, "use": {"rpc": "rpc-changed"}, "role": true},

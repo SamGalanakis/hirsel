@@ -1111,6 +1111,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return None;
             }
             let address = self.address(AddressBase::Value(msg), &[], PlaceTy::Declared(id), n);
+            // The message moves into the cause: the raise's cleanup must not clean it too
+            // (that cleanup ran its storage's free twice, once here and once with the Causes).
+            self.consume(vals[0], n);
             let cleanup = self.fail_to(n);
             self.end(
                 Terminator::Raise {

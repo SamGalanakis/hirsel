@@ -80,10 +80,7 @@ impl OsProvider {
         } else {
             unsafe { std::slice::from_raw_parts(request.path, request.path_len) }
         };
-        if matches!(
-            request.operation,
-            OPEN | MKDIR | REMOVE | REMOVE_TREE | RENAME
-        ) {
+        if matches!(request.operation, OPEN | MKDIR | REMOVE | REMOVE_TREE) {
             valid_path(path)?;
         }
         match request.operation {

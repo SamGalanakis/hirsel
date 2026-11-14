@@ -36,9 +36,8 @@ fn body_identity(item: Item<'_>) -> ContentHash {
 
 fn header_identity(item: Item<'_>) -> ContentHash {
     let block_start = item.tree.children(item.root).iter().find_map(|&child| {
-            (item.tree.node(child).kind == NodeKind::Block).then_some(
-                item.tree.node(child).origin.span.start + item.file_offset,
-            )
+        (item.tree.node(child).kind == NodeKind::Block)
+            .then_some(item.tree.node(child).origin.span.start + item.file_offset)
     });
     let tokens = item
         .tree

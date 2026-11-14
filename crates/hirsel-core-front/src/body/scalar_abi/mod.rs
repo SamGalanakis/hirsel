@@ -408,20 +408,26 @@ fn convert(
     dest
 }
 
-/// A place whose whole value is one scalar a body reads by field 0 or whole: a value
-/// place, or a scalar record row. A variant carried as its word (FORM #78) is not one:
-/// its body reaches it by case.
+/// A place whose whole value is one scalar. A fieldless word variant's case
+/// operations become typed word reads/writes before its slot is promoted.
 fn place_scalar(module: &Module, place: PlaceTy) -> Option<Ty> {
     match place {
         PlaceTy::Value(t) => Some(t),
-        PlaceTy::Declared(row) => match &module.types[row.index()] {
-            hirsel_core_layout::Shape {
-                carried: Carried::Value(t),
-                body: hirsel_core_layout::Body::Record(_),
-                ..
-            } => Some(*t),
-            _ => None,
-        },
+        PlaceTy::Declared(row) => {
+            let shape = &module.types[row.index()];
+            let Carried::Value(t) = shape.carried else {
+                return None;
+            };
+            match &shape.body {
+                hirsel_core_layout::Body::Record(_) => Some(t),
+                hirsel_core_layout::Body::Variant(cases)
+                    if cases.iter().all(|c| c.fields.is_empty()) =>
+                {
+                    Some(t)
+                }
+                _ => None,
+            }
+        }
     }
 }
 fn width(t: Ty) -> u64 {

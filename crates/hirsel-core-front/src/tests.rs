@@ -2953,3 +2953,57 @@ fn guarded_prefix_checks_preserve_failure_order() {
     let failures = run_case(&root().join("cases/body/guarded-byte-prefix.hirsel"));
     assert!(failures.is_empty(), "{failures:#?}");
 }
+
+/// Fieldless word enums need no carrier slot when an indirect generic comparator
+/// returns one. The three ordinals are checked independently of its storage.
+#[test]
+fn generic_comparator_keeps_fieldless_order_in_values() {
+    use hirsel_core_ir::PlaceTy;
+    let source = r#"
+fn compare[T: plain](x: T, before: scoped fn(T) -> Order) -> u64 {
+    match before(x) { Less => 10u64, Equal => 20u64, Greater => 30u64 }
+}
+fn run() -> u64 {
+    let before: scoped fn(u64) -> Order = fn(x: u64) -> Order {
+        if x == 1 { Less } else if x == 2 { Equal } else { Greater }
+    }
+    compare(1u64, before) + compare(2u64, before) + compare(3u64, before)
+}
+"#;
+    let (index, modules) = program_inputs(source);
+    let program = Program::declare(&index, &modules);
+    assert!(program.refusals.is_empty() && program.gaps.is_empty());
+    let mut emitter = Emitter::new();
+    let mut root = None;
+    for (f, decl) in program.fns.iter().enumerate() {
+        if !decl.path.package_is("app", "1") {
+            continue;
+        }
+        let check = program.check_lower(f, &mut emitter);
+        assert!(
+            check.refusals.is_empty() && check.gaps.is_empty(),
+            "{check:?}"
+        );
+        if decl.path.0.name == "run" {
+            root = check.function;
+        }
+    }
+    emitter.materialize_instances().unwrap();
+    wf::module(&emitter.module).unwrap();
+    assert_eq!(
+        eval::run(&emitter.module, root.unwrap(), &[], 100_000).outcome,
+        eval::Outcome::Returned(vec![60])
+    );
+    let instance = emitter
+        .module
+        .functions
+        .iter()
+        .find(|f| {
+            let key = &emitter.module.instances[f.instance.index()];
+            key.definition.0.name == "compare" && key.types == ["u64"]
+        })
+        .unwrap();
+    assert!(!instance.body.as_ref().unwrap().slots.iter().any(|ty| matches!(ty,
+        PlaceTy::Declared(id) if emitter.module.types[id.index()].name == "core@1/core/Order"
+    )), "a word-carried comparator result stays in SSA");
+}

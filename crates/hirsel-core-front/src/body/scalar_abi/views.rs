@@ -38,6 +38,38 @@ pub(super) fn scalar_copies(module: &Module, recipes: &[Recipe], body: &mut Body
                     let value = c.load(from, t);
                     c.store(to, value);
                 }
+                Inst::Case { result, address }
+                    if let Some((ty, _)) =
+                        direct_word_tag(module, recipes, c.body.addresses[address.index()].ty) =>
+                {
+                    if ty == Ty::Scalar(Scalar::U32) {
+                        let at = c.field(address, ty);
+                        c.emit(Inst::Read {
+                            result,
+                            address: at,
+                            mode: ReadMode::Bits,
+                        });
+                    } else {
+                        let operand = c.load(address, ty);
+                        c.emit(Inst::Convert {
+                            result,
+                            flag: None,
+                            operand,
+                            mode: ConvertMode::Widen,
+                        });
+                    }
+                }
+                Inst::SetCase { address, case }
+                    if let Some((ty, tag)) =
+                        direct_word_tag(module, recipes, c.body.addresses[address.index()].ty) =>
+                {
+                    let value = c.value(ty);
+                    c.emit(Inst::Const {
+                        result: value,
+                        bits: hirsel_core_layout::case_word(&tag, case).unwrap(),
+                    });
+                    c.store(address, value);
+                }
                 Inst::Drop { ty, .. } if recipes[ty.index()].drop.is_none() => removed_drop = true,
                 _ => c.emit(old[i].clone()),
             }
@@ -277,4 +309,25 @@ pub(super) fn scalar_views(module: &Module, body: &mut Body, aliases: &mut Vec<V
     }
     c.body.insts = c.insts;
     c.body.inst_anchors = c.anchors;
+}
+
+/// Only the direct tag occupying the entire carrier can be read as its ordinal.
+/// A niche variant still goes through Case, including its dataful case.
+fn direct_word_tag(
+    module: &Module,
+    recipes: &[Recipe],
+    place: PlaceTy,
+) -> Option<(Ty, hirsel_core_layout::Tag)> {
+    let PlaceTy::Declared(row) = place else {
+        return None;
+    };
+    let ty = place_scalar(module, place)?;
+    let Layout::Fixed(fixed) = &recipes[row.index()].layout else {
+        return None;
+    };
+    let tag = fixed.tag?;
+    (tag.encoding == hirsel_core_layout::Encoding::Direct
+        && tag.offset == 0
+        && tag.width == width(ty))
+    .then_some((ty, tag))
 }

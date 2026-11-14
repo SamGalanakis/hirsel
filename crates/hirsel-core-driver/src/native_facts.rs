@@ -5,10 +5,9 @@ use hirsel_core_ir::{
     Module,
     roles::{BodyFacts, FACTS_SCHEMA, Facts},
 };
-use serde::{Deserialize, Serialize};
 use std::io;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) struct ProgramFacts {
     pub facts: Vec<Facts>,
     pub consumed: Vec<Vec<BodyFacts>>,
@@ -36,9 +35,15 @@ pub(crate) fn get(
     let selection = format!("facts-{}", native::selection(key));
     if let Some(identity) = store.selection(&selection)?
         && let Some(bytes) = store.get(identity)?
-        && let Some(facts) = decode(&bytes)
+        && let Some(consumed) = decode::<Vec<Vec<BodyFacts>>>(&bytes)
+        && consumed.len() == modules.len()
+        && let Some(facts) = modules
+            .iter()
+            .zip(&consumed)
+            .map(|(module, rows)| Facts::restore(module, rows))
+            .collect::<Option<Vec<_>>>()
     {
-        return Ok(facts);
+        return Ok(ProgramFacts { facts, consumed });
     }
     let facts = Facts::program(modules, recorded);
     let consumed = modules
@@ -47,7 +52,7 @@ pub(crate) fn get(
         .map(|(module, facts)| facts.consumed(module))
         .collect();
     let result = ProgramFacts { facts, consumed };
-    let identity = store.put(&encode(&result)?)?;
+    let identity = store.put(&encode(&result.consumed)?)?;
     store.select(&selection, identity)?;
     Ok(result)
 }
@@ -61,9 +66,9 @@ mod tests {
         let body = if caller {
             "call f1 g0 (&a0)"
         } else if escape {
-            "call f2 g0 (&a0)"
+            "call f3 g0 (&a0)"
         } else {
-            ""
+            "call f2 g0 (&a0)"
         };
         let definition = |i| {
             format!(
@@ -92,10 +97,12 @@ mod tests {
  sig g0 = (&mut t0) -> ()
  inst n0 = app@1/caller [] []
  inst n1 = lib@1/leaf [] []
- inst n2 = lib@1/opaque [] []
+ inst n2 = core@1/string/truncate [] []
+ inst n3 = core@1/string/push [] []
  {caller_fn}
  {leaf_fn}
  fn f2 = n2 g0 extern
+ fn f3 = n3 g0 extern
  "#
         ))
         .unwrap()
@@ -115,6 +122,33 @@ mod tests {
             recorded,
         )
     }
+    // These are the published first-parameter facts of string.truncate from
+    // library-lend-facts.hirsel. The fixture projects that carrier-lending
+    // graph onto its relevant parameter; string.push has no held core body.
+    fn core_facts() -> Vec<BodyFacts> {
+        vec![BodyFacts {
+            code: hirsel_core_ir::InstanceKey {
+                definition: DefPath::from_full("core@1/string/truncate").unwrap(),
+                types: vec![],
+                dictionaries: vec![],
+            }
+            .digest(),
+            params: vec![hirsel_core_ir::roles::ParamFacts {
+                sealed: false,
+                place_blind: true,
+            }],
+        }]
+    }
+    fn recorded_ids(rows: &[BodyFacts]) -> Vec<ContentHash> {
+        vec![ContentHash::of_bytes(&encode(&rows).unwrap())]
+    }
+    fn assert_same(actual: &ProgramFacts, expected: &ProgramFacts) {
+        assert_eq!(actual, expected);
+        assert_eq!(
+            encode(&actual.consumed).unwrap(),
+            encode(&expected.consumed).unwrap()
+        );
+    }
     fn fresh(modules: &[&Module], recorded: &[BodyFacts]) -> ProgramFacts {
         let facts = Facts::program(modules, recorded);
         let consumed = modules
@@ -131,16 +165,11 @@ mod tests {
         let caller = module(true, false);
         let leaf = module(false, false);
         let modules = [&caller, &leaf];
-        let key = key(&identities(&modules), &[]).unwrap();
-        let expected = encode(&fresh(&modules, &[])).unwrap();
-        assert_eq!(
-            encode(&get(&store, key, &modules, &[]).unwrap()).unwrap(),
-            expected
-        );
-        assert_eq!(
-            encode(&get(&store, key, &modules, &[]).unwrap()).unwrap(),
-            expected
-        );
+        let recorded = core_facts();
+        let key = key(&identities(&modules), &recorded_ids(&recorded)).unwrap();
+        let expected = fresh(&modules, &recorded);
+        assert_same(&get(&store, key, &modules, &recorded).unwrap(), &expected);
+        assert_same(&get(&store, key, &modules, &recorded).unwrap(), &expected);
     }
     #[test]
     fn callee_body_identity_invalidates_callers_fixed_point() {
@@ -151,14 +180,18 @@ mod tests {
         let escaping = module(false, true);
         let before = [&caller, &blind];
         let after = [&caller, &escaping];
-        let a = key(&identities(&before), &[]).unwrap();
-        let b = key(&identities(&after), &[]).unwrap();
-        assert_ne!(a, b);
-        let a = get(&store, a, &before, &[]).unwrap();
-        let b = get(&store, b, &after, &[]).unwrap();
+        let recorded = core_facts();
+        let a = key(&identities(&before), &recorded_ids(&recorded)).unwrap();
+        let b = key(&identities(&after), &recorded_ids(&recorded)).unwrap();
+        let keys = (a, b);
+        let a = get(&store, a, &before, &recorded).unwrap();
+        let b = get(&store, b, &after, &recorded).unwrap();
+        assert!(!a.facts[0].sealed(FuncId(0), 0));
         assert!(a.facts[0].place_blind(FuncId(0), 0));
+        assert!(!b.facts[0].sealed(FuncId(0), 0));
         assert!(!b.facts[0].place_blind(FuncId(0), 0));
-        assert_eq!(encode(&b).unwrap(), encode(&fresh(&after, &[])).unwrap());
+        assert_same(&b, &fresh(&after, &recorded));
+        assert_ne!(keys.0, keys.1);
     }
     #[test]
     fn recorded_summary_identity_changes_consumed_declaration_facts() {
@@ -167,8 +200,14 @@ mod tests {
         let caller = module(true, false);
         let blind = module(false, false);
         let escaping = module(false, true);
-        let a = Facts::new(&blind).record(&blind);
-        let b = Facts::new(&escaping).record(&escaping);
+        let a = Facts::program(&[&blind], &core_facts())
+            .pop()
+            .unwrap()
+            .record(&blind);
+        let b = Facts::program(&[&escaping], &core_facts())
+            .pop()
+            .unwrap()
+            .record(&escaping);
         let modules = [&caller];
         let a_key = key(
             &identities(&modules),
@@ -180,11 +219,13 @@ mod tests {
             &[ContentHash::of_bytes(&encode(&b).unwrap())],
         )
         .unwrap();
-        assert_ne!(a_key, b_key);
         let a = get(&store, a_key, &modules, &a).unwrap();
         let b = get(&store, b_key, &modules, &b).unwrap();
+        assert!(!a.facts[0].sealed(FuncId(0), 0));
         assert!(a.facts[0].place_blind(FuncId(0), 0));
+        assert!(!b.facts[0].sealed(FuncId(0), 0));
         assert!(!b.facts[0].place_blind(FuncId(0), 0));
         assert_ne!(encode(&a.consumed).unwrap(), encode(&b.consumed).unwrap());
+        assert_ne!(a_key, b_key);
     }
 }

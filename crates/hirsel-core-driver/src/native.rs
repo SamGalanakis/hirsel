@@ -704,6 +704,7 @@ b0:
     include!("clone_native.rs");
     include!("record_native.rs");
     include!("source_sites_native.rs");
+    include!("facts_native.rs");
 
     fn run_clean(binary: &Path, exit: i32) {
         let result = Command::new(binary).output().unwrap();

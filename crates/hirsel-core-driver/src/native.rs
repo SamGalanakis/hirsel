@@ -577,7 +577,7 @@ fn link(
     .map(|n| read_input(&options.include.join(n)))
     .into_iter()
     .collect::<io::Result<Vec<_>>>()?;
-    let recipe = crate::tool_inputs::link_recipe(&options.cc, &options.target, &options.runtime)
+    let recipe = crate::tool_inputs::link_recipe(&options.cc, &options.target)
         .map_err(|error| NativeStop::Link(format!("direct link refused: {error}")))?;
     // Development links use lld's cheap string-merging mode. Release keeps
     // the linker default; this spelling is part of the executable key below.
@@ -647,12 +647,8 @@ fn link(
         let mut recipe = recipe;
         let mut missing = crate::tool_inputs::missing_recipe_inputs(&recipe);
         if !missing.is_empty() {
-            recipe = crate::tool_inputs::recapture_link_recipe(
-                &options.cc,
-                &options.target,
-                &options.runtime,
-            )
-            .map_err(|error| NativeStop::Link(format!("direct link refused: {error}")))?;
+            recipe = crate::tool_inputs::recapture_link_recipe(&options.cc, &options.target)
+                .map_err(|error| NativeStop::Link(format!("direct link refused: {error}")))?;
             missing = crate::tool_inputs::missing_recipe_inputs(&recipe);
         }
         if !missing.is_empty() {
@@ -676,12 +672,8 @@ fn link(
             if missing.is_empty() {
                 return Err(first);
             }
-            let refreshed = crate::tool_inputs::recapture_link_recipe(
-                &options.cc,
-                &options.target,
-                &options.runtime,
-            )
-            .map_err(|error| NativeStop::Link(format!("direct link refused: {error}")))?;
+            let refreshed = crate::tool_inputs::recapture_link_recipe(&options.cc, &options.target)
+                .map_err(|error| NativeStop::Link(format!("direct link refused: {error}")))?;
             let remaining = crate::tool_inputs::missing_recipe_inputs(&refreshed);
             if !remaining.is_empty() {
                 return Err(NativeStop::Link(format!(

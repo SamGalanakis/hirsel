@@ -1,874 +1,605 @@
-//! Streaming NoFolder sink. Values are typed local identities or constants;
-//! resolving a forward local always uses the builder's current binding.
+//! The product sink: each item and instruction becomes the LLVM object the
+//! assembly parser would build for the text producer's line, in the same
+//! order. Forward locals are typed placeholders replaced at their definition.
 use super::*;
-use crate::construction as llvm;
+use crate::construction::{self as llvm, Api, Output, Raw};
 use std::collections::HashMap;
+use std::rc::Rc;
 
-pub(crate) struct NativeSink<'c> {
-    pub unit: llvm::Unit<'c>,
-    types: HashMap<Type, llvm::Type<'c>>,
-    blocks: HashMap<String, llvm::Block<'c>>,
-    functions: HashMap<String, Signature>,
-    globals: HashMap<String, Type>,
-    scratch: HashMap<(u8, usize), Local>,
-    pending_switch: Option<(Type, Value, String, Vec<(u64, String)>)>,
+const RETURN: u32 = 0;
+const FUNCTION: u32 = u32::MAX;
+const ZEXT: u32 = 0;
+const SEXT: u32 = 1;
+const NOALIAS: u32 = 2;
+const READONLY: u32 = 3;
+const SRET: u32 = 4;
+const BYVAL: u32 = 5;
+const ALWAYS_INLINE: u32 = 6;
+const NO_INLINE: u32 = 7;
+const COLD: u32 = 8;
+const NONNULL: u32 = 9;
+const NOUNWIND: u32 = 10;
+const ALIGN: u32 = 11;
+const ARGMEM_READ: u32 = 12;
+const ALIAS_SCOPE: u32 = 0;
+const NOALIAS_SCOPE: u32 = 1;
+const INVARIANT: u32 = 2;
+const PROF: u32 = 3;
+
+pub(crate) struct NativeSink {
+    context: Rc<llvm::Context>,
+    api: &'static Api,
+    unit: Raw,
+    types: HashMap<Type, Raw>,
+    locals: HashMap<Local, Raw>,
+    pending: HashMap<Local, Raw>,
+    blocks: HashMap<Label, Raw>,
+    name: String,
 }
-fn local(name: Local) -> llvm::Local {
-    let (kind, index) = match name {
-        Local::Temp(i) => (0, i),
-        Local::Value(i) => (1, i),
-        Local::Address(i) => (2, i),
-        Local::Slot(i) => (3, i),
-        Local::Param(i) => (4, i),
-        Local::Context => (5, 0),
-        Local::Destination => (6, 0),
-        Local::CallerSite => (7, 0),
-        Local::Result => (8, 0),
-        Local::Sret => (9, 0),
-        Local::Payload => (10, 0),
-        Local::Input => (11, 0),
-        Local::Worklist => (12, 0),
-    };
-    llvm::Local { kind, index }
-}
-fn name_key(name: Local) -> Option<(u8, usize)> {
-    match name {
-        Local::Temp(i) => Some((0, i)),
-        Local::Value(i) => Some((1, i)),
-        Local::Address(i) => Some((2, i)),
-        Local::Slot(i) => Some((3, i)),
-        _ => None,
-    }
-}
-impl<'c> NativeSink<'c> {
-    pub fn new(unit: llvm::Unit<'c>) -> Self {
-        Self {
-            unit,
-            types: HashMap::new(),
-            blocks: HashMap::new(),
-            functions: HashMap::new(),
-            globals: HashMap::new(),
-            scratch: HashMap::new(),
-            pending_switch: None,
+impl Drop for NativeSink {
+    fn drop(&mut self) {
+        if !self.unit.is_null() {
+            // SAFETY: the sink exclusively owns its unit until `finish`.
+            unsafe { (self.api.unit_drop)(self.unit) }
         }
     }
-    pub fn print(&self) -> Result<String, String> {
-        self.unit.print()
+}
+impl NativeSink {
+    pub fn new(context: Rc<llvm::Context>) -> Self {
+        Self {
+            api: context.api,
+            unit: context.unit(),
+            context,
+            types: HashMap::new(),
+            locals: HashMap::new(),
+            pending: HashMap::new(),
+            blocks: HashMap::new(),
+            name: String::new(),
+        }
     }
-    pub fn bitcode(&self) -> Result<Vec<u8>, String> {
-        self.unit.bitcode()
+    /// The finished module, or the first global referenced but never defined.
+    pub fn finish(mut self) -> std::result::Result<llvm::NativeModule, String> {
+        let unit = std::mem::replace(&mut self.unit, std::ptr::null_mut());
+        let mut out = Output::default();
+        // SAFETY: `take` consumes the unit whether or not it succeeds.
+        let module = unsafe { (self.api.unit_take)(unit, &mut out) };
+        llvm::output(out)?;
+        Ok(llvm::NativeModule::new(self.context.clone(), module))
     }
-    pub fn take(
-        self,
-        context: std::rc::Rc<crate::construction::Context>,
-    ) -> crate::construction::NativeModule {
-        crate::construction::NativeModule::new(context, self.unit.take())
+    pub fn print(&self) -> std::result::Result<String, String> {
+        let mut out = Output::default();
+        // SAFETY: the live unit owns its module through the synchronous print.
+        unsafe { (self.api.print)(self.unit, &mut out) };
+        llvm::output(out)
     }
-    fn ty(&mut self, ty: &Type) -> llvm::Type<'c> {
+    pub fn bitcode(&self) -> Vec<u8> {
+        let mut out = Output::default();
+        // SAFETY: the live unit owns its module through the synchronous write.
+        unsafe { (self.api.unit_bitcode)(self.unit, &mut out) };
+        llvm::output_bytes(out).0
+    }
+    fn ty(&mut self, ty: &Type) -> Raw {
         if let Some(&t) = self.types.get(ty) {
             return t;
         }
-        let t = match ty {
-            Type::Void => self.unit.void_type(),
-            Type::Int(bits) => self.unit.integer_type(*bits),
-            Type::Float => self.unit.float_type(32),
-            Type::Double => self.unit.float_type(64),
-            Type::Ptr => self.unit.pointer_type(),
-            Type::Array(count, element) => {
-                let element = self.ty(element);
-                self.unit.array_type(element, *count)
-            }
-            Type::Vector(count, element) => {
-                let element = self.ty(element);
-                self.unit.vector_type(element, *count)
-            }
-            Type::Struct(fields, packed) => {
-                let fields: Vec<_> = fields.iter().map(|f| self.ty(f)).collect();
-                if *packed {
-                    self.unit.packed_struct_type(&fields)
-                } else {
-                    self.unit.struct_type(&fields)
+        let (api, u) = (self.api, self.unit);
+        // SAFETY (this block): type handles belong to the unit's live context;
+        // field arrays outlive each synchronous call.
+        let t = unsafe {
+            match ty {
+                Type::Void => (api.void_type)(u),
+                Type::Int(bits) => (api.integer_type)(u, *bits),
+                Type::Float => (api.float_type)(u, 32),
+                Type::Double => (api.float_type)(u, 64),
+                Type::Ptr => (api.pointer_type)(u),
+                Type::Metadata => (api.metadata_type)(u),
+                Type::Array(count, element) => {
+                    let element = self.ty(element);
+                    (api.array_type)(element, *count)
+                }
+                Type::Vector(count, element) => {
+                    let element = self.ty(element);
+                    (api.vector_type)(element, *count)
+                }
+                Type::Struct(fields, packed) => {
+                    let fields: Vec<_> = fields.iter().map(|f| self.ty(f)).collect();
+                    (api.struct_type)(u, fields.as_ptr(), fields.len(), u8::from(*packed))
                 }
             }
         };
         self.types.insert(ty.clone(), t);
         t
     }
-    pub fn register_function(&mut self, name: &str, signature: &Signature) {
-        self.functions.insert(name.into(), signature.clone());
+    fn integer(&mut self, ty: &Type, n: i128) -> Raw {
+        let t = self.ty(ty);
+        let bits = n as u128;
+        // SAFETY: an integer constant of a live integer type.
+        unsafe { (self.api.integer)(t, bits as u64, (bits >> 64) as u64) }
     }
-    pub fn register_global(&mut self, name: &str, ty: &Type) {
-        self.globals.insert(name.into(), ty.clone());
+    fn global_ref(&mut self, name: &str) -> Raw {
+        // SAFETY: the name is borrowed through the synchronous lookup.
+        unsafe { (self.api.global_ref)(self.unit, name.as_ptr().cast(), name.len()) }
     }
-    pub fn register_static(&mut self, name: &str, bytes: &[u8], align: u32) {
-        let i8 = self.unit.integer_type(8);
-        let ty = self.unit.array_type(i8, bytes.len() as u64);
-        let values: Vec<_> = bytes
-            .iter()
-            .map(|byte| self.unit.integer(i8, u128::from(*byte)))
-            .collect();
-        let initializer = self.unit.constant_array(i8, &values);
-        let global = self.unit.global(name, ty);
-        self.unit
-            .initialize_global(global, Some(initializer), 2, true, false, align);
-        self.globals.insert(
-            name.into(),
-            Type::Array(bytes.len() as u64, Box::new(Type::I8)),
-        );
+    fn local(&mut self, local: Local, ty: &Type) -> Raw {
+        if let Some(&v) = self.locals.get(&local) {
+            return v;
+        }
+        if let Some(&v) = self.pending.get(&local) {
+            return v;
+        }
+        let t = self.ty(ty);
+        // SAFETY: a detached typed placeholder, replaced at the definition.
+        let v = unsafe { (self.api.placeholder)(t) };
+        self.pending.insert(local, v);
+        v
     }
-    pub fn module_text(&mut self, text: &str) {
-        let text = text.trim();
-        if !text.starts_with('@') || !text.contains(" = private") {
-            return;
+    fn define(&mut self, local: Local, value: Raw) {
+        self.name.clear();
+        local.write_name(&mut self.name).unwrap();
+        // SAFETY: naming and replacing values of this unit's current function.
+        unsafe {
+            (self.api.set_name)(value, self.name.as_ptr().cast(), self.name.len());
+            if let Some(pending) = self.pending.remove(&local) {
+                (self.api.replace)(pending, value);
+            }
         }
-        let Some((name, body)) = text.split_once(" = private") else {
-            return;
-        };
-        if !name.starts_with("@hirsel_cause_") || !body.contains("constant") {
-            return;
-        }
-        let numbers = body
-            .split("i64 ")
-            .skip(1)
-            .filter_map(|value| {
-                value
-                    .split(|c: char| !c.is_ascii_digit())
-                    .next()?
-                    .parse()
-                    .ok()
-            })
-            .collect::<Vec<u64>>();
-        if numbers.len() < 2 {
-            return;
-        }
-        let i8 = self.unit.integer_type(8);
-        let i64 = self.unit.integer_type(64);
-        let bytes = self
-            .unit
-            .array_type(i8, crate::core::memory_layout::CAUSE_KIND as u64);
-        let fields = self.unit.struct_type(&[bytes, i64, i64]);
-        let zero_bytes = self.unit.zero(bytes);
-        let kind = self.unit.integer(i64, numbers[0] as u128);
-        let site = self.unit.integer(i64, numbers[1] as u128);
-        let initializer = self.unit.constant_struct(&[zero_bytes, kind, site], false);
-        let global_name = name.trim_start_matches('@');
-        let global = self.unit.global(global_name, fields);
-        self.unit
-            .initialize_global(global, Some(initializer), 2, true, false, 8);
-        if let Some((prefix, _)) = global_name.rsplit_once('_') {
-            for number in numbers {
-                let alias = format!("{prefix}_{number}");
-                if alias != global_name {
-                    let alias_global = self.unit.global(&alias, fields);
-                    self.unit
-                        .initialize_global(alias_global, Some(initializer), 2, true, false, 8);
+        let previous = self.locals.insert(local, value);
+        debug_assert!(previous.is_none(), "{local} is defined twice");
+    }
+    fn value(&mut self, value: &Value, ty: &Type) -> Raw {
+        let api = self.api;
+        // SAFETY (this block): constants of live types and globals of this unit.
+        unsafe {
+            match value {
+                Value::Local(local) => self.local(*local, ty),
+                Value::Int(n) => self.integer(ty, *n),
+                Value::Bool(b) => self.integer(&Type::I1, i128::from(*b)),
+                Value::Null | Value::Zero => (api.zero)(self.ty(ty)),
+                Value::Poison => (api.poison)(self.ty(ty)),
+                Value::Global(name) => self.global_ref(name),
+                Value::Bitcast { from, bits, to } => {
+                    let bits = self.integer(from, i128::from(*bits));
+                    (api.constant_cast)(Cast::Bitcast as u32, bits, self.ty(to))
+                }
+                Value::IntToPtr(bits) => {
+                    let bits = self.integer(&Type::I64, i128::from(*bits));
+                    (api.constant_cast)(Cast::IntToPtr as u32, bits, self.ty(&Type::Ptr))
+                }
+                Value::PtrToInt(name) => {
+                    let global = self.global_ref(name);
+                    (api.constant_cast)(Cast::PtrToInt as u32, global, self.ty(&Type::I64))
+                }
+                Value::Add(left, right) => {
+                    let left = self.value(left, &Type::I64);
+                    let right = self.integer(&Type::I64, i128::from(*right));
+                    (api.constant_add)(left, right)
+                }
+                Value::Struct { packed, fields } => {
+                    let fields: Vec<_> = fields.iter().map(|(t, v)| self.value(v, t)).collect();
+                    (api.constant_struct)(self.unit, fields.as_ptr(), fields.len(), u8::from(*packed))
+                }
+                Value::Bytes(bytes) => (api.constant_bytes)(self.unit, bytes.as_ptr(), bytes.len()),
+                Value::Metadata(ids) => {
+                    let tuple = self.scope_list(ids);
+                    (api.metadata_value)(self.unit, tuple)
                 }
             }
         }
     }
-    fn cause_global(&mut self, name: &str) -> llvm::Value<'c> {
-        let i8 = self.unit.integer_type(8);
-        let i64 = self.unit.integer_type(64);
-        let bytes = self
-            .unit
-            .array_type(i8, crate::core::memory_layout::CAUSE_KIND as u64);
-        let fields = self.unit.struct_type(&[bytes, i64, i64]);
-        let zero_bytes = self.unit.zero(bytes);
-        let zero_kind = self.unit.zero(i64);
-        let zero_site = self.unit.zero(i64);
-        let initializer = self
-            .unit
-            .constant_struct(&[zero_bytes, zero_kind, zero_site], false);
-        let global = self.unit.global(name, fields);
-        self.unit
-            .initialize_global(global, Some(initializer), 2, true, false, 8);
-        global
-    }
-    fn function(&mut self, name: &str, sig: &Signature) -> llvm::Value<'c> {
-        let result = self.ty(&sig.result);
-        let params: Vec<_> = sig.params.iter().map(|p| self.ty(&p.ty)).collect();
-        self.unit.function(name, result, &params)
-    }
-    pub fn begin_function(
-        &mut self,
-        name: &str,
-        sig: &Signature,
-        params: &[Local],
-        internal: bool,
-    ) {
-        self.functions.insert(name.into(), sig.clone());
-        let f = self.function(name, sig);
-        self.signature_attributes(f, sig);
-        self.unit.define(f, internal);
-        self.blocks.clear();
-        for (i, &name) in params.iter().enumerate() {
-            let p = self.unit.parameter(f, i as u32, local(name));
-            self.unit.bind(local(name), p);
+    fn block_ref(&mut self, label: Label) -> Raw {
+        if let Some(&b) = self.blocks.get(&label) {
+            return b;
         }
+        self.name.clear();
+        label.write_name(&mut self.name).unwrap();
+        // SAFETY: a detached block, placed when the producer begins it.
+        let b = unsafe { (self.api.block)(self.unit, self.name.as_ptr().cast(), self.name.len()) };
+        self.blocks.insert(label, b);
+        b
     }
-    fn value(&mut self, value: &Value, ty: &Type) -> llvm::Value<'c> {
-        let raw = self.ty(ty);
-        match value {
-            Value::Local(name) => {
-                let name = if matches!(ty, Type::Ptr) {
-                    name_key(*name)
-                        .and_then(|key| self.scratch.get(&key).copied())
-                        .unwrap_or(*name)
-                } else {
-                    *name
-                };
-                self.unit.local(raw, local(name))
-            }
-            Value::Integer(bits) => self.unit.integer(raw, *bits),
-            Value::Boolean(b) => self.unit.integer(raw, u128::from(*b)),
-            Value::Null | Value::Zero => self.unit.zero(raw),
-            Value::Poison => self.unit.poison(raw),
-            Value::Global(name) => {
-                if name.starts_with("hirsel_cause_") {
-                    return self.cause_global(name);
-                }
-                if let Some(sig) = self.functions.get(name).cloned() {
-                    self.function(name, &sig)
-                } else {
-                    let t = self.globals.get(name).cloned().unwrap_or(Type::Ptr);
-                    let t = self.ty(&t);
-                    self.unit.global(name, t)
-                }
-            }
-            Value::Bitcast { from, bits, to } => {
-                let from = self.ty(from);
-                let to = self.ty(to);
-                let v = self.unit.integer(from, *bits);
-                self.unit.constant_cast(Cast::Bitcast as u32, v, to)
-            }
-            Value::IntToPtr(bits) => {
-                let int = self.ty(&Type::I64);
-                let v = self.unit.integer(int, u128::from(*bits));
-                self.unit.constant_cast(Cast::IntToPtr as u32, v, raw)
-            }
-            Value::PtrToInt(name) => {
-                let v = self.value(&Value::Global(name.clone()), &Type::Ptr);
-                self.unit.constant_cast(Cast::PtrToInt as u32, v, raw)
-            }
-            Value::Add(left, right) => {
-                let left = self.value(left, ty);
-                let right = self.unit.integer(raw, u128::from(*right));
-                self.unit.constant_add(left, right)
-            }
-        }
+    fn md(&mut self, id: usize) -> Raw {
+        // SAFETY: the unit's node for this producer identifier.
+        unsafe { (self.api.metadata_ref)(self.unit, id) }
     }
-    fn block_ref(&mut self, name: &str) -> llvm::Block<'c> {
-        *self
-            .blocks
-            .entry(name.into())
-            .or_insert_with(|| self.unit.block(name))
+    fn scope_list(&mut self, ids: &[usize]) -> Raw {
+        let nodes: Vec<_> = ids.iter().map(|&id| self.md(id)).collect();
+        // SAFETY: a uniqued tuple of this unit's nodes.
+        unsafe { (self.api.metadata_tuple)(self.unit, nodes.as_ptr(), nodes.len(), 0) }
     }
-    fn extension(&mut self, value: llvm::Value<'c>, index: u32, extension: Extension) {
+    fn attribute(&mut self, target: Raw, index: u32, kind: u32, ty: Option<&Type>, n: u64) {
+        let ty = ty.map_or(std::ptr::null_mut(), |t| self.ty(t));
+        // SAFETY: an attribute of this unit's function or call.
+        unsafe { (self.api.attribute)(self.unit, target, index, kind, ty, n) }
+    }
+    fn extension(&mut self, target: Raw, index: u32, extension: Extension) {
         match extension {
             Extension::None => {}
-            Extension::Zero => self.unit.attribute(value, index, 0, None),
-            Extension::Sign => self.unit.attribute(value, index, 1, None),
+            Extension::Zero => self.attribute(target, index, ZEXT, None, 0),
+            Extension::Sign => self.attribute(target, index, SEXT, None, 0),
         }
     }
-    fn signature_attributes(&mut self, value: llvm::Value<'c>, sig: &Signature) {
-        self.extension(value, 0, sig.extension);
+    fn signature_attributes(&mut self, target: Raw, sig: &Signature) {
+        self.extension(target, RETURN, sig.extension);
+        if sig.nonnull {
+            self.attribute(target, RETURN, NONNULL, None, 0);
+        }
         for (i, p) in sig.params.iter().enumerate() {
             let index = i as u32 + 1;
-            self.extension(value, index, p.extension);
+            self.extension(target, index, p.extension);
             if p.noalias {
-                self.unit.attribute(value, index, 2, None);
+                self.attribute(target, index, NOALIAS, None, 0);
             }
             if p.readonly {
-                self.unit.attribute(value, index, 3, None);
+                self.attribute(target, index, READONLY, None, 0);
             }
             if let Some(t) = &p.sret {
-                let t = self.ty(t);
-                self.unit.attribute(value, index, 4, Some(t));
+                self.attribute(target, index, SRET, Some(t), 0);
             }
             if let Some(t) = &p.byval {
-                let t = self.ty(t);
-                self.unit.attribute(value, index, 5, Some(t));
+                self.attribute(target, index, BYVAL, Some(t), 0);
+            }
+            if p.align != 0 {
+                self.attribute(target, index, ALIGN, None, u64::from(p.align));
             }
         }
     }
-    fn scopes(&mut self, value: llvm::Value<'c>, name: &str, ids: &[usize]) {
-        if ids.is_empty() {
-            return;
+    fn function(&mut self, name: &str, sig: &Signature, attrs: &FnAttrs) -> Raw {
+        let result = self.ty(&sig.result);
+        let params: Vec<_> = sig.params.iter().map(|p| self.ty(&p.ty)).collect();
+        // SAFETY: a new function of this unit; arrays outlive the call.
+        let f = unsafe {
+            (self.api.function)(
+                self.unit,
+                name.as_ptr().cast(),
+                name.len(),
+                result,
+                params.as_ptr(),
+                params.len(),
+                attrs.linkage as u32,
+            )
+        };
+        self.signature_attributes(f, sig);
+        match attrs.inline {
+            Inline::Default => {}
+            Inline::Always => self.attribute(f, FUNCTION, ALWAYS_INLINE, None, 0),
+            Inline::Never => self.attribute(f, FUNCTION, NO_INLINE, None, 0),
         }
-        let refs: Vec<_> = ids.iter().map(|i| self.unit.metadata_ref(*i)).collect();
-        let tuple = self.unit.metadata_tuple(&refs, false);
-        self.unit.attach(value, name, tuple);
-    }
-    fn memory(&mut self, value: llvm::Value<'c>, memory: &Memory) {
-        if memory.invariant {
-            let empty = self.unit.metadata_tuple(&[], false);
-            self.unit.attach(value, "invariant.load", empty);
+        if attrs.nounwind {
+            self.attribute(f, FUNCTION, NOUNWIND, None, 0);
         }
-        self.scopes(value, "alias.scope", &memory.alias_scopes);
-        self.scopes(value, "noalias", &memory.noalias_scopes);
-    }
-
-    fn raw_type(text: &str) -> Type {
-        let text = text
-            .trim()
-            .trim_end_matches(" zeroext")
-            .trim_end_matches(" signext");
-        match text {
-            "void" => Type::Void,
-            "ptr" => Type::Ptr,
-            "float" => Type::Float,
-            "double" => Type::Double,
-            _ => text
-                .strip_prefix('i')
-                .and_then(|bits| bits.parse().ok())
-                .map_or(Type::Ptr, Type::Int),
+        if attrs.argmem_read {
+            self.attribute(f, FUNCTION, ARGMEM_READ, None, 0);
         }
+        let mut string = |key: &str, value: &str| {
+            // SAFETY: strings are borrowed through the synchronous call.
+            unsafe {
+                (self.api.string_attribute)(
+                    self.unit,
+                    f,
+                    key.as_ptr().cast(),
+                    key.len(),
+                    value.as_ptr().cast(),
+                    value.len(),
+                )
+            }
+        };
+        if let Some(bytes) = attrs.destination_size {
+            string("hirsel-destination-size", &bytes.to_string());
+        }
+        if attrs.view_input {
+            string("hirsel-view-input", "");
+        }
+        if let Some(scope) = attrs.subprogram {
+            let scope = self.md(scope);
+            // SAFETY: a subprogram node of this unit.
+            unsafe { (self.api.subprogram)(f, scope) }
+        }
+        f
     }
-    fn raw_local(text: &str) -> Option<Local> {
-        let text = text.trim().strip_prefix('%')?;
-        match text {
-            "context" => Some(Local::Context),
-            "dest" => Some(Local::Destination),
-            "caller_site" => Some(Local::CallerSite),
-            "result" => Some(Local::Result),
-            "sret" => Some(Local::Sret),
-            "payload" => Some(Local::Payload),
-            "input" => Some(Local::Input),
-            "worklist" => Some(Local::Worklist),
-            _ => {
-                let (kind, index) = text.split_at(1);
-                let index = index.parse().ok()?;
-                Some(match kind {
-                    "t" => Local::Temp(index),
-                    "v" => Local::Value(index),
-                    "a" => Local::Address(index),
-                    "s" => Local::Slot(index),
-                    "p" => Local::Param(index),
-                    _ => return None,
-                })
+    fn memory(&mut self, instruction: Raw, m: &Memory) {
+        if m.invariant {
+            let empty = self.md(1);
+            // SAFETY: metadata attachment on this unit's instruction.
+            unsafe { (self.api.attach)(self.unit, instruction, INVARIANT, empty) }
+        }
+        self.scopes(instruction, &m.scopes);
+    }
+    fn scopes(&mut self, instruction: Raw, scopes: &Option<Scoped>) {
+        if let Some(s) = scopes {
+            let alias = self.scope_list(&s.alias);
+            // SAFETY: metadata attachments on this unit's instruction.
+            unsafe { (self.api.attach)(self.unit, instruction, ALIAS_SCOPE, alias) };
+            if !s.noalias.is_empty() {
+                let noalias = self.scope_list(&s.noalias);
+                unsafe { (self.api.attach)(self.unit, instruction, NOALIAS_SCOPE, noalias) };
             }
         }
-    }
-    fn raw_value(text: &str) -> Value {
-        let text = text.trim().trim_end_matches(',');
-        if let Some(local) = Self::raw_local(text) {
-            return Value::Local(local);
-        }
-        match text {
-            "true" => Value::Boolean(true),
-            "false" => Value::Boolean(false),
-            "null" => Value::Null,
-            "poison" => Value::Poison,
-            "zeroinitializer" => Value::Zero,
-            _ if text.starts_with('@') => Value::Global(text[1..].to_owned()),
-            _ => text.parse::<i128>().map_or_else(
-                |_| Value::Global(text.to_owned()),
-                |n| Value::Integer(n as u128),
-            ),
-        }
-    }
-    fn raw_result(text: &str) -> Option<Local> {
-        text.split_once(" = ")
-            .and_then(|(name, _)| Self::raw_local(name))
-    }
-    fn raw_body<'a>(text: &'a str) -> &'a str {
-        text.split_once(" = ").map_or(text, |(_, body)| body)
     }
 }
-impl Sink for NativeSink<'_> {
-    fn raw_alloca(&mut self, text: &str) {
-        let text = text.trim();
-        let (name, body) = text
-            .split_once(" = alloca ")
-            .unwrap_or_else(|| panic!("native sink raw alloca unsupported: {text}"));
-        let local = Self::raw_local(name)
-            .unwrap_or_else(|| panic!("native sink raw alloca name unsupported: {name}"));
-        let mut parts = body.split(", align ");
-        let ty = Self::raw_type(parts.next().unwrap());
-        let align = parts
-            .next()
-            .and_then(|value| value.parse().ok())
-            .unwrap_or(0);
-        self.alloca(local, &ty, align);
+
+impl Sink for NativeSink {
+    fn global(&mut self, g: &Global) {
+        let ty = self.ty(&g.ty);
+        let init = g
+            .init
+            .as_ref()
+            .map_or(std::ptr::null_mut(), |v| self.value(v, &g.ty));
+        // SAFETY: the name is borrowed; handles belong to this unit.
+        unsafe {
+            (self.api.global)(
+                self.unit,
+                g.name.as_ptr().cast(),
+                g.name.len(),
+                ty,
+                init,
+                g.linkage as u32,
+                u8::from(g.constant),
+                u8::from(g.externally_initialized),
+                g.align,
+                u8::from(g.absolute_symbol),
+            )
+        }
     }
-    fn raw(&mut self, text: &str, location: Option<usize>) {
-        let text = text.trim();
-        if let Some((ty, value, default, arms)) = self.pending_switch.as_mut() {
-            if text == "]" {
-                let ty = ty.clone();
-                let value = value.clone();
-                let default = default.clone();
-                let arms = std::mem::take(arms);
-                self.pending_switch = None;
-                self.instruction(
-                    None,
-                    Operation::Switch(ty, &value, &default, &arms),
-                    location,
-                );
-                return;
-            }
-            if let Some((constant, block)) = text.split_once(", label %") {
-                let constant = constant
-                    .split_whitespace()
-                    .last()
-                    .and_then(|value| value.parse().ok())
-                    .unwrap_or(0);
-                arms.push((constant, block.to_owned()));
-                return;
-            }
-        }
-        let result = Self::raw_result(text);
-        let body = Self::raw_body(text);
-        if let Some(rest) = body.strip_prefix("select i1 ") {
-            let parts: Vec<_> = rest.split(", ").collect();
-            if parts.len() == 3 {
-                let (ty, yes) = parts[1].split_once(' ').unwrap();
-                let (_, no) = parts[2].split_once(' ').unwrap();
-                let condition = Self::raw_value(parts[0]);
-                let yes = Self::raw_value(yes);
-                let no = Self::raw_value(no);
-                self.instruction(
-                    result,
-                    Operation::Select(Self::raw_type(ty), &condition, &yes, &no),
-                    location,
-                );
-                return;
-            }
-        }
-        if let Some(rest) = body.strip_prefix("load ") {
-            let (ty, pointer) = rest
-                .split_once(", ptr ")
-                .unwrap_or_else(|| panic!("native sink raw load unsupported: {text}"));
-            let pointer = pointer
-                .split_once(", align ")
-                .map_or(pointer, |(value, _)| value);
-            let pointer = Self::raw_value(pointer);
-            self.instruction(
-                result,
-                Operation::Load(Self::raw_type(ty), &pointer, &Memory::default()),
-                location,
-            );
-            return;
-        }
-        if let Some(rest) = body.strip_prefix("getelementptr ") {
-            let parts: Vec<_> = rest.split(", ").collect();
-            if parts.len() >= 2 {
-                let element = Self::raw_type(parts[0]);
-                let (_, pointer) = parts[1].split_once(' ').unwrap();
-                let pointer = Self::raw_value(pointer);
-                let indices = parts[2..]
-                    .iter()
-                    .map(|part| {
-                        let (ty, value) = part.split_once(' ').unwrap();
-                        (Self::raw_type(ty), Self::raw_value(value))
-                    })
-                    .collect::<Vec<_>>();
-                self.instruction(
-                    result,
-                    Operation::Gep(element, &pointer, &indices),
-                    location,
-                );
-                return;
-            }
-        }
-        if let Some(rest) = body.strip_prefix("phi ") {
-            let (ty, incoming) = rest.split_once(' ').unwrap();
-            let incoming = incoming
-                .split("], [")
-                .map(|part| part.trim_matches(['[', ']']))
-                .map(|part| {
-                    let (value, block) = part.split_once(", %").unwrap();
-                    (Self::raw_value(value), block.to_owned())
-                })
-                .collect::<Vec<_>>();
-            self.instruction(
-                result,
-                Operation::Phi(Self::raw_type(ty), &incoming),
-                location,
-            );
-            return;
-        }
-        if let Some(rest) = body.strip_prefix("extractvalue ") {
-            let (ty, rest) = rest.split_once(' ').unwrap();
-            let (value, index) = rest.rsplit_once(", ").unwrap();
-            let index = index.parse().unwrap_or(0);
-            self.instruction(
-                result,
-                Operation::Extract(Self::raw_type(ty), &Self::raw_value(value), index),
-                location,
-            );
-            return;
-        }
-        if let Some(rest) = body.strip_prefix("insertvalue ") {
-            let (ty, rest) = rest.split_once(' ').unwrap();
-            let (aggregate, rest) = rest.split_once(", ").unwrap();
-            let (field, index) = rest.rsplit_once(", ").unwrap();
-            let (field_ty, field) = field.split_once(' ').unwrap();
-            let index = index.parse().unwrap_or(0);
-            let aggregate = Self::raw_value(aggregate);
-            let field = Self::raw_value(field);
-            self.instruction(
-                result,
-                Operation::Insert(
-                    Self::raw_type(ty),
-                    &aggregate,
-                    Self::raw_type(field_ty),
-                    &field,
-                    index,
-                ),
-                location,
-            );
-            return;
-        }
-        if let Some(value) = body.strip_prefix("fneg ") {
-            let (ty, value) = value.split_once(' ').unwrap();
-            self.instruction(
-                result,
-                Operation::FNeg(Self::raw_type(ty), &Self::raw_value(value)),
-                location,
-            );
-            return;
-        }
-        for (name, op) in [
-            ("add", Binary::Add),
-            ("sub", Binary::Sub),
-            ("mul", Binary::Mul),
-            ("udiv", Binary::UDiv),
-            ("sdiv", Binary::SDiv),
-            ("and", Binary::And),
-            ("or", Binary::Or),
-            ("xor", Binary::Xor),
-        ] {
-            if let Some(rest) = body.strip_prefix(&format!("{name} ")) {
-                let (ty, values) = rest.split_once(' ').unwrap();
-                let parts: Vec<_> = values.split(", ").collect();
-                if parts.len() == 2 {
-                    let left = Self::raw_value(parts[0]);
-                    let right = Self::raw_value(parts[1]);
-                    self.instruction(
-                        result,
-                        Operation::Binary(op, Self::raw_type(ty), &left, &right),
-                        location,
-                    );
-                    return;
+    fn declare(&mut self, name: &str, sig: &Signature, attrs: &FnAttrs) {
+        let f = self.function(name, sig, attrs);
+        // SAFETY: a function of this unit.
+        unsafe { (self.api.finish_declaration)(f) }
+    }
+    fn module_asm(&mut self, text: &str) {
+        // SAFETY: the text is borrowed through the synchronous append.
+        unsafe { (self.api.module_asm)(self.unit, text.as_ptr().cast(), text.len()) }
+    }
+    fn metadata(&mut self, id: usize, node: &Metadata) {
+        let (api, u) = (self.api, self.unit);
+        // SAFETY (this block): nodes of this unit; strings outlive each call.
+        let node = unsafe {
+            match node {
+                Metadata::Tuple { distinct, items } => {
+                    let items: Vec<_> = items
+                        .iter()
+                        .map(|item| match item {
+                            MdItem::Node(id) => self.md(*id),
+                            MdItem::String(s) => (api.metadata_string)(u, s.as_ptr().cast(), s.len()),
+                            MdItem::I32(n) => (api.metadata_integer)(u, 32, u64::from(*n)),
+                        })
+                        .collect();
+                    (api.metadata_tuple)(u, items.as_ptr(), items.len(), u8::from(*distinct))
+                }
+                Metadata::File { filename } => (api.di_file)(u, filename.as_ptr().cast(), filename.len()),
+                Metadata::CompileUnit { file } => {
+                    let file = self.md(*file);
+                    (api.di_compile_unit)(u, file)
+                }
+                Metadata::SubroutineType { types } => {
+                    let types = self.md(*types);
+                    (api.di_subroutine_type)(u, types)
+                }
+                Metadata::Subprogram {
+                    name,
+                    linkage,
+                    file,
+                    ty,
+                    unit,
+                } => {
+                    let (file, ty, unit) = (self.md(*file), self.md(*ty), self.md(*unit));
+                    (api.di_subprogram)(
+                        u,
+                        name.as_ptr().cast(),
+                        name.len(),
+                        linkage.as_ptr().cast(),
+                        linkage.len(),
+                        file,
+                        ty,
+                        unit,
+                    )
+                }
+                Metadata::Location {
+                    line,
+                    column,
+                    scope,
+                } => {
+                    let scope = self.md(*scope);
+                    (api.di_location)(u, *line as u32, *column, scope)
+                }
+                Metadata::LexicalBlockFile { scope, file } => {
+                    let (scope, file) = (self.md(*scope), self.md(*file));
+                    (api.di_lexical_block_file)(u, scope, file)
                 }
             }
+        };
+        // SAFETY: binding replaces this identifier's temporary, if referenced.
+        unsafe { (api.metadata_bind)(u, id, node) }
+    }
+    fn named_metadata(&mut self, name: &str, ids: &[usize]) {
+        let nodes: Vec<_> = ids.iter().map(|&id| self.md(id)).collect();
+        // SAFETY: name and nodes are borrowed through the synchronous call.
+        unsafe {
+            (self.api.named_metadata)(
+                self.unit,
+                name.as_ptr().cast(),
+                name.len(),
+                nodes.as_ptr(),
+                nodes.len(),
+            )
         }
-        for (name, op) in [
-            ("eq", Predicate::Eq),
-            ("ne", Predicate::Ne),
-            ("ult", Predicate::Ult),
-            ("ule", Predicate::Ule),
-            ("ugt", Predicate::Ugt),
-            ("uge", Predicate::Uge),
-            ("slt", Predicate::Slt),
-            ("sle", Predicate::Sle),
-            ("sgt", Predicate::Sgt),
-            ("sge", Predicate::Sge),
-        ] {
-            for prefix in ["icmp", "fcmp"] {
-                let marker = format!("{prefix} {name} ");
-                if let Some(rest) = body.strip_prefix(&marker) {
-                    let (ty, values) = rest.split_once(' ').unwrap();
-                    let parts: Vec<_> = values.split(", ").collect();
-                    if parts.len() == 2 {
-                        let left = Self::raw_value(parts[0]);
-                        let right = Self::raw_value(parts[1]);
-                        self.instruction(
-                            result,
-                            Operation::Compare(op, Self::raw_type(ty), &left, &right),
-                            location,
-                        );
-                        return;
-                    }
-                }
-            }
+    }
+    fn begin_function(&mut self, name: &str, sig: &Signature, params: &[Local], attrs: &FnAttrs) {
+        let f = self.function(name, sig, attrs);
+        self.locals.clear();
+        self.blocks.clear();
+        // SAFETY: the new function's body and arguments.
+        unsafe { (self.api.begin_body)(self.unit, f) };
+        for (i, &local) in params.iter().enumerate() {
+            let argument = unsafe { (self.api.parameter)(f, i as u32) };
+            self.define(local, argument);
         }
-        for (name, op) in [
-            ("zext", Cast::ZExt),
-            ("sext", Cast::SExt),
-            ("trunc", Cast::Trunc),
-            ("bitcast", Cast::Bitcast),
-            ("ptrtoint", Cast::PtrToInt),
-            ("inttoptr", Cast::IntToPtr),
-        ] {
-            let marker = format!("{name} ");
-            if let Some(rest) = body.strip_prefix(&marker) {
-                if let Some((source, to)) = rest.split_once(" to ") {
-                    let (from, value) = source.split_once(' ').unwrap();
-                    let value = Self::raw_value(value);
-                    self.instruction(
-                        result,
-                        Operation::Cast(op, Self::raw_type(from), &value, Self::raw_type(to)),
-                        location,
-                    );
-                    return;
-                }
-            }
+    }
+    fn end_function(&mut self) {
+        assert!(
+            self.pending.is_empty(),
+            "undefined locals {:?}",
+            self.pending.keys().collect::<Vec<_>>()
+        );
+        for (label, &block) in &self.blocks {
+            // SAFETY: a block of this unit.
+            assert!(unsafe { (self.api.block_placed)(block) } != 0, "undefined block {label}");
         }
-        if let Some(rest) = body
-            .strip_prefix("call ")
-            .or_else(|| body.strip_prefix("tail call "))
-        {
-            let is_cold = rest.ends_with(" cold");
-            let rest = rest.trim_end_matches(" cold");
-            let (result_ty, callee_and_args) = rest.split_once(' ').unwrap();
-            let at = callee_and_args.find('@').unwrap();
-            let open = callee_and_args[at..].find('(').unwrap() + at;
-            let name = &callee_and_args[at + 1..open];
-            let args_text = callee_and_args[open + 1..].trim_end_matches(')');
-            let mut params = Vec::new();
-            let mut args = Vec::new();
-            if !args_text.is_empty() {
-                for argument in args_text.split(", ") {
-                    let (ty, value) = argument.rsplit_once(' ').unwrap();
-                    params.push(Parameter::plain(Self::raw_type(ty)));
-                    args.push(Self::raw_value(value));
-                }
-            }
-            let signature = Signature {
-                result: Self::raw_type(result_ty),
-                extension: Extension::None,
-                params,
-            };
-            let callee = Value::Global(name.to_owned());
-            let attrs = CallAttrs {
-                cold: is_cold,
-                ..Default::default()
-            };
-            self.instruction(
-                result,
-                Operation::Call(&signature, &callee, &args, &attrs),
-                location,
-            );
-            return;
-        }
-        if let Some(rest) = text.strip_prefix("switch ") {
-            let head = rest.split_once(" [").map_or(rest, |(head, _)| head);
-            let (ty, rest) = head.split_once(' ').unwrap();
-            let (value, default) = rest.split_once(", label %").unwrap();
-            self.pending_switch = Some((
-                Self::raw_type(ty),
-                Self::raw_value(value),
-                default.to_owned(),
-                Vec::new(),
-            ));
-            return;
-        }
-        if text.ends_with(':') {
-            self.block(text.trim_end_matches(':'));
-            return;
-        }
-        if text == "unreachable" {
-            self.instruction(None, Operation::Unreachable, location);
-            return;
-        }
-        if let Some(target) = text.strip_prefix("br label %") {
-            self.instruction(None, Operation::Branch(target), location);
-            return;
-        }
-        if let Some(rest) = text.strip_prefix("br i1 ") {
-            let parts: Vec<_> = rest.split(", label %").collect();
-            if parts.len() == 3 {
-                let condition = Self::raw_value(parts[0]);
-                self.instruction(
-                    None,
-                    Operation::Conditional(&condition, parts[1], parts[2], false),
-                    location,
-                );
-                return;
-            }
-        }
-        if let Some(rest) = text.strip_prefix("ret ") {
-            if rest == "void" {
-                self.instruction(None, Operation::Return(Type::Void, None), location);
-                return;
-            }
-            let (ty, value) = rest
-                .split_once(' ')
-                .unwrap_or_else(|| panic!("native sink raw return unsupported: {text}"));
-            let ty = Self::raw_type(ty);
-            let value = Self::raw_value(value);
-            self.instruction(None, Operation::Return(ty, Some(&value)), location);
-            return;
-        }
-        if let Some(rest) = text.strip_prefix("store ") {
-            let (left, right) = rest
-                .split_once(", ptr ")
-                .unwrap_or_else(|| panic!("native sink raw store unsupported: {text}"));
-            let (ty, value) = left
-                .split_once(' ')
-                .unwrap_or_else(|| panic!("native sink raw store type unsupported: {text}"));
-            let align = right
-                .split_once(", align ")
-                .and_then(|(_, value)| value.parse().ok())
-                .unwrap_or(0);
-            let pointer = right
-                .split_once(", align ")
-                .map_or(right, |(value, _)| value);
-            let ty = Self::raw_type(ty);
-            let value = Self::raw_value(value);
-            let pointer = Self::raw_value(pointer);
-            let memory = Memory {
-                align,
-                ..Default::default()
-            };
-            self.instruction(
-                None,
-                Operation::Store(ty, &value, &pointer, &memory),
-                location,
-            );
-            return;
-        }
-        panic!("native sink raw operation unsupported: {text}");
+    }
+    fn block(&mut self, label: Label) {
+        let block = self.block_ref(label);
+        // SAFETY: places this function's block and positions the builder there.
+        unsafe { (self.api.begin_block)(self.unit, block) }
     }
     fn alloca(&mut self, name: Local, ty: &Type, align: u32) {
-        let ty = self.ty(ty);
-        let actual = match name_key(name) {
-            Some((kind, i)) => {
-                let slot = Local::Slot(usize::MAX - (i.wrapping_mul(4) + usize::from(kind)));
-                self.scratch.insert((kind, i), slot);
-                slot
-            }
-            None => name,
-        };
-        self.unit.alloca(ty, align, local(actual));
-    }
-    fn block(&mut self, name: &str) {
-        let block = self.block_ref(name);
-        self.unit.begin_block(block);
+        let t = self.ty(ty);
+        // SAFETY: an allocation in this function's entry prefix.
+        let v = unsafe { (self.api.alloca)(self.unit, t, align) };
+        self.define(name, v);
     }
     fn instruction(&mut self, result: Option<Local>, op: Operation<'_>, location: Option<usize>) {
-        let location = location.map(|id| self.unit.metadata_ref(id));
-        self.unit.location(location);
-        let v = match op {
-            Operation::Binary(op, ty, a, b) => {
-                let a = self.value(a, &ty);
-                let b = self.value(b, &ty);
-                Some(self.unit.binary(op as u32, a, b))
-            }
-            Operation::Cast(op, from, v, to) => {
-                let v = self.value(v, &from);
-                let to = self.ty(&to);
-                Some(self.unit.cast(op as u32, v, to))
-            }
-            Operation::Compare(op, ty, a, b) => {
-                let a = self.value(a, &ty);
-                let b = self.value(b, &ty);
-                Some(self.unit.compare(op as u32, a, b))
-            }
-            Operation::Select(ty, c, a, b) => {
-                let c = self.value(c, &Type::I1);
-                let a = self.value(a, &ty);
-                let b = self.value(b, &ty);
-                Some(self.unit.select(c, a, b))
-            }
-            Operation::FNeg(ty, v) => {
-                let v = self.value(v, &ty);
-                Some(self.unit.fneg(v))
-            }
-            Operation::Load(ty, p, m) => {
-                let ty = self.ty(&ty);
-                let p = self.value(p, &Type::Ptr);
-                let v = self.unit.load(ty, p, m.align);
-                self.memory(v, m);
-                Some(v)
-            }
-            Operation::Store(ty, v, p, m) => {
-                let v = self.value(v, &ty);
-                let p = self.value(p, &Type::Ptr);
-                let store = self.unit.store(v, p, m.align);
-                self.memory(store, m);
-                None
-            }
-            Operation::Gep(ty, p, indices) => {
-                let ty = self.ty(&ty);
-                let p = self.value(p, &Type::Ptr);
-                let indices: Vec<_> = indices.iter().map(|(t, v)| self.value(v, t)).collect();
-                Some(self.unit.gep(ty, p, &indices))
-            }
-            Operation::Extract(ty, v, index) => {
-                let v = self.value(v, &ty);
-                Some(self.unit.extract(v, index))
-            }
-            Operation::Insert(ty, a, t, v, index) => {
-                let a = self.value(a, &ty);
-                let v = self.value(v, &t);
-                Some(self.unit.insert(a, v, index))
-            }
-            Operation::Phi(ty, incoming) => {
-                let t = self.ty(&ty);
-                let values: Vec<_> = incoming.iter().map(|(v, _)| self.value(v, &ty)).collect();
-                let blocks: Vec<_> = incoming.iter().map(|(_, b)| self.block_ref(b)).collect();
-                Some(self.unit.phi(t, &values, &blocks))
-            }
-            Operation::Call(sig, callee, args, attrs) => {
-                let callee = if let Value::Global(name) = callee {
-                    self.function(name, sig)
-                } else {
-                    self.value(callee, &Type::Ptr)
-                };
-                let result = self.ty(&sig.result);
-                let params: Vec<_> = sig.params.iter().map(|p| self.ty(&p.ty)).collect();
-                let args: Vec<_> = args
-                    .iter()
-                    .zip(&sig.params)
-                    .map(|(v, p)| self.value(v, &p.ty))
-                    .collect();
-                let call = self.unit.call(result, &params, callee, &args);
-                self.signature_attributes(call, sig);
-                if attrs.cold {
-                    self.unit.attribute(call, u32::MAX, 8, None);
+        let (api, u) = (self.api, self.unit);
+        // SAFETY (this block): every operand is a live handle of this unit and
+        // every array outlives its synchronous builder call.
+        let value = unsafe {
+            match op {
+                Operation::Binary(op, ty, a, b) => {
+                    let (a, b) = (self.value(a, ty), self.value(b, ty));
+                    (api.binary)(u, op as u32, a, b)
                 }
-                if attrs.tail {
-                    self.unit.tail(call);
+                Operation::Cast(op, from, v, to) => {
+                    let v = self.value(v, from);
+                    let to = self.ty(to);
+                    (api.cast)(u, op as u32, v, to)
                 }
-                self.scopes(call, "alias.scope", &attrs.alias_scopes);
-                self.scopes(call, "noalias", &attrs.noalias_scopes);
-                Some(call)
-            }
-            Operation::Branch(target) => {
-                let target = self.block_ref(target);
-                self.unit.branch(target);
-                None
-            }
-            Operation::Conditional(c, a, b, likely) => {
-                let c = self.value(c, &Type::I1);
-                let a = self.block_ref(a);
-                let b = self.block_ref(b);
-                let branch = self.unit.conditional(c, a, b);
-                if likely {
-                    let tag = self.unit.metadata_string("branch_weights");
-                    let yes = self.unit.metadata_integer(32, 2000);
-                    let no = self.unit.metadata_integer(32, 1);
-                    let tuple = self.unit.metadata_tuple(&[tag, yes, no], false);
-                    self.unit.attach(branch, "prof", tuple);
+                Operation::Compare(p, ty, a, b) => {
+                    let (a, b) = (self.value(a, ty), self.value(b, ty));
+                    (api.compare)(u, p as u32, a, b)
                 }
-                None
-            }
-            Operation::Switch(ty, value, default, arms) => {
-                let value = self.value(value, &ty);
-                let default = self.block_ref(default);
-                let values: Vec<_> = arms
-                    .iter()
-                    .map(|(v, _)| self.value(&Value::from(*v), &ty))
-                    .collect();
-                let blocks: Vec<_> = arms.iter().map(|(_, b)| self.block_ref(b)).collect();
-                self.unit.switch_value(value, default, &values, &blocks);
-                None
-            }
-            Operation::Return(ty, value) => {
-                let value = value.map(|v| self.value(v, &ty));
-                self.unit.return_value(value);
-                None
-            }
-            Operation::Unreachable => {
-                self.unit.unreachable();
-                None
+                Operation::Select(ty, c, yes, no) => {
+                    let c = self.value(c, &Type::I1);
+                    let (yes, no) = (self.value(yes, ty), self.value(no, ty));
+                    (api.select)(u, c, yes, no)
+                }
+                Operation::FNeg(ty, v) => {
+                    let v = self.value(v, ty);
+                    (api.fneg)(u, v)
+                }
+                Operation::Load(ty, p, m) => {
+                    let t = self.ty(ty);
+                    let p = self.value(p, &Type::Ptr);
+                    let v = (api.load)(u, t, p, m.align, m.ordering.map_or(0, |o| o as u32));
+                    self.memory(v, m);
+                    v
+                }
+                Operation::Store(ty, v, p, m) => {
+                    let v = self.value(v, ty);
+                    let p = self.value(p, &Type::Ptr);
+                    let s = (api.store)(u, v, p, m.align, m.ordering.map_or(0, |o| o as u32));
+                    self.memory(s, m);
+                    s
+                }
+                Operation::Gep {
+                    ty,
+                    base,
+                    indices,
+                    inbounds,
+                } => {
+                    let t = self.ty(ty);
+                    let base = self.value(base, &Type::Ptr);
+                    let indices: Vec<_> = indices.iter().map(|(t, v)| self.value(v, t)).collect();
+                    (api.gep)(u, t, base, indices.as_ptr(), indices.len(), u8::from(inbounds))
+                }
+                Operation::Extract(ty, v, index) => {
+                    let v = self.value(v, ty);
+                    (api.extract)(u, v, index)
+                }
+                Operation::Insert(ty, aggregate, field, v, index) => {
+                    let aggregate = self.value(aggregate, ty);
+                    let v = self.value(v, field);
+                    (api.insert)(u, aggregate, v, index)
+                }
+                Operation::Phi(ty, incoming) => {
+                    let t = self.ty(ty);
+                    let values: Vec<_> = incoming.iter().map(|(v, _)| self.value(v, ty)).collect();
+                    let blocks: Vec<_> = incoming.iter().map(|(_, b)| self.block_ref(*b)).collect();
+                    (api.phi)(u, t, values.as_ptr(), blocks.as_ptr(), values.len())
+                }
+                Operation::Call(sig, callee, args, attrs) => {
+                    let result = self.ty(&sig.result);
+                    let types: Vec<_> = sig.params.iter().map(|p| self.ty(&p.ty)).collect();
+                    let callee = self.value(callee, &Type::Ptr);
+                    let args: Vec<_> = sig
+                        .params
+                        .iter()
+                        .zip(args)
+                        .map(|(p, a)| self.value(a, &p.ty))
+                        .collect();
+                    let call = (api.call)(
+                        u,
+                        result,
+                        types.as_ptr(),
+                        types.len(),
+                        callee,
+                        args.as_ptr(),
+                        args.len(),
+                        u8::from(attrs.tail),
+                    );
+                    self.signature_attributes(call, sig);
+                    if attrs.always_inline {
+                        self.attribute(call, FUNCTION, ALWAYS_INLINE, None, 0);
+                    }
+                    if attrs.cold {
+                        self.attribute(call, FUNCTION, COLD, None, 0);
+                    }
+                    self.scopes(call, &attrs.scopes);
+                    call
+                }
+                Operation::CompareExchange(p, ty, expected, new) => {
+                    let p = self.value(p, &Type::Ptr);
+                    let (expected, new) = (self.value(expected, ty), self.value(new, ty));
+                    (api.compare_exchange)(u, p, expected, new)
+                }
+                Operation::AtomicSub(p, ty, v) => {
+                    let p = self.value(p, &Type::Ptr);
+                    let v = self.value(v, ty);
+                    (api.atomic_sub)(u, p, v)
+                }
+                Operation::Fence(o) => (api.fence)(u, o as u32),
+                Operation::Branch(target) => {
+                    let target = self.block_ref(target);
+                    (api.branch)(u, target)
+                }
+                Operation::Conditional(test, yes, no, likely) => {
+                    let test = self.value(test, &Type::I1);
+                    let (yes, no) = (self.block_ref(yes), self.block_ref(no));
+                    let branch = (api.conditional)(u, test, yes, no);
+                    if likely {
+                        let weights = self.md(0);
+                        (api.attach)(u, branch, PROF, weights);
+                    }
+                    branch
+                }
+                Operation::Switch(ty, v, default, arms) => {
+                    let v = self.value(v, ty);
+                    let default = self.block_ref(default);
+                    let values: Vec<_> = arms.iter().map(|(n, _)| self.integer(ty, *n)).collect();
+                    let blocks: Vec<_> = arms.iter().map(|(_, l)| self.block_ref(*l)).collect();
+                    (api.switch_value)(u, v, default, values.as_ptr(), blocks.as_ptr(), values.len())
+                }
+                Operation::Return(value) => {
+                    let value = value.map_or(std::ptr::null_mut(), |(t, v)| self.value(v, t));
+                    (api.return_value)(u, value)
+                }
+                Operation::Unreachable => (api.unreachable)(u),
             }
         };
-        if let Some(name) = result {
-            self.unit.bind(local(name), v.unwrap());
+        if let Some(location) = location {
+            let location = self.md(location);
+            // SAFETY: a location node of this unit on its instruction.
+            unsafe { (api.location)(u, value, location) }
+        }
+        if let Some(result) = result {
+            self.define(result, value);
         }
     }
 }

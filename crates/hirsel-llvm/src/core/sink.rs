@@ -1,5 +1,9 @@
-//! LLVM syntax types shared by the streaming builder and the temporary text oracle.
-//! These describe one operation at a time; no second instruction graph is retained.
+//! The typed construction interface of CoreIR lowering. Lowering describes
+//! each module item and instruction once, in final module order; the sink
+//! consumes it immediately. Product objects use the native LLVM builder. The
+//! text producer exists only as the printed-module oracle's second producer
+//! and for diagnostic IR dumps; no product path parses its output.
+use std::borrow::Cow;
 use std::fmt::{self, Write};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -9,6 +13,7 @@ pub(super) enum Type {
     Float,
     Double,
     Ptr,
+    Metadata,
     Array(u64, Box<Type>),
     Vector(u32, Box<Type>),
     Struct(Vec<Type>, bool),
@@ -21,8 +26,14 @@ impl Type {
     pub fn bytes(count: u64) -> Self {
         Self::Array(count, Box::new(Self::I8))
     }
+    pub fn words(count: u64) -> Self {
+        Self::Array(count, Box::new(Self::I64))
+    }
     pub fn structure(fields: impl Into<Vec<Self>>) -> Self {
         Self::Struct(fields.into(), false)
+    }
+    pub fn is_void(&self) -> bool {
+        matches!(self, Self::Void)
     }
 }
 impl fmt::Display for Type {
@@ -33,6 +44,7 @@ impl fmt::Display for Type {
             Self::Float => f.write_str("float"),
             Self::Double => f.write_str("double"),
             Self::Ptr => f.write_str("ptr"),
+            Self::Metadata => f.write_str("metadata"),
             Self::Array(count, element) => write!(f, "[{count} x {element}]"),
             Self::Vector(count, element) => write!(f, "<{count} x {element}>"),
             Self::Struct(fields, packed) => {
@@ -55,6 +67,8 @@ impl fmt::Display for Type {
         }
     }
 }
+
+/// A function-local name. Numbered families share one prefix each.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum Local {
     Temp(usize),
@@ -62,80 +76,224 @@ pub(super) enum Local {
     Address(usize),
     Slot(usize),
     Param(usize),
-    Context,
-    Destination,
-    CallerSite,
-    Result,
-    Sret,
-    Payload,
-    Input,
-    Worklist,
+    Named(&'static str),
 }
-impl fmt::Display for Local {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::Temp(i) => write!(f, "%t{i}"),
-            Self::Value(i) => write!(f, "%v{i}"),
-            Self::Address(i) => write!(f, "%a{i}"),
-            Self::Slot(i) => write!(f, "%s{i}"),
-            Self::Param(i) => write!(f, "%p{i}"),
-            Self::Context => f.write_str("%context"),
-            Self::Destination => f.write_str("%dest"),
-            Self::CallerSite => f.write_str("%caller_site"),
-            Self::Result => f.write_str("%result"),
-            Self::Sret => f.write_str("%sret"),
-            Self::Payload => f.write_str("%payload"),
-            Self::Input => f.write_str("%input"),
-            Self::Worklist => f.write_str("%worklist"),
+impl Local {
+    pub const CONTEXT: Self = Self::Named("context");
+    pub const DEST: Self = Self::Named("dest");
+    pub const CALLER_SITE: Self = Self::Named("caller_site");
+    pub const SRET: Self = Self::Named("sret");
+    pub const PAYLOAD: Self = Self::Named("payload");
+    pub const CURSOR: Self = Self::Named("cursor");
+    pub const WORKLIST: Self = Self::Named("worklist");
+    pub const INPUT: Self = Self::Named("input");
+    pub const RESULT: Self = Self::Named("result");
+    pub fn write_name(self, out: &mut impl Write) -> fmt::Result {
+        match self {
+            Self::Temp(i) => write!(out, "t{i}"),
+            Self::Value(i) => write!(out, "v{i}"),
+            Self::Address(i) => write!(out, "a{i}"),
+            Self::Slot(i) => write!(out, "s{i}"),
+            Self::Param(i) => write!(out, "p{i}"),
+            Self::Named(name) => out.write_str(name),
         }
     }
 }
+impl fmt::Display for Local {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_char('%')?;
+        self.write_name(f)
+    }
+}
+
+/// A basic block label: a prefix, an optional number and an optional edge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) struct Label {
+    pub name: &'static str,
+    pub n: u32,
+    pub edge: u32,
+}
+impl Label {
+    const NONE: u32 = u32::MAX;
+    pub const ENTRY: Self = Self::plain("entry");
+    pub const fn plain(name: &'static str) -> Self {
+        Self {
+            name,
+            n: Self::NONE,
+            edge: Self::NONE,
+        }
+    }
+    pub fn new(name: &'static str, n: usize) -> Self {
+        Self {
+            name,
+            n: n as u32,
+            edge: Self::NONE,
+        }
+    }
+    pub fn edge(n: usize, edge: u32) -> Self {
+        Self {
+            name: "e",
+            n: n as u32,
+            edge,
+        }
+    }
+    pub fn block(i: impl TryInto<u32>) -> Self {
+        Self {
+            name: "b",
+            n: i.try_into().ok().unwrap(),
+            edge: Self::NONE,
+        }
+    }
+    pub fn write_name(self, out: &mut impl Write) -> fmt::Result {
+        out.write_str(self.name)?;
+        if self.n != Self::NONE {
+            write!(out, "{}", self.n)?;
+        }
+        if self.edge != Self::NONE {
+            write!(out, "_{}", self.edge)?;
+        }
+        Ok(())
+    }
+}
+impl fmt::Display for Label {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.write_name(f)
+    }
+}
+
+pub(super) type Name = Cow<'static, str>;
+
+fn plain_symbol(name: &str) -> bool {
+    !name.is_empty()
+        && !name.as_bytes()[0].is_ascii_digit()
+        && name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'$' | b'.' | b'_'))
+}
+/// A global symbol as LLVM prints it, quoted where its characters need it.
+pub(super) fn write_global(out: &mut impl Write, name: &str) -> fmt::Result {
+    out.write_char('@')?;
+    if plain_symbol(name) {
+        return out.write_str(name);
+    }
+    out.write_char('"')?;
+    for byte in name.bytes() {
+        if byte == b'"' || byte == b'\\' || !(32..127).contains(&byte) {
+            write!(out, "\\{byte:02X}")?;
+        } else {
+            out.write_char(byte as char)?;
+        }
+    }
+    out.write_char('"')
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Value {
     Local(Local),
-    Integer(u128),
-    Boolean(bool),
+    /// An integer of the operand's type, printed in decimal.
+    Int(i128),
+    Bool(bool),
     Null,
     Poison,
     Zero,
-    Global(String),
-    Bitcast { from: Type, bits: u128, to: Type },
+    Global(Name),
+    /// A floating constant given by its bit pattern.
+    Bitcast {
+        from: Type,
+        bits: u64,
+        to: Type,
+    },
     IntToPtr(u64),
-    PtrToInt(String),
-    Add(Box<Value>, u64),
+    PtrToInt(Name),
+    /// `add (i64 left, i64 right)` over a constant expression.
+    Add(Box<Value>, i64),
+    Struct {
+        packed: bool,
+        fields: Vec<(Type, Value)>,
+    },
+    Bytes(Vec<u8>),
+    /// `metadata !{!a, !b}` as a call argument.
+    Metadata(Vec<usize>),
+}
+pub(super) const CONTEXT: Value = Value::Local(Local::CONTEXT);
+impl Value {
+    pub fn global(name: impl Into<Name>) -> Self {
+        Self::Global(name.into())
+    }
+    pub fn int(n: impl Into<i128>) -> Self {
+        Self::Int(n.into())
+    }
 }
 impl From<Local> for Value {
     fn from(local: Local) -> Self {
         Self::Local(local)
     }
 }
-impl From<u64> for Value {
-    fn from(n: u64) -> Self {
-        Self::Integer(u128::from(n))
-    }
-}
 impl From<bool> for Value {
     fn from(b: bool) -> Self {
-        Self::Boolean(b)
+        Self::Bool(b)
     }
 }
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Local(name) => name.fmt(f),
-            Self::Integer(bits) => bits.fmt(f),
-            Self::Boolean(value) => value.fmt(f),
+            Self::Int(n) => n.fmt(f),
+            Self::Bool(value) => value.fmt(f),
             Self::Null => f.write_str("null"),
             Self::Poison => f.write_str("poison"),
             Self::Zero => f.write_str("zeroinitializer"),
-            Self::Global(name) => write!(f, "@{name}"),
+            Self::Global(name) => write_global(f, name),
             Self::Bitcast { from, bits, to } => write!(f, "bitcast ({from} {bits} to {to})"),
             Self::IntToPtr(bits) => write!(f, "inttoptr (i64 {bits} to ptr)"),
-            Self::PtrToInt(name) => write!(f, "ptrtoint (ptr @{name} to i64)"),
+            Self::PtrToInt(name) => {
+                f.write_str("ptrtoint (ptr ")?;
+                write_global(f, name)?;
+                f.write_str(" to i64)")
+            }
             Self::Add(left, right) => write!(f, "add (i64 {left}, i64 {right})"),
+            Self::Struct { packed, fields } => {
+                if *packed {
+                    f.write_char('<')?;
+                }
+                f.write_str("{ ")?;
+                for (i, (ty, value)) in fields.iter().enumerate() {
+                    if i != 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{ty} {value}")?;
+                }
+                f.write_str(" }")?;
+                if *packed {
+                    f.write_char('>')?;
+                }
+                Ok(())
+            }
+            Self::Bytes(bytes) => {
+                f.write_str("c\"")?;
+                for b in bytes {
+                    write!(f, "\\{b:02X}")?;
+                }
+                f.write_char('"')
+            }
+            Self::Metadata(ids) => {
+                f.write_str("!{")?;
+                list(f, ids)?;
+                f.write_char('}')
+            }
         }
     }
 }
+fn list(out: &mut impl Write, ids: &[usize]) -> fmt::Result {
+    for (i, id) in ids.iter().enumerate() {
+        if i != 0 {
+            out.write_str(", ")?;
+        }
+        write!(out, "!{id}")?;
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug)]
 #[repr(u32)]
 pub(super) enum Binary {
@@ -216,10 +374,9 @@ impl Cast {
         }
     }
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub(super) enum Predicate {
-    False = 0,
     OEq = 1,
     OGt = 2,
     OGe = 3,
@@ -234,7 +391,6 @@ pub(super) enum Predicate {
     ULt = 12,
     ULe = 13,
     UNe = 14,
-    True = 15,
     Eq = 32,
     Ne = 33,
     Ugt = 34,
@@ -249,7 +405,6 @@ pub(super) enum Predicate {
 impl Predicate {
     pub fn name(self) -> &'static str {
         match self {
-            Self::False => "false",
             Self::OEq => "oeq",
             Self::OGt => "ogt",
             Self::OGe => "oge",
@@ -264,7 +419,6 @@ impl Predicate {
             Self::ULt => "ult",
             Self::ULe => "ule",
             Self::UNe => "une",
-            Self::True => "true",
             Self::Eq => "eq",
             Self::Ne => "ne",
             Self::Ugt => "ugt",
@@ -281,18 +435,59 @@ impl Predicate {
         (self as u32) < 32
     }
 }
+/// LLVM's `AtomicOrdering` numbering.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub(super) enum Ordering {
+    Monotonic = 2,
+    Acquire = 4,
+    Release = 5,
+}
+impl Ordering {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Monotonic => "monotonic",
+            Self::Acquire => "acquire",
+            Self::Release => "release",
+        }
+    }
+}
+/// Alias scope lists of one access. `!alias.scope` is always present.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) struct Scoped {
+    pub alias: Vec<usize>,
+    pub noalias: Vec<usize>,
+}
 #[derive(Clone, Debug, Default)]
 pub(super) struct Memory {
+    /// Zero omits the alignment: ABI alignment for an access.
     pub align: u32,
     pub invariant: bool,
-    pub alias_scopes: Vec<usize>,
-    pub noalias_scopes: Vec<usize>,
+    pub ordering: Option<Ordering>,
+    pub scopes: Option<Scoped>,
+}
+impl Memory {
+    pub fn aligned(align: u32) -> Self {
+        Self {
+            align,
+            ..Self::default()
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Extension {
     None,
     Zero,
     Sign,
+}
+impl Extension {
+    fn text(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::Zero => " zeroext",
+            Self::Sign => " signext",
+        }
+    }
 }
 #[derive(Clone, Debug)]
 pub(super) struct Parameter {
@@ -302,6 +497,7 @@ pub(super) struct Parameter {
     pub readonly: bool,
     pub sret: Option<Type>,
     pub byval: Option<Type>,
+    pub align: u32,
 }
 impl Parameter {
     pub fn plain(ty: Type) -> Self {
@@ -312,89 +508,236 @@ impl Parameter {
             readonly: false,
             sret: None,
             byval: None,
+            align: 0,
         }
+    }
+    pub fn extended(ty: Type, extension: Extension) -> Self {
+        Self {
+            extension,
+            ..Self::plain(ty)
+        }
+    }
+    pub fn sret(storage: Type) -> Self {
+        Self {
+            sret: Some(storage),
+            ..Self::plain(Type::Ptr)
+        }
+    }
+}
+impl From<Type> for Parameter {
+    fn from(ty: Type) -> Self {
+        Self::plain(ty)
     }
 }
 #[derive(Clone, Debug)]
 pub(super) struct Signature {
     pub result: Type,
     pub extension: Extension,
+    pub nonnull: bool,
     pub params: Vec<Parameter>,
+}
+impl Signature {
+    pub fn new(result: Type, params: Vec<Parameter>) -> Self {
+        Self {
+            result,
+            extension: Extension::None,
+            nonnull: false,
+            params,
+        }
+    }
+    pub fn plain(result: Type, params: impl IntoIterator<Item = Type>) -> Self {
+        Self::new(result, params.into_iter().map(Parameter::plain).collect())
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Inline {
+    Default,
+    Always,
+    Never,
 }
 #[derive(Clone, Debug, Default)]
 pub(super) struct CallAttrs {
     pub cold: bool,
     pub tail: bool,
-    pub alias_scopes: Vec<usize>,
-    pub noalias_scopes: Vec<usize>,
+    pub always_inline: bool,
+    pub scopes: Option<Scoped>,
 }
-/// One synchronous sink operation. The sink consumes it immediately.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub(super) enum Linkage {
+    External,
+    Internal,
+    Private,
+}
+impl Linkage {
+    fn text(self) -> &'static str {
+        match self {
+            Self::External => "",
+            Self::Internal => "internal ",
+            Self::Private => "private ",
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub(super) struct FnAttrs {
+    pub linkage: Linkage,
+    pub inline: Inline,
+    pub nounwind: bool,
+    pub argmem_read: bool,
+    pub destination_size: Option<u64>,
+    pub view_input: bool,
+    pub subprogram: Option<usize>,
+}
+impl Default for FnAttrs {
+    fn default() -> Self {
+        Self {
+            linkage: Linkage::External,
+            inline: Inline::Default,
+            nounwind: false,
+            argmem_read: false,
+            destination_size: None,
+            view_input: false,
+            subprogram: None,
+        }
+    }
+}
+impl FnAttrs {
+    pub fn private() -> Self {
+        Self {
+            linkage: Linkage::Private,
+            ..Self::default()
+        }
+    }
+}
+#[derive(Clone, Debug)]
+pub(super) struct Global {
+    pub name: Name,
+    pub linkage: Linkage,
+    pub constant: bool,
+    pub externally_initialized: bool,
+    pub ty: Type,
+    /// `None` declares an external global.
+    pub init: Option<Value>,
+    pub align: u32,
+    pub absolute_symbol: bool,
+}
+#[derive(Clone, Debug)]
+pub(super) enum MdItem {
+    Node(usize),
+    String(String),
+    I32(u32),
+}
+#[derive(Clone, Debug)]
+pub(super) enum Metadata {
+    /// `!{...}`; a distinct tuple may name itself as an operand.
+    Tuple {
+        distinct: bool,
+        items: Vec<MdItem>,
+    },
+    File {
+        filename: String,
+    },
+    CompileUnit {
+        file: usize,
+    },
+    SubroutineType {
+        types: usize,
+    },
+    Subprogram {
+        name: String,
+        linkage: String,
+        file: usize,
+        ty: usize,
+        unit: usize,
+    },
+    Location {
+        line: u64,
+        column: u32,
+        scope: usize,
+    },
+    LexicalBlockFile {
+        scope: usize,
+        file: usize,
+    },
+}
+
+/// One synchronous instruction. The sink consumes it immediately.
 pub(super) enum Operation<'a> {
-    Binary(Binary, Type, &'a Value, &'a Value),
-    Cast(Cast, Type, &'a Value, Type),
-    Compare(Predicate, Type, &'a Value, &'a Value),
-    Select(Type, &'a Value, &'a Value, &'a Value),
-    FNeg(Type, &'a Value),
-    Load(Type, &'a Value, &'a Memory),
-    Store(Type, &'a Value, &'a Value, &'a Memory),
-    Gep(Type, &'a Value, &'a [(Type, Value)]),
-    Extract(Type, &'a Value, u32),
-    Insert(Type, &'a Value, Type, &'a Value, u32),
-    Phi(Type, &'a [(Value, String)]),
+    Binary(Binary, &'a Type, &'a Value, &'a Value),
+    Cast(Cast, &'a Type, &'a Value, &'a Type),
+    Compare(Predicate, &'a Type, &'a Value, &'a Value),
+    Select(&'a Type, &'a Value, &'a Value, &'a Value),
+    FNeg(&'a Type, &'a Value),
+    Load(&'a Type, &'a Value, &'a Memory),
+    Store(&'a Type, &'a Value, &'a Value, &'a Memory),
+    Gep {
+        ty: &'a Type,
+        base: &'a Value,
+        indices: &'a [(Type, Value)],
+        inbounds: bool,
+    },
+    Extract(&'a Type, &'a Value, u32),
+    Insert(&'a Type, &'a Value, &'a Type, &'a Value, u32),
+    Phi(&'a Type, &'a [(Value, Label)]),
     Call(&'a Signature, &'a Value, &'a [Value], &'a CallAttrs),
-    Branch(&'a str),
-    Conditional(&'a Value, &'a str, &'a str, bool),
-    Switch(Type, &'a Value, &'a str, &'a [(u64, String)]),
-    Return(Type, Option<&'a Value>),
+    /// `cmpxchg weak` with monotonic success and failure orderings.
+    CompareExchange(&'a Value, &'a Type, &'a Value, &'a Value),
+    /// `atomicrmw sub ... release, align 8`.
+    AtomicSub(&'a Value, &'a Type, &'a Value),
+    Fence(Ordering),
+    Branch(Label),
+    Conditional(&'a Value, Label, Label, bool),
+    Switch(&'a Type, &'a Value, Label, &'a [(i128, Label)]),
+    Return(Option<(&'a Type, &'a Value)>),
     Unreachable,
 }
-pub(super) trait Sink {
-    // Temporary during the lowering port; removed before product cutover.
-    fn raw(&mut self, _text: &str, _location: Option<usize>) {
-        unimplemented!("typed lowering port in progress")
-    }
-    fn raw_alloca(&mut self, _text: &str) {
-        unimplemented!("typed lowering port in progress")
-    }
 
-    fn instruction(&mut self, result: Option<Local>, op: Operation<'_>, location: Option<usize>);
-    fn block(&mut self, name: &str);
+/// Module items arrive in their final order; function bodies arrive between
+/// `begin_function` and `end_function`. Metadata may arrive in any order
+/// before its first use; its identifiers are the producer's own.
+pub(super) trait Sink {
+    fn global(&mut self, global: &Global);
+    fn declare(&mut self, name: &str, sig: &Signature, attrs: &FnAttrs);
+    fn module_asm(&mut self, text: &str);
+    fn metadata(&mut self, id: usize, node: &Metadata);
+    fn named_metadata(&mut self, name: &str, ids: &[usize]);
+    fn begin_function(&mut self, name: &str, sig: &Signature, params: &[Local], attrs: &FnAttrs);
+    fn end_function(&mut self);
+    fn block(&mut self, label: Label);
     fn alloca(&mut self, name: Local, ty: &Type, align: u32);
+    fn instruction(&mut self, result: Option<Local>, op: Operation<'_>, location: Option<usize>);
 }
 
-/// Temporary parity oracle. Product lowering uses the native implementation.
+/// LLVM text of the same module. The printed-module oracle parses it in a
+/// fresh context and compares the print with the native module's.
 #[derive(Default)]
 pub(super) struct TextSink {
-    pub allocations: String,
-    pub code: String,
+    text: String,
+    metadata: String,
+    header: String,
+    allocations: String,
+    code: String,
 }
-fn metadata(out: &mut String, memory: &Memory) {
-    if memory.invariant {
-        out.push_str(", !invariant.load !1");
+impl TextSink {
+    pub fn finish(mut self) -> String {
+        self.text.push_str(&self.metadata);
+        self.text
     }
-    scope_list(out, "alias.scope", &memory.alias_scopes);
-    scope_list(out, "noalias", &memory.noalias_scopes);
 }
-fn scope_list(out: &mut String, name: &str, ids: &[usize]) {
-    if ids.is_empty() {
-        return;
-    }
-    write!(out, ", !{name} !{{").unwrap();
-    for (i, id) in ids.iter().enumerate() {
-        if i != 0 {
-            out.push_str(", ");
+fn scopes(out: &mut String, scoped: &Option<Scoped>) {
+    if let Some(s) = scoped {
+        out.push_str(", !alias.scope !{");
+        list(out, &s.alias).unwrap();
+        out.push('}');
+        if !s.noalias.is_empty() {
+            out.push_str(", !noalias !{");
+            list(out, &s.noalias).unwrap();
+            out.push('}');
         }
-        write!(out, "!{id}").unwrap();
     }
-    out.push('}');
 }
 fn parameter(out: &mut String, p: &Parameter) {
-    write!(out, "{}", p.ty).unwrap();
-    match p.extension {
-        Extension::None => {}
-        Extension::Zero => out.push_str(" zeroext"),
-        Extension::Sign => out.push_str(" signext"),
-    }
+    write!(out, "{}{}", p.ty, p.extension.text()).unwrap();
     if p.noalias {
         out.push_str(" noalias");
     }
@@ -407,26 +750,214 @@ fn parameter(out: &mut String, p: &Parameter) {
     if let Some(ty) = &p.byval {
         write!(out, " byval({ty})").unwrap();
     }
-}
-impl Sink for TextSink {
-    fn raw_alloca(&mut self, text: &str) {
-        self.allocations.push_str(text);
+    if p.align != 0 {
+        write!(out, " align {}", p.align).unwrap();
     }
-    fn raw(&mut self, text: &str, location: Option<usize>) {
-        let location = location.filter(|_| {
-            !text.ends_with(':')
-                && !text.ends_with('[')
-                && !text.as_bytes().first().is_some_and(|c| {
-                    *c == b'i' && text.as_bytes().get(1).is_some_and(u8::is_ascii_digit)
-                })
-        });
-        if let Some(id) = location {
-            writeln!(self.code, "  {text}, !dbg !{id}").unwrap();
+}
+fn result_type(out: &mut String, sig: &Signature) {
+    out.push_str(sig.extension.text().trim_start());
+    if sig.extension != Extension::None {
+        out.push(' ');
+    }
+    if sig.nonnull {
+        out.push_str("nonnull ");
+    }
+    write!(out, "{}", sig.result).unwrap();
+}
+fn function_attrs(out: &mut String, attrs: &FnAttrs) {
+    match attrs.inline {
+        Inline::Default => {}
+        Inline::Always => out.push_str(" alwaysinline"),
+        Inline::Never => out.push_str(" noinline"),
+    }
+    if attrs.nounwind {
+        out.push_str(" nounwind");
+    }
+    if attrs.argmem_read {
+        out.push_str(" memory(argmem: read)");
+    }
+    if let Some(bytes) = attrs.destination_size {
+        write!(out, " \"hirsel-destination-size\"=\"{bytes}\"").unwrap();
+    }
+    if attrs.view_input {
+        out.push_str(" \"hirsel-view-input\"");
+    }
+    if let Some(scope) = attrs.subprogram {
+        write!(out, " !dbg !{scope}").unwrap();
+    }
+}
+fn md_string(out: &mut String, text: &str) {
+    out.push('!');
+    quoted(out, text);
+}
+fn quoted(out: &mut String, text: &str) {
+    out.push('"');
+    for byte in text.bytes() {
+        if byte == b'"' || byte == b'\\' || !(32..127).contains(&byte) {
+            write!(out, "\\{byte:02X}").unwrap();
         } else {
-            writeln!(self.code, "  {text}").unwrap();
+            out.push(byte as char);
         }
     }
-
+    out.push('"');
+}
+fn memory(out: &mut String, m: &Memory) {
+    if m.align != 0 {
+        write!(out, ", align {}", m.align).unwrap();
+    }
+    if m.invariant {
+        out.push_str(", !invariant.load !1");
+    }
+    scopes(out, &m.scopes);
+}
+impl Sink for TextSink {
+    fn global(&mut self, g: &Global) {
+        let out = &mut self.text;
+        write_global(out, &g.name).unwrap();
+        out.push_str(" = ");
+        if g.init.is_none() {
+            out.push_str("external ");
+        }
+        out.push_str(g.linkage.text());
+        if g.externally_initialized {
+            out.push_str("externally_initialized ");
+        }
+        out.push_str(if g.constant { "constant " } else { "global " });
+        write!(out, "{}", g.ty).unwrap();
+        if let Some(init) = &g.init {
+            write!(out, " {init}").unwrap();
+        }
+        if g.align != 0 {
+            write!(out, ", align {}", g.align).unwrap();
+        }
+        if g.absolute_symbol {
+            out.push_str(", !absolute_symbol !{i64 -1, i64 -1}");
+        }
+        out.push('\n');
+    }
+    fn declare(&mut self, name: &str, sig: &Signature, attrs: &FnAttrs) {
+        let out = &mut self.text;
+        out.push_str("declare ");
+        result_type(out, sig);
+        out.push(' ');
+        write_global(out, name).unwrap();
+        out.push('(');
+        for (i, p) in sig.params.iter().enumerate() {
+            if i != 0 {
+                out.push_str(", ");
+            }
+            parameter(out, p);
+        }
+        out.push(')');
+        function_attrs(out, attrs);
+        out.push('\n');
+    }
+    fn module_asm(&mut self, text: &str) {
+        writeln!(self.text, "module asm \"{text}\"").unwrap();
+    }
+    fn metadata(&mut self, id: usize, node: &Metadata) {
+        let out = &mut self.metadata;
+        write!(out, "!{id} = ").unwrap();
+        match node {
+            Metadata::Tuple { distinct, items } => {
+                if *distinct {
+                    out.push_str("distinct ");
+                }
+                out.push_str("!{");
+                for (i, item) in items.iter().enumerate() {
+                    if i != 0 {
+                        out.push_str(", ");
+                    }
+                    match item {
+                        MdItem::Node(id) => write!(out, "!{id}").unwrap(),
+                        MdItem::String(s) => md_string(out, s),
+                        MdItem::I32(n) => write!(out, "i32 {n}").unwrap(),
+                    }
+                }
+                out.push('}');
+            }
+            Metadata::File { filename } => {
+                out.push_str("!DIFile(filename: ");
+                quoted(out, filename);
+                out.push_str(", directory: \"\")");
+            }
+            Metadata::CompileUnit { file } => write!(
+                out,
+                "distinct !DICompileUnit(language: DW_LANG_Rust, file: !{file}, producer: \"Hirsel\", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug)"
+            )
+            .unwrap(),
+            Metadata::SubroutineType { types } => {
+                write!(out, "!DISubroutineType(types: !{types})").unwrap()
+            }
+            Metadata::Subprogram {
+                name,
+                linkage,
+                file,
+                ty,
+                unit,
+            } => {
+                out.push_str("distinct !DISubprogram(name: ");
+                quoted(out, name);
+                out.push_str(", linkageName: ");
+                quoted(out, linkage);
+                write!(out, ", scope: !{file}, file: !{file}, line: 1, type: !{ty}, scopeLine: 1, spFlags: DISPFlagDefinition, unit: !{unit})").unwrap();
+            }
+            Metadata::Location {
+                line,
+                column,
+                scope,
+            } => {
+                if *column == 0 {
+                    write!(out, "!DILocation(line: {line}, scope: !{scope})").unwrap()
+                } else {
+                    write!(
+                        out,
+                        "!DILocation(line: {line}, column: {column}, scope: !{scope})"
+                    )
+                    .unwrap()
+                }
+            }
+            Metadata::LexicalBlockFile { scope, file } => write!(
+                out,
+                "!DILexicalBlockFile(scope: !{scope}, file: !{file}, discriminator: 0)"
+            )
+            .unwrap(),
+        }
+        out.push('\n');
+    }
+    fn named_metadata(&mut self, name: &str, ids: &[usize]) {
+        write!(self.metadata, "!{name} = !{{").unwrap();
+        list(&mut self.metadata, ids).unwrap();
+        self.metadata.push_str("}\n");
+    }
+    fn begin_function(&mut self, name: &str, sig: &Signature, params: &[Local], attrs: &FnAttrs) {
+        let out = &mut self.header;
+        out.clear();
+        write!(out, "define {}", attrs.linkage.text()).unwrap();
+        result_type(out, sig);
+        out.push(' ');
+        write_global(out, name).unwrap();
+        out.push('(');
+        for (i, (p, local)) in sig.params.iter().zip(params).enumerate() {
+            if i != 0 {
+                out.push_str(", ");
+            }
+            parameter(out, p);
+            write!(out, " {local}").unwrap();
+        }
+        out.push(')');
+        function_attrs(out, attrs);
+        self.allocations.clear();
+        self.code.clear();
+    }
+    fn end_function(&mut self) {
+        writeln!(
+            self.text,
+            "{} {{\nentry:\n{}{}}}",
+            self.header, self.allocations, self.code
+        )
+        .unwrap();
+    }
     fn alloca(&mut self, name: Local, ty: &Type, align: u32) {
         write!(self.allocations, "  {name} = alloca {ty}").unwrap();
         if align != 0 {
@@ -434,8 +965,8 @@ impl Sink for TextSink {
         }
         self.allocations.push('\n');
     }
-    fn block(&mut self, name: &str) {
-        writeln!(self.code, "{name}:").unwrap();
+    fn block(&mut self, label: Label) {
+        writeln!(self.code, "{label}:").unwrap();
     }
     fn instruction(&mut self, result: Option<Local>, op: Operation<'_>, location: Option<usize>) {
         let out = &mut self.code;
@@ -459,22 +990,30 @@ impl Sink for TextSink {
                 write!(out, "select i1 {condition}, {ty} {yes}, {ty} {no}").unwrap()
             }
             Operation::FNeg(ty, value) => write!(out, "fneg {ty} {value}").unwrap(),
-            Operation::Load(ty, p, memory) => {
-                write!(out, "load {ty}, ptr {p}").unwrap();
-                if memory.align != 0 {
-                    write!(out, ", align {}", memory.align).unwrap();
+            Operation::Load(ty, p, m) => {
+                match m.ordering {
+                    Some(o) => write!(out, "load atomic {ty}, ptr {p} {}", o.name()).unwrap(),
+                    None => write!(out, "load {ty}, ptr {p}").unwrap(),
                 }
-                metadata(out, memory);
+                memory(out, m);
             }
-            Operation::Store(ty, value, p, memory) => {
-                write!(out, "store {ty} {value}, ptr {p}").unwrap();
-                if memory.align != 0 {
-                    write!(out, ", align {}", memory.align).unwrap();
+            Operation::Store(ty, value, p, m) => {
+                match m.ordering {
+                    Some(o) => {
+                        write!(out, "store atomic {ty} {value}, ptr {p} {}", o.name()).unwrap()
+                    }
+                    None => write!(out, "store {ty} {value}, ptr {p}").unwrap(),
                 }
-                metadata(out, memory);
+                memory(out, m);
             }
-            Operation::Gep(ty, p, indices) => {
-                write!(out, "getelementptr {ty}, ptr {p}").unwrap();
+            Operation::Gep {
+                ty,
+                base,
+                indices,
+                inbounds,
+            } => {
+                let flag = if inbounds { " inbounds" } else { "" };
+                write!(out, "getelementptr{flag} {ty}, ptr {base}").unwrap();
                 for (ty, v) in indices {
                     write!(out, ", {ty} {v}").unwrap();
                 }
@@ -501,12 +1040,8 @@ impl Sink for TextSink {
                     out.push_str("tail ");
                 }
                 out.push_str("call ");
-                match sig.extension {
-                    Extension::None => {}
-                    Extension::Zero => out.push_str("zeroext "),
-                    Extension::Sign => out.push_str("signext "),
-                }
-                write!(out, "{} {callee}(", sig.result).unwrap();
+                result_type(out, sig);
+                write!(out, " {callee}(").unwrap();
                 for (i, (param, arg)) in sig.params.iter().zip(args).enumerate() {
                     if i != 0 {
                         out.push_str(", ");
@@ -515,12 +1050,23 @@ impl Sink for TextSink {
                     write!(out, " {arg}").unwrap();
                 }
                 out.push(')');
+                if attrs.always_inline {
+                    out.push_str(" alwaysinline");
+                }
                 if attrs.cold {
                     out.push_str(" cold");
                 }
-                scope_list(out, "alias.scope", &attrs.alias_scopes);
-                scope_list(out, "noalias", &attrs.noalias_scopes);
+                scopes(out, &attrs.scopes);
             }
+            Operation::CompareExchange(p, ty, expected, new) => write!(
+                out,
+                "cmpxchg weak ptr {p}, {ty} {expected}, {ty} {new} monotonic monotonic"
+            )
+            .unwrap(),
+            Operation::AtomicSub(p, ty, value) => {
+                write!(out, "atomicrmw sub ptr {p}, {ty} {value} release, align 8").unwrap()
+            }
+            Operation::Fence(o) => write!(out, "fence {}", o.name()).unwrap(),
             Operation::Branch(target) => write!(out, "br label %{target}").unwrap(),
             Operation::Conditional(test, yes, no, likely) => {
                 write!(out, "br i1 {test}, label %{yes}, label %{no}").unwrap();
@@ -531,12 +1077,12 @@ impl Sink for TextSink {
             Operation::Switch(ty, value, default, arms) => {
                 write!(out, "switch {ty} {value}, label %{default} [").unwrap();
                 for (value, label) in arms {
-                    write!(out, "\n  {ty} {value}, label %{label}").unwrap();
+                    write!(out, "\n    {ty} {value}, label %{label}").unwrap();
                 }
                 out.push_str("\n  ]");
             }
-            Operation::Return(ty, Some(value)) => write!(out, "ret {ty} {value}").unwrap(),
-            Operation::Return(_, None) => out.push_str("ret void"),
+            Operation::Return(Some((ty, value))) => write!(out, "ret {ty} {value}").unwrap(),
+            Operation::Return(None) => out.push_str("ret void"),
             Operation::Unreachable => out.push_str("unreachable"),
         }
         if let Some(location) = location {
@@ -548,115 +1094,3 @@ impl Sink for TextSink {
 
 #[cfg(hirsel_lazy_core)]
 pub(super) mod native;
-
-#[cfg(all(test, hirsel_lazy_core))]
-pub(crate) fn primitive_oracle() {
-    fn build(sink: &mut impl Sink) {
-        sink.block("entry");
-        sink.alloca(Local::Slot(0), &Type::I64, 8);
-        sink.instruction(
-            Some(Local::Temp(0)),
-            Operation::Binary(
-                Binary::Add,
-                Type::I64,
-                &Local::Param(0).into(),
-                &1u64.into(),
-            ),
-            None,
-        );
-        sink.instruction(
-            Some(Local::Value(0)),
-            Operation::Select(
-                Type::I64,
-                &true.into(),
-                &Local::Temp(0).into(),
-                &Value::Poison,
-            ),
-            None,
-        );
-        sink.instruction(None, Operation::Branch("producer"), None);
-        sink.block("done");
-        sink.instruction(
-            None,
-            Operation::Store(
-                Type::I64,
-                &Local::Temp(1).into(),
-                &Local::Slot(0).into(),
-                &Memory::default(),
-            ),
-            None,
-        );
-        sink.instruction(
-            Some(Local::Temp(2)),
-            Operation::Load(Type::I64, &Local::Slot(0).into(), &Memory::default()),
-            None,
-        );
-        sink.instruction(
-            None,
-            Operation::Return(Type::I64, Some(&Local::Temp(2).into())),
-            None,
-        );
-        sink.block("producer");
-        sink.instruction(
-            Some(Local::Temp(1)),
-            Operation::Binary(
-                Binary::Add,
-                Type::I64,
-                &Local::Value(0).into(),
-                &1u64.into(),
-            ),
-            None,
-        );
-        sink.instruction(None, Operation::Branch("done"), None);
-    }
-    let context = crate::construction::Context::new().unwrap();
-    let mut native = native::NativeSink::new(context.unit());
-    let sig = Signature {
-        result: Type::I64,
-        extension: Extension::None,
-        params: vec![Parameter::plain(Type::I64)],
-    };
-    native.begin_function("fixture", &sig, &[Local::Param(0)], false);
-    build(&mut native);
-    let mut text = TextSink::default();
-    build(&mut text);
-    let text = format!(
-        "define i64 @fixture(i64 %p0) {{\n{} }}",
-        text.code
-            .replacen("entry:\n", &format!("entry:\n{}", text.allocations), 1)
-    );
-    assert_eq!(
-        native.unit.print().unwrap(),
-        context.print_text(&text).unwrap()
-    );
-}
-
-#[cfg(hirsel_lazy_core)]
-pub(crate) fn native_scalar_fixture() -> Result<Vec<u8>, String> {
-    let context = crate::construction::Context::new()?;
-    let mut native = native::NativeSink::new(context.unit());
-    let signature = Signature {
-        result: Type::I64,
-        extension: Extension::None,
-        params: vec![Parameter::plain(Type::I64)],
-    };
-    native.begin_function(
-        "hirsel_native_fixture",
-        &signature,
-        &[Local::Param(0)],
-        false,
-    );
-    native.block("entry");
-    let one = Value::Integer(1);
-    native.instruction(
-        Some(Local::Temp(0)),
-        Operation::Binary(Binary::Add, Type::I64, &Value::Local(Local::Param(0)), &one),
-        None,
-    );
-    native.instruction(
-        None,
-        Operation::Return(Type::I64, Some(&Value::Local(Local::Temp(0)))),
-        None,
-    );
-    native.bitcode()
-}

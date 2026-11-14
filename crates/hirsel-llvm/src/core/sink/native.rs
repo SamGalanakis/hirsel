@@ -24,6 +24,8 @@ impl<'c> NativeSink<'c> {
     pub fn new(unit:llvm::Unit<'c>)->Self {
         Self {unit,types:HashMap::new(),blocks:HashMap::new(),functions:HashMap::new(),globals:HashMap::new()}
     }
+    pub fn print(&self)->Result<String,String> { self.unit.print() }
+    pub fn take(self)->*mut std::ffi::c_void { self.unit.take() }
     fn ty(&mut self,ty:&Type)->llvm::Type<'c> {
         if let Some(&t)=self.types.get(ty) {return t;}
         let t=match ty {

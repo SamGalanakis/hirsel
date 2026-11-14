@@ -1715,6 +1715,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if let Some(function) = self.function_values.get(&value).copied() {
             if let Some(word) = word {
                 self.function_values.insert(word, function);
+                self.has_static_item_value = true;
             }
         }
         self.temp(result, word);

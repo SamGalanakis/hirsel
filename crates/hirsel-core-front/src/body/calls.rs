@@ -977,27 +977,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if let Some(value) = self.core_value(f, types, vals, result, n) {
             return value;
         }
-        let unsupported_static = if self.p.fns[f].generics.is_empty() {
-            false
-        } else {
-            let params = self.p.fns[f]
-                .params
-                .iter()
-                .map(|param| param.ty)
-                .collect::<Vec<_>>();
-            params.into_iter().enumerate().any(|(i, param)| {
-                let ty = subst(&mut self.t, param, types);
-                let is_static = matches!(
-                    self.t.kind(self.bare(ty)),
-                    TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(crate::decls::Role::StaticFn)
-                );
-                is_static
-                    && vals[i].and_then(|value| self.function_values.get(&value)).is_some_and(
-                        |&function| !self.open_static_item_supported(function),
-                    )
-            })
-        };
-        if unsupported_static {
+        if self.has_static_item_value && self.unsupported_static_item_argument(f, types, vals) {
             self.gap(
                 n,
                 "static function identity dispatch is not built for this callable item",
@@ -1084,6 +1064,34 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 Some(p)
             }
             None => first,
+        }
+    }
+
+    fn unsupported_static_item_argument(
+        &mut self,
+        f: usize,
+        types: &[TyId],
+        vals: &[Option<ValueId>],
+    ) -> bool {
+        if self.p.fns[f].generics.is_empty() {
+            false
+        } else {
+            let params = self.p.fns[f]
+                .params
+                .iter()
+                .map(|param| param.ty)
+                .collect::<Vec<_>>();
+            params.into_iter().enumerate().any(|(i, param)| {
+                let ty = subst(&mut self.t, param, types);
+                let is_static = matches!(
+                    self.t.kind(self.bare(ty)),
+                    TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(crate::decls::Role::StaticFn)
+                );
+                is_static
+                    && vals[i].and_then(|value| self.function_values.get(&value)).is_some_and(
+                        |&function| !self.open_static_item_supported(function),
+                    )
+            })
         }
     }
 

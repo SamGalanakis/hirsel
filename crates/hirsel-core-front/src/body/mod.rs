@@ -1000,6 +1000,9 @@ struct Cx<'c, 'a, 'e> {
     /// Function references produced in this body, used by the PROG-9 descriptor
     /// kernels to recover the single front-end identity encoder's source item.
     function_values: HashMap<ValueId, FuncId>,
+    /// Open StaticFn item admission is demanded only after code.describe produced
+    /// a known item in this body; ordinary calls need no parameter walk.
+    has_static_item_value: bool,
     /// The signature a source body's entry was emitted against. A row first mentioned
     /// by an earlier body may already be sealed to its word carriage; installing the
     /// body puts this signature back, so the next [`Emitter::seal`] converts the body.
@@ -1142,6 +1145,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             b: Body::default(),
             func: None,
             function_values: HashMap::default(),
+            has_static_item_value: false,
             emitted: None,
             ir_item,
             cur: None,

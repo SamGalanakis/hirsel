@@ -3533,6 +3533,9 @@ fn isolate_and_code_describe_rules() {
     failures.extend(run_case(
         &root().join("cases/body/callable-static-fn-generic.hirsel"),
     ));
+    failures.extend(run_case(
+        &root().join("cases/body/callable-static-fn-open-item-gap.hirsel"),
+    ));
     assert!(failures.is_empty(), "{failures:?}");
 }
 

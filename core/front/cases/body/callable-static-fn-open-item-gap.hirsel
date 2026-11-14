@@ -1,0 +1,6 @@
+// An unsupported StaticFn item still stops before open dispatch; ordinary
+// callable arguments and closed StaticFn operations retain their old path.
+fn touch(mut n: u64) -> u64 { n += 1; n }
+fn names[F](s: StaticFn[F]) -> u64 { list.len(code.identity(s)) }
+pub fn open_item() -> u64 { names(code.describe(touch)) }
+// expect: gap static function identity dispatch is not built for this callable item

@@ -2,10 +2,12 @@
 use hirsel_core_ir::{FuncId, Module};
 use std::{fs, path::PathBuf, process::Command};
 
+#[allow(dead_code)] // Each engine uses one of these ABIs during the site cutover.
 pub fn check(emit: impl FnOnce(&Module) -> Vec<u8>, symbol: impl Fn(&Module, FuncId) -> String) {
     check_abi(emit, symbol, false);
 }
 /// FORM#91 internal caller-site argument; the test process ABI is unchanged.
+#[allow(dead_code)]
 pub fn check_with_site(
     emit: impl FnOnce(&Module) -> Vec<u8>,
     symbol: impl Fn(&Module, FuncId) -> String,

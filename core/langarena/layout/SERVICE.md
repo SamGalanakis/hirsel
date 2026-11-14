@@ -1,3 +1,5 @@
+> Historical pre-M2 qualification matrix. The final named-commit M2 rows are in [M2.md](M2.md), [M2.tsv](M2.tsv) and [M2-build.tsv](M2-build.tsv). These earlier rows are not the M2 number.
+
 # Versioned graph and document completion matrix
 
 Source/control bundle a4fa21ae; final matched malformed lifetime/refund fix063d47c1.

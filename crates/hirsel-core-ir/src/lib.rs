@@ -716,6 +716,7 @@ pub mod eval;
 pub mod failure;
 mod ir;
 pub mod roles;
+pub mod source;
 pub mod text;
 #[cfg(any(test, feature = "wf"))]
 pub mod wf;

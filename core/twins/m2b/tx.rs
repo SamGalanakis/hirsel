@@ -48,7 +48,11 @@ fn run<R>(
     body: impl FnOnce(&mut Tx) -> Result<R, Abort>,
 ) -> Outcome<R> {
     let caught = panic::catch_unwind(AssertUnwindSafe(|| {
-        let mut tx = Tx { base: db, writes: HashMap::new(), reads };
+        let mut tx = Tx {
+            base: db,
+            writes: HashMap::new(),
+            reads,
+        };
         body(&mut tx).map(|r| (r, tx.writes))
     }));
     match caught {
@@ -68,7 +72,11 @@ fn seen(tx: &mut Tx, k: u64) -> Result<i64, Abort> {
 }
 
 fn row(id: u64, balance: i64) -> Account {
-    Account { id, owner: String::new(), balance }
+    Account {
+        id,
+        owner: String::new(),
+        balance,
+    }
 }
 
 fn transfer(tx: &mut Tx, (from, to, amount): (u64, u64, i64)) -> Result<u64, Abort> {
@@ -85,7 +93,9 @@ fn transfer(tx: &mut Tx, (from, to, amount): (u64, u64, i64)) -> Result<u64, Abo
 fn poison(tx: &mut Tx, (from, to, amount): (u64, u64, i64)) -> Result<u64, Abort> {
     let paid = seen(tx, from)?;
     let got = seen(tx, to)?;
-    let total = (paid + got + amount).checked_add(i64::MAX).expect("overflow");
+    let total = (paid + got + amount)
+        .checked_add(i64::MAX)
+        .expect("overflow");
     Ok(total as u64)
 }
 

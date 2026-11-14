@@ -15,3 +15,7 @@ path = "tx.rs"
 [[bin]]
 name = "m2b-replay"
 path = "replay.rs"
+
+[[bin]]
+name = "m2b-dispatch"
+path = "dispatch.rs"

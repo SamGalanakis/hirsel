@@ -43,7 +43,14 @@ fn decode(b: &[u8], at: &mut usize) -> Option<Account> {
 fn bench(n: u64) -> Option<u64> {
     let mut t: HashMap<u64, Account> = HashMap::new();
     for k in 0..n {
-        t.insert(k, Account { id: k, owner: String::from("owner"), balance: i64::try_from(k).ok()? });
+        t.insert(
+            k,
+            Account {
+                id: k,
+                owner: String::from("owner"),
+                balance: i64::try_from(k).ok()?,
+            },
+        );
     }
     let mut out = Vec::new();
     for k in 0..n {

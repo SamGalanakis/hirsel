@@ -54,7 +54,7 @@ def place_runtime_debug(output):
         shutil.copyfile(debug, adjacent)
 
 
-def unpack(kind, output, archives):
+def unpack(kind, output, archives, linker=None):
     with tempfile.TemporaryDirectory(prefix="hirsel-native-unpack-") as scratch:
         tree = Path(scratch)
         if kind == "glibc-floor":
@@ -84,6 +84,10 @@ def unpack(kind, output, archives):
             for source in (tree / "usr/lib/x86_64-linux-gnu").glob("*.so*"):
                 if source.is_file():
                     shutil.copy2(source, output / "lib" / source.name)
+            if linker:
+                (output / "bin/ld.lld").unlink()
+                shutil.copyfile(linker, output / "bin/ld.lld")
+                (output / "bin/ld.lld").chmod(0o755)
             wrapper = output / "bin/hirsel-clang"
             wrapper.write_text('#!/bin/sh\ntree="$(cd "$(dirname "$0")/.." && pwd)"\nLD_LIBRARY_PATH="$tree/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" exec "$tree/bin/clang" --ld-path="$tree/bin/ld.lld" "$@"\n')
             wrapper.chmod(0o755)
@@ -103,4 +107,5 @@ def unpack(kind, output, archives):
 
 
 if __name__ == "__main__":
-    unpack(sys.argv[1], Path(sys.argv[2]), sys.argv[3:])
+    linker = [a.removeprefix("--linker=") for a in sys.argv[3:] if a.startswith("--linker=")]
+    unpack(sys.argv[1], Path(sys.argv[2]), [a for a in sys.argv[3:] if not a.startswith("--linker=")], *linker)

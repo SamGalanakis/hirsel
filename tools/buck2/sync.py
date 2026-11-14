@@ -1678,6 +1678,7 @@ def native_toolchain_pins() -> str:
     records = [line.split() for line in READS.text(directory / "llvm-23.lock").splitlines()
                if line and not line.startswith("#")]
     scalars = {row[0]: " ".join(row[1:]) for row in records if row[0] != "deb"}
+    lld_sha, lld_size, lld_asset = scalars["static_lld"].split()
     llvm = [{"url": f"{scalars['deb_pool']}/{asset}",
              "sha256": sha, "size": int(size)}
             for key, name, arch, sha, size, asset in (row for row in records if row[0] == "deb")]
@@ -1689,6 +1690,7 @@ def native_toolchain_pins() -> str:
     link_kit = pins.pop("link_kit")
     return (HEADER + "LLVM_DEBS = " + json.dumps(llvm, indent=4)
             + "\nLLD_SOURCE = " + json.dumps({"url": scalars["source_url"], "sha256": scalars["source_sha256"], "version": scalars["llvm_version"]}, indent=4)
+            + "\nSTATIC_LLD = " + json.dumps({"url": f"{scalars['deb_pool']}/{lld_asset}", "sha256": lld_sha, "size": int(lld_size)}, indent=4)
             + "\nVALGRIND_DEBS = " + json.dumps(valgrind_runtime, indent=4)
             + "\nLINK_KIT = " + json.dumps(link_kit, indent=4)
             + "\nNATIVE = " + json.dumps({k: v for k, v in pins.items() if k != "schema"}, indent=4) + "\n")

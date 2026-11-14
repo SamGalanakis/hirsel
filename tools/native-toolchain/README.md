@@ -25,6 +25,28 @@ https://github.com/SamGalanakis/hirsel-lang/releases/tag/toolchain-llvm-23.1.5.
 - `fixtures/`: `version.c` for `check`; `smoke.ll`, `smoke_harness.c` and `smoke.expected`,
   the FFI smoke that `crates/hirsel-llvm/tests/it/native.rs` compiles, links and runs.
 
+- `build-static-lld DIR`, `static-lld-elf-only.patch`: build the toolchain image's
+  `bin/ld.lld` (the lock's `static_lld` record). See below.
+
+## Static ld.lld
+
+The toolchain image's `bin/ld.lld` is not the deb's. It is built once per pin
+from the locked source archive by `build-static-lld`: the ELF port only
+(`static-lld-elf-only.patch`), targets X86 and AArch64, Release without assertions,
+linked `-static-pie` and stripped. It loads no library, so each link skips
+the dynamic loader's work for libLLVM (about 18 M instructions per run). It is a static
+PIE rather than plain `-static` because a `-static` binary's start-up registers
+`.eh_frame` and libgcc then classifies every FDE (about 10 M instructions). The
+product runs it as a child exactly as it ran the deb's `ld.lld`, and the toolchain
+identity hashes it by content like every other recipe file.
+
+To rebuild it after a pin change, run `build-static-lld DIR` on an x86_64 Ubuntu 24.04
+host. It needs 4G and two jobs under `tools/capped`, and takes about an hour. Upload
+`DIR/ld.lld` to the `deb_pool` release under the printed asset name, then replace the
+`static_lld` record in `llvm-23.lock`. `tools/buck2/bootstrap_llvm.py` fetches that
+asset, verifies its SHA-256 and size, and places it as `bin/ld.lld`. Nothing rebuilds
+it per land.
+
 The former LLVM 21 GitHub binary archive was static-only. `check` continues to
 require a shared libLLVM; binary archives are not a fallback.
 

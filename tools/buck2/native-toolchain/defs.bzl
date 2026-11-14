@@ -39,7 +39,9 @@ overlay_linker = rule(impl = _overlay_linker, attrs = {
 def _unpack(ctx):
     output = ctx.actions.declare_output(ctx.label.name, dir = True)
     ctx.actions.run(
-        cmd_args("python3", ctx.attrs._unpack, ctx.attrs.kind, output.as_output(), [dep[DefaultInfo].default_outputs[0] for dep in ctx.attrs.archives]),
+        cmd_args("python3", ctx.attrs._unpack, ctx.attrs.kind, output.as_output(),
+                 [cmd_args("--linker=", ctx.attrs.linker[DefaultInfo].default_outputs[0], delimiter = "")] if ctx.attrs.linker else [],
+                 [dep[DefaultInfo].default_outputs[0] for dep in ctx.attrs.archives]),
         category = "native_toolchain_unpack",
     )
     return [DefaultInfo(default_output = output)]
@@ -47,6 +49,8 @@ def _unpack(ctx):
 unpack_toolchain = rule(impl = _unpack, attrs = {
     "archives": attrs.list(attrs.dep()),
     "kind": attrs.string(),
+    # kind llvm: the executable placed as bin/ld.lld instead of the deb's.
+    "linker": attrs.option(attrs.dep(), default = None),
     "_unpack": attrs.source(default = "//tools/buck2/native-toolchain:unpack.py"),
 })
 

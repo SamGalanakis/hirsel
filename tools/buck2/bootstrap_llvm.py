@@ -7,6 +7,7 @@ This script then lays the result out as one self-contained tree with no
 symbolic links (Buck2 hashes a link, not its target):
 
     bin/                 every LLVM, clang and lld executable (RUNPATH $ORIGIN/../lib),
+                         except ld.lld: the locked static PIE (`static_lld`),
                          and hirsel-clang, hirsel-clang++, hirsel-llvm-ar: those
                          tools with lib/ on the loader path, since libedit finds
                          libbsd only through it; wrapper lookup uses shell builtins
@@ -119,8 +120,23 @@ def fetch_deb(deb: dict, directory: pathlib.Path) -> pathlib.Path:
             continue
         if path.stat().st_size == deb["size"] and hashlib.sha256(path.read_bytes()).hexdigest() == deb["sha256"]:
             return path
-        print(f"{url}: size or SHA-256 differs from llvm-runtime-lock.json", file=sys.stderr)
+        print(f"{url}: size or SHA-256 differs from the lock", file=sys.stderr)
     raise SystemExit(f"could not fetch a verified {deb['name']}")
+
+
+def fetch_static_lld(directory: pathlib.Path) -> pathlib.Path:
+    """The locked static-PIE ld.lld (`static_lld` in llvm-23.lock, built by
+    tools/native-toolchain/build-static-lld); it replaces the deb's ld.lld."""
+    records = {}
+    for line in LOCK.read_text(encoding="utf-8").splitlines():
+        fields = line.split()
+        if fields and not fields[0].startswith("#"):
+            records[fields[0]] = fields[1:]
+    sha256, size, asset = records["static_lld"]
+    pool = records["deb_pool"][0]
+    path = fetch_deb({"name": asset, "urls": [f"{pool}/{asset}"], "size": int(size), "sha256": sha256}, directory)
+    path.chmod(0o755)
+    return path
 
 
 def place_runtime_libraries(stage: pathlib.Path, scratch: pathlib.Path) -> None:
@@ -144,6 +160,7 @@ def build(stage: pathlib.Path, wanted: dict) -> None:
         prefix = unpacked / "usr/lib/llvm-23"
         for path in sorted((prefix / "bin").iterdir()):
             place(path, stage / "bin" / path.name)
+        place(fetch_static_lld(pathlib.Path(raw)), stage / "bin/ld.lld")
         for name in ("libLLVM.so.23.1", "libLLVM-23.so", "libclang-cpp.so.23.1"):
             place(prefix / "lib" / name, stage / "lib" / name)
         place_tree(prefix / "lib/clang", stage / "lib/clang")

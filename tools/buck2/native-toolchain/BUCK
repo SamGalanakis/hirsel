@@ -1,4 +1,4 @@
-load("//tools/native-toolchain:pins.bzl", "LINK_KIT", "LLD_SOURCE", "LLVM_DEBS", "NATIVE", "VALGRIND_DEBS")
+load("//tools/native-toolchain:pins.bzl", "LINK_KIT", "LLD_SOURCE", "LLVM_DEBS", "NATIVE", "STATIC_LLD", "VALGRIND_DEBS")
 load(":defs.bzl", "link_kit", "runtime_auditor", "overlay_linker", "toolchain_proof", "unpack_toolchain")
 
 http_file(name = "lld-source", urls = [LLD_SOURCE["url"]], sha256 = LLD_SOURCE["sha256"])
@@ -18,9 +18,13 @@ overlay_linker(
 
 [http_file(name = "valgrind-runtime-{}".format(i), urls = [pin["url"]], sha256 = pin["sha256"], size_bytes = pin["size"]) for i, pin in enumerate(VALGRIND_DEBS)]
 
+# The image's bin/ld.lld: the static PIE that build-static-lld makes (llvm-23.lock).
+http_file(name = "static-lld", urls = [STATIC_LLD["url"]], sha256 = STATIC_LLD["sha256"], size_bytes = STATIC_LLD["size"])
+
 unpack_toolchain(
     name = "llvm", kind = "llvm",
     archives = [":llvm-deb-{}".format(i) for i in range(len(LLVM_DEBS))],
+    linker = ":static-lld",
     visibility = ["PUBLIC"],
 )
 [unpack_toolchain(name = name, kind = name, archives = [":" + name + "-archive"] + ([":valgrind-runtime-{}".format(i) for i in range(len(VALGRIND_DEBS))] if name == "valgrind" else []),

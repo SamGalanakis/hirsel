@@ -185,7 +185,6 @@ fn paths_cannot_escape_grants_and_tree_drop_never_follows_links() {
 
 #[test]
 fn rename_rejects_empty_and_nul_components_before_any_effect() {
-    crate::openat2_required::require();
     let mut f = Fixture::new();
     std::fs::write(f.root.join("source"), b"source").unwrap();
     std::fs::write(f.root.join("victim"), b"victim").unwrap();

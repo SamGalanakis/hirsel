@@ -229,6 +229,7 @@ fn scoped_callable_returns_llvm(){scoped_callable_returns(Backend::Llvm);}
 fn scoped_environment_placement(backend: Backend) {
     ordered_case(backend, include_str!("../../../core/front/cases/body/callable-scoped-placement.hirsel"));
     ordered_case(backend, include_str!("../../../core/front/cases/body/callable-written-anchor.hirsel"));
+    ordered_case(backend, include_str!("../../../core/front/cases/body/callable-written-anchor-activation.hirsel"));
 }
 #[test]
 #[ignore="explicit native integration target"]

@@ -300,7 +300,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let diverged = if !compound {
             let (t, v) = self.expr(value, expect(at.ty));
-            if self.descriptor_store(at, v, place) {
+            if self.descriptor_store(at, v, value, place) {
                 self.anchor_store(at, value, v, s);
                 self.capture_store(at, t, place);
             }

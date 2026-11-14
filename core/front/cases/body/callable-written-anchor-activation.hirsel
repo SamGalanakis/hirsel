@@ -1,0 +1,64 @@
+// OWN-21 activation installs: written anchors are the allowed capture roots.
+fn read_in(m: List[u64]) -> u64 {
+    let mut p: (scoped fn(u64) -> u64) in m = fn(x: u64) -> u64 { x }
+    let change = scoped fn() {
+        p = scoped fn(x: u64) -> u64 { list.len(m) + x }
+    }
+    change()
+    p(1)
+}
+
+// A direct outer-body install may lend a mut parameter's own value.
+fn outer(take m: List[u64]) -> u64 {
+    let mut p: scoped fn(u64) -> u64 = fn(x: u64) -> u64 { x }
+    p = scoped fn(x: u64) -> u64 { let _ = list.push(mut m, x); x }
+    p(1)
+}
+
+// expect: refuse OWN-21 at 23:9
+// expect: cause OWN-21 at 23:9 from 21:13
+fn swap_in(n: List[u64], m: List[u64]) -> u64 {
+    let mut p: (scoped fn(u64) -> u64) in n = scoped fn(x: u64) -> u64 { list.len(n) + x }
+    let change = scoped fn() {
+        p = scoped fn(x: u64) -> u64 { list.len(m) + x }
+    }
+    change()
+    p(1)
+}
+
+// expect: refuse OWN-10 at 36:5
+// expect: cause OWN-10 at 36:5 from 32:16
+fn inner(take m: List[u64]) -> u64 {
+    let mut p: (scoped fn(u64) -> u64) in m = fn(x: u64) -> u64 { x }
+    let change = scoped fn() {
+        p = scoped fn(x: u64) -> u64 { let _ = list.push(mut m, x); x }
+    }
+    change()
+    p(1)
+}
+
+// The evaluator's callback ABI law uses the same written-anchor install with
+// a captureless callback signature, avoiding a pointer payload at the test edge.
+// expect: run eval_read() = 0
+fn eval_read() -> u64 {
+    let m: List[u64] = list.new()
+    let mut p: (scoped fn() -> u64) in m = fn() -> u64 { 0 }
+    let change = scoped fn() {
+        p = scoped fn() -> u64 { list.len(m) }
+    }
+    change()
+    p()
+}
+
+// expect: run eval_outer() = 1
+fn eval_outer() -> u64 {
+    let mut m: List[u64] = list.new()
+    let mut p: scoped fn() -> u64 = fn() -> u64 { 0 }
+    p = scoped fn() -> u64 {
+        let _ = list.push(mut m, 1)
+        list.len(m)
+    }
+    p()
+}
+
+pub fn main() -> Result[(), Exit] { Ok(()) }

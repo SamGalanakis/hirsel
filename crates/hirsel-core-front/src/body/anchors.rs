@@ -218,6 +218,44 @@ impl Anchors {
         self.right = right;
         result
     }
+
+    pub(super) fn declared_for(&self, slot: u32) -> Option<Fact> {
+        self.declared.get(&slot).copied()
+    }
+
+    pub(super) fn has_mut_param(&self, slot: u32) -> bool {
+        self.mut_params.contains_key(&slot)
+    }
+
+    pub(super) fn permits_fact(&mut self, allowed: Fact, actual: Fact, steps: &[PStep]) -> bool {
+        self.permits(allowed, actual, steps)
+    }
+
+    /// Copy a fact graph into a child body's anchor arena. Fact IDs are local
+    /// to an arena, but their roots retain the source slot/region identities.
+    pub(super) fn import_fact(&mut self, source: &Anchors, fact: Fact) -> Fact {
+        fn copy(target: &mut Anchors, source: &Anchors, fact: Fact) -> Fact {
+            match source
+                .nodes
+                .get(fact as usize)
+                .copied()
+                .unwrap_or(Node::Empty)
+            {
+                Node::Empty => 0,
+                Node::Root(root) => target.node(Node::Root(root)),
+                Node::Union(a, b) => {
+                    let a = copy(target, source, a);
+                    let b = copy(target, source, b);
+                    target.union(a, b)
+                }
+                Node::Field(component, value) => {
+                    let value = copy(target, source, value);
+                    target.field(component, value)
+                }
+            }
+        }
+        copy(self, source, fact)
+    }
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {

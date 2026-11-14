@@ -787,6 +787,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.call_scratch.push(scratch);
         let body = fd.body.unwrap();
         self.capture_nested(body);
+        let written_anchors: Vec<_> = (0..self.vars.len())
+            .map(|slot| {
+                self.anchors.declared_for(slot as u32).or_else(|| {
+                    self.capture_frame
+                        .as_ref()
+                        .and_then(|f| f.written_anchors[slot])
+                })
+            })
+            .collect();
         let mut child = Cx::new(self.p, self.definition, self.e);
         child.fd = std::borrow::Cow::Owned(fd);
         child.header = n;
@@ -795,6 +804,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         child.capture_frame = Some(CaptureFrame {
             outer: self.vars.clone(),
             outer_descriptors: std::mem::take(&mut self.descriptors),
+            written_anchors: vec![None; self.vars.len()],
             by_slot: vec![None; self.vars.len()],
             captures: vec![],
             callbacks: vec![],
@@ -808,6 +818,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             logical: 0,
             send: true,
         });
+        for (slot, fact) in written_anchors.into_iter().enumerate() {
+            child.capture_frame.as_mut().unwrap().written_anchors[slot] =
+                fact.map(|fact| child.anchors.import_fact(&self.anchors, fact));
+        }
         std::mem::swap(&mut child.t, &mut self.t);
         let signature = child.callable_signature(ty);
         let row = signature.map(|signature| {
@@ -936,6 +950,7 @@ struct CapturedEnvironment {
 pub(super) struct CaptureFrame {
     outer: Vec<Option<Var>>,
     outer_descriptors: Descriptors,
+    written_anchors: Vec<Option<anchors::Fact>>,
     by_slot: Vec<Option<usize>>,
     captures: Vec<Capture>,
     callbacks: Vec<Capture>,
@@ -1044,8 +1059,13 @@ impl Descriptors {
     }
     fn add(&mut self, frame: &CaptureFrame, site: NodeId) -> Option<u32> {
         let start = self.captures.len();
-        self.captures
-            .extend(frame.captures.iter().filter(|c| !c.synthetic).copied());
+        self.captures.extend(
+            frame
+                .captures
+                .iter()
+                .filter(|c| !c.synthetic || c.mode == Mode::Mut)
+                .copied(),
+        );
         for c in &frame.callbacks {
             let mut c = *c;
             c.path = c.path.map(|p| self.import_path(&frame.callback_paths, p));
@@ -1739,6 +1759,31 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             }
         }
+        // A mut activation of a callback-valued slot also activates the
+        // descriptor currently installed in that slot.  Carry its nested
+        // capture modes into this loan set so an installed mut capture is
+        // checked against the slot's written-anchor freezes at this call.
+        let roots = work.clone();
+        for capture in roots {
+            if capture.path.is_some() {
+                continue;
+            }
+            let Some(&id) = self.descriptors.slots.get(&capture.slot) else {
+                continue;
+            };
+            let nested = self.descriptors.ranges[id as usize]
+                .get(&self.descriptors.captures)
+                .unwrap()
+                .to_vec();
+            for nested in nested {
+                if !work
+                    .iter()
+                    .any(|existing| self.descriptors.same_capture(*existing, nested))
+                {
+                    work.push(nested);
+                }
+            }
+        }
         if let Some(frame) = &mut self.capture_frame {
             for &c in &work {
                 if c.path.is_some()
@@ -1961,7 +2006,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             _ => false,
         }
     }
-    pub(super) fn descriptor_store(&mut self, at: At, value: Option<ValueId>, n: NodeId) -> bool {
+    pub(super) fn descriptor_store(
+        &mut self,
+        at: At,
+        value: Option<ValueId>,
+        source: NodeId,
+        n: NodeId,
+    ) -> bool {
         // A sibling may hold a callback, but this place cannot change its descriptor.
         // In particular a list, array or Box payload cannot contain scoped values.
         if !self.contains_callback(at.ty) {
@@ -1969,17 +2020,71 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         // OWN-11 governs true mut formals and aliases. The language has not yet
         // chosen invariance or carried store effects for an ordinary upvar.
-        if !self.var(at.place.slot).mut_anchor
-            && self
-                .capture_frame
-                .as_ref()
-                .is_some_and(|f| !f.owning && f.outer[at.place.slot as usize].is_some())
+        if self
+            .capture_frame
+            .as_ref()
+            .is_some_and(|f| !f.owning && f.outer[at.place.slot as usize].is_some())
         {
-            self.gap(
-                n,
-                "callback stores through captured mutable locals are not built",
-            );
-            return false;
+            // OWN-21: activation of a mut capture is a mut loan of the slot.
+            // The installed callback may read only the slot's written anchors,
+            // their projections and regions named by its type.  `anchor_store`
+            // applies the same fact construction for ordinary stores; do this
+            // check before it so a captured-slot violation is reported as
+            // OWN-21 at the assignment rather than as a generic OWN-19 gap.
+            let declared = self.anchors.declared_for(at.place.slot).or_else(|| {
+                self.capture_frame
+                    .as_ref()
+                    .and_then(|f| f.written_anchors[at.place.slot as usize])
+            });
+            let allowed = declared.unwrap_or(0);
+            let new = self.anchor_expression(source);
+            let captures =
+                if (new == 0 && self.anchors.has_mut_param(at.place.slot)) || declared.is_some() {
+                    self.capture_anchors(value)
+                } else {
+                    0
+                };
+            let actual = self.anchors.union(new, captures);
+            let permits = self.anchors.permits_fact(allowed, actual, &self.steps);
+            if !permits {
+                let cause = self.declared_at(at.place.slot);
+                self.refuse_from(
+                    "OWN-21",
+                    self.span(n),
+                    vec![cause],
+                    "a value installed through a captured slot reads an undeclared anchor",
+                );
+                return false;
+            }
+            // A callback installed through this captured slot contributes its
+            // roots transitively to the enclosing callback descriptor. Preserve
+            // their modes so a later activation loans a nested mut capture too.
+            if let Some(id) = self.descriptors.of(value) {
+                let captures = self.descriptors.ranges[id as usize]
+                    .get(&self.descriptors.captures)
+                    .unwrap()
+                    .to_vec();
+                if let Some(frame) = &mut self.capture_frame {
+                    for capture in captures {
+                        if let Some(existing) = frame
+                            .captures
+                            .iter_mut()
+                            .find(|existing| self.descriptors.same_capture(**existing, capture))
+                        {
+                            if capture.mode == Mode::Mut {
+                                existing.mode = Mode::Mut;
+                                existing.synthetic = false;
+                            }
+                        } else {
+                            frame.captures.push(Capture {
+                                path: None,
+                                synthetic: false,
+                                ..capture
+                            });
+                        }
+                    }
+                }
+            }
         }
         if self.var(at.place.slot).origin == Origin::MutParam {
             if let Some(id) = self.descriptors.of(value) {

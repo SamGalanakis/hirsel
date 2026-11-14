@@ -884,7 +884,17 @@ impl Parser<'_> {
             let mut c: Nodes = smallvec![self.pattern()?];
             let typed = self.eat(sym::COLON);
             if typed {
-                c.push(self.ty()?);
+                let mut ty = self.ty()?;
+                // A slot declaration may freeze more than one written anchor:
+                // `let mut p: T in n, m = ...`.  Ordinary type positions keep
+                // the single `in place` form; this loop is deliberately scoped
+                // to the `let` grammar and nests the anchor nodes so all
+                // existing type lowering and anchor walks remain unchanged.
+                while self.tree.node(ty).kind == NodeKind::Anchor && self.eat(sym::COMMA) {
+                    let root = self.path(NodeKind::Path)?;
+                    ty = self.node(s, NodeKind::Anchor, None, &[ty, root]);
+                }
+                c.push(ty);
             }
             let initialized = self.eat(sym::EQ);
             if initialized {

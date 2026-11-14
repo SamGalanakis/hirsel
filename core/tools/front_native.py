@@ -18,7 +18,7 @@ NAMES = ['args-empty', 'args-len', 'args-print', 'args-returned-views', 'args-va
          'stdout-closed', 'streams', 'string-growth-refusal', 'string-growth', 'string-shorten']
 
 
-def run(compiler, runtime, root, cc=None, target=None, emulator=None, sysroot=None, only=None, report=None):
+def run(compiler, runtime, root, cc=None, target=None, emulator=None, sysroot=None, only=None, report=None, backend="llvm", optimize=True):
     paths = {p.stem: p for p in (root / 'core/front/runtime').glob('*.hirsel')}
     if set(paths) != set(NAMES):
         raise ValueError(f'runtime inventory changed: missing {set(NAMES)-set(paths)}, new {set(paths)-set(NAMES)}')
@@ -60,9 +60,11 @@ def run(compiler, runtime, root, cc=None, target=None, emulator=None, sysroot=No
                 grants = ['Clock', 'Tasks']
             binary = scratch / 'program'
             command = [str(compiler), 'build', '--source-core', '--inputs', str(inputs),
-                       '--entry', 'app@1/main/main', '--backend', 'llvm', '--release',
+                       '--entry', 'app@1/main/main', '--backend', backend,
                        '--runtime', str(runtime), '--store', str(work / 'store'),
                        '--limit', str(limit), '--json', '-o', str(binary)]
+            if optimize:
+                command.append('--release')
             if host:
                 command.extend(['--dir', str(grant)])
             for capability in grants:
@@ -124,6 +126,8 @@ def main():
     parser.add_argument('--compiler', type=Path, required=True)
     parser.add_argument('--runtime', type=Path, required=True)
     parser.add_argument('--cc', type=Path)
+    parser.add_argument('--backend', choices=['llvm', 'cranelift'], default='llvm')
+    parser.add_argument('--dev', action='store_true')
     parser.add_argument('--target')
     parser.add_argument('--emulator', type=Path)
     parser.add_argument('--sysroot', type=Path)
@@ -135,7 +139,7 @@ def main():
     rows = run(args.compiler.resolve(), args.runtime.resolve(), args.root.resolve(),
                args.cc.resolve() if args.cc else None, args.target,
                args.emulator.resolve() if args.emulator else None,
-               args.sysroot.resolve() if args.sysroot else None, args.only, args.report)
+               args.sysroot.resolve() if args.sysroot else None, args.only, args.report, args.backend, not args.dev)
     print(f'{sum(r["ran"] for r in rows)} ran; {sum(r["passed"] for r in rows)}/{len(rows)} passed')
     return int(not all(r['passed'] for r in rows))
 

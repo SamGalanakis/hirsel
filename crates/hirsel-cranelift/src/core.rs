@@ -50,10 +50,7 @@ type Result<T> = std::result::Result<T, Error>;
 
 /// Whether this engine implements the requested target's native ABI.
 pub fn supports_target(triple: &str) -> bool {
-    matches!(
-        hirsel_core_layout::Target::from_triple(triple),
-        Some(hirsel_core_layout::Target::X86_64Linux)
-    )
+    hirsel_core_layout::Target::from_triple(triple).is_some()
 }
 
 /// Target and optimization policy for CoreIR emission.
@@ -144,7 +141,7 @@ pub(crate) fn isa(options: &Options<'_>) -> Result<cranelift_codegen::isa::Owned
         .map_err(|e| refuse(e.to_string()))
 }
 
-/// Emit scalar-only CoreIR directly to an x86-64 System V object. Modules with
+/// Emit scalar-only CoreIR directly to a Linux x86-64 or AArch64 C-ABI object. Modules with
 /// declared types use [`emit_object_with_layouts`] and producer layout recipes. CoreIR is a trusted compiler product;
 /// this entry does not invoke its well-formedness checker or the old pipeline.
 pub fn emit_object(input: &c::Module, options: &Options<'_>) -> Result<Object> {

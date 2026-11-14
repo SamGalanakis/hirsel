@@ -80,6 +80,10 @@ if [ "$1" = test ]; then
       fi ;;
   esac
   case "$*" in
+    *hirsel-cranelift-test-core_aarch64*)
+      if [ -f broken-arm-core ]; then echo 'ARM CoreIR body failed' >&2; exit 1; fi ;;
+  esac
+  case "$*" in
     *land-core-cranelift-custody*|*hirsel-cranelift-test-core_native*)
       if [ -f broken-custody ]; then echo 'custody native agreement failed' >&2; exit 1; fi ;;
     *land-audit-runtime-schema*)
@@ -188,6 +192,16 @@ class Land(unittest.TestCase):
         self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
         self.assertIn('FAIL  Core suites', refused.stdout)
         self.assertIn('custody native agreement failed', refused.stdout)
+        self.assertEqual(self.main_log(), ['base'])
+
+    def test_red_arm_core_suite_refuses_the_push(self):
+        (self.lane / 'broken-arm-core').write_text('broken ARM body\n')
+        self.git(self.lane, 'add', 'broken-arm-core')
+        self.git(self.lane, 'commit', '-qm', 'break an ARM core body')
+        refused = self.land()
+        self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+        self.assertIn('FAIL  Core suites', refused.stdout)
+        self.assertIn('ARM CoreIR body failed', refused.stdout)
         self.assertEqual(self.main_log(), ['base'])
 
     def test_stale_std_api_index_refuses_the_push_until_regenerated(self):

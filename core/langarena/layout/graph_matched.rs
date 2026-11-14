@@ -86,7 +86,9 @@ impl<T, const ELEMENT: u64> Values<T, ELEMENT> {
                 next.push(v);
             }
             self.data = next;
-            refund(extent(old, ELEMENT).expect("previous admitted extent"));
+            if old != 0 {
+                refund(extent(old, ELEMENT).expect("previous admitted extent"));
+            }
         }
         self.data.push(value);
         Ok(())
@@ -112,9 +114,12 @@ impl<T, const ELEMENT: u64> IndexMut<u64> for Values<T, ELEMENT> {
 impl<T, const ELEMENT: u64> Drop for Values<T, ELEMENT> {
     fn drop(&mut self) {
         let values = std::mem::take(&mut self.data);
-        let bytes = extent(values.capacity() as u64, ELEMENT).expect("admitted extent");
+        let capacity = values.capacity();
+        let bytes = extent(capacity as u64, ELEMENT).expect("admitted extent");
         drop(values);
-        refund(bytes);
+        if capacity != 0 {
+            refund(bytes);
+        }
     }
 }
 #[derive(Clone)]
@@ -403,15 +408,17 @@ fn edges(nodes: &Values<Node, 12>) -> Result<(), u64> {
 fn malformed() -> Result<u64, Capacity> {
     assert_eq!(dimensions(MALFORMED_NODES), Err(0));
     assert_eq!(dimensions(MALFORMED_WIDTH_NODES), Err(1));
-    let mut nodes: Values<Node, 12> = Values::new();
-    nodes.push(Node { value: 0, edge: 1 }).map_err(|(c, _)| c)?;
-    nodes
-        .push(Node {
-            value: 1,
-            edge: u32::try_from(MALFORMED_EDGE).unwrap(),
-        })
-        .map_err(|(c, _)| c)?;
-    assert_eq!(edges(&nodes), Err(1));
+    {
+        let mut nodes: Values<Node, 12> = Values::new();
+        nodes.push(Node { value: 0, edge: 1 }).map_err(|(c, _)| c)?;
+        nodes
+            .push(Node {
+                value: 1,
+                edge: u32::try_from(MALFORMED_EDGE).unwrap(),
+            })
+            .map_err(|(c, _)| c)?;
+        assert_eq!(edges(&nodes), Err(1));
+    }
     let mut p = Pool::new();
     let other = Pool::new();
     let old = inserted(p.insert(Node { value: 7, edge: 0 }))?;

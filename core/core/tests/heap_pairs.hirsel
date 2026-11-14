@@ -1,0 +1,18 @@
+// Signed lexicographic priorities, ties and six consecutive size boundaries.
+// expect: run pair_priorities() = true
+fn pair_priorities() -> bool {
+    let mut h: Heap[(i32,i32)] = heap.new()
+    result.unwrap(heap.push(mut h, (-1i32,3i32)))
+    result.unwrap(heap.push(mut h, (0i32,0i32)))
+    result.unwrap(heap.push(mut h, (-1i32,-2i32)))
+    result.unwrap(heap.push(mut h, (2i32,1i32)))
+    result.unwrap(heap.push(mut h, (-1i32,3i32)))
+    result.unwrap(heap.push(mut h, (0i32,-1i32)))
+    for i in 0u64 .. 6 {
+        let (a,b) = option.unwrap(heap.pop(mut h))
+        let key:i32 = if i < 3 { -1 } else if i < 5 { 0 } else { 2 }
+        let tie:i32 = if i == 0 { -2 } else if i < 3 { 3 } else if i == 3 { -1 } else if i == 4 { 0 } else { 1 }
+        if a != key || b != tie { return false }
+    }
+    heap.len(h) == 0 && heap.pop(mut h) == None
+}

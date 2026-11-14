@@ -336,6 +336,10 @@ static void emit_program(const HirselLlvmUnit *units, size_t count,
     for (size_t i = 0; i < count; ++i) {
         LLVMModuleRef unit = units[i].module;
         if (unit) {
+            if (LLVMGetModuleContext(unit) != context) {
+                error(out, "LLVM modules use different contexts");
+                goto done;
+            }
             failed = 0;
         } else {
         buffer = LLVMCreateMemoryBufferWithMemoryRangeCopy((const char*)units[i].data, units[i].len, "hirsel-core");

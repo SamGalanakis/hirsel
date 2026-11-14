@@ -4,9 +4,9 @@
 #[cfg(test)]
 hirsel_guard::install!();
 
+mod construction;
 #[path = "../../hirsel-llvm/src/core/mod.rs"]
 pub mod core;
-mod construction;
 mod loader;
 
 /// Compile compiler-produced LLVM text through the same once-loaded component.
@@ -117,23 +117,32 @@ pub fn emit_program_for_target(
     exports: &[String],
     target: hirsel_core_layout::Target,
 ) -> Result<Vec<u8>, String> {
-    let mut native_units = Vec::new();
+    let context = units
+        .iter()
+        .any(|unit| matches!(unit, Unit::Core { .. }))
+        .then(|| construction::Context::new().map(std::rc::Rc::new))
+        .transpose()?;
     let mut lowered = Vec::with_capacity(units.len());
-    let empty_summary = ImportSummary { functions: vec![], facts: vec![] };
-    for unit in units {
-        if let Unit::Core { module, .. } = unit {
-            native_units.push(core::emit_native_scalar_module(module, target).map_err(|e| e.to_string())?);
-        }
-    }
-    let mut native_index = 0;
     for unit in units {
         match unit {
-            Unit::Core { .. } => { let bytes = &native_units[native_index]; native_index += 1; lowered.push(Unit::Import { bitcode: bytes, summary: &empty_summary }); }
-            Unit::Text { ir, imported } => lowered.push(Unit::Text { ir, imported: *imported }),
-            Unit::Import { bitcode, summary } => lowered.push(Unit::Import { bitcode, summary }),
+            Unit::Core { module, .. } => lowered.push(loader::ProgramUnit::Native(
+                core::emit_native_scalar_module_in_context(
+                    module,
+                    target,
+                    context.as_ref().unwrap().clone(),
+                )
+                .map_err(|e| e.to_string())?,
+            )),
+            Unit::Text { ir, imported } => lowered.push(loader::ProgramUnit::Text {
+                ir,
+                imported: *imported,
+            }),
+            Unit::Import { bitcode, summary } => {
+                lowered.push(loader::ProgramUnit::Import { bitcode, summary })
+            }
         }
     }
-    loader::program(&lowered, exports, target)
+    loader::program(lowered, exports, target)
 }
 
 #[cfg(test)]
@@ -161,6 +170,40 @@ mod tests {
         crate::core::sink::primitive_oracle();
         let bitcode = crate::core::sink::native_scalar_fixture().unwrap();
         assert!(!bitcode.is_empty());
-        let _object = crate::emit_program(&[crate::Unit::Import { bitcode: &bitcode, summary: &crate::ImportSummary { functions: vec![], facts: vec![] } }], &[]).unwrap();
+        let _object = crate::emit_program(
+            &[crate::Unit::Import {
+                bitcode: &bitcode,
+                summary: &crate::ImportSummary {
+                    functions: vec![],
+                    facts: vec![],
+                },
+            }],
+            &[],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn core_unit_links_without_bitcode_roundtrip() {
+        let module = hirsel_core_ir::text::parse(
+            r#"core v1
+sig g0 = (u64) -> (u64)
+inst n0 = tests@0/direct/scalar [] []
+fn f0 = n0 g0 {
+b0(v0: u64):
+ return v0
+}
+"#,
+        )
+        .unwrap();
+        let facts = hirsel_core_ir::roles::Facts::new(&module);
+        let unit = crate::Unit::Core {
+            module: &module,
+            facts: &facts,
+            observe_charge: false,
+            debug_lines: false,
+        };
+        let object = crate::emit_program(&[unit], &[]).unwrap();
+        assert!(!object.is_empty());
     }
 }

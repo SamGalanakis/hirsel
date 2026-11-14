@@ -220,10 +220,26 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
     }
     fn runtime_void_metadata(&mut self, name: &str, args: &[(String, String)], metadata: &str) {
         let _ = metadata;
-        let params: Vec<_> = args.iter().map(|(t, _)| sink::Parameter::plain(super::ir_type_text(self.c_argument(t)))).collect();
+        let params: Vec<_> = args
+            .iter()
+            .map(|(t, _)| sink::Parameter::plain(super::ir_type_text(self.c_argument(t))))
+            .collect();
         let values: Vec<_> = args.iter().map(|(_, v)| self.operand(v)).collect();
-        let signature = sink::Signature { result: sink::Type::Void, extension: sink::Extension::None, params };
-        self.sink.instruction(None, sink::Operation::Call(&signature, &sink::Value::Global(name.to_owned()), &values, &sink::CallAttrs::default()), self.debug_location);
+        let signature = sink::Signature {
+            result: sink::Type::Void,
+            extension: sink::Extension::None,
+            params,
+        };
+        self.sink.instruction(
+            None,
+            sink::Operation::Call(
+                &signature,
+                &sink::Value::Global(name.to_owned()),
+                &values,
+                &sink::CallAttrs::default(),
+            ),
+            self.debug_location,
+        );
     }
     fn allocation(&mut self, name: &str, args: &[(String, String)]) -> (String, String) {
         self.allocation_call(name, args, "")
@@ -242,16 +258,61 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         attributes: &str,
     ) -> (String, String) {
         let p = self.temp("{ ptr, i64, i64 }");
-        let mut params = vec![sink::Parameter { ty: sink::Type::Ptr, extension: sink::Extension::None, noalias: false, readonly: false, sret: Some(sink::Type::structure(vec![sink::Type::Ptr, sink::Type::I64, sink::Type::I64])), byval: None }];
-        params.extend(args.iter().map(|(t, _)| sink::Parameter::plain(super::ir_type_text(self.c_argument(t)))));
+        let mut params = vec![sink::Parameter {
+            ty: sink::Type::Ptr,
+            extension: sink::Extension::None,
+            noalias: false,
+            readonly: false,
+            sret: Some(sink::Type::structure(vec![
+                sink::Type::Ptr,
+                sink::Type::I64,
+                sink::Type::I64,
+            ])),
+            byval: None,
+        }];
+        params.extend(
+            args.iter()
+                .map(|(t, _)| sink::Parameter::plain(super::ir_type_text(self.c_argument(t)))),
+        );
         let mut values = vec![self.operand(&p)];
         values.extend(args.iter().map(|(_, v)| self.operand(v)));
-        let signature = sink::Signature { result: sink::Type::Void, extension: sink::Extension::None, params };
+        let signature = sink::Signature {
+            result: sink::Type::Void,
+            extension: sink::Extension::None,
+            params,
+        };
         let _ = attributes;
-        self.sink.instruction(None, sink::Operation::Call(&signature, &sink::Value::Global(name.to_owned()), &values, &sink::CallAttrs::default()), self.debug_location);
-        let pointer = self.typed(sink::Operation::Load(sink::Type::Ptr, &self.operand(&p), &sink::Memory { align: 8, ..Default::default() }));
-        let at = self.typed(sink::Operation::Gep(sink::Type::I8, &self.operand(&p), &[(sink::Type::I64, sink::Value::Integer(16))]));
-        let available = self.typed(sink::Operation::Load(sink::Type::I64, &self.operand(&at), &sink::Memory { align: 8, ..Default::default() }));
+        self.sink.instruction(
+            None,
+            sink::Operation::Call(
+                &signature,
+                &sink::Value::Global(name.to_owned()),
+                &values,
+                &sink::CallAttrs::default(),
+            ),
+            self.debug_location,
+        );
+        let pointer = self.typed(sink::Operation::Load(
+            sink::Type::Ptr,
+            &self.operand(&p),
+            &sink::Memory {
+                align: 8,
+                ..Default::default()
+            },
+        ));
+        let at = self.typed(sink::Operation::Gep(
+            sink::Type::I8,
+            &self.operand(&p),
+            &[(sink::Type::I64, sink::Value::Integer(16))],
+        ));
+        let available = self.typed(sink::Operation::Load(
+            sink::Type::I64,
+            &self.operand(&at),
+            &sink::Memory {
+                align: 8,
+                ..Default::default()
+            },
+        ));
         (pointer, available)
     }
     /// Admit and allocate one block, returning null and room on refusal. The
@@ -377,7 +438,8 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
             &format!("allocation_success{n}"),
             &format!("allocation_status{n}"),
         );
-        self.sink.block(&format!("allocation_status{n}:").trim_end_matches(':'));
+        self.sink
+            .block(&format!("allocation_status{n}:").trim_end_matches(':'));
         self.intrinsics
             .insert("declare i8 @hirsel_core_allocation_status(ptr, ptr)".into());
         let status = self.calc(format!(
@@ -386,7 +448,8 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         let failed = self.calc(format!("icmp ne i8 {status}, 0"));
         self.branch_failure(&failed, fail, Some(6));
         self.line(format!("br label %allocation_success{n}"));
-        self.sink.block(&format!("allocation_success{n}:").trim_end_matches(':'));
+        self.sink
+            .block(&format!("allocation_success{n}:").trim_end_matches(':'));
     }
     pub(super) fn storage(&mut self, inst: &Inst, index: usize) -> Result<()> {
         let ptr = |s: &str| ("ptr".into(), s.to_string());
@@ -432,7 +495,8 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                     self.line(format!(
                         "br i1 {missing}, label %allocated{n}, label %counted{n}"
                     ));
-                    self.sink.block(&format!("counted{n}:").trim_end_matches(':'));
+                    self.sink
+                        .block(&format!("counted{n}:").trim_end_matches(':'));
                     if counted == Counted::Arc {
                         self.line(format!(
                             "store atomic i64 1, ptr {block} monotonic, align 8"
@@ -442,7 +506,8 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                         self.line(format!("store i64 1, ptr {block}, align 8"));
                     }
                     self.line(format!("br label %allocated{n}"));
-                    self.sink.block(&format!("allocated{n}:").trim_end_matches(':'));
+                    self.sink
+                        .block(&format!("allocated{n}:").trim_end_matches(':'));
                 }
             }
             // Full-new admission and install-before-refund are unchanged.
@@ -587,7 +652,8 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                     self.line(format!(
                         "br i1 {owned}, label %carrier_drop{n}, label %carrier_done{n}"
                     ));
-                    self.sink.block(&format!("carrier_drop{n}:").trim_end_matches(':'));
+                    self.sink
+                        .block(&format!("carrier_drop{n}:").trim_end_matches(':'));
                     Some(n)
                 } else {
                     None
@@ -611,7 +677,8 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                 self.branch_failure(&failed, fail, None);
                 if let Some(n) = guard {
                     self.line(format!("br label %carrier_done{n}"));
-                    self.sink.block(&format!("carrier_done{n}:").trim_end_matches(':'));
+                    self.sink
+                        .block(&format!("carrier_done{n}:").trim_end_matches(':'));
                 }
             }
             Inst::Share { node, kind } => {

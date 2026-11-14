@@ -227,24 +227,48 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         } else {
             Return::on_target(self.abi.target, &sig.results)
         };
-        if !has_status && sig.dest.is_none() && sig.results.len() == 1
-            && site.args.get(&self.body.pools.args).unwrap().iter().all(|a| matches!(a, Arg::Value(_)))
+        if !has_status
+            && sig.dest.is_none()
+            && sig.results.len() == 1
+            && site
+                .args
+                .get(&self.body.pools.args)
+                .unwrap()
+                .iter()
+                .all(|a| matches!(a, Arg::Value(_)))
         {
             let mut params = vec![sink::Parameter::plain(sink::Type::Ptr)];
             let mut values = vec![sink::Value::Local(sink::Local::Context)];
             for arg in site.args.get(&self.body.pools.args).unwrap() {
-                let Arg::Value(value) = *arg else { unreachable!() };
-                let ty = self.vty(value); params.push(sink::Parameter::plain(super::ir_type(ty)));
+                let Arg::Value(value) = *arg else {
+                    unreachable!()
+                };
+                let ty = self.vty(value);
+                params.push(sink::Parameter::plain(super::ir_type(ty)));
                 let numeric = self.numeric(value);
                 values.push(self.operand(&numeric));
             }
             params.push(sink::Parameter::plain(sink::Type::I64));
             let call_site = self.call_site_word(site.callee);
             values.push(self.operand(&call_site));
-            let name = match site.callee { Callee::Direct(f) => format!("{}.infallible", symbol(self.module, f)), _ => return false };
-            let signature = sink::Signature { result: super::ir_type(sig.results[0]), extension: sink::Extension::None, params };
-            let result = self.typed(sink::Operation::Call(&signature, &sink::Value::Global(name), &values, &sink::CallAttrs::default()));
-            for value in site.results.get(&self.body.pools.values).unwrap() { self.put(*value, &result); }
+            let name = match site.callee {
+                Callee::Direct(f) => format!("{}.infallible", symbol(self.module, f)),
+                _ => return false,
+            };
+            let signature = sink::Signature {
+                result: super::ir_type(sig.results[0]),
+                extension: sink::Extension::None,
+                params,
+            };
+            let result = self.typed(sink::Operation::Call(
+                &signature,
+                &sink::Value::Global(name),
+                &values,
+                &sink::CallAttrs::default(),
+            ));
+            for value in site.results.get(&self.body.pools.values).unwrap() {
+                self.put(*value, &result);
+            }
             return true;
         }
         if has_status && !self.has_status {
@@ -336,7 +360,11 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         if self.abi.fields.len() == 1 && !self.has_status {
             if let Some(value) = values.first() {
                 let operand = self.operand(value);
-                self.sink.instruction(None, sink::Operation::Return(super::ir_type(self.abi.fields[0]), Some(&operand)), self.debug_location);
+                self.sink.instruction(
+                    None,
+                    sink::Operation::Return(super::ir_type(self.abi.fields[0]), Some(&operand)),
+                    self.debug_location,
+                );
                 return;
             }
         }
@@ -411,26 +439,81 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
             let storage = super::ir_type_text(&self.abi.storage);
             let pointer = self.operand(&p);
             let zero = sink::Value::Zero;
-            self.sink.instruction(None, sink::Operation::Store(storage.clone(), &zero, &pointer, &sink::Memory { align: 8, ..Default::default() }), self.debug_location);
-            let fields = self.abi.fields.clone(); let offsets = self.abi.offsets.clone();
+            self.sink.instruction(
+                None,
+                sink::Operation::Store(
+                    storage.clone(),
+                    &zero,
+                    &pointer,
+                    &sink::Memory {
+                        align: 8,
+                        ..Default::default()
+                    },
+                ),
+                self.debug_location,
+            );
+            let fields = self.abi.fields.clone();
+            let offsets = self.abi.offsets.clone();
             for ((field, offset), value) in fields.iter().zip(&offsets).zip(values) {
-                let at = self.typed(sink::Operation::Gep(sink::Type::I8, &pointer, &[(sink::Type::I64, sink::Value::Integer(*offset as u128))]));
+                let at = self.typed(sink::Operation::Gep(
+                    sink::Type::I8,
+                    &pointer,
+                    &[(sink::Type::I64, sink::Value::Integer(*offset as u128))],
+                ));
                 let field_value = self.operand(value);
-                self.sink.instruction(None, sink::Operation::Store(super::ir_type(*field), &field_value, &self.operand(&at), &sink::Memory { align: 1, ..Default::default() }), self.debug_location);
+                self.sink.instruction(
+                    None,
+                    sink::Operation::Store(
+                        super::ir_type(*field),
+                        &field_value,
+                        &self.operand(&at),
+                        &sink::Memory {
+                            align: 1,
+                            ..Default::default()
+                        },
+                    ),
+                    self.debug_location,
+                );
             }
             let mut aggregate = sink::Value::Poison;
             let regs = self.abi.regs.clone();
             for (index, reg) in regs.iter().enumerate() {
-                let at = self.typed(sink::Operation::Gep(sink::Type::I8, &pointer, &[(sink::Type::I64, sink::Value::Integer((index as u64 * self.abi.reg_stride) as u128))]));
-                let loaded = self.typed(sink::Operation::Load(super::ir_type_text(reg), &self.operand(&at), &sink::Memory { align: 1, ..Default::default() }));
+                let at = self.typed(sink::Operation::Gep(
+                    sink::Type::I8,
+                    &pointer,
+                    &[(
+                        sink::Type::I64,
+                        sink::Value::Integer((index as u64 * self.abi.reg_stride) as u128),
+                    )],
+                ));
+                let loaded = self.typed(sink::Operation::Load(
+                    super::ir_type_text(reg),
+                    &self.operand(&at),
+                    &sink::Memory {
+                        align: 1,
+                        ..Default::default()
+                    },
+                ));
                 let loaded_value = self.operand(&loaded);
-                aggregate = if index == 0 { loaded_value } else {
+                aggregate = if index == 0 {
+                    loaded_value
+                } else {
                     let aggregate_type = super::ir_type_text(&self.abi.ty);
-                    let inserted = self.typed(sink::Operation::Insert(aggregate_type, &aggregate, super::ir_type_text(reg), &loaded_value, index as u32));
+                    let inserted = self.typed(sink::Operation::Insert(
+                        aggregate_type,
+                        &aggregate,
+                        super::ir_type_text(reg),
+                        &loaded_value,
+                        index as u32,
+                    ));
                     self.operand(&inserted)
                 };
             }
-            self.sink.instruction(None, sink::Operation::Return(super::ir_type_text(&self.abi.ty), Some(&aggregate)), self.debug_location);
+            self.sink.instruction(
+                None,
+                sink::Operation::Return(super::ir_type_text(&self.abi.ty), Some(&aggregate)),
+                self.debug_location,
+            );
             return;
         }
         // Padding is defined, so register coercions never observe poison.
@@ -591,7 +674,6 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         }
         values
     }
-
 }
 
 impl FunctionEmitter<'_, sink::TextSink> {

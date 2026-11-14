@@ -170,35 +170,21 @@ impl CheckProduct {
             if let Some((hash, object)) = crate::native_object::load(store, object_key)? {
                 (hash, object, false)
             } else {
-                let text = owned
-                    .iter()
-                    .map(|(i, ir)| {
-                        hirsel_llvm_lazy::core::emit_ir_relocatable_with_role_facts_for_target(
-                            ir,
-                            hirsel_core_layout::Target::from_triple(&options.target)
-                                .expect("supported native target"),
-                            options.logical_charge_report.is_some(),
-                            options.debug_lines,
-                            &facts[*i],
-                        )
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| NativeStop::Emit {
-                        definition: entry.clone(),
-                        message: e.to_string(),
-                    })?;
                 // Preserve the producer's unit order. Declaration-only imported
-                // modules need neither source emission nor a bitcode load.
-                let mut texts = text.iter();
+                // modules need neither source construction nor a bitcode load.
+                let mut own = owned.iter();
                 let mut imports = libraries.iter();
                 let units = modules
                     .iter()
                     .zip(&imported)
                     .filter_map(|(module, imported)| {
                         if !imported {
-                            Some(hirsel_llvm_lazy::Unit::Text {
-                                ir: texts.next().unwrap(),
-                                imported: false,
+                            let (i, module) = own.next().unwrap();
+                            Some(hirsel_llvm_lazy::Unit::Core {
+                                module,
+                                facts: &facts[*i],
+                                observe_charge: options.logical_charge_report.is_some(),
+                                debug_lines: options.debug_lines,
                             })
                         } else if module.functions.iter().any(|f| f.body.is_some()) {
                             let (_, bitcode, summary) = imports.next().unwrap();

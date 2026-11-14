@@ -52,6 +52,7 @@ static void unit_drop(HirselLlvmBuilder *u) { delete u; }
 static LLVMModuleRef unit_take(HirselLlvmBuilder *u) {
     auto *module = u->module.release(); delete u; return wrap(module);
 }
+static void module_drop(LLVMModuleRef module) { delete unwrap(module); }
 static void unit_bitcode(HirselLlvmBuilder *u, HirselBuilderOutput *out) {
     SmallVector<char, 0> bytes;
     raw_svector_ostream stream(bytes);
@@ -232,6 +233,6 @@ static void attach(HirselLlvmBuilder *u, LLVMValueRef v, const char *name, size_
 static void location(HirselLlvmBuilder *u, LLVMMetadataRef md) { u->builder.SetCurrentDebugLocation(md ? DebugLoc(cast<DILocation>(unwrap(md))) : DebugLoc()); }
 static LLVMValueRef metadata_value(HirselLlvmBuilder *u, LLVMMetadataRef md) { return wrap(MetadataAsValue::get(u->context,unwrap(md))); }
 extern "C" const HirselLlvmBuilderApi *hirsel_llvm_no_folder_api() {
-    static const HirselLlvmBuilderApi api={context_new,context_drop,unit_new,unit_drop,unit_take,unit_bitcode,print,print_text,integer_type,float_type,pointer_type,void_type,array_type,struct_type,integer,poison,zero,function,define,parameter,block,begin_block,name_value,local,bind,alloca_value,binary,cast_value,compare,select,load,store,gep,extract,insert,phi,call,branch,conditional,return_value,unreachable,vector_type,constant_cast,constant_add,global,constant_struct,constant_array,initialize_global,module_asm,attribute,string_attribute,tail,fneg,atomic_load,atomic_store,atomic_rmw,compare_exchange,fence,switch_value,metadata_ref,metadata_string,metadata_integer,metadata_tuple,metadata_bind,named_metadata,attach,location,metadata_value};
+    static const HirselLlvmBuilderApi api={context_new,context_drop,unit_new,unit_drop,unit_take,module_drop,unit_bitcode,print,print_text,integer_type,float_type,pointer_type,void_type,array_type,struct_type,integer,poison,zero,function,define,parameter,block,begin_block,name_value,local,bind,alloca_value,binary,cast_value,compare,select,load,store,gep,extract,insert,phi,call,branch,conditional,return_value,unreachable,vector_type,constant_cast,constant_add,global,constant_struct,constant_array,initialize_global,module_asm,attribute,string_attribute,tail,fneg,atomic_load,atomic_store,atomic_rmw,compare_exchange,fence,switch_value,metadata_ref,metadata_string,metadata_integer,metadata_tuple,metadata_bind,named_metadata,attach,location,metadata_value};
     return &api;
 }

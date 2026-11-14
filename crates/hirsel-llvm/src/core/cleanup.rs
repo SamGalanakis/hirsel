@@ -246,20 +246,23 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                 let label = self.next;
                 self.next += 1;
                 self.line(format!("br label %array_head{label}"));
-                self.sink.block(&format!("array_head{label}:").trim_end_matches(':'));
+                self.sink
+                    .block(&format!("array_head{label}:").trim_end_matches(':'));
                 let i = self.calc(format!("load i64, ptr {index}"));
                 let more = self.calc(format!("icmp ult i64 {i}, {n}"));
                 self.line(format!(
                     "br i1 {more}, label %array_body{label}, label %array_done{label}"
                 ));
-                self.sink.block(&format!("array_body{label}:").trim_end_matches(':'));
+                self.sink
+                    .block(&format!("array_body{label}:").trim_end_matches(':'));
                 let off = self.calc(format!("mul i64 {i}, {stride}"));
                 let element = self.calc(format!("getelementptr i8, ptr {p}, i64 {off}"));
                 self.clean_field(e, &element, status)?;
                 let next = self.calc(format!("add i64 {i}, 1"));
                 self.line(format!("store i64 {next}, ptr {index}"));
                 self.line(format!("br label %array_head{label}"));
-                self.sink.block(&format!("array_done{label}:").trim_end_matches(':'));
+                self.sink
+                    .block(&format!("array_done{label}:").trim_end_matches(':'));
                 None
             }
             FieldTy::Seq(_) | FieldTy::Map(_, _) => {
@@ -275,13 +278,15 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                 self.line(format!(
                     "br i1 {allocated}, label %closure_drop{label}, label %closure_done{label}"
                 ));
-                self.sink.block(&format!("closure_drop{label}:").trim_end_matches(':'));
+                self.sink
+                    .block(&format!("closure_drop{label}:").trim_end_matches(':'));
                 let glue = self.calc(format!("load ptr, ptr {environment}, align 1"));
                 self.line(format!(
                     "call i8 {glue}(ptr %context, ptr {environment}, i64 {site})"
                 ));
                 self.line(format!("br label %closure_done{label}"));
-                self.sink.block(&format!("closure_done{label}:").trim_end_matches(':'));
+                self.sink
+                    .block(&format!("closure_done{label}:").trim_end_matches(':'));
                 None
             }
             FieldTy::Rc(t) | FieldTy::Arc(t) => {
@@ -442,7 +447,8 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                     self.line(format!("br label %row{n}_0"));
                 }
                 for (row, fields) in drop.fields.iter().enumerate() {
-                    self.sink.block(&format!("row{n}_{row}:").trim_end_matches(':'));
+                    self.sink
+                        .block(&format!("row{n}_{row}:").trim_end_matches(':'));
                     let mut offset = 0;
                     for f in fields {
                         let at = self.calc(format!("getelementptr i8, ptr {p}, i64 {}", f.offset));

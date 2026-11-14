@@ -92,13 +92,15 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         self.line(format!(
             "br i1 {owned}, label %collection_head{n}, label %collection_done{n}"
         ));
-        self.sink.block(&format!("collection_head{n}:").trim_end_matches(':'));
+        self.sink
+            .block(&format!("collection_head{n}:").trim_end_matches(':'));
         let i = self.calc(format!("load i64, ptr {index}"));
         let more = self.calc(format!("icmp ult i64 {i}, {length}"));
         self.line(format!(
             "br i1 {more}, label %collection_body{n}, label %collection_settle{n}"
         ));
-        self.sink.block(&format!("collection_body{n}:").trim_end_matches(':'));
+        self.sink
+            .block(&format!("collection_body{n}:").trim_end_matches(':'));
         let entry = self.calc(format!(
             "getelementptr [{} x i8], ptr {block}, i64 {i}",
             entries.stride
@@ -109,27 +111,32 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
             self.line(format!(
                 "br i1 {live}, label %collection_live{n}, label %collection_next{n}"
             ));
-            self.sink.block(&format!("collection_live{n}:").trim_end_matches(':'));
+            self.sink
+                .block(&format!("collection_live{n}:").trim_end_matches(':'));
         }
         for (offset, f) in entries.fields {
             let at = self.calc(format!("getelementptr i8, ptr {entry}, i64 {offset}"));
             self.clean_field(f, &at, status)?;
         }
         self.line(format!("br label %collection_next{n}"));
-        self.sink.block(&format!("collection_next{n}:").trim_end_matches(':'));
+        self.sink
+            .block(&format!("collection_next{n}:").trim_end_matches(':'));
         let next = self.calc(format!("add i64 {i}, 1"));
         self.line(format!("store i64 {next}, ptr {index}"));
         self.line(format!("br label %collection_head{n}"));
-        self.sink.block(&format!("collection_settle{n}:").trim_end_matches(':'));
+        self.sink
+            .block(&format!("collection_settle{n}:").trim_end_matches(':'));
         let allocated = self.calc(format!("icmp ne i64 {capacity}, 0"));
         self.line(format!(
             "br i1 {allocated}, label %collection_free{n}, label %collection_done{n}"
         ));
-        self.sink.block(&format!("collection_free{n}:").trim_end_matches(':'));
+        self.sink
+            .block(&format!("collection_free{n}:").trim_end_matches(':'));
         let charge = self.collection_charge(&capacity, entries.logical);
         self.free_block(&block, &charge);
         self.line(format!("br label %collection_done{n}"));
-        self.sink.block(&format!("collection_done{n}:").trim_end_matches(':'));
+        self.sink
+            .block(&format!("collection_done{n}:").trim_end_matches(':'));
         Ok(())
     }
     pub(super) fn enqueue_collection(&mut self, field: &FieldTy, carrier: &str) {
@@ -146,7 +153,8 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         self.line(format!(
             "br i1 {allocated}, label %buffer{n}, label %empty{n}"
         ));
-        self.sink.block(&format!("buffer{n}:").trim_end_matches(':'));
+        self.sink
+            .block(&format!("buffer{n}:").trim_end_matches(':'));
         let charge = self.collection_charge(&capacity, entries.logical);
         if hirsel_core_layout::terminal(&self.module.types, self.recipes, field) {
             self.free_block(&buffer, &charge);

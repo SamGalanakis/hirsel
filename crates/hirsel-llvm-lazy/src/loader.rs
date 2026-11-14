@@ -66,6 +66,17 @@ pub(crate) struct RawLibrary {
     pub bitcode: Vec<u8>,
     pub functions: Vec<crate::ImportFunction>,
 }
+pub(crate) enum ProgramUnit<'a> {
+    Native(crate::construction::NativeModule),
+    Text {
+        ir: &'a str,
+        imported: bool,
+    },
+    Import {
+        bitcode: &'a [u8],
+        summary: &'a crate::ImportSummary,
+    },
+}
 struct Backend {
     compile: Compile,
     program: Program,
@@ -134,7 +145,12 @@ fn load() -> Result<Backend, String> {
     let library = unsafe { libc::dlsym(handle, c"hirsel_llvm_library_v1".as_ptr()) };
     // SAFETY: the table getter is part of the same embedded component ABI.
     let construction = unsafe { libc::dlsym(handle, c"hirsel_llvm_builder_v1".as_ptr()) };
-    if compile.is_null() || free.is_null() || program.is_null() || library.is_null() || construction.is_null() {
+    if compile.is_null()
+        || free.is_null()
+        || program.is_null()
+        || library.is_null()
+        || construction.is_null()
+    {
         return Err(dl_error());
     }
     Ok(Backend {
@@ -149,7 +165,10 @@ fn load() -> Result<Backend, String> {
         // SAFETY: the table is static, its types match construction.rs, and the
         // component stays mapped for the process lifetime.
         construction: unsafe {
-            let getter = std::mem::transmute::<*mut libc::c_void, unsafe extern "C" fn() -> *const crate::construction::Api>(construction);
+            let getter = std::mem::transmute::<
+                *mut libc::c_void,
+                unsafe extern "C" fn() -> *const crate::construction::Api,
+            >(construction);
             &*getter()
         },
         _image: image,
@@ -201,7 +220,7 @@ pub(crate) fn compile(
 }
 
 pub(crate) fn program(
-    units: &[crate::Unit<'_>],
+    mut units: Vec<ProgramUnit<'_>>,
     exports: &[String],
     target: hirsel_core_layout::Target,
 ) -> Result<Vec<u8>, String> {
@@ -209,10 +228,20 @@ pub(crate) fn program(
     let cpu = CString::new(target.cpu()).unwrap();
     let backend = backend()?;
     let inputs: Vec<_> = units
-        .iter()
+        .iter_mut()
         .filter_map(|u| match u {
-            crate::Unit::Core { .. } => None,
-            crate::Unit::Text { ir, imported } => Some(Input {
+            ProgramUnit::Native(module) => {
+                let input = Input {
+                    data: std::ptr::null(),
+                    len: 0,
+                    imported: 0,
+                    bitcode: 0,
+                    module: module.raw(),
+                };
+                module.consume();
+                Some(input)
+            }
+            ProgramUnit::Text { ir, imported } => Some(Input {
                 data: ir.as_ptr(),
                 len: ir.len(),
                 imported: u8::from(*imported),
@@ -222,7 +251,7 @@ pub(crate) fn program(
             // Apply the body-size bound after composition, just as for text.
             // Skipping an entire unit also drops declarations/private helpers
             // and changes function order and MergeFunctions representatives.
-            crate::Unit::Import {
+            ProgramUnit::Import {
                 bitcode,
                 summary: _,
             } => Some(Input {

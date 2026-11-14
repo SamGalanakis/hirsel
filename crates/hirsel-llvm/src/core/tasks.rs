@@ -49,10 +49,22 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
     ) -> Vec<String> {
         let abi = abi::Return::on_target(self.abi.target, results);
         if results.len() == 1 && !abi.indirect {
-            let params: Vec<_> = args.iter().map(|(t, _)| sink::Parameter::plain(super::ir_type_text(self.c_argument(t)))).collect();
+            let params: Vec<_> = args
+                .iter()
+                .map(|(t, _)| sink::Parameter::plain(super::ir_type_text(self.c_argument(t))))
+                .collect();
             let values: Vec<_> = args.iter().map(|(_, v)| self.operand(v)).collect();
-            let signature = sink::Signature { result: super::ir_type(results[0]), extension: sink::Extension::None, params };
-            let value = self.typed(sink::Operation::Call(&signature, &sink::Value::Global(name.to_owned()), &values, &sink::CallAttrs::default()));
+            let signature = sink::Signature {
+                result: super::ir_type(results[0]),
+                extension: sink::Extension::None,
+                params,
+            };
+            let value = self.typed(sink::Operation::Call(
+                &signature,
+                &sink::Value::Global(name.to_owned()),
+                &values,
+                &sink::CallAttrs::default(),
+            ));
             return vec![value];
         }
         let mut params = Vec::new();

@@ -22,8 +22,8 @@ mod flow;
 mod forward;
 mod growth;
 mod scalar;
-mod sites;
 pub(crate) mod sink;
+mod sites;
 mod storage;
 #[cfg(all(test, not(hirsel_lazy_core)))]
 mod target_tests;
@@ -112,53 +112,152 @@ pub fn emit_ir(module: &Module) -> Result<String> {
 /// Unit::Core product seam; larger families join it as their helpers become
 /// sink-native. No LLVM text is created on this path.
 #[cfg(hirsel_lazy_core)]
-pub fn emit_native_scalar_module(module: &Module, target: Target) -> Result<Vec<u8>> {
+pub(crate) fn emit_native_scalar_module(
+    module: &Module,
+    target: Target,
+) -> Result<crate::construction::NativeModule> {
+    let context = std::rc::Rc::new(crate::construction::Context::new().map_err(Error::Llvm)?);
+    emit_native_scalar_module_in_context(module, target, context)
+}
+
+#[cfg(hirsel_lazy_core)]
+pub(crate) fn emit_native_scalar_module_in_context(
+    module: &Module,
+    target: Target,
+    context: std::rc::Rc<crate::construction::Context>,
+) -> Result<crate::construction::NativeModule> {
     let failures = failure::Failures::new(module);
-    let recipes = hirsel_core_layout::compute(&module.types).map_err(|e| Error::Llvm(format!("{e:?}")))?;
-    let context = crate::construction::Context::new().map_err(Error::Llvm)?;
+    let recipes =
+        hirsel_core_layout::compute(&module.types).map_err(|e| Error::Llvm(format!("{e:?}")))?;
     let mut native = sink::native::NativeSink::new(context.unit());
     let mut emitted = 0;
     for (index, function) in module.functions.iter().enumerate() {
-        let Some(body) = &function.body else { continue; };
+        let Some(body) = &function.body else {
+            continue;
+        };
         let sig = &module.signatures[function.signature.index()];
         if sig.dest.is_some() || sig.results.len() > 1 || failures.may_fail[index] {
-            return Err(Error::Unsupported("native scalar seam requires infallible scalar functions".into()));
+            return Err(Error::Unsupported(
+                "native scalar seam requires infallible scalar functions".into(),
+            ));
         }
-        if body.insts.iter().any(|inst| matches!(inst, Inst::Call { .. } | Inst::Alloc { .. } | Inst::Grow { .. } | Inst::Drop { .. } | Inst::Release { .. } | Inst::Free { .. } | Inst::Copy { .. } | Inst::LimitEnter { .. } | Inst::LimitExit | Inst::RegionOpen { .. } | Inst::RegionClose { .. } | Inst::Share { .. } | Inst::TryUnwrap { .. })) {
-            return Err(Error::Unsupported("native scalar seam encountered memory/runtime instructions".into()));
+        if body.insts.iter().any(|inst| {
+            matches!(
+                inst,
+                Inst::Call { .. }
+                    | Inst::Alloc { .. }
+                    | Inst::Grow { .. }
+                    | Inst::Drop { .. }
+                    | Inst::Release { .. }
+                    | Inst::Free { .. }
+                    | Inst::Copy { .. }
+                    | Inst::LimitEnter { .. }
+                    | Inst::LimitExit
+                    | Inst::RegionOpen { .. }
+                    | Inst::RegionClose { .. }
+                    | Inst::Share { .. }
+                    | Inst::TryUnwrap { .. }
+            )
+        }) {
+            return Err(Error::Unsupported(
+                "native scalar seam encountered memory/runtime instructions".into(),
+            ));
         }
-        let result = sig.results.first().copied().map(ir_type).unwrap_or(sink::Type::Void);
+        let result = sig
+            .results
+            .first()
+            .copied()
+            .map(ir_type)
+            .unwrap_or(sink::Type::Void);
         let mut params = vec![sink::Parameter::plain(sink::Type::Ptr)];
-        params.extend(sig.params.iter().map(|p| match p { Param::Value(t) => sink::Parameter::plain(ir_type(*t)), Param::Address { .. } => sink::Parameter::plain(sink::Type::Ptr) }));
+        params.extend(sig.params.iter().map(|p| match p {
+            Param::Value(t) => sink::Parameter::plain(ir_type(*t)),
+            Param::Address { .. } => sink::Parameter::plain(sink::Type::Ptr),
+        }));
         params.push(sink::Parameter::plain(sink::Type::I64));
-        let signature = sink::Signature { result, extension: sink::Extension::None, params };
+        let signature = sink::Signature {
+            result,
+            extension: sink::Extension::None,
+            params,
+        };
         let mut locals = Vec::new();
-        for i in 0..sig.params.len() { locals.push(sink::Local::Param(i)); }
-        native.begin_function(&format!("{}.infallible", symbol(module, FuncId(index as u32))), &signature, &locals, true);
+        for i in 0..sig.params.len() {
+            locals.push(sink::Local::Param(i));
+        }
+        native.begin_function(
+            &format!("{}.infallible", symbol(module, FuncId(index as u32))),
+            &signature,
+            &locals,
+            true,
+        );
         native.block("entry");
         let flow = flow::Flow::new(body);
         let mut emitter = FunctionEmitter {
-            function: Some(FuncId(index as u32)), append_fast: false, shadow_callee: None,
-            module, body, recipes: &recipes, abi: abi::Return::on_target(target, &sig.results), has_status: false,
-            failures: &failures, constants: &failures.constants[index], empty_bounds: empty::EmptyBounds::default(), observe_charge: false,
-            facts: false, aliases: None, caller_site: "%caller_site", debug_location: None, anchor: None,
-            relocatable_sites: false, value_slots: values::slots(body, &flow), address_slots: values::address_slots(body, &flow),
-            sink: native, next: 0, intrinsics: &mut std::collections::BTreeSet::new(),
+            function: Some(FuncId(index as u32)),
+            append_fast: false,
+            shadow_callee: None,
+            module,
+            body,
+            recipes: &recipes,
+            abi: abi::Return::on_target(target, &sig.results),
+            has_status: false,
+            failures: &failures,
+            constants: &failures.constants[index],
+            empty_bounds: empty::EmptyBounds::default(),
+            observe_charge: false,
+            facts: false,
+            aliases: None,
+            caller_site: "%caller_site",
+            debug_location: None,
+            anchor: None,
+            relocatable_sites: false,
+            value_slots: values::slots(body, &flow),
+            address_slots: values::address_slots(body, &flow),
+            sink: native,
+            next: 0,
+            intrinsics: &mut std::collections::BTreeSet::new(),
         };
-        for (i, t) in body.values.iter().enumerate() { if emitter.value_slots[i] { emitter.sink.alloca(sink::Local::Value(i), &ir_type(*t), 8); } }
-        for (i, t) in body.slots.iter().enumerate() { let (bytes, align)=emitter.place_layout(*t); emitter.sink.alloca(sink::Local::Slot(i), &sink::Type::bytes(bytes), align as u32); }
-        for (i, value) in body.blocks[0].params.get(&body.pools.values).unwrap().iter().enumerate() { emitter.put(*value, &format!("%p{i}")); }
+        for (i, t) in body.values.iter().enumerate() {
+            if emitter.value_slots[i] {
+                emitter.sink.alloca(sink::Local::Value(i), &ir_type(*t), 8);
+            }
+        }
+        for (i, t) in body.slots.iter().enumerate() {
+            let (bytes, align) = emitter.place_layout(*t);
+            emitter.sink.alloca(
+                sink::Local::Slot(i),
+                &sink::Type::bytes(bytes),
+                align as u32,
+            );
+        }
+        for (i, value) in body.blocks[0]
+            .params
+            .get(&body.pools.values)
+            .unwrap()
+            .iter()
+            .enumerate()
+        {
+            emitter.put(*value, &format!("%p{i}"));
+        }
         for (block, b) in body.blocks.iter().enumerate() {
-            if block != 0 { emitter.sink.block(&format!("b{block}")); }
-            for offset in b.insts.get(&body.insts).unwrap().iter().enumerate() { emitter.inst(offset.1, b.insts.start as usize + offset.0)?; }
+            if block != 0 {
+                emitter.sink.block(&format!("b{block}"));
+            }
+            for offset in b.insts.get(&body.insts).unwrap().iter().enumerate() {
+                emitter.inst(offset.1, b.insts.start as usize + offset.0)?;
+            }
             emitter.term(&body.terminators[block])?;
         }
         let native = emitter.sink;
-        let bitcode = native.bitcode().map_err(Error::Llvm)?;
+        let module = native.take(context.clone());
         emitted += 1;
-        return Ok(bitcode);
+        return Ok(module);
     }
-    if emitted == 0 { return Err(Error::Unsupported("native scalar seam received no function bodies".into())); }
+    if emitted == 0 {
+        return Err(Error::Unsupported(
+            "native scalar seam received no function bodies".into(),
+        ));
+    }
     unreachable!()
 }
 
@@ -680,11 +779,22 @@ fn ir_type(t: Ty) -> sink::Type {
     }
 }
 fn ir_type_text(text: &str) -> sink::Type {
-    let text = text.trim().trim_end_matches(" zeroext").trim_end_matches(" signext");
-    if text == "ptr" { return sink::Type::Ptr; }
-    if text == "float" { return sink::Type::Float; }
-    if text == "double" { return sink::Type::Double; }
-    if let Some(bits) = text.strip_prefix('i').and_then(|s| s.parse().ok()) { return sink::Type::Int(bits); }
+    let text = text
+        .trim()
+        .trim_end_matches(" zeroext")
+        .trim_end_matches(" signext");
+    if text == "ptr" {
+        return sink::Type::Ptr;
+    }
+    if text == "float" {
+        return sink::Type::Float;
+    }
+    if text == "double" {
+        return sink::Type::Double;
+    }
+    if let Some(bits) = text.strip_prefix('i').and_then(|s| s.parse().ok()) {
+        return sink::Type::Int(bits);
+    }
     sink::Type::Ptr
 }
 fn bits_ty(t: Ty) -> String {
@@ -752,30 +862,46 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
     fn typed(&mut self, op: sink::Operation<'_>) -> String {
         let name = format!("%t{}", self.next);
         self.next += 1;
-        self.sink.instruction(Some(sink::Local::Temp(self.next - 1)), op, self.debug_location);
+        self.sink.instruction(
+            Some(sink::Local::Temp(self.next - 1)),
+            op,
+            self.debug_location,
+        );
         name
     }
     fn typed_binary(&mut self, op: sink::Binary, t: Ty, a: &str, b: &str) -> String {
-        let av = self.operand(a); let bv = self.operand(b); let ty = ir_type(t);
+        let av = self.operand(a);
+        let bv = self.operand(b);
+        let ty = ir_type(t);
         self.typed(sink::Operation::Binary(op, ty, &av, &bv))
     }
     fn typed_compare(&mut self, pred: sink::Predicate, t: Ty, a: &str, b: &str) -> String {
-        let av = self.operand(a); let bv = self.operand(b); let ty = ir_type(t);
+        let av = self.operand(a);
+        let bv = self.operand(b);
+        let ty = ir_type(t);
         self.typed(sink::Operation::Compare(pred, ty, &av, &bv))
     }
     fn typed_select(&mut self, t: Ty, c: &str, yes: &str, no: &str) -> String {
-        let cv = self.operand(c); let yv = self.operand(yes); let nv = self.operand(no); let ty = ir_type(t);
+        let cv = self.operand(c);
+        let yv = self.operand(yes);
+        let nv = self.operand(no);
+        let ty = ir_type(t);
         self.typed(sink::Operation::Select(ty, &cv, &yv, &nv))
     }
     fn typed_cast(&mut self, op: sink::Cast, from: Ty, value: &str, to: Ty) -> String {
-        let v = self.operand(value); let from = ir_type(from); let to = ir_type(to);
+        let v = self.operand(value);
+        let from = ir_type(from);
+        let to = ir_type(to);
         self.typed(sink::Operation::Cast(op, from, &v, to))
     }
     fn typed_call(&mut self, name: &str, result: Ty, args: &[(Ty, &str)]) -> String {
         let signature = sink::Signature {
             result: ir_type(result),
             extension: sink::Extension::None,
-            params: args.iter().map(|(t, _)| sink::Parameter::plain(ir_type(*t))).collect(),
+            params: args
+                .iter()
+                .map(|(t, _)| sink::Parameter::plain(ir_type(*t)))
+                .collect(),
         };
         let values: Vec<_> = args.iter().map(|(_, v)| self.operand(v)).collect();
         self.typed(sink::Operation::Call(
@@ -832,9 +958,22 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         let ptr = sink::Value::Local(sink::Local::Value(v.index()));
         let ty = ir_type(self.vty(v));
         if self.value_slots.get(v.index()).copied().unwrap_or(true) {
-            self.sink.instruction(None, sink::Operation::Store(ty, &value, &ptr, &sink::Memory::default()), self.debug_location);
+            self.sink.instruction(
+                None,
+                sink::Operation::Store(ty, &value, &ptr, &sink::Memory::default()),
+                self.debug_location,
+            );
         } else {
-            self.sink.instruction(Some(sink::Local::Value(v.index())), sink::Operation::Select(ty, &sink::Value::Boolean(true), &value, &sink::Value::Poison), self.debug_location);
+            self.sink.instruction(
+                Some(sink::Local::Value(v.index())),
+                sink::Operation::Select(
+                    ty,
+                    &sink::Value::Boolean(true),
+                    &value,
+                    &sink::Value::Poison,
+                ),
+                self.debug_location,
+            );
         }
     }
     fn put(&mut self, v: ValueId, x: &str) {
@@ -849,7 +988,11 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
     fn address(&mut self, a: AddressId) -> String {
         if self.address_slots.get(a.index()).copied().unwrap_or(true) {
             let ptr = sink::Value::Local(sink::Local::Address(a.index()));
-            self.typed(sink::Operation::Load(sink::Type::Ptr, &ptr, &sink::Memory::default()))
+            self.typed(sink::Operation::Load(
+                sink::Type::Ptr,
+                &ptr,
+                &sink::Memory::default(),
+            ))
         } else {
             format!("%a{}", a.0)
         }
@@ -976,7 +1119,11 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
             Inst::Const { result, bits } => {
                 let t = self.vty(result);
                 let x = if t.is_float() {
-                    sink::Value::Bitcast { from: sink::Type::Int((size(t) * 8) as u32), bits: bits as u128, to: ir_type(t) }
+                    sink::Value::Bitcast {
+                        from: sink::Type::Int((size(t) * 8) as u32),
+                        bits: bits as u128,
+                        to: ir_type(t),
+                    }
                 } else if t == Ty::Ptr {
                     sink::Value::IntToPtr(bits)
                 } else {
@@ -984,7 +1131,9 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                 };
                 self.put_value(result, x);
             }
-            Inst::ReadStatic { result, data } => self.put_value(result, sink::Value::Global(format!("s{}", data.0))),
+            Inst::ReadStatic { result, data } => {
+                self.put_value(result, sink::Value::Global(format!("s{}", data.0)))
+            }
             Inst::FunctionRef { result, function } => {
                 self.put_value(result, sink::Value::Global(symbol(self.module, function)))
             }
@@ -997,9 +1146,11 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                 let t = self.vty(operand);
                 let x = self.numeric(operand);
                 let r = match op {
-                    UnaryOp::Not => self.typed_binary(sink::Binary::Xor,t,&x,"1"),
-                    UnaryOp::BitNot => self.typed_binary(sink::Binary::Xor,t,&x,"-1"),
-                    UnaryOp::Neg if t.is_float() => self.typed(sink::Operation::FNeg(ir_type(t), &self.operand(&x))),
+                    UnaryOp::Not => self.typed_binary(sink::Binary::Xor, t, &x, "1"),
+                    UnaryOp::BitNot => self.typed_binary(sink::Binary::Xor, t, &x, "-1"),
+                    UnaryOp::Neg if t.is_float() => {
+                        self.typed(sink::Operation::FNeg(ir_type(t), &self.operand(&x)))
+                    }
                     UnaryOp::Neg => {
                         let (v, flag) = self.overflow(t, ArithOp::Sub, "0", &x);
                         self.fail_if(&flag, fail, 0)?;
@@ -1029,9 +1180,37 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                 let t = self.vty(left);
                 let a = self.numeric(left);
                 let b = self.numeric(right);
-                let pred = if t.is_float() {match op {CompareOp::Eq=>sink::Predicate::OEq,CompareOp::Ne=>sink::Predicate::UNe,CompareOp::Lt=>sink::Predicate::OLt,CompareOp::Le=>sink::Predicate::OLe,CompareOp::Gt=>sink::Predicate::OGt,CompareOp::Ge=>sink::Predicate::OGe}} else {let signed=t.int().is_some_and(|x|x.0);match op {CompareOp::Eq=>sink::Predicate::Eq,CompareOp::Ne=>sink::Predicate::Ne,CompareOp::Lt if signed=>sink::Predicate::Slt,CompareOp::Le if signed=>sink::Predicate::Sle,CompareOp::Gt if signed=>sink::Predicate::Sgt,CompareOp::Ge if signed=>sink::Predicate::Sge,CompareOp::Lt=>sink::Predicate::Ult,CompareOp::Le=>sink::Predicate::Ule,CompareOp::Gt=>sink::Predicate::Ugt,CompareOp::Ge=>sink::Predicate::Uge}};
-                let x = self.typed_compare(pred,t,&a,&b);
-                let x = self.typed_cast(sink::Cast::ZExt,Ty::Scalar(Scalar::Bool),&x,Ty::Scalar(Scalar::U8));
+                let pred = if t.is_float() {
+                    match op {
+                        CompareOp::Eq => sink::Predicate::OEq,
+                        CompareOp::Ne => sink::Predicate::UNe,
+                        CompareOp::Lt => sink::Predicate::OLt,
+                        CompareOp::Le => sink::Predicate::OLe,
+                        CompareOp::Gt => sink::Predicate::OGt,
+                        CompareOp::Ge => sink::Predicate::OGe,
+                    }
+                } else {
+                    let signed = t.int().is_some_and(|x| x.0);
+                    match op {
+                        CompareOp::Eq => sink::Predicate::Eq,
+                        CompareOp::Ne => sink::Predicate::Ne,
+                        CompareOp::Lt if signed => sink::Predicate::Slt,
+                        CompareOp::Le if signed => sink::Predicate::Sle,
+                        CompareOp::Gt if signed => sink::Predicate::Sgt,
+                        CompareOp::Ge if signed => sink::Predicate::Sge,
+                        CompareOp::Lt => sink::Predicate::Ult,
+                        CompareOp::Le => sink::Predicate::Ule,
+                        CompareOp::Gt => sink::Predicate::Ugt,
+                        CompareOp::Ge => sink::Predicate::Uge,
+                    }
+                };
+                let x = self.typed_compare(pred, t, &a, &b);
+                let x = self.typed_cast(
+                    sink::Cast::ZExt,
+                    Ty::Scalar(Scalar::Bool),
+                    &x,
+                    Ty::Scalar(Scalar::U8),
+                );
                 self.put(result, &x);
             }
             Inst::IntArith {
@@ -1092,15 +1271,35 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                 let p = self.address(address);
                 let _metadata = self.access_facts(&[address]);
                 let pointer = self.operand(&p);
-                let value = self.typed(sink::Operation::Load(ir_type(self.vty(result)), &pointer, &sink::Memory { align: 1, ..Default::default() }));
+                let value = self.typed(sink::Operation::Load(
+                    ir_type(self.vty(result)),
+                    &pointer,
+                    &sink::Memory {
+                        align: 1,
+                        ..Default::default()
+                    },
+                ));
                 self.put(result, &value);
             }
             Inst::Store { address, value } => {
                 let p = self.address(address);
                 let x = self.numeric(value);
                 let _metadata = self.access_facts(&[address]);
-                let x = self.operand(&x); let p = self.operand(&p);
-                self.sink.instruction(None, sink::Operation::Store(ir_type(self.vty(value)), &x, &p, &sink::Memory { align: 1, ..Default::default() }), self.debug_location);
+                let x = self.operand(&x);
+                let p = self.operand(&p);
+                self.sink.instruction(
+                    None,
+                    sink::Operation::Store(
+                        ir_type(self.vty(value)),
+                        &x,
+                        &p,
+                        &sink::Memory {
+                            align: 1,
+                            ..Default::default()
+                        },
+                    ),
+                    self.debug_location,
+                );
             }
             // FORM v1c: a mark is the evaluator's alone; no code.
             Inst::StorageLive { .. }
@@ -1120,7 +1319,16 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                 } else {
                     !(1u64 << field)
                 };
-                let x = self.typed_binary(if initialized {sink::Binary::Or}else{sink::Binary::And},self.vty(mask),&x,&k.to_string());
+                let x = self.typed_binary(
+                    if initialized {
+                        sink::Binary::Or
+                    } else {
+                        sink::Binary::And
+                    },
+                    self.vty(mask),
+                    &x,
+                    &k.to_string(),
+                );
                 self.put(result, &x);
             }
             Inst::Call { call } => self.call(&self.body.calls[call.index()])?,
@@ -1161,20 +1369,26 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         }
         self.sink.block(&format!("{label}:").trim_end_matches(':'));
         let to = self.edge(edge);
-        self.sink.instruction(None, sink::Operation::Branch(&to), self.debug_location);
+        self.sink
+            .instruction(None, sink::Operation::Branch(&to), self.debug_location);
     }
     fn term(&mut self, term: &Terminator) -> Result<()> {
         match *term {
             Terminator::Jump(e) => {
                 let to = self.edge(e);
-                self.sink.instruction(None, sink::Operation::Branch(&to), self.debug_location);
+                self.sink
+                    .instruction(None, sink::Operation::Branch(&to), self.debug_location);
             }
             Terminator::Branch { condition, yes, no } => {
                 let c = self.numeric(condition);
                 let c = self.typed_compare(sink::Predicate::Ne, Ty::Scalar(Scalar::U8), &c, "0");
                 let y = self.edge_label(yes);
                 let n = self.edge_label(no);
-                self.sink.instruction(None, sink::Operation::Conditional(&self.operand(&c), &y, &n, false), self.debug_location);
+                self.sink.instruction(
+                    None,
+                    sink::Operation::Conditional(&self.operand(&c), &y, &n, false),
+                    self.debug_location,
+                );
                 self.emit_edge(&y, yes);
                 self.emit_edge(&n, no);
             }
@@ -1192,8 +1406,20 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                     .iter()
                     .map(|a| (*a, self.edge_label(a.edge)))
                     .collect::<Vec<_>>();
-                let native_arms = arms.iter().map(|(a, label)| (a.value, label.clone())).collect::<Vec<_>>();
-                self.sink.instruction(None, sink::Operation::Switch(ir_type(self.vty(value)), &self.operand(&v), &other, &native_arms), self.debug_location);
+                let native_arms = arms
+                    .iter()
+                    .map(|(a, label)| (a.value, label.clone()))
+                    .collect::<Vec<_>>();
+                self.sink.instruction(
+                    None,
+                    sink::Operation::Switch(
+                        ir_type(self.vty(value)),
+                        &self.operand(&v),
+                        &other,
+                        &native_arms,
+                    ),
+                    self.debug_location,
+                );
                 self.emit_edge(&other, otherwise);
                 for (a, label) in arms {
                     self.emit_edge(&label, a.edge);
@@ -1208,7 +1434,10 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                     .collect::<Vec<_>>();
                 self.return_values(&xs);
             }
-            Terminator::Unreachable => self.sink.instruction(None, sink::Operation::Unreachable, self.debug_location),
+            Terminator::Unreachable => {
+                self.sink
+                    .instruction(None, sink::Operation::Unreachable, self.debug_location)
+            }
             Terminator::Propagate => self.return_failure(),
             Terminator::Raise { cause, cleanup } => {
                 match cause {

@@ -1,7 +1,9 @@
 //! Same-build NoFolder operations. Handles borrow the context that owns them;
 //! CoreIR semantics and failure cleanup remain in the Rust lowering.
+use std::cell::Cell;
 use std::ffi::{c_char, c_void};
 use std::marker::PhantomData;
+use std::rc::Rc;
 
 type Raw = *mut c_void;
 #[derive(Clone, Copy)]
@@ -60,6 +62,7 @@ pub(crate) struct Api {
     unit_new: unsafe extern "C" fn(Raw, *const c_char, usize) -> Raw,
     unit_drop: unsafe extern "C" fn(Raw),
     unit_take: unsafe extern "C" fn(Raw) -> Raw,
+    module_drop: unsafe extern "C" fn(Raw),
     unit_bitcode: unsafe extern "C" fn(Raw, *mut Output),
     print: unsafe extern "C" fn(Raw, *mut Output),
     print_text: unsafe extern "C" fn(*const c_char, usize, *mut Output),
@@ -123,7 +126,6 @@ pub(crate) struct Api {
     attach: unsafe extern "C" fn(Raw, Raw, *const c_char, usize, Raw),
     location: unsafe extern "C" fn(Raw, Raw),
     metadata_value: unsafe extern "C" fn(Raw, Raw) -> Raw,
-
 }
 
 pub(crate) struct Context {
@@ -140,7 +142,11 @@ impl Context {
     pub fn unit(&self) -> Unit<'_> {
         // SAFETY: the borrowed context outlives this unit and all its handles.
         let raw = unsafe { (self.api.unit_new)(self.raw, c"hirsel-core".as_ptr(), 11) };
-        Unit { raw, api: self.api, context: PhantomData }
+        Unit {
+            raw,
+            api: self.api,
+            context: PhantomData,
+        }
     }
     #[cfg(test)]
     pub fn print_text(&self, text: &str) -> Result<String, String> {
@@ -154,6 +160,38 @@ impl Drop for Context {
     fn drop(&mut self) {
         // SAFETY: units borrow Context, so no unit or value can survive this drop.
         unsafe { (self.api.context_drop)(self.raw) }
+    }
+}
+
+/// A module built in a context retained until the destination loader consumes
+/// the module handle.
+pub(crate) struct NativeModule {
+    context: Rc<Context>,
+    raw: Raw,
+    consumed: Cell<bool>,
+}
+impl NativeModule {
+    pub(crate) fn new(context: Rc<Context>, raw: Raw) -> Self {
+        Self {
+            context,
+            raw,
+            consumed: Cell::new(false),
+        }
+    }
+    pub(crate) fn raw(&self) -> Raw {
+        self.raw
+    }
+    pub(crate) fn consume(&self) {
+        self.consumed.set(true);
+    }
+}
+impl Drop for NativeModule {
+    fn drop(&mut self) {
+        if !self.consumed.get() {
+            // SAFETY: the handle was created by this same-build component and
+            // remains exclusively owned by this wrapper.
+            unsafe { (self.context.api.module_drop)(self.raw) }
+        }
     }
 }
 macro_rules! handle {
@@ -183,7 +221,7 @@ impl<'c> Unit<'c> {
     /// the same-build linker. The context remains borrowed by the returned
     /// module until the linker consumes it.
     pub(crate) fn take(self) -> Raw {
-        let mut unit = std::mem::ManuallyDrop::new(self);
+        let unit = std::mem::ManuallyDrop::new(self);
         // SAFETY: ManuallyDrop prevents the unit destructor from running after
         // the component transfers ownership of the module.
         unsafe { (unit.api.unit_take)(unit.raw) }
@@ -199,12 +237,16 @@ fn output(out: Output) -> Result<String, String> {
 }
 impl<'c> Unit<'c> {
     pub fn bitcode(&self) -> Result<Vec<u8>, String> {
-        let mut out=Output::default();
+        let mut out = Output::default();
         // SAFETY: the component serializes the live module synchronously.
-        unsafe {(self.api.unit_bitcode)(self.raw,&mut out)}
-        let bytes=unsafe {std::slice::from_raw_parts(out.data,out.len).to_vec()};
-        unsafe {crate::loader::free_construction_output(out.data)};
-        if out.failed==0 {Ok(bytes)} else {Err(String::from_utf8_lossy(&bytes).into_owned())}
+        unsafe { (self.api.unit_bitcode)(self.raw, &mut out) }
+        let bytes = unsafe { std::slice::from_raw_parts(out.data, out.len).to_vec() };
+        unsafe { crate::loader::free_construction_output(out.data) };
+        if out.failed == 0 {
+            Ok(bytes)
+        } else {
+            Err(String::from_utf8_lossy(&bytes).into_owned())
+        }
     }
     pub fn print(&self) -> Result<String, String> {
         let mut out = Output::default();
@@ -214,11 +256,17 @@ impl<'c> Unit<'c> {
     }
     pub fn integer_type(&mut self, bits: u32) -> Type<'c> {
         // SAFETY: handles belong to this borrowed context; slices live through the call.
-        Type(unsafe { (self.api.integer_type)(self.raw, bits) }, PhantomData)
+        Type(
+            unsafe { (self.api.integer_type)(self.raw, bits) },
+            PhantomData,
+        )
     }
     pub fn float_type(&mut self, bits: u32) -> Type<'c> {
         // SAFETY: handles belong to this borrowed context; slices live through the call.
-        Type(unsafe { (self.api.float_type)(self.raw, bits) }, PhantomData)
+        Type(
+            unsafe { (self.api.float_type)(self.raw, bits) },
+            PhantomData,
+        )
     }
     pub fn pointer_type(&mut self) -> Type<'c> {
         // SAFETY: handles belong to this borrowed context; slices live through the call.
@@ -230,11 +278,17 @@ impl<'c> Unit<'c> {
     }
     pub fn array_type(&mut self, element: Type<'c>, count: u64) -> Type<'c> {
         // SAFETY: handles belong to this borrowed context; slices live through the call.
-        Type(unsafe { (self.api.array_type)(element.0, count) }, PhantomData)
+        Type(
+            unsafe { (self.api.array_type)(element.0, count) },
+            PhantomData,
+        )
     }
     pub fn integer(&mut self, ty: Type<'c>, bits: u128) -> Value<'c> {
         // SAFETY: handles belong to this borrowed context; slices live through the call.
-        Value(unsafe { (self.api.integer)(ty.0, bits as u64, (bits >> 64) as u64) }, PhantomData)
+        Value(
+            unsafe { (self.api.integer)(ty.0, bits as u64, (bits >> 64) as u64) },
+            PhantomData,
+        )
     }
     pub fn poison(&mut self, ty: Type<'c>) -> Value<'c> {
         // SAFETY: handles belong to this borrowed context; slices live through the call.
@@ -246,67 +300,156 @@ impl<'c> Unit<'c> {
     }
     pub fn parameter(&mut self, function: Value<'c>, index: u32, name: Local) -> Value<'c> {
         // SAFETY: handles belong to this borrowed context; slices live through the call.
-        Value(unsafe { (self.api.parameter)(function.0, index, name) }, PhantomData)
+        Value(
+            unsafe { (self.api.parameter)(function.0, index, name) },
+            PhantomData,
+        )
     }
     pub fn local(&mut self, ty: Type<'c>, name: Local) -> Value<'c> {
         // SAFETY: handles belong to this borrowed context; slices live through the call.
-        Value(unsafe { (self.api.local)(self.raw, ty.0, name) }, PhantomData)
+        Value(
+            unsafe { (self.api.local)(self.raw, ty.0, name) },
+            PhantomData,
+        )
     }
     pub fn alloca(&mut self, ty: Type<'c>, align: u32, name: Local) -> Value<'c> {
         // SAFETY: handles belong to this borrowed context; slices live through the call.
-        Value(unsafe { (self.api.alloca)(self.raw, ty.0, align, name) }, PhantomData)
+        Value(
+            unsafe { (self.api.alloca)(self.raw, ty.0, align, name) },
+            PhantomData,
+        )
     }
     pub fn binary(&mut self, op: u32, left: Value<'c>, right: Value<'c>) -> Value<'c> {
         // SAFETY: handles belong to this borrowed context; slices live through the call.
-        Value(unsafe { (self.api.binary)(self.raw, op, left.0, right.0) }, PhantomData)
+        Value(
+            unsafe { (self.api.binary)(self.raw, op, left.0, right.0) },
+            PhantomData,
+        )
     }
     pub fn cast(&mut self, op: u32, value: Value<'c>, ty: Type<'c>) -> Value<'c> {
         // SAFETY: handles belong to this borrowed context; slices live through the call.
-        Value(unsafe { (self.api.cast)(self.raw, op, value.0, ty.0) }, PhantomData)
+        Value(
+            unsafe { (self.api.cast)(self.raw, op, value.0, ty.0) },
+            PhantomData,
+        )
     }
     pub fn compare(&mut self, predicate: u32, left: Value<'c>, right: Value<'c>) -> Value<'c> {
         // SAFETY: handles belong to this borrowed context; slices live through the call.
-        Value(unsafe { (self.api.compare)(self.raw, predicate, left.0, right.0) }, PhantomData)
+        Value(
+            unsafe { (self.api.compare)(self.raw, predicate, left.0, right.0) },
+            PhantomData,
+        )
     }
     pub fn select(&mut self, condition: Value<'c>, yes: Value<'c>, no: Value<'c>) -> Value<'c> {
         // SAFETY: handles belong to this borrowed context; slices live through the call.
-        Value(unsafe { (self.api.select)(self.raw, condition.0, yes.0, no.0) }, PhantomData)
+        Value(
+            unsafe { (self.api.select)(self.raw, condition.0, yes.0, no.0) },
+            PhantomData,
+        )
     }
     pub fn load(&mut self, ty: Type<'c>, pointer: Value<'c>, align: u32) -> Value<'c> {
         // SAFETY: handles belong to this borrowed context; slices live through the call.
-        Value(unsafe { (self.api.load)(self.raw, ty.0, pointer.0, align) }, PhantomData)
+        Value(
+            unsafe { (self.api.load)(self.raw, ty.0, pointer.0, align) },
+            PhantomData,
+        )
     }
     pub fn gep(&mut self, ty: Type<'c>, pointer: Value<'c>, indices: &[Value<'c>]) -> Value<'c> {
         // SAFETY: handles belong to this borrowed context; slices live through the call.
-        Value(unsafe { (self.api.gep)(self.raw, ty.0, pointer.0, indices.as_ptr().cast(), indices.len()) }, PhantomData)
+        Value(
+            unsafe {
+                (self.api.gep)(
+                    self.raw,
+                    ty.0,
+                    pointer.0,
+                    indices.as_ptr().cast(),
+                    indices.len(),
+                )
+            },
+            PhantomData,
+        )
     }
     pub fn extract(&mut self, value: Value<'c>, index: u32) -> Value<'c> {
         // SAFETY: handles belong to this borrowed context; slices live through the call.
-        Value(unsafe { (self.api.extract)(self.raw, value.0, index) }, PhantomData)
+        Value(
+            unsafe { (self.api.extract)(self.raw, value.0, index) },
+            PhantomData,
+        )
     }
     pub fn insert(&mut self, aggregate: Value<'c>, value: Value<'c>, index: u32) -> Value<'c> {
         // SAFETY: handles belong to this borrowed context; slices live through the call.
-        Value(unsafe { (self.api.insert)(self.raw, aggregate.0, value.0, index) }, PhantomData)
+        Value(
+            unsafe { (self.api.insert)(self.raw, aggregate.0, value.0, index) },
+            PhantomData,
+        )
     }
     pub fn struct_type(&mut self, fields: &[Type<'c>]) -> Type<'c> {
         // SAFETY: handles belong to this borrowed context; slices live through the call.
-        Type(unsafe { (self.api.struct_type)(self.raw, fields.as_ptr().cast(), fields.len(), 0) }, PhantomData)
+        Type(
+            unsafe { (self.api.struct_type)(self.raw, fields.as_ptr().cast(), fields.len(), 0) },
+            PhantomData,
+        )
     }
     pub fn phi(&mut self, ty: Type<'c>, values: &[Value<'c>], blocks: &[Block<'c>]) -> Value<'c> {
         // SAFETY: handles belong to this borrowed context; slices live through the call.
-        Value(unsafe { (self.api.phi)(self.raw, ty.0, values.as_ptr().cast(), blocks.as_ptr().cast(), values.len()) }, PhantomData)
+        Value(
+            unsafe {
+                (self.api.phi)(
+                    self.raw,
+                    ty.0,
+                    values.as_ptr().cast(),
+                    blocks.as_ptr().cast(),
+                    values.len(),
+                )
+            },
+            PhantomData,
+        )
     }
     pub fn function(&mut self, name: &str, result: Type<'c>, params: &[Type<'c>]) -> Value<'c> {
         // SAFETY: handles belong to this borrowed context; slices live through the call.
-        Value(unsafe { (self.api.function)(self.raw, name.as_ptr().cast(), name.len(), result.0, params.as_ptr().cast(), params.len()) }, PhantomData)
+        Value(
+            unsafe {
+                (self.api.function)(
+                    self.raw,
+                    name.as_ptr().cast(),
+                    name.len(),
+                    result.0,
+                    params.as_ptr().cast(),
+                    params.len(),
+                )
+            },
+            PhantomData,
+        )
     }
     pub fn block(&mut self, name: &str) -> Block<'c> {
         // SAFETY: handles belong to this borrowed context; slices live through the call.
-        Block(unsafe { (self.api.block)(self.raw, name.as_ptr().cast(), name.len()) }, PhantomData)
+        Block(
+            unsafe { (self.api.block)(self.raw, name.as_ptr().cast(), name.len()) },
+            PhantomData,
+        )
     }
-    pub fn call(&mut self, result: Type<'c>, params: &[Type<'c>], callee: Value<'c>, args: &[Value<'c>]) -> Value<'c> {
+    pub fn call(
+        &mut self,
+        result: Type<'c>,
+        params: &[Type<'c>],
+        callee: Value<'c>,
+        args: &[Value<'c>],
+    ) -> Value<'c> {
         // SAFETY: handles belong to this borrowed context; slices live through the call.
-        Value(unsafe { (self.api.call)(self.raw, result.0, params.as_ptr().cast(), params.len(), callee.0, args.as_ptr().cast(), args.len()) }, PhantomData)
+        Value(
+            unsafe {
+                (self.api.call)(
+                    self.raw,
+                    result.0,
+                    params.as_ptr().cast(),
+                    params.len(),
+                    callee.0,
+                    args.as_ptr().cast(),
+                    args.len(),
+                )
+            },
+            PhantomData,
+        )
     }
     pub fn define(&mut self, function: Value<'c>, internal: bool) {
         // SAFETY: handles belong to this borrowed context; slices live through the call.
@@ -326,15 +469,26 @@ impl<'c> Unit<'c> {
     }
     pub fn store(&mut self, value: Value<'c>, pointer: Value<'c>, align: u32) -> Value<'c> {
         // SAFETY: handles belong to this borrowed context; slices live through the call.
-        Value(unsafe { (self.api.store)(self.raw, value.0, pointer.0, align) }, PhantomData)
+        Value(
+            unsafe { (self.api.store)(self.raw, value.0, pointer.0, align) },
+            PhantomData,
+        )
     }
     pub fn branch(&mut self, block: Block<'c>) {
         // SAFETY: handles belong to this borrowed context; slices live through the call.
         unsafe { (self.api.branch)(self.raw, block.0) }
     }
-    pub fn conditional(&mut self, condition: Value<'c>, yes: Block<'c>, no: Block<'c>) -> Value<'c> {
+    pub fn conditional(
+        &mut self,
+        condition: Value<'c>,
+        yes: Block<'c>,
+        no: Block<'c>,
+    ) -> Value<'c> {
         // SAFETY: handles belong to this borrowed context; slices live through the call.
-        Value(unsafe { (self.api.conditional)(self.raw, condition.0, yes.0, no.0) }, PhantomData)
+        Value(
+            unsafe { (self.api.conditional)(self.raw, condition.0, yes.0, no.0) },
+            PhantomData,
+        )
     }
     pub fn return_value(&mut self, value: Option<Value<'c>>) {
         // SAFETY: handles belong to this borrowed context; slices live through the call.
@@ -349,35 +503,80 @@ impl<'c> Unit<'c> {
 impl<'c> Unit<'c> {
     pub fn vector_type(&mut self, element: Type<'c>, count: u32) -> Type<'c> {
         // SAFETY: context-bound handles and borrowed slices live through this call.
-        Type(unsafe { (self.api.vector_type)(element.0, count) }, PhantomData)
+        Type(
+            unsafe { (self.api.vector_type)(element.0, count) },
+            PhantomData,
+        )
     }
     pub fn packed_struct_type(&mut self, fields: &[Type<'c>]) -> Type<'c> {
         // SAFETY: context-bound handles and borrowed slices live through this call.
-        Type(unsafe { (self.api.struct_type)(self.raw, fields.as_ptr().cast(), fields.len(), 1) }, PhantomData)
+        Type(
+            unsafe { (self.api.struct_type)(self.raw, fields.as_ptr().cast(), fields.len(), 1) },
+            PhantomData,
+        )
     }
     pub fn constant_cast(&mut self, op: u32, value: Value<'c>, ty: Type<'c>) -> Value<'c> {
         // SAFETY: context-bound handles and borrowed slices live through this call.
-        Value(unsafe { (self.api.constant_cast)(op, value.0, ty.0) }, PhantomData)
+        Value(
+            unsafe { (self.api.constant_cast)(op, value.0, ty.0) },
+            PhantomData,
+        )
     }
     pub fn constant_add(&mut self, left: Value<'c>, right: Value<'c>) -> Value<'c> {
         // SAFETY: context-bound handles and borrowed slices live through this call.
-        Value(unsafe { (self.api.constant_add)(left.0, right.0) }, PhantomData)
+        Value(
+            unsafe { (self.api.constant_add)(left.0, right.0) },
+            PhantomData,
+        )
     }
     pub fn global(&mut self, name: &str, ty: Type<'c>) -> Value<'c> {
         // SAFETY: context-bound handles and borrowed slices live through this call.
-        Value(unsafe { (self.api.global)(self.raw, name.as_ptr().cast(), name.len(), ty.0) }, PhantomData)
+        Value(
+            unsafe { (self.api.global)(self.raw, name.as_ptr().cast(), name.len(), ty.0) },
+            PhantomData,
+        )
     }
     pub fn constant_struct(&mut self, values: &[Value<'c>], packed: bool) -> Value<'c> {
         // SAFETY: context-bound handles and borrowed slices live through this call.
-        Value(unsafe { (self.api.constant_struct)(self.raw, values.as_ptr().cast(), values.len(), u8::from(packed)) }, PhantomData)
+        Value(
+            unsafe {
+                (self.api.constant_struct)(
+                    self.raw,
+                    values.as_ptr().cast(),
+                    values.len(),
+                    u8::from(packed),
+                )
+            },
+            PhantomData,
+        )
     }
     pub fn constant_array(&mut self, element: Type<'c>, values: &[Value<'c>]) -> Value<'c> {
         // SAFETY: context-bound handles and borrowed slices live through this call.
-        Value(unsafe { (self.api.constant_array)(element.0, values.as_ptr().cast(), values.len()) }, PhantomData)
+        Value(
+            unsafe { (self.api.constant_array)(element.0, values.as_ptr().cast(), values.len()) },
+            PhantomData,
+        )
     }
-    pub fn initialize_global(&mut self, global: Value<'c>, init: Option<Value<'c>>, linkage: u32, constant: bool, externally_initialized: bool, align: u32) {
+    pub fn initialize_global(
+        &mut self,
+        global: Value<'c>,
+        init: Option<Value<'c>>,
+        linkage: u32,
+        constant: bool,
+        externally_initialized: bool,
+        align: u32,
+    ) {
         // SAFETY: context-bound handles and borrowed slices live through this call.
-        unsafe { (self.api.initialize_global)(global.0, init.map_or(std::ptr::null_mut(), |v| v.0), linkage, u8::from(constant), u8::from(externally_initialized), align) }
+        unsafe {
+            (self.api.initialize_global)(
+                global.0,
+                init.map_or(std::ptr::null_mut(), |v| v.0),
+                linkage,
+                u8::from(constant),
+                u8::from(externally_initialized),
+                align,
+            )
+        }
     }
     pub fn module_asm(&mut self, text: &str) {
         // SAFETY: context-bound handles and borrowed slices live through this call.
@@ -385,11 +584,28 @@ impl<'c> Unit<'c> {
     }
     pub fn attribute(&mut self, value: Value<'c>, index: u32, kind: u32, ty: Option<Type<'c>>) {
         // SAFETY: context-bound handles and borrowed slices live through this call.
-        unsafe { (self.api.attribute)(self.raw, value.0, index, kind, ty.map_or(std::ptr::null_mut(), |t| t.0)) }
+        unsafe {
+            (self.api.attribute)(
+                self.raw,
+                value.0,
+                index,
+                kind,
+                ty.map_or(std::ptr::null_mut(), |t| t.0),
+            )
+        }
     }
     pub fn string_attribute(&mut self, value: Value<'c>, name: &str, text: &str) {
         // SAFETY: context-bound handles and borrowed slices live through this call.
-        unsafe { (self.api.string_attribute)(self.raw, value.0, name.as_ptr().cast(), name.len(), text.as_ptr().cast(), text.len()) }
+        unsafe {
+            (self.api.string_attribute)(
+                self.raw,
+                value.0,
+                name.as_ptr().cast(),
+                name.len(),
+                text.as_ptr().cast(),
+                text.len(),
+            )
+        }
     }
     pub fn tail(&mut self, value: Value<'c>) {
         // SAFETY: context-bound handles and borrowed slices live through this call.
@@ -399,45 +615,117 @@ impl<'c> Unit<'c> {
         // SAFETY: context-bound handles and borrowed slices live through this call.
         Value(unsafe { (self.api.fneg)(self.raw, value.0) }, PhantomData)
     }
-    pub fn atomic_load(&mut self, ty: Type<'c>, pointer: Value<'c>, align: u32, ordering: u32) -> Value<'c> {
+    pub fn atomic_load(
+        &mut self,
+        ty: Type<'c>,
+        pointer: Value<'c>,
+        align: u32,
+        ordering: u32,
+    ) -> Value<'c> {
         // SAFETY: context-bound handles and borrowed slices live through this call.
-        Value(unsafe { (self.api.atomic_load)(self.raw, ty.0, pointer.0, align, ordering) }, PhantomData)
+        Value(
+            unsafe { (self.api.atomic_load)(self.raw, ty.0, pointer.0, align, ordering) },
+            PhantomData,
+        )
     }
-    pub fn atomic_store(&mut self, value: Value<'c>, pointer: Value<'c>, align: u32, ordering: u32) {
+    pub fn atomic_store(
+        &mut self,
+        value: Value<'c>,
+        pointer: Value<'c>,
+        align: u32,
+        ordering: u32,
+    ) {
         // SAFETY: context-bound handles and borrowed slices live through this call.
         unsafe { (self.api.atomic_store)(self.raw, value.0, pointer.0, align, ordering) }
     }
-    pub fn atomic_rmw(&mut self, op: u32, pointer: Value<'c>, value: Value<'c>, ordering: u32) -> Value<'c> {
+    pub fn atomic_rmw(
+        &mut self,
+        op: u32,
+        pointer: Value<'c>,
+        value: Value<'c>,
+        ordering: u32,
+    ) -> Value<'c> {
         // SAFETY: context-bound handles and borrowed slices live through this call.
-        Value(unsafe { (self.api.atomic_rmw)(self.raw, op, pointer.0, value.0, ordering) }, PhantomData)
+        Value(
+            unsafe { (self.api.atomic_rmw)(self.raw, op, pointer.0, value.0, ordering) },
+            PhantomData,
+        )
     }
-    pub fn compare_exchange(&mut self, pointer: Value<'c>, expected: Value<'c>, desired: Value<'c>, success: u32, failure: u32) -> Value<'c> {
+    pub fn compare_exchange(
+        &mut self,
+        pointer: Value<'c>,
+        expected: Value<'c>,
+        desired: Value<'c>,
+        success: u32,
+        failure: u32,
+    ) -> Value<'c> {
         // SAFETY: context-bound handles and borrowed slices live through this call.
-        Value(unsafe { (self.api.compare_exchange)(self.raw, pointer.0, expected.0, desired.0, success, failure) }, PhantomData)
+        Value(
+            unsafe {
+                (self.api.compare_exchange)(
+                    self.raw, pointer.0, expected.0, desired.0, success, failure,
+                )
+            },
+            PhantomData,
+        )
     }
     pub fn fence(&mut self, ordering: u32) {
         // SAFETY: context-bound handles and borrowed slices live through this call.
         unsafe { (self.api.fence)(self.raw, ordering) }
     }
-    pub fn switch_value(&mut self, value: Value<'c>, default: Block<'c>, values: &[Value<'c>], blocks: &[Block<'c>]) {
+    pub fn switch_value(
+        &mut self,
+        value: Value<'c>,
+        default: Block<'c>,
+        values: &[Value<'c>],
+        blocks: &[Block<'c>],
+    ) {
         // SAFETY: context-bound handles and borrowed slices live through this call.
-        unsafe { (self.api.switch_value)(self.raw, value.0, default.0, values.as_ptr().cast(), blocks.as_ptr().cast(), values.len()) }
+        unsafe {
+            (self.api.switch_value)(
+                self.raw,
+                value.0,
+                default.0,
+                values.as_ptr().cast(),
+                blocks.as_ptr().cast(),
+                values.len(),
+            )
+        }
     }
     pub fn metadata_ref(&mut self, id: usize) -> Metadata<'c> {
         // SAFETY: context-bound handles and borrowed slices live through this call.
-        Metadata(unsafe { (self.api.metadata_ref)(self.raw, id) }, PhantomData)
+        Metadata(
+            unsafe { (self.api.metadata_ref)(self.raw, id) },
+            PhantomData,
+        )
     }
     pub fn metadata_string(&mut self, text: &str) -> Metadata<'c> {
         // SAFETY: context-bound handles and borrowed slices live through this call.
-        Metadata(unsafe { (self.api.metadata_string)(self.raw, text.as_ptr().cast(), text.len()) }, PhantomData)
+        Metadata(
+            unsafe { (self.api.metadata_string)(self.raw, text.as_ptr().cast(), text.len()) },
+            PhantomData,
+        )
     }
     pub fn metadata_integer(&mut self, bits: u32, value: u64) -> Metadata<'c> {
         // SAFETY: context-bound handles and borrowed slices live through this call.
-        Metadata(unsafe { (self.api.metadata_integer)(self.raw, bits, value) }, PhantomData)
+        Metadata(
+            unsafe { (self.api.metadata_integer)(self.raw, bits, value) },
+            PhantomData,
+        )
     }
     pub fn metadata_tuple(&mut self, values: &[Metadata<'c>], distinct: bool) -> Metadata<'c> {
         // SAFETY: context-bound handles and borrowed slices live through this call.
-        Metadata(unsafe { (self.api.metadata_tuple)(self.raw, values.as_ptr().cast(), values.len(), u8::from(distinct)) }, PhantomData)
+        Metadata(
+            unsafe {
+                (self.api.metadata_tuple)(
+                    self.raw,
+                    values.as_ptr().cast(),
+                    values.len(),
+                    u8::from(distinct),
+                )
+            },
+            PhantomData,
+        )
     }
     pub fn metadata_bind(&mut self, id: usize, value: Metadata<'c>) {
         // SAFETY: context-bound handles and borrowed slices live through this call.
@@ -445,11 +733,27 @@ impl<'c> Unit<'c> {
     }
     pub fn named_metadata(&mut self, name: &str, values: &[Metadata<'c>]) {
         // SAFETY: context-bound handles and borrowed slices live through this call.
-        unsafe { (self.api.named_metadata)(self.raw, name.as_ptr().cast(), name.len(), values.as_ptr().cast(), values.len()) }
+        unsafe {
+            (self.api.named_metadata)(
+                self.raw,
+                name.as_ptr().cast(),
+                name.len(),
+                values.as_ptr().cast(),
+                values.len(),
+            )
+        }
     }
     pub fn attach(&mut self, value: Value<'c>, name: &str, metadata: Metadata<'c>) {
         // SAFETY: context-bound handles and borrowed slices live through this call.
-        unsafe { (self.api.attach)(self.raw, value.0, name.as_ptr().cast(), name.len(), metadata.0) }
+        unsafe {
+            (self.api.attach)(
+                self.raw,
+                value.0,
+                name.as_ptr().cast(),
+                name.len(),
+                metadata.0,
+            )
+        }
     }
     pub fn location(&mut self, location: Option<Metadata<'c>>) {
         // SAFETY: context-bound handles and borrowed slices live through this call.
@@ -457,6 +761,9 @@ impl<'c> Unit<'c> {
     }
     pub fn metadata_value(&mut self, metadata: Metadata<'c>) -> Value<'c> {
         // SAFETY: context-bound handles and borrowed slices live through this call.
-        Value(unsafe { (self.api.metadata_value)(self.raw, metadata.0) }, PhantomData)
+        Value(
+            unsafe { (self.api.metadata_value)(self.raw, metadata.0) },
+            PhantomData,
+        )
     }
 }

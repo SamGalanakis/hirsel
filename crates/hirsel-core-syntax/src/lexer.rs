@@ -5,6 +5,10 @@ pub struct LexOutput {
     pub tokens: Vec<Token>,
     pub significant: Vec<usize>,
     pub diagnostics: Vec<Diagnostic>,
+    /// Length-framed semantic token bytes, shared by body and header reuse keys.
+    pub canonical: Vec<u8>,
+    /// Canonical byte offsets before each token and after the final token.
+    pub canonical_offsets: Vec<u32>,
 }
 pub fn lex(text: &str, symbols: &mut Symbols) -> LexOutput {
     let mut scanner = Scanner::new(text, symbols);
@@ -32,6 +36,8 @@ impl<'a> Scanner<'a> {
                 tokens: Vec::with_capacity(bytes.len() / 2 + 1),
                 significant: Vec::with_capacity(bytes.len() / 2 + 1),
                 diagnostics: vec![],
+                canonical: Vec::with_capacity(bytes.len() + 8),
+                canonical_offsets: vec![0],
             },
             symbols,
             newline: false,
@@ -59,6 +65,19 @@ impl<'a> Scanner<'a> {
             symbol,
             line_before: self.newline,
         });
+        if !kind.is_trivia() && !matches!(kind, TokenKind::Eof) {
+            let length = (self.pos - start + 1) as u64;
+            self.output
+                .canonical
+                .extend_from_slice(&length.to_le_bytes());
+            self.output.canonical.push(kind as u8);
+            self.output
+                .canonical
+                .extend_from_slice(&self.bytes[start..self.pos]);
+        }
+        self.output
+            .canonical_offsets
+            .push(self.output.canonical.len() as u32);
         match kind {
             TokenKind::LineComment | TokenKind::DocLine => {}
             kind if kind.is_trivia() => {
@@ -75,6 +94,9 @@ impl<'a> Scanner<'a> {
             symbol: sym::NONE,
             line_before: self.newline,
         });
+        self.output
+            .canonical_offsets
+            .push(self.output.canonical.len() as u32);
         self.output
     }
     fn starts(&self, spelling: &[u8]) -> bool {

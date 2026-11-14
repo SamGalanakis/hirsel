@@ -13,6 +13,11 @@ pub struct DefinitionKey {
 }
 
 fn token_identity(item: Item<'_>, end: usize, domain: &str) -> ContentHash {
+    if let Some(canonical) = item.tree.canonical_slice(item.range.tokens.clone(), end) {
+        return ContentHash::of_parts(domain, [canonical]);
+    }
+    // Syntax trees decoded from an older product have no runtime canonical
+    // stream. Keep the v2 fallback until that product is naturally rebuilt.
     ContentHash::of_parts_stream(domain, |parts| {
         for token in item
             .tree
@@ -524,6 +529,17 @@ mod tests {
         let original = parse("fn main() -> u64 {\n    7u64\n}\n");
         let moved = parse("// moved\n// again\nfn main() -> u64 {\n    7u64\n}\n");
         let changed = parse("fn main() -> u64 {\n    8u64\n}\n");
+        for file in [&original, &moved, &changed] {
+            assert_eq!(
+                file.tree.canonical_offsets.len(),
+                file.tree.tokens.len() + 1
+            );
+            assert!(
+                file.tree
+                    .canonical_slice(file.items[0].tokens.clone(), usize::MAX)
+                    .is_some()
+            );
+        }
         assert_eq!(
             header_identity(original.item(0)),
             header_identity(moved.item(0))

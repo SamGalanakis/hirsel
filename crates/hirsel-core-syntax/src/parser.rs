@@ -103,6 +103,8 @@ pub fn parse(text: &str, mode: ParseMode, symbols: &mut Symbols) -> ParseOutput 
     let output = lex(text, symbols);
     let lexical_diagnostics = output.diagnostics.len();
     let significant = output.significant;
+    let canonical = output.canonical;
+    let canonical_offsets = output.canonical_offsets;
     let node_capacity = significant.len();
     let mut p = Parser {
         text,
@@ -117,6 +119,8 @@ pub fn parse(text: &str, mode: ParseMode, symbols: &mut Symbols) -> ParseOutput 
             tokens: vec![],
             nodes: Vec::with_capacity(node_capacity),
             edges: Vec::with_capacity(node_capacity),
+            canonical,
+            canonical_offsets,
         },
         base: 0,
         whitespace: 0,

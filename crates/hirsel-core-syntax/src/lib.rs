@@ -192,6 +192,12 @@ pub struct Tree {
     pub tokens: Vec<Token>,
     pub nodes: Vec<Node>,
     pub edges: Vec<NodeId>,
+    /// Runtime-only canonical token stream; rebuilt by the parser after decode.
+    #[serde(skip)]
+    pub canonical: Vec<u8>,
+    /// Runtime-only offsets into `canonical`, indexed by token ID.
+    #[serde(skip)]
+    pub canonical_offsets: Vec<u32>,
 }
 impl Tree {
     pub fn node(&self, id: NodeId) -> &Node {
@@ -204,6 +210,27 @@ impl Tree {
     pub fn token_text<'a>(&self, text: &'a str, token: TokenId) -> &'a str {
         let s = self.tokens[token.0 as usize].span;
         &text[s.start as usize..s.end as usize]
+    }
+
+    /// Return the canonical semantic-token bytes for a token range, stopping
+    /// before the first token at or beyond the supplied source offset.
+    pub fn canonical_slice(&self, range: Range<u32>, end: usize) -> Option<&[u8]> {
+        if self.canonical_offsets.len() != self.tokens.len() + 1 {
+            return None;
+        }
+        let start = range.start as usize;
+        let stop = if end == usize::MAX {
+            range.end as usize
+        } else {
+            self.tokens
+                .get(start..range.end as usize)?
+                .iter()
+                .position(|token| token.span.start as usize >= end)
+                .map_or(range.end as usize, |offset| start + offset)
+        };
+        let bytes_start = *self.canonical_offsets.get(start)? as usize;
+        let bytes_end = *self.canonical_offsets.get(stop)? as usize;
+        self.canonical.get(bytes_start..bytes_end)
     }
 }
 /// Upper bounds for resolver tables, accumulated while nodes are appended.

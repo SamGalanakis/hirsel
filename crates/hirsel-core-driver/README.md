@@ -314,3 +314,22 @@ product --runtime/--target require --install. The future distribution assembler
 uses this same producer. It does not switch the currently installed old CLI.
 A copied new compiler beside the registration uses these products/runtime from
 any working directory; moving the entire installation preserves relative paths.
+
+`fmt [--check] <package-dir>` formats every .hirsel source recursively through
+core-syntax's package formatter. Check mode prints differing paths and exits 1
+without writing. Write mode prints changed paths. A syntax refusal exits 1 and
+changes no file in the package; a resource refusal exits 2. Use --signatures for
+core declaration headers without bodies. The public formatter does not exempt
+coordinate-bearing diagnostic fixtures selected by a developer.
+
+`explain RULE` and `explain --list` use the catalogue generated from docs/spec.
+--json emits the same Rule fields or sorted array; human output identifies the
+spec file and full-rule anchor. Unknown IDs and list/rule conflicts exit 2.
+No old guidance catalogue is consulted.
+
+Explicit QEMU execution validates the selected emulator and GNU runtime loader
+before building. Execution commands are reconstructed on each run/test; no
+execution result is cached. A replacement emulator or sysroot is therefore used
+immediately with unchanged compiled objects. Invalid selections give named input
+refusals. The C cross driver selects its link sysroot; --sysroot names QEMU's
+runtime root and is not a hidden C compiler flag.

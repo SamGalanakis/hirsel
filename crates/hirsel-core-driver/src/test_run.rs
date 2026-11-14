@@ -18,6 +18,49 @@ pub enum Runner {
     },
 }
 impl Runner {
+    /// Validate the externally selected execution tools before compiling a run.
+    pub fn qemu(
+        emulator: &std::path::Path,
+        sysroot: &std::path::Path,
+        target: &str,
+    ) -> io::Result<Self> {
+        use std::os::unix::fs::PermissionsExt;
+        let emulator = std::fs::canonicalize(emulator).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("execution emulator {}: {e}", emulator.display()),
+            )
+        })?;
+        if !emulator.is_file() || emulator.metadata()?.permissions().mode() & 0o111 == 0 {
+            return Err(io::Error::other(format!(
+                "execution emulator {} is not an executable file",
+                emulator.display()
+            )));
+        }
+        let sysroot = std::fs::canonicalize(sysroot).map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("runtime sysroot {}: {e}", sysroot.display()),
+            )
+        })?;
+        let interpreter = match hirsel_core_layout::Target::from_triple(target) {
+            Some(hirsel_core_layout::Target::Aarch64Linux) => "lib/ld-linux-aarch64.so.1",
+            Some(hirsel_core_layout::Target::X86_64Linux) => "lib64/ld-linux-x86-64.so.2",
+            None => {
+                return Err(io::Error::other(format!(
+                    "unsupported execution target {target}"
+                )));
+            }
+        };
+        if !sysroot.is_dir() || !sysroot.join(interpreter).is_file() {
+            return Err(io::Error::other(format!(
+                "runtime sysroot {} has no {interpreter}",
+                sysroot.display()
+            )));
+        }
+        Ok(Self::Qemu { emulator, sysroot })
+    }
+
     pub fn command(&self, executable: &std::path::Path) -> Command {
         match self {
             Self::Native => Command::new(executable),

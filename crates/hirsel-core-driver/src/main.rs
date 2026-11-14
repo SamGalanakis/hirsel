@@ -60,6 +60,28 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
         );
         std::process::exit(0);
     }
+    if command == "fmt" || command == "explain" {
+        use hirsel_core_driver::cli::OptionId;
+        let has = |option| invocation.options.iter().any(|(id, _)| *id == option);
+        if command == "fmt" {
+            let directory = invocation
+                .positional
+                .as_deref()
+                .ok_or("fmt requires a package directory")?;
+            let status = hirsel_core_driver::cli_tools::format(
+                Path::new(directory),
+                has(OptionId::FmtCheck),
+                has(OptionId::Signatures),
+            )?;
+            std::process::exit(status);
+        }
+        hirsel_core_driver::cli_tools::explain(
+            invocation.positional.as_deref(),
+            has(OptionId::ListRules),
+            has(OptionId::Json),
+        )?;
+        std::process::exit(0);
+    }
     let dir = invocation.positional.map(PathBuf::from);
     let mut libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
     let mut store = None;
@@ -154,15 +176,16 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
             Opt::Inputs => manifest = Some(PathBuf::from(value)),
             Opt::Metrics => metrics = Some(PathBuf::from(value)),
             Opt::Image => image_path = Some(PathBuf::from(value)),
-            Opt::Help | Opt::Lib => unreachable!("CLI early command option"),
+            Opt::Help | Opt::Lib | Opt::FmtCheck | Opt::Signatures | Opt::ListRules => {
+                unreachable!("CLI early command option")
+            }
         }
     }
     let runner = match (emulator, sysroot) {
         (None, None) => hirsel_core_driver::Runner::Native,
-        (Some(emulator), Some(sysroot)) => hirsel_core_driver::Runner::Qemu {
-            emulator: std::fs::canonicalize(emulator)?,
-            sysroot: std::fs::canonicalize(sysroot)?,
-        },
+        (Some(emulator), Some(sysroot)) => {
+            hirsel_core_driver::Runner::qemu(&emulator, &sysroot, &target)?
+        }
         _ => return Err("--emulator and --sysroot must be supplied together".into()),
     };
     if test_command && !explicit_limit {
@@ -577,7 +600,8 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
                 runner
                     .command(&path)
                     .args(run_args)
-                    .status()?
+                    .status()
+                    .map_err(|e| format!("run execution {runner:?}: {e}"))?
                     .code()
                     .unwrap_or(102),
             )

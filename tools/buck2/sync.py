@@ -1317,8 +1317,11 @@ def first_party(meta: dict) -> str:
     out.append("\n" + call("hirsel_script_test", name="land-core-library-modes", script="core/tools/gate_library_modes.py", full=False,
                             args=["--compiler", "buck-out/tmp/cargo-bin-exe/land-core-library-modes/hirsel-core"],
                             bin_exes={"hirsel-core": "//:hirsel-core-driver-bin-hirsel-core"},
-                            files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:hirsel-core-rt[staticlib]"},
-                            data=Raw('glob(["core/core/**", "core/std/**"])')))
+                            files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:hirsel-core-rt[staticlib]",
+                                       "HIRSEL_CORE_RT_ARCHIVES": "//:hirsel-core-rt-archives",
+                                       "HIRSEL_TOOLCHAIN_ARM": "//tools/buck2/native-toolchain:arm",
+                                       "HIRSEL_TOOLCHAIN_QEMU": "//tools/buck2/native-toolchain:qemu"},
+                            data=Raw('glob(["core/core/**", "core/std/**", "docs/spec/**"])')))
     for engine in ("cranelift", "llvm"):
         out.append("\n" + call("hirsel_script_test", name="core-m1-" + engine, script="core/tools/m1.py", full=False,
                                 args=["--backend", engine, "--compiler", "buck-out/tmp/cargo-bin-exe/core-m1-" + engine + "/hirsel-core"],

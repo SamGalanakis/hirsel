@@ -31,6 +31,9 @@ pub enum OptionId {
     Lib,
     Help,
     Install,
+    FmtCheck,
+    Signatures,
+    ListRules,
 }
 struct OptionSpec {
     id: OptionId,
@@ -61,6 +64,8 @@ commands! {
     "std-product", "std-product [options]", "Produce or inspect the published core and std packages.";
     "new", "new <package-dir> [--lib]", "Create a runnable application or library with an example main.";
     "env", "env [--json] [options]", "Report the compiler and selected installation, products and runtime.";
+    "fmt", "fmt [--check] <package-dir>", "Format all new source files; refuse malformed input without partial edits.";
+    "explain", "explain RULE | explain --list [--json]", "Explain current specification rules.";
 }
 macro_rules! option {
     ($id:ident, [$($name:literal),+], $value:expr, [$($command:literal),*], $description:literal) => {
@@ -68,6 +73,27 @@ macro_rules! option {
     }
 }
 static OPTIONS: &[OptionSpec] = &[
+    option!(
+        FmtCheck,
+        ["--check"],
+        None,
+        ["fmt"],
+        "List differing files without writing; exit 1 when any differ."
+    ),
+    option!(
+        Signatures,
+        ["--signatures"],
+        None,
+        ["fmt"],
+        "Allow core declaration headers without bodies."
+    ),
+    option!(
+        ListRules,
+        ["--list"],
+        None,
+        ["explain"],
+        "List every rule in the current specification."
+    ),
     option!(
         Install,
         ["--install"],
@@ -88,7 +114,8 @@ static OPTIONS: &[OptionSpec] = &[
             "test",
             "core-product",
             "std-product",
-            "env"
+            "env",
+            "explain"
         ],
         "Print structured JSON."
     ),

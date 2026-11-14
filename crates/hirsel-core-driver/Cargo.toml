@@ -13,6 +13,7 @@ path = "src/main.rs"
 mimalloc = { version = "=0.1.52", default-features = false }
 rustc-hash = "2"
 hirsel-core-ids = { path = "../hirsel-core-ids" }
+hirsel-core-diag = { path = "../hirsel-core-diag" }
 hirsel-core-syntax = { path = "../hirsel-core-syntax" }
 hirsel-core-resolve = { path = "../hirsel-core-resolve" }
 hirsel-core-front = { path = "../hirsel-core-front" }

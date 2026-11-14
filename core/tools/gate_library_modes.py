@@ -114,6 +114,105 @@ def main():
                 invoke(installed, 'std-product', '--install', str(moved), '--runtime', str(work / 'missing.a'), expected=2)
                 self.assertEqual(selection.read_bytes(), previous)
 
+        def test_fmt_checks_writes_and_refuses_without_partial_changes(self):
+            with tempfile.TemporaryDirectory(prefix='hirsel-fmt-') as temporary:
+                package = Path(temporary)
+                main = package / 'main.hirsel'
+                original = 'pub fn main()->Result[(),Exit]{Ok(())}\n'
+                main.write_text(original)
+                def fmt(*arguments):
+                    return subprocess.run([str(compiler), 'fmt', *arguments, str(package)], cwd=ROOT, capture_output=True, text=True)
+                check = fmt('--check')
+                self.assertEqual(check.returncode, 1, check.stderr)
+                self.assertEqual(check.stdout.splitlines(), [str(main)])
+                self.assertEqual(main.read_text(), original)
+                written = fmt()
+                self.assertEqual(written.returncode, 0, written.stderr)
+                self.assertNotEqual(main.read_text(), original)
+                self.assertEqual(fmt('--check').returncode, 0)
+                main.write_text(original)
+                broken = package / 'z_bad.hirsel'
+                broken.write_text('pub fn broken(\n')
+                refused = fmt()
+                self.assertEqual(refused.returncode, 1)
+                self.assertIn(str(broken), refused.stderr)
+                self.assertEqual(main.read_text(), original)
+                self.assertEqual(broken.read_text(), 'pub fn broken(\n')
+                broken.unlink()
+                main.write_text('pub fn declaration(x:u64)->u64\n')
+                self.assertEqual(fmt().returncode, 1)
+                self.assertEqual(fmt('--signatures').returncode, 0)
+
+        def test_explain_reads_the_current_specification_catalogue(self):
+            def explain(*arguments):
+                return subprocess.run([str(compiler), 'explain', *arguments], cwd=ROOT, capture_output=True, text=True)
+            result = explain('LANG-7', '--json')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            rule = json.loads(result.stdout)
+            self.assertEqual(rule['id'], 'LANG-7')
+            spec = (ROOT / rule['spec_file']).read_text()
+            self.assertIn('### LANG-7: ' + rule['title'], spec)
+            self.assertIn(rule['statement'].split()[0], spec)
+            listed = explain('--list', '--json')
+            self.assertEqual(listed.returncode, 0, listed.stderr)
+            rules = json.loads(listed.stdout)
+            ids = [r['id'] for r in rules]
+            self.assertEqual(ids, sorted(set(ids)))
+            self.assertIn(rule, rules)
+            text = explain('LANG-7')
+            self.assertEqual(text.returncode, 0, text.stderr)
+            self.assertIn(rule['statement'], text.stdout)
+            self.assertIn(rule['spec_file'] + '#' + rule['anchor'], text.stdout)
+            for arguments in [(), ('UNKNOWN-999',), ('--list', 'LANG-7')]:
+                self.assertEqual(explain(*arguments).returncode, 2)
+
+        def test_cross_runner_replacement_and_invalid_sysroot_are_not_cached(self):
+            arm = Path(os.environ['HIRSEL_TOOLCHAIN_ARM']).resolve()
+            qemu = Path(os.environ['HIRSEL_TOOLCHAIN_QEMU']).resolve() / 'qemu-aarch64'
+            sysroot = arm / 'aarch64-none-linux-gnu/libc'
+            runtime = Path(os.environ['HIRSEL_CORE_RT_ARCHIVES']).resolve() / 'aarch64-unknown-linux-gnu/libhirsel_core_rt.a'
+            with tempfile.TemporaryDirectory(prefix='hirsel-cross-record-') as temporary:
+                work = Path(temporary)
+                app = work / 'app'
+                self.assertEqual(subprocess.run([str(compiler), 'new', str(app)], cwd=ROOT, capture_output=True).returncode, 0)
+                emulator = work / 'qemu'
+                selected_root = work / 'sysroot'
+                selected_root.symlink_to(sysroot, target_is_directory=True)
+                def wrapper(marker):
+                    import shlex
+                    emulator.write_text('#!/bin/sh\n' + ("printf '%s\n' " + shlex.quote(marker) + ' >&2\n' if marker else '')
+                                        + 'exec ' + shlex.quote(str(qemu)) + ' "$@"\n')
+                    emulator.chmod(0o755)
+                wrapper('')
+                command = [str(compiler), 'run', str(app), '--backend', 'llvm', '--target', 'aarch64-unknown-linux-gnu',
+                           '--runtime', str(runtime), '--cc', str(arm / 'bin/aarch64-none-linux-gnu-gcc'),
+                           '--emulator', str(emulator), '--sysroot', str(selected_root), '--json', '-o', str(work / 'program')]
+                def run():
+                    return subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
+                first = run()
+                self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+                self.assertEqual((work / 'program').read_bytes()[18:20], (183).to_bytes(2, 'little'))
+                wrapper('replacement-emulator')
+                replaced = run()
+                self.assertEqual(replaced.returncode, 0, replaced.stdout + replaced.stderr)
+                self.assertIn('replacement-emulator', replaced.stderr)
+                self.assertEqual(json.loads(replaced.stdout)['native']['compiled'], 0)
+                self.assertFalse(json.loads(replaced.stdout)['native']['linked'])
+                selected_root.unlink()
+                empty = work / 'empty-root'
+                empty.mkdir()
+                selected_root.symlink_to(empty, target_is_directory=True)
+                refused = run()
+                self.assertEqual(refused.returncode, 2)
+                self.assertIn('runtime sysroot', refused.stderr)
+                self.assertIn('ld-linux-aarch64.so.1', refused.stderr)
+                selected_root.unlink()
+                selected_root.symlink_to(sysroot, target_is_directory=True)
+                emulator.chmod(0o644)
+                refused = run()
+                self.assertEqual(refused.returncode, 2)
+                self.assertIn('execution emulator', refused.stderr)
+
         def test_user_check_in_every_cli_library_mode(self):
             with tempfile.TemporaryDirectory(prefix='hirsel-library-modes-') as temporary:
                 work = Path(temporary)

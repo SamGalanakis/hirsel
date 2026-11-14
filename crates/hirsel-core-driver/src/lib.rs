@@ -1,6 +1,7 @@
 //! One core-only request path from an immutable source snapshot to published products.
 //! Sources and signatures are explicit inputs; no old compiler or std image is loaded.
 pub mod cli;
+pub mod cli_tools;
 mod diagnostics;
 mod image;
 mod image_index;

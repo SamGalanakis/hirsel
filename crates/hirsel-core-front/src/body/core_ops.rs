@@ -1806,14 +1806,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let Some(bytes) = self.code_identity_bytes(function) else {
                 continue;
             };
-            if open_static {
-                // This adapter is already closed over the source item and its
-                // callable signature. Keeping its template under the enclosing
-                // StaticFn[F] template would manufacture a fresh adapter row
-                // during substitution, so code.describe's pointer would no
-                // longer match this candidate.
-                self.nested.remove(&function);
-            }
             items.push((function, bytes));
         }
         if items.is_empty() {

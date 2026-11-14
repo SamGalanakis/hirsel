@@ -118,13 +118,6 @@ impl Context {
         // SAFETY: the context outlives the unit; callers own and free it.
         unsafe { (self.api.unit_new)(self.raw, c"hirsel-core".as_ptr(), 11) }
     }
-    /// The printed module of LLVM text parsed in its own fresh context.
-    pub fn print_text(&self, text: &str) -> Result<String, String> {
-        let mut out = Output::default();
-        // SAFETY: text stays borrowed for the synchronous parser/printer call.
-        unsafe { (self.api.print_text)(text.as_ptr().cast(), text.len(), &mut out) };
-        output(out)
-    }
 }
 impl Drop for Context {
     fn drop(&mut self) {
@@ -164,6 +157,14 @@ impl Drop for NativeModule {
             unsafe { (self.context.api.module_drop)(self.raw) }
         }
     }
+}
+/// The printed module of LLVM text parsed in its own fresh context.
+pub(crate) fn print_text(text: &str) -> Result<String, String> {
+    let api = crate::loader::construction_api()?;
+    let mut out = Output::default();
+    // SAFETY: text stays borrowed for the synchronous parser/printer call.
+    unsafe { (api.print_text)(text.as_ptr().cast(), text.len(), &mut out) };
+    output(out)
 }
 pub(crate) fn output_bytes(out: Output) -> (Vec<u8>, bool) {
     // SAFETY: the component returns an allocated byte buffer, including on failure.

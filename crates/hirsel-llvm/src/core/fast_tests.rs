@@ -74,7 +74,7 @@ b2:
   v15: bool, v16: u64 = limit_enter v5
   branch v15, b3, b8
 b3:
-  v10: ptr, v11: u64, v12: u64 = alloc plain v5 align 8 charge v5 in v2
+  v10: ptr, v11: u64, v12: u64 = alloc stable v5 align 8 charge v5 in v2
   v13: bool = ne v10, v6
   branch v13, b4, b7
 b4:
@@ -149,13 +149,13 @@ b8:
 fn own_fast_paths_and_zero_charge_and_large_alignment_fallbacks_agree() {
     let mut source = String::from("core v1\nsig g0 = (u64) -> (bool, u64)\n");
     for (i, (kind, align)) in [
-        ("plain", 8),
-        ("own", 8),
-        ("plain", 16),
-        ("own", 16),
-        ("plain", 512),
-        ("own", 512),
-        ("plain", 1024),
+        ("for seq u8", 8),
+        ("for ownfn", 8),
+        ("for seq u8", 16),
+        ("for ownfn", 16),
+        ("for seq u8", 512),
+        ("for ownfn", 512),
+        ("for seq u8", 1024),
     ]
     .into_iter()
     .enumerate()
@@ -330,9 +330,7 @@ fn arc_initialization_share_release_and_unwrap_preserve_provider_events() {
     assert_eq!(reports[0].outcome, eval::Outcome::Returned(vec![]));
     assert_eq!(reports[0].used, 0);
     // Reuse the same ownership/unwrapping program with Arc carriers and operations.
-    let source = source
-        .replace("alloc counted rc", "alloc counted arc")
-        .replace(" rc", " arc");
+    let source = source.replace(" rc", " arc");
     let module = text::parse(&source).unwrap();
     wf::module(&module).unwrap();
     let reports = execute(

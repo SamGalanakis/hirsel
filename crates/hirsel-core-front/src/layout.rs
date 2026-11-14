@@ -403,7 +403,7 @@ impl<T: TyRead> Shapes<'_, T> {
         let (k, v) = (self.field(args[0])?, self.field(args[1])?);
         Some(FieldTy::Map(Box::new(k), Box::new(v)))
     }
-    fn field(&mut self, ty: TyId) -> Option<FieldTy> {
+    pub(crate) fn field(&mut self, ty: TyId) -> Option<FieldTy> {
         self.field_in(ty, false)
     }
 

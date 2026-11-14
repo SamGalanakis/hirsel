@@ -991,23 +991,53 @@ fn needs_drop(shapes: &[Shape], ty: &FieldTy, out: &Computed<'_>) -> bool {
     drops(shapes, ty, &|t| done(out, t).drop.is_some())
 }
 
-/// Whether the block an owning edge (`Box`, `Rc`, `Arc`, a `Seq` or `Map` with
-/// storage) points at is terminal: cleaning its contents drops nothing, so its
-/// cleanup has nothing to resume and the block needs no cleanup frame. A `Box` or
-/// counted payload whose type has no drop recipe, `Seq` storage of elements that need
-/// no drop (`String` and `Bytes` buffers, a `List` of plain elements), `Map` storage
-/// whose keys and values need none. A resource is never terminal (its block has its
-/// own prefix and cleanup); any other edge holds no block: false.
+/// How the block an owning edge points at is cleaned, which fixes the native prefix it
+/// needs (crate `hirsel-core-ir`, "Cleanup classes").
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum Cleanup {
+    /// Cleaning the block drops nothing: a free alone, nothing to resume, no frame.
+    Terminal,
+    /// A non-terminal `Box`, `Rc` or `Arc` payload: one fixed-size root whose recipe,
+    /// charge and payload offset the edge's type fixes.
+    Fixed,
+    /// Non-terminal `Seq` or `Map` storage, or an `own fn` environment: its extent (or,
+    /// for an environment, its captures) is not fixed by the edge.
+    Dynamic,
+    /// A `Box`, `Rc` or `Arc` of a resource type: the resource block, with its own
+    /// prefix and cleanup.
+    Resource,
+}
+
+/// Whether cleaning the block `edge` owns is a free with nothing to drop
+/// ([`cleanup_class`] is [`Cleanup::Terminal`]).
 pub fn terminal(shapes: &[Shape], recipes: &[Recipe], edge: &FieldTy) -> bool {
+    cleanup_class(shapes, recipes, edge) == Some(Cleanup::Terminal)
+}
+
+/// The cleanup class of the block an owning edge (`Box`, `Rc`, `Arc`, `Seq`, `Map`,
+/// `OwnFn`) points at; `None` for an edge that owns no block. Terminal is a `Box` or
+/// counted payload whose type has no drop recipe, `Seq` storage of elements that need no
+/// drop (`String` and `Bytes` buffers, a `List` of plain elements), or `Map` storage whose
+/// keys and values need none. Derived, never stored.
+pub fn cleanup_class(shapes: &[Shape], recipes: &[Recipe], edge: &FieldTy) -> Option<Cleanup> {
     let drop = |t: TypeRef| recipes[t.index()].drop.is_some();
-    match edge {
+    Some(match edge {
         FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) => {
-            shapes[t.index()].repr != Repr::Resource && !drop(*t)
+            if shapes[t.index()].repr == Repr::Resource {
+                Cleanup::Resource
+            } else if drop(*t) {
+                Cleanup::Fixed
+            } else {
+                Cleanup::Terminal
+            }
         }
-        FieldTy::Seq(e) => !drops(shapes, e, &drop),
-        FieldTy::Map(k, v) => !drops(shapes, k, &drop) && !drops(shapes, v, &drop),
-        _ => false,
-    }
+        FieldTy::Seq(e) if !drops(shapes, e, &drop) => Cleanup::Terminal,
+        FieldTy::Map(k, v) if !drops(shapes, k, &drop) && !drops(shapes, v, &drop) => {
+            Cleanup::Terminal
+        }
+        FieldTy::Seq(_) | FieldTy::Map(..) | FieldTy::OwnFn => Cleanup::Dynamic,
+        _ => return None,
+    })
 }
 
 /// Whether a value of `ty` has anything to drop, given which rows have a recipe.

@@ -73,7 +73,7 @@ b1:
   raise bounds
 b2:
   v4: u64 = const 8
-  v5: ptr, v6: u64 = alloc own v4 align 8 charge v4
+  v5: ptr, v6: u64 = alloc for seq u8 v4 align 8 charge v4
   free v5 charge v4
   return
 }

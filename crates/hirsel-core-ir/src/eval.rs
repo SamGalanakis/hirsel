@@ -12,8 +12,8 @@
 
 use crate::*;
 use hirsel_core_layout::{
-    Body as Shaped, FieldTy, Handle, Layout, Recipe, Repr, TypeRef, charge, compute, field_size,
-    map_entry, terminal,
+    Body as Shaped, Cleanup, FieldTy, Handle, Layout, Recipe, Repr, TypeRef, charge, cleanup_class,
+    compute, field_size, map_entry,
 };
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
@@ -135,9 +135,9 @@ struct Blk {
     res: Option<Res>,
     /// A counted node's kind, fixed by its `alloc`; its operations must name it.
     counted: Option<Counted>,
-    /// Allocated `plain` (crate docs, "Terminal blocks"): the edge that cleans it
-    /// must be terminal.
-    plain: bool,
+    /// The cleanup class its `alloc` named (crate docs, "Cleanup classes"): `None`
+    /// for a block no `alloc` row made; `Some(None)` for region storage.
+    class: Option<Option<Cleanup>>,
     /// Static data (`static dN`): read, never written or freed.
     fixed: bool,
     /// The liveness shadow of `mark` (crate docs, "Slot kernels"): each marked
@@ -533,7 +533,7 @@ impl Machine<'_> {
             charge,
             res,
             counted: None,
-            plain: false,
+            class: None,
             fixed: false,
             marks: BTreeMap::new(),
         });
@@ -635,15 +635,18 @@ impl Machine<'_> {
             m.0 = false;
         }
     }
-    /// The block an owning edge cleans: one allocated `plain` has no cleanup frame, so
-    /// an engine may free it only where the edge is terminal (crate docs, "Terminal
-    /// blocks").
+    /// The block an owning edge cleans: its native prefix was fixed by the class its
+    /// `alloc` named, and cleanup through the edge reads the edge's class, so the two
+    /// must agree (crate docs, "Cleanup classes").
     fn edge(&self, p: u64, edge: &FieldTy, what: &str) {
-        assert!(
-            !self.mem[split(p).0].plain || terminal(&self.m.types, &self.recipes, edge),
-            "{what} was allocated plain, but its edge ({edge:?}) is not terminal: \
-             cleaning it may resume, which needs a cleanup frame"
-        );
+        if let Some(made) = self.mem[split(p).0].class {
+            let cleaned = cleanup_class(&self.m.types, &self.recipes, edge);
+            assert!(
+                made == cleaned,
+                "{what} was allocated as {made:?} storage, but its edge ({edge:?}) cleans \
+                 {cleaned:?} storage: the block's prefix does not fit its cleanup"
+            );
+        }
     }
     /// Cleanup glue's free: native glue refunds the charge it computes from the
     /// recipe, not the one the block was admitted with, so a block allocated with
@@ -1829,7 +1832,7 @@ impl Machine<'_> {
                 result,
                 available,
                 region_entry,
-                kind,
+                ref kind,
                 place,
                 charge,
                 overflow,
@@ -1863,21 +1866,19 @@ impl Machine<'_> {
                     Ok(()) => {
                         let res = match kind {
                             AllocKind::Resource { grant } => Some(Res {
-                                grant,
+                                grant: *grant,
                                 settled: false,
                                 cell_used: false,
                             }),
                             _ => None,
                         };
                         let p = self.block(vals[size.index()], Some(l), n, res);
-                        if let AllocKind::Counted { count, .. } = kind {
+                        if let Some(count) = kind.counted() {
                             self.mem[split(p).0].counted = Some(count);
                             self.store(p, 8, 1);
                         }
-                        self.mem[split(p).0].plain = matches!(
-                            kind,
-                            AllocKind::Plain | AllocKind::Counted { plain: true, .. }
-                        );
+                        self.mem[split(p).0].class =
+                            Some(kind.cleanup(&self.m.types, &self.recipes));
                         if let AllocPlace::Region(r) = place {
                             let region =
                                 &mut self.regions[(vals[r.index()] - REGION_BASE) as usize];

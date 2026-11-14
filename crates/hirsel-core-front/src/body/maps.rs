@@ -247,6 +247,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let old_data = self.read_sequence_word(header, 0, Ty::Ptr, n);
         let old_cap = self.read_sequence_word(header, 16, u, n);
         let mut plan = self.list_plan(entry.ty, cap, None, n)?;
+        plan.edge = FieldTy::Map(
+            Box::new(self.edge_field(types[0], n)?),
+            Box::new(self.edge_field(types[1], n)?),
+        );
         let index_len = self.map_index_count(cap, n)?;
         let eight = self.konst(u, 8, n)?;
         let (index_bytes, _) =
@@ -264,16 +268,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let allocated = self.new_block(&[Ty::Ptr, u]);
         self.map_branch(empty, first, growth, n);
         self.start(first);
-        let (block, available) = self.list_allocate(plan, AllocPlace::Current, n);
+        let (block, available) = self.list_allocate(&plan, AllocPlace::Current, n);
         self.jump(allocated, &[block, available], n);
         self.start(growth);
-        let (block, available) = self.list_allocate(plan, AllocPlace::Like(old_data), n);
+        let (block, available) = self.list_allocate(&plan, AllocPlace::Like(old_data), n);
         self.jump(allocated, &[block, available], n);
         self.start(allocated);
         let incoming = self.block_params(allocated);
         let (block, available) = (incoming[0], incoming[1]);
         let null = self.konst(Ty::Ptr, 0, n)?;
         let ok = self.map_compare(CompareOp::Ne, block, null, n);
+        let charge = plan.charge;
         self.runtime_result(
             result,
             ok,
@@ -291,7 +296,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         place,
                         n,
                     );
-                    cx.runtime_capacity(at, plan.charge, available, n);
+                    cx.runtime_capacity(at, charge, available, n);
                 }
             },
         )

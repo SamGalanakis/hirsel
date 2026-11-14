@@ -541,13 +541,8 @@ impl Printer {
                         fail: f,
                     } => {
                         let kind = match kind {
-                            AllocKind::Plain => "plain".into(),
-                            AllocKind::Own => "own".into(),
-                            AllocKind::Counted { count, plain } => format!(
-                                "counted {}{}",
-                                count.name(),
-                                if *plain { " plain" } else { "" }
-                            ),
+                            AllocKind::Own { edge } => format!("for {}", field_ty(edge)),
+                            AllocKind::Stable => "stable".into(),
                             AllocKind::Resource { grant } => format!("resource grant {grant}"),
                         };
                         let place = match place {
@@ -1295,12 +1290,10 @@ impl BodyParser {
                 _ => return Err("alloc takes pointer, room and optionally region entry".into()),
             };
             let kind = match l.next()? {
-                "plain" => AllocKind::Plain,
-                "own" => AllocKind::Own,
-                "counted" => AllocKind::Counted {
-                    count: counted(l)?,
-                    plain: l.eat("plain"),
+                "for" => AllocKind::Own {
+                    edge: l.field_ty()?,
                 },
+                "stable" => AllocKind::Stable,
                 "resource" => {
                     l.expect("grant")?;
                     AllocKind::Resource { grant: l.num()? }

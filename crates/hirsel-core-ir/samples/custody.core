@@ -377,7 +377,7 @@ b0(v0: ptr, v1: ptr, v2: ptr):
   address a2
   address a3
   address a4
-  v6: ptr, v7: u64 = alloc own v4 align 1 charge v4
+  v6: ptr, v7: u64 = alloc for seq u8 v4 align 1 charge v4
   v9: ptr = const 0x0
   v10: bool = ne v6, v9
   branch v10, b1, b2

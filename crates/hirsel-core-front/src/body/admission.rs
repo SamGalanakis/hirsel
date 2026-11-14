@@ -10,25 +10,14 @@ pub(super) struct OwnedAllocation {
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
-    /// The template remembers the owning edge, never the placeholder's drop
-    /// decision. Specialization derives terminal again from the closed recipe.
-    pub(super) fn allocation_edge(&mut self, result: ValueId, edge: FieldTy) -> AllocKind {
-        self.allocations.push(AllocationLayout::Edge {
-            result,
-            edge: edge.clone(),
-        });
-        if !self.fd.generics.is_empty() {
-            return AllocKind::Own;
+    /// `ty` as a field of the edge an allocation names (FORM #89): a list's or
+    /// map's storage is `Seq`/`Map` of these.
+    pub(super) fn edge_field(&mut self, ty: TyId, n: NodeId) -> Option<FieldTy> {
+        let field = self.e.field_ty(self.p, &mut self.t, ty);
+        if field.is_none() {
+            self.gap(n, "allocation edge layout is not built");
         }
-        let count = self.e.module.types.len();
-        if count != 0 && self.e.recipe(TypeId(count as u32 - 1), count).is_none() {
-            return AllocKind::Own;
-        }
-        if hirsel_core_layout::terminal(&self.e.module.types, &self.e.recipes, &edge) {
-            AllocKind::Plain
-        } else {
-            AllocKind::Own
-        }
+        field
     }
 
     /// Called immediately before emitting a typed block allocation. Copies and
@@ -43,8 +32,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return None;
         }
         let overflow = self.konst(Ty::Scalar(Scalar::Bool), 0, n)?;
-        self.allocations
-            .push(AllocationLayout::Block { result, ty });
+        self.allocations.push(AllocationLayout { result, ty });
         Some(overflow)
     }
 

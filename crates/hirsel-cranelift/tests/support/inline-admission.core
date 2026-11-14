@@ -8,7 +8,7 @@ inst n2 = test@0/inline_admission/foreign [] []
 inst n3 = test@0/inline_admission/null_plain [] []
 fn f0 = n0 g0 {
 b0(v0: u64, v1: bool):
-  v2: ptr, v3: u64 = alloc own v0 align 8 charge v0 overflow v1
+  v2: ptr, v3: u64 = alloc for seq u8 v0 align 8 charge v0 overflow v1
   v4: ptr = const 0x0
   v5: bool = ne v2, v4
   branch v5, b1, b2
@@ -21,12 +21,12 @@ b2:
 fn f1 = n1 g0 {
 b0(v0: u64, v1: bool):
   v2: u64 = const 8
-  v3: ptr, v4: u64 = alloc own v2 align 8 charge v2
+  v3: ptr, v4: u64 = alloc for seq u8 v2 align 8 charge v2
   v5: ptr = const 0x0
   v6: bool = ne v3, v5
   branch v6, b1, b4
 b1:
-  v7: ptr, v8: u64 = alloc own v0 align 8 charge v0 like v3 overflow v1
+  v7: ptr, v8: u64 = alloc for seq u8 v0 align 8 charge v0 like v3 overflow v1
   free v3 charge v2
   v9: bool = ne v7, v5
   branch v9, b2, b3
@@ -41,7 +41,7 @@ b4:
 fn f2 = n2 g0 {
 b0(v0: u64, v1: bool):
   v2: u64 = const 8
-  v3: ptr, v4: u64 = alloc own v2 align 8 charge v2
+  v3: ptr, v4: u64 = alloc for seq u8 v2 align 8 charge v2
   v5: ptr = const 0x0
   v6: bool = ne v3, v5
   branch v6, b1, b4
@@ -50,7 +50,7 @@ b1:
   v8: bool, v9: u64 = limit_enter v7
   branch v8, b2, b5
 b2:
-  v10: ptr, v11: u64 = alloc own v0 align 8 charge v0 like v3 overflow v1
+  v10: ptr, v11: u64 = alloc for seq u8 v0 align 8 charge v0 like v3 overflow v1
   free v3 charge v2
   limit_exit
   v12: bool = ne v10, v5
@@ -70,7 +70,7 @@ b6:
 fn f3 = n3 g0 {
 b0(v0: u64, v1: bool):
   v4: ptr = const 0x0
-  v2: ptr, v3: u64 = alloc plain v0 align 8 charge v0 like v4 overflow v1
+  v2: ptr, v3: u64 = alloc for seq u8 v0 align 8 charge v0 like v4 overflow v1
   v5: bool = ne v2, v4
   branch v5, b1, b2
 b1:

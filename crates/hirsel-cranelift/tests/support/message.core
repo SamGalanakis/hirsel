@@ -15,7 +15,7 @@ b0:
   live s0
   v0: u64 = const 8
   v1: u64 = const 16
-  v2: ptr, v3: u64 = alloc own v0 align 8 charge v0
+  v2: ptr, v3: u64 = alloc for seq u8 v0 align 8 charge v0
   address a0
   address a1
   address a2

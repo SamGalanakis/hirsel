@@ -9,9 +9,10 @@ enum ListStorage {
     Dynamic(ValueId),
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct ListPlan {
-    pub(super) item: Option<TypeId>,
+    /// The edge owning the storage block: `Seq` of the element, or a map's `Map`.
+    pub(super) edge: FieldTy,
     pub(super) charge: ValueId,
     pub(super) overflow: ValueId,
     pub(super) size: ValueId,
@@ -114,21 +115,27 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.inst(Inst::Store { address: at, value }, n);
         }
     }
-    fn list_count_overflow(&mut self, to: AddressId, cap_id: TypeId, n: NodeId) -> Option<()> {
+    fn list_count_overflow(
+        &mut self,
+        to: AddressId,
+        cap_id: TypeId,
+        item: TyId,
+        n: NodeId,
+    ) -> Option<()> {
         // FORM60's declined counter-overflow admission. Under a finalizer grant it
         // follows the ordinary allocation failure edge; otherwise it is Capacity.
         let max = self.konst(Ty::Scalar(Scalar::U64), u64::MAX, n)?;
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
         let overflow = self.konst(Ty::Scalar(Scalar::Bool), 1, n)?;
         let plan = ListPlan {
-            item: None,
+            edge: FieldTy::Seq(Box::new(self.edge_field(item, n)?)),
             charge: max,
             overflow,
             size: zero,
             logical: zero,
             stride: zero,
         };
-        let (_, available) = self.list_allocate(plan, AllocPlace::Current, n);
+        let (_, available) = self.list_allocate(&plan, AllocPlace::Current, n);
         self.list_refused(to, cap_id, max, available, n);
         Some(())
     }
@@ -279,7 +286,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 
         self.start(allocate);
         let plan = self.list_plan(item, count, None, n)?;
-        let (block, available) = self.list_allocate(plan, AllocPlace::Current, n);
+        let (block, available) = self.list_allocate(&plan, AllocPlace::Current, n);
         let charge = plan.charge;
         let admitted = self.value(Ty::Scalar(Scalar::Bool));
         self.inst(
@@ -449,9 +456,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // A native size beyond the address space is host exhaustion, after logical
         // admission. Saturating bytes cannot wrap into a small successful block.
         let (size, _) = self.list_arith(ArithOp::Mul, ArithMode::Saturating, count, stride, n);
-        let item = Some(self.runtime_type(item, n)?);
+        let edge = FieldTy::Seq(Box::new(self.edge_field(item, n)?));
         Some(ListPlan {
-            item,
+            edge,
             charge,
             overflow,
             size,
@@ -461,20 +468,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
     pub(super) fn list_allocate(
         &mut self,
-        plan: ListPlan,
+        plan: &ListPlan,
         place: AllocPlace,
         n: NodeId,
     ) -> (ValueId, ValueId) {
         let block = self.value(Ty::Ptr);
         let available = self.value(Ty::Scalar(Scalar::U64));
         let fail = self.fail_to(n);
-        // A count-overflow probe has no owning edge and can never allocate.
-        let kind = plan.item.map_or(AllocKind::Plain, |item| {
-            self.allocation_edge(
-                block,
-                FieldTy::Seq(Box::new(FieldTy::Inline(TypeRef(item.0)))),
-            )
-        });
+        let kind = AllocKind::Own {
+            edge: plan.edge.clone(),
+        };
         self.inst(
             Inst::Alloc {
                 result: block,
@@ -531,7 +534,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         match self.list_storage(item, n)? {
             ListStorage::Stored => {}
             ListStorage::Empty => {
-                self.list_count_overflow(to, cap_id, n)?;
+                self.list_count_overflow(to, cap_id, item, n)?;
                 self.jump(done, &[], n);
                 self.start(success);
                 self.inst(
@@ -552,7 +555,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let stored = self.new_block(&[]);
                 self.list_branch(on, zero_sized, stored, n);
                 self.start(zero_sized);
-                self.list_count_overflow(to, cap_id, n)?;
+                self.list_count_overflow(to, cap_id, item, n)?;
                 self.jump(done, &[], n);
                 self.start(stored);
             }
@@ -572,10 +575,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let admitted = self.new_block(&[Ty::Ptr, Ty::Scalar(Scalar::U64)]);
         self.list_branch(owned, like, current, n);
         self.start(current);
-        let (block, available) = self.list_allocate(plan, AllocPlace::Current, n);
+        let (block, available) = self.list_allocate(&plan, AllocPlace::Current, n);
         self.jump(admitted, &[block, available], n);
         self.start(like);
-        let (block, available) = self.list_allocate(plan, AllocPlace::Like(old_data), n);
+        let (block, available) = self.list_allocate(&plan, AllocPlace::Like(old_data), n);
         self.jump(admitted, &[block, available], n);
         self.start(admitted);
         let parameters = self.b.blocks[admitted.index()]

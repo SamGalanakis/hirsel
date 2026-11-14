@@ -20,7 +20,7 @@ b0:
   v1: u64 = const 8
   v2: u64 = const 16
   v3: u64 = const 1
-  v4: ptr, v5: u64 = alloc own v1 align 8 charge v1
+  v4: ptr, v5: u64 = alloc for seq u8 v1 align 8 charge v1
   address a0
   address a1
   address a2

@@ -213,7 +213,7 @@ impl Cx<'_, '_, '_> {
                 result: block,
                 available,
                 region_entry: None,
-                kind: AllocKind::Plain,
+                kind: AllocKind::Stable,
                 place: AllocPlace::Region(region),
                 charge,
                 overflow: None,

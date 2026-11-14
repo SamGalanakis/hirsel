@@ -929,12 +929,13 @@ fn a_record_lends_its_niche_from_any_field_at_that_fields_offset() {
 }
 
 /// Bug: a block whose cleanup drops something is called terminal, so an engine
-/// frees it with no cleanup frame and skips (leaks) what it owns; or the reverse
-/// for the leaves BLOCK-PREFIX step 1 is about. Rows: 0 `Leaf {x: u64}`, 1 `Text
+/// frees it with no cleanup frame and skips (leaks) what it owns; a fixed root is
+/// called dynamic or the reverse, so it gets the other frame shape; a resource
+/// payload is classed as own storage. The expected classes are hand-derived. Rows: 0 `Leaf {x: u64}`, 1 `Text
 /// {s: String}` (owns a buffer), 2 `Res` (a resource), 3 `Pair {l: Leaf, n: u64}`
 /// (inline, nothing to drop), 4 `Node {next: Box[Leaf]}` (owns a box).
 #[test]
-fn terminal_blocks_are_exactly_those_whose_cleanup_drops_nothing() {
+fn cleanup_classes_follow_what_cleaning_the_block_drops() {
     let string = || FieldTy::Seq(Box::new(u(Scalar::U8)));
     let row = |i: u32| TypeRef(i);
     let shapes = [
@@ -954,24 +955,27 @@ fn terminal_blocks_are_exactly_those_whose_cleanup_drops_nothing() {
     let r = compute(&shapes).unwrap();
     let seq = |e: FieldTy| FieldTy::Seq(Box::new(e));
     let map = |k: FieldTy, v: FieldTy| FieldTy::Map(Box::new(k), Box::new(v));
+    use Cleanup::{Dynamic as D, Fixed as F, Resource as R, Terminal as T};
     for (edge, want) in [
-        (FieldTy::Box(row(0)), true),
-        (FieldTy::Box(row(3)), true),
-        (FieldTy::Box(row(1)), false),
-        (FieldTy::Box(row(4)), false),
-        (FieldTy::Box(row(2)), false),
-        (FieldTy::Rc(row(0)), true),
-        (FieldTy::Arc(row(1)), false),
-        (string(), true),
-        (seq(FieldTy::Inline(row(3))), true),
-        (seq(FieldTy::Inline(row(1))), false),
-        (seq(string()), false),
-        (seq(FieldTy::Box(row(0))), false),
-        (map(u(Scalar::U64), FieldTy::Inline(row(0))), true),
-        (map(u(Scalar::U64), string()), false),
-        (map(string(), u(Scalar::U64)), false),
-        (u(Scalar::U64), false),
+        (FieldTy::Box(row(0)), Some(T)),
+        (FieldTy::Box(row(3)), Some(T)),
+        (FieldTy::Box(row(1)), Some(F)),
+        (FieldTy::Box(row(4)), Some(F)),
+        (FieldTy::Box(row(2)), Some(R)),
+        (FieldTy::Rc(row(0)), Some(T)),
+        (FieldTy::Arc(row(1)), Some(F)),
+        (string(), Some(T)),
+        (seq(FieldTy::Inline(row(3))), Some(T)),
+        (seq(FieldTy::Inline(row(1))), Some(D)),
+        (seq(string()), Some(D)),
+        (seq(FieldTy::Box(row(0))), Some(D)),
+        (map(u(Scalar::U64), FieldTy::Inline(row(0))), Some(T)),
+        (map(u(Scalar::U64), string()), Some(D)),
+        (map(string(), u(Scalar::U64)), Some(D)),
+        (FieldTy::OwnFn, Some(D)),
+        (u(Scalar::U64), None),
+        (FieldTy::Inline(row(4)), None),
     ] {
-        assert_eq!(terminal(&shapes, &r, &edge), want, "{edge:?}");
+        assert_eq!(cleanup_class(&shapes, &r, &edge), want, "{edge:?}");
     }
 }

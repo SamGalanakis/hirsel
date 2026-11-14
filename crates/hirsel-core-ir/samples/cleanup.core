@@ -250,7 +250,7 @@ b2:
   v4: ptr = call f0 g0 (v2) fail b5
   v5: u64 = const 24                   ; charge: 8 plus Cons's 16 (MEM-24)
   v9: u64 = const 16                   ; size: Cons's payload, Nil the null next (niche)
-  v6: ptr, v7: u64 = alloc own v9 align 8 charge v5
+  v6: ptr, v7: u64 = alloc for box t2 v9 align 8 charge v5
   v10: ptr = const 0x0
   v11: bool = ne v6, v10
   branch v11, b3, b7
@@ -331,7 +331,7 @@ b0(v0: bool):
 b1:
   v4: u64 = const 96
   v5: u64 = const 3
-  v6: ptr, v7: u64 = alloc own v4 align 8 charge v4
+  v6: ptr, v7: u64 = alloc for map u64 t0 v4 align 8 charge v4
   v24: ptr = const 0x0
   v25: bool = ne v6, v24
   branch v25, b2, b3                   ; refused: t stays an empty map
@@ -415,7 +415,7 @@ b0:
   v1: u64 = const 8
   v2: u64 = const 16
   v3: u64 = const 24
-  v4: ptr, v5: u64 = alloc own v3 align 8 charge v3
+  v4: ptr, v5: u64 = alloc for seq seq t5 v3 align 8 charge v3
   v6: ptr = const 0x0
   v7: bool = ne v4, v6
   branch v7, b1, b2

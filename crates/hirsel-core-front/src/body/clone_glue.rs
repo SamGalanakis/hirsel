@@ -150,11 +150,7 @@ impl Derive<'_> {
         .0
     }
     fn allocation_kind(&self, edge: &FieldTy) -> AllocKind {
-        if hirsel_core_layout::terminal(&self.module.types, &self.recipes, edge) {
-            AllocKind::Plain
-        } else {
-            AllocKind::Own
-        }
+        AllocKind::Own { edge: edge.clone() }
     }
     fn size_of(&self, field: &FieldTy) -> u64 {
         hirsel_core_layout::field_size(&self.module.types, &self.recipes, field).0
@@ -804,7 +800,7 @@ impl Derive<'_> {
         let size = c.constant(size);
         let block = alloc_place(
             c,
-            AllocKind::Plain,
+            AllocKind::Stable,
             AllocPlace::Region(region),
             charge,
             size,
@@ -959,7 +955,7 @@ impl Derive<'_> {
                 let size = c.binary(BinaryOp::Add, bytes, head);
                 let blob = alloc_place(
                     c,
-                    AllocKind::Plain,
+                    AllocKind::Stable,
                     AllocPlace::Region(region),
                     charge,
                     size,

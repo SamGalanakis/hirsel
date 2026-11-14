@@ -45,7 +45,7 @@ b0(v0: u8):
  v1: u64 = const 0
  v2: u64 = const 8
  v3: u64 = const 16
- v4: ptr, v5: u64 = alloc plain v2 align 8 charge v2
+ v4: ptr, v5: u64 = alloc for seq u8 v2 align 8 charge v2
  v6: ptr = const 0x0
  v7: bool = ne v4, v6
  branch v7, b1, b2
@@ -79,7 +79,7 @@ b0:
  v0: u64 = const 0
  v1: u64 = const 8
  v2: u64 = const 16
- v3: ptr, v4: u64 = alloc plain v1 align 8 charge v1
+ v3: ptr, v4: u64 = alloc for seq u8 v1 align 8 charge v1
  address a0
  address a1
  address a2

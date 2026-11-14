@@ -12,42 +12,42 @@ inst n5 = test@0/host_memory/aligned64 [] []
 inst n6 = test@0/host_memory/aligned4096 [] []
 fn f0 = n0 g0 {
 b0(v0: ptr, v1: u64):
-  v2: ptr, v3: u64 = alloc plain v1 align 8 charge v1
+  v2: ptr, v3: u64 = alloc for seq u8 v1 align 8 charge v1
   free v2 charge v1
   return
 }
 fn f1 = n1 g0 {
 b0(v0: ptr, v1: u64):
-  v2: ptr, v3: u64 = alloc plain v1 align 8 charge v1 like v0
+  v2: ptr, v3: u64 = alloc for seq u8 v1 align 8 charge v1 like v0
   free v2 charge v1
   return
 }
 fn f2 = n2 g0 {
 b0(v0: ptr, v1: u64):
-  v2: ptr, v3: u64, v4: u64 = alloc own v1 align 8 charge v1 in v0
+  v2: ptr, v3: u64, v4: u64 = alloc stable v1 align 8 charge v1 in v0
   return
 }
 fn f3 = n3 g0 {
 b0(v0: ptr, v1: u64):
-  v2: ptr, v3: u64 = alloc counted rc v1 align 8 charge v1
+  v2: ptr, v3: u64 = alloc for rc t0 v1 align 8 charge v1
   release v2 rc t0
   return
 }
 fn f4 = n4 g0 {
 b0(v0: ptr, v1: u64):
-  v2: ptr, v3: u64 = alloc counted arc v1 align 8 charge v1
+  v2: ptr, v3: u64 = alloc for arc t0 v1 align 8 charge v1
   release v2 arc t0
   return
 }
 fn f5 = n5 g0 {
 b0(v0: ptr, v1: u64):
-  v2: ptr, v3: u64 = alloc plain v1 align 64 charge v1
+  v2: ptr, v3: u64 = alloc for seq u8 v1 align 64 charge v1
   free v2 charge v1
   return
 }
 fn f6 = n6 g0 {
 b0(v0: ptr, v1: u64):
-  v2: ptr, v3: u64 = alloc plain v1 align 4096 charge v1
+  v2: ptr, v3: u64 = alloc for seq u8 v1 align 4096 charge v1
   free v2 charge v1
   return
 }

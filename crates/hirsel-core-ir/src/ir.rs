@@ -10,6 +10,7 @@
 
 use hirsel_core_ids::{ContentHash, DefPath};
 pub use hirsel_core_layout::{Carried, Scalar, Shape, Ty};
+use hirsel_core_layout::{Cleanup, FieldTy, Recipe, cleanup_class};
 use std::marker::PhantomData;
 
 macro_rules! ids { ($($(#[$doc:meta])* $name:ident),* $(,)?) => {$(
@@ -538,20 +539,50 @@ pub enum Inst {
 
 /// What an `Alloc` makes. The block's bookkeeping (its limit record,
 /// and for a resource its cause cell and grant) is the engine's.
-#[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum AllocKind {
-    /// Own storage that is terminal (crate docs, "Terminal blocks"): the edge that
-    /// will own it is one `hirsel_core_layout::terminal` holds of. No cleanup frame.
-    Plain,
-    /// General own storage, including descendants of counted payloads.
-    Own,
-    /// A counted node: the count (u64, starting at 1) at offset 0, the payload at 8.
-    /// `Arc` makes the node with the atomic count every later `share`, `release`
-    /// and `try_unwrap` of it uses (MEM-15); its operations name the same kind.
-    /// `plain`: its payload is terminal, as for [`AllocKind::Plain`].
-    Counted { count: Counted, plain: bool },
+    /// Own storage for the owning edge that will hold it (crate docs, "Cleanup
+    /// classes"): `box tN`, `seq E`, `map K V`, `ownfn` (an `own fn` environment), or
+    /// `rc tN` / `arc tN`, a counted node: the count (u64, starting at 1) at offset 0,
+    /// the payload at 8. `arc` makes the node with the atomic count every later
+    /// `share`, `release` and `try_unwrap` of it uses (MEM-15); its operations name the
+    /// same kind. The edge's [`hirsel_core_layout::cleanup_class`] fixes the block's
+    /// native prefix.
+    Own { edge: FieldTy },
+    /// Region storage (MEM-1): freed when its region closes, never by an edge. Only
+    /// `in` a region, and every region allocation is stable.
+    Stable,
     /// A resource block: `charge` covers its storage, its cause cell and `grant`.
     Resource { grant: u64 },
+}
+
+impl AllocKind {
+    /// The count kind of a counted node (an `rc` or `arc` edge).
+    pub fn counted(&self) -> Option<Counted> {
+        match self {
+            AllocKind::Own {
+                edge: FieldTy::Rc(_),
+            } => Some(Counted::Rc),
+            AllocKind::Own {
+                edge: FieldTy::Arc(_),
+            } => Some(Counted::Arc),
+            _ => None,
+        }
+    }
+    /// The cleanup class of the block (crate docs, "Cleanup classes"); `None` for
+    /// region storage, which no edge cleans.
+    pub fn cleanup(&self, shapes: &[Shape], recipes: &[Recipe]) -> Option<Cleanup> {
+        match self {
+            AllocKind::Own { edge } => cleanup_class(shapes, recipes, edge),
+            AllocKind::Stable => None,
+            AllocKind::Resource { .. } => Some(Cleanup::Resource),
+        }
+    }
+    /// Whether the block is terminal: the 8-byte payer prefix, freed with nothing
+    /// to drop (crate docs, "Cleanup classes").
+    pub fn terminal(&self, shapes: &[Shape], recipes: &[Recipe]) -> bool {
+        self.cleanup(shapes, recipes) == Some(Cleanup::Terminal)
+    }
 }
 
 /// Which limit an `Alloc` is charged to.

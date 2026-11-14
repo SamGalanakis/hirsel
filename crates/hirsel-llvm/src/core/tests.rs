@@ -1222,7 +1222,7 @@ fn text_fixed_span_and_pointer_views_use_packed_unaligned_bytes() {
 fn counted_strings_release_their_dynamic_byte_buffer() {
     let source = include_str!("../../tests/core_runtime/callable.core")
         .replace("  addr a6 = v4 byte v1 : u8", "  addr a6 = v4 byte v1 : u8\n  addr a7 = v10 byte v2 : t1")
-        .replace("  raise fail a0", "  v9: u64 = const 32\n  v10: ptr, v11: u64 = alloc counted rc v9 align 8 charge v9\n  address a7\n  v12: u64 = const 24\n  copy a7, a0, v12\n  release v10 rc t1\n  return");
+        .replace("  raise fail a0", "  v9: u64 = const 32\n  v10: ptr, v11: u64 = alloc for rc t1 v9 align 8 charge v9\n  address a7\n  v12: u64 = const 24\n  copy a7, a0, v12\n  release v10 rc t1\n  return");
     let module = text::parse(&source).unwrap();
     wf::module(&module).unwrap();
     agree_cases(

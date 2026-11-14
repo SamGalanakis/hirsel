@@ -774,7 +774,7 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             result,
             available,
             region_entry,
-            kind,
+            ref kind,
             place,
             charge,
             overflow,
@@ -803,6 +803,26 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             }
             if let AllocPlace::Like(v) | AllocPlace::Region(v) = place {
                 c.is(v, Ty::Ptr)?;
+            }
+            // Region storage is stable and stable storage is in a region (crate docs,
+            // "Cleanup classes"); an own block names the edge that will own it.
+            need(
+                matches!(kind, AllocKind::Stable) == matches!(place, AllocPlace::Region(_)),
+                || "stable storage is exactly the storage allocated in a region".into(),
+            )?;
+            if let AllocKind::Own { edge } = kind {
+                use hirsel_core_layout::FieldTy as F;
+                let types = &c.m.types;
+                need(refs_ok(edge, types.len()), || {
+                    format!("allocation edge {edge:?} names an unknown type")
+                })?;
+                need(
+                    matches!(
+                        edge,
+                        F::Box(_) | F::Rc(_) | F::Arc(_) | F::Seq(_) | F::Map(..) | F::OwnFn
+                    ),
+                    || format!("allocation edge {edge:?} is not an own block's edge"),
+                )?;
             }
             need(align.is_power_of_two(), || {
                 "alignment is not a power of two".into()

@@ -271,7 +271,7 @@ fn emit(
         drop::Glues::declare(&mut object, input, layouts)?
     };
     let task_entries = task_entry::Glues::declare(&mut object, input)?;
-    let allocators = fast::declare_allocators(&mut object, input)?;
+    let allocators = fast::declare_allocators(&mut object, input, layouts)?;
     let tables = Tables {
         input,
         layouts,

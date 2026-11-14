@@ -97,10 +97,11 @@ pub const OWN_ORDINARY_MAX_TAG: usize = OWN_ORDINARY_GRAPH_TAG;
 // snapshots Capacity before its existing event. This local path adds no TLS
 // lookup, poll, drain, lock or atomic update.
 
-// FORM #84: alloc plain and counted { plain:true } select PLAIN_PREFIX_BYTES.
-// Count stays at NODE_COUNT, payload at NODE_PAYLOAD. A terminal owning edge
-// frees immediately after its last count event; it never borrows a graph frame.
-// Recipes derive terminal from hirsel_core_layout::terminal. Generic allocation
-// producers repeat this derivation after substituting the concrete owning edge.
+// FORM #84/#89: an alloc whose named owning edge is terminal
+// (hirsel_core_layout::cleanup_class) selects PLAIN_PREFIX_BYTES; every other
+// ordinary block, counted or not, GRAPH_PREFIX_BYTES. Count stays at NODE_COUNT,
+// payload at NODE_PAYLOAD. A terminal owning edge frees immediately after its last
+// count event; it never borrows a graph frame. The alloc and the cleanup glue read
+// the same edge, so the prefix always fits the cleanup.
 // Like/growth retain the same property and original payer; logical charges and
 // admission/refund ordering are independent of this native prefix selection.

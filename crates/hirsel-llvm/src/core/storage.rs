@@ -255,7 +255,7 @@ impl FunctionEmitter<'_> {
                 result,
                 available,
                 region_entry,
-                kind,
+                ref kind,
                 place,
                 charge,
                 overflow,
@@ -263,14 +263,30 @@ impl FunctionEmitter<'_> {
                 align,
                 fail,
             } => {
+                // The prefix follows the block's cleanup class (crate docs,
+                // "Cleanup classes"): terminal blocks carry only the payer word.
+                let graph = !kind.terminal(&self.module.types, self.recipes);
+                let resource = match *kind {
+                    AllocKind::Resource { grant } => Some(grant),
+                    _ => None,
+                };
+                let counted = kind.counted();
                 let charge = self.get(charge);
                 let size = self.get(size);
-                let fast = self.fast_allocate(kind, place, &charge, &size, align, overflow);
+                let fast = self.fast_allocate(
+                    resource.is_some(),
+                    graph,
+                    place,
+                    &charge,
+                    &size,
+                    align,
+                    overflow,
+                );
                 let (block, room) = if let Some(fast) = fast {
                     fast
                 } else {
-                    let (name, mut args) = match (kind, place) {
-                        (AllocKind::Resource { grant }, _) => {
+                    let (name, mut args) = match (resource, place) {
+                        (Some(grant), _) => {
                             let without_grant = self.calc(format!("sub i64 {charge}, {grant}"));
                             let storage = self.calc(format!("sub i64 {without_grant}, 32"));
                             (
@@ -314,7 +330,7 @@ impl FunctionEmitter<'_> {
                             )
                         }
                     };
-                    if !matches!(kind, AllocKind::Resource { .. }) {
+                    if resource.is_none() {
                         let overflow = overflow.map_or_else(
                             || "false".into(),
                             |v| {
@@ -324,17 +340,8 @@ impl FunctionEmitter<'_> {
                         );
                         args.push(("i1 zeroext".into(), overflow));
                     }
-                    if !matches!(kind, AllocKind::Resource { .. })
-                        && !matches!(place, AllocPlace::Region(_))
-                    {
-                        args.push((
-                            "i8 zeroext".into(),
-                            u8::from(!matches!(
-                                kind,
-                                AllocKind::Plain | AllocKind::Counted { plain: true, .. }
-                            ))
-                            .to_string(),
-                        ));
+                    if resource.is_none() && !matches!(place, AllocPlace::Region(_)) {
+                        args.push(("i8 zeroext".into(), u8::from(graph).to_string()));
                     }
                     self.allocation(name, &args)
                 };
@@ -371,7 +378,7 @@ impl FunctionEmitter<'_> {
                 writeln!(self.code, "allocation_success{n}:").unwrap();
                 self.put(result, &block);
                 self.put(available, &room);
-                if let AllocKind::Counted { count: counted, .. } = kind {
+                if let Some(counted) = counted {
                     let missing = self.calc(format!("icmp eq ptr {block}, null"));
                     let n = self.next;
                     self.next += 1;

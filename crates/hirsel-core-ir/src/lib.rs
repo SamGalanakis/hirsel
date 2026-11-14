@@ -16,7 +16,7 @@
 //! own allocation, growth (`alloc .. like`), `free` and `copy` (moves, replace
 //! with install-before-drop, growth); `drop` by recipe, with initialization bits
 //! kept by `UpdateMask`; resources as blocks with a cause cell and a finalizer
-//! grant; Rc/Arc nodes (`alloc counted`, `share`, `release`, `try_unwrap`);
+//! grant; Rc/Arc nodes (`alloc for rc|arc`, `share`, `release`, `try_unwrap`);
 //! failure successors (`fail bN` on the instructions that can fail, `raise`,
 //! `propagate`); `never` signatures, whose calls end their block before
 //! `unreachable`, which also follows a read of a binder of type `Never`; logical admission and refund with bound scopes (`limit_enter`,
@@ -179,9 +179,8 @@
 //! - A region alloc can return an optional third u64 result, the opaque payer-entry
 //!   token captured at admission. Only the destination writer passes it back to
 //!   trim; its numeric value is engine bookkeeping and is not program data.
-//!   `alloc plain` has Own's semantics but promises no outgoing mechanical drop
-//!   (Terminal blocks); general `alloc own` and counted nodes prepay a resumable
-//!   native frame.
+//!   An ordinary block's prefix follows its cleanup class (Cleanup classes): 8
+//!   bytes when terminal, else a resumable 48-byte native frame.
 //! - **Build**: a record `{blob, region, entry, charge, cursor, end = 16 + n, w, id = rt.dest_id}`; a
 //!   writer frame `{record, start, count, last}`; a `Child` `{id, at}`. Every
 //!   write checks, in order: the identity of each link it stores, in field order
@@ -270,7 +269,7 @@
 //! exactly when its capacity is not 0, except a `List` of a zero-sized element,
 //! which never does (below). Cleanup, the counted release's last step and growth
 //! test the capacity, never the data pointer: a capacity-0 carrier frees nothing,
-//! and its first growth is an `alloc own` against the current limit (MEM-26),
+//! and its first growth is an `alloc for seq ..` against the current limit (MEM-26),
 //! never `alloc .. like`.
 //! A dynamic ordinary/counted or region allocation may carry `overflow vN`, a
 //! bool saying its exact logical charge exceeds u64. It refuses admission even
@@ -289,7 +288,7 @@
 //!   to clean: a capacity-0 `String` has no storage and plain elements, so a
 //!   producer may omit its `drop`.
 //! - **A byte-string literal** (`b".."`) is `Result[Bytes, Capacity]`: it admits
-//!   `round8(length)` as `List[u8]` storage (`alloc own` against the current
+//!   `round8(length)` as `List[u8]` storage (`alloc for seq u8` against the current
 //!   limit) and copies its bytes out of `static dN` into `{data, length,
 //!   length}`; a refusal is the `Capacity` value. `b""` is `Ok({0, 0, 0})`.
 //! - A static `String`'s length exceeds its capacity, so every room test is
@@ -312,7 +311,7 @@
 //!   Creating, reserving, growing and cloning it emit no `alloc` and no charge
 //!   (its logical charge is 0); clone copies the carrier. Only the length is
 //!   bounded: a `reserve` past `2^64 - 1` elements or a push at that length is
-//!   `Capacity` with `requested` `2^64 - 1`, made by an `alloc own` of that
+//!   `Capacity` with `requested` `2^64 - 1`, made by an `alloc for` of that
 //!   charge with `overflow` true against the current limit, which always refuses
 //!   and reports that limit's room as `available` (MEM-22). Its cleanup is none,
 //!   decided from the layout (its drop glue never reads the carrier), so the null
@@ -478,7 +477,7 @@
 //! out with `copy` and `free`s the block, refunding that complete charge (MEM-23). A counted node is a u64 count at
 //! offset 0 and the payload at offset 8; `deref` of an rc or arc field names the
 //! payload. A counted payload holds no resource, so a release runs no user code.
-//! Every counted row names its kind: `alloc counted rc|arc` and `share`,
+//! Every counted row names its kind: `alloc for rc|arc` and `share`,
 //! `release` and `try_unwrap` with `rc|arc`, so each row alone says whether its
 //! count operations are atomic. An `arc` node is made and counted atomically, and
 //! each of these rows is an event in the run's order (MEM-15); `rc` never crosses
@@ -487,36 +486,37 @@
 //! gives `arc`, never from bounds of `T`; a row whose kind differs from its node's
 //! allocation is malformed (the evaluator stops on it).
 //!
-//! # Terminal blocks (FORM #84)
+//! # Cleanup classes (FORM #84, #89)
 //!
-//! A block is terminal when cleaning it has nothing to resume: freeing it drops no
-//! child and runs no user code. Which blocks are terminal is derived from the form,
-//! never stored: `hirsel_core_layout::terminal(shapes, recipes, edge)` holds of an
-//! owning edge (`box`, `rc`, `arc`, `seq`, `map`) exactly when the cleanup it
-//! starts is a free alone: a box or counted payload of a non-resource type with no
-//! drop recipe, or `List`/`Map` storage whose elements, keys and values need no
-//! drop. A `String`, a scalar `List` buffer and a `Box` of a type with no owned
-//! child are terminal; a `Box` of a type holding a `Box`, a `List[String]` or a
-//! resource payload is not.
+//! An ordinary allocation names the owning edge that will hold its pointer:
+//! `alloc for <edge>` (`AllocKind::Own { edge }`), where the edge is a `box`,
+//! `rc`, `arc`, `seq`, `map` or `ownfn` field type. Region storage is `alloc
+//! stable` (no edge cleans it) and a resource block is `alloc resource grant N`.
+//! Everything else about the block is derived from that edge and the module's
+//! recipes, never stored: `hirsel_core_layout::cleanup_class(shapes, recipes,
+//! edge)` gives its class.
+//! - **Terminal**: cleaning it has nothing to resume, freeing it drops no child and
+//!   runs no user code. A box or counted payload of a non-resource type with no drop
+//!   recipe, or `List`/`Map` storage whose elements, keys and values need no drop: a
+//!   `String`, a scalar `List` buffer, a `Box` of a type with no owned child.
+//! - **Fixed**: a box or counted payload whose type has a drop recipe (a `Box` of a
+//!   type holding a `Box`).
+//! - **Dynamic**: `List`/`Map` storage whose entries need a drop (a `List[String]`),
+//!   and `own fn` environments.
+//! - **Resource**: a box of a resource type, and every `alloc resource`.
 //!
-//! An allocation does not name the edge that will own its pointer, so the
-//! producer states it: `alloc plain` (own) and `alloc counted rc|arc plain`
-//! (counted) promise that the block is owned only by a terminal edge. The
-//! producer may always say `own` or `counted` without `plain` (a missed saving,
-//! never a fault); it must not say `plain` for a block a non-terminal edge owns.
-//! The evaluator checks that direction: cleaning a block allocated plain through
-//! an edge `terminal` does not hold of stops the run.
+//! An `rc` or `arc` edge makes the block a counted node (count set to 1 at the
+//! allocation, [`AllocKind::counted`]).
 //!
-//! Engines read the two halves where they act. The prefix is chosen at the
-//! `alloc` from its kind: a plain block may carry the 8-byte payer prefix with no
-//! cleanup frame; every other own or counted block carries the resumable frame.
-//! Cleanup glue reads `terminal(edge)` for each owning edge it releases: a
-//! terminal edge frees its block in place (`hirsel_core_free`, which finds the
-//! native base from the payer word, so it is correct for either prefix) instead
-//! of handing it to the containing worklist, which only ever receives blocks
-//! with a frame. An engine may keep the full frame for a plain block (a counted
-//! plain node, until the run time gives it the short prefix); freeing it
-//! terminally stays correct.
+//! Engines read the class where they act. At the `alloc`, a terminal block
+//! carries the 8-byte payer prefix and every other one the 48-byte resumable frame
+//! ([`AllocKind::terminal`]). Cleanup glue reads `terminal(edge)` for each owning
+//! edge it releases: a terminal edge frees its block in place
+//! (`hirsel_core_free`) instead of handing it to the containing worklist, which
+//! only ever receives blocks with a frame. Because both read the same edge, they
+//! agree by construction; a producer that names an edge other than the one that
+//! cleans the block is malformed, and the evaluator stops when the class an
+//! `alloc` named differs from the class of the edge cleaning it.
 //!
 //! # Runtime calls (FORM v1a)
 //!

@@ -77,7 +77,7 @@ impl Function<'_, '_, '_> {
     }
     pub fn own_alloc(
         &mut self,
-        kind: AllocKind,
+        graph: bool,
         place: AllocPlace,
         size: Value,
         align: u64,
@@ -96,13 +96,10 @@ impl Function<'_, '_, '_> {
         };
 
         let alignment = align.max(8);
-        let prefix = if matches!(
-            kind,
-            AllocKind::Plain | AllocKind::Counted { plain: true, .. }
-        ) {
-            memory_layout::PLAIN_PREFIX_BYTES
-        } else {
+        let prefix = if graph {
             memory_layout::GRAPH_PREFIX_BYTES
+        } else {
+            memory_layout::PLAIN_PREFIX_BYTES
         } as u64;
         let offset = prefix.next_multiple_of(alignment);
         let one = self.b.ins().iconst(types::I64, 1);
@@ -179,10 +176,7 @@ impl Function<'_, '_, '_> {
         self.b.ins().jump(done, &[null.into(), available.into()]);
         self.b.switch_to_block(allocate);
         self.debit(payer, charge, available)?;
-        let native_kind = u64::from(!matches!(
-            kind,
-            AllocKind::Plain | AllocKind::Counted { plain: true, .. }
-        ));
+        let native_kind = u64::from(graph);
         let tag = native_kind
             | (u64::from(alignment.trailing_zeros() - 3) << memory_layout::OWN_ALIGNMENT_SHIFT);
         let tagged = self.b.ins().bor_imm_s(payer, tag as i64);
@@ -625,22 +619,20 @@ pub(super) struct Allocator {
 pub(super) fn declare_allocators(
     object: &mut ObjectModule,
     input: &c::Module,
+    layouts: &[hirsel_core_layout::Recipe],
 ) -> Result<Vec<Allocator>> {
     let mut allocators: Vec<Allocator> = Vec::new();
     for body in input.functions.iter().filter_map(|f| f.body.as_ref()) {
         for inst in &body.insts {
             if let Inst::Alloc {
-                kind: kind @ (AllocKind::Plain | AllocKind::Own | AllocKind::Counted { .. }),
+                kind: kind @ AllocKind::Own { .. },
                 align,
                 place: AllocPlace::Current | AllocPlace::Like(_),
                 ..
             } = inst
             {
                 let align = (*align).max(8);
-                let prefix = if matches!(
-                    kind,
-                    AllocKind::Plain | AllocKind::Counted { plain: true, .. }
-                ) {
+                let prefix = if kind.terminal(&input.types, layouts) {
                     memory_layout::PLAIN_PREFIX_BYTES
                 } else {
                     memory_layout::GRAPH_PREFIX_BYTES

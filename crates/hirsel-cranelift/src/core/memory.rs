@@ -68,7 +68,7 @@ impl Function<'_, '_, '_> {
                 result,
                 available,
                 region_entry,
-                kind,
+                ref kind,
                 place,
                 charge,
                 overflow,
@@ -77,6 +77,12 @@ impl Function<'_, '_, '_> {
                 fail,
             } => {
                 let ctx = self.context;
+                let graph = !kind.terminal(&self.input.types, self.layouts);
+                let resource = match *kind {
+                    AllocKind::Resource { grant } => Some(grant),
+                    _ => None,
+                };
+                let counted = kind.counted();
                 let charge = self.get(charge);
                 let size = self.get(size);
                 let alignment = align;
@@ -88,11 +94,9 @@ impl Function<'_, '_, '_> {
                 // Allocation = {pointer, Capacity{requested,available}}, a C
                 // struct of three words. On refusal only the pointer is null;
                 // there is no guessed function status or call to the old runtime.
-                let values = if !matches!(kind, AllocKind::Resource { .. })
-                    && !matches!(place, AllocPlace::Region(_))
-                {
+                let values = if resource.is_none() && !matches!(place, AllocPlace::Region(_)) {
                     let overflow = overflow.map(|v| self.get(v));
-                    let values = self.own_alloc(kind, place, size, alignment, charge, overflow)?;
+                    let values = self.own_alloc(graph, place, size, alignment, charge, overflow)?;
                     [values[0], self.b.ins().iconst(types::I64, 0), values[1]]
                 } else if let Some(overflow) = overflow {
                     let overflow = self.get(overflow);
@@ -108,13 +112,7 @@ impl Function<'_, '_, '_> {
                             AllocPlace::Like(v) => self.get(v),
                             _ => self.b.ins().iconst(types::I64, 0),
                         };
-                        let kind = self.b.ins().iconst(
-                            types::I8,
-                            i64::from(!matches!(
-                                kind,
-                                AllocKind::Plain | AllocKind::Counted { plain: true, .. }
-                            )),
-                        );
+                        let kind = self.b.ins().iconst(types::I8, i64::from(graph));
                         self.c_call(
                             "hirsel_core_alloc",
                             &[p, p, u, u, u, boolean, Ty::Scalar(Scalar::U8)],
@@ -123,7 +121,7 @@ impl Function<'_, '_, '_> {
                         )?
                     };
                     [r[0], r[1], r[2]]
-                } else if let AllocKind::Resource { grant } = kind {
+                } else if let Some(grant) = resource {
                     let storage = self.b.ins().iadd_imm_s(
                         charge,
                         -(hirsel_core_layout::charge::CAUSE_CELL as i64) - grant as i64,
@@ -141,7 +139,7 @@ impl Function<'_, '_, '_> {
                         AllocPlace::Region(_) => {
                             self.region_alloc(payer, size, alignment, charge)?
                         }
-                        _ => self.own_alloc(kind, place, size, alignment, charge, None)?,
+                        _ => self.own_alloc(graph, place, size, alignment, charge, None)?,
                     };
                     [values[0], self.b.ins().iconst(types::I64, 0), values[1]]
                 };
@@ -171,7 +169,7 @@ impl Function<'_, '_, '_> {
                 self.guard(grant, 6, fail)?;
                 self.b.ins().jump(done, &[]);
                 self.b.switch_to_block(done);
-                if let AllocKind::Counted { count, .. } = kind {
+                if let Some(count) = counted {
                     let init = self.b.create_block();
                     let ready = self.b.create_block();
                     self.b.ins().brif(refused, ready, &[], init, &[]);

@@ -257,7 +257,7 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
         .file_stem()
         .is_some_and(|x| x == "generic-allocation-layout")
     {
-        use hirsel_core_ir::{AllocKind, Inst};
+        use hirsel_core_ir::Inst;
         let mut checked = 0;
         for f in &module.functions {
             let key = &module.instances[f.instance.index()];
@@ -283,7 +283,7 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
                 .iter()
                 .find_map(|i| match i {
                     Inst::Alloc {
-                        kind: AllocKind::Resource { .. },
+                        kind: hirsel_core_ir::AllocKind::Resource { .. },
                         charge,
                         size,
                         align,
@@ -1677,6 +1677,20 @@ fn list_index_iteration_and_failure_cleanup() {
         else {
             panic!("List by address")
         };
+        // The owning edge of the fixture's buffer: the row's storage field as the
+        // printed form spells it (`seq u64`, `map u64 u64`, `seq t5`); a span's blob
+        // is bytes, freed explicitly.
+        let printed = text::print(module);
+        let row = printed
+            .lines()
+            .find(|l| l.starts_with(&format!("type t{list} =")))
+            .unwrap();
+        let edge = row[row.find('{').unwrap() + 1..]
+            .split([',', '}'])
+            .filter_map(|f| f.split_once(':').map(|(_, ty)| ty.trim()))
+            .find(|ty| ty.starts_with("seq ") || ty.starts_with("map "))
+            .unwrap_or("seq u8")
+            .to_owned();
         let (g, instance, entry) = (
             module.signatures.len(),
             module.instances.len(),
@@ -1707,7 +1721,7 @@ fn f{entry} = n{instance} g{g} {{
   v1: u64 = const 0
   v2: u64 = const 8
   v3: u64 = const 16
-  v4: ptr, v5: u64 = alloc own v0 align 8 charge v0
+  v4: ptr, v5: u64 = alloc for {edge} v0 align 8 charge v0
   v6: u64 = const 7
   v7: u64 = const 11
   v8: u64 = const 13
@@ -1868,8 +1882,8 @@ fn f{entry} = n{instance} g{g} {{
                     "v0: u64 = const 96\n  v11: u64 = const 176",
                 )
                 .replace(
-                    "alloc own v0 align 8 charge v0",
-                    "alloc own v11 align 8 charge v0",
+                    &format!("alloc for {edge} v0 align 8 charge v0"),
+                    &format!("alloc for {edge} v11 align 8 charge v0"),
                 )
                 .replace(" b0:", &format!("{addresses} b0:"))
                 .replace("store a4, v6\n  store a5, v7\n  store a6, v8", &build)
@@ -1882,7 +1896,7 @@ fn f{entry} = n{instance} g{g} {{
                 let v = 11 + 7 * i;
                 let offset = i * 24;
                 addresses.push_str(&format!("addr a{a} = v4 byte v{v} : ptr\naddr a{} = v4 byte v{} : u64\naddr a{} = v4 byte v{} : u64\naddr a{} = v{} : u64\n",a+1,v+1,a+2,v+2,a+3,v+3));
-                build.push_str(&format!("v{v}: u64 = const {offset}\nv{}: u64 = const {}\nv{}: u64 = const {}\nv{}: ptr, v{}: u64 = alloc own v2 align 8 charge v2\nv{}: u64 = const 1\nv{}: u64 = const {}\naddress a{a}\naddress a{}\naddress a{}\naddress a{}\nstore a{a}, v{}\nstore a{}, v{}\nstore a{}, v{}\nstore a{}, v{}\n",v+1,offset+8,v+2,offset+16,v+3,v+4,v+5,v+6,[7,11,13][i],a+1,a+2,a+3,v+3,a+1,v+5,a+2,v+5,a+3,v+6));
+                build.push_str(&format!("v{v}: u64 = const {offset}\nv{}: u64 = const {}\nv{}: u64 = const {}\nv{}: ptr, v{}: u64 = alloc for seq u64 v2 align 8 charge v2\nv{}: u64 = const 1\nv{}: u64 = const {}\naddress a{a}\naddress a{}\naddress a{}\naddress a{}\nstore a{a}, v{}\nstore a{}, v{}\nstore a{}, v{}\nstore a{}, v{}\n",v+1,offset+8,v+2,offset+16,v+3,v+4,v+5,v+6,[7,11,13][i],a+1,a+2,a+3,v+3,a+1,v+5,a+2,v+5,a+3,v+6));
             }
             fixture
                 .replace("v0: u64 = const 24", "v0: u64 = const 72")
@@ -2025,7 +2039,7 @@ b0:
   v0: u64 = const 0
   v1: u64 = const 8
   v2: u64 = const 16
-  v3: ptr, v4: u64 = alloc own v2 align 8 charge v2
+  v3: ptr, v4: u64 = alloc for seq u64 v2 align 8 charge v2
   v5: u64 = const 2
   v6: u64 = const 5
   v7: u64 = const 7
@@ -2137,10 +2151,16 @@ fn causes_iteration_reads_complete_cells_and_preserves_order() {
         for (i, (base, _, ty, _)) in words.iter().enumerate() {
             fixture += &format!("addr a{} = {base} byte v{} : {ty}\n", i + 2, 10 + 2 * i);
         }
+        // Each cell is a boxed Cause; its message bytes a `String`'s buffer.
+        let cause = m
+            .types
+            .iter()
+            .position(|t| t.name.ends_with("Cause"))
+            .unwrap();
         let (data_at, next_at, bytes_at) = (k + 2, k + 3, k + 4);
         let (data_off, next_off, result) = (10 + 2 * k, 11 + 2 * k, 12 + 2 * k);
         fixture += &format!(
-            "addr a{data_at} = v1 byte v{data_off} : ptr\naddr a{next_at} = v1 byte v{next_off} : ptr\naddr a{bytes_at} = v6 : u32\nb0:\nlive s0\nv0: u64 = const 40\nv1: ptr, v2: u64 = alloc own v0 align 8 charge v0\nv3: ptr, v4: u64 = alloc own v0 align 8 charge v0\nv5: u64 = const 8\nv6: ptr, v7: u64 = alloc own v5 align 1 charge v5\nv8: u64 = const 17\nv9: u32 = const 1635017060\naddress a{bytes_at}\nstore a{bytes_at}, v9\n"
+            "addr a{data_at} = v1 byte v{data_off} : ptr\naddr a{next_at} = v1 byte v{next_off} : ptr\naddr a{bytes_at} = v6 : u32\nb0:\nlive s0\nv0: u64 = const 40\nv1: ptr, v2: u64 = alloc for box t{cause} v0 align 8 charge v0\nv3: ptr, v4: u64 = alloc for box t{cause} v0 align 8 charge v0\nv5: u64 = const 8\nv6: ptr, v7: u64 = alloc for seq u8 v5 align 1 charge v5\nv8: u64 = const 17\nv9: u32 = const 1635017060\naddress a{bytes_at}\nstore a{bytes_at}, v9\n"
         );
         for (i, (_, offset, ty, bits)) in words.iter().enumerate() {
             let bits = if *ty == "ptr" {
@@ -3056,7 +3076,7 @@ fn dynamic_plain_callable_fits() {
 
 #[test]
 fn terminal_prefix_is_derived_after_generic_substitution() {
-    use hirsel_core_ir::{AllocKind, Inst};
+    use hirsel_core_ir::Inst;
     let source = concat!(
         include_str!("../../../core/std/tests/terminal_blocks.hirsel"),
         "\nfn run()->u64 {leaf_box()+child_box()+leaf_growth()+child_growth()+leaf_counted()}\n"
@@ -3089,6 +3109,7 @@ fn terminal_prefix_is_derived_after_generic_substitution() {
     let report = eval::run(&emitter.module, root.unwrap(), &[], 100_000);
     assert_eq!(report.outcome, eval::Outcome::Returned(vec![45]));
     assert_eq!(report.used, 0);
+    let recipes = hirsel_core_layout::compute(&emitter.module.types).unwrap();
     let mut checked = 0;
     for function in &emitter.module.functions {
         let key = &emitter.module.instances[function.instance.index()];
@@ -3107,14 +3128,11 @@ fn terminal_prefix_is_derived_after_generic_substitution() {
                 }) {
                     continue;
                 }
+                let class = kind.cleanup(&emitter.module.types, &recipes);
                 assert_eq!(
-                    *kind,
-                    if plain {
-                        AllocKind::Plain
-                    } else {
-                        AllocKind::Own
-                    },
-                    "{key:?}"
+                    class == Some(hirsel_core_layout::Cleanup::Terminal),
+                    plain,
+                    "{key:?}: {kind:?} is {class:?}"
                 );
                 checked += 1;
             }

@@ -120,14 +120,15 @@ impl FunctionEmitter<'_> {
     }
     pub(super) fn fast_allocate(
         &mut self,
-        kind: AllocKind,
+        resource: bool,
+        graph: bool,
         place: AllocPlace,
         charge: &str,
         bytes: &str,
         align: u64,
         overflow: Option<ValueId>,
     ) -> Option<(String, String)> {
-        if matches!(kind, AllocKind::Resource { .. }) {
+        if resource {
             return None;
         }
         if let AllocPlace::Region(region) = place {
@@ -140,10 +141,6 @@ impl FunctionEmitter<'_> {
         if !matches!(place, AllocPlace::Current | AllocPlace::Like(_)) || align > 512 {
             return None;
         }
-        let graph = !matches!(
-            kind,
-            AllocKind::Plain | AllocKind::Counted { plain: true, .. }
-        );
         let prefix = if graph {
             GRAPH_PREFIX_BYTES
         } else {

@@ -106,6 +106,22 @@ fn well_formedness_rejects_producer_mistakes() {
             "b0(v0: i32, v1: i32):\n  v2: bool = lt v0, v1\n  return v2\n}\n",
             "return",
         ),
+        // an alloc's kind and place disagree (Cleanup classes): ordinary storage named
+        // stable gets no prefix or cleanup, region storage named for an edge gets a
+        // prefix and an edge's cleanup the region never runs
+        (
+            "b0(v0: i32, v1: i32):\n  v2: u64 = const 8\n  v3: ptr, v4: u64 = alloc stable v2 align 8 charge v2\n  free v3 charge v2\n  return v0\n}\n",
+            "stable storage",
+        ),
+        (
+            "b0(v0: i32, v1: i32):\n  v2: ptr = region_open\n  v3: u64 = const 8\n  v4: ptr, v5: u64, v6: u64 = alloc for seq u8 v3 align 8 charge v3 in v2\n  region_close v2\n  return v0\n}\n",
+            "stable storage",
+        ),
+        // an alloc names an edge no block is owned through, so no class derives
+        (
+            "b0(v0: i32, v1: i32):\n  v2: u64 = const 8\n  v3: ptr, v4: u64 = alloc for u64 v2 align 8 charge v2\n  free v3 charge v2\n  return v0\n}\n",
+            "not an own block's edge",
+        ),
         // entry parameters must be the signature's
         ("b0(v0: i32):\n  return v0\n}\n", "entry"),
         // a call that returns Never followed by anything but `unreachable` (Q21)
@@ -323,7 +339,7 @@ fn coreir_data_crates_depend_only_on_neutral_crates() {
 
 #[test]
 fn allocation_overflow_refuses_at_maximum_limit() {
-    let source = "core v1\nsig g0 = (bool, u64) -> (bool, u64)\ninst n0 = p@1/m/alloc [] []\nfn f0 = n0 g0 {\nb0(v0: bool, v1: u64):\n  v2: u64 = const 8\n  v3: ptr, v4: u64 = alloc own v2 align 8 charge v1 overflow v0\n  v5: ptr = const 0x0\n  v6: bool = ne v3, v5\n  branch v6, b1, b2\nb1:\n  free v3 charge v1\n  jump b2\nb2:\n  return v6, v4\n}\n";
+    let source = "core v1\nsig g0 = (bool, u64) -> (bool, u64)\ninst n0 = p@1/m/alloc [] []\nfn f0 = n0 g0 {\nb0(v0: bool, v1: u64):\n  v2: u64 = const 8\n  v3: ptr, v4: u64 = alloc for seq u8 v2 align 8 charge v1 overflow v0\n  v5: ptr = const 0x0\n  v6: bool = ne v3, v5\n  branch v6, b1, b2\nb1:\n  free v3 charge v1\n  jump b2\nb2:\n  return v6, v4\n}\n";
     let module = parse(source).unwrap();
     wf::module(&module).unwrap();
     assert_eq!(parse(&print(&module)).unwrap(), module);
@@ -343,7 +359,7 @@ fn allocation_overflow_refuses_at_maximum_limit() {
 /// Each case is a one-line change to a correct body, with the stop it must cause.
 #[test]
 fn slot_marks_stop_kernel_mistakes() {
-    let head = "core v1\nsig g0 = () -> ()\ninst n0 = core@1/m/k [] []\nfn f0 = n0 g0 {\n  addr a0 = v1 : u64\nb0:\n  v0: u64 = const 8\n  v1: ptr, v2: u64 = alloc own v0 align 8 charge v0\n  address a0\n";
+    let head = "core v1\nsig g0 = () -> ()\ninst n0 = core@1/m/k [] []\nfn f0 = n0 g0 {\n  addr a0 = v1 : u64\nb0:\n  v0: u64 = const 8\n  v1: ptr, v2: u64 = alloc for seq u64 v0 align 8 charge v0\n  address a0\n";
     let run = |body: &str| {
         let m = parse(&format!("{head}{body}  free v1 charge v0\n  return\n}}\n")).unwrap();
         wf::module(&m).unwrap();
@@ -408,7 +424,7 @@ fn slot_marks_stop_kernel_mistakes() {
     // Bug: zero-size slots share one address, so shadowing them by address calls
     // a put into slot 1 a put over slot 0. They have no storage and no shadow.
     let unit = parse(
-        "core v1\ntype t0 = own \"Unit\" { }\nsig g0 = () -> ()\ninst n0 = core@1/m/k [] []\nfn f0 = n0 g0 {\n  addr a0 = v1 index v3 : t0\n  addr a1 = v1 index v4 : t0\nb0:\n  v0: u64 = const 8\n  v1: ptr, v2: u64 = alloc own v0 align 8 charge v0\n  v3: u64 = const 0\n  v4: u64 = const 1\n  address a0\n  address a1\n  mark a0, live : t0\n  mark a1, live : t0\n  mark a0, empty : t0\n  mark a1, empty : t0\n  free v1 charge v0\n  return\n}\n",
+        "core v1\ntype t0 = own \"Unit\" { }\nsig g0 = () -> ()\ninst n0 = core@1/m/k [] []\nfn f0 = n0 g0 {\n  addr a0 = v1 index v3 : t0\n  addr a1 = v1 index v4 : t0\nb0:\n  v0: u64 = const 8\n  v1: ptr, v2: u64 = alloc for seq t0 v0 align 8 charge v0\n  v3: u64 = const 0\n  v4: u64 = const 1\n  address a0\n  address a1\n  mark a0, live : t0\n  mark a1, live : t0\n  mark a0, empty : t0\n  mark a1, empty : t0\n  free v1 charge v0\n  return\n}\n",
     )
     .unwrap();
     wf::module(&unit).unwrap();
@@ -464,13 +480,15 @@ fn only_core_marks_slots_and_finalizes_own_rows() {
     }
 }
 
-/// Terminal blocks (crate docs, "Terminal blocks"). Bug: a producer allocates
-/// `plain` (no cleanup frame) a block whose owning edge is not terminal, here the
-/// box of a `Node` that owns a box of its own; an engine's counted worklist would
-/// then write a frame before the block's payer word. `own` there, and `plain` for
-/// the terminal leaf, run (both boxes charged round8(8) = 8, freed, used 0).
+/// Cleanup classes (crate docs, "Cleanup classes"). Bug: a producer names an edge
+/// for an `alloc` other than the one that cleans the block, so the native prefix it
+/// fixes (8 bytes terminal, 48 otherwise) does not fit the cleanup: a terminal
+/// block cleaned as fixed gets a frame written before its payer word, and a fixed
+/// block cleaned as terminal is freed at the wrong offset. Here the Node's box owns
+/// a box of its own (fixed) and the Leaf's does not (terminal). The true edges run
+/// (both boxes charged round8(8) = 8, freed, used 0); either swap stops.
 #[test]
-fn a_plain_block_is_cleaned_only_by_a_terminal_edge() {
+fn an_alloc_names_the_edge_that_cleans_it() {
     let module = |node: &str, leaf: &str| {
         format!(
             "core v1\ntype t0 = own \"Leaf\" {{ x: u64 }}\ntype t1 = own \"Node\" {{ b: box t0 }}\ntype t2 = own \"Top\" {{ n: box t1 }}\nsig g0 = () -> (u64)\ninst n0 = p@0/m/main [] []\nfn f0 = n0 g0 {{\n  slot s0 = t2\n  addr a0 = s0 byte v0 : ptr\n  addr a1 = v2 byte v0 : ptr\n  addr a2 = s0 : t2\nb0:\n  live s0\n  v0: u64 = const 0\n  v1: u64 = const 8\n  v2: ptr, v3: u64 = alloc {node} v1 align 8 charge v1\n  v4: ptr, v5: u64 = alloc {leaf} v1 align 8 charge v1\n  address a0\n  address a1\n  address a2\n  store a1, v4\n  store a0, v2\n  drop a2 t2\n  dead s0\n  return v0\n}}\n"
@@ -486,9 +504,11 @@ fn a_plain_block_is_cleaned_only_by_a_terminal_edge() {
                     .map_or_else(|_| String::new(), |s| *s)
             })
     };
-    assert_eq!(run(&module("own", "plain")), Ok(0));
-    let err = run(&module("plain", "plain")).unwrap_err();
-    assert!(err.contains("a box was allocated plain"), "{err}");
+    assert_eq!(run(&module("for box t1", "for box t0")), Ok(0));
+    for (node, leaf) in [("for box t0", "for box t0"), ("for box t1", "for box t1")] {
+        let err = run(&module(node, leaf)).unwrap_err();
+        assert!(err.contains("its edge"), "{node}/{leaf}: {err}");
+    }
 }
 
 /// Loans (crate docs, "Loans"). Bugs: a producer passes one place as a `mut`
@@ -641,7 +661,7 @@ fn roles_hold_or_stop_the_run() {
     // another carrier: element 0 is written through s0's data and read back (5)
     // through s1's, the same bytes under two carriers.
     let moved = run(
-        "sig g0 = () -> (u8)\ninst n0 = core@1/m/k [] []\nfn f0 = n0 g0 {\n  slot s0 = t0\n  slot s1 = t0\n  addr a0 = s0 byte v0 : ptr\n  addr a1 = s0 byte v1 : u64\n  addr a2 = s0 byte v2 : u64\n  addr a3 = v6 index v0 : u8\n  addr a4 = s1 : t0\n  addr a5 = s0 : t0\n  addr a6 = s1 byte v0 : ptr\n  addr a7 = v9 index v0 : u8\nb0:\n  live s0\n  live s1\n  v0: u64 = const 0\n  v1: u64 = const 8\n  v2: u64 = const 16\n  v3: u64 = const 1\n  v4: ptr, v5: u64 = alloc own v1 align 8 charge v1\n  address a0\n  address a1\n  address a2\n  store a0, v4\n  store a1, v3\n  store a2, v1\n  v6: ptr = read a0\n  v7: u8 = const 5\n  address a3\n  store a3, v7\n  v8: u64 = const 24\n  address a4\n  address a5\n  copy a4, a5, v8\n  address a6\n  v9: ptr = read a6\n  address a7\n  v10: u8 = read a7\n  free v4 charge v1\n  dead s1\n  dead s0\n  return v10\n}\n",
+        "sig g0 = () -> (u8)\ninst n0 = core@1/m/k [] []\nfn f0 = n0 g0 {\n  slot s0 = t0\n  slot s1 = t0\n  addr a0 = s0 byte v0 : ptr\n  addr a1 = s0 byte v1 : u64\n  addr a2 = s0 byte v2 : u64\n  addr a3 = v6 index v0 : u8\n  addr a4 = s1 : t0\n  addr a5 = s0 : t0\n  addr a6 = s1 byte v0 : ptr\n  addr a7 = v9 index v0 : u8\nb0:\n  live s0\n  live s1\n  v0: u64 = const 0\n  v1: u64 = const 8\n  v2: u64 = const 16\n  v3: u64 = const 1\n  v4: ptr, v5: u64 = alloc for seq u8 v1 align 8 charge v1\n  address a0\n  address a1\n  address a2\n  store a0, v4\n  store a1, v3\n  store a2, v1\n  v6: ptr = read a0\n  v7: u8 = const 5\n  address a3\n  store a3, v7\n  v8: u64 = const 24\n  address a4\n  address a5\n  copy a4, a5, v8\n  address a6\n  v9: ptr = read a6\n  address a7\n  v10: u8 = read a7\n  free v4 charge v1\n  dead s1\n  dead s0\n  return v10\n}\n",
         0,
         &[],
     );

@@ -406,6 +406,25 @@ impl Emitter {
     /// inline; None when some part has no field type yet.
     fn type_row(&mut self, p: &Program, t: &mut impl TyRead, ty: TyId) -> Option<TypeId> {
         crate::cost_scope!("query", "type row");
+        let row = self.shaped(p, t, |s| s.shape(ty))?;
+        let row = TypeId(row.0);
+        self.remember_generic_types(p, t, ty);
+        Some(row)
+    }
+    /// `ty` as a field, with the rows it names added to the module.
+    fn field_ty(&mut self, p: &Program, t: &mut impl TyRead, ty: TyId) -> Option<FieldTy> {
+        let edge = self.shaped(p, t, |s| s.field(ty))?;
+        self.remember_generic_types(p, t, ty);
+        Some(edge)
+    }
+    /// Run `f` over the module's shapes, taking back the rows it added when it is
+    /// refused, and bind the finalizer and clone hooks of the rows it added.
+    fn shaped<R, T: TyRead>(
+        &mut self,
+        p: &Program,
+        t: &mut T,
+        f: impl FnOnce(&mut crate::layout::Shapes<'_, T>) -> Option<R>,
+    ) -> Option<R> {
         crate::cost_scope!("phase", "layout/drop recipes");
         let mark = self.module.types.len();
         let mut s = crate::layout::Shapes {
@@ -416,7 +435,7 @@ impl Emitter {
             module: true,
             hooks: vec![],
         };
-        let r = s.shape(ty);
+        let r = f(&mut s);
         if r.is_none() {
             s.truncate(mark);
         }
@@ -436,9 +455,7 @@ impl Emitter {
                 crate::layout::Hook::Clone => shape.clone = func,
             }
         }
-        let row = TypeId(r?.0);
-        self.remember_generic_types(p, t, ty);
-        Some(row)
+        r
     }
     /// The function row of the program's finalizer or clone body `f`, at its hook
     /// signature (FAIL-11, MEM-17, FORM).

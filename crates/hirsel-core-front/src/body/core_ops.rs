@@ -1152,20 +1152,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Some(Counted::Rc) => FieldTy::Rc(TypeRef(id.0)),
             Some(Counted::Arc) => FieldTy::Arc(TypeRef(id.0)),
         };
-        let plain = self.allocation_edge(node, edge) == AllocKind::Plain;
         self.inst(
             Inst::Alloc {
                 result: node,
                 available,
                 region_entry: None,
-                kind: kind.map_or(
-                    if plain {
-                        AllocKind::Plain
-                    } else {
-                        AllocKind::Own
-                    },
-                    |count| AllocKind::Counted { count, plain },
-                ),
+                kind: AllocKind::Own { edge },
                 place: AllocPlace::Current,
                 charge,
                 overflow: Some(overflow),

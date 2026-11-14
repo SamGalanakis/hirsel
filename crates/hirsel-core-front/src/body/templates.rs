@@ -14,9 +14,9 @@ pub struct CopySize {
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub enum AllocationLayout {
-    Block { result: ValueId, ty: TypeId },
-    Edge { result: ValueId, edge: FieldTy },
+pub struct AllocationLayout {
+    pub result: ValueId,
+    pub ty: TypeId,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -574,22 +574,7 @@ fn fill(
     let allocations = template
         .allocations
         .iter()
-        .filter_map(|a| match a {
-            AllocationLayout::Block { result, ty } => Some((*result, s.ty(*ty))),
-            AllocationLayout::Edge { .. } => None,
-        })
-        .collect::<HashMap<_, _>>();
-    let edges = template
-        .allocations
-        .iter()
-        .filter_map(|a| match a {
-            AllocationLayout::Edge { result, edge } => {
-                let mut edge = edge.clone();
-                map_field(&mut edge, &mut |t| TypeRef(s.ty(TypeId(t.0)).0));
-                Some((*result, edge))
-            }
-            AllocationLayout::Block { .. } => None,
-        })
+        .map(|a| (a.result, s.ty(a.ty)))
         .collect::<HashMap<_, _>>();
     let recipes = hirsel_core_layout::compute(&s.module.types)
         .map_err(|e| format!("instance layout: {e:?}"))?;
@@ -609,13 +594,10 @@ fn fill(
         else {
             continue;
         };
-        if let Some(edge) = edges.get(result) {
-            let plain = hirsel_core_layout::terminal(&s.module.types, &recipes, edge);
-            *kind = match *kind {
-                AllocKind::Counted { count, .. } => AllocKind::Counted { count, plain },
-                _ if plain => AllocKind::Plain,
-                _ => AllocKind::Own,
-            };
+        // The alloc names its owning edge; its cleanup class is derived from the
+        // instance's recipes wherever it is needed, so only the edge is remapped.
+        if let AllocKind::Own { edge } = kind {
+            map_field(edge, &mut |t| TypeRef(s.ty(TypeId(t.0)).0));
         }
         let Some(&ty) = allocations.get(result) else {
             continue;
@@ -632,7 +614,7 @@ fn fill(
                 *grant = s.module.types[ty.index()].grant;
                 hirsel_core_layout::charge::resource(logical, *grant)
             }
-            AllocKind::Plain => logical.checked_add(7).map(|n| n & !7),
+            AllocKind::Stable => logical.checked_add(7).map(|n| n & !7),
             _ => unreachable!("only typed resource and region constructors use block relocation"),
         };
         allocation_constants.insert(*charge, amount.unwrap_or(u64::MAX));

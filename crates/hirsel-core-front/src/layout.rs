@@ -225,9 +225,16 @@ impl<T: TyRead> Shapes<'_, T> {
                         let body = record(vec![("handle", FieldTy::Handle(handle))]);
                         return self.fill(r, LRepr::Own, body, None);
                     }
-                    // A capability, Args, Unique or Site: its one u64 word,
-                    // never cleaned (the provider owns it).
-                    _ if handle(decl) || matches!(decl.role, Some(Role::Unique | Role::Site)) => {
+                    // A capability, Args, Unique, Site or StaticFn: one plain word,
+                    // never cleaned by the holder. StaticFn is carried in CoreIR as a
+                    // pointer because it is directly callable; its physical width stays
+                    // one word.
+                    _ if handle(decl)
+                        || matches!(
+                            decl.role,
+                            Some(Role::Unique | Role::Site | Role::StaticFn)
+                        ) =>
+                    {
                         let body = record(vec![("handle", FieldTy::Scalar(Scalar::U64))]);
                         return self.fill(r, LRepr::Own, body, None);
                     }
@@ -575,6 +582,8 @@ pub(crate) fn carried(
                 Some(Role::Region | Role::Writer | Role::Dest | Role::StaticFn)
             ) =>
         {
+            // StaticFn is an eight-byte plain word in storage. The callable kernels
+            // reinterpret that word as the CoreIR FunctionRef pointer at the ABI edge.
             if decls[d.index()].role == Some(Role::StaticFn) {
                 Carried::Value(Ty::Scalar(Scalar::U64))
             } else {

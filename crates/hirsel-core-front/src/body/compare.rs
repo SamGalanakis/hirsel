@@ -276,7 +276,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     /// exactly when their words are.
     pub(super) fn word_like(&self, t: TyId) -> bool {
         matches!(self.t.kind(t), TyKind::Adt(d, _)
-            if matches!(self.p.decls[d.index()].role, Some(Role::Unique | Role::Site)))
+            if matches!(self.p.decls[d.index()].role, Some(Role::Unique | Role::Site | Role::StaticFn)))
     }
 
     /// `Text`: its bytes are compared like a `String`'s (SEM-7).

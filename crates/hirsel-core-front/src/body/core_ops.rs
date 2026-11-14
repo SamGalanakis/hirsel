@@ -622,7 +622,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Kernel::LogNew => self.runtime_log_new(types[0], result, n),
             Kernel::LogAppend => self.runtime_log_append(types[0], vals[0]?, vals[1], result, n),
             Kernel::LogFinish => self.runtime_log_finish(types[0], vals[0]?, result, n),
-            Kernel::CodeIdentity => self.runtime_code_identity(vals[0]?, result, n),
+            Kernel::CodeIdentity => self.runtime_code_identity(vals[0]?, types, result, n),
             Kernel::CodeCallable => self.runtime_code_callable(vals[0]?, result, n),
             Kernel::CodeDescribe => self.runtime_code_describe(vals[0]?, result, n),
         }
@@ -1705,22 +1705,132 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if !self.code_describe_target_valid(n) {
             return None;
         }
-        self.temp(result, Some(value));
-        Some(value)
+        let word = match self.reinterpret(value, Ty::Ptr, Ty::Scalar(Scalar::U64), n) {
+            Some(word) => Some(word),
+            None => {
+                self.gap(n, "StaticFn word carriage is not built");
+                None
+            }
+        };
+        if let Some(function) = self.function_values.get(&value).copied() {
+            if let Some(word) = word {
+                self.function_values.insert(word, function);
+            }
+        }
+        self.temp(result, word);
+        word
     }
 
     fn runtime_code_identity(
         &mut self,
-        static_fn: ValueId,
+        value: ValueId,
+        types: &[TyId],
         result: TyId,
         n: NodeId,
     ) -> Option<ValueId> {
-        let function = self.function_values.get(&static_fn).copied()?;
+        let pointer = match self.static_fn_pointer(value, n) {
+            Some(pointer) => pointer,
+            None => {
+                self.gap(n, "StaticFn callable carriage is not built");
+                return None;
+            }
+        };
+        if let Some(function) = self.function_values.get(&value).copied() {
+            let Some(bytes) = self.code_identity_bytes(function) else {
+                self.gap(n, "StaticFn identity source is not built");
+                return None;
+            };
+            let Some(value) = self.identity_carrier(&bytes, result, n) else {
+                self.gap(n, "StaticFn identity carrier is not built");
+                return None;
+            };
+            self.temp(result, Some(value));
+            return Some(value);
+        }
+
+        // A StaticFn may have crossed a parameter, record, list or map before this
+        // operation. Its eight-byte payload is still the ordinary FunctionRef code
+        // pointer, so recover the identity with a finite pointer dispatch over the
+        // non-generic function items that can produce this StaticFn type.
+        let Some(callable) = types.first().copied() else {
+            self.gap(n, "StaticFn identity type is not built");
+            return None;
+        };
+        let indices = self
+            .p
+            .fns
+            .iter()
+            .enumerate()
+            .filter_map(|(i, fd)| (fd.generics.is_empty() && fd.callable == callable).then_some(i))
+            .collect::<Vec<_>>();
+        let mut items = Vec::with_capacity(indices.len());
+        for item in indices {
+            let Some(function) = self.item_adapter(item, &[], callable, n) else {
+                continue;
+            };
+            let Some(bytes) = self.code_identity_bytes(function) else {
+                continue;
+            };
+            items.push((function, bytes));
+        }
+        if items.is_empty() {
+            self.gap(n, "static function identity dispatch is not built");
+            return None;
+        }
+
+        let join = self.new_block(&[Ty::Ptr]);
+        for (function, bytes) in items {
+            let yes = self.new_block(&[]);
+            let no = self.new_block(&[]);
+            let candidate = self.value(Ty::Ptr);
+            self.inst(
+                Inst::FunctionRef {
+                    result: candidate,
+                    function,
+                },
+                n,
+            );
+            let equal = self.value(Ty::Scalar(Scalar::Bool));
+            self.inst(
+                Inst::Compare {
+                    result: equal,
+                    op: CompareOp::Eq,
+                    left: pointer,
+                    right: candidate,
+                },
+                n,
+            );
+            let yes_edge = self.edge(yes, &[]);
+            let no_edge = self.edge(no, &[]);
+            self.end(
+                Terminator::Branch {
+                    condition: equal,
+                    yes: yes_edge,
+                    no: no_edge,
+                },
+                Some(n),
+            );
+            self.start(yes);
+            let Some(carrier) = self.identity_carrier(&bytes, result, n) else {
+                self.gap(n, "StaticFn identity carrier is not built");
+                return None;
+            };
+            self.jump(join, &[carrier], n);
+            self.start(no);
+        }
+        self.end(Terminator::Unreachable, Some(n));
+        self.start(join);
+        let value = self.block_params(join)[0];
+        self.temp(result, Some(value));
+        Some(value)
+    }
+
+    fn code_identity_bytes(&self, function: FuncId) -> Option<Vec<u8>> {
         let instance = self.e.module.functions[function.index()].instance;
         let path = &self.e.module.instances[instance.index()].definition;
         // Function items pass through a callable adapter before reaching this
-        // kernel.  Its `$callable[...]` definition is an ABI row, not the
-        // source item whose PROG-9 identity is published.
+        // kernel. Its `$callable[...]` definition is an ABI row, not the source
+        // item whose PROG-9 identity is published.
         let source_name = path
             .0
             .name
@@ -1732,10 +1842,37 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 && fd.path.0.name == source_name
         })?;
         let fd = &self.p.fns[f];
-        let bytes = crate::identity::code_identity(&self.p.decls, &self.t, fd)?;
+        let mut text = format!(
+            "{}@{}/{}",
+            fd.path.0.package.name,
+            fd.path.0.package.version,
+            fd.path.0.modules.join("/")
+        );
+        if !fd.path.0.modules.is_empty() {
+            text.push('/');
+        }
+        text.push_str(&fd.path.0.name);
+        text.push('(');
+        for (i, param) in fd.params.iter().enumerate() {
+            if i > 0 {
+                text.push_str(", ");
+            }
+            text.push_str(param.mode.keyword());
+            text.push(' ');
+            text.push_str(&crate::decls::canonical(&self.p.decls, &self.t, param.ty));
+        }
+        text.push_str(") -> ");
+        text.push_str(&crate::decls::canonical(&self.p.decls, &self.t, fd.result));
+        let mut bytes = Vec::with_capacity(text.len() + 1);
+        bytes.push(1);
+        bytes.extend_from_slice(text.as_bytes());
+        Some(bytes)
+    }
+
+    fn identity_carrier(&mut self, bytes: &[u8], result: TyId, n: NodeId) -> Option<ValueId> {
         let id = self.runtime_type(result, n)?;
         let to = self.new_slot(PlaceTy::Declared(id), n);
-        let data = self.e.static_bytes(&bytes);
+        let data = self.e.static_bytes(bytes);
         let ptr = self.value(Ty::Ptr);
         self.inst(Inst::ReadStatic { result: ptr, data }, n);
         let len = self.konst(Ty::Scalar(Scalar::U64), bytes.len() as u64, n)?;
@@ -1744,19 +1881,47 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.sequence_word(carrier, 0, Ty::Ptr, ptr, n);
         self.sequence_word(carrier, 8, Ty::Scalar(Scalar::U64), len, n);
         self.sequence_word(carrier, 16, Ty::Scalar(Scalar::U64), zero, n);
-        let value = self.pointer(to, n);
-        self.temp(result, Some(value));
-        Some(value)
+        Some(self.pointer(to, n))
     }
 
     fn runtime_code_callable(
         &mut self,
         value: ValueId,
         result: TyId,
-        _n: NodeId,
+        n: NodeId,
     ) -> Option<ValueId> {
-        self.temp(result, Some(value));
-        Some(value)
+        let pointer = match self.static_fn_pointer(value, n) {
+            Some(pointer) => Some(pointer),
+            None => {
+                self.gap(n, "StaticFn callable carriage is not built");
+                None
+            }
+        };
+        self.temp(result, pointer);
+        pointer
+    }
+
+    fn static_fn_pointer(&mut self, value: ValueId, n: NodeId) -> Option<ValueId> {
+        (self.b.values.get(value.index()) == Some(&Ty::Ptr))
+            .then_some(value)
+            .or_else(|| self.reinterpret(value, Ty::Scalar(Scalar::U64), Ty::Ptr, n))
+    }
+
+    fn reinterpret(&mut self, value: ValueId, from: Ty, to: Ty, n: NodeId) -> Option<ValueId> {
+        if self.b.values.get(value.index()) != Some(&from) {
+            return None;
+        }
+        let slot = self.new_slot(PlaceTy::Value(from), n);
+        self.inst(
+            Inst::Store {
+                address: slot,
+                value,
+            },
+            n,
+        );
+        let pointer = self.pointer(slot, n);
+        let at = self.address(AddressBase::Value(pointer), &[], PlaceTy::Value(to), n);
+        Some(self.read_bits(at, to, n))
     }
 
     fn owner_payload(

@@ -33,6 +33,15 @@
 ; The reservation is held while the body runs: 71 - 32 leaves 39 < 40 for Temp, so
 ; guarded's refused construction is the caught Unwrap, which used the primary.
 ; run limit 71: f3(0) -> 2, 1, 3 | used 32
+; The same path by injection (core-llvm-m3-927's (2, false)): admission 1 is the
+; reserved cell (32, admitted), admission 2 Temp's 40 (refused), so guarded raises
+; Unwrap before any Temp exists; it goes into the root's primary, which is now used, so
+; the catch installs the reserved cell as the primary and 32 stays after the Causes
+; (holding the root's cell, outside the limit) is dropped. No Temp, so no trace.
+; run limit 1000000 refuse 2: f3(3) -> 2, 1, 3 | used 32
+; Every admission refused from the first: the reservation itself, so the body is not
+; called and nothing is used.
+; run limit 1000000 refuse 1+: f3(3) -> 0, 1000000, 0 | used 0
 ; Nested: the inner isolate's cell becomes the primary at its catch; check then fails
 ; into that cell, and the outer catch puts its own cell in its place.
 ; run: f5(0) -> 2, 1, 3 | used 32 | trace 0

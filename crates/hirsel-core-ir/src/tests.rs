@@ -195,9 +195,11 @@ fn samples_behave_as_derived_by_hand() {
         let mut runs = 0;
         let m = load(name, text);
         for line in text.lines() {
-            // `; run [limit N] [args a b]: fK(args) -> results | used N | trace a, b
+            // `; run [limit N] [refuse K[+]] [args a b]: fK(args) -> results | used N | trace a, b
             // | out text | err text`, or `-> fail Cause, ...`; each check after the
-            // results is made when written (`\n` in a text is a newline).
+            // results is made when written (`\n` in a text is a newline). `refuse K`
+            // refuses the run's K-th admission, `K+` that one and every later one, as
+            // the native agreement harnesses' injection (K, later) does.
             let Some(run) = line.strip_prefix("; run") else {
                 continue;
             };
@@ -205,6 +207,17 @@ fn samples_behave_as_derived_by_hand() {
             let (head, argv) = match head.split_once("args") {
                 Some((h, a)) => (h, a.split_whitespace().collect()),
                 None => (head, Vec::new()),
+            };
+            let (head, injection) = match head.split_once("refuse") {
+                Some((h, k)) => {
+                    let k = k.trim();
+                    let later = k.ends_with('+');
+                    (
+                        h,
+                        Some((k.trim_end_matches('+').parse::<usize>().unwrap(), later)),
+                    )
+                }
+                None => (head, None),
             };
             let limit = match head.trim().strip_prefix("limit") {
                 Some(n) => n.trim().parse().unwrap(),
@@ -226,7 +239,13 @@ fn samples_behave_as_derived_by_hand() {
                     Param::Address { .. } => panic!("by-address arguments are FORM v1"),
                 })
                 .collect();
-            let got = eval::run_args(&m, f, &args, limit, &argv);
+            let got = match injection {
+                Some(_) => {
+                    assert!(argv.is_empty(), "{name}: refuse with args");
+                    eval::run_injected(&m, f, &args, limit, injection)
+                }
+                None => eval::run_args(&m, f, &args, limit, &argv),
+            };
             let want = match expected.trim() {
                 e if e.starts_with("fail") => eval::Outcome::Failed(
                     e["fail".len()..]

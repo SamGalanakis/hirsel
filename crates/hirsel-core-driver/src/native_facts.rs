@@ -1,5 +1,5 @@
 //! Program-wide role facts are a pure derived product of identified inputs.
-use crate::{Store, decode, encode, native};
+use crate::{Store, decode, native};
 use hirsel_core_ids::{ContentHash, DefPath};
 use hirsel_core_ir::{
     Module,
@@ -52,7 +52,10 @@ pub(crate) fn get(
         .map(|(module, facts)| facts.consumed(module))
         .collect();
     let result = ProgramFacts { facts, consumed };
-    let identity = store.put(&encode(&result.consumed)?)?;
+    let identity = store.archive(|writer| {
+        writer.record(&result.consumed)?;
+        Ok(())
+    })?;
     store.select(&selection, identity)?;
     Ok(result)
 }
@@ -60,6 +63,7 @@ pub(crate) fn get(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encode;
     use hirsel_core_ir::{FuncId, text};
 
     fn module(caller: bool, escape: bool) -> Module {

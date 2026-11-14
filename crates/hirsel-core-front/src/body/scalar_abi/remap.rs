@@ -481,6 +481,9 @@ pub(super) fn compact(
         }
         block.insts = PoolRange::new(start, body.insts.len() as u32 - start);
     }
+    for v in &mut body.callable_parameters {
+        map(v);
+    }
     for v in &mut body.pools.values {
         map(v)
     }

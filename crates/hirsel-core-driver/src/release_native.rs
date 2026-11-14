@@ -38,17 +38,25 @@ impl CheckProduct {
         library_store: Option<&Store>,
     ) -> Result<Vec<ObjectProduct>, NativeStop> {
         let mut emitted = HashSet::new();
-        let modules: Vec<_> = reached
+        let mut modules: Vec<_> = reached
             .iter()
             .map(|instance| define_once(materialized.get(instance).ir(), &mut emitted))
             .collect();
-        let imported: Vec<_> = reached
+        let mut imported: Vec<_> = reached
             .iter()
             .map(|i| library_store.is_some() && !self.definitions.contains_key(&i.definition))
             .collect();
+        crate::callable_variants::prepare(
+            &mut modules,
+            &mut imported,
+            reached,
+            materialized,
+            entry,
+            options.instance_limit,
+        )?;
         let mut objects = Vec::new();
         for ((instance, ir), imported) in reached.iter().zip(&modules).zip(&imported) {
-            if !imported {
+            if !imported || !ir.functions.iter().any(|f| f.body.is_some()) {
                 continue;
             }
             let library_store = library_store.unwrap();
@@ -78,6 +86,7 @@ impl CheckProduct {
                     (publish(library_store, object_key, &bytes)?, bytes, true)
                 };
             objects.push(ObjectProduct {
+                private_variants: 0,
                 instance: instance.clone(),
                 identity,
                 bytes,
@@ -149,6 +158,15 @@ impl CheckProduct {
             (publish(store, object_key, &bytes)?, bytes, true)
         };
         objects.push(ObjectProduct {
+            private_variants: modules
+                .iter()
+                .map(|m| {
+                    m.code_variants
+                        .keys()
+                        .filter(|f| m.functions[f.index()].body.is_some())
+                        .count()
+                })
+                .sum(),
             instance: instance.clone(),
             identity,
             bytes,

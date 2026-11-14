@@ -1850,6 +1850,13 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 }
                 _ => None,
             };
+            let mut callable_ty = pd.ty;
+            while let TyKind::Anchored(inner, _) | TyKind::View(inner) = self.t.kind(callable_ty) {
+                callable_ty = *inner;
+            }
+            if pd.mode != Mode::Mut && matches!(self.t.kind(callable_ty), TyKind::Fn(..)) {
+                self.b.callable_parameters.extend(v);
+            }
             if let Some(b) = binders.iter().find(|b| {
                 b.name == pd.name
                     && b.kind == hirsel_core_resolve::BinderKind::Parameter

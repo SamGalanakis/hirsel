@@ -1,0 +1,54 @@
+// A hand-derived callback/capture/forwarding oracle, shared by the evaluator,
+// dev and release. A callback failure must keep its original cause and cleanup.
+fn compare_named(a: u64, b: u64) -> Order {
+    if a < b {
+        Less
+    } else if a > b {
+        Greater
+    } else {
+        Equal
+    }
+}
+
+fn forwarded[T: plain](mut xs: List[T], cmp: scoped fn(T, T) -> Order) -> Result[(), Capacity] {
+    list.sort_stable(mut xs, cmp)
+}
+
+fn sample() -> List[u64] {
+    let mut xs: List[u64] = list.new()
+    result.unwrap(list.push(mut xs, 3))
+    result.unwrap(list.push(mut xs, 1))
+    result.unwrap(list.push(mut xs, 2))
+    xs
+}
+
+// expect: run known_comparators() = 123321
+fn known_comparators() -> u64 {
+    let mut xs = sample()
+    result.unwrap(forwarded(mut xs, compare_named))
+    let ascending = xs[0] * 100 + xs[1] * 10 + xs[2]
+    let descending = true
+    result.unwrap(forwarded(mut xs, fn(a: u64, b: u64) -> Order {
+        if descending {
+            compare_named(b, a)
+        } else {
+            compare_named(a, b)
+        }
+    }))
+    ascending * 1000 + xs[0] * 100 + xs[1] * 10 + xs[2]
+}
+
+// expect: run failing_comparator() = fail Unwrap
+fn failing_comparator() -> u64 {
+    let mut xs = sample()
+    let mut calls: u64 = 0
+    result.unwrap(forwarded(mut xs, fn(a: u64, b: u64) -> Order {
+        calls += 1
+        if calls == 2 {
+            let none: Option[u64] = None;
+            let _ = option.unwrap(none)
+        }
+        compare_named(a, b)
+    }))
+    calls
+}

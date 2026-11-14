@@ -91,6 +91,7 @@ impl From<io::Error> for NativeStop {
     }
 }
 pub struct ObjectProduct {
+    pub private_variants: usize,
     pub instance: InstanceKey,
     pub identity: ContentHash,
     pub bytes: Vec<u8>,
@@ -98,6 +99,8 @@ pub struct ObjectProduct {
 }
 #[derive(Serialize)]
 pub struct BuildProduct {
+    /// Native implementation copies, never semantic type instances.
+    pub private_variants: usize,
     pub executable: PathBuf,
     pub identity: ContentHash,
     pub compiled: usize,
@@ -105,7 +108,7 @@ pub struct BuildProduct {
     /// True means diagnostic instrumentation; timings are not performance samples.
     pub observation_mode: bool,
 }
-fn key(domain: &str, value: &impl Serialize) -> io::Result<ContentHash> {
+pub(crate) fn key(domain: &str, value: &impl Serialize) -> io::Result<ContentHash> {
     Ok(ContentHash::of_parts(domain, [&encode(value)?[..]]))
 }
 fn selection(hash: ContentHash) -> String {
@@ -203,6 +206,8 @@ impl CheckProduct {
             .as_ref()
             .map(|i| Store::new(&i.store_root().join("native")))
             .transpose()?;
+        // Callable code variants are LLVM-release only. Dev and evaluator keep
+        // the shared semantic bodies; the dev measurements show no gain here.
         if matches!(options.backend, Backend::Llvm) && options.optimize {
             return self.emit_release(
                 entry,
@@ -252,6 +257,7 @@ impl CheckProduct {
                     (publish(store, object_key, &bytes)?, bytes, true)
                 };
             objects.push(ObjectProduct {
+                private_variants: 0,
                 instance: instance.clone(),
                 identity,
                 bytes,
@@ -305,6 +311,7 @@ impl CheckProduct {
                     (publish(&store, object_key, &bytes)?, bytes, true)
                 };
             objects.push(ObjectProduct {
+                private_variants: 0,
                 instance: module.instances.last().unwrap().clone(),
                 identity,
                 bytes,
@@ -740,6 +747,7 @@ fn link(
     std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o755))?;
     temp.persist(&options.output).map_err(|e| e.error)?;
     Ok(BuildProduct {
+        private_variants: objects.iter().map(|o| o.private_variants).sum(),
         executable: options.output.clone(),
         identity,
         compiled: objects.iter().filter(|o| o.compiled).count(),

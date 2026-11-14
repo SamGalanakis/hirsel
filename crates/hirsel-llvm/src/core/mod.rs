@@ -65,10 +65,7 @@ type Result<T> = std::result::Result<T, Error>;
 /// The FORM instance link name, shared by declarations, definitions and callers.
 pub fn symbol(module: &Module, function: FuncId) -> String {
     let mut name = String::from("h");
-    for byte in module.instances[module.functions[function.index()].instance.index()]
-        .digest()
-        .0
-    {
+    for byte in module.code_identity(function).0 {
         write!(name, "{byte:02x}").unwrap();
     }
     name

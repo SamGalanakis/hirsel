@@ -303,7 +303,11 @@ impl Printer {
             self.line(&format!("inst n{i} = {} [{types}] [{dicts}]", k.definition));
         }
         for (i, f) in m.functions.iter().enumerate() {
-            let head = format!("fn f{i} = n{} g{}", f.instance.0, f.signature.0);
+            let mut head = format!("fn f{i} = n{} g{}", f.instance.0, f.signature.0);
+            if let Some(hash) = m.code_variants.get(&FuncId(i as u32)) {
+                let hex: String = hash.0.iter().map(|b| format!("{b:02x}")).collect();
+                head += &format!(" code {hex}");
+            }
             match &f.body {
                 None => self.line(&format!("{head} extern")),
                 Some(body) => {
@@ -316,6 +320,9 @@ impl Printer {
     }
 
     fn body(&mut self, b: &Body) {
+        for v in &b.callable_parameters {
+            self.line(&format!("  callable v{}", v.0));
+        }
         for (i, s) in b.slots.iter().enumerate() {
             self.line(&format!("  slot s{i} = {}", place(*s)));
         }
@@ -1777,20 +1784,37 @@ impl Parser {
 
     fn function(&mut self) -> R<()> {
         let n = self.module.functions.len() as u32;
-        let (instance, signature, external) = {
+        let (instance, signature, code, external) = {
             let mut l = self.line().unwrap();
             l.next()?;
             expect_index(&mut l, 'f', n)?;
             let instance = InstanceId(l.id('n')?);
             let signature = SigId(l.id('g')?);
+            let code = if l.eat("code") {
+                let text = l.next()?;
+                if text.len() != 64 || !text.is_ascii() {
+                    return Err("bad code identity".into());
+                }
+                let mut bytes = [0u8; 32];
+                for (i, byte) in bytes.iter_mut().enumerate() {
+                    *byte = u8::from_str_radix(&text[2 * i..2 * i + 2], 16)
+                        .map_err(|_| "bad code identity")?;
+                }
+                Some(hirsel_core_ids::ContentHash(bytes))
+            } else {
+                None
+            };
             let external = l.eat("extern");
             if !external {
                 l.expect("{")?;
             }
             l.end()?;
-            (instance, signature, external)
+            (instance, signature, code, external)
         };
         let body = if external { None } else { Some(self.body()?) };
+        if let Some(hash) = code {
+            self.module.code_variants.insert(FuncId(n), hash);
+        }
         self.module.functions.push(Function {
             instance,
             signature,
@@ -1814,6 +1838,11 @@ impl Parser {
                         return Err("block without terminator".into());
                     }
                     break;
+                }
+                Some("callable") if b.body.blocks.is_empty() => {
+                    l.next()?;
+                    b.body.callable_parameters.push(l.value()?);
+                    l.end()?;
                 }
                 Some("slot") if b.body.blocks.is_empty() => {
                     l.next()?;

@@ -1001,6 +1001,9 @@ pub struct Pools {
 /// parameters (a by-address parameter arrives as a pointer value).
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub struct Body {
+    /// Entry values whose source parameter is an immutable callable. Optional
+    /// optimisation information; execution and semantic instance identity ignore it.
+    pub callable_parameters: Vec<ValueId>,
     pub values: Vec<Ty>,
     pub slots: Vec<PlaceTy>,
     pub addresses: Vec<AddressInfo>,
@@ -1113,6 +1116,20 @@ pub struct Module {
     pub signatures: Vec<Signature>,
     pub instances: Vec<InstanceKey>,
     pub functions: Vec<Function>,
+    /// Private native code identities, separate from PROG-5 semantic instances.
+    /// Source products leave this empty; an optimiser may emit several code bodies
+    /// for one instance without changing the identity of its function values.
+    pub code_variants: std::collections::BTreeMap<FuncId, ContentHash>,
+}
+impl Module {
+    pub fn code_identity(&self, function: FuncId) -> ContentHash {
+        self.code_variants
+            .get(&function)
+            .copied()
+            .unwrap_or_else(|| {
+                self.instances[self.functions[function.index()].instance.index()].digest()
+            })
+    }
 }
 
 /// One step of the `Map` key hash (crate docs, "Maps"): `rotl((h ^ w) × K, 26)`.

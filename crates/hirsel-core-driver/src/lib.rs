@@ -7,6 +7,7 @@ mod image_index;
 pub mod installation;
 mod product;
 pub use product::PackageProduct;
+mod callable_variants;
 mod instances;
 mod native;
 mod reachability;

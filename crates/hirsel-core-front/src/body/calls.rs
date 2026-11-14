@@ -794,6 +794,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if at == NEVER {
             return true;
         }
+        // Equal closed types bind no generic or lexical root. A generic pattern
+        // still has to populate `s`, even when its numeric ID equals the operand.
+        if pt == at && roots.is_empty() && !has_param(&self.t, pt) {
+            return true;
+        }
         self.unify_part(pt, at, s, roots)
     }
     fn unify_part(

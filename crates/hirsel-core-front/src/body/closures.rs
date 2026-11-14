@@ -1768,6 +1768,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             if capture.path.is_some() {
                 continue;
             }
+            let written = self.anchors.declared_for(capture.slot).or_else(|| {
+                self.capture_frame
+                    .as_ref()
+                    .and_then(|f| f.written_anchors[capture.slot as usize])
+            });
+            if written.is_none() {
+                continue;
+            }
             let Some(&id) = self.descriptors.slots.get(&capture.slot) else {
                 continue;
             };
@@ -2020,11 +2028,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         // OWN-11 governs true mut formals and aliases. The language has not yet
         // chosen invariance or carried store effects for an ordinary upvar.
-        if self
-            .capture_frame
-            .as_ref()
-            .is_some_and(|f| !f.owning && f.outer[at.place.slot as usize].is_some())
-        {
+        if self.capture_frame.as_ref().is_some_and(|f| {
+            !f.owning
+                && f.outer[at.place.slot as usize].is_some()
+                && !self.var(at.place.slot).mut_anchor
+                && f.outer[at.place.slot as usize]
+                    .is_none_or(|outer| outer.origin != Origin::MutParam)
+        }) {
             // OWN-21: activation of a mut capture is a mut loan of the slot.
             // The installed callback may read only the slot's written anchors,
             // their projections and regions named by its type.  `anchor_store`
@@ -2036,14 +2046,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     .as_ref()
                     .and_then(|f| f.written_anchors[at.place.slot as usize])
             });
-            let allowed = declared.unwrap_or(0);
+            let Some(declared) = declared else {
+                self.gap(
+                    n,
+                    "callback stores through captured mutable locals are not built",
+                );
+                return false;
+            };
+            let allowed = declared;
             let new = self.anchor_expression(source);
-            let captures =
-                if (new == 0 && self.anchors.has_mut_param(at.place.slot)) || declared.is_some() {
-                    self.capture_anchors(value)
-                } else {
-                    0
-                };
+            let captures = self.capture_anchors(value);
             let actual = self.anchors.union(new, captures);
             let permits = self.anchors.permits_fact(allowed, actual, &self.steps);
             if !permits {

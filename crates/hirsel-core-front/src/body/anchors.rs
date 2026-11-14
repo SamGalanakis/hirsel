@@ -223,10 +223,6 @@ impl Anchors {
         self.declared.get(&slot).copied()
     }
 
-    pub(super) fn has_mut_param(&self, slot: u32) -> bool {
-        self.mut_params.contains_key(&slot)
-    }
-
     pub(super) fn permits_fact(&mut self, allowed: Fact, actual: Fact, steps: &[PStep]) -> bool {
         self.permits(allowed, actual, steps)
     }

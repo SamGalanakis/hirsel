@@ -24,7 +24,7 @@ pub fn compile_ir_for_target(
 }
 
 /// Version of the atomic object, raw bitcode and semantic-summary product.
-pub const NATIVE_LIBRARY_SCHEMA: u32 = 1;
+pub const NATIVE_LIBRARY_SCHEMA: u32 = 2;
 /// Raw module transport; ordinary O3 and its existing bounded late round.
 pub const IMPORT_PIPELINE_ID: &str = "raw-module-v1-o3-late";
 /// Preserve the selection qualified with the pre-SSA 2048 bound: float.scan
@@ -54,7 +54,7 @@ impl ImportSummary {
 }
 #[derive(Clone, Debug)]
 pub struct NativeLibrary {
-    pub object: Vec<u8>,
+    pub object: hirsel_core_ir::source::NativeObject,
     pub bitcode: Vec<u8>,
     pub summary: ImportSummary,
 }
@@ -66,6 +66,7 @@ pub fn compile_library(
     target: hirsel_core_layout::Target,
     observe_charge: bool,
     debug_lines: bool,
+    object_key: hirsel_core_ids::ContentHash,
 ) -> Result<NativeLibrary, String> {
     let ir = core::emit_ir_relocatable_with_role_facts_for_target(
         module,
@@ -77,7 +78,7 @@ pub fn compile_library(
     .map_err(|e| e.to_string())?;
     let output = loader::library(&ir, target)?;
     Ok(NativeLibrary {
-        object: output.object,
+        object: core::finish_native_object(output.object, object_key, debug_lines)?,
         bitcode: output.bitcode,
         summary: ImportSummary {
             functions: output.functions,

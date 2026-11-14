@@ -7,15 +7,15 @@ use hirsel_llvm_lazy::NativeLibrary;
 use serde::{Deserialize, Serialize};
 use std::io::{self, Write};
 
-// Fixed-size footer; the variable summary is decoded only after the complete
+// The variable summary is decoded only after the complete
 // product has been read through Store's version/length/digest boundary.
-const ROOT_SIZE: usize = 52;
 #[derive(Serialize, Deserialize)]
 struct Root {
     schema: u32,
     object: Record,
     bitcode: Record,
     summary: Record,
+    debug: Option<Record>,
 }
 
 pub(crate) fn key(
@@ -48,22 +48,28 @@ pub(crate) fn publish(
     } = product;
     let identity = store.archive(|writer| {
         // Raw byte sections avoid serde's per-byte sequence traversal.
-        writer.write_all(object)?;
+        writer.write_all(&object.bytes)?;
         writer.write_all(bitcode)?;
         let summary = writer.record(summary)?;
-        writer.record(&Root {
+        let debug = object
+            .debug
+            .as_ref()
+            .map(|d| writer.record(d))
+            .transpose()?;
+        let root = writer.record(&Root {
             schema,
             object: Record {
                 start: 0,
-                len: object.len() as u64,
+                len: object.bytes.len() as u64,
             },
             bitcode: Record {
-                start: object.len() as u64,
+                start: object.bytes.len() as u64,
                 len: bitcode.len() as u64,
             },
             summary,
+            debug,
         })?;
-        Ok(())
+        writer.write_all(&root.len.to_le_bytes())
     })?;
     store.select(&native::selection(key), identity)?;
     Ok(identity)
@@ -84,14 +90,23 @@ pub(crate) fn load(
 }
 
 pub(crate) fn read(bytes: &[u8], schema: u32) -> Option<NativeLibrary> {
-    let at = bytes.len().checked_sub(ROOT_SIZE)?;
-    let root: Root = decode(&bytes[at..])?;
+    let end = bytes.len().checked_sub(8)?;
+    let size = usize::try_from(u64::from_le_bytes(bytes[end..].try_into().ok()?)).ok()?;
+    let at = end.checked_sub(size)?;
+    let root: Root = decode(&bytes[at..end])?;
     if root.schema != schema {
         return None;
     }
     let payload = &bytes[..at];
+    let debug = match root.debug {
+        Some(d) => Some(decode(d.bytes(payload)?)?),
+        None => None,
+    };
     Some(NativeLibrary {
-        object: root.object.bytes(payload)?.to_vec(),
+        object: hirsel_core_ir::source::NativeObject {
+            bytes: root.object.bytes(payload)?.to_vec(),
+            debug,
+        },
         bitcode: root.bitcode.bytes(payload)?.to_vec(),
         summary: decode(root.summary.bytes(payload)?)?,
     })
@@ -100,10 +115,13 @@ pub(crate) fn read(bytes: &[u8], schema: u32) -> Option<NativeLibrary> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    const SCHEMA: u32 = 1;
+    const SCHEMA: u32 = hirsel_llvm_lazy::NATIVE_LIBRARY_SCHEMA;
     fn product(object: &[u8], bitcode: &[u8]) -> NativeLibrary {
         NativeLibrary {
-            object: object.to_vec(),
+            object: hirsel_core_ir::source::NativeObject {
+                bytes: object.to_vec(),
+                debug: None,
+            },
             bitcode: bitcode.to_vec(),
             summary: hirsel_llvm_lazy::ImportSummary {
                 functions: vec![hirsel_llvm_lazy::ImportFunction {
@@ -125,10 +143,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path()).unwrap();
         let key = ContentHash::of_bytes(b"existing native-object inputs and schema");
-        let identity = publish(&store, key, SCHEMA, &product(b"object", b"raw bitcode")).unwrap();
+        let debug = hirsel_core_ir::source::NativeDebug::default();
+        let mut original = product(b"object", b"raw bitcode");
+        original.object.debug = Some(debug.clone());
+        let identity = publish(&store, key, SCHEMA, &original).unwrap();
         let (loaded, product) = load(&store, key, SCHEMA).unwrap().unwrap();
+        assert_eq!(product.object.debug, Some(debug));
         assert_eq!(loaded, identity);
-        assert_eq!(product.object, b"object");
+        assert_eq!(product.object.bytes, b"object");
         assert_eq!(product.bitcode, b"raw bitcode");
         assert_eq!(product.summary.functions[0].symbol, "public_function");
         assert_eq!(product.summary.functions[0].instructions, 17);
@@ -144,7 +166,7 @@ mod tests {
         let key = ContentHash::of_bytes(b"native unit");
         assert!(load(&store, key, SCHEMA).unwrap().is_none());
         let identity = publish(&store, key, SCHEMA, &product(b"object", b"bitcode")).unwrap();
-        assert!(load(&store, key, 2).unwrap().is_none());
+        assert!(load(&store, key, SCHEMA + 1).unwrap().is_none());
         let complete = store.get(identity).unwrap().unwrap();
         for end in 0..complete.len() {
             assert!(read(&complete[..end], SCHEMA).is_none());
@@ -171,7 +193,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            load(&store, key, SCHEMA).unwrap().unwrap().1.object,
+            load(&store, key, SCHEMA).unwrap().unwrap().1.object.bytes,
             b"new object"
         );
     }

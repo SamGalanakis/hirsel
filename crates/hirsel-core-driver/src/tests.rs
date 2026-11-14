@@ -1074,6 +1074,7 @@ fn generic_templates_survive_disk_reuse_and_materialize_the_call_closure() {
                 optimize: false,
                 debug_lines: false,
             },
+            ContentHash::of_bytes(b"materialized test unit"),
         )
         .unwrap();
         assert!(!object.bytes.is_empty());

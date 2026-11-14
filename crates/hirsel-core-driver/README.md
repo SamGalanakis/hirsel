@@ -155,8 +155,11 @@ Native body objects with rows enabled contain code and source-independent DWARF 
 names its source item, and each line encodes the item-relative byte offset plus
 one. The object keys contain no absolute source position. One shared link-time
 writer resolves these rows, declaration positions and inline call sites against
-the current checked source snapshot. It writes a separate debug object and
-strips synthetic rows from temporary code inputs. Moving an unchanged item
+the current checked source snapshot. It writes one DWARF5 debug object from cached item-relative side products.
+The engines publish clean ELF bytes and their optional rows together; link inputs
+are never rewritten. LLVM extracts rows once when it first produces an object;
+Cranelift publishes its machine rows directly. Default-off builds emit, decode
+and bind no row metadata. Moving an unchanged item
 therefore rechecks and compiles no existing body; only the link product changes.
 Published source text has its own indexed rows and never requires decoding a
 library AST or reopening source files. Installed products contain those bytes.

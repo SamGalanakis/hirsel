@@ -97,6 +97,7 @@ pub struct ObjectProduct {
     pub instance: InstanceKey,
     pub identity: ContentHash,
     pub bytes: Vec<u8>,
+    pub debug: Option<hirsel_core_ir::source::NativeDebug>,
     pub compiled: bool,
 }
 #[derive(Serialize)]
@@ -133,7 +134,11 @@ fn read_input(path: &Path) -> io::Result<Vec<u8>> {
 }
 // A unit is the producer's complete module, including type shapes and finalizers.
 // The cache chooses its granularity; this boundary never strips type/drop inputs.
-fn emit_unit(module: &Module, options: &NativeOptions) -> Result<Vec<u8>, String> {
+fn emit_unit(
+    module: &Module,
+    options: &NativeOptions,
+    object_key: ContentHash,
+) -> Result<hirsel_core_ir::source::NativeObject, String> {
     match options.backend {
         Backend::Cranelift => hirsel_cranelift::core::emit_object_with_charge_observation(
             module,
@@ -143,9 +148,9 @@ fn emit_unit(module: &Module, options: &NativeOptions) -> Result<Vec<u8>, String
                 optimize: options.optimize,
                 debug_lines: options.debug_lines,
             },
+            object_key,
             options.logical_charge_report.is_some(),
         )
-        .map(|o| o.bytes)
         .map_err(|e| e.to_string()),
         Backend::Llvm => hirsel_llvm_lazy::core::emit_object_relocatable_for_target(
             module,
@@ -159,7 +164,10 @@ fn emit_unit(module: &Module, options: &NativeOptions) -> Result<Vec<u8>, String
             options.logical_charge_report.is_some(),
             options.debug_lines,
         )
-        .map_err(|e| e.to_string()),
+        .map_err(|e| e.to_string())
+        .and_then(|bytes| {
+            hirsel_llvm_lazy::core::finish_native_object(bytes, object_key, options.debug_lines)
+        }),
     }
 }
 
@@ -236,8 +244,9 @@ impl CheckProduct {
             let body = &instance_body.product;
             let ir = define_once(instance_body.ir(), &mut emitted);
             let object_key = key(
-                "hirsel.core-object.v1",
+                "hirsel.core-object.v2",
                 &(
+                    crate::native_object::SCHEMA,
                     compiler_identity()?,
                     &options.target,
                     options.backend,
@@ -252,21 +261,28 @@ impl CheckProduct {
                     &*ir,
                 ),
             )?;
-            let (identity, bytes, compiled) =
-                if let Some((hash, bytes)) = cached(store, object_key)? {
-                    (hash, bytes, false)
-                } else {
-                    let bytes = emit_unit(&ir, options).map_err(|message| NativeStop::Emit {
+            let (identity, object, compiled) = if let Some((hash, object)) =
+                crate::native_object::load(store, object_key)?
+            {
+                (hash, object, false)
+            } else {
+                let object =
+                    emit_unit(&ir, options, object_key).map_err(|message| NativeStop::Emit {
                         definition: instance.definition.clone(),
                         message,
                     })?;
-                    (publish(store, object_key, &bytes)?, bytes, true)
-                };
+                (
+                    crate::native_object::publish(store, object_key, &object)?,
+                    object,
+                    true,
+                )
+            };
             objects.push(ObjectProduct {
                 private_variants: 0,
                 instance: instance.clone(),
                 identity,
-                bytes,
+                bytes: object.bytes,
+                debug: object.debug,
                 compiled,
             });
         }
@@ -307,8 +323,9 @@ impl CheckProduct {
         if let Some(module) = &self.entry_binding(entry)?.cleanup {
             let store = Store::new(&options.store)?;
             let object_key = key(
-                "hirsel.core-entry-cleanup.v1",
+                "hirsel.core-entry-cleanup.v2",
                 &(
+                    crate::native_object::SCHEMA,
                     compiler_identity()?,
                     &options.target,
                     options.backend,
@@ -320,21 +337,28 @@ impl CheckProduct {
                     module,
                 ),
             )?;
-            let (identity, bytes, compiled) =
-                if let Some((identity, bytes)) = cached(&store, object_key)? {
-                    (identity, bytes, false)
-                } else {
-                    let bytes = emit_unit(module, options).map_err(|message| NativeStop::Emit {
+            let (identity, object, compiled) = if let Some((identity, object)) =
+                crate::native_object::load(&store, object_key)?
+            {
+                (identity, object, false)
+            } else {
+                let object =
+                    emit_unit(module, options, object_key).map_err(|message| NativeStop::Emit {
                         definition: entry.clone(),
                         message,
                     })?;
-                    (publish(&store, object_key, &bytes)?, bytes, true)
-                };
+                (
+                    crate::native_object::publish(&store, object_key, &object)?,
+                    object,
+                    true,
+                )
+            };
             objects.push(ObjectProduct {
                 private_variants: 0,
                 instance: module.instances.last().unwrap().clone(),
                 identity,
-                bytes,
+                bytes: object.bytes,
+                debug: object.debug,
                 compiled,
             });
         }
@@ -546,18 +570,20 @@ fn link(
             // Keep unwind data, but do not retain line tables in an off build.
             cc.arg("-Wl,--strip-debug");
         }
-        let (code, debug) = if options.debug_lines {
-            let (code, debug) = crate::native_debug::bind(objects, sources, &options.target)
-                .map_err(|error| NativeStop::Link(format!("native debug binding: {error}")))?;
-            (code, Some(debug))
+        let debug = if options.debug_lines {
+            let debug = crate::native_debug::bind_side_products(
+                objects.iter().filter_map(|o| o.debug.as_ref()),
+                sources,
+                &options.target,
+            )
+            .map_err(|error| NativeStop::Link(format!("native debug binding: {error}")))?;
+            Some(debug)
         } else {
-            let code = crate::native_debug::code_only(objects)
-                .map_err(|error| NativeStop::Link(format!("native debug stripping: {error}")))?;
-            (code, None)
+            None
         };
-        for (i, object) in code.iter().enumerate() {
+        for (i, object) in objects.iter().enumerate() {
             let path = temp.path().join(format!("{i}.o"));
-            std::fs::write(&path, object)?;
+            std::fs::write(&path, &object.bytes)?;
             cc.arg(path);
         }
         if let Some(debug) = debug {
@@ -1023,7 +1049,8 @@ b0:
                 let product =
                     crate::native_library::read(&archive, hirsel_llvm_lazy::NATIVE_LIBRARY_SCHEMA)
                         .expect("one complete native-library product");
-                assert_eq!(product.object, library.bytes);
+                assert!(product.object.debug.is_none());
+                assert_eq!(product.object.bytes, library.bytes);
                 assert!(
                     product.bitcode.starts_with(b"BC\xc0\xde"),
                     "raw LLVM bitcode"

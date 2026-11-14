@@ -102,6 +102,7 @@ impl CheckProduct {
                         .expect("supported native target"),
                     options.logical_charge_report.is_some(),
                     options.debug_lines,
+                    object_key,
                 )
                 .map_err(|message| NativeStop::Emit {
                     definition: instance.definition.clone(),
@@ -119,7 +120,8 @@ impl CheckProduct {
                 private_variants: 0,
                 instance: instance.clone(),
                 identity,
-                bytes: product.object,
+                bytes: product.object.bytes,
+                debug: product.object.debug,
                 compiled,
             });
             libraries.push((identity, product.bitcode, product.summary));
@@ -160,66 +162,80 @@ impl CheckProduct {
             ),
             &own_facts,
         )?;
-        let (identity, bytes, compiled) = if let Some((hash, bytes)) = cached(store, object_key)? {
-            (hash, bytes, false)
-        } else {
-            let text = owned
-                .iter()
-                .map(|(i, ir)| {
-                    hirsel_llvm_lazy::core::emit_ir_relocatable_with_role_facts_for_target(
-                        ir,
-                        hirsel_core_layout::Target::from_triple(&options.target)
-                            .expect("supported native target"),
-                        options.logical_charge_report.is_some(),
-                        options.debug_lines,
-                        &facts[*i],
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| NativeStop::Emit {
-                    definition: entry.clone(),
-                    message: e.to_string(),
-                })?;
-            // Preserve the producer's unit order. Declaration-only imported
-            // modules need neither source emission nor a bitcode load.
-            let mut texts = text.iter();
-            let mut imports = libraries.iter();
-            let units = modules
-                .iter()
-                .zip(&imported)
-                .filter_map(|(module, imported)| {
-                    if !imported {
-                        Some(hirsel_llvm_lazy::Unit::Text {
-                            ir: texts.next().unwrap(),
-                            imported: false,
-                        })
-                    } else if module.functions.iter().any(|f| f.body.is_some()) {
-                        let (_, bitcode, summary) = imports.next().unwrap();
-                        Some(hirsel_llvm_lazy::Unit::Import { bitcode, summary })
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>();
-            let exports = exports(
-                instance,
-                modules
+        let (identity, object, compiled) =
+            if let Some((hash, object)) = crate::native_object::load(store, object_key)? {
+                (hash, object, false)
+            } else {
+                let text = owned
+                    .iter()
+                    .map(|(i, ir)| {
+                        hirsel_llvm_lazy::core::emit_ir_relocatable_with_role_facts_for_target(
+                            ir,
+                            hirsel_core_layout::Target::from_triple(&options.target)
+                                .expect("supported native target"),
+                            options.logical_charge_report.is_some(),
+                            options.debug_lines,
+                            &facts[*i],
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| NativeStop::Emit {
+                        definition: entry.clone(),
+                        message: e.to_string(),
+                    })?;
+                // Preserve the producer's unit order. Declaration-only imported
+                // modules need neither source emission nor a bitcode load.
+                let mut texts = text.iter();
+                let mut imports = libraries.iter();
+                let units = modules
                     .iter()
                     .zip(&imported)
-                    .map(|(ir, imported)| (&**ir, *imported)),
-            );
-            let bytes = hirsel_llvm_lazy::emit_program_for_target(
-                &units,
-                &exports,
-                hirsel_core_layout::Target::from_triple(&options.target)
-                    .expect("supported native target"),
-            )
-            .map_err(|message| NativeStop::Emit {
-                definition: entry.clone(),
-                message,
-            })?;
-            (publish(store, object_key, &bytes)?, bytes, true)
-        };
+                    .filter_map(|(module, imported)| {
+                        if !imported {
+                            Some(hirsel_llvm_lazy::Unit::Text {
+                                ir: texts.next().unwrap(),
+                                imported: false,
+                            })
+                        } else if module.functions.iter().any(|f| f.body.is_some()) {
+                            let (_, bitcode, summary) = imports.next().unwrap();
+                            Some(hirsel_llvm_lazy::Unit::Import { bitcode, summary })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let exports = exports(
+                    instance,
+                    modules
+                        .iter()
+                        .zip(&imported)
+                        .map(|(ir, imported)| (&**ir, *imported)),
+                );
+                let bytes = hirsel_llvm_lazy::emit_program_for_target(
+                    &units,
+                    &exports,
+                    hirsel_core_layout::Target::from_triple(&options.target)
+                        .expect("supported native target"),
+                )
+                .map_err(|message| NativeStop::Emit {
+                    definition: entry.clone(),
+                    message,
+                })?;
+                let object = hirsel_llvm_lazy::core::finish_native_object(
+                    bytes,
+                    object_key,
+                    options.debug_lines,
+                )
+                .map_err(|message| NativeStop::Emit {
+                    definition: entry.clone(),
+                    message,
+                })?;
+                (
+                    crate::native_object::publish(store, object_key, &object)?,
+                    object,
+                    true,
+                )
+            };
         objects.push(ObjectProduct {
             private_variants: modules
                 .iter()
@@ -232,7 +248,8 @@ impl CheckProduct {
                 .sum(),
             instance: instance.clone(),
             identity,
-            bytes,
+            bytes: object.bytes,
+            debug: object.debug,
             compiled,
         });
         Ok(objects)

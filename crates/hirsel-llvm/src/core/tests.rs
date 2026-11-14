@@ -2432,14 +2432,21 @@ b0(v0: u64):
     wf::module(&caller).unwrap();
     let facts = hirsel_core_ir::roles::Facts::program(&[&library, &caller], &[]);
     for target in [Target::X86_64Linux, Target::Aarch64Linux] {
-        let product =
-            hirsel_llvm_lazy::compile_library(&library, &facts[0], target, false, false).unwrap();
+        let product = hirsel_llvm_lazy::compile_library(
+            &library,
+            &facts[0],
+            target,
+            false,
+            false,
+            hirsel_core_ids::ContentHash::of_bytes(b"bitcode fixture"),
+        )
+        .unwrap();
         let library_ir = hirsel_llvm_lazy::core::emit_ir_relocatable_with_role_facts_for_target(
             &library, target, false, false, &facts[0],
         )
         .unwrap();
         assert_eq!(
-            product.object,
+            product.object.bytes,
             hirsel_llvm_lazy::compile_ir_for_target(&library_ir, true, target).unwrap()
         );
         assert_eq!(product.summary.facts, facts[0].record(&library));

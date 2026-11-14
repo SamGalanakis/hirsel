@@ -414,7 +414,8 @@ fn f(c: bool) { while c { break 5 } }                     // refused: LANG-15, w
 
 `loop` repeats until a `break`. `while c` and `while let p = e` test before each iteration.
 `for x in e` iterates exactly the sources of [SEM-6](semantics.md#sem-6-iteration), in its
-modes, and `for take x in e` consumes an own `List`; no other iteration consumes in v1. A `for` pattern is irrefutable. Bindings made by one iteration end with it
+modes; `for take x in e` consumes an own `List` and `for take (k, v) in e` an own `Map`, and
+no other iteration consumes in v1. A `for` pattern is irrefutable. Bindings made by one iteration end with it
 ([OWN-17](ownership.md#own-17-loops)).
 
 ```hirsel

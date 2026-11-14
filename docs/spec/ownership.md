@@ -314,9 +314,10 @@ not one. A core operation may return a view of part
 of an argument's storage that its signature names (a sub-range, `string.slice`; the same
 bytes at another type, `string.as_bytes`): such a **sub-view** is a view with the anchors
 and freezes of a view of the whole argument (OWN-20). There is no last-use end and no
-mutable view. Nothing that a view exposes is written, moved or freed while the view lives,
-through the view or through any other alias; an operation given a view may still change
-state that no view exposes: a counted holder's count, a channel's queue, a region's
+mutable view. While a view lives, no permitted operation, through the view or through any
+other alias, writes, moves or frees storage the view exposes, a view in a result anchored
+to a `mut` parameter (OWN-20) included; an operation given a view may still change hidden
+bookkeeping that no view exposes: a counted holder's count, a channel's queue, a region's
 bookkeeping, the host. A log's entries ([MEM-29](memory.md#mem-29-append-only-logs)) are such state. Where a plain `T` is expected, a `View[T]` of a
 plain `T` reads as the value. A stable value used where a view is expected is that view
 ([OWN-25](#own-25-stable-values-are-read-as-views)).
@@ -449,6 +450,15 @@ assignment, so the caller's place keeps its anchor set (OWN-19) across the call.
 callback installed so is therefore the parameter's own value or a part of it, or captures no
 slot of the callee, which every callback stored there would outlive (OWN-21), so the
 caller's place also keeps its capture descriptor across the call.
+
+When a call's result is anchored to a `mut` parameter (OWN-20), the call's completed return
+(after the callee's cleanup and the delivery of its pending result,
+[FAIL-9](failure.md#fail-9-pending-results)) turns the reservation of that argument's place
+into a freeze (OWN-10) with no program step between, whatever variant is returned. The
+freeze opens as that call expression completes, before a later argument, field or operand
+is evaluated, and lasts for the result's extent like any scoped result's, a discarded
+result's statement temporary included. A call that fails delivers no result and leaves no
+freeze.
 
 ```hirsel
 fn reset(mut xs: List[u64]) { xs = list.new() }
@@ -657,9 +667,9 @@ anchors are live and frozen. It may not be:
   collection;
 - captured by an owning closure, sent, or returned past its anchor.
 
-A slot whose written type names its anchors, `let mut x: Option[View[T]] in xs = None`, as
-a result type does (OWN-20), has exactly that anchor set for its whole extent, whatever it
-holds: each anchor is frozen from the declaration on (OWN-10), even while the slot holds
+A slot whose written type names its anchors, one as in `let mut x: Option[View[T]] in xs =
+None` or several as in `let mut p: (scoped fn(u64) -> u64) in n, m = ..`, as a result type
+does (OWN-20), has exactly that anchor set for its whole extent, whatever it holds: each anchor is frozen from the declaration on (OWN-10), even while the slot holds
 `None`, and a value assigned to it or initialising it may read only those anchors, a part
 or sub-view of one included, or it is refused there. Its set is then the same at a loop's
 head and at every edge (OWN-17), so a loop may keep a view it finds; a slot without a
@@ -715,14 +725,20 @@ fn keep(xs: List[String]) -> List[View[String]] { list.new() }  // refused: OWN-
 ### OWN-20: Scoped results name their anchor
 
 A function that returns a scoped value writes its anchors in the result type: `View[T] in
-p` for one, `R[in a, in b]` for a scoped type with several. Each names a view parameter, or
-a region whose stable values the result reads.
-The caller's argument for each stays frozen for the result's extent. The result may denote
-the anchored argument, a part of it (a field, element or payload, at any depth), or a
-sub-view that a call gave for the argument or for such a part (OWN-8), core operations'
-included, or a part or sub-view of such a sub-view, at any depth; such a result has the
-argument's anchor and keeps the same freeze. It is a scoped value and copies as OWN-3 says. No anchor is inferred from a body. A
-missing or wrong anchor is refused at the written result type.
+p` for one, `R[in a, in b]` for a scoped type with several. Each names a view parameter, a
+`mut` parameter, or a region whose stable values the result reads; a projected formal such
+as `p.f` is not an anchor. The caller's argument for each stays frozen for the result's
+extent: a view argument's from its evaluation (OWN-10), a `mut` argument's from the call's
+completed return (OWN-11). The result may denote the anchored argument, a part of it (a
+field, element or payload, at any depth), or a sub-view that a call gave for the argument
+or for such a part (OWN-8), core operations' included, or a part or sub-view of such a
+sub-view, at any depth; such a result has the argument's anchor and keeps the same freeze.
+When an actual is put for an anchor, the result keeps every anchor and region root the
+actual already has; a projected actual such as `mut x.f` freezes `x.f`. It is a scoped
+value and copies as OWN-3 says. No anchor is inferred from a body. A missing or wrong anchor
+is refused at the written result type. While the result lives, its anchored argument may
+still be read and viewed, as any frozen place may, and nothing writes, moves or frees what
+the result exposes (OWN-8).
 
 ```hirsel
 fn first(xs: List[String]) -> Option[View[String]] in xs { list.get(xs, 0) }
@@ -733,6 +749,32 @@ fn show(mut xs: List[String]) {
 ```
 ```hirsel
 fn first(xs: List[String]) -> Option[View[String]] { list.get(xs, 0) }  // refused: OWN-20
+```
+```hirsel
+fn grow(mut s: String) -> Result[View[String], Capacity] in s {
+  string.push(mut s, "x")?
+  Ok(string.slice(s, 0, 1))
+}
+fn use_it(mut s: String) -> Result[u64, Capacity] {
+  let v = grow(mut s)?
+  let n = string.byte_len(v) + string.byte_len(s)     // reading s while v lives is accepted
+  Ok(n)
+}
+```
+```hirsel
+fn last(mut xs: List[String]) -> Option[View[String]] in xs {
+  let v = list.get(xs, 0)
+  list.clear(mut xs)                                  // refused: OWN-10, v freezes xs
+  v
+}
+```
+```hirsel
+fn grow(mut s: String) -> Result[View[String], Capacity] in s { Ok(string.slice(s, 0, 0)) }
+fn twice(mut s: String) -> Result[u64, Capacity] {
+  let a = grow(mut s)?
+  let b = grow(mut s)?                                // refused: OWN-10, a freezes s
+  Ok(string.byte_len(a) + string.byte_len(b))
+}
 ```
 
 ### OWN-21: Scoped callbacks
@@ -753,7 +795,15 @@ except that a field callback of an `emit` literal is active only while its field
 activation each captured place must be live, and writable for a `mut` capture, and its loan
 is checked as an argument of that call against the other arguments, active loans and
 freezes (OWN-9 to OWN-12). Forwarding a received callback reborrows its loans and creates no
-second loan of the same place. An inactive descriptor grants no access, and every captured
+second loan of the same place. Each activation of a `mut` capture is a `mut` loan of the
+captured slot, and a value installed through it, or into a place under it, may read only
+that slot's written anchors (OWN-19), their parts and sub-views of them, as OWN-20 counts
+them, and the regions its type names, as through a `mut` parameter (OWN-11); a captured
+slot with no written anchor may so be given only a value that reads none. Anything else is
+refused at the assignment, so the slot keeps its anchor set and capture descriptor across
+every activation. A callback that lends a place `mut` therefore cannot be installed from
+inside another closure into a slot anchored to that place, which is frozen (OWN-10); it is
+installed in the outer body (`outer`). An inactive descriptor grants no access, and every captured
 slot outlives the callback. A view of an owning callable used as a scoped callback freezes
 that owner for the scoped value's extent. Every slot a body names is its function's own, its
 parameters included (a slot is a local binding, a parameter or a statement temporary), so a
@@ -761,7 +811,8 @@ callback that captures never outlives the function that built it: a scoped calla
 function returns, or installs through a `mut` parameter (OWN-11), captures nothing, or is
 an argument, a part of one, or a call's result anchored to one (OWN-20), and keeps that
 argument's descriptor through the returned anchor. Within a body, a capturing callback may
-be stored in any slot its captured slots outlive.
+be stored in any slot its captured slots outlive, through a `mut` capture only as the
+install rule above allows.
 
 ```hirsel
 fn count_if(xs: List[String], keep: scoped fn(String) -> bool) -> u64 { 0 }
@@ -783,6 +834,37 @@ fn zero(xs: List[u64]) -> (scoped fn() -> u64) in xs { fn() -> u64 { 0 } }
 ```hirsel
 fn make(a: u64) -> (scoped fn() -> u64) in a { scoped fn() -> u64 { a } }
                                                           // refused: OWN-21, a does not outlive the callback
+```
+```hirsel
+fn read_in(m: List[u64]) -> u64 {
+  let mut p: (scoped fn(u64) -> u64) in m = fn(x: u64) -> u64 { x }
+  let change = scoped fn() { p = scoped fn(x: u64) -> u64 { list.len(m) + x } }
+  change()
+  p(1)
+}
+fn outer(take m: List[u64]) -> u64 {
+  let mut p: scoped fn(u64) -> u64 = fn(x: u64) -> u64 { x }
+  p = scoped fn(x: u64) -> u64 { let _ = list.push(mut m, x); x }
+  p(1)
+}
+```
+```hirsel
+fn swap_in(n: List[u64], m: List[u64]) -> u64 {
+  let mut p: (scoped fn(u64) -> u64) in n = scoped fn(x: u64) -> u64 { list.len(n) + x }
+  let change = scoped fn() {
+    p = scoped fn(x: u64) -> u64 { list.len(m) + x }    // refused: OWN-21, m is not an anchor of p
+  }
+  change()
+  p(1)
+}
+```
+```hirsel
+fn inner(take m: List[u64]) -> u64 {
+  let mut p: (scoped fn(u64) -> u64) in m = fn(x: u64) -> u64 { x }
+  let change = scoped fn() { p = scoped fn(x: u64) -> u64 { let _ = list.push(mut m, x); x } }
+  change()                                                // refused: OWN-10, m is frozen as p's anchor
+  p(1)
+}
 ```
 ```hirsel
 fn direct(take src: String) {
@@ -886,7 +968,7 @@ after a failure ([FAIL-7](failure.md#fail-7-one-owner-per-survivor)).
 | T2.2 | `let y = x`, `x` copyable | both L | | |
 | T2.3 | `take x` argument | `x` M; a caller temporary until entry | callee fails | before entry the caller's cleanup, after it the callee's |
 | T2.4 | `let v = view p` | `p` frozen to block end | | |
-| T2.5 | `mut x` argument | `x` L with the last installed value | callee fails | `x` L with the last installed value; the caller's cleanup |
+| T2.5 | `mut x` argument | `x` L with the last installed value; if the result is anchored to `x` (OWN-20), `x` frozen for the result's extent | callee fails | `x` L with the last installed value; no freeze; the caller's cleanup; a pending result dropped by a failing cleanup is T6.3 |
 | T2.6 | exit edge | views end, then owners are cleaned | | |
 
 **T3 Assignment and destructure**

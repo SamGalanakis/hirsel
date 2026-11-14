@@ -27,7 +27,10 @@ count/recovery/release operations join the domain order. Mutable shared handles 
 separate authority-bearing types, excluded from shareable/stabledata; mutex payloads
 contain no authority-bearing handles/grants, access is a scoped exclusive callback with no
 authority, a failed callback permanently hides/releases its payload, and safe atomics are
-sequentially consistent." *v1:* MEM-15, CONC-11, CONC-12; mutexes and atomics are later.
+sequentially consistent." *v1:* MEM-15, CONC-11, CONC-12; mutexes and atomics are later,
+and no later shared mutable type may hand out a view of storage that another handle can
+write, move or free while the view lives ([OWN-8](ownership.md#own-8-views)), through a
+non-locking `get_mut`-style accessor or any other.
 
 **R4.** Own layout and the calling convention are private; only compact stable layout is
 declared. A later layout or foreign declaration never reinterprets an existing type.

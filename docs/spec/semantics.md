@@ -124,8 +124,15 @@ fn bump(mut m: Map[u64, u64]) -> Option[()] {
 `for x in e` iterates a range, or a view of a `List`, an `Inline` array, a `FixedSpan`, a
 `SeqSpan` or `IndexedSpan` ([MEM-12](memory.md#mem-12-stable-sequences)) or a `Causes`
 ([core](core.md)), binding a view of each element from the lowest index. Over a view of a
-`Map` it binds `(View[K], View[V])` for each entry in insertion order. `for take x in e` consumes an own `List`, moving each
-element out from the lowest index and cleaning the rest if the loop exits early. Nothing
+`Map` it binds `(View[K], View[V])` for each entry in insertion order. `for take x in e`
+consumes an own `List`, moving each element out from the lowest index, and `for take (k, v)
+in e` consumes an own `Map`, moving each entry out as a `(K, V)` in insertion order; no
+usable collection remains. When the loop ends, by exhaustion, `break`, `return` or failure,
+the current iteration's bindings are cleaned first by the ordinary exit-edge rules
+([FAIL-8](failure.md#fail-8-exit-edge-cleanup)), so a `(k, v)` pattern's value before its
+key; then the elements or entries not yet reached are cleaned in that same order, a map's
+each key before its value; then the storage, a map's index included, is freed. Each element
+or entry is cleaned exactly once, and none of this hashes, probes or admits. Nothing
 else is iterable; scalars are read with `string.next_scalar` (SEM-3). A range `a..b` is
 half-open and `a..=b` closed; both are plain, iterate upward, and stop at the type's
 maximum without overflow. Its endpoints are typed as a binary operator's operands, the left
@@ -138,9 +145,20 @@ expected type, so two unsuffixed endpoints have none and are refused by
 ```hirsel
 fn sum(xs: List[u64]) -> u64 { let mut t: u64 = 0; for x in xs { t += x }; t }
 fn three() -> u64 { let mut n: u64 = 0; for _ in 0u64..3 { n += 1 }; n }
+fn total(take m: Map[String, u64]) -> u64 {
+  let mut t: u64 = 0
+  for take (k, v) in m { let _ = string.into_bytes(take k); t += v }
+  t
+}
 ```
 ```hirsel
 fn three() { for _ in 0..3 {} }                           // refused: LANG-11, 0 has no expected type
+```
+```hirsel
+fn again(take m: Map[String, u64]) -> u64 {
+  for take (k, v) in m {}
+  map.len(m)                                              // refused: OWN-5, m moved
+}
 ```
 ```hirsel
 fn letters() { for _ in 'a'..='c' {} }                    // refused: SEM-6, char is not an integer type

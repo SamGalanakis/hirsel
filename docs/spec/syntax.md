@@ -180,8 +180,9 @@ payload     = [ name, ":" ], type ;
 drop        = "drop", "(", name, ")", block ;
 
 (* types *)
-type        = type-atom, [ anchor ] ;
-anchor      = "in", place ;
+type        = type-atom, [ "in", place ] ;
+slot-type   = type-atom, [ anchor ] ;
+anchor      = "in", place, { ",", place } ;
 place       = name, { ".", name } ;
 type-atom   = type-path, [ "[", nonempty(type-arg), "]" ]
             | "(", ")" | "(", type, ")" | "(", type, ",", list(type), ")"
@@ -193,7 +194,7 @@ type-path   = name, { ".", name } ;
 
 (* statements and expressions *)
 block       = "{", { statement, END }, [ statement ], "}" ;
-statement   = "let", [ "mut" ], pattern, [ ":", type ], [ "=", expression, [ "else", block ] ]
+statement   = "let", [ "mut" ], pattern, [ ":", slot-type ], [ "=", expression, [ "else", block ] ]
             | expression, assign-op, expression
             | expression ;
 assign-op   = "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "<<=" | ">>=" | "&=" | "|=" | "^=" ;

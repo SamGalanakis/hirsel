@@ -180,7 +180,8 @@ operations it names; nothing else about them may be inferred from an implementat
   one call: a tally is `update`, then `insert` when it returns `None`, so a present key
   costs one lookup and no owned key. `map.remove` drops the stored key
   and returns the value. A `Map` is cleaned entry by entry in insertion order, each key
-  before its value.
+  before its value, and `for take (k, v) in m` consumes one entry by entry
+  ([SEM-6](semantics.md#sem-6-iteration)).
 - **Integers.** The `integer` and `float` bounds ([OWN-4](ownership.md#own-4-bounds)) say
   which numeric types a core parameter ranges over. `int.widen` is accepted only where
   every `T` fits in `U`, and `int.truncate` only where `U` is no wider than `T`

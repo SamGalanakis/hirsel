@@ -294,7 +294,7 @@ void hirsel_llvm_program_v1(const HirselLlvmUnit *units, size_t count,
         // A typed empty-drop guard can disappear in that round. DSE then
         // removes carrier clears/restores that its cleanup used to observe.
         LLVMErrorRef e = LLVMRunPasses(module,
-            "default<O3>,cgscc(argpromotion),function(sroa,early-cse,correlated-propagation,instcombine,constraint-elimination,simplifycfg,dse)",
+            "default<O3>,cgscc(argpromotion),function(sroa,early-cse,correlated-propagation,instcombine<no-verify-fixpoint>,constraint-elimination,simplifycfg,dse)",
             machine, options);
         LLVMDisposePassBuilderOptions(options);
         if (e) {

@@ -27,6 +27,11 @@ class Sweep(unittest.TestCase):
         self.assertEqual(SWEEP['bodies'](RUST), 1)
         self.assertEqual(SWEEP['bodies'](PYTHON, python=True), 72)
 
+    def test_arm_observations_count_only_the_completed_outer_sweep(self):
+        self.assertEqual(SWEEP['bodies']('AARCH64_EXECUTED 40\n'), 40)
+        self.assertEqual(SWEEP['bodies']('AARCH64_EXECUTED 0\n'), 0)
+        self.assertEqual(SWEEP['bodies']('---- STDERR ----\nAARCH64_EXECUTED 40\n'), 0)
+
     def test_nested_stderr_is_not_an_outer_rust_body(self):
         self.assertEqual(SWEEP['bodies']('---- STDERR ----\ntest nested ... ok\n'), 0)
 
@@ -62,7 +67,7 @@ class Sweep(unittest.TestCase):
                                          [(target, result(PYTHON if target == 'test-land' else RUST))])
                 row = execute(suite, Path(directory) / 'result', logger)
                 self.assertEqual(row['errors'], [])
-                self.assertEqual('--test-arg=--test-threads=1' in row['command'], target != 'test-land')
+                self.assertEqual('--test-arg=--test-threads=1' in row['command'], target in ('core-driver-native', 'core-llvm-aarch64-runtime'))
                 self.assertIn('//:' + target, row['command'])
 
     def test_a_red_does_not_prevent_the_other_suite_and_the_dated_report(self):
@@ -83,9 +88,9 @@ class Sweep(unittest.TestCase):
                      contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                     self.assertEqual(main(), int(red))
                 report = json.loads(Path(path).read_text())
-                self.assertEqual({row['suite'] for row in report['suites']}, {'core-driver-native', 'core-llvm-aarch64-runtime', 'test-land'})
+                self.assertEqual({row['suite'] for row in report['suites']}, {'core-driver-native', 'core-llvm-aarch64-runtime', 'core-llvm-aarch64-front', 'core-llvm-aarch64-std', 'core-llvm-aarch64-m1', 'test-land'})
                 self.assertEqual(report['status'], 'failed' if red else 'passed')
-                self.assertEqual(report['bodies'], 3)
+                self.assertEqual(report['bodies'], 6)
                 self.assertEqual(report['source'], 'main')
 
 

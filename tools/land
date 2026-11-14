@@ -92,7 +92,7 @@ CORE_ACCEPTANCE = (
     '//:hirsel-core-rt-unittest',
     '//:hirsel-core-front-unittest', '//:hirsel-cranelift-unittest',
     '//:hirsel-core-driver-unittest',
-    '//:land-core-library-modes',
+    '//:land-core-library-modes', '//:land-core-llvm-aarch64',
     '//:hirsel-llvm-lazy-unittest', '//:hirsel-llvm-unittest',
     '//:hirsel-cranelift-test-core_native', '//:hirsel-cranelift-test-core_aarch64',
     '//:core-aarch64-provider', '//:land-core-evaluator',

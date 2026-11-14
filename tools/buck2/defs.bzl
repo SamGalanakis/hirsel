@@ -781,7 +781,7 @@ _test_suite = rule(impl = _test_suite_impl, attrs = {
 def _suite(name, tests, **kwargs):
     _test_suite(name = name, tests = tests, inputs = [test + "[inputs]" for test in tests], **kwargs)
 
-def hirsel_script_test(name, script, data, runtime_archives = [], full = True, args = [], bin_exes = {}, products = None, production = False, files_env = {}, sanitizer = None, host = False, shards = 1):
+def hirsel_script_test(name, script, data, runtime_archives = [], full = True, args = [], bin_exes = {}, products = None, production = False, files_env = {}, sanitizer = None, host = False, shards = 1, native_tools = False):
     """A script harness with the same hermetic inputs as native Rust tests.
     `files_env` names further input files as environment variables. `host`
     runs it on the invoking host, never the pool: for a tool built there.
@@ -803,7 +803,7 @@ def hirsel_script_test(name, script, data, runtime_archives = [], full = True, a
             bin_exe_dir = BIN_EXE_DIR + "/" + name, products = products, files_env = files_env,
             llvm = "root//tools/buck2/native-toolchain:llvm",
             llvm_libraries = "toolchains//:llvm-libraries",
-            native_tools = native_tool_inputs() if runtime_archives else {},
+            native_tools = native_tool_inputs() if runtime_archives or native_tools else {},
             runtime_archives = runtime_archives, labels = ["gate"],
             exec_compatible_with = [budget_constraint("host")] if host else _test_platform(name),
             pool = not (TESTS_ON_HOST or host),

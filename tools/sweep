@@ -15,6 +15,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SUITES = (
     ('native', 'core-driver-native', ['--test-arg=--test-threads=1']),
     ('llvm-arm', 'core-llvm-aarch64-runtime', ['--test-arg=--test-threads=1']),
+    ('llvm-arm-front', 'core-llvm-aarch64-front', []),
+    ('llvm-arm-std', 'core-llvm-aarch64-std', []),
+    ('llvm-arm-m1', 'core-llvm-aarch64-m1', []),
     ('land', 'test-land', []),
 )
 
@@ -27,6 +30,9 @@ def bodies(details, python=False):
     # Nested libtests may be forwarded to stderr by an outer test. Count only
     # outer stdout, as tools/test-filter's completed_bodies does.
     stdout = re.split(r'^---- STDERR ----$', details, maxsplit=1, flags=re.M)[0]
+    arm = re.findall(r'^AARCH64_EXECUTED ([0-9]+)$', stdout, re.M)
+    if arm:
+        return int(arm[-1])
     return len(re.findall(r'^test \S+(?: - should panic)? \.\.\. (?:ok|FAILED)\b', stdout, re.M))
 
 
@@ -111,7 +117,7 @@ def main():
             raise RuntimeError(f'prepare.py exited {prepared.returncode}; see {setup}')
         # Each native harness is serial; independent suites retain their normal
         # pool/host placement and run concurrently. Python gets no Rust flags.
-        with ThreadPoolExecutor(max_workers=len(SUITES)) as pool:
+        with ThreadPoolExecutor(max_workers=2) as pool:
             report['suites'] = list(pool.map(lambda suite: execute(suite, base, event_logs), SUITES))
         errors = [error for row in report['suites'] for error in row['errors']]
     except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as error:

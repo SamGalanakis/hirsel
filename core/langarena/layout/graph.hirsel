@@ -101,10 +101,10 @@ fn show(out: Stdout, value: Result[u64, Capacity]) -> Result[(), Exit] waits {
     if let Error(_) = string.push(mut s, "\n") { return Error(Exit(status: 2)) }
     match stdout.write(out, s) { Ok(()) => Ok(()), Error(_) => Error(Exit(status: 3)) }
 }
-pub fn exclusive_main(out: Stdout) -> Result[(), Exit] waits { show(out, exclusive(8192, 32)) }
-pub fn churn_main(out: Stdout) -> Result[(), Exit] waits { show(out, churn(4096, 16)) }
-pub fn rc_main(out: Stdout) -> Result[(), Exit] waits { show(out, snapshots_rc(64, 256)) }
-pub fn arc_main(out: Stdout) -> Result[(), Exit] waits { show(out, snapshots_arc(64, 256)) }
+pub fn exclusive_main(out: Stdout) -> Result[(), Exit] waits { show(out, exclusive(graph_inputs.EXCLUSIVE_NODES, graph_inputs.EXCLUSIVE_ROUNDS)) }
+pub fn churn_main(out: Stdout) -> Result[(), Exit] waits { show(out, churn(graph_inputs.CHURN_NODES, graph_inputs.CHURN_ROUNDS)) }
+pub fn rc_main(out: Stdout) -> Result[(), Exit] waits { show(out, snapshots_rc(graph_inputs.SNAPSHOT_NODES, graph_inputs.SNAPSHOT_VERSIONS)) }
+pub fn arc_main(out: Stdout) -> Result[(), Exit] waits { show(out, snapshots_arc(graph_inputs.SNAPSHOT_NODES, graph_inputs.SNAPSHOT_VERSIONS)) }
 // Hand-derived: exclusive 0+1+2+3 +4*2 =14; churn final sum14 +8 stale probes=22;
 // Three-node snapshots sum5,7,9: two copied nodes increase per version, total21.
 pub fn small_law() -> bool {
@@ -120,22 +120,152 @@ pub fn small_law() -> bool {
 const SNAPSHOT_BUDGET: u64 = (31 + 256 * 33) * 32 + 256 * 8
 
 pub fn charges_main(out: Stdout) -> Result[(), Exit] waits {
-    let churn_ok = match (bound bytes 212992 { churn(4096, 16) }) { Ok(Ok(8517632)) => true, _ => false }
-    let churn_short = match (bound bytes 212991 { churn(4096, 16) }) { Ok(Error(c)) => c.requested == 98304 && c.available == 98303, _ => false }
-    let rc_ok = match (bound bytes SNAPSHOT_BUDGET { snapshots_rc(64, 256) }) { Ok(Ok(1601664)) => true, _ => false }
-    let rc_short = match (bound bytes (SNAPSHOT_BUDGET - 1) { snapshots_rc(64, 256) }) { Ok(Error(c)) => c.requested == 32 && c.available == 31, _ => false }
-    let arc_ok = match (bound bytes SNAPSHOT_BUDGET { snapshots_arc(64, 256) }) { Ok(Ok(1601664)) => true, _ => false }
-    let arc_short = match (bound bytes (SNAPSHOT_BUDGET - 1) { snapshots_arc(64, 256) }) { Ok(Error(c)) => c.requested == 32 && c.available == 31, _ => false }
+    let churn_ok = match (bound bytes 212992 { churn(graph_inputs.CHURN_NODES, graph_inputs.CHURN_ROUNDS) }) { Ok(Ok(8517632)) => true, _ => false }
+    let churn_short = match (bound bytes 212991 { churn(graph_inputs.CHURN_NODES, graph_inputs.CHURN_ROUNDS) }) { Ok(Error(c)) => c.requested == 98304 && c.available == 98303, _ => false }
+    let rc_ok = match (bound bytes SNAPSHOT_BUDGET { snapshots_rc(graph_inputs.SNAPSHOT_NODES, graph_inputs.SNAPSHOT_VERSIONS) }) { Ok(Ok(1601664)) => true, _ => false }
+    let rc_short = match (bound bytes (SNAPSHOT_BUDGET - 1) { snapshots_rc(graph_inputs.SNAPSHOT_NODES, graph_inputs.SNAPSHOT_VERSIONS) }) { Ok(Error(c)) => c.requested == 32 && c.available == 31, _ => false }
+    let arc_ok = match (bound bytes SNAPSHOT_BUDGET { snapshots_arc(graph_inputs.SNAPSHOT_NODES, graph_inputs.SNAPSHOT_VERSIONS) }) { Ok(Ok(1601664)) => true, _ => false }
+    let arc_short = match (bound bytes (SNAPSHOT_BUDGET - 1) { snapshots_arc(graph_inputs.SNAPSHOT_NODES, graph_inputs.SNAPSHOT_VERSIONS) }) { Ok(Error(c)) => c.requested == 32 && c.available == 31, _ => false }
     let mask: u64 = (if churn_ok { 1u64 } else { 0 }) + (if churn_short { 2u64 } else { 0 }) +
         (if rc_ok { 4u64 } else { 0 }) + (if rc_short { 8u64 } else { 0 }) +
         (if arc_ok { 16u64 } else { 0 }) + (if arc_short { 32u64 } else { 0 })
     show(out, Ok(mask))
 }
 fn lifetime() -> Result[u64, Capacity] {
-    let a = exclusive(8192, 32)?
-    let b = churn(4096, 16)?
-    let c = snapshots_rc(64, 256)?
-    let d = snapshots_arc(64, 256)?
+    let a = exclusive(graph_inputs.EXCLUSIVE_NODES, graph_inputs.EXCLUSIVE_ROUNDS)?
+    let b = churn(graph_inputs.CHURN_NODES, graph_inputs.CHURN_ROUNDS)?
+    let c = snapshots_rc(graph_inputs.SNAPSHOT_NODES, graph_inputs.SNAPSHOT_VERSIONS)?
+    let d = snapshots_arc(graph_inputs.SNAPSHOT_NODES, graph_inputs.SNAPSHOT_VERSIONS)?
     Ok(a + b + c + d)
 }
 pub fn lifetime_main(out: Stdout) -> Result[(), Exit] waits { show(out, lifetime()) }
+
+// expect: run exclusive_refusal() = true
+pub fn exclusive_refusal() -> bool {
+    // Four plain (u64,u32) nodes charge48, independent of physical padding.
+    let exact = match (bound bytes 48 { exclusive(4, 2) }) { Ok(Ok(14)) => true, _ => false }
+    let short = result.unwrap(bound bytes 47 {
+        let denied = match exclusive(4, 2) { Error(c) => c.requested == 48 && c.available == 47, _ => false }
+        let xs: List[u64] = result.unwrap(list.with_capacity(5))
+        denied && list.len(xs) == 0
+    })
+    exact && short
+}
+// expect: run churn_refusal_and_refund() = true
+pub fn churn_refusal_and_refund() -> bool {
+    // Four slots charge112; four Id holders charge96, total208.
+    let exact = match (bound bytes 208 { churn(4, 2) }) { Ok(Ok(22)) => true, _ => false }
+    let short = result.unwrap(bound bytes 207 {
+        let denied = match churn(4, 2) { Error(c) => c.requested == 96 && c.available == 95, _ => false }
+        // The admitted pool was destroyed, so a new192-byte list fits.
+        denied && result.unwrap(exclusive(16, 0)) == 120
+    })
+    exact && short
+}
+// expect: run rc_refusal_and_refund() = true
+pub fn rc_refusal_and_refund() -> bool {
+    // One shared suffix +3 versions of2 copied nodes, each charge32; holders24.
+    let exact = match (bound bytes 248 { snapshots_rc(3, 3) }) { Ok(Ok(21)) => true, _ => false }
+    let short = match (bound bytes 247 { snapshots_rc(3, 3) }) { Ok(Error(c)) => c.requested == 32 && c.available == 31, _ => false }
+    let root = result.unwrap(rc.new(RNode(value: 2, tail: Some(result.unwrap(rc.new(RNode(value: 1, tail: None)))))))
+    let prefix = result.unwrap(bound bytes 63 {
+        let denied = match copy_rc(root, 1) { Error(c) => c.requested == 32 && c.available == 31, _ => false }
+        let next = result.unwrap(copy_rc(root, 0))
+        denied && sum_rc(root) == 3 && sum_rc(next) == 4
+    })
+    exact && short && prefix
+}
+// expect: run arc_refusal_and_refund() = true
+pub fn arc_refusal_and_refund() -> bool {
+    let exact = match (bound bytes 248 { snapshots_arc(3, 3) }) { Ok(Ok(21)) => true, _ => false }
+    let short = match (bound bytes 247 { snapshots_arc(3, 3) }) { Ok(Error(c)) => c.requested == 32 && c.available == 31, _ => false }
+    let root = result.unwrap(arc.new(ANode(value: 2, tail: Some(result.unwrap(arc.new(ANode(value: 1, tail: None)))))))
+    let prefix = result.unwrap(bound bytes 63 {
+        let denied = match copy_arc(root, 1) { Error(c) => c.requested == 32 && c.available == 31, _ => false }
+        let next = result.unwrap(copy_arc(root, 0))
+        denied && sum_arc(root) == 3 && sum_arc(next) == 4
+    })
+    exact && short && prefix
+}
+// expect: run stale_and_foreign_probes() = true
+pub fn stale_and_foreign_probes() -> bool {
+    let mut p: std.pool.Pool[Node] = std.pool.new()
+    let other: std.pool.Pool[Node] = std.pool.new()
+    let old = result.unwrap(std.pool.insert(mut p, Node(value: 7, edge: 0)))
+    let foreign = match std.pool.get(other, old) { Error(WrongPool) => true, _ => false }
+    let node = result.unwrap(std.pool.remove(mut p, old))
+    let twice = match std.pool.remove(mut p, old) { Error(Removed) => true, _ => false }
+    let fresh = result.unwrap(std.pool.insert(mut p, take node))
+    let stale = !std.pool.contains(p, old) && result.unwrap(std.pool.get(p, fresh)).value == 7
+    std.pool.clear(mut p)
+    foreign && twice && stale && !std.pool.contains(p, fresh)
+}
+fn dimensions(n: u64) -> Result[(), u64] {
+    if n == 0 { Error(0) } else if n > 4294967295 { Error(1) } else { Ok(()) }
+}
+fn edges(nodes: List[Node]) -> Result[(), u64] {
+    for i in 0 .. list.len(nodes) {
+        let edge: u64 = int.widen(nodes[i].edge)
+        if edge >= list.len(nodes) { return Error(i) }
+    }
+    Ok(())
+}
+// expect: run malformed_graph_input() = true
+pub fn malformed_graph_input() -> bool {
+    let zero = match dimensions(graph_inputs.MALFORMED_NODES) { Error(0) => true, _ => false }
+    let width = match dimensions(graph_inputs.MALFORMED_WIDTH_NODES) { Error(1) => true, _ => false }
+    let mut nodes: List[Node] = list.new()
+    result.unwrap(list.push(mut nodes, Node(value: 0, edge: 1)))
+    result.unwrap(list.push(mut nodes, Node(value: 1, edge: int.narrow(graph_inputs.MALFORMED_EDGE))))
+    zero && width && match edges(nodes) { Error(1) => true, _ => false }
+}
+// expect: run small_law() = true
+pub fn graph_capacity_main(out: Stdout) -> Result[(), Exit] waits {
+    let mask = (if exclusive_refusal() { 1u64 } else { 0 }) +
+        (if churn_refusal_and_refund() { 2u64 } else { 0 }) +
+        (if rc_refusal_and_refund() { 4u64 } else { 0 }) +
+        (if arc_refusal_and_refund() { 8u64 } else { 0 })
+    show(out, Ok(mask))
+}
+pub fn graph_malformed_main(out: Stdout) -> Result[(), Exit] waits {
+    show(out, Ok(if malformed_graph_input() && stale_and_foreign_probes() { 7 } else { 0 }))
+}
+
+pub fn exclusive_capacity_main(out: Stdout) -> Result[(), Exit] waits { show(out, Ok(if exclusive_refusal() { 1 } else { 0 })) }
+
+pub fn churn_capacity_main(out: Stdout) -> Result[(), Exit] waits { show(out, Ok(if churn_refusal_and_refund() { 1 } else { 0 })) }
+
+pub fn rc_capacity_main(out: Stdout) -> Result[(), Exit] waits { show(out, Ok(if rc_refusal_and_refund() { 1 } else { 0 })) }
+
+pub fn arc_capacity_main(out: Stdout) -> Result[(), Exit] waits { show(out, Ok(if arc_refusal_and_refund() { 1 } else { 0 })) }
+
+// Every sub-budget of the three-node/three-snapshot case must refuse at the next
+// hand-derived admission. Prefixes: nodes0/32/64; holders96; copied nodes120/152;
+// first prefix is released, second version fits184; final copied nodes184/216.
+// expect: run snapshot_admission_prefixes() = true
+pub fn snapshot_admission_prefixes() -> bool {
+    for cap in 0u64 .. 248 {
+        let requested: u64 = if cap >= 96 && cap < 120 { 24 } else { 32 }
+        let base: u64 = if cap < 32 { 0 } else if cap < 64 { 32 }
+            else if cap < 96 { 64 } else if cap < 120 { 96 }
+            else if cap < 152 { 120 } else if cap < 184 { 152 }
+            else if cap < 216 { 184 } else { 216 }
+        let a = match (bound bytes cap { snapshots_rc(3, 3) }) {
+            Ok(Error(c)) => c.requested == requested && c.available == cap - base,
+            _ => false,
+        }
+        let b = match (bound bytes cap { snapshots_arc(3, 3) }) {
+            Ok(Error(c)) => c.requested == requested && c.available == cap - base,
+            _ => false,
+        }
+        if !a || !b { return false }
+    }
+    true
+}
+// expect: run churn_first_admission() = true
+pub fn churn_first_admission() -> bool {
+    match (bound bytes 111 { churn(4, 2) }) {
+        Ok(Error(c)) => c.requested == 112 && c.available == 111,
+        _ => false,
+    }
+}

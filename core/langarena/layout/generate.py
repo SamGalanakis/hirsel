@@ -29,6 +29,28 @@ def main():
     fixtures.mkdir(exist_ok=True)
     (fixtures / 'documents.json').write_text(json.dumps(items, separators=(',', ':')) + '\n')
     (fixtures / 'malformed.json').write_text('[1,]\n')
+    (fixtures / 'malformed-escape.json').write_text(chr(34) + chr(92) + 'x' + chr(34) + '\n')
+    (fixtures / 'malformed-utf8.bin').write_bytes(bytes([34, 240, 128, 128, 128, 34, 10]))
+    graph = {
+        'exclusive_nodes': 8192, 'exclusive_rounds': 32,
+        'churn_nodes': 4096, 'churn_rounds': 16,
+        'snapshot_nodes': 64, 'snapshot_versions': 256,
+        'malformed_nodes': 0, 'malformed_width_nodes': 4294967296, 'malformed_edge': 4,
+    }
+    (fixtures / 'graph.json').write_text(json.dumps({
+        'parameters': graph, 'shape': 'ring for mutable nodes; linear counted path',
+        'edge_bits': 32, 'generation_bits': 64, 'identity_bits': 64,
+        'stale_probes_per_remove': 1, 'copied_nodes_per_version': 33,
+        'retained_snapshots': 256, 'threads': 1, 'event_mode': 'default, no sink',
+        'hash_table': None, 'map_order': None,
+        'malformed': {'nodes': 0, 'too_many_nodes': 4294967296, 'bad_edge': 4},
+        'early_capacity': {'exclusive': 47, 'churn': 207, 'rc': 247, 'arc': 247},
+    }, indent=2) + '\n')
+    header = '// Generated alongside inputs/graph.json by generate.py. Do not edit.\n'
+    (root / 'graph_inputs.hirsel').write_text(header + ''.join(
+        f'pub const {k.upper()}: u64 = {v}\n' for k, v in graph.items()))
+    (root / 'graph_inputs.rs').write_text(header + ''.join(
+        f'pub const {k.upper()}: u64 = {v};\n' for k, v in graph.items()))
     phases = {
         'ordinary': checksum * 64,
         'sized': checksum * 64,
@@ -37,7 +59,19 @@ def main():
         'churn': sum(range(4096)) + 2 * 4096 * 16,
         'rc': 256 * sum(range(64)) + 33 * 256 * 257 // 2,
         'arc': 256 * sum(range(64)) + 33 * 256 * 257 // 2,
+        'exclusive_capacity': 1,
+        'churn_capacity': 1,
+        'rc_capacity': 1,
+        'arc_capacity': 1,
+        'ordinary_capacity': 1,
+        'sized_capacity': 1,
+        'streaming_capacity': 1,
         'charges': 63,
+        'graph_capacity': 15,
+        'graph_malformed': 7,
+        'document_capacity': 7,
+        'document_malformed': 3,
+        'json_utf8': 1,
         'lifetime': 45533440,
         'json_parse': 8192 * 32,
         'json_reject': 3,

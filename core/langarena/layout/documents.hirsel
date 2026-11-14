@@ -117,3 +117,93 @@ pub fn streaming_main(out: Stdout) -> Result[(), Exit] waits {
 pub fn small_law() -> bool {
     result.unwrap(ordinary(6)) == 33 && result.unwrap(compact_sized(6)) == 33
 }
+
+// expect: run ordinary_refusal() = true
+pub fn ordinary_refusal() -> bool {
+    // Six32-byte carriers +two rounded texts of8 +two24-byte score lists =256.
+    let exact = match (bound bytes 256 { ordinary(6) }) { Ok(Ok(33)) => true, _ => false }
+    let short = result.unwrap(bound bytes 255 {
+        let denied = match ordinary(6) { Error(c) => c.requested == 24 && c.available == 23, _ => false }
+        let xs: List[u64] = result.unwrap(list.with_capacity(31))
+        denied && list.len(xs) == 0
+    })
+    exact && short
+}
+// expect: run sized_refusal_prefix() = true
+pub fn sized_refusal_prefix() -> bool {
+    // The109-byte blob is rounded112; FixedSpan construction needs24 scratch.
+    let exact = match (bound bytes 136 { compact_sized(6) }) { Ok(Ok(33)) => true, _ => false }
+    let prefix = result.unwrap(bound bytes 135 {
+        let kept = region r {
+            let denied = match build_batch(r, 6, encoded_size(6)) { Error(Capacity(c)) => c.requested == 24 && c.available == 23, _ => false }
+            let probe: Result[List[u64], Capacity] = list.with_capacity(3)
+            denied && match take probe { Error(c) => c.requested == 24 && c.available == 23, _ => false }
+        }
+        // Closing the failed region refunds its admitted blob reservation.
+        let xs: List[u64] = result.unwrap(list.with_capacity(16))
+        kept && list.len(xs) == 0
+    })
+    exact && prefix
+}
+// expect: run streaming_refusal_prefix() = true
+pub fn streaming_refusal_prefix() -> bool {
+    // Maximum392 +scratch24. No staging/replayed producer is introduced.
+    let exact = match (bound bytes 416 { compact_streaming(6) }) { Ok(Ok(33)) => true, _ => false }
+    let prefix = result.unwrap(bound bytes 415 {
+        let kept = region r {
+            let denied = match build_batch(r, 6, 392) { Error(Capacity(c)) => c.requested == 24 && c.available == 23, _ => false }
+            let probe: Result[List[u64], Capacity] = list.with_capacity(3)
+            denied && match take probe { Error(c) => c.requested == 24 && c.available == 23, _ => false }
+        }
+        let xs: List[u64] = result.unwrap(list.with_capacity(51))
+        kept && list.len(xs) == 0
+    })
+    exact && prefix
+}
+// expect: run malformed_document_input() = true
+pub fn malformed_document_input() -> bool {
+    let comma = match std.json.size("[1,]") { Error(Syntax(3)) => true, _ => false }
+    let escape = match std.json.size("\"\\x\"") { Error(Syntax(2)) => true, _ => false }
+    comma && escape
+}
+// expect: run small_law() = true
+pub fn document_capacity_main(out: Stdout) -> Result[(), Exit] waits {
+    show(out, (if ordinary_refusal() { 1u64 } else { 0 }) +
+        (if sized_refusal_prefix() { 2u64 } else { 0 }) +
+        (if streaming_refusal_prefix() { 4u64 } else { 0 }))
+}
+pub fn document_malformed_main(out: Stdout) -> Result[(), Exit] waits {
+    show(out, if malformed_document_input() { 3 } else { 0 })
+}
+
+pub fn ordinary_capacity_main(out: Stdout) -> Result[(), Exit] waits { show(out, if ordinary_refusal() { 1 } else { 0 }) }
+
+pub fn sized_capacity_main(out: Stdout) -> Result[(), Exit] waits { show(out, if sized_refusal_prefix() { 1 } else { 0 }) }
+
+pub fn streaming_capacity_main(out: Stdout) -> Result[(), Exit] waits { show(out, if streaming_refusal_prefix() { 1 } else { 0 }) }
+
+// Six ordinary carriers charge192; text and score admissions are8,24,8,24.
+// All256 sub-budgets must refuse at that exact next admission.
+// expect: run ordinary_admission_prefixes() = true
+pub fn ordinary_admission_prefixes() -> bool {
+    for cap in 0u64 .. 256 {
+        let requested: u64 = if cap < 192 { 192 } else if cap < 200 { 8 }
+            else if cap < 224 { 24 } else if cap < 232 { 8 } else { 24 }
+        let base: u64 = if cap < 192 { 0 } else if cap < 200 { 192 }
+            else if cap < 224 { 200 } else if cap < 232 { 224 } else { 232 }
+        let denied = match (bound bytes cap { ordinary(6) }) {
+            Ok(Error(c)) => c.requested == requested && c.available == cap - base,
+            _ => false,
+        }
+        if !denied { return false }
+    }
+    let sized = match (bound bytes 111 { compact_sized(6) }) {
+        Ok(Error(Capacity(c))) => c.requested == 112 && c.available == 111,
+        _ => false,
+    }
+    let streaming = match (bound bytes 391 { compact_streaming(6) }) {
+        Ok(Error(Capacity(c))) => c.requested == 392 && c.available == 391,
+        _ => false,
+    }
+    sized && streaming
+}

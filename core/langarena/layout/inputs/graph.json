@@ -1,0 +1,35 @@
+{
+  "parameters": {
+    "exclusive_nodes": 8192,
+    "exclusive_rounds": 32,
+    "churn_nodes": 4096,
+    "churn_rounds": 16,
+    "snapshot_nodes": 64,
+    "snapshot_versions": 256,
+    "malformed_nodes": 0,
+    "malformed_width_nodes": 4294967296,
+    "malformed_edge": 4
+  },
+  "shape": "ring for mutable nodes; linear counted path",
+  "edge_bits": 32,
+  "generation_bits": 64,
+  "identity_bits": 64,
+  "stale_probes_per_remove": 1,
+  "copied_nodes_per_version": 33,
+  "retained_snapshots": 256,
+  "threads": 1,
+  "event_mode": "default, no sink",
+  "hash_table": null,
+  "map_order": null,
+  "malformed": {
+    "nodes": 0,
+    "too_many_nodes": 4294967296,
+    "bad_edge": 4
+  },
+  "early_capacity": {
+    "exclusive": 47,
+    "churn": 207,
+    "rc": 247,
+    "arc": 247
+  }
+}

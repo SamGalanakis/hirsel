@@ -52,3 +52,11 @@ pub fn json_capacity_main(out: Stdout, d: Dir) -> Result[(), Exit] waits {
     })
     show(out, refused)
 }
+
+// The byte input is rejected by UTF-8 admission before any JSON view is constructed.
+pub fn json_utf8_main(out: Stdout, d: Dir) -> Result[(), Exit] waits {
+    match std.file.read_string(d, "malformed-utf8.bin") {
+        Error(NotUtf8) => show(out, 1),
+        _ => Error(Exit(status: 1)),
+    }
+}

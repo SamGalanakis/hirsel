@@ -21,8 +21,8 @@ def toolchain_identity(compiler, runtime, compiler_profile):
     return runner.toolchain_identity(compiler, runtime, compiler_profile)
 
 
-PHASES = {'ordinary': 'documents', 'sized': 'documents', 'streaming': 'documents',
-          'exclusive': 'graph', 'churn': 'graph', 'rc': 'graph', 'arc': 'graph', 'json_parse': 'json', 'json_print': 'json', 'json_reject': 'json', 'json_capacity': 'json', 'charges': 'graph', 'lifetime': 'graph'}
+PHASES = {'exclusive_capacity': 'graph', 'churn_capacity': 'graph', 'rc_capacity': 'graph', 'arc_capacity': 'graph', 'ordinary_capacity': 'documents', 'sized_capacity': 'documents', 'streaming_capacity': 'documents', 'json_utf8': 'json', 'ordinary': 'documents', 'sized': 'documents', 'streaming': 'documents',
+          'document_capacity': 'documents', 'document_malformed': 'documents', 'graph_capacity': 'graph', 'graph_malformed': 'graph', 'exclusive': 'graph', 'churn': 'graph', 'rc': 'graph', 'arc': 'graph', 'json_parse': 'json', 'json_print': 'json', 'json_reject': 'json', 'json_capacity': 'json', 'charges': 'graph', 'lifetime': 'graph'}
 
 
 def manifest(module):
@@ -32,11 +32,12 @@ def manifest(module):
     def sources(where, signatures):
         return [{'file': str(p.resolve()), 'modules': [p.stem], 'signatures': signatures}
                 for p in sorted(where.glob('*.hirsel'))]
+    generated = ([{'file': str(Path(__file__).with_name('graph_inputs.hirsel')), 'modules': ['graph_inputs'], 'signatures': False}] if module == 'graph' else [])
     return {'core': core, 'packages': [
         {'package': core, 'sources': sources(ROOT / 'core/core', True), 'dependencies': []},
         {'package': std, 'sources': sources(ROOT / 'core/std', False), 'dependencies': [core]},
         {'package': app, 'sources': [{'file': str(Path(__file__).with_name(module + '.hirsel')),
-                                    'modules': [module], 'signatures': False}], 'dependencies': [core, std]}]}
+                                    'modules': [module], 'signatures': False}, *generated], 'dependencies': [core, std]}]}
 
 
 def main():

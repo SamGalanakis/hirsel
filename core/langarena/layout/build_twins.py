@@ -15,17 +15,18 @@ import tomllib
 ROOT = Path(__file__).resolve().parents[3]
 
 
-def build(command):
+def build(command, env=None):
     while os.getloadavg()[0] > 32:
         time.sleep(10)
     print(' '.join(map(str, command)), flush=True)
-    subprocess.run(command, check=True)
+    subprocess.run(command, check=True, env=env)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', type=Path, required=True)
-    parser.add_argument('--serde-core', type=Path, required=True)
+    parser.add_argument('--serde-core', type=Path, help='prebuilt core for the same optimization profile')
+    parser.add_argument('--serde-core-out-dir', type=Path, help='cached serde_core build-script output; build core with this profile')
     parser.add_argument('--profile', choices=['release', 'dev'], default='release')
     args = parser.parse_args()
     args.out.mkdir(parents=True, exist_ok=True)
@@ -44,6 +45,15 @@ def main():
         build([rustc, '--edition=2021', '--crate-name', name, '--crate-type=rlib', *flags,
                '--cfg', 'feature="std"', '--cfg', 'feature="alloc"', source, '-o', output])
         dependencies[name] = output.resolve()
+    if args.serde_core_out_dir:
+        source = next(registry.glob(f'*/serde_core-{versions["serde_core"]}/src/lib.rs'))
+        args.serde_core = args.out / 'libserde_core.rlib'
+        environment = dict(os.environ, OUT_DIR=str(args.serde_core_out_dir.resolve()))
+        build([rustc, '--edition=2021', '--crate-name', 'serde_core', '--crate-type=rlib', *flags,
+               '--cfg', 'feature="std"', '--cfg', 'feature="result"', '--cfg', 'feature="rc"',
+               source, '-o', args.serde_core], env=environment)
+    if args.serde_core is None:
+        parser.error('provide --serde-core or --serde-core-out-dir')
     dependencies['serde_core'] = args.serde_core.resolve()
     source = next(registry.glob(f'*/serde_json-{versions["serde_json"]}/src/lib.rs'))
     serde = args.out / 'libserde_json.rlib'

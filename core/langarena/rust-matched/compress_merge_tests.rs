@@ -23,14 +23,14 @@ fn compare(env: &Comparison, a: &Box<Item>, b: &Box<Item>) -> Ordering {
     assert_ne!(n, env.stop, "comparison failure");
     a.key.cmp(&b.key)
 }
-fn items(n: usize, drops: &Rc<Cell<usize>>) -> Vec<Box<Item>> {
+fn items(n: usize, drops: &Rc<Cell<usize>>) -> Vec<Option<Box<Item>>> {
     let mut result = Vec::with_capacity(n + 7);
     for id in 0..n {
-        result.push(Box::new(Item {
+        result.push(Some(Box::new(Item {
             key: (n - id) % 5,
             id,
             drops: drops.clone(),
-        }));
+        })));
     }
     result
 }
@@ -52,7 +52,7 @@ fn boxed_stable_reuses_original_buffer_and_capacity() {
         let mut xs = items(n, &drops);
         let old_ptr = xs.as_ptr();
         let old_cap = xs.capacity();
-        let mut expected: Vec<_> = xs.iter().map(|x| (x.key, x.id)).collect();
+        let mut expected: Vec<_> = xs.iter().map(|x| { let x = x.as_ref().unwrap(); (x.key, x.id) }).collect();
         expected.sort_by_key(|x| x.0);
         compress_merge::boxes(
             &mut xs,
@@ -65,7 +65,7 @@ fn boxed_stable_reuses_original_buffer_and_capacity() {
         assert_eq!(xs.as_ptr(), old_ptr);
         assert_eq!(xs.capacity(), old_cap);
         assert_eq!(
-            xs.iter().map(|x| (x.key, x.id)).collect::<Vec<_>>(),
+            xs.iter().map(|x| { let x = x.as_ref().unwrap(); (x.key, x.id) }).collect::<Vec<_>>(),
             expected
         );
         assert_eq!(drops.get(), 0);
@@ -100,7 +100,7 @@ fn every_comparison_failure_restores_owned_permutation() {
         assert_eq!(xs.as_ptr(), old_ptr);
         assert_eq!(xs.capacity(), old_cap);
         assert_eq!(drops.get(), 0, "failure {stop}");
-        let mut ids: Vec<_> = xs.iter().map(|x| x.id).collect();
+        let mut ids: Vec<_> = xs.iter().map(|x| x.as_ref().unwrap().id).collect();
         ids.sort();
         assert_eq!(ids, (0..17).collect::<Vec<_>>(), "failure {stop}");
         drop(xs);

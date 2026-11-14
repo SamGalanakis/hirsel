@@ -1,6 +1,6 @@
 // Mirrors core/core/list.hirsel sort_stable and Hole: one scratch block,
+// Reviewed-by: langs-numeric-920 2026-11-14; BWT2 and persistent-slot Huff2 match core7e93579e merge decisions, carriers, Ordering and restoration; no adapter scan.
 // alternating bottom-up passes, right only on Less, and the same cleanup ranges.
-// Reviewed-by: langs-numeric-920 2026-11-14 at620b106a; BWT index merge/carrier approved. Huff boxed adapter withheld: its final unwrap scan has no core equivalent.
 // usize slots are plain copies. Box slots use Option's pointer niche for holes;
 // ManuallyDrop prevents a second element-drop walk over the emptied scratch.
 use std::cmp::Ordering;
@@ -188,32 +188,12 @@ pub fn indices(xs: &mut Vec<usize>, pairs: &Vec<(usize, usize)>) {
         },
     );
 }
-// These safe in-place collect adapters reuse the Box allocation's pointer-sized
-// element buffer. The laws check its pointer/capacity, including panic cleanup.
-struct BoxInput<'a, T> {
-    original: &'a mut Vec<Box<T>>,
-    slots: Vec<Option<Box<T>>>,
-}
-impl<T> Drop for BoxInput<'_, T> {
-    fn drop(&mut self) {
-        *self.original = std::mem::take(&mut self.slots)
-            .into_iter()
-            .map(Option::unwrap)
-            .collect();
-    }
-}
+// Persistent pointer-sized optional slots model core's temporary Box holes.
+// Hole restores every slot; no full-buffer conversion or validation follows it.
 pub fn boxes<T, E>(
-    xs: &mut Vec<Box<T>>,
+    xs: &mut Vec<Option<Box<T>>>,
     environment: &E,
     call: fn(&E, &Box<T>, &Box<T>) -> Ordering,
 ) {
-    if xs.len() < 2 {
-        return;
-    }
-    let slots = std::mem::take(xs).into_iter().map(Some).collect();
-    let mut input = BoxInput {
-        original: xs,
-        slots,
-    };
-    sort_stable(&mut input.slots, BoxCompare { call, environment });
+    sort_stable(xs, BoxCompare { call, environment });
 }

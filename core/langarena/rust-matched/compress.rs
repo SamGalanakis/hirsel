@@ -5,8 +5,9 @@
 // Additional review langs-numeric-920: HuffEncode/HuffDecode/LZWDecode use matching boxed trees, first-equal insertion, i32 bit/frequency vectors, deep byte copies and owned dictionaries.
 // kostya/LangArena3c9f84d benchmarks/compress.rs. Same prefix-doubling BWT,
 // stable rank sort, arithmetic bitstreams/tables, and owned LZW dictionary bytes.
-// Delta review langs-numeric-920 2026-11-14 at620b106a: BWTEncode/BWTDecode approved against core7e93579e move-merge and comparator carrier.
-// HuffEncode/HuffDecode delta not approved: BoxInput::drop adds a full Option::unwrap scan absent from core's successful sort handoff; optimized IR retains it. See followups.md.
+// BWT2 move-merge/comparator delta approved by langs-numeric-920 2026-11-14 at 620b106a against core7e93579e.
+// HuffEncode/HuffDecode persistent-slot delta approved by langs-numeric-920 2026-11-14: one scratch move-merge, matching carriers/Ordering/Hole restoration; no conversion traversal. Supersedes the620b106a adapter objection.
+// Supersedes the rejected BoxInput adapter, whose outbound unwrap scan did extra work.
 mod text_support;
 use std::collections::HashMap;
 mod compress_merge;
@@ -505,17 +506,17 @@ fn compare_huffman(_: &(), a: &Box<HuffmanNode>, b: &Box<HuffmanNode>) -> std::c
 }
 
 fn build_huffman_tree(frequencies: &[i32]) -> Option<Box<HuffmanNode>> {
-    let mut nodes: Vec<Box<HuffmanNode>> = frequencies
+    let mut nodes: Vec<Option<Box<HuffmanNode>>> = frequencies
         .iter()
         .enumerate()
         .filter(|&(_, &freq)| freq > 0)
-        .map(|(i, &freq)| Box::new(HuffmanNode::new(freq, u8::try_from(i).unwrap(), true)))
+        .map(|(i, &freq)| Some(Box::new(HuffmanNode::new(freq, u8::try_from(i).unwrap(), true))))
         .collect();
 
     compress_merge::boxes(&mut nodes, &(), compare_huffman);
 
     if nodes.len() == 1 {
-        let node = nodes.remove(0);
+        let node = nodes.remove(0).unwrap();
         let mut root = Box::new(HuffmanNode::new(node.frequency, 0, false));
         root.left = Some(node);
         root.right = Some(Box::new(HuffmanNode::new(0, 0, true)));
@@ -523,8 +524,8 @@ fn build_huffman_tree(frequencies: &[i32]) -> Option<Box<HuffmanNode>> {
     }
 
     while nodes.len() > 1 {
-        let left = nodes.remove(0);
-        let right = nodes.remove(0);
+        let left = nodes.remove(0).unwrap();
+        let right = nodes.remove(0).unwrap();
 
         let mut parent = Box::new(HuffmanNode::new(left.frequency + right.frequency, 0, false));
         parent.left = Some(left);
@@ -535,7 +536,7 @@ fn build_huffman_tree(frequencies: &[i32]) -> Option<Box<HuffmanNode>> {
         let mut found = false;
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            match nodes[mid].frequency.cmp(&parent.frequency) {
+            match nodes[mid].as_ref().unwrap().frequency.cmp(&parent.frequency) {
                 std::cmp::Ordering::Less => lo = mid + 1,
                 std::cmp::Ordering::Equal => {
                     found = true;
@@ -546,10 +547,10 @@ fn build_huffman_tree(frequencies: &[i32]) -> Option<Box<HuffmanNode>> {
         }
         let _ = found;
         let pos = lo;
-        nodes.insert(pos, parent);
+        nodes.insert(pos, Some(parent));
     }
 
-    nodes.pop()
+    nodes.pop().flatten()
 }
 
 fn build_huffman_codes(

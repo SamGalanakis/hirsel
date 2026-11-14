@@ -5,68 +5,10 @@
 // Additional review langs-numeric-920: HuffEncode/HuffDecode/LZWDecode use matching boxed trees, first-equal insertion, i32 bit/frequency vectors, deep byte copies and owned dictionaries.
 // kostya/LangArena3c9f84d benchmarks/compress.rs. Same prefix-doubling BWT,
 // stable rank sort, arithmetic bitstreams/tables, and owned LZW dictionary bytes.
+// BWT2/Huff2 move-merge/comparator delta pending langs-numeric-920 review.
 mod text_support;
 use std::collections::HashMap;
-// core/std/list.hirsel sort_stable: indirect bottom-up merge, two index vectors.
-fn sort_stable<T>(xs: &mut [T], mut before: impl FnMut(&T, &T) -> std::cmp::Ordering) {
-    let n = xs.len();
-    if n < 2 {
-        return;
-    }
-    let mut indices = Vec::with_capacity(n);
-    let mut scratch = Vec::with_capacity(n);
-    for i in 0..n {
-        indices.push(i);
-        scratch.push(0usize);
-    }
-    let mut width = 1usize;
-    while width < n {
-        let mut lo = 0;
-        while lo < n {
-            let mid = lo + width.min(n - lo);
-            let end = mid + width.min(n - mid);
-            let mut a = lo;
-            let mut b = mid;
-            let mut out = lo;
-            while out < end {
-                let right = if b == end {
-                    false
-                } else if a == mid {
-                    true
-                } else {
-                    before(&xs[indices[b]], &xs[indices[a]]) == std::cmp::Ordering::Less
-                };
-                let selected = if right {
-                    let k = indices[b];
-                    b += 1;
-                    k
-                } else {
-                    let k = indices[a];
-                    a += 1;
-                    k
-                };
-                scratch[out] = selected;
-                out += 1;
-            }
-            lo = end;
-        }
-        std::mem::swap(&mut indices, &mut scratch);
-        if width > n / 2 {
-            break;
-        }
-        width *= 2;
-    }
-    for i in 0..n {
-        scratch[indices[i]] = i;
-    }
-    for i in 0..n {
-        while scratch[i] != i {
-            let to = scratch[i];
-            xs.swap(i, to);
-            scratch.swap(i, to);
-        }
-    }
-}
+mod compress_merge;
 struct BWTResult {
     transformed: Vec<u8>,
     original_idx: i32,
@@ -229,15 +171,7 @@ fn bwt_transform(input: &[u8]) -> BWTResult {
                 pairs.push((rank[i], rank[(i + k) % n]));
             }
 
-            sort_stable(&mut sa, |&a, &b| {
-                let pa = pairs[a];
-                let pb = pairs[b];
-                if pa.0 != pb.0 {
-                    pa.0.cmp(&pb.0)
-                } else {
-                    pa.1.cmp(&pb.1)
-                }
-            });
+            compress_merge::indices(&mut sa, &pairs);
 
             let mut new_rank = vec![0usize; n];
             new_rank[sa[0]] = 0;
@@ -565,6 +499,10 @@ impl EncodedResult {
     }
 }
 
+fn compare_huffman(_: &(), a: &Box<HuffmanNode>, b: &Box<HuffmanNode>) -> std::cmp::Ordering {
+    a.frequency.cmp(&b.frequency)
+}
+
 fn build_huffman_tree(frequencies: &[i32]) -> Option<Box<HuffmanNode>> {
     let mut nodes: Vec<Box<HuffmanNode>> = frequencies
         .iter()
@@ -573,7 +511,7 @@ fn build_huffman_tree(frequencies: &[i32]) -> Option<Box<HuffmanNode>> {
         .map(|(i, &freq)| Box::new(HuffmanNode::new(freq, u8::try_from(i).unwrap(), true)))
         .collect();
 
-    sort_stable(&mut nodes, |a, b| a.frequency.cmp(&b.frequency));
+    compress_merge::boxes(&mut nodes, &(), compare_huffman);
 
     if nodes.len() == 1 {
         let node = nodes.remove(0);

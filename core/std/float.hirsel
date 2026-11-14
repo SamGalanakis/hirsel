@@ -29,7 +29,6 @@
 /// Cost: O(len); step 3 is O(digits x shifts), at most about 768 x 30 digit steps.
 /// Ex: `let x = float.parse64(token)?`
 pub fn parse64(s: String) -> Result[f64, ParseError] {
-    let fmt = format64()
     let n = scan(s)?
     if !n.many && n.exponent >= -22 && n.exponent <= 22 && n.mantissa <= 9007199254740992 {
         let mut v: f64 = float.from_int(n.mantissa)
@@ -46,6 +45,7 @@ pub fn parse64(s: String) -> Result[f64, ParseError] {
             v
         })
     }
+    let fmt = format64()
     let (m, e) = decide(fmt, s, n)
     if e == fmt.inf {
         return Error(OutOfRange)
@@ -61,7 +61,6 @@ pub fn parse64(s: String) -> Result[f64, ParseError] {
 
 /// As parse64, rounded once to f32. Ex: `let y = float.parse32(token)?`
 pub fn parse32(s: String) -> Result[f32, ParseError] {
-    let fmt = format32()
     let n = scan(s)?
     if !n.many && n.exponent >= -10 && n.exponent <= 10 && n.mantissa <= 16777216 {
         let mut v: f32 = float.from_int(n.mantissa)
@@ -78,6 +77,7 @@ pub fn parse32(s: String) -> Result[f32, ParseError] {
             v
         })
     }
+    let fmt = format32()
     let (m, e) = decide(fmt, s, n)
     if e == fmt.inf {
         return Error(OutOfRange)
@@ -121,7 +121,7 @@ fn format32() -> Format {
 
 /// The number as scanned: its first 19 significant digits and a decimal exponent, so the
 /// value lies in [mantissa, mantissa + 1) x 10^exponent, exactly mantissa x 10^exponent
-/// unless `many`. `at` is the first byte after the sign.
+/// unless `many` (more than 19 significant digits). `at` is the first byte after the sign.
 type Scanned {
     negative: bool,
     mantissa: u64,
@@ -132,6 +132,9 @@ type Scanned {
 
 /// Scans s against the grammar: '-'?, '0' or a non-zero digit and digits, then optionally
 /// '.' and digits, then optionally 'e' or 'E', a sign and digits, and nothing after.
+/// As Rust's parse_number: every digit goes into a wrapping u64, eight at a time where
+/// eight are there, and the exponent is the fraction's length; only a number of more than
+/// 19 significant digits, whose wrapped mantissa is wrong, is scanned again (`long`).
 fn scan(s: String) -> Result[Scanned, ParseError] {
     let b = string.as_bytes(s)
     let n = list.len(b)
@@ -148,26 +151,30 @@ fn scan(s: String) -> Result[Scanned, ParseError] {
     if i >= n || !is_digit(b[i]) {
         return Error(Invalid(i))
     }
-    let mut sig = Scanned(negative: negative, mantissa: 0, exponent: 0, many: false, at: at)
-    let mut taken: u64 = 0
+    let mut mantissa: u64 = 0
     if b[i] == b'0' {
         i += 1
     } else {
-        while i < n && is_digit(b[i]) {
-            taken = significant(mut sig, taken, b[i] - b'0', false)
-            i += 1
-        }
+        let (end, x) = accumulate(b, i, 0)
+        i = end
+        mantissa = x
     }
+    let mut count = i - at
+    let mut exponent: i64 = 0
     if i < n && b[i] == b'.' {
         i += 1
-        if i >= n || !is_digit(b[i]) {
+        let first = i
+        let (end, x) = accumulate(b, i, mantissa)
+        i = end
+        mantissa = x
+        if i == first {
             return Error(Invalid(i))
         }
-        while i < n && is_digit(b[i]) {
-            taken = significant(mut sig, taken, b[i] - b'0', true)
-            i += 1
-        }
+        count += i - first
+        let places: i64 = int.narrow(i - first)
+        exponent = -places
     }
+    let mut written: i64 = 0
     if i < n && (b[i] == b'e' || b[i] == b'E') {
         i += 1
         let minus = i < n && b[i] == b'-'
@@ -177,7 +184,6 @@ fn scan(s: String) -> Result[Scanned, ParseError] {
         if i >= n || !is_digit(b[i]) {
             return Error(Invalid(i))
         }
-        let mut written: i64 = 0
         while i < n && is_digit(b[i]) {
             if written < 65536 {
                 let x: i64 = int.widen(b[i] - b'0')
@@ -185,43 +191,98 @@ fn scan(s: String) -> Result[Scanned, ParseError] {
             }
             i += 1
         }
-        sig.exponent += if minus {
-            -written
-        } else {
-            written
+        if minus {
+            written = -written
         }
     }
     if i < n {
         return Error(Invalid(i))
     }
-    Ok(sig)
+    if count > 19 {
+        // Leading zeros (and the point among them) are not significant.
+        let mut j = at
+        while j < n && (b[j] == b'0' || b[j] == b'.') {
+            if b[j] == b'0' {
+                count -= 1
+            }
+            j += 1
+        }
+        if count > 19 {
+            return Ok(long(b, negative, at, written))
+        }
+    }
+    Ok(Scanned(negative: negative, mantissa: mantissa, exponent: exponent + written, many: false, at: at))
 }
 
-/// Adds digit x of the integer part or (`fraction`) of the fraction to sig, given `taken`
-/// significant digits so far; returns the new count. Leading zeros are not significant;
-/// past 19 digits a digit only moves the exponent, and one that is not zero sets `many`.
-fn significant(mut sig: Scanned, taken: u64, x: u8, fraction: bool) -> u64 {
-    if sig.mantissa == 0 && x == 0 {
-        if fraction {
-            sig.exponent -= 1
+/// The digits of b from i accumulated onto x, wrapping (the caller rescans past 19
+/// significant digits), and the index of the first byte that is not a digit.
+fn accumulate(b: Bytes, i: u64, from: u64) -> (u64, u64) {
+    let n = list.len(b)
+    let mut x = from
+    let mut k = i
+    while k + 8 <= n {
+        let w = list.word_le(b, k)
+        if (int.wrapping_add(w, 0x4646464646464646) | int.wrapping_sub(w, 0x3030303030303030)) & 0x8080808080808080 != 0 {
+            break
         }
-        return taken
+        x = int.wrapping_add(int.wrapping_mul(x, 100000000), eight(w))
+        k += 8
     }
-    if taken < 19 {
-        let wide: u64 = int.widen(x)
-        sig.mantissa = sig.mantissa * 10 + wide
-        if fraction {
-            sig.exponent -= 1
+    while k < n {
+        let d = int.wrapping_sub(b[k], b'0')
+        if d >= 10 {
+            break
         }
-        return taken + 1
+        let wide: u64 = int.widen(d)
+        x = int.wrapping_add(int.wrapping_mul(x, 10), wide)
+        k += 1
     }
-    if x != 0 {
-        sig.many = true
+    (k, x)
+}
+
+/// The value of eight ASCII digits read little-endian, the first digit most significant
+/// (Rust's parse_8digits): pairs, then fours, then the eight, by multiply-and-shift.
+fn eight(w: u64) -> u64 {
+    let v = w - 0x3030303030303030
+    let pairs = int.wrapping_mul(v, 10) + (v >> 8)
+    let low = int.wrapping_mul(pairs & 0x000000FF000000FF, 0x000F424000000064)
+    let high = int.wrapping_mul((pairs >> 16) & 0x000000FF000000FF, 0x0000271000000001)
+    (int.wrapping_add(low, high) >> 32) & 0xFFFFFFFF
+}
+
+/// A number of more than 19 significant digits, already checked against the grammar,
+/// scanned again as Rust's: its first 19 significant digits (leading zeros leave the
+/// mantissa 0), the exponent they leave, and `many`; `written` is the explicit exponent.
+fn long(b: Bytes, negative: bool, at: u64, written: i64) -> Scanned {
+    let n = list.len(b)
+    let mut x: u64 = 0
+    let mut i = at
+    while i < n && is_digit(b[i]) && x < 1000000000000000000 {
+        let wide: u64 = int.widen(b[i] - b'0')
+        x = x * 10 + wide
+        i += 1
     }
-    if !fraction {
-        sig.exponent += 1
+    let mut exponent: i64 = 0
+    if x >= 1000000000000000000 {
+        // 19 digits in the integer part: the rest of it only scales.
+        let mut j = i
+        while j < n && is_digit(b[j]) {
+            j += 1
+        }
+        exponent = int.narrow(j - i)
+    } else {
+        // Fewer: the rest are in the fraction, after the point at i.
+        i += 1
+        let first = i
+        while i < n && is_digit(b[i]) && x < 1000000000000000000 {
+            let wide: u64 = int.widen(b[i] - b'0')
+            x = x * 10 + wide
+            i += 1
+        }
+        let places: i64 = int.narrow(i - first)
+        exponent = -places
     }
-    taken
+    Scanned(negative: negative, mantissa: x, exponent: exponent + written, many: true, at: at)
 }
 
 fn is_digit(x: u8) -> bool {
@@ -332,13 +393,7 @@ fn product(q: i64, w: u64, precision: u64) -> (u64, u64) {
 
 /// The leading zero bits of x, which is not 0.
 fn leading_zeros(x: u64) -> u64 {
-    let mut y = x
-    let mut k: u64 = 0
-    while y < 0x8000000000000000 {
-        y = y << 1
-        k += 1
-    }
-    k
+    int.widen(int.leading_zeros(x))
 }
 
 // The slow path: the digits as a big decimal, shifted by powers of two until it is in

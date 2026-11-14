@@ -664,7 +664,7 @@ impl Driver {
                 let item = modules[fd.at.module as usize]
                     .syntax
                     .item(fd.at.item as usize);
-                let key = keys.for_body(
+                let mut key = keys.for_body(
                     &index,
                     &fd.path,
                     modules[fd.at.module as usize].id,
@@ -672,6 +672,16 @@ impl Driver {
                     item,
                     &resolution,
                 )?;
+                // Entry policy is a read of the selected body only. Keep it
+                // out of the shared environment key so another program does
+                // not recheck the library closure, while separating the
+                // entry body when its waits rule changes.
+                if request.entry.as_ref() == Some(&fd.path) {
+                    key.environment = ContentHash::of_parts(
+                        "hirsel.entry-policy.v1",
+                        [&encode(&request.entry)?[..], &key.environment.0],
+                    );
+                }
                 let resident = self
                     .published
                     .as_ref()

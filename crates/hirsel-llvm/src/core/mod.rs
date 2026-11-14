@@ -527,24 +527,22 @@ impl FunctionEmitter<'_> {
         self.intrinsics.insert(format!(
             "declare void @hirsel_core_raise(ptr, ptr byval({shape}) align 8)"
         ));
-        let cause = self.temp(&shape);
-        self.line(format!(
-            "store {shape} zeroinitializer, ptr {cause}, align 8"
-        ));
-        // The kind is the message's niche word (FORM #75).
-        let at = self.fresh();
-        self.line(format!(
-            "{at} = getelementptr i8, ptr {cause}, i64 {}",
-            memory_layout::CAUSE_KIND
-        ));
-        self.line(format!(
-            "store i64 {}, ptr {at}, align 8",
-            memory_layout::cause_kind_word(kind) as i64
+        // Built-in causes have fixed bytes. The native by-value parameter
+        // copies them into the callee's storage; no shared message is moved.
+        // Keep construction out of the caller's frame and inlining cost.
+        let name = format!("hirsel_cause_{kind}");
+        let prefix = memory_layout::CAUSE_KIND;
+        let tail = memory_layout::CAUSE_BYTES - prefix - 8;
+        let layout = format!("<{{ [{prefix} x i8], i64, [{tail} x i8] }}>");
+        let word = memory_layout::cause_kind_word(kind) as i64;
+        self.intrinsics.insert(format!(
+            "@{name} = private constant {layout} <{{ [{prefix} x i8] zeroinitializer, i64 {word}, [{tail} x i8] zeroinitializer }}>, align 8"
         ));
         self.line(format!(
-            "call void @hirsel_core_raise(ptr %context, ptr byval({shape}) align 8 {cause})"
+            "call void @hirsel_core_raise(ptr %context, ptr byval({shape}) align 8 @{name})"
         ));
     }
+
     fn inst(&mut self, inst: &Inst, index: usize) -> Result<()> {
         match *inst {
             Inst::Const { result, bits } => {

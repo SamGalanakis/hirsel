@@ -183,15 +183,21 @@ pub(crate) fn recapture_link_recipe(cc: &Path, target: &str) -> io::Result<LinkR
     capture_link_recipe(cc, target, true)
 }
 
-/// One cached identity for every toolchain input. Stat signatures avoid
+/// What native products are keyed by, besides the Hirsel compiler itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Toolchain {
+    /// Every link input: C driver, libLLVM, linker, CRT and libc files, runtime archive.
+    pub(crate) image: ContentHash,
+    /// The runtime archive alone: objects are emitted in process against its
+    /// ABI, so a different C driver or linker relinks them but compiles none.
+    pub(crate) runtime: ContentHash,
+}
+
+/// One cached record of every toolchain input. Stat signatures avoid
 /// re-reading unchanged runtime, linker and CRT bytes on every request. The
 /// recipe belongs to the C driver and target alone; the runtime archive is
 /// this request's own input, so one recipe serves every runtime.
-pub(crate) fn toolchain_identity(
-    cc: &Path,
-    target: &str,
-    runtime: &Path,
-) -> io::Result<ContentHash> {
+pub(crate) fn toolchain(cc: &Path, target: &str, runtime: &Path) -> io::Result<Toolchain> {
     let recipe = link_recipe(cc, target)?;
     let root = recipe_directory(cc)?;
     let key = driver_file_key(cc)?;
@@ -224,6 +230,15 @@ pub(crate) fn toolchain_identity(
         "hirsel.toolchain-image.v2",
         [crate::encode(&(TOOLCHAIN_SCHEMA, target, image(&files)))?.as_slice()],
     );
+    let archive = files
+        .iter()
+        .find(|file| file.path == runtime)
+        .expect("the runtime archive is a recorded toolchain input")
+        .content;
+    let toolchain = Toolchain {
+        image: identity,
+        runtime: ContentHash::of_parts("hirsel.core-runtime.v2", [archive.0.as_slice()]),
+    };
     // A moved stat over equal bytes is a change to the record: rewrite it so
     // the next request reads nothing. An unchanged record is not rewritten.
     if old.is_none_or(|old| old.files != files) {
@@ -235,7 +250,7 @@ pub(crate) fn toolchain_identity(
         };
         publish(&root, &path, &manifest)?;
     }
-    Ok(identity)
+    Ok(toolchain)
 }
 
 fn find_llvm_library(cc: &Path) -> Option<PathBuf> {
@@ -270,6 +285,20 @@ fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkR
                 return Ok(recipe);
             }
             RecipeInputs::Changed => {}
+        }
+    }
+    // A driver that names a link editor which does not exist must not be
+    // captured: clang would silently fall back to some other ld.lld.
+    let selection = Command::new(&driver)
+        .arg("-print-prog-name=ld.lld")
+        .output()?;
+    if selection.status.success() {
+        let selected = PathBuf::from(String::from_utf8_lossy(&selection.stdout).trim());
+        if selected.is_absolute() && !selected.is_file() {
+            return Err(io::Error::other(format!(
+                "missing link editor input: {}",
+                selected.display()
+            )));
         }
     }
     let capture_dir = tempfile::tempdir_in(&directory)?;
@@ -732,7 +761,7 @@ mod tests {
         read_only(0o555).unwrap();
         let target = "x86_64-unknown-linux-gnu";
         let key = driver_file_key(&cc).unwrap();
-        let identity = toolchain_identity(&cc, target, &runtime);
+        let identity = toolchain(&cc, target, &runtime);
         let recipe = link_recipe(&cc, target);
         read_only(0o755).unwrap();
         let cache = PackageProduct::default_cache().join("link-recipes");
@@ -772,13 +801,13 @@ mod tests {
         let runtime = work.path().join("runtime.a");
         std::fs::write(&runtime, b"runtime").unwrap();
         let target = "x86_64-unknown-linux-gnu";
-        let identity = toolchain_identity(&cc, target, &runtime).unwrap();
+        let identity = toolchain(&cc, target, &runtime).unwrap();
         for file in [&linker, &crt, &runtime] {
             let copy = file.with_extension("rematerialised");
             std::fs::copy(file, &copy).unwrap();
             std::fs::rename(&copy, file).unwrap();
         }
-        assert_eq!(toolchain_identity(&cc, target, &runtime).unwrap(), identity);
+        assert_eq!(toolchain(&cc, target, &runtime).unwrap(), identity);
         let directory = recipe_directory(&cc).unwrap();
         let key = driver_file_key(&cc).unwrap();
         let recipe: LinkRecipe = serde_json::from_slice(
@@ -797,7 +826,7 @@ mod tests {
             );
         }
         let written = std::fs::metadata(&manifest_path).unwrap().ino();
-        assert_eq!(toolchain_identity(&cc, target, &runtime).unwrap(), identity);
+        assert_eq!(toolchain(&cc, target, &runtime).unwrap(), identity);
         assert_eq!(
             std::fs::metadata(&manifest_path).unwrap().ino(),
             written,
@@ -831,22 +860,19 @@ mod tests {
         let (first, second) = (work.path().join("first.a"), work.path().join("second.a"));
         std::fs::write(&first, b"first runtime").unwrap();
         std::fs::write(&second, b"second runtime").unwrap();
-        let first_identity = toolchain_identity(&cc, target, &first).unwrap();
-        let second_identity = toolchain_identity(&cc, target, &second).unwrap();
+        let first_identity = toolchain(&cc, target, &first).unwrap();
+        let second_identity = toolchain(&cc, target, &second).unwrap();
         assert_ne!(
             first_identity, second_identity,
             "different runtime bytes link differently"
         );
         std::fs::write(&second, b"second runtime, rebuilt").unwrap();
         assert_ne!(
-            toolchain_identity(&cc, target, &second).unwrap(),
+            toolchain(&cc, target, &second).unwrap(),
             second_identity,
             "a rebuilt runtime archive must miss every object keyed by the old one"
         );
-        assert_eq!(
-            toolchain_identity(&cc, target, &first).unwrap(),
-            first_identity
-        );
+        assert_eq!(toolchain(&cc, target, &first).unwrap(), first_identity);
     }
 
     #[test]

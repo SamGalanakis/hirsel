@@ -198,14 +198,14 @@ impl CheckProduct {
         options: &NativeOptions,
     ) -> Result<Vec<ObjectProduct>, NativeStop> {
         let reached = self.reachable(entry, options.instance_limit)?;
-        let runtime =
-            crate::tool_inputs::toolchain_identity(&options.cc, &options.target, &options.runtime)?;
+        let toolchain =
+            crate::tool_inputs::toolchain(&options.cc, &options.target, &options.runtime)?;
         self.emit_instances(
             entry,
             reached.require()?,
             &reached.materialized,
             options,
-            runtime,
+            toolchain,
         )
     }
     fn emit_instances(
@@ -214,7 +214,7 @@ impl CheckProduct {
         reached: &[InstanceKey],
         materialized: &crate::instances::InstanceSet,
         options: &NativeOptions,
-        runtime: ContentHash,
+        toolchain: crate::tool_inputs::Toolchain,
     ) -> Result<Vec<ObjectProduct>, NativeStop> {
         if !options.backend.supports_target(&options.target) {
             return Err(NativeStop::Entry(format!(
@@ -236,7 +236,7 @@ impl CheckProduct {
                 reached,
                 materialized,
                 options,
-                runtime,
+                toolchain.runtime,
                 &store,
                 library_store.as_ref(),
             );
@@ -256,7 +256,8 @@ impl CheckProduct {
                 "hirsel.core-object.v2",
                 &(
                     crate::native_object::SCHEMA,
-                    runtime,
+                    compiler_identity()?,
+                    toolchain.runtime,
                     &options.target,
                     options.backend,
                     options.optimize,
@@ -264,7 +265,6 @@ impl CheckProduct {
                     options.logical_charge_report.is_some(),
                     matches!(options.backend, Backend::Llvm)
                         && !hirsel_llvm_lazy::core::facts_enabled(),
-                    runtime,
                     &instance,
                     &body.key,
                     &*ir,
@@ -329,17 +329,18 @@ impl CheckProduct {
             .collect::<Vec<_>>();
         let sources = self.native_sources(&items)?;
         let entry_plan = self.process_entry(entry, options, &sources)?;
-        let runtime =
-            crate::tool_inputs::toolchain_identity(&options.cc, &options.target, &options.runtime)?;
+        let toolchain =
+            crate::tool_inputs::toolchain(&options.cc, &options.target, &options.runtime)?;
         let mut objects =
-            self.emit_instances(entry, instances, &reached.materialized, options, runtime)?;
+            self.emit_instances(entry, instances, &reached.materialized, options, toolchain)?;
         if let Some(module) = &self.entry_binding(entry)?.cleanup {
             let store = Store::new(&options.store)?;
             let object_key = key(
                 "hirsel.core-entry-cleanup.v2",
                 &(
                     crate::native_object::SCHEMA,
-                    runtime,
+                    compiler_identity()?,
+                    toolchain.runtime,
                     &options.target,
                     options.backend,
                     options.optimize,
@@ -376,7 +377,7 @@ impl CheckProduct {
                 compiled,
             });
         }
-        link(&entry_plan, &objects, options, &sources, runtime)
+        link(&entry_plan, &objects, options, &sources, toolchain.image)
     }
     fn entry_binding(&self, entry: &DefPath) -> Result<&EntryAbi, NativeStop> {
         let binding = self
@@ -566,7 +567,7 @@ fn link(
     objects: &[ObjectProduct],
     options: &NativeOptions,
     sources: &hirsel_core_ir::source::SourceMap,
-    runtime_identity: ContentHash,
+    toolchain: ContentHash,
 ) -> Result<BuildProduct, NativeStop> {
     let headers = [
         "hirsel_core_rt.h",
@@ -591,7 +592,8 @@ fn link(
     let link_key = key(
         "hirsel.core-executable.v2",
         &(
-            runtime_identity,
+            compiler_identity()?,
+            toolchain,
             recipe.identity,
             DIRECT_LINK_SUPPORT_LIBS,
             entry_plan,
@@ -606,7 +608,7 @@ fn link(
                 headers
                     .iter()
                     .map(Vec::as_slice)
-                    .chain([runtime_identity.0.as_slice()]),
+                    .chain([toolchain.0.as_slice()]),
             ),
         ),
     )?;

@@ -55,6 +55,16 @@ fn failure_sites_rebind(backend: Backend, optimize: bool, debug_lines: bool) {
     assert!(!built.linked);
     run(&built, 2);
 
+    // A rebuilt Hirsel compiler (DESIGN v4.1 3a's cross-toolchain case) owns no
+    // object or executable an earlier build published.
+    crate::reuse::TOOLCHAIN.set(Some(ContentHash::of_bytes(b"another compiler build")));
+    let rebuilt = warm.build(&entry, &options);
+    crate::reuse::TOOLCHAIN.set(None);
+    let rebuilt = rebuilt.unwrap();
+    assert_eq!(rebuilt.compiled, cold.compiled, "another compiler must recompile every object");
+    assert!(rebuilt.linked, "another compiler must relink");
+    run(&rebuilt, 2);
+
     // Three lines owned by a new definition, with existing item text unchanged.
     let moved = format!("fn added() -> u64 {{\n    0\n}}\n{source}");
     let product = check(&moved);

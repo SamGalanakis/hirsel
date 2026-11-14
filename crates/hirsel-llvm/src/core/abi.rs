@@ -477,6 +477,11 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
             }
             let mut aggregate = sink::Value::Poison;
             let regs = self.abi.regs.clone();
+            let aggregate_type = sink::Type::structure(
+                regs.iter()
+                    .map(|reg| super::ir_type_text(reg))
+                    .collect::<Vec<_>>(),
+            );
             for (index, reg) in regs.iter().enumerate() {
                 let at = self.typed(sink::Operation::Gep(
                     sink::Type::I8,
@@ -495,23 +500,18 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                     },
                 ));
                 let loaded_value = self.operand(&loaded);
-                aggregate = if index == 0 {
-                    loaded_value
-                } else {
-                    let aggregate_type = super::ir_type_text(&self.abi.ty);
-                    let inserted = self.typed(sink::Operation::Insert(
-                        aggregate_type,
-                        &aggregate,
-                        super::ir_type_text(reg),
-                        &loaded_value,
-                        index as u32,
-                    ));
-                    self.operand(&inserted)
-                };
+                let inserted = self.typed(sink::Operation::Insert(
+                    aggregate_type.clone(),
+                    &aggregate,
+                    super::ir_type_text(reg),
+                    &loaded_value,
+                    index as u32,
+                ));
+                aggregate = self.operand(&inserted);
             }
             self.sink.instruction(
                 None,
-                sink::Operation::Return(super::ir_type_text(&self.abi.ty), Some(&aggregate)),
+                sink::Operation::Return(aggregate_type, Some(&aggregate)),
                 self.debug_location,
             );
             return;
@@ -537,16 +537,20 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
             return;
         }
         let mut r = "poison".to_string();
+        let aggregate_ty = format!(
+            "{{ {} }}",
+            self.abi.regs.iter().cloned().collect::<Vec<_>>().join(", ")
+        );
         for (i, t) in self.abi.regs.clone().iter().enumerate() {
             let at = self.offset(&p, i as u64 * self.abi.reg_stride);
             let x = self.calc(format!("load {t}, ptr {at}, align 1"));
             r = if self.abi.regs.len() == 1 {
                 x
             } else {
-                self.calc(format!("insertvalue {} {r}, {t} {x}, {i}", self.abi.ty))
+                self.calc(format!("insertvalue {aggregate_ty} {r}, {t} {x}, {i}"))
             };
         }
-        self.line(format!("ret {} {r}", self.abi.ty));
+        self.line(format!("ret {aggregate_ty} {r}"));
     }
     pub(super) fn call(&mut self, site: &CallSite) -> Result<()> {
         if let Callee::Runtime(op) = site.callee {

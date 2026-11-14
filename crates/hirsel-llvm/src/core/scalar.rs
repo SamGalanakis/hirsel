@@ -32,14 +32,14 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
             );
             return (value, flag);
         }
-        let result = self.typed_call(
+        let result = self.typed_call_type(
             &format!(
                 "llvm.{}{}.with.overflow.{}",
                 if signed { "s" } else { "u" },
                 name,
                 ty(t)
             ),
-            t,
+            sink::Type::structure(vec![ir_type(t), sink::Type::I1]),
             &[(t, a), (t, b)],
         );
         let aggregate = sink::Type::structure(vec![ir_type(t), sink::Type::I1]);

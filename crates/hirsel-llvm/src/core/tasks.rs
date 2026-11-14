@@ -59,6 +59,14 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                 extension: sink::Extension::None,
                 params,
             };
+            self.intrinsics.insert(format!(
+                "declare {} @{name}({})",
+                super::ir_type(results[0]),
+                args.iter()
+                    .map(|(t, _)| self.c_argument(t))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
             let value = self.typed(sink::Operation::Call(
                 &signature,
                 &sink::Value::Global(name.to_owned()),

@@ -18,6 +18,7 @@ typedef struct {
     void (*unit_drop)(HirselLlvmBuilder *);
     LLVMModuleRef (*unit_take)(HirselLlvmBuilder *);
     void (*module_drop)(LLVMModuleRef);
+    LLVMModuleRef (*module_parse)(LLVMContextRef, const char *, size_t);
     void (*unit_bitcode)(HirselLlvmBuilder *, HirselBuilderOutput *);
     void (*print)(HirselLlvmBuilder *, HirselBuilderOutput *);
     void (*print_text)(const char *, size_t, HirselBuilderOutput *);

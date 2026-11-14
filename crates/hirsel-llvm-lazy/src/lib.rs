@@ -125,11 +125,19 @@ pub fn emit_program_for_target(
     let mut lowered = Vec::with_capacity(units.len());
     for unit in units {
         match unit {
-            Unit::Core { module, .. } => lowered.push(loader::ProgramUnit::Native(
-                core::emit_native_scalar_module_in_context(
+            Unit::Core {
+                module,
+                facts,
+                observe_charge,
+                debug_lines,
+            } => lowered.push(loader::ProgramUnit::Native(
+                core::emit_native_module_in_context(
                     module,
                     target,
                     context.as_ref().unwrap().clone(),
+                    facts,
+                    *observe_charge,
+                    *debug_lines,
                 )
                 .map_err(|e| e.to_string())?,
             )),

@@ -230,6 +230,13 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
             extension: sink::Extension::None,
             params,
         };
+        self.intrinsics.insert(format!(
+            "declare void @{name}({})",
+            args.iter()
+                .map(|(t, _)| self.c_argument(t))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
         self.sink.instruction(
             None,
             sink::Operation::Call(
@@ -281,6 +288,10 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
             extension: sink::Extension::None,
             params,
         };
+        let mut declaration = vec!["ptr sret({ ptr, i64, i64 })".to_owned()];
+        declaration.extend(args.iter().map(|(ty, _)| self.c_argument(ty).to_owned()));
+        self.intrinsics
+            .insert(format!("declare void @{name}({})", declaration.join(", ")));
         let _ = attributes;
         self.sink.instruction(
             None,
@@ -595,7 +606,15 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                     let (p, room) =
                         self.allocation("hirsel_core_limit_enter", &[ptr("%context"), word(n)]);
                     let yes = self.calc(format!("icmp ne ptr {p}, null"));
-                    (self.calc(format!("zext i1 {yes} to i8")), room)
+                    (
+                        self.typed_cast_llvm(
+                            sink::Cast::ZExt,
+                            sink::Type::I1,
+                            &yes,
+                            Ty::Scalar(Scalar::U8),
+                        ),
+                        room,
+                    )
                 };
                 self.put(admitted, &yes);
                 self.put(available, &room);
@@ -688,7 +707,12 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
             Inst::TryUnwrap { result, node, kind } => {
                 let p = self.numeric(node);
                 let yes = self.unique_node(&p, kind == Counted::Arc);
-                let yes = self.calc(format!("zext i1 {yes} to i8"));
+                let yes = self.typed_cast_llvm(
+                    sink::Cast::ZExt,
+                    sink::Type::I1,
+                    &yes,
+                    Ty::Scalar(Scalar::U8),
+                );
                 self.put(result, &yes);
             }
             Inst::Release { node, kind, ty } => {

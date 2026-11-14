@@ -261,6 +261,35 @@ pub(crate) fn emit_native_scalar_module_in_context(
     unreachable!()
 }
 
+/// Construct an owned unit in the shared session. Scalar-only units use the
+/// typed NoFolder sink; until the remaining operation families are ported, a
+/// whole-unit text parse keeps the product path executable and records the
+/// exact rejection at this boundary.
+#[cfg(hirsel_lazy_core)]
+pub(crate) fn emit_native_module_in_context(
+    module: &Module,
+    target: Target,
+    context: std::rc::Rc<crate::construction::Context>,
+    facts: &hirsel_core_ir::roles::Facts,
+    observe_charge: bool,
+    debug_lines: bool,
+) -> Result<crate::construction::NativeModule> {
+    match emit_native_scalar_module_in_context(module, target, context.clone()) {
+        Ok(native) => Ok(native),
+        Err(Error::Unsupported(_)) => {
+            let ir = emit_ir_relocatable_with_role_facts_for_target(
+                module,
+                target,
+                observe_charge,
+                debug_lines,
+                facts,
+            )?;
+            context.parse_module(&ir).map_err(Error::Llvm)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// Optional diagnostic emission; timings of these objects are not performance samples.
 pub fn emit_ir_with_charge_observation(module: &Module, observe_charge: bool) -> Result<String> {
     emit_ir_for_target(module, Target::X86_64Linux, observe_charge)
@@ -836,6 +865,19 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
     fn operand(&self, text: &str) -> sink::Value {
         let text = text.trim();
         if let Some(name) = text.strip_prefix('%') {
+            if let Some(local) = match name {
+                "context" => Some(sink::Local::Context),
+                "dest" => Some(sink::Local::Destination),
+                "caller_site" => Some(sink::Local::CallerSite),
+                "result" => Some(sink::Local::Result),
+                "sret" => Some(sink::Local::Sret),
+                "payload" => Some(sink::Local::Payload),
+                "input" => Some(sink::Local::Input),
+                "worklist" => Some(sink::Local::Worklist),
+                _ => None,
+            } {
+                return sink::Value::Local(local);
+            }
             let (kind, digits) = name.split_at(1);
             let index = digits.parse().unwrap_or(0);
             return match kind {
@@ -894,9 +936,17 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         let to = ir_type(to);
         self.typed(sink::Operation::Cast(op, from, &v, to))
     }
+    fn typed_cast_llvm(&mut self, op: sink::Cast, from: sink::Type, value: &str, to: Ty) -> String {
+        let v = self.operand(value);
+        let to = ir_type(to);
+        self.typed(sink::Operation::Cast(op, from, &v, to))
+    }
     fn typed_call(&mut self, name: &str, result: Ty, args: &[(Ty, &str)]) -> String {
+        self.typed_call_type(name, ir_type(result), args)
+    }
+    fn typed_call_type(&mut self, name: &str, result: sink::Type, args: &[(Ty, &str)]) -> String {
         let signature = sink::Signature {
-            result: ir_type(result),
+            result,
             extension: sink::Extension::None,
             params: args
                 .iter()
@@ -1205,9 +1255,9 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                     }
                 };
                 let x = self.typed_compare(pred, t, &a, &b);
-                let x = self.typed_cast(
+                let x = self.typed_cast_llvm(
                     sink::Cast::ZExt,
-                    Ty::Scalar(Scalar::Bool),
+                    sink::Type::I1,
                     &x,
                     Ty::Scalar(Scalar::U8),
                 );
@@ -1227,7 +1277,12 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                 let (r, over) = self.arith(t, op, mode, &a, &b);
                 self.put(result, &r);
                 if let Some(flag) = flag {
-                    let over = self.calc(format!("zext i1 {over} to i8"));
+                    let over = self.typed_cast_llvm(
+                        sink::Cast::ZExt,
+                        sink::Type::I1,
+                        &over,
+                        Ty::Scalar(Scalar::U8),
+                    );
                     self.put(flag, &over);
                 }
             }

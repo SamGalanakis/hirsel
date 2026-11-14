@@ -63,6 +63,7 @@ pub(crate) struct Api {
     unit_drop: unsafe extern "C" fn(Raw),
     unit_take: unsafe extern "C" fn(Raw) -> Raw,
     module_drop: unsafe extern "C" fn(Raw),
+    module_parse: unsafe extern "C" fn(Raw, *const c_char, usize) -> Raw,
     unit_bitcode: unsafe extern "C" fn(Raw, *mut Output),
     print: unsafe extern "C" fn(Raw, *mut Output),
     print_text: unsafe extern "C" fn(*const c_char, usize, *mut Output),
@@ -146,6 +147,17 @@ impl Context {
             raw,
             api: self.api,
             context: PhantomData,
+        }
+    }
+    pub(crate) fn parse_module(self: &Rc<Self>, text: &str) -> Result<NativeModule, String> {
+        // SAFETY: the source remains borrowed for the synchronous parse. The
+        // returned module is owned by the same LLVM context retained in the
+        // NativeModule wrapper.
+        let raw = unsafe { (self.api.module_parse)(self.raw, text.as_ptr().cast(), text.len()) };
+        if raw.is_null() {
+            Err("LLVM text module parse failed".into())
+        } else {
+            Ok(NativeModule::new(self.clone(), raw))
         }
     }
     #[cfg(test)]

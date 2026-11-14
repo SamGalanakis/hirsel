@@ -122,7 +122,12 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
     pub(super) fn empty_bound(&mut self, charge: &str) -> (String, String) {
         let payer = self.current_payer();
         let (fits, available) = self.admission_test(&payer, charge);
-        let admitted = self.calc(format!("zext i1 {fits} to i8"));
+        let admitted = self.typed_cast_llvm(
+            sink::Cast::ZExt,
+            sink::Type::I1,
+            &fits,
+            Ty::Scalar(Scalar::U8),
+        );
         let room = self.calc(format!("select i1 {fits}, i64 0, i64 {available}"));
         (admitted, room)
     }

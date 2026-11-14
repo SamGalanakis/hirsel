@@ -23,6 +23,9 @@ fn failure_sites_rebind(backend: Backend, optimize: bool) {
         assert_eq!(output.status.code(), Some(101), "{output:?}");
         assert_eq!(output.stdout, b"before\n", "{output:?}");
         assert_eq!(output.stderr, format!("Overflow at {}:{line}:5\n", dir.path().join("main.hirsel").display()).as_bytes(), "{output:?}");
+        let positions = crate::native_debug::source_positions(&std::fs::read(&built.executable).unwrap()).unwrap();
+        assert!(positions.contains(&(dir.path().join("main.hirsel").display().to_string(), line, 5)),
+            "debug line table lost the raising expression: {positions:?}");
     };
     let cold = check(source).build(&entry, &options).unwrap();
     assert!(cold.compiled > 0 && cold.linked);

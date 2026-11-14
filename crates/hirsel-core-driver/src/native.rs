@@ -331,7 +331,7 @@ impl CheckProduct {
                 compiled,
             });
         }
-        link(&source, &objects, options)
+        link(&source, &objects, options, &sources)
     }
     fn entry_binding(&self, entry: &DefPath) -> Result<&EntryAbi, NativeStop> {
         let binding = self
@@ -674,6 +674,7 @@ fn link(
     source: &str,
     objects: &[ObjectProduct],
     options: &NativeOptions,
+    sources: &hirsel_core_ir::source::SourceMap,
 ) -> Result<BuildProduct, NativeStop> {
     let runtime = read_input(&options.runtime)?;
     let headers = [
@@ -726,11 +727,16 @@ fn link(
         ])
         .arg(&options.include)
         .arg(&entry);
-        for (i, object) in objects.iter().enumerate() {
+        let (code, debug) = crate::native_debug::bind(objects, sources, &options.target)
+            .map_err(|error| NativeStop::Link(format!("native debug binding: {error}")))?;
+        for (i, object) in code.iter().enumerate() {
             let path = temp.path().join(format!("{i}.o"));
-            std::fs::write(&path, &object.bytes)?;
+            std::fs::write(&path, object)?;
             cc.arg(path);
         }
+        let debug_path = temp.path().join("debug.o");
+        std::fs::write(&debug_path, debug)?;
+        cc.arg(debug_path);
         cc.arg(&options.runtime)
             .args([
                 "-lgcc_s",

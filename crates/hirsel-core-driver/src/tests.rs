@@ -23,7 +23,7 @@ pub(crate) fn request(source: &str, dir: &Path) -> CheckRequest {
     }
 }
 #[test]
-fn publishes_a_checked_body_and_disk_syntax() {
+fn publishes_a_checked_body_record_that_runs_like_the_checked_body() {
     let dir = tempfile::tempdir().unwrap();
     let product = Driver::default()
         .check(
@@ -36,27 +36,13 @@ fn publishes_a_checked_body_and_disk_syntax() {
     let value = eval::run(&d.ir, d.check.function.unwrap(), &[], 1_000_000).outcome;
     assert_eq!(value, eval::Outcome::Returned(vec![42]));
     let store = Store::new(&dir.path().join("store")).unwrap();
-    let cache = Cache::open(&store, product.root).unwrap().unwrap();
-    let file: FileProduct = decode(cache.root.files[0].bytes(&cache.bytes).unwrap()).unwrap();
-    assert_eq!(file.syntax.text(), "fn answer() -> u64 { 6 * 7 }\n");
-    let disk: DiskCheck = decode(
-        cache
-            .root
-            .definitions
-            .values()
-            .next()
-            .unwrap()
-            .bytes(&cache.bytes)
-            .unwrap(),
-    )
-    .unwrap();
+    let index = check_index::ProgramIndex::open(&store).unwrap();
+    assert_eq!(index.root, Some(product.root));
+    let (_, record) = index.live(&d.definition).unwrap();
+    let disk: DiskCheck = decode(&store.get(record).unwrap().unwrap()).unwrap();
     assert_eq!(
         eval::run(&disk.ir, FuncId(disk.function.unwrap()), &[], 1_000_000).outcome,
         value
-    );
-    assert_eq!(
-        std::fs::read_dir(dir.path().join("store")).unwrap().count(),
-        2
     );
 }
 #[test]
@@ -346,14 +332,14 @@ fn failed_archive_write_keeps_previous_root_and_removes_temporary() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path()).unwrap();
     let old = store.put(b"previous complete result").unwrap();
-    store.publish_root(old).unwrap();
+    store.select(check_index::SELECTION, old).unwrap();
     let failure = store.archive(|writer| {
         use std::io::Write;
         writer.write_all(b"unfinished next result")?;
         Err(io::Error::other("injected publication failure"))
     });
     assert!(failure.is_err());
-    assert_eq!(store.selection("check-root").unwrap(), Some(old));
+    assert_eq!(store.selection(check_index::SELECTION).unwrap(), Some(old));
     assert_eq!(
         store.get(old).unwrap().unwrap(),
         b"previous complete result"
@@ -1660,109 +1646,78 @@ fn canonical_driver_encoding_visits_the_value_once() {
     );
 }
 
-/// Side-by-side differential of the superseded per-body signature closure
-/// (every reached path and header digest) against the component closure hash,
-/// over the design's edit kinds, a signature edit of a widely used helper and
-/// an edit inside a mutually recursive pair. Law: every body whose old key
-/// changes from the base build also has a changed new key (the new miss set is
-/// a superset of the old one). Deleted with the old derivation.
-#[test]
-fn component_closure_misses_cover_the_per_body_closure_misses() {
+/// Sources of a small program over four modules: a shared helper, a mutually
+/// recursive pair, the edited module and an independent reader of the helper.
+fn program_sources(kind: &str) -> [(&'static str, String); 4] {
     let helper = "pub fn config(x: u64) -> u64 { x }\npub fn checksum(x: u64) -> u64 { x + 1 }\npub type Settings { n: u64 }\n";
     let shapes = "pub type Even = Zero | Next(Box[Odd])\npub type Odd = One(Box[Even])\npub fn depth(e: Even) -> u64 { 0 }\npub fn top(o: Odd) -> u64 { 1 }\n";
     let main = "pub fn dispatch(n: u64) -> u64 {\n    let total = helper.config(n)\n    total\n}\npub fn main() -> u64 {\n    dispatch(helper.config(3))\n}\npub fn uses_shapes(e: shapes.Even) -> u64 { shapes.depth(e) }\n";
     let other = "pub fn other(s: helper.Settings) -> u64 { helper.config(s.n) }\npub fn more() -> u64 { helper.config(2) }\n";
-    let edit = |kind: &str| -> [String; 4] {
-        let (mut h, mut s, mut m, mut o) = (
-            helper.to_string(),
-            shapes.to_string(),
-            main.to_string(),
-            other.to_string(),
-        );
-        let d = m.find("pub fn dispatch").unwrap();
-        let e = m.find("pub fn main").unwrap();
-        let u = m.find("pub fn uses_shapes").unwrap();
-        match kind {
-            "base" => {}
-            "body" => m = m.replace("    total\n", "    let _ = 0u8\n    total\n"),
-            "body-literal" => {
-                m = m.replace("    total\n", "    let _ = \"zz-new-literal\"\n    total\n")
-            }
-            "signature" => {
-                h = h.replace("config(x: u64)", "config(x: u64, _extra: u64)");
-                for t in [&mut m, &mut o] {
-                    *t = t
-                        .replace("helper.config(n)", "helper.config(n, 0)")
-                        .replace("helper.config(3)", "helper.config(3, 0)")
-                        .replace("helper.config(s.n)", "helper.config(s.n, 0)")
-                        .replace("helper.config(2)", "helper.config(2, 0)");
-                }
-            }
-            "add" => m.push_str("pub fn extra_item() -> u32 {\n    7\n}\n"),
-            "remove" => m = format!("{}{}", &m[..e], &m[u..]),
-            "import" => m = m.replace("    total\n", "    total + helper.checksum(n)\n"),
-            "rename" => m = m.replace("pub fn main(", "pub fn main_renamed("),
-            "reorder" => m = format!("{}{}{}", &m[e..u], &m[d..e], &m[u..]),
-            "comment" => m = format!("// a comment line above dispatch\n{m}"),
-            "whitespace" => m = format!("\n\n{m}"),
-            "recursive-member" => s = s.replace("One(Box[Even])", "One(Box[Even]) | Two(u64)"),
-            "recursive-edge" => {
-                s = s.replace(
-                    "pub type Odd = One(Box[Even])",
-                    "pub type Odd = One(Box[Even], helper.Settings)",
-                )
-            }
-            "settings" => h = h.replace("{ n: u64 }", "{ n: u64, m: u64 }"),
-            _ => unreachable!("{kind}"),
-        }
-        [h, s, m, o]
-    };
-    type Old = (
-        ContentHash,
-        BTreeMap<Arc<DefPath>, ContentHash>,
-        ContentHash,
-        ContentHash,
+    let (mut h, s, mut m, mut o) = (
+        helper.to_string(),
+        shapes.to_string(),
+        main.to_string(),
+        other.to_string(),
     );
-    let build = |kind: &str| -> BTreeMap<DefPath, (Old, DefinitionKey)> {
-        let dir = tempfile::tempdir().unwrap();
-        let mut req = request("", dir.path());
-        req.inputs.packages[0].sources.clear();
-        for (name, text) in ["helper", "shapes", "main", "other"]
-            .into_iter()
-            .zip(edit(kind))
-        {
-            let file = dir.path().join(format!("{name}.hirsel"));
-            std::fs::write(&file, text).unwrap();
-            req.inputs.packages[0]
-                .sources
-                .push(hirsel_core_resolve::ModuleSource {
-                    file,
-                    modules: vec![name.into()],
-                    signatures: false,
-                });
+    let d = m.find("pub fn dispatch").unwrap();
+    let e = m.find("pub fn main").unwrap();
+    let u = m.find("pub fn uses_shapes").unwrap();
+    match kind {
+        "base" => {}
+        "body" => m = m.replace("    total\n", "    let _ = 0u8\n    total\n"),
+        "signature" => {
+            h = h.replace("config(x: u64)", "config(x: u64, _extra: u64)");
+            for t in [&mut m, &mut o] {
+                *t = t
+                    .replace("helper.config(n)", "helper.config(n, 0)")
+                    .replace("helper.config(3)", "helper.config(3, 0)")
+                    .replace("helper.config(s.n)", "helper.config(s.n, 0)")
+                    .replace("helper.config(2)", "helper.config(2, 0)");
+            }
         }
-        let (product, legacy) = reuse::legacy::capture(|| {
-            Driver::default()
-                .check(req, &mut Meter::new(false))
-                .unwrap()
-        });
-        assert_eq!(legacy.len(), product.definitions.len());
-        product
-            .definitions
-            .iter()
-            .map(|(path, d)| {
-                let k = d.key.clone();
-                let old = (k.body, legacy[path].clone(), k.lookups, k.environment);
-                (path.clone(), (old, k))
-            })
-            .collect()
-    };
-    let base = build("base");
-    assert!(base.len() >= 8, "{}", base.len());
+        "add" => m.push_str("pub fn extra_item() -> u32 {\n    7\n}\n"),
+        "remove" => m = format!("{}{}", &m[..e], &m[u..]),
+        "import" => m = m.replace("    total\n", "    total + helper.checksum(n)\n"),
+        "rename" => m = m.replace("pub fn main(", "pub fn main_renamed("),
+        "reorder" => m = format!("{}{}{}", &m[e..u], &m[d..e], &m[u..]),
+        "comment" => m = format!("// a comment line above dispatch\n{m}"),
+        "whitespace" => m = format!("\n\n{m}"),
+        _ => unreachable!("{kind}"),
+    }
+    [("helper", h), ("shapes", s), ("main", m), ("other", o)]
+}
+fn program_request(kind: &str, dir: &Path, store: &Path) -> CheckRequest {
+    let mut req = request("", dir);
+    req.store = store.to_owned();
+    req.inputs.packages[0].sources.clear();
+    for (name, text) in program_sources(kind) {
+        let file = dir.join(format!("{name}.hirsel"));
+        std::fs::write(&file, text).unwrap();
+        req.inputs.packages[0]
+            .sources
+            .push(hirsel_core_resolve::ModuleSource {
+                file,
+                modules: vec![name.into()],
+                signatures: false,
+            });
+    }
+    req
+}
+fn store_files(store: &Path) -> std::collections::BTreeSet<std::ffi::OsString> {
+    std::fs::read_dir(store)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect()
+}
+
+/// §2d edit-kind gate. Law: an incremental build publishes the live rows and
+/// file records of a fresh build of the same sources, and a tombstoned path
+/// never resolves by path, by name or by anchor. Oracle: the fresh build.
+#[test]
+fn edit_kinds_publish_the_fresh_build_and_tombstones_never_resolve() {
     let mut report = vec![];
     for kind in [
         "body",
-        "body-literal",
         "signature",
         "add",
         "remove",
@@ -1771,34 +1726,216 @@ fn component_closure_misses_cover_the_per_body_closure_misses() {
         "reorder",
         "comment",
         "whitespace",
-        "recursive-member",
-        "recursive-edge",
-        "settings",
     ] {
-        let edited = build(kind);
-        let (mut old_misses, mut new_misses) = (vec![], vec![]);
-        for (path, (old, new)) in &edited {
-            let Some((base_old, base_new)) = base.get(path) else {
-                continue;
-            };
-            if old != base_old {
-                old_misses.push(path.to_string());
-            }
-            if new != base_new {
-                new_misses.push(path.to_string());
+        let dir = tempfile::tempdir().unwrap();
+        let incremental = dir.path().join("incremental");
+        Driver::default()
+            .check(
+                program_request("base", dir.path(), &incremental),
+                &mut Meter::new(false),
+            )
+            .unwrap();
+        let before = store_files(&incremental);
+        let built = Driver::default()
+            .check(
+                program_request(kind, dir.path(), &incremental),
+                &mut Meter::new(false),
+            )
+            .unwrap();
+        let written = store_files(&incremental).difference(&before).count();
+        let fresh = Driver::default()
+            .check(
+                program_request(kind, dir.path(), &dir.path().join("fresh")),
+                &mut Meter::new(false),
+            )
+            .unwrap();
+        assert_eq!(
+            encode(&built.diagnostics).unwrap(),
+            encode(&fresh.diagnostics).unwrap(),
+            "{kind}"
+        );
+        let open = |store: &Path| {
+            let store = Store::new(store).unwrap();
+            let index = check_index::ProgramIndex::open(&store).unwrap();
+            (store, index)
+        };
+        let (store, index) = open(&incremental);
+        let (fresh_store, fresh_index) = open(&dir.path().join("fresh"));
+        let live = |index: &check_index::ProgramIndex| -> BTreeMap<DefPath, check_index::Row> {
+            index
+                .rows()
+                .filter(|r| matches!(r.1, check_index::Row::Live { .. }))
+                .map(|(p, r)| (p.clone(), *r))
+                .collect()
+        };
+        assert_eq!(live(&index), live(&fresh_index), "{kind}: live rows");
+        assert_eq!(fresh_index.rows().count(), live(&fresh_index).len());
+        let modules: Vec<_> = program_sources(kind)
+            .iter()
+            .map(|(m, _)| ("app".to_string(), "1".to_string(), vec![m.to_string()]))
+            .collect();
+        for module in &modules {
+            assert_eq!(
+                index.file(&store, module).unwrap(),
+                fresh_index.file(&fresh_store, module).unwrap(),
+                "{kind}: file record {module:?}"
+            );
+        }
+        let tombstones: Vec<DefPath> = index
+            .rows()
+            .filter(|r| matches!(r.1, check_index::Row::Removed { .. }))
+            .map(|r| r.0.clone())
+            .collect();
+        assert_eq!(
+            !tombstones.is_empty(),
+            matches!(kind, "remove" | "rename"),
+            "{kind}: {tombstones:?}"
+        );
+        for path in &tombstones {
+            assert!(index.live(path).is_none());
+            assert!(!built.definitions.contains_key(path));
+            let module = check_index::module_key(path);
+            assert_eq!(index.by_name(&store, &module, &path.0.name).unwrap(), None);
+            for ordinal in 0..8 {
+                let anchored = index.by_anchor(&store, &module, ordinal).unwrap();
+                assert!(anchored.is_none_or(|(p, _)| p != *path), "{kind}: {path:?}");
             }
         }
-        assert!(
-            old_misses.iter().all(|p| new_misses.contains(p)),
-            "{kind}: old misses {old_misses:?} not covered by new misses {new_misses:?}"
-        );
+        if kind == "body" {
+            // One body record, one file record, the changed leaf and the root;
+            // with the selection, one instance record and one object: at most 8.
+            assert!(written + 3 <= 8, "body edit wrote {written} records");
+        }
         report.push(format!(
-            "{kind}: old {} new {} equal {} {:?}",
-            old_misses.len(),
-            new_misses.len(),
-            old_misses == new_misses,
-            new_misses
+            "{kind}: rechecked {} {:?}, records written {written}, tombstones {}",
+            built.rechecked.len(),
+            names(&built),
+            tombstones.len()
         ));
     }
     eprintln!("{}", report.join("\n"));
+}
+
+/// An envelope with `payload` and a correct length, but the trailer (the
+/// address) of `old`: only the digest tells it from the record it replaces.
+fn under_old_address(old: &[u8], payload: &[u8]) -> Vec<u8> {
+    let mut bytes = old[..12].to_vec();
+    bytes.extend_from_slice(payload);
+    bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(&old[old.len() - 32..]);
+    bytes
+}
+
+/// §2g record cases. Law: a damaged record, or a record of another toolchain,
+/// is a miss and a rebuild whose publication equals a fresh build's; never a
+/// different product. Oracle: a fresh build of the same sources in a new store.
+#[test]
+fn damaged_and_foreign_records_rebuild_the_fresh_publication() {
+    let fresh_dir = tempfile::tempdir().unwrap();
+    let fresh = Driver::default()
+        .check(
+            program_request("base", fresh_dir.path(), &fresh_dir.path().join("store")),
+            &mut Meter::new(false),
+        )
+        .unwrap();
+    let dispatch = DefPath::from_full("app@1/main/dispatch").unwrap();
+    let main = DefPath::from_full("app@1/main/main").unwrap();
+    for case in [
+        "torn root",
+        "torn body",
+        "truncated leaf, valid envelope",
+        "swapped body records",
+        "corrupted body payload, valid envelope",
+        "another toolchain",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store");
+        if case == "another toolchain" {
+            reuse::TOOLCHAIN.set(Some(ContentHash::of_bytes(b"another compiler build")));
+        }
+        let base = Driver::default()
+            .check(
+                program_request("base", dir.path(), &path),
+                &mut Meter::new(false),
+            )
+            .unwrap();
+        reuse::TOOLCHAIN.set(None);
+        let store = Store::new(&path).unwrap();
+        let index = check_index::ProgramIndex::open(&store).unwrap();
+        let body = |p: &DefPath| store.path(index.live(p).unwrap().1);
+        let mut leaf_rows = vec![];
+        let expect: Vec<&str> = match case {
+            "torn root" => {
+                let bytes = std::fs::read(store.path(base.root)).unwrap();
+                std::fs::write(store.path(base.root), &bytes[..bytes.len() / 2]).unwrap();
+                names(&fresh)
+            }
+            "torn body" => {
+                let bytes = std::fs::read(body(&dispatch)).unwrap();
+                std::fs::write(body(&dispatch), &bytes[..bytes.len() / 2]).unwrap();
+                vec!["dispatch"]
+            }
+            "truncated leaf, valid envelope" => {
+                // The leaf holding dispatch's row, cut to fewer rows: a valid
+                // envelope whose payload decodes, under the old address.
+                let leaf = std::fs::read_dir(&path)
+                    .unwrap()
+                    .map(|e| e.unwrap().path())
+                    .find(|f| {
+                        let Some(bytes) = std::fs::read(f).ok().filter(|b| b.len() > 52) else {
+                            return false;
+                        };
+                        let payload = &bytes[12..bytes.len() - 40];
+                        // Node::Leaf is the second variant of the node encoding.
+                        payload[..4] == [1, 0, 0, 0]
+                            && decode::<Vec<(DefPath, check_index::Row)>>(&payload[4..])
+                                .is_some_and(|rows| rows.iter().any(|r| r.0 == dispatch))
+                    })
+                    .unwrap();
+                let bytes = std::fs::read(&leaf).unwrap();
+                let payload = &bytes[12..bytes.len() - 40];
+                let mut rows: Vec<(DefPath, check_index::Row)> = decode(&payload[4..]).unwrap();
+                leaf_rows = rows.iter().map(|r| r.0.0.name.clone()).collect();
+                leaf_rows.sort_unstable();
+                rows.retain(|r| r.0 != dispatch);
+                let mut cut = payload[..4].to_vec();
+                cut.extend(encode(&rows).unwrap());
+                std::fs::write(&leaf, under_old_address(&bytes, &cut)).unwrap();
+                // Every row below a damaged node is a miss.
+                leaf_rows.iter().map(String::as_str).collect()
+            }
+            "swapped body records" => {
+                std::fs::copy(body(&main), body(&dispatch)).unwrap();
+                vec!["dispatch"]
+            }
+            "corrupted body payload, valid envelope" => {
+                let bytes = std::fs::read(body(&dispatch)).unwrap();
+                let mut payload = bytes[12..bytes.len() - 40].to_vec();
+                let last = payload.len() - 1;
+                payload[last] ^= 1;
+                std::fs::write(body(&dispatch), under_old_address(&bytes, &payload)).unwrap();
+                vec!["dispatch"]
+            }
+            "another toolchain" => names(&fresh),
+            _ => unreachable!(),
+        };
+        let rebuilt = Driver::default()
+            .check(
+                program_request("base", dir.path(), &path),
+                &mut Meter::new(false),
+            )
+            .unwrap();
+        assert_eq!(names(&rebuilt), expect, "{case}");
+        assert_eq!(rebuilt.root, fresh.root, "{case}");
+        let again = Driver::default()
+            .check(
+                program_request("base", dir.path(), &path),
+                &mut Meter::new(false),
+            )
+            .unwrap();
+        assert!(
+            again.rechecked.is_empty(),
+            "{case}: the rebuild repaired the store"
+        );
+    }
 }

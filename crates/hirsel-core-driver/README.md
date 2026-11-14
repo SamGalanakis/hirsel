@@ -11,17 +11,22 @@ The serial request loads and hashes sources once, parses, builds the complete na
 index, resolves once, publishes declarations/layout recipes and checks/lowers each
 body once. Each body owns its CoreIR module and signature-only callee rows. Syntax,
 name rows, successful bodies and diagnostics move into shared in-memory products.
-One buffered binary archive per request writes their borrowed tables once, including
-native CoreIR without text reconstruction. The stream is hashed once and committed
-by atomic rename before its root selection. Disk reads check version, length and digest.
+Each checked body is one content-addressed record, and its address is the body
+product's content hash. A persistent 16-way index over definition paths holds one
+small row per body (its definition-key hash and record address) or a tombstone for
+a path that left a file of the request; file records hold each module's namespace
+map and anchor map. One rename of the `program-index` selection publishes the
+root node, rows, tombstones and maps together. A request reads the whole index,
+never a whole product, and writes only the records that changed. Disk reads check
+version, length and digest. Lookups treat a tombstone as not found.
 Resolver scratch is not retained or encoded; definition keys retain its observed
-lookup fingerprint and transitive signature reads. The root commits last.
+lookup fingerprint and one hash of the transitive signature components.
 No old std products, old requests, TIR or independent checker enter this path.
 
-Warm memory or disk snapshots perform no source checking. Edited requests reuse
-unchanged definition products, including refusals. Products are trusted in memory.
+A warm in-memory snapshot performs no source checking. Requests reuse unchanged
+definition products from memory or from their records, including refusals. Products are trusted in memory.
 External disk records check format version, exact length and content digest; damage
-is a cache miss. Immutable contents publish before the root. No old requests,
+is a cache miss. Records publish before the selection. No old requests,
 old std products, TIR or independent checker enter this crate. The workspace
 layering audit enforces its new-core-only dependency boundary.
 

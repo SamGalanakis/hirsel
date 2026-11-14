@@ -1,14 +1,14 @@
-//! One buffered append-only archive per request, committed by atomic rename.
+//! Content-addressed records in one envelope, committed by atomic rename.
 //! Disk bytes are external input; a damaged record is a cache miss.
 use hirsel_core_ids::ContentHash;
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufWriter, Read, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAGIC: &[u8; 8] = b"HCORE\0\0\0";
-const VERSION: u32 = 23;
+const VERSION: u32 = 24;
 const HEADER: usize = 12;
 const TRAILER: usize = 40;
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -24,21 +24,6 @@ impl Record {
         let start = usize::try_from(self.start).ok()?;
         let len = usize::try_from(self.len).ok()?;
         archive.get(start..start.checked_add(len)?)
-    }
-}
-struct HashedFile {
-    file: File,
-    hash: Sha256,
-}
-impl Write for HashedFile {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        hirsel_core_front::cost_scope!("non-check", "archive write and digest");
-        let written = self.file.write(bytes)?;
-        self.hash.update(&bytes[..written]);
-        Ok(written)
-    }
-    fn flush(&mut self) -> io::Result<()> {
-        self.file.flush()
     }
 }
 pub(crate) struct ArchiveWriter {
@@ -118,39 +103,46 @@ impl Store {
         &self,
         emit: impl FnOnce(&mut ArchiveWriter) -> io::Result<()>,
     ) -> io::Result<ContentHash> {
+        let mut writer = ArchiveWriter { buffer: Vec::new() };
+        emit(&mut writer)?;
+        let (hash, bytes) = Self::frame(&writer.buffer);
+        self.write_framed(hash, &bytes)?;
+        self.sync_directory()?;
+        Ok(hash)
+    }
+    /// The envelope of one payload and its address: the digest of the header,
+    /// payload and length bytes, computed once while framing.
+    pub(crate) fn frame(payload: &[u8]) -> (ContentHash, Vec<u8>) {
+        hirsel_core_front::cost_scope!("non-check", "archive write and digest");
+        let mut bytes = Vec::with_capacity(HEADER + payload.len() + TRAILER);
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&VERSION.to_le_bytes());
+        bytes.extend_from_slice(payload);
+        bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        let hash = ContentHash(Sha256::digest(&bytes).into());
+        bytes.extend_from_slice(&hash.0);
+        (hash, bytes)
+    }
+    /// Write and sync one framed record under its address. The directory entry
+    /// is made durable by a later `sync_directory`, once per publication.
+    pub(crate) fn write_framed(&self, hash: ContentHash, bytes: &[u8]) -> io::Result<()> {
         let temporary = self.temporary();
         let result = (|| {
-            let file = OpenOptions::new()
+            let mut file = OpenOptions::new()
                 .create_new(true)
                 .write(true)
                 .open(&temporary)?;
-            let mut output = BufWriter::with_capacity(
-                64 * 1024,
-                HashedFile {
-                    file,
-                    hash: Sha256::new(),
-                },
-            );
-            output.write_all(MAGIC)?;
-            output.write_all(&VERSION.to_le_bytes())?;
-            let mut writer = ArchiveWriter { buffer: Vec::new() };
-            emit(&mut writer)?;
-            output.write_all(&writer.buffer)?;
-            output.write_all(&(writer.buffer.len() as u64).to_le_bytes())?;
-            output.flush()?;
-            let mut output = output.into_inner().map_err(|e| e.into_error())?;
-            // The digest covers exactly the header, payload and length bytes written.
-            let hash = ContentHash(output.hash.finalize().into());
-            output.file.write_all(&hash.0)?;
-            output.file.sync_all()?;
-            fs::rename(&temporary, self.path(hash))?;
-            File::open(&self.root)?.sync_all()?;
-            Ok(hash)
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            fs::rename(&temporary, self.path(hash))
         })();
         if result.is_err() {
             let _ = fs::remove_file(temporary);
         }
         result
+    }
+    pub(crate) fn sync_directory(&self) -> io::Result<()> {
+        File::open(&self.root)?.sync_all()
     }
     pub fn get(&self, key: ContentHash) -> io::Result<Option<Vec<u8>>> {
         let mut file = match File::open(self.path(key)) {
@@ -200,9 +192,6 @@ impl Store {
     }
     pub(crate) fn select(&self, name: &str, key: ContentHash) -> io::Result<()> {
         self.atomic(&self.root.join(name), &key.0)
-    }
-    pub fn publish_root(&self, key: ContentHash) -> io::Result<()> {
-        self.atomic(&self.root.join("check-root"), &key.0)
     }
     fn temporary(&self) -> PathBuf {
         self.root.join(format!(

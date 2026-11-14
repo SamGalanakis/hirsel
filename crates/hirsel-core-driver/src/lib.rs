@@ -9,6 +9,7 @@ pub mod installation;
 mod product;
 pub use product::PackageProduct;
 mod callable_variants;
+mod check_index;
 mod instances;
 mod native;
 mod native_debug;
@@ -39,8 +40,8 @@ use hirsel_core_front::{CoreCheck, Emitter, ModuleInput, Program};
 use hirsel_core_ids::{ContentHash, DefPath, PackageId};
 use hirsel_core_ir::Module;
 use hirsel_core_resolve::{
-    CorpusManifest, Definition, ModuleId, ModulePath, NameIndex, PackageManifest, Refusal,
-    Resolution, Site, resolve,
+    CorpusManifest, Definition, DefinitionId, ModuleId, ModulePath, NameIndex, PackageManifest,
+    Refusal, Resolution, Site, resolve,
 };
 use hirsel_core_syntax::{ParseMode, Symbols, SyntaxFile, parse_bytes};
 use serde::{Deserialize, Serialize};
@@ -48,7 +49,6 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use store::Record;
 
 #[cfg(test)]
 hirsel_guard::install!();
@@ -192,6 +192,8 @@ pub struct DefinitionProduct {
     pub key: DefinitionKey,
     pub anchors: BTreeMap<(ModuleId, u32), DefPath>,
     pub incomplete: Vec<Incomplete>,
+    /// The body record's address: the content hash of this product as published.
+    pub record: ContentHash,
 }
 #[derive(Clone)]
 pub struct CheckProduct {
@@ -210,7 +212,6 @@ pub struct CheckProduct {
     native_entry: Option<native::EntryBinding>,
     test_entries: BTreeMap<DefPath, Result<native::EntryAbi, String>>,
     headers: Arc<reuse::Headers>,
-    records: Option<Root>,
 }
 impl CheckProduct {
     fn empty(index: Arc<NameIndex>) -> Self {
@@ -230,7 +231,6 @@ impl CheckProduct {
             native_entry: None,
             test_entries: BTreeMap::new(),
             headers: Arc::default(),
-            records: None,
         }
     }
     pub fn accepted(&self) -> bool {
@@ -265,23 +265,76 @@ pub struct Driver {
     store: Option<PathBuf>,
 }
 
+/// The module of a canonical record site: its item is an index into the
+/// record's anchor list, so a record does not depend on module numbering or
+/// item order at the time it was checked.
+const ANCHORED: ModuleId = ModuleId(u32::MAX);
+
 // Borrow the native result tables for output. No cloned IR, resolver scratch or text.
+// Sites are canonical: each site with an anchor names it by its position in `anchors`.
 #[derive(Serialize)]
 struct DiskCheckRef<'a> {
-    anchors: &'a BTreeMap<(ModuleId, u32), DefPath>,
+    anchors: Vec<&'a DefPath>,
     key: &'a DefinitionKey,
     definition: &'a DefPath,
-    refusals: &'a [Refusal],
-    incomplete: &'a [Incomplete],
+    refusals: Vec<Refusal>,
+    incomplete: Vec<Incomplete>,
     counts: [u64; 6],
     template: &'a Option<hirsel_core_front::GenericTemplate>,
     function: Option<u32>,
     ir: &'a Module,
     resolved: bool,
 }
+impl<'a> DiskCheckRef<'a> {
+    /// A site is a byte offset from its item's start and the key covers only
+    /// the body's own item, so a resolved body, whose refusals and gaps are
+    /// reported from its record, must cite no other item. An unresolved body's
+    /// refusals are the resolver's, reported afresh by every request.
+    fn of(d: &'a DefinitionProduct) -> io::Result<Self> {
+        let c = d.check.counts;
+        let mut anchors: Vec<&DefPath> = d.anchors.values().collect();
+        anchors.sort_unstable();
+        anchors.dedup();
+        if d.resolved
+            && let Some(other) = anchors.iter().find(|p| **p != &d.definition)
+        {
+            return Err(io::Error::other(format!(
+                "internal error: the checked body `{}` cites a site in `{other}`",
+                d.definition
+            )));
+        }
+        let canonical = |site: &mut Site| {
+            if let Some(path) = d.anchors.get(&(site.module, site.item)) {
+                site.module = ANCHORED;
+                site.item = anchors.binary_search(&path).unwrap() as u32;
+            }
+        };
+        let mut refusals = d.check.refusals.clone();
+        for r in &mut refusals {
+            canonical(&mut r.primary);
+            r.causal.iter_mut().for_each(canonical);
+        }
+        let mut incomplete = d.incomplete.clone();
+        for g in &mut incomplete {
+            canonical(&mut g.primary);
+        }
+        Ok(Self {
+            anchors,
+            key: &d.key,
+            definition: &d.definition,
+            refusals,
+            incomplete,
+            counts: [c.nodes, c.uses, c.places, c.calls, c.types, c.bytes],
+            template: &d.check.template,
+            function: d.check.function.map(|f| f.0),
+            ir: &d.ir,
+            resolved: d.resolved,
+        })
+    }
+}
 #[derive(Deserialize)]
 struct DiskCheck {
-    anchors: BTreeMap<(ModuleId, u32), DefPath>,
+    anchors: Vec<DefPath>,
     key: DefinitionKey,
     definition: DefPath,
     refusals: Vec<Refusal>,
@@ -292,78 +345,6 @@ struct DiskCheck {
     ir: Module,
     resolved: bool,
 }
-#[derive(Clone, Serialize, Deserialize)]
-struct Root {
-    snapshot: ContentHash,
-    bytes: usize,
-    identities: Record,
-    headers: Arc<reuse::Headers>,
-    declarations: Option<Record>,
-    files: Vec<Record>,
-    definitions: BTreeMap<DefPath, Record>,
-    diagnostics: Vec<Refusal>,
-    incomplete: Vec<Incomplete>,
-    resources: Vec<ResourceRefusal>,
-    native_entry: Option<native::EntryBinding>,
-    test_entries: BTreeMap<DefPath, Result<native::EntryAbi, String>>,
-}
-struct Cache {
-    bytes: Vec<u8>,
-    root: Root,
-}
-impl Cache {
-    fn open(store: &Store, hash: ContentHash) -> io::Result<Option<Self>> {
-        let Some(bytes) = store.get(hash)? else {
-            return Ok(None);
-        };
-        let Some(offset) = bytes.len().checked_sub(8) else {
-            return Ok(None);
-        };
-        let start = u64::from_le_bytes(bytes[offset..].try_into().unwrap());
-        let Some(len) = (offset as u64).checked_sub(start) else {
-            return Ok(None);
-        };
-        let Some(slice) = (Record { start, len }).bytes(&bytes) else {
-            return Ok(None);
-        };
-        let Some(root) = decode(slice) else {
-            return Ok(None);
-        };
-        Ok(Some(Self { bytes, root }))
-    }
-    fn definition(&self, path: &DefPath, key: &DefinitionKey) -> Option<DefinitionProduct> {
-        let disk: DiskCheck = decode(self.root.definitions.get(path)?.bytes(&self.bytes)?)?;
-        (disk.definition == *path && disk.key == *key).then(|| from_disk(disk))
-    }
-    fn product(&self, hash: ContentHash) -> Option<CheckProduct> {
-        let mut result = CheckProduct {
-            native_entry: self.root.native_entry.clone(),
-            test_entries: self.root.test_entries.clone(),
-            headers: Arc::clone(&self.root.headers),
-            diagnostics: self.root.diagnostics.clone(),
-            incomplete: self.root.incomplete.clone(),
-            resources: self.root.resources.clone(),
-            root: hash,
-            snapshot: self.root.snapshot,
-            bytes: self.root.bytes,
-            records: self.root.declarations.map(|_| self.root.clone()),
-            ..CheckProduct::empty(Arc::new(decode(self.root.identities.bytes(&self.bytes)?)?))
-        };
-        for &record in &self.root.files {
-            result
-                .files
-                .push(Arc::new(decode(record.bytes(&self.bytes)?)?));
-        }
-        for (path, &record) in &self.root.definitions {
-            result.definitions.insert(
-                path.clone(),
-                Arc::new(from_disk(decode(record.bytes(&self.bytes)?)?)),
-            );
-        }
-        Some(result)
-    }
-}
-
 impl Driver {
     pub fn check(
         &mut self,
@@ -447,23 +428,9 @@ impl Driver {
             meter.finish("snapshot reuse");
             return Ok(reused);
         }
-        let prior_hash = store.selection("check-root")?;
-        let prior = prior_hash
-            .map(|hash| Cache::open(&store, hash))
-            .transpose()?
-            .flatten();
-        if let Some(prior) = &prior
-            && prior.root.snapshot == snapshot
-            && let Some(cached) = prior.product(prior_hash.unwrap())
-        {
-            let mut cached = cached;
-            cached.image = image.clone();
-            let cached = Arc::new(cached);
-            self.published = Some(Arc::clone(&cached));
-            self.store = Some(request.store.clone());
-            meter.finish("snapshot reuse");
-            return Ok(cached);
-        }
+        let prior = check_index::ProgramIndex::open(&store)?;
+        let mut publication = check_index::Publication::new();
+        meter.finish("load/program index");
         let image_directory = image.as_ref().map(|i| i.directory()).transpose()?;
         meter.finish("package index demand");
 
@@ -682,19 +649,19 @@ impl Driver {
                         [&encode(&request.entry)?[..], &key.environment.0],
                     );
                 }
+                let key_hash = check_index::key_hash(&key)?;
+                // A resident product's record lives in the store it was published to.
                 let resident = self
                     .published
                     .as_ref()
+                    .filter(|_| same_store)
                     .and_then(|p| p.definitions.get(&fd.path))
                     .filter(|d| d.key == key)
                     .cloned();
                 let cached = if resident.is_some() {
                     resident
                 } else {
-                    prior
-                        .as_ref()
-                        .and_then(|p| p.definition(&fd.path, &key))
-                        .map(Arc::new)
+                    prior_definition(&store, &prior, &fd.path, &key, key_hash)?.map(Arc::new)
                 };
                 let product = if let Some(product) = cached {
                     product
@@ -721,7 +688,7 @@ impl Driver {
                         .collect();
                     let anchors = keys.capture_anchors(&check, &incomplete);
                     result.rechecked.push(fd.path.clone());
-                    Arc::new(DefinitionProduct {
+                    let mut product = DefinitionProduct {
                         definition: fd.path.clone(),
                         check,
                         ir: emitter.module,
@@ -729,8 +696,20 @@ impl Driver {
                         key,
                         anchors,
                         incomplete,
-                    })
+                        record: ContentHash::default(),
+                    };
+                    let (record, bytes) = Store::frame(&encode(&DiskCheckRef::of(&product)?)?);
+                    product.record = record;
+                    publication.bodies.push((record, bytes));
+                    Arc::new(product)
                 };
+                publication.rows.insert(
+                    fd.path.clone(),
+                    check_index::Row::Live {
+                        key: key_hash,
+                        body: product.record,
+                    },
+                );
                 if product.resolved {
                     for r in &product.check.refusals {
                         let mut r = r.clone();
@@ -770,15 +749,28 @@ impl Driver {
             }
         }
         meter.finish("check/lower");
-        let mut names: BTreeMap<ModuleId, Vec<Definition>> = BTreeMap::new();
-        for d in index.definitions.own_iter() {
-            names.entry(d.site.module).or_default().push(*d);
+        let mut names: BTreeMap<ModuleId, Vec<(DefinitionId, Definition)>> = BTreeMap::new();
+        let base = index.definitions.base_len();
+        for (i, d) in index.definitions.own_iter().enumerate() {
+            names
+                .entry(d.site.module)
+                .or_default()
+                .push((DefinitionId((base + i) as u32), *d));
         }
-        for (m, (_, path, _, _, source)) in modules.into_iter().zip(sources) {
-            let module_names = names.remove(&m.id).unwrap_or_default();
+        for (m, (path, file, _, bytes, source)) in modules.into_iter().zip(sources) {
+            let rows = names.remove(&m.id).unwrap_or_default();
+            publication.files.insert(
+                (
+                    path.package.name.clone(),
+                    path.package.version.clone(),
+                    path.modules.clone(),
+                ),
+                file_record(&index, &m, &bytes, source, &rows),
+            );
+            let module_names = rows.into_iter().map(|(_, d)| d).collect();
             result.files.push(Arc::new(FileProduct {
                 module: m.id,
-                path,
+                path: file,
                 source,
                 syntax: m.syntax,
                 names: module_names,
@@ -786,76 +778,8 @@ impl Driver {
         }
         meter.finish("publish/assemble products");
         result.headers = Arc::new(std::mem::take(&mut keys.headers));
-        result.root = store.archive(|writer| {
-            let identities = writer.record(index.as_ref())?;
-            let declarations = result
-                .library
-                .as_ref()
-                .map(|l| writer.record(l.as_ref()))
-                .transpose()?;
-            meter.finish("publish/index and declarations");
-            let headers = Arc::clone(&result.headers);
-            let mut files = Vec::with_capacity(result.files.len());
-            for file in &result.files {
-                files.push(writer.record(file.as_ref())?);
-            }
-            meter.finish("publish/file tables");
-            let mut definitions = BTreeMap::new();
-            for (path, d) in &result.definitions {
-                let c = d.check.counts;
-                let disk = DiskCheckRef {
-                    anchors: &d.anchors,
-                    key: &d.key,
-                    definition: path,
-                    refusals: &d.check.refusals,
-                    incomplete: &d.incomplete,
-                    counts: [c.nodes, c.uses, c.places, c.calls, c.types, c.bytes],
-                    template: &d.check.template,
-                    function: d.check.function.map(|f| f.0),
-                    ir: &d.ir,
-                    resolved: d.resolved,
-                };
-                definitions.insert(path.clone(), writer.record(&disk)?);
-            }
-            meter.finish("publish/definition tables");
-            // Root rows use borrowed diagnostics too. Footer owns only the offset index.
-            let footer = (
-                result.snapshot,
-                result.bytes,
-                identities,
-                &headers,
-                declarations,
-                &files,
-                &definitions,
-                &result.diagnostics,
-                &result.incomplete,
-                &result.resources,
-                &result.native_entry,
-                &result.test_entries,
-            );
-            let record = writer.record(&footer)?;
-            use std::io::Write;
-            writer.write_all(&record.start.to_le_bytes())?;
-            if declarations.is_some() {
-                result.records = Some(Root {
-                    snapshot: result.snapshot,
-                    bytes: result.bytes,
-                    identities,
-                    headers,
-                    declarations,
-                    files,
-                    definitions,
-                    diagnostics: vec![],
-                    incomplete: vec![],
-                    resources: vec![],
-                    native_entry: result.native_entry.clone(),
-                    test_entries: result.test_entries.clone(),
-                });
-            }
-            meter.finish("publish/footer");
-            Ok(())
-        })?;
-        store.publish_root(result.root)?;
+        result.root = publication.publish(&store, &prior)?;
+        meter.finish("publish/program index");
         let result = Arc::new(result);
         self.published = Some(Arc::clone(&result));
         self.store = Some(request.store.clone());
@@ -884,11 +808,69 @@ fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Option<T> {
         .deserialize(bytes)
         .ok()
 }
-fn from_disk(disk: DiskCheck) -> DefinitionProduct {
+/// A body record of the prior publication, when its live row and its
+/// content both carry the current key. Anything else is a miss.
+fn prior_definition(
+    store: &Store,
+    prior: &check_index::ProgramIndex,
+    path: &DefPath,
+    key: &DefinitionKey,
+    key_hash: ContentHash,
+) -> io::Result<Option<DefinitionProduct>> {
+    hirsel_core_front::cost_scope!("non-check", "prior body record read");
+    let Some((row_key, record)) = prior.live(path) else {
+        return Ok(None);
+    };
+    if row_key != key_hash {
+        return Ok(None);
+    }
+    let Some(disk) = store.get(record)?.and_then(|b| decode::<DiskCheck>(&b)) else {
+        return Ok(None);
+    };
+    Ok((disk.definition == *path && disk.key == *key).then(|| from_disk(disk, record)))
+}
+/// The file record: namespace map and anchor map (item ordinal, line base).
+fn file_record(
+    index: &NameIndex,
+    module: &ModuleInput,
+    bytes: &[u8],
+    source: ContentHash,
+    definitions: &[(DefinitionId, Definition)],
+) -> check_index::FileRecord {
+    let path = index.module_path(module.id);
+    let mut record = check_index::FileRecord {
+        module: (path.package.name, path.package.version, path.modules),
+        source,
+        names: BTreeMap::new(),
+        anchors: BTreeMap::new(),
+    };
+    let mut line = 0u32;
+    let mut at = 0usize;
+    let mut starts = BTreeMap::new();
+    for (i, item) in module.syntax.items().enumerate() {
+        let offset = (item.file_offset as usize).clamp(at, bytes.len());
+        line += bytes[at..offset].iter().filter(|&&b| b == b'\n').count() as u32;
+        at = offset;
+        starts.insert(i as u32, line);
+    }
+    for &(id, d) in definitions {
+        let def = index.definition_path(id);
+        if let Some(&line) = starts.get(&d.site.item) {
+            record.anchors.insert(d.site.item, (def.clone(), line));
+        }
+        record.names.insert(def.0.name.clone(), def);
+    }
+    record
+}
+fn from_disk(disk: DiskCheck, record: ContentHash) -> DefinitionProduct {
     let [nodes, uses, places, calls, types, bytes] = disk.counts;
     DefinitionProduct {
+        record,
         definition: disk.definition,
-        anchors: disk.anchors,
+        anchors: (0u32..)
+            .zip(disk.anchors)
+            .map(|(i, path)| ((ANCHORED, i), path))
+            .collect(),
         key: disk.key,
         incomplete: disk.incomplete,
         resolved: disk.resolved,

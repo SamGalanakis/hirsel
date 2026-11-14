@@ -42,10 +42,17 @@ fn token_identity(item: Item<'_>, end: usize, domain: &str) -> ContentHash {
     .expect("semantic token hash")
 }
 
+/// A body's identity is its item's source bytes from the item start. The
+/// record's sites and IR anchors are byte offsets from that start, so a
+/// leading comment or layout inside the item is part of what a reuse must
+/// match. A moved item keeps its bytes, so moved-line reuse holds.
 fn body_identity(item: Item<'_>) -> ContentHash {
-    token_identity(item, usize::MAX, "hirsel.body-tokens.v2")
+    ContentHash::of_parts("hirsel.item-source.v1", [item.source_text().as_bytes()])
 }
 
+/// A signature's identity is its header tokens: a reader's reported sites are
+/// all in its own item (`DiskCheckRef::of`), so the header's layout is not
+/// part of what a reader depends on.
 fn header_identity(item: Item<'_>) -> ContentHash {
     // Token spans are file offsets.
     let end = if matches!(
@@ -62,6 +69,8 @@ fn header_identity(item: Item<'_>) -> ContentHash {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Header {
     digest: ContentHash,
+    /// The item's source bytes, the body key's `body`.
+    source: ContentHash,
     // Publication preserves definition IDs, and requests append to that index.
     // Signature dependencies are already resolved by the producing request.
     pub(crate) reads: Vec<DefinitionId>,
@@ -204,6 +213,7 @@ impl Keys {
                 headers.names.insert(path, definition);
                 headers.rows[definition.0 as usize] = Some(Header {
                     digest,
+                    source: body_identity(item),
                     has_body: end < item.source_text().len(),
                     header_end: end as u32,
                     site: index.get(definition).site,
@@ -382,27 +392,6 @@ impl Keys {
         }
         Ok(self.closures.borrow()[&(start as u32)])
     }
-    /// The superseded per-body closure: every reached definition's path and
-    /// header digest. Kept only for the side-by-side differential against
-    /// `closure` until the old derivation is deleted.
-    pub(crate) fn legacy_signatures(
-        &self,
-        index: &NameIndex,
-        mut pending: Vec<usize>,
-    ) -> io::Result<BTreeMap<Arc<DefPath>, ContentHash>> {
-        let mut signatures = BTreeMap::new();
-        let mut seen = BTreeSet::new();
-        while let Some(id) = pending.pop() {
-            if !seen.insert(id) {
-                continue;
-            }
-            let path = self.path(index, hirsel_core_resolve::DefinitionId(id as u32));
-            let dependency = self.dependency(index, id)?;
-            signatures.insert(Arc::clone(path), dependency.digest);
-            pending.extend(dependency.reads.iter().map(|id| id.0 as usize));
-        }
-        Ok(signatures)
-    }
     /// The definitions whose signatures a body reads directly: its own header,
     /// every resolved name and every non-negative lookup result.
     fn signature_start(
@@ -448,8 +437,6 @@ impl Keys {
                 ))
             })?;
         let pending = Self::signature_start(index, module, own, resolution);
-        #[cfg(test)]
-        legacy::record(path, self.legacy_signatures(index, pending.clone())?);
         let signatures = {
             hirsel_core_front::cost_scope!("key work", "signature closure");
             let mut components = Vec::with_capacity(pending.len());
@@ -504,7 +491,7 @@ impl Keys {
                 .collect()
         };
         Ok(DefinitionKey {
-            body: body_identity(item),
+            body: self.dependency(index, own.0 as usize)?.source,
             signatures,
             lookups: ContentHash::of_bytes(&encode(&lookups)?),
             environment: self.environment,
@@ -596,7 +583,16 @@ fn header_end(item: Item<'_>) -> usize {
         .unwrap_or(item.source_text().len())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Tests stand in for another compiler build with another identity.
+    pub(crate) static TOOLCHAIN: std::cell::Cell<Option<ContentHash>> = const { std::cell::Cell::new(None) };
+}
 pub(crate) fn compiler_identity() -> io::Result<ContentHash> {
+    #[cfg(test)]
+    if let Some(identity) = TOOLCHAIN.get() {
+        return Ok(identity);
+    }
     static ID: std::sync::LazyLock<io::Result<ContentHash>> = std::sync::LazyLock::new(|| {
         hirsel_core_front::cost_scope!("non-check", "compiler executable identity");
         // The linker has already identified this executable. Read that immutable
@@ -637,35 +633,12 @@ fn compiler_stream_identity(reader: &mut (impl io::Read + io::Seek)) -> io::Resu
     Ok(ContentHash::of_bytes(&bytes))
 }
 
-/// Test-only capture of the superseded per-body closure, for the differential
-/// against the component closure hash. Deleted with `legacy_signatures`.
-#[cfg(test)]
-pub(crate) mod legacy {
-    use super::*;
-    type Captured = BTreeMap<DefPath, BTreeMap<Arc<DefPath>, ContentHash>>;
-    thread_local! {
-        static CAPTURE: std::cell::RefCell<Option<Captured>> = const { std::cell::RefCell::new(None) };
-    }
-    pub(crate) fn record(path: &DefPath, signatures: BTreeMap<Arc<DefPath>, ContentHash>) {
-        CAPTURE.with(|c| {
-            if let Some(c) = c.borrow_mut().as_mut() {
-                c.insert(path.clone(), signatures);
-            }
-        });
-    }
-    pub(crate) fn capture<T>(f: impl FnOnce() -> T) -> (T, Captured) {
-        CAPTURE.with(|c| *c.borrow_mut() = Some(BTreeMap::new()));
-        let result = f();
-        (result, CAPTURE.with(|c| c.borrow_mut().take().unwrap()))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn body_identity_ignores_moved_lines_but_tracks_semantic_edits() {
+    fn identity_follows_moved_items_and_tracks_their_own_bytes() {
         let parse = |source: &str| {
             hirsel_core_syntax::parse_bytes(
                 source.as_bytes(),
@@ -674,32 +647,26 @@ mod tests {
             )
             .syntax
         };
-        let original = parse("fn main() -> u64 {\n    7u64\n}\n");
-        let moved = parse("// moved\n// again\nfn main() -> u64 {\n    7u64\n}\n");
-        let changed = parse("fn main() -> u64 {\n    8u64\n}\n");
-        for file in [&original, &moved, &changed] {
-            assert_eq!(
-                file.tree.canonical_offsets.len(),
-                file.tree.tokens.len() + 1
-            );
-            assert!(
-                file.tree
-                    .canonical_slice(file.items[0].tokens.clone(), usize::MAX)
-                    .is_some()
-            );
-        }
-        assert_eq!(
-            header_identity(original.item(0)),
-            header_identity(moved.item(0))
+        // Item 1 is `main`. Moving it (item 0 gains lines) keeps its bytes; a
+        // comment line above it is part of its bytes and shifts every site in
+        // it, but leaves the header tokens its readers depend on.
+        let original = parse("fn a() -> u64 { 1 }\nfn main() -> u64 {\n    7u64\n}\n");
+        let moved = parse("fn a() -> u64 {\n    1\n}\nfn main() -> u64 {\n    7u64\n}\n");
+        let commented =
+            parse("fn a() -> u64 { 1 }\n// above main\nfn main() -> u64 {\n    7u64\n}\n");
+        let changed = parse("fn a() -> u64 { 1 }\nfn main() -> u64 {\n    8u64\n}\n");
+        let (o, m, c, x) = (
+            original.item(1),
+            moved.item(1),
+            commented.item(1),
+            changed.item(1),
         );
-        assert_eq!(
-            body_identity(original.item(0)),
-            body_identity(moved.item(0))
-        );
-        assert_ne!(
-            body_identity(original.item(0)),
-            body_identity(changed.item(0))
-        );
+        assert_eq!(header_identity(o), header_identity(m));
+        assert_eq!(body_identity(o), body_identity(m));
+        assert_eq!(header_identity(o), header_identity(c));
+        assert_ne!(body_identity(o), body_identity(c));
+        assert_eq!(header_identity(o), header_identity(x));
+        assert_ne!(body_identity(o), body_identity(x));
     }
 
     #[test]

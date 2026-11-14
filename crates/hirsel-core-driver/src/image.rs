@@ -206,7 +206,7 @@ impl CoreImage {
             })?;
             self.bodies.get_or_try_init(id as u64, || {
                 let disk = self.read::<DiskCheck>(directory.definitions[path])?;
-                Ok(Arc::new(from_disk(disk)))
+                Ok(Arc::new(from_disk(disk, directory.definitions[path])))
             })
         })
     }
@@ -258,21 +258,13 @@ impl Driver {
         }
         let store_path = request.store.clone();
         let product = self.check(request, meter)?;
-        if require_complete && !product.accepted() || product.records.is_none() {
+        let Some(library) = product.library.clone() else {
+            return Ok((product, None));
+        };
+        if require_complete && !product.accepted() {
             return Ok((product, None));
         }
         let store = Store::new(&store_path)?;
-        let library = if let Some(library) = &product.library {
-            Arc::clone(library)
-        } else {
-            // A foreign/missing image directory can be rebuilt from the ordinary
-            // cached check product without checking its source again.
-            let cache = Cache::open(&store, product.root)?.ok_or_else(miss)?;
-            let record = cache.root.declarations.ok_or_else(miss)?;
-            Arc::new(
-                decode::<Library>(record.bytes(&cache.bytes).ok_or_else(miss)?).ok_or_else(miss)?,
-            )
-        };
         let mut files = Vec::new();
         let mut sources = Map::default();
         for file in &product.files {
@@ -287,26 +279,10 @@ impl Driver {
                 row: store.put(&encode(file.as_ref())?)?,
             });
         }
+        // Image bodies are the program's own body records, already published.
         let mut definitions = Map::default();
         for (path, body) in &product.definitions {
-            let c = body.check.counts;
-            let disk = DiskCheckRef {
-                anchors: &body.anchors,
-                key: &body.key,
-                definition: path,
-                refusals: &body.check.refusals,
-                incomplete: &body.incomplete,
-                counts: [c.nodes, c.uses, c.places, c.calls, c.types, c.bytes],
-                template: &body.check.template,
-                function: body.check.function.map(|f| f.0),
-                ir: &body.ir,
-                resolved: body.resolved,
-            };
-            let hash = store.archive(|writer| {
-                writer.record(&disk)?;
-                Ok(())
-            })?;
-            definitions.insert(path.clone(), hash);
+            definitions.insert(path.clone(), body.record);
         }
         let mut anchors = Map::default();
         for (id, header) in product.headers.rows.iter().enumerate() {

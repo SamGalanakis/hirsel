@@ -96,8 +96,9 @@ reuse LIFO, all256 snapshots are retained, and each traversal includes the share
 There is one task/thread; no hash table, load factor or Map order applies.
 `graph_matched.rs` extracts the old reviewed intrusive-slot shape. The separate
 `graph_idiomatic.rs` uses std Vec<Option<Node>>, a generation Vec and a free-index Vec.
-Both are safe Rust with checked arithmetic. Idiomatic review925 is approved; matched review925 M1–M4 has a corrected delta
-awaiting recheck. Its ratios stay withheld until that review is recorded in the header. Malformed config controls reject zero nodes, an
+Both are safe Rust with checked arithmetic. Idiomatic review925 is approved; matched review925, recheck929 and the orchestrator's
+R1/R2 diff read approve the corrected source. The admission model has lighter bookkeeping
+than Hirsel; the analytic estimate10^5..10^6 I per snapshot phase favours Rust and raises H/R. Malformed config controls reject zero nodes, an
 unrepresentable u32 node count, and an out-of-range edge, with stale/foreign/cleared IDs.
 
 `service.py` runs only selected missing cells, writing raw JSONL outside the repo:
@@ -168,3 +169,33 @@ recording or arbitrary escaped-bound implementation. Both-profile allocation law
 all248 small-snapshot sub-budgets, exact successful boundaries, failed Pool growth returning
 its owner, and refund to the initial balance after each bounded run. No opaque barrier or
 optimization attribute prevents either compiler from proving successful admissions.
+
+
+`service_build.py` fills family build cells for graph, documents and JSON, separately
+for LLVM/opt3 and Cranelift/opt0. It uses the same canonical artifact JSON, CPU16 lock
+and2GiB cap. `--stage`/`--side` resume only missing configurations. Each group adds a
+temporary same-module `build_family` entry, without changing the shipped benchmark:
+graph calls its four lifetime phases; documents builds/scans all three representations;
+JSON calls its two existing parse/print entries with their separate input lifetimes.
+Checksums, including the edit's exact+1, are required after every native build.
+Check gets its own cold checked-product store. Fresh uses a different empty build
+store; reuse retains it; edit changes one +0 to+1 in the temporary entry body.
+Hirsel check is backend-independent: use `--reuse-hirsel-check` to reference the
+completed LLVM check for the Cranelift table. Rust check/build follows the selected
+profile; its unchanged recompile is not incremental. The runner preserves raw internal
+check/lower metrics, complete request/own source-line counts, I, RSS and wall seconds.
+A refused/missing build or wrong output is never a ratio. Imported Rust libraries are
+prebuilt, with both profile-specific serde dependency sets supplied explicitly.
+
+
+For the single final M2 Hirsel retake, select artifacts once at the commit named by the
+orchestrator, then run `service.py --matrix --stage runtime` once and
+`service.py --matrix --stage observe` once with the matching observed archive. Retain all
+qualified Rust rows; do not run `--stage twins` again. Select ordinary, sized, streaming,
+json_parse, json_print, exclusive, churn, rc, arc, lifetime, their individual *_capacity
+variants, graph_malformed, document_malformed, json_reject, json_capacity and json_utf8.
+Use separate `--events --phase arc` runs for the recording configuration. Artifacts are
+selected through core/tools/measurement_artifacts.py; observed emission never supplies
+I/RSS. The numeric family remains in layout/numeric under920's runner and ownership.
+Current completion rows establish the full matrix; the named-commit Hirsel-only pass
+supplies the final M2 numerator. Deliver those rows to889 after that pass.

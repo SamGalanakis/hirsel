@@ -1,4 +1,6 @@
-// Matched graph: review925 M1-M4 corrected; recheck pending. Ratios withheld.
+// Reviewed-by: twin-review-925, graph-twin-recheck-929, orchestrator R1/R2 diff read, 2026-11-14.
+// APPROVED for generated successful graph phases/lifetime and scoped malformed probes.
+// Admission bookkeeping is lighter than Hirsel: analytic bias10^5..10^6 I/snapshot phase, favours Rust and raises H/R.
 // Safe std-only Rust, one root funding domain, no extra counted-payload fields.
 // Logical admission is separate from physical layout/OOM. A host OOM stays fatal.
 use std::{

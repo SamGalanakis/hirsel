@@ -18,6 +18,13 @@ import measurement_artifacts
 import std_native
 from run import manifest, PHASES
 
+# The two own families, with each refusal/malformed phase kept separate.
+MATRIX = ['ordinary', 'sized', 'streaming', 'json_parse', 'json_print',
+          'exclusive', 'churn', 'rc', 'arc', 'lifetime',
+          'ordinary_capacity', 'sized_capacity', 'streaming_capacity',
+          'exclusive_capacity', 'churn_capacity', 'rc_capacity', 'arc_capacity',
+          'graph_malformed', 'document_malformed', 'json_reject', 'json_capacity', 'json_utf8']
+
 
 def save(args, row):
     with (args.out / 'results.jsonl').open('a') as out:
@@ -183,6 +190,7 @@ def main():
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--stage', choices=['runtime', 'observe', 'laws', 'twins'], required=True)
     parser.add_argument('--phase', action='append', choices=PHASES, default=[])
+    parser.add_argument('--matrix', action='store_true', help='all22 own-family runtime/observe phases; never Rust retakes')
     parser.add_argument('--backend', action='append', choices=['llvm', 'cranelift', 'evaluator'])
     parser.add_argument('--module', action='append', choices=['graph', 'documents', 'json'], default=[])
     parser.add_argument('--case', action='append')
@@ -190,6 +198,10 @@ def main():
     parser.add_argument('--skip-twin-laws', action='store_true', help='reuse completed laws when resuming missing twin cells')
     parser.add_argument('--events', action='store_true', help='separate Arc recording-sink configuration')
     args = parser.parse_args()
+    if args.matrix:
+        if args.phase or args.stage not in ['runtime', 'observe']:
+            parser.error('--matrix selects runtime/observe phases without --phase')
+        args.phase = MATRIX
     if args.events and (args.phase != ['arc'] or args.stage not in ['runtime', 'observe']):
         parser.error('--events requires the single arc runtime/observe phase')
     args.out = args.out.resolve()

@@ -208,6 +208,150 @@ fn rename_rejects_empty_and_nul_components_before_any_effect() {
         assert!(!f.root.join("bad").exists());
     }
 }
+/// Every entry of the fixture's root other than the standard streams: `f<bytes>`
+/// for a regular file, `d` for a directory, `l<target>` for a symbolic link.
+fn entries(root: &std::path::Path) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = std::fs::read_dir(root)
+        .unwrap()
+        .map(|e| e.unwrap())
+        .map(|e| e.file_name().into_string().unwrap())
+        .filter(|n| n != "stdout" && n != "stderr")
+        .map(|n| {
+            let p = root.join(&n);
+            let t = std::fs::symlink_metadata(&p).unwrap().file_type();
+            let v = if t.is_symlink() {
+                format!("l{}", std::fs::read_link(&p).unwrap().display())
+            } else if t.is_dir() {
+                "d".to_string()
+            } else {
+                format!(
+                    "f{}",
+                    String::from_utf8(std::fs::read(&p).unwrap()).unwrap()
+                )
+            };
+            (n, v)
+        })
+        .collect();
+    out.sort();
+    out
+}
+/// One case per sentence of core.md's `host.rename` paragraph; the expected tree is
+/// derived from the sentence, not from a run.
+#[test]
+fn rename_follows_each_sentence_of_core_md() {
+    crate::openat2_required::require();
+    /// Sentence, setup, `from`, `to`, the error tag, the tree after.
+    type Case = (
+        &'static str,
+        fn(&std::path::Path),
+        &'static str,
+        &'static str,
+        u8,
+        &'static [(&'static str, &'static str)],
+    );
+    let cases: [Case; 9] = [
+        (
+            "replaces a regular file at `to`",
+            |r| {
+                std::fs::write(r.join("a"), "1").unwrap();
+                std::fs::write(r.join("b"), "2").unwrap();
+            },
+            "a",
+            "b",
+            0,
+            &[("b", "f1")],
+        ),
+        (
+            "gives `from` the name `to`",
+            |r| std::fs::write(r.join("a"), "1").unwrap(),
+            "a",
+            "c",
+            0,
+            &[("c", "f1")],
+        ),
+        (
+            "a link at `from` is not followed",
+            |r| {
+                std::fs::write(r.join("a"), "1").unwrap();
+                std::os::unix::fs::symlink("a", r.join("l")).unwrap();
+            },
+            "l",
+            "c",
+            2,
+            &[("a", "f1"), ("l", "la")],
+        ),
+        (
+            "a link at `to` is not followed",
+            |r| {
+                std::fs::write(r.join("a"), "1").unwrap();
+                std::fs::write(r.join("t"), "2").unwrap();
+                std::os::unix::fs::symlink("t", r.join("l")).unwrap();
+            },
+            "a",
+            "l",
+            2,
+            &[("a", "f1"), ("l", "lt"), ("t", "f2")],
+        ),
+        (
+            // The sentence is unconditional: NotFound even where `to` alone is Denied.
+            "`from` absent is NotFound",
+            |r| std::fs::create_dir(r.join("b")).unwrap(),
+            "a",
+            "b",
+            1,
+            &[("b", "d")],
+        ),
+        (
+            "`from` a directory is Denied",
+            |r| std::fs::create_dir(r.join("a")).unwrap(),
+            "a",
+            "c",
+            2,
+            &[("a", "d")],
+        ),
+        (
+            "`to` a directory is Denied",
+            |r| {
+                std::fs::write(r.join("a"), "1").unwrap();
+                std::fs::create_dir(r.join("b")).unwrap();
+            },
+            "a",
+            "b",
+            2,
+            &[("a", "f1"), ("b", "d")],
+        ),
+        (
+            "the same name succeeds and changes nothing",
+            |r| std::fs::write(r.join("a"), "1").unwrap(),
+            "a",
+            "a",
+            0,
+            &[("a", "f1")],
+        ),
+        (
+            "two names of the same file succeed and change nothing",
+            |r| {
+                std::fs::write(r.join("a"), "1").unwrap();
+                std::fs::hard_link(r.join("a"), r.join("b")).unwrap();
+            },
+            "a",
+            "b",
+            0,
+            &[("a", "f1"), ("b", "f1")],
+        ),
+    ];
+    for (sentence, setup, from, to, tag, want) in cases {
+        let mut f = Fixture::new();
+        setup(&f.root);
+        let path = [from.as_bytes(), b"\0", to.as_bytes()].concat();
+        let got = f.simple(RENAME, f.dir, &path, 0).error.tag;
+        let want: Vec<(String, String)> = want
+            .iter()
+            .map(|(n, v)| (n.to_string(), v.to_string()))
+            .collect();
+        assert_eq!((got, entries(&f.root)), (tag, want), "{sentence}");
+    }
+}
 #[test]
 fn invalid_host_paths_are_denied_before_any_effect() {
     for operation in [OPEN, MKDIR, REMOVE, REMOVE_TREE] {

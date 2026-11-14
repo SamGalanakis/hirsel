@@ -27,5 +27,17 @@ d30f980d; the case gave 0).
 ## replace = 1
 Writes "1" to `a` and "2" to `b`, renames `a` to `b`, reads `b`. core.md says rename
 replaces a regular file at the target, which is what publishing over a stale name relies on:
-value 1 when `b` holds "1". Red on the evaluator, giving 0: its rename returns Exists for an
-existing target (eval.rs `HostOp::Rename`).
+value 1 when `b` holds "1". Catches: a rename that refuses an existing target (the evaluator
+returned Exists and gave 0 before core-form-883's FORM #105).
+
+## rename_refusals = 122011
+core.md's other rename sentences in one directory holding the file `a` ("1") and the
+directory `m`, one decimal digit each (0 Ok, 1 NotFound, 2 Denied, 3 Exists, 4 Closed,
+5 Other): `x` (absent) to `m` is NotFound (1, the sentence is unconditional, though `m`
+alone would be Denied); `m` to `c` is Denied, `from` not a regular file (2); `a` to `m`
+is Denied, `to` a directory (2); `a` to `a` succeeds (0); `a` still reads "1" (1, the
+errors and the same-name rename renamed nothing); `c` is absent (1). Catches: a rename that
+moves a directory, replaces one, reports Other for one (native renameat's EISDIR), or
+moves a file onto its own name. Symbolic links, which core.md also does not follow, are
+not in the evaluator's world; the native provider's table covers them
+(crates/hirsel-core-rt/src/provider_tests.rs).

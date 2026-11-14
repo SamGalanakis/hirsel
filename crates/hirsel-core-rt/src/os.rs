@@ -177,6 +177,20 @@ impl OsProvider {
                     parent(self.directories[&request.handle].as_raw_fd(), from)?;
                 let (to_parent, to_name) =
                     parent(self.directories[&request.handle].as_raw_fd(), to)?;
+                // core.md: only a regular file is renamed, only a regular file is
+                // replaced, and neither final component is followed. renameat alone
+                // would move a directory or a link, or replace a link.
+                match leaf_kind(&from_parent, &from_name)? {
+                    None => return Err(io::Error::from_raw_os_error(libc::ENOENT)),
+                    Some(kind) if kind != libc::S_IFREG => {
+                        return Err(io::Error::from_raw_os_error(libc::EACCES));
+                    }
+                    Some(_) => {}
+                }
+                if leaf_kind(&to_parent, &to_name)?.is_some_and(|kind| kind != libc::S_IFREG) {
+                    return Err(io::Error::from_raw_os_error(libc::EACCES));
+                }
+                // SAFETY: pinned parents and single NUL-terminated leaves.
                 syscall(unsafe {
                     libc::renameat(
                         from_parent.as_raw_fd(),
@@ -496,6 +510,29 @@ fn parent(fd: i32, path: &[u8]) -> io::Result<(OwnedFd, CString)> {
         beneath(fd, prefix, libc::O_PATH | libc::O_DIRECTORY)?,
         CString::new(name)?,
     ))
+}
+/// The file type (`S_IFMT` bits) of `name` in `parent`, not following a final link;
+/// `None` when nothing has that name.
+fn leaf_kind(parent: &OwnedFd, name: &CString) -> io::Result<Option<libc::mode_t>> {
+    // SAFETY: zeroed stat is a valid out-parameter for fstatat.
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: pinned parent, NUL-terminated leaf, live out-parameter.
+    let rc = unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            &mut st,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if rc == 0 {
+        return Ok(Some(st.st_mode & libc::S_IFMT));
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ENOENT) {
+        return Ok(None);
+    }
+    Err(error)
 }
 fn remove(fd: i32, name: &CString) -> io::Result<()> {
     // SAFETY: unlinkat never follows the final symlink; directory removal is retried explicitly.

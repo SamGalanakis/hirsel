@@ -152,6 +152,48 @@ pub fn case_replace(d: Dir) -> u64 waits {
     }
 }
 
+/// 0 for Ok, then NotFound 1, Denied 2, Exists 3, Closed 4, Other 5.
+fn io(r: Result[(), IoError]) -> u64 {
+    match r {
+        Ok(()) => 0,
+        Error(NotFound) => 1,
+        Error(Denied) => 2,
+        Error(Exists) => 3,
+        Error(Closed) => 4,
+        Error(Other(_)) => 5,
+    }
+}
+
+// core.md's other rename sentences, one digit each (rename_refusals in SPEC.md).
+pub fn case_rename_refusals(d: Dir) -> u64 waits {
+    let Ok(one) = text("1") else {
+        return 900
+    }
+    if let Error(_) = std.file.write(d, "a", one) {
+        return 901
+    }
+    if let Error(_) = std.dir.create_dir(d, "m") {
+        return 902
+    }
+    let absent = io(host.rename(d, "x", "m"))
+    let from_dir = io(host.rename(d, "m", "c"))
+    let to_dir = io(host.rename(d, "a", "m"))
+    let same = io(host.rename(d, "a", "a"))
+    let kept: u64 = match std.file.read(d, "a") {
+        Ok(b) => if b == one {
+            1
+        } else {
+            3
+        },
+        Error(_) => 4,
+    }
+    let moved: u64 = match std.file.read(d, "c") {
+        Ok(_) => 0,
+        Error(_) => 1,
+    }
+    absent * 100000 + from_dir * 10000 + to_dir * 1000 + same * 100 + kept * 10 + moved
+}
+
 fn line(out: Stdout, v: u64) -> Result[(), Exit] waits {
     let mut s = string.new()
     if let Error(_) = string.push_u64(mut s, v) {
@@ -178,6 +220,9 @@ pub fn main(out: Stdout, d: Dir, c: Clock, argv: Args) -> Result[(), Exit] waits
     }
     if name == "replace" {
         return line(out, case_replace(d))
+    }
+    if name == "rename_refusals" {
+        return line(out, case_rename_refusals(d))
     }
     let mut s = m2b.spool.stats()
     if name == "measure" {

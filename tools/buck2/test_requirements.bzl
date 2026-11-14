@@ -23,6 +23,7 @@ OPENAT2_TEST_CASES = {
         "host_ops_tests::already_reached_sleep_until_returns_at_once",
         "provider_tests::temp_basename_matches_the_completed_carrier_and_invalid_prefixes_do_not_create",
         "provider_tests::temp_collisions_retry_inside_issue_and_exhaustion_preserves_the_carrier",
+        "provider_tests::rename_follows_each_sentence_of_core_md",
     ],
     "hirsel-core-driver-unittest": [
         "native::tests::dir_cranelift_entry",

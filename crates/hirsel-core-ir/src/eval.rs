@@ -66,7 +66,10 @@ pub struct Checked {
 ///   same key holds it (then 0). `mkdtemp` appends `t<k>` to the name, k from 0,
 ///   and returns a new `Dir`; it fails with `Bounds` when the name has fewer than
 ///   32 spare bytes. `mkdir` of an existing key is `Exists`; `remove` and
-///   `remove_tree` of a missing one `NotFound`.
+///   `remove_tree` of a missing one `NotFound`. `rename` moves a file to the
+///   new key, replacing a file there; a directory at either key is `Denied`.
+///   Open files refer to keys, so one open on a renamed or replaced name reads
+///   what is at that name now.
 /// - Nothing is ever cancelled.
 #[derive(Default)]
 struct World {
@@ -575,12 +578,18 @@ impl Machine<'_> {
             HostOp::Rename => {
                 let from = (a[0], self.carrier(a[1]).0);
                 let to = (a[0], self.carrier(a[2]).0);
-                if !self.world.nodes.contains_key(&from) {
-                    return Ok(error(NOT_FOUND));
+                // core.md: a regular file `from` takes the name `to` in the one `Dir`,
+                // replacing a regular file there; anything else at either name is
+                // `Denied` and renames nothing.
+                match self.world.nodes.get(&from) {
+                    None => return Ok(error(NOT_FOUND)),
+                    Some(Node::Dir) => return Ok(error(DENIED)),
+                    Some(Node::File(_)) => {}
                 }
-                if self.world.nodes.contains_key(&to) {
-                    return Ok(error(EXISTS));
+                if let Some(Node::Dir) = self.world.nodes.get(&to) {
+                    return Ok(error(DENIED));
                 }
+                // The same name: removed and put back, unchanged.
                 let node = self.world.nodes.remove(&from).unwrap();
                 self.world.nodes.insert(to, node);
                 ok(0, 0)

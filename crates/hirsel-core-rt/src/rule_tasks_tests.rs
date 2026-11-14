@@ -102,14 +102,20 @@ unsafe extern "C" fn abandon(context: *mut Context, out: *mut u8, _: *mut u8) ->
                 },
             },
         );
-        (*context).cancel_requested = true;
+        (*context)
+            .cancel_requested
+            .store(true, std::sync::atomic::Ordering::Release);
         hirsel_core_task_drop(context, task.task);
-        let pending = (*context).cancel_requested;
+        let pending = (*context)
+            .cancel_requested
+            .load(std::sync::atomic::Ordering::Acquire);
         let clean = (*context).causes.iter().next().is_none();
         // Let the caller inspect cleanup, pending-request preservation and no failure.
         out.cast::<u64>()
             .write(witness + 100 * u64::from(pending) + 1000 * u64::from(clean));
-        (*context).cancel_requested = false;
+        (*context)
+            .cancel_requested
+            .store(false, std::sync::atomic::Ordering::Release);
     }
     0
 }

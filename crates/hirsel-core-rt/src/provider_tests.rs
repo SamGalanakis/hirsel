@@ -469,7 +469,9 @@ fn mkdtemp_bounds_and_pending_cancellation_happen_before_issue() {
         };
         // SAFETY: live operands; fixture owns the context's pending request flag.
         unsafe {
-            (*f.context).cancel_requested = cancel;
+            (*f.context)
+                .cancel_requested
+                .store(cancel, std::sync::atomic::Ordering::Release);
             assert_eq!(
                 hirsel_core_host(f.context, &provider, &mut request).status,
                 1
@@ -504,7 +506,9 @@ fn issued_operations_deliver_even_when_cancellation_arrives_at_delivery() {
             state
                 .effect
                 .extend_from_slice(std::slice::from_raw_parts((*request).buffer.data, 2));
-            (*state.context).cancel_requested = true;
+            (*state.context)
+                .cancel_requested
+                .store(true, std::sync::atomic::Ordering::Release);
         }
         Outcome {
             written: 2,

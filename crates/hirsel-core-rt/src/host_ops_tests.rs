@@ -17,6 +17,9 @@ enum Scenario {
     Bounds(usize),
     Cancel,
     SleepCancel,
+    SleepMeasure(u64),
+    SleepAlreadyReached,
+    SleepCancelDuring,
 }
 struct State {
     os: Option<Box<crate::os::OsProvider>>,
@@ -347,16 +350,65 @@ unsafe extern "C" fn entry(ctx: *mut Context, cfg: *const Config, _: *mut MainRe
                 1
             }
             Scenario::Cancel => {
-                (*ctx).cancel_requested = true;
+                (*ctx)
+                    .cancel_requested
+                    .store(true, std::sync::atomic::Ordering::Release);
                 assert_eq!(call(ctx, STDOUT, 3, Some(&mut literal(b"no")), 0).status, 1);
                 assert_eq!(call(ctx, WALL_MS, 2, None, 0).status, 0);
                 assert_eq!(call(ctx, MONO_NS, 2, None, 0).status, 0);
                 1
             }
             Scenario::SleepCancel => {
-                (*ctx).cancel_requested = true;
+                (*ctx)
+                    .cancel_requested
+                    .store(true, std::sync::atomic::Ordering::Release);
                 let out = hirsel_core_host_sleep_until(ctx, 2, 3, 123);
                 assert_eq!(out.status, 1);
+                1
+            }
+            Scenario::SleepMeasure(milliseconds) => {
+                let before_mono = call(ctx, MONO_NS, 2, None, 120).value;
+                let before_wall = call(ctx, WALL_MS, 2, None, 121).value;
+                let deadline = before_mono.saturating_add(milliseconds * 1_000_000);
+                let out = hirsel_core_host_sleep_until(ctx, 2, deadline, 122);
+                assert_eq!(out.status, 0);
+                let after_mono = call(ctx, MONO_NS, 2, None, 123).value;
+                let after_wall = call(ctx, WALL_MS, 2, None, 124).value;
+                (*state).observed.extend_from_slice(&[
+                    before_mono,
+                    after_mono,
+                    before_wall,
+                    after_wall,
+                ]);
+                0
+            }
+            Scenario::SleepAlreadyReached => {
+                let before = call(ctx, MONO_NS, 2, None, 126).value;
+                let out = hirsel_core_host_sleep_until(ctx, 2, before, 127);
+                assert_eq!(out.status, 0);
+                (*state)
+                    .observed
+                    .push(call(ctx, MONO_NS, 2, None, 128).value);
+                0
+            }
+            Scenario::SleepCancelDuring => {
+                let context_address = (ctx as usize);
+                let canceller = std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    // SAFETY: the child thread only flips the atomic cancellation
+                    // flag while the run's entry remains synchronously active.
+                    unsafe {
+                        (*(context_address as *mut Context))
+                            .cancel_requested
+                            .store(true, std::sync::atomic::Ordering::Release);
+                    }
+                });
+                let start = std::time::Instant::now();
+                let out = hirsel_core_host_sleep_until(ctx, 2, u64::MAX / 2, 125);
+                let elapsed = start.elapsed();
+                canceller.join().unwrap();
+                assert_eq!(out.status, 1);
+                assert!(elapsed < std::time::Duration::from_millis(500));
                 1
             }
             Scenario::Unavailable => files(ctx, state, false),
@@ -507,6 +559,68 @@ fn fixture(scripted: bool, scenario: Scenario, args: &[&[u8]]) -> (u8, Box<State
 fn every_host_op_routes_to_the_host_and_records_delivery() {
     crate::openat2_required::require();
     assert_child_passes("host_ops_tests::real_host_operations_child");
+}
+#[test]
+fn live_sleep_until_waits_on_host_clock_and_advances_wall() {
+    let started = std::time::Instant::now();
+    let output = child_case("host_ops_tests::live_sleep_until_50ms_child");
+    let elapsed = started.elapsed();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        elapsed >= std::time::Duration::from_millis(30),
+        "{elapsed:?}"
+    );
+    assert!(elapsed < std::time::Duration::from_secs(1), "{elapsed:?}");
+}
+#[test]
+#[ignore = "real monotonic wait fixture, invoked by parent"]
+fn live_sleep_until_50ms_child() {
+    crate::openat2_required::require();
+    let (status, state) = fixture(false, Scenario::SleepMeasure(50), &[]);
+    assert_eq!(status, 0);
+    assert_eq!(state.observed.len(), 4);
+    assert!(state.observed[1] >= state.observed[0] + 40_000_000);
+    assert!(state.observed[3] > state.observed[2]);
+}
+#[test]
+fn replay_sleep_until_does_not_wait() {
+    let started = std::time::Instant::now();
+    let (status, state) = fixture(true, Scenario::SleepMeasure(50), &[]);
+    assert_eq!(status, 0);
+    assert_eq!(state.observed, [41, 41, 37, 37]);
+    assert!(started.elapsed() < std::time::Duration::from_millis(20));
+}
+#[test]
+fn already_reached_sleep_until_returns_at_once() {
+    crate::openat2_required::require();
+    let started = std::time::Instant::now();
+    let (status, state) = fixture(false, Scenario::SleepAlreadyReached, &[]);
+    assert_eq!(status, 0);
+    assert_eq!(state.observed.len(), 1);
+    assert!(started.elapsed() < std::time::Duration::from_millis(20));
+}
+#[test]
+fn sleep_until_cancel_during_wait_is_prompt() {
+    let started = std::time::Instant::now();
+    let output = child_case("host_ops_tests::sleep_until_cancel_during_wait_child");
+    let elapsed = started.elapsed();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(elapsed < std::time::Duration::from_secs(1), "{elapsed:?}");
+}
+#[test]
+#[ignore = "real cancellation wait fixture, invoked by parent"]
+fn sleep_until_cancel_during_wait_child() {
+    crate::openat2_required::require();
+    let (status, _) = fixture(false, Scenario::SleepCancelDuring, &[]);
+    assert_eq!(status, 101);
 }
 #[test]
 #[ignore = "isolated ffi assertion fixture, invoked by parent"]

@@ -2,6 +2,7 @@
 //! canonicalization. openat2 resolves every traversal beneath its granted fd.
 use crate::provider::*;
 use std::{
+    cell::Cell,
     collections::BTreeMap,
     ffi::CString,
     io,
@@ -11,12 +12,23 @@ use std::{
 };
 pub(crate) const TEMP_ATTEMPTS: usize = 128;
 
+thread_local! {
+    static CURRENT_CONTEXT: Cell<*mut crate::Context> = const { Cell::new(std::ptr::null_mut()) };
+}
+
+pub(crate) fn set_current_context(context: *mut crate::Context) -> *mut crate::Context {
+    CURRENT_CONTEXT.with(|current| current.replace(context))
+}
+
+fn current_context() -> *mut crate::Context {
+    CURRENT_CONTEXT.with(Cell::get)
+}
+
 pub struct OsProvider {
     directories: BTreeMap<u64, OwnedFd>,
     files: BTreeMap<u64, OwnedFd>,
     next: u64,
     clock: Instant,
-    last_mono: u64,
     temporary: u64,
     pub stdout: OwnedFd,
     pub stderr: OwnedFd,
@@ -32,7 +44,6 @@ impl OsProvider {
             files: BTreeMap::new(),
             next: 1,
             clock: Instant::now(),
-            last_mono: 0,
             temporary: 0,
             stdout,
             stderr,
@@ -271,18 +282,90 @@ impl OsProvider {
                 } else {
                     0
                 };
-                self.last_mono = self.last_mono.max(deadline);
+                if self.sleep_until(deadline, request.site)? {
+                    out.status = 1;
+                }
             }
             MONO_NS => {
-                let now = u64::try_from(self.clock.elapsed().as_nanos())
-                    .unwrap_or_else(|_| crate::process::stop(b"Clock"));
-                self.last_mono = now.max(self.last_mono);
-                out.value = self.last_mono;
+                out.value = self.monotonic_ns();
             }
             _ => unreachable!(),
         }
         Ok(out)
     }
+
+    fn monotonic_ns(&self) -> u64 {
+        u64::try_from(self.clock.elapsed().as_nanos())
+            .unwrap_or_else(|_| crate::process::stop(b"Clock"))
+    }
+
+    /// Wait on the host monotonic clock. The short absolute slices let a
+    /// cancellation requested by another scheduler participant be observed
+    /// without ever advancing the clock value ourselves.
+    fn sleep_until(&self, deadline: u64, site: u64) -> io::Result<bool> {
+        const SLICE_NS: u64 = 1_000_000;
+        loop {
+            let now = self.monotonic_ns();
+            if now >= deadline {
+                return Ok(false);
+            }
+            let context = current_context();
+            if !context.is_null() {
+                // SAFETY: the provider callback pins this task context for the
+                // synchronous operation and the cancellation flag is atomic.
+                if unsafe { crate::tasks::check_cancel(context, site) } != 0 {
+                    return Ok(true);
+                }
+            }
+            let wait = deadline.saturating_sub(now).min(SLICE_NS);
+            let absolute = monotonic_clock_ns()?
+                .checked_add(wait)
+                .ok_or_else(|| io::Error::from_raw_os_error(libc::EOVERFLOW))?;
+            let timespec = ns_to_timespec(absolute)?;
+            // SAFETY: CLOCK_MONOTONIC and TIMER_ABSTIME use a valid timespec.
+            let result = unsafe {
+                libc::clock_nanosleep(
+                    libc::CLOCK_MONOTONIC,
+                    libc::TIMER_ABSTIME,
+                    &timespec,
+                    std::ptr::null_mut(),
+                )
+            };
+            if result != 0 && result != libc::EINTR {
+                return Err(io::Error::from_raw_os_error(result));
+            }
+        }
+    }
+}
+
+fn monotonic_clock_ns() -> io::Result<u64> {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: valid writable timespec for the host monotonic clock.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let seconds =
+        u64::try_from(now.tv_sec).map_err(|_| io::Error::from_raw_os_error(libc::EOVERFLOW))?;
+    let nanos =
+        u64::try_from(now.tv_nsec).map_err(|_| io::Error::from_raw_os_error(libc::EOVERFLOW))?;
+    seconds
+        .checked_mul(1_000_000_000)
+        .and_then(|value| value.checked_add(nanos))
+        .ok_or_else(|| io::Error::from_raw_os_error(libc::EOVERFLOW))
+}
+
+fn ns_to_timespec(ns: u64) -> io::Result<libc::timespec> {
+    let seconds = ns / 1_000_000_000;
+    let nanos = ns % 1_000_000_000;
+    Ok(libc::timespec {
+        tv_sec: libc::time_t::try_from(seconds)
+            .map_err(|_| io::Error::from_raw_os_error(libc::EOVERFLOW))?,
+        tv_nsec: libc::c_long::try_from(nanos)
+            .map_err(|_| io::Error::from_raw_os_error(libc::EOVERFLOW))?,
+    })
 }
 
 /// # Safety

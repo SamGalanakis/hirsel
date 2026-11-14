@@ -125,14 +125,18 @@ unsafe extern "C" fn entry(ctx: *mut Context, cfg: *const Config, _: *mut MainRe
                 IoError::OK
             );
         } else if mode == "cancelled_close" {
-            (*ctx).cancel_requested = true;
+            (*ctx)
+                .cancel_requested
+                .store(true, std::sync::atomic::Ordering::Release);
             assert_eq!(
                 hirsel_core_host_file(ctx, file, &mut request(CLOSE)).status,
                 1
             );
         } else if mode != "teardown" {
             // Pending cancellation cannot interfere with mechanical cleanup.
-            (*ctx).cancel_requested = true;
+            (*ctx)
+                .cancel_requested
+                .store(true, std::sync::atomic::Ordering::Release);
             hirsel_core_hostfile_drop(ctx, file);
         }
         if mode == "refusal" {

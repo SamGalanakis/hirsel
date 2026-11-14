@@ -98,7 +98,9 @@ unsafe extern "C" fn delivery(state: *mut u8, request: *mut Request, result: Out
         }
         tape.at += 1;
         if (*request).operation == WRITE {
-            (*tape.context).cancel_requested = true;
+            (*tape.context)
+                .cancel_requested
+                .store(true, std::sync::atomic::Ordering::Release);
         }
     }
     result

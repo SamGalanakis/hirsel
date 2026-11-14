@@ -545,7 +545,9 @@ fn cancelled_joiner_retains_handle_for_shielded_abandonment() {
                 add,
                 layout::<u64, u64>(8),
             );
-            (*context).cancel_requested = true;
+            (*context)
+                .cancel_requested
+                .store(true, std::sync::atomic::Ordering::Release);
             assert_eq!(hirsel_core_join(context, h.task, dest, 51).status, 1);
             hirsel_core_task_drop(context, h.task);
             assert_eq!(

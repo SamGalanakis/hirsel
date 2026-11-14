@@ -32,6 +32,7 @@ mod standalone_allocator;
 pub mod tasks;
 
 use limit::Funding;
+use std::sync::atomic::AtomicBool;
 
 /// MEM-22. Also used for the error portion of C allocation results.
 #[repr(C)]
@@ -54,7 +55,7 @@ pub struct Context {
     /// for the task's run, then cleared when the root returns.
     pub events: usize,
     pub(crate) run: *const crate::process::Config,
-    pub(crate) cancel_requested: bool,
+    pub(crate) cancel_requested: AtomicBool,
     pub(crate) cancel_shield: usize,
     pub(crate) finalizing: usize,
     pub(crate) bound_depth: usize,
@@ -80,7 +81,7 @@ impl Context {
             current,
             events: 0,
             run: std::ptr::null(),
-            cancel_requested: false,
+            cancel_requested: AtomicBool::new(false),
             cancel_shield: 0,
             finalizing: 0,
             bound_depth: 0,

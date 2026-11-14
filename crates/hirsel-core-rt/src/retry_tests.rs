@@ -129,7 +129,11 @@ unsafe extern "C" fn child(ctx: *mut Context, _: *mut u8, input: *mut u8) -> u8 
             assert!(full);
         }
         assert!((*input.trace).parent_ran);
-        assert!((*ctx).cancel_requested);
+        assert!(
+            (*ctx)
+                .cancel_requested
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
         let failed = hirsel_core_check_cancel(ctx, 77);
         assert_eq!(failed, 1);
         hirsel_core_sender_drop(input.ready);

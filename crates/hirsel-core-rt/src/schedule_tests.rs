@@ -325,7 +325,9 @@ unsafe extern "C" fn root(context: *mut Context, _: *mut u8, input: *mut u8) -> 
             hirsel_core_cancel(context, handles[plan.cancel as usize - 1].unwrap());
         }
         if plan.cancel == 4 {
-            (*context).cancel_requested = true;
+            (*context)
+                .cancel_requested
+                .store(true, std::sync::atomic::Ordering::Release);
         } // inject the joiner's parent's request
         if plan.abandon {
             return cleanup(context, &mut handles, &mut senders, &mut receivers);

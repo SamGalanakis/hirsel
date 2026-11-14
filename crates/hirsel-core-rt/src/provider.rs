@@ -118,8 +118,11 @@ pub unsafe extern "C" fn hirsel_core_host(
             }
         }
         let provider = &*provider;
+        let previous = crate::os::set_current_context(context);
         let outcome = (provider.issue)(provider.state, request);
-        (provider.deliver)(provider.state, request, outcome)
+        let outcome = (provider.deliver)(provider.state, request, outcome);
+        crate::os::set_current_context(previous);
+        outcome
     }
 }
 

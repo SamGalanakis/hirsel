@@ -403,7 +403,10 @@ pub unsafe fn check_cancel(context: *mut Context, site: u64) -> u8 {
     // SAFETY: the operation pins its exclusive, aligned task context. Pending
     // cancellation is the common false condition; shield/grant checks are cold.
     let current = unsafe { NonNull::new_unchecked(context).as_ref() };
-    if current.cancel_requested && current.finalizing == 0 && current.cancel_shield == 0 {
+    if current.cancel_requested.load(Ordering::Acquire)
+        && current.finalizing == 0
+        && current.cancel_shield == 0
+    {
         // SAFETY: this task exclusively owns the observed request and primary.
         unsafe { observe_cancel(context, site) };
         1
@@ -416,7 +419,7 @@ pub unsafe fn check_cancel(context: *mut Context, site: u64) -> u8 {
 unsafe fn observe_cancel(context: *mut Context, site: u64) {
     // SAFETY: the operation entry exclusively owns this task context.
     unsafe {
-        (*context).cancel_requested = false;
+        (*context).cancel_requested.store(false, Ordering::Release);
         causes::record(&mut *context, Cause::new(causes::CANCELLED, site));
         event(CANCELLED, 0, site);
     }
@@ -641,7 +644,9 @@ pub unsafe extern "C" fn hirsel_core_spawn(
 pub unsafe extern "C" fn hirsel_core_cancel(_: *mut Context, task: *mut Task) {
     // SAFETY: parent owns the child's handle and requests without touching its stack.
     unsafe {
-        (*(*task).context).cancel_requested = true;
+        (*(*task).context)
+            .cancel_requested
+            .store(true, Ordering::Release);
         event(CANCEL, (*task).id, 0);
         wake();
     }

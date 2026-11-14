@@ -228,7 +228,9 @@ fn joined_child_keeps_primary_and_finalizer_sites_and_report_order() {
 unsafe extern "C" fn cancelled(ctx: *mut Context, _: *const Config, _: *mut MainResult) -> u8 {
     // SAFETY: isolated task owns its cancellation flag and primary cell.
     unsafe {
-        (*ctx).cancel_requested = true;
+        (*ctx)
+            .cancel_requested
+            .store(true, std::sync::atomic::Ordering::Release);
         crate::tasks::hirsel_core_check_cancel(ctx, PRIMARY)
     }
 }

@@ -91,6 +91,7 @@ fn linux_c_results_execute_with_mixed_fields_padding_and_hfas() -> std::result::
                 facts: false,
                 aliases: None,
                 caller_site: "0",
+                debug_location: None,
                 anchor: None,
                 relocatable_sites: false,
                 private_float: vec![],
@@ -300,7 +301,7 @@ int main(void) {{
     for target in [Target::X86_64Linux, Target::Aarch64Linux] {
         for speed in [false, true] {
             for facts in [false, true] {
-                let ir = emit_ir_target_with_facts(&module, target, false, facts).unwrap();
+                let ir = emit_ir_target_with_facts(&module, target, false, facts, false).unwrap();
                 let object = hirsel_llvm_lazy::compile_ir_for_target(&ir, speed, target).unwrap();
                 std::fs::write(dir.join("probe.o"), object).unwrap();
                 let compiler = match target {

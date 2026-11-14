@@ -236,6 +236,7 @@ fn atomic_helpers_use_checked_cas_and_release_acquire() {
         facts: true,
         aliases: None,
         caller_site: "0",
+        debug_location: None,
         anchor: None,
         relocatable_sites: false,
         private_float: Vec::new(),

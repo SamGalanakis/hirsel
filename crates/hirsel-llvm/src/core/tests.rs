@@ -160,7 +160,7 @@ fn scalar_checked_add_keeps_wrapped_results_and_failure_edges() {
 
 #[test]
 fn native_allocator_refusals_are_reported_run_stops() {
-    host_memory::check(
+    host_memory::check_with_site(
         |module| emit_object(module, Optimization::Speed).unwrap(),
         symbol,
     );
@@ -209,6 +209,7 @@ struct NativeReport {
     admissions: usize,
     messages: Vec<String>,
     arc_events: Vec<(u8, u64)>,
+    sites: Vec<u64>,
     peak_reserved: Option<u64>,
 }
 fn has_hostfile_field(shape: &hirsel_core_layout::Shape) -> bool {
@@ -477,7 +478,7 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
             writeln!(c,"uint64_t b{k}_{j}=0; memcpy(&b{k}_{j},&r{k}.r{j},{}); printf(\" %llu\",(unsigned long long)b{k}_{j});",size(t)).unwrap();
         }
         c.push_str("}\n");
-        writeln!(c,"HirselCoreCauseCell *chain=hirsel_core_causes_take(ctx); if({status}) for(const HirselCoreCauseCell *p=chain;p;p=hirsel_core_cause_next(p)) printf(\" %s\",causes[hirsel_core_cause_kind(hirsel_core_cause_value(p))]); printf(\"|%llu|\",(unsigned long long)(initial-hirsel_core_test_available(ctx))); for(size_t i=0;i<traces;i++) printf(\" %llu\",(unsigned long long)trace[i]); printf(\"|%zu|\",hirsel_core_test_attempts(ctx)); for(const HirselCoreCauseCell *p=chain;p;p=hirsel_core_cause_next(p)) if(hirsel_core_cause_kind(hirsel_core_cause_value(p))==4) {{ const HirselCoreStringMessage *msg=&hirsel_core_cause_value(p)->message; for(uint64_t i=0;i<msg->len;i++) printf(\"%02x\",((const unsigned char *)msg->data)[i]); printf(\" \"); }} printf(\"|\"); for(size_t j=0;j<arc_count;j++) printf(\" %u:%llu\",arc_events[j].kind,(unsigned long long)arc_events[j].value); printf(\"\\n\"); hirsel_core_causes_drop(chain); return 0; }}").unwrap();
+        writeln!(c,"HirselCoreCauseCell *chain=hirsel_core_causes_take(ctx); if({status}) for(const HirselCoreCauseCell *p=chain;p;p=hirsel_core_cause_next(p)) printf(\" %s\",causes[hirsel_core_cause_kind(hirsel_core_cause_value(p))]); printf(\"|%llu|\",(unsigned long long)(initial-hirsel_core_test_available(ctx))); for(size_t i=0;i<traces;i++) printf(\" %llu\",(unsigned long long)trace[i]); printf(\"|%zu|\",hirsel_core_test_attempts(ctx)); for(const HirselCoreCauseCell *p=chain;p;p=hirsel_core_cause_next(p)) if(hirsel_core_cause_kind(hirsel_core_cause_value(p))==4) {{ const HirselCoreStringMessage *msg=&hirsel_core_cause_value(p)->message; for(uint64_t i=0;i<msg->len;i++) printf(\"%02x\",((const unsigned char *)msg->data)[i]); printf(\" \"); }} printf(\"|\"); for(size_t j=0;j<arc_count;j++) printf(\" %u:%llu\",arc_events[j].kind,(unsigned long long)arc_events[j].value); printf(\"|\"); for(const HirselCoreCauseCell *p=chain;p;p=hirsel_core_cause_next(p)) printf(\" %llu\",(unsigned long long)hirsel_core_cause_value(p)->site); printf(\"\\n\"); hirsel_core_causes_drop(chain); return 0; }}").unwrap();
     }
     invocations.push_str("return 0;}\n");
     c.push_str(&invocations);
@@ -557,6 +558,12 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
                         (kind.parse().unwrap(), value.parse().unwrap())
                     })
                     .collect(),
+                sites: parts
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .map(|s| s.parse().unwrap())
+                    .collect(),
             }
         })
         .collect()
@@ -588,6 +595,28 @@ fn agree_cases(module: &Module, cases: &[Case], memory: bool) {
             got.outcome, expected.outcome,
             "f{}({:?})",
             case.function.0, case.args
+        );
+        let actual_sites = got
+            .sites
+            .iter()
+            .map(|word| {
+                (*word != 0).then(|| {
+                    (
+                        module.items[((word >> 32) - 1) as usize].clone(),
+                        *word as u32,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let expected_sites = expected
+            .sites
+            .iter()
+            .map(|a| a.map(|a| (module.items[a.item.index()].clone(), a.start)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual_sites, expected_sites,
+            "failure sites f{}",
+            case.function.0
         );
         if let Some(peak) = got.peak_reserved {
             assert_eq!(peak, expected.peak_reserved, "peak reservation");
@@ -2404,7 +2433,7 @@ fn aarch64_memory_custody_and_calls_match_the_evaluator() {
         assert!(!cases.is_empty());
         for speed in [false, true] {
             for facts in [false, true] {
-                let ir = emit_ir_target_with_facts(&module, target, false, facts).unwrap();
+                let ir = emit_ir_target_with_facts(&module, target, false, facts, false).unwrap();
                 let object = hirsel_llvm_lazy::compile_ir_for_target(&ir, speed, target).unwrap();
                 let got = execute_target_object(
                     &module,
@@ -2442,4 +2471,220 @@ fn aarch64_memory_custody_and_calls_match_the_evaluator() {
         }
     }
     println!("ARM runtime sample and refusal executions: {count}");
+}
+
+fn assert_relative_debug_rows(bytes: &[u8], module: &Module) {
+    use object::{Object as _, ObjectSection as _};
+    let file = object::File::parse(bytes).unwrap();
+    let data = file.section_by_name(".debug_line").unwrap().data().unwrap();
+    let strings = file.section_by_name(".debug_str").unwrap().data().unwrap();
+    let strings = gimli::DebugStr::new(strings, gimli::LittleEndian);
+    let text = |value: gimli::AttributeValue<gimli::EndianSlice<'_, gimli::LittleEndian>>| {
+        value
+            .string_value(&strings)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    };
+    let line = gimli::DebugLine::new(data, gimli::LittleEndian);
+    let mut offset = 0;
+    let mut mapped = 0;
+    while offset < data.len() {
+        let program = line
+            .program(gimli::DebugLineOffset(offset), 8, None, None)
+            .unwrap();
+        let length = program.header().unit_length() as usize;
+        let mut rows = program.rows();
+        while let Some((header, row)) = rows.next_row().unwrap() {
+            if row.end_sequence() {
+                continue;
+            }
+            let Some(line) = row.line() else {
+                continue;
+            };
+            let entry = row.file(header).unwrap();
+            let path = text(entry.path_name());
+            let directory = header
+                .directory(entry.directory_index())
+                .map(&text)
+                .unwrap_or_default();
+            let path = if directory.is_empty() {
+                path
+            } else {
+                format!("{directory}/{path}")
+            };
+            let item = hirsel_core_ids::DefPath::from_full(&path)
+                .unwrap_or_else(|| panic!("not an item identity: {path}"));
+            let item = module.items.iter().position(|p| *p == item).unwrap();
+            let start = (line.get() - 1) as u32;
+            assert!(
+                start == 0
+                    || module
+                        .functions
+                        .iter()
+                        .filter_map(|f| f.body.as_ref())
+                        .any(|b| b
+                            .inst_anchors
+                            .iter()
+                            .flatten()
+                            .chain(b.blocks.iter().filter_map(|b| b.anchor.as_ref()))
+                            .any(|a| a.item.index() == item && a.start == start)),
+                "debug offset {start} in {path}"
+            );
+            mapped += 1;
+        }
+        offset += 4 + length;
+    }
+    assert!(mapped > 0, "no item-relative machine rows");
+}
+
+fn site_fixture(target: Target) {
+    use object::{Object as _, ObjectSection as _};
+    let core = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
+    let (module, names) = front::lower(
+        include_str!("../../../../core/front/cases/body/failure-sites.hirsel"),
+        &core,
+        "main",
+    )
+    .unwrap();
+    let cases = [
+        ("add", u64::MAX),
+        ("at", 3),
+        ("raise", 3),
+        ("relay", 3),
+        ("twice", u64::MAX),
+        ("first", 0),
+        ("finalize", 0),
+        ("both", 0),
+        ("sites", 1),
+    ]
+    .map(|(name, arg)| Case {
+        function: names[name],
+        args: vec![arg],
+        limit: u64::MAX,
+        injection: None,
+    });
+    let mut bindings = String::new();
+    for (i, item) in module.items.iter().enumerate() {
+        writeln!(
+            bindings,
+            "const uint64_t {} = UINT64_C({});",
+            hirsel_core_ir::source::site_symbol(item),
+            (i as u64 + 1) << 32
+        )
+        .unwrap();
+    }
+    for (opt, composed) in [
+        (Optimization::None, false),
+        (Optimization::Speed, false),
+        (Optimization::Speed, true),
+    ] {
+        let bytes = if composed {
+            let ir = emit_ir_relocatable_for_target(&module, target, false).unwrap();
+            let exports = cases
+                .iter()
+                .map(|case| symbol(&module, case.function))
+                .collect::<Vec<_>>();
+            hirsel_llvm_lazy::emit_program_for_target(
+                &[hirsel_llvm_lazy::Unit {
+                    ir: &ir,
+                    imported: false,
+                }],
+                &exports,
+                target,
+            )
+            .unwrap()
+        } else {
+            emit_object_relocatable_for_target(&module, target, opt, false).unwrap()
+        };
+        let file = object::File::parse(bytes.as_slice()).unwrap();
+        for name in [".debug_info", ".debug_line"] {
+            assert!(
+                !file
+                    .section_by_name(name)
+                    .unwrap()
+                    .data()
+                    .unwrap()
+                    .is_empty(),
+                "{name}"
+            );
+        }
+        assert_relative_debug_rows(&bytes, &module);
+        if !composed {
+            // The eager unit harness includes drop-trace hooks. Compile exactly its
+            // IR on the lazy bridge so the parity check has identical producer inputs.
+            let ir = emit_ir_relocatable_for_target(&module, target, false).unwrap();
+            let lazy = hirsel_llvm_lazy::compile_ir_for_target(
+                &ir,
+                matches!(opt, Optimization::Speed),
+                target,
+            )
+            .unwrap();
+            let left = object::File::parse(bytes.as_slice()).unwrap();
+            let right = object::File::parse(lazy.as_slice()).unwrap();
+            let differences = left
+                .sections()
+                .filter_map(|section| {
+                    let name = section.name().unwrap();
+                    let a = section.data().unwrap();
+                    let b = right
+                        .section_by_name(name)
+                        .map(|s| s.data().unwrap())
+                        .unwrap_or(&[]);
+                    (a != b).then(|| {
+                        (
+                            name.to_owned(),
+                            a.len(),
+                            b.len(),
+                            a.iter().zip(b).position(|(a, b)| a != b),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                bytes == lazy,
+                "eager/lazy {opt:?} object parity: {differences:?}"
+            );
+        }
+        let reports =
+            execute_target_object(&module, &cases, &bindings, "", opt, Some(bytes), target);
+        for (case, got) in cases.iter().zip(reports) {
+            let expected = eval::run(&module, case.function, &case.args, u64::MAX);
+            assert_eq!(got.outcome, expected.outcome);
+            let actual = got
+                .sites
+                .iter()
+                .map(|word| {
+                    (*word != 0).then(|| {
+                        (
+                            module.items[((word >> 32) - 1) as usize].clone(),
+                            *word as u32,
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+            let expected = expected
+                .sites
+                .iter()
+                .map(|a| a.map(|a| (module.items[a.item.index()].clone(), a.start)))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                actual, expected,
+                "resolved cause sites, function {}",
+                case.function.0
+            );
+        }
+    }
+    println!("native failure-site observations: {}", cases.len() * 3);
+}
+
+#[test]
+fn failure_sites_and_relative_debug_rows_match_the_evaluator() {
+    site_fixture(Target::X86_64Linux);
+}
+
+#[test]
+#[ignore = "explicit AArch64 runtime integration target"]
+fn aarch64_failure_sites_and_relative_debug_rows_match_the_evaluator() {
+    site_fixture(Target::Aarch64Linux);
 }

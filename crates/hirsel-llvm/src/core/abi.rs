@@ -419,6 +419,7 @@ impl FunctionEmitter<'_> {
         text: &mut String,
     ) {
         self.code.clear();
+        self.debug_location = None;
         self.allocations.clear();
         self.next = 0;
         self.has_status = true;

@@ -102,12 +102,12 @@ pub fn emit_ir_with_charge_observation(module: &Module, observe_charge: bool) ->
 
 /// Emit CoreIR with the requested Linux calling convention.
 pub fn emit_ir_for_target(module: &Module, target: Target, observe_charge: bool) -> Result<String> {
-    emit_ir_target_with_facts(module, target, observe_charge, facts_enabled())
+    emit_ir_target_with_facts(module, target, observe_charge, facts_enabled(), false)
 }
 
 #[cfg(all(test, not(hirsel_lazy_core)))]
 fn emit_ir_with_facts(module: &Module, observe_charge: bool, facts: bool) -> Result<String> {
-    emit_ir_target_with_facts(module, Target::X86_64Linux, observe_charge, facts)
+    emit_ir_target_with_facts(module, Target::X86_64Linux, observe_charge, facts, false)
 }
 
 fn emit_ir_target_with_facts(
@@ -115,6 +115,7 @@ fn emit_ir_target_with_facts(
     target: Target,
     observe_charge: bool,
     facts: bool,
+    relocatable_sites: bool,
 ) -> Result<String> {
     let mut text = String::new();
     for (i, data) in module.statics.iter().enumerate() {
@@ -135,6 +136,7 @@ fn emit_ir_target_with_facts(
     let mut intrinsics = BTreeSet::new();
     let mut next_scope = 2;
     let failures = failure::Failures::new(module);
+    let debug = sites::debug_plan(module, &failures, &mut next_scope, &mut intrinsics);
     for (i, f) in module.functions.iter().enumerate() {
         let sig = &module.signatures[f.signature.index()];
         let has_status = failures.may_fail[i];
@@ -155,13 +157,15 @@ fn emit_ir_target_with_facts(
             .unwrap();
             continue;
         };
+        let function_debug = debug[i].as_ref();
         let aliases = facts
             .then(|| alias::Scopes::new(module, f, &name, &mut next_scope, &mut intrinsics))
             .flatten();
         let mut e = FunctionEmitter {
             caller_site: "%caller_site",
+            debug_location: function_debug.map(|d| d.location(None)),
             anchor: None,
-            relocatable_sites: false,
+            relocatable_sites,
             private_float: private_float::addresses(body),
             value_slots: values::slots(body),
             aliases,
@@ -206,6 +210,7 @@ fn emit_ir_target_with_facts(
         // producer's cleanup CFG.
         for (index, inst) in body.insts.iter().enumerate() {
             if matches!(inst, Inst::Const { .. }) {
+                e.debug_location = function_debug.map(|d| d.location(body.inst_anchors[index]));
                 e.inst(inst, index)?;
             }
         }
@@ -233,6 +238,8 @@ fn emit_ir_target_with_facts(
             let ending = forwarding.ending(module, &recipes, sig, e.constants, i);
             let mut returned = false;
             for (offset, inst) in b.insts.get(&body.insts).unwrap().iter().enumerate() {
+                e.debug_location = function_debug
+                    .map(|d| d.location(body.inst_anchors[b.insts.start as usize + offset]));
                 if let Some(ending) = &ending
                     && offset == ending.prefix
                     && {
@@ -249,6 +256,7 @@ fn emit_ir_target_with_facts(
             }
             if !returned {
                 e.anchor = b.anchor;
+                e.debug_location = function_debug.map(|d| d.location(b.anchor));
                 e.term(&body.terminators[i])?;
             }
         }
@@ -275,10 +283,13 @@ fn emit_ir_target_with_facts(
             .unwrap_or_default();
         writeln!(
             text,
-            "define {linkage}{} @{body_name}({}){destination}{} {{\nentry:\n{}{} }}",
+            "define {linkage}{} @{body_name}({}){destination}{}{} {{\nentry:\n{}{} }}",
             e.abi.return_type(),
             params.join(", "),
             abi::view_input_marker(sig),
+            function_debug
+                .map(|d| format!(" !dbg !{}", d.scope))
+                .unwrap_or_default(),
             e.allocations,
             e.code
         )
@@ -311,6 +322,15 @@ fn emit_ir_target_with_facts(
     Ok(text)
 }
 
+/// Emit source-independent IR whose failure sites bind to the fresh link table.
+pub fn emit_ir_relocatable_for_target(
+    module: &Module,
+    target: Target,
+    observe_charge: bool,
+) -> Result<String> {
+    emit_ir_target_with_facts(module, target, observe_charge, facts_enabled(), true)
+}
+
 /// Compile CoreIR to an owned ELF object for x86-64 Linux. This uses the
 /// retained LLVM target/handle machinery, without the old product pipeline.
 /// The caller supplies its linker and entry harness; objects have FORM symbols.
@@ -334,15 +354,51 @@ pub fn emit_object_for_target(
     opt: Optimization,
     observe_charge: bool,
 ) -> Result<Vec<u8>> {
+    emit_object_site_binding(module, target, opt, observe_charge, false)
+}
+
+/// Compile a cached native unit with item relocation symbols and synthetic DWARF.
+/// File identities and byte offsets are source-independent; the driver binds both
+/// cause words and debug rows against its current source table at the final link.
+pub fn emit_object_relocatable_for_target(
+    module: &Module,
+    target: Target,
+    opt: Optimization,
+    observe_charge: bool,
+) -> Result<Vec<u8>> {
+    emit_object_site_binding(module, target, opt, observe_charge, true)
+}
+
+fn emit_object_site_binding(
+    module: &Module,
+    target: Target,
+    opt: Optimization,
+    observe_charge: bool,
+    relocatable_sites: bool,
+) -> Result<Vec<u8>> {
     #[cfg(not(hirsel_lazy_core))]
     {
-        compile_observation(module, target, opt, observe_charge, |_| (), |_| ())
-            .map(|(bytes, ())| bytes)
+        compile_observation(
+            module,
+            target,
+            opt,
+            observe_charge,
+            relocatable_sites,
+            |_| (),
+            |_| (),
+        )
+        .map(|(bytes, ())| bytes)
     }
     #[cfg(hirsel_lazy_core)]
     {
         crate::loader::compile(
-            &emit_ir_for_target(module, target, observe_charge)?,
+            &emit_ir_target_with_facts(
+                module,
+                target,
+                observe_charge,
+                facts_enabled(),
+                relocatable_sites,
+            )?,
             matches!(opt, Optimization::Speed),
             target,
         )
@@ -383,7 +439,15 @@ fn compile<R>(
     inspect: impl FnOnce(&LlvmModule<'_>) -> R,
     observer: impl FnMut(CompilationStage),
 ) -> Result<(Vec<u8>, R)> {
-    compile_observation(module, Target::X86_64Linux, opt, false, inspect, observer)
+    compile_observation(
+        module,
+        Target::X86_64Linux,
+        opt,
+        false,
+        false,
+        inspect,
+        observer,
+    )
 }
 
 #[cfg(not(hirsel_lazy_core))]
@@ -392,11 +456,18 @@ fn compile_observation<R>(
     target: Target,
     opt: Optimization,
     observe_charge: bool,
+    relocatable_sites: bool,
     inspect: impl FnOnce(&LlvmModule<'_>) -> R,
     mut observer: impl FnMut(CompilationStage),
 ) -> Result<(Vec<u8>, R)> {
     observer(CompilationStage::TextConstruction);
-    let ir = emit_ir_for_target(module, target, observe_charge)?;
+    let ir = emit_ir_target_with_facts(
+        module,
+        target,
+        observe_charge,
+        facts_enabled(),
+        relocatable_sites,
+    )?;
     observer(CompilationStage::TargetSetup);
     let machine =
         TargetMachine::core(target, matches!(opt, Optimization::Speed)).map_err(Error::Llvm)?;
@@ -446,6 +517,7 @@ struct FunctionEmitter<'a> {
     facts: bool,
     aliases: Option<alias::Scopes>,
     caller_site: &'static str,
+    debug_location: Option<usize>,
     anchor: Option<Anchor>,
     relocatable_sites: bool,
     private_float: Vec<bool>,
@@ -466,7 +538,19 @@ impl FunctionEmitter<'_> {
         }
     }
     fn line(&mut self, s: impl AsRef<str>) {
-        writeln!(self.code, "  {}", s.as_ref()).unwrap();
+        let s = s.as_ref();
+        let metadata = self.debug_location.filter(|_| {
+            !s.ends_with(':')
+                && !s.ends_with('[')
+                && !s.as_bytes().first().is_some_and(|c| {
+                    *c == b'i' && s.as_bytes().get(1).is_some_and(u8::is_ascii_digit)
+                })
+        });
+        if let Some(location) = metadata {
+            writeln!(self.code, "  {s}, !dbg !{location}").unwrap();
+        } else {
+            writeln!(self.code, "  {s}").unwrap();
+        }
     }
     fn fresh(&mut self) -> String {
         let n = self.next;

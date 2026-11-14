@@ -60,6 +60,7 @@ pub(super) fn emit(
             facts,
             aliases: None,
             caller_site: "0",
+            debug_location: None,
             anchor: None,
             relocatable_sites: false,
             private_float: Vec::new(),

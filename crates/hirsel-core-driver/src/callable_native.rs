@@ -236,3 +236,28 @@ fn scoped_environment_placement_cranelift(){scoped_environment_placement(Backend
 #[test]
 #[ignore="explicit native integration target"]
 fn scoped_environment_placement_llvm(){scoped_environment_placement(Backend::Llvm);}
+
+fn current_callback_descriptors(backend: Backend) {
+    ordered_case(backend, include_str!("../../../core/front/cases/body/callable-captured-current.hirsel"));
+    let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir=tempfile::tempdir().unwrap();
+    for (source,call) in [
+        (include_str!("../../../core/front/cases/body/callable-captured-replaced-refused.hirsel"),"checked()"),
+        (include_str!("../../../core/front/cases/body/callable-local-nested-mode-refused.hirsel"),"f()"),
+    ] {
+        let source=format!("{source}\npub fn main()->Result[(),Exit] {{{call};Ok(())}}\n");
+        let mut request=source_request(&source,dir.path());
+        request.inputs.packages[1]=PackageManifest::directory(&root.join("core/core"),package("core"),true).unwrap();
+        let product=Driver::default().check(request,&mut Meter::new(false)).unwrap();
+        assert_eq!(product.diagnostics.iter().map(|d|d.rule.as_str()).collect::<Vec<_>>(),["OWN-9"]);
+        assert!(product.incomplete.is_empty());
+        let entry=DefPath::from_full("app@1/main/main").unwrap();
+        assert!(matches!(product.build(&entry,&native_options(backend,dir.path())),Err(NativeStop::Check(message)) if message.contains("OWN-9")));
+    }
+}
+#[test]
+#[ignore="explicit native integration target"]
+fn current_callback_descriptors_cranelift(){current_callback_descriptors(Backend::Cranelift);}
+#[test]
+#[ignore="explicit native integration target"]
+fn current_callback_descriptors_llvm(){current_callback_descriptors(Backend::Llvm);}

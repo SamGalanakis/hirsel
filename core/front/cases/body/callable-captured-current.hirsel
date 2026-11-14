@@ -1,0 +1,192 @@
+// Current callback-place reads are resolved at invocation, with field precision.
+// expect: run direct() = 7
+// expect: run fields() = 107
+// expect: run copied() = 107
+// expect: run nested() = 7
+// expect: run captureless() = 7
+// expect: run coalesced() = 14
+// expect: run cycle() = 1
+fn use_callback(f: scoped fn(), mut n: u64) {
+    f();
+    n += 1
+}
+
+fn direct() -> u64 {
+    let mut a: u64 = 1;
+    let mut b: u64 = 2
+    let mut q = scoped fn() {
+        a += 10
+    }
+    let invoke = scoped fn() {
+        q()
+    }
+    q = scoped fn() {
+        b += 3
+    }
+    use_callback(invoke, mut a)
+    a + b
+}
+
+fn fields() -> u64 {
+    let mut a: u64 = 1;
+    let mut b: u64 = 2;
+    let mut c: u64 = 3
+    let mut p = (scoped fn() {
+        a += 1
+    }, scoped fn() {
+        b += 10
+    })
+    let invoke = scoped fn() {
+        p.0()
+    }
+    p.0 = scoped fn() {
+        c += 100
+    }
+    use_callback(invoke, mut b)
+    a + b + c
+}
+
+fn copied() -> u64 {
+    let mut a: u64 = 1;
+    let mut b: u64 = 2;
+    let mut c: u64 = 3
+    let mut p = (scoped fn() {
+        a += 1
+    }, scoped fn() {
+        b += 10
+    })
+    let invoke = scoped fn() {
+        let q = view p;
+        q.0()
+    }
+    p.0 = scoped fn() {
+        c += 100
+    }
+    use_callback(invoke, mut b)
+    a + b + c
+}
+
+fn nested() -> u64 {
+    let mut a: u64 = 1;
+    let mut b: u64 = 2
+    let mut q = scoped fn() {
+        a += 10
+    }
+    let invoke = scoped fn() {
+        let inner = scoped fn() {
+            q()
+        };
+        inner()
+    }
+    q = scoped fn() {
+        b += 3
+    }
+    use_callback(invoke, mut a)
+    a + b
+}
+
+fn captureless() -> u64 {
+    let mut a: u64 = 1;
+    let mut b: u64 = 2
+    let mut q: scoped fn() = fn() {}
+    let invoke = scoped fn() {
+        q()
+    }
+    q = scoped fn() {
+        b += 3
+    }
+    use_callback(invoke, mut a)
+    a + b
+}
+
+fn coalesced() -> u64 {
+    let mut a: u64 = 1;
+    let mut b: u64 = 2;
+    let mut c: u64 = 3
+    let mut q = scoped fn() {
+        a += 10
+    }
+    let mut r = scoped fn() {
+        c += 10
+    }
+    let invoke = scoped fn() {
+        q();
+        r()
+    }
+    q = scoped fn() {
+        b += 3
+    }
+    r = scoped fn() {
+        b += 4
+    }
+    use_callback(invoke, mut a)
+    a + b + c
+}
+
+fn cycle() -> u64 {
+    let mut a: u64 = 1
+    let recur = false
+    let mut q = scoped fn() {
+        a += 1
+    }
+    let invoke = scoped fn() {
+        q()
+    }
+    q = scoped fn() {
+        if recur {
+            q()
+        }
+    }
+    invoke()
+    a
+}
+
+fn observe(f: scoped fn() -> u64, a: u64) -> u64 {
+    f() + a
+}
+
+// expect: run modes() = 8
+fn modes() -> u64 {
+    let mut a: u64 = 1;
+    let mut b: u64 = 2
+    let mut q = scoped fn() {
+        a += 1
+    }
+    let invoke = scoped fn() -> u64 {
+        let before = a;
+        q();
+        before
+    }
+    q = scoped fn() {
+        b += 3
+    }
+    let n = observe(invoke, a)
+    n + a + b
+}
+
+fn reset_alias(mut dst: scoped fn(u64) -> u64) {
+    let setter = scoped fn() {
+        dst = dst
+    }
+    setter()
+}
+
+// expect: run alias() = 6
+fn alias() -> u64 {
+    let mut a: u64 = 1
+    let mut cb = scoped fn(x: u64) -> u64 {
+        a += x;
+        a
+    }
+    reset_alias(mut cb)
+    let n = cb(2)
+    n + a
+}
+
+pub fn main() -> Result[(), Exit] {
+    if direct() + fields() + copied() + nested() + captureless() + coalesced() + cycle() + modes() + alias() == 264u64 {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
+}

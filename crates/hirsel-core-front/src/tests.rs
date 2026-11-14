@@ -3302,7 +3302,7 @@ fn scoped_callable_environment_placement() {
         "callable-written-anchor-refused",
         "callable-scoped-mode-gap",
         "callable-mut-captured-reset-gap",
-        "callable-captured-replaced-gap",
+        "callable-captured-replaced-refused",
     ] {
         failures.extend(run_case(
             &root().join("cases/body").join(format!("{name}.hirsel")),
@@ -3381,4 +3381,16 @@ fn checked()->u64 {
         eval::run(&emitter.module, root, &[], 100_000).outcome,
         eval::Outcome::Returned(vec![7])
     );
+}
+
+#[test]
+fn captured_callbacks_use_current_descriptors() {
+    let mut failures = run_case(&root().join("cases/body/callable-captured-current.hirsel"));
+    failures.extend(run_case(
+        &root().join("cases/body/callable-captured-replaced-refused.hirsel"),
+    ));
+    failures.extend(run_case(
+        &root().join("cases/body/callable-local-nested-mode-refused.hirsel"),
+    ));
+    assert!(failures.is_empty(), "{failures:?}");
 }

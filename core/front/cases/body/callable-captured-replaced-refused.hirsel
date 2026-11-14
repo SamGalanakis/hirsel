@@ -1,5 +1,5 @@
 // A snapshot of q must not miss the later b capture and accept an OWN-9 conflict.
-// expect: gap replacing a callback after another closure captured it is not built
+// expect: refuse OWN-9 at 10:22
 fn use_callback(f:scoped fn(),mut n:u64){f();n+=1}
 fn checked(){
  let mut a:u64=0
@@ -9,3 +9,4 @@ fn checked(){
  q=scoped fn(){b+=1}
  use_callback(invoke,mut b)
 }
+// expect: cause OWN-9 at 10:22 from 10:15

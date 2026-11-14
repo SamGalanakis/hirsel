@@ -775,6 +775,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             outer_descriptors: std::mem::take(&mut self.descriptors),
             by_slot: vec![None; self.vars.len()],
             captures: vec![],
+            callbacks: vec![],
+            callback_paths: vec![],
+            activating: false,
             words: 0,
             environments: vec![],
             environment: None,
@@ -796,6 +799,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         child.run_row(row, body);
         std::mem::swap(&mut child.t, &mut self.t);
         let mut frame = child.capture_frame.take().unwrap();
+        frame.callback_paths = std::mem::take(&mut child.descriptors.paths);
         self.descriptors = std::mem::take(&mut frame.outer_descriptors);
         let out = child.finish();
         let function = out.function;
@@ -885,6 +889,16 @@ pub(super) struct Capture {
     mode: Mode,
     offset: u64,
     site: NodeId,
+    /// Some(path) reads the callback currently stored in this outer place.
+    path: Option<u32>,
+    /// Runtime address needed only while checking a callback's known snapshot.
+    synthetic: bool,
+}
+
+#[derive(Clone, Copy)]
+struct CapturePath {
+    parent: u32,
+    field: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -900,6 +914,9 @@ pub(super) struct CaptureFrame {
     outer_descriptors: Descriptors,
     by_slot: Vec<Option<usize>>,
     captures: Vec<Capture>,
+    callbacks: Vec<Capture>,
+    callback_paths: Vec<CapturePath>,
+    activating: bool,
     words: u32,
     environments: Vec<CapturedEnvironment>,
     pub(super) environment: Option<ValueId>,
@@ -926,8 +943,70 @@ pub(super) struct Descriptors {
     environments: Vec<EnvironmentOrigin>,
     parts: Vec<(anchors::Component, u32)>,
     imports: HashMap<u32, u32>,
+    paths: Vec<CapturePath>,
+    activation: Vec<Capture>,
+    activation_path: Vec<u32>,
+    references: HashMap<(u32, u32), u32>,
+    projections: HashMap<(u32, u32), u32>,
 }
 impl Descriptors {
+    fn path_field(&mut self, parent: u32, field: u32) -> u32 {
+        self.paths.push(CapturePath { parent, field });
+        self.paths.len() as u32
+    }
+    fn import_path(&mut self, paths: &[CapturePath], path: u32) -> u32 {
+        if path == 0 {
+            return 0;
+        }
+        let p = paths[path as usize - 1];
+        let parent = self.import_path(paths, p.parent);
+        self.path_field(parent, p.field)
+    }
+    fn same_path(&self, mut a: u32, mut b: u32) -> bool {
+        while a != b {
+            if a == 0 || b == 0 {
+                return false;
+            }
+            let (x, y) = (self.paths[a as usize - 1], self.paths[b as usize - 1]);
+            if x.field != y.field {
+                return false;
+            }
+            a = x.parent;
+            b = y.parent;
+        }
+        true
+    }
+    fn same_capture(&self, a: Capture, b: Capture) -> bool {
+        a.slot == b.slot
+            && match (a.path, b.path) {
+                (None, None) => true,
+                (Some(a), Some(b)) => self.same_path(a, b),
+                _ => false,
+            }
+    }
+    fn reference(&mut self, slot: u32, path: u32, site: NodeId) -> u32 {
+        if let Some(&id) = self.references.get(&(slot, path)) {
+            return id;
+        }
+        let id = self.ranges.len() as u32;
+        self.ranges.push(PoolRange::push(
+            &mut self.captures,
+            [Capture {
+                slot,
+                path: Some(path),
+                synthetic: false,
+                mode: Mode::View,
+                offset: 0,
+                site,
+            }],
+        ));
+        self.environments
+            .push(EnvironmentOrigin { site, local: false });
+        self.fields.push(PoolRange::EMPTY);
+        self.references.insert((slot, path), id);
+        id
+    }
+
     fn opaque(&mut self, id: Option<u32>) -> Option<u32> {
         let old = id?;
         if self.fields[old as usize].len == 0 {
@@ -939,14 +1018,24 @@ impl Descriptors {
         self.fields.push(PoolRange::EMPTY);
         Some(id)
     }
-    fn add(&mut self, captures: &[Capture], site: NodeId) -> Option<u32> {
-        if captures.is_empty() {
+    fn add(&mut self, frame: &CaptureFrame, site: NodeId) -> Option<u32> {
+        let start = self.captures.len();
+        self.captures
+            .extend(frame.captures.iter().filter(|c| !c.synthetic).copied());
+        for c in &frame.callbacks {
+            let mut c = *c;
+            c.path = c.path.map(|p| self.import_path(&frame.callback_paths, p));
+            if !(start..self.captures.len()).any(|i| self.same_capture(self.captures[i], c)) {
+                self.captures.push(c);
+            }
+        }
+        if self.captures.len() == start {
             return None;
         }
         let id = self.ranges.len() as u32;
-        self.ranges.push(PoolRange::push(
-            &mut self.captures,
-            captures.iter().copied(),
+        self.ranges.push(PoolRange::new(
+            start as u32,
+            (self.captures.len() - start) as u32,
         ));
         self.environments
             .push(EnvironmentOrigin { site, local: true });
@@ -966,9 +1055,11 @@ impl Descriptors {
         };
         let (left, right) = (captures(a), captures(b));
         if left.len() != right.len()
-            || !left
-                .iter()
-                .all(|x| right.iter().any(|y| x.slot == y.slot && x.mode == y.mode))
+            || !left.iter().all(|x| {
+                right
+                    .iter()
+                    .any(|y| self.same_capture(*x, *y) && x.mode == y.mode)
+            })
         {
             return false;
         }
@@ -1003,12 +1094,11 @@ impl Descriptors {
         let rb = self.ranges[b as usize];
         for i in rb.start..rb.start + rb.len {
             let c = self.captures[i as usize];
-            if let Some(other) = self.captures[start..]
-                .iter_mut()
-                .find(|other| other.slot == c.slot)
+            if let Some(j) =
+                (start..self.captures.len()).find(|&j| self.same_capture(self.captures[j], c))
             {
                 if c.mode == Mode::Mut {
-                    other.mode = Mode::Mut;
+                    self.captures[j].mode = Mode::Mut
                 }
             } else {
                 self.captures.push(c);
@@ -1048,6 +1138,23 @@ impl Descriptors {
     fn project(&mut self, id: Option<u32>, component: anchors::Component) -> Option<u32> {
         let range = self.fields[id? as usize];
         if range.len == 0 {
+            let captures = self.ranges[id.unwrap() as usize];
+            if captures.len == 1 {
+                let c = self.captures[captures.start as usize];
+                if let Some(path) = c.path {
+                    let anchors::Component::Field(field) = component else {
+                        return id;
+                    };
+                    let key = (id.unwrap(), field);
+                    if let Some(&id) = self.projections.get(&key) {
+                        return Some(id);
+                    }
+                    let path = self.path_field(path, field);
+                    let projected = self.reference(c.slot, path, c.site);
+                    self.projections.insert(key, projected);
+                    return Some(projected);
+                }
+            }
             return id;
         }
         let mut result = None;
@@ -1092,10 +1199,13 @@ impl Descriptors {
             return id;
         }
         let range = outer.ranges[source as usize];
-        let captures = PoolRange::push(
-            &mut self.captures,
-            range.get(&outer.captures).unwrap().iter().copied(),
-        );
+        let start = self.captures.len();
+        for i in range.start..range.start + range.len {
+            let mut c = outer.captures[i as usize];
+            c.path = c.path.map(|p| self.import_path(&outer.paths, p));
+            self.captures.push(c);
+        }
+        let captures = PoolRange::new(start as u32, range.len);
         let id = self.ranges.len() as u32;
         self.ranges.push(captures);
         self.environments.push(EnvironmentOrigin {
@@ -1156,13 +1266,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
     /// Discover an outer slot exactly when its first source use is visited.
     pub(super) fn capture_slot(&mut self, slot: u32, n: NodeId) {
+        self.capture_slot_source(slot, n, false);
+    }
+    fn capture_slot_source(&mut self, slot: u32, n: NodeId, synthetic: bool) {
         let Some(frame) = &self.capture_frame else {
             return;
         };
         let Some(original) = frame.outer[slot as usize] else {
             return;
         };
-        if frame.by_slot[slot as usize].is_some() {
+        if let Some(i) = frame.by_slot[slot as usize] {
+            if !synthetic {
+                self.capture_frame.as_mut().unwrap().captures[i].synthetic = false
+            }
             return;
         }
         let owning = frame.owning;
@@ -1233,6 +1349,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             mode: Mode::View,
             offset,
             site: n,
+            path: None,
+            synthetic,
         });
         let environment = frame.environment;
         let binding = if let Some(environment) = environment.filter(|_| self.live()) {
@@ -1328,6 +1446,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if let Some(frame) = &mut self.capture_frame
             && let Some(i) = frame.by_slot[slot as usize]
         {
+            if frame.activating {
+                return;
+            }
             frame.captures[i].mode = Mode::Mut;
             if frame.owning && !self.broken {
                 self.refuse_at("LANG-14", site, "an owning closure never mutates a capture");
@@ -1380,7 +1501,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
     }
     fn capture_address(&mut self, slot: u32, n: NodeId) -> Option<ValueId> {
-        self.capture_slot(slot, n);
         let var = self.var(slot);
         let rep = match self.rep(var.ty) {
             Ok(rep) => rep,
@@ -1457,7 +1577,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return self.captureless_callable(code, n);
         }
         for capture in captures {
-            self.capture_slot(capture.slot, n);
+            self.capture_slot_source(capture.slot, n, capture.synthetic);
         }
         if !self.live() {
             return None;
@@ -1481,7 +1601,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let carrier = self.raw_frame(2, n)?;
         self.store_word(carrier, 0, code, n);
         self.store_word(carrier, 8, environment, n);
-        if let Some(id) = self.descriptors.add(captures, n) {
+        if let Some(id) = self.descriptors.add(frame, n) {
             self.descriptors.values.insert(carrier, id);
         }
         Some(carrier)
@@ -1524,6 +1644,31 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
     }
     pub(super) fn read_descriptor(&mut self, at: At, value: Option<ValueId>, n: NodeId) {
+        if self
+            .capture_frame
+            .as_ref()
+            .is_some_and(|f| !f.owning && f.outer[at.place.slot as usize].is_some())
+            && self.contains_callback(at.ty)
+        {
+            if let Some(value) = value {
+                let mut id = self.descriptors.reference(at.place.slot, 0, n);
+                for i in at.place.start..at.place.start + at.place.len {
+                    let PStep::Field(field) = self.steps[i as usize] else {
+                        self.gap(
+                            n,
+                            "capture descriptors through this projection are not built",
+                        );
+                        return;
+                    };
+                    id = self
+                        .descriptors
+                        .project(Some(id), anchors::Component::Field(field))
+                        .unwrap();
+                }
+                self.descriptors.values.insert(value, id);
+            }
+            return;
+        }
         let mut id = self.descriptors.slots.get(&at.place.slot).copied();
         if id.is_none() || !self.contains_callback(at.ty) {
             return;
@@ -1555,10 +1700,85 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let Some(id) = self.descriptors.of(value) else {
             return;
         };
+        let mut work = std::mem::take(&mut self.descriptors.activation);
+        let mut path = std::mem::take(&mut self.descriptors.activation_path);
+        work.clear();
         let range = self.descriptors.ranges[id as usize];
-        for i in range.start..range.start + range.len {
-            let capture = self.descriptors.captures[i as usize];
-            self.capture_slot(capture.slot, n);
+        work.extend_from_slice(range.get(&self.descriptors.captures).unwrap());
+        // Direct roots of a locally built callback are real uses in this body.
+        // Only roots reached by expanding an outer callback are snapshot-only.
+        for &c in &work {
+            if c.path.is_none() {
+                self.capture_slot_source(c.slot, n, false);
+                if c.mode == Mode::Mut {
+                    self.capture_write(c.slot, self.span(n))
+                }
+            }
+        }
+        if let Some(frame) = &mut self.capture_frame {
+            for &c in &work {
+                if c.path.is_some()
+                    && frame.outer[c.slot as usize].is_some()
+                    && !frame
+                        .callbacks
+                        .iter()
+                        .any(|old| self.descriptors.same_capture(*old, c))
+                {
+                    frame.callbacks.push(c)
+                }
+            }
+        }
+        let mut i = 0;
+        while i < work.len() {
+            let c = work[i];
+            i += 1;
+            let Some(mut at) = c.path else { continue };
+            self.capture_slot_source(c.slot, n, true);
+            path.clear();
+            while at != 0 {
+                let p = self.descriptors.paths[at as usize - 1];
+                path.push(p.field);
+                at = p.parent;
+            }
+            let mut current = self.descriptors.slots.get(&c.slot).copied();
+            for &field in path.iter().rev() {
+                current = self
+                    .descriptors
+                    .project(current, anchors::Component::Field(field));
+            }
+            let root = Capture {
+                path: None,
+                mode: Mode::View,
+                ..c
+            };
+            if !work.iter().any(|x| self.descriptors.same_capture(*x, root)) {
+                work.push(root)
+            }
+            if let Some(current) = current {
+                let range = self.descriptors.ranges[current as usize];
+                for j in range.start..range.start + range.len {
+                    let c = self.descriptors.captures[j as usize];
+                    if let Some(k) = work
+                        .iter()
+                        .position(|x| self.descriptors.same_capture(*x, c))
+                    {
+                        if c.mode == Mode::Mut {
+                            work[k].mode = Mode::Mut
+                        }
+                    } else {
+                        work.push(c)
+                    }
+                }
+            }
+        }
+        if let Some(frame) = &mut self.capture_frame {
+            frame.activating = true
+        }
+        for &capture in &work {
+            if capture.path.is_some() {
+                continue;
+            }
+            self.capture_slot_source(capture.slot, n, true);
             let at = At {
                 place: Place::whole(capture.slot),
                 ty: self.var(capture.slot).ty,
@@ -1574,9 +1794,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 n,
             );
             if capture.mode == Mode::Mut {
-                self.mut_descriptor(at);
+                self.mut_descriptor(at)
             }
         }
+        if let Some(frame) = &mut self.capture_frame {
+            frame.activating = false
+        }
+        work.clear();
+        path.clear();
+        self.descriptors.activation = work;
+        self.descriptors.activation_path = path;
     }
     pub(super) fn returned_descriptor(
         &mut self,
@@ -1710,21 +1937,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             _ => false,
         }
     }
-    fn captured_descriptor_change(&mut self, slot: u32, new: Option<u32>, n: NodeId) -> bool {
-        let old = self.descriptors.slots.get(&slot).copied();
-        if self.descriptors.captures.iter().any(|c| c.slot == slot)
-            && !self.descriptors.same(old, new)
-        {
-            // A closure that invokes this slot was checked using its old value.
-            // Replacing it requires current-descriptor activation, not that snapshot.
-            self.gap(
-                n,
-                "replacing a callback after another closure captured it is not built",
-            );
-            return true;
-        }
-        false
-    }
     pub(super) fn descriptor_store(&mut self, at: At, value: Option<ValueId>, n: NodeId) -> bool {
         // A sibling may hold a callback, but this place cannot change its descriptor.
         // In particular a list, array or Box payload cannot contain scoped values.
@@ -1753,11 +1965,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     .unwrap()
                     .iter()
                     .find(|c| {
-                        c.slot == at.place.slot
-                            || self
-                                .capture_frame
-                                .as_ref()
-                                .is_none_or(|f| f.outer[c.slot as usize].is_none())
+                        c.path.is_none()
+                            && (c.slot == at.place.slot
+                                || self
+                                    .capture_frame
+                                    .as_ref()
+                                    .is_none_or(|f| f.outer[c.slot as usize].is_none()))
                     })
                 {
                     let cause = self.declared_at(c.slot);
@@ -1797,9 +2010,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         }
         if at.place.len == 0 {
-            if self.captured_descriptor_change(at.place.slot, self.descriptors.of(value), n) {
-                return false;
-            }
             self.bind_descriptor(at.place.slot, value);
         } else {
             let mut path = std::mem::take(&mut self.anchor_path);
@@ -1825,9 +2035,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let new = self.descriptors.of(value);
             let id = self.descriptors.replace(old, &path, new);
             self.anchor_path = path;
-            if self.captured_descriptor_change(at.place.slot, id, n) {
-                return false;
-            }
             self.set_slot_descriptor(at.place.slot, id);
         }
         true

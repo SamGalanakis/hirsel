@@ -243,7 +243,7 @@ fn atomic_helpers_use_checked_cas_and_release_acquire() {
         intrinsics: &mut intrinsics,
     };
     e.share_node("%node", true);
-    e.release_fast("%node", 24, "@recipe", true);
+    e.release_fast("%node", 24, Some("@recipe"), true);
     let mut ir = format!(
         "define void @test(ptr %context, ptr %node) {{\nentry:\n{}{}  ret void\n}}\ndeclare zeroext i1 @recipe(ptr, ptr, ptr, ptr)\n",
         e.allocations, e.code

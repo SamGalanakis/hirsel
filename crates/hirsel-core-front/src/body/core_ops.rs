@@ -426,7 +426,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.read_bits(field, Ty::Ptr, n)
     }
 
-    fn runtime_type(&mut self, ty: TyId, n: NodeId) -> Option<TypeId> {
+    pub(super) fn runtime_type(&mut self, ty: TyId, n: NodeId) -> Option<TypeId> {
         let id = self.e.type_row(self.p, &mut self.t, ty);
         if id.is_none() {
             self.gap(n, "runtime operand layout is not built");
@@ -1147,15 +1147,25 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let node = self.value(Ty::Ptr);
         let available = self.value(u);
         let fail = self.fail_to(n);
+        let edge = match kind {
+            None => FieldTy::Box(TypeRef(id.0)),
+            Some(Counted::Rc) => FieldTy::Rc(TypeRef(id.0)),
+            Some(Counted::Arc) => FieldTy::Arc(TypeRef(id.0)),
+        };
+        let plain = self.allocation_edge(node, edge) == AllocKind::Plain;
         self.inst(
             Inst::Alloc {
                 result: node,
                 available,
                 region_entry: None,
-                kind: kind.map_or(AllocKind::Own, |count| AllocKind::Counted {
-                    count,
-                    plain: false,
-                }),
+                kind: kind.map_or(
+                    if plain {
+                        AllocKind::Plain
+                    } else {
+                        AllocKind::Own
+                    },
+                    |count| AllocKind::Counted { count, plain },
+                ),
                 place: AllocPlace::Current,
                 charge,
                 overflow: Some(overflow),

@@ -96,3 +96,11 @@ pub const OWN_ORDINARY_MAX_TAG: usize = OWN_ORDINARY_GRAPH_TAG;
 // Ordinary admission does not apply pending refunds or add an event. Refusal
 // snapshots Capacity before its existing event. This local path adds no TLS
 // lookup, poll, drain, lock or atomic update.
+
+// FORM #84: alloc plain and counted { plain:true } select PLAIN_PREFIX_BYTES.
+// Count stays at NODE_COUNT, payload at NODE_PAYLOAD. A terminal owning edge
+// frees immediately after its last count event; it never borrows a graph frame.
+// Recipes derive terminal from hirsel_core_layout::terminal. Generic allocation
+// producers repeat this derivation after substituting the concrete owning edge.
+// Like/growth retain the same property and original payer; logical charges and
+// admission/refund ordering are independent of this native prefix selection.

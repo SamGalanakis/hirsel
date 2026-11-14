@@ -487,3 +487,26 @@ fn ordinary_native_words_and_balances_match_the_inline_contract() {
         }
     }
 }
+
+#[test]
+fn leaf_buffer_growth_preserves_plain_prefix_and_original_payer() {
+    let mut context = Context::new(128);
+    let original = crate::block::Block::new(&context, Some(8), 8, 8).unwrap();
+    // SAFETY: fixture owns eight fresh writable payload bytes.
+    unsafe { original.pointer().as_ptr().write_bytes(17, 8) };
+    context.limit_enter(0).unwrap();
+    let grown = original.replacement(&context, Some(24), 24, 8).unwrap();
+    // SAFETY: both allocations are live and original-payer words precede payloads.
+    unsafe {
+        assert_eq!(crate::block::funding(grown.pointer()).native_tag(), 0);
+        assert_eq!(crate::block::funding(original.pointer()).native_tag(), 0);
+        std::ptr::copy_nonoverlapping(original.pointer().as_ptr(), grown.pointer().as_ptr(), 8);
+        assert_eq!(grown.pointer().as_ptr().read(), 17);
+    }
+    assert_eq!(context.available(), 0);
+    context.limit_exit();
+    drop(original);
+    assert_eq!(context.available(), 104);
+    drop(grown);
+    assert_eq!(context.available(), 128);
+}

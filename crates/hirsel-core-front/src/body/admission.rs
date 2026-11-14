@@ -10,6 +10,27 @@ pub(super) struct OwnedAllocation {
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
+    /// The template remembers the owning edge, never the placeholder's drop
+    /// decision. Specialization derives terminal again from the closed recipe.
+    pub(super) fn allocation_edge(&mut self, result: ValueId, edge: FieldTy) -> AllocKind {
+        self.allocations.push(AllocationLayout::Edge {
+            result,
+            edge: edge.clone(),
+        });
+        if !self.fd.generics.is_empty() {
+            return AllocKind::Own;
+        }
+        let count = self.e.module.types.len();
+        if count != 0 && self.e.recipe(TypeId(count as u32 - 1), count).is_none() {
+            return AllocKind::Own;
+        }
+        if hirsel_core_layout::terminal(&self.e.module.types, &self.e.recipes, &edge) {
+            AllocKind::Plain
+        } else {
+            AllocKind::Own
+        }
+    }
+
     /// Called immediately before emitting a typed block allocation. Copies and
     /// owner operations use held-value sizes, which differ for a resource.
     pub(super) fn allocation_layout(
@@ -22,7 +43,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return None;
         }
         let overflow = self.konst(Ty::Scalar(Scalar::Bool), 0, n)?;
-        self.allocations.push(AllocationLayout { result, ty });
+        self.allocations
+            .push(AllocationLayout::Block { result, ty });
         Some(overflow)
     }
 

@@ -11,6 +11,7 @@ enum ListStorage {
 
 #[derive(Clone, Copy)]
 pub(super) struct ListPlan {
+    pub(super) item: Option<TypeId>,
     pub(super) charge: ValueId,
     pub(super) overflow: ValueId,
     pub(super) size: ValueId,
@@ -120,6 +121,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
         let overflow = self.konst(Ty::Scalar(Scalar::Bool), 1, n)?;
         let plan = ListPlan {
+            item: None,
             charge: max,
             overflow,
             size: zero,
@@ -447,7 +449,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         // A native size beyond the address space is host exhaustion, after logical
         // admission. Saturating bytes cannot wrap into a small successful block.
         let (size, _) = self.list_arith(ArithOp::Mul, ArithMode::Saturating, count, stride, n);
+        let item = Some(self.runtime_type(item, n)?);
         Some(ListPlan {
+            item,
             charge,
             overflow,
             size,
@@ -464,12 +468,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let block = self.value(Ty::Ptr);
         let available = self.value(Ty::Scalar(Scalar::U64));
         let fail = self.fail_to(n);
+        // A count-overflow probe has no owning edge and can never allocate.
+        let kind = plan.item.map_or(AllocKind::Plain, |item| {
+            self.allocation_edge(
+                block,
+                FieldTy::Seq(Box::new(FieldTy::Inline(TypeRef(item.0)))),
+            )
+        });
         self.inst(
             Inst::Alloc {
                 result: block,
                 available,
                 region_entry: None,
-                kind: AllocKind::Own,
+                kind,
                 place,
                 charge: plan.charge,
                 overflow: Some(plan.overflow),

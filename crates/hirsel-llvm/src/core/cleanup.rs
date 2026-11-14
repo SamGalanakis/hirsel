@@ -324,7 +324,14 @@ impl FunctionEmitter<'_> {
     pub(super) fn release_node(&mut self, node: &str, t: TypeRef, atomic: bool) -> Result<()> {
         let logical = self.recipes[t.index()].logical_size.unwrap();
         let charge = hirsel_core_layout::charge::counted(logical).unwrap();
-        self.release_fast(node, charge, &format!("@core_counted_drop_{}", t.0), atomic);
+        let edge = if atomic {
+            FieldTy::Arc(t)
+        } else {
+            FieldTy::Rc(t)
+        };
+        let recipe = (!hirsel_core_layout::terminal(&self.module.types, self.recipes, &edge))
+            .then(|| format!("@core_counted_drop_{}", t.0));
+        self.release_fast(node, charge, recipe.as_deref(), atomic);
         Ok(())
     }
 }
@@ -446,6 +453,16 @@ impl FunctionEmitter<'_> {
                         hirsel_core_layout::charge::counted(logical).unwrap(),
                     )
                 };
+                if hirsel_core_layout::terminal(&self.module.types, self.recipes, field) {
+                    if matches!(field, FieldTy::Box(_)) {
+                        self.free_block(&node, &charge.to_string());
+                    } else {
+                        self.release_node(&node, *t, matches!(field, FieldTy::Arc(_)))?;
+                    }
+                    self.line("ret i1 false");
+                    writeln!(self.code, "skip{n}:").unwrap();
+                    return Ok(());
+                }
                 let mut args = vec![("ptr".into(), "%worklist".into()), ("ptr".into(), node)];
                 if !matches!(field, FieldTy::Box(_)) {
                     args.push((

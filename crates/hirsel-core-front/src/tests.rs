@@ -3039,3 +3039,75 @@ fn dynamic_plain_callable_fits() {
     }
     assert!(failures.is_empty(), "{failures:?}");
 }
+
+#[test]
+fn terminal_prefix_is_derived_after_generic_substitution() {
+    use hirsel_core_ir::{AllocKind, Inst};
+    let source = concat!(
+        include_str!("../../../core/std/tests/terminal_blocks.hirsel"),
+        "\nfn run()->u64 {leaf_box()+child_box()+leaf_growth()+child_growth()+leaf_counted()}\n"
+    );
+    let (index, modules) = program_inputs(source);
+    let program = Program::declare(&index, &modules);
+    assert!(program.refusals.is_empty() && program.gaps.is_empty());
+    let mut emitter = Emitter::new();
+    let mut root = None;
+    for (f, decl) in program.fns.iter().enumerate() {
+        if !decl.path.package_is("app", "1")
+            && !(decl.path.package_is("core", "1")
+                && decl.path.0.modules == ["string"]
+                && decl.body.is_some())
+        {
+            continue;
+        }
+        let check = program.check_lower(f, &mut emitter);
+        emitter.seal();
+        assert!(
+            check.refusals.is_empty() && check.gaps.is_empty(),
+            "{check:?}"
+        );
+        if decl.path.0.name == "run" {
+            root = check.function;
+        }
+    }
+    emitter.materialize_instances().unwrap();
+    wf::module(&emitter.module).unwrap();
+    let report = eval::run(&emitter.module, root.unwrap(), &[], 100_000);
+    assert_eq!(report.outcome, eval::Outcome::Returned(vec![45]));
+    assert_eq!(report.used, 0);
+    let mut checked = 0;
+    for function in &emitter.module.functions {
+        let key = &emitter.module.instances[function.instance.index()];
+        if !matches!(key.definition.0.name.as_str(), "wrap" | "buffered") || key.types.is_empty() {
+            continue;
+        }
+        let plain = key.types == ["u64"];
+        let body = function.body.as_ref().unwrap();
+        for inst in &body.insts {
+            if let Inst::Alloc { kind, overflow, .. } = inst {
+                // A synthetic count-overflow admission cannot return storage.
+                if overflow.is_some_and(|v| {
+                    body.insts
+                        .iter()
+                        .any(|i| matches!(i, Inst::Const { result, bits: 1 } if *result == v))
+                }) {
+                    continue;
+                }
+                assert_eq!(
+                    *kind,
+                    if plain {
+                        AllocKind::Plain
+                    } else {
+                        AllocKind::Own
+                    },
+                    "{key:?}"
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(
+        checked >= 6,
+        "both generic boxes and both growth branches were instantiated"
+    );
+}

@@ -329,7 +329,11 @@ impl FunctionEmitter<'_> {
                     {
                         args.push((
                             "i8 zeroext".into(),
-                            u8::from(kind != AllocKind::Plain).to_string(),
+                            u8::from(!matches!(
+                                kind,
+                                AllocKind::Plain | AllocKind::Counted { plain: true, .. }
+                            ))
+                            .to_string(),
                         ));
                     }
                     self.allocation(name, &args)

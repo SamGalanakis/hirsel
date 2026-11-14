@@ -148,16 +148,20 @@ impl FunctionEmitter<'_> {
         ));
         writeln!(self.code, "buffer{n}:").unwrap();
         let charge = self.collection_charge(&capacity, entries.logical);
-        self.runtime_void(
-            "hirsel_core_release_buffer_enqueue",
-            &[
-                ("ptr".into(), "%worklist".into()),
-                ("ptr".into(), buffer),
-                ("i64".into(), charge),
-                ("ptr".into(), carrier.into()),
-                ("ptr".into(), symbol(field)),
-            ],
-        );
+        if hirsel_core_layout::terminal(&self.module.types, self.recipes, field) {
+            self.free_block(&buffer, &charge);
+        } else {
+            self.runtime_void(
+                "hirsel_core_release_buffer_enqueue",
+                &[
+                    ("ptr".into(), "%worklist".into()),
+                    ("ptr".into(), buffer),
+                    ("i64".into(), charge),
+                    ("ptr".into(), carrier.into()),
+                    ("ptr".into(), symbol(field)),
+                ],
+            );
+        }
         self.line("ret i1 false");
         writeln!(self.code, "empty{n}:").unwrap();
         self.line("ret i1 false");

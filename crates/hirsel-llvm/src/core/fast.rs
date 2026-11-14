@@ -140,7 +140,10 @@ impl FunctionEmitter<'_> {
         if !matches!(place, AllocPlace::Current | AllocPlace::Like(_)) || align > 512 {
             return None;
         }
-        let graph = kind != AllocKind::Plain;
+        let graph = !matches!(
+            kind,
+            AllocKind::Plain | AllocKind::Counted { plain: true, .. }
+        );
         let prefix = if graph {
             GRAPH_PREFIX_BYTES
         } else {
@@ -463,7 +466,13 @@ impl FunctionEmitter<'_> {
             self.calc(format!("icmp eq i64 {next}, 0"))
         }
     }
-    pub(super) fn release_fast(&mut self, node: &str, charge: u64, recipe: &str, atomic: bool) {
+    pub(super) fn release_fast(
+        &mut self,
+        node: &str,
+        charge: u64,
+        recipe: Option<&str>,
+        atomic: bool,
+    ) {
         let n = self.next;
         self.next += 1;
         let last = self.decrement_node(node, atomic);
@@ -489,15 +498,19 @@ impl FunctionEmitter<'_> {
                 &[("i1 zeroext".into(), "true".into())],
             );
         }
-        self.cold_void(
-            "hirsel_core_release_last",
-            &[
-                ("ptr".into(), "%context".into()),
-                ("ptr".into(), node.into()),
-                ("i64".into(), charge.to_string()),
-                ("ptr".into(), recipe.into()),
-            ],
-        );
+        if let Some(recipe) = recipe {
+            self.cold_void(
+                "hirsel_core_release_last",
+                &[
+                    ("ptr".into(), "%context".into()),
+                    ("ptr".into(), node.into()),
+                    ("i64".into(), charge.to_string()),
+                    ("ptr".into(), recipe.into()),
+                ],
+            );
+        } else {
+            self.free_block(node, &charge.to_string());
+        }
         self.line(format!("br label %released{n}"));
         writeln!(self.code, "released{n}:").unwrap();
     }

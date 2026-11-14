@@ -596,7 +596,19 @@ impl Glue<'_, '_, '_> {
             &mut self.calls,
             self.object,
             [self.ctx, p],
-            (charge, self.glues.resumes[t.index()].unwrap()),
+            (
+                charge,
+                (!hirsel_core_layout::terminal(
+                    &self.tables.input.types,
+                    self.tables.layouts,
+                    &if atomic {
+                        FieldTy::Arc(t)
+                    } else {
+                        FieldTy::Rc(t)
+                    },
+                ))
+                .then(|| self.glues.resumes[t.index()].unwrap()),
+            ),
             atomic,
         )
     }

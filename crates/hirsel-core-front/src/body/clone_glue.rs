@@ -149,6 +149,13 @@ impl Derive<'_> {
         )
         .0
     }
+    fn allocation_kind(&self, edge: &FieldTy) -> AllocKind {
+        if hirsel_core_layout::terminal(&self.module.types, &self.recipes, edge) {
+            AllocKind::Plain
+        } else {
+            AllocKind::Own
+        }
+    }
     fn size_of(&self, field: &FieldTy) -> u64 {
         hirsel_core_layout::field_size(&self.module.types, &self.recipes, field).0
     }
@@ -288,7 +295,7 @@ impl Derive<'_> {
             FieldTy::Box(t) => {
                 let t = TypeId(t.0);
                 let size = self.row_size(t);
-                let block = alloc(c, AllocKind::Own, round8(size), size, fail);
+                let block = alloc(c, self.allocation_kind(field), round8(size), size, fail);
                 let f = self.function(t, KeyOp::Clone)?;
                 let old = c.read(from, Ty::Ptr);
                 let x = c.address(old, PlaceTy::Declared(t));
@@ -326,7 +333,7 @@ impl Derive<'_> {
                 let k = c.constant(stride);
                 let bytes = c.mul(len, k);
                 let charge = round8_value(c, bytes);
-                let block = alloc_value(c, charge, bytes, fail);
+                let block = alloc_kind(c, self.allocation_kind(field), charge, bytes, fail);
                 let old = c.read(from, Ty::Ptr);
                 copy_value(c, block, old, bytes);
                 store(c, to, block);
@@ -696,7 +703,13 @@ impl Derive<'_> {
                 let stride = c.constant(self.size_of(item));
                 let bytes = c.mul(len, stride);
                 let charge = round8_value(c, bytes);
-                let block = alloc_value(c, charge, bytes, fail);
+                let block = alloc_kind(
+                    c,
+                    self.allocation_kind(&FieldTy::Seq(item.clone())),
+                    charge,
+                    bytes,
+                    fail,
+                );
                 copy_value(c, block, data, bytes);
                 store(c, to, block);
                 let n = c.offset(to, 8);
@@ -710,7 +723,13 @@ impl Derive<'_> {
             (FieldTy::Stable(t), FieldTy::Box(u)) => {
                 let (t, u) = (TypeId(t.0), TypeId(u.0));
                 let size = self.row_size(u);
-                let block = alloc(c, AllocKind::Own, round8(size), size, fail);
+                let block = alloc(
+                    c,
+                    self.allocation_kind(&FieldTy::Box(TypeRef(u.0))),
+                    round8(size),
+                    size,
+                    fail,
+                );
                 let f = self.function(t, KeyOp::CloneTwin(u.0))?;
                 let old = c.read(from, Ty::Ptr);
                 let x = c.address(old, PlaceTy::Declared(t));
@@ -1022,9 +1041,6 @@ fn alloc(c: &mut Code, kind: AllocKind, charge: u64, size: u64, fail: BlockId) -
     let charge = c.constant(charge);
     let size = c.constant(size);
     alloc_kind(c, kind, charge, size, fail)
-}
-fn alloc_value(c: &mut Code, charge: ValueId, size: ValueId, fail: BlockId) -> ValueId {
-    alloc_kind(c, AllocKind::Own, charge, size, fail)
 }
 fn alloc_kind(
     c: &mut Code,

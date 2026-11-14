@@ -315,3 +315,38 @@ fn counted_parent_frees_plain_owned_children_without_a_resume_frame() {
     }
     assert_eq!(ctx.available(), 64);
 }
+
+#[test]
+fn plain_counted_leaf_frees_without_invoking_a_recipe_or_touching_a_frame() {
+    unsafe extern "C" fn forbidden(
+        _: *mut Context,
+        _: *mut u8,
+        _: *mut u64,
+        _: *mut Worklist,
+    ) -> bool {
+        panic!("terminal payload has no recipe to run")
+    }
+    for atomic in [false, true] {
+        for enqueued in [false, true] {
+            let mut context = Context::new(128);
+            context.limit_enter(32).unwrap();
+            let node = Block::new(&context, Some(16), 16, 8).unwrap().into_raw();
+            // SAFETY: fresh aligned node has exactly count + scalar, no frame.
+            unsafe { counted::initialize(node, atomic) };
+            context.limit_exit();
+            context.current.inject(1, true);
+            // SAFETY: transfer the last holder; terminal cleanup never calls forbidden.
+            unsafe {
+                if enqueued {
+                    let mut work = Worklist { head: None };
+                    counted::enqueue(&mut work, node, atomic, 16, forbidden);
+                    assert!(work.head.is_none());
+                } else {
+                    counted::release(&mut context, node, atomic, 16, forbidden);
+                }
+            }
+            assert_eq!(context.available(), 128);
+            assert_eq!(context.current.attempts(), 0);
+        }
+    }
+}

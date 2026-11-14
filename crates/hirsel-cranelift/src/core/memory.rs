@@ -108,10 +108,13 @@ impl Function<'_, '_, '_> {
                             AllocPlace::Like(v) => self.get(v),
                             _ => self.b.ins().iconst(types::I64, 0),
                         };
-                        let kind = self
-                            .b
-                            .ins()
-                            .iconst(types::I8, i64::from(kind != AllocKind::Plain));
+                        let kind = self.b.ins().iconst(
+                            types::I8,
+                            i64::from(!matches!(
+                                kind,
+                                AllocKind::Plain | AllocKind::Counted { plain: true, .. }
+                            )),
+                        );
                         self.c_call(
                             "hirsel_core_alloc",
                             &[p, p, u, u, u, boolean, Ty::Scalar(Scalar::U8)],
@@ -246,7 +249,19 @@ impl Function<'_, '_, '_> {
                     &mut self.calls,
                     self.object,
                     [self.context, node],
-                    (charge, self.glues.resumes[ty.index()].unwrap()),
+                    (
+                        charge,
+                        (!hirsel_core_layout::terminal(
+                            &self.input.types,
+                            self.layouts,
+                            &if kind == Counted::Arc {
+                                hirsel_core_layout::FieldTy::Arc(hirsel_core_layout::TypeRef(ty.0))
+                            } else {
+                                hirsel_core_layout::FieldTy::Rc(hirsel_core_layout::TypeRef(ty.0))
+                            },
+                        ))
+                        .then(|| self.glues.resumes[ty.index()].unwrap()),
+                    ),
                     kind == Counted::Arc,
                 )?;
             }

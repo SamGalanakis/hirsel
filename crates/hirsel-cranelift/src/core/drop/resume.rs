@@ -85,21 +85,32 @@ impl Glue<'_, '_, '_> {
         self.b.switch_to_block(present);
         let bytes = self.b.ins().imul_imm_s(cap, logical as i64);
         let charge = self.round8(bytes);
-        let function = self
-            .glues
-            .buffers
-            .iter()
-            .find(|(t, _)| t == field)
-            .unwrap()
-            .1;
-        let reference = self.calls.reference(self.object, &mut self.b, function);
-        let recipe = self.b.ins().func_addr(types::I64, reference);
-        self.call(
-            "hirsel_core_release_buffer_enqueue",
-            &[P, P, U, P, P],
-            &[],
-            &[list, node, charge, carrier, recipe],
-        )?;
+        if hirsel_core_layout::terminal(&self.tables.input.types, self.tables.layouts, field) {
+            fast::free(
+                &mut self.b,
+                &mut self.calls,
+                self.object,
+                self.ctx,
+                node,
+                charge,
+            )?;
+        } else {
+            let function = self
+                .glues
+                .buffers
+                .iter()
+                .find(|(t, _)| t == field)
+                .unwrap()
+                .1;
+            let reference = self.calls.reference(self.object, &mut self.b, function);
+            let recipe = self.b.ins().func_addr(types::I64, reference);
+            self.call(
+                "hirsel_core_release_buffer_enqueue",
+                &[P, P, U, P, P],
+                &[],
+                &[list, node, charge, carrier, recipe],
+            )?;
+        }
         self.b.ins().jump(done, &[]);
         self.b.switch_to_block(done);
         Ok(())
@@ -225,13 +236,28 @@ impl Glue<'_, '_, '_> {
                             )
                             .unwrap(),
                         );
-                        let recipe = self.callback(*t);
-                        self.call(
-                            "hirsel_core_release_own_enqueue",
-                            &[P, P, U, P],
-                            &[],
-                            &[list, node, charge, recipe],
-                        )?;
+                        if hirsel_core_layout::terminal(
+                            &self.tables.input.types,
+                            self.tables.layouts,
+                            field,
+                        ) {
+                            fast::free(
+                                &mut self.b,
+                                &mut self.calls,
+                                self.object,
+                                self.ctx,
+                                node,
+                                charge,
+                            )?;
+                        } else {
+                            let recipe = self.callback(*t);
+                            self.call(
+                                "hirsel_core_release_own_enqueue",
+                                &[P, P, U, P],
+                                &[],
+                                &[list, node, charge, recipe],
+                            )?;
+                        }
                     }
                     FieldTy::Rc(t) | FieldTy::Arc(t) => {
                         let atomic = self
@@ -242,13 +268,21 @@ impl Glue<'_, '_, '_> {
                             charge::counted(self.tables.layouts[t.index()].logical_size.unwrap())
                                 .unwrap(),
                         );
-                        let recipe = self.callback(*t);
-                        self.call(
-                            "hirsel_core_release_enqueue",
-                            &[P, P, B, U, P],
-                            &[],
-                            &[list, node, atomic, charge, recipe],
-                        )?;
+                        if hirsel_core_layout::terminal(
+                            &self.tables.input.types,
+                            self.tables.layouts,
+                            field,
+                        ) {
+                            self.release(node, *t, matches!(field, FieldTy::Arc(_)))?;
+                        } else {
+                            let recipe = self.callback(*t);
+                            self.call(
+                                "hirsel_core_release_enqueue",
+                                &[P, P, B, U, P],
+                                &[],
+                                &[list, node, atomic, charge, recipe],
+                            )?;
+                        }
                     }
                     FieldTy::Seq(e) => {
                         let logical =

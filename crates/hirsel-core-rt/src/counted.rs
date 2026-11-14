@@ -17,7 +17,7 @@ pub struct Worklist {
 }
 
 /// # Safety
-/// The emitter initializes a newly allocated GRAPH node, count at 0 and payload at 8.
+/// The emitter initializes a newly allocated PLAIN or GRAPH node, count at 0 and payload at 8.
 pub unsafe fn initialize(node: NonNull<u8>, atomic: bool) {
     // SAFETY: node has fresh aligned storage for one count word.
     unsafe {
@@ -94,7 +94,11 @@ pub unsafe fn enqueue(
     if last {
         // SAFETY: the last holder owns the dead node exclusively.
         unsafe {
-            block::push_dead(list, node, charge, recipe, 8);
+            if block::funding(node).native_tag() & 3 == block::PLAIN as usize {
+                block::free(node, charge);
+            } else {
+                block::push_dead(list, node, charge, recipe, 8);
+            }
         }
     }
 }
@@ -150,6 +154,12 @@ pub unsafe fn release(
 /// Count is zero; caller owns this node, its exact charge and mechanical recipe.
 #[inline(never)]
 pub unsafe fn release_last(context: *mut Context, node: NonNull<u8>, charge: u64, recipe: Recipe) {
+    // SAFETY: a PLAIN counted node's terminal payload has no cleanup to resume.
+    if unsafe { block::funding(node).native_tag() & 3 == block::PLAIN as usize } {
+        // SAFETY: count is zero and caller transfers its exact original charge.
+        unsafe { block::free(node, charge) };
+        return;
+    }
     let mut list = Worklist { head: None };
     // SAFETY: caller transfers one holder and its generated mechanical recipe.
     unsafe {

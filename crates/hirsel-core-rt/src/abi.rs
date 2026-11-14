@@ -66,8 +66,9 @@
 //! takes (region, entry, previous_charge, retained_charge). No object headers.
 //!
 //! Rc uses checked u64 increment and decrement/test at count offset zero; only
-//! the zero result calls release_last. Arc uses relaxed increment and release
-//! decrement plus an acquire fence before release_last. Provider event ordering
+//! the zero result frees a terminal edge directly or calls release_last for a
+//! resumable payload. Arc uses relaxed increment and release decrement plus an
+//! acquire fence before terminal free or release_last. Provider event ordering
 //! still surrounds every Arc operation. Arc initialization stores an aligned
 //! atomic u64 value 1 before publication; Rc initialization stores ordinary u64 1.
 //! The immutable u64 event word is at context+CONTEXT_EVENTS (8). Zero means
@@ -431,7 +432,7 @@ pub unsafe extern "C" fn hirsel_core_arc_unwrapped(context: *const Context, uniq
 }
 
 /// # Safety
-/// Node is fresh GRAPH storage for a FORM count word and payload at offset 8.
+/// Node is fresh PLAIN or GRAPH storage for a FORM count word and payload at offset 8.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_counted_init(node: NonNull<u8>, atomic: bool) {
     // SAFETY: emitter supplies a fresh counted allocation.
@@ -658,9 +659,10 @@ pub unsafe extern "C" fn hirsel_core_region_refill(
 }
 
 /// Last-release slow path after the emitted decrement-and-test consumes count 1.
-/// No failure status, allocation or admission. Same recipe convention as release.
+/// No failure status, allocation or admission. PLAIN payloads are terminal and
+/// do not call the recipe; GRAPH uses the resumable release convention.
 /// # Safety
-/// Exclusive dead GRAPH allocation with count zero and exact charge/recipe.
+/// Exclusive dead PLAIN or GRAPH counted allocation with count zero and exact charge/recipe.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hirsel_core_release_last(
     context: *mut Context,
@@ -668,7 +670,7 @@ pub unsafe extern "C" fn hirsel_core_release_last(
     charge: u64,
     recipe: Recipe,
 ) {
-    // SAFETY: the emitter transferred the unique dead graph node after decrement.
+    // SAFETY: the emitter transferred the unique dead counted node after decrement.
     unsafe {
         counted::release_last(context, node, charge, recipe);
     }

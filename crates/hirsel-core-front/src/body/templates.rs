@@ -14,9 +14,9 @@ pub struct CopySize {
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct AllocationLayout {
-    pub result: ValueId,
-    pub ty: TypeId,
+pub enum AllocationLayout {
+    Block { result: ValueId, ty: TypeId },
+    Edge { result: ValueId, edge: FieldTy },
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -278,39 +278,40 @@ fn import_function(module: &mut Module, owner: &Module, f: FuncId) -> FuncId {
     FuncId(module.functions.len() as u32 - 1)
 }
 
-fn map_fields(shape: &mut Shape, f: &mut impl FnMut(TypeRef) -> TypeRef) {
-    fn field(ty: &mut FieldTy, f: &mut impl FnMut(TypeRef) -> TypeRef) {
-        match ty {
-            FieldTy::Inline(id)
-            | FieldTy::Box(id)
-            | FieldTy::Rc(id)
-            | FieldTy::Arc(id)
-            | FieldTy::Stable(id)
-            | FieldTy::Link(id) => *id = f(*id),
-            FieldTy::Seq(ty)
-            | FieldTy::Array(ty, _)
-            | FieldTy::View(ty)
-            | FieldTy::Locator(ty)
-            | FieldTy::FixedSpan(ty)
-            | FieldTy::SeqSpan(ty)
-            | FieldTy::IndexedSpan(ty) => field(ty, f),
-            FieldTy::Map(k, v) => {
-                field(k, f);
-                field(v, f);
-            }
-            _ => {}
+fn map_field(ty: &mut FieldTy, f: &mut impl FnMut(TypeRef) -> TypeRef) {
+    match ty {
+        FieldTy::Inline(id)
+        | FieldTy::Box(id)
+        | FieldTy::Rc(id)
+        | FieldTy::Arc(id)
+        | FieldTy::Stable(id)
+        | FieldTy::Link(id) => *id = f(*id),
+        FieldTy::Seq(ty)
+        | FieldTy::Array(ty, _)
+        | FieldTy::View(ty)
+        | FieldTy::Locator(ty)
+        | FieldTy::FixedSpan(ty)
+        | FieldTy::SeqSpan(ty)
+        | FieldTy::IndexedSpan(ty) => map_field(ty, f),
+        FieldTy::Map(k, v) => {
+            map_field(k, f);
+            map_field(v, f);
         }
+        _ => {}
     }
+}
+
+fn map_fields(shape: &mut Shape, f: &mut impl FnMut(TypeRef) -> TypeRef) {
     match &mut shape.body {
         ShapeBody::Record(fields) => {
             for x in fields {
-                field(&mut x.ty, f);
+                map_field(&mut x.ty, f);
             }
         }
         ShapeBody::Variant(cases) => {
             for c in cases {
                 for x in &mut c.fields {
-                    field(&mut x.ty, f);
+                    map_field(&mut x.ty, f);
                 }
             }
         }
@@ -573,7 +574,22 @@ fn fill(
     let allocations = template
         .allocations
         .iter()
-        .map(|a| (a.result, s.ty(a.ty)))
+        .filter_map(|a| match a {
+            AllocationLayout::Block { result, ty } => Some((*result, s.ty(*ty))),
+            AllocationLayout::Edge { .. } => None,
+        })
+        .collect::<HashMap<_, _>>();
+    let edges = template
+        .allocations
+        .iter()
+        .filter_map(|a| match a {
+            AllocationLayout::Edge { result, edge } => {
+                let mut edge = edge.clone();
+                map_field(&mut edge, &mut |t| TypeRef(s.ty(TypeId(t.0)).0));
+                Some((*result, edge))
+            }
+            AllocationLayout::Block { .. } => None,
+        })
         .collect::<HashMap<_, _>>();
     let recipes = hirsel_core_layout::compute(&s.module.types)
         .map_err(|e| format!("instance layout: {e:?}"))?;
@@ -593,6 +609,14 @@ fn fill(
         else {
             continue;
         };
+        if let Some(edge) = edges.get(result) {
+            let plain = hirsel_core_layout::terminal(&s.module.types, &recipes, edge);
+            *kind = match *kind {
+                AllocKind::Counted { count, .. } => AllocKind::Counted { count, plain },
+                _ if plain => AllocKind::Plain,
+                _ => AllocKind::Own,
+            };
+        }
         let Some(&ty) = allocations.get(result) else {
             continue;
         };

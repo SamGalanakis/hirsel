@@ -1429,7 +1429,7 @@ impl Program<'_> {
                 _ => self.refusals.push(refusal(
                     "OWN-20",
                     self.site(at, a),
-                    format!("anchor `{parts}` is not a view parameter"),
+                    format!("anchor `{parts}` is not a view or `mut` parameter"),
                 )),
             }
         }
@@ -1585,11 +1585,11 @@ impl Program<'_> {
                                 site,
                                 "a stable root must name a Region parameter",
                             ));
-                        } else if scoped && p.mode != Mode::View {
+                        } else if scoped && !matches!(p.mode, Mode::View | Mode::Mut) {
                             self.refusals.push(refusal(
                                 "OWN-20",
                                 fd.result_site,
-                                "a scoped anchor names a view or Region parameter",
+                                "a scoped anchor names a view, `mut`, or Region parameter",
                             ));
                         }
                     }

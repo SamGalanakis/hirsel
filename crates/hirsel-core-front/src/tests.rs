@@ -3129,6 +3129,7 @@ fn mut_scoped_parameters_keep_the_callers_anchors() {
         "mut-scoped-anchors.hirsel",
         "mut-scoped-anchors-refused.hirsel",
         "mut-scoped-forward-refused.hirsel",
+        "mut-result-anchors.hirsel",
     ] {
         failures.extend(run_case(&root().join("cases/body").join(case)));
     }

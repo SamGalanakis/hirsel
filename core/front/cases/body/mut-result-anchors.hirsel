@@ -1,0 +1,16 @@
+// OWN-20: a scoped result may name an exact `mut` parameter.
+// expect: accept
+fn grow(mut s:String)->Result[View[String],Capacity] in s {
+  string.push(mut s,"x")?
+  Ok(string.slice(s,0,1))
+}
+fn use_it()->Result[u64,Capacity] {
+  let mut s:String="abc"
+  let v=grow(mut s)?
+  Ok(string.byte_len(v)+string.byte_len(s))
+}
+
+// A projected formal is not an anchor spelling.
+type Pair { value:String }
+fn projected(mut p:Pair)->View[String] in p.value { view p.value }
+// expect: refuse OWN-20 at 15:43

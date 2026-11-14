@@ -402,3 +402,39 @@ fn f()->u64 {
     assert_eq!(run.outcome, eval::Outcome::Returned(vec![18]));
     assert_eq!(run.used, 0);
 }
+
+#[test]
+fn host_rename_and_sleep_rows_are_replayable_in_evaluator() {
+    let source = r#"fn f(d:Dir,c:Clock)->u64 waits {
+        let mut file = result.unwrap(host.open(d, "old", Write))
+        result.unwrap(host.write(mut file, string.as_bytes("ok")))
+        result.unwrap(host.close(take file))
+        result.unwrap(host.rename(d, "old", "new"))
+        let mut read = result.unwrap(host.open(d, "new", Read))
+        let mut bytes:Bytes = list.with_capacity(2)
+        if result.unwrap(host.read(mut read, mut bytes)) != 2u64 { return 1u64 }
+        result.unwrap(host.close(take read))
+        let now = host.mono_ns(c)
+        result.unwrap(host.sleep_until(c, now))
+        result.unwrap(host.remove(d, "new"))
+        7u64
+    }"#;
+    let (index, modules) = canonical(source);
+    let p = Program::declare(&index, &modules);
+    let mut emitter = Emitter::new();
+    let f = p
+        .fns
+        .iter()
+        .position(|f| f.path.0.package.name == "app")
+        .unwrap();
+    let check = p.check_lower(f, &mut emitter);
+    assert!(
+        check.refusals.is_empty() && check.gaps.is_empty(),
+        "{check:?}"
+    );
+    emitter.materialize_instances().unwrap();
+    wf::module(&emitter.module).unwrap();
+    let run = eval::run(&emitter.module, check.function.unwrap(), &[1, 1], 256);
+    assert_eq!(run.outcome, eval::Outcome::Returned(vec![7]));
+    assert_eq!(run.used, 0);
+}

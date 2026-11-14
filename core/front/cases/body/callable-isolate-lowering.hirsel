@@ -1,0 +1,27 @@
+// FORM #101: a returned body leaves no charge at the boundary.
+// expect: accept
+// hand-derived run: returned() = 7
+fn returned() -> u64 {
+    match isolate(fn() -> u64 {
+        7
+    }) {
+        Ok(Ok(v)) => v,
+        _ => 0,
+    }
+}
+
+// A body failure is caught as the inner Result error; its primary cell remains
+// charged after the Causes value is discarded (the isolate law's 32-byte case).
+// hand-derived run: caught() = 1 | used 32
+fn caught() -> u64 {
+    match isolate(fn() -> u64 {
+        fail("x")
+    }) {
+        Ok(Error(_)) => 1,
+        _ => 0,
+    }
+}
+
+pub fn main() -> Result[(), Exit] {
+    Ok(())
+}

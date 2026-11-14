@@ -3513,6 +3513,12 @@ fn isolate_and_code_describe_rules() {
 }
 
 #[test]
+fn isolate_lowering_rules() {
+    let failures = run_case(&root().join("cases/body/callable-isolate-lowering.hirsel"));
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
 fn written_anchor_activation_rules() {
     let failures = run_case(&root().join("cases/body/callable-written-anchor-activation.hirsel"));
     assert!(failures.is_empty(), "{failures:?}");

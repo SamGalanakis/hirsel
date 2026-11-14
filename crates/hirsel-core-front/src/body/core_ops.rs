@@ -357,7 +357,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         "isolate's body may not capture a mutable place",
                     );
                 } else {
-                    self.gap(n, "isolate failure boundary lowering is not built");
+                    let body_ty = self.p.fns[f]
+                        .params
+                        .first()
+                        .map(|p| subst(&mut self.t, p.ty, _types))
+                        .unwrap_or(ERROR);
+                    if let Some(body) = vals.first().copied().flatten() {
+                        return Some(self.lower_isolate(body_ty, body, _result, n));
+                    }
                 }
                 Some(None)
             }
@@ -386,6 +393,146 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             _ => None,
         }
+    }
+
+    /// Lower `core.isolate`'s value boundary (FORM #101).  The callback's failure
+    /// successor enters `handler`, whose first instruction is the catch row; the
+    /// ordinary result slot is initialized independently on each of the three exits.
+    fn lower_isolate(
+        &mut self,
+        body_ty: TyId,
+        body: ValueId,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let Some((_, inner, Some(capacity))) = self.result_parts(result) else {
+            self.gap(n, "isolate result shape is not built");
+            return None;
+        };
+        let Some((_, payload, Some(causes))) = self.result_parts(inner) else {
+            self.gap(n, "isolate result shape is not built");
+            return None;
+        };
+        let (Ok(Rep::Place(result_id)), Ok(Rep::Place(inner_id)), Ok(Rep::Place(capacity_id))) =
+            (self.rep(result), self.rep(inner), self.rep(capacity))
+        else {
+            self.gap(n, "isolate result representation is not built");
+            return None;
+        };
+        if !self.live() {
+            return None;
+        }
+
+        let to = self.new_slot(PlaceTy::Declared(result_id), n);
+        let [entered, room, ..] = match self.runtime_row(RtOp::IsolateEnter, &[], n) {
+            Some(values) => values,
+            None => return None,
+        };
+        let body_block = self.new_block(&[]);
+        let refused_block = self.new_block(&[]);
+        let handler = self.new_block(&[]);
+        let join = self.new_block(&[]);
+        self.runtime_branch(entered, body_block, refused_block, n);
+
+        self.start(body_block);
+        let returned = self.call_lowered_fail(body_ty, body, n, handler);
+        self.runtime_row(RtOp::IsolateLeave, &[], n);
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 0,
+            },
+            n,
+        );
+        let inside = self.address(
+            AddressBase::Address(to),
+            &[Step::CaseField { case: 0, field: 0 }],
+            PlaceTy::Declared(inner_id),
+            n,
+        );
+        self.inst(
+            Inst::SetCase {
+                address: inside,
+                case: 0,
+            },
+            n,
+        );
+        if let Some(rep) = self.rep(payload).ok()
+            && let Some(value) = returned
+            && let Some(place) = rep.stored()
+        {
+            let at = self.address(
+                AddressBase::Address(inside),
+                &[Step::CaseField { case: 0, field: 0 }],
+                place,
+                n,
+            );
+            self.install(at, rep, Some(value), n);
+        }
+        self.jump(join, &[], n);
+
+        self.start(handler);
+        let [caught, ..] = match self.runtime_row(RtOp::IsolateCatch, &[], n) {
+            Some(values) => values,
+            None => return None,
+        };
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 0,
+            },
+            n,
+        );
+        let inside = self.address(
+            AddressBase::Address(to),
+            &[Step::CaseField { case: 0, field: 0 }],
+            PlaceTy::Declared(inner_id),
+            n,
+        );
+        self.inst(
+            Inst::SetCase {
+                address: inside,
+                case: 1,
+            },
+            n,
+        );
+        if let Some(at) =
+            self.runtime_field(inside, &[Step::CaseField { case: 1, field: 0 }], causes, n)
+        {
+            self.runtime_store(at, &[Step::Field(0)], Ty::Ptr, caught, n);
+        }
+        self.jump(join, &[], n);
+
+        self.start(refused_block);
+        self.inst(
+            Inst::SetCase {
+                address: to,
+                case: 1,
+            },
+            n,
+        );
+        let capacity_at = self.address(
+            AddressBase::Address(to),
+            &[Step::CaseField { case: 1, field: 0 }],
+            PlaceTy::Declared(capacity_id),
+            n,
+        );
+        let requested = match self.konst(
+            Ty::Scalar(Scalar::U64),
+            hirsel_core_layout::charge::CAUSE_CELL,
+            n,
+        ) {
+            Some(value) => value,
+            None => return None,
+        };
+        self.runtime_capacity(capacity_at, requested, room, n);
+        self.jump(join, &[], n);
+
+        self.start(join);
+        let value = self.pointer(to, n);
+        self.temp(result, Some(value));
+        // The operation itself synthesizes a value; its caller owns the result slot.
+        Some(value)
     }
 
     fn runtime_kernel(

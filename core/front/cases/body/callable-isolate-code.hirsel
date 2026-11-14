@@ -4,8 +4,8 @@ fn mut_capture()->u64 {
  let mut n:u64=0
  match isolate(scoped fn()->u64{n+=1;n}) { _ => 0 }
 }
-// A plain function is callable through isolate, but engine lowering remains pending.
-// expect: gap isolate failure boundary lowering is not built
+// A plain function is callable through isolate.
+// expect: accept
 fn plain_body()->u64 { match isolate(fn()->u64{7}) { _ => 0 } }
 // A received scoped callback that is invoked by the body counts as mutable.
 // expect: refuse FAIL-16 at 13:16

@@ -356,7 +356,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.callable_word(value, 8, n),
             )
         };
-        let v = self.emit_value_call(code, environment, abi, result, n, scratch);
+        let fail = self.fail_to(n);
+        let v = self.emit_value_call(code, environment, abi, result, n, scratch, fail);
         if result == NEVER {
             self.dead = true;
         }
@@ -371,6 +372,31 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         value: ValueId,
         vals: &[Option<ValueId>],
         n: NodeId,
+    ) -> Option<ValueId> {
+        let fail = self.fail_to(n);
+        self.call_lowered_with_fail(ty, value, vals, n, fail)
+    }
+
+    /// Call a lowered callable with an explicit failure successor.  Isolation uses
+    /// this to send the body's failure directly to its handler, before ordinary
+    /// enclosing cleanup runs.
+    pub(super) fn call_lowered_fail(
+        &mut self,
+        ty: TyId,
+        value: ValueId,
+        n: NodeId,
+        fail: BlockId,
+    ) -> Option<ValueId> {
+        self.call_lowered_with_fail(ty, value, &[], n, Some(fail))
+    }
+
+    fn call_lowered_with_fail(
+        &mut self,
+        ty: TyId,
+        value: ValueId,
+        vals: &[Option<ValueId>],
+        n: NodeId,
+        fail: Option<BlockId>,
     ) -> Option<ValueId> {
         let mut scratch = self.call_scratch.pop().unwrap_or_default();
         let TyKind::Fn(params, result, _, callable) = self.t.kind(ty).clone() else {
@@ -391,7 +417,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.callable_word(Some(value), 8, n),
             )
         };
-        let v = self.emit_value_call(code, environment, abi, result, n, &mut scratch);
+        let v = self.emit_value_call(code, environment, abi, result, n, &mut scratch, fail);
         self.call_scratch.push(scratch);
         v
     }
@@ -553,6 +579,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
         scratch: &mut CallScratch,
+        fail: Option<BlockId>,
     ) -> Option<ValueId> {
         if !self.live() {
             return None;
@@ -598,7 +625,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             scratch.ir_args.push(Arg::Address(at));
         }
         let args = PoolRange::push(&mut self.b.pools.args, scratch.ir_args.iter().copied());
-        let fail = self.fail_to(n);
         let value = self.e.module.signatures[signature.index()]
             .results
             .first()

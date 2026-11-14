@@ -3525,6 +3525,12 @@ fn isolate_anchor_attack_regressions() {
 }
 
 #[test]
+fn isolate_parameter_region_anchor_regressions() {
+    let failures = run_case(&root().join("cases/body/callable-attack-949.hirsel"));
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
 fn isolate_transitive_attack_regressions() {
     let failures = run_case(&root().join("cases/body/callable-isolate-attack-947.hirsel"));
     assert!(failures.is_empty(), "{failures:?}");

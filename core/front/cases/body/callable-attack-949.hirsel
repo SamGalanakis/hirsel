@@ -1,0 +1,89 @@
+stable type Stamp949 {
+    n: u64
+}
+
+// A Region parameter keeps its named root through a captured mut slot.
+// expect: accept
+fn listed_param949(r: Region) -> u64 {
+    let mut p: (scoped fn() -> u64) in r = fn() -> u64 {
+        0
+    }
+    let change = scoped fn() {
+        p = scoped fn() -> u64 {
+            let x = result.unwrap(Stamp949(n: 7) in r)
+            x.n
+        }
+    }
+    change()
+    p()
+}
+
+// The same parameter-root rule holds through a second minimal callback body.
+// expect: accept
+fn parameter_region949b(r: Region) -> u64 {
+    let mut p: (scoped fn() -> u64) in r = fn() -> u64 {
+        1
+    }
+    let change = scoped fn() {
+        p = scoped fn() -> u64 {
+            let x = result.unwrap(Stamp949(n: 8) in r)
+            x.n
+        }
+    }
+    change()
+    p()
+}
+
+// expect: run run_listed_param949() = 7
+fn run_listed_param949() -> u64 {
+    region r {
+        listed_param949(r)
+    }
+}
+
+// expect: run run_parameter_region949b() = 8
+fn run_parameter_region949b() -> u64 {
+    region r {
+        parameter_region949b(r)
+    }
+}
+
+// A second Region parameter is outside the written anchor list.
+// expect: refuse OWN-21 at 59:9
+// expect: cause OWN-21 at 59:9 from 55:13
+fn unlisted_param949(r: Region, other: Region) -> u64 {
+    let mut p: (scoped fn() -> u64) in r = fn() -> u64 {
+        0
+    }
+    let change = scoped fn() {
+        p = scoped fn() -> u64 {
+            let x = result.unwrap(Stamp949(n: 8) in other)
+            x.n
+        }
+    }
+    change()
+    p()
+}
+
+// A nested lexical Region is also outside the parameter root list.
+// expect: refuse OWN-21 at 77:13
+// expect: cause OWN-21 at 77:13 from 73:17
+fn nested_unlisted949(r: Region) -> u64 {
+    region other {
+        let mut p: (scoped fn() -> u64) in r = fn() -> u64 {
+            0
+        }
+        let change = scoped fn() {
+            p = scoped fn() -> u64 {
+                let x = result.unwrap(Stamp949(n: 9) in other)
+                x.n
+            }
+        }
+        change()
+        p()
+    }
+}
+
+pub fn main() -> Result[(), Exit] {
+    Ok(())
+}

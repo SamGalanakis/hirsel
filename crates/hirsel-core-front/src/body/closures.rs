@@ -720,6 +720,33 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
+    /// Return the semantic Region root for a slot that may cross into a
+    /// callback activation.  Resolver slots are storage identities, so a
+    /// captured formal would otherwise be mistaken for a local Region root.
+    fn region_root_for_capture(&self, slot: usize) -> Option<crate::types::Root> {
+        let var = self.vars.get(slot).and_then(Option::as_ref)?;
+        if !self.region_handle(var.ty) {
+            return None;
+        }
+        if let Some(root) = self
+            .capture_frame
+            .as_ref()
+            .and_then(|frame| frame.region_roots.get(slot).copied().flatten())
+        {
+            return Some(root);
+        }
+        self.fd
+            .params
+            .iter()
+            .enumerate()
+            .find_map(|(index, parameter)| {
+                (self.binder_at.get(&(parameter.site.span.start, parameter.site.span.end))
+                    == Some(&(slot as u32)))
+                    .then_some(crate::types::Root::Parameter(index as u32))
+            })
+            .or(Some(crate::types::Root::Local(slot as u32)))
+    }
+
     pub(super) fn closure(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         let mut fd = self.fd.as_ref().clone();
         fd.drop_of = None;
@@ -887,6 +914,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 })
             })
             .collect();
+        // Preserve the semantic identity of Region roots as a callback crosses
+        // an activation.  A captured Region parameter is still carried in a
+        // local slot, but OWN-21 compares its named parameter root with the
+        // written anchor list, rather than with that storage place.
+        let region_roots: Vec<_> = (0..self.vars.len())
+            .map(|slot| self.region_root_for_capture(slot))
+            .collect();
         let mut child = Cx::new(self.p, self.definition, self.e);
         child.fd = std::borrow::Cow::Owned(fd);
         child.header = n;
@@ -896,6 +930,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             outer: self.vars.clone(),
             outer_descriptors: std::mem::take(&mut self.descriptors),
             written_anchors: vec![None; self.vars.len()],
+            region_roots,
             by_slot: vec![None; self.vars.len()],
             captures: vec![],
             callbacks: vec![],
@@ -1043,6 +1078,10 @@ pub(super) struct CaptureFrame {
     outer: Vec<Option<Var>>,
     outer_descriptors: Descriptors,
     written_anchors: Vec<Option<anchors::Fact>>,
+    /// Semantic Region roots for captured slots.  The slot itself is local to
+    /// this activation, while a captured formal keeps its parent's parameter
+    /// root for anchor comparison.
+    region_roots: Vec<Option<crate::types::Root>>,
     by_slot: Vec<Option<usize>>,
     captures: Vec<Capture>,
     callbacks: Vec<Capture>,
@@ -2576,7 +2615,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let slot = self.descriptors.captures[i as usize].slot;
             let ty = self.var(slot).ty;
             let captured = if self.region_handle(ty) {
-                self.anchors.named_region(slot)
+                let root = self
+                    .capture_frame
+                    .as_ref()
+                    .and_then(|frame| frame.region_roots.get(slot as usize).copied().flatten())
+                    .unwrap_or(crate::types::Root::Local(slot));
+                self.anchors.named_region_root(root)
             } else {
                 self.anchor_read(At {
                     place: Place::whole(slot),

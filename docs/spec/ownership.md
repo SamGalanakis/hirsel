@@ -664,13 +664,32 @@ holds: each anchor is frozen from the declaration on (OWN-10), even while the sl
 or sub-view of one included, or it is refused there. Its set is then the same at a loop's
 head and at every edge (OWN-17), so a loop may keep a view it finds; a slot without a
 written anchor starts with its initialiser's set, which is why `last_len` (OWN-8) is
-refused and `last` below is not.
+refused and `last` below is not. A scoped callback slot with a written anchor may so be
+assigned a callback that captures that anchor as a view, even while it holds one that
+captures nothing (`pick`); a `mut` capture of the anchor is refused where it is activated,
+the anchor being frozen (OWN-10). Only a body that can name the anchor builds such a
+callback: a callee given the slot through a `mut` parameter names none of its caller's
+slots, and a capture of its own slots is refused (OWN-21).
 
 ```hirsel
 fn last(xs: List[String], n: u64) -> Option[View[String]] in xs {
   let mut found: Option[View[String]] in xs = None
   for s in xs { if string.byte_len(s) == n { found = Some(s) } }
   found
+}
+```
+```hirsel
+fn pick(n: List[u64], c: bool) -> u64 {
+  let mut cb: (scoped fn() -> u64) in n = fn() -> u64 { 0 }
+  if c { cb = scoped fn() -> u64 { list.len(n) } }
+  cb()
+}
+```
+```hirsel
+fn grow(take n: List[u64]) -> u64 {
+  let mut cb: (scoped fn() -> u64) in n = fn() -> u64 { 0 }
+  cb = scoped fn() -> u64 { let _ = list.push(mut n, 1); 0 }
+  cb()                                                    // refused: OWN-10, n is frozen
 }
 ```
 ```hirsel

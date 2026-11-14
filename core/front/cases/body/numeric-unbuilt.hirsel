@@ -1,5 +1,6 @@
 // A float operation on a type parameter is a gap, never a checker panic, even in a body
 // whose numeric bound is refused (it is still lowered).
-// expect: refuse OWN-4 at 5:12
+// expect: refuse OWN-4 at 6:12
 // expect: gap a float operation on a type parameter is not built
+// expect: compared OWN-4 at 6:12 | float bound on a type parameter in package app | numeric bound on a core declaration's type parameter
 fn root[F: float](x: F) -> F { float.sqrt(x) }

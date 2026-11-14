@@ -1,5 +1,6 @@
 // LANG-7: functions cannot head dotted paths.
 // Ignoring the suffix silently emitted a recursive call instead of refusing it.
-// expect: refuse LANG-7 at 5:22
-// expect: cause LANG-7 at 5:22 from 5:4
+// expect: refuse LANG-7 at 6:22
+// expect: cause LANG-7 at 6:22 from 6:4
+// expect: compared LANG-7 at 6:22 | function | local, module, package or constant as a dotted-path head
 fn recurse() -> u8 { recurse.missing() }

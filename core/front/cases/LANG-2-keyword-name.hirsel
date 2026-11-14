@@ -1,4 +1,5 @@
 // LANG-2: a reserved keyword cannot be a declaration name.
-// expect: refuse LANG-2 at 3:4
+// expect: refuse LANG-2 at 4:4
+// expect: compared LANG-2 at 4:4 | view | non-keyword identifier
 fn view() {}
 fn next() {}

@@ -1,5 +1,6 @@
 // LANG-9: ordinary function calls are positional; labels belong to construction.
 // The resolver refuses once; the body checker must not add a gap for that refusal.
-// expect: refuse LANG-9 at 5:16
+// expect: refuse LANG-9 at 6:16
+// expect: compared LANG-9 at 6:16 | labelled arguments | positional arguments in an ordinary call
 fn id(x: u8) -> u8 { x }
 fn f() -> u8 { id(x: 3) }

@@ -1,3 +1,4 @@
 // CONC-12's exact refused program, diagnosed by LANG-5.
-// expect: refuse LANG-5 at 3:1
+// expect: refuse LANG-5 at 4:1
+// expect: compared LANG-5 at 4:1 | var | type
 var hits: u64 = 0

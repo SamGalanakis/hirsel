@@ -1,3 +1,4 @@
 // LANG-9: ordinary calls have no labelled arguments.
-// expect: refuse LANG-9 at 3:28
+// expect: refuse LANG-9 at 4:28
+// expect: compared LANG-9 at 4:28 | labelled arguments | positional arguments in an ordinary call
 fn f(h:fn(u64)->u64)->u64 {h(n:1)}

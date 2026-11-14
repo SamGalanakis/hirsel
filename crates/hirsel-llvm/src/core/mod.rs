@@ -136,10 +136,11 @@ pub(crate) fn emit_native_scalar_module_in_context(
             continue;
         };
         let sig = &module.signatures[function.signature.index()];
-        if sig.dest.is_some() || sig.results.len() > 1 {
-            return Err(Error::Unsupported(
-                "native scalar seam requires infallible scalar functions".into(),
-            ));
+        if sig.dest.is_some() {
+            return Err(Error::Unsupported(format!(
+                "native scalar seam function {} requires infallible scalar functions",
+                symbol(module, FuncId(index as u32))
+            )));
         }
         if body.insts.iter().any(|inst| {
             matches!(
@@ -183,12 +184,15 @@ pub(crate) fn emit_native_scalar_module_in_context(
             } else {
                 sink::Extension::None
             };
+            let sret = declaration
+                .split_once("sret(")
+                .and_then(|(_, rest)| rest.split_once(')').map(|(ty, _)| ir_type_text(ty)));
             params.push(sink::Parameter {
                 ty,
                 extension,
                 noalias: declaration.contains(" noalias"),
                 readonly: declaration.contains(" readonly"),
-                sret: None,
+                sret,
                 byval: None,
             });
             let local = match name {

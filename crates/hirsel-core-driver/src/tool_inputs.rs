@@ -224,16 +224,17 @@ pub(crate) fn toolchain_identity(
         "hirsel.toolchain-image.v2",
         [crate::encode(&(TOOLCHAIN_SCHEMA, target, image(&files)))?.as_slice()],
     );
-    let manifest = ToolchainManifest {
-        schema: TOOLCHAIN_SCHEMA,
-        target: target.into(),
-        files,
-        identity,
-    };
-    let temporary = tempfile::NamedTempFile::new_in(&root)?;
-    serde_json::to_writer(&temporary, &manifest).map_err(io::Error::other)?;
-    let temporary = temporary.into_temp_path();
-    std::fs::rename(&temporary, path)?;
+    // A moved stat over equal bytes is a change to the record: rewrite it so
+    // the next request reads nothing. An unchanged record is not rewritten.
+    if old.is_none_or(|old| old.files != files) {
+        let manifest = ToolchainManifest {
+            schema: TOOLCHAIN_SCHEMA,
+            target: target.into(),
+            files,
+            identity,
+        };
+        publish(&root, &path, &manifest)?;
+    }
     Ok(identity)
 }
 
@@ -257,13 +258,19 @@ fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkR
     let mut path = directory.join(format!("{target}-{driver_key}.json"));
     if !force
         && let Ok(bytes) = std::fs::read(&path)
-        && let Ok(recipe) = serde_json::from_slice::<LinkRecipe>(&bytes)
+        && let Ok(mut recipe) = serde_json::from_slice::<LinkRecipe>(&bytes)
         && recipe.schema == LINK_RECIPE_SCHEMA
         && recipe.target == target
         && recipe.linker.is_file()
-        && recipe_inputs_match(&recipe)?
     {
-        return Ok(recipe);
+        match refresh_recipe_inputs(&mut recipe)? {
+            RecipeInputs::Current => return Ok(recipe),
+            RecipeInputs::Restated => {
+                publish(&directory, &path, &recipe)?;
+                return Ok(recipe);
+            }
+            RecipeInputs::Changed => {}
+        }
     }
     let capture_dir = tempfile::tempdir_in(&directory)?;
     let mut synthetic_source = capture_dir.path().join("recipe.c");
@@ -442,9 +449,7 @@ fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkR
         source_files,
         identity,
     };
-    let temp = tempfile::NamedTempFile::new_in(&directory)?;
-    serde_json::to_writer(&temp, &recipe).map_err(io::Error::other)?;
-    temp.persist(path).map_err(|e| e.error)?;
+    publish(&directory, &path, &recipe)?;
     Ok(recipe)
 }
 
@@ -517,24 +522,43 @@ fn image(files: &[RecipeFile]) -> Vec<(&Path, &ContentHash)> {
         .collect()
 }
 
-fn recipe_inputs_match(recipe: &LinkRecipe) -> io::Result<bool> {
-    // The recipe is a published toolchain product. Compare metadata first;
-    // only an input whose stat signature moved is re-hashed.
-    for input in recipe.files.iter().chain(&recipe.source_files) {
+#[derive(Debug, PartialEq, Eq)]
+enum RecipeInputs {
+    Current,
+    /// Some stat moved over unchanged bytes; the recipe now records the new stat.
+    Restated,
+    Changed,
+}
+
+/// Compare a recorded recipe's inputs by metadata first; only an input whose
+/// stat moved is re-hashed. Equal bytes under a moved stat (Buck re-links a
+/// toolchain file) update the recorded stat, so the next request reads none.
+fn refresh_recipe_inputs(recipe: &mut LinkRecipe) -> io::Result<RecipeInputs> {
+    let mut inputs = RecipeInputs::Current;
+    for input in recipe.files.iter_mut().chain(&mut recipe.source_files) {
         let Ok(stat) = recipe_stat(&input.path) else {
-            return Ok(false);
+            return Ok(RecipeInputs::Changed);
         };
         if stat == input.stat {
             continue;
         }
         let Ok(bytes) = std::fs::read(&input.path) else {
-            return Ok(false);
+            return Ok(RecipeInputs::Changed);
         };
         if ContentHash::of_bytes(&bytes) != input.content {
-            return Ok(false);
+            return Ok(RecipeInputs::Changed);
         }
+        input.stat = stat;
+        inputs = RecipeInputs::Restated;
     }
-    Ok(true)
+    Ok(inputs)
+}
+
+fn publish(directory: &Path, path: &Path, value: &impl Serialize) -> io::Result<()> {
+    let temporary = tempfile::NamedTempFile::new_in(directory)?;
+    serde_json::to_writer(&temporary, value).map_err(io::Error::other)?;
+    temporary.persist(path).map_err(|error| error.error)?;
+    Ok(())
 }
 
 fn recipe_file(path: &Path) -> io::Result<RecipeFile> {
@@ -723,6 +747,65 @@ mod tests {
     }
 
     #[test]
+    fn a_rematerialised_toolchain_file_is_read_once() {
+        // Buck re-links toolchain files: same bytes, new inode and ctime. The request
+        // that sees it re-hashes once and records the new stat; later requests read
+        // nothing and rewrite nothing.
+        let work = tempfile::tempdir().unwrap();
+        let bin = work.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let linker = bin.join("ld.lld");
+        let crt = work.path().join("crt1.o");
+        std::fs::write(&linker, b"linker").unwrap();
+        std::fs::write(&crt, b"crt").unwrap();
+        let cc = bin.join("cc");
+        std::fs::write(
+            &cc,
+            format!(
+                "#!/bin/sh\necho '\"{}\" \"-pie\" \"-o\" \"out\" \"{}\" \"-lc\"' >&2\n",
+                linker.display(),
+                crt.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&cc, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let runtime = work.path().join("runtime.a");
+        std::fs::write(&runtime, b"runtime").unwrap();
+        let target = "x86_64-unknown-linux-gnu";
+        let identity = toolchain_identity(&cc, target, &runtime).unwrap();
+        for file in [&linker, &crt, &runtime] {
+            let copy = file.with_extension("rematerialised");
+            std::fs::copy(file, &copy).unwrap();
+            std::fs::rename(&copy, file).unwrap();
+        }
+        assert_eq!(toolchain_identity(&cc, target, &runtime).unwrap(), identity);
+        let directory = recipe_directory(&cc).unwrap();
+        let key = driver_file_key(&cc).unwrap();
+        let recipe: LinkRecipe = serde_json::from_slice(
+            &std::fs::read(directory.join(format!("{target}-{key}.json"))).unwrap(),
+        )
+        .unwrap();
+        let manifest_path = directory.join(format!("toolchain-{target}-{key}.json"));
+        let manifest: ToolchainManifest =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        for file in recipe.files.iter().chain(&manifest.files) {
+            assert_eq!(
+                file.stat,
+                recipe_stat(&file.path).unwrap(),
+                "{} keeps a stat the next request must re-hash",
+                file.path.display()
+            );
+        }
+        let written = std::fs::metadata(&manifest_path).unwrap().ino();
+        assert_eq!(toolchain_identity(&cc, target, &runtime).unwrap(), identity);
+        assert_eq!(
+            std::fs::metadata(&manifest_path).unwrap().ino(),
+            written,
+            "an unchanged toolchain record is not rewritten"
+        );
+    }
+
+    #[test]
     fn each_runtime_archive_keys_its_own_toolchain_identity() {
         // Two builds share one C driver but link different runtime archives (the pool and
         // openat2 host targets do). A recipe captured for one must not stand in for the other.
@@ -771,7 +854,7 @@ mod tests {
         let work = tempfile::tempdir().unwrap();
         let input = work.path().join("crt.o");
         std::fs::write(&input, b"same bytes").unwrap();
-        let recipe = LinkRecipe {
+        let mut recipe = LinkRecipe {
             schema: LINK_RECIPE_SCHEMA,
             target: "x86_64-unknown-linux-gnu".into(),
             linker: input.clone(),
@@ -780,15 +863,20 @@ mod tests {
             source_files: vec![],
             identity: ContentHash::of_bytes(b"recipe"),
         };
-        assert!(recipe_inputs_match(&recipe).unwrap());
+        assert_eq!(
+            refresh_recipe_inputs(&mut recipe).unwrap(),
+            RecipeInputs::Current
+        );
         std::fs::write(&input, b"same bytes").unwrap();
-        assert!(
-            recipe_inputs_match(&recipe).unwrap(),
+        assert_eq!(
+            refresh_recipe_inputs(&mut recipe).unwrap(),
+            RecipeInputs::Restated,
             "touch-only replacement must reuse"
         );
         std::fs::write(&input, b"changed bytes").unwrap();
-        assert!(
-            !recipe_inputs_match(&recipe).unwrap(),
+        assert_eq!(
+            refresh_recipe_inputs(&mut recipe).unwrap(),
+            RecipeInputs::Changed,
             "changed content must miss"
         );
     }

@@ -41,7 +41,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for name in roots {
         let entry = DefPath::from_full(&format!("hot@1/loops/{name}")).unwrap();
         let options = NativeOptions {
-            backend: Backend::Llvm,
+            backend: if args.iter().any(|s| s == "cranelift") {
+                Backend::Cranelift
+            } else {
+                Backend::Llvm
+            },
             optimize: true,
             debug_lines: false,
             target: "x86_64-unknown-linux-gnu".into(),

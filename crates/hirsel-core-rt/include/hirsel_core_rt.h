@@ -59,6 +59,14 @@ typedef struct HirselCoreContext HirselCoreContext;
 typedef struct HirselCoreLimitRecord HirselCoreLimitRecord;
 typedef struct { uint64_t requested, available; } HirselCoreCapacity;
 typedef struct { void *pointer; HirselCoreCapacity capacity; } HirselCoreAllocation;
+typedef struct { void *pointer; uint64_t available; } HirselCoreGrowth;
+/* Consuming sequence growth after the emitted shared threshold test. Success
+ * installs data/capacity before refund and returns pointer/0. Capacity returns
+ * NULL/room without mutation; use allocation_status for a grant refusal.
+ * HostMemory is stop102, no cleanup. kind is PLAIN/GRAPH, capacity was nonzero. */
+HirselCoreGrowth hirsel_core_grow(const HirselCoreContext *, void *carrier,
+    size_t bytes, size_t align, uint64_t charge, uint64_t capacity, size_t moved,
+    uint64_t refund, bool overflow, uint8_t kind);
 /* rt.dest_id: no hidden context or failure status; never admits or allocates. */
 uint64_t hirsel_core_dest_id(void);
 /* rt.hash_bytes: the fixed Map byte hash (FORM "Maps"); no context or status. */

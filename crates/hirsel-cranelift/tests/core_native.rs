@@ -1389,3 +1389,13 @@ fn relative_debug_rows_and_distinct_cold_sites() {
 fn float_nan_paths_in_dev_and_speed() {
     check_float_nan_paths();
 }
+
+#[test]
+fn consuming_growth_keeps_the_carrier_and_original_payer_on_refusal() {
+    for optimize in [false, true] {
+        check_sample_with_refusals(
+            include_str!("../../hirsel-core-rt/testdata/grow.core"),
+            optimize,
+        );
+    }
+}

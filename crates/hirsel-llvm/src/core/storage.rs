@@ -255,10 +255,10 @@ impl FunctionEmitter<'_> {
         let available = self.calc(format!("load i64, ptr {available}, align 8"));
         (pointer, available)
     }
-    /// Admit and allocate one block, branching to `fail` when a refusal is a failure
-    /// (a finalizer's grant, MEM-27): the block (null on refusal) and the room.
+    /// Admit and allocate one block, returning null and room on refusal. The
+    /// caller applies the grant status before continuing the source instruction.
     #[allow(clippy::too_many_arguments)]
-    fn allocate(
+    pub(super) fn allocate_raw(
         &mut self,
         kind: &AllocKind,
         place: &Payer,
@@ -266,7 +266,7 @@ impl FunctionEmitter<'_> {
         size: &str,
         align: u64,
         overflow: Option<ValueId>,
-        fail: Option<BlockId>,
+        owned_like: bool,
     ) -> (String, String) {
         let ptr = |s: &str| ("ptr".into(), s.to_string());
         let word = |s: String| ("i64".into(), s);
@@ -289,6 +289,7 @@ impl FunctionEmitter<'_> {
             size,
             align,
             overflow,
+            owned_like,
         );
         let (block, room) = if let Some(fast) = fast {
             fast
@@ -350,6 +351,24 @@ impl FunctionEmitter<'_> {
             }
             self.allocation(name, &args)
         };
+        (block, room)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn allocate(
+        &mut self,
+        kind: &AllocKind,
+        place: &Payer,
+        charge: &str,
+        size: &str,
+        align: u64,
+        overflow: Option<ValueId>,
+        fail: Option<BlockId>,
+    ) -> (String, String) {
+        let (block, room) = self.allocate_raw(kind, place, charge, size, align, overflow, false);
+        self.allocation_status(&block, fail);
+        (block, room)
+    }
+    pub(super) fn allocation_status(&mut self, block: &str, fail: Option<BlockId>) {
         // Only refusal needs the runtime's active-finalizer decision.
         let present = self.calc(format!("icmp ne ptr {block}, null"));
         let n = self.next;
@@ -369,7 +388,6 @@ impl FunctionEmitter<'_> {
         self.branch_failure(&failed, fail, Some(6));
         self.line(format!("br label %allocation_success{n}"));
         writeln!(self.code, "allocation_success{n}:").unwrap();
-        (block, room)
     }
     pub(super) fn storage(&mut self, inst: &Inst, index: usize) -> Result<()> {
         let ptr = |s: &str| ("ptr".into(), s.to_string());
@@ -428,9 +446,9 @@ impl FunctionEmitter<'_> {
                     writeln!(self.code, "allocated{n}:").unwrap();
                 }
             }
-            // `grow` lowers as the allocate / copy / free it replaces (crate docs,
-            // "Growth"): admit like the old block, then on success move the
-            // elements, install the block and capacity, and free the old block.
+            // Full-new admission and install-before-refund are unchanged.
+            // Growth may reuse ordinary local backing under the shared policy;
+            // every other buffer takes the original allocate/copy/free path.
             Inst::Grow {
                 result,
                 available,
@@ -453,44 +471,17 @@ impl FunctionEmitter<'_> {
                 let at = self.address(carrier);
                 let old = self.calc(format!("load ptr, ptr {at}, align 8"));
                 let (charge, size) = (self.numeric(charge), self.numeric(size));
-                let (block, room) = self.allocate(
-                    &AllocKind::Own { edge },
-                    &Payer::Like(old.clone()),
-                    &charge,
-                    &size,
-                    align,
-                    overflow,
-                    fail,
-                );
-                self.put(result, &block);
-                self.put(available, &room);
                 let (moved, capacity, refund) = (
                     self.numeric(moved),
                     self.numeric(capacity),
                     self.numeric(refund),
                 );
-                let present = self.calc(format!("icmp ne ptr {block}, null"));
-                let n = self.next;
-                self.next += 1;
-                self.line(format!(
-                    "br i1 {present}, label %grow_moved{n}, label %grown{n}"
-                ));
-                writeln!(self.code, "grow_moved{n}:").unwrap();
-                self.runtime_void(
-                    "llvm.memcpy.p0.p0.i64",
-                    &[
-                        ptr(&block),
-                        ptr(&old),
-                        word(moved),
-                        ("i1".into(), "false".into()),
-                    ],
+                let (block, room) = self.grow_buffer(
+                    edge, &at, &old, &charge, &size, align, overflow, fail, &capacity, &moved,
+                    &refund,
                 );
-                self.line(format!("store ptr {block}, ptr {at}, align 8"));
-                let cap_at = self.calc(format!("getelementptr i8, ptr {at}, i64 16"));
-                self.line(format!("store i64 {capacity}, ptr {cap_at}, align 8"));
-                self.free_block(&old, &refund);
-                self.line(format!("br label %grown{n}"));
-                writeln!(self.code, "grown{n}:").unwrap();
+                self.put(result, &block);
+                self.put(available, &room);
             }
             Inst::Pointer { result, address } => {
                 let p = self.address(address);

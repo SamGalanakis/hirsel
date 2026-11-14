@@ -85,3 +85,35 @@ fn relative_debug_rows_and_distinct_cold_sites() {
 fn float_nan_paths_in_dev_and_speed() {
     check_float_nan_paths();
 }
+
+#[test]
+fn consuming_growth_keeps_the_carrier_and_original_payer_on_refusal() {
+    for optimize in [false, true] {
+        check_sample_with_refusals(
+            include_str!("../../hirsel-core-rt/testdata/grow.core"),
+            optimize,
+        );
+    }
+}
+
+#[test]
+fn consuming_growth_host_memory_refusal_is_a_reported_run_stop() {
+    host_memory::check_aarch64(
+        |module| {
+            emit_object_with_layouts(
+                module,
+                &hirsel_core_layout::compute(&module.types).unwrap(),
+                &Options {
+                    target: NATIVE_TARGET,
+                    optimize: true,
+                    debug_lines: false,
+                },
+            )
+            .unwrap()
+            .bytes
+        },
+        |module, function| {
+            symbol(&module.instances[module.functions[function.index()].instance.index()])
+        },
+    );
+}

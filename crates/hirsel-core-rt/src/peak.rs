@@ -447,6 +447,95 @@ mod tests {
         drop(run);
     }
     #[test]
+    fn consuming_growth_observes_full_new_charge_and_only_live_backing() {
+        for kind in [crate::block::PLAIN, crate::block::GRAPH] {
+            let context = Context::new(4096);
+            let run = Run::start(&context);
+            let old =
+                crate::block::allocate_like(&context, None, Some(1024), 1024, 8, kind).unwrap();
+            let mut carrier = [old.as_ptr().addr() as u64, 1, 1024];
+            // SAFETY: exclusive live sequence backing and carrier, exact charges
+            // and initialized prefix; the byte to transfer is initialized here.
+            let replacement = unsafe {
+                old.as_ptr().write(42);
+                crate::growth::grow(
+                    &context,
+                    carrier.as_mut_ptr().cast(),
+                    2048,
+                    8,
+                    2048,
+                    2048,
+                    1,
+                    1024,
+                    false,
+                    kind,
+                )
+                .unwrap()
+            };
+            assert_eq!(carrier, [replacement.as_ptr().addr() as u64, 1, 2048]);
+            let prefix = crate::block::prefix(kind) as u64;
+            assert_eq!(
+                figures(),
+                Figures {
+                    charged: 2048,
+                    retained: 2048 + prefix,
+                    slack: 0
+                }
+            );
+            // SAFETY: the consuming row moved the one initialized byte and
+            // released the old storage; only the replacement remains live.
+            unsafe {
+                assert_eq!(replacement.as_ptr().read(), 42);
+                crate::block::free(replacement, 2048);
+            }
+            assert_eq!(figures(), Figures::default());
+            drop(run);
+            assert_eq!(LAST.get(), 3072);
+            LAST_REPORT.with(|json| {
+                let json = json.borrow();
+                let expected = format!("\"peak_retained_bytes\":{}", 2048 + prefix);
+                assert!(json.contains(&expected));
+            });
+        }
+    }
+    #[test]
+    fn native_reallocation_replaces_one_backing_without_changing_charge() {
+        let context = Context::new(1000);
+        let run = Run::start(&context);
+        let base =
+            crate::allocator::allocate(std::alloc::Layout::from_size_align(2048, 8).unwrap());
+        // SAFETY: exclusive live native backing, ordinary alignment, valid grow.
+        let grown = unsafe {
+            base.as_ptr().write(42);
+            base.as_ptr().add(2047).write(91);
+            crate::allocator::reallocate_ordinary(base.as_ptr(), 4096)
+        };
+        // SAFETY: realloc preserves the complete old payload on success.
+        unsafe {
+            assert_eq!(grown.as_ptr().read(), 42);
+            assert_eq!(grown.as_ptr().add(2047).read(), 91);
+        }
+        assert_eq!(
+            figures(),
+            Figures {
+                charged: 0,
+                retained: 4096,
+                slack: 0
+            }
+        );
+        // SAFETY: the consumed old base is never freed, only its replacement.
+        unsafe {
+            crate::allocator::deallocate_raw(grown.as_ptr());
+        }
+        assert_eq!(figures(), Figures::default());
+        drop(run);
+        LAST_REPORT.with(|json| {
+            let json = json.borrow();
+            assert!(json.contains("\"peak_root_reserved_bytes\":0"));
+            assert!(json.contains("\"peak_retained_bytes\":4096"));
+        });
+    }
+    #[test]
     fn phase_peaks_reset_and_report_keeps_exact_labels_and_end_figures() {
         let context = Context::new(1000);
         let run = Run::start(&context);

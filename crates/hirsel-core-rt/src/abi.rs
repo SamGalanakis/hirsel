@@ -38,6 +38,16 @@
 //! refusal or an unrepresentable native layout stops as `HostMemory`. FAIL-15
 //! stops write `run stop: <Name>\n` and exit 102 without cleanup or failure status.
 //!
+//! `hirsel_core_grow(ctx, carrier, bytes, align, charge, capacity, moved,
+//! refund, overflow, kind) -> Growth { pointer, available }` consumes an owned
+//! sequence backing. Success installs the carrier, refunds the original charge
+//! and returns the new pointer/zero room; Capacity returns null/room, unchanged
+//! carrier and backing. The caller applies allocation_status for a grant refusal.
+//! Native host refusal stops HostMemory102 without cleanup. No new event or
+//! refund drain is introduced. Emitters call this shared entry from
+//! abi_layout::GROW_REALLOC_MIN_PAYLOAD_BYTES of old native payload upward;
+//! small buffers retain the classic inline triple. kind is PLAIN or GRAPH.
+//!
 //! Contexts are task-owned. Allocation pointers, sizes, alignment and remaining
 //! logical charges are trusted emitter operands. None may be stale. Provider
 //! operations serialize Arc operations and cross-task refunds in event order.
@@ -517,6 +527,13 @@ pub struct Allocation {
     pub capacity: Capacity,
 }
 
+/// The consuming grow row's two outputs; both targets return them in registers.
+#[repr(C)]
+pub struct Growth {
+    pub pointer: *mut u8,
+    pub available: u64,
+}
+
 /// Create a context. The provider owns task startup admission (256 + 32).
 #[unsafe(no_mangle)]
 pub extern "C" fn hirsel_core_context_new(bytes: u64) -> *mut Context {
@@ -992,5 +1009,41 @@ pub unsafe extern "C" fn hirsel_core_release_static_enqueue(
         if counted::decrement(node, atomic) {
             crate::block::push_static(&mut *list, node, descriptor);
         }
+    }
+}
+
+/// Full-new admission, replacement, carrier install, then original-payer refund.
+/// # Safety
+/// The consuming sequence carrier is exclusively owned and has nonzero capacity.
+/// Layout, kind (PLAIN/GRAPH), charges and moved bytes are exact FORM operands.
+/// Emitters have selected the shared old-native-payload growth threshold.
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_grow(
+    context: *const Context,
+    carrier: *mut u8,
+    bytes: usize,
+    align: usize,
+    charge: u64,
+    capacity: u64,
+    moved: usize,
+    refund: u64,
+    overflow: bool,
+    kind: u8,
+) -> Growth {
+    // SAFETY: the exclusive consuming carrier and all layout operands are live.
+    match unsafe {
+        crate::growth::grow(
+            &*context, carrier, bytes, align, charge, capacity, moved, refund, overflow, kind,
+        )
+    } {
+        Ok(pointer) => Growth {
+            pointer: pointer.as_ptr(),
+            available: 0,
+        },
+        Err(capacity) => Growth {
+            pointer: ptr::null_mut(),
+            available: capacity.available,
+        },
     }
 }

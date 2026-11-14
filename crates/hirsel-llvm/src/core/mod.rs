@@ -17,6 +17,7 @@ mod copy_tests;
 mod empty;
 mod fast;
 mod forward;
+mod growth;
 mod scalar;
 mod sites;
 mod storage;

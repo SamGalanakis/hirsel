@@ -104,8 +104,15 @@ impl Function<'_, '_, '_> {
                         AllocPlace::Like(v) => Some(self.get(v)),
                         _ => None,
                     };
-                    let values =
-                        self.own_alloc(native_kind, like, size, alignment, charge, overflow)?;
+                    let values = self.own_alloc(
+                        native_kind,
+                        like,
+                        size,
+                        alignment,
+                        charge,
+                        overflow,
+                        false,
+                    )?;
                     [values[0], self.b.ins().iconst(types::I64, 0), values[1]]
                 } else if let Some(overflow) = overflow {
                     let overflow = self.get(overflow);
@@ -153,7 +160,7 @@ impl Function<'_, '_, '_> {
                                 AllocPlace::Like(v) => Some(self.get(v)),
                                 _ => None,
                             };
-                            self.own_alloc(native_kind, like, size, alignment, charge, None)?
+                            self.own_alloc(native_kind, like, size, alignment, charge, None, false)?
                         }
                     };
                     [values[0], self.b.ins().iconst(types::I64, 0), values[1]]
@@ -324,9 +331,9 @@ impl Function<'_, '_, '_> {
                     self.c_call("memcpy", &[p, p, u], &[p], &[to, from, bytes])?;
                 }
             }
-            // `grow` lowers as the allocate / copy / free it replaces (crate docs,
-            // "Growth"): admit like the old block, then on success move the
-            // elements, install the block and capacity, and free the old block.
+            // Full-new admission and install-before-refund are unchanged.
+            // Growth may reuse ordinary local backing under the shared policy;
+            // every other buffer takes the original allocate/copy/free path.
             Inst::Grow {
                 result,
                 available,
@@ -340,7 +347,6 @@ impl Function<'_, '_, '_> {
                 refund,
                 fail,
             } => {
-                let ctx = self.context;
                 let edge =
                     c::sequence_edge(&self.input.types, self.body.addresses[carrier.index()].ty)
                         .expect("wf: grow of a sequence carrier")
@@ -352,45 +358,36 @@ impl Function<'_, '_, '_> {
                         Some(hirsel_core_layout::Cleanup::Fixed) => memory_layout::NATIVE_STATIC,
                         _ => memory_layout::NATIVE_GRAPH,
                     };
-                let trusted = cranelift_codegen::ir::MemFlagsData::trusted();
                 let at = self.addr(carrier);
-                let old = self.b.ins().load(types::I64, trusted, at, 0);
+                let old = self
+                    .b
+                    .ins()
+                    .load(types::I64, MemFlagsData::trusted(), at, 0);
                 let (charge, size) = (self.get(charge), self.get(size));
                 let overflow = overflow.map(|v| self.get(v));
-                let values =
-                    self.own_alloc(native_kind, Some(old), size, align, charge, overflow)?;
-                self.set(result, values[0]);
-                self.set(available, values[1]);
-                let refused = self.b.ins().icmp_imm_s(IntCC::Equal, values[0], 0);
-                let check = self.b.create_block();
-                let moved_block = self.b.create_block();
-                let done = self.b.create_block();
-                self.b.ins().brif(refused, check, &[], moved_block, &[]);
-                self.b.switch_to_block(check);
-                let grant = self.c_call(
-                    "hirsel_core_allocation_status",
-                    &[p, p],
-                    &[boolean],
-                    &[ctx, values[0]],
-                )?[0];
-                self.guard(grant, 6, fail)?;
-                self.b.ins().jump(done, &[]);
-                self.b.switch_to_block(moved_block);
                 let (moved, capacity, refund) =
                     (self.get(moved), self.get(capacity), self.get(refund));
-                self.c_call("memcpy", &[p, p, u], &[p], &[values[0], old, moved])?;
-                self.b.ins().store(trusted, values[0], at, 0);
-                self.b.ins().store(trusted, capacity, at, 16);
-                fast::free(
-                    &mut self.b,
-                    &mut self.calls,
-                    self.object,
-                    self.context,
+                let hirsel_core_layout::FieldTy::Seq(item) = edge else {
+                    unreachable!("grow sequence")
+                };
+                let stride =
+                    hirsel_core_layout::field_size(&self.input.types, self.layouts, &item).0;
+                let values = self.grow_buffer(
+                    native_kind,
+                    stride,
+                    at,
                     old,
+                    size,
+                    align,
+                    charge,
+                    overflow,
+                    capacity,
+                    moved,
                     refund,
+                    fail,
                 )?;
-                self.b.ins().jump(done, &[]);
-                self.b.switch_to_block(done);
+                self.set(result, values[0]);
+                self.set(available, values[1]);
             }
             Inst::LimitEnter {
                 admitted,

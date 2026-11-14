@@ -16,11 +16,11 @@ impl FunctionEmitter<'_> {
             self.calc(format!("getelementptr i8, ptr {p}, i64 {offset}"))
         }
     }
-    fn load_native(&mut self, p: &str, offset: usize, ty: &str) -> String {
+    pub(super) fn load_native(&mut self, p: &str, offset: usize, ty: &str) -> String {
         let at = self.field_pointer(p, offset);
         self.calc(format!("load {ty}, ptr {at}, align 8"))
     }
-    fn store_native(&mut self, p: &str, offset: usize, ty: &str, value: &str) {
+    pub(super) fn store_native(&mut self, p: &str, offset: usize, ty: &str, value: &str) {
         let at = self.field_pointer(p, offset);
         self.line(format!("store {ty} {value}, ptr {at}, align 8"));
     }
@@ -124,6 +124,7 @@ impl FunctionEmitter<'_> {
         let room = self.calc(format!("select i1 {fits}, i64 0, i64 {available}"));
         (admitted, room)
     }
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn fast_allocate(
         &mut self,
         resource: bool,
@@ -133,6 +134,7 @@ impl FunctionEmitter<'_> {
         bytes: &str,
         align: u64,
         overflow: Option<ValueId>,
+        owned_like: bool,
     ) -> Option<(String, String)> {
         if resource {
             return None;
@@ -182,13 +184,15 @@ impl FunctionEmitter<'_> {
         );
         if matches!(place, Payer::Like(_)) {
             writeln!(self.code, "allocation_payer{n}:").unwrap();
-            let empty = self.calc(format!("icmp eq ptr {like}, null"));
-            self.likely(
-                &empty,
-                &format!("admit{n}"),
-                &format!("allocation_header{n}"),
-            );
-            writeln!(self.code, "allocation_header{n}:").unwrap();
+            if !owned_like {
+                let empty = self.calc(format!("icmp eq ptr {like}, null"));
+                self.likely(
+                    &empty,
+                    &format!("admit{n}"),
+                    &format!("allocation_header{n}"),
+                );
+                writeln!(self.code, "allocation_header{n}:").unwrap();
+            }
             let header = self.calc(format!(
                 "getelementptr i8, ptr {like}, i64 -{OWN_PAYER_BACK}"
             ));

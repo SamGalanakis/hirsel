@@ -145,3 +145,8 @@ pub const OWN_ORDINARY_MAX_TAG: usize = OWN_ORDINARY_GRAPH_TAG;
 // the same edge, so the prefix always fits the cleanup.
 // Like/growth retain the same property and original payer; logical charges and
 // admission/refund ordering are independent of this native prefix selection.
+
+/// Reuse an owned sequence buffer from this many OLD native payload bytes.
+/// Capacity times native element stride, excluding the prefix. Both emitters
+/// use this one allocator policy; logical admission remains the full new charge.
+pub const GROW_REALLOC_MIN_PAYLOAD_BYTES: u64 = 1024;

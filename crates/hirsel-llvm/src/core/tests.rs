@@ -3173,3 +3173,103 @@ fn caller_sites_follow_core_generated_direct_and_indirect_inheritance() {
 fn aarch64_caller_sites_follow_core_generated_direct_and_indirect_inheritance() {
     inheritance_fixture(Target::Aarch64Linux);
 }
+
+fn check_consuming_growth(target: Target) {
+    let source = include_str!("../../../hirsel-core-rt/testdata/grow.core");
+    let module = text::parse(source).unwrap();
+    wf::module(&module).unwrap();
+    let mut cases = Vec::new();
+    for case in sample_cases(&module, source) {
+        let report = eval::run(&module, case.function, &case.args, case.limit);
+        for nth in 1..=report.admissions {
+            for later in [false, true] {
+                cases.push(Case {
+                    function: case.function,
+                    args: case.args.clone(),
+                    limit: case.limit,
+                    injection: Some((nth, later)),
+                });
+            }
+        }
+        cases.push(case);
+    }
+    for speed in [false, true] {
+        let ir = emit_ir_target_with_facts(
+            &module,
+            target,
+            std::env::var_os("HIRSEL_TEST_CHARGE_OBSERVATION").is_some(),
+            true,
+            SourceEmission {
+                relocatable_sites: false,
+                debug_lines: false,
+            },
+        )
+        .unwrap();
+        let object = hirsel_llvm_lazy::compile_ir_for_target(&ir, speed, target).unwrap();
+        let reports = execute_target_object(
+            &module,
+            &cases,
+            "",
+            "",
+            if speed {
+                Optimization::Speed
+            } else {
+                Optimization::None
+            },
+            Some(object),
+            target,
+        );
+        assert_eq!(reports.len(), cases.len());
+        for (case, actual) in cases.iter().zip(reports) {
+            let expected = eval::run_injected(
+                &module,
+                case.function,
+                &case.args,
+                case.limit,
+                case.injection,
+            );
+            assert_eq!(actual.outcome, expected.outcome);
+            assert_eq!(actual.used, expected.used);
+            assert_eq!(actual.trace, expected.trace);
+            assert_eq!(actual.admissions, expected.admissions);
+            if let Some(peak) = actual.peak_reserved {
+                assert_eq!(peak, expected.peak_reserved);
+            }
+        }
+    }
+    println!(
+        "consuming grow: {} cases per profile, both profiles",
+        cases.len()
+    );
+}
+#[test]
+fn consuming_growth_keeps_the_carrier_and_original_payer_on_refusal() {
+    check_consuming_growth(Target::X86_64Linux);
+}
+#[test]
+#[ignore = "explicit AArch64 runtime integration target"]
+fn aarch64_consuming_growth_keeps_the_carrier_and_original_payer_on_refusal() {
+    check_consuming_growth(Target::Aarch64Linux);
+}
+
+#[test]
+#[ignore = "explicit AArch64 runtime integration target"]
+fn aarch64_consuming_growth_host_memory_refusal_is_a_reported_run_stop() {
+    host_memory::check_aarch64(
+        |module| {
+            let ir = emit_ir_target_with_facts(
+                module,
+                Target::Aarch64Linux,
+                false,
+                true,
+                SourceEmission {
+                    relocatable_sites: false,
+                    debug_lines: false,
+                },
+            )
+            .unwrap();
+            hirsel_llvm_lazy::compile_ir_for_target(&ir, true, Target::Aarch64Linux).unwrap()
+        },
+        symbol,
+    );
+}

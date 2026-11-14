@@ -24,6 +24,7 @@ mod drop;
 mod failure;
 mod fast;
 mod function;
+mod growth;
 mod loops;
 mod memory;
 mod place;

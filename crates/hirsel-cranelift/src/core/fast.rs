@@ -13,12 +13,12 @@ const B: Ty = Ty::Scalar(Scalar::Bool);
 const K: Ty = Ty::Scalar(Scalar::U8);
 
 impl Function<'_, '_, '_> {
-    fn load_word(&mut self, base: Value, offset: usize) -> Value {
+    pub(super) fn load_word(&mut self, base: Value, offset: usize) -> Value {
         self.b
             .ins()
             .load(types::I64, Flags::trusted(), base, offset as i32)
     }
-    fn store_word(&mut self, base: Value, offset: usize, value: Value) {
+    pub(super) fn store_word(&mut self, base: Value, offset: usize, value: Value) {
         self.b
             .ins()
             .store(Flags::trusted(), value, base, offset as i32);
@@ -75,6 +75,7 @@ impl Function<'_, '_, '_> {
         }
         Ok(())
     }
+    #[allow(clippy::too_many_arguments)]
     pub fn own_alloc(
         &mut self,
         native_kind: u8,
@@ -83,6 +84,7 @@ impl Function<'_, '_, '_> {
         align: u64,
         charge: Value,
         overflow: Option<Value>,
+        owned_like: bool,
     ) -> Result<[Value; 2]> {
         let slow = self.cold_block();
         let fast = self.b.create_block();
@@ -119,10 +121,12 @@ impl Function<'_, '_, '_> {
         if let Some(like) = like {
             // This operand is an owned block, not a collection carrier. A producer
             // with capacity zero selects Current even when data is a static pointer.
-            let header = self.b.create_block();
-            let empty = self.b.ins().icmp_imm_s(IntCC::Equal, like, 0);
-            self.b.ins().brif(empty, fast, &[], header, &[]);
-            self.b.switch_to_block(header);
+            if !owned_like {
+                let header = self.b.create_block();
+                let empty = self.b.ins().icmp_imm_s(IntCC::Equal, like, 0);
+                self.b.ins().brif(empty, fast, &[], header, &[]);
+                self.b.switch_to_block(header);
+            }
             let tagged = self.b.ins().load(
                 types::I64,
                 Flags::trusted(),

@@ -4,7 +4,7 @@ use std::{fs, path::PathBuf, process::Command};
 
 #[allow(dead_code)] // Each engine uses one of these ABIs during the site cutover.
 pub fn check(emit: impl FnOnce(&Module) -> Vec<u8>, symbol: impl Fn(&Module, FuncId) -> String) {
-    check_abi(emit, symbol, false);
+    check_abi(emit, symbol, false, false);
 }
 /// FORM#91 internal caller-site argument; the test process ABI is unchanged.
 #[allow(dead_code)]
@@ -12,12 +12,21 @@ pub fn check_with_site(
     emit: impl FnOnce(&Module) -> Vec<u8>,
     symbol: impl Fn(&Module, FuncId) -> String,
 ) {
-    check_abi(emit, symbol, true);
+    check_abi(emit, symbol, true, false);
+}
+/// The same real-null oracle on ARM, where QEMU ignores guest RLIMIT_AS.
+#[allow(dead_code)]
+pub fn check_aarch64(
+    emit: impl FnOnce(&Module) -> Vec<u8>,
+    symbol: impl Fn(&Module, FuncId) -> String,
+) {
+    check_abi(emit, symbol, true, true);
 }
 fn check_abi(
     emit: impl FnOnce(&Module) -> Vec<u8>,
     symbol: impl Fn(&Module, FuncId) -> String,
     with_site: bool,
+    aarch64: bool,
 ) {
     let module = hirsel_core_ir::text::parse(include_str!("host_memory.core")).unwrap();
     hirsel_core_ir::wf::module(&module).unwrap();
@@ -91,9 +100,23 @@ fn check_abi(
     } else {
         root.join(archive)
     };
-    let cc = std::env::var_os("LLVM_SYS_231_PREFIX")
-        .map(|p| PathBuf::from(p).join("bin/clang"))
-        .unwrap_or_else(|| "cc".into());
+    let input = |name: &str| {
+        let path = PathBuf::from(std::env::var_os(name).expect("declared native toolchain"));
+        if path.is_absolute() {
+            path
+        } else {
+            root.join(path)
+        }
+    };
+    let cc = if aarch64 {
+        std::env::var_os("HIRSEL_AARCH64_CC")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| input("HIRSEL_TOOLCHAIN_ARM").join("bin/aarch64-none-linux-gnu-gcc"))
+    } else {
+        std::env::var_os("LLVM_SYS_231_PREFIX")
+            .map(|p| PathBuf::from(p).join("bin/clang"))
+            .unwrap_or_else(|| "cc".into())
+    };
     let linked = Command::new(cc)
         .args(["-std=c11", "-O0", "-no-pie", "-I"])
         .arg(&directory)
@@ -101,6 +124,7 @@ fn check_abi(
         .arg(directory.join("input.o"))
         .arg(archive)
         .args([
+            "-Wl,--wrap=realloc",
             "-lgcc_s",
             "-lpthread",
             "-ldl",
@@ -117,9 +141,12 @@ fn check_abi(
         "{}",
         String::from_utf8_lossy(&linked.stderr)
     );
-    let large = 64 << 20;
+    let large = if aarch64 { 1u64 << 60 } else { 64 << 20 };
     let invalid_layout = 1u64 << 63;
     let cases = [
+        ("consuming native realloc", 8, large),
+        ("consuming foreign fallback", 9, large),
+        ("consuming invalid layout", 8, invalid_layout),
         ("ordinary inline", 0, large),
         ("foreign-payer growth", 1, large),
         ("first region block", 2, large),
@@ -136,7 +163,22 @@ fn check_abi(
     ];
     let mut failures = Vec::new();
     for (name, mode, bytes) in cases {
-        let output = Command::new(directory.join("run"))
+        let mut command = if aarch64 {
+            let runner = std::env::var_os("HIRSEL_QEMU_AARCH64")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| input("HIRSEL_TOOLCHAIN_QEMU").join("qemu-aarch64"));
+            let sysroot = std::env::var_os("HIRSEL_AARCH64_SYSROOT")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    input("HIRSEL_TOOLCHAIN_ARM").join("aarch64-none-linux-gnu/libc")
+                });
+            let mut command = Command::new(runner);
+            command.arg("-L").arg(sysroot).arg(directory.join("run"));
+            command
+        } else {
+            Command::new(directory.join("run"))
+        };
+        let output = command
             .args([mode.to_string(), bytes.to_string()])
             .output()
             .unwrap();
@@ -153,5 +195,5 @@ fn check_abi(
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
-    println!("native HostMemory refusals: 13, each status102 and exact line; no return/cleanup");
+    println!("native HostMemory refusals: 16, each status102 and exact line; no return/cleanup");
 }

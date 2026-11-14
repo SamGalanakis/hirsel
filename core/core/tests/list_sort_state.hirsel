@@ -1,0 +1,58 @@
+// test-of: core.list
+// test-reason: inject failure at private Hole state publications and audit restoration
+
+// Identity model [0,1,2,3,4]. A pair starts at lo=2 after two moves;
+// the previous pair's a=mid=1,b=end=2 gives destination length2.
+// A pass boundary has all5 moved. Both source directions and both sides of
+// each whole-record assignment must restore the identity without loss/overlap.
+fn state_probe(source: bool, checkpoint: u64, refuse: bool) -> bool {
+    let mut xs: List[u64] = result.unwrap(list.with_capacity(5))
+    for i in 0u64 .. 5 { result.unwrap(list.push(mut xs, i)) }
+    let scratch: Slots[u64] = result.unwrap(slots_new(5))
+    let pass = checkpoint >= 2
+    let mut g = Hole(xs: view xs, scratch: take scratch,
+        state: MergeState(source_is_xs: source, a: if pass { 2 } else { 1 },
+            mid: if pass { 2 } else { 1 }, b: if pass { 5 } else { 2 },
+            end: if pass { 5 } else { 2 }, n: 5))
+    let moved: u64 = if pass { 5 } else { 2 }
+    if source {
+        for i in 0u64 .. moved { slots_from_list(g.xs, i, mut g.scratch, i) }
+    } else {
+        for i in 0u64 .. 5 { slots_from_list(g.xs, i, mut g.scratch, i) }
+        for i in 0u64 .. moved { slots_to_list(mut g.scratch, i, g.xs, i) }
+    }
+    if checkpoint == 1 {
+        g.state = MergeState(source_is_xs: source, a: 2, mid: 4, b: 4, end: 5, n: 5)
+    } else if checkpoint == 3 {
+        g.state = MergeState(source_is_xs: !source, a: 0, mid: 0, b: 0, end: 0, n: 5)
+    }
+    if refuse { let none: Option[u64] = None; let _ = option.unwrap(none) }
+    let _ = take g
+    list.len(xs) == 5 && xs[0] == 0 && xs[1] == 1 && xs[2] == 2 && xs[3] == 3 && xs[4] == 4
+}
+
+// expect: run state_publications_restore_identity() = true
+fn state_publications_restore_identity() -> bool {
+    for checkpoint in 0u64 .. 4 {
+        if !state_probe(true, checkpoint, false) || !state_probe(false, checkpoint, false) { return false }
+    }
+    true
+}
+// The evaluator's unmark live oracle checks the restored prefix before freeing.
+// Literal-order mutant at checkpoint1 overwrites a live slot instead of propagating Unwrap.
+// expect: run lo2_out2_scratch_failure() = fail Unwrap
+fn lo2_out2_scratch_failure() -> bool { state_probe(false, 1, true) }
+// expect: run lo2_out2_xs_failure() = fail Unwrap
+fn lo2_out2_xs_failure() -> bool { state_probe(true, 1, true) }
+// expect: run pair_before_xs_failure() = fail Unwrap
+fn pair_before_xs_failure() -> bool { state_probe(true, 0, true) }
+// expect: run pair_before_scratch_failure() = fail Unwrap
+fn pair_before_scratch_failure() -> bool { state_probe(false, 0, true) }
+// expect: run pass_before_xs_failure() = fail Unwrap
+fn pass_before_xs_failure() -> bool { state_probe(true, 2, true) }
+// expect: run pass_before_scratch_failure() = fail Unwrap
+fn pass_before_scratch_failure() -> bool { state_probe(false, 2, true) }
+// expect: run pass_after_xs_failure() = fail Unwrap
+fn pass_after_xs_failure() -> bool { state_probe(true, 3, true) }
+// expect: run pass_after_scratch_failure() = fail Unwrap
+fn pass_after_scratch_failure() -> bool { state_probe(false, 3, true) }

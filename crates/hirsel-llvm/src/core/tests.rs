@@ -3389,8 +3389,22 @@ fn site_fixture(target: Target) {
                 );
             }
         }
-        let reports =
-            execute_target_object(&module, &cases, &bindings, "", opt, Some(bytes), target);
+        let product = finish_native_object(
+            bytes,
+            hirsel_core_ids::ContentHash::of_bytes(b"executed native debug witness"),
+            debug_lines,
+        )
+        .unwrap();
+        assert_eq!(product.debug.is_some(), debug_lines);
+        let reports = execute_target_object(
+            &module,
+            &cases,
+            &bindings,
+            "",
+            opt,
+            Some(product.bytes),
+            target,
+        );
         for (case, got) in cases.iter().zip(reports) {
             let expected = eval::run(&module, case.function, &case.args, u64::MAX);
             assert_eq!(got.outcome, expected.outcome);

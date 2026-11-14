@@ -236,6 +236,26 @@ def observation(case, result):
     return f'exit {result.returncode}, stdout {result.stdout!r}, stderr {result.stderr!r}; expected {case.expected}'
 
 
+def test_observation(case, result, entry):
+    """Keep source failure/output oracles while executing PROG-4 test runs."""
+    try:
+        product = json.loads(result.stdout)
+    except ValueError:
+        return False, f'test command exited {result.returncode}: {result.stdout!r} {result.stderr!r}'
+    tests = product.get('tests', [])
+    if len(tests) != 1 or tests[0].get('definition') != entry:
+        return False, f'test discovery must execute exactly {entry}: {product!r}'
+    test = tests[0]
+    if 'stopped' in test:
+        return False, test['stopped']
+    if test.get('timed_out'):
+        return True, 'native test execution timed out'
+    if result.returncode != int(not test['passed']):
+        return False, f'test aggregate disagrees with its outcome: exit {result.returncode}, {test!r}'
+    output = subprocess.CompletedProcess([], test['status'], test['stdout'].encode(), test['stderr'].encode())
+    return True, observation(case, output)
+
+
 def evaluator_observation(case, result):
     if result.returncode:
         return False, f'evaluator backend exited {result.returncode}: {result.stdout!r} {result.stderr!r}'
@@ -314,11 +334,9 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 inputs = scratch / 'inputs.json'
                 inputs.write_text(json.dumps(manifest(root, case, adapted)))
                 entry = f'{case.package}@1/{case.test_of or ("tests/" + case.file.stem)}/native_contract'
-                binary = scratch / 'program'
-                command = [str(compiler), 'build', '--inputs', str(inputs), '--entry',
-                           entry, '--backend', engine,
+                command = [str(compiler), 'test', '--inputs', str(inputs), '--backend', engine,
                            '--runtime', str(runtime), '--store', str(work / 'store'), '--json', '--limit', str(64 * 1024 * 1024),
-                           '--dir', str(host), '-o', str(binary)]
+                           '--test-timeout', str(timeout), '--dir', str(host), '-o', str(scratch / 'programs')]
                 if evaluating:
                     try:
                         wait_load()
@@ -356,28 +374,13 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                 if linker:
                     command.extend(['--cc', str(linker)])
                 wait_load()
-                build = subprocess.run(command, capture_output=True)
-                try:
-                    product = json.loads(build.stdout)
-                except ValueError:
-                    product = {'stopped': f'build exited {build.returncode}: {build.stdout.decode(errors="replace")} {build.stderr.decode(errors="replace")}'}
-                if build.returncode or not product.get('native'):
-                    row['cause'] = first_stop(product)
-                else:
-                    try:
-                        wait_load()
-                        result = subprocess.run([str(binary)], cwd=host, capture_output=True, timeout=timeout)
-                        row['ran'] = True
-                        row['cause'] = observation(case, result)
-                        row['passed'] = row['cause'] is None
-                    except subprocess.TimeoutExpired:
-                        row['ran'] = True
-                        row['cause'] = f'native execution timed out after {timeout}s'
+                result = subprocess.run(command, cwd=host, capture_output=True)
+                row['ran'], row['cause'] = test_observation(case, result, entry)
+                row['passed'] = row['cause'] is None
                 if row['cause']:
                     row['owner'] = owner(row['cause'], owners)
                 save_row(rows, row, output)
-                if binary.exists():
-                    binary.unlink()
+                shutil.rmtree(scratch / 'programs', ignore_errors=True)
             selected = [r for r in rows if r['engine'] == engine]
             print(f"{engine}: {len(selected)} selected, {sum(r['ran'] for r in selected)} ran, {sum(bool(r['passed']) for r in selected)} passed, {sum(r['applicable'] and not r['ran'] for r in selected)} not run, {sum(not r['applicable'] for r in selected)} not applicable, {sum(r['native_only'] for r in selected)} native-only; {time.monotonic() - started:.3f}s", flush=True)
     return rows

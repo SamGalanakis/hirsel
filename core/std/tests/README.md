@@ -122,12 +122,23 @@ status and exact cause as before. A wrong result, unexpected failure or crash
 still fails the law. Evaluator adapters remain scalar entries for their model
 comparison; native-only and evaluator-only accounting is unchanged.
 
-Each known test entry builds through the public product `build --entry <test>`
-path used by the driver's `run_test`, with an explicit 64 MiB native root limit
-and the case's grants. The walker owns its separate test process so the existing
-30-second execution bound is preserved; builds have no time bound. Core tests
-need no application forwarding function. They pass `--source-core` so their
-temporary test bodies stay in the source request, since published dependencies
-deliberately omit test bodies. The compiler checks the adapter's
-PROG-4 signature and references, and applies ordinary module privacy. This does
-not publish test adapters or alter the source library.
+Each generated adapter runs through `hirsel-core test --inputs <manifest>`,
+with an explicit 64 MiB root limit and the case's grants. The driver discovers
+and executes exactly one adapter in an independent process. The walker checks
+that identity and rejects empty or partial discovery. It compares captured
+stdout, stderr and status with the original law oracle. An expected `fail Cause`
+is still a failed PROG-4 test; observing that exact failure passes its law.
+`--test-timeout 30` bounds only execution, never checking, compilation or linking.
+Core tests pass `--source-core` so their temporary bodies stay in the source
+request. No adapter is published and ordinary module privacy still applies.
+
+Run the entire native law corpus on both engines, including evaluator-only laws
+on their declared backend, with one aggregate exit status and no filters:
+
+    python3 core/tools/std_native.py --compiler <hirsel-core> --runtime <shipping-core-rt.a> --evaluator <hirsel-core-contract-eval> --backend both --report /tmp/library-laws.json
+
+This is the same discovery inventory and source adapters as the evaluator walker.
+Every applicable law must run and satisfy its oracle. The command exits 1 for any
+failed or unavailable applicable law, 2 for a configuration/selection error,
+and 0 only when all applicable rows pass. Evaluator-only memory-misuse laws stay
+explicitly inapplicable on native engines and run on the evaluator instead.

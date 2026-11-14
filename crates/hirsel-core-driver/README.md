@@ -252,3 +252,9 @@ at least one test ran and every selected test passed; 1 means a selected test
 failed; 2 means no tests matched or configuration could not be read. `--backend`
 and `--release` select the same engines and options as `build`; `--output` is a
 test-executable directory, defaulting to the private store's `native/tests`.
+
+`test --test-timeout <positive seconds>` optionally bounds each independent
+native execution. It starts after build/link and records `timed_out` in JSON;
+a timed-out run fails and later tests still run. With no option there is no
+execution deadline. The core/std law walker uses this path with its existing
+30-second execution bound; its build work remains unbounded.

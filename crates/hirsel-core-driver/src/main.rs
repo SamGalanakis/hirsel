@@ -62,6 +62,7 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     let test_command = command == "test";
     let native_command = command == "build" || command == "run" || test_command;
     let mut test_filter = None;
+    let mut test_timeout = None;
     let mut explicit_limit = false;
     let mut backend = None;
     let mut release = false;
@@ -103,6 +104,13 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
             }
             "--filter" if test_command => {
                 test_filter = Some(args.next().ok_or("missing test filter")?)
+            }
+            "--test-timeout" if test_command => {
+                let seconds: u64 = args.next().ok_or("missing test timeout seconds")?.parse()?;
+                if seconds == 0 {
+                    return Err("test timeout must be positive".into());
+                }
+                test_timeout = Some(std::time::Duration::from_secs(seconds));
             }
             "--release" => release = true,
             "--backend" => {
@@ -351,7 +359,7 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
             options.output = output_dir.join(hex(hirsel_core_ids::ContentHash::of_bytes(
                 test.to_string().as_bytes(),
             )));
-            let row = match product.run_test(test, options) {
+            let row = match product.run_test_with_timeout(test, options, test_timeout) {
                 Ok(outcome) => {
                     let passed = outcome.passed();
                     failed |= !passed;
@@ -359,7 +367,9 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
                         if passed {
                             println!("pass {test}");
                         } else {
-                            let reason = if outcome.output.stderr.is_empty() {
+                            let reason = if outcome.timed_out {
+                                "execution timed out".to_owned()
+                            } else if outcome.output.stderr.is_empty() {
                                 "error".to_owned()
                             } else {
                                 String::from_utf8_lossy(&outcome.output.stderr)
@@ -370,7 +380,7 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
                             println!("fail {test}: {reason}");
                         }
                     }
-                    serde_json::json!({"definition":test.to_string(),"passed":passed,"status":outcome.output.status.code(),"stdout":String::from_utf8_lossy(&outcome.output.stdout),"stderr":String::from_utf8_lossy(&outcome.output.stderr)})
+                    serde_json::json!({"definition":test.to_string(),"passed":passed,"status":outcome.output.status.code(),"stdout":String::from_utf8_lossy(&outcome.output.stdout),"stderr":String::from_utf8_lossy(&outcome.output.stderr),"timed_out":outcome.timed_out})
                 }
                 Err(error) => {
                     failed = true;

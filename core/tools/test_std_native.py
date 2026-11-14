@@ -7,7 +7,8 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from std_native import Contract, discover, first_stop, observation, owner, wrapper, test_module, manifest, evaluator_observation, run
+from unittest.mock import patch
+from std_native import Contract, discover, first_stop, observation, owner, wrapper, test_module, manifest, evaluator_observation, test_observation, run
 
 
 class Walker(unittest.TestCase):
@@ -24,6 +25,50 @@ class Walker(unittest.TestCase):
             self.assertIn(' waits', wrapper(cases[0]))
             with self.assertRaisesRegex(ValueError, 'no expect: run'):
                 discover(root, ['missing'])
+
+    def test_driver_test_outcomes_preserve_oracles_and_reject_partial_discovery(self):
+        case = Contract(Path('law.hirsel'), 1, 'law()', 'true', False)
+        entry = 'std@1/tests/law/native_contract'
+        test = dict(definition=entry, passed=True, status=0, stdout='', stderr='')
+        def result(tests, status=0):
+            return subprocess.CompletedProcess([], status, json.dumps(dict(tests=tests)).encode(), b'')
+        self.assertEqual(test_observation(case, result([test]), entry), (True, None))
+        for tests in [[], [test, test], [dict(test, definition='wrong')]]:
+            self.assertFalse(test_observation(case, result(tests), entry)[0])
+        self.assertIsNotNone(test_observation(case, result([test], 1), entry)[1])
+        self.assertFalse(test_observation(case, result([dict(test, stopped='link failed')]), entry)[0])
+        self.assertIsNotNone(test_observation(case, result([dict(test, timed_out=True)]), entry)[1])
+        fail = Contract(case.file, 1, 'law()', 'fail Bounds', False)
+        failed = dict(test, passed=False, status=101, stderr='Bounds at 3\n')
+        self.assertEqual(test_observation(fail, result([failed], 1), entry), (True, None))
+        self.assertIsNotNone(test_observation(case, result([failed], 1), entry)[1])
+        self.assertIsNotNone(test_observation(fail, result([dict(failed, status=None)], 1), entry)[1])
+
+    def test_native_walker_uses_driver_tests_for_every_law_on_both_engines(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tests = root / 'core/std/tests'
+            tests.mkdir(parents=True)
+            (root / 'core/core').mkdir()
+            (tests / 'law.hirsel').write_text('// expect: run one() = true\nfn one()->bool {true}\n// expect: run two() = fail Bounds\nfn two()->u64 {1}')
+            commands = []
+            def compiler(command, **kwargs):
+                commands.append(command)
+                self.assertEqual(command[1], 'test')
+                self.assertNotIn('--entry', command)
+                self.assertNotIn('--filter', command)
+                self.assertIn('--test-timeout', command)
+                adapted = Path(command[command.index('--inputs') + 1]).parent / 'law.hirsel'
+                failed = 'let _ = two()' in adapted.read_text()
+                test = dict(definition='std@1/tests/law/native_contract', passed=not failed,
+                            status=101 if failed else 0, stdout='', stderr='Bounds at 3\n' if failed else '')
+                return subprocess.CompletedProcess(command, int(failed), json.dumps(dict(tests=[test])).encode(), b'')
+            cases = discover(root, [])
+            with patch('std_native.subprocess.run', side_effect=compiler), contextlib.redirect_stdout(io.StringIO()):
+                rows = run(root, root / 'compiler', root / 'runtime', cases, ['cranelift', 'llvm'], None, [])
+            self.assertEqual(len(commands), 4)
+            self.assertEqual(len(rows), 2 * len(cases))
+            self.assertTrue(all(r['ran'] and r['passed'] for r in rows))
 
     def test_expected_failure_is_not_an_arbitrary_process_crash(self):
         case = Contract(Path('test.hirsel'), 1, 'f()', 'fail Bounds', False)

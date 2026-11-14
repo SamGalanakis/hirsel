@@ -726,7 +726,25 @@ fn link_run_checked(scratch: &Scratch, source: &str, memcheck: bool) -> Vec<u64>
             .arg(&binary);
         command
     } else {
-        native_command(&binary)
+        // Native fixtures must turn a stuck runtime/child into an ordinary
+        // red test.  Without a bound, Buck retries a signal-terminated test
+        // indefinitely and a land appears hung.
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "timeout 30s \"$@\"; rc=$?; if [ $rc -gt 128 ]; then exit 1; else exit $rc; fi",
+            "hirsel-native-timeout",
+        ]);
+        if NATIVE_TARGET == "aarch64-unknown-linux-gnu" {
+            command
+                .arg(input_path("HIRSEL_TOOLCHAIN_QEMU").join("qemu-aarch64"))
+                .arg("-L")
+                .arg(input_path("HIRSEL_TOOLCHAIN_ARM").join("aarch64-none-linux-gnu/libc"))
+                .arg(&binary);
+        } else {
+            command.arg(&binary);
+        }
+        command
     };
     let run = command.output().unwrap();
     assert!(

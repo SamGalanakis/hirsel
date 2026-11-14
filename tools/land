@@ -473,6 +473,30 @@ def first_error(text, count=40):
     return '\n'.join(lines[start:start + count])
 
 
+STAMP = re.compile(r'^\[[^\]]*\] ?')
+SECTION_END = re.compile(r'(?:✓ Pass|✗ Fail|Network|Tests finished):')
+FAILED_CASE = re.compile(r'^test (\S+) (?:- should panic )?\.\.\. FAILED$|^(?:FAIL|ERROR): (\S+)')
+CASE_ERROR = re.compile(r'panicked at |^Traceback |^error(?:\[|:)|^Error:')
+
+
+def failing_targets(text, count=12):
+    """The failing Buck2 test targets first, then each one's failing cases and its own first error.
+
+    None when the output names no failing target, so other checks keep first_error."""
+    lines = [STAMP.sub('', line) for line in text.splitlines()]
+    sections = [(match[1], list(itertools.takewhile(lambda line: not SECTION_END.match(line), lines[at + 1:])))
+                for at, line in enumerate(lines) if (match := re.match(r'✗ Fail: (\S+)', line))]
+    if not sections:
+        return None
+    report = ['failing targets: ' + ', '.join(name for name, _ in sections)]
+    for name, body in sections:
+        cases = [match[1] or match[2] for line in body if (match := FAILED_CASE.match(line))]
+        start = next((at for at, line in enumerate(body) if CASE_ERROR.search(line)), max(0, len(body) - count))
+        report += [f'{name}: failing cases: {", ".join(cases) or "none named"}',
+                   *('  ' + line for line in body[start:start + count])]
+    return '\n'.join(report)
+
+
 def run(command):
     """Run a check in this worktree, in its own session so a withdrawal takes its Buck2 client with it."""
     process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -495,7 +519,7 @@ def check(name, command):
     say(f'{"pass" if done.returncode == 0 else "FAIL"}  {name} ({time.monotonic() - started:.3f} s)')
     if done.returncode == 0:
         return None
-    error = first_error(done.stderr + done.stdout)
+    error = failing_targets(done.stderr + done.stdout) or first_error(done.stderr + done.stdout)
     print(error, flush=True)
     return [f'FAIL  {name}', *error.splitlines()]
 

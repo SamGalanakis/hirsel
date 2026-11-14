@@ -3,6 +3,7 @@
 because main moved goes back to the rebase, and a red check refuses the push."""
 import argparse
 import ast
+import contextlib
 import csv
 import fcntl
 import io
@@ -1424,6 +1425,38 @@ if not marker.exists():
 
 
 class Units(unittest.TestCase):
+    def test_a_red_suite_report_names_each_failing_target_with_its_own_error(self):
+        # The shape of `buck2 test` output on 2026-11-14: the failing target's section first, then a
+        # passing target whose "104 passed" was the whole old excerpt (the last 40 lines of the run).
+        stamp = '[2026-11-14T20:15:04.065+01:00] '
+        failing = ['✗ Fail: root//:core-driver-sites-pool (1.7s)', '---- STDOUT ----', 'running 2 tests',
+                   'test native::tests::failure_sites_cranelift_dev ... FAILED', '',
+                   "thread 'native::tests::failure_sites_cranelift_dev' (23) panicked at src/sites.rs:50:5:",
+                   'assertion `left == right` failed', '  left: 2', ' right: 0',
+                   'test native::tests::failure_sites_llvm_dev ... ok', 'test result: FAILED. 1 passed; 1 failed',
+                   '---- STDERR ----', '✗ Fail: root//:land-core-library-modes (3.0s)', '---- STDOUT ----',
+                   '---- STDERR ----', 'FAIL: test_cache_identity (__main__.Modes.test_cache_identity)',
+                   'Traceback (most recent call last):', '  File "gate.py", line 89, in test_cache_identity',
+                   'AssertionError: False != True']
+        passing = ['✓ Pass: root//:hirsel-core-driver-unittest (10.0s)', '---- STDOUT ----',
+                   *(f'test tests::case_{n} ... ok' for n in range(60)), 'test result: ok. 104 passed; 0 failed']
+        summary = ['Tests finished: Pass 1. Fail 2.', '2 TESTS FAILED', '  ✗ root//:core-driver-sites-pool',
+                   '  ✗ root//:land-core-library-modes']
+        text = '\n'.join([*(stamp + line for line in failing + passing), *summary])
+        module = runpy.run_path(str(ROOT / 'tools/land'))
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / 'red.py'
+            script.write_text(f'import sys\nsys.stderr.write({text!r})\nsys.exit(32)\n')
+            with contextlib.redirect_stdout(io.StringIO()):
+                report = '\n'.join(module['check']('Core suites', [sys.executable, str(script)]))
+        self.assertIn('failing targets: root//:core-driver-sites-pool, root//:land-core-library-modes', report)
+        self.assertIn('failing cases: native::tests::failure_sites_cranelift_dev\n', report)
+        self.assertIn('right: 0', report)
+        self.assertIn('failing cases: test_cache_identity', report)
+        self.assertIn('AssertionError: False != True', report)
+        self.assertNotIn('104 passed', report)
+        self.assertNotIn(stamp, report)
+
     def test_land_uses_the_platforms_land_priority(self):
         module = runpy.run_path(str(ROOT / 'tools/land'))
         priority = runpy.run_path(str(ROOT / 'tools/buck2/priorities.bzl'))['LAND_PRIORITY']
@@ -1565,5 +1598,5 @@ if __name__ == '__main__':
     # Land's Core suites pass --test-threads=1 to every suite; these tests already run one at a time.
     parser = argparse.ArgumentParser()
     parser.add_argument('--test-threads', type=int, choices=[1], default=1)
-    parser.parse_args()
-    unittest.main(argv=[__file__])
+    _, tests = parser.parse_known_args()
+    unittest.main(argv=[__file__, *tests])

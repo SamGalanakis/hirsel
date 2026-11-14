@@ -62,6 +62,8 @@ checksum and process status. --helper-laws builds the bootstrap's independent
 LCG/checksum controls. This is a correctness entry; slice F owns the performance
 runner core/langarena/run.py and the vendored Rust twin.
 
+The [text and collection results](TEXT-RESULTS.md) report all 27 tasks at the fixed M2 commit, including both engines, memory peaks, and the worst-ten profiles.
+
 The [numeric results](NUMERIC-RESULTS.md) compare the 23 numeric configurations
 against upstream Rust and independently reviewed matched twins. `run.py --resume <report>` reuses
 complete Rust samples when refreshing Hirsel. Add `--profile-always` to profile

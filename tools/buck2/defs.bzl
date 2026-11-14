@@ -104,7 +104,8 @@ def _release_codegen_units(name):
     # Core request measurements favor one unit: all 18 product requests save
     # 2.92-4.17K instructions/line; both all-source controls improve. This
     # release-only exception retains the measured compile reservations.
-    if name in ["hirsel-core-front", "hirsel-core-driver", "hirsel-core-ir"]:
+    # The four support libraries add 0.05-0.15K savings per product line.
+    if name in ["hirsel-core-front", "hirsel-core-driver", "hirsel-core-ir", "hirsel-core-syntax", "hirsel-core-resolve", "hirsel-core-ids", "hirsel-core-layout"]:
         return ["-Ccodegen-units=1"]
     if name not in COMPILE_REQUESTS["release"] and not (PROBE_CPUS and name in COMPILE_CLASSES["release"]):
         return []

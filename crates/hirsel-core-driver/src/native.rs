@@ -540,7 +540,7 @@ fn link(
     .collect::<io::Result<Vec<_>>>()?;
     let tools = crate::tool_inputs::link_tools(&options.cc)
         .map_err(|error| NativeStop::Link(format!("tool selection: {error}")))?;
-    let cc = command(Command::new(&tools.0.path).arg("--version"))?;
+    let cc_version = command(Command::new(&tools.0.path).arg("--version"))?;
     let identities: Vec<_> = objects.iter().map(|o| o.identity).collect();
     let link_key = key(
         "hirsel.core-executable.v2",
@@ -558,7 +558,7 @@ fn link(
                 headers
                     .iter()
                     .map(Vec::as_slice)
-                    .chain([runtime_identity.0.as_slice(), cc.as_slice()]),
+                    .chain([runtime_identity.0.as_slice(), cc_version.as_slice()]),
             ),
         ),
     )?;
@@ -574,7 +574,19 @@ fn link(
         std::fs::write(&entry, bytes)?;
         let output = temp.path().join("program");
         let mut cc = Command::new(&tools.0.path);
-        cc.arg(format!("--ld-path={}", tools.1.path.display()));
+        let linker_dir = temp.path().join("linker-bin");
+        std::fs::create_dir(&linker_dir)?;
+        // GCC cross drivers do not implement clang's --ld-path spelling.  A
+        // private -B directory gives both GCC and clang the same pinned lld;
+        // the directory is per-link and never enters the executable key.
+        std::os::unix::fs::symlink(&tools.1.path, linker_dir.join("ld.lld"))?;
+        std::os::unix::fs::symlink(&tools.1.path, linker_dir.join("ld"))?;
+        if String::from_utf8_lossy(&cc_version).contains("clang") {
+            cc.arg(format!("--ld-path={}", tools.1.path.display()));
+        } else {
+            cc.arg("-fuse-ld=lld");
+        }
+        cc.arg(format!("-B{}/", linker_dir.display()));
         cc.arg("-pie").arg(&entry);
         let debug = if options.debug_lines {
             let debug = crate::native_debug::bind_side_products(

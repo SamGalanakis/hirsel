@@ -438,8 +438,15 @@ impl Payer {
     }
 
     pub(crate) fn finish_reserved(self) {
+        let child = self.slot().id;
         let funding = Funding { payer: self };
-        funding.end_id();
+        let winner = funding.end_id();
+        // `end_id` merges the child into its parent but preserves the child's
+        // own handle pin. The reservation cell is that handle's final owner;
+        // release it so the slot returns to the forest free list.
+        let forest = funding.payer.forest();
+        forest.retain(winner);
+        forest.release(child);
         std::mem::forget(funding);
     }
 }

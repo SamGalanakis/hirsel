@@ -34,6 +34,17 @@ fn returned_body_refunds_the_isolate_cell() {
 }
 
 #[test]
+fn repeated_returned_isolates_reuse_the_reservation_record() {
+    let mut context = started(1_000_000);
+    let records = context.current.records();
+    for _ in 0..1_000 {
+        assert!(unsafe { hirsel_core_isolate_enter(&mut context) }.entered);
+        unsafe { hirsel_core_isolate_leave(&mut context) };
+        assert_eq!(context.current.records(), records);
+    }
+}
+
+#[test]
 fn refusal_returns_room_and_changes_nothing() {
     let mut context = Context::new(31);
     let entered = unsafe { hirsel_core_isolate_enter(&mut context) };

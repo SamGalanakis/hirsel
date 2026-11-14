@@ -177,6 +177,17 @@ impl Drop for Unit<'_> {
         unsafe { (self.api.unit_drop)(self.raw) }
     }
 }
+impl<'c> Unit<'c> {
+    /// Consume the construction unit and transfer its LLVM module handle to
+    /// the same-build linker. The context remains borrowed by the returned
+    /// module until the linker consumes it.
+    pub(crate) fn take(self) -> Raw {
+        let mut unit = std::mem::ManuallyDrop::new(self);
+        // SAFETY: ManuallyDrop prevents the unit destructor from running after
+        // the component transfers ownership of the module.
+        unsafe { (unit.api.unit_take)(unit.raw) }
+    }
+}
 fn output(out: Output) -> Result<String, String> {
     // SAFETY: the component returns an allocated byte buffer, including on failure.
     let bytes = unsafe { std::slice::from_raw_parts(out.data, out.len).to_vec() };

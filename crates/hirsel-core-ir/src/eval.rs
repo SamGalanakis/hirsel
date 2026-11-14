@@ -1373,6 +1373,10 @@ impl Machine<'_> {
         }
         self.role_checks += 1;
         let (b, lo) = split(p);
+        // Static bytes are never written, so any roles may read them together.
+        if self.mem[b].fixed {
+            return;
+        }
         let hi = lo + n;
         let spans = frame.spans.entry(b).or_default();
         let near: Vec<(usize, usize, roles::Role)> = spans

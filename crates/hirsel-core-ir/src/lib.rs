@@ -643,8 +643,9 @@
 //! [`roles::roles`] gives some addresses of a body a storage role. It derives
 //! them from the form itself; nothing stores them. Two accesses (`read`, `store`,
 //! either side of a `copy`) through addresses of different roles touch disjoint
-//! bytes, throughout one activation. An emitter may rely on that, and may ignore
-//! it. An address without a role makes no claim.
+//! bytes, or static bytes, which nothing writes, throughout one activation. An
+//! emitter may rely on that, and may ignore it. An address without a role makes
+//! no claim.
 //! - A **carrier type** is an own record whose one field is a `seq` of a scalar:
 //!   `String`, `Bytes`, `List` of a scalar. Its buffer holds scalars, never a
 //!   carrier.
@@ -654,18 +655,29 @@
 //!   within its 24 bytes. A parameter's entry value has its role only while no
 //!   edge targets the entry block. `view` parameters get none, because two views
 //!   of one place may be passed together.
-//! - `Buffer`: storage reached through a pointer read from a carrier role's data
-//!   word, then `index` or `byte` steps. Every buffer of a body has this one
-//!   role, because a move hands a buffer from one carrier to another.
+//! - A buffer is storage reached through a pointer read from a carrier role's data
+//!   word, then `index` or `byte` steps. A move hands a buffer from one carrier
+//!   to another, so buffers share one role, `Buffers`, unless the body seals their
+//!   carrier.
+//! - `Buffer(root)`: the buffers of a **sealed** `mut` or `take` parameter, whose
+//!   buffer never changes hands within the body. Every address that reaches the
+//!   carrier is a carrier-role word access, a `pointer` of one, or a `view` lend
+//!   to a call: it is never copied, lent `mut` or `take`, dropped or marked. A
+//!   store to its data word stores a block this body allocated, and that block
+//!   goes into no other data word. A pointer to the carrier or to its buffer is
+//!   used only as an address base or in a comparison, and a buffer pointer also as
+//!   a `free` or `alloc … like` operand. So no value carries a buffer in or out.
 //!
 //! This is what the language already guarantees. Slots are distinct. A `mut` or
 //! `take` place overlaps no other argument (Loans) and lies outside the callee's
 //! frame. A buffer is separately owned storage (OWN-3), static bytes or a view of
-//! either, and it holds scalars. Counted headers, map storage, queues, region
+//! either, and it holds scalars. So two sealed parameters' buffers are disjoint at
+//! entry, and no other carrier's buffer overlaps theirs except where both hold
+//! the same static bytes. Counted headers, map storage, queues, region
 //! records and provider handles have no role. LLVM can take one alias domain per
 //! function and one scope per role; its inliner clones them. The test evaluator
 //! derives the same roles on every call, and it stops the run when two roles of
-//! one activation touch the same byte.
+//! one activation touch the same byte that is not static.
 //!
 //! # Instances
 //!

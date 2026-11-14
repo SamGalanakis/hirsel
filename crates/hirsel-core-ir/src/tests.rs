@@ -701,7 +701,7 @@ fn roles_hold_or_stop_the_run() {
         &[],
     );
     let stop = aliased.expect_err("a buffer store over a carrier ran to its end");
-    assert!(stop.contains("Buffer touches +8..+9"), "{stop}");
+    assert!(stop.contains("Buffers touches +8..+9"), "{stop}");
     // A caller with one carrier of length 3 in s0, lent as `&a0` to f0.
     let caller = |sig: &str, call: &str| {
         format!(
@@ -733,6 +733,80 @@ fn roles_hold_or_stop_the_run() {
         &[],
     );
     assert_eq!(moved, Ok(eval::Outcome::Returned(vec![5])));
+
+    // f0(&mut a, &mut b) reads a[0], runs `mid`, then reads b[0] and returns the sum.
+    // Its caller lends two carriers of length 1 whose buffers hold 5 and 6 (or, with
+    // `static`, one static byte 5 for both), and frees what it allocated.
+    let two = |head: &str, mid: &str, tail: &str, stat: bool| {
+        let (setup, fini) = if stat {
+            (
+                "  v4: ptr = static d0\n  v5: u64 = const 0\n  v6: ptr = static d0\n  v7: u64 = const 0\n  v8: u8 = const 0\n  v9: u8 = const 0\n  v10: u64 = const 0\n",
+                "",
+            )
+        } else {
+            (
+                "  v4: ptr, v5: u64 = alloc for seq u8 v1 align 8 charge v1\n  v6: ptr, v7: u64 = alloc for seq u8 v1 align 8 charge v1\n  v8: u8 = const 5\n  v9: u8 = const 6\n  address a8\n  store a8, v8\n  address a9\n  store a9, v9\n  v10: u64 = const 8\n",
+                "  free v4 charge v1\n  free v6 charge v1\n",
+            )
+        };
+        let text = format!(
+            "static d0 = align 1 hex 05\nsig g0 = (&mut t0, &mut t0) -> (u8)\nsig g1 = () -> (u8)\nsig g2 = (&mut t0, &mut t0) -> ()\ninst n0 = core@1/m/f [] []\ninst n1 = core@1/m/main [] []\ninst n2 = core@1/m/swap [] []\n\
+             fn f0 = n0 g0 {{\n  addr a0 = v0 byte v2 : ptr\n  addr a1 = v1 byte v2 : ptr\n  addr a2 = v3 index v2 : u8\n{head}b0(v0: ptr, v1: ptr):\n  v2: u64 = const 0\n  address a0\n  address a1\n  v3: ptr = read a0\n  address a2\n  v4: u8 = read a2\n{mid}{tail}}}\n\
+             fn f1 = n1 g1 {{\n  slot s0 = t0\n  slot s1 = t0\n  addr a0 = s0 : t0\n  addr a1 = s0 byte v0 : ptr\n  addr a2 = s0 byte v1 : u64\n  addr a3 = s0 byte v2 : u64\n  addr a4 = s1 : t0\n  addr a5 = s1 byte v0 : ptr\n  addr a6 = s1 byte v1 : u64\n  addr a7 = s1 byte v2 : u64\n  addr a8 = v4 index v0 : u8\n  addr a9 = v6 index v0 : u8\nb0:\n  live s0\n  live s1\n  v0: u64 = const 0\n  v1: u64 = const 8\n  v2: u64 = const 16\n  v3: u64 = const 1\n{setup}  address a0\n  address a1\n  address a2\n  address a3\n  address a4\n  address a5\n  address a6\n  address a7\n  store a1, v4\n  store a2, v3\n  store a3, v10\n  store a5, v6\n  store a6, v3\n  store a7, v10\n  v11: u8 = call f0 g0 (&a0, &a4)\n{fini}  dead s1\n  dead s0\n  return v11\n}}\n\
+             fn f2 = n2 g2 {{\n  slot s0 = t0\n  addr a0 = s0 : t0\n  addr a1 = v0 : t0\n  addr a2 = v1 : t0\nb0(v0: ptr, v1: ptr):\n  live s0\n  v2: u64 = const 24\n  address a0\n  address a1\n  address a2\n  copy a0, a1, v2\n  copy a1, a2, v2\n  copy a2, a0, v2\n  dead s0\n  return\n}}\n"
+        );
+        let r = run(&text, 1, &[]);
+        (text, r)
+    };
+    let sum = |v: u32| {
+        let (y, z) = (v + 1, v + 2);
+        format!(
+            "  v{v}: ptr = read a1\n  address a3\n  v{y}: u8 = read a3\n  v{z}: u8 = add v4, v{y}\n  return v{z}\n"
+        )
+    };
+    let read_b = |v: u32| format!("  addr a3 = v{v} index v2 : u8\n");
+    // Two sealed parameters (merge's `a` and `temp`) get two buffer roles, so LLVM
+    // gives them two scopes; and they may read one static literal together.
+    let (text, both) = two(&read_b(5), "", &sum(5), true);
+    assert_eq!(both, Ok(eval::Outcome::Returned(vec![10])));
+    let m = parse(&format!("{list}{text}")).unwrap();
+    let r = roles::roles(&m, &m.functions[0]);
+    assert_eq!(
+        (r[2], r[3]),
+        (
+            Some(roles::Role::Buffer(roles::Root::Param(0))),
+            Some(roles::Role::Buffer(roles::Root::Param(1)))
+        )
+    );
+    // Bug: a `mut` lend leaves the carrier sealed. The callee swaps a and b, so a's
+    // buffer is read again through b: 5 + 5.
+    let (_, swapped) = two(
+        &format!("{}  addr a4 = v0 : t0\n  addr a5 = v1 : t0\n", read_b(5)),
+        "  address a4\n  address a5\n  call f2 g2 (&a4, &a5)\n",
+        &sum(5),
+        false,
+    );
+    assert_eq!(swapped, Ok(eval::Outcome::Returned(vec![10])));
+    // Bug: a carrier copied whole stays sealed. b := a, then b[0] is a's 5.
+    let (_, copied) = two(
+        &format!("{}  addr a4 = v0 : t0\n  addr a5 = v1 : t0\n", read_b(6)),
+        "  address a4\n  address a5\n  v5: u64 = const 24\n  copy a5, a4, v5\n",
+        &sum(6),
+        false,
+    );
+    assert_eq!(copied, Ok(eval::Outcome::Returned(vec![10])));
+    // Bug: a's data pointer stored into b's data word leaves either sealed.
+    let (_, escaped) = two(&read_b(5), "  store a1, v3\n", &sum(5), false);
+    assert_eq!(escaped, Ok(eval::Outcome::Returned(vec![10])));
+    // Bug: one fresh block installed in both data words leaves both sealed: 7 is
+    // written through a's data and read through b's, 5 + 7.
+    let (_, shared) = two(
+        &format!("{}  addr a4 = v8 index v2 : u8\n", read_b(10)),
+        "  v5: u64 = const 8\n  v6: ptr, v7: u64 = alloc for seq u8 v5 align 8 charge v5\n  store a0, v6\n  store a1, v6\n  v8: ptr = read a0\n  address a4\n  v9: u8 = const 7\n  store a4, v9\n",
+        "  v10: ptr = read a1\n  address a3\n  v11: u8 = read a3\n  free v6 charge v5\n  v12: u8 = add v4, v11\n  return v12\n",
+        false,
+    );
+    assert_eq!(shared, Ok(eval::Outcome::Returned(vec![12])));
 }
 
 /// Frame slots end with their activation (crate docs, "Values, slots and

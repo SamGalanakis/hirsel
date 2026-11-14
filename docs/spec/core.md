@@ -1,7 +1,7 @@
 # Core library
 
 The core library is source: one file per core module under
-[`core/core/`](../../core/core/), 27 files. Each file is a module ([LANG-7](language.md#lang-7-names))
+[`core/core/`](../../core/core/), 29 files. Each file is a module ([LANG-7](language.md#lang-7-names))
 of the package `core`, which differs from any other package in one power: a function there
 may end at its header, and is then provided by the implementation. A core function with a
 body is ordinary code under the ordinary rules. Either way its contract is its header and
@@ -12,7 +12,7 @@ there with no body is built in, so its summary is the one the table below gives 
 
 | module | file | rules |
 |---|---|---|
-| `core` (the prelude: every core type, `fail`, `replace`, `clone`, `clone_in`, `build_in`, `build_stream_in`, `emit`, `finish`, `finish_trim`) | [core.hirsel](../../core/core/core.hirsel) | LANG-7, MEM-4, MEM-17, OWN-13, FAIL-2 |
+| `core` (the prelude: every core type, `fail`, `isolate`, `replace`, `clone`, `clone_in`, `build_in`, `build_stream_in`, `emit`, `finish`, `finish_trim`) | [core.hirsel](../../core/core/core.hirsel) | LANG-7, MEM-4, MEM-17, OWN-13, FAIL-2, FAIL-16 |
 | `option`, `result` | [option](../../core/core/option.hirsel), [result](../../core/core/result.hirsel) | FAIL-2 |
 | `int`, `float`, `char` | [int](../../core/core/int.hirsel), [float](../../core/core/float.hirsel), [char](../../core/core/char.hirsel) | SEM-1 to SEM-3 |
 | `box`, `rc`, `arc`, `unique` | [box](../../core/core/box.hirsel), [rc](../../core/core/rc.hirsel), [arc](../../core/core/arc.hirsel), [unique](../../core/core/unique.hirsel) | MEM-13 to MEM-18 |
@@ -21,6 +21,8 @@ there with no body is built in, so its summary is the one the table below gives 
 | `heap` | [heap](../../core/core/heap.hirsel) | Deques and heaps, MEM-24 |
 | `seq`, `indexed`, `writer` | [seq](../../core/core/seq.hirsel), [indexed](../../core/core/indexed.hirsel), [writer](../../core/core/writer.hirsel) | MEM-4, MEM-12 |
 | `task`, `channel` | [task](../../core/core/task.hirsel), [channel](../../core/core/channel.hirsel) | CONC-1 to CONC-11 |
+| `log` | [log](../../core/core/log.hirsel) | MEM-29 |
+| `code` | [code](../../core/core/code.hirsel) | PROG-9 |
 | `args`, `host`, `stdout`, `stderr` | [args](../../core/core/args.hirsel), [host](../../core/core/host.hirsel), [stdout](../../core/core/stdout.hirsel), [stderr](../../core/core/stderr.hirsel) | PROG-3, CAP-5 |
 
 A library module may extend a core module by name (LANG-7).
@@ -74,6 +76,8 @@ an environment (OWN-19), so it has no heap size; a scoped type's own fields
 | `Args` | plain | `shareable`, `send` | 8 | nothing |
 | `Site` | plain | `shareable`, `send`, `key` | 8 | nothing |
 | `Causes` | own | `send` | 8 | opaque owner |
+| `Log[E]` | own | none | 8 | opaque owner, and E's |
+| `StaticFn[F]` | plain | `shareable`, `send`, `key` | 8 | nothing |
 
 `Args` designates the entry arguments, which are host memory outside every limit, immutable
 and live for the run; `args.get` returns a view of one. `Causes` owns its chain's cause
@@ -82,7 +86,9 @@ cells, which were charged when each cause was raised
 that have bodies (`Option`, `Result`, `Capacity`, the error types) have the summaries OWN-2
 computes, with `Option` and `Result` taking bounds as tuples do. `Task[R]` is never `send`
 ([CONC-2](tasks.md#conc-2-the-send-bound)); its parameter's `R: send` constrains the
-result, not the handle.
+result, not the handle. `Log[E]` is a handle to a separately admitted node that owns its
+entries ([MEM-29](memory.md#mem-29-append-only-logs)), and `StaticFn[F]` designates static
+identity bytes and a function ([PROG-9](programs.md#prog-9-code-descriptors)).
 
 ## Contracts the signatures do not state
 
@@ -209,11 +215,13 @@ operations it names; nothing else about them may be inferred from an implementat
   and never names the `Dir` itself. Every Host operation that takes a path returns `Denied`
   for one that is not valid, or that leaves its `Dir`, and then has no host effect.
   A provider gives a `Dir` this confinement or does not exist; none opens a path any weaker
-  way. On Linux the host's provider needs Linux 5.6 or later with `openat2` permitted by
-  every sandbox in force, which a version check alone cannot show, so a run granted a host
-  `Dir` tries `openat2` once before `main`. Where it is unavailable the grant cannot be
-  given and the run does not start
-  ([CAP-4](capabilities.md#cap-4-entry-grants)); a run granted no `Dir` makes no such check.
+  way, and there is no fallback that resolves paths itself. On Linux the host's provider
+  needs `openat2` (Linux 5.6 or later) permitted by every sandbox in force, which a version
+  check alone cannot show, so a run granted a host `Dir` probes `openat2` once before
+  `main`. Where it is unavailable or a sandbox denies it, the run does not start
+  ([CAP-4](capabilities.md#cap-4-entry-grants)): it runs no program code, has no host
+  effect, and its one line names the cause, `Dir requires openat2 (Linux 5.6 or later,
+  permitted by the sandbox)`. A run granted no `Dir` does not probe.
   `OpenMode`:
   `Read` opens an existing file for reading (`NotFound` when absent); `Write` opens for
   writing, creating the file when absent and emptying it otherwise; `Append` opens for
@@ -242,8 +250,20 @@ operations it names; nothing else about them may be inferred from an implementat
   which that name is not a valid path of one component (it holds a `/` or a NUL) gives
   `Denied`. On an error it creates nothing and appends nothing. `host.remove_tree(d, name)` removes such a directory without
   following symbolic links; on an error it may have removed part of the tree, and nothing
-  removed is restored. `host.wall_ms` is milliseconds since 1970 and
-  `host.mono_ns` never decreases in a run. No host operation admits; every byte it returns
+  removed is restored. `host.rename(d, from, to)` gives the regular file `from` the name
+  `to`, both in the one `Dir` `d`, replacing a regular file at `to`. The final component of
+  either path is not followed as a symbolic link. It returns `NotFound` when `from` is
+  absent, and `Denied` when `from` is not a regular file or `to` names anything other than
+  a regular file; on an error it renames nothing. When both name the same file it succeeds
+  and changes nothing. Its atomicity is visibility only: an `open` of `to` finds the old
+  file or the new one, never neither, and nothing is made durable or synced, so after a host
+  crash either name may hold the file. `host.wall_ms` is milliseconds since 1970 and
+  `host.mono_ns` never decreases in a run. `host.sleep_until(c, deadline_ns)` returns once
+  `host.mono_ns(c) >= deadline_ns`, at once for a deadline already reached; it is a
+  cancellation point at its entry and while it waits
+  ([CONC-7](tasks.md#conc-7-cancellation-points)), and replay delivers its completion
+  without waiting ([CAP-8](capabilities.md#cap-8-the-replay-point)). A relative sleep is
+  library code over it. No host operation admits; every byte it returns
   lands in capacity the caller already holds. `HostFile` is a mechanical resource
   ([MEM-24](budgets.md#mem-24-logical-charges)): its finalizer closes it and ignores the
   outcome. `Net`, `Random`, `Stdin`, `Env` and `Process` have no operations in v1.

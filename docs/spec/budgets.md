@@ -116,6 +116,9 @@ A charge is the logical size of what is allocated under the policy `charge-v1`:
 | task | 256 + its result's size + 32 for its primary cause cell + its reserved limit `n` |
 | `main`'s task at startup | 256 + 32, from the root limit before `main` runs; a root limit smaller than this does not start the run |
 | channel | capacity × item size + 64 |
+| `log.new` node | 24 |
+| a log's entries | as `List[E]` storage |
+| `isolate` | 32 for its cause cell, refunded unless `body` fails ([FAIL-16](failure.md#fail-16-isolation)) |
 
 `list.new`, `string.new`, `map.new`, `deque.new`, `heap.new`, `list.with_capacity(0)` and an empty span builder
 allocate nothing and charge 0; an explicit `span.with_capacity(r, 0)` and an empty

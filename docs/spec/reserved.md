@@ -58,9 +58,11 @@ captures and pending results are cleaned; outer installed mutations/effects pers
 Public mutating APIs preserve initialized ownership and their abstraction invariants on
 failure or poison/discard the affected state. Environment death is not catchable.
 `shield(body)` defers cooperative cancellation only and does not suppress bug failure."
-*v1:* FAIL-8, FAIL-9; FAIL-14 says no v1 code may rely on a failure ending its task.
-Recovering will reserve a new primary cause cell before failure-capable code resumes; if
-that admission fails, the recovery returns a bare `Capacity` and leaves the chain as it is.
+*v1:* FAIL-16: `isolate` reserves a new primary cause cell before its body runs, returns
+the refused `Capacity` and leaves the chain as it is when that admission fails, catches
+after FAIL-8's cleanup, lets outer effects persist, never catches `Cancelled` or a run stop,
+and accepts only a body whose capture descriptor lends nothing `mut`. `shield` has no v1
+form.
 
 **R9.** Recording a failure and its causes never admits: cause storage is admitted with
 each task and resource; causes are never truncated and cleanup is never skipped. *v1:*
@@ -90,7 +92,8 @@ code/runtime-contract identity; generic identity includes type/size/dictionary/g
 dependencies, never backend addresses/clone numbers. Start with closed named monomorphic
 wrappers. Requests resolve only to registered typed decode/call/encode adapters; IDs grant
 no code execution authority and serialize no closure captures." *v1:* PROG-5, PROG-6,
-SEM-8; the revision hash itself is later.
+PROG-9, SEM-8: closed named functions without type parameters have identity bytes; the
+revision is later.
 
 **R14.** "Callable and erased-value signatures carry independent invocation-allocation and
 cleanup-allocation summaries; omission conservatively permits allocation. `noalloc_drop`
@@ -118,8 +121,9 @@ PROG-7, PROG-8.
 no read/count/clear, and `finish(take Log[E])->OwnedEvents[E]` transfers without
 allocation. E is independently owned inert data, never scoped/stable/resource. This does
 not allow writes through ordinary frozen views; queries cannot report success after a
-failed tracking append." *v1:* OWN-8 counts the log as state that no view exposes, which
-an operation given a view may change.
+failed tracking append." *v1:* MEM-29: a `Log[E]` is a handle to a separately admitted
+node whose entries no view exposes, `log.finish` returns them as a `List[E]`, and `E` is
+inert at every depth.
 
 **R19.** "Opaque capability facades declare their nominal public authority independently
 of a private implementation-authority ceiling, including captured/destructor grants.
@@ -180,17 +184,17 @@ allocator chunk size becomes a logical capacity (MEM-28).
 | hook | v1 | state |
 |---|---|---|
 | O, scoped ownership and authority | scoped types and callbacks, declared anchors, regions and limits; authority only through arguments | open: authority facades (R19) and static brands (R24) |
-| F, failure boundary | cleanup on every exit edge; one owner per survivor; ordered causes; FAIL-14 promises no task end | open: `isolate` has its v1 obligations (R8); `shield` has no v1 form |
+| F, failure boundary | cleanup on every exit edge; one owner per survivor; ordered causes; `isolate` (FAIL-16) | open: a single `Result[R, Causes]` form, which needs a per-boundary cause cell; a form that moves owned state into the body and back; `shield` |
 | C, derivation and codecs | nominal identity, opacity, rigid bounds, declaration field order | open: the content hash of a declaration for stored data is not specified |
-| D, code descriptors | code identity; instance identity; no address or order dependence | open: the semantic revision hash is not specified |
-| L, append-only log | the R18 exception named in OWN-8 | open: the `Log[E]` type |
-| I, providers | host primitives in core; issue and delivery replay points; `WriteError` | open: providers for `Net`, `Random`, `Stdin`, `Env`, `Process` |
+| D, code descriptors | code identity; identity bytes of closed named functions (PROG-9); no address or order dependence | open: `code.revision(s) -> Option[Bytes]`, never part of equality; instance identities |
+| L, append-only log | `Log[E]` (MEM-29) | open: a readable log or cell, which waits for R3 |
+| I, providers | host primitives in core, `host.rename` and `host.sleep_until` among them; issue and delivery replay points; `WriteError` | open: providers for `Net`, `Random`, `Stdin`, `Env`, `Process`; watching, renaming across directories, durable sync |
 | T, tasks | spawn, join, channels, cancellation points, `Arc`, the event order | settled for v1; selection, shared limits, mutexes and atomics later |
 
 ## Not in v1
 
 User-made shared limits; mutexes, atomics and cells; weak counted references; catching
-failures; deadlines and timeouts; task sets and selection; `@noalloc`; compile-time
+failures other than by `isolate`; deadlines and timeouts on operations other than `host.sleep_until`; task sets and selection; `@noalloc`; compile-time
 evaluation beyond `const`; unsafe code and foreign functions; layout declarations other
 than `@compact`; methods, traits and implementation contracts; imports; list and map
 literals (an `Inline` array literal is not one); format strings; `forget`; static brands;

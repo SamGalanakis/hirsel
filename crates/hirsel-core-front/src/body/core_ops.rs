@@ -56,6 +56,15 @@ macro_rules! operations {
 
 operations! {
     ("int", "parse", Lane::PendingCode, "C", "std-seed-api-889", false),
+    ("core", "isolate", Lane::PendingCode, "A", "core-check-callables-913", false),
+    ("log", "new", Lane::PendingCode, "B", "core-ops-914", false),
+    ("log", "append", Lane::PendingCode, "B", "core-ops-914", false),
+    ("log", "finish", Lane::PendingCode, "B", "core-ops-914", false),
+    ("code", "describe", Lane::PendingCode, "A", "core-check-callables-913", false),
+    ("code", "identity", Lane::PendingCode, "A", "core-ops-914", false),
+    ("code", "callable", Lane::PendingCode, "A", "core-ops-914", false),
+    ("host", "rename", Lane::PendingCode, "B", "core-ops-914", false),
+    ("host", "sleep_until", Lane::PendingCode, "B", "core-ops-914", false),
     ("list", "sum", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("list", "fill", Lane::PendingCode, "A", "core-check-calls-910", false),
     ("string", "from", Lane::PendingCode, "C", "std-seed-api-889", false),

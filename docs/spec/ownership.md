@@ -317,7 +317,7 @@ and freezes of a view of the whole argument (OWN-20). There is no last-use end a
 mutable view. Nothing that a view exposes is written, moved or freed while the view lives,
 through the view or through any other alias; an operation given a view may still change
 state that no view exposes: a counted holder's count, a channel's queue, a region's
-bookkeeping, the host. Read tracking (R18 in [reserved](reserved.md)) is such state. Where a plain `T` is expected, a `View[T]` of a
+bookkeeping, the host. A log's entries ([MEM-29](memory.md#mem-29-append-only-logs)) are such state. Where a plain `T` is expected, a `View[T]` of a
 plain `T` reads as the value. A stable value used where a view is expected is that view
 ([OWN-25](#own-25-stable-values-are-read-as-views)).
 

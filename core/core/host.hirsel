@@ -20,6 +20,10 @@ pub fn remove(d: Dir, p: String) -> Result[(), IoError] waits
 
 pub fn remove_tree(d: Dir, p: String) -> Result[(), IoError] waits
 
+pub fn rename(d: Dir, from: String, to: String) -> Result[(), IoError] waits
+
 pub fn wall_ms(c: Clock) -> u64
 
 pub fn mono_ns(c: Clock) -> u64
+
+pub fn sleep_until(c: Clock, deadline_ns: u64) waits

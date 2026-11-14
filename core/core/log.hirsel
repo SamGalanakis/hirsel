@@ -1,0 +1,6 @@
+// Module `log` (MEM-29).
+pub fn new[E]() -> Result[Log[E], Capacity]
+
+pub fn append[E](l: Log[E], take e: E) -> Result[(), (Capacity, E)]
+
+pub fn finish[E](take l: Log[E]) -> List[E]

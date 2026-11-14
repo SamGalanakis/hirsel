@@ -107,6 +107,10 @@ pub opaque type Site
 
 pub opaque type Causes
 
+pub opaque type Log[E]
+
+pub opaque type StaticFn[F]
+
 pub type Cause {
     kind: CauseKind,
     site: Site
@@ -128,6 +132,8 @@ pub type ParseError = Empty | Invalid(u64) | OutOfRange
 pub type FloatError = NaN | OutOfRange
 
 pub fn fail(take msg: String) -> Never
+
+pub fn isolate[R](body: scoped fn() -> R) -> Result[Result[R, Causes], Capacity]
 
 pub fn replace[T](mut q: T, take v: T) -> T
 

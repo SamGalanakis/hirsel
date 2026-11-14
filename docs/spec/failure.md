@@ -4,9 +4,10 @@
 
 An **error** is an `Error(e)` value; it is handled by ordinary code. A **failure** is the
 abandonment of a task's computation with a cause (FAIL-2); it runs cleanup (FAIL-8) and is
-observed only by the task's joiner (FAIL-14). A **run stop** ends the whole run without
+observed only by the task's joiner (FAIL-14) or by an enclosing `isolate` (FAIL-16). A **run stop** ends the whole run without
 cleanup (FAIL-15). No construct converts one into another, except that `join` delivers a
-child's failure to its parent as an error value.
+child's failure to its parent as an error value, and `isolate` delivers a failure in its
+body as a value (FAIL-16).
 
 ### FAIL-2: Causes
 
@@ -197,12 +198,10 @@ finalizers and never fail.
 
 ### FAIL-14: Failure boundary
 
-In v1 a failure ends the task in which it happens, after the task's cleanup. Its joiner
+A failure that no `isolate` catches (FAIL-16) ends the task in which it happens, after the task's cleanup. Its joiner
 receives `Failed(causes)`, or `Cancelled(causes)` when the primary cause is `Cancelled`, as
 an error value of `join` ([CONC-6](tasks.md#conc-6-join)). A failure in `main` ends the run
-with the failure as its outcome. No v1 construct inside a task catches a failure, and no v1
-code may rely on a failure ending its task: a later isolating scope (R8 in
-[reserved](reserved.md)) may resume after that scope's cleanup.
+with the failure as its outcome. No construct other than `isolate` catches a failure.
 
 ### FAIL-15: Run stops
 
@@ -225,3 +224,97 @@ writes one line to stderr, `run stop: ` and the stop's name
 | the host refuses the signal stack, a signal action, the clock or the page size | `SignalStack`, `Signal`, `Clock`, `PageSize` |
 
 Termination by the host writes nothing and its status is the host's.
+
+### FAIL-16: Isolation
+
+`isolate(body)`, with `body: scoped fn() -> R`, runs `body` once and returns a failure in
+it as a value, `Result[Result[R, Causes], Capacity]`, instead of ending the task. It is a
+recovery boundary and undoes nothing:
+
+- It first reserves a new primary cause cell for the task
+  ([FAIL-10](#fail-10-cause-chain)), charged as a task's
+  ([MEM-24](budgets.md#mem-24-logical-charges)). When that admission fails it returns
+  `Error(c)`, `c` the refused `Capacity`, without calling `body`, and the chain is as it
+  was. Otherwise it calls `body` with the activation of a call that receives it
+  ([OWN-21](ownership.md#own-21-scoped-callbacks)).
+- If `body` returns `r`, the reserved cell is refunded and `isolate` returns `Ok(Ok(r))`.
+- If `body` fails, the failure is cleaned as on every exit edge (FAIL-8) up to `isolate`:
+  the owners, loans, captures and pending results of `body` are cleaned, and every cause
+  that cleanup adds joins the chain (FAIL-10). `isolate` then returns `Ok(Error(causes))`
+  holding the whole chain, and the reserved cell becomes the task's primary cell. A failure
+  is caught whatever its primary cause other than `Cancelled`: `Overflow`, `Bounds`,
+  `Division`, `Unwrap`, `Fail` or a finalizer's `Capacity` ([MEM-27](budgets.md#mem-27-finalizer-grants)).
+- A failure whose primary cause is `Cancelled` is not caught: after the same cleanup the
+  reserved cell is refunded and the failure goes on past `isolate`. A run stop (FAIL-15)
+  is not caught, and nothing resumes at the operation that failed. `Capacity` outside a
+  finalizer is an error that `body` handles as a value (FAIL-2), never a failure.
+
+`body`'s type is not `waits`, so nothing in it waits ([LANG-8](language.md#lang-8-signatures)),
+and it takes no parameter, so it has no `mut` or `take` parameter; a callable that does
+not fit that type is refused by [LANG-13](language.md#lang-13-callables). `R` is a type
+parameter and therefore never scoped ([OWN-19](ownership.md#own-19-scoped-values)).
+
+`isolate` is refused here, at its argument, when the argument's capture descriptor
+(OWN-21) has a `mut` entry. The descriptor checked is the transitive one: it unites the
+descriptors of the scoped callbacks the body invokes or passes on, with `mut` dominating
+view, and a scoped callback that the enclosing function received as a parameter counts as
+a `mut` entry, because its descriptor is its caller's and is not known in this body. A
+capture the body lends `mut`, a `Box` payload reached through it included, is a `mut`
+entry (LANG-14). An `own fn` or `fn` value lends nothing outside its environment, which
+its calls only view ([LANG-14](language.md#lang-14-captures)), so the body may call one.
+
+So if `body` fails, every place outside it that it reached through a view holds the value
+that was installed in it at entry. Effects that do not install into such a place persist,
+and are not undone. They include appends to a log
+([MEM-29](memory.md#mem-29-append-only-logs)), sends on a channel and the queue changes
+they make ([CONC-4](tasks.md#conc-4-channels)), provider operations already issued
+([CAP-5](capabilities.md#cap-5-provider-operations)), counted holders' counts
+([MEM-16](memory.md#mem-16-counting)) and bytes allocated in an outer region, which stay
+charged until it closes (FAIL-6). A program that needs all or nothing keeps its working
+state in owned values made inside `body`, returns them on success and installs them after
+`isolate` returns. A single-`Result` form and a form that moves owned state into the body
+and back are reserved ([reserved](reserved.md), F).
+
+```hirsel
+fn run(db: Map[u64, u64], step: own fn(Map[u64, u64], mut Map[u64, u64])) -> Result[Result[Map[u64, u64], Causes], Capacity] {
+  isolate(fn() -> Map[u64, u64] {
+    let mut writes: Map[u64, u64] = map.new()
+    step(db, mut writes)                          // a failure here cleans writes; db is unchanged
+    writes
+  })
+}
+```
+```hirsel
+fn report(tx: Sender[u64], xs: List[u64]) -> u64 {
+  match isolate(fn() -> u64 {
+    let _ = channel.try_send(tx, 1)               // stays sent when the sum fails
+    list.sum(xs)
+  }) {
+    Ok(Ok(s)) => s,
+    Ok(Error(_)) => 0,
+    Error(_) => 0,
+  }
+}
+```
+```hirsel
+fn bump(mut n: u64) -> u64 {
+  let _ = isolate(fn() -> u64 { n = n + 1; n })   // refused: FAIL-16, n is captured mut
+  n
+}
+```
+```hirsel
+fn count(xs: List[u64]) -> u64 {
+  let mut seen: u64 = 0
+  let tick = scoped fn() { seen = seen + 1 }
+  let _ = isolate(fn() -> u64 { tick(); list.len(xs) })   // refused: FAIL-16, tick lends seen mut
+  seen
+}
+```
+```hirsel
+fn guard(f: scoped fn() -> u64) -> u64 {
+  match isolate(fn() -> u64 { f() }) {            // refused: FAIL-16, f's descriptor is not known here
+    Ok(Ok(v)) => v,
+    _ => 0,
+  }
+}
+```

@@ -48,13 +48,13 @@ These goals decide between designs. A rule that would break one of them is wrong
 | [Syntax](syntax.md) | LANG-1 to LANG-5 |
 | [Language](language.md) | LANG-6 to LANG-21 |
 | [Ownership](ownership.md) | OWN-1 to OWN-26 |
-| [Memory](memory.md) | MEM-1 to MEM-18 |
+| [Memory](memory.md) | MEM-1 to MEM-18, MEM-29 |
 | [Budgets](budgets.md) | MEM-19 to MEM-28 |
-| [Failure](failure.md) | FAIL-1 to FAIL-15 |
+| [Failure](failure.md) | FAIL-1 to FAIL-16 |
 | [Tasks](tasks.md) | CONC-1 to CONC-12 |
 | [Capabilities](capabilities.md) | CAP-1 to CAP-8 |
 | [Semantics](semantics.md) | SEM-1 to SEM-9 |
-| [Programs](programs.md) | PROG-1 to PROG-6 |
+| [Programs](programs.md) | PROG-1 to PROG-6, PROG-9 |
 | [Diagnostics](diagnostics.md) | PROG-7 and PROG-8 |
 | [Core library](core.md) | |
 | [Reserved](reserved.md) | |
@@ -87,6 +87,7 @@ the comment says.
 | extent, view | [OWN-8](ownership.md#own-8-views) |
 | failure, error, run stop | [FAIL-1](failure.md#fail-1-errors-failures-and-run-stops) |
 | grant | [MEM-27](budgets.md#mem-27-finalizer-grants) |
+| identity bytes | [PROG-9](programs.md#prog-9-code-descriptors) |
 | hand-over, limit record | [MEM-20](budgets.md#mem-20-limit-records-and-hand-over) |
 | kind | [OWN-3](ownership.md#own-3-kinds) |
 | outlives | [MEM-6](memory.md#mem-6-roots) |

@@ -567,3 +567,48 @@ fn same_pool(a: Handle, b: Handle) -> bool { a.pool == b.pool }
 ```hirsel
 fn older(a: Unique, b: Unique) -> bool { a < b }            // refused: LANG-21, Unique is not ordered
 ```
+
+### MEM-29: Append-only logs
+
+A `Log[E]` is an own, task-local, opaque handle of 8 bytes to a separately admitted node of
+24 bytes, which owns the log's entries. It is never `send`, `shareable`, `key` or
+`ordered`. Its entries are state that no view exposes
+([OWN-8](ownership.md#own-8-views)): no operation reads, counts, clears or iterates them.
+
+- `log.new() -> Result[Log[E], Capacity]` admits the node.
+- `log.append(l: Log[E], take e: E) -> Result[(), (Capacity, E)]` takes a view of the log.
+  It admits the growth of the entries' storage, as `list.push` grows a `List[E]`
+  ([MEM-24](budgets.md#mem-24-logical-charges)), before it commits `e`; on `Capacity` it
+  returns `e` and leaves the log unchanged. An append writes only the node and the entries'
+  storage, never the handle's 8 bytes, so no byte a view of the log exposes changes.
+- A successful append stays: a later `Error` or failure undoes nothing
+  ([FAIL-16](failure.md#fail-16-isolation)).
+- `log.finish(take l: Log[E]) -> List[E]` returns the entries in append order, moving their
+  storage into the `List` without admitting, and frees and refunds the node. Dropping a
+  log cleans its entries in append order, then frees and refunds the node.
+
+A `Log[T]` is accepted only where `T` holds no resource, no capability, no view, no scoped
+value and no stable reference at any depth, as its summary records
+([OWN-2](ownership.md#own-2-type-summaries)), the condition of an owning closure's
+captures ([LANG-14](language.md#lang-14-captures)). Any other `Log[T]` is refused here, at
+`T`; a type parameter may hold a capability, so a `Log` over one is refused outside core's
+`log` module.
+
+```hirsel
+type Row { name: String }
+fn read(m: Map[u64, Row], seen: Log[u64], k: u64) -> Result[Option[View[Row]], (Capacity, u64)] in m {
+  log.append(seen, k)?
+  Ok(map.get(m, k))
+}
+```
+```hirsel
+fn names(l: Log[View[String]]) {}                 // refused: MEM-29, at View[String]
+```
+```hirsel
+fn seen(take l: Log[u64]) -> List[u64] {
+  let v = view l
+  let xs = log.finish(take l)                     // refused: OWN-10, l is frozen
+  let _ = log.append(v, 1)
+  xs
+}
+```

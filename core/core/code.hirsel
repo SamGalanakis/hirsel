@@ -1,0 +1,6 @@
+// Module `code` (PROG-9).
+pub fn describe[F](f: F) -> StaticFn[F]
+
+pub fn identity[F](s: StaticFn[F]) -> View[Bytes] in s
+
+pub fn callable[F](s: StaticFn[F]) -> F

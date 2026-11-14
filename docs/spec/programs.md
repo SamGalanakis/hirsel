@@ -114,11 +114,78 @@ Each top-level function has a **code identity**: its definition identity (PROG-1
 signature. A call through a function value keeps the callee's identity; a closure has
 none of its own. An instance of a generic function is identified by its definition, its
 closed type arguments and the dictionaries chosen for its bounds; sizes are not part of
-it. Programs cannot read code identities in v1 ([reserved](reserved.md), R13). No
+it. A program reads the identity of a named function through `code` (PROG-9). No
 construct dispatches on a function's name or signature at run time, and nothing
 observable depends on a function's address or on the order of declarations
 ([SEM-8](semantics.md#sem-8-determinism)), so two bodies with the same checked meaning
 are interchangeable.
+
+### PROG-9: Code descriptors
+
+`code.describe(f)` returns a `StaticFn[F]`. It is accepted only where `f` is the name of a
+top-level function without type parameters (region parameters are allowed), and `F` is
+then that function's callable type ([LANG-13](language.md#lang-13-callables)); any other
+argument, a local, a parameter, a field, a closure or a generic function, is refused here,
+at the argument. A `StaticFn[F]` is plain, `shareable`, `send` and `key`, 8 bytes, and
+making one admits nothing. `code.callable(s)` returns the function. Nothing turns bytes into
+a function, and a `StaticFn` grants no authority: the function takes its capabilities as
+arguments.
+
+`code.identity(s)` returns a view of static bytes, the function's **identity bytes**. Two
+`StaticFn` values are equal exactly when their identity bytes are, and nothing else about a
+function takes part in that equality. The bytes are produced once, by the front end, from
+the checked declarations, and are the same on every engine and build
+([SEM-8](semantics.md#sem-8-determinism)). They are one version byte, `0x01`, which versions
+this encoding and nothing else, followed by the UTF-8 text `D S`:
+
+- `D` is the definition identity (PROG-1): `package@major/module/../name`, the package's
+  name, its major version in decimal without leading zeros, each component of the module
+  path, and the function's name, joined by `/`. In each component, every byte other than
+  an ASCII letter, digit or `_` is written `%` and two upper-case hex digits.
+- `S` is the function's header (`fn-header`, [syntax](syntax.md)) with its whole meaning
+  and no spelling: parameter names are left out; region parameters keep their order and
+  are written `^0`, `^1`, ..; an anchor or region argument names its parameter by position
+  as `#0`, `#1`, .., or its region as `^i`, followed by any field names as written; every
+  type path is replaced by the definition identity of the type it names, aliases expanded
+  first, and keeps its type arguments; the builtin type names of
+  [LANG-10](language.md#lang-10-built-in-types) are written as themselves; a missing result
+  is written `->()`; `waits` stays; the outlives clauses are written as `where ^i:^j`
+  pairs, sorted by `i` then `j`, each once; bounds in `own[..]` are written in the order
+  of the `bound-name` production.
+- No whitespace appears except one space between two adjacent words, a word being a
+  keyword, an identifier, a number or a definition identity, and no list has a trailing
+  comma.
+
+So `fn double(b: Bytes) -> Result[Bytes, Capacity]` in module `main` of package `app`
+version 1 has the identity bytes `0x01` followed by
+`app@1/main/double(core@1/core/List[u8])->core@1/core/Result[core@1/core/List[u8],core@1/core/Capacity]`.
+A change to a function's package, version, module path, name, parameter modes or types,
+result, anchors, `waits` or outlives clauses changes its identity; a change to its
+parameter names or to its body does not. A rename or a move to another module is a new
+identity, and no alias connects the two. A later encoding may add an instance's closed type
+arguments and dictionaries after `D`; version 1 has none.
+
+`code.revision(s)`, a check of the body, is reserved ([reserved](reserved.md), D) and is
+never part of equality. An identity stored without a revision was matched by identity
+alone, so a changed body under an unchanged identity is not detected.
+
+```hirsel
+type Handler = fn(Bytes) -> Result[Bytes, Capacity]
+type Entry { code: StaticFn[Handler] }
+fn double(b: Bytes) -> Result[Bytes, Capacity] { let mut out: Bytes = list.new(); list.append(mut out, b)?; list.append(mut out, b)?; Ok(out) }
+fn register() -> Entry { Entry(code: code.describe(double)) }
+fn serve(reg: List[Entry], wire: Bytes, arg: Bytes) -> Option[Result[Bytes, Capacity]] {
+  for e in reg { if code.identity(e.code) == wire { return Some((code.callable(e.code))(arg)) } }
+  None
+}
+```
+```hirsel
+fn d(f: fn(u64) -> u64) -> StaticFn[fn(u64) -> u64] { code.describe(f) }   // refused: PROG-9, f names no top-level function
+```
+```hirsel
+fn same[T: key](a: T, b: T) -> bool { a == b }
+fn d() -> u64 { let _ = code.describe(same); 0 }                             // refused: PROG-9, same is generic
+```
 
 ### PROG-6: One meaning
 

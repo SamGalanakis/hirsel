@@ -32,20 +32,24 @@ fn anchored_instance_key_llvm() {
 fn grouped_region_calls(backend: Backend) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dir = tempfile::tempdir().unwrap();
-    let source = include_str!("../../../core/front/cases/body/call-region-grouped.hirsel");
-    let mut request = source_request(source, dir.path());
-    request.inputs.packages[1] =
-        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
-    let product = Driver::default()
-        .check(request, &mut Meter::new(false))
-        .unwrap();
-    let built = product
-        .build(
-            &DefPath::from_full("app@1/main/main").unwrap(),
-            &native_options(backend, dir.path()),
-        )
-        .unwrap();
-    run_clean(&built.executable, 0);
+    for source in [
+        include_str!("../../../core/front/cases/body/call-region-grouped.hirsel"),
+        include_str!("../../../core/front/cases/body/callable-region-take-result.hirsel"),
+    ] {
+        let mut request = source_request(source, dir.path());
+        request.inputs.packages[1] =
+            PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+        let product = Driver::default()
+            .check(request, &mut Meter::new(false))
+            .unwrap();
+        let built = product
+            .build(
+                &DefPath::from_full("app@1/main/main").unwrap(),
+                &native_options(backend, dir.path()),
+            )
+            .unwrap();
+        run_clean(&built.executable, 0);
+    }
 }
 #[test]
 #[ignore = "explicit native integration target"]

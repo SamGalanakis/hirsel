@@ -237,7 +237,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if let Some(abi) = abi {
             for j in abi.regions.start..abi.regions.start + abi.regions.len {
                 let i = self.callable_regions[j as usize] as usize;
-                if self.binder_path(args[i]).is_none() {
+                if self.region_argument_path(args[i]).is_none() {
                     return self.gap_ty(
                         n,
                         "a call result rooted in a Region expression is not built",

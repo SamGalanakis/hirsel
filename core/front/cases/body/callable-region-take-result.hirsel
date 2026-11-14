@@ -1,0 +1,83 @@
+// MEM-1 / OWN-3 / MEM-6: take copies a Region and preserves its root.
+// Both calls allocate in outer; the unused inner argument must not become the
+// result's root. Three Stamps with n=11 give 33 after inner closes.
+// expect: accept
+// expect: run witness() = 1
+// expect: run agreement() = 33
+// expect: run literal() = 1
+// expect: run mutable() = 7
+stable type Stamp {
+    n: u64
+}
+
+fn make(take r: Region) -> Result[Stamp in r, Capacity] {
+    Stamp(n: 1) in r
+}
+
+fn witness() -> u64 {
+    region r {
+        let f = make
+        let s = result.unwrap(f(take r))
+        s.n
+    }
+}
+
+fn two(take r: Region, spare: Region, n: u64) -> Result[Stamp in r, Capacity] {
+    Stamp(n: n) in r
+}
+
+fn agreement() -> u64 {
+    region outer {
+        let f = two
+        let a: Stamp in outer = result.unwrap(two(take outer, outer, 11))
+        let b: Stamp in outer = region inner {
+            let direct: Stamp in outer = result.unwrap(two(take outer, inner, 11))
+            let indirect: Stamp in outer = result.unwrap(f(take (outer), inner, 11))
+            if direct.n != indirect.n {
+                return 0
+            }
+            indirect
+        }
+        let c: Stamp in outer = result.unwrap(f(take outer, outer, 11))
+        if a.n == b.n && b.n == c.n {
+            a.n + b.n + c.n
+        } else {
+            0
+        }
+    }
+}
+
+fn literal() -> u64 {
+    region r {
+        let f = fn(take q: Region) -> Result[Stamp in q, Capacity] {
+            make(take q)
+        }
+        let s: Stamp in r = result.unwrap(f(take r))
+        s.n
+    }
+}
+
+fn via_mut(mut r: Region) -> Result[Stamp in r, Capacity] {
+    Stamp(n: 7) in r
+}
+
+fn read_mut(mut r: Region) -> u64 {
+    let f = via_mut
+    let s: Stamp in r = result.unwrap(f(mut r))
+    s.n
+}
+
+fn mutable() -> u64 {
+    region r {
+        let mut alias = r
+        read_mut(mut alias)
+    }
+}
+
+pub fn main() -> Result[(), Exit] {
+    if witness() == 1 && agreement() == 33 && literal() == 1 && mutable() == 7 {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
+}

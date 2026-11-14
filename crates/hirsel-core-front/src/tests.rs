@@ -3415,7 +3415,7 @@ fn marked_scoped_parameters_use_value_and_declared_places() {
         "callable-scoped-parameters",
         "callable-region-store-refused",
         "callable-region-local-store-refused",
-        "callable-region-take-result-gap",
+        "callable-region-take-result",
     ] {
         failures.extend(run_case(
             &root().join("cases/body").join(format!("{case}.hirsel")),

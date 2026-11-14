@@ -84,10 +84,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 _ => None,
             })
             .collect();
-        if rooted
-            .iter()
-            .any(|&i| args.get(i).is_none_or(|&e| self.binder_path(e).is_none()))
-        {
+        if rooted.iter().any(|&i| {
+            args.get(i)
+                .is_none_or(|&e| self.region_argument_path(e).is_none())
+        }) {
             return self.gap_ty(
                 n,
                 "a call result rooted in a Region expression is not built",
@@ -388,6 +388,21 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         (result, v)
     }
 
+    // MEM-1 / OWN-3: a marked Region argument still names the same region.
+    // Only root substitution strips the mark; argument checking sees the original
+    // expression and enforces its mode, place and loan rules as usual.
+    pub(super) fn region_argument_path(&self, mut n: NodeId) -> Option<NodeId> {
+        loop {
+            match self.kind(n) {
+                NodeKind::Group => n = self.kids(n)[0],
+                NodeKind::Unary if matches!(self.token_text(n), "take" | "mut") => {
+                    n = self.kids(n)[0];
+                }
+                _ => return self.binder_path(n),
+            }
+        }
+    }
+
     pub(super) fn call_region_roots(
         &mut self,
         params: impl IntoIterator<Item = TyId>,
@@ -398,10 +413,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         for (i, ty) in params.into_iter().enumerate() {
             if matches!(self.t.kind(ty), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::Region))
                 && let Some(&arg) = args.get(i)
-                && self.binder_path(arg).is_some()
+                && let Some(path) = self.region_argument_path(arg)
             {
                 roots.resize(i + 1, None);
-                roots[i] = Some(self.body_root(arg, true));
+                roots[i] = Some(self.body_root(path, true));
             }
         }
     }

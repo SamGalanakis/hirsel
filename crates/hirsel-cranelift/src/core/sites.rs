@@ -19,7 +19,11 @@ impl Function<'_, '_, '_> {
             .anchor
             .filter(|a| !self.input.items[a.item.index()].package_is("core", "1"))
         else {
-            return Ok(self.caller_site);
+            return Ok(if c::source::inherits_site(self.instance) {
+                self.caller_site
+            } else {
+                self.b.ins().iconst(types::I64, 0)
+            });
         };
         let mut symbols = self.site_symbols.borrow_mut();
         let data = if let Some(&data) = symbols.get(&anchor.item) {

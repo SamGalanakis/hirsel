@@ -468,8 +468,16 @@ impl Glues {
                 if resource {
                     g.call("hirsel_core_finalizer_begin", &[P, P], &[], &[g.ctx, base])?;
                 }
+                let function = &tables.input.functions[finalizer.0 as usize];
+                let site =
+                    if c::source::inherits_site(&tables.input.instances[function.instance.index()])
+                    {
+                        g.caller_site
+                    } else {
+                        g.ctx
+                    };
                 let f = tables.functions[finalizer.0 as usize];
-                let status = g.direct(f, &[g.ctx, base, g.caller_site]);
+                let status = g.direct(f, &[g.ctx, base, site]);
                 g.merge(status);
                 if resource {
                     g.call("hirsel_core_finalizer_end", &[P, P], &[], &[g.ctx, base])?;

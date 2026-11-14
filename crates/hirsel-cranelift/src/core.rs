@@ -305,7 +305,9 @@ fn emit(
     };
     let mut debug_functions = Vec::new();
     for (index, f) in input.functions.iter().enumerate() {
-        let Some(body) = &f.body else { continue };
+        if f.body.is_none() {
+            continue;
+        }
         let build = observer.enter("build_clif");
         let sig = &signatures[f.signature.index()];
         let context = &mut scratch.codegen;
@@ -313,7 +315,7 @@ fn emit(
         object.clear_context(context);
         context.func.signature = sig.clif.clone();
         let builder = FunctionBuilder::new(&mut context.func, builder_context);
-        function::emit(&mut object, builder, body, sig, &tables)?;
+        function::emit(&mut object, builder, f, sig, &tables)?;
         drop(build);
         observer
             .define(&mut object, functions[index], context)

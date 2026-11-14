@@ -938,6 +938,64 @@ fn check_failure_sites() {
     for optimize in [false, true] {
         execute(&module, &runs, optimize);
     }
+    // FORM #95's core and generated fallbacks are real calls, even when the
+    // source frontend elects to inline a particular library operation.
+    let inheritance = text::parse(r#"core v1
+item i0 = user@0/site/call
+item i1 = core@1/site/helper
+sig g0 = (u64) -> (u64)
+inst n0 = core@1/site/helper [] []
+inst n1 = user@0/site/call [] []
+inst n2 = user@0/site/call.$glue [] []
+inst n3 = user@0/site/own [] []
+inst n4 = user@0/site/relay [] []
+inst n5 = user@0/site/indirect [] []
+inst n6 = user@0/site/glue_caller [] []
+fn f0 = n0 g0 {
+b0(v0: u64):
+  v1: u64 = const 1
+  v2: u64 = add v0, v1 at i1 5..10
+  return v2
+}
+fn f1 = n1 g0 {
+b0(v0: u64):
+  v1: u64 = call f0 g0 (v0) at i0 20..30
+  return v1
+}
+fn f2 = n2 g0 {
+b0(v0: u64):
+  v1: u64 = const 1
+  v2: u64 = add v0, v1
+  return v2
+}
+fn f3 = n6 g0 {
+b0(v0: u64):
+  v1: u64 = call f2 g0 (v0) at i0 90..95
+  return v1
+}
+fn f4 = n3 g0 {
+b0(v0: u64):
+  v1: u64 = const 1
+  v2: u64 = add v0, v1 at i0 50..55
+  return v2
+}
+fn f5 = n4 g0 {
+b0(v0: u64):
+  v1: u64 = call f4 g0 (v0) at i0 60..65
+  return v1
+}
+fn f6 = n5 g0 {
+b0(v0: u64):
+  v1: ptr = fnref f0
+  v2: u64 = call v1 g0 (v0) at i0 22..25
+  return v2
+}
+"#).unwrap();
+    wf::module(&inheritance).unwrap();
+    let runs = [0, 1, 3, 5, 6].map(|f| (FuncId(f), vec![u64::MAX]));
+    for optimize in [false, true] {
+        execute(&inheritance, &runs, optimize);
+    }
 }
 
 fn check_relative_debug_rows() {

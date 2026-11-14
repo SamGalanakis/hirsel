@@ -22,6 +22,7 @@ pub(super) struct Function<'a, 'b, 'c> {
     pub object: &'b mut ObjectModule,
     pub body: &'c Body,
     pub input: &'c c::Module,
+    pub instance: &'c InstanceKey,
     pub layouts: &'c [hirsel_core_layout::Recipe],
     pub values: Vec<Value>,
     addresses: Vec<AddressValue>,
@@ -56,10 +57,11 @@ pub(super) struct Function<'a, 'b, 'c> {
 pub(super) fn emit(
     object: &mut ObjectModule,
     mut b: FunctionBuilder<'_>,
-    body: &Body,
+    function: &c::Function,
     signature: &abi::Signature,
     tables: &super::Tables<'_>,
 ) -> Result<()> {
+    let body = function.body.as_ref().unwrap();
     let (input, layouts, signatures, functions, statics) = (
         tables.input,
         tables.layouts,
@@ -193,6 +195,7 @@ pub(super) fn emit(
         object,
         body,
         input,
+        instance: &input.instances[function.instance.index()],
         layouts,
         values,
         addresses,
@@ -589,7 +592,17 @@ impl Function<'_, '_, '_> {
                         Arg::Address(a) => self.addr(a),
                     });
                 }
-                args.push(self.site()?);
+                let site = match call.callee {
+                    Callee::Direct(f)
+                        if !c::source::inherits_site(
+                            &self.input.instances[self.input.functions[f.index()].instance.index()],
+                        ) =>
+                    {
+                        self.context
+                    }
+                    _ => self.site()?,
+                };
+                args.push(site);
                 let inst = match call.callee {
                     Callee::Direct(f) => {
                         let f = self.calls.reference(

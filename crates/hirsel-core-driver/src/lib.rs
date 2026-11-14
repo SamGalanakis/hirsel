@@ -289,8 +289,8 @@ struct DiskCheckRef<'a> {
 impl<'a> DiskCheckRef<'a> {
     /// A site is a byte offset from its item's start and the key covers only
     /// the body's own item, so a resolved body, whose refusals and gaps are
-    /// reported from its record, must cite no other item. An unresolved body's
-    /// refusals are the resolver's, reported afresh by every request.
+    /// reported from its record, must cite no other item. An unresolved body
+    /// records none (see `check_inner`).
     fn of(d: &'a DefinitionProduct) -> io::Result<Self> {
         let c = d.check.counts;
         let mut anchors: Vec<&DefPath> = d.anchors.values().collect();
@@ -676,13 +676,14 @@ impl Driver {
                     product
                 } else {
                     let mut emitter = Emitter::new();
+                    // An unresolved body records no refusals: they are the
+                    // resolver's, reported by declarations on every request,
+                    // and they may cite other items, whose sites the key does
+                    // not cover.
                     let check = if !resolution.diagnostics.is_empty()
                         || resolution.resource_refusal.is_some()
                     {
-                        CoreCheck {
-                            refusals: resolution.diagnostics.clone(),
-                            ..Default::default()
-                        }
+                        CoreCheck::default()
                     } else {
                         p.check_lower(f, &mut emitter)
                     };

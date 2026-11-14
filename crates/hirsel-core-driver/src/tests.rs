@@ -2072,3 +2072,92 @@ fn every_reached_shape_name_has_one_closure() {
     }
     eprintln!("roots built {built}");
 }
+
+fn modules_request(files: &[(&str, &str)], dir: &Path, store: &Path) -> CheckRequest {
+    let mut req = request("", dir);
+    req.store = store.to_owned();
+    req.inputs.packages[0].sources.clear();
+    for (name, text) in files {
+        let file = dir.join(format!("{name}.hirsel"));
+        std::fs::write(&file, text).unwrap();
+        req.inputs.packages[0]
+            .sources
+            .push(hirsel_core_resolve::ModuleSource {
+                file,
+                modules: vec![name.to_string()],
+                signatures: false,
+            });
+    }
+    req
+}
+
+/// Attack 960's resolution counterexamples 1 and 6 as edit-kind cases. Law:
+/// after an edit, an incremental build reports the diagnostics, holds the
+/// products and publishes the root of a fresh build of the same sources.
+/// Oracle: the fresh build. Red before an unresolved body stopped recording
+/// the resolver's refusals: its record kept the foreign type's old span.
+#[test]
+fn resolution_edges_rebuild_like_fresh() {
+    let cases: [(&str, &[(&str, &str)], &[(&str, &str)]); 2] = [
+        (
+            "a variant added elsewhere takes over a record construction",
+            &[(
+                "a",
+                "type R { x: u64 }\nfn make() -> R { R(x: 1u64) }\nconst K: R = R(x: 1u64)\n",
+            )],
+            &[
+                (
+                    "a",
+                    "type R { x: u64 }\nfn make() -> R { R(x: 1u64) }\nconst K: R = R(x: 1u64)\n",
+                ),
+                ("b", "pub type V = R(u64)\n"),
+            ],
+        ),
+        (
+            "whitespace moves a foreign private type a refusal names",
+            &[
+                ("a", "fn f(x: b.Hidden) -> u64 { 0 }\n"),
+                ("b", "type Hidden {}\n"),
+            ],
+            &[
+                ("a", "fn f(x: b.Hidden) -> u64 { 0 }\n"),
+                ("b", "type     Hidden {}\n"),
+            ],
+        ),
+    ];
+    for (case, base, edit) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let incremental = dir.path().join("incremental");
+        Driver::default()
+            .check(
+                modules_request(base, dir.path(), &incremental),
+                &mut Meter::new(false),
+            )
+            .unwrap();
+        let built = Driver::default()
+            .check(
+                modules_request(edit, dir.path(), &incremental),
+                &mut Meter::new(false),
+            )
+            .unwrap();
+        let fresh = Driver::default()
+            .check(
+                modules_request(edit, dir.path(), &dir.path().join("fresh")),
+                &mut Meter::new(false),
+            )
+            .unwrap();
+        assert_eq!(
+            encode(&built.diagnostics).unwrap(),
+            encode(&fresh.diagnostics).unwrap(),
+            "{case}: diagnostics"
+        );
+        let records = |p: &CheckProduct| -> BTreeMap<DefPath, ContentHash> {
+            p.definitions
+                .iter()
+                .map(|(k, d)| (k.clone(), d.record))
+                .collect()
+        };
+        assert_eq!(records(&built), records(&fresh), "{case}: products");
+        assert_eq!(built.root, fresh.root, "{case}: publication");
+    }
+}

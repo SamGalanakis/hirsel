@@ -89,7 +89,11 @@ fn execute_runs(module: &c::Module, runs: &[Run], optimize: bool) {
                 args.push("&operand".into());
             }
             if sig.params.len() == 3 {
-                args.push("3".into());
+                if op == HostOp::Rename {
+                    args.push("&operand".into());
+                } else {
+                    args.push("3".into());
+                }
             }
             args
         } else {

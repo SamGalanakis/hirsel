@@ -740,9 +740,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             .iter()
             .enumerate()
             .find_map(|(index, parameter)| {
-                (self.binder_at.get(&(parameter.site.span.start, parameter.site.span.end))
+                (self
+                    .binder_at
+                    .get(&(parameter.site.span.start, parameter.site.span.end))
                     == Some(&(slot as u32)))
-                    .then_some(crate::types::Root::Parameter(index as u32))
+                .then_some(crate::types::Root::Parameter(index as u32))
             })
             .or(Some(crate::types::Root::Local(slot as u32)))
     }

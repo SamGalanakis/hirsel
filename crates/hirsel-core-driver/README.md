@@ -149,6 +149,14 @@ therefore rechecks and compiles no existing body; only the link product changes.
 Published source text has its own indexed rows and never requires decoding a
 library AST or reopening source files. Installed products contain those bytes.
 
+The driver emits the fresh entry/link object directly on x86-64 and AArch64,
+using Cranelift's C ABI and the same Object ELF writer on both program engines.
+It contains startup, the Result/cleanup callback and static argument, grant and
+source descriptors. There is no generated C translation unit or C compilation
+step. The selected `--cc` runs only as a linker driver for CRT, sysroot and
+library selection. Runtime headers remain embedded ABI/cache inputs. Entry code
+generation runs only on a link-cache miss.
+
 The fresh entry object also defines the linked item ordinals and hands the
 borrowed current-source table to `hirsel_core_os_run_with_sources`. An exit101
 report resolves each cause's original raising operation to file:line:column;

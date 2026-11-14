@@ -10,6 +10,10 @@ name = "hirsel-core"
 path = "src/main.rs"
 
 [dependencies]
+cranelift-codegen = { version = "=0.136.3", default-features = false, features = ["std", "x86", "arm64", "unwind"] }
+cranelift-frontend = { version = "=0.136.3", default-features = false, features = ["std"] }
+cranelift-module = { version = "=0.136.3", default-features = false, features = ["std"] }
+cranelift-object = { version = "=0.136.3", default-features = false }
 mimalloc = { version = "=0.1.52", default-features = false }
 rustc-hash = "2"
 hirsel-core-ids = { path = "../hirsel-core-ids" }

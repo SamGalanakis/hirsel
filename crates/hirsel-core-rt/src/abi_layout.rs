@@ -1,6 +1,20 @@
 // Frozen memory ABI for both supported 64-bit targets. This file is standalone:
 // native emitters include these constants without linking runtime semantics.
 pub const CONTEXT_CURRENT_LIMIT: usize = 0;
+// The process C ABI is identical on the two supported 64-bit targets.
+pub const OS_CONFIG_BYTES: u32 = 72;
+pub const OS_CONFIG_ROOT_LIMIT: i32 = 0;
+pub const OS_CONFIG_ARGS: i32 = 8;
+pub const OS_CONFIG_ARGS_LEN: i32 = 16;
+pub const OS_CONFIG_DIRECTORIES: i32 = 24;
+pub const OS_CONFIG_DIRECTORIES_LEN: i32 = 32;
+pub const OS_CONFIG_GRANT_MASK: i32 = 40;
+pub const OS_CONFIG_STREAMS: i32 = 48;
+pub const OS_CONFIG_PARAMETERS: i32 = 56;
+pub const OS_CONFIG_PARAMETERS_LEN: i32 = 64;
+pub const PROCESS_CONFIG_GRANTS: i32 = 24;
+pub const MAIN_RESULT_KIND: i32 = 0;
+pub const MAIN_RESULT_EXIT: i32 = 1;
 pub const CONTEXT_EVENTS: usize = 8;
 pub const LIMIT_AVAILABLE: usize = 0;
 pub const LIMIT_OUTSTANDING: usize = 8;

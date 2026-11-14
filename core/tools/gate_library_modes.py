@@ -99,6 +99,36 @@ def main():
             self.assertEqual((policy['default_dev'], policy['default_release']), ('off', 'off'))
             self.assertIn('always enabled', policy['statement'])
 
+        def test_native_link_uses_objects_without_c_compilation(self):
+            runtime = Path(os.environ['HIRSEL_CORE_RT_ARCHIVE']).resolve()
+            prefix = os.environ.get('LLVM_SYS_231_PREFIX')
+            real_cc = Path(prefix) / 'bin/clang' if prefix else Path(shutil.which('cc'))
+            with tempfile.TemporaryDirectory(prefix='hirsel-entry-object-') as temporary:
+                work = Path(temporary)
+                app = work / 'app'
+                self.assertEqual(subprocess.run([str(compiler), 'new', str(app)], cwd=ROOT, capture_output=True).returncode, 0)
+                calls, cc = work / 'calls.jsonl', work / 'link-only'
+                cc.write_text('#!/usr/bin/python3\nimport json,os,pathlib,sys\n'
+                    + 'args=sys.argv[1:]\n'
+                    + 'if any(a in {"-c","-S","-E","-x"} or pathlib.Path(a).suffix in {".c",".cc",".cpp",".s",".S"} for a in args):\n'
+                    + ' sys.stderr.write("C compilation forbidden by direct-object oracle\\n");sys.exit(69)\n'
+                    + 'for a in args:\n'
+                    + ' if pathlib.Path(a).name=="entry.o": assert pathlib.Path(a).read_bytes()[:4]==b"\\x7fELF"\n'
+                    + 'with open(' + repr(str(calls)) + ',"a") as log: log.write(json.dumps(args)+"\\n")\n'
+                    + 'os.execv(' + repr(str(real_cc)) + ',[' + repr(str(real_cc)) + ',*args])\n')
+                cc.chmod(0o755)
+                for engine in ['cranelift', 'llvm']:
+                    result = subprocess.run([str(compiler), 'build', str(app), '--runtime', str(runtime),
+                        '--backend', engine, '--cc', str(cc), '--store', str(work / engine),
+                        '-o', str(work / 'program'), '--json'], cwd=ROOT, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertTrue(json.loads(result.stdout)['native']['linked'])
+                    ran = subprocess.run([str(work / 'program')], capture_output=True)
+                    self.assertEqual((ran.returncode, ran.stdout, ran.stderr), (0, b'', b''))
+                commands = [json.loads(line) for line in calls.read_text().splitlines()]
+                links = [args for args in commands if any(Path(a).name == 'entry.o' for a in args)]
+                self.assertEqual(len(links), 2)
+
         def test_env_and_registered_products_work_away_from_the_checkout(self):
             runtime = Path(os.environ['HIRSEL_CORE_RT_ARCHIVE']).resolve()
             with tempfile.TemporaryDirectory(prefix='hirsel-installed-') as temporary:

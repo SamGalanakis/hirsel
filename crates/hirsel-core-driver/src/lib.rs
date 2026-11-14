@@ -12,6 +12,7 @@ mod callable_variants;
 mod instances;
 mod native;
 mod native_debug;
+mod native_entry;
 mod native_sources;
 mod reachability;
 mod test_run;

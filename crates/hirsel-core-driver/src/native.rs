@@ -302,7 +302,7 @@ impl CheckProduct {
             })
             .collect::<Vec<_>>();
         let sources = self.native_sources(&items)?;
-        let source = self.process_entry(entry, options, &sources)?;
+        let entry_plan = self.process_entry(entry, options, &sources)?;
         let mut objects = self.emit_instances(entry, instances, &reached.materialized, options)?;
         if let Some(module) = &self.entry_binding(entry)?.cleanup {
             let store = Store::new(&options.store)?;
@@ -338,7 +338,7 @@ impl CheckProduct {
                 compiled,
             });
         }
-        link(&source, &objects, options, &sources)
+        link(&entry_plan, &objects, options, &sources)
     }
     fn entry_binding(&self, entry: &DefPath) -> Result<&EntryAbi, NativeStop> {
         let binding = self
@@ -352,32 +352,20 @@ impl CheckProduct {
             })?;
         binding.as_ref().map_err(|e| NativeStop::Entry(e.clone()))
     }
-    fn process_entry(
-        &self,
+    fn process_entry<'a>(
+        &'a self,
         entry: &DefPath,
-        options: &NativeOptions,
-        sources: &hirsel_core_ir::source::SourceMap,
-    ) -> Result<String, NativeStop> {
-        let binding = self.entry_binding(entry)?;
-        let EntryAbi {
-            recipe,
-            exit_offset,
-            parameters,
-            cleanup,
-        } = binding;
+        options: &'a NativeOptions,
+        sources: &'a hirsel_core_ir::source::SourceMap,
+    ) -> Result<crate::native_entry::Plan<'a>, NativeStop> {
         let instance = InstanceKey {
             definition: entry.clone(),
             types: vec![],
             dictionaries: vec![],
         };
-        entry_source(
-            &hirsel_cranelift::core::symbol(&instance),
-            recipe,
-            *exit_offset,
-            parameters,
-            cleanup
-                .as_ref()
-                .map(|m| hirsel_cranelift::core::symbol(m.instances.last().unwrap())),
+        crate::native_entry::Plan::new(
+            hirsel_cranelift::core::symbol(&instance),
+            self.entry_binding(entry)?,
             options,
             sources,
         )
@@ -387,15 +375,15 @@ impl CheckProduct {
 // It is cached with the check, so native builds never resolve/type-check again.
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct EntryAbi {
-    recipe: Recipe,
-    exit_offset: Option<u64>,
-    parameters: Vec<EntryParameter>,
-    cleanup: Option<Module>,
+    pub(super) recipe: Recipe,
+    pub(super) exit_offset: Option<u64>,
+    pub(super) parameters: Vec<EntryParameter>,
+    pub(super) cleanup: Option<Module>,
 }
 #[derive(Clone, Serialize, Deserialize)]
-struct EntryParameter {
-    ty: String,
-    name: String,
+pub(super) struct EntryParameter {
+    pub(super) ty: String,
+    pub(super) name: String,
 }
 pub(crate) type EntryBinding = (DefPath, Result<EntryAbi, String>);
 pub(crate) fn bind_entry(
@@ -487,183 +475,6 @@ pub fn grant_kind(name: &str) -> Option<u8> {
     .map(|kind| kind as u8)
 }
 
-fn entry_source(
-    symbol: &str,
-    recipe: &Recipe,
-    exit_offset: Option<u64>,
-    parameters: &[EntryParameter],
-    cleanup: Option<String>,
-    options: &NativeOptions,
-    sources: &hirsel_core_ir::source::SourceMap,
-) -> Result<String, NativeStop> {
-    let Layout::Fixed(layout) = &recipe.layout else {
-        return Err(NativeStop::Entry("Result needs fixed layout".into()));
-    };
-    let tag = layout.tag.expect("checked Result is a variant");
-    let case = c_case(&tag, "word");
-    let error = if let Some(offset) = exit_offset {
-        format!("out->kind=2; out->exit=result[{}];", offset)
-    } else {
-        "out->kind=1;".into()
-    };
-    let mut ordinals = [0usize; 11];
-    let mut requirements = Vec::new();
-    for parameter in parameters {
-        let kind = parameter
-            .ty
-            .strip_prefix("core@1/core/")
-            .and_then(grant_kind)
-            .ok_or_else(|| {
-                NativeStop::Entry(format!("unsupported provider parameter {}", parameter.ty))
-            })?;
-        requirements.push(format!("{{{kind},{}}}", ordinals[kind as usize]));
-        ordinals[kind as usize] += 1;
-    }
-    let requirements_len = requirements.len();
-    let requirements = if requirements.is_empty() {
-        "{0,0}".into()
-    } else {
-        requirements.join(",")
-    };
-    let directories_len = options.directories.len();
-    let directories = if options.directories.is_empty() {
-        "{0,0}".into()
-    } else {
-        options
-            .directories
-            .iter()
-            .map(|path| c_view(path))
-            .collect::<Vec<_>>()
-            .join(",")
-    };
-    let parameter_names = if parameters.is_empty() {
-        "{0,0}".into()
-    } else {
-        parameters
-            .iter()
-            .map(|p| c_view(&p.name))
-            .collect::<Vec<_>>()
-            .join(",")
-    };
-    let parameter_types = ", uint64_t".repeat(parameters.len() + 1);
-    let grants = (0..parameters.len())
-        .map(|i| format!(",cfg->grants[{i}]"))
-        .collect::<String>();
-    let cleanup_declaration = cleanup
-        .as_ref()
-        .map(|name| format!("extern uint8_t {name}(HirselCoreContext *, void *, uint64_t);"))
-        .unwrap_or_default();
-    let cleanup_call = cleanup
-        .as_ref()
-        .map(|name| format!("if({name}(ctx,result,0)) return 1;"))
-        .unwrap_or_default();
-    let limit = options.root_limit;
-    let grant_mask = options.grant_mask;
-    let source_table = crate::native_sources::entry_table(sources);
-    let observation_label = if options.logical_charge_report.is_some() {
-        r#"__attribute__((used)) static const char hirsel_observation_build[] = "Hirsel observation build: timings are not performance samples";"#
-    } else {
-        ""
-    };
-    let charge_report = options.logical_charge_report.as_ref().map_or_else(String::new, |path| {
-        use std::os::unix::ffi::OsStrExt;
-        let literal = path.as_os_str().as_bytes().iter().map(|b| format!("\\{b:03o}")).collect::<String>();
-        format!(r#"FILE *report=fopen("{literal}","w");
-    if(!report) {{ perror("logical charge report"); return 2; }}
-    size_t report_len=0;
-    const uint8_t *report_data=hirsel_core_memory_report(&report_len);
-    if(fwrite(report_data,1,report_len,report)!=report_len) {{ perror("logical charge report"); fclose(report); return 2; }}
-    if(fclose(report)) {{ perror("logical charge report"); return 2; }}"#)
-    });
-    Ok(format!(
-        r#"#include "hirsel_core_rt_host.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-{observation_label}
-extern uint8_t {symbol}(HirselCoreContext *, void *{parameter_types});
-{cleanup_declaration}
-static uint8_t entry(HirselCoreContext *ctx, const HirselCoreProcessConfig *cfg, HirselCoreMainResult *out) {{
-    (void)cfg;
-    _Alignas({align}) uint8_t result[{size}];
-    uint8_t failed={symbol}(ctx,result{grants},0);
-    if(failed) return failed;
-    uint64_t word=0; memcpy(&word,result+{at},{width});
-    if(({case})==1) {{ {error} }}
-    {cleanup_call}
-    return 0;
-}}
-static const HirselCoreEntryRequirement parameters[] = {{{requirements}}};
-static const HirselCoreView parameter_names[] = {{{parameter_names}}};
-static const HirselCoreView directories[] = {{{directories}}};
-{source_table}
-int main(int argc, char **argv) {{
-    size_t n=(size_t)(argc-1);
-    HirselCoreView *args=calloc(n ? n : 1,sizeof(*args));
-    if(!args) {{ fputs("run stop: HostMemory\n",stderr); return 102; }}
-    for(size_t i=0;i<n;i++) {{ args[i].data=(const uint8_t *)argv[i+1]; args[i].len=strlen(argv[i+1]); }}
-    HirselCoreOsConfig input={{0}};
-    input.root_limit=UINT64_C({limit}); input.args=args; input.args_len=n;
-    input.directories=directories; input.directories_len={directories_len};
-    input.grant_mask=UINT64_C({grant_mask}); input.stdout_fd=1; input.stderr_fd=2;
-    input.parameters=parameters; input.parameters_len={requirements_len};
-    uint8_t status=hirsel_core_os_run_with_sources(&input,parameter_names,&hirsel_sources,entry);
-    free(args);
-    {charge_report}
-    return status;
-}}
-"#,
-        align = layout.align,
-        size = layout.size.max(1),
-        at = tag.offset,
-        width = tag.width,
-    ))
-}
-/// The C expression for the case a variant's tag word `word` holds (read_case).
-fn c_case(tag: &hirsel_core_layout::Tag, word: &str) -> String {
-    struct C(Vec<String>);
-    impl hirsel_core_layout::CaseOps for C {
-        type V = usize;
-        fn constant(&mut self, n: u64) -> usize {
-            self.push(format!("UINT64_C({n})"))
-        }
-        fn add(&mut self, a: usize, b: usize) -> usize {
-            self.push(format!("({}+{})", self.0[a], self.0[b]))
-        }
-        fn sub(&mut self, a: usize, b: usize) -> usize {
-            self.push(format!("({}-{})", self.0[a], self.0[b]))
-        }
-        fn and(&mut self, a: usize, b: usize) -> usize {
-            self.push(format!("({}&{})", self.0[a], self.0[b]))
-        }
-        fn below(&mut self, a: usize, b: usize) -> usize {
-            self.push(format!("(uint64_t)({}<{})", self.0[a], self.0[b]))
-        }
-        fn select(&mut self, c: usize, yes: usize, no: usize) -> usize {
-            self.push(format!("({}?{}:{})", self.0[c], self.0[yes], self.0[no]))
-        }
-    }
-    impl C {
-        fn push(&mut self, e: String) -> usize {
-            self.0.push(e);
-            self.0.len() - 1
-        }
-    }
-    let mut c = C(vec![word.to_string()]);
-    let v = hirsel_core_layout::read_case(tag, &mut c, 0);
-    c.0.swap_remove(v)
-}
-pub(super) fn c_view(text: &str) -> String {
-    // Fixed-width byte escapes preserve UTF-8 and never form C source tokens.
-    let mut literal = String::with_capacity(text.len() * 4);
-    for &byte in text.as_bytes() {
-        literal.push('\\');
-        literal.push((b'0' + (byte >> 6)) as char);
-        literal.push((b'0' + ((byte >> 3) & 7)) as char);
-        literal.push((b'0' + (byte & 7)) as char);
-    }
-    format!("{{(const uint8_t *)\"{literal}\",{}}}", text.len())
-}
 fn command(command: &mut Command) -> Result<Vec<u8>, NativeStop> {
     let result = command
         .output()
@@ -678,7 +489,7 @@ fn command(command: &mut Command) -> Result<Vec<u8>, NativeStop> {
     Ok(result.stdout)
 }
 fn link(
-    source: &str,
+    entry_plan: &crate::native_entry::Plan<'_>,
     objects: &[ObjectProduct],
     options: &NativeOptions,
     sources: &hirsel_core_ir::source::SourceMap,
@@ -702,7 +513,7 @@ fn link(
         &(
             compiler_identity()?,
             &tools,
-            source,
+            entry_plan,
             &identities,
             &options.target,
             options.backend,
@@ -722,19 +533,14 @@ fn link(
         (identity, bytes, false)
     } else {
         let temp = tempfile::tempdir_in(&options.store)?;
-        let entry = temp.path().join("entry.c");
-        std::fs::write(&entry, source)?;
+        let entry = temp.path().join("entry.o");
+        let bytes = entry_plan
+            .emit(&options.target)
+            .map_err(|error| NativeStop::Link(format!("entry object: {error}")))?;
+        std::fs::write(&entry, bytes)?;
         let output = temp.path().join("program");
         let mut cc = Command::new(&tools.0.path);
-        cc.args([
-            "-std=c11",
-            "-fstack-clash-protection",
-            "-no-pie",
-            if options.optimize { "-O3" } else { "-O0" },
-            "-I",
-        ])
-        .arg(&options.include)
-        .arg(&entry);
+        cc.arg("-no-pie").arg(&entry);
         if !options.debug_lines {
             // The independent runtime archive may carry its own compiler DWARF.
             // Keep unwind data, but do not retain line tables in an off build.

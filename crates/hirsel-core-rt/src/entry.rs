@@ -443,3 +443,7 @@ unsafe fn run_with_sources_and_probe(
 #[cfg(test)]
 #[path = "startup_host_tests.rs"]
 mod startup_host_tests;
+
+#[cfg(test)]
+#[path = "entry_layout_tests.rs"]
+mod layout_tests;

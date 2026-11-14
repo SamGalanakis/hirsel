@@ -721,6 +721,10 @@ name = "hirsel-core-driver"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "cranelift-codegen",
+ "cranelift-frontend",
+ "cranelift-module",
+ "cranelift-object",
  "gimli",
  "hirsel-core-diag",
  "hirsel-core-front",

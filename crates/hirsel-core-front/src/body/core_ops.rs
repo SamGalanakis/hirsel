@@ -66,7 +66,7 @@ operations! {
     ("log", "new", Lane::Runtime(Kernel::LogNew), "B", "core-ops-914", false),
     ("log", "append", Lane::Runtime(Kernel::LogAppend), "B", "core-ops-914", false),
     ("log", "finish", Lane::Runtime(Kernel::LogFinish), "B", "core-ops-914", false),
-    ("code", "describe", Lane::PendingCode, "A", "core-check-callables-913", false),
+    ("code", "describe", Lane::Runtime(Kernel::CodeDescribe), "A", "core-check-callables-913", false),
     ("code", "identity", Lane::Runtime(Kernel::CodeIdentity), "A", "core-ops-914", false),
     ("code", "callable", Lane::Runtime(Kernel::CodeCallable), "A", "core-ops-914", false),
     ("host", "rename", Lane::Runtime(Kernel::Host(HostOp::Rename)), "B", "core-ops-914", false),
@@ -374,31 +374,30 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
                 Some(None)
             }
-            ("code", "describe") => {
-                let argument = args.get(1).copied().unwrap_or(n);
-                let valid = self.p.target(self.at, argument).is_some_and(|target| {
-                    let Target::Definition(id) = target else {
-                        return false;
-                    };
-                    let Some(Def::Fn(index)) = self.p.by_definition[id.0 as usize] else {
-                        return false;
-                    };
-                    let function = &self.p.fns[index as usize];
-                    function.generics.iter().all(|generic| generic.region)
-                });
-                if !valid {
-                    self.refuse(
-                        "PROG-9",
-                        argument,
-                        "code.describe requires a top-level non-generic function name",
-                    );
-                } else {
-                    self.gap(n, "code descriptor lowering is not built");
-                }
-                Some(None)
-            }
             _ => None,
         }
+    }
+
+    fn code_describe_target_valid(&mut self, n: NodeId) -> bool {
+        let argument = self.kids(n).get(1).copied().unwrap_or(n);
+        let valid = self.p.target(self.at, argument).is_some_and(|target| {
+            let Target::Definition(id) = target else {
+                return false;
+            };
+            let Some(Def::Fn(index)) = self.p.by_definition[id.0 as usize] else {
+                return false;
+            };
+            let function = &self.p.fns[index as usize];
+            function.generics.iter().all(|generic| generic.region)
+        });
+        if !valid {
+            self.refuse(
+                "PROG-9",
+                argument,
+                "code.describe requires a top-level non-generic function name",
+            );
+        }
+        valid
     }
 
     /// Lower `core.isolate`'s value boundary (FORM #101).  The callback's failure
@@ -1701,8 +1700,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         &mut self,
         value: ValueId,
         result: TyId,
-        _n: NodeId,
+        n: NodeId,
     ) -> Option<ValueId> {
+        if !self.code_describe_target_valid(n) {
+            return None;
+        }
         self.temp(result, Some(value));
         Some(value)
     }
@@ -1716,7 +1718,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let function = self.function_values.get(&static_fn).copied()?;
         let instance = self.e.module.functions[function.index()].instance;
         let path = &self.e.module.instances[instance.index()].definition;
-        let f = self.p.fns.iter().position(|fd| &fd.path == path)?;
+        // Function items pass through a callable adapter before reaching this
+        // kernel.  Its `$callable[...]` definition is an ABI row, not the
+        // source item whose PROG-9 identity is published.
+        let source_name = path
+            .0
+            .name
+            .split_once("$callable")
+            .map_or(path.0.name.as_str(), |(name, _)| name);
+        let f = self.p.fns.iter().position(|fd| {
+            fd.path.0.package == path.0.package
+                && fd.path.0.modules == path.0.modules
+                && fd.path.0.name == source_name
+        })?;
         let fd = &self.p.fns[f];
         let mut text = format!(
             "{}@{}/{}",

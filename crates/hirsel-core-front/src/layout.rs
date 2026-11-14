@@ -572,10 +572,14 @@ pub(crate) fn carried(
         TyKind::Adt(d, _)
             if matches!(
                 decls[d.index()].role,
-                Some(Role::Region | Role::Writer | Role::Dest)
+                Some(Role::Region | Role::Writer | Role::Dest | Role::StaticFn)
             ) =>
         {
-            Carried::Value(Ty::Ptr)
+            if decls[d.index()].role == Some(Role::StaticFn) {
+                Carried::Value(Ty::Scalar(Scalar::U64))
+            } else {
+                Carried::Value(Ty::Ptr)
+            }
         }
         // A capability or `Args` is a provider handle, plain and never cleaned by the
         // program (FORM e68de117); `Unique` and `Site` are one plain word (core.md

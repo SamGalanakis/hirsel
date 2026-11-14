@@ -3513,6 +3513,60 @@ fn isolate_and_code_describe_rules() {
 }
 
 #[test]
+fn code_describe_identity_static_bytes() {
+    let source = r#"
+fn named(a: u64) -> u64 { a }
+fn other(b: u64) -> u64 { b }
+fn run() -> u64 {
+    let _ = code.identity(code.describe(named));
+    let _ = code.identity(code.describe(other));
+    0
+}
+pub fn main() -> Result[(), Exit] { Ok(()) }
+"#;
+    let (index, modules) = program_inputs(source);
+    let program = Program::declare(&index, &modules);
+    assert!(program.refusals.is_empty() && program.gaps.is_empty());
+    let mut emitter = Emitter::new();
+    let mut refusals = vec![];
+    let mut gaps = vec![];
+    for (f, fd) in program.fns.iter().enumerate() {
+        if fd.body.is_none() || !fd.path.package_is("app", "1") {
+            continue;
+        }
+        let check = program.check_lower(f, &mut emitter);
+        refusals.extend(check.refusals);
+        gaps.extend(check.gaps);
+        emitter.seal();
+    }
+    assert!(
+        refusals.is_empty() && gaps.is_empty(),
+        "{refusals:?} {gaps:?}"
+    );
+    let identities: Vec<String> = emitter
+        .module
+        .statics
+        .iter()
+        .filter_map(|s| String::from_utf8(s.bytes.get(1..)?.to_vec()).ok())
+        .collect();
+    assert!(
+        identities
+            .iter()
+            .any(|s| s == "app@1/main/named(view u64) -> u64")
+    );
+    assert!(
+        identities
+            .iter()
+            .any(|s| s == "app@1/main/other(view u64) -> u64")
+    );
+    assert!(
+        identities
+            .iter()
+            .all(|s| !s.contains(" a: ") && !s.contains(" b: "))
+    );
+}
+
+#[test]
 fn isolate_lowering_rules() {
     let failures = run_case(&root().join("cases/body/callable-isolate-lowering.hirsel"));
     assert!(failures.is_empty(), "{failures:?}");

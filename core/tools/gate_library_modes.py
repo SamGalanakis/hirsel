@@ -125,9 +125,12 @@ def main():
                     self.assertTrue(json.loads(result.stdout)['native']['linked'])
                     ran = subprocess.run([str(work / 'program')], capture_output=True)
                     self.assertEqual((ran.returncode, ran.stdout, ran.stderr), (0, b'', b''))
-                commands = [json.loads(line) for line in calls.read_text().splitlines()]
+                # Direct linking invokes the pinned link editor itself.  The
+                # configured cc is only a compatibility input for recipe
+                # capture; it must not be called for either executable link.
+                commands = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
                 links = [args for args in commands if any(Path(a).name == 'entry.o' for a in args)]
-                self.assertEqual(len(links), 2)
+                self.assertEqual(links, [])
 
         def test_env_and_registered_products_work_away_from_the_checkout(self):
             runtime = Path(os.environ['HIRSEL_CORE_RT_ARCHIVE']).resolve()

@@ -132,12 +132,13 @@ pub(crate) fn recapture_link_recipe(cc: &Path, target: &str) -> io::Result<LinkR
 }
 
 fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkRecipe> {
-    let root = cc
+    let mut driver = cc.to_owned();
+    let mut root = driver
         .parent()
         .and_then(Path::parent)
         .ok_or_else(|| io::Error::other("link driver has no toolchain root"))?;
-    let directory = root.join(".hirsel-link-recipes");
-    let path = directory.join(format!("{target}.json"));
+    let mut directory = root.join(".hirsel-link-recipes");
+    let mut path = directory.join(format!("{target}.json"));
     if !force
         && let Ok(bytes) = std::fs::read(&path)
         && let Ok(recipe) = serde_json::from_slice::<LinkRecipe>(&bytes)
@@ -147,45 +148,82 @@ fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkR
     {
         return Ok(recipe);
     }
-    let source = directory.join("recipe.c");
     std::fs::create_dir_all(&directory)?;
+    let source = directory.join("recipe.c");
     std::fs::write(&source, "int main(void) { return 0; }\n")?;
-    let output = Command::new(cc)
-        .args([
-            "-###",
-            &format!("--target={target}"),
-            "-fuse-ld=lld",
-            "-pie",
-        ])
-        .arg(&source)
-        .arg("-o")
-        .arg(directory.join("recipe"))
-        .output()?;
+    let capture = |driver: &Path, source: &Path, output: &Path| {
+        let mut command = Command::new(driver);
+        command.args(["-###", "-fuse-ld=lld", "-pie"]);
+        if driver
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.contains("clang"))
+        {
+            command.arg(format!("--target={target}"));
+        }
+        command.arg(source).arg("-o").arg(output).output()
+    };
+    let mut output = capture(&driver, &source, &directory.join("recipe"))?;
+    if !output.status.success()
+        && let Some(prefix) = std::env::var_os("LLVM_SYS_231_PREFIX")
+    {
+        let candidate = PathBuf::from(prefix).join("bin/clang");
+        if candidate.is_file() && candidate != driver {
+            driver = candidate;
+            root = driver
+                .parent()
+                .and_then(Path::parent)
+                .ok_or_else(|| io::Error::other("fallback clang has no toolchain root"))?;
+            directory = root.join(".hirsel-link-recipes");
+            path = directory.join(format!("{target}.json"));
+            std::fs::create_dir_all(&directory)?;
+            let fallback_source = directory.join("recipe.c");
+            std::fs::write(&fallback_source, "int main(void) { return 0; }\n")?;
+            output = capture(&driver, &fallback_source, &directory.join("recipe"))?;
+            let _ = std::fs::remove_file(fallback_source);
+        }
+    }
     let _ = std::fs::remove_file(&source);
     if !output.status.success() {
         return Err(io::Error::other(format!(
             "link recipe capture failed through {}: {}",
-            cc.display(),
+            driver.display(),
             String::from_utf8_lossy(&output.stderr)
         )));
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
     let line = stderr
         .lines()
-        .filter(|line| line.contains("ld") && line.contains("-pie"))
+        .filter(|line| line.contains("ld.lld") || line.contains("collect2"))
         .last()
         .ok_or_else(|| io::Error::other("link recipe capture emitted no link editor argv"))?;
     let mut argv = shell_words(line)?;
-    if argv.first().is_some_and(|arg| arg.contains("collect2")) {
-        return Err(io::Error::other(
-            "link recipe capture did not expose a direct lld argv",
-        ));
-    }
-    let linker = PathBuf::from(argv.remove(0));
-    let linker = if linker.is_file() {
-        linker
-    } else {
+    let linker = if argv.first().is_some_and(|arg| arg.contains("collect2")) {
+        argv.remove(0);
+        let mut filtered = Vec::with_capacity(argv.len());
+        let mut skip = false;
+        for arg in argv {
+            if skip {
+                skip = false;
+                continue;
+            }
+            if arg == "-plugin" {
+                skip = true;
+            } else if arg.starts_with("-plugin-opt=") || arg == "-fuse-ld=lld" {
+                continue;
+            } else {
+                filtered.push(arg);
+            }
+        }
+        argv = filtered;
         link_tools(cc)?.1.path
+    } else {
+        let linker = PathBuf::from(argv.remove(0));
+        if linker.is_file() {
+            linker
+        } else {
+            link_tools(cc)?.1.path
+        }
     };
     let mut args = Vec::with_capacity(argv.len() + 1);
     let mut marker = false;
@@ -239,7 +277,16 @@ fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkR
 
 fn recipe_files(linker: &Path, args: &[String]) -> io::Result<Vec<(PathBuf, ContentHash)>> {
     let mut paths = vec![linker.to_owned()];
+    let mut skip_dynamic_linker = false;
     for arg in args {
+        if skip_dynamic_linker {
+            skip_dynamic_linker = false;
+            continue;
+        }
+        if arg == "-dynamic-linker" {
+            skip_dynamic_linker = true;
+            continue;
+        }
         if arg != INPUT_MARKER && !arg.starts_with('-') && arg.contains('/') {
             paths.push(PathBuf::from(arg));
         }
@@ -291,7 +338,12 @@ fn recipe_inputs_match(recipe: &LinkRecipe) -> io::Result<bool> {
 pub(crate) fn missing_recipe_inputs(recipe: &LinkRecipe) -> Vec<PathBuf> {
     let mut missing = Vec::new();
     let mut expects_path = false;
+    let mut skips_path = false;
     for arg in &recipe.args {
+        if skips_path {
+            skips_path = false;
+            continue;
+        }
         if expects_path {
             if !Path::new(arg).exists() {
                 missing.push(PathBuf::from(arg));
@@ -299,7 +351,12 @@ pub(crate) fn missing_recipe_inputs(recipe: &LinkRecipe) -> Vec<PathBuf> {
             expects_path = false;
             continue;
         }
-        if arg == "-dynamic-linker" || arg == "--sysroot" {
+        if arg == "-dynamic-linker" {
+            // This is the target's runtime interpreter, not a host-side link
+            // input; it is intentionally allowed to be absent on a cross
+            // linker host.
+            skips_path = true;
+        } else if arg == "--sysroot" {
             expects_path = true;
         } else if let Some(path) = arg.strip_prefix("--sysroot=") {
             if !path.is_empty() && !Path::new(path).exists() {

@@ -235,9 +235,7 @@ fn import_type(
     seen.insert(root, row);
     module.types.push(shape.clone());
     let mut shape = shape.clone();
-    map_fields(&mut shape, &mut |id| {
-        TypeRef(import_type(module, owner, id, seen).0)
-    });
+    shape.map_refs(&mut |id| TypeRef(import_type(module, owner, id, seen).0));
     shape.finalizer = shape
         .finalizer
         .map(|f| FuncRef(import_function(module, owner, FuncId(f.0)).0));
@@ -278,46 +276,6 @@ fn import_function(module: &mut Module, owner: &Module, f: FuncId) -> FuncId {
     FuncId(module.functions.len() as u32 - 1)
 }
 
-fn map_field(ty: &mut FieldTy, f: &mut impl FnMut(TypeRef) -> TypeRef) {
-    match ty {
-        FieldTy::Inline(id)
-        | FieldTy::Box(id)
-        | FieldTy::Rc(id)
-        | FieldTy::Arc(id)
-        | FieldTy::Stable(id)
-        | FieldTy::Link(id) => *id = f(*id),
-        FieldTy::Seq(ty)
-        | FieldTy::Array(ty, _)
-        | FieldTy::View(ty)
-        | FieldTy::Locator(ty)
-        | FieldTy::FixedSpan(ty)
-        | FieldTy::SeqSpan(ty)
-        | FieldTy::IndexedSpan(ty) => map_field(ty, f),
-        FieldTy::Map(k, v) => {
-            map_field(k, f);
-            map_field(v, f);
-        }
-        _ => {}
-    }
-}
-
-fn map_fields(shape: &mut Shape, f: &mut impl FnMut(TypeRef) -> TypeRef) {
-    match &mut shape.body {
-        ShapeBody::Record(fields) => {
-            for x in fields {
-                map_field(&mut x.ty, f);
-            }
-        }
-        ShapeBody::Variant(cases) => {
-            for c in cases {
-                for x in &mut c.fields {
-                    map_field(&mut x.ty, f);
-                }
-            }
-        }
-    }
-}
-
 struct Substitution<'a> {
     module: &'a mut Module,
     parameters: &'a [Option<TypeId>],
@@ -354,7 +312,18 @@ impl Substitution<'_> {
         let row = TypeId(self.module.types.len() as u32);
         self.types.insert(old, row);
         self.module.types.push(shape.clone());
-        map_fields(&mut shape, &mut |id| TypeRef(self.ty(TypeId(id.0)).0));
+        shape.held = shape.held.map(|held| self.field(&held, false));
+        self.module.types[row.index()].held = shape.held.clone();
+        let compact = matches!(shape.repr, hirsel_core_layout::Repr::Compact(_));
+        let mut fields = |fields: &mut Vec<hirsel_core_layout::Field>, s: &mut Self| {
+            for x in fields {
+                x.ty = s.field(&x.ty, compact);
+            }
+        };
+        match &mut shape.body {
+            ShapeBody::Record(xs) => fields(xs, self),
+            ShapeBody::Variant(cases) => cases.iter_mut().for_each(|c| fields(&mut c.fields, self)),
+        }
         // A generic row's finalizer and clone body are the instances at the
         // substituted arguments.
         shape.finalizer = shape
@@ -364,6 +333,42 @@ impl Substitution<'_> {
         self.module.types[row.index()] = shape;
         crate::layout::word_carriage(&mut self.module.types, row.index());
         row
+    }
+    /// The template field `ty` at the instance's arguments, written as a source row
+    /// writes it (FORM #109): a row held inline whose type a holder writes otherwise
+    /// (a parameter's scalar, list, box, stable value, ..) becomes its `held` field,
+    /// without the locator in a compact context (`compact`: a compact row's own
+    /// fields, or a span's elements), so one name is one closure.
+    fn field(&mut self, ty: &FieldTy, compact: bool) -> FieldTy {
+        let row = |id: &TypeRef, s: &mut Self| TypeRef(s.ty(TypeId(id.0)).0);
+        match ty {
+            FieldTy::Inline(id) => {
+                let id = row(id, self);
+                match self.module.types[id.index()].held.clone() {
+                    Some(FieldTy::Locator(x)) if compact => *x,
+                    Some(FieldTy::Stable(x)) if compact => FieldTy::Inline(x),
+                    Some(held) => held,
+                    None => FieldTy::Inline(id),
+                }
+            }
+            FieldTy::Box(id) => FieldTy::Box(row(id, self)),
+            FieldTy::Rc(id) => FieldTy::Rc(row(id, self)),
+            FieldTy::Arc(id) => FieldTy::Arc(row(id, self)),
+            FieldTy::Stable(id) => FieldTy::Stable(row(id, self)),
+            FieldTy::Link(id) => FieldTy::Link(row(id, self)),
+            FieldTy::Seq(x) => FieldTy::Seq(Box::new(self.field(x, false))),
+            FieldTy::Array(x, n) => FieldTy::Array(Box::new(self.field(x, false)), *n),
+            FieldTy::Map(k, v) => FieldTy::Map(
+                Box::new(self.field(k, false)),
+                Box::new(self.field(v, false)),
+            ),
+            FieldTy::View(x) => crate::layout::view_field(self.field(x, compact)),
+            FieldTy::Locator(x) => FieldTy::Locator(Box::new(self.field(x, compact))),
+            FieldTy::FixedSpan(x) => FieldTy::FixedSpan(Box::new(self.field(x, true))),
+            FieldTy::SeqSpan(x) => FieldTy::SeqSpan(Box::new(self.field(x, true))),
+            FieldTy::IndexedSpan(x) => FieldTy::IndexedSpan(Box::new(self.field(x, true))),
+            other => other.clone(),
+        }
     }
     fn place(&mut self, ty: &mut PlaceTy) {
         if let PlaceTy::Declared(id) = ty {
@@ -601,7 +606,7 @@ fn fill(
         // The alloc names its owning edge; its cleanup class is derived from the
         // instance's recipes wherever it is needed, so only the edge is remapped.
         if let AllocKind::Own { edge } = kind {
-            map_field(edge, &mut |t| TypeRef(s.ty(TypeId(t.0)).0));
+            *edge = s.field(edge, false);
         }
         let Some(&ty) = allocations.get(result) else {
             continue;
@@ -934,6 +939,7 @@ mod tests {
             finalizer: None,
             clone: None,
             grant: 0,
+            held: None,
         };
         // This template constant is the producer's size query, independent of any
         // source-level sizeof feature. The record's logical 9 bytes pad to 16.
@@ -971,6 +977,7 @@ mod tests {
             finalizer: None,
             clone: None,
             grant: 0,
+            held: None,
         };
         template.copies = vec![CopySize {
             value,

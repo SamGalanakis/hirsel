@@ -239,6 +239,37 @@ pub enum FieldTy {
     Locator(Box<FieldTy>),
 }
 
+impl FieldTy {
+    /// Rewrite every row this field names, in field order.
+    pub fn map_refs(&mut self, f: &mut impl FnMut(TypeRef) -> TypeRef) {
+        match self {
+            FieldTy::Inline(id)
+            | FieldTy::Box(id)
+            | FieldTy::Rc(id)
+            | FieldTy::Arc(id)
+            | FieldTy::Stable(id)
+            | FieldTy::Link(id) => *id = f(*id),
+            FieldTy::Seq(ty)
+            | FieldTy::Array(ty, _)
+            | FieldTy::View(ty)
+            | FieldTy::Locator(ty)
+            | FieldTy::FixedSpan(ty)
+            | FieldTy::SeqSpan(ty)
+            | FieldTy::IndexedSpan(ty) => ty.map_refs(f),
+            FieldTy::Map(k, v) => {
+                k.map_refs(f);
+                v.map_refs(f);
+            }
+            FieldTy::Scalar(_)
+            | FieldTy::Fn
+            | FieldTy::OwnFn
+            | FieldTy::Borrow
+            | FieldTy::Handle(_)
+            | FieldTy::Text => {}
+        }
+    }
+}
+
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Field {
     pub name: String,
@@ -276,9 +307,28 @@ pub struct Shape {
     pub clone: Option<FuncRef>,
     /// `grant bytes n` (MEM-27).
     pub grant: u64,
+    /// How a holder writes a field of this row's type when that is not
+    /// `Inline(this row)` (`Scalar` for a scalar, `Seq` for a list, `Box` for a box,
+    /// `Stable` for a stable value, ..): the one encoding a substituted generic row
+    /// writes at its arguments, so one name is one closure (FORM #109). A compact
+    /// context reads it without its `Locator`, and a `Stable` as `Inline`.
+    pub held: Option<FieldTy>,
 }
 
 impl Shape {
+    /// Rewrite every row the body names, in field order, then the rows `held` names.
+    pub fn map_refs(&mut self, f: &mut impl FnMut(TypeRef) -> TypeRef) {
+        match &mut self.body {
+            Body::Record(fields) => fields.iter_mut().for_each(|x| x.ty.map_refs(f)),
+            Body::Variant(cases) => cases
+                .iter_mut()
+                .flat_map(|c| &mut c.fields)
+                .for_each(|x| x.ty.map_refs(f)),
+        }
+        if let Some(held) = &mut self.held {
+            held.map_refs(f);
+        }
+    }
     /// The fields of case `case`, or of the record when `case` is `None`.
     pub fn fields(&self, case: Option<u32>) -> Option<&[Field]> {
         match (&self.body, case) {

@@ -18,6 +18,7 @@ fn record(name: &str, repr: Repr, fields: Vec<Field>) -> Shape {
         finalizer: None,
         clone: None,
         grant: 0,
+        held: None,
     }
 }
 fn variant(name: &str, repr: Repr, cases: Vec<(&str, Vec<Field>)>) -> Shape {
@@ -37,6 +38,7 @@ fn variant(name: &str, repr: Repr, cases: Vec<(&str, Vec<Field>)>) -> Shape {
         finalizer: None,
         clone: None,
         grant: 0,
+        held: None,
     }
 }
 fn fixed(r: &Recipe) -> &Fixed {
@@ -281,6 +283,14 @@ fn plain_elements_are_packed_and_only_packed_types_are_elements() {
         pt.clone(),
     );
     refused(FieldTy::Inline(TypeRef(0)), pt.clone());
+    // A scalar's own row `{0: u64}` held inline is a plain record too: the front and a
+    // generic instance both write a direct scalar field as `Scalar` (FORM #109), so a
+    // relaxation of MEM-9 taking a one-scalar record as its scalar must decide
+    // whether that row lays out as the scalar before it can change a layout.
+    refused(
+        FieldTy::Inline(TypeRef(0)),
+        record("u64", Repr::Own, vec![field("0", u(Scalar::U64))]),
+    );
     let blob = record(
         "C",
         Repr::Compact(Width::U16),

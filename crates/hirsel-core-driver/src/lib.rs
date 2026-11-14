@@ -27,7 +27,7 @@ pub use test_run::{Runner, TestOutcome};
 mod meter;
 pub use diagnostics::{Diagnostic, IncompleteDiagnostic, ResourceDiagnostic, SourceSite};
 pub use image::{CoreImage, LibraryInput};
-pub use instances::{InstanceStop, collect_instances};
+pub use instances::{InstanceStop, ShapeClosures, collect_instances};
 mod reuse;
 mod store;
 use bincode::Options;

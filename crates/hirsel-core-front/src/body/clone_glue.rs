@@ -1368,6 +1368,7 @@ mod kernel_clone_tests {
             finalizer,
             clone: None,
             grant: 0,
+            held: None,
         };
         let mut base = Module::default();
         base.types = vec![

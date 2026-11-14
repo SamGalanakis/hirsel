@@ -184,7 +184,7 @@ fn fields(fs: &[hirsel_core_layout::Field]) -> String {
     )
 }
 /// `own "Pair" { a: u64 }`, `own "u64" value u64 { 0: u64 }`, `own "()" nothing { }`,
-/// `resource "Temp" drop f3 grant 64 { .. }`,
+/// `resource "Temp" drop f3 grant 64 { .. }`, `own "u64" value u64 held u64 { 0: u64 }`,
 /// `compact u32 "Row" { .. }`, `own "Opt" | None { } | Some { v: u64 }`.
 fn shape(s: &Shape) -> String {
     use hirsel_core_layout::{Body as B, Repr, Width};
@@ -216,6 +216,9 @@ fn shape(s: &Shape) -> String {
     }
     if s.grant != 0 {
         out += &format!(" grant {}", s.grant);
+    }
+    if let Some(held) = &s.held {
+        out += &format!(" held {}", field_ty(held));
     }
     match &s.body {
         B::Record(fs) => out += &format!(" {}", fields(fs)),
@@ -1018,6 +1021,11 @@ impl<'a> Line<'a> {
             None
         };
         let grant = if self.eat("grant") { self.num()? } else { 0 };
+        let held = if self.eat("held") {
+            Some(self.field_ty()?)
+        } else {
+            None
+        };
         let body = if self.peek() == Some("|") {
             let mut cases = Vec::new();
             while self.eat("|") {
@@ -1039,6 +1047,7 @@ impl<'a> Line<'a> {
             finalizer,
             clone,
             grant,
+            held,
         })
     }
     fn value(&mut self) -> R<ValueId> {

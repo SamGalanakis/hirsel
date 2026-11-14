@@ -1939,3 +1939,136 @@ fn damaged_and_foreign_records_rebuild_the_fresh_publication() {
         );
     }
 }
+
+/// FORM #109: rows are reused across instance bodies by name, which is sound only if
+/// one name is one type. Before one canonical encoding a substituted `String` field
+/// was `Inline(String)` in one body and `Seq(u8)` in another, so a holder's layout
+/// came from whichever body published the name first. Every monomorphic definition
+/// of LangArena, std and the Core corpus (M1 programs, front cases) is a root.
+#[test]
+fn every_reached_shape_name_has_one_closure() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .unwrap();
+    let files = |dir: &Path, tests: bool| -> Vec<hirsel_core_resolve::ModuleSource> {
+        let mut paths = Vec::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(d) = pending.pop() {
+            for e in std::fs::read_dir(&d).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    pending.push(p);
+                } else if p.extension().is_some_and(|x| x == "hirsel") {
+                    paths.push(p);
+                }
+            }
+        }
+        paths.sort();
+        paths
+            .into_iter()
+            .filter_map(|p| {
+                let rel = p.strip_prefix(dir).unwrap().with_extension("");
+                let modules: Vec<String> = rel.iter().map(|m| m.to_string_lossy().into()).collect();
+                (tests || modules[0] != "tests").then_some(hirsel_core_resolve::ModuleSource {
+                    file: p,
+                    modules,
+                    signatures: dir.ends_with("core"),
+                })
+            })
+            .collect()
+    };
+    let core = PackageManifest {
+        package: package("core"),
+        sources: files(&root.join("core/core"), false),
+        dependencies: vec![],
+    };
+    let std = PackageManifest {
+        package: package("std"),
+        sources: files(&root.join("core/std"), false),
+        dependencies: vec![package("core")],
+    };
+    let mut m1: CorpusManifest = serde_json::from_slice(
+        &std::fs::read(root.join("core/programs/m1/manifest.json")).unwrap(),
+    )
+    .unwrap();
+    for s in m1.packages.iter_mut().flat_map(|p| &mut p.sources) {
+        s.file = root.join(&s.file);
+    }
+    let langarena = CorpusManifest {
+        core: package("core"),
+        packages: vec![
+            core,
+            std,
+            PackageManifest {
+                package: package("langarena"),
+                sources: files(&root.join("core/langarena"), true),
+                dependencies: vec![package("core"), package("std")],
+            },
+        ],
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut requests: Vec<(String, CheckRequest)> = [("langarena", langarena), ("m1", m1)]
+        .into_iter()
+        .map(|(name, inputs)| {
+            let store = dir.path().join(name);
+            (
+                name.to_string(),
+                CheckRequest {
+                    inputs,
+                    store,
+                    library: LibraryInput::Sources,
+                    entry: None,
+                },
+            )
+        })
+        .collect();
+    for (i, case) in files(&root.join("core/front/cases"), true)
+        .into_iter()
+        .enumerate()
+    {
+        let case_dir = dir.path().join(format!("case{i}"));
+        std::fs::create_dir_all(&case_dir).unwrap();
+        let source = std::fs::read_to_string(&case.file).unwrap();
+        requests.push((case.file.display().to_string(), request(&source, &case_dir)));
+    }
+    let mut built = 0;
+    for (name, request) in requests {
+        // Names are one type within a product; separate cases reuse `app/main/P`.
+        let mut closures = ShapeClosures::default();
+        let product = Driver::default()
+            .check(request, &mut Meter::new(false))
+            .unwrap();
+        let roots: Vec<_> = product
+            .definitions
+            .keys()
+            .filter(|d| {
+                product.demand_body(d).is_ok_and(|p| {
+                    p.check.refusals.is_empty()
+                        && p.incomplete.is_empty()
+                        && p.check.function.is_some()
+                        && p.check.template.is_none()
+                })
+            })
+            .map(|d| hirsel_core_ir::InstanceKey {
+                definition: d.clone(),
+                types: vec![],
+                dictionaries: vec![],
+            })
+            .collect();
+        for root in roots {
+            // A root whose reach includes an unfinished body is not a program.
+            match product.shape_closures([root], 1 << 20, &mut closures) {
+                Ok(()) => built += 1,
+                Err(InstanceStop::Incomplete(_) | InstanceStop::OutsideReached(_)) => {}
+                Err(stop) => panic!("{name}: {stop:?}"),
+            }
+        }
+        assert!(
+            closures.conflicts.is_empty(),
+            "{name}: {:?}",
+            closures.conflicts
+        );
+    }
+    eprintln!("roots built {built}");
+}

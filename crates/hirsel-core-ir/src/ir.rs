@@ -10,7 +10,8 @@
 
 use hirsel_core_ids::{ContentHash, DefPath};
 pub use hirsel_core_layout::{Carried, Scalar, Shape, Ty};
-use hirsel_core_layout::{Cleanup, FieldTy, Recipe, cleanup_class};
+use hirsel_core_layout::{Cleanup, FieldTy, FuncRef, Recipe, TypeRef, cleanup_class};
+use std::collections::HashMap;
 use std::marker::PhantomData;
 
 macro_rules! ids { ($($(#[$doc:meta])* $name:ident),* $(,)?) => {$(
@@ -1195,6 +1196,45 @@ impl Module {
             .unwrap_or_else(|| {
                 self.instances[self.functions[function.index()].instance.index()].digest()
             })
+    }
+}
+
+/// A row of [`Module::shape_closure`]: the shape with every row it names replaced by
+/// that row's position in the closure, and its finalizer and clone body by their
+/// instance keys.
+pub type ClosureRow = (Shape, [Option<InstanceKey>; 2]);
+
+impl Module {
+    /// The rows `root` reaches through its fields, in first-visit order, independent
+    /// of this table's numbering: two modules hold one type exactly when its closures
+    /// are equal. A row is reused by name across modules (first owner), so every row
+    /// of one name must have one closure.
+    pub fn shape_closure(&self, root: TypeRef) -> Vec<ClosureRow> {
+        let mut order = HashMap::<TypeRef, u32>::new();
+        let mut rows: Vec<Option<ClosureRow>> = vec![];
+        let mut pending = vec![root];
+        order.insert(root, 0);
+        rows.push(None);
+        while let Some(t) = pending.pop() {
+            let mut shape = self.types[t.index()].clone();
+            shape.map_refs(&mut |r| {
+                let next = order.len() as u32;
+                let i = *order.entry(r).or_insert_with(|| {
+                    rows.push(None);
+                    pending.push(r);
+                    next
+                });
+                TypeRef(i)
+            });
+            let key = |f: Option<FuncRef>| {
+                f.map(|f| self.instances[self.functions[f.0 as usize].instance.index()].clone())
+            };
+            let glue = [key(shape.finalizer.take()), key(shape.clone.take())];
+            rows[order[&t] as usize] = Some((shape, glue));
+        }
+        rows.into_iter()
+            .map(|r| r.expect("every visited row is filled"))
+            .collect()
     }
 }
 

@@ -76,7 +76,24 @@ impl CheckProduct {
         limit: usize,
         instances: &mut InstanceSet,
     ) -> Result<Vec<InstanceKey>, InstanceStop> {
-        self.instances_observed(roots, limit, instances, |_, _| {})
+        self.instances_observed(roots, limit, instances, None, |_, _| {})
+    }
+    /// Record the closure (`Module::shape_closure`) of every shape name reached from
+    /// `roots` into `closures`, which may span several calls and products.
+    pub fn shape_closures(
+        &self,
+        roots: impl IntoIterator<Item = InstanceKey>,
+        limit: usize,
+        closures: &mut ShapeClosures,
+    ) -> Result<(), InstanceStop> {
+        self.instances_observed(
+            roots,
+            limit,
+            &mut InstanceSet::default(),
+            Some(closures),
+            |_, _| {},
+        )
+        .map(drop)
     }
     /// Measure library loading and mechanical specialization without changing the
     /// native collection path. The ordinary path erases the no-op observer.
@@ -86,13 +103,14 @@ impl CheckProduct {
         limit: usize,
         observe: impl FnMut(&InstanceKey, &'static str),
     ) -> Result<Vec<InstanceKey>, InstanceStop> {
-        self.instances_observed(roots, limit, &mut InstanceSet::default(), observe)
+        self.instances_observed(roots, limit, &mut InstanceSet::default(), None, observe)
     }
     fn instances_observed(
         &self,
         roots: impl IntoIterator<Item = InstanceKey>,
         limit: usize,
         instances: &mut InstanceSet,
+        mut closures: Option<&mut ShapeClosures>,
         mut observe: impl FnMut(&InstanceKey, &'static str),
     ) -> Result<Vec<InstanceKey>, InstanceStop> {
         // A concrete argument names a shape published by the caller that requested
@@ -164,9 +182,22 @@ impl CheckProduct {
             instances.bodies.push(InstanceBody { product, module });
             let ir = instances.bodies[row].ir();
             for (i, shape) in ir.types.iter().enumerate() {
-                shapes
-                    .entry(shape.name.clone())
-                    .or_insert((row, hirsel_core_layout::TypeRef(i as u32)));
+                let t = hirsel_core_layout::TypeRef(i as u32);
+                shapes.entry(shape.name.clone()).or_insert((row, t));
+                if let Some(c) = closures.as_deref_mut()
+                    && !shape.name.contains('$')
+                {
+                    let closure = ir.shape_closure(t);
+                    match c.first.get(&shape.name) {
+                        Some(first) if *first != closure => {
+                            c.conflicts.insert(shape.name.clone());
+                        }
+                        Some(_) => {}
+                        None => {
+                            c.first.insert(shape.name.clone(), closure);
+                        }
+                    }
+                }
             }
             let pending = external_functions(ir, function)
                 .into_iter()
@@ -177,6 +208,15 @@ impl CheckProduct {
             Ok(pending)
         })
     }
+}
+
+/// Each reached shape name's first closure, and the names a later row disagrees with.
+/// Rows are reused across instance bodies by name, which is sound only if one name is
+/// one type (FORM #109), so a land gate requires `conflicts` to be empty.
+#[derive(Default)]
+pub struct ShapeClosures {
+    first: std::collections::BTreeMap<String, Vec<hirsel_core_ir::ClosureRow>>,
+    pub conflicts: BTreeSet<String>,
 }
 
 /// Generated closure bodies share their producer's module; only signature-only rows

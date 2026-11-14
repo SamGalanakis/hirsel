@@ -1,6 +1,6 @@
 //! Linux descriptor-relative host operations. No path is authorized by a prior
 //! canonicalization. openat2 resolves every traversal beneath its granted fd.
-use crate::provider::*;
+use crate::{Context, provider::*};
 use std::{
     cell::Cell,
     collections::BTreeMap,
@@ -75,6 +75,10 @@ impl OsProvider {
             .checked_add(1)
             .unwrap_or_else(|| crate::process::stop(b"HostHandles"));
         id
+    }
+    pub(crate) fn remaining_until(&self, deadline: u64) -> u64 {
+        let now = u64::try_from(self.clock.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        deadline.saturating_sub(now)
     }
     pub fn provider(&mut self) -> Provider {
         Provider {
@@ -366,6 +370,32 @@ fn ns_to_timespec(ns: u64) -> io::Result<libc::timespec> {
         tv_nsec: libc::c_long::try_from(nanos)
             .map_err(|_| io::Error::from_raw_os_error(libc::EOVERFLOW))?,
     })
+}
+
+/// Park an OS clock wait in the task scheduler, checking cancellation whenever
+/// the parked task is resumed. The provider issue itself remains synchronous
+/// and is called only after the deadline has been reached.
+pub(crate) unsafe fn wait_until(
+    context: *mut Context,
+    state: *mut u8,
+    deadline: u64,
+    site: u64,
+) -> u8 {
+    // SAFETY: the provider state is the live OsProvider selected by its issue
+    // function, and the context belongs to the current task.
+    unsafe {
+        let provider = &*state.cast::<OsProvider>();
+        loop {
+            let remaining = provider.remaining_until(deadline);
+            if remaining == 0 {
+                return 0;
+            }
+            crate::tasks::sleep_for(context, std::time::Duration::from_nanos(remaining));
+            if crate::tasks::check_cancel(context, site) != 0 {
+                return 1;
+            }
+        }
+    }
 }
 
 /// # Safety

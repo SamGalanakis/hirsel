@@ -1,9 +1,17 @@
-use crate::{Context, abi_host::*, entry::Grant, process::*, provider::*};
+use crate::{
+    Context,
+    abi_host::*,
+    abi_tasks::{hirsel_core_cancel, hirsel_core_join, hirsel_core_spawn},
+    entry::Grant,
+    process::*,
+    provider::*,
+};
 use std::{
     fs::File,
     path::PathBuf,
     ptr,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, Ordering},
+    time::Instant,
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -698,6 +706,292 @@ fn sleep_until_cancellation_is_cancelled_at_the_native_wait_boundary() {
         assert!(state.issued.is_empty());
         assert!(state.delivered.is_empty());
     }
+}
+
+#[derive(Clone, Copy)]
+struct TimerChild {
+    provider: *const Provider,
+    deadline: u64,
+    started: *const AtomicBool,
+    finished: *const AtomicBool,
+    order: *const AtomicU64,
+    id: u64,
+}
+
+#[derive(Clone, Copy)]
+struct TimerRoot {
+    provider: *const Provider,
+    first: *const AtomicBool,
+    second: *const AtomicBool,
+    order: *const AtomicU64,
+}
+
+unsafe extern "C" fn timer_none_drop(_: *mut Context, _: *mut u8) -> u8 {
+    0
+}
+
+fn timer_layout<T>() -> crate::tasks::TaskLayout {
+    crate::tasks::TaskLayout {
+        input: crate::tasks::ValueLayout {
+            bytes: size_of::<T>(),
+            align: align_of::<T>(),
+            logical: 0,
+            drop: timer_none_drop,
+        },
+        result: crate::tasks::ValueLayout {
+            bytes: 0,
+            align: 1,
+            logical: 0,
+            drop: timer_none_drop,
+        },
+    }
+}
+
+unsafe extern "C" fn timer_child(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
+    // SAFETY: the scheduler owns this copied input for the child lifetime.
+    unsafe {
+        let input = input.cast::<TimerChild>().read();
+        (*input.started).store(true, Ordering::Release);
+        let mut bytes = input.deadline.to_ne_bytes();
+        let mut request = Request {
+            operation: SLEEP_UNTIL,
+            mode: 0,
+            handle: 0,
+            path: ptr::null(),
+            path_len: 0,
+            buffer: Buffer {
+                data: bytes.as_mut_ptr(),
+                len: 8,
+                capacity: 8,
+            },
+            site: 123,
+        };
+        let out = hirsel_core_host(context, input.provider, &mut request);
+        assert_eq!(out.status, 0);
+        input
+            .finished
+            .as_ref()
+            .unwrap()
+            .store(true, Ordering::Release);
+        input
+            .order
+            .as_ref()
+            .unwrap()
+            .compare_exchange(0, input.id, Ordering::AcqRel, Ordering::Acquire)
+            .ok();
+        0
+    }
+}
+
+unsafe extern "C" fn cancellable_timer_child(
+    context: *mut Context,
+    _: *mut u8,
+    input: *mut u8,
+) -> u8 {
+    // SAFETY: the scheduler owns this copied input for the child lifetime.
+    unsafe {
+        let input = input.cast::<TimerChild>().read();
+        (*input.started).store(true, Ordering::Release);
+        let mut bytes = input.deadline.to_ne_bytes();
+        let mut request = Request {
+            operation: SLEEP_UNTIL,
+            mode: 0,
+            handle: 0,
+            path: ptr::null(),
+            path_len: 0,
+            buffer: Buffer {
+                data: bytes.as_mut_ptr(),
+                len: 8,
+                capacity: 8,
+            },
+            site: 123,
+        };
+        let out = hirsel_core_host(context, input.provider, &mut request);
+        assert_eq!(out.status, 1);
+        1
+    }
+}
+
+unsafe extern "C" fn cancel_timer_root(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
+    // SAFETY: root owns the copied input and child handle until join.
+    unsafe {
+        let input = input.cast::<TimerRoot>().read();
+        let mut child = TimerChild {
+            provider: input.provider,
+            deadline: 200_000_000,
+            started: input.first,
+            finished: input.second,
+            order: input.order,
+            id: 1,
+        };
+        let spawned = hirsel_core_spawn(
+            context,
+            0,
+            (&mut child as *mut TimerChild).cast(),
+            cancellable_timer_child,
+            timer_layout::<TimerChild>(),
+        );
+        assert!(!spawned.task.is_null());
+        crate::tasks::checkpoint(false);
+        hirsel_core_cancel(context, spawned.task);
+        let joined = hirsel_core_join(context, spawned.task, ptr::null_mut(), 123);
+        assert_eq!((joined.kind, joined.status), (2, 0));
+        0
+    }
+}
+
+unsafe extern "C" fn timer_root(context: *mut Context, _: *mut u8, input: *mut u8) -> u8 {
+    // SAFETY: root owns the copied input and each child handle until join.
+    unsafe {
+        let input = input.cast::<TimerRoot>().read();
+        let mut first = TimerChild {
+            provider: input.provider,
+            deadline: 50_000_000,
+            started: input.first,
+            finished: input.first,
+            order: input.order,
+            id: 1,
+        };
+        let mut second = first;
+        second.deadline = 5_000_000;
+        second.started = input.second;
+        second.finished = input.second;
+        second.id = 2;
+        let a = hirsel_core_spawn(
+            context,
+            0,
+            (&mut first as *mut TimerChild).cast(),
+            timer_child,
+            timer_layout::<TimerChild>(),
+        );
+        let b = hirsel_core_spawn(
+            context,
+            0,
+            (&mut second as *mut TimerChild).cast(),
+            timer_child,
+            timer_layout::<TimerChild>(),
+        );
+        assert!(!a.task.is_null() && !b.task.is_null());
+        let joined_a = hirsel_core_join(context, a.task, ptr::null_mut(), 123);
+        assert_eq!((joined_a.kind, joined_a.status), (0, 0));
+        let joined_b = hirsel_core_join(context, b.task, ptr::null_mut(), 123);
+        assert_eq!((joined_b.kind, joined_b.status), (0, 0));
+        0
+    }
+}
+
+#[test]
+fn os_sleep_parks_worker_runs_peer_and_orders_deadlines() {
+    let stdout: std::os::fd::OwnedFd = File::open("/dev/null").unwrap().into();
+    let stderr: std::os::fd::OwnedFd = File::open("/dev/null").unwrap().into();
+    let mut os = Box::new(crate::os::OsProvider::new(stdout, stderr));
+    let provider = os.provider();
+    let first = AtomicBool::new(false);
+    let second = AtomicBool::new(false);
+    let order = AtomicU64::new(0);
+    let input = TimerRoot {
+        provider: &provider,
+        first: &first,
+        second: &second,
+        order: &order,
+    };
+    let mut context = Context::new(1 << 20);
+    crate::causes::task_start(&mut context).unwrap();
+    let started = Instant::now();
+    let status = unsafe {
+        crate::tasks::run_root(
+            &mut context,
+            timer_root,
+            (&input as *const TimerRoot).cast_mut().cast(),
+            ptr::null_mut(),
+            size_of::<TimerRoot>(),
+            0,
+            crate::tasks::SchedulerProvider::default(),
+        )
+    };
+    let elapsed = started.elapsed();
+    assert_eq!(status, 0);
+    assert!(first.load(Ordering::Acquire) && second.load(Ordering::Acquire));
+    assert_eq!(order.load(Ordering::Acquire), 2);
+    assert!(elapsed >= std::time::Duration::from_millis(40));
+    assert!(elapsed < std::time::Duration::from_millis(500));
+    drop(os);
+}
+
+#[test]
+fn os_sleep_cancelled_while_blocked_returns_cancelled_promptly() {
+    let stdout: std::os::fd::OwnedFd = File::open("/dev/null").unwrap().into();
+    let stderr: std::os::fd::OwnedFd = File::open("/dev/null").unwrap().into();
+    let mut os = Box::new(crate::os::OsProvider::new(stdout, stderr));
+    let provider = os.provider();
+    let started = AtomicBool::new(false);
+    let finished = AtomicBool::new(false);
+    let order = AtomicU64::new(0);
+    let input = TimerRoot {
+        provider: &provider,
+        first: &started,
+        second: &finished,
+        order: &order,
+    };
+    let mut context = Context::new(1 << 20);
+    crate::causes::task_start(&mut context).unwrap();
+    let began = Instant::now();
+    let status = unsafe {
+        crate::tasks::run_root(
+            &mut context,
+            cancel_timer_root,
+            (&input as *const TimerRoot).cast_mut().cast(),
+            ptr::null_mut(),
+            size_of::<TimerRoot>(),
+            0,
+            crate::tasks::SchedulerProvider::default(),
+        )
+    };
+    assert_eq!(status, 0);
+    assert!(started.load(Ordering::Acquire));
+    assert!(began.elapsed() < std::time::Duration::from_millis(100));
+    drop(os);
+}
+
+unsafe extern "C" fn scripted_sleep(_: *mut u8, request: *mut Request) -> Outcome {
+    // SAFETY: the fixture pins the request for the callback.
+    unsafe {
+        assert_eq!((*request).operation, SLEEP_UNTIL);
+    }
+    Outcome::default()
+}
+
+unsafe extern "C" fn scripted_deliver(_: *mut u8, _: *mut Request, out: Outcome) -> Outcome {
+    out
+}
+
+#[test]
+fn replayed_sleep_does_not_wait() {
+    let provider = Provider {
+        state: ptr::null_mut(),
+        issue: scripted_sleep,
+        deliver: scripted_deliver,
+    };
+    let mut context = Context::new(1 << 20);
+    crate::causes::task_start(&mut context).unwrap();
+    let mut bytes = 1_000_000_000u64.to_ne_bytes();
+    let mut request = Request {
+        operation: SLEEP_UNTIL,
+        mode: 0,
+        handle: 0,
+        path: ptr::null(),
+        path_len: 0,
+        buffer: Buffer {
+            data: bytes.as_mut_ptr(),
+            len: 8,
+            capacity: 8,
+        },
+        site: 123,
+    };
+    let started = Instant::now();
+    let out = unsafe { hirsel_core_host(&mut context, &provider, &mut request) };
+    assert_eq!(out.status, 0);
+    assert!(started.elapsed() < std::time::Duration::from_millis(20));
 }
 
 fn child_case(name: &str) -> std::process::Output {

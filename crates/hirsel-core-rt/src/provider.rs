@@ -119,6 +119,21 @@ pub unsafe extern "C" fn hirsel_core_host(
         }
         let provider = &*provider;
         let previous = crate::os::set_current_context(context);
+        if request.operation == SLEEP_UNTIL && provider.issue as usize == crate::os::issue as usize
+        {
+            let deadline = if request.buffer.len >= 8 {
+                *(request.buffer.data.cast::<u64>())
+            } else {
+                0
+            };
+            if crate::os::wait_until(context, provider.state, deadline, request.site) != 0 {
+                crate::os::set_current_context(previous);
+                return Outcome {
+                    status: 1,
+                    ..Outcome::default()
+                };
+            }
+        }
         let outcome = (provider.issue)(provider.state, request);
         let outcome = (provider.deliver)(provider.state, request, outcome);
         crate::os::set_current_context(previous);

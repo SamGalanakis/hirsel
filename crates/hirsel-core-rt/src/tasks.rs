@@ -12,6 +12,7 @@ use std::{
     cell::Cell as Local,
     ptr::{self, NonNull},
     sync::atomic::{AtomicBool, Ordering},
+    time::{Duration, Instant},
 };
 
 #[repr(C)]
@@ -134,6 +135,8 @@ pub struct Task {
     owned_context: Option<Context>,
     run: *mut Scheduler,
     ready: *mut Task,
+    timer_next: *mut Task,
+    timer_deadline: Option<Instant>,
     all: *mut Task,
     state: State,
     id: u64,
@@ -153,6 +156,7 @@ struct Scheduler {
     idle: *mut u8,
     head: *mut Task,
     tail: *mut Task,
+    timers: *mut Task,
     all: *mut Task,
     next: u64,
     provider: SchedulerProvider,
@@ -223,10 +227,77 @@ impl Scheduler {
         unsafe {
             while !task.is_null() {
                 if (*task).state == State::Blocked {
+                    self.remove_timer(task);
                     self.ready(task);
                 }
                 task = (*task).all;
             }
+        }
+    }
+
+    unsafe fn insert_timer(&mut self, task: *mut Task, deadline: Instant) {
+        // SAFETY: the task is exclusively blocked and is not in either queue.
+        unsafe {
+            (*task).timer_deadline = Some(deadline);
+            let mut link = &raw mut self.timers;
+            while !(*link).is_null()
+                && (*(*link))
+                    .timer_deadline
+                    .as_ref()
+                    .is_some_and(|at| *at <= deadline)
+            {
+                link = &raw mut (**link).timer_next;
+            }
+            (*task).timer_next = *link;
+            *link = task;
+        }
+    }
+
+    unsafe fn remove_timer(&mut self, task: *mut Task) {
+        // SAFETY: only the idle scheduler mutates timer links.
+        unsafe {
+            if (*task).timer_deadline.is_none() {
+                return;
+            }
+            let mut link = &raw mut self.timers;
+            while !(*link).is_null() && *link != task {
+                link = &raw mut (**link).timer_next;
+            }
+            if *link == task {
+                *link = (*task).timer_next;
+            }
+            (*task).timer_next = ptr::null_mut();
+            (*task).timer_deadline = None;
+        }
+    }
+
+    unsafe fn wake_timers(&mut self) {
+        // SAFETY: the timer list is sorted and owned by the idle scheduler.
+        unsafe {
+            let now = Instant::now();
+            while !self.timers.is_null()
+                && (*self.timers)
+                    .timer_deadline
+                    .is_some_and(|deadline| deadline <= now)
+            {
+                let task = self.timers;
+                self.timers = (*task).timer_next;
+                (*task).timer_next = ptr::null_mut();
+                (*task).timer_deadline = None;
+                self.ready(task);
+            }
+        }
+    }
+
+    fn wait_for_timer(&mut self) {
+        let deadline = unsafe { self.timers.as_ref().and_then(|task| task.timer_deadline) };
+        match deadline {
+            Some(deadline) => {
+                std::thread::park_timeout(deadline.saturating_duration_since(Instant::now()));
+                // SAFETY: no task is running while the idle scheduler waits.
+                unsafe { self.wake_timers() };
+            }
+            None => std::thread::park(),
         }
     }
 }
@@ -386,6 +457,23 @@ pub unsafe fn checkpoint(blocked: bool) {
         hirsel_stack::switch(&raw mut (*task).sp, (*run).idle);
     }
 }
+
+/// Park the current task for a host wait. The scheduler, rather than the host
+/// stack, owns the sleep so other ready tasks can run on the worker.
+pub(crate) unsafe fn sleep_for(_context: *mut Context, duration: Duration) {
+    let task = CURRENT.get();
+    if task.is_null() {
+        std::thread::sleep(duration);
+        return;
+    }
+    // SAFETY: the active task owns its scheduler and fiber while it parks.
+    unsafe {
+        let run = (*task).run;
+        (*run).insert_timer(task, Instant::now() + duration);
+        (*task).state = State::Blocked;
+        hirsel_stack::switch(&raw mut (*task).sp, (*run).idle);
+    }
+}
 pub(crate) fn wake() {
     let task = CURRENT.get();
     if task.is_null() {
@@ -485,6 +573,7 @@ pub unsafe fn run_root(
         idle: ptr::null_mut(),
         head: ptr::null_mut(),
         tail: ptr::null_mut(),
+        timers: ptr::null_mut(),
         all: ptr::null_mut(),
         next: 1,
         provider,
@@ -503,6 +592,8 @@ pub unsafe fn run_root(
         owned_context: None,
         run: &mut run,
         ready: ptr::null_mut(),
+        timer_next: ptr::null_mut(),
+        timer_deadline: None,
         all: ptr::null_mut(),
         state: State::Ready,
         id: 0,
@@ -543,9 +634,10 @@ pub unsafe fn run_root(
             if root.state == State::Ended {
                 break;
             }
+            run.wake_timers();
             let task = run.pop();
             if task.is_null() {
-                std::thread::park();
+                run.wait_for_timer();
                 continue;
             }
             CURRENT.set(task);
@@ -604,6 +696,8 @@ pub unsafe extern "C" fn hirsel_core_spawn(
             owned_context: Some(child_context),
             run,
             ready: ptr::null_mut(),
+            timer_next: ptr::null_mut(),
+            timer_deadline: None,
             all: (*run).all,
             state: State::Ready,
             id,

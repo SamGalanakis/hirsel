@@ -152,6 +152,9 @@ impl<T: TyRead> Shapes<'_, T> {
                         let entries = self.map_field(&args)?;
                         return self.fill(r, LRepr::Own, record(vec![("entries", entries)]), None);
                     }
+                    // A log owns one boxed List carrier.  The source Log[E] declaration
+                    // has E as its only argument; construct the corresponding List[E]
+                    // row here so the box shape is the same row used by list kernels.
                     Some(Role::Log) => {
                         let list = self
                             .decls

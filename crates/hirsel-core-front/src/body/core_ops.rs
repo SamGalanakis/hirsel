@@ -27,6 +27,12 @@ pub(crate) enum Kernel {
     Send,
     TrySend,
     Receive,
+    LogNew,
+    LogAppend,
+    LogFinish,
+    CodeIdentity,
+    CodeCallable,
+    CodeDescribe,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -57,12 +63,12 @@ macro_rules! operations {
 operations! {
     ("int", "parse", Lane::PendingCode, "C", "std-seed-api-889", false),
     ("core", "isolate", Lane::PendingCode, "A", "core-check-callables-913", false),
-    ("log", "new", Lane::PendingCode, "B", "core-ops-914", false),
-    ("log", "append", Lane::PendingCode, "B", "core-ops-914", false),
-    ("log", "finish", Lane::PendingCode, "B", "core-ops-914", false),
+    ("log", "new", Lane::Runtime(Kernel::LogNew), "B", "core-ops-914", false),
+    ("log", "append", Lane::Runtime(Kernel::LogAppend), "B", "core-ops-914", false),
+    ("log", "finish", Lane::Runtime(Kernel::LogFinish), "B", "core-ops-914", false),
     ("code", "describe", Lane::PendingCode, "A", "core-check-callables-913", false),
-    ("code", "identity", Lane::PendingCode, "A", "core-ops-914", false),
-    ("code", "callable", Lane::PendingCode, "A", "core-ops-914", false),
+    ("code", "identity", Lane::Runtime(Kernel::CodeIdentity), "A", "core-ops-914", false),
+    ("code", "callable", Lane::Runtime(Kernel::CodeCallable), "A", "core-ops-914", false),
     ("host", "rename", Lane::Runtime(Kernel::Host(HostOp::Rename)), "B", "core-ops-914", false),
     ("host", "sleep_until", Lane::Runtime(Kernel::Host(HostOp::SleepUntil)), "B", "core-ops-914", false),
     ("list", "sum", Lane::PendingCode, "C", "std-seed-api-889", false),
@@ -614,6 +620,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             Kernel::Receive => self.runtime_receive(types[0], vals[0]?, result, n),
             Kernel::Join => self.runtime_join(types[0], vals[0]?, result, n),
+            Kernel::LogNew => self.runtime_log_new(types[0], result, n),
+            Kernel::LogAppend => self.runtime_log_append(types[0], vals[0]?, vals[1], result, n),
+            Kernel::LogFinish => self.runtime_log_finish(types[0], vals[0]?, result, n),
+            Kernel::CodeIdentity => self.runtime_code_identity(vals[0]?, result, n),
+            Kernel::CodeCallable => self.runtime_code_callable(vals[0]?, result, n),
+            Kernel::CodeDescribe => self.runtime_code_describe(vals[0]?, result, n),
         }
     }
 
@@ -1195,7 +1207,13 @@ pub(crate) fn assert_no_ambient_input(p: &Program<'_>) {
             | Kernel::ChannelSender
             | Kernel::Send
             | Kernel::TrySend
-            | Kernel::Receive => false,
+            | Kernel::Receive
+            | Kernel::LogNew
+            | Kernel::LogAppend
+            | Kernel::LogFinish
+            | Kernel::CodeIdentity
+            | Kernel::CodeCallable
+            | Kernel::CodeDescribe => false,
         }
     }
     for (f, fd) in p.fns.iter().enumerate() {
@@ -1439,6 +1457,315 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
             },
         )
+    }
+
+    fn list_ty(&mut self, item: TyId) -> Option<TyId> {
+        let list = self.p.core_decl("List")?;
+        Some(self.t.mk(TyKind::Adt(list, vec![item])))
+    }
+
+    fn log_ty(&mut self, item: TyId) -> Option<TyId> {
+        let log = self
+            .p
+            .decls
+            .iter()
+            .position(|d| d.role == Some(crate::decls::Role::Log) && d.path.0.name == "Log")?;
+        Some(
+            self.t
+                .mk(TyKind::Adt(crate::types::DeclId(log as u32), vec![item])),
+        )
+    }
+
+    /// MEM-29: the log node is a box allocation whose payload is the List carrier.
+    fn runtime_log_new(&mut self, item: TyId, result: TyId, n: NodeId) -> Option<ValueId> {
+        let list = self.list_ty(item)?;
+        let (charge, overflow) = self.owner_charge(list, None, n)?;
+        let id = self.runtime_type(list, n)?;
+        let payload = self.layout_size(list, false, n)?;
+        let node = self.value(Ty::Ptr);
+        let available = self.value(Ty::Scalar(Scalar::U64));
+        let edge = FieldTy::Box(TypeRef(id.0));
+        let fail = self.fail_to(n);
+        self.inst(
+            Inst::Alloc {
+                result: node,
+                available,
+                region_entry: None,
+                kind: AllocKind::Own { edge },
+                place: AllocPlace::Current,
+                charge,
+                overflow: Some(overflow),
+                size: payload,
+                align: 8,
+                fail,
+            },
+            n,
+        );
+        let ok = self.runtime_nonzero(Ty::Ptr, node, n)?;
+        let null = self.konst(Ty::Ptr, 0, n)?;
+        let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
+        self.runtime_result(
+            result,
+            ok,
+            n,
+            |cx, to, log| {
+                // The node itself is the List carrier: {data, len, capacity}.
+                cx.sequence_word(node, 0, Ty::Ptr, null, n);
+                cx.sequence_word(node, 8, Ty::Scalar(Scalar::U64), zero, n);
+                cx.sequence_word(node, 16, Ty::Scalar(Scalar::U64), zero, n);
+                if let Some(at) =
+                    cx.runtime_field(to, &[Step::CaseField { case: 0, field: 0 }], log, n)
+                {
+                    cx.runtime_store(at, &[Step::Field(0)], Ty::Ptr, node, n);
+                }
+            },
+            |cx, to, cap| {
+                if let Some(at) =
+                    cx.runtime_field(to, &[Step::CaseField { case: 1, field: 0 }], cap, n)
+                {
+                    cx.runtime_capacity(at, charge, available, n);
+                }
+            },
+        )
+    }
+
+    /// Append through the pointer loaded from the Log carrier. The temporary
+    /// reserve result is adapted to the public `(Capacity, E)` refusal so the
+    /// taken element remains available until the reserve decision.
+    fn runtime_log_append(
+        &mut self,
+        item: TyId,
+        log: ValueId,
+        value: Option<ValueId>,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let log_ty = self.log_ty(item)?;
+        let log_id = self.runtime_type(log_ty, n)?;
+        let log_base = self.address(AddressBase::Value(log), &[], PlaceTy::Declared(log_id), n);
+        let node_at = self.address(
+            AddressBase::Address(log_base),
+            &[Step::Field(0)],
+            PlaceTy::Value(Ty::Ptr),
+            n,
+        );
+        let node = self.read_bits(node_at, Ty::Ptr, n);
+        let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
+        let cap = self
+            .t
+            .mk(TyKind::Adt(self.p.core_decl("Capacity")?, vec![]));
+        let reserve = self
+            .t
+            .mk(TyKind::Adt(self.p.core_decl("Result")?, vec![UNIT, cap]));
+        let reserved = self.list_reserve(item, node, one, reserve, n)?;
+        let reserve_id = match self.rep(reserve) {
+            Ok(Rep::Place(id)) => id,
+            _ => return None,
+        };
+        let tag = self.value(Ty::Scalar(Scalar::U32));
+        let from = self.address(
+            AddressBase::Value(reserved),
+            &[],
+            PlaceTy::Declared(reserve_id),
+            n,
+        );
+        self.inst(
+            Inst::Case {
+                result: tag,
+                address: from,
+            },
+            n,
+        );
+        let zero = self.konst(Ty::Scalar(Scalar::U32), 0, n)?;
+        let ok = self.list_compare(CompareOp::Eq, tag, zero, n);
+        let out_id = match self.rep(result) {
+            Ok(Rep::Place(id)) => id,
+            Err(what) => {
+                self.gap(n, what);
+                return None;
+            }
+            _ => return None,
+        };
+        let out = self.new_slot(PlaceTy::Declared(out_id), n);
+        let yes = self.new_block(&[]);
+        let no = self.new_block(&[]);
+        let done = self.new_block(&[]);
+        self.list_branch(ok, yes, no, n);
+        let item_rep = self.rep(item).ok()?;
+        self.start(yes);
+        let len = self.read_sequence_word(node, 8, Ty::Scalar(Scalar::U64), n);
+        let element = self.list_element(item, node, len, n)?;
+        if let Some(place) = item_rep.stored() {
+            let at = self.address(AddressBase::Value(element), &[], place, n);
+            self.install(at, item_rep, value, n);
+        }
+        let (new_len, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, len, one, n);
+        self.sequence_word(node, 8, Ty::Scalar(Scalar::U64), new_len, n);
+        self.inst(
+            Inst::SetCase {
+                address: out,
+                case: 0,
+            },
+            n,
+        );
+        self.consume(value, n);
+        self.jump(done, &[], n);
+        self.start(no);
+        self.inst(
+            Inst::SetCase {
+                address: out,
+                case: 1,
+            },
+            n,
+        );
+        let error_ty = match self.t.kind(result).clone() {
+            TyKind::Adt(_, args) => args[1],
+            _ => return None,
+        };
+        let cap_at =
+            self.runtime_field(out, &[Step::CaseField { case: 1, field: 0 }], error_ty, n)?;
+        let cap_id = self.runtime_type(cap, n)?;
+        let old_cap = self.address(
+            AddressBase::Address(from),
+            &[Step::CaseField { case: 1, field: 0 }],
+            PlaceTy::Declared(cap_id),
+            n,
+        );
+        for field in 0..2 {
+            let src = self.address(
+                AddressBase::Address(old_cap),
+                &[Step::Field(field)],
+                PlaceTy::Value(Ty::Scalar(Scalar::U64)),
+                n,
+            );
+            let value = self.read_bits(src, Ty::Scalar(Scalar::U64), n);
+            self.runtime_store(
+                cap_at,
+                &[Step::Field(field)],
+                Ty::Scalar(Scalar::U64),
+                value,
+                n,
+            );
+        }
+        if let Some(at) = self.runtime_field(
+            out,
+            &[Step::CaseField { case: 1, field: 0 }, Step::Field(1)],
+            item,
+            n,
+        ) {
+            self.install(at, item_rep, value, n);
+        }
+        self.jump(done, &[], n);
+        self.start(done);
+        let out = self.pointer(out, n);
+        self.temp(result, Some(out));
+        Some(out)
+    }
+
+    fn runtime_log_finish(
+        &mut self,
+        item: TyId,
+        log: ValueId,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let log_ty = self.log_ty(item)?;
+        let log_id = self.runtime_type(log_ty, n)?;
+        let log_base = self.address(AddressBase::Value(log), &[], PlaceTy::Declared(log_id), n);
+        let node_at = self.address(
+            AddressBase::Address(log_base),
+            &[Step::Field(0)],
+            PlaceTy::Value(Ty::Ptr),
+            n,
+        );
+        let node = self.read_bits(node_at, Ty::Ptr, n);
+        let list = self.list_ty(item)?;
+        let list_id = self.runtime_type(list, n)?;
+        let to = self.new_slot(PlaceTy::Declared(list_id), n);
+        self.copy_to(to, node, list_id, n);
+        self.consume(Some(log), n);
+        let (charge, _) = self.owner_charge(list, None, n)?;
+        self.inst(
+            Inst::Free {
+                block: node,
+                charge,
+            },
+            n,
+        );
+        let value = self.pointer(to, n);
+        self.temp(result, Some(value));
+        Some(value)
+    }
+
+    fn runtime_code_describe(
+        &mut self,
+        value: ValueId,
+        result: TyId,
+        _n: NodeId,
+    ) -> Option<ValueId> {
+        self.temp(result, Some(value));
+        Some(value)
+    }
+
+    fn runtime_code_identity(
+        &mut self,
+        static_fn: ValueId,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let function = self.function_values.get(&static_fn).copied()?;
+        let instance = self.e.module.functions[function.index()].instance;
+        let path = &self.e.module.instances[instance.index()].definition;
+        let f = self.p.fns.iter().position(|fd| &fd.path == path)?;
+        let fd = &self.p.fns[f];
+        let mut text = format!(
+            "{}@{}/{}",
+            fd.path.0.package.name,
+            fd.path.0.package.version,
+            fd.path.0.modules.join("/")
+        );
+        if !fd.path.0.modules.is_empty() {
+            text.push('/');
+        }
+        text.push_str(&fd.path.0.name);
+        text.push('(');
+        for (i, param) in fd.params.iter().enumerate() {
+            if i > 0 {
+                text.push_str(", ");
+            }
+            text.push_str(param.mode.keyword());
+            text.push(' ');
+            text.push_str(&crate::decls::canonical(&self.p.decls, &self.t, param.ty));
+        }
+        text.push_str(") -> ");
+        text.push_str(&crate::decls::canonical(&self.p.decls, &self.t, fd.result));
+        let mut bytes = Vec::with_capacity(text.len() + 1);
+        bytes.push(1);
+        bytes.extend_from_slice(text.as_bytes());
+        let id = self.runtime_type(result, n)?;
+        let to = self.new_slot(PlaceTy::Declared(id), n);
+        let data = self.e.static_bytes(&bytes);
+        let ptr = self.value(Ty::Ptr);
+        self.inst(Inst::ReadStatic { result: ptr, data }, n);
+        let len = self.konst(Ty::Scalar(Scalar::U64), bytes.len() as u64, n)?;
+        let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
+        let carrier = self.pointer(to, n);
+        self.sequence_word(carrier, 0, Ty::Ptr, ptr, n);
+        self.sequence_word(carrier, 8, Ty::Scalar(Scalar::U64), len, n);
+        self.sequence_word(carrier, 16, Ty::Scalar(Scalar::U64), zero, n);
+        let value = self.pointer(to, n);
+        self.temp(result, Some(value));
+        Some(value)
+    }
+
+    fn runtime_code_callable(
+        &mut self,
+        value: ValueId,
+        result: TyId,
+        _n: NodeId,
+    ) -> Option<ValueId> {
+        self.temp(result, Some(value));
+        Some(value)
     }
 
     fn owner_payload(

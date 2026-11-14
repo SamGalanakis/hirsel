@@ -2377,6 +2377,25 @@ fn provider_samples_match_the_hand_oracle_and_every_closed_row_emits() {
 }
 
 #[test]
+fn log_append_facts_on_and_off_never_store_through_the_handle() {
+    let module = text::parse(include_str!("../../../hirsel-core-ir/samples/log.core")).unwrap();
+    wf::module(&module).unwrap();
+    for facts in [false, true] {
+        let ir = emit_ir_with_facts(&module, false, facts).unwrap();
+        let body = ir
+            .split_once("define")
+            .and_then(|(_, rest)| rest.split_once("define").map(|(first, _)| first))
+            .unwrap_or(&ir);
+        assert!(
+            !body
+                .lines()
+                .any(|line| line.contains("store") && line.contains("%p0")),
+            "log append stored through its handle (facts={facts}): {ir}"
+        );
+    }
+}
+
+#[test]
 fn native_provider_samples_and_refusals_match_the_hand_oracle() {
     let module = text::parse(include_str!(
         "../../../hirsel-core-ir/samples/providers.core"

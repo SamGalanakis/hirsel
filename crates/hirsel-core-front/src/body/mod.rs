@@ -997,6 +997,9 @@ struct Cx<'c, 'a, 'e> {
     e: &'e mut Emitter,
     b: Body,
     func: Option<FuncId>,
+    /// Function references produced in this body, used by the PROG-9 descriptor
+    /// kernels to recover the single front-end identity encoder's source item.
+    function_values: HashMap<ValueId, FuncId>,
     /// The signature a source body's entry was emitted against. A row first mentioned
     /// by an earlier body may already be sealed to its word carriage; installing the
     /// body puts this signature back, so the next [`Emitter::seal`] converts the body.
@@ -1138,6 +1141,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             e,
             b: Body::default(),
             func: None,
+            function_values: HashMap::default(),
             emitted: None,
             ir_item,
             cur: None,
@@ -1524,6 +1528,12 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     fn inst(&mut self, i: Inst, n: NodeId) {
         crate::cost_scope!("phase", "CoreIR emission");
         if self.live() {
+            if let Inst::FunctionRef { result, function } = i {
+                self.function_values.insert(result, function);
+                self.open.push(Inst::FunctionRef { result, function });
+                self.open_anchors.push(Some(self.anchor(n)));
+                return;
+            }
             self.open.push(i);
             self.open_anchors.push(Some(self.anchor(n)));
         }

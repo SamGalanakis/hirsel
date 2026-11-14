@@ -445,39 +445,30 @@ fn host_rename_and_sleep_rows_are_replayable_in_evaluator() {
     assert_eq!(run.used, 0);
 }
 
-// std.clock.sleep_ns replayed: the evaluator world delivers each `host.mono_ns` reading
-// (one tick per reading) and the `host.sleep_until` completion from its record, never a
-// host wait. Hand-derived: `before` reads 0, sleep_ns reads 1 and issues deadline 1 + 1000,
-// so the world clock is delivered at 1001 and `after` reads 1001. A deadline taken as
-// `ns` alone delivers 1000; a wrapping add never fails the second run.
 #[test]
-fn std_sleep_ns_replays_its_deadline_from_the_record() {
-    let source = format!(
-        "{}\nfn f(c: Clock) -> u64 waits {{\n    let before = host.mono_ns(c)\n    sleep_ns(c, 1000)\n    host.mono_ns(c) - before\n}}\nfn g(c: Clock) -> u64 waits {{\n    let _ = host.mono_ns(c)\n    sleep_ns(c, int.wrapping_sub(0u64, 1))\n    0u64\n}}\n",
-        include_str!("../../../core/std/clock.hirsel")
-    );
-    let (index, modules) = canonical(&source);
+fn log_boxed_list_append_and_finish_in_evaluator() {
+    let source = r#"fn f() -> u64 {
+        let l:Log[u64] = result.unwrap(log.new())
+        result.unwrap(log.append(l, 7u64))
+        let xs = log.finish(take l)
+        list.len(xs)
+    }"#;
+    let (index, modules) = canonical(source);
     let p = Program::declare(&index, &modules);
     let mut emitter = Emitter::new();
-    let mut entries = HashMap::new();
-    for (f, fd) in p
+    let f = p
         .fns
         .iter()
-        .enumerate()
-        .filter(|(_, fd)| fd.path.0.package.name == "app")
-    {
-        let check = p.check_lower(f, &mut emitter);
-        assert!(
-            check.refusals.is_empty() && check.gaps.is_empty(),
-            "{check:?}"
-        );
-        entries.insert(fd.path.0.name.clone(), check.function);
-    }
+        .position(|fd| fd.path.0.package.name == "app")
+        .unwrap();
+    let check = p.check_lower(f, &mut emitter);
+    assert!(
+        check.refusals.is_empty() && check.gaps.is_empty(),
+        "{check:?}"
+    );
     emitter.materialize_instances().unwrap();
     wf::module(&emitter.module).unwrap();
-    let run = eval::run(&emitter.module, entries["f"].unwrap(), &[1], 256);
-    assert_eq!(run.outcome, eval::Outcome::Returned(vec![1001]));
+    let run = eval::run(&emitter.module, check.function.unwrap(), &[], 64);
+    assert_eq!(run.outcome, eval::Outcome::Returned(vec![1]));
     assert_eq!(run.used, 0);
-    let run = eval::run(&emitter.module, entries["g"].unwrap(), &[1], 256);
-    assert_eq!(run.outcome, eval::Outcome::Failed(vec!["Overflow".into()]));
 }

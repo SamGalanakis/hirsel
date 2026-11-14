@@ -357,7 +357,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         result
     }
-    fn list_compare(&mut self, op: CompareOp, left: ValueId, right: ValueId, n: NodeId) -> ValueId {
+    pub(super) fn list_compare(
+        &mut self,
+        op: CompareOp,
+        left: ValueId,
+        right: ValueId,
+        n: NodeId,
+    ) -> ValueId {
         let result = self.value(Ty::Scalar(Scalar::Bool));
         self.inst(
             Inst::Compare {
@@ -370,7 +376,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         result
     }
-    fn list_branch(&mut self, condition: ValueId, yes: BlockId, no: BlockId, n: NodeId) {
+    pub(super) fn list_branch(&mut self, condition: ValueId, yes: BlockId, no: BlockId, n: NodeId) {
         let yes = self.edge(yes, &[]);
         let no = self.edge(no, &[]);
         self.end(Terminator::Branch { condition, yes, no }, Some(n));
@@ -1262,7 +1268,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(())
     }
 
-    fn list_element(
+    pub(super) fn list_element(
         &mut self,
         item: TyId,
         header: ValueId,

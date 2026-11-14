@@ -681,18 +681,18 @@ extern uint8_t {ordinary}(void *, void *);
 extern uint8_t {counted}(void *, void *);
 static uint64_t trace[8]; static size_t traces;
 void hirsel_core_test_drop_trace(uint64_t id) {{ if(traces==8) abort(); trace[traces++]=id; }}
-static void *allocate(HirselCoreContext *ctx, size_t size, uint64_t charge) {{
-  void *p=hirsel_core_alloc(ctx,0,size,8,charge,false,HIRSEL_CORE_NATIVE_GRAPH).pointer; if(!p) abort(); return p;
+static void *allocate(HirselCoreContext *ctx, size_t size, uint64_t charge, uint8_t kind) {{
+  void *p=hirsel_core_alloc(ctx,0,size,8,charge,false,kind).pointer; if(!p) abort(); return p;
 }}
 static void *resource(HirselCoreContext *ctx, uint64_t id) {{
   uint64_t *p=hirsel_core_resource_alloc(ctx,8,8,8,0).pointer; if(!p) abort(); *p=id; return p;
 }}
 static void *leaf(HirselCoreContext *ctx, bool atomic) {{
-  uint64_t *p=allocate(ctx,16,16); hirsel_core_counted_init(p,atomic); p[1]=7; return p;
+  uint64_t *p=allocate(ctx,16,16,HIRSEL_CORE_NATIVE_PLAIN); hirsel_core_counted_init(p,atomic); p[1]=7; return p;
 }}
 int main(void) {{
   HirselCoreContext *ctx=hirsel_core_test_context_new(10000);
-  uint64_t *entries=allocate(ctx,4*32+8,128);
+  uint64_t *entries=allocate(ctx,4*32+8,128,HIRSEL_CORE_NATIVE_GRAPH);
   memset(entries,0xcc,4*32+8);
   for(size_t i=0;i<3;i+=2) {{ entries[4*i+1]=1; entries[4*i+2]=(uintptr_t)resource(ctx,10*i+1); entries[4*i+3]=(uintptr_t)resource(ctx,10*i+2); }}
   entries[5]=0;
@@ -709,11 +709,11 @@ int main(void) {{
   hirsel_core_context_free(ctx);
 
   ctx=hirsel_core_test_context_new(10000);
-  entries=allocate(ctx,4*32+8,128);
+  entries=allocate(ctx,4*32+8,128,HIRSEL_CORE_NATIVE_GRAPH);
   memset(entries,0xcc,4*32+8);
   for(size_t i=0;i<3;i+=2) {{ entries[4*i+1]=1; entries[4*i+2]=(uintptr_t)leaf(ctx,false); entries[4*i+3]=(uintptr_t)leaf(ctx,true); }}
   entries[5]=0;
-  uint64_t *root=allocate(ctx,32,32); hirsel_core_counted_init(root,false);
+  uint64_t *root=allocate(ctx,32,32,HIRSEL_CORE_NATIVE_STATIC); hirsel_core_counted_init(root,false);
   root[1]=(uintptr_t)entries; root[2]=3; root[3]=4;
   hirsel_core_test_inject(ctx,1,true); attempts=hirsel_core_test_attempts(ctx);
   if({counted}(ctx,root)!=0 || hirsel_core_test_available(ctx)!=10000 || hirsel_core_test_attempts(ctx)!=attempts) return 6;

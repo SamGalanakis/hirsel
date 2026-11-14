@@ -357,10 +357,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
     fn pattern_number(&mut self, n: NodeId, ty: TyId) -> i128 {
         let text = self.token_text(n);
-        let span = self.span(n);
-        let negative = self.item.text[span.start as usize..span.end as usize]
-            .trim_start()
-            .starts_with('-');
+        // A negative literal pattern begins with its `-` token (LANG-3). Read the token:
+        // a node span is not an offset into the item's text.
+        let first = self.item.tree.node(n).origin.tokens.start;
+        let negative = self.item.tree.tokens[first as usize].kind == TokenKind::Minus;
         let number = match self.token_kind(n) {
             Some(TokenKind::KwTrue) if ty == BOOL => Some(1),
             Some(TokenKind::KwFalse) if ty == BOOL => Some(0),

@@ -1,0 +1,22 @@
+// ------------------------------------------------------------------------------------
+// A literal pattern's sign is its own `-` token in every item of a file. The dash line
+// above sits where a later item's patterns fall when read at item-relative offsets.
+// expect: run signed(17) = 1
+// expect: run signed(-17) = 2
+// expect: run unsigned(17) = 1
+fn first() {}
+
+fn signed(x: i64) -> u64 {
+    match x {
+        17 => 1,
+        - 17 => 2,
+        _ => 3
+    }
+}
+
+fn unsigned(x: u64) -> u64 {
+    match x {
+        17 => 1,
+        _ => 3
+    }
+}

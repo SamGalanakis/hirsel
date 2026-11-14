@@ -13,6 +13,24 @@ pub(super) struct CallableAbi {
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
     #[inline(always)]
+    pub(super) fn isolate_descriptor_forbidden(&self, value: Option<ValueId>) -> bool {
+        let Some(id) = self.descriptors.of(value) else {
+            return false;
+        };
+        let range = self.descriptors.ranges[id as usize];
+        range
+            .get(&self.descriptors.captures)
+            .unwrap()
+            .iter()
+            .any(|capture| {
+                if capture.mode == Mode::Mut {
+                    return true;
+                }
+                let var = self.var(capture.slot);
+                matches!(var.origin, Origin::ViewParam | Origin::MutParam)
+                    && self.contains_callback(var.ty)
+            })
+    }
     pub(super) fn scoped_callable_view(&self, from: TyId, to: TyId) -> bool {
         if from.0 <= HOLE.0 || to.0 <= HOLE.0 {
             return false;

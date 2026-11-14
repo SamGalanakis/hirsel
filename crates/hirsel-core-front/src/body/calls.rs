@@ -70,6 +70,23 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return self.put_form(n, f, args, want);
         }
         let g = &p.fns[f];
+        // PROG-9 is decided at the argument even when a generic function item
+        // cannot otherwise be materialized without an expected callable type.
+        // Keep this refusal ahead of function-value inference so the diagnostic
+        // names the offending generic item rather than cascading LANG-12.
+        if g.path.is_core("code.describe")
+            && let Some(argument) = args.first()
+            && let Some(Target::Definition(id)) = p.target(self.at, *argument)
+            && let Some(Def::Fn(item)) = p.by_definition[id.0 as usize]
+            && !p.fns[item as usize].generics.is_empty()
+        {
+            self.refuse(
+                "PROG-9",
+                *argument,
+                "code.describe requires a top-level non-generic function name",
+            );
+            return (ERROR, None);
+        }
         // A result rooted in a Region parameter is rooted in the region its argument
         // names (MEM-6); `rooted` lists those parameters.
         let rooted: Vec<usize> = g

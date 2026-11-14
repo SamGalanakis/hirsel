@@ -298,7 +298,7 @@ pub(crate) fn binding(f: &FnDecl) -> Option<u16> {
         .position(|entry| {
             f.path.0.modules == [entry.module]
                 && f.path.0.name == entry.name
-                && matches!(entry.lane, Lane::Runtime(_))
+                && matches!(entry.lane, Lane::Runtime(_) | Lane::PendingCode)
         })
         .map(|i| i as u16)
 }
@@ -312,10 +312,79 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         result: TyId,
         n: NodeId,
     ) -> Option<Option<ValueId>> {
-        let Lane::Runtime(kernel) = OPERATIONS[self.p.core_operations[f]? as usize].lane else {
-            unreachable!()
-        };
-        Some(self.runtime_kernel(kernel, f, types, vals, result, n))
+        match OPERATIONS[self.p.core_operations[f]? as usize].lane {
+            Lane::Runtime(kernel) => Some(self.runtime_kernel(kernel, f, types, vals, result, n)),
+            Lane::PendingCode => self.pending_code(f, types, vals, result, n),
+            _ => None,
+        }
+    }
+
+    fn pending_code(
+        &mut self,
+        f: usize,
+        _types: &[TyId],
+        vals: &[Option<ValueId>],
+        _result: TyId,
+        n: NodeId,
+    ) -> Option<Option<ValueId>> {
+        let entry = &OPERATIONS[self.p.core_operations[f]? as usize];
+        let args = self.kids(n);
+        match (entry.module, entry.name) {
+            ("core", "isolate") => {
+                let argument = args.get(1).copied().unwrap_or(n);
+                let forbidden = vals
+                    .first()
+                    .copied()
+                    .flatten()
+                    .is_some_and(|value| self.isolate_descriptor_forbidden(Some(value)))
+                    || args.get(1).is_some_and(|arg| {
+                        self.p
+                            .target(self.at, *arg)
+                            .is_some_and(|target| match target {
+                                Target::Binder(slot) => {
+                                    let var = self.var(*slot);
+                                    matches!(var.origin, Origin::ViewParam | Origin::MutParam)
+                                        && self.contains_callback(var.ty)
+                                }
+                                _ => false,
+                            })
+                    });
+                if forbidden {
+                    self.refuse(
+                        "FAIL-16",
+                        argument,
+                        "isolate's body may not capture a mutable place",
+                    );
+                } else {
+                    self.gap(n, "isolate failure boundary lowering is not built");
+                }
+                Some(None)
+            }
+            ("code", "describe") => {
+                let argument = args.get(1).copied().unwrap_or(n);
+                let valid = self.p.target(self.at, argument).is_some_and(|target| {
+                    let Target::Definition(id) = target else {
+                        return false;
+                    };
+                    let Some(Def::Fn(index)) = self.p.by_definition[id.0 as usize] else {
+                        return false;
+                    };
+                    let function = &self.p.fns[index as usize];
+                    function.generics.iter().all(|generic| generic.region)
+                });
+                if !valid {
+                    self.refuse(
+                        "PROG-9",
+                        argument,
+                        "code.describe requires a top-level non-generic function name",
+                    );
+                } else {
+                    self.gap(n, "code descriptor lowering is not built");
+                }
+                Some(None)
+            }
+            _ => None,
+        }
     }
 
     fn runtime_kernel(

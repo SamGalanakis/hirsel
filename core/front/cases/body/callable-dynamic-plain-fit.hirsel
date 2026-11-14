@@ -1,0 +1,49 @@
+// LANG-13: all callable code takes env first; plain fits as (code, null).
+// No admission occurs, including viewed, returned and passed dynamic values.
+// expect: run checked() = 16
+// expect: run passed() = 16
+// expect: run aggregate() = 43
+// expect: run captured() = 9
+fn plus(x:u64)->u64 {x+1}
+fn choose(c:bool)->fn(u64)->u64 {if c {plus}else{fn(x:u64)->u64{x+2}}}
+fn owning(code:fn(u64)->u64)->u64 {let f:own fn(u64)->u64=code;f(1)}
+fn scoped_fit(code:fn(u64)->u64)->u64 {let f:scoped fn(u64)->u64=code;f(1)}
+fn viewed(code:fn(u64)->u64)->u64 {let f:scoped fn(u64)->u64=view code;f(1)}
+fn viewed_own(code:fn(u64)->u64)->u64 {let f:own fn(u64)->u64=view code;f(1)}
+fn send_fit(code:fn(u64)->u64)->u64 {let f:own[send] fn(u64)->u64=code;f(1)}
+fn return_own(code:fn(u64)->u64)->own fn(u64)->u64 {code}
+fn return_scoped(code:fn(u64)->u64)->(scoped fn(u64)->u64) in code {code}
+fn checked()->u64 {
+ let code=choose(true)
+ let r:Result[u64,Capacity]=bound bytes 0 {
+  let f=return_own(code)
+  let s=return_scoped(code)
+  owning(code)+scoped_fit(code)+viewed(code)+viewed_own(code)+send_fit(code)+f(1)+s(1)+code(1)
+ }
+ result.unwrap(r)
+}
+fn own_arg(f:own fn(u64)->u64)->u64 {f(3)}
+fn scoped_arg(f:scoped fn(u64)->u64)->u64 {f(3)}
+fn own_take(take f:own fn(u64)->u64)->u64 {f(3)}
+fn passed()->u64 {
+ let code=choose(true)
+ own_arg(code)+scoped_arg(code)+scoped_arg(view code)+own_take(code)
+}
+type Pair {value:u64}
+fn identity[T:plain](x:T)->T {x}
+fn generic_fit[T:plain](code:fn(T)->T,x:T)->T {let f:own fn(T)->T=code;f(x)}
+fn generic_arg[T:plain](f:scoped fn(T)->T,x:T)->T {f(x)}
+fn aggregate()->u64 {
+ let code:fn(Pair)->Pair=identity
+ let f:own fn(Pair)->Pair=code
+ let a=f(Pair(value:10))
+ let b=generic_fit(code,Pair(value:11))
+ let c=generic_arg(code,Pair(value:22))
+ a.value+b.value+c.value
+}
+fn captured()->u64 {
+ let code=choose(false)
+ let f:own fn(u64)->u64=result.unwrap(fn(x:u64)->u64{let g:scoped fn(u64)->u64=code;g(x)})
+ f(7)
+}
+pub fn main()->Result[(),Exit] {if checked()==16u64 && passed()==16u64 && aggregate()==43u64 && captured()==9u64 {Ok(())}else{Error(Exit(status:1))}}

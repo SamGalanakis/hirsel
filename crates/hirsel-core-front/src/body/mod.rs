@@ -1292,14 +1292,8 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         let callable = matches!((self.t.kind(t), self.t.kind(w.ty)),
             (TyKind::Fn(a, ar, aw, ak), TyKind::Fn(b, br, bw, bk))
                 if a == b && ar == br && (ak == bk || matches!((ak,bk), (Callable::OwnSend, Callable::Own))) && (!aw || *bw))
-            || scoped_callable;
-        if matches!((self.t.kind(self.bare(t)), self.t.kind(self.bare(w.ty))),
-            (TyKind::Fn(a, ar, aw, Callable::Plain), TyKind::Fn(b, br, bw, Callable::Own | Callable::OwnSend | Callable::Scoped))
-                if a == b && ar == br && (!aw || *bw))
-        {
-            self.gap(n, "callable kind conversions are not built");
-            return;
-        }
+            || scoped_callable
+            || self.plain_callable_fit(t, w.ty);
         if !callable
             && matches!(
                 (self.t.kind(t), self.t.kind(w.ty)),
@@ -1796,9 +1790,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             vec![]
         };
         let mut k = usize::from(self.dest.is_some());
-        if let Some(frame) = &mut self.capture_frame
-            && frame.has_environment
-        {
+        if let Some(frame) = &mut self.capture_frame {
             frame.environment = entry_params.get(k).copied();
             k += 1;
         }
@@ -2010,6 +2002,14 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             t = payload;
             v = value;
             self.anchor_payload(n, t, v);
+        }
+        if let Some(w) = want.filter(|w| w.payload == 0)
+            && t != w.ty
+            && self.plain_callable_fit(t, w.ty)
+        {
+            v = self.fit_plain_callable(v, w.ty, n);
+            t = w.ty;
+            self.synth_ty = t;
         }
         if let Some(w) = want.filter(|w| w.payload == 0)
             && self.scoped_callable_view(t, w.ty)

@@ -55,6 +55,9 @@
 //!   charged, MEM-24) and its glue cleans the captures in reverse, frees the block
 //!   and refunds it. A captureless `own fn` has a null environment. Captures hold
 //!   no resource, so this cleanup never fails and runs no finalizer.
+//!   Every callable code pointer takes the environment pointer first; a plain
+//!   `fn` value's code receives null and ignores it, so a plain `fn` fits `own fn`
+//!   and `scoped fn` as `(code, null)`.
 //! - Providers (CAP-5): a provider operation is a closed runtime row (below,
 //!   "Providers"), a cancellation point when it `waits` (so it can fail),
 //!   admitting nothing. `HostFile` is a mechanical resource that is not a
@@ -513,6 +516,8 @@
 //! channel charges are admitted whole at `rt.spawn` and `rt.channel_new` (queue,
 //! result slot, record, primary cell and the child's limit), so send, receive and
 //! join admit nothing. A refused spawn returns null with `x` still the caller's.
+//! Its plain callable code is invoked with a null environment before `x`, after
+//! the result destination when present, using `x` and `r`'s concrete carriage.
 //! `rt.join` writes the result, or returns a `Causes` that owns the child's used
 //! cells until it is dropped (`JoinError = Failed(Causes) | Cancelled(Causes)`).
 //!

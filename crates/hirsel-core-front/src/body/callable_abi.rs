@@ -7,7 +7,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         &mut self,
         params: &[(Mode, TyId)],
         result: TyId,
-        environment: bool,
         buffer: &mut Vec<Param>,
     ) -> Result<SigId, &'static str> {
         #[cfg(test)]
@@ -19,10 +18,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             params: vec![],
             result: true,
         };
-        if environment {
-            buffer.push(Param::Value(Ty::Ptr));
-            abi.params.push(false);
-        }
+        buffer.push(Param::Value(Ty::Ptr));
+        abi.params.push(false);
         for &(mode, ty) in params {
             let rep = self.rep(ty)?;
             let p = if mode == Mode::Mut {
@@ -110,25 +107,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return None;
             }
         };
-        let environment =
-            matches!(self.t.kind(ty), TyKind::Fn(_, _, _, k) if *k != Callable::Plain);
-        self.callable_adapter(raw, Some((item, types)), ty, environment, n)
+        self.callable_adapter(raw, Some((item, types)), ty, n)
     }
-    pub(super) fn row_adapter(
-        &mut self,
-        raw: FuncId,
-        ty: TyId,
-        environment: bool,
-        n: NodeId,
-    ) -> Option<FuncId> {
-        self.callable_adapter(raw, None, ty, environment, n)
+    pub(super) fn row_adapter(&mut self, raw: FuncId, ty: TyId, n: NodeId) -> Option<FuncId> {
+        self.callable_adapter(raw, None, ty, n)
     }
     fn callable_adapter(
         &mut self,
         raw: FuncId,
         item: Option<(usize, &[TyId])>,
         ty: TyId,
-        environment: bool,
         n: NodeId,
     ) -> Option<FuncId> {
         if !self.live() {
@@ -143,7 +131,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return None;
             }
         }
-        let signature = match self.indirect_signature(&params, result, environment, &mut vec![]) {
+        let signature = match self.indirect_signature(&params, result, &mut vec![]) {
             Ok(signature) => signature,
             Err(what) => {
                 self.gap(n, what);
@@ -205,15 +193,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let incoming = child.block_params(block);
         let has_dest = child.e.module.signatures[signature.index()].dest.is_some();
         let mut k = usize::from(has_dest);
-        let env = if environment {
-            let env = incoming[k];
-            k += 1;
-            Some(env)
-        } else {
-            None
-        };
+        let env = incoming[k];
+        k += 1;
         let mut values = Vec::with_capacity(params.len());
-        let mut parameter = usize::from(environment);
+        let mut parameter = 1;
         for &(mode, ty) in &params {
             let rep = child.rep(ty).ok()?;
             if mode != Mode::Mut && matches!(rep, Rep::None) {
@@ -249,7 +232,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 child.emit_call(f, types, &values, result, n)
             }
         } else {
-            child.adapter_call(raw, env, &params, &values, result, n)
+            child.adapter_call(raw, Some(env), &params, &values, result, n)
         };
         if child.live() {
             if result == NEVER {

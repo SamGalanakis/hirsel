@@ -1116,10 +1116,11 @@ impl Machine<'_> {
                 let f = FuncId((a[2] - FN_BASE) as u32);
                 let xc = self.m.types[x.index()].carried;
                 let rc = self.m.types[r.index()].carried;
-                let mut args = Vec::with_capacity(2);
+                let mut args = Vec::with_capacity(3);
                 if matches!(rc, Carried::Address) {
                     args.push(rb)
                 }
+                args.push(0); // A plain callable's environment.
                 match xc {
                     Carried::Address => args.push(xb),
                     Carried::Value(t) => args.push(self.load(xb, bytes_of(t))),

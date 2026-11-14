@@ -33,6 +33,43 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         || *kind == Callable::Scoped && self.is_view(from)))
     }
 
+    #[inline(always)]
+    pub(super) fn plain_callable_fit(&self, from: TyId, to: TyId) -> bool {
+        if from.0 <= HOLE.0 || to.0 <= HOLE.0 {
+            return false;
+        }
+        if !matches!(
+            self.t.kind(to),
+            TyKind::Fn(
+                _,
+                _,
+                _,
+                Callable::Own | Callable::OwnSend | Callable::Scoped
+            )
+        ) {
+            return false;
+        }
+        matches!((self.t.kind(self.bare(from)), self.t.kind(to)),
+            (TyKind::Fn(a, ar, aw, Callable::Plain), TyKind::Fn(b, br, bw, Callable::Own | Callable::OwnSend | Callable::Scoped))
+                if a == b && ar == br && (!aw || *bw))
+    }
+
+    pub(super) fn fit_plain_callable(
+        &mut self,
+        value: Option<ValueId>,
+        to: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let value = value.and_then(|code| self.captureless_callable(code, n));
+        if matches!(
+            self.t.kind(to),
+            TyKind::Fn(_, _, _, Callable::Own | Callable::OwnSend)
+        ) {
+            self.temp(to, value);
+        }
+        value
+    }
+
     pub(super) fn function_value(
         &mut self,
         f: usize,
@@ -106,16 +143,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         scratch
             .tys
             .extend(scratch.found.iter().map(|t| t.unwrap_or(ERROR)));
-        let mut ty = subst(&mut self.t, ty, &scratch.tys);
-        // A named item can use an environment-taking adapter without allocating
-        // an environment. Its code identity is known at this value's creation.
-        if let Some(w) = want.filter(|w| w.payload == 0)
-            && matches!((self.t.kind(ty), self.t.kind(w.ty)),
-                (TyKind::Fn(a, ar, aw, Callable::Plain), TyKind::Fn(b, br, bw, Callable::Own | Callable::OwnSend | Callable::Scoped))
-                    if a == b && ar == br && (!aw || *bw))
-        {
-            ty = w.ty;
-        }
+        let ty = subst(&mut self.t, ty, &scratch.tys);
         let Some(function) = self.item_adapter(f, &scratch.tys, ty, n) else {
             return (ty, None);
         };
@@ -125,17 +153,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             Some(result)
         } else {
             None
-        };
-        let value = match self.t.kind(ty) {
-            TyKind::Fn(_, _, _, Callable::Own | Callable::OwnSend) => {
-                let value = value.and_then(|code| self.empty_own_callable(code, n));
-                self.temp(ty, value);
-                value
-            }
-            TyKind::Fn(_, _, _, Callable::Scoped) => {
-                value.and_then(|code| self.scoped_value(code, &[], n))
-            }
-            _ => value,
         };
         (ty, value)
     }
@@ -213,7 +230,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 );
             }
         }
-        let abi = self.value_call_abi(ty, result, callable != Callable::Plain, n, scratch);
+        let abi = self.value_call_abi(ty, result, n, scratch);
         if let Some(abi) = abi {
             for j in abi.regions.start..abi.regions.start + abi.regions.len {
                 let i = self.callable_regions[j as usize] as usize;
@@ -309,7 +326,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             result
         };
         let (code, environment) = if callable == Callable::Plain {
-            (value, None)
+            (value, self.konst(Ty::Ptr, 0, n))
         } else {
             (
                 self.callable_word(value, 0, n),
@@ -342,9 +359,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         scratch.params.extend_from_slice(&params);
         scratch.vals.clear();
         scratch.vals.extend_from_slice(vals);
-        let abi = self.value_call_abi(ty, result, callable != Callable::Plain, n, &mut scratch);
+        let abi = self.value_call_abi(ty, result, n, &mut scratch);
         let (code, environment) = if callable == Callable::Plain {
-            (Some(value), None)
+            (Some(value), self.konst(Ty::Ptr, 0, n))
         } else {
             (
                 self.callable_word(Some(value), 0, n),
@@ -384,7 +401,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         &mut self,
         callable: TyId,
         result: TyId,
-        environment: bool,
         n: NodeId,
         scratch: &mut CallScratch,
     ) -> Option<CallableAbi> {
@@ -394,7 +410,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let signature = match self.indirect_signature(
                     &scratch.params,
                     result,
-                    environment,
                     &mut scratch.ir_params,
                 ) {
                     Ok(signature) => signature,
@@ -760,14 +775,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             by_slot: vec![None; self.vars.len()],
             captures: vec![],
             environment: None,
-            has_environment: environment,
             owning: !scoped,
             physical: 8,
             logical: 0,
             send: true,
         });
         std::mem::swap(&mut child.t, &mut self.t);
-        let signature = child.callable_signature(ty, environment);
+        let signature = child.callable_signature(ty);
         let row = signature.map(|signature| {
             let f = child.e.function(
                 &child.fd.path,
@@ -796,7 +810,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return (if refused { ERROR } else { ty }, None);
         }
         let raw = function.unwrap();
-        let Some(function) = self.row_adapter(raw, ty, frame.has_environment, n) else {
+        let Some(function) = self.row_adapter(raw, ty, n) else {
             return (ty, None);
         };
         let code = if self.live() {
@@ -825,7 +839,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     unreachable!()
                 };
                 let ty = self.t.mk(TyKind::Fn(ps, r, w, kind));
-                let v = code.and_then(|code| self.empty_own_callable(code, n));
+                let v = code.and_then(|code| self.captureless_callable(code, n));
                 self.temp(ty, v);
                 return (ty, v);
             }
@@ -856,11 +870,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.owning_value(callable, code, &frame, n)
     }
 
-    fn callable_signature(&mut self, ty: TyId, environment: bool) -> Result<SigId, &'static str> {
+    fn callable_signature(&mut self, ty: TyId) -> Result<SigId, &'static str> {
         let TyKind::Fn(ps, result, _, _) = self.t.kind(ty).clone() else {
             unreachable!()
         };
-        self.indirect_signature(&ps, result, environment, &mut vec![])
+        self.indirect_signature(&ps, result, &mut vec![])
     }
 }
 
@@ -879,7 +893,6 @@ pub(super) struct CaptureFrame {
     by_slot: Vec<Option<usize>>,
     captures: Vec<Capture>,
     pub(super) environment: Option<ValueId>,
-    pub(super) has_environment: bool,
     owning: bool,
     physical: u64,
     logical: u64,
@@ -1146,24 +1159,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 );
             }
         }
-        if owning && !self.capture_frame.as_ref().unwrap().has_environment && self.live() {
-            let environment = self.value(Ty::Ptr);
-            let f = self.func.unwrap();
-            let mut signature = self.e.module.signatures
-                [self.e.module.functions[f.index()].signature.index()]
-            .clone();
-            signature.params.insert(0, Param::Value(Ty::Ptr));
-            let old = self.e.module.functions[f.index()].signature;
-            let mut abi = self.e.signature_abis.get(&old).cloned().unwrap_or_default();
-            abi.params.insert(0, false);
-            self.e.module.functions[f.index()].signature = self.e.sig_abi(signature, abi);
-            let mut params = self.block_params(BlockId(0));
-            params.insert(usize::from(self.dest.is_some()), environment);
-            self.b.blocks[0].params = PoolRange::push(&mut self.b.pools.values, params);
-            let frame = self.capture_frame.as_mut().unwrap();
-            frame.environment = Some(environment);
-            frame.has_environment = true;
-        }
         let (size, align, logical) = match self.rep(original.ty) {
             Ok(Rep::None) => (0, 1, 0),
             Ok(Rep::Scalar(ty)) => {
@@ -1385,6 +1380,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.inst(Inst::Store { address, value }, n);
     }
     fn scoped_value(&mut self, code: ValueId, captures: &[Capture], n: NodeId) -> Option<ValueId> {
+        if captures.is_empty() {
+            return self.captureless_callable(code, n);
+        }
         let environment = self.raw_frame(captures.len(), n)?;
         for (i, capture) in captures.iter().enumerate() {
             let pointer = self.capture_address(capture.slot, n)?;
@@ -1696,7 +1694,7 @@ impl Descriptors {
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
-    fn empty_own_callable(&mut self, code: ValueId, n: NodeId) -> Option<ValueId> {
+    fn captureless_callable(&mut self, code: ValueId, n: NodeId) -> Option<ValueId> {
         let carrier = self.raw_frame(2, n)?;
         let null = self.konst(Ty::Ptr, 0, n)?;
         self.store_word(carrier, 0, code, n);
@@ -1946,17 +1944,13 @@ mod cache_tests {
             ..Default::default()
         };
         let n = cx.item.root;
-        let first = cx
-            .value_call_abi(callable, value, false, n, &mut scratch)
-            .unwrap();
+        let first = cx.value_call_abi(callable, value, n, &mut scratch).unwrap();
         assert_eq!(
             cx.callable_signatures.len(),
             1,
             "unused types took callable-cache slots"
         );
-        let again = cx
-            .value_call_abi(callable, value, false, n, &mut scratch)
-            .unwrap();
+        let again = cx.value_call_abi(callable, value, n, &mut scratch).unwrap();
         assert_eq!(again.signature, first.signature);
         assert_eq!(cx.callable_reps.len(), 1);
         assert_eq!(cx.callable_signatures.len(), 1);

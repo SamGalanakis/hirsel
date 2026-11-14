@@ -455,17 +455,27 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         self.use_place(at, Use::Mut(Hold::CallMut(call)), e);
                         self.arg_ty_rooted(pt, at.ty, e, found, roots);
                         if self.live()
+                            && at.ty.0 > HOLE.0
                             && matches!(
                                 self.t.kind(self.bare(at.ty)),
-                                TyKind::Fn(_, _, _, Callable::Own | Callable::OwnSend)
+                                TyKind::Fn(
+                                    _,
+                                    _,
+                                    _,
+                                    Callable::Plain | Callable::Own | Callable::OwnSend
+                                )
                             )
                             && let Some(expected) = self.known_rooted(pt, found, roots)
-                            && self.scoped_callable_view(at.ty, expected)
+                            && (self.plain_callable_fit(at.ty, expected)
+                                || matches!(
+                                    self.t.kind(self.bare(at.ty)),
+                                    TyKind::Fn(_, _, _, Callable::Own | Callable::OwnSend)
+                                ) && self.scoped_callable_view(at.ty, expected))
                         {
                             self.refuse(
                                 "OWN-8",
                                 e,
-                                "an owning callable fits scoped only as a view",
+                                "a callable kind fit cannot borrow a different carrier as mut",
                             );
                             return true;
                         }
@@ -502,6 +512,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     _ => v,
                 };
                 self.arg_ty_rooted(pt, t, e, found, roots);
+                if t.0 > HOLE.0
+                    && matches!(
+                        self.t.kind(self.bare(t)),
+                        TyKind::Fn(_, _, _, Callable::Plain)
+                    )
+                    && let Some(expected) = self.known_rooted(pt, found, roots)
+                    && self.plain_callable_fit(t, expected)
+                {
+                    *val = self.fit_plain_callable(*val, expected, e);
+                }
                 true
             }
             Mode::View | Mode::Take if unary.is_none() => {
@@ -563,6 +583,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     *val = self.read_plain_view(t, *val, e);
                 }
                 self.arg_ty_rooted(pt, t, e, found, roots);
+                if t.0 > HOLE.0
+                    && matches!(
+                        self.t.kind(self.bare(t)),
+                        TyKind::Fn(_, _, _, Callable::Plain)
+                    )
+                    && let Some(expected) = self.known_rooted(pt, found, roots)
+                    && self.plain_callable_fit(t, expected)
+                {
+                    *val = self.fit_plain_callable(*val, expected, e);
+                }
                 true
             }
             _ => false,
@@ -820,7 +850,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.unify_part(pt, b, s, roots)
             }
             (TyKind::Fn(a, ar, aw, ak), TyKind::Fn(b, br, bw, bk))
-                if ak == bk && a.len() == b.len() && (!bw || aw) =>
+                if (ak == bk
+                    || bk == Callable::Plain
+                        && matches!(ak, Callable::Own | Callable::OwnSend | Callable::Scoped))
+                    && a.len() == b.len()
+                    && (!bw || aw) =>
             {
                 a.iter()
                     .zip(&b)

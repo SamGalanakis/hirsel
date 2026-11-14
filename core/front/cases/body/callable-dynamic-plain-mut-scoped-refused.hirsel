@@ -1,0 +1,6 @@
+// OWN-8: kind fitting forms a new carrier, never a mutable loan of plain code.
+// expect: refuse OWN-8 at 5:8
+fn reset(mut f:scoped fn(u64)->u64) {f=fn(x:u64)->u64{x}}
+fn caller(mut code:fn(u64)->u64) {
+ reset(mut code)
+}

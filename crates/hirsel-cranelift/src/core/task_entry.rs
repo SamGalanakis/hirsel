@@ -89,7 +89,7 @@ impl Glues {
                 .iadd_imm(ps[2], input_offset(tables.input, tables.layouts, x)? as i64);
             let xc = tables.input.types[x.index()].carried;
             let rc = tables.input.types[r.index()].carried;
-            let sig = c::Signature {
+            let mut sig = c::Signature {
                 params: match xc {
                     // The task takes its input (RtOp::Spawn).
                     Carried::Address => vec![Param::Address {
@@ -106,13 +106,16 @@ impl Glues {
                 dest: matches!(rc, Carried::Address).then_some(r),
                 never: false,
             };
+            sig.params.insert(0, Param::Value(Ty::Ptr));
             let abi = abi::Signature::new(&sig);
             let signature = b.import_signature(abi.clif.clone());
-            let mut args = Vec::with_capacity(3);
+            let mut args = Vec::with_capacity(4);
             args.push(ps[0]);
             if matches!(rc, Carried::Address) {
                 args.push(ps[1]);
             }
+            let environment = b.ins().iconst(types::I64, 0);
+            args.push(environment);
             match xc {
                 Carried::Address => args.push(data),
                 Carried::Value(t) => {

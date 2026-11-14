@@ -75,6 +75,7 @@ pub(super) fn emit(
         if matches!(rc, Carried::Address) {
             args.push("ptr %result".into())
         }
+        args.push("ptr null".into());
         match xc {
             Carried::Address => args.push(format!("ptr {data}")),
             Carried::Value(t) => {

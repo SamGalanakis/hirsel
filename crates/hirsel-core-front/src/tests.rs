@@ -2839,7 +2839,6 @@ fn owning_callable_scoped_views() {
         "callable-own-scoped-lifetime.hirsel",
         "callable-own-scoped-return-refused.hirsel",
         "callable-own-scoped-temporary-return-refused.hirsel",
-        "callable-dynamic-plain-fit-gap.hirsel",
         "callable-own-scoped-mut-gap.hirsel",
     ] {
         failures.extend(run_case(&root().join("cases/body").join(case)));
@@ -3024,4 +3023,19 @@ fn run() -> u64 {
     assert!(!instance.body.as_ref().unwrap().slots.iter().any(|ty| matches!(ty,
         PlaceTy::Declared(id) if emitter.module.types[id.index()].name == "core@1/core/Order"
     )), "a word-carried comparator result stays in SSA");
+}
+
+#[test]
+fn dynamic_plain_callable_fits() {
+    let mut failures = vec![];
+    for name in [
+        "callable-dynamic-plain-fit",
+        "callable-dynamic-plain-mut-own-refused",
+        "callable-dynamic-plain-mut-scoped-refused",
+    ] {
+        failures.extend(run_case(
+            &root().join("cases/body").join(format!("{name}.hirsel")),
+        ));
+    }
+    assert!(failures.is_empty(), "{failures:?}");
 }

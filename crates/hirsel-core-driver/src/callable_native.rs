@@ -184,3 +184,22 @@ fn scoped_result_regions_cranelift(){scoped_result_regions(Backend::Cranelift);}
 #[test]
 #[ignore="explicit native integration target"]
 fn scoped_result_regions_llvm(){scoped_result_regions(Backend::Llvm);}
+
+fn dynamic_plain_callable_fits(backend: Backend) {
+    ordered_case(backend, include_str!("../../../core/front/cases/body/callable-dynamic-plain-fit.hirsel"));
+    let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir=tempfile::tempdir().unwrap();
+    let mut request=source_request(include_str!("../../../core/front/cases/body/callable-capability-spawn.hirsel"),dir.path());
+    request.inputs.packages[1]=PackageManifest::directory(&root.join("core/core"),package("core"),true).unwrap();
+    let product=Driver::default().check(request,&mut Meter::new(false)).unwrap();
+    let mut options=native_options(backend,dir.path());
+    options.grant_mask=(1<<9)|(1<<4);
+    let built=product.build(&DefPath::from_full("app@1/main/main").unwrap(),&options).unwrap();
+    run_clean(&built.executable,0);
+}
+#[test]
+#[ignore="explicit native integration target"]
+fn dynamic_plain_callable_fits_cranelift(){dynamic_plain_callable_fits(Backend::Cranelift);}
+#[test]
+#[ignore="explicit native integration target"]
+fn dynamic_plain_callable_fits_llvm(){dynamic_plain_callable_fits(Backend::Llvm);}

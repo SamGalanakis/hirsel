@@ -74,20 +74,29 @@ impl FunctionEmitter<'_> {
                     ("i8 zeroext".into(), kind.to_string()),
                 ],
             );
-            // #93 installs exactly vN and leaves length unchanged. Use those
-            // known words when copying back, including the refusal identity.
             let block = self.calc(format!("extractvalue {{ ptr, i64 }} {pair}, 0"));
             let room = self.calc(format!("extractvalue {{ ptr, i64 }} {pair}, 1"));
             let present = self.calc(format!("icmp ne ptr {block}, null"));
-            let data = self.calc(format!("select i1 {present}, ptr {block}, ptr {old}"));
-            let returned_capacity =
-                self.calc(format!("select i1 {present}, i64 {capacity}, i64 {cap}"));
-            self.store_native(at, 0, "ptr", &data);
-            self.store_native(at, 16, "i64", &returned_capacity);
+            self.likely(
+                &present,
+                &format!("grow_native_copy{n}"),
+                &format!("grow_native_refused{n}"),
+            );
+            writeln!(self.code, "grow_native_copy{n}:").unwrap();
+            // Read the helper's carrier word to avoid threading the requested
+            // operand through loop-carried values; publish #93's fact on success.
+            let grown_capacity = self.load_native(&shadow, 16, "i64");
+            if self.facts {
+                let exact = self.calc(format!("icmp eq i64 {grown_capacity}, {capacity}"));
+                self.runtime_void("llvm.assume", &[("i1".into(), exact)]);
+            }
+            self.store_native(at, 0, "ptr", &block);
+            self.store_native(at, 16, "i64", &grown_capacity);
+            self.runtime_void("llvm.lifetime.end.p0", &[("ptr".into(), shadow.clone())]);
+            self.line(format!("br label %grow_done{n}"));
+            writeln!(self.code, "grow_native_refused{n}:").unwrap();
             self.runtime_void("llvm.lifetime.end.p0", &[("ptr".into(), shadow)]);
-            self.line(format!(
-                "br i1 {present}, label %grow_done{n}, label %grow_refused{n}"
-            ));
+            self.line(format!("br label %grow_refused{n}"));
             writeln!(self.code, "grow_classic{n}:").unwrap();
             Some((block, room))
         } else {
@@ -131,7 +140,7 @@ impl FunctionEmitter<'_> {
         writeln!(self.code, "grow_refused{n}:").unwrap();
         let mut refused = format!("[{room}, %grow_allocated{n}]");
         if let Some((_, room)) = &native {
-            write!(refused, ", [{room}, %grow_native{n}]").unwrap();
+            write!(refused, ", [{room}, %grow_native_refused{n}]").unwrap();
         }
         let room = self.calc(format!("phi i64 {refused}"));
         self.intrinsics
@@ -147,8 +156,8 @@ impl FunctionEmitter<'_> {
         let mut pointers = format!("[{block}, %grow_copied{n}], [null, %grow_refused_done{n}]");
         let mut rooms = format!("[0, %grow_copied{n}], [{room}, %grow_refused_done{n}]");
         if let Some((block, _)) = native {
-            write!(pointers, ", [{block}, %grow_native{n}]").unwrap();
-            write!(rooms, ", [0, %grow_native{n}]").unwrap();
+            write!(pointers, ", [{block}, %grow_native_copy{n}]").unwrap();
+            write!(rooms, ", [0, %grow_native_copy{n}]").unwrap();
         }
         let block = self.calc(format!("phi ptr {pointers}"));
         let room = self.calc(format!("phi i64 {rooms}"));

@@ -2,10 +2,15 @@
 // Record mode runs each call and appends an entry; replay mode runs it again and
 // compares it with the entry at the cursor (Temporal's replay check). A provider
 // read (the clock) is the exception: replay returns the recorded value and asks
-// the host nothing. An entry names its function by the identity bytes of a
-// `StaticFn` (PROG-9), never by a typed-in string. Library code, never std.
+// the host nothing. An entry names its function by a `StaticFn` (PROG-9), never by a
+// typed-in string. Library code, never std.
+//
+// One StaticFn type per callable type: a recorded call, the clock read and the sleep
+// have three, so the entry's code is a sum of the three.
+pub type Code = Call(StaticFn[Recorded]) | Now(StaticFn[fn(Clock) -> u64]) | Sleep(StaticFn[fn(Clock, u64) waits])
+
 pub type Entry {
-    code: Bytes,
+    code: Code,
     arg: Bytes,
     outcome: Bytes
 }
@@ -113,8 +118,8 @@ fn outcome_bytes(r: Result[Bytes, Capacity]) -> Result[Bytes, Diverged] {
     Ok(b)
 }
 
-fn record(mut j: Journal, code: Bytes, arg: Bytes, take outcome: Bytes) -> Result[(), Diverged] {
-    let e = Entry(code: owned(code)?, arg: owned(arg)?, outcome: take outcome)
+fn record(mut j: Journal, code: Code, arg: Bytes, take outcome: Bytes) -> Result[(), Diverged] {
+    let e = Entry(code: code, arg: owned(arg)?, outcome: take outcome)
     match list.push(mut j.entries, take e) {
         Ok(()) => Ok(()),
         Error((c, _)) => Error(Full(c)),
@@ -123,12 +128,21 @@ fn record(mut j: Journal, code: Bytes, arg: Bytes, take outcome: Bytes) -> Resul
 
 // The replay check common to every recorded operation: the entry at the cursor
 // must exist and name the same code and argument. Returns its index and advances.
-fn expect(mut j: Journal, code: Bytes, arg: Bytes) -> Result[u64, Diverged] {
+fn same(a: Code, b: Code) -> bool {
+    match (a, b) {
+        (Call(x), Call(y)) => x == y,
+        (Now(x), Now(y)) => x == y,
+        (Sleep(x), Sleep(y)) => x == y,
+        _ => false,
+    }
+}
+
+fn expect(mut j: Journal, code: Code, arg: Bytes) -> Result[u64, Diverged] {
     let i = j.at
     match list.get(j.entries, i) {
         None => return Error(Missing(i)),
         Some(e) => {
-            if e.code != code {
+            if !same(e.code, code) {
                 return Error(Code(i))
             }
             if e.arg != arg {
@@ -140,13 +154,10 @@ fn expect(mut j: Journal, code: Bytes, arg: Bytes) -> Result[u64, Diverged] {
     Ok(i)
 }
 
-// Runs the call under the journal's bound. A refused allocation is an outcome,
-// recorded and compared like a result; only a mismatch is Diverged.
-// WORKAROUND (HOOK-FINDINGS R5): the intended signature takes one `s: StaticFn[Recorded]`
-// and uses `code.identity(s)` and `code.callable(s)`; neither is built for a StaticFn
-// that is a parameter, so the caller passes `code.identity(code.describe(f))` and `f`,
-// and nothing checks that the two name the same function.
-pub fn call(mut j: Journal, id: Bytes, f: Recorded, arg: Bytes) -> Result[Result[Bytes, Capacity], Diverged] {
+// Runs the call named by `s` under the journal's bound. A refused allocation is an
+// outcome, recorded and compared like a result; only a mismatch is Diverged.
+pub fn call(mut j: Journal, s: StaticFn[Recorded], arg: Bytes) -> Result[Result[Bytes, Capacity], Diverged] {
+    let f = code.callable(s)
     let r: Result[Bytes, Capacity] = match (bound bytes j.limit { f(arg) }) {
         Ok(Ok(take o)) => Ok(take o),
         Ok(Error(c)) => Error(c),
@@ -154,7 +165,7 @@ pub fn call(mut j: Journal, id: Bytes, f: Recorded, arg: Bytes) -> Result[Result
     }
     let out = outcome_bytes(r)?
     if j.replay {
-        let i = expect(mut j, id, arg)?
+        let i = expect(mut j, Call(s), arg)?
         match list.get(j.entries, i) {
             Some(e) => if e.outcome != out {
                 return Error(Outcome(i))
@@ -162,7 +173,7 @@ pub fn call(mut j: Journal, id: Bytes, f: Recorded, arg: Bytes) -> Result[Result
             None => return Error(Missing(i)),
         }
     } else {
-        record(mut j, id, arg, take out)?
+        record(mut j, Call(s), arg, take out)?
     }
     Ok(r)
 }
@@ -172,7 +183,7 @@ pub fn now(mut j: Journal, c: Clock) -> Result[u64, Diverged] {
     let s = code.describe(host.wall_ms)
     let empty: Bytes = list.new()
     if j.replay {
-        let i = expect(mut j, code.identity(s), empty)?
+        let i = expect(mut j, Now(s), empty)?
         let stored = match list.get(j.entries, i) {
             Some(e) => get_u64(e.outcome, 0),
             None => None,
@@ -183,7 +194,7 @@ pub fn now(mut j: Journal, c: Clock) -> Result[u64, Diverged] {
         }
     }
     let t = host.wall_ms(c)
-    record(mut j, code.identity(s), empty, u64_bytes(t)?)?
+    record(mut j, Now(s), empty, u64_bytes(t)?)?
     Ok(t)
 }
 
@@ -193,11 +204,11 @@ pub fn sleep(mut j: Journal, c: Clock, ns: u64) -> Result[(), Diverged] waits {
     let s = code.describe(std.clock.sleep_ns)
     let arg = u64_bytes(ns)?
     if j.replay {
-        let _ = expect(mut j, code.identity(s), arg)?
+        let _ = expect(mut j, Sleep(s), arg)?
         return Ok(())
     }
     std.clock.sleep_ns(c, ns)
-    record(mut j, code.identity(s), arg, list.new())
+    record(mut j, Sleep(s), arg, list.new())
 }
 
 // A failure's outcome bytes: tag 2 and its primary cause's kind (FAIL-2 order, 1..7),
@@ -227,7 +238,8 @@ fn failure_bytes(causes: Causes) -> Result[Bytes, Diverged] {
 // `call` for a callee that may fail: the call runs inside `isolate` (FAIL-16), so a
 // failure is an outcome, recorded as its primary cause and compared like the others:
 // a replay that fails with another cause is Outcome. The caller gets the Causes.
-pub fn call_isolated(mut j: Journal, id: Bytes, f: Recorded, arg: Bytes) -> Result[Result[Result[Bytes, Capacity], Causes], Diverged] {
+pub fn call_isolated(mut j: Journal, s: StaticFn[Recorded], arg: Bytes) -> Result[Result[Result[Bytes, Capacity], Causes], Diverged] {
+    let f = code.callable(s)
     let limit = j.limit
     let caught = match isolate(fn() -> Result[Result[Bytes, Capacity], Capacity] { bound bytes limit { f(arg) } }) {
         Ok(take x) => x,
@@ -244,7 +256,7 @@ pub fn call_isolated(mut j: Journal, id: Bytes, f: Recorded, arg: Bytes) -> Resu
         Error(causes) => failure_bytes(causes)?,
     }
     if j.replay {
-        let i = expect(mut j, id, arg)?
+        let i = expect(mut j, Call(s), arg)?
         match list.get(j.entries, i) {
             Some(e) => if e.outcome != out {
                 return Error(Outcome(i))
@@ -252,7 +264,7 @@ pub fn call_isolated(mut j: Journal, id: Bytes, f: Recorded, arg: Bytes) -> Resu
             None => return Error(Missing(i)),
         }
     } else {
-        record(mut j, id, arg, take out)?
+        record(mut j, Call(s), arg, take out)?
     }
     Ok(take r)
 }

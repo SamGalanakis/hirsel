@@ -5,12 +5,6 @@ fn divide(b: Bytes) -> Result[Bytes, Capacity] {
     Ok(list.new())
 }
 
-fn overflow(b: Bytes) -> Result[Bytes, Capacity] {
-    let top: u64 = 18446744073709551615
-    let _ = top + 1 + list.len(b)
-    Ok(list.new())
-}
-
 fn code_of(take d: m2b.journal.Diverged) -> u64 {
     match take d {
         Missing(i) => 100 + i,
@@ -40,9 +34,9 @@ fn failed(take r: Result[Result[Bytes, Capacity], Causes]) -> u64 {
 pub fn fails() -> Result[u64, m2b.journal.Diverged] {
     let mut j = m2b.journal.recording(65536)
     let empty: Bytes = list.new()
-    let a = failed(m2b.journal.call_isolated(mut j, code.identity(code.describe(divide)), divide, empty)?)
+    let a = failed(m2b.journal.call_isolated(mut j, code.describe(divide), empty)?)
     m2b.journal.rewind(mut j)
-    let b = failed(m2b.journal.call_isolated(mut j, code.identity(code.describe(divide)), divide, empty)?)
+    let b = failed(m2b.journal.call_isolated(mut j, code.describe(divide), empty)?)
     m2b.journal.finish(j)?
     let outcome: u64 = match list.get(j.entries, 0) {
         Some(e) => if list.len(e.outcome) == 2 {
@@ -57,14 +51,27 @@ pub fn fails() -> Result[u64, m2b.journal.Diverged] {
     Ok(list.len(j.entries) * 10000 + a * 1000 + b * 100 + outcome)
 }
 
-// The same identity with a changed body (PROG-9: a body change keeps the identity),
-// which now fails with Overflow where Division was recorded: replay reports Outcome(0).
+// A journal recorded by an older body of divide (PROG-9: a body change keeps the
+// identity) that failed with Overflow: entry 0's outcome is set to the Overflow failure
+// (tag 2, kind 1). Replay fails with Division: Outcome(0).
 pub fn cause_changed() -> Result[u64, m2b.journal.Diverged] {
     let mut j = m2b.journal.recording(65536)
     let empty: Bytes = list.new()
-    let _ = m2b.journal.call_isolated(mut j, code.identity(code.describe(divide)), divide, empty)?
+    let _ = m2b.journal.call_isolated(mut j, code.describe(divide), empty)?
+    let code0 = match list.get(j.entries, 0) {
+        Some(e) => e.code,
+        None => return Ok(1),
+    }
+    let mut older: Bytes = list.new()
+    if let Error((cap, _)) = list.push(mut older, 2u8) {
+        return Error(Full(cap))
+    }
+    if let Error((cap, _)) = list.push(mut older, 1u8) {
+        return Error(Full(cap))
+    }
+    let _ = list.set(mut j.entries, 0, m2b.journal.Entry(code: code0, arg: list.new(), outcome: take older))
     m2b.journal.rewind(mut j)
-    let _ = m2b.journal.call_isolated(mut j, code.identity(code.describe(divide)), overflow, empty)?
+    let _ = m2b.journal.call_isolated(mut j, code.describe(divide), empty)?
     Ok(1)
 }
 

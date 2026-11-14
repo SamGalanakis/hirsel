@@ -1,0 +1,3 @@
+[
+  {"name": "generic_identity", "value": 1, "used": 0, "red": {"evaluator": "code.identity of a generic StaticFn[F] parameter is not built: 'static function identity dispatch is not built' (core-check-callables-913)", "cranelift": "code.identity of a generic StaticFn[F] parameter is not built: 'static function identity dispatch is not built' (core-check-callables-913)", "llvm": "code.identity of a generic StaticFn[F] parameter is not built: 'static function identity dispatch is not built' (core-check-callables-913)"}}
+]

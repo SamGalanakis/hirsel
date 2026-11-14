@@ -28,8 +28,8 @@ Entry 1's outcome is replaced by the one byte 0 (tag 0, empty result). Replay re
 compares only identities and arguments, or returns the stored outcome without re-running.
 
 ## changed_code = 201
-Replay passes `triple` and its identity where `double` was recorded at entry 1: `Code(1)`.
-Catches: identity bytes that do not depend on the function's name.
+Replay passes `code.describe(triple)` where `double` was recorded at entry 1: `Code(1)`.
+Catches: a `StaticFn` equality that does not depend on the function's name.
 
 ## changed_arg = 300
 Replay starts from "xy": entry 0's argument differs, `Arg(0)`.

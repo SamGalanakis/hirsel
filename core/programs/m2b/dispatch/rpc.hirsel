@@ -2,7 +2,7 @@
 // handler by `code.describe(rpc.handlers.f)` and never calls it; the server registers it.
 // `double` has the registry's type and is registered as itself. `repeat` takes a typed
 // argument, so it is registered through a byte adapter under its own identity: the key
-// says which function the request means, the adapter decodes for it (HOOK-FINDINGS S1).
+// says which function the request means, the adapter decodes for it (HOOK-FINDINGS S2).
 // rpc_changed.hirsel is this file with `repeat`'s count narrowed to u32.
 pub fn double(b: Bytes) -> Result[Bytes, Capacity] {
     let mut out: Bytes = list.new()
@@ -31,6 +31,6 @@ fn repeat_wire(a: Bytes) -> Result[Bytes, Capacity] {
 }
 
 pub fn register(mut r: m2b.spool.Registry) -> Result[(), m2b.spool.Failure] {
-    m2b.spool.register(mut r, code.identity(code.describe(double)), double)?
-    m2b.spool.register(mut r, code.identity(code.describe(repeat)), repeat_wire)
+    m2b.spool.register(mut r, code.describe(double))?
+    m2b.spool.register_as(mut r, code.identity(code.describe(repeat)), code.describe(repeat_wire))
 }

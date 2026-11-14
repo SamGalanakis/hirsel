@@ -19,6 +19,7 @@ failure that escapes the journal, a replayed failure reported as a divergence, a
 entry added on replay, a cause recorded as another kind.
 
 ## cause_changed = 400
-Replay passes `divide`'s identity with `overflow` as the callable, a body change that keeps
-the identity (PROG-9), and it fails with Overflow (2, 1) where Division (2, 3) was recorded:
-`Outcome(0)`. Catches: a journal that records only that a call failed.
+A journal recorded by an older body of `divide` (a body change keeps the identity, PROG-9)
+that failed with Overflow: after recording, entry 0's outcome is set to Overflow's (2, 1).
+Replay runs today's `divide`, which fails with Division (2, 3): `Outcome(0)`. Catches: a
+journal that records only that a call failed.

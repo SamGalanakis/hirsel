@@ -25,7 +25,8 @@ identities share `server@1/main/` with nothing registered, and `unknown`'s signa
 `double`'s apart from the package and name).
 
 ## solo_bad = 2
-A well-formed request for identity "abc" with an empty argument, whose identity length bytes
-3..10 are then rewritten to 1000 (byte 3 = 232, byte 4 = 3). The field claims 1000 bytes and
-three follow, so `parse` refuses it: `Bad`, without a lookup. Catches: a length that is
+A well-formed request for the server's `unknown` with "ab", whose identity length bytes 3..10
+are then rewritten to 1000 (byte 3 = 232, byte 4 = 3, the rest 0 as before). The field claims
+1000 bytes and fewer follow (the identity, about 110 bytes, and the argument), so `parse`
+refuses it: `Bad`, without a lookup. Catches: a length that is
 trusted past the end of the frame (a read out of bounds or a slice that fails).

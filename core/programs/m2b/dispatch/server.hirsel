@@ -54,9 +54,10 @@ fn nocode(d: Dir, c: Clock) -> Result[m2b.spool.Reply, m2b.spool.Failure] waits 
     solo(d, c, m2b.spool.request(code.identity(code.describe(unknown)), text("ab")?)?)
 }
 
-// "HQ", version 1, then an identity length of 1000 with three bytes after it.
+// A request for `unknown` with "ab", whose identity length is rewritten to 1000: the
+// field runs past the end of the frame.
 fn bad(d: Dir, c: Clock) -> Result[m2b.spool.Reply, m2b.spool.Failure] waits {
-    let frame = m2b.spool.request(text("abc")?, text("")?)?
+    let frame = m2b.spool.request(code.identity(code.describe(unknown)), text("ab")?)?
     let mut cut: Bytes = list.new()
     let mut i: u64 = 0
     while i < list.len(frame) {

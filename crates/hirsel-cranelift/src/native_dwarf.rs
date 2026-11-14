@@ -132,8 +132,8 @@ pub(crate) fn append(
             let row = lines.row();
             row.address_offset = start;
             row.file = file;
-            row.line = u64::from(at.line);
-            row.column = u64::from(at.column);
+            row.line = at.line;
+            row.column = at.column;
             lines.generate_row();
             end = Some(stop);
         }
@@ -157,7 +157,7 @@ pub(crate) fn append(
         );
         entry.set(
             gimli::DW_AT_decl_line,
-            AttributeValue::Udata(u64::from(declaration.line)),
+            AttributeValue::Udata(declaration.line),
         );
         entry.set(gimli::DW_AT_low_pc, AttributeValue::Address(address));
         entry.set(gimli::DW_AT_high_pc, AttributeValue::Udata(function.size));

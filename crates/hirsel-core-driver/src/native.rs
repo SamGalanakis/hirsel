@@ -283,7 +283,21 @@ impl CheckProduct {
         options: &NativeOptions,
     ) -> Result<BuildProduct, NativeStop> {
         let instances = reached.require()?;
-        let source = self.process_entry(entry, options)?;
+        let items = instances
+            .iter()
+            .flat_map(|instance| {
+                reached
+                    .materialized
+                    .get(instance)
+                    .ir()
+                    .items
+                    .iter()
+                    .cloned()
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let source = self.process_entry(entry, options, &items)?;
         let mut objects = self.emit_instances(entry, instances, &reached.materialized, options)?;
         if let Some(module) = &self.entry_binding(entry)?.cleanup {
             let store = Store::new(&options.store)?;
@@ -336,6 +350,7 @@ impl CheckProduct {
         &self,
         entry: &DefPath,
         options: &NativeOptions,
+        items: &[DefPath],
     ) -> Result<String, NativeStop> {
         let binding = self.entry_binding(entry)?;
         let EntryAbi {
@@ -358,6 +373,7 @@ impl CheckProduct {
                 .as_ref()
                 .map(|m| hirsel_cranelift::core::symbol(m.instances.last().unwrap())),
             options,
+            items,
         )
     }
 }
@@ -472,6 +488,7 @@ fn entry_source(
     parameters: &[EntryParameter],
     cleanup: Option<String>,
     options: &NativeOptions,
+    items: &[DefPath],
 ) -> Result<String, NativeStop> {
     let Layout::Fixed(layout) = &recipe.layout else {
         return Err(NativeStop::Entry("Result needs fixed layout".into()));
@@ -522,20 +539,31 @@ fn entry_source(
             .collect::<Vec<_>>()
             .join(",")
     };
-    let parameter_types = ", uint64_t".repeat(parameters.len());
+    let parameter_types = ", uint64_t".repeat(parameters.len() + 1);
     let grants = (0..parameters.len())
         .map(|i| format!(",cfg->grants[{i}]"))
         .collect::<String>();
     let cleanup_declaration = cleanup
         .as_ref()
-        .map(|name| format!("extern uint8_t {name}(HirselCoreContext *, void *);"))
+        .map(|name| format!("extern uint8_t {name}(HirselCoreContext *, void *, uint64_t);"))
         .unwrap_or_default();
     let cleanup_call = cleanup
         .as_ref()
-        .map(|name| format!("if({name}(ctx,result)) return 1;"))
+        .map(|name| format!("if({name}(ctx,result,0)) return 1;"))
         .unwrap_or_default();
     let limit = options.root_limit;
     let grant_mask = options.grant_mask;
+    let site_definitions = items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            format!(
+                "const uint64_t {} = UINT64_C({}) << 32;\n",
+                hirsel_core_ir::source::site_symbol(item),
+                i + 1
+            )
+        })
+        .collect::<String>();
     let observation_label = if options.logical_charge_report.is_some() {
         r#"__attribute__((used)) static const char hirsel_observation_build[] = "Hirsel observation build: timings are not performance samples";"#
     } else {
@@ -562,7 +590,7 @@ extern uint8_t {symbol}(HirselCoreContext *, void *{parameter_types});
 static uint8_t entry(HirselCoreContext *ctx, const HirselCoreProcessConfig *cfg, HirselCoreMainResult *out) {{
     (void)cfg;
     _Alignas({align}) uint8_t result[{size}];
-    uint8_t failed={symbol}(ctx,result{grants});
+    uint8_t failed={symbol}(ctx,result{grants},0);
     if(failed) return failed;
     uint64_t word=0; memcpy(&word,result+{at},{width});
     if(({case})==1) {{ {error} }}
@@ -572,6 +600,7 @@ static uint8_t entry(HirselCoreContext *ctx, const HirselCoreProcessConfig *cfg,
 static const HirselCoreEntryRequirement parameters[] = {{{requirements}}};
 static const HirselCoreView parameter_names[] = {{{parameter_names}}};
 static const HirselCoreView directories[] = {{{directories}}};
+{site_definitions}
 int main(int argc, char **argv) {{
     size_t n=(size_t)(argc-1);
     HirselCoreView *args=calloc(n ? n : 1,sizeof(*args));

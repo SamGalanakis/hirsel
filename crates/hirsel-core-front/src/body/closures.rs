@@ -386,12 +386,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         n: NodeId,
         scratch: &mut CallScratch,
     ) -> Option<CallableAbi> {
-        let abi = match self
-            .callable_signatures
-            .get(callable.0 as usize)
-            .copied()
-            .flatten()
-        {
+        let abi = match self.callable_signatures.get(&callable).copied() {
             Some(abi) => abi,
             None => {
                 let signature = match self.indirect_signature(
@@ -450,8 +445,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         (self.callable_regions.len() - roots) as u32,
                     ),
                 };
-                self.callable_signatures.resize(self.t.len(), None);
-                self.callable_signatures[callable.0 as usize] = Some(abi);
+                self.callable_signatures.insert(callable, abi);
                 abi
             }
         };
@@ -1844,5 +1838,49 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             fact = self.anchors.union(fact, captured);
         }
         fact
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[test]
+    fn callable_abi_cache_occupies_only_mentioned_types() {
+        let (index, modules) = crate::tests::program_inputs("fn only() -> u64 { 42 }\n");
+        let p = Program::declare(&index, &modules);
+        let f = p.fns.iter().position(|f| f.path.0.name == "only").unwrap();
+        let mut emitter = Emitter::new();
+        let mut cx = Cx::new(&p, f, &mut emitter);
+        for n in 1..65 {
+            cx.t.mk(TyKind::Array(UNIT, n));
+        }
+        let value = scalar(Scalar::U64);
+        let callable = cx.t.mk(TyKind::Fn(
+            vec![(Mode::View, value)],
+            value,
+            false,
+            Callable::Plain,
+        ));
+        assert!(callable.0 >= 64);
+        let mut scratch = CallScratch {
+            params: vec![(Mode::View, value)],
+            ..Default::default()
+        };
+        let n = cx.item.root;
+        let first = cx
+            .value_call_abi(callable, value, false, n, &mut scratch)
+            .unwrap();
+        assert_eq!(
+            cx.callable_signatures.len(),
+            1,
+            "unused types took callable-cache slots"
+        );
+        let again = cx
+            .value_call_abi(callable, value, false, n, &mut scratch)
+            .unwrap();
+        assert_eq!(again.signature, first.signature);
+        assert_eq!(cx.callable_reps.len(), 1);
+        assert_eq!(cx.callable_signatures.len(), 1);
     }
 }

@@ -1007,7 +1007,7 @@ struct Cx<'c, 'a, 'e> {
     numeric_sites: Vec<scalar_abi::NumericSite>,
     nested: std::collections::BTreeMap<FuncId, GenericTemplate>,
     call_seq: u32,
-    callable_signatures: Vec<Option<closures::CallableAbi>>,
+    callable_signatures: HashMap<TyId, closures::CallableAbi>,
     callable_reps: Vec<Rep>,
     callable_regions: Vec<u32>,
     /// Invocation parameters available while a closure header is being read.
@@ -1137,7 +1137,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             numeric_sites: vec![],
             nested: Default::default(),
             call_seq: 0,
-            callable_signatures: vec![],
+            callable_signatures: HashMap::default(),
             callable_reps: vec![],
             callable_regions: vec![],
             closure_header_params: vec![],

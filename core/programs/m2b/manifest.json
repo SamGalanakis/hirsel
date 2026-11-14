@@ -26,7 +26,7 @@
     },
     {
       "package": {"name": "app", "version": "1"},
-      "dependencies": [{"name": "core", "version": "1"}, {"name": "std", "version": "1"}, {"name": "m2b", "version": "1"}],
+      "dependencies": [{"name": "core", "version": "1"}, {"name": "std", "version": "1"}, {"name": "m2b", "version": "1"}, {"name": "lib", "version": "1"}],
       "sources": [
         {"file": "core/programs/m2b/replay/main.hirsel", "modules": ["main"], "signatures": false}
       ]
@@ -50,6 +50,13 @@
       "dependencies": [{"name": "core", "version": "1"}, {"name": "std", "version": "1"}],
       "sources": [
         {"file": "core/programs/m2b/dispatch/generic.hirsel", "modules": ["main"], "signatures": false}
+      ]
+    },
+    {
+      "package": {"name": "lib", "version": "1"},
+      "dependencies": [{"name": "core", "version": "1"}, {"name": "std", "version": "1"}],
+      "sources": [
+        {"file": "core/programs/m2b/dispatch/cross_lib.hirsel", "modules": ["lib"], "signatures": false}
       ]
     },
     {
@@ -88,6 +95,7 @@
     {"workload": "replay_fail", "package": {"name": "failing", "version": "1"}, "module": "main"},
     {"workload": "causes", "package": {"name": "causes", "version": "1"}, "module": "main"},
     {"workload": "dispatch_generic", "package": {"name": "generic", "version": "1"}, "module": "main"},
+    {"workload": "dispatch_cross_package", "package": {"name": "app", "version": "1"}, "module": "main", "grants": ["Clock"]},
     {"workload": "dispatch_server", "package": {"name": "server", "version": "1"}, "module": "main", "grants": ["Clock"], "dir": true},
     {"workload": "dispatch_server_changed", "package": {"name": "server", "version": "1"}, "module": "main", "grants": ["Clock"], "dir": true, "use": {"rpc": "rpc-changed"}, "role": true},
     {"workload": "dispatch_client", "package": {"name": "client", "version": "1"}, "module": "main", "grants": ["Clock"], "dir": true},

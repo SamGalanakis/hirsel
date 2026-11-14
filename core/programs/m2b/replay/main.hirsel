@@ -362,3 +362,27 @@ pub fn main(out: Stdout, c: Clock, argv: Args) -> Result[(), Exit] waits {
         Error(_) => Error(Exit(status: 2)),
     }
 }
+
+// Cross-package generic StaticFn dispatch: these helpers live in package lib,
+// while the function item and callers remain in package app.
+fn repeat(b: Bytes) -> Result[Bytes, Capacity] {
+    Ok(list.new())
+}
+
+pub fn case_cross_len() -> u64 {
+    lib.lib.len_of(code.describe(repeat))
+}
+
+pub fn case_cross_same() -> u64 {
+    let mut want: Bytes = list.new()
+    let _ = list.append(mut want, code.identity(code.describe(repeat)))
+    if lib.lib.same(code.describe(repeat), want) {
+        1
+    } else {
+        0
+    }
+}
+
+pub fn case_cross_sum() -> u64 {
+    lib.lib.sum_of(code.describe(repeat))
+}

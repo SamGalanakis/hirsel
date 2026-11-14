@@ -25,6 +25,7 @@ struct HirselLlvmBuilder {
     Function *function = nullptr;
     AllocaInst *last_alloca = nullptr;
     DenseMap<std::pair<unsigned, size_t>, Value *> locals;
+    DenseMap<std::pair<unsigned, size_t>, Value *> allocas;
     DenseMap<size_t, TrackingMDRef> metadata;
     HirselLlvmBuilder(LLVMContext &c, StringRef name)
         : context(c), module(std::make_unique<Module>(name, c)), builder(c) {}
@@ -116,7 +117,7 @@ static LLVMValueRef function(HirselLlvmBuilder *u, const char *name, size_t len,
 }
 static void define(HirselLlvmBuilder *u, LLVMValueRef f, unsigned linkage) {
     u->function=cast<Function>(unwrap(f)); u->function->setLinkage(linkage ? GlobalValue::InternalLinkage : GlobalValue::ExternalLinkage);
-    u->last_alloca=nullptr; u->locals.clear();
+    u->last_alloca=nullptr; u->locals.clear(); u->allocas.clear();
 }
 static LLVMValueRef parameter(LLVMValueRef f, unsigned index, HirselLocalName name) {
     LLVMValueRef value=wrap(cast<Function>(unwrap(f))->getArg(index)); name_value(value,name); return value;
@@ -126,7 +127,12 @@ static void begin_block(HirselLlvmBuilder *u, LLVMBasicBlockRef ref) {
     auto *b=unwrap(ref); if (!b->getParent()) b->insertInto(u->function); u->builder.SetInsertPoint(b);
 }
 static LLVMValueRef local(HirselLlvmBuilder *u, LLVMTypeRef type, HirselLocalName name) {
-    auto key=std::make_pair(unsigned(name.kind),name.index); auto it=u->locals.find(key);
+    auto key=std::make_pair(unsigned(name.kind),name.index);
+    if (unwrap(type)->isPointerTy()) {
+        auto allocation=u->allocas.find(key);
+        if (allocation!=u->allocas.end()) return wrap(allocation->second);
+    }
+    auto it=u->locals.find(key);
     if(it!=u->locals.end()) return wrap(it->second);
     auto *value=new Argument(unwrap(type)); u->locals[key]=value; return wrap(value);
 }
@@ -139,7 +145,9 @@ static LLVMValueRef alloca_value(HirselLlvmBuilder *u, LLVMTypeRef type, unsigne
     auto &entry=u->function->getEntryBlock(); auto point=u->builder.saveIP(); auto location=u->builder.getCurrentDebugLocation();
     u->builder.SetInsertPoint(&entry, u->last_alloca ? std::next(u->last_alloca->getIterator()) : entry.begin());
     u->builder.SetCurrentDebugLocation(DebugLoc()); auto *a=u->builder.CreateAlloca(unwrap(type)); if(alignment) a->setAlignment(Align(alignment));
-    u->last_alloca=a; u->builder.restoreIP(point); u->builder.SetCurrentDebugLocation(location); auto value=wrap(a); bind(u,name,value); return value;
+    u->last_alloca=a; u->builder.restoreIP(point); u->builder.SetCurrentDebugLocation(location);
+    auto key=std::make_pair(unsigned(name.kind),name.index); u->allocas[key]=a;
+    return wrap(a);
 }
 static LLVMValueRef binary(HirselLlvmBuilder *u, unsigned op, LLVMValueRef left, LLVMValueRef right) {
     const Instruction::BinaryOps ops[]={Instruction::Add,Instruction::Sub,Instruction::Mul,Instruction::UDiv,Instruction::SDiv,Instruction::URem,Instruction::SRem,Instruction::And,Instruction::Or,Instruction::Xor,Instruction::Shl,Instruction::LShr,Instruction::AShr,Instruction::FAdd,Instruction::FSub,Instruction::FMul,Instruction::FDiv,Instruction::FRem};

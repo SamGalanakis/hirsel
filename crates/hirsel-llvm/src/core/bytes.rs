@@ -2,7 +2,7 @@
 //! the ordering-only prefix work after LLVM inlines this total bytewise order.
 use super::*;
 
-impl<S: sink::Sink> FunctionEmitter<'_, S> {
+impl FunctionEmitter<'_> {
     pub(super) fn hash_bytes(&mut self, data: &str, len: &str) -> String {
         let facts = if self.facts {
             " nounwind memory(argmem: read)"

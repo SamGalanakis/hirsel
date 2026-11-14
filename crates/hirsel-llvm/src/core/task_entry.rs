@@ -69,7 +69,8 @@ pub(super) fn emit(
             value_slots: Vec::new(),
             address_slots: Vec::new(),
             empty_bounds: empty::EmptyBounds::new(&body, &[]),
-            sink: sink::TextSink::default(),
+            code: String::new(),
+            allocations: String::new(),
             next: 0,
             intrinsics,
         };
@@ -107,7 +108,7 @@ pub(super) fn emit(
             e.line("done:");
         }
         e.line(format!("ret i8 {status}"));
-        writeln!(text,"define private i8 @core_task_entry_{}_{}(ptr %context, ptr %result, ptr %input) {{\nentry:\n{}{}\n}}",x.0,r.0,e.sink.allocations,e.sink.code).unwrap();
+        writeln!(text,"define private i8 @core_task_entry_{}_{}(ptr %context, ptr %result, ptr %input) {{\nentry:\n{}{}\n}}",x.0,r.0,e.allocations,e.code).unwrap();
     }
     Ok(())
 }

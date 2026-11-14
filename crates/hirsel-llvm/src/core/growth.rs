@@ -5,7 +5,7 @@ use super::storage::Payer;
 use super::*;
 use hirsel_core_layout::{FieldTy, field_size};
 
-impl<S: sink::Sink> FunctionEmitter<'_, S> {
+impl FunctionEmitter<'_> {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn grow_buffer(
         &mut self,
@@ -37,8 +37,7 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
             self.line(format!(
                 "br i1 {large}, label %grow_native{n}, label %grow_classic{n}"
             ));
-            self.sink
-                .block(&format!("grow_native{n}:").trim_end_matches(':'));
+            writeln!(self.code, "grow_native{n}:").unwrap();
             let kind =
                 match hirsel_core_layout::cleanup_class(&self.module.types, self.recipes, &edge) {
                     Some(hirsel_core_layout::Cleanup::Terminal) => NATIVE_PLAIN,
@@ -83,8 +82,7 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                 &format!("grow_native_copy{n}"),
                 &format!("grow_native_refused{n}"),
             );
-            self.sink
-                .block(&format!("grow_native_copy{n}:").trim_end_matches(':'));
+            writeln!(self.code, "grow_native_copy{n}:").unwrap();
             // Read the helper's carrier word to avoid threading the requested
             // operand through loop-carried values; publish #93's fact on success.
             let grown_capacity = self.load_native(&shadow, 16, "i64");
@@ -96,12 +94,10 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
             self.store_native(at, 16, "i64", &grown_capacity);
             self.runtime_void("llvm.lifetime.end.p0", &[("ptr".into(), shadow.clone())]);
             self.line(format!("br label %grow_done{n}"));
-            self.sink
-                .block(&format!("grow_native_refused{n}:").trim_end_matches(':'));
+            writeln!(self.code, "grow_native_refused{n}:").unwrap();
             self.runtime_void("llvm.lifetime.end.p0", &[("ptr".into(), shadow)]);
             self.line(format!("br label %grow_refused{n}"));
-            self.sink
-                .block(&format!("grow_classic{n}:").trim_end_matches(':'));
+            writeln!(self.code, "grow_classic{n}:").unwrap();
             Some((block, room))
         } else {
             None
@@ -116,14 +112,12 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
             dispatch,
         );
         self.line(format!("br label %grow_allocated{n}"));
-        self.sink
-            .block(&format!("grow_allocated{n}:").trim_end_matches(':'));
+        writeln!(self.code, "grow_allocated{n}:").unwrap();
         let present = self.calc(format!("icmp ne ptr {block}, null"));
         self.line(format!(
             "br i1 {present}, label %grow_copy{n}, label %grow_refused{n}"
         ));
-        self.sink
-            .block(&format!("grow_copy{n}:").trim_end_matches(':'));
+        writeln!(self.code, "grow_copy{n}:").unwrap();
         if self.facts {
             let distinct = self.calc(format!("icmp ne ptr {block}, {old}"));
             self.runtime_void("llvm.assume", &[("i1".into(), distinct)]);
@@ -141,11 +135,9 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         self.store_native(at, 16, "i64", capacity);
         self.free_block(old, refund);
         self.line(format!("br label %grow_copied{n}"));
-        self.sink
-            .block(&format!("grow_copied{n}:").trim_end_matches(':'));
+        writeln!(self.code, "grow_copied{n}:").unwrap();
         self.line(format!("br label %grow_done{n}"));
-        self.sink
-            .block(&format!("grow_refused{n}:").trim_end_matches(':'));
+        writeln!(self.code, "grow_refused{n}:").unwrap();
         let mut refused = format!("[{room}, %grow_allocated{n}]");
         if let Some((_, room)) = &native {
             write!(refused, ", [{room}, %grow_native_refused{n}]").unwrap();
@@ -158,11 +150,9 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         let failed = self.calc(format!("icmp ne i8 {status}, 0"));
         self.branch_failure(&failed, fail, Some(6));
         self.line(format!("br label %grow_refused_done{n}"));
-        self.sink
-            .block(&format!("grow_refused_done{n}:").trim_end_matches(':'));
+        writeln!(self.code, "grow_refused_done{n}:").unwrap();
         self.line(format!("br label %grow_done{n}"));
-        self.sink
-            .block(&format!("grow_done{n}:").trim_end_matches(':'));
+        writeln!(self.code, "grow_done{n}:").unwrap();
         let mut pointers = format!("[{block}, %grow_copied{n}], [null, %grow_refused_done{n}]");
         let mut rooms = format!("[0, %grow_copied{n}], [{room}, %grow_refused_done{n}]");
         if let Some((block, _)) = native {

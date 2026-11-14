@@ -99,7 +99,8 @@ fn linux_c_results_execute_with_mixed_fields_padding_and_hfas() -> std::result::
                 relocatable_sites: false,
                 value_slots: vec![],
                 address_slots: vec![],
-                sink: sink::TextSink::default(),
+                code: String::new(),
+                allocations: String::new(),
                 next: 0,
                 intrinsics: &mut declarations,
             };
@@ -131,8 +132,8 @@ fn linux_c_results_execute_with_mixed_fields_padding_and_hfas() -> std::result::
                 } else {
                     "ptr %context".into()
                 },
-                e.sink.allocations,
-                e.sink.code
+                e.allocations,
+                e.code
             )
             .unwrap();
             let c_ty = |s: Scalar| match s {

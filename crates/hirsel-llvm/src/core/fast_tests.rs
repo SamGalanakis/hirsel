@@ -245,7 +245,8 @@ fn atomic_helpers_use_checked_cas_and_release_acquire() {
         value_slots: Vec::new(),
         address_slots: Vec::new(),
         empty_bounds: empty::EmptyBounds::default(),
-        sink: sink::TextSink::default(),
+        code: String::new(),
+        allocations: String::new(),
         next: 0,
         intrinsics: &mut intrinsics,
     };
@@ -253,7 +254,7 @@ fn atomic_helpers_use_checked_cas_and_release_acquire() {
     e.release_fast("%node", 24, Some("@descriptor"), true);
     let mut ir = format!(
         "define void @test(ptr %context, ptr %node) {{\nentry:\n{}{}  ret void\n}}\ndeclare zeroext i1 @recipe(ptr, ptr, ptr, ptr)\n@descriptor = private constant {{ ptr, i64, i64 }} {{ ptr @recipe, i64 24, i64 8 }}\n",
-        e.sink.allocations, e.sink.code
+        e.allocations, e.code
     );
     for decl in intrinsics {
         writeln!(ir, "{decl}").unwrap();

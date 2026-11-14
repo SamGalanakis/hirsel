@@ -22,7 +22,6 @@ mod flow;
 mod forward;
 mod growth;
 mod scalar;
-pub(crate) mod sink;
 mod sites;
 mod storage;
 #[cfg(all(test, not(hirsel_lazy_core)))]
@@ -39,7 +38,6 @@ use std::fmt::{self, Write};
 use hirsel_core_ir::failure;
 use hirsel_core_ir::*;
 use hirsel_core_layout::Target;
-use sink::Sink as _;
 
 #[cfg(not(hirsel_lazy_core))]
 use crate::context::{Context, Module as LlvmModule, TargetMachine};
@@ -106,192 +104,6 @@ pub fn supports_target(triple: &str) -> bool {
 /// This function trusts its producer's IR and layout recipes.
 pub fn emit_ir(module: &Module) -> Result<String> {
     emit_ir_with_charge_observation(module, false)
-}
-
-/// Direct native construction for the scalar CoreIR subset. This is the first
-/// Unit::Core product seam; larger families join it as their helpers become
-/// sink-native. No LLVM text is created on this path.
-#[cfg(hirsel_lazy_core)]
-pub(crate) fn emit_native_scalar_module(
-    module: &Module,
-    target: Target,
-) -> Result<crate::construction::NativeModule> {
-    let context = std::rc::Rc::new(crate::construction::Context::new().map_err(Error::Llvm)?);
-    emit_native_scalar_module_in_context(module, target, context, None, false)
-}
-
-#[cfg(hirsel_lazy_core)]
-pub(crate) fn emit_native_scalar_module_in_context(
-    module: &Module,
-    target: Target,
-    context: std::rc::Rc<crate::construction::Context>,
-    provided_roles: Option<&hirsel_core_ir::roles::Facts>,
-    observe_charge: bool,
-) -> Result<crate::construction::NativeModule> {
-    let failures = failure::Failures::new(module);
-    let recipes =
-        hirsel_core_layout::compute(&module.types).map_err(|e| Error::Llvm(format!("{e:?}")))?;
-    let mut native = sink::native::NativeSink::new(context.unit());
-    for (i, data) in module.statics.iter().enumerate() {
-        native.register_static(&format!("s{i}"), &data.bytes, data.align as u32);
-    }
-    let mut emitted = 0;
-    for (index, function) in module.functions.iter().enumerate() {
-        let Some(body) = &function.body else {
-            continue;
-        };
-        let sig = &module.signatures[function.signature.index()];
-        let has_status = failures.may_fail[index];
-        let abi = if has_status {
-            abi::Return::internal_on_target(target, &sig.results)
-        } else {
-            abi::Return::on_target(target, &sig.results)
-        };
-        let return_type = abi.return_type();
-        let (extension, return_type) = if let Some(ty) = return_type.strip_prefix("zeroext ") {
-            (sink::Extension::Zero, ty)
-        } else if let Some(ty) = return_type.strip_prefix("signext ") {
-            (sink::Extension::Sign, ty)
-        } else {
-            (sink::Extension::None, return_type.as_str())
-        };
-        let result = ir_type_text(return_type);
-        let mut params = Vec::new();
-        let mut locals = Vec::new();
-        for parameter in abi.parameters(sig, false) {
-            let (declaration, name) = parameter
-                .rsplit_once(' ')
-                .ok_or_else(|| Error::Unsupported("native parameter spelling".into()))?;
-            let ty = ir_type_text(declaration);
-            let extension = if declaration.contains(" zeroext") {
-                sink::Extension::Zero
-            } else if declaration.contains(" signext") {
-                sink::Extension::Sign
-            } else {
-                sink::Extension::None
-            };
-            let sret = declaration
-                .split_once("sret(")
-                .and_then(|(_, rest)| rest.split_once(')').map(|(ty, _)| ir_type_text(ty)));
-            params.push(sink::Parameter {
-                ty,
-                extension,
-                noalias: declaration.contains(" noalias"),
-                readonly: declaration.contains(" readonly"),
-                sret,
-                byval: None,
-            });
-            let local = match name {
-                "%context" => sink::Local::Context,
-                "%dest" => sink::Local::Destination,
-                "%caller_site" => sink::Local::CallerSite,
-                "%sret" => sink::Local::Sret,
-                name => sink::Local::Param(
-                    name.strip_prefix("%p")
-                        .and_then(|n| n.parse().ok())
-                        .ok_or_else(|| Error::Unsupported("native parameter name".into()))?,
-                ),
-            };
-            locals.push(local);
-        }
-        let signature = sink::Signature {
-            result,
-            extension,
-            params,
-        };
-        let function_name = if has_status {
-            symbol(module, FuncId(index as u32))
-        } else {
-            format!("{}.infallible", symbol(module, FuncId(index as u32)))
-        };
-        native.begin_function(&function_name, &signature, &locals, !has_status);
-        native.block("entry");
-        let flow = flow::Flow::new(body);
-        let facts = facts_enabled() && provided_roles.is_some();
-        let mut emitter = FunctionEmitter {
-            function: Some(FuncId(index as u32)),
-            append_fast: false,
-            shadow_callee: None,
-            module,
-            body,
-            recipes: &recipes,
-            abi,
-            has_status,
-            failures: &failures,
-            constants: &failures.constants[index],
-            empty_bounds: empty::EmptyBounds::default(),
-            observe_charge,
-            facts,
-            aliases: None,
-            caller_site: "%caller_site",
-            debug_location: None,
-            anchor: None,
-            relocatable_sites: false,
-            value_slots: values::slots(body, &flow),
-            address_slots: values::address_slots(body, &flow),
-            sink: native,
-            next: 0,
-            intrinsics: &mut std::collections::BTreeSet::new(),
-        };
-        for (i, t) in body.values.iter().enumerate() {
-            if emitter.value_slots[i] {
-                emitter.sink.alloca(sink::Local::Value(i), &ir_type(*t), 8);
-            }
-        }
-        for (i, t) in body.slots.iter().enumerate() {
-            let (bytes, align) = emitter.place_layout(*t);
-            emitter.sink.alloca(
-                sink::Local::Slot(i),
-                &sink::Type::bytes(bytes),
-                align as u32,
-            );
-        }
-        for (i, value) in body.blocks[0]
-            .params
-            .get(&body.pools.values)
-            .unwrap()
-            .iter()
-            .enumerate()
-        {
-            emitter.put(*value, &format!("%p{i}"));
-        }
-        for (block, b) in body.blocks.iter().enumerate() {
-            if block != 0 {
-                emitter.sink.block(&format!("b{block}"));
-            }
-            for offset in b.insts.get(&body.insts).unwrap().iter().enumerate() {
-                emitter.inst(offset.1, b.insts.start as usize + offset.0)?;
-            }
-            emitter.term(&body.terminators[block])?;
-        }
-        let intrinsics = std::mem::take(emitter.intrinsics);
-        native = emitter.sink;
-        for intrinsic in intrinsics {
-            native.module_text(&intrinsic);
-        }
-        emitted += 1;
-    }
-    if emitted == 0 {
-        return Err(Error::Unsupported(
-            "native scalar seam received no function bodies".into(),
-        ));
-    }
-    Ok(native.take(context.clone()))
-}
-
-/// Construct an owned unit in the shared session through the typed NoFolder
-/// sink. The text emitter remains an oracle and import fixture only.
-#[cfg(hirsel_lazy_core)]
-pub(crate) fn emit_native_module_in_context(
-    module: &Module,
-    target: Target,
-    context: std::rc::Rc<crate::construction::Context>,
-    facts: &hirsel_core_ir::roles::Facts,
-    observe_charge: bool,
-    debug_lines: bool,
-) -> Result<crate::construction::NativeModule> {
-    let _ = (facts, debug_lines);
-    emit_native_scalar_module_in_context(module, target, context, Some(facts), observe_charge)
 }
 
 /// Optional diagnostic emission; timings of these objects are not performance samples.
@@ -444,26 +256,27 @@ fn emit_ir_target_with_role_facts(
             } else {
                 empty::EmptyBounds::new(body, &failures.constants[i])
             },
-            sink: sink::TextSink::default(),
+            code: String::new(),
+            allocations: String::new(),
             next: 0,
             intrinsics: &mut intrinsics,
         };
         for (i, t) in body.values.iter().enumerate() {
             if e.value_slots[i] {
-                writeln!(e.sink.allocations, "  %v{i} = alloca {}", ty(*t)).unwrap();
+                writeln!(e.allocations, "  %v{i} = alloca {}", ty(*t)).unwrap();
             }
         }
         for (i, t) in body.slots.iter().enumerate() {
             let (bytes, align) = e.place_layout(*t);
             writeln!(
-                e.sink.allocations,
+                e.allocations,
                 "  %s{i} = alloca [{bytes} x i8], align {align}"
             )
             .unwrap();
         }
         for i in 0..body.addresses.len() {
             if e.address_slots[i] {
-                writeln!(e.sink.allocations, "  %a{i} = alloca ptr").unwrap();
+                writeln!(e.allocations, "  %a{i} = alloca ptr").unwrap();
             }
         }
         // Cleanup continuations may mention a branch-local constant even when
@@ -496,7 +309,7 @@ fn emit_ir_target_with_role_facts(
         e.line("br label %b0");
         let mut forwarding = forward::Forwarding::new(body);
         for (i, b) in body.blocks.iter().enumerate() {
-            writeln!(e.sink.code, "b{i}:").unwrap();
+            writeln!(e.code, "b{i}:").unwrap();
             let ending = forwarding.ending(module, &recipes, sig, e.constants, i);
             let mut returned = false;
             for (offset, inst) in b.insts.get(&body.insts).unwrap().iter().enumerate() {
@@ -558,8 +371,8 @@ fn emit_ir_target_with_role_facts(
             function_debug
                 .map(|d| format!(" !dbg !{}", d.scope))
                 .unwrap_or_default(),
-            e.sink.allocations,
-            e.sink.code
+            e.allocations,
+            e.code
         )
         .unwrap();
         if !has_status {
@@ -803,50 +616,6 @@ fn ty(t: Ty) -> String {
         Ty::Scalar(s) => format!("i{}", s.size() * 8),
     }
 }
-fn ir_type(t: Ty) -> sink::Type {
-    match t {
-        Ty::Ptr => sink::Type::Ptr,
-        Ty::Scalar(Scalar::F32) => sink::Type::Float,
-        Ty::Scalar(Scalar::F64) => sink::Type::Double,
-        Ty::Scalar(s) => sink::Type::Int((s.size() * 8) as u32),
-    }
-}
-fn ir_type_text(text: &str) -> sink::Type {
-    let text = text
-        .trim()
-        .trim_end_matches(" zeroext")
-        .trim_end_matches(" signext");
-    if text == "ptr" {
-        return sink::Type::Ptr;
-    }
-    if text == "float" {
-        return sink::Type::Float;
-    }
-    if text == "double" {
-        return sink::Type::Double;
-    }
-    if let Some(bits) = text.strip_prefix('i').and_then(|s| s.parse().ok()) {
-        return sink::Type::Int(bits);
-    }
-    if let Some(fields) = text.strip_prefix("{ ").and_then(|s| s.strip_suffix(" }")) {
-        return sink::Type::structure(fields.split(", ").map(ir_type_text).collect::<Vec<_>>());
-    }
-    if let Some(element) = text.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-        if let Some((count, ty)) = element.split_once(" x ") {
-            if let Ok(count) = count.parse() {
-                return sink::Type::Array(count, Box::new(ir_type_text(ty)));
-            }
-        }
-    }
-    if let Some(element) = text.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
-        if let Some((count, ty)) = element.split_once(" x ") {
-            if let Ok(count) = count.parse() {
-                return sink::Type::Vector(count, Box::new(ir_type_text(ty)));
-            }
-        }
-    }
-    sink::Type::Ptr
-}
 fn bits_ty(t: Ty) -> String {
     format!("i{}", size(t) * 8)
 }
@@ -857,7 +626,7 @@ fn size(t: Ty) -> u64 {
     }
 }
 
-struct FunctionEmitter<'a, S: sink::Sink = sink::TextSink> {
+struct FunctionEmitter<'a> {
     function: Option<FuncId>,
     module: &'a Module,
     body: &'a Body,
@@ -878,110 +647,12 @@ struct FunctionEmitter<'a, S: sink::Sink = sink::TextSink> {
     relocatable_sites: bool,
     value_slots: Vec<bool>,
     address_slots: Vec<bool>,
-    sink: S,
+    code: String,
+    allocations: String,
     next: usize,
     intrinsics: &'a mut BTreeSet<String>,
 }
-impl<S: sink::Sink> FunctionEmitter<'_, S> {
-    fn operand(&self, text: &str) -> sink::Value {
-        let text = text.trim();
-        if let Some(name) = text.strip_prefix('%') {
-            if let Some(local) = match name {
-                "context" => Some(sink::Local::Context),
-                "dest" => Some(sink::Local::Destination),
-                "caller_site" => Some(sink::Local::CallerSite),
-                "result" => Some(sink::Local::Result),
-                "sret" => Some(sink::Local::Sret),
-                "payload" => Some(sink::Local::Payload),
-                "input" => Some(sink::Local::Input),
-                "worklist" => Some(sink::Local::Worklist),
-                _ => None,
-            } {
-                return sink::Value::Local(local);
-            }
-            let (kind, digits) = name.split_at(1);
-            let index = digits.parse().unwrap_or(0);
-            return match kind {
-                "t" => sink::Local::Temp(index).into(),
-                "v" => sink::Local::Value(index).into(),
-                "a" => sink::Local::Address(index).into(),
-                "s" => sink::Local::Slot(index).into(),
-                "p" => sink::Local::Param(index).into(),
-                _ => sink::Value::Global(name.to_owned()),
-            };
-        }
-        match text {
-            "true" => sink::Value::Boolean(true),
-            "false" => sink::Value::Boolean(false),
-            "null" => sink::Value::Null,
-            "poison" => sink::Value::Poison,
-            "zeroinitializer" => sink::Value::Zero,
-            _ => text.parse::<i128>().map_or_else(
-                |_| sink::Value::Global(text.trim_start_matches('@').to_owned()),
-                |n| sink::Value::Integer(n as u128),
-            ),
-        }
-    }
-    fn typed(&mut self, op: sink::Operation<'_>) -> String {
-        let name = format!("%t{}", self.next);
-        self.next += 1;
-        self.sink.instruction(
-            Some(sink::Local::Temp(self.next - 1)),
-            op,
-            self.debug_location,
-        );
-        name
-    }
-    fn typed_binary(&mut self, op: sink::Binary, t: Ty, a: &str, b: &str) -> String {
-        let av = self.operand(a);
-        let bv = self.operand(b);
-        let ty = ir_type(t);
-        self.typed(sink::Operation::Binary(op, ty, &av, &bv))
-    }
-    fn typed_compare(&mut self, pred: sink::Predicate, t: Ty, a: &str, b: &str) -> String {
-        let av = self.operand(a);
-        let bv = self.operand(b);
-        let ty = ir_type(t);
-        self.typed(sink::Operation::Compare(pred, ty, &av, &bv))
-    }
-    fn typed_select(&mut self, t: Ty, c: &str, yes: &str, no: &str) -> String {
-        let cv = self.operand(c);
-        let yv = self.operand(yes);
-        let nv = self.operand(no);
-        let ty = ir_type(t);
-        self.typed(sink::Operation::Select(ty, &cv, &yv, &nv))
-    }
-    fn typed_cast(&mut self, op: sink::Cast, from: Ty, value: &str, to: Ty) -> String {
-        let v = self.operand(value);
-        let from = ir_type(from);
-        let to = ir_type(to);
-        self.typed(sink::Operation::Cast(op, from, &v, to))
-    }
-    fn typed_cast_llvm(&mut self, op: sink::Cast, from: sink::Type, value: &str, to: Ty) -> String {
-        let v = self.operand(value);
-        let to = ir_type(to);
-        self.typed(sink::Operation::Cast(op, from, &v, to))
-    }
-    fn typed_call(&mut self, name: &str, result: Ty, args: &[(Ty, &str)]) -> String {
-        self.typed_call_type(name, ir_type(result), args)
-    }
-    fn typed_call_type(&mut self, name: &str, result: sink::Type, args: &[(Ty, &str)]) -> String {
-        let signature = sink::Signature {
-            result,
-            extension: sink::Extension::None,
-            params: args
-                .iter()
-                .map(|(t, _)| sink::Parameter::plain(ir_type(*t)))
-                .collect(),
-        };
-        let values: Vec<_> = args.iter().map(|(_, v)| self.operand(v)).collect();
-        self.typed(sink::Operation::Call(
-            &signature,
-            &sink::Value::Global(name.to_owned()),
-            &values,
-            &sink::CallAttrs::default(),
-        ))
-    }
+impl FunctionEmitter<'_> {
     fn c_argument<'a>(&self, t: &'a str) -> &'a str {
         if self.abi.target == Target::Aarch64Linux {
             t.strip_suffix(" zeroext")
@@ -992,7 +663,19 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         }
     }
     fn line(&mut self, s: impl AsRef<str>) {
-        self.sink.raw(s.as_ref(), self.debug_location);
+        let s = s.as_ref();
+        let metadata = self.debug_location.filter(|_| {
+            !s.ends_with(':')
+                && !s.ends_with('[')
+                && !s.as_bytes().first().is_some_and(|c| {
+                    *c == b'i' && s.as_bytes().get(1).is_some_and(u8::is_ascii_digit)
+                })
+        });
+        if let Some(location) = metadata {
+            writeln!(self.code, "  {s}, !dbg !{location}").unwrap();
+        } else {
+            writeln!(self.code, "  {s}").unwrap();
+        }
     }
     fn fresh(&mut self) -> String {
         let n = self.next;
@@ -1005,10 +688,9 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         v
     }
     fn temp(&mut self, t: &str) -> String {
-        let n = self.next;
-        self.next += 1;
-        self.sink.alloca(sink::Local::Temp(n), &ir_type_text(t), 8);
-        format!("%t{n}")
+        let p = self.fresh();
+        writeln!(self.allocations, "  {p} = alloca {t}, align 8").unwrap();
+        p
     }
     fn vty(&self, v: ValueId) -> Ty {
         self.body.values[v.index()]
@@ -1017,39 +699,21 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
     // Reinterpret from a float is the sole bit observer (FORM #97).
     fn numeric(&mut self, v: ValueId) -> String {
         if self.value_slots.get(v.index()).copied().unwrap_or(true) {
-            let name = sink::Local::Value(v.index());
-            let ty = ir_type(self.vty(v));
-            let ptr = sink::Value::Local(name);
-            self.typed(sink::Operation::Load(ty, &ptr, &sink::Memory::default()))
+            self.calc(format!("load {}, ptr %v{}", ty(self.vty(v)), v.0))
         } else {
             format!("%v{}", v.0)
         }
     }
-    fn put_value(&mut self, v: ValueId, value: sink::Value) {
-        let ptr = sink::Value::Local(sink::Local::Value(v.index()));
-        let ty = ir_type(self.vty(v));
-        if self.value_slots.get(v.index()).copied().unwrap_or(true) {
-            self.sink.instruction(
-                None,
-                sink::Operation::Store(ty, &value, &ptr, &sink::Memory::default()),
-                self.debug_location,
-            );
-        } else {
-            self.sink.instruction(
-                Some(sink::Local::Value(v.index())),
-                sink::Operation::Select(
-                    ty,
-                    &sink::Value::Boolean(true),
-                    &value,
-                    &sink::Value::Poison,
-                ),
-                self.debug_location,
-            );
-        }
-    }
     fn put(&mut self, v: ValueId, x: &str) {
-        let value = self.operand(x);
-        self.put_value(v, value);
+        if self.value_slots.get(v.index()).copied().unwrap_or(true) {
+            self.line(format!("store {} {x}, ptr %v{}", ty(self.vty(v)), v.0));
+        } else {
+            // LLVM has no scalar copy instruction. This identity also permits
+            // forward references when CoreIR blocks are not in dominance order.
+            // It preserves poison; no freeze or representation promise is added.
+            let t = ty(self.vty(v));
+            self.line(format!("%v{} = select i1 true, {t} {x}, {t} poison", v.0));
+        }
     }
     fn access_facts(&self, addresses: &[AddressId]) -> String {
         self.aliases
@@ -1058,12 +722,7 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
     }
     fn address(&mut self, a: AddressId) -> String {
         if self.address_slots.get(a.index()).copied().unwrap_or(true) {
-            let ptr = sink::Value::Local(sink::Local::Address(a.index()));
-            self.typed(sink::Operation::Load(
-                sink::Type::Ptr,
-                &ptr,
-                &sink::Memory::default(),
-            ))
+            self.calc(format!("load ptr, ptr %a{}", a.0))
         } else {
             format!("%a{}", a.0)
         }
@@ -1115,13 +774,13 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
             self.line(format!("br i1 {flag}, label %b{}, label %ok{n}", fail.0));
         } else {
             self.line(format!("br i1 {flag}, label %bad{n}, label %ok{n}"));
-            self.sink.block(&format!("bad{n}:").trim_end_matches(':'));
+            writeln!(self.code, "bad{n}:").unwrap();
             if let Some(cause) = cause {
                 self.raise(cause);
             }
             self.propagate_to(fail);
         }
-        self.sink.block(&format!("ok{n}:").trim_end_matches(':'));
+        writeln!(self.code, "ok{n}:").unwrap();
     }
     fn propagate_to(&mut self, fail: Option<BlockId>) {
         if let Some(fail) = fail {
@@ -1190,23 +849,17 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
             Inst::Const { result, bits } => {
                 let t = self.vty(result);
                 let x = if t.is_float() {
-                    sink::Value::Bitcast {
-                        from: sink::Type::Int((size(t) * 8) as u32),
-                        bits: bits as u128,
-                        to: ir_type(t),
-                    }
+                    format!("bitcast ({} {bits} to {})", bits_ty(t), ty(t))
                 } else if t == Ty::Ptr {
-                    sink::Value::IntToPtr(bits)
+                    format!("inttoptr (i64 {bits} to ptr)")
                 } else {
-                    sink::Value::Integer(bits as u128)
+                    bits.to_string()
                 };
-                self.put_value(result, x);
+                self.put(result, &x);
             }
-            Inst::ReadStatic { result, data } => {
-                self.put_value(result, sink::Value::Global(format!("s{}", data.0)))
-            }
+            Inst::ReadStatic { result, data } => self.put(result, &format!("@s{}", data.0)),
             Inst::FunctionRef { result, function } => {
-                self.put_value(result, sink::Value::Global(symbol(self.module, function)))
+                self.put(result, &format!("@{}", symbol(self.module, function)))
             }
             Inst::Unary {
                 result,
@@ -1217,11 +870,9 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                 let t = self.vty(operand);
                 let x = self.numeric(operand);
                 let r = match op {
-                    UnaryOp::Not => self.typed_binary(sink::Binary::Xor, t, &x, "1"),
-                    UnaryOp::BitNot => self.typed_binary(sink::Binary::Xor, t, &x, "-1"),
-                    UnaryOp::Neg if t.is_float() => {
-                        self.typed(sink::Operation::FNeg(ir_type(t), &self.operand(&x)))
-                    }
+                    UnaryOp::Not => self.calc(format!("xor {} {x}, 1", ty(t))),
+                    UnaryOp::BitNot => self.calc(format!("xor {} {x}, -1", ty(t))),
+                    UnaryOp::Neg if t.is_float() => self.calc(format!("fneg {} {x}", ty(t))),
                     UnaryOp::Neg => {
                         let (v, flag) = self.overflow(t, ArithOp::Sub, "0", &x);
                         self.fail_if(&flag, fail, 0)?;
@@ -1251,37 +902,35 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                 let t = self.vty(left);
                 let a = self.numeric(left);
                 let b = self.numeric(right);
-                let pred = if t.is_float() {
-                    match op {
-                        CompareOp::Eq => sink::Predicate::OEq,
-                        CompareOp::Ne => sink::Predicate::UNe,
-                        CompareOp::Lt => sink::Predicate::OLt,
-                        CompareOp::Le => sink::Predicate::OLe,
-                        CompareOp::Gt => sink::Predicate::OGt,
-                        CompareOp::Ge => sink::Predicate::OGe,
-                    }
-                } else {
-                    let signed = t.int().is_some_and(|x| x.0);
-                    match op {
-                        CompareOp::Eq => sink::Predicate::Eq,
-                        CompareOp::Ne => sink::Predicate::Ne,
-                        CompareOp::Lt if signed => sink::Predicate::Slt,
-                        CompareOp::Le if signed => sink::Predicate::Sle,
-                        CompareOp::Gt if signed => sink::Predicate::Sgt,
-                        CompareOp::Ge if signed => sink::Predicate::Sge,
-                        CompareOp::Lt => sink::Predicate::Ult,
-                        CompareOp::Le => sink::Predicate::Ule,
-                        CompareOp::Gt => sink::Predicate::Ugt,
-                        CompareOp::Ge => sink::Predicate::Uge,
-                    }
+                let pred = match op {
+                    CompareOp::Eq => "eq",
+                    CompareOp::Ne => "ne",
+                    CompareOp::Lt => "lt",
+                    CompareOp::Le => "le",
+                    CompareOp::Gt => "gt",
+                    CompareOp::Ge => "ge",
                 };
-                let x = self.typed_compare(pred, t, &a, &b);
-                let x = self.typed_cast_llvm(
-                    sink::Cast::ZExt,
-                    sink::Type::I1,
-                    &x,
-                    Ty::Scalar(Scalar::U8),
-                );
+                let cmp = if t.is_float() {
+                    format!(
+                        "fcmp {}{pred} {} {a}, {b}",
+                        if op == CompareOp::Ne { "u" } else { "o" },
+                        ty(t)
+                    )
+                } else {
+                    format!(
+                        "icmp {}{pred} {} {a}, {b}",
+                        if matches!(op, CompareOp::Eq | CompareOp::Ne) {
+                            ""
+                        } else if t.int().is_some_and(|x| x.0) {
+                            "s"
+                        } else {
+                            "u"
+                        },
+                        ty(t)
+                    )
+                };
+                let x = self.calc(cmp);
+                let x = self.calc(format!("zext i1 {x} to i8"));
                 self.put(result, &x);
             }
             Inst::IntArith {
@@ -1298,12 +947,7 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                 let (r, over) = self.arith(t, op, mode, &a, &b);
                 self.put(result, &r);
                 if let Some(flag) = flag {
-                    let over = self.typed_cast_llvm(
-                        sink::Cast::ZExt,
-                        sink::Type::I1,
-                        &over,
-                        Ty::Scalar(Scalar::U8),
-                    );
+                    let over = self.calc(format!("zext i1 {over} to i8"));
                     self.put(flag, &over);
                 }
             }
@@ -1345,37 +989,21 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                 result, address, ..
             } => {
                 let p = self.address(address);
-                let _metadata = self.access_facts(&[address]);
-                let pointer = self.operand(&p);
-                let value = self.typed(sink::Operation::Load(
-                    ir_type(self.vty(result)),
-                    &pointer,
-                    &sink::Memory {
-                        align: 1,
-                        ..Default::default()
-                    },
+                let metadata = self.access_facts(&[address]);
+                let x = self.calc(format!(
+                    "load {}, ptr {p}, align 1{metadata}",
+                    ty(self.vty(result))
                 ));
-                self.put(result, &value);
+                self.put(result, &x);
             }
             Inst::Store { address, value } => {
                 let p = self.address(address);
                 let x = self.numeric(value);
-                let _metadata = self.access_facts(&[address]);
-                let x = self.operand(&x);
-                let p = self.operand(&p);
-                self.sink.instruction(
-                    None,
-                    sink::Operation::Store(
-                        ir_type(self.vty(value)),
-                        &x,
-                        &p,
-                        &sink::Memory {
-                            align: 1,
-                            ..Default::default()
-                        },
-                    ),
-                    self.debug_location,
-                );
+                let metadata = self.access_facts(&[address]);
+                self.line(format!(
+                    "store {} {x}, ptr {p}, align 1{metadata}",
+                    ty(self.vty(value))
+                ));
             }
             // FORM v1c: a mark is the evaluator's alone; no code.
             Inst::StorageLive { .. }
@@ -1395,16 +1023,10 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                 } else {
                     !(1u64 << field)
                 };
-                let x = self.typed_binary(
-                    if initialized {
-                        sink::Binary::Or
-                    } else {
-                        sink::Binary::And
-                    },
-                    self.vty(mask),
-                    &x,
-                    &k.to_string(),
-                );
+                let x = self.calc(format!(
+                    "{} {t} {x}, {k}",
+                    if initialized { "or" } else { "and" }
+                ));
                 self.put(result, &x);
             }
             Inst::Call { call } => self.call(&self.body.calls[call.index()])?,
@@ -1443,28 +1065,22 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         if self.body.edges[edge.index()].args.len == 0 {
             return;
         }
-        self.sink.block(&format!("{label}:").trim_end_matches(':'));
+        writeln!(self.code, "{label}:").unwrap();
         let to = self.edge(edge);
-        self.sink
-            .instruction(None, sink::Operation::Branch(&to), self.debug_location);
+        self.line(format!("br label %{to}"));
     }
     fn term(&mut self, term: &Terminator) -> Result<()> {
         match *term {
             Terminator::Jump(e) => {
                 let to = self.edge(e);
-                self.sink
-                    .instruction(None, sink::Operation::Branch(&to), self.debug_location);
+                self.line(format!("br label %{to}"));
             }
             Terminator::Branch { condition, yes, no } => {
                 let c = self.numeric(condition);
-                let c = self.typed_compare(sink::Predicate::Ne, Ty::Scalar(Scalar::U8), &c, "0");
+                let c = self.calc(format!("icmp ne i8 {c}, 0"));
                 let y = self.edge_label(yes);
                 let n = self.edge_label(no);
-                self.sink.instruction(
-                    None,
-                    sink::Operation::Conditional(&self.operand(&c), &y, &n, false),
-                    self.debug_location,
-                );
+                self.line(format!("br i1 {c}, label %{y}, label %{n}"));
                 self.emit_edge(&y, yes);
                 self.emit_edge(&n, no);
             }
@@ -1482,20 +1098,11 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                     .iter()
                     .map(|a| (*a, self.edge_label(a.edge)))
                     .collect::<Vec<_>>();
-                let native_arms = arms
-                    .iter()
-                    .map(|(a, label)| (a.value, label.clone()))
-                    .collect::<Vec<_>>();
-                self.sink.instruction(
-                    None,
-                    sink::Operation::Switch(
-                        ir_type(self.vty(value)),
-                        &self.operand(&v),
-                        &other,
-                        &native_arms,
-                    ),
-                    self.debug_location,
-                );
+                self.line(format!("switch {t} {v}, label %{other} ["));
+                for (a, label) in &arms {
+                    self.line(format!("{t} {}, label %{label}", a.value));
+                }
+                self.line("]");
                 self.emit_edge(&other, otherwise);
                 for (a, label) in arms {
                     self.emit_edge(&label, a.edge);
@@ -1510,10 +1117,7 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                     .collect::<Vec<_>>();
                 self.return_values(&xs);
             }
-            Terminator::Unreachable => {
-                self.sink
-                    .instruction(None, sink::Operation::Unreachable, self.debug_location)
-            }
+            Terminator::Unreachable => self.line("unreachable"),
             Terminator::Propagate => self.return_failure(),
             Terminator::Raise { cause, cleanup } => {
                 match cause {

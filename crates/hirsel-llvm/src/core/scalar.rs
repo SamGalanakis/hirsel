@@ -1,70 +1,51 @@
-//! Scalar lowering through the shared typed sink.
+//! Scalar lowering uses LLVM overflow and numeric intrinsics like the retained
+//! backend, with CoreIR types and explicit failure successors.
 use super::*;
 
-impl<S: sink::Sink> FunctionEmitter<'_, S> {
+impl FunctionEmitter<'_> {
     pub(super) fn overflow(&mut self, t: Ty, op: ArithOp, a: &str, b: &str) -> (String, String) {
-        let (name, signed) = match op {
-            ArithOp::Add => ("add", t.int().is_some_and(|x| x.0)),
-            ArithOp::Sub => ("sub", t.int().is_some_and(|x| x.0)),
-            ArithOp::Mul => ("mul", t.int().is_some_and(|x| x.0)),
-            ArithOp::Div => unreachable!(),
-        };
-        if !signed && matches!(op, ArithOp::Add | ArithOp::Sub) {
-            let value = self.typed_binary(
-                if op == ArithOp::Add {
-                    sink::Binary::Add
-                } else {
-                    sink::Binary::Sub
-                },
-                t,
-                a,
-                b,
-            );
-            let flag = self.typed_compare(
-                if op == ArithOp::Add {
-                    sink::Predicate::Ult
-                } else {
-                    sink::Predicate::Ult
-                },
-                t,
-                &value,
-                a,
-            );
+        if op == ArithOp::Add && !t.int().unwrap().0 {
+            // Keep the value and its overflow condition scalar. A PHI of the
+            // intrinsic's aggregate can hide end = index + width from the late
+            // constraint pass, even on the edge where overflow was ruled out.
+            // Wrapping add is defined on both paths, including checked_add's
+            // observable wrapped result. No no-wrap promise is needed here.
+            let value = self.calc(format!("add {} {a}, {b}", ty(t)));
+            let flag = self.calc(format!("icmp ult {} {value}, {a}", ty(t)));
             return (value, flag);
         }
-        let result = self.typed_call_type(
-            &format!(
-                "llvm.{}{}.with.overflow.{}",
-                if signed { "s" } else { "u" },
-                name,
-                ty(t)
-            ),
-            sink::Type::structure(vec![ir_type(t), sink::Type::I1]),
-            &[(t, a), (t, b)],
+        if op == ArithOp::Sub && !t.int().unwrap().0 {
+            let value = self.calc(format!("sub {} {a}, {b}", ty(t)));
+            let flag = self.calc(format!("icmp ult {} {a}, {b}", ty(t)));
+            return (value, flag);
+        }
+        let op = match op {
+            ArithOp::Add => "add",
+            ArithOp::Sub => "sub",
+            ArithOp::Mul => "mul",
+            ArithOp::Div => unreachable!(),
+        };
+        let sign = if t.int().unwrap().0 { "s" } else { "u" };
+        let rt = format!("{{ {}, i1 }}", ty(t));
+        let x = self.intrinsic(
+            &format!("llvm.{sign}{op}.with.overflow.{}", ty(t)),
+            &rt,
+            &[(ty(t), a.into()), (ty(t), b.into())],
         );
-        let aggregate = sink::Type::structure(vec![ir_type(t), sink::Type::I1]);
-        let rv = self.typed(sink::Operation::Extract(
-            aggregate.clone(),
-            &self.operand(&result),
-            0,
-        ));
-        let rf = self.typed(sink::Operation::Extract(
-            aggregate,
-            &self.operand(&result),
-            1,
-        ));
-        (rv, rf)
+        let v = self.calc(format!("extractvalue {rt} {x}, 0"));
+        let flag = self.calc(format!("extractvalue {rt} {x}, 1"));
+        (v, flag)
     }
     fn div_overflow(&mut self, t: Ty, a: &str, b: &str) -> String {
-        let zero = self.typed_compare(sink::Predicate::Eq, t, b, "0");
-        if !t.int().is_some_and(|x| x.0) {
+        let zero = self.calc(format!("icmp eq {} {b}, 0", ty(t)));
+        if !t.int().unwrap().0 {
             return zero;
         }
-        let min = (1u64 << (size(t) * 8 - 1)).to_string();
-        let x = self.typed_compare(sink::Predicate::Eq, t, a, &min);
-        let y = self.typed_compare(sink::Predicate::Eq, t, b, "-1");
-        let both = self.typed_binary(sink::Binary::And, Ty::Scalar(Scalar::Bool), &x, &y);
-        self.typed_binary(sink::Binary::Or, Ty::Scalar(Scalar::Bool), &zero, &both)
+        let min = 1u64 << (size(t) * 8 - 1);
+        let x = self.calc(format!("icmp eq {} {a}, {min}", ty(t)));
+        let y = self.calc(format!("icmp eq {} {b}, -1", ty(t)));
+        let over = self.calc(format!("and i1 {x}, {y}"));
+        self.calc(format!("or i1 {zero}, {over}"))
     }
     pub(super) fn arith(
         &mut self,
@@ -74,36 +55,27 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         a: &str,
         b: &str,
     ) -> (String, String) {
+        let tt = ty(t);
         if op == ArithOp::Div {
             let over = self.div_overflow(t, a, b);
-            let safe = self.typed_select(t, &over, "1", b);
-            let x = self.typed_binary(
-                if t.int().is_some_and(|x| x.0) {
-                    sink::Binary::SDiv
-                } else {
-                    sink::Binary::UDiv
-                },
-                t,
-                a,
-                &safe,
-            );
-            let x = self.typed_select(t, &over, "0", &x);
+            let safe = self.calc(format!("select i1 {over}, {tt} 1, {tt} {b}"));
+            let x = self.calc(format!(
+                "{}div {tt} {a}, {safe}",
+                if t.int().unwrap().0 { "s" } else { "u" }
+            ));
+            let x = self.calc(format!("select i1 {over}, {tt} 0, {tt} {x}"));
             return (x, over);
         }
+        let op_name = match op {
+            ArithOp::Add => "add",
+            ArithOp::Sub => "sub",
+            ArithOp::Mul => "mul",
+            _ => unreachable!(),
+        };
         match mode {
             ArithMode::Checked => self.overflow(t, op, a, b),
             ArithMode::Wrapping => (
-                self.typed_binary(
-                    match op {
-                        ArithOp::Add => sink::Binary::Add,
-                        ArithOp::Sub => sink::Binary::Sub,
-                        ArithOp::Mul => sink::Binary::Mul,
-                        _ => unreachable!(),
-                    },
-                    t,
-                    a,
-                    b,
-                ),
+                self.calc(format!("{op_name} {tt} {a}, {b}")),
                 "false".into(),
             ),
             ArithMode::Saturating => {
@@ -116,15 +88,22 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                         "-1".into()
                     }
                 } else {
-                    let neg = self.typed_compare(sink::Predicate::Slt, t, a, "0");
-                    self.typed_select(
-                        t,
-                        &neg,
-                        &(1u64 << (w - 1)).to_string(),
-                        &((1u64 << (w - 1)) - 1).to_string(),
-                    )
+                    let negative = if op == ArithOp::Mul {
+                        let n = self.calc(format!("xor {tt} {a}, {b}"));
+                        self.calc(format!("icmp slt {tt} {n}, 0"))
+                    } else {
+                        self.calc(format!("icmp slt {tt} {a}, 0"))
+                    };
+                    self.calc(format!(
+                        "select i1 {negative}, {tt} {}, {tt} {}",
+                        1u64 << (w - 1),
+                        (1u64 << (w - 1)) - 1
+                    ))
                 };
-                (self.typed_select(t, &over, &limit, &x), over)
+                (
+                    self.calc(format!("select i1 {over}, {tt} {limit}, {tt} {x}")),
+                    over,
+                )
             }
         }
     }
@@ -136,124 +115,100 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         right: ValueId,
         fail: Option<BlockId>,
     ) -> Result<String> {
-        let b = self.numeric(right);
+        let b = &self.numeric(right);
+        let tt = ty(t);
         if t.is_float() {
-            let native = match op {
-                BinaryOp::Add => Some(sink::Binary::FAdd),
-                BinaryOp::Sub => Some(sink::Binary::FSub),
-                BinaryOp::Mul => Some(sink::Binary::FMul),
-                BinaryOp::Div => Some(sink::Binary::FDiv),
-                _ => None,
+            let name = match op {
+                BinaryOp::Add => "fadd",
+                BinaryOp::Sub => "fsub",
+                BinaryOp::Mul => "fmul",
+                BinaryOp::Div => "fdiv",
+                _ => "",
             };
-            if let Some(op) = native {
-                return Ok(self.typed_binary(op, t, a, &b));
+            if !name.is_empty() {
+                return Ok(self.calc(format!("{name} {tt} {a}, {b}")));
             }
             let name = match op {
                 BinaryOp::Min | BinaryOp::MinNumber => "minimum",
                 BinaryOp::Max | BinaryOp::MaxNumber => "maximum",
                 _ => unreachable!(),
             };
-            let ordered = self.typed_call(
+            let ordered = self.intrinsic(
                 &format!("llvm.{name}.{}", if size(t) == 4 { "f32" } else { "f64" }),
-                t,
-                &[(t, a), (t, &b)],
+                &tt,
+                &[(tt.clone(), a.into()), (tt.clone(), b.into())],
             );
+            if matches!(op, BinaryOp::MinNumber | BinaryOp::MaxNumber) {
+                // Retain the existing engine's signed-zero behavior. Its minimumNumber
+                // intrinsic had a +0/-0 lowering defect at O0 on x86-64.
+                let left_nan = self.calc(format!("fcmp uno {tt} {a}, {a}"));
+                let right_nan = self.calc(format!("fcmp uno {tt} {b}, {b}"));
+                let number = self.calc(format!("select i1 {right_nan}, {tt} {a}, {tt} {ordered}"));
+                return Ok(self.calc(format!("select i1 {left_nan}, {tt} {b}, {tt} {number}")));
+            }
             return Ok(ordered);
         }
-        let signed = t.int().is_some_and(|x| x.0);
-        let width = (size(t) * 8) as u32;
+        let (signed, w) = t.int().unwrap_or((false, (size(t) * 8) as u32));
+        let sign = if signed { "s" } else { "u" };
         Ok(match op {
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => {
-                let ar = match op {
+                let op = match op {
                     BinaryOp::Add => ArithOp::Add,
                     BinaryOp::Sub => ArithOp::Sub,
                     _ => ArithOp::Mul,
                 };
-                let (x, flag) = self.overflow(t, ar, a, &b);
+                let (x, flag) = self.overflow(t, op, a, b);
                 self.fail_if(&flag, fail, 0)?;
                 x
             }
             BinaryOp::Rem => {
-                let zero = self.typed_compare(sink::Predicate::Eq, t, &b, "0");
+                let zero = self.calc(format!("icmp eq {tt} {b}, 0"));
                 self.fail_if(&zero, fail, 2)?;
                 let safe = if signed {
-                    let m = self.typed_compare(sink::Predicate::Eq, t, &b, "-1");
-                    self.typed_select(t, &m, "1", &b)
+                    let minus_one = self.calc(format!("icmp eq {tt} {b}, -1"));
+                    self.calc(format!("select i1 {minus_one}, {tt} 1, {tt} {b}"))
                 } else {
-                    b.clone()
+                    b.into()
                 };
-                self.typed_binary(
-                    if signed {
-                        sink::Binary::SRem
-                    } else {
-                        sink::Binary::URem
-                    },
-                    t,
-                    a,
-                    &safe,
-                )
+                self.calc(format!("{sign}rem {tt} {a}, {safe}"))
             }
             BinaryOp::Div => {
-                let zero = self.typed_compare(sink::Predicate::Eq, t, &b, "0");
+                let zero = self.calc(format!("icmp eq {tt} {b}, 0"));
                 self.fail_if(&zero, fail, 2)?;
-                let over = self.div_overflow(t, a, &b);
+                let over = self.div_overflow(t, a, b);
                 self.fail_if(&over, fail, 0)?;
-                self.typed_binary(
-                    if signed {
-                        sink::Binary::SDiv
-                    } else {
-                        sink::Binary::UDiv
-                    },
-                    t,
-                    a,
-                    &b,
-                )
+                self.calc(format!("{sign}div {tt} {a}, {b}"))
             }
             BinaryOp::Shl | BinaryOp::Shr => {
                 if !failure::bounded_shift(t, self.constants[right.index()]) {
-                    let outside =
-                        self.typed_compare(sink::Predicate::Uge, t, &b, &width.to_string());
+                    let outside = self.calc(format!("icmp uge {tt} {b}, {w}"));
                     self.fail_if(&outside, fail, 0)?;
                 }
-                self.typed_binary(
+                self.calc(format!(
+                    "{} {tt} {a}, {b}",
                     if op == BinaryOp::Shl {
-                        sink::Binary::Shl
+                        "shl"
                     } else if signed {
-                        sink::Binary::AShr
+                        "ashr"
                     } else {
-                        sink::Binary::LShr
-                    },
-                    t,
-                    a,
-                    &b,
-                )
+                        "lshr"
+                    }
+                ))
             }
-            BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => self.typed_binary(
+            BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => self.calc(format!(
+                "{} {tt} {a}, {b}",
                 match op {
-                    BinaryOp::BitAnd => sink::Binary::And,
-                    BinaryOp::BitOr => sink::Binary::Or,
-                    _ => sink::Binary::Xor,
-                },
-                t,
-                a,
-                &b,
-            ),
+                    BinaryOp::BitAnd => "and",
+                    BinaryOp::BitOr => "or",
+                    _ => "xor",
+                }
+            )),
             BinaryOp::Min | BinaryOp::Max => {
-                let p = if signed {
-                    if op == BinaryOp::Min {
-                        sink::Predicate::Slt
-                    } else {
-                        sink::Predicate::Sgt
-                    }
-                } else {
-                    if op == BinaryOp::Min {
-                        sink::Predicate::Ult
-                    } else {
-                        sink::Predicate::Ugt
-                    }
-                };
-                let c = self.typed_compare(p, t, a, &b);
-                self.typed_select(t, &c, a, &b)
+                let cmp = self.calc(format!(
+                    "icmp {sign}{} {tt} {a}, {b}",
+                    if op == BinaryOp::Min { "lt" } else { "gt" }
+                ));
+                self.calc(format!("select i1 {cmp}, {tt} {a}, {tt} {b}"))
             }
             _ => unreachable!(),
         })
@@ -276,18 +231,19 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         if op == ScalarUnaryOp::SwapBytes && size(t) == 1 {
             return x.into();
         }
-        self.typed_call(
-            &format!(
-                "llvm.{name}.{}",
-                if t.is_float() {
-                    format!("f{}", size(t) * 8)
-                } else {
-                    ty(t)
-                }
-            ),
-            t,
-            &[(t, x)],
-        )
+        let suffix = if t.is_float() {
+            format!("f{}", size(t) * 8)
+        } else {
+            ty(t)
+        };
+        let mut args = vec![(ty(t), x.into())];
+        if matches!(
+            op,
+            ScalarUnaryOp::LeadingZeros | ScalarUnaryOp::TrailingZeros
+        ) {
+            args.push(("i1".into(), "false".into()));
+        }
+        self.intrinsic(&format!("llvm.{name}.{suffix}"), &ty(t), &args)
     }
     pub(super) fn convert(
         &mut self,
@@ -299,91 +255,123 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         let from = self.vty(operand);
         let to = self.vty(result);
         let x = self.numeric(operand);
+        let x = if mode == ConvertMode::Reinterpret {
+            self.canonical(from, &x)
+        } else {
+            x
+        };
+        let ft = ty(from);
+        let tt = ty(to);
+        let signed = from.int().is_some_and(|x| x.0);
+        let cast = |op: &str| format!("{op} {ft} {x} to {tt}");
         let r = match mode {
-            ConvertMode::Reinterpret if from == to => x.clone(),
-            ConvertMode::Reinterpret => self.typed_cast(
-                if from == Ty::Ptr {
-                    sink::Cast::PtrToInt
+            ConvertMode::Reinterpret => {
+                if from == to {
+                    x.clone()
+                } else if from == Ty::Ptr {
+                    self.calc(cast("ptrtoint"))
                 } else if to == Ty::Ptr {
-                    sink::Cast::IntToPtr
+                    self.calc(cast("inttoptr"))
                 } else {
-                    sink::Cast::Bitcast
-                },
-                from,
-                &x,
-                to,
-            ),
-            ConvertMode::Widen if size(from) == size(to) => x.clone(),
-            ConvertMode::Widen => self.typed_cast(
-                if from.int().is_some_and(|v| v.0) {
-                    sink::Cast::SExt
-                } else {
-                    sink::Cast::ZExt
-                },
-                from,
-                &x,
-                to,
-            ),
-            ConvertMode::Truncate if size(from) == size(to) => x.clone(),
-            ConvertMode::Truncate => self.typed_cast(sink::Cast::Trunc, from, &x, to),
-            ConvertMode::IntToFloat => self.typed_cast(
-                if from.int().is_some_and(|v| v.0) {
-                    sink::Cast::SIToFP
-                } else {
-                    sink::Cast::UIToFP
-                },
-                from,
-                &x,
-                to,
-            ),
-            ConvertMode::FloatResize if size(from) < size(to) => {
-                self.typed_cast(sink::Cast::FPExt, from, &x, to)
+                    self.calc(cast("bitcast"))
+                }
             }
-            ConvertMode::FloatResize => self.typed_cast(sink::Cast::FPTrunc, from, &x, to),
-            ConvertMode::TryNarrow => {
-                let (signed, w) = to.int().unwrap();
-                let wide = self.typed_cast(
-                    if from.int().is_some_and(|v| v.0) {
-                        sink::Cast::SExt
+            ConvertMode::Widen => {
+                if size(from) == size(to) {
+                    x.clone()
+                } else {
+                    self.calc(cast(if signed { "sext" } else { "zext" }))
+                }
+            }
+            ConvertMode::Truncate => {
+                if size(from) == size(to) {
+                    x.clone()
+                } else {
+                    self.calc(cast("trunc"))
+                }
+            }
+            ConvertMode::IntToFloat => self.calc(cast(if signed { "sitofp" } else { "uitofp" })),
+            ConvertMode::FloatResize => {
+                if from == to {
+                    x.clone()
+                } else {
+                    self.calc(cast(if size(from) < size(to) {
+                        "fpext"
                     } else {
-                        sink::Cast::ZExt
-                    },
-                    from,
-                    &x,
-                    Ty::Scalar(Scalar::I64),
-                );
-                let lo = if signed { -(1i128 << (w - 1)) } else { 0 };
-                let hi = if signed {
+                        "fptrunc"
+                    }))
+                }
+            }
+            ConvertMode::TryNarrow if to == Ty::Scalar(Scalar::Char) => {
+                // A Unicode scalar value, else 0: no invalid char exists.
+                let a = self.calc(format!("icmp ult i32 {x}, 55296"));
+                let b = self.calc(format!("icmp uge i32 {x}, 57344"));
+                let c = self.calc(format!("icmp ule i32 {x}, 1114111"));
+                let high = self.calc(format!("and i1 {b}, {c}"));
+                let ok = self.calc(format!("or i1 {a}, {high}"));
+                let status = self.calc(format!("zext i1 {ok} to i8"));
+                self.put(flag.unwrap(), &status);
+                self.calc(format!("select i1 {ok}, i32 {x}, i32 0"))
+            }
+            ConvertMode::TryNarrow => {
+                // Extend to i128 before range comparisons, preserving signedness.
+                let wide = self.calc(format!(
+                    "{} {ft} {x} to i128",
+                    if signed { "sext" } else { "zext" }
+                ));
+                let (sign, w) = to.int().unwrap();
+                let lo = if sign { -(1i128 << (w - 1)) } else { 0 };
+                let hi = if sign {
                     (1i128 << (w - 1)) - 1
                 } else {
                     (1i128 << w) - 1
                 };
-                let a = self.typed_compare(
-                    sink::Predicate::Sge,
-                    Ty::Scalar(Scalar::I64),
-                    &wide,
-                    &lo.to_string(),
-                );
-                let b = self.typed_compare(
-                    sink::Predicate::Sle,
-                    Ty::Scalar(Scalar::I64),
-                    &wide,
-                    &hi.to_string(),
-                );
-                let ok = self.typed_binary(sink::Binary::And, Ty::Scalar(Scalar::Bool), &a, &b);
-                if let Some(flag) = flag {
-                    let st = self.typed_cast(
-                        sink::Cast::ZExt,
-                        Ty::Scalar(Scalar::Bool),
-                        &ok,
-                        Ty::Scalar(Scalar::U8),
-                    );
-                    self.put(flag, &st);
-                }
-                self.typed_cast(sink::Cast::Trunc, Ty::Scalar(Scalar::I64), &wide, to)
+                let a = self.calc(format!("icmp sge i128 {wide}, {lo}"));
+                let b = self.calc(format!("icmp sle i128 {wide}, {hi}"));
+                let ok = self.calc(format!("and i1 {a}, {b}"));
+                let status = self.calc(format!("zext i1 {ok} to i8"));
+                self.put(flag.unwrap(), &status);
+                let raw = self.calc(format!("zext {ft} {x} to i128"));
+                self.calc(format!("trunc i128 {raw} to {tt}"))
             }
-            _ => return,
+            ConvertMode::FloatToInt => {
+                let (sign, w) = to.int().unwrap();
+                let truncated = self.intrinsic(
+                    &format!("llvm.trunc.f{}", size(from) * 8),
+                    &ft,
+                    &[(ft.clone(), x.clone())],
+                );
+                let low = if sign {
+                    -(2f64).powi(w as i32 - 1)
+                } else {
+                    0.0
+                };
+                let high = (2f64).powi(w as i32 - i32::from(sign));
+                let constant = |f: f64| {
+                    if size(from) == 4 {
+                        format!("bitcast (i32 {} to float)", (f as f32).to_bits())
+                    } else {
+                        format!("bitcast (i64 {} to double)", f.to_bits())
+                    }
+                };
+                let a = self.calc(format!("fcmp oge {ft} {truncated}, {}", constant(low)));
+                let b = self.calc(format!("fcmp olt {ft} {truncated}, {}", constant(high)));
+                let ok = self.calc(format!("and i1 {a}, {b}"));
+                let safe = self.calc(format!(
+                    "select i1 {ok}, {ft} {truncated}, {ft} {}",
+                    constant(0.0)
+                ));
+                let r = self.calc(format!(
+                    "{} {ft} {safe} to {tt}",
+                    if sign { "fptosi" } else { "fptoui" }
+                ));
+                let nan = self.calc(format!("fcmp uno {ft} {x}, {x}"));
+                let bad = self.calc(format!("select i1 {nan}, i8 1, i8 2"));
+                let status = self.calc(format!("select i1 {ok}, i8 0, i8 {bad}"));
+                self.put(flag.unwrap(), &status);
+                r
+            }
         };
-        self.put(result, &r)
+        self.put(result, &r);
     }
 }

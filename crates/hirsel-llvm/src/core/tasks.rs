@@ -6,7 +6,7 @@ const U: Ty = Ty::Scalar(Scalar::U64);
 const K: Ty = Ty::Scalar(Scalar::U8);
 const B: Ty = Ty::Scalar(Scalar::Bool);
 
-impl<S: sink::Sink> FunctionEmitter<'_, S> {
+impl FunctionEmitter<'_> {
     fn value_descriptors(&mut self, types: &[TypeId], task_input: bool) -> String {
         let buffer = self.temp(&format!("[{} x i8]", 32 * types.len()));
         for (i, &t) in types.iter().enumerate() {
@@ -48,33 +48,6 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         args: &[(String, String)],
     ) -> Vec<String> {
         let abi = abi::Return::on_target(self.abi.target, results);
-        if results.len() == 1 && !abi.indirect {
-            let params: Vec<_> = args
-                .iter()
-                .map(|(t, _)| sink::Parameter::plain(super::ir_type_text(self.c_argument(t))))
-                .collect();
-            let values: Vec<_> = args.iter().map(|(_, v)| self.operand(v)).collect();
-            let signature = sink::Signature {
-                result: super::ir_type(results[0]),
-                extension: sink::Extension::None,
-                params,
-            };
-            self.intrinsics.insert(format!(
-                "declare {} @{name}({})",
-                super::ir_type(results[0]),
-                args.iter()
-                    .map(|(t, _)| self.c_argument(t))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-            let value = self.typed(sink::Operation::Call(
-                &signature,
-                &sink::Value::Global(name.to_owned()),
-                &values,
-                &sink::CallAttrs::default(),
-            ));
-            return vec![value];
-        }
         let mut params = Vec::new();
         if abi.indirect {
             params.push(format!("ptr sret({})", abi.storage));

@@ -1,17 +1,17 @@
 //! Variant cases. Every read and write of a tag word goes through
 //! hirsel-core-layout's `read_case` and `case_word`, so a niche variant (NICHES-14)
 //! and a direct one are told apart in one place.
-use super::{FunctionEmitter, sink};
+use super::FunctionEmitter;
 use hirsel_core_layout::{CaseOps, Encoding, Tag, case_word, read_case};
 
 /// `read_case` emitted as IR. Values are indices into `names`, since the trait's
 /// values are `Copy`; `below` yields an `i1` that only `select` consumes.
-struct Ir<'a, 'b, S: sink::Sink> {
-    e: &'a mut FunctionEmitter<'b, S>,
+struct Ir<'a, 'b> {
+    e: &'a mut FunctionEmitter<'b>,
     ty: &'static str,
     names: Vec<String>,
 }
-impl<S: sink::Sink> Ir<'_, '_, S> {
+impl Ir<'_, '_> {
     fn put(&mut self, name: String) -> usize {
         self.names.push(name);
         self.names.len() - 1
@@ -22,7 +22,7 @@ impl<S: sink::Sink> Ir<'_, '_, S> {
         self.put(name)
     }
 }
-impl<S: sink::Sink> CaseOps for Ir<'_, '_, S> {
+impl CaseOps for Ir<'_, '_> {
     type V = usize;
     fn constant(&mut self, n: u64) -> usize {
         self.put(n.to_string())
@@ -52,7 +52,7 @@ impl<S: sink::Sink> CaseOps for Ir<'_, '_, S> {
     }
 }
 
-impl<S: sink::Sink> FunctionEmitter<'_, S> {
+impl FunctionEmitter<'_> {
     fn tag_at(&mut self, tag: &Tag, base: &str) -> String {
         if tag.offset == 0 {
             base.to_string()

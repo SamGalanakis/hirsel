@@ -166,7 +166,7 @@ impl Return {
     }
 }
 
-impl<S: sink::Sink> FunctionEmitter<'_, S> {
+impl FunctionEmitter<'_> {
     fn shadow_argument(&self, site: &CallSite) -> Option<usize> {
         let Callee::Direct(f) = site.callee else {
             return None;
@@ -227,50 +227,6 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         } else {
             Return::on_target(self.abi.target, &sig.results)
         };
-        if !has_status
-            && sig.dest.is_none()
-            && sig.results.len() == 1
-            && site
-                .args
-                .get(&self.body.pools.args)
-                .unwrap()
-                .iter()
-                .all(|a| matches!(a, Arg::Value(_)))
-        {
-            let mut params = vec![sink::Parameter::plain(sink::Type::Ptr)];
-            let mut values = vec![sink::Value::Local(sink::Local::Context)];
-            for arg in site.args.get(&self.body.pools.args).unwrap() {
-                let Arg::Value(value) = *arg else {
-                    unreachable!()
-                };
-                let ty = self.vty(value);
-                params.push(sink::Parameter::plain(super::ir_type(ty)));
-                let numeric = self.numeric(value);
-                values.push(self.operand(&numeric));
-            }
-            params.push(sink::Parameter::plain(sink::Type::I64));
-            let call_site = self.call_site_word(site.callee);
-            values.push(self.operand(&call_site));
-            let name = match site.callee {
-                Callee::Direct(f) => format!("{}.infallible", symbol(self.module, f)),
-                _ => return false,
-            };
-            let signature = sink::Signature {
-                result: super::ir_type(sig.results[0]),
-                extension: sink::Extension::None,
-                params,
-            };
-            let result = self.typed(sink::Operation::Call(
-                &signature,
-                &sink::Value::Global(name),
-                &values,
-                &sink::CallAttrs::default(),
-            ));
-            for value in site.results.get(&self.body.pools.values).unwrap() {
-                self.put(*value, &result);
-            }
-            return true;
-        }
         if has_status && !self.has_status {
             return false;
         }
@@ -357,17 +313,6 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         self.calc(format!("getelementptr i8, ptr {p}, i64 {n}"))
     }
     pub(super) fn return_values(&mut self, values: &[String]) {
-        if self.abi.fields.len() == 1 && !self.has_status {
-            if let Some(value) = values.first() {
-                let operand = self.operand(value);
-                self.sink.instruction(
-                    None,
-                    sink::Operation::Return(super::ir_type(self.abi.fields[0]), Some(&operand)),
-                    self.debug_location,
-                );
-                return;
-            }
-        }
         let mut returned = values.to_vec();
         if self.has_status {
             returned.push("0".into());
@@ -435,87 +380,6 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         } else {
             self.temp(&self.abi.storage.clone())
         };
-        if !self.abi.indirect {
-            let storage = super::ir_type_text(&self.abi.storage);
-            let pointer = self.operand(&p);
-            let zero = sink::Value::Zero;
-            self.sink.instruction(
-                None,
-                sink::Operation::Store(
-                    storage.clone(),
-                    &zero,
-                    &pointer,
-                    &sink::Memory {
-                        align: 8,
-                        ..Default::default()
-                    },
-                ),
-                self.debug_location,
-            );
-            let fields = self.abi.fields.clone();
-            let offsets = self.abi.offsets.clone();
-            for ((field, offset), value) in fields.iter().zip(&offsets).zip(values) {
-                let at = self.typed(sink::Operation::Gep(
-                    sink::Type::I8,
-                    &pointer,
-                    &[(sink::Type::I64, sink::Value::Integer(*offset as u128))],
-                ));
-                let field_value = self.operand(value);
-                self.sink.instruction(
-                    None,
-                    sink::Operation::Store(
-                        super::ir_type(*field),
-                        &field_value,
-                        &self.operand(&at),
-                        &sink::Memory {
-                            align: 1,
-                            ..Default::default()
-                        },
-                    ),
-                    self.debug_location,
-                );
-            }
-            let mut aggregate = sink::Value::Poison;
-            let regs = self.abi.regs.clone();
-            let aggregate_type = sink::Type::structure(
-                regs.iter()
-                    .map(|reg| super::ir_type_text(reg))
-                    .collect::<Vec<_>>(),
-            );
-            for (index, reg) in regs.iter().enumerate() {
-                let at = self.typed(sink::Operation::Gep(
-                    sink::Type::I8,
-                    &pointer,
-                    &[(
-                        sink::Type::I64,
-                        sink::Value::Integer((index as u64 * self.abi.reg_stride) as u128),
-                    )],
-                ));
-                let loaded = self.typed(sink::Operation::Load(
-                    super::ir_type_text(reg),
-                    &self.operand(&at),
-                    &sink::Memory {
-                        align: 1,
-                        ..Default::default()
-                    },
-                ));
-                let loaded_value = self.operand(&loaded);
-                let inserted = self.typed(sink::Operation::Insert(
-                    aggregate_type.clone(),
-                    &aggregate,
-                    super::ir_type_text(reg),
-                    &loaded_value,
-                    index as u32,
-                ));
-                aggregate = self.operand(&inserted);
-            }
-            self.sink.instruction(
-                None,
-                sink::Operation::Return(aggregate_type, Some(&aggregate)),
-                self.debug_location,
-            );
-            return;
-        }
         // Padding is defined, so register coercions never observe poison.
         self.line(format!(
             "store {} zeroinitializer, ptr {p}, align 8",
@@ -537,20 +401,16 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
             return;
         }
         let mut r = "poison".to_string();
-        let aggregate_ty = format!(
-            "{{ {} }}",
-            self.abi.regs.iter().cloned().collect::<Vec<_>>().join(", ")
-        );
         for (i, t) in self.abi.regs.clone().iter().enumerate() {
             let at = self.offset(&p, i as u64 * self.abi.reg_stride);
             let x = self.calc(format!("load {t}, ptr {at}, align 1"));
             r = if self.abi.regs.len() == 1 {
                 x
             } else {
-                self.calc(format!("insertvalue {aggregate_ty} {r}, {t} {x}, {i}"))
+                self.calc(format!("insertvalue {} {r}, {t} {x}, {i}", self.abi.ty))
             };
         }
-        self.line(format!("ret {aggregate_ty} {r}"));
+        self.line(format!("ret {} {r}", self.abi.ty));
     }
     pub(super) fn call(&mut self, site: &CallSite) -> Result<()> {
         if let Callee::Runtime(op) = site.callee {
@@ -678,9 +538,7 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         }
         values
     }
-}
 
-impl FunctionEmitter<'_, sink::TextSink> {
     pub(super) fn infallible_wrapper(
         &mut self,
         name: &str,
@@ -689,9 +547,9 @@ impl FunctionEmitter<'_, sink::TextSink> {
         text: &mut String,
         debug: Option<(usize, usize)>,
     ) {
-        self.sink.code.clear();
+        self.code.clear();
         self.debug_location = debug.map(|(_, location)| location);
-        self.sink.allocations.clear();
+        self.allocations.clear();
         self.next = 0;
         self.has_status = true;
         self.abi = Return::internal_on_target(self.abi.target, &sig.results);
@@ -721,8 +579,8 @@ impl FunctionEmitter<'_, sink::TextSink> {
             debug
                 .map(|(scope, _)| format!(" !dbg !{scope}"))
                 .unwrap_or_default(),
-            self.sink.allocations,
-            self.sink.code
+            self.allocations,
+            self.code
         )
         .unwrap();
     }

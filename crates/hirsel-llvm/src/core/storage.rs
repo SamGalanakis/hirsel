@@ -18,7 +18,7 @@ pub(super) enum At {
     Array(Box<FieldTy>, u64),
     Other,
 }
-impl<S: sink::Sink> FunctionEmitter<'_, S> {
+impl FunctionEmitter<'_> {
     pub(super) fn fixed(&self, t: TypeId) -> &hirsel_core_layout::Fixed {
         let Layout::Fixed(f) = &self.recipes[t.index()].layout else {
             panic!("compact projection requires its extent recipe")
@@ -219,17 +219,6 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         self.runtime_void_metadata(name, args, "");
     }
     fn runtime_void_metadata(&mut self, name: &str, args: &[(String, String)], metadata: &str) {
-        let _ = metadata;
-        let params: Vec<_> = args
-            .iter()
-            .map(|(t, _)| sink::Parameter::plain(super::ir_type_text(self.c_argument(t))))
-            .collect();
-        let values: Vec<_> = args.iter().map(|(_, v)| self.operand(v)).collect();
-        let signature = sink::Signature {
-            result: sink::Type::Void,
-            extension: sink::Extension::None,
-            params,
-        };
         self.intrinsics.insert(format!(
             "declare void @{name}({})",
             args.iter()
@@ -237,16 +226,13 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
-        self.sink.instruction(
-            None,
-            sink::Operation::Call(
-                &signature,
-                &sink::Value::Global(name.to_owned()),
-                &values,
-                &sink::CallAttrs::default(),
-            ),
-            self.debug_location,
-        );
+        self.line(format!(
+            "call void @{name}({}){metadata}",
+            args.iter()
+                .map(|(t, v)| format!("{} {v}", self.c_argument(t)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
     fn allocation(&mut self, name: &str, args: &[(String, String)]) -> (String, String) {
         self.allocation_call(name, args, "")
@@ -265,65 +251,20 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         attributes: &str,
     ) -> (String, String) {
         let p = self.temp("{ ptr, i64, i64 }");
-        let mut params = vec![sink::Parameter {
-            ty: sink::Type::Ptr,
-            extension: sink::Extension::None,
-            noalias: false,
-            readonly: false,
-            sret: Some(sink::Type::structure(vec![
-                sink::Type::Ptr,
-                sink::Type::I64,
-                sink::Type::I64,
-            ])),
-            byval: None,
-        }];
-        params.extend(
-            args.iter()
-                .map(|(t, _)| sink::Parameter::plain(super::ir_type_text(self.c_argument(t)))),
-        );
-        let mut values = vec![self.operand(&p)];
-        values.extend(args.iter().map(|(_, v)| self.operand(v)));
-        let signature = sink::Signature {
-            result: sink::Type::Void,
-            extension: sink::Extension::None,
-            params,
-        };
-        let mut declaration = vec!["ptr sret({ ptr, i64, i64 })".to_owned()];
-        declaration.extend(args.iter().map(|(ty, _)| self.c_argument(ty).to_owned()));
+        let mut types = vec!["ptr sret({ ptr, i64, i64 })".to_string()];
+        types.extend(args.iter().map(|(t, _)| self.c_argument(t).to_owned()));
         self.intrinsics
-            .insert(format!("declare void @{name}({})", declaration.join(", ")));
-        let _ = attributes;
-        self.sink.instruction(
-            None,
-            sink::Operation::Call(
-                &signature,
-                &sink::Value::Global(name.to_owned()),
-                &values,
-                &sink::CallAttrs::default(),
-            ),
-            self.debug_location,
-        );
-        let pointer = self.typed(sink::Operation::Load(
-            sink::Type::Ptr,
-            &self.operand(&p),
-            &sink::Memory {
-                align: 8,
-                ..Default::default()
-            },
+            .insert(format!("declare void @{name}({})", types.join(", ")));
+        self.line(format!(
+            "call void @{name}(ptr sret({{ ptr, i64, i64 }}) {p}, {}){attributes}",
+            args.iter()
+                .map(|(t, v)| format!("{} {v}", self.c_argument(t)))
+                .collect::<Vec<_>>()
+                .join(", ")
         ));
-        let at = self.typed(sink::Operation::Gep(
-            sink::Type::I8,
-            &self.operand(&p),
-            &[(sink::Type::I64, sink::Value::Integer(16))],
-        ));
-        let available = self.typed(sink::Operation::Load(
-            sink::Type::I64,
-            &self.operand(&at),
-            &sink::Memory {
-                align: 8,
-                ..Default::default()
-            },
-        ));
+        let pointer = self.calc(format!("load ptr, ptr {p}, align 8"));
+        let available = self.calc(format!("getelementptr i8, ptr {p}, i64 16"));
+        let available = self.calc(format!("load i64, ptr {available}, align 8"));
         (pointer, available)
     }
     /// Admit and allocate one block, returning null and room on refusal. The
@@ -449,8 +390,7 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
             &format!("allocation_success{n}"),
             &format!("allocation_status{n}"),
         );
-        self.sink
-            .block(&format!("allocation_status{n}:").trim_end_matches(':'));
+        writeln!(self.code, "allocation_status{n}:").unwrap();
         self.intrinsics
             .insert("declare i8 @hirsel_core_allocation_status(ptr, ptr)".into());
         let status = self.calc(format!(
@@ -459,8 +399,7 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         let failed = self.calc(format!("icmp ne i8 {status}, 0"));
         self.branch_failure(&failed, fail, Some(6));
         self.line(format!("br label %allocation_success{n}"));
-        self.sink
-            .block(&format!("allocation_success{n}:").trim_end_matches(':'));
+        writeln!(self.code, "allocation_success{n}:").unwrap();
     }
     pub(super) fn storage(&mut self, inst: &Inst, index: usize) -> Result<()> {
         let ptr = |s: &str| ("ptr".into(), s.to_string());
@@ -506,8 +445,7 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                     self.line(format!(
                         "br i1 {missing}, label %allocated{n}, label %counted{n}"
                     ));
-                    self.sink
-                        .block(&format!("counted{n}:").trim_end_matches(':'));
+                    writeln!(self.code, "counted{n}:").unwrap();
                     if counted == Counted::Arc {
                         self.line(format!(
                             "store atomic i64 1, ptr {block} monotonic, align 8"
@@ -517,8 +455,7 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                         self.line(format!("store i64 1, ptr {block}, align 8"));
                     }
                     self.line(format!("br label %allocated{n}"));
-                    self.sink
-                        .block(&format!("allocated{n}:").trim_end_matches(':'));
+                    writeln!(self.code, "allocated{n}:").unwrap();
                 }
             }
             // Full-new admission and install-before-refund are unchanged.
@@ -606,15 +543,7 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                     let (p, room) =
                         self.allocation("hirsel_core_limit_enter", &[ptr("%context"), word(n)]);
                     let yes = self.calc(format!("icmp ne ptr {p}, null"));
-                    (
-                        self.typed_cast_llvm(
-                            sink::Cast::ZExt,
-                            sink::Type::I1,
-                            &yes,
-                            Ty::Scalar(Scalar::U8),
-                        ),
-                        room,
-                    )
+                    (self.calc(format!("zext i1 {yes} to i8")), room)
                 };
                 self.put(admitted, &yes);
                 self.put(available, &room);
@@ -671,8 +600,7 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                     self.line(format!(
                         "br i1 {owned}, label %carrier_drop{n}, label %carrier_done{n}"
                     ));
-                    self.sink
-                        .block(&format!("carrier_drop{n}:").trim_end_matches(':'));
+                    writeln!(self.code, "carrier_drop{n}:").unwrap();
                     Some(n)
                 } else {
                     None
@@ -696,8 +624,7 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                 self.branch_failure(&failed, fail, None);
                 if let Some(n) = guard {
                     self.line(format!("br label %carrier_done{n}"));
-                    self.sink
-                        .block(&format!("carrier_done{n}:").trim_end_matches(':'));
+                    writeln!(self.code, "carrier_done{n}:").unwrap();
                 }
             }
             Inst::Share { node, kind } => {
@@ -707,12 +634,7 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
             Inst::TryUnwrap { result, node, kind } => {
                 let p = self.numeric(node);
                 let yes = self.unique_node(&p, kind == Counted::Arc);
-                let yes = self.typed_cast_llvm(
-                    sink::Cast::ZExt,
-                    sink::Type::I1,
-                    &yes,
-                    Ty::Scalar(Scalar::U8),
-                );
+                let yes = self.calc(format!("zext i1 {yes} to i8"));
                 self.put(result, &yes);
             }
             Inst::Release { node, kind, ty } => {

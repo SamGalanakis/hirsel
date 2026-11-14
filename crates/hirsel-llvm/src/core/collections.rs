@@ -60,7 +60,7 @@ pub(super) fn collect(field: &FieldTy, collections: &mut Vec<FieldTy>) {
         _ => {}
     }
 }
-impl<S: sink::Sink> FunctionEmitter<'_, S> {
+impl FunctionEmitter<'_> {
     fn carrier_word(&mut self, carrier: &str, offset: u64) -> String {
         let at = self.calc(format!("getelementptr i8, ptr {carrier}, i64 {offset}"));
         self.calc(format!("load i64, ptr {at}, align 1"))
@@ -92,15 +92,13 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         self.line(format!(
             "br i1 {owned}, label %collection_head{n}, label %collection_done{n}"
         ));
-        self.sink
-            .block(&format!("collection_head{n}:").trim_end_matches(':'));
+        writeln!(self.code, "collection_head{n}:").unwrap();
         let i = self.calc(format!("load i64, ptr {index}"));
         let more = self.calc(format!("icmp ult i64 {i}, {length}"));
         self.line(format!(
             "br i1 {more}, label %collection_body{n}, label %collection_settle{n}"
         ));
-        self.sink
-            .block(&format!("collection_body{n}:").trim_end_matches(':'));
+        writeln!(self.code, "collection_body{n}:").unwrap();
         let entry = self.calc(format!(
             "getelementptr [{} x i8], ptr {block}, i64 {i}",
             entries.stride
@@ -111,32 +109,27 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
             self.line(format!(
                 "br i1 {live}, label %collection_live{n}, label %collection_next{n}"
             ));
-            self.sink
-                .block(&format!("collection_live{n}:").trim_end_matches(':'));
+            writeln!(self.code, "collection_live{n}:").unwrap();
         }
         for (offset, f) in entries.fields {
             let at = self.calc(format!("getelementptr i8, ptr {entry}, i64 {offset}"));
             self.clean_field(f, &at, status)?;
         }
         self.line(format!("br label %collection_next{n}"));
-        self.sink
-            .block(&format!("collection_next{n}:").trim_end_matches(':'));
+        writeln!(self.code, "collection_next{n}:").unwrap();
         let next = self.calc(format!("add i64 {i}, 1"));
         self.line(format!("store i64 {next}, ptr {index}"));
         self.line(format!("br label %collection_head{n}"));
-        self.sink
-            .block(&format!("collection_settle{n}:").trim_end_matches(':'));
+        writeln!(self.code, "collection_settle{n}:").unwrap();
         let allocated = self.calc(format!("icmp ne i64 {capacity}, 0"));
         self.line(format!(
             "br i1 {allocated}, label %collection_free{n}, label %collection_done{n}"
         ));
-        self.sink
-            .block(&format!("collection_free{n}:").trim_end_matches(':'));
+        writeln!(self.code, "collection_free{n}:").unwrap();
         let charge = self.collection_charge(&capacity, entries.logical);
         self.free_block(&block, &charge);
         self.line(format!("br label %collection_done{n}"));
-        self.sink
-            .block(&format!("collection_done{n}:").trim_end_matches(':'));
+        writeln!(self.code, "collection_done{n}:").unwrap();
         Ok(())
     }
     pub(super) fn enqueue_collection(&mut self, field: &FieldTy, carrier: &str) {
@@ -153,8 +146,7 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         self.line(format!(
             "br i1 {allocated}, label %buffer{n}, label %empty{n}"
         ));
-        self.sink
-            .block(&format!("buffer{n}:").trim_end_matches(':'));
+        writeln!(self.code, "buffer{n}:").unwrap();
         let charge = self.collection_charge(&capacity, entries.logical);
         if hirsel_core_layout::terminal(&self.module.types, self.recipes, field) {
             self.free_block(&buffer, &charge);
@@ -171,7 +163,7 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
             );
         }
         self.line("ret i1 false");
-        self.sink.block(&format!("empty{n}:").trim_end_matches(':'));
+        writeln!(self.code, "empty{n}:").unwrap();
         self.line("ret i1 false");
     }
 }
@@ -210,7 +202,8 @@ pub(super) fn glue(
             value_slots: Vec::new(),
             address_slots: Vec::new(),
             empty_bounds: empty::EmptyBounds::default(),
-            sink: sink::TextSink::default(),
+            code: String::new(),
+            allocations: String::new(),
             next: 0,
             intrinsics,
         };
@@ -226,7 +219,7 @@ pub(super) fn glue(
             let index = e.calc(format!("udiv i64 {cursor}, {count}"));
             let more = e.calc(format!("icmp ult i64 {index}, {length}"));
             e.line(format!("br i1 {more}, label %element, label %done"));
-            writeln!(e.sink.code, "element:").unwrap();
+            writeln!(e.code, "element:").unwrap();
             let next = e.calc(format!("add i64 {cursor}, 1"));
             e.line(format!("store i64 {next}, ptr %cursor"));
             let buffer = e.calc("load ptr, ptr %payload, align 1");
@@ -238,9 +231,9 @@ pub(super) fn glue(
                 let state = e.carrier_word(&entry, 8);
                 let live = e.calc(format!("icmp eq i64 {state}, 1"));
                 e.line(format!("br i1 {live}, label %live, label %removed"));
-                writeln!(e.sink.code, "removed:").unwrap();
+                writeln!(e.code, "removed:").unwrap();
                 e.line("ret i1 false");
-                writeln!(e.sink.code, "live:").unwrap();
+                writeln!(e.code, "live:").unwrap();
             }
             let inner = e.calc(format!("urem i64 {cursor}, {count}"));
             let mut base = 0;
@@ -250,10 +243,10 @@ pub(super) fn glue(
                 base += steps;
             }
             e.line("ret i1 false");
-            writeln!(e.sink.code, "done:").unwrap();
+            writeln!(e.code, "done:").unwrap();
         }
         e.line("ret i1 true");
-        writeln!(text, "define private zeroext i1 {}(ptr %context, ptr %payload, ptr %cursor, ptr %worklist) {{\nentry:\n{}{} }}", symbol(field), e.sink.allocations, e.sink.code).unwrap();
+        writeln!(text, "define private zeroext i1 {}(ptr %context, ptr %payload, ptr %cursor, ptr %worklist) {{\nentry:\n{}{} }}", symbol(field), e.allocations, e.code).unwrap();
     }
     Ok(())
 }

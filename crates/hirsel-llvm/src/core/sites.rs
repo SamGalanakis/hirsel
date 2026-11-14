@@ -1,7 +1,7 @@
 //! Item-relative causes and the caller location inherited through core/generated code.
 use super::*;
 
-impl<S: sink::Sink> FunctionEmitter<'_, S> {
+impl FunctionEmitter<'_> {
     pub(super) fn call_site_word(&mut self, callee: Callee) -> String {
         if let Callee::Direct(f) = callee {
             let function = &self.module.functions[f.index()];

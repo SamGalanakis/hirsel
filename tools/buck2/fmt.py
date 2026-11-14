@@ -3,8 +3,8 @@
 
 `--check` reports files that are not formatted and fails, as `cargo fmt --check`.
 rustfmt starts from each target's root file and follows its modules.
-Changed conformance cases are checked, never rewritten: the corpus checker
-preserves its exact expected-syntax-error exemptions and diagnostic locations.
+Changed new-language sources are checked, never rewritten. Refusal/gap fixtures
+are excluded by explicit expectation comments to preserve diagnostic coordinates.
 """
 
 import argparse
@@ -22,16 +22,26 @@ CONFIG = os.environ.get('HIRSEL_BUCK2_CONFIG', '').split()
 RUSTFMT = ROOT / 'tools/buck2/toolchains/rust-files/bin/rustfmt'
 
 
+SOURCE_ROOTS = ('core/core', 'core/std', 'core/front', 'core/programs/m1', 'core/langarena')
+FIXTURE_EXPECTATION = re.compile(r'^\s*//\s*expect:\s*(?:refuse|gap)\b', re.MULTILINE)
+
+
+def is_refusal_fixture(path):
+    """Coordinate-bearing refusal/gap fixtures are input bytes, not formatting targets."""
+    return bool(FIXTURE_EXPECTATION.search((ROOT / path).read_text(errors='replace')))
+
+
 def changed_cases(base=None):
     """Branch, index, worktree and new cases; never sweep unrelated main debt."""
     def git(*args):
         return subprocess.check_output(['git', *args], cwd=ROOT).decode('utf-8', 'surrogateescape')
     if base is None:
         base = git('merge-base', 'HEAD', 'origin/main').strip()
-    paths = set(git('diff', '--name-only', '--diff-filter=ACMR', '-z', base, '--', 'conformance').split('\0'))
-    paths.update(git('ls-files', '--others', '--exclude-standard', '-z', '--', 'conformance').split('\0'))
-    return sorted(path for path in paths if Path(path).suffix == '.hir'
-                  and 'reports' not in Path(path).parts and (ROOT / path).is_file())
+    paths = set(git('diff', '--name-only', '--diff-filter=ACMR', '-z', base, '--', *SOURCE_ROOTS).split('\0'))
+    paths.update(git('ls-files', '--others', '--exclude-standard', '-z', '--', *SOURCE_ROOTS).split('\0'))
+    return sorted(path for path in paths if Path(path).suffix == '.hirsel'
+                  and 'reports' not in Path(path).parts and (ROOT / path).is_file()
+                  and not is_refusal_fixture(path))
 
 
 def check_cases(paths):
@@ -40,15 +50,20 @@ def check_cases(paths):
     synced = subprocess.run([sys.executable, str(ROOT / 'tools/buck2/sync.py'), '--if-stale'], cwd=ROOT)
     if synced.returncode:
         return synced.returncode
-    target = 'root//:hirsel-conformance-bin-hirsel-conformance'
+    target = 'root//:hirsel-core-syntax-bin-hirsel-core-syntax'
     built = subprocess.run([str(BUCK2), 'build', *CONFIG, '--show-json-output', target],
                            cwd=ROOT, capture_output=True, text=True)
     if built.returncode:
         print(built.stdout + built.stderr, file=sys.stderr, end='')
         return built.returncode
     executable = ROOT / json.loads(built.stdout)[target]
-    return subprocess.run([str(executable), '--format-only', '--root', str(ROOT),
-                           *[arg for path in paths for arg in ('--path', path)]], cwd=ROOT).returncode
+    status = 0
+    for signatures in (True, False):
+        selected = [p for p in paths if (Path(p).parts[:2] == ('core', 'core')) == signatures]
+        if selected:
+            flags = ['--signatures'] if signatures else []
+            status = subprocess.run([str(executable), '--check', *flags, *selected], cwd=ROOT).returncode or status
+    return status
 
 
 def main():

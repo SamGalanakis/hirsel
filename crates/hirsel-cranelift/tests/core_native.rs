@@ -2007,3 +2007,62 @@ b6:
         execute(&module, &runs, optimize);
     }
 }
+
+#[test]
+fn ordinary_allocator_charge_edges_and_alignment_match_evaluator() {
+    let mut source = String::from("core v1\nsig g0 = (u64) -> (bool, u64)\n");
+    for f in 0..3 {
+        writeln!(source, "inst n{f} = test@0/ordinary/align{f} [] []").unwrap();
+    }
+    for (f, align) in [8, 16, 64].into_iter().enumerate() {
+        writeln!(
+            source,
+            "fn f{f} = n{f} g0 {{
+b0(v0: u64):
+  v1: u64 = const 16
+  v2: ptr, v3: u64 = alloc plain v1 align {align} charge v0
+  v4: ptr = const 0x0
+  v5: bool = ne v2, v4
+  branch v5, b1, b2
+b1:
+  free v2 charge v0
+  return v5, v3
+b2:
+  return v5, v3
+}}"
+        )
+        .unwrap();
+    }
+    let module = text::parse(&source).unwrap();
+    wf::module(&module).unwrap();
+    let runs: Vec<_> = (0..3)
+        .flat_map(|f| [0, 1, 8, u64::MAX].map(move |charge| (FuncId(f), vec![charge])))
+        .collect();
+    let mut cases = Vec::new();
+    for limit in [0, 1, 8, u64::MAX] {
+        for (function, args) in &runs {
+            cases.push(NativeCase {
+                function: *function,
+                args,
+                limit,
+                injection: None,
+                report: None,
+            });
+            let baseline = eval::run(&module, *function, args, limit);
+            for nth in 1..=baseline.admissions {
+                for later in [false, true] {
+                    cases.push(NativeCase {
+                        function: *function,
+                        args,
+                        limit,
+                        injection: Some((nth, later)),
+                        report: None,
+                    });
+                }
+            }
+        }
+    }
+    for optimize in [false, true] {
+        execute_cases(&module, optimize, &cases);
+    }
+}

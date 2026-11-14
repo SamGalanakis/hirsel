@@ -106,7 +106,6 @@ impl Function<'_, '_, '_> {
         let nonzero_size = self.b.ins().umax(size, one);
         let offset_value = self.b.ins().iconst(types::I64, offset as i64);
         let native_size = self.b.ins().iadd(nonzero_size, offset_value);
-        let zero_charge = self.b.ins().icmp_imm_s(IntCC::Equal, charge, 0);
         let too_large = self.b.ins().icmp_imm_s(
             IntCC::UnsignedGreaterThan,
             nonzero_size,
@@ -116,9 +115,8 @@ impl Function<'_, '_, '_> {
                 0
             },
         );
-        let fallback = self.b.ins().bor(zero_charge, too_large);
         let overflow = overflow.unwrap_or_else(|| self.b.ins().iconst(types::I8, 0));
-        let fallback = self.b.ins().bor(fallback, overflow);
+        let fallback = self.b.ins().bor(too_large, overflow);
         let eligible = self.b.create_block();
         let fallback = if alignment > 512 {
             self.b.ins().iconst(types::I8, 1)
@@ -151,10 +149,10 @@ impl Function<'_, '_, '_> {
         }
         self.b.switch_to_block(fast);
         let available = self.load_word(payer, memory_layout::LIMIT_AVAILABLE);
-        let fits = self
-            .b
-            .ins()
-            .icmp(IntCC::UnsignedLessThanOrEqual, charge, available);
+        // Wrapping charge-1 < available combines positive charge and room.
+        // Zero becomes MAX and keeps the runtime's zero-pin path even at MAX.
+        let last = self.b.ins().iadd_imm_s(charge, -1);
+        let fits = self.b.ins().icmp(IntCC::UnsignedLessThan, last, available);
         let probe = self.b.create_block();
         let allocate = self.b.create_block();
         let refused = self.cold_block();
@@ -678,15 +676,26 @@ pub(super) fn emit_allocator(
         b.block_params(entry)[2],
     ];
     let mut calls = calls::Calls::new(&tables.runtimes, tables.signatures, 0);
-    let alignment = b.ins().iconst(types::I64, allocator.align as i64);
-    let base = calls.c(
-        object,
-        &mut b,
-        "hirsel_core_native_alloc",
-        &[U, U],
-        &[P],
-        &[args[0], alignment],
-    )?[0];
+    let base = if allocator.align <= 16 {
+        calls.c(
+            object,
+            &mut b,
+            "hirsel_core_native_alloc_ordinary",
+            &[U],
+            &[P],
+            &[args[0]],
+        )?[0]
+    } else {
+        let alignment = b.ins().iconst(types::I64, allocator.align as i64);
+        calls.c(
+            object,
+            &mut b,
+            "hirsel_core_native_alloc",
+            &[U, U],
+            &[P],
+            &[args[0], alignment],
+        )?[0]
+    };
     let pointer = b.ins().iadd_imm_s(base, allocator.offset as i64);
     b.ins().store(
         Flags::trusted(),

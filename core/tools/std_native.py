@@ -380,9 +380,17 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                     (scratch / 'bin').mkdir()
                     linker = scratch / 'bin/scripted-cc'
                     actual = str(cc or Path(shutil.which('cc')))
-                    source = root / 'core/tools/std_host.c'
-                    include = root / 'crates/hirsel-core-rt/include'
-                    linker.write_text('#!/bin/sh\nexec ' + shlex.quote(actual) + ' \"$@\" ' + shlex.quote(str(source)) + ' -I' + shlex.quote(str(include)) + f' -DFIRST={case.first_write} -DFIRST_OP={case.host_op} -Wl,--wrap=hirsel_core_host_op\n')
+                    # A prebuilt object: the direct-link recipe keeps an existing support
+                    # object for every C driver, while an appended source is recovered only
+                    # from clang's -cc1 lines, never gcc's (the aarch64 cross driver).
+                    support = scratch / 'std_host.o'
+                    built = subprocess.run([actual, '-c', '-fPIC', str(root / 'core/tools/std_host.c'),
+                                            '-I' + str(root / 'crates/hirsel-core-rt/include'),
+                                            f'-DFIRST={case.first_write}', f'-DFIRST_OP={case.host_op}',
+                                            '-o', str(support)], capture_output=True)
+                    if built.returncode:
+                        raise RuntimeError(f'std_host.c: {built.stderr.decode()}')
+                    linker.write_text('#!/bin/sh\nexec ' + shlex.quote(actual) + ' \"$@\" ' + shlex.quote(str(support)) + ' -Wl,--wrap=hirsel_core_host_op\n')
                     linker.chmod(0o755)
                 if linker:
                     command.extend(['--cc', str(linker)])

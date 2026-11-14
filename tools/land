@@ -96,6 +96,9 @@ CORE_ACCEPTANCE = (
     '//:hirsel-llvm-lazy-unittest', '//:hirsel-llvm-unittest',
     '//:hirsel-cranelift-test-core_native', '//:hirsel-cranelift-test-core_aarch64',
     '//:core-aarch64-provider', '//:land-core-evaluator', '//:land-core-native-capabilities',
+    # The #[ignore] native::tests bodies that need the host's openat2, run one per
+    # target on the invoking host; the pool half joins once its bodies all pass.
+    '//:core-driver-native-openat2',
 )
 # A target literal in a tools/land: the tool on main checks every batch this
 # tree joins, so each one it names must exist in the tree submitted.

@@ -190,3 +190,90 @@ fn update_owning_result() -> u64 {
     }
     map.get_or(m, 1, 0) * 10 + list.len(string.as_bytes(returned))
 }
+
+// reserve's law: the map is made inside a limit of exactly 8 entries of Map[u64, u64]
+// storage (8 x (8 + 8 + 16) = 256 bytes, MEM-24), so any later admission returns Capacity.
+// reserve(8) admits those 256 once; 8 inserts follow without growth (+1000 +80). With 3
+// removed, len + 3 = 8 fits the capacity, so reserve(3) compacts in place and admits
+// nothing (+100), and 3 fresh inserts follow without growth (+3). Order: 3 .. 10.
+// expect: run reserve_admits_once() = 1183
+fn reserve_admits_once() -> u64 {
+    let r = bound bytes 256 {
+        let mut m: Map[u64, u64] = map.new()
+        let mut code: u64 = 0
+        match map.reserve(mut m, 8) {
+            Ok(()) => {
+                code += 1000
+            }
+            Error(_) => {}
+        }
+        for i in 0u64 .. 8 {
+            match map.insert(mut m, i, i) {
+                Ok(()) => {
+                    code += 10
+                }
+                Error(_) => {}
+            }
+        }
+        for i in 0u64 .. 3 {
+            let _ = map.remove(mut m, i)
+        }
+        match map.reserve(mut m, 3) {
+            Ok(()) => {
+                code += 100
+            }
+            Error(_) => {}
+        }
+        for i in 8u64 .. 11 {
+            match map.insert(mut m, i, i) {
+                Ok(()) => {
+                    code += 1
+                }
+                Error(_) => {}
+            }
+        }
+        let mut expected: u64 = 3
+        for (k, v) in m {
+            if k != expected || v != expected {
+                code += 5000
+            }
+            expected += 1
+        }
+        code
+    }
+    result.unwrap(r)
+}
+
+// Growth from empty is max(len + n, 4, 2 x 0) = 4 entries: 4 x 32 = 128 bytes, refused
+// under 127 (+1) and admitted under 128 (+10).
+// expect: run reserve_charge() = 11
+fn reserve_charge() -> u64 {
+    let mut a: Map[u64, u64] = map.new()
+    let under = result.unwrap(bound bytes 127 {
+        map.reserve(mut a, 3)
+    })
+    let mut b: Map[u64, u64] = map.new()
+    let exact = result.unwrap(bound bytes 128 {
+        map.reserve(mut b, 3)
+    })
+    let refused: u64 = match under {
+        Error(_) => 1,
+        Ok(()) => 0
+    }
+    let admitted: u64 = match exact {
+        Ok(()) => 10,
+        Error(_) => 0
+    }
+    refused + admitted
+}
+
+// len + n past 2^64 - 1 is refused, never wrapped into a small request; the map keeps
+// its one entry.
+// expect: run reserve_overflow_refused() = 1
+fn reserve_overflow_refused() -> u64 {
+    let mut m = one_entry()
+    match map.reserve(mut m, int.wrapping_sub(0u64, 1)) {
+        Error(_) => map.len(m),
+        Ok(()) => 99
+    }
+}

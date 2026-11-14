@@ -179,7 +179,11 @@ operations it names; nothing else about them may be inferred from an implementat
   name `m` ([OWN-9](ownership.md#own-9-overlap)). No core operation inserts or updates in
   one call: a tally is `update`, then `insert` when it returns `None`, so a present key
   costs one lookup and no owned key. `map.remove` drops the stored key
-  and returns the value. A `Map` is cleaned entry by entry in insertion order, each key
+  and returns the value. `map.reserve(mut m, n)` makes room for `n` absent keys: after it
+  returns `Ok`, the next `n` insertions admit nothing, whatever removals, sets and updates
+  come between. It grows by [MEM-24](budgets.md#mem-24-logical-charges) from a need of
+  `len + n`, admits nothing when the capacity already holds `len + n` (it drops removed
+  entries in place), and on `Capacity` leaves `m` unchanged. A `Map` is cleaned entry by entry in insertion order, each key
   before its value, and `for take (k, v) in m` consumes one entry by entry
   ([SEM-6](semantics.md#sem-6-iteration)).
 - **Integers.** The `integer` and `float` bounds ([OWN-4](ownership.md#own-4-bounds)) say

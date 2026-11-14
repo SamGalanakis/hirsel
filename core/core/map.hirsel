@@ -89,6 +89,38 @@ pub fn remove[K: key, V](mut m: Map[K, V], k: K) -> Option[V] {
     }
 }
 
+// Room for n more absent keys: afterwards the next n insertions admit nothing, whatever
+// removals, sets and updates come between. Growth follows MEM-24 from needed = len + n;
+// when the capacity already holds len + n but removed entries fill the slots, it compacts
+// in place and admits nothing. On Capacity the map is unchanged.
+pub fn reserve[K: key, V](mut m: Map[K, V], n: u64) -> Result[(), Capacity] {
+    let cap = capacity(m)
+    let needed = int.saturating_add(len(m), n)
+    if needed > cap {
+        let doubled = int.saturating_add(cap, cap)
+        let mut target = if needed > doubled {
+            needed
+        } else {
+            doubled
+        }
+        if target < 4 {
+            target = 4
+        }
+        // An entry charges at least 16 bytes, so no limit admits 2^60 entries: a larger
+        // need is refused at that request, inside the index size regrow can compute.
+        if target > 1152921504606846976 {
+            target = 1152921504606846976
+        }
+        // Growth keeps only live entries, in insertion order.
+        regrow(mut m, target)?
+        reindex(mut m)
+    } else if int.saturating_add(slots(m), n) > cap {
+        compact(mut m)
+        reindex(mut m)
+    }
+    Ok(())
+}
+
 // Only this module can access entries and its private lookup index.
 fn hash[K: key](k: K) -> u64
 
@@ -159,7 +191,12 @@ fn make_room[K: key, V](mut m: Map[K, V]) -> Result[(), Capacity] {
         }
         regrow(mut m, new_cap)?
     }
-    // Reindexing changes only index words, never the entry count or index length.
+    reindex(mut m)
+    Ok(())
+}
+
+// Reindexing changes only index words, never the entry count or index length.
+fn reindex[K: key, V](mut m: Map[K, V]) {
     let count = slots(m)
     let mask = int.wrapping_sub(index_len(m), 1)
     let mut i: u64 = 0
@@ -173,7 +210,6 @@ fn make_room[K: key, V](mut m: Map[K, V]) -> Result[(), Capacity] {
         index_set(mut m, j, s)
         i = s
     }
-    Ok(())
 }
 
 fn install_index[K: key, V](mut m: Map[K, V], h: u64, s: u64) {

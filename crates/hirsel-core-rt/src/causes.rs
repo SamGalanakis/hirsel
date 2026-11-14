@@ -82,12 +82,16 @@ pub struct Cell {
     pub(crate) next: *mut Cell,
     funding: Payer,
     pub(crate) reserved: bool,
+    /// The root task's startup cell is outside the program limit. Its charge
+    /// remains held by the task record until context teardown.
+    pub(crate) startup: bool,
 }
 impl Cell {
     pub(crate) fn prepaid(funding: Payer) -> Box<Self> {
         let cell = Box::new(Self {
             funding,
             reserved: false,
+            startup: false,
             cause: Cause::default(),
             next: ptr::null_mut(),
         });
@@ -103,6 +107,17 @@ impl Cell {
         Box::new(Self {
             funding,
             reserved: true,
+            startup: false,
+            cause: Cause::default(),
+            next: ptr::null_mut(),
+        })
+    }
+
+    pub(crate) fn startup(funding: Payer) -> Box<Self> {
+        Box::new(Self {
+            funding,
+            reserved: false,
+            startup: true,
             cause: Cause::default(),
             next: ptr::null_mut(),
         })
@@ -112,7 +127,9 @@ impl Drop for Cell {
     fn drop(&mut self) {
         // SAFETY: this cell owns its inline String; unused cells have capacity zero.
         unsafe { drop_string(&self.cause.message) };
-        self.funding.refund(charge::CAUSE_CELL);
+        if !self.startup {
+            self.funding.refund(charge::CAUSE_CELL);
+        }
         if self.reserved {
             self.funding.finish_reserved();
         }
@@ -202,7 +219,7 @@ pub fn task_start(context: &mut Context) -> Result<(), Capacity> {
         8,
     )?;
     let funding = record.partition(charge::CAUSE_CELL);
-    context.primary = Some(Cell::prepaid(funding));
+    context.primary = Some(Cell::startup(funding));
     context.task_record = Some(record);
     Ok(())
 }
@@ -224,7 +241,9 @@ fn take_cell(context: &mut Context) -> Box<Cell> {
         // SAFETY: active_resource is the live, exclusively running finalizer's state.
         unsafe { (*context.active_resource).cell.take().unwrap() }
     };
-    if let Some(reservation) = context.isolates.last_mut() {
+    if let Some(reservation) = context.isolates.last_mut()
+        && reservation.obligation == context.active_resource
+    {
         reservation.used = true;
     }
     cell
@@ -314,6 +333,11 @@ pub unsafe fn finalizer_begin(context: &mut Context, pointer: std::ptr::NonNull<
 pub unsafe fn finalizer_end(context: &mut Context, pointer: std::ptr::NonNull<u8>) {
     // SAFETY: this is the state installed by the matching finalizer_begin.
     let resource = unsafe { &mut *block::resource(pointer) };
+    // An isolate cell installed into this obligation is funded by the active
+    // grant. Return it before handing that grant back to its parent.
+    if resource.cell.as_ref().is_some_and(|cell| cell.reserved) {
+        drop(resource.cell.take());
+    }
     context.current.handover();
     context.current = resource.previous.take().unwrap();
     context.active_resource = resource.previous_resource;

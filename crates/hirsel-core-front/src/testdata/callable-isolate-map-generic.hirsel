@@ -1,0 +1,55 @@
+// expect: run test() = 1 evaluator-only:cranelift,llvm
+// expect: run field_test() = 1 evaluator-only:cranelift,llvm
+fn outer[K: key, V](m: Map[K, V]) -> u64 {
+    match isolate(scoped fn() -> u64 {
+        map.len(m)
+    }) {
+        Ok(Ok(n)) => n,
+        _ => 0,
+    }
+}
+
+fn outer_direct[K: key, V](m: Map[K, V]) -> u64 {
+    map.len(m)
+}
+
+fn outer_get[K: key, V](m: Map[K, V], k: K) -> bool {
+    match isolate(scoped fn() -> bool {
+        match map.get(m, k) {
+            Some(_) => true,
+            None => false
+        }
+    }) {
+        Ok(Ok(found)) => found,
+        _ => false,
+    }
+}
+
+type Holder[K: key, V] {
+    table: Map[K, V]
+}
+
+fn outer_field[K: key, V](h: Holder[K, V]) -> u64 {
+    match isolate(scoped fn() -> u64 {
+        map.len(h.table)
+    }) {
+        Ok(Ok(n)) => n,
+        _ => 0,
+    }
+}
+
+fn test() -> u64 {
+    let mut m: Map[u64, u64] = map.new()
+    result.unwrap(map.insert(mut m, 1u64, 7u64))
+    if outer_direct(m) == 1 && outer(m) == 1 && outer_get(m, 1u64) {
+        1
+    } else {
+        0
+    }
+}
+
+fn field_test() -> u64 {
+    let mut m: Map[u64, u64] = map.new()
+    result.unwrap(map.insert(mut m, 1u64, 7u64))
+    outer_field(Holder(table: m))
+}

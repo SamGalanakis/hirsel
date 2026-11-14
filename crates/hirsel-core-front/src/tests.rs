@@ -3537,6 +3537,23 @@ fn isolate_transitive_attack_regressions() {
 }
 
 #[test]
+fn isolate_outer_map_generic_calls() {
+    let failures = run_case(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src/testdata/callable-isolate-map.hirsel"),
+    );
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
+fn isolate_outer_generic_map_call() {
+    let failures = run_case(
+        &Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/testdata/callable-isolate-map-generic.hirsel"),
+    );
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
 fn written_anchor_activation_rules() {
     let failures = run_case(&root().join("cases/body/callable-written-anchor-activation.hirsel"));
     assert!(failures.is_empty(), "{failures:?}");

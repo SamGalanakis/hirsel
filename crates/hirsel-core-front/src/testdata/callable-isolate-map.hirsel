@@ -1,0 +1,69 @@
+// Isolate reads an outer Map through a scoped closure. Generic map calls must
+// infer the captured Map's concrete key/value rows.
+// expect: run read_len() = 1 evaluator-only:cranelift,llvm
+// expect: run read_get() = 7 evaluator-only:cranelift,llvm
+// expect: run read_fail() = fail Unwrap evaluator-only:cranelift,llvm
+// expect: run field_len() = 1 evaluator-only:cranelift,llvm
+fn seed() -> Map[u64, u64] {
+    let mut m: Map[u64, u64] = map.new()
+    result.unwrap(map.insert(mut m, 1u64, 7u64))
+    m
+}
+
+fn read_len() -> u64 {
+    let m = seed()
+    match isolate(scoped fn() -> u64 { map.len(m) }) {
+        Ok(Ok(n)) => n,
+        _ => 0,
+    }
+}
+
+fn read_get() -> u64 {
+    let m = seed()
+    match isolate(scoped fn() -> u64 {
+        match map.get(m, 1u64) { Some(v) => v, None => 0u64 }
+    }) {
+        Ok(Ok(n)) => n,
+        _ => 0,
+    }
+}
+
+fn read_fail() -> u64 {
+    let m = seed()
+    let _ = match isolate(scoped fn() -> u64 { let _ = map.len(m); fail("inner") }) {
+        Ok(Error(_)) => 1u64,
+        _ => 0,
+    }
+    let intact = match map.get(m, 1u64) { Some(v) => v == 7u64, None => false }
+    if map.len(m) == 1 && intact {
+        let none: Option[u64] = None
+        option.unwrap(none)
+    } else {
+        0
+    }
+}
+
+type Boxed { table: Map[u64, u64] }
+fn field_len() -> u64 {
+    let boxed = Boxed(table: seed())
+    match isolate(scoped fn() -> u64 { map.len(boxed.table) }) {
+        Ok(Ok(n)) => n,
+        _ => 0,
+    }
+}
+
+pub fn main() -> Result[(), Exit] {
+    if read_len() == 1 && read_get() == 7 && read_fail() == 1 && field_len() == 1 { Ok(()) } else { Error(Exit(status: 1)) }
+}
+
+// FAIL-16: an isolate cannot mutate a captured outer Map.
+// expect: refuse FAIL-16 at 63:19
+fn mut_map() -> u64 {
+    let mut m: Map[u64, u64] = seed()
+    match isolate(scoped fn() -> u64 {
+        result.unwrap(map.insert(mut m, 2u64, 8u64))
+        0u64
+    }) {
+        _ => 0,
+    }
+}

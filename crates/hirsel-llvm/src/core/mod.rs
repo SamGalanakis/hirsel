@@ -862,6 +862,17 @@ impl FunctionEmitter<'_> {
     fn emit_to(&mut self, result: Local, op: Operation<'_>) {
         self.sink.instruction(Some(result), op, self.debug_location);
     }
+    /// `name` denotes `x`. A local is bound by name, so uses before its
+    /// definition (CoreIR blocks need not be in dominance order) resolve too.
+    /// LLVM has no scalar copy instruction, so a constant goes through the
+    /// identity select, which preserves poison and adds no representation promise.
+    fn copy(&mut self, name: Local, t: &Type, x: &Value) {
+        if let Value::Local(value) = x {
+            self.sink.bind(name, t, *value);
+        } else {
+            self.emit_to(name, Operation::Select(t, &true.into(), x, &Value::Poison));
+        }
+    }
     fn effect(&mut self, op: Operation<'_>) {
         self.sink.instruction(None, op, self.debug_location);
     }
@@ -970,13 +981,7 @@ impl FunctionEmitter<'_> {
         if self.value_slots.get(v.index()).copied().unwrap_or(true) {
             self.store(&t, x, &Local::Value(v.index()).into(), 0);
         } else {
-            // LLVM has no scalar copy instruction. This identity also permits
-            // forward references when CoreIR blocks are not in dominance order.
-            // It preserves poison; no freeze or representation promise is added.
-            self.emit_to(
-                Local::Value(v.index()),
-                Operation::Select(&t, &true.into(), x, &Value::Poison),
-            );
+            self.copy(Local::Value(v.index()), &t, x);
         }
     }
     fn access_facts(&self, addresses: &[AddressId]) -> Option<Scoped> {

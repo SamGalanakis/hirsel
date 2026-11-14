@@ -684,6 +684,9 @@ pub(super) trait Sink {
     fn block(&mut self, label: Label);
     fn alloca(&mut self, name: Local, ty: &Type, align: u32);
     fn instruction(&mut self, result: Option<Local>, op: Operation<'_>, location: Option<usize>);
+    /// `name` denotes the same value as `value` in this function, before or
+    /// after `value`'s definition, without emitting an instruction.
+    fn bind(&mut self, name: Local, ty: &Type, value: Local);
 }
 
 /// LLVM text of the same module. The printed-module oracle parses it in a
@@ -695,6 +698,7 @@ pub(super) struct TextSink {
     header: String,
     allocations: String,
     code: String,
+    bound: std::collections::HashMap<String, String>,
 }
 impl TextSink {
     pub fn finish(mut self) -> String {
@@ -788,6 +792,34 @@ fn memory(out: &mut String, m: &Memory) {
     }
     scopes(out, &m.scopes);
 }
+/// `code` with every `%name` bound to another local spelled as that local.
+/// Bound names are value and address locals; labels and quoted text never
+/// spell one.
+fn rebind(code: &str, bound: &std::collections::HashMap<String, String>) -> String {
+    fn resolve<'a>(
+        bound: &'a std::collections::HashMap<String, String>,
+        mut name: &'a str,
+    ) -> &'a str {
+        while let Some(next) = bound.get(name) {
+            name = next;
+        }
+        name
+    }
+    let mut out = String::with_capacity(code.len());
+    let mut rest = code;
+    while let Some(at) = rest.find('%') {
+        out.push_str(&rest[..=at]);
+        rest = &rest[at + 1..];
+        let end = rest
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
+            .unwrap_or(rest.len());
+        out.push_str(resolve(bound, &rest[..end]));
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 impl Sink for TextSink {
     fn global(&mut self, g: &Global) {
         let out = &mut self.text;
@@ -927,8 +959,12 @@ impl Sink for TextSink {
         function_attrs(out, attrs);
         self.allocations.clear();
         self.code.clear();
+        self.bound.clear();
     }
     fn end_function(&mut self) {
+        if !self.bound.is_empty() {
+            self.code = rebind(&self.code, &self.bound);
+        }
         writeln!(
             self.text,
             "{} {{\nentry:\n{}{}}}",
@@ -945,6 +981,12 @@ impl Sink for TextSink {
     }
     fn block(&mut self, label: Label) {
         writeln!(self.code, "{label}:").unwrap();
+    }
+    fn bind(&mut self, name: Local, _: &Type, value: Local) {
+        let (mut n, mut v) = (String::new(), String::new());
+        name.write_name(&mut n).unwrap();
+        value.write_name(&mut v).unwrap();
+        self.bound.insert(n, v);
     }
     fn instruction(&mut self, result: Option<Local>, op: Operation<'_>, location: Option<usize>) {
         let out = &mut self.code;

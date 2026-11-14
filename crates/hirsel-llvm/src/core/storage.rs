@@ -205,10 +205,7 @@ impl FunctionEmitter<'_> {
         {
             self.store(&Type::Ptr, &p, &local.into(), 0);
         } else {
-            self.emit_to(
-                local,
-                Operation::Select(&Type::Ptr, &true.into(), &p, &Value::Poison),
-            );
+            self.copy(local, &Type::Ptr, &p);
         }
         Ok(())
     }

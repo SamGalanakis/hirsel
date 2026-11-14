@@ -33,6 +33,7 @@ pub(crate) struct NativeSink {
     types: HashMap<Type, Raw>,
     locals: HashMap<Local, Raw>,
     pending: HashMap<Local, Raw>,
+    bound: HashMap<Local, Local>,
     blocks: HashMap<Label, Raw>,
     name: String,
 }
@@ -53,6 +54,7 @@ impl NativeSink {
             types: HashMap::new(),
             locals: HashMap::new(),
             pending: HashMap::new(),
+            bound: HashMap::new(),
             blocks: HashMap::new(),
             name: String::new(),
         }
@@ -115,6 +117,9 @@ impl NativeSink {
         unsafe { (self.api.global_ref)(self.unit, name.as_ptr().cast(), name.len()) }
     }
     fn local(&mut self, local: Local, ty: &Type) -> Raw {
+        if let Some(&value) = self.bound.get(&local) {
+            return self.local(value, ty);
+        }
         if let Some(&v) = self.locals.get(&local) {
             return v;
         }
@@ -429,6 +434,7 @@ impl Sink for NativeSink {
     fn begin_function(&mut self, name: &str, sig: &FnSig, params: &[Local], attrs: &FnAttrs) {
         let f = self.function(name, sig, attrs);
         self.locals.clear();
+        self.bound.clear();
         self.blocks.clear();
         // SAFETY: the new function's body and arguments.
         unsafe { (self.api.begin_body)(self.unit, f) };
@@ -455,6 +461,18 @@ impl Sink for NativeSink {
         let block = self.block_ref(label);
         // SAFETY: places this function's block and positions the builder there.
         unsafe { (self.api.begin_block)(self.unit, block) }
+    }
+    fn bind(&mut self, name: Local, ty: &Type, value: Local) {
+        let previous = self.bound.insert(name, value);
+        debug_assert!(
+            previous.is_none() && !self.locals.contains_key(&name),
+            "{name} is defined twice"
+        );
+        if let Some(pending) = self.pending.remove(&name) {
+            let value = self.local(value, ty);
+            // SAFETY: replacing this function's placeholder with a live value.
+            unsafe { (self.api.replace)(pending, value) }
+        }
     }
     fn alloca(&mut self, name: Local, ty: &Type, align: u32) {
         let t = self.ty(ty);

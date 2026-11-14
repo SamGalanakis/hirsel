@@ -454,16 +454,23 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         }
                         self.use_place(at, Use::Mut(Hold::CallMut(call)), e);
                         self.arg_ty_rooted(pt, at.ty, e, found, roots);
-                        if self.contains_callback(at.ty)
-                            || self.live() && self.contains_callback(pt)
+                        if self.live()
+                            && matches!(
+                                self.t.kind(self.bare(at.ty)),
+                                TyKind::Fn(_, _, _, Callable::Own | Callable::OwnSend)
+                            )
+                            && let Some(expected) = self.known_rooted(pt, found, roots)
+                            && self.scoped_callable_view(at.ty, expected)
                         {
-                            self.gap(
+                            self.refuse(
+                                "OWN-8",
                                 e,
-                                "capture descriptor updates through mut arguments are not built",
+                                "an owning callable fits scoped only as a view",
                             );
                             return true;
                         }
                         *val = self.place_ptr(at, e);
+                        self.mut_descriptor(at);
                     }
                     Ok(None) => {
                         let _ = self.expr(p, None);

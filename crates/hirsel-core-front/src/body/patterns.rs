@@ -615,7 +615,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let component = case.map_or(anchors::Component::Field(field), |c| {
             anchors::Component::Case(c, field)
         });
-        self.project_descriptor(subject.value, value, component);
+        self.project_descriptor(subject.value, value, component, ty);
         let anchors = self.anchors.project(subject.anchors, component);
         if anchors != 0
             && let Some(v) = value

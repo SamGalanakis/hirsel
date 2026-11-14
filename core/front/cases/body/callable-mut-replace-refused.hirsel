@@ -1,0 +1,5 @@
+// A different incoming callback is not one of dst's anchors.
+// expect: refuse OWN-11 at 4:2
+fn replace_cb(mut dst:scoped fn(u64)->u64,take next:scoped fn(u64)->u64) {
+ dst=take next
+}

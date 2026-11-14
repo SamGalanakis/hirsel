@@ -576,7 +576,7 @@ impl Cx<'_, '_, '_> {
                 Rep::None => None,
             }
         })();
-        self.project_descriptor(value, v, anchors::Component::Field(i as u32));
+        self.project_descriptor(value, v, anchors::Component::Field(i as u32), ty);
         (ty, v)
     }
 }

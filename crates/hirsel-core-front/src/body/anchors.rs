@@ -636,7 +636,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return;
         }
         let new = self.anchor_expression(value);
-        let captures = if self.anchors.mut_params.contains_key(&at.place.slot)
+        let captures = if (new == 0 && self.anchors.mut_params.contains_key(&at.place.slot))
             || self.anchors.declared.contains_key(&at.place.slot)
         {
             self.capture_anchors(emitted)
@@ -706,7 +706,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         0
                     }
                 }
-                NodeKind::Unary if self.token_text(n) == "view" => {
+                NodeKind::Unary if matches!(self.token_text(n), "view" | "take") => {
                     if let Some((_, at)) = self.anchors.place.filter(|(node, _)| *node == kids[0]) {
                         self.anchor_read(at)
                     } else {

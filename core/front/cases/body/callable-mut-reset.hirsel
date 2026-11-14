@@ -1,0 +1,51 @@
+// OWN-11 / OWN-21: a call preserves its caller's capture upper bound.
+// expect: run reset_run() = 12
+// expect: run self_run() = 24
+// expect: run part_run() = 25
+// expect: run captured_run() = 12
+// expect: run destructured_run() = 24
+fn reset_cb(mut dst:scoped fn(u64)->u64) {dst=fn(x:u64)->u64{x}}
+fn reset_run()->u64 {
+ let mut n:u64=10
+ let mut cb=scoped fn(x:u64)->u64{n+=x;n}
+ reset_cb(mut cb)
+ cb(2)+n
+}
+fn self_cb(mut dst:scoped fn(u64)->u64) {dst=dst;dst=view dst}
+fn self_run()->u64 {
+ let mut n:u64=10
+ let mut cb=scoped fn(x:u64)->u64{n+=x;n}
+ self_cb(mut cb)
+ cb(2)+n
+}
+scoped type Pair {a:scoped fn(u64)->u64,b:scoped fn(u64)->u64}
+fn copy_part(mut dst:Pair) {dst.b=dst.a}
+fn part_run()->u64 {
+ let mut n:u64=1
+ let mut m:u64=10
+ let mut p=Pair(a:scoped fn(x:u64)->u64{n+=x;n},b:scoped fn(x:u64)->u64{m+=x;m})
+ copy_part(mut p)
+ let b=p.b(2)
+ let a=p.a(3)
+ b+a+n+m
+}
+fn captured_run()->u64 {
+ let mut n:u64=10
+ let mut cb=scoped fn(x:u64)->u64{n+=x;n}
+ let reset=scoped fn() {cb=fn(x:u64)->u64{x}}
+ reset()
+ cb(2)+n
+}
+fn identity(x:u64)->u64{x}
+fn copy_tuple(mut dst:(scoped fn(u64)->u64,scoped fn(u64)->u64,u64,fn(u64)->u64)) {dst.1=dst.0}
+fn destructured_run()->u64 {
+ let mut n:u64=1
+ let mut m:u64=10
+ let mut p=(scoped fn(x:u64)->u64{n+=x;n},scoped fn(x:u64)->u64{m+=x;m},7u64,identity)
+ copy_tuple(mut p)
+ let (a,b,count,plain)=take p
+ let from_plain=plain(n)
+ let from_callback=b(2)
+ count+from_plain+from_callback+n+m
+}
+pub fn main()->Result[(),Exit] {if reset_run()==12u64 && self_run()==24u64 && part_run()==25u64 && captured_run()==12u64 && destructured_run()==24u64 {Ok(())}else{Error(Exit(status:1))}}

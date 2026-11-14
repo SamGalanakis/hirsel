@@ -1,0 +1,5 @@
+// The callee's slot dst cannot be captured by a callback stored through it.
+// expect: refuse OWN-21 at 4:2
+fn wrap_cb(mut dst:scoped fn(u64)->u64) {
+ dst=scoped fn(x:u64)->u64 {dst(x)+1}
+}

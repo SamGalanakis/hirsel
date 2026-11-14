@@ -106,6 +106,31 @@ fn owning_callable_scoped_views_cranelift(){owning_callable_scoped_views(Backend
 #[ignore="explicit native integration target"]
 fn owning_callable_scoped_views_llvm(){owning_callable_scoped_views(Backend::Llvm);}
 
+fn scoped_callback_mutation(backend: Backend) {
+    ordered_case(backend, include_str!("../../../core/front/cases/body/callable-mut-reset.hirsel"));
+    let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for (source, rule, call) in [
+        (include_str!("../../../core/front/cases/body/callable-mut-replace-refused.hirsel"), "OWN-11", "replace_cb(mut cb,fn(x:u64)->u64{x})"),
+        (include_str!("../../../core/front/cases/body/callable-mut-wrap-refused.hirsel"), "OWN-21", "wrap_cb(mut cb)"),
+    ] {
+        let dir=tempfile::tempdir().unwrap();
+        let source=format!("{source}\npub fn main()->Result[(),Exit] {{let mut cb:scoped fn(u64)->u64=fn(x:u64)->u64{{x}};{call};Ok(())}}\n");
+        let mut request=source_request(&source,dir.path());
+        request.inputs.packages[1]=PackageManifest::directory(&root.join("core/core"),package("core"),true).unwrap();
+        let product=Driver::default().check(request,&mut Meter::new(false)).unwrap();
+        assert_eq!(product.diagnostics.iter().map(|d|d.rule.as_str()).collect::<Vec<_>>(),[rule]);
+        assert!(product.incomplete.is_empty());
+        let entry=DefPath::from_full("app@1/main/main").unwrap();
+        assert!(matches!(product.build(&entry,&native_options(backend,dir.path())),Err(NativeStop::Check(message)) if message.contains(rule)));
+    }
+}
+#[test]
+#[ignore="explicit native integration target"]
+fn scoped_callback_mutation_cranelift(){scoped_callback_mutation(Backend::Cranelift);}
+#[test]
+#[ignore="explicit native integration target"]
+fn scoped_callback_mutation_llvm(){scoped_callback_mutation(Backend::Llvm);}
+
 fn slots_needs_drop(backend: Backend) {
     let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dir=tempfile::tempdir().unwrap();

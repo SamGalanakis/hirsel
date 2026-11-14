@@ -27,8 +27,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return false;
         };
         matches!(self.t.kind(self.bare(from)),
-            TyKind::Fn(a, ar, aw, Callable::Own | Callable::OwnSend)
-                if a == b && ar == br && (!aw || *bw))
+            TyKind::Fn(a, ar, aw, kind)
+                if a == b && ar == br && (!aw || *bw)
+                    && (matches!(kind, Callable::Own | Callable::OwnSend)
+                        || *kind == Callable::Scoped && self.is_view(from)))
     }
 
     pub(super) fn function_value(
@@ -895,6 +897,16 @@ pub(super) struct Descriptors {
     imports: HashMap<u32, u32>,
 }
 impl Descriptors {
+    fn opaque(&mut self, id: Option<u32>) -> Option<u32> {
+        let old = id?;
+        if self.fields[old as usize].len == 0 {
+            return id;
+        }
+        let id = self.ranges.len() as u32;
+        self.ranges.push(self.ranges[old as usize]);
+        self.fields.push(PoolRange::EMPTY);
+        Some(id)
+    }
     fn add(&mut self, captures: &[Capture]) -> Option<u32> {
         if captures.is_empty() {
             return None;
@@ -969,6 +981,10 @@ impl Descriptors {
             start as u32,
             (self.captures.len() - start) as u32,
         ));
+        if self.fields[a as usize].len == 0 || self.fields[b as usize].len == 0 {
+            self.fields.push(PoolRange::EMPTY);
+            return Some(id);
+        }
         let start = self.parts.len();
         for source in [a, b] {
             let range = self.fields[source as usize];
@@ -992,6 +1008,9 @@ impl Descriptors {
     }
     fn project(&mut self, id: Option<u32>, component: anchors::Component) -> Option<u32> {
         let range = self.fields[id? as usize];
+        if range.len == 0 {
+            return id;
+        }
         let mut result = None;
         for i in range.start..range.start + range.len {
             let (field, child) = self.parts[i as usize];
@@ -1010,6 +1029,9 @@ impl Descriptors {
         let Some((&component, rest)) = path.split_first() else {
             return new;
         };
+        if old.is_some_and(|id| self.fields[id as usize].len == 0) {
+            return self.union(old, new);
+        }
         let child = self.project(old, component);
         let child = self.replace(child, rest, new);
         let mut result = None;
@@ -1240,7 +1262,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let fact = self.anchor_root(Place::whole(slot));
             self.replace_slot_anchors(slot, fact);
         }
-        if original.mut_anchor {
+        if original.mut_anchor
+            || !owning && original.origin.writable() && self.contains_callback(original.ty)
+        {
             self.parameter_anchors(slot, original.ty, Mode::Mut, slot);
         }
         // Import only this callback's roots. Marking its environment slot above
@@ -1400,8 +1424,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         from: Option<ValueId>,
         value: Option<ValueId>,
         component: anchors::Component,
+        ty: TyId,
     ) {
         let id = self.descriptors.of(from);
+        if id.is_none() || !self.contains_callback(ty) {
+            return;
+        }
         let id = self.descriptors.project(id, component);
         if let (Some(value), Some(id)) = (value, id) {
             self.descriptors.values.insert(value, id);
@@ -1409,6 +1437,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     }
     pub(super) fn read_descriptor(&mut self, at: At, value: Option<ValueId>, n: NodeId) {
         let mut id = self.descriptors.slots.get(&at.place.slot).copied();
+        if id.is_none() || !self.contains_callback(at.ty) {
+            return;
+        }
         for i in at.place.start..at.place.start + at.place.len {
             if id.is_none() {
                 break;
@@ -1454,6 +1485,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 },
                 n,
             );
+            if capture.mode == Mode::Mut {
+                self.mut_descriptor(at);
+            }
         }
     }
     pub(super) fn descriptor_scope(&mut self, scope: usize, value: Option<ValueId>, n: NodeId) {
@@ -1493,8 +1527,38 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.descriptors.replace_slot(slot, id);
         }
     }
-    /// A mut signature has no post-call capture descriptor yet. Walk only the
-    /// inline scoped structure; ordinary type arguments cannot be scoped (OWN-19).
+    /// A mut callee can install any old part. Keep its capture union but forget
+    /// component refinements; the caller cannot know which part was installed.
+    pub(super) fn mut_descriptor(&mut self, at: At) {
+        let root = self.descriptors.slots.get(&at.place.slot).copied();
+        let Some(_) = root else {
+            return;
+        };
+        if !self.contains_callback(at.ty) {
+            return;
+        }
+        let mut selected = root;
+        let mut path = std::mem::take(&mut self.anchor_path);
+        path.clear();
+        for i in at.place.start..at.place.start + at.place.len {
+            if selected.is_none() {
+                break;
+            }
+            let PStep::Field(field) = self.steps[i as usize] else {
+                unreachable!("a callback component is reached only through fields");
+            };
+            let part = anchors::Component::Field(field);
+            path.push(part);
+            selected = self.descriptors.project(selected, part);
+        }
+        let opaque = self.descriptors.opaque(selected);
+        if opaque != selected {
+            let id = self.descriptors.replace(root, &path, opaque);
+            self.set_slot_descriptor(at.place.slot, id);
+        }
+        self.anchor_path = path;
+    }
+    /// Walk only inline scoped structure; ordinary type arguments cannot be scoped.
     pub(super) fn contains_callback(&self, ty: TyId) -> bool {
         match self.t.kind(ty) {
             TyKind::Fn(_, _, _, Callable::Scoped) => true,
@@ -1519,25 +1583,38 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             _ => false,
         }
     }
-    pub(super) fn descriptor_store(&mut self, at: At, value: Option<ValueId>, n: NodeId) {
+    pub(super) fn descriptor_store(&mut self, at: At, value: Option<ValueId>, n: NodeId) -> bool {
         // A sibling may hold a callback, but this place cannot change its descriptor.
         // In particular a list, array or Box payload cannot contain scoped values.
         if !self.contains_callback(at.ty) {
-            return;
+            return true;
         }
-        if matches!(
-            self.var(at.place.slot).origin,
-            Origin::MutParam | Origin::ViewParam | Origin::PatternView
-        ) || self
-            .capture_frame
-            .as_ref()
-            .is_some_and(|f| f.outer[at.place.slot as usize].is_some())
-        {
-            self.gap(
-                n,
-                "capture descriptor updates through a borrowed place are not built",
-            );
-            return;
+        if self.var(at.place.slot).origin == Origin::MutParam {
+            if let Some(id) = self.descriptors.of(value) {
+                let range = self.descriptors.ranges[id as usize];
+                if range
+                    .get(&self.descriptors.captures)
+                    .unwrap()
+                    .iter()
+                    .any(|c| {
+                        c.slot == at.place.slot
+                            || self
+                                .capture_frame
+                                .as_ref()
+                                .is_none_or(|f| f.outer[c.slot as usize].is_none())
+                    })
+                {
+                    self.refuse(
+                        "OWN-21",
+                        n,
+                        "a stored callback cannot capture a callee slot",
+                    );
+                    return false;
+                }
+            }
+            // OWN-11 checks the value's anchors next. An allowed replacement
+            // leaves this borrow's capture upper bound, and the caller's, intact.
+            return true;
         }
         if let Some(id) = self.descriptors.of(value) {
             let target = self.var(at.place.slot).depth;
@@ -1553,7 +1630,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     n,
                     "a scoped callback cannot outlive a captured slot",
                 );
-                return;
+                return false;
             }
         }
         if at.place.len == 0 {
@@ -1574,7 +1651,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                             );
                         }
                         self.anchor_path = path;
-                        return;
+                        return false;
                     }
                 }
             }
@@ -1584,6 +1661,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.set_slot_descriptor(at.place.slot, id);
             self.anchor_path = path;
         }
+        true
     }
     pub(super) fn capture_store(&mut self, at: At, ty: TyId, n: NodeId) {
         let Some(frame) = &self.capture_frame else {

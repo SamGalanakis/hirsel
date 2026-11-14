@@ -1,5 +1,5 @@
 // A fresh callback environment cannot escape an invocation through a captured slot.
-// expect: gap capture descriptor updates through a borrowed place are not built
+// expect: refuse OWN-11 at 7:26
 fn f()->u64 {
  let mut n:u64=1
  let mut m:u64=2

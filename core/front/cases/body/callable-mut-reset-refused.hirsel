@@ -1,0 +1,10 @@
+// Resetting the code does not discard the caller's original capture descriptor.
+// expect: refuse OWN-9 at 9:5
+fn reset_cb(mut dst:scoped fn(u64)->u64) {dst=fn(x:u64)->u64{x}}
+fn f()->u64 {
+ let mut n:u64=1
+ let mut cb=scoped fn(x:u64)->u64{n+=x;n}
+ reset_cb(mut cb)
+ let _=0u64
+ cb(n)
+}

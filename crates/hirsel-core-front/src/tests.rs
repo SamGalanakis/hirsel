@@ -2848,6 +2848,24 @@ fn owning_callable_scoped_views() {
 }
 
 #[test]
+fn scoped_callback_mutation_contracts() {
+    let mut failures = vec![];
+    for name in [
+        "callable-mut-reset",
+        "callable-mut-replace-refused",
+        "callable-mut-wrap-refused",
+        "callable-mut-reset-refused",
+        "callable-mut-part-refused",
+        "callable-mut-captured-wrap-refused",
+    ] {
+        failures.extend(run_case(
+            &root().join("cases/body").join(format!("{name}.hirsel")),
+        ));
+    }
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
 fn mut_scoped_parameters_keep_the_callers_anchors() {
     let mut failures = vec![];
     for case in [

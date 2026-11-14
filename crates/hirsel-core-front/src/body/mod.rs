@@ -2153,6 +2153,27 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
     fn place_value(&mut self, n: NodeId, want: Option<Want>) -> (TyId, Option<ValueId>) {
         match self.place(n) {
             Ok(Some(at)) => {
+                if self.var(at.place.slot).origin == Origin::MutParam
+                    && matches!(self.t.kind(at.ty), TyKind::Fn(_, _, _, Callable::Scoped))
+                    && want.is_some_and(|w| w.payload == 0 && w.ty == at.ty)
+                    && self
+                        .freezes
+                        .iter()
+                        .any(|f| f.hold == Hold::Assign && f.place.slot == at.place.slot)
+                {
+                    self.use_place(at, Use::View(Hold::View(Extent::Temp)), n);
+                    let value = self
+                        .place_ptr(at, n)
+                        .and_then(|value| match self.rep(at.ty) {
+                            Ok(Rep::Place(id)) => Some(self.snapshot(value, id, n)),
+                            Err(what) => {
+                                self.gap(n, what);
+                                None
+                            }
+                            _ => unreachable!("a scoped callable has a carrier"),
+                        });
+                    return (at.ty, value);
+                }
                 if let Some(w) = want.filter(|w| w.payload == 0)
                     && self.scoped_callable_view(at.ty, w.ty)
                 {

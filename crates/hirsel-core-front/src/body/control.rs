@@ -297,9 +297,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         let diverged = if !compound {
             let (t, v) = self.expr(value, expect(at.ty));
-            self.descriptor_store(at, v, place);
-            self.anchor_store(at, value, v, s);
-            self.capture_store(at, t, place);
+            if self.descriptor_store(at, v, place) {
+                self.anchor_store(at, value, v, s);
+                self.capture_store(at, t, place);
+            }
             if let (Some(address), Ok(r)) = (address, self.rep(at.ty)) {
                 // OWN-12: the old value is cleaned when it is live, or maybe with its
                 // flag set; then the new one is installed and the flag set (T3.2-T3.4).

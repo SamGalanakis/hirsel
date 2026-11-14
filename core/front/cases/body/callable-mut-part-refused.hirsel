@@ -1,0 +1,11 @@
+// A mut callee may install any old part, so later projections use the old union.
+// expect: refuse OWN-9 at 10:6
+scoped type Pair {a:scoped fn(u64)->u64,b:scoped fn(u64)->u64}
+fn copy_part(mut dst:Pair) {dst.b=dst.a}
+fn f()->u64 {
+ let mut n:u64=1
+ let mut m:u64=10
+ let mut p=Pair(a:scoped fn(x:u64)->u64{n+=x;n},b:scoped fn(x:u64)->u64{m+=x;m})
+ copy_part(mut p)
+ p.b(n)
+}

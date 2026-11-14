@@ -122,7 +122,7 @@ impl<'c> NativeSink<'c> {
                 if let Some(sig) = self.functions.get(name).cloned() {
                     self.function(name, &sig)
                 } else {
-                    let t = self.globals[name].clone();
+                    let t = self.globals.get(name).cloned().unwrap_or(Type::Ptr);
                     let t = self.ty(&t);
                     self.unit.global(name, t)
                 }
@@ -384,7 +384,11 @@ impl Sink for NativeSink<'_> {
             let (ty, rest) = rest.split_once(' ').unwrap();
             let (value, index) = rest.rsplit_once(", ").unwrap();
             let index = index.parse().unwrap_or(0);
-            self.instruction(result, Operation::Extract(Self::raw_type(ty), &Self::raw_value(value), index), location);
+            self.instruction(
+                result,
+                Operation::Extract(Self::raw_type(ty), &Self::raw_value(value), index),
+                location,
+            );
             return;
         }
         if let Some(rest) = body.strip_prefix("insertvalue ") {
@@ -395,12 +399,26 @@ impl Sink for NativeSink<'_> {
             let index = index.parse().unwrap_or(0);
             let aggregate = Self::raw_value(aggregate);
             let field = Self::raw_value(field);
-            self.instruction(result, Operation::Insert(Self::raw_type(ty), &aggregate, Self::raw_type(field_ty), &field, index), location);
+            self.instruction(
+                result,
+                Operation::Insert(
+                    Self::raw_type(ty),
+                    &aggregate,
+                    Self::raw_type(field_ty),
+                    &field,
+                    index,
+                ),
+                location,
+            );
             return;
         }
         if let Some(value) = body.strip_prefix("fneg ") {
             let (ty, value) = value.split_once(' ').unwrap();
-            self.instruction(result, Operation::FNeg(Self::raw_type(ty), &Self::raw_value(value)), location);
+            self.instruction(
+                result,
+                Operation::FNeg(Self::raw_type(ty), &Self::raw_value(value)),
+                location,
+            );
             return;
         }
         for (name, op) in [

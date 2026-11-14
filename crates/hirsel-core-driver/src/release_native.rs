@@ -109,8 +109,10 @@ impl CheckProduct {
             let text = modules
                 .iter()
                 .map(|ir| {
-                    hirsel_llvm_lazy::core::emit_ir_with_charge_observation(
+                    hirsel_llvm_lazy::core::emit_ir_for_target(
                         ir,
+                        hirsel_core_layout::Target::from_triple(&options.target)
+                            .expect("supported native target"),
                         options.logical_charge_report.is_some(),
                     )
                 })
@@ -134,11 +136,15 @@ impl CheckProduct {
                     .zip(&imported)
                     .map(|(ir, imported)| (&**ir, *imported)),
             );
-            let bytes = hirsel_llvm_lazy::emit_program(&units, &exports).map_err(|message| {
-                NativeStop::Emit {
-                    definition: entry.clone(),
-                    message,
-                }
+            let bytes = hirsel_llvm_lazy::emit_program_for_target(
+                &units,
+                &exports,
+                hirsel_core_layout::Target::from_triple(&options.target)
+                    .expect("supported native target"),
+            )
+            .map_err(|message| NativeStop::Emit {
+                definition: entry.clone(),
+                message,
             })?;
             (publish(store, object_key, &bytes)?, bytes, true)
         };

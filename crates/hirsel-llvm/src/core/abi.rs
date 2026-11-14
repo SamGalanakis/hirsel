@@ -1,18 +1,25 @@
-//! System V AMD64 result classification, adapted from rustc_target's
-//! callconv/x86_64.rs: integer class wins within each eightbyte; aggregates
-//! over two eightbytes use sret. Only CoreIR's naturally aligned scalars occur.
+//! Linux C result classification, adapted from rustc_target's callconv/{x86_64,
+//! aarch64}.rs. SysV merges eightbyte classes; AAPCS64 uses homogeneous floating
+//! aggregates or integer carriers, and otherwise the dedicated sret register.
+//! Only FORM's naturally aligned scalar fields occur.
 use super::*;
 
 pub(super) struct Return {
+    pub target: hirsel_core_layout::Target,
     pub ty: String,
     pub storage: String,
     pub indirect: bool,
     pub fields: Vec<Ty>,
     pub offsets: Vec<u64>,
     pub regs: Vec<String>,
+    pub reg_stride: u64,
 }
-pub(super) fn extension(t: Ty) -> &'static str {
-    if size(t) >= 4 || t.is_float() || t == Ty::Ptr {
+pub(super) fn extension(target: hirsel_core_layout::Target, t: Ty) -> &'static str {
+    if target == hirsel_core_layout::Target::Aarch64Linux
+        || size(t) >= 4
+        || t.is_float()
+        || t == Ty::Ptr
+    {
         ""
     } else if t.int().is_some_and(|x| x.0) {
         " signext"
@@ -21,10 +28,10 @@ pub(super) fn extension(t: Ty) -> &'static str {
     }
 }
 impl Return {
-    pub fn internal(fields: &[Ty]) -> Self {
+    pub fn internal_on_target(target: hirsel_core_layout::Target, fields: &[Ty]) -> Self {
         let mut fields = fields.to_vec();
         fields.push(Ty::Scalar(Scalar::U8));
-        Self::new(&fields)
+        Self::on_target(target, &fields)
     }
 
     pub fn parameters(&self, sig: &Signature, facts: bool) -> Vec<String> {
@@ -45,7 +52,7 @@ impl Return {
         }
         for (i, p) in sig.params.iter().enumerate() {
             let t = match p {
-                Param::Value(t) => format!("{}{}", ty(*t), extension(*t)),
+                Param::Value(t) => format!("{}{}", ty(*t), extension(self.target, *t)),
                 Param::Address { loan, .. } if facts => match loan {
                     Loan::Mut | Loan::Take => "ptr noalias".into(),
                     // Loan::View freezes the place for the whole call, including
@@ -61,12 +68,19 @@ impl Return {
 
     pub fn return_type(&self) -> String {
         match self.fields.as_slice() {
-            [t] if !extension(*t).is_empty() => format!("{} {}", extension(*t).trim(), self.ty),
+            [t] if !extension(self.target, *t).is_empty() => {
+                format!("{} {}", extension(self.target, *t).trim(), self.ty)
+            }
             _ => self.ty.clone(),
         }
     }
 
+    #[cfg(all(test, not(hirsel_lazy_core)))]
     pub fn new(fields: &[Ty]) -> Self {
+        Self::on_target(hirsel_core_layout::Target::X86_64Linux, fields)
+    }
+
+    pub fn on_target(target: hirsel_core_layout::Target, fields: &[Ty]) -> Self {
         let mut offsets = vec![];
         let mut end = 0u64;
         let mut alignment = 1;
@@ -79,11 +93,23 @@ impl Return {
         }
         let extent = end.next_multiple_of(alignment);
         let storage = format!("[{} x i8]", extent.max(16));
-        let indirect = fields.len() > 1 && extent > 16;
+        let homogeneous = target == hirsel_core_layout::Target::Aarch64Linux
+            && (2..=4).contains(&fields.len())
+            && fields[0].is_float()
+            && fields.iter().all(|t| *t == fields[0]);
+        let indirect = fields.len() > 1 && extent > 16 && !homogeneous;
         let regs = if fields.len() <= 1 {
             fields.iter().map(|t| ty(*t)).collect()
         } else if indirect {
             vec![]
+        } else if homogeneous {
+            fields.iter().map(|t| ty(*t)).collect()
+        } else if target == hirsel_core_layout::Target::Aarch64Linux {
+            if extent <= 8 {
+                vec![format!("i{}", extent * 8)]
+            } else {
+                vec!["i64".into(), "i64".into()]
+            }
         } else {
             (0..end.div_ceil(8))
                 .map(|chunk| {
@@ -109,13 +135,16 @@ impl Return {
             [one] => one.clone(),
             _ => format!("{{ {} }}", regs.join(", ")),
         };
+        let reg_stride = if homogeneous { size(fields[0]) } else { 8 };
         Self {
+            target,
             ty,
             storage,
             indirect,
             fields: fields.to_vec(),
             offsets,
             regs,
+            reg_stride,
         }
     }
 }
@@ -129,9 +158,9 @@ impl FunctionEmitter<'_> {
         };
         let sig = &self.module.signatures[site.signature.index()];
         let abi = if has_status {
-            Return::internal(&sig.results)
+            Return::internal_on_target(self.abi.target, &sig.results)
         } else {
-            Return::new(&sig.results)
+            Return::on_target(self.abi.target, &sig.results)
         };
         if has_status && !self.has_status {
             return false;
@@ -151,7 +180,11 @@ impl FunctionEmitter<'_> {
                     Arg::Address(a) => format!("ptr {}", self.address(a)),
                     Arg::Value(v) => {
                         let x = self.get(v);
-                        format!("{}{} {x}", ty(self.vty(v)), extension(self.vty(v)))
+                        format!(
+                            "{}{} {x}",
+                            ty(self.vty(v)),
+                            extension(self.abi.target, self.vty(v))
+                        )
                     }
                 }
             });
@@ -243,7 +276,7 @@ impl FunctionEmitter<'_> {
         }
         let mut r = "poison".to_string();
         for (i, t) in self.abi.regs.clone().iter().enumerate() {
-            let at = self.offset(&p, i as u64 * 8);
+            let at = self.offset(&p, i as u64 * self.abi.reg_stride);
             let x = self.calc(format!("load {t}, ptr {at}, align 1"));
             r = if self.abi.regs.len() == 1 {
                 x
@@ -263,9 +296,9 @@ impl FunctionEmitter<'_> {
             _ => true,
         };
         let abi = if has_status {
-            Return::internal(&sig.results)
+            Return::internal_on_target(self.abi.target, &sig.results)
         } else {
-            Return::new(&sig.results)
+            Return::on_target(self.abi.target, &sig.results)
         };
         let mut args = vec![];
         args.push("ptr %context".into());
@@ -273,7 +306,11 @@ impl FunctionEmitter<'_> {
             args.push(match *arg {
                 Arg::Value(v) => {
                     let x = self.get(v);
-                    format!("{}{} {x}", ty(self.vty(v)), extension(self.vty(v)))
+                    format!(
+                        "{}{} {x}",
+                        ty(self.vty(v)),
+                        extension(self.abi.target, self.vty(v))
+                    )
                 }
                 Arg::Address(a) => format!("ptr {}", self.address(a)),
             });
@@ -343,7 +380,7 @@ impl FunctionEmitter<'_> {
                             r.as_ref().unwrap()
                         ))
                     };
-                    let at = self.offset(&p, i as u64 * 8);
+                    let at = self.offset(&p, i as u64 * abi.reg_stride);
                     self.line(format!("store {t} {x}, ptr {at}, align 1"));
                 }
             }
@@ -366,19 +403,19 @@ impl FunctionEmitter<'_> {
         self.allocations.clear();
         self.next = 0;
         self.has_status = true;
-        self.abi = Return::internal(&sig.results);
+        self.abi = Return::internal_on_target(self.abi.target, &sig.results);
         let mut args = vec!["ptr %context".into()];
         if sig.dest.is_some() {
             args.push("ptr %dest".into());
         }
         for (i, p) in sig.params.iter().enumerate() {
             args.push(match p {
-                Param::Value(t) => format!("{}{} %p{i}", ty(*t), extension(*t)),
+                Param::Value(t) => format!("{}{} %p{i}", ty(*t), extension(self.abi.target, *t)),
                 Param::Address { .. } => format!("ptr %p{i}"),
             });
         }
         let values = self.invoke(
-            &Return::new(&sig.results),
+            &Return::on_target(self.abi.target, &sig.results),
             &format!("@{name}.infallible"),
             args,
         );
@@ -392,5 +429,14 @@ impl FunctionEmitter<'_> {
             self.code
         )
         .unwrap();
+    }
+}
+
+/// Large C composites are stack byval on SysV and caller-owned copies passed
+/// by pointer on AAPCS64. All runtime composites here are larger than16 bytes.
+pub(super) fn composite_argument(target: Target, bytes: usize) -> String {
+    match target {
+        Target::X86_64Linux => format!("ptr byval([{bytes} x i8]) align 8"),
+        Target::Aarch64Linux => "ptr".into(),
     }
 }

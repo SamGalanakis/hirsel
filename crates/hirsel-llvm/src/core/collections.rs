@@ -170,6 +170,7 @@ impl FunctionEmitter<'_> {
 
 pub(super) fn glue(
     module: &Module,
+    target: Target,
     recipes: &[hirsel_core_layout::Recipe],
     failures: &failure::Failures,
     facts: bool,
@@ -184,7 +185,7 @@ pub(super) fn glue(
             module,
             body: &empty,
             recipes,
-            abi: abi::Return::new(&[]),
+            abi: abi::Return::on_target(target, &[]),
             has_status: false,
             failures,
             constants: &[],

@@ -1323,14 +1323,15 @@ def hirsel_core_driver_native_test(name, data):
     _suite(name = name + "-openat2", tests = host_targets, labels = ["local-execution", "requires-openat2"])
     _suite(name = name, tests = [":" + name + "-pool"] + host_targets)
 
-def hirsel_core_llvm_native_test(name, data):
+def hirsel_core_llvm_native_test(name, data, selection = None):
     """CoreIR executable agreement uses the core runtime, with no old std products."""
     _rust_test(
         name = name,
         harness = "//:hirsel-llvm-unittest-harness",
         data = data,
         files_env = {"HIRSEL_CORE_RT_ARCHIVE": "//:core-llvm-runtime-fixture[staticlib]"},
-        args = ["core::", "context::probe_tests::"],
+        args = selection if selection != None else ["core::", "context::probe_tests::"],
+        native_tools = native_tool_inputs() if selection != None else {},
         cwd = "crates/hirsel-llvm",
         test_binary = "hirsel-llvm-unittest",
         llvm = "root//tools/buck2/native-toolchain:llvm",

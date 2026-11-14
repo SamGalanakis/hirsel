@@ -18,6 +18,8 @@ mod forward;
 mod private_float;
 mod scalar;
 mod storage;
+#[cfg(all(test, not(hirsel_lazy_core)))]
+mod target_tests;
 mod task_entry;
 mod tasks;
 #[cfg(all(test, not(hirsel_lazy_core)))]
@@ -29,6 +31,7 @@ use std::fmt::{self, Write};
 
 use hirsel_core_ir::failure;
 use hirsel_core_ir::*;
+use hirsel_core_layout::Target;
 
 #[cfg(not(hirsel_lazy_core))]
 use crate::context::{Context, Module as LlvmModule, TargetMachine};
@@ -91,10 +94,25 @@ pub fn emit_ir(module: &Module) -> Result<String> {
 
 /// Optional diagnostic emission; timings of these objects are not performance samples.
 pub fn emit_ir_with_charge_observation(module: &Module, observe_charge: bool) -> Result<String> {
-    emit_ir_with_facts(module, observe_charge, facts_enabled())
+    emit_ir_for_target(module, Target::X86_64Linux, observe_charge)
 }
 
+/// Emit CoreIR with the requested Linux calling convention.
+pub fn emit_ir_for_target(module: &Module, target: Target, observe_charge: bool) -> Result<String> {
+    emit_ir_target_with_facts(module, target, observe_charge, facts_enabled())
+}
+
+#[cfg(all(test, not(hirsel_lazy_core)))]
 fn emit_ir_with_facts(module: &Module, observe_charge: bool, facts: bool) -> Result<String> {
+    emit_ir_target_with_facts(module, Target::X86_64Linux, observe_charge, facts)
+}
+
+fn emit_ir_target_with_facts(
+    module: &Module,
+    target: Target,
+    observe_charge: bool,
+    facts: bool,
+) -> Result<String> {
     let mut text = String::new();
     for (i, data) in module.statics.iter().enumerate() {
         let bytes = data
@@ -118,9 +136,9 @@ fn emit_ir_with_facts(module: &Module, observe_charge: bool, facts: bool) -> Res
         let sig = &module.signatures[f.signature.index()];
         let has_status = failures.may_fail[i];
         let abi = if has_status || f.body.is_none() {
-            abi::Return::internal(&sig.results)
+            abi::Return::internal_on_target(target, &sig.results)
         } else {
-            abi::Return::new(&sig.results)
+            abi::Return::on_target(target, &sig.results)
         };
         let name = symbol(module, FuncId(i as u32));
         let params = abi.parameters(sig, facts);
@@ -260,6 +278,7 @@ fn emit_ir_with_facts(module: &Module, observe_charge: bool, facts: bool) -> Res
     }
     cleanup::drop_glue(
         module,
+        target,
         &recipes,
         &failures,
         facts,
@@ -268,6 +287,7 @@ fn emit_ir_with_facts(module: &Module, observe_charge: bool, facts: bool) -> Res
     )?;
     task_entry::emit(
         module,
+        target,
         &recipes,
         &failures,
         facts,
@@ -293,15 +313,27 @@ pub fn emit_object_with_charge_observation(
     opt: Optimization,
     observe_charge: bool,
 ) -> Result<Vec<u8>> {
+    emit_object_for_target(module, Target::X86_64Linux, opt, observe_charge)
+}
+
+/// Compile for one supported Linux target with the same ABI on both LLVM paths.
+pub fn emit_object_for_target(
+    module: &Module,
+    target: Target,
+    opt: Optimization,
+    observe_charge: bool,
+) -> Result<Vec<u8>> {
     #[cfg(not(hirsel_lazy_core))]
     {
-        compile_observation(module, opt, observe_charge, |_| (), |_| ()).map(|(bytes, ())| bytes)
+        compile_observation(module, target, opt, observe_charge, |_| (), |_| ())
+            .map(|(bytes, ())| bytes)
     }
     #[cfg(hirsel_lazy_core)]
     {
         crate::loader::compile(
-            &emit_ir_with_charge_observation(module, observe_charge)?,
+            &emit_ir_for_target(module, target, observe_charge)?,
             matches!(opt, Optimization::Speed),
+            target,
         )
         .map_err(Error::Llvm)
     }
@@ -340,25 +372,23 @@ fn compile<R>(
     inspect: impl FnOnce(&LlvmModule<'_>) -> R,
     observer: impl FnMut(CompilationStage),
 ) -> Result<(Vec<u8>, R)> {
-    compile_observation(module, opt, false, inspect, observer)
+    compile_observation(module, Target::X86_64Linux, opt, false, inspect, observer)
 }
 
 #[cfg(not(hirsel_lazy_core))]
 fn compile_observation<R>(
     module: &Module,
+    target: Target,
     opt: Optimization,
     observe_charge: bool,
     inspect: impl FnOnce(&LlvmModule<'_>) -> R,
     mut observer: impl FnMut(CompilationStage),
 ) -> Result<(Vec<u8>, R)> {
     observer(CompilationStage::TextConstruction);
-    let ir = emit_ir_with_charge_observation(module, observe_charge)?;
+    let ir = emit_ir_for_target(module, target, observe_charge)?;
     observer(CompilationStage::TargetSetup);
-    let machine = TargetMachine::core(
-        hirsel_core_layout::Target::X86_64Linux,
-        matches!(opt, Optimization::Speed),
-    )
-    .map_err(Error::Llvm)?;
+    let machine =
+        TargetMachine::core(target, matches!(opt, Optimization::Speed)).map_err(Error::Llvm)?;
     observer(CompilationStage::IrParse);
     let context = Context::new();
     let module = LlvmModule::parse(&context, "hirsel-core", &ir).map_err(Error::Llvm)?;
@@ -412,6 +442,15 @@ struct FunctionEmitter<'a> {
     intrinsics: &'a mut BTreeSet<String>,
 }
 impl FunctionEmitter<'_> {
+    fn c_argument<'a>(&self, t: &'a str) -> &'a str {
+        if self.abi.target == Target::Aarch64Linux {
+            t.strip_suffix(" zeroext")
+                .or_else(|| t.strip_suffix(" signext"))
+                .unwrap_or(t)
+        } else {
+            t
+        }
+    }
     fn line(&mut self, s: impl AsRef<str>) {
         writeln!(self.code, "  {}", s.as_ref()).unwrap();
     }
@@ -526,12 +565,12 @@ impl FunctionEmitter<'_> {
     }
     fn raise(&mut self, kind: u8) {
         let shape = format!("[{} x i8]", memory_layout::CAUSE_BYTES);
-        self.intrinsics.insert(format!(
-            "declare void @hirsel_core_raise(ptr, ptr byval({shape}) align 8)"
-        ));
-        // Built-in causes have fixed bytes. The native by-value parameter
-        // copies them into the callee's storage; no shared message is moved.
-        // Keep construction out of the caller's frame and inlining cost.
+        let argument = abi::composite_argument(self.abi.target, memory_layout::CAUSE_BYTES);
+        self.intrinsics
+            .insert(format!("declare void @hirsel_core_raise(ptr, {argument})"));
+        // Built-in causes have fixed bytes. SysV byval supplies a caller copy;
+        // AAPCS64 needs an explicit private copy before passing its pointer.
+        // Neither convention lets the callee mutate the shared constant.
         let name = format!("hirsel_cause_{kind}");
         let prefix = memory_layout::CAUSE_KIND;
         let tail = memory_layout::CAUSE_BYTES - prefix - 8;
@@ -540,8 +579,16 @@ impl FunctionEmitter<'_> {
         self.intrinsics.insert(format!(
             "@{name} = private constant {layout} <{{ [{prefix} x i8] zeroinitializer, i64 {word}, [{tail} x i8] zeroinitializer }}>, align 8"
         ));
+        let pointer = if self.abi.target == Target::Aarch64Linux {
+            let pointer = self.temp(&shape);
+            let value = self.calc(format!("load {shape}, ptr @{name}, align 8"));
+            self.line(format!("store {shape} {value}, ptr {pointer}, align 8"));
+            pointer
+        } else {
+            format!("@{name}")
+        };
         self.line(format!(
-            "call void @hirsel_core_raise(ptr %context, ptr byval({shape}) align 8 @{name})"
+            "call void @hirsel_core_raise(ptr %context, {argument} {pointer})"
         ));
     }
 

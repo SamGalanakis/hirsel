@@ -13,7 +13,14 @@ struct Output {
     len: usize,
     failed: u8,
 }
-type Compile = unsafe extern "C" fn(*const u8, usize, u8, *mut Output);
+type Compile = unsafe extern "C" fn(
+    *const u8,
+    usize,
+    u8,
+    *const libc::c_char,
+    *const libc::c_char,
+    *mut Output,
+);
 type Free = unsafe extern "C" fn(*mut u8);
 #[repr(C)]
 struct Input {
@@ -21,8 +28,16 @@ struct Input {
     len: usize,
     imported: u8,
 }
-type Program =
-    unsafe extern "C" fn(*const Input, usize, *const *const libc::c_char, usize, u8, *mut Output);
+type Program = unsafe extern "C" fn(
+    *const Input,
+    usize,
+    *const *const libc::c_char,
+    usize,
+    u8,
+    *const libc::c_char,
+    *const libc::c_char,
+    *mut Output,
+);
 struct Backend {
     compile: Compile,
     program: Program,
@@ -103,7 +118,13 @@ fn backend() -> Result<&'static Backend, String> {
     static BACKEND: OnceLock<Result<Backend, String>> = OnceLock::new();
     BACKEND.get_or_init(load).as_ref().map_err(Clone::clone)
 }
-pub(crate) fn compile(ir: &str, speed: bool) -> Result<Vec<u8>, String> {
+pub(crate) fn compile(
+    ir: &str,
+    speed: bool,
+    target: hirsel_core_layout::Target,
+) -> Result<Vec<u8>, String> {
+    let triple = CString::new(target.triple()).unwrap();
+    let cpu = CString::new(target.cpu()).unwrap();
     let backend = backend()?;
     let mut output = Output {
         data: std::ptr::null_mut(),
@@ -113,7 +134,14 @@ pub(crate) fn compile(ir: &str, speed: bool) -> Result<Vec<u8>, String> {
     // SAFETY: IR stays borrowed through the call; engine.c returns an owned
     // malloc buffer on every exit, which its paired free consumes once.
     unsafe {
-        (backend.compile)(ir.as_ptr(), ir.len(), u8::from(speed), &mut output);
+        (backend.compile)(
+            ir.as_ptr(),
+            ir.len(),
+            u8::from(speed),
+            triple.as_ptr(),
+            cpu.as_ptr(),
+            &mut output,
+        );
         let bytes = std::slice::from_raw_parts(output.data, output.len).to_vec();
         (backend.free)(output.data);
         if output.failed == 0 {
@@ -124,7 +152,13 @@ pub(crate) fn compile(ir: &str, speed: bool) -> Result<Vec<u8>, String> {
     }
 }
 
-pub(crate) fn program(units: &[crate::Unit<'_>], exports: &[String]) -> Result<Vec<u8>, String> {
+pub(crate) fn program(
+    units: &[crate::Unit<'_>],
+    exports: &[String],
+    target: hirsel_core_layout::Target,
+) -> Result<Vec<u8>, String> {
+    let triple = CString::new(target.triple()).unwrap();
+    let cpu = CString::new(target.cpu()).unwrap();
     let backend = backend()?;
     let inputs: Vec<_> = units
         .iter()
@@ -153,6 +187,8 @@ pub(crate) fn program(units: &[crate::Unit<'_>], exports: &[String]) -> Result<V
             pointers.as_ptr(),
             pointers.len(),
             1,
+            triple.as_ptr(),
+            cpu.as_ptr(),
             &mut output,
         );
         let bytes = std::slice::from_raw_parts(output.data, output.len).to_vec();

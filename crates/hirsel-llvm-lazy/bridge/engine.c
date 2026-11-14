@@ -138,20 +138,19 @@ static void register_results(LLVMModuleRef module, LLVMContextRef context) {
 __attribute__((visibility("default")))
 void hirsel_llvm_program_v1(const HirselLlvmUnit *units, size_t count,
                           const char *const *exports, size_t export_count,
-                          uint8_t speed, HirselLlvmOutput *out) {
+                          uint8_t speed, const char *triple, const char *cpu, HirselLlvmOutput *out) {
     pthread_once(&initialized, initialize);
     unsigned major, minor, patch;
     LLVMGetVersion(&major, &minor, &patch);
     if (major != 23 || minor != 1 || patch != 5) {
         error(out, "LLVM component requires pinned LLVM 23.1.5"); return;
     }
-    const char *triple = "x86_64-unknown-linux-gnu";
     LLVMTargetRef target = NULL;
     char *message = NULL;
     if (LLVMGetTargetFromTriple(triple, &target, &message)) {
         error(out, message); LLVMDisposeMessage(message); return;
     }
-    LLVMTargetMachineRef machine = LLVMCreateTargetMachine(target, triple, "x86-64", "",
+    LLVMTargetMachineRef machine = LLVMCreateTargetMachine(target, triple, cpu, "",
         speed ? LLVMCodeGenLevelAggressive : LLVMCodeGenLevelNone, LLVMRelocPIC, LLVMCodeModelDefault);
     if (!machine) { error(out, "LLVM could not create the target machine"); return; }
     LLVMContextRef context = LLVMContextCreate();
@@ -258,7 +257,7 @@ done:
     LLVMContextDispose(context); LLVMDisposeTargetMachine(machine);
 }
 __attribute__((visibility("default")))
-void hirsel_llvm_compile_v1(const uint8_t *ir, size_t len, uint8_t speed, HirselLlvmOutput *out) {
+void hirsel_llvm_compile_v1(const uint8_t *ir, size_t len, uint8_t speed, const char *triple, const char *cpu, HirselLlvmOutput *out) {
     HirselLlvmUnit unit = { ir, len, 0 };
-    hirsel_llvm_program_v1(&unit, 1, NULL, 0, speed, out);
+    hirsel_llvm_program_v1(&unit, 1, NULL, 0, speed, triple, cpu, out);
 }

@@ -19,6 +19,7 @@ fn cleanup_dependencies(field: &FieldTy, counted: bool, pending: &mut Vec<(usize
 
 pub(super) fn drop_glue(
     module: &Module,
+    target: Target,
     recipes: &[hirsel_core_layout::Recipe],
     failures: &failure::Failures,
     facts: bool,
@@ -74,7 +75,7 @@ pub(super) fn drop_glue(
             module,
             body: &empty,
             recipes,
-            abi: abi::Return::internal(&[]),
+            abi: abi::Return::internal_on_target(target, &[]),
             has_status: true,
             failures,
             constants: &[],
@@ -192,9 +193,11 @@ pub(super) fn drop_glue(
             }
         }
     }
-    counted_glue(module, recipes, failures, facts, &counted, text, intrinsics)?;
+    counted_glue(
+        module, target, recipes, failures, facts, &counted, text, intrinsics,
+    )?;
     collections::glue(
-        module, recipes, failures, facts, &sequences, text, intrinsics,
+        module, target, recipes, failures, facts, &sequences, text, intrinsics,
     )?;
     Ok(())
 }
@@ -485,6 +488,7 @@ impl FunctionEmitter<'_> {
 }
 fn counted_glue(
     module: &Module,
+    target: Target,
     recipes: &[hirsel_core_layout::Recipe],
     failures: &failure::Failures,
     facts: bool,
@@ -501,7 +505,7 @@ fn counted_glue(
             module,
             body: &empty,
             recipes,
-            abi: abi::Return::new(&[]),
+            abi: abi::Return::on_target(target, &[]),
             has_status: false,
             failures,
             constants: &[],

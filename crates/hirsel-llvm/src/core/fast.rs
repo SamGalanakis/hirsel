@@ -37,14 +37,14 @@ impl FunctionEmitter<'_> {
         self.intrinsics.insert(format!(
             "declare void @{name}({})",
             args.iter()
-                .map(|(t, _)| t.as_str())
+                .map(|(t, _)| self.c_argument(t))
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
         self.line(format!(
             "call void @{name}({}) cold",
             args.iter()
-                .map(|(t, v)| format!("{t} {v}"))
+                .map(|(t, v)| format!("{} {v}", self.c_argument(t)))
                 .collect::<Vec<_>>()
                 .join(", ")
         ));

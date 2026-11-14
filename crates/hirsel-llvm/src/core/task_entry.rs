@@ -17,6 +17,7 @@ pub(super) fn input_offset(
 }
 pub(super) fn emit(
     module: &Module,
+    target: Target,
     recipes: &[hirsel_core_layout::Recipe],
     failures: &failure::Failures,
     facts: bool,
@@ -46,12 +47,12 @@ pub(super) fn emit(
             Carried::Value(t) => vec![t],
             _ => vec![],
         };
-        let abi = abi::Return::internal(&fields);
+        let abi = abi::Return::internal_on_target(target, &fields);
         let mut e = FunctionEmitter {
             module,
             body: &body,
             recipes,
-            abi: abi::Return::new(&[Ty::Scalar(Scalar::U8)]),
+            abi: abi::Return::on_target(target, &[Ty::Scalar(Scalar::U8)]),
             has_status: false,
             failures,
             constants: &[],
@@ -80,7 +81,7 @@ pub(super) fn emit(
             Carried::Address => args.push(format!("ptr {data}")),
             Carried::Value(t) => {
                 let v = e.calc(format!("load {}, ptr {data}, align 1", ty(t)));
-                args.push(format!("{}{} {v}", ty(t), abi::extension(t)))
+                args.push(format!("{}{} {v}", ty(t), abi::extension(e.abi.target, t)))
             }
             Carried::Nothing => {}
         }

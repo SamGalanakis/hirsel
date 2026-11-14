@@ -47,12 +47,12 @@ impl FunctionEmitter<'_> {
         results: &[Ty],
         args: &[(String, String)],
     ) -> Vec<String> {
-        let abi = abi::Return::new(results);
+        let abi = abi::Return::on_target(self.abi.target, results);
         let mut params = Vec::new();
         if abi.indirect {
             params.push(format!("ptr sret({})", abi.storage));
         }
-        params.extend(args.iter().map(|(t, _)| t.clone()));
+        params.extend(args.iter().map(|(t, _)| self.c_argument(t).to_owned()));
         self.intrinsics.insert(format!(
             "declare {} @{name}({})",
             abi.return_type(),
@@ -61,7 +61,9 @@ impl FunctionEmitter<'_> {
         self.invoke(
             &abi,
             &format!("@{name}"),
-            args.iter().map(|(t, v)| format!("{t} {v}")).collect(),
+            args.iter()
+                .map(|(t, v)| format!("{} {v}", self.c_argument(t)))
+                .collect(),
         )
     }
     fn host_call(&mut self, op: HostOp, args: &[String]) -> Vec<String> {
@@ -142,7 +144,7 @@ impl FunctionEmitter<'_> {
                         u(&args[0]),
                         p(&packed),
                         p(&format!("@core_task_entry_{}_{}", x.0, r.0)),
-                        ("ptr byval([64 x i8]) align 8".into(), descriptor),
+                        (abi::composite_argument(self.abi.target, 64), descriptor),
                     ],
                 )
             }
@@ -165,7 +167,7 @@ impl FunctionEmitter<'_> {
                     &[
                         p("%context"),
                         u(&args[0]),
-                        ("ptr byval([32 x i8]) align 8".into(), descriptor),
+                        (abi::composite_argument(self.abi.target, 32), descriptor),
                         u("0"),
                     ],
                 )

@@ -11,7 +11,16 @@ mod loader;
 /// Compile compiler-produced LLVM text through the same once-loaded component.
 /// This is also the object-parity boundary used by the direct engine's tests.
 pub fn compile_ir(ir: &str, speed: bool) -> Result<Vec<u8>, String> {
-    loader::compile(ir, speed)
+    compile_ir_for_target(ir, speed, hirsel_core_layout::Target::X86_64Linux)
+}
+
+/// Compile LLVM text using the same target as its producer's calling convention.
+pub fn compile_ir_for_target(
+    ir: &str,
+    speed: bool,
+    target: hirsel_core_layout::Target,
+) -> Result<Vec<u8>, String> {
+    loader::compile(ir, speed, target)
 }
 
 /// An already-published body, emitted with its unit-local type/static tables.
@@ -25,7 +34,16 @@ pub struct Unit<'a> {
 /// One release codegen unit. LLVM resolves instance symbols, internalizes all
 /// owned definitions except `exports`, then runs the ordinary O3 pipeline.
 pub fn emit_program(units: &[Unit<'_>], exports: &[String]) -> Result<Vec<u8>, String> {
-    loader::program(units, exports)
+    emit_program_for_target(units, exports, hirsel_core_layout::Target::X86_64Linux)
+}
+
+/// Compose a release unit for the requested native target.
+pub fn emit_program_for_target(
+    units: &[Unit<'_>],
+    exports: &[String],
+    target: hirsel_core_layout::Target,
+) -> Result<Vec<u8>, String> {
+    loader::program(units, exports, target)
 }
 
 #[cfg(test)]

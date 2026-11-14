@@ -1328,6 +1328,7 @@ def first_party(meta: dict) -> str:
                             data=["crates/hirsel-core-front/test-check-cost.py", "crates/hirsel-core-front/check-cost.py", "core/tools/measure.py"]))
     out.append("\n" + call("hirsel_core_driver_native_test", name="core-driver-native", data=Raw('glob(["crates/hirsel-core-rt/include/**", "crates/hirsel-core-driver/Cargo.toml", "core/core/**", "core/std/**", "core/front/runtime/**"])')))
     out.append("\n" + call("hirsel_core_llvm_native_test", name="core-llvm-native", data=Raw('glob(["core/core/**", "core/front/**", "crates/hirsel-core-rt/include/**", "crates/hirsel-core-ir/samples/**", "crates/hirsel-llvm/Cargo.toml"])')))
+    out.append("\n" + call("hirsel_core_llvm_native_test", name="core-llvm-aarch64-abi", data=[], selection=["core::target_tests::linux_c_results_execute_with_mixed_fields_padding_and_hfas", "core::tests::lazy_component_preserves_exact_core_objects", "--exact"]))
     out.append("\n" + call("hirsel_library", name="hirsel-core-rt-observed", crate="hirsel_core_rt", crate_root="crates/hirsel-core-rt/src/lib.rs",
         srcs=Raw('glob(["crates/hirsel-core-rt/src/**"])'), features=["standalone", "charge-observation"], deps=declared_deps(next(p for p in packages.values() if p["name"] == "hirsel-core-rt"), packages),
         manifest_dir="crates/hirsel-core-rt", package_name="hirsel-core-rt", version="0.1.0", edition="2024"))

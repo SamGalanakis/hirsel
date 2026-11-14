@@ -202,14 +202,14 @@ impl FunctionEmitter<'_> {
         self.intrinsics.insert(format!(
             "declare void @{name}({})",
             args.iter()
-                .map(|(t, _)| t.as_str())
+                .map(|(t, _)| self.c_argument(t))
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
         self.line(format!(
             "call void @{name}({}){metadata}",
             args.iter()
-                .map(|(t, v)| format!("{t} {v}"))
+                .map(|(t, v)| format!("{} {v}", self.c_argument(t)))
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
@@ -232,13 +232,13 @@ impl FunctionEmitter<'_> {
     ) -> (String, String) {
         let p = self.temp("{ ptr, i64, i64 }");
         let mut types = vec!["ptr sret({ ptr, i64, i64 })".to_string()];
-        types.extend(args.iter().map(|(t, _)| t.clone()));
+        types.extend(args.iter().map(|(t, _)| self.c_argument(t).to_owned()));
         self.intrinsics
             .insert(format!("declare void @{name}({})", types.join(", ")));
         self.line(format!(
             "call void @{name}(ptr sret({{ ptr, i64, i64 }}) {p}, {}){attributes}",
             args.iter()
-                .map(|(t, v)| format!("{t} {v}"))
+                .map(|(t, v)| format!("{} {v}", self.c_argument(t)))
                 .collect::<Vec<_>>()
                 .join(", ")
         ));

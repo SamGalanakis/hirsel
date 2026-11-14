@@ -6,6 +6,7 @@
 use hirsel_core_ids::published::{Map, Publisher, Table};
 use hirsel_core_layout::Scalar;
 use rustc_hash::FxHashMap as HashMap;
+use std::hash::BuildHasher;
 
 #[derive(
     Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
@@ -249,7 +250,7 @@ pub const HOLE: TyId = TyId(3 + Scalar::ALL.len() as u32);
 pub struct Local<'a> {
     pub base: &'a Types,
     kinds: Vec<TypeEntry>,
-    map: HashMap<TyKind, TyId>,
+    map: hashbrown::HashTable<TyId>,
     layout_names: Option<LayoutNames<'a>>,
 }
 struct LayoutNames<'a> {
@@ -262,7 +263,7 @@ impl<'a> Local<'a> {
         Self {
             base,
             kinds: vec![],
-            map: HashMap::default(),
+            map: hashbrown::HashTable::new(),
             layout_names: None,
         }
     }
@@ -284,12 +285,20 @@ impl<'a> Local<'a> {
         if let Some(id) = self.base.find(&k) {
             return id;
         }
-        if let Some(&id) = self.map.get(&k) {
+        let base = self.base.len();
+        let hash = rustc_hash::FxBuildHasher.hash_one(&k);
+        if let Some(&id) = self
+            .map
+            .find(hash, |id| self.kinds[id.0 as usize - base].kind == k)
+        {
             return id;
         }
-        let id = TyId((self.base.len() + self.kinds.len()) as u32);
-        self.kinds.push(TypeEntry::new(self, k.clone()));
-        self.map.insert(k, id);
+        let id = TyId((base + self.kinds.len()) as u32);
+        self.kinds.push(TypeEntry::new(self, k));
+        let kinds = &self.kinds;
+        self.map.insert_unique(hash, id, |id| {
+            rustc_hash::FxBuildHasher.hash_one(&kinds[id.0 as usize - base].kind)
+        });
         id
     }
     #[inline(always)]
@@ -667,6 +676,30 @@ mod interner_tests {
             0,
             "a predicate re-walked the type graph"
         );
+    }
+
+    #[test]
+    fn local_type_index_survives_growth_and_compares_full_keys() {
+        let base = Types::new();
+        let mut local = Local::new(&base);
+        let mut ids = vec![];
+        for n in 0..256 {
+            ids.push(local.intern(TyKind::Tuple(vec![UNIT; n])));
+        }
+        for (n, &id) in ids.iter().enumerate().rev() {
+            assert_eq!(local.intern(TyKind::Tuple(vec![UNIT; n])), id);
+            assert!(matches!(local.kind(id), TyKind::Tuple(xs) if xs.len() == n));
+        }
+        assert_eq!(local.len(), base.len() + 256);
+        assert_eq!(local.intern(TyKind::Unit), UNIT);
+        assert_eq!(local.len(), base.len() + 256);
+        let arguments = vec![UNIT; 1024];
+        let address = arguments.as_ptr();
+        let id = local.intern(TyKind::Tuple(arguments));
+        let TyKind::Tuple(stored) = local.kind(id) else {
+            panic!("tuple")
+        };
+        assert_eq!(stored.as_ptr(), address, "interner cloned its vector key");
     }
 
     #[test]

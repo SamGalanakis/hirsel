@@ -733,6 +733,7 @@ dependencies = [
 name = "hirsel-core-front"
 version = "0.1.0"
 dependencies = [
+ "hashbrown 0.16.1",
  "hirsel-core-ids",
  "hirsel-core-ir",
  "hirsel-core-layout",

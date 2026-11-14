@@ -10,6 +10,7 @@ test-assembly = []
 cost-profile = []
 
 [dependencies]
+hashbrown = { version = "0.16.1", default-features = false }
 rustc-hash = "2"
 serde = { version = "1", features = ["derive", "rc"] }
 hirsel-core-ids = { path = "../hirsel-core-ids" }

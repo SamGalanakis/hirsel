@@ -60,6 +60,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 return Some(None);
             }
             "push" => return Some(self.list_push(item, vals[0]?, vals[1], result, n)),
+            "fill" => return Some(self.list_fill(item, vals[0]?, vals[1]?, vals[2], result, n)),
             "append" => return Some(self.list_append(item, vals[0]?, vals[1]?, result, n)),
             "reserve" => return Some(self.list_reserve(item, vals[0]?, vals[1]?, result, n)),
             "get" => return Some(self.list_get(item, vals[0]?, vals[1]?, result, n)),

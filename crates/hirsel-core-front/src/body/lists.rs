@@ -862,6 +862,91 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         Some(reserved)
     }
 
+    pub(super) fn list_fill(
+        &mut self,
+        item: TyId,
+        header: ValueId,
+        count: ValueId,
+        value: Option<ValueId>,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let old_len = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
+        let reserved = self.list_reserve(item, header, count, result, n)?;
+        let result_id = match self.rep(result) {
+            Ok(Rep::Place(id)) => id,
+            _ => return None,
+        };
+        let at = self.address(
+            AddressBase::Value(reserved),
+            &[],
+            PlaceTy::Declared(result_id),
+            n,
+        );
+        let tag = self.value(Ty::Scalar(Scalar::U32));
+        self.inst(
+            Inst::Case {
+                result: tag,
+                address: at,
+            },
+            n,
+        );
+        let ok_tag = self.konst(Ty::Scalar(Scalar::U32), 0, n)?;
+        let ok = self.list_compare(CompareOp::Eq, tag, ok_tag, n);
+        let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
+        let nonempty = self.list_compare(CompareOp::Ne, count, zero, n);
+        let filling = self.list_bool(BinaryOp::BitAnd, ok, nonempty, n);
+        let fill = self.new_block(&[]);
+        let commit = self.new_block(&[]);
+        let done = self.new_block(&[]);
+        self.list_branch(filling, fill, done, n);
+        self.start(fill);
+        let rep = match self.rep(item) {
+            Ok(rep) => rep,
+            Err(what) => {
+                self.gap(n, what);
+                return None;
+            }
+        };
+        if let Some(place) = rep.stored() {
+            let data = self.read_sequence_word(header, 0, Ty::Ptr, n);
+            let stride = self.layout_size(item, false, n)?;
+            let empty = self.list_compare(CompareOp::Eq, stride, zero, n);
+            let setup = self.new_block(&[]);
+            self.list_branch(empty, commit, setup, n);
+            self.start(setup);
+            let (offset, _) =
+                self.list_arith(ArithOp::Mul, ArithMode::Wrapping, old_len, stride, n);
+            let base = self.address(AddressBase::Value(data), &[Step::Byte(offset)], place, n);
+            let base = self.pointer(base, n);
+            let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
+            let test = self.new_block(&[Ty::Scalar(Scalar::U64)]);
+            let store = self.new_block(&[]);
+            self.jump(test, &[zero], n);
+            self.start(test);
+            let index = self.b.blocks[test.index()]
+                .params
+                .get(&self.b.pools.values)
+                .unwrap()[0];
+            let more = self.list_compare(CompareOp::Lt, index, count, n);
+            self.list_branch(more, store, commit, n);
+            self.start(store);
+            let (offset, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, index, stride, n);
+            let target = self.address(AddressBase::Value(base), &[Step::Byte(offset)], place, n);
+            self.install(target, rep, value, n);
+            let (next, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, index, one, n);
+            self.jump(test, &[next], n);
+        } else {
+            self.jump(commit, &[], n);
+        }
+        self.start(commit);
+        let (len, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, old_len, count, n);
+        self.sequence_word(header, 8, Ty::Scalar(Scalar::U64), len, n);
+        self.jump(done, &[], n);
+        self.start(done);
+        Some(reserved)
+    }
+
     /// FORM #61: a range is a new non-owning carrier, copied through the result dest.
     pub(super) fn list_slice(
         &mut self,

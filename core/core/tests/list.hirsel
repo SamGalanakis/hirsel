@@ -73,3 +73,26 @@ fn fill_each_width() -> bool {
     }
     ok
 }
+
+fn fill_plain[T: plain](mut xs: List[T], n: u64, x: T) {
+    result.unwrap(list.fill(mut xs, n, x))
+}
+
+// A tuple exercises the generic copy recipe, and a unit list needs no stores.
+// expect: run fill_generic_plain() = true
+fn fill_generic_plain() -> bool {
+    let mut xs: List[(u8, u64)] = list.new()
+    fill_plain(mut xs, 3, (7u8, 91u64))
+    let mut units: List[()] = list.new()
+    fill_plain(mut units, 999, ())
+    let mut ok = list.len(xs) == 3 && list.len(units) == 999
+    let mut i: u64 = 0
+    while i < 3 {
+        let (a, b) = xs[i]
+        ok = ok && a == 7 && b == 91
+        i += 1
+    }
+    let mut scalars: List[u64] = list.new()
+    fill_plain(mut scalars, 2, 42u64)
+    ok && scalars[0] == 42 && scalars[1] == 42
+}

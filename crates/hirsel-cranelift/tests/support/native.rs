@@ -72,7 +72,7 @@ fn declare_functions(source: &mut String, module: &c::Module) {
     for (i, item) in module.items.iter().enumerate() {
         writeln!(
             source,
-            "const uint64_t {}=UINT64_C({});",
+            "__asm__(\".globl {0}\\n.hidden {0}\\n.set {0}, {1}\\n\");",
             c::source::site_symbol(item),
             ((i as u64) + 1) << 32
         )
@@ -541,6 +541,7 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
 }
 
 fn link_program(scratch: &Scratch, source: &str) -> PathBuf {
+    use cranelift_object::object::Object as _;
     fs::write(scratch.0.join("caller.c"), source).unwrap();
     let archive = PathBuf::from(
         std::env::var_os("HIRSEL_CORE_RUNTIME_ARCHIVE")
@@ -578,7 +579,7 @@ fn link_program(scratch: &Scratch, source: &str) -> PathBuf {
     }
     let link = Command::new(c_compiler())
         .current_dir(&scratch.0)
-        .args(["caller.c", "input.o", "-I"])
+        .args(["-fPIC", "caller.c", "input.o", "-I"])
         .arg(&scratch.0)
         .arg(archive)
         .args([
@@ -587,7 +588,7 @@ fn link_program(scratch: &Scratch, source: &str) -> PathBuf {
             "-lpthread",
             "-lrt",
             "-lutil",
-            "-no-pie",
+            "-pie",
             "-o",
             "run",
         ])
@@ -598,7 +599,11 @@ fn link_program(scratch: &Scratch, source: &str) -> PathBuf {
         "{}",
         String::from_utf8_lossy(&link.stderr)
     );
-    scratch.0.join("run")
+    let run = scratch.0.join("run");
+    let image = fs::read(&run).unwrap();
+    let image = cranelift_object::object::File::parse(&*image).unwrap();
+    assert_eq!(image.kind(), cranelift_object::object::ObjectKind::Dynamic, "site oracle must execute PIE");
+    run
 }
 
 fn link_run(scratch: &Scratch, source: &str) -> Vec<u64> {
@@ -999,7 +1004,7 @@ b0(v0: u64):
 }
 
 fn check_relative_debug_rows() {
-    use cranelift_object::object::{Object as _, ObjectSection as _};
+    use cranelift_object::object::{Object as _, ObjectSection as _, ObjectSymbol as _};
     let mut module = text::parse(
         r#"core v1
 item i0 = test@0/sites/rows
@@ -1047,6 +1052,20 @@ b0(v0: u64):
         )
         .unwrap();
         let file = cranelift_object::object::File::parse(&*object.bytes).unwrap();
+        let mut addends = Vec::new();
+        for section in file.sections() {
+            for (_, relocation) in section.relocations() {
+                if let cranelift_object::object::RelocationTarget::Symbol(symbol) = relocation.target()
+                    && file.symbol_by_index(symbol).unwrap().name().unwrap().starts_with("hirsel_core_site_")
+                {
+                    assert_eq!(relocation.kind(), cranelift_object::object::RelocationKind::Absolute);
+                    assert_eq!(relocation.size(), 64);
+                    addends.push(relocation.addend());
+                }
+            }
+        }
+        addends.sort_unstable();
+        assert_eq!(addends, [7, 27]);
         let without_rows = emit_object(
             &module,
             &Options {

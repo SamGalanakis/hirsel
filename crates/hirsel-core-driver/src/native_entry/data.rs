@@ -81,13 +81,7 @@ pub(super) fn write(object: &mut ObjectModule, plan: &Plan<'_>) -> Result<Tables
     }
     let files = define(object, None, files, 8, &pointers)?;
     let mut items = Vec::new();
-    for (i, (path, item)) in plan.sources.items.iter().enumerate() {
-        bytes(
-            object,
-            Some(&hirsel_core_ir::source::site_symbol(path)),
-            ((i as u64 + 1) << 32).to_le_bytes().to_vec(),
-            8,
-        )?;
+    for item in plan.sources.items.values() {
         items.extend_from_slice(&item.file.to_le_bytes());
         items.extend_from_slice(&item.file_offset.to_le_bytes());
     }

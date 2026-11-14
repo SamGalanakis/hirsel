@@ -725,8 +725,10 @@ impl FunctionEmitter<'_> {
         }
     }
     fn raise(&mut self, kind: u8) {
-        let site = self.site_word();
-        let fixed_site = site.parse::<u64>().ok();
+        let fixed_site = self.fixed_site_word();
+        let fixed = fixed_site.is_some();
+        let site = fixed_site.unwrap_or_else(|| self.site_word());
+        let fixed = fixed || site == "0";
         let shape = format!("[{} x i8]", memory_layout::CAUSE_BYTES);
         let argument = abi::composite_argument(self.abi.target, memory_layout::CAUSE_BYTES);
         self.intrinsics
@@ -734,19 +736,33 @@ impl FunctionEmitter<'_> {
         // Built-in causes have fixed bytes. SysV byval supplies a caller copy;
         // AAPCS64 needs an explicit private copy before passing its pointer.
         // Neither convention lets the callee mutate the shared constant.
-        let name = format!("hirsel_cause_{kind}_{}", fixed_site.unwrap_or(0));
+        let suffix = if fixed && self.relocatable_sites && site != "0" {
+            let anchor = self.anchor.unwrap();
+            format!("{}_{}", anchor.item.0, anchor.start)
+        } else {
+            site.parse::<u64>().unwrap_or(0).to_string()
+        };
+        let name = format!("hirsel_cause_{kind}_{suffix}");
         let prefix = memory_layout::CAUSE_KIND;
         let layout = format!("<{{ [{prefix} x i8], i64, i64 }}>");
         let word = memory_layout::cause_kind_word(kind) as i64;
+        // Keep AArch64's relocated site in this object's constant bytes;
+        // folding that field into an external pointer would select the GOT.
+        let initialized =
+            if fixed && self.relocatable_sites && self.abi.target == Target::Aarch64Linux {
+                " externally_initialized"
+            } else {
+                ""
+            };
         self.intrinsics.insert(format!(
-            "@{name} = private constant {layout} <{{ [{prefix} x i8] zeroinitializer, i64 {word}, i64 {} }}>, align 8", fixed_site.unwrap_or(0)
+            "@{name} = private{initialized} constant {layout} <{{ [{prefix} x i8] zeroinitializer, i64 {word}, i64 {} }}>, align 8", if fixed { site.as_str() } else { "0" }
         ));
-        let pointer = if self.abi.target == Target::Aarch64Linux || fixed_site.is_none() {
+        let pointer = if self.abi.target == Target::Aarch64Linux || !fixed {
             let pointer = self.temp(&shape);
             let words = format!("[{} x i64]", memory_layout::CAUSE_BYTES / 8);
             let value = self.calc(format!("load {words}, ptr @{name}, align 8"));
             self.line(format!("store {words} {value}, ptr {pointer}, align 8"));
-            if fixed_site.is_none() {
+            if !fixed {
                 let at = self.calc(format!(
                     "getelementptr i8, ptr {pointer}, i64 {}",
                     memory_layout::CAUSE_SITE

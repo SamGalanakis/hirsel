@@ -16,7 +16,7 @@ load(":platforms.bzl", "CLIPPY_REQUEST", "PRECHECK_REQUEST", "PROBE_CPUS", "budg
 load(":test_requirements.bzl", "EXACT_CASE_CPUS", "EXACT_TEST_CPUS", "ISOLATED_TEST_CASES", "OPENAT2_TEST_CASES")
 load(":exec_sizes.bzl", "COMPILE_CLASSES", "COMPILE_REQUESTS")
 load(":profile.bzl", "OPTIMIZED_RUNTIME_VARIANTS", "TEST_RUNTIME_FLAGS", "runtime_profile_flags", "workspace_profile_flags")
-load("@prelude//linking:link_info.bzl", "ArchiveLinkable", "LinkStrategy", "ObjectsLinkable")
+load("@prelude//linking:link_info.bzl", "ArchiveLinkable", "LinkStrategy", "MergedLinkInfo", "ObjectsLinkable")
 load("@prelude//rust:link_info.bzl", "RustLinkInfo", "dfs_dedupe_by_label")
 
 # Cargo gives integration tests an existing, private scratch directory; this is
@@ -451,7 +451,7 @@ def hirsel_core_cranelift_test(name, case, data):
         harness = "//:" + binary + "-harness",
         args = [case, "--exact", "--nocapture"],
         data = data,
-        files_env = {"HIRSEL_CORE_RUNTIME_ARCHIVE": "//:core-llvm-runtime-fixture[staticlib]"},
+        files_env = {"HIRSEL_CORE_RUNTIME_ARCHIVE": "//:core-native-runtime-fixture-pic"},
         llvm = "root//tools/buck2/native-toolchain:llvm",
         llvm_libraries = "toolchains//:llvm-libraries",
         cwd = "crates/hirsel-cranelift",
@@ -1119,6 +1119,28 @@ def hirsel_runtime_archives(name, crate, crate_root, srcs, features, deps, featu
                       exec_compatible_with = [budget_constraint(pool_budget_name(4, 2097152))],
                       visibility = ["PUBLIC"])
 
+def _pic_staticlib_archive(library):
+    # The prelude's staticlib subtarget requests a non-PIC archive. Its native
+    # static_pic link provider already names the bundled PIC staticlib, with
+    # the same profile, assertions, panic policy and dependency feature graph.
+    infos = library[MergedLinkInfo]._infos[LinkStrategy("static_pic")]
+    for info in infos.traverse():
+        for linkable in info.default.linkables:
+            if isinstance(linkable, ArchiveLinkable):
+                return linkable.archive.artifact
+    fail("Rust native static_pic provider has no bundled archive")
+
+def _pic_staticlib_impl(ctx):
+    return [DefaultInfo(default_output = _pic_staticlib_archive(ctx.attrs.library))]
+
+_pic_staticlib = rule(
+    impl = _pic_staticlib_impl,
+    attrs = {"library": attrs.dep(providers = [MergedLinkInfo])},
+)
+
+def hirsel_pic_staticlib(name, library):
+    _pic_staticlib(name = name, library = library, visibility = ["PUBLIC"])
+
 def hirsel_core_runtime_archives(name, library, archive_name):
     """The new Rust-only runtime, in its own archive namespace on both targets.
 
@@ -1137,7 +1159,7 @@ def _core_runtime_archives_impl(ctx):
     entries = {}
     views = {}
     for triple, dep in ctx.attrs.archives.items():
-        archive = dep[DefaultInfo].sub_targets["staticlib"][DefaultInfo].default_outputs[0]
+        archive = _pic_staticlib_archive(dep)
         entries[triple + "/" + ctx.attrs.archive_name] = archive
         views[triple.split("-")[0]] = [DefaultInfo(default_output = archive)]
     return [DefaultInfo(default_output = ctx.actions.symlinked_dir(ctx.label.name, entries), sub_targets = views)]
@@ -1310,7 +1332,7 @@ def hirsel_core_driver_native_test(name, data, case_filter = "native::tests::"):
     common = dict(
         harness = "//:hirsel-core-driver-unittest-harness",
         data = data,
-        files_env = {"HIRSEL_CORE_RT_ARCHIVE": "//:hirsel-core-rt[staticlib]"},
+        files_env = {"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
         cwd = "crates/hirsel-core-driver",
         test_binary = "hirsel-core-driver-native",
         llvm = "root//tools/buck2/native-toolchain:llvm",
@@ -1342,7 +1364,7 @@ def hirsel_core_driver_native_test(name, data, case_filter = "native::tests::"):
         _suite(name = name + "-openat2", tests = host_targets, labels = ["local-execution", "requires-openat2"])
     _suite(name = name, tests = [":" + name + "-pool"] + host_targets)
 
-def hirsel_core_llvm_native_test(name, data, selection = None, runtime = "//:core-llvm-runtime-fixture[staticlib]"):
+def hirsel_core_llvm_native_test(name, data, selection = None, runtime = "//:core-native-runtime-fixture-pic"):
     """CoreIR executable agreement uses the core runtime, with no old std products."""
     _rust_test(
         name = name,

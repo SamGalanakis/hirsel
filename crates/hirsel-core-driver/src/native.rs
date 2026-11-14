@@ -540,7 +540,7 @@ fn link(
         std::fs::write(&entry, bytes)?;
         let output = temp.path().join("program");
         let mut cc = Command::new(&tools.0.path);
-        cc.arg("-no-pie").arg(&entry);
+        cc.arg("-pie").arg(&entry);
         if !options.debug_lines {
             // The independent runtime archive may carry its own compiler DWARF.
             // Keep unwind data, but do not retain line tables in an off build.
@@ -578,6 +578,7 @@ fn link(
             .arg(&output);
         command(&mut cc)?;
         let bytes = std::fs::read(output)?;
+        crate::native_entry::check_linked_sites(&bytes).map_err(NativeStop::Link)?;
         (publish(&store, link_key, &bytes)?, bytes, true)
     };
     if let Some(parent) = options

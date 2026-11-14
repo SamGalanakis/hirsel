@@ -20,6 +20,7 @@ static pthread_once_t initialized = PTHREAD_ONCE_INIT;
 static void initialize(void) {
     LLVMInitializeX86TargetInfo(); LLVMInitializeX86Target();
     LLVMInitializeX86TargetMC(); LLVMInitializeX86AsmPrinter();
+    LLVMInitializeX86AsmParser();
     LLVMInitializeAArch64TargetInfo(); LLVMInitializeAArch64Target();
     LLVMInitializeAArch64TargetMC(); LLVMInitializeAArch64AsmPrinter();
 }

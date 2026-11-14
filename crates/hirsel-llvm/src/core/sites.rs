@@ -15,10 +15,7 @@ impl FunctionEmitter<'_> {
     }
 
     pub(super) fn site_word(&mut self) -> String {
-        let Some(anchor) = self
-            .anchor
-            .filter(|a| !self.module.items[a.item.index()].package_is("core", "1"))
-        else {
+        let Some(word) = self.fixed_site_word() else {
             return if self.function.is_none_or(|f| {
                 let function = &self.module.functions[f.index()];
                 hirsel_core_ir::source::inherits_site(
@@ -30,14 +27,59 @@ impl FunctionEmitter<'_> {
                 "0".into()
             };
         };
+        if self.relocatable_sites && self.abi.target == Target::Aarch64Linux {
+            // AArch64 selects a GOT reference for an external pointer even
+            // with !absolute_symbol. Code addresses only this object's pool.
+            // externally_initialized keeps O3 from folding back to the GOT.
+            let anchor = self.anchor.unwrap();
+            let symbol =
+                hirsel_core_ir::source::site_symbol(&self.module.items[anchor.item.index()]);
+            let pool = format!("{symbol}.{}.word", anchor.start);
+            self.intrinsics.insert(format!(
+                "@{pool} = private externally_initialized constant i64 {word}, align 8"
+            ));
+            self.calc(format!("load i64, ptr @{pool}, align 8"))
+        } else {
+            word
+        }
+    }
+
+    pub(super) fn fixed_site_word(&mut self) -> Option<String> {
+        let anchor = self
+            .anchor
+            .filter(|a| !self.module.items[a.item.index()].package_is("core", "1"))?;
         if !self.relocatable_sites {
-            return (((u64::from(anchor.item.0) + 1) << 32) | u64::from(anchor.start)).to_string();
+            return Some(
+                (((u64::from(anchor.item.0) + 1) << 32) | u64::from(anchor.start)).to_string(),
+            );
         }
         let symbol = hirsel_core_ir::source::site_symbol(&self.module.items[anchor.item.index()]);
-        self.intrinsics
-            .insert(format!("@{symbol} = external constant i64"));
-        let item = self.calc(format!("load i64, ptr @{symbol}, align 8"));
-        self.calc(format!("or i64 {item}, {}", anchor.start))
+        Some(match self.abi.target {
+            Target::X86_64Linux => {
+                // A nonzero IR addend lets X86ISel fold this into a PC-relative
+                // LEA, even with !absolute_symbol. Resolve the addend in asm;
+                // this temporary name disappears and ELF references only the
+                // canonical symbol with its original addend.
+                let alias = format!(".L{symbol}_{}", anchor.start);
+                self.intrinsics.insert(format!(
+                    "module asm \".set {alias}, {symbol}+{}\"",
+                    anchor.start
+                ));
+                self.intrinsics.insert(format!(
+                    "@{alias} = external constant i8, !absolute_symbol !{{i64 -1, i64 -1}}"
+                ));
+                format!("ptrtoint (ptr @{alias} to i64)")
+            }
+            Target::Aarch64Linux => {
+                self.intrinsics.insert(format!(
+                    "@{symbol} = external constant i8, !absolute_symbol !{{i64 -1, i64 -1}}"
+                ));
+                format!(
+                    "add (i64 ptrtoint (ptr @{symbol} to i64), i64 {})",
+                    anchor.start
+                )
+            }
+        })
     }
 }
 

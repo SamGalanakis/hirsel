@@ -1160,7 +1160,7 @@ def first_party(meta: dict) -> str:
     archive_consumers = set()
     out = [
         HEADER,
-        'load("//tools/buck2:defs.bzl", "hirsel_binary", "hirsel_build_script", "hirsel_command_test", "hirsel_core_llvm_native_test", "hirsel_core_driver_native_test", "hirsel_core_cranelift_test", "hirsel_core_image", "hirsel_products", "hirsel_library", "hirsel_link_hosts_test", "hirsel_runtime_archives", "hirsel_core_runtime_archives", "hirsel_tsan_runtime_archives", "hirsel_script_test", "hirsel_source_audit", "hirsel_test", "hirsel_toolchain_bundle")\n',
+        'load("//tools/buck2:defs.bzl", "hirsel_binary", "hirsel_build_script", "hirsel_command_test", "hirsel_core_llvm_native_test", "hirsel_core_driver_native_test", "hirsel_core_cranelift_test", "hirsel_core_image", "hirsel_products", "hirsel_library", "hirsel_link_hosts_test", "hirsel_runtime_archives", "hirsel_pic_staticlib", "hirsel_core_runtime_archives", "hirsel_tsan_runtime_archives", "hirsel_script_test", "hirsel_source_audit", "hirsel_test", "hirsel_toolchain_bundle")\n',
         'load("//tools/buck2:native_selection.bzl", "hirsel_native_selection")\n',
     ]
 
@@ -1223,8 +1223,8 @@ def first_party(meta: dict) -> str:
             files_env = ({"HIRSEL_CORE_RUNTIME_ARCHIVE": "//:core-cranelift-runtime-fixtures[aarch64]",
                           "HIRSEL_TOOLCHAIN_ARM": "//tools/buck2/native-toolchain:arm",
                           "HIRSEL_TOOLCHAIN_QEMU": "//tools/buck2/native-toolchain:qemu"} if binary == "hirsel-cranelift-test-core_aarch64" else
-                         {"HIRSEL_CORE_RUNTIME_ARCHIVE": "//:core-llvm-runtime-fixture[staticlib]"} if core_native
-                         else {"HIRSEL_CORE_RT_ARCHIVE": "//:core-llvm-runtime-fixture[staticlib]"} if binary == "hirsel-llvm-unittest" else None)
+                         {"HIRSEL_CORE_RUNTIME_ARCHIVE": "//:core-native-runtime-fixture-pic"} if core_native
+                          else {"HIRSEL_CORE_RT_ARCHIVE": "//:core-native-runtime-fixture-pic"} if binary == "hirsel-llvm-unittest" else None)
             return dict(data=Raw(f'glob({starlark(["stdlib/**", relative(package_dir / "Cargo.toml")], 4)})') if requests_only else test_data(binary, name, package_dir, src),
                         runtime_archives=runtime_views(binary) if name in NATIVE_TESTS and not requests_only and not core_native and binary != "hirsel-rt-unittest" else None,
                         products=PRODUCTS if name in PRODUCT_TESTS and not core_native else None,
@@ -1317,7 +1317,7 @@ def first_party(meta: dict) -> str:
     out.append("\n" + call("hirsel_script_test", name="land-core-library-modes", script="core/tools/gate_library_modes.py", full=False,
                             args=["--compiler", "buck-out/tmp/cargo-bin-exe/land-core-library-modes/hirsel-core"],
                             bin_exes={"hirsel-core": "//:hirsel-core-driver-bin-hirsel-core"},
-                            files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:hirsel-core-rt[staticlib]",
+                            files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic",
                                        "HIRSEL_CORE_RT_ARCHIVES": "//:hirsel-core-rt-archives",
                                        "HIRSEL_TOOLCHAIN_ARM": "//tools/buck2/native-toolchain:arm",
                                        "HIRSEL_TOOLCHAIN_QEMU": "//tools/buck2/native-toolchain:qemu"},
@@ -1326,7 +1326,7 @@ def first_party(meta: dict) -> str:
         out.append("\n" + call("hirsel_script_test", name="core-m1-" + engine, script="core/tools/m1.py", full=False,
                                 args=["--backend", engine, "--compiler", "buck-out/tmp/cargo-bin-exe/core-m1-" + engine + "/hirsel-core"],
                                 bin_exes={"hirsel-core": "//:hirsel-core-driver-bin-hirsel-core"},
-                                files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:hirsel-core-rt[staticlib]"},
+                                files_env={"HIRSEL_CORE_RT_ARCHIVE": "//:core-driver-runtime-pic"},
                                 data=Raw('glob(["core/core/**", "core/std/**", "core/programs/m1/**", "core/corpus/m1/**", "crates/hirsel-core-rt/include/**"])')))
     out.append("\n" + call("hirsel_script_test", name="core-check-cost", script="crates/hirsel-core-front/check-cost.py", full=False, host=True, production=True,
                             args=["--compiler", "buck-out/tmp/cargo-bin-exe/core-check-cost/hirsel-core", "--request-compiler", "buck-out/tmp/cargo-bin-exe/core-check-cost/hirsel-core-request-cost"],
@@ -1381,6 +1381,8 @@ def first_party(meta: dict) -> str:
         crate="core_llvm_runtime_fixture", crate_root="crates/hirsel-llvm/tests/core_runtime/lib.rs",
         srcs=["crates/hirsel-llvm/tests/core_runtime/lib.rs"], features=[], deps=["//:hirsel-core-rt-native-fixture"],
         manifest_dir="crates/hirsel-llvm", package_name="hirsel-llvm", version="0.1.0", edition="2024"))
+    out.append("\n" + call("hirsel_pic_staticlib", name="core-native-runtime-fixture-pic", library=":core-llvm-runtime-fixture"))
+    out.append("\n" + call("hirsel_pic_staticlib", name="core-driver-runtime-pic", library=":hirsel-core-rt"))
     out.append("\n" + call("hirsel_core_runtime_archives", name="core-cranelift-runtime-fixtures", library=":core-llvm-runtime-fixture", archive_name="libcore_cranelift_fixture.a"))
     out.append("\n" + call("hirsel_core_cranelift_test", name="land-core-cranelift-custody",
         case="every_custody_sample_and_injected_admission_matches_evaluator",

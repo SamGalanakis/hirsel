@@ -501,7 +501,7 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
     };
     output(
         compiler
-            .args(["-std=c11", "-O0", "-no-pie", "-I"])
+            .args(["-std=c11", "-O0", "-fPIC", "-pie", "-Wl,-z,text", "-I"])
             .arg(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../hirsel-core-rt/include"))
             .arg(dir.join("test.c"))
             .arg(dir.join("core.o"))
@@ -510,6 +510,21 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
             .arg("-o")
             .arg(dir.join("test")),
     );
+    {
+        use object::{Object as _, ObjectSymbol as _};
+        let image = std::fs::read(dir.join("test")).unwrap();
+        let file = object::File::parse(image.as_slice()).unwrap();
+        assert_eq!(file.kind(), object::ObjectKind::Dynamic);
+        for symbol in file
+            .symbols()
+            .filter(|s| s.name().is_ok_and(|n| n.starts_with("hirsel_core_site_")))
+        {
+            assert_eq!(symbol.section(), object::SymbolSection::Absolute);
+            assert!(
+                matches!(symbol.flags(), object::SymbolFlags::Elf { st_other, .. } if st_other.0 & 3 == object::elf::STV_HIDDEN.0)
+            );
+        }
+    }
     let mut executable = match target {
         Target::X86_64Linux => Command::new(dir.join("test")),
         Target::Aarch64Linux => {
@@ -2661,7 +2676,7 @@ fn site_fixture(target: Target) {
     for (i, item) in module.items.iter().enumerate() {
         writeln!(
             bindings,
-            "const uint64_t {} = UINT64_C({});",
+            "__asm__(\".globl {0}\\n.hidden {0}\\n.set {0}, {1}\\n\");",
             hirsel_core_ir::source::site_symbol(item),
             (i as u64 + 1) << 32
         )
@@ -2691,9 +2706,33 @@ fn site_fixture(target: Target) {
         } else if debug_lines {
             emit_object_relocatable_for_target(&module, target, opt, false, true).unwrap()
         } else {
-            emit_object_for_target(&module, target, opt, false).unwrap()
+            emit_object_relocatable_for_target(&module, target, opt, false, false).unwrap()
         };
         let file = object::File::parse(bytes.as_slice()).unwrap();
+        let mut site_relocations = 0;
+        for section in file.sections() {
+            for (_, relocation) in section.relocations() {
+                if let object::RelocationTarget::Symbol(index) = relocation.target()
+                    && file
+                        .symbol_by_index(index)
+                        .unwrap()
+                        .name()
+                        .unwrap()
+                        .starts_with("hirsel_core_site_")
+                {
+                    assert_eq!(
+                        relocation.kind(),
+                        object::RelocationKind::Absolute,
+                        "{target:?} {} {relocation:?}",
+                        section.name().unwrap()
+                    );
+                    assert_eq!(relocation.size(), 64);
+                    assert!(relocation.addend() >= 0);
+                    site_relocations += 1;
+                }
+            }
+        }
+        assert!(site_relocations > 0);
         if !debug_lines {
             assert!(
                 file.section_by_name(".debug_line").is_none(),

@@ -26,6 +26,9 @@ fn failure_sites_rebind(backend: Backend, optimize: bool, debug_lines: bool) {
         assert_eq!(output.stderr, format!("Overflow at {}:{line}:5\n", dir.path().join("main.hirsel").display()).as_bytes(), "{output:?}");
         assert_eq!(built.debug_lines, debug_lines);
         let bytes = std::fs::read(&built.executable).unwrap();
+        use object::Object as _;
+        assert_eq!(object::File::parse(bytes.as_slice()).unwrap().kind(), object::ObjectKind::Dynamic,
+            "site constants must survive a PIE load bias");
         if debug_lines {
             let positions = crate::native_debug::source_positions(&bytes).unwrap();
             assert!(positions.contains(&(dir.path().join("main.hirsel").display().to_string(), line, 5)),
@@ -85,3 +88,22 @@ fn failure_sites_cranelift_dev_default() { failure_sites_rebind(Backend::Craneli
 #[test]
 #[ignore = "explicit native integration target"]
 fn failure_sites_llvm_dev_default() { failure_sites_rebind(Backend::Llvm, false, false); }
+
+#[test]
+#[ignore = "explicit native integration target"]
+fn failure_sites_dynamic_relocation_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut object = object::write::Object::new(object::BinaryFormat::Elf, object::Architecture::X86_64, object::Endianness::Little);
+    let section = object.add_section(vec![], b".data".to_vec(), object::SectionKind::Data);
+    object.section_mut(section).set_data(vec![0;8],8);
+    let name = hirsel_core_ir::source::site_symbol(&DefPath::core("dynamic_site"));
+    let symbol = object.add_symbol(object::write::Symbol { name:name.into_bytes(),value:0,size:0,kind:object::SymbolKind::Unknown,scope:object::SymbolScope::Dynamic,weak:false,section:object::write::SymbolSection::Undefined,flags:object::SymbolFlags::None });
+    object.add_relocation(section,object::write::Relocation { offset:0, symbol,addend:0,flags:object::RelocationFlags::Generic { kind:object::RelocationKind::Absolute,encoding:object::RelocationEncoding::Generic,size:64 } }).unwrap();
+    let input = dir.path().join("site.o"); let output = dir.path().join("site.so");
+    std::fs::write(&input,object.write().unwrap()).unwrap();
+    let options = native_options(Backend::Cranelift,dir.path());
+    let linked = Command::new(&options.cc).args(["-shared","-nostdlib"]).arg(input).arg("-o").arg(&output).output().unwrap();
+    assert!(linked.status.success(),"{linked:?}");
+    let error = crate::native_entry::check_linked_sites(&std::fs::read(output).unwrap()).unwrap_err();
+    assert!(error.contains("dynamic relocation against site symbol"),"{error}");
+}

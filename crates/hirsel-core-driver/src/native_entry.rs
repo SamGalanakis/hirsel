@@ -17,8 +17,10 @@ mod adapter;
 mod code;
 mod data;
 mod report;
+mod sites;
 mod start;
 use code::{Code, I8, I32, I64};
+pub(crate) use sites::check_linked_sites;
 type Result<T> = std::result::Result<T, String>;
 fn error(e: impl std::fmt::Display) -> String {
     e.to_string()
@@ -127,7 +129,9 @@ impl<'a> Plan<'a> {
             .map_err(error)?;
         adapter::emit(&mut object, self, entry, signature)?;
         start::emit(&mut object, self, &data, entry)?;
-        object.finish().object.write().map_err(error)
+        let mut product = object.finish();
+        sites::define(&mut product.object, self.sources);
+        product.object.write().map_err(error)
     }
 }
 

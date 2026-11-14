@@ -26,8 +26,9 @@ use llvm_sys::target::{
     LLVMABIAlignmentOfType, LLVMABISizeOfType, LLVMByteOrder, LLVMByteOrdering,
     LLVMCopyStringRepOfTargetData, LLVMDisposeTargetData, LLVMInitializeAArch64AsmPrinter,
     LLVMInitializeAArch64Target, LLVMInitializeAArch64TargetInfo, LLVMInitializeAArch64TargetMC,
-    LLVMInitializeX86AsmPrinter, LLVMInitializeX86Target, LLVMInitializeX86TargetInfo,
-    LLVMInitializeX86TargetMC, LLVMPointerSize, LLVMSetModuleDataLayout, LLVMTargetDataRef,
+    LLVMInitializeX86AsmParser, LLVMInitializeX86AsmPrinter, LLVMInitializeX86Target,
+    LLVMInitializeX86TargetInfo, LLVMInitializeX86TargetMC, LLVMPointerSize,
+    LLVMSetModuleDataLayout, LLVMTargetDataRef,
 };
 use llvm_sys::target_machine::{
     LLVMCodeGenFileType, LLVMCodeGenOptLevel, LLVMCodeModel, LLVMCreateTargetDataLayout,
@@ -81,6 +82,7 @@ fn initialize_targets() {
             LLVMInitializeX86Target();
             LLVMInitializeX86TargetMC();
             LLVMInitializeX86AsmPrinter();
+            LLVMInitializeX86AsmParser();
             LLVMInitializeAArch64TargetInfo();
             LLVMInitializeAArch64Target();
             LLVMInitializeAArch64TargetMC();

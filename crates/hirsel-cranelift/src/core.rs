@@ -117,6 +117,7 @@ pub(super) struct Tables<'a> {
     observe_charge: bool,
     debug: bool,
     site_symbols: std::cell::RefCell<std::collections::HashMap<ItemId, cranelift_module::DataId>>,
+    site_constants: std::cell::RefCell<sites::Constants>,
     runtimes: std::cell::RefCell<calls::Imports>,
 }
 
@@ -296,6 +297,7 @@ fn emit(
         observe_charge,
         debug: options.debug_lines,
         site_symbols: Default::default(),
+        site_constants: Default::default(),
         runtimes: Default::default(),
     };
     drop(setup);
@@ -332,6 +334,7 @@ fn emit(
         fast::emit_allocator(&mut object, &tables, allocator, observer, &mut scratch)?;
     }
     let _write = observer.enter("object_write");
+    tables.site_constants.borrow().define(&mut object)?;
     let mut product = object.finish();
     if options.debug_lines {
         crate::native_dwarf::append(&mut product.object, &debug_functions, "").map_err(error)?;

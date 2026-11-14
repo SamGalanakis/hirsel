@@ -143,6 +143,15 @@ struct NativeCase<'a> {
 }
 
 fn execute_cases(module: &c::Module, optimize: bool, cases: &[NativeCase<'_>]) {
+    execute_cases_with_rows(module, optimize, cases, false);
+}
+
+fn execute_cases_with_rows(
+    module: &c::Module,
+    optimize: bool,
+    cases: &[NativeCase<'_>],
+    debug_lines: bool,
+) {
     assert!(!cases.is_empty(), "native fixture must execute cases");
     println!("native cases: {} (optimize={optimize})", cases.len());
     fn has_hostfile(field: &hirsel_core_layout::FieldTy) -> bool {
@@ -189,7 +198,7 @@ fn execute_cases(module: &c::Module, optimize: bool, cases: &[NativeCase<'_>]) {
         &Options {
             target: NATIVE_TARGET,
             optimize,
-            debug_lines: false,
+            debug_lines,
         },
         hirsel_core_ids::ContentHash([0x90; 32]),
         observing,
@@ -1101,6 +1110,23 @@ b0(v0: u64):
             ],
             optimize,
         );
+        let runs = [
+            (FuncId(0), vec![u64::MAX]),
+            (FuncId(0), vec![u64::MAX - 1]),
+            (FuncId(1), vec![u64::MAX]),
+            (FuncId(1), vec![5]),
+        ];
+        let cases: Vec<_> = runs
+            .iter()
+            .map(|(function, args)| NativeCase {
+                function: *function,
+                args,
+                limit: 1_000_000,
+                injection: None,
+                report: None,
+            })
+            .collect();
+        execute_cases_with_rows(&module, optimize, &cases, true);
         let object = emit_object(
             &module,
             &Options {

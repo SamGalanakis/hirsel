@@ -871,16 +871,20 @@ HirselCoreSpawn __wrap_hirsel_core_spawn(HirselCoreContext *ctx,uint64_t bytes,v
 }}
 struct R {{ uint64_t status, value, available, native_status; }};
 extern struct R {body}(void *,uint64_t,uint64_t,uint64_t);
+extern HirselCoreContext *hirsel_core_test_context_new(uint64_t);
 extern uint64_t hirsel_core_test_available(const HirselCoreContext *);
 extern uint8_t hirsel_core_test_run(HirselCoreContext *,HirselCoreTaskBody,void *,void *,size_t,size_t);
 static uint8_t entry(HirselCoreContext *ctx,void *out,void *input) {{ *(struct R *)out={body}(ctx,7,1000,0); return 0; }}
 int main(void) {{
-  HirselCoreContext *ctx=hirsel_core_context_new(UINT64_C(1000000));
+  HirselCoreContext *ctx=hirsel_core_test_context_new(UINT64_C(1000000));
   uint64_t before=hirsel_core_test_available(ctx);
   struct R result={{0}};
   if(hirsel_core_test_run(ctx,entry,0,&result,0,sizeof result)) return 5;
   if(result.native_status || result.status!=2) return 1;
-  if(hirsel_core_test_available(ctx)!=before) return 2;
+  /* The input Tok (40) and the cancellation cause cell (32) are the only
+     non-isolate charges left after the child is joined.  A leaked isolate
+     reservation would add another 32 here. */
+  if(hirsel_core_test_available(ctx)!=before-72) return 2;
   hirsel_core_context_free(ctx);
   return 0;
 }}

@@ -17,7 +17,9 @@ static CONTEXT: extern "C" fn(u64) -> *mut hirsel_core_rt::Context =
 pub extern "C" fn hirsel_core_test_context_new(bytes: u64) -> *mut hirsel_core_rt::Context {
     let mut context = hirsel_core_rt::Context::new(288);
     hirsel_core_rt::causes::task_start(&mut context).expect("fixture startup allowance");
-    context.reset_test_limit(bytes);
+    // Keep the payer domain registered by task_start while exposing the
+    // requested fixture allowance, including u64::MAX rows.
+    context.set_test_available(bytes);
     Box::into_raw(Box::new(context))
 }
 /// # Safety

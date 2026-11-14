@@ -71,9 +71,14 @@ fn declare_functions(source: &mut String, module: &c::Module) {
     for f in &module.functions {
         let s = &module.signatures[f.signature.index()];
         let indirect = result_layout(s).0;
-        let result = match (s.results.as_slice(), indirect) {
-            ([], _) | (_, true) => "uint8_t".into(),
-            _ => format!("struct r{}", f.signature.0),
+        // Declare aggregate returns as aggregates even when Cranelift lowers
+        // them through a hidden sret pointer.  On AArch64 this makes the C
+        // compiler place that hidden pointer in x8, matching the platform ABI;
+        // spelling the sret as an ordinary first parameter would put it in x0.
+        let result = if s.results.is_empty() {
+            "uint8_t".into()
+        } else {
+            format!("struct r{}", f.signature.0)
         };
         write!(
             source,
@@ -81,7 +86,7 @@ fn declare_functions(source: &mut String, module: &c::Module) {
             symbol(&module.instances[f.instance.index()])
         )
         .unwrap();
-        if result_layout(s).0 || s.dest.is_some() {
+        if s.dest.is_some() {
             source.push_str(", void*");
         }
         for p in &s.params {
@@ -245,7 +250,7 @@ fn execute_cases_with_bindings(
     source.push_str(include_str!(
         "../../../hirsel-core-rt/include/hirsel_core_rt.h"
     ));
-    source.push_str("\nextern HirselCoreContext *hirsel_core_test_context_new(uint64_t);\nextern void hirsel_core_test_inject(HirselCoreContext *,size_t,bool);\nextern uint64_t hirsel_core_test_available(const HirselCoreContext *);\nextern size_t hirsel_core_test_attempts(const HirselCoreContext *);\nstatic uint64_t trace[1000000]; static size_t traces;\nvoid hirsel_core_test_drop_trace(uint64_t n) { if(traces >= 1000000) __builtin_abort(); trace[traces++]=n; }\n");
+    source.push_str("\nextern HirselCoreContext *hirsel_core_test_context_new(uint64_t);\nextern void hirsel_core_test_inject(HirselCoreContext *,size_t,bool);\nextern uint64_t hirsel_core_test_available(const HirselCoreContext *);\nextern size_t hirsel_core_test_attempts(const HirselCoreContext *);\nextern uint64_t hirsel_core_test_primary_refund(const HirselCoreContext *);\nstatic uint64_t trace[1000000]; static size_t traces;\nvoid hirsel_core_test_drop_trace(uint64_t n) { if(traces >= 1000000) __builtin_abort(); trace[traces++]=n; }\n");
     if observing {
         source.push_str("extern void *hirsel_core_test_observe_begin(const HirselCoreContext *); extern uint64_t hirsel_core_test_observe_end(void *);\n");
     }
@@ -331,6 +336,9 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
         let function = &module.functions[f.index()];
         let s = &module.signatures[function.signature.index()];
         let (indirect, result_offsets, result_size) = result_layout(s);
+        // Scheduled wrappers already materialize the C aggregate into `value`;
+        // only direct calls need the explicit storage buffer below.
+        let via_storage = indirect && !scheduled;
         let computed;
         let report = if let Some(report) = case.report {
             report
@@ -408,6 +416,7 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
             )
             .unwrap();
         }
+        source.push_str("size_t initial_attempts=hirsel_core_test_attempts(ctx);\n");
         for (j, (p, arg)) in s.params.iter().zip(args).enumerate() {
             let Param::Value(t) = p else {
                 panic!("scalar test")
@@ -426,8 +435,6 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
         }
         let result = if s.results.is_empty() {
             "uint64_t status = ".into()
-        } else if indirect {
-            "uint8_t native_status = ".into()
         } else {
             format!("struct r{} value = ", function.signature.0)
         };
@@ -463,38 +470,50 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
                     result_size.max(1)
                 )
                 .unwrap();
-            } else if let Some(ty) = s.dest {
+            }
+            if let Some(ty) = s.dest {
                 let hirsel_core_layout::Layout::Fixed(layout) = &layouts[ty.index()].layout else {
                     panic!("fixed fixture result");
                 };
                 writeln!(
                     source,
-                    "_Alignas({}) uint8_t returned_place[{}];",
+                    "_Alignas({}) uint8_t destination_place[{}];",
                     layout.align,
                     layout.size.max(1)
                 )
                 .unwrap();
             }
-            write!(
-                source,
-                "{result}{}(",
-                symbol(&module.instances[function.instance.index()])
-            )
-            .unwrap();
             if indirect {
-                source.push_str("returned_place, ctx");
-            } else {
-                source.push_str("ctx");
+                write!(
+                    source,
+                    "struct r{} value = {}(ctx",
+                    function.signature.0,
+                    symbol(&module.instances[function.instance.index()])
+                )
+                .unwrap();
                 if s.dest.is_some() {
-                    source.push_str(", returned_place");
+                    source.push_str(", destination_place");
+                }
+            } else {
+                write!(
+                    source,
+                    "{result}{}(ctx",
+                    symbol(&module.instances[function.instance.index()])
+                )
+                .unwrap();
+                if s.dest.is_some() {
+                    source.push_str(", destination_place");
                 }
             }
             for j in 0..args.len() {
                 write!(source, ", a{j}").unwrap();
             }
             source.push_str(",0);\n");
+            if indirect {
+                source.push_str("memcpy(returned_place, &value, sizeof value);\n");
+            }
         }
-        if indirect {
+        if via_storage {
             let status_offset = result_offsets[s.results.len()];
             writeln!(source, "uint64_t status = 0; memcpy(&status, returned_place + {status_offset}, sizeof(uint8_t));").unwrap();
         } else if !s.results.is_empty() {
@@ -524,13 +543,13 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
         .unwrap();
         for (j, t) in s.results.iter().enumerate() {
             let expr = format!("value.v{j}");
-            if indirect {
+            if via_storage {
                 writeln!(source, "uint64_t out{i}_{j} = 0; memcpy(&out{i}_{j}, returned_place + {}, sizeof({}));", result_offsets[j], ctype(*t)).unwrap();
             } else {
                 writeln!(source, "uint64_t out{i}_{j} = 0;").unwrap();
             }
             // Values are raw low bits, even when the language type is signed.
-            if t.is_float() && !indirect {
+            if t.is_float() && !via_storage {
                 writeln!(source, "memcpy(&out{i}_{j}, &{expr}, sizeof({expr}));").unwrap();
                 let (exponent, fraction, canonical) = if *t == Ty::Scalar(Scalar::F32) {
                     (0x7f800000u64, 0x007fffffu64, 0x7fc00000u64)
@@ -538,7 +557,7 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
                     (0x7ff0000000000000, 0x000fffffffffffff, 0x7ff8000000000000)
                 };
                 writeln!(source, "if ((out{i}_{j} & UINT64_C({exponent})) == UINT64_C({exponent}) && (out{i}_{j} & UINT64_C({fraction}))) out{i}_{j} = UINT64_C({canonical});").unwrap();
-            } else if !indirect {
+            } else if !via_storage {
                 writeln!(
                     source,
                     "out{i}_{j} = (uint64_t)({expr}) & UINT64_C({});",
@@ -558,12 +577,8 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
         expected.push(report.trace.len() as u64);
         expected.extend(&report.trace);
         expected.push(report.admissions as u64);
-        let primary_refund = if host_files {
-            "hirsel_core_test_primary_refund(ctx)"
-        } else {
-            "0"
-        };
-        writeln!(source,"uint64_t used = UINT64_C({limit}) - hirsel_core_test_available(ctx); fwrite(&used,8,1,stdout); uint64_t nt=traces; fwrite(&nt,8,1,stdout); fwrite(trace,8,traces,stdout); uint64_t na=hirsel_core_test_attempts(ctx); fwrite(&na,8,1,stdout); uint64_t startup_refund={primary_refund}; hirsel_core_causes_drop(causes); if(status && hirsel_core_test_available(ctx) != UINT64_C({limit}) + startup_refund) return 9; hirsel_core_context_free(ctx);").unwrap();
+        let primary_refund = "hirsel_core_test_primary_refund(ctx)";
+        writeln!(source,"uint64_t startup_refund={primary_refund}; uint64_t available=hirsel_core_test_available(ctx); uint64_t used = available > UINT64_C({limit}) ? 0 : UINT64_C({limit}) - available; fwrite(&used,8,1,stdout); uint64_t nt=traces; fwrite(&nt,8,1,stdout); fwrite(trace,8,traces,stdout); uint64_t na=hirsel_core_test_attempts(ctx) - initial_attempts; fwrite(&na,8,1,stdout); hirsel_core_causes_drop(causes); uint64_t after_drop=hirsel_core_test_available(ctx); if(status && after_drop != UINT64_C({limit}) + startup_refund) return 9; hirsel_core_context_free(ctx);").unwrap();
         if host_files {
             // Context/run ownership belongs to hirsel_core_run in this path.
             let end = source.rfind("hirsel_core_context_free(ctx);").unwrap();

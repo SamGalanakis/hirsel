@@ -20,6 +20,29 @@ mod providers;
 #[path = "../../../hirsel-core-rt/testdata/host_memory.rs"]
 mod host_memory;
 
+fn result_layout(s: &c::Signature) -> (bool, Vec<u32>, u32) {
+    let mut offset = 0u32;
+    let mut align = 1u32;
+    let mut offsets = Vec::with_capacity(s.results.len() + 1);
+    for t in s.results.iter().copied().chain([Ty::Scalar(Scalar::U8)]) {
+        let size = match t {
+            Ty::Ptr => 8,
+            Ty::Scalar(s) => s.size() as u32,
+        };
+        align = align.max(size);
+        offset = offset.next_multiple_of(size);
+        offsets.push(offset);
+        offset += size;
+    }
+    offset = offset.next_multiple_of(align);
+    let homogeneous = NATIVE_TARGET.starts_with("aarch64")
+        && !s.results.is_empty()
+        && s.results.len() <= 4
+        && s.results[0].is_float()
+        && s.results.iter().all(|t| *t == s.results[0]);
+    (offset > 16 && !homogeneous, offsets, offset)
+}
+
 fn ctype(t: Ty) -> &'static str {
     match t {
         Ty::Ptr => "void*",
@@ -47,8 +70,9 @@ fn declare_functions(source: &mut String, module: &c::Module) {
     }
     for f in &module.functions {
         let s = &module.signatures[f.signature.index()];
-        let result = match s.results.as_slice() {
-            [] => "uint8_t".into(),
+        let indirect = result_layout(s).0;
+        let result = match (s.results.as_slice(), indirect) {
+            ([], _) | (_, true) => "uint8_t".into(),
             _ => format!("struct r{}", f.signature.0),
         };
         write!(
@@ -57,7 +81,7 @@ fn declare_functions(source: &mut String, module: &c::Module) {
             symbol(&module.instances[f.instance.index()])
         )
         .unwrap();
-        if s.dest.is_some() {
+        if result_layout(s).0 || s.dest.is_some() {
             source.push_str(", void*");
         }
         for p in &s.params {
@@ -306,6 +330,7 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
         let injection = case.injection;
         let function = &module.functions[f.index()];
         let s = &module.signatures[function.signature.index()];
+        let (indirect, result_offsets, result_size) = result_layout(s);
         let computed;
         let report = if let Some(report) = case.report {
             report
@@ -401,6 +426,8 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
         }
         let result = if s.results.is_empty() {
             "uint64_t status = ".into()
+        } else if indirect {
+            "uint8_t native_status = ".into()
         } else {
             format!("struct r{} value = ", function.signature.0)
         };
@@ -429,7 +456,14 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
             }
             writeln!(source, "}}; if(hirsel_core_test_run(ctx,run{},&args,&{variable},sizeof args,sizeof {variable})) return 10;", f.0).unwrap();
         } else {
-            if let Some(ty) = s.dest {
+            if indirect {
+                writeln!(
+                    source,
+                    "_Alignas(8) uint8_t returned_place[{}];",
+                    result_size.max(1)
+                )
+                .unwrap();
+            } else if let Some(ty) = s.dest {
                 let hirsel_core_layout::Layout::Fixed(layout) = &layouts[ty.index()].layout else {
                     panic!("fixed fixture result");
                 };
@@ -443,19 +477,27 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
             }
             write!(
                 source,
-                "{result}{}(ctx",
+                "{result}{}(",
                 symbol(&module.instances[function.instance.index()])
             )
             .unwrap();
-            if s.dest.is_some() {
-                source.push_str(", returned_place");
+            if indirect {
+                source.push_str("returned_place, ctx");
+            } else {
+                source.push_str("ctx");
+                if s.dest.is_some() {
+                    source.push_str(", returned_place");
+                }
             }
             for j in 0..args.len() {
                 write!(source, ", a{j}").unwrap();
             }
             source.push_str(",0);\n");
         }
-        if !s.results.is_empty() {
+        if indirect {
+            let status_offset = result_offsets[s.results.len()];
+            writeln!(source, "uint64_t status = 0; memcpy(&status, returned_place + {status_offset}, sizeof(uint8_t));").unwrap();
+        } else if !s.results.is_empty() {
             source.push_str("uint64_t status = value.status;\n");
         }
         if observing {
@@ -482,9 +524,13 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
         .unwrap();
         for (j, t) in s.results.iter().enumerate() {
             let expr = format!("value.v{j}");
-            writeln!(source, "uint64_t out{i}_{j} = 0;").unwrap();
+            if indirect {
+                writeln!(source, "uint64_t out{i}_{j} = 0; memcpy(&out{i}_{j}, returned_place + {}, sizeof({}));", result_offsets[j], ctype(*t)).unwrap();
+            } else {
+                writeln!(source, "uint64_t out{i}_{j} = 0;").unwrap();
+            }
             // Values are raw low bits, even when the language type is signed.
-            if t.is_float() {
+            if t.is_float() && !indirect {
                 writeln!(source, "memcpy(&out{i}_{j}, &{expr}, sizeof({expr}));").unwrap();
                 let (exponent, fraction, canonical) = if *t == Ty::Scalar(Scalar::F32) {
                     (0x7f800000u64, 0x007fffffu64, 0x7fc00000u64)
@@ -492,7 +538,7 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
                     (0x7ff0000000000000, 0x000fffffffffffff, 0x7ff8000000000000)
                 };
                 writeln!(source, "if ((out{i}_{j} & UINT64_C({exponent})) == UINT64_C({exponent}) && (out{i}_{j} & UINT64_C({fraction}))) out{i}_{j} = UINT64_C({canonical});").unwrap();
-            } else {
+            } else if !indirect {
                 writeln!(
                     source,
                     "out{i}_{j} = (uint64_t)({expr}) & UINT64_C({});",
@@ -620,9 +666,14 @@ fn link_program_checked(scratch: &Scratch, source: &str, memcheck: bool) -> Path
     let mut compiler = Command::new(c_compiler());
     if memcheck && NATIVE_TARGET == "x86_64-unknown-linux-gnu" {
         // The declared Memcheck tree carries its matching loader symbols.
-        let runtime = PathBuf::from(std::env::var_os("HIRSEL_VALGRIND_RUNTIME").expect("declared Memcheck runtime"));
-        compiler.args(["-Xlinker", "--dynamic-linker", "-Xlinker"]).arg(runtime.join("ld-linux-x86-64.so.2"))
-            .args(["-Xlinker", "-rpath", "-Xlinker"]).arg(&runtime);
+        let runtime = PathBuf::from(
+            std::env::var_os("HIRSEL_VALGRIND_RUNTIME").expect("declared Memcheck runtime"),
+        );
+        compiler
+            .args(["-Xlinker", "--dynamic-linker", "-Xlinker"])
+            .arg(runtime.join("ld-linux-x86-64.so.2"))
+            .args(["-Xlinker", "-rpath", "-Xlinker"])
+            .arg(&runtime);
     }
     let link = compiler
         .current_dir(&scratch.0)
@@ -663,10 +714,20 @@ fn link_run(scratch: &Scratch, source: &str) -> Vec<u64> {
 fn link_run_checked(scratch: &Scratch, source: &str, memcheck: bool) -> Vec<u64> {
     let binary = link_program_checked(scratch, source, memcheck);
     let mut command = if memcheck && NATIVE_TARGET == "x86_64-unknown-linux-gnu" {
-        let mut command = Command::new(std::env::var_os("HIRSEL_VALGRIND").expect("declared Memcheck tool"));
-        command.args(["--tool=memcheck", "--quiet", "--exit-on-first-error=yes", "--error-exitcode=99"]).arg(&binary);
+        let mut command =
+            Command::new(std::env::var_os("HIRSEL_VALGRIND").expect("declared Memcheck tool"));
         command
-    } else { native_command(&binary) };
+            .args([
+                "--tool=memcheck",
+                "--quiet",
+                "--exit-on-first-error=yes",
+                "--error-exitcode=99",
+            ])
+            .arg(&binary);
+        command
+    } else {
+        native_command(&binary)
+    };
     let run = command.output().unwrap();
     assert!(
         run.status.success(),
@@ -1354,15 +1415,38 @@ fn check_growth_shadow_words() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/front");
     let source = include_str!("../../../../core/front/cases/body/grow-carrier-words.hirsel");
     let (module, names) = front::lower(&root, source);
-    let runs: Vec<_> = [("grown",131328), ("refused",130816512904), ("regrown",523776)].into_iter().map(|(name, want)| {
+    let runs: Vec<_> = [
+        ("grown", 131328),
+        ("refused", 130816512904),
+        ("regrown", 523776),
+    ]
+    .into_iter()
+    .map(|(name, want)| {
         let f = names[name];
         let report = eval::run(&module, f, &[], 1_000_000);
         assert_eq!(report.outcome, eval::Outcome::Returned(vec![want]));
         assert_eq!(report.used, 0);
         (f, Vec::new())
-    }).collect();
-    let cases: Vec<_> = runs.iter().map(|(function,args)| NativeCase {function:*function,args,limit:1_000_000,injection:None,report:None}).collect();
-    for speed in [false,true] {
-        execute_cases_with_bindings(&module,speed,&cases,false,include_str!("../../../hirsel-core-rt/testdata/moving_realloc.c"), true);
+    })
+    .collect();
+    let cases: Vec<_> = runs
+        .iter()
+        .map(|(function, args)| NativeCase {
+            function: *function,
+            args,
+            limit: 1_000_000,
+            injection: None,
+            report: None,
+        })
+        .collect();
+    for speed in [false, true] {
+        execute_cases_with_bindings(
+            &module,
+            speed,
+            &cases,
+            false,
+            include_str!("../../../hirsel-core-rt/testdata/moving_realloc.c"),
+            true,
+        );
     }
 }

@@ -55,7 +55,7 @@ fn gram(b:Bytes,i:u64)->u32 {
 fn bump(mut counts:Map[u32,u64],key:u32)->Result[u64,helper.Error] {
     let old=map.get_or(counts,key,0u64)
     if old==0 {
-        match map.insert(mut counts,key,1u64) {Ok(())=>{},Error((c,_,_))=>return Error(Capacity(c))}
+        helper.mem(result.capacity_only(map.insert(mut counts,key,1u64)))?
     } else {let _=map.set(mut counts,key,old+1)}
     Ok(old+1)
 }

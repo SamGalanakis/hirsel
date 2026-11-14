@@ -15,7 +15,7 @@ fn tally(source:String)->Result[u32,helper.Error] {
             let present=map.update(mut frequencies,word,fn(mut count:u32) {count+=1})
             if present==None {
                 let key=helper.mem(string.from(word))?
-                match map.insert(mut frequencies,take key,1u32) {Ok(())=>{},Error((c,_,_))=>return Error(Capacity(c))}
+                helper.mem(result.capacity_only(map.insert(mut frequencies,take key,1u32)))?
             }
         }
     }

@@ -106,7 +106,7 @@ fn scan(log:String)->Result[u32,helper.Error] {
     let mut counts:Map[String,u64]=map.new()
     for pattern in 0u64 .. 13u64 {
         let key=helper.mem(string.from(names[pattern]))?
-        match map.insert(mut counts,take key,0u64) {Ok(())=>{},Error((c,_,_))=>return Error(Capacity(c))}
+        helper.mem(result.capacity_only(map.insert(mut counts,take key,0u64)))?
         let mut i:u64=0
         while i<list.len(b) {
             if let Some(end)=matched(b,i,pattern) {

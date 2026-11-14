@@ -22,10 +22,7 @@ pub fn push[T](mut xs: List[T], take x: T) -> Result[(), Error] {
 }
 
 pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), Error] {
-    match map.insert(mut m, take k, take v) {
-        Ok(()) => Ok(()),
-        Error((c, _, _)) => mem(Error(c))
-    }
+    mem(result.capacity_only(map.insert(mut m, take k, take v)))
 }
 
 pub fn put(out: Stdout, s: String) -> Result[(), Error] waits {

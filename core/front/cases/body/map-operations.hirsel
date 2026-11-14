@@ -59,7 +59,7 @@ fn handback() -> u64 {
   let r: Result[u64,Capacity] = bound bytes 0 {
     let mut m: Map[u64,u64] = map.new()
     match map.insert(mut m,7,11) {
-      Error((c,k,v)) => if c.requested == 128 && c.available == 0 { k*100+v } else { 0 },
+      Error((c,(k,v))) => if c.requested == 128 && c.available == 0 { k*100+v } else { 0 },
       Ok(()) => 0
     }
   }
@@ -70,7 +70,7 @@ fn refused_growth() -> u64 {
     let mut m: Map[u64,u64] = map.new()
     for i in 0u64..4u64 { result.unwrap(map.insert(mut m,i,i*10)) }
     match map.insert(mut m,4,40) {
-      Error((c,k,v)) => if c.requested == 256 && c.available == 255 && map.len(m) == 4 { k*1000+v } else { 0 },
+      Error((c,(k,v))) => if c.requested == 256 && c.available == 255 && map.len(m) == 4 { k*1000+v } else { 0 },
       Ok(()) => 0
     }
   }
@@ -87,7 +87,7 @@ fn unit_entries() -> u64 {
 fn unit_charge() -> u64 {
   let r: Result[u64,Capacity] = bound bytes 63 {
     let mut m: Map[(),()] = map.new()
-    match map.insert(mut m,(),()) {Error((c,_,_))=>c.requested*100+c.available,Ok(())=>0}
+    match map.insert(mut m,(),()) {Error((c,_))=>c.requested*100+c.available,Ok(())=>0}
   }
   result.unwrap(r)
 }

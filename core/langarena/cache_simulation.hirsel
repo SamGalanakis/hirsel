@@ -49,7 +49,7 @@ fn put(mut c:Cache,take key:String,take value:String)->Result[(),helper.Error] {
             slot
         },
     }
-    match map.insert(mut c.entries,take key,node) {Ok(())=>{},Error((e,_,_))=>return Error(Capacity(e))}
+    helper.mem(result.capacity_only(map.insert(mut c.entries,take key,node)))?
     front(mut c,node)
     c.size+=1
     Ok(())

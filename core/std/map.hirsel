@@ -32,10 +32,10 @@ pub fn get_or[K: key, V: plain](m: Map[K, V], k: K, x: V) -> V {
 
 /// Copies the stored plain value, or inserts (k, x) and returns x when absent.
 /// Existing keys keep their place and value; unused k and x are cleaned.
-/// Fails: Error((c, k, x)) on growth, m unchanged. Alloc: map GROWTH.
+/// Fails: Error((c, (k, x))) on growth, m unchanged. Alloc: map GROWTH.
 /// Cost: expected amortised O(1). Like get_or, this helper copies plain values;
 /// OWN-20 permits scoped results to anchor only view parameters, not mut m.
-pub fn get_or_insert[K: key, V: plain](mut m: Map[K, V], take k: K, x: V) -> Result[V, (Capacity, K, V)] {
+pub fn get_or_insert[K: key, V: plain](mut m: Map[K, V], take k: K, x: V) -> Result[V, (Capacity, (K, V))] {
     let found: Option[V] = match map.get(m, k) { Some(v) => Some(v), None => None }
     if let Some(v) = found { return Ok(v) }
     map.insert(mut m, take k, x)?

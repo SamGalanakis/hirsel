@@ -91,7 +91,7 @@ fn lzw_encode(input:Bytes)->Result[Bytes,helper.Error] {
     for i in 0u32 .. 256u32 {
         let mut key:Bytes=list.new()
         push(mut key,int.narrow(i))?
-        match map.insert(mut dict,take key,i) {Ok(())=>{},Error((c,_,_))=>return Error(Capacity(c))}
+        helper.mem(result.capacity_only(map.insert(mut dict,take key,i)))?
     }
     let mut next_code:u32=256
     let mut output:Bytes=helper.mem(list.with_capacity(n*2))?
@@ -107,7 +107,7 @@ fn lzw_encode(input:Bytes)->Result[Bytes,helper.Error] {
             }
             push(mut output,int.narrow((code>>8u32)&255u32))?
             push(mut output,int.narrow(code&255u32))?
-            match map.insert(mut dict,take current,next_code) {Ok(())=>{},Error((c,_,_))=>return Error(Capacity(c))}
+            helper.mem(result.capacity_only(map.insert(mut dict,take current,next_code)))?
             next_code+=1
             current=list.new()
             push(mut current,byte)?

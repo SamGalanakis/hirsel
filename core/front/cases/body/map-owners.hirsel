@@ -28,7 +28,7 @@ fn handback() -> u64 {
     let mut m: Map[u64,Mark] = map.new()
     let value = result.unwrap(Mark(id:11))
     match map.insert(mut m,7,take value) {
-      Error((c,k,take v)) => if c.requested == 128 && c.available == 0 { k*100+v.id } else { 0 },
+      Error((c,(k,take v))) => if c.requested == 128 && c.available == 0 { k*100+v.id } else { 0 },
       Ok(()) => 0
     }
   }

@@ -19,7 +19,7 @@ pub fn get[K: key, V](m: Map[K, V], k: K) -> Option[View[V]] in m {
     j = int.wrapping_add(j, 1) & mask
   }
 }
-pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), (Capacity, K, V)] {
+pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), (Capacity, (K, V))] {
   let h = hash(k)
   // The first empty index word is the insertion position unless growth moves it.
   let mut j: u64 = 0
@@ -42,7 +42,7 @@ pub fn insert[K: key, V](mut m: Map[K, V], take k: K, take v: V) -> Result[(), (
   let cap = capacity(m)
   if slots(m) == cap {
     match make_room(mut m) {
-      Error(c) => return Error((c, take k, take v)),
+      Error(c) => return Error((c, (take k, take v))),
       Ok(()) => {}
     }
     let mask = int.wrapping_sub(index_len(m), 1)

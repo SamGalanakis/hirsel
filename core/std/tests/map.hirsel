@@ -76,7 +76,7 @@ fn get_or_insert_capacity() -> u64 {
     let mut m: Map[String, u64] = map.new()
     let x = result.unwrap(string.from("abc"))
     let r = bound bytes 0 { map.get_or_insert(mut m, take x, 7) }
-    match r { Ok(Error((_, take original, v))) => if v == 7 && original == "abc" { list.len(string.as_bytes(original)) + map.len(m) } else { 99 }, _ => 99 }
+    match r { Ok(Error((_, (take original, v)))) => if v == 7 && original == "abc" { list.len(string.as_bytes(original)) + map.len(m) } else { 99 }, _ => 99 }
 }
 
 // A present key is read without admission, without replacing its value.

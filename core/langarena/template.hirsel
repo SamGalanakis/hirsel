@@ -7,9 +7,7 @@ fn numbered(prefix:String,i:u64)->Result[String,helper.Error] {
 }
 fn bind(mut vars:Map[String,String],take key:String,value:String)->Result[(),helper.Error] {
     let owned=helper.mem(string.from(value))?
-    match map.insert(mut vars,take key,take owned) {
-        Ok(())=>Ok(()),Error((c,_,_))=>Error(Capacity(c)),
-    }
+    helper.mem(result.capacity_only(map.insert(mut vars,take key,take owned)))
 }
 fn render(source:String,vars:Map[String,String],regex:bool)->Result[String,helper.Error] {
     let n=string.byte_len(source)

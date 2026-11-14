@@ -149,7 +149,7 @@ fn evaluate(node:Node,mut variables:Map[String,i64])->Result[i64,helper.Error] {
         Assignment(name,child)=>{
             let value=evaluate(child,mut variables)?
             let key=helper.mem(string.from(name))?
-            match map.insert(mut variables,take key,value) {Ok(())=>{},Error((c,_,_))=>return Error(Capacity(c))}
+            helper.mem(result.capacity_only(map.insert(mut variables,take key,value)))?
             Ok(value)
         },
     }

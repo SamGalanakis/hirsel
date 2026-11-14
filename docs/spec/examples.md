@@ -183,7 +183,7 @@ fn tally(ws: List[String]) -> Result[Map[String, u64], Capacity] {
   for w in ws {
     let n: u64 = match map.get(m, w) { Some(v) => v, None => 0 }
     let k = string.from(w)?
-    match map.insert(mut m, take k, n + 1) { Ok(()) => {}, Error((c, _, _)) => return Error(c) }
+    match map.insert(mut m, take k, n + 1) { Ok(()) => {}, Error((c, _)) => return Error(c) }
   }
   Ok(take m)
 }

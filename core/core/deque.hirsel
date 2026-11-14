@@ -106,7 +106,11 @@ fn grow[T](mut d: Deque[T]) -> Result[(), Capacity] {
     // admission complete before either move and no fallible step between them.
     let head = d.head
     let tail = int.wrapping_sub(cap, head)
-    let first = if count < tail { count } else { tail }
+    let first = if count < tail {
+        count
+    } else {
+        tail
+    }
     let second = int.wrapping_sub(count, first)
     slots_move(mut d.ring, head, mut ring, 0, first)
     slots_move(mut d.ring, 0, mut ring, first, second)

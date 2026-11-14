@@ -66,6 +66,7 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     let mut manifest = None;
     let mut metrics = None;
     let mut image_path = None;
+    let mut install_root = None;
     let mut core_product = None;
     let mut source_core = false;
     let mut source_std = false;
@@ -79,6 +80,8 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     let mut backend = None;
     let mut release = false;
     let mut runtime = None;
+    let mut explicit_runtime = false;
+    let mut explicit_target = false;
     let mut logical_charge_report = None;
     let mut output_path = None;
     let mut root_limit = 64 * 1024 * 1024;
@@ -97,6 +100,7 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
         let value = value.unwrap_or_default();
         match option {
             Opt::Json => json = true,
+            Opt::Install => install_root = Some(PathBuf::from(value)),
             Opt::SourceCore => source_core = true,
             Opt::SourceStd => source_std = true,
             Opt::Name => {
@@ -122,12 +126,18 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
             }
             Opt::Release => release = true,
             Opt::Backend => backend = Some(value.parse::<Backend>()?),
-            Opt::Runtime => runtime = Some(PathBuf::from(value)),
+            Opt::Runtime => {
+                explicit_runtime = true;
+                runtime = Some(PathBuf::from(value));
+            }
             Opt::LogicalChargeReport => {
                 logical_charge_report = Some(PathBuf::from(value));
             }
             Opt::Cc => cc = PathBuf::from(value),
-            Opt::Target => target = value,
+            Opt::Target => {
+                explicit_target = true;
+                target = value;
+            }
             Opt::Emulator => emulator = Some(PathBuf::from(value)),
             Opt::Sysroot => sysroot = Some(PathBuf::from(value)),
             Opt::Limit => {
@@ -161,6 +171,57 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     if test_command && entry.is_some() {
         return Err("test selects marked functions with --filter, not --entry".into());
     }
+    let executable = std::env::current_exe()?;
+    let installed = hirsel_core_driver::installation::Installed::discover(&executable)?;
+    if let Some(installed) = &installed {
+        if core_product.is_none() {
+            core_product = Some(installed.cache());
+        }
+        if runtime.is_none() {
+            runtime = installed.runtime(&target);
+        }
+    }
+    if command == "env" {
+        let cache = core_product.unwrap_or_else(hirsel_core_driver::PackageProduct::default_cache);
+        let report = hirsel_core_driver::installation::environment(
+            &executable,
+            installed.as_ref(),
+            &cache,
+            &target,
+            runtime.as_deref(),
+        )?;
+        if json {
+            println!("{}", serde_json::to_string(&report)?);
+        } else {
+            println!("compiler: {}", report.executable.display());
+            println!(
+                "installed root: {}",
+                report
+                    .installed_root
+                    .as_ref()
+                    .map_or_else(|| "none".to_owned(), |p| p.display().to_string())
+            );
+            println!("package cache: {}", report.package_cache.display());
+            println!("target: {}", report.target);
+            println!(
+                "runtime: {}",
+                report.runtime.as_ref().map_or_else(
+                    || "none; select --runtime".to_owned(),
+                    |p| p.display().to_string()
+                )
+            );
+        }
+        std::process::exit(0);
+    }
+    if install_root.is_some() && (store.is_some() || image_path.is_some()) {
+        return Err("--install cannot be combined with --store or --image".into());
+    }
+    if matches!(command, "core-product" | "std-product")
+        && install_root.is_none()
+        && (explicit_runtime || explicit_target)
+    {
+        return Err("product --runtime/--target require --install".into());
+    }
     let mut meter = Meter::new(metrics.is_some());
     // Directory checks and source comparisons use checkout sources when Buck's
     // build-time package path is relative to its action directory.
@@ -170,11 +231,13 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     {
         libraries = PathBuf::from("core");
     }
-    let store = store.unwrap_or_else(|| {
-        dir.as_deref()
-            .unwrap_or(Path::new("."))
-            .join(".hirsel-core")
-    });
+    let store = store
+        .or_else(|| install_root.as_ref().map(|root| root.join("core-packages")))
+        .unwrap_or_else(|| {
+            dir.as_deref()
+                .unwrap_or(Path::new("."))
+                .join(".hirsel-core")
+        });
     if command == "core-product" || command == "std-product" {
         meter.finish("startup/discovery");
         let (image, rebuilt) = if let Some(path) = image_path {
@@ -183,7 +246,14 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
                 false,
             )
         } else {
-            let package = if command == "std-product" {
+            let package = if let Some(root) = &install_root {
+                hirsel_core_driver::installation::publish(
+                    root,
+                    command == "std-product",
+                    runtime.as_deref().map(|runtime| (runtime, target.as_str())),
+                    &mut meter,
+                )?
+            } else if command == "std-product" {
                 hirsel_core_driver::PackageProduct::bundled_std(&store, &mut meter)?
             } else {
                 hirsel_core_driver::PackageProduct::bundled(&store, &mut meter)?
@@ -235,7 +305,7 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
         CheckRequest::libraries(dir.as_deref().unwrap_or(&libraries), &store)?
     } else if let Some(image) = image {
         CheckRequest::with_image(&dir.ok_or("missing package directory")?, &store, image)?
-    } else if native_command {
+    } else if native_command || installed.is_some() {
         CheckRequest::program(&dir.ok_or("missing package directory")?, &libraries, &store)?
     } else {
         CheckRequest::directory(&dir.ok_or("missing package directory")?, &libraries, &store)?

@@ -657,12 +657,15 @@ fn link(
     .map(|n| read_input(&options.include.join(n)))
     .into_iter()
     .collect::<io::Result<Vec<_>>>()?;
-    let cc = command(Command::new(&options.cc).arg("--version"))?;
+    let tools = crate::tool_inputs::link_tools(&options.cc)
+        .map_err(|error| NativeStop::Link(format!("tool selection: {error}")))?;
+    let cc = command(Command::new(&tools.0.path).arg("--version"))?;
     let identities: Vec<_> = objects.iter().map(|o| o.identity).collect();
     let link_key = key(
-        "hirsel.core-executable.v1",
+        "hirsel.core-executable.v2",
         &(
             compiler_identity()?,
+            &tools,
             source,
             &identities,
             &options.target,
@@ -685,7 +688,7 @@ fn link(
         let entry = temp.path().join("entry.c");
         std::fs::write(&entry, source)?;
         let output = temp.path().join("program");
-        let mut cc = Command::new(&options.cc);
+        let mut cc = Command::new(&tools.0.path);
         cc.args([
             "-std=c11",
             "-fstack-clash-protection",
@@ -813,6 +816,7 @@ b0:
     include!("test_rules_native.rs");
     include!("test_run_native.rs");
     include!("clone_native.rs");
+    include!("record_native.rs");
 
     fn run_clean(binary: &Path, exit: i32) {
         let result = Command::new(binary).output().unwrap();
@@ -873,6 +877,11 @@ b0:
         assert_eq!(restored.compiled, 0);
         assert!(!restored.linked);
         run_clean(&restored.executable, 7);
+        std::fs::remove_file(&restored.executable).unwrap();
+        let missing = cached.build(&entry, &options).unwrap();
+        assert_eq!(missing.compiled, 0);
+        assert!(!missing.linked);
+        run_clean(&missing.executable, 7);
 
         let source = "pub fn main() -> Result[(), Exit] { Error(Exit(status: answer())) }\nfn answer() -> u8 { add(3u8, 4u8) }\nfn add(a: u8, b: u8) -> u8 { a + b }\nfn unused[T](take x: T) -> T { x }\ntype Broken = Missing\n";
         let product = driver

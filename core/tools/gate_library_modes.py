@@ -65,6 +65,55 @@ def main():
                     self.assertEqual(again.returncode, 2)
                     self.assertEqual((app / 'main.hirsel').read_bytes(), original)
 
+        def test_env_and_registered_products_work_away_from_the_checkout(self):
+            runtime = Path(os.environ['HIRSEL_CORE_RT_ARCHIVE']).resolve()
+            with tempfile.TemporaryDirectory(prefix='hirsel-installed-') as temporary:
+                work = Path(temporary)
+                app, root = work / 'app', work / 'toolchain'
+                root.mkdir()
+                installed = root / 'hirsel'
+                shutil.copy2(compiler, installed)
+                def invoke(executable, *arguments, expected=0):
+                    result = subprocess.run([str(executable), *arguments], cwd=work, capture_output=True, text=True)
+                    self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                    return result
+                invoke(compiler, 'std-product', '--runtime', str(runtime), expected=2)
+                invoke(compiler, 'core-product', '--target', 'x86_64-unknown-linux-gnu', expected=2)
+                initial = json.loads(invoke(compiler, 'env', '--json').stdout)
+                self.assertIsNone(initial['installed_root'])
+                self.assertIsNone(initial['runtime'])
+                published = json.loads(invoke(compiler, 'std-product', '--install', str(root), '--runtime', str(runtime)).stdout)
+                environment = json.loads(invoke(installed, 'env', '--json').stdout)
+                self.assertEqual(Path(environment['installed_root']), root)
+                self.assertEqual(Path(environment['package_cache']), root / 'core-packages')
+                self.assertEqual(environment['products']['std']['image'], published['image'])
+                self.assertTrue(environment['products']['std']['registered'])
+                self.assertTrue(Path(environment['runtime']).is_file())
+                invoke(installed, 'core-product', '--store', str(work / 'other-products'))
+                invoke(installed, 'new', str(app))
+                product = json.loads(invoke(installed, 'check', str(app), '--json').stdout)
+                self.assertTrue(product['accepted'])
+                self.assertEqual(product['files'], 1)
+                self.assertEqual(product['diagnostics'], [])
+                for engine in ['cranelift', 'llvm']:
+                    built = json.loads(invoke(installed, 'build', str(app), '--backend', engine,
+                                              '--json', '-o', str(work / 'program')).stdout)
+                    self.assertIsNotNone(built['native'])
+                    run = invoke(work / 'program')
+                    self.assertEqual((run.stdout, run.stderr), ('', ''))
+                moved = work / 'moved-toolchain'
+                root.rename(moved)
+                installed = moved / 'hirsel'
+                environment = json.loads(invoke(installed, 'env', '--json').stdout)
+                self.assertEqual(Path(environment['installed_root']), moved)
+                self.assertTrue(Path(environment['runtime']).is_file())
+                self.assertTrue(environment['products']['std']['registered'])
+                self.assertTrue(json.loads(invoke(installed, 'check', str(app), '--json').stdout)['accepted'])
+                selection = moved / 'hirsel-core-toolchain.json'
+                previous = selection.read_bytes()
+                invoke(installed, 'std-product', '--install', str(moved), '--runtime', str(work / 'missing.a'), expected=2)
+                self.assertEqual(selection.read_bytes(), previous)
+
         def test_user_check_in_every_cli_library_mode(self):
             with tempfile.TemporaryDirectory(prefix='hirsel-library-modes-') as temporary:
                 work = Path(temporary)

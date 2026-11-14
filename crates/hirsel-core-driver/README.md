@@ -124,7 +124,12 @@ backend, optimization and runtime bytes. Reached installed-package objects live
 in the package store and are shared across application stores. They compile on
 first demand, including nongeneric bodies; no eager monolithic core object is
 built. Executables additionally key the entry
-thunk, headers and linker version. A warm build reads integrity-checked products
+thunk, headers, runtime bytes, and the resolved C-driver/link-editor paths,
+content digests and the C-driver version. Digests are cached by device/inode,
+length, mode, nanosecond mtime and ctime; replacement and in-place changes
+refresh them even when version output is unchanged. Incidental metadata changes
+do not invalidate a link whose tool content is unchanged. PATH selection is repeated
+on each link request; a missing selected editor is a named link refusal. A warm build reads integrity-checked products
 and compiles/links nothing; an implementation edit rebuilds its object and relinks.
 The real `hirsel_core_run` boundary maps PROG-3 outcomes after cleanup. Entry
 binding reads the emitted main's `Signature.dest` and derives its instantiated
@@ -293,3 +298,19 @@ creates a public `lib.hirsel` and an example `main.hirsel` that calls it. Both
 check, build, and run with the ordinary directory interface. Existing directories
 are refused without changing their contents. Native build/run still require an
 explicit runtime archive until installed-root selection is configured.
+
+`env --json` reports the executable, optional installation root, selected package
+cache and actual product roots, target and selected runtime. Explicit
+`--core-product`, `--runtime` and `--target` take precedence over installed defaults.
+With no registered runtime, env reports null and native commands require --runtime.
+
+`std-product --install ROOT --runtime ARCHIVE [--target TRIPLE]` publishes the
+ordinary new package image under ROOT/core-packages and registers it beside the
+future copied compiler in hirsel-core-toolchain.json. `core-product` has the same
+registration option. Runtime bytes are stored under a content-derived relative
+path; the small selection file commits last. A failed publication preserves the
+previous registration. --store and --image cannot combine with --install;
+product --runtime/--target require --install. The future distribution assembler
+uses this same producer. It does not switch the currently installed old CLI.
+A copied new compiler beside the registration uses these products/runtime from
+any working directory; moving the entire installation preserves relative paths.

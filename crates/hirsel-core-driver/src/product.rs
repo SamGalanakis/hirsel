@@ -46,6 +46,17 @@ impl PackageProduct {
     pub fn bundled_std_digest() -> ContentHash {
         ContentHash(bundled::STD_DIGEST)
     }
+    /// Selected directory for the compiled toolchain and bundled source identity.
+    pub fn cache_directory(root: &Path, std: bool) -> io::Result<PathBuf> {
+        cache_path(
+            root,
+            if std {
+                Self::bundled_std_digest()
+            } else {
+                Self::bundled_digest()
+            },
+        )
+    }
     pub fn default_cache() -> PathBuf {
         std::env::var_os("XDG_CACHE_HOME")
             .map(PathBuf::from)

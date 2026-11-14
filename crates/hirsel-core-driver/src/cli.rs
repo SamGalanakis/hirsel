@@ -30,6 +30,7 @@ pub enum OptionId {
     Image,
     Lib,
     Help,
+    Install,
 }
 struct OptionSpec {
     id: OptionId,
@@ -59,6 +60,7 @@ commands! {
     "core-product", "core-product [options]", "Produce or inspect the published core package.";
     "std-product", "std-product [options]", "Produce or inspect the published core and std packages.";
     "new", "new <package-dir> [--lib]", "Create a runnable application or library with an example main.";
+    "env", "env [--json] [options]", "Report the compiler and selected installation, products and runtime.";
 }
 macro_rules! option {
     ($id:ident, [$($name:literal),+], $value:expr, [$($command:literal),*], $description:literal) => {
@@ -66,6 +68,13 @@ macro_rules! option {
     }
 }
 static OPTIONS: &[OptionSpec] = &[
+    option!(
+        Install,
+        ["--install"],
+        Some("ROOT"),
+        ["core-product", "std-product"],
+        "Register new products and an optional runtime in an installation root."
+    ),
     option!(Help, ["--help", "-h"], None, [], "Show this help."),
     option!(
         Json,
@@ -78,7 +87,8 @@ static OPTIONS: &[OptionSpec] = &[
             "run",
             "test",
             "core-product",
-            "std-product"
+            "std-product",
+            "env"
         ],
         "Print structured JSON."
     ),
@@ -107,7 +117,7 @@ static OPTIONS: &[OptionSpec] = &[
         CoreProduct,
         ["--core-product"],
         Some("CACHE"),
-        ["check", "build", "run", "test"],
+        ["check", "build", "run", "test", "env"],
         "Select the published package cache; enables products for check."
     ),
     option!(
@@ -156,7 +166,7 @@ static OPTIONS: &[OptionSpec] = &[
         Runtime,
         ["--runtime"],
         Some("ARCHIVE"),
-        ["build", "run", "test"],
+        ["build", "run", "test", "env", "core-product", "std-product"],
         "Select the core runtime archive."
     ),
     option!(
@@ -177,7 +187,7 @@ static OPTIONS: &[OptionSpec] = &[
         Target,
         ["--target"],
         Some("TRIPLE"),
-        ["build", "run", "test"],
+        ["build", "run", "test", "env", "core-product", "std-product"],
         "Select the full native target triple."
     ),
     option!(
@@ -387,7 +397,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Action, Stri
                 .transpose()?;
             invocation.options.push((option.id, value));
         } else if invocation.positional.is_none()
-            && !matches!(name.as_str(), "core-product" | "std-product")
+            && !matches!(name.as_str(), "core-product" | "std-product" | "env")
         {
             invocation.positional = Some(argument);
         } else {

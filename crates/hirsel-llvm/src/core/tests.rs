@@ -2146,6 +2146,79 @@ fn joined_cause_views_use_core_layout() {
 }
 
 #[test]
+fn release_import_bound_keeps_small_bodies_and_uses_cached_large_entries() {
+    fn body(name: &str, instructions: usize, linkage: &str) -> String {
+        let mut text = format!("define {linkage}i64 @{name}(i64 %x) {{\n");
+        for i in 0..instructions - 1 {
+            let input = if i == 0 {
+                "%x".into()
+            } else {
+                format!("%v{}", i - 1)
+            };
+            writeln!(text, "%v{i} = add i64 {input}, 0").unwrap();
+        }
+        writeln!(text, "ret i64 %v{}\n}}", instructions - 2).unwrap();
+        text
+    }
+    let dir = std::env::temp_dir().join(format!("hirsel-core-import-bound-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let prefix = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
+    std::fs::write(dir.join("probe.c"), "#include <stdint.h>\nextern uint64_t entry(uint64_t);\nint main(void){uint64_t xs[]={0,1,UINT64_MAX};for(unsigned i=0;i<3;i++)if(entry(xs[i])!=xs[i])return 1;return 0;}\n").unwrap();
+    let entry = "declare i64 @import_bound(i64)\ndefine i64 @entry(i64 %x) {%r = call i64 @import_bound(i64 %x)\nret i64 %r}";
+    for instructions in [2047, 2049] {
+        for wrapper in [false, true] {
+            let imported = if wrapper {
+                let mut text = body("import_bound.infallible", instructions - 2, "internal ");
+                text.push_str("define i64 @import_bound(i64 %x) {%r = call i64 @import_bound.infallible(i64 %x)\nret i64 %r}\n");
+                text
+            } else {
+                body("import_bound", instructions, "")
+            };
+            let units = [
+                hirsel_llvm_lazy::Unit {
+                    ir: &imported,
+                    imported: true,
+                },
+                hirsel_llvm_lazy::Unit {
+                    ir: entry,
+                    imported: false,
+                },
+            ];
+            let bytes = hirsel_llvm_lazy::emit_program(&units, &["entry".into()]).unwrap();
+            std::fs::write(dir.join("unit.o"), bytes).unwrap();
+            let undefined = output(
+                Command::new(prefix.join("bin/llvm-nm"))
+                    .arg("--undefined-only")
+                    .arg(dir.join("unit.o")),
+            );
+            assert_eq!(
+                undefined.contains("import_bound"),
+                instructions == 2049,
+                "{instructions} instructions, wrapper={wrapper}: {undefined}"
+            );
+            // The cached library supplies the same public definition when the
+            // application keeps only its declaration, including wrapper bodies.
+            std::fs::write(
+                dir.join("library.o"),
+                hirsel_llvm_lazy::compile_ir(&imported, true).unwrap(),
+            )
+            .unwrap();
+            output(
+                Command::new(prefix.join("bin/clang"))
+                    .arg(format!("--ld-path={}", prefix.join("bin/ld.lld").display()))
+                    .arg(dir.join("probe.c"))
+                    .arg(dir.join("unit.o"))
+                    .arg(dir.join("library.o"))
+                    .arg("-o")
+                    .arg(dir.join("probe")),
+            );
+            output(&mut Command::new(dir.join("probe")));
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn release_imports_keep_transitive_bodies_in_either_unit_order() {
     let leaf = "define i64 @leaf(i64 %x) { %y = mul i64 %x, 3\n ret i64 %y }";
     let middle = "declare i64 @leaf(i64)\ndefine i64 @middle(i64 %x) { %a = call i64 @leaf(i64 %x)\n %y = add i64 %a, 1\n ret i64 %y }";

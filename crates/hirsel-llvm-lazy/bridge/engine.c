@@ -258,6 +258,50 @@ static void local_inputs(LLVMModuleRef module) {
     finish_worker_debug(debug);
 }
 
+// Raw homes and cleanup CFG mostly simplify away, so this deliberately gives
+// much more headroom than LLVM's 250 weighted O3 inline-cost threshold.
+static const size_t INLINE_IMPORT_INSTRUCTION_LIMIT = 2048;
+
+static size_t import_instructions(LLVMValueRef f) {
+    size_t count = 0;
+    for (LLVMBasicBlockRef b = LLVMGetFirstBasicBlock(f); b; b = LLVMGetNextBasicBlock(b))
+        for (LLVMValueRef i = LLVMGetFirstInstruction(b); i; i = LLVMGetNextInstruction(i)) ++count;
+    return count;
+}
+static void bound_imports(LLVMModuleRef module) {
+    for (LLVMValueRef f = LLVMGetFirstFunction(module); f;) {
+        LLVMValueRef next = LLVMGetNextFunction(f);
+        if (LLVMGetLinkage(f) != LLVMAvailableExternallyLinkage || !LLVMCountBasicBlocks(f)) {
+            f = next; continue;
+        }
+        size_t len;
+        const char *raw = LLVMGetValueName2(f, &len);
+        char *name = malloc(len + 12);
+        if (!name) abort();
+        memcpy(name, raw, len); strcpy(name + len, ".infallible");
+        LLVMValueRef implementation = LLVMGetNamedFunction(module, name);
+        size_t size = import_instructions(f);
+        if (implementation) size += import_instructions(implementation);
+        name[len] = 0;
+        if (size <= INLINE_IMPORT_INSTRUCTION_LIMIT) { free(name); f = next; continue; }
+        LLVMSetValueName2(f, "", 0);
+        LLVMValueRef declaration = LLVMAddFunction(module, name, LLVMGlobalGetValueType(f));
+        free(name);
+        LLVMSetFunctionCallConv(declaration, LLVMGetFunctionCallConv(f));
+        for (unsigned i = 0, count = LLVMCountParams(f); i <= count + 1; ++i) {
+            unsigned index = i == count + 1 ? LLVMAttributeFunctionIndex : i;
+            unsigned n = LLVMGetAttributeCountAtIndex(f, index);
+            LLVMAttributeRef *attrs = malloc(n * sizeof(*attrs));
+            LLVMGetAttributesAtIndex(f, index, attrs);
+            for (unsigned j = 0; j < n; ++j) LLVMAddAttributeAtIndex(declaration, index, attrs[j]);
+            free(attrs);
+        }
+        LLVMReplaceAllUsesWith(f, declaration);
+        LLVMDeleteFunction(f);
+        f = next;
+    }
+}
+
 __attribute__((visibility("default")))
 void hirsel_llvm_program_v1(const HirselLlvmUnit *units, size_t count,
                           const char *const *exports, size_t export_count,
@@ -330,6 +374,7 @@ void hirsel_llvm_program_v1(const HirselLlvmUnit *units, size_t count,
         }
     }
     if (speed && export_count) {
+        bound_imports(module);
         register_results(module, context);
         local_inputs(module);
     }

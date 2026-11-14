@@ -118,11 +118,12 @@ impl CheckProduct {
                 )?;
                 (identity, native, true)
             };
+            let object_identity = store.put_bare(&product.object.bytes)?;
             objects.push(ObjectProduct {
                 private_variants: 0,
                 instance: instance.clone(),
-                identity,
-                path: crate::native_object::path(store, identity),
+                identity: object_identity,
+                path: crate::native_object::path(store, object_identity),
                 bytes: product.object.bytes,
                 debug: product.object.debug,
                 compiled,

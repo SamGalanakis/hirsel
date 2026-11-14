@@ -899,6 +899,13 @@ pub(super) struct CaptureFrame {
     send: bool,
 }
 
+#[derive(Clone, Copy)]
+struct EnvironmentOrigin {
+    site: NodeId,
+    // An imported descriptor names an environment from an enclosing activation.
+    local: bool,
+}
+
 #[derive(Default)]
 pub(super) struct Descriptors {
     pub(super) captures: Vec<Capture>,
@@ -906,6 +913,7 @@ pub(super) struct Descriptors {
     pub(super) values: HashMap<ValueId, u32>,
     pub(super) slots: HashMap<u32, u32>,
     fields: Vec<PoolRange<(anchors::Component, u32)>>,
+    environments: Vec<EnvironmentOrigin>,
     parts: Vec<(anchors::Component, u32)>,
     imports: HashMap<u32, u32>,
 }
@@ -917,10 +925,11 @@ impl Descriptors {
         }
         let id = self.ranges.len() as u32;
         self.ranges.push(self.ranges[old as usize]);
+        self.environments.push(self.environments[old as usize]);
         self.fields.push(PoolRange::EMPTY);
         Some(id)
     }
-    fn add(&mut self, captures: &[Capture]) -> Option<u32> {
+    fn add(&mut self, captures: &[Capture], site: NodeId) -> Option<u32> {
         if captures.is_empty() {
             return None;
         }
@@ -929,6 +938,8 @@ impl Descriptors {
             &mut self.captures,
             captures.iter().copied(),
         ));
+        self.environments
+            .push(EnvironmentOrigin { site, local: true });
         self.fields.push(PoolRange::EMPTY);
         Some(id)
     }
@@ -969,6 +980,10 @@ impl Descriptors {
             (Some(a), Some(b)) if a != b => (a, b),
             _ => return a.or(b),
         };
+        let a_env = self.environments[a as usize];
+        let b_env = self.environments[b as usize];
+        self.environments
+            .push(if a_env.local { a_env } else { b_env });
         let start = self.captures.len();
         let ra = self.ranges[a as usize];
         for i in ra.start..ra.start + ra.len {
@@ -1015,6 +1030,7 @@ impl Descriptors {
         let child = child?;
         let id = self.ranges.len() as u32;
         self.ranges.push(self.ranges[child as usize]);
+        self.environments.push(self.environments[child as usize]);
         self.fields
             .push(PoolRange::push(&mut self.parts, [(component, child)]));
         Some(id)
@@ -1072,6 +1088,10 @@ impl Descriptors {
         );
         let id = self.ranges.len() as u32;
         self.ranges.push(captures);
+        self.environments.push(EnvironmentOrigin {
+            local: false,
+            ..outer.environments[source as usize]
+        });
         self.fields.push(PoolRange::EMPTY);
         self.imports.insert(source, id);
         let fields = outer.fields[source as usize];
@@ -1391,7 +1411,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let carrier = self.raw_frame(2, n)?;
         self.store_word(carrier, 0, code, n);
         self.store_word(carrier, 8, environment, n);
-        if let Some(id) = self.descriptors.add(captures) {
+        if let Some(id) = self.descriptors.add(captures, n) {
             self.descriptors.values.insert(carrier, id);
         }
         Some(carrier)
@@ -1487,6 +1507,43 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.mut_descriptor(at);
             }
         }
+    }
+    pub(super) fn returned_descriptor(
+        &mut self,
+        value: Option<ValueId>,
+        anchors: &[u32],
+        args: &[Option<ValueId>],
+    ) {
+        let Some(value) = value else { return };
+        let mut id = None;
+        for &i in anchors {
+            id = self
+                .descriptors
+                .union(id, self.descriptors.of(args[i as usize]));
+        }
+        // A declaration states which arguments, not which component permutation.
+        let id = self.descriptors.opaque(id);
+        if let Some(id) = id {
+            self.descriptors.values.insert(value, id);
+        }
+    }
+    pub(super) fn return_descriptor(&mut self, value: Option<ValueId>) -> bool {
+        if !self.live() || self.descriptors.values.is_empty() {
+            return false;
+        }
+        if let Some(id) = self.descriptors.of(value) {
+            let environment = self.descriptors.environments[id as usize];
+            if environment.local {
+                self.refuse(
+                    "OWN-21",
+                    environment.site,
+                    "a scoped callback that captures a callee slot cannot be returned",
+                );
+                self.dead = true;
+                return true;
+            }
+        }
+        false
     }
     pub(super) fn descriptor_scope(&mut self, scope: usize, value: Option<ValueId>, n: NodeId) {
         let Some(id) = self.descriptors.of(value) else {

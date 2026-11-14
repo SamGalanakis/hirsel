@@ -1,0 +1,18 @@
+// OWN-21: captureless values and received descriptors can be returned.
+// expect: run checked() = 27
+fn zero(xs:List[u64])->(scoped fn()->u64) in xs {fn()->u64{0}}
+fn forward(f:scoped fn()->u64)->(scoped fn()->u64) in f {view f}
+fn part(p:(scoped fn()->u64,u64))->(scoped fn()->u64) in p {view p.0}
+fn through(f:scoped fn()->u64)->(scoped fn()->u64) in f {forward(f)}
+fn checked()->u64 {
+ let xs:List[u64]=list.new()
+ let z=zero(xs)
+ let n:u64=9
+ let cb=scoped fn()->u64 {n}
+ let a=forward(cb)
+ let p:(scoped fn()->u64,u64)=(view cb,1u64)
+ let b=part(p)
+ let c=through(cb)
+ z()+a()+b()+c()
+}
+pub fn main()->Result[(),Exit] {if checked()==27u64 {Ok(())}else{Error(Exit(status:1))}}

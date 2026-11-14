@@ -1,0 +1,10 @@
+// OWN-9: the returned argument descriptor still activates its captured slot.
+// expect: refuse OWN-9 at 9:10
+fn forward(f:scoped fn()->u64)->(scoped fn()->u64) in f {view f}
+fn apply(f:scoped fn()->u64,mut n:u64)->u64 {f()}
+fn checked()->u64 {
+ let mut n:u64=9
+ let cb=scoped fn()->u64{n}
+ let c=forward(cb)
+ apply(c,mut n)
+}

@@ -1,0 +1,6 @@
+// OWN-21: aliases keep the fresh environment's creation site.
+// expect: refuse OWN-21 at 4:9
+fn make(a:u64)->(scoped fn()->u64) in a {
+ let cb=scoped fn()->u64 {a}
+ view cb
+}

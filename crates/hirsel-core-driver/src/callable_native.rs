@@ -203,3 +203,25 @@ fn dynamic_plain_callable_fits_cranelift(){dynamic_plain_callable_fits(Backend::
 #[test]
 #[ignore="explicit native integration target"]
 fn dynamic_plain_callable_fits_llvm(){dynamic_plain_callable_fits(Backend::Llvm);}
+
+fn scoped_callable_returns(backend: Backend) {
+    ordered_case(backend, include_str!("../../../core/front/cases/body/callable-returned-descriptors.hirsel"));
+    ordered_case(backend, include_str!("../../../core/front/cases/body/callable-outer-environment.hirsel"));
+    let root=Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for source in [include_str!("../../../core/front/cases/body/callable-returned-environment-refused.hirsel"), include_str!("../../../core/front/cases/body/callable-returned-call-refused.hirsel")] {
+        let dir=tempfile::tempdir().unwrap();
+        let source=format!("{source}\npub fn main()->Result[(),Exit] {{let _ = make(1u64); Ok(())}}\n");
+        let mut request=source_request(&source,dir.path());
+        request.inputs.packages[1]=PackageManifest::directory(&root.join("core/core"),package("core"),true).unwrap();
+        let product=Driver::default().check(request,&mut Meter::new(false)).unwrap();
+        assert_eq!(product.diagnostics.iter().map(|d|d.rule.as_str()).collect::<Vec<_>>(),["OWN-21"]);
+        assert!(product.incomplete.is_empty());
+        assert!(matches!(product.build(&DefPath::from_full("app@1/main/main").unwrap(),&native_options(backend,dir.path())),Err(NativeStop::Check(message)) if message.contains("OWN-21")));
+    }
+}
+#[test]
+#[ignore="explicit native integration target"]
+fn scoped_callable_returns_cranelift(){scoped_callable_returns(Backend::Cranelift);}
+#[test]
+#[ignore="explicit native integration target"]
+fn scoped_callable_returns_llvm(){scoped_callable_returns(Backend::Llvm);}

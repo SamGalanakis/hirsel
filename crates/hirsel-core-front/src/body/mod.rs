@@ -1537,15 +1537,11 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         if !self.live() {
             return;
         }
-        self.return_place_anchors();
-        if !self.live() {
+        if self.return_descriptor(v) {
             return;
         }
-        if self.descriptors.of(v).is_some() {
-            self.gap(
-                n,
-                "returning scoped capture environments is not represented",
-            );
+        self.return_place_anchors();
+        if !self.live() {
             return;
         }
         let v = match (self.dest, v) {

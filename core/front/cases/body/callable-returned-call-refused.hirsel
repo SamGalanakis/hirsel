@@ -1,0 +1,6 @@
+// OWN-21: returning through a declared anchor must retain the fresh descriptor.
+// expect: refuse OWN-21 at 5:11
+fn forward(f:scoped fn()->u64)->(scoped fn()->u64) in f {view f}
+fn make(a:u64)->(scoped fn()->u64) in a {
+  forward(scoped fn()->u64 {a})
+}

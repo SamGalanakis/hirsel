@@ -372,6 +372,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.emit_call(f, tys, vals, result, n)
         };
         if self.type_kind(result) == Kind::Scoped {
+            if self.contains_callback(result) {
+                self.returned_descriptor(v, &g.anchors, vals);
+            }
             let mut fact = 0;
             for &i in &g.anchors {
                 let argument = self.anchor_argument(args[i as usize]);

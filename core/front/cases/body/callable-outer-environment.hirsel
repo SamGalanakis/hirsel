@@ -1,0 +1,9 @@
+// FORM87: an in-body outer store uses the owning function activation.
+// expect: run checked() = 9
+fn checked()->u64 {
+ let n:u64=9
+ let mut cb:scoped fn()->u64=fn()->u64{0}
+ {cb=scoped fn()->u64{n}}
+ cb()
+}
+pub fn main()->Result[(),Exit] {if checked()==9u64 {Ok(())}else{Error(Exit(status:1))}}

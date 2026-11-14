@@ -3125,3 +3125,21 @@ fn terminal_prefix_is_derived_after_generic_substitution() {
         "both generic boxes and both growth branches were instantiated"
     );
 }
+
+#[test]
+fn scoped_callable_return_contracts() {
+    let mut failures = vec![];
+    for name in [
+        "callable-returned-environment-refused",
+        "callable-returned-call-refused",
+        "callable-returned-alias-refused",
+        "callable-returned-descriptor-refused",
+        "callable-returned-descriptors",
+        "callable-outer-environment",
+    ] {
+        failures.extend(run_case(
+            &root().join("cases/body").join(format!("{name}.hirsel")),
+        ));
+    }
+    assert!(failures.is_empty(), "{failures:?}");
+}

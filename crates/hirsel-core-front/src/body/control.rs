@@ -9,8 +9,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.tail_ty = UNIT;
         let r = self.statements(n, want);
         let value = std::mem::replace(&mut self.tail_ty, UNIT);
-        self.result_place_anchors(scope, n, r.0);
-        self.descriptor_scope(scope, r.1, n);
+        let captured_return = self.fd.body == Some(n) && self.return_descriptor(r.1);
+        if !captured_return {
+            self.result_place_anchors(scope, n, r.0);
+            self.descriptor_scope(scope, r.1, n);
+        }
         self.close_scope(scope, freezes, n, value);
         // The tail's temporaries end at the block's exit, before its locals, unless
         // the block's value is one (LANG-6).

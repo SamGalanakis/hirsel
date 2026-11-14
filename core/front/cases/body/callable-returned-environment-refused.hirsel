@@ -1,0 +1,5 @@
+// OWN-21: even a formal is a callee slot; a fresh environment cannot escape.
+// expect: refuse OWN-21 at 4:3
+fn make(a:u64)->(scoped fn()->u64) in a {
+  scoped fn()->u64 {a}
+}

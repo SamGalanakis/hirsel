@@ -68,7 +68,7 @@ finalizer_entries!(
 
 #[test]
 fn finalizers_rc_resource_refuses_spec_rule_and_site() {
-    // OWN-4's Rc payload example, with a resource in place of its own Note.
+    // LANG-12: a written `Rc[R]` whose argument lacks `shareable` is refused at it.
     let source = "resource type R { d: u64 }\ntype Holder { r: Rc[R] }\n";
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dir = tempfile::tempdir().unwrap();
@@ -77,7 +77,7 @@ fn finalizers_rc_resource_refuses_spec_rule_and_site() {
     request.inputs.packages[1] = PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
     let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
     let diagnostic = product.machine_diagnostics().unwrap().into_iter().find(|d| d.primary.module == "app@1/main").unwrap();
-    assert_eq!(diagnostic.rule, "OWN-4");
+    assert_eq!(diagnostic.rule, "LANG-12");
     let start = (source.find("Rc[R]").unwrap() + 3) as u32;
     assert_eq!((diagnostic.primary.span.start, diagnostic.primary.span.end), (start, start + 1));
 }

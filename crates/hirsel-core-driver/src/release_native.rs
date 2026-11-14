@@ -122,7 +122,7 @@ impl CheckProduct {
             objects.push(ObjectProduct {
                 private_variants: 0,
                 instance: instance.clone(),
-                identity: object_identity,
+                identity,
                 path: crate::native_object::path(store, object_identity),
                 bytes: product.object.bytes,
                 debug: product.object.debug,

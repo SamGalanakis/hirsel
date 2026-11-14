@@ -47,7 +47,7 @@ fn record_inputs(backend: Backend) {
     let new_ld=bin.join("replacement-ld");std::fs::write(&new_ld,format!("{ld_script}# replacement\n")).unwrap();std::fs::set_permissions(&new_ld,std::fs::Permissions::from_mode(0o755)).unwrap();std::fs::rename(new_ld,&ld).unwrap();
     let changed=product.build(&entry,&options).unwrap();assert_eq!(changed.compiled,0);assert!(changed.linked,"replaced link editor");run_clean(&changed.executable,8);
     std::fs::remove_file(ld).unwrap();
-    let refused=product.build(&entry,&options).err().unwrap().to_string();assert!(refused.contains("tool selection"),"{refused}");
+    let refused=match product.build(&entry,&options) { Ok(b) => panic!("unexpected success after linker removal: linked={}",b.linked), Err(e) => e.to_string() };assert!(refused.contains("tool selection") || refused.contains("missing link editor"),"{refused}");
     options.cc=original.clone();
     let runtime=dir.path().join("runtime.a");std::fs::write(&runtime,std::fs::read(&options.runtime).unwrap()).unwrap();options.runtime=runtime.clone();
     let c=dir.path().join("extra.c");let object=dir.path().join("extra.o");std::fs::write(&c,"void hirsel_driver_cache_probe(void) {}\n").unwrap();

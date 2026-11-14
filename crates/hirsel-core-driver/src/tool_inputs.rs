@@ -16,7 +16,24 @@ pub(crate) struct Tool {
 }
 
 pub(crate) const INPUT_MARKER: &str = "__HIRSEL_LINK_INPUTS__";
-const LINK_RECIPE_SCHEMA: u32 = 2;
+const LINK_RECIPE_SCHEMA: u32 = 3;
+#[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub(crate) struct RecipeFile {
+    pub(crate) path: PathBuf,
+    pub(crate) content: ContentHash,
+    pub(crate) stat: RecipeStat,
+}
+#[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub(crate) struct RecipeStat {
+    pub(crate) dev: u64,
+    pub(crate) ino: u64,
+    pub(crate) len: u64,
+    pub(crate) mode: u32,
+    pub(crate) mtime: i64,
+    pub(crate) mtime_nsec: i64,
+    pub(crate) ctime: i64,
+    pub(crate) ctime_nsec: i64,
+}
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
 pub(crate) struct LinkRecipe {
     #[serde(default)]
@@ -24,9 +41,9 @@ pub(crate) struct LinkRecipe {
     pub(crate) target: String,
     pub(crate) linker: PathBuf,
     pub(crate) args: Vec<String>,
-    pub(crate) files: Vec<(PathBuf, ContentHash)>,
+    pub(crate) files: Vec<RecipeFile>,
     #[serde(default)]
-    pub(crate) source_files: Vec<(PathBuf, ContentHash)>,
+    pub(crate) source_files: Vec<RecipeFile>,
     pub(crate) identity: ContentHash,
 }
 fn selected(program: &Path, search: &OsStr) -> io::Result<PathBuf> {
@@ -126,17 +143,26 @@ pub(crate) fn link_tools(cc: &Path) -> io::Result<(Tool, Tool)> {
 /// Capture the link editor command once beside the selected toolchain. The
 /// capture is the only C-driver use in the direct-link path; subsequent builds
 /// invoke the recorded lld argv themselves.
-pub(crate) fn link_recipe(cc: &Path, target: &str) -> io::Result<LinkRecipe> {
-    capture_link_recipe(cc, target, false)
+pub(crate) fn link_recipe(cc: &Path, target: &str, runtime: &Path) -> io::Result<LinkRecipe> {
+    capture_link_recipe(cc, target, runtime, false)
 }
 
 /// Recapture is reserved for a recipe whose previously recorded toolchain
 /// input disappeared.  Ordinary builds never invoke the C driver.
-pub(crate) fn recapture_link_recipe(cc: &Path, target: &str) -> io::Result<LinkRecipe> {
-    capture_link_recipe(cc, target, true)
+pub(crate) fn recapture_link_recipe(
+    cc: &Path,
+    target: &str,
+    runtime: &Path,
+) -> io::Result<LinkRecipe> {
+    capture_link_recipe(cc, target, runtime, true)
 }
 
-fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkRecipe> {
+fn capture_link_recipe(
+    cc: &Path,
+    target: &str,
+    runtime: &Path,
+    force: bool,
+) -> io::Result<LinkRecipe> {
     let mut driver = cc.to_owned();
     let mut root = driver
         .parent()
@@ -253,10 +279,8 @@ fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkR
             )));
         }
         compiled_objects.insert(transient_output, stable.clone());
-        source_files.push((
-            PathBuf::from(source),
-            ContentHash::of_bytes(&std::fs::read(source)?),
-        ));
+        let source = PathBuf::from(source);
+        source_files.push(recipe_file(&source)?);
     }
     let linker = if argv.first().is_some_and(|arg| arg.contains("collect2")) {
         argv.remove(0);
@@ -324,7 +348,10 @@ fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkR
             .unwrap_or(args.len());
         args.insert(at, INPUT_MARKER.into());
     }
-    let files = recipe_files(&linker, &args)?;
+    let mut files = recipe_files(&linker, &args)?;
+    if !files.iter().any(|file| file.path == runtime) {
+        files.push(recipe_file(runtime)?);
+    }
     let identity = recipe_identity(target, &driver_key, &linker, &args, &files, &source_files)?;
     let recipe = LinkRecipe {
         schema: LINK_RECIPE_SCHEMA,
@@ -342,7 +369,7 @@ fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkR
     Ok(recipe)
 }
 
-fn recipe_files(linker: &Path, args: &[String]) -> io::Result<Vec<(PathBuf, ContentHash)>> {
+fn recipe_files(linker: &Path, args: &[String]) -> io::Result<Vec<RecipeFile>> {
     let mut paths = vec![linker.to_owned()];
     let mut skip_dynamic_linker = false;
     for arg in args {
@@ -375,13 +402,7 @@ fn recipe_files(linker: &Path, args: &[String]) -> io::Result<Vec<(PathBuf, Cont
                 .join(", ")
         )));
     }
-    paths
-        .into_iter()
-        .map(|path| {
-            let bytes = std::fs::read(&path)?;
-            Ok((path, ContentHash::of_bytes(&bytes)))
-        })
-        .collect()
+    paths.into_iter().map(|path| recipe_file(&path)).collect()
 }
 
 fn recipe_identity(
@@ -389,8 +410,8 @@ fn recipe_identity(
     driver_key: &str,
     linker: &Path,
     args: &[String],
-    files: &[(PathBuf, ContentHash)],
-    source_files: &[(PathBuf, ContentHash)],
+    files: &[RecipeFile],
+    source_files: &[RecipeFile],
 ) -> io::Result<ContentHash> {
     Ok(ContentHash::of_parts(
         "hirsel.direct-link-recipe.v1",
@@ -408,15 +429,46 @@ fn recipe_identity(
 }
 
 fn recipe_inputs_match(recipe: &LinkRecipe) -> io::Result<bool> {
-    // The recipe is a published toolchain product.  Do not hash libc/CRT
-    // inputs on every build; a missing path is the only runtime invalidation.
-    if recipe.files.iter().any(|(path, _)| !path.is_file()) {
-        return Ok(false);
+    // The recipe is a published toolchain product. Compare metadata first;
+    // only an input whose stat signature moved is re-hashed.
+    for input in recipe.files.iter().chain(&recipe.source_files) {
+        let Ok(stat) = recipe_stat(&input.path) else {
+            return Ok(false);
+        };
+        if stat == input.stat {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&input.path) else {
+            return Ok(false);
+        };
+        if ContentHash::of_bytes(&bytes) != input.content {
+            return Ok(false);
+        }
     }
-    Ok(!recipe.source_files.iter().any(|(path, identity)| {
-        !path.is_file()
-            || ContentHash::of_bytes(&std::fs::read(path).unwrap_or_default()) != *identity
-    }))
+    Ok(true)
+}
+
+fn recipe_file(path: &Path) -> io::Result<RecipeFile> {
+    let bytes = std::fs::read(path)?;
+    Ok(RecipeFile {
+        path: path.to_owned(),
+        content: ContentHash::of_bytes(&bytes),
+        stat: recipe_stat(path)?,
+    })
+}
+
+fn recipe_stat(path: &Path) -> io::Result<RecipeStat> {
+    let metadata = path.metadata()?;
+    Ok(RecipeStat {
+        dev: metadata.dev(),
+        ino: metadata.ino(),
+        len: metadata.len(),
+        mode: metadata.mode(),
+        mtime: metadata.mtime(),
+        mtime_nsec: metadata.mtime_nsec(),
+        ctime: metadata.ctime(),
+        ctime_nsec: metadata.ctime_nsec(),
+    })
 }
 
 fn driver_file_key(path: &Path) -> io::Result<String> {
@@ -471,9 +523,9 @@ pub(crate) fn missing_recipe_inputs(recipe: &LinkRecipe) -> Vec<PathBuf> {
             missing.push(PathBuf::from(arg));
         }
     }
-    for (path, _) in &recipe.files {
-        if !path.is_file() {
-            missing.push(path.clone());
+    for input in recipe.files.iter().chain(&recipe.source_files) {
+        if !input.path.is_file() {
+            missing.push(input.path.clone());
         }
     }
     missing.sort();
@@ -536,5 +588,32 @@ mod tests {
         let replaced = identity(Path::new("cc"), &search, &store).unwrap();
         assert_eq!(earlier.path, replaced.path);
         assert_ne!(earlier.content, replaced.content);
+    }
+
+    #[test]
+    fn recipe_input_stat_change_rehashes_only_when_content_changes() {
+        let work = tempfile::tempdir().unwrap();
+        let input = work.path().join("crt.o");
+        std::fs::write(&input, b"same bytes").unwrap();
+        let recipe = LinkRecipe {
+            schema: LINK_RECIPE_SCHEMA,
+            target: "x86_64-unknown-linux-gnu".into(),
+            linker: input.clone(),
+            args: vec![INPUT_MARKER.into()],
+            files: vec![recipe_file(&input).unwrap()],
+            source_files: vec![],
+            identity: ContentHash::of_bytes(b"recipe"),
+        };
+        assert!(recipe_inputs_match(&recipe).unwrap());
+        std::fs::write(&input, b"same bytes").unwrap();
+        assert!(
+            recipe_inputs_match(&recipe).unwrap(),
+            "touch-only replacement must reuse"
+        );
+        std::fs::write(&input, b"changed bytes").unwrap();
+        assert!(
+            !recipe_inputs_match(&recipe).unwrap(),
+            "changed content must miss"
+        );
     }
 }

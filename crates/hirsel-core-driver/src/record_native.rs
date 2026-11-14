@@ -42,6 +42,8 @@ fn record_inputs(backend: Backend) {
     let new_cc=dir.path().join("replacement-cc");std::fs::write(&new_cc,format!("{script}# replacement\n")).unwrap();std::fs::set_permissions(&new_cc,std::fs::Permissions::from_mode(0o755)).unwrap();std::fs::rename(new_cc,&cc).unwrap();
     assert_eq!(version,command(Command::new(&cc).arg("--version")).unwrap());
     let changed=product.build(&entry,&options).unwrap();assert_eq!(changed.compiled,0);assert!(changed.linked,"replaced C driver, same version");
+    let same_cc=dir.path().join("same-cc");std::fs::write(&same_cc,std::fs::read(&cc).unwrap()).unwrap();std::fs::set_permissions(&same_cc,std::fs::Permissions::from_mode(0o755)).unwrap();std::fs::rename(same_cc,&cc).unwrap();
+    let unchanged=product.build(&entry,&options).unwrap();assert_eq!(unchanged.compiled,0);assert!(!unchanged.linked,"identical C driver bytes must reuse");
     let new_ld=bin.join("replacement-ld");std::fs::write(&new_ld,format!("{ld_script}# replacement\n")).unwrap();std::fs::set_permissions(&new_ld,std::fs::Permissions::from_mode(0o755)).unwrap();std::fs::rename(new_ld,&ld).unwrap();
     let changed=product.build(&entry,&options).unwrap();assert_eq!(changed.compiled,0);assert!(changed.linked,"replaced link editor");run_clean(&changed.executable,8);
     std::fs::remove_file(ld).unwrap();

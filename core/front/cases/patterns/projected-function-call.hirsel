@@ -1,5 +1,6 @@
 // Selecting a member of a function value must not silently call the function.
 // The names lane has not implemented this kind of value projection.
-// expect: refuse LANG-7 at 5:16
+// expect: refuse LANG-7 at 6:16
+// expect: cause LANG-7 at 6:16 from 5:4
 fn source() -> u8 { 7 }
 fn f() -> u8 { source.member() }

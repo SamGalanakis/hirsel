@@ -1,7 +1,10 @@
 // PROG-4: ordinary functions cannot name a test, call it, or take its value.
-// expect: refuse PROG-4 at 8:13
-// expect: refuse PROG-4 at 11:5
-// expect: refuse PROG-4 at 14:38
+// expect: refuse PROG-4 at 11:13
+// expect: refuse PROG-4 at 14:5
+// expect: refuse PROG-4 at 17:38
+// expect: cause PROG-4 at 11:13 from 9:4
+// expect: cause PROG-4 at 14:5 from 9:4
+// expect: cause PROG-4 at 17:38 from 9:4
 @test
 fn only_test() -> Result[(), ()] { Ok(()) }
 fn name_it() {

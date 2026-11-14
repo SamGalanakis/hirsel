@@ -338,6 +338,9 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
     }
     let all_emitted = refusals.is_empty() && gaps.is_empty();
     let mut want_refusals = vec![];
+    // PROG-7: every refusal with causal sites, or with compared facts, states them.
+    let mut want_causes = vec![];
+    let mut want_compared = vec![];
     let mut want_gaps = vec![];
     let mut failures = vec![];
     let mut expects = 0;
@@ -353,6 +356,16 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
         match words.as_slice() {
             ["accept"] => {}
             ["refuse", rule, "at", at] => want_refusals.push(format!("{rule} at {at}")),
+            ["cause", rule, "at", at, "from", from @ ..] => {
+                want_causes.push(format!("{rule} at {at} from {}", from.join(" ")))
+            }
+            ["compared", ..] => match e.split(" | ").collect::<Vec<_>>().as_slice() {
+                [head, declared, required] => want_compared.push(format!(
+                    "{} | {declared} | {required}",
+                    head.trim_start_matches("compared ")
+                )),
+                _ => failures.push(format!("unreadable expectation `{e}`")),
+            },
             ["gap", what @ ..] => want_gaps.push(what.join(" ")),
             ["kind", ty, k] | ["holds", ty, k] | ["size", ty, k] => {
                 let Some(d) = index
@@ -462,6 +475,57 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
             })
             .collect();
         failures.push(format!("refusals: want {want_refusals:?}, got {detail:?}"));
+    }
+    let mut got_causes: Vec<String> = refusals
+        .iter()
+        .filter(|r| !r.causal.is_empty())
+        .map(|r| {
+            // A cause in the case's own file is its line:column; one in a library module
+            // is that module, whose lines the case does not own.
+            let from: Vec<String> = r
+                .causal
+                .iter()
+                .map(|c| {
+                    if c.module == main {
+                        line_col(&modules, c)
+                    } else {
+                        let m = index.module_path(c.module);
+                        format!("{}/{}", m.package.name, m.modules.join("/"))
+                    }
+                })
+                .collect();
+            format!(
+                "{} at {} from {}",
+                r.rule,
+                line_col(&modules, &r.primary),
+                from.join(" ")
+            )
+        })
+        .collect();
+    got_causes.sort();
+    want_causes.sort();
+    if got_causes != want_causes {
+        failures.push(format!("causes: want {want_causes:?}, got {got_causes:?}"));
+    }
+    let mut got_compared: Vec<String> = refusals
+        .iter()
+        .filter(|r| r.declared.is_some() || r.required.is_some())
+        .map(|r| {
+            format!(
+                "{} at {} | {} | {}",
+                r.rule,
+                line_col(&modules, &r.primary),
+                r.declared.as_deref().unwrap_or("-"),
+                r.required.as_deref().unwrap_or("-")
+            )
+        })
+        .collect();
+    got_compared.sort();
+    want_compared.sort();
+    if got_compared != want_compared {
+        failures.push(format!(
+            "compared: want {want_compared:?}, got {got_compared:?}"
+        ));
     }
     let mut got_gaps: Vec<String> = gaps.iter().map(|g| g.what.to_string()).collect();
     // A gap is a kind of unbuilt construct: each kind is listed once per case.

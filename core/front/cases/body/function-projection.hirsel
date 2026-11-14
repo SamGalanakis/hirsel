@@ -1,4 +1,5 @@
 // LANG-7: functions cannot head dotted paths.
 // Ignoring the suffix silently emitted a recursive call instead of refusing it.
-// expect: refuse LANG-7 at 4:22
+// expect: refuse LANG-7 at 5:22
+// expect: cause LANG-7 at 5:22 from 5:4
 fn recurse() -> u8 { recurse.missing() }

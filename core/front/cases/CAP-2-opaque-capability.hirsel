@@ -1,5 +1,6 @@
 // CAP-2: a capability is an opaque standard-library type, made only by its own module, so
 // no program forges one (refused by PROG-2's opacity at the constructor).
-// expect: refuse PROG-2 at 5:21
-// expect: refuse PROG-2 at 5:21
+// expect: refuse PROG-2 at 6:21
+// expect: refuse PROG-2 at 6:21
+// expect: cause PROG-2 at 6:21 from core/core
 fn forge() -> Dir { Dir() }

@@ -7,7 +7,7 @@
 // expect: run first(0) = fail Unwrap@45:5
 // expect: run finalize(0) = fail Division@51:13
 // expect: run both(0) = fail Overflow@63:18,Division@51:13
-// expect: run sites(1) = 0 evaluator-only:cranelift,llvm
+// expect: run sites(1) = 0 evaluator-only:llvm
 // SITES.md: a cause's site is the start of its raising op: a checked op, the `fail`, the
 // same site through a propagating call or any generic instance, the call into core for
 // an op inside core, the finalizer's op in cleanup; a different statement, another Site.

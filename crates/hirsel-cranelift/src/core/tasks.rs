@@ -66,8 +66,12 @@ impl Function<'_, '_, '_> {
         }
         let mut outputs = [Value::from_u32(0); 4];
         let site = match op {
-            RtOp::Host(_) | RtOp::CheckCancel | RtOp::Join { .. } | RtOp::ChannelNew { .. }
-            | RtOp::Send { .. } | RtOp::Receive { .. } => self.site()?,
+            RtOp::Host(_)
+            | RtOp::CheckCancel
+            | RtOp::Join { .. }
+            | RtOp::ChannelNew { .. }
+            | RtOp::Send { .. }
+            | RtOp::Receive { .. } => self.site()?,
             _ => self.b.ins().iconst(types::I64, 0),
         };
         let n = match op {

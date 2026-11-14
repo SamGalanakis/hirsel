@@ -28,12 +28,19 @@ pub(super) struct Function<'a, 'b, 'c> {
     pub caller_site: Value,
     pub anchor: Option<Anchor>,
     pub srcloc: ir::SourceLoc,
-    pub site_symbols: &'c std::cell::RefCell<std::collections::HashMap<ItemId, cranelift_module::DataId>>,
+    pub site_symbols:
+        &'c std::cell::RefCell<std::collections::HashMap<ItemId, cranelift_module::DataId>>,
     pub debug: bool,
     pub allocators: &'c [fast::Allocator],
     pub signature: &'c abi::Signature,
     pub result_storage: Option<Value>,
-    pub raise_blocks: Vec<(u8, Option<BlockId>, Option<Anchor>, ir::SourceLoc, ir::Block)>,
+    pub raise_blocks: Vec<(
+        u8,
+        Option<BlockId>,
+        Option<Anchor>,
+        ir::SourceLoc,
+        ir::Block,
+    )>,
     pub propagation: Option<ir::Block>,
     pub cause_slot: Option<ir::StackSlot>,
     pub calls: calls::Calls<'c>,
@@ -243,7 +250,10 @@ pub(super) fn emit(
         };
         for (offset, inst) in block.insts.get(&body.insts).unwrap().iter().enumerate() {
             let index = block.insts.start as usize + offset;
-            f.at_anchor(body.inst_anchors.get(index).copied().flatten(), index as u32 + 1);
+            f.at_anchor(
+                body.inst_anchors.get(index).copied().flatten(),
+                index as u32 + 1,
+            );
             if !matches!((fill, inst), (Some(fill), Inst::Store { address, .. }) if fill.store == *address)
             {
                 f.instruction(inst)?;

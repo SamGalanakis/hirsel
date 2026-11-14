@@ -82,7 +82,12 @@ impl Function<'_, '_, '_> {
             super::memory_layout::CAUSE_KIND as i32,
         );
         let site = self.site()?;
-        self.b.ins().store(MemFlagsData::trusted(), site, addr, super::memory_layout::CAUSE_SITE as i32);
+        self.b.ins().store(
+            MemFlagsData::trusted(),
+            site,
+            addr,
+            super::memory_layout::CAUSE_SITE as i32,
+        );
         self.calls
             .raise(self.object, &mut self.b, self.context, addr)
     }
@@ -120,7 +125,8 @@ impl Function<'_, '_, '_> {
         } else {
             let block = self.b.create_block();
             self.b.set_cold_block(block);
-            self.raise_blocks.push((kind, target, self.anchor, self.srcloc, block));
+            self.raise_blocks
+                .push((kind, target, self.anchor, self.srcloc, block));
             block
         };
         let next = self.b.create_block();

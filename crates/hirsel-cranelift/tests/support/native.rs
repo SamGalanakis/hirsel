@@ -66,8 +66,34 @@ fn declare_functions(source: &mut String, module: &c::Module) {
             };
             write!(source, ", {c}").unwrap();
         }
-        source.push_str(");\n");
+        source.push_str(",uint64_t);\n");
     }
+    for (i, item) in module.items.iter().enumerate() {
+        writeln!(
+            source,
+            "const uint64_t {}=UINT64_C({});",
+            c::source::site_symbol(item),
+            ((i as u64) + 1) << 32
+        )
+        .unwrap();
+    }
+    source.push_str("static const uint64_t test_site_items[][4]={");
+    if module.items.is_empty() {
+        source.push_str("{0,0,0,0}");
+    }
+    for item in &module.items {
+        source.push('{');
+        for chunk in item.fingerprint().0.chunks_exact(8) {
+            write!(
+                source,
+                "UINT64_C({}),",
+                u64::from_le_bytes(chunk.try_into().unwrap())
+            )
+            .unwrap();
+        }
+        source.push_str("},");
+    }
+    source.push_str("};\nstatic void emit_test_site(uint64_t site) { uint64_t present=site!=0, start=(uint32_t)site, empty[4]={0}; fwrite(&present,8,1,stdout); fwrite(present?test_site_items[(site>>32)-1]:empty,8,4,stdout); fwrite(&start,8,1,stdout); }\n");
 }
 
 fn execute(module: &c::Module, runs: &[(FuncId, Vec<u64>)], optimize: bool) {
@@ -222,7 +248,7 @@ fn execute_cases(module: &c::Module, optimize: bool, cases: &[NativeCase<'_>]) {
             for i in 0..signature.params.len() {
                 write!(source, ",args->a{i}").unwrap();
             }
-            source.push_str("); return 0; }\n");
+            source.push_str(",0); return 0; }\n");
         }
     }
     let mut process_calls = String::new();
@@ -272,7 +298,7 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
             Outcome::Failed(causes) => {
                 expected.push(1);
                 expected.push(causes.len() as u64);
-                for cause in causes {
+                for (cause_index, cause) in causes.iter().enumerate() {
                     expected.push(match cause.as_str() {
                         "Overflow" => 0,
                         "Bounds" => 1,
@@ -283,6 +309,20 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
                         "Capacity" => 6,
                         _ => panic!("unknown cause {cause}"),
                     });
+                    let site = report.sites.get(cause_index).copied().flatten();
+                    expected.push(u64::from(site.is_some()));
+                    if let Some(anchor) = site {
+                        for chunk in module.items[anchor.item.index()]
+                            .fingerprint()
+                            .0
+                            .chunks_exact(8)
+                        {
+                            expected.push(u64::from_le_bytes(chunk.try_into().unwrap()));
+                        }
+                        expected.push(u64::from(anchor.start));
+                    } else {
+                        expected.extend([0; 5]);
+                    }
                 }
             }
         }
@@ -384,7 +424,7 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
             for j in 0..args.len() {
                 write!(source, ", a{j}").unwrap();
             }
-            source.push_str(");\n");
+            source.push_str(",0);\n");
         }
         if !s.results.is_empty() {
             source.push_str("uint64_t status = value.status;\n");
@@ -404,7 +444,7 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
             )
             .unwrap();
         }
-        source.push_str("fwrite(&status,8,1,stdout); HirselCoreCauseCell *causes = 0; if (status) { causes = hirsel_core_causes_take(ctx); uint64_t count = 0; for(const HirselCoreCauseCell *c = causes; c; c = hirsel_core_cause_next(c)) count++; fwrite(&count,8,1,stdout); for(const HirselCoreCauseCell *c = causes; c; c = hirsel_core_cause_next(c)) { uint64_t kind = hirsel_core_cause_kind(hirsel_core_cause_value(c)); fwrite(&kind,8,1,stdout); } } else {\n");
+        source.push_str("fwrite(&status,8,1,stdout); HirselCoreCauseCell *causes = 0; if (status) { causes = hirsel_core_causes_take(ctx); uint64_t count = 0; for(const HirselCoreCauseCell *c = causes; c; c = hirsel_core_cause_next(c)) count++; fwrite(&count,8,1,stdout); for(const HirselCoreCauseCell *c = causes; c; c = hirsel_core_cause_next(c)) { uint64_t kind = hirsel_core_cause_kind(hirsel_core_cause_value(c)); fwrite(&kind,8,1,stdout); emit_test_site(hirsel_core_cause_value(c)->site); } } else {\n");
         writeln!(
             source,
             "uint64_t count = {}; fwrite(&count,8,1,stdout);",
@@ -462,7 +502,8 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
     // this executable. The count words include either results or causes, then
     // retained charge, the drop trace, and admission attempts.
     fn take_report<'a>(words: &mut &'a [u64]) -> Option<&'a [u64]> {
-        let payload = usize::try_from(*words.get(1)?).ok()?;
+        let count = usize::try_from(*words.get(1)?).ok()?;
+        let payload = count.checked_mul(if *words.first()? == 0 { 1 } else { 7 })?;
         let trace_at = payload.checked_add(3)?;
         let trace = usize::try_from(*words.get(trace_at)?).ok()?;
         let end = trace_at.checked_add(trace)?.checked_add(2)?;

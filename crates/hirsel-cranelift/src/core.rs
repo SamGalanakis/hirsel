@@ -291,7 +291,7 @@ fn emit(
         allocators: &allocators,
         trace_drops,
         observe_charge,
-        debug: false,
+        debug: true,
         site_symbols: Default::default(),
         runtimes: Default::default(),
     };
@@ -314,6 +314,7 @@ fn emit(
         observer
             .define(&mut object, functions[index], context)
             .map_err(error)?;
+
     }
     glues.emit(&mut object, &tables, observer, &mut scratch)?;
     task_entries.emit(&mut object, &tables, observer, &mut scratch)?;

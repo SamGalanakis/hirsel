@@ -186,9 +186,15 @@ impl Glues {
                 );
             }
             if descriptors.contains(&i) {
-                callbacks[i] = Some(object.declare_function(
-                    &format!("hirsel.core.drop.callback.{i}"), Linkage::Local,
-                    &abi::Signature::c(object, &[P, P], &[B]).clif).map_err(error)?);
+                callbacks[i] = Some(
+                    object
+                        .declare_function(
+                            &format!("hirsel.core.drop.callback.{i}"),
+                            Linkage::Local,
+                            &abi::Signature::c(object, &[P, P], &[B]).clif,
+                        )
+                        .map_err(error)?,
+                );
             }
             if roots.contains(&i) {
                 resumes[i] = Some(
@@ -321,8 +327,14 @@ impl Glues {
         }
         Ok(())
     }
-    fn emit_callback(&self, object: &mut ObjectModule, callback: cranelift_module::FuncId,
-        target: cranelift_module::FuncId, observer: &impl profile::Observer, scratch: &mut Compilation) -> Result<()> {
+    fn emit_callback(
+        &self,
+        object: &mut ObjectModule,
+        callback: cranelift_module::FuncId,
+        target: cranelift_module::FuncId,
+        observer: &impl profile::Observer,
+        scratch: &mut Compilation,
+    ) -> Result<()> {
         let context = &mut scratch.codegen;
         object.clear_context(context);
         context.func.signature = abi::Signature::c(object, &[P, P], &[B]).clif;
@@ -390,15 +402,23 @@ impl Glues {
         let build = observer.enter("build_glue");
         let context = &mut scratch.codegen;
         object.clear_context(context);
-        context.func.signature =
-            abi::Signature::c(object, if resume { &[P, P, P, P] } else { &[P, P, U] }, &[B]).clif;
+        context.func.signature = abi::Signature::c(
+            object,
+            if resume { &[P, P, P, P] } else { &[P, P, U] },
+            &[B],
+        )
+        .clif;
         let mut b = FunctionBuilder::new(&mut context.func, &mut scratch.frontend);
         let entry = b.create_block();
         b.append_block_params_for_function_params(entry);
         b.switch_to_block(entry);
         let args = b.block_params(entry).to_vec();
         let failed = b.ins().iconst(types::I8, 0);
-        let caller_site = if resume { b.ins().iconst(types::I64, 0) } else { args[2] };
+        let caller_site = if resume {
+            b.ins().iconst(types::I64, 0)
+        } else {
+            args[2]
+        };
         let mut g = Glue {
             b,
             object,

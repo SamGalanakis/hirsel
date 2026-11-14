@@ -5,7 +5,7 @@ include!("support/native.rs");
 
 #[test]
 fn native_allocator_refusals_are_reported_run_stops() {
-    host_memory::check(
+    host_memory::check_with_site(
         |module| {
             emit_object_with_layouts(
                 module,
@@ -683,8 +683,8 @@ extern HirselCoreContext *hirsel_core_test_context_new(uint64_t);
 extern void hirsel_core_test_inject(HirselCoreContext *,size_t,bool);
 extern uint64_t hirsel_core_test_available(const HirselCoreContext *);
 extern size_t hirsel_core_test_attempts(const HirselCoreContext *);
-extern uint8_t {ordinary}(void *, void *);
-extern uint8_t {counted}(void *, void *);
+extern uint8_t {ordinary}(void *, void *,uint64_t);
+extern uint8_t {counted}(void *, void *,uint64_t);
 static uint64_t trace[8]; static size_t traces;
 void hirsel_core_test_drop_trace(uint64_t id) {{ if(traces==8) abort(); trace[traces++]=id; }}
 static void *allocate(HirselCoreContext *ctx, size_t size, uint64_t charge, uint8_t kind) {{
@@ -705,7 +705,7 @@ int main(void) {{
   uint64_t carrier[]={{(uintptr_t)entries,3,4}};
   hirsel_core_test_inject(ctx,1,true);
   size_t attempts=hirsel_core_test_attempts(ctx);
-  if({ordinary}(ctx,carrier)!=1 || traces!=4 || trace[0]!=1 || trace[1]!=2 || trace[2]!=21 || trace[3]!=22) return 1;
+  if({ordinary}(ctx,carrier,0)!=1 || traces!=4 || trace[0]!=1 || trace[1]!=2 || trace[2]!=21 || trace[3]!=22) return 1;
   if(hirsel_core_test_attempts(ctx)!=attempts) return 2;
   HirselCoreCauseCell *causes=hirsel_core_causes_take(ctx);
   size_t n=0; for(const HirselCoreCauseCell *c=causes;c;c=hirsel_core_cause_next(c)) {{ if(hirsel_core_cause_kind(hirsel_core_cause_value(c))!=3) return 3; n++; }}
@@ -722,7 +722,7 @@ int main(void) {{
   uint64_t *root=allocate(ctx,32,32,HIRSEL_CORE_NATIVE_STATIC); hirsel_core_counted_init(root,false);
   root[1]=(uintptr_t)entries; root[2]=3; root[3]=4;
   hirsel_core_test_inject(ctx,1,true); attempts=hirsel_core_test_attempts(ctx);
-  if({counted}(ctx,root)!=0 || hirsel_core_test_available(ctx)!=10000 || hirsel_core_test_attempts(ctx)!=attempts) return 6;
+  if({counted}(ctx,root,0)!=0 || hirsel_core_test_available(ctx)!=10000 || hirsel_core_test_attempts(ctx)!=attempts) return 6;
   hirsel_core_context_free(ctx);
   return 0;
 }}
@@ -781,14 +781,14 @@ uint8_t hirsel_core_check_cancel(void *ctx, uint64_t site) {{
   if(ctx!=(void*)16 || site!=0) abort(); calls++; return cancelled;
 }}
 struct R {{ uint64_t value; uint8_t status; }};
-extern struct R {cleanup}(void *);
-extern struct R {propagate}(void *);
+extern struct R {cleanup}(void *,uint64_t);
+extern struct R {propagate}(void *,uint64_t);
 int main(void) {{
-  struct R r={cleanup}((void*)16); if(r.status || r.value!=3) return 1;
-  r={propagate}((void*)16); if(r.status || r.value!=9) return 2;
+  struct R r={cleanup}((void*)16,0); if(r.status || r.value!=3) return 1;
+  r={propagate}((void*)16,0); if(r.status || r.value!=9) return 2;
   cancelled=1;
-  r={cleanup}((void*)16); if(r.status || r.value!=7) return 3;
-  r={propagate}((void*)16); if(r.status!=1 || calls!=4) return 4;
+  r={cleanup}((void*)16,0); if(r.status || r.value!=7) return 3;
+  r={propagate}((void*)16,0); if(r.status!=1 || calls!=4) return 4;
   return 0;
 }}
 "#,
@@ -909,7 +909,7 @@ fn inlined_arc_updates_keep_the_provider_event_order() {
 #include <stdlib.h>
 #include "hirsel_core_rt.h"
 struct R {{ uint8_t value,status; }};
-extern struct R {function}(void*);
+extern struct R {function}(void*,uint64_t);
 extern HirselCoreContext *hirsel_core_test_context_new(uint64_t);
 extern uint64_t hirsel_core_test_available(const HirselCoreContext*);
 extern uint8_t hirsel_core_test_run_events(HirselCoreContext*,uint8_t (*)(HirselCoreContext*,void*,void*),void*,void*,size_t,size_t,HirselCoreSchedulerProvider);
@@ -917,7 +917,7 @@ static uint64_t kinds[6],values[6],count;
 static void event(void *state,HirselCoreEvent e) {{
  if(e.kind>=10 && e.kind<=13) {{ if(count==6 || e.task!=0 || e.object!=0) abort(); kinds[count]=e.kind;values[count++]=e.value; }}
 }}
-static uint8_t body(HirselCoreContext *ctx,void *out,void *in) {{ *(struct R*)out={function}(ctx);return 0; }}
+static uint8_t body(HirselCoreContext *ctx,void *out,void *in) {{ *(struct R*)out={function}(ctx,0);return 0; }}
 int main(void) {{
  HirselCoreContext *ctx=hirsel_core_test_context_new(1000);
  HirselCoreSchedulerProvider provider={{0,event,0}};struct R out;
@@ -947,7 +947,7 @@ fn inlined_count_increment_overflow_is_the_runtime_stop() {
         .unwrap();
         fs::write(scratch.0.join("input.o"), object.bytes).unwrap();
         let source = format!(
-            "#include <stdint.h>\nextern uint8_t {}(void*,void*);\nint main(void) {{ uint64_t node[2]={{UINT64_MAX,7}}; {}(0,node);return 0; }}\n",
+            "#include <stdint.h>\nextern uint8_t {}(void*,void*,uint64_t);\nint main(void) {{ uint64_t node[2]={{UINT64_MAX,7}}; {}(0,node,0);return 0; }}\n",
             symbol(&module.instances[0]),
             symbol(&module.instances[0])
         );

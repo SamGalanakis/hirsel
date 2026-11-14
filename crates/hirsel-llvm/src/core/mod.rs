@@ -136,12 +136,6 @@ pub(crate) fn emit_native_scalar_module_in_context(
             continue;
         };
         let sig = &module.signatures[function.signature.index()];
-        if sig.dest.is_some() {
-            return Err(Error::Unsupported(format!(
-                "native scalar seam function {} requires infallible scalar functions",
-                symbol(module, FuncId(index as u32))
-            )));
-        }
         if body.insts.iter().any(|inst| {
             matches!(
                 inst,

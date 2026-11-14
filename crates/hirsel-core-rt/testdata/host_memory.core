@@ -58,7 +58,7 @@ fn f7 = n7 g0 {
   addr a0 = v0 : t1
 b0(v0: ptr, v1: u64):
   v2: u64 = const 1
-  v3: u64 = const 1024
+  v3: u64 = const 16384
   address a0
   v4: ptr, v5: u64 = grow a0 v1 align 8 charge v1 capacity v1 moved v2 refund v3
   return

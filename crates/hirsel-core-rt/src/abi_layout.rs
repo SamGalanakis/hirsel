@@ -149,4 +149,4 @@ pub const OWN_ORDINARY_MAX_TAG: usize = OWN_ORDINARY_GRAPH_TAG;
 /// Reuse an owned sequence buffer from this many OLD native payload bytes.
 /// Capacity times native element stride, excluding the prefix. Both emitters
 /// use this one allocator policy; logical admission remains the full new charge.
-pub const GROW_REALLOC_MIN_PAYLOAD_BYTES: u64 = 1024;
+pub const GROW_REALLOC_MIN_PAYLOAD_BYTES: u64 = 2048;

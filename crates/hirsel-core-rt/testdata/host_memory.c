@@ -19,7 +19,7 @@ void *__wrap_realloc(void *base, size_t bytes) {
            carrier intact before the runtime reports its no-cleanup stop. */
         assert(realloc_payload[0] == 42);
         assert(realloc_carrier[0] == (uintptr_t)realloc_payload);
-        assert(realloc_carrier[1] == 1 && realloc_carrier[2] == 1024);
+        assert(realloc_carrier[1] == 1 && realloc_carrier[2] == 16384);
     }
     return result;
 }
@@ -47,11 +47,12 @@ int main(int argc, char **argv) {
         body = mode - 1;
     }
     uint64_t carrier[3];
+    /* This fixture stays above every measured crossover candidate. */
     if (mode >= 8) {
-        HirselCoreAllocation buffer = hirsel_core_alloc(ctx, NULL, 1024, 8, 1024, false, HIRSEL_CORE_NATIVE_PLAIN);
+        HirselCoreAllocation buffer = hirsel_core_alloc(ctx, NULL, 16384, 8, 16384, false, HIRSEL_CORE_NATIVE_PLAIN);
         assert(buffer.pointer);
         ((uint8_t *)buffer.pointer)[0] = 42;
-        carrier[0] = (uintptr_t)buffer.pointer; carrier[1] = 1; carrier[2] = 1024;
+        carrier[0] = (uintptr_t)buffer.pointer; carrier[1] = 1; carrier[2] = 16384;
         argument = carrier; body = 7;
         if (mode == 9) assert(hirsel_core_limit_enter(ctx, 0).pointer);
         realloc_payload = buffer.pointer; realloc_carrier = carrier;

@@ -31,7 +31,7 @@ frees it. Raw allocation/free/refund entries take owned blocks, not carriers.
 FORM's consuming `grow` keeps full-new-charge admission before the old refund.
 Only an owned Terminal or Dynamic sequence buffer can reach it. Both emitters
 read `GROW_REALLOC_MIN_PAYLOAD_BYTES` from `src/abi_layout.rs`: reuse begins at
-1024 OLD native payload bytes (capacity times native stride, prefix excluded).
+2048 OLD native payload bytes (capacity times native stride, prefix excluded).
 Below that threshold, or with a foreign/forwarded payer or alignment above 16,
 the original allocate/copy/install/free sequence remains. The large path is one
 shared `hirsel_core_grow` call returning pointer/room in registers. Local reuse
@@ -41,7 +41,8 @@ Capacity leaves everything intact; a native realloc refusal stops HostMemory
 without cleanup. No owner event or remote-refund delivery is introduced.
 The observed retained metric counts one replacement backing request, while
 logical peak still includes the full old and new reservations. Default archives
-contain no observation hooks.
+contain no observation hooks. The measured crossover for the shared helper is
+recorded in [GROWTH-CROSSOVER.md](GROWTH-CROSSOVER.md).
 
 Each task has a paged limit table and a direct current-record pointer. Admission,
 refund and scope operations use ordinary task-local loads and stores. Outstanding

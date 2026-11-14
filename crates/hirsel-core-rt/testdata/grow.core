@@ -1,25 +1,25 @@
-; run: f4(128) -> 42, 0 | used 0
-; run limit 3080: f4(128) -> 42, 0 | used 0
-; run limit 3079: f4(128) -> 42, 2047 | used 0
-; Native16 vs logical12: cap64 crosses the native threshold at charge768.
-; run: f5(64) -> 42, 0 | used 0
-; run limit 2304: f5(64) -> 42, 0 | used 0
-; run limit 2303: f5(64) -> 42, 1535 | used 0
-; Consuming growth. Native threshold is OLD payload 1024, prefix excluded.
+; run: f4(256) -> 42, 0 | used 0
+; run limit 6152: f4(256) -> 42, 0 | used 0
+; run limit 6151: f4(256) -> 42, 4095 | used 0
+; Native16 vs logical12: cap128 crosses the native threshold at charge1536.
+; run: f5(128) -> 42, 0 | used 0
+; run limit 4608: f5(128) -> 42, 0 | used 0
+; run limit 4607: f5(128) -> 42, 3071 | used 0
+; Consuming growth. Native threshold is OLD payload 2048, prefix excluded.
 ; f0 local, f1 foreign root under bound0, f2 forwarded survivor, f3 wide64.
 ; Refusal keeps the old element42 and the carrier; every return refunds it.
 ; run: f0(1) -> 42, 0 | used 0
-; run: f0(127) -> 42, 0 | used 0
-; run: f0(128) -> 42, 0 | used 0
+; run: f0(255) -> 42, 0 | used 0
+; run: f0(256) -> 42, 0 | used 0
 ; run: f0(1024) -> 42, 0 | used 0
-; run limit 3072: f0(128) -> 42, 0 | used 0
-; run limit 3071: f0(128) -> 42, 2047 | used 0
-; run: f1(128) -> 42, 0 | used 0
-; run limit 3071: f1(128) -> 42, 2047 | used 0
-; run: f2(128) -> 42, 0 | used 0
-; run limit 3071: f2(128) -> 42, 2047 | used 0
-; run: f3(128) -> 42, 0 | used 0
-; run limit 3071: f3(128) -> 42, 2047 | used 0
+; run limit 6144: f0(256) -> 42, 0 | used 0
+; run limit 6143: f0(256) -> 42, 4095 | used 0
+; run: f1(256) -> 42, 0 | used 0
+; run limit 6143: f1(256) -> 42, 4095 | used 0
+; run: f2(256) -> 42, 0 | used 0
+; run limit 6143: f2(256) -> 42, 4095 | used 0
+; run: f3(256) -> 42, 0 | used 0
+; run limit 6143: f3(256) -> 42, 4095 | used 0
 core v1
 type t0 = own "List" { items: seq u64 }
 type t1 = own "Leaf" { value: u64 }

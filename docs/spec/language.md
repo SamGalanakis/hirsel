@@ -258,7 +258,9 @@ call: they are found from that one call, as LANG-11 orders it, or the call is re
 A type argument that lacks a bound its
 parameter declares is refused when it is fixed, at what fixed it in LANG-11's order: at the
 call when the expected result fixed it, otherwise at the argument that did. An argument that
-later agrees with it is not a second site. A record or variant constructor is typed exactly as such a
+later agrees with it is not a second site. A type argument written in a type, as in
+`Rc[HostFile]` for `Rc[T: shareable]`, that lacks a bound its parameter declares is refused
+here, at that argument. A record or variant constructor is typed exactly as such a
 call, its payloads the arguments: its type arguments are fixed by its expected type and its
 own payloads, and one still open when the constructor has been typed is refused here, at the
 constructor. Nothing to its right, in its statement or later, fixes it, so the checker emits
@@ -272,6 +274,9 @@ fn same[T: key](a: T, b: T) -> bool { a == b }
 ```
 ```hirsel
 fn same[T](a: T, b: T) -> bool { a == b }                 // refused: LANG-12, T is not key
+```
+```hirsel
+fn keep(r: Option[Rc[HostFile]]) -> u64 { 0 }             // refused: LANG-12, at HostFile: not shareable
 ```
 ```hirsel
 fn empty() -> u64 { list.len(list.new()) }                // refused: LANG-12, at list.new(): T is open

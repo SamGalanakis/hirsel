@@ -1,3 +1,69 @@
+# M2 numeric and whole-suite results
+
+STATUS | M2 e96338cf41d7, canonical artifact identities match | 46/46 numeric H samples; 8/8 whole50 H compiler samples | Rust samples reused; M1 twin930 delta preserved separately
+
+One sample per Hirsel side, CPU16,2GiB, instructions:u, unchanged run.js. All23 numeric matched twins are approved. The headline geomean uses22 tasks excluding SHA256; T4/T8/T16 are independent configurations. No old Hirsel row enters the M2 result. The complete counts, RSS, roots, elapsed times and all four identity fields are in M2-RUNTIME.tsv and M2-BUILD.tsv.
+
+| Task | LLVM upstream / matched | Dev upstream / matched | Compiler profile/hash; runtime profile/hash |
+|---|---:|---:|---|
+| Base64::Decode | 18.723 / 1.072 | 3.607 / 1.708 | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| Base64::Encode | 37.872 / 1.662 | 8.273 / 1.999 | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| Binarytrees::Arena | 2.793 / 1.724 | 6.115 / 1.719 | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| Binarytrees::Obj | 1.130 / 1.130 | 1.465 / 1.482 | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| Brainfuck::Array | 0.961 / 0.919 | 0.585 / 0.613 | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| Brainfuck::Recursion | 1.136 / 1.138 | 0.722 / 0.777 | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| CLBG::Fannkuchredux | 1.333 / 1.054 | 0.204 / 0.199 | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| CLBG::Mandelbrot | 1.422 / 1.179 | 5.297 / 2.480 | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| CLBG::Nbody | 1.821 / 1.829 | 1.850 / 1.704 | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| CLBG::Spectralnorm | 2.338 / 2.338 | 1.325 / 1.393 | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| Etc::GameOfLife | 0.454 / 1.144 | 0.359 / 0.364 | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| Etc::NeuralNet | 1.646 / 1.646 | 1.998 / 1.998 | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| Etc::Sieve | 0.812 / 0.812 | 0.689 / 0.696 | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| Etc::TextRaytracer | 2.402 / 1.605 | 3.591 / 1.649 | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| Hash::CRC32 | 1.006 / 0.996 | 0.485 / 0.475 | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| Hash::SHA256 | 0.967 / 0.935 | 0.725 / 0.971 | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| Matmul::Single | 0.924 / 0.924 | 0.708 / 0.555 | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| Matmul::T16 | 1.697 / 0.946 | 0.885 / 0.513 | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| Matmul::T4 | 1.697 / 0.946 | 0.886 / 0.513 | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| Matmul::T8 | 1.697 / 0.946 | 0.886 / 0.513 | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| Sort::Merge | 1.723 / 1.448 | 1.611 / 0.987 | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| Sort::Quick | 0.982 / 0.970 | 0.314 / 0.317 | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| Sort::Self | 1.156 / 1.152 | 0.630 / 0.480 | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+
+| Engine / cohort | Tasks | Geomean upstream | Geomean matched | Compiler profile/hash; runtime profile/hash |
+|---|---:|---:|---:|---|
+| llvm 22-task comparison headline | 22 | 1.761267 | 1.204164 | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| llvm 23 tasks including SHA256 | 23 | 1.715949 | 1.191012 | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| cranelift 22-task comparison headline | 22 | 1.182886 | 0.840032 | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| cranelift 23 tasks including SHA256 | 23 | 1.157970 | 0.845349 | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+
+SHA256 was excluded while LLVM hoisted one invariant outlined call; M2 inlines it and performs all1440 hashes, so it is now an ordinary row in the23-task figure. The22-task headline remains for comparison with the prior LLVM1.854702/1.268045 and dev1.159039/0.823097 upstream/matched figures. Current assembly evidence is in m2-sha.s, outer counter40cb34–40cb45, state reset40cb53/40cb59, byte loop40cc50–40ccbb.
+
+Hoist-removing land: open for905; reading952f724a,647e5d9c and35d5d9dc did not uniquely attribute the changed inlining decision without separate compiler controls.
+
+| Whole50 compiler row | Hirsel instructions | Rust instructions, reused | H/R total | H/R per source line | Status | Compiler profile/hash; runtime profile/hash |
+|---|---:|---:|---:|---:|---|---|
+| llvm check-fresh | 266939180 | 1162440012 | 0.229637 | 0.164375 | ok | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| llvm build-fresh | 60977197237 | 21448145129 | 2.843006 | 2.035038 | ok | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| llvm build-reuse | 269902683 | 21450577652 | 0.012583 | 0.009007 | ok | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| llvm build-edit | 58797655037 | 21443311370 | 2.742004 | 1.962846 | ok | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| cranelift check-fresh | 266942393 | 1162808542 | 0.229567 | 0.164325 | ok | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| cranelift build-fresh | 2165458282 | 4295242593 | 0.504153 | 0.360875 | ok | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| cranelift build-reuse | 261904547 | 4295129320 | 0.060977 | 0.043648 | ok | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+| cranelift build-edit | 408960223 | 4297980920 | 0.095152 | 0.068114 | ok | release/2f1f30544428; shipping-release-fat-lto/95dd816277b9 |
+
+Physical loaded H source counts are7428 lines,7429 for the edit; Rust counts5317/5318. The earlier H count5846 predates formatting and library-source changes; the per-line figures compare languages within M2, not fixed-source compiler versions.
+
+The M2 commit includes the known71c7b740 check/lower regression of0.5–1.1K instructions per own line; these compiler rows retain it. Check rows are reported as uncensored results when complete. This whole50 Rust denominator is the unchanged upstream idiomatic tree; numeric/text matched-twin source edits do not enter it. Fresh/reuse/edit/cache behavior follows core/MEASURE.md; reused Rust builds have incremental compilation off.
+
+Full M2 identities: compiler_build_profile release; compiler_sha256 2f1f30544428e06b3d89bef6ea21cde83d03db780949f339030307055aad9557; runtime_archive_profile shipping-release-fat-lto; runtime_archive_sha256 95dd816277b936c865ccba458657918917889d6cd86a109f8343c1f03f3c8bb7. Every row uses source e96338cf41d71efd2076a9902068048a37b742c8.
+
+M1 is separate: lands14/15 reached EXIT0;930 corrections and slice checks are preserved WIP98ac04db while the frozen M2 retake runs. No M1 matched ratio is approved. Canonical BFS stays unchanged; the scratch branch and four-way extra-row table remain in M1-PARITY.md.
+
+## Superseded pre-M2 results
+
+The following rows were measured8416d12b / post-fill3200f088, landed f23e1a64; they are historical and do not enter M2.
+
 # Numeric LangArena measurements
 
 One sample per configuration, CPU 16, 2 GiB, process-tree instructions:u, unchanged upstream run.js. Both approved Rust denominators are reused byte-for-byte from their original reports; all 23 numeric twins were independently reviewed by921. Ratios are Hirsel/Rust instruction counts; lower is better. Elapsed time, peak RSS and absolute counts are in runtime-refresh.tsv; whole50 raw rows in build-refresh.tsv. Seven fill-profile configurations were retaken on BOTH engines after9cf5a4d9; only their post-fill rows are current. Initial samples remain in runtime-before-fill.tsv. Default logical root 64 MiB, Obj 128 MiB and Arena 256 MiB as previously admitted.

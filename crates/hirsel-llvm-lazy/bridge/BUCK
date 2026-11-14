@@ -1,6 +1,6 @@
 cxx_library(
     name = "engine",
-    srcs = ["engine.c"],
+    srcs = ["engine.c", "bitcode.cpp"],
     headers = {
         "aggregate_phi.h": "//crates/hirsel-llvm/bridge:aggregate_phi.h",
     },

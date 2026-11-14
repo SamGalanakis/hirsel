@@ -136,7 +136,7 @@ impl CheckProduct {
             let units = text
                 .iter()
                 .zip(&imported)
-                .map(|(ir, imported)| hirsel_llvm_lazy::Unit {
+                .map(|(ir, imported)| hirsel_llvm_lazy::Unit::Text {
                     ir,
                     imported: *imported,
                 })

@@ -142,6 +142,17 @@ fn emit_ir_target_with_facts(
     facts: bool,
     source: SourceEmission,
 ) -> Result<String> {
+    emit_ir_target_with_role_facts(module, target, observe_charge, facts, source, None)
+}
+
+fn emit_ir_target_with_role_facts(
+    module: &Module,
+    target: Target,
+    observe_charge: bool,
+    facts: bool,
+    source: SourceEmission,
+    provided_roles: Option<&hirsel_core_ir::roles::Facts>,
+) -> Result<String> {
     let mut text = String::new();
     for (i, data) in module.statics.iter().enumerate() {
         let bytes = data
@@ -166,7 +177,9 @@ fn emit_ir_target_with_facts(
     } else {
         module.functions.iter().map(|_| None).collect()
     };
-    let role_facts = facts.then(|| hirsel_core_ir::roles::Facts::new(module));
+    let local_roles =
+        (facts && provided_roles.is_none()).then(|| hirsel_core_ir::roles::Facts::new(module));
+    let role_facts = provided_roles.or(local_roles.as_ref()).filter(|_| facts);
     for (i, f) in module.functions.iter().enumerate() {
         let sig = &module.signatures[f.signature.index()];
         let has_status = failures.may_fail[i];
@@ -391,6 +404,28 @@ pub fn emit_ir_relocatable_for_target(
             relocatable_sites: true,
             debug_lines,
         },
+    )
+}
+
+/// Release emission with FORM facts derived over the publication/dependency
+/// graph. The diagnostic facts-off switch still suppresses emitted attributes.
+pub fn emit_ir_relocatable_with_role_facts_for_target(
+    module: &Module,
+    target: Target,
+    observe_charge: bool,
+    debug_lines: bool,
+    roles: &hirsel_core_ir::roles::Facts,
+) -> Result<String> {
+    emit_ir_target_with_role_facts(
+        module,
+        target,
+        observe_charge,
+        facts_enabled(),
+        SourceEmission {
+            relocatable_sites: true,
+            debug_lines,
+        },
+        Some(roles),
     )
 }
 

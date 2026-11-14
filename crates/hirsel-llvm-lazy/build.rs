@@ -48,6 +48,8 @@ fn main() {
             .unwrap()
             .success()
     );
+    let bitcode = source.with_file_name("bitcode.cpp");
+    println!("cargo:rerun-if-changed={}", bitcode.display());
     let component = out.join("libhirsel_llvm_engine.so");
     assert!(
         Command::new(prefix.join("bin/hirsel-clang"))
@@ -64,6 +66,7 @@ fn main() {
             .arg(&shared)
             .arg(&source)
             .arg(&copy_object)
+            .arg(&bitcode)
             .arg("-l:libstdc++.so.6")
             .arg("-L")
             .arg(prefix.join("lib"))

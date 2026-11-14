@@ -1249,6 +1249,7 @@ dependencies = [
  "hirsel-core-layout",
  "hirsel-guard",
  "libc",
+ "serde",
 ]
 
 [[package]]

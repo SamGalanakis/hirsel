@@ -9,6 +9,7 @@ rust-version.workspace = true
 hirsel-core-ir = { path = "../hirsel-core-ir" }
 hirsel-core-layout = { path = "../hirsel-core-layout" }
 libc = "0.2"
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 hirsel-guard = { path = "../hirsel-guard" }

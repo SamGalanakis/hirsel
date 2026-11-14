@@ -3,6 +3,7 @@
 #include <llvm-c/Core.h>
 #include <llvm-c/DebugInfo.h>
 #include <llvm-c/IRReader.h>
+#include <llvm-c/BitReader.h>
 #include <llvm-c/Linker.h>
 #include <llvm-c/Error.h>
 #include <llvm-c/Target.h>
@@ -16,7 +17,10 @@
 extern void hirsel_llvm_guard_copy_loops(void *module, void *machine);
 
 typedef struct { uint8_t *data; size_t len; uint8_t failed; } HirselLlvmOutput;
-typedef struct { const uint8_t *data; size_t len; uint8_t imported; } HirselLlvmUnit;
+typedef struct { const uint8_t *data; size_t len; uint8_t imported, bitcode; } HirselLlvmUnit;
+typedef struct { uint8_t *symbol; size_t len; uint64_t instructions; } HirselLlvmImport;
+typedef struct { HirselLlvmImport *data; size_t len; } HirselLlvmImports;
+extern LLVMMemoryBufferRef hirsel_llvm_raw_bitcode(LLVMModuleRef module);
 static pthread_once_t initialized = PTHREAD_ONCE_INIT;
 static void initialize(void) {
     LLVMInitializeX86TargetInfo(); LLVMInitializeX86Target();
@@ -259,17 +263,13 @@ static void local_inputs(LLVMModuleRef module) {
     finish_worker_debug(debug);
 }
 
-// Raw homes and cleanup CFG mostly simplify away, so this deliberately gives
-// much more headroom than LLVM's 250 weighted O3 inline-cost threshold.
-static const size_t INLINE_IMPORT_INSTRUCTION_LIMIT = 2048;
-
 static size_t import_instructions(LLVMValueRef f) {
     size_t count = 0;
     for (LLVMBasicBlockRef b = LLVMGetFirstBasicBlock(f); b; b = LLVMGetNextBasicBlock(b))
         for (LLVMValueRef i = LLVMGetFirstInstruction(b); i; i = LLVMGetNextInstruction(i)) ++count;
     return count;
 }
-static void bound_imports(LLVMModuleRef module) {
+static void bound_imports(LLVMModuleRef module, uint64_t limit) {
     for (LLVMValueRef f = LLVMGetFirstFunction(module); f;) {
         LLVMValueRef next = LLVMGetNextFunction(f);
         if (LLVMGetLinkage(f) != LLVMAvailableExternallyLinkage || !LLVMCountBasicBlocks(f)) {
@@ -284,7 +284,7 @@ static void bound_imports(LLVMModuleRef module) {
         size_t size = import_instructions(f);
         if (implementation) size += import_instructions(implementation);
         name[len] = 0;
-        if (size <= INLINE_IMPORT_INSTRUCTION_LIMIT) { free(name); f = next; continue; }
+        if (size <= limit) { free(name); f = next; continue; }
         LLVMSetValueName2(f, "", 0);
         LLVMValueRef declaration = LLVMAddFunction(module, name, LLVMGlobalGetValueType(f));
         free(name);
@@ -303,10 +303,10 @@ static void bound_imports(LLVMModuleRef module) {
     }
 }
 
-__attribute__((visibility("default")))
-void hirsel_llvm_program_v1(const HirselLlvmUnit *units, size_t count,
+static void emit_program(const HirselLlvmUnit *units, size_t count,
                           const char *const *exports, size_t export_count,
-                          uint8_t speed, const char *triple, const char *cpu, HirselLlvmOutput *out) {
+                          uint8_t speed, const char *triple, const char *cpu, HirselLlvmOutput *out,
+                          uint64_t import_limit, HirselLlvmOutput *raw, HirselLlvmImports *summary) {
     pthread_once(&initialized, initialize);
     unsigned major, minor, patch;
     LLVMGetVersion(&major, &minor, &patch);
@@ -333,9 +333,43 @@ void hirsel_llvm_program_v1(const HirselLlvmUnit *units, size_t count,
     for (size_t i = 0; i < count; ++i) {
         LLVMModuleRef unit = NULL;
         buffer = LLVMCreateMemoryBufferWithMemoryRangeCopy((const char*)units[i].data, units[i].len, "hirsel-core");
-        failed = LLVMParseIRInContext2(context, buffer, &unit, &message);
+        if (units[i].bitcode) {
+            failed = LLVMParseBitcodeInContext2(context, buffer, &unit);
+            if (failed) message = LLVMCreateMessage("LLVM bitcode decoding failed");
+        } else {
+            failed = LLVMParseIRInContext2(context, buffer, &unit, &message);
+        }
         LLVMDisposeMemoryBuffer(buffer);
         if (failed || !unit) { error(out, message); LLVMDisposeMessage(message); goto done; }
+        if (raw) {
+            // Snapshot exactly the parsed emitter module, before any target,
+            // linkage, adapter, probe or optimization mutation.
+            LLVMMemoryBufferRef bitcode = hirsel_llvm_raw_bitcode(unit);
+            copy(raw, LLVMGetBufferStart(bitcode), LLVMGetBufferSize(bitcode), 0);
+            LLVMDisposeMemoryBuffer(bitcode);
+            size_t count = 0;
+            for (LLVMValueRef f = LLVMGetFirstFunction(unit); f; f = LLVMGetNextFunction(f))
+                if (LLVMCountBasicBlocks(f) && LLVMGetLinkage(f) == LLVMExternalLinkage) ++count;
+            summary->data = calloc(count ? count : 1, sizeof(*summary->data));
+            if (!summary->data) abort();
+            summary->len = count;
+            size_t row = 0;
+            for (LLVMValueRef f = LLVMGetFirstFunction(unit); f; f = LLVMGetNextFunction(f)) {
+                if (!LLVMCountBasicBlocks(f) || LLVMGetLinkage(f) != LLVMExternalLinkage) continue;
+                size_t len;
+                const char *name = LLVMGetValueName2(f, &len);
+                char *implementation = malloc(len + 12);
+                if (!implementation) abort();
+                memcpy(implementation, name, len); strcpy(implementation + len, ".infallible");
+                LLVMValueRef body = LLVMGetNamedFunction(unit, implementation);
+                uint64_t size = import_instructions(f) + (body ? import_instructions(body) : 0);
+                free(implementation);
+                uint8_t *symbol = malloc(len ? len : 1);
+                if (!symbol) abort();
+                memcpy(symbol, name, len);
+                summary->data[row++] = (HirselLlvmImport){symbol, len, size};
+            }
+        }
         if (units[i].imported) {
             for (LLVMValueRef f = LLVMGetFirstFunction(unit); f; f = LLVMGetNextFunction(f)) {
                 if (LLVMCountBasicBlocks(f) && LLVMGetLinkage(f) == LLVMExternalLinkage) {
@@ -375,7 +409,7 @@ void hirsel_llvm_program_v1(const HirselLlvmUnit *units, size_t count,
         }
     }
     if (speed && export_count) {
-        bound_imports(module);
+        bound_imports(module, import_limit);
         register_results(module, context);
         local_inputs(module);
     }
@@ -434,7 +468,20 @@ done:
     LLVMContextDispose(context); LLVMDisposeTargetMachine(machine);
 }
 __attribute__((visibility("default")))
+void hirsel_llvm_program_v2(const HirselLlvmUnit *units, size_t count,
+                          const char *const *exports, size_t export_count,
+                          uint8_t speed, const char *triple, const char *cpu,
+                          uint64_t import_limit, HirselLlvmOutput *out) {
+    emit_program(units, count, exports, export_count, speed, triple, cpu, out, import_limit, NULL, NULL);
+}
+__attribute__((visibility("default")))
 void hirsel_llvm_compile_v1(const uint8_t *ir, size_t len, uint8_t speed, const char *triple, const char *cpu, HirselLlvmOutput *out) {
-    HirselLlvmUnit unit = { ir, len, 0 };
-    hirsel_llvm_program_v1(&unit, 1, NULL, 0, speed, triple, cpu, out);
+    HirselLlvmUnit unit = { ir, len, 0, 0 };
+    emit_program(&unit, 1, NULL, 0, speed, triple, cpu, out, 0, NULL, NULL);
+}
+__attribute__((visibility("default")))
+void hirsel_llvm_library_v1(const uint8_t *ir, size_t len, const char *triple, const char *cpu,
+                          HirselLlvmOutput *out, HirselLlvmOutput *raw, HirselLlvmImports *summary) {
+    HirselLlvmUnit unit = { ir, len, 0, 0 };
+    emit_program(&unit, 1, NULL, 0, 1, triple, cpu, out, 0, raw, summary);
 }

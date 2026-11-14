@@ -27,6 +27,7 @@ struct Input {
     data: *const u8,
     len: usize,
     imported: u8,
+    bitcode: u8,
 }
 type Program = unsafe extern "C" fn(
     *const Input,
@@ -36,11 +37,38 @@ type Program = unsafe extern "C" fn(
     u8,
     *const libc::c_char,
     *const libc::c_char,
+    u64,
     *mut Output,
 );
+#[repr(C)]
+struct ImportFunction {
+    symbol: *mut u8,
+    len: usize,
+    instructions: u64,
+}
+#[repr(C)]
+struct Imports {
+    data: *mut ImportFunction,
+    len: usize,
+}
+type Library = unsafe extern "C" fn(
+    *const u8,
+    usize,
+    *const libc::c_char,
+    *const libc::c_char,
+    *mut Output,
+    *mut Output,
+    *mut Imports,
+);
+pub(crate) struct RawLibrary {
+    pub object: Vec<u8>,
+    pub bitcode: Vec<u8>,
+    pub functions: Vec<crate::ImportFunction>,
+}
 struct Backend {
     compile: Compile,
     program: Program,
+    library: Library,
     free: Free,
     _image: File,
 }
@@ -100,8 +128,9 @@ fn load() -> Result<Backend, String> {
     // engine.c built in this same artifact. No foreign component is selected.
     let compile = unsafe { libc::dlsym(handle, c"hirsel_llvm_compile_v1".as_ptr()) };
     let free = unsafe { libc::dlsym(handle, c"hirsel_llvm_output_free_v1".as_ptr()) };
-    let program = unsafe { libc::dlsym(handle, c"hirsel_llvm_program_v1".as_ptr()) };
-    if compile.is_null() || free.is_null() || program.is_null() {
+    let program = unsafe { libc::dlsym(handle, c"hirsel_llvm_program_v2".as_ptr()) };
+    let library = unsafe { libc::dlsym(handle, c"hirsel_llvm_library_v1".as_ptr()) };
+    if compile.is_null() || free.is_null() || program.is_null() || library.is_null() {
         return Err(dl_error());
     }
     Ok(Backend {
@@ -111,6 +140,8 @@ fn load() -> Result<Backend, String> {
         // SAFETY: this export is built with the Input/Output C layouts above.
         program: unsafe { std::mem::transmute::<*mut libc::c_void, Program>(program) },
         free: unsafe { std::mem::transmute::<*mut libc::c_void, Free>(free) },
+        // SAFETY: the same embedded component produces all library fields.
+        library: unsafe { std::mem::transmute::<*mut libc::c_void, Library>(library) },
         _image: image,
     })
 }
@@ -162,10 +193,19 @@ pub(crate) fn program(
     let backend = backend()?;
     let inputs: Vec<_> = units
         .iter()
-        .map(|u| Input {
-            data: u.ir.as_ptr(),
-            len: u.ir.len(),
-            imported: u8::from(u.imported),
+        .filter_map(|u| match u {
+            crate::Unit::Text { ir, imported } => Some(Input {
+                data: ir.as_ptr(),
+                len: ir.len(),
+                imported: u8::from(*imported),
+                bitcode: 0,
+            }),
+            crate::Unit::Import { bitcode, summary } => summary.selected().then_some(Input {
+                data: bitcode.as_ptr(),
+                len: bitcode.len(),
+                imported: 1,
+                bitcode: 1,
+            }),
         })
         .collect();
     let names: Vec<_> = exports
@@ -189,6 +229,7 @@ pub(crate) fn program(
             1,
             triple.as_ptr(),
             cpu.as_ptr(),
+            crate::INLINE_IMPORT_INSTRUCTION_LIMIT,
             &mut output,
         );
         let bytes = std::slice::from_raw_parts(output.data, output.len).to_vec();
@@ -198,5 +239,66 @@ pub(crate) fn program(
         } else {
             Err(String::from_utf8_lossy(&bytes).into_owned())
         }
+    }
+}
+
+pub(crate) fn library(ir: &str, target: hirsel_core_layout::Target) -> Result<RawLibrary, String> {
+    let backend = backend()?;
+    let triple = CString::new(target.triple()).unwrap();
+    let cpu = CString::new(target.cpu()).unwrap();
+    let empty = || Output {
+        data: std::ptr::null_mut(),
+        len: 0,
+        failed: 0,
+    };
+    let mut object = empty();
+    let mut bitcode = empty();
+    let mut imports = Imports {
+        data: std::ptr::null_mut(),
+        len: 0,
+    };
+    // SAFETY: input and target strings live through the synchronous call. Each
+    // returned allocation belongs to this component and is freed with its API.
+    unsafe {
+        (backend.library)(
+            ir.as_ptr(),
+            ir.len(),
+            triple.as_ptr(),
+            cpu.as_ptr(),
+            &mut object,
+            &mut bitcode,
+            &mut imports,
+        );
+        let mut functions = Vec::with_capacity(imports.len);
+        if imports.len != 0 {
+            for row in std::slice::from_raw_parts(imports.data, imports.len) {
+                // The compiler emits ASCII link names, not external input.
+                let symbol = String::from_utf8_unchecked(
+                    std::slice::from_raw_parts(row.symbol, row.len).to_vec(),
+                );
+                functions.push(crate::ImportFunction {
+                    symbol,
+                    instructions: row.instructions,
+                });
+                (backend.free)(row.symbol);
+            }
+        }
+        (backend.free)(imports.data.cast());
+        let raw = if bitcode.len == 0 {
+            Vec::new()
+        } else {
+            std::slice::from_raw_parts(bitcode.data, bitcode.len).to_vec()
+        };
+        (backend.free)(bitcode.data);
+        let bytes = std::slice::from_raw_parts(object.data, object.len).to_vec();
+        (backend.free)(object.data);
+        if object.failed != 0 {
+            return Err(String::from_utf8_lossy(&bytes).into_owned());
+        }
+        Ok(RawLibrary {
+            object: bytes,
+            bitcode: raw,
+            functions,
+        })
     }
 }

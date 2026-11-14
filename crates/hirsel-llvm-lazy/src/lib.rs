@@ -23,13 +23,76 @@ pub fn compile_ir_for_target(
     loader::compile(ir, speed, target)
 }
 
-/// An already-published body, emitted with its unit-local type/static tables.
-pub struct Unit<'a> {
-    pub ir: &'a str,
-    /// Imported bodies are available for inlining. Direct view-input calls may
-    /// retain a private implementation for argument promotion; other surviving
-    /// calls and all address uses link the separately cached public entry.
-    pub imported: bool,
+/// Version of the atomic object, raw bitcode and semantic-summary product.
+pub const NATIVE_LIBRARY_SCHEMA: u32 = 1;
+/// Raw module transport; ordinary O3 and its existing bounded late round.
+pub const IMPORT_PIPELINE_ID: &str = "raw-module-v1-o3-late";
+/// Raw homes and cleanup CFG simplify away, so this is deliberately far above
+/// LLVM's 250 weighted O3 inline-cost threshold.
+pub const INLINE_IMPORT_INSTRUCTION_LIMIT: u64 = 2048;
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct ImportFunction {
+    pub symbol: String,
+    /// Instructions in the public body and its private infallible implementation.
+    pub instructions: u64,
+}
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct ImportSummary {
+    pub functions: Vec<ImportFunction>,
+    pub facts: Vec<hirsel_core_ir::roles::BodyFacts>,
+}
+impl ImportSummary {
+    /// Declaration-only units need neither their text nor their bitcode decoded.
+    pub fn selected(&self) -> bool {
+        self.functions
+            .iter()
+            .any(|f| f.instructions <= INLINE_IMPORT_INSTRUCTION_LIMIT)
+    }
+}
+#[derive(Clone, Debug)]
+pub struct NativeLibrary {
+    pub object: Vec<u8>,
+    pub bitcode: Vec<u8>,
+    pub summary: ImportSummary,
+}
+/// Publish the canonical object and the exact raw emitter module together.
+/// The caller derives facts over the complete publication/dependency graph.
+pub fn compile_library(
+    module: &hirsel_core_ir::Module,
+    facts: &hirsel_core_ir::roles::Facts,
+    target: hirsel_core_layout::Target,
+    observe_charge: bool,
+    debug_lines: bool,
+) -> Result<NativeLibrary, String> {
+    let ir = core::emit_ir_relocatable_with_role_facts_for_target(
+        module,
+        target,
+        observe_charge,
+        debug_lines,
+        facts,
+    )
+    .map_err(|e| e.to_string())?;
+    let output = loader::library(&ir, target)?;
+    Ok(NativeLibrary {
+        object: output.object,
+        bitcode: output.bitcode,
+        summary: ImportSummary {
+            functions: output.functions,
+            facts: facts.record(module),
+        },
+    })
+}
+/// Application-owned text or an inline candidate from a published library.
+pub enum Unit<'a> {
+    Text {
+        ir: &'a str,
+        imported: bool,
+    },
+    Import {
+        bitcode: &'a [u8],
+        summary: &'a ImportSummary,
+    },
 }
 
 /// One release codegen unit. LLVM resolves instance symbols, internalizes all

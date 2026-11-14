@@ -35,6 +35,10 @@
 ; then drops it (freeing the box) and frees the storage, and the node is freed.
 ; Without the finalizer the List would drop slot 0, which holds nothing:
 ; run: f5() -> | used 0
+; injection: none. This family checks slot marks; f4 and f5 use their allocations
+; without a refusal branch, so an injected refusal stops the evaluator (a null
+; pointer), as for any producer that skips the branch. Refusal paths are the failure
+; and cleanup families' (DECISIONS-883 #92).
 core v1
 item i0 = samples@0/kernel/ring
 type t0 = resource "Res" { id: u64 }

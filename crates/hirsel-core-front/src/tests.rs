@@ -99,7 +99,7 @@ fn line_col(modules: &[ModuleInput], site: &Site) -> String {
     let text = m.syntax.text();
     let before = &text[..start as usize];
     let line = before.matches('\n').count() + 1;
-    let col = before.len() - before.rfind('\n').map_or(0, |i| i + 1) + 1;
+    let col = before.rsplit('\n').next().unwrap().chars().count() + 1;
     format!("{line}:{col}")
 }
 
@@ -450,7 +450,39 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
                 }
             }
             ["run", call, "=", want @ ..] => {
-                failures.extend(run_expect(module, &functions, call, want));
+                // `evaluator-only:cranelift,llvm` (last): the named native walkers do
+                // not hold this run yet and require it to disagree; the evaluator does.
+                let want = match want {
+                    [w @ .., m] if m.starts_with("evaluator-only:") => {
+                        let engines = &m["evaluator-only:".len()..];
+                        if engines
+                            .split(',')
+                            .any(|e| !["cranelift", "llvm"].contains(&e))
+                        {
+                            failures.push(format!("run {call}: unknown engine in `{m}`"));
+                        }
+                        w
+                    }
+                    w => w,
+                };
+                // SITES.md: a site resolves through its item's place in the source
+                // table, `line:column` (columns count scalars) in the case file.
+                let site = |a: hirsel_core_ir::Anchor| {
+                    let path = &module.items[a.item.index()];
+                    let Some(fd) = p.fns.iter().find(|fd| &fd.path == path) else {
+                        return format!("{path:?}");
+                    };
+                    if fd.at.module as usize != modules.len() - 1 {
+                        return "core".to_string();
+                    }
+                    let syntax = &modules[fd.at.module as usize].syntax;
+                    let at = (syntax.items[fd.at.item as usize].file_offset + a.start) as usize;
+                    let before = &syntax.source[..at];
+                    let line = before.matches('\n').count() + 1;
+                    let column = before.rsplit('\n').next().unwrap().chars().count() + 1;
+                    format!("{line}:{column}")
+                };
+                failures.extend(run_expect(module, &functions, call, want, &site));
             }
             _ => failures.push(format!("unreadable expectation `{e}`")),
         }
@@ -553,7 +585,8 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
     failures
 }
 
-/// `f(a,b)` run against `= r1,r2` or `= fail C1,C2` (the cause chain, primary first),
+/// `f(a,b)` run against `= r1,r2` or `= fail C1,C2` (the cause chain, primary first;
+/// `C1@line:column` also checks each cause's site, SITES.md),
 /// optionally followed by `trace t1,t2`: the first u64 field of each resource whose
 /// cleanup started, in order. Arguments and results are read at the emitted
 /// signature's types, so a case writes values, not bits. A run that returns has
@@ -563,6 +596,7 @@ fn run_expect(
     functions: &HashMap<String, FuncId>,
     call: &str,
     want: &[&str],
+    site: &dyn Fn(hirsel_core_ir::Anchor) -> String,
 ) -> Option<String> {
     let (name, args) = call.strip_suffix(')')?.split_once('(')?;
     let Some(&f) = functions.get(name) else {
@@ -617,6 +651,24 @@ fn run_expect(
                 report.trace
             ));
         }
+    }
+    if let ["fail", causes] = want
+        && causes.contains('@')
+    {
+        // `Kind@line:column` per cause: the site the evaluator reports (SITES.md).
+        let eval::Outcome::Failed(kinds) = &report.outcome else {
+            return Some(format!(
+                "run {call}: want fail {causes}, got {:?}",
+                report.outcome
+            ));
+        };
+        let got: Vec<String> = kinds
+            .iter()
+            .zip(&report.sites)
+            .map(|(k, s)| format!("{k}@{}", s.map_or("none".to_string(), site)))
+            .collect();
+        let got = got.join(",");
+        return (got != *causes).then(|| format!("run {call}: want fail {causes}, got fail {got}"));
     }
     let got = report.outcome;
     if matches!(got, eval::Outcome::Returned(_)) && report.used != 0 {

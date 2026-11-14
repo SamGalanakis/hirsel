@@ -36,6 +36,10 @@ pub struct Report {
     /// Bytes the program wrote to its `Stdout` and `Stderr`.
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
+    /// The site of each cause of a failed run, parallel to its chain (SITES.md):
+    /// the anchor of the raising operation, or of the call that reached it when
+    /// that operation is core's or unanchored; `None` when no such anchor exists.
+    pub sites: Vec<Option<Anchor>>,
 }
 
 /// What the run's oracle checks covered (crate docs, "Loans").
@@ -100,6 +104,7 @@ const CHAN_BASE: u64 = 0x30_0000;
 struct Cause {
     kind: &'static str,
     message: [u64; 3],
+    site: Option<Anchor>,
 }
 /// `CauseKind` in declaration order, its case ordinals.
 const CAUSE_KINDS: [&str; 7] = [
@@ -116,6 +121,15 @@ const CAUSE_KINDS: [&str; 7] = [
 /// #75): another kind `k` is the capacity `CAUSE_KIND_START + k`.
 const CELL_NEXT: u64 = 32;
 const CAUSE_CAPACITY: u64 = 16;
+const CAUSE_SITE: u64 = 24;
+
+/// A cause's `Site` word (SITES.md): `(item + 1) << 32 | start` for an anchor in
+/// item `item` starting `start` bytes into it, 0 for none.
+fn site_word(site: Option<Anchor>) -> u64 {
+    site.map_or(0, |a| {
+        ((a.item.index() as u64 + 1) << 32) | u64::from(a.start)
+    })
+}
 const CAUSE_KIND_START: u64 = 1 << 63;
 
 /// Why an instruction stopped: a new cause, or a callee's failure already chained.
@@ -161,6 +175,8 @@ struct Task {
     chain: Vec<Cause>,
     /// Used cause cells beyond the primary, with the limit each is charged to.
     cells: Vec<(usize, u64)>,
+    /// The anchor each running activation of the task is at, innermost last.
+    at: Vec<Option<Anchor>>,
 }
 struct Child {
     status: u8,
@@ -325,11 +341,13 @@ fn run_world(
         limits: vec![0],
         chain: Vec::new(),
         cells: Vec::new(),
+        at: Vec::new(),
     };
     let outcome = match mach.call(&mut task, f, args) {
         Ok(r) => Outcome::Returned(r),
         Err(_) => Outcome::Failed(task.chain.iter().map(|c| c.kind.into()).collect()),
     };
+    let sites = task.chain.iter().map(|c| c.site).collect();
     let checked = Checked {
         loans: mach.loans,
         roles: mach.role_checks,
@@ -342,6 +360,7 @@ fn run_world(
         admissions: mach.admissions,
         stdout: mach.world.stdout,
         stderr: mach.world.stderr,
+        sites,
     };
     (report, checked)
 }
@@ -1077,6 +1096,7 @@ impl Machine<'_> {
                 limits: Vec::new(),
                 chain: Vec::new(),
                 cells: Vec::new(),
+                at: Vec::new(),
             };
             assert!(
                 !self.drop_value(&mut scratch, node + 8, ty),
@@ -1115,6 +1135,7 @@ impl Machine<'_> {
                     limits: vec![lim],
                     chain: Vec::new(),
                     cells: Vec::new(),
+                    at: Vec::new(),
                 };
                 let f = FuncId((a[2] - FN_BASE) as u32);
                 let xc = self.m.types[x.index()].carried;
@@ -1189,6 +1210,7 @@ impl Machine<'_> {
                         } else {
                             self.store(cell + CAUSE_CAPACITY, 8, CAUSE_KIND_START + tag as u64);
                         }
+                        self.store(cell + CAUSE_SITE, 8, site_word(c.site));
                         self.store(cell + CELL_NEXT, 8, head);
                         head = cell;
                     }
@@ -1398,6 +1420,22 @@ impl Machine<'_> {
         r
     }
     fn frame(&mut self, t: &mut Task, b: &Body, args: &[u64], slots: &[u64]) -> X<Vec<u64>> {
+        t.at.push(None);
+        let r = self.blocks(t, b, args, slots);
+        t.at.pop();
+        r
+    }
+    /// SITES.md: the innermost anchor of the task's activations that is not in a
+    /// core@1 item. A core operation's cause, or an unanchored one's, takes the
+    /// site of the call that reached it.
+    fn site(&self, t: &Task) -> Option<Anchor> {
+        t.at.iter()
+            .rev()
+            .flatten()
+            .find(|a| !self.m.items[a.item.index()].package_is("core", "1"))
+            .copied()
+    }
+    fn blocks(&mut self, t: &mut Task, b: &Body, args: &[u64], slots: &[u64]) -> X<Vec<u64>> {
         let depth = t.limits.len();
         let mut vals = vec![0u64; b.values.len()];
         let mut places = vec![(0u64, At::Other); b.addresses.len()];
@@ -1409,13 +1447,17 @@ impl Machine<'_> {
             for (p, a) in pool(blk.params).into_iter().zip(&incoming) {
                 vals[p.index()] = *a;
             }
-            for inst in blk.insts.get(&b.insts).unwrap() {
+            let first = blk.insts.start as usize;
+            for (k, inst) in blk.insts.get(&b.insts).unwrap().iter().enumerate() {
+                *t.at.last_mut().unwrap() = b.inst_anchors[first + k];
                 let r = self.inst(t, b, slots, &mut vals, &mut places, inst);
                 if let Err(stop) = r {
                     if let Stop::Cause(c) = stop {
+                        let site = self.site(t);
                         t.chain.push(Cause {
                             kind: c,
                             message: [0; 3],
+                            site,
                         });
                     }
                     match inst.fail(b) {
@@ -1468,9 +1510,12 @@ impl Machine<'_> {
                         let (p, _) = self.address(b, slots, &vals, &places, *a)?;
                         message = [0, 8, 16].map(|o| self.load(p + o, 8));
                     }
+                    *t.at.last_mut().unwrap() = blk.anchor;
+                    let site = self.site(t);
                     t.chain.push(Cause {
                         kind: cause(*c),
                         message,
+                        site,
                     });
                     match cleanup {
                         Some(c) => (*c, Vec::new()),

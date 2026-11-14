@@ -350,6 +350,7 @@ fn counted_variant_chain_uses_constant_stack_and_refunds_every_node() {
             admissions: n as usize + 1,
             stdout: vec![],
             stderr: vec![],
+            sites: vec![],
         }]),
     );
 }
@@ -444,6 +445,7 @@ fn string_literals_grow_and_clean_in_dev_and_speed() {
                         admissions: usize::from(counted_drop),
                         stdout: vec![],
                         stderr: vec![],
+                        sites: vec![],
                     }]),
                 );
                 if counted_drop {
@@ -462,6 +464,7 @@ fn string_literals_grow_and_clean_in_dev_and_speed() {
                                 admissions: 1,
                                 stdout: vec![],
                                 stderr: vec![],
+                                sites: vec![],
                             }]),
                         );
                     }
@@ -548,6 +551,7 @@ fn owned_callable_captures_and_captureless_cleanup_use_function_row_abi() {
             admissions: 1,
             stdout: vec![],
             stderr: vec![],
+            sites: vec![],
         },
         eval::Report {
             outcome: Outcome::Returned(vec![13]),
@@ -557,6 +561,7 @@ fn owned_callable_captures_and_captureless_cleanup_use_function_row_abi() {
             admissions: 0,
             stdout: vec![],
             stderr: vec![],
+            sites: vec![],
         },
     ];
     execute_reports(&module, &runs, false, 1000, None, Some(&reports));
@@ -617,6 +622,7 @@ fn nested_counted_sequences_clean_refused_prefixes_and_deep_chains() {
             admissions: 1 + 3 * n as usize,
             stdout: vec![],
             stderr: vec![],
+            sites: vec![],
         }]),
     );
 }
@@ -981,6 +987,7 @@ fn static_capacity_zero_carriers_drop_and_grow_through_runtime_cleanup() {
             admissions: [0, 1, 1, 2][f.index()],
             stdout: vec![],
             stderr: vec![],
+            sites: vec![],
         })
         .collect();
     execute_reports(&module, &cases, false, 1000, None, Some(&expected));
@@ -995,6 +1002,7 @@ fn joined_cause_views_use_core_layout() {
         peak_reserved: 0, // This independent fixture specifies outcomes/ledger, not its high water.
         stdout: vec![],
         stderr: vec![],
+        sites: vec![],
         trace: vec![7],
         admissions: eval::run(&module, FuncId(6), &[], 1000).admissions,
     };
@@ -1061,6 +1069,7 @@ fn dynamic_overflow_and_local_like_admissions_keep_exact_refusal_counts() {
                     admissions: 1,
                     stdout: vec![],
                     stderr: vec![],
+                    sites: vec![],
                 };
                 raw.push((vec![charge, overflow], injection, expected));
             }

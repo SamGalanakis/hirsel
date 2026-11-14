@@ -317,6 +317,7 @@ fn every_host_row_preserves_c_fields_and_wait_status() {
                     admissions: 0,
                     stdout: vec![],
                     stderr: vec![],
+                    sites: vec![],
                 },
                 matrix: Some((op, failing)),
             });

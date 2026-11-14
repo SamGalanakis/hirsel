@@ -337,6 +337,35 @@ fn coreir_data_crates_depend_only_on_neutral_crates() {
     }
 }
 
+/// Bug: a cause inside core reports core's own text (or none) instead of the user
+/// call that reached it, or a `raise` reports the anchor of the instruction before
+/// it instead of its block's own. Law (SITES.md): the site is the raising
+/// operation's anchor, unless that is core's or missing, then the anchor of the
+/// nearest enclosing non-core activation; a raise uses its block's anchor; with no
+/// such activation the site is none. Expected anchors are read off the text below.
+#[test]
+fn failure_sites_follow_the_contract() {
+    let m = load(
+        "sites",
+        "core v1\nitem i0 = p@0/m/user\nitem i1 = core@1/m/k\nsig g0 = (u64) -> (u64)\ninst n0 = core@1/m/k [] []\ninst n1 = p@0/m/user [] []\ninst n2 = p@0/m/check [] []\nfn f0 = n0 g0 {\nb0(v0: u64):\n  v1: u64 = const 1\n  v2: u64 = add v0, v1 at i1 5..10\n  return v2\n}\nfn f1 = n1 g0 {\nb0(v0: u64):\n  v1: u64 = call f0 g0 (v0) at i0 20..30\n  return v1\n}\nfn f2 = n2 g0 {\nb0(v0: u64):\n  v1: u64 = const 0 at i0 50..55\n  v2: bool = eq v0, v1 at i0 60..65\n  branch v2, b1, b2\nb1:\n  v3: u64 = const 1 at i0 70..75\n  raise unwrap at i0 40..45\nb2:\n  return v0\n}\n",
+    );
+    let at = |start, end| {
+        Some(Anchor {
+            item: ItemId(0),
+            start,
+            end,
+        })
+    };
+    let site = |f: u32, x: u64| eval::run(&m, FuncId(f), &[x], u64::MAX).sites;
+    assert_eq!(
+        site(1, u64::MAX),
+        vec![at(20, 30)],
+        "core op: the user call"
+    );
+    assert_eq!(site(0, u64::MAX), vec![None], "core with no user caller");
+    assert_eq!(site(2, 0), vec![at(40, 45)], "raise: its block's anchor");
+}
+
 #[test]
 fn allocation_overflow_refuses_at_maximum_limit() {
     let source = "core v1\nsig g0 = (bool, u64) -> (bool, u64)\ninst n0 = p@1/m/alloc [] []\nfn f0 = n0 g0 {\nb0(v0: bool, v1: u64):\n  v2: u64 = const 8\n  v3: ptr, v4: u64 = alloc for seq u8 v2 align 8 charge v1 overflow v0\n  v5: ptr = const 0x0\n  v6: bool = ne v3, v5\n  branch v6, b1, b2\nb1:\n  free v3 charge v1\n  jump b2\nb2:\n  return v6, v4\n}\n";

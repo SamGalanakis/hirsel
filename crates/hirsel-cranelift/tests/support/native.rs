@@ -667,10 +667,17 @@ fn check_front_end_run_cases() {
         let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let (module, functions) = front::lower(&root, &source);
             let mut runs = Vec::new();
+            // A run marked `evaluator-only:..cranelift..` (SITES.md, NOT-BUILT) must
+            // still disagree here, so the marker cannot outlive the missing emission.
+            let mut pending = Vec::new();
             for line in source
                 .lines()
                 .filter_map(|l| l.strip_prefix("// expect: run "))
             {
+                let marked = line.split_whitespace().last().is_some_and(|m| {
+                    m.strip_prefix("evaluator-only:")
+                        .is_some_and(|e| e.split(',').any(|e| e == "cranelift"))
+                });
                 let call = line.split_once(" = ").unwrap().0;
                 let (name, args) = call.strip_suffix(')').unwrap().split_once('(').unwrap();
                 let f = functions[name];
@@ -686,10 +693,24 @@ fn check_front_end_run_cases() {
                         eval::scalar(*t, a.trim())
                     })
                     .collect();
+                if marked {
+                    pending.push((line, (f, args)));
+                    continue;
+                }
                 runs.push((f, args));
                 count += 1;
             }
             execute(&module, &runs, false);
+            for (line, run) in pending {
+                let agrees = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    execute(&module, &[run], false)
+                }))
+                .is_ok();
+                assert!(
+                    !agrees,
+                    "`{line}` now agrees on Cranelift: remove `cranelift` from its marker and its NOT-BUILT row"
+                );
+            }
         }));
         if let Err(error) = attempt {
             let message = error

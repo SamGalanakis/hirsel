@@ -317,7 +317,9 @@ fn check_corpus(corpus: hirsel_core_resolve::Corpus) -> String {
                 // The evaluator stops (panics) at a function it has no body for, such as a
                 // core operation that is only a signature.
                 let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    run_expect(&emitter.module, functions, call, &words)
+                    run_expect(&emitter.module, functions, call, &words, &|a| {
+                        format!("{a:?}")
+                    })
                 }));
                 match run {
                     Ok(None) => "pass".to_string(),
@@ -494,7 +496,9 @@ fn generic_numeric_core_contracts() {
         ("sum_overflow()", &["fail", "Overflow"][..]),
         ("sum_signed()", &["-2"][..]),
     ] {
-        let error = run_expect(&emitter.module, &functions, call, want);
+        let error = run_expect(&emitter.module, &functions, call, want, &|a| {
+            format!("{a:?}")
+        });
         assert!(error.is_none(), "{call}: {error:?}");
     }
 }

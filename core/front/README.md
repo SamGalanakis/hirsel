@@ -14,6 +14,13 @@
 - `// expect: run f(A,B) = R` or `= fail Cause`: every application body is checked and
   emitted; the emitted module must be well formed, and `f` run by the CoreIR evaluator
   must return `R` or fail with `Cause`. Values are written at the signature's types
-  (`-3`, `true`, `0.5`), comma-separated without spaces.
+  (`-3`, `true`, `0.5`), comma-separated without spaces. `= fail Kind@LINE:COL,...`
+  also compares each cause's site (SITES.md), resolved in the evaluator; native
+  harnesses compare the kinds.
+
+A run line may end in `evaluator-only:ENGINE,..` (engines `cranelift`, `llvm`): the case
+harness holds it under the evaluator, and each named native walker requires it to
+disagree. An engine's land that makes it agree removes that engine from the marker and
+its NOT-BUILT row in the same commit; the walker fails until it does.
 
 Every case is checked against the one core package, `core/core/`, as every program is.

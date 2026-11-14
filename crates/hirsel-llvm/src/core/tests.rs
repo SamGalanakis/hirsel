@@ -1004,36 +1004,58 @@ fn every_front_run_case_matches_the_evaluator() {
         let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let (module, names) = front::lower(&source, &root.join("../core"), "main")
                 .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            // A run marked `evaluator-only:..llvm..` (SITES.md, NOT-BUILT) must still
+            // disagree here, so the marker cannot outlive the missing emission.
+            let pending = |run: &str| {
+                run.split_whitespace().last().is_some_and(|m| {
+                    m.strip_prefix("evaluator-only:")
+                        .is_some_and(|e| e.split(',').any(|e| e == "llvm"))
+                })
+            };
+            let case = |run: &&str| {
+                let (call, _) = run.split_once(" = ").unwrap();
+                let (name, args) = call.strip_suffix(')').unwrap().split_once('(').unwrap();
+                let function = names[name];
+                let sig = &module.signatures[module.functions[function.index()].signature.index()];
+                let args = args
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .zip(&sig.params)
+                    .map(|(a, t)| {
+                        let Param::Value(t) = t else {
+                            panic!("front argument")
+                        };
+                        eval::scalar(*t, a)
+                    })
+                    .collect();
+                Case {
+                    function,
+                    args,
+                    limit: u64::MAX,
+                    injection: None,
+                }
+            };
             let cases = runs
                 .iter()
-                .map(|run| {
-                    let (call, _) = run.split_once(" = ").unwrap();
-                    let (name, args) = call.strip_suffix(')').unwrap().split_once('(').unwrap();
-                    let function = names[name];
-                    let sig =
-                        &module.signatures[module.functions[function.index()].signature.index()];
-                    let args = args
-                        .split(',')
-                        .filter(|s| !s.is_empty())
-                        .zip(&sig.params)
-                        .map(|(a, t)| {
-                            let Param::Value(t) = t else {
-                                panic!("front argument")
-                            };
-                            eval::scalar(*t, a)
-                        })
-                        .collect();
-                    Case {
-                        function,
-                        args,
-                        limit: u64::MAX,
-                        injection: None,
-                    }
-                })
+                .filter(|r| !pending(r))
+                .map(case)
                 .collect::<Vec<_>>();
             println!("front {}: {} native runs", path.display(), cases.len());
             count += cases.len();
             agree_cases(&module, &cases, false);
+            let marked = runs
+                .iter()
+                .filter(|r| pending(r))
+                .copied()
+                .collect::<Vec<_>>();
+            let held = marked.iter().map(case).collect::<Vec<_>>();
+            for ((run, case), got) in marked.iter().zip(&held).zip(execute(&module, &held)) {
+                let expected = eval::run(&module, case.function, &case.args, case.limit);
+                assert_ne!(
+                    got.outcome, expected.outcome,
+                    "`{run}` now agrees on LLVM: remove `llvm` from its marker and its NOT-BUILT row"
+                );
+            }
         }));
         if let Err(error) = attempt {
             let message = error

@@ -77,7 +77,7 @@ fn every_emitted_function_probes_its_frame_within_the_guard() {
         assert_eq!(lazy, direct, "lazy probe interval, speed={speed}");
         if speed {
             let composed = hirsel_llvm_lazy::emit_program(
-                &[hirsel_llvm_lazy::Unit {
+                &[hirsel_llvm_lazy::Unit::Text {
                     ir: IR,
                     imported: false,
                 }],
@@ -87,6 +87,82 @@ fn every_emitted_function_probes_its_frame_within_the_guard() {
             assert_eq!(composed, direct, "release composition probe interval");
         }
     }
+    // Published RAW bitcode starts without probe attributes. Exercise a live
+    // wide frame from the import itself, and compare with the direct emitter
+    // whose probe settings are inspected above, before and after composition.
+    let wide = hirsel_core_ir::text::parse(
+        r#"core v1
+type t0 = own "Wide" { bytes: array 262144 u8 }
+sig g0 = () -> ()
+sig g1 = (ptr) -> ()
+inst n0 = tests@0/probes/wide [] []
+inst n1 = tests@0/probes/external [] []
+fn f0 = n0 g0 {
+  slot s0 = t0
+  addr a0 = s0 : t0
+b0:
+  live s0
+  address a0
+  v0: ptr = pointer a0
+  call f1 g1 (v0)
+  dead s0
+  return
+}
+fn f1 = n1 g1 extern
+"#,
+    )
+    .unwrap();
+    let facts = hirsel_core_ir::roles::Facts::new(&wide);
+    let target = hirsel_core_layout::Target::X86_64Linux;
+    let raw = crate::core::emit_ir_relocatable_with_role_facts_for_target(
+        &wide, target, false, false, &facts,
+    )
+    .unwrap();
+    let machine = TargetMachine::core(target, true).unwrap();
+    let context = Context::new();
+    let direct_module = Module::parse(&context, "hirsel-core", &raw).unwrap();
+    direct_module.set_target(&machine);
+    direct_module.run_core_passes(&machine).unwrap();
+    let direct = direct_module.emit_object(&machine).unwrap();
+    assert_probes(&direct_module.text(), "published CoreIR", 1);
+    let library = hirsel_llvm_lazy::compile_library(&wide, &facts, target, false, false).unwrap();
+    assert_eq!(library.object, direct, "publication probe interval");
+    let exported = crate::core::symbol(&wide, hirsel_core_ir::FuncId(0));
+    // Keep the imported definition in the owned wrapper even if the inliner
+    // chooses to retain its large frame as an out-of-line call.
+    let wrapper = format!(
+        "declare i8 @{exported}(ptr, i64)\ndefine i8 @entry(ptr %ctx, i64 %site) {{\n%status = call i8 @{exported}(ptr %ctx, i64 %site) alwaysinline\nret i8 %status\n}}\n"
+    );
+    let exports = ["entry".to_owned()];
+    let reference = hirsel_llvm_lazy::emit_program(
+        &[
+            hirsel_llvm_lazy::Unit::Text {
+                ir: &raw,
+                imported: true,
+            },
+            hirsel_llvm_lazy::Unit::Text {
+                ir: &wrapper,
+                imported: false,
+            },
+        ],
+        &exports,
+    )
+    .unwrap();
+    let decoded = hirsel_llvm_lazy::emit_program(
+        &[
+            hirsel_llvm_lazy::Unit::Import {
+                bitcode: &library.bitcode,
+                summary: &library.summary,
+            },
+            hirsel_llvm_lazy::Unit::Text {
+                ir: &wrapper,
+                imported: false,
+            },
+        ],
+        &exports,
+    )
+    .unwrap();
+    assert_eq!(decoded, reference, "bitcode import probe interval");
     let core_ir = hirsel_core_ir::text::parse(
         r#"core v1
 type t0 = own "Probe" { value: u64 }

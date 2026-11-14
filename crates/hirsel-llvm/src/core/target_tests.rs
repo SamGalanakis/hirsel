@@ -217,7 +217,7 @@ fn linux_c_results_execute_with_mixed_fields_padding_and_hfas() -> std::result::
             if speed {
                 objects.push(
                     hirsel_llvm_lazy::emit_program_for_target(
-                        &[hirsel_llvm_lazy::Unit {
+                        &[hirsel_llvm_lazy::Unit::Text {
                             ir: &ir,
                             imported: false,
                         }],

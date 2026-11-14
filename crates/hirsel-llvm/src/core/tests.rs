@@ -2177,7 +2177,7 @@ inst n0 = samples@1/raw_library/xor [] []
 fn f0 = n0 g0 {
 b0(v0: u64):
   v1: u64 = const 5
-  v2: u64 = xor v0, v1
+  v2: u64 = bitxor v0, v1
   return v2
 }
 "#,

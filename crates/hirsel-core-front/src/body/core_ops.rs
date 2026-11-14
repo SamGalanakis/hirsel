@@ -217,6 +217,7 @@ operations! {
     ("map", "install_index", Lane::PendingCode, "C", "core-check-callables-913", true),
     ("map", "swap_value", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "kill", Lane::Value, "A", "core-check-callables-913", true),
+    ("map", "take_entry", Lane::Value, "A", "core-collections-918", true),
     ("map", "hash", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "slots", Lane::Value, "A", "core-check-callables-913", true),
     ("map", "capacity", Lane::Value, "A", "core-check-callables-913", true),

@@ -615,12 +615,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let (ty, value) = if let Some(at) = at {
                 self.out.counts.nodes += 1;
                 if consuming {
-                    if !matches!(self.t.kind(at.ty), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::List))
+                    if !matches!(self.t.kind(at.ty), TyKind::Adt(d, _) if matches!(self.p.decls[d.index()].role, Some(Role::List | Role::Map)))
                     {
                         self.refuse(
                             "LANG-16",
                             source,
-                            "only an own List is consumed by iteration",
+                            "only an own List or Map is consumed by iteration",
                         );
                         return (ERROR, None);
                     }
@@ -649,8 +649,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 }
                 TyKind::Adt(d, args) if self.p.decls[d.index()].role == Some(Role::Map) => {
                     let (key, value) = (args[0], args[1]);
-                    let key = self.t.mk(TyKind::View(key));
-                    let value = self.t.mk(TyKind::View(value));
+                    let (key, value) = if consuming {
+                        (key, value)
+                    } else {
+                        (self.t.mk(TyKind::View(key)), self.t.mk(TyKind::View(value)))
+                    };
                     let pair = self.t.mk(TyKind::Tuple(vec![key, value]));
                     (pair, None)
                 }
@@ -670,12 +673,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             };
             if consuming
                 && (ty != inner
-                    || !matches!(self.t.kind(inner), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::List)))
+                    || !matches!(self.t.kind(inner), TyKind::Adt(d, _) if matches!(self.p.decls[d.index()].role, Some(Role::List | Role::Map))))
             {
                 self.refuse(
                     "LANG-16",
                     source,
-                    "only an own List is consumed by iteration",
+                    "only an own List or Map is consumed by iteration",
                 );
                 return (ERROR, None);
             }
@@ -829,7 +832,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         .map(|v| v[0])
                 } else if matches!(self.t.kind(collection), TyKind::Adt(d, _) if self.p.decls[d.index()].role == Some(Role::Map))
                 {
-                    self.map_pair(pointer, collection, index, elem, advance, n)
+                    self.map_pair(pointer, collection, index, elem, advance, consuming, n)
                 } else if matches!(self.t.kind(collection), TyKind::Adt(d, _) if matches!(self.p.decls[d.index()].role, Some(Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan)))
                 {
                     packed_cursor

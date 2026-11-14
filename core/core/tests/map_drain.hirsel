@@ -1,0 +1,85 @@
+// test-of: core.map
+// test-reason: private slot state is required to prove moved entries are not cleaned twice
+fn word(i: u64) -> String {
+    result.unwrap(string.from(match i {
+        0 => "a",
+        1 => "b",
+        2 => "c",
+        3 => "d",
+        4 => "e",
+        5 => "f",
+        6 => "g",
+        7 => "h",
+        8 => "i",
+        9 => "j",
+        10 => "k",
+        11 => "l",
+        12 => "m",
+        13 => "n",
+        14 => "o",
+        15 => "p",
+        _ => "q"
+    }))
+}
+
+// Removing eight entries and filling the table forces compact before key16.
+// The resulting live insertion order is 8,9,10,11,12,13,14,15,16.
+// expect: run drained_after_compact() = 9
+fn drained_after_compact() -> u64 {
+    let mut m: Map[u64, String] = map.new()
+    for i in 0u64 .. 9 {
+        result.unwrap(map.insert(mut m, i, word(i)))
+    }
+    let _ = map.remove(mut m, 0)
+    let _ = map.remove(mut m, 2)
+    let _ = map.remove(mut m, 4)
+    let _ = map.remove(mut m, 6)
+    let _ = map.remove(mut m, 1)
+    let _ = map.remove(mut m, 3)
+    let _ = map.remove(mut m, 5)
+    let _ = map.remove(mut m, 7)
+    for i in 9u64 .. 16 {
+        result.unwrap(map.insert(mut m, i, word(i)))
+    }
+    result.unwrap(map.insert(mut m, 16, word(16)))
+    let mut count: u64 = 0
+    for take (k, v) in m {
+        if k != count + 8 || v != word(k) {
+            return 99
+        }
+        count += 1
+    }
+    count
+}
+
+// The current binding is cleaned before the unreached map tail.
+// expect: run early_break_cleans_tail() = 0
+fn early_break_cleans_tail() -> u64 {
+    let mut m: Map[u64, String] = map.new()
+    for i in 0u64 .. 4 {
+        result.unwrap(map.insert(mut m, i, word(i)))
+    }
+    let mut count: u64 = 0
+    for take (k, v) in m {
+        count += k
+        break
+    }
+    count
+}
+
+// A failing body leaves the current binding and every unreached entry owned.
+// The evaluator's moved-slot checks catch both duplicate cleanup and leaks.
+// expect: run failing_body_cleans_tail() = fail Unwrap
+fn failing_body_cleans_tail() -> u64 {
+    let mut m: Map[u64, String] = map.new()
+    for i in 0u64 .. 4 {
+        result.unwrap(map.insert(mut m, i, word(i)))
+    }
+    let mut count: u64 = 0
+    for take (k, v) in m {
+        count += k
+        let none: Option[u64] = None
+        let _ = option.unwrap(none)
+    }
+    count
+}

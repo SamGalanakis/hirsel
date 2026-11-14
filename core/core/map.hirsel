@@ -168,6 +168,10 @@ fn swap_value[K: key, V](mut m: Map[K, V], i: u64, take v: V) -> V
 
 fn kill[K: key, V](mut m: Map[K, V], i: u64) -> V
 
+// Move one live entry out in insertion order. The source slot becomes dead;
+// ordinary Map cleanup owns every entry not reached by a consuming loop.
+fn take_entry[K: key, V](mut m: Map[K, V], i: u64) -> (K, V)
+
 fn push_entry[K: key, V](mut m: Map[K, V], h: u64, take k: K, take v: V)
 
 // Capacity is at most max(4, 4 * peak live entries). Removals do not shrink.

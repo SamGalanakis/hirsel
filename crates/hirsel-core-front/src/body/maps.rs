@@ -54,6 +54,14 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 ));
                 Some(self.call_lowered(callable, vals[2]?, &[Some(pointer)], n))
             }
+            "take_entry" => {
+                let collection = self.map_type(types)?;
+                let value = self.map_take_entry_values(
+                    vals[0]?, collection, vals[1]?, result, types[0], types[1], n,
+                )?;
+                self.temp(result, Some(value));
+                Some(Some(value))
+            }
             "swap_value" | "kill" => {
                 let collection = self.map_type(types)?;
                 let entry = self.map_entry_at(vals[0]?, collection, vals[1]?, n)?;
@@ -187,6 +195,77 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let value = self.pointer(to, n);
         self.temp(result, Some(value));
         Some(value)
+    }
+
+    /// Move one live entry out of its insertion-order slot. The caller has
+    /// already checked the state word. Marking the slot dead before publishing
+    /// the tuple makes Map cleanup skip the moved key and value on every exit.
+    pub(super) fn map_take_entry_values(
+        &mut self,
+        header: ValueId,
+        collection: TyId,
+        index: ValueId,
+        result: TyId,
+        key_ty: TyId,
+        value_ty: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let entry = self.map_entry_at(header, collection, index, n)?;
+        let to = self.slot(result, None, n)?;
+        for (field, ty) in [(0, key_ty), (1, value_ty)] {
+            let rep = match self.rep(ty) {
+                Ok(rep) => rep,
+                Err(what) => {
+                    self.gap(n, what);
+                    return None;
+                }
+            };
+            let Some(place) = rep.stored() else {
+                continue;
+            };
+            let from = self.address(
+                AddressBase::Address(entry),
+                &[Step::Field(field as u32 + 2)],
+                place,
+                n,
+            );
+            let value = self.read_carried_rep(from, rep, n);
+            let dest = self.address(
+                AddressBase::Address(to),
+                &[Step::Field(field as u32)],
+                place,
+                n,
+            );
+            self.install(dest, rep, value, n);
+        }
+        let u = Ty::Scalar(Scalar::U64);
+        let zero = self.konst(u, 0, n)?;
+        let state = self.address(
+            AddressBase::Address(entry),
+            &[Step::Field(1)],
+            PlaceTy::Value(u),
+            n,
+        );
+        self.inst(
+            Inst::Store {
+                address: state,
+                value: zero,
+            },
+            n,
+        );
+        let layout = self.map_entry(key_ty, value_ty, n)?;
+        let live_at = self.map_live_at(header, layout, n)?;
+        let live = self.read_bits(live_at, u, n);
+        let one = self.konst(u, 1, n)?;
+        let remaining = self.map_binary(BinaryOp::Sub, live, one, n);
+        self.inst(
+            Inst::Store {
+                address: live_at,
+                value: remaining,
+            },
+            n,
+        );
+        Some(self.pointer(to, n))
     }
 
     fn map_push(&mut self, types: &[TyId], vals: &[Option<ValueId>], n: NodeId) -> Option<ValueId> {

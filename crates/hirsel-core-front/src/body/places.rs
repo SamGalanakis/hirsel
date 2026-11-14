@@ -845,6 +845,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         index: ValueId,
         pair: TyId,
         advance: BlockId,
+        consuming: bool,
         n: NodeId,
     ) -> Option<ValueId> {
         let entry = self.map_entry_at(header, collection, index, n)?;
@@ -871,6 +872,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let no = self.edge(advance, &[]);
         self.end(Terminator::Branch { condition, yes, no }, Some(n));
         self.start(live);
+        if consuming {
+            return self.map_take_entry(header, collection, index, pair, n);
+        }
         let place = self.place_ty(pair, n)?;
         let to = self.new_slot(place, n);
         let TyKind::Tuple(views) = self.t.kind(pair).clone() else {
@@ -903,6 +907,23 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         Some(self.pointer(to, n))
     }
+
+    /// Shared lowering for the private Map `take_entry` kernel. Consuming
+    /// iteration uses this exact move path after the slot-live test.
+    fn map_take_entry(
+        &mut self,
+        header: ValueId,
+        collection: TyId,
+        index: ValueId,
+        result: TyId,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        let TyKind::Adt(_, args) = self.t.kind(collection).clone() else {
+            return None;
+        };
+        self.map_take_entry_values(header, collection, index, result, args[0], args[1], n)
+    }
+
     /// FORM's Seq carrier is data/length/capacity; a word read does not copy storage.
     pub(super) fn read_sequence_word(
         &mut self,

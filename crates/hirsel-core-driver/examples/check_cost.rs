@@ -115,7 +115,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "template": d.check.template.is_some(),
             "key": {
                 "body":d.key.body, "lookups":d.key.lookups,
-                "signatures":d.key.signatures.iter().map(|(path,hash)| json!([path.to_string(),hash])).collect::<Vec<_>>(),
+                "signatures":d.key.signatures,
             },
             "instance_references": instance_refs,
             "instance_bodies": instance_bodies,

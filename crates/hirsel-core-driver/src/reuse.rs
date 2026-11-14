@@ -7,7 +7,9 @@ use std::collections::BTreeSet;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct DefinitionKey {
     pub body: ContentHash,
-    pub signatures: BTreeMap<Arc<DefPath>, ContentHash>,
+    /// The transitive signature closure as one Merkle hash over the strongly
+    /// connected components of header reads (see `Keys::closure`).
+    pub signatures: ContentHash,
     pub lookups: ContentHash,
     pub environment: ContentHash,
 }
@@ -45,11 +47,12 @@ fn body_identity(item: Item<'_>) -> ContentHash {
 }
 
 fn header_identity(item: Item<'_>) -> ContentHash {
+    // Token spans are file offsets.
     let end = if matches!(
         item.tree.node(item.root).kind,
         NodeKind::Function | NodeKind::CloneHook
     ) {
-        header_end(item)
+        item.file_offset as usize + header_end(item)
     } else {
         usize::MAX
     };
@@ -131,6 +134,8 @@ pub(crate) struct Keys {
     modules: Demand<ModulePath>,
     packages: Demand<PackageId>,
     anchors: hirsel_core_ids::published::Map<(ModuleId, u32), DefPath>,
+    // One closure hash per definition, memoised across the bodies of a request.
+    closures: std::cell::RefCell<rustc_hash::FxHashMap<u32, ContentHash>>,
 }
 impl Keys {
     pub fn new(
@@ -186,7 +191,6 @@ impl Keys {
                 let path = index.definition_path(definition);
                 let end = header_end(item);
                 let digest = header_identity(item);
-                let relative_end = end.saturating_sub(item.file_offset as usize);
                 let mut reads = BTreeSet::new();
                 let mut body_reads = BTreeSet::new();
                 for name in &resolution.names {
@@ -200,8 +204,8 @@ impl Keys {
                 headers.names.insert(path, definition);
                 headers.rows[definition.0 as usize] = Some(Header {
                     digest,
-                    has_body: relative_end < item.source_text().len(),
-                    header_end: relative_end as u32,
+                    has_body: end < item.source_text().len(),
+                    header_end: end as u32,
                     site: index.get(definition).site,
                     body_reads: body_reads.into_iter().collect(),
                     reads: reads.into_iter().collect(),
@@ -216,6 +220,7 @@ impl Keys {
             paths: Demand::new(index.definitions.base_len(), index.definitions.len()),
             modules: Demand::new(index.modules.base_len(), index.modules.len()),
             packages: Demand::new(index.packages.base_len(), index.packages.len()),
+            closures: Default::default(),
         };
         Ok(keys)
     }
@@ -282,26 +287,130 @@ impl Keys {
             site.item = h.anchor.1;
         }
     }
-    pub fn for_body(
+    /// The closure hash of `start`: a Merkle hash over the condensation of the
+    /// header-read graph. Each strongly connected component hashes its members'
+    /// (path, header digest) rows and its successor components' hashes, so a
+    /// changed digest or a changed edge out of a component changes the hash of
+    /// every component that reaches it. Iterative Tarjan; every component is
+    /// hashed once per request, whatever the number of bodies that reach it.
+    fn closure(&self, index: &NameIndex, start: usize) -> io::Result<ContentHash> {
+        if let Some(&hash) = self.closures.borrow().get(&(start as u32)) {
+            return Ok(hash);
+        }
+        // Visit order and low link per node of this traversal.
+        let mut order: rustc_hash::FxHashMap<usize, (u32, u32)> = Default::default();
+        let mut stack: Vec<usize> = vec![];
+        let mut on_stack: rustc_hash::FxHashSet<usize> = Default::default();
+        let mut frames: Vec<(usize, usize)> = vec![];
+        let mut next = 0u32;
+        let enter = |v: usize,
+                     order: &mut rustc_hash::FxHashMap<usize, (u32, u32)>,
+                     stack: &mut Vec<usize>,
+                     on_stack: &mut rustc_hash::FxHashSet<usize>,
+                     next: &mut u32| {
+            order.insert(v, (*next, *next));
+            *next += 1;
+            stack.push(v);
+            on_stack.insert(v);
+        };
+        enter(start, &mut order, &mut stack, &mut on_stack, &mut next);
+        frames.push((start, 0));
+        while let Some(&(v, child)) = frames.last() {
+            let reads = &self.dependency(index, v)?.reads;
+            if let Some(w) = reads.get(child).map(|id| id.0 as usize) {
+                frames.last_mut().unwrap().1 += 1;
+                if self.closures.borrow().contains_key(&(w as u32)) {
+                    continue;
+                }
+                match order.get(&w) {
+                    None => {
+                        enter(w, &mut order, &mut stack, &mut on_stack, &mut next);
+                        frames.push((w, 0));
+                    }
+                    Some(&(w_index, _)) if on_stack.contains(&w) => {
+                        let low = &mut order.get_mut(&v).unwrap().1;
+                        *low = (*low).min(w_index);
+                    }
+                    Some(_) => {}
+                }
+                continue;
+            }
+            frames.pop();
+            let (v_index, v_low) = order[&v];
+            if let Some(&(parent, _)) = frames.last() {
+                let low = &mut order.get_mut(&parent).unwrap().1;
+                *low = (*low).min(v_low);
+            }
+            if v_low != v_index {
+                continue;
+            }
+            let at = stack.iter().rposition(|&m| m == v).unwrap();
+            let members: Vec<usize> = stack.drain(at..).collect();
+            for m in &members {
+                on_stack.remove(m);
+            }
+            let mut rows = Vec::with_capacity(members.len());
+            let mut successors = vec![];
+            {
+                let closures = self.closures.borrow();
+                for &m in &members {
+                    let header = self.dependency(index, m)?;
+                    rows.push((
+                        self.path(index, hirsel_core_resolve::DefinitionId(m as u32))
+                            .as_ref(),
+                        header.digest,
+                    ));
+                    successors.extend(
+                        header
+                            .reads
+                            .iter()
+                            .filter_map(|w| closures.get(&w.0).copied()),
+                    );
+                }
+            }
+            rows.sort_unstable();
+            successors.sort_unstable();
+            successors.dedup();
+            let hash = ContentHash::of_parts(
+                "hirsel.signature-component.v1",
+                [&encode(&(rows, successors))?[..]],
+            );
+            let mut closures = self.closures.borrow_mut();
+            for m in members {
+                closures.insert(m as u32, hash);
+            }
+        }
+        Ok(self.closures.borrow()[&(start as u32)])
+    }
+    /// The superseded per-body closure: every reached definition's path and
+    /// header digest. Kept only for the side-by-side differential against
+    /// `closure` until the old derivation is deleted.
+    pub(crate) fn legacy_signatures(
         &self,
         index: &NameIndex,
-        path: &DefPath,
+        mut pending: Vec<usize>,
+    ) -> io::Result<BTreeMap<Arc<DefPath>, ContentHash>> {
+        let mut signatures = BTreeMap::new();
+        let mut seen = BTreeSet::new();
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id) {
+                continue;
+            }
+            let path = self.path(index, hirsel_core_resolve::DefinitionId(id as u32));
+            let dependency = self.dependency(index, id)?;
+            signatures.insert(Arc::clone(path), dependency.digest);
+            pending.extend(dependency.reads.iter().map(|id| id.0 as usize));
+        }
+        Ok(signatures)
+    }
+    /// The definitions whose signatures a body reads directly: its own header,
+    /// every resolved name and every non-negative lookup result.
+    fn signature_start(
+        index: &NameIndex,
         module: ModuleId,
-        ordinal: u32,
-        item: Item<'_>,
+        own: DefinitionId,
         resolution: &Resolution,
-    ) -> io::Result<DefinitionKey> {
-        hirsel_core_front::cost_scope!("phase", "driver keys/anchors");
-        let own = index
-            .item_definition(module, ordinal, item)
-            .ok_or_else(|| {
-                io::Error::other(format!(
-                    "internal error: core reuse body `{path}` has no indexed definition"
-                ))
-            })?;
-        // Reserve the direct resolver reads up front. This keeps the per-body
-        // closure buffer from growing through allocator reallocation while
-        // retaining the existing Keys shape and traversal order.
+    ) -> Vec<usize> {
         let mut pending = Vec::with_capacity(1 + resolution.names.len() + resolution.reads.len());
         pending.push(own.0 as usize);
         for name in &resolution.names {
@@ -319,26 +428,37 @@ impl Keys {
                 LookupResult::Ambiguous | LookupResult::Missing => {}
             }
         }
+        pending
+    }
+    pub fn for_body(
+        &self,
+        index: &NameIndex,
+        path: &DefPath,
+        module: ModuleId,
+        ordinal: u32,
+        item: Item<'_>,
+        resolution: &Resolution,
+    ) -> io::Result<DefinitionKey> {
+        hirsel_core_front::cost_scope!("phase", "driver keys/anchors");
+        let own = index
+            .item_definition(module, ordinal, item)
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "internal error: core reuse body `{path}` has no indexed definition"
+                ))
+            })?;
+        let pending = Self::signature_start(index, module, own, resolution);
+        #[cfg(test)]
+        legacy::record(path, self.legacy_signatures(index, pending.clone())?);
         let signatures = {
             hirsel_core_front::cost_scope!("key work", "signature closure");
-            let mut signatures = BTreeMap::new();
-            let base = index.definitions.base_len();
-            let mut seen = vec![false; index.definitions.len() - base];
-            let mut library_seen = BTreeSet::new();
-            while let Some(id) = pending.pop() {
-                if if id >= base {
-                    std::mem::replace(&mut seen[id - base], true)
-                } else {
-                    !library_seen.insert(id)
-                } {
-                    continue;
-                }
-                let path = self.path(index, hirsel_core_resolve::DefinitionId(id as u32));
-                let dependency = self.dependency(index, id)?;
-                signatures.insert(Arc::clone(path), dependency.digest);
-                pending.extend(dependency.reads.iter().map(|id| id.0 as usize));
+            let mut components = Vec::with_capacity(pending.len());
+            for &id in &pending {
+                components.push(self.closure(index, id)?);
             }
-            signatures
+            components.sort_unstable();
+            components.dedup();
+            ContentHash::of_parts("hirsel.signature-closure.v1", [&encode(&components)?[..]])
         };
         let lookups: Vec<_> = {
             hirsel_core_front::cost_scope!("key work", "lookup rows");
@@ -457,6 +577,8 @@ fn target_definitions(
             .flat_map(move |name| index.constructor_candidates(module, name)),
     )
 }
+/// The item-relative end of the header: a function's body block start, else
+/// the item's end. Node spans are item-relative.
 fn header_end(item: Item<'_>) -> usize {
     if !matches!(
         item.tree.node(item.root).kind,
@@ -469,8 +591,7 @@ fn header_end(item: Item<'_>) -> usize {
         .iter()
         .find_map(|&c| {
             let n = item.tree.node(c);
-            (n.kind == NodeKind::Block)
-                .then_some(n.origin.span.start as usize + item.file_offset as usize)
+            (n.kind == NodeKind::Block).then_some(n.origin.span.start as usize)
         })
         .unwrap_or(item.source_text().len())
 }
@@ -514,6 +635,29 @@ fn compiler_stream_identity(reader: &mut (impl io::Read + io::Seek)) -> io::Resu
     let mut bytes = Vec::new();
     reader.read_to_end(&mut bytes)?;
     Ok(ContentHash::of_bytes(&bytes))
+}
+
+/// Test-only capture of the superseded per-body closure, for the differential
+/// against the component closure hash. Deleted with `legacy_signatures`.
+#[cfg(test)]
+pub(crate) mod legacy {
+    use super::*;
+    type Captured = BTreeMap<DefPath, BTreeMap<Arc<DefPath>, ContentHash>>;
+    thread_local! {
+        static CAPTURE: std::cell::RefCell<Option<Captured>> = const { std::cell::RefCell::new(None) };
+    }
+    pub(crate) fn record(path: &DefPath, signatures: BTreeMap<Arc<DefPath>, ContentHash>) {
+        CAPTURE.with(|c| {
+            if let Some(c) = c.borrow_mut().as_mut() {
+                c.insert(path.clone(), signatures);
+            }
+        });
+    }
+    pub(crate) fn capture<T>(f: impl FnOnce() -> T) -> (T, Captured) {
+        CAPTURE.with(|c| *c.borrow_mut() = Some(BTreeMap::new()));
+        let result = f();
+        (result, CAPTURE.with(|c| c.borrow_mut().take().unwrap()))
+    }
 }
 
 #[cfg(test)]

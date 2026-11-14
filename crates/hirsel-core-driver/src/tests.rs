@@ -198,7 +198,9 @@ fn warm_and_body_edits_reuse_signature_readers_in_memory_and_on_disk() {
 fn signature_edits_recheck_readers_and_leave_independent_bodies() {
     let dir = tempfile::tempdir().unwrap();
     let mut driver = Driver::default();
-    let a = "fn callee() -> u64 { 1 }\nfn caller() -> u64 { callee() }\nfn independent() -> u64 { 42 }\n";
+    // `outer` reads only `caller`'s signature, which a body name of `caller`
+    // does not enter, wherever `caller` sits in the file.
+    let a = "fn callee() -> u64 { 1 }\nfn caller() -> u64 { callee() }\nfn independent() -> u64 { 42 }\nfn outer() -> u64 { caller() }\n";
     driver
         .check(request(a, dir.path()), &mut Meter::new(false))
         .unwrap();
@@ -447,19 +449,32 @@ fn image_signature_use_skips_source_and_body_decoding() {
     );
     assert_eq!(names(&checked), ["caller"]);
     assert_eq!((opened.decoded_files(), opened.decoded_bodies()), (0, 0));
+    // The caller's key reads the installed signatures it names: an image
+    // header edit changes it and an image body edit does not.
+    let caller_signatures = |library: &str| {
+        let lib = tempfile::tempdir().unwrap();
+        let (_, image) = Driver::default()
+            .produce_image(library_request(library, lib.path()), &mut Meter::new(false))
+            .unwrap();
+        let app = tempfile::tempdir().unwrap();
+        let mut req = request(
+            "fn caller(x: lib.Number) -> u64 { x + lib.answer() }\n",
+            app.path(),
+        );
+        req.library = LibraryInput::Image(image.unwrap());
+        let checked = Driver::default()
+            .check(req, &mut Meter::new(false))
+            .unwrap();
+        checked.definitions.values().next().unwrap().key.signatures
+    };
     let caller = checked.definitions.values().next().unwrap();
     assert_eq!(
-        caller
-            .key
-            .signatures
-            .keys()
-            .map(|p| p.to_string())
-            .collect::<Vec<_>>(),
-        [
-            "app@1/main/caller",
-            "core@1/lib/Number",
-            "core@1/lib/answer"
-        ]
+        caller.key.signatures,
+        caller_signatures("pub type Number = u64\npub fn answer() -> Number { 43 }\n")
+    );
+    assert_ne!(
+        caller.key.signatures,
+        caller_signatures("pub type Number = u64\npub fn answer() -> u64 { 42 }\n")
     );
     let answer = DefPath::from_full("core@1/lib/answer").unwrap();
     let body = checked.demand_body(&answer).unwrap();
@@ -931,8 +946,16 @@ fn reachable_build_refuses_and_censuses_the_incomplete_callee() {
 
 #[test]
 fn reachable_build_keeps_refusals_in_named_signature_declarations() {
+    // The declaration's refusal is kept wherever the declaration sits in its file.
+    for source in [
+        "type Broken = Missing\nfn inspect(x: Broken) -> u8 { 7u8 }\nfn answer() -> u8 { inspect(7u8) }\n",
+        "fn inspect(x: Broken) -> u8 { 7u8 }\nfn answer() -> u8 { inspect(7u8) }\ntype Broken = Missing\n",
+    ] {
+        reachable_build_keeps_the_declaration_refusal(source);
+    }
+}
+fn reachable_build_keeps_the_declaration_refusal(source: &str) {
     let dir = tempfile::tempdir().unwrap();
-    let source = "type Broken = Missing\nfn inspect(x: Broken) -> u8 { 7u8 }\nfn answer() -> u8 { inspect(7u8) }\n";
     let entry = DefPath::from_full("app@1/main/answer").unwrap();
     let product = Driver::default()
         .check(request(source, dir.path()), &mut Meter::new(false))
@@ -1635,4 +1658,147 @@ fn canonical_driver_encoding_visits_the_value_once() {
         1,
         "canonical encoding made a sizing traversal"
     );
+}
+
+/// Side-by-side differential of the superseded per-body signature closure
+/// (every reached path and header digest) against the component closure hash,
+/// over the design's edit kinds, a signature edit of a widely used helper and
+/// an edit inside a mutually recursive pair. Law: every body whose old key
+/// changes from the base build also has a changed new key (the new miss set is
+/// a superset of the old one). Deleted with the old derivation.
+#[test]
+fn component_closure_misses_cover_the_per_body_closure_misses() {
+    let helper = "pub fn config(x: u64) -> u64 { x }\npub fn checksum(x: u64) -> u64 { x + 1 }\npub type Settings { n: u64 }\n";
+    let shapes = "pub type Even = Zero | Next(Box[Odd])\npub type Odd = One(Box[Even])\npub fn depth(e: Even) -> u64 { 0 }\npub fn top(o: Odd) -> u64 { 1 }\n";
+    let main = "pub fn dispatch(n: u64) -> u64 {\n    let total = helper.config(n)\n    total\n}\npub fn main() -> u64 {\n    dispatch(helper.config(3))\n}\npub fn uses_shapes(e: shapes.Even) -> u64 { shapes.depth(e) }\n";
+    let other = "pub fn other(s: helper.Settings) -> u64 { helper.config(s.n) }\npub fn more() -> u64 { helper.config(2) }\n";
+    let edit = |kind: &str| -> [String; 4] {
+        let (mut h, mut s, mut m, mut o) = (
+            helper.to_string(),
+            shapes.to_string(),
+            main.to_string(),
+            other.to_string(),
+        );
+        let d = m.find("pub fn dispatch").unwrap();
+        let e = m.find("pub fn main").unwrap();
+        let u = m.find("pub fn uses_shapes").unwrap();
+        match kind {
+            "base" => {}
+            "body" => m = m.replace("    total\n", "    let _ = 0u8\n    total\n"),
+            "body-literal" => {
+                m = m.replace("    total\n", "    let _ = \"zz-new-literal\"\n    total\n")
+            }
+            "signature" => {
+                h = h.replace("config(x: u64)", "config(x: u64, _extra: u64)");
+                for t in [&mut m, &mut o] {
+                    *t = t
+                        .replace("helper.config(n)", "helper.config(n, 0)")
+                        .replace("helper.config(3)", "helper.config(3, 0)")
+                        .replace("helper.config(s.n)", "helper.config(s.n, 0)")
+                        .replace("helper.config(2)", "helper.config(2, 0)");
+                }
+            }
+            "add" => m.push_str("pub fn extra_item() -> u32 {\n    7\n}\n"),
+            "remove" => m = format!("{}{}", &m[..e], &m[u..]),
+            "import" => m = m.replace("    total\n", "    total + helper.checksum(n)\n"),
+            "rename" => m = m.replace("pub fn main(", "pub fn main_renamed("),
+            "reorder" => m = format!("{}{}{}", &m[e..u], &m[d..e], &m[u..]),
+            "comment" => m = format!("// a comment line above dispatch\n{m}"),
+            "whitespace" => m = format!("\n\n{m}"),
+            "recursive-member" => s = s.replace("One(Box[Even])", "One(Box[Even]) | Two(u64)"),
+            "recursive-edge" => {
+                s = s.replace(
+                    "pub type Odd = One(Box[Even])",
+                    "pub type Odd = One(Box[Even], helper.Settings)",
+                )
+            }
+            "settings" => h = h.replace("{ n: u64 }", "{ n: u64, m: u64 }"),
+            _ => unreachable!("{kind}"),
+        }
+        [h, s, m, o]
+    };
+    type Old = (
+        ContentHash,
+        BTreeMap<Arc<DefPath>, ContentHash>,
+        ContentHash,
+        ContentHash,
+    );
+    let build = |kind: &str| -> BTreeMap<DefPath, (Old, DefinitionKey)> {
+        let dir = tempfile::tempdir().unwrap();
+        let mut req = request("", dir.path());
+        req.inputs.packages[0].sources.clear();
+        for (name, text) in ["helper", "shapes", "main", "other"]
+            .into_iter()
+            .zip(edit(kind))
+        {
+            let file = dir.path().join(format!("{name}.hirsel"));
+            std::fs::write(&file, text).unwrap();
+            req.inputs.packages[0]
+                .sources
+                .push(hirsel_core_resolve::ModuleSource {
+                    file,
+                    modules: vec![name.into()],
+                    signatures: false,
+                });
+        }
+        let (product, legacy) = reuse::legacy::capture(|| {
+            Driver::default()
+                .check(req, &mut Meter::new(false))
+                .unwrap()
+        });
+        assert_eq!(legacy.len(), product.definitions.len());
+        product
+            .definitions
+            .iter()
+            .map(|(path, d)| {
+                let k = d.key.clone();
+                let old = (k.body, legacy[path].clone(), k.lookups, k.environment);
+                (path.clone(), (old, k))
+            })
+            .collect()
+    };
+    let base = build("base");
+    assert!(base.len() >= 8, "{}", base.len());
+    let mut report = vec![];
+    for kind in [
+        "body",
+        "body-literal",
+        "signature",
+        "add",
+        "remove",
+        "import",
+        "rename",
+        "reorder",
+        "comment",
+        "whitespace",
+        "recursive-member",
+        "recursive-edge",
+        "settings",
+    ] {
+        let edited = build(kind);
+        let (mut old_misses, mut new_misses) = (vec![], vec![]);
+        for (path, (old, new)) in &edited {
+            let Some((base_old, base_new)) = base.get(path) else {
+                continue;
+            };
+            if old != base_old {
+                old_misses.push(path.to_string());
+            }
+            if new != base_new {
+                new_misses.push(path.to_string());
+            }
+        }
+        assert!(
+            old_misses.iter().all(|p| new_misses.contains(p)),
+            "{kind}: old misses {old_misses:?} not covered by new misses {new_misses:?}"
+        );
+        report.push(format!(
+            "{kind}: old {} new {} equal {} {:?}",
+            old_misses.len(),
+            new_misses.len(),
+            old_misses == new_misses,
+            new_misses
+        ));
+    }
+    eprintln!("{}", report.join("\n"));
 }

@@ -170,11 +170,34 @@ struct Limit {
     forward: Option<usize>,
     grant: bool,
 }
+/// A cause cell an obligation holds unused (FAIL-10): the limit and amount it
+/// refunds to, and whether it is a resource's own cell, which its block's free
+/// refunds.
+#[derive(Clone, Copy)]
+struct Cell {
+    limit: usize,
+    amount: u64,
+    resource: bool,
+}
+/// A running `isolate`'s reservation (crate docs, "Isolation"): its cell's limit,
+/// and the active chain it set aside, with that chain's cells.
+struct Reservation {
+    limit: usize,
+    chain: Vec<Cause>,
+    cells: Vec<(usize, u64)>,
+}
 struct Task {
     limits: Vec<usize>,
+    /// The active chain: the causes of the failure in progress, primary first.
     chain: Vec<Cause>,
-    /// Used cause cells beyond the primary, with the limit each is charged to.
+    /// The active chain's cells, with the limit and amount each refunds to.
     cells: Vec<(usize, u64)>,
+    /// The obligations that can take a cause: the task's primary first, then one
+    /// per running finalizer, the innermost last. A cause goes into the last
+    /// one's cell; `None` once it is used.
+    obligations: Vec<Option<Cell>>,
+    /// The running `isolate`s' reservations, the innermost last.
+    reserved: Vec<Reservation>,
     /// The anchor each running activation of the task is at, innermost last, and
     /// whether its function inherits its caller's site (SITES.md 6(b)).
     at: Vec<(Option<Anchor>, bool)>,
@@ -187,8 +210,10 @@ struct Child {
     n: u64,
     limit: usize,
     joined: bool,
-    /// The child's used cells: its primary and each failed finalizer's.
+    /// The child's used cells: those of the chain it failed with.
     cells: Vec<(usize, u64)>,
+    /// Its primary cell when unused at its end, refunded when it is joined.
+    primary: Option<Cell>,
     /// Its causes, primary first, while no `Causes` holds them.
     chain: Vec<Cause>,
 }
@@ -366,10 +391,17 @@ fn run_world(
             collect_arrays(&f.ty, &mut mach.arrays);
         }
     }
+    // The root's primary cell is admitted with the run, outside its limit.
     let mut task = Task {
         limits: vec![0],
         chain: Vec::new(),
         cells: Vec::new(),
+        obligations: vec![Some(Cell {
+            limit: 0,
+            amount: 0,
+            resource: false,
+        })],
+        reserved: Vec::new(),
         at: Vec::new(),
     };
     let outcome = match mach.call(&mut task, f, args) {
@@ -1099,17 +1131,27 @@ impl Machine<'_> {
             let grant = self.mem[b].res.as_ref().expect("a resource block").grant;
             let g = self.open_limit(grant, self.mem[b].limit.expect("charged"), true);
             t.limits.push(g);
+            t.obligations.push(Some(Cell {
+                limit: self.mem[b].limit.expect("charged"),
+                amount: charge::CAUSE_CELL,
+                resource: true,
+            }));
             failed = self.call(t, FuncId(f.0), &[blk]).is_err();
             t.limits.pop();
             self.end_limit(g);
+            // FAIL-10: a used resource cell left with a chain; a cell an isolate
+            // installed in its place (unused) is refunded now.
+            let used = match t.obligations.pop().expect("the finalizer's obligation") {
+                Some(c) if c.resource => false,
+                Some(c) => {
+                    self.refund(c.limit, c.amount);
+                    true
+                }
+                None => true,
+            };
             let res = self.mem[b].res.as_mut().unwrap();
             res.settled = true;
-            res.cell_used |= failed;
-            if failed {
-                // FAIL-10: the resource's cell now holds a cause and leaves with the chain.
-                let l = self.mem[b].limit.unwrap();
-                t.cells.push((l, charge::CAUSE_CELL));
-            }
+            res.cell_used |= used;
         }
         failed |= self.drop_fields(t, blk, ty);
         let storage = self.recipes[ty.index()]
@@ -1119,18 +1161,57 @@ impl Machine<'_> {
         self.free_as(blk, charge, None, "a resource");
         failed
     }
-    /// Refund a joined or abandoned task's record, result slot and primary cell; the
-    /// reserved `n` came back when the child's limit ended. A failed child's primary
-    /// cell is among its used cells, which are returned to go with its `Causes`.
+    /// Refund a joined or abandoned task's record, result slot and unused primary
+    /// cell; the reserved `n` came back when the child's limit ended. The spawn's
+    /// charge holds the child's first primary cell, which may have left with a
+    /// chain: a used cell is among the cells returned to go with its `Causes`, or
+    /// went with one the child caught.
     fn settle_child(&mut self, i: usize) -> Vec<(usize, u64)> {
         let c = &mut self.children[i];
         assert!(!c.joined, "task handle used twice");
         c.joined = true;
-        let cell = if c.status == 0 { 0 } else { charge::CAUSE_CELL };
-        let (l, n) = (c.limit, c.charge - c.n - cell);
+        let (l, n) = (c.limit, c.charge - c.n - charge::CAUSE_CELL);
         let cells = std::mem::take(&mut c.cells);
+        let primary = c.primary.take();
         self.refund(l, n);
+        if let Some(p) = primary {
+            self.refund(p.limit, p.amount);
+        }
         cells
+    }
+    /// A chain as the run time delivers it, a `Causes` owning `cells`: one cell per
+    /// cause, each a `Cause` in core's layout then the next cell (crate docs,
+    /// "Causes"). The head cell.
+    fn deliver(&mut self, chain: Vec<Cause>, cells: Vec<(usize, u64)>) -> u64 {
+        let mut head = 0;
+        for c in chain.iter().rev() {
+            let cell = self.block(CELL_NEXT + 8, None, 0, None);
+            let tag = CAUSE_KINDS.iter().position(|k| *k == c.kind).unwrap();
+            if c.kind == "Fail" {
+                for (j, w) in c.message.into_iter().enumerate() {
+                    self.store(cell + 8 * j as u64, 8, w);
+                }
+            } else {
+                self.store(cell + CAUSE_CAPACITY, 8, CAUSE_KIND_START + tag as u64);
+            }
+            self.store(cell + CAUSE_SITE, 8, site_word(c.site));
+            self.store(cell + CELL_NEXT, 8, head);
+            head = cell;
+        }
+        self.causes.insert(head, cells);
+        head
+    }
+    /// FAIL-10: record a cause in the innermost obligation's unused cell, which
+    /// then leaves with the chain.
+    fn record(&mut self, t: &mut Task, cause: Cause) {
+        let cell = t
+            .obligations
+            .last_mut()
+            .expect("a failure outside every obligation")
+            .take()
+            .expect("a failure whose obligation's cell is already used");
+        t.cells.push((cell.limit, cell.amount));
+        t.chain.push(cause);
     }
     /// MEM-16: drop one holder; at zero clean the payload and free the node. The
     /// payload holds no resource, so nothing here fails or runs user code.
@@ -1143,6 +1224,8 @@ impl Machine<'_> {
                 limits: Vec::new(),
                 chain: Vec::new(),
                 cells: Vec::new(),
+                obligations: Vec::new(),
+                reserved: Vec::new(),
                 at: Vec::new(),
             };
             assert!(
@@ -1178,10 +1261,17 @@ impl Machine<'_> {
                 let bytes = self.get(a[1], self.held(x) as usize).to_vec();
                 self.put(xb, &bytes);
                 let rb = self.block(self.held(r), None, 0, None);
+                // The child's primary cell is part of the spawn's charge to `cur`.
                 let mut child = Task {
                     limits: vec![lim],
                     chain: Vec::new(),
                     cells: Vec::new(),
+                    obligations: vec![Some(Cell {
+                        limit: cur,
+                        amount: charge::CAUSE_CELL,
+                        resource: false,
+                    })],
+                    reserved: Vec::new(),
                     at: Vec::new(),
                 };
                 let f = FuncId((a[2] - FN_BASE) as u32);
@@ -1208,10 +1298,8 @@ impl Machine<'_> {
                     Some("Cancelled") => 2,
                     _ => 1,
                 };
-                let (mut cells, chain) = (child.cells, child.chain);
-                if status != 0 {
-                    cells.insert(0, (cur, charge::CAUSE_CELL));
-                }
+                let (cells, chain) = (child.cells, child.chain);
+                let primary = child.obligations[0];
                 self.children.push(Child {
                     status,
                     result: rb,
@@ -1222,6 +1310,7 @@ impl Machine<'_> {
                     joined: false,
                     cells,
                     chain,
+                    primary,
                 });
                 vec![TASK_BASE + self.children.len() as u64 - 1, 0]
             }
@@ -1243,31 +1332,68 @@ impl Machine<'_> {
                 if status == 0 {
                     vec![0, 0]
                 } else {
-                    // The chain as the run time delivers it: one cell per cause, each
-                    // a `Cause` in core's layout then the next cell (crate docs, "Causes").
                     let chain = std::mem::take(&mut self.children[i].chain);
-                    let mut head = 0;
-                    for c in chain.iter().rev() {
-                        let cell = self.block(CELL_NEXT + 8, None, 0, None);
-                        let tag = CAUSE_KINDS.iter().position(|k| *k == c.kind).unwrap();
-                        if c.kind == "Fail" {
-                            for (j, w) in c.message.into_iter().enumerate() {
-                                self.store(cell + 8 * j as u64, 8, w);
-                            }
-                        } else {
-                            self.store(cell + CAUSE_CAPACITY, 8, CAUSE_KIND_START + tag as u64);
-                        }
-                        self.store(cell + CAUSE_SITE, 8, site_word(c.site));
-                        self.store(cell + CELL_NEXT, 8, head);
-                        head = cell;
-                    }
-                    self.causes.insert(head, cells);
-                    vec![u64::from(status), head]
+                    vec![u64::from(status), self.deliver(chain, cells)]
                 }
             }
             RtOp::CauseNext => vec![self.load(a[0] + CELL_NEXT, 8)],
             RtOp::CauseValue => vec![a[0]],
             RtOp::Cancel | RtOp::CheckCancel => vec![], // every child has already ended
+            // Isolation (crate docs): a reservation on entry, set aside with the
+            // active chain; refunded when the body returns; on a caught failure the
+            // chain becomes a `Causes`, and the reserved cell takes the place of the
+            // obligation cell the failure used, or is refunded when it used none.
+            RtOp::IsolateEnter => {
+                assert!(
+                    t.obligations.last().is_some_and(Option::is_some),
+                    "isolate entered with its obligation's cell used"
+                );
+                if let Err(room) = self.admit(cur, charge::CAUSE_CELL) {
+                    return Ok(vec![0, room]);
+                }
+                let r = Reservation {
+                    limit: cur,
+                    chain: std::mem::take(&mut t.chain),
+                    cells: std::mem::take(&mut t.cells),
+                };
+                t.reserved.push(r);
+                vec![1, 0]
+            }
+            RtOp::IsolateLeave => {
+                let r = t.reserved.pop().expect("isolate_leave with no reservation");
+                assert!(t.chain.is_empty(), "isolate_leave during a failure");
+                self.refund(r.limit, charge::CAUSE_CELL);
+                (t.chain, t.cells) = (r.chain, r.cells);
+                vec![]
+            }
+            RtOp::IsolateCatch => {
+                let r = t.reserved.pop().expect("isolate_catch with no reservation");
+                assert!(!t.chain.is_empty(), "isolate_catch with no failure");
+                if t.chain[0].kind == "Cancelled" {
+                    // FAIL-16: not caught; the failure goes on past the isolate.
+                    self.refund(r.limit, charge::CAUSE_CELL);
+                    let (chain, cells) =
+                        (std::mem::take(&mut t.chain), std::mem::take(&mut t.cells));
+                    (t.chain, t.cells) = (r.chain, r.cells);
+                    t.chain.extend(chain);
+                    t.cells.extend(cells);
+                    return Err(Stop::Chained);
+                }
+                let (chain, cells) = (std::mem::take(&mut t.chain), std::mem::take(&mut t.cells));
+                (t.chain, t.cells) = (r.chain, r.cells);
+                let head = self.deliver(chain, cells);
+                let top = t.obligations.last_mut().expect("an obligation");
+                if top.is_none() {
+                    *top = Some(Cell {
+                        limit: r.limit,
+                        amount: charge::CAUSE_CELL,
+                        resource: false,
+                    });
+                } else {
+                    self.refund(r.limit, charge::CAUSE_CELL);
+                }
+                vec![head]
+            }
             RtOp::DestId => {
                 self.dests += 1;
                 vec![self.dests]
@@ -1514,6 +1640,7 @@ impl Machine<'_> {
     }
     fn blocks(&mut self, t: &mut Task, b: &Body, args: &[u64], slots: &[u64]) -> X<Vec<u64>> {
         let depth = t.limits.len();
+        let reserved = t.reserved.len();
         let mut vals = vec![0u64; b.values.len()];
         let mut places = vec![(0u64, At::Other); b.addresses.len()];
         let pool = |r: PoolRange<ValueId>| r.get(&b.pools.values).unwrap().to_vec();
@@ -1531,11 +1658,12 @@ impl Machine<'_> {
                 if let Err(stop) = r {
                     if let Stop::Cause(c) = stop {
                         let site = self.site(t);
-                        t.chain.push(Cause {
+                        let cause = Cause {
                             kind: c,
                             message: [0; 3],
                             site,
-                        });
+                        };
+                        self.record(t, cause);
                     }
                     match inst.fail(b) {
                         Some(fb) => {
@@ -1579,6 +1707,7 @@ impl Machine<'_> {
                 }
                 Terminator::Return(r) => {
                     assert_eq!(t.limits.len(), depth, "a return left a bound scope open");
+                    assert_eq!(t.reserved.len(), reserved, "a return left an isolate open");
                     return Ok(pool(*r).iter().map(|v| vals[v.index()]).collect());
                 }
                 Terminator::Raise { cause: c, cleanup } => {
@@ -1589,11 +1718,12 @@ impl Machine<'_> {
                     }
                     t.at.last_mut().unwrap().0 = blk.anchor;
                     let site = self.site(t);
-                    t.chain.push(Cause {
+                    let cause = Cause {
                         kind: cause(*c),
                         message,
                         site,
-                    });
+                    };
+                    self.record(t, cause);
                     match cleanup {
                         Some(c) => (*c, Vec::new()),
                         None => break 'blocks,
@@ -1604,6 +1734,7 @@ impl Machine<'_> {
             };
         }
         assert_eq!(t.limits.len(), depth, "a failure left a bound scope open");
+        assert_eq!(t.reserved.len(), reserved, "a failure left an isolate open");
         Err(Stop::Chained)
     }
 

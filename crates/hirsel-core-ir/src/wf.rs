@@ -504,8 +504,34 @@ pub fn body(m: &Module, sig: &Signature, b: &Body) -> R {
     no_catch(b)
 }
 
-/// FAIL-14: no block reachable from a failure block returns normally.
+/// Whether block `bi` opens with `rt.isolate_catch`: a handler (crate docs,
+/// "Isolation").
+fn handler(b: &Body, bi: usize) -> bool {
+    let insts = b.blocks[bi].insts.get(&b.insts).unwrap_or_default();
+    insts.iter().position(|i| catch(b, i)) == Some(0)
+}
+fn catch(b: &Body, i: &Inst) -> bool {
+    matches!(*i, Inst::Call { call } if b.calls[call.index()].callee == Callee::Runtime(RtOp::IsolateCatch))
+}
+
+/// FAIL-14, FAIL-16: no block reachable from a failure block returns normally,
+/// except past a handler, whose catch ends the failure. A catch opens its block,
+/// and only failure edges enter that block.
 fn no_catch(b: &Body) -> R {
+    for bi in 0..b.blocks.len() {
+        let insts = b.blocks[bi].insts.get(&b.insts).unwrap_or_default();
+        need(insts.iter().skip(1).all(|i| !catch(b, i)), || {
+            format!("b{bi}: rt.isolate_catch is not the block's first instruction")
+        })?;
+    }
+    for e in &b.edges {
+        need(!handler(b, e.target.index()), || {
+            format!("b{}: a handler entered by an edge", e.target.0)
+        })?;
+    }
+    need(b.blocks.is_empty() || !handler(b, 0), || {
+        "the entry block is a handler".into()
+    })?;
     let succ = |bi: usize| -> Vec<BlockId> {
         let blk = &b.blocks[bi];
         let mut out: Vec<BlockId> = blk
@@ -551,7 +577,7 @@ fn no_catch(b: &Body) -> R {
         })
         .collect();
     while let Some(k) = work.pop() {
-        if std::mem::replace(&mut seen[k.index()], true) {
+        if std::mem::replace(&mut seen[k.index()], true) || handler(b, k.index()) {
             continue;
         }
         need(

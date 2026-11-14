@@ -75,6 +75,11 @@ impl Function<'_, '_, '_> {
             _ => self.b.ins().iconst(types::I64, 0),
         };
         let n = match op {
+            RtOp::IsolateEnter | RtOp::IsolateLeave | RtOp::IsolateCatch => {
+                return Err(unsupported(
+                    "isolate's runtime rows (crate docs, \"Isolation\") are not lowered yet",
+                ));
+            }
             RtOp::DestId => {
                 outputs[0] = self.c_call("hirsel_core_dest_id", &[], &[U], &[])?[0];
                 1

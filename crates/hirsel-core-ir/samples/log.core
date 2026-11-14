@@ -1,0 +1,161 @@
+; CoreIR sample, family: append-only logs (MEM-29), lowered as the crate docs' "Logs"
+; says: a `Log[E]` is an own record of one `box` field whose payload is the `List[E]`
+; carrier {data, length, capacity}; `log.new` admits the box (24, MEM-24's `log.new`
+; node); an append reads the node pointer out of a `view` of the handle and writes only
+; the node and the entries' storage; dropping the handle cleans the box, so the storage
+; and then the node are freed and refunded.
+;
+; Source (package samples@0, module log):
+;   f0: log.append(l: Log[u64], e: u64): its first growth admits capacity 4 (32), as
+;       list.push grows a List[u64]; Capacity is the status 1 and the room. Past 4 this
+;       sample's append raises Bounds instead of growing again (no run needs it).
+;   f1: fn fill(n) { let l = log.new()?; for i in 1..=n { log.append(l, 10 * i)? } ... }
+;       returning (status, a, b, c): 0 with the length and the first and last entries,
+;       read through the node; 1 with the room and the entries appended so far when an
+;       append is refused; 2 with the room when log.new is refused.
+;
+; Behaviour, derived by hand. The view freezes the handle's 8 bytes for the call, and
+; nothing else: the append's writes land in the box and the storage, behind the pointer
+; it loaded, so the call runs (a write of the handle's bytes stops the evaluator).
+; run: f1(3) -> 0, 3, 10, 30 | used 0                 ; 24 + 32, both refunded at the drop
+; run: f1(4) -> 0, 4, 10, 40 | used 0
+; run: f1(0) -> 0, 0, 0, 0 | used 0                   ; no entries: no storage
+; run limit 56: f1(1) -> 0, 1, 10, 10 | used 0        ; node 24 and storage 32 fit exactly
+; run limit 55: f1(2) -> 1, 31, 0, 0 | used 0         ; the first growth is refused: 55 - 24
+; run limit 23: f1(1) -> 2, 23, 0, 0 | used 0         ; the node is refused
+; run: f1(5) -> fail Bounds | used 0                  ; the log is cleaned on the failure path
+core v1
+type t0 = own "List[u64]" { items: seq u64 }
+type t1 = own "Log[u64]" { node: box t0 }
+sig g0 = (&view t1, u64) -> (u64, u64)
+sig g1 = (u64) -> (u64, u64, u64, u64)
+inst n0 = samples@0/log/append [] []
+inst n1 = samples@0/log/fill [] []
+fn f0 = n0 g0 {
+  addr a0 = v0 : t1                    ; the handle, lent as a view
+  addr a1 = a0 field 0 : ptr           ; its node pointer
+  addr a2 = v2 : t0                    ; the node: the List carrier
+  addr a3 = a2 field 0 byte v3 : ptr   ; data
+  addr a4 = a2 field 0 byte v4 : u64   ; length
+  addr a5 = a2 field 0 byte v5 : u64   ; capacity
+  addr a6 = v16 byte v18 : u64         ; the new entry
+b0(v0: ptr, v1: u64):
+  address a0
+  address a1
+  v2: ptr = read a1
+  v3: u64 = const 0
+  v4: u64 = const 8
+  v5: u64 = const 16
+  address a2
+  address a3
+  address a4
+  address a5
+  v6: u64 = read a4
+  v7: u64 = read a5
+  v8: bool = lt v6, v7
+  branch v8, b4, b1
+b1:
+  v9: bool = eq v7, v3
+  branch v9, b2, b6
+b2:                                    ; first growth: capacity 4 x 8, admitted before e commits
+  v10: u64 = const 32
+  v11: ptr, v12: u64 = alloc for seq u64 v10 align 8 charge v10
+  v13: ptr = const 0x0
+  v14: bool = ne v11, v13
+  branch v14, b3, b5
+b3:
+  store a3, v11
+  v15: u64 = const 4
+  store a5, v15
+  jump b4
+b4:
+  v16: ptr = read a3
+  v17: u64 = read a4
+  v18: u64 = mul v17, v4
+  address a6
+  store a6, v1
+  v19: u64 = const 1
+  v20: u64 = add v17, v19
+  store a4, v20
+  return v3, v3
+b5:                                    ; Capacity: the log is unchanged
+  v21: u64 = const 1
+  return v21, v12
+b6:
+  raise bounds
+}
+fn f1 = n1 g1 {
+  slot s0 = t1                         ; l
+  addr a0 = s0 : t1
+  addr a1 = s0 field 0 : ptr
+  addr a2 = v2 : t0                    ; the new node
+  addr a3 = a2 field 0 byte v6 : ptr
+  addr a4 = a2 field 0 byte v7 : u64
+  addr a5 = a2 field 0 byte v8 : u64
+  addr a6 = v21 byte v6 : u64          ; the first entry
+  addr a7 = v21 byte v25 : u64         ; the last entry
+b0(v0: u64):
+  v1: u64 = const 24
+  v2: ptr, v3: u64 = alloc for box t0 v1 align 8 charge v1
+  v4: ptr = const 0x0
+  v5: bool = ne v2, v4
+  branch v5, b1, b9
+b1:
+  live s0
+  address a0
+  address a1
+  v6: u64 = const 0
+  v7: u64 = const 8
+  v8: u64 = const 16
+  address a2
+  address a3
+  address a4
+  address a5
+  store a3, v4                         ; {null, 0, 0}: no storage yet
+  store a4, v6
+  store a5, v6
+  store a1, v2
+  jump b2(v6)
+b2(v9: u64):                           ; entries appended so far
+  v10: bool = lt v9, v0
+  branch v10, b3, b5
+b3:
+  v11: u64 = const 1
+  v12: u64 = add v9, v11
+  v13: u64 = const 10
+  v14: u64 = mul v12, v13
+  v15: u64, v16: u64 = call f0 g0 (&a0, v14) fail b8
+  v17: bool = eq v15, v6
+  branch v17, b4, b7
+b4:
+  jump b2(v12)
+b5:
+  v18: ptr = read a1                   ; the node, through the handle
+  v19: u64 = read a4
+  v20: bool = eq v19, v6
+  branch v20, b10, b6
+b6:
+  v21: ptr = read a3
+  address a6
+  v22: u64 = read a6
+  v23: u64 = const 1
+  v24: u64 = sub v19, v23
+  v25: u64 = mul v24, v7
+  address a7
+  v26: u64 = read a7
+  drop a0 t1
+  return v6, v19, v22, v26
+b7:
+  drop a0 t1
+  return v15, v16, v9, v6
+b8:
+  drop a0 t1
+  propagate
+b9:
+  v27: u64 = const 2
+  v28: u64 = const 0
+  return v27, v3, v28, v28
+b10:
+  drop a0 t1
+  return v6, v6, v6, v6
+}

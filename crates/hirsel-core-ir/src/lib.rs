@@ -456,7 +456,8 @@
 //! task's chain. Without one, the failure leaves the function at once, so a
 //! producer names a successor exactly where owners are live. A failure path ends
 //! in `propagate` (or `raise`, which appends a new cause first) and never reaches a
-//! `return`: nothing catches a failure (FAIL-14). Propagation reserves nothing;
+//! `return`: nothing catches a failure (FAIL-14) except an `isolate`'s handler,
+//! past which the path is normal code again ("Isolation"). Propagation reserves nothing;
 //! the chain lives in one cell per task and one per resource (FAIL-10). Cleanup on
 //! a failure path drops the live owners in the order the normal exit would. A
 //! failing finalizer appends its cause, its resource's fields are still cleaned and
@@ -474,6 +475,108 @@
 //! or a generated name with `$`). Every other body anchors each failure point in a
 //! non-core item: wf refuses one anchored in core, and the evaluator stops when an
 //! unanchored one would take its caller's site (SITES 6(b)).
+//!
+//! # Isolation (FORM #101, FAIL-16)
+//!
+//! `isolate(body)` is three runtime rows and a handler block, over the status
+//! returns above; there is no new terminator and no new edge kind.
+//!
+//! ```text
+//!   ok, room = call rt.isolate_enter ()       ; never fails
+//!   branch ok, bCall, bRefused
+//! bCall:
+//!   r = call body (..) fail bH                ; the body's failures enter bH
+//!   call rt.isolate_leave ()
+//!   ... Ok(Ok(r))
+//! bH:                                         ; the handler
+//!   cs = call rt.isolate_catch () fail <the enclosing cleanup, or none>
+//!   ... Ok(Error(cs))
+//! bRefused:
+//!   ... Error(Capacity { available: room })   ; the body is not called
+//! ```
+//!
+//! A **handler** is a block whose first instruction is `rt.isolate_catch`. wf
+//! refuses a catch anywhere else, a handler entered by an edge (only failure
+//! successors enter it, so the chain is never empty there), and an entry block that
+//! is one; its failure-path walk (FAIL-14) stops at a handler. Between `enter` and
+//! its `leave` or catch, the producer names the body's call (and the cleanup of
+//! anything the isolate's own frame made since `enter`) with failure successors
+//! that reach the handler, so every exit of the activation passes exactly one of the
+//! two. Reservations nest LIFO within an activation, and none is open at its return
+//! or failure exit (the evaluator stops otherwise).
+//!
+//! **The cause-cell proof.** Every task holds one primary cause cell (32) and every
+//! resource one; a failure records into the *current obligation*, the cell of the
+//! innermost running finalizer's resource or else the task's primary, and a used
+//! obligation is never recorded into again (FAIL-10). Let O be the current
+//! obligation, C the active chain and its cells, and N a cell of 32.
+//! - `enter`: admit N against the current limit (MEM-24). If refused, return
+//!   (false, the room) and change nothing. Otherwise push a reservation {N, the
+//!   limit charged, S := C}, set C := empty, and return (true, 0). Normal code runs
+//!   only while O is unused, so the body starts with O unused and C empty.
+//! - `leave` (the body returned): pop; C is empty; refund N; C := S.
+//! - `isolate_catch` (the body failed, its cleanup done): pop; C is not empty.
+//!   - If C's primary cause is `Cancelled`, it is not caught: refund N, C := S ++ C,
+//!     and fail (status 1) adding no cause, so the enclosing failure path or the
+//!     caller's continues the cancellation with every cause intact.
+//!   - Otherwise the result `Causes` takes C and its cells, C := S, and N replaces
+//!     what the body used: if O is now used (the primary cause went into it), O := N;
+//!     if O is unused (every cause the body made went into resource cells, as when a
+//!     finalizer fails on the body's normal exit), refund N.
+//!
+//! The invariant every row keeps: each cell is in exactly one place (an
+//! obligation, a reservation, C, a saved S, or a live `Causes`, which refunds its
+//! cells when dropped), normal code runs with O unused, and C is empty outside
+//! failure paths. So after a caught failure the code after the isolate may fail
+//! again and has an unused cell to fail into, and the charge stays balanced: a
+//! returned body costs 0, a caught one 32 while the caught primary's cell is the
+//! task's (`isolate`'s MEM-24 row). Nested isolates are the same law one level in:
+//! the inner catch makes N_inner the obligation, the outer body may fail into it,
+//! and the outer catch replaces it with N_outer. In a finalizer, O is the
+//! resource's cell and the current limit is the grant: a refused `enter` there is
+//! still the value `Error(Capacity)`, never the grant's `Capacity` failure, and a
+//! failure path being cleaned (the finalizer of a failure-path drop) is S, set
+//! aside whole and restored by `leave` or the catch. Run stops are not failures
+//! and pass every isolate (FAIL-16).
+//!
+//! **Engines.** The runtime keeps the reservations in the task context (a stack of
+//! {cell, limit, saved head and tail}), and C is the context's chain; its entries
+//! are `hirsel_core_isolate_enter(ctx) -> {bool, u64}`, `hirsel_core_isolate_leave
+//! (ctx)` and `hirsel_core_isolate_catch(ctx) -> {ptr, u8}`, the last with the
+//! status of a failing row. Cranelift and LLVM lower the three as runtime calls
+//! and the catch's status through the existing status test; a handler is an
+//! ordinary block (the body call's failure successor). Neither engine may move or
+//! duplicate a catch, or assume C is empty in a handler. The evaluator runs the
+//! law (`samples/isolate.core`); `Cancelled` is unreachable there (a child runs to
+//! completion at its spawn), so the runtime tests the pass-through natively.
+//!
+//! **Reserved: a single `Result` with a frame-resident cause slot.** If a later
+//! form keeps the reservation in the isolating frame (`Causes` holding its head
+//! inline) instead of the context, the proof carries over as long as the slot
+//! holds only what a reservation holds (N, its limit, S) and the slot's frame is
+//! the one that runs `enter` and its `leave` or catch: LIFO per activation already
+//! makes the frame's lifetime the reservation's. What it would not cover is a
+//! `Causes` that keeps its head in a frame slot beyond the catch: the delivered
+//! chain must still own its cells outside the frame (the catch moves them out), or
+//! a `Causes` returned or stored would dangle when the frame ends.
+//!
+//! # Logs (FORM #101, MEM-29)
+//!
+//! `Log[E]` adds no form. Its row is `own "Log[E]" { node: box L }` with `L` the
+//! `List[E]` row: the 8-byte handle is a box pointer, the node is the box's 24-byte
+//! payload, the `List` carrier, charged 24 (`log.new`), and the entries' storage is
+//! that carrier's, admitted and grown by the list kernels as `list.push` would, so a
+//! `Log` is cleaned by its existing box and sequence classes (entries in index order,
+//! which is append order, then the node). `log.append` takes `&view` of the handle,
+//! loads the node pointer, and writes only behind it: wf refuses a body that writes
+//! its `view` place, and a node reached through a loaded pointer is not that place
+//! (Loans: places behind the parameter carry no loan). `log.finish` moves the
+//! carrier out of the node and frees the box. `noalias readonly` on the view stays
+//! valid: LLVM's `readonly` is about memory reached through pointers based on the
+//! argument, and a pointer loaded from the handle is not based on it; no write
+//! reaches the handle's 8 bytes during the call, which is all `noalias` claims; and
+//! [`roles::Facts`] gives addresses through a loaded pointer no role, so no alias
+//! scope covers the node. `samples/log.core` is the oracle.
 //!
 //! # Storage and admission (FORM v1a)
 //!
@@ -622,8 +725,8 @@
 //!
 //! **Runtime rows** (`Callee::Runtime`) are the runtime's own declared C entry
 //! points, with the row's parameters and results. Only the rows that can fail
-//! ([`RtOp::fails`]: `join`, `check_cancel`, `channel_new`, `send`, `receive`)
-//! append the `u8` status, and only those may name a failure successor. The
+//! ([`RtOp::fails`]: `join`, `check_cancel`, `channel_new`, `send`, `receive`,
+//! `isolate_catch`, and the host rows that wait) append the `u8` status, and only those may name a failure successor. The
 //! runtime entries behind instructions (`alloc`, `free`, `limit_enter`, region
 //! operations, `trim`) are not calls in FORM and report refusals as values.
 //! `rt.dest_id` is a runtime row with no parameters and one `u64`, no status;
@@ -722,6 +825,15 @@
 //! when a `view` of the same place is passed alongside, because neither is
 //! written. `take` does not say the place is readonly in LLVM's sense (a drop in
 //! place releases what it owns), and it does not say the pointer is not captured.
+//!
+//! Ruling 7 (OWN-11, OWN-20) costs the form nothing: when a call whose result is
+//! anchored to a `mut` parameter completes, the checker turns that loan into a
+//! freeze of the place for as long as the result lives, and a failed call leaves no
+//! freeze. Freezes are the checker's facts, as loans are, and no row carries them.
+//! The facts stay sound across the transition: a `place_blind` parameter's address
+//! is never returned and a `sealed` one's buffer never leaves (Roles), so no
+//! anchored result points into a place an emitter took either licence on, and the
+//! grow shadow (Growth) returns nothing that points into its slot.
 //!
 //! A `view` is not invariant beyond the call, and a `mut` place changes. Places
 //! behind the parameter (a carrier's buffer, a counted header, a queue, a region

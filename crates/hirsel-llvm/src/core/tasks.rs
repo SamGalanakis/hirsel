@@ -113,6 +113,11 @@ impl FunctionEmitter<'_> {
         let p = |v: &str| ("ptr".into(), v.to_string());
         let u = |v: &str| ("i64".into(), v.to_string());
         let values = match op {
+            RtOp::IsolateEnter | RtOp::IsolateLeave | RtOp::IsolateCatch => {
+                return Err(Error::Unsupported(
+                    "isolate's runtime rows (crate docs, \"Isolation\") are not lowered yet".into(),
+                ));
+            }
             RtOp::DestId => self.native_call("hirsel_core_dest_id", &[U], &[]),
             RtOp::ArgsLen => {
                 self.native_call("hirsel_core_args_len", &[U], &[p("%context"), u(&args[0])])

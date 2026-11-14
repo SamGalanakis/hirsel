@@ -27,6 +27,8 @@ const SAMPLES: &[(&str, &str)] = &[
     ("stable-keys", include_str!("../samples/stable-keys.core")),
     ("scalar-rows", include_str!("../samples/scalar-rows.core")),
     ("kernel", include_str!("../samples/kernel.core")),
+    ("isolate", include_str!("../samples/isolate.core")),
+    ("log", include_str!("../samples/log.core")),
 ];
 
 fn load(name: &str, text: &str) -> Module {
@@ -69,7 +71,7 @@ fn every_sample_is_well_formed() {
 /// Each case is a one-line edit of a correct body and the rule it breaks.
 #[test]
 fn well_formedness_rejects_producer_mistakes() {
-    let head = "core v1\nsig g0 = (i32, i32) -> (i32)\nsig g1 = (u64) -> (ptr)\nsig g2 = (u64) -> never\ninst n0 = p@0/m/f [] []\ninst n1 = p@0/m/stop [] []\nfn f0 = n0 g0 {\n";
+    let head = "core v1\nsig g0 = (i32, i32) -> (i32)\nsig g1 = (u64) -> (ptr)\nsig g2 = (u64) -> never\nsig g3 = () -> (ptr)\ninst n0 = p@0/m/f [] []\ninst n1 = p@0/m/stop [] []\nfn f0 = n0 g0 {\n";
     let tail = "fn f1 = n1 g2 extern\n";
     let ok =
         "b0(v0: i32, v1: i32):\n  v2: i32 = add v0, v1 fail b1\n  return v2\nb1:\n  propagate\n}\n";
@@ -121,6 +123,22 @@ fn well_formedness_rejects_producer_mistakes() {
         (
             "b0(v0: i32, v1: i32):\n  v2: u64 = const 8\n  v3: ptr, v4: u64 = alloc for u64 v2 align 8 charge v2\n  free v3 charge v2\n  return v0\n}\n",
             "not an own block's edge",
+        ),
+        // a catch past a block's first instruction runs after normal code there, so a
+        // block entered by a normal edge would catch nothing (FAIL-16)
+        (
+            "b0(v0: i32, v1: i32):\n  v2: i32 = add v0, v1 fail b1\n  return v2\nb1:\n  v3: u64 = const 0\n  v4: ptr = call rt.isolate_catch g3 ()\n  return v0\n}\n",
+            "not the block's first instruction",
+        ),
+        // a handler reached by a normal edge would catch with no failure in the chain
+        (
+            "b0(v0: i32, v1: i32):\n  v2: i32 = add v0, v1 fail b1\n  jump b1\nb1:\n  v3: ptr = call rt.isolate_catch g3 ()\n  return v0\n}\n",
+            "a handler entered by an edge",
+        ),
+        // the entry block is reached by the call, never by a failure
+        (
+            "b0(v0: i32, v1: i32):\n  v2: ptr = call rt.isolate_catch g3 ()\n  return v0\n}\n",
+            "the entry block is a handler",
         ),
         // entry parameters must be the signature's
         ("b0(v0: i32):\n  return v0\n}\n", "entry"),

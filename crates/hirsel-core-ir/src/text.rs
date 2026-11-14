@@ -246,6 +246,9 @@ fn rt(op: RtOp) -> String {
         RtOp::ArgsLen => "rt.args_len".into(),
         RtOp::ArgsGet => "rt.args_get".into(),
         RtOp::Host(op) => format!("rt.{}", op.name()),
+        RtOp::IsolateEnter => "rt.isolate_enter".into(),
+        RtOp::IsolateLeave => "rt.isolate_leave".into(),
+        RtOp::IsolateCatch => "rt.isolate_catch".into(),
     }
 }
 fn list<T>(items: impl IntoIterator<Item = T>, f: impl Fn(T) -> String) -> String {
@@ -1593,6 +1596,9 @@ impl BodyParser {
                 "cause_value" => RtOp::CauseValue,
                 "args_len" => RtOp::ArgsLen,
                 "args_get" => RtOp::ArgsGet,
+                "isolate_enter" => RtOp::IsolateEnter,
+                "isolate_leave" => RtOp::IsolateLeave,
+                "isolate_catch" => RtOp::IsolateCatch,
                 _ => match HostOp::ALL.into_iter().find(|op| op.name() == name) {
                     Some(op) => RtOp::Host(op),
                     None => return Err(format!("unknown engine operation `{t}`")),

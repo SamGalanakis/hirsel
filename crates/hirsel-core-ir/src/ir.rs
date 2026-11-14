@@ -687,6 +687,13 @@ pub enum RtOp {
     ArgsGet,
     /// A provider operation of `host`, `stdout` or `stderr` (CAP-5).
     Host(HostOp),
+    /// `isolate`'s entry: reserve a cause cell (crate docs, "Isolation").
+    IsolateEnter,
+    /// `isolate`'s body returned: refund the innermost reservation.
+    IsolateLeave,
+    /// `isolate`'s handler: take the caught chain as a `Causes`, or fail on with
+    /// it when its primary cause is `Cancelled`.
+    IsolateCatch,
 }
 
 /// The provider operations, numbered as the run time's `HirselCoreHostRequest`
@@ -797,11 +804,15 @@ impl RtOp {
     /// | `host_mkdtemp` | `Dir: u64`, name `ptr` | outcome |
     /// | `host_wall_ms`, `host_mono_ns` | `Clock: u64` | `u64` |
     /// | `stdout_write`, `stderr_write` | stream `u64`, string `ptr` | outcome |
+    /// | `isolate_enter` | | `bool`: reserved; `available: u64` (0 when reserved) |
+    /// | `isolate_leave` | | |
+    /// | `isolate_catch` | | `Causes` `ptr`: the caught chain's head |
     ///
     /// `f` is a plain function `(&X) -> () dest R`. `channel_new` with `cap` 0 fails
     /// with `Bounds`; `send`, `receive`, `join` and `check_cancel` fail with
-    /// `Cancelled` when they observe it (CONC-7). These five are the rows that can
-    /// fail ([`RtOp::fails`]); the others never do.
+    /// `Cancelled` when they observe it (CONC-7). `isolate_catch` fails, adding no
+    /// cause, when the chain it would catch has the primary cause `Cancelled`. These
+    /// six are the rows that can fail ([`RtOp::fails`]); the others never do.
     ///
     /// `compare_bytes` orders unsigned bytes from the first, a proper prefix first
     /// (SEM-7); it reads both ranges, writes nothing, admits nothing and takes no
@@ -848,6 +859,9 @@ impl RtOp {
             RtOp::CauseNext | RtOp::CauseValue => (vec![V(p)], vec![p]),
             RtOp::ArgsLen => (vec![V(u64_)], vec![u64_]),
             RtOp::ArgsGet => (vec![V(u64_), V(u64_)], vec![p]),
+            RtOp::IsolateEnter => (vec![], vec![bool_, u64_]),
+            RtOp::IsolateLeave => (vec![], vec![]),
+            RtOp::IsolateCatch => (vec![], vec![p]),
             RtOp::Host(op) => {
                 let outcome = vec![u64_, u8_, Ty::Scalar(Scalar::U32), u64_];
                 match op {
@@ -876,6 +890,7 @@ impl RtOp {
                 | RtOp::ChannelNew { .. }
                 | RtOp::Send { .. }
                 | RtOp::Receive { .. }
+                | RtOp::IsolateCatch
         ) || matches!(self, RtOp::Host(op) if op.waits())
     }
 
@@ -897,7 +912,10 @@ impl RtOp {
             | RtOp::CauseValue
             | RtOp::ArgsLen
             | RtOp::ArgsGet
-            | RtOp::Host(_) => vec![],
+            | RtOp::Host(_)
+            | RtOp::IsolateEnter
+            | RtOp::IsolateLeave
+            | RtOp::IsolateCatch => vec![],
         }
     }
 }

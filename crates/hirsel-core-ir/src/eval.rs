@@ -13,7 +13,7 @@
 use crate::*;
 use hirsel_core_layout::{
     Body as Shaped, FieldTy, Handle, Layout, Recipe, Repr, TypeRef, charge, compute, field_size,
-    map_entry,
+    map_entry, terminal,
 };
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
@@ -135,6 +135,9 @@ struct Blk {
     res: Option<Res>,
     /// A counted node's kind, fixed by its `alloc`; its operations must name it.
     counted: Option<Counted>,
+    /// Allocated `plain` (crate docs, "Terminal blocks"): the edge that cleans it
+    /// must be terminal.
+    plain: bool,
     /// Static data (`static dN`): read, never written or freed.
     fixed: bool,
     /// The liveness shadow of `mark` (crate docs, "Slot kernels"): each marked
@@ -530,6 +533,7 @@ impl Machine<'_> {
             charge,
             res,
             counted: None,
+            plain: false,
             fixed: false,
             marks: BTreeMap::new(),
         });
@@ -630,6 +634,16 @@ impl Machine<'_> {
             );
             m.0 = false;
         }
+    }
+    /// The block an owning edge cleans: one allocated `plain` has no cleanup frame, so
+    /// an engine may free it only where the edge is terminal (crate docs, "Terminal
+    /// blocks").
+    fn edge(&self, p: u64, edge: &FieldTy, what: &str) {
+        assert!(
+            !self.mem[split(p).0].plain || terminal(&self.m.types, &self.recipes, edge),
+            "{what} was allocated plain, but its edge ({edge:?}) is not terminal: \
+             cleaning it may resume, which needs a cleanup frame"
+        );
     }
     /// Cleanup glue's free: native glue refunds the charge it computes from the
     /// recipe, not the one the block was admitted with, so a block allocated with
@@ -864,6 +878,7 @@ impl Machine<'_> {
             }
             FieldTy::Box(x) => {
                 let p = self.load(at, 8);
+                self.edge(p, ty, "a box");
                 let failed = self.drop_value(t, p, *x);
                 let size = (!self.is_resource(*x)).then(|| self.held(*x));
                 self.free_as(p, charge::boxed(self.logical(*x)), size, "a box");
@@ -897,6 +912,9 @@ impl Machine<'_> {
                     // SEM-4: no element storage, nothing to clean (capacity 2^64 - 1).
                     return false;
                 }
+                if capacity != 0 {
+                    self.edge(block, ty, "list storage");
+                }
                 let mut failed = false;
                 for i in 0..length {
                     self.drop_marked(block + i * stride, stride as usize);
@@ -918,6 +936,9 @@ impl Machine<'_> {
                 let slots = self.load(at + 8, 8);
                 let capacity = self.load(at + 16, 8);
                 let e = map_entry(&self.m.types, &self.recipes, k, v);
+                if capacity != 0 {
+                    self.edge(block, ty, "map storage");
+                }
                 let mut failed = false;
                 for i in 0..slots {
                     let entry = block + i * e.stride;
@@ -1045,6 +1066,7 @@ impl Machine<'_> {
     /// MEM-16: drop one holder; at zero clean the payload and free the node. The
     /// payload holds no resource, so nothing here fails or runs user code.
     fn release(&mut self, node: u64, ty: TypeRef) {
+        self.edge(node, &FieldTy::Rc(ty), "a counted node");
         let count = self.load(node, 8) - 1;
         self.store(node, 8, count);
         if count == 0 {
@@ -1836,10 +1858,14 @@ impl Machine<'_> {
                             _ => None,
                         };
                         let p = self.block(vals[size.index()], Some(l), n, res);
-                        if let AllocKind::Counted(c) = kind {
-                            self.mem[split(p).0].counted = Some(c);
+                        if let AllocKind::Counted { count, .. } = kind {
+                            self.mem[split(p).0].counted = Some(count);
                             self.store(p, 8, 1);
                         }
+                        self.mem[split(p).0].plain = matches!(
+                            kind,
+                            AllocKind::Plain | AllocKind::Counted { plain: true, .. }
+                        );
                         if let AllocPlace::Region(r) = place {
                             let region =
                                 &mut self.regions[(vals[r.index()] - REGION_BASE) as usize];

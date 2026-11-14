@@ -540,14 +540,16 @@ pub enum Inst {
 /// and for a resource its cause cell and grant) is the engine's.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum AllocKind {
-    /// Own storage with no outgoing mechanical drop. No resumable frame.
+    /// Own storage that is terminal (crate docs, "Terminal blocks"): the edge that
+    /// will own it is one `hirsel_core_layout::terminal` holds of. No cleanup frame.
     Plain,
     /// General own storage, including descendants of counted payloads.
     Own,
     /// A counted node: the count (u64, starting at 1) at offset 0, the payload at 8.
     /// `Arc` makes the node with the atomic count every later `share`, `release`
     /// and `try_unwrap` of it uses (MEM-15); its operations name the same kind.
-    Counted(Counted),
+    /// `plain`: its payload is terminal, as for [`AllocKind::Plain`].
+    Counted { count: Counted, plain: bool },
     /// A resource block: `charge` covers its storage, its cause cell and `grant`.
     Resource { grant: u64 },
 }

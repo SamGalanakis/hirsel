@@ -23,7 +23,7 @@ pub use recipe::{
     CField, CLOSURE_CARRIER, CaseOps, Compact, CompactSet, DropRecipe, Encoding, FieldDrop, Fixed,
     Layout, LayoutError, MapEntry, Niche, POINTER, Pos, Recipe, SEQ_CARRIER, Size, Tag, case_of,
     case_word, compact_extent, compact_starts, compute, extend, field_niche, field_size, map_entry,
-    read_case, storage_free, tag_width, word,
+    read_case, storage_free, tag_width, terminal, word,
 };
 pub use shape::{
     Body, Carried, Case, Field, FieldTy, FuncRef, Handle, Repr, Scalar, Shape, Ty, TypeRef, Width,

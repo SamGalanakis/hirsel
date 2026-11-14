@@ -927,3 +927,51 @@ fn a_record_lends_its_niche_from_any_field_at_that_fields_offset() {
     assert_eq!((f.size, t.offset, t.width), (16, 8, 8));
     assert_eq!(f.offsets, vec![vec![], vec![0]]);
 }
+
+/// Bug: a block whose cleanup drops something is called terminal, so an engine
+/// frees it with no cleanup frame and skips (leaks) what it owns; or the reverse
+/// for the leaves BLOCK-PREFIX step 1 is about. Rows: 0 `Leaf {x: u64}`, 1 `Text
+/// {s: String}` (owns a buffer), 2 `Res` (a resource), 3 `Pair {l: Leaf, n: u64}`
+/// (inline, nothing to drop), 4 `Node {next: Box[Leaf]}` (owns a box).
+#[test]
+fn terminal_blocks_are_exactly_those_whose_cleanup_drops_nothing() {
+    let string = || FieldTy::Seq(Box::new(u(Scalar::U8)));
+    let row = |i: u32| TypeRef(i);
+    let shapes = [
+        record("Leaf", Repr::Own, vec![field("x", u(Scalar::U64))]),
+        record("Text", Repr::Own, vec![field("s", string())]),
+        record("Res", Repr::Resource, vec![field("n", u(Scalar::U64))]),
+        record(
+            "Pair",
+            Repr::Own,
+            vec![
+                field("l", FieldTy::Inline(row(0))),
+                field("n", u(Scalar::U64)),
+            ],
+        ),
+        record("Node", Repr::Own, vec![field("next", FieldTy::Box(row(0)))]),
+    ];
+    let r = compute(&shapes).unwrap();
+    let seq = |e: FieldTy| FieldTy::Seq(Box::new(e));
+    let map = |k: FieldTy, v: FieldTy| FieldTy::Map(Box::new(k), Box::new(v));
+    for (edge, want) in [
+        (FieldTy::Box(row(0)), true),
+        (FieldTy::Box(row(3)), true),
+        (FieldTy::Box(row(1)), false),
+        (FieldTy::Box(row(4)), false),
+        (FieldTy::Box(row(2)), false),
+        (FieldTy::Rc(row(0)), true),
+        (FieldTy::Arc(row(1)), false),
+        (string(), true),
+        (seq(FieldTy::Inline(row(3))), true),
+        (seq(FieldTy::Inline(row(1))), false),
+        (seq(string()), false),
+        (seq(FieldTy::Box(row(0))), false),
+        (map(u(Scalar::U64), FieldTy::Inline(row(0))), true),
+        (map(u(Scalar::U64), string()), false),
+        (map(string(), u(Scalar::U64)), false),
+        (u(Scalar::U64), false),
+    ] {
+        assert_eq!(terminal(&shapes, &r, &edge), want, "{edge:?}");
+    }
+}

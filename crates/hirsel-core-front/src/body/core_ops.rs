@@ -1152,7 +1152,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 result: node,
                 available,
                 region_entry: None,
-                kind: kind.map_or(AllocKind::Own, AllocKind::Counted),
+                kind: kind.map_or(AllocKind::Own, |count| AllocKind::Counted {
+                    count,
+                    plain: false,
+                }),
                 place: AllocPlace::Current,
                 charge,
                 overflow: Some(overflow),

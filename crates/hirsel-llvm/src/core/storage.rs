@@ -367,7 +367,7 @@ impl FunctionEmitter<'_> {
                 writeln!(self.code, "allocation_success{n}:").unwrap();
                 self.put(result, &block);
                 self.put(available, &room);
-                if let AllocKind::Counted(counted) = kind {
+                if let AllocKind::Counted { count: counted, .. } = kind {
                     let missing = self.calc(format!("icmp eq ptr {block}, null"));
                     let n = self.next;
                     self.next += 1;

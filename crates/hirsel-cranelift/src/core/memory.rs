@@ -168,13 +168,13 @@ impl Function<'_, '_, '_> {
                 self.guard(grant, 6, fail)?;
                 self.b.ins().jump(done, &[]);
                 self.b.switch_to_block(done);
-                if matches!(kind, AllocKind::Counted(_)) {
+                if let AllocKind::Counted { count, .. } = kind {
                     let init = self.b.create_block();
                     let ready = self.b.create_block();
                     self.b.ins().brif(refused, ready, &[], init, &[]);
                     self.b.switch_to_block(init);
                     let one = self.b.ins().iconst(types::I64, 1);
-                    if kind == AllocKind::Counted(Counted::Arc) {
+                    if count == Counted::Arc {
                         self.b.ins().atomic_store(
                             cranelift_codegen::ir::MemFlagsData::trusted(),
                             one,

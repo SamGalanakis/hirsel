@@ -988,11 +988,33 @@ fn zero_sized(shapes: &[Shape], ty: &FieldTy, seen: &mut Vec<TypeRef>) -> bool {
 }
 
 fn needs_drop(shapes: &[Shape], ty: &FieldTy, out: &Computed<'_>) -> bool {
+    drops(shapes, ty, &|t| done(out, t).drop.is_some())
+}
+
+/// Whether the block an owning edge (`Box`, `Rc`, `Arc`, a `Seq` or `Map` with
+/// storage) points at is terminal: cleaning its contents drops nothing, so its
+/// cleanup has nothing to resume and the block needs no cleanup frame. A `Box` or
+/// counted payload whose type has no drop recipe, `Seq` storage of elements that need
+/// no drop (`String` and `Bytes` buffers, a `List` of plain elements), `Map` storage
+/// whose keys and values need none. A resource is never terminal (its block has its
+/// own prefix and cleanup); any other edge holds no block: false.
+pub fn terminal(shapes: &[Shape], recipes: &[Recipe], edge: &FieldTy) -> bool {
+    let drop = |t: TypeRef| recipes[t.index()].drop.is_some();
+    match edge {
+        FieldTy::Box(t) | FieldTy::Rc(t) | FieldTy::Arc(t) => {
+            shapes[t.index()].repr != Repr::Resource && !drop(*t)
+        }
+        FieldTy::Seq(e) => !drops(shapes, e, &drop),
+        FieldTy::Map(k, v) => !drops(shapes, k, &drop) && !drops(shapes, v, &drop),
+        _ => false,
+    }
+}
+
+/// Whether a value of `ty` has anything to drop, given which rows have a recipe.
+fn drops(shapes: &[Shape], ty: &FieldTy, drop: &dyn Fn(TypeRef) -> bool) -> bool {
     match ty {
         FieldTy::Seq(e) => !zero_sized(shapes, e, &mut vec![]),
-        FieldTy::Inline(t) => {
-            !matches!(shapes[t.index()].repr, Repr::Compact(_)) && done(out, *t).drop.is_some()
-        }
+        FieldTy::Inline(t) => !matches!(shapes[t.index()].repr, Repr::Compact(_)) && drop(*t),
         FieldTy::Box(_)
         | FieldTy::Rc(_)
         | FieldTy::Arc(_)
@@ -1001,7 +1023,7 @@ fn needs_drop(shapes: &[Shape], ty: &FieldTy, out: &Computed<'_>) -> bool {
         | FieldTy::Handle(
             Handle::Task | Handle::Sender | Handle::Receiver | Handle::Causes | Handle::HostFile,
         ) => true,
-        FieldTy::Array(e, n) => *n > 0 && needs_drop(shapes, e, out),
+        FieldTy::Array(e, n) => *n > 0 && drops(shapes, e, drop),
         _ => false,
     }
 }

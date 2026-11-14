@@ -464,6 +464,33 @@ fn only_core_marks_slots_and_finalizes_own_rows() {
     }
 }
 
+/// Terminal blocks (crate docs, "Terminal blocks"). Bug: a producer allocates
+/// `plain` (no cleanup frame) a block whose owning edge is not terminal, here the
+/// box of a `Node` that owns a box of its own; an engine's counted worklist would
+/// then write a frame before the block's payer word. `own` there, and `plain` for
+/// the terminal leaf, run (both boxes charged round8(8) = 8, freed, used 0).
+#[test]
+fn a_plain_block_is_cleaned_only_by_a_terminal_edge() {
+    let module = |node: &str, leaf: &str| {
+        format!(
+            "core v1\ntype t0 = own \"Leaf\" {{ x: u64 }}\ntype t1 = own \"Node\" {{ b: box t0 }}\ntype t2 = own \"Top\" {{ n: box t1 }}\nsig g0 = () -> (u64)\ninst n0 = p@0/m/main [] []\nfn f0 = n0 g0 {{\n  slot s0 = t2\n  addr a0 = s0 byte v0 : ptr\n  addr a1 = v2 byte v0 : ptr\n  addr a2 = s0 : t2\nb0:\n  live s0\n  v0: u64 = const 0\n  v1: u64 = const 8\n  v2: ptr, v3: u64 = alloc {node} v1 align 8 charge v1\n  v4: ptr, v5: u64 = alloc {leaf} v1 align 8 charge v1\n  address a0\n  address a1\n  address a2\n  store a1, v4\n  store a0, v2\n  drop a2 t2\n  dead s0\n  return v0\n}}\n"
+        )
+    };
+    let run = |text: &str| {
+        let m = load("terminal", text);
+        wf::module(&m).unwrap();
+        std::panic::catch_unwind(|| eval::run(&m, FuncId(0), &[], u64::MAX))
+            .map(|r| r.used)
+            .map_err(|e| {
+                e.downcast::<String>()
+                    .map_or_else(|_| String::new(), |s| *s)
+            })
+    };
+    assert_eq!(run(&module("own", "plain")), Ok(0));
+    let err = run(&module("plain", "plain")).unwrap_err();
+    assert!(err.contains("a box was allocated plain"), "{err}");
+}
+
 /// Loans (crate docs, "Loans"). Bugs: a producer passes one place as a `mut`
 /// argument and as another argument, writes a place it holds as a `view` (both
 /// unsound once an emitter marks `mut` noalias and `view` readonly), or a body

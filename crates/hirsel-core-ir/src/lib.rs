@@ -161,8 +161,9 @@
 //! - A region alloc can return an optional third u64 result, the opaque payer-entry
 //!   token captured at admission. Only the destination writer passes it back to
 //!   trim; its numeric value is engine bookkeeping and is not program data.
-//!   `alloc plain` has Own's semantics but promises no outgoing mechanical drop;
-//!   general `alloc own` and counted nodes prepay a resumable native frame.
+//!   `alloc plain` has Own's semantics but promises no outgoing mechanical drop
+//!   (Terminal blocks); general `alloc own` and counted nodes prepay a resumable
+//!   native frame.
 //! - **Build**: a record `{blob, region, entry, charge, cursor, end = 16 + n, w, id = rt.dest_id}`; a
 //!   writer frame `{record, start, count, last}`; a `Child` `{id, at}`. Every
 //!   write checks, in order: the identity of each link it stores, in field order
@@ -467,6 +468,37 @@
 //! source operation is on, `rc.*` or `Rc[T]` gives `rc`, `arc.*` or `Arc[T]`
 //! gives `arc`, never from bounds of `T`; a row whose kind differs from its node's
 //! allocation is malformed (the evaluator stops on it).
+//!
+//! # Terminal blocks (FORM #84)
+//!
+//! A block is terminal when cleaning it has nothing to resume: freeing it drops no
+//! child and runs no user code. Which blocks are terminal is derived from the form,
+//! never stored: `hirsel_core_layout::terminal(shapes, recipes, edge)` holds of an
+//! owning edge (`box`, `rc`, `arc`, `seq`, `map`) exactly when the cleanup it
+//! starts is a free alone: a box or counted payload of a non-resource type with no
+//! drop recipe, or `List`/`Map` storage whose elements, keys and values need no
+//! drop. A `String`, a scalar `List` buffer and a `Box` of a type with no owned
+//! child are terminal; a `Box` of a type holding a `Box`, a `List[String]` or a
+//! resource payload is not.
+//!
+//! An allocation does not name the edge that will own its pointer, so the
+//! producer states it: `alloc plain` (own) and `alloc counted rc|arc plain`
+//! (counted) promise that the block is owned only by a terminal edge. The
+//! producer may always say `own` or `counted` without `plain` (a missed saving,
+//! never a fault); it must not say `plain` for a block a non-terminal edge owns.
+//! The evaluator checks that direction: cleaning a block allocated plain through
+//! an edge `terminal` does not hold of stops the run.
+//!
+//! Engines read the two halves where they act. The prefix is chosen at the
+//! `alloc` from its kind: a plain block may carry the 8-byte payer prefix with no
+//! cleanup frame; every other own or counted block carries the resumable frame.
+//! Cleanup glue reads `terminal(edge)` for each owning edge it releases: a
+//! terminal edge frees its block in place (`hirsel_core_free`, which finds the
+//! native base from the payer word, so it is correct for either prefix) instead
+//! of handing it to the containing worklist, which only ever receives blocks
+//! with a frame. An engine may keep the full frame for a plain block (a counted
+//! plain node, until the run time gives it the short prefix); freeing it
+//! terminally stays correct.
 //!
 //! # Runtime calls (FORM v1a)
 //!

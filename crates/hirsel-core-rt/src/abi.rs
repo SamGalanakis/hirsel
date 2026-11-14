@@ -45,7 +45,7 @@
 //! Inline contract: compare charge with current_limit.available, subtract on
 //! success and add it to outstanding. A plain block's only native word is its
 //! payer pointer at payload-8. Native allocation kind is 0 plain, 1 graph or 2
-//! resource. Payload offset is align_up(prefix_bytes, max(alignment,8)); native
+//! resource, or 3 fixed (STATIC32). Payload offset is align_up(prefix_bytes, max(alignment,8)); native
 //! size is offset+max(bytes,1). The payer word tags its low five bits: kind in
 //! bits 0..1; bits 2..4 encode log2(max(alignment,8))-3. Index 7 stores the
 //! alignment in one extra word before the prefix. Generic free takes pointer
@@ -942,5 +942,55 @@ pub unsafe fn inline_own_free_current(
         (*context.limit_record()).outstanding =
             (*context.limit_record()).outstanding.wrapping_sub(charge);
         crate::block::deallocate_plain(pointer, bytes, align);
+    }
+}
+
+/// Fixed last-release slow path. No status, admission or extra count/event.
+/// # Safety
+/// Count operation/event already transferred exclusive dead STATIC ownership;
+/// descriptor is immutable, exact and lives as long as the compiled program.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_release_static_last(
+    context: *mut Context,
+    node: NonNull<u8>,
+    descriptor: *const crate::block::Descriptor,
+) {
+    let mut list = Worklist { head: None };
+    // SAFETY: caller transfers the fixed block and its concrete descriptor.
+    unsafe {
+        crate::block::push_static(&mut list, node, descriptor);
+        counted::drain(context, &mut list);
+    }
+}
+/// Enqueue a uniquely owned Fixed block. No status/admission/event.
+/// # Safety
+/// Exclusive live worklist, dead STATIC block and immutable exact descriptor.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_release_static_own_enqueue(
+    list: *mut Worklist,
+    node: NonNull<u8>,
+    descriptor: *const crate::block::Descriptor,
+) {
+    // SAFETY: generated mechanical glue transfers the uniquely owned descendant.
+    unsafe {
+        crate::block::push_static(&mut *list, node, descriptor);
+    }
+}
+/// Consume a Fixed counted holder, enqueueing only on last release. No status;
+/// Arc retains the same decrement and event before its last-release work.
+/// # Safety
+/// Live holder under the count/event discipline, exclusive worklist, exact descriptor.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hirsel_core_release_static_enqueue(
+    list: *mut Worklist,
+    node: NonNull<u8>,
+    atomic: bool,
+    descriptor: *const crate::block::Descriptor,
+) {
+    // SAFETY: caller transfers a holder and the same immutable concrete descriptor.
+    unsafe {
+        if counted::decrement(node, atomic) {
+            crate::block::push_static(&mut *list, node, descriptor);
+        }
     }
 }

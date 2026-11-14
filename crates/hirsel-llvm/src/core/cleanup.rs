@@ -333,7 +333,7 @@ impl FunctionEmitter<'_> {
             FieldTy::Rc(t)
         };
         let recipe = (!hirsel_core_layout::terminal(&self.module.types, self.recipes, &edge))
-            .then(|| format!("@core_counted_drop_{}", t.0));
+            .then(|| format!("@core_static_counted_{}", t.0));
         self.release_fast(node, charge, recipe.as_deref(), atomic);
         Ok(())
     }
@@ -447,12 +447,12 @@ impl FunctionEmitter<'_> {
                 let logical = self.recipes[t.index()].logical_size.unwrap();
                 let (name, charge) = if matches!(field, FieldTy::Box(_)) {
                     (
-                        "hirsel_core_release_own_enqueue",
+                        "hirsel_core_release_static_own_enqueue",
                         hirsel_core_layout::charge::boxed(logical).unwrap(),
                     )
                 } else {
                     (
-                        "hirsel_core_release_enqueue",
+                        "hirsel_core_release_static_enqueue",
                         hirsel_core_layout::charge::counted(logical).unwrap(),
                     )
                 };
@@ -473,10 +473,12 @@ impl FunctionEmitter<'_> {
                         matches!(field, FieldTy::Arc(_)).to_string(),
                     ));
                 }
-                args.extend([
-                    ("i64".into(), charge.to_string()),
-                    ("ptr".into(), format!("@core_counted_drop_{}", t.0)),
-                ]);
+                let owner = if matches!(field, FieldTy::Box(_)) {
+                    "own"
+                } else {
+                    "counted"
+                };
+                args.push(("ptr".into(), format!("@core_static_{owner}_{}", t.0)));
                 self.runtime_void(name, &args);
                 self.line("ret i1 false");
             }
@@ -520,6 +522,21 @@ fn counted_glue(
             next: 0,
             intrinsics,
         };
+        let logical = recipes[t].logical_size.unwrap();
+        for (owner, charge, offset) in [
+            (
+                "own",
+                hirsel_core_layout::charge::boxed(logical).unwrap(),
+                0,
+            ),
+            (
+                "counted",
+                hirsel_core_layout::charge::counted(logical).unwrap(),
+                memory_layout::NODE_PAYLOAD,
+            ),
+        ] {
+            writeln!(text, "@core_static_{owner}_{t} = private constant {{ ptr, i64, i64 }} {{ ptr @core_counted_drop_{t}, i64 {charge}, i64 {offset} }}, align 8").unwrap();
+        }
         let field = FieldTy::Inline(TypeRef(t as u32));
         let cursor = e.calc("load i64, ptr %cursor");
         let next = e.calc(format!("add i64 {cursor}, 1"));

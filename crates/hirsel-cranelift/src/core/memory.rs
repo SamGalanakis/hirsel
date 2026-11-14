@@ -77,7 +77,11 @@ impl Function<'_, '_, '_> {
                 fail,
             } => {
                 let ctx = self.context;
-                let graph = !kind.terminal(&self.input.types, self.layouts);
+                let native_kind = match kind.cleanup(&self.input.types, self.layouts) {
+                    Some(hirsel_core_layout::Cleanup::Terminal) => memory_layout::NATIVE_PLAIN,
+                    Some(hirsel_core_layout::Cleanup::Fixed) => memory_layout::NATIVE_STATIC,
+                    _ => memory_layout::NATIVE_GRAPH,
+                };
                 let resource = match *kind {
                     AllocKind::Resource { grant } => Some(grant),
                     _ => None,
@@ -96,7 +100,8 @@ impl Function<'_, '_, '_> {
                 // there is no guessed function status or call to the old runtime.
                 let values = if resource.is_none() && !matches!(place, AllocPlace::Region(_)) {
                     let overflow = overflow.map(|v| self.get(v));
-                    let values = self.own_alloc(graph, place, size, alignment, charge, overflow)?;
+                    let values =
+                        self.own_alloc(native_kind, place, size, alignment, charge, overflow)?;
                     [values[0], self.b.ins().iconst(types::I64, 0), values[1]]
                 } else if let Some(overflow) = overflow {
                     let overflow = self.get(overflow);
@@ -112,7 +117,7 @@ impl Function<'_, '_, '_> {
                             AllocPlace::Like(v) => self.get(v),
                             _ => self.b.ins().iconst(types::I64, 0),
                         };
-                        let kind = self.b.ins().iconst(types::I8, i64::from(graph));
+                        let kind = self.b.ins().iconst(types::I8, i64::from(native_kind));
                         self.c_call(
                             "hirsel_core_alloc",
                             &[p, p, u, u, u, boolean, Ty::Scalar(Scalar::U8)],
@@ -139,7 +144,7 @@ impl Function<'_, '_, '_> {
                         AllocPlace::Region(_) => {
                             self.region_alloc(payer, size, alignment, charge)?
                         }
-                        _ => self.own_alloc(graph, place, size, alignment, charge, None)?,
+                        _ => self.own_alloc(native_kind, place, size, alignment, charge, None)?,
                     };
                     [values[0], self.b.ins().iconst(types::I64, 0), values[1]]
                 };
@@ -258,7 +263,7 @@ impl Function<'_, '_, '_> {
                                 hirsel_core_layout::FieldTy::Rc(hirsel_core_layout::TypeRef(ty.0))
                             },
                         ))
-                        .then(|| self.glues.resumes[ty.index()].unwrap()),
+                        .then(|| self.glues.fixed[ty.index()].unwrap()[1]),
                     ),
                     kind == Counted::Arc,
                 )?;

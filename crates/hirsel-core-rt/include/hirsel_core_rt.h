@@ -35,6 +35,11 @@ void hirsel_core_memory_checkpoint(const uint8_t *name, size_t len);
 #define HIRSEL_CORE_PLAIN_PREFIX_BYTES 8
 #define HIRSEL_CORE_GRAPH_PREFIX_BYTES 48
 #define HIRSEL_CORE_RESOURCE_PREFIX_BYTES 16
+#define HIRSEL_CORE_STATIC_PREFIX_BYTES 32
+#define HIRSEL_CORE_STATIC_DESCRIPTOR_RECIPE 0
+#define HIRSEL_CORE_STATIC_DESCRIPTOR_CHARGE 8
+#define HIRSEL_CORE_STATIC_DESCRIPTOR_PAYLOAD_OFFSET 16
+#define HIRSEL_CORE_STATIC_DESCRIPTOR_BYTES 24
 #define HIRSEL_CORE_CAUSE_BYTES 32
 #define HIRSEL_CORE_CAUSE_MESSAGE 0
 #define HIRSEL_CORE_CAUSE_MESSAGE_DATA 0
@@ -49,6 +54,7 @@ void hirsel_core_memory_checkpoint(const uint8_t *name, size_t len);
 #define HIRSEL_CORE_NATIVE_PLAIN 0
 #define HIRSEL_CORE_NATIVE_GRAPH 1
 #define HIRSEL_CORE_NATIVE_RESOURCE 2
+#define HIRSEL_CORE_NATIVE_STATIC 3
 typedef struct HirselCoreContext HirselCoreContext;
 typedef struct HirselCoreLimitRecord HirselCoreLimitRecord;
 typedef struct { uint64_t requested, available; } HirselCoreCapacity;
@@ -79,6 +85,13 @@ typedef struct HirselCoreWorklist HirselCoreWorklist;
 /* Resumable glue: cursor starts at 0. Advance it, enqueue at most one child,
    return false; return true only after all children and fields are cleaned. */
 typedef bool (*HirselCoreDropRecipe)(HirselCoreContext *, void *payload, uint64_t *cursor, HirselCoreWorklist *);
+/* Shared immutable Fixed metadata, not a language allocation. No status or
+   admission for the entries below; enqueue consumes ownership, last drains an
+   intrusive worklist without recursion. Descriptor survives the compiled run. */
+typedef struct { HirselCoreDropRecipe recipe; uint64_t charge, payload_offset; } HirselCoreStaticDescriptor;
+void hirsel_core_release_static_last(HirselCoreContext *, void *, const HirselCoreStaticDescriptor *);
+void hirsel_core_release_static_own_enqueue(HirselCoreWorklist *, void *, const HirselCoreStaticDescriptor *);
+void hirsel_core_release_static_enqueue(HirselCoreWorklist *, void *, bool atomic, const HirselCoreStaticDescriptor *);
 /* Inline Arc completion hooks: call only when ctx[CONTEXT_EVENTS] != 0.
    The event word/sink are immutable during a run. No TLS read on the taken path.
    No status/admission/suspension/count mutation.

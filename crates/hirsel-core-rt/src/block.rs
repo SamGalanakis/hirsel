@@ -5,9 +5,25 @@ use crate::{Capacity, Context, limit::Payer};
 use std::alloc::Layout;
 use std::ptr::NonNull;
 
-pub const PLAIN: u8 = 0;
-pub const GRAPH: u8 = 1;
-pub const RESOURCE: u8 = 2;
+pub const PLAIN: u8 = crate::abi_layout::NATIVE_PLAIN;
+pub const GRAPH: u8 = crate::abi_layout::NATIVE_GRAPH;
+pub const RESOURCE: u8 = crate::abi_layout::NATIVE_RESOURCE;
+pub const STATIC: u8 = crate::abi_layout::NATIVE_STATIC;
+/// Immutable generated metadata for one concrete fixed owning shape.
+#[repr(C)]
+pub struct Descriptor {
+    pub recipe: crate::counted::Recipe,
+    pub charge: u64,
+    pub payload_offset: u64,
+}
+#[repr(C)]
+struct StaticDead {
+    next: Option<NonNull<u8>>,
+    descriptor: *const Descriptor,
+    cursor: u64,
+}
+const _: () =
+    assert!(size_of::<StaticDead>() + size_of::<Payer>() == crate::abi_layout::STATIC_PREFIX_BYTES);
 pub const GRAPH_PREFIX_BYTES: usize = size_of::<Payer>() + size_of::<Frame>();
 #[repr(C)]
 struct Frame {
@@ -23,13 +39,7 @@ pub(crate) struct Dead {
 }
 #[inline]
 pub(crate) fn prefix(kind: u8) -> usize {
-    size_of::<Payer>()
-        + match kind {
-            PLAIN => 0,
-            GRAPH => size_of::<Frame>(),
-            RESOURCE => size_of::<*mut crate::causes::Resource>(),
-            _ => unreachable!(),
-        }
+    crate::abi_layout::own_prefix(kind)
 }
 #[inline]
 fn physical_layout(bytes: usize, align: usize, kind: u8) -> (Layout, usize) {
@@ -119,6 +129,60 @@ pub(crate) unsafe fn push_buffer(
 pub(crate) unsafe fn dead(payload: NonNull<u8>) -> *mut Dead {
     // SAFETY: push_dead initialized this uniquely owned dead graph node's frame.
     unsafe { (*frame(payload)).dead.as_mut_ptr() }
+}
+/// # Safety
+/// Exclusive dead STATIC block; descriptor lives for the compiled program.
+pub(crate) unsafe fn push_static(
+    list: &mut crate::counted::Worklist,
+    node: NonNull<u8>,
+    descriptor: *const Descriptor,
+) {
+    // SAFETY: STATIC reserves these three frame words before the payer word.
+    unsafe {
+        let frame = node.as_ptr().sub(prefix(STATIC)).cast::<StaticDead>();
+        frame.write(StaticDead {
+            next: list.head,
+            descriptor,
+            cursor: 0,
+        });
+        list.head = Some(node);
+    }
+}
+/// # Safety
+/// Node is the initialized dead head of an exclusive worklist. Returns its
+/// borrowed recipe state; the frame remains live until that recipe completes.
+pub(crate) unsafe fn resume_state(
+    node: NonNull<u8>,
+) -> (
+    crate::counted::Recipe,
+    *mut u8,
+    *mut u64,
+    Option<NonNull<u8>>,
+    u64,
+) {
+    // SAFETY: the native kind fixes the initialized frame and descriptor layout.
+    unsafe {
+        if funding(node).native_tag() & 3 == STATIC as usize {
+            let frame = &mut *node.as_ptr().sub(prefix(STATIC)).cast::<StaticDead>();
+            let descriptor = &*frame.descriptor;
+            (
+                descriptor.recipe,
+                node.as_ptr().add(descriptor.payload_offset as usize),
+                &mut frame.cursor,
+                frame.next,
+                descriptor.charge,
+            )
+        } else {
+            let frame = &mut *dead(node);
+            (
+                frame.recipe,
+                frame.payload,
+                &mut frame.cursor,
+                frame.next,
+                frame.charge,
+            )
+        }
+    }
 }
 #[inline]
 pub(crate) fn allocate(

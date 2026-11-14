@@ -121,7 +121,7 @@ impl FunctionEmitter<'_> {
     pub(super) fn fast_allocate(
         &mut self,
         resource: bool,
-        graph: bool,
+        native_kind: u8,
         place: AllocPlace,
         charge: &str,
         bytes: &str,
@@ -141,11 +141,7 @@ impl FunctionEmitter<'_> {
         if !matches!(place, AllocPlace::Current | AllocPlace::Like(_)) || align > 512 {
             return None;
         }
-        let prefix = if graph {
-            GRAPH_PREFIX_BYTES
-        } else {
-            PLAIN_PREFIX_BYTES
-        } as u64;
+        let prefix = own_prefix(native_kind) as u64;
         let alignment = align.max(8);
         let offset = prefix.next_multiple_of(alignment);
         let maximum = ((i64::MAX as u64) & !(alignment - 1)) - offset;
@@ -235,7 +231,7 @@ impl FunctionEmitter<'_> {
         let payload = self.calc(format!(
             "getelementptr{inbounds} i8, ptr {base}, i64 {offset}"
         ));
-        let tag = ((alignment.trailing_zeros() - 3) << 2) | u32::from(graph);
+        let tag = ((alignment.trailing_zeros() - 3) << 2) | u32::from(native_kind);
         let tagged = self.calc(format!("getelementptr i8, ptr {payer}, i64 {tag}"));
         let header = self.calc(format!(
             "getelementptr i8, ptr {payload}, i64 -{OWN_PAYER_BACK}"
@@ -254,7 +250,7 @@ impl FunctionEmitter<'_> {
                 ("i64".into(), align.to_string()),
                 ("i64".into(), charge.into()),
                 ("i1 zeroext".into(), overflow),
-                ("i8 zeroext".into(), u8::from(graph).to_string()),
+                ("i8 zeroext".into(), native_kind.to_string()),
             ],
         );
         self.line(format!("br label %allocation_done{n}"));
@@ -385,6 +381,25 @@ impl FunctionEmitter<'_> {
         self.runtime_void("hirsel_core_native_free", &[("ptr".into(), base)]);
         self.line(format!("br label %freed{n}"));
         writeln!(self.code, "free_slow{n}:").unwrap();
+        let fixed = self.calc(format!("icmp eq i64 {tag}, {NATIVE_STATIC}"));
+        let fixed = self.calc(format!("and i1 {fixed}, {positive}"));
+        self.line(format!(
+            "br i1 {fixed}, label %free_static{n}, label %free_generic{n}"
+        ));
+        writeln!(self.code, "free_static{n}:").unwrap();
+        let available = self.load_native(&current, LIMIT_AVAILABLE, "i64");
+        let restored = self.calc(format!("add i64 {available}, {charge}"));
+        self.store_native(&current, LIMIT_AVAILABLE, "i64", &restored);
+        let outstanding = self.load_native(&current, LIMIT_OUTSTANDING, "i64");
+        let remaining = self.calc(format!("sub i64 {outstanding}, {charge}"));
+        self.store_native(&current, LIMIT_OUTSTANDING, "i64", &remaining);
+        let base = self.calc(format!(
+            "getelementptr i8, ptr {pointer}, i64 -{STATIC_PREFIX_BYTES}"
+        ));
+        self.runtime_void("hirsel_core_native_free", &[("ptr".into(), base)]);
+        self.line(format!("br label %freed{n}"));
+        writeln!(self.code, "free_generic{n}:").unwrap();
+
         self.cold_void(
             "hirsel_core_free_value",
             &[
@@ -497,11 +512,10 @@ impl FunctionEmitter<'_> {
         }
         if let Some(recipe) = recipe {
             self.cold_void(
-                "hirsel_core_release_last",
+                "hirsel_core_release_static_last",
                 &[
                     ("ptr".into(), "%context".into()),
                     ("ptr".into(), node.into()),
-                    ("i64".into(), charge.to_string()),
                     ("ptr".into(), recipe.into()),
                 ],
             );

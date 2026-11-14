@@ -212,7 +212,8 @@ fn counted_hot_paths_are_inline_and_last_release_is_cold() {
     assert!(ir.contains("call void @hirsel_core_arc_shared"));
     assert!(ir.contains("call void @hirsel_core_arc_released"));
     assert!(ir.lines().any(
-        |line| line.contains("call void @hirsel_core_release_last") && line.ends_with(" cold")
+        |line| line.contains("call void @hirsel_core_release_static_last")
+            && line.ends_with(" cold")
     ));
     assert!(ir.contains("!\"branch_weights\""));
 }
@@ -243,9 +244,9 @@ fn atomic_helpers_use_checked_cas_and_release_acquire() {
         intrinsics: &mut intrinsics,
     };
     e.share_node("%node", true);
-    e.release_fast("%node", 24, Some("@recipe"), true);
+    e.release_fast("%node", 24, Some("@descriptor"), true);
     let mut ir = format!(
-        "define void @test(ptr %context, ptr %node) {{\nentry:\n{}{}  ret void\n}}\ndeclare zeroext i1 @recipe(ptr, ptr, ptr, ptr)\n",
+        "define void @test(ptr %context, ptr %node) {{\nentry:\n{}{}  ret void\n}}\ndeclare zeroext i1 @recipe(ptr, ptr, ptr, ptr)\n@descriptor = private constant {{ ptr, i64, i64 }} {{ ptr @recipe, i64 24, i64 8 }}\n",
         e.allocations, e.code
     );
     for decl in intrinsics {

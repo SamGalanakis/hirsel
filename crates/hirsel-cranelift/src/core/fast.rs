@@ -77,7 +77,7 @@ impl Function<'_, '_, '_> {
     }
     pub fn own_alloc(
         &mut self,
-        graph: bool,
+        native_kind: u8,
         place: AllocPlace,
         size: Value,
         align: u64,
@@ -96,11 +96,7 @@ impl Function<'_, '_, '_> {
         };
 
         let alignment = align.max(8);
-        let prefix = if graph {
-            memory_layout::GRAPH_PREFIX_BYTES
-        } else {
-            memory_layout::PLAIN_PREFIX_BYTES
-        } as u64;
+        let prefix = memory_layout::own_prefix(native_kind) as u64;
         let offset = prefix.next_multiple_of(alignment);
         let one = self.b.ins().iconst(types::I64, 1);
         let nonzero_size = self.b.ins().umax(size, one);
@@ -176,7 +172,7 @@ impl Function<'_, '_, '_> {
         self.b.ins().jump(done, &[null.into(), available.into()]);
         self.b.switch_to_block(allocate);
         self.debit(payer, charge, available)?;
-        let native_kind = u64::from(graph);
+        let native_kind = u64::from(native_kind);
         let tag = native_kind
             | (u64::from(alignment.trailing_zeros() - 3) << memory_layout::OWN_ALIGNMENT_SHIFT);
         let tagged = self.b.ins().bor_imm_s(payer, tag as i64);
@@ -377,6 +373,48 @@ pub(super) fn free(
     calls.c(object, b, "hirsel_core_native_free", &[P], &[], &[base])?;
     b.ins().jump(done, &[]);
     b.switch_to_block(slow);
+    let fixed = b
+        .ins()
+        .icmp_imm_s(IntCC::Equal, tag, i64::from(memory_layout::NATIVE_STATIC));
+    let fixed = b.ins().band(fixed, positive);
+    let fixed_local = b.create_block();
+    let generic = b.create_block();
+    b.set_cold_block(generic);
+    b.ins().brif(fixed, fixed_local, &[], generic, &[]);
+    b.switch_to_block(fixed_local);
+    let available = b.ins().load(
+        types::I64,
+        Flags::trusted(),
+        current,
+        memory_layout::LIMIT_AVAILABLE as i32,
+    );
+    let outstanding = b.ins().load(
+        types::I64,
+        Flags::trusted(),
+        current,
+        memory_layout::LIMIT_OUTSTANDING as i32,
+    );
+    let available = b.ins().iadd(available, charge);
+    let outstanding = b.ins().isub(outstanding, charge);
+    b.ins().store(
+        Flags::trusted(),
+        available,
+        current,
+        memory_layout::LIMIT_AVAILABLE as i32,
+    );
+    b.ins().store(
+        Flags::trusted(),
+        outstanding,
+        current,
+        memory_layout::LIMIT_OUTSTANDING as i32,
+    );
+    let base = b
+        .ins()
+        .iadd_imm_s(pointer, -(memory_layout::STATIC_PREFIX_BYTES as i64));
+    calls.c(object, b, "hirsel_core_native_free", &[P], &[], &[base])?;
+    b.ins().jump(done, &[]);
+    b.switch_to_block(generic);
+
     calls.c(
         object,
         b,
@@ -508,7 +546,7 @@ pub(super) fn release(
     calls: &mut calls::Calls<'_>,
     object: &mut ObjectModule,
     operands: [Value; 2],
-    cleanup: (u64, Option<cranelift_module::FuncId>),
+    cleanup: (u64, Option<cranelift_module::DataId>),
     atomic: bool,
 ) -> Result<()> {
     let [context, node] = operands;
@@ -556,16 +594,15 @@ pub(super) fn release(
     b.ins().brif(last, slow, &[], done, &[]);
     b.switch_to_block(slow);
     if let Some(recipe) = cleanup.1 {
-        let reference = calls.reference(object, b, recipe);
-        let recipe = b.ins().func_addr(types::I64, reference);
-        let charge = b.ins().iconst(types::I64, cleanup.0 as i64);
+        let reference = object.declare_data_in_func(recipe, b.func);
+        let recipe = b.ins().symbol_value(types::I64, reference);
         calls.c(
             object,
             b,
-            "hirsel_core_release_last",
-            &[P, P, U, P],
+            "hirsel_core_release_static_last",
+            &[P, P, P],
             &[],
-            &[context, node, charge, recipe],
+            &[context, node, recipe],
         )?;
     } else {
         let charge = b.ins().iconst(types::I64, cleanup.0 as i64);
@@ -632,11 +669,12 @@ pub(super) fn declare_allocators(
             } = inst
             {
                 let align = (*align).max(8);
-                let prefix = if kind.terminal(&input.types, layouts) {
-                    memory_layout::PLAIN_PREFIX_BYTES
-                } else {
-                    memory_layout::GRAPH_PREFIX_BYTES
-                } as u64;
+                let native_kind = match kind.cleanup(&input.types, layouts) {
+                    Some(hirsel_core_layout::Cleanup::Terminal) => memory_layout::NATIVE_PLAIN,
+                    Some(hirsel_core_layout::Cleanup::Fixed) => memory_layout::NATIVE_STATIC,
+                    _ => memory_layout::NATIVE_GRAPH,
+                };
+                let prefix = memory_layout::own_prefix(native_kind) as u64;
                 let offset = prefix.next_multiple_of(align);
                 if allocators
                     .iter()

@@ -250,12 +250,12 @@ impl Glue<'_, '_, '_> {
                                 charge,
                             )?;
                         } else {
-                            let recipe = self.callback(*t);
+                            let descriptor = self.descriptor(*t, false);
                             self.call(
-                                "hirsel_core_release_own_enqueue",
-                                &[P, P, U, P],
+                                "hirsel_core_release_static_own_enqueue",
+                                &[P, P, P],
                                 &[],
-                                &[list, node, charge, recipe],
+                                &[list, node, descriptor],
                             )?;
                         }
                     }
@@ -264,10 +264,6 @@ impl Glue<'_, '_, '_> {
                             .b
                             .ins()
                             .iconst(types::I8, i64::from(matches!(field, FieldTy::Arc(_))));
-                        let charge = self.icon(
-                            charge::counted(self.tables.layouts[t.index()].logical_size.unwrap())
-                                .unwrap(),
-                        );
                         if hirsel_core_layout::terminal(
                             &self.tables.input.types,
                             self.tables.layouts,
@@ -275,12 +271,12 @@ impl Glue<'_, '_, '_> {
                         ) {
                             self.release(node, *t, matches!(field, FieldTy::Arc(_)))?;
                         } else {
-                            let recipe = self.callback(*t);
+                            let descriptor = self.descriptor(*t, true);
                             self.call(
-                                "hirsel_core_release_enqueue",
-                                &[P, P, B, U, P],
+                                "hirsel_core_release_static_enqueue",
+                                &[P, P, B, P],
                                 &[],
-                                &[list, node, atomic, charge, recipe],
+                                &[list, node, atomic, descriptor],
                             )?;
                         }
                     }

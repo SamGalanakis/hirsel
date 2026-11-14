@@ -265,7 +265,11 @@ impl FunctionEmitter<'_> {
             } => {
                 // The prefix follows the block's cleanup class (crate docs,
                 // "Cleanup classes"): terminal blocks carry only the payer word.
-                let graph = !kind.terminal(&self.module.types, self.recipes);
+                let native_kind = match kind.cleanup(&self.module.types, self.recipes) {
+                    Some(hirsel_core_layout::Cleanup::Terminal) => memory_layout::NATIVE_PLAIN,
+                    Some(hirsel_core_layout::Cleanup::Fixed) => memory_layout::NATIVE_STATIC,
+                    _ => memory_layout::NATIVE_GRAPH,
+                };
                 let resource = match *kind {
                     AllocKind::Resource { grant } => Some(grant),
                     _ => None,
@@ -275,7 +279,7 @@ impl FunctionEmitter<'_> {
                 let size = self.get(size);
                 let fast = self.fast_allocate(
                     resource.is_some(),
-                    graph,
+                    native_kind,
                     place,
                     &charge,
                     &size,
@@ -341,7 +345,7 @@ impl FunctionEmitter<'_> {
                         args.push(("i1 zeroext".into(), overflow));
                     }
                     if resource.is_none() && !matches!(place, AllocPlace::Region(_)) {
-                        args.push(("i8 zeroext".into(), u8::from(graph).to_string()));
+                        args.push(("i8 zeroext".into(), native_kind.to_string()));
                     }
                     self.allocation(name, &args)
                 };

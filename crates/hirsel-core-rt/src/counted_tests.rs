@@ -350,3 +350,104 @@ fn plain_counted_leaf_frees_without_invoking_a_recipe_or_touching_a_frame() {
         }
     }
 }
+
+static FIXED_CHAIN: crate::block::Descriptor = crate::block::Descriptor {
+    recipe: mixed_fixed_chain,
+    charge: 16,
+    payload_offset: crate::abi_layout::NODE_PAYLOAD as u64,
+};
+unsafe extern "C" fn mixed_fixed_chain(
+    _: *mut Context,
+    payload: *mut u8,
+    cursor: *mut u64,
+    work: *mut Worklist,
+) -> bool {
+    // SAFETY: fixture stores one child pointer; both frame classes yield once
+    // before resuming the parent. The child kind determines its prepaid frame.
+    unsafe {
+        if *cursor == 0 {
+            *cursor = 1;
+            if let Some(child) = NonNull::new(payload.cast::<*mut u8>().read()) {
+                if crate::block::funding(child).native_tag() & 3 == crate::block::STATIC as usize {
+                    crate::abi::hirsel_core_release_static_enqueue(
+                        work,
+                        child,
+                        false,
+                        &FIXED_CHAIN,
+                    );
+                } else {
+                    counted::enqueue(&mut *work, child, false, 16, mixed_fixed_chain);
+                }
+                return false;
+            }
+        }
+        true
+    }
+}
+#[test]
+fn fixed_and_dynamic_frames_share_one_nonrecursive_worklist() {
+    use crate::{abi_layout::*, block};
+    assert_eq!(size_of::<block::Descriptor>(), STATIC_DESCRIPTOR_BYTES);
+    assert_eq!(
+        std::mem::offset_of!(block::Descriptor, recipe),
+        STATIC_DESCRIPTOR_RECIPE
+    );
+    assert_eq!(
+        std::mem::offset_of!(block::Descriptor, charge),
+        STATIC_DESCRIPTOR_CHARGE
+    );
+    assert_eq!(
+        std::mem::offset_of!(block::Descriptor, payload_offset),
+        STATIC_DESCRIPTOR_PAYLOAD_OFFSET
+    );
+    let mut ctx = Context::new(2_000_000);
+    let mut head = ptr::null_mut();
+    for i in 0..100_000 {
+        let kind = if i % 2 == 0 {
+            block::GRAPH
+        } else {
+            block::STATIC
+        };
+        let node = block::allocate(ctx.payer(None), Some(16), 16, 8, kind).unwrap();
+        // SAFETY: fresh counted node receives one transferred child holder.
+        unsafe {
+            counted::initialize(node, false);
+            node.as_ptr()
+                .add(NODE_PAYLOAD)
+                .cast::<*mut u8>()
+                .write(head);
+        }
+        head = node.as_ptr();
+    }
+    ctx.current.inject(1, true);
+    // SAFETY: the only root holder is transferred; this head uses STATIC32.
+    unsafe {
+        let node = NonNull::new(head).unwrap();
+        assert!(counted::decrement(node, false));
+        crate::abi::hirsel_core_release_static_last(&mut ctx, node, &FIXED_CHAIN);
+    }
+    assert_eq!(ctx.available(), 2_000_000);
+    assert_eq!(ctx.current.attempts(), 0);
+}
+
+#[test]
+fn fixed_prefix_alignment_like_and_original_payer_refunds() {
+    use crate::block;
+    for align in [8, 16, 64, 1024] {
+        let mut ctx = Context::new(256);
+        ctx.limit_enter(128).unwrap();
+        let node = block::allocate(ctx.payer(None), Some(16), 16, align, block::STATIC).unwrap();
+        assert_eq!(node.as_ptr().addr() % align, 0);
+        // SAFETY: node remains live and pins its initialized payer word.
+        let payer = unsafe { block::funding(node) };
+        let replacement =
+            block::allocate_like(&ctx, Some(payer), Some(32), 32, align, block::STATIC).unwrap();
+        ctx.limit_exit();
+        // SAFETY: two exclusive cleaned allocations retain exact original charges.
+        unsafe {
+            block::free(node, 16);
+            block::free(replacement, 32);
+        }
+        assert_eq!(ctx.available(), 256);
+    }
+}

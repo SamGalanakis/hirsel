@@ -164,13 +164,19 @@ pub unsafe fn release_last(context: *mut Context, node: NonNull<u8>, charge: u64
     // SAFETY: caller transfers one holder and its generated mechanical recipe.
     unsafe {
         block::push_dead(&mut list, node, charge, recipe, 8);
+        drain(context, &mut list);
+    }
+}
+/// # Safety
+/// All list entries carry initialized intrusive frames and exact recipes.
+pub(crate) unsafe fn drain(context: *mut Context, list: &mut Worklist) {
+    // SAFETY: recipes yield at most one descendant and keep unfinished parents live.
+    unsafe {
         while let Some(node) = list.head {
-            let dead = block::dead(node);
-            let recipe = (*dead).recipe;
-            let payload = (*dead).payload;
-            if recipe(context, payload, &mut (*dead).cursor, &mut list) {
-                list.head = (*dead).next;
-                block::free_graph(node, (*dead).charge);
+            let (recipe, payload, cursor, next, charge) = block::resume_state(node);
+            if recipe(context, payload, cursor, list) {
+                list.head = next;
+                block::free_graph(node, charge);
             }
         }
     }

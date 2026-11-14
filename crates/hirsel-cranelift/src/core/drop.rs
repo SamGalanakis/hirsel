@@ -10,6 +10,7 @@ use resume::plan_type;
 pub(super) struct Glues {
     pub drops: Vec<Option<cranelift_module::FuncId>>,
     pub resumes: Vec<Option<cranelift_module::FuncId>>,
+    pub fixed: Vec<Option<[cranelift_module::DataId; 2]>>,
     pub buffers: Vec<(FieldTy, cranelift_module::FuncId)>,
 }
 const P: Ty = Ty::Ptr;
@@ -194,6 +195,51 @@ impl Glues {
                 );
             }
         }
+        let mut fixed = vec![None; layouts.len()];
+        for (i, function) in resumes.iter().enumerate() {
+            if let Some(function) = *function {
+                let logical = layouts[i].logical_size.unwrap();
+                let mut ids = Vec::new();
+                for (owner, charge, offset) in [
+                    ("own", charge::boxed(logical).unwrap(), 0),
+                    (
+                        "counted",
+                        charge::counted(logical).unwrap(),
+                        memory_layout::NODE_PAYLOAD as u64,
+                    ),
+                ] {
+                    let id = object
+                        .declare_data(
+                            &format!("hirsel.core.static.{owner}.{i}"),
+                            Linkage::Local,
+                            false,
+                            false,
+                        )
+                        .map_err(error)?;
+                    let mut image = vec![0; memory_layout::STATIC_DESCRIPTOR_BYTES];
+                    let endian = object.isa().endianness();
+                    let encode = |value: u64| match endian {
+                        cranelift_codegen::ir::Endianness::Little => value.to_le_bytes(),
+                        cranelift_codegen::ir::Endianness::Big => value.to_be_bytes(),
+                    };
+                    let at = memory_layout::STATIC_DESCRIPTOR_CHARGE;
+                    image[at..at + 8].copy_from_slice(&encode(charge));
+                    let at = memory_layout::STATIC_DESCRIPTOR_PAYLOAD_OFFSET;
+                    image[at..at + 8].copy_from_slice(&encode(offset));
+                    let mut data = DataDescription::new();
+                    data.define(image.into_boxed_slice());
+                    data.set_align(8);
+                    let reference = object.declare_func_in_data(function, &mut data);
+                    data.write_function_addr(
+                        memory_layout::STATIC_DESCRIPTOR_RECIPE as u32,
+                        reference,
+                    );
+                    object.define_data(id, &data).map_err(error)?;
+                    ids.push(id);
+                }
+                fixed[i] = Some([ids[0], ids[1]]);
+            }
+        }
         let mut buffers = Vec::new();
         fn collect(t: &FieldTy, buffers: &mut Vec<FieldTy>) {
             match t {
@@ -238,6 +284,7 @@ impl Glues {
         Ok(Self {
             drops,
             resumes,
+            fixed,
             buffers,
         })
     }
@@ -434,13 +481,10 @@ impl Glue<'_, '_, '_> {
             self.merge(status);
         }
     }
-    fn callback(&mut self, t: TypeRef) -> Value {
-        let f = self.calls.reference(
-            self.object,
-            &mut self.b,
-            self.glues.resumes[t.index()].unwrap(),
-        );
-        self.b.ins().func_addr(types::I64, f)
+    fn descriptor(&mut self, t: TypeRef, counted: bool) -> Value {
+        let id = self.glues.fixed[t.index()].unwrap()[usize::from(counted)];
+        let reference = self.object.declare_data_in_func(id, self.b.func);
+        self.b.ins().symbol_value(types::I64, reference)
     }
     fn fields(&mut self, base: Value, index: usize) -> Result<()> {
         let recipe = &self.tables.layouts[index];
@@ -607,7 +651,7 @@ impl Glue<'_, '_, '_> {
                         FieldTy::Rc(t)
                     },
                 ))
-                .then(|| self.glues.resumes[t.index()].unwrap()),
+                .then(|| self.glues.fixed[t.index()].unwrap()[1]),
             ),
             atomic,
         )

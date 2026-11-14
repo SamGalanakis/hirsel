@@ -42,8 +42,12 @@ buffers, and counted payloads of the same kind use this short prefix. Count and
 payload offsets stay the same. Terminal children free in place, including inside
 a counted parent's worklist; they never borrow a dormant frame. Generic producers
 derive the property after substitution and growth preserves it and the payer.
-Graph nodes additionally reserve an intrusive resumable destruction frame;
-resources reserve a state pointer. The
+Fixed nonleaf blocks use a 32-byte prefix: next, immutable descriptor,
+cursor and payer. The descriptor shares the concrete mechanical recipe, portable
+charge and payload offset across all blocks of that shape. Dynamic buffers and
+callable environments keep the 48-byte frame because their continuation depends
+on the live carrier or capture shape. One intrusive worklist resumes either frame
+without recursion or an external stack; resources reserve a state pointer. The
 allocator takes a native kind; kind and alignment tag the payer word so generic
 free needs only pointer and charge. These tags never affect logical charges. No legacy ABI is retained.
 

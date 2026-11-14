@@ -18,6 +18,29 @@ pub const OWN_ALIGNMENT_SHIFT: usize = 2;
 pub const PLAIN_PREFIX_BYTES: usize = 8;
 pub const GRAPH_PREFIX_BYTES: usize = 48;
 pub const RESOURCE_PREFIX_BYTES: usize = 16;
+pub const STATIC_PREFIX_BYTES: usize = 32;
+pub const NATIVE_PLAIN: u8 = 0;
+pub const NATIVE_GRAPH: u8 = 1;
+pub const NATIVE_RESOURCE: u8 = 2;
+pub const NATIVE_STATIC: u8 = 3;
+pub const STATIC_DESCRIPTOR_RECIPE: usize = 0;
+pub const STATIC_DESCRIPTOR_CHARGE: usize = 8;
+pub const STATIC_DESCRIPTOR_PAYLOAD_OFFSET: usize = 16;
+pub const STATIC_DESCRIPTOR_BYTES: usize = 24;
+pub const fn own_prefix(kind: u8) -> usize {
+    match kind {
+        NATIVE_PLAIN => PLAIN_PREFIX_BYTES,
+        NATIVE_GRAPH => GRAPH_PREFIX_BYTES,
+        NATIVE_RESOURCE => RESOURCE_PREFIX_BYTES,
+        NATIVE_STATIC => STATIC_PREFIX_BYTES,
+        _ => panic!("native block kind"),
+    }
+}
+// Fixed blocks use STATIC32: next/descriptor/cursor/payer. The immutable
+// descriptor contains recipe/portable charge/payload offset, shared per concrete
+// owning shape. Only dead nodes write a frame. Dynamic buffers retain GRAPH48;
+// terminal blocks PLAIN8, resources their separate prefix. STATIC's tag 3 is
+// deliberately outside OWN_ORDINARY_MAX_TAG: 2 identifies a resource, not graph.
 
 // Arc count mutations are inline under the scheduler's event turn.
 // If context[CONTEXT_EVENTS] != 0, call the context-first cold hook
@@ -91,6 +114,9 @@ pub const OWN_ORDINARY_MAX_TAG: usize = OWN_ORDINARY_GRAPH_TAG;
 // identity plus ordinary plain/GRAPH native layout. For nonzero charge, refund
 // available/outstanding directly and free(payload - the selected prefix).
 // Otherwise call free_value; it preserves original-payer/remote-event handling.
+// If that first test fails, raw_header XOR current == NATIVE_STATIC, with
+// nonzero charge, proves an ordinary local Fixed block: refund directly and
+// free(payload - STATIC_PREFIX_BYTES). This separate branch excludes Resource2.
 // Outstanding bytes retain the old slot across scope exit and re-entry. Resume
 // only binds/normalizes custody; owner events deliver eligible pending refunds.
 // Ordinary admission does not apply pending refunds or add an event. Refusal
@@ -99,7 +125,7 @@ pub const OWN_ORDINARY_MAX_TAG: usize = OWN_ORDINARY_GRAPH_TAG;
 
 // FORM #84/#89: an alloc whose named owning edge is terminal
 // (hirsel_core_layout::cleanup_class) selects PLAIN_PREFIX_BYTES; every other
-// ordinary block, counted or not, GRAPH_PREFIX_BYTES. Count stays at NODE_COUNT,
+// Fixed block, counted or not, STATIC_PREFIX_BYTES; Dynamic uses GRAPH_PREFIX_BYTES. Count stays at NODE_COUNT,
 // payload at NODE_PAYLOAD. A terminal owning edge frees immediately after its last
 // count event; it never borrows a graph frame. The alloc and the cleanup glue read
 // the same edge, so the prefix always fits the cleanup.

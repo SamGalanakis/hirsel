@@ -922,12 +922,20 @@ impl FunctionEmitter<'_> {
         format!("b{}", e.target.0)
     }
     fn edge_label(&mut self, edge: EdgeId) -> String {
+        let e = &self.body.edges[edge.index()];
+        if e.args.len == 0 {
+            return format!("b{}", e.target.0);
+        }
         let n = self.next;
         self.next += 1;
-        // Each edge gets its own block, including distinct switch arms to the same target.
+        // Value transfers need separate blocks, including distinct switch arms
+        // to the same target. Empty edges already name their final destination.
         format!("e{n}_{}", edge.0)
     }
     fn emit_edge(&mut self, label: &str, edge: EdgeId) {
+        if self.body.edges[edge.index()].args.len == 0 {
+            return;
+        }
         writeln!(self.code, "{label}:").unwrap();
         let to = self.edge(edge);
         self.line(format!("br label %{to}"));

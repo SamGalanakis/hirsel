@@ -17,13 +17,22 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let Some(id) = self.descriptors.of(value) else {
             return false;
         };
-        self.isolate_descriptor_forbidden_at(id, None)
+        self.isolate_descriptor_forbidden_at(id, None, &mut Vec::new())
     }
 
     /// A projected capture only carries the projected type's descriptor.  Keep a
     /// callback sibling in a tuple from poisoning an isolate that reads another
     /// field (FAIL-16); a projected callback field still refuses.
-    fn isolate_descriptor_forbidden_at(&mut self, id: u32, projected: Option<TyId>) -> bool {
+    fn isolate_descriptor_forbidden_at(
+        &mut self,
+        id: u32,
+        projected: Option<TyId>,
+        seen: &mut Vec<u32>,
+    ) -> bool {
+        if seen.contains(&id) {
+            return false;
+        }
+        seen.push(id);
         let range = self.descriptors.ranges[id as usize];
         let captures = self
             .descriptors
@@ -49,8 +58,19 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let ty = projected
                     .or_else(|| self.descriptor_capture_type(*capture, var.ty))
                     .unwrap_or(var.ty);
-                matches!(var.origin, Origin::ViewParam | Origin::MutParam)
+                if matches!(var.origin, Origin::ViewParam | Origin::MutParam)
                     && self.contains_callback(ty)
+                {
+                    return true;
+                }
+                self.descriptors
+                    .slots
+                    .get(&capture.slot)
+                    .copied()
+                    .is_some_and(|child| {
+                        self.contains_callback(ty)
+                            && self.isolate_descriptor_forbidden_at(child, Some(ty), seen)
+                    })
             });
         }
         fields.iter().any(|(component, child)| {
@@ -58,7 +78,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 anchors::Component::Field(i) => self.field_ty(ty, *i),
                 _ => None,
             });
-            self.isolate_descriptor_forbidden_at(*child, ty)
+            self.isolate_descriptor_forbidden_at(*child, ty, seen)
         })
     }
 

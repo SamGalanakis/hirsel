@@ -1,0 +1,125 @@
+scoped type Boxed {
+    cb: scoped fn() -> u64,
+    tag: u64,
+}
+
+// H1: calling a captured mutating callback indirectly mutates caller state.
+// hand-derived evaluator run: written_slot_inside() = 11
+// expect: refuse FAIL-16 at 19:19
+fn written_slot_inside() -> u64 {
+    let m: List[u64] = list.new()
+    let mut p: (scoped fn() -> u64) in m = fn() -> u64 {
+        7u64
+    }
+    let change = scoped fn() {
+        p = scoped fn() -> u64 {
+            11u64
+        }
+    }
+    match isolate(scoped fn() -> u64 {
+        change()
+        0u64
+    }) {
+        Ok(Ok(_)) => p(),
+        _ => 0,
+    }
+}
+
+// The same indirect mutation is refused before a caught body failure.
+// expect: refuse FAIL-16 at 40:19
+fn written_slot_fail() -> u64 {
+    let m: List[u64] = list.new()
+    let mut p: (scoped fn() -> u64) in m = fn() -> u64 {
+        7u64
+    }
+    let change = scoped fn() {
+        p = scoped fn() -> u64 {
+            11u64
+        }
+    }
+    match isolate(scoped fn() -> u64 {
+        change()
+        fail("inner")
+    }) {
+        _ => 0,
+    }
+}
+
+// A callback that captures another mutating callback is refused at depth two.
+// expect: refuse FAIL-16 at 58:19
+fn depth_two() -> u64 {
+    let mut n: u64 = 0
+    let inner = scoped fn() {
+        n += 1
+    }
+    let outer = scoped fn() {
+        inner()
+    }
+    match isolate(scoped fn() -> u64 {
+        outer()
+        0
+    }) {
+        _ => 0,
+    }
+}
+
+// Tuple and struct fields carry the same transitive descriptor rule.
+// expect: refuse FAIL-16 at 74:19
+fn tuple_field() -> u64 {
+    let mut n: u64 = 0
+    let pair = (scoped fn() -> u64 {
+        n += 1
+        n
+    }, 1u64)
+    match isolate(scoped fn() -> u64 {
+        pair.0()
+    }) {
+        _ => 0,
+    }
+}
+
+// expect: refuse FAIL-16 at 88:19
+fn struct_field() -> u64 {
+    let mut n: u64 = 0
+    let boxed = Boxed(cb: scoped fn() -> u64 {
+        n += 1
+        n
+    }, tag: 1u64)
+    match isolate(scoped fn() -> u64 {
+        boxed.cb()
+    }) {
+        _ => 0,
+    }
+}
+
+// A nested closure that calls the mutating callback is also refused.
+// expect: refuse FAIL-16 at 103:19
+fn nested_body() -> u64 {
+    let mut n: u64 = 0
+    let cb = scoped fn() -> u64 {
+        n += 1
+        n
+    }
+    match isolate(scoped fn() -> u64 {
+        let nested = scoped fn() -> u64 {
+            cb()
+        }
+        nested()
+    }) {
+        _ => 0,
+    }
+}
+
+// View-only callbacks remain accepted, as does a scalar sibling projection.
+// expect: accept
+fn view_control(pair: (scoped fn() -> u64, u64)) -> u64 {
+    match isolate(scoped fn() -> u64 {
+        pair.1
+    }) {
+        _ => 0,
+    }
+}
+
+pub fn main() -> Result[(), Exit] {
+    Ok(())
+}

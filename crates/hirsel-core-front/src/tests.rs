@@ -3525,6 +3525,12 @@ fn isolate_anchor_attack_regressions() {
 }
 
 #[test]
+fn isolate_transitive_attack_regressions() {
+    let failures = run_case(&root().join("cases/body/callable-isolate-attack-947.hirsel"));
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
 fn written_anchor_activation_rules() {
     let failures = run_case(&root().join("cases/body/callable-written-anchor-activation.hirsel"));
     assert!(failures.is_empty(), "{failures:?}");

@@ -337,6 +337,7 @@ def main():
     funding.add_argument('--root-mib', type=int, help='logical root in MiB, equivalent to --limit N*1048576')
     parser.add_argument('--build-only', action='store_true', help='measure check/build fresh/reuse/edit once for the task group')
     parser.add_argument('--profile', action='store_true', help='profile instructions at period 50003 when an instruction ratio exceeds 2')
+    parser.add_argument('--profile-always', action='store_true', help='profile even below 2x; --resume reuses primary counters and rebuilds only for profiling')
     parser.add_argument('--out', type=Path, required=True)
     args = parser.parse_args()
     try:
@@ -398,16 +399,20 @@ def main():
                      '--dir', str(host), '--grant', 'Stdout', '--grant', 'Tasks', '--limit', str(args.limit), '--json', '-o', str(binary)]
             if args.backend == 'llvm':
                 build.append('--release')
-            if 'hirsel' not in report['samples']:
+            if 'hirsel' not in report['samples'] or args.profile_always:
                 wait_load()
                 built = subprocess.run(build, capture_output=True)
                 (args.out / 'build.stdout').write_bytes(built.stdout)
                 (args.out / 'build.stderr').write_bytes(built.stderr)
                 if built.returncode:
-                    report['samples']['hirsel'] = {'status': f'build-exit:{built.returncode}'}
+                    if 'hirsel' not in report['samples']:
+                        report['samples']['hirsel'] = {'status': f'build-exit:{built.returncode}'}
+                    else:
+                        report['profile_build_status'] = built.returncode
                 else:
-                    report['samples']['hirsel'] = observe([str(binary), 'config.json', args.task],
-                        args.out / 'hirsel-run', args.task, row['checksum'])
+                    if 'hirsel' not in report['samples']:
+                        report['samples']['hirsel'] = observe([str(binary), 'config.json', args.task],
+                            args.out / 'hirsel-run', args.task, row['checksum'])
             if 'idiomatic' in report['samples']:
                 pass
             elif args.idiomatic.is_file():
@@ -427,7 +432,7 @@ def main():
                 report['samples']['matched'] = {'status': 'blocked: missing binary or independent review'}
             for twin in ['idiomatic', 'matched']:
                 report['ratios'][twin] = ratio(report['samples']['hirsel'], report['samples'][twin])
-            if args.profile and binary.is_file() and any(r.get('instructions', 0) > 2 for r in report['ratios'].values()):
+            if binary.is_file() and (args.profile_always or args.profile and any(r.get('instructions', 0) > 2 for r in report['ratios'].values())):
                 data = args.out / 'perf.data'
                 with open('/tmp/hirsel-langarena-measure.lock', 'a') as lock:
                     fcntl.flock(lock, fcntl.LOCK_EX)
@@ -445,7 +450,9 @@ def main():
         report['stop'] = str(error)
     (args.out / 'report.json').write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps(report, indent=2))
-    return int('stop' in report or any(x['status'] != 'ok' for x in report['ratios'].values()))
+    return int('stop' in report or report.get('profile_build_status', 0) != 0
+               or report.get('profile_status', 0) != 0
+               or any(x['status'] != 'ok' for x in report['ratios'].values()))
 
 
 if __name__ == '__main__':

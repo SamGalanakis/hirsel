@@ -1,5 +1,6 @@
 // Mirrors core/core/list.hirsel sort_stable and Hole: one scratch block,
 // alternating bottom-up passes, right only on Less, and the same cleanup ranges.
+// Reviewed-by: langs-numeric-920 2026-11-14 at620b106a; BWT index merge/carrier approved. Huff boxed adapter withheld: its final unwrap scan has no core equivalent.
 // usize slots are plain copies. Box slots use Option's pointer niche for holes;
 // ManuallyDrop prevents a second element-drop walk over the emptied scratch.
 use std::cmp::Ordering;

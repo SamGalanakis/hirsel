@@ -5,7 +5,8 @@
 // Additional review langs-numeric-920: HuffEncode/HuffDecode/LZWDecode use matching boxed trees, first-equal insertion, i32 bit/frequency vectors, deep byte copies and owned dictionaries.
 // kostya/LangArena3c9f84d benchmarks/compress.rs. Same prefix-doubling BWT,
 // stable rank sort, arithmetic bitstreams/tables, and owned LZW dictionary bytes.
-// BWT2/Huff2 move-merge/comparator delta pending langs-numeric-920 review.
+// Delta review langs-numeric-920 2026-11-14 at620b106a: BWTEncode/BWTDecode approved against core7e93579e move-merge and comparator carrier.
+// HuffEncode/HuffDecode delta not approved: BoxInput::drop adds a full Option::unwrap scan absent from core's successful sort handoff; optimized IR retains it. See followups.md.
 mod text_support;
 use std::collections::HashMap;
 mod compress_merge;

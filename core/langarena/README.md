@@ -62,6 +62,12 @@ checksum and process status. --helper-laws builds the bootstrap's independent
 LCG/checksum controls. This is a correctness entry; slice F owns the performance
 runner core/langarena/run.py and the vendored Rust twin.
 
+The [numeric results](NUMERIC-RESULTS.md) compare the 23 numeric configurations
+against upstream Rust and independently reviewed matched twins. `run.py --resume <report>` reuses
+complete Rust samples when refreshing Hirsel. Add `--profile-always` to profile
+below the usual 2x threshold; with a matching resumed toolchain, it reuses the
+primary counters and rebuilds the executable only for the profile.
+
 tests/bootstrap.hirsel is the initial Base64::Encode witness, not the owner of the
 full base64 port. Size30 encodes to40 bytes; 8192 iterations and1638 warmups add
 40*9830=393200 to its u32 result. DJB2 of

@@ -1334,6 +1334,11 @@ def first_party(meta: dict) -> str:
         srcs=Raw('glob(["crates/hirsel-core-rt/src/**"])'), features=["standalone", "charge-observation"], deps=declared_deps(next(p for p in packages.values() if p["name"] == "hirsel-core-rt"), packages),
         manifest_dir="crates/hirsel-core-rt", package_name="hirsel-core-rt", version="0.1.0", edition="2024"))
     out.append("\n" + call("hirsel_core_runtime_archives", name="hirsel-core-rt-observed-archives", library=":hirsel-core-rt-observed", archive_name="libhirsel_core_rt.a"))
+    out.append("\n" + call("hirsel_script_test", name="core-aarch64-provider", script="tools/tests/core_aarch64_provider.py", full=False, host=True,
+        files_env={"HIRSEL_CORE_RT_ARCHIVES": "//:hirsel-core-rt-archives",
+                   "HIRSEL_TOOLCHAIN_ARM": "//tools/buck2/native-toolchain:arm",
+                   "HIRSEL_TOOLCHAIN_QEMU": "//tools/buck2/native-toolchain:qemu"},
+        data=Raw('glob(["crates/hirsel-core-rt/include/**"]) + ["tools/tests/fixtures/core_aarch64_provider.c"]')))
     out.append("\n" + call("hirsel_script_test", name="core-bookkeeping-stop", script="tools/tests/core_bookkeeping_stop.py", full=False,
         files_env={"HIRSEL_CORE_RT_ARCHIVES": "//:hirsel-core-rt-archives"},
         data=Raw('glob(["crates/hirsel-core-rt/include/**"]) + ["crates/hirsel-core-rt/testdata/bookkeeping_stop.c"]')))

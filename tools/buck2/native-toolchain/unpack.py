@@ -89,7 +89,7 @@ def unpack(kind, output, archives):
             wrapper.chmod(0o755)
         elif kind == "qemu":
             output.mkdir()
-            shutil.copy2(tree / "usr/bin/qemu-aarch64-static", output / "qemu-aarch64")
+            shutil.copy2(tree / "usr/bin/qemu-aarch64", output / "qemu-aarch64")
         elif kind == "patch":
             (output / "bin").mkdir(parents=True)
             shutil.copy2(tree / "usr/bin/patch", output / "bin/patch")

@@ -28,6 +28,7 @@ pub(super) fn drop_glue(
 ) -> Result<()> {
     let mut normal = BTreeSet::new();
     let mut counted = BTreeSet::new();
+    let mut callbacks = BTreeSet::new();
     let mut pending = Vec::new();
     for body in module.functions.iter().filter_map(|f| f.body.as_ref()) {
         for inst in &body.insts {
@@ -36,10 +37,12 @@ pub(super) fn drop_glue(
                 Inst::Release { ty, .. } => pending.push((ty.index(), true)),
                 Inst::Call { call } => match body.calls[call.index()].callee {
                     Callee::Runtime(RtOp::Spawn { x, r }) => {
+                        callbacks.insert(r.index());
                         pending.push((x.index(), false));
                         pending.push((r.index(), false));
                     }
                     Callee::Runtime(RtOp::ChannelNew { item }) => {
+                        callbacks.insert(item.index());
                         pending.push((item.index(), false))
                     }
                     _ => {}
@@ -82,6 +85,9 @@ pub(super) fn drop_glue(
             observe_charge: false,
             facts,
             aliases: None,
+            caller_site: "%caller_site",
+            anchor: None,
+            relocatable_sites: false,
             private_float: Vec::new(),
             value_slots: Vec::new(),
             empty_bounds: empty::EmptyBounds::default(),
@@ -124,13 +130,13 @@ pub(super) fn drop_glue(
             }
             if failures.may_fail[f.0 as usize] {
                 let failed = e.calc(format!(
-                    "call i8 @{}(ptr %context, ptr {base})",
+                    "call i8 @{}(ptr %context, ptr {base}, i64 %caller_site)",
                     symbol(module, FuncId(f.0))
                 ));
                 e.line(format!("store i8 {failed}, ptr {status}"));
             } else {
                 e.line(format!(
-                    "call void @{}.infallible(ptr %context, ptr {base})",
+                    "call void @{}.infallible(ptr %context, ptr {base}, i64 %caller_site)",
                     symbol(module, FuncId(f.0))
                 ));
             }
@@ -180,10 +186,13 @@ pub(super) fn drop_glue(
         e.line(format!("ret i8 {failed}"));
         writeln!(
             text,
-            "define private i8 @core_drop_{t}(ptr %context, ptr %payload) {{\nentry:\n{}{} }}",
+            "define private i8 @core_drop_{t}(ptr %context, ptr %payload, i64 %caller_site) {{\nentry:\n{}{} }}",
             e.allocations, e.code
         )
         .unwrap();
+        if callbacks.contains(&t) {
+            writeln!(text, "define private i8 @core_drop_c_{t}(ptr %context, ptr %payload) {{\nentry:\n  %r = call i8 @core_drop_{t}(ptr %context, ptr %payload, i64 0)\n  ret i8 %r\n}}").unwrap();
+        }
     }
     let mut sequences = Vec::new();
     for &t in &counted {
@@ -205,14 +214,16 @@ pub(super) fn drop_glue(
 impl FunctionEmitter<'_> {
     pub(super) fn clean_field(&mut self, field: &FieldTy, p: &str, status: &str) -> Result<()> {
         let ptr = |s: &str| ("ptr".into(), s.to_string());
+        let site = self.site_word();
         let failed = match field {
-            FieldTy::Inline(t) => {
-                Some(self.calc(format!("call i8 @core_drop_{}(ptr %context, ptr {p})", t.0)))
-            }
+            FieldTy::Inline(t) => Some(self.calc(format!(
+                "call i8 @core_drop_{}(ptr %context, ptr {p}, i64 {site})",
+                t.0
+            ))),
             FieldTy::Box(t) => {
                 let block = self.calc(format!("load ptr, ptr {p}, align 1"));
                 let failed = self.calc(format!(
-                    "call i8 @core_drop_{}(ptr %context, ptr {block})",
+                    "call i8 @core_drop_{}(ptr %context, ptr {block}, i64 {site})",
                     t.0
                 ));
                 let logical = if self.module.types[t.index()].repr == Repr::Resource {
@@ -262,7 +273,9 @@ impl FunctionEmitter<'_> {
                 ));
                 writeln!(self.code, "closure_drop{label}:").unwrap();
                 let glue = self.calc(format!("load ptr, ptr {environment}, align 1"));
-                self.line(format!("call i8 {glue}(ptr %context, ptr {environment})"));
+                self.line(format!(
+                    "call i8 {glue}(ptr %context, ptr {environment}, i64 {site})"
+                ));
                 self.line(format!("br label %closure_done{label}"));
                 writeln!(self.code, "closure_done{label}:").unwrap();
                 None
@@ -385,6 +398,7 @@ impl FunctionEmitter<'_> {
         cursor: &str,
         base: u64,
     ) -> Result<()> {
+        let site = self.site_word();
         let count = mechanical_count(self.module, self.recipes, field)?;
         if count == 0 {
             return Ok(());
@@ -404,7 +418,10 @@ impl FunctionEmitter<'_> {
                     .as_ref()
                     .is_some_and(|d| d.finalizer.is_some()) =>
             {
-                self.line(format!("call i8 @core_drop_{}(ptr %context, ptr {p})", t.0));
+                self.line(format!(
+                    "call i8 @core_drop_{}(ptr %context, ptr {p}, i64 {site})",
+                    t.0
+                ));
                 self.line("ret i1 false");
             }
             FieldTy::Inline(t) => {
@@ -514,6 +531,9 @@ fn counted_glue(
             observe_charge: false,
             facts,
             aliases: None,
+            caller_site: "0",
+            anchor: None,
+            relocatable_sites: false,
             private_float: Vec::new(),
             value_slots: Vec::new(),
             empty_bounds: empty::EmptyBounds::default(),

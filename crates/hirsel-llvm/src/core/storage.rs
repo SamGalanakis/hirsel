@@ -512,8 +512,9 @@ impl FunctionEmitter<'_> {
                 } else {
                     None
                 };
+                let site = self.site_word();
                 let failed = self.calc(format!(
-                    "call i8 @core_drop_{}(ptr %context, ptr {p})",
+                    "call i8 @core_drop_{}(ptr %context, ptr {p}, i64 {site})",
                     ty.0
                 ));
                 let failed = self.calc(format!("icmp ne i8 {failed}, 0"));

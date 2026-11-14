@@ -37,7 +37,7 @@ pub(super) fn emit(
     let inputs = pairs.iter().map(|(x, _)| *x).collect::<BTreeSet<_>>();
     for x in inputs {
         let offset = input_offset(module, recipes, x);
-        writeln!(text,"define private i8 @core_task_input_drop_{}(ptr %context, ptr %input) {{\nentry:\n  %x = getelementptr i8, ptr %input, i64 {offset}\n  %status = call i8 @core_drop_{}(ptr %context, ptr %x)\n  ret i8 %status\n}}",x.0,x.0).unwrap();
+        writeln!(text,"define private i8 @core_task_input_drop_{}(ptr %context, ptr %input) {{\nentry:\n  %x = getelementptr i8, ptr %input, i64 {offset}\n  %status = call i8 @core_drop_{}(ptr %context, ptr %x, i64 0)\n  ret i8 %status\n}}",x.0,x.0).unwrap();
     }
     let body = Body::default();
     for (x, r) in pairs {
@@ -59,6 +59,9 @@ pub(super) fn emit(
             observe_charge: false,
             facts,
             aliases: None,
+            caller_site: "0",
+            anchor: None,
+            relocatable_sites: false,
             private_float: Vec::new(),
             value_slots: Vec::new(),
             empty_bounds: empty::EmptyBounds::new(&body, &[]),
@@ -85,6 +88,7 @@ pub(super) fn emit(
             }
             Carried::Nothing => {}
         }
+        args.push("i64 0".into());
         let values = e.invoke(&abi, &code, args);
         let status = values.last().unwrap();
         if let Carried::Value(t) = rc {

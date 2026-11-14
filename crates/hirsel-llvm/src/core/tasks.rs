@@ -35,7 +35,7 @@ impl FunctionEmitter<'_> {
             let drop = if task_input && i == 0 {
                 format!("core_task_input_drop_{}", t.0)
             } else {
-                format!("core_drop_{}", t.0)
+                format!("core_drop_c_{}", t.0)
             };
             self.line(format!("store ptr @{drop}, ptr {at}, align 8"));
         }
@@ -69,6 +69,7 @@ impl FunctionEmitter<'_> {
     fn host_call(&mut self, op: HostOp, args: &[String]) -> Vec<String> {
         let operand = args.get(1).map(String::as_str).unwrap_or("null");
         let mode = args.get(2).map(String::as_str).unwrap_or("0");
+        let at = self.site_word();
         let mut values = self.native_call(
             "hirsel_core_host_op",
             &[U, K, Ty::Scalar(Scalar::U32), U, K],
@@ -78,7 +79,7 @@ impl FunctionEmitter<'_> {
                 ("i64".into(), args[0].clone()),
                 ("ptr".into(), operand.into()),
                 ("i8 zeroext".into(), mode.into()),
-                ("i64".into(), "0".into()),
+                ("i64".into(), at),
             ],
         );
         if !op.waits() {
@@ -97,6 +98,18 @@ impl FunctionEmitter<'_> {
                 Arg::Address(a) => self.address(a),
             })
             .collect::<Vec<_>>();
+        let at = if matches!(
+            op,
+            RtOp::Join { .. }
+                | RtOp::CheckCancel
+                | RtOp::ChannelNew { .. }
+                | RtOp::Send { .. }
+                | RtOp::Receive { .. }
+        ) {
+            self.site_word()
+        } else {
+            "0".into()
+        };
         let p = |v: &str| ("ptr".into(), v.to_string());
         let u = |v: &str| ("i64".into(), v.to_string());
         let values = match op {
@@ -151,13 +164,13 @@ impl FunctionEmitter<'_> {
             RtOp::Join { .. } => self.native_call(
                 "hirsel_core_join",
                 &[K, P, K],
-                &[p("%context"), p(&args[0]), p(&args[1]), u("0")],
+                &[p("%context"), p(&args[0]), p(&args[1]), u(&at)],
             ),
             RtOp::Cancel => {
                 self.native_call("hirsel_core_cancel", &[], &[p("%context"), p(&args[0])])
             }
             RtOp::CheckCancel => {
-                self.native_call("hirsel_core_check_cancel", &[K], &[p("%context"), u("0")])
+                self.native_call("hirsel_core_check_cancel", &[K], &[p("%context"), u(&at)])
             }
             RtOp::ChannelNew { item } => {
                 let descriptor = self.value_descriptors(&[item], false);
@@ -168,7 +181,7 @@ impl FunctionEmitter<'_> {
                         p("%context"),
                         u(&args[0]),
                         (abi::composite_argument(self.abi.target, 32), descriptor),
-                        u("0"),
+                        u(&at),
                     ],
                 )
             }
@@ -182,7 +195,7 @@ impl FunctionEmitter<'_> {
                     "hirsel_core_receive"
                 },
                 &[B, K],
-                &[p("%context"), p(&args[0]), p(&args[1]), u("0")],
+                &[p("%context"), p(&args[0]), p(&args[1]), u(&at)],
             ),
             RtOp::TrySend { .. } => {
                 self.native_call("hirsel_core_try_send", &[K], &[p(&args[0]), p(&args[1])])

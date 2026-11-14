@@ -333,6 +333,7 @@ fn execute_target_object(
                     Param::Value(t) => cty(*t),
                     Param::Address { .. } => "void *",
                 }))
+                .chain(std::iter::once("uint64_t"))
                 .collect::<Vec<_>>()
                 .join(", ")
         )
@@ -415,6 +416,7 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
         } else {
             format!("{context}, {args}")
         };
+        let args = format!("{args}, 0");
         let ret = if sig.results.is_empty() {
             "uint8_t".into()
         } else {
@@ -1809,7 +1811,8 @@ static HirselCoreHostOutcome clock_issue(void *state, HirselCoreHostRequest *req
 static HirselCoreHostOutcome clock_deliver(void *state, HirselCoreHostRequest *request, HirselCoreHostOutcome out) {
     (void)state; assert(request->operation==10); return out;
 }
-R1 EXTERNAL(void *context, uint64_t mode) {
+R1 EXTERNAL(void *context, uint64_t mode, uint64_t caller_site) {
+    (void)caller_site;
     HirselCoreProvider provider={.issue=clock_issue,.deliver=clock_deliver};
     HirselCoreHostRequest request={.operation=10,.handle=mode};
     HirselCoreHostOutcome out=hirsel_core_host(context,&provider,&request);

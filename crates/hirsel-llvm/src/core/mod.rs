@@ -17,6 +17,7 @@ mod fast;
 mod forward;
 mod private_float;
 mod scalar;
+mod sites;
 mod storage;
 #[cfg(all(test, not(hirsel_lazy_core)))]
 mod target_tests;
@@ -158,6 +159,9 @@ fn emit_ir_target_with_facts(
             .then(|| alias::Scopes::new(module, f, &name, &mut next_scope, &mut intrinsics))
             .flatten();
         let mut e = FunctionEmitter {
+            caller_site: "%caller_site",
+            anchor: None,
+            relocatable_sites: false,
             private_float: private_float::addresses(body),
             value_slots: values::slots(body),
             aliases,
@@ -231,7 +235,10 @@ fn emit_ir_target_with_facts(
             for (offset, inst) in b.insts.get(&body.insts).unwrap().iter().enumerate() {
                 if let Some(ending) = &ending
                     && offset == ending.prefix
-                    && e.return_call(&body.calls[ending.call.index()], ending)
+                    && {
+                        e.anchor = body.inst_anchors[b.insts.start as usize + offset];
+                        e.return_call(&body.calls[ending.call.index()], ending)
+                    }
                 {
                     returned = true;
                     break;
@@ -241,6 +248,7 @@ fn emit_ir_target_with_facts(
                 }
             }
             if !returned {
+                e.anchor = b.anchor;
                 e.term(&body.terminators[i])?;
             }
         }
@@ -437,6 +445,9 @@ struct FunctionEmitter<'a> {
     observe_charge: bool,
     facts: bool,
     aliases: Option<alias::Scopes>,
+    caller_site: &'static str,
+    anchor: Option<Anchor>,
+    relocatable_sites: bool,
     private_float: Vec<bool>,
     value_slots: Vec<bool>,
     code: String,
@@ -567,6 +578,8 @@ impl FunctionEmitter<'_> {
         }
     }
     fn raise(&mut self, kind: u8) {
+        let site = self.site_word();
+        let fixed_site = site.parse::<u64>().ok();
         let shape = format!("[{} x i8]", memory_layout::CAUSE_BYTES);
         let argument = abi::composite_argument(self.abi.target, memory_layout::CAUSE_BYTES);
         self.intrinsics
@@ -574,18 +587,24 @@ impl FunctionEmitter<'_> {
         // Built-in causes have fixed bytes. SysV byval supplies a caller copy;
         // AAPCS64 needs an explicit private copy before passing its pointer.
         // Neither convention lets the callee mutate the shared constant.
-        let name = format!("hirsel_cause_{kind}");
+        let name = format!("hirsel_cause_{kind}_{}", fixed_site.unwrap_or(0));
         let prefix = memory_layout::CAUSE_KIND;
-        let tail = memory_layout::CAUSE_BYTES - prefix - 8;
-        let layout = format!("<{{ [{prefix} x i8], i64, [{tail} x i8] }}>");
+        let layout = format!("<{{ [{prefix} x i8], i64, i64 }}>");
         let word = memory_layout::cause_kind_word(kind) as i64;
         self.intrinsics.insert(format!(
-            "@{name} = private constant {layout} <{{ [{prefix} x i8] zeroinitializer, i64 {word}, [{tail} x i8] zeroinitializer }}>, align 8"
+            "@{name} = private constant {layout} <{{ [{prefix} x i8] zeroinitializer, i64 {word}, i64 {} }}>, align 8", fixed_site.unwrap_or(0)
         ));
-        let pointer = if self.abi.target == Target::Aarch64Linux {
+        let pointer = if self.abi.target == Target::Aarch64Linux || fixed_site.is_none() {
             let pointer = self.temp(&shape);
             let value = self.calc(format!("load {shape}, ptr @{name}, align 8"));
             self.line(format!("store {shape} {value}, ptr {pointer}, align 8"));
+            if fixed_site.is_none() {
+                let at = self.calc(format!(
+                    "getelementptr i8, ptr {pointer}, i64 {}",
+                    memory_layout::CAUSE_SITE
+                ));
+                self.line(format!("store i64 {site}, ptr {at}, align 8"));
+            }
             pointer
         } else {
             format!("@{name}")
@@ -596,6 +615,7 @@ impl FunctionEmitter<'_> {
     }
 
     fn inst(&mut self, inst: &Inst, index: usize) -> Result<()> {
+        self.anchor = self.body.inst_anchors[index];
         match *inst {
             Inst::Const { result, bits } => {
                 let t = self.vty(result);
@@ -886,7 +906,8 @@ impl FunctionEmitter<'_> {
                             "declare void @hirsel_core_raise_string(ptr, i64, ptr, i64, i64)"
                                 .into(),
                         );
-                        self.line(format!("call void @hirsel_core_raise_string(ptr %context, i64 0, ptr {data}, i64 {length}, i64 {capacity})"));
+                        let site = self.site_word();
+                        self.line(format!("call void @hirsel_core_raise_string(ptr %context, i64 {site}, ptr {data}, i64 {length}, i64 {capacity})"));
                     }
                 }
                 self.propagate_to(cleanup);

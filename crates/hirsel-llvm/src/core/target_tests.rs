@@ -90,6 +90,9 @@ fn linux_c_results_execute_with_mixed_fields_padding_and_hfas() -> std::result::
                 observe_charge: false,
                 facts: false,
                 aliases: None,
+                caller_site: "0",
+                anchor: None,
+                relocatable_sites: false,
                 private_float: vec![],
                 value_slots: vec![],
                 code: String::new(),
@@ -274,16 +277,16 @@ void hirsel_core_raise(HirselCoreContext *context, HirselCoreCause cause) {{
 }}
 typedef struct {{ int32_t value; uint8_t status; }} Add;
 typedef struct {{ int64_t quotient, remainder; uint8_t status; }} Divide;
-extern Add {add}(HirselCoreContext *, int32_t, int32_t);
-extern Divide {divide}(HirselCoreContext *, int64_t, int64_t);
+extern Add {add}(HirselCoreContext *, int32_t, int32_t, uint64_t);
+extern Divide {divide}(HirselCoreContext *, int64_t, int64_t, uint64_t);
 int main(void) {{
     HirselCoreContext *context=(void *)(uintptr_t)0x12345678;
-    Add a={add}(context,2,3); assert(a.value==5 && a.status==0 && raised==0);
-    a={add}(context,INT32_MAX,1); assert(a.status==1 && raised==1 && kind==0);
-    a={add}(context,INT32_MIN,-1); assert(a.status==1 && raised==2 && kind==0);
-    Divide d={divide}(context,-7,2); assert(d.quotient==-3 && d.remainder==-1 && d.status==0 && raised==2);
-    d={divide}(context,1,0); assert(d.status==1 && raised==3 && kind==2);
-    d={divide}(context,INT64_MIN,-1); assert(d.status==1 && raised==4 && kind==0);
+    Add a={add}(context,2,3,0); assert(a.value==5 && a.status==0 && raised==0);
+    a={add}(context,INT32_MAX,1,0); assert(a.status==1 && raised==1 && kind==0);
+    a={add}(context,INT32_MIN,-1,0); assert(a.status==1 && raised==2 && kind==0);
+    Divide d={divide}(context,-7,2,0); assert(d.quotient==-3 && d.remainder==-1 && d.status==0 && raised==2);
+    d={divide}(context,1,0,0); assert(d.status==1 && raised==3 && kind==2);
+    d={divide}(context,INT64_MIN,-1,0); assert(d.status==1 && raised==4 && kind==0);
     return 0;
 }}
 "#

@@ -38,28 +38,13 @@ mod provider_m3 {
             .check(request, &mut Meter::new(false))
             .unwrap();
         let cc = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap()).join("bin/clang");
-        let object = dir.path().join("provider.o");
         let c = dir.path().join("provider.c");
         std::fs::write(&c, include_str!("provider_m3.c")).unwrap();
-        let compile = Command::new(&cc)
-            .args(["-std=c11", "-O1", "-c"])
-            .arg(&c)
-            .arg("-I")
-            .arg(root.join("crates/hirsel-core-rt/include"))
-            .arg("-o")
-            .arg(&object)
-            .output()
-            .unwrap();
-        assert!(
-            compile.status.success(),
-            "{}",
-            String::from_utf8_lossy(&compile.stderr)
-        );
         let linker = dir.path().join("cc");
         let mut script = std::fs::File::create(&linker).unwrap();
         // Paths are our generated scratch/toolchain paths, with POSIX single-quote escaping.
         let quote = |p: &Path| format!("'{}'", p.to_str().unwrap().replace('\'', "'\\''"));
-        writeln!(script, "#!/bin/sh\nexec {} \"$@\" {} -Wl,--wrap=hirsel_core_os_run_with_sources -Wl,--wrap=hirsel_core_spawn -Wl,--wrap=hirsel_core_receive -Wl,--wrap=hirsel_core_send -Wl,--wrap=hirsel_core_cancel -Wl,--wrap=hirsel_core_host_op", quote(&cc), quote(&object)).unwrap();
+        writeln!(script, "#!/bin/sh\nexec {} \"$@\" {} -I {} -Wl,--wrap=hirsel_core_os_run_with_sources -Wl,--wrap=hirsel_core_spawn -Wl,--wrap=hirsel_core_receive -Wl,--wrap=hirsel_core_send -Wl,--wrap=hirsel_core_cancel -Wl,--wrap=hirsel_core_host_op", quote(&cc), quote(&c), quote(&root.join("crates/hirsel-core-rt/include"))).unwrap();
         drop(script);
         std::fs::set_permissions(&linker, std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut options = native_options(backend, dir.path());

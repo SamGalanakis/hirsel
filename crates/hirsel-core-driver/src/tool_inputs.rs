@@ -16,12 +16,17 @@ pub(crate) struct Tool {
 }
 
 pub(crate) const INPUT_MARKER: &str = "__HIRSEL_LINK_INPUTS__";
+const LINK_RECIPE_SCHEMA: u32 = 2;
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
 pub(crate) struct LinkRecipe {
+    #[serde(default)]
+    pub(crate) schema: u32,
     pub(crate) target: String,
     pub(crate) linker: PathBuf,
     pub(crate) args: Vec<String>,
     pub(crate) files: Vec<(PathBuf, ContentHash)>,
+    #[serde(default)]
+    pub(crate) source_files: Vec<(PathBuf, ContentHash)>,
     pub(crate) identity: ContentHash,
 }
 fn selected(program: &Path, search: &OsStr) -> io::Result<PathBuf> {
@@ -138,10 +143,12 @@ fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkR
         .and_then(Path::parent)
         .ok_or_else(|| io::Error::other("link driver has no toolchain root"))?;
     let mut directory = root.join(".hirsel-link-recipes");
-    let mut path = directory.join(format!("{target}.json"));
+    let mut driver_key = driver_file_key(&driver)?;
+    let mut path = directory.join(format!("{target}-{driver_key}.json"));
     if !force
         && let Ok(bytes) = std::fs::read(&path)
         && let Ok(recipe) = serde_json::from_slice::<LinkRecipe>(&bytes)
+        && recipe.schema == LINK_RECIPE_SCHEMA
         && recipe.target == target
         && recipe.linker.is_file()
         && recipe_inputs_match(&recipe)?
@@ -149,8 +156,9 @@ fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkR
         return Ok(recipe);
     }
     std::fs::create_dir_all(&directory)?;
-    let source = directory.join("recipe.c");
-    std::fs::write(&source, "int main(void) { return 0; }\n")?;
+    let capture_dir = tempfile::tempdir_in(&directory)?;
+    let mut synthetic_source = capture_dir.path().join("recipe.c");
+    std::fs::write(&synthetic_source, "int main(void) { return 0; }\n")?;
     let capture = |driver: &Path, source: &Path, output: &Path| {
         let mut command = Command::new(driver);
         command.args(["-###", "-fuse-ld=lld", "-pie"]);
@@ -163,7 +171,11 @@ fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkR
         }
         command.arg(source).arg("-o").arg(output).output()
     };
-    let mut output = capture(&driver, &source, &directory.join("recipe"))?;
+    let mut output = capture(
+        &driver,
+        &synthetic_source,
+        &capture_dir.path().join("recipe"),
+    )?;
     if !output.status.success()
         && let Some(prefix) = std::env::var_os("LLVM_SYS_231_PREFIX")
     {
@@ -175,15 +187,19 @@ fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkR
                 .and_then(Path::parent)
                 .ok_or_else(|| io::Error::other("fallback clang has no toolchain root"))?;
             directory = root.join(".hirsel-link-recipes");
-            path = directory.join(format!("{target}.json"));
+            driver_key = driver_file_key(&driver)?;
+            path = directory.join(format!("{target}-{driver_key}.json"));
             std::fs::create_dir_all(&directory)?;
-            let fallback_source = directory.join("recipe.c");
+            let fallback_source = capture_dir.path().join("recipe-fallback.c");
             std::fs::write(&fallback_source, "int main(void) { return 0; }\n")?;
-            output = capture(&driver, &fallback_source, &directory.join("recipe"))?;
-            let _ = std::fs::remove_file(fallback_source);
+            output = capture(
+                &driver,
+                &fallback_source,
+                &capture_dir.path().join("recipe"),
+            )?;
+            synthetic_source = fallback_source;
         }
     }
-    let _ = std::fs::remove_file(&source);
     if !output.status.success() {
         return Err(io::Error::other(format!(
             "link recipe capture failed through {}: {}",
@@ -198,6 +214,50 @@ fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkR
         .last()
         .ok_or_else(|| io::Error::other("link recipe capture emitted no link editor argv"))?;
     let mut argv = shell_words(line)?;
+    let mut source_files = Vec::new();
+    let mut compiled_objects = std::collections::HashMap::new();
+    for (index, line) in stderr.lines().enumerate() {
+        let words = shell_words(line)?;
+        if !words.iter().any(|word| word == "-cc1") {
+            continue;
+        }
+        let Some(output_index) = words.iter().position(|word| word == "-o") else {
+            continue;
+        };
+        let Some(transient_output) = words.get(output_index + 1).map(PathBuf::from) else {
+            continue;
+        };
+        let Some(source) = words
+            .iter()
+            .rev()
+            .find(|word| is_c_source(word) && Path::new(word).is_file())
+        else {
+            continue;
+        };
+        // The synthetic recipe source is only there to expose the normal
+        // toolchain command; its object is represented by INPUT_MARKER.
+        if Path::new(source) == synthetic_source.as_path() {
+            continue;
+        }
+        let stable = directory.join(format!("extra-{driver_key}-{index}.o"));
+        let mut command = Command::new(&words[0]);
+        let mut args = words[1..].to_vec();
+        if let Some(output) = args.iter_mut().position(|word| word == "-o") {
+            args[output + 1] = stable.display().to_string();
+        }
+        let status = command.args(&args).status()?;
+        if !status.success() {
+            return Err(io::Error::other(format!(
+                "compiling link source {} failed",
+                source
+            )));
+        }
+        compiled_objects.insert(transient_output, stable.clone());
+        source_files.push((
+            PathBuf::from(source),
+            ContentHash::of_bytes(&std::fs::read(source)?),
+        ));
+    }
     let linker = if argv.first().is_some_and(|arg| arg.contains("collect2")) {
         argv.remove(0);
         let mut filtered = Vec::with_capacity(argv.len());
@@ -237,6 +297,11 @@ fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkR
         // clang names the object produced for the stdin source `--*.o`.
         // Keep any other object: provider tests and link recipes may carry a
         // fixed support object that must remain an input to every executable.
+        if let Some(stable) = compiled_objects.get(Path::new(arg)) {
+            args.push(stable.display().to_string());
+            i += 1;
+            continue;
+        }
         let transient = arg.ends_with(".o")
             && Path::new(arg)
                 .file_stem()
@@ -260,12 +325,14 @@ fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkR
         args.insert(at, INPUT_MARKER.into());
     }
     let files = recipe_files(&linker, &args)?;
-    let identity = recipe_identity(target, &linker, &args, &files)?;
+    let identity = recipe_identity(target, &linker, &args, &files, &source_files)?;
     let recipe = LinkRecipe {
+        schema: LINK_RECIPE_SCHEMA,
         target: target.into(),
         linker,
         args,
         files,
+        source_files,
         identity,
     };
     std::fs::create_dir_all(&directory)?;
@@ -322,17 +389,49 @@ fn recipe_identity(
     linker: &Path,
     args: &[String],
     files: &[(PathBuf, ContentHash)],
+    source_files: &[(PathBuf, ContentHash)],
 ) -> io::Result<ContentHash> {
     Ok(ContentHash::of_parts(
         "hirsel.direct-link-recipe.v1",
-        [crate::encode(&(target, linker, args, files))?.as_slice()],
+        [crate::encode(&(
+            LINK_RECIPE_SCHEMA,
+            target,
+            linker,
+            args,
+            files,
+            source_files,
+        ))?
+        .as_slice()],
     ))
 }
 
 fn recipe_inputs_match(recipe: &LinkRecipe) -> io::Result<bool> {
     // The recipe is a published toolchain product.  Do not hash libc/CRT
     // inputs on every build; a missing path is the only runtime invalidation.
-    Ok(!recipe.files.iter().any(|(path, _)| !path.is_file()))
+    if recipe.files.iter().any(|(path, _)| !path.is_file()) {
+        return Ok(false);
+    }
+    Ok(!recipe.source_files.iter().any(|(path, identity)| {
+        !path.is_file()
+            || ContentHash::of_bytes(&std::fs::read(path).unwrap_or_default()) != *identity
+    }))
+}
+
+fn driver_file_key(path: &Path) -> io::Result<String> {
+    let hash = ContentHash::of_parts(
+        "hirsel.link-driver.v1",
+        [
+            crate::encode(&path.canonicalize()?)?.as_slice(),
+            &std::fs::read(path)?,
+        ],
+    );
+    Ok(hash.0.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+fn is_c_source(path: &str) -> bool {
+    [".c", ".cc", ".cpp", ".cxx", ".S", ".s"]
+        .iter()
+        .any(|suffix| path.ends_with(suffix))
 }
 
 pub(crate) fn missing_recipe_inputs(recipe: &LinkRecipe) -> Vec<PathBuf> {

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Derive a runtime archive's link forms: debug-stripped, and its compiler builtins alone.
 
-The stripped archive is what default links read; the debug-bearing input stays
-beside it for `hirsel build --debug`. The builtins archive holds the archive's
+Core runtime links always read the stripped archive. The old runtime also keeps
+the debug-bearing input beside it for `hirsel build --debug`. The builtins archive holds the archive's
 `compiler_builtins` members in archive order: the integer and float helpers a
 program library (which links no runtime) needs, the same implementations the
 runtime archive gives an executable. Both are deterministic.

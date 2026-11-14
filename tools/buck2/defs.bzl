@@ -1130,12 +1130,25 @@ def _pic_staticlib_archive(library):
                 return linkable.archive.artifact
     fail("Rust native static_pic provider has no bundled archive")
 
+def _runtime_without_debug(ctx, archive, path):
+    stripped = ctx.actions.declare_output(path)
+    ctx.actions.run(cmd_args(
+        "python3", ctx.attrs._parts, "--llvm", ctx.attrs._llvm[DefaultInfo].default_outputs[0],
+        "--archive", archive, "--stripped", stripped.as_output(),
+    ), category = "core_runtime_parts", identifier = path.replace("/", "-"))
+    return stripped
+
 def _pic_staticlib_impl(ctx):
-    return [DefaultInfo(default_output = _pic_staticlib_archive(ctx.attrs.library))]
+    archive = _runtime_without_debug(ctx, _pic_staticlib_archive(ctx.attrs.library), "libhirsel_core_rt.a")
+    return [DefaultInfo(default_output = archive)]
 
 _pic_staticlib = rule(
     impl = _pic_staticlib_impl,
-    attrs = {"library": attrs.dep(providers = [MergedLinkInfo])},
+    attrs = {
+        "library": attrs.dep(providers = [MergedLinkInfo]),
+        "_parts": attrs.source(default = "//tools/buck2:runtime_parts.py"),
+        "_llvm": attrs.dep(default = "toolchains//:clang"),
+    },
 )
 
 def hirsel_pic_staticlib(name, library):
@@ -1159,7 +1172,7 @@ def _core_runtime_archives_impl(ctx):
     entries = {}
     views = {}
     for triple, dep in ctx.attrs.archives.items():
-        archive = _pic_staticlib_archive(dep)
+        archive = _runtime_without_debug(ctx, _pic_staticlib_archive(dep), triple + "/" + ctx.attrs.archive_name)
         entries[triple + "/" + ctx.attrs.archive_name] = archive
         views[triple.split("-")[0]] = [DefaultInfo(default_output = archive)]
     return [DefaultInfo(default_output = ctx.actions.symlinked_dir(ctx.label.name, entries), sub_targets = views)]
@@ -1169,6 +1182,8 @@ _core_runtime_archives = rule(
     attrs = {
         "archives": attrs.dict(attrs.string(), attrs.dep()),
         "archive_name": attrs.string(),
+        "_parts": attrs.source(default = "//tools/buck2:runtime_parts.py"),
+        "_llvm": attrs.dep(default = "toolchains//:clang"),
     },
 )
 

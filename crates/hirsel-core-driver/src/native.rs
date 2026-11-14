@@ -565,11 +565,6 @@ fn link(
         let output = temp.path().join("program");
         let mut cc = Command::new(&tools.0.path);
         cc.arg("-pie").arg(&entry);
-        if !options.debug_lines {
-            // The independent runtime archive may carry its own compiler DWARF.
-            // Keep unwind data, but do not retain line tables in an off build.
-            cc.arg("-Wl,--strip-debug");
-        }
         let debug = if options.debug_lines {
             let debug = crate::native_debug::bind_side_products(
                 objects.iter().filter_map(|o| o.debug.as_ref()),

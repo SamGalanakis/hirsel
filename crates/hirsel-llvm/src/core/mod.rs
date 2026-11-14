@@ -136,60 +136,59 @@ pub(crate) fn emit_native_scalar_module_in_context(
             continue;
         };
         let sig = &module.signatures[function.signature.index()];
-        if sig.dest.is_some() || sig.results.len() > 1 || failures.may_fail[index] {
-            return Err(Error::Unsupported(
-                "native scalar seam requires infallible scalar functions".into(),
-            ));
+        let has_status = failures.may_fail[index];
+        let abi = if has_status {
+            abi::Return::internal_on_target(target, &sig.results)
+        } else {
+            abi::Return::on_target(target, &sig.results)
+        };
+        let result = ir_type_text(&abi.return_type());
+        let mut params = Vec::new();
+        let mut locals = Vec::new();
+        for parameter in abi.parameters(sig, false) {
+            let (declaration, name) = parameter
+                .rsplit_once(' ')
+                .ok_or_else(|| Error::Unsupported("native parameter spelling".into()))?;
+            let ty = ir_type_text(declaration);
+            let extension = if declaration.contains(" zeroext") {
+                sink::Extension::Zero
+            } else if declaration.contains(" signext") {
+                sink::Extension::Sign
+            } else {
+                sink::Extension::None
+            };
+            params.push(sink::Parameter {
+                ty,
+                extension,
+                noalias: declaration.contains(" noalias"),
+                readonly: declaration.contains(" readonly"),
+                sret: None,
+                byval: None,
+            });
+            let local = match name {
+                "%context" => sink::Local::Context,
+                "%dest" => sink::Local::Destination,
+                "%caller_site" => sink::Local::CallerSite,
+                "%sret" => sink::Local::Sret,
+                name => sink::Local::Param(
+                    name.strip_prefix("%p")
+                        .and_then(|n| n.parse().ok())
+                        .ok_or_else(|| Error::Unsupported("native parameter name".into()))?,
+                ),
+            };
+            locals.push(local);
         }
-        if body.insts.iter().any(|inst| {
-            matches!(
-                inst,
-                Inst::Call { .. }
-                    | Inst::Alloc { .. }
-                    | Inst::Grow { .. }
-                    | Inst::Drop { .. }
-                    | Inst::Release { .. }
-                    | Inst::Free { .. }
-                    | Inst::Copy { .. }
-                    | Inst::LimitEnter { .. }
-                    | Inst::LimitExit
-                    | Inst::RegionOpen { .. }
-                    | Inst::RegionClose { .. }
-                    | Inst::Share { .. }
-                    | Inst::TryUnwrap { .. }
-            )
-        }) {
-            return Err(Error::Unsupported(
-                "native scalar seam encountered memory/runtime instructions".into(),
-            ));
-        }
-        let result = sig
-            .results
-            .first()
-            .copied()
-            .map(ir_type)
-            .unwrap_or(sink::Type::Void);
-        let mut params = vec![sink::Parameter::plain(sink::Type::Ptr)];
-        params.extend(sig.params.iter().map(|p| match p {
-            Param::Value(t) => sink::Parameter::plain(ir_type(*t)),
-            Param::Address { .. } => sink::Parameter::plain(sink::Type::Ptr),
-        }));
-        params.push(sink::Parameter::plain(sink::Type::I64));
         let signature = sink::Signature {
             result,
             extension: sink::Extension::None,
             params,
         };
-        let mut locals = Vec::new();
-        for i in 0..sig.params.len() {
-            locals.push(sink::Local::Param(i));
-        }
-        native.begin_function(
-            &format!("{}.infallible", symbol(module, FuncId(index as u32))),
-            &signature,
-            &locals,
-            true,
-        );
+        let function_name = if has_status {
+            symbol(module, FuncId(index as u32))
+        } else {
+            format!("{}.infallible", symbol(module, FuncId(index as u32)))
+        };
+        native.begin_function(&function_name, &signature, &locals, !has_status);
         native.block("entry");
         let flow = flow::Flow::new(body);
         let mut emitter = FunctionEmitter {
@@ -199,8 +198,8 @@ pub(crate) fn emit_native_scalar_module_in_context(
             module,
             body,
             recipes: &recipes,
-            abi: abi::Return::on_target(target, &sig.results),
-            has_status: false,
+            abi,
+            has_status,
             failures: &failures,
             constants: &failures.constants[index],
             empty_bounds: empty::EmptyBounds::default(),
@@ -827,6 +826,23 @@ fn ir_type_text(text: &str) -> sink::Type {
     }
     if let Some(bits) = text.strip_prefix('i').and_then(|s| s.parse().ok()) {
         return sink::Type::Int(bits);
+    }
+    if let Some(fields) = text.strip_prefix("{ ").and_then(|s| s.strip_suffix(" }")) {
+        return sink::Type::structure(fields.split(", ").map(ir_type_text).collect::<Vec<_>>());
+    }
+    if let Some(element) = text.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        if let Some((count, ty)) = element.split_once(" x ") {
+            if let Ok(count) = count.parse() {
+                return sink::Type::Array(count, Box::new(ir_type_text(ty)));
+            }
+        }
+    }
+    if let Some(element) = text.strip_prefix('<').and_then(|s| s.strip_suffix('>')) {
+        if let Some((count, ty)) = element.split_once(" x ") {
+            if let Ok(count) = count.parse() {
+                return sink::Type::Vector(count, Box::new(ir_type_text(ty)));
+            }
+        }
     }
     sink::Type::Ptr
 }

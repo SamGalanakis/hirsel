@@ -72,6 +72,32 @@ fn caught_primary_keeps_exactly_one_reserved_cell() {
 }
 
 #[test]
+fn injected_capacity_refusal_uses_the_primary_and_keeps_the_reserved_cell() {
+    let mut context = started(1_000_000);
+    context.current.inject(2, false);
+    let before = context.available();
+    assert!(unsafe { hirsel_core_isolate_enter(&mut context) }.entered);
+    let allocation = unsafe {
+        crate::abi::hirsel_core_alloc(
+            &context,
+            std::ptr::null_mut(),
+            8,
+            8,
+            40,
+            false,
+            crate::block::PLAIN,
+        )
+    };
+    assert!(allocation.pointer.is_null());
+    unsafe { causes::record(&mut context, Cause::new(causes::UNWRAP, 13)) };
+    let caught = unsafe { hirsel_core_isolate_catch(&mut context) };
+    assert_eq!(caught.status, 0);
+    assert_eq!(context.available(), before - 32);
+    drop_caught(caught.causes);
+    drop(context.primary.take());
+}
+
+#[test]
 fn nested_isolates_replace_the_current_primary_in_lifo_order() {
     let mut context = started(2048);
     assert!(unsafe { hirsel_core_isolate_enter(&mut context) }.entered);

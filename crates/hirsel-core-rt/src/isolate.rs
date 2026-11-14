@@ -9,6 +9,7 @@ pub const ISOLATE_CELL: u64 = 32;
 pub struct Reservation {
     pub(crate) cell: Option<Box<Cell>>,
     pub(crate) saved: Causes,
+    pub(crate) used: bool,
 }
 
 #[repr(C)]
@@ -45,6 +46,7 @@ pub unsafe extern "C" fn hirsel_core_isolate_enter(context: *mut Context) -> Iso
         let reservation = Reservation {
             cell: Some(Cell::reserved(payer)),
             saved: std::mem::take(&mut context.causes),
+            used: false,
         };
         context.isolates.push(reservation);
         IsolateEnter {
@@ -91,11 +93,7 @@ pub unsafe extern "C" fn hirsel_core_isolate_catch(context: *mut Context) -> Iso
             };
         }
 
-        let used = if context.active_resource.is_null() {
-            context.primary.is_none()
-        } else {
-            (*context.active_resource).cell.is_none()
-        };
+        let used = reservation.used;
         if used {
             let cell = reservation
                 .cell

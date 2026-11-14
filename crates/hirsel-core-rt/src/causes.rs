@@ -218,12 +218,16 @@ pub unsafe fn record(context: &mut Context, cause: Cause) {
 }
 
 fn take_cell(context: &mut Context) -> Box<Cell> {
-    if context.active_resource.is_null() {
+    let cell = if context.active_resource.is_null() {
         context.primary.take().unwrap()
     } else {
         // SAFETY: active_resource is the live, exclusively running finalizer's state.
         unsafe { (*context.active_resource).cell.take().unwrap() }
+    };
+    if let Some(reservation) = context.isolates.last_mut() {
+        reservation.used = true;
     }
+    cell
 }
 
 /// Retain a moved String without allocating after failure or keeping a frame

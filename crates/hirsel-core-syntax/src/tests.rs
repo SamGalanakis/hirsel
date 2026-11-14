@@ -743,3 +743,39 @@ fn iterative_attributes_paths_and_postfixes_do_not_spend_nesting_budget() {
     assert_eq!(p.resource_refusal, None);
     assert_eq!(p.syntax.text(), text);
 }
+
+#[test]
+fn prog_7_expected_tokens_and_names_include_the_compared_facts() {
+    for (source, declared, required) in [
+        ("fn f(x u64) {}", "u64", ":"),
+        ("fn if() {}", "if", "non-keyword identifier"),
+        (
+            "@compact(u8) type T {}",
+            "u8",
+            "u16, u32 or u64 compact width",
+        ),
+        (
+            "@unknown fn f() {}",
+            "unknown",
+            "test, compact or twin attribute",
+        ),
+        (
+            "type T = A(x: u64, u64) | B",
+            "positional payload",
+            "labelled payload",
+        ),
+    ] {
+        let p = parse(source, ParseMode::Source);
+        let d = &p.diagnostics[0];
+        assert_eq!(d.declared.as_deref(), Some(declared));
+        assert_eq!(d.required.as_deref(), Some(required));
+        let json = serde_json::to_value(d).unwrap();
+        assert_eq!(json["declared"], declared);
+        assert_eq!(json["required"], required);
+    }
+    let d = &lex("$").diagnostics[0];
+    assert!(
+        d.declared.is_none() && d.required.is_none(),
+        "source validity compares no declaration"
+    );
+}

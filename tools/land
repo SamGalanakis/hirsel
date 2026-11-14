@@ -87,7 +87,7 @@ SOURCE_AUDITS = ('//:land-audit-workspace-layering', '//:land-audit-runtime-sche
 # their fixing owners are recorded in core-cranelift-904/RED-CENSUS.md.
 CORE_ACCEPTANCE = (
     '//:hirsel-core-contract-unittest', '//:hirsel-core-ids-unittest',
-    '//:hirsel-core-syntax-unittest', '//:hirsel-core-resolve-unittest',
+    '//:hirsel-core-diag-unittest', '//:hirsel-core-syntax-unittest', '//:hirsel-core-resolve-unittest',
     '//:hirsel-core-layout-unittest', '//:hirsel-core-ir-unittest',
     '//:hirsel-core-rt-unittest',
     '//:hirsel-core-front-unittest', '//:hirsel-cranelift-unittest',

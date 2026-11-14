@@ -56,6 +56,16 @@ pub struct Diagnostic {
     pub message: String,
 }
 impl Diagnostic {
+    /// The written fact and the fact required by this particular rule check.
+    pub fn with_comparison(
+        mut self,
+        declared: impl Into<String>,
+        required: impl Into<String>,
+    ) -> Self {
+        self.declared = Some(declared.into());
+        self.required = Some(required.into());
+        self
+    }
     pub fn error(rule: &str, primary: Span, message: impl Into<String>) -> Self {
         Self {
             rule: rule.into(),

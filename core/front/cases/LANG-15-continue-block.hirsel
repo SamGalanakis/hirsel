@@ -1,0 +1,3 @@
+// LANG-15: continue targets a loop, never a labelled block; primary is the exit.
+// expect: refuse LANG-15 at 3:16
+fn f() { 'b: { continue 'b } }

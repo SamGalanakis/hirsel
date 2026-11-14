@@ -156,15 +156,21 @@ pub fn resolve(index: &NameIndex, module: ModuleId, ordinal: u32, item: Item<'_>
             .any(|&c| item.tree.node(c).kind == NodeKind::Block)
     {
         let end = item.tree.node(item.root).origin.span.end;
-        r.out.diagnostics.push(Refusal::new(
-            "LANG-5",
-            Site {
-                module,
-                item: ordinal,
-                span: Span { start: end, end },
-            },
-            "a function outside core requires a body",
-        ));
+        r.out.diagnostics.push(
+            Refusal::new(
+                "LANG-5",
+                Site {
+                    module,
+                    item: ordinal,
+                    span: Span { start: end, end },
+                },
+                "a function outside core requires a body",
+            )
+            .with_comparison(
+                "function without a body",
+                "function body outside package core",
+            ),
+        );
     }
     r.visit(item.root);
     r.out
@@ -249,11 +255,14 @@ impl<'a> Resolver<'a> {
             Namespace::Value
         };
         if ns == Namespace::Type && builtin(name) {
-            self.out.diagnostics.push(Refusal::new(
-                "LANG-7",
-                self.site(n),
-                "builtin type name cannot be redeclared",
-            ));
+            self.out.diagnostics.push(
+                Refusal::new(
+                    "LANG-7",
+                    self.site(n),
+                    "builtin type name cannot be redeclared",
+                )
+                .with_comparison(self.index.symbols.text(name), "a fresh type-parameter name"),
+            );
             return;
         }
         let local = self.local_in(name, ns);
@@ -292,6 +301,8 @@ impl<'a> Resolver<'a> {
                 Target::Definition(id) => d.causal.push(self.index.get(id).site),
                 _ => {}
             }
+            d.declared = Some(self.index.symbols.text(name).into());
+            d.required = Some("a name not already visible in this namespace".into());
             self.out.diagnostics.push(d);
             return;
         }
@@ -340,6 +351,17 @@ impl<'a> Resolver<'a> {
                 format!("`{}` is private or opaque", self.index.definition_path(id)),
             );
             refusal.causal.push(d.site);
+            if matches!(result, LookupResult::Private(_)) {
+                refusal = refusal.with_comparison(
+                    "private definition",
+                    "public definition across module boundary",
+                );
+            } else {
+                refusal = refusal.with_comparison(
+                    "opaque type",
+                    "transparent type for construction outside its module",
+                );
+            }
             self.out.diagnostics.push(refusal);
         }
         self.record(n, ns, scope, name, construct, result);
@@ -489,6 +511,10 @@ impl<'a> Resolver<'a> {
                 LookupResult::Ambiguous,
             );
             let mut d = Refusal::new("LANG-7", self.site(n), "ambiguous module extension member");
+            d = d.with_comparison(
+                "multiple visible extension members",
+                "one unambiguous member",
+            );
             d.causal.extend(
                 self.index
                     .members_named(self.module, module, name, ns, construct)
@@ -508,6 +534,10 @@ impl<'a> Resolver<'a> {
         );
         diagnostic.primary.span = self.item.token_span(token);
         diagnostic.causal.push(self.index.get(id).site);
+        diagnostic = diagnostic.with_comparison(
+            "function",
+            "local, module, package or constant as a dotted-path head",
+        );
         self.out.diagnostics.push(diagnostic);
         Target::Missing
     }
@@ -898,11 +928,17 @@ impl<'a> Resolver<'a> {
                         if matches!(target,Some(Target::Definition(id)) if self.index.get(id).kind==DefinitionKind::Function)
                             || matches!(target, Some(Target::Binder(_)))
                         {
-                            self.out.diagnostics.push(Refusal::new(
-                                "LANG-9",
-                                self.site(n),
-                                "ordinary calls have no labelled arguments",
-                            ));
+                            self.out.diagnostics.push(
+                                Refusal::new(
+                                    "LANG-9",
+                                    self.site(n),
+                                    "ordinary calls have no labelled arguments",
+                                )
+                                .with_comparison(
+                                    "labelled arguments",
+                                    "positional arguments in an ordinary call",
+                                ),
+                            );
                         }
                     }
                 }
@@ -917,6 +953,10 @@ impl<'a> Resolver<'a> {
                 if let Some(b) = old {
                     let mut d = Refusal::new("LANG-15", self.site(n), "active label is shadowed");
                     d.causal.push(self.out.binders[b as usize].site);
+                    d = d.with_comparison(
+                        self.index.symbols.text(name),
+                        "a label name not already active in this function",
+                    );
                     self.out.diagnostics.push(d);
                 }
                 let id = self.out.binders.len() as u32;
@@ -950,11 +990,10 @@ impl<'a> Resolver<'a> {
                         "exit has no enclosing loop",
                     ));
                 } else if kind == NodeKind::Continue && target == Some(NodeKind::Block) {
-                    self.out.diagnostics.push(Refusal::new(
-                        "LANG-15",
-                        self.site(n),
-                        "continue target is a block",
-                    ));
+                    self.out.diagnostics.push(
+                        Refusal::new("LANG-15", self.site(n), "continue target is a block")
+                            .with_comparison("labelled block", "loop target for continue"),
+                    );
                 } else if kind == NodeKind::Break
                     && !c.is_empty()
                     && matches!(
@@ -962,11 +1001,17 @@ impl<'a> Resolver<'a> {
                         Some(NodeKind::While | NodeKind::For | NodeKind::ForTake)
                     )
                 {
-                    self.out.diagnostics.push(Refusal::new(
-                        "LANG-15",
-                        self.site(n),
-                        "while and for do not accept a break value",
-                    ));
+                    self.out.diagnostics.push(
+                        Refusal::new(
+                            "LANG-15",
+                            self.site(n),
+                            "while and for do not accept a break value",
+                        )
+                        .with_comparison(
+                            "while/for target with a break value",
+                            "loop-expression target for a valued break",
+                        ),
+                    );
                 }
                 if let Some(t) = token {
                     let name = self.name(t);
@@ -1005,7 +1050,10 @@ impl<'a> Resolver<'a> {
                         "OWN-4",
                         self.site(n),
                         "numeric bounds are only permitted on type parameters of core declarations",
-                    ));
+                    ).with_comparison(
+                        format!("{} bound on {} in package {}", self.index.symbols.text(self.name(token.unwrap())),
+                            if self.numeric_parameter { "a type parameter" } else { "a declaration" }, self.index.module_path(self.module).package.name),
+                        "numeric bound on a core declaration's type parameter"));
                 }
             }
             NodeKind::Error => {}

@@ -598,6 +598,16 @@ fn numeric_bounds_only_on_core_type_parameters() {
                 assert!(r.diagnostics.is_empty(), "{source}: {:?}", r.diagnostics);
             }
             for d in r.diagnostics.iter().filter(|d| d.rule == "OWN-4") {
+                assert!(
+                    d.declared
+                        .as_deref()
+                        .unwrap()
+                        .ends_with(&format!("in package {pkg}"))
+                );
+                assert_eq!(
+                    d.required.as_deref(),
+                    Some("numeric bound on a core declaration's type parameter")
+                );
                 assert_eq!(d.primary.module, f[0].0);
                 assert_eq!(d.primary.item, 0);
                 let span = d.primary.span;
@@ -1107,4 +1117,50 @@ fn lang_1_prog_7_columns_count_scalars_and_one_per_tab() {
         assert_eq!(d.line, if byte == 27 { 2 } else { 1 });
         assert_eq!(d.column, column);
     }
+}
+
+#[test]
+fn lang_15_prog_7_continue_refusal_has_the_target_site_and_facts() {
+    let source = "fn f() { 'b: { continue 'b } }";
+    let (i, f) = fixture(&[("m", source)]);
+    let r = run(&i, &f, 0, 0);
+    assert_eq!(r.diagnostics.len(), 1);
+    let d = &r.diagnostics[0];
+    assert_eq!(d.rule, "LANG-15");
+    assert_eq!(
+        d.primary,
+        Site {
+            module: f[0].0,
+            item: 0,
+            span: hirsel_core_syntax::Span { start: 15, end: 26 }
+        }
+    );
+    assert_eq!(d.declared.as_deref(), Some("labelled block"));
+    assert_eq!(d.required.as_deref(), Some("loop target for continue"));
+    let json = serde_json::to_value(d).unwrap();
+    assert_eq!(json["primary"]["span"]["start"], 15);
+    assert_eq!(json["declared"], "labelled block");
+    assert_eq!(json["required"], "loop target for continue");
+}
+
+#[test]
+fn prog_7_visibility_and_path_heads_report_actual_and_required_kinds() {
+    let (i, f) = fixture(&[("m", "fn f() {}\nfn g() { f.x }")]);
+    let r = run(&i, &f, 0, 1);
+    assert_eq!(r.diagnostics[0].declared.as_deref(), Some("function"));
+    assert_eq!(
+        r.diagnostics[0].required.as_deref(),
+        Some("local, module, package or constant as a dotted-path head")
+    );
+    let (i, f) = fixture(&[("a", "fn hidden() {}"), ("b", "fn f() { a.hidden() }")]);
+    let r = run(&i, &f, 1, 0);
+    assert_eq!(
+        r.diagnostics[0].declared.as_deref(),
+        Some("private definition")
+    );
+    assert_eq!(
+        r.diagnostics[0].required.as_deref(),
+        Some("public definition across module boundary")
+    );
+    assert_eq!(r.diagnostics[0].causal.len(), 1);
 }

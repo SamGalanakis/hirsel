@@ -706,6 +706,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hirsel-core-diag"
+version = "0.1.0"
+dependencies = [
+ "hirsel-guard",
+ "proc-macro2",
+ "serde",
+ "serde_json",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "hirsel-core-driver"
 version = "0.1.0"
 dependencies = [

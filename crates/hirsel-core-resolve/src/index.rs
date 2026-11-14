@@ -39,6 +39,16 @@ pub struct Refusal {
     pub message: String,
 }
 impl Refusal {
+    /// The declared/written fact and the fact required by the cited rule.
+    pub fn with_comparison(
+        mut self,
+        declared: impl Into<String>,
+        required: impl Into<String>,
+    ) -> Self {
+        self.declared = Some(declared.into());
+        self.required = Some(required.into());
+        self
+    }
     pub(crate) fn new(rule: &str, primary: Site, message: impl Into<String>) -> Self {
         Self {
             rule: rule.into(),
@@ -224,15 +234,18 @@ impl NameIndex {
             });
             self.children.insert((parent, name), id);
             if hirsel_core_syntax::keyword_symbol(name) {
-                self.diagnostics.push(Refusal::new(
-                    "LANG-2",
-                    Site {
-                        module: id,
-                        item: u32::MAX,
-                        span: Span::default(),
-                    },
-                    "module name is a reserved keyword",
-                ));
+                self.diagnostics.push(
+                    Refusal::new(
+                        "LANG-2",
+                        Site {
+                            module: id,
+                            item: u32::MAX,
+                            span: Span::default(),
+                        },
+                        "module name is a reserved keyword",
+                    )
+                    .with_comparison(self.symbols.text(name), "non-keyword module name"),
+                );
             }
             parent = id;
         }
@@ -434,6 +447,10 @@ impl NameIndex {
                     let mut r =
                         Refusal::new("LANG-7", d.site, "extension redeclares a core member");
                     r.causal.push(self.get(old).site);
+                    r = r.with_comparison(
+                        self.symbols.text(d.name),
+                        "an extension member name absent from the core module",
+                    );
                     self.diagnostics.push(r);
                 }
             }
@@ -465,11 +482,10 @@ impl NameIndex {
             span: item.token_span(t),
         };
         if kind == DefinitionKind::Type && crate::resolve::builtin(name) {
-            self.diagnostics.push(Refusal::new(
-                "LANG-7",
-                site,
-                "builtin type name cannot be redeclared",
-            ));
+            self.diagnostics.push(
+                Refusal::new("LANG-7", site, "builtin type name cannot be redeclared")
+                    .with_comparison(self.symbols.text(name), "a fresh type-definition name"),
+            );
             return;
         }
         let old = if kind == DefinitionKind::Clone {
@@ -483,6 +499,10 @@ impl NameIndex {
         if let Some(old) = old {
             let mut r = Refusal::new("LANG-7", site, "duplicate definition");
             r.causal.push(self.get(old).site);
+            r = r.with_comparison(
+                self.symbols.text(name),
+                "one definition of this name in the module namespace",
+            );
             self.diagnostics.push(r);
             return;
         }

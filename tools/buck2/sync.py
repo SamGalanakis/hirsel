@@ -80,7 +80,13 @@ READS = generated.Reads(ROOT)
 
 # What the engine's build script reads (crates/hirsel-engine/build.rs), as
 # repository paths: it hashes these into the frozen runtime revision.
+BUILD_SCRIPT_SOURCES = {
+    "hirsel-registry": ["crates/hirsel-registry/build.rs", "crates/hirsel-registry/src/**"],
+    "hirsel-core-diag": ["crates/hirsel-core-diag/build.rs", "crates/hirsel-core-diag/src/catalogue_source.rs"],
+}
+
 BUILD_SCRIPT_INPUTS = {
+    "hirsel-core-diag": ["docs/spec/*.md"],
     "hirsel-core-driver": ["core/core/**", "core/std/*.hirsel"],
     "hirsel-rt-operations": ["native-tests/library/operations.tsv"],
     "hirsel-registry": ["crates/hirsel-registry/src/**"],
@@ -181,6 +187,7 @@ RUNTIME_DATA = {
 # invalidate another binary's passing verdicts. A source change still reruns
 # every test whose harness it changes.
 TEST_DATA = {
+    "hirsel-core-diag-unittest": ["docs/spec/**", "crates/hirsel-core-syntax/src/**", "crates/hirsel-core-resolve/src/**", "crates/hirsel-core-front/src/**"],
     "hirsel-core-resolve-unittest": ["docs/spec/**", "core/core/**"],
     "hirsel-core-front-unittest": ["core/front/**", "core/core/**", "core/std/**", "core/programs/m1/**"],
     "hirsel-core-driver-unittest": ["core/core/**", "core/front/**", "core/std/**", "core/programs/m1/**"],
@@ -1230,7 +1237,7 @@ def first_party(meta: dict) -> str:
                 "hirsel_build_script",
                 name=build_script,
                 crate_root=relative(src),
-                srcs=Raw('glob(["crates/hirsel-registry/build.rs", "crates/hirsel-registry/src/**"])') if name == "hirsel-registry" else [relative(src)],
+                srcs=Raw(f"glob({starlark(BUILD_SCRIPT_SOURCES[name], 4)})") if name in BUILD_SCRIPT_SOURCES else [relative(src)],
                 deps=sorted(deps["build"]),
                 inputs=Raw(f"glob({starlark(BUILD_SCRIPT_INPUTS[name], 4)})"),
                 input_paths={f"crates/hirsel-llvm/bridge/{source}.cpp":

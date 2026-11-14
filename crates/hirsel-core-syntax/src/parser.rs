@@ -247,7 +247,27 @@ impl Parser<'_> {
         }
     }
     fn expected(&mut self, word: Symbol) -> Parsed<()> {
-        self.fail("LANG-5", format!("expected `{}`", self.symbols.text(word)))
+        self.fail_expected(
+            "LANG-5",
+            self.symbols.text(word),
+            format!("expected `{}`", self.symbols.text(word)),
+        )
+    }
+    fn fail_expected<T>(
+        &mut self,
+        rule: &str,
+        required: &str,
+        message: impl Into<String>,
+    ) -> Parsed<T> {
+        let declared = if self.eof() {
+            "end of file"
+        } else {
+            self.text_token(self.index())
+        };
+        let d = Diagnostic::error(rule, self.token(0).span, message)
+            .with_comparison(declared, required);
+        self.diagnostics.push(d);
+        Err(())
     }
     fn fail<T>(&mut self, rule: &str, message: impl Into<String>) -> Parsed<T> {
         self.diagnostics
@@ -259,12 +279,13 @@ impl Parser<'_> {
         if self.token(0).kind == TokenKind::Ident && !self.at(sym::UNDERSCORE) {
             Ok(self.bump())
         } else {
-            self.fail(
+            self.fail_expected(
                 if self.token(0).kind.is_keyword() {
                     "LANG-2"
                 } else {
                     "LANG-5"
                 },
+                "non-keyword identifier",
                 "expected a non-keyword name",
             )
         }
@@ -362,7 +383,7 @@ impl Parser<'_> {
         if self.at(close) || self.eat(sym::COMMA) || self.newline() {
             Ok(())
         } else {
-            self.fail("LANG-4", "expected comma or newline")
+            self.fail_expected("LANG-4", "comma or newline", "expected comma or newline")
         }
     }
     fn end(&mut self, implicit: bool) -> Parsed<bool> {
@@ -371,7 +392,11 @@ impl Parser<'_> {
         } else if self.eof() || self.at(sym::RBRACE) || self.newline() || implicit {
             Ok(false)
         } else {
-            self.fail("LANG-4", "expected newline or semicolon")
+            self.fail_expected(
+                "LANG-4",
+                "newline or semicolon",
+                "expected newline or semicolon",
+            )
         }
     }
     fn item_start(&self) -> bool {
@@ -425,7 +450,11 @@ impl Parser<'_> {
             if word == sym::COMPACT {
                 self.expect(sym::LPAREN)?;
                 if !matches!(self.word(0), sym::U16 | sym::U32 | sym::U64) {
-                    return self.fail("LANG-5", "expected compact width");
+                    return self.fail_expected(
+                        "LANG-5",
+                        "u16, u32 or u64 compact width",
+                        "expected compact width",
+                    );
                 }
                 self.bump();
                 self.expect(sym::RPAREN)?;
@@ -436,7 +465,14 @@ impl Parser<'_> {
                 c.push(self.node(a, NodeKind::Attribute, Some(n), &[path]));
                 continue;
             } else if word != sym::TEST {
-                return self.fail("LANG-5", "unknown attribute");
+                self.diagnostics.push(
+                    Diagnostic::error("LANG-5", self.token(0).span, "unknown attribute")
+                        .with_comparison(
+                            self.symbols.text(word),
+                            "test, compact or twin attribute",
+                        ),
+                );
+                return Err(());
             }
             c.push(self.node(a, NodeKind::Attribute, Some(n), &[]));
         }
@@ -453,11 +489,14 @@ impl Parser<'_> {
                 c.push(self.block()?);
             } else if self.mode != ParseMode::Signatures {
                 let end = self.tokens[self.significant[self.pos - 1]].span.end;
-                self.diagnostics.push(Diagnostic::error(
-                    "LANG-5",
-                    Span { start: end, end },
-                    "function requires a body",
-                ));
+                self.diagnostics.push(
+                    Diagnostic::error(
+                        "LANG-5",
+                        Span { start: end, end },
+                        "function requires a body",
+                    )
+                    .with_comparison("function header without a body", "function body"),
+                );
                 return Err(());
             }
             return Ok(self.node(s, NodeKind::Function, Some(name), &c));
@@ -498,7 +537,11 @@ impl Parser<'_> {
             let st = self.pos - 1;
             self.expect(sym::BYTES)?;
             if self.token(0).kind != TokenKind::Integer {
-                return self.fail("LANG-5", "expected grant size");
+                return self.fail_expected(
+                    "LANG-5",
+                    "integer literal grant size",
+                    "expected grant size",
+                );
             }
             let t = self.bump();
             c.push(self.node(st, NodeKind::Literal, Some(t), &[]));
@@ -561,7 +604,22 @@ impl Parser<'_> {
                     None
                 };
                 if labelled.is_some_and(|old| old != label.is_some()) {
-                    return p.fail("LANG-9", "mixed payload labels");
+                    p.diagnostics.push(
+                        Diagnostic::error("LANG-9", p.token(0).span, "mixed payload labels")
+                            .with_comparison(
+                                if label.is_some() {
+                                    "labelled payload"
+                                } else {
+                                    "positional payload"
+                                },
+                                if labelled == Some(true) {
+                                    "labelled payload"
+                                } else {
+                                    "positional payload"
+                                },
+                            ),
+                    );
+                    return Err(());
                 }
                 labelled = Some(label.is_some());
                 let ty = p.ty()?;
@@ -603,7 +661,12 @@ impl Parser<'_> {
         loop {
             let st = self.pos;
             if !BOUNDS.contains(&self.word(0)) {
-                return self.fail("LANG-5", "unknown bound");
+                let required = BOUNDS
+                    .iter()
+                    .map(|&b| self.symbols.text(b))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return self.fail_expected("LANG-5", &required, "unknown bound");
             }
             let n = self.bump();
             c.push(self.node(st, NodeKind::BoundName, Some(n), &[]));
@@ -1053,7 +1116,11 @@ impl Parser<'_> {
                 children.push(self.expr(0)?);
                 if self.eat(sym::SEMICOLON) {
                     if self.token(0).kind != TokenKind::Integer {
-                        return self.fail("LANG-5", "array repeat count is an integer literal");
+                        return self.fail_expected(
+                            "LANG-5",
+                            "integer literal repeat count",
+                            "array repeat count is an integer literal",
+                        );
                     }
                     let st = self.pos;
                     let token = self.bump();

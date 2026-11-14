@@ -72,6 +72,16 @@ fn kernel_finalizers() {
 }
 
 #[test]
+fn isolate_sample_in_dev_and_speed_matches_evaluator() {
+    for optimize in [false, true] {
+        check_sample_with_refusals(
+            include_str!("../../hirsel-core-ir/samples/isolate.core"),
+            optimize,
+        );
+    }
+}
+
+#[test]
 fn failure_sites_in_dev_and_speed() {
     check_failure_sites();
 }

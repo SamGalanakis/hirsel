@@ -117,7 +117,7 @@ pub(crate) fn emit_native_scalar_module(
     target: Target,
 ) -> Result<crate::construction::NativeModule> {
     let context = std::rc::Rc::new(crate::construction::Context::new().map_err(Error::Llvm)?);
-    emit_native_scalar_module_in_context(module, target, context)
+    emit_native_scalar_module_in_context(module, target, context, None, false)
 }
 
 #[cfg(hirsel_lazy_core)]
@@ -125,6 +125,8 @@ pub(crate) fn emit_native_scalar_module_in_context(
     module: &Module,
     target: Target,
     context: std::rc::Rc<crate::construction::Context>,
+    provided_roles: Option<&hirsel_core_ir::roles::Facts>,
+    observe_charge: bool,
 ) -> Result<crate::construction::NativeModule> {
     let failures = failure::Failures::new(module);
     let recipes =
@@ -205,6 +207,7 @@ pub(crate) fn emit_native_scalar_module_in_context(
         native.begin_function(&function_name, &signature, &locals, !has_status);
         native.block("entry");
         let flow = flow::Flow::new(body);
+        let facts = facts_enabled() && provided_roles.is_some();
         let mut emitter = FunctionEmitter {
             function: Some(FuncId(index as u32)),
             append_fast: false,
@@ -217,8 +220,8 @@ pub(crate) fn emit_native_scalar_module_in_context(
             failures: &failures,
             constants: &failures.constants[index],
             empty_bounds: empty::EmptyBounds::default(),
-            observe_charge: false,
-            facts: false,
+            observe_charge,
+            facts,
             aliases: None,
             caller_site: "%caller_site",
             debug_location: None,
@@ -287,8 +290,8 @@ pub(crate) fn emit_native_module_in_context(
     observe_charge: bool,
     debug_lines: bool,
 ) -> Result<crate::construction::NativeModule> {
-    let _ = (facts, observe_charge, debug_lines);
-    emit_native_scalar_module_in_context(module, target, context)
+    let _ = (facts, debug_lines);
+    emit_native_scalar_module_in_context(module, target, context, Some(facts), observe_charge)
 }
 
 /// Optional diagnostic emission; timings of these objects are not performance samples.

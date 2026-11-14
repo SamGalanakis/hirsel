@@ -68,11 +68,7 @@ fn caught_primary_keeps_exactly_one_reserved_cell() {
     assert!(context.primary.is_some());
     assert_eq!(context.available(), before - 32);
     drop_caught(caught.causes);
-    assert_eq!(
-        context.available(),
-        before - 32,
-        "the startup primary is outside the run limit"
-    );
+    assert_eq!(context.available(), before - 32);
 }
 
 #[test]
@@ -98,11 +94,7 @@ fn injected_capacity_refusal_uses_the_primary_and_keeps_the_reserved_cell() {
     assert_eq!(caught.status, 0);
     assert_eq!(context.available(), before - 32);
     drop_caught(caught.causes);
-    assert_eq!(
-        context.available(),
-        before - 32,
-        "dropping the caught startup primary must not refund the run limit"
-    );
+    assert_eq!(context.available(), before - 32);
     drop(context.primary.take());
 }
 

@@ -219,7 +219,7 @@ pub fn task_start(context: &mut Context) -> Result<(), Capacity> {
         8,
     )?;
     let funding = record.partition(charge::CAUSE_CELL);
-    context.primary = Some(Cell::startup(funding));
+    context.primary = Some(Cell::prepaid(funding));
     context.task_record = Some(record);
     Ok(())
 }

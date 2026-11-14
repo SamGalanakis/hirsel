@@ -34,6 +34,7 @@ pub unsafe extern "C" fn hirsel_core_isolate_enter(context: *mut Context) -> Iso
     // SAFETY: the engine owns this task context exclusively at every runtime row.
     unsafe {
         let context = &mut *context;
+        context.mark_startup_primary();
         let available = context.available();
         let payer = match context.current.isolate_reserve(ISOLATE_CELL) {
             Ok(payer) => payer,

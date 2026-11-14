@@ -105,6 +105,12 @@ impl Context {
     pub fn set_test_available(&mut self, bytes: u64) {
         self.current.set_test_available(bytes);
     }
+
+    pub(crate) fn mark_startup_primary(&mut self) {
+        if let Some(primary) = self.primary.as_mut() {
+            primary.startup = true;
+        }
+    }
     #[cfg(feature = "testing")]
     pub fn inject_admission(&mut self, n: usize, later: bool) {
         self.current.inject(n, later);

@@ -124,9 +124,20 @@ impl<'c> NativeSink<'c> {
         let kind = self.unit.integer(i64, numbers[0] as u128);
         let site = self.unit.integer(i64, numbers[1] as u128);
         let initializer = self.unit.constant_struct(&[zero_bytes, kind, site], false);
-        let global = self.unit.global(name.trim_start_matches('@'), fields);
+        let global_name = name.trim_start_matches('@');
+        let global = self.unit.global(global_name, fields);
         self.unit
             .initialize_global(global, Some(initializer), 2, true, false, 8);
+        if let Some((prefix, _)) = global_name.rsplit_once('_') {
+            for number in numbers {
+                let alias = format!("{prefix}_{number}");
+                if alias != global_name {
+                    let alias_global = self.unit.global(&alias, fields);
+                    self.unit
+                        .initialize_global(alias_global, Some(initializer), 2, true, false, 8);
+                }
+            }
+        }
     }
     fn function(&mut self, name: &str, sig: &Signature) -> llvm::Value<'c> {
         let result = self.ty(&sig.result);

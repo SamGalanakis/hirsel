@@ -35,6 +35,7 @@ pub use meter::{Measurements, Meter, Stage};
 pub use reuse::DefinitionKey;
 use reuse::{Keys, compiler_identity};
 pub use store::Store;
+pub use tool_inputs::link_driver;
 
 use hirsel_core_front::{CoreCheck, Emitter, ModuleInput, Program};
 use hirsel_core_ids::{ContentHash, DefPath, PackageId};

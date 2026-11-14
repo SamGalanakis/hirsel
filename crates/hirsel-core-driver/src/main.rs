@@ -449,7 +449,7 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
             target,
             runtime: runtime.ok_or("build/run/test requires --runtime <core runtime archive>")?,
             include: headers.path().to_owned(),
-            cc,
+            cc: hirsel_core_driver::link_driver(&cc)?,
             store: native_store,
             output: output_path.unwrap_or(default_output),
             root_limit,

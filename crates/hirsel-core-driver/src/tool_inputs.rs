@@ -75,6 +75,28 @@ fn selected(program: &Path, search: &OsStr) -> io::Result<PathBuf> {
             )
         })
 }
+/// The C driver a request names, resolved once at the command line: a bare
+/// name such as the default `cc` is looked up on `PATH`, like the shell does.
+pub fn link_driver(program: &Path) -> io::Result<PathBuf> {
+    selected(program, &std::env::var_os("PATH").unwrap_or_default())
+}
+
+/// Where the driver's link recipe and toolchain manifest live: beside its
+/// toolchain when that tree is ours to write, else in the user's cache (a
+/// system `/usr/bin/cc` has an unwritable `/usr`). The driver key names the
+/// files, so both homes hold distinct entries for distinct drivers.
+fn recipe_directory(driver: &Path) -> io::Result<PathBuf> {
+    if let Some(root) = driver.parent().and_then(Path::parent) {
+        let beside = root.join(".hirsel-link-recipes");
+        if std::fs::create_dir_all(&beside).is_ok() && tempfile::tempfile_in(&beside).is_ok() {
+            return Ok(beside);
+        }
+    }
+    let cache = PackageProduct::default_cache().join("link-recipes");
+    std::fs::create_dir_all(&cache)?;
+    Ok(cache)
+}
+
 fn identity(program: &Path, search: &OsStr, store: &Store) -> io::Result<Tool> {
     let path = selected(program, search)?;
     let m = path.metadata()?;
@@ -171,12 +193,7 @@ pub(crate) fn toolchain_identity(
     runtime: &Path,
 ) -> io::Result<ContentHash> {
     let recipe = link_recipe(cc, target)?;
-    let root = cc
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| io::Error::other("link driver has no toolchain root"))?
-        .join(".hirsel-link-recipes");
-    std::fs::create_dir_all(&root)?;
+    let root = recipe_directory(cc)?;
     let key = driver_file_key(cc)?;
     let path = root.join(format!("toolchain-{target}-{key}.json"));
     let mut paths = vec![cc.canonicalize()?, runtime.to_owned()];
@@ -235,11 +252,7 @@ fn find_llvm_library(cc: &Path) -> Option<PathBuf> {
 
 fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkRecipe> {
     let mut driver = cc.to_owned();
-    let mut root = driver
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| io::Error::other("link driver has no toolchain root"))?;
-    let mut directory = root.join(".hirsel-link-recipes");
+    let mut directory = recipe_directory(&driver)?;
     let mut driver_key = driver_file_key(&driver)?;
     let mut path = directory.join(format!("{target}-{driver_key}.json"));
     if !force
@@ -252,7 +265,6 @@ fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkR
     {
         return Ok(recipe);
     }
-    std::fs::create_dir_all(&directory)?;
     let capture_dir = tempfile::tempdir_in(&directory)?;
     let mut synthetic_source = capture_dir.path().join("recipe.c");
     std::fs::write(&synthetic_source, "int main(void) { return 0; }\n")?;
@@ -279,14 +291,9 @@ fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkR
         let candidate = PathBuf::from(prefix).join("bin/clang");
         if candidate.is_file() && candidate != driver {
             driver = candidate;
-            root = driver
-                .parent()
-                .and_then(Path::parent)
-                .ok_or_else(|| io::Error::other("fallback clang has no toolchain root"))?;
-            directory = root.join(".hirsel-link-recipes");
+            directory = recipe_directory(&driver)?;
             driver_key = driver_file_key(&driver)?;
             path = directory.join(format!("{target}-{driver_key}.json"));
-            std::fs::create_dir_all(&directory)?;
             let fallback_source = capture_dir.path().join("recipe-fallback.c");
             std::fs::write(&fallback_source, "int main(void) { return 0; }\n")?;
             output = capture(
@@ -435,7 +442,6 @@ fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkR
         source_files,
         identity,
     };
-    std::fs::create_dir_all(&directory)?;
     let temp = tempfile::NamedTempFile::new_in(&directory)?;
     serde_json::to_writer(&temp, &recipe).map_err(io::Error::other)?;
     temp.persist(path).map_err(|e| e.error)?;
@@ -671,6 +677,49 @@ mod tests {
         let replaced = identity(Path::new("cc"), &search, &store).unwrap();
         assert_eq!(earlier.path, replaced.path);
         assert_ne!(earlier.content, replaced.content);
+    }
+
+    #[test]
+    fn a_driver_whose_toolchain_tree_is_read_only_still_links() {
+        // A system driver (/usr/bin/cc) has a toolchain root nobody but root may write.
+        let work = tempfile::tempdir().unwrap();
+        let tree = work.path().join("usr");
+        let bin = tree.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let linker = work.path().join("ld.lld");
+        let crt = work.path().join("crt1.o");
+        std::fs::write(&linker, b"linker").unwrap();
+        std::fs::write(&crt, b"crt").unwrap();
+        let cc = bin.join("cc");
+        std::fs::write(
+            &cc,
+            format!(
+                "#!/bin/sh\necho '\"{}\" \"-pie\" \"-o\" \"out\" \"{}\" \"-lc\"' >&2\n",
+                linker.display(),
+                crt.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&cc, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let runtime = work.path().join("runtime.a");
+        std::fs::write(&runtime, b"runtime").unwrap();
+        let read_only =
+            |mode| std::fs::set_permissions(&tree, std::fs::Permissions::from_mode(mode));
+        read_only(0o555).unwrap();
+        let target = "x86_64-unknown-linux-gnu";
+        let key = driver_file_key(&cc).unwrap();
+        let identity = toolchain_identity(&cc, target, &runtime);
+        let recipe = link_recipe(&cc, target);
+        read_only(0o755).unwrap();
+        let cache = PackageProduct::default_cache().join("link-recipes");
+        for name in [
+            format!("{target}-{key}.json"),
+            format!("toolchain-{target}-{key}.json"),
+        ] {
+            let _ = std::fs::remove_file(cache.join(name));
+        }
+        identity.unwrap();
+        assert_eq!(recipe.unwrap().linker, linker);
     }
 
     #[test]

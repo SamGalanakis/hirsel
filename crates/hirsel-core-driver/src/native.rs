@@ -49,6 +49,7 @@ pub struct NativeOptions {
     pub target: String,
     pub runtime: PathBuf,
     pub include: PathBuf,
+    /// The C driver's path; [`crate::link_driver`] resolves a bare name on `PATH`.
     pub cc: PathBuf,
     pub store: PathBuf,
     pub output: PathBuf,

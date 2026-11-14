@@ -1,0 +1,5 @@
+// OWN-22: a scoped type is scoped (OWN-19), so a field of it in an own record is refused
+// (ownership.md's example).
+// expect: refuse OWN-19 at 5:15
+scoped type Cursor { input: View[Bytes], pos: u64 }
+type Holder { c: Cursor }

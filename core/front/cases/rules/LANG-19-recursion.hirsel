@@ -1,0 +1,10 @@
+// LANG-19: functions call each other and themselves freely, before or after their
+// declaration; each call's signature is all the caller needs. Hand-derived: 10 is even,
+// 7 is odd, and fact(5) = 120. Exhausting the stack is a run stop (FAIL-15): its fence
+// is test_run_native.rs prog4_runs "stopped" (`deep()`, status 102, `run stop: Stack`).
+// expect: run even(10) = 1
+// expect: run even(7) = 0
+// expect: run fact(5) = 120
+fn even(n: u64) -> u64 { if n == 0 { 1 } else { odd(n - 1) } }
+fn odd(n: u64) -> u64 { if n == 0 { 0 } else { even(n - 1) } }
+fn fact(n: u64) -> u64 { if n == 0 { 1 } else { n * fact(n - 1) } }

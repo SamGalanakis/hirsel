@@ -1,0 +1,22 @@
+// OWN-24: the only conversion to counted is `rc.new(take x)` / `arc.new(take x)` of an
+// own or plain shareable value, and `rc.try_unwrap` converts a sole holder back to own;
+// there is no conversion from a resource to counted. memory.md's MEM-14 example refuses
+// `rc.new(take f)` of a HostFile as not shareable; with no `Rc[HostFile]` in the signature
+// (whose OWN-4 refusal decls/rc-payload-not-shareable fences), the call is refused where
+// its argument fixes T = HostFile, under LANG-12 (language.md LANG-12). Hand-derived: round(5) counts P(n: 5), shares it inside a
+// block whose end drops the share, so the count is 1 again and the unwrap gives 5 + 1.
+// expect: run round(5) = 6
+// expect: refuse LANG-12 at 20:18
+type P: shareable { n: u64 }
+fn round(n: u64) -> u64 {
+  let h = result.unwrap(rc.new(P(n: n)))
+  {
+    let s = rc.share(h)
+    let _ = s.n
+  }
+  match rc.try_unwrap(take h) { Ok(p) => p.n + 1, Error(_) => 0 }
+}
+fn wrap(take f: HostFile) -> u64 {
+  let _ = rc.new(take f)
+  0
+}

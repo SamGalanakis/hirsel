@@ -1,0 +1,16 @@
+// LANG-10: the builtin type names are bool, char, i8..i64, u8..u64, f32, f64 and Inline;
+// Never, the type of `return`, `break`, `continue`, `fail` and a loop with no `break`,
+// converts to every type. The conversion is one way: Never has no values (core.md), so
+// a u64 is not a Never and `into` is refused under LANG-11. Hand-derived: ret(4) leaves
+// through `return 4`, whose Never initializes a String; inl() reads element 1 of [1, 2];
+// widths(1,2) widens the u8 1 and adds the u64 2.
+// expect: run ret(4) = 4
+// expect: run inl() = 2
+// expect: run widths(1,2) = 3
+// expect: refuse LANG-11 at 14:28
+fn ret(n: u64) -> u64 { let s: String = return n; 0 }
+fn from(x: Never) -> String { x }
+fn inl() -> u64 { let a: Inline[u64, 2] = [1, 2]; a[1] }
+fn into(n: u64) -> Never { n }
+fn widths(a: u8, c: u64) -> u64 { let w: u64 = int.widen(a); w + c }
+fn names(c: char, b: bool, f: f64, g: f32, i: i8, j: i16, k: i32, l: i64, m: u16) {}

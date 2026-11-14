@@ -1,0 +1,71 @@
+// Native finalizer-order witness for consuming Map iteration. The key is an
+// own key with a non-failing finalizer; values are resources whose finalizers
+// append their identity to the shared Stdout log. The host-free moved-slot
+// law remains in map_drain.hirsel for evaluator coverage.
+type DrainKey: key + shareable + ordered {
+    id: u64
+} drop(x) {
+    let _ = x.id
+}
+
+resource type DrainValue {
+    out: Stdout,
+    id: u64
+} drop(x) {
+    let _ = stdout.write(x.out, if x.id == 0 {
+        "V0"
+    } else if x.id == 1 {
+        "V1"
+    } else {
+        "V2"
+    })
+}
+
+fn seed(out: Stdout) -> Map[DrainKey, DrainValue] {
+    let mut m: Map[DrainKey, DrainValue] = map.new()
+    for i in 0u64 .. 3 {
+        result.unwrap(map.insert(mut m, DrainKey(id: i), result.unwrap(DrainValue(out: out, id: i))))
+    }
+    m
+}
+
+// Exhaustion cleans each current value once in insertion order.
+// expect: stdout "V0V1V2"
+// expect: run exhausted(out) = 3
+fn exhausted(out: Stdout) -> u64 {
+    let m = seed(out)
+    let mut n: u64 = 0
+    for take (k, v) in m {
+        n += 1
+    }
+    n
+}
+
+// At the second entry, the current value is cleaned before its key; the
+// unreached tail is then cleaned in insertion order.
+// expect: stdout "V0V1V2"
+// expect: run early_break(out) = 1
+fn early_break(out: Stdout) -> u64 {
+    let m = seed(out)
+    for take (k, v) in m {
+        if k.id == 1 {
+            break
+        }
+    }
+    1
+}
+
+// A body failure at the second entry still cleans the current binding and the
+// unreached tail exactly once.
+// expect: stdout "V0V1V2"
+// expect: run failing_body(out) = fail Unwrap
+fn failing_body(out: Stdout) -> u64 {
+    let m = seed(out)
+    for take (k, v) in m {
+        if k.id == 1 {
+            let none: Option[u64] = None
+            let _ = option.unwrap(none)
+        }
+    }
+    0
+}

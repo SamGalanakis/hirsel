@@ -1097,20 +1097,20 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         }
         self.sink.block(&format!("{label}:").trim_end_matches(':'));
         let to = self.edge(edge);
-        self.line(format!("br label %{to}"));
+        self.sink.instruction(None, sink::Operation::Branch(&to), self.debug_location);
     }
     fn term(&mut self, term: &Terminator) -> Result<()> {
         match *term {
             Terminator::Jump(e) => {
                 let to = self.edge(e);
-                self.line(format!("br label %{to}"));
+                self.sink.instruction(None, sink::Operation::Branch(&to), self.debug_location);
             }
             Terminator::Branch { condition, yes, no } => {
                 let c = self.numeric(condition);
-                let c = self.calc(format!("icmp ne i8 {c}, 0"));
+                let c = self.typed_compare(sink::Predicate::Ne, Ty::Scalar(Scalar::U8), &c, "0");
                 let y = self.edge_label(yes);
                 let n = self.edge_label(no);
-                self.line(format!("br i1 {c}, label %{y}, label %{n}"));
+                self.sink.instruction(None, sink::Operation::Conditional(&self.operand(&c), &y, &n, false), self.debug_location);
                 self.emit_edge(&y, yes);
                 self.emit_edge(&n, no);
             }
@@ -1147,7 +1147,7 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                     .collect::<Vec<_>>();
                 self.return_values(&xs);
             }
-            Terminator::Unreachable => self.line("unreachable"),
+            Terminator::Unreachable => self.sink.instruction(None, sink::Operation::Unreachable, self.debug_location),
             Terminator::Propagate => self.return_failure(),
             Terminator::Raise { cause, cleanup } => {
                 match cause {

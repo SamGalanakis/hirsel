@@ -326,7 +326,7 @@ impl Sink for TextSink {
 }
 
 #[cfg(hirsel_lazy_core)]
-mod native;
+pub(super) mod native;
 
 #[cfg(all(test,hirsel_lazy_core))]
 pub(crate) fn primitive_oracle() {

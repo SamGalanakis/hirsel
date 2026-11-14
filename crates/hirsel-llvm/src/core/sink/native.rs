@@ -4,7 +4,7 @@ use super::*;
 use crate::construction as llvm;
 use std::collections::HashMap;
 
-pub(super) struct NativeSink<'c> {
+pub(crate) struct NativeSink<'c> {
     pub unit:llvm::Unit<'c>,
     types:HashMap<Type,llvm::Type<'c>>,
     blocks:HashMap<String,llvm::Block<'c>>,

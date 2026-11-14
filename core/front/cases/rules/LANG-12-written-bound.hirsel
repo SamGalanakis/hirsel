@@ -1,0 +1,7 @@
+// LANG-12 (language.md): a type argument written in a type that lacks a bound its
+// parameter declares is refused at that argument, as `HostFile` in `Rc[HostFile]` for
+// `Rc[T: shareable]` (the spec's `keep`). A shareable argument is accepted.
+// expect: refuse LANG-12 at 5:22
+fn keep(r: Option[Rc[HostFile]]) -> u64 { 0 }
+type P: shareable { n: u64 }
+fn fine(r: Option[Rc[P]]) -> u64 { 0 }

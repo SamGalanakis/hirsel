@@ -1195,15 +1195,14 @@ impl Program<'_> {
                 }
                 let need = d.generics[i].bounds;
                 if need != 0 {
-                    let counted = matches!(role, Some(Role::Rc | Role::Arc));
                     self.pending.push(Pending::Bound {
                         ty: *t,
                         bounds: need,
                         params: params.clone(),
                         site: *s,
-                        rule: if counted {
-                            "OWN-4"
-                        } else if matches!(
+                        // LANG-12: a written type argument lacking its parameter's bound
+                        // (`Rc[HostFile]`) is refused at that argument.
+                        rule: if matches!(
                             role,
                             Some(
                                 Role::FixedSpan

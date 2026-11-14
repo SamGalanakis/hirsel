@@ -326,7 +326,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             );
             return ERROR;
         }
-        let counted = matches!(decl.role, Some(Role::Rc | Role::Arc));
         for (g, &(t, at)) in decl.generics.iter().zip(args) {
             if g.region {
                 if !matches!(self.t.kind(t), TyKind::Region(_)) && t != ERROR {
@@ -349,9 +348,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             let missing = g.bounds & !has_bounds(&p.decls, &self.t, t, &self.params);
             if missing != 0 {
-                let rule = if counted {
-                    "OWN-4"
-                } else if matches!(
+                // LANG-12: a written type argument lacking its parameter's bound
+                // (`Rc[HostFile]`) is refused at that argument.
+                let rule = if matches!(
                     decl.role,
                     Some(Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan | Role::SeqIndex)
                 ) {

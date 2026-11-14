@@ -1,9 +1,8 @@
 // MEM-21: an allocating operation admits its charge before any write and otherwise fails
 // with Capacity having allocated nothing; a core operation that may allocate says so in
-// its result type, which must be used (budgets.md's examples: `grow` accepted; an unused
-// Result refused under LANG-18, fenced by patterns/unused-result). budgets.md's one-line
-// unit `grow` makes the push the body's value, typed against `()` under LANG-11
-// (syntax.md rule 6), not an expression statement. Hand-derived: a first push grows an
+// its result type, which must be used (budgets.md's examples: `grow` accepted; the unit
+// `grow`'s discarded push refused under LANG-18, fenced by patterns/unused-result).
+// Hand-derived: a first push grows an
 // empty List[u64] to capacity 4, a charge of 4 * 8 = 32 bytes (budgets.md), so under
 // `bound bytes 0` it fails requesting 32, the list stays empty and the error returns the
 // value 1: 32 * 100 + 0 * 10 + 1. Unbounded, one push gives length 1.

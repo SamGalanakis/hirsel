@@ -148,11 +148,13 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
                 test_timeout = Some(std::time::Duration::from_secs(seconds));
             }
             Opt::Release => release = true,
-            Opt::DebugLines => debug_lines = Some(match value.as_str() {
-                "on" => true,
-                "off" => false,
-                _ => return Err("--debug-lines expects on or off".into()),
-            }),
+            Opt::DebugLines => {
+                debug_lines = Some(match value.as_str() {
+                    "on" => true,
+                    "off" => false,
+                    _ => return Err("--debug-lines expects on or off".into()),
+                })
+            }
             Opt::Backend => backend = Some(value.parse::<Backend>()?),
             Opt::Runtime => {
                 explicit_runtime = true;

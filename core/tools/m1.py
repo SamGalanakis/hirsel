@@ -183,7 +183,7 @@ def compare_case(binary, directory, case, scratch, timeout=None, runner=()):
     return None
 
 
-def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=None, case_timeouts=None, include_libraries=True, target=None, emulator=None, sysroot=None):
+def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=None, case_timeouts=None, include_libraries=True, target=None, emulator=None, sysroot=None, debug_lines=None):
     runner = [str(emulator), "-L", str(sysroot)] if emulator else []
     manifest = json.loads(manifest_path.read_text())
     entries = [e for e in manifest['entries'] if not only or e['workload'] in only]
@@ -222,6 +222,8 @@ def run(compiler, runtime, engines, manifest_path, root, store, cc=None, only=No
                            str(store / entry['workload'] / entry['variant']), '--json', '-o', str(binary)]
                 if engine == 'llvm':
                     command.append('--release')
+                if debug_lines is not None:
+                    command.extend(['--debug-lines', debug_lines])
                 if target:
                     command.extend(['--target', target])
                 if cc:
@@ -379,6 +381,7 @@ def main():
     parser.add_argument('--sysroot', type=Path)
     parser.add_argument('--only', nargs='+')
     parser.add_argument('--programs-only', action='store_true')
+    parser.add_argument('--debug-lines', choices=['on', 'off'], help='Override native line tables for every build.')
     parser.add_argument('--report', type=Path)
     parser.add_argument('--timeout-case', action='append', default=[], metavar='PROGRAM/CASE=SECONDS')
     args = parser.parse_args()
@@ -395,7 +398,7 @@ def main():
         rows = run(args.compiler.resolve(), args.runtime.resolve(), engines, args.manifest.resolve(),
                    args.root.resolve(), args.store.resolve() if args.store else Path(store),
                    args.cc.resolve() if args.cc else None, args.only, case_timeouts, not args.programs_only,
-                   args.target, args.emulator.resolve() if args.emulator else None, args.sysroot.resolve() if args.sysroot else None)
+                   args.target, args.emulator.resolve() if args.emulator else None, args.sysroot.resolve() if args.sysroot else None, args.debug_lines)
     print(report(rows))
     if args.report:
         args.report.write_text(json.dumps(rows, indent=2) + '\n')

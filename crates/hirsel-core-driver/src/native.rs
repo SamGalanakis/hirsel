@@ -733,6 +733,11 @@ fn link(
         ])
         .arg(&options.include)
         .arg(&entry);
+        if !options.debug_lines {
+            // The independent runtime archive may carry its own compiler DWARF.
+            // Keep unwind data, but do not retain line tables in an off build.
+            cc.arg("-Wl,--strip-debug");
+        }
         let (code, debug) = if options.debug_lines {
             let (code, debug) = crate::native_debug::bind(objects, sources, &options.target)
                 .map_err(|error| NativeStop::Link(format!("native debug binding: {error}")))?;

@@ -59,6 +59,14 @@ print(json.dumps({'accepted':True, 'native':{'executable':str(output)}, 'diagnos
         return run(self.compiler, self.root / 'runtime.a', ['cranelift'], self.path,
                    self.root, self.root / 'store')
 
+    def test_debug_lines_choice_reaches_the_build_request(self):
+        original = self.compiler.read_text()
+        self.compiler.write_text(original.replace("assert args[args.index('--dir')+1] == '.'",
+            "assert args[args.index('--debug-lines')+1] == 'on'"))
+        rows = run(self.compiler, self.root / 'runtime.a', ['cranelift'], self.path,
+                   self.root, self.root / 'store', debug_lines='on')
+        self.assertTrue(all(row['built'] for row in rows), rows)
+
     def test_build_once_runs_all_cases_and_compares_every_observation(self):
         rows = self.rows()
         self.assertEqual(rows[0]['passed'], 2)

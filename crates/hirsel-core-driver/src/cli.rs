@@ -66,7 +66,7 @@ commands! {
     "new", "new <package-dir> [--lib]", "Create a runnable application or library with an example main.";
     "env", "env [--json] [options]", "Report the compiler and selected installation, products and runtime.";
     "fmt", "fmt [--check] <package-dir>", "Format all new source files; refuse malformed input without partial edits.";
-    "explain", "explain RULE | explain --list [--json]", "Explain current specification rules or the debug-lines build option.";
+    "explain", "explain RULE|debug-lines | explain --list [--json]", "Explain current specification rules or the debug-lines build option.";
 }
 macro_rules! option {
     ($id:ident, [$($name:literal),+], $value:expr, [$($command:literal),*], $description:literal) => {

@@ -167,10 +167,9 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
         return Err("test selects marked functions with --filter, not --entry".into());
     }
     let mut meter = Meter::new(metrics.is_some());
-    // Source comparison uses checkout sources when Buck's build-time package
-    // path is relative to its action directory. Installed builds need no files.
-    if (source_std || source_core)
-        && manifest.is_none()
+    // Directory checks and source comparisons use checkout sources when Buck's
+    // build-time package path is relative to its action directory.
+    if manifest.is_none()
         && libraries == Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core")
         && Path::new("core/std").is_dir()
     {

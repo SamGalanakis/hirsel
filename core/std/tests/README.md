@@ -47,6 +47,12 @@ test/helper functions with bodies; type/const/pub additions, duplicate names and
 in the original module are refused. A reason comment is required. Use
 --filter pool_internal[:function] for a file named pool_internal.hirsel.
 
+All files under core/std/tests and core/core/tests are test-build inputs only,
+regardless of their headers. User dependency discovery never includes either
+tests subtree. A fixture must be selected explicitly by a contract runner; it
+cannot assume it is an ordinary module of a user program. Marked fixtures gain
+private access only through the walker's existing same-module splice.
+
 Marked files are test-build inputs only. They are excluded from the ordinary
 std_seed loader; published std, the cost corpora, M1 and LangArena load library
 files only. Unmarked tests keep their tests.<stem> module and public-only access.
@@ -65,8 +71,8 @@ module. The same private-function, collision and reason rules apply. An unmarked
 core test stays a separate `core.tests.<stem>` module and sees only public library
 items. For native execution the temporary core test adapter is itself an `@test`
 entry built through the ordinary core body and native product APIs. No test declaration
-is added to the installed product. Recursive core directory discovery excludes its
-root tests subtree; bundled products, std seed, M1 library rows and LangArena use
+is added to the installed product. Recursive core and std directory discovery excludes their
+root tests subtrees; bundled products, std seed, M1 library rows and LangArena use
 library sources only. Real library source refusals still fail those paths.
 
 Build the additional test backend `hirsel-core-contract-eval-bin-hirsel-core-contract-eval`

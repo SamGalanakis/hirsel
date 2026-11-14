@@ -42,7 +42,11 @@ Native `build` and `run` use published core and std packages by default. The
 compiler build embeds the root library sources and freezes their digests. The
 shared package cache is keyed by source selection and compiler identity. A miss
 produces the package once; later builds parse, resolve and check only application
-sources. Std contract-test files are not installed library sources. Explicit
+sources. Neither core/tests nor std/tests is a dependency module directory. Directory
+checks, source-library checks, and image production exclude those entire test
+subtrees, regardless of fixture headers. Contract runners select their files
+through explicit manifests. Application test directories keep ordinary discovery.
+Std contract-test files are not installed library sources. Explicit
 canonical manifests preserve exactly their supplied std module subset, even when
 the installed toolchain contains newer modules.
 

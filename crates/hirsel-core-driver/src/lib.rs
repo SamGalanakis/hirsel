@@ -62,23 +62,7 @@ pub struct CheckRequest {
 }
 impl CheckRequest {
     fn source_std(root: &Path) -> io::Result<PackageManifest> {
-        use std::io::BufRead;
-
         let mut manifest = PackageManifest::directory(root, package("std"), true)?;
-        let mut sources = Vec::with_capacity(manifest.sources.len());
-        for source in manifest.sources {
-            // Private contract fixtures are spliced into their owning module by
-            // the law walker. They are not standalone source-std modules.
-            if source.modules.first().is_some_and(|name| name == "tests") {
-                let mut first = String::new();
-                io::BufReader::new(std::fs::File::open(&source.file)?).read_line(&mut first)?;
-                if first.starts_with("// test-of:") {
-                    continue;
-                }
-            }
-            sources.push(source);
-        }
-        manifest.sources = sources;
         manifest.dependencies.push(package("core"));
         Ok(manifest)
     }

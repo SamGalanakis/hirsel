@@ -1465,7 +1465,7 @@ fn store_paths_keep_two_lowercase_hex_digits_per_digest_byte() {
 }
 
 #[test]
-fn prog4_source_std_excludes_only_first_line_marked_contracts() {
+fn prog4_source_std_excludes_contract_directory() {
     let dir = tempfile::tempdir().unwrap();
     let libraries = dir.path().join("libraries");
     let core = libraries.join("core");
@@ -1473,7 +1473,12 @@ fn prog4_source_std_excludes_only_first_line_marked_contracts() {
     let app = dir.path().join("app");
     std::fs::create_dir_all(&core).unwrap();
     std::fs::create_dir_all(std.join("tests")).unwrap();
-    std::fs::create_dir(&app).unwrap();
+    std::fs::create_dir_all(app.join("tests")).unwrap();
+    std::fs::write(
+        app.join("tests/local.hirsel"),
+        "@test\nfn local() -> Result[(), ()] { Ok(()) }\n",
+    )
+    .unwrap();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     for source in PackageProduct::bundled_manifest(&root.join("core/core")).sources {
         std::fs::copy(&source.file, core.join(source.file.file_name().unwrap())).unwrap();
@@ -1510,7 +1515,7 @@ fn prog4_source_std_excludes_only_first_line_marked_contracts() {
             .iter()
             .map(|s| s.modules.join("/"))
             .collect();
-        assert_eq!(modules, ["probe", "tests/later", "tests/public"]);
+        assert_eq!(modules, ["probe"]);
         let product = Driver::default()
             .check(request, &mut Meter::new(false))
             .unwrap();
@@ -1520,7 +1525,10 @@ fn prog4_source_std_excludes_only_first_line_marked_contracts() {
             product.diagnostics,
             product.incomplete
         );
-        assert_eq!(product.tests().count(), usize::from(expected_tests == 0));
+        assert_eq!(
+            product.tests().count(),
+            2 * usize::from(expected_tests == 0)
+        );
     }
     // A marker on a library source must never hide a real source refusal.
     std::fs::write(

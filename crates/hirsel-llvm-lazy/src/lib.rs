@@ -89,6 +89,12 @@ pub fn compile_library(
 }
 /// Application-owned text or an inline candidate from a published library.
 pub enum Unit<'a> {
+    Core {
+        module: &'a hirsel_core_ir::Module,
+        facts: &'a hirsel_core_ir::roles::Facts,
+        observe_charge: bool,
+        debug_lines: bool,
+    },
     Text {
         ir: &'a str,
         imported: bool,
@@ -111,7 +117,23 @@ pub fn emit_program_for_target(
     exports: &[String],
     target: hirsel_core_layout::Target,
 ) -> Result<Vec<u8>, String> {
-    loader::program(units, exports, target)
+    let mut native_units = Vec::new();
+    let mut lowered = Vec::with_capacity(units.len());
+    let empty_summary = ImportSummary { functions: vec![], facts: vec![] };
+    for unit in units {
+        if let Unit::Core { module, .. } = unit {
+            native_units.push(core::emit_native_scalar_module(module, target).map_err(|e| e.to_string())?);
+        }
+    }
+    let mut native_index = 0;
+    for unit in units {
+        match unit {
+            Unit::Core { .. } => { let bytes = &native_units[native_index]; native_index += 1; lowered.push(Unit::Import { bitcode: bytes, summary: &empty_summary }); }
+            Unit::Text { ir, imported } => lowered.push(Unit::Text { ir, imported: *imported }),
+            Unit::Import { bitcode, summary } => lowered.push(Unit::Import { bitcode, summary }),
+        }
+    }
+    loader::program(&lowered, exports, target)
 }
 
 #[cfg(test)]

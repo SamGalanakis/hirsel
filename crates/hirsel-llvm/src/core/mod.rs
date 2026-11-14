@@ -39,6 +39,7 @@ use std::fmt::{self, Write};
 use hirsel_core_ir::failure;
 use hirsel_core_ir::*;
 use hirsel_core_layout::Target;
+use sink::Sink as _;
 
 #[cfg(not(hirsel_lazy_core))]
 use crate::context::{Context, Module as LlvmModule, TargetMachine};
@@ -105,6 +106,60 @@ pub fn supports_target(triple: &str) -> bool {
 /// This function trusts its producer's IR and layout recipes.
 pub fn emit_ir(module: &Module) -> Result<String> {
     emit_ir_with_charge_observation(module, false)
+}
+
+/// Direct native construction for the scalar CoreIR subset. This is the first
+/// Unit::Core product seam; larger families join it as their helpers become
+/// sink-native. No LLVM text is created on this path.
+#[cfg(hirsel_lazy_core)]
+pub fn emit_native_scalar_module(module: &Module, target: Target) -> Result<Vec<u8>> {
+    let failures = failure::Failures::new(module);
+    let recipes = hirsel_core_layout::compute(&module.types).map_err(|e| Error::Llvm(format!("{e:?}")))?;
+    let context = crate::construction::Context::new().map_err(Error::Llvm)?;
+    let mut native = sink::native::NativeSink::new(context.unit());
+    let mut emitted = 0;
+    for (index, function) in module.functions.iter().enumerate() {
+        let Some(body) = &function.body else { continue; };
+        let sig = &module.signatures[function.signature.index()];
+        if sig.dest.is_some() || sig.results.len() > 1 || failures.may_fail[index] {
+            return Err(Error::Unsupported("native scalar seam requires infallible scalar functions".into()));
+        }
+        if body.insts.iter().any(|inst| matches!(inst, Inst::Call { .. } | Inst::Alloc { .. } | Inst::Grow { .. } | Inst::Drop { .. } | Inst::Release { .. } | Inst::Free { .. } | Inst::Copy { .. } | Inst::LimitEnter { .. } | Inst::LimitExit | Inst::RegionOpen { .. } | Inst::RegionClose { .. } | Inst::Share { .. } | Inst::TryUnwrap { .. })) {
+            return Err(Error::Unsupported("native scalar seam encountered memory/runtime instructions".into()));
+        }
+        let result = sig.results.first().copied().map(ir_type).unwrap_or(sink::Type::Void);
+        let mut params = vec![sink::Parameter::plain(sink::Type::Ptr)];
+        params.extend(sig.params.iter().map(|p| match p { Param::Value(t) => sink::Parameter::plain(ir_type(*t)), Param::Address { .. } => sink::Parameter::plain(sink::Type::Ptr) }));
+        params.push(sink::Parameter::plain(sink::Type::I64));
+        let signature = sink::Signature { result, extension: sink::Extension::None, params };
+        let mut locals = Vec::new();
+        for i in 0..sig.params.len() { locals.push(sink::Local::Param(i)); }
+        native.begin_function(&format!("{}.infallible", symbol(module, FuncId(index as u32))), &signature, &locals, true);
+        native.block("entry");
+        let flow = flow::Flow::new(body);
+        let mut emitter = FunctionEmitter {
+            function: Some(FuncId(index as u32)), append_fast: false, shadow_callee: None,
+            module, body, recipes: &recipes, abi: abi::Return::on_target(target, &sig.results), has_status: false,
+            failures: &failures, constants: &failures.constants[index], empty_bounds: empty::EmptyBounds::default(), observe_charge: false,
+            facts: false, aliases: None, caller_site: "%caller_site", debug_location: None, anchor: None,
+            relocatable_sites: false, value_slots: values::slots(body, &flow), address_slots: values::address_slots(body, &flow),
+            sink: native, next: 0, intrinsics: &mut std::collections::BTreeSet::new(),
+        };
+        for (i, t) in body.values.iter().enumerate() { if emitter.value_slots[i] { emitter.sink.alloca(sink::Local::Value(i), &ir_type(*t), 8); } }
+        for (i, t) in body.slots.iter().enumerate() { let (bytes, align)=emitter.place_layout(*t); emitter.sink.alloca(sink::Local::Slot(i), &sink::Type::bytes(bytes), align as u32); }
+        for (i, value) in body.blocks[0].params.get(&body.pools.values).unwrap().iter().enumerate() { emitter.put(*value, &format!("%p{i}")); }
+        for (block, b) in body.blocks.iter().enumerate() {
+            if block != 0 { emitter.sink.block(&format!("b{block}")); }
+            for offset in b.insts.get(&body.insts).unwrap().iter().enumerate() { emitter.inst(offset.1, b.insts.start as usize + offset.0)?; }
+            emitter.term(&body.terminators[block])?;
+        }
+        let native = emitter.sink;
+        let bitcode = native.bitcode().map_err(Error::Llvm)?;
+        emitted += 1;
+        return Ok(bitcode);
+    }
+    if emitted == 0 { return Err(Error::Unsupported("native scalar seam received no function bodies".into())); }
+    unreachable!()
 }
 
 /// Optional diagnostic emission; timings of these objects are not performance samples.

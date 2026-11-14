@@ -210,6 +210,7 @@ pub(crate) fn program(
     let inputs: Vec<_> = units
         .iter()
         .filter_map(|u| match u {
+            crate::Unit::Core { .. } => None,
             crate::Unit::Text { ir, imported } => Some(Input {
                 data: ir.as_ptr(),
                 len: ir.len(),

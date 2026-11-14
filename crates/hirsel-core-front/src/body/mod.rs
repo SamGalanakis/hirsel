@@ -411,6 +411,21 @@ impl Emitter {
         self.remember_generic_types(p, t, ty);
         Some(row)
     }
+    /// The place a `mut` parameter of type `ty` lends (#88): one of scalar
+    /// representation (`mut n: u64`, `mut r: Region`) is a value place, as a slot's;
+    /// any other is its type's row. None when that row is not built.
+    fn mut_place(
+        &mut self,
+        p: &Program,
+        t: &mut impl TyRead,
+        ty: TyId,
+        rep: Rep,
+    ) -> Option<PlaceTy> {
+        match rep {
+            Rep::Scalar(s) => Some(PlaceTy::Value(s)),
+            _ => self.type_row(p, t, ty).map(PlaceTy::Declared),
+        }
+    }
     /// `ty` as a field, with the rows it names added to the module.
     fn field_ty(&mut self, p: &Program, t: &mut impl TyRead, ty: TyId) -> Option<FieldTy> {
         let edge = self.shaped(p, t, |s| s.field(ty))?;
@@ -647,11 +662,11 @@ impl Emitter {
             let ty = subst(t, q.ty, arguments);
             let rep = self.rep(p, t, ty)?;
             if q.mode == Mode::Mut {
-                let id = self
-                    .type_row(p, t, ty)
+                let place = self
+                    .mut_place(p, t, ty, rep)
                     .ok_or("values of this type are not built")?;
                 params.push(Param::Address {
-                    ty: id,
+                    place,
                     loan: Loan::Mut,
                 });
                 abi.params.push(false);
@@ -665,7 +680,7 @@ impl Emitter {
                 }
                 Rep::Place(id) => {
                     params.push(Param::Address {
-                        ty: id,
+                        place: PlaceTy::Declared(id),
                         loan: loan(q.mode),
                     });
                     abi.params.push(true);

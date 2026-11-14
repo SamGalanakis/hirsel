@@ -43,14 +43,15 @@ impl KeyOp {
             Self::NeedsDrop => "core.$needs_drop",
         })
     }
-    fn signature(self, ty: TypeId) -> Signature {
-        // The value read is lent as a view; a clone's target is written.
+    fn signature(self, types: &[hirsel_core_layout::Shape], ty: TypeId) -> Signature {
+        // The value read is lent as a view; a clone's target is written, through
+        // the place a `mut` parameter of its row lends.
         let view = |ty| Param::Address {
-            ty,
+            place: PlaceTy::Declared(ty),
             loan: Loan::View,
         };
         let out = |ty| Param::Address {
-            ty,
+            place: scalar_abi::mut_place(types, ty),
             loan: Loan::Mut,
         };
         let mut params = vec![view(ty)];
@@ -195,7 +196,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                         types: vec![name],
                         dictionaries: vec![],
                     },
-                    op.signature(id),
+                    op.signature(&self.e.module.types, id),
                     // A clone writes through `to`, so both its places stay addresses.
                     match op {
                         KeyOp::Clone | KeyOp::CloneIn(_) | KeyOp::CloneTwin(_) => {
@@ -357,7 +358,10 @@ pub(super) fn inline_ordered(module: &Module, body: &mut Body) -> bool {
                     {
                         s
                     }
-                    Param::Address { ty, .. } => scalar_row(module, ty)?,
+                    Param::Address {
+                        place: PlaceTy::Declared(ty),
+                        ..
+                    } => scalar_row(module, ty)?,
                     _ => return None,
                 };
                 let args = call.args.get(&body.pools.args).unwrap();
@@ -526,7 +530,7 @@ impl Derive<'_> {
             }
             row
         } else {
-            let sig = op.signature(ty);
+            let sig = op.signature(&self.module.types, ty);
             let signature = if let Some(i) = self.module.signatures.iter().position(|s| *s == sig) {
                 SigId(i as u32)
             } else {

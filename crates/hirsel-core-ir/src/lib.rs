@@ -590,6 +590,11 @@
 //! with, in order: a pointer to the destination when `dest` is present; then each
 //! parameter, a scalar or pointer by value, or a by-address parameter (`&t`) as a
 //! pointer to a place of that type the caller owns for the duration of the call.
+//! A by-address parameter's place is a [`PlaceTy`]: a declared row (`&mut t3`) or a
+//! value place of one scalar or pointer (`&mut u64`, `&mut ptr`), as a slot's is. A
+//! `mut` parameter of a type carried by value (Carried, below) lends a value place
+//! of that scalar, as `mut n: u64` and `mut r: Region` do (#88); every other
+//! by-address parameter lends its row.
 //! Results come back in registers in the target's C convention for a struct of the
 //! result scalars (`m <= 1`: the plain C return). `bool` travels as a byte 0/1,
 //! `char` as a u32 scalar value. Link names are `h` followed by the hex digest of the

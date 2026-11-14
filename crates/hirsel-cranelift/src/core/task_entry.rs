@@ -93,7 +93,7 @@ impl Glues {
                 params: match xc {
                     // The task takes its input (RtOp::Spawn).
                     Carried::Address => vec![Param::Address {
-                        ty: x,
+                        place: c::PlaceTy::Declared(x),
                         loan: c::Loan::Take,
                     }],
                     Carried::Value(t) => vec![Param::Value(t)],

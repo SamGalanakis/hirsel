@@ -95,7 +95,7 @@ pub fn roles(m: &Module, f: &Function) -> Vec<Option<Role>> {
         let skip = usize::from(sig.dest.is_some());
         for (i, (p, v)) in sig.params.iter().zip(values.iter().skip(skip)).enumerate() {
             if let Param::Address {
-                ty,
+                place: PlaceTy::Declared(ty),
                 loan: Loan::Mut | Loan::Take,
             } = *p
                 && carrier(m, ty)

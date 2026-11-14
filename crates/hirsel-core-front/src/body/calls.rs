@@ -969,8 +969,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let v = vals[i].expect("a live call has every carried argument value");
             let arg = match r {
                 _ if p.mode == Mode::Mut => {
-                    let id = self.e.type_row(self.p, &mut self.t, ty)?;
-                    let a = self.address(AddressBase::Value(v), &[], PlaceTy::Declared(id), n);
+                    let place = self.e.mut_place(self.p, &mut self.t, ty, r)?;
+                    let a = self.address(AddressBase::Value(v), &[], place, n);
                     Arg::Address(a)
                 }
                 Rep::Place(id) => {

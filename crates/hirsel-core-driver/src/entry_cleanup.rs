@@ -30,7 +30,7 @@ pub(super) fn result_cleanup(source: &Module, result: TypeId, entry: &DefPath) -
     let signature = SigId(module.signatures.len() as u32);
     module.signatures.push(Signature {
         params: vec![Param::Address {
-            ty: result,
+            place: hirsel_core_ir::PlaceTy::Declared(result),
             loan: Loan::Take,
         }],
         results: vec![],

@@ -2,17 +2,30 @@
 use super::*;
 
 /// Address parameters with value semantics can follow their substituted row's
-/// carriage. Mutable parameters keep their address, even for a scalar instance.
+/// carriage. Mutable parameters keep their address, and at a scalar-carried row
+/// lend a value place of that scalar, as a direct signature's do (#88).
 #[derive(Clone, Debug, Default, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SignatureAbi {
     pub params: Vec<bool>,
     pub result: bool,
 }
 
+/// The place a `mut` parameter at row `id` lends (#88): a value place of the
+/// scalar a scalar-carried row is carried as, else the row.
+pub(super) fn mut_place(types: &[hirsel_core_layout::Shape], id: TypeId) -> PlaceTy {
+    match types[id.index()].carried {
+        Carried::Value(t) => PlaceTy::Value(t),
+        Carried::Nothing | Carried::Address => PlaceTy::Declared(id),
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(super) enum Change {
     Keep,
     Value(Ty, TypeId),
+    /// A `mut` parameter whose row is carried as `Ty`: still lent by address, as
+    /// a value place of it.
+    Place(Ty),
     Nothing,
 }
 
@@ -31,19 +44,33 @@ impl Plan {
             .enumerate()
             .filter_map(|(i, &param)| {
                 let change = match param {
-                    Param::Address { ty: id, .. } if abi.params.get(i) == Some(&true) => {
+                    Param::Address {
+                        place: PlaceTy::Declared(id),
+                        ..
+                    } if abi.params.get(i) == Some(&true) => {
                         match module.types[id.index()].carried {
                             Carried::Value(t) => Change::Value(t, id),
                             Carried::Nothing => Change::Nothing,
                             Carried::Address => Change::Keep,
                         }
                     }
+                    Param::Address {
+                        place: PlaceTy::Declared(id),
+                        loan: Loan::Mut,
+                    } => match mut_place(&module.types, id) {
+                        PlaceTy::Value(t) => Change::Place(t),
+                        PlaceTy::Declared(_) => Change::Keep,
+                    },
                     _ => Change::Keep,
                 };
                 params.push(change);
                 match change {
                     Change::Keep => Some(param),
                     Change::Value(t, _) => Some(Param::Value(t)),
+                    Change::Place(t) => Some(Param::Address {
+                        place: PlaceTy::Value(t),
+                        loan: Loan::Mut,
+                    }),
                     Change::Nothing => None,
                 }
             })
@@ -195,8 +222,11 @@ pub(super) fn seal<T>(
     for (&id, abi) in abis {
         let sig = &module.signatures[id.index()];
         let moves = |(i, p): (usize, &Param)| match p {
-            Param::Address { ty, .. } => abi.params.get(i) == Some(&true) && !by_address(*ty),
-            Param::Value(_) => false,
+            Param::Address {
+                place: PlaceTy::Declared(ty),
+                ..
+            } => abi.params.get(i) == Some(&true) && !by_address(*ty),
+            Param::Address { .. } | Param::Value(_) => false,
         };
         if !sig.params.iter().enumerate().any(moves)
             && !sig.dest.is_some_and(|t| abi.result && !by_address(t))
@@ -204,8 +234,11 @@ pub(super) fn seal<T>(
             continue;
         }
         let mut rows = sig.params.iter().filter_map(|p| match p {
-            Param::Address { ty, .. } => Some(*ty),
-            Param::Value(_) => None,
+            Param::Address {
+                place: PlaceTy::Declared(ty),
+                ..
+            } => Some(*ty),
+            Param::Address { .. } | Param::Value(_) => None,
         });
         if rows.any(|t| rigid.contains_key(&t)) || sig.dest.is_some_and(|t| rigid.contains_key(&t))
         {
@@ -299,6 +332,7 @@ fn convert(
     let mut params = Vec::with_capacity(entry.len());
     let mut index = usize::from(original.dest.is_some());
     let scalar_dest = match own.result {
+        Change::Place(_) => unreachable!("a result is never lent"),
         Change::Keep => {
             if original.dest.is_some() {
                 params.push(entry[0]);
@@ -318,7 +352,7 @@ fn convert(
         let old_value = entry[index];
         index += 1;
         match *change {
-            Change::Keep => params.push(old_value),
+            Change::Keep | Change::Place(_) => params.push(old_value),
             Change::Nothing => c.emit(Inst::Const {
                 result: old_value,
                 bits: 0,
@@ -345,6 +379,7 @@ fn convert(
                 let mut k = usize::from(old_sig.dest.is_some());
                 let mut passed = Vec::with_capacity(args.len());
                 let output = match plan.result {
+                    Change::Place(_) => unreachable!("a result is never lent"),
                     Change::Keep => {
                         if old_sig.dest.is_some() {
                             passed.push(args[0]);
@@ -365,6 +400,12 @@ fn convert(
                     k += 1;
                     match *change {
                         Change::Keep => passed.push(arg),
+                        Change::Place(t) => {
+                            let Arg::Address(at) = arg else {
+                                unreachable!()
+                            };
+                            passed.push(Arg::Address(c.field(at, t)));
+                        }
                         Change::Nothing => {}
                         Change::Value(t, _) => {
                             let Arg::Address(at) = arg else {

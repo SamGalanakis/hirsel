@@ -1309,15 +1309,15 @@ impl Machine<'_> {
         let places: Vec<(usize, usize, usize, Loan)> = sig
             .dest
             .map(|ty| Param::Address {
-                ty,
+                place: PlaceTy::Declared(ty),
                 loan: Loan::Mut,
             })
             .into_iter()
             .chain(sig.params.iter().copied())
             .zip(args)
             .filter_map(|(p, &a)| match p {
-                Param::Address { ty, loan } => {
-                    let n = self.place_size(PlaceTy::Declared(ty)) as usize;
+                Param::Address { place, loan } => {
+                    let n = self.place_size(place) as usize;
                     (n > 0).then(|| {
                         let (b, o) = split(a);
                         (b, o, n, loan)

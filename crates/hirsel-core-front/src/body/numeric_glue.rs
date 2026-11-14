@@ -69,7 +69,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let ty = subst(&mut self.t, p.ty, tys);
                 rows[i] = self.e.type_row(self.p, &mut self.t, ty)?;
                 params.push(Param::Address {
-                    ty: rows[i],
+                    place: PlaceTy::Declared(rows[i]),
                     loan: loan(p.mode),
                 });
             }

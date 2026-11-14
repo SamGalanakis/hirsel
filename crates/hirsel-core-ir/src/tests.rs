@@ -635,6 +635,32 @@ fn loans_stop_producer_aliasing() {
         taken.contains("into a lent view or take place"),
         "got `{taken}`"
     );
+    // A value place (`&mut u64`, #88: a `mut` scalar or Region parameter) is lent
+    // as any by-address place: its size comes from the place type, so the loan is
+    // checked; the callee's write is the caller's (5 becomes 7).
+    let cell = |call: &str| {
+        format!(
+            "core v1\nsig g0 = () -> (u64)\nsig g1 = (&mut u64, &mut u64) -> ()\ninst n0 = p@0/m/main [] []\ninst n1 = p@0/m/callee [] []\nfn f0 = n0 g0 {{\n  slot s0 = u64\n  slot s1 = u64\n  addr a0 = s0 : u64\n  addr a1 = s1 : u64\nb0:\n  live s0\n  live s1\n  address a0\n  address a1\n  v0: u64 = const 5\n  store a0, v0\n  store a1, v0\n  call f1 g1 ({call})\n  v1: u64 = read a0\n  dead s1\n  dead s0\n  return v1\n}}\nfn f1 = n1 g1 {{\n  addr a0 = v0 : u64\nb0(v0: ptr, v1: ptr):\n  address a0\n  v2: u64 = const 7\n  store a0, v2\n  return\n}}\n"
+        )
+    };
+    let m = parse(&cell("&a0, &a1")).unwrap();
+    wf::module(&m).unwrap();
+    let (report, checked) = eval::run_checked(&m, FuncId(0), &[], u64::MAX);
+    assert_eq!(
+        (report.outcome, checked.loans),
+        (eval::Outcome::Returned(vec![7]), 2)
+    );
+    let twice = cell("&a0, &a0");
+    let err = wf_err(&twice);
+    assert!(
+        err.contains("a mut place overlaps another argument"),
+        "got `{err}`"
+    );
+    let shared = eval_only(&twice).unwrap_err();
+    assert!(
+        shared.contains("overlaps another argument's place"),
+        "got `{shared}`"
+    );
     // wf: a body writes its own take parameter's incoming place
     let err = wf_err(&module("", &write("g5", "v0")));
     assert!(

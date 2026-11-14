@@ -376,7 +376,11 @@ impl Substitution<'_> {
         }
         let mut sig = self.module.signatures[old.index()].clone();
         for param in &mut sig.params {
-            if let Param::Address { ty: id, .. } = param {
+            if let Param::Address {
+                place: PlaceTy::Declared(id),
+                ..
+            } = param
+            {
                 *id = self.ty(*id);
             }
         }

@@ -284,7 +284,7 @@ impl Printer {
         for (i, s) in m.signatures.iter().enumerate() {
             let params = list(&s.params, |p| match p {
                 Param::Value(t) => ty(*t).into(),
-                Param::Address { ty, loan } => format!("&{} t{}", loan_word(*loan), ty.0),
+                Param::Address { place: p, loan } => format!("&{} {}", loan_word(*loan), place(*p)),
             });
             let results = if s.never {
                 "never".into()
@@ -1728,7 +1728,7 @@ impl Parser {
                                 return Err("expected `mut`, `view` or `take` after `&`".into());
                             };
                             Ok(Param::Address {
-                                ty: TypeId(l.id('t')?),
+                                place: l.place()?,
                                 loan,
                             })
                         } else {

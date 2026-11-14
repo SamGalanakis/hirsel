@@ -777,11 +777,11 @@ impl RtOp {
     pub fn signature(self) -> Signature {
         use Param::Value as V;
         let take = |ty| Param::Address {
-            ty,
+            place: PlaceTy::Declared(ty),
             loan: Loan::Take,
         };
         let out = |ty| Param::Address {
-            ty,
+            place: PlaceTy::Declared(ty),
             loan: Loan::Mut,
         };
         let (u8_, u64_, bool_) = (
@@ -1025,7 +1025,7 @@ pub enum Param {
     /// A pointer to a place of the declared type, owned by the caller, lent for
     /// the whole call under `loan` (crate docs, "Loans").
     Address {
-        ty: TypeId,
+        place: PlaceTy,
         loan: Loan,
     },
 }

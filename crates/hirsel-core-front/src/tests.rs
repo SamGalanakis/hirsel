@@ -1803,7 +1803,8 @@ fn list_index_iteration_and_failure_cleanup() {
         let module = &emitter.module;
         let signature = module.functions[target.index()].signature;
         let Param::Address {
-            ty: TypeId(list), ..
+            place: hirsel_core_ir::PlaceTy::Declared(TypeId(list)),
+            ..
         } = module.signatures[signature.index()].params[0]
         else {
             panic!("List by address")
@@ -2148,7 +2149,11 @@ fn list_set_transfers_the_indexed_element() {
     );
     let target = check.function.unwrap();
     let sig = emitter.module.functions[target.index()].signature;
-    let Param::Address { ty: list, .. } = emitter.module.signatures[sig.index()].params[0] else {
+    let Param::Address {
+        place: hirsel_core_ir::PlaceTy::Declared(list),
+        ..
+    } = emitter.module.signatures[sig.index()].params[0]
+    else {
         panic!("mut List ABI")
     };
     let s = emitter.module.signatures.len();
@@ -2254,7 +2259,11 @@ fn causes_iteration_reads_complete_cells_and_preserves_order() {
         let target = check.function.unwrap();
         let m = &emitter.module;
         let sig = m.functions[target.index()].signature;
-        let Param::Address { ty: cs, .. } = m.signatures[sig.index()].params[0] else {
+        let Param::Address {
+            place: hirsel_core_ir::PlaceTy::Declared(cs),
+            ..
+        } = m.signatures[sig.index()].params[0]
+        else {
             panic!("Causes carrier")
         };
         let (g, instance, entry) = (m.signatures.len(), m.instances.len(), m.functions.len());
@@ -2425,7 +2434,10 @@ fn packed_iteration_uses_one_cursor_for_variable_records() {
                 );
                 let target = check.function.unwrap();
                 let sig = emitter.module.functions[target.index()].signature;
-                let Param::Address { ty, .. } = emitter.module.signatures[sig.index()].params[0]
+                let Param::Address {
+                    place: hirsel_core_ir::PlaceTy::Declared(ty),
+                    ..
+                } = emitter.module.signatures[sig.index()].params[0]
                 else {
                     panic!("span locator")
                 };
@@ -2841,9 +2853,9 @@ fn rows_publish_the_closed_signature_carriage() {
         .filter_map(|&(name, carried)| match carried {
             Carried::Value(t) => Some(Param::Value(t)),
             Carried::Address => Some(Param::Address {
-                ty: hirsel_core_ir::TypeId(
+                place: hirsel_core_ir::PlaceTy::Declared(hirsel_core_ir::TypeId(
                     module.types.iter().position(|t| t.name == name).unwrap() as u32,
-                ),
+                )),
                 loan: hirsel_core_ir::Loan::View,
             }),
             Carried::Nothing => None,

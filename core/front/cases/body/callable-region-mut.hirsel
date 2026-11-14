@@ -1,0 +1,10 @@
+// A mut Region parameter lends a value place holding the region's pointer
+// (`&mut ptr`, #88), so a callable over one is built; no stored Region row is
+// invented for it.
+// expect: accept
+fn invoke(cb: fn(mut Region) -> u64) -> u64 {
+    region r {
+        let mut alias = r
+        cb(mut alias)
+    }
+}

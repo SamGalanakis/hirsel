@@ -559,8 +559,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             let param = self.e.module.signatures[signature.index()].params[parameter];
             parameter += 1;
-            let id = match param {
-                Param::Address { ty: id, .. } => id,
+            let place = match param {
+                Param::Address { place, .. } => place,
                 Param::Value(_) => {
                     scratch.ir_args.push(Arg::Value(scratch.vals[i]?));
                     continue;
@@ -571,12 +571,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             } else if matches!(rep, Rep::Place(_)) {
                 scratch.vals[i]
             } else {
-                let place = rep.stored().unwrap_or(PlaceTy::Declared(id));
-                let at = self.new_slot(place, n);
+                let at = self.new_slot(rep.stored().unwrap_or(place), n);
                 self.install(at, rep, scratch.vals[i], n);
                 Some(self.pointer(at, n))
             }?;
-            let at = self.address(AddressBase::Value(pointer), &[], PlaceTy::Declared(id), n);
+            let at = self.address(AddressBase::Value(pointer), &[], place, n);
             scratch.ir_args.push(Arg::Address(at));
         }
         let args = PoolRange::push(&mut self.b.pools.args, scratch.ir_args.iter().copied());

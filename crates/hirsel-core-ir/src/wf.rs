@@ -93,8 +93,11 @@ pub fn module(m: &Module) -> R {
     hirsel_core_layout::compute(&m.types).map_err(|e| format!("layout: {e:?}"))?;
     for (i, s) in m.signatures.iter().enumerate() {
         let types_ok = s.params.iter().all(|p| match p {
-            Param::Address { ty, .. } => ty.index() < m.types.len(),
-            Param::Value(_) => true,
+            Param::Address {
+                place: PlaceTy::Declared(ty),
+                ..
+            } => ty.index() < m.types.len(),
+            Param::Address { .. } | Param::Value(_) => true,
         }) && s.dest.is_none_or(|t| t.index() < m.types.len());
         need(types_ok, || format!("g{i}: unknown type"))?;
         need(
@@ -966,7 +969,7 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             let params = sig
                 .dest
                 .map(|ty| Param::Address {
-                    ty,
+                    place: PlaceTy::Declared(ty),
                     loan: Loan::Mut,
                 })
                 .into_iter()
@@ -974,7 +977,7 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             for (i, (a, p)) in args.iter().zip(params).enumerate() {
                 let ok = match (a, p) {
                     (Arg::Value(v), Param::Value(t)) => c.ty(*v)? == t,
-                    (Arg::Address(a), Param::Address { ty, loan }) => {
+                    (Arg::Address(a), Param::Address { place, loan }) => {
                         if loan == Loan::Mut {
                             c.writes(*a)?;
                             for (j, b) in args.iter().enumerate() {
@@ -988,7 +991,7 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
                                 }
                             }
                         }
-                        c.place(*a)? == PlaceTy::Declared(ty)
+                        c.place(*a)? == place
                     }
                     _ => false,
                 };

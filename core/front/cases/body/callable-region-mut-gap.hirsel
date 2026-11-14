@@ -1,9 +1,0 @@
-// No stored Region row is invented for a mut callable parameter. An unbuilt
-// payload convention must stop emission rather than silently accept a missing call.
-// expect: gap callable payload layouts are not built
-fn invoke(cb: fn(mut Region) -> u64) -> u64 {
-  region r {
-    let mut alias = r
-    cb(mut alias)
-  }
-}

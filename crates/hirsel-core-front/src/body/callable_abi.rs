@@ -24,9 +24,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let rep = self.rep(ty)?;
             let p = if mode == Mode::Mut {
                 Param::Address {
-                    ty: self
+                    place: self
                         .e
-                        .type_row(self.p, &mut self.t, ty)
+                        .mut_place(self.p, &mut self.t, ty, rep)
                         .ok_or("callable payload layouts are not built")?,
                     loan: Loan::Mut,
                 }
@@ -35,7 +35,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     Rep::None => continue,
                     Rep::Scalar(t) => Param::Value(t),
                     Rep::Place(id) => Param::Address {
-                        ty: id,
+                        place: PlaceTy::Declared(id),
                         loan: loan(mode),
                     },
                 }
@@ -208,13 +208,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let value = match param {
                 Param::Value(_) => Some(incoming[k]),
                 Param::Address { .. } if mode == Mode::Mut => Some(incoming[k]),
-                Param::Address { ty: id, .. } => {
-                    let at = child.address(
-                        AddressBase::Value(incoming[k]),
-                        &[],
-                        PlaceTy::Declared(id),
-                        n,
-                    );
+                Param::Address { place, .. } => {
+                    let at = child.address(AddressBase::Value(incoming[k]), &[], place, n);
                     child.read_carried(at, ty, n)
                 }
             };

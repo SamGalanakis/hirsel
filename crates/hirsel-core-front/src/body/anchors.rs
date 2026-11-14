@@ -223,6 +223,10 @@ impl Anchors {
         self.declared.get(&slot).copied()
     }
 
+    pub(super) fn named_region(&mut self, slot: u32) -> Fact {
+        self.node(Node::Root(Root::Region(crate::types::Root::Local(slot))))
+    }
+
     pub(super) fn permits_fact(&mut self, allowed: Fact, actual: Fact, steps: &[PStep]) -> bool {
         self.permits(allowed, actual, steps)
     }

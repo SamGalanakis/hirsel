@@ -1,0 +1,97 @@
+stable type Stamp {
+    n: u64
+}
+
+// A named region root in the written anchor list is the same root read by the
+// installed callback, even though the callback captures the region handle place.
+// expect: accept
+fn listed_region() -> u64 {
+    region r {
+        let mut p: (scoped fn() -> u64) in r = fn() -> u64 {
+            0
+        }
+        let change = scoped fn() {
+            p = scoped fn() -> u64 {
+                let x = result.unwrap(Stamp(n: 1) in r)
+                x.n
+            }
+        }
+        change()
+        p()
+    }
+}
+
+// A second region remains outside the written list and still refuses OWN-21.
+// expect: refuse OWN-21 at 34:17
+// expect: cause OWN-21 at 34:17 from 30:21
+fn unlisted_region() -> u64 {
+    region r {
+        region other {
+            let mut p: (scoped fn() -> u64) in r = fn() -> u64 {
+                0
+            }
+            let change = scoped fn() {
+                p = scoped fn() -> u64 {
+                    let x = result.unwrap(Stamp(n: 1) in other)
+                    x.n
+                }
+            }
+            change()
+            p()
+        }
+    }
+}
+
+// A projected scalar does not inherit the callback sibling of its tuple root.
+// expect: accept
+fn guard(pair: (scoped fn() -> u64, u64)) -> u64 {
+    match isolate(scoped fn() -> u64 {
+        pair.1
+    }) {
+        _ => 0,
+    }
+}
+
+// Reading the projected callback itself remains FAIL-16.
+// expect: refuse FAIL-16 at 58:19
+fn guard_bad(pair: (scoped fn() -> u64, u64)) -> u64 {
+    match isolate(scoped fn() -> u64 {
+        pair.0()
+    }) {
+        _ => 0,
+    }
+}
+
+// An unanchored captured slot accepts an anchor-free replacement.
+// expect: accept
+fn unanchored_outer(take n: List[u64], take m: List[u64]) -> u64 {
+    let mut p: scoped fn() -> u64 = fn() -> u64 {
+        0
+    }
+    let change = scoped fn() {
+        p = scoped fn() -> u64 {
+            0
+        }
+    }
+    change()
+    0
+}
+
+// The same slot refuses a replacement that reads an anchor (OWN-21).
+// expect: refuse OWN-21 at 87:9
+fn unanchored_anchor(take n: List[u64], take m: List[u64]) -> u64 {
+    let mut p: scoped fn() -> u64 = fn() -> u64 {
+        0
+    }
+    let change = scoped fn() {
+        p = scoped fn() -> u64 {
+            list.len(m)
+        }
+    }
+    change()
+    0
+}
+
+pub fn main() -> Result[(), Exit] {
+    Ok(())
+}

@@ -13,23 +13,68 @@ pub(super) struct CallableAbi {
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
     #[inline(always)]
-    pub(super) fn isolate_descriptor_forbidden(&self, value: Option<ValueId>) -> bool {
+    pub(super) fn isolate_descriptor_forbidden(&mut self, value: Option<ValueId>) -> bool {
         let Some(id) = self.descriptors.of(value) else {
             return false;
         };
+        self.isolate_descriptor_forbidden_at(id, None)
+    }
+
+    /// A projected capture only carries the projected type's descriptor.  Keep a
+    /// callback sibling in a tuple from poisoning an isolate that reads another
+    /// field (FAIL-16); a projected callback field still refuses.
+    fn isolate_descriptor_forbidden_at(&mut self, id: u32, projected: Option<TyId>) -> bool {
         let range = self.descriptors.ranges[id as usize];
-        range
-            .get(&self.descriptors.captures)
+        let captures = self
+            .descriptors
+            .projected
+            .get(&id)
+            .cloned()
+            .filter(|captures| !captures.is_empty())
+            .unwrap_or_else(|| range.get(&self.descriptors.captures).unwrap().to_vec());
+        if captures.iter().any(|capture| capture.mode == Mode::Mut) {
+            return true;
+        }
+        let fields = self.descriptors.fields[id as usize]
+            .get(&self.descriptors.parts)
             .unwrap()
-            .iter()
-            .any(|capture| {
-                if capture.mode == Mode::Mut {
-                    return true;
+            .to_vec();
+        if fields.is_empty() {
+            let projected_path = captures.iter().any(|capture| capture.path.is_some());
+            return captures.iter().any(|capture| {
+                if projected_path && capture.path.is_none() {
+                    return false;
                 }
                 let var = self.var(capture.slot);
+                let ty = projected
+                    .or_else(|| self.descriptor_capture_type(*capture, var.ty))
+                    .unwrap_or(var.ty);
                 matches!(var.origin, Origin::ViewParam | Origin::MutParam)
-                    && self.contains_callback(var.ty)
-            })
+                    && self.contains_callback(ty)
+            });
+        }
+        fields.iter().any(|(component, child)| {
+            let ty = projected.and_then(|ty| match component {
+                anchors::Component::Field(i) => self.field_ty(ty, *i),
+                _ => None,
+            });
+            self.isolate_descriptor_forbidden_at(*child, ty)
+        })
+    }
+
+    fn descriptor_capture_type(&mut self, capture: Capture, root: TyId) -> Option<TyId> {
+        let mut path = Vec::new();
+        let mut at = capture.path?;
+        while at != 0 {
+            let step = self.descriptors.paths[at as usize - 1];
+            path.push(step.field);
+            at = step.parent;
+        }
+        let mut ty = root;
+        for field in path.into_iter().rev() {
+            ty = self.field_ty(ty, field)?;
+        }
+        Some(ty)
     }
     pub(super) fn scoped_callable_view(&self, from: TyId, to: TyId) -> bool {
         if from.0 <= HOLE.0 || to.0 <= HOLE.0 {
@@ -834,6 +879,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             by_slot: vec![None; self.vars.len()],
             captures: vec![],
             callbacks: vec![],
+            projected: vec![],
             callback_paths: vec![],
             activating: false,
             words: 0,
@@ -980,6 +1026,7 @@ pub(super) struct CaptureFrame {
     by_slot: Vec<Option<usize>>,
     captures: Vec<Capture>,
     callbacks: Vec<Capture>,
+    projected: Vec<Capture>,
     callback_paths: Vec<CapturePath>,
     activating: bool,
     words: u32,
@@ -1013,6 +1060,7 @@ pub(super) struct Descriptors {
     activation_path: Vec<u32>,
     references: HashMap<(u32, u32), u32>,
     projections: HashMap<(u32, u32), u32>,
+    projected: HashMap<u32, Vec<Capture>>,
 }
 impl Descriptors {
     fn path_field(&mut self, parent: u32, field: u32) -> u32 {
@@ -1671,8 +1719,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let carrier = self.raw_frame(2, n)?;
         self.store_word(carrier, 0, code, n);
         self.store_word(carrier, 8, environment, n);
+        let mut projected = frame.projected.clone();
+        for capture in &mut projected {
+            capture.path = capture
+                .path
+                .map(|path| self.descriptors.import_path(&frame.callback_paths, path));
+        }
         if let Some(id) = self.descriptors.add(frame, n) {
             self.descriptors.values.insert(carrier, id);
+            if !projected.is_empty() {
+                self.descriptors.projected.insert(id, projected);
+            }
         }
         Some(carrier)
     }
@@ -1739,6 +1796,43 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
             return;
         }
+        if self
+            .capture_frame
+            .as_ref()
+            .is_some_and(|f| !f.owning && f.outer[at.place.slot as usize].is_some())
+            && at.place.len > 0
+            && self.contains_callback(self.var(at.place.slot).ty)
+            && !self.contains_callback(at.ty)
+        {
+            let mut path = 0;
+            for i in at.place.start..at.place.start + at.place.len {
+                let PStep::Field(field) = self.steps[i as usize] else {
+                    self.gap(
+                        n,
+                        "capture descriptors through this projection are not built",
+                    );
+                    return;
+                };
+                path = self.descriptors.path_field(path, field);
+            }
+            let projected = Capture {
+                slot: at.place.slot,
+                mode: Mode::View,
+                offset: 0,
+                site: n,
+                path: Some(path),
+                synthetic: false,
+            };
+            if let Some(frame) = &mut self.capture_frame
+                && !frame
+                    .projected
+                    .iter()
+                    .any(|old| self.descriptors.same_capture(*old, projected))
+            {
+                frame.projected.push(projected);
+            }
+            return;
+        }
         let mut id = self.descriptors.slots.get(&at.place.slot).copied();
         if id.is_none() || !self.contains_callback(at.ty) {
             return;
@@ -1766,6 +1860,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.descriptors.values.insert(value, id);
         }
     }
+
     pub(super) fn activate(&mut self, value: Option<ValueId>, call: u32, n: NodeId) {
         let Some(id) = self.descriptors.of(value) else {
             return;
@@ -2072,25 +2167,26 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                     .as_ref()
                     .and_then(|f| f.written_anchors[at.place.slot as usize])
             });
-            let Some(declared) = declared else {
-                self.gap(
-                    n,
-                    "callback stores through captured mutable locals are not built",
-                );
-                return false;
-            };
-            let allowed = declared;
             let new = self.anchor_expression(source);
             let captures = self.capture_anchors(value);
             let actual = self.anchors.union(new, captures);
-            let permits = self.anchors.permits_fact(allowed, actual, &self.steps);
-            if !permits {
-                let cause = self.declared_at(at.place.slot);
-                self.refuse_from(
+            if let Some(allowed) = declared {
+                let permits = self.anchors.permits_fact(allowed, actual, &self.steps);
+                if !permits {
+                    let cause = self.declared_at(at.place.slot);
+                    self.refuse_from(
+                        "OWN-21",
+                        self.span(n),
+                        vec![cause],
+                        "a value installed through a captured slot reads an undeclared anchor",
+                    );
+                    return false;
+                }
+            } else if actual != 0 {
+                self.refuse(
                     "OWN-21",
-                    self.span(n),
-                    vec![cause],
-                    "a value installed through a captured slot reads an undeclared anchor",
+                    n,
+                    "a captured slot without written anchors may receive only an anchor-free value",
                 );
                 return false;
             }
@@ -2459,11 +2555,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         for i in range.start..range.start + range.len {
             let slot = self.descriptors.captures[i as usize].slot;
             let ty = self.var(slot).ty;
-            let captured = self.anchor_read(At {
-                place: Place::whole(slot),
-                ty,
-                shared: false,
-            });
+            let captured = if self.region_handle(ty) {
+                self.anchors.named_region(slot)
+            } else {
+                self.anchor_read(At {
+                    place: Place::whole(slot),
+                    ty,
+                    shared: false,
+                })
+            };
             fact = self.anchors.union(fact, captured);
         }
         fact

@@ -1,5 +1,5 @@
-// Captured-local store semantics await the language ruling.
-// expect: gap callback stores through captured mutable locals are not built
+// An unanchored slot accepts an anchor-free replacement.
+// expect: accept
 fn captured_run() -> u64 {
     let mut n: u64 = 10
     let mut cb = scoped fn(x: u64) -> u64 {
@@ -14,4 +14,3 @@ fn captured_run() -> u64 {
     reset()
     cb(2) + n
 }
-

@@ -3519,6 +3519,12 @@ fn isolate_lowering_rules() {
 }
 
 #[test]
+fn isolate_anchor_attack_regressions() {
+    let failures = run_case(&root().join("cases/body/callable-attack-945.hirsel"));
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
 fn written_anchor_activation_rules() {
     let failures = run_case(&root().join("cases/body/callable-written-anchor-activation.hirsel"));
     assert!(failures.is_empty(), "{failures:?}");

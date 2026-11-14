@@ -1,10 +1,18 @@
-// Captured-local store effects await the language ruling.
-// expect: gap callback stores through captured mutable locals are not built
-fn f()->u64 {
- let mut n:u64=1
- let mut m:u64=2
- let mut p=(scoped fn(x:u64)->u64 {n+=x;n},0u64)
- let change=scoped fn() {p.0=scoped fn(x:u64)->u64 {m+=x;m}}
- change()
- p.0(m)
+// An unanchored aggregate store that reads a captured place is OWN-21.
+// expect: refuse OWN-21 at 11:9
+fn f() -> u64 {
+    let mut n: u64 = 1
+    let mut m: u64 = 2
+    let mut p = (scoped fn(x: u64) -> u64 {
+        n += x;
+        n
+    }, 0u64)
+    let change = scoped fn() {
+        p.0 = scoped fn(x: u64) -> u64 {
+            m += x;
+            m
+        }
+    }
+    change()
+    p.0(m)
 }

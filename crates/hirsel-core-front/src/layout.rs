@@ -41,10 +41,15 @@ impl<T: TyRead> Shapes<'_, T> {
     /// field type for some part of it (recorded as a gap by the caller).
     pub fn shape(&mut self, ty: TyId) -> Option<TypeRef> {
         crate::cost_scope!("query", "shape lookup");
-        let name = crate::decls::layout_name(self.decls, &*self.types, ty);
-        if let Some(&r) = self.of.get(&name) {
-            return Some(r);
-        }
+        let name = match crate::decls::with_layout_name(self.decls, &*self.types, ty, |name| {
+            self.of
+                .get(name.as_ref())
+                .copied()
+                .ok_or_else(|| name.into_owned())
+        }) {
+            Ok(row) => return Some(row),
+            Err(name) => name,
+        };
         // A view is held as its type's own bytes (FORM #56); an anchor only bounds where
         // a value may go.
         if let TyKind::Anchored(x, _) | TyKind::View(x) = *self.types.kind(ty) {

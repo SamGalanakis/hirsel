@@ -2546,6 +2546,15 @@ pub(crate) fn layout_name(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: Ty
     crate::cost_scope!("query", "layout type name");
     t.layout_name(decls, ty)
 }
+pub(crate) fn with_layout_name<R>(
+    decls: &crate::Rows<TypeDecl>,
+    t: &impl TyRead,
+    ty: TyId,
+    read: impl FnOnce(std::borrow::Cow<'_, str>) -> R,
+) -> R {
+    crate::cost_scope!("query", "layout type name");
+    t.with_layout_name(decls, ty, read)
+}
 pub(crate) fn uncached_layout_name(
     decls: &crate::Rows<TypeDecl>,
     t: &impl TyRead,

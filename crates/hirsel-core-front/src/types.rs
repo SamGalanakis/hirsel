@@ -317,6 +317,17 @@ pub trait TyRead {
     {
         crate::decls::uncached_layout_name(decls, self, ty)
     }
+    fn with_layout_name<R>(
+        &self,
+        decls: &crate::Rows<crate::decls::TypeDecl>,
+        ty: TyId,
+        read: impl FnOnce(std::borrow::Cow<'_, str>) -> R,
+    ) -> R
+    where
+        Self: Sized,
+    {
+        read(std::borrow::Cow::Owned(self.layout_name(decls, ty)))
+    }
 }
 impl TyRead for Types {
     #[inline(always)]
@@ -354,17 +365,30 @@ impl TyRead for Local<'_> {
         self.intern(k)
     }
     fn layout_name(&self, decls: &crate::Rows<crate::decls::TypeDecl>, ty: TyId) -> String {
+        self.with_layout_name(decls, ty, |name| name.into_owned())
+    }
+    fn with_layout_name<R>(
+        &self,
+        decls: &crate::Rows<crate::decls::TypeDecl>,
+        ty: TyId,
+        read: impl FnOnce(std::borrow::Cow<'_, str>) -> R,
+    ) -> R {
+        use std::borrow::Cow;
         let Some(cache) = self.layout_names.as_ref().filter(|cache| {
             std::ptr::eq(cache.base, self.base) && std::ptr::eq(cache.decls, decls)
         }) else {
-            return crate::decls::uncached_layout_name(decls, self, ty);
+            return read(Cow::Owned(crate::decls::uncached_layout_name(
+                decls, self, ty,
+            )));
         };
-        if let Some(name) = cache.values.borrow().get(&ty) {
-            return name.clone();
+        let values = cache.values.borrow();
+        if let Some(name) = values.get(&ty) {
+            return read(Cow::Borrowed(name));
         }
+        drop(values);
         let name = crate::decls::uncached_layout_name(decls, self, ty);
         cache.values.borrow_mut().insert(ty, name.clone());
-        name
+        read(Cow::Owned(name))
     }
 }
 
@@ -660,6 +684,14 @@ mod interner_tests {
         let nominal = first.intern(TyKind::Adt(DeclId(d as u32), vec![]));
         let expected = p.decls[d].path.to_string();
         assert_eq!(first.layout_name(&p.decls, nominal), expected);
+        first.with_layout_name(&p.decls, nominal, |name| {
+            assert!(matches!(name, std::borrow::Cow::Borrowed(_)));
+            assert_eq!(name, expected);
+        });
+        first.with_layout_name(&renamed, nominal, |name| {
+            assert!(matches!(name, std::borrow::Cow::Owned(_)));
+            assert_eq!(name, renamed[d].path.to_string());
+        });
         assert_eq!(first.layout_name(&p.decls, nominal), expected);
         assert_eq!(
             first.layout_name(&renamed, nominal),

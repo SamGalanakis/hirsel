@@ -118,7 +118,7 @@ A charge is the logical size of what is allocated under the policy `charge-v1`:
 | channel | capacity × item size + 64 |
 | `log.new` node | 24 |
 | a log's entries | as `List[E]` storage |
-| `isolate` | 32 for its cause cell, refunded unless `body` fails ([FAIL-16](failure.md#fail-16-isolation)) |
+| `isolate` | 32 for its cause cell, from the current limit (inside a finalizer, its grant); refunded when `body` returns, and when a caught failure leaves the current obligation's cell unused ([FAIL-16](failure.md#fail-16-isolation)) |
 
 `list.new`, `string.new`, `map.new`, `deque.new`, `heap.new`, `list.with_capacity(0)` and an empty span builder
 allocate nothing and charge 0; an explicit `span.with_capacity(r, 0)` and an empty
@@ -199,7 +199,9 @@ too, whatever limit its storage refers to, and its old storage is refunded to th
 record leads to. Exceeding it is a
 finalizer failure with cause `Capacity` ([FAIL-12](failure.md#fail-12-finalizer-failure)),
 recorded in the resource's own cause cell ([FAIL-10](failure.md#fail-10-cause-chain)), and
-abandons the finalizer body. When the finalizer ends, the unused part of the grant is
+abandons the finalizer body. The one exception is the cell an `isolate` reserves at its
+entry: refused, it is the value `Error(Capacity)` and never this failure
+([FAIL-16](failure.md#fail-16-isolation)). When the finalizer ends, the unused part of the grant is
 refunded, and what survives it (cause cells, sent values) is handed over to the limit that
 funded the resource (MEM-20). So cleanup, failure cleanup included, never admits from any
 limit but a grant.

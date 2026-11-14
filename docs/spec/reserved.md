@@ -61,7 +61,7 @@ captures and pending results are cleaned; outer installed mutations/effects pers
 Public mutating APIs preserve initialized ownership and their abstraction invariants on
 failure or poison/discard the affected state. Environment death is not catchable.
 `shield(body)` defers cooperative cancellation only and does not suppress bug failure."
-*v1:* FAIL-16: `isolate` reserves a new primary cause cell before its body runs, returns
+*v1:* FAIL-16: `isolate` reserves a cell for the current obligation before its body runs, returns
 the refused `Capacity` and leaves the chain as it is when that admission fails, catches
 after FAIL-8's cleanup, lets outer effects persist, never catches `Cancelled` or a run stop,
 and accepts only a body whose capture descriptor lends nothing `mut`. `shield` has no v1

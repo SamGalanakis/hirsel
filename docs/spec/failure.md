@@ -136,7 +136,8 @@ finalizer takes its cell and storage from the finalizer's grant
 ([MEM-27](budgets.md#mem-27-finalizer-grants)). A cause raised by a finalizer goes into its
 resource's cell, and any other cause into the task's primary cell. If a finalizer cannot
 admit an obligation while a failure is active, its grant being exhausted, that is its own
-failure with cause `Capacity`, recorded in its resource's cell, and cleanup continues. So
+failure with cause `Capacity`, recorded in its resource's cell, and cleanup continues; an
+`isolate`'s refused cell is a value instead ([FAIL-16](#fail-16-isolation)). So
 code that makes no resources performs no cause admission beyond task startup, the chain has no depth limit and
 is never truncated, and recording, linking and delivering causes never admit. An unused
 cell is refunded with its obligation; a used cell stays with the chain, through `join`, until
@@ -231,21 +232,31 @@ Termination by the host writes nothing and its status is the host's.
 it as a value, `Result[Result[R, Causes], Capacity]`, instead of ending the task. It is a
 recovery boundary and undoes nothing:
 
-- It first reserves a new primary cause cell for the task
-  ([FAIL-10](#fail-10-cause-chain)), charged as a task's
-  ([MEM-24](budgets.md#mem-24-logical-charges)). When that admission fails it returns
-  `Error(c)`, `c` the refused `Capacity`, without calling `body`, and the chain is as it
-  was. Otherwise it calls `body` with the activation of a call that receives it
-  ([OWN-21](ownership.md#own-21-scoped-callbacks)).
-- If `body` returns `r`, the reserved cell is refunded and `isolate` returns `Ok(Ok(r))`.
+- It first reserves a new cause cell, charged as a task's
+  ([MEM-24](budgets.md#mem-24-logical-charges)) and admitted from the current limit, which
+  inside a finalizer is its grant ([MEM-27](budgets.md#mem-27-finalizer-grants)). The cell
+  stands in for the **current obligation**'s cell ([FAIL-10](#fail-10-cause-chain)): the
+  cell of the resource whose finalizer is running, the innermost one, or else the task's
+  primary cell. When that admission fails, under a grant too, `isolate` returns the value
+  `Error(c)`, `c` the refused `Capacity`, and never fails; it does not call `body`, and the
+  chain is as it was. Otherwise it sets aside the chain active at entry, a failure being
+  cleaned when a finalizer runs on a failure path, and calls `body` with the activation of
+  a call that receives it ([OWN-21](ownership.md#own-21-scoped-callbacks)).
+- If `body` returns `r`, the reserved cell is refunded, the chain set aside is restored, and
+  `isolate` returns `Ok(Ok(r))`.
 - If `body` fails, the failure is cleaned as on every exit edge (FAIL-8) up to `isolate`:
   the owners, loans, captures and pending results of `body` are cleaned, and every cause
   that cleanup adds joins the chain (FAIL-10). `isolate` then returns `Ok(Error(causes))`
-  holding the whole chain, and the reserved cell becomes the task's primary cell. A failure
-  is caught whatever its primary cause other than `Cancelled`: `Overflow`, `Bounds`,
-  `Division`, `Unwrap`, `Fail` or a finalizer's `Capacity` ([MEM-27](budgets.md#mem-27-finalizer-grants)).
+  holding every cause raised since its entry, and the chain set aside is restored as it
+  was. When the caught failure used the current obligation's cell, the reserved cell takes
+  its place, so the code after `isolate` has an unused cell to fail into; when it did not,
+  every caught cause having gone into resources' cells, the reserved cell is refunded. A
+  failure is caught whatever its primary cause other than `Cancelled`: `Overflow`,
+  `Bounds`, `Division`, `Unwrap`, `Fail` or a finalizer's `Capacity`
+  ([MEM-27](budgets.md#mem-27-finalizer-grants)).
 - A failure whose primary cause is `Cancelled` is not caught: after the same cleanup the
-  reserved cell is refunded and the failure goes on past `isolate`. A run stop (FAIL-15)
+  reserved cell is refunded, the chain set aside is restored with the failure's causes
+  after it, and the failure goes on past `isolate`. A run stop (FAIL-15)
   is not caught, and nothing resumes at the operation that failed. `Capacity` outside a
   finalizer is an error that `body` handles as a value (FAIL-2), never a failure.
 

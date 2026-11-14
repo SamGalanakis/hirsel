@@ -62,6 +62,37 @@ fn grouped_region_calls_llvm() {
     grouped_region_calls(Backend::Llvm);
 }
 
+// OWN-20 / OWN-11 (ruling 7): results anchored to a `mut` parameter, read beside
+// their frozen place and lent again by each `while let` iteration, in both engines.
+fn mut_anchored_results(backend: Backend) {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    let source = include_str!("../../../core/front/cases/body/own-20-mut-anchor.hirsel");
+    let mut request = source_request(source, dir.path());
+    request.inputs.packages[1] =
+        PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    let built = product
+        .build(
+            &DefPath::from_full("app@1/main/main").unwrap(),
+            &native_options(backend, dir.path()),
+        )
+        .unwrap();
+    run_clean(&built.executable, 0);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn mut_anchored_results_cranelift() {
+    mut_anchored_results(Backend::Cranelift);
+}
+#[test]
+#[ignore = "explicit native integration target"]
+fn mut_anchored_results_llvm() {
+    mut_anchored_results(Backend::Llvm);
+}
+
 // Stored generic instances use the same layout identities and ABI in both engines.
 fn anchored_map_rows(backend: Backend) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

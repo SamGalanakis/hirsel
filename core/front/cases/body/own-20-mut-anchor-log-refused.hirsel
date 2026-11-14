@@ -1,0 +1,6 @@
+// OWN-20 (ruling 7), mut-anchor-attack-919 entry 36: a `mut` anchor does not turn an
+// append-only Log (MEM-29) into a readable element view; core has no `log.get`.
+fn bad(mut l: Log[u64]) -> View[u64] in l {
+    log.get(l, 0)
+}
+// expect: refuse LANG-7 at 4:5

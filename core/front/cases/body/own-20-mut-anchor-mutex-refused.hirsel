@@ -1,0 +1,13 @@
+// OWN-20 (ruling 7), mut-anchor-attack-919 entry 37: there is no Mutex, so no accessor
+// can lend its payload past a `mut` anchor.
+fn bad(mut m: Mutex[String]) -> u64 {
+    let v = mutex.unsynchronised_view(mut m)
+    mutex.with_lock(m, fn(mut payload: String) {
+        payload = string.new()
+    })
+    string.byte_len(v)
+}
+// expect: refuse LANG-7 at 3:15
+// expect: refuse LANG-7 at 4:13
+// expect: refuse LANG-7 at 5:5
+// expect: gap values of this type are not built

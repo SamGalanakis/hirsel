@@ -1,0 +1,118 @@
+// OWN-20 / OWN-11 (ruling 7): the attacks of mut-anchor-attack-919 that the text
+// accepts, numbered as there. Each is checked as written; none is a dangling view.
+// expect: accept
+fn lend(mut s: String) -> View[String] in s {
+    string.slice(s, 0, string.byte_len(s))
+}
+
+fn step(mut s: String) -> Result[Option[View[String]], Capacity] in s {
+    string.push(mut s, "x")?
+    Ok(Some(lend(mut s)))
+}
+
+// 1: replace and reallocate before forming the view.
+fn refill(mut s: String) -> Result[View[String], Capacity] in s {
+    s = string.new()
+    string.push(mut s, "new")?
+    Ok(lend(mut s))
+}
+
+// 7: two anchors with distinct actuals and different modes.
+scoped type Duo7[in a, in b] {
+    x: View[String] in a,
+    y: View[String] in b,
+}
+
+fn both7(mut a: String, b: String) -> Duo7[in a, in b] {
+    a = string.new()
+    Duo7(x: view a, y: view b)
+}
+
+fn use_pair(mut a: String, b: String) -> u64 {
+    let d = both7(mut a, b)
+    string.byte_len(d.x) + string.byte_len(d.y)
+}
+
+// 9: a field of a `mut` parameter is a returned part.
+type Buffer {
+    text: String,
+    generation: u64,
+}
+
+fn field(mut b: Buffer) -> View[String] in b {
+    b.generation += 1
+    lend(mut b.text)
+}
+
+// 9: lending the field directly freezes only that field.
+fn sibling(mut b: Buffer) -> u64 {
+    let v = lend(mut b.text)
+    b.generation += 1
+    string.byte_len(v)
+}
+
+// 13: anchor substitution composes through a wrapper.
+scoped type Line13 {
+    text: View[String],
+}
+
+fn wrap(mut s: String) -> Line13 in s {
+    Line13(text: lend(mut s))
+}
+
+// 17: repeated lending in `while let`.
+fn each(mut s: String) -> Result[(), Capacity] {
+    while let Some(line) = step(mut s)? {
+        let _ = string.byte_len(line)
+    }
+    Ok(())
+}
+
+// 19: a view kept across a `?` exit.
+fn across(mut s: String) -> Result[(), Capacity] {
+    let line = lend(mut s)
+    let _ = string.from("allocation")?
+    let _ = string.byte_len(line)
+    Ok(())
+}
+
+// 21: fail after installing a value.
+fn fails(mut s: String) -> View[String] in s {
+    s = string.new()
+    fail("after install")
+}
+
+// 24: reverse declaration order of the result slot and its actual.
+scoped type Saved {
+    line: View[String],
+    scratch: String,
+}
+
+fn cleanup(c: bool) {
+    let saved: Saved
+    let mut s = string.new()
+    saved = Saved(line: lend(mut s), scratch: string.new())
+    if c {
+        fail("exit")
+    }
+}
+
+// 25: read, view and clone a frozen String.
+fn copies(mut s: String) -> Result[u64, Capacity] {
+    let v = lend(mut s)
+    let n = string.byte_len(s)
+    let w = view s
+    let mut separate: String = clone(s)?
+    separate = string.new()
+    Ok(n + string.byte_len(v) + string.byte_len(w))
+}
+
+// 34: a discarded result's freeze ends with its statement.
+fn sequential(mut s: String) {
+    lend(mut s)
+    s = string.new()
+    let v = {
+        lend(mut s)
+    }
+    let _ = string.byte_len(v)
+}

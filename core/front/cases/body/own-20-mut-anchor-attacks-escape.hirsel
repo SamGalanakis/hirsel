@@ -1,0 +1,85 @@
+// OWN-20 / OWN-11 (ruling 7): the attacks of mut-anchor-attack-919 that try to carry a
+// result anchored to a `mut` parameter past its anchor, numbered as there.
+fn lend(mut s: String) -> View[String] in s {
+    string.slice(s, 0, string.byte_len(s))
+}
+
+// 6: an outer capture anchored to a callback's invocation parameter.
+fn visit(mut s: String, cb: scoped fn(mut String)) {
+    cb(mut s)
+}
+
+fn export(mut s: String) {
+    let mut saved: Option[View[String]] = None
+    visit(mut s, fn(mut p: String) {
+        saved = Some(lend(mut p))
+    })
+}
+
+// 12: an owning closure capturing the result.
+fn capture(mut s: String) {
+    let v = lend(mut s)
+    let cb = fn() -> u64 {
+        string.byte_len(v)
+    }
+}
+
+// 13: a wrapper result returned with no valid external anchor.
+scoped type Line13 {
+    text: View[String],
+}
+
+fn wrap(mut s: String) -> Line13 in s {
+    Line13(text: lend(mut s))
+}
+
+fn outlive() -> Line13 {
+    let mut local = string.new()
+    wrap(mut local)
+}
+
+// 14: the result moved into a task.
+fn spawned(tasks: Tasks, mut s: String) {
+    let v = lend(mut s)
+    let _ = task.spawn(tasks, bytes 64, v, fn(take x: View[String]) -> u64 {
+        string.byte_len(x)
+    })
+}
+
+// 15: a channel of the result type.
+fn channelled(mut s: String) {
+    let v = lend(mut s)
+    let q: Result[(Sender[View[String]], Receiver[View[String]]), Capacity] = channel.new(1)
+}
+
+// 29: a provider operation writing into a frozen buffer.
+fn borrow_bytes(mut b: Bytes) -> View[Bytes] in b {
+    view b
+}
+
+fn provider(mut f: HostFile, mut b: Bytes) waits {
+    let v = borrow_bytes(mut b)
+    let _ = host.read(mut f, mut b)
+}
+
+// 6: the invocation parameter cannot escape into the capture.
+// expect: refuse OWN-21 at 15:9
+// expect: cause OWN-21 at 15:9 from 15:27
+// 12: an owning closure holds no scoped value.
+// expect: refuse LANG-14 at 23:25
+// 13: no anchor for the result, and `local` would be cleaned under it.
+// expect: refuse OWN-20 at 36:17
+// expect: refuse OWN-10 at 39:1
+// expect: cause OWN-10 at 39:1 from 38:10
+// 14: a view is not send.
+// expect: refuse CONC-2 at 44:41
+// expect: compared CONC-2 at 44:41 | View[core@1/core/String] | send
+// 15: a scoped type is no channel element.
+// expect: refuse OWN-19 at 52:27
+// expect: compared OWN-19 at 52:27 | View[core@1/core/String] | not scoped
+// expect: refuse OWN-19 at 52:51
+// expect: compared OWN-19 at 52:51 | View[core@1/core/String] | not scoped
+// expect: gap values of this type are not built
+// 29: the provider's `mut b` crosses the freeze.
+// expect: refuse OWN-10 at 62:30
+// expect: cause OWN-10 at 62:30 from 61:13

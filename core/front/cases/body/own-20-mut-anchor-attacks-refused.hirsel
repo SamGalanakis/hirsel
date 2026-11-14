@@ -1,0 +1,197 @@
+// OWN-20 / OWN-11 (ruling 7): the attacks of mut-anchor-attack-919 that the text
+// refuses, numbered as there, each refused where the text says.
+fn lend(mut s: String) -> View[String] in s {
+    string.slice(s, 0, string.byte_len(s))
+}
+
+fn step(mut s: String) -> Result[Option[View[String]], Capacity] in s {
+    string.push(mut s, "x")?
+    Ok(Some(lend(mut s)))
+}
+
+// 2: replace the parameter after forming the returned view.
+fn replace_after(mut s: String) -> View[String] in s {
+    let v = string.slice(s, 0, string.byte_len(s))
+    s = string.new()
+    v
+}
+
+// 3: the freeze opens at the call's return, before a later field is checked.
+scoped type Mark {
+    line: View[String],
+    n: u64,
+}
+
+fn aggregate(mut s: String) -> Mark in s {
+    Mark(line: lend(mut s), n: {
+        s = string.new()
+        0
+    })
+}
+
+// 4: lending again after a nested anchored call returned.
+fn nested(mut s: String) -> View[String] in s {
+    let v = lend(mut s)
+    let w = lend(mut s)
+    v
+}
+
+// 5: a callback activation crosses the freeze installed after it was built.
+fn callback(mut s: String) -> View[String] in s {
+    let cb = scoped fn() {
+        s = string.new()
+    }
+    let v = lend(mut s)
+    cb()
+    v
+}
+
+// 8: the same actual for a `mut` anchor and a view anchor.
+scoped type Duo8[in a, in b] {
+    x: View[String] in a,
+    y: View[String] in b,
+}
+
+fn both8(mut a: String, b: String) -> Duo8[in a, in b] {
+    Duo8(x: view a, y: view b)
+}
+
+fn same_actual(mut s: String) {
+    let d = both8(mut s, s)
+}
+
+// 9: a write to a sibling field crosses the freeze of the whole actual.
+type Buffer {
+    text: String,
+    generation: u64,
+}
+
+fn field(mut b: Buffer) -> View[String] in b {
+    lend(mut b.text)
+}
+
+fn prefix(mut b: Buffer) {
+    let v = field(mut b)
+    b.generation += 1
+}
+
+// 10: indexes are not proved distinct.
+fn index(mut xs: List[String], i: u64, j: u64) {
+    let v = lend(mut xs[i])
+    xs[j] = string.new()
+}
+
+// 11: a result stored in a scoped record keeps its anchor.
+scoped type Line11 {
+    text: View[String],
+}
+
+fn record(mut s: String) -> Result[(), Capacity] {
+    let line = Line11(text: match step(mut s)? {
+        Some(v) => v,
+        None => return Ok(()),
+    })
+    s = string.new()
+    Ok(())
+}
+
+// 16: a line kept across a loop back edge.
+fn back_edge(mut s: String) {
+    let mut last: Option[View[String]] = None
+    loop {
+        last = Some(lend(mut s))
+    }
+}
+
+// 18: a write in a `while let` body while its line lives.
+fn while_body(mut s: String) -> Result[(), Capacity] {
+    while let Some(line) = step(mut s)? {
+        s = string.new()
+        let _ = string.byte_len(line)
+    }
+    Ok(())
+}
+
+// 20: every variant is frozen, an empty arm included.
+fn empty_arm(mut s: String) -> Result[(), Capacity] {
+    match step(mut s)? {
+        Some(line) => {
+            let _ = string.byte_len(line)
+        },
+        None => {
+            s = string.new()
+        },
+    }
+    Ok(())
+}
+
+// 33: the inner owner cannot be cleaned while the outer view needs it.
+fn inner_owner() -> u64 {
+    let v = {
+        let mut s = string.new()
+        lend(mut s)
+    }
+    string.byte_len(v)
+}
+
+// 34: a braced tail still reaches its binding.
+fn braced(mut s: String) {
+    lend(mut s)
+    s = string.new()
+    let v = { lend(mut s) }
+    s = string.new()
+}
+
+// 35: a scoped parameter keeps its carried anchors when it is lent.
+scoped type Cursor {
+    input: View[String],
+    pos: u64,
+}
+
+fn advance(mut c: Cursor) -> View[String] in c {
+    c.pos += 1
+    string.slice(c.input, 0, 0)
+}
+
+fn carried(mut s: String) {
+    let mut c = Cursor(input: view s, pos: 0)
+    let v = advance(mut c)
+    s = string.new()
+}
+
+// 2, 3, 4: the write, the later field's write and the second loan.
+// expect: refuse OWN-10 at 15:5
+// expect: cause OWN-10 at 15:5 from 14:13
+// expect: refuse OWN-10 at 27:9
+// expect: cause OWN-10 at 27:9 from 26:21
+// expect: refuse OWN-10 at 35:18
+// expect: cause OWN-10 at 35:18 from 34:13
+// 5: the activation.
+// expect: refuse OWN-10 at 45:5
+// expect: cause OWN-10 at 45:5 from 44:13
+// 8: the second argument overlaps the `mut` loan.
+// expect: refuse OWN-9 at 60:26
+// expect: cause OWN-9 at 60:26 from 60:19
+// 9, 10, 11: the sibling field, the other index, the record's anchor.
+// expect: refuse OWN-10 at 75:5
+// expect: cause OWN-10 at 75:5 from 74:13
+// expect: refuse OWN-10 at 81:5
+// expect: cause OWN-10 at 81:5 from 80:13
+// expect: refuse OWN-10 at 94:5
+// expect: cause OWN-10 at 94:5 from 90:16
+// 16: the back edge.
+// expect: refuse OWN-17 at 103:5
+// 18, 20: the body write and the empty arm.
+// expect: refuse OWN-10 at 109:9
+// expect: cause OWN-10 at 109:9 from 108:20
+// expect: refuse OWN-10 at 122:13
+// expect: cause OWN-10 at 122:13 from 117:16
+// 33: the inner block's close.
+// expect: refuse OWN-10 at 133:5
+// expect: cause OWN-10 at 133:5 from 132:14
+// 34: only the second assignment.
+// expect: refuse OWN-10 at 142:5
+// expect: cause OWN-10 at 142:5 from 141:13
+// 35: the carried anchor.
+// expect: refuse OWN-10 at 159:5
+// expect: cause OWN-10 at 159:5 from 158:13

@@ -1,0 +1,13 @@
+// OWN-11 / OWN-20 (ruling 7): the first call's `mut` loan becomes a freeze of s at
+// its return, so lending s again while `a` lives is refused at the second `mut s`.
+// expect: refuse OWN-10 at 11:18
+// expect: cause OWN-10 at 11:18 from 10:13
+fn grow(mut s: String) -> Result[View[String], Capacity] in s {
+    Ok(string.slice(s, 0, 0))
+}
+
+fn twice(mut s: String) -> Result[u64, Capacity] {
+    let a = grow(mut s)?
+    let b = grow(mut s)?
+    Ok(string.byte_len(a) + string.byte_len(b))
+}

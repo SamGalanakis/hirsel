@@ -1,0 +1,55 @@
+// OWN-20 / OWN-11 (ruling 7): a result anchored to a `mut` parameter freezes the
+// caller's place from the call's completed return. The place may still be read while
+// the result lives, and a `while let` binding's freeze ends with each iteration, so
+// the next condition lends the place again.
+// expect: run run_use_it() = 2
+// expect: run lines() = 3
+fn grow(mut s: String) -> Result[View[String], Capacity] in s {
+    string.push(mut s, "x")?
+    Ok(string.slice(s, 0, 1))
+}
+
+fn use_it(mut s: String) -> Result[u64, Capacity] {
+    let v = grow(mut s)?
+    let n = string.byte_len(v) + string.byte_len(s)
+    Ok(n)
+}
+
+fn run_use_it() -> u64 {
+    let mut s = string.new()
+    match use_it(mut s) {
+        Ok(n) => n,
+        Error(_) => 0,
+    }
+}
+
+type Lines {
+    text: String,
+    pos: u64,
+}
+
+fn next_line(mut l: Lines) -> Option[View[String]] in l {
+    if l.pos >= string.byte_len(l.text) {
+        return None
+    }
+    let at = l.pos
+    l.pos += 1
+    Some(string.slice(l.text, at, at + 1))
+}
+
+fn lines() -> u64 {
+    let mut l = Lines(text: result.unwrap(string.from("abc")), pos: 0)
+    let mut n: u64 = 0
+    while let Some(line) = next_line(mut l) {
+        n += string.byte_len(line)
+    }
+    n
+}
+
+pub fn main() -> Result[(), Exit] {
+    if run_use_it() == 2u64 && lines() == 3u64 {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
+}

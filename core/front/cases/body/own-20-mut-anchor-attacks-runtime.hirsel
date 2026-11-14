@@ -1,0 +1,127 @@
+// OWN-20 / OWN-11 (ruling 7): the accepted attacks of mut-anchor-attack-919 that
+// reach hidden runtime state (cancellation, waits, finalizers, counts, channels,
+// regions, compact locators, writers), numbered as there.
+// expect: accept
+fn lend(mut s: String) -> View[String] in s {
+    string.slice(s, 0, string.byte_len(s))
+}
+
+// 21: cancellation observed after installing a value.
+fn cancelled(mut s: String) -> View[String] in s {
+    s = string.new()
+    task.check_cancel()
+    lend(mut s)
+}
+
+// 22: the loan stays outstanding across a wait.
+fn receive_then_lend(mut s: String, rx: Receiver[()]) -> View[String] in s waits {
+    s = string.new()
+    let _ = channel.receive(rx)
+    lend(mut s)
+}
+
+// 23: a finalizer fails while the return value is pending.
+resource type Bomb {} drop(b) {
+    fail("drop")
+}
+
+fn pending(mut s: String) -> Result[View[String], Capacity] in s {
+    let bomb = Bomb()?
+    Ok(lend(mut s))
+}
+
+// 26: a counted holder is shared while frozen.
+fn counted(mut h: Rc[String]) -> View[String] in h {
+    string.slice(h, 0, string.byte_len(h))
+}
+
+fn try_attack(take original: Rc[String]) -> u64 {
+    let mut h = original
+    let v = counted(mut h)
+    let another = rc.share(h)
+    let _ = rc.try_unwrap(take another)
+    string.byte_len(v)
+}
+
+// 27: distinct arguments that physically share a counted payload.
+scoped type Duo27[in a, in b] {
+    x: View[String] in a,
+    y: View[String] in b,
+}
+
+fn shared(mut a: Rc[String], b: Rc[String]) -> Duo27[in a, in b] {
+    Duo27(x: string.slice(a, 0, 0), y: string.slice(b, 0, 0))
+}
+
+fn aliases(take source: Rc[String]) {
+    let mut a = source
+    let b = rc.share(a)
+    let pair = shared(mut a, b)
+}
+
+// 28: a borrowed channel endpoint changes hidden state while viewed.
+fn endpoint(mut rx: Receiver[String]) -> View[Receiver[String]] in rx {
+    view rx
+}
+
+fn queue_state(take receiver: Receiver[String]) waits {
+    let mut rx = receiver
+    let v = endpoint(mut rx)
+    let _ = channel.receive(rx)
+    let _ = channel.receive(v)
+}
+
+// 30: allocation in a region while a returned view of its Text lives.
+type Holder30[in r] {
+    text: Text in r,
+    n: u64,
+}
+
+fn borrow_text[in r](mut h: Holder30[in r]) -> View[String] in h {
+    h.n += 1
+    text.as_string(h.text)
+}
+
+fn region_use() -> Result[u64, Capacity] {
+    region r {
+        let mut h = Holder30(text: text.copy_in(r, "a")?, n: 0)
+        let v = borrow_text(mut h)
+        let more = text.copy_in(r, "b")?
+        Ok(string.byte_len(v))
+    }
+}
+
+// 31: a compact locator keeps its width through the `mut` wrapper.
+@compact(u16)
+stable type Node {
+    text: Text,
+}
+
+type Holder31[in r] {
+    node: Node in r,
+    n: u64,
+}
+
+fn compact_view[in r](mut h: Holder31[in r]) -> View[String] in h {
+    h.n += 1
+    text.as_string(h.node.text)
+}
+
+// Its copy, `clone_in(out, v)` into `Text in out`, is MEM-17's whole-value String/Text
+// pair, which is not built (NOT-BUILT "MEM-17 whole String to Text").
+fn reads_view[in r](mut h: Holder31[in r]) -> u64 {
+    let v = compact_view(mut h)
+    string.byte_len(v)
+}
+
+// 32: a completed element is read while the enclosing writer continues.
+fn build[in r](take w: Writer[SeqSpan[u64], in r]) -> Result[Child[SeqSpan[u64]], BuildError] {
+    writer.append(mut w, fn(take item: Writer[u64, in r]) -> Result[Child[u64], BuildError] {
+        emit(take item, 1)
+    })?
+    let first: Option[View[u64]] = writer.completed(w, 0)
+    writer.append(mut w, fn(take item: Writer[u64, in r]) -> Result[Child[u64], BuildError] {
+        emit(take item, 2)
+    })?
+    writer.close(take w)
+}

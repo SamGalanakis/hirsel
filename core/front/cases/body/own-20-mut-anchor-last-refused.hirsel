@@ -1,0 +1,9 @@
+// OWN-20 (ruling 7): inside the callee, a view of a `mut` parameter returned under
+// `in xs` freezes xs, so clearing it before the return is refused.
+// expect: refuse OWN-10 at 7:16
+// expect: cause OWN-10 at 7:16 from 6:13
+fn last(mut xs: List[String]) -> Option[View[String]] in xs {
+    let v = list.get(xs, 0)
+    list.clear(mut xs)
+    v
+}

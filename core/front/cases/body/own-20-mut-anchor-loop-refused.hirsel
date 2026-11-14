@@ -1,0 +1,24 @@
+// OWN-17 (ruling 7): a line kept in a slot declared outside the loop changes that
+// slot's anchor set from {} to {l} across the back edge, refused at the body's `}`.
+// expect: refuse OWN-17 at 22:5
+type Lines {
+    text: String,
+    pos: u64,
+}
+
+fn next_line(mut l: Lines) -> Option[View[String]] in l {
+    if l.pos >= string.byte_len(l.text) {
+        return None
+    }
+    let at = l.pos
+    l.pos += 1
+    Some(string.slice(l.text, at, at + 1))
+}
+
+fn keep(mut l: Lines) -> u64 {
+    let mut last: Option[View[String]] = None
+    while let Some(line) = next_line(mut l) {
+        last = Some(line)
+    }
+    0
+}

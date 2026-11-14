@@ -468,6 +468,24 @@ fn image_signature_use_skips_source_and_body_decoding() {
         eval::Outcome::Returned(vec![42])
     );
     assert_eq!((opened.decoded_files(), opened.decoded_bodies()), (0, 1));
+    let sources = checked
+        .native_sources(std::slice::from_ref(&answer))
+        .unwrap();
+    let source = &sources.items[&answer];
+    assert_eq!(source.file_offset, 22);
+    assert_eq!(
+        sources.files[source.file as usize].text,
+        "pub type Number = u64\npub fn answer() -> Number { 42 }\n"
+    );
+    assert_eq!(
+        sources.files[source.file as usize].path,
+        dir.path().join("main.hirsel").to_string_lossy()
+    );
+    assert_eq!(
+        (opened.decoded_files(), opened.decoded_bodies()),
+        (0, 1),
+        "native source binding must not decode a published syntax tree"
+    );
     assert!(
         opened
             .file(0)

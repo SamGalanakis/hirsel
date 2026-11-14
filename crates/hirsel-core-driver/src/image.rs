@@ -25,6 +25,7 @@ pub(crate) struct ImageDirectory {
     pub inputs: CorpusManifest,
     pub index: Arc<NameIndex>,
     pub files: Table<ImageFile>,
+    pub sources: Map<ModuleId, ContentHash>,
     pub headers: Arc<reuse::Headers>,
     pub anchors: Map<(ModuleId, u32), DefPath>,
     pub offsets: Map<(ModuleId, u32), u32>,
@@ -137,6 +138,22 @@ impl CoreImage {
     }
     pub fn file(&self, index: usize) -> io::Result<Arc<FileProduct>> {
         hirsel_core_ids::published::catch_io(|| self.file_inner(index))
+    }
+    pub(crate) fn source_file(
+        &self,
+        module: ModuleId,
+    ) -> io::Result<hirsel_core_ir::source::SourceFile> {
+        hirsel_core_ids::published::catch_io(|| {
+            let directory = self.directory()?;
+            let row = directory.sources.get(&module).ok_or_else(|| {
+                io::Error::other("native source module is not in its package image")
+            })?;
+            let (path, text): (PathBuf, String) = self.read(*row)?;
+            Ok(hirsel_core_ir::source::SourceFile {
+                path: path.to_string_lossy().into_owned(),
+                text,
+            })
+        })
     }
     fn file_inner(&self, index: usize) -> io::Result<Arc<FileProduct>> {
         if let Some(file) = self.files.lock().unwrap().get(&index) {
@@ -257,7 +274,12 @@ impl Driver {
             )
         };
         let mut files = Vec::new();
+        let mut sources = Map::default();
         for file in &product.files {
+            sources.insert(
+                file.module,
+                store.put(&encode(&(&file.path, &file.syntax.source))?)?,
+            );
             files.push(ImageFile {
                 module: file.module,
                 path: file.path.clone(),
@@ -315,6 +337,7 @@ impl Driver {
             inputs,
             index: Arc::new(product.index.publish(&mut writer)?),
             files: writer.table(&files.into())?,
+            sources: writer.map(&sources)?,
             headers: Arc::new(product.headers.publish(&mut writer)?),
             anchors: writer.map(&anchors)?,
             offsets: writer.map(&offsets)?,

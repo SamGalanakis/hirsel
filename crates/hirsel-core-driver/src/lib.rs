@@ -11,6 +11,7 @@ pub use product::PackageProduct;
 mod callable_variants;
 mod instances;
 mod native;
+mod native_sources;
 mod reachability;
 mod test_run;
 mod tool_inputs;

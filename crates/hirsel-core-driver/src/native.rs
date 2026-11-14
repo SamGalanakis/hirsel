@@ -294,10 +294,9 @@ impl CheckProduct {
                     .iter()
                     .cloned()
             })
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
             .collect::<Vec<_>>();
-        let source = self.process_entry(entry, options, &items)?;
+        let sources = self.native_sources(&items)?;
+        let source = self.process_entry(entry, options, &sources)?;
         let mut objects = self.emit_instances(entry, instances, &reached.materialized, options)?;
         if let Some(module) = &self.entry_binding(entry)?.cleanup {
             let store = Store::new(&options.store)?;
@@ -350,7 +349,7 @@ impl CheckProduct {
         &self,
         entry: &DefPath,
         options: &NativeOptions,
-        items: &[DefPath],
+        sources: &hirsel_core_ir::source::SourceMap,
     ) -> Result<String, NativeStop> {
         let binding = self.entry_binding(entry)?;
         let EntryAbi {
@@ -373,7 +372,7 @@ impl CheckProduct {
                 .as_ref()
                 .map(|m| hirsel_cranelift::core::symbol(m.instances.last().unwrap())),
             options,
-            items,
+            sources,
         )
     }
 }
@@ -488,7 +487,7 @@ fn entry_source(
     parameters: &[EntryParameter],
     cleanup: Option<String>,
     options: &NativeOptions,
-    items: &[DefPath],
+    sources: &hirsel_core_ir::source::SourceMap,
 ) -> Result<String, NativeStop> {
     let Layout::Fixed(layout) = &recipe.layout else {
         return Err(NativeStop::Entry("Result needs fixed layout".into()));
@@ -553,17 +552,7 @@ fn entry_source(
         .unwrap_or_default();
     let limit = options.root_limit;
     let grant_mask = options.grant_mask;
-    let site_definitions = items
-        .iter()
-        .enumerate()
-        .map(|(i, item)| {
-            format!(
-                "const uint64_t {} = UINT64_C({}) << 32;\n",
-                hirsel_core_ir::source::site_symbol(item),
-                i + 1
-            )
-        })
-        .collect::<String>();
+    let source_table = crate::native_sources::entry_table(sources);
     let observation_label = if options.logical_charge_report.is_some() {
         r#"__attribute__((used)) static const char hirsel_observation_build[] = "Hirsel observation build: timings are not performance samples";"#
     } else {
@@ -600,7 +589,7 @@ static uint8_t entry(HirselCoreContext *ctx, const HirselCoreProcessConfig *cfg,
 static const HirselCoreEntryRequirement parameters[] = {{{requirements}}};
 static const HirselCoreView parameter_names[] = {{{parameter_names}}};
 static const HirselCoreView directories[] = {{{directories}}};
-{site_definitions}
+{source_table}
 int main(int argc, char **argv) {{
     size_t n=(size_t)(argc-1);
     HirselCoreView *args=calloc(n ? n : 1,sizeof(*args));
@@ -611,7 +600,7 @@ int main(int argc, char **argv) {{
     input.directories=directories; input.directories_len={directories_len};
     input.grant_mask=UINT64_C({grant_mask}); input.stdout_fd=1; input.stderr_fd=2;
     input.parameters=parameters; input.parameters_len={requirements_len};
-    uint8_t status=hirsel_core_os_run(&input,parameter_names,entry);
+    uint8_t status=hirsel_core_os_run_with_sources(&input,parameter_names,&hirsel_sources,entry);
     free(args);
     {charge_report}
     return status;
@@ -657,13 +646,15 @@ fn c_case(tag: &hirsel_core_layout::Tag, word: &str) -> String {
     let v = hirsel_core_layout::read_case(tag, &mut c, 0);
     c.0.swap_remove(v)
 }
-fn c_view(text: &str) -> String {
+pub(super) fn c_view(text: &str) -> String {
     // Fixed-width byte escapes preserve UTF-8 and never form C source tokens.
-    let literal = text
-        .as_bytes()
-        .iter()
-        .map(|b| format!("\\{b:03o}"))
-        .collect::<String>();
+    let mut literal = String::with_capacity(text.len() * 4);
+    for &byte in text.as_bytes() {
+        literal.push('\\');
+        literal.push((b'0' + (byte >> 6)) as char);
+        literal.push((b'0' + ((byte >> 3) & 7)) as char);
+        literal.push((b'0' + (byte & 7)) as char);
+    }
     format!("{{(const uint8_t *)\"{literal}\",{}}}", text.len())
 }
 fn command(command: &mut Command) -> Result<Vec<u8>, NativeStop> {
@@ -855,6 +846,7 @@ b0:
     include!("test_run_native.rs");
     include!("clone_native.rs");
     include!("record_native.rs");
+    include!("source_sites_native.rs");
 
     fn run_clean(binary: &Path, exit: i32) {
         let result = Command::new(binary).output().unwrap();

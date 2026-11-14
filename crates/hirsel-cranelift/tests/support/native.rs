@@ -771,3 +771,70 @@ impl Drop for Scratch {
         }
     }
 }
+
+fn check_c_struct_calls() {
+    let source = r#"core v1
+sig g0 = (u64) -> (u64, u64, u64)
+sig g1 = (u64) -> (u32, f32)
+sig g2 = (u32, f32) -> (u32, f32)
+sig g3 = (f32, f32) -> (f32, f32)
+inst n0 = test@0/abi/loop [] []
+inst n1 = test@0/abi/call [] []
+inst n2 = test@0/abi/pair [] []
+inst n3 = test@0/abi/floats [] []
+fn f0 = n0 g0 {
+  slot s0 = u64
+  addr a0 = s0 : u64
+b0(v0: u64):
+  live s0
+  address a0
+  v1: u64 = const 0
+  v2: u64 = const 1
+  store a0, v1
+  jump b1(v1)
+b1(v3: u64):
+  v4: bool = lt v3, v0
+  branch v4, b2, b3
+b2:
+  v5: u64 = read a0
+  v6: u64 = wrapping_add v5, v3
+  store a0, v6
+  v7: u64 = wrapping_add v3, v2
+  jump b1(v7)
+b3:
+  v8: u64 = read a0
+  dead s0
+  return v0, v8, v3
+}
+fn f1 = n1 g1 {
+b0(v0: u64):
+  v1: u64, v2: u64, v3: u64 = call f0 g0 (v0)
+  v4: u32 = truncate v2
+  v5: f32 = int_to_float v3
+  v6: ptr = fnref f2
+  v7: u32, v8: f32 = call v6 g2 (v4, v5)
+  return v7, v8
+}
+fn f2 = n2 g2 {
+b0(v0: u32, v1: f32):
+  return v0, v1
+}
+fn f3 = n3 g3 {
+b0(v0: f32, v1: f32):
+  return v1, v0
+}
+"#;
+    let m = text::parse(source).unwrap();
+    wf::module(&m).unwrap();
+    let runs = vec![
+        (FuncId(0), vec![0]),
+        (FuncId(0), vec![100]),
+        (FuncId(1), vec![100]),
+        (
+            FuncId(3),
+            vec![1f32.to_bits() as u64, (-2f32).to_bits() as u64],
+        ),
+    ];
+    execute(&m, &runs, false);
+    execute(&m, &runs, true);
+}

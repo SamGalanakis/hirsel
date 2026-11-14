@@ -40,7 +40,7 @@ fn execute_runs(module: &c::Module, runs: &[Run], optimize: bool) {
         module,
         &layouts,
         &Options {
-            target: "x86_64-unknown-linux-gnu",
+            target: NATIVE_TARGET,
             optimize,
         },
     )

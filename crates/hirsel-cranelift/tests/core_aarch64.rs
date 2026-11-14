@@ -38,7 +38,6 @@ fn ownership_stable_counted_and_failure() {
         include_str!("../../hirsel-core-ir/samples/stable-keys.core"),
         include_str!("../../hirsel-core-ir/samples/sequences.core"),
         include_str!("../../hirsel-core-ir/samples/strings.core"),
-        include_str!("../../hirsel-core-ir/samples/kernel.core"),
     ] {
         for optimize in [false, true] {
             check_sample_with_refusals(source, optimize);
@@ -53,5 +52,21 @@ fn task_entry_stack_switching_and_custody() {
             include_str!("../../hirsel-core-ir/samples/custody.core"),
             optimize,
         );
+    }
+}
+
+#[test]
+fn mixed_float_and_large_returns_through_indirect_calls() {
+    check_c_struct_calls();
+}
+
+#[test]
+fn kernel_finalizers() {
+    // This sample's hand-built ring assumes its buffer allocation succeeds.
+    // Keep the existing ordinary-case oracle; refusal-safe samples are above.
+    let source = include_str!("../../hirsel-core-ir/samples/kernel.core");
+    let module = text::parse(source).unwrap();
+    for optimize in [false, true] {
+        execute(&module, &sample_runs(&module, source), optimize);
     }
 }

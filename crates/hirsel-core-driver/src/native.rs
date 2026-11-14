@@ -528,7 +528,9 @@ fn entry_source(
         let literal = path.as_os_str().as_bytes().iter().map(|b| format!("\\{b:03o}")).collect::<String>();
         format!(r#"FILE *report=fopen("{literal}","w");
     if(!report) {{ perror("logical charge report"); return 2; }}
-    fprintf(report,"{{\"observation_mode\":true,\"peak_root_reserved_bytes\":%llu}}\n",(unsigned long long)hirsel_core_peak_charge());
+    size_t report_len=0;
+    const uint8_t *report_data=hirsel_core_memory_report(&report_len);
+    if(fwrite(report_data,1,report_len,report)!=report_len) {{ perror("logical charge report"); fclose(report); return 2; }}
     if(fclose(report)) {{ perror("logical charge report"); return 2; }}"#)
     });
     Ok(format!(

@@ -94,14 +94,21 @@
 //! Optional charge-observation archive: `hirsel_core_observe_charge() -> ()` samples
 //! after an emitted debit; `hirsel_core_peak_charge() -> u64` reads the completed
 //! run's root peak reservation (bound/task/grant reservations included, MEM-19).
-//! Neither has failure status, admission, refund delivery or an event. Both are
+//! memory_report(len:*mut usize)->*const u8 borrows the last UTF-8 JSON report
+//! until a run next starts or completes on this worker; len is its byte count.
+//! memory_checkpoint(name:*const u8,len:usize)->() records a native UTF-8 phase
+//! label at an operation boundary, with no ABI region mutation in progress.
+//! None has failure status, admission, refund delivery or an event. All are
 //! absent from shipping archives; observed emission must link the observed archive.
 //!
 // Offset and header constants are shared verbatim with both native emitters.
 pub use crate::abi_layout::*;
 
 #[cfg(feature = "charge-observation")]
-pub use crate::peak::{hirsel_core_observe_charge, hirsel_core_peak_charge};
+pub use crate::peak::{
+    hirsel_core_memory_checkpoint, hirsel_core_memory_report, hirsel_core_observe_charge,
+    hirsel_core_peak_charge,
+};
 
 use crate::{
     Capacity, Context,
@@ -111,7 +118,14 @@ use crate::{
 /// Open an empty explicit region. Opening admits nothing.
 #[unsafe(no_mangle)]
 pub extern "C" fn hirsel_core_region_open(chunk_bytes: usize) -> *mut crate::region::Region {
-    Box::into_raw(Box::new(crate::region::Region::new(chunk_bytes)))
+    let region = Box::into_raw(Box::new(crate::region::Region::new(chunk_bytes)));
+    #[cfg(any(test, feature = "charge-observation"))]
+    {
+        crate::peak::allocated(region.cast(), size_of::<crate::region::Region>());
+        // SAFETY: the opaque ABI handle remains pinned until region_close.
+        unsafe { crate::peak::region_open(region) };
+    }
+    region
 }
 
 /// # Safety

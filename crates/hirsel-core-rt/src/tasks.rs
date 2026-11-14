@@ -49,6 +49,10 @@ impl Storage {
                 NonNull::new(alloc(layout)).unwrap_or_else(|| crate::process::stop(b"HostMemory"))
             }
         };
+        #[cfg(any(test, feature = "charge-observation"))]
+        if bytes != 0 {
+            crate::peak::allocated(pointer.as_ptr(), bytes);
+        }
         Self { pointer, layout }
     }
     pub(crate) fn as_ptr(&self) -> *mut u8 {
@@ -60,6 +64,8 @@ impl Drop for Storage {
         // SAFETY: sole owner of this host storage; payload is already moved/cleaned.
         unsafe {
             if self.layout.size() != 0 {
+                #[cfg(any(test, feature = "charge-observation"))]
+                crate::peak::deallocated(self.pointer.as_ptr());
                 dealloc(self.pointer.as_ptr(), self.layout);
             }
         }
@@ -512,6 +518,8 @@ pub unsafe fn run_root(
         failed: 0,
         record: None,
     });
+    #[cfg(any(test, feature = "charge-observation"))]
+    crate::peak::allocated((&*root as *const Task).cast(), size_of::<Task>());
     // SAFETY: root's stable allocation and both stacks stay live through the loop.
     unsafe {
         ptr::copy_nonoverlapping(argument, root.input.as_ptr(), input_bytes);
@@ -605,6 +613,8 @@ pub unsafe extern "C" fn hirsel_core_spawn(
             failed: 0,
             record: Some(record),
         });
+        #[cfg(any(test, feature = "charge-observation"))]
+        crate::peak::allocated((&*task as *const Task).cast(), size_of::<Task>());
         let task = Box::into_raw(task);
         (*task).context = (*task).owned_context.as_mut().unwrap();
         (*task).refunds = Some(
@@ -793,5 +803,12 @@ pub(crate) unsafe fn host_operation(
         hirsel_stack::switch(&mut call.saved, target);
         crate::fiber::guard((*task).stack.bounds());
         call.result.assume_init()
+    }
+}
+
+#[cfg(any(test, feature = "charge-observation"))]
+impl Drop for Task {
+    fn drop(&mut self) {
+        crate::peak::deallocated((self as *const Self).cast());
     }
 }

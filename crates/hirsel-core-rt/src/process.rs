@@ -73,6 +73,8 @@ pub unsafe extern "C" fn hirsel_core_run(config: *const Config, entry: Entry) ->
             }
             return NOT_STARTED;
         }
+        #[cfg(feature = "charge-observation")]
+        crate::peak::checkpoint("startup");
         let mut result = MainResult::default();
         struct Call {
             entry: Entry,
@@ -105,6 +107,8 @@ pub unsafe extern "C" fn hirsel_core_run(config: *const Config, entry: Entry) ->
             size_of::<MainResult>(),
             config.scheduler,
         );
+        #[cfg(feature = "charge-observation")]
+        crate::peak::checkpoint("main");
         crate::fiber::set_stop_fd(previous_fd);
         let status = if failed != 0 {
             for cause in context.causes.iter() {

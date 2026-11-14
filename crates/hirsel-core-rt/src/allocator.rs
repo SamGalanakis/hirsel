@@ -28,7 +28,10 @@ pub(crate) fn allocate(layout: Layout) -> NonNull<u8> {
             }
         }
     };
-    NonNull::new(pointer).unwrap_or_else(|| crate::process::stop(b"HostMemory"))
+    let pointer = NonNull::new(pointer).unwrap_or_else(|| crate::process::stop(b"HostMemory"));
+    #[cfg(any(test, feature = "charge-observation"))]
+    crate::peak::allocated(pointer.as_ptr(), layout.size());
+    pointer
 }
 /// # Safety
 /// Matching live allocation and original Layout from this backend.
@@ -43,6 +46,8 @@ pub(crate) unsafe fn deallocate(pointer: *mut u8, _layout: Layout) {
 /// Original native base, exclusively owned, allocated by this backend.
 #[inline]
 pub(crate) unsafe fn deallocate_raw(pointer: *mut u8) {
+    #[cfg(any(test, feature = "charge-observation"))]
+    crate::peak::deallocated(pointer);
     // SAFETY: malloc and posix_memalign both pair with free; mimalloc with mi_free.
     unsafe {
         #[cfg(feature = "mimalloc")]

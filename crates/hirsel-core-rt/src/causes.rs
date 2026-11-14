@@ -84,11 +84,14 @@ pub struct Cell {
 }
 impl Cell {
     pub(crate) fn prepaid(funding: Payer) -> Box<Self> {
-        Box::new(Self {
+        let cell = Box::new(Self {
             funding,
             cause: Cause::default(),
             next: ptr::null_mut(),
-        })
+        });
+        #[cfg(any(test, feature = "charge-observation"))]
+        crate::peak::allocated((&*cell as *const Self).cast(), size_of::<Self>());
+        cell
     }
 }
 impl Drop for Cell {
@@ -96,6 +99,8 @@ impl Drop for Cell {
         // SAFETY: this cell owns its inline String; unused cells have capacity zero.
         unsafe { drop_string(&self.cause.message) };
         self.funding.refund(charge::CAUSE_CELL);
+        #[cfg(any(test, feature = "charge-observation"))]
+        crate::peak::deallocated((self as *const Self).cast());
     }
 }
 
@@ -232,6 +237,8 @@ pub unsafe fn resource_new(
         previous_resource: ptr::null_mut(),
         previous_grant_depth: usize::MAX,
     });
+    #[cfg(any(test, feature = "charge-observation"))]
+    crate::peak::allocated((&*state as *const Resource).cast(), size_of::<Resource>());
     // SAFETY: fresh resource storage receives its single prepaid metadata record.
     unsafe {
         block::set_resource(block.pointer(), Box::into_raw(state));
@@ -323,4 +330,11 @@ pub unsafe fn next(cell: *const Cell) -> *const Cell {
 pub unsafe fn value<'a>(cell: *const Cell) -> &'a Cause {
     // SAFETY: a delivered cell always holds an initialized cause.
     unsafe { &(*cell).cause }
+}
+
+#[cfg(any(test, feature = "charge-observation"))]
+impl Drop for Resource {
+    fn drop(&mut self) {
+        crate::peak::deallocated((self as *const Self).cast());
+    }
 }

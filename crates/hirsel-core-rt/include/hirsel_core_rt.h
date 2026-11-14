@@ -1,11 +1,17 @@
 #ifndef HIRSEL_CORE_RT_H
 #define HIRSEL_CORE_RT_H
 #include <stdint.h>
+#include <stddef.h>
 /* Diagnostic archive only. Samples do not admit, deliver refunds or emit events.
  * Peak is the last run's root reservation, including bound/task/grant reservations. */
 void hirsel_core_observe_charge(void);
 uint64_t hirsel_core_peak_charge(void);
-#include <stddef.h>
+/* Observed archive only. Report bytes live until an observed run next starts
+   or completes on this worker; len is a writable out count. No status/admission/event. */
+const uint8_t *hirsel_core_memory_report(size_t *len);
+/* Native harness phase, UTF-8 label; call between operations, with no ABI region
+   mutation in progress. No source operation/status/admission/refund/event. */
+void hirsel_core_memory_checkpoint(const uint8_t *name, size_t len);
 #include <stdbool.h>
 /* Frozen 64-bit emitter layouts; offsets in bytes, no atomic local accounting. */
 #define HIRSEL_CORE_CONTEXT_CURRENT_LIMIT 0

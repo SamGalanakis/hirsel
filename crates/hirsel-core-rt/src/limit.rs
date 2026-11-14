@@ -583,6 +583,21 @@ impl Funding {
         // SAFETY: this handle pins its canonical local record.
         unsafe { (*self.fast()).available }
     }
+    #[cfg(any(test, feature = "charge-observation"))]
+    pub(crate) fn observation_capacity(&self) -> u64 {
+        // SAFETY: the run's root handle pins its canonical live limit record.
+        unsafe { (*self.fast()).live.capacity }
+    }
+    #[cfg(feature = "testing")]
+    pub(crate) fn set_test_available(&self, bytes: u64) {
+        // SAFETY: the process fixture exclusively owns its live root record.
+        let record = unsafe { &mut *self.fast() };
+        let reserved = record.live.capacity.wrapping_sub(record.available);
+        // A sample may choose u64::MAX after startup. Its synthetic allowance
+        // and prepaid startup use the same modular balances as the fixture.
+        record.live.capacity = bytes.wrapping_add(reserved);
+        record.available = bytes;
+    }
     pub(crate) fn admit(&self, bytes: Option<u64>) -> Result<(), Capacity> {
         self.payer.canonical().admit(bytes)
     }

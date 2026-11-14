@@ -95,6 +95,12 @@ impl Context {
         self.current = Funding::root(bytes);
         self.current.bind();
     }
+    /// Changes the fixture allowance while retaining startup reservations and
+    /// the payer domain registered with the scheduler's refund notification.
+    #[cfg(feature = "testing")]
+    pub fn set_test_available(&mut self, bytes: u64) {
+        self.current.set_test_available(bytes);
+    }
     #[cfg(feature = "testing")]
     pub fn inject_admission(&mut self, n: usize, later: bool) {
         self.current.inject(n, later);

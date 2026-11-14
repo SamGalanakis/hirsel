@@ -1323,6 +1323,9 @@ def first_party(meta: dict) -> str:
     out.append("\n" + call("hirsel_script_test", name="core-bookkeeping-stop", script="tools/tests/core_bookkeeping_stop.py", full=False,
         files_env={"HIRSEL_CORE_RT_ARCHIVES": "//:hirsel-core-rt-archives"},
         data=Raw('glob(["crates/hirsel-core-rt/include/**"]) + ["crates/hirsel-core-rt/testdata/bookkeeping_stop.c"]')))
+    out.append("\n" + call("hirsel_script_test", name="core-memory-report", script="tools/tests/core_memory_report.py", full=False,
+        files_env={"HIRSEL_REPORT_COMPILER": "//:hirsel-core-driver-bin-hirsel-core", "HIRSEL_CORE_RT_DEFAULT_ARCHIVES": "//:hirsel-core-rt-archives", "HIRSEL_CORE_RT_OBSERVED_ARCHIVES": "//:hirsel-core-rt-observed-archives"},
+        data=Raw('glob(["crates/hirsel-core-rt/include/**", "core/core/**", "core/std/**"]) + ["crates/hirsel-core-rt/testdata/memory_report.c"]')))
     out.append("\n" + call("hirsel_library", name="hirsel-core-rt-native-fixture", crate="hirsel_core_rt", crate_root="crates/hirsel-core-rt/src/lib.rs",
         srcs=Raw('glob(["crates/hirsel-core-rt/src/**"])'), features=["testing", "memcheck", "charge-observation"], deps=declared_deps(next(p for p in packages.values() if p["name"] == "hirsel-core-rt"), packages),
         manifest_dir="crates/hirsel-core-rt", package_name="hirsel-core-rt", version="0.1.0", edition="2024"))

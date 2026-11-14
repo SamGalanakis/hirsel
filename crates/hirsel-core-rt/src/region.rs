@@ -102,6 +102,8 @@ impl Region {
     }
     #[cold]
     pub(crate) fn refill(&mut self, bytes: usize, align: usize) -> NonNull<u8> {
+        #[cfg(any(test, feature = "charge-observation"))]
+        let old_tail = self.end.addr() - self.cursor.addr();
         let layout = Layout::from_size_align(self.chunk_bytes.max(bytes.max(1)), align)
             .unwrap_or_else(|_| crate::process::stop(b"HostMemory"));
         // SAFETY: nonzero layout is retained for matching deallocation.
@@ -109,6 +111,8 @@ impl Region {
         self.chunks.push(Chunk { pointer, layout });
         self.cursor = pointer.as_ptr().wrapping_add(bytes.max(1));
         self.end = pointer.as_ptr().wrapping_add(layout.size());
+        #[cfg(any(test, feature = "charge-observation"))]
+        crate::peak::region_refill(self, old_tail, layout.size() - bytes.max(1));
         pointer
     }
     /// Refund only this builder's tail through its original payer entry.
@@ -135,6 +139,8 @@ impl Region {
 }
 impl Drop for Region {
     fn drop(&mut self) {
+        #[cfg(any(test, feature = "charge-observation"))]
+        crate::peak::region_close(self);
         if self.charge != 0 {
             Payer::from_current(self.payer).refund(self.charge);
         }
@@ -147,5 +153,7 @@ impl Drop for Region {
                 dealloc(chunk.pointer.as_ptr(), chunk.layout);
             }
         }
+        #[cfg(any(test, feature = "charge-observation"))]
+        crate::peak::deallocated((self as *const Self).cast());
     }
 }

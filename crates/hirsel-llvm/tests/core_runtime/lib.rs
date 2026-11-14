@@ -135,12 +135,7 @@ pub unsafe extern "C" fn hirsel_core_test_reset_limit(
     // SAFETY: the process entry exclusively borrows this live context.
     unsafe {
         let context = &mut *context;
-        let available = context
-            .limit_record()
-            .cast::<u8>()
-            .add(hirsel_core_rt::abi_layout::LIMIT_AVAILABLE)
-            .cast::<u64>();
-        *available = bytes;
+        context.set_test_available(bytes);
         // Admission indices in the sample exclude process startup. Index zero
         // never fires, and an injected case replaces it before its first admit.
         context.inject_admission(0, false);
@@ -154,9 +149,9 @@ pub unsafe extern "C" fn hirsel_core_test_observe_begin(
     context: *const hirsel_core_rt::Context,
 ) -> *mut hirsel_core_rt::peak::Run {
     // SAFETY: fixture pins its root for the whole observation.
-    Box::into_raw(Box::new(hirsel_core_rt::peak::Run::start(unsafe {
-        &*context
-    })))
+    Box::into_raw(Box::new(hirsel_core_rt::peak::Run::start_test_interval(
+        unsafe { &*context },
+    )))
 }
 /// # Safety
 /// Observation is the live unique result of test_observe_begin on this worker.

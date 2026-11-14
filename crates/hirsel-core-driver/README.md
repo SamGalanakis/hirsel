@@ -203,15 +203,35 @@ Automatic std-package selection is the remaining driver integration step; std's
 constant/declaration acceptance and all body completion are still required for
 the standing canonical-image rows to turn green.
 
-`build` and `run --logical-charge-report <file.json>` create a diagnostic build
-that writes `{"observation_mode":true,"peak_root_reserved_bytes":N}` after the
-run and its cleanup. Program stdout, stderr, exit status, Capacity boundaries and
-refund delivery order remain the same. The report counts the root's peak
-reservation under MEM-19: bound scopes, task reservations and finalizer grants
-are included even when their reserved bytes are unused. Root task/cause startup
-is included; host allocations, physical chunk slack and engine bookkeeping are
-excluded. This is logical charge, not RSS or lifetime admitted bytes. The report
-file is opened only after the run. An error writing it is a driver/report error.
+`build` and `run --logical-charge-report <file.json>` create a diagnostic build.
+The version-2 JSON keeps `observation_mode:true` and `peak_root_reserved_bytes`.
+It adds these independent measurements at each native phase and at run end:
+
+| Field | Meaning |
+|---|---|
+| `charged_bytes` | MEM-19 root reservation, including unused bounds/tasks/grants and startup. |
+| `retained_bytes` | Live backing allocation requests, including native prefixes, region chunks/handles, task/channel storage, cause cells and resource state. |
+| `slack_bytes` | Unassigned region chunk tails, including tails stranded by refill. |
+| `peak_charged_bytes`, `peak_retained_bytes`, `peak_slack_bytes` | Independent lifetime maxima; the old peak field aliases peak charged. |
+| `phases` | `run_start`, `startup`, `main`, `run_end`, each with current fields and interval peaks. |
+
+Program stdout, stderr, exit status, Capacity boundaries and refund delivery stay
+the same. These are separate units: `retained - charged` is not slack, because
+unused limit reservations need no physical backing. Retained is allocator-requested
+storage, not RSS, malloc headers/size classes, or arenas kept after free. Limit
+records, observer bookkeeping, host/provider storage and call stacks are excluded.
+Slack does not guess spare collection capacity, consumed alignment holes or exact
+compact-builder trim waste; those lie inside already allocated extents and the
+runtime has no live lengths/used extents to infer them from portable charges.
+
+An observed-only native harness can call
+`hirsel_core_memory_checkpoint(name,len)` between operations to name application
+phase endpoints. This admits nothing, delivers no refunds and creates no event;
+it is not a source operation. No ABI region mutation may be in progress.
+`hirsel_core_memory_report(&len)` borrows the last completed UTF-8 JSON bytes until
+a run next starts or completes on that worker. The driver writes them only after
+the run; a report write failure remains a driver/report error. Arbitrary internal
+source phases are not inferred from the automatic native lifecycle checkpoints.
 
 Use the optional `//:hirsel-core-rt-observed-archives` Buck artifact with
 `--runtime <artifact>/x86_64-unknown-linux-gnu/libhirsel_core_rt.a`. Its Cargo

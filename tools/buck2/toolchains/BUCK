@@ -67,10 +67,11 @@ source_files(
     visibility = ["PUBLIC"],
 )
 
-llvm_cxx_tools(name = "cxx_tools", tree = ":clang")
+llvm_cxx_tools(name = "cxx_tools", tree = ":clang", fixed_build_date = "fixed-build-date")
 llvm_cxx_tools(
     name = "cxx_tools_arm",
     tree = ":clang",
+    fixed_build_date = "fixed-build-date",
     arm = "root//tools/buck2/native-toolchain:arm",
 )
 

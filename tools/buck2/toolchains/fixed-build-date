@@ -1,0 +1,9 @@
+#!/bin/sh
+# Every C compile in the Buck graph sees one fixed build date, so a binary does
+# not change with the time its C objects were compiled: clang expands
+# __DATE__, __TIME__ and __TIMESTAMP__ from SOURCE_DATE_EPOCH
+# (https://reproducible-builds.org/specs/source-date-epoch/). mimalloc's
+# options.c prints __DATE__ __TIME__ and has no switch to drop it.
+SOURCE_DATE_EPOCH=0
+export SOURCE_DATE_EPOCH
+exec "$@"

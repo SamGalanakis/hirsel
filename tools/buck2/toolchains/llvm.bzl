@@ -19,9 +19,10 @@ source_files = rule(impl = _source_files, attrs = {"srcs": attrs.list(attrs.sour
 def _tools(ctx):
     # The tree's wrappers run clang with its bundled libraries on the loader
     # path (tools/buck2/bootstrap_llvm.py); the whole tree is a hidden input.
+    # fixed-build-date pins SOURCE_DATE_EPOCH for each compile and link.
     llvm = ctx.attrs.tree[DefaultInfo].default_outputs[0]
-    clang = cmd_args(llvm.project("bin/hirsel-clang"), hidden = llvm)
-    clangxx = cmd_args(llvm.project("bin/hirsel-clang++"), hidden = llvm)
+    clang = cmd_args(ctx.attrs.fixed_build_date, llvm.project("bin/hirsel-clang"), hidden = llvm)
+    clangxx = cmd_args(ctx.attrs.fixed_build_date, llvm.project("bin/hirsel-clang++"), hidden = llvm)
     if ctx.attrs.arm:
         arm = ctx.attrs.arm[DefaultInfo].default_outputs[0]
         flags = cmd_args(
@@ -51,4 +52,8 @@ def _tools(ctx):
         ),
     ]
 
-llvm_cxx_tools = rule(impl = _tools, attrs = {"tree": attrs.exec_dep(), "arm": attrs.option(attrs.exec_dep(), default = None)})
+llvm_cxx_tools = rule(impl = _tools, attrs = {
+    "tree": attrs.exec_dep(),
+    "arm": attrs.option(attrs.exec_dep(), default = None),
+    "fixed_build_date": attrs.source(),
+})

@@ -2,6 +2,9 @@
 # already in the environment wins, for example a local `install --unpack` prefix.
 [env]
 LLVM_SYS_231_PREFIX = { value = "tools/buck2/toolchains/llvm-files", relative = true, force = false }
+# C built by build scripts (cc) sees one fixed build date: mimalloc embeds
+# __DATE__ __TIME__ (tools/buck2/toolchains/fixed-build-date does this for Buck).
+SOURCE_DATE_EPOCH = { value = "0", force = false }
 # Tests run at most 4 at a time (the compiler tests use large thread stacks).
 RUST_TEST_THREADS = { value = "4", force = false }
 # Worker threads of the agreement campaign and other in-process fan-outs.

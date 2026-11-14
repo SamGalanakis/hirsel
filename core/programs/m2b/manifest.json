@@ -4,7 +4,8 @@
       "package": {"name": "m2b", "version": "1"},
       "dependencies": [{"name": "core", "version": "1"}, {"name": "std", "version": "1"}],
       "sources": [
-        {"file": "core/programs/m2b/table/table.hirsel", "modules": ["table"], "signatures": false}
+        {"file": "core/programs/m2b/table/table.hirsel", "modules": ["table"], "signatures": false},
+        {"file": "core/programs/m2b/tx/tx.hirsel", "modules": ["tx"], "signatures": false}
       ]
     },
     {
@@ -13,9 +14,17 @@
       "sources": [
         {"file": "core/programs/m2b/table/main.hirsel", "modules": ["main"], "signatures": false}
       ]
+    },
+    {
+      "package": {"name": "tx", "version": "1"},
+      "dependencies": [{"name": "core", "version": "1"}, {"name": "std", "version": "1"}, {"name": "m2b", "version": "1"}],
+      "sources": [
+        {"file": "core/programs/m2b/tx/main.hirsel", "modules": ["main"], "signatures": false}
+      ]
     }
   ],
   "entries": [
-    {"workload": "table", "package": {"name": "table", "version": "1"}, "module": "main"}
+    {"workload": "table", "package": {"name": "table", "version": "1"}, "module": "main"},
+    {"workload": "tx", "package": {"name": "tx", "version": "1"}, "module": "main"}
   ]
 }

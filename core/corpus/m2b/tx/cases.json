@@ -1,0 +1,11 @@
+[
+  {"name": "commit", "value": 11211, "used": 0, "red": {"cranelift": "isolate is not lowered on Cranelift yet (core-cranelift-904)"}},
+  {"name": "insufficient", "value": 21211, "used": 0, "red": {"cranelift": "isolate is not lowered on Cranelift yet (core-cranelift-904)"}},
+  {"name": "overflow", "value": 31311, "used": 32, "red": {"cranelift": "isolate is not lowered on Cranelift yet (core-cranelift-904)"}},
+  {"name": "bounds", "value": 3111, "used": 32, "red": {"cranelift": "isolate is not lowered on Cranelift yet (core-cranelift-904)"}},
+  {"name": "unwrap", "value": 31911, "used": 32, "red": {"cranelift": "isolate is not lowered on Cranelift yet (core-cranelift-904)"}},
+  {"name": "explicit_fail", "value": 3111, "used": 32, "red": {"cranelift": "isolate is not lowered on Cranelift yet (core-cranelift-904)"}},
+  {"name": "refused_alloc", "value": 6111, "used": 0, "red": {"cranelift": "isolate is not lowered on Cranelift yet (core-cranelift-904)"}},
+  {"name": "full", "value": 411512072, "used": 0, "red": {"cranelift": "isolate is not lowered on Cranelift yet (core-cranelift-904)"}},
+  {"name": "generic_relay", "value": 2, "used": 0, "red": {"evaluator": "not well formed: direct call through another signature (core-form-883 item 1)", "cranelift": "isolate is not lowered on Cranelift yet (core-cranelift-904)"}}
+]

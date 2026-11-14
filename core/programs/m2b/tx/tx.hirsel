@@ -1,0 +1,80 @@
+// M2b slice 2: a transaction over a table, with read tracking, on the failure-boundary
+// hooks. The body runs inside `isolate` (FAIL-16), so a failing body is a value and the
+// task goes on; reads go to a `Log` through a view (MEM-29), so a failed body's reads
+// stay recorded; commit reserves room for every new key before its first write, so a
+// refused admission leaves the table as it was.
+pub type Abort = Insufficient | NoRow(u64) | Full(Capacity)
+
+// What `run` did. `Failed` holds the causes of a body that failed; `Refused` is a commit
+// that could not reserve room for the body's new keys.
+pub type Outcome[R] = Committed(R) | Aborted(Abort) | Failed(Causes) | Refused(Capacity)
+
+// The body's view of the table: rows it has written, then the table as it was at entry.
+pub scoped type Tx[T] {
+    base: View[table.Table[T]],
+    writes: Map[u64, T],
+    reads: View[Log[u64]]
+}
+
+// Records k as read, then returns the row this transaction sees at k.
+pub fn read[T](tx: Tx[T], k: u64) -> Result[Option[View[T]], Abort] in tx {
+    match log.append(tx.reads, k) {
+        Ok(()) => {},
+        Error((c, _)) => return Error(Full(c)),
+    }
+    match map.get(tx.writes, k) {
+        Some(v) => Ok(Some(v)),
+        None => Ok(table.get(tx.base, k)),
+    }
+}
+
+pub fn write[T](mut tx: Tx[T], k: u64, take v: T) -> Result[(), Abort] {
+    match map.insert(mut tx.writes, k, take v) {
+        Ok(()) => Ok(()),
+        Error((c, _)) => Error(Full(c)),
+    }
+}
+
+// Runs body(tx, arg) once against db and commits its writes only when it returns Ok.
+// Error(c) is the one case where isolate could not reserve its cause cell; then the body
+// did not run. Every read the body made, whatever its outcome, is in `reads`.
+pub fn run[T, A, R](mut db: table.Table[T], reads: Log[u64], arg: A, body: fn(mut Tx[T], A) -> Result[R, Abort]) -> Result[Outcome[R], Capacity] {
+    let caught = isolate(fn() -> Result[(R, Map[u64, T]), Abort] {
+        let mut tx = Tx(base: view db, writes: map.new(), reads: view reads)
+        let r = body(mut tx, arg)
+        let Tx(base: _, writes: take w, reads: _) = tx
+        match take r {
+            Ok(take x) => Ok((take x, take w)),
+            Error(a) => Error(a),
+        }
+    })
+    match take caught {
+        Error(c) => Error(c),
+        Ok(Error(take causes)) => Ok(Failed(take causes)),
+        Ok(Ok(Error(a))) => Ok(Aborted(a)),
+        Ok(Ok(Ok((take r, take writes)))) => Ok(commit(mut db, take writes, take r)),
+    }
+}
+
+// Reserve, then install: after `reserve` succeeds no put admits, so either every write
+// is installed or, on Capacity, none is.
+fn commit[T, R](mut db: table.Table[T], take writes: Map[u64, T], take r: R) -> Outcome[R] {
+    let mut fresh: u64 = 0
+    for (k, _) in writes {
+        match table.get(db, k) {
+            Some(_) => {},
+            None => {
+                fresh += 1
+            },
+        }
+    }
+    if let Error(c) = table.reserve(mut db, fresh) {
+        return Refused(c)
+    }
+    for take (k, v) in writes {
+        if let Error(_) = table.put(mut db, k, take v) {
+            fail("tx: a put into reserved room was refused")
+        }
+    }
+    Committed(take r)
+}

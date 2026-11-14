@@ -7,3 +7,7 @@ rust-version.workspace = true
 [[bin]]
 name = "m2b-table"
 path = "table.rs"
+
+[[bin]]
+name = "m2b-tx"
+path = "tx.rs"

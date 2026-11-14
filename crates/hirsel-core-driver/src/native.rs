@@ -574,6 +574,7 @@ fn link(
         std::fs::write(&entry, bytes)?;
         let output = temp.path().join("program");
         let mut cc = Command::new(&tools.0.path);
+        cc.arg(format!("--ld-path={}", tools.1.path.display()));
         cc.arg("-pie").arg(&entry);
         let debug = if options.debug_lines {
             let debug = crate::native_debug::bind_side_products(

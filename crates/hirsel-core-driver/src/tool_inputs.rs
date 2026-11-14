@@ -84,12 +84,15 @@ pub(crate) fn link_tools(cc: &Path) -> io::Result<(Tool, Tool)> {
     let search = std::env::var_os("PATH").unwrap_or_default();
     let store = Store::new(&PackageProduct::default_cache().join("host-tools"))?;
     let driver = identity(cc, &search, &store)?;
+    // Resolve the pinned LLVM link editor rather than the host `ld`.  The
+    // absolute path is part of the tool identity and is passed back to clang
+    // at link time, so a host linker cannot silently enter the cache.
     let result = Command::new(&driver.path)
-        .arg("-print-prog-name=ld")
+        .arg("-print-prog-name=ld.lld")
         .output()?;
     if !result.status.success() {
         return Err(io::Error::other(format!(
-            "cannot select link editor through {}: {}",
+            "cannot select pinned link editor through {}: {}",
             driver.path.display(),
             String::from_utf8_lossy(&result.stderr)
         )));
@@ -98,7 +101,9 @@ pub(crate) fn link_tools(cc: &Path) -> io::Result<(Tool, Tool)> {
         .map_err(io::Error::other)?
         .trim();
     if linker.is_empty() || linker.contains('\n') {
-        return Err(io::Error::other("C driver did not name one link editor"));
+        return Err(io::Error::other(
+            "C driver did not name one pinned link editor",
+        ));
     }
     Ok((driver, identity(Path::new(linker), &search, &store)?))
 }

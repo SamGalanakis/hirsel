@@ -14,6 +14,16 @@ pub(crate) struct Tool {
     pub(crate) path: PathBuf,
     content: ContentHash,
 }
+
+pub(crate) const INPUT_MARKER: &str = "__HIRSEL_LINK_INPUTS__";
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+pub(crate) struct LinkRecipe {
+    pub(crate) target: String,
+    pub(crate) linker: PathBuf,
+    pub(crate) args: Vec<String>,
+    pub(crate) files: Vec<(PathBuf, ContentHash)>,
+    pub(crate) identity: ContentHash,
+}
 fn selected(program: &Path, search: &OsStr) -> io::Result<PathBuf> {
     if program.components().count() > 1 || program.is_absolute() {
         return std::fs::canonicalize(program);
@@ -106,6 +116,237 @@ pub(crate) fn link_tools(cc: &Path) -> io::Result<(Tool, Tool)> {
         ));
     }
     Ok((driver, identity(Path::new(linker), &search, &store)?))
+}
+
+/// Capture the link editor command once beside the selected toolchain. The
+/// capture is the only C-driver use in the direct-link path; subsequent builds
+/// invoke the recorded lld argv themselves.
+pub(crate) fn link_recipe(cc: &Path, target: &str) -> io::Result<LinkRecipe> {
+    capture_link_recipe(cc, target, false)
+}
+
+/// Recapture is reserved for a recipe whose previously recorded toolchain
+/// input disappeared.  Ordinary builds never invoke the C driver.
+pub(crate) fn recapture_link_recipe(cc: &Path, target: &str) -> io::Result<LinkRecipe> {
+    capture_link_recipe(cc, target, true)
+}
+
+fn capture_link_recipe(cc: &Path, target: &str, force: bool) -> io::Result<LinkRecipe> {
+    let root = cc
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| io::Error::other("link driver has no toolchain root"))?;
+    let directory = root.join(".hirsel-link-recipes");
+    let path = directory.join(format!("{target}.json"));
+    if !force
+        && let Ok(bytes) = std::fs::read(&path)
+        && let Ok(recipe) = serde_json::from_slice::<LinkRecipe>(&bytes)
+        && recipe.target == target
+        && recipe.linker.is_file()
+        && recipe_inputs_match(&recipe)?
+    {
+        return Ok(recipe);
+    }
+    let source = directory.join("recipe.c");
+    std::fs::create_dir_all(&directory)?;
+    std::fs::write(&source, "int main(void) { return 0; }\n")?;
+    let output = Command::new(cc)
+        .args([
+            "-###",
+            &format!("--target={target}"),
+            "-fuse-ld=lld",
+            "-pie",
+        ])
+        .arg(&source)
+        .arg("-o")
+        .arg(directory.join("recipe"))
+        .output()?;
+    let _ = std::fs::remove_file(&source);
+    if !output.status.success() {
+        return Err(io::Error::other(format!(
+            "link recipe capture failed through {}: {}",
+            cc.display(),
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let line = stderr
+        .lines()
+        .filter(|line| line.contains("ld") && line.contains("-pie"))
+        .last()
+        .ok_or_else(|| io::Error::other("link recipe capture emitted no link editor argv"))?;
+    let mut argv = shell_words(line)?;
+    if argv.first().is_some_and(|arg| arg.contains("collect2")) {
+        return Err(io::Error::other(
+            "link recipe capture did not expose a direct lld argv",
+        ));
+    }
+    let linker = PathBuf::from(argv.remove(0));
+    let linker = if linker.is_file() {
+        linker
+    } else {
+        link_tools(cc)?.1.path
+    };
+    let mut args = Vec::with_capacity(argv.len() + 1);
+    let mut marker = false;
+    let mut i = 0;
+    while i < argv.len() {
+        let arg = &argv[i];
+        if arg == "-o" {
+            i += 2;
+            continue;
+        }
+        // clang names the object produced for the stdin source `--*.o`.
+        // Keep any other object: provider tests and link recipes may carry a
+        // fixed support object that must remain an input to every executable.
+        let transient = arg.ends_with(".o")
+            && Path::new(arg)
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("--") || !Path::new(arg).exists());
+        if transient {
+            if !marker {
+                args.push(INPUT_MARKER.into());
+                marker = true;
+            }
+        } else {
+            args.push(arg.clone());
+        }
+        i += 1;
+    }
+    if !marker {
+        let at = args
+            .iter()
+            .position(|arg| arg == "-lc" || arg == "--as-needed")
+            .unwrap_or(args.len());
+        args.insert(at, INPUT_MARKER.into());
+    }
+    let files = recipe_files(&linker, &args)?;
+    let identity = recipe_identity(target, &linker, &args, &files)?;
+    let recipe = LinkRecipe {
+        target: target.into(),
+        linker,
+        args,
+        files,
+        identity,
+    };
+    std::fs::create_dir_all(&directory)?;
+    let temp = tempfile::NamedTempFile::new_in(&directory)?;
+    serde_json::to_writer(&temp, &recipe).map_err(io::Error::other)?;
+    temp.persist(path).map_err(|e| e.error)?;
+    Ok(recipe)
+}
+
+fn recipe_files(linker: &Path, args: &[String]) -> io::Result<Vec<(PathBuf, ContentHash)>> {
+    let mut paths = vec![linker.to_owned()];
+    for arg in args {
+        if arg != INPUT_MARKER && !arg.starts_with('-') && arg.contains('/') {
+            paths.push(PathBuf::from(arg));
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    let missing = paths
+        .iter()
+        .filter(|path| !path.is_file())
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(io::Error::other(format!(
+            "missing recipe inputs: {}",
+            missing
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    paths
+        .into_iter()
+        .map(|path| {
+            let bytes = std::fs::read(&path)?;
+            Ok((path, ContentHash::of_bytes(&bytes)))
+        })
+        .collect()
+}
+
+fn recipe_identity(
+    target: &str,
+    linker: &Path,
+    args: &[String],
+    files: &[(PathBuf, ContentHash)],
+) -> io::Result<ContentHash> {
+    Ok(ContentHash::of_parts(
+        "hirsel.direct-link-recipe.v1",
+        [crate::encode(&(target, linker, args, files))?.as_slice()],
+    ))
+}
+
+fn recipe_inputs_match(recipe: &LinkRecipe) -> io::Result<bool> {
+    // The recipe is a published toolchain product.  Do not hash libc/CRT
+    // inputs on every build; a missing path is the only runtime invalidation.
+    Ok(!recipe.files.iter().any(|(path, _)| !path.is_file()))
+}
+
+pub(crate) fn missing_recipe_inputs(recipe: &LinkRecipe) -> Vec<PathBuf> {
+    let mut missing = Vec::new();
+    let mut expects_path = false;
+    for arg in &recipe.args {
+        if expects_path {
+            if !Path::new(arg).exists() {
+                missing.push(PathBuf::from(arg));
+            }
+            expects_path = false;
+            continue;
+        }
+        if arg == "-dynamic-linker" || arg == "--sysroot" {
+            expects_path = true;
+        } else if let Some(path) = arg.strip_prefix("--sysroot=") {
+            if !path.is_empty() && !Path::new(path).exists() {
+                missing.push(PathBuf::from(path));
+            }
+        } else if arg != INPUT_MARKER
+            && !arg.starts_with('-')
+            && arg.contains('/')
+            && !Path::new(arg).exists()
+        {
+            missing.push(PathBuf::from(arg));
+        }
+    }
+    for (path, _) in &recipe.files {
+        if !path.is_file() {
+            missing.push(path.clone());
+        }
+    }
+    missing.sort();
+    missing.dedup();
+    missing
+}
+
+fn shell_words(line: &str) -> io::Result<Vec<String>> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    for ch in line.chars() {
+        match (quote, ch) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), c) => current.push(c),
+            (None, '\'' | '"') => quote = Some(ch),
+            (None, c) if c.is_whitespace() => {
+                if !current.is_empty() {
+                    words.push(std::mem::take(&mut current));
+                }
+            }
+            (None, c) => current.push(c),
+        }
+    }
+    if quote.is_some() {
+        return Err(io::Error::other("unterminated quote in link recipe"));
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    Ok(words)
 }
 
 #[cfg(test)]

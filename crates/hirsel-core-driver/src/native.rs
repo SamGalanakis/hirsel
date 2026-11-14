@@ -522,6 +522,37 @@ fn command(command: &mut Command) -> Result<Vec<u8>, NativeStop> {
     }
     Ok(result.stdout)
 }
+
+fn direct_link(
+    recipe: &crate::tool_inputs::LinkRecipe,
+    inputs: &[PathBuf],
+    output: &Path,
+    optimize: bool,
+) -> Result<(), NativeStop> {
+    let mut process = Command::new(&recipe.linker);
+    let mut inserted = false;
+    for argument in &recipe.args {
+        if argument == crate::tool_inputs::INPUT_MARKER {
+            for input in inputs {
+                process.arg(input);
+            }
+            inserted = true;
+        } else {
+            process.arg(argument);
+        }
+    }
+    if !inserted {
+        return Err(NativeStop::Link(
+            "direct link recipe has no input marker".into(),
+        ));
+    }
+    if !optimize {
+        process.arg("-O0");
+    }
+    process.arg("-o").arg(output);
+    command(&mut process).map(|_| ())
+}
+
 fn link(
     entry_plan: &crate::native_entry::Plan<'_>,
     objects: &[ObjectProduct],
@@ -539,9 +570,8 @@ fn link(
     .map(|n| read_input(&options.include.join(n)))
     .into_iter()
     .collect::<io::Result<Vec<_>>>()?;
-    let tools = crate::tool_inputs::link_tools(&options.cc)
-        .map_err(|error| NativeStop::Link(format!("tool selection: {error}")))?;
-    let cc_version = command(Command::new(&tools.0.path).arg("--version"))?;
+    let recipe = crate::tool_inputs::link_recipe(&options.cc, &options.target)
+        .map_err(|error| NativeStop::Link(format!("direct link refused: {error}")))?;
     // Development links use lld's cheap string-merging mode. Release keeps
     // the linker default; this spelling is part of the executable key below.
     let link_mode = if options.optimize {
@@ -554,7 +584,7 @@ fn link(
         "hirsel.core-executable.v2",
         &(
             compiler_identity()?,
-            &tools,
+            recipe.identity,
             entry_plan,
             &identities,
             &options.target,
@@ -567,7 +597,7 @@ fn link(
                 headers
                     .iter()
                     .map(Vec::as_slice)
-                    .chain([runtime_identity.0.as_slice(), cc_version.as_slice()]),
+                    .chain([runtime_identity.0.as_slice()]),
             ),
         ),
     )?;
@@ -582,24 +612,8 @@ fn link(
             .map_err(|error| NativeStop::Link(format!("entry object: {error}")))?;
         std::fs::write(&entry, bytes)?;
         let output = temp.path().join("program");
-        let mut cc = Command::new(&tools.0.path);
-        let linker_dir = temp.path().join("linker-bin");
-        std::fs::create_dir(&linker_dir)?;
-        // GCC cross drivers do not implement clang's --ld-path spelling.  A
-        // private -B directory gives both GCC and clang the same pinned lld;
-        // the directory is per-link and never enters the executable key.
-        std::os::unix::fs::symlink(&tools.1.path, linker_dir.join("ld.lld"))?;
-        std::os::unix::fs::symlink(&tools.1.path, linker_dir.join("ld"))?;
-        if String::from_utf8_lossy(&cc_version).contains("clang") {
-            cc.arg(format!("--ld-path={}", tools.1.path.display()));
-        } else {
-            cc.arg("-fuse-ld=lld");
-        }
-        cc.arg(format!("-B{}/", linker_dir.display()));
-        if !options.optimize {
-            cc.arg("-Wl,-O0");
-        }
-        cc.arg("-pie").arg(&entry);
+        let mut inputs = Vec::with_capacity(objects.len() + 2);
+        inputs.push(entry.clone());
         let debug = if options.debug_lines {
             let debug = crate::native_debug::bind_side_products(
                 objects.iter().filter_map(|o| o.debug.as_ref()),
@@ -614,25 +628,51 @@ fn link(
         for (i, object) in objects.iter().enumerate() {
             let path = temp.path().join(format!("{i}.o"));
             std::fs::write(&path, &object.bytes)?;
-            cc.arg(path);
+            inputs.push(path);
         }
         if let Some(debug) = debug {
             let debug_path = temp.path().join("debug.o");
             std::fs::write(&debug_path, debug)?;
-            cc.arg(debug_path);
+            inputs.push(debug_path);
         }
-        cc.arg(&options.runtime)
-            .args([
-                "-lgcc_s",
-                "-lpthread",
-                "-ldl",
-                "-lm",
-                "-lrt",
-                "-lutil",
-                "-o",
-            ])
-            .arg(&output);
-        command(&mut cc)?;
+        inputs.push(options.runtime.clone());
+        let mut recipe = recipe;
+        let mut missing = crate::tool_inputs::missing_recipe_inputs(&recipe);
+        if !missing.is_empty() {
+            recipe = crate::tool_inputs::recapture_link_recipe(&options.cc, &options.target)
+                .map_err(|error| NativeStop::Link(format!("direct link refused: {error}")))?;
+            missing = crate::tool_inputs::missing_recipe_inputs(&recipe);
+        }
+        if !missing.is_empty() {
+            return Err(NativeStop::Link(format!(
+                "direct link refused: missing recipe inputs: {}",
+                missing
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+        if let Err(first) = direct_link(&recipe, &inputs, &output, options.optimize) {
+            let missing = crate::tool_inputs::missing_recipe_inputs(&recipe);
+            if missing.is_empty() {
+                return Err(first);
+            }
+            let refreshed = crate::tool_inputs::recapture_link_recipe(&options.cc, &options.target)
+                .map_err(|error| NativeStop::Link(format!("direct link refused: {error}")))?;
+            let remaining = crate::tool_inputs::missing_recipe_inputs(&refreshed);
+            if !remaining.is_empty() {
+                return Err(NativeStop::Link(format!(
+                    "direct link refused: missing recipe inputs: {}",
+                    remaining
+                        .iter()
+                        .map(|path| path.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )));
+            }
+            direct_link(&refreshed, &inputs, &output, options.optimize)?;
+        }
         let bytes = std::fs::read(output)?;
         crate::native_entry::check_linked_sites(&bytes).map_err(NativeStop::Link)?;
         (publish(&store, link_key, &bytes)?, bytes, true)

@@ -753,9 +753,10 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         v
     }
     fn temp(&mut self, t: &str) -> String {
-        let p = self.fresh();
-        self.sink.raw_alloca(&format!("  {p} = alloca {t}, align 8\n"));
-        p
+        let n = self.next;
+        self.next += 1;
+        self.sink.alloca(sink::Local::Temp(n), &ir_type_text(t), 8);
+        format!("%t{n}")
     }
     fn vty(&self, v: ValueId) -> Ty {
         self.body.values[v.index()]

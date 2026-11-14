@@ -242,20 +242,16 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         attributes: &str,
     ) -> (String, String) {
         let p = self.temp("{ ptr, i64, i64 }");
-        let mut types = vec!["ptr sret({ ptr, i64, i64 })".to_string()];
-        types.extend(args.iter().map(|(t, _)| self.c_argument(t).to_owned()));
-        self.intrinsics
-            .insert(format!("declare void @{name}({})", types.join(", ")));
-        self.line(format!(
-            "call void @{name}(ptr sret({{ ptr, i64, i64 }}) {p}, {}){attributes}",
-            args.iter()
-                .map(|(t, v)| format!("{} {v}", self.c_argument(t)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-        let pointer = self.calc(format!("load ptr, ptr {p}, align 8"));
-        let available = self.calc(format!("getelementptr i8, ptr {p}, i64 16"));
-        let available = self.calc(format!("load i64, ptr {available}, align 8"));
+        let mut params = vec![sink::Parameter { ty: sink::Type::Ptr, extension: sink::Extension::None, noalias: false, readonly: false, sret: Some(sink::Type::structure(vec![sink::Type::Ptr, sink::Type::I64, sink::Type::I64])), byval: None }];
+        params.extend(args.iter().map(|(t, _)| sink::Parameter::plain(super::ir_type_text(self.c_argument(t)))));
+        let mut values = vec![self.operand(&p)];
+        values.extend(args.iter().map(|(_, v)| self.operand(v)));
+        let signature = sink::Signature { result: sink::Type::Void, extension: sink::Extension::None, params };
+        let _ = attributes;
+        self.sink.instruction(None, sink::Operation::Call(&signature, &sink::Value::Global(name.to_owned()), &values, &sink::CallAttrs::default()), self.debug_location);
+        let pointer = self.typed(sink::Operation::Load(sink::Type::Ptr, &self.operand(&p), &sink::Memory { align: 8, ..Default::default() }));
+        let at = self.typed(sink::Operation::Gep(sink::Type::I8, &self.operand(&p), &[(sink::Type::I64, sink::Value::Integer(16))]));
+        let available = self.typed(sink::Operation::Load(sink::Type::I64, &self.operand(&at), &sink::Memory { align: 8, ..Default::default() }));
         (pointer, available)
     }
     /// Admit and allocate one block, returning null and room on refusal. The

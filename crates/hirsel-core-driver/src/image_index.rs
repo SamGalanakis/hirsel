@@ -42,6 +42,26 @@ impl From<IndexHash> for ContentHash {
         Self(bytes)
     }
 }
+/// A fixed-size, four-probe Bloom filter. A possible match always takes the
+/// ordinary bounded bucket lookup; only definite absence skips its IO.
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct NameFilter(Box<[[u64; 32]; 4]>);
+impl NameFilter {
+    fn positions(key: ContentHash) -> impl Iterator<Item = (usize, u64)> {
+        IndexHash::from(key).0.into_iter().map(|word| {
+            let bit = word & 8191;
+            ((bit >> 6) as usize, 1u64 << (bit & 63))
+        })
+    }
+    fn insert(&mut self, key: ContentHash) {
+        for (word, bit) in Self::positions(key) {
+            self.0[word / 32][word % 32] |= bit;
+        }
+    }
+    fn might_contain(&self, key: ContentHash) -> bool {
+        Self::positions(key).all(|(word, bit)| self.0[word / 32][word % 32] & bit != 0)
+    }
+}
 #[derive(Serialize, Deserialize)]
 enum Node {
     Array(Box<[Option<IndexHash>; 16]>),
@@ -49,6 +69,7 @@ enum Node {
         buckets: IndexHash,
         mask: u32,
         salt: u32,
+        filter: NameFilter,
     },
     Bucket(Vec<(IndexHash, u32)>),
 }
@@ -84,6 +105,10 @@ fn bucket_index(key: ContentHash, mask: u32, salt: u32) -> u32 {
     u32::from_le_bytes(hash.0[..4].try_into().unwrap()) & mask
 }
 fn names(store: &Store, entries: &[(ContentHash, u32)]) -> io::Result<ContentHash> {
+    let mut filter = NameFilter::default();
+    for &(key, _) in entries {
+        filter.insert(key);
+    }
     let maximum = entries.len().max(1).next_power_of_two();
     let mut count = entries.len().div_ceil(8).max(1).next_power_of_two();
     loop {
@@ -114,6 +139,7 @@ fn names(store: &Store, entries: &[(ContentHash, u32)]) -> io::Result<ContentHas
                 buckets: buckets.into(),
                 mask,
                 salt,
+                filter,
             })?);
         }
         if count == maximum {
@@ -214,10 +240,16 @@ impl Source for DiskIndex {
             buckets,
             mask,
             salt,
+            filter,
         } = node.as_ref()
         else {
             return Err(miss());
         };
+        if !filter.might_contain(key) {
+            hirsel_core_front::cost_scope!("name lookup", "filtered absent");
+            return Ok(None);
+        }
+        hirsel_core_front::cost_scope!("name lookup", "bucket fallback");
         let Some(hash) = self.at(
             (*buckets).into(),
             bucket_index(key, *mask, *salt),
@@ -311,6 +343,75 @@ impl Publisher for Writer<'_> {
 mod tests {
     use super::*;
     #[test]
+    fn name_filter_keeps_all_members_and_false_matches_use_exact_lookup() {
+        let mut filter = NameFilter::default();
+        let keys = (0..2048u32)
+            .map(|i| ContentHash::of_bytes(&i.to_le_bytes()))
+            .collect::<Vec<_>>();
+        for &key in &keys {
+            filter.insert(key);
+        }
+        assert!(keys.iter().all(|&key| filter.might_contain(key)));
+        let restored: NameFilter = decode(&encode(&filter).unwrap()).unwrap();
+        assert!(keys.iter().all(|&key| restored.might_contain(key)));
+        let dir = tempfile::tempdir().unwrap();
+        let source = DiskIndex::new(dir.path()).unwrap();
+        let root = names(&source.store, &[(ContentHash::of_bytes(b"present"), 0)]).unwrap();
+        let Node::Names {
+            buckets,
+            mask,
+            salt,
+            ..
+        } = decode(&source.store.get(root).unwrap().unwrap()).unwrap()
+        else {
+            panic!("names")
+        };
+        let filter = NameFilter(Box::new([[u64::MAX; 32]; 4]));
+        let lookup = source
+            .store
+            .put(
+                &encode(&Node::Names {
+                    buckets,
+                    mask,
+                    salt,
+                    filter,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        let table = Descriptor {
+            namespace: ContentHash::default(),
+            table: 0,
+            len: 1,
+            rows: ContentHash::default(),
+            lookup,
+        };
+        assert_eq!(Source::find(&source, table, b"present").unwrap(), Some(0));
+        assert_eq!(Source::find(&source, table, b"absent").unwrap(), None);
+    }
+
+    #[test]
+    fn absent_name_does_not_open_bucket_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = DiskIndex::new(dir.path()).unwrap();
+        let lookup = names(&source.store, &[(ContentHash::of_bytes(b"present"), 0)]).unwrap();
+        let table = Descriptor {
+            namespace: ContentHash::default(),
+            table: 0,
+            len: 1,
+            rows: ContentHash::default(),
+            lookup,
+        };
+        assert_eq!(Source::find(&source, table, b"absent").unwrap(), None);
+        assert_eq!(
+            source.decoded_nodes(),
+            1,
+            "absence opened the bucket directory"
+        );
+        assert_eq!(Source::find(&source, table, b"present").unwrap(), Some(0));
+    }
+
+    #[test]
     fn one_record_uses_no_leading_zero_directory_pages() {
         let dir = tempfile::tempdir().unwrap();
         let source = DiskIndex::new(dir.path()).unwrap();
@@ -352,15 +453,20 @@ mod tests {
             }
         }
         assert_eq!(encode(&node).unwrap(), expected);
+        let mut filter = NameFilter::default();
+        filter.insert(ContentHash::default());
         let names = Node::Names {
             buckets: hash.into(),
             mask: 7,
             salt: 11,
+            filter,
         };
         let mut names_bytes = 1u32.to_le_bytes().to_vec();
         names_bytes.extend_from_slice(&hash.0);
         names_bytes.extend_from_slice(&7u32.to_le_bytes());
         names_bytes.extend_from_slice(&11u32.to_le_bytes());
+        names_bytes.extend_from_slice(&1u64.to_le_bytes());
+        names_bytes.resize(names_bytes.len() + 127 * 8, 0);
         assert_eq!(encode(&names).unwrap(), names_bytes);
         let bucket = Node::Bucket(vec![(hash.into(), 7)]);
         let mut bucket_bytes = 2u32.to_le_bytes().to_vec();

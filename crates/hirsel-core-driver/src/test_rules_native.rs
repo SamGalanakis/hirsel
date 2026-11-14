@@ -3,13 +3,12 @@ fn prog4_source_rules(backend: Backend) {
     let dir = tempfile::tempdir().unwrap();
     let entry = DefPath::from_full("app@1/main/success").unwrap();
     let mut options = native_options(backend, dir.path());
-    for (case, accepted) in [
-        ("test-functions", true),
-        ("test-signatures-refused", false),
-        ("test-references-refused", false),
+    for (case, source, accepted) in [
+        ("test-functions", include_str!("../../../core/front/cases/body/test-functions.hirsel"), true),
+        ("test-signatures-refused", include_str!("../../../core/front/cases/body/test-signatures-refused.hirsel"), false),
+        ("test-references-refused", include_str!("../../../core/front/cases/body/test-references-refused.hirsel"), false),
     ] {
-        let source = std::fs::read_to_string(root.join(format!("core/front/cases/body/{case}.hirsel"))).unwrap();
-        let mut request = source_request(&source, dir.path());
+        let mut request = source_request(source, dir.path());
         request.entry = Some(entry.clone());
         request.inputs.packages[1] = PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();
         let product = Driver::default().check(request, &mut Meter::new(false)).unwrap();
@@ -22,7 +21,7 @@ fn prog4_source_rules(backend: Backend) {
         let built = product.build(&entry, &options).unwrap();
         run_clean(&built.executable, 0);
         // The accepted reference paths run too: direct call and function value.
-        let mut request = source_request(&source, dir.path());
+        let mut request = source_request(source, dir.path());
         let entry = DefPath::from_full("app@1/main/accepted").unwrap();
         request.entry = Some(entry.clone());
         request.inputs.packages[1] = PackageManifest::directory(&root.join("core/core"), package("core"), true).unwrap();

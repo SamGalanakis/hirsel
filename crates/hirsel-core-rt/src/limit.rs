@@ -176,10 +176,10 @@ impl Forest {
     }
     #[inline(always)]
     fn find(&mut self, id: usize) -> usize {
-        if self.record(id).parent.is_none() {
-            id
-        } else {
-            self.compress(id)
+        match self.record(id).parent {
+            None => id,
+            Some(parent) if self.record(parent).parent.is_none() => parent,
+            Some(_) => self.compress(id),
         }
     }
     #[cold]
@@ -210,9 +210,18 @@ impl Forest {
         if bytes == 0 {
             self.zeros -= 1;
             self.release(id);
+        } else {
+            let root = self.find(id);
+            self.refund_rooted(id, root, bytes);
+        }
+    }
+    #[inline(always)]
+    fn refund_rooted(&mut self, id: usize, root: usize, bytes: u64) {
+        if bytes == 0 {
+            self.zeros -= 1;
+            self.release(id);
             return;
         }
-        let root = self.find(id);
         self.record_mut(root).available = self.record(root).available.wrapping_add(bytes);
         let r = self.record_mut(id);
         r.outstanding = r.outstanding.wrapping_sub(bytes);
@@ -355,22 +364,24 @@ impl Payer {
             || CURRENT_DOMAIN.with(|v| v.get() == self.slot().domain.as_ptr().addr());
         if local && d.handles.get() != 0 {
             let root = self.canonical();
-            let owner = root.forest().record(root.slot().id).live.owner;
+            // No event or callback occurs between this lookup and settlement.
+            // SAFETY: this task exclusively owns the resolved, live record.
+            let owner = unsafe { (*root.local()).live.owner };
             if owner != crate::tasks::current_id() && bytes != 0 {
                 crate::abi_tasks::cross_task_refund(owner, bytes);
-                let inbox = root.forest().record(root.slot().id).live.inbox;
+                // SAFETY: the resolved record retains its domain-owned inbox.
+                let inbox = unsafe { (*root.local()).live.inbox };
                 d.remote.lock().unwrap().enqueue(self, bytes, Some(inbox));
                 return;
             }
-        }
-        if local && d.handles.get() != 0 {
-            // SAFETY: this task owns all local fields; remote events use only mailbox atoms.
+            // SAFETY: this task owns the table; outstanding stays on its original slot.
             let r = unsafe { &mut *self.local() };
             if bytes != 0 && r.parent.is_none() && r.refs != 0 {
                 r.available = r.available.wrapping_add(bytes);
                 r.outstanding = r.outstanding.wrapping_sub(bytes);
             } else {
-                self.forest().refund(self.slot().id, bytes);
+                self.forest()
+                    .refund_rooted(self.slot().id, root.slot().id, bytes);
             }
         } else {
             self.remote_refund(bytes);
@@ -814,6 +825,49 @@ impl Funding {
             (*self.raw_local()).available = (*self.raw_local()).available.wrapping_add(unused);
         }
     }
+
+    /// The rank-zero one-survivor union has a fixed result: the lexical parent
+    /// remains representative, so it can transfer the context pin without
+    /// running the general rank/metadata machinery.
+    #[cold]
+    fn exit_rank_zero_survivor(&mut self, parent: Payer) -> bool {
+        let child = self.payer;
+        let child_id = child.slot().id;
+        let parent_id = parent.slot().id;
+        let f = child.forest();
+        let child_record = f.record(child_id);
+        let parent_record = f.record(parent_id);
+        let child_parent = child_record.parent;
+        let child_rank = child_record.rank;
+        let child_refs = child_record.refs;
+        let child_outstanding = child_record.outstanding;
+        let child_owner = child_record.live.owner;
+        let parent_parent = parent_record.parent;
+        let parent_owner = parent_record.live.owner;
+        let parent_rank = parent_record.rank;
+        let parent_available = parent_record.available;
+        if child_parent.is_some()
+            || child_rank != 0
+            || child_refs != 1
+            || child_outstanding == 0
+            || parent_parent.is_some()
+            || child_owner != crate::tasks::current_id()
+            || parent_owner != crate::tasks::current_id()
+        {
+            return false;
+        }
+        let unused = child_record.available;
+        crate::abi_tasks::cross_task_refund(parent_owner, unused);
+        f.record_mut(parent_id).available = parent_available.wrapping_add(unused);
+        if parent_rank == 0 {
+            f.record_mut(parent_id).rank += 1;
+        }
+        f.record_mut(child_id).parent = Some(parent_id);
+        f.record_mut(child_id).refs = 0;
+        f.record_mut(parent_id).refs += 1;
+        self.payer = parent;
+        true
+    }
     #[inline(always)]
     fn recycle_scope(&mut self, parent: Payer) -> u64 {
         let old = self.payer;
@@ -853,6 +907,14 @@ impl Funding {
     }
     #[cold]
     fn exit_survivors(&mut self) {
+        // SAFETY: exit owns the canonical scope and its retained lexical parent.
+        let parent = unsafe { (*self.raw_local()).live.parent.unwrap() };
+        if self.exit_rank_zero_survivor(parent) {
+            return;
+        }
+        self.exit_general();
+    }
+    fn exit_general(&mut self) {
         let old = self.payer;
         let winner = self.end_id();
         let f = old.forest();
@@ -940,3 +1002,7 @@ impl Drop for Funding {
 #[cfg(test)]
 #[path = "limit_refund_tests.rs"]
 mod refund_tests;
+
+#[cfg(test)]
+#[path = "limit_bound_tests.rs"]
+mod bound_tests;

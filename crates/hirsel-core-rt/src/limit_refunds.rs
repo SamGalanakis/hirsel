@@ -18,9 +18,36 @@ pub(super) struct Inbox {
     head: UnsafeCell<Option<NonNull<Slot>>>,
     signals: Vec<RefundSignal>,
 }
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct InboxSnapshot {
+    owner: u64,
+    references: usize,
+    reaping: bool,
+    pending: bool,
+    head: Option<usize>,
+    next_reap: Option<u64>,
+    signals: Vec<bool>,
+}
 impl Inbox {
     // Only the table lease changes these counts: one per initialized live record
     // (including forwarding records) and one for the domain's bound inbox cache.
+    #[cfg(test)]
+    pub(super) fn debug_state(&self) -> InboxSnapshot {
+        InboxSnapshot {
+            owner: self.owner,
+            references: self.references.get(),
+            reaping: self.reaping.get(),
+            pending: self.pending(),
+            head: unsafe { (*self.head.get()).map(|p| p.as_ref().id) },
+            next_reap: self.next_reap.get().map(|p| unsafe { p.as_ref().owner }),
+            signals: self
+                .signals
+                .iter()
+                .map(|p| unsafe { p.0.as_ref().load(Ordering::Acquire) })
+                .collect(),
+        }
+    }
     pub(super) fn retain(&self) {
         self.references.set(self.references.get().wrapping_add(1));
     }
@@ -107,6 +134,17 @@ impl Remote {
     #[cfg(test)]
     pub(super) fn inbox_count(&self) -> usize {
         self.inboxes.len()
+    }
+    #[cfg(test)]
+    pub(super) fn debug_state(&self) -> (bool, usize, Option<usize>, Vec<InboxSnapshot>) {
+        let mut inboxes: Vec<_> = self.inboxes.values().map(|v| v.debug_state()).collect();
+        inboxes.sort();
+        (
+            self.retired,
+            self.queued,
+            unsafe { self.unassigned.map(|p| p.as_ref().id) },
+            inboxes,
+        )
     }
     pub(super) fn pending(&self) -> bool {
         self.queued != 0

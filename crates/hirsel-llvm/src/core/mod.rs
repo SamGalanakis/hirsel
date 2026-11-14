@@ -1128,11 +1128,8 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
                     .iter()
                     .map(|a| (*a, self.edge_label(a.edge)))
                     .collect::<Vec<_>>();
-                self.line(format!("switch {t} {v}, label %{other} ["));
-                for (a, label) in &arms {
-                    self.line(format!("{t} {}, label %{label}", a.value));
-                }
-                self.line("]");
+                let native_arms = arms.iter().map(|(a, label)| (a.value, label.clone())).collect::<Vec<_>>();
+                self.sink.instruction(None, sink::Operation::Switch(ir_type(self.vty(value)), &self.operand(&v), &other, &native_arms), self.debug_location);
                 self.emit_edge(&other, otherwise);
                 for (a, label) in arms {
                     self.emit_edge(&label, a.edge);

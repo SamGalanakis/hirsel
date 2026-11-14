@@ -313,6 +313,13 @@ impl<S: sink::Sink> FunctionEmitter<'_, S> {
         self.calc(format!("getelementptr i8, ptr {p}, i64 {n}"))
     }
     pub(super) fn return_values(&mut self, values: &[String]) {
+        if self.abi.fields.len() == 1 && !self.has_status {
+            if let Some(value) = values.first() {
+                let operand = self.operand(value);
+                self.sink.instruction(None, sink::Operation::Return(super::ir_type(self.abi.fields[0]), Some(&operand)), self.debug_location);
+                return;
+            }
+        }
         let mut returned = values.to_vec();
         if self.has_status {
             returned.push("0".into());

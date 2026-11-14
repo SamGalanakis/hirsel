@@ -57,6 +57,7 @@ fn evaluate() -> Result<Value, String> {
         .collect::<HashMap<_, _>>();
     let mut emitter = Emitter::new();
     let mut checked = HashSet::new();
+    let mut templates = HashMap::new();
     let mut pending = vec![root];
     let mut function = None;
     // As in the existing front evaluator assembly: check each demanded source body
@@ -67,12 +68,25 @@ fn evaluate() -> Result<Value, String> {
                 continue;
             }
             let check = program.check_lower(f as usize, &mut emitter);
+            emitter.seal();
             if !check.refusals.is_empty() || !check.gaps.is_empty() {
                 return Err(format!("{}: {check:?}", program.fns[f as usize].path));
             }
             if f == root {
                 function = check.function;
             }
+            if check.template.is_some()
+                && let Some(row) = check.function
+                && let Some(body) = &emitter.module.functions[row.index()].body
+            {
+                // The driver retains each checked definition's immutable IR.
+                // Test assembly consumes generic source bodies; keep that same
+                // source available when a later demand introduces another instance.
+                templates.insert(row, body.clone());
+            }
+        }
+        for (&row, body) in &templates {
+            emitter.module.functions[row.index()].body = Some(body.clone());
         }
         emitter.materialize_instances()?;
         for row in &emitter.module.functions {

@@ -142,3 +142,12 @@ Every applicable law must run and satisfy its oracle. The command exits 1 for an
 failed or unavailable applicable law, 2 for a configuration/selection error,
 and 0 only when all applicable rows pass. Evaluator-only memory-misuse laws stay
 explicitly inapplicable on native engines and run on the evaluator instead.
+
+Evaluator assembly follows the driver's per-body order: check and install a
+demanded source body, seal it, then materialize the instances it demands. Each
+generic source body is retained as immutable checked input, as in the driver's
+definition products, because the test assembler removes its source rows after
+materializing. Later demands reuse those generic sources without rechecking
+them. Nongeneric bodies are never restored or deferred past their seal. The
+walker_generic and walker_sealed laws cover late generic instances and a
+later-defined word-carried enum callee respectively.

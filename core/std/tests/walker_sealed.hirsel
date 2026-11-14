@@ -1,0 +1,13 @@
+// FORM #78: source callees are checked after their caller sealed their rows.
+// Mirrored from core/front/cases/body/word-carriage.hirsel's early/later fence.
+type Direction: ordered = North | East | South | West
+fn turn(d:Direction)->Direction {
+    match d {North=>East,East=>South,South=>West,West=>North}
+}
+fn ordinal(d:Direction)->u64 {
+    match d {North=>0,East=>1,South=>2,West=>3}
+}
+
+// expect: run later_defined_word_callee() = 2
+fn later_defined_word_callee()->u64 {ordinal(later(East))}
+fn later(d:Direction)->Direction {turn(d)}

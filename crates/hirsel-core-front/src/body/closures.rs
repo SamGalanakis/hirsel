@@ -335,7 +335,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.activate(scratch.vals[i], call, arg);
         }
         self.unfreeze(holds, |hold| match hold {
-            Hold::CallView(c, _) | Hold::CallMut(c) if c == call => None,
+            Hold::CallView(c, _) | Hold::CallMut(c, _) if c == call => None,
             other => Some(other),
         });
         let result = self.partial(result, &scratch.found);
@@ -1811,7 +1811,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.use_place(
                 at,
                 if capture.mode == Mode::Mut {
-                    Use::Mut(Hold::CallMut(call))
+                    Use::Mut(Hold::CallMut(call, u32::MAX))
                 } else {
                     Use::View(Hold::CallView(call, u32::MAX))
                 },
@@ -2072,8 +2072,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         }
         if kind(&self.p.decls, &self.t, ty, &self.params) == Kind::Scoped
             && let Some(f) = self.freezes.iter().find(|f| {
+                // A view parameter, or a `mut` one a result is anchored to (OWN-20).
                 frame.outer[f.place.slot as usize].is_none()
-                    && self.var(f.place.slot).origin == Origin::ViewParam
+                    && matches!(
+                        self.var(f.place.slot).origin,
+                        Origin::ViewParam | Origin::MutParam
+                    )
             })
         {
             let cause = self.cause(f.site);

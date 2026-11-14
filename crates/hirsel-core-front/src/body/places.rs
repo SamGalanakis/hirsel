@@ -287,7 +287,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let why = match f.hold {
                     Hold::View(_) => "is viewed",
                     Hold::CallView(..) => "is viewed by an argument of this call",
-                    Hold::CallMut(_) => "is lent `mut` to this call",
+                    Hold::CallMut(..) => "is lent `mut` to this call",
                     Hold::Assign => "is reserved by an assignment",
                 };
                 let cause = self.cause(f.site);

@@ -1,0 +1,19 @@
+// OWN-20: each bare anchor of a scoped type's arguments names a view parameter
+// and roots the named type itself, so `Duo[in a, in b]` is a valid result.
+// expect: accept
+scoped type Duo[in a, in b] {
+    x: View[String] in a,
+    y: View[String] in b,
+}
+
+fn both(a: String, b: String) -> Duo[in a, in b] {
+    Duo(x: view a, y: view b)
+}
+
+fn use_pair() -> u64 {
+    let a: String = "ab"
+    let b: String = "cde"
+    let d = both(a, b)
+    string.byte_len(d.x) + string.byte_len(d.y)
+}
+// expect: run use_pair() = 5

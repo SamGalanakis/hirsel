@@ -336,14 +336,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if undetermined && !self.broken {
             self.refuse("LANG-12", n, "a type parameter of the callee is still open");
         }
-        // The call completes: its arguments' holds end, except a view the scoped result
-        // is anchored to, which lasts for the result's extent (OWN-11, OWN-20).
+        // The call completes: its arguments' holds end, except an argument the scoped
+        // result is anchored to. A view argument stays frozen, and a `mut` argument's
+        // loan becomes a freeze in this same step, before any later sibling is
+        // checked; both last for the result's extent, whatever variant it holds
+        // (OWN-10, OWN-11, OWN-20). A call that fails delivers no result, so no
+        // freeze outlives it.
         let anchors = &g.anchors;
         self.unfreeze(holds, |h| match h {
-            Hold::CallView(c, i) if c == call => {
+            Hold::CallView(c, i) | Hold::CallMut(c, i) if c == call => {
                 anchors.contains(&i).then_some(Hold::View(Extent::Temp))
             }
-            Hold::CallMut(c) if c == call => None,
             h => Some(h),
         });
         let result = if undetermined {
@@ -489,7 +492,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                             self.refuse("OWN-8", e, "nothing is written through a view");
                             return true;
                         }
-                        self.use_place(at, Use::Mut(Hold::CallMut(call)), e);
+                        self.use_place(at, Use::Mut(Hold::CallMut(call, i as u32)), e);
                         self.arg_ty_rooted(pt, at.ty, e, found, roots);
                         if self.live()
                             && at.ty.0 > HOLE.0

@@ -1432,7 +1432,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let out = self.put_typed(n, f, args, found, dest);
         // The put completes: the destination's `mut` loan ends (OWN-9).
         self.unfreeze(holds, |h| match h {
-            Hold::CallMut(c) if c == call => None,
+            Hold::CallMut(c, _) if c == call => None,
             h => Some(h),
         });
         out

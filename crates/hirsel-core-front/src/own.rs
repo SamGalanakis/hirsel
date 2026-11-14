@@ -104,8 +104,9 @@ pub(crate) enum Hold {
     View(Extent),
     /// A view argument of an open call: the call and the argument index.
     CallView(u32, u32),
-    /// A `mut` argument of an open call, lent until the call completes.
-    CallMut(u32),
+    /// A `mut` argument of an open call, lent until the call completes: the call and
+    /// the argument index.
+    CallMut(u32, u32),
     /// The place of an assignment, reserved while its right side is evaluated.
     Assign,
 }
@@ -131,7 +132,7 @@ pub(crate) enum Act {
 /// overlap (OWN-9), a view's freeze (OWN-10), an assignment's reservation (OWN-12).
 pub(crate) fn breaks(hold: Hold, act: Act) -> Option<&'static str> {
     match (hold, act) {
-        (Hold::CallMut(_), _) => Some("OWN-9"),
+        (Hold::CallMut(..), _) => Some("OWN-9"),
         (_, Act::Read) => None,
         (Hold::CallView(..), Act::Write) => Some("OWN-9"),
         (Hold::View(_), Act::Write) => Some("OWN-10"),

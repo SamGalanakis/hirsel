@@ -1019,11 +1019,24 @@ impl Program<'_> {
             }
             NodeKind::TypeArguments => {
                 let mut args = vec![];
+                let mut roots = vec![];
                 for &c in &children[1..] {
+                    let pending = self.pending.len();
                     let t = self.lower_ty_result(at, c, generics, scoped_roots);
+                    if item.tree.node(c).kind == NodeKind::Anchor {
+                        roots.extend(pending..self.pending.len());
+                    }
                     args.push((t, self.site(at, c)));
                 }
                 let mut ty = self.named_ty(at, children[0], &args, generics);
+                // `R[in a, in b]`: each bare anchor roots the named type itself (OWN-20).
+                for i in roots {
+                    if let Pending::Root { base, .. } = &mut self.pending[i]
+                        && *base == ERROR
+                    {
+                        *base = ty;
+                    }
+                }
                 if scoped_roots && scoped_payload(&self.decls, &self.types, ty) {
                     for &(root, _) in &args {
                         if matches!(self.types.kind(root), TyKind::Region(_)) {

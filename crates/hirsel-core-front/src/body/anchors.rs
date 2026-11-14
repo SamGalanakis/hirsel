@@ -577,6 +577,13 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         if fact != 0 {
             return fact;
         }
+        // `mut p` lends the place `p`: a result anchored to it reads `p` and keeps
+        // every anchor and region root `p` already has (OWN-20).
+        let n = if self.kind(n) == NodeKind::Unary && self.token_text(n) == "mut" {
+            self.kids(n)[0]
+        } else {
+            n
+        };
         if let Some((_, at)) = self.anchors.place.filter(|(node, _)| *node == n) {
             self.anchor_read(at)
         } else {

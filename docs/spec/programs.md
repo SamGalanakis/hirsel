@@ -143,25 +143,34 @@ this encoding and nothing else, followed by the UTF-8 text `D S`:
   path, and the function's name, joined by `/`. In each component, every byte other than
   an ASCII letter, digit or `_` is written `%` and two upper-case hex digits.
 - `S` is the function's header (`fn-header`, [syntax](syntax.md)) with its whole meaning
-  and no spelling: parameter names are left out; region parameters keep their order and
-  are written `^0`, `^1`, ..; an anchor or region argument names its parameter by position
-  as `#0`, `#1`, .., or its region as `^i`, followed by any field names as written; every
+  and no spelling: parameter names and the generics list are left out; the region
+  generics ([MEM-6](memory.md#mem-6-roots)) are written `^0`, `^1`, .. in the order each is
+  first named in the parameters and then the result, read left to right, and any named in
+  neither take the next numbers in their declared order; an anchor, a region argument or
+  an outlives clause names a region generic as `^i` and a parameter, `Region` parameters
+  included, as `#i` by its position in the function's own parameter list, since a callable
+  type's parameters have no names ([LANG-13](language.md#lang-13-callables)) and no anchor
+  is a projection ([OWN-20](ownership.md#own-20-scoped-results-name-their-anchor)); every
   type path is replaced by the definition identity of the type it names, aliases expanded
   first, and keeps its type arguments; the builtin type names of
   [LANG-10](language.md#lang-10-built-in-types) are written as themselves; a missing result
-  is written `->()`; `waits` stays; the outlives clauses are written as `where ^i:^j`
-  pairs, sorted by `i` then `j`, each once; bounds in `own[..]` are written in the order
-  of the `bound-name` production.
+  is written `->()`; `waits` stays; the outlives clauses are written as `where x:y`
+  pairs, one for each `x` that the declared clauses make outlive a different `y`, directly
+  or by transitivity, sorted by `x` then `y`, every `^i` before every `#i` and each by `i`;
+  bounds in `own[..]` are written in the order of the `bound-name` production.
 - No whitespace appears except one space between two adjacent words, a word being a
-  keyword, an identifier, a number or a definition identity, and no list has a trailing
-  comma.
+  keyword, an identifier, a number, a definition identity or a root name `^i` or `#i`, and
+  no list has a trailing comma.
 
 So `fn double(b: Bytes) -> Result[Bytes, Capacity]` in module `main` of package `app`
 version 1 has the identity bytes `0x01` followed by
 `app@1/main/double(core@1/core/List[u8])->core@1/core/Result[core@1/core/List[u8],core@1/core/Capacity]`.
+And `fn edges[in b, in a](s: Region, r: Region, t: Text in a, u: Text in b) -> u64 where
+a: r, r: s` there, or the same header with `[in a, in b]`, has `0x01` followed by
+`app@1/main/edges(core@1/core/Region,core@1/core/Region,core@1/core/Text in ^0,core@1/core/Text in ^1)->u64 where ^0:#0,^0:#1,#1:#0`.
 A change to a function's package, version, module path, name, parameter modes or types,
 result, anchors, `waits` or outlives clauses changes its identity; a change to its
-parameter names or to its body does not. A rename or a move to another module is a new
+parameter names, to the order of its region generics or to its body does not. A rename or a move to another module is a new
 identity, and no alias connects the two. A later encoding may add an instance's closed type
 arguments and dictionaries after `D`; version 1 has none.
 

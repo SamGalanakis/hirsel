@@ -19,6 +19,7 @@
 // expect: run dirs() = 310
 // expect: run indirect() = 65
 // expect: run mutated() = 66
+// expect: run early() = 2
 type Dir: ordered = North | East | South | West
 fn turn(d: Dir) -> Dir { match d { North => East, East => South, South => West, West => North } }
 fn ordinal(d: Dir) -> u64 { match d { North => 0, East => 1, South => 2, West => 3 } }
@@ -56,3 +57,6 @@ fn mutated() -> u32 {
   bump(mut c)
   match c { None => 0, Some(x) => char.to_u32(x) }
 }
+// A callee whose body is checked after its caller has sealed its row (FORM #78).
+fn early() -> u64 { ordinal(later(East)) }
+fn later(d: Dir) -> Dir { turn(d) }

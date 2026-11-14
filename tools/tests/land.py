@@ -74,6 +74,12 @@ if [ "$1" = test ]; then
       if [ -f broken-core-suite ]; then echo 'core evaluator body failed' >&2; exit 1; fi ;;
   esac
   case "$*" in
+    *land-core-evaluator*)
+      if [ -n "$FAKE_LAW_GATE" ]; then
+        exec python3 core/tools/gate_evaluator.py --root . --evaluator "$FAKE_CORE_EVALUATOR"
+      fi ;;
+  esac
+  case "$*" in
     *land-core-cranelift-custody*|*hirsel-cranelift-test-core_native*)
       if [ -f broken-custody ]; then echo 'custody native agreement failed' >&2; exit 1; fi ;;
     *land-audit-runtime-schema*)
@@ -132,6 +138,9 @@ class Land(unittest.TestCase):
                                'tools/buck2/rust_environment.py': (ROOT / 'tools/buck2/rust_environment.py').read_text(),
                                'tools/buck2/priorities.bzl': (ROOT / 'tools/buck2/priorities.bzl').read_text(),
                                'core/tools/std_api_index.py': (ROOT / 'core/tools/std_api_index.py').read_text(),
+                               'core/tools/gate_evaluator.py': (ROOT / 'core/tools/gate_evaluator.py').read_text(),
+                               'core/tools/std_native.py': (ROOT / 'core/tools/std_native.py').read_text(),
+                               'core/tools/std_native_owners.json': (ROOT / 'core/tools/std_native_owners.json').read_text(),
                                'core/std/example.hirsel': 'pub fn present() -> void {}\n',
                                'core/std/API.md': '| Module | Extends | Ops | Operations |\n| **total** | | | |\n',
                                '.gitignore': '.buck2/\n__pycache__/\n'})
@@ -206,6 +215,52 @@ class Land(unittest.TestCase):
         self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
         self.assertIn('FAIL  Core suites', refused.stdout)
         self.assertIn('core evaluator body failed', refused.stdout)
+        self.assertEqual(self.main_log(), ['base'])
+
+    def law_fixture(self, expected):
+        # Keep the real walker/helper; only Buck's transport is fake here.
+        helper = ROOT / 'buck-out/tmp/cargo-bin-exe/test-land/hirsel-core-contract-eval'
+        self.assertTrue(helper.is_file(), 'release evaluator is required test data')
+        (self.lane / 'core/std/example.hirsel').write_text('pub fn present()->u64 {7}\n')
+        directory = self.lane / 'core/std/tests'
+        directory.mkdir()
+        oracle = '' if expected is None else f'// expect: run answer() = {expected}\n'
+        (directory / 'oracle.hirsel').write_text(oracle + 'fn answer()->u64 {7}\n')
+        self.git(self.lane, 'add', 'core')
+        self.git(self.lane, 'commit', '-qm', 'library law fixture')
+        return dict(FAKE_LAW_GATE='1', FAKE_CORE_EVALUATOR=str(helper.resolve()))
+
+    def test_wrong_library_oracle_refuses_push_until_corrected(self):
+        fixture = self.law_fixture(8)
+        refused = self.land(**fixture)
+        self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+        self.assertIn('FAIL  Core suites', refused.stdout)
+        self.assertIn("'values': [0]", refused.stdout)
+        self.assertIn('oracle:answer', refused.stdout)
+        self.assertEqual(self.main_log(), ['base'])
+        law = self.lane / 'core/std/tests/oracle.hirsel'
+        law.write_text(law.read_text().replace('answer() = 8', 'answer() = 7'))
+        self.git(self.lane, 'commit', '-qam', 'correct the authored expectation')
+        accepted = self.land(**fixture)
+        self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+
+    def test_zero_library_law_selection_refuses_the_push(self):
+        refused = self.land(**self.law_fixture(None))
+        self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+        self.assertIn('FAIL  Core suites', refused.stdout)
+        self.assertIn('no expect: run', refused.stdout)
+        self.assertEqual(self.main_log(), ['base'])
+
+    def test_native_only_library_selection_cannot_pass_the_evaluator_gate(self):
+        fixture = self.law_fixture(None)
+        law = self.lane / 'core/std/tests/oracle.hirsel'
+        law.write_text('// expect: run answer(out) = true\nfn answer(out:Stdout)->bool {true}\n')
+        self.git(self.lane, 'commit', '-qam', 'only a native law remains')
+        refused = self.land(**fixture)
+        self.assertNotEqual(refused.returncode, 0, refused.stdout + refused.stderr)
+        self.assertIn('FAIL  Core suites', refused.stdout)
+        self.assertIn('zero evaluator-eligible laws selected', refused.stdout)
+        self.assertIn('1 native-only', refused.stdout)
         self.assertEqual(self.main_log(), ['base'])
 
     def test_detached_wrapper_records_submission_and_one_completion_with_the_landed_sha(self):

@@ -961,6 +961,10 @@ struct Cx<'c, 'a, 'e> {
     e: &'e mut Emitter,
     b: Body,
     func: Option<FuncId>,
+    /// The signature a source body's entry was emitted against. A row first mentioned
+    /// by an earlier body may already be sealed to its word carriage; installing the
+    /// body puts this signature back, so the next [`Emitter::seal`] converts the body.
+    emitted: Option<SigId>,
     ir_item: ItemId,
     cur: Option<BlockId>,
     open: Vec<Inst>,
@@ -1097,6 +1101,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             e,
             b: Body::default(),
             func: None,
+            emitted: None,
             ir_item,
             cur: None,
             open: vec![],
@@ -1753,6 +1758,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
         match row {
             Ok((func, sig)) => {
                 self.func = Some(func);
+                self.emitted = Some(sig);
                 let s = &self.e.module.signatures[sig.index()];
                 // The destination first, then the parameters; an address arrives as a
                 // pointer (Body: block 0's parameters).
@@ -1938,6 +1944,9 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
                 scalar_abi::inline_keys(&self.e.module, &mut self.b);
             }
             self.e.module.functions[f.index()].body = Some(std::mem::take(&mut self.b));
+            if let Some(sig) = self.emitted {
+                self.e.module.functions[f.index()].signature = sig;
+            }
             self.out.function = Some(f);
             if !self.fd.generics.is_empty() {
                 self.e.generic_rows.insert(f);

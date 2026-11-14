@@ -12,7 +12,7 @@ test = false
 
 [dependencies]
 hirsel-core-front = { path = "../hirsel-core-front", features = ["test-assembly"] }
-hirsel-core-ir = { path = "../hirsel-core-ir", features = ["eval"] }
+hirsel-core-ir = { path = "../hirsel-core-ir", features = ["eval", "wf"] }
 hirsel-core-ids = { path = "../hirsel-core-ids" }
 hirsel-core-resolve = { path = "../hirsel-core-resolve" }
 hirsel-guard = { path = "../hirsel-guard" }

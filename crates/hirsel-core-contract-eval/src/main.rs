@@ -89,6 +89,7 @@ fn evaluate() -> Result<Value, String> {
         }
     }
     let function = function.ok_or("entry body is unavailable")?;
+    hirsel_core_ir::wf::module(&emitter.module).map_err(|e| format!("not well formed: {e}"))?;
     let hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

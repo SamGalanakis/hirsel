@@ -1389,12 +1389,18 @@ def first_party(meta: dict) -> str:
                             data=["tools/tests/distribution_notices.py"],
                             files_env={"HIRSEL_DISTRIBUTION_NOTICES": "//tools/toolchain-dist:notices.py"}))
     out.append("\n" + call("hirsel_script_test", name="test-land", script="tools/tests/land.py", full=False, host=True,
+                            production=True, bin_exes={"hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
                             data=["tools/land", "tools/land-run", "tools/land_events.py", "tools/tests/land.py", "tools/check-hot-files", "tools/main-runs", "core/tools/std_api_index.py",
+                                  "core/tools/gate_evaluator.py", "core/tools/std_native.py", "core/tools/std_native_owners.json",
                                   "//tools/buck2:run_failures.py", "//tools/buck2:generated.py",
                                   "//tools/buck2:merging.py", "//tools/buck2:clippy.py", "//tools/buck2:fmt.py",
                                   "//tools/buck2:event_logs.py", "//tools/buck2:conformance.py", "//tools/buck2:rust_environment.py",
                                   "//tools/buck2:priorities.bzl"],
                             files_env={"HIRSEL_TEST_CASE_FORMATTER": "//:hirsel-conformance-bin-hirsel-conformance"}))
+    out.append("\n" + call("hirsel_script_test", name="land-core-evaluator", script="core/tools/gate_evaluator.py", full=False,
+                            production=True, bin_exes={"hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
+                            args=["--evaluator", "buck-out/tmp/cargo-bin-exe/land-core-evaluator/hirsel-core-contract-eval"],
+                            data=Raw('glob(["core/core/**", "core/std/**", "core/tools/std_native.py", "core/tools/std_native_owners.json"])')))
     out.append("\n" + call("hirsel_script_test", name="test-core-sweep", script="tools/tests/core_sweep.py", full=False,
                             data=["tools/sweep"]))
     out.append("\n" + call("hirsel_test", name="test-report-fixture", crate="test_report_fixture",

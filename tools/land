@@ -93,7 +93,7 @@ CORE_ACCEPTANCE = (
     '//:hirsel-core-front-unittest', '//:hirsel-cranelift-unittest',
     '//:hirsel-core-driver-unittest',
     '//:hirsel-llvm-lazy-unittest', '//:hirsel-llvm-unittest',
-    '//:hirsel-cranelift-test-core_native',
+    '//:hirsel-cranelift-test-core_native', '//:land-core-evaluator',
 )
 # A target literal in a tools/land: the tool on main checks every batch this
 # tree joins, so each one it names must exist in the tree submitted.

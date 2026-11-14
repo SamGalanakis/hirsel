@@ -198,7 +198,8 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
         .find("main")
         .and_then(|s| index.definition(main, s))
         .map(|d| index.definition_path(d));
-    // Every body of the application module, checked once, in order.
+    // Every body of the application module, checked once, in order, and sealed after
+    // each as the driver does: a later body may fill a row an earlier seal converted.
     let mut emitter = Emitter::new();
     let mut refusals = p.refusals.clone();
     let mut gaps = p.gaps.clone();
@@ -212,6 +213,7 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
             continue;
         }
         let c = p.check_lower(f, &mut emitter);
+        emitter.seal();
         refusals.extend(c.refusals);
         gaps.extend(c.gaps);
         if let Some(id) = c.function {

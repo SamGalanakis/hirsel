@@ -1,6 +1,8 @@
 cxx_library(
     name = "engine",
     srcs = ["engine.c"],
+    headers = {"aggregate_phi.h": "//crates/hirsel-llvm/bridge:aggregate_phi.h"},
+    header_namespace = "",
     compiler_flags = ["-O2", "-fvisibility=hidden"],
     deps = ["toolchains//:libllvm"],
     preferred_linkage = "shared",

@@ -527,9 +527,7 @@ impl<'context> Module<'context> {
     /// after typed empty-drop elimination. Keep this in sync with the lazy component;
     /// object parity covers both entries. No retained count/ahead extensions.
     pub(crate) fn run_core_passes(&self, machine: &TargetMachine) -> Result<(), String> {
-        let pipeline = c_string(
-            "default<O3>,cgscc(argpromotion),function(sroa,early-cse,correlated-propagation,instcombine<no-verify-fixpoint>,constraint-elimination,simplifycfg,dse)",
-        );
+        let pipeline = c_string("default<O3>");
         // SAFETY: handles are live; these are per-invocation options, disposed
         // after LLVM consumes them. The default pipeline does not verify IR.
         unsafe {
@@ -551,7 +549,20 @@ impl<'context> Module<'context> {
                 }
                 function = LLVMGetNextFunction(function);
             }
-            let error = LLVMRunPasses(self.raw, pipeline.as_ptr(), machine.raw, options);
+            let mut error = LLVMRunPasses(self.raw, pipeline.as_ptr(), machine.raw, options);
+            if error.is_null() {
+                unsafe extern "C" {
+                    fn hirsel_llvm_scalarize_aggregate_phis(
+                        module: LLVMModuleRef,
+                        context: LLVMContextRef,
+                    );
+                }
+                hirsel_llvm_scalarize_aggregate_phis(self.raw, self.context.raw);
+                let cleanup = c_string(
+                    "cgscc(argpromotion),function(sroa,early-cse,correlated-propagation,instcombine<no-verify-fixpoint>,jump-threading,constraint-elimination,simplifycfg,dse)",
+                );
+                error = LLVMRunPasses(self.raw, cleanup.as_ptr(), machine.raw, options);
+            }
             LLVMDisposePassBuilderOptions(options);
             if error.is_null() {
                 return Ok(());

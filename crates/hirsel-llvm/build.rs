@@ -5,6 +5,10 @@ fn main() {
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let sources = ["stack_size", "count_loops"];
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest.join("bridge/aggregate_phi.h").display()
+    );
     let sysroot = prefix.join("sysroot");
     assert!(
         sysroot.join("usr/include/c++/13/vector").is_file(),

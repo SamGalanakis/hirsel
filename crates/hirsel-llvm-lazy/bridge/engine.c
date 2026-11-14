@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include "aggregate_phi.h"
 
 typedef struct { uint8_t *data; size_t len; uint8_t failed; } HirselLlvmOutput;
 typedef struct { const uint8_t *data; size_t len; uint8_t imported; } HirselLlvmUnit;
@@ -293,9 +294,13 @@ void hirsel_llvm_program_v1(const HirselLlvmUnit *units, size_t count,
         // Scalar cleanup also exposes checked end offsets to constraints again.
         // A typed empty-drop guard can disappear in that round. DSE then
         // removes carrier clears/restores that its cleanup used to observe.
-        LLVMErrorRef e = LLVMRunPasses(module,
-            "default<O3>,cgscc(argpromotion),function(sroa,early-cse,correlated-propagation,instcombine<no-verify-fixpoint>,constraint-elimination,simplifycfg,dse)",
-            machine, options);
+        LLVMErrorRef e = LLVMRunPasses(module, "default<O3>", machine, options);
+        if (!e) {
+            hirsel_scalarize_aggregate_phis(module, context);
+            e = LLVMRunPasses(module,
+                "cgscc(argpromotion),function(sroa,early-cse,correlated-propagation,instcombine<no-verify-fixpoint>,jump-threading,constraint-elimination,simplifycfg,dse)",
+                machine, options);
+        }
         LLVMDisposePassBuilderOptions(options);
         if (e) {
             char *text = LLVMGetErrorMessage(e); error(out, text);

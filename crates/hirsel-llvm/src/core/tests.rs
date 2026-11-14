@@ -834,6 +834,68 @@ fn float_intrinsics_preserve_nan_and_signed_zero() {
 }
 
 #[test]
+fn numerical_returns_keep_failure_status_and_canonical_bits() {
+    let module = text::parse(include_str!("../../tests/core_runtime/numeric-status.core")).unwrap();
+    wf::module(&module).unwrap();
+    let mut cases = Vec::new();
+    for function in [FuncId(0), FuncId(1)] {
+        for index in [0, 7, u64::MAX - 1, u64::MAX] {
+            for bits in [
+                0,
+                (-0.0f64).to_bits(),
+                1.0f64.to_bits(),
+                f64::INFINITY.to_bits(),
+                0x7ff0_0000_0000_0001,
+                0xfff8_0000_0000_0042,
+            ] {
+                cases.push(Case {
+                    function,
+                    args: vec![index, bits],
+                    limit: u64::MAX,
+                    injection: None,
+                });
+            }
+        }
+    }
+    for facts in [false, true] {
+        let ir = emit_ir_with_facts(&module, false, facts).unwrap();
+        for speed in [false, true] {
+            let object = hirsel_llvm_lazy::compile_ir(&ir, speed).unwrap();
+            let context = crate::context::Context::new();
+            let direct = crate::context::Module::parse(&context, "hirsel-core", &ir).unwrap();
+            let machine = crate::context::TargetMachine::new(
+                &hirsel_lir::layout_types::TargetSpec::x86_64_unknown_linux_gnu(),
+                speed,
+            )
+            .unwrap();
+            direct.set_target(&machine);
+            if speed {
+                direct.run_core_passes(&machine).unwrap();
+            }
+            assert_eq!(object, direct.emit_object(&machine).unwrap());
+            let results = execute_object(
+                &module,
+                &cases,
+                "",
+                "",
+                if speed {
+                    Optimization::Speed
+                } else {
+                    Optimization::None
+                },
+                Some(object),
+            );
+            assert_eq!(results.len(), cases.len());
+            for (case, actual) in cases.iter().zip(results) {
+                let expected = eval::run(&module, case.function, &case.args, case.limit);
+                assert_eq!(actual.outcome, expected.outcome, "{:?}", case.args);
+                assert_eq!(actual.used, expected.used);
+            }
+        }
+    }
+}
+
+#[test]
 fn numerical_chains_canonicalize_at_memory_bits_calls_and_returns() {
     let mut source = String::from("core v1\n");
     let mut cases = Vec::new();

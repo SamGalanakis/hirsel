@@ -1730,10 +1730,29 @@ pub(crate) struct TargetMachine {
 
 impl TargetMachine {
     pub(crate) fn new(target: &TargetSpec, optimize: bool) -> Result<Self, String> {
+        Self::with_settings(
+            &target.triple,
+            &target.cpu,
+            &target.features.join(","),
+            optimize,
+        )
+    }
+
+    pub(crate) fn core(target: hirsel_core_layout::Target, optimize: bool) -> Result<Self, String> {
+        Self::with_settings(target.triple(), target.cpu(), "", optimize)
+    }
+
+    fn with_settings(
+        triple: &str,
+        cpu: &str,
+        features: &str,
+        optimize: bool,
+    ) -> Result<Self, String> {
         initialize_targets();
-        let triple = c_string(&target.triple);
-        let cpu = c_string(&target.cpu);
-        let features = c_string(&target.features.join(","));
+        let triple_text = triple;
+        let triple = c_string(triple);
+        let cpu = c_string(cpu);
+        let features = c_string(features);
         let mut llvm_target: LLVMTargetRef = ptr::null_mut();
         let mut message = ptr::null_mut();
         // SAFETY: the triple is NUL-terminated; LLVM writes a target or a message.
@@ -1764,12 +1783,12 @@ impl TargetMachine {
         if raw.is_null() {
             return Err(format!(
                 "LLVM could not create a target machine for {}",
-                target.triple
+                triple_text
             ));
         }
         Ok(Self {
             raw,
-            triple: target.triple.clone(),
+            triple: triple_text.into(),
         })
     }
 

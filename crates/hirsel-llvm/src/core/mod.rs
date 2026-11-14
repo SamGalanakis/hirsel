@@ -354,9 +354,11 @@ fn compile_observation<R>(
     observer(CompilationStage::TextConstruction);
     let ir = emit_ir_with_charge_observation(module, observe_charge)?;
     observer(CompilationStage::TargetSetup);
-    let target = hirsel_lir::layout_types::TargetSpec::x86_64_unknown_linux_gnu();
-    let machine =
-        TargetMachine::new(&target, matches!(opt, Optimization::Speed)).map_err(Error::Llvm)?;
+    let machine = TargetMachine::core(
+        hirsel_core_layout::Target::X86_64Linux,
+        matches!(opt, Optimization::Speed),
+    )
+    .map_err(Error::Llvm)?;
     observer(CompilationStage::IrParse);
     let context = Context::new();
     let module = LlvmModule::parse(&context, "hirsel-core", &ir).map_err(Error::Llvm)?;

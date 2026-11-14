@@ -18,6 +18,9 @@ hirsel_guard::install!();
 pub mod charge;
 mod recipe;
 mod shape;
+mod target;
+
+pub use target::Target;
 
 pub use recipe::{
     CField, CLOSURE_CARRIER, CaseOps, Compact, CompactSet, DropRecipe, Encoding, FieldDrop, Fixed,

@@ -668,6 +668,38 @@ b0(v0: u64, v1: u64, v2: u64):
 }
 
 #[test]
+fn scalar_values_keep_inactive_cross_block_paths_in_storage() {
+    let module = text::parse(
+        r#"
+core v1
+sig g0 = (bool, u64) -> (u64)
+inst n0 = tests@0/local_values [] []
+fn f0 = n0 g0 {
+b0(v0: bool, v1: u64):
+ branch v0, b1(), b2()
+b1():
+ v2: u64 = const 1
+ v3: u64 = add v1, v2
+ jump b2()
+b2():
+ branch v0, b3(), b4()
+b3():
+ return v3
+b4():
+ v4: u64 = const 0
+ return v4
+}
+"#,
+    )
+    .unwrap();
+    wf::module(&module).unwrap();
+    agree(
+        &module,
+        &[(FuncId(0), vec![0, 41]), (FuncId(0), vec![1, 41])],
+    );
+}
+
+#[test]
 fn loop_edges_transfer_parameters_in_parallel() {
     let module = text::parse(
         r#"core v0

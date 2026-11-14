@@ -22,6 +22,7 @@ mod task_entry;
 mod tasks;
 #[cfg(all(test, not(hirsel_lazy_core)))]
 mod tests;
+mod values;
 
 use std::collections::BTreeSet;
 use std::fmt::{self, Write};
@@ -138,6 +139,7 @@ fn emit_ir_with_facts(module: &Module, observe_charge: bool, facts: bool) -> Res
             .flatten();
         let mut e = FunctionEmitter {
             private_float: private_float::addresses(body),
+            value_slots: values::slots(body),
             aliases,
             module,
             body,
@@ -159,7 +161,9 @@ fn emit_ir_with_facts(module: &Module, observe_charge: bool, facts: bool) -> Res
             intrinsics: &mut intrinsics,
         };
         for (i, t) in body.values.iter().enumerate() {
-            writeln!(e.allocations, "  %v{i} = alloca {}", ty(*t)).unwrap();
+            if e.value_slots[i] {
+                writeln!(e.allocations, "  %v{i} = alloca {}", ty(*t)).unwrap();
+            }
         }
         for (i, t) in body.slots.iter().enumerate() {
             let (bytes, align) = e.place_layout(*t);
@@ -171,6 +175,15 @@ fn emit_ir_with_facts(module: &Module, observe_charge: bool, facts: bool) -> Res
         }
         for i in 0..body.addresses.len() {
             writeln!(e.allocations, "  %a{i} = alloca ptr").unwrap();
+        }
+        // Cleanup continuations may mention a branch-local constant even when
+        // that branch is inactive. Constants have no effects or operands, so
+        // define them in the entry rather than imposing LLVM dominance on the
+        // producer's cleanup CFG.
+        for (index, inst) in body.insts.iter().enumerate() {
+            if matches!(inst, Inst::Const { .. }) {
+                e.inst(inst, index)?;
+            }
         }
         for (i, v) in body.blocks[0]
             .params
@@ -203,7 +216,9 @@ fn emit_ir_with_facts(module: &Module, observe_charge: bool, facts: bool) -> Res
                     returned = true;
                     break;
                 }
-                e.inst(inst, b.insts.start as usize + offset)?;
+                if !matches!(inst, Inst::Const { .. }) {
+                    e.inst(inst, b.insts.start as usize + offset)?;
+                }
             }
             if !returned {
                 e.term(&body.terminators[i])?;
@@ -388,6 +403,7 @@ struct FunctionEmitter<'a> {
     facts: bool,
     aliases: Option<alias::Scopes>,
     private_float: Vec<bool>,
+    value_slots: Vec<bool>,
     code: String,
     allocations: String,
     next: usize,
@@ -425,10 +441,22 @@ impl FunctionEmitter<'_> {
     // calls, returns and conversions (including reinterpret) still canonicalize.
     // No fast-math flags, reassociation or change to the operation's rounding.
     fn numeric(&mut self, v: ValueId) -> String {
-        self.calc(format!("load {}, ptr %v{}", ty(self.vty(v)), v.0))
+        if self.value_slots.get(v.index()).copied().unwrap_or(true) {
+            self.calc(format!("load {}, ptr %v{}", ty(self.vty(v)), v.0))
+        } else {
+            format!("%v{}", v.0)
+        }
     }
     fn put(&mut self, v: ValueId, x: &str) {
-        self.line(format!("store {} {x}, ptr %v{}", ty(self.vty(v)), v.0));
+        if self.value_slots.get(v.index()).copied().unwrap_or(true) {
+            self.line(format!("store {} {x}, ptr %v{}", ty(self.vty(v)), v.0));
+        } else {
+            // LLVM has no scalar copy instruction. This identity also permits
+            // forward references when CoreIR blocks are not in dominance order.
+            // It preserves poison; no freeze or representation promise is added.
+            let t = ty(self.vty(v));
+            self.line(format!("%v{} = select i1 true, {t} {x}, {t} poison", v.0));
+        }
     }
     fn access_facts(&self, addresses: &[AddressId]) -> String {
         self.aliases

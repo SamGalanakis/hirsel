@@ -690,6 +690,7 @@ fn link_program_checked(scratch: &Scratch, source: &str, memcheck: bool) -> Path
             "-o",
             "run",
         ])
+        .args(source.contains("HIRSEL_TEST_WRAP_SPAWN").then_some("-Wl,--wrap=hirsel_core_spawn"))
         .output()
         .unwrap();
     assert!(
@@ -794,16 +795,29 @@ fn check_sample_with_refusals(source: &str, optimize: bool) {
         .into_iter()
         .map(|run| (run, 1_000_000))
         .collect();
-    for line in source
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix("; run limit "))
-    {
-        let (limit, call) = line.split_once(": ").unwrap();
-        runs.extend(
-            sample_runs(&module, &format!("; run: {call}"))
+    let mut refusals = Vec::new();
+    for line in source.lines().filter_map(|line| {
+        line.trim().strip_prefix("; run limit ")
+    }) {
+        let (header, call) = line.split_once(": ").unwrap();
+        let mut words = header.split_whitespace();
+        let limit: u64 = words.next().unwrap().parse().unwrap();
+        if words.next() == Some("refuse") {
+            let n = words.next().unwrap();
+            let later = n.ends_with('+');
+            let n = n.trim_end_matches('+').parse().unwrap();
+            let run = sample_runs(&module, &format!("; run: {call}"))
                 .into_iter()
-                .map(|run| (run, limit.parse().unwrap())),
-        );
+                .next()
+                .unwrap();
+            refusals.push((run, limit, (n, later)));
+        } else {
+            runs.extend(
+                sample_runs(&module, &format!("; run: {call}"))
+                    .into_iter()
+                    .map(|run| (run, limit)),
+            );
+        }
     }
     let mut native = Vec::new();
     for (run, limit) in &runs {
@@ -826,6 +840,15 @@ fn check_sample_with_refusals(source: &str, optimize: bool) {
                 });
             }
         }
+    }
+    for (run, limit, injection) in &refusals {
+        native.push(NativeCase {
+            function: run.0,
+            args: &run.1,
+            limit: *limit,
+            injection: Some(*injection),
+            report: None,
+        });
     }
     execute_cases(&module, optimize, &native);
 }

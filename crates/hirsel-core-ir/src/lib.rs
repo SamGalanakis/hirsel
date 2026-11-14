@@ -106,6 +106,12 @@
 //!   stops the run on `unmark live` of a slot marked empty (a hole handed back as
 //!   a value) and `unmark empty` of one marked live (a value left behind); a slot
 //!   never marked passes. Engines emit nothing for it, as for `mark`.
+//! - **Writes behind a view.** A core@1 slot kernel may move elements in and out of
+//!   the storage behind a `View[List[T]]` of a list its function holds by a `mut`
+//!   loan (`sort_stable` holds `xs` so; its guard keeps the view). The view
+//!   freezes the header, not that storage, so no engine may emit a deep-storage
+//!   immutability fact for a `View` (readonly or invariant loads of the elements
+//!   behind it); a loan's own facts cover only the place passed.
 //! - **A finalizer on an own row** (`type tN = own "Deque[T]" drop fM { .. }`,
 //!   `DropRecipe::finalizer`) is called with the value's address, as `(ptr) ->
 //!   ()`, before its fields are cleaned (FAIL-8), under the current limit with no

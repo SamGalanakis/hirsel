@@ -1,7 +1,7 @@
 // M2b slice 4, the intended spool API for a handler of any type: `request` and
 // `register_as` take a `StaticFn[F]` for any F and take its identity themselves.
-// Expected red: `code.identity` of a generic StaticFn parameter is not built
-// (core/corpus/m2b/dispatch_generic/SPEC.md).
+// `code.identity` of a generic StaticFn parameter dispatches through the same
+// eight-byte FunctionRef word as a closed StaticFn.
 fn repeat(b: Bytes, k: u64) -> Result[Bytes, Capacity] {
     Ok(list.new())
 }

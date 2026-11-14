@@ -3,6 +3,10 @@ fn double(b: u64) -> u64 {
     b * 2
 }
 
+fn repeat(b: Bytes, k: u64) -> Result[Bytes, Capacity] {
+    Ok(list.new())
+}
+
 fn names[F](s: StaticFn[F], want: Bytes) -> u64 {
     if code.identity(s) == want {
         1
@@ -24,7 +28,7 @@ fn callable_only[F](s: StaticFn[F]) -> F {
 }
 
 pub fn generic_function_case() -> u64 {
-    let s = code.describe(double)
+    let s = code.describe(repeat)
     names(s, code.identity(s))
 }
 

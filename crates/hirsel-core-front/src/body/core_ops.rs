@@ -1783,7 +1783,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             .enumerate()
             .filter_map(|(i, fd)| {
                 let region_only = fd.generics.iter().all(|generic| generic.region);
-                (fd.body.is_some() && region_only && (open_static || fd.callable == callable))
+                (fd.body.is_some()
+                    && (!open_static
+                        || fd.path.0.package == self.p.fns[self.definition].path.0.package)
+                    && region_only
+                    && (open_static || fd.callable == callable))
                     .then_some(i)
             })
             .collect::<Vec<_>>();

@@ -20,7 +20,9 @@ fn program_facts_source_changes(backend: Backend) {
         let checked = driver.check(request.clone(), &mut Meter::new(false)).unwrap();
         assert!(checked.accepted(), "{:?} {:?}",checked.diagnostics,checked.incomplete);
         let key = checked.demand(&caller).unwrap().key.clone();
-        if let Some(previous) = &caller_key { assert_eq!(&key, previous); }
+        if let Some(previous) = &caller_key {
+            assert_ne!(&key, previous, "callee body facts must invalidate the caller key");
+        }
         caller_key = Some(key);
         let built = checked.build(&entry,&options).unwrap();
         run_clean(&built.executable,status);

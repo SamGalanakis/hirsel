@@ -1,0 +1,34 @@
+// Facts across a library boundary (crate docs, "Roles"; FORM #98). Each helper
+// lends its own `mut` String parameter whole to a core body. So whether that
+// parameter is place-blind and sealed is the core body's fact, which a release
+// reads from the facts recorded when core was published. The corpus derives
+// this module whole, split as core published apart, and split as two linked
+// modules, and the three must agree.
+// push_char and truncate are blind but not sealed (push_char reaches push_scalar,
+// which moves the buffer through local carriers), so append and trimmed are too:
+// a recording that drops the facts loses blind, and one that claims more gains
+// sealed. joined lends to string.push, which has no core body.
+// Hand-derived: "a", "ab", truncate to 1 gives "a", then "a" + "cd" gives "acd",
+// then "e": 4 bytes.
+// expect: run appended() = 4
+fn append(mut s: String, c: char) {
+    result.unwrap(string.push_char(mut s, c))
+}
+
+fn trimmed(mut s: String) {
+    string.truncate(mut s, 1)
+}
+
+fn joined(mut s: String, t: String) {
+    result.unwrap(string.push(mut s, t))
+}
+
+fn appended() -> u64 {
+    let mut s = string.new()
+    append(mut s, 'a')
+    append(mut s, 'b')
+    trimmed(mut s)
+    joined(mut s, "cd")
+    append(mut s, 'e')
+    string.byte_len(s)
+}

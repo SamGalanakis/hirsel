@@ -755,7 +755,7 @@
 //!   buffer never changes hands within the body. Every address that reaches the
 //!   carrier is a carrier-role word access, a `pointer` of one, or a `view` lend
 //!   to a call, or a `mut` or `take` lend of the whole carrier to a direct callee
-//!   with a body in the module whose parameter there is itself sealed (so a
+//!   with a known body (below) whose parameter there is itself sealed (so a
 //!   recursion that lends its carriers on to itself keeps them sealed): it is
 //!   never copied, lent otherwise, dropped or marked. A
 //!   store to its data word stores a block this body allocated, and that block
@@ -765,13 +765,22 @@
 //! - A **place-blind** `mut` or `take` carrier parameter ([`roles::Facts::place_blind`]):
 //!   its place's address is never a value. It is only an address base for reads,
 //!   stores, copies, drops and case tests of its bytes, or lent whole to a direct
-//!   callee with a body in the module that is blind at that position. It is never
+//!   callee with a known body that is blind at that position. It is never
 //!   stored, compared, converted, returned, passed on an edge, passed as a value
-//!   or to a runtime operation, extern or indirect call, or marked. A caller may
+//!   or to a runtime operation, an unknown or indirect callee, or marked. A caller may
 //!   then lend a stand-in copy of the 24 bytes and copy it back on every exit,
 //!   failure included, and nothing can tell (Loans: no other path reaches the
 //!   original meanwhile). Sealed and blind are different facts: a body that
 //!   moves its buffer through local carriers is blind but not sealed.
+//! - A callee's body is **known** when it is in the module, or, for a function
+//!   without a body, when another module linked into the same program holds the
+//!   body with its code identity, the link name the call binds to
+//!   ([`roles::Facts::program`], one greatest fixpoint over all their bodies).
+//!   Facts are a function of those bodies alone: an emitter uses program facts
+//!   only in an object whose key names every module it derived them from (the
+//!   release unit names all its modules). An object keyed by one module uses that
+//!   module's facts ([`roles::Facts::new`]). A declaration no module holds has
+//!   no facts.
 //!
 //! This is what the language already guarantees. Slots are distinct. A `mut` or
 //! `take` place overlaps no other argument (Loans) and lies outside the callee's

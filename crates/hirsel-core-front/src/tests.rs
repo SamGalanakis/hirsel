@@ -347,6 +347,8 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
     let mut expects = 0;
     if all_emitted && let Err(e) = wf::module(module) {
         failures.push(format!("emitted CoreIR is not well formed: {e:?}"));
+    } else if all_emitted {
+        failures.extend(split_facts(module));
     }
     for line in source.lines() {
         let Some(e) = line.trim().strip_prefix("// expect: ") else {
@@ -583,6 +585,58 @@ pub(crate) fn run_case(path: &Path) -> Vec<String> {
         failures.push(format!("gaps: want {want_gaps:?}, got {got_gaps:?}"));
     }
     failures
+}
+
+/// Facts across modules (crate docs, "Roles"). Split as a release links it, core's
+/// bodies published with their recorded facts and the case's bodies reading them,
+/// and also as two modules linked together, the module derives each fact it does
+/// whole. The evaluator's role check holds the whole module's facts on every run,
+/// so a recorded fact that is too strong fails here or there.
+fn split_facts(module: &Module) -> Option<String> {
+    use hirsel_core_ir::roles::Facts;
+    let core = |f: usize| {
+        module.instances[module.functions[f].instance.index()]
+            .definition
+            .to_string()
+            .starts_with("core@")
+    };
+    let part = |library: bool| {
+        let mut m = module.clone();
+        for (f, function) in m.functions.iter_mut().enumerate() {
+            if core(f) != library {
+                function.body = None;
+            }
+        }
+        m
+    };
+    let (library, application) = (part(true), part(false));
+    let whole = Facts::new(module);
+    let published = Facts::new(&library);
+    let reading = Facts::program(&[&application], &published.record(&library))
+        .pop()
+        .unwrap();
+    let linked = Facts::program(&[&library, &application], &[]);
+    for (f, function) in module.functions.iter().enumerate() {
+        let sig = &module.signatures[function.signature.index()];
+        let split = if core(f) { &published } else { &reading };
+        for p in 0..sig.params.len() as u32 {
+            let g = FuncId(f as u32);
+            let want = (whole.sealed(g, p), whole.place_blind(g, p));
+            for (how, facts) in [
+                ("recorded", split),
+                ("linked", &linked[usize::from(!core(f))]),
+            ] {
+                let got = (facts.sealed(g, p), facts.place_blind(g, p));
+                if got != want {
+                    let name = &module.instances[function.instance.index()].definition;
+                    return Some(format!(
+                        "{how} facts of {name} parameter {p}: (sealed, blind) {got:?}, whole module {want:?}"
+                    ));
+                }
+            }
+        }
+    }
+    None
 }
 
 /// `f(a,b)` run against `= r1,r2` or `= fail C1,C2` (the cause chain, primary first;

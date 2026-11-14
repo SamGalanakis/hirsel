@@ -136,10 +136,36 @@ fn shape<'a>(m: &Module, f: &'a Function) -> Option<Shape<'a>> {
     })
 }
 
+/// The version of what [`Facts`] derive (crate docs, "Roles"). A product that
+/// records [`BodyFacts`] includes it in its key, and a change to what a fact
+/// claims or how it is derived bumps it.
+pub const FACTS_SCHEMA: u32 = 1;
+
+/// One parameter's facts, as a published body records them.
+#[derive(
+    serde::Serialize, serde::Deserialize, Clone, Copy, Debug, Default, Eq, PartialEq, Hash,
+)]
+pub struct ParamFacts {
+    pub sealed: bool,
+    pub place_blind: bool,
+}
+
+/// A body's facts as a product records them (crate docs, "Roles"): `code` is
+/// the body's code identity, the link name calls bind to
+/// ([`Module::code_identity`]), and `params` is by signature parameter, the
+/// destination not counted. A parameter past the end has none.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct BodyFacts {
+    pub code: hirsel_core_ids::ContentHash,
+    pub params: Vec<ParamFacts>,
+}
+
 /// Per-parameter facts of every function of a module (crate docs, "Roles"), the
-/// greatest fixpoint over its direct calls. Derived, never stored. A parameter
-/// with a fact is a `mut` or `take` carrier parameter of a body in the module
-/// whose entry block no edge re-enters; every other parameter has none.
+/// greatest fixpoint over its direct calls. Derived; a product may record a
+/// body's facts as [`BodyFacts`]. A parameter with a fact is a `mut` or `take`
+/// carrier parameter of a body whose entry block no edge re-enters; every other
+/// parameter has none. A function without a body has the facts of its known
+/// body ([`Facts::program`]), and none if it has none.
 pub struct Facts {
     /// Its carrier's buffer never changes hands within an activation.
     sealed: Vec<Vec<bool>>,
@@ -149,44 +175,120 @@ pub struct Facts {
 }
 
 impl Facts {
+    /// One module's facts: a call to a function without a body here has none.
     pub fn new(m: &Module) -> Self {
-        let shapes: Vec<Option<Shape>> = m.functions.iter().map(|f| shape(m, f)).collect();
-        let top: Vec<Vec<bool>> = shapes
+        Self::program(&[m], &[]).pop().expect("one module")
+    }
+
+    /// The facts of each of the modules, by module, for modules linked into one
+    /// program: one greatest fixpoint over every body they hold. A function
+    /// without a body has the facts of the body with its code identity, held by
+    /// one of `ms` or recorded in `recorded`, and none if neither has it.
+    /// Recorded facts are taken as given; the derivation never raises them.
+    pub fn program(ms: &[&Module], recorded: &[BodyFacts]) -> Vec<Self> {
+        let shapes: Vec<Vec<Option<Shape>>> = ms
             .iter()
-            .zip(&m.functions)
-            .map(|(s, f)| {
-                let n = m.signatures[f.signature.index()].params.len();
-                (0..n)
-                    .map(|i| {
-                        s.as_ref().is_some_and(|s| {
-                            s.defs
-                                .iter()
-                                .any(|d| matches!(d, Def::Root(Root::Param(p)) if *p as usize == i))
-                        })
+            .map(|m| m.functions.iter().map(|f| shape(m, f)).collect())
+            .collect();
+        let mut facts: Vec<Facts> = ms
+            .iter()
+            .zip(&shapes)
+            .map(|(m, shapes)| {
+                let top: Vec<Vec<bool>> = shapes
+                    .iter()
+                    .zip(&m.functions)
+                    .map(|(s, f)| {
+                        let n = m.signatures[f.signature.index()].params.len();
+                        (0..n)
+                            .map(|i| {
+                                s.as_ref().is_some_and(|s| {
+                                    s.defs.iter().any(|d| {
+                                        matches!(d, Def::Root(Root::Param(p)) if *p as usize == i)
+                                    })
+                                })
+                            })
+                            .collect()
                     })
-                    .collect()
+                    .collect();
+                Facts {
+                    sealed: top.clone(),
+                    blind: top,
+                }
             })
             .collect();
-        let mut facts = Facts {
-            sealed: top.clone(),
-            blind: top,
-        };
+        // Each known body, by the link name its calls bind to: a held body first.
+        enum Known<'a> {
+            Held(usize, usize),
+            Recorded(&'a [ParamFacts]),
+        }
+        let mut known = std::collections::HashMap::new();
+        for (k, m) in ms.iter().enumerate() {
+            for (f, function) in m.functions.iter().enumerate() {
+                if function.body.is_some() {
+                    known
+                        .entry(m.code_identity(FuncId(f as u32)))
+                        .or_insert(Known::Held(k, f));
+                }
+            }
+        }
+        for r in recorded {
+            known.entry(r.code).or_insert(Known::Recorded(&r.params));
+        }
+        let links: Vec<(usize, usize, &Known)> = ms
+            .iter()
+            .enumerate()
+            .flat_map(|(k, m)| {
+                let known = &known;
+                m.functions
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, function)| function.body.is_none())
+                    .filter_map(move |(f, _)| {
+                        Some((k, f, known.get(&m.code_identity(FuncId(f as u32)))?))
+                    })
+            })
+            .collect();
         // Start from every candidate and drop what a body refutes, assuming its
-        // callees' current facts, until nothing changes: so a recursion holds.
+        // callees' current facts, until nothing changes: so a recursion holds,
+        // within a module and across them. A declaration follows its body.
         loop {
             let mut changed = false;
-            for (i, s) in shapes.iter().enumerate() {
-                let Some(s) = s else { continue };
-                let n = facts.sealed[i].len();
-                let (sealed, blind) = Seal::new(m, s.b, &s.defs, &s.locs, &facts).facts(n);
-                for p in 0..n {
+            for &(k, f, body) in &links {
+                for p in 0..facts[k].sealed[f].len() {
+                    let new = match *body {
+                        Known::Held(j, g) => ParamFacts {
+                            sealed: facts[j].sealed(FuncId(g as u32), p as u32),
+                            place_blind: facts[j].place_blind(FuncId(g as u32), p as u32),
+                        },
+                        Known::Recorded(r) => r.get(p).copied().unwrap_or_default(),
+                    };
+                    let now = &mut facts[k];
                     for (now, new) in [
-                        (&mut facts.sealed[i][p], sealed[p]),
-                        (&mut facts.blind[i][p], blind[p]),
+                        (&mut now.sealed[f][p], new.sealed),
+                        (&mut now.blind[f][p], new.place_blind),
                     ] {
-                        if *now && !new {
-                            *now = false;
+                        if *now != new {
+                            *now = new;
                             changed = true;
+                        }
+                    }
+                }
+            }
+            for (k, m) in ms.iter().enumerate() {
+                for (i, s) in shapes[k].iter().enumerate() {
+                    let Some(s) = s else { continue };
+                    let n = facts[k].sealed[i].len();
+                    let (sealed, blind) = Seal::new(m, s.b, &s.defs, &s.locs, &facts[k]).facts(n);
+                    let now = &mut facts[k];
+                    for p in 0..n {
+                        for (now, new) in [
+                            (&mut now.sealed[i][p], sealed[p]),
+                            (&mut now.blind[i][p], blind[p]),
+                        ] {
+                            if *now && !new {
+                                *now = false;
+                                changed = true;
+                            }
                         }
                     }
                 }
@@ -195,6 +297,38 @@ impl Facts {
                 return facts;
             }
         }
+    }
+
+    /// The facts of each body `m` holds, to record with a product (`self` is
+    /// `m`'s facts).
+    pub fn record(&self, m: &Module) -> Vec<BodyFacts> {
+        self.rows(m, false)
+    }
+
+    /// Every fact an emitter of `m` reads, its declarations' included: the input a
+    /// key names for an object emitted from `m` with these facts. Two emissions
+    /// with equal rows read the same facts, so a key naming them is never stale.
+    pub fn consumed(&self, m: &Module) -> Vec<BodyFacts> {
+        self.rows(m, true)
+    }
+
+    fn rows(&self, m: &Module, declarations: bool) -> Vec<BodyFacts> {
+        m.functions
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| declarations || f.body.is_some())
+            .map(|(f, _)| BodyFacts {
+                code: m.code_identity(FuncId(f as u32)),
+                params: self.sealed[f]
+                    .iter()
+                    .zip(&self.blind[f])
+                    .map(|(&sealed, &place_blind)| ParamFacts {
+                        sealed,
+                        place_blind,
+                    })
+                    .collect(),
+            })
+            .collect()
     }
 
     /// Whether parameter `i` of `f` is sealed.

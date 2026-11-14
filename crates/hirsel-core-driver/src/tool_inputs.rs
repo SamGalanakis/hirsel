@@ -17,6 +17,7 @@ pub(crate) struct Tool {
 
 pub(crate) const INPUT_MARKER: &str = "__HIRSEL_LINK_INPUTS__";
 const LINK_RECIPE_SCHEMA: u32 = 3;
+const TOOLCHAIN_SCHEMA: u32 = 1;
 #[derive(Clone, Debug, Serialize, serde::Deserialize, PartialEq, Eq)]
 pub(crate) struct RecipeFile {
     pub(crate) path: PathBuf,
@@ -33,6 +34,13 @@ pub(crate) struct RecipeStat {
     pub(crate) mtime_nsec: i64,
     pub(crate) ctime: i64,
     pub(crate) ctime_nsec: i64,
+}
+#[derive(Clone, Debug, Serialize, serde::Deserialize)]
+struct ToolchainManifest {
+    schema: u32,
+    target: String,
+    files: Vec<RecipeFile>,
+    identity: ContentHash,
 }
 #[derive(Clone, Debug, Serialize, serde::Deserialize)]
 pub(crate) struct LinkRecipe {
@@ -155,6 +163,76 @@ pub(crate) fn recapture_link_recipe(
     runtime: &Path,
 ) -> io::Result<LinkRecipe> {
     capture_link_recipe(cc, target, runtime, true)
+}
+
+/// One cached identity for every toolchain input. Stat signatures avoid
+/// re-reading unchanged runtime, linker and CRT bytes on every request.
+pub(crate) fn toolchain_identity(
+    cc: &Path,
+    target: &str,
+    runtime: &Path,
+) -> io::Result<ContentHash> {
+    let recipe = link_recipe(cc, target, runtime)?;
+    let root = cc
+        .parent()
+        .and_then(Path::parent)
+        .ok_or_else(|| io::Error::other("link driver has no toolchain root"))?
+        .join(".hirsel-link-recipes");
+    std::fs::create_dir_all(&root)?;
+    let key = driver_file_key(cc)?;
+    let path = root.join(format!("toolchain-{target}-{key}.json"));
+    let mut paths = vec![cc.canonicalize()?];
+    if let Some(lib) = find_llvm_library(cc) {
+        paths.push(lib);
+    }
+    paths.extend(recipe.files.iter().map(|file| file.path.clone()));
+    paths.sort();
+    paths.dedup();
+    let old = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<ToolchainManifest>(&bytes).ok())
+        .filter(|manifest| manifest.schema == TOOLCHAIN_SCHEMA && manifest.target == target);
+    let mut files = Vec::with_capacity(paths.len());
+    for file in paths {
+        if let Some(previous) = old
+            .as_ref()
+            .and_then(|manifest| manifest.files.iter().find(|entry| entry.path == file))
+        {
+            if recipe_stat(&file)? == previous.stat {
+                files.push(previous.clone());
+                continue;
+            }
+        }
+        files.push(recipe_file(&file)?);
+    }
+    let identity = ContentHash::of_parts(
+        "hirsel.toolchain-image.v1",
+        [crate::encode(&(TOOLCHAIN_SCHEMA, target, &files))?.as_slice()],
+    );
+    let manifest = ToolchainManifest {
+        schema: TOOLCHAIN_SCHEMA,
+        target: target.into(),
+        files,
+        identity,
+    };
+    let temporary = tempfile::NamedTempFile::new_in(&root)?;
+    serde_json::to_writer(&temporary, &manifest).map_err(io::Error::other)?;
+    let temporary = temporary.into_temp_path();
+    std::fs::rename(&temporary, path)?;
+    Ok(identity)
+}
+
+fn find_llvm_library(cc: &Path) -> Option<PathBuf> {
+    let lib = cc.parent()?.parent()?.join("lib");
+    std::fs::read_dir(lib)
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("libLLVM") && name.contains(".so"))
+        })
 }
 
 fn capture_link_recipe(

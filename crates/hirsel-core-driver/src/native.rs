@@ -197,10 +197,8 @@ impl CheckProduct {
         options: &NativeOptions,
     ) -> Result<Vec<ObjectProduct>, NativeStop> {
         let reached = self.reachable(entry, options.instance_limit)?;
-        let runtime = ContentHash::of_parts(
-            "hirsel.core-runtime.v1",
-            [&read_input(&options.runtime)?[..]],
-        );
+        let runtime =
+            crate::tool_inputs::toolchain_identity(&options.cc, &options.target, &options.runtime)?;
         self.emit_instances(
             entry,
             reached.require()?,
@@ -257,7 +255,7 @@ impl CheckProduct {
                 "hirsel.core-object.v2",
                 &(
                     crate::native_object::SCHEMA,
-                    compiler_identity()?,
+                    runtime,
                     &options.target,
                     options.backend,
                     options.optimize,
@@ -330,8 +328,8 @@ impl CheckProduct {
             .collect::<Vec<_>>();
         let sources = self.native_sources(&items)?;
         let entry_plan = self.process_entry(entry, options, &sources)?;
-        let runtime_bytes = read_input(&options.runtime)?;
-        let runtime = ContentHash::of_parts("hirsel.core-runtime.v1", [&runtime_bytes[..]]);
+        let runtime =
+            crate::tool_inputs::toolchain_identity(&options.cc, &options.target, &options.runtime)?;
         let mut objects =
             self.emit_instances(entry, instances, &reached.materialized, options, runtime)?;
         if let Some(module) = &self.entry_binding(entry)?.cleanup {
@@ -340,7 +338,7 @@ impl CheckProduct {
                 "hirsel.core-entry-cleanup.v2",
                 &(
                     crate::native_object::SCHEMA,
-                    compiler_identity()?,
+                    runtime,
                     &options.target,
                     options.backend,
                     options.optimize,
@@ -592,7 +590,7 @@ fn link(
     let link_key = key(
         "hirsel.core-executable.v2",
         &(
-            compiler_identity()?,
+            runtime_identity,
             recipe.identity,
             DIRECT_LINK_SUPPORT_LIBS,
             entry_plan,

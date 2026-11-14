@@ -37,6 +37,8 @@ impl CheckProduct {
         store: &Store,
         library_store: Option<&Store>,
     ) -> Result<Vec<ObjectProduct>, NativeStop> {
+        let toolchain =
+            crate::tool_inputs::toolchain_identity(&options.cc, &options.target, &options.runtime)?;
         let mut emitted = HashSet::new();
         let mut modules: Vec<_> = reached
             .iter()
@@ -59,8 +61,7 @@ impl CheckProduct {
         // All shape-owner modules used by generic materialization are in this
         // ordered closure. Entry and compiler identify the deterministic callable
         // preparation above, including appended private units.
-        let facts_key =
-            crate::native_facts::key(compiler_identity()?, entry, &body_identities, reached, &[])?;
+        let facts_key = crate::native_facts::key(toolchain, entry, &body_identities, reached, &[])?;
         let crate::native_facts::ProgramFacts { facts, consumed } =
             crate::native_facts::get(store, facts_key, &refs, &[])?;
         let mut objects = Vec::new();
@@ -75,7 +76,7 @@ impl CheckProduct {
             let object_key = crate::native_library::key(
                 "hirsel.core-object.v1",
                 &(
-                    compiler_identity()?,
+                    toolchain,
                     &options.target,
                     options.backend,
                     options.optimize,
@@ -154,7 +155,7 @@ impl CheckProduct {
         let object_key = crate::native_library::key(
             "hirsel.core-release-unit.v2",
             &(
-                compiler_identity()?,
+                toolchain,
                 &options.target,
                 options.debug_lines,
                 options.logical_charge_report.is_some(),

@@ -61,14 +61,35 @@ pub struct CheckRequest {
     pub entry: Option<DefPath>,
 }
 impl CheckRequest {
+    fn source_std(root: &Path) -> io::Result<PackageManifest> {
+        use std::io::BufRead;
+
+        let mut manifest = PackageManifest::directory(root, package("std"), true)?;
+        let mut sources = Vec::with_capacity(manifest.sources.len());
+        for source in manifest.sources {
+            // Private contract fixtures are spliced into their owning module by
+            // the law walker. They are not standalone source-std modules.
+            if source.modules.first().is_some_and(|name| name == "tests") {
+                let mut first = String::new();
+                io::BufReader::new(std::fs::File::open(&source.file)?).read_line(&mut first)?;
+                if first.starts_with("// test-of:") {
+                    continue;
+                }
+            }
+            sources.push(source);
+        }
+        manifest.sources = sources;
+        manifest.dependencies.push(package("core"));
+        Ok(manifest)
+    }
+
     pub fn libraries(libraries: &Path, store: &Path) -> io::Result<Self> {
         let core = if libraries == Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core") {
             PackageProduct::bundled_manifest(&libraries.join("core"))
         } else {
             PackageManifest::directory(&libraries.join("core"), package("core"), true)?
         };
-        let mut std = PackageManifest::directory(&libraries.join("std"), package("std"), true)?;
-        std.dependencies.push(package("core"));
+        let std = Self::source_std(&libraries.join("std"))?;
         Ok(Self {
             inputs: CorpusManifest {
                 core: package("core"),
@@ -129,8 +150,7 @@ impl CheckRequest {
         } else {
             PackageManifest::directory(&libraries.join("core"), package("core"), true)?
         };
-        let mut std = PackageManifest::directory(&libraries.join("std"), package("std"), true)?;
-        std.dependencies.push(package("core"));
+        let std = Self::source_std(&libraries.join("std"))?;
         let mut app = PackageManifest::directory(dir, package("app"), false)?;
         app.dependencies.extend([package("core"), package("std")]);
         Ok(Self {

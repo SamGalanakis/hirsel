@@ -1463,3 +1463,79 @@ fn store_paths_keep_two_lowercase_hex_digits_per_digest_byte() {
         dir.path().join("0001107f80feffaa".repeat(4))
     );
 }
+
+#[test]
+fn prog4_source_std_excludes_only_first_line_marked_contracts() {
+    let dir = tempfile::tempdir().unwrap();
+    let libraries = dir.path().join("libraries");
+    let core = libraries.join("core");
+    let std = libraries.join("std");
+    let app = dir.path().join("app");
+    std::fs::create_dir_all(&core).unwrap();
+    std::fs::create_dir_all(std.join("tests")).unwrap();
+    std::fs::create_dir(&app).unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    for source in PackageProduct::bundled_manifest(&root.join("core/core")).sources {
+        std::fs::copy(&source.file, core.join(source.file.file_name().unwrap())).unwrap();
+    }
+    let library = std.join("probe.hirsel");
+    std::fs::write(&library, "pub fn answer() -> u64 { 7 }\n").unwrap();
+    std::fs::write(
+        std.join("tests/private.hirsel"),
+        "// test-of: std.probe\nfn deliberately broken(\n",
+    )
+    .unwrap();
+    std::fs::write(
+        std.join("tests/public.hirsel"),
+        "fn ordinary() -> u64 { 9 }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        std.join("tests/later.hirsel"),
+        "// ordinary fixture\n// test-of: std.probe\nfn later() -> u64 { 11 }\n",
+    )
+    .unwrap();
+    std::fs::write(app.join("main.hirsel"), "@test\nfn law() -> Result[(), ()] { if std.probe.answer() == 7 { Ok(()) } else { Error(()) } }\n").unwrap();
+    let store = dir.path().join("store");
+    for (expected_tests, mut request) in [
+        CheckRequest::directory(&app, &libraries, &store).unwrap(),
+        CheckRequest::libraries(&libraries, &store).unwrap(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        request.entry = None;
+        let modules: Vec<_> = request.inputs.packages[1]
+            .sources
+            .iter()
+            .map(|s| s.modules.join("/"))
+            .collect();
+        assert_eq!(modules, ["probe", "tests/later", "tests/public"]);
+        let product = Driver::default()
+            .check(request, &mut Meter::new(false))
+            .unwrap();
+        assert!(
+            product.accepted(),
+            "{:?} {:?}",
+            product.diagnostics,
+            product.incomplete
+        );
+        assert_eq!(product.tests().count(), usize::from(expected_tests == 0));
+    }
+    // A marker on a library source must never hide a real source refusal.
+    std::fs::write(
+        &library,
+        "// test-of: std.probe\npub fn answer() -> u64 { true }\n",
+    )
+    .unwrap();
+    let mut request = CheckRequest::directory(&app, &libraries, &store).unwrap();
+    request.entry = None;
+    let product = Driver::default()
+        .check(request, &mut Meter::new(false))
+        .unwrap();
+    assert!(!product.accepted());
+    assert!(
+        product.diagnostics.iter().any(|r| r.rule == "LANG-11"
+            && product.index.module_path(r.primary.module).modules == ["probe"])
+    );
+}

@@ -59,6 +59,8 @@ enum Def {
     Read(AddressId),
     /// A block this body allocated.
     Fresh,
+    /// The block a `grow` of the carrier at this address installed.
+    Grown(AddressId),
 }
 
 #[derive(Clone, Copy)]
@@ -86,6 +88,9 @@ pub fn roles(m: &Module, f: &Function) -> Vec<Option<Role>> {
         match *inst {
             Inst::Const { result, bits } => defs[result.index()] = Def::Const(bits),
             Inst::Alloc { result, .. } => defs[result.index()] = Def::Fresh,
+            Inst::Grow {
+                result, carrier, ..
+            } => defs[result.index()] = Def::Grown(carrier),
             Inst::Pointer { result, address } => defs[result.index()] = Def::Pointer(address),
             Inst::Read {
                 result, address, ..
@@ -184,7 +189,7 @@ impl Derive<'_> {
             Def::Root(r) => Some(Loc::Carrier(r, 0)),
             Def::Pointer(x) => self.loc(x),
             // The data word of a carrier: its first.
-            Def::Read(x) => match self.loc(x)? {
+            Def::Read(x) | Def::Grown(x) => match self.loc(x)? {
                 Loc::Carrier(r, 0) => Some(Loc::Buffer(r)),
                 _ => None,
             },
@@ -265,6 +270,7 @@ impl<'a> Seal<'a> {
                 (Some((_, true)) | None, _) => None,
             },
             Def::Fresh => self.installed[v.index()].map(|r| (r, true)),
+            Def::Grown(x) => at(x).map(|(r, _)| (r, true)),
             Def::Other | Def::Const(_) => None,
         }
     }
@@ -383,6 +389,23 @@ impl<'a> Seal<'a> {
                 }
                 self.used(charge, Use::Other);
                 self.used(size, Use::Other);
+            }
+            // A grow installs its own block in its own carrier: the sealed rules hold.
+            Inst::Grow {
+                charge,
+                overflow,
+                size,
+                capacity,
+                moved,
+                refund,
+                ..
+            } => {
+                for v in [charge, size, capacity, moved, refund]
+                    .into_iter()
+                    .chain(overflow)
+                {
+                    self.used(v, Use::Other);
+                }
             }
             Inst::Copy { to, from, bytes } => {
                 self.whole(to);

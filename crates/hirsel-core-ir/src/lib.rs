@@ -86,6 +86,11 @@
 //! an own row, below ("Slot kernels"). Nothing else changes, and no v1a or v1b row
 //! changes meaning.
 //!
+//! **FORM v1d (growth, #93; header `core v1`):** `grow`, the one instruction that
+//! replaces a sequence carrier's owned storage, below ("Growth"). No earlier row
+//! changes meaning; `alloc .. like`, `copy` and `free` still express every other
+//! growth (a map's rehash, a deque's rotation).
+//!
 //! Brands, `SlotOwner` and `uses` lists are not in FORM v1 at all: a pool handle
 //! is plain data checked at run time.
 //!
@@ -488,6 +493,46 @@
 //! source operation is on, `rc.*` or `Rc[T]` gives `rc`, `arc.*` or `Arc[T]`
 //! gives `arc`, never from bounds of `T`; a row whose kind differs from its node's
 //! allocation is malformed (the evaluator stops on it).
+//!
+//! # Growth (FORM v1d, #93)
+//!
+//! `vR: ptr, vA: u64 = grow aC vS align A charge vK capacity vN moved vM refund vO
+//! [overflow vF] [fail bN]` replaces the storage of the sequence carrier at `aC`: a
+//! place whose type is a row with exactly one field, a `seq E` edge (`List` items,
+//! `String` bytes; [`sequence_edge`]), with the data, length and capacity words at
+//! +0, +8 and +16. The carrier is written, so it is never a `view` or `take`
+//! place.
+//! - **Precondition.** The carrier's capacity is not 0, so its data is an owned
+//!   block of that edge at offset 0. Capacity 0 owns nothing (an empty carrier, or
+//!   one over static bytes): its producer allocates against the current limit
+//!   (`alloc for seq E`), copies `length` elements and frees nothing, as before.
+//! - **Admission** is `alloc .. like` the old block's (MEM-26): the whole new
+//!   `charge` is admitted against the limit the old block was charged to, before
+//!   any refund, so a grow never needs room it frees. Inside a finalizer it admits
+//!   from the current limit (MEM-27). `overflow` refuses as on `alloc`.
+//! - **Refusal**: `vR` is null, `vA` the room the refusing limit had, and the
+//!   carrier, its old block and its elements are untouched. Under a finalizer's
+//!   grant a refusal is the failure `Capacity` (`fail bN`).
+//! - **Success**: a block of `size` bytes, of the class
+//!   `cleanup_class(seq E)` (Terminal or Dynamic; never Fixed, Resource or region
+//!   storage). The first `moved` bytes move into it with their liveness shadow
+//!   (slot marks); `moved` is the carrier's length times `E`'s stride, and the length
+//!   fits `capacity`. The carrier takes the new data word and `capacity` (its length
+//!   is unchanged); then the old block is freed and `refund`, its exact charge, goes
+//!   back to the limit its record leads to, which may be another limit than the
+//!   current one; the carrier is installed before that refund. The old block is
+//!   dead afterwards even if an engine reuses its address.
+//! - **Engines** may lower it as `alloc .. like`, a copy, two stores and a `free`,
+//!   or resize the old block in place (`realloc`); a run observes the same bytes,
+//!   charges and refunds either way, apart from the address.
+//!
+//! The evaluator stops on a capacity-0 carrier, a carrier whose data is not an
+//! owned block of its edge, a `moved` other than length × stride, a `refund` other
+//! than the old block's charge, or a block that cannot hold the elements.
+//!
+//! `grow` covers the "new block, move the run `0..len`, free the old" kernel of a
+//! `List` reserve. A map rehash moves entries to new slots, and a deque's grow
+//! rotates two runs, so they keep `alloc .. like` with `copy`/`slots_move`.
 //!
 //! # Cleanup classes (FORM #84, #89)
 //!

@@ -108,6 +108,22 @@ pub(super) fn slots(body: &Body) -> Vec<bool> {
                     read(block);
                     read(charge);
                 }
+                Inst::Grow {
+                    charge,
+                    overflow,
+                    size,
+                    capacity,
+                    moved,
+                    refund,
+                    ..
+                } => {
+                    for v in [charge, size, capacity, moved, refund]
+                        .into_iter()
+                        .chain(overflow)
+                    {
+                        read(v);
+                    }
+                }
                 Inst::Copy { bytes, .. } | Inst::LimitEnter { bytes, .. } => read(bytes),
                 Inst::Trim {
                     block,

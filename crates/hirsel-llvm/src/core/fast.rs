@@ -5,6 +5,7 @@
 // payer. Outstanding bytes pin the original slot across exit/re-entry. Native
 // tag bits may cause a safe slow-path false negative. No offset changes.
 use super::memory_layout::*;
+use super::storage::Payer;
 use super::*;
 
 impl FunctionEmitter<'_> {
@@ -122,7 +123,7 @@ impl FunctionEmitter<'_> {
         &mut self,
         resource: bool,
         native_kind: u8,
-        place: AllocPlace,
+        place: &Payer,
         charge: &str,
         bytes: &str,
         align: u64,
@@ -131,14 +132,13 @@ impl FunctionEmitter<'_> {
         if resource {
             return None;
         }
-        if let AllocPlace::Region(region) = place {
+        if let Payer::Region(region) = place {
             if overflow.is_some() {
                 return None;
             }
-            let region = self.get(region);
-            return Some(self.fast_region(&region, charge, bytes, align));
+            return Some(self.fast_region(region, charge, bytes, align));
         }
-        if !matches!(place, AllocPlace::Current | AllocPlace::Like(_)) || align > 512 {
+        if align > 512 {
             return None;
         }
         let prefix = own_prefix(native_kind) as u64;
@@ -149,7 +149,7 @@ impl FunctionEmitter<'_> {
         self.next += 1;
         let payer = self.current_payer();
         let like = match place {
-            AllocPlace::Like(v) => self.get(v),
+            Payer::Like(old) => old.clone(),
             _ => "null".into(),
         };
         let overflow = overflow.map_or_else(
@@ -168,7 +168,7 @@ impl FunctionEmitter<'_> {
             &format!("allocation_slow{n}"),
         );
         writeln!(self.code, "allocation_payer{n}:").unwrap();
-        if matches!(place, AllocPlace::Like(_)) {
+        if matches!(place, Payer::Like(_)) {
             let empty = self.calc(format!("icmp eq ptr {like}, null"));
             self.likely(
                 &empty,

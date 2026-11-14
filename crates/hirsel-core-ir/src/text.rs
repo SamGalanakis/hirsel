@@ -85,6 +85,7 @@ pub fn uses_v1(m: &Module) -> bool {
                         || matches!(
                             i,
                             Inst::Alloc { .. }
+                                | Inst::Grow { .. }
                                 | Inst::Free { .. }
                                 | Inst::Copy { .. }
                                 | Inst::RegionOpen { .. }
@@ -568,6 +569,31 @@ impl Printer {
                             fail(*f)
                         )
                     }
+                    Inst::Grow {
+                        result,
+                        available,
+                        carrier,
+                        charge,
+                        overflow,
+                        size,
+                        align,
+                        capacity,
+                        moved,
+                        refund,
+                        fail: f,
+                    } => format!(
+                        "{}, {} = grow a{} {} align {align} charge {} capacity {} moved {} refund {}{}{}",
+                        def(*result),
+                        def(*available),
+                        carrier.0,
+                        v(size),
+                        v(charge),
+                        v(capacity),
+                        v(moved),
+                        v(refund),
+                        overflow.map_or_else(String::new, |v| format!(" overflow v{}", v.0)),
+                        fail(*f)
+                    ),
                     Inst::Free { block, charge } => {
                         format!("free {} charge {}", v(block), v(charge))
                     }
@@ -1358,6 +1384,38 @@ impl BodyParser {
                 overflow,
                 size,
                 align,
+                fail: l.fail()?,
+            }
+        } else if op == "grow" {
+            let (result, available) = pair(&defs)?;
+            let carrier = AddressId(l.id('a')?);
+            let size = l.value()?;
+            l.expect("align")?;
+            let align = l.num()?;
+            l.expect("charge")?;
+            let charge = l.value()?;
+            l.expect("capacity")?;
+            let capacity = l.value()?;
+            l.expect("moved")?;
+            let moved = l.value()?;
+            l.expect("refund")?;
+            let refund = l.value()?;
+            let overflow = if l.eat("overflow") {
+                Some(l.value()?)
+            } else {
+                None
+            };
+            Inst::Grow {
+                result,
+                available,
+                carrier,
+                charge,
+                overflow,
+                size,
+                align,
+                capacity,
+                moved,
+                refund,
                 fail: l.fail()?,
             }
         } else if op == "limit_enter" {

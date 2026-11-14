@@ -125,6 +125,30 @@ pub(super) fn values(inst: &mut Inst, definitions: bool, f: &mut impl FnMut(&mut
             f(charge)
         }
         Inst::Copy { bytes, .. } => f(bytes),
+        Inst::Grow {
+            result,
+            available,
+            charge,
+            overflow,
+            size,
+            capacity,
+            moved,
+            refund,
+            ..
+        } => {
+            if definitions {
+                f(result);
+                f(available);
+            }
+            f(charge);
+            if let Some(v) = overflow {
+                f(v)
+            }
+            f(size);
+            f(capacity);
+            f(moved);
+            f(refund)
+        }
         Inst::RegionClose { region } => f(region),
         Inst::Trim {
             block,
@@ -182,7 +206,10 @@ pub(super) fn addresses(inst: &mut Inst, f: &mut impl FnMut(&mut AddressId)) {
         | Inst::SetCase { address, .. }
         | Inst::Mark { address, .. }
         | Inst::Unmark { address, .. }
-        | Inst::Drop { address, .. } => f(address),
+        | Inst::Drop { address, .. }
+        | Inst::Grow {
+            carrier: address, ..
+        } => f(address),
         Inst::Copy { to, from, .. } => {
             f(to);
             f(from)

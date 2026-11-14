@@ -2,6 +2,14 @@
 use super::*;
 use hirsel_core_layout::{FieldTy, Layout, Repr, TypeRef, field_size};
 
+/// Where an allocation is charged, resolved to operands.
+pub(super) enum Payer {
+    Current,
+    /// Like the block at this pointer (null charges the current limit).
+    Like(String),
+    Region(String),
+}
+
 #[derive(Clone)]
 pub(super) enum At {
     Declared(TypeId),
@@ -247,6 +255,122 @@ impl FunctionEmitter<'_> {
         let available = self.calc(format!("load i64, ptr {available}, align 8"));
         (pointer, available)
     }
+    /// Admit and allocate one block, branching to `fail` when a refusal is a failure
+    /// (a finalizer's grant, MEM-27): the block (null on refusal) and the room.
+    #[allow(clippy::too_many_arguments)]
+    fn allocate(
+        &mut self,
+        kind: &AllocKind,
+        place: &Payer,
+        charge: &str,
+        size: &str,
+        align: u64,
+        overflow: Option<ValueId>,
+        fail: Option<BlockId>,
+    ) -> (String, String) {
+        let ptr = |s: &str| ("ptr".into(), s.to_string());
+        let word = |s: String| ("i64".into(), s);
+        // The prefix follows the block's cleanup class (crate docs,
+        // "Cleanup classes"): terminal blocks carry only the payer word.
+        let native_kind = match kind.cleanup(&self.module.types, self.recipes) {
+            Some(hirsel_core_layout::Cleanup::Terminal) => memory_layout::NATIVE_PLAIN,
+            Some(hirsel_core_layout::Cleanup::Fixed) => memory_layout::NATIVE_STATIC,
+            _ => memory_layout::NATIVE_GRAPH,
+        };
+        let resource = match *kind {
+            AllocKind::Resource { grant } => Some(grant),
+            _ => None,
+        };
+        let fast = self.fast_allocate(
+            resource.is_some(),
+            native_kind,
+            place,
+            charge,
+            size,
+            align,
+            overflow,
+        );
+        let (block, room) = if let Some(fast) = fast {
+            fast
+        } else {
+            let (name, mut args) = match (resource, place) {
+                (Some(grant), _) => {
+                    let without_grant = self.calc(format!("sub i64 {charge}, {grant}"));
+                    let storage = self.calc(format!("sub i64 {without_grant}, 32"));
+                    (
+                        "hirsel_core_resource_alloc",
+                        vec![
+                            ptr("%context"),
+                            word(size.to_string()),
+                            word(align.to_string()),
+                            word(storage),
+                            word(grant.to_string()),
+                        ],
+                    )
+                }
+                (_, Payer::Region(r)) => (
+                    "hirsel_core_region_alloc",
+                    vec![
+                        ptr("%context"),
+                        ptr(r),
+                        word(size.to_string()),
+                        word(align.to_string()),
+                        word(charge.to_string()),
+                    ],
+                ),
+                (_, place) => {
+                    let like = match place {
+                        Payer::Like(old) => old.clone(),
+                        _ => "null".into(),
+                    };
+                    (
+                        "hirsel_core_alloc",
+                        vec![
+                            ptr("%context"),
+                            ptr(&like),
+                            word(size.to_string()),
+                            word(align.to_string()),
+                            word(charge.to_string()),
+                        ],
+                    )
+                }
+            };
+            if resource.is_none() {
+                let overflow = overflow.map_or_else(
+                    || "false".into(),
+                    |v| {
+                        let value = self.get(v);
+                        self.calc(format!("icmp ne i8 {value}, 0"))
+                    },
+                );
+                args.push(("i1 zeroext".into(), overflow));
+            }
+            if resource.is_none() && !matches!(place, Payer::Region(_)) {
+                args.push(("i8 zeroext".into(), native_kind.to_string()));
+            }
+            self.allocation(name, &args)
+        };
+        // Only refusal needs the runtime's active-finalizer decision.
+        let present = self.calc(format!("icmp ne ptr {block}, null"));
+        let n = self.next;
+        self.next += 1;
+        self.likely(
+            &present,
+            &format!("allocation_success{n}"),
+            &format!("allocation_status{n}"),
+        );
+        writeln!(self.code, "allocation_status{n}:").unwrap();
+        self.intrinsics
+            .insert("declare i8 @hirsel_core_allocation_status(ptr, ptr)".into());
+        let status = self.calc(format!(
+            "call i8 @hirsel_core_allocation_status(ptr %context, ptr {block}) cold"
+        ));
+        let failed = self.calc(format!("icmp ne i8 {status}, 0"));
+        self.branch_failure(&failed, fail, Some(6));
+        self.line(format!("br label %allocation_success{n}"));
+        writeln!(self.code, "allocation_success{n}:").unwrap();
+        (block, room)
+    }
     pub(super) fn storage(&mut self, inst: &Inst, index: usize) -> Result<()> {
         let ptr = |s: &str| ("ptr".into(), s.to_string());
         let word = |s: String| ("i64".into(), s);
@@ -263,97 +387,18 @@ impl FunctionEmitter<'_> {
                 align,
                 fail,
             } => {
-                // The prefix follows the block's cleanup class (crate docs,
-                // "Cleanup classes"): terminal blocks carry only the payer word.
-                let native_kind = match kind.cleanup(&self.module.types, self.recipes) {
-                    Some(hirsel_core_layout::Cleanup::Terminal) => memory_layout::NATIVE_PLAIN,
-                    Some(hirsel_core_layout::Cleanup::Fixed) => memory_layout::NATIVE_STATIC,
-                    _ => memory_layout::NATIVE_GRAPH,
+                let payer = match place {
+                    AllocPlace::Current => Payer::Current,
+                    AllocPlace::Like(v) => Payer::Like(self.get(v)),
+                    AllocPlace::Region(r) => Payer::Region(self.get(r)),
                 };
-                let resource = match *kind {
-                    AllocKind::Resource { grant } => Some(grant),
-                    _ => None,
-                };
-                let counted = kind.counted();
-                let charge = self.get(charge);
-                let size = self.get(size);
-                let fast = self.fast_allocate(
-                    resource.is_some(),
-                    native_kind,
-                    place,
-                    &charge,
-                    &size,
-                    align,
-                    overflow,
-                );
-                let (block, room) = if let Some(fast) = fast {
-                    fast
-                } else {
-                    let (name, mut args) = match (resource, place) {
-                        (Some(grant), _) => {
-                            let without_grant = self.calc(format!("sub i64 {charge}, {grant}"));
-                            let storage = self.calc(format!("sub i64 {without_grant}, 32"));
-                            (
-                                "hirsel_core_resource_alloc",
-                                vec![
-                                    ptr("%context"),
-                                    word(size.to_string()),
-                                    word(align.to_string()),
-                                    word(storage),
-                                    word(grant.to_string()),
-                                ],
-                            )
-                        }
-                        (_, AllocPlace::Region(r)) => {
-                            let r = self.get(r);
-                            (
-                                "hirsel_core_region_alloc",
-                                vec![
-                                    ptr("%context"),
-                                    ptr(&r),
-                                    word(size.to_string()),
-                                    word(align.to_string()),
-                                    word(charge),
-                                ],
-                            )
-                        }
-                        (_, place) => {
-                            let like = match place {
-                                AllocPlace::Like(v) => self.get(v),
-                                _ => "null".into(),
-                            };
-                            (
-                                "hirsel_core_alloc",
-                                vec![
-                                    ptr("%context"),
-                                    ptr(&like),
-                                    word(size.to_string()),
-                                    word(align.to_string()),
-                                    word(charge),
-                                ],
-                            )
-                        }
-                    };
-                    if resource.is_none() {
-                        let overflow = overflow.map_or_else(
-                            || "false".into(),
-                            |v| {
-                                let value = self.get(v);
-                                self.calc(format!("icmp ne i8 {value}, 0"))
-                            },
-                        );
-                        args.push(("i1 zeroext".into(), overflow));
-                    }
-                    if resource.is_none() && !matches!(place, AllocPlace::Region(_)) {
-                        args.push(("i8 zeroext".into(), native_kind.to_string()));
-                    }
-                    self.allocation(name, &args)
-                };
+                let (charge, size) = (self.get(charge), self.get(size));
+                let (block, room) =
+                    self.allocate(kind, &payer, &charge, &size, align, overflow, fail);
                 if let Some(token) = region_entry {
-                    let AllocPlace::Region(region) = place else {
+                    let Payer::Region(region) = &payer else {
                         unreachable!()
                     };
-                    let region = self.get(region);
                     let at = self.calc(format!(
                         "getelementptr i8, ptr {region}, i64 {}",
                         super::memory_layout::REGION_ENTRY
@@ -361,28 +406,9 @@ impl FunctionEmitter<'_> {
                     let value = self.calc(format!("load i64, ptr {at}, align 8"));
                     self.put(token, &value);
                 }
-                // Only refusal needs the runtime's active-finalizer decision.
-                let present = self.calc(format!("icmp ne ptr {block}, null"));
-                let n = self.next;
-                self.next += 1;
-                self.likely(
-                    &present,
-                    &format!("allocation_success{n}"),
-                    &format!("allocation_status{n}"),
-                );
-                writeln!(self.code, "allocation_status{n}:").unwrap();
-                self.intrinsics
-                    .insert("declare i8 @hirsel_core_allocation_status(ptr, ptr)".into());
-                let status = self.calc(format!(
-                    "call i8 @hirsel_core_allocation_status(ptr %context, ptr {block}) cold"
-                ));
-                let failed = self.calc(format!("icmp ne i8 {status}, 0"));
-                self.branch_failure(&failed, fail, Some(6));
-                self.line(format!("br label %allocation_success{n}"));
-                writeln!(self.code, "allocation_success{n}:").unwrap();
                 self.put(result, &block);
                 self.put(available, &room);
-                if let Some(counted) = counted {
+                if let Some(counted) = kind.counted() {
                     let missing = self.calc(format!("icmp eq ptr {block}, null"));
                     let n = self.next;
                     self.next += 1;
@@ -401,6 +427,67 @@ impl FunctionEmitter<'_> {
                     self.line(format!("br label %allocated{n}"));
                     writeln!(self.code, "allocated{n}:").unwrap();
                 }
+            }
+            // `grow` lowers as the allocate / copy / free it replaces (crate docs,
+            // "Growth"): admit like the old block, then on success move the
+            // elements, install the block and capacity, and free the old block.
+            Inst::Grow {
+                result,
+                available,
+                carrier,
+                charge,
+                overflow,
+                size,
+                align,
+                capacity,
+                moved,
+                refund,
+                fail,
+            } => {
+                let edge = hirsel_core_ir::sequence_edge(
+                    &self.module.types,
+                    self.body.addresses[carrier.index()].ty,
+                )
+                .expect("wf: grow of a sequence carrier")
+                .clone();
+                let at = self.address(carrier);
+                let old = self.calc(format!("load ptr, ptr {at}, align 8"));
+                let (charge, size) = (self.get(charge), self.get(size));
+                let (block, room) = self.allocate(
+                    &AllocKind::Own { edge },
+                    &Payer::Like(old.clone()),
+                    &charge,
+                    &size,
+                    align,
+                    overflow,
+                    fail,
+                );
+                self.put(result, &block);
+                self.put(available, &room);
+                let (moved, capacity, refund) =
+                    (self.get(moved), self.get(capacity), self.get(refund));
+                let present = self.calc(format!("icmp ne ptr {block}, null"));
+                let n = self.next;
+                self.next += 1;
+                self.line(format!(
+                    "br i1 {present}, label %grow_moved{n}, label %grown{n}"
+                ));
+                writeln!(self.code, "grow_moved{n}:").unwrap();
+                self.runtime_void(
+                    "llvm.memcpy.p0.p0.i64",
+                    &[
+                        ptr(&block),
+                        ptr(&old),
+                        word(moved),
+                        ("i1".into(), "false".into()),
+                    ],
+                );
+                self.line(format!("store ptr {block}, ptr {at}, align 8"));
+                let cap_at = self.calc(format!("getelementptr i8, ptr {at}, i64 16"));
+                self.line(format!("store i64 {capacity}, ptr {cap_at}, align 8"));
+                self.free_block(&old, &refund);
+                self.line(format!("br label %grown{n}"));
+                writeln!(self.code, "grown{n}:").unwrap();
             }
             Inst::Pointer { result, address } => {
                 let p = self.address(address);

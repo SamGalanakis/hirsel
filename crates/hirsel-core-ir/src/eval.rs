@@ -742,6 +742,24 @@ impl Machine<'_> {
             Err(room)
         }
     }
+    /// The limit growth of `old` admits from: the one its record leads to, or,
+    /// inside a finalizer (N03, MEM-27), the current limit, which is the grant or a
+    /// bound scope entered within it (MEM-25).
+    fn like(&self, t: &Task, old: u64) -> usize {
+        if t.limits.iter().any(|&l| self.limits[l].grant) {
+            return *t.limits.last().unwrap();
+        }
+        self.find(self.mem[split(old).0].limit.expect("a charged block"))
+    }
+    /// An `alloc` or `grow` admission of `n`, refused outright when its exact
+    /// charge overflowed: Err(the room left).
+    fn admit_charge(&mut self, l: usize, n: u64, overflowed: bool) -> Result<(), u64> {
+        if overflowed {
+            self.admissions += 1;
+            return Err(self.limits[l].cap - self.limits[l].used);
+        }
+        self.admit(l, n)
+    }
     fn refund(&mut self, l: usize, n: u64) {
         let l = self.find(l);
         self.limits[l].used -= n;
@@ -1888,28 +1906,15 @@ impl Machine<'_> {
                 size,
                 ..
             } => {
-                let top = *t.limits.last().unwrap();
                 let l = match place {
-                    // N03, MEM-27: inside a finalizer growth admits from the current
-                    // limit, the grant or a bound scope entered within it (MEM-25).
-                    AllocPlace::Like(_) if t.limits.iter().any(|&l| self.limits[l].grant) => top,
-                    AllocPlace::Like(v) => {
-                        let (blk, _) = split(vals[v.index()]);
-                        self.find(self.mem[blk].limit.expect("a charged block"))
-                    }
+                    AllocPlace::Like(v) => self.like(t, vals[v.index()]),
                     AllocPlace::Current | AllocPlace::Region(_) => *t.limits.last().unwrap(),
                 };
                 if let Some(token) = region_entry {
                     vals[token.index()] = 0;
                 }
                 let n = vals[charge.index()];
-                let admission = if overflow.is_some_and(|v| vals[v.index()] != 0) {
-                    self.admissions += 1;
-                    Err(self.limits[l].cap - self.limits[l].used)
-                } else {
-                    self.admit(l, n)
-                };
-                match admission {
+                match self.admit_charge(l, n, overflow.is_some_and(|v| vals[v.index()] != 0)) {
                     Err(_) if self.limits[l].grant => return Err(Stop::Cause("Capacity")),
                     Err(room) => (vals[result.index()], vals[available.index()]) = (0, room),
                     Ok(()) => {
@@ -2025,6 +2030,90 @@ impl Machine<'_> {
                 self.read_marked(f, n);
                 let src = self.get(f, n).to_vec();
                 self.put(places[to.index()].0, &src);
+            }
+            Inst::Grow {
+                result,
+                available,
+                carrier,
+                charge,
+                overflow,
+                size,
+                capacity,
+                moved,
+                refund,
+                ..
+            } => {
+                let at = places[carrier.index()].0;
+                let edge = sequence_edge(&self.m.types, b.addresses[carrier.index()].ty)
+                    .expect("wf: grow of a sequence carrier")
+                    .clone();
+                let FieldTy::Seq(elem) = &edge else {
+                    unreachable!("a sequence edge")
+                };
+                self.touch(carrier, at, hirsel_core_layout::SEQ_CARRIER as usize);
+                let (old, len, cap) = (
+                    self.load(at, 8),
+                    self.load(at + 8, 8),
+                    self.load(at + 16, 8),
+                );
+                // Capacity 0 owns nothing (empty, or static bytes): its producer
+                // allocates in the current limit and copies instead.
+                assert!(
+                    cap != 0,
+                    "grow of a carrier with capacity 0, which owns no storage"
+                );
+                let ob = split(old).0;
+                assert!(
+                    split(old).1 == 0 && self.mem[ob].live && !self.mem[ob].fixed,
+                    "grow of storage its carrier does not own"
+                );
+                self.edge(old, &edge, "grow's old storage");
+                let l = self.like(t, old);
+                let n = vals[charge.index()];
+                match self.admit_charge(l, n, overflow.is_some_and(|v| vals[v.index()] != 0)) {
+                    Err(_) if self.limits[l].grant => return Err(Stop::Cause("Capacity")),
+                    // Refused: the carrier, its block and the block's elements stay.
+                    Err(room) => (vals[result.index()], vals[available.index()]) = (0, room),
+                    Ok(()) => {
+                        let (bytes, new_cap) = (vals[moved.index()], vals[capacity.index()]);
+                        assert_eq!(
+                            bytes,
+                            len * self.stride(elem),
+                            "grow moves another byte count than its carrier's length times the stride"
+                        );
+                        assert_eq!(
+                            vals[refund.index()],
+                            self.mem[ob].charge,
+                            "grow refunds another charge than its old block's"
+                        );
+                        assert!(
+                            len <= new_cap && bytes <= vals[size.index()],
+                            "grow to a block that does not hold the carrier's elements"
+                        );
+                        let p = self.block(vals[size.index()], Some(l), n, None);
+                        let nb = split(p).0;
+                        self.mem[nb].class =
+                            Some(cleanup_class(&self.m.types, &self.recipes, &edge));
+                        // The elements move with their liveness shadow (crate docs, "Slot
+                        // kernels"); what the old block marks past them is still its own.
+                        let src = self.get(old, bytes as usize).to_vec();
+                        self.put(p, &src);
+                        let shadow: Vec<_> = self.mem[ob]
+                            .marks
+                            .range(..bytes as usize)
+                            .map(|(&o, &m)| (o, m))
+                            .collect();
+                        for (o, m) in shadow {
+                            self.mem[ob].marks.remove(&o);
+                            self.mem[nb].marks.insert(o, m);
+                        }
+                        // The carrier takes the new block before the old one's refund.
+                        self.store(at, 8, p);
+                        self.store(at + 16, 8, new_cap);
+                        self.free(old);
+                        (vals[result.index()], vals[available.index()]) = (p, 0);
+                    }
+                }
             }
             Inst::Share { node, kind } => {
                 let p = vals[node.index()];

@@ -832,6 +832,44 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
             })?;
             c.fail(fail, true)
         }
+        Inst::Grow {
+            result,
+            available,
+            carrier,
+            charge,
+            overflow,
+            size,
+            align,
+            capacity,
+            moved,
+            refund,
+            fail,
+        } => {
+            c.def(result)?;
+            c.def(available)?;
+            c.is(result, Ty::Ptr)?;
+            c.is(available, Ty::Scalar(Scalar::U64))?;
+            for v in [size, charge, capacity, moved, refund] {
+                c.is(v, Ty::Scalar(Scalar::U64))?;
+            }
+            if let Some(flag) = overflow {
+                c.is(flag, Ty::Scalar(Scalar::Bool))?;
+            }
+            // The carrier is written on success, so never a view or take place, and
+            // names the `seq` edge that owns both blocks (crate docs, "Growth").
+            c.writes(carrier)?;
+            let place = c.place(carrier)?;
+            need(sequence_edge(&c.m.types, place).is_some(), || {
+                format!(
+                    "a{}: grow of a place that is not a sequence carrier",
+                    carrier.0
+                )
+            })?;
+            need(align.is_power_of_two(), || {
+                "alignment is not a power of two".into()
+            })?;
+            c.fail(fail, true)
+        }
         Inst::Free { block, charge } => {
             c.is(block, Ty::Ptr)?;
             c.is(charge, Ty::Scalar(Scalar::U64))

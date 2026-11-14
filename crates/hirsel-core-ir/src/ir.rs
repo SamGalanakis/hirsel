@@ -434,6 +434,29 @@ pub enum Inst {
         from: AddressId,
         bytes: ValueId,
     },
+    /// `grow` (crate docs, "Growth"): replace the storage the sequence carrier at
+    /// `carrier` owns (its capacity is not 0) with a block of `size` bytes for
+    /// `capacity` elements, consuming the old one. It admits `charge` as `alloc ..
+    /// like` the old block does, the whole charge before any refund. On refusal
+    /// `result` is null, `available` the room left, and the carrier, its block and
+    /// its elements are unchanged; under a finalizer's grant a refusal is the failure
+    /// `Capacity` (MEM-27). On success the first `moved` bytes (the carrier's
+    /// length times its element's stride) are the new block's, the carrier holds the
+    /// new data and `capacity`, and then the old block is dead, even at an unchanged
+    /// address, and `refund` (its charge) goes back to the limit its record leads to.
+    Grow {
+        result: ValueId,
+        available: ValueId,
+        carrier: AddressId,
+        charge: ValueId,
+        overflow: Option<ValueId>,
+        size: ValueId,
+        align: u64,
+        capacity: ValueId,
+        moved: ValueId,
+        refund: ValueId,
+        fail: Option<BlockId>,
+    },
     // ---- FORM v1b (frozen) ----
     /// The case number (`u32`, declaration order from 0) of the variant value at
     /// `address`, a place of an own, resource, stable or scoped variant type. Its
@@ -585,6 +608,22 @@ impl AllocKind {
     /// to drop (crate docs, "Cleanup classes").
     pub fn terminal(&self, shapes: &[Shape], recipes: &[Recipe]) -> bool {
         self.cleanup(shapes, recipes) == Some(Cleanup::Terminal)
+    }
+}
+
+/// The owning `seq E` edge of a sequence carrier place, which `grow` replaces the
+/// storage of (crate docs, "Growth"): a row whose only field is that edge, as
+/// `List[T]` (`items`) and `String` (`bytes`) are. None for any other place.
+pub fn sequence_edge(shapes: &[Shape], place: PlaceTy) -> Option<&FieldTy> {
+    let PlaceTy::Declared(t) = place else {
+        return None;
+    };
+    match &shapes.get(t.index())?.body {
+        hirsel_core_layout::Body::Record(fields) => match fields.as_slice() {
+            [f] if matches!(f.ty, FieldTy::Seq(_)) => Some(&f.ty),
+            _ => None,
+        },
+        hirsel_core_layout::Body::Variant(_) => None,
     }
 }
 
@@ -883,7 +922,7 @@ impl Inst {
                 Callee::Runtime(op) => op.fails(),
                 Callee::Direct(_) | Callee::Indirect(_) => true,
             }),
-            Inst::Alloc { .. } | Inst::Drop { .. } => true,
+            Inst::Alloc { .. } | Inst::Grow { .. } | Inst::Drop { .. } => true,
             _ => false,
         }
     }
@@ -895,6 +934,7 @@ impl Inst {
             | Inst::Binary { fail, .. }
             | Inst::Address { fail, .. }
             | Inst::Alloc { fail, .. }
+            | Inst::Grow { fail, .. }
             | Inst::Drop { fail, .. } => fail,
             Inst::Call { call } => b.calls.get(call.index()).and_then(|c| c.fail),
             _ => None,

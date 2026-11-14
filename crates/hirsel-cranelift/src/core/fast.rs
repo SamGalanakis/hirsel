@@ -78,7 +78,7 @@ impl Function<'_, '_, '_> {
     pub fn own_alloc(
         &mut self,
         native_kind: u8,
-        place: AllocPlace,
+        like: Option<Value>,
         size: Value,
         align: u64,
         charge: Value,
@@ -90,11 +90,6 @@ impl Function<'_, '_, '_> {
         self.b.append_block_param(done, types::I64);
         self.b.append_block_param(done, types::I64);
         let payer = self.current_limit();
-        let like = match place {
-            AllocPlace::Like(v) => Some(self.get(v)),
-            _ => None,
-        };
-
         let alignment = align.max(8);
         let prefix = memory_layout::own_prefix(native_kind) as u64;
         let offset = prefix.next_multiple_of(alignment);
@@ -625,6 +620,7 @@ pub(super) fn empty_bound(body: &Body) -> bool {
             Inst::LimitEnter { .. } => enters += 1,
             Inst::LimitExit => exits += 1,
             Inst::Alloc { .. }
+            | Inst::Grow { .. }
             | Inst::Free { .. }
             | Inst::Drop { .. }
             | Inst::Call { .. }
@@ -661,14 +657,26 @@ pub(super) fn declare_allocators(
     let mut allocators: Vec<Allocator> = Vec::new();
     for body in input.functions.iter().filter_map(|f| f.body.as_ref()) {
         for inst in &body.insts {
-            if let Inst::Alloc {
-                kind: kind @ AllocKind::Own { .. },
-                align,
-                place: AllocPlace::Current | AllocPlace::Like(_),
-                ..
-            } = inst
+            let (kind, align) = match inst {
+                Inst::Alloc {
+                    kind: kind @ AllocKind::Own { .. },
+                    align,
+                    place: AllocPlace::Current | AllocPlace::Like(_),
+                    ..
+                } => (kind.clone(), *align),
+                Inst::Grow { carrier, align, .. } => {
+                    let Some(edge) =
+                        c::sequence_edge(&input.types, body.addresses[carrier.index()].ty)
+                    else {
+                        continue;
+                    };
+                    (AllocKind::Own { edge: edge.clone() }, *align)
+                }
+                _ => continue,
+            };
             {
-                let align = (*align).max(8);
+                let kind = &kind;
+                let align = align.max(8);
                 let native_kind = match kind.cleanup(&input.types, layouts) {
                     Some(hirsel_core_layout::Cleanup::Terminal) => memory_layout::NATIVE_PLAIN,
                     Some(hirsel_core_layout::Cleanup::Fixed) => memory_layout::NATIVE_STATIC,

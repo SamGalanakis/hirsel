@@ -72,6 +72,7 @@ fn fail_operand(inst: &mut Inst) -> Option<&mut Option<BlockId>> {
         | Inst::Binary { fail, .. }
         | Inst::Address { fail, .. }
         | Inst::Alloc { fail, .. }
+        | Inst::Grow { fail, .. }
         | Inst::Drop { fail, .. } => Some(fail),
         _ => None,
     }

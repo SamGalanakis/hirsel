@@ -100,8 +100,12 @@ impl Function<'_, '_, '_> {
                 // there is no guessed function status or call to the old runtime.
                 let values = if resource.is_none() && !matches!(place, AllocPlace::Region(_)) {
                     let overflow = overflow.map(|v| self.get(v));
+                    let like = match place {
+                        AllocPlace::Like(v) => Some(self.get(v)),
+                        _ => None,
+                    };
                     let values =
-                        self.own_alloc(native_kind, place, size, alignment, charge, overflow)?;
+                        self.own_alloc(native_kind, like, size, alignment, charge, overflow)?;
                     [values[0], self.b.ins().iconst(types::I64, 0), values[1]]
                 } else if let Some(overflow) = overflow {
                     let overflow = self.get(overflow);
@@ -144,7 +148,13 @@ impl Function<'_, '_, '_> {
                         AllocPlace::Region(_) => {
                             self.region_alloc(payer, size, alignment, charge)?
                         }
-                        _ => self.own_alloc(native_kind, place, size, alignment, charge, None)?,
+                        _ => {
+                            let like = match place {
+                                AllocPlace::Like(v) => Some(self.get(v)),
+                                _ => None,
+                            };
+                            self.own_alloc(native_kind, like, size, alignment, charge, None)?
+                        }
                     };
                     [values[0], self.b.ins().iconst(types::I64, 0), values[1]]
                 };
@@ -313,6 +323,74 @@ impl Function<'_, '_, '_> {
                 if !self.small_copy(to, from, bytes) {
                     self.c_call("memcpy", &[p, p, u], &[p], &[to, from, bytes])?;
                 }
+            }
+            // `grow` lowers as the allocate / copy / free it replaces (crate docs,
+            // "Growth"): admit like the old block, then on success move the
+            // elements, install the block and capacity, and free the old block.
+            Inst::Grow {
+                result,
+                available,
+                carrier,
+                charge,
+                overflow,
+                size,
+                align,
+                capacity,
+                moved,
+                refund,
+                fail,
+            } => {
+                let ctx = self.context;
+                let edge =
+                    c::sequence_edge(&self.input.types, self.body.addresses[carrier.index()].ty)
+                        .expect("wf: grow of a sequence carrier")
+                        .clone();
+                let native_kind =
+                    match hirsel_core_layout::cleanup_class(&self.input.types, self.layouts, &edge)
+                    {
+                        Some(hirsel_core_layout::Cleanup::Terminal) => memory_layout::NATIVE_PLAIN,
+                        Some(hirsel_core_layout::Cleanup::Fixed) => memory_layout::NATIVE_STATIC,
+                        _ => memory_layout::NATIVE_GRAPH,
+                    };
+                let trusted = cranelift_codegen::ir::MemFlagsData::trusted();
+                let at = self.addr(carrier);
+                let old = self.b.ins().load(types::I64, trusted, at, 0);
+                let (charge, size) = (self.get(charge), self.get(size));
+                let overflow = overflow.map(|v| self.get(v));
+                let values =
+                    self.own_alloc(native_kind, Some(old), size, align, charge, overflow)?;
+                self.set(result, values[0]);
+                self.set(available, values[1]);
+                let refused = self.b.ins().icmp_imm_s(IntCC::Equal, values[0], 0);
+                let check = self.b.create_block();
+                let moved_block = self.b.create_block();
+                let done = self.b.create_block();
+                self.b.ins().brif(refused, check, &[], moved_block, &[]);
+                self.b.switch_to_block(check);
+                let grant = self.c_call(
+                    "hirsel_core_allocation_status",
+                    &[p, p],
+                    &[boolean],
+                    &[ctx, values[0]],
+                )?[0];
+                self.guard(grant, 6, fail)?;
+                self.b.ins().jump(done, &[]);
+                self.b.switch_to_block(moved_block);
+                let (moved, capacity, refund) =
+                    (self.get(moved), self.get(capacity), self.get(refund));
+                self.c_call("memcpy", &[p, p, u], &[p], &[values[0], old, moved])?;
+                self.b.ins().store(trusted, values[0], at, 0);
+                self.b.ins().store(trusted, capacity, at, 16);
+                fast::free(
+                    &mut self.b,
+                    &mut self.calls,
+                    self.object,
+                    self.context,
+                    old,
+                    refund,
+                )?;
+                self.b.ins().jump(done, &[]);
+                self.b.switch_to_block(done);
             }
             Inst::LimitEnter {
                 admitted,

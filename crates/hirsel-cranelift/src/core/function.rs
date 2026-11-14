@@ -125,7 +125,10 @@ pub(super) fn emit(
                 | Inst::Pointer { address, .. }
                 | Inst::Case { address, .. }
                 | Inst::SetCase { address, .. }
-                | Inst::Drop { address, .. } => used(address),
+                | Inst::Drop { address, .. }
+                | Inst::Grow {
+                    carrier: address, ..
+                } => used(address),
                 Inst::Copy { to, from, .. } => {
                     used(to);
                     used(from);

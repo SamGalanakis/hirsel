@@ -472,6 +472,100 @@ fn slot_marks_stop_kernel_mistakes() {
     assert!(stop.contains("overlapping"), "{stop}");
 }
 
+/// `grow` replaces a carrier's owned block (crate docs, "Growth"). A list of
+/// u64 with length 1 and capacity 2 (16 bytes, element 42) grows to capacity 4
+/// (32 bytes); the hand-derived results are the element, then the room.
+#[test]
+fn a_grow_moves_its_carrier_or_stops() {
+    // v13 is the grow's `moved`, v14 its `refund`, v12 its capacity; `{pre}` runs
+    // before it and `{post}` after it succeeds.
+    let module = |pre: &str, grow: &str, post: &str| {
+        format!(
+            "core v1\ntype t0 = own \"List\" {{ items: seq u64 }}\nsig g0 = () -> (u64, u64)\ninst n0 = core@1/m/k [] []\nfn f0 = n0 g0 {{\n  slot s0 = t0\n  addr a0 = s0 field 0 byte v1 : ptr\n  addr a1 = s0 field 0 byte v2 : u64\n  addr a2 = s0 field 0 byte v3 : u64\n  addr a3 = s0 : t0\n  addr a4 = v4 : u64\n  addr a5 = v15 : u64\nb0:\n  live s0\n  v0: u64 = const 0\n  v1: u64 = const 0\n  v2: u64 = const 8\n  v3: u64 = const 16\n  address a0\n  address a1\n  address a2\n  v4: ptr, v5: u64 = alloc for seq u64 v3 align 8 charge v3\n  v6: u64 = const 1\n  v7: u64 = const 2\n  address a4\n  v8: u64 = const 42\n  store a4, v8\n  store a0, v4\n  store a1, v6\n  store a2, v7\n  v9: u64 = const 32\n  v10: u64 = const 0\n  v11: u64 = const 0\n  v12: u64 = const 4\n  v13: u64 = const 8\n  v14: u64 = const 16\n{pre}  address a3\n  {grow}\n  v17: ptr = const 0x0\n  v18: bool = ne v15, v17\n  branch v18, b1, b2\nb1:\n  address a5\n{post}  v19: u64 = read a5\n  drop a3 t0\n  dead s0\n  return v19, v16\nb2:\n  v20: u64 = read a4\n  drop a3 t0\n  dead s0\n  return v20, v16\n}}\n"
+        )
+    };
+    let grow =
+        "v15: ptr, v16: u64 = grow a3 v9 align 8 charge v9 capacity v12 moved v13 refund v14";
+    let run = |text: &str, limit: u64| {
+        let m = load("grow", text);
+        wf::module(&m).unwrap();
+        std::panic::catch_unwind(|| eval::run(&m, FuncId(0), &[], limit))
+            .map(|r| (r.outcome, r.used))
+            .map_err(|e| match e.downcast::<String>() {
+                Ok(s) => *s,
+                Err(e) => e
+                    .downcast::<&str>()
+                    .map_or_else(|_| String::new(), |s| s.to_string()),
+            })
+    };
+    // Bug: the element stays behind, or the new block is charged other than its
+    // size, so dropping the grown list (capacity 4: 32 bytes) leaves `used` off 0.
+    assert_eq!(
+        run(&module("", grow, ""), u64::MAX),
+        Ok((eval::Outcome::Returned(vec![42, 0]), 0))
+    );
+    // Bug: a refused grow frees or rewires the old block. Under a limit of 40 the
+    // 32 new bytes do not fit beside the old 16: null, room 24, the list unchanged.
+    assert_eq!(
+        run(&module("", grow, ""), 40),
+        Ok((eval::Outcome::Returned(vec![42, 24]), 0))
+    );
+    for (pre, grow, post, stop) in [
+        // Bug: the old block outlives the grow, so a pointer read before it still
+        // reaches the elements in one engine and garbage in another.
+        ("", grow, "  v21: u64 = read a4\n", "use of a freed block"),
+        // Bug: a producer passes the capacity's bytes, or zero, as `moved`.
+        (
+            "",
+            &grow.replace("moved v13", "moved v3"),
+            "",
+            "another byte count",
+        ),
+        // Bug: a refund computed from the new capacity, so the old limit is
+        // credited with what the new block charged.
+        (
+            "",
+            &grow.replace("refund v14", "refund v9"),
+            "",
+            "another charge",
+        ),
+        // Bug: a grow below the length drops elements.
+        (
+            "",
+            &grow.replace("capacity v12", "capacity v1"),
+            "",
+            "does not hold",
+        ),
+        // Bug: capacity 0 (empty, or static bytes) owns no storage to replace.
+        ("  store a2, v1\n", grow, "", "capacity 0"),
+        // Bug: the liveness shadow stays with the old block, so the moved live
+        // slot reads as empty in the new one and the old one frees a live slot.
+        (
+            "  mark a4, v6, live : u64\n",
+            grow,
+            "  mark a5, v6, empty : u64\n  unmark a5, v6, empty : u64\n  store a5, v8\n",
+            "",
+        ),
+    ] {
+        let got = run(&module(pre, grow, post), u64::MAX);
+        if stop.is_empty() {
+            assert_eq!(
+                got,
+                Ok((eval::Outcome::Returned(vec![42, 0]), 0)),
+                "{pre}{post}"
+            );
+        } else {
+            let err = got.expect_err(stop);
+            assert!(err.contains(stop), "expected `{stop}`, got `{err}`");
+        }
+    }
+    // Bug: a grow of a place that is not a sequence carrier (an element) would
+    // read its words as a carrier's.
+    let m = parse(&module("", &grow.replace("grow a3", "grow a4"), "")).unwrap();
+    let err = wf::module(&m).expect_err("a grow of an element");
+    assert!(err.contains("not a sequence carrier"), "{err}");
+}
+
 /// Bug: a producer other than core's kernels emits `mark` or gives an own row a
 /// finalizer, so a user type gets cleanup that bypasses its recipe.
 #[test]

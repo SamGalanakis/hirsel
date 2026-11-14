@@ -568,30 +568,114 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let new_cap = self.list_max(needed, four, n);
         let new_cap = self.list_max(new_cap, double, n);
         let plan = self.list_plan(item, new_cap, Some(count_over), n)?;
-        let old_data = self.read_sequence_word(header, 0, Ty::Ptr, n);
         let owned = self.list_compare(CompareOp::Ne, old_cap, zero, n);
         let current = self.new_block(&[]);
         let like = self.new_block(&[]);
-        let admitted = self.new_block(&[Ty::Ptr, Ty::Scalar(Scalar::U64)]);
+        let error = self.new_block(&[Ty::Scalar(Scalar::U64)]);
+        let null = self.konst(Ty::Ptr, 0, n)?;
+        let (moved, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, len, plan.stride, n);
         self.list_branch(owned, like, current, n);
+        // Capacity 0 owns no storage (empty, or static bytes): allocate in the
+        // current limit and copy the elements over.
         self.start(current);
         let (block, available) = self.list_allocate(&plan, AllocPlace::Current, n);
-        self.jump(admitted, &[block, available], n);
-        self.start(like);
-        let (block, available) = self.list_allocate(&plan, AllocPlace::Like(old_data), n);
-        self.jump(admitted, &[block, available], n);
-        self.start(admitted);
-        let parameters = self.b.blocks[admitted.index()]
-            .params
-            .get(&self.b.pools.values)
-            .unwrap();
-        let (block, available) = (parameters[0], parameters[1]);
-        let null = self.konst(Ty::Ptr, 0, n)?;
         let ok = self.list_compare(CompareOp::Ne, block, null, n);
         let copy = self.new_block(&[]);
-        let error = self.new_block(&[]);
-        self.list_branch(ok, copy, error, n);
+        let refused = self.new_block(&[]);
+        self.list_branch(ok, copy, refused, n);
+        self.start(refused);
+        self.jump(error, &[available], n);
+        self.start(copy);
+        let nonempty = self.list_compare(CompareOp::Ne, len, zero, n);
+        let copy_data = self.new_block(&[]);
+        let commit = self.new_block(&[]);
+        self.list_branch(nonempty, copy_data, commit, n);
+        self.start(copy_data);
+        let old_data = self.read_sequence_word(header, 0, Ty::Ptr, n);
+        let from = self.address(
+            AddressBase::Value(old_data),
+            &[],
+            PlaceTy::Value(Ty::Scalar(Scalar::U8)),
+            n,
+        );
+        let to_data = self.address(
+            AddressBase::Value(block),
+            &[],
+            PlaceTy::Value(Ty::Scalar(Scalar::U8)),
+            n,
+        );
+        self.inst(
+            Inst::Copy {
+                to: to_data,
+                from,
+                bytes: moved,
+            },
+            n,
+        );
+        self.jump(commit, &[], n);
+        self.start(commit);
+        self.sequence_word(header, 0, Ty::Ptr, block, n);
+        self.sequence_word(header, 16, Ty::Scalar(Scalar::U64), new_cap, n);
+        self.jump(success, &[], n);
+        // Owned storage is replaced by one `grow` (crate docs, "Growth"), which
+        // admits like the old block and refunds its charge after the install.
+        self.start(like);
+        let list = self.p.core_decl("List")?;
+        let list = self.t.mk(TyKind::Adt(list, vec![item]));
+        let Ok(Rep::Place(list_id)) = self.rep(list) else {
+            return None;
+        };
+        let carrier = self.address(
+            AddressBase::Value(header),
+            &[],
+            PlaceTy::Declared(list_id),
+            n,
+        );
+        let (charge, _) =
+            self.list_arith(ArithOp::Mul, ArithMode::Wrapping, old_cap, plan.logical, n);
+        let seven = self.konst(Ty::Scalar(Scalar::U64), 7, n)?;
+        let (rounded, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, charge, seven, n);
+        let mask = self.konst(Ty::Scalar(Scalar::U64), !7, n)?;
+        let refund = self.value(Ty::Scalar(Scalar::U64));
+        self.inst(
+            Inst::Binary {
+                result: refund,
+                op: BinaryOp::BitAnd,
+                left: rounded,
+                right: mask,
+                fail: None,
+            },
+            n,
+        );
+        let block = self.value(Ty::Ptr);
+        let available = self.value(Ty::Scalar(Scalar::U64));
+        let fail = self.fail_to(n);
+        self.inst(
+            Inst::Grow {
+                result: block,
+                available,
+                carrier,
+                charge: plan.charge,
+                overflow: Some(plan.overflow),
+                size: plan.size,
+                align: 8,
+                capacity: new_cap,
+                moved,
+                refund,
+                fail,
+            },
+            n,
+        );
+        let grown = self.list_compare(CompareOp::Ne, block, null, n);
+        let refused = self.new_block(&[]);
+        self.list_branch(grown, success, refused, n);
+        self.start(refused);
+        self.jump(error, &[available], n);
         self.start(error);
+        let available = self.b.blocks[error.index()]
+            .params
+            .get(&self.b.pools.values)
+            .unwrap()[0];
         self.inst(
             Inst::SetCase {
                 address: to,
@@ -615,64 +699,6 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             self.inst(Inst::Store { address: at, value }, n);
         }
         self.jump(done, &[], n);
-        self.start(copy);
-        let nonempty = self.list_compare(CompareOp::Ne, len, zero, n);
-        let copy_data = self.new_block(&[]);
-        let commit = self.new_block(&[]);
-        self.list_branch(nonempty, copy_data, commit, n);
-        self.start(copy_data);
-        let (bytes, _) = self.list_arith(ArithOp::Mul, ArithMode::Wrapping, len, plan.stride, n);
-        let from = self.address(
-            AddressBase::Value(old_data),
-            &[],
-            PlaceTy::Value(Ty::Scalar(Scalar::U8)),
-            n,
-        );
-        let to_data = self.address(
-            AddressBase::Value(block),
-            &[],
-            PlaceTy::Value(Ty::Scalar(Scalar::U8)),
-            n,
-        );
-        self.inst(
-            Inst::Copy {
-                to: to_data,
-                from,
-                bytes,
-            },
-            n,
-        );
-        self.jump(commit, &[], n);
-        self.start(commit);
-        self.sequence_word(header, 0, Ty::Ptr, block, n);
-        self.sequence_word(header, 16, Ty::Scalar(Scalar::U64), new_cap, n);
-        let free = self.new_block(&[]);
-        self.list_branch(owned, free, success, n);
-        self.start(free);
-        let (charge, _) =
-            self.list_arith(ArithOp::Mul, ArithMode::Wrapping, old_cap, plan.logical, n);
-        let seven = self.konst(Ty::Scalar(Scalar::U64), 7, n)?;
-        let (rounded, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, charge, seven, n);
-        let mask = self.konst(Ty::Scalar(Scalar::U64), !7, n)?;
-        let charge = self.value(Ty::Scalar(Scalar::U64));
-        self.inst(
-            Inst::Binary {
-                result: charge,
-                op: BinaryOp::BitAnd,
-                left: rounded,
-                right: mask,
-                fail: None,
-            },
-            n,
-        );
-        self.inst(
-            Inst::Free {
-                block: old_data,
-                charge,
-            },
-            n,
-        );
-        self.jump(success, &[], n);
         self.start(success);
         self.inst(
             Inst::SetCase {

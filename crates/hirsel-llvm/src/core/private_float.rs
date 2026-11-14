@@ -45,7 +45,10 @@ pub(super) fn addresses(body: &Body) -> Vec<bool> {
             | Inst::SetCase { address, .. }
             | Inst::Drop { address, .. }
             | Inst::Mark { address, .. }
-            | Inst::Unmark { address, .. } => {
+            | Inst::Unmark { address, .. }
+            | Inst::Grow {
+                carrier: address, ..
+            } => {
                 reject(&mut private, &roots, address);
             }
             Inst::Copy { to, from, .. } => {

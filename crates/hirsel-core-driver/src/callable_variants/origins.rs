@@ -102,6 +102,13 @@ impl<'a> Origins<'a> {
                         s.escaped.insert(loc.root);
                     }
                 }
+                // A grow rewrites a sequence carrier's data word, never a callable's;
+                // any root it names is no longer followed.
+                Inst::Grow { carrier, .. } => {
+                    if let Some(loc) = s.addresses[carrier.index()] {
+                        s.escaped.insert(loc.root);
+                    }
+                }
                 Inst::Copy { to, from, bytes } => {
                     if let Some(loc) = s.addresses[to.index()] {
                         match (loc.offset, s.constant(bytes)) {

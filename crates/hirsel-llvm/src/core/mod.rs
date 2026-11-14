@@ -270,9 +270,10 @@ fn emit_ir_target_with_facts(
             .unwrap_or_default();
         writeln!(
             text,
-            "define {linkage}{} @{body_name}({}){destination} {{\nentry:\n{}{} }}",
+            "define {linkage}{} @{body_name}({}){destination}{} {{\nentry:\n{}{} }}",
             e.abi.return_type(),
             params.join(", "),
+            abi::view_input_marker(sig),
             e.allocations,
             e.code
         )

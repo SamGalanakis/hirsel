@@ -2043,6 +2043,84 @@ fn release_imports_keep_transitive_bodies_in_either_unit_order() {
 }
 
 #[test]
+fn private_view_inputs_preserve_public_addresses_and_failure_destinations() {
+    let imported = r#"
+define zeroext i8 @view(ptr %ctx, ptr %out, ptr readonly %pair, i8 zeroext %fail) noinline "hirsel-view-input" {
+entry:
+  %bad = icmp ne i8 %fail, 0
+  br i1 %bad, label %failure, label %success
+success:
+  %a = load i64, ptr %pair, align 1
+  %p = getelementptr i8, ptr %pair, i64 8
+  %b = load i64, ptr %p, align 1
+  %sum = add i64 %a, %b
+  store i64 %sum, ptr %out, align 1
+  ret i8 0
+failure:
+  ret i8 %fail
+}
+"#;
+    let owned = r#"
+declare zeroext i8 @view(ptr, ptr, ptr, i8 zeroext)
+@addresses = private constant [1 x ptr] [ptr @view]
+define ptr @address() {
+  %p = load ptr, ptr @addresses
+  ret ptr %p
+}
+define zeroext i8 @direct(ptr %out, ptr %pair, i8 zeroext %fail) {
+  %status = call zeroext i8 @view(ptr null, ptr %out, ptr %pair, i8 zeroext %fail)
+  ret i8 %status
+}
+"#;
+    let dir = std::env::temp_dir().join(format!("hirsel-core-view-inputs-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let prefix = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
+    std::fs::write(
+        dir.join("probe.c"),
+        r#"#include <stdint.h>
+typedef uint8_t (*View)(void *, uint64_t *, const uint64_t *, uint8_t);
+uint8_t view(void *ctx, uint64_t *out, const uint64_t *p, uint8_t fail) {
+    if (fail) return fail;
+    *out = p[0] + p[1]; return 0;
+}
+extern View address(void);
+extern uint8_t direct(uint64_t *, const uint64_t *, uint8_t);
+int main(void) {
+    if (address() != view) return 1;
+    uint64_t pair[] = {UINT64_MAX, 3};
+    for (unsigned fail = 0; fail < 256; ++fail) {
+        uint64_t a = 123, b = 123;
+        if (direct(&a, pair, fail) != fail) return 2;
+        if (address()(0, &b, pair, fail) != fail) return 3;
+        if (a != b || a != (fail ? 123 : 2)) return 4;
+    }
+    return 0;
+}
+"#,
+    )
+    .unwrap();
+    for order in [
+        [(imported, true), (owned, false)],
+        [(owned, false), (imported, true)],
+    ] {
+        let units = order.map(|(ir, imported)| hirsel_llvm_lazy::Unit { ir, imported });
+        let object =
+            hirsel_llvm_lazy::emit_program(&units, &["address".into(), "direct".into()]).unwrap();
+        std::fs::write(dir.join("unit.o"), object).unwrap();
+        output(
+            Command::new(prefix.join("bin/clang"))
+                .arg(format!("--ld-path={}", prefix.join("bin/ld.lld").display()))
+                .arg(dir.join("probe.c"))
+                .arg(dir.join("unit.o"))
+                .arg("-o")
+                .arg(dir.join("probe")),
+        );
+        output(&mut Command::new(dir.join("probe")));
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn lazy_component_preserves_exact_core_objects() {
     for source in [
         include_str!("../../../hirsel-core-ir/samples/arith.core"),

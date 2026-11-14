@@ -135,6 +135,68 @@ static void register_results(LLVMModuleRef module, LLVMContextRef context) {
     LLVMDisposeBuilder(builder);
 }
 
+// Imported view carriers can be promoted only while their bodies are local:
+// O3 discards available_externally bodies before our late argument promotion.
+// Keep one private implementation for direct calls. Address uses still name
+// the cached public entry, whose FORM convention and identity do not change.
+static void local_inputs(LLVMModuleRef module) {
+    unsigned always = LLVMGetEnumAttributeKindForName("alwaysinline", 12);
+    LLVMValueRef last = LLVMGetLastFunction(module);
+    for (LLVMValueRef f = LLVMGetFirstFunction(module); f;) {
+        LLVMValueRef next = f == last ? NULL : LLVMGetNextFunction(f);
+        if (!LLVMCountBasicBlocks(f) || LLVMGetLinkage(f) != LLVMAvailableExternallyLinkage ||
+            !LLVMGetStringAttributeAtIndex(f, LLVMAttributeFunctionIndex, "hirsel-view-input", 17)) {
+            f = next; continue;
+        }
+        unsigned calls = 0, ordinary = 0;
+        for (LLVMUseRef use = LLVMGetFirstUse(f); use; use = LLVMGetNextUse(use)) {
+            LLVMValueRef call = LLVMGetUser(use);
+            if (LLVMIsACallInst(call) && LLVMGetCalledValue(call) == f &&
+                LLVMGetOperandUse(call, LLVMGetNumOperands(call)-1) == use) {
+                ++calls;
+                if (!LLVMGetCallSiteEnumAttribute(call, LLVMAttributeFunctionIndex, always)) ++ordinary;
+            }
+        }
+        // A register-result adapter already forces its call to inline. Leave
+        // imports used only there to that existing path.
+        if (!ordinary) { f = next; continue; }
+        LLVMValueRef *sites = malloc(calls * sizeof(*sites));
+        unsigned at = 0;
+        for (LLVMUseRef use = LLVMGetFirstUse(f); use; use = LLVMGetNextUse(use)) {
+            LLVMValueRef call = LLVMGetUser(use);
+            if (LLVMIsACallInst(call) && LLVMGetCalledValue(call) == f &&
+                LLVMGetOperandUse(call, LLVMGetNumOperands(call)-1) == use) sites[at++] = call;
+        }
+        size_t len;
+        const char *name = LLVMGetValueName2(f, &len);
+        char *label = malloc(len + 7);
+        memcpy(label, name, len); strcpy(label + len, ".local");
+        LLVMSetValueName2(f, label, len + 6);
+        label[len] = 0;
+        LLVMValueRef external = LLVMAddFunction(module, label, LLVMGlobalGetValueType(f));
+        free(label);
+        LLVMSetFunctionCallConv(external, LLVMGetFunctionCallConv(f));
+        // Preserve ABI and semantic attributes, including sret and narrow
+        // extensions. The marker selects candidates even with facts disabled;
+        // it does not assert readonly, nonnull or any additional memory fact.
+        for (unsigned i = 0, count = LLVMCountParams(f); i <= count + 1; ++i) {
+            unsigned index = i == count + 1 ? LLVMAttributeFunctionIndex : i;
+            unsigned n = LLVMGetAttributeCountAtIndex(f, index);
+            LLVMAttributeRef *attrs = malloc(n * sizeof(*attrs));
+            LLVMGetAttributesAtIndex(f, index, attrs);
+            for (unsigned j = 0; j < n; ++j) LLVMAddAttributeAtIndex(external, index, attrs[j]);
+            free(attrs);
+        }
+        // RAUW also handles function addresses nested in constant aggregates.
+        LLVMReplaceAllUsesWith(f, external);
+        for (unsigned i = 0; i < calls; ++i)
+            LLVMSetOperand(sites[i], LLVMGetNumOperands(sites[i])-1, f);
+        free(sites);
+        LLVMSetLinkage(f, LLVMInternalLinkage);
+        f = next;
+    }
+}
+
 __attribute__((visibility("default")))
 void hirsel_llvm_program_v1(const HirselLlvmUnit *units, size_t count,
                           const char *const *exports, size_t export_count,
@@ -206,7 +268,10 @@ void hirsel_llvm_program_v1(const HirselLlvmUnit *units, size_t count,
             if (!exported) LLVMSetLinkage(f, LLVMInternalLinkage);
         }
     }
-    if (speed && export_count) register_results(module, context);
+    if (speed && export_count) {
+        register_results(module, context);
+        local_inputs(module);
+    }
     LLVMSetTarget(module, triple);
     LLVMTargetDataRef layout = LLVMCreateTargetDataLayout(machine);
     LLVMSetModuleDataLayout(module, layout); LLVMDisposeTargetData(layout);

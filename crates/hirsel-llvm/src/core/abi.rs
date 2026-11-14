@@ -4,6 +4,22 @@
 //! Only FORM's naturally aligned scalar fields occur.
 use super::*;
 
+pub(super) fn view_input_marker(sig: &Signature) -> &'static str {
+    if sig.params.iter().any(|p| {
+        matches!(
+            p,
+            Param::Address {
+                loan: Loan::View,
+                ..
+            }
+        )
+    }) {
+        " \"hirsel-view-input\""
+    } else {
+        ""
+    }
+}
+
 pub(super) struct Return {
     pub target: hirsel_core_layout::Target,
     pub ty: String,
@@ -422,9 +438,10 @@ impl FunctionEmitter<'_> {
         self.return_values(&values);
         writeln!(
             text,
-            "define {} @{name}({}) {{\nentry:\n{}{} }}",
+            "define {} @{name}({}){} {{\nentry:\n{}{} }}",
             self.abi.return_type(),
             self.abi.parameters(sig, facts).join(", "),
+            view_input_marker(sig),
             self.allocations,
             self.code
         )

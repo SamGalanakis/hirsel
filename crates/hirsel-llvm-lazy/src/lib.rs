@@ -26,8 +26,9 @@ pub fn compile_ir_for_target(
 /// An already-published body, emitted with its unit-local type/static tables.
 pub struct Unit<'a> {
     pub ir: &'a str,
-    /// Imported bodies are available for inlining; surviving calls link their
-    /// separately cached library object instead of emitting a second copy.
+    /// Imported bodies are available for inlining. Direct view-input calls may
+    /// retain a private implementation for argument promotion; other surviving
+    /// calls and all address uses link the separately cached public entry.
     pub imported: bool,
 }
 

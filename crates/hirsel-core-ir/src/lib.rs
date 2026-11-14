@@ -467,6 +467,14 @@
 //! limit it tried (MEM-22 `available`). [`failure::Failures`] says which functions
 //! of a module may fail; wf and the LLVM emitter share it.
 //!
+//! A cause's `Site` is its failure point's anchor (a `raise` takes its block's).
+//! When that anchor is core's or none, the site is the anchor of the nearest
+//! enclosing activation that has a non-core one, but the walk passes only through
+//! functions that inherit their caller's site ([`source::inherits_site`]: core@1,
+//! or a generated name with `$`). Every other body anchors each failure point in a
+//! non-core item: wf refuses one anchored in core, and the evaluator stops when an
+//! unanchored one would take its caller's site (SITES 6(b)).
+//!
 //! # Storage and admission (FORM v1a)
 //!
 //! Every charge is a `charge-v1` logical size computed by the producer and passed

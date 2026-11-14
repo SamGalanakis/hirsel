@@ -175,8 +175,9 @@ struct Task {
     chain: Vec<Cause>,
     /// Used cause cells beyond the primary, with the limit each is charged to.
     cells: Vec<(usize, u64)>,
-    /// The anchor each running activation of the task is at, innermost last.
-    at: Vec<Option<Anchor>>,
+    /// The anchor each running activation of the task is at, innermost last, and
+    /// whether its function inherits its caller's site (SITES.md 6(b)).
+    at: Vec<(Option<Anchor>, bool)>,
 }
 struct Child {
     status: u8,
@@ -240,6 +241,8 @@ struct Machine<'m> {
     /// touched (`lo -> (hi, role)`, disjoint, a role's adjacent spans merged).
     footprints: Vec<Footprint>,
     role_checks: u64,
+    /// Whether each function inherits its caller's site (`source::inherits_site`).
+    inherits: Vec<bool>,
 }
 
 struct Footprint {
@@ -312,6 +315,11 @@ fn run_world(
         roles: vec![None; m.functions.len()],
         footprints: Vec::new(),
         role_checks: 0,
+        inherits: m
+            .functions
+            .iter()
+            .map(|f| crate::source::inherits_site(&m.instances[f.instance.index()]))
+            .collect(),
     };
     for s in &m.statics {
         let p = mach.block(s.bytes.len() as u64, None, 0, None);
@@ -1433,7 +1441,7 @@ impl Machine<'_> {
             .iter()
             .map(|s| self.block(self.place_size(*s), None, 0, None))
             .collect();
-        let r = self.frame(t, b, args, &slots);
+        let r = self.frame(t, b, args, &slots, self.inherits[f.index()]);
         for p in slots {
             let blk = &mut self.mem[split(p).0];
             blk.live = false;
@@ -1441,8 +1449,15 @@ impl Machine<'_> {
         }
         r
     }
-    fn frame(&mut self, t: &mut Task, b: &Body, args: &[u64], slots: &[u64]) -> X<Vec<u64>> {
-        t.at.push(None);
+    fn frame(
+        &mut self,
+        t: &mut Task,
+        b: &Body,
+        args: &[u64],
+        slots: &[u64],
+        inherits: bool,
+    ) -> X<Vec<u64>> {
+        t.at.push((None, inherits));
         let r = self.blocks(t, b, args, slots);
         t.at.pop();
         r
@@ -1450,12 +1465,30 @@ impl Machine<'_> {
     /// SITES.md: the innermost anchor of the task's activations that is not in a
     /// core@1 item. A core operation's cause, or an unanchored one's, takes the
     /// site of the call that reached it.
+    ///
+    /// Only a function that inherits (`source::inherits_site`) reads its caller's
+    /// site; engines pass a body that does not inherit none. So a cause whose walk
+    /// would leave such a body and still find an anchor stops the run: no producer
+    /// may emit one (SITES.md 6(b)).
     fn site(&self, t: &Task) -> Option<Anchor> {
-        t.at.iter()
-            .rev()
-            .flatten()
-            .find(|a| !self.m.items[a.item.index()].package_is("core", "1"))
-            .copied()
+        let real = |a: &Option<Anchor>| {
+            a.filter(|a| !self.m.items[a.item.index()].package_is("core", "1"))
+        };
+        let mut frames = t.at.iter().rev();
+        while let Some((at, inherits)) = frames.next() {
+            if let Some(a) = real(at) {
+                return Some(a);
+            }
+            if !inherits {
+                let beyond = frames.find_map(|(at, _)| real(at));
+                assert!(
+                    beyond.is_none(),
+                    "a site falls back through a body that does not inherit its caller's site"
+                );
+                return None;
+            }
+        }
+        None
     }
     fn blocks(&mut self, t: &mut Task, b: &Body, args: &[u64], slots: &[u64]) -> X<Vec<u64>> {
         let depth = t.limits.len();
@@ -1471,7 +1504,7 @@ impl Machine<'_> {
             }
             let first = blk.insts.start as usize;
             for (k, inst) in blk.insts.get(&b.insts).unwrap().iter().enumerate() {
-                *t.at.last_mut().unwrap() = b.inst_anchors[first + k];
+                t.at.last_mut().unwrap().0 = b.inst_anchors[first + k];
                 let r = self.inst(t, b, slots, &mut vals, &mut places, inst);
                 if let Err(stop) = r {
                     if let Stop::Cause(c) = stop {
@@ -1532,7 +1565,7 @@ impl Machine<'_> {
                         let (p, _) = self.address(b, slots, &vals, &places, *a)?;
                         message = [0, 8, 16].map(|o| self.load(p + o, 8));
                     }
-                    *t.at.last_mut().unwrap() = blk.anchor;
+                    t.at.last_mut().unwrap().0 = blk.anchor;
                     let site = self.site(t);
                     t.chain.push(Cause {
                         kind: cause(*c),

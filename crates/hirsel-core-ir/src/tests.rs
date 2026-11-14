@@ -343,11 +343,15 @@ fn coreir_data_crates_depend_only_on_neutral_crates() {
 /// operation's anchor, unless that is core's or missing, then the anchor of the
 /// nearest enclosing non-core activation; a raise uses its block's anchor; with no
 /// such activation the site is none. Expected anchors are read off the text below.
+/// SITES.md 6(b): the walk passes only through bodies that inherit their caller's
+/// site (core@1, or a generated name with `$`). A user body that leaves a failure
+/// unanchored is a producer mistake the evaluator stops on, since engines pass it
+/// no site; a user body that anchors a failure in core is refused statically.
 #[test]
 fn failure_sites_follow_the_contract() {
     let m = load(
         "sites",
-        "core v1\nitem i0 = p@0/m/user\nitem i1 = core@1/m/k\nsig g0 = (u64) -> (u64)\ninst n0 = core@1/m/k [] []\ninst n1 = p@0/m/user [] []\ninst n2 = p@0/m/check [] []\nfn f0 = n0 g0 {\nb0(v0: u64):\n  v1: u64 = const 1\n  v2: u64 = add v0, v1 at i1 5..10\n  return v2\n}\nfn f1 = n1 g0 {\nb0(v0: u64):\n  v1: u64 = call f0 g0 (v0) at i0 20..30\n  return v1\n}\nfn f2 = n2 g0 {\nb0(v0: u64):\n  v1: u64 = const 0 at i0 50..55\n  v2: bool = eq v0, v1 at i0 60..65\n  branch v2, b1, b2\nb1:\n  v3: u64 = const 1 at i0 70..75\n  raise unwrap at i0 40..45\nb2:\n  return v0\n}\n",
+        "core v1\nitem i0 = p@0/m/user\nitem i1 = core@1/m/k\nsig g0 = (u64) -> (u64)\ninst n0 = core@1/m/k [] []\ninst n1 = p@0/m/user [] []\ninst n2 = p@0/m/check [] []\nfn f0 = n0 g0 {\nb0(v0: u64):\n  v1: u64 = const 1\n  v2: u64 = add v0, v1 at i1 5..10\n  return v2\n}\nfn f1 = n1 g0 {\nb0(v0: u64):\n  v1: u64 = call f0 g0 (v0) at i0 20..30\n  return v1\n}\nfn f2 = n2 g0 {\nb0(v0: u64):\n  v1: u64 = const 0 at i0 50..55\n  v2: bool = eq v0, v1 at i0 60..65\n  branch v2, b1, b2\nb1:\n  v3: u64 = const 1 at i0 70..75\n  raise unwrap at i0 40..45\nb2:\n  return v0\n}\ninst n3 = p@0/m/helper [] []\ninst n4 = p@0/m/user.$glue [] []\nfn f3 = n3 g0 {\nb0(v0: u64):\n  v1: u64 = const 1\n  v2: u64 = add v0, v1\n  return v2\n}\nfn f4 = n1 g0 {\nb0(v0: u64):\n  v1: u64 = call f3 g0 (v0) at i0 80..90\n  return v1\n}\nfn f5 = n4 g0 {\nb0(v0: u64):\n  v1: u64 = const 1\n  v2: u64 = add v0, v1\n  return v2\n}\nfn f6 = n1 g0 {\nb0(v0: u64):\n  v1: u64 = call f5 g0 (v0) at i0 90..95\n  return v1\n}\n",
     );
     let at = |start, end| {
         Some(Anchor {
@@ -364,6 +368,28 @@ fn failure_sites_follow_the_contract() {
     );
     assert_eq!(site(0, u64::MAX), vec![None], "core with no user caller");
     assert_eq!(site(2, 0), vec![at(40, 45)], "raise: its block's anchor");
+    assert_eq!(
+        site(6, u64::MAX),
+        vec![at(90, 95)],
+        "generated glue: the user call"
+    );
+    let stop = std::panic::catch_unwind(|| site(4, u64::MAX))
+        .err()
+        .map(|e| match e.downcast::<String>() {
+            Ok(s) => *s,
+            Err(e) => e
+                .downcast::<&str>()
+                .map_or_else(|_| String::new(), |s| s.to_string()),
+        });
+    assert!(
+        stop.as_deref()
+            .is_some_and(|s| s.contains("does not inherit its caller's site")),
+        "an unanchored failure in a user body falls back to its caller: {stop:?}"
+    );
+    // The same core-anchored add as f0's, in a user body: no engine passes it a site.
+    let user_core = print(&m).replacen("fn f0 = n0 g0", "fn f0 = n2 g0", 1);
+    let e = wf::module(&parse(&user_core).unwrap()).unwrap_err();
+    assert!(e.contains("f0: a failure point anchored in core"), "{e}");
 }
 
 #[test]

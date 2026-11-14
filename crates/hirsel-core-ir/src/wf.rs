@@ -122,6 +122,29 @@ pub fn module(m: &Module) -> R {
                         .any(|x| matches!(x, Inst::Mark { .. } | Inst::Unmark { .. })),
                 || format!("f{i}: only core's slot kernels emit `mark` and `unmark`"),
             )?;
+            // SITES.md 6(b): a body that does not inherit its caller's site gets none,
+            // so a failure point it anchors in core would report no site where the
+            // evaluator's walk found one. Producers anchor such a point in the body's
+            // own item (front-inlined core code takes the call's anchor).
+            if !crate::source::inherits_site(&m.instances[f.instance.index()]) {
+                let in_core = |a: &Option<Anchor>| {
+                    a.is_some_and(|a| m.items[a.item.index()].package_is("core", "1"))
+                };
+                let insts = b.insts.iter().zip(&b.inst_anchors);
+                let raises = b.blocks.iter().zip(&b.terminators);
+                need(
+                    !insts.into_iter().any(|(x, a)| x.can_fail(b) && in_core(a))
+                        && !raises.into_iter().any(|(k, t)| {
+                            matches!(t, Terminator::Raise { .. }) && in_core(&k.anchor)
+                        }),
+                    || {
+                        format!(
+                            "f{i}: a failure point anchored in core in a body that does not \
+                             inherit its caller's site (SITES 6(b))"
+                        )
+                    },
+                )?;
+            }
         }
     }
     Ok(())

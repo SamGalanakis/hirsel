@@ -45,6 +45,15 @@ pub fn site_symbol(item: &DefPath) -> String {
     symbol
 }
 
+/// SITES.md 6(b): whether a function reads its caller's site. Only a core@1
+/// definition or a generated one (a `$` in its name, which no source identifier
+/// has) does; every other body anchors each failure in its own item. Engines and the
+/// evaluator read it from the callee's identity, never from its body, so a caller,
+/// a library and an application agree without a stored fact.
+pub fn inherits_site(instance: &crate::InstanceKey) -> bool {
+    instance.definition.package_is("core", "1") || instance.definition.0.name.contains('$')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

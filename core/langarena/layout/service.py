@@ -57,7 +57,7 @@ def build(args, phase, backend, observed=False):
         command += ['--dir', Path(__file__).with_name('inputs').resolve()]
     if args.events:
         linker = args.out / 'recording-cc'
-        linker.write_text('#!/bin/sh\nexec cc \"$@\" ' + shlex.quote(str(Path(__file__).with_name('arc_events.c'))) + ' -I' + shlex.quote(str(ROOT / 'crates/hirsel-core-rt/include')) + ' -Wl,--wrap=hirsel_core_os_run\n')
+        linker.write_text('#!/bin/sh\nexec cc \"$@\" ' + shlex.quote(str(Path(__file__).with_name('arc_events.c'))) + ' -I' + shlex.quote(str(ROOT / 'crates/hirsel-core-rt/include')) + ' -Wl,--wrap=hirsel_core_os_run_with_sources\n')
         linker.chmod(0o755)
         command += ['--cc', linker]
     if backend == 'llvm':

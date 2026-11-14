@@ -169,6 +169,8 @@ pub enum Role {
     Unique,
     Site,
     Causes,
+    Log,
+    StaticFn,
 }
 impl Role {
     fn of(path: &DefPath) -> Option<Role> {

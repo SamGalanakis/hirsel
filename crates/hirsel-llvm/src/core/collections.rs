@@ -199,6 +199,7 @@ pub(super) fn glue(
             anchor: None,
             relocatable_sites: false,
             value_slots: Vec::new(),
+            address_slots: Vec::new(),
             empty_bounds: empty::EmptyBounds::default(),
             code: String::new(),
             allocations: String::new(),

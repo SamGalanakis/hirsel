@@ -97,6 +97,7 @@ fn linux_c_results_execute_with_mixed_fields_padding_and_hfas() -> std::result::
                 anchor: None,
                 relocatable_sites: false,
                 value_slots: vec![],
+                address_slots: vec![],
                 code: String::new(),
                 allocations: String::new(),
                 next: 0,

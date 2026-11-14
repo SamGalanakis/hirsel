@@ -222,6 +222,7 @@ fn emit_ir_target_with_role_facts(
             anchor: None,
             relocatable_sites: source.relocatable_sites,
             value_slots: values::slots(body),
+            address_slots: values::address_slots(body),
             aliases,
             module,
             body,
@@ -256,7 +257,9 @@ fn emit_ir_target_with_role_facts(
             .unwrap();
         }
         for i in 0..body.addresses.len() {
-            writeln!(e.allocations, "  %a{i} = alloca ptr").unwrap();
+            if e.address_slots[i] {
+                writeln!(e.allocations, "  %a{i} = alloca ptr").unwrap();
+            }
         }
         // Cleanup continuations may mention a branch-local constant even when
         // that branch is inactive. Constants have no effects or operands, so
@@ -624,6 +627,7 @@ struct FunctionEmitter<'a> {
     anchor: Option<Anchor>,
     relocatable_sites: bool,
     value_slots: Vec<bool>,
+    address_slots: Vec<bool>,
     code: String,
     allocations: String,
     next: usize,
@@ -698,7 +702,11 @@ impl FunctionEmitter<'_> {
             .map_or_else(String::new, |a| a.access(addresses))
     }
     fn address(&mut self, a: AddressId) -> String {
-        self.calc(format!("load ptr, ptr %a{}", a.0))
+        if self.address_slots.get(a.index()).copied().unwrap_or(true) {
+            self.calc(format!("load ptr, ptr %a{}", a.0))
+        } else {
+            format!("%a{}", a.0)
+        }
     }
     fn intrinsic(&mut self, name: &str, ret: &str, args: &[(String, String)]) -> String {
         self.intrinsics.insert(format!(

@@ -66,6 +66,7 @@ pub(super) fn emit(
             anchor: None,
             relocatable_sites: false,
             value_slots: Vec::new(),
+            address_slots: Vec::new(),
             empty_bounds: empty::EmptyBounds::new(&body, &[]),
             code: String::new(),
             allocations: String::new(),

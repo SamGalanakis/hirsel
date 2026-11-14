@@ -763,6 +763,141 @@ b0(v0: u64, v1: u64, v2: u64):
 }
 
 #[test]
+fn message_raise_reads_a_correlated_cross_block_address() {
+    let source = include_str!("../../tests/core_runtime/callable.core");
+    let (prefix, body) = source.split_once("fn f3 = n3 g3 {").unwrap();
+    let prefix = prefix.replace("sig g3 = () -> ()", "sig g3 = (bool) -> ()");
+    let body = body
+        .replacen("b0:", "  addr a7 = s0 : t1\nb0(v9: bool):", 1)
+        .replacen("  address a0\n", "", 1)
+        .replace(
+            "  raise fail a0",
+            r#"  branch v9, b1(), b2()
+b1():
+  address a0
+  jump b2()
+b2():
+  branch v9, b3(), b4()
+b3():
+  raise fail a0
+b4():
+  address a7
+  drop a7 t1
+  dead s0
+  return"#,
+        );
+    let module = text::parse(&format!("{prefix}fn f3 = n3 g3 {{{body}")).unwrap();
+    wf::module(&module).unwrap();
+    agree_cases(
+        &module,
+        &[
+            Case {
+                function: FuncId(3),
+                args: vec![0],
+                limit: 256,
+                injection: None,
+            },
+            Case {
+                function: FuncId(3),
+                args: vec![1],
+                limit: 256,
+                injection: None,
+            },
+        ],
+        true,
+    );
+}
+
+#[test]
+fn local_homes_preserve_inactive_addresses_and_entry_back_edges() {
+    let module = text::parse(
+        r#"core v1
+sig g0 = (u64) -> (u64)
+sig g1 = (bool, u64) -> (u64)
+inst n0 = tests@0/homes/local [] []
+inst n1 = tests@0/homes/identity [] []
+inst n2 = tests@0/homes/inactive [] []
+inst n3 = tests@0/homes/entry_loop [] []
+fn f0 = n0 g0 {
+ slot s0 = u64
+ addr a0 = s0 : u64
+b0(v0: u64):
+ live s0
+ address a0
+ store a0, v0
+ v1: u64 = read a0
+ v2: u64 = call f1 g0 (v1)
+ dead s0
+ return v2
+}
+fn f1 = n1 g0 {
+b0(v0: u64):
+ return v0
+}
+fn f2 = n2 g1 {
+ slot s0 = u64
+ addr a0 = s0 : u64
+b0(v0: bool, v1: u64):
+ live s0
+ branch v0, b1(), b2()
+b1():
+ address a0
+ store a0, v1
+ jump b2()
+b2():
+ branch v0, b3(), b4()
+b3():
+ v2: u64 = read a0
+ dead s0
+ return v2
+b4():
+ v3: u64 = const 0
+ dead s0
+ return v3
+}
+fn f3 = n3 g0 {
+b0(v0: u64):
+ v1: u64 = const 0
+ v2: bool = ne v0, v1
+ branch v2, b1(), b2()
+b1():
+ v3: u64 = const 1
+ v4: u64 = wrapping_sub v0, v3
+ jump b0(v4)
+b2():
+ return v0
+}
+"#,
+    )
+    .unwrap();
+    wf::module(&module).unwrap();
+    let raw = emit_ir(&module).unwrap();
+    let local = raw
+        .split("define ")
+        .find(|f| f.contains(&format!("@{}", symbol(&module, FuncId(0)))))
+        .unwrap();
+    assert!(
+        !local.contains("%a0 = alloca"),
+        "local address is an SSA value"
+    );
+    assert!(
+        !local.contains("%v1 = alloca"),
+        "local call operand is an SSA value"
+    );
+    agree(
+        &module,
+        &[
+            (FuncId(0), vec![42]),
+            (FuncId(0), vec![u64::MAX]),
+            (FuncId(2), vec![0, 42]),
+            (FuncId(2), vec![1, 42]),
+            (FuncId(3), vec![0]),
+            (FuncId(3), vec![4]),
+        ],
+    );
+}
+
+#[test]
 fn scalar_values_keep_inactive_cross_block_paths_in_storage() {
     let module = text::parse(
         r#"
@@ -2386,7 +2521,8 @@ fn release_import_bound_keeps_small_bodies_and_uses_cached_large_entries() {
     let prefix = PathBuf::from(std::env::var_os("LLVM_SYS_231_PREFIX").unwrap());
     std::fs::write(dir.join("probe.c"), "#include <stdint.h>\nextern uint64_t entry(uint64_t);\nint main(void){uint64_t xs[]={0,1,UINT64_MAX};for(unsigned i=0;i<3;i++)if(entry(xs[i])!=xs[i])return 1;return 0;}\n").unwrap();
     let entry = "declare i64 @import_bound(i64)\ndefine i64 @entry(i64 %x) {%r = call i64 @import_bound(i64 %x)\nret i64 %r}";
-    for instructions in [2047, 2049] {
+    let limit = hirsel_llvm_lazy::INLINE_IMPORT_INSTRUCTION_LIMIT as usize;
+    for instructions in [limit - 1, limit + 1] {
         for wrapper in [false, true] {
             let imported = if wrapper {
                 let mut text = body("import_bound.infallible", instructions - 2, "internal ");
@@ -2414,7 +2550,7 @@ fn release_import_bound_keeps_small_bodies_and_uses_cached_large_entries() {
             );
             assert_eq!(
                 undefined.contains("import_bound"),
-                instructions == 2049,
+                instructions > limit,
                 "{instructions} instructions, wrapper={wrapper}: {undefined}"
             );
             // The cached library supplies the same public definition when the

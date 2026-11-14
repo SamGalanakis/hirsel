@@ -200,7 +200,19 @@ impl FunctionEmitter<'_> {
                 }
             }
         }
-        self.line(format!("store ptr {p}, ptr %a{}", address.0));
+        if self
+            .address_slots
+            .get(address.index())
+            .copied()
+            .unwrap_or(true)
+        {
+            self.line(format!("store ptr {p}, ptr %a{}", address.0));
+        } else {
+            self.line(format!(
+                "%a{} = select i1 true, ptr {p}, ptr poison",
+                address.0
+            ));
+        }
         Ok(())
     }
     pub(super) fn runtime_void(&mut self, name: &str, args: &[(String, String)]) {

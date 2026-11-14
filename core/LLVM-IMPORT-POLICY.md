@@ -1,3 +1,7 @@
+Current bound:1536 raw instructions after SSA-home emission. The former2048 bound was calibrated before that representation change. The retained boundary body std.float.scan changes1758 to1384 instructions; the first excluded body std.json.write_string changes2167 to1731. Max retained1384 is below min excluded1731, so1536 preserves all208/212 prior selections in the qualified M1/Arena closure. The same per-function bound runs after composition and remains far above LLVM's250 weighted O3 inline threshold.
+
+The original pre-SSA qualification follows.
+
 | Kind | Row | Control user instructions | Bound2048 user instructions | Change |
 |---|---|---:|---:|---:|
 | Build | M1 warm closure,18builds | 96,988,497,773 | 93,322,800,744 | -3.7795% |
@@ -89,7 +93,7 @@ After the bound, json retains 1,429,831,624 marginal pass instructions and lru r
 
 ## Qualification and evidence
 
-The production component names INLINE_IMPORT_INSTRUCTION_LIMIT=2048. The boundary test exercises 2047 and 2049 instructions, both as a direct body and as a wrapper plus its private .infallible implementation. It verifies the undefined-symbol path and links and executes each object against the standalone published library definition. The test passed. The native CoreIR suite passed 56 tests with two explicit ignores; the stack-probe test passed. M1 passed 232 cases in each engine/fact configuration, 928 exact observations. Arena passed all50 checksums in each fact mode, with identical outputs.
+The pre-SSA component used INLINE_IMPORT_INSTRUCTION_LIMIT=2048. Its boundary test exercised 2047 and 2049 instructions, both as a direct body and as a wrapper plus its private .infallible implementation. It verifies the undefined-symbol path and links and executes each object against the standalone published library definition. The test passed. The native CoreIR suite passed 56 tests with two explicit ignores; the stack-probe test passed. M1 passed 232 cases in each engine/fact configuration, 928 exact observations. Arena passed all50 checksums in each fact mode, with identical outputs.
 
 The 68 run-time observations and two build rows are checked in as LLVM-IMPORT-POLICY.tsv beside this report. These same-base measurements were taken on e912f8d5; later default-off source-row policy changes are outside the pair. Production qualification uses compiler a5262df0c53356bc81746ea501015b820a06a04aa54cd034353600beced99b91 and the same shipping runtime. Residual-import profiling uses this production compiler, a diagnostic preload and private caches. Every measured residual build compiled one application unit. Evidence: import-runtime-{ibase,itest}/rows.json, c1-{ibase,itest}/rows.json, import-land-frozen.json, residual-import-cost/rows.json and the six stage TSVs. Later rows do not replace M2.
 

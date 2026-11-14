@@ -8,21 +8,25 @@ signature. Every signature and every implementation lives in exactly one place, 
 file. The operation index under "Files" is generated from those files by
 `python3 core/tools/std_api_index.py --write` (`--check` exits 1 when it is stale).
 
-**Core declarations and library code.** `core/core/*.hirsel` is the core library. It holds
-declarations only: a function there has no body, because each engine provides it. `core/std/*.hirsel`
-is library code. Every function there has a body written in Hirsel over `core/core`, and nothing
-else, so you can tell core from library by the directory, and in a file by whether the `fn` has a
-body. A `pub fn` is the API. A plain `fn` or `const` is an implementation detail of its module.
-`core/std/tests/<module>.hirsel` holds the contract tests: small functions, each preceded by
-`// expect: run f() = R`, with the expected values derived by hand. To see what the
-front-end checker does with each body and test (the counts, then a table per function and per
-contract-test run), run
-`cargo test -p hirsel-core-front std_seed_check_report -- --ignored --nocapture`. It prints to the
-test log and writes nothing to the tree; the report depends on the checker, so it is not tracked.
+**Core and std code.** `core/core/*.hirsel` contains the core types, engine-backed
+operations and Hirsel bodies over private kernels. `core/std/*.hirsel` extends that library
+with Hirsel bodies over the public core operations. A body can therefore occur in either
+directory. `Deque[T]`, `Heap[T]`, `list.swap` and `list.sort_stable` belong to core;
+`list.sort` is std's unstable sort. Each public operation is declared in one module.
+A plain `fn` or `const` is private to its module. Contract tests live under
+`core/core/tests` and `core/std/tests`: small functions with hand-derived
+`// expect: run f() = R` oracles. `python3 core/tools/std_native.py --backend both`
+runs them through the package product on the two native engines; `--filter` selects
+named cases, and `--backend evaluator` runs host-free cases on the test evaluator.
 
 **Naming std from another package.** There are no imports (LANG-7). A module that extends core
 (list, string, char, int, float, map, result) merges into core's name, so `list.sort` and
-`string.find` are written bare everywhere. The deque and the heap are core modules (`Deque[T]`, `deque.push_back`, `Heap[T]`, `heap.pop`; docs/spec/core.md), not std: `std.deque` and `std.heap` are deleted, not re-exported, and `list.swap` and `list.sort_stable` are core. `string.make_ascii_upper` and `string.make_ascii_lower` are core too, written over the carrier without a second UTF-8 pass; std no longer defines them, and callers keep the same names. Modules that are std's alone (order, set, pool, dir,
+`string.find` are written bare everywhere. Core collections use bare names: `Deque[T]`, `deque.push_back`, `Heap[T]`,
+`heap.pop`, `list.swap` and `list.sort_stable`. The stable sort uses one scratch block
+of `len * size(T)` bytes; a comparator failure preserves every element in unspecified
+order, and Capacity leaves the list unchanged. The Deque ring uses uninhabited slots,
+and the Heap uses hole sifts over one List. Their modules are in `core/core`, with no
+std copies or re-exports. `string.make_ascii_upper` and `string.make_ascii_lower` are core too, written over the carrier without a second UTF-8 pass; std no longer defines them, and callers keep the same names. Modules that are std's alone (order, set, pool, dir,
 file) are reached from another package through the package name: `std.order.compare`,
 `std.set.Set[u64]`, `std.pool.Pool[T]`, `std.file.read(d, p)`, `std.file.Error`. Variants are
 written bare (`Held(f)`, `NotUtf8`).

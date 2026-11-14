@@ -206,7 +206,9 @@ impl CoreImage {
             })?;
             self.bodies.get_or_try_init(id as u64, || {
                 let disk = self.read::<DiskCheck>(directory.definitions[path])?;
-                Ok(Arc::new(from_disk(disk, directory.definitions[path])))
+                let mut body = from_disk(disk, directory.definitions[path]);
+                bind_record_sites(&mut body, &directory.headers);
+                Ok(Arc::new(body))
             })
         })
     }

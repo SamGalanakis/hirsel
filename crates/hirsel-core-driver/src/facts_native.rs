@@ -1,4 +1,5 @@
-// FORM #98/#100: a callee body changes the caller's facts across a lend.
+// FORM #98/#100: a callee body changes the caller's facts across a lend; the
+// caller's checked record is reused and the program facts are rederived.
 fn program_facts_source_changes(backend: Backend) {
     let dir = tempfile::tempdir().unwrap();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -21,7 +22,9 @@ fn program_facts_source_changes(backend: Backend) {
         assert!(checked.accepted(), "{:?} {:?}",checked.diagnostics,checked.incomplete);
         let key = checked.demand(&caller).unwrap().key.clone();
         if let Some(previous) = &caller_key {
-            assert_ne!(&key, previous, "callee body facts must invalidate the caller key");
+            // Program facts are derived at the native stage from the reached
+            // bodies' identities; the caller's check reads only signatures.
+            assert_eq!(&key, previous, "a callee body edit must keep the caller's check key");
         }
         caller_key = Some(key);
         let built = checked.build(&entry,&options).unwrap();

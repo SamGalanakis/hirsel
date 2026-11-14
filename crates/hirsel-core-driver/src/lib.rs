@@ -886,6 +886,34 @@ fn file_record(
     }
     record
 }
+/// A record's sites are canonical. An image body is reported as it stands, so
+/// bind its sites and anchors to the image's items once, when it is decoded;
+/// a request's own bodies bind the copies they report instead.
+fn bind_record_sites(product: &mut DefinitionProduct, headers: &reuse::Headers) {
+    let anchors = std::mem::take(&mut product.anchors);
+    let bind = |site: &mut Site| {
+        if let Some(h) = anchors
+            .get(&(site.module, site.item))
+            .and_then(|p| headers.get(p))
+        {
+            site.module = h.anchor.0;
+            site.item = h.anchor.1;
+        }
+    };
+    for r in &mut product.check.refusals {
+        bind(&mut r.primary);
+        for site in &mut r.causal {
+            bind(site);
+        }
+    }
+    for g in &mut product.incomplete {
+        bind(&mut g.primary);
+    }
+    product.anchors = anchors
+        .into_values()
+        .filter_map(|path| Some((headers.get(&path)?.anchor, path)))
+        .collect();
+}
 fn from_disk(disk: DiskCheck, record: ContentHash) -> DefinitionProduct {
     let [nodes, uses, places, calls, types, bytes] = disk.counts;
     DefinitionProduct {

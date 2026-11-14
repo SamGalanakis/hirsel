@@ -1,0 +1,19 @@
+// Reserved-capacity append loops. These retain the cold grow edge but take no
+// growth on a successful run; read every element so the writes remain observable.
+pub fn list_push(n: u64) -> u64 {
+    let mut xs: List[u64] = result.unwrap(list.with_capacity(n))
+    for i in 0u64..n { result.unwrap(list.push(mut xs, i)) }
+    list.sum(xs)
+}
+pub fn byte_push(n: u64) -> u64 {
+    let mut xs: Bytes = result.unwrap(list.with_capacity(n))
+    for i in 0u64..n {
+        result.unwrap(list.push(mut xs, if i & 1 == 0 { 1u8 } else { 2u8 }))
+    }
+    list.sum_bytes(xs)
+}
+pub fn char_push(n: u64) -> u64 {
+    let mut s = result.unwrap(string.with_capacity(n))
+    for _ in 0u64..n { result.unwrap(string.push_char(mut s, 'x')) }
+    list.sum_bytes(string.as_bytes(s))
+}

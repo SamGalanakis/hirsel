@@ -368,6 +368,29 @@ fn execute_target_object(
     object: Option<Vec<u8>>,
     target: Target,
 ) -> Vec<NativeReport> {
+    execute_target_object_checked(
+        module,
+        cases,
+        bindings,
+        configuration,
+        optimization,
+        object,
+        target,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_target_object_checked(
+    module: &Module,
+    cases: &[Case],
+    bindings: &str,
+    configuration: &str,
+    optimization: Optimization,
+    object: Option<Vec<u8>>,
+    target: Target,
+    memcheck: bool,
+) -> Vec<NativeReport> {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let dir = std::env::temp_dir().join(format!(
         "hirsel-core-llvm-{}-{}",
@@ -595,6 +618,18 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
         }
         Target::Aarch64Linux => Command::new(std::env::var_os("HIRSEL_AARCH64_CC").unwrap()),
     };
+    if memcheck && target == Target::X86_64Linux {
+        // The pool's system loader is stripped; use the declared symbol-bearing
+        // loader/runtime paired with Memcheck, just as the toolchain proof does.
+        let runtime = PathBuf::from(
+            std::env::var_os("HIRSEL_VALGRIND_RUNTIME").expect("declared Memcheck runtime"),
+        );
+        compiler
+            .args(["-Xlinker", "--dynamic-linker", "-Xlinker"])
+            .arg(runtime.join("ld-linux-x86-64.so.2"))
+            .args(["-Xlinker", "-rpath", "-Xlinker"])
+            .arg(&runtime);
+    }
     output(
         compiler
             .args(["-std=c11", "-O0", "-fPIC", "-pie", "-Wl,-z,text", "-I"])
@@ -622,6 +657,19 @@ static void diagnostic(void *state, const uint8_t *s, size_t n) { (void)state; f
         }
     }
     let mut executable = match target {
+        Target::X86_64Linux if memcheck => {
+            let mut command =
+                Command::new(std::env::var_os("HIRSEL_VALGRIND").expect("declared Memcheck tool"));
+            command
+                .args([
+                    "--tool=memcheck",
+                    "--quiet",
+                    "--exit-on-first-error=yes",
+                    "--error-exitcode=99",
+                ])
+                .arg(dir.join("test"));
+            command
+        }
         Target::X86_64Linux => Command::new(dir.join("test")),
         Target::Aarch64Linux => {
             let mut command = Command::new(std::env::var_os("HIRSEL_QEMU_AARCH64").unwrap());
@@ -3713,4 +3761,76 @@ fn aarch64_consuming_growth_host_memory_refusal_is_a_reported_run_stop() {
         },
         symbol,
     );
+}
+
+fn growth_shadow_words(target: Target) {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/core");
+    let source = include_str!("../../../../core/front/cases/body/grow-carrier-words.hirsel");
+    let (module, names) = front::lower(source, &root, "main").unwrap();
+    let cases: Vec<_> = [
+        ("grown", 131328),
+        ("refused", 130816512904),
+        ("regrown", 523776),
+    ]
+    .into_iter()
+    .map(|(name, want)| {
+        let function = names[name];
+        let report = eval::run(&module, function, &[], 1_000_000);
+        assert_eq!(report.outcome, eval::Outcome::Returned(vec![want]));
+        assert_eq!(report.used, 0);
+        Case {
+            function,
+            args: vec![],
+            limit: 1_000_000,
+            injection: None,
+        }
+    })
+    .collect();
+    for speed in [false, true] {
+        let ir = emit_ir_target_with_facts(
+            &module,
+            target,
+            std::env::var_os("HIRSEL_TEST_CHARGE_OBSERVATION").is_some(),
+            true,
+            SourceEmission {
+                relocatable_sites: false,
+                debug_lines: false,
+            },
+        )
+        .unwrap();
+        let object = hirsel_llvm_lazy::compile_ir_for_target(&ir, speed, target).unwrap();
+        let reports = execute_target_object_checked(
+            &module,
+            &cases,
+            include_str!("../../../hirsel-core-rt/testdata/moving_realloc.c"),
+            "",
+            if speed {
+                Optimization::Speed
+            } else {
+                Optimization::None
+            },
+            Some(object),
+            target,
+            true,
+        );
+        for (case, actual) in cases.iter().zip(reports) {
+            let expected = eval::run(&module, case.function, &case.args, case.limit);
+            assert_eq!(actual.outcome, expected.outcome);
+            assert_eq!(actual.used, expected.used);
+            assert_eq!(actual.admissions, expected.admissions);
+            assert_eq!(actual.trace, expected.trace);
+            if let Some(peak) = actual.peak_reserved {
+                assert_eq!(peak, expected.peak_reserved);
+            }
+        }
+    }
+}
+#[test]
+fn growth_shadow_copies_back_data_and_capacity() {
+    growth_shadow_words(Target::X86_64Linux);
+}
+#[test]
+#[ignore = "explicit AArch64 runtime integration target"]
+fn aarch64_growth_shadow_copies_back_data_and_capacity() {
+    growth_shadow_words(Target::Aarch64Linux);
 }

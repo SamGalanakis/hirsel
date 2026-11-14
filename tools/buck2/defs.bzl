@@ -253,7 +253,7 @@ def _merged_archives(ctx, views):
         for key, artifact in view[RuntimeArchivesInfo].entries.items()
     })
 
-def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, package_name, version, edition, build_script = None, bin_exes = {}, data = [], files_env = {}, runtime_archives = [], products = None, shards = 1, case_shards = {}, costs = None, seeded = False, skips = [], consumer_cases = {}, retained_cases = []):
+def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, package_name, version, edition, build_script = None, bin_exes = {}, data = [], files_env = {}, runtime_archives = [], native_tools = False, products = None, shards = 1, case_shards = {}, costs = None, seeded = False, skips = [], consumer_cases = {}, retained_cases = []):
     """A libtest harness (`rustc --test`) and the test that runs it.
 
     `bin_exes` are the package's binaries, as Cargo's CARGO_BIN_EXE_<name>.
@@ -319,7 +319,7 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
         product_definitions = read_root_config("hirsel", "product_definitions", ""),
         llvm = "root//tools/buck2/native-toolchain:llvm",
         llvm_libraries = "toolchains//:llvm-libraries",
-        native_tools = native_tool_inputs() if runtime_archives else {},
+        native_tools = native_tool_inputs() if runtime_archives or native_tools else {},
         cwd = manifest_dir,
         test_binary = name,
         request = _request(name),

@@ -240,3 +240,14 @@ shared definition; no source variant/niche tag is involved. The physical native
 allocator splits over-alignment into a cold helper. Its ordinary branch retains
 the same malloc/mi_malloc calls and their at-least-16-byte returned alignment;
 its size-only Layout does not round an already valid size up again.
+
+Reserved append qualification uses `core/tools/memory_append.py --builder
+<release-hot_loops> --runtime <shipping-archive> --out <fresh-directory> --check`.
+It measures List, Bytes and String loops with reserved capacity, checks every
+result and asserts that no grow helper executes. A cold grow edge remains in the
+compiled loop. The LLVM instruction envelopes reject the carrier-escape regression
+introduced by 4316fbb2; Cranelift counts are reported alongside it. Run serially
+with the other counter samples and the same CPU16 / 2 GiB envelope. This is an
+explicit performance qualification, not a wall-time test in the unit suite.
+The separate `grow-carrier-words.hirsel` oracle forces moving realloc and checks
+success, refusal and regrowth, including both data and capacity copy-back.

@@ -118,3 +118,8 @@ fn consuming_growth_host_memory_refusal_is_a_reported_run_stop() {
         },
     );
 }
+
+#[test]
+fn growth_shadow_copies_back_data_and_capacity() {
+    check_growth_shadow_words();
+}

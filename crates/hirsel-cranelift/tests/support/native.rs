@@ -152,6 +152,17 @@ fn execute_cases_with_rows(
     cases: &[NativeCase<'_>],
     debug_lines: bool,
 ) {
+    execute_cases_with_bindings(module, optimize, cases, debug_lines, "", false);
+}
+
+fn execute_cases_with_bindings(
+    module: &c::Module,
+    optimize: bool,
+    cases: &[NativeCase<'_>],
+    debug_lines: bool,
+    bindings: &str,
+    memcheck: bool,
+) {
     assert!(!cases.is_empty(), "native fixture must execute cases");
     println!("native cases: {} (optimize={optimize})", cases.len());
     fn has_hostfile(field: &hirsel_core_layout::FieldTy) -> bool {
@@ -206,6 +217,7 @@ fn execute_cases_with_rows(
     .unwrap();
     fs::write(scratch.0.join("input.o"), artifact.bytes).unwrap();
     let mut source = String::from("#include <stdint.h>\n#include <stdio.h>\n#include <string.h>\n");
+    source.push_str(bindings);
     source.push_str(include_str!(
         "../../../hirsel-core-rt/include/hirsel_core_rt.h"
     ));
@@ -520,7 +532,7 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
         source.push_str(&process_calls);
     }
     source.push_str("return 0; }\n");
-    let actual = link_run(&scratch, &source);
+    let actual = link_run_checked(&scratch, &source, memcheck);
     // Decode each report independently so a red row cannot hide later rows in
     // this executable. The count words include either results or causes, then
     // retained charge, the drop trace, and admission attempts.
@@ -562,6 +574,9 @@ static void diagnostic(void *s,const uint8_t *p,size_t n) { __builtin_abort(); }
 }
 
 fn link_program(scratch: &Scratch, source: &str) -> PathBuf {
+    link_program_checked(scratch, source, false)
+}
+fn link_program_checked(scratch: &Scratch, source: &str, memcheck: bool) -> PathBuf {
     use cranelift_object::object::Object as _;
     fs::write(scratch.0.join("caller.c"), source).unwrap();
     let archive = PathBuf::from(
@@ -598,7 +613,14 @@ fn link_program(scratch: &Scratch, source: &str) -> PathBuf {
     ] {
         fs::write(scratch.0.join(name), text).unwrap();
     }
-    let link = Command::new(c_compiler())
+    let mut compiler = Command::new(c_compiler());
+    if memcheck && NATIVE_TARGET == "x86_64-unknown-linux-gnu" {
+        // The declared Memcheck tree carries its matching loader symbols.
+        let runtime = PathBuf::from(std::env::var_os("HIRSEL_VALGRIND_RUNTIME").expect("declared Memcheck runtime"));
+        compiler.args(["-Xlinker", "--dynamic-linker", "-Xlinker"]).arg(runtime.join("ld-linux-x86-64.so.2"))
+            .args(["-Xlinker", "-rpath", "-Xlinker"]).arg(&runtime);
+    }
+    let link = compiler
         .current_dir(&scratch.0)
         .args(["-fPIC", "caller.c", "input.o", "-I"])
         .arg(&scratch.0)
@@ -632,9 +654,16 @@ fn link_program(scratch: &Scratch, source: &str) -> PathBuf {
 }
 
 fn link_run(scratch: &Scratch, source: &str) -> Vec<u64> {
-    let run = native_command(&link_program(scratch, source))
-        .output()
-        .unwrap();
+    link_run_checked(scratch, source, false)
+}
+fn link_run_checked(scratch: &Scratch, source: &str, memcheck: bool) -> Vec<u64> {
+    let binary = link_program_checked(scratch, source, memcheck);
+    let mut command = if memcheck && NATIVE_TARGET == "x86_64-unknown-linux-gnu" {
+        let mut command = Command::new(std::env::var_os("HIRSEL_VALGRIND").expect("declared Memcheck tool"));
+        command.args(["--tool=memcheck", "--quiet", "--exit-on-first-error=yes", "--error-exitcode=99"]).arg(&binary);
+        command
+    } else { native_command(&binary) };
+    let run = command.output().unwrap();
     assert!(
         run.status.success(),
         "native execution: {:?}\n{}",
@@ -1314,5 +1343,22 @@ b0(v0: u64):
                     .unwrap()
             );
         }
+    }
+}
+
+fn check_growth_shadow_words() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/front");
+    let source = include_str!("../../../../core/front/cases/body/grow-carrier-words.hirsel");
+    let (module, names) = front::lower(&root, source);
+    let runs: Vec<_> = [("grown",131328), ("refused",130816512904), ("regrown",523776)].into_iter().map(|(name, want)| {
+        let f = names[name];
+        let report = eval::run(&module, f, &[], 1_000_000);
+        assert_eq!(report.outcome, eval::Outcome::Returned(vec![want]));
+        assert_eq!(report.used, 0);
+        (f, Vec::new())
+    }).collect();
+    let cases: Vec<_> = runs.iter().map(|(function,args)| NativeCase {function:*function,args,limit:1_000_000,injection:None,report:None}).collect();
+    for speed in [false,true] {
+        execute_cases_with_bindings(&module,speed,&cases,false,include_str!("../../../hirsel-core-rt/testdata/moving_realloc.c"), true);
     }
 }

@@ -1405,3 +1405,8 @@ fn consuming_growth_keeps_the_carrier_and_original_payer_on_refusal() {
         );
     }
 }
+
+#[test]
+fn growth_shadow_copies_back_data_and_capacity() {
+    check_growth_shadow_words();
+}

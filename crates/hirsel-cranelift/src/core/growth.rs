@@ -2,7 +2,7 @@
 //! retain the inline classic allocation/copy/install/free sequence.
 use super::function::Function;
 use super::*;
-use cranelift_codegen::ir::{Value, condcodes::IntCC};
+use cranelift_codegen::ir::{StackSlotData, StackSlotKind, Value, condcodes::IntCC};
 const P: Ty = Ty::Ptr;
 const U: Ty = Ty::Scalar(Scalar::U64);
 const B: Ty = Ty::Scalar(Scalar::Bool);
@@ -47,13 +47,23 @@ impl Function<'_, '_, '_> {
             let alignment = self.b.ins().iconst(types::I64, align as i64);
             let kind = self.b.ins().iconst(types::I8, i64::from(kind));
             let over = overflow.unwrap_or_else(|| self.b.ins().iconst(types::I8, 0));
+            let slot = self.b.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                24,
+                3,
+            ));
+            let shadow = self.b.ins().stack_addr(types::I64, slot, 0);
+            let length = self.load_word(at, 8);
+            self.store_word(shadow, 0, old);
+            self.store_word(shadow, 8, length);
+            self.store_word(shadow, 16, cap);
             let values = self.c_call(
                 "hirsel_core_grow",
                 &[P, P, U, U, U, U, U, U, B, K],
                 &[P, U],
                 &[
                     self.context,
-                    at,
+                    shadow,
                     size,
                     alignment,
                     charge,
@@ -64,7 +74,13 @@ impl Function<'_, '_, '_> {
                     kind,
                 ],
             )?;
+            // #93 guarantees the returned data on success, the exact requested
+            // capacity, unchanged length, and untouched words on refusal.
             let null = self.b.ins().icmp_imm_s(IntCC::Equal, values[0], 0);
+            let data = self.b.ins().select(null, old, values[0]);
+            let returned_capacity = self.b.ins().select(null, cap, capacity);
+            self.store_word(at, 0, data);
+            self.store_word(at, 16, returned_capacity);
             self.b.ins().brif(
                 null,
                 refused,

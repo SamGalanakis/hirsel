@@ -50,12 +50,20 @@ impl FunctionEmitter<'_> {
                     self.calc(format!("icmp ne i8 {flag}, 0"))
                 },
             );
+            // The runtime borrows only this call-lifetime carrier. Keep the
+            // source carrier's address out of the call so local homes promote.
+            let shadow = self.temp("[3 x i64]");
+            self.runtime_void("llvm.lifetime.start.p0", &[("ptr".into(), shadow.clone())]);
+            let length = self.load_native(at, 8, "i64");
+            self.store_native(&shadow, 0, "ptr", old);
+            self.store_native(&shadow, 8, "i64", &length);
+            self.store_native(&shadow, 16, "i64", &cap);
             let pair = self.intrinsic(
                 "hirsel_core_grow",
                 "{ ptr, i64 }",
                 &[
                     ("ptr".into(), "%context".into()),
-                    ("ptr".into(), at.into()),
+                    ("ptr".into(), shadow.clone()),
                     ("i64".into(), size.into()),
                     ("i64".into(), align.to_string()),
                     ("i64".into(), charge.into()),
@@ -66,9 +74,17 @@ impl FunctionEmitter<'_> {
                     ("i8 zeroext".into(), kind.to_string()),
                 ],
             );
+            // #93 installs exactly vN and leaves length unchanged. Use those
+            // known words when copying back, including the refusal identity.
             let block = self.calc(format!("extractvalue {{ ptr, i64 }} {pair}, 0"));
             let room = self.calc(format!("extractvalue {{ ptr, i64 }} {pair}, 1"));
             let present = self.calc(format!("icmp ne ptr {block}, null"));
+            let data = self.calc(format!("select i1 {present}, ptr {block}, ptr {old}"));
+            let returned_capacity =
+                self.calc(format!("select i1 {present}, i64 {capacity}, i64 {cap}"));
+            self.store_native(at, 0, "ptr", &data);
+            self.store_native(at, 16, "i64", &returned_capacity);
+            self.runtime_void("llvm.lifetime.end.p0", &[("ptr".into(), shadow)]);
             self.line(format!(
                 "br i1 {present}, label %grow_done{n}, label %grow_refused{n}"
             ));
@@ -93,6 +109,10 @@ impl FunctionEmitter<'_> {
             "br i1 {present}, label %grow_copy{n}, label %grow_refused{n}"
         ));
         writeln!(self.code, "grow_copy{n}:").unwrap();
+        if self.facts {
+            let distinct = self.calc(format!("icmp ne ptr {block}, {old}"));
+            self.runtime_void("llvm.assume", &[("i1".into(), distinct)]);
+        }
         self.runtime_void(
             "llvm.memcpy.p0.p0.i64",
             &[

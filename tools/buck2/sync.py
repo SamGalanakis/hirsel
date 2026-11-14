@@ -1229,6 +1229,7 @@ def first_party(meta: dict) -> str:
                         runtime_archives=runtime_views(binary) if name in NATIVE_TESTS and not requests_only and not core_native and binary != "hirsel-rt-unittest" else None,
                         products=PRODUCTS if name in PRODUCT_TESTS and not core_native else None,
                         files_env=files_env,
+                        native_tools=True if binary == "hirsel-cranelift-test-core_native" else None,
                         seeded=seeded(target_dir(package_dir, src), src) or None, skips=FULL_GATE_SKIPS.get(binary),
                         consumer_cases=CONSUMER_CASES.get(binary), retained_cases=retained_rust().get(binary, []))
 

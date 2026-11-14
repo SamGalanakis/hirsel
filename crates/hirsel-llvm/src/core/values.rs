@@ -1,8 +1,8 @@
-//! Keep instruction-local scalars in SSA without strengthening FORM's cleanup
-//! control-flow contract. Values crossing a CoreIR block retain edge storage.
+//! Keep strictly dominated scalar/address uses in SSA. Correlated cleanup
+//! and simultaneous block-parameter transfers retain their existing homes.
 use super::*;
 
-pub(super) fn slots(body: &Body) -> Vec<bool> {
+pub(super) fn slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
     let mut owners = vec![None; body.values.len()];
     for (block, b) in body.blocks.iter().enumerate() {
         for (index, inst) in b.insts.get(&body.insts).unwrap().iter().enumerate() {
@@ -32,16 +32,11 @@ pub(super) fn slots(body: &Body) -> Vec<bool> {
         }
     }
     let mut slots: Vec<_> = owners.iter().map(Option::is_none).collect();
-    // Edge transfers can execute on several continuations and retain homes.
-    for edge in &body.edges {
-        for v in edge.args.get(&body.pools.values).unwrap() {
-            slots[v.index()] = true;
-        }
-    }
     for (block, b) in body.blocks.iter().enumerate() {
         for (index, inst) in b.insts.get(&body.insts).unwrap().iter().enumerate() {
             let mut read = |v: ValueId| {
-                if !matches!(owners[v.index()], Some((owner, before)) if owner == block && before < index)
+                if !owners[v.index()]
+                    .is_some_and(|definition| flow.available(definition, (block, index)))
                 {
                     slots[v.index()] = true;
                 }
@@ -160,13 +155,52 @@ pub(super) fn slots(body: &Body) -> Vec<bool> {
             }
         }
         let mut read = |v: ValueId| {
-            if !matches!(owners[v.index()], Some((owner, _)) if owner == block) {
+            if !owners[v.index()]
+                .is_some_and(|definition| flow.available(definition, (block, b.insts.len as usize)))
+            {
                 slots[v.index()] = true;
             }
         };
         match body.terminators[block] {
-            Terminator::Branch { condition, .. } => read(condition),
-            Terminator::Switch { value, .. } => read(value),
+            Terminator::Jump(edge) => {
+                for value in body.edges[edge.index()]
+                    .args
+                    .get(&body.pools.values)
+                    .unwrap()
+                {
+                    read(*value);
+                }
+            }
+            Terminator::Branch { condition, yes, no } => {
+                read(condition);
+                for edge in [yes, no] {
+                    for value in body.edges[edge.index()]
+                        .args
+                        .get(&body.pools.values)
+                        .unwrap()
+                    {
+                        read(*value);
+                    }
+                }
+            }
+            Terminator::Switch {
+                value,
+                arms,
+                otherwise,
+            } => {
+                read(value);
+                for edge in std::iter::once(otherwise)
+                    .chain(arms.get(&body.pools.arms).unwrap().iter().map(|a| a.edge))
+                {
+                    for value in body.edges[edge.index()]
+                        .args
+                        .get(&body.pools.values)
+                        .unwrap()
+                    {
+                        read(*value);
+                    }
+                }
+            }
             Terminator::Return(values) => {
                 for v in values.get(&body.pools.values).unwrap() {
                     read(*v);
@@ -192,10 +226,9 @@ pub(super) fn slots(body: &Body) -> Vec<bool> {
     slots
 }
 
-/// Cache only addresses that cross a CoreIR block or have multiple projections.
-/// Requiring an earlier projection in the same block also covers inactive
-/// cleanup operands that can precede their otherwise live projection.
-pub(super) fn address_slots(body: &Body) -> Vec<bool> {
+/// Cache multiply projected addresses and uses not dominated by a projection.
+/// This includes inactive cleanup operands before their live projection.
+pub(super) fn address_slots(body: &Body, flow: &flow::Flow<'_>) -> Vec<bool> {
     let mut definitions = vec![None; body.addresses.len()];
     let mut slots = vec![false; body.addresses.len()];
     for (block, b) in body.blocks.iter().enumerate() {
@@ -212,7 +245,8 @@ pub(super) fn address_slots(body: &Body) -> Vec<bool> {
     for (block, b) in body.blocks.iter().enumerate() {
         for (index, inst) in b.insts.get(&body.insts).unwrap().iter().enumerate() {
             let mut read = |address: AddressId| {
-                if !matches!(definitions[address.index()], Some((owner, before)) if owner == block && before < index)
+                if !definitions[address.index()]
+                    .is_some_and(|definition| flow.available(definition, (block, index)))
                 {
                     slots[address.index()] = true;
                 }
@@ -275,7 +309,9 @@ pub(super) fn address_slots(body: &Body) -> Vec<bool> {
                 cause: RaiseCause::Fail(address),
                 ..
             } => {
-                if !matches!(definitions[address.index()], Some((owner, _)) if owner == block) {
+                if !definitions[address.index()].is_some_and(|definition| {
+                    flow.available(definition, (block, body.blocks[block].insts.len as usize))
+                }) {
                     slots[address.index()] = true;
                 }
             }

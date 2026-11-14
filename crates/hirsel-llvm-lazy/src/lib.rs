@@ -27,10 +27,10 @@ pub fn compile_ir_for_target(
 pub const NATIVE_LIBRARY_SCHEMA: u32 = 2;
 /// Raw module transport; ordinary O3 and its existing bounded late round.
 pub const IMPORT_PIPELINE_ID: &str = "raw-module-v1-o3-late";
-/// Preserve the selection qualified with the pre-SSA 2048 bound: float.scan
-/// shrank 1758 -> 1384, while excluded json.write_string shrank 2167 -> 1731.
+/// Preserve the pre-SSA 2048 selection after local/cross-block SSA: float.scan
+/// shrank 1758 -> 1384 -> 1130; excluded json.write_string 2167 -> 1731 -> 1469.
 /// This remains far above LLVM's 250 weighted O3 inline-cost threshold.
-pub const INLINE_IMPORT_INSTRUCTION_LIMIT: u64 = 1536;
+pub const INLINE_IMPORT_INSTRUCTION_LIMIT: u64 = 1280;
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct ImportFunction {

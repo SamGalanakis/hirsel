@@ -1,4 +1,4 @@
-Current bound:1536 raw instructions after SSA-home emission. The former2048 bound was calibrated before that representation change. The retained boundary body std.float.scan changes1758 to1384 instructions; the first excluded body std.json.write_string changes2167 to1731. Max retained1384 is below min excluded1731, so1536 preserves all208/212 prior selections in the qualified M1/Arena closure. The same per-function bound runs after composition and remains far above LLVM's250 weighted O3 inline threshold.
+Current bound:1280 raw instructions after local and cross-block SSA emission. The former2048 bound was calibrated before those representation changes. The retained boundary body std.float.scan changes1758 to1384 to1130 instructions; the first excluded body std.json.write_string changes2167 to1731 to1469. Max retained1130 is below min excluded1469, so1280 preserves all208/212 prior selections in the qualified M1/Arena closure. The intermediate local-SSA bound was1536. The same per-function bound runs after composition and remains far above LLVM's250 weighted O3 inline threshold.
 
 The original pre-SSA qualification follows.
 

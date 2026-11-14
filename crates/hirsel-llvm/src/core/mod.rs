@@ -18,6 +18,7 @@ mod debug;
 pub use debug::finish_native_object;
 mod empty;
 mod fast;
+mod flow;
 mod forward;
 mod growth;
 mod scalar;
@@ -229,6 +230,7 @@ fn emit_ir_target_with_role_facts(
                 &mut intrinsics,
             )
         });
+        let flow = flow::Flow::new(body);
         let mut e = FunctionEmitter {
             function: Some(FuncId(i as u32)),
             append_fast,
@@ -237,8 +239,8 @@ fn emit_ir_target_with_role_facts(
             debug_location: function_debug.map(|d| d.location(None)),
             anchor: None,
             relocatable_sites: source.relocatable_sites,
-            value_slots: values::slots(body),
-            address_slots: values::address_slots(body),
+            value_slots: values::slots(body, &flow),
+            address_slots: values::address_slots(body, &flow),
             aliases,
             module,
             body,

@@ -859,6 +859,55 @@ b0(v0: u64, v1: u64, v2: u64):
 }
 
 #[test]
+fn failure_edges_precede_later_scalar_and_address_definitions() {
+    let module = text::parse(
+        r#"core v1
+sig g0 = (u64, u64) -> (u64, u64)
+inst n0 = tests@0/homes/failing_prefix [] []
+fn f0 = n0 g0 {
+ slot s0 = u64
+ addr a0 = s0 : u64
+b0(v0: u64, v1: u64):
+ live s0
+ v2: u64, v3: bool = checked_add v0, v1
+ v4: bool = const false
+ v5: bool = eq v3, v4
+ v6: u64 = add v0, v1 fail b1
+ v7: u64 = const 1
+ v8: u64 = wrapping_add v0, v7
+ address a0
+ store a0, v8
+ jump b4()
+b1():
+ branch v5, b2(), b3()
+b2():
+ v9: u64 = read a0
+ v10: u64 = wrapping_add v8, v9
+ dead s0
+ propagate
+b3():
+ dead s0
+ propagate
+b4():
+ v11: u64 = read a0
+ dead s0
+ return v8, v11
+}
+"#,
+    )
+    .unwrap();
+    wf::module(&module).unwrap();
+    agree(
+        &module,
+        &[
+            (FuncId(0), vec![0, 0]),
+            (FuncId(0), vec![2, 3]),
+            (FuncId(0), vec![u64::MAX, 1]),
+        ],
+    );
+}
+
+#[test]
 fn message_raise_reads_a_correlated_cross_block_address() {
     let source = include_str!("../../tests/core_runtime/callable.core");
     let (prefix, body) = source.split_once("fn f3 = n3 g3 {").unwrap();

@@ -44,6 +44,7 @@ fn execute_runs(module: &c::Module, runs: &[Run], optimize: bool) {
             optimize,
             debug_lines: false,
         },
+        hirsel_core_ids::ContentHash([0x90; 32]),
     )
     .unwrap();
     fs::write(scratch.0.join("input.o"), object.bytes).unwrap();

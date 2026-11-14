@@ -224,6 +224,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             optimize: args.iter().any(|a| a == "--speed"),
             debug_lines: false,
         },
+        hirsel_core_ids::ContentHash([0x90; 32]),
         &measure,
     )?;
     {

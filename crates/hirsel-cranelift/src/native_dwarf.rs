@@ -1,5 +1,4 @@
-//! DWARF5 line/subprogram records. CoreIR supplies item-relative pseudo positions;
-//! its final source coordinates are written by the driver at link.
+//! DWARF5 line/subprogram records for the existing native emission path.
 use cranelift_object::object;
 use gimli::write::{
     Address, AttributeValue, DwarfUnit, EndianVec, LineProgram, LineString, Range, RangeList,

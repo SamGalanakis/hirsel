@@ -191,6 +191,7 @@ fn execute_cases(module: &c::Module, optimize: bool, cases: &[NativeCase<'_>]) {
             optimize,
             debug_lines: false,
         },
+        hirsel_core_ids::ContentHash([0x90; 32]),
         observing,
     )
     .unwrap();
@@ -613,7 +614,11 @@ fn link_program(scratch: &Scratch, source: &str) -> PathBuf {
     let run = scratch.0.join("run");
     let image = fs::read(&run).unwrap();
     let image = cranelift_object::object::File::parse(&*image).unwrap();
-    assert_eq!(image.kind(), cranelift_object::object::ObjectKind::Dynamic, "site oracle must execute PIE");
+    assert_eq!(
+        image.kind(),
+        cranelift_object::object::ObjectKind::Dynamic,
+        "site oracle must execute PIE"
+    );
     run
 }
 
@@ -964,7 +969,8 @@ fn check_failure_sites() {
     }
     // FORM #95's core and generated fallbacks are real calls, even when the
     // source frontend elects to inline a particular library operation.
-    let inheritance = text::parse(r#"core v1
+    let inheritance = text::parse(
+        r#"core v1
 item i0 = user@0/site/call
 item i1 = core@1/site/helper
 sig g0 = (u64) -> (u64)
@@ -1014,7 +1020,9 @@ b0(v0: u64):
   v2: u64 = call v1 g0 (v0) at i0 22..25
   return v2
 }
-"#).unwrap();
+"#,
+    )
+    .unwrap();
     wf::module(&inheritance).unwrap();
     let runs = [0, 1, 3, 5, 6].map(|f| (FuncId(f), vec![u64::MAX]));
     for optimize in [false, true] {
@@ -1038,14 +1046,22 @@ fn check_relative_debug_rows() {
     let mut module = text::parse(
         r#"core v1
 item i0 = test@0/sites/rows
+item i1 = test@0/sites/second
 sig g0 = (u64) -> (u64)
 inst n0 = test@0/sites/rows [] []
+inst n1 = test@0/sites/second [] []
 fn f0 = n0 g0 {
 b0(v0: u64):
   v1: u64 = const 1
   v2: u64 = add v0, v1
   v3: u64 = add v2, v1
   return v3
+}
+fn f1 = n1 g0 {
+b0(v0: u64):
+  v1: u64 = const 2
+  v2: u64 = add v0, v1
+  return v2
 }
 "#,
     )
@@ -1065,11 +1081,24 @@ b0(v0: u64):
         start: 39,
         end: 40,
     });
+    module.functions[1].body.as_mut().unwrap().inst_anchors = vec![
+        None,
+        Some(Anchor {
+            item: ItemId(1),
+            start: 42,
+            end: 43,
+        }),
+    ];
     for optimize in [false, true] {
         // Two same-kind cold edges must retain their distinct raising anchors.
         execute(
             &module,
-            &[(FuncId(0), vec![u64::MAX]), (FuncId(0), vec![u64::MAX - 1])],
+            &[
+                (FuncId(0), vec![u64::MAX]),
+                (FuncId(0), vec![u64::MAX - 1]),
+                (FuncId(1), vec![u64::MAX]),
+                (FuncId(1), vec![5]),
+            ],
             optimize,
         );
         let object = emit_object(
@@ -1079,23 +1108,33 @@ b0(v0: u64):
                 optimize,
                 debug_lines: true,
             },
+            hirsel_core_ids::ContentHash([0x90; 32]),
         )
         .unwrap();
         let file = cranelift_object::object::File::parse(&*object.bytes).unwrap();
         let mut addends = Vec::new();
         for section in file.sections() {
             for (_, relocation) in section.relocations() {
-                if let cranelift_object::object::RelocationTarget::Symbol(symbol) = relocation.target()
-                    && file.symbol_by_index(symbol).unwrap().name().unwrap().starts_with("hirsel_core_site_")
+                if let cranelift_object::object::RelocationTarget::Symbol(symbol) =
+                    relocation.target()
+                    && file
+                        .symbol_by_index(symbol)
+                        .unwrap()
+                        .name()
+                        .unwrap()
+                        .starts_with("hirsel_core_site_")
                 {
-                    assert_eq!(relocation.kind(), cranelift_object::object::RelocationKind::Absolute);
+                    assert_eq!(
+                        relocation.kind(),
+                        cranelift_object::object::RelocationKind::Absolute
+                    );
                     assert_eq!(relocation.size(), 64);
                     addends.push(relocation.addend());
                 }
             }
         }
         addends.sort_unstable();
-        assert_eq!(addends, [7, 27]);
+        assert_eq!(addends, [7, 27, 42]);
         let without_rows = emit_object(
             &module,
             &Options {
@@ -1103,68 +1142,151 @@ b0(v0: u64):
                 optimize,
                 debug_lines: false,
             },
+            hirsel_core_ids::ContentHash([0x90; 32]),
         )
         .unwrap();
         let plain = cranelift_object::object::File::parse(&*without_rows.bytes).unwrap();
         assert!(plain.section_by_name(".debug_line").is_none());
         assert!(plain.section_by_name(".debug_info").is_none());
         // Row collection is a side product; the same code still reports sites.
-        for section in file.sections().filter(|s| s.kind() == cranelift_object::object::SectionKind::Text) {
-            assert_eq!(section.data().unwrap(), plain.section_by_name(section.name().unwrap()).unwrap().data().unwrap());
-        }
-        let dwarf = gimli::Dwarf::load(|id| -> Result<_, gimli::Error> {
-            Ok(gimli::EndianSlice::new(
-                file.section_by_name(id.name())
-                    .map(|s| s.data().unwrap())
-                    .unwrap_or(&[]),
-                gimli::LittleEndian,
-            ))
-        })
-        .unwrap();
-        let mut units = dwarf.units();
-        let unit = dwarf
-            .unit(units.next().unwrap().expect("a core compilation unit"))
-            .unwrap();
-        let mut lines = unit
-            .line_program
-            .clone()
-            .expect("item-relative rows")
-            .rows();
-        let mut mapped = Vec::new();
-        while let Some((header, row)) = lines.next_row().unwrap() {
-            if row.end_sequence() {
-                continue;
-            }
-            let path = dwarf
-                .attr_string(&unit, row.file(header).unwrap().path_name())
-                .unwrap()
-                .to_string_lossy()
-                .into_owned();
-            mapped.push((path, row.line().unwrap().get(), row.column()));
-        }
-        for line in [8, 28] {
-            assert!(
-                mapped
-                    .iter()
-                    .any(|(path, l, col)| path == "test@0/sites/rows"
-                        && *l == line
-                        && *col
-                            == gimli::ColumnType::Column(std::num::NonZeroU64::new(1).unwrap())),
-                "{mapped:?}"
+        for section in file
+            .sections()
+            .filter(|s| s.kind() == cranelift_object::object::SectionKind::Text)
+        {
+            assert_eq!(
+                section.data().unwrap(),
+                plain
+                    .section_by_name(section.name().unwrap())
+                    .unwrap()
+                    .data()
+                    .unwrap()
             );
         }
-        let mut entries = unit.entries();
-        let mut subprogram = false;
-        while let Some(entry) = entries.next_dfs().unwrap() {
-            if entry.tag() == gimli::DW_TAG_subprogram {
-                let name = dwarf
-                    .attr_string(&unit, entry.attr_value(gimli::DW_AT_linkage_name).unwrap())
+        assert!(file.section_by_name(".debug_line").is_none());
+        assert!(file.section_by_name(".debug_info").is_none());
+        assert!(without_rows.debug.is_none());
+        assert!(
+            !plain
+                .symbols()
+                .any(|s| s.name().is_ok_and(|n| n.starts_with("__hirsel_debug_")))
+        );
+        let debug = object.debug.as_ref().unwrap();
+        assert_eq!(debug.items, module.items);
+        assert_eq!(debug.sequences.len(), 2);
+        assert_eq!(debug.scopes.len(), 2);
+        for (index, section) in debug.sections.iter().enumerate() {
+            assert_eq!(
+                section.symbol,
+                c::source::debug_symbol(hirsel_core_ids::ContentHash([0x90; 32]), index as u32)
+            );
+            let alias = file.symbol_by_name(&section.symbol).unwrap();
+            assert_eq!(alias.address(), 0);
+            assert!(alias.is_global());
+            let cranelift_object::object::SymbolFlags::Elf { st_info, st_other } = alias.flags()
+            else {
+                panic!("ELF alias")
+            };
+            assert_eq!(st_info.0 >> 4, cranelift_object::object::elf::STB_GLOBAL.0);
+            assert_eq!(st_other.0 & 3, cranelift_object::object::elf::STV_HIDDEN.0);
+            assert_eq!(
+                file.section_by_index(alias.section_index().unwrap())
                     .unwrap()
-                    .to_string_lossy()
-                    .into_owned();
-                subprogram |= name == symbol(&module.instances[0]);
-            }
+                    .size(),
+                section.size
+            );
         }
-        assert!(subprogram, "the actual ELF function has a subprogram entry");
+        for (index, sequence) in debug.sequences.iter().enumerate() {
+            let name = symbol(&module.instances[index]);
+            let function = file.symbol_by_name(&name).unwrap();
+            assert_eq!(sequence.range.begin, function.address());
+            assert_eq!(sequence.range.end - sequence.range.begin, function.size());
+            assert!(sequence.rows.windows(2).all(|r| r[0].offset < r[1].offset));
+            assert!(
+                sequence
+                    .rows
+                    .iter()
+                    .all(|r| r.offset >= sequence.range.begin && r.offset < sequence.range.end)
+            );
+            assert!(
+                sequence.rows.iter().any(|r| r.source.is_none()),
+                "generated ranges use line zero"
+            );
+            let scope = &debug.scopes[index];
+            assert_eq!(scope.ranges, [sequence.range]);
+            assert_eq!(scope.name, module.instances[index].definition.to_string());
+            assert_eq!(scope.kind, c::source::ScopeKind::Function { linkage: name });
+            assert_eq!(scope.parent, None);
+            assert_eq!(scope.origin, None);
+            assert_eq!(scope.call, None);
+            assert_eq!(
+                scope.declaration,
+                Some(c::source::NativeLocation {
+                    item: index as u32,
+                    start: 0
+                })
+            );
+        }
+        assert!(
+            debug.sequences[1].range.begin > 0,
+            "second function rows must include its section offset"
+        );
+        for (item, start) in [(0, 7), (0, 27), (1, 42)] {
+            assert!(
+                debug
+                    .sequences
+                    .iter()
+                    .flat_map(|s| &s.rows)
+                    .any(|r| r.source == Some(c::source::NativeLocation { item, start })),
+                "{debug:?}"
+            );
+        }
+        let repeated = emit_object(
+            &module,
+            &Options {
+                target: NATIVE_TARGET,
+                optimize,
+                debug_lines: true,
+            },
+            hirsel_core_ids::ContentHash([0x90; 32]),
+        )
+        .unwrap();
+        assert_eq!(
+            object, repeated,
+            "same unit produces the same code and side product"
+        );
+        let other_key = hirsel_core_ids::ContentHash([0x91; 32]);
+        let other = emit_object(
+            &module,
+            &Options {
+                target: NATIVE_TARGET,
+                optimize,
+                debug_lines: true,
+            },
+            other_key,
+        )
+        .unwrap();
+        let other_file = cranelift_object::object::File::parse(&*other.bytes).unwrap();
+        let mut expected = debug.clone();
+        for (index, section) in expected.sections.iter_mut().enumerate() {
+            section.symbol = c::source::debug_symbol(other_key, index as u32);
+        }
+        assert_eq!(
+            other.debug.as_ref(),
+            Some(&expected),
+            "only aliases depend on supplied unit identity"
+        );
+        for section in file
+            .sections()
+            .filter(|s| s.kind() == cranelift_object::object::SectionKind::Text)
+        {
+            assert_eq!(
+                section.data().unwrap(),
+                other_file
+                    .section_by_name(section.name().unwrap())
+                    .unwrap()
+                    .data()
+                    .unwrap()
+            );
+        }
     }
 }

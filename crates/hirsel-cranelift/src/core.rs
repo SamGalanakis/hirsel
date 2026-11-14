@@ -65,9 +65,7 @@ pub struct Options<'a> {
 }
 
 /// A relocatable object. Its symbols use CoreIR instance identities.
-pub struct Object {
-    pub bytes: Vec<u8>,
-}
+pub use c::source::NativeObject as Object;
 
 /// The external name of a closed CoreIR instance.
 pub fn symbol(instance: &InstanceKey) -> String {
@@ -152,8 +150,12 @@ pub(crate) fn isa(options: &Options<'_>) -> Result<cranelift_codegen::isa::Owned
 /// Emit scalar-only CoreIR directly to a Linux x86-64 or AArch64 C-ABI object. Modules with
 /// declared types use [`emit_object_with_layouts`] and producer layout recipes. CoreIR is a trusted compiler product;
 /// this entry does not invoke its well-formedness checker or the old pipeline.
-pub fn emit_object(input: &c::Module, options: &Options<'_>) -> Result<Object> {
-    emit_object_with_layouts(input, &[], options)
+pub fn emit_object(
+    input: &c::Module,
+    options: &Options<'_>,
+    object_key: hirsel_core_ids::ContentHash,
+) -> Result<Object> {
+    emit_object_with_layouts(input, &[], options, object_key)
 }
 
 /// Emit with the producer's already-computed layout recipes. The recipe table
@@ -162,8 +164,9 @@ pub fn emit_object_with_layouts(
     input: &c::Module,
     layouts: &[hirsel_core_layout::Recipe],
     options: &Options<'_>,
+    object_key: hirsel_core_ids::ContentHash,
 ) -> Result<Object> {
-    emit(input, layouts, options, false, false, &())
+    emit(input, layouts, options, object_key, false, false, &())
 }
 
 /// Native fixture entry. Trace instrumentation is absent from ordinary emission.
@@ -172,8 +175,9 @@ pub fn emit_object_for_test(
     input: &c::Module,
     layouts: &[hirsel_core_layout::Recipe],
     options: &Options<'_>,
+    object_key: hirsel_core_ids::ContentHash,
 ) -> Result<Object> {
-    emit_object_for_test_observed(input, layouts, options, false)
+    emit_object_for_test_observed(input, layouts, options, object_key, false)
 }
 
 /// Native observation fixture, retaining the admission injector and cleanup trace.
@@ -182,9 +186,18 @@ pub fn emit_object_for_test_observed(
     input: &c::Module,
     layouts: &[hirsel_core_layout::Recipe],
     options: &Options<'_>,
+    object_key: hirsel_core_ids::ContentHash,
     observe_charge: bool,
 ) -> Result<Object> {
-    emit(input, layouts, options, true, observe_charge, &())
+    emit(
+        input,
+        layouts,
+        options,
+        object_key,
+        true,
+        observe_charge,
+        &(),
+    )
 }
 /// Emit with diagnostic stage observation. Ordinary emission uses a zero-sized
 /// observer whose hooks disappear during Rust compilation.
@@ -193,23 +206,34 @@ pub fn emit_object_profiled(
     input: &c::Module,
     layouts: &[hirsel_core_layout::Recipe],
     options: &Options<'_>,
+    object_key: hirsel_core_ids::ContentHash,
     observer: &impl profile::Observer,
 ) -> Result<Object> {
-    emit(input, layouts, options, false, false, observer)
+    emit(input, layouts, options, object_key, false, false, observer)
 }
 /// Optional diagnostic emission; timings of these objects are not performance samples.
 pub fn emit_object_with_charge_observation(
     input: &c::Module,
     layouts: &[hirsel_core_layout::Recipe],
     options: &Options<'_>,
+    object_key: hirsel_core_ids::ContentHash,
     observe_charge: bool,
 ) -> Result<Object> {
-    emit(input, layouts, options, false, observe_charge, &())
+    emit(
+        input,
+        layouts,
+        options,
+        object_key,
+        false,
+        observe_charge,
+        &(),
+    )
 }
 fn emit(
     input: &c::Module,
     layouts: &[hirsel_core_layout::Recipe],
     options: &Options<'_>,
+    object_key: hirsel_core_ids::ContentHash,
     trace_drops: bool,
     observe_charge: bool,
     observer: &impl profile::Observer,
@@ -323,10 +347,13 @@ fn emit(
         observer
             .define(&mut object, functions[index], context)
             .map_err(error)?;
-        if options.debug_lines
-            && let Some(function) = debug::function(input, f, context.compiled_code().unwrap())
-        {
-            debug_functions.push(function);
+        if options.debug_lines {
+            debug_functions.push(debug::function(
+                input,
+                f,
+                functions[index],
+                context.compiled_code().unwrap(),
+            ));
         }
     }
     glues.emit(&mut object, &tables, observer, &mut scratch)?;
@@ -337,10 +364,11 @@ fn emit(
     let _write = observer.enter("object_write");
     tables.site_constants.borrow().define(&mut object)?;
     let mut product = object.finish();
-    if options.debug_lines {
-        crate::native_dwarf::append(&mut product.object, &debug_functions, "").map_err(error)?;
-    }
+    let debug = options
+        .debug_lines
+        .then(|| debug::finish(input, &mut product, debug_functions, object_key));
     Ok(Object {
         bytes: crate::object::finish(product).map_err(error)?,
+        debug,
     })
 }

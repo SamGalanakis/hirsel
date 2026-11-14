@@ -108,6 +108,7 @@ fn consuming_growth_host_memory_refusal_is_a_reported_run_stop() {
                     optimize: true,
                     debug_lines: false,
                 },
+                hirsel_core_ids::ContentHash([0x90; 32]),
             )
             .unwrap()
             .bytes

@@ -50,6 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             optimize: args.iter().any(|a| a == "--speed"),
             debug_lines: false,
         },
+        hirsel_core_ids::ContentHash([0x90; 32]),
     )?;
     std::fs::write(args.get(2).ok_or("expected output.o")?, object.bytes)?;
     Ok(())

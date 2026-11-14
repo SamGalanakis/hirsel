@@ -15,6 +15,7 @@ fn native_allocator_refusals_are_reported_run_stops() {
                     optimize: false,
                     debug_lines: false,
                 },
+                hirsel_core_ids::ContentHash([0x90; 32]),
             )
             .unwrap()
             .bytes
@@ -285,6 +286,7 @@ fn slot_kernels_match_evaluator_and_marks_emit_nothing() {
                     optimize,
                     debug_lines: false,
                 },
+                hirsel_core_ids::ContentHash([0x90; 32]),
             )
             .unwrap()
             .bytes
@@ -673,6 +675,7 @@ b0(v0: ptr):
             optimize: false,
             debug_lines: false,
         },
+        hirsel_core_ids::ContentHash([0x90; 32]),
     )
     .unwrap();
     fs::write(scratch.0.join("input.o"), object.bytes).unwrap();
@@ -771,6 +774,7 @@ b0:
             optimize: false,
             debug_lines: false,
         },
+        hirsel_core_ids::ContentHash([0x90; 32]),
     )
     .unwrap();
     fs::write(scratch.0.join("input.o"), object.bytes).unwrap();
@@ -905,6 +909,7 @@ fn inlined_arc_updates_keep_the_provider_event_order() {
             optimize: false,
             debug_lines: false,
         },
+        hirsel_core_ids::ContentHash([0x90; 32]),
     )
     .unwrap();
     fs::write(scratch.0.join("input.o"), object.bytes).unwrap();
@@ -949,6 +954,7 @@ fn inlined_count_increment_overflow_is_the_runtime_stop() {
                 optimize: false,
                 debug_lines: false,
             },
+            hirsel_core_ids::ContentHash([0x90; 32]),
         )
         .unwrap();
         fs::write(scratch.0.join("input.o"), object.bytes).unwrap();

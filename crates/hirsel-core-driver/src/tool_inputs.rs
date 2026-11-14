@@ -206,8 +206,8 @@ pub(crate) fn toolchain_identity(
         files.push(recipe_file(&file)?);
     }
     let identity = ContentHash::of_parts(
-        "hirsel.toolchain-image.v1",
-        [crate::encode(&(TOOLCHAIN_SCHEMA, target, &files))?.as_slice()],
+        "hirsel.toolchain-image.v2",
+        [crate::encode(&(TOOLCHAIN_SCHEMA, target, image(&files)))?.as_slice()],
     );
     let manifest = ToolchainManifest {
         schema: TOOLCHAIN_SCHEMA,
@@ -497,18 +497,28 @@ fn recipe_identity(
     source_files: &[RecipeFile],
 ) -> io::Result<ContentHash> {
     Ok(ContentHash::of_parts(
-        "hirsel.direct-link-recipe.v1",
+        "hirsel.direct-link-recipe.v2",
         [crate::encode(&(
             LINK_RECIPE_SCHEMA,
             target,
             driver_key,
             linker,
             args,
-            files,
-            source_files,
+            image(files),
+            image(source_files),
         ))?
         .as_slice()],
     ))
+}
+
+/// What an input contributes to an identity: its path and bytes. Its stat is
+/// only the cue to re-hash; a metadata-only change (a materialiser re-linking
+/// the file moves ctime) keeps the identity, so every keyed object stays.
+fn image(files: &[RecipeFile]) -> Vec<(&Path, &ContentHash)> {
+    files
+        .iter()
+        .map(|file| (file.path.as_path(), &file.content))
+        .collect()
 }
 
 fn recipe_inputs_match(recipe: &LinkRecipe) -> io::Result<bool> {

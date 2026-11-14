@@ -44,6 +44,10 @@ fn failure_sites_rebind(backend: Backend, optimize: bool, debug_lines: bool) {
     assert!(cold.compiled > 0 && cold.linked);
     run(&cold, 2);
 
+    // Land's materialiser re-links toolchain files: a metadata-only change
+    // (chmod to the same mode moves ctime) keeps the bytes, so every object stays.
+    let runtime = &options.runtime;
+    std::fs::set_permissions(runtime, std::fs::metadata(runtime).unwrap().permissions()).unwrap();
     let warm = check(source);
     assert!(warm.rechecked.is_empty());
     let built = warm.build(&entry, &options).unwrap();

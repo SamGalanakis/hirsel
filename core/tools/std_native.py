@@ -286,6 +286,7 @@ def save_row(rows, row, output):
     rows.append(row)
     status = 'NOT APPLICABLE' if not row['applicable'] else 'PASS' if row['passed'] else 'FAIL' if row['ran'] else 'NOT RUN'
     print(f"{row['engine']} {row['test']}: {status}" + (f" {row['cause']}" if row['cause'] else '') +
+          (f" ({row['seconds']:.3f}s of {row['bound']}s)" if 'seconds' in row else '') +
           (f" [owner {row['owner']}]" if row['owner'] else ''), flush=True)
     if output:
         output.write_text(json.dumps(rows, indent=2) + '\n')
@@ -338,14 +339,19 @@ def run(root, compiler, runtime, contracts, engines, output, owners, cc=None, ti
                            '--runtime', str(runtime), '--store', str(work / 'store'), '--json', '--limit', str(64 * 1024 * 1024),
                            '--test-timeout', str(timeout), '--dir', str(host), '-o', str(scratch / 'programs')]
                 if evaluating:
+                    # No load admission here: an evaluator law starts no build, and
+                    # the gate's pool reservation already admitted this process. The
+                    # timed interval is the law's own evaluator process alone.
+                    law_started = time.monotonic()
                     try:
-                        wait_load()
                         result = subprocess.run([str(evaluator), str(inputs), entry],
                                                 capture_output=True, timeout=timeout)
                         row['ran'], row['cause'] = evaluator_observation(case, result)
                     except subprocess.TimeoutExpired:
                         row['ran'] = True
                         row['cause'] = f'evaluator execution timed out after {timeout}s'
+                    row['seconds'] = round(time.monotonic() - law_started, 3)
+                    row['bound'] = timeout
                     row['passed'] = row['cause'] is None
                     if row['cause']:
                         row['owner'] = ('core-check-895' if not row['ran'] else

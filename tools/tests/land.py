@@ -251,8 +251,10 @@ class Land(unittest.TestCase):
         self.assertIn('FAIL  Core suites', refused.stdout)
         self.assertIn("'values': [0]", refused.stdout)
         self.assertIn('oracle:answer', refused.stdout)
+        # The surviving land log alone must tell a slow red from a wrong one.
+        self.assertRegex(refused.stdout, r'oracle:answer: .*\(\d+\.\d{3}s of the 30s bound\)')
         self.assertEqual(self.main_log(), ['base'])
-        law = self.lane / 'core/std/tests/oracle.hirsel'
+        law =self.lane / 'core/std/tests/oracle.hirsel'
         law.write_text(law.read_text().replace('answer() = 8', 'answer() = 7'))
         self.git(self.lane, 'commit', '-qam', 'correct the authored expectation')
         accepted = self.land(**fixture)

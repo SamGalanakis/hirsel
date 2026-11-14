@@ -27,7 +27,8 @@ def main():
                        evaluator=args.evaluator.resolve())
             eligible = [row for row in rows if row['applicable']]
             self.assertTrue(eligible, 'zero evaluator-eligible laws selected')
-            findings = [f"{row['file']}:{row['line']} {row['test']}: {row['cause']}"
+            findings = [f"{row['file']}:{row['line']} {row['test']}: {row['cause']} "
+                        f"({row['seconds']:.3f}s of the {row['bound']}s bound)"
                         for row in eligible if not row['ran'] or not row['passed']]
             findings += [f"{row['test']}: native-only law was counted as a pass"
                          for row in rows if not row['applicable']

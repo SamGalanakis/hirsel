@@ -2,6 +2,8 @@
 """A user check must not acquire the core/std contract-test corpus."""
 import argparse
 import json
+import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -19,6 +21,50 @@ def main():
     compiler = args.compiler.resolve()
 
     class LibraryModes(unittest.TestCase):
+        def test_help_uses_the_parser_catalogue(self):
+            def cli(*arguments):
+                return subprocess.run([str(compiler), *arguments], cwd=ROOT, capture_output=True, text=True)
+            general = cli('help')
+            self.assertEqual(general.returncode, 0, general.stderr)
+            for arguments in [(), ('--help',), ('-h',)]:
+                shown = cli(*arguments)
+                self.assertEqual((shown.returncode, shown.stdout), (0, general.stdout))
+            commands = re.findall(r'^  ([a-z][a-z-]*) +', general.stdout, re.M)
+            self.assertTrue(commands)
+            for command in commands:
+                expected = cli('help', command)
+                self.assertEqual(expected.returncode, 0, expected.stderr)
+                for flag in ['--help', '-h']:
+                    shown = cli(command, flag)
+                    self.assertEqual((shown.returncode, shown.stdout), (0, expected.stdout))
+            for arguments in [('check', '--safe'), ('check', '--backend', 'llvm'), ('new', '--watch'), ('unknown',)]:
+                self.assertEqual(cli(*arguments).returncode, 2)
+
+        def test_new_scaffolds_check_build_and_run_on_both_engines(self):
+            runtime = Path(os.environ['HIRSEL_CORE_RT_ARCHIVE']).resolve()
+            with tempfile.TemporaryDirectory(prefix='hirsel-new-') as temporary:
+                work = Path(temporary)
+                for library in [False, True]:
+                    app = work / ('library' if library else 'application')
+                    new = subprocess.run([str(compiler), 'new', str(app), *(['--lib'] if library else [])],
+                                         cwd=ROOT, capture_output=True, text=True)
+                    self.assertEqual(new.returncode, 0, new.stderr)
+                    check = subprocess.run([str(compiler), 'check', str(app), '--json'], cwd=ROOT, capture_output=True, text=True)
+                    self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+                    self.assertTrue(json.loads(check.stdout)['accepted'])
+                    for engine in ['cranelift', 'llvm']:
+                        build = subprocess.run([str(compiler), 'build', str(app), '--runtime', str(runtime),
+                                                '--backend', engine, '-o', str(work / 'program'), '--json'],
+                                               cwd=ROOT, capture_output=True, text=True)
+                        self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
+                        self.assertIsNotNone(json.loads(build.stdout)['native'])
+                        run = subprocess.run([str(work / 'program')], capture_output=True)
+                        self.assertEqual((run.returncode, run.stdout, run.stderr), (0, b'', b''))
+                    original = (app / 'main.hirsel').read_bytes()
+                    again = subprocess.run([str(compiler), 'new', str(app)], cwd=ROOT, capture_output=True)
+                    self.assertEqual(again.returncode, 2)
+                    self.assertEqual((app / 'main.hirsel').read_bytes(), original)
+
         def test_user_check_in_every_cli_library_mode(self):
             with tempfile.TemporaryDirectory(prefix='hirsel-library-modes-') as temporary:
                 work = Path(temporary)

@@ -31,24 +31,35 @@ fn hex(hash: hirsel_core_ids::ContentHash) -> String {
     hash.0.iter().map(|b| format!("{b:02x}")).collect()
 }
 fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
-    let mut args = std::env::args().skip(1);
-    let command = args
-        .next()
-        .ok_or("usage: hirsel-core check <package-dir> | image --libraries <core-root>")?;
-    if ![
-        "check",
-        "image",
-        "build",
-        "run",
-        "test",
-        "core-product",
-        "std-product",
-    ]
-    .contains(&command.as_str())
-    {
-        return Err("expected check, image, build, run, test, core-product or std-product".into());
+    let invocation = match hirsel_core_driver::cli::parse(std::env::args().skip(1))? {
+        hirsel_core_driver::cli::Action::Help(help) => {
+            print!("{help}");
+            std::process::exit(0);
+        }
+        hirsel_core_driver::cli::Action::Invoke(invocation) => invocation,
+    };
+    let command = invocation.command.name;
+    if command == "new" {
+        let directory = invocation
+            .positional
+            .as_deref()
+            .ok_or("new requires a package directory")?;
+        let library = invocation
+            .options
+            .iter()
+            .any(|(id, _)| *id == hirsel_core_driver::cli::OptionId::Lib);
+        hirsel_core_driver::cli::scaffold(Path::new(directory), library)?;
+        println!(
+            "Created {} at {directory}",
+            if library {
+                "library with example main"
+            } else {
+                "application"
+            }
+        );
+        std::process::exit(0);
     }
-    let mut dir = None;
+    let dir = invocation.positional.map(PathBuf::from);
     let mut libraries = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core");
     let mut store = None;
     let mut manifest = None;
@@ -74,90 +85,61 @@ fn run() -> Result<std::convert::Infallible, Box<dyn std::error::Error>> {
     let mut cc = std::env::var_os("LLVM_SYS_231_PREFIX")
         .map(|p| PathBuf::from(p).join("bin/clang"))
         .unwrap_or_else(|| PathBuf::from("cc"));
-    let mut run_args = Vec::new();
+    let run_args = invocation.arguments;
     let mut directories = Vec::new();
     let mut grant_mask = 0;
     let mut json = false;
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--json" => json = true,
-            "--source-core" => source_core = true,
-            "--source-std" => source_std = true,
-            "--name" => {
+    use hirsel_core_driver::cli::OptionId as Opt;
+    for (option, value) in invocation.options {
+        let value = value.unwrap_or_default();
+        match option {
+            Opt::Json => json = true,
+            Opt::SourceCore => source_core = true,
+            Opt::SourceStd => source_std = true,
+            Opt::Name => {
                 product_name = Some(
-                    hirsel_core_ids::DefPath::from_full(&args.next().ok_or("missing --name")?)
+                    hirsel_core_ids::DefPath::from_full(&value)
                         .ok_or("invalid --name definition path")?,
                 )
             }
-            "--core-product" => {
-                core_product = Some(PathBuf::from(
-                    args.next().ok_or("missing core product cache")?,
-                ))
-            }
-            "--dir" if native_command => {
-                directories.push(args.next().ok_or("missing directory grant path")?)
-            }
-            "--grant" if native_command => {
-                let kind = hirsel_core_driver::grant_kind(&args.next().ok_or("missing grant kind")?)
+            Opt::CoreProduct => core_product = Some(PathBuf::from(value)),
+            Opt::Dir => directories.push(value),
+            Opt::Grant => {
+                let kind = hirsel_core_driver::grant_kind(&value)
                     .filter(|kind| (1..=9).contains(kind)).ok_or("expected Net, Clock, Random, Stdout, Stderr, Stdin, Env, Process or Tasks; use --dir for Dir; Args is always present")?;
                 grant_mask |= 1 << kind;
             }
-            "--filter" if test_command => {
-                test_filter = Some(args.next().ok_or("missing test filter")?)
-            }
-            "--test-timeout" if test_command => {
-                let seconds: u64 = args.next().ok_or("missing test timeout seconds")?.parse()?;
+            Opt::Filter => test_filter = Some(value),
+            Opt::TestTimeout => {
+                let seconds: u64 = value.parse()?;
                 if seconds == 0 {
                     return Err("test timeout must be positive".into());
                 }
                 test_timeout = Some(std::time::Duration::from_secs(seconds));
             }
-            "--release" => release = true,
-            "--backend" => {
-                backend = Some(args.next().ok_or("missing backend")?.parse::<Backend>()?)
+            Opt::Release => release = true,
+            Opt::Backend => backend = Some(value.parse::<Backend>()?),
+            Opt::Runtime => runtime = Some(PathBuf::from(value)),
+            Opt::LogicalChargeReport => {
+                logical_charge_report = Some(PathBuf::from(value));
             }
-            "--runtime" => {
-                runtime = Some(PathBuf::from(args.next().ok_or("missing runtime archive")?))
-            }
-            "--logical-charge-report" if native_command => {
-                logical_charge_report = Some(PathBuf::from(
-                    args.next().ok_or("missing logical charge report path")?,
-                ));
-            }
-            "--cc" => cc = PathBuf::from(args.next().ok_or("missing C linker driver")?),
-            "--target" => target = args.next().ok_or("missing target")?,
-            "--limit" => {
+            Opt::Cc => cc = PathBuf::from(value),
+            Opt::Target => target = value,
+            Opt::Limit => {
                 explicit_limit = true;
-                root_limit = args.next().ok_or("missing root limit")?.parse()?;
+                root_limit = value.parse()?;
             }
-            "-o" | "--output" => {
-                output_path = Some(PathBuf::from(args.next().ok_or("missing output path")?))
+            Opt::Output => output_path = Some(PathBuf::from(value)),
+            Opt::Entry => {
+                entry =
+                    Some(hirsel_core_ids::DefPath::from_full(&value).ok_or("invalid entry path")?)
             }
-            "--" if command == "run" => {
-                run_args.extend(args);
-                break;
-            }
-            "--entry" => {
-                entry = Some(
-                    hirsel_core_ids::DefPath::from_full(
-                        &args.next().ok_or("missing entry definition path")?,
-                    )
-                    .ok_or("invalid entry path")?,
-                )
-            }
-            "--libraries" => libraries = PathBuf::from(args.next().ok_or("missing library root")?),
-            "--store" => store = Some(PathBuf::from(args.next().ok_or("missing store directory")?)),
-            "--inputs" => {
-                manifest = Some(PathBuf::from(args.next().ok_or("missing input manifest")?))
-            }
-            "--metrics" => {
-                metrics = Some(PathBuf::from(args.next().ok_or("missing metrics path")?))
-            }
-            "--image" => {
-                image_path = Some(PathBuf::from(args.next().ok_or("missing image directory")?))
-            }
-            _ if !arg.starts_with('-') && dir.is_none() => dir = Some(PathBuf::from(arg)),
-            _ => return Err(format!("unknown argument: {arg}").into()),
+            Opt::Libraries => libraries = PathBuf::from(value),
+            Opt::Store => store = Some(PathBuf::from(value)),
+            Opt::Inputs => manifest = Some(PathBuf::from(value)),
+            Opt::Metrics => metrics = Some(PathBuf::from(value)),
+            Opt::Image => image_path = Some(PathBuf::from(value)),
+            Opt::Help | Opt::Lib => unreachable!("CLI early command option"),
         }
     }
     if test_command && !explicit_limit {

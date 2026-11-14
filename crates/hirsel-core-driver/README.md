@@ -282,3 +282,14 @@ native execution. It starts after build/link and records `timed_out` in JSON;
 a timed-out run fails and later tests still run. With no option there is no
 execution deadline. The core/std law walker uses this path with its existing
 30-second execution bound; its build work remains unbounded.
+
+`help`, `--help`, and `-h` show the command catalogue. `help <command>` and
+`<command> --help` or `-h` show that command's options. The same catalogue
+selects legal options and produces help; unsupported or retired flags fail
+with exit 2. Arguments after run's `--` belong to the program.
+
+`new <package-dir>` creates a new-source application. `new <package-dir> --lib`
+creates a public `lib.hirsel` and an example `main.hirsel` that calls it. Both
+check, build, and run with the ordinary directory interface. Existing directories
+are refused without changing their contents. Native build/run still require an
+explicit runtime archive until installed-root selection is configured.

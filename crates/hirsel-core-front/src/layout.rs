@@ -418,6 +418,7 @@ impl<T: TyRead> Shapes<'_, T> {
                 Some(Role::List) => FieldTy::Seq(Box::new(self.field(args[0])?)),
                 Some(Role::String) => FieldTy::Seq(Box::new(FieldTy::Scalar(Scalar::U8))),
                 Some(Role::Map) => FieldTy::Inline(self.shape(ty)?),
+                Some(Role::Log | Role::StaticFn) => FieldTy::Scalar(Scalar::U64),
                 _ if handle(&self.decls[d.index()]) => FieldTy::Scalar(Scalar::U64),
                 Some(Role::Task) => FieldTy::Handle(Handle::Task),
                 Some(Role::Sender) => FieldTy::Handle(Handle::Sender),

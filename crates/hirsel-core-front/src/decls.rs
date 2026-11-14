@@ -203,6 +203,8 @@ impl Role {
             "Unique" => Role::Unique,
             "Site" => Role::Site,
             "Causes" => Role::Causes,
+            "Log" => Role::Log,
+            "StaticFn" => Role::StaticFn,
 
             "Dir" | "Net" | "Clock" | "Random" | "Stdout" | "Stderr" | "Stdin" | "Env"
             | "Process" | "Tasks" => Role::Capability,
@@ -217,7 +219,8 @@ impl Role {
             | Role::Map
             | Role::SpanBuilder
             | Role::Builder
-            | Role::Causes => Kind::Own,
+            | Role::Causes
+            | Role::Log => Kind::Own,
             Role::Rc | Role::Arc => Kind::Counted,
             Role::View | Role::Region | Role::Dest | Role::Writer => Kind::Scoped,
             Role::Text | Role::FixedSpan | Role::SeqSpan | Role::IndexedSpan | Role::SeqIndex => {
@@ -228,7 +231,8 @@ impl Role {
             | Role::Unique
             | Role::Site
             | Role::Child
-            | Role::Link => Kind::Plain,
+            | Role::Link
+            | Role::StaticFn => Kind::Plain,
             Role::Task | Role::Sender | Role::Receiver | Role::HostFile => Kind::Resource,
         }
     }
@@ -1918,7 +1922,7 @@ impl Program<'_> {
                 // A builder and `Causes` are owners with no copy contract (OWN-2); a
                 // builder also holds its region's stable blob.
                 Some(Role::SpanBuilder | Role::Builder) => H_STABLE | H_OPAQUE,
-                Some(Role::Causes) => H_OPAQUE,
+                Some(Role::Causes | Role::Log) => H_OPAQUE,
                 Some(_) => 0,
                 None => match decl.repr {
                     Repr::Resource => H_RESOURCE,
@@ -2547,6 +2551,7 @@ pub fn has_bounds(decls: &crate::Rows<TypeDecl>, t: &impl TyRead, ty: TyId, para
                     Some(Role::Child | Role::Unique | Role::Site) => PLAIN | SHAREABLE | SEND | KEY,
                     Some(Role::Args) => PLAIN | SHAREABLE | SEND,
                     Some(Role::Causes) => SEND,
+                    Some(Role::StaticFn) => PLAIN | SHAREABLE | SEND | KEY,
                     Some(Role::Rc) => SHAREABLE | (meet(args) & (KEY | ORDERED)),
                     Some(Role::Arc) => SHAREABLE | SEND | (meet(args) & (KEY | ORDERED)),
                     Some(Role::Box) => meet(args) & (SHAREABLE | SEND | KEY | ORDERED),

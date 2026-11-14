@@ -1,11 +1,18 @@
-// expect: accept
 // A retry policy over isolate's Causes: retry while the primary cause is Fail, stop on any
-// other. Run lines wait: a caught failure leaves the replacement cell charged (FAIL-16,
-// MEM-24), and the harness refuses a run that returns with bytes admitted; the evaluator
-// also faults on cleaning a caught Fail whose message is a heap String (core-form-883).
-// hand-derived run: case_fail_then_ok() = 20 | used 32
-// hand-derived run: case_unwrap_stops() = 2005 | used 32
-// hand-derived run: case_gives_up() = 1000 | used 32
+// other; and a caught Fail whose message is a heap String, its Causes dropped unread, read
+// once, or caught twice (FORM #104: the raise's cleanup freed the message the cause had
+// taken, a double free). Every run returns with one cause cell still admitted: a caught
+// failure keeps the cell as the primary and a later catch refunds the earlier one
+// (FAIL-16, MEM-24), so each states `used 32`.
+// Cranelift keeps 64 after a second catch: the later catch does not refund the earlier
+// cell (core-cranelift-904; LLVM and the evaluator keep 32), so the two runs that catch
+// twice are held under the evaluator until it does.
+// expect: run case_fail_then_ok() = 20 used 32 evaluator-only:cranelift
+// expect: run case_unwrap_stops() = 2005 used 32
+// expect: run case_gives_up() = 1000 used 32
+// expect: run case_drop() = 1 used 32
+// expect: run case_read() = 1 used 32
+// expect: run case_twice() = 2 used 32 evaluator-only:cranelift
 fn attempt(n: u64) -> u64 {
     if n < 2 {
         fail(result.unwrap(string.from("busy")))
@@ -79,4 +86,37 @@ pub fn case_gives_up() -> u64 {
         Stopped(n) => 2000 + n,
         NoRoom => 9999
     }
+}
+
+// attempt(0) fails with the heap message "busy"; the Causes is dropped unread
+pub fn case_drop() -> u64 {
+    match isolate(fn() -> u64 {
+        attempt(0)
+    }) {
+        Error(_) => 9,
+        Ok(Ok(v)) => v,
+        Ok(Error(_)) => 1,
+    }
+}
+
+// read once: its primary is the Fail
+pub fn case_read() -> u64 {
+    match isolate(fn() -> u64 {
+        attempt(0)
+    }) {
+        Error(_) => 9,
+        Ok(Ok(v)) => v,
+        Ok(Error(take cs)) => if retryable(cs) {
+            1
+        } else {
+            2
+        },
+    }
+}
+
+// two catches in a row, 1 each
+pub fn case_twice() -> u64 {
+    let a = case_drop()
+    let b = case_drop()
+    a + b
 }

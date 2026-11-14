@@ -661,9 +661,10 @@ fn split_facts(module: &Module) -> Option<String> {
 /// `f(a,b)` run against `= r1,r2` or `= fail C1,C2` (the cause chain, primary first;
 /// `C1@line:column` also checks each cause's site, SITES.md),
 /// optionally followed by `trace t1,t2`: the first u64 field of each resource whose
-/// cleanup started, in order. Arguments and results are read at the emitted
-/// signature's types, so a case writes values, not bits. A run that returns has
-/// refunded every admission (MEM-23).
+/// cleanup started, in order, and by `used N`: the bytes still admitted when it returns,
+/// 0 when absent. Arguments and results are read at the emitted signature's types, so a
+/// case writes values, not bits. A run that returns has refunded every admission
+/// (MEM-23) except what it states: a caught failure keeps its cause cell (FAIL-16).
 fn run_expect(
     module: &Module,
     functions: &HashMap<String, FuncId>,
@@ -697,6 +698,13 @@ fn run_expect(
         .zip(&args)
         .map(|(&t, a)| eval::scalar(t, a))
         .collect();
+    let (want, used) = match want {
+        [w @ .., "used", n] => match n.parse::<u64>() {
+            Ok(n) => (w, n),
+            Err(_) => return Some(format!("run {call}: unreadable `used {n}`")),
+        },
+        w => (w, 0),
+    };
     let (want, trace) = match want.iter().position(|w| *w == "trace") {
         Some(i) => (&want[..i], want.get(i + 1).copied()),
         None => (want, None),
@@ -756,8 +764,11 @@ fn run_expect(
         ),
         failed => failed,
     };
-    if matches!(got, eval::Outcome::Returned(_)) && report.used != 0 {
-        return Some(format!("run {call}: {} bytes still admitted", report.used));
+    if matches!(got, eval::Outcome::Returned(_)) && report.used != used {
+        return Some(format!(
+            "run {call}: {} bytes still admitted, want {used}",
+            report.used
+        ));
     }
     let expected = match want {
         ["fail", causes] => eval::Outcome::Failed(causes.split(',').map(str::to_string).collect()),

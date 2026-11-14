@@ -16,7 +16,10 @@
   must return `R` or fail with `Cause`. Values are written at the signature's types
   (`-3`, `true`, `0.5`), comma-separated without spaces. `= fail Kind@LINE:COL,...`
   also compares each cause's site (SITES.md), resolved in the evaluator; native
-  harnesses compare the kinds.
+  harnesses compare the kinds. A run that returns must have refunded every admission unless the line
+  ends in `used N` (after any `trace`), the bytes still admitted when it returns: a
+  caught failure keeps its cause cell (FAIL-16), so a run whose `isolate` caught
+  one states `used 32`.
 
 A run line may end in `evaluator-only:ENGINE,..` (engines `cranelift`, `llvm`): the case
 harness holds it under the evaluator, and each named native walker requires it to

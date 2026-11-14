@@ -1245,10 +1245,13 @@ dependencies = [
 name = "hirsel-llvm-lazy"
 version = "0.1.0"
 dependencies = [
+ "gimli",
+ "hirsel-core-ids",
  "hirsel-core-ir",
  "hirsel-core-layout",
  "hirsel-guard",
  "libc",
+ "object",
  "serde",
 ]
 

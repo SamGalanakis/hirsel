@@ -13,6 +13,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(hirsel_lazy_core)'] }
 native-tsan = []
 
 [dependencies]
+hirsel-core-ids = { path = "../hirsel-core-ids" }
 hirsel-core-layout = { path = "../hirsel-core-layout" }
 hirsel-core-ir = { path = "../hirsel-core-ir" }
 hirsel-graph = { path = "../hirsel-graph" }
@@ -20,10 +21,11 @@ hirsel-core-contract = { path = "../hirsel-core-contract" }
 hirsel-lir = { path = "../hirsel-lir" }
 hirsel-syntax = { path = "../hirsel-syntax" }
 gimli = { version = "=0.33.0", default-features = false, features = ["read", "std"] }
-object = { version = "=0.40.0", default-features = false, features = ["elf", "read_core", "std", "write"] }
+object = { version = "=0.40.0", default-features = false, features = ["elf", "read_core", "std", "write", "build"] }
 llvm-sys = { version = "=231.0.1", default-features = false, features = ["strict-versioning", "force-dynamic"] }
 
 [dev-dependencies]
+gimli = { version = "=0.33.0", default-features = false, features = ["read", "write", "std"] }
 hirsel-llvm-lazy = { path = "../hirsel-llvm-lazy" }
 hirsel-intern = { path = "../hirsel-intern" }
 hirsel-core-rt = { path = "../hirsel-core-rt", features = ["testing", "charge-observation"] }

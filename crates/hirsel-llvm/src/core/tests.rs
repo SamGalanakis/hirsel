@@ -3072,6 +3072,80 @@ fn assert_relative_debug_rows(bytes: &[u8], module: &Module) {
         offset += 4 + length;
     }
     assert!(mapped > 0, "no item-relative machine rows");
+    assert_native_debug_product(bytes);
+}
+
+fn assert_native_debug_product(bytes: &[u8]) {
+    use hirsel_core_ir::source::ScopeKind;
+    use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
+    let unit = hirsel_core_ids::ContentHash::of_bytes(b"native debug witness");
+    let product = finish_native_object(bytes.to_vec(), unit, true).unwrap();
+    let lazy = hirsel_llvm_lazy::core::finish_native_object(bytes.to_vec(), unit, true).unwrap();
+    assert_eq!(product, lazy, "eager/lazy debug extraction differs");
+    let file = object::File::parse(product.bytes.as_slice()).unwrap();
+    assert!(file.section_by_name(".debug_info").is_none());
+    assert!(file.section_by_name(".debug_line").is_none());
+    let original = object::File::parse(bytes).unwrap();
+    for section in original
+        .sections()
+        .filter(|s| s.kind() == object::SectionKind::Text)
+    {
+        assert_eq!(
+            section.data().unwrap(),
+            file.section_by_name(section.name().unwrap())
+                .unwrap()
+                .data()
+                .unwrap()
+        );
+    }
+    let debug = product.debug.unwrap();
+    assert!(!debug.sequences.is_empty());
+    assert!(!debug.items.is_empty());
+    for (index, section) in debug.sections.iter().enumerate() {
+        assert_eq!(
+            section.symbol,
+            hirsel_core_ir::source::debug_symbol(unit, index as u32)
+        );
+        let symbol = file
+            .symbols()
+            .find(|s| s.name().unwrap() == section.symbol)
+            .unwrap();
+        assert_eq!(symbol.address(), 0);
+        assert!(
+            matches!(symbol.flags(), object::SymbolFlags::Elf { st_info, st_other }
+            if st_info.0 >> 4 == object::elf::STB_GLOBAL.0 && st_other.0 & 3 == object::elf::STV_HIDDEN.0)
+        );
+    }
+    for sequence in &debug.sequences {
+        assert!(sequence.range.begin <= sequence.range.end);
+        assert!(sequence.range.end <= debug.sections[sequence.range.section as usize].size);
+        for row in &sequence.rows {
+            assert!((sequence.range.begin..=sequence.range.end).contains(&row.offset));
+            if let Some(at) = row.source {
+                assert!((at.item as usize) < debug.items.len());
+            }
+        }
+    }
+    for (index, scope) in debug.scopes.iter().enumerate() {
+        if let Some(parent) = scope.parent {
+            assert!((parent as usize) < index);
+        }
+        if let Some(origin) = scope.origin {
+            assert!(matches!(
+                debug.scopes[origin as usize].kind,
+                ScopeKind::Function { .. }
+            ));
+        }
+    }
+    assert!(
+        debug
+            .scopes
+            .iter()
+            .any(|s| matches!(&s.kind, ScopeKind::Function { linkage } if !linkage.is_empty()))
+    );
+    let off = finish_native_object(bytes.to_vec(), unit, false).unwrap();
+    assert_eq!(off.bytes, bytes);
+    assert!(off.debug.is_none());
 }
 
 fn site_fixture(target: Target) {

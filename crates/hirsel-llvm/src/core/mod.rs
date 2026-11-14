@@ -14,6 +14,8 @@ mod cleanup;
 mod collections;
 #[cfg(all(test, not(hirsel_lazy_core)))]
 mod copy_tests;
+mod debug;
+pub use debug::finish_native_object;
 mod empty;
 mod fast;
 mod forward;

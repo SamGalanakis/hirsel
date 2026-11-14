@@ -152,6 +152,16 @@ impl<T: TyRead> Shapes<'_, T> {
                         let entries = self.map_field(&args)?;
                         return self.fill(r, LRepr::Own, record(vec![("entries", entries)]), None);
                     }
+                    Some(Role::Log) => {
+                        let list = self
+                            .decls
+                            .iter()
+                            .position(|d| d.role == Some(Role::List))
+                            .map(|d| crate::types::DeclId(d as u32))?;
+                        let list = self.types.mk(TyKind::Adt(list, vec![args[0]]));
+                        let node = FieldTy::Box(self.shape(list)?);
+                        return self.fill(r, LRepr::Own, record(vec![("node", node)]), None);
+                    }
                     // Compact text or a span held as a value: a stable reference to
                     // compact data in its region (core.md), plain. The locator names
                     // what it locates (FORM #63), so key, equality and order read it.

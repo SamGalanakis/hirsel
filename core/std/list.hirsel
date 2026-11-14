@@ -328,6 +328,17 @@ pub fn dedup[T: key](mut xs: List[T]) {
     truncate(mut xs, write)
 }
 
+/// Appends a copy of x. Fails: Error(c) when GROWTH is refused, xs unchanged; x is plain,
+/// so nothing comes back, and the result composes with `?` into Result[_, Capacity].
+/// Alloc: GROWTH. Cost: O(1) amortised.
+/// Ex: `list.push_copy(mut ids, id)?`
+pub fn push_copy[T: plain](mut xs: List[T], x: T) -> Result[(), Capacity] {
+    match list.push(mut xs, x) {
+        Ok(()) => Ok(()),
+        Error((c, _)) => Error(c),
+    }
+}
+
 /// Appends copies of ys. Fails: Capacity leaves xs unchanged.
 /// Alloc: one list GROWTH. Cost: O(len ys), plus growth copies.
 pub fn extend[T: plain](mut xs: List[T], ys: List[T]) -> Result[(), Capacity] {

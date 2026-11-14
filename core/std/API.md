@@ -63,14 +63,14 @@ the seed's, read through one name. No extension declares a core member's name.
 | int | yes | 5 | parse_uint, parse_int, is_ascii_digit, is_ascii_alpha, to_ascii_lower |
 | io |  | 7 | lines, prefix, read_line, out, pending, flush, write |
 | json |  | 6 | size, parse, push_json, index, get, shown |
-| list | yes | 15 | first, get_or, last, remove, insert, swap_remove, truncate, reverse, sort, sum_bytes, contains, binary_search, dedup, extend, binary_search_by |
+| list | yes | 16 | first, get_or, last, remove, insert, swap_remove, truncate, reverse, sort, sum_bytes, contains, binary_search, dedup, push_copy, extend, binary_search_by |
 | map | yes | 3 | contains, get_or, get_or_insert |
 | order |  | 5 | compare, min, max, reverse, then |
 | pool |  | 11 | new, with_capacity, len, insert, get, get_or, contains, update, remove, clear, next |
 | result | yes | 2 | map_err, capacity_only |
 | set |  | 6 | new, len, contains, insert, remove, entries |
 | string | yes | 15 | with_capacity, is_boundary, push_i64, push_uint, repeat, clear, find, starts_with, ends_with, split_once, next_split, next_line, strip_prefix, strip_suffix, trim_ascii |
-| **total** | **7 of 16** | **106** | |
+| **total** | **7 of 16** | **107** | |
 
 **Known cost.** float's push_fixed64 and its push_ascii helper build their digits as Bytes
 and pass them through `string.from_utf8`, revalidating about 20 ASCII bytes per number that

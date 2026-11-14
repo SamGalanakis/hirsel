@@ -387,6 +387,39 @@ fn extend_capacity() -> u64 {
     }
 }
 
+fn push_three(mut xs: List[u64], x: u64) -> Result[u64, Capacity] {
+    list.push_copy(mut xs, x)?
+    list.push_copy(mut xs, x + 1)?
+    list.push_copy(mut xs, x + 2)?
+    Ok(x)
+}
+
+// The copies land in order after the existing elements; x stays the caller's.
+// expect: run push_copy_appends() = 1234
+fn push_copy_appends() -> u64 {
+    let mut xs: List[u64] = list.new()
+    result.unwrap(list.push_copy(mut xs, 1))
+    let kept = result.unwrap(push_three(mut xs, 2))
+    if kept != 2 {
+        return 99
+    }
+    digits(xs)
+}
+
+// A refused first growth is Error(Capacity) and leaves xs empty. Growth is charged to
+// the limit where the list was made, so the list's first block is the one under the bound.
+// expect: run push_copy_capacity() = 0
+fn push_copy_capacity() -> u64 {
+    let mut xs: List[u64] = list.new()
+    let r = bound bytes 0 {
+        list.push_copy(mut xs, 3)
+    }
+    match r {
+        Ok(Error(_)) => list.len(xs),
+        _ => 99
+    }
+}
+
 fn by_tens(a: u64, b: u64) -> Order {
     order.compare(a / 10, b / 10)
 }

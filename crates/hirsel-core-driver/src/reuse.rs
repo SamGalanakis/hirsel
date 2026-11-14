@@ -299,7 +299,11 @@ impl Keys {
                     "internal error: core reuse body `{path}` has no indexed definition"
                 ))
             })?;
-        let mut pending = vec![own.0 as usize];
+        // Reserve the direct resolver reads up front. This keeps the per-body
+        // closure buffer from growing through allocator reallocation while
+        // retaining the existing Keys shape and traversal order.
+        let mut pending = Vec::with_capacity(1 + resolution.names.len() + resolution.reads.len());
+        pending.push(own.0 as usize);
         for name in &resolution.names {
             target_ids(index, module, name.target, &mut pending);
         }

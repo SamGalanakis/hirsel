@@ -89,6 +89,45 @@ impl<'c> NativeSink<'c> {
     pub fn register_global(&mut self, name: &str, ty: &Type) {
         self.globals.insert(name.into(), ty.clone());
     }
+    pub fn module_text(&mut self, text: &str) {
+        let text = text.trim();
+        if !text.starts_with('@') || !text.contains(" = private") {
+            return;
+        }
+        let Some((name, body)) = text.split_once(" = private") else {
+            return;
+        };
+        if !name.starts_with("@hirsel_cause_") || !body.contains("constant") {
+            return;
+        }
+        let numbers = body
+            .split("i64 ")
+            .skip(1)
+            .filter_map(|value| {
+                value
+                    .split(|c: char| !c.is_ascii_digit())
+                    .next()?
+                    .parse()
+                    .ok()
+            })
+            .collect::<Vec<u64>>();
+        if numbers.len() < 2 {
+            return;
+        }
+        let i8 = self.unit.integer_type(8);
+        let i64 = self.unit.integer_type(64);
+        let bytes = self
+            .unit
+            .array_type(i8, crate::core::memory_layout::CAUSE_KIND as u64);
+        let fields = self.unit.struct_type(&[bytes, i64, i64]);
+        let zero_bytes = self.unit.zero(bytes);
+        let kind = self.unit.integer(i64, numbers[0] as u128);
+        let site = self.unit.integer(i64, numbers[1] as u128);
+        let initializer = self.unit.constant_struct(&[zero_bytes, kind, site], false);
+        let global = self.unit.global(name.trim_start_matches('@'), fields);
+        self.unit
+            .initialize_global(global, Some(initializer), 2, true, false, 8);
+    }
     fn function(&mut self, name: &str, sig: &Signature) -> llvm::Value<'c> {
         let result = self.ty(&sig.result);
         let params: Vec<_> = sig.params.iter().map(|p| self.ty(&p.ty)).collect();

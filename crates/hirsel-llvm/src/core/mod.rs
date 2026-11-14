@@ -273,7 +273,11 @@ pub(crate) fn emit_native_scalar_module_in_context(
             }
             emitter.term(&body.terminators[block])?;
         }
-        let native = emitter.sink;
+        let intrinsics = emitter.intrinsics.clone();
+        let mut native = emitter.sink;
+        for intrinsic in intrinsics {
+            native.module_text(&intrinsic);
+        }
         emitted += 1;
         // Keep the shared sink alive while the next function is lowered. The
         // emitter owns the sink for this iteration; reconstructing it is not

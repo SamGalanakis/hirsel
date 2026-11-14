@@ -6,7 +6,7 @@ cxx_library(
     },
     header_namespace = "",
     compiler_flags = ["-O2", "-fvisibility=hidden"],
-    deps = ["toolchains//:libllvm"],
+    deps = ["toolchains//:libllvm", "//crates/hirsel-llvm/bridge:checked-copy-static"],
     preferred_linkage = "shared",
     visibility = ["PUBLIC"],
 )

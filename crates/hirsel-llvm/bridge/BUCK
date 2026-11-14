@@ -1,16 +1,18 @@
-cxx_library(
-    name = "bridge",
-    srcs = ["stack_size.cpp", "count_loops.cpp"],
-    headers = ["aggregate_phi.h"],
-    header_namespace = "",
-    compiler_flags = [
+LLVM_BRIDGE_FLAGS = [
         "-std=c++17", "-fno-exceptions", "-fno-rtti", "-nostdinc++",
         "--sysroot=tools/buck2/toolchains/llvm-files/sysroot",
         "-isystem", "tools/buck2/toolchains/llvm-files/sysroot/usr/include/c++/13",
         "-isystem", "tools/buck2/toolchains/llvm-files/sysroot/usr/include/x86_64-linux-gnu/c++/13",
         "-isystem", "tools/buck2/toolchains/llvm-files/sysroot/usr/include",
         "-isystem", "tools/buck2/toolchains/llvm-files/sysroot/usr/include/x86_64-linux-gnu",
-    ],
+    ]
+
+cxx_library(
+    name = "bridge",
+    srcs = ["stack_size.cpp", "count_loops.cpp", "checked_copy.cpp"],
+    headers = ["aggregate_phi.h", "loop_version.h"],
+    header_namespace = "",
+    compiler_flags = LLVM_BRIDGE_FLAGS,
     deps = ["toolchains//:libllvm"],
     exported_linker_flags = ["-l:libstdc++.so.6"],
     visibility = ["PUBLIC"],
@@ -19,3 +21,18 @@ cxx_library(
 export_file(name = "count_loops.cpp", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "stack_size.cpp", mode = "reference", visibility = ["PUBLIC"])
 export_file(name = "aggregate_phi.h", mode = "reference", visibility = ["PUBLIC"])
+
+export_file(name = "checked_copy.cpp", mode = "reference", visibility = ["PUBLIC"])
+export_file(name = "loop_version.h", mode = "reference", visibility = ["PUBLIC"])
+
+cxx_library(
+    name = "checked-copy-static",
+    srcs = ["checked_copy.cpp"],
+    headers = ["loop_version.h"],
+    header_namespace = "",
+    compiler_flags = LLVM_BRIDGE_FLAGS,
+    deps = ["toolchains//:libllvm"],
+    exported_linker_flags = ["-l:libstdc++.so.6"],
+    preferred_linkage = "static",
+    visibility = ["PUBLIC"],
+)

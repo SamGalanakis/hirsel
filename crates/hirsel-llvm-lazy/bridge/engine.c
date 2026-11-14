@@ -13,6 +13,7 @@
 #include <string.h>
 #include <pthread.h>
 #include "aggregate_phi.h"
+extern void hirsel_llvm_guard_copy_loops(void *module, void *machine);
 
 typedef struct { uint8_t *data; size_t len; uint8_t failed; } HirselLlvmOutput;
 typedef struct { const uint8_t *data; size_t len; uint8_t imported; } HirselLlvmUnit;
@@ -401,12 +402,12 @@ void hirsel_llvm_program_v1(const HirselLlvmUnit *units, size_t count,
         // removes carrier clears/restores that its cleanup used to observe.
         LLVMErrorRef e = LLVMRunPasses(module, "default<O3>", machine, options);
         if (!e) {
+            hirsel_llvm_guard_copy_loops(module, machine);
             hirsel_scalarize_aggregate_phis(module, context);
             e = LLVMRunPasses(module,
                 "cgscc(argpromotion),function(sroa,early-cse,correlated-propagation,instcombine<no-verify-fixpoint>,jump-threading,constraint-elimination,simplifycfg,dse)",
                 machine, options);
         }
-        if (!e)
         LLVMDisposePassBuilderOptions(options);
         if (e) {
             char *text = LLVMGetErrorMessage(e); error(out, text);

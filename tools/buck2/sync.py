@@ -1247,7 +1247,7 @@ def first_party(meta: dict) -> str:
                 inputs=Raw(f"glob({starlark(BUILD_SCRIPT_INPUTS[name], 4)})"),
                 input_paths={f"crates/hirsel-llvm/bridge/{source}":
                              f"//crates/hirsel-llvm/bridge:{source}"
-                             for source in ("count_loops.cpp", "stack_size.cpp", "aggregate_phi.h")}
+                             for source in ("count_loops.cpp", "stack_size.cpp", "aggregate_phi.h", "checked_copy.cpp", "loop_version.h")}
                             if name == "hirsel-compiler-identity" else None,
                 features=features,
                 **common,

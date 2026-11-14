@@ -17,6 +17,37 @@ fn main() {
         prefix.join("lib/libLLVM.so.23.1").display()
     );
     println!("cargo:rerun-if-env-changed=LLVM_SYS_231_PREFIX");
+    let copy_source = shared.join("checked_copy.cpp");
+    for source in [&copy_source, &shared.join("loop_version.h")] {
+        println!("cargo:rerun-if-changed={}", source.display());
+    }
+    let copy_object = out.join("checked_copy.o");
+    let sysroot = prefix.join("sysroot");
+    assert!(
+        Command::new(prefix.join("bin/hirsel-clang++"))
+            .args([
+                "-std=c++17",
+                "-fPIC",
+                "-O2",
+                "-fno-exceptions",
+                "-fno-rtti",
+                "-nostdinc++"
+            ])
+            .arg(format!("--sysroot={}", sysroot.display()))
+            .arg("-isystem")
+            .arg(sysroot.join("usr/include/c++/13"))
+            .arg("-isystem")
+            .arg(sysroot.join("usr/include/x86_64-linux-gnu/c++/13"))
+            .arg("-I")
+            .arg(prefix.join("include"))
+            .arg("-c")
+            .arg(copy_source)
+            .arg("-o")
+            .arg(&copy_object)
+            .status()
+            .unwrap()
+            .success()
+    );
     let component = out.join("libhirsel_llvm_engine.so");
     assert!(
         Command::new(prefix.join("bin/hirsel-clang"))
@@ -32,6 +63,8 @@ fn main() {
             .arg("-I")
             .arg(&shared)
             .arg(&source)
+            .arg(&copy_object)
+            .arg("-l:libstdc++.so.6")
             .arg("-L")
             .arg(prefix.join("lib"))
             .arg("-l:libLLVM.so.23.1")

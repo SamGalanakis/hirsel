@@ -10,6 +10,7 @@
 #undef _GLIBCXX_USE_PTHREAD_RWLOCK_CLOCKLOCK
 #endif
 #include <optional>
+#include "loop_version.h"
 #include <llvm/Analysis/AssumptionCache.h>
 #include <llvm/Analysis/LoopInfo.h>
 #include <llvm/Analysis/ScalarEvolution.h>
@@ -31,37 +32,7 @@
 #include <llvm/Transforms/Utils/ScalarEvolutionExpander.h>
 using namespace llvm;
 
-// Keep the checked loop and every partial-failure exit as the fallback.
-static void versionLoop(Loop &L, Value *Safe, LoopInfo &LI, DominatorTree &DT,
-                        ScalarEvolution &SE, StringRef Preheader,
-                        StringRef Suffix) {
-  BasicBlock *PH = L.getLoopPreheader();
-  formLCSSA(L, DT, &LI, &SE);
-  BasicBlock *Check = PH;
-  PH = SplitBlock(Check, Check->getTerminator(), &DT, &LI, nullptr, Preheader);
-  ValueToValueMapTy Map;
-  SmallVector<BasicBlock *, 16> Cloned;
-  Loop *Slow = cloneLoopWithPreheader(PH, Check, &L, Map, Suffix, &LI,
-                                      &DT, Cloned);
-  remapInstructionsInBlocks(Cloned, Map);
-  // LCSSA already funnels all outside uses through exit PHIs. Clone each
-  // incoming edge, preserving the precise partially updated state on failure.
-  SmallVector<BasicBlock *, 8> Exits;
-  L.getUniqueExitBlocks(Exits);
-  for (BasicBlock *Exit : Exits) for (PHINode &P : Exit->phis()) {
-    unsigned N = P.getNumIncomingValues();
-    for (unsigned I = 0; I < N; ++I) {
-      BasicBlock *From = P.getIncomingBlock(I);
-      if (!L.contains(From)) continue;
-      Value *V = P.getIncomingValue(I);
-      P.addIncoming(Map.count(V) ? static_cast<Value *>(Map[V]) : V,
-                    cast<BasicBlock>(Map[From]));
-    }
-  }
-  Instruction *OldBranch = Check->getTerminator();
-  CondBrInst::Create(Safe, PH, Slow->getLoopPreheader(), OldBranch->getIterator());
-  OldBranch->eraseFromParent();
-}
+using hirsel_llvm::versionLoop;
 
 // Each update is exactly the entry accumulator or its single +1, through
 // PHI/select joins. Anything else, including another arithmetic update, refuses.

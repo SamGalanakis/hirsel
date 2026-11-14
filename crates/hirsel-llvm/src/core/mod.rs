@@ -12,6 +12,8 @@ mod bytes;
 mod case;
 mod cleanup;
 mod collections;
+#[cfg(all(test, not(hirsel_lazy_core)))]
+mod copy_tests;
 mod empty;
 mod fast;
 mod forward;

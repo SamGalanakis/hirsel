@@ -37,7 +37,7 @@ fn host_startup_stops_have_exact_names_and_skip_cleanup() {
         ("zero page", b"run stop: PageSize\n".as_slice()),
         ("missing action", b"run stop: Signal\n".as_slice()),
     ] {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = crate::test_process::command()
             .args([
                 "--ignored",
                 "--exact",

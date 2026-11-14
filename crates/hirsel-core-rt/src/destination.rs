@@ -37,7 +37,7 @@ mod tests {
 
     #[test]
     fn destination_overflow_is_a_named_run_stop() {
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let output = crate::test_process::command()
             .args([
                 "--ignored",
                 "--exact",

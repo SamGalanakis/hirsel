@@ -1,0 +1,91 @@
+fn read_sequence(d:Dir)->bool waits {
+    let mut f=result.unwrap(host.open(d,"f",Read))
+    let mut b:Bytes=result.unwrap(list.with_capacity(8))
+    result.unwrap(list.push(mut b,b'P'))
+    match host.read(mut f,mut b) {Error(Other(5))=>{},_=>return false}
+    if list.len(b)!=1 || b[0]!=b'P' {return false}
+    if result.unwrap(host.read(mut f,mut b))!=2 || list.len(b)!=3 || b[1]!=b'a' || b[2]!=b'b' {return false}
+    match host.read(mut f,mut b) {Error(NotFound)=>{},_=>return false}
+    if list.len(b)!=3 {return false}
+    if result.unwrap(host.read(mut f,mut b))!=1 || list.len(b)!=4 || b[3]!=b'c' {return false}
+    result.unwrap(host.read(mut f,mut b))==0 && list.len(b)==4
+}
+fn errors(d:Dir)->bool waits {
+    match host.open(d,"f",Read) {Error(NotFound)=>{},_=>return false}
+    match host.open(d,"f",Read) {Error(Denied)=>{},_=>return false}
+    match host.open(d,"f",Read) {Error(Exists)=>{},_=>return false}
+    match host.open(d,"f",Read) {Error(Closed)=>{},_=>return false}
+    match host.open(d,"f",Read) {Error(Other(1234))=>{},_=>return false}
+    let f=result.unwrap(host.open(d,"f",Read))
+    result.unwrap(host.close(take f))
+    true
+}
+fn append_sequence(d:Dir,n:u64)->bool waits {
+    let mut f=result.unwrap(host.open(d,"f",Append))
+    let b=string.as_bytes("xyz")
+    match host.write(mut f,b) {Error(e)=>{if e.written!=n{return false};match e.error {Other(5)=>{},_=>return false}},_=>return false}
+    result.unwrap(host.write(mut f,list.slice(b,n,3)))
+    match host.write(mut f,string.as_bytes("!")) {Error(e)=>{if e.written!=0{return false};match e.error {Denied=>{},_=>return false}},_=>return false}
+    result.unwrap(host.write(mut f,string.as_bytes("!")))
+    result.unwrap(host.close(take f))
+    let mut reader=result.unwrap(host.open(d,"f",Read))
+    let mut got:Bytes=result.unwrap(list.with_capacity(8))
+    if result.unwrap(host.read(mut reader,mut got))!=7 {return false}
+    got[0]==b'o' && got[1]==b'l' && got[2]==b'd' && got[3]==b'x' && got[4]==b'y' && got[5]==b'z' && got[6]==b'!'
+}
+type IssueInput:send { f:HostFile, tx:Sender[u64], write:bool }
+fn issued(take input:IssueInput)->u64 waits {
+    let mut x=take input
+    let value=if x.write {
+        match host.write(mut x.f,string.as_bytes("xyz")) {Error(e)=>{match e.error {Other(5)=>{},_=>return 0};e.written},_=>return 0}
+    } else {
+        let mut b:Bytes=result.unwrap(list.with_capacity(1))
+        let n=result.unwrap(host.read(mut x.f,mut b))
+        if list.len(b)!=1 || b[0]!=b'A' {return 0}
+        n
+    }
+    result.unwrap(channel.try_send(x.tx,value))
+    task.check_cancel()
+    99
+}
+fn cancelled_at_provider(d:Dir,tasks:Tasks,before:bool,writing:bool)->bool waits {
+    let mode=if writing {Append} else {Read}
+    let f=result.unwrap(host.open(d,"f",mode))
+    let c:Result[(Sender[u64],Receiver[u64]),Capacity]=channel.new(1)
+    let (tx,rx)=result.unwrap(take c)
+    let mut h=result.unwrap(task.spawn(tasks,bytes 1024,IssueInput(f:take f,tx:take tx,write:writing),issued))
+    if before {task.cancel(mut h)}
+    match task.join(take h) {Error(Cancelled(take causes))=>{let _=take causes},_=>return false}
+    if before {match channel.receive(rx) {Error(Closed(()))=>true,_=>false}}
+    else {result.unwrap(channel.receive(rx))==1}
+}
+type WaitInput:send { ready:Sender[u64], data_tx:Sender[u64], data_rx:Receiver[u64], sending:bool }
+fn blocked(take input:WaitInput)->u64 waits {
+    let x=take input
+    result.unwrap(channel.try_send(x.ready,1))
+    if x.sending {result.unwrap(channel.send(x.data_tx,22))}
+    else {let _=result.unwrap(channel.receive(x.data_rx))}
+    99
+}
+fn cancel_blocked(tasks:Tasks,sending:bool)->bool waits {
+    let ready:Result[(Sender[u64],Receiver[u64]),Capacity]=channel.new(1)
+    let (ready_tx,ready_rx)=result.unwrap(take ready)
+    let data:Result[(Sender[u64],Receiver[u64]),Capacity]=channel.new(1)
+    let (data_tx,data_rx)=result.unwrap(take data)
+    if sending {result.unwrap(channel.try_send(data_tx,11))}
+    let parent_tx=channel.sender(data_tx)
+    let mut h=result.unwrap(task.spawn(tasks,bytes 0,WaitInput(ready:take ready_tx,data_tx:take data_tx,data_rx:take data_rx,sending:sending),blocked))
+    if result.unwrap(channel.receive(ready_rx))!=1 {return false}
+    task.cancel(mut h)
+    match task.join(take h) {Error(Cancelled(take causes))=>{let _=take causes;true},_=>false}
+}
+pub fn main(d:Dir,tasks:Tasks,a:Args)->Result[(),Exit] {
+    let mode=option.unwrap(args.get(a,0))
+    let ok=if mode=="read" {read_sequence(d)} else if mode=="errors" {errors(d)}
+      else if mode=="append0" {append_sequence(d,0)} else if mode=="append1" {append_sequence(d,1)} else if mode=="append3" {append_sequence(d,3)}
+      else if mode=="before-read" {cancelled_at_provider(d,tasks,true,false)}
+      else if mode=="issue-read" || mode=="delivery-read" {cancelled_at_provider(d,tasks,false,false)}
+      else if mode=="issue-write" || mode=="delivery-write" {cancelled_at_provider(d,tasks,false,true)}
+      else {cancel_blocked(tasks,mode=="blocked-send")}
+    if ok {Ok(())} else {Error(Exit(status:1))}
+}

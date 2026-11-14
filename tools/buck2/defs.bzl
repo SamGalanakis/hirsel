@@ -290,6 +290,24 @@ def hirsel_test(name, crate, crate_root, srcs, features, deps, manifest_dir, pac
         exec_compatible_with = _compile_constraints(harness),
         visibility = ["PUBLIC"],
     )
+    if package_name == "hirsel-core-rt":
+        # Cross harness is opt-in, not a host test/tool or a shipping archive.
+        # Same sources/deps as the ordinary harness, with real ARM cfg/std/link.
+        native.rust_binary(
+            name = "hirsel-core-rt-aarch64-harness",
+            incoming_transition = "root//tools/buck2:aarch64_test_tool_transition",
+            crate = crate,
+            crate_root = crate_root,
+            srcs = srcs,
+            features = features,
+            deps = deps,
+            edition = edition,
+            env = _compile_env(package_name, crate, version, build_script),
+            rustc_flags = _flags(manifest_dir, ["--test"], target = "hirsel-core-rt-aarch64-harness"),
+            exec_compatible_with = _compile_constraints("hirsel-core-rt-aarch64-harness"),
+            labels = ["gate"],
+            visibility = ["PUBLIC"],
+        )
     common = dict(
         harness = ":" + harness,
         data = data,
@@ -1287,8 +1305,8 @@ _runtime_archives = rule(
     },
 )
 
-def hirsel_core_driver_native_test(name, data):
-    cases = OPENAT2_TEST_CASES["hirsel-core-driver-unittest"]
+def hirsel_core_driver_native_test(name, data, case_filter = "native::tests::"):
+    cases = OPENAT2_TEST_CASES["hirsel-core-driver-unittest"] if case_filter == "native::tests::" else []
     common = dict(
         harness = "//:hirsel-core-driver-unittest-harness",
         data = data,
@@ -1302,7 +1320,7 @@ def hirsel_core_driver_native_test(name, data):
     )
     _rust_test(
         name = name + "-pool",
-        args = ["native::tests::", "--ignored"] + [arg for case in cases for arg in ["--skip", case]],
+        args = [case_filter, "--ignored"] + [arg for case in cases for arg in ["--skip", case]],
         exec_compatible_with = _test_platform("hirsel-core-driver-unittest"),
         pool = not TESTS_ON_HOST,
         **common
@@ -1320,7 +1338,8 @@ def hirsel_core_driver_native_test(name, data):
             extra_env = {"HIRSEL_TEST_DEDICATED_CASE": case},
             **common
         )
-    _suite(name = name + "-openat2", tests = host_targets, labels = ["local-execution", "requires-openat2"])
+    if cases:
+        _suite(name = name + "-openat2", tests = host_targets, labels = ["local-execution", "requires-openat2"])
     _suite(name = name, tests = [":" + name + "-pool"] + host_targets)
 
 def hirsel_core_llvm_native_test(name, data, selection = None):

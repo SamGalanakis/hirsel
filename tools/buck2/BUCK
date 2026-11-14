@@ -74,6 +74,17 @@ host_transition(
     visibility = ["PUBLIC"],
 )
 
+# Explicit ARM libtest compilation; the ordinary test transition always stays x86.
+host_transition(
+    name = "aarch64_test_tool_transition",
+    configuration_name = "hirsel-rust-test-aarch64",
+    budget = ":budget",
+    panic = ":panic",
+    profile = ":profile_checked",
+    cpu = "prelude//cpu/constraints:arm64",
+    visibility = ["PUBLIC"],
+)
+
 # Performance budgets measure the production compiler, without test assertions.
 host_transition(
     name = "release_tool_transition",

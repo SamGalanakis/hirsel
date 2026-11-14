@@ -363,7 +363,7 @@ fn broken_pipe_child() {
 }
 #[test]
 fn broken_pipe_is_a_typed_write_error_from_native_process_entry() {
-    let out = std::process::Command::new(std::env::current_exe().unwrap())
+    let out = crate::test_process::command()
         .args([
             "--exact",
             "entry_tests::broken_pipe_child",

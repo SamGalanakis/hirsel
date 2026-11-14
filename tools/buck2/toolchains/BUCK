@@ -24,7 +24,7 @@ rust_toolchain(
         "DEFAULT": {p.removeprefix("rust-files/"): p for p in glob(["rust-files/**"])},
     }),
     sanitizer = select({"root//tools/buck2:sanitizer_thread": "thread", "DEFAULT": None}),
-    # The AArch64 runtime archive is the one cross-compiled target.
+    # Explicit ARM runtime archives and libtest harnesses share the target sysroot.
     target_triple = select({
         "prelude//cpu:arm64": "aarch64-unknown-linux-gnu",
         "DEFAULT": "x86_64-unknown-linux-gnu",
@@ -68,10 +68,19 @@ source_files(
 )
 
 llvm_cxx_tools(name = "cxx_tools", tree = ":clang")
+llvm_cxx_tools(
+    name = "cxx_tools_arm",
+    tree = ":clang",
+    arm = "root//tools/buck2/native-toolchain:arm",
+)
 
 cxx_tools_info_toolchain(
     name = "cxx",
-    cxx_tools_info = ":cxx_tools",
+    # Choose before the tools' execution transition discards the target CPU.
+    cxx_tools_info = select({
+        "prelude//cpu:arm64": ":cxx_tools_arm",
+        "DEFAULT": ":cxx_tools",
+    }),
     visibility = ["PUBLIC"],
 )
 

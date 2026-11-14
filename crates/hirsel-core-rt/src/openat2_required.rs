@@ -15,7 +15,9 @@ unsafe extern "C" {
 pub(crate) fn require() {
     let directory = std::fs::File::open(".").expect("openat2 precondition: open test directory");
     let how = OpenHow {
-        flags: 0x20_0000 | 0x8_0000 | 0x1_0000,
+        // O_RDONLY is zero on both supported Linux architectures. The existing
+        // readable directory descriptor above needs the same authority.
+        flags: 0,
         mode: 0,
         resolve: 0x08 | 0x02,
     };

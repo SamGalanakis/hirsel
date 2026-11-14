@@ -1,7 +1,7 @@
 //! The M1 ready/gate handshake: Full offers a peer turn but never cancellation.
 use crate::{Context, causes, channel::*, tasks::*};
 use std::{
-    process::{Command, Stdio},
+    process::Stdio,
     ptr,
     time::{Duration, Instant},
 };
@@ -265,7 +265,7 @@ fn full_schedules_a_peer_without_observing_cancel_and_replays_exactly() {
     run_bounded("0");
 }
 fn run_bounded(kind: &str) {
-    let mut child = Command::new(std::env::current_exe().unwrap())
+    let mut child = crate::test_process::command()
         .args([
             "--exact",
             "retry_tests::gate_replay_child",

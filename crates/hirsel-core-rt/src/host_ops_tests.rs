@@ -568,7 +568,7 @@ fn waiting_rows_cancel_before_issue_but_clocks_do_not_cancel() {
 }
 
 fn child_case(name: &str) -> std::process::Output {
-    std::process::Command::new(std::env::current_exe().unwrap())
+    crate::test_process::command()
         .args([
             "--ignored",
             "--exact",
@@ -606,7 +606,7 @@ fn z_later_host_body_child() {
 }
 #[test]
 fn ffi_abort_is_a_reported_failure_and_later_bodies_continue() {
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
+    let output = crate::test_process::command()
         .args([
             "--ignored",
             "--exact",

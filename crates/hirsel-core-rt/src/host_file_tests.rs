@@ -1,5 +1,5 @@
 use crate::{Context, abi_host::*, entry::*, process::*, provider::*};
-use std::{fs::File, os::fd::AsRawFd, process::Command, ptr};
+use std::{fs::File, os::fd::AsRawFd, ptr};
 
 struct Track {
     provider: Provider,
@@ -206,7 +206,7 @@ fn native_host_file_child() {
     }
 }
 fn child(root: &std::path::Path, mode: &str) -> std::process::Output {
-    Command::new(std::env::current_exe().unwrap())
+    crate::test_process::command()
         .args([
             "--exact",
             "host_file_tests::native_host_file_child",

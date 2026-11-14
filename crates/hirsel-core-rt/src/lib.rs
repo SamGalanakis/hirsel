@@ -199,3 +199,6 @@ mod retry_tests;
 
 #[cfg(test)]
 mod openat2_required;
+
+#[cfg(test)]
+mod test_process;

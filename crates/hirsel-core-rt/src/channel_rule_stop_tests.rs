@@ -1,7 +1,6 @@
 //! FAIL-15 full counters stop the process before cleanup or join delivery.
 use super::*;
 use crate::{process::*, tasks::*};
-use std::process::Command;
 #[derive(Clone, Copy)]
 enum Stop {
     Rc,
@@ -124,7 +123,7 @@ fn sender_overflow_child() {
     run_child(Stop::Sender)
 }
 fn expect_stop(child: &str, diagnostic: &[u8]) {
-    let result = Command::new(std::env::current_exe().unwrap())
+    let result = crate::test_process::command()
         .args(["--ignored", "--exact", child, "--test-threads=1"])
         .output()
         .unwrap();

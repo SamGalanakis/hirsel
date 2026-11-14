@@ -298,6 +298,15 @@ The driver links with the input
 never a compiler driver. Native launches preserve the selected
 Valgrind support directory when clearing the child's environment.
 
+The opt-in `//:hirsel-core-rt-aarch64-harness` builds a real ARM libtest
+executable. The ordinary runtime unittest harness intentionally remains x86.
+Build it with `buck2 build --show-json-output` and run the returned executable
+through the pinned `HIRSEL_QEMU_AARCH64 -L HIRSEL_AARCH64_SYSROOT` runner.
+Export both variables for child fixtures, which reexecute through that same
+runner without binfmt registration. The ARM C dependencies and linker use the
+pinned cross GCC sysroot; host tool dependencies remain x86. Real-file bodies
+execute their openat2 precondition and fail if it is unavailable.
+
 The full gate's runtime C harness, library C probes and LLVM pin check are
 `//:gate-native-runtime-c`, `//:gate-native-library-c` and
 `//:gate-native-toolchain-pin` under `-c hirsel.full=true`. They run on the

@@ -35,7 +35,7 @@ fn native_refusal_child() {
 #[test]
 fn fail15_native_allocator_refusal_is_a_reported_run_stop_without_cleanup() {
     for ordinary in [false, true] {
-        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        let mut child = crate::test_process::command();
         child.args([
             "--ignored",
             "--exact",

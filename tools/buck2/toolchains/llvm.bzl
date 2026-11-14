@@ -22,6 +22,16 @@ def _tools(ctx):
     llvm = ctx.attrs.tree[DefaultInfo].default_outputs[0]
     clang = cmd_args(llvm.project("bin/hirsel-clang"), hidden = llvm)
     clangxx = cmd_args(llvm.project("bin/hirsel-clang++"), hidden = llvm)
+    if ctx.attrs.arm:
+        arm = ctx.attrs.arm[DefaultInfo].default_outputs[0]
+        flags = cmd_args(
+            "--target=aarch64-unknown-linux-gnu",
+            cmd_args("--sysroot=", arm.project("aarch64-none-linux-gnu/libc"), delimiter = ""),
+            cmd_args("--gcc-toolchain=", arm, delimiter = ""),
+            hidden = arm,
+        )
+        clang = cmd_args(clang, flags)
+        clangxx = cmd_args(clangxx, flags)
     return [
         DefaultInfo(),
         CxxToolsInfo(
@@ -41,4 +51,4 @@ def _tools(ctx):
         ),
     ]
 
-llvm_cxx_tools = rule(impl = _tools, attrs = {"tree": attrs.exec_dep()})
+llvm_cxx_tools = rule(impl = _tools, attrs = {"tree": attrs.exec_dep(), "arm": attrs.option(attrs.exec_dep(), default = None)})

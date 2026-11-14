@@ -420,7 +420,7 @@ fn stack_stop_child() {
 }
 #[test]
 fn guarded_stacks_report_102() {
-    let out = std::process::Command::new(std::env::current_exe().unwrap())
+    let out = crate::test_process::command()
         .args([
             "--exact",
             "tasks_tests::stack_stop_child",

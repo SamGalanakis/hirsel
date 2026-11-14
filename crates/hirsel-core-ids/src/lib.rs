@@ -73,19 +73,100 @@ impl ContentHash {
         }
         Ok(Self(stream.hash.finalize().into()))
     }
-    pub fn of_parts<'a>(domain: &'a str, parts: impl IntoIterator<Item = &'a [u8]>) -> Self {
+    /// Hash length-framed parts supplied directly to one streaming hasher.
+    ///
+    /// `part_with` is for a logical part whose bytes are naturally produced in
+    /// several borrowed chunks. It keeps the same framing as `of_parts` without
+    /// requiring a temporary concatenation buffer.
+    #[inline]
+    pub fn of_parts_stream(
+        domain: &str,
+        emit: impl FnOnce(&mut PartsHasher) -> std::io::Result<()>,
+    ) -> std::io::Result<Self> {
         use hirsel_intern::timings::instructions::{self as counted, Owner, Volume};
         let _scope = counted::scope(Owner::Hash);
-        let mut bytes = 0;
-        let mut hash = Sha256::new();
-        for part in std::iter::once(domain.as_bytes()).chain(parts) {
-            hash.update((part.len() as u64).to_le_bytes());
-            hash.update(part);
-            bytes += part.len() as u64;
-        }
+        let mut hasher = PartsHasher {
+            hash: Sha256::new(),
+            bytes: 0,
+        };
+        hasher.part(domain.as_bytes());
+        emit(&mut hasher)?;
         counted::volume(Volume::Hashes, 1);
-        counted::volume(Volume::HashedBytes, bytes);
-        Self(hash.finalize().into())
+        counted::volume(Volume::HashedBytes, hasher.bytes);
+        Ok(Self(hasher.hash.finalize().into()))
+    }
+
+    pub fn of_parts<'a>(domain: &'a str, parts: impl IntoIterator<Item = &'a [u8]>) -> Self {
+        Self::of_parts_stream(domain, |hasher| {
+            for part in parts {
+                hasher.part(part);
+            }
+            Ok(())
+        })
+        .expect("content hash stream")
+    }
+}
+
+/// Builder for the length-framed parts consumed by [`ContentHash::of_parts_stream`].
+pub struct PartsHasher {
+    hash: Sha256,
+    bytes: u64,
+}
+
+impl PartsHasher {
+    #[inline]
+    fn part(&mut self, bytes: &[u8]) {
+        self.hash.update((bytes.len() as u64).to_le_bytes());
+        self.hash.update(bytes);
+        self.bytes += bytes.len() as u64;
+    }
+
+    #[inline]
+    pub fn part_byte_slice(&mut self, first: u8, rest: &[u8]) {
+        let length = (rest.len() + 1) as u64;
+        self.hash.update(length.to_le_bytes());
+        self.hash.update([first]);
+        self.hash.update(rest);
+        self.bytes += length;
+    }
+
+    #[inline]
+    pub fn part_with(
+        &mut self,
+        length: u64,
+        emit: impl FnOnce(&mut dyn std::io::Write) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        self.hash.update(length.to_le_bytes());
+        let mut writer = PartWriter {
+            hash: &mut self.hash,
+            remaining: length,
+        };
+        emit(&mut writer)?;
+        if writer.remaining != 0 {
+            return Err(std::io::Error::other("content hash part is short"));
+        }
+        self.bytes += length;
+        Ok(())
+    }
+}
+
+struct PartWriter<'a> {
+    hash: &'a mut Sha256,
+    remaining: u64,
+}
+
+impl std::io::Write for PartWriter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.remaining = self
+            .remaining
+            .checked_sub(bytes.len() as u64)
+            .ok_or_else(|| std::io::Error::other("content hash part is long"))?;
+        self.hash.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 /// Package identity includes version; package names alone do not identify types (PROG-1).

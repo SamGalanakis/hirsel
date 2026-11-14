@@ -12,54 +12,45 @@ pub struct DefinitionKey {
     pub environment: ContentHash,
 }
 
-/// Hash the semantic token stream, without absolute offsets, whitespace or
-/// comments. Source positions are late-bound by the site/source-table writer;
-/// moving an item therefore keeps its native body product reusable.
+fn token_identity(item: Item<'_>, end: usize, domain: &str) -> ContentHash {
+    ContentHash::of_parts_stream(domain, |parts| {
+        for token in item
+            .tree
+            .tokens
+            .get(item.range.tokens.start as usize..item.range.tokens.end as usize)
+            .into_iter()
+            .flatten()
+        {
+            if token.kind.is_trivia()
+                || matches!(token.kind, TokenKind::Eof)
+                || token.span.start as usize >= end
+            {
+                continue;
+            }
+            let text = &item.text[token.span.start as usize..token.span.end as usize];
+            parts.part_byte_slice(token.kind as u8, text.as_bytes());
+        }
+        Ok(())
+    })
+    .expect("semantic token hash")
+}
+
 fn body_identity(item: Item<'_>) -> ContentHash {
-    let tokens = item
-        .tree
-        .tokens
-        .get(item.range.tokens.start as usize..item.range.tokens.end as usize)
-        .into_iter()
-        .flatten()
-        .filter(|token| !token.kind.is_trivia() && !matches!(token.kind, TokenKind::Eof))
-        .map(|token| {
-            let mut bytes = vec![token.kind as u8];
-            bytes.extend_from_slice(
-                &item.text[token.span.start as usize..token.span.end as usize].as_bytes(),
-            );
-            bytes
-        })
-        .collect::<Vec<_>>();
-    ContentHash::of_parts("hirsel.body-tokens.v2", tokens.iter().map(Vec::as_slice))
+    token_identity(item, usize::MAX, "hirsel.body-tokens.v2")
 }
 
 fn header_identity(item: Item<'_>) -> ContentHash {
-    let block_start = item.tree.children(item.root).iter().find_map(|&child| {
-        (item.tree.node(child).kind == NodeKind::Block)
-            .then_some(item.tree.node(child).origin.span.start + item.file_offset)
-    });
-    let tokens = item
-        .tree
-        .tokens
-        .get(item.range.tokens.start as usize..item.range.tokens.end as usize)
-        .into_iter()
-        .flatten()
-        .filter(|token| {
-            block_start.is_none_or(|start| token.span.start < start)
-                && !token.kind.is_trivia()
-                && !matches!(token.kind, TokenKind::Eof)
-        })
-        .map(|token| {
-            let mut bytes = vec![token.kind as u8];
-            bytes.extend_from_slice(
-                &item.text[token.span.start as usize..token.span.end as usize].as_bytes(),
-            );
-            bytes
-        })
-        .collect::<Vec<_>>();
-    ContentHash::of_parts("hirsel.header-tokens.v2", tokens.iter().map(Vec::as_slice))
+    let end = if matches!(
+        item.tree.node(item.root).kind,
+        NodeKind::Function | NodeKind::CloneHook
+    ) {
+        header_end(item)
+    } else {
+        usize::MAX
+    };
+    token_identity(item, end, "hirsel.header-tokens.v2")
 }
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Header {
     digest: ContentHash,

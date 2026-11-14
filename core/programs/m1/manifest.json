@@ -46,6 +46,13 @@
           "signatures": true
         },
         {
+          "file": "core/core/code.hirsel",
+          "modules": [
+            "code"
+          ],
+          "signatures": true
+        },
+        {
           "file": "core/core/core.hirsel",
           "modules": [
             "core"
@@ -105,6 +112,13 @@
           "file": "core/core/list.hirsel",
           "modules": [
             "list"
+          ],
+          "signatures": true
+        },
+        {
+          "file": "core/core/log.hirsel",
+          "modules": [
+            "log"
           ],
           "signatures": true
         },

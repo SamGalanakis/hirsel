@@ -3,6 +3,20 @@ use hirsel_core_ir::{FuncId, Module};
 use std::{fs, path::PathBuf, process::Command};
 
 pub fn check(emit: impl FnOnce(&Module) -> Vec<u8>, symbol: impl Fn(&Module, FuncId) -> String) {
+    check_abi(emit, symbol, false);
+}
+/// FORM#91 internal caller-site argument; the test process ABI is unchanged.
+pub fn check_with_site(
+    emit: impl FnOnce(&Module) -> Vec<u8>,
+    symbol: impl Fn(&Module, FuncId) -> String,
+) {
+    check_abi(emit, symbol, true);
+}
+fn check_abi(
+    emit: impl FnOnce(&Module) -> Vec<u8>,
+    symbol: impl Fn(&Module, FuncId) -> String,
+    with_site: bool,
+) {
     let module = hirsel_core_ir::text::parse(include_str!("host_memory.core")).unwrap();
     hirsel_core_ir::wf::module(&module).unwrap();
     let directory = std::env::temp_dir().join(format!(
@@ -49,12 +63,19 @@ pub fn check(emit: impl FnOnce(&Module) -> Vec<u8>, symbol: impl Fn(&Module, Fun
     let names: Vec<_> = (0..module.functions.len())
         .map(|n| symbol(&module, FuncId(n as u32)))
         .collect();
+    let site_parameter = if with_site { ", uint64_t" } else { "" };
     let declarations = names
         .iter()
-        .map(|name| format!("extern uint8_t {name}(HirselCoreContext *, void *, uint64_t);\n"))
+        .map(|name| {
+            format!(
+                "extern uint8_t {name}(HirselCoreContext *, void *, uint64_t{site_parameter});\n"
+            )
+        })
         .collect::<String>();
     let source = include_str!("host_memory.c")
         .replace("@@DECLARATIONS@@", &declarations)
+        .replace("@@SITE_PARAMETER@@", site_parameter)
+        .replace("@@SITE_ARGUMENT@@", if with_site { ", 0" } else { "" })
         .replace("@@SYMBOLS@@", &names.join(","));
     fs::write(directory.join("caller.c"), source).unwrap();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");

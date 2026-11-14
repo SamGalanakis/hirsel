@@ -33,7 +33,10 @@ impl Function<'_, '_, '_> {
             symbols.insert(anchor.item, data);
             data
         };
-        let global = self.object.declare_data_in_func(data, self.b.func);
+        let global = *self
+            .site_references
+            .entry(anchor.item)
+            .or_insert_with(|| self.object.declare_data_in_func(data, self.b.func));
         let address = self.b.ins().symbol_value(types::I64, global);
         let base = self.b.ins().load(
             types::I64,

@@ -1,6 +1,6 @@
 //! Explicit failure edges and FORM #38 status returns. A callee has already
 //! recorded its cause; only the instruction that raises one records a new cell.
-use super::function::Function;
+use super::function::{Function, PendingRaise};
 use super::*;
 use cranelift_codegen::ir::{MemFlagsData, StackSlotData, StackSlotKind, Value, condcodes::IntCC};
 impl Function<'_, '_, '_> {
@@ -23,7 +23,14 @@ impl Function<'_, '_, '_> {
         self.b.ins().jump(block, &[]);
     }
     pub fn emit_failure_blocks(&mut self) -> Result<()> {
-        while let Some((kind, target, anchor, srcloc, block)) = self.raise_blocks.pop() {
+        while let Some(PendingRaise {
+            kind,
+            target,
+            anchor,
+            srcloc,
+            block,
+        }) = self.raise_blocks.pop()
+        {
             self.b.switch_to_block(block);
             self.anchor = anchor;
             self.srcloc = srcloc;
@@ -33,6 +40,7 @@ impl Function<'_, '_, '_> {
         }
         if let Some(block) = self.propagation {
             self.b.switch_to_block(block);
+            self.b.set_srcloc(ir::SourceLoc::default());
             let mut results = std::mem::take(&mut self.calls.results);
             results.clear();
             for &t in &self.signature.results[..self.signature.results.len() - 1] {
@@ -116,17 +124,20 @@ impl Function<'_, '_, '_> {
         Ok(())
     }
     pub fn guard(&mut self, condition: Value, kind: u8, target: Option<BlockId>) -> Result<()> {
-        let failed = if let Some((_, _, _, _, block)) = self
-            .raise_blocks
-            .iter()
-            .find(|(k, t, anchor, _, _)| *k == kind && *t == target && *anchor == self.anchor)
-        {
-            *block
+        let key = (kind, target, self.anchor);
+        let failed = if let Some(&block) = self.raise_lookup.get(&key) {
+            block
         } else {
             let block = self.b.create_block();
             self.b.set_cold_block(block);
-            self.raise_blocks
-                .push((kind, target, self.anchor, self.srcloc, block));
+            self.raise_blocks.push(PendingRaise {
+                kind,
+                target,
+                anchor: self.anchor,
+                srcloc: self.srcloc,
+                block,
+            });
+            self.raise_lookup.insert(key, block);
             block
         };
         let next = self.b.create_block();

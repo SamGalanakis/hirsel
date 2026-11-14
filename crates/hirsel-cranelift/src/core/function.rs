@@ -9,6 +9,14 @@ enum AddressValue {
     Snapshot(ir::StackSlot),
 }
 
+pub(super) struct PendingRaise {
+    pub kind: u8,
+    pub target: Option<BlockId>,
+    pub anchor: Option<Anchor>,
+    pub srcloc: ir::SourceLoc,
+    pub block: ir::Block,
+}
+
 pub(super) struct Function<'a, 'b, 'c> {
     pub b: FunctionBuilder<'a>,
     pub object: &'b mut ObjectModule,
@@ -34,13 +42,9 @@ pub(super) struct Function<'a, 'b, 'c> {
     pub allocators: &'c [fast::Allocator],
     pub signature: &'c abi::Signature,
     pub result_storage: Option<Value>,
-    pub raise_blocks: Vec<(
-        u8,
-        Option<BlockId>,
-        Option<Anchor>,
-        ir::SourceLoc,
-        ir::Block,
-    )>,
+    pub raise_blocks: Vec<PendingRaise>,
+    pub raise_lookup: std::collections::HashMap<(u8, Option<BlockId>, Option<Anchor>), ir::Block>,
+    pub site_references: std::collections::HashMap<ItemId, ir::GlobalValue>,
     pub propagation: Option<ir::Block>,
     pub cause_slot: Option<ir::StackSlot>,
     pub calls: calls::Calls<'c>,
@@ -206,6 +210,8 @@ pub(super) fn emit(
         signature,
         result_storage,
         raise_blocks: Vec::with_capacity(4),
+        raise_lookup: Default::default(),
+        site_references: Default::default(),
         propagation: None,
         cause_slot: None,
         testing: tables.trace_drops,
@@ -225,29 +231,37 @@ pub(super) fn emit(
         let block = &body.blocks[i];
         f.b.switch_to_block(f.blocks[i]);
         let fill = fills.get(i).copied().flatten();
-        let original_index = if let Some(fill) = fill {
-            let index = f.get(fill.index);
-            let bound = f.get(fill.bound);
-            let base = f.get(fill.base);
-            let to = f.b.ins().iadd(base, index);
-            let bytes = f.b.ins().isub(bound, index);
-            let byte = f.get(fill.byte);
-            let byte = f.resize(byte, types::I32, false);
-            f.c_call(
-                "memset",
-                &[Ty::Ptr, Ty::Scalar(Scalar::U32), Ty::Scalar(Scalar::U64)],
-                &[Ty::Ptr],
-                &[to, byte, bytes],
-            )?;
-            // This block is entered only for index < bound. Preserve its
-            // evaluated address snapshot and scalar definitions as the last
-            // iteration; its existing backedge then carries bound to the test.
-            let last = f.b.ins().iadd_imm_s(bound, -1);
-            f.set(fill.index, last);
-            Some(index)
-        } else {
-            None
-        };
+        let original_index =
+            if let Some(fill) = fill {
+                let store = block.insts.get(&body.insts).unwrap().iter().position(|inst|
+                matches!(inst, Inst::Store { address, .. } if *address == fill.store)).unwrap();
+                let index = block.insts.start as usize + store;
+                f.at_anchor(
+                    body.inst_anchors.get(index).copied().flatten(),
+                    index as u32 + 1,
+                );
+                let index = f.get(fill.index);
+                let bound = f.get(fill.bound);
+                let base = f.get(fill.base);
+                let to = f.b.ins().iadd(base, index);
+                let bytes = f.b.ins().isub(bound, index);
+                let byte = f.get(fill.byte);
+                let byte = f.resize(byte, types::I32, false);
+                f.c_call(
+                    "memset",
+                    &[Ty::Ptr, Ty::Scalar(Scalar::U32), Ty::Scalar(Scalar::U64)],
+                    &[Ty::Ptr],
+                    &[to, byte, bytes],
+                )?;
+                // This block is entered only for index < bound. Preserve its
+                // evaluated address snapshot and scalar definitions as the last
+                // iteration; its existing backedge then carries bound to the test.
+                let last = f.b.ins().iadd_imm_s(bound, -1);
+                f.set(fill.index, last);
+                Some(index)
+            } else {
+                None
+            };
         for (offset, inst) in block.insts.get(&body.insts).unwrap().iter().enumerate() {
             let index = block.insts.start as usize + offset;
             f.at_anchor(

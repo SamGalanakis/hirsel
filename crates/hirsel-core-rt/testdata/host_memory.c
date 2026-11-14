@@ -6,7 +6,7 @@
 #include <unistd.h>
 
 @@DECLARATIONS@@
-static uint8_t (*const bodies[])(HirselCoreContext *, void *, uint64_t) = {
+static uint8_t (*const bodies[])(HirselCoreContext *, void *, uint64_t@@SITE_PARAMETER@@) = {
     @@SYMBOLS@@
 };
 int main(int argc, char **argv) {
@@ -37,7 +37,7 @@ int main(int argc, char **argv) {
     assert(setrlimit(RLIMIT_AS, &denied) == 0);
     /* Proves setup completed; this unbuffered write allocates nothing. */
     assert(write(1, "entered\n", 8) == 8);
-    (void)bodies[body](ctx, argument, bytes);
+    (void)bodies[body](ctx, argument, bytes@@SITE_ARGUMENT@@);
     (void)write(2, "RETURNED/CLEANUP\n", 17);
     return 80;
 }

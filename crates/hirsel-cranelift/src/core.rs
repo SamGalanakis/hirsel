@@ -19,6 +19,7 @@ pub mod memory_layout {
 mod abi;
 mod calls;
 mod case;
+mod debug;
 mod drop;
 mod failure;
 mod fast;
@@ -300,6 +301,7 @@ fn emit(
         codegen: object.make_context(),
         frontend: FunctionBuilderContext::new(),
     };
+    let mut debug_functions = Vec::new();
     for (index, f) in input.functions.iter().enumerate() {
         let Some(body) = &f.body else { continue };
         let build = observer.enter("build_clif");
@@ -314,7 +316,9 @@ fn emit(
         observer
             .define(&mut object, functions[index], context)
             .map_err(error)?;
-
+        if let Some(function) = debug::function(input, f, context.compiled_code().unwrap()) {
+            debug_functions.push(function);
+        }
     }
     glues.emit(&mut object, &tables, observer, &mut scratch)?;
     task_entries.emit(&mut object, &tables, observer, &mut scratch)?;
@@ -322,7 +326,9 @@ fn emit(
         fast::emit_allocator(&mut object, &tables, allocator, observer, &mut scratch)?;
     }
     let _write = observer.enter("object_write");
+    let mut product = object.finish();
+    crate::native_dwarf::append(&mut product.object, &debug_functions, "").map_err(error)?;
     Ok(Object {
-        bytes: crate::object::finish(object.finish()).map_err(error)?,
+        bytes: crate::object::finish(product).map_err(error)?,
     })
 }

@@ -3,24 +3,16 @@
 //! machine source-location ranges, and each link writes one object of DWARF 5 line tables
 //! and subprogram entries over every unit's intervals (`debug_object`), relocated against
 //! the units' function symbols. Both backends' intervals feed it.
-use std::collections::HashMap;
 
 use cranelift_codegen::CompiledCode;
 use cranelift_object::object;
-use gimli::write::{
-    Address, AttributeValue, DwarfUnit, EndianVec, LineProgram, LineString, Range, RangeList,
-    RelocateWriter, Relocation, RelocationTarget, Sections,
-};
-use gimli::{Encoding, Format, LineEncoding, LittleEndian};
 use hirsel_lir::debug::DebugFunction;
 use hirsel_lir::ir::LirUnit;
 use hirsel_lir::layout_types::TargetSpec;
-use hirsel_lir::profile::ProfileSource;
 use hirsel_lir::stage::Ready;
 use hirsel_syntax::DefPath;
 
 use crate::CodegenError;
-use crate::module::Emitted;
 
 /// The intervals of `unit`'s function `symbol`, compiled as `code`. Its source locations
 /// encode complete sites in the unit's canonical `SiteTable` (`SourceLoc` bits).
@@ -67,25 +59,6 @@ pub struct Resolved {
     pub column: u32,
 }
 
-#[derive(Clone)]
-struct Section {
-    bytes: EndianVec<LittleEndian>,
-    relocations: Vec<Relocation>,
-}
-
-impl RelocateWriter for Section {
-    type Writer = EndianVec<LittleEndian>;
-    fn writer(&self) -> &Self::Writer {
-        &self.bytes
-    }
-    fn writer_mut(&mut self) -> &mut Self::Writer {
-        &mut self.bytes
-    }
-    fn relocate(&mut self, relocation: Relocation) {
-        self.relocations.push(relocation);
-    }
-}
-
 fn error(message: impl ToString) -> CodegenError {
     CodegenError::Object {
         message: message.to_string(),
@@ -116,7 +89,7 @@ pub fn debug_object_sources(
     resolve: &dyn Fn(&DefPath, u32, u32) -> Option<Resolved>,
     target: &TargetSpec,
 ) -> Result<Vec<u8>, CodegenError> {
-    use object::write::{Object, Symbol, SymbolSection};
+    use object::write::Object;
     let architecture = if target.triple.starts_with("x86_64") {
         object::Architecture::X86_64
     } else if target.triple.starts_with("aarch64") {
@@ -145,165 +118,42 @@ pub fn debug_object_sources(
             ))
         })
         .collect();
-    let Some((_, first)) = declared.first() else {
-        return product.write().map_err(error);
+    let position = |at: Resolved| crate::native_dwarf::Resolved {
+        path: at.path,
+        line: u64::from(at.line),
+        column: u64::from(at.column),
     };
-    let encoding = Encoding {
-        format: Format::Dwarf32,
-        version: 5,
-        address_size: 8,
-    };
-    let mut dwarf = DwarfUnit::new(encoding);
-    let mut lines = LineProgram::new(
-        encoding,
-        LineEncoding::default(),
-        LineString::String(ProfileSource::COMPILATION_DIRECTORY.as_bytes().to_vec()),
-        None,
-        LineString::String(first.path.as_bytes().to_vec()),
-        None,
-    );
-    let root = dwarf.unit.root();
-    for (name, value) in [
-        (gimli::DW_AT_name, first.path.as_str()),
-        (gimli::DW_AT_comp_dir, ProfileSource::COMPILATION_DIRECTORY),
-        (gimli::DW_AT_producer, "hirsel"),
-    ] {
-        dwarf
-            .unit
-            .get_mut(root)
-            .set(name, AttributeValue::String(value.as_bytes().to_vec()));
-    }
-    let mut ranges = Vec::new();
-    let mut symbols = Vec::new();
-    for (symbol, (function, declaration)) in declared.iter().enumerate() {
-        symbols.push(product.add_symbol(Symbol {
-            name: function.symbol.as_bytes().to_vec(),
-            value: 0,
-            size: 0,
-            kind: object::SymbolKind::Text,
-            scope: object::SymbolScope::Linkage,
-            weak: false,
-            section: SymbolSection::Undefined,
-            flags: object::SymbolFlags::None,
-        }));
-        let address = Address::Symbol { symbol, addend: 0 };
-        ranges.push(Range::StartLength {
-            begin: address,
-            length: function.size,
-        });
-        let mut file = |path: &str| {
-            let directory = lines.default_directory();
-            lines.add_file(
-                LineString::String(path.as_bytes().to_vec()),
-                directory,
-                None,
-            )
-        };
-        let declaration_file = file(&declaration.path);
-        let rows: Vec<_> = function
-            .ranges
-            .iter()
-            .filter_map(|range| {
-                let item = function.items.get(range.item as usize)?;
-                let at = resolve(
-                    item,
-                    *function.sources.get(range.item as usize)?,
-                    range.offset,
-                )?;
-                Some((range.start, range.stop, file(&at.path), at))
-            })
-            .collect();
-        let mut end = None;
-        for (start, stop, file, at) in rows {
-            if end != Some(start) {
-                if let Some(end) = end {
-                    lines.end_sequence(end);
-                }
-                lines.begin_sequence(Some(address));
-            }
-            let row = lines.row();
-            row.address_offset = start;
-            row.file = file;
-            row.line = u64::from(at.line);
-            row.column = u64::from(at.column);
-            lines.generate_row();
-            end = Some(stop);
-        }
-        if let Some(end) = end {
-            lines.end_sequence(end);
-        }
-        let entry = dwarf.unit.add(root, gimli::DW_TAG_subprogram);
-        let entry = dwarf.unit.get_mut(entry);
-        entry.set(
-            gimli::DW_AT_name,
-            AttributeValue::String(function.items[0].to_string().into_bytes()),
-        );
-        entry.set(
-            gimli::DW_AT_linkage_name,
-            AttributeValue::String(function.symbol.as_bytes().to_vec()),
-        );
-        entry.set(gimli::DW_AT_external, AttributeValue::Flag(true));
-        entry.set(
-            gimli::DW_AT_decl_file,
-            AttributeValue::FileIndex(Some(declaration_file)),
-        );
-        entry.set(
-            gimli::DW_AT_decl_line,
-            AttributeValue::Udata(u64::from(declaration.line)),
-        );
-        entry.set(gimli::DW_AT_low_pc, AttributeValue::Address(address));
-        entry.set(gimli::DW_AT_high_pc, AttributeValue::Udata(function.size));
-    }
-    let ranges = dwarf.unit.ranges.add(RangeList(ranges));
-    dwarf
-        .unit
-        .get_mut(root)
-        .set(gimli::DW_AT_ranges, AttributeValue::RangeListRef(ranges));
-    dwarf.unit.line_program = lines;
-    let mut sections = Sections::new(Section {
-        bytes: EndianVec::new(LittleEndian),
-        relocations: Vec::new(),
-    });
-    dwarf.write(&mut sections).map_err(error)?;
-    let mut ids = HashMap::new();
-    sections.for_each(|id, section| -> Emitted {
-        if !section.bytes.slice().is_empty() {
-            let object_id = product.add_section(
-                Vec::new(),
-                id.name().as_bytes().to_vec(),
-                object::SectionKind::Debug,
-            );
-            product
-                .section_mut(object_id)
-                .set_data(section.bytes.slice().to_vec(), 1);
-            ids.insert(id, object_id);
-        }
-        Ok(())
-    })?;
-    sections.for_each(|id, section| -> Emitted {
-        for relocation in &section.relocations {
-            let symbol = match relocation.target {
-                RelocationTarget::Symbol(index) => symbols[index],
-                RelocationTarget::Section(id) => product.section_symbol(ids[&id]),
-            };
-            product
-                .add_relocation(
-                    ids[&id],
-                    object::write::Relocation {
-                        offset: relocation.offset as u64,
-                        symbol,
-                        addend: relocation.addend,
-                        flags: object::RelocationFlags::Generic {
-                            kind: object::RelocationKind::Absolute,
-                            encoding: object::RelocationEncoding::Generic,
-                            size: relocation.size * 8,
-                        },
-                    },
-                )
-                .map_err(error)?;
-        }
-        Ok(())
-    })?;
+    let resolved: Vec<_> = declared
+        .into_iter()
+        .map(|(function, declaration)| crate::native_dwarf::Function {
+            symbol: function.symbol.clone(),
+            name: function.items[0].to_string(),
+            size: function.size,
+            declaration: position(declaration),
+            rows: function
+                .ranges
+                .iter()
+                .filter_map(|range| {
+                    let item = function.items.get(range.item as usize)?;
+                    Some((
+                        range.start,
+                        range.stop,
+                        position(resolve(
+                            item,
+                            *function.sources.get(range.item as usize)?,
+                            range.offset,
+                        )?),
+                    ))
+                })
+                .collect(),
+        })
+        .collect();
+    crate::native_dwarf::append(
+        &mut product,
+        &resolved,
+        hirsel_lir::profile::ProfileSource::COMPILATION_DIRECTORY,
+    )
+    .map_err(error)?;
     product.write().map_err(error)
 }
 
@@ -311,6 +161,8 @@ pub fn debug_object_sources(
 mod tests {
     use super::*;
     use cranelift_object::object::read::{Object as _, ObjectSection as _};
+    use gimli::LittleEndian;
+    use std::collections::HashMap;
 
     fn item(name: &str) -> DefPath {
         DefPath::core(name)

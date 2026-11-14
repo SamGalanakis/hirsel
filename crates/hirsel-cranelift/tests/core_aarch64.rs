@@ -70,3 +70,13 @@ fn kernel_finalizers() {
         execute(&module, &sample_runs(&module, source), optimize);
     }
 }
+
+#[test]
+fn failure_sites_in_dev_and_speed() {
+    check_failure_sites();
+}
+
+#[test]
+fn relative_debug_rows_and_distinct_cold_sites() {
+    check_relative_debug_rows();
+}

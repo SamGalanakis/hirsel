@@ -16,6 +16,7 @@ mod front;
 #[path = "providers.rs"]
 mod providers;
 
+#[allow(dead_code)] // The shared fixture also exposes the pre-site ABI for LLVM's cutover.
 #[path = "../../../hirsel-core-rt/testdata/host_memory.rs"]
 mod host_memory;
 
@@ -903,4 +904,142 @@ b0(v0: f32, v1: f32):
     ];
     execute(&m, &runs, false);
     execute(&m, &runs, true);
+}
+
+fn check_failure_sites() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../core/front");
+    let source = fs::read_to_string(root.join("cases/body/failure-sites.hirsel")).unwrap();
+    let (module, functions) = front::lower(&root, &source);
+    let runs: Vec<_> = source
+        .lines()
+        .filter_map(|line| line.strip_prefix("// expect: run "))
+        .map(|line| {
+            let call = line.split_once(" = ").unwrap().0;
+            let (name, args) = call.strip_suffix(')').unwrap().split_once('(').unwrap();
+            let function = functions[name];
+            let signature =
+                &module.signatures[module.functions[function.index()].signature.index()];
+            let args = signature
+                .params
+                .iter()
+                .zip(args.split(',').filter(|a| !a.is_empty()))
+                .map(|(p, a)| {
+                    let Param::Value(t) = p else {
+                        panic!("scalar run")
+                    };
+                    eval::scalar(*t, a.trim())
+                })
+                .collect();
+            (function, args)
+        })
+        .collect();
+    assert_eq!(runs.len(), 9);
+    for optimize in [false, true] {
+        execute(&module, &runs, optimize);
+    }
+}
+
+fn check_relative_debug_rows() {
+    use cranelift_object::object::{Object as _, ObjectSection as _};
+    let mut module = text::parse(
+        r#"core v1
+item i0 = test@0/sites/rows
+sig g0 = (u64) -> (u64)
+inst n0 = test@0/sites/rows [] []
+fn f0 = n0 g0 {
+b0(v0: u64):
+  v1: u64 = const 1
+  v2: u64 = add v0, v1
+  v3: u64 = add v2, v1
+  return v3
+}
+"#,
+    )
+    .unwrap();
+    let body = module.functions[0].body.as_mut().unwrap();
+    body.inst_anchors = [1, 7, 27]
+        .map(|start| {
+            Some(Anchor {
+                item: ItemId(0),
+                start,
+                end: start + 1,
+            })
+        })
+        .to_vec();
+    body.blocks[0].anchor = Some(Anchor {
+        item: ItemId(0),
+        start: 39,
+        end: 40,
+    });
+    for optimize in [false, true] {
+        // Two same-kind cold edges must retain their distinct raising anchors.
+        execute(
+            &module,
+            &[(FuncId(0), vec![u64::MAX]), (FuncId(0), vec![u64::MAX - 1])],
+            optimize,
+        );
+        let object = emit_object(
+            &module,
+            &Options {
+                target: NATIVE_TARGET,
+                optimize,
+            },
+        )
+        .unwrap();
+        let file = cranelift_object::object::File::parse(&*object.bytes).unwrap();
+        let dwarf = gimli::Dwarf::load(|id| -> Result<_, gimli::Error> {
+            Ok(gimli::EndianSlice::new(
+                file.section_by_name(id.name())
+                    .map(|s| s.data().unwrap())
+                    .unwrap_or(&[]),
+                gimli::LittleEndian,
+            ))
+        })
+        .unwrap();
+        let mut units = dwarf.units();
+        let unit = dwarf
+            .unit(units.next().unwrap().expect("a core compilation unit"))
+            .unwrap();
+        let mut lines = unit
+            .line_program
+            .clone()
+            .expect("item-relative rows")
+            .rows();
+        let mut mapped = Vec::new();
+        while let Some((header, row)) = lines.next_row().unwrap() {
+            if row.end_sequence() {
+                continue;
+            }
+            let path = dwarf
+                .attr_string(&unit, row.file(header).unwrap().path_name())
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            mapped.push((path, row.line().unwrap().get(), row.column()));
+        }
+        for line in [8, 28] {
+            assert!(
+                mapped
+                    .iter()
+                    .any(|(path, l, col)| path == "test@0/sites/rows"
+                        && *l == line
+                        && *col
+                            == gimli::ColumnType::Column(std::num::NonZeroU64::new(1).unwrap())),
+                "{mapped:?}"
+            );
+        }
+        let mut entries = unit.entries();
+        let mut subprogram = false;
+        while let Some(entry) = entries.next_dfs().unwrap() {
+            if entry.tag() == gimli::DW_TAG_subprogram {
+                let name = dwarf
+                    .attr_string(&unit, entry.attr_value(gimli::DW_AT_linkage_name).unwrap())
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                subprogram |= name == symbol(&module.instances[0]);
+            }
+        }
+        assert!(subprogram, "the actual ELF function has a subprogram entry");
+    }
 }

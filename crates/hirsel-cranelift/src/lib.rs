@@ -23,6 +23,7 @@ mod data;
 mod dispatcher;
 mod drop;
 mod dwarf;
+mod native_dwarf;
 pub use dwarf::{Resolved, debug_object, debug_object_sources};
 mod flat;
 mod foreign;

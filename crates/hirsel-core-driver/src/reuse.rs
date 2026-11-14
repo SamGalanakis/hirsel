@@ -145,7 +145,6 @@ impl Keys {
         compiler: ContentHash,
         image_headers: Option<&Headers>,
         image_anchors: Option<&hirsel_core_ids::published::Map<(ModuleId, u32), DefPath>>,
-        entry: Option<&DefPath>,
     ) -> io::Result<Self> {
         let mut headers = image_headers.cloned().unwrap_or_default();
         headers.rows.resize(index.definitions.len(), None);
@@ -158,7 +157,7 @@ impl Keys {
         namespaces.sort_by_key(|p| p.0);
         let environment = ContentHash::of_parts(
             "hirsel.core-environment.v1",
-            [&encode(&(compiler, &inputs.core, namespaces, entry))?[..]],
+            [&encode(&(compiler, &inputs.core, namespaces))?[..]],
         );
         for (m, rows) in modules.iter().zip(resolutions) {
             for (ordinal, (item, resolution)) in m.syntax.items().zip(rows).enumerate() {

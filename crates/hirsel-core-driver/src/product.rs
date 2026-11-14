@@ -313,24 +313,20 @@ fn bundled_std_selection(input: &PackageManifest) -> Option<Vec<(&'static str, &
     if input.package != package("std") || input.dependencies != [package("core")] {
         return None;
     }
-    let compiled = normalized(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../core/std"));
-    let workspace = normalized(Path::new("core/std"));
     let mut selected = Vec::with_capacity(input.sources.len());
     for source in &input.sources {
         if !source.signatures || source.modules.len() != 1 {
             return None;
         }
         let name = source.modules[0].as_str();
-        if ![&compiled, &workspace]
-            .iter()
-            .any(|root| normalized(&source.file) == root.join(format!("{name}.hirsel")))
-        {
-            return None;
-        }
         let at = bundled::STD_SOURCES
             .binary_search_by_key(&name, |(module, _)| module)
             .ok()?;
-        selected.push(bundled::STD_SOURCES[at]);
+        let expected = bundled::STD_SOURCES[at];
+        if std::fs::read_to_string(&source.file).ok()?.as_bytes() != expected.1.as_bytes() {
+            return None;
+        }
+        selected.push(expected);
     }
     selected.sort_unstable_by_key(|(name, _)| *name);
     if selected.windows(2).any(|w| w[0].0 == w[1].0) {
@@ -351,12 +347,6 @@ fn matches_bundle(
     {
         return false;
     }
-    let compiled = normalized(
-        &Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../core")
-            .join(name),
-    );
-    let workspace = normalized(&Path::new("core").join(name));
     let mut selected = input.sources.iter().collect::<Vec<_>>();
     selected.sort_by(|a, b| a.modules.cmp(&b.modules));
     selected
@@ -365,9 +355,14 @@ fn matches_bundle(
         .all(|(source, (module, _))| {
             source.signatures
                 && source.modules == [*module]
-                && [&compiled, &workspace]
-                    .iter()
-                    .any(|root| normalized(&source.file) == root.join(format!("{module}.hirsel")))
+                && std::fs::read_to_string(&source.file)
+                    .ok()
+                    .is_some_and(|text| {
+                        text == sources
+                            .iter()
+                            .find(|(candidate, _)| *candidate == *module)
+                            .map_or("", |(_, text)| *text)
+                    })
         })
 }
 
@@ -393,6 +388,27 @@ pub(crate) fn normalized(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundled_std_selection_uses_content_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let (name, text) = bundled::STD_SOURCES[0];
+        let file = dir.path().join("elsewhere.hirsel");
+        std::fs::write(&file, text).unwrap();
+        let manifest = PackageManifest {
+            package: package("std"),
+            dependencies: vec![package("core")],
+            sources: vec![ModuleSource {
+                file: file.clone(),
+                modules: vec![name.into()],
+                signatures: true,
+            }],
+        };
+        assert!(bundled_std_selection(&manifest).is_some());
+        std::fs::write(&file, format!("{text} ")).unwrap();
+        assert!(bundled_std_selection(&manifest).is_none());
+    }
+
     fn library(source: &str, dir: &Path) -> CorpusManifest {
         let file = dir.join("core.hirsel");
         std::fs::write(&file, source).unwrap();

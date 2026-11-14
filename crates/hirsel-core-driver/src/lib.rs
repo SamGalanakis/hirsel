@@ -632,7 +632,6 @@ impl Driver {
             compiler_identity()?,
             image_directory.as_ref().map(|i| &*i.headers),
             image_directory.as_ref().map(|i| &i.anchors),
-            request.entry.as_ref(),
         )?;
         {
             let mut p = Program::declare_with_library(

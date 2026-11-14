@@ -16,6 +16,7 @@ enum Scenario {
     Temp(usize),
     Bounds(usize),
     Cancel,
+    SleepCancel,
 }
 struct State {
     os: Option<Box<crate::os::OsProvider>>,
@@ -140,6 +141,7 @@ unsafe extern "C" fn issue(state: *mut u8, request: *mut Request) -> Outcome {
             }
             WALL_MS => out.value = 37,
             MONO_NS => out.value = 41,
+            SLEEP_UNTIL => out.value = 0,
             STDOUT => {
                 s.stdout.extend_from_slice(input(r.buffer));
                 out.written = r.buffer.len as u64;
@@ -349,6 +351,12 @@ unsafe extern "C" fn entry(ctx: *mut Context, cfg: *const Config, _: *mut MainRe
                 assert_eq!(call(ctx, STDOUT, 3, Some(&mut literal(b"no")), 0).status, 1);
                 assert_eq!(call(ctx, WALL_MS, 2, None, 0).status, 0);
                 assert_eq!(call(ctx, MONO_NS, 2, None, 0).status, 0);
+                1
+            }
+            Scenario::SleepCancel => {
+                (*ctx).cancel_requested = true;
+                let out = hirsel_core_host_sleep_until(ctx, 2, 3, 123);
+                assert_eq!(out.status, 1);
                 1
             }
             Scenario::Unavailable => files(ctx, state, false),
@@ -564,6 +572,17 @@ fn waiting_rows_cancel_before_issue_but_clocks_do_not_cancel() {
         assert_eq!(state.diagnostics, b"Cancelled at 123\n");
         assert_eq!(state.issued, [WALL_MS, MONO_NS]);
         assert!(state.stdout.is_empty());
+    }
+}
+
+#[test]
+fn sleep_until_cancellation_is_cancelled_at_the_native_wait_boundary() {
+    for scripted in [false, true] {
+        let (status, state) = fixture(scripted, Scenario::SleepCancel, &[]);
+        assert_eq!(status, 101);
+        assert_eq!(state.diagnostics, b"Cancelled at 123\n");
+        assert!(state.issued.is_empty());
+        assert!(state.delivered.is_empty());
     }
 }
 

@@ -616,6 +616,14 @@ fn ty(t: Ty) -> String {
         Ty::Scalar(s) => format!("i{}", s.size() * 8),
     }
 }
+fn ir_type(t: Ty) -> sink::Type {
+    match t {
+        Ty::Ptr => sink::Type::Ptr,
+        Ty::Scalar(Scalar::F32) => sink::Type::Float,
+        Ty::Scalar(Scalar::F64) => sink::Type::Double,
+        Ty::Scalar(s) => sink::Type::Int((s.size() * 8) as u32),
+    }
+}
 fn bits_ty(t: Ty) -> String {
     format!("i{}", size(t) * 8)
 }
@@ -652,6 +660,68 @@ struct FunctionEmitter<'a, S: sink::Sink = sink::TextSink> {
     intrinsics: &'a mut BTreeSet<String>,
 }
 impl<S: sink::Sink> FunctionEmitter<'_, S> {
+    fn operand(&self, text: &str) -> sink::Value {
+        let text = text.trim();
+        if let Some(name) = text.strip_prefix('%') {
+            let (kind, digits) = name.split_at(1);
+            let index = digits.parse().unwrap_or(0);
+            return match kind {
+                "t" => sink::Local::Temp(index).into(),
+                "v" => sink::Local::Value(index).into(),
+                "a" => sink::Local::Address(index).into(),
+                "s" => sink::Local::Slot(index).into(),
+                "p" => sink::Local::Param(index).into(),
+                _ => sink::Value::Global(name.to_owned()),
+            };
+        }
+        match text {
+            "true" => sink::Value::Boolean(true),
+            "false" => sink::Value::Boolean(false),
+            "null" => sink::Value::Null,
+            "poison" => sink::Value::Poison,
+            "zeroinitializer" => sink::Value::Zero,
+            _ => text.parse::<i128>().map_or_else(
+                |_| sink::Value::Global(text.trim_start_matches('@').to_owned()),
+                |n| sink::Value::Integer(n as u128),
+            ),
+        }
+    }
+    fn typed(&mut self, op: sink::Operation<'_>) -> String {
+        let name = format!("%t{}", self.next);
+        self.next += 1;
+        self.sink.instruction(Some(sink::Local::Temp(self.next - 1)), op, self.debug_location);
+        name
+    }
+    fn typed_binary(&mut self, op: sink::Binary, t: Ty, a: &str, b: &str) -> String {
+        let av = self.operand(a); let bv = self.operand(b); let ty = ir_type(t);
+        self.typed(sink::Operation::Binary(op, ty, &av, &bv))
+    }
+    fn typed_compare(&mut self, pred: sink::Predicate, t: Ty, a: &str, b: &str) -> String {
+        let av = self.operand(a); let bv = self.operand(b); let ty = ir_type(t);
+        self.typed(sink::Operation::Compare(pred, ty, &av, &bv))
+    }
+    fn typed_select(&mut self, t: Ty, c: &str, yes: &str, no: &str) -> String {
+        let cv = self.operand(c); let yv = self.operand(yes); let nv = self.operand(no); let ty = ir_type(t);
+        self.typed(sink::Operation::Select(ty, &cv, &yv, &nv))
+    }
+    fn typed_cast(&mut self, op: sink::Cast, from: Ty, value: &str, to: Ty) -> String {
+        let v = self.operand(value); let from = ir_type(from); let to = ir_type(to);
+        self.typed(sink::Operation::Cast(op, from, &v, to))
+    }
+    fn typed_call(&mut self, name: &str, result: Ty, args: &[(Ty, &str)]) -> String {
+        let signature = sink::Signature {
+            result: ir_type(result),
+            extension: sink::Extension::None,
+            params: args.iter().map(|(t, _)| sink::Parameter::plain(ir_type(*t))).collect(),
+        };
+        let values: Vec<_> = args.iter().map(|(_, v)| self.operand(v)).collect();
+        self.typed(sink::Operation::Call(
+            &signature,
+            &sink::Value::Global(name.to_owned()),
+            &values,
+            &sink::CallAttrs::default(),
+        ))
+    }
     fn c_argument<'a>(&self, t: &'a str) -> &'a str {
         if self.abi.target == Target::Aarch64Linux {
             t.strip_suffix(" zeroext")

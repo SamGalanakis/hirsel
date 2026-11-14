@@ -20,10 +20,9 @@ budget. The poll must time out; every `sleep_until` waits one interval (core.md:
 once the clock reaches the deadline), so the wall time that passed covers the sleeps:
 `elapsed + 1 >= sleeps`, the + 1 for the millisecond resolution of `wall_ms`. Value 1. A
 sleep that does not wait makes thousands of sleeps in 20 ms and gives 0. On the evaluator the
-first sleep moves the model clock past the budget (one sleep, a large elapsed): 1. Red on
-Cranelift and LLVM, giving 0: native `sleep_until` moves the provider's monotonic reading to
-the deadline and returns at once (os.rs SLEEP_UNTIL, core-ops-914). Catches: a wait that is a
-spin.
+first sleep moves the model clock past the budget (one sleep, a large elapsed): 1.
+Catches: a wait that is a spin (native `sleep_until` was one before core-ops-914's
+d30f980d; the case gave 0).
 
 ## replace = 1
 Writes "1" to `a` and "2" to `b`, renames `a` to `b`, reads `b`. core.md says rename

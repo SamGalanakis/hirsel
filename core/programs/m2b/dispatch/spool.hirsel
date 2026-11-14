@@ -223,9 +223,8 @@ pub fn publish(d: Dir, kind: String, seq: u64, data: Bytes, mut s: Stats) -> Res
 
 // Waits for kind<seq> to appear, reads it and removes it. Each attempt is one open;
 // between attempts the task checks for cancellation and sleeps `period_ns` with
-// `host.sleep_until`. It gives up after `budget_ms` of wall-clock time, not after a
-// count of attempts: a native sleep_until does not wait yet (HOOK-FINDINGS S6), so a
-// count would run out in microseconds. A budget of 0 tries once.
+// `host.sleep_until`. It gives up after `budget_ms` of wall-clock time, so the limit
+// does not depend on how long each sleep really took. A budget of 0 tries once.
 pub fn take_file(d: Dir, c: Clock, kind: String, seq: u64, period_ns: u64, budget_ms: u64, mut s: Stats) -> Result[Bytes, Failure] waits {
     let final = name(kind, seq, false)?
     let start = host.wall_ms(c)

@@ -52,8 +52,7 @@ waits at least 200 ms, so the wall reading moves by at least 199 (one millisecon
 the readings' resolution) (10); replay moves it by less than 199 (1). Value 10 + 1. The
 wall clock, not `mono_ns`: a sleep that only pushes the monotonic reading forward would pass
 a `mono_ns` check without waiting. On the evaluator, recording moves the model clock to the
-deadline and replay only adds one reading. Red on Cranelift and LLVM, giving 1: native
-`sleep_until` does not wait yet (os.rs SLEEP_UNTIL, core-ops-914). Catches: a replay that
+deadline and replay only adds one reading. Catches: a replay that
 waits again, a record that does not wait.
 
 ## refused = 10000065536
@@ -63,10 +62,11 @@ admitted inside the bound, so it is refused with `Capacity { requested: 100000, 
 the same figures. Value `requested × 100000 + available`. Catches: a refused allocation
 treated as a divergence or dropped from the outcome.
 
-## identity = 1 (red until core-form-883)
+## identity = 1
 `code.identity(code.describe(double))` compared with PROG-9's own example bytes for this
 function: `\x01app@1/main/double(core@1/core/List[u8])->core@1/core/Result[core@1/core/List[u8],core@1/core/Capacity]`.
-Today the front end writes `view ` and spaces, so the case gives 0.
+Catches: an encoder that writes the default `view` mode or spaces around `->` and after
+`,` (the front end did before core-form-883's encoder; the case gave 0).
 
 ## bench (measurement only, not a case)
 `bench(100000)` records 100000 calls of `double` on k's 8 little-endian bytes and replays

@@ -174,7 +174,7 @@ pub fn clock(c: Clock) -> Result[u64, m2b.journal.Diverged] {
 }
 
 // A 200 ms sleep is waited when recorded and not when replayed. Measured on the wall
-// clock: a sleep can push the monotonic reading forward without waiting (HOOK-FINDINGS S6).
+// clock, which a sleep cannot move without waiting.
 pub fn sleep(c: Clock) -> Result[u64, m2b.journal.Diverged] waits {
     let wait: u64 = 200000000
     let mut j = m2b.journal.recording(65536)

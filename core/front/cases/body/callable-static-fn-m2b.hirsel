@@ -1,34 +1,64 @@
 // expect: accept
-fn double(b: u64) -> u64 { b * 2 }
-fn other(b: u64) -> u64 { b * 3 }
+fn double(b: u64) -> u64 {
+    b * 2
+}
+
+fn other(b: u64) -> u64 {
+    b * 3
+}
+
 fn h(s: StaticFn[fn(u64) -> u64]) -> u64 {
     let g = code.callable(s)
     g(4)
 }
-pub fn f() -> u64 { h(code.describe(double)) }
+
+pub fn f() -> u64 {
+    h(code.describe(double))
+}
 
 fn identity_len(s: StaticFn[fn(u64) -> u64]) -> u64 {
-    if list.len(code.identity(s)) > 0 { 1 } else { 0 }
+    if list.len(code.identity(s)) > 0 {
+        1
+    } else {
+        0
+    }
 }
-pub fn identity_case() -> u64 { identity_len(code.describe(double)) }
+
+pub fn identity_case() -> u64 {
+    identity_len(code.describe(double))
+}
+
 // expect: run identity_case() = 1
-
 fn same(s: StaticFn[fn(u64) -> u64], t: StaticFn[fn(u64) -> u64]) -> u64 {
-    if s == t { 1 } else { 0 }
+    if s == t {
+        1
+    } else {
+        0
+    }
 }
-pub fn equality_case() -> u64 { same(code.describe(double), code.describe(double)) }
-// expect: run equality_case() = 1
-pub fn inequality_case() -> u64 { same(code.describe(double), code.describe(other)) }
-// expect: run inequality_case() = 0
 
+pub fn equality_case() -> u64 {
+    same(code.describe(double), code.describe(double))
+}
+
+// expect: run equality_case() = 1
+pub fn inequality_case() -> u64 {
+    same(code.describe(double), code.describe(other))
+}
+
+// expect: run inequality_case() = 0
 pub fn list_case() -> u64 {
     let mut xs: List[StaticFn[fn(u64) -> u64]] = list.new()
     let _ = list.push(mut xs, code.describe(double))
     let g = code.callable(xs[0])
-    if list.len(code.identity(xs[0])) > 0 && g(3) == 6 { 1 } else { 0 }
+    if list.len(code.identity(xs[0])) > 0 && g(3) == 6 {
+        1
+    } else {
+        0
+    }
 }
-// expect: run list_case() = 1
 
+// expect: run list_case() = 1
 pub fn map_case() -> u64 {
     let mut m: Map[StaticFn[fn(u64) -> u64], u64] = map.new()
     let _ = map.insert(mut m, code.describe(double), 7)
@@ -37,6 +67,7 @@ pub fn map_case() -> u64 {
         None => 0
     }
 }
+
 // expect: run map_case() = 7
 pub fn map_inequality_case() -> u64 {
     let mut m: Map[StaticFn[fn(u64) -> u64], u64] = map.new()
@@ -46,33 +77,58 @@ pub fn map_inequality_case() -> u64 {
         None => 0
     }
 }
-// expect: run map_inequality_case() = 0
 
-type Entry { code: StaticFn[fn(u64) -> u64] }
-fn make_entry() -> Entry { Entry(code: code.describe(double)) }
+// expect: run map_inequality_case() = 0
+type Entry {
+    code: StaticFn[fn(u64) -> u64]
+}
+
+fn make_entry() -> Entry {
+    Entry(code: code.describe(double))
+}
+
 pub fn record_case() -> u64 {
     let e = make_entry()
     let g = code.callable(e.code)
-    if list.len(code.identity(e.code)) > 0 && g(3) == 6 { 1 } else { 0 }
+    if list.len(code.identity(e.code)) > 0 && g(3) == 6 {
+        1
+    } else {
+        0
+    }
 }
-// expect: run record_case() = 1
 
-fn relay(s: StaticFn[fn(u64) -> u64]) -> StaticFn[fn(u64) -> u64] { s }
+// expect: run record_case() = 1
+fn relay(s: StaticFn[fn(u64) -> u64]) -> StaticFn[fn(u64) -> u64] {
+    s
+}
+
 pub fn result_case() -> u64 {
     let s = relay(code.describe(double))
     let g = code.callable(s)
-    if list.len(code.identity(s)) > 0 { g(5) } else { 0 }
+    if list.len(code.identity(s)) > 0 {
+        g(5)
+    } else {
+        0
+    }
 }
-// expect: run result_case() = 10
 
+// expect: run result_case() = 10
 type Handler = fn(Bytes) -> Result[Bytes, Capacity]
-type HandlerEntry { code: StaticFn[Handler] }
+
+type HandlerEntry {
+    code: StaticFn[Handler]
+}
+
 fn echo_bytes(b: Bytes) -> Result[Bytes, Capacity] {
     let mut out: Bytes = list.new()
     list.append(mut out, b)?
     Ok(out)
 }
-fn register_handler() -> HandlerEntry { HandlerEntry(code: code.describe(echo_bytes)) }
+
+fn register_handler() -> HandlerEntry {
+    HandlerEntry(code: code.describe(echo_bytes))
+}
+
 fn serve(reg: List[HandlerEntry], wire: Bytes, arg: Bytes) -> Option[Result[Bytes, Capacity]] {
     for e in reg {
         if code.identity(e.code) == wire {
@@ -81,6 +137,7 @@ fn serve(reg: List[HandlerEntry], wire: Bytes, arg: Bytes) -> Option[Result[Byte
     }
     None
 }
+
 pub fn serve_case() -> u64 {
     let mut reg: List[HandlerEntry] = list.new()
     let _ = list.push(mut reg, register_handler())
@@ -91,9 +148,12 @@ pub fn serve_case() -> u64 {
         _ => 0
     }
 }
-// expect: run serve_case() = 0
 
-fn region_double[in r](b: u64) -> u64 { b * 2 }
+// expect: run serve_case() = 0
+fn region_double[in r](b: u64) -> u64 {
+    b * 2
+}
+
 pub fn region_case() -> u64 {
     let s = code.describe(region_double)
     let g = code.callable(s)

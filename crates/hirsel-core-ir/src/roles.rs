@@ -1,8 +1,8 @@
 //! Storage roles (crate docs, "Roles"): derived from a body, never stored.
 
 use crate::{
-    AddressBase, AddressId, AllocPlace, Arg, Body, Function, Inst, Loan, Module, Param, PlaceTy,
-    SlotId, Step, Terminator, TypeId, ValueId,
+    AddressBase, AddressId, AllocPlace, Arg, Body, Callee, FuncId, Function, Inst, Loan, Module,
+    Param, PlaceTy, SlotId, Step, Terminator, TypeId, ValueId,
 };
 use hirsel_core_layout::{Body as Shaped, FieldTy, POINTER, Repr, SEQ_CARRIER, Ty};
 
@@ -77,11 +77,16 @@ struct Derive<'a> {
     memo: Vec<Memo>,
 }
 
-/// Each address's role, by `AddressId`; None makes no claim.
-pub fn roles(m: &Module, f: &Function) -> Vec<Option<Role>> {
-    let Some(b) = &f.body else {
-        return Vec::new();
-    };
+/// A body's derivation, before any fact about its callees: each value's
+/// definition and each address's location.
+struct Shape<'a> {
+    b: &'a Body,
+    defs: Vec<Def>,
+    locs: Vec<Option<Loc>>,
+}
+
+fn shape<'a>(m: &Module, f: &'a Function) -> Option<Shape<'a>> {
+    let b = f.body.as_ref()?;
     let sig = &m.signatures[f.signature.index()];
     let mut defs = vec![Def::Other; b.values.len()];
     for inst in &b.insts {
@@ -124,16 +129,109 @@ pub fn roles(m: &Module, f: &Function) -> Vec<Option<Role>> {
     let locs: Vec<Option<Loc>> = (0..b.addresses.len())
         .map(|a| d.loc(AddressId(a as u32)))
         .collect();
-    let sealed = Seal::new(m, b, &d.defs, &locs).sealed(sig.params.len());
-    locs.iter()
-        .map(|l| {
-            l.map(|l| match l {
-                Loc::Carrier(root, _) => Role::Carrier(root),
-                Loc::Buffer(Root::Param(i)) if sealed[i as usize] => Role::Buffer(Root::Param(i)),
-                Loc::Buffer(_) => Role::Buffers,
+    Some(Shape {
+        b,
+        defs: d.defs,
+        locs,
+    })
+}
+
+/// Per-parameter facts of every function of a module (crate docs, "Roles"), the
+/// greatest fixpoint over its direct calls. Derived, never stored. A parameter
+/// with a fact is a `mut` or `take` carrier parameter of a body in the module
+/// whose entry block no edge re-enters; every other parameter has none.
+pub struct Facts {
+    /// Its carrier's buffer never changes hands within an activation.
+    sealed: Vec<Vec<bool>>,
+    /// Its place's address is never a value: only bytes are read and written
+    /// through it, and it is lent only to callees blind at that position.
+    blind: Vec<Vec<bool>>,
+}
+
+impl Facts {
+    pub fn new(m: &Module) -> Self {
+        let shapes: Vec<Option<Shape>> = m.functions.iter().map(|f| shape(m, f)).collect();
+        let top: Vec<Vec<bool>> = shapes
+            .iter()
+            .zip(&m.functions)
+            .map(|(s, f)| {
+                let n = m.signatures[f.signature.index()].params.len();
+                (0..n)
+                    .map(|i| {
+                        s.as_ref().is_some_and(|s| {
+                            s.defs
+                                .iter()
+                                .any(|d| matches!(d, Def::Root(Root::Param(p)) if *p as usize == i))
+                        })
+                    })
+                    .collect()
             })
-        })
-        .collect()
+            .collect();
+        let mut facts = Facts {
+            sealed: top.clone(),
+            blind: top,
+        };
+        // Start from every candidate and drop what a body refutes, assuming its
+        // callees' current facts, until nothing changes: so a recursion holds.
+        loop {
+            let mut changed = false;
+            for (i, s) in shapes.iter().enumerate() {
+                let Some(s) = s else { continue };
+                let n = facts.sealed[i].len();
+                let (sealed, blind) = Seal::new(m, s.b, &s.defs, &s.locs, &facts).facts(n);
+                for p in 0..n {
+                    for (now, new) in [
+                        (&mut facts.sealed[i][p], sealed[p]),
+                        (&mut facts.blind[i][p], blind[p]),
+                    ] {
+                        if *now && !new {
+                            *now = false;
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if !changed {
+                return facts;
+            }
+        }
+    }
+
+    /// Whether parameter `i` of `f` is sealed.
+    pub fn sealed(&self, f: FuncId, i: u32) -> bool {
+        self.sealed[f.index()]
+            .get(i as usize)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Whether parameter `i` of `f` is place-blind: a body may stand a copy of its
+    /// 24 bytes in for the place, copied back on every exit, and nothing can tell.
+    pub fn place_blind(&self, f: FuncId, i: u32) -> bool {
+        self.blind[f.index()]
+            .get(i as usize)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Each address of `f`'s body's role, by `AddressId`; None makes no claim.
+    pub fn roles(&self, m: &Module, f: FuncId) -> Vec<Option<Role>> {
+        let Some(s) = shape(m, &m.functions[f.index()]) else {
+            return Vec::new();
+        };
+        s.locs
+            .iter()
+            .map(|l| {
+                l.map(|l| match l {
+                    Loc::Carrier(root, _) => Role::Carrier(root),
+                    Loc::Buffer(Root::Param(i)) if self.sealed(f, i) => {
+                        Role::Buffer(Root::Param(i))
+                    }
+                    Loc::Buffer(_) => Role::Buffers,
+                })
+            })
+            .collect()
+    }
 }
 
 impl Derive<'_> {
@@ -231,10 +329,20 @@ struct Seal<'a> {
     /// The root a fresh block is installed in, once one store puts it in a data word.
     installed: Vec<Option<Root>>,
     open: Vec<bool>,
+    /// The callee facts assumed so far.
+    facts: &'a Facts,
+    /// Parameters whose place's address is used as a value.
+    exposed: Vec<bool>,
 }
 
 impl<'a> Seal<'a> {
-    fn new(m: &'a Module, b: &'a Body, defs: &'a [Def], locs: &'a [Option<Loc>]) -> Self {
+    fn new(
+        m: &'a Module,
+        b: &'a Body,
+        defs: &'a [Def],
+        locs: &'a [Option<Loc>],
+        facts: &'a Facts,
+    ) -> Self {
         let mut s = Seal {
             m,
             b,
@@ -243,6 +351,8 @@ impl<'a> Seal<'a> {
             reach: Vec::new(),
             installed: vec![None; b.values.len()],
             open: Vec::new(),
+            facts,
+            exposed: Vec::new(),
         };
         // An address's base comes before it, so one pass in order sees every base.
         for a in 0..b.addresses.len() {
@@ -283,8 +393,18 @@ impl<'a> Seal<'a> {
         }
     }
 
-    fn sealed(mut self, params: usize) -> Vec<bool> {
+    fn expose(&mut self, r: Root) {
+        if let Root::Param(i) = r
+            && let Some(o) = self.exposed.get_mut(i as usize)
+        {
+            *o = true;
+        }
+    }
+
+    /// Which parameters this body keeps sealed, and which place-blind.
+    fn facts(mut self, params: usize) -> (Vec<bool>, Vec<bool>) {
         self.open = vec![false; params];
+        self.exposed = vec![false; params];
         let b = self.b;
         // Installs first: a fresh block stored into one data word joins that root.
         for inst in &b.insts {
@@ -335,13 +455,48 @@ impl<'a> Seal<'a> {
                 self.used(*v, Use::Other);
             }
         }
-        self.open.iter().map(|o| !o).collect()
+        (
+            self.open.iter().map(|o| !o).collect(),
+            self.exposed.iter().map(|o| !o).collect(),
+        )
     }
 
     fn used(&mut self, v: ValueId, how: Use) {
-        if let Some((r, buffer)) = self.value(v)
-            && !(how == Use::Compare || (how == Use::Block && buffer))
-        {
+        if let Some((r, buffer)) = self.value(v) {
+            if !buffer {
+                self.expose(r);
+            }
+            if !(how == Use::Compare || (how == Use::Block && buffer)) {
+                self.unseal(r);
+            }
+        }
+    }
+
+    /// An address argument at parameter `p` of a direct call to `g`: the whole
+    /// carrier of a root, to a carrier parameter, keeps the callee's facts there.
+    fn lend(&mut self, a: AddressId, callee: Callee, sig: &crate::Signature, p: usize) {
+        let Some((r, false)) = self.reach[a.index()] else {
+            return;
+        };
+        let whole = matches!(self.locs[a.index()], Some(Loc::Carrier(r2, 0)) if r2 == r)
+            && matches!(self.b.addresses[a.index()].ty, PlaceTy::Declared(t) if carrier(self.m, t));
+        let (view, kept) = match sig.params.get(p) {
+            Some(Param::Address { loan, place }) => (
+                *loan == Loan::View,
+                matches!(place, PlaceTy::Declared(t) if carrier(self.m, *t)),
+            ),
+            _ => (false, false),
+        };
+        let at = match callee {
+            Callee::Direct(g) if whole && kept => Some((g, p as u32)),
+            _ => None,
+        };
+        if !at.is_some_and(|(g, p)| self.facts.place_blind(g, p)) {
+            self.expose(r);
+        }
+        // A `view` lend cannot move the buffer; any other keeps it sealed only into
+        // a callee that keeps it sealed.
+        if !view && !at.is_some_and(|(g, p)| self.facts.sealed(g, p)) {
             self.unseal(r);
         }
     }
@@ -428,19 +583,9 @@ impl<'a> Seal<'a> {
                 {
                     match *arg {
                         Arg::Value(v) => self.used(v, Use::Other),
-                        Arg::Address(a) => {
-                            let view = i >= skip
-                                && matches!(
-                                    sig.params.get(i - skip),
-                                    Some(Param::Address {
-                                        loan: Loan::View,
-                                        ..
-                                    })
-                                );
-                            if !view {
-                                self.whole(a);
-                            }
-                        }
+                        // The destination is a fresh place, never a parameter's.
+                        Arg::Address(a) if i < skip => self.whole(a),
+                        Arg::Address(a) => self.lend(a, site.callee, sig, i - skip),
                     }
                 }
             }
@@ -448,6 +593,10 @@ impl<'a> Seal<'a> {
             | Inst::Case { address, .. }
             | Inst::SetCase { address, .. } => self.whole(address),
             Inst::Mark { address, count, .. } | Inst::Unmark { address, count, .. } => {
+                // Marks are state of the place's own bytes: a stand-in would lose them.
+                if let Some((r, false)) = self.reach[address.index()] {
+                    self.expose(r);
+                }
                 self.whole(address);
                 self.used(count, Use::Other);
             }

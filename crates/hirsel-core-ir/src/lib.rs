@@ -693,8 +693,9 @@
 //!
 //! # Roles
 //!
-//! [`roles::roles`] gives some addresses of a body a storage role. It derives
-//! them from the form itself; nothing stores them. Two accesses (`read`, `store`,
+//! [`roles::Facts`] gives some addresses of a body a storage role, and some
+//! parameters facts. It derives them from the form itself, over the whole module
+//! as the greatest fixpoint of its direct calls (#96); nothing stores them. Two accesses (`read`, `store`,
 //! either side of a `copy`) through addresses of different roles touch disjoint
 //! bytes, or static bytes, which nothing writes, throughout one activation. An
 //! emitter may rely on that, and may ignore it. An address without a role makes
@@ -715,11 +716,24 @@
 //! - `Buffer(root)`: the buffers of a **sealed** `mut` or `take` parameter, whose
 //!   buffer never changes hands within the body. Every address that reaches the
 //!   carrier is a carrier-role word access, a `pointer` of one, or a `view` lend
-//!   to a call: it is never copied, lent `mut` or `take`, dropped or marked. A
+//!   to a call, or a `mut` or `take` lend of the whole carrier to a direct callee
+//!   with a body in the module whose parameter there is itself sealed (so a
+//!   recursion that lends its carriers on to itself keeps them sealed): it is
+//!   never copied, lent otherwise, dropped or marked. A
 //!   store to its data word stores a block this body allocated, and that block
 //!   goes into no other data word. A pointer to the carrier or to its buffer is
 //!   used only as an address base or in a comparison, and a buffer pointer also as
 //!   a `free` or `alloc … like` operand. So no value carries a buffer in or out.
+//! - A **place-blind** `mut` or `take` carrier parameter ([`roles::Facts::place_blind`]):
+//!   its place's address is never a value. It is only an address base for reads,
+//!   stores, copies, drops and case tests of its bytes, or lent whole to a direct
+//!   callee with a body in the module that is blind at that position. It is never
+//!   stored, compared, converted, returned, passed on an edge, passed as a value
+//!   or to a runtime operation, extern or indirect call, or marked. A caller may
+//!   then lend a stand-in copy of the 24 bytes and copy it back on every exit,
+//!   failure included, and nothing can tell (Loans: no other path reaches the
+//!   original meanwhile). Sealed and blind are different facts: a body that
+//!   moves its buffer through local carriers is blind but not sealed.
 //!
 //! This is what the language already guarantees. Slots are distinct. A `mut` or
 //! `take` place overlaps no other argument (Loans) and lies outside the callee's

@@ -167,6 +167,7 @@ fn emit_ir_target_with_facts(
     } else {
         module.functions.iter().map(|_| None).collect()
     };
+    let role_facts = facts.then(|| hirsel_core_ir::roles::Facts::new(module));
     for (i, f) in module.functions.iter().enumerate() {
         let sig = &module.signatures[f.signature.index()];
         let has_status = failures.may_fail[i];
@@ -190,9 +191,16 @@ fn emit_ir_target_with_facts(
         let definition = module.instances[f.instance.index()].definition.to_string();
         let append_fast = definition == "core@1/string/push_char";
         let function_debug = debug[i].as_ref();
-        let aliases = facts
-            .then(|| alias::Scopes::new(module, f, &name, &mut next_scope, &mut intrinsics))
-            .flatten();
+        let aliases = role_facts.as_ref().and_then(|r| {
+            alias::Scopes::new(
+                module,
+                r,
+                FuncId(i as u32),
+                &name,
+                &mut next_scope,
+                &mut intrinsics,
+            )
+        });
         let mut e = FunctionEmitter {
             append_fast,
             caller_site: "%caller_site",

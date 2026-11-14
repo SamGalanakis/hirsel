@@ -235,7 +235,9 @@ struct Machine<'m> {
     /// The `view` places of the calls running now, as (block, offset, size).
     frozen: Vec<(usize, usize, usize)>,
     loans: u64,
-    /// Each function's derived roles, filled on its first call.
+    /// The module's derived parameter facts, and each function's roles, filled on
+    /// its first call.
+    facts: roles::Facts,
     roles: Vec<Option<std::rc::Rc<[Option<roles::Role>]>>>,
     /// Per running activation: its roles, and by block the byte spans each role
     /// touched (`lo -> (hi, role)`, disjoint, a role's adjacent spans merged).
@@ -312,6 +314,7 @@ fn run_world(
         world: World::default(),
         frozen: Vec::new(),
         loans: 0,
+        facts: roles::Facts::new(m),
         roles: vec![None; m.functions.len()],
         footprints: Vec::new(),
         role_checks: 0,
@@ -1373,8 +1376,9 @@ impl Machine<'_> {
     }
     fn call(&mut self, t: &mut Task, f: FuncId, args: &[u64]) -> X<Vec<u64>> {
         let m = self.m;
+        let facts = &self.facts;
         let roles = self.roles[f.index()]
-            .get_or_insert_with(|| roles::roles(m, &m.functions[f.index()]).into())
+            .get_or_insert_with(|| facts.roles(m, f).into())
             .clone();
         self.footprints.push(Footprint {
             roles,

@@ -890,7 +890,7 @@ fn roles_hold_or_stop_the_run() {
     let (text, both) = two(&read_b(5), "", &sum(5), true);
     assert_eq!(both, Ok(eval::Outcome::Returned(vec![10])));
     let m = parse(&format!("{list}{text}")).unwrap();
-    let r = roles::roles(&m, &m.functions[0]);
+    let r = roles::Facts::new(&m).roles(&m, FuncId(0));
     assert_eq!(
         (r[2], r[3]),
         (
@@ -899,14 +899,77 @@ fn roles_hold_or_stop_the_run() {
         )
     );
     // Bug: a `mut` lend leaves the carrier sealed. The callee swaps a and b, so a's
-    // buffer is read again through b: 5 + 5.
-    let (_, swapped) = two(
+    // buffer is read again through b: 5 + 5. The swap only moves bytes, so both
+    // places stay blind (a stand-in copy would swap the same way): sealed and
+    // place-blind are different facts.
+    let (swap_text, swapped) = two(
         &format!("{}  addr a4 = v0 : t0\n  addr a5 = v1 : t0\n", read_b(5)),
         "  address a4\n  address a5\n  call f2 g2 (&a4, &a5)\n",
         &sum(5),
         false,
     );
     assert_eq!(swapped, Ok(eval::Outcome::Returned(vec![10])));
+    let m = parse(&format!("{list}{swap_text}")).unwrap();
+    let facts = roles::Facts::new(&m);
+    assert_eq!(
+        (facts.sealed(FuncId(0), 0), facts.place_blind(FuncId(0), 0)),
+        (false, true),
+        "the swap's caller"
+    );
+    // Bug: a lend to a function with no body here keeps a fact. Nothing says what
+    // runs there.
+    let external = swap_text.replace("call f2 g2", "call f3 g2")
+        + "inst n3 = core@1/m/elsewhere [] []\nfn f3 = n3 g2 extern\n";
+    let m = parse(&format!("{list}{external}")).unwrap();
+    let facts = roles::Facts::new(&m);
+    assert_eq!(
+        (facts.sealed(FuncId(0), 0), facts.place_blind(FuncId(0), 0)),
+        (false, false),
+        "a lend to an external callee"
+    );
+    // A recursion lends both carriers on to itself, as merge does: each stays
+    // sealed (and blind) through the lend. a[0] counts 5 down to 0, then 0 + b[0].
+    let (text, recursive) = two(
+        &format!("{}  addr a4 = v0 : t0\n  addr a5 = v1 : t0\n", read_b(10)),
+        "  v5: u8 = const 0\n  v6: bool = eq v4, v5\n  branch v6, b2, b1\nb1:\n  v7: u8 = const 1\n  v8: u8 = sub v4, v7\n  store a2, v8\n  address a4\n  address a5\n  v9: u8 = call f0 g0 (&a4, &a5)\n  return v9\nb2:\n",
+        &sum(10),
+        false,
+    );
+    assert_eq!(recursive, Ok(eval::Outcome::Returned(vec![6])));
+    let m = parse(&format!("{list}{text}")).unwrap();
+    let facts = roles::Facts::new(&m);
+    let r = facts.roles(&m, FuncId(0));
+    assert_eq!(
+        (r[2], r[3]),
+        (
+            Some(roles::Role::Buffer(roles::Root::Param(0))),
+            Some(roles::Role::Buffer(roles::Root::Param(1)))
+        ),
+        "a lend to a sealed callee"
+    );
+    assert!(facts.place_blind(FuncId(0), 0), "a lend to a blind callee");
+    // Bug: a body that compares its place's address with another is blind. A
+    // stand-in copy changes what the comparison sees.
+    let (text, _) = two(
+        &format!("{}  addr a4 = v0 : t0\n  addr a5 = v1 : t0\n", read_b(8)),
+        "  address a4\n  address a5\n  v5: ptr = pointer a4\n  v6: ptr = pointer a5\n  v7: bool = eq v5, v6\n",
+        &sum(8),
+        true,
+    );
+    let m = parse(&format!("{list}{text}")).unwrap();
+    let facts = roles::Facts::new(&m);
+    assert_eq!(
+        (
+            facts.place_blind(FuncId(0), 0),
+            facts.place_blind(FuncId(0), 1)
+        ),
+        (false, false),
+        "a compared place"
+    );
+    assert!(
+        facts.sealed(FuncId(0), 0),
+        "a comparison does not move a buffer"
+    );
     // Bug: a carrier copied whole stays sealed. b := a, then b[0] is a's 5.
     let (_, copied) = two(
         &format!("{}  addr a4 = v0 : t0\n  addr a5 = v1 : t0\n", read_b(6)),

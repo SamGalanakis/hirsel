@@ -63,7 +63,8 @@ fn storage_roles_keep_moved_buffers_in_one_scope() {
     let mut declarations = BTreeSet::new();
     let scopes = alias::Scopes::new(
         &module,
-        &module.functions[0],
+        &hirsel_core_ir::roles::Facts::new(&module),
+        FuncId(0),
         "test",
         &mut 2,
         &mut declarations,

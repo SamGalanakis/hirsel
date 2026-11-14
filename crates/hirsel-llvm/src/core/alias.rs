@@ -1,7 +1,7 @@
 //! FORM storage roles are disjoint within one activation. Scope declarations
 //! let LLVM clone that activation's domains when it inlines the function.
 use super::*;
-use hirsel_core_ir::roles::{Role, Root, roles};
+use hirsel_core_ir::roles::{Facts, Role, Root};
 
 pub(super) struct Scopes {
     addresses: Vec<Option<usize>>,
@@ -12,12 +12,14 @@ pub(super) struct Scopes {
 impl Scopes {
     pub fn new(
         module: &Module,
-        function: &Function,
+        facts: &Facts,
+        id: FuncId,
         name: &str,
         next: &mut usize,
         declarations: &mut BTreeSet<String>,
     ) -> Option<Self> {
-        let addresses = roles(module, function);
+        let function = &module.functions[id.index()];
+        let addresses = facts.roles(module, id);
         let body = function.body.as_ref()?;
         let signature = &module.signatures[function.signature.index()];
         let params = body.blocks[0].params.get(&body.pools.values).unwrap();

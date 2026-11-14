@@ -40,8 +40,11 @@ Build them with:
 
     python3 core/tools/measurement_artifacts.py > /tmp/measurement-artifacts.json
 
-Pass `--compiler-profile release` and the runtime archive reported by the
-configured shipping target, or its `hirsel-core-rt-archives/` view. The runner
+Pass `--compiler-profile release` and the `compiler` and `runtime` it reports:
+read-only, sha256-named pinned copies under `buck-out/measurement/pinned/`.
+Samples execute the pinned copy, never the live Buck path (`compiler_source`,
+`runtime_source`), which a later build replaces. Right before each batch run
+`python3 core/tools/measurement_artifacts.py --check <path> --identity <json>`. The runner
 refuses another archive before creating a report directory. `--diagnostic`
 explicitly permits other toolchains; use `--compiler-profile checked
 --runtime-profile checked` to label those observations. Every report records

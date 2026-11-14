@@ -1455,6 +1455,8 @@ def first_party(meta: dict) -> str:
                             production=True, bin_exes={"hirsel-core-contract-eval": "//:hirsel-core-contract-eval-bin-hirsel-core-contract-eval"},
                             args=["--evaluator", "buck-out/tmp/cargo-bin-exe/land-core-evaluator/hirsel-core-contract-eval"],
                             data=Raw('glob(["core/core/**", "core/std/**", "core/tools/std_native.py", "core/tools/std_native_owners.json"])')))
+    out.append("\n" + call("hirsel_script_test", name="test-measurement-artifacts", script="tools/tests/measurement_artifacts.py", full=False,
+                            data=["core/tools/measurement_artifacts.py", "core/tools/std_native.py"]))
     out.append("\n" + call("hirsel_script_test", name="test-core-sweep", script="tools/tests/core_sweep.py", full=False,
                             data=["tools/sweep"]))
     out.append("\n" + call("hirsel_test", name="test-report-fixture", crate="test_report_fixture",

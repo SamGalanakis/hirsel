@@ -1373,19 +1373,30 @@ impl Machine<'_> {
         spans.insert(start, (end, role));
     }
 
+    /// Run one activation of `f`. Its slots are frame memory: they end when the
+    /// activation does, by return or by failure, so a later use of an address into
+    /// them is a stop (crate docs, "Values, slots and addresses").
     fn activation(&mut self, t: &mut Task, f: FuncId, args: &[u64]) -> X<Vec<u64>> {
-        let m = self.m;
-        let b = m.functions[f.index()]
+        let b = self.m.functions[f.index()]
             .body
             .as_ref()
             .expect("external functions do not run here");
-        let depth = t.limits.len();
-        let mut vals = vec![0u64; b.values.len()];
         let slots: Vec<u64> = b
             .slots
             .iter()
             .map(|s| self.block(self.place_size(*s), None, 0, None))
             .collect();
+        let r = self.frame(t, b, args, &slots);
+        for p in slots {
+            let blk = &mut self.mem[split(p).0];
+            blk.live = false;
+            blk.marks.clear();
+        }
+        r
+    }
+    fn frame(&mut self, t: &mut Task, b: &Body, args: &[u64], slots: &[u64]) -> X<Vec<u64>> {
+        let depth = t.limits.len();
+        let mut vals = vec![0u64; b.values.len()];
         let mut places = vec![(0u64, At::Other); b.addresses.len()];
         let pool = |r: PoolRange<ValueId>| r.get(&b.pools.values).unwrap().to_vec();
         let mut block = BlockId(0);
@@ -1396,7 +1407,7 @@ impl Machine<'_> {
                 vals[p.index()] = *a;
             }
             for inst in blk.insts.get(&b.insts).unwrap() {
-                let r = self.inst(t, b, &slots, &mut vals, &mut places, inst);
+                let r = self.inst(t, b, slots, &mut vals, &mut places, inst);
                 if let Err(stop) = r {
                     if let Stop::Cause(c) = stop {
                         t.chain.push(Cause {
@@ -1451,7 +1462,7 @@ impl Machine<'_> {
                 Terminator::Raise { cause: c, cleanup } => {
                     let mut message = [0; 3];
                     if let RaiseCause::Fail(a) = c {
-                        let (p, _) = self.address(b, &slots, &vals, &places, *a)?;
+                        let (p, _) = self.address(b, slots, &vals, &places, *a)?;
                         message = [0, 8, 16].map(|o| self.load(p + o, 8));
                     }
                     t.chain.push(Cause {

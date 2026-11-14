@@ -647,3 +647,35 @@ fn roles_hold_or_stop_the_run() {
     );
     assert_eq!(moved, Ok(eval::Outcome::Returned(vec![5])));
 }
+
+/// Frame slots end with their activation (crate docs, "Values, slots and
+/// addresses"). Bug: a producer keeps an address into a callee's frame past its
+/// return, as a scoped environment built in a nested closure body and stored into
+/// an outer slot would (SCOPED-ENV). Native code reads a dead stack there; the
+/// evaluator must stop rather than hand back the stale 7 (which it did before
+/// slots ended at exit).
+#[test]
+fn a_frame_slot_ends_with_its_activation() {
+    let module = |main: &str| {
+        format!(
+            "core v1\nsig g0 = () -> (u64)\nsig g1 = () -> (ptr)\ninst n0 = p@0/m/main [] []\ninst n1 = p@0/m/leak [] []\nfn f0 = n0 g0 {{\n  addr a0 = v0 : u64\nb0:\n{main}}}\nfn f1 = n1 g1 {{\n  slot s0 = u64\n  addr a0 = s0 : u64\nb0:\n  live s0\n  v0: u64 = const 7\n  address a0\n  store a0, v0\n  v1: ptr = pointer a0\n  return v1\n}}\n"
+        )
+    };
+    let run = |text: &str| {
+        let m = load("frame", text);
+        wf::module(&m).unwrap();
+        std::panic::catch_unwind(|| eval::run(&m, FuncId(0), &[], u64::MAX))
+            .map(|r| r.outcome)
+            .map_err(|e| match e.downcast::<String>() {
+                Ok(s) => *s,
+                Err(e) => e
+                    .downcast::<&str>()
+                    .map_or_else(|_| String::new(), |s| s.to_string()),
+            })
+    };
+    let err = run(&module(
+        "  v0: ptr = call f1 g1 ()\n  address a0\n  v1: u64 = read a0\n  return v1\n",
+    ))
+    .unwrap_err();
+    assert!(err.contains("use of a freed block"), "{err}");
+}

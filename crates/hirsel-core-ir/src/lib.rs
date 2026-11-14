@@ -58,6 +58,15 @@
 //!   Every callable code pointer takes the environment pointer first; a plain
 //!   `fn` value's code receives null and ignores it, so a plain `fn` fits `own fn`
 //!   and `scoped fn` as `(code, null)`.
+//!   A `scoped fn` is the same pair, but its environment is a frame slot of words,
+//!   each the address of one captured slot, never a block (no admission, no charge,
+//!   no size in the type). One slot per closure literal, in its anchor frame: the
+//!   activation of the innermost body that owns one of the literal's captured slots.
+//!   That slot is live for the whole anchor activation, so every build of the
+//!   literal writes the same addresses into it and a value built earlier stays
+//!   valid. A literal built in a body nested inside its anchor reaches the slot
+//!   through one more environment word of each closure between them. OWN-21 keeps
+//!   every such value inside its anchor activation (SCOPED-ENV, #87).
 //! - Providers (CAP-5): a provider operation is a closed runtime row (below,
 //!   "Providers"), a cancellation point when it `waits` (so it can fail),
 //!   admitting nothing. `HostFile` is a mechanical resource that is not a
@@ -564,6 +573,9 @@
 //! a scalar ([`Scalar`]) or a pointer. A slot is a typed piece of frame memory with
 //! no initialization discipline beyond what its producer guarantees: `StorageLive`
 //! begins it, `StorageDead` ends it, reads and stores in between name addresses.
+//! Its address is fixed for its function's activation, and every slot ends when the
+//! activation does, by return or by failure: a later use of an address into it is
+//! a stop.
 //! An address is a base (a slot, a pointer value or another address) and steps;
 //! `Inst::Address` evaluates it and runs its bounds checks, and later reads and
 //! stores use it. Uses need not be dominated by definitions in any sense stronger

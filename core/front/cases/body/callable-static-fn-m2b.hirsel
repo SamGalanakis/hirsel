@@ -38,6 +38,15 @@ pub fn map_case() -> u64 {
     }
 }
 // expect: run map_case() = 7
+pub fn map_inequality_case() -> u64 {
+    let mut m: Map[StaticFn[fn(u64) -> u64], u64] = map.new()
+    let _ = map.insert(mut m, code.describe(double), 7)
+    match map.get(m, code.describe(other)) {
+        Some(_) => 1,
+        None => 0
+    }
+}
+// expect: run map_inequality_case() = 0
 
 type Entry { code: StaticFn[fn(u64) -> u64] }
 fn make_entry() -> Entry { Entry(code: code.describe(double)) }

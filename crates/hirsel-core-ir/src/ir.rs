@@ -426,8 +426,8 @@ pub enum Inst {
         block: ValueId,
         charge: ValueId,
     },
-    /// Copy `bytes` bytes from the place `from` to the place `to` (they do not
-    /// overlap). A move of a non-plain value is this copy; the source is then moved
+    /// Copy `bytes` bytes from the place `from` to the place `to`. The two ranges
+    /// are the same or do not overlap (the evaluator stops the run otherwise). A move of a non-plain value is this copy; the source is then moved
     /// out and its drop flag cleared by the producer. Growth copies the old storage.
     Copy {
         to: AddressId,
@@ -514,24 +514,27 @@ pub enum Inst {
         kind: Counted,
     },
     // ---- FORM v1c ----
-    /// `mark a, live|empty : ty`: the slot at `address`, a place of `ty`, now holds
-    /// a value (`live`, after a put) or none (`empty`, after a take). Only core's
+    /// `mark a, vN, live|empty : ty`: the `count` consecutive slots from `address`,
+    /// each a place of `ty` at its size's stride, now hold a value (`live`, after a
+    /// put or a move in) or none (`empty`, after a take or a move out). Only core's
     /// slot kernels emit it. It has no run-time effect: engines emit nothing for
     /// it, and the evaluator keeps it as a liveness shadow that stops the run on a
     /// take of an empty slot, a put over a live one, a read of an empty one and a
     /// free of a block with a live one (crate docs, "Slot kernels").
     Mark {
         address: AddressId,
+        count: ValueId,
         live: bool,
         ty: PlaceTy,
     },
-    /// `unmark a, live|empty : ty`: the inverse of `mark`. The slot at `address`
-    /// leaves the liveness shadow and is ordinary storage again, and the kernel
+    /// `unmark a, vN, live|empty : ty`: the inverse of `mark`. The `count` slots from
+    /// `address` leave the liveness shadow and is ordinary storage again, and the kernel
     /// states which way it leaves: `live` (a value the storage now holds) or `empty`.
     /// Like `mark` it has no run-time effect; the evaluator stops the run when the
     /// shadow shows the other state, and a slot never marked passes.
     Unmark {
         address: AddressId,
+        count: ValueId,
         live: bool,
         ty: PlaceTy,
     },

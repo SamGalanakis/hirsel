@@ -168,9 +168,8 @@ pub(super) fn values(inst: &mut Inst, definitions: bool, f: &mut impl FnMut(&mut
         | Inst::Call { .. }
         | Inst::SetCase { .. }
         | Inst::LimitExit
-        | Inst::Mark { .. }
-        | Inst::Unmark { .. }
         | Inst::Drop { .. } => {}
+        Inst::Mark { count, .. } | Inst::Unmark { count, .. } => f(count),
     }
 }
 pub(super) fn addresses(inst: &mut Inst, f: &mut impl FnMut(&mut AddressId)) {

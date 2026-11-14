@@ -106,7 +106,7 @@ fn grow[T](mut d: Deque[T]) -> Result[(), Capacity] {
     while i < count {
         // grow admits only cap <= MAX/2; head < cap and i < count <= cap.
         let at = int.wrapping_add(d.head, i) & int.wrapping_sub(cap, 1)
-        slots_move(mut d.ring, at, mut ring, i)
+        slots_move(mut d.ring, at, mut ring, i, 1)
         i = int.wrapping_add(i, 1)
     }
     let old = replace(mut d.ring, take ring)
@@ -141,7 +141,7 @@ fn slots_put[T](mut s: Slots[T], i: u64, take x: T)
 
 fn slots_take[T](mut s: Slots[T], i: u64) -> T
 
-fn slots_move[T](mut src: Slots[T], i: u64, mut dst: Slots[T], j: u64)
+fn slots_move[T](mut src: Slots[T], i: u64, mut dst: Slots[T], j: u64, n: u64)
 
 fn slots_shift[T](mut s: Slots[T], i: u64, j: u64)
 

@@ -96,11 +96,14 @@
 //! `{raw: List[T]}`, whose `List` length word is the count of live slots. Three
 //! rows exist only for them; well-formedness refuses each outside a function
 //! that is an instance of a core@1 definition.
-//! - **`mark a, live|empty : t`** says the slot at `a`, a place of `t`, now holds
-//!   a value (`live`, after a put) or none (`empty`, after a take). A move is a
-//!   `copy` with its source marked `empty` and its destination `live`; the blocks
-//!   may differ. It has no run-time effect: engines emit nothing for it, so a
-//!   body's code is the same with its marks removed. The evaluator keeps it as a
+//! - **`mark a, vN, live|empty : t`** says the `vN` (u64) consecutive slots from
+//!   `a`, each a place of `t` at its size's stride, now hold a value (`live`, after
+//!   a put) or none (`empty`, after a take). A move of a run of `n` slots between
+//!   two blocks is one `copy` of `n` times the size, with its source marked
+//!   `empty` and its destination `live`, `n` slots each (FORM #90); a move within
+//!   one block is one slot (a `copy`'s two ranges are the same or disjoint). It
+//!   has no run-time effect: engines emit nothing for it, so a body's code is the
+//!   same with its marks removed. The evaluator keeps it as a
 //!   liveness shadow and stops the run on a take (`empty`) of a slot marked empty,
 //!   a put (`live`) over a slot marked live, a `read` of, or `copy` from, bytes of
 //!   a slot marked empty, and a `free` (or cleanup's free) of a block with a slot
@@ -110,8 +113,8 @@
 //!   either (storage a `List` hands over is all live and unmarked; a new block
 //!   needs no registration). A zero-size slot has no storage to identify it and is
 //!   not shadowed.
-//! - **`unmark a, live|empty : t`** is the inverse: the slot leaves the shadow and
-//!   is ordinary storage again, in the state the kernel names. A kernel that hands
+//! - **`unmark a, vN, live|empty : t`** is the inverse: the slots leave the shadow
+//!   and are ordinary storage again, in the state the kernel names. A kernel that hands
 //!   its storage back as an ordinary `List` (a sort's scratch returned to its
 //!   owner) unmarks each slot it marked, `live` over the prefix `0..len` and
 //!   `empty` past it, so later `List` operations see plain storage. The evaluator

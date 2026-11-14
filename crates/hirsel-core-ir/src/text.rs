@@ -612,15 +612,27 @@ impl Printer {
                     Inst::TryUnwrap { result, node, kind } => {
                         format!("{} = try_unwrap {} {}", def(*result), v(node), kind.name())
                     }
-                    Inst::Mark { address, live, ty } | Inst::Unmark { address, live, ty } => {
+                    Inst::Mark {
+                        address,
+                        count,
+                        live,
+                        ty,
+                    }
+                    | Inst::Unmark {
+                        address,
+                        count,
+                        live,
+                        ty,
+                    } => {
                         format!(
-                            "{} a{}, {} : {}",
+                            "{} a{}, {}, {} : {}",
                             if matches!(inst, Inst::Mark { .. }) {
                                 "mark"
                             } else {
                                 "unmark"
                             },
                             address.0,
+                            v(count),
                             if *live { "live" } else { "empty" },
                             place(*ty)
                         )
@@ -1207,6 +1219,8 @@ impl BodyParser {
                 l.next()?;
                 let address = AddressId(l.id('a')?);
                 l.expect(",")?;
+                let count = l.value()?;
+                l.expect(",")?;
                 let live = match l.next()? {
                     "live" => true,
                     "empty" => false,
@@ -1215,9 +1229,19 @@ impl BodyParser {
                 l.expect(":")?;
                 let ty = l.place()?;
                 return Ok(if word == "mark" {
-                    Inst::Mark { address, live, ty }
+                    Inst::Mark {
+                        address,
+                        count,
+                        live,
+                        ty,
+                    }
                 } else {
-                    Inst::Unmark { address, live, ty }
+                    Inst::Unmark {
+                        address,
+                        count,
+                        live,
+                        ty,
+                    }
                 });
             }
             Some("drop") => {

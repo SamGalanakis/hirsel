@@ -105,7 +105,7 @@ fn grow[T: ordered](mut h: Heap[T]) -> Result[(), Capacity] {
     let mut items: List[T] = slots_new(next)?
     let mut i: u64 = 0
     while i < count {
-        slots_move(mut h.items, i, mut items, i)
+        slots_move(mut h.items, i, mut items, i, 1)
         i += 1
     }
     let old = replace(mut h.items, take items)
@@ -115,6 +115,6 @@ fn grow[T: ordered](mut h: Heap[T]) -> Result[(), Capacity] {
 
 fn slots_new[T](n: u64) -> Result[List[T], Capacity]
 
-fn slots_move[T](mut src: List[T], i: u64, mut dst: List[T], j: u64)
+fn slots_move[T](mut src: List[T], i: u64, mut dst: List[T], j: u64, n: u64)
 
 fn slots_free[T](take xs: List[T])

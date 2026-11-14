@@ -39,3 +39,15 @@ fn slots_move_over_live() {
     slots_put(mut s, 1, 2)
     slots_shift(mut s, 0, 1)
 }
+
+// A run's third destination slot is live: every slot of the run is a put.
+// expect: run slots_run_over_live() = fault "put over the live slot at +16"
+fn slots_run_over_live() {
+    let mut a: Slots[u64] = result.unwrap(slots_new(4))
+    let mut b: Slots[u64] = result.unwrap(slots_new(4))
+    slots_put(mut a, 0, 1)
+    slots_put(mut a, 1, 2)
+    slots_put(mut a, 2, 3)
+    slots_put(mut b, 2, 9)
+    slots_move(mut a, 0, mut b, 0, 3)
+}

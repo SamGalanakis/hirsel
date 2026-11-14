@@ -28,15 +28,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let rep = self.rep(item).ok()?;
                 self.install(at, rep, vals[2], n);
                 self.consume(vals[2], n);
+                let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
                 self.inst(
                     Inst::Mark {
                         address: at,
+                        count: one,
                         ty,
                         live: true,
                     },
                     n,
                 );
-                self.slots_count(header, true, n)?;
+                self.slots_count(header, true, one, n)?;
                 Some(None)
             }
             "slots_take" => {
@@ -45,15 +47,17 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 let (at, ty) = self.slots_at(item, header, index, n)?;
                 let value = self.read_carried(at, item, n);
                 let saved = self.slot(item, value, n)?;
+                let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
                 self.inst(
                     Inst::Mark {
                         address: at,
+                        count: one,
                         ty,
                         live: false,
                     },
                     n,
                 );
-                self.slots_count(header, false, n)?;
+                self.slots_count(header, false, one, n)?;
                 let value = self.read_carried(saved, item, n);
                 self.temp(result, value);
                 Some(value)
@@ -69,9 +73,18 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 } else {
                     (vals[2]?, vals[3]?)
                 };
+                // FORM #90: a move between distinct blocks is a run of `count`
+                // slots, one copy and one mark each way; a shift is one slot.
+                let count = if name == "slots_shift" {
+                    self.konst(Ty::Scalar(Scalar::U64), 1, n)?
+                } else {
+                    vals[4]?
+                };
                 let (source, ty) = self.slots_at(item, source_header, vals[1]?, n)?;
                 let (target, _) = self.slots_at(item, target_header, to, n)?;
-                let bytes = self.layout_size(item, false, n)?;
+                let stride = self.layout_size(item, false, n)?;
+                let (bytes, _) =
+                    self.list_arith(ArithOp::Mul, ArithMode::Wrapping, count, stride, n);
                 self.inst(
                     Inst::Copy {
                         to: target,
@@ -83,6 +96,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.inst(
                     Inst::Mark {
                         address: source,
+                        count,
                         ty,
                         live: false,
                     },
@@ -91,6 +105,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 self.inst(
                     Inst::Mark {
                         address: target,
+                        count,
                         ty,
                         live: true,
                     },
@@ -101,8 +116,8 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
                 // Sort's aliases leave both headers fixed: Hole tracks its exact live set and restores
                 // xs before the zero-length scratch's structural free.
                 if name == "slots_move" {
-                    self.slots_count(source_header, false, n)?;
-                    self.slots_count(target_header, true, n)?;
+                    self.slots_count(source_header, false, count, n)?;
+                    self.slots_count(target_header, true, count, n)?;
                 }
                 Some(None)
             }
@@ -129,48 +144,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
     fn slots_finish_list(&mut self, item: TyId, header: ValueId, n: NodeId) -> Option<()> {
         let count = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
         let zero = self.konst(Ty::Scalar(Scalar::U64), 0, n)?;
-        let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
-        let check = self.new_block(&[Ty::Scalar(Scalar::U64)]);
-        let body = self.new_block(&[]);
-        let done = self.new_block(&[]);
-        self.jump(check, &[zero], n);
-        self.start(check);
-        let index = self.b.blocks[check.index()]
-            .params
-            .get(&self.b.pools.values)?[0];
-        let more = self.value(Ty::Scalar(Scalar::Bool));
-        self.inst(
-            Inst::Compare {
-                result: more,
-                op: CompareOp::Lt,
-                left: index,
-                right: count,
-            },
-            n,
-        );
-        let yes = self.edge(body, &[]);
-        let no = self.edge(done, &[]);
-        self.end(
-            Terminator::Branch {
-                condition: more,
-                yes,
-                no,
-            },
-            Some(n),
-        );
-        self.start(body);
-        let (address, ty) = self.slots_at(item, header, index, n)?;
+        let (address, ty) = self.slots_at(item, header, zero, n)?;
         self.inst(
             Inst::Unmark {
                 address,
+                count,
                 live: true,
                 ty,
             },
             n,
         );
-        let (next, _) = self.list_arith(ArithOp::Add, ArithMode::Wrapping, index, one, n);
-        self.jump(check, &[next], n);
-        self.start(done);
         Some(())
     }
 
@@ -231,6 +214,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         self.inst(
             Inst::Mark {
                 address,
+                count: one,
                 live: false,
                 ty,
             },
@@ -333,11 +317,10 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         ))
     }
 
-    fn slots_count(&mut self, header: ValueId, add: bool, n: NodeId) -> Option<()> {
+    fn slots_count(&mut self, header: ValueId, add: bool, by: ValueId, n: NodeId) -> Option<()> {
         let count = self.read_sequence_word(header, 8, Ty::Scalar(Scalar::U64), n);
-        let one = self.konst(Ty::Scalar(Scalar::U64), 1, n)?;
         let op = if add { ArithOp::Add } else { ArithOp::Sub };
-        let (count, _) = self.list_arith(op, ArithMode::Wrapping, count, one, n);
+        let (count, _) = self.list_arith(op, ArithMode::Wrapping, count, by, n);
         self.sequence_word(header, 8, Ty::Scalar(Scalar::U64), count, n);
         Some(())
     }
@@ -485,7 +468,7 @@ fn slots_cross_block_law() -> u64 {
     let mut b: Slots[u64] = result.unwrap(slots_new(4))
     slots_put(mut a, 1, 7)
     slots_put(mut b, 3, 11)
-    slots_move(mut a, 1, mut b, 0)
+    slots_move(mut a, 1, mut b, 0, 1)
     slots_shift(mut b, 3, 3)
     let answer = slots_take(mut b, 0) * 100 + slots_take(mut b, 3)
     slots_free(take a)

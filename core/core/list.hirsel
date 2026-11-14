@@ -65,7 +65,7 @@ fn slots_take[T](mut s: Slots[T], i: u64) -> T
 fn slots_view[T](s: Slots[T], i: u64) -> View[T] in s
 
 // Distinct mutable carriers. Updates both live counts.
-fn slots_move[T](mut src: Slots[T], i: u64, mut dst: Slots[T], j: u64)
+fn slots_move[T](mut src: Slots[T], i: u64, mut dst: Slots[T], j: u64, n: u64)
 
 // Same carrier, including i == j. Keeps its live count.
 fn slots_shift[T](mut s: Slots[T], i: u64, j: u64)
@@ -111,19 +111,19 @@ pub fn sort_stable[T](mut xs: List[T], before: scoped fn(T, T) -> Order) -> Resu
                         _ => false
                     }
                     if right {
-                        slots_from_list(g.xs, g.state.b, mut g.scratch, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)))
+                        slots_from_list(g.xs, g.state.b, mut g.scratch, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)), 1)
                         g.state.b = int.wrapping_add(g.state.b, 1)
                     } else {
-                        slots_from_list(g.xs, g.state.a, mut g.scratch, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)))
+                        slots_from_list(g.xs, g.state.a, mut g.scratch, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)), 1)
                         g.state.a = int.wrapping_add(g.state.a, 1)
                     }
                 }
                 while g.state.a < g.state.mid {
-                    slots_from_list(g.xs, g.state.a, mut g.scratch, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)))
+                    slots_from_list(g.xs, g.state.a, mut g.scratch, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)), 1)
                     g.state.a = int.wrapping_add(g.state.a, 1)
                 }
                 while g.state.b < g.state.end {
-                    slots_from_list(g.xs, g.state.b, mut g.scratch, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)))
+                    slots_from_list(g.xs, g.state.b, mut g.scratch, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)), 1)
                     g.state.b = int.wrapping_add(g.state.b, 1)
                 }
             } else {
@@ -133,19 +133,19 @@ pub fn sort_stable[T](mut xs: List[T], before: scoped fn(T, T) -> Order) -> Resu
                         _ => false
                     }
                     if right {
-                        slots_to_list(mut g.scratch, g.state.b, g.xs, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)))
+                        slots_to_list(mut g.scratch, g.state.b, g.xs, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)), 1)
                         g.state.b = int.wrapping_add(g.state.b, 1)
                     } else {
-                        slots_to_list(mut g.scratch, g.state.a, g.xs, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)))
+                        slots_to_list(mut g.scratch, g.state.a, g.xs, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)), 1)
                         g.state.a = int.wrapping_add(g.state.a, 1)
                     }
                 }
                 while g.state.a < g.state.mid {
-                    slots_to_list(mut g.scratch, g.state.a, g.xs, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)))
+                    slots_to_list(mut g.scratch, g.state.a, g.xs, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)), 1)
                     g.state.a = int.wrapping_add(g.state.a, 1)
                 }
                 while g.state.b < g.state.end {
-                    slots_to_list(mut g.scratch, g.state.b, g.xs, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)))
+                    slots_to_list(mut g.scratch, g.state.b, g.xs, int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid)), 1)
                     g.state.b = int.wrapping_add(g.state.b, 1)
                 }
             }
@@ -187,13 +187,13 @@ scoped type Hole[T] {
     if g.state.source_is_xs {
         let mut i: u64 = 0
         while i < g.state.a {
-            slots_to_list(mut g.scratch, read, g.xs, i)
+            slots_to_list(mut g.scratch, read, g.xs, i, 1)
             read = int.wrapping_add(read, 1)
             i = int.wrapping_add(i, 1)
         }
         i = g.state.mid
         while i < g.state.b {
-            slots_to_list(mut g.scratch, read, g.xs, i)
+            slots_to_list(mut g.scratch, read, g.xs, i, 1)
             read = int.wrapping_add(read, 1)
             i = int.wrapping_add(i, 1)
         }
@@ -201,19 +201,19 @@ scoped type Hole[T] {
         let mut out = int.wrapping_add(g.state.a, int.wrapping_sub(g.state.b, g.state.mid))
         let mut i = g.state.a
         while i < g.state.mid {
-            slots_to_list(mut g.scratch, i, g.xs, out)
+            slots_to_list(mut g.scratch, i, g.xs, out, 1)
             out = int.wrapping_add(out, 1)
             i = int.wrapping_add(i, 1)
         }
         i = g.state.b
         while i < g.state.end {
-            slots_to_list(mut g.scratch, i, g.xs, out)
+            slots_to_list(mut g.scratch, i, g.xs, out, 1)
             out = int.wrapping_add(out, 1)
             i = int.wrapping_add(i, 1)
         }
         i = g.state.end
         while i < g.state.n {
-            slots_to_list(mut g.scratch, i, g.xs, out)
+            slots_to_list(mut g.scratch, i, g.xs, out, 1)
             out = int.wrapping_add(out, 1)
             i = int.wrapping_add(i, 1)
         }
@@ -226,9 +226,9 @@ scoped type Hole[T] {
 // scratch retains0, and Hole restores every original slot before field cleanup.
 fn slots_list_view[T](xs: View[List[T]], i: u64) -> View[T] in xs
 
-fn slots_from_list[T](src: View[List[T]], i: u64, mut dst: Slots[T], j: u64)
+fn slots_from_list[T](src: View[List[T]], i: u64, mut dst: Slots[T], j: u64, n: u64)
 
-fn slots_to_list[T](mut src: Slots[T], i: u64, dst: View[List[T]], j: u64)
+fn slots_to_list[T](mut src: Slots[T], i: u64, dst: View[List[T]], j: u64, n: u64)
 
 // Sort touches only the original prefix and restores it before handing back.
 // No tail slot was marked, so unmark live over the restored prefix is complete.

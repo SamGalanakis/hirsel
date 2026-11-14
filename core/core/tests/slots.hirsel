@@ -55,12 +55,39 @@ fn slots_cross_block_law() -> u64 {
     let mut b: Slots[u64] = result.unwrap(slots_new(4))
     slots_put(mut a, 1, 7)
     slots_put(mut b, 3, 11)
-    slots_move(mut a, 1, mut b, 0)
+    slots_move(mut a, 1, mut b, 0, 1)
     slots_shift(mut b, 3, 3)
     let answer = slots_take(mut b, 0) * 100 + slots_take(mut b, 3)
     slots_free(take a)
     slots_free(take b)
     answer
+}
+
+// A run of owned values moves between blocks in one call: every slot arrives,
+// both live counts move by n once, an n = 0 run on empty storage is nothing, and
+// both blocks free with no slot left live (FORM #90).
+// expect: run slots_run_law() = 31
+fn slots_run_law() -> u64 {
+    let mut a: Slots[String] = result.unwrap(slots_new(4))
+    let mut b: Slots[String] = result.unwrap(slots_new(4))
+    let mut e: Slots[String] = slots_empty()
+    slots_put(mut a, 1, result.unwrap(string.from("x")))
+    slots_put(mut a, 2, result.unwrap(string.from("yy")))
+    slots_put(mut a, 3, result.unwrap(string.from("zzz")))
+    slots_move(mut a, 1, mut b, 0, 3)
+    slots_move(mut e, 0, mut b, 3, 0)
+    let counts = list.len(a.raw) * 100 + list.len(b.raw) * 10
+    let x = slots_take(mut b, 0)
+    let y = slots_take(mut b, 1)
+    let z = slots_take(mut b, 2)
+    slots_free(take a)
+    slots_free(take b)
+    slots_free(take e)
+    if x == "x" && y == "yy" && z == "zzz" {
+        counts + 1
+    } else {
+        counts
+    }
 }
 
 // expect: run slots_forget_ring_law() = true
@@ -83,9 +110,9 @@ fn slots_list_handoff_law() -> u64 {
         result.unwrap(list.push(mut xs, i))
     }
     let mut scratch: Slots[u64] = result.unwrap(slots_new(1))
-    slots_from_list(view xs, 1, mut scratch, 0)
+    slots_from_list(view xs, 1, mut scratch, 0, 1)
     let fixed_header = list.len(xs) == 3 && list.len(scratch.raw) == 0
-    slots_to_list(mut scratch, 0, view xs, 1)
+    slots_to_list(mut scratch, 0, view xs, 1, 1)
     slots_finish_list(view xs)
     slots_free(take scratch)
     let a = option.unwrap(list.pop(mut xs))

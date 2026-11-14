@@ -1968,8 +1968,13 @@ impl Machine<'_> {
                 }
                 self.touch(from, places[from.index()].0, n);
                 self.touch(to, places[to.index()].0, n);
-                self.read_marked(places[from.index()].0, n);
-                let src = self.get(places[from.index()].0, n).to_vec();
+                let (f, t) = (places[from.index()].0, places[to.index()].0);
+                assert!(
+                    f == t || split(f).0 != split(t).0 || f + n as u64 <= t || t + n as u64 <= f,
+                    "copy of {n} bytes between overlapping ranges"
+                );
+                self.read_marked(f, n);
+                let src = self.get(f, n).to_vec();
                 self.put(places[to.index()].0, &src);
             }
             Inst::Share { node, kind } => {
@@ -1982,19 +1987,27 @@ impl Machine<'_> {
                 self.kind(vals[node.index()], kind);
                 self.release(vals[node.index()], TypeRef(ty.0))
             }
-            Inst::Mark { address, live, ty } => {
-                self.mark(
-                    places[address.index()].0,
-                    live,
-                    self.place_size(ty) as usize,
-                );
+            Inst::Mark {
+                address,
+                count,
+                live,
+                ty,
+            } => {
+                let size = self.place_size(ty);
+                for k in 0..vals[count.index()] {
+                    self.mark(places[address.index()].0 + k * size, live, size as usize);
+                }
             }
-            Inst::Unmark { address, live, ty } => {
-                self.unmark(
-                    places[address.index()].0,
-                    live,
-                    self.place_size(ty) as usize,
-                );
+            Inst::Unmark {
+                address,
+                count,
+                live,
+                ty,
+            } => {
+                let size = self.place_size(ty);
+                for k in 0..vals[count.index()] {
+                    self.unmark(places[address.index()].0 + k * size, live, size as usize);
+                }
             }
             Inst::TryUnwrap { result, node, kind } => {
                 self.kind(vals[node.index()], kind);

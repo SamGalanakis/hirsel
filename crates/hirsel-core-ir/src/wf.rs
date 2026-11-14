@@ -888,14 +888,17 @@ fn inst_wf(c: &mut Ctx, inst: &Inst) -> R {
         Inst::LimitExit => Ok(()),
         Inst::Mark {
             address,
+            count,
             live: _,
             ty,
         }
         | Inst::Unmark {
             address,
+            count,
             live: _,
             ty,
         } => {
+            c.is(count, Ty::Scalar(Scalar::U64))?;
             if let PlaceTy::Declared(t) = ty {
                 c.tid(t)?;
             }

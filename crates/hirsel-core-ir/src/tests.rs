@@ -359,7 +359,7 @@ fn allocation_overflow_refuses_at_maximum_limit() {
 /// Each case is a one-line change to a correct body, with the stop it must cause.
 #[test]
 fn slot_marks_stop_kernel_mistakes() {
-    let head = "core v1\nsig g0 = () -> ()\ninst n0 = core@1/m/k [] []\nfn f0 = n0 g0 {\n  addr a0 = v1 : u64\nb0:\n  v0: u64 = const 8\n  v1: ptr, v2: u64 = alloc for seq u64 v0 align 8 charge v0\n  address a0\n";
+    let head = "core v1\nsig g0 = () -> ()\ninst n0 = core@1/m/k [] []\nfn f0 = n0 g0 {\n  addr a0 = v1 : u64\nb0:\n  v0: u64 = const 8\n  v1: ptr, v2: u64 = alloc for seq u64 v0 align 8 charge v0\n  v3: u64 = const 1\n  address a0\n";
     let run = |body: &str| {
         let m = parse(&format!("{head}{body}  free v1 charge v0\n  return\n}}\n")).unwrap();
         wf::module(&m).unwrap();
@@ -370,33 +370,33 @@ fn slot_marks_stop_kernel_mistakes() {
                     .map_or_else(|_| String::new(), |s| *s)
             })
     };
-    let ok = "  store a0, v0\n  mark a0, live : u64\n  v3: u64 = read a0\n  mark a0, empty : u64\n";
+    let ok = "  store a0, v0\n  mark a0, v3, live : u64\n  v4: u64 = read a0\n  mark a0, v3, empty : u64\n";
     assert_eq!(run(ok), None, "the base case runs");
     for (body, stop) in [
         (
-            "  mark a0, live : u64\n  mark a0, empty : u64\n  mark a0, empty : u64\n",
+            "  mark a0, v3, live : u64\n  mark a0, v3, empty : u64\n  mark a0, v3, empty : u64\n",
             "take of the empty slot",
         ),
         (
-            "  mark a0, live : u64\n  mark a0, live : u64\n  mark a0, empty : u64\n",
+            "  mark a0, v3, live : u64\n  mark a0, v3, live : u64\n  mark a0, v3, empty : u64\n",
             "put over the live slot",
         ),
         (
-            "  mark a0, live : u64\n  mark a0, empty : u64\n  v3: u64 = read a0\n",
+            "  mark a0, v3, live : u64\n  mark a0, v3, empty : u64\n  v4: u64 = read a0\n",
             "read of the empty slot",
         ),
         (
-            "  mark a0, live : u64\n",
+            "  mark a0, v3, live : u64\n",
             "free of a block whose slot at +0 is live",
         ),
         // A kernel hands a hole back to ordinary storage as a value.
         (
-            "  mark a0, live : u64\n  mark a0, empty : u64\n  unmark a0, live : u64\n",
+            "  mark a0, v3, live : u64\n  mark a0, v3, empty : u64\n  unmark a0, v3, live : u64\n",
             "unmark live of the empty slot",
         ),
         // A kernel hands storage back with a value it claims it took.
         (
-            "  store a0, v0\n  mark a0, live : u64\n  unmark a0, empty : u64\n",
+            "  store a0, v0\n  mark a0, v3, live : u64\n  unmark a0, v3, empty : u64\n",
             "unmark empty of the live slot",
         ),
     ] {
@@ -407,16 +407,16 @@ fn slot_marks_stop_kernel_mistakes() {
     // stops: a free of a slot handed back live, a read of one handed back empty and
     // refilled. A slot never marked passes either way.
     for body in [
-        "  store a0, v0\n  mark a0, live : u64\n  unmark a0, live : u64\n",
-        "  mark a0, live : u64\n  mark a0, empty : u64\n  unmark a0, empty : u64\n  store a0, v0\n  v3: u64 = read a0\n",
-        "  store a0, v0\n  unmark a0, live : u64\n  unmark a0, empty : u64\n",
+        "  store a0, v0\n  mark a0, v3, live : u64\n  unmark a0, v3, live : u64\n",
+        "  mark a0, v3, live : u64\n  mark a0, v3, empty : u64\n  unmark a0, v3, empty : u64\n  store a0, v0\n  v4: u64 = read a0\n",
+        "  store a0, v0\n  unmark a0, v3, live : u64\n  unmark a0, v3, empty : u64\n",
     ] {
         assert_eq!(run(body), None, "{body}");
     }
     // Bug: a body outside core's kernels unmarks a slot.
     let user = head.replace("core@1/m/k", "p@0/m/k");
     let m = parse(&format!(
-        "{user}  unmark a0, live : u64\n  free v1 charge v0\n  return\n}}\n"
+        "{user}  unmark a0, v3, live : u64\n  free v1 charge v0\n  return\n}}\n"
     ))
     .unwrap();
     let err = wf::module(&m).expect_err("a user body unmarks");
@@ -424,11 +424,23 @@ fn slot_marks_stop_kernel_mistakes() {
     // Bug: zero-size slots share one address, so shadowing them by address calls
     // a put into slot 1 a put over slot 0. They have no storage and no shadow.
     let unit = parse(
-        "core v1\ntype t0 = own \"Unit\" { }\nsig g0 = () -> ()\ninst n0 = core@1/m/k [] []\nfn f0 = n0 g0 {\n  addr a0 = v1 index v3 : t0\n  addr a1 = v1 index v4 : t0\nb0:\n  v0: u64 = const 8\n  v1: ptr, v2: u64 = alloc for seq t0 v0 align 8 charge v0\n  v3: u64 = const 0\n  v4: u64 = const 1\n  address a0\n  address a1\n  mark a0, live : t0\n  mark a1, live : t0\n  mark a0, empty : t0\n  mark a1, empty : t0\n  free v1 charge v0\n  return\n}\n",
+        "core v1\ntype t0 = own \"Unit\" { }\nsig g0 = () -> ()\ninst n0 = core@1/m/k [] []\nfn f0 = n0 g0 {\n  addr a0 = v1 index v3 : t0\n  addr a1 = v1 index v4 : t0\nb0:\n  v0: u64 = const 8\n  v1: ptr, v2: u64 = alloc for seq t0 v0 align 8 charge v0\n  v3: u64 = const 0\n  v4: u64 = const 1\n  address a0\n  address a1\n  mark a0, v4, live : t0\n  mark a1, v4, live : t0\n  mark a0, v4, empty : t0\n  mark a1, v4, empty : t0\n  free v1 charge v0\n  return\n}\n",
     )
     .unwrap();
     wf::module(&unit).unwrap();
     eval::run(&unit, FuncId(0), &[], u64::MAX);
+    // Bug: a run move within one block lowers to a copy whose ranges overlap, which
+    // a native memcpy may garble (FORM #90 refuses it). Bytes 0..16 onto 8..24.
+    let overlap = parse(
+        "core v1\nsig g0 = () -> ()\ninst n0 = core@1/m/k [] []\nfn f0 = n0 g0 {\n  addr a0 = v1 : u64\n  addr a1 = v1 byte v3 : u64\nb0:\n  v0: u64 = const 24\n  v1: ptr, v2: u64 = alloc for seq u64 v0 align 8 charge v0\n  v3: u64 = const 8\n  v4: u64 = const 16\n  address a0\n  address a1\n  copy a1, a0, v4\n  free v1 charge v0\n  return\n}\n",
+    )
+    .unwrap();
+    wf::module(&overlap).unwrap();
+    let stop = std::panic::catch_unwind(|| eval::run(&overlap, FuncId(0), &[], u64::MAX))
+        .err()
+        .and_then(|e| e.downcast::<String>().ok())
+        .expect("an overlapping copy stops the run");
+    assert!(stop.contains("overlapping"), "{stop}");
 }
 
 /// Bug: a producer other than core's kernels emits `mark` or gives an own row a

@@ -92,7 +92,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
 }
 
 impl<'c, 'a> Cx<'c, 'a, '_> {
-    fn entry_slot(&mut self, ty: PlaceTy, _n: NodeId) -> AddressId {
+    pub(super) fn entry_slot(&mut self, ty: PlaceTy, _n: NodeId) -> AddressId {
         self.b.slots.push(ty);
         let slot = SlotId(self.b.slots.len() as u32 - 1);
         self.entry_setup.push(Inst::StorageLive { slot });

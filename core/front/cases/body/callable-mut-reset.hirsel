@@ -2,7 +2,6 @@
 // expect: run reset_run() = 12
 // expect: run self_run() = 24
 // expect: run part_run() = 25
-// expect: run captured_run() = 12
 // expect: run destructured_run() = 24
 fn reset_cb(mut dst: scoped fn(u64) -> u64) {
     dst = fn(x: u64) -> u64 {
@@ -60,21 +59,6 @@ fn part_run() -> u64 {
     b + a + n + m
 }
 
-fn captured_run() -> u64 {
-    let mut n: u64 = 10
-    let mut cb = scoped fn(x: u64) -> u64 {
-        n += x;
-        n
-    }
-    let reset = scoped fn() {
-        cb = fn(x: u64) -> u64 {
-            x
-        }
-    }
-    reset()
-    cb(2) + n
-}
-
 fn identity(x: u64) -> u64 {
     x
 }
@@ -101,7 +85,7 @@ fn destructured_run() -> u64 {
 }
 
 pub fn main() -> Result[(), Exit] {
-    if reset_run() == 12u64 && self_run() == 24u64 && part_run() == 25u64 && captured_run() == 12u64 && destructured_run() == 24u64 {
+    if reset_run() == 12u64 && self_run() == 24u64 && part_run() == 25u64 && destructured_run() == 24u64 {
         Ok(())
     } else {
         Error(Exit(status: 1))

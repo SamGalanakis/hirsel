@@ -1,0 +1,29 @@
+// OWN-19/OWN-21: written anchors permit a view capture absent from the old value.
+// expect: run checked() = 3
+fn pick(n: List[u64], c: bool) -> u64 {
+    let mut cb: (scoped fn() -> u64) in n = fn() -> u64 {
+        0
+    }
+    if c {
+        cb = scoped fn() -> u64 {
+            list.len(n)
+        }
+    }
+    cb()
+}
+
+fn checked() -> u64 {
+    let mut xs: List[u64] = list.new()
+    let _ = list.push(mut xs, 1)
+    let _ = list.push(mut xs, 2)
+    let _ = list.push(mut xs, 3)
+    pick(xs, true) + pick(xs, false)
+}
+
+pub fn main() -> Result[(), Exit] {
+    if checked() == 3u64 {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
+}

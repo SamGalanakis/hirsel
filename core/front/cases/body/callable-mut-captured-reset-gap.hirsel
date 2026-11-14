@@ -1,0 +1,17 @@
+// Captured-local store semantics await the language ruling.
+// expect: gap callback stores through captured mutable locals are not built
+fn captured_run() -> u64 {
+    let mut n: u64 = 10
+    let mut cb = scoped fn(x: u64) -> u64 {
+        n += x;
+        n
+    }
+    let reset = scoped fn() {
+        cb = fn(x: u64) -> u64 {
+            x
+        }
+    }
+    reset()
+    cb(2) + n
+}
+

@@ -1,0 +1,8 @@
+// OWN-10: a written anchor stays frozen even after installing a mut capture.
+// expect: refuse OWN-10 at 6:2
+fn grow(take n:List[u64])->u64 {
+ let mut cb:(scoped fn()->u64) in n=fn()->u64{0}
+ cb=scoped fn()->u64{let _ = list.push(mut n,1);0}
+ cb()
+}
+// expect: cause OWN-10 at 6:2 from 4:13

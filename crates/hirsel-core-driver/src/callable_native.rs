@@ -225,3 +225,14 @@ fn scoped_callable_returns_cranelift(){scoped_callable_returns(Backend::Cranelif
 #[test]
 #[ignore="explicit native integration target"]
 fn scoped_callable_returns_llvm(){scoped_callable_returns(Backend::Llvm);}
+
+fn scoped_environment_placement(backend: Backend) {
+    ordered_case(backend, include_str!("../../../core/front/cases/body/callable-scoped-placement.hirsel"));
+    ordered_case(backend, include_str!("../../../core/front/cases/body/callable-written-anchor.hirsel"));
+}
+#[test]
+#[ignore="explicit native integration target"]
+fn scoped_environment_placement_cranelift(){scoped_environment_placement(Backend::Cranelift);}
+#[test]
+#[ignore="explicit native integration target"]
+fn scoped_environment_placement_llvm(){scoped_environment_placement(Backend::Llvm);}

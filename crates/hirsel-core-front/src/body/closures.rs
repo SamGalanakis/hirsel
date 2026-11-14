@@ -768,12 +768,15 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let mut child = Cx::new(self.p, self.definition, self.e);
         child.fd = std::borrow::Cow::Owned(fd);
         child.header = n;
+        child.frame_level = self.frame_level + 1;
         child.entry = false;
         child.capture_frame = Some(CaptureFrame {
             outer: self.vars.clone(),
             outer_descriptors: std::mem::take(&mut self.descriptors),
             by_slot: vec![None; self.vars.len()],
             captures: vec![],
+            words: 0,
+            environments: vec![],
             environment: None,
             owning: !scoped,
             physical: 8,
@@ -827,10 +830,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             None
         };
         if scoped {
-            return (
-                ty,
-                code.and_then(|code| self.scoped_value(code, &frame.captures, n)),
-            );
+            return (ty, code.and_then(|code| self.scoped_value(code, &frame, n)));
         }
         if frame.captures.is_empty() {
             if environment {
@@ -887,11 +887,21 @@ pub(super) struct Capture {
     site: NodeId,
 }
 
+#[derive(Clone, Copy)]
+struct CapturedEnvironment {
+    literal: NodeId,
+    owner: u32,
+    words: usize,
+    offset: u64,
+}
+
 pub(super) struct CaptureFrame {
     outer: Vec<Option<Var>>,
     outer_descriptors: Descriptors,
     by_slot: Vec<Option<usize>>,
     captures: Vec<Capture>,
+    words: u32,
+    environments: Vec<CapturedEnvironment>,
     pub(super) environment: Option<ValueId>,
     owning: bool,
     physical: u64,
@@ -1210,7 +1220,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         let offset = if owning {
             (frame.physical + align - 1) & !(align - 1)
         } else {
-            index as u64 * 8
+            let offset = frame.words as u64 * 8;
+            frame.words += 1;
+            offset
         };
         frame.physical = offset + size;
         frame.logical += logical;
@@ -1269,6 +1281,12 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             avail: Avail::Live,
             holds: 0,
             own: None,
+            frame_level: if owning {
+                self.frame_level
+            } else {
+                original.frame_level
+            },
+            depth: if owning { 0 } else { original.depth },
             ..original
         });
         if kind(&self.p.decls, &self.t, original.ty, &self.params) == Kind::Stable {
@@ -1277,9 +1295,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let fact = self.anchor_root(Place::whole(slot));
             self.replace_slot_anchors(slot, fact);
         }
-        if original.mut_anchor
-            || !owning && original.origin.writable() && self.contains_callback(original.ty)
-        {
+        if original.mut_anchor {
             self.parameter_anchors(slot, original.ty, Mode::Mut, slot);
         }
         // Import only this callback's roots. Marking its environment slot above
@@ -1399,14 +1415,68 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
         );
         self.inst(Inst::Store { address, value }, n);
     }
-    fn scoped_value(&mut self, code: ValueId, captures: &[Capture], n: NodeId) -> Option<ValueId> {
-        if captures.is_empty() {
+    /// FORM87: a literal's environment belongs to the innermost activation
+    /// owning a capture. Intervening closures carry that slot's address.
+    fn environment_slot(
+        &mut self,
+        literal: NodeId,
+        owner: u32,
+        words: usize,
+        n: NodeId,
+    ) -> Option<ValueId> {
+        if !self.live() {
+            return None;
+        }
+        if owner == self.frame_level {
+            let ty = self.t.mk(TyKind::Array(scalar(Scalar::U64), words as u64));
+            let place = self.rep(ty).ok()?.stored()?;
+            self.out.counts.places += 1;
+            let address = self.entry_slot(place, n);
+            return Some(self.pointer(address, n));
+        }
+        let frame = self
+            .capture_frame
+            .as_mut()
+            .expect("a nested activation has an environment");
+        // The one source visit forwards each literal along its unique enclosing path.
+        let offset = frame.words as u64 * 8;
+        frame.words += 1;
+        frame.environments.push(CapturedEnvironment {
+            literal,
+            owner,
+            words,
+            offset,
+        });
+        let environment = frame.environment;
+        self.callable_word(environment, offset, n)
+    }
+
+    fn scoped_value(&mut self, code: ValueId, frame: &CaptureFrame, n: NodeId) -> Option<ValueId> {
+        let captures = &frame.captures;
+        if captures.is_empty() && frame.environments.is_empty() {
             return self.captureless_callable(code, n);
         }
-        let environment = self.raw_frame(captures.len(), n)?;
-        for (i, capture) in captures.iter().enumerate() {
+        for capture in captures {
+            self.capture_slot(capture.slot, n);
+        }
+        if !self.live() {
+            return None;
+        }
+        let owner = captures
+            .iter()
+            .map(|c| self.var(c.slot).frame_level)
+            .chain(frame.environments.iter().map(|e| e.owner))
+            .max()
+            .unwrap_or(self.frame_level);
+        let environment = self.environment_slot(n, owner, frame.words as usize, n)?;
+        for capture in captures {
             let pointer = self.capture_address(capture.slot, n)?;
-            self.store_word(environment, i as u64 * 8, pointer, n);
+            self.store_word(environment, capture.offset, pointer, n);
+        }
+        for captured in &frame.environments {
+            let pointer =
+                self.environment_slot(captured.literal, captured.owner, captured.words, n)?;
+            self.store_word(environment, captured.offset, pointer, n);
         }
         let carrier = self.raw_frame(2, n)?;
         self.store_word(carrier, 0, code, n);
@@ -1640,11 +1710,40 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             _ => false,
         }
     }
+    fn captured_descriptor_change(&mut self, slot: u32, new: Option<u32>, n: NodeId) -> bool {
+        let old = self.descriptors.slots.get(&slot).copied();
+        if self.descriptors.captures.iter().any(|c| c.slot == slot)
+            && !self.descriptors.same(old, new)
+        {
+            // A closure that invokes this slot was checked using its old value.
+            // Replacing it requires current-descriptor activation, not that snapshot.
+            self.gap(
+                n,
+                "replacing a callback after another closure captured it is not built",
+            );
+            return true;
+        }
+        false
+    }
     pub(super) fn descriptor_store(&mut self, at: At, value: Option<ValueId>, n: NodeId) -> bool {
         // A sibling may hold a callback, but this place cannot change its descriptor.
         // In particular a list, array or Box payload cannot contain scoped values.
         if !self.contains_callback(at.ty) {
             return true;
+        }
+        // OWN-11 governs true mut formals and aliases. The language has not yet
+        // chosen invariance or carried store effects for an ordinary upvar.
+        if !self.var(at.place.slot).mut_anchor
+            && self
+                .capture_frame
+                .as_ref()
+                .is_some_and(|f| !f.owning && f.outer[at.place.slot as usize].is_some())
+        {
+            self.gap(
+                n,
+                "callback stores through captured mutable locals are not built",
+            );
+            return false;
         }
         if self.var(at.place.slot).origin == Origin::MutParam {
             if let Some(id) = self.descriptors.of(value) {
@@ -1676,13 +1775,16 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             return true;
         }
         if let Some(id) = self.descriptors.of(value) {
-            let target = self.var(at.place.slot).depth;
+            let target = self.var(at.place.slot);
             let range = self.descriptors.ranges[id as usize];
             if let Some(c) = range
                 .get(&self.descriptors.captures)
                 .unwrap()
                 .iter()
-                .find(|c| self.var(c.slot).depth > target)
+                .find(|c| {
+                    let captured = self.var(c.slot);
+                    (captured.frame_level, captured.depth) > (target.frame_level, target.depth)
+                })
             {
                 let cause = self.declared_at(c.slot);
                 self.refuse_from(
@@ -1695,6 +1797,9 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             }
         }
         if at.place.len == 0 {
+            if self.captured_descriptor_change(at.place.slot, self.descriptors.of(value), n) {
+                return false;
+            }
             self.bind_descriptor(at.place.slot, value);
         } else {
             let mut path = std::mem::take(&mut self.anchor_path);
@@ -1719,8 +1824,11 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             let old = self.descriptors.slots.get(&at.place.slot).copied();
             let new = self.descriptors.of(value);
             let id = self.descriptors.replace(old, &path, new);
-            self.set_slot_descriptor(at.place.slot, id);
             self.anchor_path = path;
+            if self.captured_descriptor_change(at.place.slot, id, n) {
+                return false;
+            }
+            self.set_slot_descriptor(at.place.slot, id);
         }
         true
     }

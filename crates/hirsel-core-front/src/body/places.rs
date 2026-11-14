@@ -31,6 +31,7 @@ impl<'c, 'a> Cx<'c, 'a, '_> {
             at: n,
             born: self.born,
             depth: self.depth,
+            frame_level: self.frame_level,
             flagged: false,
             holds: 0,
             own: None,

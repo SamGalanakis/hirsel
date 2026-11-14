@@ -877,6 +877,8 @@ struct Var {
     /// Declaration order, so a loop tells the slots declared outside it (OWN-17).
     born: u32,
     depth: u32,
+    /// Lexical activation that owns this slot, preserved through scoped captures.
+    frame_level: u32,
     /// It reached maybe at a join (OWN-18).
     flagged: bool,
     /// Freeze and reservation records naming it; with none, no record is searched.
@@ -1087,6 +1089,7 @@ struct Cx<'c, 'a, 'e> {
     pending: Option<(AddressBase, TypeId)>,
     out: CoreCheck,
     capture_frame: Option<closures::CaptureFrame>,
+    frame_level: u32,
     descriptors: closures::Descriptors,
     anchors: anchors::Anchors,
     anchor_path: Vec<anchors::Component>,
@@ -1201,6 +1204,7 @@ impl<'c, 'a, 'e> Cx<'c, 'a, 'e> {
             pending: None,
             out: CoreCheck::default(),
             capture_frame: None,
+            frame_level: 0,
             descriptors: closures::Descriptors::default(),
             anchors: anchors::Anchors::new(info.resolution.binders.len()),
             anchor_path: vec![],

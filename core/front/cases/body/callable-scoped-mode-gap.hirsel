@@ -1,0 +1,9 @@
+// A local capture-mode change needs a caller descriptor update; scope ruling pending.
+// expect: gap callback stores through captured mutable locals are not built
+fn checked()->u64 {
+ let mut n:u64=7
+ let mut cb=scoped fn()->u64{n}
+ let change=scoped fn(){cb=scoped fn()->u64{n+=1;n}}
+ change()
+ cb()
+}

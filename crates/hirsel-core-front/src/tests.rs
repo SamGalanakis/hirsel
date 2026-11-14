@@ -3292,3 +3292,93 @@ fn scoped_callable_return_contracts() {
     }
     assert!(failures.is_empty(), "{failures:?}");
 }
+
+#[test]
+fn scoped_callable_environment_placement() {
+    let mut failures = vec![];
+    for name in [
+        "callable-scoped-placement",
+        "callable-written-anchor",
+        "callable-written-anchor-refused",
+        "callable-scoped-mode-gap",
+        "callable-mut-captured-reset-gap",
+        "callable-captured-replaced-gap",
+    ] {
+        failures.extend(run_case(
+            &root().join("cases/body").join(format!("{name}.hirsel")),
+        ));
+    }
+    assert!(failures.is_empty(), "{failures:?}");
+}
+
+#[test]
+fn scoped_environment_slots_belong_to_the_captured_activation() {
+    use hirsel_core_ir::PlaceTy;
+    let (index, modules) = program_inputs(
+        r#"
+fn checked()->u64 {
+ let x:u64=7
+ let f=scoped fn()->u64 {let g=scoped fn()->u64{x};g()}
+ f()
+}
+"#,
+    );
+    let program = Program::declare(&index, &modules);
+    let f = program
+        .fns
+        .iter()
+        .position(|f| f.path.package_is("app", "1"))
+        .unwrap();
+    let mut emitter = Emitter::new();
+    let check = program.check_lower(f, &mut emitter);
+    assert!(
+        check.refusals.is_empty() && check.gaps.is_empty(),
+        "{check:?}"
+    );
+    let root = check.function.unwrap();
+    emitter.seal();
+    let recipes = hirsel_core_layout::compute(&emitter.module.types).unwrap();
+    let slot_sizes = |body: &hirsel_core_ir::Body| {
+        body.slots
+            .iter()
+            .filter_map(|ty| match ty {
+                PlaceTy::Declared(id) => match &recipes[id.index()].layout {
+                    hirsel_core_layout::Layout::Fixed(l) => Some(l.size),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let root_sizes = slot_sizes(
+        emitter.module.functions[root.index()]
+            .body
+            .as_ref()
+            .unwrap(),
+    );
+    // g's one-word environment and f's two-word environment live in checked.
+    // f carries the hidden address of g's environment beside its ordinary &x.
+    assert!(root_sizes.contains(&8), "{root_sizes:?}");
+    assert_eq!(
+        root_sizes.iter().filter(|&&n| n == 16).count(),
+        2,
+        "{root_sizes:?}"
+    );
+    for function in &emitter.module.functions {
+        if function.instance == emitter.module.functions[root.index()].instance {
+            continue;
+        }
+        if let Some(body) = &function.body {
+            assert!(
+                !slot_sizes(body).contains(&8),
+                "nested activation owns no environment: {:?}",
+                slot_sizes(body)
+            );
+        }
+    }
+    wf::module(&emitter.module).unwrap();
+    assert_eq!(
+        eval::run(&emitter.module, root, &[], 100_000).outcome,
+        eval::Outcome::Returned(vec![7])
+    );
+}

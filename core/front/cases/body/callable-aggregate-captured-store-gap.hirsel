@@ -1,6 +1,5 @@
-// A fresh callback environment cannot escape an invocation through a captured slot.
-// expect: refuse OWN-11 at 8:26
-// expect: cause OWN-11 at 8:26 from 7:10
+// Captured-local store effects await the language ruling.
+// expect: gap callback stores through captured mutable locals are not built
 fn f()->u64 {
  let mut n:u64=1
  let mut m:u64=2

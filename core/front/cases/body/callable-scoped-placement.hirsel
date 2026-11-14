@@ -1,0 +1,100 @@
+// FORM87: one environment per literal in the innermost owning activation.
+// expect: run nested() = 19
+// expect: run twice_nested() = 19
+// expect: run looped() = 22
+// expect: run branches() = 44
+// expect: run reentered() = 1
+// expect: run bounded() = 105
+fn invoke(f: scoped fn(u64) -> u64) -> u64 {
+    f(2)
+}
+
+fn nested() -> u64 {
+    let n: u64 = 7
+    let work = scoped fn() -> u64 {
+        invoke(scoped fn(x: u64) -> u64 {
+            n + x + 10
+        })
+    }
+    work()
+}
+
+fn twice_nested() -> u64 {
+    let n: u64 = 7
+    let work = scoped fn() -> u64 {
+        let inner = scoped fn() -> u64 {
+            invoke(scoped fn(x: u64) -> u64 {
+                n + x + 10
+            })
+        }
+        inner()
+    }
+    work()
+}
+
+fn looped() -> u64 {
+    let n: u64 = 7
+    let mut i: u64 = 0
+    let mut cb = scoped fn(x: u64) -> u64 {
+        n + x + i
+    }
+    while i < 3 {
+        cb = scoped fn(x: u64) -> u64 {
+            n + x + i + 10
+        };
+        i += 1
+    }
+    cb(2)
+}
+
+fn branch(c: bool) -> u64 {
+    let n: u64 = 7
+    let mut cb = scoped fn() -> u64 {
+        n
+    }
+    if c {
+        cb = scoped fn() -> u64 {
+            n + 10
+        }
+    } else {
+        cb = scoped fn() -> u64 {
+            n + 20
+        }
+    }
+    cb()
+}
+
+fn branches() -> u64 {
+    branch(true) + branch(false)
+}
+
+fn reentered() -> u64 {
+    let work = fn(y: u64, again: scoped fn(u64) -> u64) -> u64 {
+        let cb = scoped fn() -> u64 {
+            y
+        }
+        let _ = again(2)
+        cb()
+    }
+    let inner = scoped fn(x: u64) -> u64 {
+        work(x, fn(z: u64) -> u64 {
+            0
+        })
+    }
+    work(1, inner)
+}
+
+fn bounded() -> u64 {
+    let r: Result[u64, Capacity] = bound bytes 0 {
+        nested() + twice_nested() + looped() + branches() + reentered()
+    }
+    result.unwrap(r)
+}
+
+pub fn main() -> Result[(), Exit] {
+    if bounded() == 105u64 {
+        Ok(())
+    } else {
+        Error(Exit(status: 1))
+    }
+}

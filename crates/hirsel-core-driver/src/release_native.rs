@@ -46,7 +46,7 @@ impl CheckProduct {
             .iter()
             .map(|i| library_store.is_some() && !self.definitions.contains_key(&i.definition))
             .collect();
-        crate::callable_variants::prepare(
+        let body_identities = crate::callable_variants::prepare(
             &mut modules,
             &mut imported,
             reached,
@@ -55,12 +55,14 @@ impl CheckProduct {
             options.instance_limit,
         )?;
         let refs = modules.iter().map(|m| &**m).collect::<Vec<_>>();
-        let facts = hirsel_core_ir::roles::Facts::program(&refs, &[]);
-        let consumed = refs
-            .iter()
-            .zip(&facts)
-            .map(|(module, facts)| facts.consumed(module))
-            .collect::<Vec<_>>();
+        // The checked body keys identify the source-neutral published modules.
+        // All shape-owner modules used by generic materialization are in this
+        // ordered closure. Entry and compiler identify the deterministic callable
+        // preparation above, including appended private units.
+        let facts_key =
+            crate::native_facts::key(compiler_identity()?, entry, &body_identities, reached, &[])?;
+        let crate::native_facts::ProgramFacts { facts, consumed } =
+            crate::native_facts::get(store, facts_key, &refs, &[])?;
         let mut objects = Vec::new();
         let mut libraries = Vec::new();
         for (i, ((instance, ir), imported)) in

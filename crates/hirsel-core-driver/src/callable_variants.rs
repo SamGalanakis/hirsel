@@ -33,7 +33,7 @@ pub(crate) fn prepare<'m>(
     materialized: &InstanceSet,
     entry: &DefPath,
     limit: usize,
-) -> Result<(), NativeStop> {
+) -> Result<Vec<ContentHash>, NativeStop> {
     let mut originals = BTreeMap::new();
     let mut eligible = BTreeSet::new();
     let mut owners = Vec::with_capacity(modules.len());
@@ -65,6 +65,7 @@ pub(crate) fn prepare<'m>(
         .1;
     // The collector owns modules only during this call. Cow's source lifetime
     // remains independent of that mutable borrow.
+    let body_identities = owners.clone();
     collect(
         modules,
         imported,
@@ -74,7 +75,8 @@ pub(crate) fn prepare<'m>(
         root,
         reached.len(),
         limit,
-    )
+    )?;
+    Ok(body_identities)
 }
 
 #[allow(clippy::too_many_arguments)]
